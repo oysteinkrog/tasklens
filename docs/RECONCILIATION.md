@@ -840,4 +840,3 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 |
 | U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 |
 
-All 9 parts sent.
