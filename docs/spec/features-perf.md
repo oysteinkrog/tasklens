@@ -1,1004 +1,1319 @@
-# PERF: performance monitoring, graphs, minigraphs, tray graphs and Information tab
+I have enough evidence. Here is the spec.
 
-This spec has 78 entries. 76 are BUILD or ADAPT and 2 are DROP. Every entry has a phase. The machine checks below were made on this machine on 2026-10-02 and change some earlier assumptions:
+# PERF feature spec: system and device monitoring
 
-- **DIMM details need no root.** `udevadm info -q property -p /sys/devices/virtual/dmi/id` returns `MEMORY_DEVICE_<n>_*` keys as a normal user: size, type, speed, form factor, locator, bank, maker, part number and serial. This corrects PLAN.md section 3, which says DIMM details need root. Only `/sys/class/dmi/id/{board,product,chassis}_serial` and `product_uuid` are root-only (mode 0400).
-- **RAPL is readable here, but only because of a leftover Mission Center rule.** `/etc/udev/rules.d/99-powercap.rules` makes `energy_uj` world-readable. The kernel default is 0400.
-- **The NVIDIA DRM connector `enabled` attribute is wrong.** Three monitors are lit, but `/sys/class/drm/card1-DP-{1,3}/enabled` reads `disabled`. tasklens must not use it.
-- **NVML supports these metrics on driver 615.71.09:** utilization (gpu and memory), encoder, decoder, used/total/reserved memory (380 MiB reserved), GPU temperature, power draw, power limit and max limit, graphics/memory/video clocks and their maximums, PCIe generation and width, fan %, VBIOS, display active and P-state. Memory temperature is N/A. Fan reads 0 % because the card is in zero-RPM mode.
-- **Other hardware found:** `k10temp` (Tctl plus CCD sensors), `nct6797` (7 fans, 7 PWM outputs, 13 temperatures), two NVMe hwmon nodes, `zram0` active, zswap off, a Logitech `hidpp_battery_0` through UPower, and UDisks2, NetworkManager and UPower all on the system bus. `nethogs` is not installed.
+Scope: the Performance tab, graphs, the system minigraph panel, tray graphs, the performance mini window, the Information tab, and the additional-setup flow.
 
----
+Sources and what I checked:
+- **Read:** PLAN.md, DECISIONS.md, both TaskSlinger inventories (including fable-taskslinger-crosscheck.md sections A to C), both Mission Center inventories, the architecture review and the GPUI notes. I also looked at `performance.png` and `information.png` myself. I did not run a Codex second opinion on these two reference images, because this is a subagent run.
+- **Checked live on this machine (2026-10-02):**
+  - `/sys/class/powercap/intel-rapl:0/energy_uj` can be read by any user. The reason is that `/etc/udev/rules.d/99-powercap.rules` (Mission Center's rule) is already installed.
+  - The udev database gives DIMM details without root (`MEMORY_DEVICE_<n>_*`, serial numbers included).
+  - `board_serial`, `product_serial` and `product_uuid` are mode 0400.
+  - hwmon on this machine: `k10temp`, `nct6797` (fans 1 to 7, pwm 1 to 7), two `nvme`, `iwlwifi_1`, `r8169`, `i350bb` and `hidpp_battery_0`.
+  - zram0 is active and zswap is off.
+  - Network interfaces: `enp36s0f0` to `f3`, `enp38s0`, `wlan0` (down), `docker0`, `tailscale0`.
+  - D-Bus services present: UPower (it lists a Logitech HID++ battery), UDisks2 and NetworkManager.
+  - NVIDIA `card1` sysfs shows PCIe at 16 GT/s x16 now, with a 32 GT/s maximum. The connector `enabled` file reads "disabled" for active outputs, so it cannot be trusted on this driver.
+  - nvidia-smi reports every NVML metric listed below as supported, except memory temperature, which reads N/A.
+- **Not run:** I did not run NVML calls directly. Function support comes from the nvidia-smi fields, which use the same NVML calls.
 
-## A. Performance tab structure
+Shared rules for every entry:
+- **No zeros for missing data.** A value that is not valid shows a validity state (valid, warming up, stale, restricted, unsupported, missing device, failed). It is shown with TaskSlinger's fallback strings: "Unavailable", "Not reported", "Not supported", "Status not reported", "<Unknown>", "Unknown CPU", "Unknown Adapter". A tooltip gives the reason, for example "Needs additional setup" or "Restricted: needs root".
+- **TaskSlinger's layout wins.** Graphs sit on top and a three-column stats grid sits below them, as in `performance.png`. Mission Center's right-hand info panel is not built.
+- **Settings** go in versioned TOML under `$XDG_CONFIG_HOME/tasklens/`.
 
-### PERF-001 Performance tab layout
-- Source: TS 2.3 (sidebar plus page, NavWidth=252) | MC 2.0 (device list, detail area, right info panel)
-- Behaviour: Left: a sidebar of device cards, default width 252 logical px. A splitter drags the width between 180 and 400 px, saved as `performance.nav_width`. Right: the selected device page. The page has a header (device name on the left, mode toggles on the right), graphs, then a 3-column stats grid below the graphs, as in the TS screenshot. MC puts stats in a right-hand side panel; tasklens uses the TS layout instead. The last selected page is restored by device identity (MC saves this but restores the wrong device; tasklens fixes that). When the window is under 700 logical px wide, the sidebar collapses to graph-only cards that are 64 px wide.
-- Linux data/mechanism: none (UI). The page subscribes to demand for its own device's sources only (architecture review, visibility semantics).
-- Verdict: BUILD (TS layout; MC's restore bug fixed)
-- Phase: P1
-- Privilege: none
+## Sidebar and navigation
 
-### PERF-002 Sidebar device cards
-- Source: TS 2.3 sidebar | MC 2.0 "What each row shows"
-- Behaviour: Each card has a mini graph (about 116×56 px, no grid, filled area plus top line) with the current value overlaid at its top left, then a title line and two detail lines. The selected card has the accent outline. Per device:
-  - CPU: "CPU", model (ellipsized), "4631 MHz · 52 °C".
-  - Memory: "Memory", "34.68 GiB / 63.16 GiB", "Commit 69%". The graph shows used as a fill and committed as a dashed line (MC).
-  - GPU N: "GPU N", model, "52 °C".
-  - Disk N: "Disk N", "<Kind> - <primary mount>" (for example "NVMe - /"), model. The value shown is active %. Temperature is appended when available.
-  - Network: interface display name, type ("Ethernet", "Wi-Fi", "VPN", "Virtual"), and the rate in the accent colour ("0.01 Mbps"). A down interface shows its state ("Disconnected") and the card drops to 0.6 opacity (MC).
-  - Fan N: label, "1240 RPM" or "PWM 45 %", paired temperature.
-  - Battery N: model, "87 % · Charging".
-- Linux data/mechanism: values come from the page sources (PERF-010 to PERF-055). Card graphs read the same history rings as the pages, so there is no second sampling.
-- Verdict: BUILD (TS look; MC's extra temperature lines added)
-- Phase: P1 (CPU, Memory, GPU, Disk, Network); P2 (Fan, Battery)
-- Privilege: none
-
-### PERF-003 Device discovery, hotplug and identity
-- Source: MC 2.0 (devices added and removed at runtime) | architecture review section 5 (device identity)
-- Behaviour: Cards and pages appear and disappear live when devices come and go. If the selected device disappears, selection moves to the next visible card. A device that comes back with the same identity regains its saved order, visibility and colour. MC places late devices second to last and ignores visibility settings; tasklens fixes both.
-- Linux data/mechanism: Saved identity keys:
-  - GPU: NVML UUID, else PCI slot (`gpu:<uuid>` or `gpu:pci:0000:2d:00.0`).
-  - Disk: WWN, else serial, else `/dev/disk/by-id` name, else major:minor plus generation.
-  - Network: interface name plus MAC.
-  - Fan: hwmon chip name, device path and fan index.
-  - Battery: UPower `NativePath`.
-
-  Hotplug is detected by a udev netlink monitor (`NETLINK_KOBJECT_UEVENT`, subsystems `block`, `net`, `hwmon`, `drm`, `power_supply`). Disk events are debounced by 500 ms. NVML devices are enumerated once at probe start; a GPU hotplug restarts the probe.
+### PERF-001 Device sidebar cards
+- Source: TS 2.3 "Left sidebar", crosscheck A.14 | MC 2.0 "What each row shows"
+- Behaviour: One card per device: a mini graph (about 116×56 logical px, filled area plus top line, faint grid), the current % at top left over the graph, a title and two detail lines. Clicking a card selects its page. The selected card has an accent outline.
+  - CPU: "CPU", the model, then "4631 MHz · 52 °C".
+  - Memory: "Memory", "34.68 GiB / 63.16 GiB", "Commit 69%".
+  - GPU: "GPU N", the name, "52 °C".
+  - Disk: "Disk N", "NVMe - /" (kind and primary mount), the model.
+  - Network: the interface display name, its type, then the combined rate in accent colour ("0.01 Mbps"). A disconnected interface shows its state and the card is drawn at 0.6 opacity.
+  - Fan: "Fan N", the label, then "1200 RPM · 45 °C".
+  - Battery: "Battery N" or the UPower kind, the model, then "% · state".
+  - Titles keep TaskSlinger's strings ("Disk %d", "GPU %d"). The page header uses the long form ("Processor", "Graphics adapter").
+  - Default order: CPU, Memory, GPU, Disk, Network, Fans, Batteries. This follows TaskSlinger's `Columns.Performance=0,1,4,2,3` order, with Mission Center's fan and battery types added at the end.
+- Linux data/mechanism: Each card reads the newest sample of its device's main series from the snapshot. No extra collection.
 - Verdict: BUILD
 - Phase: P1
 - Privilege: none
 
-### PERF-004 Page order, hiding and edit mode
-- Source: TS 2.3 context menu ("Select Pages", "Hide This Page", "Show This Page"), [INI Columns.Performance, Performance.HiddenPages] | MC 2.0 sidebar edit mode
-- Behaviour: Right-click a card for "Select Pages", "Hide This Page" and "Show This Page" (TS labels). "Select Pages" enters MC's edit mode. Each card then shows a drag handle and an on/off switch, hidden cards reappear with the switch off, and the sidebar header shows "Enable All", "Disable All", "Reset to Default" and "Done". Drag-and-drop reorders cards, with a 3 px accent drop line. Hiding the last visible page is refused with the toast "At least one performance page must stay visible" (TS). The default order is CPU, Memory, GPUs, Disks, Network, Fans, Batteries. That is TS order with MC's Fans and Batteries appended.
-- Linux data/mechanism: TOML `performance.page_order = [identity keys]` and `performance.page_overrides = { "<id>" = "show" | "hide" }`. A per-device override wins over the type default (PERF-005).
-- Verdict: BUILD (TS menu labels plus MC edit mode)
-- Phase: P1 (hide and show menu); P2 (edit mode with drag)
+### PERF-002 Hide/show page context menu
+- Source: TS 2.3 (L28324-28326, L28650)
+- Behaviour: Right-clicking a card shows "Select Pages" (opens edit mode, PERF-003), "Hide This Page" and "Show This Page". "Show This Page" appears only in edit mode, on hidden cards. Hiding the last visible page is refused with the toast "At least one performance page must stay visible". Hiding the selected page selects the next visible card.
+- Linux data/mechanism: Hidden pages are stored in `performance.hidden_pages` by stable device key (PERF-005).
+- Verdict: BUILD
+- Phase: P1
 - Privilege: none
 
-### PERF-005 Device type visibility defaults
-- Source: MC 5 Preferences > Devices, keys `performance-show-*`, network groups
-- Behaviour: Settings > Performance > Devices has switches for Disks, GPUs, Fans and Batteries, and a Network expander with Wired, Wireless, VPN/tunnel, Virtual and Other. Defaults: all on except Network > Virtual. Virtual covers `docker*`, `veth*`, `br-*`, `virbr*` and other interfaces with no `device` link. Loopback is never shown. CPU and Memory always exist; they can be hidden only per page.
-- Linux data/mechanism: Interface class from sysfs, with no NetworkManager dependency:
-  - `wireless/` or `phy80211` → Wi-Fi.
-  - `bridge/` → Virtual (bridge).
-  - `tun_flags`, or `type` 65534 (e.g. `tailscale0`), or `wireguard` in `uevent` DEVTYPE → VPN/tunnel.
-  - `device` link with a USB driver → USB network (Wired group).
-  - DEVTYPE `wwan` → Other.
-  - `type` 1 with a `device` link → Ethernet.
-  - no `device` link → Virtual.
-- Verdict: BUILD (MC; TS has no equivalent)
+### PERF-003 Sidebar edit mode
+- Source: MC 2.0 "Sidebar edit mode" (`summary_graph.rs:338-350`, `mod.rs:2907-2989`)
+- Behaviour: Edit mode opens from "Select Pages" or from a pencil button at the top of the sidebar.
+  - Each card gets a drag handle and an on/off switch. Hidden cards reappear with the switch off.
+  - Header buttons: "Enable All", "Disable All", "Reset to Default".
+  - Drag-and-drop reorders cards. A 3 px accent drop line shows the target.
+  - "Done" leaves edit mode.
+  - Reset clears the custom order and per-device overrides.
+  - The at-least-one-visible rule from PERF-002 applies here too.
+- Linux data/mechanism: Saves `performance.page_order = [keys]` and `performance.device_overrides = {key: show|hide}`. A per-device override wins over the type default (PERF-004).
+- Verdict: BUILD. Mission Center's edit mode is merged into TaskSlinger's "Select Pages" item, because TaskSlinger has no reorder interface.
 - Phase: P2
 - Privilege: none
 
-### PERF-006 Aggregate pages
-- Source: TS 2.3 "Aggregate storage" L28224, "Aggregate adapters" L28228
-- Behaviour: Optional pages "All disks" and "All GPUs". They exist only when there are 2 or more physical devices of that type, and are hidden by default (enable in edit mode). They graph summed throughput, maximum active time and summed VRAM, with a per-device legend.
-- Linux data/mechanism: sums over physical disks only, never partitions or dm/md, to avoid double counting (architecture review, device topology). GPU sums come from per-device NVML or sysfs values.
+### PERF-004 Per-type default visibility and network groups
+- Source: MC 5 "Devices" group, `summary_graph.rs:41-66`
+- Behaviour: Under Settings > Performance > Devices there are switches for Disks, GPUs, Fans and Batteries. Network has sub-switches: Wired, Wireless, VPN/Tunnel, Virtual and Other.
+  - Defaults are on for all except Virtual, which is off. Virtual covers `docker*`, `veth*`, `br-*`, `virbr*` and Multipass.
+  - Loopback is never shown.
+  - CPU and Memory always exist and can only be hidden per page.
+  - A device plugged in later follows these defaults. This fixes Mission Center's bug where late devices ignore visibility outside edit mode.
+- Linux data/mechanism: Type classification is in PERF-052.
+- Verdict: ADAPT. Virtual interfaces are hidden by default (PLAN section 3). Mission Center shows everything.
+- Phase: P2
+- Privilege: none
+
+### PERF-005 Device hotplug and stable keys
+- Source: MC 2.0 (`mod.rs:2072-2657`) | review section 5 "Device identity/topology"
+- Behaviour: Disks, interfaces, GPUs, fans and batteries appear and disappear while tasklens runs. A new device takes its saved place in the order, or else goes at the end of its type group. When the selected device vanishes, the next card is selected. History never joins across device generations. A re-plugged device starts a new series with a visible gap.
+- Linux data/mechanism:
+  - **Persistent keys** (saved in settings):
+    - `cpu` and `memory`;
+    - `gpu:<NVML UUID>` for NVIDIA, else `gpu:pci:<domain:bus:dev.fn>`;
+    - `disk:<udev ID_WWN or ID_SERIAL>`, falling back to the by-path name;
+    - `net:<ifname>`;
+    - `fan:<hwmon name>:<device path>:<n>`;
+    - `bat:<UPower NativePath>`.
+  - **Runtime identity** adds a generation: major:minor plus a lifecycle counter for block devices, and netns plus ifindex plus a counter for interfaces.
+  - **Events:** netlink `NETLINK_KOBJECT_UEVENT` (subsystems `block`, `net`, `hwmon`, `drm`, `power_supply`) and UPower `DeviceAdded`/`DeviceRemoved`. Rescan fallback every 5 s.
+- Verdict: BUILD
+- Phase: P1 for disks and network, P2 for the rest.
+- Privilege: none (reading uevents over netlink needs no capability).
+
+### PERF-006 Sidebar width splitter
+- Source: TS 2.3 `Performance.NavWidth=252`
+- Behaviour: A draggable splitter between the sidebar and the page. The default is 252 logical px, the range 180 to 400. The width persists.
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-007 Jump keys and View submenu
+- Source: MC 2.0 context menu "View" submenu, MC 6 "F1 to F8"
+- Behaviour:
+  - On the Performance tab, F1 to F8 select the 1st to 8th **visible** card. This fixes Mission Center's bug of counting hidden rows.
+  - Every page's context menu has "View >" with CPU, Memory, Disk, Network, GPU, Fan and Battery. Each jumps to the first visible device of that type. Types with no visible device are disabled.
+  - Up and Down move the selection when the sidebar has focus.
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-008 Aggregate pages
+- Source: TS 2.3 "Aggregate storage" (L28224), "Aggregate adapters" (L28228), card titles "Aggregate"/"Multiple" (A.14)
+- Behaviour:
+  - "Aggregate storage" sums active time (the busiest disk's %) and transfer rates over all physical disks.
+  - "Aggregate adapters" shows GPU utilization (the highest engine across GPUs) and the VRAM sum.
+  - Each page exists only when there are two or more devices of that type. Both are hidden by default and can be turned on in edit mode.
+- Linux data/mechanism: Sums are taken over whole disks only, never partitions or dm/md devices, so nothing is counted twice (review section 5). GPU values come from PERF-059.
 - Verdict: BUILD
 - Phase: P4
 - Privilege: none
 
-### PERF-007 Summary mode
-- Source: MC 2.0 Summary mode (Ctrl+M, "Graph Summary View") | MC UX problem 1 (only one device visible at a time)
-- Behaviour: Ctrl+M, or "Graph Summary View" in the page context menu, hides the title bar menus, tab bar, sidebar and stats. The window then shows a tile grid with the main graph of **every visible device**, each tile labelled and showing its value. Esc or Ctrl+M leaves it. Tab-switch shortcuts are blocked while it is on (MC). Why this changes MC: MC shows only the current page's graphs, and its inventory lists "one device visible at a time" as the main user complaint.
-- Linux data/mechanism: none (UI). Demand covers all visible devices.
-- Verdict: ADAPT (summary shows all devices tiled, not only the current page)
+### PERF-009 Graph summary mode
+- Source: MC 2.0 "Summary mode" (Ctrl+M, `window.rs:585-622`)
+- Behaviour: Ctrl+M, or "Graph Summary View" in any page's context menu, hides the title bar menus, tab bar, sidebar and stats. The window then shows a tiled grid of the **main graph of every visible device**, each with its title and current value. Esc or Ctrl+M leaves the mode. Tab switching is blocked while it is on.
+- Linux data/mechanism: None.
+- Verdict: ADAPT. Mission Center shows only the one selected page. tasklens tiles all devices, because "only one device visible at a time" is the main complaint about Mission Center (MC inventory, UX problem 1).
 - Phase: P2
 - Privilege: none
 
-### PERF-008 Page context menu and View jump
-- Source: MC 2.0 context menu (page items, Graph Summary View, View submenu, Copy) | TS 2.3 GPU engine menu
-- Behaviour: Right-click on any page graph area shows:
-  1. Page-specific items (listed per page).
-  2. "Graph Summary View".
-  3. "View >" CPU, Memory, GPU, Disk, Network, Fan, Battery. Each jumps to the first visible device of that type; types with no visible device are greyed out.
-  4. "Copy" (PERF-009).
-  5. "Add tray icon graph" (PERF-068).
-  6. "Hide This Page".
-- Linux data/mechanism: none
-- Verdict: BUILD (merge)
-- Phase: P1 (Copy, Hide); P2 (rest)
-- Privilege: none
-
-### PERF-009 Copy device info
-- Source: MC 2.0 Copy (Ctrl+C, `data_summary()`) | TS toast "Copied metrics to clipboard"
-- Behaviour: Ctrl+C on the Performance tab, or the menu item "Copy", puts plain text on the clipboard. The text is the device heading line, then the model, then every stats-grid field as "Label: value" lines indented by 4 spaces, in on-screen order. tasklens copies **all** visible fields, which fixes MC's per-page omissions (CPU power, disk serial and others). Toast: "Copied metrics to clipboard". On failure: "Failed to copy to clipboard". Stats values are also selectable text (MC).
-- Linux data/mechanism: GPUI `cx.write_to_clipboard(ClipboardItem::new_string(..))` (Wayland `wl_data_device`).
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
----
-
-## B. CPU page
-
-### PERF-010 CPU chart modes
-- Source: TS 2.3 ("Overall" / "Per core" toggle, [INI Performance.CpuPerCore=1]) | MC 2.1 top graph (Overall, Logical Processors, All Threads, All Threads Stacked)
-- Behaviour: The header button opens a 4-item dropdown: "Overall", "Per core" (default, as TS), "All cores overlaid" and "All cores stacked".
-  - Overall: one large chart.
-  - Per core: a grid of "CPU N" charts. Columns = ceil(√(2n)), so 16 CPUs give 6 columns (matches the TS screenshot) and 32 CPUs give 8 columns × 4 rows. Minimum cell width is 120 logical px; below that, columns are reduced. The legend ("Total", "Kernel") sits in the first cell.
-  - Overlaid: every core in one chart at opacity max(1/n, 0.08).
-  - Stacked: cores stacked, max = 100 × n.
-
-  Each cell shows "CPU N" at the top left and the % at the top right. Hovering a cell shows a tooltip with the core's current clock and its SMT sibling.
-- Linux data/mechanism: `/proc/stat` `cpuN` lines, read through a persistent fd with `pread`. Used = user+nice+system+irq+softirq+steal. Idle = idle+iowait. Guest columns are ignored (already inside user and nice). Rates come from actual elapsed monotonic time. CPU hotplug is detected from changes in the `cpuN` line set (architecture review). Sampling: 10 Hz while CPU charts are visible, 1 Hz otherwise (architecture review schedule).
-- Verdict: BUILD (TS toggle extended with MC's 2 extra modes)
-- Phase: P1 (Overall, Per core); P2 (overlaid, stacked)
-- Privilege: none
-
-### PERF-011 Kernel time overlay
-- Source: TS 2.3 "Kernel on"/"Kernel off", [INI Performance.CpuKernel=1], red kernel line | MC 2.1 Show Kernel Times (dashed)
-- Behaviour: A header toggle "Kernel on" / "Kernel off" (TS labels, default on). Kernel time draws as an unfilled line in kernel red (#C1514E) in Overall and Per core modes. The overlaid and stacked modes show no kernel series (MC). TS draws a solid line, so tasklens uses solid.
-- Linux data/mechanism: kernel = system+irq+softirq from `/proc/stat`, per architecture review. iowait is not counted.
-- Verdict: BUILD (TS)
-- Phase: P1
-- Privilege: none
-
-### PERF-012 Core type markers
-- Source: TS 2.3 "Performance core"/"Efficiency core" icons L28239-28240
-- Behaviour: On hybrid CPUs, each per-core cell shows a small P or E icon. On AMD with preferred-core ranking, the tooltip shows "Preferred core rank N". Cores holding the highest rank get a small star. No icon appears on uniform CPUs.
-- Linux data/mechanism: Intel hybrid: `/sys/devices/cpu_core/cpus` and `/sys/devices/cpu_atom/cpus`. AMD Zen 5/5c hybrids, or any CPU without those files: `/sys/devices/system/cpu/cpuN/cpu_capacity`, where values below the maximum mean E. Rank: `/sys/devices/system/cpu/cpufreq/policyN/amd_pstate_prefcore_ranking` (present on this machine).
-- Verdict: ADAPT (adds the AMD preferred-core marker; hybrid detection uses sysfs)
-- Phase: P2
-- Privilege: none
-
-### PERF-013 CPU bottom graph
-- Source: MC 2.1 bottom graph (None, Power Draw, Clock Speed, Temperature)
-- Behaviour: Below the chart grid sits a full-width strip of 25 % of the graph height. Its dropdown offers "None", "Power", "Clock speed" and "Temperature".
-  - Default: Power if RAPL is readable, else Temperature, else Clock (MC fallback order).
-  - Options with no data are greyed out, with the tooltip giving the reason ("Needs additional setup", PERF-075).
-  - Label: "<Metric> over <range>", with the current maximum at the right.
-  - Scaling (PERF-058): Power is sticky-up with integer rounding. Clock is sticky-up. Temperature is sticky up and down, starting at 35 to 45 °C.
-- Linux data/mechanism:
-  - Power: delta of `/sys/class/powercap/intel-rapl:0/energy_uj` (package-0; the AMD RAPL interface uses the same `intel-rapl` name, verified here) divided by elapsed time. Wrap is handled with `max_energy_range_uj`. Also read `intel-rapl:0:0` ("core") for the tooltip.
-  - Clock: per-policy `cpufreq/policyN/cpuinfo_avg_freq` (APERF/MPERF, exists here), else `scaling_cur_freq`, else `/proc/cpuinfo` "cpu MHz". The value shown is the mean, and the tooltip shows the maximum.
-  - Temperature: hwmon `k10temp` `temp1_input` (Tctl), else `coretemp` "Package id 0", else `zenpower`, else `cpu_thermal`. The tooltip lists Tccd sensors (`temp3`/`temp4` labels).
-  - Rate: 1 Hz while displayed (architecture review).
-- Verdict: BUILD (MC)
-- Phase: P2
-- Privilege: Power needs `energy_uj` readable (mode 0400 root by default since kernel 5.10). Fallback: "Power: unavailable (needs setup)" and the option greyed out. Setup in PERF-075.
-
-### PERF-014 CPU stats grid
-- Source: TS 2.3 stats L28241-28261 | MC 2.1 live and static panels
-- Behaviour: 3 columns, label above value (TS style). Rows in order:
-  1. Utilization, Kernel time, Speed.
-  2. Processes, Threads, Handles.
-  3. Up time, Base speed, Sockets.
-  4. Cores, Logical processors, Virtualization.
-  5. Virtual machine, CPU vulnerabilities, Hypervisor (these replace TS's VBS, Security services and Hypervisor platform).
-  6. L1 cache, L2 cache, L3 cache.
-  7. Power draw, Temperature, Cpufreq driver.
-  8. Governor, Energy preference, Platform profile.
-  9. Microcode.
-
-  A row whose value is unsupported shows "Unsupported" in secondary text. MC hides such rows; tasklens keeps TS's fixed grid, so nothing jumps. Up time format is "2 days, 2h 38m 15s" (TS). Speed uses the BogoMIPS fallback with "(?)" and MC's explanatory tooltip.
-- Linux data/mechanism:
-  - Processes: count of numeric `/proc` entries. Threads: sum of `/proc/<pid>/stat` field 20 from the process sweep. Both come from the shared sweep, not a second scan.
-  - Handles: `/proc/sys/fs/file-nr` field 1, labelled "Handles" with the tooltip "Open file handles, system-wide".
-  - Up time: `clock_gettime(CLOCK_BOOTTIME)`.
-  - Base speed: `cpufreq/base_frequency`, else `acpi_cppc/nominal_freq` (MHz), else `bios_limit`.
-  - Sockets: distinct `topology/physical_package_id`. Cores: distinct (package, `core_id`). Logical processors: online count from `/sys/devices/system/cpu/online`.
-  - Virtualization: `svm` or `vmx` flag in `/proc/cpuinfo` plus `/dev/kvm`. Values: "Enabled (KVM ready)", "Supported, KVM module not loaded", "Not supported".
-  - Virtual machine: systemd `org.freedesktop.systemd1.Manager.Virtualization` property, where empty means "No".
-  - CPU vulnerabilities: count of `/sys/devices/system/cpu/vulnerabilities/*` files starting "Mitigation" or "Not affected" versus "Vulnerable", shown as "14 mitigated, 0 vulnerable". The tooltip lists each file.
-  - Hypervisor: `hypervisor` cpuinfo flag plus `/sys/hypervisor/type` if present, else "None".
-  - Caches: `/sys/devices/system/cpu/cpu*/cache/index*/{level,type,size,shared_cpu_list}`, deduplicated by `shared_cpu_list` and summed per level (L1 = data + instruction).
-  - Driver, governor, EPP: `cpufreq/policy0/{scaling_driver,scaling_governor,energy_performance_preference}` (here amd-pstate-epp, powersave, balance_performance).
-  - Platform profile: `/sys/firmware/acpi/platform_profile`, else power-profiles-daemon `ActiveProfile` over D-Bus (`org.freedesktop.UPower.PowerProfiles`, present here).
-  - Microcode: `/proc/cpuinfo` `microcode`.
-- Verdict: ADAPT (Windows VBS, Security services and Hypervisor platform replaced by Linux analogues; MC's cpufreq rows added)
-- Phase: P1 (rows 1-4 and 6); P2 (rows 5, 7-9)
-- Privilege: Power draw as in PERF-013. Everything else needs none.
-
----
-
-## C. Memory page
-
-### PERF-015 Memory graphs
-- Source: TS 2.3 graphs Physical memory, Commit, Swap L28573-28575 | MC 2.2 main graph (committed dashed, dirty, used filled) and Swap graph
-- Behaviour: Three stacked graphs:
-  - "Physical memory": used filled, max = total. Modified (Dirty+Writeback) is drawn as an unfilled line.
-  - "Commit": Committed_AS filled, CommitLimit as a dashed line. Max = max(CommitLimit, peak Committed_AS in view), because commit can exceed 100 % (architecture review).
-  - "Swap": used / total. Hidden, and its toggle disabled, when SwapTotal is 0.
-
-  Context menu: "Show Memory Composition", "Show Commit Graph", "Show Swap Usage".
-- Linux data/mechanism: `/proc/meminfo` through a persistent fd at 1 Hz. Used = MemTotal − MemAvailable (if MemAvailable > MemTotal, use MemFree; MC rule). ZFS ARC: if `/proc/spl/kstat/zfs/arcstats` exists, (size − c_min) is added to available (MC).
-- Verdict: BUILD (TS graph set; MC dirty line)
-- Phase: P1
-- Privilege: none
-
-### PERF-016 Memory composition bar
-- Source: TS 2.3 "Memory composition" (In use, In use (compressed), Modified, Standby, Free) | MC 2.2 composition widget
-- Behaviour: A horizontal bar with segments "In use", "In use (compressed)", "Modified", "Standby" and "Free". Each has a hover tooltip with its amount and a one-line definition. Default visible.
-- Linux data/mechanism:
-  - compressed = zram `mm_stat` field 3 (mem_used_total) summed over zram devices, plus meminfo `Zswap`.
-  - in_use = (MemTotal − MemAvailable) − compressed, clamped at 0.
-  - modified = Dirty + Writeback.
-  - free = MemFree.
-  - standby = MemTotal − in_use − compressed − modified − free, clamped at 0.
-
-  The segments always sum to MemTotal.
-- Verdict: ADAPT (TS segments with Linux definitions)
-- Phase: P1
-- Privilege: none
-
-### PERF-017 Memory stats grid
-- Source: TS 2.3 fields L28262-28270 | MC 2.2 stats panel
-- Behaviour: Rows:
-  1. In use, Available, Committed ("46.2 / 67.2 GiB").
-  2. Cached, Slab reclaimable, Slab unreclaimable (these replace Paged pool and Non-paged pool).
-  3. Swap used, Swap free, Compressed.
-  4. Compression savings, Speed, Slots used ("2 of 4").
-  5. Form factor, Type, Hardware reserved.
-
-  Compressed and Savings show "None" when under 1 MiB (MC hides them). Swap free shows actual free; MC has a bug that shows total.
-- Linux data/mechanism:
-  - meminfo: Cached + Buffers for Cached, SReclaimable, SUnreclaim, SwapTotal, SwapFree, Committed_AS, CommitLimit.
-  - Savings = (zram `mm_stat` orig_data_size + meminfo `Zswapped`) − compressed.
-  - DIMM fields from the udev database (PERF-020): Speed is the first device's `CONFIGURED_SPEED_MTS`, Slots used is device count of `MEMORY_ARRAY_NUM_DEVICES`, Form factor and Type come from the first device.
-  - Hardware reserved = Σ DIMM `SIZE` − MemTotal, shown only if DIMM sizes are known.
-- Verdict: ADAPT (pools mapped to slab, as TS inventory section 9 suggests)
-- Phase: P1 (meminfo rows); P2 (DIMM rows, reserved)
-- Privilege: none (verified)
-
-### PERF-018 zram and zswap section
-- Source: MC 2.2 Compressed and Savings | TS inventory section 9 (zram/zswap compressed)
-- Behaviour: A collapsible "Compression" block under the stats.
-  - Per zram device: Device, Algorithm, Disk size, Original data, Compressed data, Memory used, Ratio ("3.38 : 1"), Used as swap (Yes/No, with priority).
-  - zswap: Enabled (Y/N), Compressor, Max pool %, Pool size (`Zswap`), Stored (`Zswapped`).
-
-  The block is hidden when neither zram nor zswap exists.
-- Linux data/mechanism: `/sys/block/zram*/mm_stat` (fields orig, compr, mem_used, mem_limit, mem_used_max, same_pages, pages_compacted, huge_pages), `comp_algorithm` (active value in [brackets]), `disksize`. `/sys/module/zswap/parameters/{enabled,compressor,max_pool_percent}`. meminfo `Zswap` and `Zswapped`.
-- Verdict: BUILD (Linux-only; MC data, more detail)
-- Phase: P2
-- Privilege: none
-
-### PERF-019 Swap devices list
-- Source: TS 2.3 Swap graph | TS section 9 (swap devices)
-- Behaviour: A table under the Swap graph with columns Device, Type (partition, file, zram), Size, Used, Priority.
-- Linux data/mechanism: `/proc/swaps`.
-- Verdict: ADAPT (page file → swap devices)
-- Phase: P2
-- Privilege: none
-
-### PERF-020 Memory modules (DIMMs)
-- Source: TS 2.7 Memory per module | MC 2.2 Speed, Slots, Form factor, Type
-- Behaviour: Shown on the Information tab (PERF-071) and as a tooltip on "Slots used".
-- Linux data/mechanism: `udevadm` database properties of `/sys/devices/virtual/dmi/id`: `MEMORY_ARRAY_NUM_DEVICES`, `MEMORY_ARRAY_MAX_CAPACITY` and `MEMORY_DEVICE_<n>_{SIZE,FORM_FACTOR,LOCATOR,BANK_LOCATOR,TYPE,TYPE_DETAIL,SPEED_MTS,CONFIGURED_SPEED_MTS,MANUFACTURER,PART_NUMBER,SERIAL_NUMBER,RANK,CONFIGURED_VOLTAGE}`. Read with libudev (`udev` crate) or by parsing `/run/udev/data/+dmi:id`; no subprocess. Rows with SIZE absent or "No Module Installed" are empty slots. Fallback when the udev keys are missing (no `dmi_memory_id` helper): show "Module details unavailable" and offer nothing that needs root.
-- Verdict: BUILD (MC mechanism; verified unprivileged here)
-- Phase: P2
-- Privilege: none (verified)
-
----
-
-## D. Disk pages
-
-### PERF-021 Disk list and kind
-- Source: TS 2.3 Disk page, drive types L28078-28113 | MC 2.3, 7 Disks
-- Behaviour: One page per physical disk: "Disk N (nvme0n1)" plus the model. Kind is one of NVMe, SSD, HDD, eMMC, SD card, USB drive, Optical, Virtual or iSCSI. Kind appears in the card ("NVMe - /") and in the stats.
-- Linux data/mechanism: `/sys/block/*`, excluding `loop*`, `ram*`, `zram*` (shown in Memory), `fd*`, `dm-*`, `md*`, `zd*` and `nbd*` with size 0. Kind is decided in this order:
-  1. name `nvme` → NVMe;
-  2. `mmcblk` with `device/type` MMC → eMMC, SD → SD card;
-  3. `sr` → Optical;
-  4. udev `ID_BUS=usb` → USB drive;
-  5. `virtio`/`xen` → Virtual;
-  6. `device/transport` iSCSI;
-  7. `queue/rotational` 1 → HDD, else SSD.
-
-  Model: `device/model` (plus `device/vendor` for SCSI), else UDisks2 `Drive.Model`.
-- Verdict: ADAPT (TS drive types replaced by MC's Linux kinds)
-- Phase: P1
-- Privilege: none
-
-### PERF-022 Disk graphs
-- Source: TS 2.3 Active time and Disk transfer rate | MC 2.3 Active time, Throughput (read solid, write dashed)
-- Behaviour: "Active time" 0-100 % filled. "Transfer rate": read filled, write dashed, both on one shared scale, auto-scaled (PERF-058). The disk colour is #D9B567.
-- Linux data/mechanism: `/sys/block/<dev>/stat` through a persistent fd at 1 Hz.
-  - active % = Δio_ticks / Δt_ms × 100, clamped to 100.
-  - read/write rate = Δsectors × 512 / Δt (the kernel always uses 512-byte units here).
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
-### PERF-023 Disk stats grid
-- Source: TS 2.3 fields L28272-28282 | MC 2.3 stats
-- Behaviour: Rows:
-  1. Active time, Average response time ("0.42 ms"), Read speed.
-  2. Write speed, Total read, Total written.
-  3. Capacity, Formatted, Used space.
-  4. Free space, System disk, Swap on disk (replaces Page file).
-  5. Type, Hardware name, Interface.
-  6. Serial, WWN, Rotation rate.
-  7. Temperature, Firmware.
-- Linux data/mechanism:
-  - Response time = Δ(read_ticks + write_ticks + discard_ticks + flush_ticks) / Δ(reads + writes + discards + flushes), using stat fields 4, 8, 15, 17 and 1, 5, 12, 16.
-  - Totals: cumulative sectors × 512. Capacity: `size` × 512.
-  - Formatted, Used, Free: `statvfs` summed over mounted filesystems on this disk (following holders, PERF-024).
-  - System disk: holds the `/` or `/boot` mount.
-  - Swap: any `/proc/swaps` entry on this disk.
-  - Interface: udev `ID_BUS` / transport (NVMe, SATA, USB, SCSI, virtio).
-  - Serial and WWN: UDisks2 `Drive.Serial` and `Drive.WWN`, else sysfs `device/serial` and `wwid`. Rotation: `Drive.RotationRate`.
-  - Temperature: drive hwmon (`nvme` hwmon, present here; SATA needs the `drivetemp` module), else UDisks2 `Drive.Ata.SmartTemperature` (kelvin).
-  - Firmware: `device/firmware_rev`.
-- Verdict: ADAPT (page file → swap)
-- Phase: P1 (rows 1-5); P2 (rows 6-7)
-- Privilege: none. If `drivetemp` is not loaded for SATA, Temperature falls back to the UDisks2 SMART value; otherwise "Unavailable".
-
-### PERF-024 Partitions table
-- Source: TS 2.3 Partitions ("%zu partitions - %s"; columns Partition, Size, Offset, Drive, Mount path, Volume, File system, Flags, Type) | MC 2.3 partition rows with usage bar, mount points, LUKS/dm following
-- Behaviour: The heading is "3 partitions - GPT". A sortable table with columns Partition (`nvme0n1p2`), Size, Offset, Device (dm name if encrypted, for example `luks-…` → `cryptroot`), Mount path (first mount; up to 3 shown, the rest in a tooltip, as MC), Label, File system, Usage (bar plus "%" and "used / size", from MC), Flags and Type. Unallocated gaps of 1 MiB or more appear as "Unallocated" rows. Default sort is offset ascending (TS). MC sorts by size; TS order is used.
-- Linux data/mechanism:
-  - Partitions: `/sys/block/<dev>/<part>/{partition,start,size,ro}`.
-  - udev properties: `ID_PART_TABLE_TYPE` (gpt/dos), `ID_PART_ENTRY_TYPE` (GUID or MBR byte), `ID_PART_ENTRY_FLAGS`, `ID_FS_TYPE`, `ID_FS_LABEL`.
-  - Holders: `/sys/block/<dev>/<part>/holders/dm-N` → `/sys/block/dm-N/dm/name`, followed recursively for LVM on LUKS.
-  - Mounts: `/proc/self/mountinfo` (major:minor match). Usage: `statvfs`.
-  - Type name table, GPT: C12A7328 EFI system, 0FC63DAF Linux filesystem, 0657FD6D Linux swap, E6D6D379 Linux LVM, 4F68BCE3 Linux root x86-64, 933AC7E1 Linux /home, CA7D7CCB LUKS, EBD0A0A2 Basic data, E3C9E316 Microsoft reserved, DE94BBA4 Windows recovery; others "GPT partition". MBR: 0x83 Linux, 0x82 swap, 0x8e LVM, 0x07 NTFS/exFAT, 0x0b/0x0c FAT32, 0xef EFI, 0x05/0x0f Extended; others "MBR 0x%02X".
-  - Flags from GPT attributes (bit 0 Required, bit 62 Hidden, bit 63 No automount, bit 60 Read-only) and MBR boot flag 0x80 (Boot); "Read-only" also when sysfs `ro`=1.
-  - Rescan on udev `block` change events.
-- Verdict: ADAPT (TS columns with Linux types, flags and dm following; MC usage bar added)
-- Phase: P2
-- Privilege: none
-
-### PERF-025 SMART data
-- Source: MC 2.3 Show SMART Data dialog
-- Behaviour: A header button "Show SMART Data" (only when the drive supports it) opens a dialog.
-  - Header: Last updated ("2 min ago"), Powered on, Drive health ("Healthy", or "Failing" from the assessment; MC leaves this blank), Self-test status.
-  - ATA table: ID, Attribute, Value, Normalized, Threshold, Worst, Type (Pre-fail/Old-age), Updates (Online/Offline), Assessment (Failing / Failed in the past / OK).
-  - NVMe table: Attribute/Value rows with MC's list, without its duplicate "Control Busy Time" row.
-  - Button "Refresh".
-  - Failure dialog: "Failed to get SMART data", with the error text and a hint to run `smartctl -a /dev/<dev>`.
-- Linux data/mechanism: UDisks2 `org.freedesktop.UDisks2.Drive.Ata`: `SmartGetAttributes(a{sv})`, properties `SmartUpdated`, `SmartPowerOnSeconds`, `SmartFailing`, `SmartSelftestStatus`; `SmartUpdate` on Refresh. NVMe: `org.freedesktop.UDisks2.NVMe.Controller.SmartGetAttributes` / `SmartUpdate` (UDisks2 2.10 or later). Calls go through zbus in the engine's D-Bus adapter.
-- Verdict: BUILD (MC)
-- Phase: P2
-- Privilege: Reading cached attributes needs none. `SmartUpdate` uses polkit `org.freedesktop.udisks2.ata-smart-update` (allowed for the active local session by default). If UDisks2 is absent, the button is hidden. There is no smartctl fallback, because smartctl needs root.
-
-### PERF-026 Eject with blockers
-- Source: MC 2.3 Eject Disk and eject failure dialog
-- Behaviour: A header button "Eject" appears only for ejectable or removable drives and updates live. It unmounts every filesystem on the drive, then powers off or ejects it. Success toast: "Disk ejected". On a busy failure, a dialog lists the blocking processes grouped by app: icon, name, PID and open paths (up to 5, then "+N more"). Each row has an "End Task" button. The dialog buttons are "Close", "Retry" and "End All". End Task and End All send SIGTERM through the process action path (pidfd, identity check), then retry the eject once after 1 s.
-- Linux data/mechanism: UDisks2 `Filesystem.Unmount({})` per mounted filesystem (also through dm holders: `Encrypted.Lock` after unmount), then `Drive.Eject({})` if `Ejectable`, else `Drive.PowerOff({})` if `CanPowerOff`. Blockers come from scanning `/proc/*/fd`, `/proc/*/cwd`, `/proc/*/root` and `/proc/*/maps` for paths under the mount points, run in the blocking pool.
-- Verdict: BUILD (MC; TS labels for actions)
-- Phase: P2
-- Privilege: Unmount and eject use UDisks2 polkit actions (`filesystem-unmount-others`, `eject-media`; allowed for the active session on removable media). Other users' processes cannot be scanned without root, so the dialog adds a line: "Processes of other users may also hold files open". Ending another user's process goes through the privileged helper path owned by the process-actions area.
-
----
-
-## E. Network pages
-
-### PERF-027 Network throughput graph
-- Source: TS 2.3 Throughput (Upload/Download) | MC 2.4 graph (send dashed, receive filled, linked max, dynamic or link speed)
-- Behaviour: One graph: "Receive" filled and "Send" dashed, sharing one scale. With the setting "Scale network graphs dynamically" on (default), it auto-scales (PERF-058). With it off, the graph is fixed at the link speed when known, else dynamic. The colour is #359CAB.
-- Linux data/mechanism: `/sys/class/net/<if>/statistics/{rx_bytes,tx_bytes}` through persistent fds at 1 Hz. Read `/proc/net/dev` once per tick instead when more than 16 interfaces exist. Rates use actual elapsed time. Counter decrease (interface recreated) resets the baseline.
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
-### PERF-028 Network stats grid
-- Source: TS 2.3 Network fields L28283-28293, types L28137-28145, states L28147-28152 | MC 2.4 stats
-- Behaviour: Rows:
-  1. Receive, Send, Adapter name.
-  2. Connection type, State, Interface index.
-  3. Total received, Total sent, Link speed (rx and tx; one value on Linux, both TS rows merged).
-  4. IPv4 address, IPv6 address, MAC address.
-  5. Public IP (PERF-030), Driver, MTU.
-
-  States use TS's list, which maps one-to-one to kernel operstate: up "Connected", down "Disconnected", testing "Testing", dormant "Dormant", notpresent "Not present", lowerlayerdown "Lower layer down", unknown "Unknown". When NetworkManager is present, the tooltip adds its state ("Connecting", "Waiting for auth" and so on).
-- Linux data/mechanism:
-  - `/sys/class/net/<if>/{operstate,ifindex,address,mtu,speed}`; speed -1 or missing → "Unknown".
-  - Driver: `device/driver` link basename.
-  - Adapter name: udev `ID_MODEL_FROM_DATABASE` / `ID_VENDOR_FROM_DATABASE` (hwdb, unprivileged); MC's own SQLite hwdb is not needed.
-  - IPs: rtnetlink `RTM_GETADDR` dump (netlink-packet-route); all addresses listed in a tooltip, the primary global one shown. Link-local IPv6 only when no global address exists.
-  - NetworkManager `Device.State` over D-Bus is optional enrichment.
-- Verdict: ADAPT (Windows connection states map exactly to Linux operstate; NM optional)
-- Phase: P1 (rows 1-4); P2 (row 5)
-- Privilege: none
-
-### PERF-029 Wi-Fi details
-- Source: MC 2.4 Wi-Fi rows (SSID, Signal strength 4-level icon, Maximum bitrate, Frequency)
-- Behaviour: Wi-Fi interfaces add the rows SSID, Signal strength (4-bar icon at ≤25/50/75/100 % plus "−54 dBm"), Bitrate and Frequency/Band ("5.18 GHz (ch 36)").
-- Linux data/mechanism: Primary: NetworkManager `Device.Wireless.ActiveAccessPoint` → `AccessPoint.{Ssid,Strength,Frequency,MaxBitrate}`. Without NM: generic netlink nl80211 `NL80211_CMD_GET_INTERFACE` (SSID, frequency) and `NL80211_CMD_GET_STATION` (signal dBm, tx bitrate), both unprivileged.
-- Verdict: BUILD (MC, plus an nl80211 fallback)
-- Phase: P2
-- Privilege: none
-
-### PERF-030 Public IP fetch
-- Source: TS 2.3 Public IP ("Fetch", "Not fetched"), Confirm Public IP Fetch dialog, [INI Connections.AutoFetchPublicIP, PublicIPFetchNoticeAccepted] | TS 2.7 Information
-- Behaviour: The value shows "Not fetched" plus a "Fetch" link. The first fetch opens TS's dialog: "tasklens will fetch your public IP address from an online service.", "Service: https://api.ipify.org", "Continue only if you want this computer to contact that service.", the checkbox "Do not ask again for public IP fetches.", and Continue / Cancel. Results show "203.0.113.5 (fetched 14:02)". The setting "Auto-fetch public IP on launch" defaults to off. The value is shared by the Network page and the Information tab. The fetch is never repeated automatically after launch.
-- Linux data/mechanism: HTTPS GET `https://api.ipify.org` (IPv4) and `https://api6.ipify.org` (IPv6, only if a global IPv6 default route exists). Uses the `ureq` 3 crate (blocking, rustls, no Tokio) in the engine blocking pool, with a 5 s timeout and errors shown inline ("Fetch failed: timed out").
-- Verdict: BUILD (TS)
-- Phase: P2
-- Privilege: none
-
-### PERF-031 Network settings link
-- Source: TS 2.3 "Show more information" L28329 | MC 2.4 "Network Settings" context item (GNOME Settings over D-Bus)
-- Behaviour: Context menu item and link "Network settings". On KDE it runs `systemsettings kcm_networkmanagement`. On GNOME it calls `org.gnome.Settings` `org.freedesktop.Application.ActivateAction("launch-panel", [("wifi"|"network",[])])` (MC). On other desktops the item is hidden.
-- Linux data/mechanism: `XDG_CURRENT_DESKTOP` decides which path to use; the process is spawned detached.
-- Verdict: ADAPT (KDE path added)
-- Phase: P4
-- Privilege: none
-
----
-
-## F. GPU pages
-
-### PERF-032 GPU backend split
-- Source: architecture review section 3 (tl-gpu-probe) | MC 7 GPU (nvtop backends) | PLAN section 3
-- Behaviour: Every GPU page and card is fed through one vendor-neutral `GpuSample` with per-metric validity. A metric the backend cannot supply shows "Unsupported" and is never shown as 0.
-- Linux data/mechanism:
-  - **NVIDIA**: NVML, loaded only in `tl-gpu-probe` (child process, socketpair protocol, 500 ms deadline, restart backoff). Rate 1 Hz while any GPU view or card is visible.
-  - **AMD (amdgpu)**: sysfs and hwmon under `/sys/class/drm/cardN/device/`, read in-process.
-  - **Intel (i915/xe)**: sysfs, hwmon, DRM fdinfo and i915 PMU, read in-process.
-
-  The vendor comes from `device/vendor`: 0x10de NVIDIA, 0x1002 AMD, 0x8086 Intel. Other DRM drivers (v3d, msm, panfrost, panthor, nouveau) get utilization from fdinfo only. nouveau gets name and PCIe only.
-- Verdict: ADAPT (replaces MC's bundled nvtop and TS's D3DKMT)
-- Phase: P1 (NVIDIA probe, AMD sysfs); P2 (Intel, fdinfo engines)
-- Privilege: none for NVML and amdgpu sysfs. Intel PMU needs privilege; see PERF-034.
-
-### PERF-033 NVML call map (NVIDIA)
-- Source: machine check (nvidia-smi field support on 615.71.09) | PLAN section 3 | brief
-- Behaviour: Supplies every NVIDIA metric listed in PERF-034 to PERF-039.
-- Linux data/mechanism: NVML C functions, called by `tl-gpu-probe` through nvml-wrapper:
-
-  | Metric | NVML call | Poll |
-  |---|---|---|
-  | Init, count, handles | `nvmlInit_v2`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2` | once |
-  | Identity | `nvmlDeviceGetUUID`, `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3` (busId), `nvmlDeviceGetVbiosVersion`, `nvmlDeviceGetBoardPartNumber` | once |
-  | Driver | `nvmlSystemGetDriverVersion`, `nvmlSystemGetCudaDriverVersion_v2` | once |
-  | Utilization (3D/compute) and memory controller % | `nvmlDeviceGetUtilizationRates` (.gpu, .memory) | 1 Hz |
-  | Video Encode % | `nvmlDeviceGetEncoderUtilization` | 1 Hz |
-  | Video Decode % | `nvmlDeviceGetDecoderUtilization` | 1 Hz |
-  | JPEG and optical flow % | `nvmlDeviceGetJpgUtilization`, `nvmlDeviceGetOfaUtilization` (NOT_SUPPORTED → engine hidden) | 1 Hz |
-  | VRAM used/total/reserved | `nvmlDeviceGetMemoryInfo_v2` (total, reserved, used, free) | 1 Hz |
-  | BAR1 | `nvmlDeviceGetBAR1MemoryInfo` | on page open |
-  | Temperature | `nvmlDeviceGetTemperatureV` (sensor GPU), fallback `nvmlDeviceGetTemperature(NVML_TEMPERATURE_GPU)`; slowdown and max from `nvmlDeviceGetTemperatureThreshold` | 1 Hz / once |
-  | Power draw | `nvmlDeviceGetPowerUsage` (mW) | 1 Hz |
-  | Power limit, max limit | `nvmlDeviceGetEnforcedPowerLimit`, `nvmlDeviceGetPowerManagementLimitConstraints` | 10 s |
-  | Energy | `nvmlDeviceGetTotalEnergyConsumption` (mJ) | 1 Hz, optional, used for the average |
-  | Clocks | `nvmlDeviceGetClockInfo` (GRAPHICS, MEM, VIDEO, SM) | 1 Hz |
-  | Max clocks | `nvmlDeviceGetMaxClockInfo` (GRAPHICS, MEM) | once |
-  | PCIe current/max | `nvmlDeviceGetCurrPcieLinkGeneration`, `nvmlDeviceGetCurrPcieLinkWidth`, `nvmlDeviceGetGpuMaxPcieLinkGeneration`, `nvmlDeviceGetMaxPcieLinkWidth` | 5 s |
-  | PCIe throughput | `nvmlDeviceGetPcieThroughput` (TX_BYTES, RX_BYTES; KB/s) | 1 Hz while the page is open |
-  | Fan | `nvmlDeviceGetNumFans`, `nvmlDeviceGetFanSpeed_v2` | 1 Hz |
-  | P-state | `nvmlDeviceGetPerformanceState` | 1 Hz |
-  | Throttle reasons | `nvmlDeviceGetCurrentClocksEventReasons` | 1 Hz while the page is open |
-  | Display attached/active | `nvmlDeviceGetDisplayMode`, `nvmlDeviceGetDisplayActive` | once |
-  | Per-process (process area owns these columns) | `nvmlDeviceGetComputeRunningProcesses_v3`, `nvmlDeviceGetGraphicsRunningProcesses_v3`, `nvmlDeviceGetProcessUtilization(lastSeenTimeStamp)` | 1 Hz while demanded |
-
-  Every call is probed once per UUID. `NVML_ERROR_NOT_SUPPORTED` marks the metric Unsupported for the session. `GPU_IS_LOST` marks the device "Lost" and restarts the probe.
-- Verdict: BUILD
-- Phase: P1 (utilization, memory, temperature, power, clocks, encode/decode, identity); P2 (rest)
-- Privilege: none (NVML device queries run as a normal user)
-
-### PERF-034 GPU engine graphs
-- Source: TS 2.3 engine graphs (Utilization (3D), Compute, Video Encode, Video Decode, Video Processing, "Engine %u"), context "Select GPU Engine Graphs" / "Hide This Engine Graph", [INI Performance.HiddenGpuEngines] | MC 2.5 top graph and Encode/Decode
-- Behaviour: A grid of engine charts in the CPU grid style (TS), one per engine the backend reports. The context menu offers "Select GPU Engine Graphs" (checklist) and "Hide This Engine Graph". Engine labels:
-  - NVIDIA: "3D / Compute" (NVML does not split them), "Memory controller", "Video Encode", "Video Decode", plus "JPEG" and "Optical flow" when supported.
-  - AMD: "3D" (gfx), "Compute", "Copy" (dma), "Video Decode", "Video Encode", "JPEG".
-  - Intel: "Render/3D", "Copy", "Video", "Video Enhance", "Compute".
-
-  A shared encoder/decoder (MC `encode_decode_shared`) shows one "Video Encode/Decode" chart.
-- Linux data/mechanism:
-  - NVIDIA: PERF-033.
-  - AMD: total = `device/gpu_busy_percent`. Engines come from `device/gpu_metrics` (binary `gpu_metrics_v1_x`/`v2_x`/`v3_x`: `average_gfx_activity`, `average_umc_activity`, `average_mm_activity` or `vcn_activity[]`, `jpeg_activity[]`). Fallback: the sum over readable `/proc/*/fdinfo/*` of `drm-engine-{gfx,compute,dma,dec,enc,jpeg}` ns deltas divided by elapsed time, with clients deduplicated by `drm-client-id`.
-  - Intel i915: i915 PMU through `perf_event_open` (type from `/sys/bus/event_source/devices/i915/type`, events `rcs0-busy`, `bcs0-busy`, `vcs0-busy`, `vecs0-busy`, `ccs0-busy`), else fdinfo `drm-engine-{render,copy,video,video-enhance,compute}`.
-  - Intel xe: fdinfo `drm-cycles-<class>` / `drm-total-cycles-<class>`.
-
-  fdinfo fallback charts carry the coverage marker "Own processes only" in their label tooltip (architecture review, coverage).
-- Verdict: ADAPT (TS grid; engine sets per Linux driver)
-- Phase: P1 (NVIDIA and AMD total); P2 (all engines)
-- Privilege: Intel PMU needs `CAP_PERFMON` or `kernel.perf_event_paranoid` ≤ 0. tasklens does not request that; it uses the fdinfo fallback with the coverage marker. The fdinfo fallback sees only the user's own processes.
-
-### PERF-035 GPU memory, temperature, power and clock graphs
-- Source: TS 2.3 ("VRAM and temperature on a separate row" [CL 0.9.2]) | MC 2.5 middle and bottom graphs (Encode/Decode, Memory Usage, Power Draw, Clock Speeds, Temperature)
-- Behaviour: Below the engine grid there is a second row of charts:
-  - "Dedicated memory" (VRAM used, max total) with "Shared memory" dashed when the backend has GTT;
-  - "Temperature".
-
-  An optional third row is toggled in the context menu "Select GPU Engine Graphs": "Power" (draw filled, limit as a dashed line) and "Clocks" (graphics solid, memory dashed, linked scale). The third row is off by default. Options with no data are disabled (MC).
-- Linux data/mechanism:
-  - NVIDIA: PERF-033 (no GTT on NVIDIA, so no shared series).
-  - AMD:
-    - memory: `device/mem_info_vram_{used,total}`, `mem_info_gtt_{used,total}`;
-    - temperature: hwmon `temp1_input` (edge), `temp2` (junction, shown in the tooltip), `temp3` (mem);
-    - power: hwmon `power1_average`, else `power1_input`; limit `power1_cap`;
-    - clocks: hwmon `freq1_input` (sclk) and `freq2_input` (mclk), maximums from the last line of `pp_dpm_sclk` / `pp_dpm_mclk`.
-  - Intel:
-    - memory: dGPU VRAM from the sum of fdinfo `drm-total-local0`/`drm-resident-vram0` (own processes; iGPU has no dedicated memory);
-    - temperature: hwmon `temp1_input` (dGPU only);
-    - power: hwmon `energy1_input` delta (dGPU), else RAPL `intel-rapl:0:1` ("uncore") for the iGPU;
-    - clocks: i915 `cardN/gt_act_freq_mhz`, max `gt_max_freq_mhz`; xe `device/tile0/gt0/freq0/{act_freq,max_freq}`.
-- Verdict: BUILD (TS rows; MC power and clock graphs as an optional row)
-- Phase: P1 (memory, temperature); P2 (power, clocks)
-- Privilege: none, except that Intel iGPU power needs RAPL readable (PERF-075).
-
-### PERF-036 GPU stats grid
-- Source: TS 2.3 GPU fields L28294-28303 | MC 2.5 stats
-- Behaviour: Rows:
-  1. Utilization, Dedicated memory ("2.8 / 15.9 GiB"), Shared memory.
-  2. Temperature, Power ("31.9 / 300 W"), Fan.
-  3. GPU clock ("1905 / 3105 MHz"), Memory clock, P-state.
-  4. Video encode, Video decode, Throttle reasons.
-  5. Driver version, Kernel module, VBIOS.
-  6. Vulkan version, OpenGL version, PCIe ("Gen 4 x16 (max Gen 4 x16)").
-  7. Physical location ("PCI bus 45, device 0, function 0"; TS format), Hardware reserved memory, UUID.
-
-  "Unsupported" shows where the backend has no value.
-- Linux data/mechanism:
-  - NVIDIA: PERF-033. Kernel module = `/sys/module/nvidia/version`. Hardware reserved = `MemoryInfo_v2.reserved` (380 MiB here). P-state, throttle and fan are NVIDIA only.
-  - AMD: `/sys/module/amdgpu/version` is often absent, so it shows the kernel version. VBIOS = `device/vbios_version`. Fan = hwmon `fan1_input` / `pwm1`. P-state uses `power_dpm_force_performance_level`.
-  - All vendors: PCIe from `device/{current_link_speed,current_link_width,max_link_speed,max_link_width}`, with GT/s mapped to generation: 2.5→1, 5→2, 8→3, 16→4, 32→5, 64→6. Location from the PCI slot name.
-- Verdict: ADAPT (DirectX version → Vulkan/OpenGL; Driver date → Kernel module version, since Linux drivers carry no date)
-- Phase: P1 (rows 1-3, 5); P2 (rows 4, 6, 7)
-- Privilege: none
-
-### PERF-037 Vulkan and OpenGL version probe
-- Source: MC 7 GPU (EGL on GBM and ash, each in a forked child) | TS DirectX version
-- Behaviour: Fills "Vulkan version" ("1.4.312, NVIDIA 615.71.09") and "OpenGL version" ("4.6.0 NVIDIA 615.71.09", ES marked "OpenGL ES"). Shows "Probing…" until done and "Unsupported" on failure.
-- Linux data/mechanism: Run once at startup, and again after a driver update detected by a change in `/sys/module/*/version`. Implementation: a short-lived `tl-gpu-probe --api-versions` child. This is a separate invocation from the long-running NVML probe, so a crash in a GL or Vulkan driver cannot hit the UI or NVML sampling.
-  - Vulkan: `ash` → `vkEnumeratePhysicalDevices`, matched by PCI bus through `VK_EXT_pci_bus_info`; `apiVersion` plus `VkPhysicalDeviceDriverProperties.driverInfo`.
-  - OpenGL: `eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT)`, with the device matched through `EGL_DRM_DEVICE_FILE_EXT`; a surfaceless context, then `glGetString(GL_VERSION)`.
-  - Deadline 5 s.
-- Verdict: ADAPT
-- Phase: P2
-- Privilege: none
-
-### PERF-038 Displays list
-- Source: TS 2.3 Displays (connection type, "%s @ %d Hz", "%d-bit, %s", orientation) L29511-29519
-- Behaviour: A "Displays" table on each GPU page with columns Monitor (EDID name, e.g. "DELL U2723QE"), Connector (DP-2), Type (DisplayPort, HDMI, eDP/Internal, DVI, VGA, USB-C/DP-alt, Virtual), Mode ("3840×2160 @ 144 Hz"), Bit depth ("max 10 bpc"), Orientation (Landscape, Portrait, Landscape (flipped), Portrait (flipped)), Scale ("110 %"). Connected but disabled outputs show Mode "Off".
-- Linux data/mechanism:
-  - Connectors per GPU: `/sys/class/drm/cardN-*/status` ("connected") and `edid` (parsed for the monitor name descriptor 0xFC). The sysfs `enabled` attribute is not used, because it is wrong on nvidia-drm (verified).
-  - Mode, refresh and max bpc: DRM KMS read-only ioctls on `/dev/dri/cardN` (no DRM master needed; the seat user has an ACL): `DRM_IOCTL_MODE_GETRESOURCES`, `GETCONNECTOR`, `GETENCODER`, `GETCRTC` (current mode, refresh = clock×1000/(htotal×vtotal)), connector property "max bpc".
-  - Orientation and scale on KDE: `kscreen-doctor -j` run once when the page opens and when KMS connector status changes (JSON fields `rotation`, `scale`, `enabled`, `currentModeId`). On other desktops these columns show "Unknown".
-- Verdict: ADAPT (TS fields from DRM KMS plus KScreen; actual output bit depth is not exposed by Linux, so "max bpc" is shown and labelled as a maximum)
-- Phase: P2
-- Privilege: none (verified: `card1` has the seat ACL)
-
-### PERF-039 GPU card
-- Source: TS 2.3 GPU card | MC 2.0 GPU row
-- Behaviour: "GPU N", model, then "52 °C" plus "· 32 W" when power is known. The graph shows utilization %.
-- Linux data/mechanism: PERF-033 and PERF-035.
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
----
-
-## G. Fans and batteries
-
-### PERF-040 Fan pages
-- Source: MC 2.6 (per hwmon fan; RPM graph with dashed PWM; temperature graph; stats Fan Speed, PWM Percentage, Current Temperature)
-- Behaviour: One page per fan: "Fan N" or its label, with the paired sensor name as subtitle.
-  - Graphs: "Fan speed" (RPM filled, PWM % dashed on a 0-100 secondary scale; fixed at `fanN_max` if present, else sticky-up) and "Temperature" (paired sensor; hidden if none).
-  - Stats: Fan speed (RPM), PWM ("45 %", or "Auto"/"Manual" mode from `pwmN_enable`), Temperature, Chip (`nct6797`), Sensor.
-  - Context menu: "Temperature sensor >" (every temp input of the same chip plus CPU and GPU temperatures) and "Rename…". Both are saved per fan identity.
-  - Default pairing: the same chip and index. MC uses the same-index temp without a choice; the menu lets the user fix wrong pairs.
-  - Fans whose RPM has read 0 since start and that have no label are hidden by default as "probably not connected". The setting "Show fans reading 0 RPM" turns them on, and they reappear as soon as they spin.
-  - The GPU fan stays on the GPU page, not here.
-- Linux data/mechanism: `/sys/class/hwmon/hwmon*/fan*_input`, `fanN_label`, `fanN_max`, `fanN_min`, `pwmN` (/255), `pwmN_enable`, `tempN_input`, `tempN_label`, `name`. Polled at 1 Hz while displayed. Board chips (`nct6797` here) can take tens of ms per read, so they run in the blocking pool and never at 10 Hz (PLAN section 3).
-- Verdict: ADAPT (MC page; MC's config-dir override files become an in-app rename and sensor choice)
-- Phase: P2
-- Privilege: none. Missing Super I/O drivers mean no fans; PERF-077 covers sensors-detect.
-
-### PERF-041 Battery and UPower device pages
-- Source: MC 2.7 and Astra MC Battery (power graph, 7-day history, stats, all UPower kinds)
-- Behaviour: One page per UPower device except DisplayDevice and line power. The heading is the kind and index ("Mouse", "Battery 1"), with vendor and model as subtitle.
-  - System batteries: "Power" graph (charging positive, discharging negative, filled to zero, symmetric scale with Pow10 rounding).
-  - Peripherals and unknown state: "Charge" 0-100 % graph.
-  - Stats (MC list, with MC's "Swap available"-style bugs fixed): Percentage, State, Time to full/empty, Energy, Energy rate, Voltage, Charge cycles, Capacity (health %), Technology, Energy empty, Energy full, Energy full (design), Voltage min (design), Voltage max (design), Powering system, Serial, Charge threshold (shows "Disabled" when supported but off; MC shows "Yes" there), Charge start and end threshold, Temperature.
-  - Rows with no value are hidden here (MC). UPower values differ widely per device kind, and a fixed grid would be mostly empty for a mouse.
-- Linux data/mechanism: zbus on the system bus.
-  - `org.freedesktop.UPower.EnumerateDevices`, signals `DeviceAdded` and `DeviceRemoved`.
-  - Per device `org.freedesktop.UPower.Device` properties: `Type`, `PowerSupply`, `Percentage`, `State`, `TimeToEmpty`, `TimeToFull`, `Energy`, `EnergyRate`, `EnergyEmpty`, `EnergyFull`, `EnergyFullDesign`, `Voltage`, `VoltageMinDesign`, `VoltageMaxDesign`, `ChargeCycles`, `Capacity`, `Technology`, `Temperature`, `Serial`, `Model`, `Vendor`, `NativePath`, `ChargeThresholdSupported`, `ChargeThresholdEnabled`, `ChargeStartThreshold`, `ChargeEndThreshold`.
-  - Updates come from `PropertiesChanged`, with no polling.
-  - Fallback without UPower: `/sys/class/power_supply/*` (`capacity`, `status`, `energy_now`, `power_now`, `voltage_now`, `cycle_count`, `scope`), rescanned every 30 s.
-- Verdict: BUILD (MC)
-- Phase: P2
-- Privilege: none
-
-### PERF-042 Battery charge history
-- Source: MC 2.7 "Battery Charge over past week"
-- Behaviour: For system batteries with 2 or more history points, a graph "Battery charge over past week" spans 7 days with 7 day gridlines. Gaps are drawn as faint dashed lines. The graph refreshes on the UPower history change.
-- Linux data/mechanism: `org.freedesktop.UPower.Device.GetHistory("charge", 604800, 1000)` → array of (time, value, state). Re-fetched on page open and every 10 min while open.
+### PERF-010 Copy device info
+- Source: MC 2.0 "Copy" (`data_summary()`, e.g. `cpu.rs:798-873`) | TS 8 toast "Copied metrics to clipboard"
+- Behaviour: Ctrl+C on a Performance page, or "Copy" in its context menu, copies plain text. The first line is the page heading, the second the model, then aligned `    Label: value` lines (4-space indent). Every stats-grid field of that page is included; nothing is left out the way Mission Center leaves fields out. Missing values print their fallback string. Toast: "Copied metrics to clipboard".
+- Linux data/mechanism: GPUI `write_to_clipboard` (Wayland data-device).
 - Verdict: BUILD
 - Phase: P2
 - Privilege: none
 
----
-
-## H. Graph engine behaviour (all graphs)
-
-### PERF-055 Graph rendering style
-- Source: TS 2.3 (filled area, brighter top line, faint vertical grid, right-to-left scroll) | MC 2.0 graph engine (rounded clip radius 7, 1 px outline, scrolling grid, dashed secondary series) | architecture review section 4
-- Behaviour:
-  - Filled area at the fill colour, with a 1.5 logical px top line in the line colour.
-  - Secondary series are dashed (5,5) and unfilled.
-  - Vertical gridlines in the line colour at 12 % alpha, spaced every 1/6 of the time range; they scroll with the data (TS and MC).
-  - 3 faint horizontal gridlines at 25/50/75 % on percent graphs.
-  - Corner radius follows the theme's Rounded Corners setting (4-6 px).
-  - 1 px border in the divider colour.
-  - The label sits at the top left and the current value at the top right.
-  - On graphs over 200 px tall: "<Metric> over 60 seconds" at the bottom left and the scale maximum at the top right.
-- Linux data/mechanism: the app-owned chart element. Quads for background and grid. Cached linear fill and stroke paths, rebuilt only when samples, size, scale or y-range change. Min/max per physical-pixel bucket when samples exceed width. A time translation per frame (architecture review rendering rules 1-7).
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
-### PERF-056 Time ranges and history tiers
-- Source: TS 4.2 minigraph Time Range (30 seconds, 1 minute, 5 minutes, 10 minutes) | MC Data Points 10-600 × update interval | architecture review (60 s default, ring capacity 602)
-- Behaviour: Each graph group has a time range of 30 s, 1 min (default), 5 min or 10 min.
-  - Performance pages: one range for the whole tab, set from the page context menu "Time range >" and saved as `performance.time_range`.
-  - Minigraphs and tray graphs: their own range, per card.
-
-  MC's Data Points slider is replaced by this choice.
-- Linux data/mechanism: two ring tiers per series in the engine.
-  - Fast tier: capacity 602 at the source rate (10 Hz for CPU while visible), so 60 s.
-  - Slow tier: capacity 602 at 1 Hz, so 10 min, holding the min, max and last value of each second.
-
-  Ranges of 60 s or less draw from the fast tier when it exists. Longer ranges draw from the slow tier using its min and max. History exists only for series that have been demanded since start, or since the device appeared. Older time shows a gap, not zero. Memory estimate: about 120 series × 2 tiers × 602 × 16 B ≈ 2.3 MB (inferred from the review's sample layout).
-- Verdict: ADAPT (TS ranges; MC data points dropped in favour of ranges)
-- Phase: P1 (30 s, 1 min); P2 (5 min, 10 min)
-- Privilege: none
-
-### PERF-057 Smooth scrolling
-- Source: TS [INI UI.SmoothGraphs=1] "Interpolated graph scrolling" | MC `performance-sliding-graphs` (50 ms timer) | architecture review smooth time mapping
-- Behaviour: Setting "Smooth graphs" (Settings > Motion, default on). When on, graphs scroll continuously at the monitor refresh rate (144 Hz here), drawing one sample interval behind real time. When off, or with reduced motion, or when "Animations" is off, graphs step once per sample and request no animation frames. Numeric readouts always show the latest measured value.
-- Linux data/mechanism: one GPUI `request_animation_frame` per window, only while a visible chart is moving. x = right − (right_edge_time − t) × width / range (architecture review).
-- Verdict: BUILD (TS meaning; MC's 50 ms timer method rejected)
-- Phase: P1
-- Privilege: none
-
-### PERF-058 Scaling modes
-- Source: MC graph engine (Fixed, ScaleUp/Down, Sticky*, Stacking; rounding Pow2, Pow2Base10, Integer, Pow10; linked datasets) | architecture review "Units and graph ranges" | TS "Auto-scale network transfer rates"
-- Behaviour: Each graph type has a fixed rule:
-  - Percent (CPU, GPU engines, disk active, battery %): fixed 0-100.
-  - Memory, VRAM, swap: fixed 0 to total.
-  - Commit: 0 to max(CommitLimit, visible peak).
-  - Rates (disk, network, PCIe): the scale rises at once when a value exceeds it. It falls only after the visible maximum has stayed below half the scale for 10 s (architecture review). Paired series share one scale (read/write, send/receive).
-  - Power and clock: sticky up, never shrinking during the session.
-  - Temperature: sticky up and down, starting at 35-45 °C, with a 10 °C minimum span.
-  - Stacked CPU: 0 to 100 × n.
-
-  Scale maxima round to 1, 2 or 5 × 10^n for decimal units and to powers of 2 for binary units.
-- Linux data/mechanism: none
-- Verdict: BUILD (MC modes reduced to fixed rules per type; review rule for rates)
-- Phase: P1
-- Privilege: none
-
-### PERF-059 Network scale to link speed
-- Source: MC `performance-page-network-dynamic-scaling` (true)
-- Behaviour: Setting "Scale network graphs dynamically", default on. When off, network graphs use a fixed maximum equal to the link speed, with dynamic scaling as fallback when the speed is unknown.
-- Linux data/mechanism: `/sys/class/net/<if>/speed` (Mb/s), or Wi-Fi bitrate from PERF-029.
-- Verdict: BUILD
-- Phase: P2
-- Privilege: none
-
-### PERF-060 Units
-- Source: TS Network transfer unit (Bits per second / Bytes per second), [INI UI.ProcessNetworkRateUnit=0] bits, NetworkRateAutoScale | MC Units page (Bytes/Bits × Base 10/Base 2 for Memory, Drive, Network) | architecture review (IEC memory)
-- Behaviour: Settings > Units has three rows, each with a Bytes/Bits toggle and a Base 2/Base 10 toggle:
-  - Memory: Bytes, Base 2 (GiB). Bits is disabled for memory, because a bit count of RAM has no use.
-  - Disk: Bytes, Base 2.
-  - Network: Bits, Base 10 (Mbps; TS default).
-
-  "Auto-scale transfer rate units" (TS, default on) picks the unit prefix per value. When off, every rate uses one fixed prefix (the setting "Fixed rate unit": K, M or G). Number format: 2 decimals below 10, 1 below 100, else 0 (MC). Rates end in "/s" for bytes and "bps" for bits. The settings agent owns the settings page; these units apply to every PERF surface.
-- Linux data/mechanism: none (tl-model formatting)
-- Verdict: BUILD (merge: MC's per-class units, TS's network default and auto-scale)
-- Phase: P1 (defaults); P2 (all toggles)
-- Privilege: none
-
-### PERF-061 Graph colours
-- Source: TS palette (PLAN section 9) and 18 graph accents L28548-28565 | MC per-type colours
-- Behaviour: Colours per device type from the theme: CPU #0D546D fill / #0A7096 line, Kernel #C1514E, Memory #7E6A9A, GPU #508A59 / #71B768, Disk #D9B567, Network #359CAB. Fans and batteries have no TS colour; they take the theme accents "Violet" and "Lime". Devices of one type share a colour (TS and MC). Minigraph and tray cards can override with "Accent" or any of the 17 named accents. Performance pages use theme colours only, because TS offers no per-page colour.
-- Linux data/mechanism: theme slots (theme area owns the slot list).
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
-### PERF-062 Gaps, stale and unavailable states
-- Source: architecture review (validity states never shown as zero) | MC NaN breaks the line
-- Behaviour:
-  - Missing samples break the line and leave the area empty, with no ramp down to zero.
-  - A source that has missed 3 or more intervals greys the chart and shows "Stale (8 s)" in the value spot.
-  - Unsupported metrics show "Unsupported". Permission problems show "Needs setup" or "Restricted" with a tooltip giving the reason and the fix (PERF-075).
-  - After suspend and resume, a gap marks the sleep time.
-  - Warm-up, before the second sample of a rate: "…".
-- Linux data/mechanism: per-sample `flags` (valid, gap, reset) in the history ring. Suspend is detected by a CLOCK_BOOTTIME vs CLOCK_MONOTONIC jump, or by logind `PrepareForSleep`.
-- Verdict: BUILD
-- Phase: P1
-- Privilege: none
-
-### PERF-063 Hover readout
-- Source: TS 4.2 (hover marker following the curve [CL 0.8.28], " avg %.1f%s ", " peak %.1f%s ", " %u samples") | MC (none)
-- Behaviour: Hovering any graph shows a vertical marker and a dot on each series. A tooltip shows the time offset ("−12 s"), each series value, and for the visible range "avg 12.3 %", "peak 48.1 %" and "601 samples" (TS strings).
-- Linux data/mechanism: reads the history slice already used for drawing.
-- Verdict: BUILD (TS)
-- Phase: P2
-- Privilege: none
-
-### PERF-064 Curved lines option
-- Source: MC `performance-smooth-graphs` (cubic Bézier)
-- Behaviour: Setting "Curved graph lines", default off. When on, lines use monotone cubic interpolation (Fritsch-Carlson). It never overshoots a sample, so percentages cannot exceed 0-100, and spikes stay at their real height. MC's horizontal-tangent Bézier is not used.
-- Linux data/mechanism: tessellated with lyon (GPUI `PathBuilder::cubic_bezier_to`) in the same cached path.
-- Verdict: ADAPT (monotone curve instead of MC's Bézier, to meet the architecture review's no-overshoot rule)
-- Phase: P4
-- Privilege: none
-
----
-
-## I. System minigraph panel, tray graphs and mini window
-
-### PERF-065 System minigraph panel
-- Source: TS 4.2 (floating cards over the bottom right of Processes: VRAM, GPU, Network, Disk, Memory, CPU; label top left, value top right, drop shadow), [INI UI.ShowCpuGraph, ShowRamGraph, ShowDiskGraph, ShowNetworkGraph, ProcessGraphs.ShowGpuTemperatureGraph]
-- Behaviour: A grid of cards (about 200×80 logical px) floats over the bottom right of the Processes tab, with the theme drop shadow at DropShadowIntensityPct.
-  - Default cards: CPU, Memory, Disk, Network, GPU, VRAM, all on. "GPU Temperature" is off.
-  - View > Graphs has toggles: CPU Graph, Memory Graph, Disk Graph, Network Graph, GPU Graph, VRAM Graph, GPU Temperature Graph.
-  - Sources: Disk = sum over physical disks of read+write. Network = sum over non-virtual interfaces of rx+tx. GPU and VRAM = GPU 0, or the GPU picked with the card menu "Device >".
-  - Process-specific cards ("Add Minigraph", name graph, app graph) are added by the process area through the same card model. This panel renders and stores them.
-- Linux data/mechanism: reads the same history rings as the Performance tab. While the Processes tab is visible, the panel adds demand for those system sources at 1 Hz.
-- Verdict: BUILD (TS)
-- Phase: P1
-- Privilege: none
-
-### PERF-066 Minigraph card menu, time range and colour
-- Source: TS 4.2 context menu (Hide Graph, Time Range > 30 seconds/1 minute/5 minutes/10 minutes, Graph Color > Accent plus 17 accents, Add tray icon graph), toasts
-- Behaviour: Right-click a card for:
-  - "Hide Graph";
-  - "Time Range >" with 30 seconds, 1 minute (default), 5 minutes, 10 minutes;
-  - "Graph Color >" with Accent and the 17 named colours, each with a swatch;
-  - "Device >" (GPU and disk cards when more than one device exists);
-  - "Detach" or "Attach";
-  - "Add tray icon graph";
-  - "Reset Minigraph Layout".
-
-  Toasts (TS): "Minigraph added", "Minigraph already exists", "No space for more minigraphs", "Unable to add minigraph", "Minigraph layout reset". Hover readout as PERF-063.
-- Linux data/mechanism: TOML `[[minigraphs]]` entries: source, device identity, colour, range, slot, detached. These replace the INI keys `Column%d`, `ProcessGraphColors` and `ProcessGraphTimeRanges`.
-- Verdict: BUILD
-- Phase: P1 (hide, range, colour); P3 (detach, tray)
-- Privilege: none
-
-### PERF-067 Move and detach minigraphs
-- Source: TS 4.2 (cards can be moved and detached, window class `TaskSlingerDetachedGraph`, always on top, separate context menu; detached menu Show Main Window, Close Graph, Exit, Add Graph, Remove Graph), "Keep detached graphs open when closing main window" L28543, [INI ProcessGraphs.KeepDetachedOpenOnMainClose=0]
-- Behaviour:
-  - Moving: drag a card within the panel to reorder it. Cards snap to grid slots, and other cards shift.
-  - Detaching: choose "Detach", or drag a card past the window edge. The card becomes its own small window with no decorations. Dragging its body moves it.
-  - Detached window menu: "Show Main Window", "Close Graph", "Attach", "Time Range >", "Graph Color >", "Always on Top" (checked by default), "Exit tasklens".
-  - Several detached cards can be grouped by dropping one onto another, which shares one window with a group outline (TS).
-  - "Keep detached graphs open when closing main window" (View > Graphs, default off). When on, closing the main window leaves detached graphs open, and the app exits when the last one closes.
-  - Detached windows are restored on start. On KDE they return to their saved position; elsewhere the compositor picks the position.
-- Linux data/mechanism:
-  - Windows: GPUI `open_window` with `WindowKind::Normal`, `WindowDecorations::Client`, `app_id` `tasklens-graph`, and `start_window_move()` on drag. Wayland gives clients no position and no keep-above.
-  - On KDE: tasklens loads a KWin script through D-Bus `org.kde.KWin /Scripting loadScript(path, "tasklens-graphs")` then `start()`. The script finds windows with resourceClass `tasklens-graph` and sets `keepAbove = true`. It moves each window to its saved geometry, which tasklens passes through a per-window title tag. It reports geometry changes back by calling a tasklens D-Bus method (`io.tasklens.Graphs.GeometryChanged`).
-  - On other desktops: no keep-above. The "Always on Top" item shows "Not available on this desktop".
-- Verdict: ADAPT (Wayland has no client keep-above or positioning; KWin scripting supplies both on KDE)
-- Phase: P3
-- Privilege: none
-
-### PERF-068 Tray icon graphs
-- Source: TS 4.3 (live graph in the tray icon; sources: performance page, column, process, name filter, app filter; main tray icon hidden while a tray graph is shown; tooltip; tray menu; toasts; remembered), [INI TrayIconGraphs.*]
-- Behaviour:
-  - Any performance page, minigraph card, or process-area source can be added as a tray graph: "Add tray icon graph" in the page, card or row menu.
-  - Each tray graph is its own tray icon, drawn as a filled graph in the source colour on a transparent background over the last 30 s.
-  - While at least one tray graph exists, the plain tasklens tray icon is hidden (TS 0.9.2).
-  - Tooltip: "CPU Usage: 12 %", plus a summary block "CPU: 12 %, RAM: 55 %, GPU: 11 %, Disk: 0.1 %, Network: 0.01 Mbps".
-  - Left click shows or raises the main window.
-  - Menu: "Show Main Window", "Tray icon graphs >" (list with checks), "Close tray icon graph", "Exit tasklens".
-  - Toasts: "Tray icon graph added", "Tray icon graph removed", "Tray icon graph already exists", "Unable to add tray icon graph".
-  - Tray graphs persist across restarts.
-- Linux data/mechanism: StatusNotifierItem on the session bus via zbus.
-  - Each graph registers its own name `org.kde.StatusNotifierItem-<pid>-<n>` with `org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem`.
-  - The icon is supplied through the `IconPixmap` property: ARGB32, network byte order, sizes 22, 32 and 48 px for 110 % scale. A `NewIcon` signal is emitted at 1 Hz.
-  - `ToolTip` property (icon, title, text). The menu uses `com.canonical.dbusmenu`.
-  - Library rule: use the `ksni` crate with default features off if `cargo tree -e normal` then shows no `tokio`. Otherwise write SNI plus dbusmenu by hand on the engine's zbus connection (async-io).
-  - Rendering: a CPU raster into a 48×48 buffer with straight lines, no GPU.
-- Verdict: ADAPT (Shell_NotifyIcon → SNI)
-- Phase: P3
-- Privilege: none. If no StatusNotifierWatcher exists (GNOME without the AppIndicator extension), the add item is disabled with the tooltip "No system tray on this desktop".
-
-### PERF-069 Performance mini window
-- Source: TS 4.4 (compact, movable, always-on-top performance window [CL 0.8.4]; probably opened by "Toggle view mode", toast "View mode: %ls")
-- Behaviour: The toolbar "Toggle view mode" button cycles "Full" and "Mini", with the toast "View mode: Mini". View > Window > "Performance mini window" does the same. Mini hides the main window and opens a borderless window (about 260 px wide) holding only the sidebar device cards in the user's page order and visibility. Card graphs keep their Performance time range. The window has "Always on Top" on by default (KDE only, same KWin script as PERF-067) and is moved by dragging. Double-click a card, or press Esc, to return to Full with that page selected. Size is saved; position is saved on KDE only.
-- Linux data/mechanism: GPUI second window, `app_id` `tasklens-mini`, KWin script as in PERF-067.
-- Verdict: ADAPT (always-on-top only on KDE; how TS opens this window is inferred, so tasklens defines it as above)
-- Phase: P3
-- Privilege: none
-- Open question: TS's trigger is unconfirmed (TS inventory "Gaps"). Recommended answer: the toolbar view-mode button plus the menu item, as specified.
-
----
-
-## J. Information tab
-
-### PERF-070 Information tab layout and copy
-- Source: TS 2.7 (two-column layout; section headers with an accent bar and copy button `information.copy.%d`; tab-level copy icon copies everything; the filter applies to this tab)
-- Behaviour:
-  - Two columns of sections. Each header has a 3 px accent bar and a copy icon that copies "Section" then "  Label: value" lines.
-  - The copy icon on the tab itself copies all sections. Toast: "Copied to clipboard".
-  - The tab-bar filter hides non-matching rows, and hides sections with no matches.
+### PERF-011 Page layout and fallback strings
+- Source: TS `performance.png`, crosscheck A.19, A.20
+- Behaviour: Each page has:
+  - a header with the device name at left and page toggles at right;
+  - the graph area;
+  - a stats grid of label (secondary text) over value (primary text), three columns, rows in TaskSlinger order.
+  - Mission Center fields that TaskSlinger lacks are appended after TaskSlinger's fields.
+  - Formats: up time "2 days, 2h 38m 15s" (" day, " when singular) and caches "%ld KB".
+  - Rows a device cannot supply show "Not supported". Rows that need privilege show "Unavailable" with a reason tooltip. Mission Center hides missing rows; tasklens shows them, because TaskSlinger keeps a stable grid.
   - Values are selectable text.
-  - Static data loads once at tab open, with "Refresh" in the context menu. Live rows (uptime, counts, available memory) update at 1 Hz while visible.
-  - TS's bug of Process Count 0 and Thread Count 0 is not reproduced.
-- Linux data/mechanism: per PERF-071 to PERF-074. MC's System Information dialog (OS, Kernel, Desktop) is folded into these sections.
-- Verdict: BUILD (TS; MC's dialog merged in)
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+## Graph behaviour
+
+### PERF-012 Graph element
+- Source: TS 9 "Layout" (PLAN section 9) | MC 2.0 "Graph engine" | review section 4
+- Behaviour:
+  - The newest sample is at the right edge.
+  - The area is filled in the series fill colour, with a 1.5 px brighter top line.
+  - The faint vertical grid scrolls with the data. One line every 60 logical px; horizontal lines at 25/50/75%.
+  - 1 px outline in the series colour at 40% alpha, 4 px corner radius (matches the "Rounded Corners" setting).
+  - Title at top left and current value at top right in the panel and sidebar sizes.
+- Linux data/mechanism: An app-owned GPUI element: background and grid as quads; fill and stroke as cached linear paths, rebuilt only when samples, size, scale, y-range or style change. Contiguous valid runs are drawn separately. When there are more samples than pixels, each pixel bucket keeps its min and max.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-013 Time range
+- Source: TS 4.2 Time Range (30 s, 1 min, 5 min, 10 min) | MC "Data Points" 10 to 600 and the "Utilization over N" label
+- Behaviour:
+  - Each graph family has a "Time Range >" choice of 30 seconds, 1 minute (default), 5 minutes or 10 minutes.
+  - The Performance tab has one range for all its pages: Settings > Performance > "Graph time range". Each minigraph card has its own range.
+  - The graph's lower-left label reads "Utilization over 60 seconds" (Mission Center wording, words per metric: "Throughput over", "Memory usage over").
+  - Mission Center's data-point slider is replaced by this choice.
+- Linux data/mechanism: Ranges up to 60 s read the fast tier and longer ranges read the 1 Hz tier (PERF-014).
+- Verdict: ADAPT. Data points become TaskSlinger's fixed ranges, so the duration no longer depends on the refresh interval.
+- Phase: P1 for 30 s and 60 s; P2 for 5 and 10 min.
+- Privilege: none
+
+### PERF-014 History tiers
+- Source: review section 4 "History structures"
+- Behaviour: The user sees no difference. Graphs show up to 10 minutes.
+- Linux data/mechanism: Every series has two `SeriesRing`s of capacity 602:
+  - the fast tier, at the source rate (10 Hz CPU while visible, else the source's rate);
+  - a 1 Hz tier holding the per-second mean, plus min and max kept for drawing.
+  - The engine owns both and publishes views. About 80 series × 2 × 602 × 16 B ≈ 1.5 MB.
+- Verdict: BUILD
+- Phase: P1 for the fast tier, P2 for the 1 Hz tier.
+- Privilege: none
+
+### PERF-015 Scaling modes
+- Source: MC 2.0 scaling modes | review "Units and graph ranges"
+- Behaviour:
+  - **Percentages:** fixed 0 to 100.
+  - **Memory, VRAM:** fixed 0 to total.
+  - **Commit:** 0 to max(CommitLimit, peak in view).
+  - **Rates (disk, network, GPU PCIe):** the scale rises at once and falls only after 10 s below half scale.
+  - **Network fixed mode:** when "Scale network graphs dynamically" is off, the scale is the link speed. If the link speed is unknown, the graph falls back to dynamic.
+  - **Temperature:** sticky up/down, starting at 35 to 45 °C.
+  - **Power and clocks:** sticky up from 0. When a hardware maximum is known (GPU max clock, power limit, fan max RPM), the scale is fixed at that maximum.
+  - **Stacked CPU:** 0 to 100 × n.
+  - **Battery power:** symmetric around 0.
+- Linux data/mechanism: Computed in the UI from the visible samples.
+- Verdict: ADAPT. Mission Center's nine modes collapse to these rules. The fall rule follows the review.
+- Phase: P1
+- Privilege: none
+
+### PERF-016 Axis maximum rounding and label
+- Source: MC Pow2/Pow10 rounding, `disk.rs:516-533`
+- Behaviour: Non-fixed scales round up to 1, 2 or 5 × 10ⁿ for decimal units, or to a power of two for binary units. The maximum shows at top right of large graphs, for example "100 Mbps" or "4 GiB/s".
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-017 Smooth (sliding) graphs
+- Source: TS `UI.SmoothGraphs=1` | MC "Sliding Graphs" (50 ms timer) | review section 4 "Smooth time mapping"
+- Behaviour: "Smooth graphs" defaults to **on**. When on, graphs scroll continuously at the monitor's refresh rate (144 Hz here), drawn one sample interval behind the newest data. When off, graphs jump one step per sample. When the window is hidden, or reduced motion is set, sliding stops.
+- Linux data/mechanism: One `request_animation_frame` chain per window, active only while a visible graph is moving. The cached path is translated each frame.
+- Verdict: ADAPT. TaskSlinger's meaning and default are kept. Mission Center's 50 ms timer is replaced by compositor-paced frames.
+- Phase: P1
+- Privilege: none
+
+### PERF-018 Curved lines
+- Source: MC "Smooth Graphs" (cubic Bézier)
+- Behaviour: "Curved lines" in Settings > Performance, off by default.
+- Linux data/mechanism: Monotone cubic (Fritsch-Carlson) curves through the samples. This never overshoots, which meets the review's no-overshoot rule.
+- Verdict: ADAPT. Monotone curves replace Mission Center's Bézier, which can overshoot.
+- Phase: P4
+- Privilege: none
+
+### PERF-019 Gaps and stale data
+- Source: review "Data validity", `Sample.flags` | MC NaN line breaks
+- Behaviour:
+  - Invalid samples (suspend, collector restart, device re-plug, unsupported) break the line. The gap shows as empty space with a dotted baseline.
+  - When the newest data is older than 3 × the source period, the value shows in secondary colour with "(stale)" in its tooltip.
+  - After suspend/resume, a gap is inserted and counter baselines are reset.
+- Linux data/mechanism: Suspend is detected when the `CLOCK_BOOTTIME` minus `CLOCK_MONOTONIC` jump exceeds 2 s, or from logind `PrepareForSleep`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-020 Hover readout
+- Source: TS 4.2 "Hover shows a value marker" (CL 0.8.28), " avg %.1f%s ", " peak %.1f%s ", " %u samples" | MC has none
+- Behaviour: On every large graph and minigraph, hovering shows a vertical marker and a dot on each series. A tooltip shows the time offset ("-12s"), each series value, and the "avg", "peak" and "samples" figures for the visible window.
+- Linux data/mechanism: Hit test only on hover.
+- Verdict: BUILD. TaskSlinger has it and Mission Center lacks it.
 - Phase: P2
 - Privilege: none
 
-### PERF-071 Operating System, Processor and System sections
-- Source: TS 2.7 Operating System, Processor, System | MC System Information dialog (OS, Kernel, Desktop groups)
-- Behaviour and data:
-  - **Operating System**:
-    - OS Name (`/etc/os-release` PRETTY_NAME) and Version (VERSION_ID, else BUILD_ID, else "Rolling").
-    - Kernel (uname release, replacing Build) and Kernel build (uname version).
-    - Architecture ("x86_64 (64-bit)").
-    - Install Date: `statx(STATX_BTIME)` of `/`, else the first timestamp in `/var/log/pacman.log`, else apt or dnf logs.
-    - Package Manager and Package Manager Version: `pacman --version` first line, run once and cached; same for apt and dnf.
-    - Desktop (`XDG_CURRENT_DESKTOP` plus `plasmashell --version`), Windowing System (Wayland or X11 from `XDG_SESSION_TYPE`), Virtual Terminal (`XDG_VTNR`).
-    - Machine ID (`/etc/machine-id`, replacing Product ID), plus the distro logo (os-release LOGO from the icon theme).
-  - **Processor**: Name, Vendor (`vendor_id`), Architecture, Identifier ("Family 25 Model 97 Stepping 2" from cpuinfo family, model and stepping), Logical Processors, Cores, Base Speed (PERF-014), Max Speed (`cpuinfo_max_freq`), Microcode.
-  - **System**: Computer Name (hostnamed `PrettyHostname`, else `gethostname`), User Name, Domain (`getdomainname`, hidden when "(none)"; replaces User Domain), System Uptime, Boot Time (now − CLOCK_BOOTTIME, local time), Process Count, Thread Count, Handle Count (file-nr).
-- Verdict: ADAPT (Build → Kernel; Product ID → Machine ID; User Domain → NIS/DNS domain; Registered Owner DROP, see PERF-078)
+### PERF-021 Graph colours
+- Source: TS PLAN section 9 graph colours, TS 6 "Graph accents" | MC per-type colours
+- Behaviour:
+  - Per type: CPU #0D546D fill / #0A7096 line; kernel line #C1514E; Memory #7E6A9A; GPU #508A59 / #71B768; Disk #D9B567; Network #359CAB.
+  - Fan uses the "Violet" accent and Battery the "Mint" accent. TaskSlinger has no colour for these; tasklens picks them from its own accent list.
+  - Two devices of the same type share a colour (both apps do this).
+  - Minigraph and tray cards can be recoloured with "Graph Color >": "Accent" plus 17 named accents.
+  - Themes may override the graph colours.
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P1 for the palette; P3 for per-card colour.
+- Privilege: none
+
+### PERF-022 Units
+- Source: TS "Network transfer unit", "Auto-scale network transfer rates" | MC 5 "Units" (bytes/bits and base 10/base 2 per class)
+- Behaviour: Settings > Units has three groups.
+  - **Memory:** Base 2 (KiB, MiB, GiB; default) or Base 10.
+  - **Disk:** bytes, Base 2 default (MiB/s).
+  - **Network:** "Bits per second" (default) or "Bytes per second", plus Base 10 (default) or Base 2.
+  - "Auto-scale network transfer rates" defaults to on. When on, the unit changes from Kbps to Mbps to Gbps by size. When off, the unit is fixed at Mbps or MB/s.
+  - Number format (Mission Center rule): 2 decimals below 10, 1 below 100, else 0.
+  - Rates always carry "/s" or "ps".
+- Linux data/mechanism: Formatting lives in `tl-model`.
+- Verdict: ADAPT. Mission Center's groups are merged with TaskSlinger's auto-scale. TaskSlinger's `NetworkRateAutoScale` defaults to 0, but tasklens defaults auto-scale to on, because a fixed Mbps unit shows "0.00 Mbps" for idle links.
+- Phase: P1 for the defaults; P2 for the settings page.
+- Privilege: none
+
+### PERF-023 Legends and secondary series
+- Source: TS legend in the first cell ("Total", "Kernel", crosscheck A.28), network "Upload" legend (A.15) | MC dashed secondary series
+- Behaviour: Legends are drawn inside the first graph of a page, top left, as coloured line swatches with labels:
+  - "Total"/"Kernel" (CPU);
+  - "Download"/"Upload" (network; download filled, upload a dashed line);
+  - "Read"/"Write" (disk; write dashed);
+  - "Dedicated"/"Shared" (GPU memory);
+  - "Encode"/"Decode";
+  - "GPU clock"/"Memory clock";
+  - "RPM"/"PWM";
+  - "Used"/"Committed" (memory; committed dashed, which also covers Mission Center's dirty series as a thin unfilled line).
+- Linux data/mechanism: Dash pattern 5/5 px through `PathBuilder::dash_array`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+## CPU page
+
+### PERF-024 CPU header and graph mode
+- Source: TS "Overall"/"Per core" toggle (L28233-28236) | MC `performance-page-cpu-graph` 1 to 4
+- Behaviour: The header shows the CPU name. At right is a mode button with the choices "Overall", "Per core" (default), "All cores overlaid" and "All cores stacked". A "Kernel on"/"Kernel off" toggle sits next to it. Both persist (`performance.cpu_mode`, `performance.cpu_kernel`, default on).
+- Linux data/mechanism: `/proc/stat` (PERF-030).
+- Verdict: ADAPT. TaskSlinger's two-state toggle becomes a four-choice button so Mission Center's two extra modes fit.
+- Phase: P1 for Overall and Per core; P2 for the other two.
+- Privilege: none
+
+### PERF-025 Per-core grid
+- Source: TS grid of "CPU %d" charts | MC `compute_column_count`
+- Behaviour:
+  - One chart per logical CPU, titled "CPU N", with the % at top right.
+  - The column count is ceil(√(2n)), so 16 CPUs give 6 columns (matches TaskSlinger) and 32 give 8 columns in 4 rows. Cells are at least 120 logical px wide; the count is reduced when needed.
+  - Hovering a cell's title shows a tooltip: "Core C, thread T, 4.2 GHz".
+  - This is the 32-chart frame-budget case for phase 0.
+- Linux data/mechanism:
+  - `/proc/stat` `cpuN` lines. Per CPU, at 10 Hz while visible: used = user + nice + steal, kernel = system + irq + softirq, idle = idle + iowait, guest excluded.
+  - Core and thread come from `/sys/devices/system/cpu/cpuN/topology/{core_id,thread_siblings_list}`.
+  - Clock comes from `cpufreq/policyN/cpuinfo_avg_freq`, falling back to `scaling_cur_freq`.
+  - CPU hotplug: offline CPUs show "Offline".
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-026 Kernel time overlay
+- Source: TS "Kernel on" red line | MC "Show Kernel Times" dashed
+- Behaviour: When on, each per-core and overall chart adds the kernel % as a #C1514E line with no fill (TaskSlinger style, solid). Overlaid and stacked modes show no kernel line.
+- Linux data/mechanism: system + irq + softirq deltas.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-027 Overlaid and stacked modes
+- Source: MC 2.1 values 3 and 4
+- Behaviour: "All cores overlaid" draws one large chart with every core's line at opacity 1/n, minimum 0.08. "All cores stacked" draws stacked filled bands with a maximum of 100 × n%. The y-label then reads "3200%".
+- Linux data/mechanism: Same per-CPU series.
+- Verdict: BUILD
 - Phase: P2
 - Privilege: none
 
-### PERF-072 Memory section and modules
-- Source: TS 2.7 Memory, per module
-- Behaviour and data:
-  - Total Physical, Available Physical, Memory Usage %, Committed, Commit Limit.
-  - Peak Committed: tasklens records the highest Committed_AS seen since it started, labelled "Peak Committed (since tasklens started)", because Linux keeps no system peak.
-  - Page Size (`sysconf(_SC_PAGESIZE)`), Huge Page Size (meminfo `Hugepagesize`).
-  - Per module (PERF-020): Module N, Slot ("P0 CHANNEL A (DIMM 0)" from BANK_LOCATOR plus LOCATOR), Capacity, Speed ("3200 MT/s" configured; rated in the tooltip), Type ("DDR4"), Form Factor, Manufacturer, Part Number, Serial, Rank. Empty slots are listed as "Empty".
-- Verdict: ADAPT (Peak Committed redefined)
+### PERF-028 Core type marks
+- Source: TS "Performance core"/"Efficiency core" icons (L28239-28240)
+- Behaviour:
+  - On hybrid CPUs, each cell shows a small P or E icon.
+  - On AMD with preferred-core ranking, the highest-ranked cores show a small star, and the tooltip reads "Preferred core (rank 236)".
+  - Otherwise there is no icon. This machine shows stars only if the ranking differs between cores.
+- Linux data/mechanism:
+  - Intel: `/sys/devices/cpu_core/cpus` and `/sys/devices/cpu_atom/cpus`.
+  - AMD Zen 5c hybrids: distinct `cpu_capacity` values.
+  - Preferred cores: `cpufreq/policyN/amd_pstate_prefcore_ranking` (present here).
+- Verdict: ADAPT. The marks come from Linux topology files. The AMD preferred-core star is new.
 - Phase: P2
-- Privilege: none (verified)
+- Privilege: none
 
-### PERF-073 Disk, BIOS/Firmware and Motherboard sections
-- Source: TS 2.7 Disk Drives, BIOS/Firmware, Motherboard
-- Behaviour and data:
-  - **Disk Drives**: per physical disk, Model, Space ("412 GiB free of 1.82 TiB"), Volumes (mount points), Type (PERF-021 kind), Interface (NVMe, SATA, USB, SCSI, virtio).
-  - **BIOS/Firmware**: Firmware Type ("UEFI" if `/sys/firmware/efi` exists, else "Legacy BIOS"), Secure Boot (efivar `SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c` byte 4, readable as user), BIOS Vendor, BIOS Version, BIOS Date (`/sys/class/dmi/id/bios_{vendor,version,date}`).
-  - **Motherboard**: Manufacturer, Product, Version (`board_{vendor,name,version}`), System (`sys_vendor` plus `product_name`).
-  - Serials (`board_serial`, `product_serial`, `product_uuid`) are mode 0400 and shown as "Restricted (needs root)".
-- Verdict: ADAPT (drive letters → mount points)
+### PERF-029 CPU bottom graph
+- Source: MC `performance-page-cpu-graph-bottom` (power, clock, temperature)
+- Behaviour: Under the chart area sits one wide graph with a choice: "None", "Power draw" (W, default), "Clock speed" (GHz, average plus a dashed maximum-core line) or "Temperature" (°C). Choices without data are disabled. When power is missing, the default falls back to Temperature, then Clock. Label: "Power draw over 60 seconds", with the max value at top right.
+- Linux data/mechanism: PERF-033, PERF-034, PERF-035, at 1 Hz.
+- Verdict: BUILD. TaskSlinger has no such graph.
 - Phase: P2
-- Privilege: none. Serials need root and are not fetched; they show as restricted.
+- Privilege: power needs RAPL readability (PERF-101). The fallback is the disabled choice with the tooltip "Needs additional setup".
 
-### PERF-074 Graphics and Network Adapters sections
-- Source: TS 2.7 Graphics, Network Adapters (Public IP with fetch)
-- Behaviour and data:
-  - **Graphics**: per GPU, Name, Driver Version, Kernel Module (replaces Driver Date), Vulkan and OpenGL (replace DirectX Version), Temperature, Temperature Source ("NVML GPU core", "hwmon amdgpu edge"), Dedicated Memory, Shared Memory ("None" on NVIDIA), Resolution (each active display "3840×2160 @ 144 Hz", PERF-038).
-  - **Network Adapters**: per non-virtual interface, Connection (name plus type), Details (adapter model, driver, link speed), IP Address, MAC Address. Then one Public IP row with "Fetch" (PERF-030).
+### PERF-030 CPU live stats
+- Source: TS stats rows (L28241-28261) | MC "Live stats panel"
+- Behaviour: Grid rows, in order:
+  - Utilization, Kernel time, Speed;
+  - Processes, Threads, Handles;
+  - Up time, Base speed, Sockets.
+  - Then Mission Center additions: Power draw, Temperature, Load average (1/5/15).
+- Linux data/mechanism:
+  - **Utilization:** `/proc/stat` `cpu` line.
+  - **Speed:** mean of `cpuinfo_avg_freq` over all policies, falling back to `scaling_cur_freq`, then `/proc/cpuinfo` MHz. The tooltip gives the maximum core.
+  - **BogoMIPS fallback:** shows "(?)" with Mission Center's tooltip.
+  - **Processes:** count of numeric `/proc` entries. **Threads:** the sum from the process sweep, or the `procs_running` and `processes` fields when no sweep runs.
+  - **Handles** is relabelled "Handles (open files)": field 1 of `/proc/sys/fs/file-nr`.
+  - **Up time:** `CLOCK_BOOTTIME`.
+  - **Base speed:** `cpufreq/base_frequency`, then `acpi_cppc/nominal_freq` (amd-pstate), then `bios_limit`.
+  - **Sockets:** distinct `physical_package_id`.
+  - **Load average:** `/proc/loadavg`.
+- Verdict: ADAPT. Handles become open files. Load average is added.
+- Phase: P1
+- Privilege: none
+
+### PERF-031 CPU static stats
+- Source: TS Cores, Logical processors, L1/L2/L3 | MC Cpufreq driver, governor, EPP
+- Behaviour: Rows: Cores, Logical processors, Virtualization, Running in VM, CPU security, Hypervisor, L1 cache, L2 cache, L3 cache, Cpufreq driver, Governor, Power preference (EPP), Platform profile, Microcode.
+- Linux data/mechanism:
+  - Cores: distinct (package, core_id).
+  - Caches: `/sys/devices/system/cpu/cpu*/cache/index*/{level,type,size,shared_cpu_list}`, de-duplicated by `shared_cpu_list`. L1 is data plus instruction. Shown as "512 KB".
+  - `cpu0/cpufreq/{scaling_driver,scaling_governor,energy_performance_preference}`: here "amd-pstate-epp", "powersave", "balance_performance".
+  - `/sys/firmware/acpi/platform_profile`, falling back to power-profiles-daemon `ActiveProfile` over D-Bus.
+  - Microcode from `/proc/cpuinfo`.
+- Verdict: BUILD
+- Phase: P1 for cores, logical processors and caches; P2 for the rest.
+- Privilege: none
+
+### PERF-032 Virtualization and security rows
+- Source: TS Virtualization, Virtualization-based security, Security services, Hypervisor platform (L28256-28258, crosscheck A.18) | MC Virtualization, Virtual machine
+- Behaviour:
+  - **"Virtualization":** "Enabled (KVM available)", "Supported, KVM module not loaded" or "Not supported".
+  - **"Running in VM":** "No", or the hypervisor name. This replaces "Virtualization-based security".
+  - **"CPU security":** "N mitigated, N not affected, N vulnerable". The tooltip lists each entry. This replaces "Security services" (Credential Guard and the other Windows values).
+  - **"Hypervisor":** "None", or a vendor.
+- Linux data/mechanism:
+  - `svm`/`vmx` in `/proc/cpuinfo` flags plus `/dev/kvm` (present here).
+  - systemd `org.freedesktop.systemd1.Manager.Virtualization`.
+  - `/sys/devices/system/cpu/vulnerabilities/*`.
+  - The `hypervisor` cpuinfo flag plus `/sys/hypervisor/type`.
+- Verdict: ADAPT. VBS and Windows security services have no Linux meaning, so their rows carry the nearest Linux facts.
+- Phase: P2
+- Privilege: none
+
+### PERF-033 CPU power (RAPL)
+- Source: MC "Power: RAPL"
+- Behaviour: "Power draw" in watts on the stats grid and in the bottom graph. The tooltip splits Package and Core.
+- Linux data/mechanism:
+  - `/sys/class/powercap/intel-rapl:0/energy_uj` (package-0) and `intel-rapl:0:0` (core). The AMD driver also uses the `intel-rapl` names.
+  - Rate = Δenergy_uj / Δt. Counter wrap uses `max_energy_range_uj`.
+  - Polled at 1 Hz. The file is kept open and read with `pread`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: The kernel default is mode 0400, root only (since the PLATYPUS fix, CVE-2020-8694). It is readable here only because of the existing udev rule. Fallback: "Unavailable" with a "Set up…" link to PERF-101.
+
+### PERF-034 CPU temperature
+- Source: MC "Temperature: hwmon k10temp, coretemp or zenpower"
+- Behaviour: "Temperature" in °C on the stats grid, the CPU card and the bottom graph. The tooltip lists every sensor of that chip (Tctl, Tccd1, Tccd2).
+- Linux data/mechanism: Find hwmon by `name` in this order: `k10temp`, `zenpower`, `coretemp`, `cpu_thermal`. The main reading is the `tempN_input` whose label is "Tctl" or "Package id 0", else temp1. 1 Hz.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-035 CPU clock
+- Source: TS "4631 MHz" | MC Speed
+- Behaviour: Average MHz on the card and the stats grid, per-core MHz in cell tooltips, and the clock bottom graph.
+- Linux data/mechanism: `cpuinfo_avg_freq` (APERF/MPERF-based, present here) per policy, at 1 Hz while shown. Falls back to `scaling_cur_freq`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+## Memory page
+
+### PERF-036 Memory graphs
+- Source: TS "Physical memory", "Commit", "Swap" (L28573-28575) | MC memory and swap graphs
+- Behaviour: Three graphs in a column:
+  - "Physical memory": used filled, committed dashed and dirty as a thin line. Max = total.
+  - "Commit": Committed_AS against CommitLimit. It can go above 100%, and the label says so.
+  - "Swap": used. Hidden and disabled when there is no swap.
+  - The context menu has "Show memory composition" and "Show swap usage" (Mission Center), both persisted and default on.
+- Linux data/mechanism: `/proc/meminfo` at 1 Hz. Used = MemTotal − MemAvailable (MemFree when Available > Total). Swap used = SwapTotal − SwapFree.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-037 Memory composition bar
+- Source: TS "Memory composition" (In use, In use (compressed), Modified, Standby, Free) | MC composition widget
+- Behaviour: A horizontal bar with five segments and hover tooltips. Each tooltip gives the amount and a one-line meaning, for example "Standby: cache the kernel can drop".
+- Linux data/mechanism:
+  - Free = MemFree.
+  - Modified = Dirty + Writeback.
+  - Compressed = zram `mm_stat` field 3 (mem_used_total) + meminfo `Zswap`, clamped to In use.
+  - In use = Total − Available − Compressed.
+  - Standby = Total − In use − Compressed − Modified − Free, clamped at 0.
+- Verdict: ADAPT. Windows page lists are mapped to Linux meminfo fields, with zram and zswap as the compressed segment.
+- Phase: P1
+- Privilege: none
+
+### PERF-038 Memory stats
+- Source: TS In use, Committed, Cached, Paged pool, Non-paged pool, Slots used, Form factor, Hardware reserved, Speed | MC Available, Swap used, Swap available, Compressed, Savings, Type
+- Behaviour: Rows, in order:
+  - In use, Available, Committed ("46.2 / 67.2 GiB"), Cached;
+  - "Kernel slab (reclaimable)" (replaces Paged pool), "Kernel slab (unreclaimable)" (replaces Non-paged pool);
+  - Speed, Slots used ("2 of 4"), Form factor, Type, Hardware reserved;
+  - Swap used, Swap available;
+  - Compressed, Savings (shown only when at least 1 MiB is compressed);
+  - Huge pages (shown only when non-zero).
+- Linux data/mechanism:
+  - meminfo `Cached`, `SReclaimable`, `SUnreclaim`, `Committed_AS`/`CommitLimit` and `HugePages_*`.
+  - Swap available = SwapFree. This fixes Mission Center's bug, which shows SwapTotal.
+  - Savings = (zram orig_data_size + Zswapped) − (zram compr_data_size + Zswap).
+  - Hardware reserved = sum of DIMM sizes − MemTotal.
+  - DIMM fields from PERF-041. Speed is the configured speed in MT/s.
+- Verdict: ADAPT. Pools become slab.
+- Phase: P1 for meminfo rows; P2 for DIMM rows.
+- Privilege: none
+
+### PERF-039 zram and zswap details
+- Source: MC Compressed/Savings | TS "In use (compressed)"
+- Behaviour: A "Compressed memory" block under the stats.
+  - Per zram device: Device, Size (disksize), Stored (orig), Compressed, Memory used, Ratio "3.4 : 1", Algorithm.
+  - zswap: "Enabled: No" here; when enabled, Pool size and Stored.
+- Linux data/mechanism:
+  - `/sys/block/zram*/{disksize,mm_stat,comp_algorithm}`. In `comp_algorithm` the active entry is the one in brackets.
+  - `/sys/module/zswap/parameters/{enabled,compressor,max_pool_percent}` and meminfo `Zswap`/`Zswapped`.
+- Verdict: ADAPT. The block is new and gives detail Mission Center only sums.
+- Phase: P2
+- Privilege: none
+
+### PERF-040 Swap devices list
+- Source: TS "Page file" concept | MC swap graph
+- Behaviour: A table under the compressed block with the columns Name, Type (partition, file, zram), Size, Used and Priority.
+- Linux data/mechanism: `/proc/swaps`.
+- Verdict: ADAPT. Replaces Windows page files.
+- Phase: P2
+- Privilege: none
+
+### PERF-041 Memory modules
+- Source: TS "Memory module" heading (crosscheck A.16, B.5), Information modules | MC slots, speed, form factor, type
+- Behaviour: Under "Memory module" there is one block per DIMM: Slot ("P0 CHANNEL A / DIMM 0"), Capacity, Speed (configured / rated MT/s), Type (DDR4 and TaskSlinger's type list), Form factor, Manufacturer, Part number, Rank, Voltage. The same data feeds the Information tab (PERF-093).
+- Linux data/mechanism: Read the udev database for `/sys/devices/virtual/dmi/id` through libudev or by parsing `/run/udev/data/+dmi:id`. Keys: `MEMORY_ARRAY_NUM_DEVICES`, `MEMORY_DEVICE_<n>_{SIZE,LOCATOR,BANK_LOCATOR,TYPE,FORM_FACTOR,SPEED_MTS,CONFIGURED_SPEED_MTS,MANUFACTURER,PART_NUMBER,SERIAL_NUMBER,RANK,CONFIGURED_VOLTAGE}`. Read once at startup.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none. Checked on this machine. This corrects PLAN section 3, which says DIMM details need root. If udev lacks the keys (systemd-udevd before v252), the fallback is "Not reported" and no dmidecode is run.
+
+## Disk pages
+
+### PERF-042 Disk list and kind
+- Source: TS drive types | MC disk kinds and exclusions
+- Behaviour: One page per physical disk. Kind is one of NVMe, SSD, HDD, eMMC, SD, USB, Optical or Virtual. Here that gives three pages: nvme0n1, nvme1n1 and sda.
+- Linux data/mechanism:
+  - `/sys/block/*`, excluding `loop`, `ram`, `zram`, `fd`, `dm-`, `md` and `zd`. Those appear as holders and partitions.
+  - Kind rules, in order:
+    - an `nvme` prefix is NVMe;
+    - `mmcblk` plus `device/type` (MMC/SD) gives eMMC or SD;
+    - a `usb` transport (udev `ID_BUS=usb`) gives USB;
+    - `sr*` is Optical;
+    - `virtio`/`xen` is Virtual;
+    - otherwise `queue/rotational` decides HDD (1) or SSD (0).
+  - Model from udev `ID_MODEL`, falling back to sysfs `device/model`.
+- Verdict: ADAPT. Windows drive types become Linux kinds.
+- Phase: P1
+- Privilege: none
+
+### PERF-043 Disk graphs
+- Source: TS "Active time", "Disk transfer rate" | MC throughput with write dashed
+- Behaviour: "Active time" (0 to 100%, filled) and "Transfer rate" (Read filled, Write dashed, dynamic scale).
+- Linux data/mechanism: `/sys/block/<d>/stat` at 1 Hz.
+  - Active = Δio_ticks / Δt_ms.
+  - Read rate = Δsectors_read × 512 / Δt; write likewise.
+  - Counters are u64, with reset detection.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-044 Disk stats
+- Source: TS Average response time, Read speed, Write speed, Capacity, Formatted, System disk, Page file, Hardware name, Used space, Free space | MC Total read/written, Type, WWN, Serial, Rotation rate
+- Behaviour: Rows: Active time, Average response time (ms, 2 decimals), Read speed, Write speed, Total read, Total written, Capacity, Formatted, Used space, Free space, System disk, "Swap" (replaces Page file: Yes/No), Hardware name, Type, Interface, WWN, Serial, Rotation rate, Temperature.
+- Linux data/mechanism:
+  - Response = Δ(read_ticks + write_ticks + discard_ticks + flush_ticks) / Δ(reads + writes + discards + flushes) from `stat` fields 4, 8, 15 and 17 (the read and write fields per the kernel layout).
+  - Totals from the sectors counters since boot.
+  - Capacity = `size` × 512.
+  - Formatted, used and free = the sum of `statvfs` over mounted filesystems on this disk.
+  - System disk = holds `/` or `/boot`.
+  - Swap = any `/proc/swaps` entry on this disk or its holders.
+  - Interface from the udev `ID_BUS` or transport (nvme, ata, usb, scsi, virtio).
+  - WWN and Serial from udev `ID_WWN` and `ID_SERIAL_SHORT`, or UDisks2 `Drive.WWN`/`Serial`.
+  - Rotation from UDisks2 `Drive.RotationRate`.
+- Verdict: ADAPT. Page file becomes Swap.
+- Phase: P1 for rates, active time, capacity and response; P2 for the rest.
+- Privilege: none. Serials come from udev and are readable without root.
+
+### PERF-045 Partitions table
+- Source: TS "Partitions" table ("%zu partitions - %s"; Partition, Size, Offset, Drive, Mount path, Volume, File system, Flags, Type) | MC partition list with usage bar
+- Behaviour: The heading reads "3 partitions - GPT". Columns:
+  - Partition (`nvme0n1p2`);
+  - Size;
+  - Offset;
+  - Device: a dm/LUKS holder such as `luks-…` → `dm-0`, replacing Drive;
+  - Mount path: the first mount, with the rest in a tooltip ("Additional mount points:");
+  - Label: replaces Volume;
+  - File system;
+  - Usage: Mission Center's bar plus %;
+  - Flags;
+  - Type.
+  - Unallocated gaps over 1 MiB show as rows with Type "Unallocated".
+  - Rows are ordered by offset. TaskSlinger orders them this way; Mission Center sorts by size.
+- Linux data/mechanism:
+  - `/sys/block/<d>/<p>/{start,size,partition,ro}` and holders in `/sys/block/<d>/<p>/holders/`.
+  - udev `ID_FS_TYPE`, `ID_FS_LABEL`, `ID_PART_TABLE_TYPE`, `ID_PART_ENTRY_TYPE`, `ID_PART_ENTRY_FLAGS`.
+  - Mounts from `/proc/self/mountinfo`. Usage from `statvfs`.
+  - Type names from a GPT GUID table: EFI system, Linux filesystem, Linux root (x86-64), Linux home, Linux swap, Linux LVM, Linux RAID, LUKS, Microsoft basic data, Microsoft reserved, Windows recovery, BIOS boot. Anything else shows "GPT partition {guid}". MBR types show "MBR 0x%02X".
+  - Flags from GPT attributes: bit 0 "Required", bit 2 "Legacy BIOS bootable" (mapped to "Boot"), bit 60 "Read-only", bit 62 "Hidden", bit 63 "No automount". The sysfs `ro` value also gives "Read-only".
+- Verdict: ADAPT. Drive letters become device and mount path.
+- Phase: P2
+- Privilege: none
+
+### PERF-046 SMART data dialog
+- Source: MC SMART dialog
+- Behaviour: A "Show SMART data" button sits in the disk page header when SMART is available. The dialog has these fields: Last updated ("2 min ago"), Powered on, Drive health (the overall assessment; tasklens fills the value Mission Center leaves empty), Self-test status. Then a sortable table:
+  - ATA columns: ID, Attribute, Value, Normalized, Threshold, Worst, Type (Pre-fail or Old-age), Updates (Online or Offline), Assessment (FAILING, Failed in the past, OK).
+  - NVMe rows: Percent used, Available spare, Spare threshold, Total data read, Total data written, Warning temp time, Critical temp time, Controller busy time, Warning temperature, Critical temperature, Temperature sensors, Unsafe shutdowns, Media errors, Error log entries, Power cycles. Mission Center's duplicate busy-time row is dropped.
+  - A "Refresh" button.
+  - On failure the dialog reads "Failed to get SMART data" and names the reason.
+- Linux data/mechanism:
+  - ATA: UDisks2 `org.freedesktop.UDisks2.Drive.Ata.SmartGetAttributes({})`, `SmartUpdated`, `SmartPowerOnSeconds`, `SmartFailing`, `SmartSelftestStatus`. "Refresh" calls `SmartUpdate({})`.
+  - NVMe: `org.freedesktop.UDisks2.NVMe.Controller.SmartGetAttributes({})` and `SmartUpdate`. This needs udisks2 2.10 or newer with the nvme module.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: Reading cached attributes is allowed for the active session. `SmartUpdate` uses the polkit action `org.freedesktop.udisks2.ata-smart-update` (allowed for the active local session by default). Fallback when UDisks2 or NVMe support is missing: a "Read with smartctl (admin)" button runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` and parses the JSON.
+
+### PERF-047 Eject with blocking processes
+- Source: MC eject button and failure dialog
+- Behaviour: An "Eject" button appears only for ejectable or removable drives, and its visibility updates live. A failed unmount opens "Disk is in use".
+  - The dialog lists blocking processes grouped by app: name, PID, open paths, and an "End Task" button per row.
+  - Buttons: "Close", "Retry", "End All".
+  - End and End All send SIGTERM; holding Shift sends SIGKILL ("Force end").
+  - A retry follows automatically after ending.
+  - Success shows the toast "Disk ejected".
+- Linux data/mechanism:
+  - UDisks2 `Filesystem.Unmount({})` for each mounted filesystem, `Encrypted.Lock` for LUKS holders, then `Drive.Eject({})`, or `Drive.PowerOff` for USB.
+  - Blockers: scan `/proc/*/{cwd,root,exe}`, `/proc/*/fd/*` and `/proc/*/maps` for paths under the mount points.
+  - Signals use pidfd with identity check (process actions owner).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: Unmount and eject use the udisks2 polkit actions (`filesystem-unmount-others`, `eject-media`; allowed for the active session on removable media). The blocker scan sees only the user's own processes. The dialog adds the line "Processes of other users may also hold this disk" when any `/proc/*/fd` read failed with EACCES.
+
+### PERF-048 Disk temperature
+- Source: MC sidebar disk temperature
+- Behaviour: Temperature on the disk card line ("12% · 41 °C") and as a stats row.
+- Linux data/mechanism: The drive's hwmon (`nvme` hwmon "Composite", temp1, present here; `drivetemp` for SATA when that module is loaded). Fallback: UDisks2 `Drive.Ata.SmartTemperature` (Kelvin). 1 Hz.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+## Network pages
+
+### PERF-049 Interface list and type
+- Source: TS interface types and states (L28137-28152) | MC NetworkManager kinds
+- Behaviour:
+  - One page per interface, except loopback.
+  - Type: Ethernet, Wi-Fi, Virtual, USB network, Bridge, Cellular, Tunnel, VPN or Other.
+  - State uses TaskSlinger's labels, which map one-to-one to the kernel operstate: Connected (up), Disconnected (down), Testing, Dormant, Not present, Lower layer down. "unknown" plus carrier shows Connected.
+  - Here `tailscale0` is a Tunnel, so it shows (TaskSlinger shows Tailscale too). `docker0` is Virtual and hidden by default.
+- Linux data/mechanism:
+  - `/sys/class/net/<if>/`:
+    - a `wireless/` or `phy80211` entry is Wi-Fi;
+    - `bridge/` is Bridge;
+    - `tun_flags` or `type`=65534 is Tunnel;
+    - `device/driver` under a usb parent is USB network;
+    - `wwan*` or `type`=519 is Cellular;
+    - a name matching `docker*|veth*|br-*|virbr*|vnet*` is Virtual;
+    - `type`=1 with a `device` link is Ethernet.
+  - NetworkManager `Device.DeviceType`, read as `u` (u32), refines VPN and WireGuard when NM is present.
+  - State from `operstate` and `carrier`, with rtnetlink `RTM_NEWLINK` events.
+- Verdict: ADAPT. Classification uses sysfs first, so it works without NetworkManager. NetworkManager only adds detail.
+- Phase: P1
+- Privilege: none
+
+### PERF-050 Throughput graph
+- Source: TS "Throughput" (Download/Upload) | MC send dashed, receive filled, linked scale
+- Behaviour: "Throughput" graph: Download filled, Upload dashed, one shared scale (PERF-015), "Throughput over 60 seconds".
+- Linux data/mechanism: `/sys/class/net/<if>/statistics/{rx_bytes,tx_bytes}` at 1 Hz, kept open and read with `pread`. `/proc/net/dev` serves as a bulk fallback.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-051 Network stats
+- Source: TS Adapter name, Connection type, IPv4, IPv6, MAC, Public IP, Receive/Transmit link speed, Interface index, Display unit (crosscheck A.15) | MC Receive, Send, Total received, Total sent, Connection status
+- Behaviour: Rows:
+  - Download, Upload, Total received, Total sent;
+  - Adapter name, Interface name, Connection type, Connection status;
+  - Link speed. The kernel reports one speed for Ethernet, so receive and transmit are the same. Wi-Fi shows its RX and TX bitrates.
+  - IPv4 address, IPv6 address, MAC address, Interface index, Driver;
+  - "Display unit" (the active unit, for example "Megabits per second");
+  - Public IP (PERF-054).
+- Linux data/mechanism:
+  - Adapter name from the systemd hwdb (`ID_MODEL_FROM_DATABASE`/`ID_VENDOR_FROM_DATABASE` in the udev properties of the net device). No bundled SQLite database like Mission Center's.
+  - `speed` (Mb/s; -1 shows "Not reported"), `address`, `ifindex`, `device/driver` basename.
+- Verdict: BUILD
+- Phase: P1 for rates and totals; P2 for the rest.
+- Privilege: none
+
+### PERF-052 Wi-Fi details
+- Source: MC SSID, Signal strength, Maximum bitrate, Frequency
+- Behaviour: Wi-Fi rows: SSID, Signal (4-level icon plus "-52 dBm (78%)"), RX/TX bitrate, Frequency ("5.18 GHz", channel), Security.
+- Linux data/mechanism:
+  - NetworkManager `Device.Wireless.ActiveAccessPoint`, then `AccessPoint.{Ssid,Strength,Frequency,MaxBitrate,RsnFlags}`.
+  - Without NetworkManager: nl80211 generic netlink `NL80211_CMD_GET_INTERFACE` (SSID, frequency) and `NL80211_CMD_GET_STATION` (signal, rx/tx bitrate).
+  - 1 Hz while the page is shown.
+- Verdict: ADAPT. nl80211 is added as a fallback.
+- Phase: P2
+- Privilege: none
+
+### PERF-053 IP addresses
+- Source: TS IPv4/IPv6 | MC NM AddressData
+- Behaviour: Shows every address with its prefix ("192.168.1.10/24"). IPv6 shows global addresses first and link-local addresses in the tooltip.
+- Linux data/mechanism: rtnetlink `RTM_GETADDR` dump plus `RTM_NEWADDR`/`RTM_DELADDR` events. This avoids depending on NetworkManager.
+- Verdict: ADAPT. rtnetlink replaces NetworkManager IP config.
+- Phase: P2
+- Privilege: none
+
+### PERF-054 Public IP fetch
+- Source: TS Public IP "Fetch" and "Not fetched", the Confirm Public IP Fetch dialog, `AutoFetchPublicIP` (in Window & startup per crosscheck B.7)
+- Behaviour:
+  - Shows "Not fetched" with a "Fetch" button.
+  - The first click opens the confirm dialog with TaskSlinger's text, "Service: https://api.ipify.org", a "Do not ask again for public IP fetches." checkbox, and "Continue"/"Cancel".
+  - Result: "203.0.113.4 (fetched 14:02)".
+  - The setting "Auto-fetch public IP on launch" defaults to off.
+  - The same value is shown on the Information tab.
+- Linux data/mechanism:
+  - HTTPS GET to `https://api.ipify.org` (IPv4). `https://api6.ipify.org` is also asked when a global IPv6 route exists.
+  - Uses `ureq` 3 (sync, rustls, no Tokio) in the blocking pool with a 5 s timeout.
+  - The result is never saved to disk.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-055 Network settings link
+- Source: TS "Show more information" (L28329) | MC "Network Settings" (GNOME launch-panel)
+- Behaviour: A "Network settings" link under the stats and in the context menu.
+- Linux data/mechanism:
+  - KDE (this machine): run `kcmshell6 kcm_networkmanagement`.
+  - GNOME: session D-Bus `org.gnome.Settings` `/org/gnome/Settings` `org.freedesktop.Application.ActivateAction("launch-panel", [<"wifi"|"network">])`.
+  - Hidden on other desktops.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+
+## GPU pages
+
+### PERF-056 GPU enumeration and tl-gpu-probe
+- Source: TS GPU N cards | MC nvtop | review section 3 "GPU child contract"
+- Behaviour: One page per GPU, keyed by UUID (NVIDIA) or PCI address. A hung or crashed probe shows "Unavailable (GPU monitor restarting)" on every GPU metric, never zero.
+- Linux data/mechanism:
+  - **Discovery:** DRM devices come from `/sys/class/drm/card*/device` (vendor `0x10de`, `0x1002`, `0x8086`), plus NVIDIA devices from NVML.
+  - **NVIDIA (only in `tl-gpu-probe`):**
+    - Setup: `nvmlInit_v2`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetUUID`, `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3` (matched to the DRM card by bus id; here `00000000:2D:00.0` matches card1), `nvmlDeviceGetMinorNumber`.
+    - Probe sends one batched sample reply per request at 1 Hz. The minimum period is 500 ms, even when Refresh is 0.25 s.
+    - It answers over a socketpair with the review's protocol and 500 ms deadline.
+  - **AMD and Intel:** read in-process from sysfs, hwmon and fdinfo (PERF-066, PERF-067). No child is needed, because no native library is loaded.
+- Verdict: ADAPT. nvtop is replaced by direct per-vendor sources.
+- Phase: P1
+- Privilege: none
+
+### PERF-057 Engine graphs
+- Source: TS engine graphs (Utilization/3D, Compute, Video Encode, Video Decode, Video Processing, "Engine %u"), "Select GPU Engine Graphs", "Hide This Engine Graph", `HiddenGpuEngines`, crosscheck B.4
+- Behaviour:
+  - Row 1 is a grid of engine graphs in the CPU-grid style. Row 2 holds "Memory" (PERF-058) and "Temperature" graphs (TaskSlinger 0.9.2 layout). Row 3 is optional: "Power" and "Clocks" (Mission Center's middle and bottom choices).
+  - The context menu has "Select GPU engine graphs" (a checklist of engines and of the Power and Clocks graphs) and "Hide this engine graph".
+  - **NVIDIA engines:** "Graphics/Compute", "Memory controller", "Video encode", "Video decode", "JPEG", "Optical flow".
+  - **AMD engines:** "Graphics", "Compute", "Memory controller", "Video encode", "Video decode", "JPEG", "DMA".
+  - **Intel engines:** "Render/3D", "Compute", "Copy", "Video", "Video enhance".
+  - Engines the device does not report are not listed.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetUtilizationRates` (`.gpu` gives Graphics/Compute, `.memory` gives Memory controller), `nvmlDeviceGetEncoderUtilization`, `nvmlDeviceGetDecoderUtilization`, `nvmlDeviceGetJpgUtilization`, `nvmlDeviceGetOfaUtilization`. A `NOT_SUPPORTED` result hides that engine.
+  - AMD and Intel: see PERF-066 and PERF-067.
+- Verdict: ADAPT. NVML has no 3D/Compute split and no "Video Processing" engine, so tasklens shows a merged Graphics/Compute engine plus JPEG and optical flow.
+- Phase: P1 for Graphics, Encode and Decode; P2 for the rest and for hiding.
+- Privilege: none
+
+### PERF-058 GPU memory
+- Source: TS GPU memory (dedicated), (shared), Hardware reserved memory | MC memory graph with dedicated solid and shared dashed
+- Behaviour: The "Memory" graph shows dedicated (filled) against its total, and shared (dashed) against its total where the device has shared memory. Rows: "Dedicated memory 2.8 / 15.9 GiB", "Shared memory", "Hardware reserved memory 380 MiB".
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetMemoryInfo_v2` (`used`, `total`, `reserved`). NVIDIA has no shared (GTT) figure, so that row shows "Not supported".
+  - AMD: `device/mem_info_vram_{used,total}` and `mem_info_gtt_{used,total}`.
+  - Intel dGPU (xe/i915): the sum of `drm-resident-local0`/`drm-total-local0` over readable fdinfo, plus `device/tile0/vram0` sizes. Intel iGPU: "Shared" from the summed `drm-resident-system0`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-059 Video encode and decode
+- Source: TS Video Encode/Decode | MC Encode/Decode graph and rows
+- Behaviour: Rows "Video encode" and "Video decode" in %. When the hardware shares one engine, a single "Video encode/decode" row is shown (Mission Center). Encode and decode are also engine graphs (PERF-057).
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetEncoderUtilization(&util, &periodUs)` and `nvmlDeviceGetDecoderUtilization`. The active session count comes from `nvmlDeviceGetEncoderSessions` (tooltip).
+  - AMD: `gpu_metrics` `vcn_activity[]`, or else fdinfo `drm-engine-enc`/`dec`.
+  - Intel: the video engines.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-060 GPU clocks
+- Source: MC Clock speed, Memory speed, Clock Speeds graph
+- Behaviour: Rows "Clock speed 1905 / 3105 MHz", "Memory speed 7001 / 14001 MHz", "Video clock". "Clocks" graph: GPU clock solid, memory clock dashed, scaled to the maximum. The tooltip shows the P-state ("P3") and the throttle reasons.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetClockInfo(NVML_CLOCK_GRAPHICS | NVML_CLOCK_MEM | NVML_CLOCK_VIDEO)`, `nvmlDeviceGetMaxClockInfo`, `nvmlDeviceGetPerformanceState`, `nvmlDeviceGetCurrentClocksEventReasons`.
+  - AMD: hwmon `freq1_input` (sclk) and `freq2_input` (mclk). The maximum is the last line of `pp_dpm_sclk`/`pp_dpm_mclk`.
+  - Intel: `gt_act_freq_mhz`/`gt_max_freq_mhz` (i915) or `device/tile0/gt0/freq0/{act_freq,max_freq}` (xe).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-061 GPU power
+- Source: MC Power draw current / limit, Power graph
+- Behaviour: Row "Power draw 31.9 / 300 W". The tooltip gives the limit range "max 350 W" and energy since boot. "Power" graph scaled to the limit.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetPowerUsage` (mW), `nvmlDeviceGetEnforcedPowerLimit`, `nvmlDeviceGetPowerManagementLimitConstraints`, `nvmlDeviceGetTotalEnergyConsumption` (mJ).
+  - AMD: hwmon `power1_input`, falling back to `power1_average` (µW), and `power1_cap`.
+  - Intel dGPU: hwmon `energy1_input` delta and `power1_max`. Intel iGPU: RAPL `intel-rapl:0:1` (uncore), labelled "Package uncore (estimate)".
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none, except the Intel iGPU RAPL source (needs PERF-101).
+
+### PERF-062 GPU temperature and fan
+- Source: TS Temperature, Information "Temperature Source" (crosscheck A.17) | MC Temperature
+- Behaviour: Temperature in °C on the card, the stats grid and the "Temperature" graph. A "Temperature source" row reads "NVML (GPU core)" or "hwmon amdgpu edge". Rows for slowdown and shutdown thresholds. "Fan speed 0 % (0 RPM)" belongs to the GPU page and does not appear on the Fans pages.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetTemperatureV` with `NVML_TEMPERATURE_GPU`, falling back to `nvmlDeviceGetTemperature`. Also `nvmlDeviceGetTemperatureThreshold(SLOWDOWN, SHUTDOWN)`, `nvmlDeviceGetNumFans`, `nvmlDeviceGetFanSpeed_v2`, and `nvmlDeviceGetFanSpeedRPM` where available. Memory temperature uses `nvmlDeviceGetFieldValues(NVML_FI_DEV_MEMORY_TEMP)` and shows "Not supported" on this card.
+  - AMD: hwmon `temp1` edge, `temp2` junction, `temp3` mem, `fan1_input`, `pwm1`.
+  - Intel dGPU: hwmon `temp1`. The iGPU has no sensor of its own and shows "Not supported".
+- Verdict: BUILD
+- Phase: P1 for temperature; P2 for fan and thresholds.
+- Privilege: none
+
+### PERF-063 PCIe link
+- Source: MC PCI Express speed, Max PCI Express speed
+- Behaviour: Rows "PCI Express: Gen 4 x16", "Max PCI Express: Gen 5 x16" (hidden when equal), "PCIe throughput RX/TX".
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetCurrPcieLinkGeneration`, `nvmlDeviceGetCurrPcieLinkWidth`, `nvmlDeviceGetGpuMaxPcieLinkGeneration`, `nvmlDeviceGetMaxPcieLinkWidth`, `nvmlDeviceGetPcieThroughput(TX_BYTES | RX_BYTES)`.
+  - All vendors, and the fallback: `device/{current_link_speed,current_link_width,max_link_speed,max_link_width}`, mapping GT/s to Gen (2.5→1, 5→2, 8→3, 16→4, 32→5, 64→6).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-064 GPU static fields
+- Source: TS Driver version, Driver date, DirectX version, Physical location | MC OpenGL, Vulkan, PCI bus address
+- Behaviour: Rows: Driver version (615.71.09), "Kernel module" (replaces Driver date: "nvidia 615.71.09"), CUDA version, Vulkan version, OpenGL version (replaces DirectX version), Physical location ("PCI bus 45, device 0, function 0"), VBIOS version, UUID, Architecture.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlSystemGetDriverVersion`, `nvmlSystemGetCudaDriverVersion_v2`, `nvmlDeviceGetVbiosVersion`, `nvmlDeviceGetArchitecture`.
+  - Kernel module from `/sys/module/<driver>/version`.
+  - Vulkan and OpenGL: a separate short-lived run of `tl-gpu-probe --api-versions`:
+    - Vulkan: ash calls `vkEnumeratePhysicalDevices` and matches the GPU through `VK_EXT_pci_bus_info`. It reads `apiVersion` and `VkPhysicalDeviceDriverProperties`.
+    - OpenGL: EGL `EGL_EXT_platform_device` on the matching DRM device, then a context, then `glGetString(GL_VERSION)`.
+    - It runs once at startup. A crash only gives "Unknown".
+- Verdict: ADAPT. DirectX becomes Vulkan and OpenGL, and the driver date becomes the module version.
+- Phase: P2
+- Privilege: none
+
+### PERF-065 Displays list
+- Source: TS Displays (connection type, "%s @ %d Hz", "%d-bit, %s", orientation; connectors per crosscheck A.17)
+- Behaviour: Under the GPU stats, one row per display on that GPU: "DELL U2723QE: DisplayPort, 3840×2160 @ 144 Hz, max 10-bit, Landscape, scale 110%". Disconnected connectors are not listed.
+- Linux data/mechanism:
+  - DRM KMS read-only ioctls on `/dev/dri/cardN` (no DRM master needed): `drmModeGetResources`, `drmModeGetConnector` (type: DisplayPort, HDMI-A, eDP shown as "Internal", DVI, VGA, ...), `drmModeGetEncoder`/`drmModeGetCrtc` (current mode and refresh), the connector property "max bpc", and the EDID blob for the monitor name.
+  - On KDE: orientation and scale from `kscreen-doctor --json`, run on demand and re-run on wl_output changes. Elsewhere orientation shows "Not reported".
+  - The sysfs `enabled` file is not used (wrong on this NVIDIA driver).
+- Verdict: ADAPT. Linux has no actual-bit-depth API, so the row shows "max N-bit" from the property.
+- Phase: P2
+- Privilege: none. `/dev/dri/card1` has a seat ACL for the logged-in user. If open fails, the rows fall back to EDID from `/sys/class/drm/card*-*/edid` plus `modes`.
+
+### PERF-066 AMD GPU backend
+- Source: MC nvtop amdgpu backend, PLAN section 3 "AMD and Intel GPUs"
+- Behaviour: Same pages as NVIDIA. Not tested on this machine.
+- Linux data/mechanism:
+  - `device/gpu_busy_percent` (Graphics), `device/mem_busy_percent` (Memory controller).
+  - `device/gpu_metrics`, a binary struct parsed by its header version: `average_gfx_activity`, `average_umc_activity`, `vcn_activity`, `temperature_*`.
+  - Compute, DMA and JPEG engines come from the sum of `/proc/<pid>/fdinfo/*` `drm-engine-{compute,dma,jpeg}` ns deltas over all readable DRM clients, de-duplicated by `drm-client-id`. Coverage is marked "own processes only" when any fdinfo read fails.
+  - Memory, clocks, power and temperature as in PERF-058 to PERF-062.
 - Verdict: ADAPT
 - Phase: P2
+- Privilege: none. Engine graphs from fdinfo cover only processes tasklens can read, and say so.
+
+### PERF-067 Intel GPU backend
+- Source: PLAN section 3 | MC nvtop i915/xe
+- Behaviour: Same pages as NVIDIA. Not tested on this machine.
+- Linux data/mechanism:
+  - Engines, preferred source: the i915 PMU through `perf_event_open`. The type comes from `/sys/bus/event_source/devices/i915/type`, with events `rcs0-busy`, `bcs0-busy`, `vcs0-busy`, `vecs0-busy`, `ccs0-busy`.
+  - Fallback: summed fdinfo `drm-engine-{render,copy,video,video-enhance,compute}` (i915), or `drm-cycles-*`/`drm-total-cycles-*` (xe).
+  - Clocks, power and memory as in PERF-058, PERF-060 and PERF-061.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: The PMU needs `CAP_PERFMON` or `kernel.perf_event_paranoid` ≤ 0. tasklens does not ask for either. The fdinfo fallback covers only processes tasklens can read.
+
+## Fans and batteries
+
+### PERF-068 Fan pages
+- Source: MC 2.6 Fan
+- Behaviour:
+  - One page per fan: "Fan N" or its label, with the chip name ("nct6797").
+  - Graphs: "Fan speed" (RPM, filled; PWM % dashed on a 0 to 100 axis) and "Temperature" (paired sensor, PERF-069).
+  - Rows: Fan speed, PWM %, Control mode (Manual, Automatic, Full speed, from `pwmN_enable`), Temperature, Chip.
+  - Fans that read 0 RPM for the whole session and have no label count as "not connected". They are hidden by default; the setting "Show disconnected fans" shows them.
+  - On this machine nct6797 has fans 1 to 7.
+- Linux data/mechanism: `/sys/class/hwmon/hwmon*/{name, fanN_input, fanN_label, fanN_max, pwmN, pwmN_enable}` at 1 Hz while shown or in the sidebar. GPU fans are excluded (they are on the GPU page).
+- Verdict: BUILD. Display only, no fan control (same as Mission Center).
+- Phase: P2
+- Privilege: none. Missing Super I/O drivers mean no fans; PERF-103 covers that.
+
+### PERF-069 Fan labels and temperature pairing
+- Source: MC per-file override directory | MC same-index temperature pairing
+- Behaviour:
+  - The context menu has "Rename fan…" and "Temperature sensor >", which lists every hwmon temp with its label and current value. The choice persists per fan key.
+  - Default pairing: the same-index `tempN` on the same chip, but only when the chip has exactly one fan. Otherwise no sensor is chosen, and the Temperature graph reads "Choose a sensor".
+- Linux data/mechanism: Settings TOML `fans.<key>.label` and `fans.<key>.temp = "<hwmon name>:<path>:tempN"`.
+- Verdict: ADAPT. Mission Center's config-file overrides become in-app settings. Mission Center's index pairing is often wrong on Super I/O chips, so tasklens does not pair by default there.
+- Phase: P3
 - Privilege: none
 
----
+### PERF-070 Battery and power device pages
+- Source: MC 2.7 Battery (all UPower kinds)
+- Behaviour:
+  - One page per UPower device except `DisplayDevice` and line power. Here that is the Logitech mouse via HID++.
+  - Title: the kind ("Mouse", "Battery", "UPS"), then vendor and model.
+  - Graph: "Power input"/"Power output" (W, charge positive, discharge negative) for system batteries; "Percentage" for peripherals.
+  - Rows (Mission Center's list): Percentage, Energy, Voltage, Power, State, Time to full/empty, Charge cycles, Serial, Type, Powering system, Technology, Capacity, Energy empty, Energy full, Energy full (design), Voltage min/max (design), Charge threshold, Charge start/end threshold, Temperature.
+  - Charge threshold shows "Enabled" or "Disabled" correctly (Mission Center always shows "Yes").
+- Linux data/mechanism:
+  - UPower `org.freedesktop.UPower.EnumerateDevices`, `DeviceAdded`/`DeviceRemoved`, `PropertiesChanged`.
+  - Properties: `Percentage`, `Energy`, `EnergyRate`, `Voltage`, `State`, `TimeToFull`, `TimeToEmpty`, `ChargeCycles`, `Serial`, `Type`, `PowerSupply`, `Technology`, `Capacity`, `EnergyEmpty`, `EnergyFull`, `EnergyFullDesign`, `VoltageMinDesign`, `VoltageMaxDesign`, `ChargeThresholdSupported`, `ChargeThresholdEnabled`, `ChargeStartThreshold`, `ChargeEndThreshold`, `Temperature`, `Vendor`, `Model`.
+  - Fallback: `/sys/class/power_supply/*` (`capacity`, `status`, `energy_now`, `power_now`, `cycle_count`), rescanned every 30 s.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
 
-## K. Additional setup (replaces Mission Center's first-run flow)
-
-### PERF-075 Additional data panel
-- Source: MC first-run dialog ("Enabling Additional Values", Run Additional Setup split button, Revert, View Script, Copy Script Location, Copy Command, Copy Revert Command; success and failure dialogs) | MC setup script (nethogs setcap, RAPL udev rule, sensors-detect)
-- Behaviour: tasklens shows no first-run dialog. Instead:
-  - Every "Needs setup" value has a link "Set up…" that opens Settings > Monitoring > "Additional data".
-  - That panel has one row per item (PERF-076, PERF-077) with status "Enabled", "Not enabled" or "Not needed", and an "Enable" or "Revert" button.
-  - "View script" shows the exact commands. "Copy command" copies the `pkexec …` line.
-  - Results show inline: on success, "Enabled. Values appear within 2 seconds"; no restart needed, because the collectors retry. On failure, the output plus "Copy output" and "Retry".
-
-  Why: MC's dialog explains three things at once on first launch, two of which tasklens does not need.
-- Linux data/mechanism: a fixed script shipped at `/usr/lib/tasklens/tasklens-setup` (root-owned, 0755, in the package), run by `pkexec /usr/lib/tasklens/tasklens-setup <enable-rapl|revert-rapl|sensors-detect>`. A polkit action `io.tasklens.setup` with `auth_admin_keep` and `exec.path` annotation is installed at `/usr/share/polkit-1/actions/io.tasklens.setup.policy`. Nothing is written to `/tmp` (MC writes its script there).
-- Verdict: ADAPT (inline per-value setup instead of a first-run dialog; no temp-file script)
-- Phase: P3
-- Privilege: polkit `auth_admin_keep` through pkexec. Without setup, values show "Needs setup".
-
-### PERF-076 RAPL power access
-- Source: MC setup script step 2 (`/etc/udev/rules.d/99-powercap.rules`)
-- Behaviour: Row "CPU power draw (RAPL)". "Enable" installs the rule and applies it at once. The status reads "Enabled (rule from another app)" when any rule already makes `energy_uj` readable, as on this machine with MC's `99-powercap.rules`. In that case Revert is offered only for tasklens's own rule. The row text includes the caveat: "Lets any local user read CPU energy counters. On some CPUs this leaks timing information (CVE-2020-8694)."
-- Linux data/mechanism: Writes `/etc/udev/rules.d/60-tasklens-powercap.rules` with `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`, then `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add`. Revert deletes the file and runs `chmod 0400` on the nodes. Detection: `access("/sys/class/powercap/intel-rapl:0/energy_uj", R_OK)`.
+### PERF-071 Battery charge history
+- Source: MC "Battery Charge over past week" (`GetHistory("charge", 604800)`)
+- Behaviour: A 7-day charge graph with day gridlines and dashed lines across gaps. Shown for system batteries with at least 2 history points.
+- Linux data/mechanism: UPower `Device.GetHistory("charge", 604800, 500)` and `GetHistory("rate", …)`. Refreshed every 10 minutes and when `UpdateTime` changes.
 - Verdict: BUILD
 - Phase: P3
-- Privilege: pkexec as PERF-075. Fallback: Power shows "Needs setup", and the CPU bottom graph falls back to Temperature.
+- Privilege: none
 
-### PERF-077 Fan sensor detection
+## System minigraph panel
+
+### PERF-072 Minigraph panel and cards
+- Source: TS 4.2 (cards VRAM, GPU, Network, Disk, Memory, CPU), View > Graphs toggles, labels "GPU temp", "Total"/"Kernel" (crosscheck A.28)
+- Behaviour:
+  - Floating cards in a grid over the bottom right of the Processes tab, each with a drop shadow.
+  - Each card shows the label at top left (for example "CPU" or "GPU temp"), the value at top right, and a graph.
+  - System cards: CPU (Total plus a Kernel line), Memory, Disk, Network, GPU, VRAM, GPU temp (off by default).
+  - View > Graphs has a checkbox per card (`ShowCpuGraph`, `ShowRamGraph`, `ShowDiskGraph`, `ShowNetworkGraph`, GPU, VRAM, `ShowGpuTemperatureGraph`).
+  - Card size is 180×90 logical px. Cards scale with UI scale.
+- Linux data/mechanism: Reuses the system series. Disk = aggregate active time; Network = the sum over visible physical interfaces; GPU = the highest engine on GPU 0, or a GPU chosen in the card menu.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-073 Card context menu
+- Source: TS 4.2 menu (Hide Graph, Time Range, Graph Color, Add tray icon graph)
+- Behaviour: Right-click shows "Hide graph", "Time range >" (30 seconds, 1 minute, 5 minutes, 10 minutes), "Graph color >" (Accent plus 17), "Detach" or "Attach to main window", "Add tray icon graph", and "Reset minigraph layout". Per-card range and colour persist.
+- Linux data/mechanism: Settings `minigraphs.cards[]` with `{source, range, color, slot, detached}`.
+- Verdict: BUILD
+- Phase: P1 for hide and range; P3 for colour, detach and tray.
+- Privilege: none
+
+### PERF-074 Move and reorder cards
+- Source: TS "Drag to move", "Reset Minigraph Layout", toasts "No space for more minigraphs", "Minigraph layout reset"
+- Behaviour: Dragging a card moves it to another grid slot, and other cards shift. The grid fills from the bottom right, at most 3 rows by 4 columns. Adding a card to a full grid shows the toast "No space for more minigraphs". "Reset minigraph layout" restores the defaults and shows "Minigraph layout reset".
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-075 Detached graph windows
+- Source: TS `TaskSlingerDetachedGraph`, always on top, detached menu (Show Main Window, Close Graph, Exit, Add Graph, Remove Graph)
+- Behaviour:
+  - "Detach", or dragging a card past the window edge, opens it as its own small borderless window. Dragging the window body moves it.
+  - Its menu: "Show main window", "Close graph", "Attach to main window", "Add graph >" (adds another card to the same window), "Remove graph", "Exit tasklens".
+  - Windows are always on top where the desktop allows it. Size and stacked cards persist. Position is restored only on KDE.
+- Linux data/mechanism:
+  - GPUI `open_window` with `WindowKind::Floating`, client decorations and no title bar. Moving uses `start_window_move()`.
+  - On KDE, keep-above and position come from a KWin script loaded through `org.kde.KWin /Scripting loadScript`, matched by app_id `tasklens-graph-<n>`. It sets `keepAbove` and `frameGeometry` from saved values and reports moves back over D-Bus.
+  - Elsewhere the compositor places the window and keep-above is not offered.
+- Verdict: ADAPT. Wayland clients cannot set position or keep-above, so a KWin script does it on KDE.
+- Phase: P3
+- Privilege: none
+
+### PERF-076 Keep detached graphs open
+- Source: TS "Keep detached graphs open when closing main window" (`KeepDetachedOpenOnMainClose`, default 0)
+- Behaviour: When on, closing the main window hides it, and the app keeps running while any detached graph is open. "Show main window" brings it back. When off, closing the main window closes everything.
+- Linux data/mechanism: App lifecycle checks the open windows.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PERF-077 Process-source cards
+- Source: TS process-specific minigraphs (`ProcessSpecificMiniGraphs`), labels "Process %lu", " by app", " by name", "No match", "Ended" (crosscheck A.28)
+- Behaviour:
+  - Cards whose source is one process (captured identity), a process-name filter or an app.
+  - Titles: "firefox (Process 1234)", "firefox by name", "Firefox by app".
+  - A name or app card with no running match shows "No match". A one-process card whose process exited shows "Ended", and its graph freezes.
+  - Created from the Processes context menu, which the process-table spec owns. This spec owns the card.
+- Linux data/mechanism: The engine adds demand for these identities, so they are sampled even when off screen.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none, for the user's own processes. Other users' processes show "Restricted" for fields they hide.
+
+## Tray graphs
+
+### PERF-078 Tray icon graph
+- Source: TS 4.3 (sources: page, column, process, name filter, app filter), CL 0.8.6, 0.8.27
+- Behaviour:
+  - Each tray graph is its own tray icon, drawing a live mini graph in the graph colour on a transparent background, with the current value as a filled bar height.
+  - Added from a Performance card menu ("Add tray icon graph"), a minigraph card, or the process menu.
+  - Toasts: "Tray icon graph added", "removed" and "already exists", and "Unable to add tray icon graph".
+  - Choices persist.
+- Linux data/mechanism:
+  - A StatusNotifierItem on the session bus, one per graph: name `org.kde.StatusNotifierItem-<pid>-<n>`, registered with `org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem`.
+  - `IconPixmap` holds ARGB32 big-endian images at 22, 32 and 44 px, re-rendered on the CPU from the 1 Hz series.
+  - The `NewIcon` signal fires at 1 Hz, and only when the pixels changed.
+  - The menu is served over `com.canonical.dbusmenu`.
+  - Implementation: `ksni` with default features off, if `cargo tree -e normal` shows no Tokio. Otherwise a hand-written SNI and dbusmenu server on the engine's zbus connection.
+- Verdict: ADAPT. Windows `Shell_NotifyIcon` becomes SNI.
+- Phase: P3
+- Privilege: none. If no `StatusNotifierWatcher` is on the bus, the menu items are disabled with the tooltip "No system tray available".
+
+### PERF-079 Tray tooltip
+- Source: TS tooltip strings ("CPU Usage: ", "%d procs: %s", "CPU:", "RAM:", "GPU:", "Disk:", "Network:")
+- Behaviour: A graph icon's tooltip shows its title and value ("CPU Usage: 18.6%"). The main tray icon's tooltip shows five lines: CPU, RAM, GPU, Disk, Network. A process-filter icon shows "3 procs: firefox".
+- Linux data/mechanism: SNI `ToolTip` property `(icon, title, description)` and the `NewToolTip` signal at 1 Hz.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PERF-080 Tray menu and graph colour
+- Source: TS tray menu ("Tray icon graphs", "Close tray icon graph", Show Main Window, Exit), "Graph color" item (crosscheck A.29)
+- Behaviour: The menu has "Show main window", "Graph color >", "Time range >", "Close tray icon graph", "Tray icon graphs >" (a checklist to add or remove the others) and "Exit tasklens". Left-click shows or hides the main window.
+- Linux data/mechanism: dbusmenu layout. `Activate(x, y)` toggles the window.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PERF-081 Main tray icon while graphs show
+- Source: TS CL 0.9.2 "main tray icon is hidden while a tray graph is shown"
+- Behaviour: When at least one tray graph exists, the plain app icon is not registered. The first graph icon's menu carries the main entries. With no graphs, the plain icon shows when a tray setting needs it. Tray settings belong to the chrome and settings spec.
+- Linux data/mechanism: Register or unregister the SNI.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+## Performance mini window
+
+### PERF-082 Performance mini window
+- Source: TS 4.4 (CL 0.8.4: compact, movable, always-on-top), crosscheck B.1 (the view-mode button is a process view cycler, so the opening path is unknown)
+- Behaviour:
+  - A compact, borderless window listing the visible sidebar cards (PERF-001) in one column.
+  - Open it with View > Window > "Performance mini window", or by double-clicking the Performance graph area (Windows Task Manager's summary-view gesture).
+  - Double-clicking the mini window, or "Show main window" in its menu, returns to the main window.
+  - Its menu: "Always on top" (KDE only), "Show main window", "Close".
+  - Clicking a card opens the main window on that page.
+  - Width is 260 logical px; height fits the cards.
+- Linux data/mechanism: GPUI `Floating` window. Keep-above and position use the KWin script from PERF-075.
+- Verdict: ADAPT. The opening path is decided here because TaskSlinger's is unknown. Always on top works on KDE only.
+- Phase: P3
+- Privilege: none
+- Open question: TaskSlinger's real trigger is unknown. Recommendation: use the View menu item plus double-click, as above.
+
+## Information tab
+
+### PERF-083 Information layout, copy and filter
+- Source: TS 2.7 (two columns, section header with accent bar and copy button, tab-level copy icon, filter applies) | MC System Information "Copy All"
+- Behaviour:
+  - Two scrolling columns of sections. Each header has a 3 px accent bar at left and a copy button at right.
+  - The copy icon on the tab copies all sections. Toast: "Copied to clipboard".
+  - Format: a section name line, then `Label: value` lines, with a blank line between sections.
+  - The tab's filter box hides rows whose label or value does not match, and hides empty sections.
+  - Values are selectable.
+  - Data loads once at tab open. Live values (uptime, available memory, counts) refresh at 1 Hz while the tab is visible.
+- Linux data/mechanism: None.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-084 Operating System section
+- Source: TS OS Name, Version, Build, Architecture, Install Date, Registered Owner, Product ID | MC OS name, version, package manager and its version, kernel release and version, distro logo
+- Behaviour: Rows: OS name ("CachyOS Linux", with the distro logo), Version, Build, Kernel, Kernel version, Architecture ("x86_64 (64-bit)"), Install date, Package manager ("pacman 7.0.0"), Machine ID.
+  - Version is `VERSION_ID`, or "Rolling" when that is missing.
+  - Build is `BUILD_ID`, or "Not reported".
+  - Machine ID replaces Product ID.
+  - Registered Owner is dropped. Linux has no registered-owner record, and the user name is already under System.
+- Linux data/mechanism:
+  - `/etc/os-release` (`PRETTY_NAME`, `VERSION_ID`, `BUILD_ID`, `LOGO`, which is looked up in the icon theme).
+  - `uname(2)` (release, version, machine).
+  - Install date: `statx` btime of `/`, falling back to the first timestamp in `/var/log/pacman.log`.
+  - Package manager version: `pacman --version`, `dpkg-query --version` or `rpm --version`, run once.
+  - `/etc/machine-id`.
+- Verdict: ADAPT. Product ID becomes Machine ID. Registered Owner is dropped, with the reason above.
+- Phase: P2
+- Privilege: none
+
+### PERF-085 Processor section
+- Source: TS Name, Vendor, Architecture, Identifier, Logical Processors, Speed
+- Behaviour: Rows: Name, Vendor ("AuthenticAMD"), Architecture, Identifier ("Family 25 Model 97 Stepping 2"), Cores, Logical processors, Base speed, Max speed, Microcode, Flags summary (virtualization, AVX-512 yes/no).
+- Linux data/mechanism: `/proc/cpuinfo` (`vendor_id`, `cpu family`, `model`, `stepping`, `model name`, `microcode`, `flags`), topology files, `cpuinfo_max_freq`, and base speed from PERF-030.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-086 System section
+- Source: TS Computer Name, User Name, User Domain, System Uptime, Boot Time, Process Count, Thread Count, Handle Count | MC Desktop group
+- Behaviour: Rows:
+  - Computer name: the pretty hostname plus the static hostname.
+  - User name.
+  - Domain: replaces User Domain, shows "None" instead of "WORKGROUP".
+  - System uptime ("2 days, 2h 38m 28s") and Boot time.
+  - Process count, Thread count, Open files: real values, fixing TaskSlinger's zero bug.
+  - Desktop ("KDE Plasma 6.x"), Windowing system ("Wayland"), Session type, Virtual terminal.
+- Linux data/mechanism:
+  - systemd-hostnamed `org.freedesktop.hostname1` (`PrettyHostname`, `StaticHostname`).
+  - `getpwuid(getuid())`; `getdomainname(2)`, or the DNS domain from the FQDN.
+  - Boot time = now − `CLOCK_BOOTTIME`.
+  - Counts as in PERF-030.
+  - Desktop from `XDG_CURRENT_DESKTOP` plus `plasmashell --version` (once), `XDG_SESSION_TYPE`, `XDG_VTNR`, and logind `Session` properties.
+- Verdict: ADAPT. The Windows domain becomes the DNS or NIS domain. Mission Center's Desktop group is merged in here.
+- Phase: P2
+- Privilege: none
+
+### PERF-087 Memory section
+- Source: TS Total Physical, Available Physical, Memory Usage, Committed, Commit Limit, Peak Committed, Page Size
+- Behaviour: Rows: Total physical, Available physical, Memory usage (%), Committed, Commit limit, "Peak committed (since tasklens started)", Page size ("4096 bytes"), Huge page size, Swap total, zram size.
+- Linux data/mechanism: `/proc/meminfo`, `sysconf(_SC_PAGESIZE)`, and meminfo `Hugepagesize`. The kernel keeps no peak for Committed_AS, so tasklens tracks the maximum it has seen while running.
+- Verdict: ADAPT. The peak covers the tasklens run, and the label says so.
+- Phase: P2
+- Privilege: none
+
+### PERF-088 Memory modules section
+- Source: TS per-module block (Module, Slot, Capacity, Speed, Type, Form Factor, Manufacturer, Part Number)
+- Behaviour: One block per DIMM, as in `information.png`: "Module 1", Slot ("P0 CHANNEL A (DIMM 0)"), Capacity, Speed ("3200 MT/s"), Type, Form factor, Manufacturer, Part number, Serial number.
+- Linux data/mechanism: Same udev keys as PERF-041.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none (verified on this machine).
+
+### PERF-089 Disk drives section
+- Source: TS Disk Drives (Space "%s free of %s", Volume, type, interface)
+- Behaviour: One block per physical disk: Model, Type, Interface (NVMe, SATA, USB, SCSI, virtio), Capacity, Space ("812 GB free of 1.82 TB"), Volumes (mount paths), Serial.
+- Linux data/mechanism: Same as PERF-042 to PERF-045.
+- Verdict: ADAPT. Volume letters become mount paths.
+- Phase: P2
+- Privilege: none
+
+### PERF-090 BIOS/Firmware section
+- Source: TS Firmware Type, BIOS Vendor, BIOS Version, BIOS Date
+- Behaviour: Rows: Firmware type ("UEFI" or "Legacy BIOS"), BIOS vendor, BIOS version, BIOS date, BIOS release, Secure Boot ("Enabled", "Disabled" or "Not reported").
+- Linux data/mechanism:
+  - `/sys/firmware/efi` presence gives the firmware type.
+  - `/sys/class/dmi/id/{bios_vendor,bios_version,bios_date,bios_release}`, all world-readable.
+  - Secure Boot from byte 4 of `/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-091 Motherboard section
+- Source: TS Manufacturer, Product, Version
+- Behaviour: Rows: Manufacturer, Product, Version, System vendor, System product, Chassis type, Serial number.
+- Linux data/mechanism: `/sys/class/dmi/id/{board_vendor,board_name,board_version,sys_vendor,product_name,chassis_type}`. Serial from `board_serial`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: `board_serial` is mode 0400 (checked). Unprivileged it shows "Unavailable", with the tooltip "Needs root". There is no pkexec prompt for this.
+
+### PERF-092 Graphics section
+- Source: TS Name, Driver Version, Driver Date, DirectX Version, Temperature, Temperature Source, Dedicated Memory, Shared Memory, Resolution
+- Behaviour: One block per GPU: Name, Driver version, Kernel module (replaces Driver Date), Vulkan version and OpenGL version (replace DirectX Version), Temperature, Temperature source, Dedicated memory, Shared memory, Resolution (each display "3840×2160 @ 144 Hz").
+- Linux data/mechanism: Same as PERF-056 to PERF-065.
+- Verdict: ADAPT. Same mapping as PERF-064.
+- Phase: P2
+- Privilege: none
+
+### PERF-093 Network adapters section
+- Source: TS Connection, Details, IP Address, MAC Address, Public IP with fetch
+- Behaviour: One block per visible interface: Connection (name and type), Details (adapter name, driver, link speed), IP address, MAC address. A final "Public IP" row has the Fetch button from PERF-054.
+- Linux data/mechanism: Same as PERF-049 to PERF-054.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+## Additional setup (replaces Mission Center's first-run dialog)
+
+### PERF-094 Additional data panel
+- Source: MC first-run dialog ("Enabling Additional Values", Run Additional Setup, Revert, View Script, Copy Script Location, Copy Command, Copy Revert Command; success and failure dialogs)
+- Behaviour:
+  - No dialog on first launch. Settings > Monitoring > "Additional data…" opens a panel. Each item has a status ("Enabled", "Not enabled", "Not needed") and an "Enable"/"Revert" button.
+    - "CPU power draw" (PERF-095).
+    - "Per-process network". This item explains that tasklens uses TCP attribution with no setup. Exact numbers need the later network helper (PERF-096).
+    - "Fan sensors" (PERF-097).
+  - Each item has "View script" and "Copy command".
+  - Every "Unavailable: needs setup" tooltip in the app links to this panel.
+  - Success shows "Done. No restart needed". tasklens re-probes the source at once.
+  - Failure shows the output with "Copy output" and "Retry".
+- Linux data/mechanism: A fixed script shipped at `/usr/lib/tasklens/tasklens-setup` (root-owned, in the package) with the subcommands `rapl-enable`, `rapl-revert` and `sensors-detect`. It runs through `pkexec /usr/lib/tasklens/tasklens-setup <cmd>` under the polkit action `io.tasklens.setup` (`auth_admin_keep`). No script is written to `/tmp`, unlike Mission Center.
+- Verdict: ADAPT. The first-run dialog becomes an on-demand panel, and the temporary script becomes a packaged one.
+- Phase: P3
+- Privilege: pkexec with polkit `io.tasklens.setup`. If cancelled, the item stays "Not enabled".
+
+### PERF-095 RAPL udev rule
+- Source: MC setup script step 2 (`/etc/udev/rules.d/99-powercap.rules`)
+- Behaviour:
+  - Status is "Enabled" when `energy_uj` can be read. That is the case on this machine through Mission Center's existing rule, which tasklens detects and leaves alone.
+  - Enabling shows a warning first: "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)."
+- Linux data/mechanism:
+  - `rapl-enable` writes `/etc/udev/rules.d/60-tasklens-powercap.rules` containing `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`.
+  - It then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add`.
+  - `rapl-revert` removes the file and re-triggers. The kernel then resets the mode to 0400 on the next trigger or reboot. The revert step says that a reboot may be needed.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: root through pkexec. Fallback: "Unavailable" for power.
+
+### PERF-096 nethogs capabilities
+- Source: MC setup script step 1 (`setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+pe` on nethogs)
+- Behaviour: Not offered. The panel row explains the sock_diag TCP attribution and points to the later network helper.
+- Linux data/mechanism: Per-process network uses sock_diag. The process and connections specs own that. A later eBPF collector will get its own narrow privilege (review risk 8).
+- Verdict: DROP. tasklens does not run nethogs, so there is nothing to give capabilities to. Scraping nethogs output from a pseudo-terminal is also fragile, and putting capabilities on a general tool is too broad. The feature itself (per-process network) is kept through other means.
+- Phase: P3 (the panel text only)
+- Privilege: none
+
+### PERF-097 sensors-detect
 - Source: MC setup script step 3 (`sensors-detect --auto`)
-- Behaviour: Row "Fan and board sensors". It shows "Not needed" when any hwmon `fan*_input` exists (here `nct6797` already gives 7 fans). Otherwise it offers "Detect sensors". That button runs sensors-detect, shows its output, and lists the modules it suggests. "Load now" runs `modprobe` for each; "Load at boot" writes `/etc/modules-load.d/tasklens-sensors.conf`. The row is hidden when lm_sensors is not installed, with the hint "Install lm_sensors to detect board sensors".
-- Linux data/mechanism: `pkexec /usr/lib/tasklens/tasklens-setup sensors-detect`, which runs `sensors-detect --auto` and parses the "MODULES=" or `#----cut here----` block.
-- Verdict: ADAPT (MC runs it blindly; tasklens runs it only when no fans are found and shows the result)
+- Behaviour:
+  - Shows "Not needed" when any hwmon fan exists. That is the case here: nct6797 is loaded.
+  - Otherwise "Run sensor detection" runs it and shows the output. The modules it finds are written to `/etc/modules-load.d/tasklens-sensors.conf` and loaded with `modprobe`.
+  - Revert removes that file.
+  - When lm_sensors is not installed, the row reads "Install lm_sensors to detect fan sensors" and has no button.
+- Linux data/mechanism: `tasklens-setup sensors-detect` runs `sensors-detect --auto`, parses its "MODULE_n" output, then writes the file and runs `modprobe`.
+- Verdict: ADAPT. Mission Center's result is not saved across reboots unless sensors-detect writes a config; tasklens always writes the module file.
 - Phase: P4
-- Privilege: pkexec. Fallback: the Fans pages are absent.
+- Privilege: root through pkexec. Fallback: no fan pages.
 
-### PERF-078 Dropped items
-- Source: MC setup script step 1 (nethogs `setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+pe`) | TS 2.7 Registered Owner
-- Behaviour: Not built.
-- Linux data/mechanism: n/a
-- Verdict: DROP. nethogs: tasklens does not use nethogs. Per-process network comes from sock_diag (unprivileged), with exact numbers later from an eBPF collector owned by the process and connections areas. Granting ptrace and DAC-bypass capabilities to a third-party binary is not needed. Registered Owner: Linux has no registered-owner record.
-- Phase: n/a
-- Privilege: n/a
-
----
-
-## Entry table
+## Summary table
 
 | ID | Name | Verdict | Phase |
 |---|---|---|---|
-| PERF-001 | Performance tab layout | BUILD | P1 |
-| PERF-002 | Sidebar device cards | BUILD | P1/P2 |
-| PERF-003 | Device discovery, hotplug, identity | BUILD | P1 |
-| PERF-004 | Page order, hiding, edit mode | BUILD | P1/P2 |
-| PERF-005 | Device type visibility defaults | BUILD | P2 |
-| PERF-006 | Aggregate pages | BUILD | P4 |
-| PERF-007 | Summary mode | ADAPT | P2 |
-| PERF-008 | Page context menu and View jump | BUILD | P1/P2 |
-| PERF-009 | Copy device info | BUILD | P1 |
-| PERF-010 | CPU chart modes | BUILD | P1/P2 |
-| PERF-011 | Kernel time overlay | BUILD | P1 |
-| PERF-012 | Core type markers | ADAPT | P2 |
-| PERF-013 | CPU bottom graph | BUILD | P2 |
-| PERF-014 | CPU stats grid | ADAPT | P1/P2 |
-| PERF-015 | Memory graphs | BUILD | P1 |
-| PERF-016 | Memory composition bar | ADAPT | P1 |
-| PERF-017 | Memory stats grid | ADAPT | P1/P2 |
-| PERF-018 | zram and zswap section | BUILD | P2 |
-| PERF-019 | Swap devices list | ADAPT | P2 |
-| PERF-020 | Memory modules | BUILD | P2 |
-| PERF-021 | Disk list and kind | ADAPT | P1 |
-| PERF-022 | Disk graphs | BUILD | P1 |
-| PERF-023 | Disk stats grid | ADAPT | P1/P2 |
-| PERF-024 | Partitions table | ADAPT | P2 |
-| PERF-025 | SMART data | BUILD | P2 |
-| PERF-026 | Eject with blockers | BUILD | P2 |
-| PERF-027 | Network throughput graph | BUILD | P1 |
-| PERF-028 | Network stats grid | ADAPT | P1/P2 |
-| PERF-029 | Wi-Fi details | BUILD | P2 |
-| PERF-030 | Public IP fetch | BUILD | P2 |
-| PERF-031 | Network settings link | ADAPT | P4 |
-| PERF-032 | GPU backend split | ADAPT | P1/P2 |
-| PERF-033 | NVML call map | BUILD | P1/P2 |
-| PERF-034 | GPU engine graphs | ADAPT | P1/P2 |
-| PERF-035 | GPU memory, temperature, power, clock graphs | BUILD | P1/P2 |
-| PERF-036 | GPU stats grid | ADAPT | P1/P2 |
-| PERF-037 | Vulkan and OpenGL version probe | ADAPT | P2 |
-| PERF-038 | Displays list | ADAPT | P2 |
-| PERF-039 | GPU card | BUILD | P1 |
-| PERF-040 | Fan pages | ADAPT | P2 |
-| PERF-041 | Battery and UPower pages | BUILD | P2 |
-| PERF-042 | Battery charge history | BUILD | P2 |
-| PERF-055 | Graph rendering style | BUILD | P1 |
-| PERF-056 | Time ranges and history tiers | ADAPT | P1/P2 |
-| PERF-057 | Smooth scrolling | BUILD | P1 |
-| PERF-058 | Scaling modes | BUILD | P1 |
-| PERF-059 | Network scale to link speed | BUILD | P2 |
-| PERF-060 | Units | BUILD | P1/P2 |
-| PERF-061 | Graph colours | BUILD | P1 |
-| PERF-062 | Gaps, stale, unavailable states | BUILD | P1 |
-| PERF-063 | Hover readout | BUILD | P2 |
-| PERF-064 | Curved lines option | ADAPT | P4 |
-| PERF-065 | System minigraph panel | BUILD | P1 |
-| PERF-066 | Minigraph menu, range, colour | BUILD | P1/P3 |
-| PERF-067 | Move and detach minigraphs | ADAPT | P3 |
-| PERF-068 | Tray icon graphs | ADAPT | P3 |
-| PERF-069 | Performance mini window | ADAPT | P3 |
-| PERF-070 | Information layout and copy | BUILD | P2 |
-| PERF-071 | OS, Processor, System sections | ADAPT | P2 |
-| PERF-072 | Memory section and modules | ADAPT | P2 |
-| PERF-073 | Disk, BIOS, Motherboard sections | ADAPT | P2 |
-| PERF-074 | Graphics, Network Adapters sections | ADAPT | P2 |
-| PERF-075 | Additional data panel | ADAPT | P3 |
-| PERF-076 | RAPL power access | BUILD | P3 |
-| PERF-077 | Fan sensor detection | ADAPT | P4 |
-| PERF-078 | Dropped items (nethogs caps, Registered Owner) | DROP | n/a |
-
-IDs 043 to 054 are unused (numbering gap only; no entries are missing).
+| PERF-001 | Device sidebar cards | BUILD | P1 |
+| PERF-002 | Hide/show page context menu | BUILD | P1 |
+| PERF-003 | Sidebar edit mode | BUILD | P2 |
+| PERF-004 | Per-type default visibility and network groups | ADAPT | P2 |
+| PERF-005 | Device hotplug and stable keys | BUILD | P1/P2 |
+| PERF-006 | Sidebar width splitter | BUILD | P1 |
+| PERF-007 | Jump keys and View submenu | BUILD | P2 |
+| PERF-008 | Aggregate pages | BUILD | P4 |
+| PERF-009 | Graph summary mode | ADAPT | P2 |
+| PERF-010 | Copy device info | BUILD | P2 |
+| PERF-011 | Page layout and fallback strings | BUILD | P1 |
+| PERF-012 | Graph element | BUILD | P1 |
+| PERF-013 | Time range | ADAPT | P1/P2 |
+| PERF-014 | History tiers | BUILD | P1/P2 |
+| PERF-015 | Scaling modes | ADAPT | P1 |
+| PERF-016 | Axis maximum rounding and label | BUILD | P1 |
+| PERF-017 | Smooth (sliding) graphs | ADAPT | P1 |
+| PERF-018 | Curved lines | ADAPT | P4 |
+| PERF-019 | Gaps and stale data | BUILD | P1 |
+| PERF-020 | Hover readout | BUILD | P2 |
+| PERF-021 | Graph colours | BUILD | P1/P3 |
+| PERF-022 | Units | ADAPT | P1/P2 |
+| PERF-023 | Legends and secondary series | BUILD | P1 |
+| PERF-024 | CPU header and graph mode | ADAPT | P1/P2 |
+| PERF-025 | Per-core grid | BUILD | P1 |
+| PERF-026 | Kernel time overlay | BUILD | P1 |
+| PERF-027 | Overlaid and stacked modes | BUILD | P2 |
+| PERF-028 | Core type marks | ADAPT | P2 |
+| PERF-029 | CPU bottom graph | BUILD | P2 |
+| PERF-030 | CPU live stats | ADAPT | P1 |
+| PERF-031 | CPU static stats | BUILD | P1/P2 |
+| PERF-032 | Virtualization and security rows | ADAPT | P2 |
+| PERF-033 | CPU power (RAPL) | BUILD | P2 |
+| PERF-034 | CPU temperature | BUILD | P1 |
+| PERF-035 | CPU clock | BUILD | P1 |
+| PERF-036 | Memory graphs | BUILD | P1 |
+| PERF-037 | Memory composition bar | ADAPT | P1 |
+| PERF-038 | Memory stats | ADAPT | P1/P2 |
+| PERF-039 | zram and zswap details | ADAPT | P2 |
+| PERF-040 | Swap devices list | ADAPT | P2 |
+| PERF-041 | Memory modules | BUILD | P2 |
+| PERF-042 | Disk list and kind | ADAPT | P1 |
+| PERF-043 | Disk graphs | BUILD | P1 |
+| PERF-044 | Disk stats | ADAPT | P1/P2 |
+| PERF-045 | Partitions table | ADAPT | P2 |
+| PERF-046 | SMART data dialog | BUILD | P2 |
+| PERF-047 | Eject with blocking processes | BUILD | P2 |
+| PERF-048 | Disk temperature | BUILD | P2 |
+| PERF-049 | Interface list and type | ADAPT | P1 |
+| PERF-050 | Throughput graph | BUILD | P1 |
+| PERF-051 | Network stats | BUILD | P1/P2 |
+| PERF-052 | Wi-Fi details | ADAPT | P2 |
+| PERF-053 | IP addresses | ADAPT | P2 |
+| PERF-054 | Public IP fetch | BUILD | P2 |
+| PERF-055 | Network settings link | ADAPT | P3 |
+| PERF-056 | GPU enumeration and tl-gpu-probe | ADAPT | P1 |
+| PERF-057 | Engine graphs | ADAPT | P1/P2 |
+| PERF-058 | GPU memory | BUILD | P1 |
+| PERF-059 | Video encode and decode | BUILD | P1 |
+| PERF-060 | GPU clocks | BUILD | P2 |
+| PERF-061 | GPU power | BUILD | P2 |
+| PERF-062 | GPU temperature and fan | BUILD | P1/P2 |
+| PERF-063 | PCIe link | BUILD | P2 |
+| PERF-064 | GPU static fields | ADAPT | P2 |
+| PERF-065 | Displays list | ADAPT | P2 |
+| PERF-066 | AMD GPU backend | ADAPT | P2 |
+| PERF-067 | Intel GPU backend | ADAPT | P3 |
+| PERF-068 | Fan pages | BUILD | P2 |
+| PERF-069 | Fan labels and temperature pairing | ADAPT | P3 |
+| PERF-070 | Battery and power device pages | BUILD | P2 |
+| PERF-071 | Battery charge history | BUILD | P3 |
+| PERF-072 | Minigraph panel and cards | BUILD | P1 |
+| PERF-073 | Card context menu | BUILD | P1/P3 |
+| PERF-074 | Move and reorder cards | BUILD | P2 |
+| PERF-075 | Detached graph windows | ADAPT | P3 |
+| PERF-076 | Keep detached graphs open | BUILD | P3 |
+| PERF-077 | Process-source cards | BUILD | P3 |
+| PERF-078 | Tray icon graph | ADAPT | P3 |
+| PERF-079 | Tray tooltip | BUILD | P3 |
+| PERF-080 | Tray menu and graph colour | BUILD | P3 |
+| PERF-081 | Main tray icon while graphs show | BUILD | P3 |
+| PERF-082 | Performance mini window | ADAPT | P3 |
+| PERF-083 | Information layout, copy and filter | BUILD | P2 |
+| PERF-084 | Operating System section | ADAPT | P2 |
+| PERF-085 | Processor section | BUILD | P2 |
+| PERF-086 | System section | ADAPT | P2 |
+| PERF-087 | Memory section | ADAPT | P2 |
+| PERF-088 | Memory modules section | BUILD | P2 |
+| PERF-089 | Disk drives section | ADAPT | P2 |
+| PERF-090 | BIOS/Firmware section | BUILD | P2 |
+| PERF-091 | Motherboard section | BUILD | P2 |
+| PERF-092 | Graphics section | ADAPT | P2 |
+| PERF-093 | Network adapters section | BUILD | P2 |
+| PERF-094 | Additional data panel | ADAPT | P3 |
+| PERF-095 | RAPL udev rule | ADAPT | P3 |
+| PERF-096 | nethogs capabilities | DROP | P3 |
+| PERF-097 | sensors-detect | ADAPT | P4 |
 
 ## Conflicts with the architecture review
 
-1. **Time ranges.** The review sets v1 at 15 s and 60 s with one 602-sample ring. PERF-056 adds TS's 30 s, 5 min and 10 min, which needs a second 1 Hz ring tier (602 samples) per series. The extra memory is about 1 MB. The review's no-catch-up and gap rules still apply.
-2. **Last-window exit.** The review says closing the last window exits in v1. PERF-067 ("Keep detached graphs open", default off) and PERF-068 (tray) keep the app alive without the main window. Both are P3. If P3 is inside v1, the review's lifecycle rule needs an exception for these two modes.
-3. **KWin scripting.** The review lists KWin-based features and always-on-top as deferred or unsupported. PERF-067 and PERF-069 use a KWin script for keep-above and positioning on KDE in P3, and degrade on other desktops.
-4. **Splines.** The review bans splines. PERF-064 keeps MC's smooth-line option, off by default, using monotone cubic interpolation that cannot overshoot. That meets the review's stated reason.
-5. **Extra child-process use.** PERF-037 runs Vulkan and EGL probing as a separate short-lived `tl-gpu-probe --api-versions` invocation. This extends the rule that NVML lives only in tl-gpu-probe. It is not a conflict, but the probe's protocol needs a second mode.
-6. **Hidden-mode demand.** Tray graphs and detached cards are demand sources while the main window is hidden. The review's hidden policy ("off without recording") must count them, as its demand-aggregation rule already says for detached graphs.
-7. **PLAN.md, not the review:** PLAN section 3 says DIMM details need root. That is wrong on this machine, because the udev database exposes them unprivileged (PERF-020). Only DMI board, product and chassis serials need root.
-
-Notes for the leader:
-
-- I looked at `performance.png` and `information.png` as layout references. I skipped the Codex second opinion on them, because they are reference screenshots read inside a research loop and nothing in this spec depends on a disputed reading of them.
-- **Unchecked: NVML calls.** I did not call NVML directly. The NVML support claims rest on `nvidia-smi --query-gpu` fields on this machine. JPEG and optical-flow utilization support on the RTX 5070 Ti is not confirmed; PERF-033 hides those engines when the call returns NOT_SUPPORTED.
-- **Unchecked: `kscreen-doctor -j` keys.** The JSON field names in PERF-038 (`rotation`, `scale`, `currentModeId`) are from memory. Check them before building that bead.
+1. **Time ranges (PERF-013, PERF-014).** The review proposes 15 s and 60 s ranges in v1, with one 602-sample ring. This spec keeps TaskSlinger's 30 s, 1 min, 5 min and 10 min, and adds a 1 Hz tier ring of 602 samples per series. Extra memory is about 0.8 MB.
+2. **GPU sample rate (PERF-056).** The review sets GPU totals at 1 Hz. This spec keeps 1 Hz as the default, but allows 500 ms when Refresh is below 1 s. It never goes faster than 500 ms, so the 500 ms probe deadline still holds.
+3. **Window lifecycle (PERF-076, PERF-078, PERF-082).** The review says closing the last window exits the app in v1, with tray persistence later. Keep-detached-open, tray graphs and the mini window keep the app alive after the main window closes. All of these are P3. If v1 includes P3, the review's exit rule needs an exception for these windows.
+4. **Always-on-top and KWin scripting (PERF-075, PERF-082).** The review defers always-on-top where unsupported, and KWin window picking. This spec uses a KWin script for keep-above and position on KDE in P3. It is not offered elsewhere.
+5. **Splines (PERF-018).** The review says use straight segments. This spec adds monotone curves, off by default. They never overshoot, which keeps the review's correctness concern.
+6. **Second use of `tl-gpu-probe` (PERF-064).** The review makes `tl-gpu-probe` the only process that loads NVML. This spec also uses a separate one-shot run of the same binary (`--api-versions`) to load Vulkan and EGL. It is a separate process from the NVML sampler. I read this as an extension, not a break.
+7. **PLAN section 3 facts (not review rules) are wrong in two places on this machine:**
+   - DIMM details, including serials, come from the udev database without root (PERF-041).
+   - The DRM connector `enabled` file is wrong on NVIDIA 615, so display data must come from KMS ioctls (PERF-065).
+8. **Hidden-mode policy.** The review says sources go off when the window is hidden and nothing is recording. Tray graphs, detached graphs, process-source cards and the mini window add demand, so their sources keep running while the main window is hidden. The review's rule for aggregating demand already allows this. I am noting it so the hidden-CPU budget (0.3% of one core) is measured with one tray graph active.
