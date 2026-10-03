@@ -80,10 +80,10 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | Crate | Workspace deps allowed | External deps allowed |
 |---|---|---|
 | tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustix (feature `time` only, for `clock_gettime`) |
-| tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys |
+| tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec |
-| tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde |
+| tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
 | tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON) |
 | tl-app | tl-model, tl-engine, tl-ui, tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
@@ -725,7 +725,8 @@ Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `
 - writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js` and loads it as KWin script plugin `tasklens-bridge`;
 - exports object `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s json)`, which the script calls with the window list;
 - publishes the list as `Snapshot.windows` (ADR-003);
-- runs commands (activate, close, keep above, pick) from `Command::KWin(KWinCommand)` (ADR-005) as one-shot scripts named `tasklens-cmd-<n>`; the window picker uses `tasklens-pick`.
+- runs commands (activate, close, keep above, pick) from `Command::KWin(KWinCommand)` (ADR-005) as one-shot scripts named `tasklens-cmd-<n>`; the window picker uses `tasklens-pick`;
+- finds tasklens's own secondary windows (detached graph windows "tasklens Graph <n>", the mini window "tasklens Mini Window") in `WindowsSnapshot` by tasklens's pid plus the window caption. Every tasklens window keeps the one app ID `io.github.oysteinkrog.Tasklens`; there are no per-window app IDs.
 
 There is no X11 EWMH fallback for the window features in v1 (X11 is best effort, ADR-010).
 
@@ -916,8 +917,9 @@ pub struct ActionRequest {
 
 pub enum ActionTarget {
     Process(ProcessKey),
-    Cgroup(CgroupRef),
-    Unit(UnitRef),
+    Thread { process: ProcessKey, tid: u32 },  // P2: Threads tab actions (ADR-006)
+    Cgroup(CgroupRef),                         // app cgroups under app.slice
+    Unit(UnitRef),                             // services; freeze, thaw and kill of units outside app.slice
     Startup(StartupRef),
 }
 
@@ -939,7 +941,7 @@ pub enum ActionKind {
 pub enum Signal { Term, Kill, Hup, Int, Quit, Stop, Cont, Usr1, Usr2, Other(u8) }  // Other: any other number, incl. SIGRTMIN..=SIGRTMAX
 pub enum SchedPolicy { Other, Batch, Idle, Fifo, Rr }   // rt_prio 1..=99 for Fifo and Rr, else 0
 pub struct CpuSet(pub [u64; 16]);      // up to 1024 CPUs
-pub enum IoPriority { Realtime(u8), BestEffort(u8), Idle }   // levels 0..=7
+pub enum IoPriority { None, Realtime(u8), BestEffort(u8), Idle }   // levels 0..=7; None = IOPRIO_CLASS_NONE, "Default (follows nice)"
 
 pub enum ActionState {
     Rejected(RejectReason),    // never started, nothing changed
@@ -1027,6 +1029,7 @@ Details:
 - `SetAffinity(set)`: `sched_setaffinity` on every TID, same rules.
 - `SetIoPriority(p)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, value)` through `libc::syscall(SYS_ioprio_set, ..)` in `tl-ops/src/sys.rs`, on every TID, same rules. `Realtime` needs root and is shown only in the privileged menu.
 - TIDs are re-listed right before the loop. A TID that disappears mid-loop is skipped and not counted as failure.
+- `ActionTarget::Thread { process, tid }`: `open_verified(process)`, then check that `/proc/<pid>/task/<tid>` exists (else `Rejected(IdentityChanged)`), then run the call on that one TID and poll the pidfd as above. Signals to a thread use `tgkill(pid, tid, sig)`. Allowed kinds: `Signal`, `SetNice`, `SetSched`, `SetAffinity`.
 - `EPERM` maps to `ActionError::PermissionDenied`. The UI shows the toast "Permission denied" with the button "Retry as administrator" from P3; before P3 the toast has no button. Raising priority (lower nice) is expected to fail without `CAP_SYS_NICE`.
 
 **Suspend and resume one process:** `Signal(Stop)` and `Signal(Cont)` through the pidfd.
@@ -1048,6 +1051,8 @@ Validation in `tl-ops::cgroup::open_validated(cg, uid)`:
 3. The tasklens process's own cgroup is not inside it (`Rejected(Protected)`).
 4. Write with `openat(dirfd, "cgroup.freeze" | "cgroup.kill")`: `"1"` to freeze, `"0"` to thaw, `"1"` to kill.
 5. Freeze completion: poll `cgroup.events` for `frozen 1` every 50 ms for up to 2 s; not frozen by then is `OutcomeUnknown("freeze still in progress")`.
+
+**Units outside `app.slice`.** `FreezeGroup`, `ThawGroup` and `KillGroup` on an `ActionTarget::Unit` (user units in `session.slice` or `background.slice`, and system units) go through the owning manager: `FreezeUnit(name)`, `ThawUnit(name)` and `KillUnit(name, "all", SIGKILL)` on `org.freedesktop.systemd1.Manager`, user manager over the session bus, system manager over the system bus. Calls set `ALLOW_INTERACTIVE_AUTHORIZATION`, so polkit `org.freedesktop.systemd1.manage-units` can prompt for system units. Freeze completion is the unit's `FreezerState` property reading `frozen` within 2 s; otherwise `OutcomeUnknown("freeze still in progress")`.
 
 **Protected processes.** `PROTECTED` is set on: PID 1, the current session's `kwin_wayland`, `plasmashell`, `ksmserver`, `Xwayland`, `sddm`, `systemd-logind`, the session's `login` ancestor, the user's `systemd --user`, the user's `dbus-broker` or `dbus-daemon`, and tasklens itself.
 
@@ -1085,10 +1090,10 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 - Polkit has exactly three tasklens actions, in `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`: `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation; `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`; `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon` (P4). Polkit authorises the `pkexec` launch once, so per-operation action names inside a running helper would not be enforced.
 - Transport: the helper's stdin and stdout, using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB. A reply larger than one frame is sent as a sequence of frames; the total per request is capped at 4 MiB. There is no single-call `--once` mode.
 - Allowed requests only:
-  - `Signal { key, signal }`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`;
+  - `Signal { key, signal }`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`; `Signal`, `SetNice`, `SetSched` and `SetAffinity` also accept a thread target (`ActionTarget::Thread`);
   - `FreezeGroup`, `ThawGroup`, `KillGroup` for any uid's cgroup under `/sys/fs/cgroup`;
   - `ReadProcessDetail { key, what }` for root-only `/proc` fields;
-  - `ReadProcessFiles { key, files }`, where `files` is a set of `io`, `fd_list`, `fdinfo`, `environ`, `maps`, `smaps_rollup`, `ns`, `cwd`, `exe`, `status`;
+  - `ReadProcessFiles { key, files }`, where `files` is a set of `io`, `fd_list`, `fdinfo`, `environ`, `maps`, `smaps`, `smaps_rollup`, `ns`, `cwd`, `exe`, `status`;
   - `ScanStrings { key, opts }`, which streams batches;
   - `Dump { key, mode, out_fd }`, which runs `/usr/bin/gcore` by fixed path and writes to the passed fd;
   - `ResolveSocketInodes { inodes }`;
@@ -1132,6 +1137,8 @@ Astra's critical correction: a segfault or abort inside NVML kills the whole pro
 ### Decision
 
 **Process.** Binary `tl-gpu-probe`, synchronous, no async runtime, depends on `nvml-wrapper =0.13.0`. Located by, in order: `$TASKLENS_GPU_PROBE`, the directory of `std::env::current_exe()`, `/usr/lib/tasklens/tl-gpu-probe`. Not found: `GpuNvidia` health is `Unsupported` with message "GPU probe not installed".
+
+**API versions mode.** `tl-gpu-probe --api-versions` is a second, one-shot mode. It loads Vulkan through `ash` and EGL through `khronos-egl` (both loaded at run time), and per GPU reads the Vulkan `apiVersion` and driver properties (matched by `VK_EXT_pci_bus_info`) and the OpenGL `GL_VERSION` from an EGL context on the matching DRM device (`EGL_EXT_platform_device`). It writes one postcard frame (`ApiVersions { devices: Vec<GpuApiVersions> }`, keyed by PCI bus ID) to stdout and exits 0. The engine runs it once at startup on the blocking pool with a 5 s deadline, in its own process, never in the NVML sampler process. A crash, timeout or non-zero exit gives `Unknown` for those fields and is not retried.
 
 **Spawn** (`tl-engine/src/gpu/spawn.rs`, inside `spawn_blocking`):
 1. `rustix::net::socketpair(AddressFamily::UNIX, SocketType::STREAM, SocketFlags::CLOEXEC, None)`.
@@ -1276,7 +1283,8 @@ pub struct Demand {
 | GPU per process | 1 Hz, only if a GPU process column is shown | off | 1 Hz if recording includes GPU |
 | Connections and socket attribution | every 2 s | off | off |
 | systemd units | event-driven; full resync on connect and every 60 s while the page is visible | events only, no resync | same |
-| Startup entries, inventory | on page open and on `RefreshNow` | off | off |
+| Startup entries | on page open and on `RefreshNow`; while the Startup Apps tab is visible, inotify on the autostart directories and the two Plasma script directories plus the user manager's `UnitFilesChanged` signal trigger a rescan | off | off |
+| Inventory | on page open and on `RefreshNow` | off | off |
 | Logind sleep signal | event-driven, always on | always on | always on |
 | Device enumeration (disks, nets, hwmon) | every 5 s while any of those is demanded | off | every 5 s |
 
@@ -1485,7 +1493,7 @@ pub struct TlTheme {
 - Kit widgets (menus, dialogs, inputs, tooltips, toasts, buttons, scrollbars) read gpui-kit `Theme`. `theme/map.rs::apply(&TlTheme, &mut gpui_kit Theme)` sets: `background ← window_bg`, `foreground ← text_primary`, `muted_foreground ← text_secondary`, `border ← divider`, `title_bar ← titlebar`, `popover ← menu_bg`, `accent ← menu_hover`, `primary ← accent`, `ring ← accent`, `input ← input`, `scrollbar ← scroll_track`, `scrollbar_thumb ← scroll_thumb`, `table ← list_bg`, `table_even ← row_alt`, `table_hover ← row_hover`, `table_active ← row_selected`, `table_head ← header`, `table_row_border ← divider`, `tab_bar ← tab_bg`, `status_bar ← toolbar`, `chart_1..5 ← graph cpu/mem/gpu/disk/net lines`, `chart_grid ← graph.grid`. The bead that writes `map.rs` must check each token name against `ThemeColor` in gpui-component 0.7.0 source; a missing name maps to the nearest existing token and the mapping is recorded in a comment in `map.rs`.
 - Theme switch: `Theme::update` plus replacing the `TlTheme` global, bumping `style_version` so every chart rebuilds geometry once.
 
-**Metrics and scale.** Settings `appearance.ui_scale_pct` (75..=200, step 5, default 100) and `appearance.row_height_pct` (80..=150, step 5, default 100). With `ui_scale = ui_scale_pct / 100`: `UiMetrics { ui_scale, row_height: 28 × row_height_pct/100 × ui_scale, base_text: 13 × ui_scale, radius: 5 × ui_scale }`. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. Ctrl+Plus, Ctrl+Minus and Ctrl+0 step the scale by 5 or reset it to 100, with the toast "UI scale changed to N%". A change in `window.scale_factor()`, `ui_scale_pct` or `row_height_pct` bumps `style_version` and clears `CellTextCache`.
+**Metrics and scale.** Settings `appearance.ui_scale_pct` (75..=200, step 5, default 100) and `appearance.row_height_pct` (80..=150, step 5, default 100). With `ui_scale = ui_scale_pct / 100`: `UiMetrics { ui_scale, row_height: 28 × row_height_pct/100 × ui_scale, base_text: 13 × ui_scale, radius_small: 4 × ui_scale, radius_card: 6 × ui_scale }`. `radius_small` is for rows, menus and other small elements; `radius_card` is for cards. `appearance.rounded_corners = false` sets both to 0. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. Ctrl+Plus, Ctrl+Minus and Ctrl+0 step the scale by 5 or reset it to 100, with the toast "UI scale changed to N%". A change in `window.scale_factor()`, `ui_scale_pct` or `row_height_pct` bumps `style_version` and clears `CellTextCache`.
 
 **Fonts.** Bundle in `assets/fonts/` (SIL OFL): `NotoSans-Regular.ttf`, `NotoSans-Medium.ttf`, `NotoSans-SemiBold.ttf` (static weights, not the variable font, because of zed#64783). Load with `cx.text_system().add_fonts(..)` before the first window. Family name `"Noto Sans"`. Numeric cells and chart labels use `FontFeatures(Arc::new(vec![("tnum".into(), 1)]))`. Fallback for non-Latin process names comes from fontconfig system fonts (cosmic-text). The bead must verify that each bundled face loads (zed#61660: faces without `m` are dropped).
 
@@ -1628,7 +1636,7 @@ Directories are created with mode `0700`; files with `0600`. Built-in themes are
 
 **Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout and tray graphs.
 
-**Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default)]`). Canonical table (a) in `docs/RECONCILIATION.md` is the only settings schema, for both files: every key, default and range is defined there, and a key not listed there does not exist. Both files start with `schema_version = 1`. The sections of `settings.toml` are `[general]`, `[theme]`, `[appearance]`, `[motion]`, `[units]`, `[processes]`, `[properties]`, `[performance]`, `[fans]`, `[graphs]`, `[history]`, `[window]`, `[tray]`, `[startup]`, `[network]`, `[privilege]`, `[rendering]`, `[services]`, `[lowmem]` and `[debug]`. The keys other ADRs depend on:
+**Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default)]`). Canonical table (a) in `docs/RECONCILIATION.md` is the only settings schema, for both files: every key, default and range is defined there, and a key not listed there does not exist. Both files start with `schema_version = 1`. The sections of `settings.toml` are `[general]`, `[theme]`, `[appearance]`, `[motion]`, `[units]`, `[processes]`, `[tables]`, `[properties]`, `[performance]`, `[fans]`, `[graphs]`, `[history]`, `[window]`, `[tray]`, `[startup]`, `[network]`, `[privilege]`, `[rendering]`, `[services]`, `[lowmem]` and `[debug]`. The keys other ADRs depend on:
 
 ```toml
 [general]
