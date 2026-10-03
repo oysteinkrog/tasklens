@@ -694,3 +694,222 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (numeric ids become string IDs)
 - Phase: P1
 - Privilege: none
+
+---
+
+## E. Header, display, filter, sort and selection
+
+### PROC-038 Two-line header with system totals
+- Was: v1 PROC-029; r2 PROC-028
+- Source: TS 2.1 Header, [IMG processes.png "CPU / 11.9%"], cross-check B.10 | MC `table_view/mod.rs:852-948`
+- Behaviour:
+  - Line 1 is the column name with the sort arrow ("PID ↑"). Line 2 is the system total, right-aligned, in secondary text colour.
+  - Totals:
+    - CPU: total utilization from `/proc/stat` (ADR-008 math; kernel = system + irq + softirq).
+    - Memory: (MemTotal − MemAvailable) / MemTotal %.
+    - Swap: used %.
+    - Disk: highest busy % among physical disks (MC).
+    - Network: total physical-interface throughput as % of the summed link speed; a rate when the link speed is unknown.
+    - GPU: highest utilization among GPUs. GPU N: that adapter's utilization.
+    - VRAM: used / total % over all GPUs.
+    - Threads: system thread count.
+    - Handles: `/proc/sys/fs/file-nr` field 1.
+  - Name, User, PID, Power usage, Description and other text columns have no line 2. With no GPU, the GPU totals show `n/a`.
+  - Percent totals use one decimal (PROC-003).
+- Linux data/mechanism: the system collectors' snapshot (Performance workers) at the time of the process sweep, from `ProcessTableView.totals`.
+- Verdict: BUILD (TaskSlinger layout, MC formulas)
+- Phase: P1
+- Privilege: none
+
+### PROC-039 Row hover tooltip
+- Was: v1 PROC-032; r2 PROC-013; add amend PROC-032
+- Source: TS 2.1 tooltip L35703, L28447, [CL 0.8.27], cross-check A.5 | R-009
+- Behaviour: after 600 ms of hover over the Name cell, a tooltip shows these lines in order, each only when it applies:
+  ```
+  <command line, first 512 characters>
+  path: <exe path, or "restricted">
+  user: <name> (uid N)
+  Unit: <unit> (<Description>)
+  cgroup: <path>
+  Package: <name> <version>              (when known, P2)
+  Desktop file: <path>                   (app rows only)
+  Some values need administrator access. (restricted rows only)
+  ```
+  - "Unit:" is the systemd analogue of TaskSlinger's "Services:".
+  - Pseudo rows show only a one-line description of what they count.
+- Linux data/mechanism: cached metadata in the snapshot; the package lookup from PROC-027.
+- Verdict: ADAPT
+- Phase: P1 (Package line P2)
+- Privilege: none
+
+### PROC-040 Heat colouring
+- Was: v1 PROC-033; r2 PROC-029
+- Source: TS INI `UI.ProcessValueColorCoding=1`, `ProcessValueColorCodingIntensityPct=50`, View > Appearance "Value Color Coding" | R-059
+- Behaviour:
+  - Numeric resource cells get a background blended from transparent toward VALUE_HEAT (#3E2A28 in Default Dark) with `alpha = intensity × clamp(value / reference, 0, 1)`.
+  - References: CPU 400/ncpu % (12.5% here); CPU (one core = 100%) 400%; memory columns 10% of MemTotal; disk and I/O rates 100 MiB/s; network 10 MiB/s, or 80 Mbps in bits mode; GPU 100%; VRAM 25% of total VRAM; Power usage 25 W.
+  - Count columns are not tinted.
+  - View > Appearance > "Value Color Coding" (`appearance.heat_coloring = true`) and an intensity slider 0-100% (`appearance.heat_intensity_pct = 50`).
+- Linux data/mechanism: UI only.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-041 Dim zero values
+- Was: v1 PROC-034; r2 PROC-030
+- Source: MC `apps-page-hide-is-zero`
+- Behaviour: Settings > Processes > "Dim zero values", default off (`processes.dim_zero_values = false`). A measured zero draws at 30% opacity. It never applies to validity glyphs.
+- Linux data/mechanism: UI only.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PROC-042 Column separators
+- Was: v1 PROC-035
+- Source: MC `apps-page-show-column-separators`
+- Behaviour: Settings > Processes > "Show column separators", default off (`processes.column_separators = false`). It draws 1 px DIVIDER lines between columns.
+- Linux data/mechanism: UI only.
+- Verdict: BUILD
+- Phase: P4
+- Privilege: none
+
+### PROC-043 Highlight new and exited processes
+- Was: v1 PROC-036; r2 PROC-031
+- Source: TS 1.3, INI `UI.HighlightNewExitedProcesses=1`, L30335 "process diff linger", [CL 0.9.0] | R-041
+- Behaviour:
+  - View > Process View > "Highlight New and Exited Processes", default on (`processes.highlight_new_exited = true`).
+  - New rows get the theme success colour at 35% alpha.
+  - Exited rows stay in place with the theme error colour at 35% alpha and greyed text. They are not actionable: every menu item except Copy is disabled, with tooltip "Process exited".
+  - Linger time is 2 × `processes.interval_ms`, clamped to 1..=3 s. The tint fades out over the last 300 ms, or switches off at the end when reduced motion or Animations is off.
+- Linux data/mechanism: identity diff between sweeps in the engine. The reducer keeps exited records for the linger time, then removes them (ADR-004).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-044 Filter box and type-to-filter
+- Was: v1 PROC-041; r2 PROC-032
+- Source: TS 1.7, L28339, L30133, [CL 0.8.28, 0.8.32] | MC `table_view/mod.rs:604-638` | R-043 | APP-028
+- Behaviour:
+  - "Filter: " field in the tab bar with a clear button; it expands on focus.
+  - Typing a printable character while the process table has focus starts the filter, unless an input or dialog has focus.
+  - One Esc clears the filter and returns focus to the table. A further Esc follows the global Esc rule.
+  - Matching is a case-insensitive substring over display name, image name, command line, user, description, app name, unit name and group names. A numeric query also matches PIDs by prefix. Space-separated terms must all match.
+  - MC's reverse containment and Levenshtein matching are not used (false hits).
+  - Group headers stay visible with their filtered counts.
+  - The filter also applies to the History table and graph (PROC-088).
+- Linux data/mechanism: normalized lowercase strings cached per identity (`ProcessMeta.search_lower`). The UI debounces input 100 ms, then sends `SetTableQuery` with a new generation; results for an older generation are discarded (ADR-009). There is no `filter_cmdline` setting (R-043).
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### PROC-045 Include children
+- Was: v1 PROC-042; r2 PROC-033
+- Source: TS 1.7, L28338, L28831-28832, INI `UI.FilterShowChildren=0`
+- Behaviour:
+  - An "Include children" checkbox shows while filtering and in Tree View. Default off (`processes.filter_include_children = false`).
+  - When on, every descendant of each match also shows.
+  - Toasts: "Including filtered process children." when turned on, "Hiding unmatched filtered process children." when turned off.
+- Linux data/mechanism: tree projection in the engine.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-046 Hide system processes
+- Was: v1 PROC-012; r2 PROC-034; add amend PROC-012
+- Source: TS 1.1 grid button, L28330-28331, L28738-28739, L35335-35345, INI `UI.HideMicrosoftProcesses=0`, [CL 0.9.2] | APP-004 | R-031
+- Behaviour:
+  - A toolbar toggle on the Processes tab only (PROC-016). Tooltip "Hide system processes" or "Show system processes". Toasts "Hiding system processes" and "Showing system processes". Default off (`processes.hide_system = false`).
+  - When on, these are hidden: the whole System processes group (kernel threads, the "Kernel threads (N)" row, other users' processes, system units), pseudo rows (PROC-012), and Background rows of desktop infrastructure.
+  - Desktop infrastructure means user units in `session.slice` and `background.slice`, for example pipewire, wireplumber, dbus-broker, xdg-desktop-portal*, at-spi, kded6, ksmserver, powerdevil, plus `init.scope` (`systemd --user`).
+  - These stay visible: `plasma-plasmashell.service` and `plasma-kwin_wayland.service` (the Explorer analogue), `org.gnome.Shell@wayland.service`, and everything in `app.slice`.
+  - In History mode the toggle stays active and also filters the History table.
+- Linux data/mechanism: the PROC-004 cgroup classes plus the unit name; the exception list is a constant. `hide_system` is part of `EngineSettings`.
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### PROC-047 Sorting
+- Was: v1 PROC-037; r2 PROC-035
+- Source: TS 2.1 Header, INI `Sort.ProcessesKey=3`, `ProcessesAscending=1` | MC `table_view/mod.rs:226`, `settings.rs:55-101` | R-011 | ADR-008, ADR-009
+- Behaviour:
+  - Click anywhere on a header cell to sort. The first click is descending for numeric columns and ascending for text; each further click reverses.
+  - Default: PID ascending. The History table defaults to CPU descending (PROC-088).
+  - Groups keep their fixed order. In Tree View and inside groups, siblings sort under their parent.
+  - Ties break by `ProcessKey`.
+  - The table re-sorts at every refresh unless paused (PROC-050).
+  - Sort always persists in `state.toml` `[sort.processes]` (`column`, `ascending`). MC's "Remember sorting" option is not built.
+  - Columns measured for visible rows only (PSS, USS, Cycles, Cycles delta, Context switches, Context switches delta) cannot be sorted. Their header is not clickable and shows the tooltip "Only measured for visible rows".
+- Linux data/mechanism: engine-side projection tagged with a generation (ADR-009).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-048 Selection and multi-select
+- Was: v1 PROC-039; r2 PROC-036; add amend PROC-039
+- Source: TS [CL 0.8.4], L28336, L29280-29285, cross-check A.2 | MC single selection only
+- Behaviour:
+  - Click selects one row. Ctrl+click toggles a row. Shift+click selects a range. Shift+Up/Down extends. Ctrl+A selects all visible process rows.
+  - Right-click on an unselected row selects only that row first. Right-click inside the selection keeps it.
+  - Group header rows cannot be selected for actions.
+  - Selection is a set of identities (`FxHashSet<NodeId>` with anchor and focus) and survives re-sorting and filtering. Exited identities drop out after the linger time.
+  - Multi-select actions act on the whole selection: End Selected Tasks, End Selected Processes, Suspend Selected Tasks, Resume Selected Tasks, Send Signal, Set Priority, Set Affinity, Set I/O Priority, Copy, Copy details, Copy all metrics, Copy rows as table (PROC-069, PROC-070).
+  - Properties with several rows selected opens one window per selected process, up to the cap of 8 (PROC-077).
+- Linux data/mechanism: `tl-ui/src/table/selection.rs` (ADR-009).
+- Verdict: BUILD (TaskSlinger multi-select)
+- Phase: P1
+- Privilege: none
+
+### PROC-049 Keyboard in the process table
+- Was: v1 PROC-040; r2 PROC-037; add amend PROC-040
+- Source: TS 7, [CL 0.8.4], cross-check C.4 | MC `table_view/mod.rs:323-470` | RECONCILIATION table (b), R-045, D-008
+- Behaviour (key context ProcessTable inside Table; one GPUI Action per row, and menu items dispatch the same Action):
+
+  | Keys | Action |
+  |---|---|
+  | Up / Down / PgUp / PgDn / Home / End | move the row selection (rows, never columns) |
+  | Shift+Up/Down, Shift+click, Ctrl+click | extend or toggle the selection |
+  | Ctrl+A | select all visible rows |
+  | Right / Left | expand, or move to the first child / collapse, or move to the parent |
+  | Space | toggle expand |
+  | Enter, Alt+Enter, Ctrl+I | Properties (D-008) |
+  | Delete, Ctrl+E | End Task (SIGTERM) |
+  | Shift+Delete, Ctrl+X | End Process (SIGKILL) |
+  | Ctrl+C | Copy details (PROC-070) |
+  | Ctrl+Shift+C | Copy rows as table (TSV with a header line) |
+  | Ctrl+L | Collapse all |
+  | Ctrl+F | focus the filter (global) |
+  | Shift+F10, Menu key | open the context menu for the selection |
+  | printable character | start filtering (not when an input or dialog has focus) |
+  | Hold Ctrl | pause the display (PROC-050) |
+
+- Linux data/mechanism: GPUI actions bound in the `ProcessTable` key context.
+- Verdict: ADAPT (TaskSlinger evidences no table keys beyond typing and multi-select; the set is fixed by table b)
+- Phase: P1
+- Privilege: none
+
+### PROC-050 Hold Ctrl to pause
+- Was: v1 PROC-043; r2 PROC-038
+- Source: TS L28337, [CL 0.8.10] | MC `window.rs:863-907` | R-042 | ADR-009
+- Behaviour:
+  - While Ctrl is held and the main window is active (whatever has focus inside it), the displayed rows, order and values freeze, and the status bar appends "[PAUSED - Ctrl]".
+  - Collection and history keep running.
+  - Releasing Ctrl or deactivating the window resumes and applies the latest snapshot.
+  - Actions taken while paused use the captured identities and revalidate them.
+- Linux data/mechanism: the table renders from one retained `paused: Option<Arc<Snapshot>>` (ADR-005 allows at most this one extra snapshot).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-051 Processes status bar text
+- Was: v1 PROC-044; r2 PROC-039
+- Source: TS 1.8, L28335-28337, L30142
+- Behaviour, bottom left:
+  - "296 Processes", or "41 / 296 Processes" while filtering.
+  - "3 processes selected" when 2 or more rows are selected.
+  - "[PAUSED - Ctrl]" appended while paused.
+  - " | 42 restricted" appended when restricted rows exist, with the tooltip "Some values for other users' processes need administrator rights. Click to enable." From P3, clicking it starts the helper (PROC-076); before P3 it is not clickable.
+  - The count excludes pseudo rows and includes kernel threads only when they are shown.
+- Linux data/mechanism: projection counts.
+- Verdict: BUILD (plus the restricted count)
+- Phase: P1
+- Privilege: none
