@@ -1674,3 +1674,127 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (Shell_NotifyIcon becomes SNI)
 - Phase: P3
 - Privilege: none
+
+---
+
+## K. Run dialog, Search File Handles and low-memory rescue
+
+### PROC-095 Run dialog
+- Was: v1 PROC-091; r2 PROC-079
+- Source: TS 8 "TaskSlinger Run", L28472 (Ctrl+N), L29321, L29331-29338, L28653-28812, `runCommandHistory.json`, cross-check A.37 | APP-014, APP-045 | R-061
+- Behaviour:
+  - File > "Run..." (Ctrl+N) opens a separate pinnable window titled "tasklens Run".
+  - Text: "Type the name of a program, folder, document, or Internet resource."
+  - "Open:" is a combo with history: 5 visible rows, prefix matches first. Up and Down pick a match, Enter runs, Shift+Enter runs as administrator.
+  - Controls: "Run as administrator" checkbox, "Browse…" (filters "Programs" = executable files and "All files"), "Clear command history", OK, Cancel.
+  - Under the checkbox: "GUI programs may not start as root on Wayland".
+  - Toasts: "Command launched", "Command history cleared", "Please enter a command", "Command contains invalid text." (a NUL byte or a control character), "Failed to run command", "Authentication cancelled" (cancelled polkit prompt).
+- Linux data/mechanism:
+  - A URL with a scheme, or an existing path that is not an executable, opens through the portal `org.freedesktop.portal.OpenURI`, falling back to `xdg-open`.
+  - `kcm_*` names (the `.cpl` analogue) run `systemsettings <name>`.
+  - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-024). It then groups as an app and is detached from tasklens.
+  - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`.
+  - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
+  - Browse uses GPUI `prompt_for_paths` (portal FileChooser). If that pulls in Tokio (U-15), call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none, or polkit `org.freedesktop.policykit.exec` for administrator runs
+
+### PROC-096 Search File Handles
+- Was: v1 PROC-092; r2 PROC-080
+- Source: TS 8 dialog, L28473, L29339-29345, L28677-28679, L30071-30081 | APP-015, APP-045 | R-061
+- Behaviour:
+  - File > "Search File Handles..." opens a separate pinnable window titled "tasklens Handle Search".
+  - Controls: "Pattern:" field (case-insensitive substring; `*` and `?` work as globs), the checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
+  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
+  - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
+  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process (PROC-071), Copy path, Open file location.
+  - Without the helper, a footer note reads "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button that starts the helper and searches again.
+  - Error: "Handle search failed".
+- Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between PIDs. Other UIDs go through the helper (`ReadProcessFiles { fd_list, maps, cwd, exe }`).
+- Verdict: ADAPT (the NT handle table becomes a procfs walk, like lsof)
+- Phase: P3
+- Privilege: own processes need none; other UIDs need the helper.
+- Open question: R-061 adopts r2's menu labels, but "End Process (SIGTERM)" and "Kill Process (SIGKILL)" clash with the table naming, where End Task is SIGTERM and End Process is SIGKILL (R-045). Recommended answer: label them "End Task" (SIGTERM) and "End Process" (SIGKILL).
+
+### PROC-097 Low-memory watcher
+- Was: v1 PROC-093; r2 PROC-081
+- Source: TS `/low-memory` L35425, [CL 0.8.0], 4.5 | TS inventory section 9 (PSI trigger) | R-062
+- Behaviour:
+  - Settings > Window & startup > "Open rescue window on critical memory pressure", default off (`lowmem.enabled = false`).
+  - When turned on, tasklens installs and enables the user unit `tasklens-lowmem.service`, which runs `tasklens --watch-memory`. Turning it off disables and removes the unit.
+  - When memory pressure crosses the threshold and no rescue window is open, the watcher starts `tasklens --low-memory`.
+  - Threshold: PSI `full` above 10% over a 1 s window, or MemAvailable below 3% of MemTotal.
+- Linux data/mechanism:
+  - Write `full 100000 1000000` to an open `/proc/pressure/memory` fd and `poll(POLLPRI)`. Also check MemAvailable every 5 s.
+  - The watcher mode does not initialise GPUI. Target below 4 MiB RSS. It calls `mlockall(MCL_CURRENT|MCL_FUTURE)` (within the systemd default RLIMIT_MEMLOCK of 8 MiB).
+  - The unit sets `OOMScoreAdjust=-900` (U-24). A user unit may lower it only to the user manager's own value; if systemd refuses, the unit uses 0 and the setting tooltip says so.
+  - It coexists with systemd-oomd; the setting tooltip notes that oomd may act first. The watcher only opens UI and never kills anything itself.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+
+### PROC-098 Low-memory rescue window
+- Was: v1 PROC-094; r2 PROC-082
+- Source: TS 4.5, L35830, L28914-28916, L28921, L28926-28929 | R-062, R-073
+- Behaviour:
+  - A small window titled "tasklens - Low memory", kept above other windows (PROC-056).
+  - Text: "Your device is running on critically low memory." and "We recommend you close some of the processes below."
+  - A "Filter..." field and a list of at most 30 apps and processes sorted by memory (RssAnon + swap for processes, cgroup `memory.current` for apps), each with "Memory 12.0%" of MemTotal and an "End Task" button.
+  - Here "End Task" sends SIGKILL to processes and `KillUnit(name, "all", SIGKILL)` to apps, with no confirmation, because a graceful stop under memory pressure makes thrashing worse. Tooltip "Ends immediately, unsaved work is lost".
+  - Other users' rows are listed but disabled, with the tooltip "Needs administrator rights".
+  - "Open Full tasklens" opens the main window.
+  - When pressure stays below the threshold for 10 s: "Memory pressure has eased. You can open the full tasklens or close this window."
+  - Errors: "End Task Failed", "kill failed: <errno text>".
+- Linux data/mechanism:
+  - A minimal GPUI window: small font set, no charts, no icons, no history.
+  - A stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s.
+  - The process is mlocked after start. The same identity and pidfd rules as PROC-001 apply.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none for own processes.
+
+---
+
+## L. Settings
+
+### PROC-099 Settings and state keys for this area
+- Was: v1 PROC-095; add amend PROC-095
+- Source: TS INI `UI.*`, `Sort.*`, `Columns.*` | MC gschema `apps-page-*` | ADR-011 | R-018, R-019, R-071, RECONCILIATION table (a)
+- Behaviour: this area uses only these canonical keys (table a). Both files start with `schema_version = 1`, load with clamping, and save atomically with a 500 ms debounce.
+  - `$XDG_CONFIG_HOME/tasklens/settings.toml`:
+
+    | Key | Default | Entry |
+    |---|---|---|
+    | `processes.interval_ms` | 1000 (250..=10000) | PROC-002 |
+    | `processes.mode` | "grouped" | PROC-014 |
+    | `processes.tree_guide_lines` | false | PROC-017 |
+    | `processes.highlight_new_exited` | true | PROC-043 |
+    | `processes.filter_include_children` | false | PROC-045 |
+    | `processes.hide_system` | false | PROC-046 |
+    | `processes.subtree_totals` | false | PROC-019 |
+    | `processes.dim_zero_values` | false | PROC-041 |
+    | `processes.column_separators` | false | PROC-042 |
+    | `processes.column_resize` | "proportional" | PROC-025 |
+    | `processes.dump_type` | "mini" | PROC-075 |
+    | `appearance.heat_coloring` | true | PROC-040 |
+    | `appearance.heat_intensity_pct` | 50 | PROC-040 |
+    | `properties.hide_unnamed_handles` | true | PROC-080 |
+    | `properties.shared_objects_only` | true | PROC-081 |
+    | `properties.env_mask` | true | PROC-083 |
+    | `history.enabled` | false | PROC-086 |
+    | `history.retention_h` | 6 (1..=12) | PROC-086 |
+    | `history.persist` | true | PROC-087 |
+    | `history.max_disk_mb` | 256 | PROC-087 |
+    | `lowmem.enabled` | false | PROC-097 |
+    | `units.network`, `units.network_auto_scale` | "bits", false | PROC-003, PROC-032 |
+    | `window.always_on_top` | false | PROC-056 |
+
+  - `$XDG_STATE_HOME/tasklens/state.toml`: `[processes] history_mode = false`, `group_expanded = { apps = true, background = true, system = true }`; `[sort.processes]` (`pid`, ascending); `[sort.history]` (`cpu`, descending); `[columns.processes]` and `[columns.history]` (`order`, `visible`, `widths`); `[[minigraphs]]`; `[[tray_graphs]]`.
+  - `EngineSettings` (derived, never persisted) carries `interval_ms`, `subtree_totals`, `hide_system`, the network unit and `history.*`.
+  - Old keys from v1 PROC-095: `tree_view` and `grouping` Dropped: R-010; `guide_lines`, `heat`, `heat_intensity_pct`, `dim_zero`, `resize_behavior`, `history.hours` and `props.*` are renamed to the keys above (R-019); `sort.*`, `columns.*`, `history.sort` and `history_mode` move to `state.toml` (R-018); `copy_rows_tsv_shortcut` Dropped: R-071 (the binding is fixed in table b).
+  - Never added: `processes.filter_cmdline` (R-043), `processes.cpu_mode` and `processes.cpu_one_core_100` (R-044), `processes.column_graphs` (R-071).
+- Linux data/mechanism: atomic write (temp file, fsync, rename, fsync directory) with migrations on version change (ADR-011). No inotify; external edits apply at the next start.
+- Verdict: ADAPT (INI becomes TOML)
+- Phase: P1 (each key arrives with its feature)
+- Privilege: none
