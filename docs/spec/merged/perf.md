@@ -1352,3 +1352,197 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Phase: P3
 - Privilege: none
 - Applied: R-058, R-073, table b (Ctrl+Shift+M)
+
+## Information tab
+
+### PERF-094 Information layout, copy and filter
+- Was: v2 PERF-083
+- Source: TS 2.7 (two columns, section header with accent bar and copy button, tab-level copy icon, filter applies) | MC System Information "Copy All"
+- Behaviour:
+  - Information is tab 6 (Ctrl+6, Alt+6).
+  - Two scrolling columns of sections. Each section header has a 3 px accent bar at left and a copy button at right.
+  - Sections: Operating System, Processor, System, Memory, Memory modules, Disk drives, BIOS/Firmware, Motherboard, Graphics, Network adapters (PERF-095 to PERF-104).
+  - The copy icon on the tab copies all sections. Toast: "Copied to clipboard". Format: a section name line, then `Label: value` lines, a blank line between sections. Memory module serials never appear (D-007).
+  - The tab's filter box hides rows whose label and value do not match, and hides empty sections.
+  - Values are selectable text. Missing values use the PERF-013 words.
+  - Until the first data arrives, each section shows skeleton blocks, once per session.
+  - Help > "System Information…" switches to this tab and scrolls to Operating System (APP-041).
+  - Data loads when the tab first opens and on F5. Live values (uptime, available memory, counts) refresh at 1 Hz while the tab is visible.
+- Linux data/mechanism: Engine `inventory` component, demanded by the tab (ADR-008 "Startup entries, inventory" row).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+- Applied: R-023, R-050, R-060
+
+### PERF-095 Operating System section
+- Was: v2 PERF-084
+- Source: TS OS Name, Version, Build, Architecture, Install Date, Registered Owner, Product ID | MC OS name, version, package manager and its version, kernel release and version, distro logo (APP-041)
+- Behaviour: Rows: OS name ("CachyOS Linux", with the distro logo beside the section title), Version, Build, Kernel, Kernel version, Architecture ("x86_64 (64-bit)"), Install date, Package manager ("pacman 7.0.0"), Machine ID.
+  - Version is `VERSION_ID`, or "Rolling" when missing.
+  - Build is `BUILD_ID`, or `Not reported`.
+  - Machine ID replaces Product ID.
+  - Registered Owner is dropped: Linux has no such record, and the user name is under System.
+- Linux data/mechanism:
+  - `/etc/os-release` (`PRETTY_NAME`, `VERSION_ID`, `BUILD_ID`, `LOGO`, looked up in the icon theme).
+  - `uname(2)` (release, version, machine).
+  - Install date: `statx` btime of `/`, else the first timestamp in `/var/log/pacman.log`.
+  - Package manager version: the first of `pacman --version`, `dpkg-query --version`, `rpm --version` that exists, run once.
+  - `/etc/machine-id`.
+- Verdict: ADAPT. Product ID becomes Machine ID. Registered Owner is dropped.
+- Phase: P2
+- Privilege: none
+
+### PERF-096 Processor section
+- Was: v2 PERF-085
+- Source: TS Name, Vendor, Architecture, Identifier, Logical Processors, Speed
+- Behaviour: Rows: Name, Vendor ("AuthenticAMD"), Architecture, Identifier ("Family 25 Model 97 Stepping 2"), Cores, Logical processors, Base speed, Max speed, Microcode, Flags summary (virtualization, AVX-512 yes or no).
+- Linux data/mechanism: `/proc/cpuinfo` (`vendor_id`, `cpu family`, `model`, `stepping`, `model name`, `microcode`, `flags`), topology files, `cpuinfo_max_freq`, base speed per PERF-033. Speeds in integer MHz.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-097 System section
+- Was: v2 PERF-086, add amend (Information tab, System section, User Domain)
+- Source: TS Computer Name, User Name, User Domain, System Uptime, Boot Time, Process Count, Thread Count, Handle Count | MC Desktop group (APP-041)
+- Behaviour: Rows:
+  - Computer name: the pretty hostname plus the static hostname.
+  - User name.
+  - Domain: `getdomainname()`, or the DNS domain of the hostname. The row is hidden when that is empty or "(none)". TaskSlinger's "WORKGROUP" fallback is not used.
+  - System uptime (PERF-034 format) and Boot time (`YYYY-MM-DD HH:MM:SS` local).
+  - Process count, Thread count, Handle count: real values (fixing TaskSlinger's zero bug), computed as in PERF-033. "Handle count" has the tooltip "Open file descriptors, system-wide".
+  - Desktop ("KDE Plasma 6.x"), Windowing system ("Wayland"), Session type, Virtual terminal.
+- Linux data/mechanism:
+  - systemd-hostnamed `org.freedesktop.hostname1` (`PrettyHostname`, `StaticHostname`).
+  - `getpwuid(getuid())`; `getdomainname(2)`.
+  - Boot time = now − `CLOCK_BOOTTIME`.
+  - Desktop from `XDG_CURRENT_DESKTOP` plus `plasmashell --version` or `gnome-shell --version` (once), `XDG_SESSION_TYPE`, `XDG_VTNR`, and logind `Session` properties.
+- Verdict: ADAPT. The Windows domain becomes the DNS or NIS domain. Mission Center's Desktop group is merged in.
+- Phase: P2
+- Privilege: none
+
+### PERF-098 Memory section
+- Was: v2 PERF-087
+- Source: TS Total Physical, Available Physical, Memory Usage, Committed, Commit Limit, Peak Committed, Page Size
+- Behaviour: Rows: Total physical, Available physical, Memory usage (percent), Committed, Commit limit, "Peak committed (since tasklens started)", Page size ("4096 bytes"), Huge page size, Swap total, zram size.
+- Linux data/mechanism: `/proc/meminfo`, `sysconf(_SC_PAGESIZE)`, meminfo `Hugepagesize`. The kernel keeps no peak for Committed_AS, so tasklens tracks the maximum it has seen while running.
+- Verdict: ADAPT. The peak covers the tasklens run, and the label says so.
+- Phase: P2
+- Privilege: none
+
+### PERF-099 Memory modules section
+- Was: v2 PERF-088
+- Source: TS per-module block (Module, Slot, Capacity, Speed, Type, Form Factor, Manufacturer, Part Number), `information.png`
+- Behaviour: One block per populated DIMM: "Module 1", Slot ("P0 CHANNEL A (DIMM 0)"), Capacity, Speed ("3200 MT/s"), Type, Form factor, Manufacturer, Part number. There is no Serial number row.
+- Linux data/mechanism: Same udev keys as PERF-046. `SERIAL_NUMBER` is not read.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none (verified on this machine)
+- Applied: D-007, R-030
+
+### PERF-100 Disk drives section
+- Was: v2 PERF-089
+- Source: TS Disk Drives (Space "%s free of %s", Volume, type, interface)
+- Behaviour: One block per physical disk: Model, Type, Interface (NVMe, SATA, USB, SCSI, virtio), Capacity, Space ("812.40 GiB free of 1.82 TiB"), Volumes (mount paths), Serial.
+- Linux data/mechanism: Same as PERF-047 to PERF-050.
+- Verdict: ADAPT. Volume letters become mount paths.
+- Phase: P2
+- Privilege: none
+- Applied: table d
+
+### PERF-101 BIOS/Firmware section
+- Was: v2 PERF-090
+- Source: TS Firmware Type, BIOS Vendor, BIOS Version, BIOS Date
+- Behaviour: Rows: Firmware type ("UEFI" or "Legacy BIOS"), BIOS vendor, BIOS version, BIOS date, BIOS release, Secure Boot ("Enabled", "Disabled" or `Not reported`).
+- Linux data/mechanism:
+  - `/sys/firmware/efi` presence gives the firmware type.
+  - `/sys/class/dmi/id/{bios_vendor,bios_version,bios_date,bios_release}`, all world-readable.
+  - Secure Boot from byte 4 of `/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c` (U-27).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-102 Motherboard section
+- Was: v2 PERF-091
+- Source: TS Manufacturer, Product, Version
+- Behaviour: Rows: Manufacturer, Product, Version, System vendor, System product, Chassis type, Serial number.
+- Linux data/mechanism: `/sys/class/dmi/id/{board_vendor,board_name,board_version,sys_vendor,product_name,chassis_type}`. Serial from `board_serial`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: `board_serial` is mode 0400 (verified). Unprivileged it shows `Restricted` with the tooltip "Needs administrator access." The shield does not change this, because the tl-helper allowlist (R-004) has no DMI read, and there is no pkexec prompt for it (inferred).
+- Applied: R-050
+
+### PERF-103 Graphics section
+- Was: v2 PERF-092
+- Source: TS Name, Driver Version, Driver Date, DirectX Version, Temperature, Temperature Source, Dedicated Memory, Shared Memory, Resolution
+- Behaviour: One block per GPU: Name, Driver version, Kernel module (replaces Driver Date), Vulkan version and OpenGL version (replace DirectX Version), Temperature, Temperature source (PERF-069), Dedicated memory, Shared memory, Resolution (each display "3840x2160 @ 144 Hz", with ` (primary)` on the primary).
+- Linux data/mechanism: Same as PERF-062 to PERF-073.
+- Verdict: ADAPT. Same mapping as PERF-071.
+- Phase: P2
+- Privilege: none
+
+### PERF-104 Network adapters section
+- Was: v2 PERF-093
+- Source: TS Connection, Details, IP Address, MAC Address, Public IP with fetch
+- Behaviour: One block per visible interface: Connection (name and type), Details (adapter name, driver, link speed), IP address, MAC address. A final "Public IP" row has the Fetch button from PERF-060.
+- Linux data/mechanism: Same as PERF-054 to PERF-060.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+## Additional setup
+
+### PERF-105 Additional setup window
+- Was: v2 PERF-094; content of sys-app APP-042 (R-028 rewrites APP-042 to point here)
+- Source: MC first-run dialog ("Enabling Additional Values", Run Additional Setup, Revert, View Script, Copy Script Location, Copy Command, Copy Revert Command; success and failure dialogs)
+- Behaviour:
+  - There is no first-run dialog. One window titled "tasklens Additional Setup" opens from Help > "Additional setup…", from Settings > All settings > Privileges, and from every `Needs setup` link in the app.
+  - Rows, each with status text, an "Enable" or "Revert" button where one applies, "View script" and "Copy command":
+    - "CPU power draw" (PERF-106).
+    - "Journal access": shows `sudo usermod -aG systemd-journal $USER` with a Copy button. tasklens never changes groups itself.
+    - "Administrator helper": "Installed" or "Not installed" (`/usr/lib/tasklens/tl-helper`).
+    - "Fan sensors" (PERF-108, P4).
+    - "Per-process network": text only (PERF-107).
+  - Statuses: "Enabled", "Enabled (existing rule)", "Not enabled", "Not needed".
+  - Success shows "Done. No restart needed." and tasklens re-probes the source at once.
+  - Failure shows the script output with "Copy output" and "Retry".
+- Linux data/mechanism: A fixed root-owned script shipped at `/usr/lib/tasklens/tasklens-setup` with subcommands `rapl-enable`, `rapl-revert`, `sensors-detect` and `polkit-rule on|off` (the last is used by the P4 privilege settings, APP-049). It runs as `pkexec /usr/lib/tasklens/tasklens-setup <subcommand>` under the polkit action `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`). No script is written to `/tmp`. `state.first_run_done` does not exist.
+- Verdict: ADAPT. The first-run dialog becomes an on-demand window, and the temporary script becomes a packaged one.
+- Phase: P3 (Fan sensors row P4)
+- Privilege: pkexec with `io.github.oysteinkrog.tasklens.setup`. If cancelled, the row keeps its old status.
+- Applied: R-001, R-002, R-028
+
+### PERF-106 RAPL udev rule
+- Was: v2 PERF-095
+- Source: MC setup script step 2 (`/etc/udev/rules.d/99-powercap.rules`)
+- Behaviour:
+  - Status "Enabled" when `/etc/udev/rules.d/99-tasklens-powercap.rules` exists and `energy_uj` is readable. Status "Enabled (existing rule)" when `energy_uj` is readable and the tasklens file is absent, as on this machine through Mission Center's rule. tasklens never touches `99-powercap.rules`.
+  - "Enable" first shows: "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)." with "Enable" and "Cancel".
+  - "Revert" removes the tasklens rule and re-triggers. It says that a reboot may be needed before the files return to mode 0400.
+- Linux data/mechanism:
+  - `rapl-enable` writes `/etc/udev/rules.d/99-tasklens-powercap.rules` with one line: `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add`.
+  - `rapl-revert` removes the file and runs the same two commands.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: root through pkexec. Without it, CPU power shows `Needs setup` (U-37).
+- Applied: R-029
+
+### PERF-107 Per-process network row (nethogs capabilities dropped)
+- Was: v2 PERF-096
+- Source: MC setup script step 1 (`setcap cap_net_admin,cap_net_raw,cap_dac_read_search,cap_sys_ptrace+pe` on nethogs)
+- Behaviour: Mission Center's nethogs step is not offered. The "Per-process network" row only explains that tasklens attributes TCP traffic per process through sock_diag with no setup, and that exact numbers for all traffic need the later network helper (`tl-netmon`, P4).
+- Linux data/mechanism: Per-process network uses sock_diag; the process and connections specs own it. `tl-netmon` will use the reserved polkit action `io.github.oysteinkrog.tasklens.netmon`.
+- Verdict: DROP (the nethogs capability step). tasklens does not run nethogs, scraping its output is fragile, and capabilities on a general tool are too broad. The per-process network feature itself stays.
+- Phase: P3 (the row text only)
+- Privilege: none
+
+### PERF-108 Fan sensor detection
+- Was: v2 PERF-097
+- Source: MC setup script step 3 (`sensors-detect --auto`)
+- Behaviour:
+  - Status "Not needed" when any hwmon fan exists (as here: nct6797 is loaded).
+  - Otherwise "Run sensor detection" runs it and shows the output. The modules it finds are written to `/etc/modules-load.d/tasklens-sensors.conf` and loaded with `modprobe`. "Revert" removes that file.
+  - When lm_sensors is not installed, the row reads "Install lm_sensors to detect fan sensors" and has no button.
+- Linux data/mechanism: `tasklens-setup sensors-detect` runs `sensors-detect --auto`, parses its `MODULE_n` output, writes the file and runs `modprobe`.
+- Verdict: ADAPT. tasklens always writes the module file, so the result survives a reboot.
+- Phase: P4
+- Privilege: root through pkexec. Without it: no fan pages.
