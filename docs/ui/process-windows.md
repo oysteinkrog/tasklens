@@ -31,8 +31,7 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 | Set Affinity | UI-PWN-021 | Confirmation-style modal | `tasklens Set Affinity` | 640 × content (360 to 640) | same | no |
 | Set Priority (Custom) | UI-PWN-023 | Confirmation-style modal | `tasklens Set Priority` | 440 × content | same | no |
 | Real-time signal | UI-PWN-027 | Confirmation-style modal | `tasklens Send Signal` | 360 × content | same | no |
-| Confirmations | UI-PWN-025 | Confirmation | `tasklens` | 420 × content | 360 × 120 | no |
-| VirusTotal notice | UI-PWN-036 | Confirmation | `tasklens VirusTotal Notice` | 420 × content | 360 × 120 | no |
+| Confirmations (UI-PRC-014) | UI-PWN-025 | Confirmation | `tasklens` | 420 × content | 360 × 120 | no |
 | Run | UI-PWN-028 | Tool | `tasklens Run` | 480 × 248 | 480 × 248 | no |
 | Handle Search | UI-PWN-030 | Tool | `tasklens Handle Search` | 860 × 560 | 560 × 360 | yes |
 | Low memory | UI-PWN-032 | Tool, no parent | `tasklens - Low memory` | 420 × 560 | 360 × 400 | yes |
@@ -881,45 +880,33 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 ### UI-PWN-024 Realtime priority confirmation
 
 - **Implements:** PROC-066 ("Realtime" asks first; SCHED_RR priority 1 with reset on fork).
-- **Anatomy:** the confirmation window of UI-PWN-025 with:
-  - Message [spec]: "Realtime priority can freeze the desktop if the process spins. Set it anyway?"
-  - Detail line [chosen]: the target subtitle as UI-PWN-021, for example "firefox (PID 4321)".
-  - Buttons: "Cancel" and "Set realtime priority" (danger variant, default button) [chosen label naming the result].
-- **States:** as UI-PWN-025.
-- **Interaction:** opened by the Set Priority menu item "Realtime" (`SetPriorityRealtime`) and by the Custom dialog for FIFO and RR. Confirm sends `SetSched { policy: Rr, rt_prio: 1 }` for the menu item, or the Custom dialog's values. Toasts as UI-PWN-023.
-- **Data binding:** none beyond the captured targets.
-- **Build:** `priority.rs`, `fn confirm_realtime(targets, then: SchedRequest, cx)`.
-- **Tests:** `realtime_menu_item_opens_confirmation`; `realtime_cancel_sends_nothing`.
+- **Anatomy:** the process-action confirmation from `docs/ui/processes.md` UI-PRC-014, row "Set Priority > Realtime", with its exact texts: title "Set realtime priority?", description "Realtime priority can freeze the desktop if the process spins. Set it anyway?", buttons "Set realtime" (danger) and "Cancel". This file adds no text of its own.
+- **States and keys:** as UI-PRC-014 and UI-FND-021.
+- **Interaction:** opened by the Set Priority menu item "Realtime" (row menu or Threads menu) and by the Custom priority dialog for FIFO and RR (UI-PWN-023). Confirm sends `SetSched { policy: Rr, rt_prio: 1 }` for the menu item, or the Custom dialog's policy and priority. Toasts as UI-PWN-023.
+- **Data binding:** the captured targets.
+- **Build:** `priority.rs` calls the UI-PRC-014 helper `confirm(ConfirmKind::Realtime, targets, ..)` and continues with the request on confirm.
+- **Tests:** `realtime_from_custom_dialog_confirms_first`; `realtime_cancel_sends_nothing`.
 - **Phase:** P2.
-- **Decided here:** detail line; button label.
+- **Decided here:** nothing beyond the reuse.
 
-### UI-PWN-025 Confirmation window (frame used by the dialogs in this file)
+### UI-PWN-025 Confirmations used by this file
 
-- **Implements:** APP-045 (confirmations are modal windows titled "tasklens"; Esc and Cancel close; Enter triggers the default button), PROC-059 (confirmation rules), R-083.
-- **Anatomy:**
+- **Implements:** APP-045, PROC-059, R-083.
+- **Anatomy:** this file draws no confirmation of its own. Every confirmation it triggers uses the process-action confirmation of `docs/ui/processes.md` UI-PRC-014 (texts, titles, button labels, focus rule) inside the `TlDialog` frame of UI-FND-021 (window title "tasklens"). The triggers from this file:
 
-```text
-+--------------------------------------------------+
-| tasklens                               [pin] [x] | 32
-| [TriangleAlert 20]  Message text, t_base,        |
-|                     wraps at 340 px              |
-|                     Detail line, t_sm secondary  |
-|                          [Cancel]  [Action]      | footer 52
-+--------------------------------------------------+
-  width 420, height from content, minimum 160
-```
+| Trigger | Entry | UI-PRC-014 row |
+|---|---|---|
+| Realtime priority (menu or Custom dialog) | UI-PWN-024 | Set Priority > Realtime |
+| Signal to a protected target or to another user's process | UI-PWN-026, UI-PWN-011 | protected target; another user's process |
+| Signal to several targets | UI-PWN-026, UI-PWN-011 | not in UI-PRC-014: title "Send signal to N processes?", text "Send SIG{NAME} to N selected processes?", button "Send signal" (danger when the signal ends processes, primary otherwise) [chosen; to be added to UI-PRC-014's table] |
+| End Task or End Process from Handle Search results | UI-PWN-031 | End Task or End Process with 2+ targets; another user's process |
+| Large dump | UI-PWN-034 | Create dump file, VmRSS > 2 GiB |
+| VirusTotal first use | UI-PWN-036 | Open in VirusTotal, first use |
 
-  - `WindowKind::Dialog` (xdg_dialog_v1 modal to the parent), title "tasklens" [spec], width 420, not resizable. Content padding `sp6` (16). Icon and text per the `TlDialog` body (UI-FND-021): `triangle-alert` in `status.warning` for risky or destructive actions, `info` in `status.info` otherwise.
-  - Footer: as UI-PWN-021; the action button uses the danger variant for destructive or risky actions and primary otherwise.
-- **States:** as UI-FND-021: Enter triggers the action button; Cancel and Esc close with no action; window close (x) equals Cancel. Initial focus: Cancel for danger-variant confirmations (UI-FND-021), the action button otherwise.
-- **Interaction:** Tab cycles Cancel and the action button; Left and Right also move between them [chosen]. The parent window cannot be clicked while the dialog is open (modal).
-- **Data binding:** none.
-- **Build:** `TlDialog::confirm` (UI-FND-021), opened by `windows::frame::open_confirmation(parent, ConfirmSpec { message, detail, action_label, variant, on_confirm }, cx)`. Processes-table confirmations from `docs/ui/processes.md` use the same helper when that file does not specify its own.
-- **Performance:** static.
-- **Accessibility:** the window title plus the message are what a window switcher shows; buttons name their result.
-- **Tests:** `confirm_enter_triggers_action`; `confirm_esc_cancels`; `confirm_close_button_is_cancel`.
+- **Build:** the UI-PRC-014 helper `pages/processes/confirm.rs::confirm(kind, targets, w, cx)`, called with the parent window's handle (a Properties window, Handle Search or the main window).
+- **Tests:** `pwn_triggers_use_prc014_texts` (each trigger opens a confirmation whose title matches the UI-PRC-014 table).
 - **Phase:** P1.
-- **Decided here:** Left and Right between buttons; helper name.
+- **Decided here:** the several-targets signal confirmation text.
 
 ### UI-PWN-026 Send Signal submenu
 
@@ -946,7 +933,7 @@ Real-time signal…
 - **States:** hover `menu_hover`; keyboard highlight the same; disabled: the whole "Send Signal" item is disabled with tooltip "Kernel threads cannot be signalled." when every target is a kernel thread [chosen; PROC-059 otherwise refuses with that toast].
 - **Interaction:**
   - Each item dispatches `SendSignal(Signal)` with the captured targets (`Signal::Other(n)` for the other list). App rows send to the primary processes (PROC-065).
-  - Confirmation per PROC-059 (protected target, another user's process, or more than one target) through UI-PWN-025 with the message "Send SIGHUP to 4 processes?" and the action button "Send signal" [chosen], or the protected-target text from PROC-059.
+  - Confirmation per PROC-059 (protected target, another user's process, or more than one target) through UI-PWN-025, which gives the texts.
   - Refusals (tasklens itself, PID 1, kernel threads) show the PROC-059 toasts.
   - Toasts: one process "Sent SIGHUP to firefox (1234)" [spec]; several "Sent SIGHUP to 4 processes" [chosen]; app row "Sent SIGHUP to Firefox (3 processes)" [chosen]; failures in the PROC-058 forms.
 - **Data binding:** `Command::Action(ActionRequest { kind: Signal(sig), .. })`.
@@ -1192,7 +1179,7 @@ Real-time signal…
 
 - **Implements:** PROC-075 (confirmation over 2 GiB, progress toast, gdb missing, administrator rights), R-004.
 - **Anatomy:**
-  - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PWN-025 with the message "firefox (PID 4321) uses 3.42 GiB. The process is paused while the core file is written. Create the dump anyway?" and the action button "Create dump" (Primary) [chosen text and label].
+  - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PRC-014 row "Create dump file, VmRSS > 2 GiB" (title "Create a large dump?", button "Create dump"), through UI-PWN-025.
   - Progress toast: TlToast Info, top centre of the window that started the dump, autohide off while running, id `DumpToast(action_id)`, text "Writing core… 1.2 GiB" [spec], the size in table (d) memory format, updated every 500 ms [chosen].
 - **States:**
   - Before the first size read: "Writing core…" [chosen].
@@ -1205,7 +1192,7 @@ Real-time signal…
 - **Accessibility:** toast text is the only progress indicator; it carries the size as text.
 - **Tests:** `dump_confirm_only_over_2gib`; `dump_progress_toast_updates_in_place` (same toast id, new text); `dump_disabled_without_gcore_tooltip`.
 - **Phase:** P3.
-- **Decided here:** confirmation text and button; 500 ms stat polling; the UI picks the output path; "Writing core…" before the first size.
+- **Decided here:** 500 ms stat polling; the UI picks the output path; "Writing core…" before the first size.
 
 ### UI-PWN-035 Dump result toasts
 
@@ -1225,18 +1212,18 @@ Real-time signal…
 
 - **Implements:** PROC-074 (background hash, toast after 500 ms, one-time notice, errors, nothing uploaded), R-095.
 - **Anatomy:**
-  - Notice window: UI-PWN-025 frame, title "tasklens VirusTotal Notice" [chosen, APP-045 naming], icon `info`, message "This opens virustotal.com with the file's hash. The file is not uploaded." [spec text]; buttons "Cancel" and "Open VirusTotal" (Primary, default button) [chosen label].
+  - Notice: UI-PRC-014 row "Open in VirusTotal, first use" (title "Open VirusTotal?", text "This opens virustotal.com with the file's hash. The file is not uploaded." [spec text], buttons "Open" and "Cancel"), through UI-PWN-025.
   - Hashing toast: TlToast Info "Computing SHA-256…" [spec], id `VtToast(action_id)`, shown only when hashing takes longer than 500 ms [spec].
 - **States:**
-  - First use (`state.toml [processes] virustotal_notice_accepted = false`): the notice opens before anything is hashed. "Open VirusTotal" sets the flag to true (saved through the state file's debounced save) and continues; Cancel does nothing and keeps the flag false [spec R-095].
+  - First use (`state.toml [processes] virustotal_notice_accepted = false`): the notice opens before anything is hashed. "Open" sets the flag to true (saved through the state file's debounced save) and continues; Cancel does nothing and keeps the flag false [spec R-095].
   - Later uses: no notice.
   - Hash done: the toast (if shown) is removed and the browser opens `https://www.virustotal.com/gui/file/{sha256}` through the portal OpenURI, falling back to `xdg-open` [spec].
   - Errors (Error toasts, replacing the hashing toast) [spec]: "SHA-256 unavailable", "Process image unavailable"; browser launch failure: "Could not open the browser." [chosen].
-- **Interaction:** row menu item "Open in VirusTotal" (`OpenVirusTotal { key }`, menu owned by `docs/ui/processes.md`). Enter in the notice triggers "Open VirusTotal"; Esc cancels.
+- **Interaction:** row menu item "Open in VirusTotal" (`OpenVirusTotal { key }`, menu owned by `docs/ui/processes.md`). Keys in the notice follow UI-PRC-014.
 - **Data binding:** `Command::ComputeHashes(key)` (shared with UI-PWN-008; the engine cache by dev, inode and mtime makes a second request instant); the result arrives in the General detail payload for that key, which the UI demands while the request is pending.
 - **Build:** `notices.rs`, `fn open_virustotal(key, cx)`.
 - **Performance:** hashing off the UI thread; the 500 ms timer is one `Timer::after` task, dropped when the hash arrives first.
 - **Accessibility:** the notice states what is sent (the hash) and what is not (the file).
 - **Tests:** `vt_notice_shown_once_then_flag_saved`; `vt_cancel_keeps_flag_false`; `vt_toast_only_after_500ms`; `vt_error_toasts`.
 - **Phase:** P2.
-- **Decided here:** notice title and button label; browser failure text; reuse of the General hash path.
+- **Decided here:** browser failure text; reuse of the General hash path.
