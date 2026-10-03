@@ -192,3 +192,55 @@ Steps of UI-SHL-110 by bead: 1 to 3 and 7 to 10 in E33-A1, 4 and 5 in E33-A2, ex
 14. **E33-OI-14. Tray wiring in `main.rs` is unassigned.** `tl-tray` must be spawned by tl-app (tl-ui cannot depend on it) and connected to `tray_bridge.rs` channels. `main.rs` chain edits are listed only for E01 and E32. Recommendation: add an E31 chain-edit bead "E31: add tray spawn to tl-app/src/main.rs" depending on E33-A1, and allow `tl-tray` in tl-app's `Cargo.toml` by the same bead (ADR-001 already lists `tl-tray (P3)` in the tl-app row).
 15. **E33-OI-15. `build.rs` is not in the section 2 file list.** E33-001 creates `crates/tl-app/build.rs` for the git hash (APP-053, ADR-015). Recommendation: record it as an E33 owner-only file.
 
+## E01 Phase 0 spike
+
+26 beads (2 anchors updated in place, 24 created under epic tasklens-wlf). Priority 0 except E01-013 and E01-014 (gallery entry, UI-FND-030 is P1) and E01-023 and E01-024 (they need the P1 anchors E13-A2, E10-A1 and E12-A2; see E01-OI-14 and E01-OI-15). E01-019 and E01-020 are conditional on the soak failing and are closed as not needed if it passes. No bead was made for the table (c) `--gallery` doc edit (R-138 item 15): `docs/RECONCILIATION.md` table (c) already lists `--gallery`.
+
+| Plan key | Bead ID | Title | P | Depends on |
+|---|---|---|---|---|
+| E01-001 | tasklens-wlf.3 | E01: add bench feature to tl-ui/Cargo.toml | 0 | E16-A1 (tasklens-fut.1) |
+| E01-002 | tasklens-wlf.4 | E01: add bench feature to tl-app/Cargo.toml | 0 | E33-A1 (tasklens-cr0.1), E01-001 |
+| E01-003 | tasklens-wlf.5 | E01: add mod bench to tl-ui/src/lib.rs | 0 | E16-A1 (tasklens-fut.1), E01-001 |
+| E01-004 | tasklens-wlf.6 | Bench synthetic CPU, device and stats sources | 0 | E01-003, E03-A1 (tasklens-as2.1) |
+| E01-005 | tasklens-wlf.7 | BenchEngine: scripted EngineClient for the bench scenes | 0 | E01-004, E03-A2 (tasklens-as2.2) |
+| E01-006 | tasklens-wlf.8 | Bench frame statistics and JSON report | 0 | E01-003, E03-A1 (tasklens-as2.1), E19-A1 (tasklens-yrf.1) |
+| E01-007 | tasklens-wlf.9 | Bench scenes perf-cpu, static and bridge with the run loop | 0 | E01-005, E01-006, E15-A1 (tasklens-ug9.1), E15-A2 (tasklens-ug9.2), E16-A1 (tasklens-fut.1), E17-A1 (tasklens-lgw.1), E19-A1 (tasklens-yrf.1), E19-A2 (tasklens-yrf.2), E24-A1 (tasklens-crw.1) |
+| E01-008 | tasklens-wlf.10 | Bench scene table-2000 with synthetic process table | 0 | E01-007, E18-A1 (tasklens-rsf.1), E18-A2 (tasklens-rsf.2), E22-A1 (tasklens-pdu.1) |
+| E01-009 | tasklens-wlf.11 | tl-app bench entry: bench_main.rs | 0 | E01-002, E01-007, E33-A1 (tasklens-cr0.1), E08-A1 (tasklens-8hz.1), E09-A1 (tasklens-8q0.1), E12-A1 (tasklens-hjn.1) |
+| E01-010 | tasklens-wlf.12 | E01: add --bench arm to tl-app/src/main.rs | 0 | E33-A1 (tasklens-cr0.1), E01-009 |
+| E01-011 | tasklens-wlf.13 | cargo xtask bench: three runs per scene, median and table | 0 | E02-A1 (tasklens-v9m.1) |
+| E01-012 | tasklens-wlf.14 | E01: add bench arm to xtask/src/main.rs | 0 | E02-A1 (tasklens-v9m.1), E01-011 |
+| E01-A1 | tasklens-wlf.1 | Bench harness and perf-cpu scene run end to end | 0 | E01-008, E01-010, E01-012 |
+| E01-013 | tasklens-wlf.15 | tl-app gallery entry: gallery_main.rs | 1 | E01-002, E33-A1 (tasklens-cr0.1), E15-A3 (tasklens-ug9.3), E16-A1 (tasklens-fut.1), E17-A1 (tasklens-lgw.1) |
+| E01-014 | tasklens-wlf.16 | E01: add --gallery arm to tl-app/src/main.rs | 1 | E01-013, E01-010, E33-A1 (tasklens-cr0.1) |
+| E01-015 | tasklens-wlf.17 | Bench soak scene for zed#64499: three windows, 10 minutes | 0 | E01-A1 |
+| E01-016 | tasklens-wlf.18 | Phase-0 results file and gate runs of the four scenes | 0 | E01-A1 |
+| E01-017 | tasklens-wlf.19 | First-frame, minimized-CPU and RSS gate measurements | 0 | E01-016, E20-A1 (tasklens-jqk.1), E33-A1 (tasklens-cr0.1) |
+| E01-018 | tasklens-wlf.20 | Run the zed#64499 soak and record U-9 | 0 | E01-015, E01-017 |
+| E01-019 | tasklens-wlf.21 | Conditional: vendor gpui-pre-linux 0.3.7 with the zed#64499 fix | 0 | E01-018 |
+| E01-020 | tasklens-wlf.22 | Conditional: E01: add gpui-pre-linux patch to root Cargo.toml and re-run the soak | 0 | E01-019, E02-A1 (tasklens-v9m.1) |
+| E01-021 | tasklens-wlf.23 | Phase-0 manual checklist: CSD, monitors, lock, suspend, restore, sharpness, run return | 0 | E01-020, E20-A1 (tasklens-jqk.1), E33-A1 (tasklens-cr0.1) |
+| E01-022 | tasklens-wlf.24 | Record the polkit dismissed and denied error names (U-39) | 0 | E01-021 |
+| E01-A2 | tasklens-wlf.2 | Phase-0 results and decision recorded | 0 | E01-016, E01-017, E01-018, E01-019, E01-020, E01-021, E01-022, E15-A1 (tasklens-ug9.1) |
+| E01-023 | tasklens-wlf.25 | GPU power baseline through the probe (report only) | 1 | E01-A2, E13-A2 (tasklens-ndy.2) |
+| E01-024 | tasklens-wlf.26 | Collection-cost gates with the real engine (U-10) | 1 | E01-A2, E10-A1 (tasklens-dwy.1), E12-A2 (tasklens-hjn.2) |
+
+### Open items
+
+- **E01-OI-1 PRNG for the synthetic data.** UI-PRF-053 says "ChaCha8 or `fastrand` seeded"; neither crate is in `tl-ui`'s allowed row (ADR-001). Recommendation: SplitMix64 plus Box-Muller written in `bench/synth.rs`, no new dependency. Blocks E01-004.
+- **E01-OI-2 Reading of the synthetic value rules.** UI-PRF-053 gives "55% +- 1 random walk", "10% +- 8", "295 +- 3", "Load average random walk" and network "0.01..5 Mbps bursts" without step sizes or burst probability. Recommendation: "X +- N" is a fresh uniform draw in [X - N, X + N] each second; random walk steps are uniform in [-1, 1] (memory) and [-0.05, 0.05] (load average, start 1.24 0.98 0.87); network bursts use the disk rule (p = 0.1 per second, else 0.01 Mbps). The bench device catalog also uses placeholder identities (16 cores x 2 threads, disk major:minor 259:0..3, ifindex 2 and 3). Blocks E01-004 and E01-005.
+- **E01-OI-3 JSON shape lacks the "none above 3 x period" count.** The UI-PRF-053 shape has `missed_frames` only. Recommendation: add `long_missed_frames` (intervals above 3 x period) after `missed_frames`. Affects E01-006.
+- **E01-OI-4 MB unit in `rss_mb` and `pss_mb`.** Not stated. Recommendation: 1,000,000 bytes, so the RSS gate "150 MB" compares directly.
+- **E01-OI-5 `CpuPage.bench_show_both` lives in E24's `cpu.rs`.** UI-PRF-053 names the bench-only flag, but `cpu.rs` is E24 owner-only and E01 has no chain-edit right. Recommendation: E24-A1 implements the flag behind `#[cfg(feature = "bench")]` (B6 writer to add it to the E24-A1 bead). E01-007 assumes it.
+- **E01-OI-6 Paint hook for bridge latency.** UI-PRF-053 measures to "the first `ChartElement::paint` that includes that sample". `ChartElement` is E19's. Recommendation: E19-A1 exposes, behind `bench`, a per-window record of (newest painted sample `t_ns`, `now_boot_ns()` at paint) that `bench/stats.rs` reads. E01-007 assumes it.
+- **E01-OI-7 `table-2000` columns and synthetic rows.** ADR-014 says 10 columns (written against ADR-011's old 10-column default); R-006 now has 9 defaults. Names, group sizes and value ranges are not given. Recommendation: R-006's nine columns plus `power` (101 px); 40 App groups "App 01" to "App 40" of 50 processes each named `proc-0001` to `proc-2000`; CPU uniform 0..5%, memory 1..500 MiB, disk 0..2 MiB/s, network 0..1 Mbps, GPU 0..10%, all redrawn each second. Blocks E01-008.
+- **E01-OI-8 Access to the table's scroll handle.** The scroll must drive the production table's `UniformListScrollHandle`. Recommendation: E18-A1 exposes `TlTreeTable::scroll_handle(&self) -> &UniformListScrollHandle` and E22-A1 exposes the table entity from `ProcessesPage` (B5 and B8 writers). E01-008 assumes it.
+- **E01-OI-9 Process CPU clock.** ADR-014 names `/proc/self/stat` utime + stime; `tl-ui` cannot read clocks itself and `tl-app` has no `libc` for `CLK_TCK`. Recommendation: `tl-app` supplies `clock_gettime(ProcessCPUTime)` and `ThreadCPUTime` through rustix (same quantity, ns resolution) as `BenchClocks` function pointers. No allowed-row change needed. E01-006 and E01-009 are written this way.
+- **E01-OI-10 Build wrapper inside `xtask bench`.** Recommendation: `xtask bench` builds through the build-rule flock and `systemd-run` command when `TL_BUILD_WRAP=1`, plainly otherwise.
+- **E01-OI-11 Gallery window title.** UI-FND-030 gives none. Recommendation: "tasklens Gallery".
+- **E01-OI-12 How the zed#64499 soak is launched.** ADR-010 fixes the soak (three windows, 1 Hz, 10 minutes, no input) but no command, and table (c) has no `soak` scene. Recommendation: bench scene `soak` (E01-015) with the main `perf-cpu` composition at 1 Hz plus two bench-only 600 x 300 graph windows, run with `--duration 600 --warmup 0`; add `soak` to table (c)'s scene list. Blocks E01-015.
+- **E01-OI-13 Files for the conditional zed#64499 patch.** `vendor/gpui-pre-linux/` has no owner row and the root `Cargo.toml` chain-edit rule names only P3 `members` lines, but ADR-010 step 3 fixes both the directory and the `[patch.crates-io]` line. Recommendation: allow E01-019 and E01-020 as written (E01 owns `vendor/gpui-pre-linux/`, one chain edit of the root `Cargo.toml`).
+- **E01-OI-14 GPU power baseline placement.** ADR-014 and open question 7 want a report-only GPU baseline in phase 0, but the probe and client are P1 (E13). Recommendation: phase-0 reports carry `gpu: null`; E01-023 (priority 1, after E01-A2, depends on E13-A2) adds the measurement and the new test file `tl-app/tests/real_gpu_baseline.rs`. Alternative: make E13-A1 and E13-A2 P0.
+- **E01-OI-15 Collection-cost measurement method and timing.** ADR-014 gives the gates but no method, and they need P1 workers. Recommendation: sum utime + stime of threads named `tl-engine*` plus the probe child over 60 s; run in E01-024 (priority 1, after E01-A2), allowed by decision rule step 4.
+- **E01-OI-16 First-frame log line in P0.** E01-017 reads `first_frame_ms` (UI-SHL-110 step 11). Recommendation: confirm that E20-A1 (P0) writes that log line; otherwise the first-frame gate is recorded at P1.
+
