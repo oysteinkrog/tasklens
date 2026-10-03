@@ -640,4 +640,585 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 - **Phase**: P2.
 - **Decided here**: sizes, 12-item threshold for the filter field, type-ahead.
 
+### UI-FND-018 TlTabs (in-window tab strip for Properties and Settings)
+
+- **Implements**: PROC-077 Properties tabs ("General", "Threads [n]", …), SYS-011 to SYS-014
+  Service Properties tabs, APP-023 (the Settings window uses a page sidebar, not tabs; TlTabs is
+  used inside its "Performance" page for per-device groups), APP-042 Additional Setup sections.
+  The main window tab strip is the shell's (`shell.md`), styled after APP-027; TlTabs is the
+  plainer in-window style.
+- **Anatomy** (measured from `adv_sheet_01` Properties window: a 32 px strip, labels centered in
+  equal-width cells, the active cell slightly lighter with a 2 px accent underline):
+
+```text
+┌───────────┬───────────┬──────────────┬──────────┐ h 32, bg tab_bg
+│  General  │Threads [17]│ Handles [1181]│  Token   │ t_sm, padding x sp5, min w 80
+└═══════════┴───────────┴──────────────┴──────────┘ 1 px divider below; active: 2 px accent
+```
+
+  Active: text `text_primary` weight 500, bg `window_bg`, 2 px `accent` line at the bottom
+  spanning the cell. Inactive: `text_secondary`, bg `tab_bg`. Counts "[n]" use `tnum` and update
+  live. Overflow: when the cells do not fit at min width 80, the strip scrolls horizontally and a
+  "»" `TlButton::Icon` (`chevron-right`) at the right opens a `TlMenu` listing every tab with a
+  check on the active one (kit `TabBar::menu(true)`).
+- **States**: hover (inactive): bg `tab_hover`, text `text_primary`. Pressed: bg `header`.
+  Focused: the strip is one tab stop; the focused cell shows the focus ring inset 2 px (clipped
+  strip). Disabled tab (`Strings` before its data loads): 0.5, not selectable, tooltip from the
+  owner. Switching animates the underline sliding over `m_fast` (120 ms) and the content with no
+  crossfade (content is a `match` on the index; the main window's 250 ms crossfade is APP-027's
+  and belongs to the shell). Instant under reduced motion.
+- **Interaction**: click selects. Keyboard, inside the strip: Left/Right move and select
+  (wrapping), Home/End, Ctrl+Tab and Ctrl+Shift+Tab also work while focus is anywhere inside the
+  window the strip belongs to (bound on the window root with `key_context("TlTabsWindow")`).
+  `on_change(usize)`.
+- **Data binding**: the owner holds `selected: usize` and the labels; counts come from the owner's
+  snapshot slice.
+- **Build**: `components/tabs.rs`, wraps kit `TabBar::new(stable_id).underline().small()` with
+  `Tab` children; the keyboard handling is tasklens's because the kit has none. The id must be
+  stable per window (animation state is keyed on it).
+- **Performance**: value type; labels are `SharedString`s built once; the count suffix is
+  re-formatted only when the count changes (owner caches `(count, SharedString)`).
+- **Tests**: `tabs::tests::arrow_keys_wrap`, `tabs::tests::ctrl_tab_from_content`,
+  `tabs::tests::overflow_menu_lists_all`.
+- **Phase**: P2.
+- **Decided here**: 32 px strip, underline style, min cell width 80, overflow rule.
+
+### UI-FND-019 TlTooltip
+
+- **Implements**: PROC-039 row hover tooltip (600 ms, up to 8 lines), ADR-003 validity tooltips,
+  APP-003 shield tooltips, D-004 Memory header tooltip, PROC-061 "Ends the process immediately
+  (SIGKILL)", every icon-only button (rule 8), PERF-013 reason tooltips.
+- **Anatomy**:
+
+```text
+┌─────────────────────────────────┐ bg menu_bg, 1 px divider, r_sm, shadow (menu level)
+│ sp4 │ text t_sm text_primary    │ padding y sp2, x sp4
+│     │ second line …             │ max width 360, wraps at word boundaries
+│     │ Ctrl+E              t_xs  │ optional shortcut line, text_secondary, right-aligned
+└─────────────────────────────────┘
+```
+
+  Two kinds: `TlTooltip::text(impl Into<SharedString>)` for one short line, and
+  `TlTooltip::lines(Vec<SharedString>)` for the row tooltip, where each line is its own text run
+  so long lines wrap independently. `.action(&dyn Action)` appends the shortcut line (kit
+  `Tooltip::action`). Max width 360, max height 12 lines (about 190 px); more lines are cut and
+  the last visible line ends with "…". The command-line line is already cut to 512 characters by
+  PROC-039 before it reaches the tooltip; the tooltip itself applies no middle ellipsis.
+- **States**: shown; hidden. No hover state of its own (the pointer never enters it; it closes on
+  pointer move off the trigger, mouse down, key down, scroll, or window deactivate).
+- **Interaction**: delay 500 ms for buttons and glyphs (kit default), 600 ms for table Name cells
+  (PROC-039); both as `tooltip_show_delay`. Position: below the trigger, left-aligned, offset
+  `sp2`; flips above when there is no room below; clamps to the window. Keyboard: a focused
+  button shows its tooltip after the same delay while focus rests on it, and Esc hides it (focus
+  stays). Moving between two triggers within 300 ms shows the second at once (kit grace period
+  applies to kit widgets; for `.id().tooltip(..)` on plain elements there is no grace period, and
+  tasklens does not add one).
+- **Data binding**: text is built by the owner when the tooltip opens (the closure runs then),
+  so a row tooltip reads the current `ProcessMeta` and formats once per open.
+- **Build**: `components/tooltip.rs`, wraps kit `Tooltip::new(..)` / `Tooltip::element(..)` and
+  returns the `AnyView` for GPUI's `.tooltip(|w, cx| ..)`. Kit widgets with a `.tooltip(text)`
+  builder get `TlTooltip::text` content through the same style because `popover` and
+  `popover_foreground` are mapped (UI-FND-002).
+- **Performance**: a tooltip is one extra view only while visible. The table attaches the
+  tooltip closure to the Name cell element only; the closure captures the `NodeId`, not the text.
+- **Accessibility**: tooltips repeat the accessible name; nothing is tooltip-only (the row
+  tooltip's lines are all available in Properties or Copy details).
+- **Tests**: `tooltip::tests::wraps_at_360`, `tooltip::tests::twelve_line_cut`,
+  `tooltip::tests::escape_hides_keeps_focus`.
+- **Phase**: P1.
+- **Decided here**: max width 360, 12-line cut, keyboard show, placement.
+
+### UI-FND-020 TlToast queue rules
+
+- **Implements**: APP-044 (position, max 4, 5 s, 8 s errors, hover pause, replace in place,
+  system delivery when hidden), PROC-058 toasts, R-035, ADR-011 settings toasts, ADR-015 (a
+  collection error never becomes a toast unless the user started an action).
+- **Anatomy**:
+
+```text
+          ┌─ i_md icon ─┬──────────────────────────────────────┬───┐  width 382 (kit default)
+          │   ●         │ Message text t_base text_primary     │ x │  min h 40, padding sp4
+          │             │ second line wraps (max 3 lines)      │   │  bg menu_bg, 1 px divider
+          │             │ [ Retry as administrator ]  (button) │   │  r_md, shadow (toast level)
+          └─────────────┴──────────────────────────────────────┴───┘
+   position: horizontally centered in the window, top = title bar 34 + tab strip 32 + sp4 8 = 74
+   stacked downward with sp3 gap, newest at the bottom of the stack
+```
+
+  Icon per kind: Info `info` in `status.info`; Success `circle-check` in `status.success`;
+  Warning `triangle-alert` in `status.warning`; Error `circle-x` in `status.danger`. Progress
+  (in-flight actions, service jobs): `TlSpinner` `i_md` in `text_secondary`. Close button
+  `TlButton::Icon` sm with `x` `i_sm`, always present. An optional action button is a
+  `TlButton::Secondary` sm under the text, left-aligned. Text is at most 3 lines; longer text is
+  cut with "…" and the full text is in the toast's tooltip.
+- **States**: entering (slides down 8 px and fades in over `m_base` 200 ms; the kit's 400 ms
+  enter is overridden by the tasklens settings below), shown, paused (pointer over any toast in
+  the stack, or keyboard focus on one), exiting (fades over 200 ms `ease_in_cubic`), replaced (same
+  key: the content swaps in place with no animation and the timer restarts). Reduced motion or
+  `motion.animations = false`: no enter or exit animation.
+- **Queue rules** (`components/toast.rs::ToastQueue`, one per window, a GPUI `Entity`):
+  1. At most 4 toasts are visible. A fifth is appended to a FIFO wait list and appears when a
+     slot frees. The wait list holds at most 16; a 17th drops the oldest waiting Info or Success
+     toast (never a Warning, Error or Progress one).
+  2. Durations from the moment the toast becomes visible: Info and Success 5 s, Warning 5 s,
+     Error 8 s, Progress none (it stays until replaced or 120 s, when it becomes the Warning
+     "Outcome unknown" per PROC-058), toast with an action button 15 s. The kit's fixed 5 s
+     autohide is used only for the 5 s kinds; the others set `autohide(false)` and the queue runs
+     its own `cx.spawn` timer with `remove_notification1::<ToastKey>(key)`.
+  3. Hover or focus on any toast pauses every visible toast's timer; it resumes when the pointer
+     leaves the stack (kit behaviour for 5 s toasts; the queue mirrors it for its own timers).
+  4. Replace in place: `ToastKey(u64)` chosen by the owner (`ActionId` for actions, a unit hash
+     for service jobs, a fixed key per settings warning). Pushing with an existing key swaps the
+     content and kind and restarts the timer; the position in the stack is kept.
+  5. Coalescing: a toast with the same kind and text as a visible one pushed within 1 s is not
+     added; the visible one's timer restarts and a count suffix " (×2)" is appended from the
+     second repeat on (so "Copied to clipboard" pressed five times shows one toast "Copied to
+     clipboard (×5)").
+  6. Priority: an Error pushed while 4 toasts are visible evicts the oldest visible Info or
+     Success toast instead of waiting. Warnings and Progress toasts wait.
+  7. Esc never closes toasts (table b reserves Esc). Clicking the toast body does nothing unless
+     `on_click` was given; the X closes it; the action button runs its action and closes it.
+  8. Visibility: toasts are pushed only while the main window is visible (ADR-010 hidden state);
+     while hidden to the tray, Error toasts go to a desktop notification through
+     `NotificationDelivery::System` and the others are dropped. On restore nothing is replayed.
+  9. Secondary windows have their own queue and stack (each has a kit Root, APP-045), positioned
+     at top = title bar 34 + sp4.
+- **Interaction**: Tab reaches the toast stack last in the window's focus order; inside it Tab
+  moves between the action button and the X of each toast. Enter on the X closes, Enter on the
+  action runs it.
+- **Data binding**: owners call `ToastQueue::push(kind, text, key: Option<ToastKey>, action:
+  Option<ToastAction>)`. `ToastAction { label, action: Box<dyn Action> }`. The exact texts live in
+  the owning spec entries; this file fixes only the shapes.
+- **Build**: `components/toast.rs`: `ToastQueue` (Entity, created in `MainWindow::new`) over kit
+  `window.push_notification(Notification::..)`. In `theme::map::apply`: `notification.placement =
+  Anchor::TopCenter`, `margins.top = 34 + tab_strip + sp4` (the shell exports `TAB_STRIP_H`; if
+  the shell's value is not 32 the shell's value wins), `max_items = 4`, `width = px(382)`. Enter and
+  exit durations: the kit's are fixed at 400 and 200 ms; the queue cannot change them, so the
+  entry animation is accepted as 400 ms (noted in "Open").
+- **Performance**: the kit runs a 50 ms tick only while a toast animates or counts down. The queue
+  timers are `cx.background_executor().timer` futures, one per non-5 s toast. No toast is pushed
+  from render.
+- **Accessibility**: each toast has its icon's kind as an accessible prefix ("Error: …") in the
+  tooltip text; the stack is keyboard reachable.
+- **Tests**: `toast::tests::fifth_waits_then_shows`, `toast::tests::error_evicts_oldest_info`,
+  `toast::tests::same_key_replaces_in_place`, `toast::tests::coalesce_count_suffix`,
+  `toast::tests::error_lives_8s_info_5s` (with `TestAppContext` time advance),
+  `toast::tests::hidden_window_drops_or_routes_to_system`.
+- **Phase**: P1.
+- **Decided here**: stack order, wait list size, eviction, coalescing text, action toast 15 s,
+  Progress 120 s, 3-line cut, focus order, secondary window margin.
+
+### UI-FND-021 TlDialog and TlSecondaryWindow (frames)
+
+- **Implements**: APP-045 (every dialog is a window, titles, modality), APP-009 and R-073 and
+  PROC-056 (pin button on every window), PROC-059 confirmations, PROC-077 window frame, APP-014,
+  APP-015, APP-023, APP-030, APP-037, APP-042, APP-053 frames, ADR-010 decorations, D-006.
+- **Anatomy** of a secondary window (`TlSecondaryWindow`):
+
+```text
+┌────────────────────────────────────────────────────────────────┐ CSD, kit window_border shadow
+│ icon16  Title t_base 500 text_primary       [pin][min][max][x] │ title bar 34, bg titlebar
+├────────────────────────────────────────────────────────────────┤ 1 px divider
+│                                                                │
+│   content (owner's), bg window_bg                              │
+│                                                                │
+└────────────────────────────────────────────────────────────────┘
+```
+
+  Title bar: kit `TitleBar` (34 px, Linux left padding 12). The caption buttons are the kit's
+  (34 px wide each, close hover `status.danger` fill with white icon, others hover `tab_hover`);
+  the pin is a tasklens `TlButton::Toggle` 34 × 34 placed just left of minimize, icon Lucide `pin`
+  `i_md`; on: `accent` fill at alpha 0.25 and the icon tinted `accent`, tooltip "Always on top"
+  (off) or "Always on top (on)". Where no keep-above mechanism exists it is disabled with tooltip
+  "Not supported by this desktop" (R-073). Minimize and maximize appear only when
+  `window.window_controls()` reports them. Double-click the title maximizes (tool windows) or does
+  nothing (modal confirmations); right-click opens the compositor window menu. The title text is
+  the exact string from the APP-045 table or the owning spec, truncated at the end with "…" when
+  the bar is narrow (never the middle; the identifying part of these titles is at the start).
+  Under `appearance.decorations = "server"` the title bar is not drawn and the pin moves to the
+  top-right corner of the content as a 24 px `TlButton::Toggle` (decided).
+
+  Kinds:
+
+| Kind | `WindowKind` | Modal | Default size | Min size | Resizable | Esc |
+|---|---|---|---|---|---|---|
+| Confirmation (`TlDialog::confirm`) | `Dialog` | yes, to its parent | content-sized, width 420, height 140 to 320 | 360 × 120 | no | Cancel |
+| Tool window (Settings, Theme Editor, Shortcuts, Run, Handle Search, About, Additional Setup, Crash Report) | `Floating` | no | per owner | 480 × 320 | yes (About and Crash Report: no) | closes (Run: cancels) |
+| Properties window (process, service, startup, connection) | `Floating` | no | 900 × 640 (PROC-077); service and others per owner | 640 × 400 | yes | closes |
+
+  Confirmation body (`TlDialog`):
+
+```text
+┌───────────────────────────────────────────────┐ width 420
+│ [i_lg icon]  Ending kwin_wayland will end     │ padding sp6; icon triangle-alert status.warning
+│              your desktop session. End it     │ (danger actions) or info status.info; text t_base
+│              anyway?                          │ text_primary, wraps, max 6 lines
+│                                               │
+│                          [ Cancel ] [ End ]   │ footer: right-aligned, gap sp4, buttons md
+└───────────────────────────────────────────────┘
+```
+
+  The default button (Enter) is `Primary`, or `Danger` for destructive actions (End, Kill, Delete,
+  Close connection, Reset settings); Cancel is `Secondary` and sits left of it (rule 11; measured
+  TaskSlinger order is Cancel then the action). Buttons name the result ("End tree", "Delete",
+  "Reset"), never "Yes". A confirmation can carry one `TlCheckbox` under the text ("Do not ask
+  again" where a spec allows it; none in P1).
+- **States**: active window (full shadow), inactive (kit dims the shadow and border), pinned
+  (pin on), modal parent blocked (the parent's content gets `derived.overlay` painted over it and
+  ignores input while the confirmation is open; the compositor also marks the dialog modal
+  through `xdg_dialog_v1`), too many windows (PROC-077: the owner shows a toast and opens
+  nothing), content loading (owner's skeleton, UI-FND-025), error ("Could not open properties."
+  toast, no window).
+- **Interaction**: Enter triggers the default button in a confirmation (bound on the window root,
+  not when a multi-line input has focus); Esc cancels or closes per the table; Tab order: content,
+  then footer buttons left to right, then the pin; Ctrl+W closes a tool or properties window;
+  focus on open goes to the first focusable content element, or to Cancel in a destructive
+  confirmation (decided: so a stray Enter does not destroy). Closing the main window closes every
+  child window except detached graphs when `graphs.keep_detached_on_close` is on (APP-045).
+  Opening Properties again for the same key activates the existing window (PROC-077).
+- **Data binding**: `WindowRegistry` (Entity in `window/registry.rs`) holds every open secondary
+  window handle keyed by `WindowKey` (`Properties(ProcessKey)`, `Service(unit)`, `Settings`, …),
+  enforces the 8-window limit for Properties, and closes children with the main window. Pin state
+  for the main window is `window.always_on_top`; secondary windows keep it in memory only.
+- **Build**: `components/window_frame.rs` (`TlSecondaryWindow::open(cx, kind, title, size,
+  build_content)` calls `gpui_kit::open_window` with `WindowOptions { window_decorations:
+  Some(Client), window_background: Opaque, kind, window_min_size, app_id: the tasklens app id,
+  ..TitleBar::window_options() }`, then the kit Root wraps the view; the pin dispatches
+  `ToggleAlwaysOnTop { window: WindowKey }`, which `tl-ui` forwards to the engine's KWin bridge
+  or X11 path (APP-009; tl-ui never talks to KWin itself)). `components/dialog.rs` (`TlDialog` body
+  and footer). In-window kit `Dialog` is used only for sub-prompts inside a secondary window
+  (APP-045), styled with the same body and footer.
+- **Performance**: a secondary window has its own frame loop; its content follows the same
+  caching rules as pages (ADR-009). A confirmation window costs one small view.
+- **Accessibility**: title is the window title (compositor reads it); default and cancel buttons
+  are keyboard reachable; the warning icon is paired with text.
+- **Tests**: `window_frame::tests::confirm_enter_runs_default_escape_cancels`,
+  `window_frame::tests::destructive_focuses_cancel`, `registry::tests::ninth_properties_refused`,
+  `registry::tests::main_close_closes_children`, `window_frame::tests::pin_disabled_without_bridge`.
+- **Phase**: P1 (frame, confirmation, pin button drawn), P2 (pin working, properties windows).
+- **Decided here**: sizes table, pin placement and look, server-decorations pin fallback, focus on
+  Cancel for destructive confirmations, title truncation rule.
+
+### UI-FND-022 TlMenu and submenu (context, dropdown, menu bar menus)
+
+- **Implements**: PROC-057 row menu, APP-012 to APP-026 menu bar menus, APP-036 theme submenu
+  (painted items), SYS-008, SYS-025, SYS-032, PROC-024 header menu, column chooser, PERF graph
+  menus, widgets rule 10 (one Action per command, shortcut hints), table (b) Shift+F10 and Menu.
+- **Anatomy** (measured from `adv_sheet_01` context menu: rows about 0.8 of a table row, a 1 px
+  lighter border, no icons, submenu arrows as ">" text; TaskSlinger draws no icon column in the
+  row menu and a check column in View menus):
+
+```text
+┌───────────────────────────────────────────┐ bg menu_bg, 1 px divider, r_sm, menu shadow
+│ sp2 padding                               │ padding y sp2
+│ ┌───────────────────────────────────────┐ │
+│ │ ✓ │ End Task                 Delete   │ │ item h 26; check/icon column 20; label t_base
+│ │   │ End Process         Shift+Delete  │ │ shortcut column t_xs text_secondary, right, min gap sp6
+│ ├───────────────────────────────────────┤ │ separator: hairline divider, margin y sp2, x sp4
+│ │   │ Set Priority                    ▸ │ │ submenu chevron-right i_xs text_secondary
+│ │   │ Set Affinity                    ▸ │ │
+│ │   │ Copy all metrics (disabled)       │ │ disabled: opacity 0.5
+│ └───────────────────────────────────────┘ │
+└───────────────────────────────────────────┘ min w 180, max w 360; label truncated end "…"
+```
+
+  Item padding x `sp4`; the check or icon column is 20 wide and always reserved when any item in
+  the menu has a check, icon or radio mark, otherwise the column collapses to 0 (the process row
+  menu has none, matching the measured look; View menus have it). Check mark Lucide `check`
+  `i_xs`; radio mark a 6 px filled circle; both `text_primary`. Header rows (`PopupMenu::label`)
+  are `t_xs` `text_secondary` uppercase-free, 22 high, not selectable. Submenus open to the right
+  with a 4 px overlap, flip left when there is no room, and align their first item with the parent
+  item. Theme items (APP-036) are `menu_element` rows painted with their own theme's `menu_bg` and
+  `text_primary`, 26 high, with the copy icon `copy` `i_sm` at the right (UI-FND-022 provides
+  `TlMenu::painted_item(label, bg, fg, suffix_icon, action)`).
+- **States**: hover or keyboard highlight: bg `menu_hover`, text `text_primary`, shortcut text
+  `text_primary` too (so the row reads as one). Pressed: same as hover (the menu closes on
+  release). Disabled: opacity 0.5, not highlightable by mouse, skipped by arrow keys. Checked and
+  radio marks as above. Open submenu parent stays highlighted. Menu open animation: fade in over
+  `m_fast` 120 ms with no slide (kit menus fade; the kit's duration is used as is); reduced motion
+  instant. Empty menu (every item filtered out, column chooser): one disabled row "No items".
+- **Interaction**: mouse: hover highlights, click runs the action and closes; a click on a submenu
+  parent opens it without closing. Keyboard: Up/Down move (wrap, skipping separators and disabled
+  items), Right opens a submenu and focuses its first item, Left closes a submenu back to its
+  parent, Enter and Space run, Esc closes the topmost menu level and returns focus to what opened
+  it (the row, the header cell, the button), typing a letter jumps to the next item starting with
+  it, Home and End jump. Shift+F10 and the Menu key open the context menu for the current selection
+  at the focused row's left edge plus `sp4` (table b). Right-click in a table selects the row first
+  if it was not selected (ADR-009) and opens at the pointer. Menus clamp to the window; a menu
+  taller than the window scrolls (`.scrollable(true)`, max height window minus `sp6`). Clicking
+  outside closes and the click is consumed (it does not also select a row). Opening a menu closes
+  any tooltip. Each item's shortcut hint is the kit's automatic lookup through the action context
+  (`PopupMenu::action_context(focus_handle)`), so the row menu passes the table's focus handle and
+  a menu bar menu passes the window's.
+- **Data binding**: items are built when the menu opens from the owner's closure
+  (`ContextMenuExt::context_menu` or `PopupMenu::build`); data-carrying actions capture their
+  targets (`SmallVec<[ProcessKey; 1]>`, ADR-009). Dynamic availability (disabled items) is
+  computed in the same closure from the current snapshot.
+- **Build**: `components/menu.rs`: `TlMenu` is a thin builder over kit `PopupMenu` setting
+  `.min_w(180)`, `.max_w(360)`, `.scrollable(true)`, `.check_side(Side::Left)`, and providing
+  `item`, `check_item`, `radio_item`, `submenu`, `separator`, `header`, `painted_item`. The look
+  comes from the mapped tokens (`popover`, `accent`, `border`); the item height 26 is the kit's
+  `text_sm` row at rem 13 plus padding, verified by the render test below. Row menu per table: one
+  handler on the table element (not one per row).
+- **Performance**: built on open only; nothing per frame while closed. Painted theme items are 12
+  small divs.
+- **Accessibility**: every command has a non-menu path (table b or the menu bar); shortcut hints
+  are shown; keyboard navigation complete.
+- **Tests**: `menu::tests::arrow_keys_skip_separators_and_disabled`,
+  `menu::tests::right_opens_submenu_left_closes`, `menu::tests::shift_f10_opens_at_row`,
+  `menu::tests::item_height_is_26_at_100pct` (render test), `menu::tests::outside_click_consumed`.
+- **Phase**: P1.
+- **Decided here**: item height 26, column widths, min and max width, header row look, painted
+  item API, empty text, submenu overlap and alignment.
+
+### UI-FND-023 TlProgress and TlSpinner
+
+- **Implements**: APP-044 progress toasts, SYS-005 job tracking rows, PROC-078 hash computation
+  ("computed in the background"), APP-042 setup steps, PROC-083 Strings scan, kit rules in
+  ADR-009 (no Spinner, Skeleton or Progress in table cells or charts).
+- **Anatomy**: `TlProgress`: bar height 4 (sm) or 6 (md), track `scroll_track`, fill `accent`,
+  radius full, width from the parent; determinate `.value(0..=100)`; indeterminate: a 30% wide
+  segment moving left to right over 1.2 s, looping. Optional right-aligned `t_xs` percent label
+  with `tnum`. `TlSpinner`: Lucide `loader-circle` at `i_sm` (16) or `i_md` (20), colour
+  `text_secondary` by default, rotating 360° per 0.8 s (kit).
+- **States**: determinate value changes jump (no transition; the kit's transition is turned off
+  by giving a new `id` per value bucket of 1%, decided, because an animated bar in a 1 Hz-updated
+  row requests frames). Indeterminate loops. Reduced motion: the indeterminate bar becomes a
+  static 30% segment at the left plus the text "Working…" from the owner; the spinner becomes a
+  static `loader-circle` icon at 50% opacity.
+- **Interaction**: none. Tooltip from the owner where the meaning is unclear.
+- **Where they may be used**: toasts, dialog footers, the Properties General tab hash row, the
+  setup window, the Strings tab header, the Services status bar text. Never in a table cell, a
+  chart, a sidebar card or the status bar of the main window (ADR-009).
+- **Build**: `components/progress.rs`, wraps kit `Progress` (`.small()` or default, `.loading(bool)`)
+  and `Spinner`. Both keep requesting frames while visible, so the owner removes them from the
+  tree as soon as the work ends (not `visibility hidden`).
+- **Performance**: at most 2 spinners or indeterminate bars visible per window at a time is the
+  budget; a test counts them in the gallery.
+- **Tests**: `progress::tests::reduced_motion_static`, `progress::tests::removed_when_done`.
+- **Phase**: P1 (toasts), P2 (the rest).
+- **Decided here**: sizes, 1% bucketing, reduced-motion stand-ins, usage list and budget.
+
+### UI-FND-024 TlSkeleton rows and blocks
+
+- **Implements**: APP-059, R-060, PROC-021 (no skeleton on Processes), SYS-016.
+- **Anatomy**: `TlSkeletonRows { rows: usize, columns: &[Pixels] }` draws `rows` fake table rows
+  of `row_height` with one rounded bar (height 10, radius `r_sm`, colour `skeleton` token from
+  UI-FND-002) per column, width 40% to 80% of the column width from a fixed pattern
+  (`[0.6, 0.45, 0.8, 0.5, 0.7]` repeating), inset `sp4`. `TlSkeletonBlock { lines }` draws text
+  lines of height 10 with `sp3` gaps and widths `[0.9, 0.7, 0.8, 0.5]` repeating, for key/value
+  grids and Information cards. The whole skeleton pulses opacity 0.5 to 1.0 over 2 s (kit
+  `Skeleton` animation); under reduced motion it is static at 0.7.
+- **States**: shown until the first data for that tab arrives in the session; then replaced in
+  the same frame (no fade). Never shown again for that tab, even if the data later becomes empty
+  (that is the empty state, UI-FND-029) or stale.
+- **Row count**: `min(visible rows that fit, 12)` for tables; 8 lines per block.
+- **Build**: `components/skeleton.rs`, kit `Skeleton` elements inside a `v_flex` of row divs.
+- **Performance**: requests frames while visible (2 s loop). It is shown once per tab per session
+  for under a few seconds; the budget is fine. It must not be inside `uniform_list`.
+- **Tests**: `skeleton::tests::shown_once_per_tab` (fixture: empty snapshot, then data, then empty
+  again; the skeleton appears only in the first state).
+- **Phase**: P1 (component), P2 (used by the P2 tabs).
+- **Decided here**: bar sizes and width pattern, 12-row cap, no fade on replace.
+
+### UI-FND-025 TlKeyValueGrid (Properties, Information, Performance stats)
+
+- **Implements**: PERF-012 ("Details" stats grid: label over value, three columns), PERF-013
+  words, PROC-078 (three key/value columns, click copies), Information tab cards (PERF-100 to
+  PERF-104 sections, `information.png`), SYS-011, SYS-026, SYS-034 property pages, D-007 none.
+- **Anatomy**: two layouts in one component.
+
+  Stacked (Performance stats, measured from `performance.png`: label in secondary colour over the
+  value in primary colour, three equal columns, about 2.4 rows per pair):
+
+```text
+Utilization          Kernel time          Speed                 label t_sm text_secondary
+18.6%                2.3%                 4631 MHz              value t_base text_primary tnum
+                                                                pair height 2 × row_height (56)
+Processes            Threads              Handles               columns: equal, min 160
+295                  5596                 253248                column gap sp7, row gap 0
+```
+
+  Inline (Information and Properties General, measured from `information.png`: label with a
+  colon in secondary colour, value in primary colour starting at a fixed x of about 360 px at that
+  scale, one row per pair):
+
+```text
+OS Name:             Linux                                      row height row_height (28)
+Version:             6.17.0-arch1                                label column 180, value flex
+Build:               …                                          label ends with ":" (owner's text)
+```
+
+  Section title (Information cards, measured): a band of `header` colour, `row_height` high, with
+  a 3 px `accent` bar at its left edge, title `t_md` 500 `text_primary` with `sp4` padding, and a
+  copy `TlButton::Icon` (`copy` `i_sm`) at the right end that copies the section (PERF-011 format).
+  Cards have `sp6` between them and `sp4` between the band and the first row. A sub-block heading
+  inside a card (memory "Module 1", "Module 2") indents its rows by `sp6` and is separated from the
+  previous block by `sp4`.
+
+  Values are selectable text (PERF-012): the value element is a `Label` with text selection
+  enabled; a click on a Properties value copies it with the toast "Process property value copied."
+  (PROC-078) and the row shows a 120 ms `accent` at 0.25 flash. Links (PPID, Executable, Unit) are
+  `status.info` with an underline on hover and the pointer cursor. Long values truncate at the end
+  with "…" and get a tooltip with the full text; paths use the middle ellipsis (UI-FND-052).
+- **States per value** (`TlValue { text, validity, tooltip }`, the PERF-013 word table): Valid
+  shows the text in `text_primary`; WarmingUp "Collecting…"; Stale: last value in `text_secondary`
+  with tooltip "Last updated {age} ago"; Restricted "Restricted"; Unsupported "Not supported",
+  "Not reported" or "Needs setup" per the owner's reason, with "Needs setup" as a link to the
+  Additional Setup window; Missing: the row or card is removed; Failed "Unavailable" with tooltip
+  "Could not read: {last_error}". Every non-valid word is `text_secondary`. Rows that PERF-013
+  lists as hidden-when-missing are omitted by the owner. Empty grid (filtered to nothing in
+  Properties): "No properties match the current filter." centered, `t_base` `text_secondary`.
+  Loading: `TlSkeletonBlock`.
+- **Interaction**: click copies (Properties); text drag selects; Ctrl+C with a selection copies the
+  selection, without one it runs the page's Copy action (PERF-011 on Performance). Context menu on
+  a value: "Copy value", "Copy row" (`Label: value`), "Copy section".
+- **Data binding**: the owner passes `&[TlKvRow]` built from its snapshot slice; the component
+  re-renders when the owner notifies. The grid caches nothing itself; the owner keeps the
+  formatted `SharedString`s and re-formats only changed values (the same rule as `CellTextCache`).
+- **Build**: `components/kv_grid.rs`; custom `div` grid (kit `DescriptionList` does not do the
+  stacked layout or the validity words). Columns are fixed widths computed once from the available
+  width (`floor((w - 2 × sp7) / 3)`).
+- **Performance**: a Performance stats grid has 12 to 30 values updating at 1 Hz; each is one
+  text element; the page's `.cached()` wrapper skips repaint when nothing changed.
+- **Accessibility**: label and value are adjacent text nodes; the copy button has a tooltip
+  "Copy section".
+- **Tests**: `kv_grid::tests::validity_words` (one row per validity, asserts text and colour),
+  `kv_grid::tests::stacked_three_columns`, `kv_grid::tests::click_copies_and_toasts`.
+- **Phase**: P1 (stacked and inline), P2 (links, section copy).
+- **Decided here**: label column 180, pair height, section band look, flash on copy, context menu
+  items.
+
+### UI-FND-026 TlValidityGlyph (table cells, header totals, sidebar readouts)
+
+- **Implements**: ADR-003 validity table, R-050, PERF-013 (the word table is UI-FND-025; this is
+  the glyph table), PROC-021 (`…` in rate cells on the first sweep).
+- **Anatomy**: `TlValidityGlyph::render(validity, value_text: &SharedString, m, theme) ->
+  impl IntoElement`, used by every numeric cell and readout:
+
+| Validity | Element | Colour | Tooltip (UI-FND-019, 500 ms) |
+|---|---|---|---|
+| Valid | the formatted text | `text_primary` (or `text_selected_primary` on a selected row) | none |
+| WarmingUp | `…` (U+2026) | `text_secondary` | "Collecting first sample" |
+| Stale | the last value | `text_secondary` | "Last updated {age} ago" (short age format, table d) |
+| Restricted | Lucide `lock` `i_xs` 12, right-aligned like a number, vertical center | `text_secondary` | "Needs administrator access. Click the shield to grant it." (before P3: "Needs administrator access.") |
+| Unsupported | `n/a` | `text_secondary` | "Not available on this device" |
+| Missing | `-` (U+002D) | `text_secondary` | "No longer present" |
+| Failed | `!` | `status.warning` | "Could not read: {last_error}" |
+
+  Glyph cells keep the column's numeric alignment (right) and width, so a change from `…` to a
+  number does not move anything. On a selected row the secondary colour becomes
+  `text_selected_secondary`. Heat colouring applies only to Valid cells (a glyph cell never gets a
+  tint). Charts: Valid drawn; Stale drawn at 50% alpha after the last fresh sample then a gap; all
+  others a gap (ADR-003), handled by the chart element, not this component.
+- **States**: as the table above. Hover shows the tooltip; nothing else changes.
+- **Interaction**: Restricted glyph click: no action of its own (the tooltip tells the user to use
+  the shield); the row click still selects. Copy actions on a glyph cell copy the glyph's text
+  (`…`, `n/a`, `-`, `!`) and for Restricted the word "Restricted" (ADR-015 copy formats).
+- **Data binding**: `Validity` from `FieldValidity` per `ProcessField`, or the `ComponentHeader`
+  validity for totals.
+- **Build**: `components/validity.rs`; the text variants are `SharedString` statics (no
+  allocation); the lock is an `Icon` element. `CellTextCache` keys include the validity (ADR-009)
+  so the glyph text is cached like a value.
+- **Performance**: a glyph is one text run; the lock icon is one SVG quad. No per-frame work.
+- **Accessibility**: the tooltip carries the meaning; copy formats spell it out.
+- **Tests**: `validity::tests::glyph_per_state` (render test asserting text, colour and that the
+  width of `…`, `n/a`, `-`, `!` never exceeds the "100.0%" template width);
+  `validity::tests::selected_row_colours`.
+- **Phase**: P1.
+- **Decided here**: lock icon right-aligned like a number; copy text for glyph cells.
+
+### UI-FND-027 TlBadge (status badges, counts)
+
+- **Implements**: SYS-003 service state column ("running", "failed", …), SYS-020 startup Status
+  (Enabled, Disabled), SYS-029 connection State, PROC-057 "+N" child counts next to a PID are not
+  badges (plain `t_xs` text), APP-007 is dropped (no update badge), PROC-077 tab counts are plain
+  text.
+- **Anatomy**: a pill 18 high, padding x `sp3`, radius full, `t_xs` 500 text, min width 18.
+  Kinds: `Neutral` (bg `header`, text `text_primary`), `Success` (bg `status.success` at 0.2,
+  text `status.success`), `Warning`, `Danger`, `Info` (same pattern with their colour), `Count`
+  (bg `accent` at 0.25, text `text_primary`, `tnum`, shows `99+` above 99). An optional leading
+  6 px dot in the status colour (`.dot(true)`) is used for service states so the state is not
+  colour-only when the text is short. In a table cell the badge is vertically centered and
+  left-aligned with the cell padding; the cell's selected and hover colours show around it.
+- **States**: static. On a selected row the tinted backgrounds stay (they are translucent) and the
+  text keeps its status colour, which stays above 4.5:1 on `row_selected` in both themes
+  (checked for the four status colours; the light `status.warning` on light `row_selected` is
+  4.6:1).
+- **Interaction**: none; tooltip from the owner (for example the full systemd sub-state).
+- **Build**: `components/badge.rs`, custom `div` (kit `Badge` is a count overlay and kit `Tag` has a
+  different height; neither used).
+- **Performance**: one quad plus one text run; cached through `CellTextCache` like other cells.
+- **Tests**: `badge::tests::kinds_render`, `badge::tests::count_caps_at_99_plus`.
+- **Phase**: P2 (first user is the Services tab).
+- **Decided here**: all geometry, tint alpha 0.2, the dot rule.
+
+### UI-FND-028 TlShield (privilege state button and badge)
+
+- **Implements**: APP-003 (shield locked and unlocked, tooltips, hidden before P3 and without
+  tl-helper), APP-002 toolbar slot, PROC-058 "Retry as administrator" (the toast button dispatches
+  the same `StartHelperSession` action the shield uses), ADR-003 Restricted tooltip "Click the
+  shield".
+- **Anatomy**: a `TlButton::Toggle` 24 × 24 in the toolbar (position per `shell.md`), icon
+  `shield` `i_md` in `text_primary` when locked; unlocked: app SVG `shield-unlocked.svg` (a shield
+  with an open padlock cut-out, 16 px grid, 1.5 px strokes, drawn by the icon bead) tinted
+  `status.success`, with the Toggle "on" fill `accent` at 0.25 and 1 px `accent` border. Measured:
+  TaskSlinger's shield is a two-tone blue and yellow 16 px glyph at the left of the toolbar;
+  tasklens uses the single-colour Lucide glyph (decided; no TaskSlinger artwork ships, D-005).
+  While a polkit prompt is open or the helper is starting: the icon is replaced by `TlSpinner`
+  `i_md` and the button is inert. Badge: when the helper session is alive, the status bar's right
+  side shows nothing extra (the toolbar state is enough); when a privileged action was refused
+  (EPERM) in the last 10 s and the helper is not installed, the status bar shows "Restricted: N
+  processes" (APP-029), which is the shell's.
+- **States**: hidden (before P3, or `/usr/lib/tasklens/tl-helper` missing); locked (default);
+  starting (spinner, 120 s deadline per ADR-006, then back to locked with the toast
+  "Authentication cancelled" if the prompt was dismissed or "Could not start the privileged
+  helper" on any other failure); unlocked (on look, tooltip "Privileged actions unlocked (click
+  to lock)"); hover and pressed and focus as TlButton::Toggle. The helper's 300 s idle exit moves
+  the button back to locked without a toast (APP-003).
+- **Interaction**: click or Space or Enter: locked dispatches `StartHelperSession`; unlocked
+  dispatches `EndHelperSession`. Tooltip when locked: "Unlock privileged actions". Shift held at
+  launch and `privilege.unlock_at_launch` start the session at launch, which shows the starting
+  state in the toolbar.
+- **Data binding**: `HealthSnapshot.helper: HelperState { Missing, Locked, Starting, Unlocked }`
+  (the engine publishes it; ADR-006). Re-renders on the `health` `ComponentMask` bit.
+- **Build**: `components/shield.rs`; `assets/icons/shield-unlocked.svg`.
+- **Performance**: one button.
+- **Accessibility**: tooltip text is the accessible name; the state is also in text in the
+  tooltip, not colour alone.
+- **Tests**: `shield::tests::hidden_without_helper`, `shield::tests::states_and_tooltips`.
+- **Phase**: P3 (hidden until then; the component is written in P3).
+- **Decided here**: single-colour glyph, starting state look, failure toast text "Could not start
+  the privileged helper".
+
+### UI-FND-029 TlEmptyState
+
+- **Implements**: PROC-077 "No properties match the current filter.", PROC-079 "No threads
+  found.", SYS-036 and other "no rows" states, APP-059 (empty is not loading), filter with no
+  matches in every table.
+- **Anatomy**: centered block in the content area: optional icon `i_lg` `text_secondary`, text
+  `t_base` `text_secondary` (the exact string from the owning spec), optional second line `t_sm`,
+  optional `TlButton::Secondary` sm ("Clear filter"). Vertical gap `sp4`, outer padding `sp8`. The
+  table header stays visible above it so the user keeps the columns.
+- **States**: static. When the empty state is because of a filter, the "Clear filter" button is
+  shown and dispatches `ClearFilter`.
+- **Build**: `components/empty.rs`.
+- **Tests**: `empty::tests::clear_filter_button_only_when_filtering`.
+- **Phase**: P1.
+- **Decided here**: layout; the button rule.
+
+### UI-FND-030 Component gallery (`--gallery`)
+
+- **Implements**: ADR-013 render tests need a host; the brief's "every state" requirement.
+- **Anatomy**: `tasklens --gallery` (built with `--features bench`, next to `--bench`) opens one
+  window with a `TlTabs` strip, one page per component above, each page listing every variant and
+  state in both themes side by side (left half Default Dark, right half Default Light, by
+  rendering two `TlTheme`-scoped subtrees), with reduced motion toggled by a `TlSwitch` at the top.
+- **Build**: `crates/tl-ui/src/components/gallery.rs`. The render tests in ADR-013 open the same
+  pages headless and compare against golden PNGs (`TL_UPDATE_GOLDEN=1` rewrites them).
+- **Tests**: `gallery::tests::every_component_has_a_page` (a const list checked against the
+  module list).
+- **Phase**: P1.
+- **Decided here**: the gallery exists and is the golden-image host.
+
 <!-- APPEND -->
