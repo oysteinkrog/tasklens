@@ -362,19 +362,21 @@ pub enum Validity {
 }
 ```
 
-How the UI shows each state (exact strings; table cells, sidebar readouts and detail stats all use these):
+How the UI shows each state (exact strings). Table cells, header totals and sidebar readouts use the glyphs in the "Text cell" column. Performance stats grids, Information rows and Properties key/value fields use the words from PERF-079 instead ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown"). Every surface uses the tooltips below.
 
 | State | Text cell | Chart | Tooltip |
 |---|---|---|---|
 | Valid | formatted value | drawn | none |
 | WarmingUp | `…` (U+2026) in secondary text color | nothing drawn yet | "Collecting first sample" |
 | Stale | last value in secondary text color | line and fill drawn at 50% alpha after the last fresh sample, then a gap | "Last updated {age} ago" |
-| Restricted | Lucide `lock` icon, 12 logical px, secondary color | gap | "Needs permission to read" |
+| Restricted | Lucide `lock` icon, 12 logical px, secondary color | gap | "Needs administrator access. Click the shield to grant it." (before P3: "Needs administrator access.") |
 | Unsupported | `n/a` in secondary color | gap | "Not available on this device" |
 | Missing | `-` in secondary color | gap | "No longer present" |
 | Failed | `!` in the theme's warning color | gap | "Could not read: {last_error}" |
 
-**Field validity in records.** `FieldValidity` holds one `Validity` per numeric field: `pub struct FieldValidity(pub [Validity; PROCESS_FIELDS]);` with `PROCESS_FIELDS = 12`, indexed by `ProcessField` (`Cpu, Rss, Pss, Uss, Swap, IoRead, IoWrite, NetRx, NetTx, GpuUtil, GpuMem, Threads`).
+"Needs setup" is `Unsupported` with a reason tooltip that links to the Additional Setup window. "Not reported" is `Unsupported` where the source answers with no value.
+
+**Field validity in records.** `FieldValidity` holds one `Validity` per numeric field: `pub struct FieldValidity(pub [Validity; PROCESS_FIELDS]);` with `PROCESS_FIELDS = 13`, indexed by `ProcessField` (`Cpu, RssAnon, Rss, Pss, Uss, Swap, IoRead, IoWrite, NetRx, NetTx, GpuUtil, GpuMem, Threads`).
 
 **Series.**
 
@@ -404,7 +406,11 @@ pub struct SeriesView {
 }
 ```
 
-Ring capacity per series is `ceil(max_graph_range_ns / period_ns) + 2`. In v1 the maximum live graph range is 60 s, so a 10 Hz series holds 602 samples and a 1 Hz series holds 62. A source that changes rate keeps its ring and marks `GAP_BEFORE` on the first sample at the new rate. Raw counters stay `u64` inside `tl-collect` and `tl-engine`; only graph values become `f32`.
+Graph range choices are 30 s, 1 min, 5 min and 10 min (default 1 min). P1 ships 30 s and 1 min; 5 and 10 min arrive in P2. Every series has two ring tiers:
+- Fast tier, capacity `ceil(60 s / period_ns) + 2`: 602 samples at 10 Hz, 62 at 1 Hz. It serves the 30 s and 1 min ranges.
+- 1 Hz tier (from P2), capacity 602 samples (10 min + 2). Each value is the per-second maximum of the fast tier, the same rule ADR-012 uses for history. It serves the 5 and 10 min ranges.
+
+`Sample` stays 16 bytes; there is no per-sample min/max pair. Memory is about 1.5 MB for 80 series. A source that changes rate keeps its ring and marks `GAP_BEFORE` on the first sample at the new rate. Raw counters stay `u64` inside `tl-collect` and `tl-engine`; only graph values become `f32`.
 
 **Identifiers.** These numeric values are stored in history files (ADR-012) and must never be renumbered.
 
@@ -473,14 +479,15 @@ pub struct ProcessMeta {
     pub app_id: Option<Arc<str>>,      // from the app scope or desktop entry
     pub icon: Option<Arc<str>>,        // resolved icon file path
     pub description: Option<Arc<str>>, // desktop entry Comment or GenericName
-    pub search_lower: Arc<str>,        // lowercase name + comm + cmdline for filtering
+    pub search_lower: Arc<str>,        // lowercase filter text: display name, image name, cmdline, user,
+                                       // description, app name, unit name (R-043)
 }
 
 #[repr(u8)] pub enum ProcState { Running, Sleeping, DiskSleep, Stopped, Zombie, Idle, Other }
 
 bitflags! { pub struct ProcFlags: u16 {
-    const NEW = 1;           // appeared within the last 2 s
-    const EXITED = 2;        // exited within the last 2 s; kept for highlight, then removed
+    const NEW = 1;           // appeared within the linger time: 2 × processes.interval_ms, clamped to 1..=3 s
+    const EXITED = 2;        // exited within the linger time; kept for highlight, then removed
     const KERNEL_THREAD = 4;
     const OTHER_USER = 8;
     const IS_SELF = 16;      // tasklens or its probe
@@ -499,7 +506,8 @@ pub struct ProcessRecord {
     pub nice: i8,
     pub threads: u32,
     pub cpu_pct: f32,          // percent of whole machine capacity, 0..=100
-    pub rss_bytes: u64,
+    pub rss_anon_bytes: u64,   // RssAnon from /proc/<pid>/status; the default Memory column (D-004)
+    pub rss_bytes: u64,        // VmRSS; the "Working set total" column
     pub pss_bytes: u64,        // only for demanded keys (ADR-008)
     pub uss_bytes: u64,
     pub swap_bytes: u64,
@@ -553,6 +561,7 @@ pub struct Snapshot {
     pub inventory: Arc<InventorySnapshot>,
     pub devices: Arc<DeviceCatalog>,
     pub health: Arc<HealthSnapshot>,
+    pub windows: Arc<WindowsSnapshot>, // P2: KWin window list keyed by pid (ADR-004, KWin worker)
 }
 
 pub struct SeriesSet {
@@ -569,16 +578,19 @@ pub struct ProcessSnapshot {
 pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed by the UI
 ```
 
+`WindowsSnapshot` holds the KWin window list keyed by pid. Each entry has `internal_id`, `caption`, `resource_class`, `desktop_file_name`, `minimized`, `maximized`, `keep_above`, `frame_geometry` and `window_type`. Without the KWin bridge it is empty with validity `Unsupported`.
+
 Every component except `series` is replaced as a whole new `Arc` when it changes. A publish that changes only CPU series reuses every other `Arc`.
 
-**Units and formatting (`units.rs`).**
-- Memory and storage sizes: IEC, base 1024, labels `B KiB MiB GiB TiB`, 3 significant digits (`1.23 GiB`, `512 MiB`).
-- Disk rates: IEC bytes per second (`12.3 MiB/s`).
-- Network rates: setting `network_units = "bits" | "bytes"`, default `"bits"`. Bits use SI, base 1000 (`Kbps Mbps Gbps`); bytes use IEC (`KiB/s`).
-- Percent: one decimal below 10 (`3.4%`), none at or above 10 (`37%`).
-- Frequencies: `GHz` with 2 decimals.
-- Temperatures: `°C`, no decimals.
-- Durations: `1d 4h`, `4h 12m`, `12m 5s`, `5s`.
+**Units and formatting (`units.rs`).** Canonical table (d) in `docs/RECONCILIATION.md` is the full list. In short:
+- Percent: one decimal everywhere (`%.1f%%`: `3.4%`, `37.0%`); a measured zero is `0%`.
+- Memory and storage sizes: IEC, base 1024, labels `B KiB MiB GiB TiB`, two decimals from 1 KiB up (`1.22 GiB`, `16.00 KiB`); integer bytes below 1 KiB (`512 B`). Copy details lines use whole MiB.
+- Disk and I/O rates: `MiB/s` with one decimal in tables; auto-scaled IEC (`KiB/s`, `MiB/s`, `GiB/s`) with one decimal on Performance graphs and stats.
+- Network rates: setting `units.network = "bits" | "bytes"`, default `"bits"`, and `units.network_auto_scale`, default `false`. Bits use SI, base 1000 (`Kbps Mbps Gbps`); bytes use IEC (`KiB/s`, `MiB/s`). With auto-scale off, values are fixed `Mbps` (or `MiB/s`) with one decimal, `0 Mbps` at zero. Graph axes use 1-2-5 × 10ⁿ rounding whatever the setting.
+- Counts: digits grouped with a thin space (U+2009), `12 345`.
+- Frequencies: integer `MHz` (`4631 MHz`).
+- Temperatures: integer `°C`. Power: one decimal `W`.
+- Uptime: `2 days, 2h 38m 15s`. Short ages (tooltips and the Start time column's age text only): `1d 4h`, `4h 12m`, `12m 5s`, `5s`.
 - Formatting functions write into a caller-provided `String` and never allocate when the buffer is large enough.
 
 ### Consequences
