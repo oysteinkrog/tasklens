@@ -2092,18 +2092,21 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 
 ## Open questions and recommended defaults
 
-These could not be settled from the evidence. Each has a recommended default that beads use unless Oystein decides otherwise.
+Settled since these records were first written:
+- Application id and D-Bus name: `io.github.oysteinkrog.Tasklens` (D-005, R-001).
+- History recording default: off, 6 h retention when turned on (D-003); 10-minute rolling window while off (D-010).
+- Decorations default: client-side (D-006), with the fallback rule in ADR-010.
+- Users and Details tabs and Mission Center's Apps page: not required. tasklens has six tabs (R-023); grouped mode covers the Apps page.
 
-1. **Reverse-DNS application id and D-Bus name.** The repo is private and has no domain. Default: `io.github.oysteinkrog.Tasklens` for `app_id`, the desktop file name and the bus name.
-2. **Collection-cost gate with the Processes tab visible.** PLAN.md said 2%; Astra's arithmetic says about 3% for 2,000 processes. Default: gate at 3.5% (ADR-014) and keep the 2% gate for the Performance tab.
-3. **History recording default once `tl-history` lands.** Astra says off by default; the owner wants six-hour history. Default: off until the history phase ships, then on with 6 h retention and a 256 MB cap.
-4. **Decorations default.** Client-side matches TaskSlinger; server-side is lower risk on KDE. Default: client-side, with the fixed fallback rule in ADR-010.
-5. **Font family.** Astra recommends Noto Sans; PLAN.md allowed Inter. Default: Noto Sans static weights. Inter is the alternative if Noto Sans lacks `tnum` in the bundled files (the font bead checks this first).
-6. **Icons.** TaskSlinger uses Material Symbols. Default: Lucide through gpui-kit, because the Material Symbols variable font may hit zed#64783 and zed#61660.
-7. **Whether `Application::run` returns on Linux.** Not verified. Default: shut the engine down after `run` returns, and also from `on_app_quit` if it does not.
-8. **Headless wgpu screenshots on Linux.** The code path exists but gpui-kit does not test it. Default: try it in the first render-test bead; fall back to `painted_quads()` assertions.
-9. **Minimize and restore on KWin.** Not verified that GPUI renders on restore without a notify. Default: the hidden-state timer in ADR-010, plus `window.refresh()` every 1 s while hidden if phase 0 shows it is needed.
-10. **GPU power gate.** No baseline exists yet. Default: report only in phase 0; set a gate after the first measurements.
-11. **Exact gpui-kit `ThemeColor` token names.** Only some were listed in the research. Default: the mapping in ADR-009, checked against source by the theme bead.
-12. **zed#64499 fix details.** The patch outline in ADR-010 is based on the issue text, not a tested fix. Default: apply it only if the soak test fails, and re-run the soak.
-13. **Users and Details tabs (TaskSlinger) and Mission Center's Apps page.** Not specified in detail by these ADRs. Default: Users and Details come after phase 3 and get their own small ADRs; Mission Center's Apps page is covered by the Processes tab's grouped mode.
+Still open. Each has a recommended default that beads use unless Oystein decides otherwise. The unverified list in `docs/RECONCILIATION.md` (U-1 to U-38) tracks every assumption that phase 0 or the first bead touching it must confirm; the U-numbers below point there.
+
+1. **Collection-cost gate with the Processes tab visible** (U-10). PLAN.md said 2%; Astra's arithmetic says about 3% for 2,000 processes. Default: gate at 3.5% (ADR-014) and keep the 2% gate for the Performance tab.
+2. **Font family** (U-7). Default: Noto Sans static weights. Inter is the alternative if Noto Sans lacks `tnum` in the bundled files (the font bead checks this first).
+3. **Icons.** TaskSlinger uses Material Symbols. Default: Lucide through gpui-kit, because the Material Symbols variable font may hit zed#64783 and zed#61660.
+4. **Whether `Application::run` returns on Linux** (U-2). Default: shut the engine down after `run` returns, and also from `on_app_quit` if it does not.
+5. **Headless wgpu screenshots on Linux** (U-4). Default: try it in the first render-test bead; fall back to `painted_quads()` assertions.
+6. **Minimize and restore on KWin** (U-3). Default: the hidden-state timer in ADR-010, plus `window.refresh()` every 1 s while hidden if phase 0 shows it is needed.
+7. **GPU power gate.** No baseline exists yet. Default: report only in phase 0; set a gate after the first measurements.
+8. **Exact gpui-kit `ThemeColor` token names** (U-8). Default: the mapping in ADR-009, checked against source by the theme bead.
+9. **zed#64499 fix details** (U-9). Default: apply the ADR-010 patch only if the soak test fails, and re-run the soak.
+10. **CSD checklist on KWin** (U-36). Default: client-side; switch the default to server-side if any check fails (ADR-010).
