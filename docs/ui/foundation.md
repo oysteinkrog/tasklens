@@ -1221,4 +1221,549 @@ Build:               …                                          label ends wit
 - **Phase**: P1.
 - **Decided here**: the gallery exists and is the golden-image host.
 
-<!-- APPEND -->
+## 3. Theme pipeline
+
+### UI-FND-040 TlTheme global and the switch path
+
+- **Implements**: ADR-009 theme model and "Theme switch", APP-035, APP-036 (follow system,
+  200 ms crossfade), R-017, R-069, R-068.
+- **Anatomy**:
+
+```rust
+// crates/tl-ui/src/theme/mod.rs
+pub struct TlTheme {
+    pub name: Arc<str>, pub mode: ThemeMode, pub version: u64, pub builtin: bool,
+    // 22 slots + accent + graph (ADR-009), plus:
+    pub status: StatusColors,     // success warning danger info
+    pub derived: Derived,         // UI-FND-001 derived tints, rebuilt by rebuild_derived()
+}
+pub struct ThemeStore {              // GPUI Global, one per app
+    pub builtin: Arc<[ThemeDef]>,    // 2 in P1, 12 in P2, in TaskSlinger order
+    pub user: Vec<ThemeDef>,         // from themes.json, in file order
+    pub active: Arc<TlTheme>,        // the current theme; views read cx.global::<ThemeStore>().active
+    pub preview: Option<Arc<TlTheme>>, // live editor preview (UI-FND-043); when Some, it is what renders
+    pub system_scheme: ColorScheme,  // portal value 0, 1 or 2
+}
+```
+
+  `ThemeDef` is the parsed JSON record (name, 22 slots, `accent`, optional `status`, optional
+  `graph`, `mode` derived from `window_bg` lightness when the file has no `mode` key: lightness
+  below 0.5 is dark).
+
+  Switch path (`ThemeStore::activate(name, cx)`):
+  1. Resolve `name` against `user` first, then `builtin` (a user theme may shadow a built-in name;
+     the menu shows both, the user one marked "(custom)").
+  2. Build `TlTheme` from the def, run `rebuild_derived(appearance)`.
+  3. If `motion.animations` is on and reduce-motion is off: start a 200 ms crossfade (`m_base`).
+     The crossfade is a `TlTheme` interpolation: each frame, `active` is replaced by
+     `lerp(old, new, t)` in Hsla space for every slot, status and graph colour (about 40 lerps),
+     and `style_version` bumps once at the start and once at the end, not per frame, so chart
+     geometry rebuilds twice, not 12 times. The frames are driven by the window's
+     `AnimationDriver` (a one-shot request per frame, same mechanism as charts). Instant when
+     animations are off.
+  4. On completion: `theme.active = name` is written to settings (unless the switch came from
+     `follow_system`, which writes nothing), `theme::map::apply` runs once with the final theme,
+     `CellTextCache` is not cleared (text colour is not part of the cache key; only
+     `style_version` consumers rebuild).
+  5. Every view that reads colours re-renders because `MainWindow` observes `ThemeStore` and
+     notifies its children through the usual subscription; `.cached()` wrappers see the new
+     `style_version` in their keys and repaint.
+
+  Follow system (APP-036): `ThemeStore` holds the portal `color-scheme` value, fed by the engine's
+  D-Bus worker through `SnapshotHub` (`system.color_scheme`, updated on `SettingChanged`). When
+  `theme.follow_system` is on, a change selects `theme.dark` for 0 and 1 and `theme.light` for 2,
+  through the same `activate` path with the crossfade. Turning follow-system off keeps the current
+  theme and writes it to `theme.active`.
+
+  Scale and radius changes do not go through `activate`; they bump `style_version` through
+  `UiMetrics::recompute` and clear `CellTextCache` (ADR-009).
+
+- **States**: idle; crossfading (input still works; a second switch during a crossfade restarts
+  from the current interpolated colours); previewing (UI-FND-043).
+- **Interaction**: View > Theme items dispatch `ActivateTheme { name }`; the Settings window's
+  theme fields dispatch the same action. Toasts per APP-036 belong to the shell's menu entry; the
+  store emits `ThemeEvent::{Activated, Deleted, Copied, ImportFailed}` and the shell turns them
+  into toasts.
+- **Data binding**: `[theme]` section of table (a); `system.color_scheme` from the snapshot.
+- **Build**: `theme/mod.rs` (`TlTheme`, `ThemeStore`, `activate`, crossfade), `theme/derived.rs`,
+  `theme/map.rs` (UI-FND-002). The crossfade uses the window's `AnimationDriver::request` with a
+  reserved `EntityId` for the theme, so there is still exactly one `on_next_frame` per frame.
+- **Performance**: 40 Hsla lerps per crossfade frame, 12 frames at 60 Hz; two geometry rebuilds
+  per switch (ADR-009 asks for "once"; the crossfade needs the start and end, and a switch with
+  animations off rebuilds exactly once).
+- **Tests**: `theme::tests::activate_user_shadows_builtin`,
+  `theme::tests::crossfade_bumps_style_version_twice`,
+  `theme::tests::follow_system_picks_light_for_2_dark_otherwise`,
+  `theme::tests::animations_off_is_instant_and_single_rebuild`.
+- **Phase**: P1 (activate, instant switch), P2 (crossfade, follow system, 10 more themes).
+- **Decided here**: user theme shadows built-in with "(custom)" marker, two rebuilds per animated
+  switch, restart-from-current on double switch, mode inferred from `window_bg` lightness.
+
+### UI-FND-041 Built-in theme loading (`assets/themes/builtin.json`)
+
+- **Implements**: ADR-009 ("Built-in themes ship as `assets/themes/builtin.json`"), APP-035, R-068,
+  ADR-011 (built-ins are not on disk).
+- **Anatomy**: the file is embedded with `include_str!` (it is not read from disk at run time) in
+  TaskSlinger's format with the tasklens additions:
+
+```json
+{"themes":[{"name":"Default Dark","mode":"dark",
+  "WINDOW_BG":"#191B1D","TITLEBAR":"#27292B","TOOLBAR":"#202224","INPUT":"#202224",
+  "INPUT_FOCUS":"#25282B","HEADER":"#2E3235","LIST_BG":"#191B1D","ROW_ALT":"#1D1F20",
+  "ROW_HOVER":"#232629","ROW_SELECTED":"#075B84","DIVIDER":"#2B2F33","MENU_BG":"#2A2E31",
+  "MENU_HOVER":"#104B68","TAB_BG":"#202224","TAB_HOVER":"#27292B","SCROLL_TRACK":"#1A1C1E",
+  "SCROLL_THUMB":"#494F54","TEXT_PRIMARY":"#D6D8D9","TEXT_SECONDARY":"#6C7072",
+  "TEXT_SELECTED_PRIMARY":"#FFFFFF","TEXT_SELECTED_SECONDARY":"#BFD9E6","VALUE_HEAT":"#3E2A28",
+  "accent":"#0277A6",
+  "status":{"success":"#4CAF50","warning":"#E0A526","danger":"#D9534F","info":"#2A9FD6"},
+  "graph":{"cpu_fill":"#0D546D","cpu_line":"#0A7096","kernel_line":"#C1514E","mem_fill":"#7E6A9A",
+    "mem_line":"#A58CC4","gpu_fill":"#508A59","gpu_line":"#71B768","disk_fill":"#8A7340",
+    "disk_line":"#D9B567","net_fill":"#1E5C66","net_line":"#359CAB","grid":"#2A3033","chart_bg":"#1D2223"}},
+ {"name":"Default Light","mode":"light", "...": "UI-FND-001 light values"}]}
+```
+
+  Slot keys are the upper-case TaskSlinger names from APP-035; `accent`, `mode`, `status` and
+  `graph` are lower-case tasklens keys so a TaskSlinger import never collides with them.
+  Parsing rules: every one of the 22 slots is required for a built-in (a missing slot is a build
+  failure through the parse test); `mode` optional (derived from `WINDOW_BG` lightness); `status`
+  and `graph` optional (defaults: the Default Dark or Default Light values for the theme's mode).
+  Colour strings accept `#RRGGBB` and `#RRGGBBAA`; anything else fails the parse.
+  The 10 P2 themes are appended in TaskSlinger order (APP-035) with values extracted per APP-035's
+  mechanism; their `status` and `graph` keys are omitted unless the extraction yields them, so they
+  fall back to the mode defaults.
+- **Build**: `theme/builtin.rs`: `pub fn load() -> Arc<[ThemeDef]>` using `serde_json` into a
+  `BTreeMap<String, serde_json::Value>` per theme, then a typed conversion that reports the theme
+  name and key on error. Runs once at `TasklensUi::init`.
+- **Performance**: once at start; under 1 ms for 12 themes.
+- **Tests**: `builtin::tests::all_slots_present_in_every_theme`, `builtin::tests::names_in_ts_order`
+  (the const list from APP-035), `builtin::tests::light_theme_mode_inferred_if_missing`.
+- **Phase**: P1 (2 themes), P2 (12).
+- **Decided here**: `include_str!`, key casing rule, `#RRGGBBAA` accepted, strict parse for
+  built-ins.
+
+### UI-FND-042 User themes file (`themes.json`)
+
+- **Implements**: ADR-011 (path, atomic write), APP-036 (Create copy, Delete, Import), APP-038
+  (`TL1.` codes and raw JSON import), R-018, R-079.
+- **Anatomy**: `$XDG_CONFIG_HOME/tasklens/themes.json`, same format as UI-FND-041. Loading, at
+  start and after every write:
+  1. Missing file: `user` is empty; nothing is written until the first copy or import.
+  2. Parse error: rename to `themes.json.corrupt-<unix seconds>`, `user` empty, toast (Warning)
+     "Themes file was unreadable and has been reset. The old file was kept as
+     themes.json.corrupt-<unix seconds>" (the ADR-011 settings pattern applied to this file).
+  3. Per theme, lenient: a missing slot takes the value from the built-in theme of the same
+     `mode` (Default Dark or Default Light) and a `warn!` names the theme and slot; a bad colour
+     string does the same; a theme without a name gets "Custom theme N"; duplicate names get " (2)",
+     " (3)" appended. A file with more than 64 themes keeps the first 64 and logs the count.
+  4. Unknown keys are preserved on save (the file is round-tripped through the `BTreeMap`), so a
+     file shared with TaskSlinger keeps TaskSlinger-only keys.
+  Saving: `write_atomic` (ADR-011) of the whole list, pretty-printed with 2-space indent, after
+  Create copy, Delete, Import, and when the Theme Editor finishes (Done). Never on activate.
+  Create copy: the new theme is named "<name> copy", or "<name> copy 2" and so on, placed at the end
+  of `user`, and activated. Delete: asks per APP-036 and, if the deleted theme was active, activates
+  `theme.dark` or `theme.light` by the deleted theme's mode. Import accepts raw JSON of a
+  `{"themes":[…]}` object or a single theme object, and `TL1.` codes (APP-038); `TS1.` codes per
+  R-079 after U-17 is verified.
+- **Build**: `theme/user_store.rs`; file I/O through the `tl-app` persist callback (tl-ui does no
+  file I/O itself, ADR-011): `PersistTheme::{Save(Vec<ThemeDef>), RenameCorrupt}` requests.
+- **Tests** (with `tempfile`): `user_store::tests::missing_file_empty`,
+  `user_store::tests::corrupt_renamed_and_toast`, `user_store::tests::missing_slot_falls_back`,
+  `user_store::tests::unknown_keys_round_trip`, `user_store::tests::copy_names_increment`.
+- **Phase**: P2 (load, copy, delete), P3 (import codes, editor save).
+- **Decided here**: lenient per-theme repair, 64-theme cap, round-trip of unknown keys, copy
+  naming, fallback on delete of the active theme.
+
+### UI-FND-043 Theme editor live-preview contract
+
+- **Implements**: APP-037 ("Edits apply live to the app; Cancel reverts"), R-083 title. The
+  editor UI itself (slot list, hue strip, colour plane, readouts, buttons) is in `shell.md`; this
+  entry fixes how the editor and the rest of the app exchange colours.
+- **Anatomy** (`theme/preview.rs`):
+
+```rust
+pub struct ThemePreview;            // zero-size handle type; methods on ThemeStore
+impl ThemeStore {
+    pub fn begin_preview(&mut self, base: &ThemeDef, cx) -> PreviewToken;  // snapshots `active`
+    pub fn set_preview_slot(&mut self, tok: &PreviewToken, slot: ThemeSlot, c: Hsla, cx);
+    pub fn set_preview_name(&mut self, tok: &PreviewToken, name: Arc<str>);
+    pub fn commit_preview(&mut self, tok: PreviewToken, cx) -> ThemeDef;   // Done
+    pub fn cancel_preview(&mut self, tok: PreviewToken, cx);               // Cancel, or editor window closed
+}
+pub enum ThemeSlot { WindowBg, Titlebar, …, ValueHeat, Accent }  // 22 + accent = 23
+```
+
+  Rules:
+  1. Only one preview exists at a time; `begin_preview` while one is live cancels the first
+     (and the first editor window is closed by the shell).
+  2. While `preview` is `Some`, every view reads `preview` instead of `active` (the accessor
+     `ThemeStore::current()` returns whichever applies; views never read `active` directly).
+  3. `set_preview_slot` replaces `preview` with a new `Arc<TlTheme>` (clone, one field changed,
+     `rebuild_derived`), bumps `style_version` and notifies. No crossfade during preview. Calls
+     are coalesced to one per frame: the editor's colour plane drags at pointer rate, and the store
+     applies the last value in `on_next_frame`.
+  4. Editing `Accent` also refreshes `derived.focus_ring` and the kit `primary` and `ring` tokens
+     through `map::apply`, so buttons and focus rings preview too. The graph palette and status
+     colours are not editable in the editor (APP-037 lists the 22 slots plus Accent) and keep the
+     base theme's values; a "Random" theme (toast "Random theme generated.") randomizes the 23
+     editable values only, with the constraint that `text_primary` on `list_bg` stays at or above
+     4.5:1 (the generator re-rolls `text_primary` lightness until it does).
+  5. `commit_preview` writes the def into `user` (replacing the theme with the same name, which
+     must be a user theme; built-ins are refused upstream with "Copy a theme before editing it"),
+     saves through UI-FND-042, activates it without crossfade, and clears `preview`.
+  6. `cancel_preview` clears `preview` and bumps `style_version`; `active` was never changed, so
+     the app returns to it in one frame. Closing the editor window by its X is a cancel.
+  7. The editor's own mini preview pane (mini table, tab bar, graph) renders with
+     `ThemeStore::current()` like everything else; it has no private theme copy.
+  8. Theme Editor "Share" encodes the current preview def (not the saved one) as a `TL1.` code
+     (APP-038) so an unsaved edit can be shared.
+- **States**: no preview; previewing (the Theme submenu shows the previewed theme name with
+  " (editing)" and the check on it; `ActivateTheme` while previewing is refused with the toast
+  "Finish or cancel the theme editor first").
+- **Data binding**: none persisted until commit.
+- **Build**: `theme/preview.rs`; the editor view in `window/theme_editor.rs` (shell file) calls
+  these methods only.
+- **Performance**: one `TlTheme` clone (about 1 KB) per applied frame; `style_version` bumps make
+  charts rebuild geometry each applied frame during a drag, which is the same cost as a theme
+  switch frame and happens only while dragging in the editor.
+- **Tests**: `preview::tests::views_read_preview_when_live`, `preview::tests::cancel_restores_active`,
+  `preview::tests::commit_saves_and_activates`, `preview::tests::second_begin_cancels_first`,
+  `preview::tests::random_keeps_contrast`.
+- **Phase**: P3 (with the editor).
+- **Decided here**: the whole contract, the "(editing)" marker, the refusal toast text, the random
+  contrast rule, Share encodes the preview.
+
+## 4. Text rendering rules
+
+### UI-FND-050 Fonts: bundling, loading and fallback
+
+- **Implements**: ADR-009 "Fonts", APP-043 (languages: the bundled face must cover every shipped
+  language's Latin and Cyrillic; CJK comes from fallback), ADR-015 (sanitized text only).
+- **Anatomy**: `assets/fonts/NotoSans-Regular.ttf`, `NotoSans-Medium.ttf`, `NotoSans-SemiBold.ttf`
+  (static instances; the variable font is not used because of zed#64783). Loaded once in
+  `TasklensUi::init` before the first window with `cx.text_system().add_fonts(vec![Cow::Borrowed(
+  include_bytes!(..)), ..])`. Then `theme::map::apply` sets `font_family = "Noto Sans"`.
+  Weights used: 400 (`regular`), 500 (`medium`), 600 (`semibold`); no bold 700 anywhere (a 700
+  request would synthesize or fall back; the gallery test asserts the three weights resolve to the
+  bundled faces and `FontWeight::BOLD` is not used in tl-ui: `grep` in CI).
+  Monospace: not bundled. `"Noto Sans Mono"` is requested for the Strings tab and Environment
+  values if fontconfig has it; otherwise the kit's mono fallback chain applies (UI-FND-002). No
+  layout depends on the mono font's metrics.
+  Fallback: non-Latin process names, window titles and command lines fall back through
+  cosmic-text's fontconfig lookup to the system's Noto CJK or whatever is installed. A missing
+  glyph shows as the font's `.notdef` box; tasklens does not substitute `U+FFFD` for unknown glyphs
+  (only for control characters, UI-FND-053).
+  Verification at start (ADR-009, zed#61660): after `add_fonts`, `text_system().font_id(&font("Noto
+  Sans"))` must succeed for each weight; on failure tasklens logs `error!` and continues with the
+  system UI font (`.SystemUIFont`), and the About window shows "Bundled font failed to load" under
+  the version so the user can report it.
+- **Build**: `crates/tl-ui/src/text/fonts.rs`.
+- **Tests**: `fonts::tests::three_weights_load` (headless `TestAppContext` with the asset source),
+  `fonts::tests::no_bold_in_tl_ui` (source scan).
+- **Phase**: P1.
+- **Decided here**: no 700 weight, mono not bundled, start-up check behaviour and About note.
+
+### UI-FND-051 Tabular figures and numeric text
+
+- **Implements**: ADR-009 "Numbers use the tabular-figures font feature and right alignment",
+  table (d), PROC-023 template widths, R-081 (no locale forms).
+- **Rules**:
+  1. Every numeric text run (table cells, header totals, sidebar readouts, stats values, badge
+     counts, slider values, stepper inputs, chart axis labels, tab counts "[17]", PID "+N" text,
+     status bar counts, toast counts "(×2)") uses `TextStyle { font_features:
+     FontFeatures(Arc::new(vec![("tnum".into(), 1)])), .. }`. The `Arc` is a `static` built once in
+     `text/style.rs::TNUM`, never allocated per cell.
+  2. Numeric columns are right-aligned; the sort arrow and header name share the right edge. The
+     thin space U+2009 used for digit grouping is in Noto Sans and is itself tabular-width in
+     `tnum` mode (checked in the gallery golden).
+  3. Minimum numeric column widths come from the PROC-023 template strings measured with
+     `text_system().layout_line` in the table font at the current scale with `tnum` on; the
+     results are cached in `TextMetricsCache` keyed by `(template, font size bits, scale bits)` and
+     recomputed when `style_version` changes. Unit suffixes ("MiB/s") are part of the same run as
+     the number; there is no separate unit column.
+  4. Percent, size and rate texts never change length within their template (table d fixed
+     forms), so a value change never shifts neighbours. Where a value exceeds its template (a
+     1.5 TiB RSS, a 10 GiB/s rate) the text is still drawn and clipped at the cell's right edge
+     with no ellipsis (numbers are never ellipsized; the tooltip shows the full text).
+  5. Labels and names use proportional figures (no `tnum`): "Apps (11)", "Threads [17]" are labels
+     and use `tnum` only on the number run when the count updates live (TlTabs and group rows
+     split the run so the label does not jiggle).
+- **Build**: `text/style.rs` (`TNUM`, `numeric_style(m)`, `label_style(m)`), `text/metrics.rs`
+  (`TextMetricsCache`).
+- **Tests**: `style::tests::tnum_static_is_shared` (pointer equality), `metrics::tests::template_
+  widths_monotonic_in_scale`, gallery golden for a column of 0 to 9 digits aligning.
+- **Phase**: P1.
+- **Decided here**: clip-not-ellipsize for overflowing numbers, split runs for live counts.
+
+### UI-FND-052 Truncation and ellipsis rules per element type
+
+- **Implements**: ADR-009 (names use `SharedString::from(Arc<str>)` without copying), PROC-039
+  (512-char tooltip cut), R-008 (command line read and display limits), PROC-023 (60 px text
+  column minimum), APP-045 titles, kit `TabBar::max_width` behaviour.
+- **Rules** (the ellipsis is always the single character U+2026; truncation is done by GPUI's
+  `text_overflow(TextOverflow::Ellipsis)` on a `whitespace_nowrap` element unless a rule says
+  "manual"):
+
+| Element | Rule |
+|---|---|
+| Table text cell (Name, User, Description, Image path, Unit, Window title) | end ellipsis; the full text in the row tooltip (Name) or the cell tooltip (others, 500 ms, shown only when truncated: the cell compares its measured width to the available width in prepaint and sets a flag) |
+| Table text cell holding a path (Image path, Command line, Working dir, Executable) | manual middle ellipsis (UI-FND-052a) when the column is narrower than the text; `CellTextCache` caches the truncated `SharedString` per `(NodeId, ColumnId, width bucket of 8 px)` |
+| Group row "Apps (11)" | end ellipsis on the label run; the count run is never cut |
+| Header column name | end ellipsis; full name in the header tooltip (which also carries D-004's "Shows RssAnon…" for Memory) |
+| Header total value | never cut (numeric rule UI-FND-051) |
+| Tab label (main strip, TlTabs) | end ellipsis at `max_width` 160; count suffix kept |
+| Menu item label | end ellipsis at `max_w` 360 minus the shortcut column; full text in a tooltip only for painted theme items (user theme names can be long) |
+| Tooltip lines | wrap at 360 px; the 12-line cut per UI-FND-019; no per-line ellipsis except the last visible line |
+| Toast text | wrap, 3 lines, then end ellipsis; full text in its tooltip |
+| Window title | end ellipsis |
+| Key/value grid value | end ellipsis plus tooltip; paths get the middle ellipsis; the Properties "Cmd line" row wraps instead (PROC-078) with a 32 KiB cap already applied by `sanitize` |
+| Sidebar card lines (device name, model) | end ellipsis; full text in the card tooltip (measured: `performance.png` cuts "AMD Ryzen 7 7800X3…" at the end) |
+| Status bar text | end ellipsis on the left segment; the right (health) segment never truncates, it wins the space |
+| Chart labels | never cut; the chart element only draws labels that fit (`ChartView` measures the `ShapedLine`) |
+| Button labels | never cut; buttons grow, and a dialog is sized to its buttons |
+| Badge text | never cut; badges grow to 120 px then end-ellipsize |
+| Input text | scrolls horizontally inside the input (kit behaviour); no ellipsis |
+
+- **UI-FND-052a Middle ellipsis for paths** (`text/ellipsis.rs::middle_ellipsis(text, max_px,
+  measure) -> SharedString`): keep the last path component whole when it fits in at least 40% of
+  the width, else keep its last 12 characters; fill the start from the beginning of the path up to
+  the width minus the ellipsis width; cut at a character boundary (never inside a grapheme; use
+  `unicode_segmentation` graphemes); the ellipsis replaces at least 2 characters (if only one
+  would be removed, keep the text whole and let it clip). Measurement uses the same
+  `TextMetricsCache` with a per-character advance cache for the table font, so one call is O(n)
+  additions, no shaping per candidate. The result is cached per cell as above.
+  Examples at a width that fits 30 characters: `/usr/lib/firefox/firefox-bin` stays whole;
+  `/home/oystein/.local/share/Steam/steamapps/common/Game/bin/game.x86_64` becomes
+  `/home/oystein/.local/s…/game.x86_64`.
+- **Build**: `text/ellipsis.rs`, `text/metrics.rs`; the "truncated" flag for conditional
+  tooltips is a `Cell<bool>` set in `prepaint` of `TlTextCell` (table file owns `TlTextCell`; this
+  file owns the rule).
+- **Tests**: `ellipsis::tests::keeps_last_component`, `ellipsis::tests::grapheme_boundary`
+  (combining marks and an emoji flag not split), `ellipsis::tests::two_char_minimum`,
+  render test: a 60 px Name column shows "…" and its tooltip holds the full name.
+- **Phase**: P1.
+- **Decided here**: the per-element table, the 40% and 12-character rules, the 8 px width bucket,
+  conditional tooltips only when truncated.
+
+### UI-FND-053 Bidi and control-character display (ADR-015)
+
+- **Implements**: ADR-015 "Untrusted process text", ADR-003 (names from `/proc`), APP-043.
+- **Rules**:
+  1. All process-derived text (`comm`, name, exe, cmdline, user, cgroup, unit description,
+     window caption, environment values, strings) is sanitized by `tl-collect::sanitize` before it
+     reaches `ProcessMeta` (ADR-015): C0 and C1 controls become U+FFFD; bidi controls U+202A to
+     U+202E and U+2066 to U+2069 and U+200B to U+200F are removed; invalid UTF-8 is replaced
+     lossily. tl-ui trusts that and does not re-scan per frame. A debug assertion in
+     `TlTextCell` (debug builds only) checks that no control character survives.
+  2. U+FFFD is drawn as the font's replacement glyph in `status.warning` colour when it appears
+     in a Name cell (the run is split around it), so a name that contained controls is visibly
+     marked. In other cells and in tooltips it is drawn in the normal colour. A name consisting
+     only of U+FFFD or empty after sanitizing shows `comm` instead, or `[pid N]` if `comm` is empty
+     too (decided).
+  3. Bidi: the bidi *control* characters are removed, but right-to-left letters (Hebrew, Arabic
+     process names and window titles) are kept and shaped by cosmic-text's bidi algorithm as
+     paragraphs in GPUI. Each table cell is its own paragraph with base direction LTR (the table is
+     LTR), so an RTL name renders right-to-left inside a left-aligned cell and never reorders
+     neighbouring cells, the count suffix or the ellipsis. The ellipsis is appended to the logical
+     end of the string, so it appears at the left of an RTL run; this is accepted.
+  4. Line separators (U+2028, U+2029) and the form feed are covered by rule 1's control class and
+     by `sanitize`'s "lines are joined with spaces"; a cell is always a single line.
+  5. Zero-width joiners inside emoji sequences (U+200D) are kept (not in the removed set) so
+     emoji names render as one glyph; U+200B to U+200F are removed, which includes the zero-width
+     space and the LRM/RLM marks.
+  6. Tabs (U+0009) are in C0 and become U+FFFD; a command line's argument separators are already
+     spaces (`sanitize` replaces NUL with a space), so TSV copy (ADR-015 "Copy rows as table") is
+     unambiguous: a cell value can never contain a tab or a newline.
+  7. Copy and export use the sanitized text as displayed (not the raw bytes), with one exception:
+     "Copy all metrics" and Properties "Cmd line" copy the full 32 KiB sanitized command line, not
+     the 512-char tooltip cut.
+  8. Text direction of the UI itself is LTR in every shipped language (APP-043 lists no RTL
+     language); no mirroring is implemented.
+- **Build**: `text/untrusted.rs` (`split_fffd_runs`, debug check), used by the table's
+  `TlTextCell` and `TlKeyValueGrid`.
+- **Tests**: `untrusted::tests::fffd_run_split_and_coloured`, `untrusted::tests::empty_name_falls_
+  back_to_comm_then_pid`, `untrusted::tests::rtl_name_in_ltr_cell` (render test: the ellipsis and
+  the "+N" run stay at the right), plus the ADR-015 `sanitize` tests in tl-collect.
+- **Phase**: P1.
+- **Decided here**: U+FFFD highlighted in Name cells only, the name fallback chain, LTR paragraph
+  per cell, the ellipsis at the logical end.
+
+## 5. Summary table
+
+| ID | Name | Implements | Phase |
+|---|---|---|---|
+| UI-FND-001 | Colour slots: Default Dark and Default Light | APP-035, R-068, R-059, ADR-009 theme model, PLAN 9 | P1 (P2 more themes) |
+| UI-FND-002 | gpui-kit Theme mapping (map.rs) | ADR-009 map list, APP-035 U-8, R-077, R-020 | P1 |
+| UI-FND-003 | Metrics: spacing, text, radii, rows, icons, motion, focus, shadows, scrollbars | ADR-009 metrics and fonts, R-020, R-077, R-017, APP-040, APP-058 | P1 |
+| UI-FND-010 | TlButton | APP-002, APP-003, APP-004, APP-005, APP-045, PERF-014 | P1 |
+| UI-FND-011 | TlCheckbox | APP-028, APP-040, PROC-024, APP-023, SYS-004 | P1 |
+| UI-FND-012 | TlRadio, TlRadioGroup | APP-023, APP-037 | P2 |
+| UI-FND-013 | TlSwitch | APP-023, D-003, APP-036 | P2 |
+| UI-FND-014 | TlSlider | APP-040, APP-023 | P2 |
+| UI-FND-015 | TlStepper | APP-023, PROC-066, PROC-067 | P2 |
+| UI-FND-016 | TlTextInput, TlFilterBox | APP-028, PROC-077, APP-014, APP-037, PROC-024, R-043 | P1 |
+| UI-FND-017 | TlSelect, TlCombo | APP-023, SYS-012, SYS-013 | P2 |
+| UI-FND-018 | TlTabs (in-window) | PROC-077, SYS-011 to SYS-014, APP-042 | P2 |
+| UI-FND-019 | TlTooltip | PROC-039, ADR-003, APP-003, D-004, PROC-061, PERF-013, R-009 | P1 |
+| UI-FND-020 | TlToast queue rules | APP-044, PROC-058, R-035, ADR-011, ADR-015 | P1 |
+| UI-FND-021 | TlDialog, TlSecondaryWindow | APP-045, APP-009, R-073, PROC-056, PROC-059, PROC-077, ADR-010, D-006 | P1 (P2 pin, properties) |
+| UI-FND-022 | TlMenu and submenu | PROC-057, APP-012 to APP-026, APP-036, SYS-008, SYS-025, SYS-032, PROC-024, table (b) | P1 |
+| UI-FND-023 | TlProgress, TlSpinner | APP-044, SYS-005, PROC-078, APP-042, PROC-083 | P1 (P2 rest) |
+| UI-FND-024 | TlSkeleton | APP-059, R-060, PROC-021, SYS-016 | P1 (P2 use) |
+| UI-FND-025 | TlKeyValueGrid | PERF-012, PERF-013, PROC-078, PERF-100 to PERF-104, SYS-011, SYS-026, SYS-034, PERF-011 | P1 (P2 links) |
+| UI-FND-026 | TlValidityGlyph | ADR-003, R-050, PERF-013, PROC-021 | P1 |
+| UI-FND-027 | TlBadge | SYS-003, SYS-020, SYS-029 | P2 |
+| UI-FND-028 | TlShield | APP-003, APP-002, PROC-058, ADR-003 | P3 |
+| UI-FND-029 | TlEmptyState | PROC-077, PROC-079, SYS-036, APP-059 | P1 |
+| UI-FND-030 | Component gallery | ADR-013 | P1 |
+| UI-FND-040 | TlTheme global and switch path | ADR-009, APP-035, APP-036, R-017, R-069 | P1 (P2 crossfade, follow system) |
+| UI-FND-041 | Built-in theme loading | ADR-009, APP-035, R-068, ADR-011 | P1 (P2 12 themes) |
+| UI-FND-042 | User themes file | ADR-011, APP-036, APP-038, R-018, R-079 | P2 (P3 import) |
+| UI-FND-043 | Theme editor live-preview contract | APP-037, R-083 | P3 |
+| UI-FND-050 | Fonts | ADR-009 fonts, APP-043 | P1 |
+| UI-FND-051 | Tabular figures and numeric text | ADR-009, table (d), PROC-023, R-081 | P1 |
+| UI-FND-052 | Truncation and ellipsis | ADR-009, PROC-039, R-008, PROC-023, APP-045 | P1 |
+| UI-FND-053 | Bidi and control characters | ADR-015, ADR-003, APP-043 | P1 |
+
+## 6. Coverage
+
+Merged spec IDs, R and D entries and ADR sections in this file's scope, and the entries that
+realize them. Entries owned by other files are named "(shell)", "(processes)", "(process
+windows)", "(performance)", "(system tabs)" where this file supplies only a component.
+
+| Scope item | Realized by |
+|---|---|
+| APP-035 Built-in themes and colour slots | UI-FND-001, UI-FND-002, UI-FND-040, UI-FND-041 |
+| APP-036 Theme menu and follow system | UI-FND-040 (switch, follow system), UI-FND-042 (copy, delete), UI-FND-022 (painted items); menu itself (shell) |
+| APP-037 Theme editor | UI-FND-043 (contract); editor UI (shell) |
+| APP-038 Theme share and import codes | UI-FND-042 (import and file format); Share window (shell) |
+| APP-039 Graph accent colours | not a foundation item: the 17 named colours are constants in the performance file; UI-FND-001 supplies `accent` as the default |
+| APP-040 Appearance sliders | UI-FND-003 (metrics effects), UI-FND-014 (slider), UI-FND-011 (checks); menu (shell) |
+| APP-044 Toasts | UI-FND-020 |
+| APP-045 Dialogs as separate pinnable windows | UI-FND-021 |
+| APP-009 Always on top and the pin, R-073, PROC-056 | UI-FND-021 (pin button); the KWin path (engine, ADR-004) |
+| APP-058 Accessibility and reduced motion | UI-FND-003 (focus ring, motion rules), every component's keyboard path, UI-FND-023 and UI-FND-024 reduced-motion stand-ins; scale-from-font default (shell, P4) |
+| APP-059 Loading placeholders, R-060, PROC-021 | UI-FND-024, UI-FND-026 (`…` cells) |
+| APP-003 Shield | UI-FND-028 |
+| APP-028 Filter box, R-043 | UI-FND-016 (component); placement and per-tab text (shell) |
+| APP-023 Settings window | UI-FND-011 to UI-FND-017 (fields), UI-FND-018 (in-page tabs), UI-FND-021 (frame); pages (shell) |
+| APP-002 Title bar toolbar buttons | UI-FND-010 (variants); layout (shell) |
+| APP-008 Caption buttons | UI-FND-021 (pin look, kit controls) |
+| PERF-012 Page layout stats grid, PERF-013 Fallback words, R-050 | UI-FND-025, UI-FND-026 |
+| PERF-011 Copy device info | UI-FND-025 (section copy button, Ctrl+C routing); format (performance) |
+| PROC-039 Row hover tooltip, R-009 | UI-FND-019 (component and 600 ms delay); line content (processes) |
+| PROC-040 Heat colouring, R-059 | UI-FND-001 (`heat()` derived rule); cell use (processes) |
+| PROC-057 Row context menu, R-033 | UI-FND-022 (component); items (processes) |
+| PROC-058 Action toasts, R-035 | UI-FND-020 (shapes, replace, retry button); texts (processes) |
+| PROC-059 Confirmations, R-036, D-009 | UI-FND-021 (TlDialog); texts and rules (processes) |
+| PROC-077 Properties window frame | UI-FND-021 (frame, 8-window registry), UI-FND-018 (tabs), UI-FND-016 (filters), UI-FND-029 (empty); content (process windows) |
+| PROC-078 General tab key/value | UI-FND-025 (grid, click-to-copy); fields (process windows) |
+| PROC-023 Column widths from templates | UI-FND-051 (measurement cache); columns (processes) |
+| PROC-024 Column picker | UI-FND-011 (indeterminate), UI-FND-016 (filter), UI-FND-022 (menu entry); picker (processes) |
+| SYS-003, SYS-020, SYS-029 state columns | UI-FND-027 |
+| SYS-011 to SYS-014, SYS-026, SYS-034 property windows | UI-FND-021, UI-FND-018, UI-FND-025 (frames and grids); content (system tabs) |
+| SYS-016 loading state | UI-FND-024, UI-FND-020 |
+| ADR-003 validity table | UI-FND-026 (glyphs), UI-FND-025 (words), UI-FND-019 (tooltips) |
+| ADR-009 theme model, map.rs, metrics, fonts, icons, text caching rules for text | UI-FND-001, UI-FND-002, UI-FND-003, UI-FND-040, UI-FND-050, UI-FND-051, UI-FND-052 |
+| ADR-010 decorations, window options | UI-FND-021 |
+| ADR-011 themes.json path and atomic write, settings toasts | UI-FND-042, UI-FND-020 |
+| ADR-013 render tests host | UI-FND-030 |
+| ADR-014 per-frame rules for components | each entry's Performance line; UI-FND-023 budget |
+| ADR-015 untrusted text, copy formats | UI-FND-053, UI-FND-026 (glyph copy text) |
+| R-017 motion settings | UI-FND-003, UI-FND-040 |
+| R-020 scale and row height | UI-FND-003 |
+| R-068, R-069 theme phase and keys | UI-FND-040, UI-FND-041 |
+| R-077 corner radius | UI-FND-003, UI-FND-002 |
+| R-079 TS1 codes | UI-FND-042 (after U-17) |
+| R-081 number forms | UI-FND-051 |
+| R-083 window titles | UI-FND-021 |
+| D-004 Memory header tooltip | UI-FND-019 (component), UI-FND-052 (header tooltip rule) |
+| D-005 no TaskSlinger artwork | UI-FND-028 (own shield glyph), UI-FND-003 (Lucide only) |
+| D-006 client-drawn title bar | UI-FND-021 |
+| D-007 no serial numbers | UI-FND-025 (owner omits rows; the grid has no special case) |
+| Brief shared vocabulary (colours, spacing, text, radii, row height, icons, motion) | UI-FND-001, UI-FND-003 |
+
+No scope item is unmapped.
+
+## 7. Decided here (all in one list)
+
+1. Default Dark slots not in PLAN 9: `input` #202224, `input_focus` #25282B, `row_hover` #232629,
+   `menu_bg` #2A2E31, `menu_hover` #104B68, `tab_hover` #27292B, `scroll_track` #1A1C1E,
+   `scroll_thumb` #494F54, `text_selected_primary` #FFFFFF, `text_selected_secondary` #BFD9E6.
+2. Every Default Light value (UI-FND-001 table).
+3. Status colours for both themes; `status` as an optional theme key with mode defaults.
+4. Graph palette additions: `mem_line`, `disk_fill`, `net_fill`, `grid`, and a 13th field
+   `chart_bg`; light graph palette.
+5. Derived tints: NEW and EXITED alpha 0.18; heat blend in sRGB; shadow alpha 0.35 dark and 0.18
+   light; overlay 0.4 and 0.25; selection 0.35.
+6. Kit mapping rows beyond ADR-009's list; ±8% lightness for hover and active; `scrollbar_mode`
+   Scrolling by default and Always on tables.
+7. Line height 1.3; icon sizes 12, 14, 16, 20; header name `t_sm` over total `t_base`.
+8. Hover fills are not animated; `m_fast` only for check, radio, switch, tab underline.
+9. Focus ring 2 px accent, 2 px outside, keyboard-only through `TlFocusRing`; rows use a 1 px
+   inset border; inputs use the accent border.
+10. Shadow geometry per surface; hairline = 1 physical px.
+11. Sidebar card height `4 × row_height`; in-window tab strip 32.
+12. TlButton heights 24 and 28, min width 72, toggle fill alpha 0.25, Segment look.
+13. TlCheckbox 16 px custom box with an indeterminate state; TlRadio roving tab index; TlSwitch
+    small only.
+14. TlSlider geometry and keyboard steps; per-frame coalescing of scale drags.
+15. TlStepper design (kit NumberInput not used).
+16. TlTextInput states; filter box stays 280 wide while non-empty; 20 px clear hit area.
+17. TlSelect: popup max 10 items, filter field above 12 items, type-ahead.
+18. TlTabs: underline style, min cell 80, overflow menu.
+19. TlTooltip: max width 360, 12-line cut, keyboard show, below-then-above placement.
+20. Toast queue: stack grows downward, newest at the bottom; wait list 16; Error evicts oldest
+    Info or Success; coalesce within 1 s with " (×N)"; action toasts 15 s; Progress 120 s then
+    "Outcome unknown"; 3-line cut; secondary windows' margin 34 + 8.
+21. Window kinds table (sizes, modality, Esc); pin placement left of minimize; server-decoration
+    pin fallback at the content's top-right; destructive confirmations focus Cancel; titles
+    truncate at the end.
+22. TlMenu: item height 26, check column 20 (collapsing), min 180 and max 360 wide, header rows
+    22 high, submenu overlap 4 px, "No items" row, `painted_item` API.
+23. TlProgress 4 and 6 px, 1% buckets, reduced-motion stand-ins, 2-per-window budget.
+24. TlSkeleton bar pattern, 12-row cap, no fade on replace.
+25. TlKeyValueGrid: label column 180, pair height 2 rows, section band with 3 px accent bar,
+    copy flash, value context menu.
+26. TlValidityGlyph: lock right-aligned like a number; copy text per glyph.
+27. TlBadge geometry, tint 0.2, status dot rule.
+28. TlShield single-colour glyph, starting state, failure toast "Could not start the privileged
+    helper".
+29. TlEmptyState layout and "Clear filter" rule.
+30. Component gallery as the golden-image host, `--gallery` flag.
+31. Theme store: user theme shadows built-in with "(custom)"; animated switch rebuilds geometry
+    twice; a second switch restarts from the current colours; mode from `window_bg` lightness.
+32. Built-in JSON embedded with `include_str!`; upper-case slot keys, lower-case tasklens keys;
+    `#RRGGBBAA` accepted; strict parse for built-ins, lenient repair for user themes; 64-theme cap;
+    unknown keys round-trip; copy naming "<name> copy N"; delete of the active theme falls back by
+    mode.
+33. Preview contract: single preview, `current()` accessor, per-frame coalescing, "(editing)"
+    marker, refusal toast "Finish or cancel the theme editor first", Random keeps 4.5:1, Share
+    encodes the preview.
+34. Fonts: no 700 weight; mono not bundled; load failure falls back to the system font with a note
+    in About.
+35. Numbers clip rather than ellipsize; live counts are separate `tnum` runs.
+36. Truncation table per element; middle ellipsis keeps the last component (40% rule, 12-char
+    floor, 2-char minimum removal); width bucket 8 px; tooltips only when truncated.
+37. U+FFFD highlighted in Name cells only; name fallback `comm` then `[pid N]`; one LTR paragraph
+    per cell.
+
+## 8. Open
+
+1. Toast enter animation: the kit fixes it at 400 ms and exit at 200 ms. This file specifies 200
+   ms enter. Recommended: accept the kit's 400 ms in P1 and record it; if the owner wants 200 ms,
+   the bead vendors a one-line change or draws toasts without the kit's animation.
+2. Default Light has no TaskSlinger reference frame. Recommended: ship the UI-FND-001 values and
+   compare against TaskSlinger's "Default Light" `themes.json` export when the APP-035 extraction
+   runs (U-18); replace the values then if they differ, keeping the contrast floor.
+3. Kit rem scaling: at `font_size` 13 the kit's rem-based sizes are 13/16 of its documented px
+   values (for example a kit `h_8` is 26 px, not 32). This file gives target px for every
+   tasklens component and relies on the gallery render tests to catch mismatches. Recommended: the
+   first component bead measures the kit `Button` small height at rem 13 and adjusts the `TlButton`
+   size choice (`xsmall` vs `small`) to hit 24 px.
+4. `TlFocusRing`'s "last input was keyboard" tracking is tasklens's own heuristic because GPUI has
+   no focus-visible. Recommended: ship it; if it misfires (ring shown after a mouse click), fall
+   back to always showing the ring on focus, which is the kit default.
+5. `chart_bg` as a 13th `GraphPalette` field is an addition to ADR-009's list. Recommended: the
+   architecture file gains the field when the ADR is next edited; until then the field exists in
+   code with a comment.
+
