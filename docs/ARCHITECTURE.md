@@ -1,18 +1,8 @@
-> **Leader note.** Where these records disagree with `docs/DECISIONS.md`, the decision wins. Known places:
-> - D-003: open question 3 and ADR-012 say history turns on by default once the history phase ships. D-003 says it stays off by default, with 6 h retention when turned on.
-> - D-004: ADR-011 lists `memory_rss` in the default columns. The default Memory column is RssAnon.
->
-> Where these records disagree with the feature specs, the reconciliation pass decides and records the result here. Known places:
-> - Graph time ranges: ADR-003 and ADR-011 cap live graphs at 60 s (15 s or 60 s). PERF and APP want ranges up to 10 min.
-> - Number formats: ADR-003 uses 3 significant digits for memory and drops the decimal on percentages of 10 and above. PROC-104 uses 2 decimals and "%.1f%%".
-> - Power column: ADR-016 hides it by default. PROC shows it when RAPL is readable, which it is on this machine.
-> - Copy: ADR-015 copies visible columns as TSV. The PROC addendum makes Ctrl+C copy the fixed details block and moves TSV to Ctrl+Shift+C.
-> - Default sort: ADR-011 sorts by CPU, descending. PROC uses TaskSlinger's default, PID ascending.
-> - History retention range: ADR-011 allows 1 to 24 h and caps the store at 256 MB on disk. PROC allows 1 to 12 h and caps RAM at 64 MiB.
+> **Note.** This file includes the reconciliation in `docs/RECONCILIATION.md` (R-001 to R-074) and the decisions in `docs/DECISIONS.md` (D-001 to D-010). If anything here still disagrees with either of those files, DECISIONS.md wins first and RECONCILIATION.md second. Phases use the canonical P0 to P4 numbering from R-072.
 
 # tasklens Architecture Decision Records
 
-Status: proposed, 2026-10-02. Supersedes `docs/PLAN.md` wherever they differ. `docs/DECISIONS.md` (D-001, D-002) stays binding and these ADRs do not reopen it.
+Status: proposed, 2026-10-02; reconciled 2026-10-03. Supersedes `docs/PLAN.md` wherever they differ. `docs/DECISIONS.md` (D-001 to D-010) stays binding and these ADRs do not reopen it.
 
 Implementation agents follow these records exactly. When a bead needs a choice these records do not make, the agent stops and asks; it does not pick.
 
@@ -35,7 +25,7 @@ Where these records deviate from Astra, the ADR says so under "Deviation from As
 | 009 | UI architecture: views, table, charts, caching, theme, fonts, icons |
 | 010 | Window and platform integration |
 | 011 | Settings and persistence |
-| 012 | History storage (later phase) |
+| 012 | History storage (P3) |
 | 013 | Testing strategy |
 | 014 | Performance budgets, phase-0 spike and fallback |
 | 015 | Logging, errors, crash handling and privacy |
