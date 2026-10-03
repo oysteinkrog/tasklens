@@ -166,7 +166,7 @@ Toolchain upgrades are separate beads with a full test and perf run.
 asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros"] }
 gpui-kit   = { version = "=0.7.0" }                       # default features: component, assets
 nvml-wrapper = { version = "=0.13.0", default-features = false }
-ksni       = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }  # later phase
+ksni       = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }  # P3
 
 # Bridge
 arc-swap      = "1.9.2"
@@ -192,8 +192,8 @@ bitflags = "2"
 smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
 rustc-hash = "2.1.3"
 futures-lite = "2.6.1"
-zstd      = "0.13.3"     # later phase
-crc32fast = "1"          # later phase
+zstd      = "0.13.3"     # P3
+crc32fast = "1"          # P3
 
 # Errors and logging
 thiserror = "2.0.21"
@@ -230,7 +230,7 @@ Not used: `lyon` (GPUI's `PathBuilder` tessellates with lyon internally), `procf
 
 **NVML access: `nvml-wrapper`, not raw dlopen.** It already loads `libnvidia-ml.so.1` at runtime through `libloading` and maps every error code. It is used only in `tl-gpu-probe`.
 
-**zbus executor rule.** Engine connections are built with `.internal_executor(false)` and driven by an asupersync task (ADR-004). The `tl-app` single-instance connection uses the blocking API with zbus's internal executor thread. `ksni` (later) runs its own async-executor thread through its `blocking` API.
+**zbus executor rule.** Engine connections are built with `.internal_executor(false)` and driven by an asupersync task (ADR-004). The `tl-app` single-instance connection uses the blocking API with zbus's internal executor thread. `ksni` (P3) runs its own async-executor thread through its `blocking` API.
 
 **Cargo profiles** (root `Cargo.toml`):
 
