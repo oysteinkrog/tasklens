@@ -503,3 +503,267 @@ Minimum tile 200 × 120; when the window is too small for that, cols shrink unti
 - **Tests**: `summary_tiles_all_visible_devices`, `summary_blocks_tab_switch`, `summary_esc_returns_to_selected_device`, `summary_tile_grid_for_9` (3 × 3).
 - **Phase**: P2.
 - **Decided here**: tile grid rule and minimums, heading composition, accent marker, click-to-select, title suffix.
+
+---
+
+## Part C: device pages
+
+### UI-PRF-020 Device page frame
+
+- **Implements**: PERF-008 (page headers), PERF-012, PERF-014 (toggles in the header).
+- **Anatomy** (inside the page scroll area, padding `page_pad`):
+
+```
+┌ header row, page_header_h 36 ─────────────────────────────────────────────────────────┐
+│ Processor   AMD Ryzen 7 7800X3D 8-Core Processor            [Per core ▾] [Kernel on]  │
+│ ↑ t_lg 500 text_primary   ↑ t_lg 400 text_secondary, sp4 after   ↑ TlButton small, sp4 gap │
+└───────────────────────────────────────────────────────────────────────────────────────┘
+sp4
+[graph area: page-specific, Part C entries]
+details_gap 24
+Details                      t_md 500 text_primary, 24 px row
+sp4
+[TlKeyValueGrid 3 columns]
+sp6
+[page blocks: tables, module blocks, links]
+page_pad bottom
+```
+
+  - **Header text** (PERF-008): "Processor" + model; "Memory"; "Disk N" + model + ` (nvme0n1)` in `text_secondary` (kernel name); "Graphics adapter" + GPU name; `<ifname>` + adapter name; "Fan N" + chip; battery kind + vendor and model. The first word group is `t_lg` 500 `text_primary`; the rest `t_lg` 400 `text_secondary`, one line, ellipsis. Tooltip with the full text when truncated. `performance.png` shows the model only; tasklens adds the type word per PERF-008 (spec wins).
+  - **Toggles**: right-aligned `TlButton`s, small (24 px), outline variant, 122 px minimum width (measured), `sp4` apart. Dropdown buttons show the kit caret. Which buttons each page has is in its entry.
+  - **"Details"** heading (PERF-008): `t_md` 500.
+  - **Details grid**: UI-PRF-021.
+- **States**: a page whose device went `Missing` is removed by the sidebar; while the removal animation runs the page keeps its last content.
+- **Interaction**: right-click anywhere → UI-PRF-015. Double-click on the graph area → `perf::ShowMiniWindow` (P3). Text in the Details grid is selectable (PERF-012): values are rendered with the kit `Label`-free plain text in a `div().selectable()`-style GPUI text selection is not available in gpui-pre 0.3.7 for arbitrary divs [inferred from the API map, which lists no text selection on div]; tasklens therefore gives every value a right-click "Copy value" item and a click-to-select behaviour: clicking a value selects its text visually (bg `row_selected`, text `text_selected_primary`) and Ctrl+C copies that value instead of the device info while the selection is active; Esc clears it. Recorded under Open items.
+- **Data binding**: header from `DeviceCatalog`; re-render on `DEVICES`.
+- **Build**: `pages/performance/page.rs` `DevicePageFrame` (RenderOnce) used by every page entity; trait `DevicePage { fn header(&self) -> (SharedString, SharedString); fn toggles(..); fn graphs(..); fn details(&self) -> &KeyValueModel; fn blocks(..); fn menu_items(..); fn copy_text(&self, out: &mut String) }`.
+- **Tests**: `page_header_strings` for each kind.
+- **Phase**: P1.
+- **Decided here**: header text styles, toggle size, selection fallback for values.
+
+### UI-PRF-021 Details grid (TlKeyValueGrid on device pages)
+
+- **Implements**: PERF-012, PERF-013, R-050.
+- **Anatomy**:
+
+```
+col 1 (flex 1)           kv_col_gap    col 2 (flex 1)            col 3 (flex 1)
+Utilization                            Kernel time               Speed             ← label t_sm 400 text_secondary, 18 px
+18.6%                                  2.3%                      4631 MHz          ← value t_base 400 text_primary tnum, 20 px
+(sp4 row gap; row pitch kv_row_h 46; measured 46 at 200%)
+```
+
+  - Rows fill left to right, top to bottom, in the order each page's entry gives. A row that a device cannot supply shows the PERF-013 word in `text_secondary` (`Collecting…`, `Restricted`, `Needs setup`, `Not supported`, `Not reported`, `Unavailable`, `Unknown`), so the grid shape is stable, except the rows PERF-013 lists as hidden when missing (CPU power with no RAPL zone, CPU temperature with no CPU hwmon, disk WWN, serial, rotation rate, battery charge thresholds, GPU "Max PCI Express" when equal).
+  - Composite values keep one line: "46.20 GiB / 67.20 GiB", "1905 / 3105 MHz", "31.9 / 300 W".
+  - Tooltips (`TlTooltip`): the reason for a fallback word ("Needs administrator access.", "Not available on this device", "Could not read: {last_error}", `Needs setup` → "Needs setup. Open Additional Setup…" which is a link row: clicking the value dispatches `app::OpenAdditionalSetup`); row-specific tooltips are listed per page.
+  - Stale values: the last value in `text_secondary` with tooltip "Last updated {age} ago".
+- **States**: value hover: underline dotted `text_secondary` only when the value has a tooltip or a click action; link values (`Needs setup`, "Fetch", "Display unit") in `accent`.
+- **Build**: `TlKeyValueGrid` from the foundation (`columns(3)`, `row_h(46)`); model `KeyValueModel { rows: Vec<KvRow { label: &'static str, value: SharedString, validity: Validity, tooltip: Option<SharedString>, action: Option<Box<dyn Action>> }> }` kept in the page entity and updated on snapshot; a value string re-formats only when its bits change (`FxHashMap<&'static str, u64>` per page).
+- **Performance**: 12 to 25 rows; text re-shape only on change. The grid is inside the page's `.cached()` Details block, which re-renders at most at 1 Hz.
+- **Tests**: `kv_grid_fallback_words_per_validity`, `kv_grid_hidden_rows_rule`.
+- **Phase**: P1.
+
+### UI-PRF-022 Copy device info
+
+- **Implements**: PERF-011, R-012, D-007.
+- **Behaviour**: `perf::CopyDeviceInfo` (Ctrl+C in the `Performance` context, page menu "Copy") writes plain text: line 1 the page header words ("Processor"), line 2 the model, then every Details row as `    Label: value` (4-space indent, label as shown, value as shown or the PERF-013 word), in grid order, then each page block in its own paragraph with the block heading as a line and the same indented rows (partitions and swap tables as `    <col>: <value>` per row separated by blank lines). Memory module serials never appear (they are never read). Toast `TlToast` info "Copied metrics to clipboard".
+- **Build**: `DevicePage::copy_text(&self, out: &mut String)`; `cx.write_to_clipboard(ClipboardItem::new_string(text))`.
+- **Tests**: `copy_text_cpu_format` (golden under `tests/golden/copy_cpu.txt`, updated with `TL_UPDATE_GOLDEN`).
+- **Phase**: P2.
+
+### UI-PRF-023 CPU page: header, modes and graph area
+
+- **Implements**: PERF-027, PERF-028, PERF-029, PERF-030, PERF-031, PERF-033 (Utilization value in the header chart), ADR-014 fixture.
+- **Anatomy**:
+
+```
+Processor  AMD Ryzen 7 7800X3D 8-Core Processor           [Per core ▾] [Kernel on]
+sp4
+mode = overall:
+┌ one UI-PRF-001 chart, W × graph_h_overall 300 ─────────────────────────────────────┐
+│ Utilization (heading)                                                   18.6%      │
+│ ── Total  ── Kernel                                                                │
+│ ...                                                                                │
+│ Utilization over 60 seconds                                                        │
+└────────────────────────────────────────────────────────────────────────────────────┘
+mode = per_core:
+┌ UI-PRF-002 grid: n cells, cols = ceil(sqrt(2n)) capped by width, grid_cell_h 112 ──┐
+│ CPU 0   6.1% │ CPU 1  3.0% │ CPU 2 14.1% │ CPU 3 18.2% │ CPU 4 11.1% │ CPU 5  9.1% │
+│ ── Total     │             │             │             │             │             │
+│ ── Kernel    │             │             │             │             │             │
+│ ...          │ ...         │ ...         │ ...         │ ...         │ ...         │
+└────────────────────────────────────────────────────────────────────────────────────┘
+mode = all_cores_overlaid: one chart W × 300, n lines each at alpha max(1/n, 0.08), no fill, no kernel line
+mode = all_cores_stacked: one chart W × 300, n stacked filled bands (cumulative sums), Stacked(n) scale, axis max "1600%"
+sp4
+[secondary graph, UI-PRF-025, W × 120]  (P2; absent when choice is "None")
+```
+
+  - **Mode button** (`TlButton` small outline with dropdown): label is the current mode name; menu radio items "Overall", "Per core", "All cores overlaid", "All cores stacked" → `perf::SetCpuGraphMode { mode }`. Default "Per core". The two extra modes are disabled with tooltip "Available in a later version" before P2 (chosen).
+  - **Kernel toggle** (`TlButton` small outline, pressed look when on): label "Kernel on" / "Kernel off" → `perf::ToggleCpuKernel`. Default on. In overlaid and stacked modes the button is disabled (PERF-029: no kernel line there) and keeps its label.
+  - **Per-core cell**: heading "CPU N", value `6.1%`, legend "Total"/"Kernel" in cell 0 only (PERF-028, `performance.png`), fill `cpu_fill`, line `cpu_line`, kernel overlay `kernel_line` solid 1 px no fill when on (PERF-029). Core marks (PERF-031, P2): a 12 px icon after the heading: Lucide `zap` for P cores and `leaf` for E cores on hybrid CPUs; Lucide `star` for the top-ranked AMD preferred cores with tooltip "Preferred core (rank 236)"; no icon otherwise. Icons use `text_secondary`.
+  - **Heading tooltip** (PERF-028): "Core C, thread T, 4200 MHz" (integer MHz, table d).
+  - **Offline CPU**: cell shows "Offline" (UI-PRF-002).
+  - **Mode change animation**: cross-fade `m_base` between the old and new graph area; reduced motion: instant. Height change animates with the same duration.
+- **States**: per UI-PRF-001 and UI-PRF-002. `WarmingUp` on first open: cells show grid and `…`.
+- **Interaction**: page menu (UI-PRF-015) page-specific items: "Graph >" with the four mode radio items, "Kernel times" check item → `perf::ToggleCpuKernel`, "Secondary graph >" (UI-PRF-025). Hover readout (P2) per cell.
+- **Data binding**: `SeriesId`s for `cpu.total`, `cpu.kernel`, `cpu.core[N]`, `cpu.core_kernel[N]` from the CPU device; `Snapshot.system.cpu` for the header, clock and topology. Demand: `cpu: PerCore` in per-core, overlaid and stacked modes, `Total` in overall; `cpu_fast = true` while the page is visible and a chart is moving (smooth on); when smooth is off `cpu_fast` is still true so per-core percent labels update at 10 Hz (chosen: matches the ADR-014 fixture "per-core percent labels updated at 10 Hz").
+- **Build**: `pages/performance/cpu.rs` `CpuPage` entity: `overall: Entity<ChartView>`, `grid: Entity<ChartGridView>`, `overlaid: Option<Entity<ChartView>>`, `stacked: Option<Entity<ChartView>>` (created on first use), `secondary: Option<Entity<ChartView>>`, `details: KeyValueModel`. Settings keys `performance.cpu_graph_mode`, `performance.cpu_kernel`.
+- **Performance**: this is the `perf-cpu` scene. Budget per ADR-014. The grid is one element (3 paths). Per-core value labels: 32 `ShapedLine`s re-shaped only when text changes (at 10 Hz most change each tick; shaping 32 short strings per 100 ms is inside the budget; the bead measures it).
+- **Accessibility**: mode and kernel buttons are focusable with tooltips "Graph mode" and "Show kernel time". Each cell's value is text.
+- **Tests**: `cpu_mode_button_labels`, `cpu_kernel_disabled_in_overlaid`, `cpu_grid_16_cores_6_cols`, `cpu_core_mark_icons`, `cpu_demand_percore_only_when_needed` (overall mode sends `Total`).
+- **Phase**: P1 (overall, per core, kernel); P2 (overlaid, stacked, marks, secondary graph).
+- **Decided here**: `graph_h_overall` 300, cross-fade on mode change, mark icons, disabled-mode tooltip, `cpu_fast` with smooth off.
+
+### UI-PRF-024 CPU page: Details grid
+
+- **Implements**: PERF-033, PERF-034, PERF-035, PERF-036, PERF-037, PERF-038, PERF-039, PERF-040.
+- **Rows** (exact labels, grid order, 3 columns left to right):
+
+| # | Label | Value example | Tooltip / notes | Phase |
+|---|---|---|---|---|
+| 1 | Utilization | `18.6%` | | P1 |
+| 2 | Kernel time | `2.3%` | | P1 |
+| 3 | Speed | `4631 MHz` | "Fastest core: 5050 MHz"; BogoMIPS-only: value `4200 MHz (?)`, tooltip "Reported by the kernel at boot; the current clock is not available" | P1 |
+| 4 | Processes | `295` | | P1 |
+| 5 | Threads | `5 596` | | P1 |
+| 6 | Handles | `253 248` | "Open file descriptors, system-wide" | P1 |
+| 7 | Up time | `2 days, 2h 38m 15s` | tooltip "Boot time 2026-10-01 07:12:33" | P1 |
+| 8 | Base speed | `4200 MHz` | | P1 |
+| 9 | Sockets | `1` | | P1 |
+| 10 | Power draw | `31.9 W` | "Package 31.9 W · Core 18.2 W"; `Needs setup` link when RAPL exists but is unreadable; row hidden when no RAPL zone | P2 |
+| 11 | Temperature | `52 °C` | "Tctl 52 °C · Tccd1 48 °C · Tccd2 50 °C"; row hidden when no CPU hwmon | P1 |
+| 12 | Load average | `1.24 0.98 0.87` | "1, 5 and 15 minutes" | P1 |
+| 13 | Cores | `8` | | P1 |
+| 14 | Logical processors | `16` | | P1 |
+| 15 | Virtualization | `Enabled (KVM available)` | | P2 |
+| 16 | Running in VM | `No` | | P2 |
+| 17 | Security features | `Secure Boot, IOMMU` | "12 mitigated, 0 vulnerable, 3 not affected" plus "Could not read: lockdown" when a source failed | P2 |
+| 18 | Hypervisor | `None` | | P2 |
+| 19 | L1 cache | `512 KiB` | "16 × 32 KiB data + 16 × 32 KiB instruction" | P1 |
+| 20 | L2 cache | `8 MiB` | "8 × 1 MiB" | P1 |
+| 21 | L3 cache | `96 MiB` | "98 304 KiB · 1 × 96 MiB"; L4 appended when present | P1 |
+| 22 | Cpufreq driver | `amd-pstate-epp` | | P2 |
+| 23 | Governor | `powersave` | | P2 |
+| 24 | Power preference | `balance_performance` | | P2 |
+| 25 | Platform profile | `balanced` | | P2 |
+| 26 | Microcode | `0xa601206` | | P2 |
+
+  Rows 1 to 12 are the live group; the grid re-renders at 1 Hz (`SYSTEM`). Rows 13 to 26 are static (`DEVICES`). Before P2 the P2 rows are not shown (the grid has 14 rows).
+- **Build**: `CpuPage::details`, formatter calls from `tl-model::units` (`fmt_percent`, `fmt_mhz`, `fmt_count`, `fmt_uptime`, `fmt_watts`, `fmt_celsius`, `fmt_cache`).
+- **Tests**: `cpu_details_order_p1`, `cpu_details_order_p2`, `cache_tooltips`.
+- **Phase**: as per row.
+- **Decided here**: tooltip texts for Up time, Load average and BogoMIPS.
+
+### UI-PRF-025 CPU secondary graph
+
+- **Implements**: PERF-032, PERF-038, PERF-039, PERF-040.
+- **Anatomy**: one UI-PRF-001 chart, W × `secondary_graph_h` 120, under the main graph area with `sp4` gap. Heading and range word per choice:
+
+| Choice | Heading | Series | Scale | Range label |
+|---|---|---|---|---|
+| Power draw | "Power draw" | package W (fill cpu_fill, line cpu_line); core W as a dashed line | `StickyUp { hw_max: None }` | "Power draw over 60 seconds" |
+| Clock speed | "Clock speed" | average MHz filled; maximum-core MHz dashed | `StickyUp { hw_max: cpuinfo_max_freq }` | "Clock speed over 60 seconds" |
+| Temperature | "Temperature" | main sensor °C | `StickyTemp` | "Temperature over 60 seconds" |
+| None | chart absent | | | |
+
+  Axis max shown at top right (UI-PRF-003). Value label is the newest value (`31.9 W`, `4631 MHz`, `52 °C`).
+- **States**: the saved choice is `performance.cpu_secondary_graph` (default "power"). When power is not available the graph shows Temperature, else Clock speed, without changing the saved key (PERF-032); the heading then carries a `TlTooltip` "Power draw is not available. Showing Temperature." (chosen). When nothing is available the chart is absent.
+- **Interaction**: page menu "Secondary graph >" radio items "None", "Power draw", "Clock speed", "Temperature" → `perf::SetCpuSecondaryGraph { choice }`. "Power draw" is disabled with tooltip "Needs setup" when RAPL is unreadable; the tooltip's text is a link row that opens the Additional Setup window (clicking the disabled item does nothing; a second menu item "Set up CPU power draw…" appears directly under it in that case and dispatches `app::OpenAdditionalSetup`, chosen so the link is reachable from the menu).
+- **Data binding**: `cpu.power_pkg`, `cpu.power_core`, `cpu.clock_avg`, `cpu.clock_max`, `cpu.temp` series at 1 Hz. Demand: `sensors` while the choice is temperature; RAPL is part of the CPU worker.
+- **Build**: `CpuPage.secondary`.
+- **Tests**: `secondary_fallback_without_power`, `secondary_menu_disabled_needs_setup`.
+- **Phase**: P2.
+- **Decided here**: height 120, fallback tooltip, "Set up CPU power draw…" item.
+
+### UI-PRF-026 Memory page: graphs
+
+- **Implements**: PERF-041, PERF-026 (legend), PERF-018 (scales).
+- **Anatomy**: a vertical stack of up to three UI-PRF-001 charts, each W × `graph_h_stacked` 150, `sp4` apart:
+
+```
+┌ Physical memory                                    34.68 GiB ┐  heading; value = used (table d)
+│ ── Used  ── Committed                                  (legend; dirty: thin line, no legend)
+│ fill mem_fill (used), dashed mem_line (committed), 1 px mem_line @0.6 (dirty)
+│ Memory usage over 60 seconds                                  │  scale FixedTotal(MemTotal)
+└───────────────────────────────────────────────────────────────┘
+┌ Commit                                                 69.0% ┐  value = Committed_AS / CommitLimit
+│ fill mem_fill; scale Commit(limit); axis max text when > 100% │  heading tooltip "Committed memory against the commit limit. It can exceed 100%."
+│ Commit over 60 seconds                                        │
+└───────────────────────────────────────────────────────────────┘
+┌ Swap                                                 1.20 GiB ┐  hidden when SwapTotal = 0 or memory_swap_graph = false
+│ fill mem_fill; scale FixedTotal(SwapTotal)                    │
+│ Swap usage over 60 seconds                                    │
+└───────────────────────────────────────────────────────────────┘
+sp6
+[composition bar, UI-PRF-027]  (hidden when memory_composition = false)
+```
+
+- **Interaction**: page menu page-specific items: "Show memory composition" (check) → `perf::ToggleMemoryComposition`; "Show swap usage" (check) → `perf::ToggleMemorySwapGraph`. Hiding and showing animates height 150 → 0 over `m_base`; reduced motion: instant.
+- **Data binding**: series `mem.used`, `mem.committed`, `mem.dirty`, `mem.commit_pct`, `swap.used`; totals from `Snapshot.system.memory` (`SYSTEM`). Demand `memory`.
+- **Build**: `pages/performance/memory.rs` `MemoryPage` with three `ChartView`s.
+- **Tests**: `memory_swap_graph_hidden_without_swap`, `commit_axis_text_above_100`.
+- **Phase**: P1.
+- **Decided here**: stacked height 150, commit heading tooltip.
+
+### UI-PRF-027 Memory composition bar
+
+- **Implements**: PERF-042.
+- **Anatomy**:
+
+```
+Memory composition      t_sm 400 text_secondary (caption above the bar, chosen)
+┌──────────────┬──┬───┬─────────────┬──────────────┐  height 24, r_sm, 1 px divider outline
+│ In use       │▒▒│███│ Standby     │ Free         │  segments left to right: In use, In use (compressed), Modified, Standby, Free
+└──────────────┴──┴───┴─────────────┴──────────────┘
+  mem_line      mem_line  status.   mem_line @0.35  window_bg (free stays the background colour)
+  @1.0          hatched   warning
+                @0.8      @0.8
+```
+
+  - Segment widths are proportional to bytes over MemTotal; a non-zero segment is at least 2 px wide (chosen). Segment labels (`t_xs` 400 `text_selected_primary` on dark segments, `text_secondary` on Free) are drawn only when the segment is at least 72 px wide; otherwise the tooltip carries the name.
+  - Hatching for compressed: 1 px diagonal lines every 4 px in `window_bg` at alpha 0.5 painted with `paint_path` once per rebuild (chosen, matches "In use (compressed)" being a sub-state of In use).
+  - Tooltips (`TlTooltip`, exact one-liners, PERF-042):
+    - "In use: 20.11 GiB. Memory used by running programs and the kernel."
+    - "In use (compressed): 1.02 GiB. Memory held compressed in zram or zswap."
+    - "Modified: 120.00 MiB. Dirty pages waiting to be written to disk."
+    - "Standby: 12.40 GiB. Cache the kernel can drop."
+    - "Free: 28.60 GiB. Unused memory."
+- **States**: `WarmingUp`: bar outline only, caption "Collecting…". Hover on a segment: segment at alpha +0.15 and the tooltip.
+- **Build**: `pages/performance/memory.rs` `CompositionBar` custom element (quads plus one hatch path); one hitbox per segment only while the pointer is inside the bar (same rule as UI-PRF-002).
+- **Tests**: `composition_segments_sum_to_total`, `composition_min_width_2px`, `composition_tooltip_texts`.
+- **Phase**: P1.
+- **Decided here**: all geometry, colours, caption, tooltip sentences.
+
+### UI-PRF-028 Memory page: Details grid and blocks
+
+- **Implements**: PERF-043, PERF-044, PERF-045, PERF-046, D-007.
+- **Details rows** (grid order):
+
+| # | Label | Value example | Notes | Phase |
+|---|---|---|---|---|
+| 1 | In use | `20.11 GiB` | | P1 |
+| 2 | Available | `41.20 GiB` | | P1 |
+| 3 | Committed | `46.20 GiB / 67.20 GiB` | | P1 |
+| 4 | Cached | `12.40 GiB` | | P1 |
+| 5 | Kernel slab (reclaimable) | `1.10 GiB` | tooltip "SReclaimable" | P1 |
+| 6 | Kernel slab (unreclaimable) | `420.00 MiB` | tooltip "SUnreclaim" | P1 |
+| 7 | Speed | `3200 MT/s` | configured speed | P2 |
+| 8 | Slots used | `2 of 4` | | P2 |
+| 9 | Form factor | `DIMM` | | P2 |
+| 10 | Type | `DDR4` | | P2 |
+| 11 | Hardware reserved | `0 B` | tooltip "Sum of module sizes minus MemTotal" | P2 |
+| 12 | Swap used | `1.20 GiB` | | P1 |
+| 13 | Swap available | `30.80 GiB` | SwapFree | P1 |
+| 14 | Compressed | `1.02 GiB` | shown only when ≥ 1 MiB compressed | P1 |
+| 15 | Savings | `2.30 GiB` | shown with Compressed | P1 |
+| 16 | Huge pages | `2 048 × 2 MiB` | shown only when non-zero | P1 |
+
+- **Blocks** below the grid, each with a `t_md` 500 heading and `sp6` above:
+  1. **"Compressed memory"** (PERF-044, P2): one `TlKeyValueGrid` (3 columns) per zram device with a `t_sm` 500 sub-heading "zram0": rows Device, Size, Stored, Compressed, Memory used, Ratio (`3.4 : 1`), Algorithm. Then a 3-column grid "zswap": row "Enabled" (`No`); when enabled also Pool size and Stored. Hidden entirely when there is no zram device and zswap is disabled (chosen).
+  2. **"Swap devices"** (PERF-045, P2): a static table (the foundation's `TlStaticTable`: header row 24 px `header` bg, rows 28 px, `row_alt` striping) with columns Name (flex), Type (80), Size (90, right), Used (90, right), Priority (70, right). Empty: the block is hidden when `/proc/swaps` has no entries.
+  3. **"Memory modules"** (PERF-046, P2): a line "Slots used: 2 of 4" (`t_sm` `text_secondary`), then one collapsible block per populated DIMM: header row 28 px with a chevron `TlButton` ghost 20 px and the title "Memory module N" (`t_sm` 500); body a 3-column `TlKeyValueGrid` with rows Slot, Capacity, Speed, Configured speed (only when it differs), Type, Form factor, Manufacturer, Part number, Rank, Voltage. Blocks start collapsed when there are more than 4 modules; expand state is not persisted. When the udev keys are missing: the block list is replaced by one grid row "Module details" = `Not reported`. No serial anywhere (D-007).
+- **Build**: `MemoryPage.details`, `MemoryPage.blocks`. The module block uses a GPUI `div` with the chevron rotating 90° over `m_fast` (reduced motion: instant).
+- **Tests**: `memory_details_order`, `memory_hidden_rows_rule`, `modules_collapsed_when_more_than_4`, `no_serial_in_copy_text`.
+- **Phase**: as per row and block.
+- **Decided here**: block visibility rules, table column widths, module header layout, Huge pages format.
