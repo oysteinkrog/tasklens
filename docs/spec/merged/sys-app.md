@@ -874,3 +874,225 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P1
 - Privilege: none
+
+## Menus
+
+### APP-012 File menu
+- Was: APP-012
+- Source: TS 1.2
+- Behaviour: Items:
+  - "Run..." (Ctrl+N), see APP-014
+  - "Search File Handles...", see APP-015
+  - "Open System Monitor", see APP-016
+  - separator
+  - "Exit tasklens" (Ctrl+Q)
+
+  Menu items appear only once their feature exists, so the menu never has dead items. F10 and Alt+F open this menu (table b).
+- Linux data/mechanism: gpui-component PopupMenu from the title bar; keyboard hints come from the Actions
+- Verdict: ADAPT
+- Phase: P1 (Exit), later items in their own phase
+- Privilege: none
+
+### APP-013 Run Installer item
+- Was: APP-013
+- Source: TS 1.2 L28475
+- Behaviour: none
+- Linux data/mechanism: none
+- Verdict: DROP (TaskSlinger installer front end; pacman installs tasklens)
+- Phase: P4 (recorded)
+- Privilege: none
+
+### APP-014 Run dialog (window frame and privilege path)
+- Was: APP-014
+- Source: TS 8 "TaskSlinger Run" L29321-29338, runCommandHistory.json | R-061
+- Behaviour:
+  - Ownership (R-061): this entry owns the window frame and the administrator path. The content (text, combo, buttons, keys, toasts, history format, URL and `kcm_*` handling) is owned by the process spec's Run dialog entry (r2 PROC-079). The summary below matches it.
+  - A separate pinnable window titled "tasklens Run", opened by File > "Run..." and Ctrl+N.
+  - Text "Type the name of a program, folder, document, or Internet resource.", then "Open:" and a combo with history (5 visible rows, prefix matches first).
+  - Keys (table b, RunDialog): Up and Down pick a history match, Enter runs, Shift+Enter runs as administrator.
+  - Controls per r2 PROC-079: "Run as administrator" checkbox, "Browse…" (Programs filter = executable files; All files), "Clear command history", OK (default), Cancel.
+  - Toasts: "Command launched", "Command history cleared", "Please enter a command", "Command contains invalid text." (a NUL byte or a control character), "Failed to run command", "Authentication cancelled".
+  - The dialog notes "GUI programs may not start as root on Wayland" next to the administrator checkbox.
+- Linux data/mechanism:
+  - URLs and existing paths go to the portal `org.freedesktop.portal.OpenURI` (or `xdg-open`). `kcm_*` names run `systemsettings <name>`.
+  - Anything else runs as `/bin/sh -c <text>` through the shared launcher (SYS-023), in a transient scope `app-tasklens-run-<rand>.scope` on the user manager.
+  - Run as administrator (R-061): `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec` with standard auth_admin. Plain pkexec, never tl-helper, so the helper never offers an arbitrary shell.
+  - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
+  - Browse: GPUI `prompt_for_paths` (portal FileChooser). Phase 0 confirms it pulls in no Tokio (U-15); otherwise call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none, or pkexec for Run as administrator
+
+### APP-015 Search File Handles window (frame)
+- Was: APP-015
+- Source: TS 8 "Search File Handles" L29339-29345, L30071-30081 | R-061
+- Behaviour:
+  - Ownership (R-061): this entry owns the menu item and the window frame. Controls, result columns, progress strings, the result menu and the footer note are owned by the process spec (r2 PROC-080). The summary below matches it.
+  - A separate pinnable, non-modal window titled "tasklens Handle Search", opened by File > "Search File Handles...".
+  - Field "Pattern:" (case-insensitive substring; `*` and `?` globs allowed), checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
+  - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
+  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
+  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process, Copy path, Open file location.
+  - Unprivileged footer: "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button.
+- Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between pids. Other users' processes go through tl-helper `ReadProcessFiles` (R-004).
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: own processes need none. Others need tl-helper under polkit `io.github.oysteinkrog.tasklens.helper` (R-002).
+
+### APP-016 Launch other system monitor
+- Was: APP-016
+- Source: TS "Launch Windows Task Manager" L28474, toast L28639
+- Behaviour: The File item "Open System Monitor" starts the desktop's own monitor. It is hidden when none is installed. Failure gives the toast "Failed to launch System Monitor".
+- Linux data/mechanism: the first found of `plasma-systemmonitor`, `gnome-system-monitor`, `missioncenter`, run through the shared launcher (SYS-023)
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: none
+
+### APP-017 View menu structure
+- Was: APP-017
+- Source: TS 1.3
+- Behaviour: Submenus, in order: "Columns >", "Process View >", "Window >", "Appearance >", "Theme >", "Graphs >". Alt+V opens it (table b).
+- Linux data/mechanism: PopupMenu submenus
+- Verdict: BUILD
+- Phase: P1 (Columns, Process View, Window, Graphs), P2 (Appearance, Theme)
+- Privilege: none
+
+### APP-018 View > Columns (all tables)
+- Was: APP-018
+- Source: TS 1.3, header menu L29313-29314, L28434, L28484-28487, toasts L28648, L28652, cross-check A.10 | R-065, table (d)
+- Behaviour: Applies to the active tab's table (Processes, History, Services, Startup Apps, Connections). The same items open from a right-click on a column header.
+  - "Select Columns…": the "Columns" picker, a checklist with a filter field, grouped under headings. Process headings (add PROC-102): Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux. Entries show alias text, for example `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"` (R-065). The filter matches full name and alias. Other tables list their columns without headings (inferred).
+  - "Hide This Column" (header menu only).
+  - "Resize columns to fit content": measures the table (d) template strings `"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`. Text columns have a 60 px minimum.
+  - "Resize Behavior: Proportional / Last Column" (`processes.column_resize`, see O-1).
+  - "Reset to default".
+  - Toasts: "At least one column must stay visible", "Columns reset to default".
+- Linux data/mechanism: tl-ui table state, persisted per APP-033 in `state.toml` `[columns.<table>]` (`order`, `visible`, `widths`)
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-019 View > Process View
+- Was: APP-019
+- Source: TS 1.3 L28488-28492 | R-010
+- Behaviour: Three radio items "Tree View", "Task Manager Grouping", "List View" (`processes.mode`), then check items "Tree Connector Lines" (`processes.tree_guide_lines`) and "Highlight New and Exited Processes" (`processes.highlight_new_exited`). Behaviour is defined in the process spec.
+- Linux data/mechanism: settings in table (a)
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-020 View > Window
+- Was: APP-020
+- Source: TS L28493 | R-058
+- Behaviour:
+  - "Always On Top" (check), see APP-009.
+  - "Performance mini window" (check, Ctrl+Shift+M). The mini window itself is owned by the Performance spec (PERF-082).
+- Linux data/mechanism: APP-009; the mini window per PERF-082
+- Verdict: ADAPT
+- Phase: P2 (Always On Top), P3 (Performance mini window)
+- Privilege: none
+
+### APP-021 View > Graphs
+- Was: APP-021
+- Source: TS 1.3 L28470-28471, L28483, L28543-28544
+- Behaviour:
+  - Checks: "CPU Graph", "Memory Graph", "Disk Graph", "Network Graph", "GPU Graph", "VRAM Graph", "GPU Temperature Graph" (`graphs.minigraph_cpu`, `_memory`, `_disk`, `_network`, `_gpu`, `_vram`, `_gpu_temperature`).
+  - Then "Keep detached graphs open when closing main window" (`graphs.keep_detached_on_close`) and "Reset Minigraph Layout" (toast "Minigraph layout reset"; resets `[[minigraphs]]` in `state.toml`).
+  - The minigraph spec (PERF) owns what these graphs show and how they behave.
+- Linux data/mechanism: settings `[graphs]`
+- Verdict: BUILD
+- Phase: P1 (graph checks and Reset, with the system minigraph cards, PERF-086 and table a), P3 (Keep detached graphs open)
+- Privilege: none
+
+### APP-022 Settings menu
+- Was: APP-022
+- Source: TS 1.4 L28494-28536, cross-check B.7 | R-015, R-025, R-028, R-058, D-003
+- Behaviour: Group headings and items, in order. Alt+S opens it.
+  - **Monitoring**
+    - "Refresh >": 0.25s, 0.5s, 1.0s, 2.0s, 5.0s, 10.0s (`processes.interval_ms` 250, 500, 1000, 2000, 5000, 10000)
+    - "Network transfer unit >": Bits per second / Bytes per second (`units.network = bits | bytes`)
+    - "Auto-scale network transfer rates" (`units.network_auto_scale`, default off)
+    - "Record history" (`history.enabled`, default off, D-003)
+    - "History storage >": 1, 2, 3, 4, 6, 8, 12 hours (`history.retention_h`, default 6)
+    - "Save history to disk" (`history.persist`, default on)
+    - "Rendering GPU >" (`rendering.gpu`, APP-046)
+  - **Motion & interaction**
+    - "Animations" (`motion.animations`), "Smooth Graphs" (`motion.smooth_graphs`), "Smooth Scroll" (`motion.smooth_scroll`)
+    - "Tab Switch" slider (0-500 ms, step 10, label "%d ms") (`motion.tab_switch_ms`)
+    - "Close with Esc" (`window.close_with_esc`)
+  - **Window & startup**
+    - "Close to tray", "Minimize to tray", "Always show tray icon" (`tray.close_to_tray`, `tray.minimize_to_tray`, `tray.always_show`)
+    - "Start at login" (`startup.start_at_login`), then an indented "Start minimized" (`startup.start_minimized`, disabled unless Start at login is on)
+    - "Default tab >" (`general.start_tab`: Processes, Performance, Services, Startup Apps, Connections, Information, Last used)
+    - "Unlock privileged actions at launch" (`privilege.unlock_at_launch`)
+    - "Skip password prompts (experimental)" (`privilege.passwordless`)
+    - "Auto-fetch Public IP on launch" (`network.auto_fetch_public_ip`, R-058)
+    - "Open rescue window on critical memory pressure" (`lowmem.enabled`; owned by the process spec, r2 PROC-081)
+  - **Language**: "Language: >" with "System default", then the locales (APP-043) (`general.language`)
+  - Bottom: "All settings…" (Ctrl+,), "Reset Settings to Defaults"
+
+  - "Reset Settings to Defaults" opens a modal confirm window: "Reset all settings to their defaults? Themes and history are kept.", buttons "Reset" / "Cancel". Then toast "Settings reset to defaults", or "Failed to reset settings". It resets `settings.toml` only; `state.toml`, `themes.json` and history are kept (inferred from the confirm text).
+  - The Additional Setup window is not in this menu. It opens from Help, from All settings > Privileges and from every "Needs setup" link (R-028).
+- Linux data/mechanism: PopupMenu; every item writes through the settings store (APP-033)
+- Verdict: ADAPT
+- Phase: P1 (Refresh, units, Default tab, Close with Esc, motion items), others in their feature's phase
+- Privilege: none
+
+### APP-023 Settings window ("All settings…")
+- Was: APP-023
+- Source: MC Preferences dialog (General, Performance Page, Apps & Services, Units) | TS has menus only
+- Behaviour:
+  - A separate window titled "tasklens Settings", opened by "All settings…" and Ctrl+,. It uses the gpui-component `Settings` widget (page sidebar plus search).
+  - Pages: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced.
+  - Every key of `settings.toml` in table (a) appears exactly once, with the same label as its menu item where one exists. `state.toml` keys do not appear.
+  - Privileges page: the two privilege keys and an "Additional setup…" button (R-028).
+  - Startup and window page: also "Open with Ctrl+Esc" (APP-051), which reads and writes kglobalaccel and has no settings key (inferred).
+  - Advanced page: "Import from TaskSlinger…" (APP-034).
+  - Changes apply live, except `appearance.decorations` and `rendering.gpu`, which need a restart.
+  - TaskSlinger's quick menus are kept; this window adds the settings that have no menu item, mostly from Mission Center.
+- Linux data/mechanism: gpui-component Settings/SettingPage/SettingField bound to the settings Global
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### APP-024 Help menu
+- Was: APP-024
+- Source: TS 1.5 | MC main menu (Keyboard Shortcuts, Open Wiki, Show First Run Dialog, About) | R-028
+- Behaviour: Items (Alt+H opens the menu):
+  - "Keyboard Shortcuts" (Ctrl+?), see APP-030
+  - "System Information…", see APP-041
+  - "Additional setup…", see APP-042
+  - "Documentation", which opens `/usr/share/doc/tasklens/README.md` with xdg-open; this replaces Mission Center's "Open Wiki"
+  - separator
+  - "About tasklens…", see APP-053
+- Linux data/mechanism: PopupMenu
+- Verdict: ADAPT
+- Phase: P2 (Additional setup… P3, Documentation P4)
+- Privilege: none
+
+### APP-025 Purchase license, Enter license, early-bird notice
+- Was: APP-025
+- Source: TS 1.5 L28537-28539, 8 License and Early-bird dialogs, cross-check A.35, INI License.Token, WingetEarlyBirdNoticeShown
+- Behaviour: none
+- Linux data/mechanism: none
+- Verdict: DROP (personal tool with no licence system; the purchase flow is TaskSlinger's commercial model)
+- Phase: P4 (recorded)
+- Privilege: none
+
+### APP-026 Debug menu
+- Was: APP-026
+- Source: TS 1.6, hidden INI keys ShowFps/ShowDebugWindow/TripleBuffering | R-071
+- Behaviour: Shown only with `--debug` or `TASKLENS_DEBUG=1`. Items:
+  - "Show FPS" (`debug.show_fps`): overlay of frame time p50/p99 and fps.
+  - "Continuous rendering": requests a frame every vsync.
+  - "Enable all columns".
+  - "Add random process minigraphs": toasts "Added %ld random process minigraphs." / "No process minigraphs available.".
+  - "Collector health": window listing each collector's state, age, last error and restart count. This is the Linux analogue of ShowDebugWindow. It also opens from the status bar health text (APP-029). There is no setting for it (R-071).
+  Dropped items:
+  - Force D3D feature level: Direct3D only.
+  - Triple buffering: wgpu present mode is fixed to Mailbox.
+  - Clear text atlas cache: GPUI has no public API for it.
+- Linux data/mechanism: GPUI `request_animation_frame` (debug only; ADR-009's AnimationDriver rule applies everywhere else); engine health snapshot
+- Verdict: ADAPT
+- Phase: P4 (Show FPS in P1 as a developer-only flag)
+- Privilege: none
