@@ -1360,3 +1360,467 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Tests**: `empty_filter_state_shows_text_and_button`, `no_skeleton_on_processes_tab`.
 - **Phase**: P1.
 - **Decided here**: texts, y position, button, header suppression when nothing matches.
+
+---
+
+## C. History mode
+
+### UI-PRC-030 History mode layout, header text and mode switch
+
+- **Implements**: PROC-088 (toggle, tab label, layout, header text), PROC-091 (first-snapshot
+  text), PROC-016 (toolbar in History), D-010, R-023.
+- **Anatomy** (replaces the live table in the tab content area while `history_mode` is on):
+
+  ```text
+  ┌ tab strip: [ History ⟲ ] Performance … (tab label reads "History"; the ⟲ icon is toggled) ┐
+  │ header line: "History - Drag scrubber below to view timeline"            [Live] [chips]   │ 32
+  │ ┌────────────────────────────────────────────────────────────────────────────────────────┐ │
+  │ │ timeline strip (UI-PRC-032): stacked metric graph + scrub handle                       │ │ 120
+  │ └────────────────────────────────────────────────────────────────────────────────────────┘ │
+  │ ┌────────────────────────────────────────────────────────────────────────────────────────┐ │
+  │ │ minimap (UI-PRC-033): full retention with viewport box                                 │ │ 24
+  │ └────────────────────────────────────────────────────────────────────────────────────────┘ │
+  │ history table (UI-PRC-031): TlTreeTable, flat, 9 columns                                   │ rest
+  └────────────────────────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  - The history icon: Lucide `History` 16 px inside the Processes tab label (measured: a clock
+    arrow glyph right of "Processes" in processes.png), a `TlIconButton` ghost 20 × 20; toggled
+    look (`row_selected` fill) while History mode is on. Tooltip "Show process history" / "Show
+    live processes".
+  - Header line: height 32, padding `sp5` 12 horizontal, `t_base` `text_primary`. Text states:
+    live: "History - Drag scrubber below to view timeline"; at a scrub point: "History Snapshot:
+    213 processes - 4 min 12 sec ago" (format "<N> processes - <M> min <S> sec ago", under a
+    minute "<S> sec ago", over an hour "<H> h <M> min ago"; decided from the spec example);
+    range selected: "History Range: 12:01:30 - 12:04:12 (2 min 42 sec), averages"; no frame yet:
+    "Collecting first history snapshot..." (PROC-091). Right side: the `Live` button
+    (UI-PRC-036) and the metric chips (UI-PRC-035).
+  - Timeline strip 120 high, minimap 24 high, `sp2` 4 between them, `sp4` 8 below before the
+    table; all inside the tab content width minus `sp5` margins.
+- **States**: live (handle at the right edge, header text 1), scrubbed, range, collecting,
+  recording-off (UI-PRC-036), loading store (first 2 s after start: the strip shows "Loading
+  history…" centred `text_secondary` and the table is empty; PROC-087 toasts on problems).
+- **Interaction**: `ToggleHistoryMode` from the tab icon and View > Process View (shell); the
+  state persists in `state.toml [processes] history_mode`. Hide system processes stays active
+  and filters the history table; the view-mode cycler is disabled (UI-PRC-019). The filter applies
+  (UI-PRC-016). Esc with a scrub point: returns to live (decided, before the global Esc rule).
+- **Data binding**: `Command::HistoryQuery { id, range, what }` → `Snapshot.history:
+  Arc<HistoryView>` (max 1,024 points per series, min/max decimated, ADR-009). The page sends a
+  query on mode entry, on every scrub change (debounced to one in flight: a new scrub while a
+  query is pending replaces the pending request, decided), on range change and every second
+  while live. Re-render on `ComponentMask::HISTORY`.
+- **Build**: `crates/tl-ui/src/pages/processes/history/{mod.rs, table.rs, scrubber.rs,
+  minimap.rs, legend.rs}`; the header line is a `div`; strip and minimap are custom elements
+  (ADR-009 chart element family).
+- **Performance**: scrub queries are rate-limited by the one-in-flight rule; the strip redraws
+  only on new `HistoryView` or pointer moves over it; the table reuses `TlTreeTable`.
+- **Accessibility**: header text states the time; keyboard scrubbing (UI-PRC-032); the Live
+  button is a real button.
+- **Tests**: `history_toggle_persists_and_relabels_tab`, `history_header_text_states`,
+  `history_one_query_in_flight`.
+- **Phase**: P3.
+- **Decided here**: header line height and formats, strip and minimap heights, Esc returns to
+  live, query coalescing.
+
+### UI-PRC-031 History table
+
+- **Implements**: PROC-088 (columns, sort, selection, Delete from history, "Process not
+  running"), PROC-046 (hide system in history), R-011 (default sort CPU descending).
+- **Anatomy**: `TlTreeTable` with `HistoryTableDelegate`: flat rows (`RowKind::Plain`, depth 0,
+  no chevrons, 16 px icons), 9 columns in default order Name 248, PID 96, User 92, Image path
+  200, CPU 63, Memory 92, Disk 82, Network 92, GPU 72 (decided widths for the two that R-006
+  does not give: Image path 200, others as the live table), header line 2 shows the system
+  totals at the scrub time (CPU, Memory; others `-`), header tooltip on the Name column
+  "Values at the selected time" or "Averages over the selected range (peak in cell tooltips)".
+  Cells: the same painters as UI-PRC-004; with a range selected each metric cell's tooltip reads
+  "peak 42.1%".
+- **States**: live (rows update each second), scrub point, range (averages), filtered, a
+  selected identity absent at the scrub time: the row is still listed at the bottom with every
+  metric `-` and the Name cell secondary text "Process not running" `text_secondary` (decided
+  placement), identities from another boot: Name secondary text "(previous boot)" and a 12 px
+  `History` glyph.
+- **Interaction**: selection as UI-PRC-008 (single and multi); selecting rows adds their series
+  to the strip (UI-PRC-035); double-click or Enter on a row: if the identity is live, jump to it
+  in the live table (UI-PRC-022); else toast "Process not running". Right-click menu: Copy, Copy
+  details, Copy all metrics, Copy rows as table, separator, "Show in live table" (disabled when
+  not live), separator, "Delete from history" (`DeleteFromHistory`, toast "History entry
+  deleted"; decided minimal menu). Sort by header click; persisted in `[sort.history]`; columns
+  in `[columns.history]`; the column picker (UI-PRC-007) works with the history registry.
+- **Data binding**: `HistoryView.rows` for the current time or range; the live second comes
+  from the rolling window or store, never from the live `ProcessTableView`.
+- **Build**: `history/table.rs::HistoryTableDelegate`.
+- **Performance**: as UI-PRC-001; rows ≤ a few hundred.
+- **Accessibility**: as the live table.
+- **Tests**: `history_table_default_sort_cpu_desc`, `history_missing_identity_row_marked`,
+  `history_menu_items`.
+- **Phase**: P3.
+- **Decided here**: widths for Image path, missing-identity row placement, menu content.
+
+### UI-PRC-032 Timeline scrubber element
+
+- **Implements**: PROC-089 (strip, handle, wheel zoom, pan, range drag, double-click, time
+  labels, keyboard), table b History scrubber keys, PROC-092 (bench scene input).
+- **Anatomy** (custom element `HistoryScrubber`, 120 high, full width):
+
+  ```text
+  y 0   ┌─────────────────────────────────────────────────────────────────────┐
+        │ ▁▂▃▅▆▇█▇▆▅▃▂▁ stacked metric graph (top-3 + other, UI-PRC-035)       │  plot area y 0..100
+        │                              ╎ handle: 1 px accent line, 10×10 grip  │
+  y 100 ├──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┤  axis 1 px divider
+        │ -10:00    -8:20      -6:40      -5:00      -3:20      -1:40     now│  labels t_xs text_secondary, y 104..118
+  y 120 └─────────────────────────────────────────────────────────────────────┘
+  ```
+
+  - Plot: background `list_bg`; grid lines as the ADR-009 chart (hairline `graph.grid`, vertical
+    every `visible_range / 10`, horizontal at 25, 50, 75%); series fills and lines from
+    `graph.*` (UI-PRC-035 colours); gaps (suspend, epoch) drawn as a hatched `divider` band at
+    30% alpha.
+  - Handle: a 1 px `accent` vertical line over the plot height with a 10 × 10 `accent` diamond
+    grip centred on the axis line; while live the handle sits at the right edge and reads as a
+    1 px `text_secondary` line (no grip). Hover over the strip shows a 1 px `text_secondary`
+    hairline at the pointer (the hover cursor) plus the UI-PRC-034 top-3 card.
+  - Range selection: a `row_selected` fill at 35% alpha between the two bounds with 1 px
+    `accent` edges; bound grips 6 × 10 at the axis.
+  - Time labels: `t_xs` 11 `text_secondary` `tnum`, formats "-1:02:03" for offsets at or above
+    an hour, "1h 02m" for span labels, "2m 05s", "45s", and "now" at the right edge; label
+    positions align to the grid lines; labels that would overlap are dropped (every second).
+  - The visible window defaults to the last 10 minutes (or the whole retained span when shorter)
+    and zooms between 60 s and the full retention.
+- **States**: live, scrubbed, range, hover, dragging handle (grip 12 × 12, cursor `ew-resize`),
+  panning (cursor `grabbing`), empty (no frames: "Collecting first history snapshot..." in the
+  header, plot shows the grid only), reduced data (fewer than 2 points: a single marker).
+- **Interaction**:
+  - Drag the handle or click anywhere in the plot: set the scrub time (`HistoryScrub { t }`),
+    snapped to whole seconds.
+  - Wheel over the strip: zoom around the cursor time by a factor 1.25 per notch (decided),
+    clamped to 60 s..retention.
+  - Shift+wheel or middle-button drag: pan.
+  - Shift+drag with the left button: range selection (`HistorySetRange { from, to }`);
+    dragging a bound grip resizes it; click without Shift clears the range.
+  - Double-click: return to live (`HistoryLive`).
+  - Keyboard (strip focused: click gives focus; Tab reaches it after the header controls):
+    Left / Right step 1 s, Shift+Left / Shift+Right step 1 min, Home = oldest frame, End = live,
+    Esc = live; focus ring 1 px `accent` inset around the strip.
+  - While dragging, queries coalesce (UI-PRC-030).
+- **Data binding**: `HistoryView.series` (per metric, decimated to ≤ 1,024 points for the visible
+  range), `HistoryView.span` (oldest, newest), gaps; the element holds `view_range: (t0, t1)`,
+  `scrub: Option<t>`, `range: Option<(a, b)>`.
+- **Build**: `history/scrubber.rs` implements GPUI `Element` (like `ChartElement`, ADR-009):
+  `request_layout` fixed height, `prepaint` inserts one hitbox, `paint` draws grid quads, series
+  paths (`PathBuilder` fill and 1 px stroke, built in local coordinates and cached by a
+  `ChartGeometryKey` over series versions, size and view range), the handle, range fill and
+  labels (`ShapedLine`s cached per label text). Pointer events via `window.on_mouse_event` in
+  paint; keys via the page's `on_action`.
+- **Performance**: geometry rebuilds only when the view range, size or series version changes;
+  pointer hover redraws only the hairline and card (the strip entity notifies itself); ADR-014
+  `history-scrub` scene reports p50/p95/p99 scrub frame times; target p99 ≤ 4 ms including the
+  50 ms-budget engine query running off-thread.
+- **Accessibility**: keyboard stepping; the header text reads the time; the top-3 card is text.
+- **Tests**: `scrubber_time_label_formats`, `scrubber_zoom_clamps_and_keeps_cursor_time`,
+  `scrubber_keys_step_1s_1min`, `scrubber_geometry_cached_until_key_changes`.
+- **Phase**: P3.
+- **Decided here**: heights, grip sizes, zoom factor, default window 10 min, label dropping
+  rule, hatched gap band.
+
+### UI-PRC-033 Minimap
+
+- **Implements**: PROC-089 ("a minimap of the full retention below it with a viewport box").
+- **Anatomy**: custom element 24 high, full width, `list_bg`, 1 px `divider` top border: a
+  single-series area of the active metric's system total over the full retained span (`graph.*`
+  fill at 50% alpha, no line), a viewport box (1 px `accent` border, `accent` 15% fill) marking
+  the strip's visible range, with 4 px edge grips; the scrub time as a 1 px `accent` tick; the
+  recording-off 10-minute window shows the box filling everything (whole span visible).
+- **States**: default, dragging the box (cursor `grab`/`grabbing`), resizing an edge
+  (`ew-resize`), hover (box border 2 px).
+- **Interaction**: drag the box to pan the strip; drag an edge to zoom; click outside the box
+  centres the box there; wheel does the same zoom as the strip.
+- **Data binding**: `HistoryView.overview` (the whole retention decimated to ≤ 1,024 points,
+  requested once per minute and on mode entry; decided).
+- **Build**: `history/minimap.rs`, same `Element` pattern as UI-PRC-032 with one path.
+- **Performance**: redraws on overview change (1/min) or interaction only.
+- **Accessibility**: duplicate of the strip's pan and zoom; keyboard users use the strip keys.
+- **Tests**: `minimap_box_tracks_strip_range`, `minimap_drag_pans_strip`.
+- **Phase**: P3.
+- **Decided here**: height, colours, overview refresh rate.
+
+### UI-PRC-034 Top-3 hover card
+
+- **Implements**: PROC-090; R-063.
+- **Anatomy**: a `TlTooltip`-styled card (`menu_bg`, 1 px `divider`, `r_sm`, padding `sp4`,
+  `t_sm`) anchored 12 px right of the hover hairline and 8 px below the strip top, flipping to
+  the left of the hairline when it would cross the right edge; width 260:
+
+  ```text
+  12:04:31  (-4m 12s)                      t_sm semibold text_primary + text_secondary
+  CPU total 23.4%                          t_sm text_secondary
+  ─────────────────
+  1  [icon] firefox (4321)      CPU: 12.3%   rows 20 high: rank, 16 px icon, name (PID), value right-aligned tnum
+  2  [icon] kwin_wayland (912)  CPU: 6.1%
+  3  [icon] plasmashell (1000)  CPU: 2.0%
+  ```
+
+  Value formats per metric: "CPU: 12.3%", "Memory: 1.22 / 62.70 GiB", "Disk: 4.2 MiB/s",
+  "Network: 12.0 Mbps" (chosen unit), "GPU: 41.0%". Fewer than three processes: fewer rows.
+  While the query runs (50 ms budget): the previous card stays; after 150 ms without data the
+  rows read "…".
+- **States**: shown while the pointer is over the plot and not dragging; hidden on leave, on
+  drag start, on wheel.
+- **Interaction**: hover only; a click sets the scrub time as UI-PRC-032.
+- **Data binding**: `Command::HistoryQuery { what: TopAt { t, metric, n: 3 } }` → part of
+  `HistoryView`, coalesced one in flight, with a 32 ms pointer debounce (decided).
+- **Build**: `history/scrubber.rs` renders the card as a deferred overlay (`defer_draw`) from
+  cached `ShapedLine`s.
+- **Performance**: ≤ 1 query per 32 ms; card re-shapes only when the text changes.
+- **Accessibility**: the same top-3 for the current scrub time is readable in the table sorted
+  by the metric; keyboard users get it from the table.
+- **Tests**: `top3_card_formats_per_metric`, `top3_query_debounced_and_coalesced`,
+  `top3_card_flips_at_right_edge`.
+- **Phase**: P3.
+- **Decided here**: card size, anchor, debounce, stale row text.
+
+### UI-PRC-035 Legend chips, metric selection and process series
+
+- **Implements**: PROC-088 ("Metric chips or legend toggles choose CPU, Memory, Disk, Network or
+  GPU"; selected process series; clear chip).
+- **Anatomy**: in the header line's right slot, a `TlButtonGroup` of five chips 24 high
+  (`t_sm`, padding `sp4`, `r_sm`): CPU, Memory, Disk, Network, GPU; the active chip has the
+  metric's `graph.*_line` colour as a 8 × 8 dot before the label and `row_selected` fill. Exactly
+  one metric is active (radio behaviour; decided) and it drives the strip, minimap, top-3 and
+  the table's value tooltips. Colours: CPU `graph.cpu_fill`/`cpu_line`, Memory `mem_*`, Disk
+  `disk_*`, Network `net_*`, GPU `gpu_*`.
+  Process series: each selected history row adds a line series (1 px, no fill) to the strip in
+  one of 8 accent-derived colours (decided: `accent` hue rotated by k × 45°, same saturation
+  and lightness, assigned in selection order), and a chip "firefox (4321) ×" appears after the
+  metric chips (max 8 visible chips; more show "+N"); clicking × removes the series and
+  deselects the row (`history.process.clear`). The stacked "top-3 + other" area shows under the
+  lines.
+- **States**: active metric, hover (chip `row_hover`), process chips present, overflow "+N".
+- **Interaction**: click a metric chip → `HistorySetMetric { metric }`; keys 1..5 while the
+  strip is focused select a metric (decided); × on a process chip → `HistoryClearProcess { key }`.
+- **Data binding**: `HistoryView.series` for the metric and the selected keys; selection from
+  the history table.
+- **Build**: `history/legend.rs`; chips are `TlButton` small ghost with a leading dot element.
+- **Performance**: n/a.
+- **Accessibility**: chips are buttons with labels; the dot is decorative.
+- **Tests**: `legend_single_active_metric`, `process_chip_added_on_select_removed_on_x`,
+  `series_colours_distinct_for_8`.
+- **Phase**: P3.
+- **Decided here**: radio chips, chip geometry, series colour scheme, 1..5 keys, overflow.
+
+### UI-PRC-036 Live button and the recording-off state
+
+- **Implements**: PROC-088 ("Live" at the right edge), PROC-086 (recording off: rolling 10-minute
+  window, toast with Enable), D-010, PROC-087 (load toasts).
+- **Anatomy**: `TlButton` small (24 high) "Live" in the header line, left of the chips: while
+  live it is `primary` filled and disabled-looking (no hover change, tooltip "Showing live
+  data"); while scrubbed it is `default` with a 6 px `status.success` dot before the label and
+  tooltip "Return to live (double-click the timeline or press End)".
+  Recording-off banner: when `history.enabled = false`, a one-line banner under the header line,
+  28 high, `status.info` at 15% fill, `t_sm` text "History recording is off. Showing the last
+  10 minutes kept in memory." with a `TlButton` small "Enable" at the right (`history.enabled =
+  true`, which switches the view to the ADR-012 store at the next frame) and an × that hides the
+  banner for the session (decided). On entering History mode with recording off the toast
+  "History recording is off" with an "Enable" button also shows once per session (PROC-086).
+  The minimap span then covers only the 10-minute window and the time labels never exceed
+  "-10:00".
+- **States**: live, scrubbed, recording off (banner), recording on, store loading (first 2 s),
+  load error toasts (PROC-087 texts, each once).
+- **Interaction**: `HistoryLive` from the button, End, Esc, double-click. Enable from banner or
+  toast → `SetSetting { history.enabled = true }`.
+- **Data binding**: `history.enabled`, `HistoryView.source: Store | RollingWindow`.
+- **Build**: `history/mod.rs`.
+- **Performance**: n/a.
+- **Accessibility**: button and banner are text; the dot is decorative.
+- **Tests**: `live_button_state_follows_scrub`, `recording_off_banner_and_toast_once`,
+  `rolling_window_labels_capped_10min`.
+- **Phase**: P3.
+- **Decided here**: banner text, Live button styling, banner dismiss.
+
+### UI-PRC-037 History table row menu and Delete from history
+
+- **Implements**: PROC-088 ("Delete from history", toast), PROC-070 (copy commands reused),
+  R-103 (deleted-keys list).
+- **Anatomy**: see UI-PRC-031 menu list. "Delete from history" is the last item, `TlMenu`
+  item with icon `Trash2` 14 px `status.danger` text (decided: danger colour because it cannot be
+  undone in the UI).
+- **States**: enabled for every history row (also other-boot identities); multi-select deletes
+  every selected identity in one command.
+- **Interaction**: `DeleteFromHistory { keys }` → `Command::HistoryDelete { keys }`; no
+  confirmation (the data is a local log; decided); toast "History entry deleted" (plural "N
+  history entries deleted" for multi; decided). The rows disappear with the next `HistoryView`;
+  their series and chips are removed.
+- **Data binding**: `HistoryView` filters deleted keys (engine).
+- **Build**: `history/table.rs`.
+- **Performance**: n/a.
+- **Accessibility**: as `TlMenu`.
+- **Tests**: `delete_from_history_removes_rows_series_and_chips`.
+- **Phase**: P3.
+- **Decided here**: no confirmation, plural toast, danger colouring.
+
+---
+
+## Summary table
+
+| ID | Name | Implements | Phase |
+|---|---|---|---|
+| UI-PRC-001 | TlTreeTable: generic virtualized tree table | PROC-013, PROC-022, PROC-025, ADR-009 | P1 |
+| UI-PRC-002 | Process table delegate and row anatomy | PROC-004, 008, 009, 012, 014, 018, 019, 021, 043, 063, 064 | P1 (P2 parts) |
+| UI-PRC-003 | Name cell: indent, chevron, connectors, icon, texts, window button | PROC-006, 007, 008, 017, 053, 054, 063 | P1 (P2 button) |
+| UI-PRC-004 | Cell rendering per column type | PROC-003, 018, 019, 027 to 036, 040, 041, 042, R-050 | P1 (P2, P4 parts) |
+| UI-PRC-005 | Two-line header | PROC-023, 025, 027, 030, 032, 033, 038, 047 | P1 |
+| UI-PRC-006 | Header context menu | PROC-022, 025, 026 | P1 |
+| UI-PRC-007 | Column picker window | PROC-022, 024, APP-018 | P1 |
+| UI-PRC-008 | Selection visuals and gestures | PROC-001, 048 | P1 |
+| UI-PRC-009 | Keyboard model | PROC-020, 044, 049, 050, D-008, table b | P1 |
+| UI-PRC-010 | Scrolling, anchoring, visible-range demand | PROC-013, 071, ADR-014 | P1 |
+| UI-PRC-011 | New and exited row highlight | PROC-043, R-041 | P1 |
+| UI-PRC-012 | Row hover tooltip | PROC-012, 039, R-009 | P1 (P2 line) |
+| UI-PRC-013 | Row context menu | PROC-012, 043, 048, 054, 057, 060 to 075, 093, 094 | P1 (items per entry) |
+| UI-PRC-014 | Confirmation dialogs | PROC-055, 059, 062, 064, 066, 074, 075, D-009 | P1 |
+| UI-PRC-015 | Toasts for process actions | PROC-015, 026, 045, 046, 058, 060 to 077, 093, 094, R-035 | P1 |
+| UI-PRC-016 | Filter interaction and Include children | PROC-044, 045, R-043, APP-028 | P1 |
+| UI-PRC-017 | Hold-Ctrl pause indicator | PROC-050, R-042 | P1 |
+| UI-PRC-018 | Status bar text | PROC-048, 050, 051, 076 | P1 (P3 parts) |
+| UI-PRC-019 | Processes toolbar buttons | PROC-015, 016, 046, APP-004, APP-005 | P1 |
+| UI-PRC-020 | Submenus: signal, priority, I/O priority, graphs | PROC-065, 066, 068, 069, 093, 094 | P1, P2, P3 |
+| UI-PRC-021 | Set Affinity and Custom priority dialogs | PROC-066, 067, 069 | P1, P2 |
+| UI-PRC-022 | Jump target by identity | PROC-055, 071, 088 | P1, P2 |
+| UI-PRC-023 | Performance plan for 2,000 rows | PROC-013, ADR-009, ADR-014 | P0, P1 |
+| UI-PRC-024 | Empty, first-sweep and no-match states | PROC-021, 044, R-060 | P1 |
+| UI-PRC-030 | History mode layout and header text | PROC-016, 088, 091, D-010 | P3 |
+| UI-PRC-031 | History table | PROC-046, 088, R-011 | P3 |
+| UI-PRC-032 | Timeline scrubber element | PROC-089, 092 | P3 |
+| UI-PRC-033 | Minimap | PROC-089 | P3 |
+| UI-PRC-034 | Top-3 hover card | PROC-090, R-063 | P3 |
+| UI-PRC-035 | Legend chips and process series | PROC-088 | P3 |
+| UI-PRC-036 | Live button and recording-off state | PROC-086, 087, 088, D-010 | P3 |
+| UI-PRC-037 | History row menu and Delete from history | PROC-070, 088, R-103 | P3 |
+
+## Coverage: merged spec IDs in scope
+
+| Merged ID | UI entries |
+|---|---|
+| PROC-001 identity targeting | UI-PRC-008, UI-PRC-009, UI-PRC-013, UI-PRC-017 |
+| PROC-003 formats | UI-PRC-004 |
+| PROC-004 groups | UI-PRC-002 |
+| PROC-006 icons | UI-PRC-002, UI-PRC-003 |
+| PROC-007 names | UI-PRC-003 |
+| PROC-008 app rows | UI-PRC-002, UI-PRC-003 |
+| PROC-009 unit and kernel rows | UI-PRC-002 |
+| PROC-012 pseudo rows | UI-PRC-002, UI-PRC-012, UI-PRC-013 |
+| PROC-013 table basis | UI-PRC-001, UI-PRC-010, UI-PRC-023 |
+| PROC-014 view modes | UI-PRC-002, UI-PRC-019 |
+| PROC-015 cycler | UI-PRC-019, UI-PRC-015 |
+| PROC-016 toolbar buttons | UI-PRC-019, UI-PRC-030 |
+| PROC-017 connector lines | UI-PRC-003 |
+| PROC-018 PID +N | UI-PRC-002, UI-PRC-004 |
+| PROC-019 subtree totals | UI-PRC-002, UI-PRC-004 |
+| PROC-020 collapse all | UI-PRC-009 |
+| PROC-021 startup placeholder | UI-PRC-002, UI-PRC-024 |
+| PROC-022 column model | UI-PRC-001, UI-PRC-006, UI-PRC-007 |
+| PROC-023 widths | UI-PRC-005 |
+| PROC-024 picker | UI-PRC-007 |
+| PROC-025 reorder, resize, persistence | UI-PRC-001, UI-PRC-005, UI-PRC-006 |
+| PROC-026 header menu | UI-PRC-006, UI-PRC-015 |
+| PROC-027 to PROC-036 column display | UI-PRC-004, UI-PRC-005 (header tooltips and GPU N) |
+| PROC-037 id map | none needed (no UI; string ids) |
+| PROC-038 two-line header | UI-PRC-005 |
+| PROC-039 row tooltip | UI-PRC-012 |
+| PROC-040 heat | UI-PRC-004 |
+| PROC-041 dim zero | UI-PRC-004 |
+| PROC-042 separators | UI-PRC-002, UI-PRC-004 |
+| PROC-043 highlight | UI-PRC-011, UI-PRC-013 |
+| PROC-044 filter | UI-PRC-016, UI-PRC-009, UI-PRC-024 |
+| PROC-045 include children | UI-PRC-016 |
+| PROC-046 hide system | UI-PRC-019, UI-PRC-031 |
+| PROC-047 sorting | UI-PRC-005, UI-PRC-006 |
+| PROC-048 selection | UI-PRC-008, UI-PRC-013, UI-PRC-018 |
+| PROC-049 keyboard | UI-PRC-009 |
+| PROC-050 Ctrl pause | UI-PRC-017, UI-PRC-018 |
+| PROC-051 status bar | UI-PRC-018 |
+| PROC-053 window button | UI-PRC-003 |
+| PROC-054 Show Window | UI-PRC-003, UI-PRC-013, UI-PRC-015 |
+| PROC-055 picker result | UI-PRC-014, UI-PRC-022 |
+| PROC-057 row menu | UI-PRC-013 |
+| PROC-058 action toasts | UI-PRC-015 |
+| PROC-059 confirmations | UI-PRC-014, UI-PRC-015 |
+| PROC-060, 061, 062, 063 | UI-PRC-013, UI-PRC-014, UI-PRC-015 |
+| PROC-064 Freeze, Thaw, Kill App | UI-PRC-002, UI-PRC-013, UI-PRC-014, UI-PRC-015 |
+| PROC-065 Send Signal | UI-PRC-020 |
+| PROC-066 Set Priority | UI-PRC-020, UI-PRC-021, UI-PRC-014 |
+| PROC-067 Set Affinity | UI-PRC-021 |
+| PROC-068 Set I/O Priority | UI-PRC-020 |
+| PROC-069 multi-select | UI-PRC-013, UI-PRC-020, UI-PRC-021, UI-PRC-015 |
+| PROC-070 copy commands | UI-PRC-013, UI-PRC-015, UI-PRC-037 |
+| PROC-071 jump target | UI-PRC-022, UI-PRC-010, UI-PRC-015 |
+| PROC-072 Restart unit | UI-PRC-013, UI-PRC-015 |
+| PROC-073 file location, properties | UI-PRC-013, UI-PRC-015 |
+| PROC-074 VirusTotal | UI-PRC-013, UI-PRC-014, UI-PRC-015 |
+| PROC-075 dump | UI-PRC-013, UI-PRC-014, UI-PRC-015 |
+| PROC-076 helper (status bar link, badge, Retry button) | UI-PRC-018, UI-PRC-015 |
+| PROC-077 Properties (cap toast, Enter) | UI-PRC-009, UI-PRC-015 (window itself: other agent) |
+| PROC-086 recording | UI-PRC-036 |
+| PROC-087 persistence toasts | UI-PRC-030, UI-PRC-036 |
+| PROC-088 history view and table | UI-PRC-030, UI-PRC-031, UI-PRC-035, UI-PRC-036, UI-PRC-037, UI-PRC-022 |
+| PROC-089 scrubber | UI-PRC-032, UI-PRC-033 |
+| PROC-090 top-3 | UI-PRC-034 |
+| PROC-091 first snapshot | UI-PRC-030 |
+| PROC-092 scrub bench | UI-PRC-032 |
+| PROC-093 minigraph items | UI-PRC-013, UI-PRC-020, UI-PRC-015 |
+| PROC-094 tray graph items | UI-PRC-013, UI-PRC-020, UI-PRC-015 |
+| PROC-099 settings keys used | UI-PRC-002, 004, 005, 006, 011, 016, 019, 030, 031, 036 |
+
+Not in scope here (other files): PROC-002, 005, 010, 011 (engine); PROC-052, 056 (bridge, pin:
+shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
+
+## Decided here (all entries)
+
+1. Group header rows are `row_h` tall with a top divider, not TaskSlinger's ≈ 36 px
+   (`uniform_list` needs one height). UI-PRC-002.
+2. `header_h` 44, indent 18, chevron 16 always reserved, scrollbar 12 Always, menu item 28, min
+   menu width 240. Shared geometry table.
+3. Zebra counted over the flattened index; stale cells at 60% opacity; heat quad hidden on the
+   selected row; exited icons at 60%. UI-PRC-002, 004, 011.
+4. Glyph icons: `Pause`, `Snowflake`, `Binary`, `Cog`, `Cpu`, `Activity`, `Archive`, `AppWindow`,
+   `Lock`, `LayoutGrid`, `Rows3`, `History`, `Trash2`, `Zap`, `Leaf`. UI-PRC-002, 003, 004, 019,
+   021, 030, 037.
+5. Header: line 2 always right-aligned; boundary lines always drawn; Name fixed first and
+   undraggable; double-click a boundary fits one column; 4 px drag threshold; "Sort by" item in
+   the header menu; FitColumns measures visible rows plus 3 cached versions. UI-PRC-005, 006.
+6. Column picker: title "tasklens Columns" (APP-045 pattern over PROC-024's "Columns"), 420 × 560,
+   immediate apply, re-shown column returns to its old slot. UI-PRC-007.
+7. Selection: empty-area click clears; Ctrl+Space toggles; hidden selected rows not counted;
+   focus ring only when the focus row is unselected; Left on a depth-1 row collapses its group.
+   UI-PRC-008, 009.
+8. Scroll anchoring to the top visible identity, skipped during wheel or thumb drag; keyboard
+   moves scroll Nearest with a 1-row margin; demand set change detected by hash. UI-PRC-010.
+9. Copy commands stay enabled on exited rows; Enter on an exited row toasts "Process exited".
+   UI-PRC-011, 013.
+10. Multi-select Suspend/Resume label: Resume only when every target is stopped. UI-PRC-013.
+11. Confirmation dialogs: titles and button labels as tabulated, focus starts on Cancel, Enter
+    ignored, protected text wins and keeps N. UI-PRC-014.
+12. Button toasts auto-close after 30 s. UI-PRC-015.
+13. Filter: Enter keeps the filter and focuses the table; Ctrl+F selects all; zero-match groups
+    show "(0)"; widths 160/280. UI-PRC-016.
+14. Pause survives open menus. UI-PRC-017.
+15. Status bar separators, history text, pre-P3 restricted tooltip. UI-PRC-018.
+16. Submenu note lines ("autogroup", "Scheduler: bfq") as disabled first items; "Already added"
+    graph items. UI-PRC-020.
+17. Affinity dialog 520 wide, SMT pairs in 112 px cells, mixed-mark glyph, Enter allowed.
+    UI-PRC-021.
+18. Jump target leaves History mode. UI-PRC-022.
+19. Column culling for horizontal overflow; in-GPUI fallback order. UI-PRC-023.
+20. Empty-filter text "No processes match the filter" with a "Clear filter" button. UI-PRC-024.
+21. History: header line 32, strip 120, minimap 24, default window 10 min, zoom 1.25 per notch,
+    Esc returns to live, one query in flight, top-3 debounce 32 ms, radio metric chips with keys
+    1..5, 8 series colours by accent hue rotation, recording-off banner, no confirmation for
+    Delete from history. UI-PRC-030 to 037.
+
+## Open
+
+None left to the implementer. Two items need a reviewer's nod because they diverge from a
+written source:
+
+- Group header row height equals the data row height (UI-PRC-002), against TaskSlinger's taller
+  group rows; the alternative is GPUI `list()` with variable heights, which costs more per frame.
+- Column picker window title "tasklens Columns" (UI-PRC-007), where PROC-024 writes "Columns".
