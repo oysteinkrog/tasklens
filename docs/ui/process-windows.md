@@ -702,11 +702,11 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 | Command line (primary process)                               [Copy] |
 | /usr/lib/firefox/firefox                                            |
 +----------------------------------------------------------------------+
-  default 720 x 560, minimum 560 x 400
+  default 720 x 560, minimum 640 x 400
 ```
 
   - Title `App Properties - {app name}` [spec]; for unit rows `App Properties - {unit name}`. Exited: ` (not running)` appended.
-  - Default size 720 × 560, minimum 560 × 400 [chosen]. Frame per UI-PWN-001; tab strip per UI-PWN-004 with two tabs; filter bar per UI-PWN-005 (matches labels and values on General, Name, PID, User and Command line on Processes).
+  - Default size 720 × 560 [chosen], minimum 640 × 400 (UI-FND-021 Properties kind). Frame per UI-PWN-001; tab strip per UI-PWN-004 with two tabs; filter bar per UI-PWN-005 (matches labels and values on General, Name, PID, User and Command line on Processes).
   - Header block: height 64, padding `sp5`. Icon 48 × 48 (`img(path)` from the engine's icon resolution, ADR-016; fallback Lucide `AppWindow` 48 px `text_secondary`) [spec size]. Name `t_lg` (16) semibold 600 `text_primary`; under it the type word `t_sm` `text_secondary`.
   - Two panels as UI-PWN-006 (identity left, usage right) when the body is at least 640 px wide, stacked below that [chosen].
   - Identity fields: `App ID:`; `Type:` `App` or `Unit` [spec]; `Desktop file:` path as a link (Open file location); `Unit:` link to the Services tab (Go to service), hidden when none; `Cgroup:` path; `Processes:` count.
