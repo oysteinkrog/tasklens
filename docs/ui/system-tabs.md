@@ -12,7 +12,7 @@ Sibling UI files, written at the same time:
 - `docs/ui/foundation.md`: tokens, the `Tl*` components, focus ring, toasts, secondary window frame.
 - `docs/ui/processes.md`: `TlTreeTable` (header, rows, selection, column picker, group rows), the
   process row renderer and the process context menu. This file gives only the delegate details.
-- `docs/ui/shell.md`: title bar, tab strip, filter box and status bar frame.
+- `docs/ui/shell.md`: title bar, tab strip, filter box and status chip.
 
 If a component or action name here differs from the one in those files, theirs wins and this file
 is corrected to match. The names this file assumes are listed in "Names used from other files".
@@ -49,26 +49,29 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
 | Name | Owner | Used for |
 |---|---|---|
-| `TlTreeTable<D: TlTreeDelegate>` | processes.md | the three system tables |
-| `TlTreeDelegate` hooks `row_count`, `row`, `paint_cell`, `context_menu`, `on_activate`, `tooltip` | processes.md | delegate details below |
-| `TlColumnPicker` ("Columns" picker) | processes.md | View > Columns for the three tables (APP-018) |
-| shared table actions `table::OpenProperties`, `table::CopyCell`, `table::CopyRow`, `table::CopyRowsAsTable`, `table::SelectAll`, `table::CollapseAll`, `table::OpenContextMenu` | processes.md | same keys in every table |
-| process row renderer `ProcessRowCells` and process context menu `process_menu(..)` | processes.md | service child rows |
-| `TlButton`, `TlIconButton`, `TlToggleChip`, `TlSelect`, `TlCheckbox`, `TlInput`, `TlNumberInput` | foundation.md | controls |
-| `TlMenu` (context, dropdown and submenu) | foundation.md | menus |
-| `TlToast` (id, kind, text, optional action button) | foundation.md | toasts (APP-044) |
-| `TlDialog` (modal confirm window) | foundation.md | confirmations (APP-045) |
-| `TlSecondaryWindow` (pinnable top-level window frame with title, pin, close) | foundation.md | Properties windows |
-| `TlTabStrip` (inner tabs of a secondary window) | foundation.md | Properties tabs |
-| `TlKeyValueGrid` (label/value rows, validity words, copy affordance) | foundation.md | Properties and Information rows |
-| `TlSectionHeader` (accent bar, title, trailing buttons) | foundation.md | Information sections |
-| `TlSkeleton` | foundation.md | first-load placeholders (R-060) |
-| `TlEmptyState` (icon, heading, text, optional button) | foundation.md | empty and error states |
-| `TlBanner` (info or warning strip inside a pane) | foundation.md | journal access banner |
-| `TlLink` | foundation.md | clickable values |
-| `TlTag` | foundation.md | relation tags in Dependencies |
-| `StatusBarText` slot | shell.md | left status bar text per tab (APP-029) |
-| `FilterBox` per-tab text | shell.md | the tab filter (APP-028) |
+| `TlTreeTable<D: TreeTableDelegate>` (UI-PRC-001) | processes.md | the three system tables |
+| `TreeTableDelegate` hooks `row_count`, `row_id`, `row_index`, `row_kind`, `row_depth`, `row_expandable`, `row_flags`, `columns`, `column_spec`, `cell`, `name_cell`, `sort`, `selectable`, `context_menu`, `on_toggle_expand`, `on_sort`, `on_columns_changed`, `on_visible_range`, `on_activate`, `row_tooltip`, `empty_text`, `header_lines` (`HeaderLines::One` gives a 28 px header), `columns_fixed` | processes.md | delegate details below |
+| `RowKind::{GroupHeader, Unit, Process, Plain}` | processes.md | row kinds |
+| Column picker window (UI-PRC-007) and header menu (UI-PRC-006) | processes.md | View > Columns for the three tables (APP-018) |
+| shared table actions `OpenProperties`, `CopyCell { col }`, `CopyDetails` (Ctrl+C; menu label "Copy row" in these tables, R-012), `CopyRowsAsTable`, `SelectAll`, `CollapseAll`, `ToggleExpand`, `OpenContextMenu`, `MoveFocus*` (namespace `tasklens`) | processes.md | same keys in every table |
+| process row delegate cells (UI-PRC-002, UI-PRC-004) and the process row menu (UI-PRC-013) | processes.md | service child rows |
+| `ProcessesPage::select_by_key(key, source)` (UI-PRC-022) | processes.md | jumps to a process |
+| `TlButton` kinds `Primary`, `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle`, `Segment` (UI-FND-010) | foundation.md | buttons; `Segment` is the filter strip toggle |
+| `TlSelect`, `TlCheckbox`, `TlTextInput`, `TlStepper` (UI-FND-015 to UI-FND-017) | foundation.md | form controls |
+| `TlMenu` (UI-FND-022) | foundation.md | context, dropdown and sub menus |
+| `ToastQueue::push(kind, text, key, action)` with kinds Info, Success, Warning, Error, Progress and `ToastKey` (UI-FND-020) | foundation.md | toasts (APP-044) |
+| `TlDialog` and `TlSecondaryWindow` (UI-FND-021) | foundation.md | confirmations and Properties windows |
+| `TlTabs` (UI-FND-018) | foundation.md | Properties window tabs |
+| `TlKeyValueGrid` inline layout, its section title band and its link values (UI-FND-025) | foundation.md | Properties fields and Information sections |
+| `TlSkeletonRows`, `TlSkeletonBlock` (UI-FND-024) | foundation.md | first-load placeholders (R-060) |
+| `TlEmptyState` (UI-FND-029) | foundation.md | empty and error states |
+| `TlBadge` `Neutral` (UI-FND-027) | foundation.md | relation tags in Dependencies |
+| `TlSpinner` (UI-FND-023) | foundation.md | pending buttons |
+| `TlLink` | this file | shorthand for a `TlKeyValueGrid` link value (`status.info`, underline on hover, pointer cursor, UI-FND-025) used outside a grid too |
+| `TlBanner` | this file, UI-SYS-038 | an info strip inside a pane: height 32, padding x `sp5`, `status.info` at alpha 0.12 fill, 1 px `status.info` bottom border, icon `info` 14 in `status.info`, text `t_sm` `text_primary`, trailing buttons `TlButton::Secondary` sm |
+| Status chip, page method `fn status_text(&self, out: &mut String)` and event `StatusChanged` (UI-SHL-050) | shell.md | status text per tab (APP-029) |
+| `FilterBox` and the page event `FilterChanged { tab, text }` (UI-SHL-024) | shell.md | the tab filter (APP-028) |
+| Information tab copy icon, action `CopyInformationAll` (UI-SHL-023) | shell.md | copy all |
 
 ---
 
@@ -91,7 +94,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   │ table body (uniform_list), rows row_h                                     │
   │ ...                                                                       │
   ├──────────────────────────────────────────────────────────────────────────┤
-  │ status bar, 22 px (shell.md), left text from this page                    │
+  │                                                                          │
+  │ status chip, 26 px, floating bottom-left (shell.md UI-SHL-050)            │
   └──────────────────────────────────────────────────────────────────────────┘
   ```
 
@@ -99,21 +103,23 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   |---|---|---|---|
   | Page root | fills the content area | `window_bg` | `v_flex`, `size_full`, no padding |
   | Filter strip | full width × 28 | `toolbar` background, 1 px `divider` bottom border | UI-SYS-011 |
-  | Header | full width × 28 (one line; chosen) | `header` background, `divider` bottom border, `text_primary` `t_base` medium | the three tables have no totals line, so `TlTreeTableConfig::header_lines = 1` |
+  | Header | full width × 28 (one line; chosen) | `header` background, `divider` bottom border, `text_primary` `t_base` medium | the three tables have no totals line, so the delegate returns `HeaderLines::One` (header_h 28, UI-PRC-001) |
   | Body | rest | `list_bg`, alternate rows `row_alt` | `TlTreeTable` body, not cached (owns scrolling) |
-  | Status bar text | in the shell's 22 px bar | `text_secondary` `t_sm` | UI-SYS-022, UI-SYS-049, UI-SYS-067 |
+  | Status text | in the shell's floating status chip (UI-SHL-050) | chip styling is the shell's | the page implements `status_text(&self, out: &mut String)` and emits `StatusChanged` only when counts or the selection size change; UI-SYS-022, UI-SYS-049, UI-SYS-067. The table body adds bottom padding equal to the chip height (UI-SHL-050) |
 
 - **States**:
   - Loading (first data not yet in this session): UI-SYS-004.
   - Empty: UI-SYS-005.
   - Ctrl held while the main window is active: the table renders from the paused snapshot and the
-    status bar appends "[PAUSED - Ctrl]" in `accent` (R-042). The shell owns the text; the page
-    reads `SnapshotHub::view_snapshot()` which returns the paused one while paused.
+    status chip appends "[PAUSED - Ctrl]" in `accent` (R-042). The shell owns that segment; the
+    table is paused through `TlTreeTable.paused` (UI-PRC-017) and the delegate reads the paused
+    snapshot the hub keeps (ADR-009).
 - **Interaction**: the page has key context `ServiceTable` (Services), `StartupTable` (Startup Apps,
   chosen), `ConnectionTable` (Connections, chosen), each nested inside `Table`. All three also get
-  the `Table` bindings of table (b). F5 dispatches `page::Refresh`, handled per page (UI-SYS-022,
-  UI-SYS-049, UI-SYS-067). A printable key with the table focused starts filtering (shell
-  `FilterBox`).
+  the `Table` bindings of table (b). F5 (Global "Refresh current tab now") is handled by the active
+  page (UI-SYS-022, UI-SYS-049, UI-SYS-067). A printable key with the table focused starts filtering
+  (shell `FilterBox`, which then sends `FilterChanged { tab, text }` to the page after its 100 ms
+  debounce).
 - **Data binding**:
   - Services: `Snapshot.services` (`ComponentMask::SERVICES`), plus `::PROCESSES` only while a
     service row is expanded (child rows).
@@ -168,29 +174,30 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   `ServicesSnapshot.rows`, `StartupSnapshot.rows` and `ConnectionsSnapshot.rows` are
   `Arc<[SysRow]>` with `query_generation: u64`, next to the records they index.
-- **Interaction**: the UI debounces filter text 100 ms, then sends
-  `Command::SetSysTableQuery(SysTableQuery)` with a new generation. Header clicks, expand and
+- **Interaction**: on `FilterChanged` (already debounced 100 ms by the shell `FilterBox`) the page
+  sends `Command::SetSysTableQuery(SysTableQuery)` with a new generation. Header clicks, expand and
   collapse, and filter strip changes send at once (no debounce). The UI shows a view only when its
   `query_generation` equals the latest sent; until then it keeps the previous rows (ADR-009 rule).
-- **Delegate details** (`TlTreeDelegate` implementation per table):
+- **Delegate details** (`TreeTableDelegate` implementation per table):
 
   | Hook | Services | Startup Apps | Connections |
   |---|---|---|---|
   | Row id | `SysNodeId::{ServiceGroup, Unit, UnitProcess}` | `SysNodeId::Startup` | `SysNodeId::Conn` |
   | Selectable rows | `Unit`, `UnitProcess` (group rows are not selectable for actions) | all | all |
   | Expandable | group rows; unit rows with a non-empty cgroup | none | none |
-  | `paint_cell` | UI-SYS-015, UI-SYS-016 | UI-SYS-042 | UI-SYS-062 |
+  | `cell`, `name_cell` | UI-SYS-015, UI-SYS-016 | UI-SYS-042 | UI-SYS-062 |
   | `context_menu` | UI-SYS-017 (unit), process menu (child) | UI-SYS-044 | UI-SYS-063 |
   | `on_activate` (Enter, Alt+Enter, Ctrl+I, double-click) | open Service Properties (unit); Process Properties (child) | open Startup Properties | open Connection Properties |
-  | `tooltip` (600 ms on the Name cell) | Description, unit file path, "Manager: System" or "Manager: User" | Command and Location | all owner PIDs when shared (SYS-030) |
+  | `row_tooltip` (600 ms on the Name cell) | Description, unit file path, "Manager: System" or "Manager: User" | Command and Location | all owner PIDs when shared (SYS-030) |
 
 - **Data binding**: reads `rows` and `query_generation` from the table's component.
-- **Build**: `crates/tl-ui/src/pages/sys_table.rs` holds the shared query sender, debounce task and
-  generation check. Delegates live in each page file.
+- **Build**: `crates/tl-ui/src/pages/sys_table.rs` holds the shared query sender and the
+  generation check. Delegates return `HeaderLines::One` and `RowKind::GroupHeader`, `Unit`,
+  `Process` (Services) or `Plain` (Startup Apps, Connections). Delegates live in each page file.
 - **Performance**: no sort, filter or allocation per frame in the UI. Delegates format through
   `CellTextCache` keyed by `(SysNodeId, ColumnId)`.
 - **Accessibility**: as `TlTreeTable`.
-- **Tests**: `sys_query_debounces_filter_100ms`; `sys_query_ignores_stale_generation` (install rows
+- **Tests**: `sys_query_sent_on_filter_changed`; `sys_query_ignores_stale_generation` (install rows
   with an older generation, assert the old rows still show); `services_group_rows_not_selectable`
   (Ctrl+A selects only unit and child rows).
 - **Phase**: P2.
@@ -253,8 +260,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 ### UI-SYS-004 First-load skeleton for system tables
 
 - **Implements**: R-060, APP-059, SYS-016, SYS-027, SYS-028.
-- **Anatomy**: the header is drawn normally. The body shows 12 skeleton rows (chosen), each `row_h`
-  tall:
+- **Anatomy**: the header is drawn normally. The body shows `TlSkeletonRows` (UI-FND-024):
+  `min(rows that fit, 12)` rows, each `row_h` tall, one bar per visible column:
 
   ```
   │ ▭▭▭▭▭▭▭▭▭▭▭▭▭     ▭▭▭▭▭▭▭▭▭▭        ▭▭▭▭▭      ▭▭▭▭▭▭   │
@@ -262,30 +269,30 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Part | Size | Colour |
   |---|---|---|
-  | Bar per visible column | height 10, `r_sm` corners, width 70% of the Name column and 40% of other columns, left inset `sp4` (right-aligned for numeric columns) | `TlSkeleton` default (foundation.md) |
+  | Bar per visible column | height 10, `r_sm`, width from the foundation pattern `[0.6, 0.45, 0.8, 0.5, 0.7]` of the column width, inset `sp4` | `skeleton` token (UI-FND-002) |
   | Row background | `row_h` | `list_bg` / `row_alt` alternating |
 
 - **States**: shown once per session per tab until the component's `header.validity` is not
   `WarmingUp` or rows arrive. Never shown again after that, even if the tab is left and re-entered
   (APP-059). If the source fails first, UI-SYS-005 error state replaces the skeleton.
-  Reduced motion: `TlSkeleton` draws a static bar (no pulse).
-  Services also pushes the toast "Loading service data..." (Info, `TlToast` id
-  `ToastId::ServicesLoading`, autohide off) on first visit and removes it when the skeleton goes
-  (SYS-016).
+  Reduced motion: static at opacity 0.7 (UI-FND-024).
+  Services also pushes the toast "Loading service data..." (`ToastQueue::push` kind Progress, key
+  `ToastKey::SERVICES_LOADING`) on first visit and removes it when the skeleton goes (SYS-016).
 - **Interaction**: keys and clicks on the body do nothing while the skeleton shows; the header
   is live (sort clicks are queued in the query).
 - **Data binding**: `component.header.validity` and `rows.is_empty()`; a per-page
   `first_data_seen: bool` that never resets in the session.
-- **Build**: the page renders a plain `v_flex` of 12 skeleton rows in place of the `TlTreeTable`
-  body. `TlSkeleton` is the kit `Skeleton`; it is allowed here because it is not a table cell of
-  live data (ADR-009 forbids it in cells and charts) and it stops requesting frames once removed.
+- **Build**: the page renders `TlSkeletonRows` in place of the `TlTreeTable` body (outside the
+  `uniform_list`, as UI-FND-024 requires). The kit `Skeleton` under it is allowed here because it
+  is not a live table cell (ADR-009 forbids it in cells and charts) and it stops requesting frames
+  once removed.
 - **Performance**: the kit Skeleton requests frames while visible (2 s loop). It is visible for
   well under 1 s on this machine (assumed). Twelve rows × up to 7 bars is 84 quads.
-- **Accessibility**: the status bar text reads "Loading…" (chosen) while the skeleton shows.
+- **Accessibility**: the status chip text reads "Loading…" (chosen) while the skeleton shows.
 - **Tests**: `skeleton_shows_once_per_session` (first visit shows it; data arrives; leave and
   return; assert no skeleton); `services_loading_toast_removed_on_data`.
 - **Phase**: P2.
-- **Decided here**: 12 rows, bar widths, "Loading…" status text.
+- **Decided here**: "Loading…" status text.
 
 ### UI-SYS-005 Empty and error states for system tables
 
@@ -301,15 +308,15 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Case | Icon | Heading | Text | Button |
   |---|---|---|---|---|
-  | Services, neither manager answers | `server` | "systemd not found" (spec) | "tasklens lists services from systemd. Neither the system manager nor the user manager answered." (new) | "Retry" → `page::Refresh` |
-  | Any table, text filter or state filters exclude every row | `funnel-x` | "No matches" (new) | "No services match the current filters." / "No startup entries match the filter." / "No connections match the filter." (new) | "Clear filters" (new): clears the filter text and, on Services, resets the strip to defaults |
+  | Services, neither manager answers | `server` | "systemd not found" (spec) | "tasklens lists services from systemd. Neither the system manager nor the user manager answered." (new) | "Retry" → `RefreshCurrentTab` |
+  | Any table, text filter or state filters exclude every row | `funnel-x` | "No matches" (new) | "No services match the current filters." / "No startup entries match the filter." / "No connections match the filter." (new) | Startup Apps and Connections: "Clear filter" dispatching `ClearFilter` (UI-FND-029). Services: "Clear filters" (new) dispatching `services::ClearAllFilters`, which clears the text and resets the strip to defaults |
   | Startup Apps, no entries at all | `app-window` | "No startup entries" (new) | "Nothing starts automatically when you log in." (new) | none |
   | Connections, no sockets | `network` | "No connections" (new) | none | none |
-  | Source `Failed` before first data | `circle-alert` in `status.warning` | "Could not load services" / "Could not load startup entries" / "Could not load connections" (new) | `SourceHealth.last_error`, one line, ellipsis | "Retry" → `page::Refresh` |
+  | Source `Failed` before first data | `circle-alert` in `status.warning` | "Could not load services" / "Could not load startup entries" / "Could not load connections" (new) | `SourceHealth.last_error`, one line, ellipsis | "Retry" → `RefreshCurrentTab` |
 
 - **States**: the empty state replaces only the body. When data arrives, rows replace it without
-  animation. A `Failed` source after first data keeps the last rows and shows the status bar health
-  text (APP-029); no empty state.
+  animation. A `Failed` source after first data keeps the last rows and shows the status chip health
+  item (APP-029, UI-SHL-051); no empty state.
 - **Interaction**: Tab reaches the button; Enter or Space presses it.
 - **Data binding**: `rows.is_empty()`, the query filter, `header.validity`, `SourceHealth`.
 - **Build**: `TlEmptyState` from foundation.md.
@@ -327,9 +334,9 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Command | Menu label | Keys | Action | Result |
   |---|---|---|---|---|
-  | Copy the clicked cell | "Copy" | none | `table::CopyCell { column }` (column captured at right-click) | cell text as shown (formatted), toast "Copied: <value>" with the value truncated to 60 chars plus "…" |
-  | Copy row | "Copy row" | Ctrl+C | `table::CopyRow` | the fixed block of the table (UI-SYS-020, UI-SYS-048, UI-SYS-066); multi-select blocks joined by one blank line |
-  | Copy rows as table | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | TSV of the visible columns in view order, header line first, one line per selected row in view order |
+  | Copy the clicked cell | "Copy" | none | `CopyCell { col }` (column captured at right-click) | cell text as shown (formatted), toast "Copied: <value>" with the value truncated to 60 chars plus "…" |
+  | Copy row | "Copy row" | Ctrl+C | `CopyDetails` | the fixed block of the table (UI-SYS-020, UI-SYS-048, UI-SYS-066); multi-select blocks joined by one blank line |
+  | Copy rows as table | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | TSV of the visible columns in view order, header line first, one line per selected row in view order |
 
   - Toasts on success: Services "Service details copied."; Startup "Copied to clipboard"
     (chosen, the spec has no startup row toast); Connections "Connection copied" (spec). On clipboard
@@ -357,22 +364,26 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Implements**: SYS-005, SYS-006, SYS-007, SYS-013 (P3 edit), SYS-022, SYS-023, SYS-024,
   SYS-031, ADR-005 (`ActionTracker`), APP-044.
 - **Anatomy**: no new widget. Progress is shown in three places:
-  1. A `TlToast` per action, replaced in place by id (`ActionToast` keyed by `ActionId.0`, or by
-     `(ActionId.0, target index)` for multi-target requests).
+  1. A toast per action through `ToastQueue::push`, replaced in place by `ToastKey` (the
+     `ActionId.0`, or a hash of `(ActionId.0, target index)` for multi-target requests).
   2. The row's own cell while the action is pending (Services Status cell, UI-SYS-018).
   3. The menu: the same action on the same target is disabled while pending, with tooltip
      "A service action is already in progress." (Services) (spec text).
 - **States** (one toast lifecycle):
 
-  | ActionState | Toast kind | Icon | Autohide |
-  |---|---|---|---|
-  | request sent, no event yet | Info | `loader-circle` (spins at 1 turn per 1 s; static with reduced motion or `motion.animations = false`) | off |
-  | `Started` | unchanged | unchanged | off |
-  | `Succeeded` | Success | `check` | 5 s |
-  | `Failed(..)` | Error | `circle-x` | 8 s |
-  | `OutcomeUnknown(..)` | Warning | `triangle-alert` | 8 s |
-  | `Rejected(Busy)` | Warning | `triangle-alert` | 5 s |
-  | other `Rejected` | Error | `circle-x` | 8 s |
+  | ActionState | Toast kind (UI-FND-020 icons and durations) |
+  |---|---|
+  | request sent, no event yet | Progress (spinner; static with reduced motion) |
+  | `Started` | Progress, unchanged |
+  | `Succeeded` | Success, 5 s |
+  | `Failed(..)` | Error, 8 s (15 s when it has a "View logs" button) |
+  | `OutcomeUnknown(..)` | Warning, 5 s |
+  | `Rejected(Busy)` | Warning, 5 s |
+  | other `Rejected` | Error, 8 s |
+
+  Service job toasts are exempt from the 120 s Progress cap in UI-FND-020, because SYS-005 says
+  there is no client-side timeout (systemd enforces `TimeoutStartSec`). The toast stays Progress
+  until the final event. Every other action here keeps the 120 s cap.
 
   Polkit prompt state: tasklens cannot see the prompt. While polkit-kde-authentication-agent shows
   its dialog the toast stays in the request-sent state. When the call returns:
@@ -384,8 +395,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   How the engine tells "dismissed" from "not authorized" is open item O-3.
 
 - **Interaction**: a toast with a result button ("View logs" on service failures, "Show" on
-  not-visible jumps) keeps autohide off until closed (kit behaviour). Clicking the toast body does
-  nothing.
+  not-visible jumps) lasts 15 s (UI-FND-020). Clicking the toast body does nothing.
 - **Multi-select** (chosen): with 1 to 3 targets, one toast per target (spec). With 4 or more
   targets, one summary toast (to stay under the 4-toast stack limit): "Starting 6 services..."
   then "6 services started" or "4 of 6 services started. 2 failed." (new; same pattern for stop,
@@ -402,8 +412,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Tests**: `action_toast_replaced_in_place` (Started then Succeeded share the id);
   `multi_target_summary_toast_at_4`; `pending_target_disables_same_action`.
 - **Phase**: P2 (P3 for helper-backed actions).
-- **Decided here**: icons and autohide per state; the 4-target summary rule and its strings; the
-  no-agent string.
+- **Decided here**: kind per state; the Progress-cap exemption for service jobs; the 4-target
+  summary rule and its strings; the no-agent string.
 
 ---
 
@@ -431,7 +441,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   ```
 
   Parts: UI-SYS-011 (strip), UI-SYS-013 (columns), UI-SYS-014 (group rows), UI-SYS-015 (unit rows),
-  UI-SYS-016 (child rows), UI-SYS-022 (status bar).
+  UI-SYS-016 (child rows), UI-SYS-022 (status text).
 - **States**: loading UI-SYS-004; empty and error UI-SYS-005; partial manager failure UI-SYS-014.
 - **Interaction**: Tab order: strip toggles left to right, Unit types, System, User, Remove filters,
   then the table. Key context `ServiceTable` inside `Table`.
@@ -460,13 +470,13 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Part | Widget | Size | Text | Notes |
   |---|---|---|---|---|
-  | State toggles | `TlToggleChip` × 4 | height 22, padding x `sp4`, `r_sm` | "Running", "Failed", "Stopped", "Disabled" (`t_sm`) | multi-select; none on = all states |
+  | State toggles | `TlButton::Segment` × 4 | height 22, padding x `sp4`, `r_sm` | "Running", "Failed", "Stopped", "Disabled" (`t_sm`) | multi-select; none on = all states |
   | Unit types | `TlButton` ghost, small, with `chevron-down` caret, opens a `TlMenu` of check items | height 22 | "Unit types" plus " (4)" when not all types are on (chosen) | UI-SYS-012 |
-  | Manager toggles | `TlToggleChip` × 2 | as above | "System", "User" | both on by default |
+  | Manager toggles | `TlButton::Segment` × 2 | as above | "System", "User" | both on by default |
   | Remove filters | `TlButton` ghost small, icon `funnel-x` 14 | height 22 | "Remove filters" | disabled when the strip is at its defaults |
 
-  `TlToggleChip` look (foundation.md owns the values; repeated here for the reviewer): off =
-  transparent fill, 1 px `divider` border, `text_secondary`; on = `accent` at 18% alpha fill,
+  `TlButton::Segment` look (foundation.md owns the values; repeated here for the reviewer): off =
+  transparent fill, 1 px `divider` border, `text_secondary`; on = `accent` at alpha 0.25 fill,
   1 px `accent` border, `text_primary`; hover = `tab_hover` fill; focus = shared focus ring.
 
 - **States**:
@@ -588,7 +598,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   hidden (chosen).
 - **Interaction**: click on the chevron or double-click on the row toggles; Space toggles; Right
   expands, Left collapses. Ctrl+L (Collapse all) collapses unit rows and keeps the two group rows
-  expanded (chosen). Action `table::ToggleExpand`.
+  expanded (chosen). Action `ToggleExpand`.
 - **Data binding**: `state.toml` `[services] group_expanded = { system = true, user = true }`,
   saved on each toggle. Manager health from `ServicesSnapshot.managers[System|User].state`
   (`Connected | Unavailable | Reconnecting`, new field).
@@ -630,13 +640,13 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   `text_selected_primary`; focused row gets the shared row focus outline; stale (manager
   reconnecting) all text `text_secondary`. Failed units keep the danger status label.
 - **Interaction**: click selects; Ctrl+click, Shift+click per table rules; double-click or Enter
-  opens Service Properties (`table::OpenProperties`); right-click opens UI-SYS-017. Hover tooltip on
+  opens Service Properties (`OpenProperties`); right-click opens UI-SYS-017. Hover tooltip on
   the name cell after 600 ms: three lines "<Description>", "<FragmentPath>", "Manager: System"
   (chosen).
 - **Data binding**: `ServicesSnapshot.units[record]`: `unit: UnitRef`, `description`, `status:
   ServiceStatus`, `startup: StartupType`, `main_pid`, `user`, `path`, `kind: UnitKind`,
   `has_cgroup_procs: bool`, resource fields with `Validity`.
-- **Build**: `ServicesDelegate::paint_cell`; strings come from the snapshot as `Arc<str>` wrapped in
+- **Build**: `ServicesDelegate::cell`; strings come from the snapshot as `Arc<str>` wrapped in
   `SharedString` without copying; numbers through `CellTextCache`.
 - **Performance**: no allocation for unchanged cells.
 - **Accessibility**: row accessible name "<id>, <Status>, <Startup type>" (chosen).
@@ -697,14 +707,14 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | 6 | "Startup type" › | | submenu, UI-SYS-019 | always | see UI-SYS-019 |
   | – | separator | | | | |
   | 7 | "View logs" | | `services::ViewLogs` | always | one target; disabled on OpenRC |
-  | 8 | "Properties" | Enter | `table::OpenProperties` | always | always |
+  | 8 | "Properties" | Enter | `OpenProperties` | always | always |
   | 9 | "File properties" | | `services::FileProperties` | always | binary or unit file known |
   | 10 | "Open file location" | | `services::OpenFileLocation` | always | binary known |
   | 11 | "Open unit file" | | `services::OpenUnitFile` | always | `FragmentPath` not empty |
   | – | separator | | | | |
-  | 12 | "Copy" | | `table::CopyCell` | always | always |
-  | 13 | "Copy row" | Ctrl+C | `table::CopyRow` | always | always |
-  | 14 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always | always |
+  | 12 | "Copy" | | `CopyCell { col }` | always | always |
+  | 13 | "Copy row" | Ctrl+C | `CopyDetails` | always | always |
+  | 14 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always | always |
   | 15 | "Jump to process" | | `services::JumpToProcess` | always | one target with MainPID ≠ 0 |
 
   Items have no icons (chosen; TaskSlinger menus have none). The kit hides a separator next to a
@@ -855,16 +865,16 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Phase**: P2.
 - **Decided here**: strip filter removal rule; "Show" button for text-filter case.
 
-### UI-SYS-022 Services status bar text and refresh
+### UI-SYS-022 Services status text and refresh
 
 - **Implements**: SYS-016, APP-029.
-- **Anatomy**: left text in the shell status bar, `t_sm`, `text_secondary`:
+- **Anatomy**: the tab text segment of the shell status chip (UI-SHL-050 owns font and colours):
   "255 Total | 198 Running | 57 Stopped", plus " | 3 selected" with a selection. Counts are unit
   rows after all filters (child rows not counted), thin-space grouped. Running counts ActiveState
   `active` and `reloading`; Stopped counts `inactive` and `failed`; Starting and Stopping count in
   Total only.
 - **States**: while the skeleton shows: "Loading…". While paused: shell appends "[PAUSED - Ctrl]".
-- **Interaction**: F5 (`page::Refresh`) sends `RefreshNow(SystemdSystem)` and
+- **Interaction**: F5 (`RefreshCurrentTab`) sends `RefreshNow(SystemdSystem)` and
   `RefreshNow(SystemdUser)`, then shows "Services refreshed." when the next services version
   arrives or after 2 s, whichever is first (chosen).
 - **Data binding**: counts precomputed by the engine in `ServicesSnapshot.counts` (new field), so
@@ -934,7 +944,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   ```
   ┌ sshd.service Properties                                   📌  ✕ ┐  title bar (foundation)
   ├──────────────────────────────────────────────────────────────────┤
-  │  General   Log On   Recovery   Dependencies   Logs                │  TlTabStrip, 32
+  │  General   Log On   Recovery   Dependencies   Logs                │  TlTabs, 32
   ├──────────────────────────────────────────────────────────────────┤
   │                                                                  │
   │  tab content, padding sp6 (16)                                    │
@@ -949,7 +959,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Frame | `TlSecondaryWindow` (`WindowKind::Floating`, own gpui-kit Root) | as above | `window_bg` |
   | Title | "<id> Properties", for example "sshd.service Properties" (spec) | | |
   | Pin | title bar pin (R-073) | | |
-  | Tab strip | `TlTabStrip`, tabs "General", "Log On", "Recovery", "Dependencies", "Logs" | 32 high | `tab_bg`, active `accent` underline per foundation |
+  | Tab strip | `TlTabs`, tabs "General", "Log On", "Recovery", "Dependencies", "Logs" | 32 high | `tab_bg`, active `accent` underline per foundation |
   | Content | per tab | fills | `window_bg` |
   | Footer | `h_flex` right-aligned, gap `sp4`, top border 1 px `divider` | 48 | `toolbar` |
   | OK | `TlButton` primary, min width 80 | 28 high | |
@@ -1119,10 +1129,10 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Field | Widget | Range or values |
   |---|---|---|
   | On failure | `TlSelect` width 200 | no, on-success, on-failure, on-abnormal, on-watchdog, on-abort, always |
-  | Restart service after | `TlNumberInput` width 100, suffix "ms" | 0..=3 600 000, step 100 |
-  | Give up after | two `TlNumberInput` width 80 | starts 0..=1000; within 0..=86 400 s |
+  | Restart service after | `TlStepper` width 100, suffix "ms" | 0..=3 600 000, step 100 |
+  | Give up after | two `TlStepper` width 80 | starts 0..=1000; within 0..=86 400 s |
   | When giving up, Failure action | `TlSelect` width 200 | none, reboot, reboot-force, reboot-immediate, poweroff, poweroff-force, poweroff-immediate, exit, exit-force |
-  | Run on failure | `TlInput`, full width | unit names separated by spaces |
+  | Run on failure | `TlTextInput`, full width | unit names separated by spaces |
   | Restarts so far | text | read-only |
   | Saved as | `t_sm` `text_secondary`, selectable | the drop-in path from table (c) |
   | Remove tasklens settings (new) | `TlButton` small, default | shown only when the tasklens drop-in exists |
@@ -1179,7 +1189,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   |---|---|---|
   | Heading | `t_base` semibold `text_primary`; top margin `sp6` except the first | "Depends on:", "Dependents:" (spec) |
   | Row | `row_h`, padding x `sp4`, hover `row_hover`, selected `row_selected` | dot 8 per UI-SYS-003 service status, gap `sp3`, unit id `t_base`, tag right-aligned |
-  | Tag | `TlTag` small outline, `t_xs` | relation word: Requires, Requisite, Wants, BindsTo, PartOf, Upholds / RequiredBy, RequisiteOf, WantedBy, BoundBy, ConsistsOf, UpheldBy / After, Before |
+  | Tag | `TlBadge` small outline, `t_xs` | relation word: Requires, Requisite, Wants, BindsTo, PartOf, Upholds / RequiredBy, RequisiteOf, WantedBy, BoundBy, ConsistsOf, UpheldBy / After, Before |
   | Ordering header | `row_h`, chevron 16, "Ordering (N)" (chosen label with count) | collapsed by default |
   | Empty list | "(None)" in `text_secondary` (spec) | |
 
@@ -1220,11 +1230,11 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Part | Widget | Size | Notes |
   |---|---|---|---|
   | Toolbar | `h_flex`, gap `sp4`, padding y `sp2` | 32 | `toolbar` background, bottom border |
-  | Filter | `TlInput` small with `search` prefix, cleanable, placeholder "Filter logs" (new) | width 220 | |
-  | Follow | `TlToggleChip` with icon `arrow-down-to-line` 14, label "Follow" (spec) | 24 | on by default |
+  | Filter | `TlTextInput` small with `search` prefix, cleanable, placeholder "Filter logs" (new) | width 220 | |
+  | Follow | `TlButton::Segment` with icon `arrow-down-to-line` 14, label "Follow" (spec) | 24 | on by default |
   | Load older | `TlButton` small, label "Load older" (spec) | 24 | |
-  | Copy | `TlIconButton` `copy` 14, tooltip "Copy logs to clipboard" (spec) | 24 × 24 | right side |
-  | Open in terminal | `TlIconButton` `terminal` 14, tooltip "Open in terminal" (spec) | 24 × 24 | |
+  | Copy | `TlButton::Icon` `copy` 14, tooltip "Copy logs to clipboard" (spec) | 24 × 24 | right side |
+  | Open in terminal | `TlButton::Icon` `terminal` 14, tooltip "Open in terminal" (spec) | 24 × 24 | |
   | Banner | `TlBanner` info, `t_sm` | 32 | UI-SYS-038 |
   | List | `uniform_list`, font "Noto Sans Mono" `t_sm` (12), line height 18 (chosen) | fills | `list_bg`, no alternate rows |
   | Time column | 19 characters wide, `text_secondary` | | `YYYY-MM-DD HH:MM:SS` local (table d) |
@@ -1411,7 +1421,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Data binding**: `StartupSnapshot.entries[record]`: `id: StartupRef`, `name`, `icon_path`,
   `publisher`, `status`, `impact: Impact`, `impact_detail`, `kind: StartupKind`, `location`,
   `command`, `source_path`, `can_toggle`, `can_delete`, `can_run`, `overridden_by_user: bool`.
-- **Build**: `StartupDelegate::paint_cell`; icons with `img(path)` at 16 × ui scale.
+- **Build**: `StartupDelegate::cell`; icons with `img(path)` at 16 × ui scale.
 - **Performance**: icons are cached by GPUI's image cache by path.
 - **Accessibility**: row name "<Name>, <Status>, <Type>".
 - **Tests**: `startup_row_fallback_icons`; `startup_overridden_row_secondary`.
@@ -1445,7 +1455,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: none besides the tooltip; sorting per UI-SYS-041.
 - **Data binding**: `entry.impact`, `entry.impact_detail { activation_ms, start_offset_ms, cpu_ns,
   fork_exec_only: bool }`.
-- **Build**: `StartupDelegate::paint_cell` plus `tooltip`.
+- **Build**: `StartupDelegate::cell` plus `tooltip`.
 - **Tests**: `impact_tooltip_lines`; `impact_thresholds_1000_300` (fake data 999 ms → Medium,
   1000 ms → High, 299 ms → Low).
 - **Phase**: P2.
@@ -1461,12 +1471,12 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | 1 | "Disable" or "Enable" (by state; both shown for a mixed selection) | | `startup::Disable` / `startup::Enable` | `can_toggle` for at least one target |
   | 2 | "Run now" | | `startup::RunNow` | `can_run` for at least one target |
   | – | separator | | | |
-  | 3 | "Copy" | | `table::CopyCell` | always |
-  | 4 | "Copy row" | Ctrl+C | `table::CopyRow` | always |
-  | 5 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always |
+  | 3 | "Copy" | | `CopyCell { col }` | always |
+  | 4 | "Copy row" | Ctrl+C | `CopyDetails` | always |
+  | 5 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always |
   | 6 | "Copy command" | | `startup::CopyCommand` | one target |
   | 7 | "Open file location" | | `startup::OpenFileLocation` | one target |
-  | 8 | "Properties" | Enter | `table::OpenProperties` | always |
+  | 8 | "Properties" | Enter | `OpenProperties` | always |
   | – | separator | | | |
   | 9 | "Delete entry…" | Delete | `startup::Delete` | `can_delete` for at least one target |
 
@@ -1578,7 +1588,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Phase**: P2.
 - **Decided here**: full path in copy.
 
-### UI-SYS-049 Startup status bar, refresh and keyboard
+### UI-SYS-049 Startup status text, refresh and keyboard
 
 - **Implements**: SYS-027.
 - **Anatomy**: status text "12 Total | 9 Enabled | 3 Disabled", plus " | 2 selected". Disabled
@@ -1598,7 +1608,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Implements**: SYS-026, APP-045.
 - **Anatomy**: `TlSecondaryWindow` titled "Startup properties: <Name>" (spec), default 620 × 520,
   minimum 480 × 360 (chosen), not modal. Content: `TlKeyValueGrid` in a scroll region, padding
-  `sp6`, label column 220, one copy button per line (`TlIconButton` `copy` 14 in a 20 × 20 hit
+  `sp6`, label column 220, one copy button per line (`TlButton::Icon` `copy` 14 in a 20 × 20 hit
   area at the line's right end, `text_secondary` at 60% alpha, full alpha on row hover or focus).
   Footer 48 with one `TlButton` "Close" (default).
 
@@ -1739,7 +1749,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   `foreign`, `state`, `owners: SmallVec<[ProcessKey; 1]>`, `owner_validity: Validity`, `uid`,
   `inode`, `ifindex`, `recv_q`, `send_q`, `unit: Option<UnitRef>`, `tcp: Option<TcpInfoView>`.
   Owner name and icon come from `Snapshot.processes` by `ProcessKey`.
-- **Build**: `ConnectionsDelegate::paint_cell`. Addresses are formatted by the engine once per
+- **Build**: `ConnectionsDelegate::cell`. Addresses are formatted by the engine once per
   socket (`Arc<str>`) since they never change for a cookie (chosen; saves UI formatting).
 - **Performance**: the address strings are shared, so a refresh with unchanged sockets formats
   nothing.
@@ -1755,9 +1765,9 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | # | Label | Key hint | Action | Shown / enabled |
   |---|---|---|---|---|
-  | 1 | "Copy" | | `table::CopyCell` | always (chosen addition, R-012) |
-  | 2 | "Copy row" | Ctrl+C | `table::CopyRow` | always |
-  | 3 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always |
+  | 1 | "Copy" | | `CopyCell { col }` | always (chosen addition, R-012) |
+  | 2 | "Copy row" | Ctrl+C | `CopyDetails` | always |
+  | 3 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always |
   | 4 | "Copy local address" | | `connections::CopyLocal` | one target |
   | 5 | "Copy foreign address" | | `connections::CopyForeign` | one target; disabled for `*:*` |
   | – | separator | | | |
@@ -1765,7 +1775,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | – | separator | | | |
   | 7 | "Jump to process" | | `connections::JumpToProcess` | one target; disabled with no owner (tooltip "No owning process for this connection") |
   | 8 | "Go to service" | | `connections::GoToService` | shown when the owner belongs to a systemd unit |
-  | 9 | "Properties" | Enter | `table::OpenProperties` | always |
+  | 9 | "Properties" | Enter | `OpenProperties` | always |
 
 - **States**: disabled tooltips as listed; restricted owner: Jump is disabled with the
   Restricted tooltip.
@@ -1847,7 +1857,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Phase**: P2.
 - **Decided here**: address and port split rules; all PIDs.
 
-### UI-SYS-067 Connections status bar, filter and refresh
+### UI-SYS-067 Connections status text, filter and refresh
 
 - **Implements**: SYS-036, SYS-037 (dropdown place).
 - **Anatomy**: status text "214 Total | 168 TCP | 46 UDP | 97 EST | 31 LISTEN", plus " | 3
@@ -1885,7 +1895,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | "Bytes sent / received" (TCP) | "1.22 MiB / 34.68 MiB" |
   | "Retransmits" (TCP) | count |
   | "Last data received" (TCP) | "1 240 ms ago" |
-  | "Closable here" | "Yes", or "No (<reason>)": "TIME-WAIT", "UDP", "needs the tasklens helper", "kernel lacks CONFIG_INET_DIAG_DESTROY", "not available before version 3" is not shown; before P3 the reason is "not supported in this version" (chosen) |
+  | "Closable here" | "Yes", or "No (<reason>)": "TIME-WAIT", "UDP", "needs the tasklens helper", "kernel lacks CONFIG_INET_DIAG_DESTROY"; before P3 the reason is "not supported in this version" (chosen) |
 
 - **States**: refreshes every 2 s by cookie. When the socket is gone: the title appends " (closed)"
   (spec), values stay in `text_secondary`. Up to 10 windows (chosen); the 11th shows "Too many
@@ -1917,8 +1927,13 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 ### UI-SYS-070 Namespaces dropdown
 
 - **Implements**: SYS-037.
-- **Anatomy**: `TlButton` ghost xsmall in the status bar, label "Namespaces: Host only ▾" or
-  "Namespaces: All ▾" (chosen), opening a `TlMenu` with check items "Host only", "All".
+- **Anatomy**: `TlButton::Ghost` sm (24 high) with a `chevron-down` `i_xs` caret, label
+  "Namespaces: Host only" or "Namespaces: All" (chosen), opening a `TlMenu` with check items
+  "Host only", "All". SYS-037 puts it in the status bar. The shell's status chip (UI-SHL-050) has
+  no slot for a control, so this file asks the shell for an optional page control slot drawn
+  after the tab text inside the chip (open item O-6). Until that exists, it is drawn by the
+  Connections page as its own floating element at the bottom-right of the table body, `sp4` from
+  both edges, `menu_bg` fill, 1 px `divider` border, `r_md` (chosen fallback).
 - **States**: without the helper, "All" is disabled with tooltip "Needs the tasklens helper". With
   "All", the `netns` column is shown and listed first after Proto (chosen); switching back hides it.
 - **Interaction**: choosing "All" with the helper locked starts a helper session (polkit). Cancel:
