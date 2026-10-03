@@ -547,7 +547,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   | IOMMU | a non-empty `/sys/class/iommu` |
   | Vulnerabilities | `/sys/devices/system/cpu/vulnerabilities/*` |
 
-  The addendum wrote the Secure Boot GUID as `8be4df61-93ca-11d2-aa0d-e0c98e1ccb4a`; the EFI global variable GUID is `8be4df61-93ca-11d2-aa0d-00e098032b8c` (v2 and PERF-101 agree), so that form is used. Readability of lockdown, efivars and iommu without root is unverified (U-27). A source that cannot be read is left out of the list and named in the tooltip.
+  The addendum wrote the Secure Boot GUID as `8be4df61-93ca-11d2-aa0d-e0c98e1ccb4a`; the EFI global variable GUID is `8be4df61-93ca-11d2-aa0d-00e098032b8c` (v2 PERF-032 and v2 PERF-090 use it), so that form is used. Readability of lockdown, efivars and iommu without root is unverified (U-27). A source that cannot be read is left out of the list and named in the tooltip.
 - Verdict: ADAPT. Windows security rows carry the nearest Linux facts.
 - Phase: P2
 - Privilege: none
@@ -678,3 +678,236 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Phase: P2
 - Privilege: none (this corrects PLAN.md and ADR-016, which say DIMM details need root)
 - Applied: D-007, R-030
+
+## Disk pages
+
+### PERF-047 Disk list and kind
+- Was: v2 PERF-042
+- Source: TS drive types | MC disk kinds and exclusions
+- Behaviour: One page per physical disk. Kind is one of NVMe, SSD, HDD, eMMC, SD, USB, Optical or Virtual. This machine has three: nvme0n1, nvme1n1 and sda.
+- Linux data/mechanism:
+  - `/sys/block/*`, excluding `loop`, `ram`, `zram`, `fd`, `dm-`, `md` and `zd`. Partitions and `dm-*` devices appear as children (PERF-050).
+  - Kind rules, in order: an `nvme` prefix is NVMe; `mmcblk` plus `device/type` (MMC/SD) gives eMMC or SD; udev `ID_BUS=usb` gives USB; `sr*` is Optical; `virtio`/`xen` is Virtual; otherwise `queue/rotational` decides HDD (1) or SSD (0).
+  - Model from udev `ID_MODEL`, else sysfs `device/model`.
+  - Enumeration by rescan every 5 s while demanded (PERF-005).
+- Verdict: ADAPT. Windows drive types become Linux kinds.
+- Phase: P1
+- Privilege: none
+- Applied: R-052
+
+### PERF-048 Disk graphs
+- Was: v2 PERF-043
+- Source: TS "Active time", "Disk transfer rate" | MC throughput with write dashed
+- Behaviour: "Active time" (0 to 100%, filled) and "Transfer rate" (Read filled, Write dashed, dynamic scale with a power-of-two axis, "Throughput over 60 seconds").
+- Linux data/mechanism: one `pread` of `/proc/diskstats` per 1 Hz tick for all disks (ADR-016; v2's per-device `/sys/block/<d>/stat` is replaced).
+  - Active = Δio_ticks / Δt_ms.
+  - Read rate = Δsectors_read × 512 / Δt; write likewise.
+  - Counters are u64 with reset detection (ADR-008).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-052, table d
+
+### PERF-049 Disk stats
+- Was: v2 PERF-044
+- Source: TS Average response time, Read speed, Write speed, Capacity, Formatted, System disk, Page file, Hardware name, Used space, Free space | MC Total read/written, Type, WWN, Serial, Rotation rate
+- Behaviour: Rows: Active time, Average response time (ms, 2 decimals), Read speed, Write speed, Total read, Total written, Capacity, Formatted, Used space, Free space, System disk, Swap (replaces Page file: Yes/No), Hardware name, Type, Interface, WWN, Serial, Rotation rate, Temperature. WWN, Serial and Rotation rate are hidden when missing (PERF-013).
+- Linux data/mechanism:
+  - Response time = Δ(read_ticks + write_ticks + discard_ticks + flush_ticks) / Δ(reads + writes + discards + flushes), from the matching `/proc/diskstats` fields.
+  - Totals from the sector counters since boot.
+  - Capacity = `/sys/block/<d>/size` × 512.
+  - Formatted, used and free = sums of `statvfs` over mounted filesystems on this disk.
+  - System disk = holds `/` or `/boot`.
+  - Swap = any `/proc/swaps` entry on this disk or its holders.
+  - Interface from udev `ID_BUS` or the transport (nvme, ata, usb, scsi, virtio).
+  - WWN and Serial from udev `ID_WWN` and `ID_SERIAL_SHORT`, or UDisks2 `Drive.WWN`/`Serial`.
+  - Rotation rate from UDisks2 `Drive.RotationRate`.
+- Verdict: ADAPT. Page file becomes Swap.
+- Phase: P1 for rates, active time, capacity and response time; P2 for the rest.
+- Privilege: none. Disk serials come from udev without root. D-007 covers memory modules only.
+
+### PERF-050 Partitions table
+- Was: v2 PERF-045
+- Source: TS "Partitions" table ("%zu partitions - %s"; Partition, Size, Offset, Drive, Mount path, Volume, File system, Flags, Type) | MC partition list with usage bar
+- Behaviour: The heading reads "3 partitions - GPT". Columns:
+  - Partition (`nvme0n1p2`);
+  - Size;
+  - Offset;
+  - Device: a dm or LUKS holder such as `luks-…` → `dm-0` (replaces Drive);
+  - Mount path: the first mount, the rest in a tooltip ("Additional mount points:");
+  - Label (replaces Volume);
+  - File system;
+  - Usage: a bar plus percent;
+  - Flags;
+  - Type.
+
+  Unallocated gaps over 1 MiB show as rows with Type "Unallocated". Rows are ordered by offset, as in TaskSlinger.
+- Linux data/mechanism:
+  - `/sys/block/<d>/<p>/{start,size,partition,ro}` and `/sys/block/<d>/<p>/holders/`.
+  - udev `ID_FS_TYPE`, `ID_FS_LABEL`, `ID_PART_TABLE_TYPE`, `ID_PART_ENTRY_TYPE`, `ID_PART_ENTRY_FLAGS`.
+  - Mounts from `/proc/self/mountinfo`. Usage from `statvfs`.
+  - Type names from a GPT GUID table: EFI system, Linux filesystem, Linux root (x86-64), Linux home, Linux swap, Linux LVM, Linux RAID, LUKS, Microsoft basic data, Microsoft reserved, Windows recovery, BIOS boot. Anything else shows "GPT partition {guid}". MBR types show "MBR 0x%02X".
+  - Flags from GPT attributes: bit 0 "Required", bit 2 "Boot" (legacy BIOS bootable), bit 60 "Read-only", bit 62 "Hidden", bit 63 "No automount". The sysfs `ro` value also gives "Read-only".
+- Verdict: ADAPT. Drive letters become device and mount path.
+- Phase: P2
+- Privilege: none
+
+### PERF-051 SMART data dialog
+- Was: v2 PERF-046
+- Source: MC SMART dialog
+- Behaviour: A "Show SMART data" button sits in the disk page header when SMART is available. The dialog opens as its own window ("tasklens SMART Data", APP-045 naming) with: Last updated ("2m 5s ago"), Powered on, Drive health (the overall assessment, which Mission Center leaves empty), Self-test status. Then a sortable table:
+  - ATA columns: ID, Attribute, Value, Normalized, Threshold, Worst, Type (Pre-fail or Old-age), Updates (Online or Offline), Assessment (FAILING, Failed in the past, OK).
+  - NVMe rows: Percent used, Available spare, Spare threshold, Total data read, Total data written, Warning temp time, Critical temp time, Controller busy time, Warning temperature, Critical temperature, Temperature sensors, Unsafe shutdowns, Media errors, Error log entries, Power cycles.
+  - A "Refresh" button.
+  - On failure the dialog reads "Failed to get SMART data" and names the reason.
+- Linux data/mechanism:
+  - ATA: UDisks2 `org.freedesktop.UDisks2.Drive.Ata.SmartGetAttributes({})`, `SmartUpdated`, `SmartPowerOnSeconds`, `SmartFailing`, `SmartSelftestStatus`. "Refresh" calls `SmartUpdate({})`.
+  - NVMe: `org.freedesktop.UDisks2.NVMe.Controller.SmartGetAttributes({})` and `SmartUpdate`. Needs udisks2 2.10 or newer with the NVMe module (U-25).
+- Verdict: BUILD
+- Phase: P2 (the smartctl fallback in P3)
+- Privilege: Reading cached attributes is allowed for the active session. `SmartUpdate` uses `org.freedesktop.udisks2.ata-smart-update` (allowed for the active local session by default). When UDisks2 or its NVMe module is missing, a "Read with smartctl (admin)" button runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` under `org.freedesktop.policykit.exec` and parses the JSON. This is not a tl-helper operation (R-004 has no SMART read). See open item 5.
+
+### PERF-052 Eject with blocking processes
+- Was: v2 PERF-047
+- Source: MC eject button and failure dialog
+- Behaviour: An "Eject" button appears only for ejectable or removable drives, and its visibility updates live. A failed unmount opens the window "Disk is in use".
+  - It lists blocking processes grouped by app: name, PID, open paths, and an "End Task" button per row.
+  - Buttons: "Close", "Retry", "End All".
+  - "End Task" sends SIGTERM. Holding Shift changes the button to "End Process" and sends SIGKILL.
+  - "End All" with more than one process, and any action on another user's process or a protected process, asks first with the R-036 dialogs. A single End Task on the user's own process does not ask.
+  - A retry follows automatically after ending.
+  - Success shows the toast "Disk ejected".
+- Linux data/mechanism:
+  - UDisks2 `Filesystem.Unmount({})` for each mounted filesystem, `Encrypted.Lock` for LUKS holders, then `Drive.Eject({})`, or `Drive.PowerOff` for USB.
+  - Blockers: scan `/proc/*/{cwd,root,exe}`, `/proc/*/fd/*` and `/proc/*/maps` for paths under the mount points.
+  - Signals go through the process actions path (pidfd with identity check, ADR-006).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: Unmount and eject use `org.freedesktop.udisks2.filesystem-unmount-others` and `eject-media` (allowed for the active session on removable media). The blocker scan sees only the user's own processes. The window adds "Processes of other users may also hold this disk" when any `/proc/*/fd` read failed with EACCES.
+- Applied: R-036, R-045 (no "Force end" naming), D-009
+
+### PERF-053 Disk temperature
+- Was: v2 PERF-048
+- Source: MC sidebar disk temperature
+- Behaviour: Temperature on the disk card line 2 ("12.0% · 41 °C") and as a stats row.
+- Linux data/mechanism: The drive's hwmon (`nvme` hwmon "Composite", temp1, present here; `drivetemp` for SATA when that module is loaded). Fallback: UDisks2 `Drive.Ata.SmartTemperature` (Kelvin). 1 Hz.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+## Network pages
+
+### PERF-054 Interface list and type
+- Was: v2 PERF-049
+- Source: TS interface types and states (L28137-28152) | MC NetworkManager kinds
+- Behaviour:
+  - One page per interface, except loopback.
+  - Type: Ethernet, Wi-Fi, Virtual, USB network, Bridge, Cellular, Tunnel, VPN or Other.
+  - State uses TaskSlinger's labels, one-to-one with the kernel operstate: Connected (up), Disconnected (down), Testing, Dormant, Not present, Lower layer down. "unknown" with carrier shows Connected; "unknown" without carrier shows `Unknown`.
+  - Here `tailscale0` is a Tunnel and shows. `docker0` is Virtual and hidden by default (PERF-004).
+- Linux data/mechanism:
+  - `/sys/class/net/<if>/`, in order:
+    - a `wireless/` or `phy80211` entry is Wi-Fi;
+    - `bridge/` is Bridge;
+    - `tun_flags` or `type`=65534 is Tunnel;
+    - `device/driver` under a usb parent is USB network;
+    - `wwan*` or `type`=519 is Cellular;
+    - a name matching `docker*|veth*|br-*|virbr*|vnet*` is Virtual;
+    - `type`=1 with a `device` link is Ethernet;
+    - anything else is Other.
+  - NetworkManager `Device.DeviceType`, read as `u` (u32), refines VPN and WireGuard when NM is present.
+  - `operstate` and `carrier` are read from sysfs on each 1 Hz tick while network is demanded. The interface list is rescanned every 5 s. There is no RTM_NEWLINK subscription in v1 (inferred from R-052).
+- Verdict: ADAPT. Classification uses sysfs first, so it works without NetworkManager.
+- Phase: P1
+- Privilege: none
+- Applied: R-052, R-053
+
+### PERF-055 Throughput graph and legend
+- Was: v2 PERF-050, add PERF-084 (graph and legend part)
+- Source: TS "Throughput" (L28242), "Upload" (L28283), "Download" (L28192) | MC send dashed, receive filled, linked scale
+- Behaviour: Graph title "Throughput". Legend "Download" (filled area in the network colour #359CAB) and "Upload" (dashed line, no fill, same colour at a lighter tint). One shared scale (PERF-018). Label "Throughput over 60 seconds". Mission Center's "S:" and "R:" are not used.
+- Linux data/mechanism: one `pread` of `/proc/net/dev` per 1 Hz tick for all interfaces (ADR-016; v2's per-interface `statistics/{rx,tx}_bytes` files are replaced). Download = rx. Rates use actual elapsed time (ADR-008).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-052
+
+### PERF-056 Network stats
+- Was: v2 PERF-051, add PERF-084 (details rows part)
+- Source: TS Adapter name, Connection type, IPv4, IPv6, MAC, Public IP, Receive/Transmit link speed, Interface index, Display unit (crosscheck A.15) | MC Receive, Send, Total received, Total sent, Connection status
+- Behaviour: Rows:
+  - Download speed, Upload speed, Total downloaded, Total uploaded (since boot);
+  - Adapter name, Interface name, Connection type, Connection status;
+  - Link speed. Ethernet reports one speed for both directions. Wi-Fi shows its RX and TX bitrates;
+  - IPv4 address, IPv6 address (PERF-059), MAC address, Interface index, Driver;
+  - Display unit (PERF-057);
+  - Public IP (PERF-060).
+- Linux data/mechanism:
+  - Adapter name from the systemd hwdb (`ID_MODEL_FROM_DATABASE` and `ID_VENDOR_FROM_DATABASE` in the net device's udev properties). No bundled database like Mission Center's. Missing: `Unknown adapter`.
+  - sysfs `speed` (Mb/s; -1 shows `Not reported`), `address`, `ifindex`, and the `device/driver` basename.
+- Verdict: BUILD
+- Phase: P1 for rates and totals; P2 for the rest.
+- Privilege: none
+
+### PERF-057 Display unit row
+- Was: add PERF-083
+- Source: TS crosscheck A.15 and B.6 (L28290)
+- Behaviour: The network page's Details grid has a row "Display unit". Its value is the current unit: `Mbps` or `MiB/s` with auto-scale off, `bits/s, auto` or `bytes/s, auto` with it on. Clicking the value opens a two-item menu: "Bits per second" and "Bytes per second". The choice changes the global setting (Settings > Network transfer unit). All network graphs, cards and process columns switch at once. Tooltip: "Applies to all network values".
+- Linux data/mechanism: `units.network = "bits" | "bytes"`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-014, R-015
+
+### PERF-058 Wi-Fi details
+- Was: v2 PERF-052
+- Source: MC SSID, Signal strength, Maximum bitrate, Frequency
+- Behaviour: Wi-Fi rows: SSID, Signal (4-level icon plus "-52 dBm (78%)"), RX and TX bitrate, Frequency ("5180 MHz, channel 36"), Security.
+- Linux data/mechanism:
+  - NetworkManager `Device.Wireless.ActiveAccessPoint`, then `AccessPoint.{Ssid,Strength,Frequency,MaxBitrate,RsnFlags}`.
+  - Without NetworkManager: nl80211 generic netlink `NL80211_CMD_GET_INTERFACE` (SSID, frequency) and `NL80211_CMD_GET_STATION` (signal, RX and TX bitrate).
+  - 1 Hz while the page is shown.
+- Verdict: ADAPT. nl80211 is added as a fallback.
+- Phase: P2
+- Privilege: none
+- Applied: table d (integer MHz)
+
+### PERF-059 IP addresses
+- Was: v2 PERF-053
+- Source: TS IPv4/IPv6 | MC NM AddressData
+- Behaviour: Shows every address with its prefix ("192.168.1.10/24"). IPv6 shows global addresses first and link-local addresses in the tooltip.
+- Linux data/mechanism: rtnetlink `RTM_GETADDR` dump when the page opens and on each 5 s rescan while the page is shown. This avoids depending on NetworkManager. (v2's `RTM_NEWADDR`/`RTM_DELADDR` subscription is replaced by the rescan, inferred from R-052.)
+- Verdict: ADAPT. rtnetlink replaces NetworkManager IP config.
+- Phase: P2
+- Privilege: none
+
+### PERF-060 Public IP fetch
+- Was: v2 PERF-054, add amend (Public IP fetch)
+- Source: TS Public IP "Fetch" and "Not fetched", Confirm Public IP Fetch dialog, `AutoFetchPublicIP` (Window & startup per crosscheck B.7) | APP-056
+- Behaviour:
+  - The row shows "Not fetched" with a "Fetch" button.
+  - The first fetch opens the "tasklens Public IP Notice" window from APP-056 (text, "Service: https://api.ipify.org", the checkbox "Do not ask again for public IP fetches", buttons "Continue" and "Cancel").
+  - Result: "203.0.113.4 (fetched 14:02)".
+  - "Auto-fetch Public IP on launch" sits under Settings > Window & startup, default off. It fetches once at startup, and only after the notice has been accepted.
+  - The same value shows on the Information tab (PERF-104).
+- Linux data/mechanism:
+  - HTTPS GET to `https://api.ipify.org` (IPv4); `https://api6.ipify.org` too when a global IPv6 route exists.
+  - `ureq` 3 (sync, rustls, no Tokio; U-30) in the blocking pool, 5 s timeout.
+  - The result is never saved to disk.
+  - Keys `network.auto_fetch_public_ip = false`, `network.public_ip_notice_accepted = false`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+- Applied: R-058
+
+### PERF-061 Network settings link
+- Was: v2 PERF-055
+- Source: TS "Show more information" (L28329) | MC "Network Settings" (GNOME launch-panel)
+- Behaviour: A "Network settings" link under the stats and in the page context menu.
+- Linux data/mechanism:
+  - KDE (this machine): run `kcmshell6 kcm_networkmanagement`.
+  - GNOME: session D-Bus `org.gnome.Settings` `/org/gnome/Settings` `org.freedesktop.Application.ActivateAction("launch-panel", [<"wifi"|"network">])`.
+  - Hidden on other desktops.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
