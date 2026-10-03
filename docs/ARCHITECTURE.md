@@ -895,6 +895,7 @@ pub enum Command {
     Action(ActionRequest),
     RefreshNow(SourceId),         // user pressed refresh, or a page opened
     ResetBaselines,               // debugging aid, also used after resume
+    KWin(KWinCommand),            // P2: activate, close, keep above, pick (ADR-004 KWin worker)
 }
 ```
 
@@ -910,7 +911,7 @@ pub struct ActionRequest {
     pub id: ActionId,
     pub kind: ActionKind,
     pub targets: SmallVec<[ActionTarget; 1]>,  // max 256, captured at menu-open time
-    pub privileged: bool,                       // user chose "Run as administrator" (later phase)
+    pub privileged: bool,                       // user chose "Retry as administrator" (P3)
 }
 
 pub enum ActionTarget {
@@ -922,9 +923,11 @@ pub enum ActionTarget {
 
 pub enum ActionKind {
     // ADR-006
-    Signal(Signal),            // End = Signal(Term), Force end = Signal(Kill)
+    Signal(Signal),            // End Task = Signal(Term), End Process = Signal(Kill)
+    KillTree,                  // End Process Tree: SIGSTOP every target, then SIGKILL every target
     Suspend, Resume,           // SIGSTOP / SIGCONT on one process
     SetNice(i8),               // -20..=19
+    SetSched { policy: SchedPolicy, rt_prio: u8 },  // P2: Custom, Realtime and Idle priority
     SetAffinity(CpuSet),
     SetIoPriority(IoPriority),
     FreezeGroup, ThawGroup, KillGroup,
@@ -933,7 +936,8 @@ pub enum ActionKind {
     StartupEnable, StartupDisable,
 }
 
-pub enum Signal { Term, Kill, Int, Hup, Usr1, Usr2, Stop, Cont }
+pub enum Signal { Term, Kill, Hup, Int, Quit, Stop, Cont, Usr1, Usr2, Other(u8) }  // Other: any other number, incl. SIGRTMIN..=SIGRTMAX
+pub enum SchedPolicy { Other, Batch, Idle, Fifo, Rr }   // rt_prio 1..=99 for Fifo and Rr, else 0
 pub struct CpuSet(pub [u64; 16]);      // up to 1024 CPUs
 pub enum IoPriority { Realtime(u8), BestEffort(u8), Idle }   // levels 0..=7
 
