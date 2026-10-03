@@ -1146,7 +1146,7 @@ frame = u32 little-endian payload length | payload (postcard)
 max payload = 1_048_576 bytes (1 MiB) for the probe; 65_536 for the helper
 ```
 
-A frame longer than the max, a short read or a postcard error is a protocol failure.
+A frame longer than the max, a short read or a postcard error is a protocol failure. Helper replies may span several frames, up to 4 MiB per request (ADR-006).
 
 **Messages** (`tl-model/src/gpu_proto.rs`):
 
@@ -1211,7 +1211,7 @@ The probe gets per-process data from `process_utilization_stats(last_seen_timest
 
 Restart backoff and the five-per-minute rule come from ADR-004. A child stuck in uninterruptible kernel sleep cannot be reaped; the blocking job then waits in `wait()`, the worker's health shows `Late`, and the rest of the app is unaffected. This is a known limitation.
 
-**Rates.** Device totals at 1 Hz while any GPU view, sidebar mini graph or tray graph is demanded; process data at 1 Hz only when a GPU process column is visible. Never 10 Hz.
+**Rates.** Device totals at 1 Hz while any GPU view, sidebar mini graph or tray graph is demanded; process data at 1 Hz only when a GPU process column is visible. Never faster than 1 Hz; the Refresh setting does not change the probe rate.
 
 **Shutdown.** The worker sends `Shutdown`, waits 200 ms for exit, then SIGKILL and `wait()`.
 
