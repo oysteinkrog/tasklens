@@ -923,3 +923,403 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Decided here**: OpenRC group label and reduced menu.
 
 ---
+
+## Service Properties window
+
+### UI-SYS-030 Service Properties window frame
+
+- **Implements**: SYS-011 (frame), APP-045, R-073, SYS-015 ("View logs" entry).
+- **Anatomy** (default 720 × 560, minimum 560 × 440, resizable; chosen):
+
+  ```
+  ┌ sshd.service Properties                                   📌  ✕ ┐  title bar (foundation)
+  ├──────────────────────────────────────────────────────────────────┤
+  │  General   Log On   Recovery   Dependencies   Logs                │  TlTabStrip, 32
+  ├──────────────────────────────────────────────────────────────────┤
+  │                                                                  │
+  │  tab content, padding sp6 (16)                                    │
+  │                                                                  │
+  ├──────────────────────────────────────────────────────────────────┤
+  │                                       [  OK  ] [Cancel] [Apply] │  footer 48, padding sp5
+  └──────────────────────────────────────────────────────────────────┘
+  ```
+
+  | Part | Widget | Size | Colours |
+  |---|---|---|---|
+  | Frame | `TlSecondaryWindow` (`WindowKind::Floating`, own gpui-kit Root) | as above | `window_bg` |
+  | Title | "<id> Properties", for example "sshd.service Properties" (spec) | | |
+  | Pin | title bar pin (R-073) | | |
+  | Tab strip | `TlTabStrip`, tabs "General", "Log On", "Recovery", "Dependencies", "Logs" | 32 high | `tab_bg`, active `accent` underline per foundation |
+  | Content | per tab | fills | `window_bg` |
+  | Footer | `h_flex` right-aligned, gap `sp4`, top border 1 px `divider` | 48 | `toolbar` |
+  | OK | `TlButton` primary, min width 80 | 28 high | |
+  | Cancel | `TlButton` default, min width 80 | | |
+  | Apply | `TlButton` default, min width 80 | | disabled unless a field is changed |
+
+- **States**:
+  - Opening the same unit again focuses the existing window (chosen, as PROC-077).
+  - At 10 open windows, an 11th open shows "Too many service properties windows are already open"
+    in the main window (spec).
+  - Unit removed or no longer loaded while open: the title appends " (not loaded)" (new), values
+    stay as last seen in `text_secondary`, the Start, Stop, Restart buttons and Apply are disabled.
+  - OpenRC: only the General tab is shown (SYS-018).
+  - A tab whose data is still arriving shows "Collecting…" in its value fields.
+- **Interaction**:
+  - Opened by Properties (Enter, Alt+Enter, Ctrl+I, double-click) on a unit row, by "View logs"
+    (opens on Logs), by a Dependencies row (UI-SYS-035) and by the failure toast "View logs".
+  - With several unit rows selected, Properties opens one window per unit up to the cap (chosen,
+    as PROC-048).
+  - OK: applies pending changes (UI-SYS-031 Startup, UI-SYS-034 Recovery) and closes when every
+    apply succeeds; on a failure the window stays open on the failing tab. Cancel and Esc close
+    without applying, with no question (chosen). Enter in a non-text field triggers OK.
+  - Ctrl+Tab / Ctrl+Shift+Tab switch tabs inside the window (chosen, matches the main window keys);
+    Ctrl+1..Ctrl+5 select a tab (chosen).
+  - Toasts for actions started from this window appear in this window (its own Root).
+- **Data binding**: while open the window adds its `UnitRef` to `Demand.unit_details` (new, max
+  10; open item O-1). The engine fetches `GetAll` once and follows `PropertiesChanged`, publishing
+  `ServicesSnapshot.details: Arc<FxHashMap<UnitRef, Arc<UnitDetails>>>`. The window re-renders on
+  `ComponentMask::SERVICES` only when its own `UnitDetails` Arc changed (pointer compare).
+- **Build**: `ServicePropertiesWindow` entity in
+  `crates/tl-ui/src/windows/service_properties/{mod.rs, general.rs, logon.rs, recovery.rs,
+  dependencies.rs, logs.rs}`. A per-app registry `PropertiesWindows` holds open handles by
+  `UnitRef` for focus-existing and the cap.
+- **Performance**: one window renders only when its unit's details change; the Logs tab has its
+  own rules (UI-SYS-036).
+- **Accessibility**: Tab order: tab strip, tab content, footer buttons. Focus starts on the tab
+  strip. Esc closes.
+- **Tests**: `service_props_cap_10`; `service_props_focus_existing`;
+  `service_props_ok_applies_then_closes`; `service_props_not_loaded_title`.
+- **Phase**: P2.
+- **Decided here**: sizes; focus-existing; " (not loaded)"; one window per selected unit; tab keys;
+  Cancel without question.
+
+### UI-SYS-031 Service Properties: General tab
+
+- **Implements**: SYS-011 (General), SYS-007 (Startup combo), SYS-006 (buttons), R-050.
+- **Anatomy**: `TlKeyValueGrid`, label column 120 (chosen), row height 28, label `text_secondary`
+  `t_base` with a trailing ":", value `text_primary` `t_base`, values selectable.
+
+  ```
+  Name:       sshd.service
+  Display:    OpenSSH Daemon
+  Desc:       man:sshd(8)  man:sshd_config(5)              (TlLink each)
+  Path:       /usr/bin/sshd -D                              (wraps, max 3 lines)
+  Unit file:  /usr/lib/systemd/system/sshd.service          (TlLink)
+  Drop-ins:   /etc/systemd/system/sshd.service.d/x.conf     (one TlLink per line)
+  Startup:    [ Enabled          ▾ ]                        (TlSelect, width 200)
+  Status:     ● Running (running) since 2026-10-03 09:12:44
+              [Start] [Stop] [Restart]                      (TlButton small, gap sp4)
+  Main PID:   812                                           (TlLink)
+  Memory:     5.23 MiB
+  Tasks:      1
+  CPU time:   0:00:02
+  Manager:    System
+  ```
+
+  Labels are the spec labels exactly: "Name", "Display", "Desc", "Path", "Unit file", "Drop-ins",
+  "Startup", "Status", "Main PID", "Memory", "Tasks", "CPU time", "Manager".
+- **States**:
+  - Desc with no Documentation: "Not reported" (R-050 word). Drop-ins empty: "None" (chosen;
+    an empty list is a real value). Main PID 0: "None" (chosen).
+  - Status for inactive units: "Stopped (dead)" with no "since" part (chosen).
+  - MemoryCurrent or TasksCurrent unset (systemd reports `u64::MAX`): "Not reported".
+  - Startup combo: values "Enabled", "Disabled", "Masked". For Static, Indirect, Generated,
+    Transient the combo is disabled, shows the current word, tooltip "This unit has no install
+    section". Changing the value marks the tab dirty and enables Apply.
+  - Start, Stop, Restart enablement as UI-SYS-017; pending state shows the overlay label in the
+    Status line and disables all three.
+- **Interaction**:
+  - `man:` links run `xdg-open man:<page>`; `https:` and `http:` links run `xdg-open`. Failure
+    toast "Could not open the link" (new).
+  - Unit file and Drop-in links run `xdg-open <path>`; failure "Could not open the unit file" (new,
+    shared with UI-SYS-017).
+  - Main PID link: activates the main window and runs the PROC-071 jump with UI-SYS-021 toasts.
+  - Apply or OK with a changed Startup: runs the UI-SYS-019 flow; on success the toast "Changes
+    applied" (spec) replaces "Startup type changed" in this window; failure "Failed to change
+    startup type".
+  - Right-click on a value: `TlMenu` with "Copy value" (new), toast "Copied to clipboard".
+- **Data binding**: `UnitDetails` fields `id`, `description`, `documentation`, `exec_start_argv`,
+  `fragment_path`, `drop_in_paths`, `startup`, `active_state`, `sub_state`,
+  `active_enter_timestamp`, `main_pid`, `memory_current`, `tasks_current`, `cpu_usage_nsec`,
+  `manager`.
+- **Build**: `general.rs`; the grid is `TlKeyValueGrid` with custom value elements for the combo,
+  buttons and links.
+- **Performance**: renders on details change only (PropertiesChanged, about once a second for
+  Memory while the unit is busy).
+- **Accessibility**: the combo has the accessible name "Startup type"; links have their text as
+  name.
+- **Tests**: `general_tab_labels_golden`; `startup_combo_disabled_for_static`;
+  `apply_startup_toast_changes_applied`.
+- **Phase**: P2.
+- **Decided here**: label width; "None" for empty drop-ins and Main PID 0; "Stopped (dead)"; link
+  failure strings; "Copy value" menu.
+
+### UI-SYS-032 Service Properties: Log On tab
+
+- **Implements**: SYS-012, R-050.
+- **Anatomy**: read-only `TlKeyValueGrid`, label column 160 (chosen), labels "Log on", "Group",
+  "Supplementary groups", "Runs as", "PAM service", "Manager", "Session" (spec).
+  Values: "root", "dynamic user (<name>)", group list comma-separated, "uid 1000, gid 1000" (chosen
+  format for Runs as), "System manager" or "User manager (oystein)", "graphical session" or "none".
+- **States**: a missing value shows "Not reported" (R-050 words; this overrides SYS-012's "N/A"
+  because R-050 sets the words for every Properties field). Runs as when MainPID is 0: "Not
+  running" (chosen).
+- **Interaction**: right-click "Copy value".
+- **Data binding**: `UnitDetails` `user`, `group`, `dynamic_user`, `supplementary_groups`,
+  `pam_name`, `main_pid_ids`, `manager`, `graphical_session`.
+- **Build**: `logon.rs`.
+- **Performance**: static.
+- **Accessibility**: plain grid.
+- **Tests**: `logon_missing_shows_not_reported`.
+- **Phase**: P2.
+- **Decided here**: label width; Runs as format; "Not running".
+
+### UI-SYS-033 Service Properties: Recovery tab (view)
+
+- **Implements**: SYS-013 (P2 view).
+- **Anatomy**: read-only `TlKeyValueGrid`, label column 200 (chosen), rows and value formats:
+
+  | Label (spec) | Value format |
+  |---|---|
+  | "On failure" | the `Restart=` word, for example "on-failure" |
+  | "Restart service after" | "100 ms"; with steps: "100 ms, rising to 5000 ms in 5 steps" (chosen) |
+  | "Give up after" | "5 starts within 10 s" |
+  | "When giving up" | `StartLimitAction` word |
+  | "Failure action" | `FailureAction` word |
+  | "Run on failure" | one `TlLink` per OnFailure unit; "None" when empty |
+  | "Restarts so far" | `NRestarts` count |
+
+  Below the grid, `t_sm` `text_secondary`: "Editing recovery settings comes in a later version."
+  (new) in P2 only. User units show the same.
+- **States**: values missing: "Not reported".
+- **Interaction**: Run on failure links open that unit's Properties.
+- **Data binding**: `UnitDetails.recovery: RecoverySettings`.
+- **Build**: `recovery.rs` (view mode).
+- **Tests**: `recovery_view_formats`.
+- **Phase**: P2.
+- **Decided here**: value formats; P2 note text.
+
+### UI-SYS-034 Service Properties: Recovery drop-in editor
+
+- **Implements**: SYS-013 (P3 edit), R-004 `WriteServiceDropIn`, R-002, ADR-011 `write_atomic`.
+- **Anatomy** (replaces UI-SYS-033 from P3):
+
+  ```
+  On failure:            [ on-failure        ▾ ]
+  Restart service after: [   100 ] ms
+  Give up after:         [     5 ] starts within [   10 ] s
+  When giving up:        [ none              ▾ ]
+  Failure action:        [ none              ▾ ]
+  Run on failure:        [ failure-notify@%n.service             ]
+  Restarts so far:       3
+  ─────────────────────────────────────────────────────────────
+  Saved as /etc/systemd/system/sshd.service.d/50-tasklens-recovery.conf     [Remove tasklens settings]
+  ```
+
+  | Field | Widget | Range or values |
+  |---|---|---|
+  | On failure | `TlSelect` width 200 | no, on-success, on-failure, on-abnormal, on-watchdog, on-abort, always |
+  | Restart service after | `TlNumberInput` width 100, suffix "ms" | 0..=3 600 000, step 100 |
+  | Give up after | two `TlNumberInput` width 80 | starts 0..=1000; within 0..=86 400 s |
+  | When giving up, Failure action | `TlSelect` width 200 | none, reboot, reboot-force, reboot-immediate, poweroff, poweroff-force, poweroff-immediate, exit, exit-force |
+  | Run on failure | `TlInput`, full width | unit names separated by spaces |
+  | Restarts so far | text | read-only |
+  | Saved as | `t_sm` `text_secondary`, selectable | the drop-in path from table (c) |
+  | Remove tasklens settings (new) | `TlButton` small, default | shown only when the tasklens drop-in exists |
+
+- **States**:
+  - Clean / dirty: Apply enabled only when a value differs from the unit's current value.
+  - Invalid: Run on failure tokens must match `^[A-Za-z0-9:_.\\@%-]{1,255}\.(service|socket|target|timer|mount|path|slice|scope)$`.
+    Invalid input gets a 1 px `status.danger` border and the line below it, `t_sm`
+    `status.danger`: "Enter unit names separated by spaces, for example failure-notify@%n.service"
+    (new). Apply and OK are disabled while invalid.
+  - A reboot or poweroff value in "When giving up" or "Failure action" shows a `t_sm`
+    `status.warning` line under the field: "The computer will restart or power off when this
+    happens." (new).
+  - System unit, helper not installed: all controls disabled, tooltip "Needs the tasklens helper"
+    (spec), and a line above the grid with `TlLink` "Additional setup…" opening the Additional
+    Setup window.
+  - System unit, helper installed but locked: controls enabled; Apply starts a helper session
+    (polkit prompt for `io.github.oysteinkrog.tasklens.helper`).
+  - Saving: toast "Saving recovery settings..." (new), then "Recovery settings saved" (new) or
+    "Failed to save recovery settings: <error>" (new); polkit cancel "Authentication cancelled".
+- **Interaction**: Apply or OK writes the drop-in with only the changed keys plus the keys already
+  in the tasklens drop-in, then the engine calls `Manager.Reload()`. "Remove tasklens settings"
+  deletes the tasklens drop-in after a `TlDialog` titled "tasklens": heading "Remove tasklens
+  recovery settings?", text "The unit goes back to the settings in its unit file.", buttons
+  "Remove" (danger) and "Cancel" (all new).
+- **Data binding**: `ActionKind::UnitWriteRecovery(RecoveryEdit)` and
+  `UnitRemoveRecovery` (new; open item O-2). `UnitDetails.recovery_dropin_exists: bool` (new).
+- **Build**: `recovery.rs` (edit mode); form state in a `RecoveryForm` struct created on tab open,
+  reset on Cancel.
+- **Performance**: n/a.
+- **Accessibility**: each control has its row label as accessible name; validation text is linked
+  as the description.
+- **Tests**: `recovery_invalid_unit_blocks_apply`; `recovery_helper_missing_disables`;
+  `recovery_remove_confirm`.
+- **Phase**: P3.
+- **Decided here**: all ranges, the validation pattern, the warning and status strings, the remove
+  flow.
+
+### UI-SYS-035 Service Properties: Dependencies tab
+
+- **Implements**: SYS-014.
+- **Anatomy**: one vertical scroll region with three blocks:
+
+  ```
+  Depends on:                                      (t_base semibold, margin-bottom sp3)
+  │ ● system.slice                      [Requires] │  rows 28
+  │ ○ network-online.target             [Wants]    │
+  Dependents:
+  │ ● multi-user.target                 [WantedBy] │
+  › Ordering (12)                                     (collapsed header row, chevron 16)
+  ```
+
+  | Part | Size | Style |
+  |---|---|---|
+  | Heading | `t_base` semibold `text_primary`; top margin `sp6` except the first | "Depends on:", "Dependents:" (spec) |
+  | Row | `row_h`, padding x `sp4`, hover `row_hover`, selected `row_selected` | dot 8 per UI-SYS-003 service status, gap `sp3`, unit id `t_base`, tag right-aligned |
+  | Tag | `TlTag` small outline, `t_xs` | relation word: Requires, Requisite, Wants, BindsTo, PartOf, Upholds / RequiredBy, RequisiteOf, WantedBy, BoundBy, ConsistsOf, UpheldBy / After, Before |
+  | Ordering header | `row_h`, chevron 16, "Ordering (N)" (chosen label with count) | collapsed by default |
+  | Empty list | "(None)" in `text_secondary` (spec) | |
+
+  A unit with several relations shows one row per relation (chosen). Rows are sorted by unit id.
+- **States**: units not loaded in the snapshot: ring dot `text_secondary`.
+- **Interaction**: click selects a row; Up/Down move; double-click or Enter opens that unit's
+  Properties (counts toward the cap); right-click "Copy value" copies the unit id. Space or Enter
+  on the Ordering header toggles it.
+- **Data binding**: `UnitDetails.deps: Arc<[DepEntry { unit: UnitRef, relation: Relation }]>`;
+  state dots from `ServicesSnapshot.units` by `UnitRef` lookup.
+- **Build**: `dependencies.rs`; a `uniform_list` per block is not needed (lists are short); a plain
+  `v_flex` with `overflow_y_scrollbar()`. If a block has more than 200 rows (chosen threshold) it
+  uses `uniform_list`.
+- **Performance**: rebuilt only when details change.
+- **Accessibility**: rows are focusable; accessible name "<unit>, <relation>, <status>".
+- **Tests**: `deps_empty_shows_none`; `deps_double_click_opens_props`.
+- **Phase**: P2.
+- **Decided here**: one row per relation; "Ordering (N)"; 200-row threshold.
+
+### UI-SYS-036 Service Properties: Logs tab toolbar and list
+
+- **Implements**: SYS-015, R-074.
+- **Anatomy**:
+
+  ```
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │ [⌕ Filter logs          ✕] [⤓ Follow] [Load older]          [⧉] [>_]     │  toolbar 32
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ ⓘ Only your own log messages are visible. Add your user to …  [Copy command] │  banner (when limited)
+  ├──────────────────────────────────────────────────────────────────────────┤
+  │ 2026-10-03 09:12:44  info     Server listening on 0.0.0.0 port 22.        │  lines 18
+  │ 2026-10-03 09:13:02  warning  error: kex_exchange_identification: …      │
+  │ 2026-10-03 09:13:05  err      fatal: Timeout before authentication (+2 lines) │
+  │                                                     [ ↓ 12 new lines ]    │  pill
+  └──────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  | Part | Widget | Size | Notes |
+  |---|---|---|---|
+  | Toolbar | `h_flex`, gap `sp4`, padding y `sp2` | 32 | `toolbar` background, bottom border |
+  | Filter | `TlInput` small with `search` prefix, cleanable, placeholder "Filter logs" (new) | width 220 | |
+  | Follow | `TlToggleChip` with icon `arrow-down-to-line` 14, label "Follow" (spec) | 24 | on by default |
+  | Load older | `TlButton` small, label "Load older" (spec) | 24 | |
+  | Copy | `TlIconButton` `copy` 14, tooltip "Copy logs to clipboard" (spec) | 24 × 24 | right side |
+  | Open in terminal | `TlIconButton` `terminal` 14, tooltip "Open in terminal" (spec) | 24 × 24 | |
+  | Banner | `TlBanner` info, `t_sm` | 32 | UI-SYS-038 |
+  | List | `uniform_list`, font "Noto Sans Mono" `t_sm` (12), line height 18 (chosen) | fills | `list_bg`, no alternate rows |
+  | Time column | 19 characters wide, `text_secondary` | | `YYYY-MM-DD HH:MM:SS` local (table d) |
+  | Priority column | 7 characters wide, gap `sp4` each side | | words emerg, alert, crit, err, warning, notice, info, debug (journalctl names) |
+  | Message | rest, one line, ellipsis | | multi-line messages show the first line plus " (+N lines)" in `text_secondary` |
+  | New-lines pill | `TlButton` small, rounded, `accent` fill, `text_primary`, 16 above the bottom, centred | 24 | "↓ N new lines" (new) |
+
+  Colouring by priority (spec plus chosen detail): 0 to 3 → priority word and message in
+  `status.danger`; 4 → `status.warning`; 5 and 6 → `text_primary`; 7 → `text_secondary`. The time
+  column is always `text_secondary`.
+- **States**: UI-SYS-037 (follow and paging) and UI-SYS-038 (loading, empty, errors, access).
+  Selected lines: `row_selected` with `text_selected_primary`; danger and warning colours stay.
+- **Interaction**:
+  - Filter: case-insensitive substring over the message and priority word, 100 ms debounce, applied
+    to loaded lines only.
+  - Lines: click selects one line, Shift+click a range, Ctrl+click toggles, Ctrl+A selects all
+    shown lines, Ctrl+C copies the selected lines (key context `JournalList`, chosen). Hover over a
+    message for 600 ms shows the full message (first 2000 characters) and "PID <n>" in a tooltip.
+  - Copy button: copies all shown lines (after the filter) as
+    "<time> <priority> <message>" with full multi-line messages, toast "Copied to clipboard".
+  - Open in terminal: runs `xdg-terminal-exec journalctl -u <id> -b` (or `--user-unit <id>`), else
+    `konsole -e journalctl …`. Failure toast "Could not open a terminal" (new).
+- **Data binding**: `EngineClient::journal(JournalQuery { unit: UnitRef, follow: bool }) ->
+  JournalHandle` (new; open item O-4). The handle yields `JournalEvent::{Batch { entries, older,
+  exhausted }, Access(JournalAccess), Error(JournalError)}`. Entries:
+  `JournalEntry { realtime_us, priority: u8, pid: Option<u32>, message: Arc<str>, cursor: Arc<str> }`.
+  Dropping the handle kills the journalctl child.
+- **Build**: `logs.rs`, entity `LogsView` owns `lines: VecDeque<LogLine>` (formatted time and
+  priority `SharedString`s made once on arrival), `filtered: Vec<u32>`, `handle:
+  Option<JournalHandle>`, `stick_to_bottom: bool`, `new_since_unstick: u32`.
+- **Performance**: lines are formatted once; the list draws only visible lines; re-filtering
+  10 000 lines is a linear scan off the render path (on input debounce), under 2 ms (estimate).
+- **Accessibility**: toolbar buttons have their spec labels as accessible names; Follow is a
+  toggle; the list is focusable and keyboard selectable.
+- **Tests**: `logs_priority_colors`; `logs_filter_debounced`; `logs_copy_format`;
+  `logs_multiline_suffix`.
+- **Phase**: P2.
+- **Decided here**: mono font, sizes, priority words, multi-line rendering, tooltip, key context
+  `JournalList`, filter placeholder, failure toast, `JournalHandle` API.
+
+### UI-SYS-037 Logs tab: follow mode and Load older
+
+- **Implements**: SYS-015, R-074.
+- **States and behaviour**:
+  - Open: the tab requests the last 200 entries of the current boot. With Follow on (default) the
+    engine keeps a `journalctl -f` child and appends batches.
+  - Stick to bottom: when the list is scrolled to within one line of the bottom, new lines scroll
+    it so the newest line stays visible. Scrolling up by more than one line unsticks; new lines
+    then only count into the pill "↓ N new lines". Clicking the pill (or pressing End) scrolls to
+    the bottom and sticks again.
+  - Follow off: the engine kills the `-f` child at once; no new lines arrive; the pill hides.
+    Follow on again: the engine resumes after the last cursor (`--after-cursor`), so no lines are
+    lost or doubled.
+  - Leaving the Logs tab or closing the window drops the handle (child killed, spec). Coming back
+    to the tab keeps the loaded lines and resumes from the last cursor (chosen).
+  - Load older: fetches 200 entries before the oldest loaded one; the button shows "Loading…"
+    (new) and is disabled meanwhile; lines are inserted at the top and the scroll position is kept
+    on the line that was first. When a fetch returns fewer than 200, the button reads "No older
+    entries" (new) and stays disabled.
+  - Cap: at most 10 000 lines are kept (chosen). In follow mode the oldest lines are dropped beyond
+    the cap and Load older is enabled again.
+  - Reduced motion: the pill appears without fade; scrolling to the bottom is instant either way.
+- **Interaction**: End key in the list = click on the pill; Home scrolls to the top.
+- **Data binding**: `JournalHandle::load_older(&self)` and `set_follow(&self, bool)` (new).
+- **Build**: in `LogsView`; the scroll position check uses `UniformListScrollHandle`.
+- **Performance**: appends are batched by the engine at most every 100 ms (chosen), so a chatty
+  unit causes at most 10 list updates per second.
+- **Accessibility**: the pill is focusable and has the same label as its text.
+- **Tests**: `follow_sticks_to_bottom`; `follow_unstick_counts_new_lines`;
+  `load_older_keeps_anchor`; `follow_off_kills_child` (fake engine records the drop).
+- **Phase**: P2.
+- **Decided here**: stick threshold, pill, resume on return, "Loading…", "No older entries",
+  10 000-line cap, 100 ms batching.
+
+### UI-SYS-038 Logs tab: loading, empty, error and access states
+
+- **Implements**: SYS-015 (privilege banner), APP-042 / PERF-105 ("Journal access" row).
+- **States** (all in the list area unless noted; text `t_base` `text_secondary`, centred):
+
+  | State | Display |
+  |---|---|
+  | First fetch running | "Loading logs…" (new); no skeleton (the fetch is short) |
+  | No entries this boot | "No log entries for this unit in the current boot." (new) |
+  | Filter hides all | "No log entries match the filter." (new) |
+  | `journalctl` not found | `TlEmptyState` icon `circle-alert`, heading "journalctl not found" (new), no button |
+  | 5 s timeout | `TlEmptyState` heading "Reading the journal took too long." (new), button "Retry" |
+  | Non-zero exit | `TlEmptyState` heading "Could not read the journal" (new), text = first stderr line, button "Retry" |
+  | Own entries only (user not in `wheel`, `adm` or `systemd-journal`) | `TlBanner` (info) above the list: "Only your own log messages are visible. Add your user to the systemd-journal group to see all." (spec), button "Copy command" (new) copying `sudo usermod -aG systemd-journal $USER` with toast "Copied to clipboard"; from P3 also a `TlLink` "Additional setup…" opening the Additional Setup window |
+
+  The banner cannot be dismissed (chosen; it states a fact about the data shown).
+- **Interaction**: Retry re-requests the last 200 entries.
+- **Data binding**: `JournalEvent::Access(JournalAccess::OwnOnly)` and `Error(..)`.
+- **Build**: `logs.rs`.
+- **Tests**: `logs_access_banner_shown`; `logs_timeout_retry`.
+- **Phase**: P2 (Additional setup link P3).
+- **Decided here**: all "(new)" strings; banner not dismissable; no skeleton.
+
+---
