@@ -2379,3 +2379,278 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
 - **Decided here**: filter clearing and no toast.
 
 ---
+
+# Summary table
+
+| ID | Name | Implements | Phase |
+|---|---|---|---|
+| UI-SYS-001 | System table page frame | SYS-001, SYS-004, SYS-016, SYS-027, SYS-028, SYS-036, APP-029, APP-059 | P2 |
+| UI-SYS-002 | Table query and delegate pattern | SYS-004, SYS-017, SYS-027, SYS-036, R-011 | P2 |
+| UI-SYS-003 | Status rendering in system tables | SYS-003, SYS-020, SYS-029, R-050 | P2 |
+| UI-SYS-004 | First-load skeleton for system tables | R-060, APP-059, SYS-016, SYS-027, SYS-028 | P2 |
+| UI-SYS-005 | Empty and error states for system tables | SYS-001, SYS-004, SYS-028, SYS-036 | P2 |
+| UI-SYS-006 | Copy commands in system tables | SYS-009, SYS-025, SYS-032, R-012 | P2 |
+| UI-SYS-007 | Action tracking, progress and polkit prompt states | SYS-005, SYS-006, SYS-007, SYS-022 to SYS-024, SYS-031 | P2, P3 |
+| UI-SYS-010 | Services page layout | SYS-001, SYS-004, SYS-016 | P2 |
+| UI-SYS-011 | Services filter strip | SYS-004, SYS-002 | P2 |
+| UI-SYS-012 | Unit types dropdown | SYS-002 | P2 |
+| UI-SYS-013 | Services columns | SYS-003, SYS-017 | P2 |
+| UI-SYS-014 | Services group rows | SYS-001 | P2 |
+| UI-SYS-015 | Service unit row | SYS-001, SYS-003, SYS-005 | P2 |
+| UI-SYS-016 | Service child process rows | SYS-001, SYS-006 | P2 |
+| UI-SYS-017 | Services context menu | SYS-008, SYS-006, SYS-007 | P2 |
+| UI-SYS-018 | Start, Stop, Restart, Reload, Reset failed flows | SYS-005, SYS-006 | P2 |
+| UI-SYS-019 | Startup type submenu and flow | SYS-007 | P2 |
+| UI-SYS-020 | Services copy formats | SYS-009 | P2 |
+| UI-SYS-021 | Jump between Services and Processes | SYS-010, PROC-071 | P2 |
+| UI-SYS-022 | Services status text and refresh | SYS-016 | P2 |
+| UI-SYS-023 | Services keyboard summary | SYS-006, table (b) | P2 |
+| UI-SYS-024 | OpenRC variant of the Services tab | SYS-018 | P4 |
+| UI-SYS-030 | Service Properties window frame | SYS-011 | P2 |
+| UI-SYS-031 | Service Properties: General tab | SYS-011, SYS-007 | P2 |
+| UI-SYS-032 | Service Properties: Log On tab | SYS-012 | P2 |
+| UI-SYS-033 | Service Properties: Recovery tab (view) | SYS-013 | P2 |
+| UI-SYS-034 | Service Properties: Recovery drop-in editor | SYS-013 | P3 |
+| UI-SYS-035 | Service Properties: Dependencies tab | SYS-014 | P2 |
+| UI-SYS-036 | Logs tab toolbar and list | SYS-015, R-074 | P2 |
+| UI-SYS-037 | Logs tab follow mode and Load older | SYS-015, R-074 | P2 |
+| UI-SYS-038 | Logs tab loading, empty, error and access states | SYS-015, PERF-105 | P2, P3 |
+| UI-SYS-040 | Startup Apps page layout | SYS-019, SYS-020, SYS-027 | P2 |
+| UI-SYS-041 | Startup columns | SYS-020, SYS-027 | P2 |
+| UI-SYS-042 | Startup row anatomy | SYS-019, SYS-020 | P2 |
+| UI-SYS-043 | Startup impact display | SYS-021 | P2 |
+| UI-SYS-044 | Startup context menu | SYS-022 to SYS-025 | P2 |
+| UI-SYS-045 | Enable and disable flow | SYS-022 | P2 |
+| UI-SYS-046 | Run now flow | SYS-023 | P2 |
+| UI-SYS-047 | Delete startup entry confirmation | SYS-024 | P2 |
+| UI-SYS-048 | Startup copy formats and Open file location | SYS-025 | P2 |
+| UI-SYS-049 | Startup status text, refresh and keyboard | SYS-027 | P2 |
+| UI-SYS-050 | Startup Properties window | SYS-026 | P2 |
+| UI-SYS-060 | Connections page layout | SYS-028, SYS-036 | P2 |
+| UI-SYS-061 | Connections columns | SYS-029, SYS-030, SYS-035 to SYS-037 | P2, P4 |
+| UI-SYS-062 | Connection row anatomy | SYS-029, SYS-030 | P2, P3 |
+| UI-SYS-063 | Connections context menu | SYS-032, SYS-031, SYS-033 | P2, P3 |
+| UI-SYS-064 | Close TCP connection flow | SYS-031 | P3 |
+| UI-SYS-065 | Jump to owning process and Go to service | SYS-033, SYS-032, SYS-010 | P2 |
+| UI-SYS-066 | Connections copy format | SYS-032 | P2 |
+| UI-SYS-067 | Connections status text, filter and refresh | SYS-036 | P2 |
+| UI-SYS-068 | Connection Properties window | SYS-034 | P2 |
+| UI-SYS-069 | Remote host column | SYS-035 | P4 |
+| UI-SYS-070 | Namespaces dropdown | SYS-037 | P4 |
+| UI-SYS-080 | Information page layout | PERF-094, APP-041 | P2 |
+| UI-SYS-081 | Information section anatomy | PERF-094, PERF-095 | P2 |
+| UI-SYS-082 | Information row values and validity | PERF-013, PERF-102, PERF-105, D-007 | P2, P3 |
+| UI-SYS-083 | Information copy: section and all | PERF-094, APP-041 | P2 |
+| UI-SYS-084 | Information filter | PERF-094, APP-028 | P2 |
+| UI-SYS-085 | Information loading, live values, refresh and errors | PERF-094, R-060 | P2 |
+| UI-SYS-086 | Operating System section | PERF-095, APP-041 | P2 |
+| UI-SYS-087 | Processor section | PERF-096 | P2 |
+| UI-SYS-088 | System section | PERF-097, APP-041 | P2 |
+| UI-SYS-089 | Memory section | PERF-098 | P2 |
+| UI-SYS-090 | Memory modules section | PERF-099, D-007 | P2 |
+| UI-SYS-091 | Disk drives section | PERF-100 | P2 |
+| UI-SYS-092 | BIOS/Firmware section | PERF-101 | P2 |
+| UI-SYS-093 | Motherboard section | PERF-102 | P2 |
+| UI-SYS-094 | Graphics section | PERF-103 | P2 |
+| UI-SYS-095 | Network adapters section and Public IP row | PERF-104, PERF-060 | P2 |
+| UI-SYS-096 | Help > System Information… target | APP-041, PERF-094 | P2 |
+
+70 entries.
+
+# Coverage of merged spec IDs in scope
+
+| Spec ID | Realized by |
+|---|---|
+| SYS-001 | UI-SYS-001, UI-SYS-005, UI-SYS-010, UI-SYS-014, UI-SYS-015, UI-SYS-016 |
+| SYS-002 | UI-SYS-011, UI-SYS-012 |
+| SYS-003 | UI-SYS-003, UI-SYS-013, UI-SYS-015 |
+| SYS-004 | UI-SYS-002, UI-SYS-005, UI-SYS-011 |
+| SYS-005 | UI-SYS-007, UI-SYS-014 (reconnect), UI-SYS-018 |
+| SYS-006 | UI-SYS-007, UI-SYS-016, UI-SYS-017, UI-SYS-018, UI-SYS-023 |
+| SYS-007 | UI-SYS-017, UI-SYS-019, UI-SYS-031 |
+| SYS-008 | UI-SYS-017 |
+| SYS-009 | UI-SYS-006, UI-SYS-020 |
+| SYS-010 | UI-SYS-021, UI-SYS-065 |
+| SYS-011 | UI-SYS-030, UI-SYS-031 |
+| SYS-012 | UI-SYS-032 |
+| SYS-013 | UI-SYS-033, UI-SYS-034 |
+| SYS-014 | UI-SYS-035 |
+| SYS-015 | UI-SYS-030 ("View logs"), UI-SYS-036, UI-SYS-037, UI-SYS-038 |
+| SYS-016 | UI-SYS-001, UI-SYS-004, UI-SYS-022 |
+| SYS-017 | UI-SYS-013 |
+| SYS-018 | UI-SYS-024 |
+| SYS-019 | UI-SYS-040, UI-SYS-042 |
+| SYS-020 | UI-SYS-003, UI-SYS-041, UI-SYS-042 |
+| SYS-021 | UI-SYS-043 |
+| SYS-022 | UI-SYS-044, UI-SYS-045 |
+| SYS-023 | UI-SYS-044, UI-SYS-046 |
+| SYS-024 | UI-SYS-044, UI-SYS-047 |
+| SYS-025 | UI-SYS-006, UI-SYS-044, UI-SYS-048 |
+| SYS-026 | UI-SYS-050 |
+| SYS-027 | UI-SYS-004, UI-SYS-041, UI-SYS-049 |
+| SYS-028 | UI-SYS-004, UI-SYS-060 |
+| SYS-029 | UI-SYS-003, UI-SYS-061, UI-SYS-062 |
+| SYS-030 | UI-SYS-062 |
+| SYS-031 | UI-SYS-063, UI-SYS-064 |
+| SYS-032 | UI-SYS-006, UI-SYS-063, UI-SYS-065, UI-SYS-066 |
+| SYS-033 | UI-SYS-065 |
+| SYS-034 | UI-SYS-068 |
+| SYS-035 | UI-SYS-061, UI-SYS-069 |
+| SYS-036 | UI-SYS-061, UI-SYS-067 |
+| SYS-037 | UI-SYS-061, UI-SYS-070 |
+| PERF-013 (Information rows) | UI-SYS-082 |
+| PERF-094 | UI-SYS-080, UI-SYS-081, UI-SYS-083, UI-SYS-084, UI-SYS-085, UI-SYS-096 |
+| PERF-095 | UI-SYS-081 (logo), UI-SYS-086 |
+| PERF-096 | UI-SYS-087 |
+| PERF-097 | UI-SYS-088 |
+| PERF-098 | UI-SYS-089 |
+| PERF-099 | UI-SYS-090 |
+| PERF-100 | UI-SYS-091 |
+| PERF-101 | UI-SYS-092 |
+| PERF-102 | UI-SYS-082, UI-SYS-093 |
+| PERF-103 | UI-SYS-094 |
+| PERF-104 | UI-SYS-095 |
+| APP-041 | UI-SYS-083, UI-SYS-086, UI-SYS-088, UI-SYS-096 |
+| APP-059 (for these four tabs) | UI-SYS-004, UI-SYS-085 |
+
+No SYS entry and no Information entry in scope is unmapped. Out of scope here and owned by other
+UI files: the Additional Setup window itself (PERF-105 to PERF-108; this file only links to it),
+the Public IP notice window (PERF-060), the Processes-side "Go to service" entry (PROC-071), the
+column picker (APP-018) and the status chip and filter box frames (APP-028, APP-029).
+
+# Decided here
+
+Every value this file chose, grouped by entry. Strings marked "(new)" in the entries are listed
+in full in the entries themselves.
+
+- UI-SYS-001: one-line 28 px header (`HeaderLines::One`) for the three tables; key contexts
+  `StartupTable`, `ConnectionTable`.
+- UI-SYS-002: `SysTableQuery`, `SysNodeId`, `SysRow`, `Command::SetSysTableQuery`.
+- UI-SYS-003: every status dot and label colour; selected rows keep `status.danger`; Status
+  tooltip "<ActiveState> (<SubState>)".
+- UI-SYS-004: "Loading…" status text.
+- UI-SYS-005: empty-state strings ("No matches", "No services match the current filters.", "No
+  startup entries match the filter.", "No connections match the filter.", "No startup entries",
+  "Nothing starts automatically when you log in.", "No connections", "Could not load …", the
+  systemd-missing explanation, "Clear filters").
+- UI-SYS-006: "Copied: " truncation at 60 characters; startup "Copy row" toast "Copied to
+  clipboard"; glyph cells empty in TSV; "Copy rows as table" in all three menus.
+- UI-SYS-007: toast kind per action state; Progress-cap exemption for service jobs; summary toast
+  at 4 or more targets with its strings and "Details" dialog; "no authentication agent is running".
+- UI-SYS-011: Segment buttons for the strip; " (N)" count on Unit types; both managers off allowed;
+  Remove filters keeps the text; manager toggles session-only; tooltip "Show all units".
+- UI-SYS-012: "Reset to default" item; last-type refusal toast "At least one unit type must stay
+  selected"; menu stays open while toggling.
+- UI-SYS-013: optional column widths and minimums; child rows by PID; heat colouring on unit CPU,
+  Memory, Disk; `Demand.service_cgroup_stats`.
+- UI-SYS-014: " (reconnecting…)"; empty groups hidden; Ctrl+L keeps groups open; manager health
+  field; group accessible name.
+- UI-SYS-015: unit-type icons; startup-type colours; name tooltip lines; row accessible name.
+- UI-SYS-016: nested cgroup processes listed flat; column mapping; process demand while a unit is
+  expanded; `cgroup_pids`.
+- UI-SYS-017: multi-select enablement; no menu icons; disabled tooltips; mixed selection rule;
+  "Could not open the unit file"; no success toast for Open unit file.
+- UI-SYS-018: overlay labels ("Starting…", "Stopping…", "Restarting…", "Reloading…"); Reload and
+  Reset failed toasts.
+- UI-SYS-019: "Changing startup type...", "This unit has no unit file", error suffix, no check on
+  mixed selection.
+- UI-SYS-020: empty values print nothing after "Label: ".
+- UI-SYS-021: strip filters removed only when they hide the target; "Show" for the text-filter case.
+- UI-SYS-022: Running and Stopped count rules; refresh toast timing (next version or 2 s);
+  `counts` field.
+- UI-SYS-023: Enter on a group row toggles it.
+- UI-SYS-024: "OpenRC services (N)" and the reduced menu.
+- UI-SYS-030: 720 × 560 (min 560 × 440); focus existing; " (not loaded)"; one window per selected
+  unit; Ctrl+Tab and Ctrl+1..5 in the window; Cancel without a question.
+- UI-SYS-031: label width 120; "None" for empty drop-ins and Main PID 0; "Stopped (dead)"; link
+  failure strings; "Copy value".
+- UI-SYS-032: label width 160; "uid N, gid N"; "Not running"; R-050 words instead of SYS-012's "N/A".
+- UI-SYS-033: value formats; the P2 note text.
+- UI-SYS-034: ranges, validation pattern and message, reboot warning, saving toasts, remove flow.
+- UI-SYS-035: one row per relation; "Ordering (N)"; 200-row threshold.
+- UI-SYS-036: "Noto Sans Mono" 12 px, 18 px lines; priority words; multi-line suffix; message
+  tooltip; `JournalList` key context; "Filter logs"; "Could not open a terminal"; `JournalHandle`.
+- UI-SYS-037: stick-to-bottom rule; "↓ N new lines" pill; resume on return; "Loading…"; "No older
+  entries"; 10 000-line cap; 100 ms batching.
+- UI-SYS-038: loading, empty, error strings; "Copy command" button; banner not dismissable.
+- UI-SYS-041: Status and Startup impact sort orders; `~` for `$HOME`.
+- UI-SYS-042: fallback icons; overridden rows in secondary text; "Updating…".
+- UI-SYS-043: impact colours and tooltip wording.
+- UI-SYS-044: both labels for mixed selection; reason tooltips; Delete key.
+- UI-SYS-045 and UI-SYS-046: error suffixes; skip rule; summary strings; `StartupRunNow`.
+- UI-SYS-047: width 440; name and path lines; focus on Cancel; multi-select texts.
+- UI-SYS-048: full path in copy.
+- UI-SYS-049: Disabled count = not Enabled.
+- UI-SYS-050: 620 × 520; Source words; "Not found"; " (removed)"; cap 10 and its toast; optional
+  rows only when set.
+- UI-SYS-060: no highlight for new or closed sockets.
+- UI-SYS-061: optional widths; sort keys; inode without grouping; Remote host picker note.
+- UI-SYS-062: lowest PID for shared sockets; tooltip cap 16; "Closing…"; engine-formatted addresses.
+- UI-SYS-063: "Copy" cell item.
+- UI-SYS-064: Cancel focus; plural heading; UDP rows hide the item.
+- UI-SYS-066: address and port split; all PIDs.
+- UI-SYS-068: 560 × 520; unit words; "Closable here" reasons; cap 10 and its toast.
+- UI-SYS-069: lookups for visible rows only.
+- UI-SYS-070: label, `netns` column position, session-only, fallback placement.
+- UI-SYS-080: column split and order, 880 px breakpoint, one scroll region, section gap 32, demand
+  for GPUs and disks, keyboard scrolling.
+- UI-SYS-081: band corners `r_sm`, label column 232, block indent and gap 12, no click-to-copy.
+- UI-SYS-083: multi-line values joined with ", "; copy ignores the filter; Ctrl+C fallback.
+- UI-SYS-084: title match shows the whole section; block first row kept; "No information matches
+  the filter."; no highlight.
+- UI-SYS-085: live row list; "Information refreshed."; "Could not load system information".
+- UI-SYS-087 to UI-SYS-096: Flags summary format; Computer name and Session type formats; zram
+  "None"; label wrap; modules all expanded and the no-data row; disk Type words and "None";
+  chassis words; multi-line Resolution and IP rows; "Not fetched", "Fetching…"; Help target clears
+  a hiding filter.
+
+# Open items
+
+Each has a recommended answer. None blocks the UI work; most need a matching change in
+`ARCHITECTURE.md` or a sibling UI file.
+
+- **O-1 Demand fields.** This file needs `Demand.service_cgroup_stats: bool`,
+  `Demand.unit_details: Arc<[UnitRef]>` (max 10), `Demand.remote_host_cookies` (P4) and
+  `Demand.connections_all_netns: bool` (P4), and sets `Demand.process_table` while a service row is
+  expanded. Recommended: add them to ADR-008's `Demand` as named.
+- **O-2 ActionKind and ActionTarget additions.** ADR-005 lacks `UnitReload`, `UnitResetFailed`,
+  `UnitMask`, `UnitUnmask`, `UnitWriteRecovery(RecoveryEdit)`, `UnitRemoveRecovery`,
+  `StartupRunNow`, `StartupDelete`, `SockDestroy` and `ActionTarget::Socket { cookie, family,
+  proto, four_tuple }`. Recommended: add them. `UnitRemoveRecovery` for system units needs a
+  helper operation; recommended: `WriteServiceDropIn` with an empty key set deletes the tasklens
+  drop-in, so R-004's allowlist does not grow.
+- **O-3 Telling a dismissed polkit prompt from a denial.** For pkexec-based paths (helper, setup)
+  exit code 126 means dismissed and 127 means not authorized. For systemd D-Bus calls both are
+  believed to come back as an access-denied error. Recommended: phase 0 records the exact error
+  for "dismissed" and "denied" against `manage-units`; until then systemd calls show
+  "<failure text>: not authorized" for both, and "Authentication cancelled" only where the cause is
+  certain.
+- **O-4 Journal API.** `EngineClient::journal(JournalQuery) -> JournalHandle` with
+  `load_older` and `set_follow`, events `Batch`, `Access`, `Error`; dropping the handle kills the
+  child. Recommended: add to ADR-005 next to the action events channel; the engine owns the
+  `journalctl` child (ADR-016 "Service logs").
+- **O-5 Snapshot fields.** `SysRow` rows and `query_generation` on `ServicesSnapshot`,
+  `StartupSnapshot`, `ConnectionsSnapshot`; `counts` on all three; `ServicesSnapshot.managers`,
+  `details`, `backend`; `UnitDetails` (with `recovery`, `recovery_dropin_exists`, `deps`);
+  `cgroup_pids` per unit; `ConnectionsSnapshot.destroy_supported`. Recommended: ADR-003 adds them
+  as listed in UI-SYS-002, UI-SYS-014, UI-SYS-015, UI-SYS-016, UI-SYS-022, UI-SYS-030, UI-SYS-062,
+  UI-SYS-064.
+- **O-6 Control slot in the status chip.** SYS-037 puts the Namespaces dropdown in the status bar;
+  UI-SHL-050's chip holds text only. Recommended: shell.md adds an optional page control drawn
+  after the tab text inside the chip. Fallback until then: UI-SYS-070's floating control.
+- **O-7 Information spacing vs UI-FND-025.** Measured from `information.png`: section gap 37
+  (foundation `sp6` 16), label column 232 (foundation 180), sub-block indent 11 and gap 12
+  (foundation 16 and 8), band 25 (foundation 28, kept). Recommended: UI-FND-025 takes these as
+  parameters with its values as defaults, and the Information page passes 32, 232, 12, 12.
+  UI-FND-003's text table lists `t_lg` 600 for Information titles while UI-FND-025 says `t_md`
+  500; this file uses `t_md` 500 (closer to the measured title).
+- **O-8 Monospace font for the Logs tab.** The foundation bundles only Noto Sans. Recommended:
+  bundle the static `NotoSansMono-Regular.ttf` (SIL OFL) and check it loads (zed#61660), family
+  "Noto Sans Mono".
+- **O-9 Keys beyond table (b).** Delete in `StartupTable` (delete entry), the `StartupTable`,
+  `ConnectionTable` and `JournalList` contexts, Ctrl+Tab and Ctrl+1..5 inside Service Properties.
+  Recommended: add them to table (b) and the Keyboard Shortcuts window (APP-030).
+- **O-10 Summary toast at 4 or more targets.** SYS-006 says one toast per result; the 4-toast stack
+  (APP-044) cannot show more than 4. Recommended: keep this file's summary rule.
+- **O-11 "N/A" in the Log On tab.** SYS-012 asks for "N/A"; R-050 sets the PERF-013 words for every
+  Properties field and has precedence. This file uses "Not reported". Reviewer to confirm.
