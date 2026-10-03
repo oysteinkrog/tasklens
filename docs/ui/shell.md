@@ -813,3 +813,261 @@ x=0
 
 - **Phase**: P4 (menu); "Show FPS" exists from P1 as a developer flag reachable by `--debug` [S].
 - **Decided here**: Alt+D; "All columns enabled" toast.
+
+---
+
+## 5. Status chip
+
+### UI-SHL-050 Status chip (per-tab status text)
+
+- **Implements**: APP-029, PROC-051, PROC-050, SYS-016, SYS-027, SYS-036, R-042, table (d) counts.
+- **Form**: APP-029 calls for a compact 22 px bar built on gpui-kit `StatusBar`. The TaskSlinger reference draws a floating chip over the bottom-left of the table instead [M processes.png: chip at x 0..112, y 813..840, 1 px border, rounded top-right corner], and shows nothing on Performance and Information [M performance.png, information.png]. This spec follows the reference: a floating chip, hidden when it has no text [C, open item 2].
+- **Anatomy**:
+
+```text
+                                        (page content continues under the chip)
++------------------------------+ <- top-right corner radius r_md; other corners square (flush with window edges)
+| 296 Processes | 3 processes selected [PAUSED - Ctrl]  · GPU data stale |
++------------------------------+
+x=0, bottom=0
+```
+
+  - Position: absolute, left 0, bottom 0 of the page area [M].
+  - Height 26 [M 27 including border] [C rounded to 26]. Padding-x 12 (`sp5`) [M text starts at x 6.5 logical from the 1 px border, measured 7]: use left padding 8 (`sp4`) and right padding 12 [C].
+  - Background `tab_bg` [M #202224]; border 1 physical px `divider` on top and right sides only [M]; top-right corner radius `r_md` [M].
+  - Text `t_sm` [C from M cap height] in `text_primary`, tabular figures for the counts.
+  - Segments, separated by " | " in `text_secondary` [S PROC-051 " | "]:
+    1. Tab text (below).
+    2. "[PAUSED - Ctrl]" in `accent` [S R-042], preceded by one space, while Ctrl-paused.
+    3. Health items (UI-SHL-051) in `status.warning`, preceded by " · " [C].
+  - Width: fits content; max width = page width − 200 [C], text truncated at the end with "…".
+- **Tab text** (owners in brackets):
+  - Processes [PROC-051]: "296 Processes"; while filtering "41 / 296 Processes"; then " | 3 processes selected" when 2 or more rows are selected; then " | 42 restricted" when restricted rows exist (clickable from P3, tooltip "Some values for other users' processes need administrator rights. Click to enable.").
+  - History mode: the process spec's history text (PROC-088 owns it); if it defines none, the chip shows the Processes text for the history table [C].
+  - Services [SYS-016], Startup Apps [SYS-027], Connections [SYS-036]: their own strings.
+  - Performance, Information: empty [S].
+  - Counts use thin-space grouping, for example "12 345 Processes" (U+2009) [S table d].
+- **Visibility**: the chip is hidden when all three segments are empty (so Performance and Information normally show nothing). It appears on any tab while paused or while a health item exists [C].
+- **Overlap with content**: the Processes, Services, Startup Apps and Connections tables add bottom padding equal to the chip height (26 × scale) inside their scroll content, so the last row can scroll clear of the chip [C]. Minigraph cards (PERF-080) sit bottom-right and do not collide at 800 px width with the 200 px reserve [C].
+- **States**:
+  - Hover over the restricted segment (P3) or a health item: underline and pointer arrow cursor stays default (widgets rule 7: not a link) [C]; tooltip shows.
+  - Pressed: nothing visible beyond the click action.
+- **Interaction**: click on " | 42 restricted" (P3) dispatches `UnlockPrivileged` [S]. Click on a health item dispatches `OpenCollectorHealth` [S APP-029]. Right-click: nothing.
+- **Data binding**: the active page provides `fn status_text(&self, out: &mut String)`; `StatusChip` re-renders when the page notifies with `StatusChanged` (pages emit it only when their counts or selection count change), on Ctrl-pause flips, and on `ComponentMask::HEALTH`.
+- **Build**: `StatusChip` Entity in `window/status.rs`, positioned by `MainWindow` with `.absolute().left_0().bottom_0()`, embedded `.cached(..)`. Text is one `SharedString` rebuilt into a reused `String` buffer only when inputs change.
+- **Performance**: at most one text shaping per change; with 1 Hz sweeps the count changes at most once per second.
+- **Accessibility**: the chip text is readable as plain text; the clickable parts have tooltips and act on Enter when reached through the keyboard (they are Tab stops only when clickable) [C].
+- **Tests**: `status_chip_processes_text`: 296 rows, filter matching 41, 3 selected: text "41 / 296 Processes | 3 processes selected". `status_chip_hidden_on_performance`. `status_chip_paused`: Ctrl held with the window active appends "[PAUSED - Ctrl]".
+- **Phase**: P1.
+- **Decided here**: chip form instead of a full-width bar (open item 2); sizes; segment separator " · " for health; visibility rule; table bottom padding.
+
+### UI-SHL-051 Health items in the chip
+
+- **Implements**: APP-029, ADR-015 (no toast for collection errors), R-071, PERF-013 words.
+- **Behaviour**:
+  - Source: `Snapshot.health` (`HealthSnapshot`, one `SourceHealth` per `SourceId`).
+  - An item is shown for each source that the active tab or a visible surface uses and whose state is Stale, Failed or Disabled. Texts [C, extending APP-029's examples]:
+    - Stale: "<Source> data stale", for example "GPU data stale" [S example].
+    - Failed: "<Source> unavailable".
+    - Disabled (restart budget spent, ADR-004): "<Source> paused after errors".
+  - Source display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin [C].
+  - At most two items show; more become "+N more" [C].
+  - Restricted process counts are not repeated here; they are in the Processes tab text (PROC-051) [C].
+  - Tooltip on each item: the source's `last_error` text, or "No new data for 12 s" for Stale [C].
+  - Healthy: no item [S].
+- **Tests**: `health_items_limit`: three failed sources: two items plus "+1 more".
+- **Phase**: P1.
+- **Decided here**: the three state texts, source names, the limit of two, tooltips, restricted count excluded.
+
+---
+
+## 6. Settings window
+
+### UI-SHL-060 Settings window frame
+
+- **Implements**: APP-023, APP-045, R-028.
+- **Anatomy**:
+  - Separate top-level window, title "tasklens Settings" [S], `WindowKind::Floating` with the main window as parent, not modal [S APP-045].
+  - Default size 900 × 640, minimum 720 × 480 [C]. Opens centred on the main window where the compositor allows (Wayland places it; tasklens requests no position) [C].
+  - Frame: `TlWindowFrame` (UI-SHL-090) with title, pin and close.
+  - Body: gpui-kit `Settings::new("settings").sidebar_width(px(220.))` [S widget; C width]: left sidebar with a search field on top and the page list, right the active page.
+  - Pages in order [S]: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced. Page icons (Lucide, 16): `settings`, `palette`, `activity`, `scaling`, `list-tree`, `gauge`, `chart-area` (falls back to `activity` if missing) [C], `cog` → use `settings-2`, `app-window`, `shield`, `sliders-horizontal`.
+  - Page content: groups (`SettingGroup` with a title, `t_sm` semibold `text_secondary`), items (`SettingItem` title `t_base` `text_primary`, description `t_sm` `text_secondary`), control at the right.
+- **Rules**:
+  - Every key of `settings.toml` in table (a) appears exactly once, with the same label as its menu item where one exists [S]. `state.toml` keys never appear [S].
+  - Changes apply live, except `appearance.decorations` and `rendering.gpu`, which show the description "Takes effect after restart" under the item and push their restart toast on change [S].
+  - Search (kit) matches item titles, descriptions and the keywords listed per item below.
+  - Opening it again (Ctrl+, or "All settings…") focuses the existing window [C].
+  - Esc closes the window only if `window.close_with_esc` is on [C, the global Esc rule applied to this window].
+  - Controls bind to `TlSettings` through the kit `SettingField` get and set closures (`Fn(&App) -> T`, `Fn(T, &mut App)`), which call `TlSettings::update`. Sliders persist on release, like the menu sliders.
+- **Build**: `windows/settings.rs`, Entity `SettingsWindow` holding the kit `Settings` builder output; slider and input state entities created in `SettingsWindow::new`.
+- **Performance**: the window renders only on input and on `TlSettings` changes; it subscribes to no snapshot data except the device catalog (Performance page device lists) and the GPU engine list.
+- **Accessibility**: Tab moves through the search field, the page list, then the page's controls in reading order; Up and Down move in the page list.
+- **Tests**: `settings_every_key_once` (unit over the page model): the set of keys bound by all items equals the set of `settings.toml` keys in table (a) (with `fans.*` counted once for the Fans group), with no duplicates. `settings_restart_toast`: toggling "Use system title bar" pushes "Restart tasklens to apply the title bar change".
+- **Phase**: P2 (window); each item from its feature's phase.
+- **Decided here**: size, sidebar width, icons, refocus, Esc rule.
+
+### UI-SHL-061 Settings page: General
+
+| Group | Label | Control | Key | Values and labels | Phase |
+|---|---|---|---|---|---|
+| Startup | Default tab | dropdown | `general.start_tab` | Processes, Performance, Services, Startup Apps, Connections, Information, Last used | P2 |
+| Language | Language | dropdown | `general.language` | System default; English (United States); Deutsch; Español; Français; 日本語; 한국어; Português (Brasil); Русский; Українська; 简体中文; Norsk bokmål | P2 (P4 for non-English) |
+
+- Language description: "Numbers and dates keep the same format in every language." [C, R-081].
+- **Decided here**: locale display names in their own language.
+
+### UI-SHL-062 Settings page: Appearance
+
+| Group | Label | Control | Key | Range or values | Phase |
+|---|---|---|---|---|---|
+| Theme | Theme | dropdown of all theme names | `theme.active` | built-ins then customs | P2 |
+| Theme | Sync theme with system | switch | `theme.follow_system` | | P2 |
+| Theme | Preferred Light Theme | dropdown | `theme.light` | all themes | P2 |
+| Theme | Preferred Dark Theme | dropdown | `theme.dark` | all themes | P2 |
+| Size | UI Scale | slider with "%d%%" | `appearance.ui_scale_pct` | 75..=200 step 5 | P2 |
+| Size | Row Height | slider | `appearance.row_height_pct` | 80..=150 step 5 | P2 |
+| Look | Rounded Corners | switch | `appearance.rounded_corners` | | P2 |
+| Look | Value Color Coding | switch | `appearance.heat_coloring` | | P2 |
+| Look | Value Color Coding Intensity | slider | `appearance.heat_intensity_pct` | 0..=100 step 5 | P2 |
+| Look | Drop Shadow Intensity | slider | `appearance.shadow_intensity_pct` | 0..=100 step 5 | P2 |
+| Window | Use system title bar | switch (on = `server`) | `appearance.decorations` | client, server; "Takes effect after restart" | P2 |
+
+### UI-SHL-063 Settings page: Motion
+
+| Label | Control | Key | Range | Phase |
+|---|---|---|---|---|
+| Animations | switch | `motion.animations` | | P2 |
+| Smooth Graphs | switch | `motion.smooth_graphs` | | P2 |
+| Smooth Scroll | switch | `motion.smooth_scroll` | | P2 |
+| Smooth scroll amount | slider "%d" | `motion.smooth_scroll_amount` | 1..=50 step 1; disabled while Smooth Scroll is off | P2 |
+| Tab Switch | slider "%d ms" | `motion.tab_switch_ms` | 0..=500 step 10 | P2 |
+
+- Page description at the top: "Your system's reduced motion setting turns all of these off." [C, R-017]. While reduced motion is on, the page shows an Info line "Reduced motion is on in your system settings" [C].
+
+### UI-SHL-064 Settings page: Units
+
+| Label | Control | Key | Values | Phase |
+|---|---|---|---|---|
+| Network transfer unit | dropdown | `units.network` | Bits per second, Bytes per second | P2 |
+| Auto-scale network transfer rates | switch | `units.network_auto_scale` | | P2 |
+
+### UI-SHL-065 Settings page: Processes
+
+| Group | Label | Control | Key | Values | Phase |
+|---|---|---|---|---|---|
+| Refresh | Refresh | dropdown | `processes.interval_ms` | 0.25s, 0.5s, 1.0s, 2.0s, 5.0s, 10.0s | P2 |
+| View | Process View | dropdown | `processes.mode` | Tree View, Task Manager Grouping, List View | P2 |
+| View | Tree Connector Lines | switch | `processes.tree_guide_lines` | | P2 |
+| View | Highlight New and Exited Processes | switch | `processes.highlight_new_exited` | | P2 |
+| View | Include children | switch | `processes.filter_include_children` | | P2 |
+| View | Hide system processes | switch | `processes.hide_system` | | P2 |
+| View | Show subtree totals on parent processes | switch | `processes.subtree_totals` | | P2 |
+| Tables (every table) | Resize Behavior | dropdown | `tables.column_resize` | Proportional, Last Column | P2 |
+| Tables (every table) | Show column separators | switch | `tables.column_separators` | | P4 |
+| Tables (every table) | Dim zero values | switch | `tables.dim_zero_values` | | P2 |
+| Properties windows | Hide unnamed handles | switch | `properties.hide_unnamed_handles` | | P2 |
+| Properties windows | Shared libraries only | switch | `properties.shared_objects_only` | | P2 |
+| Properties windows | Mask secret environment values | switch | `properties.env_mask` | | P2 |
+| Dumps | Dump type | dropdown | `processes.dump_type` | Mini, Full | P3 |
+| History | Record history | switch | `history.enabled` | | P3 |
+| History | History storage | dropdown | `history.retention_h` | 1, 2, 3, 4, 6, 8, 12 hours | P3 |
+| History | Save history to disk | switch | `history.persist` | disabled while Record history is off | P3 |
+| History | History disk limit | number input, suffix "MiB" | `history.max_disk_mb` | 64..=4096 step 64 [C] | P3 |
+
+- **Decided here**: label "Mask secret environment values"; the disk limit range 64..=4096 (table a gives only the default 256 and says "not in menus", so the window shows it).
+
+### UI-SHL-066 Settings page: Performance
+
+| Group | Label | Control | Key | Values | Phase |
+|---|---|---|---|---|---|
+| Graphs | Graph time range | dropdown | `performance.graph_range_s` | 30 seconds, 1 minute, 5 minutes (P2), 10 minutes (P2) | P2 |
+| Graphs | Curved lines | switch | `performance.curved_lines` | | P2 |
+| Graphs | Scale network graphs dynamically | switch | `performance.network_dynamic_scale` | off = link speed | P2 |
+| CPU | CPU graph | dropdown | `performance.cpu_graph_mode` | Overall, Per core, All cores overlaid, All cores stacked | P2 |
+| CPU | Kernel times | switch | `performance.cpu_kernel` | | P2 |
+| CPU | Secondary graph | dropdown | `performance.cpu_secondary_graph` | None, Power draw, Clock speed, Temperature | P2 |
+| Memory | Show memory composition | switch | `performance.memory_composition` | | P2 |
+| Memory | Show swap usage | switch | `performance.memory_swap_graph` | | P2 |
+| GPU | Optional GPU graphs | two checkboxes "Power", "Clocks" | `performance.gpu_optional_graphs` | subset of power, clocks | P2 |
+| GPU | Hidden engine graphs | custom: checklist per GPU of its engines (checked = shown) | `performance.hidden_gpu_engines` | engine keys | P2 |
+| Devices | Disks / GPUs / Fans / Batteries | four switches | `performance.show_disks`, `show_gpus`, `show_fans`, `show_batteries` | | P2 |
+| Devices | Wired / Wireless / VPN and tunnel / Virtual / Other | five switches, indented 16 under a "Network adapters" label | `performance.show_network_wired`, `_wireless`, `_vpn`, `_virtual`, `_other` | | P2 |
+| Devices | Show disconnected fans | switch | `performance.show_disconnected_fans` | | P3 |
+| Sidebar | Device order and visibility | custom list (below) | `performance.device_order`, `performance.device_overrides` | | P2 |
+| Fans | one row per fan: label input and temperature sensor dropdown | custom (below) | `fans.<key>` | | P3 |
+
+- **Device order list** [C]: one row per device in the catalog (name, type), 28 tall, with a drag handle (Lucide `grip-vertical`) to reorder, and a three-way segmented control "Default", "Show", "Hide" bound to `device_overrides` (Default removes the key). Buttons below: "Reset order" (clears `device_order`, toast "Sidebar order reset") and "Show all" (clears `device_overrides`). Keyboard: Alt+Up and Alt+Down move the focused row.
+- **Fans group** [C]: per fan, a text input "Label" (empty = default name) and a dropdown "Temperature sensor" listing hwmon temperatures as "<label> (<chip>) 45 °C", plus "None". Writes `fans."<key>" = { label, temp }`; an empty label and "None" remove the entry.
+- **Decided here**: labels "Kernel times", "Secondary graph", "Hidden engine graphs", the device list control, the fans group form.
+
+### UI-SHL-067 Settings page: Graphs
+
+| Label | Control | Key | Phase |
+|---|---|---|---|
+| CPU Graph | switch | `graphs.minigraph_cpu` | P2 |
+| Memory Graph | switch | `graphs.minigraph_memory` | P2 |
+| Disk Graph | switch | `graphs.minigraph_disk` | P2 |
+| Network Graph | switch | `graphs.minigraph_network` | P2 |
+| GPU Graph | switch | `graphs.minigraph_gpu` | P2 |
+| VRAM Graph | switch | `graphs.minigraph_vram` | P2 |
+| GPU Temperature Graph | switch | `graphs.minigraph_gpu_temperature` | P2 |
+| Keep detached graphs open when closing main window | switch | `graphs.keep_detached_on_close` | P3 |
+
+- A "Reset Minigraph Layout" button sits below the list (same Action as the menu) [C].
+
+### UI-SHL-068 Settings page: Services
+
+| Label | Control | Key | Values | Phase |
+|---|---|---|---|---|
+| Unit types | ten checkboxes in two columns | `services.unit_types` | Services, Sockets, Timers, Mounts, Automounts, Paths, Targets, Swaps, Slices, Scopes (stored as `service`, `socket`, `timer`, `mount`, `automount`, `path`, `target`, `swap`, `slice`, `scope`) | P2 |
+| Show only these states | four checkboxes | `services.filter_states` | Running, Failed, Stopped, Disabled; none checked = all states | P2 |
+
+- Unchecking the last unit type is refused with the Info toast "At least one unit type must stay selected" [C].
+
+### UI-SHL-069 Settings page: Startup and window
+
+| Group | Label | Control | Key | Phase |
+|---|---|---|---|---|
+| Window | Close with Esc | switch | `window.close_with_esc` | P2 |
+| Window | Always On Top | switch | `window.always_on_top` (same Action as the pin) | P2 |
+| Tray | Close to tray | switch | `tray.close_to_tray` | P3 |
+| Tray | Minimize to tray | switch | `tray.minimize_to_tray` | P3 |
+| Tray | Always show tray icon | switch | `tray.always_show` | P3 |
+| Login | Start at login | switch | `startup.start_at_login` | P2 |
+| Login | Start minimized | switch, indented 16, disabled unless Start at login is on | `startup.start_minimized` | P2 |
+| Login | Open with Ctrl+Esc | switch, no settings key; reads and writes kglobalaccel (APP-051); hidden outside KDE | (none) | P4 |
+| Network | Auto-fetch Public IP on launch | switch | `network.auto_fetch_public_ip` | P2 |
+| Memory | Open rescue window on critical memory pressure | switch | `lowmem.enabled` | P3 |
+
+- "Open with Ctrl+Esc" on failure to stick (U-16 fallback) shows the description "Log out and back in to apply" [S R-080].
+
+### UI-SHL-070 Settings page: Privileges
+
+| Label | Control | Key | Phase |
+|---|---|---|---|
+| Unlock privileged actions at launch | switch | `privilege.unlock_at_launch` | P3 |
+| Skip password prompts (experimental) | switch (`TogglePasswordless`, with the confirm window) | `privilege.passwordless` | P4 |
+| Additional setup… | button | opens UI-SHL-094 | P3 |
+
+- The page shows the helper status line "Administrator helper: Installed" or "Not installed" [C, same check as the setup window row].
+
+### UI-SHL-071 Settings page: Advanced
+
+| Label | Control | Key | Phase |
+|---|---|---|---|
+| Rendering GPU | dropdown (Auto, adapters, Software renderer), "Takes effect after restart" | `rendering.gpu` | P4 |
+| Do not ask again for public IP fetches | switch | `network.public_ip_notice_accepted` | P2 |
+| Show FPS | switch | `debug.show_fps` | P2 |
+| Import from TaskSlinger… | button (APP-034: portal file chooser for `UserSettings.ini` or `themes.json`; toast "Imported N settings and M themes") | (none) | P4 |
+| Open settings folder | button: `xdg-open $XDG_CONFIG_HOME/tasklens` | (none) [C] | P2 |
+| Reset Settings to Defaults | button (danger style), same confirm as the menu | (none) | P2 |
+
+- **Decided here**: the "Open settings folder" button; Show FPS is always listed here so the key appears once.
+
+### UI-SHL-072 Reset settings confirmation
+
+- **Implements**: APP-022.
+- **Behaviour**: `ResetSettings` opens the generic confirm window (UI-SHL-091) titled "tasklens", text "Reset all settings to their defaults? Themes and history are kept.", buttons "Reset" (danger, default) and "Cancel" [S]. On Reset: `settings.toml` is replaced by defaults (atomic write), `TlSettings` reloads, the theme and scale re-apply, `EngineSettings` re-sent, Success toast "Settings reset to defaults"; on write failure Error toast "Failed to reset settings" and nothing changes [S]. `state.toml`, `themes.json` and history are untouched [S].
+- **Tests**: `reset_settings_keeps_state`: after reset, `UiState` columns and window size unchanged, `settings.ui_scale_pct == 100`.
+- **Phase**: P1.
