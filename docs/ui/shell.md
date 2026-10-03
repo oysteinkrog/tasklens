@@ -486,7 +486,10 @@ x=0
   - Click the open menu's button: close it.
   - While any menu is open, hovering another menu button opens that menu and closes the first (classic menu bar) [S gpui-kit `AppMenuBar::handle_hover` behaviour, copied].
   - Keys: F10 opens File (`OpenMenu(MenuId::File)`); Alt+F, Alt+V, Alt+S, Alt+H open File, View, Settings, Help (`OpenMenu(..)`) [S table b]. Alt+D opens Debug when present [C]. When a menu opens from the keyboard, its first enabled item is highlighted [C].
-  - Inside an open popup (key context `TlMenu`, kit `PopupMenu` bindings): Up and Down move the highlight and skip separators, headers and disabled rows; Enter or Space activates; Right opens a submenu; Left closes a submenu, or at the top level moves to the previous menu (wrapping); Right at the top level on an item without a submenu moves to the next menu (wrapping) [S kit `SelectLeft`/`SelectRight` in `MenuBar` context]; Home and End jump to the first and last item; Esc closes the innermost popup, and focus returns to the element that had focus before the menu opened (widgets rule 16).
+  - Inside an open popup, keys inside one menu are UI-FND-022's. The menu bar adds two:
+    - Left at the top level moves to the previous menu, wrapping.
+    - Right at the top level, on an item without a submenu, moves to the next menu, wrapping [S kit `SelectLeft`/`SelectRight` in the `MenuBar` context].
+  - Esc closes the innermost popup. When the last popup closes, focus returns to the element that had it before the menu opened (widgets rule 16).
   - Activating an item closes the whole menu chain, then dispatches the Action to the focus that was active before the menu opened (`PopupMenu::action_context(previous_focus)`), so table-context Actions (for example Collapse all) reach the table.
   - Pressing and releasing Alt alone does nothing [C] (no Windows-style mnemonic underlines).
 - **Data binding**: `MenuBar { open: Option<MenuId>, popup: Option<Entity<PopupMenu>>, return_focus: Option<FocusHandle> }`. Menus are built fresh each time they open, from `TlSettings` and app state at that moment (cheap; widgets perf note).
@@ -1261,7 +1264,13 @@ x=0, bottom=0
   8. `Application::run`: load fonts, `gpui_kit::init`, register the asset source, build `ThemeStore` and activate the theme without crossfade (UI-FND-040), `bind_keys` (UI-SHL-120), set the toast globals, create `SnapshotHub`, `DemandAggregator`, `ActionTracker`.
   9. Open the main window (UI-SHL-002) on the start tab: `--tab` if given, else `general.start_tab` (`last_used` reads `UiState.tabs.last_tab`) [S]. Only that page Entity is created.
   10. First frame renders the chrome and the start page with whatever the hub has (probably nothing): no waiting for collectors [S APP-059]. The page shows its own first-data state (process table: header and empty body, then rows with `…` in rate cells after the first sweep; Performance: charts with "Collecting…" readouts; P2 tabs: skeletons, UI-SHL-111).
-  11. After the first frame callback: log `info!(target: "tasklens::perf", first_frame_ms)`; show queued toasts (settings errors); show the Crash Report window if due (UI-SHL-093); run `--select-pid` (select-and-scroll through the process jump target, PROC-071, as soon as the pid appears in the table, waiting up to 3 s, then Info toast "Process <pid> not found" [C]); start the helper session if Shift was held or `privilege.unlock_at_launch` is on (P3); start the public IP auto-fetch if enabled and accepted (P2).
+  11. After the first frame callback, in this order:
+      - log `info!(target: "tasklens::perf", first_frame_ms)`;
+      - show the queued toasts (settings errors);
+      - show the Crash Report window if due (UI-SHL-093);
+      - run `--select-pid`: select and scroll through the process jump target (PROC-071) as soon as the pid appears in the table; after 3 s without it, Info toast "Process <pid> not found" [C];
+      - start the helper session if Shift was held or `privilege.unlock_at_launch` is on (P3);
+      - start the public IP auto-fetch if it is enabled and the notice was accepted (P2).
 - **Start hidden or minimized**: UI-SHL-002 (`--start-minimized`).
 - **`--low-memory`**: opens the rescue window (PROC-098) instead of the main window [S]. `--watch-memory` starts no GPUI [S].
 - **`--debug`** or `TASKLENS_DEBUG=1`: Debug menu present (UI-SHL-042).
@@ -1561,7 +1570,7 @@ x=0, bottom=0
 | UI-SHL-132 | Motion in the shell and reduced motion | R-017, APP-058 | P1, P2 |
 | UI-SHL-140 | FPS overlay | APP-026, ADR-014 | P1 |
 
-Entry count: 78.
+Entry count: 77.
 
 ## 15. Coverage
 
