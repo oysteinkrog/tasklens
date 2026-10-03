@@ -1021,3 +1021,342 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   table), `retry_button_only_from_p3_and_only_on_eperm`.
 - **Phase**: P1 (texts arrive with their features).
 - **Decided here**: 30 s cap for button toasts; toast types per event.
+
+### UI-PRC-016 Filter interaction and Include children
+
+- **Implements**: PROC-044, PROC-045; R-043; APP-028 (the input itself belongs to the shell's
+  tab strip; this entry covers its behaviour for the Processes tab).
+- **Anatomy** (right end of the tab strip, shell owns the pixels; summarized here for the
+  binding): `TlInput` small (24 high) with the label "Filter: " as prefix text `text_secondary`,
+  width 160 unfocused, 280 focused (`m_fast` 120 ms width animation, none under reduce motion),
+  cleanable (× button), placeholder empty. To its left, only while the filter is non-empty or the
+  mode is Tree: `TlCheckbox` "Include children" (label `t_base`, checkbox 16, `sp4` gap),
+  measured position in customize-28.png: directly left of "Filter:".
+- **States**: idle, focused (`input_focus` fill, 1 px `accent` ring), with text (× visible),
+  matching (status bar "41 / 296 Processes"), no match (table empty state UI-PRC-024), Include
+  children checked or unchecked, checkbox hidden (flat mode without a filter).
+- **Interaction**:
+  - Typing: 100 ms debounce, then `Command::SetTableQuery` with `filter = lowercased text` and a
+    new generation (ADR-009); the table keeps the previous rows until the matching generation
+    arrives. Space-separated terms must all match; numeric input also matches PID prefixes
+    (engine).
+  - Printable key in the table: `StartFilter { ch }` focuses the input and inserts the character
+    at the end (UI-PRC-009).
+  - Esc in the input: clears the text (`clean()`, emits Change) and focuses the table; one Esc
+    does both. A further Esc follows the global rule.
+  - Enter in the input: focuses the table and keeps the filter (decided).
+  - × button: clears and keeps focus in the input (kit behaviour).
+  - Ctrl+F: focuses and selects all text (decided).
+  - Include children: `ToggleIncludeChildren` → `processes.filter_include_children`; toasts
+    "Including filtered process children." / "Hiding unmatched filtered process children.".
+  - Group headers stay visible with filtered counts; a group with zero matches still shows its
+    header with "(0)" collapsed to no children (decided, matches "stay visible").
+  - Selection survives filtering; hidden selected rows are not counted (UI-PRC-008).
+  - History mode: the same filter applies to the History table and graph (UI-PRC-031).
+- **Data binding**: `TableQuery.filter`, `processes.filter_include_children`; re-renders on the
+  matching `query_generation`.
+- **Build**: shell `TlInput` entity shared through `MainWindow`; the Processes page subscribes
+  to `InputEvent::Change` and owns the debounce `Task` (keeps the handle, drops to cancel).
+  `pages/processes/filter.rs`.
+- **Performance**: one `text()` rope borrow per change, no `value()` allocation; the engine
+  filters.
+- **Accessibility**: "Filter:" is the visible label; the checkbox has a visible label; Esc and
+  Ctrl+F paths.
+- **Tests**: `filter_debounce_100ms_new_generation`, `esc_clears_and_focuses_table`,
+  `stale_generation_results_ignored`, `include_children_checkbox_visibility_rule`.
+- **Phase**: P1.
+- **Decided here**: Enter keeps the filter; Ctrl+F selects all; zero-match groups show "(0)";
+  widths 160/280.
+
+### UI-PRC-017 Hold-Ctrl pause indicator
+
+- **Implements**: PROC-050; R-042; ADR-009 Ctrl-pause.
+- **Anatomy**: no new element in the table. The status bar text appends " [PAUSED - Ctrl]"
+  (UI-PRC-018) in `status.warning`. The table draws from `paused: Option<Arc<Snapshot>>` so
+  rows, order, values and header totals freeze; the header's sort arrow and the scrollbar still
+  respond.
+- **States**: running; paused (Ctrl down and `window.is_window_active()`); resumed on Ctrl up,
+  on window deactivation (`on_window_activation` observer), or when a menu or dialog opens
+  (decided: an open `TlMenu` takes the key focus, and holding Ctrl to use Ctrl+click or Ctrl+C
+  keeps the pause, which is the point of the feature).
+- **Interaction**: `window.on_modifiers_changed` on the page root; pause starts when
+  `modifiers.control` becomes true with no other modifier and ends when it becomes false.
+  Ctrl+click, Ctrl+A, Ctrl+C and the other Ctrl shortcuts work while paused. Actions started
+  while paused use the captured identities and revalidate (PROC-058). New snapshots keep
+  installing into the hub; on resume the table renders the latest and runs the scroll-anchoring
+  rule once (UI-PRC-010).
+- **Data binding**: `SnapshotHub` latest vs. `paused` clone (at most one extra `Arc`, ADR-005).
+- **Build**: `pages/processes/mod.rs` holds `paused`; the status bar reads
+  `ProcessesPage::is_paused()`.
+- **Performance**: while paused the table does not re-render on snapshot installs (the hub
+  subscription is ignored), so UI CPU drops to input only.
+- **Accessibility**: the status bar text is the indicator; there is no colour-only cue.
+- **Tests**: `ctrl_down_freezes_rows_and_sets_status`, `window_deactivate_resumes`,
+  `action_while_paused_revalidates_identity`.
+- **Phase**: P1.
+- **Decided here**: pause survives open menus; status text colour.
+
+### UI-PRC-018 Status bar text
+
+- **Implements**: PROC-051; PROC-048 (selected count); PROC-050; PROC-076 (restricted link).
+- **Anatomy** (left slot of the shell `StatusBar`, `t_sm` 12 `text_secondary`, padding
+  `sp2`/`sp4`, measured at the bottom left "296 Processes"):
+
+  ```text
+  41 / 296 Processes  ·  3 processes selected  [PAUSED - Ctrl]  |  42 restricted
+  ```
+
+  - Segment 1: "296 Processes" or "41 / 296 Processes" while filtering. Count excludes pseudo
+    rows and includes kernel threads only when shown.
+  - Segment 2 (2+ selected): " · 3 processes selected" (separator "·" with `sp2` spaces).
+  - Segment 3 (paused): " [PAUSED - Ctrl]" in `status.warning` (UI-PRC-017).
+  - Segment 4 (restricted rows exist): " | 42 restricted", tooltip "Some values for other users'
+    processes need administrator rights. Click to enable." From P3 the segment is a `TlButton`
+    text variant (underline on hover) that dispatches `StartHelper`; before P3 plain text with
+    the tooltip minus "Click to enable." (decided wording for pre-P3: "Some values for other
+    users' processes need administrator rights.").
+  - History mode: segment 1 reads "213 processes at 12:04:31" at a scrub point and "Live" when
+    live (decided; UI-PRC-030 has the header text), the other segments as above.
+  - Administrator mode badge (P3, PROC-076): a `Tag` "Administrator mode" in `status.info` after
+    segment 4; clicking ends the helper session.
+- **States**: plain, filtering, selection, paused, restricted, administrator, history.
+- **Interaction**: click on the restricted segment (P3) and on the badge; nothing else.
+- **Data binding**: `ProcessTableView` counts (`total`, `shown`, `restricted`), selection size,
+  pause flag, helper session state; re-render on `PROCESSES` and selection changes.
+- **Build**: `pages/processes/status.rs::status_text()` returning the segments as `SharedString`s
+  cached by value; the shell's `StatusBar::left(..)` takes the element.
+- **Performance**: formats only when a count changes.
+- **Accessibility**: text; the clickable segment has a tooltip and focus ring.
+- **Tests**: `status_text_variants` (each segment on and off), `status_count_excludes_pseudo
+  _and_hidden_kthreads`.
+- **Phase**: P1 (restricted click and badge P3).
+- **Decided here**: separators, history text, pre-P3 tooltip.
+
+### UI-PRC-019 Processes toolbar buttons (hide system, view-mode cycler)
+
+- **Implements**: PROC-015, PROC-016, PROC-046; APP-004, APP-005 (the title-bar toolbar layout
+  itself is in the shell spec).
+- **Anatomy**: two `TlIconButton`s ghost 24 × 24 with 16 px icons in the title-bar toolbar, right
+  of the shield, `sp2` gap (measured: shield, grid, stacked bars, plus at x ≈ 468, 512, 557, 604
+  physical in processes.png):
+  - Hide system processes: Lucide `LayoutGrid` (TaskSlinger "grid"); toggled state draws the
+    `row_selected` fill behind the icon (kit `Toggle` look). Tooltip "Hide system processes" /
+    "Show system processes".
+  - View-mode cycler: Lucide `Rows3` (stacked bars). Tooltip "Toggle view mode (current: Tree
+    View | Task Manager Grouping | List View)". In History mode: disabled, tooltip "History shows a
+    flat list".
+  - Both are removed, not greyed, on other tabs; the toolbar does not reserve their space.
+- **States**: default, hover (`tab_hover` fill), pressed, toggled (hide system on), disabled
+  (cycler in History), focused (1 px `accent` ring).
+- **Interaction**: `ToggleHideSystem` → `processes.hide_system`, toasts "Hiding system
+  processes" / "Showing system processes"; `CycleViewMode` → `processes.mode` in the order Tree
+  View, Task Manager Grouping, List View, toast "View mode: <name>". Both dispatch the same
+  actions as View > Process View and the Settings window. Selection is kept by identity across
+  the change; the scroll anchoring rule applies (UI-PRC-010); expansion state is kept per
+  identity for the session.
+- **Data binding**: `processes.hide_system`, `processes.mode`; re-render on `SETTINGS`.
+- **Build**: `pages/processes/toolbar.rs` returning the two buttons for the shell's toolbar slot.
+- **Performance**: n/a.
+- **Accessibility**: tooltips carry the labels; keyboard reach through the shell toolbar tab
+  order and through the View menu.
+- **Tests**: `toolbar_buttons_only_on_processes_tab`, `cycle_order_tree_grouping_list`,
+  `cycler_disabled_in_history`.
+- **Phase**: P1.
+- **Decided here**: icon names `LayoutGrid` and `Rows3`; toggled look.
+
+### UI-PRC-020 Submenus: Send Signal, Set Priority, Set I/O Priority, graph columns
+
+- **Implements**: PROC-065, PROC-066, PROC-068, PROC-069 (check marks for multi-select),
+  PROC-093, PROC-094 (column submenus).
+- **Anatomy**: `TlMenu` submenus, item height 28, check marks (Lucide `Check` 14 px) on the
+  left in place of the icon:
+  - **Send Signal >**: Terminate (TERM) (ends process), Kill (KILL) (ends process), Hangup (HUP)
+    (ends process), Interrupt (INT) (ends process), Quit (QUIT) (ends process), Stop (STOP),
+    Continue (CONT), User 1 (USR1) (ends process), User 2 (USR2) (ends process), separator,
+    "Other signals >" with ABRT 6, ALRM 14, BUS 7, CHLD 17, FPE 8, ILL 4, IO/POLL 29, PIPE 13,
+    PROF 27, PWR 30, SEGV 11, STKFLT 16, SYS 31, TRAP 5, TSTP 20, TTIN 21, TTOU 22, URG 23,
+    VTALRM 26, WINCH 28, XCPU 24, XFSZ 25 as "ABRT (6) (ends process)" where the default action
+    terminates, then "Real-time signal…" which opens a small `TlDialog` with a `TlInput` number
+    field 34..64 labelled "Signal number (SIGRTMIN+0 = 34)", buttons Send (primary) and Cancel.
+    Action `SendSignal { signo }`. The "(ends process)" suffix is `text_secondary`.
+  - **Set Priority >**: Realtime, High, Above normal, Normal, Below normal, Low, Idle,
+    separator, Custom…; the current class is checked (multi-select: checked only when all
+    targets share it). Realtime and Idle and Custom are P2 and hidden before. Tooltip on the
+    submenu header "With autogroup on, nice only orders processes within the same session."
+    (shown as the first, disabled, `text_secondary` item of the submenu, decided, because
+    submenu headers have no tooltip). Action `SetPriority { class }`; Custom opens UI-PRC-021b.
+  - **Set I/O Priority >**: Realtime, High, Normal, Low, Idle, separator, Default (follows nice);
+    current checked; first disabled line "Scheduler: bfq" names the active block scheduler
+    (decided placement, same reason). Realtime disabled without a helper session, tooltip "Needs
+    administrator access." or "Needs administrator helper (not installed)". Action
+    `SetIoPriority { class }`.
+  - **Add Minigraph > / Add Process Name Graph > / Add App Name Graph > / Add tray icon graph >**:
+    CPU, Memory, Disk, Network, GPU, VRAM. Items whose source already exists are checked and
+    disabled with tooltip "Already added" (decided). Actions `AddMinigraph { column }` and so on.
+- **States**: per `TlMenu`; checked, disabled with tooltip.
+- **Interaction**: click or Enter dispatches; the Realtime priority item first opens the
+  UI-PRC-014 confirmation.
+- **Data binding**: current policy and nice (PROC-029), current ioprio, scheduler name, helper
+  state, existing minigraph and tray sources.
+- **Build**: `pages/processes/menu.rs::{signal_menu, priority_menu, ioprio_menu, graph_menu}`.
+- **Performance**: built on open.
+- **Accessibility**: labels carry the signal number and effect in text.
+- **Tests**: `signal_menu_lists_all_and_marks_terminating`, `priority_check_only_when_all_share`,
+  `ioprio_realtime_disabled_without_helper`.
+- **Phase**: P1 (priority classes High to Low), P2 (rest), P3 (graph submenus).
+- **Decided here**: note lines as disabled first items; "Already added" state; RT dialog layout.
+
+### UI-PRC-021 Set Affinity dialog and Custom priority dialog
+
+- **Implements**: PROC-067 (Set Affinity), PROC-066 (Custom…), PROC-069 (mixed marks).
+- **Anatomy** (a): Set Affinity, `TlWindow` modal-less dialog through `open_dialog`, width 520,
+  title "Set Affinity - firefox (PID 4321)" (multi: "Set Affinity - 3 processes"):
+
+  ```text
+  ┌ Set Affinity - firefox (PID 4321) ───────────────────── ✕ ┐
+  │ [✓] All processors                                          │  TlCheckbox row 28
+  │ CCD 0: CPU 0-7, 16-23                                       │  group heading t_sm text_secondary
+  │ [✓]CPU 0 [✓]CPU 16  [✓]CPU 1 [✓]CPU 17  [✓]CPU 2 [✓]CPU 18 … │  grid: 4 pairs per row, pair = SMT siblings side by side
+  │ CCD 1: CPU 8-15, 24-31                                      │
+  │ [✓]CPU 8 [✓]CPU 24  …                                       │
+  │ CPU list: [0-7,16-23                                   ]    │  TlInput, syncs both ways, invalid text turns ring status.danger
+  │ At least one CPU must stay enabled                          │  status.danger t_sm, only when nothing is checked
+  │                                        [Cancel] [OK]        │  OK primary, disabled when nothing checked or text invalid
+  └──────────────────────────────────────────────────────────────┘
+  ```
+
+  Checkbox cells 24 high, label `t_sm`; each pair in a 112 px cell; grid wraps to the dialog
+  width. Intel hybrid: a 12 px `Zap` icon before P-cores and `Leaf` before E-cores (decided
+  icons). Multi-select mixed marks: `TlCheckbox` has no indeterminate state in the kit, so a
+  mixed CPU draws a filled square `Minus` glyph in the box (custom paint in `TlCheckbox`
+  foundation variant `mixed`); clicking a mixed box checks it for all targets.
+  (b) Custom priority, `open_dialog`, width 448, title "Set Priority - <name>": `TlSlider` "Nice"
+  −20..19 step 1 with the value label; `TlSelect` "Policy" OTHER, BATCH, IDLE, FIFO, RR; `TlInput`
+  number "RT priority" 1..99 enabled only for FIFO and RR; note `t_sm` `text_secondary`
+  "Lowering nice below 0 and realtime policies need administrator access."; buttons Cancel and
+  OK (primary; danger when FIFO or RR, after the UI-PRC-014 realtime confirmation).
+- **States**: valid, nothing checked (OK disabled, message shown), invalid list text, mixed
+  marks (multi), applying (OK shows a spinner for at most 2 s, then the dialog closes and the
+  toast reports), error (dialog stays open with the toast).
+- **Interaction**: Tab order: All processors, grid, list field, Cancel, OK; Space toggles; Enter
+  on a valid dialog triggers OK (here Enter is allowed, decided: not destructive); Esc cancels.
+  OK dispatches `SetAffinity { mask }` / `SetSched { policy, rt_prio }` or `SetNice { n }`
+  with the captured targets.
+- **Data binding**: current masks from `sched_getaffinity` per target (engine detail request),
+  topology (`cache/index3/shared_cpu_list`, `thread_siblings_list`), `cpuset.cpus.effective`
+  limit (CPUs outside it are disabled with tooltip "Not in this cgroup's cpuset").
+- **Build**: `pages/processes/affinity_dialog.rs`, `priority_dialog.rs`; kit `Dialog` with a
+  custom footer (`DialogFooter`, `DialogClose`, `DialogAction`).
+- **Performance**: n/a.
+- **Accessibility**: every box labelled "CPU n"; the list field is the fast path; error text is
+  text.
+- **Tests**: `affinity_grid_groups_by_l3_and_pairs_smt`, `affinity_list_and_grid_stay_in_sync`,
+  `affinity_ok_disabled_when_empty`, `affinity_mixed_marks_for_multi`, `custom_priority_rt_field
+  _enabled_only_for_fifo_rr`.
+- **Phase**: P1 (affinity, one target); P2 (mixed marks, custom priority).
+- **Decided here**: dialog sizes and titles, pair cell width, hybrid icons, mixed-mark glyph,
+  Enter allowed.
+
+### UI-PRC-022 Jump target: select a process by identity
+
+- **Implements**: PROC-071 (shared entry point, Go to parent, Go to service, failure toasts),
+  PROC-055 (picker result), PROC-088 (History row to live row).
+- **Anatomy**: no element; behaviour of `ProcessesPage::select_by_key(key, source)`.
+- **Behaviour**:
+  1. If the active tab is not Processes: switch (toast "Switched to Processes tab" unless the
+     caller brings its own text). If History mode is on: leave it (decided: the live table is
+     the only place a live identity can be shown; History keeps `history_mode` state false
+     afterwards).
+  2. Look up `key` in the current `ProcessTableView`. Not present: toast "Process not found in
+     current view" (or the caller's "Parent process not found in current view").
+  3. Present but hidden (filter or Hide system): the caller's "not visible" toast with the
+     "Show" button (UI-PRC-015); on Show: clear the filter, set `hide_system = false`, wait for
+     the matching generation, then continue at 4.
+  4. Expand the path: in Grouped mode the group and every collapsed ancestor; in Tree mode every
+     collapsed ancestor (`TableQuery.expanded` grows; one `SetTableQuery`).
+  5. When the view with the row arrives: selection = {key}, `scroll_to_item_strict(ix,
+     Center)`, focus the table.
+  6. Go to parent: key = the parent's `ProcessKey` (ppid plus its start ticks from the snapshot);
+     toast "Switched to parent process". Go to service: delegate to the Services page with the
+     `UnitRef` (SYS-010 texts).
+- **States**: n/a.
+- **Data binding**: `ProcessTableView`, `TableQuery.expanded`, settings writes for Show.
+- **Build**: `pages/processes/jump.rs`; callers: Properties PPID link, Services, Connections,
+  Handle Search, picker, History table, `--select-pid`, D-Bus `select-pid`.
+- **Performance**: at most two query round trips.
+- **Accessibility**: focus lands on the selected row.
+- **Tests**: `jump_expands_group_and_ancestors_then_centres`, `jump_hidden_offers_show_button`,
+  `jump_missing_toasts_not_found`, `jump_leaves_history_mode`.
+- **Phase**: P1 (Go to parent); P2 (shared entry).
+- **Decided here**: leaving History mode on jump.
+
+### UI-PRC-023 Performance plan for 2,000 rows at 144 Hz
+
+- **Implements**: ADR-014 `table-2000` gates (UI thread p99 ≤ 2.0 ms per frame while scrolling
+  at 1,200 px/s with 1 Hz value changes and re-sorts; 0 missed frames in the median run; RSS
+  ≤ 150 MB); PROC-013; ADR-009 text cache.
+- **Budget split per frame (144 Hz, 6.94 ms frame, 2.0 ms UI CPU target)**:
+
+  | Work | Budget | How it is met |
+  |---|---|---|
+  | `uniform_list` range callback building ≈ 36 rows × 10 cells | ≤ 0.6 ms | one `div` per row, absolutely positioned fixed-size cell `div`s, `SharedString` clones from `CellTextCache`, no `format!`, no per-cell ids, no closures captured per cell beyond the row index |
+  | Layout (taffy) for ≈ 400 elements | ≤ 0.5 ms | cells use fixed `w` and `h` so taffy does no measuring; text is measured by GPUI's line cache, which hits because strings are unchanged |
+  | Paint: zebra, tints, heat quads, dividers, icons, text | ≤ 0.4 ms | quads are instanced; heat quads only on valid non-zero metric cells (≈ 150); icons are atlas sprites; text runs are cached by GPUI per frame |
+  | Selection, hover, demand hashing | ≤ 0.1 ms | hash sets; demand hash of ≤ 512 keys |
+  | Header | ≤ 0.1 ms | `.cached()`, invalidated at 1 Hz |
+  | Snapshot install (once per second, not per frame) | ≤ 1.0 ms amortized | re-format only changed cells (value bits compare), rebuild `row_index` map (2,000 inserts ≈ 60 µs), scroll-anchor lookup |
+
+  Rules that hold the budget:
+  1. The table never sorts, filters or aggregates; `ProcessTableView` arrives finished.
+  2. `CellTextCache` keyed by `(NodeId, ColumnId)`, 8,192 entries, pruned of keys unseen for 3
+     versions; a cell is formatted only when `(value_bits, validity)` changed. Expected hit rate
+     above 95% on steady state (ADR-009 test).
+  3. No element ids on metric cells; the only ids are per-row (hitbox), the Name cell (tooltip)
+     and the window button. GPUI element-state maps stay small.
+  4. No `Spinner`, `Skeleton`, `Progress` or `Animation` in rows (ADR-009). Fade tints request
+     frames through the `AnimationDriver` only while a fade is live.
+  5. During a scrollbar drag or wheel burst, snapshot installs still apply (the owner wants live
+     data) but scroll anchoring is skipped (UI-PRC-010), so no extra scroll work.
+  6. Icons: `img(path)` with the engine's resolved file; GPUI rasterizes once per size into the
+     atlas; 2,000 distinct icons would be unusual (most rows share ≈ 60 icons).
+  7. Horizontal overflow renders only visible columns: the range callback skips columns whose
+     `[x, x + w)` misses the viewport (decided; cheap with the precomputed offsets).
+  8. Memory: `ProcessTableView` for 2,000 rows ≈ 2,000 × 24 B rows + records (ADR-003 size)
+     well under 2 MB; text cache ≤ 8,192 × (~40 B + string) ≈ 1 MB; RSS gate is dominated by
+     GPU buffers and fonts.
+- **Measurement**: `tasklens --bench table-2000 --duration 30 --warmup 5 --json out.json`
+  (ADR-014); `cargo xtask bench` runs it 3 times. Pass criteria as the gate table. A regression
+  above 20% blocks the phase.
+- **Fallback inside GPUI** (ADR-014 decision rule step 2, ≤ 2 days): drop zebra quads for a
+  single `list_bg` fill plus 1 px row dividers; merge heat quads per row into one quad with the
+  max alpha; move the whole row to a `canvas` painter with `ShapedLine::paint` per cell (no
+  per-cell `div`), which removes taffy from the row path.
+- **Tests**: `bench_table_2000_scene_exists_and_is_deterministic` (seed 42 produces the same
+  first row set), plus the ADR-014 gate run recorded in `docs/spike/phase0-results.md`.
+- **Phase**: P0 (spike scene), P1 (production table must still pass).
+- **Decided here**: budget split, column culling, the in-GPUI fallback order.
+
+### UI-PRC-024 Empty, first-sweep and no-match states
+
+- **Implements**: PROC-021 (no skeleton), PROC-044 (no match), R-060.
+- **Anatomy**:
+  - First sweep not yet installed (first ≈ 50 ms after launch): the header shows with `…`
+    totals and the body is plain `list_bg` with no text (no skeleton, no spinner).
+  - First sweep installed, second not yet: rows show with `…` in rate cells (UI-PRC-004).
+  - Filter with no match: body shows, centred horizontally at y = 96 from the body top, the
+    text "No processes match the filter" `t_md` `text_secondary`, and below it a `TlButton`
+    ghost "Clear filter" (decided) that dispatches `ClearFilter`. Group headers are not shown
+    when nothing matches at all (decided; "(0)" headers only when some group matches).
+  - Hide system processes hides everything (cannot happen: `app.slice` rows stay) and an engine
+    error never empties the table: the last view stays with stale dimming (ADR-003) and the shell
+    health indicator reports the worker (shell spec).
+- **States**: as listed.
+- **Interaction**: "Clear filter" button.
+- **Data binding**: `ProcessTableView.rows.is_empty()` and the filter text.
+- **Build**: `tree_table.rs` renders `delegate.empty_text()` and an optional button when
+  `row_count() == 0`.
+- **Performance**: n/a.
+- **Accessibility**: text plus a button; the status bar reads "0 / 296 Processes".
+- **Tests**: `empty_filter_state_shows_text_and_button`, `no_skeleton_on_processes_tab`.
+- **Phase**: P1.
+- **Decided here**: texts, y position, button, header suppression when nothing matches.
