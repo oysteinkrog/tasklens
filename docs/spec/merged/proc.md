@@ -913,3 +913,76 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: BUILD (plus the restricted count)
 - Phase: P1
 - Privilege: none
+
+---
+
+## F. KWin bridge and window features
+
+### PROC-052 KWin window bridge
+- Was: v1 PROC-030; r2 PROC-059
+- Source: TS window features L29074-29080, L29201-29213, [CL 0.8.30] | PLAN section 7 | R-001, R-046 | ADR-003, ADR-004, ADR-005
+- Behaviour: gives tasklens a live map of PID to windows (title, class, desktop file, state, geometry, internal ID) on KDE Plasma. App titles, the Name window button, Show Window, the window picker, the Windows column, the Properties window block and the pin buttons use it. On any other desktop these features are hidden and the toast "Window features need KDE Plasma" is shown once when one is first requested.
+- Linux data/mechanism:
+  - A `tl-engine` D-Bus worker `workers/dbus_kwin.rs`, `SourceId::KWin`, event-driven, on the engine's session-bus connection.
+  - Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus.
+  - At start it writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js`, loads it with `org.kde.kwin.Scripting.loadScript(path, "tasklens-bridge")` and starts it.
+  - tasklens exports `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s json)`, on its bus name `io.github.oysteinkrog.Tasklens`.
+  - The script sends the full window list once, then an update on `workspace.windowAdded`, `windowRemoved`, `windowActivated` and each window's `captionChanged`, through `callDBus(...)` to that method. Each entry carries `internalId`, `pid`, `caption`, `resourceClass`, `desktopFileName`, `minimized`, `maximized`, `keepAbove`, `frameGeometry` and `windowType`.
+  - The engine publishes it as the `Snapshot.windows: Arc<WindowsSnapshot>` component keyed by PID; without the bridge it is empty with validity `Unsupported`.
+  - Commands (activate, close, keep above, pick) arrive as `Command::KWin(KWinCommand)` and run as one-shot scripts `tasklens-cmd-<n>` with the parameters embedded, which unload themselves. KWin scripts cannot receive D-Bus signals (U-13). The picker uses the script `tasklens-pick`.
+  - On exit tasklens calls `unloadScript("tasklens-bridge")`.
+  - The X11 EWMH fallback from r2 is Dropped: R-046.
+- Verdict: ADAPT (replaces Win32 window enumeration)
+- Phase: P2
+- Privilege: none. KWin scripting is open to session-bus clients.
+
+### PROC-053 App window titles and the Name-cell window button
+- Was: v1 PROC-031; r2 PROC-014
+- Source: TS [IMG adv_sheet_01 "ShareX - Image editor - 1280x800"], 2.1 [CL 0.8.30]
+- Behaviour:
+  - App rows show the title of their most recently active window as dimmed text after the name (PROC-008).
+  - Rows that own one or more top-level windows show a small window icon at the right edge of the Name cell, on hover and on the selected row. Clicking it opens a popup listing each window by title ("Untitled window" when the caption is empty). Clicking an entry activates that window.
+  - For app rows the list covers all PIDs of the app.
+  - Without the bridge there is no title and no button.
+- Linux data/mechanism: `WindowsSnapshot` joined by PID; activation through `KWinCommand` activate.
+- Verdict: ADAPT (HWND enumeration becomes the KWin bridge)
+- Phase: P2
+- Privilege: none
+
+### PROC-054 Show Window
+- Was: v1 PROC-061; r2 PROC-057
+- Source: TS L29289, toasts "Process window shown.", "No window found"
+- Behaviour: "Show Window" brings the most recently active window of the process (or, for app rows, of any process in the app) to the front and un-minimizes it. The item is enabled only when such a window exists, and hidden when the bridge is unavailable. Toasts: "Process window shown." and "No window found".
+- Linux data/mechanism: one-shot KWin script `w.minimized = false; workspace.activeWindow = w;` for the window whose `pid` matches. The X11 `_NET_ACTIVE_WINDOW` fallback is Dropped: R-046.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### PROC-055 Window picker ("+" button)
+- Was: v1 PROC-062; r2 PROC-058
+- Source: TS 1.1, 7, `chrome.window_picker` L28333, L30131, tooltips L29201-29213, [CL 0.8.4] | APP-002, APP-006
+- Behaviour:
+  - A toolbar "+" button with tooltip "Select process by window", on every tab (APP-002).
+  - Clicking it arms the picker with the toast "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels." KWin shows its crosshair.
+  - A plain click on a window selects its process: tasklens switches to the Processes tab, clears a filter that hides it, and scrolls to it through the jump target (PROC-071).
+  - Ctrl+click ends that process with SIGTERM after a confirmation. tasklens reads Ctrl from GPUI modifiers when it has focus; when it cannot see the modifier, the confirmation dialog offers "Terminate" next to "Select".
+  - Desktop, panel, notification and OSD windows are ignored, with the toast "No window found". Esc gives "No window selected".
+  - Picking a tasklens window selects tasklens. A PID that is not in the table gives "Unknown process".
+  - Hidden on non-KDE sessions.
+- Linux data/mechanism:
+  - `org.kde.KWin.queryWindowInfo()` on `/KWin` does the interactive pick and returns the window's map with `uuid`.
+  - If the map has no `pid` (U-14), the `tasklens-pick` script looks up `workspace.windowList()` by `internalId == uuid` and returns the PID over the bridge.
+  - Shell windows are filtered by `windowType` (desktop, dock, notification, onScreenDisplay).
+  - The X11 pointer-grab fallback is Dropped: R-046.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+
+### PROC-056 Pin on top for tasklens windows
+- Was: v1 PROC-063
+- Source: TS L30218-30221 pin, [CL 0.8.25] | APP-009 | R-073
+- Behaviour: the pin button is shown on every secondary window (Process Properties, App Properties, Run, Handle Search, the rescue window) and on the main window. When pinned, the window stays above other windows. Only the main window's state persists (`window.always_on_top`).
+- Linux data/mechanism: on KDE it sets `keepAbove` through the bridge (one-shot script matched by tasklens's PID and window caption); on X11 it sends `_NET_WM_STATE_ABOVE`; elsewhere the button is disabled with the tooltip "Not supported by this desktop". Wayland has no client protocol for this.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
