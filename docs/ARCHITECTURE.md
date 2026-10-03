@@ -57,10 +57,10 @@ tasklens/
     tl-gpu-probe/         # bin: the only process that loads NVML
     tl-ui/                # lib: GPUI views, chart element, process table, theme
     tl-app/               # bin "tasklens": main, wiring, single instance, settings store, logging
-    tl-history/           # lib, later phase: history segment format and store (ADR-012)
-    tl-tray/              # lib, later phase: StatusNotifierItem tray and tray graph rasterizer
-    tl-helper/            # bin, later phase: pkexec helper for privileged process actions
-    tl-netmon/            # bin, later phase: privileged eBPF per-process network collector
+    tl-history/           # lib, P3: history segment format, store and rolling window (ADR-012)
+    tl-tray/              # lib, P3: StatusNotifierItem tray and tray graph rasterizer
+    tl-helper/            # bin, P3: pkexec helper for privileged process actions
+    tl-netmon/            # bin, P4: privileged eBPF per-process network collector
   xtask/                  # bin, not shipped: check-deps, capture-fixture, bench runner
   assets/
     fonts/                # bundled TTFs (ADR-009)
@@ -69,11 +69,11 @@ tasklens/
   packaging/
     PKGBUILD
     io.github.oysteinkrog.Tasklens.desktop
-    io.github.oysteinkrog.Tasklens.policy     # polkit, later phase
+    io.github.oysteinkrog.Tasklens.policy     # polkit, P3
   docs/
 ```
 
-Later-phase crates are not created until their phase starts. Their names and dependency rows below are reserved now.
+Crates for P3 and P4 are not created until their phase starts. Their names and dependency rows below are reserved now.
 
 **Allowed dependencies.** A crate may depend only on what its row lists (plus `[dev-dependencies]`, which are unrestricted except Tokio rules below).
 
@@ -82,10 +82,10 @@ Later-phase crates are not created until their phase starts. Their names and dep
 | tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustix (feature `time` only, for `clock_gettime`) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
-| tl-engine | tl-model, tl-collect, tl-ops, tl-history (later) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec |
+| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde |
 | tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON) |
-| tl-app | tl-model, tl-engine, tl-ui, tl-tray (later) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
+| tl-app | tl-model, tl-engine, tl-ui, tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni |
 | tl-helper | tl-model, tl-ops | rustix, postcard, serde |
@@ -120,7 +120,7 @@ Hard rules:
 
 - The engine runtime can be replaced by changing `tl-engine` only.
 - The UI can be tested against a fake engine and replaced by an eframe UI crate without touching the engine.
-- `tl-ops` is shared by the unprivileged engine and the later root helper, so privileged code paths are the same code.
+- `tl-ops` is shared by the unprivileged engine and the P3 root helper, so privileged code paths are the same code.
 
 ### Rejected alternatives
 
