@@ -700,25 +700,34 @@ Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `
 
 | SourceId | Module | Phase | Work |
 |---|---|---|---|
-| `Cpu` | `workers/cpu.rs` | 1 | `/proc/stat`, cpufreq, CPU temperature |
-| `Memory` | `workers/memory.rs` | 1 | `/proc/meminfo`, zram `mm_stat`, `/proc/vmstat` |
-| `Disk` | `workers/disk.rs` | 1 | `/proc/diskstats`, `/sys/block` enumeration |
-| `Net` | `workers/net.rs` | 1 | `/proc/net/dev`, `/sys/class/net` enumeration |
-| `GpuNvidia` | `workers/gpu_nvidia.rs` | 1 | client of `tl-gpu-probe` (ADR-007) |
-| `GpuDrm` | `workers/gpu_drm.rs` | later | AMD and Intel via sysfs and DRM fdinfo |
-| `Sensors` | `workers/sensors.rs` | 1 | hwmon temperatures and fans |
-| `Processes` | `workers/processes.rs` | 2 | full process sweep |
-| `ProcessDetail` | `workers/process_detail.rs` | 2 | PSS/USS and other per-key enrichment |
-| `Connections` | `workers/connections.rs` | 3 | sock_diag dump and socket-to-pid map |
-| `SystemdSystem` | `workers/dbus_systemd.rs` | 3 | system manager over the system bus |
-| `SystemdUser` | `workers/dbus_systemd.rs` | 3 | user manager over the session bus |
-| `Logind` | `workers/dbus_logind.rs` | 1 | `PrepareForSleep` signal (ADR-008) |
-| `Startup` | `workers/startup.rs` | 3 | XDG autostart and systemd user unit files |
-| `Inventory` | `workers/inventory.rs` | 3 | static hardware and OS information |
-| `Udisks` | `workers/dbus_udisks.rs` | later | disk model, SMART, partitions, eject |
-| `UPower` | `workers/dbus_upower.rs` | later | batteries |
-| `NetworkManager` | `workers/dbus_nm.rs` | later | interface kind, addresses, Wi-Fi |
-| `HistoryRecorder` | `workers/history.rs` | later | ADR-012 |
+| `Cpu` | `workers/cpu.rs` | P1 | `/proc/stat`, cpufreq, CPU temperature |
+| `Memory` | `workers/memory.rs` | P1 | `/proc/meminfo`, zram `mm_stat`, `/proc/vmstat` |
+| `Disk` | `workers/disk.rs` | P1 | `/proc/diskstats`, `/sys/block` enumeration |
+| `Net` | `workers/net.rs` | P1 | `/proc/net/dev`, `/sys/class/net` enumeration |
+| `GpuNvidia` | `workers/gpu_nvidia.rs` | P1 | client of `tl-gpu-probe` (ADR-007) |
+| `GpuDrm` | `workers/gpu_drm.rs` | P2 (AMD), P3 (Intel) | AMD and Intel via sysfs and DRM fdinfo |
+| `Sensors` | `workers/sensors.rs` | P1 | hwmon temperatures and fans |
+| `Processes` | `workers/processes.rs` | P1 | full process sweep |
+| `ProcessDetail` | `workers/process_detail.rs` | P1 | PSS/USS and other per-key enrichment |
+| `Connections` | `workers/connections.rs` | P2 | sock_diag dump and socket-to-pid map |
+| `SystemdSystem` | `workers/dbus_systemd.rs` | P2 | system manager over the system bus |
+| `SystemdUser` | `workers/dbus_systemd.rs` | P2 | user manager over the session bus |
+| `Logind` | `workers/dbus_logind.rs` | P1 | `PrepareForSleep` signal (ADR-008) |
+| `Startup` | `workers/startup.rs` | P2 | XDG autostart and systemd user unit files |
+| `Inventory` | `workers/inventory.rs` | P2 | static hardware and OS information |
+| `KWin` | `workers/dbus_kwin.rs` | P2 | KWin window bridge, event-driven (below) |
+| `Udisks` | `workers/dbus_udisks.rs` | P2 | disk model, SMART, partitions, eject |
+| `UPower` | `workers/dbus_upower.rs` | P2 | batteries |
+| `NetworkManager` | `workers/dbus_nm.rs` | P2 | interface kind, addresses, Wi-Fi |
+| `HistoryRecorder` | `workers/history.rs` | P3 | ADR-012 store and rolling window |
+
+**KWin bridge worker.** `workers/dbus_kwin.rs` runs on the engine's session-bus connection. Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus. Otherwise the window features are hidden and the UI shows the toast "Window features need KDE Plasma". The worker:
+- writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js` and loads it as KWin script plugin `tasklens-bridge`;
+- exports object `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s json)`, which the script calls with the window list;
+- publishes the list as `Snapshot.windows` (ADR-003);
+- runs commands (activate, close, keep above, pick) from `Command::KWin(KWinCommand)` (ADR-005) as one-shot scripts named `tasklens-cmd-<n>`; the window picker uses `tasklens-pick`.
+
+There is no X11 EWMH fallback for the window features in v1 (X11 is best effort, ADR-010).
 
 **Sampling worker loop** (every periodic worker follows this shape):
 
@@ -777,7 +786,7 @@ pub enum EngineMsg {
 
 Loop: `recv(&cx)` one message, then drain with `try_recv` until empty (at most 256 messages), apply all, then publish once. It never awaits between `latest.store(..)` and `wake_tx.try_send(())`. It owns: all `SeriesRing`s, the process table state, the current `TableQuery`, metadata caches, the device catalog and health. It builds `ProcessTableView` (sort, filter, group, tree flatten) whenever processes or the query change.
 
-Reducer state is bounded: process metadata cache holds live processes plus at most 256 exited ones; exited records are removed 2 s after exit.
+Reducer state is bounded: process metadata cache holds live processes plus at most 256 exited ones. Exited records are kept for the linger time, `2 × processes.interval_ms` clamped to 1..=3 s, then removed.
 
 **Shutdown** (`EngineHandle::shutdown(self, total: Duration) -> ShutdownReport`), called on the main thread after GPUI has stopped (ADR-010):
 1. Drop the UI-side senders (done by dropping the `EngineHandle` internals).
