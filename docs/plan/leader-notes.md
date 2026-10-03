@@ -31,8 +31,11 @@ pass once all batch writers finish.
 
 - One pass replacing the old `flock ... systemd-run ...` build line with `heavy-build` in every
   bead description.
-- `br sync --flush-only`, then compact the database (WAL reached 626 MB, `.br_history` 410 MB)
-  once no writer holds it.
+- `br sync --flush-only` at the end (writers use `--no-auto-flush`). The database is
+  FrankenSQLite (fsqlite), so never touch it with the sqlite3 tool. Its WAL is 640 MB and did
+  not shrink with a lone write; a lone write still takes 1.7 s, so it is not urgent. If it
+  matters later, rebuild from the flushed JSONL with `br doctor --repair` after a backup.
+- Delete old `.beads/.br_history` copies (410 MB) once the round is done, after asking.
 - Collect every batch's open items, settle them (new R entries), apply them to beads.
 - Quality pass: `br dep cycles`, `br lint`, orphan and coverage checks.
 - Astra review of the plan and beads after Codex returns (Sunday 4 October 11:12), then oracle
