@@ -244,3 +244,40 @@ Steps of UI-SHL-110 by bead: 1 to 3 and 7 to 10 in E33-A1, 4 and 5 in E33-A2, ex
 - **E01-OI-15 Collection-cost measurement method and timing.** ADR-014 gives the gates but no method, and they need P1 workers. Recommendation: sum utime + stime of threads named `tl-engine*` plus the probe child over 60 s; run in E01-024 (priority 1, after E01-A2), allowed by decision rule step 4.
 - **E01-OI-16 First-frame log line in P0.** E01-017 reads `first_frame_ms` (UI-SHL-110 step 11). Recommendation: confirm that E20-A1 (P0) writes that log line; otherwise the first-frame gate is recorded at P1.
 
+## E31 Tray
+
+Epic bead `tasklens-wox`. All beads are P3 (priority 3).
+
+| Plan key | Bead ID | Title | P | Depends on |
+|---|---|---|---|---|
+| E31-001 | tasklens-wox.3 | Tray contract types in tl-model (TrayModel, TrayEvent, channels) | 3 | E03-A2 (tasklens-as2.2) |
+| E31-002 | tasklens-wox.4 | E31: add tl-tray to root Cargo.toml members with the crate skeleton | 3 | E02-A1 (tasklens-v9m.1), E31-001 |
+| E31-003 | tasklens-wox.5 | Tray graph icon rasterizer (raster.rs, 22 and 44 px ARGB32) | 3 | E31-002 |
+| E31-004 | tasklens-wox.6 | Tray dbusmenu contents for graph and main icons (menu.rs) | 3 | E31-002 |
+| E31-005 | tasklens-wox.7 | ksni Tray item for graph and main icons (item.rs) | 3 | E31-003, E31-004 |
+| E31-A1 | tasklens-wox.1 | Tray crate (lib.rs, model.rs: service thread, update rule, main icon rule; U-31) | 3 | E31-005 |
+| E31-006 | tasklens-wox.8 | E31: add tray_bridge module to tl-ui lib.rs | 3 | E16-A1 (tasklens-fut.1) |
+| E31-007 | tasklens-wox.9 | Tray bridge: graph list, 1 Hz model, tooltips, main icon rule, demand | 3 | E31-006, E31-001, E16-A1, E17-A1 (tasklens-lgw.1), E19-A1 (tasklens-yrf.1), E20-A2 (tasklens-jqk.2), E26-A1 (tasklens-xdh.1) |
+| E31-A2 | tasklens-wox.2 | Tray bridge (events, add and remove actions, toasts, window actions) | 3 | E31-007, E16-A2 (tasklens-fut.2), E20-A1 (tasklens-jqk.1) |
+| E31-008 | tasklens-wox.10 | E31: start the tl-tray thread from tl-app main.rs | 3 | E33-A1 (tasklens-cr0.1), E31-A1, E31-A2 |
+| E31-009 | tasklens-wox.11 | E31: add close-to-tray and minimize-to-tray rows to the close decision | 3 | E20-A1 (tasklens-jqk.1), E31-A2 |
+| E31-010 | tasklens-wox.12 | E31: add the Tray rows to window/settings/startup_window.rs | 3 | E21-A2 (tasklens-bj6.2), E31-A2 |
+| E31-011 | tasklens-wox.13 | E31: add the tray item to pages/processes/menu.rs | 3 | E22-A2 (tasklens-pdu.2), E31-A2 |
+| E31-012 | tasklens-wox.14 | E31: add Add tray icon graph to pages/minigraph/menu.rs | 3 | E26-A1 (tasklens-xdh.1), E31-A2 |
+
+Note: E31-007 depends on E17-A1, E19-A1 and E20-A2, which are anchors outside the E31 row of 00-epics section 4 (palette constants, chart scale, `TlSettings`). All three are anchors, so no cycle; `br dep cycles` is clean.
+
+### Open items
+
+1. **E31-1, shared tray types have no legal home.** tl-ui (bridge) and tl-tray (service) cannot depend on each other (ADR-001; tl-tray pulls zbus through ksni), so `TrayModel`, `TrayEvent` and the channels must live in `tl-model`, which E03 owns up front with a frozen module list. Recommendation: approve E31-001 as written (new `tl-model/src/tray.rs` plus one `pub mod tray;` line), or move it into an E03 bead. Related: `raster::render` takes a `max: f32` instead of the `&mut ScaleState` in UI-PRF-050, because the scale lives in tl-ui; model channel `bounded(2)` with `try_send` (event channel `bounded(16)` is from UI-PRF-051). E31-001 is marked pending.
+2. **E31-2, tl-app chain edit not listed.** Starting the tray thread needs a `tl-tray` dependency and a few lines in `tl-app/src/main.rs` (E33). Section 2 lists main.rs chain edits only for E01 and E32. Recommendation: add E31 to that row (depends on E33-A1). E31-008 is marked pending.
+3. **E31-3, close decision row 1 and minimize to tray.** They belong to E31 (coverage: UI-SHL-113 "E31 row 1 and tray") but the close decision is in E20's `window/main.rs` and the Minimize handler in `window/titlebar.rs`, both owner-only. Recommendation: add a chain-edit rule for E31 there (depends on E20-A1), or move E31-009's deliverable into an E20 bead that depends on E31-A2. E31-009 is marked pending.
+4. **E31-4, main tray icon pixels.** UI-SHL-113 says "the app icon at 22 x 22 and 44 x 44 ARGB32", but the app icon is an SVG and neither tl-tray nor tl-app can rasterize SVG. Recommendation: commit two pre-rendered raw ARGB32 files `assets/icons/tray-22.argb` and `tray-44.argb` (rendered once from `assets/icons/tasklens.svg`, chain edit to E15's assets folder) and `include_bytes!` them in tl-app. Alternative: SNI `IconName` with the installed hicolor icon name. E31-A1 takes the pixels as a parameter, so only E31-008 waits on this.
+5. **E31-5, add-tray-graph action plumbing.** (a) `PerfAddTrayGraph { source }` appears in E24's card and page menus and E26's card menu but has no declared owner; recommendation: declare it in `tray_bridge.rs` (E31-A2, done that way) and have E24's P3 menu items (UI-PRF-014 item 5, UI-PRF-015 item 8) depend on E31-A2; E24 must confirm it builds those items. (b) processes.md names `AddTrayGraph { column }` / `RemoveTrayGraph` read from `MenuTargets`, which needs a handler in `pages/processes/mod.rs` where E31 has no chain edit; recommendation (used in E31-011): build the source when the menu is built and dispatch `AddTrayGraph { source, column }` / `RemoveTrayGraph { source, column }`. (c) Row kind to source: process row `process:`, app row `app:<id>`, unit row `app:<unit name>`; the "name filter" tray mode (PROC-094) has no entry point in the row menu. Please confirm.
+6. **E31-6, accent label in the tray Graph color menu.** UI-PRF-051 says "Accent"; UI-SHL-085 says the tray variant shows "the same names" as the in-app menu, whose first row is "Accent (theme default)". E31-004 uses "Accent (theme default)"; one string to change if the leader picks "Accent".
+7. **E31-7, tray toasts while the main window is hidden.** UI-PRF-051 says they show on the next render; UI-FND toast rule 8 says Errors go to a desktop notification and the rest are dropped, nothing replayed. E31-A2 pushes through `ToastQueue` and lets rule 8 decide. Recommendation: keep rule 8 and drop the UI-PRF-051 sentence.
+8. **E31-8, tray demand and tooltip gaps.** (a) `Demand.tray: TrayDemand` (ADR-008) has no fields defined anywhere; E03 must define it. Recommendation: `TrayDemand { visible: bool }` (the tray counts as a visible surface) with the tray's sources expressed through the normal `Demand` fields and the same process-identity mechanism the minigraph process cards use. (b) Tooltip forms for `vram` and `gpu_temp` page graphs are not in the UI-PRF-051 table; E31-007 uses `VRAM Usage` with the size value and `GPU temp` with `52 °C`. (c) Main tooltip "Disk" and "GPU" metrics are not defined; E31-007 uses busiest disk active time and the first GPU in sidebar order (R-085). (d) APP-047 and UI-SHL-113 show the main tooltip on one line; PERF-089 and UI-PRF-051 say five lines; E31-007 uses five lines joined by `\n`.
+9. **E31-9, minigraph source resolver API.** E31-007 resolves tray graph sources with the resolver in `pages/minigraph/sources.rs` (E26-A1). Its function names are not fixed in the UI docs. The B6 writer should name them in E26-A1 so E31-007 can cite them; E31-007 then needs a one-line update.
+10. **E31-10, tray availability before any item exists.** "No system tray available" needs to know whether a `StatusNotifierWatcher` is on the bus even when no tray item is registered, but tl-tray learns that only through ksni callbacks of a registered item, and may not use zbus directly. E31-007 assumes "available" until the first watcher event (a failed registration then shows "Unable to add tray icon graph"). Recommendation: accept, or allow `zbus` in tl-tray's ADR-001 row for a `NameHasOwner` and `NameOwnerChanged` watch.
+11. **Not mine, noted.** The Settings menu's "Window & startup" tray check items (shell.md menu table) are E21's own P3 items in `menus_settings.rs`; E31 does not bead them.
+
