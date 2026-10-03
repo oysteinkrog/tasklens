@@ -1637,3 +1637,296 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   rows shown only when set; label for X-KDE-autostart-phase.
 
 ---
+
+# D. Connections tab
+
+### UI-SYS-060 Connections page layout
+
+- **Implements**: SYS-028, SYS-036, R-023 (tab 5), R-042.
+- **Anatomy** (no filter strip):
+
+  ```
+  ┌ tab strip (shell) ──────────────────────────────────────────── Filter: [        ] ┐
+  ├ Proto ↑ ─ Address local ───────── Address foreign ─────── State ──────── PID ──── Process ┤ 28
+  │ TCP      0.0.0.0:22                *:*                     LISTENING        812   ⚙ sshd      │
+  │ TCP      192.168.1.10:51234        140.82.112.4:443        ESTABLISHED     4321   ◉ firefox   │
+  │ TCP      [::1]:631                 *:*                     LISTENING        690   ⚙ cupsd     │
+  │ TCP      192.168.1.10:40012        34.107.221.82:443       TIME-WAIT          -   No owner (kernel) │
+  │ UDP      0.0.0.0:5353              *:*                     UNCONNECTED      790   ⚙ avahi-daemon │
+  ├──────────────────────────────────────────────────────────────────────────────────┤
+  │ 214 Total | 168 TCP | 46 UDP | 97 EST | 31 LISTEN                                 │ 22
+  └──────────────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  Flat list. Rows keep identity by socket cookie across the 2 s refresh, so selection and scroll
+  position are stable.
+- **States**: loading UI-SYS-004; empty and error UI-SYS-005. Ctrl held: frozen on the paused
+  snapshot (R-042). Rows that appear or disappear are not highlighted (chosen; TaskSlinger does not
+  highlight them).
+- **Interaction**: key context `ConnectionTable` inside `Table`.
+- **Data binding**: `Snapshot.connections` (`ComponentMask::CONNECTIONS`) and `Snapshot.processes`
+  (`::PROCESSES`) for owner names and icons. `Demand.connections = true` while the tab is active or
+  a Connection Properties window is open.
+- **Build**: `ConnectionsPage` in `crates/tl-ui/src/pages/connections.rs` with
+  `table: Entity<TlTreeTable<ConnectionsDelegate>>`.
+- **Performance**: one row rebuild per 2 s; visible cells only re-format when values change
+  (`CellTextCache`). Addresses and states rarely change, so the hit rate stays high.
+- **Accessibility**: as tables.
+- **Tests**: `connections_selection_stable_across_refresh` (two snapshots with the same cookies in a
+  new order; selection stays on the cookie); `connections_paused_on_ctrl`.
+- **Phase**: P2.
+- **Decided here**: no new or closed highlight.
+
+### UI-SYS-061 Connections columns
+
+- **Implements**: SYS-029, SYS-030, SYS-035, SYS-036, SYS-037, R-011, table (d).
+- **Anatomy**:
+
+  | Id | Header label | Default width | Min width | Align | Content | Default |
+  |---|---|---|---|---|---|---|
+  | `proto` | "Proto" | 90 | 60 | left | "TCP" or "UDP" | visible |
+  | `local` | "Address local" | 260 | 120 | left, `tnum` | `a.b.c.d:port`, `[v6%scope]:port`, `0.0.0.0:*`, `[::]:*` | visible |
+  | `foreign` | "Address foreign" | 260 | 120 | left, `tnum` | as local; `*:*` for listeners and unconnected UDP | visible |
+  | `state` | "State" | 120 | 90 | left | SYS-029 labels, UI-SYS-003 colours | visible |
+  | `pid` | "PID" | 80 | template `"999999 +99"` | right, `tnum` | UI-SYS-062 | visible |
+  | `process` | "Process" | 180 | 60 | left | icon 16 and display name | visible |
+  | `user` | "User" | 120 | 60 | left | user from the diag uid | hidden |
+  | `family` | "Family" | 70 | 60 | left | "IPv4" or "IPv6" | hidden |
+  | `local_port` | "Local port" | 90 | template `"99999"` | right | port number | hidden |
+  | `foreign_port` | "Foreign port" | 90 | template `"99999"` | right | port, empty for `*` | hidden |
+  | `recv_q` | "Recv-Q" | 80 | template `"999999"` | right | count, thin-space grouped | hidden |
+  | `send_q` | "Send-Q" | 80 | template `"999999"` | right | count | hidden |
+  | `interface` | "Interface" | 100 | 60 | left | `if_indextoname`, empty for 0 | hidden |
+  | `inode` | "Inode" | 100 | template `"9999999999"` | right | integer, no grouping (chosen; it is an id) | hidden |
+  | `service` | "Service" | 200 | 60 | left | owning unit id | hidden |
+  | `remote_host` | "Remote host" | 240 | 60 | left | UI-SYS-069 | hidden, P4 |
+  | `netns` | "Namespace" | 160 | 60 | left | UI-SYS-070 | only with "All" namespaces, P4 |
+
+  Default-column widths are spec; optional widths are chosen.
+- **States**: default sort `proto` ascending, then local port ascending (R-011). Sort keys (chosen):
+  addresses sort by family, address bytes, then port; State sorts in the SYS-029 table order
+  (LISTENING, SYN-SENT, SYN-RECEIVED, ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING,
+  LAST-ACK, TIME-WAIT, CLOSED, UNKNOWN, UNCONNECTED, CONNECTED); PID sorts unknown ("?") and none
+  ("-") after all numbers.
+- **Interaction**: header click sorts; shared header menu; the column picker shows the Remote host
+  entry with a second line "Sends reverse DNS queries for foreign addresses." (new) in
+  `text_secondary`.
+- **Data binding**: `state.toml` `[sort.connections]`, `[columns.connections]`.
+- **Build**: `ConnectionsDelegate::columns()`.
+- **Tests**: `connections_default_sort`; `connections_address_sort_numeric`.
+- **Phase**: P2 (remote_host and netns P4).
+- **Decided here**: optional widths; sort keys; inode format; picker note.
+
+### UI-SYS-062 Connection row anatomy
+
+- **Implements**: SYS-029, SYS-030.
+- **Anatomy**:
+
+  | Cell | Normal | Shared socket | Kernel-owned (TIME-WAIT, inode 0) | Other user's socket, unresolved |
+  |---|---|---|---|---|
+  | pid | "4321" | "4321 +2" (`+N` in `text_secondary`) | "-" `text_secondary` | "?" `text_secondary` |
+  | process | icon 16, display name | owner with the lowest PID | "No owner (kernel)" `text_secondary`, no icon | lock icon 12 (ADR-003 Restricted glyph), `text_secondary` |
+
+  - Tooltip on PID or Process for a shared socket: one line per owner "PID <n>  <name>" (all
+    owners, max 16 lines then "and <n> more", chosen).
+  - Tooltip for unresolved: "Owned by <user>. Needs the tasklens helper to identify the process"
+    (spec). From P3 with the helper unlocked these rows resolve to normal owners.
+  - Addresses use `tnum` so digits line up; IPv4-mapped IPv6 show in IPv4 form (spec).
+- **States**: hover, selected, focused as tables. Pending close: State cell shows "Closing…" (new)
+  in `status.info` until the row goes or the action fails.
+- **Interaction**: double-click or Enter opens Connection Properties.
+- **Data binding**: `ConnectionsSnapshot.records[i]`: `cookie`, `proto`, `family`, `local`,
+  `foreign`, `state`, `owners: SmallVec<[ProcessKey; 1]>`, `owner_validity: Validity`, `uid`,
+  `inode`, `ifindex`, `recv_q`, `send_q`, `unit: Option<UnitRef>`, `tcp: Option<TcpInfoView>`.
+  Owner name and icon come from `Snapshot.processes` by `ProcessKey`.
+- **Build**: `ConnectionsDelegate::paint_cell`. Addresses are formatted by the engine once per
+  socket (`Arc<str>`) since they never change for a cookie (chosen; saves UI formatting).
+- **Performance**: the address strings are shared, so a refresh with unchanged sockets formats
+  nothing.
+- **Accessibility**: row name "<Proto> <local> to <foreign>, <State>, <Process>".
+- **Tests**: `conn_row_shared_pid_plus_n`; `conn_row_kernel_owner`; `conn_row_restricted_lock`.
+- **Phase**: P2 (helper resolution P3).
+- **Decided here**: shared-owner pick and tooltip cap; "Closing…"; engine-formatted addresses.
+
+### UI-SYS-063 Connections context menu
+
+- **Implements**: SYS-032, SYS-031, SYS-033, SYS-010, R-012, R-091 (applied).
+- **Anatomy**: `TlMenu`, min width 220:
+
+  | # | Label | Key hint | Action | Shown / enabled |
+  |---|---|---|---|---|
+  | 1 | "Copy" | | `table::CopyCell` | always (chosen addition, R-012) |
+  | 2 | "Copy row" | Ctrl+C | `table::CopyRow` | always |
+  | 3 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always |
+  | 4 | "Copy local address" | | `connections::CopyLocal` | one target |
+  | 5 | "Copy foreign address" | | `connections::CopyForeign` | one target; disabled for `*:*` |
+  | – | separator | | | |
+  | 6 | "Close TCP connection" | | `connections::CloseTcp` | shown from P3 for TCP targets; see UI-SYS-064 |
+  | – | separator | | | |
+  | 7 | "Jump to process" | | `connections::JumpToProcess` | one target; disabled with no owner (tooltip "No owning process for this connection") |
+  | 8 | "Go to service" | | `connections::GoToService` | shown when the owner belongs to a systemd unit |
+  | 9 | "Properties" | Enter | `table::OpenProperties` | always |
+
+- **States**: disabled tooltips as listed; restricted owner: Jump is disabled with the
+  Restricted tooltip.
+- **Interaction**: capture at open; Shift+F10. "Copy local address" copies the address as shown,
+  toast "Local address copied"; "Copy foreign address" toast "Foreign address copied" (spec).
+- **Data binding**: captured `SmallVec<[u64; 1]>` cookies plus the records at open.
+- **Build**: `ConnectionsDelegate::context_menu`.
+- **Tests**: `conn_menu_order`; `conn_menu_close_hidden_before_p3` (feature flag off).
+- **Phase**: P2 (item 6 from P3).
+- **Decided here**: "Copy" cell item.
+
+### UI-SYS-064 Close TCP connection flow
+
+- **Implements**: SYS-031, R-002, R-004 `SockDestroy`.
+- **States of the menu item**:
+
+  | Condition | Item |
+  |---|---|
+  | Before P3 | hidden |
+  | UDP target, or TIME-WAIT | hidden (spec: shown for TCP in any state except TIME-WAIT) |
+  | Helper not installed | disabled, tooltip "Needs the tasklens helper" (spec) |
+  | Kernel answered EOPNOTSUPP earlier this session | disabled, tooltip "Kernel lacks CONFIG_INET_DIAG_DESTROY" (spec) |
+  | Pending close on this cookie | disabled, tooltip "Closing…" |
+  | otherwise | enabled |
+
+- **Flow**:
+  1. Targets that are LISTENING need confirmation: `TlDialog` window titled "tasklens" (APP-045),
+     heading "Close listening socket?", text "The program will stop accepting new connections on
+     <addr>." (spec), buttons "Close socket" (danger) and "Cancel"; focus on "Cancel" (chosen).
+     With several listening targets: heading "Close <n> listening sockets?" (new) and one address
+     per line (max 5, then "and <n> more").
+  2. Toast "TCP connection close requested" (spec; Info, pending icon).
+  3. If the helper session is locked, polkit asks for `io.github.oysteinkrog.tasklens.helper`; the
+     toast stays pending. Cancel: "Authentication cancelled".
+  4. Result, replacing the toast: "TCP connection closed" (Success) or "Failed to close TCP
+     connection: <errno text>" (Error) (spec). EOPNOTSUPP also sets the session flag above.
+  5. The row disappears at the next refresh. Until then it shows "Closing…".
+- **Data binding**: `ActionKind::SockDestroy` with target `ActionTarget::Socket { cookie,
+  family, proto, four_tuple }` (new; open item O-2). `ConnectionsSnapshot.destroy_supported:
+  Option<bool>` (new).
+- **Build**: handler in `pages/connections.rs`; dialog through `TlDialog`.
+- **Tests**: `close_listening_requires_confirm`; `close_eopnotsupp_disables_item`;
+  `close_toast_sequence`.
+- **Phase**: P3.
+- **Decided here**: Cancel focus; plural heading; UDP hidden rather than disabled.
+
+### UI-SYS-065 Jump to owning process and Go to service
+
+- **Implements**: SYS-033, SYS-032, SYS-010, PROC-071.
+- **Interaction**:
+  - "Jump to process" uses the PROC-071 entry point with the owner `ProcessKey` (the lowest PID when
+    shared). Toasts: "Switched to owning process." / "Owning process not visible in the current
+    process view." with "Show" / "No owning process for this connection" / "Process not found in
+    current view" (spec).
+  - "Go to service" calls UI-SYS-021 with the owner's `UnitRef`, with its toasts.
+- **Tests**: `conn_jump_uses_lowest_pid`; `conn_go_to_service`.
+- **Phase**: P2.
+- **Decided here**: lowest PID for shared sockets.
+
+### UI-SYS-066 Connections copy format
+
+- **Implements**: SYS-032, R-012.
+- **Anatomy**: "Copy row" block, exactly:
+
+  ```
+  Protocol: …
+  Local address: …
+  Local port: …
+  Foreign address: …
+  Foreign port: …
+  State: …
+  PID: …
+  Process: …
+  ```
+
+  Addresses without the port; IPv6 without brackets (chosen). `*` ports print "*". Shared sockets
+  print all PIDs comma-separated (chosen). Toast "Connection copied" (spec).
+- **Tests**: `conn_copy_block_golden`.
+- **Phase**: P2.
+- **Decided here**: address and port split rules; all PIDs.
+
+### UI-SYS-067 Connections status bar, filter and refresh
+
+- **Implements**: SYS-036, SYS-037 (dropdown place).
+- **Anatomy**: status text "214 Total | 168 TCP | 46 UDP | 97 EST | 31 LISTEN", plus " | 3
+  selected". Counts follow the filter. From P4 the Namespaces control follows the text after `sp6`
+  (UI-SYS-070).
+- **Interaction**:
+  - Filter: case-insensitive substring over Proto, both addresses with ports as shown, State, PID,
+    Process and User (spec). Engine-side.
+  - F5: `RefreshNow(Connections)`; toast "Connections refreshed." (spec) when the next connections
+    version arrives or after 2 s.
+- **Data binding**: `ConnectionsSnapshot.counts` (new).
+- **Tests**: `connections_status_text`; `connections_filter_matches_port`.
+- **Phase**: P2.
+- **Decided here**: refresh toast timing.
+
+### UI-SYS-068 Connection Properties window
+
+- **Implements**: SYS-034, APP-045.
+- **Anatomy**: `TlSecondaryWindow` titled "Connection properties: <Proto> <State>" (spec), for
+  example "Connection properties: TCP ESTABLISHED", default 560 × 520, minimum 440 × 360 (chosen).
+  `TlKeyValueGrid`, label column 200, copy button per line as UI-SYS-050. Footer 48 with "Close".
+
+  | Label | Value |
+  |---|---|
+  | "Protocol / State / Family" | "TCP / ESTABLISHED / IPv4" |
+  | "Local" | "<addr> Port <n>" |
+  | "Foreign" | "<addr> Port <n>", or "*" for listeners |
+  | "Process" | `TlLink` "<name> PID <n>" that jumps (UI-SYS-065); "No owner (kernel)"; or "Restricted" |
+  | "User" | name |
+  | "Inode" | integer |
+  | "Interface" | name, or "None" |
+  | "Recv-Q / Send-Q" | "0 / 0" |
+  | "RTT" (TCP) | "0.42 ms (var 0.10 ms)" |
+  | "Congestion window" (TCP) | "10 segments" (chosen unit word) |
+  | "Bytes sent / received" (TCP) | "1.22 MiB / 34.68 MiB" |
+  | "Retransmits" (TCP) | count |
+  | "Last data received" (TCP) | "1 240 ms ago" |
+  | "Closable here" | "Yes", or "No (<reason>)": "TIME-WAIT", "UDP", "needs the tasklens helper", "kernel lacks CONFIG_INET_DIAG_DESTROY", "not available before version 3" is not shown; before P3 the reason is "not supported in this version" (chosen) |
+
+- **States**: refreshes every 2 s by cookie. When the socket is gone: the title appends " (closed)"
+  (spec), values stay in `text_secondary`. Up to 10 windows (chosen); the 11th shows "Too many
+  connection properties windows are already open" (new). Same cookie focuses its window. A missing
+  tcp_info value shows "Not reported".
+- **Interaction**: as UI-SYS-050; the Process link jumps.
+- **Data binding**: the record in `Snapshot.connections` by cookie; `Demand.connections` stays on
+  while any such window is open.
+- **Build**: `crates/tl-ui/src/windows/connection_properties.rs`.
+- **Performance**: renders at most every 2 s.
+- **Accessibility**: as UI-SYS-050.
+- **Tests**: `conn_props_closed_title`; `conn_props_tcp_lines_only_for_tcp`.
+- **Phase**: P2.
+- **Decided here**: sizes, unit words, reason texts, cap and its toast.
+
+### UI-SYS-069 Remote host column
+
+- **Implements**: SYS-035.
+- **Anatomy**: text cell. Lookup pending: the address in `text_secondary`. Name found: the name in
+  `text_primary`, tooltip the address. No name: the address in `text_primary`. Listeners and `*`
+  show empty.
+- **States**: lookups run only while the column is visible (chosen) and only for visible rows plus
+  one viewport of overscan (chosen, at most 4 at once per spec).
+- **Data binding**: `Demand.remote_host_cookies` (new, follows the visible-range rule of ADR-009).
+- **Tests**: `remote_host_pending_shows_address`.
+- **Phase**: P4.
+- **Decided here**: visible-rows-only lookups.
+
+### UI-SYS-070 Namespaces dropdown
+
+- **Implements**: SYS-037.
+- **Anatomy**: `TlButton` ghost xsmall in the status bar, label "Namespaces: Host only ▾" or
+  "Namespaces: All ▾" (chosen), opening a `TlMenu` with check items "Host only", "All".
+- **States**: without the helper, "All" is disabled with tooltip "Needs the tasklens helper". With
+  "All", the `netns` column is shown and listed first after Proto (chosen); switching back hides it.
+- **Interaction**: choosing "All" with the helper locked starts a helper session (polkit). Cancel:
+  "Authentication cancelled", the choice stays "Host only".
+- **Data binding**: `Demand.connections_all_netns: bool` (new). Session-only (chosen; no key in
+  table a).
+- **Tests**: `netns_all_adds_column`.
+- **Phase**: P4.
+- **Decided here**: label, column position, session-only.
+
+---
