@@ -119,7 +119,15 @@ and the shared tokens and components (`docs/ui/foundation.md`).
       fn on_activate(&mut self, id: Self::RowId, cx);                // Enter / double-click
       fn row_tooltip(&self, ix: usize) -> Option<AnyView>;
       fn empty_text(&self) -> Option<SharedString>;                  // UI-PRC-024
+      fn header_lines(&self) -> HeaderLines { HeaderLines::Two }     // One: header_h = 28, no totals (Properties tables, Handle Search)
+      fn columns_fixed(&self) -> bool { false }                      // true: no picker, no header menu items 2, 3, 6; resize and sort still work
   }
+
+  Reuse notes for other tables: `RowId` is an associated type, so a u64 or `(pid, tid)` works as
+  well as `NodeId`; the owner supplies finished rows (already sorted and filtered) and the table
+  only reports header clicks through `on_sort`; `row_kind` may return `Plain` for every row, which
+  draws no chevron or indent; `header_total` returning `false` for every column gives an empty
+  line 2, and `HeaderLines::One` removes it.
   ```
 
   `TlTreeTable<D>` is an `Entity` holding: `delegate: D`, `selection: Selection<D::RowId>`
