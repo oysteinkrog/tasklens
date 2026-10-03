@@ -37,8 +37,11 @@ commit. The agent sees only the bead text plus the repo, so every bead must stan
   edges.
 - **Large-file rule**: for a bead that creates a large file, the implementer commits the file
   before building or testing (CLAUDE.md). Say so in the Notes of such beads.
-- **Build rule** (goes into the Notes of every bead that builds or tests): run cargo through
-  `flock -w 7200 "$XDG_RUNTIME_DIR/heavy-build.lock" systemd-run --user --scope --quiet --collect --slice=builds.slice -p MemoryHigh=16G -p MemoryMax=18G -p MemorySwapMax=2G -p OOMPolicy=kill env CARGO_BUILD_JOBS=8 cargo ...`
+- **Build rule** (goes into the Notes of every bead that builds or tests): run every cargo
+  build, test, check, clippy or doc through `heavy-build`, for example
+  `heavy-build cargo test -p tl-model`. It waits for the machine-wide build lock and runs in a
+  memory-capped scope. On exit 137 (OOM kill) retry once, then report. On exit 75 (low disk) stop
+  and report.
 
 ## Bead description template
 
