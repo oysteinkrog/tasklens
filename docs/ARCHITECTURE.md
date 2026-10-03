@@ -1,4 +1,4 @@
-> **Note.** This file includes the reconciliation in `docs/RECONCILIATION.md` (R-001 to R-074) and the decisions in `docs/DECISIONS.md` (D-001 to D-010). If anything here still disagrees with either of those files, DECISIONS.md wins first and RECONCILIATION.md second. Phases use the canonical P0 to P4 numbering from R-072.
+> **Note.** This file includes the reconciliation in `docs/RECONCILIATION.md` (R-001 to R-138) and the decisions in `docs/DECISIONS.md` (D-001 to D-010). If anything here still disagrees with either of those files, DECISIONS.md wins first and RECONCILIATION.md second. Phases use the canonical P0 to P4 numbering from R-072.
 
 # tasklens Architecture Decision Records
 
@@ -82,10 +82,10 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustix (feature `time` only, for `clock_gettime`) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
-| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec |
+| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
-| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON) |
-| tl-app | tl-model, tl-engine, tl-ui, tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
+| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132) |
+| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni |
 | tl-helper | tl-model, tl-ops | rustix, postcard, serde |
@@ -97,7 +97,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 ```text
 tl-app -> tl-ui -> tl-model
 tl-app -> tl-engine -> {tl-collect, tl-ops, tl-history} -> tl-model
-tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper also -> tl-ops)
+tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-ops)
 ```
 
 Hard rules:
@@ -192,6 +192,9 @@ bitflags = "2"
 smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
 rustc-hash = "2.1.3"
 futures-lite = "2.6.1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }   # tl-engine public IP only; exact pin set by the bead that adds it (R-131)
+fluent-bundle = "0.15"   # tl-ui strings (R-132); exact pins set by the bead that adds them
+unic-langid = "0.9"
 zstd      = "0.13.3"     # P3
 crc32fast = "1"          # P3
 
@@ -310,11 +313,16 @@ src/devices.rs    # DeviceCatalog, DeviceIdentity
 src/system.rs     # CpuTotals, MemoryTotals, DiskTotals, NetTotals, GpuTotals, SensorReading
 src/health.rs     # SourceId, SourceHealth, SourceState
 src/actions.rs    # ActionId, ActionRequest, ActionKind, ActionTarget, ActionState, ActionEvent, ActionError
+src/command.rs    # Command, KWinCommand, SetupStep, HistoryRange, HistoryWhat, CommandError, AppRequest (ADR-005, R-136)
+src/details.rs    # DetailsSnapshot and the Properties payload types
 src/demand.rs     # Demand and its parts (ADR-008)
 src/settings.rs   # Settings types (ADR-011); no file I/O
 src/units.rs      # formatting: IEC bytes, rates, percent, durations
 src/wire.rs       # length-prefixed postcard framing (ADR-007), used by probe and helper
 src/gpu_proto.rs  # GPU probe messages (ADR-007)
+src/helper_proto.rs # helper requests and replies (ADR-006)
+src/journal.rs    # JournalQuery, JournalHandle, JournalEvent (ADR-005)
+src/history.rs    # HistoryView, RecordSink (ADR-012)
 src/client.rs     # EngineClient trait (ADR-005)
 ```
 
@@ -745,7 +753,7 @@ Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `
 **Engine modes.** `EngineMode::{Full, LowMemory}` is fixed at start. `LowMemory` is used by the
 `tasklens --low-memory` rescue process (PROC-098, UI-PWN-032): only the `Processes` worker runs, with
 a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, and the
-engine publishes `Snapshot.processes` and `Snapshot.health` only. Actions still go through the
+engine publishes `Snapshot.processes` and `Snapshot.health` only. The stripped sweep is its own `Source` in `workers/lowmem.rs`, chosen by one `match` on `EngineMode` in `workers/processes.rs` (R-138). Actions still go through the
 ADR-006 pipeline with identity revalidation.
 
 **Worker list** (each is one `ManagedSupervisor`; `SourceId` is the enum in `tl-model::health`):
@@ -903,6 +911,9 @@ pub trait EngineClient: Send + Sync + 'static {
 
 pub enum CommandError { Busy, EngineStopped }
 
+/// Sent by tl-app's org.freedesktop.Application handler to the UI over async_channel::bounded(4) (ADR-010, R-136).
+pub enum AppRequest { Activate { token: Option<Arc<str>> }, SelectTab(Tab), SelectPid(u32), Quit }
+
 pub struct JournalQuery { pub unit: UnitRef, pub follow: bool }           // last 200 entries of this boot first
 pub struct JournalHandle { /* async_channel receiver plus a control sender */ }
 impl JournalHandle {
@@ -1030,7 +1041,14 @@ pub enum ActionKind {
     UnitRemoveRecovery,                        // P3: deletes the tasklens drop-in
     StartupEnable, StartupDisable, StartupRunNow, StartupDelete,
     SockDestroy,                               // P3: target ActionTarget::Socket (SYS-031)
+    // session-bus openers and the shared launcher (R-134); targets is empty for these three
+    OpenUri(Arc<str>),                         // portal OpenURI, else xdg-open
+    ShowInFileManager { path: Arc<str>, properties: bool }, // FileManager1 ShowItems / ShowItemProperties
+    Launch(LaunchSpec),                        // Run dialog, Startup "Run now"
 }
+
+pub struct LaunchSpec { pub what: LaunchWhat, pub as_admin: bool, pub cwd: Option<Arc<str>> }
+pub enum LaunchWhat { Command(Arc<str>), DesktopEntry(Arc<str>), Unit(UnitRef) }
 
 pub enum Signal { Term, Kill, Hup, Int, Quit, Stop, Cont, Usr1, Usr2, Other(u8) }  // Other: any other number, incl. SIGRTMIN..=SIGRTMAX
 pub enum SchedPolicy { Other, Batch, Idle, Fifo, Rr }   // rt_prio 1..=99 for Fifo and Rr, else 0
@@ -1054,11 +1072,13 @@ pub struct ActionEvent {
 }
 ```
 
+`OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134).
+
 Event order per request: `Started` (or a single `Rejected`), then one final state per target, then one final state with `target: None` summarizing (Succeeded only if every target succeeded; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected).
 
 Action events carry no progress. A dump's progress is the size of its output file, which the UI reads with `std::fs::metadata` every 500 ms on the background executor while the action is in flight (UI-PWN-034). Service jobs have no client-side timeout (SYS-005); every other action keeps the ADR-006 deadlines.
 
-**UI handling.** `ActionTracker` (entity in `tl-ui/src/actions.rs`) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
+**UI handling.** `ActionTracker` (entity in `tl-ui/src/action_tracker.rs`, R-129) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
 
 ### Consequences
 
@@ -1464,7 +1484,9 @@ app.rs            TasklensUi::init(cx, client: Arc<dyn EngineClient>, settings) 
 hub.rs            SnapshotHub (Entity, one per app)
 demand.rs         DemandAggregator (Entity, one per app)
 anim.rs           AnimationDriver (Entity, one per window)
-actions.rs        ActionTracker (Entity, one per app)
+action_tracker.rs ActionTracker (Entity, one per app) (R-129)
+actions.rs        window-level GPUI Actions and bind_keys_global; table/actions.rs and pages/<page>/actions.rs hold the rest
+i18n.rs           Fluent strings: tr(key), tr_args(key, args), Strings Global, strings_version; catalogue assets/locales/en-US.ftl (R-132)
 theme/            TlTheme, built-in themes, mapping onto gpui-kit Theme
 window/main.rs    MainWindow (Entity): title bar, tab strip, active page, status bar
 pages/performance/{mod.rs, sidebar.rs, cpu.rs, memory.rs, gpu.rs, disk.rs, net.rs, sensors.rs}
@@ -1676,7 +1698,7 @@ WindowOptions {
 **Single instance.** In `tl-app` before GPUI starts:
 1. `zbus::blocking::Connection::session()`, then request the name `io.github.oysteinkrog.Tasklens` with `RequestNameFlags::DoNotQueue`.
 2. If the name is taken (`RequestNameReply::Exists` or a `NameTaken` error): call `org.freedesktop.Application.Activate({"activation-token": $XDG_ACTIVATION_TOKEN if set})` on `/io/github/oysteinkrog/Tasklens` and exit 0.
-3. If owned: serve `org.freedesktop.Application` (`Activate`, `Open` returns an error, `ActivateAction(name, parameter, platform_data)` with actions `quit`, `tab` (string) and `select-pid` (uint32)) at that path. Command-line arguments of a second instance are forwarded through `ActivateAction`. `Activate` forwards to the GPUI main thread through an `async_channel::bounded(4)`; a GPUI task receives it and calls `window.activate_window()` on the main window, or reopens it if closed to the tray. When the KWin bridge is up (ADR-004), it also activates the window through the bridge.
+3. If owned: serve `org.freedesktop.Application` (`Activate`, `Open` returns an error, `ActivateAction(name, parameter, platform_data)` with actions `quit`, `tab` (string) and `select-pid` (uint32)) at that path. Command-line arguments of a second instance are forwarded through `ActivateAction`. `Activate` forwards to the GPUI main thread as `tl_model::command::AppRequest` (R-136) through an `async_channel::bounded(4)`; a GPUI task receives it and calls `window.activate_window()` on the main window, or reopens it if closed to the tray. When the KWin bridge is up (ADR-004), it also activates the window through the bridge.
 4. If the session bus is unavailable: log a warning and run without single-instance. There is no lock-file fallback.
 Focus stealing prevention on Wayland may only flash the taskbar entry; that is accepted [inferred].
 
@@ -1807,7 +1829,7 @@ Column ids are stable strings defined once in `tl-model::ids::ColumnId` with `as
 
 There is no file watching: an external edit applies at the next start.
 
-**Save.** Debounced 500 ms after the last change, plus on exit. Atomic write: write `<name>.tmp-<pid>` in the same directory, `fsync` the file, `rename` over the target, `fsync` the directory. The same routine (`tl-app/src/atomic.rs::write_atomic`) is used for `settings.toml`, `state.toml`, `themes.json` and XDG autostart overrides (ADR-016).
+**Save.** Debounced 500 ms after the last change, plus on exit. Atomic write: write `<name>.tmp-<pid>` in the same directory, `fsync` the file, `rename` over the target, `fsync` the directory. The routine is `tl-ops/src/fs.rs::write_atomic`, re-exported by `tl-app/src/atomic.rs` (R-130); it is used for `settings.toml`, `state.toml`, `themes.json` and, from the engine's `Startup` worker, XDG autostart overrides (ADR-016).
 
 **Ownership.** `tl-ui` holds settings and state in GPUI `Global`s and calls a `Box<dyn Fn(&Settings, &State)>` persist callback given by `tl-app`. Engine-relevant parts are pushed with `EngineClient::set_settings` as `EngineSettings` (derived, never persisted): `processes.interval_ms`, `units.network`, the `performance.show_network_*` keys, `history.*`, `processes.subtree_totals` and `processes.hide_system`.
 
@@ -2104,7 +2126,7 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 
 **Errors.**
 - Libraries use `thiserror` enums: `CollectError` (tl-collect), `OpsError` (tl-ops), `ProbeError` and `WorkerError` (tl-engine), `HistoryError` (tl-history). `anyhow` only in `tl-app::main` and `xtask`.
-- `ActionError` (tl-model) has variants `PermissionDenied`, `NoSuchProcess`, `Partial { done: u16, total: u16 }`, `UnitJob(Arc<str>)`, `Os(i32)`, `Internal(Arc<str>)`. `tl-ui/src/actions.rs::message(&ActionError) -> SharedString` turns each into plain, sentence-case text, for example "Permission denied. This process belongs to another user."
+- `ActionError` (tl-model) has variants `PermissionDenied`, `NoSuchProcess`, `Partial { done: u16, total: u16 }`, `UnitJob(Arc<str>)`, `Os(i32)`, `Internal(Arc<str>)`. `tl-ui/src/action_tracker.rs::message(&ActionError) -> SharedString` turns each into plain, sentence-case text, for example "Permission denied. This process belongs to another user."
 - Collection errors appear as `Validity::Failed` plus `SourceHealth.last_error`; a source error never becomes a toast unless the user started an action.
 
 **Crash handling.**
@@ -2154,6 +2176,8 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 
 **Parsers.** Hand-written in `tl-collect`, no `procfs` crate. Each parser takes `&[u8]` and a reusable output struct, uses `memchr`, and allocates only for new strings. `/proc/<pid>/stat` is parsed from the last `)` to handle names with spaces and parentheses.
 
+**Module layout of `tl-collect`** (R-135): `sysroot.rs` (`SysRoot`, kept-open files, `pread`), `fdcache.rs`, `counters.rs` (rates, resets, suspend gap), `sanitize.rs`, `hash.rs`; `parse/` with one file per system file (`stat`, `meminfo`, `vmstat`, `diskstats`, `netdev`, `cpufreq`, `hwmon`, `zram`, `block`, `netif`, `topology`, `rapl`); `sample/{cpu,memory,disk,net,sensors}.rs`; `proc/` (`pid_stat`, `status`, `statm`, `io`, `cgroup`, `meta`, `fdcount`, `sweep`, `smaps`, `detail`, `strings`, `handles`); `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`); `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`); `startup/` (`autostart`, `user_units`, `plasma_scripts`, `watch`, `impact`); `inventory/` (`cpuinfo`, `dmi`, `os_release`, `displays`, `modules`); `gpu_drm/` (`amdgpu`, `intel`, `fdinfo`).
+
 **File descriptor policy.**
 - Kept open and re-read with `pread` at offset 0: `/proc/stat`, `/proc/meminfo`, `/proc/vmstat`, `/proc/diskstats`, `/proc/net/dev`, each used `cpufreq` and `hwmon` file, zram `mm_stat`. Reopened after any read error.
 - Per-process files are opened with `openat` relative to an `O_DIRECTORY` fd of `/proc/<pid>` during the sweep, read, and closed in the same sweep.
@@ -2175,6 +2199,7 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 | Processes [P1] | `/proc/<pid>/stat`, `statm`, `status` (uid, threads, RssAnon), `io` (own processes), `cgroup`; fd count from `fstatat` `st_size` of `/proc/<pid>/fd`, readdir fallback | `io` gives `Restricted` for other users; all timestamps CLOCK_BOOTTIME (ADR-003) |
 | Process metadata [P1] | `comm`, `cmdline`, `exe` | refreshed every 10 sweeps per process and immediately when `comm` changes (exec) |
 | PSS/USS [P1] | `/proc/<pid>/smaps_rollup` | `detail_keys` only |
+| App and unit cgroup stats [P1 apps, P2 units] | cgroup v2 `memory.stat` (`anon`), `memory.swap.current`, `cpu.stat` (`usage_usec`), `io.stat` (`rbytes`, `wbytes`, `rios`, `wios`), `pids.current`, `cgroup.procs`; `memory.current` only in `EngineMode::LowMemory` | app scopes every sweep; demanded unit cgroups (`service_cgroup_stats`, `unit_details`) at 1 Hz; opened with `openat` from a dirfd on `/sys/fs/cgroup` and closed in the same sweep (R-137) |
 | App grouping [P1] | cgroup v2 path from `/proc/<pid>/cgroup`; current uid from `getuid()` | app id from scope name `app-<launcher>-<app id>-<n>.scope` (KDE: `app-<desktop file id>@<id>.service` or `.scope`); desktop file lookup through `XDG_DATA_DIRS` |
 | Per-process network [P2] | `sock_diag` `inet_diag` dump for TCP v4 and v6 with `INET_DIAG_INFO` (`tcpi_bytes_acked`, `tcpi_bytes_received`) | labelled "Network (TCP, attributed)"; sockets shared by several processes count for each and the cell gets a tooltip; UDP not attributed |
 | Socket to pid map [P2] | `/proc/<pid>/fd` symlinks `socket:[inode]` | rebuilt every 2 s while demanded; own processes only without the helper |
