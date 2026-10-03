@@ -711,3 +711,166 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P4
 - Privilege: root through tl-helper under polkit `io.github.oysteinkrog.tasklens.helper` (R-002). Without it, only "Host only" is offered.
+
+# APP: application shell
+
+## Window chrome
+
+### APP-001 Window decorations (client-drawn title bar by default)
+- Was: APP-001
+- Source: TS 1.1 | MC Adw header bar | gpui-component title_bar.rs:258, widgets §2 | D-006, R-021
+- Behaviour:
+  - By default tasklens draws its own 34 px title bar in TaskSlinger's layout (APP-002) (D-006).
+  - Setting `appearance.decorations = "client"` (`client | server`). The settings label is "Use system title bar"; checking it sets `server`. A change takes effect after a restart; the toast reads "Restart tasklens to apply the title bar change" (inferred text).
+  - In `server` mode KWin draws the title bar. The menus and toolbar move into a 28 px row under it, then the tab strip. The caption buttons are omitted except the pin, which stays in that row.
+  - On compositors without xdg-decoration, GPUI uses client-side mode whatever the setting says.
+  - Predetermined fallback (ADR-010, U-36): if any phase-0 CSD check fails (drag, double-click maximize, restore, resize from all edges and corners, right-click window menu, tiling), the default becomes `server` with no further discussion.
+- Linux data/mechanism: `WindowOptions { window_decorations: Some(Client), window_background: Opaque, window_min_size: Some(size(px(800.), px(500.))), app_id: Some("io.github.oysteinkrog.Tasklens"), window_bounds: Some(restored_bounds), ..TitleBar::window_options() }`, or `Server` when the setting says so. Root's WindowBorder supplies resize edges and the shadow. The Wayland `app_id` matches the installed `io.github.oysteinkrog.Tasklens.desktop`, so KDE shows the icon.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-002 Title bar layout and toolbar
+- Was: APP-002
+- Source: TS 1.1 [IMG processes.png, performance.png], cross-check A.8 | R-031
+- Behaviour: Left to right:
+  1. app icon (16 px);
+  2. menus File, View, Settings, Help (Debug added when enabled, APP-026);
+  3. toolbar buttons, which depend on the tab;
+  4. drag area;
+  5. caption buttons: pin, minimize, maximize, close (APP-008).
+
+  Toolbar buttons by tab:
+  - Every tab: Shield (APP-003, from P3 and only when tl-helper is installed) and Window picker "+" (APP-006).
+  - Processes tab only: Hide system processes (APP-004) and View mode (APP-005). On other tabs these two are removed, not greyed. In History mode both stay active (R-031).
+  - Mission Center's header buttons map elsewhere: Toggle Sidebar is a Performance-tab action (F9, Ctrl+T), and System Information is APP-041.
+
+  Double-click on the drag area maximizes. Right-click opens the KWin window menu.
+- Linux data/mechanism: gpui-component TitleBar (`start_window_move`, `zoom_window`, `show_window_menu`); toolbar buttons are ghost Buttons bound to Actions
+- Verdict: ADAPT (update badge removed, APP-007)
+- Phase: P1
+- Privilege: none
+
+### APP-003 Shield: unlock privileged actions
+- Was: APP-003
+- Source: TS 1.1 `chrome.admin` (relaunch elevated), "Shift held at launch" L30398 | R-002, R-003, R-004
+- Behaviour:
+  - The icon is shield (locked) or shield-hi (unlocked).
+  - Click starts a tl-helper session (one polkit prompt). Privileged actions then run without further prompts while the session lives.
+  - The helper exits after 300 s with no request, or when tasklens exits (stdin EOF). The shield then shows locked again; the next privileged action starts a new session.
+  - Click on an unlocked shield ends the session (lock).
+  - Holding Shift during launch unlocks at start (table b). Setting `privilege.unlock_at_launch` does the same on every launch (APP-049).
+  - Tooltip: "Unlock privileged actions" or "Privileged actions unlocked (click to lock)".
+  - tasklens never relaunches the GUI as root: a root GUI on Wayland breaks the session bus, portals and theming.
+- Linux data/mechanism: `pkexec /usr/lib/tasklens/tl-helper --session` under polkit `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`). Transport is the helper's stdin and stdout with `tl-model::wire` framing, max frame 64 KiB, multi-frame replies capped at 4 MiB per request (R-003). The helper allows only the ADR-006 operations plus the R-004 extensions, never a path, command or free-form file argument, and re-runs `open_verified` on every process target.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: polkit auth_admin_keep. The button is hidden before P3 and when tl-helper is not installed.
+
+### APP-004 Hide system processes button
+- Was: APP-004
+- Source: TS 1.1 `chrome.microsoft`, toasts L28738-28739, INI UI.HideMicrosoftProcesses | R-031
+- Behaviour:
+  - Toggle button, Processes tab only (removed on other tabs; active in History mode).
+  - Tooltip "Hide system processes" / "Show system processes". Toasts "Hiding system processes" / "Showing system processes".
+  - Which processes count as system (and the pseudo rows, R-032) is defined in the process spec (r2 PROC-034, add PROC-100).
+- Linux data/mechanism: setting `processes.hide_system = false`; part of `EngineSettings`
+- Verdict: ADAPT (Microsoft signer test becomes a Linux system classification)
+- Phase: P1
+- Privilege: none
+
+### APP-005 View mode button
+- Was: APP-005
+- Source: TS `chrome.view_mode`, toast "View mode: %ls" L28638, cross-check B.1 | R-010
+- Behaviour:
+  - Processes tab only.
+  - Each click cycles Tree View, then Task Manager Grouping, then List View (TaskSlinger string order), the same three choices as View > Process View.
+  - Toast "View mode: <name>", for example "View mode: Tree View".
+  - Tooltip "Toggle view mode (current: <name>)".
+- Linux data/mechanism: sets `processes.mode` (`tree | grouped | flat`, default `grouped`)
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-006 Window picker "+"
+- Was: APP-006
+- Source: TS 7 window picker, tooltips L29201-29213, cross-check A.7 | R-046
+- Behaviour:
+  - Click "+": KWin asks the user to click a window.
+  - Plain click on a window: tasklens selects that window's process in Processes.
+  - Ctrl+click on a window: tasklens ends that process with SIGTERM, then gives a toast.
+  - Esc cancels (table b, Picker context).
+  - Toasts: "No window selected", "No window found".
+  - Desktop and panel windows (plasmashell) are ignored, with "No window found".
+  - Without the KWin bridge (not KDE, or `org.kde.KWin` not on the bus) the button is hidden (R-046).
+- Linux data/mechanism:
+  - Through the KWin bridge worker (`workers/dbus_kwin.rs`, `SourceId::KWin`, R-046) as `Command::KWin(KWinCommand::Pick)`.
+  - Session D-Bus `org.kde.KWin /KWin org.kde.KWin.queryWindowInfo()` does the interactive selection and returns a map with `uuid`.
+  - If the map has no `pid` (U-14), a one-shot KWin script `tasklens-pick`, loaded through `org.kde.kwin.Scripting.loadScript`, looks up `workspace.windowList()` by `internalId == uuid` and returns `pid` through the WindowBridge object.
+  - X11: `XGrabPointer` crosshair, then `_NET_WM_PID` (best effort; see open item O-2).
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+- Open question: does R-046's drop of the X11 EWMH fallback also drop the X11 picker path? Recommended answer: yes, drop it in v1; X11 is best effort (ADR-010) and the button is hidden without the KWin bridge. Listed as O-2.
+
+### APP-007 Update badge
+- Was: APP-007
+- Source: TS `chrome.update_available` [CL 0.8.15, 0.8.18]
+- Behaviour: none
+- Linux data/mechanism: none
+- Verdict: DROP (pacman and the localbuilds recipe update tasklens, so there is no in-app updater)
+- Phase: P4 (recorded as dropped)
+- Privilege: none
+
+### APP-008 Caption buttons
+- Was: APP-008
+- Source: TS 1.1 `chrome.caption.*` [CL 0.8.28]
+- Behaviour: Pin (always on top, accent fill when on), Minimize, Maximize/Restore, Close. Minimize and maximize appear when the compositor reports them (`window_controls()`). Close follows the close behaviour in APP-047.
+- Linux data/mechanism: TitleBar controls; the pin is a custom button bound to the `ToggleAlwaysOnTop` action (APP-009)
+- Verdict: BUILD
+- Phase: P1 (pin P2)
+- Privilege: none
+
+### APP-009 Always on top and the pin
+- Was: APP-009
+- Source: TS View > Window > Always On Top L28493, INI Window.AlwaysOnTop | review (defer where unsupported) | R-046, R-073
+- Behaviour:
+  - The pin button is shown on the main window and on every secondary window (R-073). On the main window it is toggled by the pin, by View > Window > Always On Top, and by nothing else.
+  - Only the main window's state persists, in `window.always_on_top = false`.
+  - Where no mechanism exists, the pin and the menu item are disabled with tooltip "Not supported by this desktop".
+- Linux data/mechanism:
+  - KDE: `keepAbove` through the KWin bridge (R-046), `Command::KWin(KWinCommand::KeepAbove)`, run as a one-shot script `tasklens-cmd-<n>`. The window is found by pid and `resourceClass == "io.github.oysteinkrog.Tasklens"`, plus the caption for secondary windows.
+  - X11: `_NET_WM_STATE_ABOVE` client message.
+  - The bridge lives in tl-engine (`workers/dbus_kwin.rs`), never in tl-ui (ADR-001 rule 1).
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### APP-010 Size, minimum size and geometry restore
+- Was: APP-010
+- Source: TS INI Window.Width/Height/X/Y/Maximized (1280×800), minimum size [CL 0.9.2] | MC window-width/height/is-maximized | gpui APIs (Wayland position cannot be restored) | R-022
+- Behaviour:
+  - Default size 1280×800 logical px. Minimum 800×500 logical px (R-022).
+  - Width, height and maximized state are saved, debounced 500 ms and on close, and restored. On start the size is clamped to at least 800×500.
+  - Position is never saved; the compositor places the window. tasklens does not pick an output at startup (zed#46378).
+  - KWin quick tiling and snapping work as for any window, so Windows 11 snap layouts need no work.
+- Linux data/mechanism: `window_min_size`, `observe_window_bounds`, `window_bounds()`; saved to `state.toml` `[window] width, height, maximized`
+- Verdict: ADAPT (position not restored)
+- Phase: P1
+- Privilege: none
+
+### APP-011 Single instance
+- Was: APP-011
+- Source: TS L35762, L35794 [CL 0.8.12] | MC GApplication single instance | review "Window lifecycle" | R-047
+- Behaviour:
+  - A second launch hands its arguments to the running copy and exits with code 0. `--tab` and `--select-pid` are forwarded; `--start-minimized` is ignored.
+  - The running copy shows, raises and focuses its main window, or reopens it if it was closed to the tray.
+- Linux data/mechanism (in tl-app before GPUI starts, ADR-010, R-047):
+  1. `zbus::blocking::Connection::session()`, then request `io.github.oysteinkrog.Tasklens` with `RequestNameFlags::DoNotQueue`.
+  2. If taken: call `org.freedesktop.Application.Activate({"activation-token": $XDG_ACTIVATION_TOKEN if set})` on `/io/github/oysteinkrog/Tasklens`. Forward arguments with `ActivateAction(name, parameter, platform_data)`: `tab` (string), `select-pid` (uint32). Then exit 0.
+  3. If owned: serve `org.freedesktop.Application` at that path: `Activate`; `Open` returns an error; `ActivateAction` with `quit`, `tab`, `select-pid`. Calls reach the GPUI main thread through `async_channel::bounded(4)`. The owner calls `window.activate_window()` and, when the KWin bridge is up, also activates through it, because KWin may refuse GPUI's own token.
+  4. No session bus: log a warning and run without single instance. There is no flock fallback.
+  - Wayland focus-stealing prevention may only flash the taskbar entry; that is accepted (U-6).
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
