@@ -785,6 +785,73 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Rule: shell.md is the authority for actions; GPUI action names must be unique per namespace.
 - Edits: performance.md, system-tabs.md (job 1 of the consistency pass).
 
+### R-129 `ActionTracker` file name
+- Sources in conflict: ADR-009 puts `ActionTracker` in `tl-ui/src/actions.rs`; shell.md puts every GPUI Action and `bind_keys` in `tl-ui/src/actions.rs`.
+- Resolution: the entity lives in `tl-ui/src/action_tracker.rs` (with `message(&ActionError)`); `tl-ui/src/actions.rs` holds the window-level GPUI Actions and `bind_keys_global`. Shared table actions live in `tl-ui/src/table/actions.rs`; page actions in `pages/<page>/actions.rs`; `app.rs` calls each `bind_keys_*`.
+- Rule: one file, one purpose; shell.md names the Action file.
+- Edits: ADR-005, ADR-009, ADR-015; `docs/plan/00-epics.md` item 1.
+
+### R-130 Where `write_atomic` lives
+- Sources in conflict: ADR-011 names `tl-app/src/atomic.rs::write_atomic` for settings, state, themes and XDG autostart overrides; the autostart overrides are written by the engine's `Startup` worker, and ADR-001 lets no crate depend on `tl-app`.
+- Resolution: `write_atomic` lives in `tl-ops/src/fs.rs` together with the autostart override write and remove. `tl-app` gains `tl-ops` in its allowed workspace dependencies and `tl-app/src/atomic.rs` re-exports the function. `tl-engine` already depends on `tl-ops`.
+- Rule: ADR-001 dependency direction (edges point toward `tl-model`; `tl-ops` is below both callers).
+- Edits: ADR-001 table (tl-app row), ADR-011 "Save".
+
+### R-131 `ureq` for the public IP fetch
+- Sources in conflict: PERF-060 fixes `ureq` 3 with rustls on the blocking pool; no ADR-001 row allows it and ADR-002 has no pin.
+- Resolution: `ureq = { version = "3", default-features = false, features = ["rustls"] }` is added to `[workspace.dependencies]` and to `tl-engine`'s allowed row. The bead that adds it pins the exact version `cargo add` resolves and runs `xtask check-deps`, which settles U-30. It is used only in `tl-engine/src/workers/public_ip.rs`.
+- Rule: a dependency the spec names is added to the ADR tables, not smuggled in.
+- Edits: ADR-001 table, ADR-002 pins.
+
+### R-132 Fluent strings and the catalogue layout
+- Sources in conflict: APP-043 fixes `fluent-bundle` and `unic-langid` with embedded `.ftl` files; no ADR-001 row allows them and no file names the catalogue layout.
+- Resolution: both crates are added to `tl-ui`'s allowed row and the workspace pins. `tl-ui/src/i18n.rs` exposes `tr(key) -> SharedString` and `tr_args(key, args) -> SharedString`, a `Strings` Global and `strings_version` (UI-SHL-131). One English catalogue `assets/locales/en-US.ftl` is embedded with `include_str!`; every epic that adds user-visible strings appends its keys in the bead that uses them (chain edit, `docs/plan/00-epics.md` section 2). Keys are `<area>-<entry>-<slug>` in kebab case, for example `processes-menu-end-task`. Other locales are P4 and are separate files in the same directory.
+- Rule: APP-043 mechanism; ADR-001 tables follow the spec that needs them.
+- Edits: ADR-001 table, ADR-002 pins, ADR-009 entity structure.
+
+### R-133 Process-windows Actions use the `tasklens` namespace
+- Sources in conflict: process-windows.md conventions say `actions!(tl_pwn, [...])`; R-128 fixes one namespace, `tasklens`.
+- Resolution: `crates/tl-ui/src/windows/actions.rs` declares its Actions in `tasklens` with the prefixes `Props`, `Affinity`, `Priority`, `Signal`, `Run` and `HandleSearch`.
+- Rule: R-128.
+- Edits: process-windows.md conventions.
+
+### R-134 Opening URLs, file locations and launching programs
+- Sources in conflict: PROC-073, PROC-074, PROC-095, SYS-023, PERF-061 and UI-SHL-093 need session-bus calls (`org.freedesktop.FileManager1`, portal `OpenURI`, `StartTransientUnit`) with an `xdg-open` fallback and a result toast; `tl-ui` may not use zbus (ADR-001) and `Command` had no variant for them.
+- Resolution: three new `ActionKind` variants in `tl-model::actions`: `OpenUri(Arc<str>)`, `ShowInFileManager { path: Arc<str>, properties: bool }` and `Launch(LaunchSpec)` where `LaunchSpec { what: LaunchWhat::{Command(Arc<str>), DesktopEntry(Arc<str>), Unit(UnitRef)}, as_admin: bool, cwd: Option<Arc<str>> }`. For these three kinds `ActionRequest.targets` is empty and admission skips the target checks. They run in `tl-engine/src/opener.rs` and `tl-engine/src/launcher.rs` on the engine's session-bus connection with the fallbacks the specs name, under the 2 s deadline (120 s for `as_admin`), and report through the normal `ActionEvent` path so the existing toasts apply.
+- Rule: one action path, one place for session-bus code (ADR-005, ADR-006).
+- Edits: ADR-005 action types.
+
+### R-135 `tl-collect` module layout
+- Sources in conflict: none. ADR-016 names only `sanitize.rs` and `benches/sweep.rs`.
+- Resolution: the layout in `docs/plan/00-epics.md` section 2 is the current state: `sysroot.rs`, `fdcache.rs`, `counters.rs`, `sanitize.rs`, `hash.rs`, `parse/` (one file per system file), `sample/` (`cpu`, `memory`, `disk`, `net`, `sensors`), `proc/` (per-pid readers, `sweep.rs`, `smaps.rs`, `detail.rs`, `strings.rs`, `handles.rs`), `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`), `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`), `startup/`, `inventory/`, `gpu_drm/`.
+- Rule: ADR-016 is the home of the parser rules; the layout is written there once.
+- Edits: ADR-016 "Parsers".
+
+### R-136 `AppRequest` lives in `tl-model`
+- Sources in conflict: UI-SHL-112 names an `AppRequest` value carried over `async_channel::bounded(4)` from `tl-app` to `tl-ui` without defining it.
+- Resolution: `tl_model::command::AppRequest { Activate { token: Option<Arc<str>> }, SelectTab(Tab), SelectPid(u32), Quit }`. `tl-app` sends it from the `org.freedesktop.Application` handler; `TasklensUi::init` receives it. `Command`, `KWinCommand`, `SetupStep`, `HistoryRange`, `HistoryWhat` and `CommandError` live in the same file `tl-model/src/command.rs`.
+- Rule: ADR-001, neither crate depends on the other for a shared type.
+- Edits: ADR-003 module list, ADR-005, ADR-010 single instance.
+
+### R-137 cgroup files read by the process sweep
+- Sources in conflict: PROC-008, PROC-093, PROC-098 and SYS-003 read cgroup files (`memory.stat` `anon`, `memory.current`, `memory.swap.current`, `cpu.stat` `usage_usec`, `io.stat`, `pids.current`, `cgroup.procs`) that ADR-016's source table does not list.
+- Resolution: the table gains one row for them. App scopes are read every sweep; demanded unit cgroups (`Demand.service_cgroup_stats`, `unit_details`) at 1 Hz; `memory.current` only in `EngineMode::LowMemory`. Files are opened with `openat` from a dirfd on `/sys/fs/cgroup` and closed in the same sweep.
+- Rule: ADR-016 lists every file the collectors read (R-052).
+- Edits: ADR-016 source table.
+
+### R-138 Accepted structural choices from the epic map
+- Sources in conflict: none. `docs/plan/00-epics.md` made seven structural choices that no doc fixed.
+- Resolution: accepted as written there:
+  - the phase-0 spike measures the real chart, table, pages and bridge, so E01 depends on 21 anchors across 13 epics, those anchors are `phase-p0`, and the ADR-014 gate on P1 UI beads is a scheduling rule (P0 first, P1 UI after `E01-A2`), not a dependency edge (item 8);
+  - `tl-engine/src/reducer/sys_table.rs` is created by E09-A1 with its signatures and an empty body and filled by E14-A1 (item 9);
+  - the low-memory stripped sweep is its own `Source` in `tl-engine/src/workers/lowmem.rs`, selected by one `match` arm on `EngineMode` in `workers/processes.rs` (item 10);
+  - `tasklens-setup` is `packaging/tasklens-setup`, POSIX `sh`, installed with mode 0755 (item 11);
+  - the KWin bridge scripts are `assets/kwin/{kwin-bridge.js,pick.js,cmd-template.js}`, embedded with `include_str!` and written to `$XDG_RUNTIME_DIR/tasklens/` at run time (item 12);
+  - 33 epics stand (item 14);
+  - `--gallery` is declared beside `--bench`, both behind the `bench` feature, and table (c)'s argument list gains it (item 15).
+- Rule: the epic map is input 6 of the bead brief; its choices bind writers once recorded here.
+- Edits: ADR-004 engine modes; table (c) arguments.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
@@ -1134,7 +1201,7 @@ XDG paths (ADR-011, directories 0700, files 0600):
 
 Environment variables read: `TASKLENS_LOG`, `TASKLENS_GPU_PROBE`, `TASKLENS_DEBUG`, `ZED_DEVICE_ID` (respected, set by tasklens only in P4 per R-070), `__NV_FORCE_ENABLE_X11_EGL_PLATFORM` (set on X11 with NVIDIA, ADR-010), `TL_UPDATE_GOLDEN` (tests).
 
-Command-line arguments (APP-052): `--start-minimized`, `--low-memory`, `--watch-memory`, `--tab <name>`, `--select-pid <pid>`, `--debug`, `--bench <scene> [--duration --warmup --json]` (ADR-014 scenes `perf-cpu`, `table-2000`, `bridge`, `static`, plus `history-scrub` in P3), `--force-full-memory-mode`, `--app-id <id>`, `--version`, `--help`. APP-052's `--bench [charts|table|history]` and `--bench-out` are replaced by ADR-014's form.
+Command-line arguments (APP-052): `--start-minimized`, `--low-memory`, `--watch-memory`, `--tab <name>`, `--select-pid <pid>`, `--debug`, `--bench <scene> [--duration --warmup --json]` (ADR-014 scenes `perf-cpu`, `table-2000`, `bridge`, `static`, plus `history-scrub` in P3), `--gallery` (UI-FND-030; both behind the `bench` feature, R-138), `--force-full-memory-mode`, `--app-id <id>`, `--version`, `--help`. APP-052's `--bench [charts|table|history]` and `--bench-out` are replaced by ADR-014's form.
 
 ### (d) Number and unit formats
 
