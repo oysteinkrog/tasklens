@@ -1615,66 +1615,81 @@ Astra: versioned TOML under `$XDG_CONFIG_HOME/tasklens/`, atomic replacement, mi
 
 | Data | Path |
 |---|---|
-| Settings | `$XDG_CONFIG_HOME/tasklens/settings.toml` (default `~/.config/tasklens/settings.toml`) |
-| User themes | `$XDG_CONFIG_HOME/tasklens/themes/*.json` |
-| Window state | `$XDG_STATE_HOME/tasklens/window.toml` (default `~/.local/state/...`) |
+| Settings (user choices) | `$XDG_CONFIG_HOME/tasklens/settings.toml` (default `~/.config/tasklens/settings.toml`) |
+| User themes | `$XDG_CONFIG_HOME/tasklens/themes.json`, TaskSlinger format `{"themes":[…]}` |
+| State (remembered UI state) | `$XDG_STATE_HOME/tasklens/state.toml` (default `~/.local/state/tasklens/state.toml`) |
 | Logs | `$XDG_STATE_HOME/tasklens/logs/` |
 | Crash reports | `$XDG_STATE_HOME/tasklens/crash/` |
 | History | `$XDG_STATE_HOME/tasklens/history/` (ADR-012) |
+| Run dialog history | `$XDG_STATE_HOME/tasklens/run-history.json` |
 | Icon path cache | `$XDG_CACHE_HOME/tasklens/icons.toml` |
 
-Directories are created with mode `0700`; files with `0600`.
+Directories are created with mode `0700`; files with `0600`. Built-in themes are not on disk; they ship as `assets/themes/builtin.json` (ADR-009).
 
-**Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default, deny_unknown_fields = false)]`):
+**Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout and tray graphs. There is no `window.toml`.
+
+**Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default)]`). Canonical table (a) in `docs/RECONCILIATION.md` is the only settings schema, for both files: every key, default and range is defined there, and a key not listed there does not exist. Both files start with `schema_version = 1`. The sections of `settings.toml` are `[general]`, `[theme]`, `[appearance]`, `[motion]`, `[units]`, `[processes]`, `[properties]`, `[performance]`, `[fans]`, `[graphs]`, `[history]`, `[window]`, `[tray]`, `[startup]`, `[network]`, `[privilege]`, `[rendering]`, `[services]`, `[lowmem]` and `[debug]`. The keys other ADRs depend on:
 
 ```toml
-schema_version = 1
-
 [general]
-start_tab = "processes"           # processes | performance | startup | services | connections | information
-close_to_tray = false
+start_tab = "processes"        # processes | performance | services | startup | connections | information | last_used
+
+[theme]
+active = "Default Dark"
+follow_system = false
+light = "Default Light"
+dark = "Default Dark"
 
 [appearance]
-theme = "Default Dark"
-ui_scale = 1.0                    # 0.8..=1.5
-decorations = "client"            # client | server
-animations = true                 # "Smooth graphs" and motion
-highlight_new_exited = true
+ui_scale_pct = 100             # 75..=200, step 5
+row_height_pct = 100           # 80..=150, step 5
+decorations = "client"         # client | server (label "Use system title bar"; restart)
+heat_coloring = true
+heat_intensity_pct = 50        # 0..=100
 
-[performance]
-graph_range_s = 60                # 15 | 60 in v1
-cpu_view = "per_core"             # overall | per_core
-show_kernel = true
-
-[processes]
-interval_ms = 1000                # 250..=10000
-mode = "grouped"                  # grouped | tree | flat
-sort = { column = "cpu", dir = "desc" }
-columns = ["name", "user", "pid", "cpu", "memory_rss", "disk_read", "disk_write", "net", "gpu", "description"]
-column_widths = { name = 260, cpu = 70 }   # logical px at ui_scale 1.0, keyed by column id
-cpu_mode = "machine"              # machine | core
-filter_cmdline = false
+[motion]
+animations = true              # tab, theme, toast motion
+smooth_graphs = true           # chart sliding
 
 [units]
-network = "bits"                  # bits | bytes
+network = "bits"               # bits | bytes
+network_auto_scale = false
 
-[history]                          # later phase
-enabled = false
-retention_h = 6                   # 1..=24
+[processes]
+interval_ms = 1000             # 250..=10000
+mode = "grouped"               # grouped | tree | flat
+highlight_new_exited = true
+hide_system = false
+subtree_totals = false
+
+[performance]
+graph_range_s = 60             # 30 | 60 | 300 | 600 (300 and 600 from P2)
+
+[history]                       # P3
+enabled = false                # D-003
+retention_h = 6                # 1..=12
+persist = true
 max_disk_mb = 256
 ```
 
+`state.toml` defaults that other ADRs depend on: `[window] width = 1280, height = 800` (clamped to at least 800 × 500); `[sort.processes] column = "pid", ascending = true` (history: `cpu` descending; services: `name` ascending; startup: `status` ascending, then name; connections: `proto` ascending, then local port); `[columns.processes] visible = ["name", "user", "pid", "cpu", "memory", "disk", "network", "gpu", "description"]` with widths Name 248, User 92, PID 96, CPU 63, Memory 92, Disk 82, Network 92, GPU 72, Description 342 (logical px at 100%), and Power usage 101 when shown. `power` and `power_trend` exist and are off by default on every machine. `memory` is RssAnon (D-004).
+
+There is no CPU percentage mode setting (two columns instead, ADR-008) and no `filter_cmdline` setting (the filter always matches the command line, ADR-009). Table (a) and R-071 list the other dropped keys.
+
 Column ids are stable strings defined once in `tl-model::ids::ColumnId` with `as_str()`/`from_str()`; an unknown id in the file is dropped with a log line.
 
-**Load.**
-1. Missing file: defaults; do not write until the user changes something.
-2. Parse to `toml::Table`. Parse error: rename the file to `settings.toml.corrupt-<unix seconds>`, use defaults, show a warning toast "Settings file was unreadable and has been reset. The old file was kept as {name}".
+**Load** (same steps for each file).
+1. Missing file: defaults; do not write until something changes.
+2. Parse to `toml::Table`. Parse error: rename the file to `<name>.corrupt-<unix seconds>`, use defaults, show a warning toast "Settings file was unreadable and has been reset. The old file was kept as {name}".
 3. `schema_version` missing: treat as 1. Lower than current: run migrations `fn migrate_vN_to_vN1(t: &mut toml::Table)` in order, then deserialize. Higher than current: deserialize what is understood, set `read_only = true`, never save, show the toast "Settings were written by a newer tasklens; changes will not be saved".
 4. Values out of range are clamped and logged.
+5. Unknown keys are ignored and not preserved on the next save.
 
-**Save.** Debounced 500 ms after the last change, plus on exit. Atomic write: write `settings.toml.tmp-<pid>` in the same directory, `fsync` the file, `rename` over `settings.toml`, `fsync` the directory. The same routine (`tl-app/src/atomic.rs::write_atomic`) is used for `window.toml`, user themes and XDG autostart overrides (ADR-016).
+There is no file watching: an external edit applies at the next start.
 
-**Ownership.** `tl-ui` holds settings in a GPUI `Global` and calls a `Box<dyn Fn(&Settings)>` persist callback given by `tl-app`. Engine-relevant parts are pushed with `EngineClient::set_settings` as `EngineSettings` (derived; never persisted separately).
+**Save.** Debounced 500 ms after the last change, plus on exit. Atomic write: write `<name>.tmp-<pid>` in the same directory, `fsync` the file, `rename` over the target, `fsync` the directory. The same routine (`tl-app/src/atomic.rs::write_atomic`) is used for `settings.toml`, `state.toml`, `themes.json` and XDG autostart overrides (ADR-016).
+
+**Ownership.** `tl-ui` holds settings and state in GPUI `Global`s and calls a `Box<dyn Fn(&Settings, &State)>` persist callback given by `tl-app`. Engine-relevant parts are pushed with `EngineClient::set_settings` as `EngineSettings` (derived, never persisted): `processes.interval_ms`, `units.network`, the `performance.show_network_*` keys, `history.*`, `processes.subtree_totals` and `processes.hide_system`.
 
 ### Consequences
 
@@ -1688,7 +1703,7 @@ Column ids are stable strings defined once in `tl-model::ids::ColumnId` with `as
 
 ### Verification
 
-- Tests with `tempfile`: missing file; corrupt file renamed; v0 (no version) migrated; future version read-only and never written; crash simulation (kill between write and rename) leaves either the old or new file intact.
+- Tests with `tempfile`, for both `settings.toml` and `state.toml`: missing file; corrupt file renamed to `<name>.corrupt-<unix seconds>`; v0 (no version) migrated; future version read-only and never written; crash simulation (kill between write and rename) leaves either the old or new file intact; unknown keys ignored and absent after the next save.
 - Test: unknown column id dropped, known ones keep order.
 
 ---
