@@ -187,7 +187,7 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
   - Tab tools sit right-aligned in the same bar, gap `sp4` (8): File descriptors: checkbox "Hide unnamed handles"; Memory maps: checkbox "Shared libraries only"; Environment: "Environment at process start" note and Refresh button; Strings: the scan controls (UI-PWN-017). General, Threads and Security have none.
 - **States:**
   - Empty filter: all rows. Non-empty: rows whose searched text contains the filter, case-insensitive (Unicode simple lowercase), substring only, no globs.
-  - Nothing matches: the body shows the empty state "No properties match the current filter." centred, `t_base`, `text_secondary`, 48 px from the top of the body [spec text]. For table tabs, the table keeps its header and shows this text in place of rows.
+  - Nothing matches: the body shows the empty state "No properties match the current filter." centred, `t_base`, `text_secondary`, 48 px from the top of the body [spec text]. For table tabs, the table keeps its header and shows this text in place of rows. The Threads tab uses its own text "No threads match the current filter." [spec].
   - Focused: `input_focus` and the accent border.
 - **Interaction:**
   - Typing debounces 100 ms (same as the main filter, ADR-009), then refilters on the background executor (`cx.background_spawn`) for tables over 2,000 rows, synchronously otherwise. The result is an `Arc<[u32]>` of row indexes, applied only if its generation equals the latest (rule from ADR-009).
@@ -352,7 +352,7 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 - **Anatomy:** the last rows of column 3, after `GPU engine:`, separated by an 8 px gap and a 1 px `divider` line inset `sp4` on both sides.
 
 ```text
-| Window title:  Mozilla Firefox — Start page  |
+| Window title:  Start page - Mozilla Firefox |
 | Window ID:     {4b1c...}                      |
 | Window state:  Normal                         |
 | Window class:  firefox                        |
@@ -375,3 +375,153 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 - **Tests:** `window_block_none_text`, `window_block_and_n_more`, `window_block_unsupported_without_bridge`, `window_rect_format`.
 - **Phase:** P2 (with the bridge).
 - **Decided here:** which window is shown first; "Needs the KDE window bridge." tooltip; "And N more" tooltip.
+
+### UI-PWN-010 Threads tab
+
+- **Implements:** PROC-079 (columns, priority words, states), R-097.
+- **Anatomy:** filter bar (UI-PWN-005), then a `TlTreeTable` in flat mode, fixed column set (no picker), single-line header, filling the body. Body padding 0 (the table runs edge to edge under the filter bar) [chosen].
+
+| Column | Header text | Width (min) | Align | Value format |
+|---|---|---|---|---|
+| tid | Thread ID | 80 (60) | right | integer, no grouping |
+| name | Name | 160 (60) | left | thread `comm` |
+| state | State | 96 (60) | left | `Running`, `Sleeping`, `Disk sleep`, `Stopped`, `Tracing stop`, `Zombie`, `Dead`, `Idle`, `Parked` |
+| cpu | CPU % | 70 (60) | right | percent of the machine, one decimal |
+| utime | User time (ms) | 104 (80) | right | count |
+| stime | Kernel time (ms) | 112 (80) | right | count |
+| prio | Priority | 100 (70) | left | `Variable`, `Realtime 50`, `Deadline` |
+| base | Base priority | 100 (70) | right | nice (`-5`, `0`, `19`) or rt_priority |
+| aff | Affinity | 110 (60) | left | `All` or a CPU list (`0-7,16-23`) |
+| lastcpu | Last CPU | 72 (60) | right | integer |
+| ctx | Ctx switches | 140 (100) | right | `1 204 / 33` (voluntary / involuntary, counts) |
+| wchan | Wait channel | 160 (60) | left | symbol name, `0` shown as `-` |
+
+  - Widths [chosen] use the canonical template-string minimums for numeric columns (table d) and 60 px for text columns. Column widths can be resized for the life of the window; they are not saved [chosen].
+  - The main thread (TID = PID) is drawn with Name in medium 500 weight [chosen].
+- **States:**
+  - Loading: "Loading threads..." centred in the table body [spec].
+  - Empty: "No threads found." [spec] (a zombie has no threads).
+  - Filter empty: "No threads match the current filter." [spec].
+  - Restricted cells (`wchan` of other UIDs): the ADR-003 lock glyph with the tooltip from R-050.
+  - Priority tooltip names the policy: "SCHED_OTHER", "SCHED_BATCH", "SCHED_IDLE", "SCHED_FIFO", "SCHED_RR" or "SCHED_DEADLINE" [spec].
+  - Selected, hover, focused rows: TlTreeTable states.
+  - Exited: rows frozen, row menu actions disabled.
+- **Interaction:**
+  - Sorting: click a header (descending first, then ascending, as the process table). Default sort: Thread ID ascending [chosen]. Sort is done in the tab entity (small lists, at most a few thousand threads) and kept by `ColumnId` for the window's life.
+  - Selection by TID survives refresh and re-sort.
+  - Enter on a row does nothing [chosen]; Shift+F10 or Menu opens the row menu (UI-PWN-011); Ctrl+C copies the focused row as `Label: value` lines for all columns [chosen]; Ctrl+Shift+C copies the selected rows as TSV with a header line (table b).
+- **Data binding:** `TabPayload::Threads(Arc<[ThreadRow]>)` (bit `DETAILS`) where `ThreadRow { tid, comm, state, cpu_pct, utime_ms, stime_ms, policy, rt_prio, nice, cpus: CpuListText, last_cpu, vol_ctx, invol_ctx, wchan, validity }`. The count in the tab label comes from `ProcessRecord.threads`.
+- **Build:** `props/threads.rs`, `pub struct ThreadsTab` (Entity) owning the sorted index `Arc<[u32]>`, the filter result, the `CellTextCache`-style string cache keyed by `(tid, ColumnId)`, and a `TlTreeTable` entity.
+- **Performance:** sorting 2,000 threads is under 0.2 ms; done only when the payload version or sort changes. Cell strings re-format only when value bits change.
+- **Accessibility:** headers have tooltips: "User time (ms)": "Time spent in user mode, in milliseconds"; "Kernel time (ms)": "Time spent in the kernel, in milliseconds"; "Ctx switches": "Voluntary / involuntary context switches"; "Wait channel": "Kernel function the thread is sleeping in" [chosen].
+- **Tests:** `threads_priority_words` (OTHER gives "Variable", FIFO 50 gives "Realtime 50", DEADLINE gives "Deadline"); `threads_selection_survives_resort`; `threads_loading_and_empty_texts`; `threads_ctx_format`.
+- **Phase:** P2.
+- **Decided here:** column widths; default sort; main-thread weight; Enter does nothing; header tooltips; Ctrl+C row copy format.
+
+### UI-PWN-011 Threads row menu and thread actions
+
+- **Implements:** PROC-079 (row menu), PROC-066, PROC-067, PROC-059, R-097.
+- **Anatomy:** TlMenu (kit `PopupMenu`), item height 26, min width 220.
+
+```text
+Copy
+Set thread priority          >   Realtime / High / Above normal / Normal / Below normal / Low / Idle / Custom…
+Set thread affinity…
+Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) / User 2 (USR2)
+```
+
+  - The current priority class of the right-clicked thread has a check mark (as PROC-066); with several selected threads, a class is checked only when all share it (PROC-069 rule).
+  - Signal items carry the secondary suffix "(ends process)" on TERM and KILL, and on USR1 and USR2 (their default action terminates) [chosen per PROC-065 rule].
+- **States:** items disabled with tooltip "The process is not running." when exited. "Realtime" and "Custom…" policy items follow PROC-066 privilege rules (enabled; EPERM gives the toast).
+- **Interaction:**
+  - Right-click selects the row if it is not selected and captures `SmallVec<[ActionTarget; 1]>` of `ActionTarget::Thread { process: key, tid }` for every selected row (max 256), as the process table does.
+  - Copy (`CopyCell`): copies the right-clicked cell's text; toast "Copied to clipboard".
+  - Set thread priority items dispatch `SetThreadNice(n)` (`ActionKind::SetNice`) or `SetThreadSched` (`ActionKind::SetSched`); "Realtime" first opens the realtime confirmation (UI-PWN-024); "Custom…" opens the Custom priority dialog (UI-PWN-023) for the thread targets.
+  - "Set thread affinity…" opens Set Affinity (UI-PWN-021) for the thread targets.
+  - "Send signal to thread" items dispatch `SignalThread(Signal)` (`ActionKind::Signal` on thread targets, `tgkill` in the engine). The submenu has the tooltip "A signal that ends a thread ends the whole process." [spec meaning, chosen wording]. Confirmation follows PROC-059 (protected process, other user, or more than one target).
+  - Toasts [chosen, following the PROC-058 forms]: "Thread priority updated", "Thread affinity updated", "Sent SIGUSR1 to thread 4325" (one thread) or "Sent SIGUSR1 to 3 threads"; failures use PROC-058 forms ("Permission denied" with "Retry as administrator" from P3; the partial form "Priority updated for 3 of 4 threads. 1 failed: permission denied").
+- **Data binding:** sends `Command::Action(ActionRequest { kind, targets: Thread targets, privileged: false })`; results through `ActionTracker` on `action_events`.
+- **Build:** menu built in `props/threads.rs` with `PopupMenu::build`; actions in `windows/actions.rs`.
+- **Performance:** menu is built only on open.
+- **Accessibility:** Shift+F10 and Menu open it on the focused row; arrow keys move; Esc closes and returns focus to the table.
+- **Tests:** `thread_menu_captures_thread_targets`; `thread_signal_toast_text_single_and_multi`; `thread_menu_disabled_when_exited`.
+- **Phase:** P2.
+- **Decided here:** "(ends process)" on USR1 and USR2; toast wordings for thread actions; multi-thread targets.
+
+### UI-PWN-012 File descriptors tab
+
+- **Implements:** PROC-080 (columns, details pane, Hide unnamed handles, states, row menu).
+- **Anatomy:**
+
+```text
++------------------------------------------------------------------------------+
+| [Filter................]                      [x] Hide unnamed handles      |  filter bar
++------------------------------------------------------------------------------+
+| FD | Type      | Name                                    | Access     | Position |  TlTreeTable, flat
+| 0  | file      | /dev/null                               | R          |        0 |
+| 3  | TCP       | TCP 127.0.0.1:5000 → 10.0.0.2:443 ESTABLISHED | RW+NB CLOEXEC |   |
+| ...                                                                          |
++============================================================================== +  4 px splitter
+| Raw flags:         0o2104002                                                 |  details pane
+| Access mode:       Read/write                                                |  default 132 high
+| Status flags:      Append, Non-blocking                                      |
+| Descriptor flags:  Close-on-exec                                             |
+| Mount ID:          27        Inode:  1234567                                 |
++------------------------------------------------------------------------------+
+```
+
+  - Columns [chosen widths]: FD 64 (60) right; Type 96 (60) left; Name flex, min 240, left, ellipsis in the middle for paths [chosen: middle ellipsis keeps the file name]; Access 120 (80) left, text such as `RW +A +NB CLOEXEC`; Position 110 (80) right, count or `-` for sockets and pipes.
+  - Type words [spec]: `file`, `directory`, `TCP`, `UDP`, `unix`, `netlink`, `pipe`, `FIFO`, `eventfd`, `eventpoll`, `timerfd`, `signalfd`, `inotify`, `fanotify`, `memfd`, `dmabuf`, `DRM`, `pidfd`, `io_uring`, `anon_inode`, `device`.
+  - Hide unnamed handles: TlCheckbox, label "Hide unnamed handles", in the filter bar on the right [spec]; bound to the setting `properties.hide_unnamed_handles` (default true). Changing it writes the setting (500 ms debounced save, ADR-011) and applies to every open Properties window [chosen].
+  - Details pane: under the table, split by a 4 px horizontal splitter (kit `v_resizable`, drag handle colour `divider`, hover `accent`). Default height 132 [chosen: 5 rows of 26 plus padding], minimum 80, maximum 50% of the body. Height is kept for the window's life, not saved. Contents: a TlKeyValueGrid with two columns: left `Raw flags:`, `Access mode:`, `Status flags:`, `Descriptor flags:`; right `Mount ID:`, `Inode:`, and for eventfd `Count:` (`eventfd-count`), for DRM `DRM client:` (`drm-client-id`), `DRM driver:` (`drm-driver`) [chosen extras from the fdinfo keys PROC-080 reads].
+  - Decoded words [chosen]: access mode `Read only`, `Write only`, `Read/write`, `Path only`; status flags joined by ", " from `Append`, `Non-blocking`, `Sync`, `Direct`, `Path`, `Temp file`; descriptor flags `Close-on-exec` or `None`.
+- **States:**
+  - Loading: "Loading handles..." [spec].
+  - Empty: "No handles reported." [spec].
+  - Details pane without a selection: "Select a descriptor to see its flags." centred, `text_secondary` [chosen].
+  - Details pane when fdinfo cannot be read: "Handle detail query unavailable." [spec].
+  - No access: UI-PWN-018 with the text "Handles unavailable (insufficient privileges)" and the "Grant access" button [spec].
+  - Exited: frozen; row menu disabled.
+- **Interaction:**
+  - Sort: header click; default FD ascending [chosen].
+  - Selecting a row fills the details pane (keyboard and mouse).
+  - Row menu (TlMenu): "Copy" (cell text; toast "Copied to clipboard"); "Open file location" (enabled for `file` and `directory` rows, `OpenPathLocation { path }`, toast "Opening file location"); "Go to connection" (enabled for `TCP`, `UDP` and `unix` rows; `GoToConnection { inode }`: activates the main window, switches to the Connections tab and selects the socket; toast "Connection not found in current view" when absent [chosen, following PROC-071 wording]).
+  - Ctrl+C copies the selected rows as `FD<TAB>Type<TAB>Name<TAB>Access<TAB>Position` lines without header [chosen]; Ctrl+Shift+C adds the header line.
+- **Data binding:** `TabPayload::Fds(Arc<FdDetail>)` with `rows: Arc<[FdRow]>` and per-row `fdinfo` fields; the count in the tab label is the visible row count after the hide filter.
+- **Build:** `props/fds.rs`, `pub struct FdsTab` (Entity): a `TlTreeTable` and a `FdDetailsPane` cached child view, inside kit `v_resizable("fds-split")`.
+- **Performance:** a process with 10,000 fds re-sorts only when the payload version changes; the pane re-renders only on selection or payload change.
+- **Accessibility:** the splitter has the tooltip "Drag to resize"; the details pane is reachable by Tab after the table (it is a focus stop only for copy: Ctrl+C copies the pane as lines).
+- **Tests:** `fds_hide_unnamed_filters_anon_inode`; `fds_details_decodes_flags` (0o2104002 gives "Read/write", "Non-blocking" and "Close-on-exec"; the large-file bit is not shown); `fds_go_to_connection_enabled_only_for_sockets`; `fds_privilege_state_text_and_button`.
+- **Phase:** P2.
+- **Decided here:** widths; middle ellipsis; details pane size, layout, extra DRM and eventfd fields, decoded words; setting applies to all windows; copy formats.
+
+### UI-PWN-013 Memory maps tab
+
+- **Implements:** PROC-081 (tree, Primary, Outside loaded modules, columns, Shared libraries only), R-098.
+- **Anatomy:** filter bar with the TlCheckbox "Shared libraries only" on the right (setting `properties.shared_objects_only`, default true, applies to all windows) [spec]; then a `TlTreeTable` in tree mode (expand chevrons and indentation from the processes spec).
+
+| Column | Header text | Width (min) | Align | Node row | Region row |
+|---|---|---|---|---|---|
+| name | Name | 260 (120) | left, tree | file name, `firefox (Primary)`, or `Outside loaded modules` | `7f3a2c000000-7f3a2c021000` |
+| base | Base address | 140 (110) | right | lowest start, `0x7f3a2c000000` | start |
+| size | Size | 90 (70) | right | sum of region sizes | region size |
+| rss | RSS | 90 (70) | right | sum of region RSS | region RSS |
+| perms | Perms | 64 (60) | left | empty | `r-xp` |
+| offset | Offset | 100 (80) | right | empty | `0x0001a000` |
+| path | Path | 280 (60) | left, middle ellipsis | full path | empty |
+| desc | Description | 200 (60) | left | package `%DESC%` | empty |
+| pkg | Package | 140 (60) | left | `glibc 2.42-1` | empty |
+
+  - Order [spec plus chosen]: the "(Primary)" node first, "Outside loaded modules" last, the others sorted by the active sort (default Base address ascending). Region children are always in address order.
+  - Addresses use lowercase hex with `0x` and no padding on node rows [chosen]. Sizes use table (d) memory sizes.
+  - "Outside loaded modules" children: `[heap]`, `[stack]`, `[vdso]`, `[vvar]`, `anonymous`, `memfd:<name>` rows [spec], drawn with the region format plus the name in the Name cell (`[heap] 55d3f1a00000-55d3f1c21000`).
+  - All nodes start collapsed [chosen]. Expansion state is kept per node path for the window's life.
+- **States:** Loading "Loading memory maps..." [chosen]; empty (kernel thread) "No memory maps." [chosen]; filter empty: shared text (UI-PWN-005); no access: "Needs administrator access." with the Grant access button (UI-PWN-018) [spec text]; RSS column before the first `smaps` read: `…` glyph (WarmingUp).
+- **Interaction:** Right and Left expand and collapse, Space toggles (table b). Row menu: "Copy" (cell); "Copy path" (node rows); "Open file location" (node rows with a path, `OpenPathLocation`). Toasts as UI-PWN-012.
+- **Data binding:** `TabPayload::Maps(Arc<MapsDetail>)` with `nodes: Arc<[MapNode]>` and `regions: Arc<[MapRegion]>`; RSS from `smaps` at most 1 Hz [spec]. The label count is the visible node count.
+- **Build:** `props/maps.rs`, `pub struct MapsTab` (Entity) builds the flattened visible row list (`Arc<[TreeRowRef]>`) from nodes, expansion and filter, on payload, expansion, sort or filter change only.
+- **Performance:** a large process has about 1,000 mappings; flattening is linear and runs only on the changes above.
+- **Accessibility:** "(Primary)" has the tooltip "Main executable"; "Outside loaded modules" has the tooltip "Anonymous, heap, stack and other mappings without a file" [chosen].
+- **Tests:** `maps_primary_first_outside_last`; `maps_shared_only_filter_includes_wine_dll`; `maps_rss_warming_up_glyph`; `maps_expand_state_survives_refresh`.
+- **Phase:** P2.
+- **Decided here:** widths; node versus region cell contents; address format; collapsed default; loading and empty texts; tooltips.
