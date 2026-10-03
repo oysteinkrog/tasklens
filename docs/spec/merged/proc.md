@@ -2,12 +2,12 @@
 
 This is the merged PROC spec (round 3). It replaces `features-proc.md` (v1), `features-proc-r2.md` (r2) and `features-proc-addendum.md` (add) for implementation. It covers the Processes tab, apps and units, process actions, the Process and App Properties windows, History mode, the process parts of minigraphs and tray graphs, the Run dialog, Search File Handles and the low-memory rescue window.
 
-Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION.md` (R-001 to R-103 and canonical tables a to d), then `docs/ARCHITECTURE.md` on engineering structure, then the source specs (r2 over v1 on a shared topic, the addendum where it is later and more specific). "Was:" lines name every old ID an entry absorbs. Old IDs are prefixed `v1`, `r2` or `add`; "add amend PROC-0xx" means the addendum's amendment to that v1 entry.
+Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION.md` (R-001 to R-103 and canonical tables a to d), then `docs/ARCHITECTURE.md` on engineering structure, then the source specs (r2 over v1 on a shared topic, the addendum where it is later and more specific). "Was:" lines name every old ID an entry absorbs. Old IDs are prefixed `v1`, `r2` or `add`; "add amend PROC-0xx" means the addendum's amendment to that v1 entry. Every ID outside "Was:" lines and the ID map names a merged entry: PROC in this file, PERF in `perf.md`, SYS and APP in `sys-app.md`.
 
 ## Conventions used in every entry
 
 - **Identity.** A process is a `ProcessKey { start_ticks, boot_id, pid }` (ADR-003). `start_ticks` is field 22 of `/proc/<pid>/stat`; `boot_id` is folded from `/proc/sys/kernel/random/boot_id`. Rows, selections, menu targets, Properties windows, graphs and history all key on it, never on a row index or a bare PID. App and unit rows key on `CgroupRef { rel_path, cgroup_id }` or `UnitRef { manager, name }` (ADR-005, ADR-006).
-- **Validity.** Missing data is never shown as zero. Table cells, header totals and sidebar readouts use the ADR-003 glyphs: `…` warming up, lock icon restricted, `n/a` unsupported, `-` missing, `!` failed (theme warning colour), dimmed value stale. Properties key/value fields and stats grids use the PERF-079 words: "Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown" (R-050). The restricted tooltip is "Needs administrator access. Click the shield to grant it." from P3, and "Needs administrator access." before P3. Stale means older than `max(3 × period, 1.5 s)` (R-051, ADR-008).
+- **Validity.** Missing data is never shown as zero. Table cells, header totals and sidebar readouts use the ADR-003 glyphs: `…` warming up, lock icon restricted, `n/a` unsupported, `-` missing, `!` failed (theme warning colour), dimmed value stale. Properties key/value fields and stats grids use the PERF-013 words: "Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown" (R-050). The restricted tooltip is "Needs administrator access. Click the shield to grant it." from P3, and "Needs administrator access." before P3. Stale means older than `max(3 × period, 1.5 s)` (R-051, ADR-008).
 - **Time.** Every timestamp is CLOCK_BOOTTIME; CLOCK_MONOTONIC is read only to detect suspend (ADR-003, R-064).
 - **Helper.** `tl-helper` is started as `pkexec /usr/lib/tasklens/tl-helper --session` under polkit action `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`), talks over its stdin and stdout with `tl-model::wire` framing (64 KiB frames, 4 MiB per request), accepts only the ADR-006 allowlist, and exits after 300 s idle or on stdin EOF (R-001 to R-004). Nothing retries through it on its own.
 - **Phases** (R-072). P0 spike; P1 Performance core, process table and P1 actions; P2 Services, Startup Apps, Connections, Properties windows, KWin bridge, 5 and 10 min ranges, remaining themes; P3 helper, history, tray, detached graphs, mini window, strings, dumps, low-memory; P4 everything marked P4.
@@ -531,7 +531,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Values use IEC units with 2 decimals (PROC-003). Sorting is numeric.
   - PSS and USS cannot be sorted; cells outside `ProcessSnapshot.coverage` show `…` (ADR-008).
   - MC's `RssAnon + RssShmem + RssFile/share` estimate is not built; the PSS column replaces it.
-  - Column-graph labels: "Memory" for `memory`, "RSS" for `ws_total`, "RSS shared" for `ws_shared` (R-005, PERF-088).
+  - Column-graph labels: "Memory" for `memory`, "RSS" for `ws_total`, "RSS shared" for `ws_shared` (R-005, PERF-087).
 - Linux data/mechanism: as in the table.
 - Verdict: see the table
 - Phase: see the table
@@ -1267,7 +1267,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-071 Process jump target, Go to parent and Go to service
 - Was: add PROC-099; r2 PROC-061; v1 PROC-064; v1 PROC-065; add amend PROC-064; add amend PROC-065
-- Source: TS L29292, L29320, toasts L28645-28766, L28696, L28700, L28709-28710, L28728, L28830, cross-check A.4 | SYS-010, SYS-033 (merged sys-app IDs) | R-047
+- Source: TS L29292, L29320, toasts L28645-28766, L28696, L28700, L28709-28710, L28728, L28830, cross-check A.4 | SYS-010, SYS-033 | R-047
 - Behaviour:
   - The Processes tab has one "select process by identity" entry point. Go to parent process, the Properties PPID link, Services "Jump to process", Connections "Jump to process", Search File Handles "Go to process", the window picker, the History table, `--select-pid <pid>` and the D-Bus `ActivateAction("select-pid", <uint32>)` all use it.
   - On success: switch to Processes (toast "Switched to Processes tab" when the source was another tab, unless the caller has its own toast such as "Switched to owning process." or "Switched to service process."), expand the group or tree path, select the row and scroll it to the centre.
@@ -1370,7 +1370,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - When the process exits, the title appends " (not running)", values freeze and actions are disabled.
   - Esc closes the window.
   - Failure to open: "Could not open properties." (PROC-071).
-  - Key/value fields use the PERF-079 words for missing values ("Restricted", "Not supported", "Unavailable" and the rest), never a zero (R-050).
+  - Key/value fields use the PERF-013 words for missing values ("Restricted", "Not supported", "Unavailable" and the rest), never a zero (R-050).
 - Linux data/mechanism: GPUI `cx.open_window` (`WindowKind::Floating`, APP-045) with its own gpui-kit Root. The window registers demand for its `ProcessKey` and the active tab's data.
 - Verdict: ADAPT
 - Phase: P2
@@ -1636,7 +1636,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-093 Process minigraphs from the row menu
 - Was: v1 PROC-087; v1 PROC-088; v1 PROC-089; r2 PROC-062
-- Source: TS 4.2, L29304, L28719, INI `ProcessSpecificMiniGraphs.*`, `NameFilter`, `AppName`, `ProcessGraphColumnMask=720C0`, keys L35545-35557, cross-check A.28 | PERF-077, PERF-086, PERF-087 | R-066
+- Source: TS 4.2, L29304, L28719, INI `ProcessSpecificMiniGraphs.*`, `NameFilter`, `AppName`, `ProcessGraphColumnMask=720C0`, keys L35545-35557, cross-check A.28 | PERF-085, PERF-086, PERF-087 | R-066
 - Behaviour:
   - "Add Minigraph >", "Add Process Name Graph >" and "Add App Name Graph >" each list CPU, Memory, Disk, Network, GPU and VRAM (the fixed six graphable columns).
   - **Add Minigraph** binds a card to the process key. Title `<name> (<pid>) · CPU`; `Process <pid>` only until the name is read.
@@ -1656,13 +1656,13 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-094 Process tray icon graphs
 - Was: v1 PROC-090; r2 PROC-063
-- Source: TS 4.3, L29305-29306, L30441-30446, L28715-28723, L28584-28586, INI `TrayIconGraphs Graph0Mode` | PERF-078, PERF-079 | R-027, R-067
+- Source: TS 4.3, L29305-29306, L30441-30446, L28715-28723, L28584-28586, INI `TrayIconGraphs Graph0Mode` | PERF-088, PERF-089 | R-027, R-067
 - Behaviour:
   - Row menu "Add tray icon graph >" offers the same six metrics. "Remove tray icon graph" appears instead when one exists for this source.
   - Modes: process, name filter, app.
   - Tray tooltips: process graph "<name> (PID n): CPU 3.2%"; name filter "3 procs: firefox"; app "<App>: CPU 3.2%".
   - Toasts: "Tray icon graph added", "Tray icon graph removed", "Tray icon graph already exists", "Unable to add tray icon graph", "Unable to remove tray icon graph".
-  - The tray icon, its rendering and its menu belong to the tray area (PERF-078, R-027).
+  - The tray icon, its rendering and its menu belong to the tray area (PERF-088, R-027).
 - Linux data/mechanism: the same process series as PROC-093; `tl-tray` with `ksni =0.3.6` draws a StatusNotifierItem at 22 and 44 px, updated at most 1 Hz and only when the pixels change. Persisted in `state.toml` `[[tray_graphs]]`.
 - Verdict: ADAPT (Shell_NotifyIcon becomes SNI)
 - Phase: P3
@@ -1685,7 +1685,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Linux data/mechanism:
   - A URL with a scheme, or an existing path that is not an executable, opens through the portal `org.freedesktop.portal.OpenURI`, falling back to `xdg-open`.
   - `kcm_*` names (the `.cpl` analogue) run `systemsettings <name>`.
-  - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-023, merged sys-app ID). It then groups as an app and is detached from tasklens.
+  - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-023). It then groups as an app and is detached from tasklens.
   - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`.
   - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
   - Browse uses GPUI `prompt_for_paths` (portal FileChooser). If that pulls in Tokio (U-15), call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.

@@ -12,7 +12,7 @@ Conventions:
 - Phases follow R-072. P0 is the spike. P1 is the Performance core, the process table and P1 actions. P2 adds Services, Startup Apps, Connections, Properties windows, the KWin bridge, the 5 and 10 minute ranges and the remaining themes. P3 adds the helper, history, tray, detached graphs, mini window, strings, dumps and low-memory. P4 is everything later.
 - Names, paths, polkit actions and D-Bus names are from canonical table (c). Number formats are from canonical table (d). Settings keys are from canonical table (a). Keys are from canonical table (b).
 - Polkit actions owned by tasklens are exactly three (R-002): `io.github.oysteinkrog.tasklens.helper`, `io.github.oysteinkrog.tasklens.setup` and `io.github.oysteinkrog.tasklens.netmon` (reserved). Every tl-helper operation runs under the helper action.
-- Table cells, header totals and sidebar readouts use ADR-003's validity glyphs. Properties fields and Information rows use the PERF-079 words ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown") (R-050).
+- Table cells, header totals and sidebar readouts use ADR-003's validity glyphs. Properties fields and Information rows use the PERF-013 words ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown") (R-050).
 - "Was:" lines name old IDs from `features-sys-app.md`. Every other ID reference names a merged entry: SYS and APP in this file, PROC in `proc.md`, PERF in `perf.md`.
 
 # SYS: Services, Startup Apps, Connections
@@ -242,7 +242,7 @@ Conventions:
   | CPU time | CPUUsageNSec as `h:mm:ss` |
   | Manager | System or User |
 
-  - Missing values use the PERF-079 words (R-050). Mission Center's empty Description bug does not apply.
+  - Missing values use the PERF-013 words (R-050). Mission Center's empty Description bug does not apply.
 - Linux data/mechanism: Unit and Service properties as named, through GetAll on open and PropertiesChanged afterwards
 - Verdict: ADAPT
 - Phase: P2
@@ -773,7 +773,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Behaviour:
   - Toggle button, Processes tab only (removed on other tabs; active in History mode).
   - Tooltip "Hide system processes" / "Show system processes". Toasts "Hiding system processes" / "Showing system processes".
-  - Which processes count as system (and the pseudo rows, R-032) is defined in the process spec (r2 PROC-034, add PROC-100).
+  - Which processes count as system (and the pseudo rows, R-032) is defined in the process spec (PROC-046, PROC-012).
 - Linux data/mechanism: setting `processes.hide_system = false`; part of `EngineSettings`
 - Verdict: ADAPT (Microsoft signer test becomes a Linux system classification)
 - Phase: P1
@@ -904,7 +904,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-014
 - Source: TS 8 "TaskSlinger Run" L29321-29338, runCommandHistory.json | R-061
 - Behaviour:
-  - Ownership (R-061): this entry owns the window frame and the administrator path. The content (text, combo, buttons, keys, toasts, history format, URL and `kcm_*` handling) is owned by merged `proc.md` PROC-095 (r2 PROC-079, v1 PROC-091). The summary below matches it.
+  - Ownership (R-061): this entry owns the window frame and the administrator path. The content (text, combo, buttons, keys, toasts, history format, URL and `kcm_*` handling) is owned by merged `proc.md` PROC-095. The summary below matches it.
   - A separate pinnable window titled "tasklens Run", opened by File > "Run..." and Ctrl+N.
   - Text "Type the name of a program, folder, document, or Internet resource.", then "Open:" and a combo with history (5 visible rows, prefix matches first).
   - Keys (table b, RunDialog): Up and Down pick a history match, Enter runs, Shift+Enter runs as administrator.
@@ -925,7 +925,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-015
 - Source: TS 8 "Search File Handles" L29339-29345, L30071-30081 | R-061
 - Behaviour:
-  - Ownership (R-061): this entry owns the menu item and the window frame. Controls, result columns, progress strings, the result menu and the footer note are owned by merged `proc.md` PROC-096 (r2 PROC-080, v1 PROC-092). The summary below matches it.
+  - Ownership (R-061): this entry owns the menu item and the window frame. Controls, result columns, progress strings, the result menu and the footer note are owned by merged `proc.md` PROC-096. The summary below matches it.
   - A separate pinnable, non-modal window titled "tasklens Handle Search", opened by File > "Search File Handles...".
   - Field "Pattern:" (case-insensitive substring; `*` and `?` globs allowed), checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
   - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
@@ -959,7 +959,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-018
 - Source: TS 1.3, header menu L29313-29314, L28434, L28484-28487, toasts L28648, L28652, cross-check A.10 | R-065, R-075, table (d)
 - Behaviour: Applies to the active tab's table (Processes, History, Services, Startup Apps, Connections). The same items open from a right-click on a column header.
-  - "Select Columns…": the "Columns" picker, a checklist with a filter field, grouped under headings. Process headings (add PROC-102): Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux. Entries show alias text, for example `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"` (R-065). The filter matches full name and alias. Other tables list their columns without headings (inferred).
+  - "Select Columns…": the "Columns" picker, a checklist with a filter field, grouped under headings. Process headings (PROC-024): Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux. Entries show alias text, for example `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"` (R-065). The filter matches full name and alias. Other tables list their columns without headings (inferred).
   - "Hide This Column" (header menu only).
   - "Resize columns to fit content": measures the table (d) template strings `"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`. Text columns have a 60 px minimum.
   - "Resize Behavior: Proportional / Last Column" (`tables.column_resize`).
@@ -985,8 +985,8 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Source: TS L28493 | R-058
 - Behaviour:
   - "Always On Top" (check), see APP-009.
-  - "Performance mini window" (check, Ctrl+Shift+M). The mini window itself is owned by the Performance spec (PERF-082).
-- Linux data/mechanism: APP-009; the mini window per PERF-082
+  - "Performance mini window" (check, Ctrl+Shift+M). The mini window itself is owned by the Performance spec (PERF-093).
+- Linux data/mechanism: APP-009; the mini window per PERF-093
 - Verdict: ADAPT
 - Phase: P2 (Always On Top), P3 (Performance mini window)
 - Privilege: none
@@ -1000,7 +1000,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - The minigraph spec (PERF) owns what these graphs show and how they behave.
 - Linux data/mechanism: settings `[graphs]`
 - Verdict: BUILD
-- Phase: P1 (graph checks and Reset, with the system minigraph cards, PERF-086 and table a), P3 (Keep detached graphs open)
+- Phase: P1 (graph checks and Reset, with the system minigraph cards, PERF-080 and table a), P3 (Keep detached graphs open)
 - Privilege: none
 
 ### APP-022 Settings menu
@@ -1026,7 +1026,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
     - "Unlock privileged actions at launch" (`privilege.unlock_at_launch`)
     - "Skip password prompts (experimental)" (`privilege.passwordless`)
     - "Auto-fetch Public IP on launch" (`network.auto_fetch_public_ip`, R-058)
-    - "Open rescue window on critical memory pressure" (`lowmem.enabled`; owned by the process spec, r2 PROC-081)
+    - "Open rescue window on critical memory pressure" (`lowmem.enabled`; owned by the process spec, PROC-097)
   - **Language**: "Language: >" with "System default", then the locales (APP-043) (`general.language`)
   - Bottom: "All settings…" (Ctrl+,), "Reset Settings to Defaults"
 
@@ -1473,7 +1473,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | performance.cpu_graph_mode | TS CpuPerCore; MC performance-page-cpu-graph |
   | performance.cpu_kernel | TS CpuKernel; MC performance-page-kernel-times |
   | performance.cpu_secondary_graph | MC performance-page-cpu-graph-bottom |
-  | performance.gpu_optional_graphs | PERF-057 (R-054) |
+  | performance.gpu_optional_graphs | PERF-063 (R-054) |
   | performance.hidden_gpu_engines | TS HiddenGpuEngines |
   | performance.memory_composition / memory_swap_graph | MC memory-composition-visible / memory-swap-visible |
   | performance.show_disks / show_gpus / show_fans / show_batteries | MC performance-show-* |
@@ -1500,7 +1500,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | privilege.passwordless | TS UacLessElevation (adapted, APP-049) |
   | rendering.gpu | TS Graphics.GpuSelectionKind/GpuAdapterId/GpuAdapterName/GpuPreference |
   | services.unit_types / filter_states | new (SYS-002, SYS-004) |
-  | lowmem.enabled | r2 PROC-081 |
+  | lowmem.enabled | PROC-097 |
   | debug.show_fps | TS ShowFps |
   | state `[window]` | TS Window.Width/Height/Maximized; MC window-width/window-height/is-maximized |
   | state `[tabs] last_tab` | MC window-selected-page |
@@ -1721,7 +1721,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-041
 - Source: MC about_system_dialog (OS, Kernel, Desktop groups; per-row copy; Copy All; Ctrl+A)
 - Behaviour:
-  - Not a separate window. Its fields join the Information tab's "Operating System" section, which the Performance spec owns (PERF-084): Package manager, Package manager version, Kernel release, Kernel version; Desktop name, Desktop version, Windowing system, Virtual terminal; the distro logo beside the section title.
+  - Not a separate window. Its fields join the Information tab's "Operating System" section, which the Performance spec owns (PERF-095): Package manager, Package manager version, Kernel release, Kernel version; Desktop name, Desktop version, Windowing system, Virtual terminal; the distro logo beside the section title.
   - Missing values hide their rows, as in Mission Center.
   - Help > "System Information…" switches to the Information tab and scrolls to that section.
   - Mission Center's per-row copy is the Information row copy; its Copy All is the Information tab copy icon. Ctrl+A is Select all (table b); System Information has no shortcut.
@@ -1739,14 +1739,14 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 ### APP-042 Additional Setup window
 - Was: APP-042
 - Source: MC first_run_dialog (Enabling Additional Values, setup script, revert, view, copy command) | R-028, R-029
-- Behaviour (R-028; the full design is the Performance spec's PERF-094, which owns the rows):
+- Behaviour (R-028; the full design is the Performance spec's PERF-105, which owns the rows):
   - There is no first-run dialog.
   - One window titled "tasklens Additional Setup", opened from Help > "Additional setup…", from the Settings window's Privileges page, and from every "Needs setup" link.
-  - Rows: "CPU power draw" (PERF-095), "Journal access", "Administrator helper", "Fan sensors" (PERF-097, P4), "Per-process network" (text only, PERF-096).
+  - Rows: "CPU power draw" (PERF-106), "Journal access", "Administrator helper", "Fan sensors" (PERF-108, P4), "Per-process network" (text only, PERF-107).
     - Journal access shows `sudo usermod -aG systemd-journal $USER` with a Copy button. tasklens never changes groups itself.
     - Administrator helper shows "Installed" or "Not installed".
   - Each row has status text, Enable or Revert, "View script" and "Copy command".
-  - CPU power draw shows PERF-095's warning before enabling: "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)." Status "Enabled (existing rule)" when `energy_uj` is already readable and the tasklens rule file is absent.
+  - CPU power draw shows PERF-106's warning before enabling: "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)." Status "Enabled (existing rule)" when `energy_uj` is already readable and the tasklens rule file is absent.
   - Success shows "Done. No restart needed" and re-probes the source at once. Failure shows the output with "Copy output" and "Retry".
   - Mission Center's `nethogs` capabilities are not needed: tasklens uses sock_diag.
 - Linux data/mechanism: the packaged script `/usr/lib/tasklens/tasklens-setup` (never written to /tmp), run as `pkexec /usr/lib/tasklens/tasklens-setup <rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off>` under polkit `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`). `rapl-enable` writes `/etc/udev/rules.d/99-tasklens-powercap.rules` with the one line `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add` (R-029). Mission Center's `/etc/udev/rules.d/99-powercap.rules` is detected and never touched.
@@ -1838,14 +1838,14 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-047
 - Source: TS INI Window.CloseToTray/MinimizeToTray/AlwaysShowTrayIcon, tray menu L28588, L29307, tooltip L28584-28586, L30144-30157 | review (closing the last window exits in v1; tray is a later explicit mode) | R-027, ADR-010
 - Behaviour:
-  - When any tray setting is on, a main StatusNotifierItem appears. Tray graph icons are owned by the Performance spec (PERF-078 to PERF-081, PERF-089).
+  - When any tray setting is on, a main StatusNotifierItem appears. Tray graph icons are owned by the Performance spec (PERF-088 to PERF-092).
   - Tooltip: "CPU: 12.3% RAM: 45.6% GPU: 3.0% Disk: 0.4% Network: 2.3 Mbps", percent with one decimal (table d), network in the `units.network` unit. Updated at 1 Hz while the tray is shown.
   - Left click toggles the main window.
   - Menu (R-027): "Show Main Window", "Tray icon graphs >", separator, "Exit tasklens".
   - Close to tray (`tray.close_to_tray`): close (button, Ctrl+W, Esc-close) hides the window instead of exiting.
   - Minimize to tray (`tray.minimize_to_tray`): minimize hides it.
   - Always show tray icon (`tray.always_show`): keeps the icon while the window is visible.
-  - The main tray icon is hidden while a tray graph icon is shown [CL 0.9.2] (PERF-081).
+  - The main tray icon is hidden while a tray graph icon is shown [CL 0.9.2] (PERF-091).
   - With every tray setting off, closing the main window exits.
   - While hidden: collection stops except tray and graph demand.
 - Linux data/mechanism (R-027, ADR-010):
@@ -1909,8 +1909,8 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Source: TS 7 and cross-check C.5 | MC `--app-id`/`-a` | PLAN `--bench` | table (c)
 - Behaviour: Arguments (table c):
   - `--start-minimized` (APP-048)
-  - `--low-memory`: low-memory rescue window (process spec, r2 PROC-081); TaskSlinger's `/low-memory` and `--internal-low-memory-recovery`
-  - `--watch-memory`: the low-memory watcher mode run by `tasklens-lowmem.service`; it does not start GPUI (r2 PROC-081)
+  - `--low-memory`: low-memory rescue window (process spec, PROC-098); TaskSlinger's `/low-memory` and `--internal-low-memory-recovery`
+  - `--watch-memory`: the low-memory watcher mode run by `tasklens-lowmem.service`; it does not start GPUI (PROC-097)
   - `--tab <processes|performance|services|startup|connections|information>`: TaskSlinger's page argument, whose syntax is unknown, made explicit
   - `--select-pid <pid>`: opens Processes and selects that pid
   - `--debug`: Debug menu (APP-026)
@@ -2084,7 +2084,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 | APP-018 | View > Columns (all tables) | BUILD | P1 |
 | APP-019 | View > Process View | BUILD | P1 |
 | APP-020 | View > Window | ADAPT | P2 (Always On Top), P3 (Performance mini window) |
-| APP-021 | View > Graphs | BUILD | P1 (graph checks and Reset, with the system minigraph cards, PERF-086 and table a), P3 (Keep detached graphs open) |
+| APP-021 | View > Graphs | BUILD | P1 (graph checks and Reset, with the system minigraph cards, PERF-080 and table a), P3 (Keep detached graphs open) |
 | APP-022 | Settings menu | ADAPT | P1 (Refresh, units, Default tab, Close with Esc, motion items), others in their feature's phase |
 | APP-023 | Settings window ("All settings…") | ADAPT | P2 |
 | APP-024 | Help menu | ADAPT | P2 (Additional setup… P3, Documentation P4) |

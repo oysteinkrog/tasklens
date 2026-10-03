@@ -547,7 +547,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   | IOMMU | a non-empty `/sys/class/iommu` |
   | Vulnerabilities | `/sys/devices/system/cpu/vulnerabilities/*` |
 
-  The addendum wrote the Secure Boot GUID as `8be4df61-93ca-11d2-aa0d-e0c98e1ccb4a`; the EFI global variable GUID is `8be4df61-93ca-11d2-aa0d-00e098032b8c` (v2 PERF-032 and v2 PERF-090 use it), so that form is used. Readability of lockdown, efivars and iommu without root is unverified (U-27). A source that cannot be read is left out of the list and named in the tooltip.
+  The addendum wrote the Secure Boot GUID as `8be4df61-93ca-11d2-aa0d-e0c98e1ccb4a`; the EFI global variable GUID is `8be4df61-93ca-11d2-aa0d-00e098032b8c` (PERF-037 and PERF-101 use it), so that form is used. Readability of lockdown, efivars and iommu without root is unverified (U-27). A source that cannot be read is left out of the list and named in the tooltip.
 - Verdict: ADAPT. Windows security rows carry the nearest Linux facts.
 - Phase: P2
 - Privilege: none
