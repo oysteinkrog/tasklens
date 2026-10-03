@@ -362,7 +362,7 @@ pub enum Validity {
 }
 ```
 
-How the UI shows each state (exact strings). Table cells, header totals and sidebar readouts use the glyphs in the "Text cell" column. Performance stats grids, Information rows and Properties key/value fields use the words from PERF-079 instead ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown"). Every surface uses the tooltips below.
+How the UI shows each state (exact strings). Table cells, header totals and sidebar readouts use the glyphs in the "Text cell" column. Performance stats grids, Information rows and Properties key/value fields use the words from PERF-079 [now PERF-013] instead ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown"). Every surface uses the tooltips below.
 
 | State | Text cell | Chart | Tooltip |
 |---|---|---|---|
@@ -1771,7 +1771,7 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 **Retention and budget.**
 - The recorder deletes segments older than retention and, when over the disk cap, the oldest segments first. The UI shows the real retained span.
 - On start, directories of other boots older than retention are deleted.
-- Loading the store at start has a 2 s budget; load errors show the toasts from r2 PROC-078.
+- Loading the store at start has a 2 s budget; load errors show the toasts from r2 PROC-078 [now PROC-087].
 
 **Rolling window while recording is off** (D-010).
 - While `history.enabled` is false and the Processes tab is open (`Demand.process_table` is true), the engine keeps the last 10 minutes of process history in RAM. History mode shows this window.
@@ -2009,7 +2009,7 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - Lines are joined with spaces; NUL separators in `cmdline` become spaces.
 
 **Exports and copy.** In every table:
-- Ctrl+C runs "Copy row" (process menu label "Copy details"; services, startup and connections: "Copy row"). It copies a fixed text block per selected row (add PROC-098, SYS-009, SYS-026, SYS-034).
+- Ctrl+C runs "Copy row" (process menu label "Copy details"; services, startup and connections: "Copy row"). It copies a fixed text block per selected row (add PROC-098 [now PROC-070], SYS-009, SYS-026 [now SYS-025], SYS-034 [now SYS-032]).
 - Ctrl+Shift+C runs "Copy rows as table": the visible columns of the selected rows as tab-separated text with a header line.
 - "Copy" copies the clicked cell.
 - "Copy all metrics" copies every column with data as `Label: value` lines, ending with `Command line: …`.
@@ -2056,7 +2056,7 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 | CPU temperature [P1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only |
 | Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat`, `/proc/vmstat` | |
 | Disks [P1] | `/proc/diskstats`, `/sys/block/*` | active % from `io_ticks` delta; latency = Δ(read_ticks+write_ticks) / Δ(ios); exclude `loop`, `ram`, `zram`, `fd` from the sidebar; partitions and `dm-*` are children |
-| Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default; settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false) |
+| Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049 [now PERF-054]); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default; settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false) |
 | NVIDIA GPU [P1] | `tl-gpu-probe` (ADR-007) | |
 | AMD/Intel GPU [P2 AMD, P3 Intel] | sysfs `gpu_busy_percent`, `mem_info_vram_*`, hwmon, DRM fdinfo | untested here |
 | Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*` | |

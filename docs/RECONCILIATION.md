@@ -4,106 +4,106 @@ This file settles every contradiction found between `docs/DECISIONS.md`, `docs/A
 
 Labels: "verified" means read in a document or checked on the machine; "inferred" means decided here from the rules because no document settles it.
 
-PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from.
+PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from. In R-001 to R-074, the owner questions, the canonical tables and the unverified list, feature IDs are those of the old specs; `[now X]` after an old ID names the entry in the merged specs (`spec/merged/proc.md`, `spec/merged/perf.md`, `spec/merged/sys-app.md`). From R-075 on, a feature ID without a `v1`, `r2`, `add` or `old` prefix is a merged spec ID.
 
 ## Resolutions
 
 ### R-001 Application ID, D-Bus names and object paths
-- Sources in conflict: v1 PROC-003/PROC-030 `org.tasklens.helper.process`, `org.tasklens.Tasklens`, `/KWinBridge`; r2 helper note and PROC-059/064 `org.tasklens.helper`, `org.tasklens.App`, `/WindowBridge`, policy file `org.tasklens.policy`; PERF-094 `io.tasklens.setup`; ADR-001/006/010, APP-001/003/011, SYS-013/032/033 `io.github.oysteinkrog.*`.
+- Sources in conflict: v1 PROC-003/PROC-030 [now PROC-076, PROC-052] `org.tasklens.helper.process`, `org.tasklens.Tasklens`, `/KWinBridge`; r2 helper note and PROC-059/064 [now PROC-052, PROC-076] `org.tasklens.helper`, `org.tasklens.App`, `/WindowBridge`, policy file `org.tasklens.policy`; PERF-094 [now PERF-105] `io.tasklens.setup`; ADR-001/006/010, APP-001/003/011, SYS-013/032/033 [now SYS-013, SYS-030, SYS-031] `io.github.oysteinkrog.*`.
 - Resolution: app ID and session bus name `io.github.oysteinkrog.Tasklens`. Object path `/io/github/oysteinkrog/Tasklens` serves `org.freedesktop.Application`. The KWin bridge object is `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s)`. Polkit action prefix `io.github.oysteinkrog.tasklens.` (lower-case `tasklens`, as D-005 writes it). Policy file `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy` (ADR-001 packaging name). Desktop file `io.github.oysteinkrog.Tasklens.desktop`.
 - Rule: D-005.
-- Edits: v1 PROC-003 helper line and PROC-030; r2 helper note, PROC-059, PROC-064; PERF-094 action name. ADR-001 unchanged.
+- Edits: v1 PROC-003 [now PROC-076] helper line and PROC-030 [now PROC-052]; r2 helper note, PROC-059 [now PROC-052], PROC-064 [now PROC-076]; PERF-094 [now PERF-105] action name. ADR-001 unchanged.
 
 ### R-002 Polkit action set
-- Sources in conflict: ADR-006 one action `…tasklens.helper`; SYS-013 `…tasklens.service-dropin`; SYS-032/039 `…tasklens.inspect`; SYS-033 `…tasklens.close-connection`; PERF-094 setup action; APP-049 passwordless rule for the whole prefix.
+- Sources in conflict: ADR-006 one action `…tasklens.helper`; SYS-013 `…tasklens.service-dropin`; SYS-032/039 [now SYS-030, SYS-037] `…tasklens.inspect`; SYS-033 [now SYS-031] `…tasklens.close-connection`; PERF-094 [now PERF-105] setup action; APP-049 passwordless rule for the whole prefix.
 - Resolution: three actions only. `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation, including reads, SOCK_DESTROY and service drop-ins. `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`. `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon`. Reason: polkit authorises the `pkexec` launch of the helper process once; it cannot authorise individual operations inside a running session, so per-operation action names would not be enforced (inferred from how pkexec works).
 - Rule: ADR-006 wins on the privilege boundary.
-- Edits: SYS-013, SYS-032, SYS-033, SYS-039, PERF-094, APP-049 (rule text stays prefix-based).
+- Edits: SYS-013, SYS-032 [now SYS-030], SYS-033 [now SYS-031], SYS-039 [now SYS-037], PERF-094 [now PERF-105], APP-049 (rule text stays prefix-based).
 
 ### R-003 Helper transport, flags and idle exit
-- Sources in conflict: ADR-006 stdin/stdout framing, 300 s idle, no flag; v1 and r2 stdin/stdout, r2 `--session`, 5 min idle, r2 PROC-064 also `--once` single calls in P2; APP-003 "inherited socketpair", 15 min idle.
-- Resolution: transport is the helper's stdin and stdout with `tl-model::wire` framing (max frame 64 KiB). Start command `pkexec /usr/lib/tasklens/tl-helper --session`. Idle exit after 300 s or when stdin reaches EOF. No `--once` mode: privileged actions exist only from the helper phase (P3). Replies larger than one frame are sent as a sequence of frames; the total per request is capped at 4 MiB (v1 PROC-003).
+- Sources in conflict: ADR-006 stdin/stdout framing, 300 s idle, no flag; v1 and r2 stdin/stdout, r2 `--session`, 5 min idle, r2 PROC-064 [now PROC-076] also `--once` single calls in P2; APP-003 "inherited socketpair", 15 min idle.
+- Resolution: transport is the helper's stdin and stdout with `tl-model::wire` framing (max frame 64 KiB). Start command `pkexec /usr/lib/tasklens/tl-helper --session`. Idle exit after 300 s or when stdin reaches EOF. No `--once` mode: privileged actions exist only from the helper phase (P3). Replies larger than one frame are sent as a sequence of frames; the total per request is capped at 4 MiB (v1 PROC-003 [now PROC-076]).
 - Rule: ADR-006 wins; `--session` is a harmless addition.
-- Edits: APP-003 (socketpair, 15 min); r2 PROC-064 phase note (`--once`); ADR-006 add `--session` and the multi-frame reply rule.
+- Edits: APP-003 (socketpair, 15 min); r2 PROC-064 [now PROC-076] phase note (`--once`); ADR-006 add `--session` and the multi-frame reply rule.
 
 ### R-004 Helper operation allowlist
-- Sources in conflict: ADR-006 allows Signal, SetNice, SetAffinity, SetIoPriority, Freeze/Thaw/KillGroup, ReadProcessDetail only. PROC (v1 PROC-003/070/078, r2 PROC-064), SYS-013/032/033/039 need reads of io, fd list, fdinfo, environ, maps, smaps_rollup, ns, cwd, exe; strings scan; gcore dump; socket inode resolution; SOCK_DESTROY; recovery drop-in write; netns sock_diag dump.
+- Sources in conflict: ADR-006 allows Signal, SetNice, SetAffinity, SetIoPriority, Freeze/Thaw/KillGroup, ReadProcessDetail only. PROC (v1 PROC-003/070/078 [now PROC-076, PROC-075, PROC-084], r2 PROC-064 [now PROC-076]), SYS-013/032/033/039 [now SYS-013, SYS-030, SYS-031, SYS-037] need reads of io, fd list, fdinfo, environ, maps, smaps_rollup, ns, cwd, exe; strings scan; gcore dump; socket inode resolution; SOCK_DESTROY; recovery drop-in write; netns sock_diag dump.
 - Resolution: ADR-006's allowlist is extended with exactly: `ReadProcessFiles { key, files: set of {io, fd_list, fdinfo, environ, maps, smaps, smaps_rollup, ns, cwd, exe, status} }` (`smaps` per R-098); `ScanStrings { key, opts }` (streams batches); `Dump { key, mode, out_fd }` (runs `/usr/bin/gcore` by fixed path, writes to the passed fd); `ResolveSocketInodes { inodes }`; `SockDestroy { family, proto, four_tuple, cookie }`; `WriteServiceDropIn { manager: System, unit, keys limited to Restart*, StartLimit*, FailureAction, OnFailure }` to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`; `NetnsSockDiagDump { netns_ino }`. Still no path, command or free-form file argument. The helper re-runs `open_verified` on every process target.
 - Rule: rule 2, second clause: the ADR as written makes required features impossible, so the ADR changes.
 - Edits: ADR-006 "Privileged helper boundary" list.
 
 ### R-005 Default Memory column is RssAnon
-- Sources in conflict: D-004 RssAnon; ADR-008 "Memory (RSS)" and ADR-011 `memory_rss`; v1 PROC-020 and r2 PROC-020 VmRSS; add PROC-098/102 "Working set total - Memory", "Memory is RSS"; PERF-088 "RSS for the default Memory column".
+- Sources in conflict: D-004 RssAnon; ADR-008 "Memory (RSS)" and ADR-011 `memory_rss`; v1 PROC-020 [now PROC-030] and r2 PROC-020 [now PROC-030] VmRSS; add PROC-098/102 [now PROC-070, PROC-024] "Working set total - Memory", "Memory is RSS"; PERF-088 [now PERF-087] "RSS for the default Memory column".
 - Resolution: column id `memory`, header "Memory", value RssAnon from `/proc/<pid>/status`. Header tooltip: "Private memory (RssAnon). Shared and file-backed pages are not counted." Picker alias `Working set private - "Memory"` (TaskSlinger's own alias). Remove the separate `ws_private` column (it duplicates `memory`). Keep `ws_total` (VmRSS, label "Working set total", tooltip "Resident set size (VmRSS)"), `pss`, `uss`, `swap`. App and unit rows: cgroup `memory.stat` `anon`, tooltip "Anonymous memory charged to this app's cgroup". Subtree totals: Σ RssAnon. Heat reference: 10% of MemTotal against RssAnon. Copy details lines: `Memory:` RssAnon, `Private bytes:` VmData+VmStk, `Working set:` VmRSS, all whole MiB. Minigraph label for the Memory column: "Memory"; for `ws_total`: "RSS"; for `ws_shared`: "RSS shared". History (ADR-012 `HistProcess`) stores RssAnon in `rss_kib`; rename the field `mem_anon_kib`.
 - Rule: D-004.
-- Edits: ADR-003 `ProcessRecord` gains `rss_anon_bytes: u64` and `ProcessField::RssAnon` (PROCESS_FIELDS = 13); ADR-008 memory sentence; ADR-011 column list; ADR-012 field; v1/r2 PROC-020; add PROC-098, PROC-102; PERF-088; r2 PROC-007 (anon only); r2 PROC-015.
+- Edits: ADR-003 `ProcessRecord` gains `rss_anon_bytes: u64` and `ProcessField::RssAnon` (PROCESS_FIELDS = 13); ADR-008 memory sentence; ADR-011 column list; ADR-012 field; v1/r2 PROC-020 [now PROC-030]; add PROC-098 [now PROC-070], PROC-102 [now PROC-024]; PERF-088 [now PERF-087]; r2 PROC-007 [now PROC-008] (anon only); r2 PROC-015 [now PROC-019].
 
 ### R-006 Default visible columns and Power usage
-- Sources in conflict: ADR-011 `name,user,pid,cpu,memory_rss,disk_read,disk_write,net,gpu,description`; ADR-016 power hidden; v1 PROC-015 and add PROC-106 nine columns without Power; r2 PROC-016/024 Power on when RAPL readable; v1 PROC-022 single Disk column.
+- Sources in conflict: ADR-011 `name,user,pid,cpu,memory_rss,disk_read,disk_write,net,gpu,description`; ADR-016 power hidden; v1 PROC-015 [now PROC-018, PROC-027, PROC-028] and add PROC-106 [now PROC-022] nine columns without Power; r2 PROC-016/024 [now PROC-022, PROC-023, PROC-024, PROC-025, PROC-034] Power on when RAPL readable; v1 PROC-022 [now PROC-031] single Disk column.
 - Resolution: default visible, in order: `name, user, pid, cpu, memory, disk, network, gpu, description`. `power` and `power_trend` exist and are off by default on every machine. Default widths (logical px at 100%): Name 248, User 92, PID 96, CPU 63, Memory 92, Disk 82, Network 92, GPU 72, Description 342; Power usage 101 when shown.
 - Rule: ADR-016 and the architecture review (no default power column without a per-process source; the column is an estimate). TaskSlinger's single Disk column wins over ADR-011's read/write pair (rule 3).
-- Edits: ADR-011 `columns` and `column_widths` example; r2 PROC-016 and PROC-024 default-set sentences.
+- Edits: ADR-011 `columns` and `column_widths` example; r2 PROC-016 [now PROC-022, PROC-023, PROC-024, PROC-025] and PROC-024 [now PROC-034] default-set sentences.
 
 ### R-007 Column identifiers and labels
 - Sources in conflict: v1 gives string ids; r2 gives labels only, some renamed.
-- Resolution: v1's string ids are canonical (PROC-015 to PROC-027 plus add PROC-103 `gpu_0..gpu_15`). r2's labels win where they differ, except where TaskSlinger has the label: "Handles" stays "Handles" (tooltip "Open file descriptors"), not "File descriptors". Adopt from r2: Type values "App, Background process, System process, Kernel thread, Unit, Pseudo"; Elevated values "Full (root)", "Capabilities", "Setuid" (euid differs from ruid; added, inferred), "Default"; Sandbox values; "Package", "Packager", "Package status", "Build date"; Session blank for 4294967295; Start time "HH:MM:SS" today else "YYYY-MM-DD HH:MM"; Priority class text with the nice value in the tooltip; Disk = Δ(read_bytes + write_bytes − cancelled_write_bytes)/Δt; GPU = max over adapters of max(SM, encoder, decoder).
+- Resolution: v1's string ids are canonical (PROC-015 [now PROC-018, PROC-027, PROC-028] to PROC-027 [now PROC-036] plus add PROC-103 [now PROC-033] `gpu_0..gpu_15`). r2's labels win where they differ, except where TaskSlinger has the label: "Handles" stays "Handles" (tooltip "Open file descriptors"), not "File descriptors". Adopt from r2: Type values "App, Background process, System process, Kernel thread, Unit, Pseudo"; Elevated values "Full (root)", "Capabilities", "Setuid" (euid differs from ruid; added, inferred), "Default"; Sandbox values; "Package", "Packager", "Package status", "Build date"; Session blank for 4294967295; Start time "HH:MM:SS" today else "YYYY-MM-DD HH:MM"; Priority class text with the nice value in the tooltip; Disk = Δ(read_bytes + write_bytes − cancelled_write_bytes)/Δt; GPU = max over adapters of max(SM, encoder, decoder).
 - Rule: rule 5 and rule 3.
-- Edits: v1 PROC-015/017/018/021/022/024/026 label columns; the merge agent carries ids into r2's tables.
+- Edits: v1 PROC-015/017/018/021/022/024/026 [now PROC-018, PROC-027, PROC-028, PROC-029, PROC-031, PROC-033, PROC-035] label columns; the merge agent carries ids into r2's tables.
 
 ### R-008 Command-line read and display limits
-- Sources in conflict: v1 PROC-002/015 64 KiB; r2 PROC-001/017 4 KiB in the table, full on demand; ADR-015 32 KiB.
+- Sources in conflict: v1 PROC-002/015 [now PROC-002, PROC-018, PROC-027, PROC-028] 64 KiB; r2 PROC-001/017 [now PROC-002, PROC-027] 4 KiB in the table, full on demand; ADR-015 32 KiB.
 - Resolution: read limit 32 KiB with `…` appended (ADR-015). Table cell and hover tooltip show the first 512 characters; Properties shows the full 32 KiB.
 - Rule: ADR-015.
-- Edits: v1 PROC-002, PROC-015; r2 PROC-001, PROC-017.
+- Edits: v1 PROC-002, PROC-015 [now PROC-018, PROC-027, PROC-028]; r2 PROC-001 [now PROC-002], PROC-017 [now PROC-027].
 
 ### R-009 Row hover tooltip format
-- Sources in conflict: add PROC-032 amendment (TaskSlinger line keys, cmdline first 512 chars); r2 PROC-013 ("path:", "user:", "Unit:", "Command line:" 8 lines, "Package:").
+- Sources in conflict: add PROC-032 amendment [now PROC-039] (TaskSlinger line keys, cmdline first 512 chars); r2 PROC-013 [now PROC-039] ("path:", "user:", "Unit:", "Command line:" 8 lines, "Package:").
 - Resolution: the addendum's block, plus r2's `Package: <name> <version>` line after `cgroup:` when known:
   `<command line, first 512 chars>` / `path: <exe or "restricted">` / `user: <name> (uid N)` / `Unit: <unit> (<Description>)` / `cgroup: <path>` / `Package: …` / `Desktop file: …` (app rows) / `Some values need administrator access.` (restricted rows).
 - Rule: addendum later and more specific; r2 line added because it does not contradict.
-- Edits: r2 PROC-013.
+- Edits: r2 PROC-013 [now PROC-039].
 
 ### R-010 View mode model, menu and cycle order
-- Sources in conflict: ADR-011 `processes.mode = grouped|tree|flat`; r2 PROC-002 one enum, three radio items, default Grouping; add PROC-004 amendment (radio pair plus check), add PROC-105 cycle Tree, Grouping, List; APP-005 cycle Grouping, Tree, List; APP-032 and PROC-095 two booleans.
+- Sources in conflict: ADR-011 `processes.mode = grouped|tree|flat`; r2 PROC-002 [now PROC-014, PROC-015] one enum, three radio items, default Grouping; add PROC-004 amendment [now PROC-014 (Dropped: R-010)] (radio pair plus check), add PROC-105 [now PROC-015] cycle Tree, Grouping, List; APP-005 cycle Grouping, Tree, List; APP-032 and PROC-095 [now PROC-099] two booleans.
 - Resolution: one setting `processes.mode` with values `grouped | tree | flat`, default `grouped`. View > Process View shows three radio items "Tree View", "Task Manager Grouping", "List View". The toolbar button cycles Tree View, then Task Manager Grouping, then List View (TaskSlinger string order). Toast "View mode: <name>". Tooltip "Toggle view mode (current: <name>)".
 - Rule: ADR-011 on the data model; TaskSlinger string order on the cycle (rule 3).
-- Edits: APP-005, APP-032 (`tree_view`, `grouping` keys), PROC-095 (same keys), add PROC-105 (two-boolean mapping), add PROC-004 amendment (drop).
+- Edits: APP-005, APP-032 (`tree_view`, `grouping` keys), PROC-095 [now PROC-099] (same keys), add PROC-105 [now PROC-015] (two-boolean mapping), add PROC-004 amendment [now PROC-014 (Dropped: R-010)] (drop).
 
 ### R-011 Default sort
-- Sources in conflict: ADR-011 `cpu desc`; v1 PROC-037, r2 PROC-035, APP-032 PID ascending.
+- Sources in conflict: ADR-011 `cpu desc`; v1 PROC-037 [now PROC-047], r2 PROC-035 [now PROC-047], APP-032 PID ascending.
 - Resolution: processes PID ascending; history CPU descending; services Name ascending; startup Status ascending then Name; connections Proto ascending then local port.
 - Rule: rule 3 (TaskSlinger INI `Sort.ProcessesKey=3`, verified in the inventory).
 - Edits: ADR-011 `sort` default.
 
 ### R-012 Ctrl+C and the copy commands
-- Sources in conflict: ADR-015 "Copy" = TSV of visible columns; add PROC-098 Ctrl+C = Copy details (fixed block), Ctrl+Shift+C = "Copy rows as table" (TSV); APP-031 Ctrl+C = TSV in all tables; SYS-009 Ctrl+C = TSV.
-- Resolution: in every table, Ctrl+C runs "Copy row" (processes: menu label "Copy details"; services, startup, connections: "Copy row"), which copies the fixed block from add PROC-098, SYS-009, SYS-026 or SYS-034. Ctrl+Shift+C runs "Copy rows as table": TSV of the visible columns with a header line. "Copy" copies the clicked cell. "Copy all metrics" copies every column with data as `Label: value` lines, ending with `Command line: …`. On the Performance tab Ctrl+C copies the device info (PERF-010). Command lines appear only in "Copy all metrics" and only for rows the user selected; this is the deliberate export ADR-015 allows.
+- Sources in conflict: ADR-015 "Copy" = TSV of visible columns; add PROC-098 [now PROC-070] Ctrl+C = Copy details (fixed block), Ctrl+Shift+C = "Copy rows as table" (TSV); APP-031 Ctrl+C = TSV in all tables; SYS-009 Ctrl+C = TSV.
+- Resolution: in every table, Ctrl+C runs "Copy row" (processes: menu label "Copy details"; services, startup, connections: "Copy row"), which copies the fixed block from add PROC-098 [now PROC-070], SYS-009, SYS-026 [now SYS-025] or SYS-034 [now SYS-032]. Ctrl+Shift+C runs "Copy rows as table": TSV of the visible columns with a header line. "Copy" copies the clicked cell. "Copy all metrics" copies every column with data as `Label: value` lines, ending with `Command line: …`. On the Performance tab Ctrl+C copies the device info (PERF-010 [now PERF-011]). Command lines appear only in "Copy all metrics" and only for rows the user selected; this is the deliberate export ADR-015 allows.
 - Rule: addendum later and more specific; applied to the other tables for consistency (inferred).
-- Edits: ADR-015 "Exports and copy"; APP-031 Ctrl+C row; SYS-009; r2 PROC-037 and PROC-053.
+- Edits: ADR-015 "Exports and copy"; APP-031 Ctrl+C row; SYS-009; r2 PROC-037 [now PROC-049] and PROC-053 [now PROC-070].
 
 ### R-013 Number formats
-- Sources in conflict: ADR-003 (3 significant digits for memory, no decimal on percent at or above 10, GHz with 2 decimals, durations "1d 4h"); add PROC-104 and r2 PROC-027 (percent "%.1f%%", memory 2 decimals, counts thin-space grouped); PERF-022 Mission Center rule (2 decimals below 10, 1 below 100); PERF-001 "4631 MHz"; PERF-080 uptime "2 days, 2h 38m 15s".
+- Sources in conflict: ADR-003 (3 significant digits for memory, no decimal on percent at or above 10, GHz with 2 decimals, durations "1d 4h"); add PROC-104 [now PROC-003] and r2 PROC-027 [now PROC-003] (percent "%.1f%%", memory 2 decimals, counts thin-space grouped); PERF-022 [now PERF-025] Mission Center rule (2 decimals below 10, 1 below 100); PERF-001 "4631 MHz"; PERF-080 [now PERF-034] uptime "2 days, 2h 38m 15s".
 - Resolution: see canonical table (d). In short: percent one decimal everywhere, "0%" at measured zero; memory and storage IEC with 2 decimals, "512 B" below 1 KiB; rates IEC MiB/s with 1 decimal in tables, auto-scaled with 1-2-5 axis rounding on graphs; frequencies integer MHz; uptime in the TaskSlinger form; the short "4h 12m" form only inside tooltips and the Start time column's age text.
 - Rule: rule 3 (TaskSlinger density and strings).
-- Edits: ADR-003 units list; PERF-022 number-format line; PERF-025 tooltip "4.2 GHz" becomes "4200 MHz".
+- Edits: ADR-003 units list; PERF-022 [now PERF-025] number-format line; PERF-025 [now PERF-028] tooltip "4.2 GHz" becomes "4200 MHz".
 
 ### R-014 Disk and I/O rate unit labels
-- Sources in conflict: r2 PROC-021/027, PROC-029, PROC-077 "MB/s"; add PROC-104, ADR-003, PERF-022 "MiB/s".
+- Sources in conflict: r2 PROC-021/027 [now PROC-031, PROC-003], PROC-029 [now PROC-040], PROC-077 [now PROC-090] "MB/s"; add PROC-104 [now PROC-003], ADR-003, PERF-022 [now PERF-025] "MiB/s".
 - Resolution: "MiB/s" and "KiB/s" everywhere, base 1024. Heat reference 100 MiB/s. Top-3 hover "Disk: 4.2 MiB/s".
 - Rule: ADR-003 and the review's IEC rule; the addendum agrees.
-- Edits: r2 PROC-021, PROC-027, PROC-029, PROC-077; v1 PROC-033, PROC-084.
+- Edits: r2 PROC-021 [now PROC-031], PROC-027 [now PROC-003], PROC-029 [now PROC-040], PROC-077 [now PROC-090]; v1 PROC-033 [now PROC-040], PROC-084 [now PROC-090].
 
 ### R-015 Network units and auto-scale default
-- Sources in conflict: PERF-022 auto-scale on, memory and disk base choices; APP-032 `units.network_auto_scale=false`, `network_base2`, `memory_*`, `disk_*`; ADR-003 `[units] network = bits|bytes` only; TaskSlinger INI `NetworkRateAutoScale=0` (verified).
-- Resolution: `[units] network = "bits"` (bits are SI base 1000: Kbps, Mbps, Gbps; bytes are IEC: KiB/s, MiB/s). `[units] network_auto_scale = false`. With auto-scale off, values are fixed Mbps (or MiB/s) with one decimal, "0 Mbps" at zero. Graph axis maxima still use PERF-016 rounding regardless of this setting. No base-10 options for memory or disk; those Mission Center settings are dropped.
+- Sources in conflict: PERF-022 [now PERF-025] auto-scale on, memory and disk base choices; APP-032 `units.network_auto_scale=false`, `network_base2`, `memory_*`, `disk_*`; ADR-003 `[units] network = bits|bytes` only; TaskSlinger INI `NetworkRateAutoScale=0` (verified).
+- Resolution: `[units] network = "bits"` (bits are SI base 1000: Kbps, Mbps, Gbps; bytes are IEC: KiB/s, MiB/s). `[units] network_auto_scale = false`. With auto-scale off, values are fixed Mbps (or MiB/s) with one decimal, "0 Mbps" at zero. Graph axis maxima still use PERF-016 [now PERF-019] rounding regardless of this setting. No base-10 options for memory or disk; those Mission Center settings are dropped.
 - Rule: rule 3 on the default (TaskSlinger 0); ADR-003 on the setting shape.
-- Edits: PERF-022; APP-032 units rows; add PROC-104 "with auto-scale on" wording stays as the on-case.
+- Edits: PERF-022 [now PERF-025]; APP-032 units rows; add PROC-104 [now PROC-003] "with auto-scale on" wording stays as the on-case.
 
 ### R-016 Graph time ranges and ring capacity
-- Sources in conflict: ADR-003/009/011 ranges 15 s and 60 s, one 602-sample ring; PERF-013 30 s, 1, 5, 10 min with one Performance-wide range; APP-032 `graphs.time_range_s` 30, 60, 120, 300, 600; TaskSlinger minigraph ranges 30 s, 1 min, 5 min, 10 min (inventory, verified).
+- Sources in conflict: ADR-003/009/011 ranges 15 s and 60 s, one 602-sample ring; PERF-013 [now PERF-016] 30 s, 1, 5, 10 min with one Performance-wide range; APP-032 `graphs.time_range_s` 30, 60, 120, 300, 600; TaskSlinger minigraph ranges 30 s, 1 min, 5 min, 10 min (inventory, verified).
 - Resolution: choices are 30 s, 1 min, 5 min, 10 min; default 1 min. Phase 1 ships 30 s and 1 min; 5 and 10 min arrive in P2 with the 1 Hz tier. Drop 15 s and 2 min. One setting `performance.graph_range_s` for the Performance tab (values 30, 60, 300, 600); each minigraph card keeps its own range. Rings: every series has a fast tier of capacity `ceil(60 s / period) + 2` (602 at 10 Hz) and, from P2, a 1 Hz tier of 602 samples (10 min + 2) whose value is the per-second maximum of the fast tier (same rule ADR-012 uses for history). `Sample` stays 16 bytes; no per-sample min/max pair. Memory about 1.5 MB for 80 series.
 - Rule: rule 3 on the user-visible choices; ADR-003 structure kept and extended.
-- Edits: ADR-003 ring paragraph; ADR-009 `ChartSpec.range_ns` comment; ADR-011 `graph_range_s`; PERF-013/014 (phases match); APP-032 `graphs.time_range_s` (rename and value list).
+- Edits: ADR-003 ring paragraph; ADR-009 `ChartSpec.range_ns` comment; ADR-011 `graph_range_s`; PERF-013/014 [now PERF-016, PERF-017] (phases match); APP-032 `graphs.time_range_s` (rename and value list).
 
 ### R-017 Motion and animation settings
 - Sources in conflict: ADR-011 one key `appearance.animations` covering "Smooth graphs" and motion; APP-032 `motion.animations`, `motion.smooth_graphs`, `motion.smooth_scroll`, `motion.smooth_scroll_amount`, `motion.tab_switch_ms`; TaskSlinger has separate INI keys (verified).
@@ -112,16 +112,16 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: ADR-011 schema; ADR-009 animation driver text ("setting Smooth graphs").
 
 ### R-018 Settings files, format details and corrupt-file handling
-- Sources in conflict: ADR-011 `settings.toml` plus `window.toml`, user themes `themes/*.json`, `schema_version`, corrupt file renamed `.corrupt-<unix>`, toast text, no `directories` crate; APP-033 `settings.toml`, `state.toml`, `themes.json`, `version`, `.bad-<unix>`, different toast, `directories`, inotify reload, unknown keys kept; PROC-095 everything under `[processes]` in settings.toml including sort, columns and `history_mode`.
+- Sources in conflict: ADR-011 `settings.toml` plus `window.toml`, user themes `themes/*.json`, `schema_version`, corrupt file renamed `.corrupt-<unix>`, toast text, no `directories` crate; APP-033 `settings.toml`, `state.toml`, `themes.json`, `version`, `.bad-<unix>`, different toast, `directories`, inotify reload, unknown keys kept; PROC-095 [now PROC-099] everything under `[processes]` in settings.toml including sort, columns and `history_mode`.
 - Resolution: two TOML files. `$XDG_CONFIG_HOME/tasklens/settings.toml` holds user choices. `$XDG_STATE_HOME/tasklens/state.toml` holds window size and maximized, sort per table, columns per table, group expand state, last tab, Performance nav width and selected device, `history_mode`, minigraph layout, tray graphs. `window.toml` is dropped (its content moves to `[window]` in `state.toml`). User themes live in `$XDG_CONFIG_HOME/tasklens/themes.json` in TaskSlinger's `{"themes":[…]}` format; built-ins ship as `assets/themes/builtin.json`. Both TOML files start with `schema_version = 1`. Load, migrate, clamp, atomic save and the read-only rule for newer files follow ADR-011. A corrupt file is renamed `<name>.corrupt-<unix seconds>` and the toast reads "Settings file was unreadable and has been reset. The old file was kept as {name}". Unknown keys are ignored and not preserved. No `directories` crate. No inotify on the settings file; external edits apply at the next start.
 - Rule: ADR-011 on structure; APP-033's split into settings and state adopted because ADR-011 already separates window state.
-- Edits: ADR-011 paths table and ownership text; ADR-009 theme path; APP-033; PROC-095 (state keys move).
+- Edits: ADR-011 paths table and ownership text; ADR-009 theme path; APP-033; PROC-095 [now PROC-099] (state keys move).
 
 ### R-019 Settings key names
-- Sources in conflict: three different key sets (ADR-011, APP-032, PROC-095) plus PERF keys.
+- Sources in conflict: three different key sets (ADR-011, APP-032, PROC-095 [now PROC-099]) plus PERF keys.
 - Resolution: canonical table (a) is the only settings schema. Merge agents replace every key named in a spec with the table's name. Keys that no feature needs are dropped there with a reason.
 - Rule: ADR-011 naming style (short section names, snake_case ids).
-- Edits: APP-032, PROC-095, PERF-002/003/004/069/073, ADR-011.
+- Edits: APP-032, PROC-095 [now PROC-099], PERF-002/003/004/069/073 [now PERF-002, PERF-003, PERF-004, PERF-077, PERF-081], ADR-011.
 
 ### R-020 UI scale and row height
 - Sources in conflict: ADR-009/011 `ui_scale = 1.0`, 0.8..=1.5, row height 28 × ui_scale; APP-032/040 `ui_scale_pct` 75-200 step 5, `row_height_pct` 80-150; TaskSlinger INI `UIScale`, `RowHeightPct` in percent (verified).
@@ -154,136 +154,136 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: APP-032.
 
 ### R-025 History retention, caps, format and persistence
-- Sources in conflict: D-003 off by default, 6 h; ADR-011/012 1..=24 h, `max_disk_mb = 256`, 16 MB RAM, segments per boot `seg-<boottime>.tlh`; v1 PROC-080/081 and r2 PROC-074/078 1..=12 h, 64 MiB RAM cap, 10-minute uncompressed window, `YYYYmmdd-HHMM.tlh`, "Save history to disk" setting, r2 shows a 10-minute rolling window when recording is off; APP-022 menu 1, 2, 3, 4, 6, 8, 12 hours.
-- Resolution: `history.enabled = false`; `history.retention_h = 6`, range 1..=12; menu offers 1, 2, 3, 4, 6, 8, 12. `history.max_disk_mb = 256` (not shown in menus). `history.persist = true`: when false the recorder deletes its segments at shutdown and loads nothing at start; the on-disk format is unchanged. Storage format, RAM budget (16 MB), directory layout and segment names follow ADR-012. With recording off, History mode shows the "History recording is off" toast with an "Enable" button and no data; the r2 10-minute rolling window is dropped. Load error toasts from r2 PROC-078 stay; load time budget 2 s.
+- Sources in conflict: D-003 off by default, 6 h; ADR-011/012 1..=24 h, `max_disk_mb = 256`, 16 MB RAM, segments per boot `seg-<boottime>.tlh`; v1 PROC-080/081 [now PROC-086, PROC-087] and r2 PROC-074/078 [now PROC-086, PROC-087] 1..=12 h, 64 MiB RAM cap, 10-minute uncompressed window, `YYYYmmdd-HHMM.tlh`, "Save history to disk" setting, r2 shows a 10-minute rolling window when recording is off; APP-022 menu 1, 2, 3, 4, 6, 8, 12 hours.
+- Resolution: `history.enabled = false`; `history.retention_h = 6`, range 1..=12; menu offers 1, 2, 3, 4, 6, 8, 12. `history.max_disk_mb = 256` (not shown in menus). `history.persist = true`: when false the recorder deletes its segments at shutdown and loads nothing at start; the on-disk format is unchanged. Storage format, RAM budget (16 MB), directory layout and segment names follow ADR-012. With recording off, History mode shows the "History recording is off" toast with an "Enable" button and no data; the r2 10-minute rolling window is dropped. Load error toasts from r2 PROC-078 [now PROC-087] stay; load time budget 2 s.
 - Rule: D-003; ADR-012 on storage; TaskSlinger on the 1..=12 range (rule 3).
-- Edits: ADR-011 `retention_h` range; ADR-012 retention sentence; v1 PROC-080/081; r2 PROC-074/078; APP-032.
+- Edits: ADR-011 `retention_h` range; ADR-012 retention sentence; v1 PROC-080/081 [now PROC-086, PROC-087]; r2 PROC-074/078 [now PROC-086, PROC-087]; APP-032.
 
 ### R-026 GPU sample rate
-- Sources in conflict: ADR-007 device totals at 1 Hz, never faster; PERF-056 500 ms when Refresh is under 1 s.
+- Sources in conflict: ADR-007 device totals at 1 Hz, never faster; PERF-056 [now PERF-062] 500 ms when Refresh is under 1 s.
 - Resolution: GPU totals and GPU process data at 1 Hz. The Refresh setting does not affect the probe.
 - Rule: ADR-007.
-- Edits: PERF-056; PERF conflicts item 2.
+- Edits: PERF-056 [now PERF-062]; PERF conflicts item 2.
 
 ### R-027 Tray implementation, icon sizes and menus
-- Sources in conflict: ADR-010 `ksni =0.3.6`, sizes 22 and 44, menu "Show tasklens, graph choice, Quit", data from a 1 Hz GPUI timer in `tl-tray`; APP-047 hand-written SNI in the tl-engine zbus adapter, 22 and 44; PERF-078 ksni if no Tokio else hand-written, sizes 22, 32, 44; PERF-080/089 detailed menus.
-- Resolution: `tl-tray` with `ksni =0.3.6` as ADR-010 says; `cargo xtask check-deps` proves no Tokio. If that check fails, the fallback is a hand-written SNI and dbusmenu server inside `tl-tray` on its own zbus connection, never inside tl-engine. Icon sizes 22 and 44 px. Tray graph icon menu (PERF-089 order): Graph color >, Time range >, Close tray icon graph, Tray icon graphs >, separator, Show Main Window, Show mini window (P3), Exit tasklens. Main tray icon menu (APP-047): Show Main Window, Tray icon graphs >, separator, Exit tasklens. Left click toggles the main window. Updates at most 1 Hz and only when pixels changed. Re-register on `StatusNotifierWatcher` owner change (PERF-090).
+- Sources in conflict: ADR-010 `ksni =0.3.6`, sizes 22 and 44, menu "Show tasklens, graph choice, Quit", data from a 1 Hz GPUI timer in `tl-tray`; APP-047 hand-written SNI in the tl-engine zbus adapter, 22 and 44; PERF-078 [now PERF-088] ksni if no Tokio else hand-written, sizes 22, 32, 44; PERF-080/089 [now PERF-090] detailed menus.
+- Resolution: `tl-tray` with `ksni =0.3.6` as ADR-010 says; `cargo xtask check-deps` proves no Tokio. If that check fails, the fallback is a hand-written SNI and dbusmenu server inside `tl-tray` on its own zbus connection, never inside tl-engine. Icon sizes 22 and 44 px. Tray graph icon menu (PERF-089 [now PERF-090] order): Graph color >, Time range >, Close tray icon graph, Tray icon graphs >, separator, Show Main Window, Show mini window (P3), Exit tasklens. Main tray icon menu (APP-047): Show Main Window, Tray icon graphs >, separator, Exit tasklens. Left click toggles the main window. Updates at most 1 Hz and only when pixels changed. Re-register on `StatusNotifierWatcher` owner change (PERF-090 [now PERF-092]).
 - Rule: ADR-010 on structure; TaskSlinger menus (rule 3).
-- Edits: ADR-010 tray paragraph (menus); APP-047 mechanism; PERF-078 sizes.
+- Edits: ADR-010 tray paragraph (menus); APP-047 mechanism; PERF-078 [now PERF-088] sizes.
 
 ### R-028 Additional setup: panel, not first-run dialog
-- Sources in conflict: PERF-094 on-demand panel under Settings > Monitoring, no first-run dialog; APP-042 first-run dialog gated by `state.first_run_done`, reopened from Help; APP-024 Help item.
-- Resolution: no first-run dialog. One window titled "tasklens Additional Setup", opened from Help > "Additional setup…", from Settings > All settings > Privileges, and from every "Needs setup" link. Rows: "CPU power draw" (RAPL rule, PERF-095), "Journal access" (shows `sudo usermod -aG systemd-journal $USER` with Copy; no automatic change), "Administrator helper" (Installed / Not installed), "Fan sensors" (PERF-097, P4), "Per-process network" (text only, PERF-096). Each row has status text, Enable or Revert, "View script" and "Copy command". Script `/usr/lib/tasklens/tasklens-setup` with subcommands `rapl-enable`, `rapl-revert`, `sensors-detect`, `polkit-rule on|off`. `state.first_run_done` is dropped.
-- Rule: rule 3 (TaskSlinger has no first-run dialog); PERF-094 is the more complete design.
-- Edits: APP-042 (rewrite to point at PERF-094), APP-032 state row, PERF-094 title and location.
+- Sources in conflict: PERF-094 [now PERF-105] on-demand panel under Settings > Monitoring, no first-run dialog; APP-042 first-run dialog gated by `state.first_run_done`, reopened from Help; APP-024 Help item.
+- Resolution: no first-run dialog. One window titled "tasklens Additional Setup", opened from Help > "Additional setup…", from Settings > All settings > Privileges, and from every "Needs setup" link. Rows: "CPU power draw" (RAPL rule, PERF-095 [now PERF-106]), "Journal access" (shows `sudo usermod -aG systemd-journal $USER` with Copy; no automatic change), "Administrator helper" (Installed / Not installed), "Fan sensors" (PERF-097 [now PERF-108], P4), "Per-process network" (text only, PERF-096 [now PERF-107]). Each row has status text, Enable or Revert, "View script" and "Copy command". Script `/usr/lib/tasklens/tasklens-setup` with subcommands `rapl-enable`, `rapl-revert`, `sensors-detect`, `polkit-rule on|off`. `state.first_run_done` is dropped.
+- Rule: rule 3 (TaskSlinger has no first-run dialog); PERF-094 [now PERF-105] is the more complete design.
+- Edits: APP-042 (rewrite to point at PERF-094 [now PERF-105]), APP-032 state row, PERF-094 [now PERF-105] title and location.
 
 ### R-029 RAPL udev rule file
-- Sources in conflict: PERF-095 `60-tasklens-powercap.rules`; r2 PROC-024 and APP-042 `99-tasklens-powercap.rules`; existing `/etc/udev/rules.d/99-powercap.rules` from Mission Center (verified present).
-- Resolution: `/etc/udev/rules.d/99-tasklens-powercap.rules` with one line: `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`. `rapl-enable` writes it, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add`. Status "Enabled (existing rule)" when `energy_uj` is already readable and the tasklens file is absent; tasklens never touches `99-powercap.rules`. The warning text from PERF-095 is shown before enabling.
+- Sources in conflict: PERF-095 [now PERF-106] `60-tasklens-powercap.rules`; r2 PROC-024 [now PROC-034] and APP-042 `99-tasklens-powercap.rules`; existing `/etc/udev/rules.d/99-powercap.rules` from Mission Center (verified present).
+- Resolution: `/etc/udev/rules.d/99-tasklens-powercap.rules` with one line: `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`. `rapl-enable` writes it, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add`. Status "Enabled (existing rule)" when `energy_uj` is already readable and the tasklens file is absent; tasklens never touches `99-powercap.rules`. The warning text from PERF-095 [now PERF-106] is shown before enabling.
 - Rule: two of three documents agree; a 99- prefix sorts after distro rules (inferred).
-- Edits: PERF-095 file name.
+- Edits: PERF-095 [now PERF-106] file name.
 
 ### R-030 DIMM serial numbers
-- Sources in conflict: PERF-041 key list includes `SERIAL_NUMBER`; PERF-088 Information shows "Serial number"; PERF addendum PERF-085 hides serials.
+- Sources in conflict: PERF-041 [now PERF-046] key list includes `SERIAL_NUMBER`; PERF-088 [now PERF-099] Information shows "Serial number"; PERF addendum PERF-085 [now PERF-046] hides serials.
 - Resolution: serials are not shown on the Memory page, the Information tab or in any copy text. The udev key is not read. See owner question Q-1 if Oystein wants them.
 - Rule: addendum is later and more specific; it also protects copy and screenshot output.
-- Edits: PERF-041, PERF-088.
+- Edits: PERF-041 [now PERF-046], PERF-088 [now PERF-099].
 
 ### R-031 Hide system processes: wording, key and scope
-- Sources in conflict: v1 PROC-012 and r2 PROC-034 tooltip "Hide system background processes"; add PROC-012 amendment and APP-004 "Hide system processes" / "Show system processes"; keys `processes.hide_system_processes` (APP-032) vs `hide_system` (PROC-095).
-- Resolution: tooltip "Hide system processes" / "Show system processes"; toasts "Hiding system processes" / "Showing system processes". Key `processes.hide_system = false`. Scope per r2 PROC-034 plus pseudo rows (add PROC-100). The button exists on the Processes tab only, removed (not greyed) on other tabs; in History mode it stays active.
+- Sources in conflict: v1 PROC-012 [now PROC-046] and r2 PROC-034 [now PROC-046] tooltip "Hide system background processes"; add PROC-012 amendment [now PROC-046] and APP-004 "Hide system processes" / "Show system processes"; keys `processes.hide_system_processes` (APP-032) vs `hide_system` (PROC-095 [now PROC-099]).
+- Resolution: tooltip "Hide system processes" / "Show system processes"; toasts "Hiding system processes" / "Showing system processes". Key `processes.hide_system = false`. Scope per r2 PROC-034 [now PROC-046] plus pseudo rows (add PROC-100 [now PROC-012]). The button exists on the Processes tab only, removed (not greyed) on other tabs; in History mode it stays active.
 - Rule: addendum later; key name by ADR style.
-- Edits: v1 PROC-012, r2 PROC-034 tooltip text; APP-032 key.
+- Edits: v1 PROC-012 [now PROC-046], r2 PROC-034 [now PROC-046] tooltip text; APP-032 key.
 
 ### R-032 Pseudo-process rows
-- Sources in conflict: r2 PROC-010 three rows (System Idle Process, System interrupts, Memory compression), toggle "Show pseudo processes" default on, Type "Pseudo"; add PROC-100 two rows ("Interrupts", "Memory compression (zram)"), no idle row, no toggle, Type "Kernel".
-- Resolution: add PROC-100 wins: two rows, names "Interrupts" and "Memory compression (zram)", no extra toggle, hidden by Hide system processes, excluded from the process count, menu Copy, Copy details, Copy all metrics, Add Minigraph only. Type column shows "Pseudo" (r2's value list, R-007). Phase P2.
+- Sources in conflict: r2 PROC-010 [now PROC-012] three rows (System Idle Process, System interrupts, Memory compression), toggle "Show pseudo processes" default on, Type "Pseudo"; add PROC-100 [now PROC-012] two rows ("Interrupts", "Memory compression (zram)"), no idle row, no toggle, Type "Kernel".
+- Resolution: add PROC-100 [now PROC-012] wins: two rows, names "Interrupts" and "Memory compression (zram)", no extra toggle, hidden by Hide system processes, excluded from the process count, menu Copy, Copy details, Copy all metrics, Add Minigraph only. Type column shows "Pseudo" (r2's value list, R-007). Phase P2.
 - Rule: addendum later and more specific; it also uses the verified `CONFIG_IRQ_TIME_ACCOUNTING=y` fact.
-- Edits: r2 PROC-010; r2 PROC-017 Type list stays.
+- Edits: r2 PROC-010 [now PROC-012]; r2 PROC-017 [now PROC-027] Type list stays.
 
 ### R-033 Row context menu order and labels
-- Sources in conflict: v1 PROC-049 (with add amendments); r2 PROC-041; app-row labels "Force End App" (v1, add PROC-096) vs "Kill App (all processes)" (r2); "Suspend App/Resume App" (v1) vs "Freeze App/Thaw App" (r2); Set Affinity submenu (v1) vs dialog "Set Affinity…" (r2).
-- Resolution: r2 PROC-041 order, with "Copy details" inserted between "Copy" and "Copy all metrics". App and unit rows: "End App", "Freeze App" / "Thaw App", "Kill App (all processes)". "Set Affinity…" opens the r2 PROC-050 dialog. Pseudo rows and exited rows per R-032 and r2.
+- Sources in conflict: v1 PROC-049 [now PROC-057] (with add amendments); r2 PROC-041 [now PROC-057]; app-row labels "Force End App" (v1, add PROC-096 [now PROC-061]) vs "Kill App (all processes)" (r2); "Suspend App/Resume App" (v1) vs "Freeze App/Thaw App" (r2); Set Affinity submenu (v1) vs dialog "Set Affinity…" (r2).
+- Resolution: r2 PROC-041 [now PROC-057] order, with "Copy details" inserted between "Copy" and "Copy all metrics". App and unit rows: "End App", "Freeze App" / "Thaw App", "Kill App (all processes)". "Set Affinity…" opens the r2 PROC-050 [now PROC-067] dialog. Pseudo rows and exited rows per R-032 and r2.
 - Rule: r2 wins where it covers; addendum adds the one item it introduced.
-- Edits: v1 PROC-049 (superseded); add PROC-096 app-row sentence ("Force End App" becomes "Kill App (all processes)").
+- Edits: v1 PROC-049 [now PROC-057] (superseded); add PROC-096 [now PROC-061] app-row sentence ("Force End App" becomes "Kill App (all processes)").
 
 ### R-034 Multi-select labels
-- Sources in conflict: add PROC-096 "End %d Processes"; r2 PROC-041 "End Selected Processes".
-- Resolution: "End Selected Tasks", "End Selected Processes", "Suspend Selected Tasks", "Resume Selected Tasks". Toasts per add PROC-097 ("Selected process priority updated." and the rest).
+- Sources in conflict: add PROC-096 [now PROC-061] "End %d Processes"; r2 PROC-041 [now PROC-057] "End Selected Processes".
+- Resolution: "End Selected Tasks", "End Selected Processes", "Suspend Selected Tasks", "Resume Selected Tasks". Toasts per add PROC-097 [now PROC-069] ("Selected process priority updated." and the rest).
 - Rule: r2 pattern kept for consistency (inferred; TaskSlinger evidences only the toasts, not the labels).
-- Edits: add PROC-096.
+- Edits: add PROC-096 [now PROC-061].
 
 ### R-035 Action toasts and identity-change text
-- Sources in conflict: v1 PROC-050/051 toasts; r2 PROC-042/043/044; identity-change text capitalised (v1, TaskSlinger) vs lower-case (r2).
-- Resolution: r2 PROC-042 to PROC-044 toasts. Identity mismatch toast is TaskSlinger's exact text: "The selected process changed; wait for the list to update and try again." EPERM toast "Permission denied" with button "Retry as administrator" (hidden until the helper phase ships; before P3 the toast has no button).
+- Sources in conflict: v1 PROC-050/051 [now PROC-058, PROC-060, PROC-061, PROC-064] toasts; r2 PROC-042/043/044 [now PROC-058, PROC-060, PROC-061]; identity-change text capitalised (v1, TaskSlinger) vs lower-case (r2).
+- Resolution: r2 PROC-042 [now PROC-058] to PROC-044 [now PROC-061] toasts. Identity mismatch toast is TaskSlinger's exact text: "The selected process changed; wait for the list to update and try again." EPERM toast "Permission denied" with button "Retry as administrator" (hidden until the helper phase ships; before P3 the toast has no button).
 - Rule: r2 wins; TaskSlinger text wins on the quoted string.
-- Edits: r2 PROC-042 string; v1 PROC-050/051 superseded.
+- Edits: r2 PROC-042 [now PROC-058] string; v1 PROC-050/051 [now PROC-058, PROC-060, PROC-061, PROC-064] superseded.
 
 ### R-036 Confirmations and protected processes
-- Sources in conflict: ADR-006 PROTECTED set and "Force end and End process tree on anything open an AlertDialog"; r2 PROC-052 (confirmations for session-critical, End Process Tree, Kill App, multi-select End of more than 1, any action on another user's process; refusals for tasklens, PID 1, kernel threads; adds sddm, login, systemd-logind to the critical list); r2 PROC-044 no confirmation for single End Process.
+- Sources in conflict: ADR-006 PROTECTED set and "Force end and End process tree on anything open an AlertDialog"; r2 PROC-052 [now PROC-059] (confirmations for session-critical, End Process Tree, Kill App, multi-select End of more than 1, any action on another user's process; refusals for tasklens, PID 1, kernel threads; adds sddm, login, systemd-logind to the critical list); r2 PROC-044 [now PROC-061] no confirmation for single End Process.
 - Resolution: PROTECTED set = ADR-006's list plus `sddm`, `systemd-logind` and the session's `login` ancestor. Refused with toast: tasklens itself ("Refusing to end tasklens itself."), PID 1 ("PID 1 (systemd) cannot be ended."), kernel threads ("Kernel threads cannot be signalled."). Confirmation dialog for: any signal, freeze or kill on a PROTECTED target ("Ending <name> will end your desktop session. End it anyway?"); End Process Tree ("End N processes in this tree?", buttons End tree / Cancel); Kill App ("Kill all N processes of <App>?"); End Task or End Process with more than one target; any action on another user's process. No confirmation for a single End Process (SIGKILL) on the user's own non-protected process.
 - Rule: rule 3 (TaskSlinger shows a toast, not a dialog, for End Process); ADR-006 protected set kept.
 - Edits: ADR-006 "Protected processes" paragraph.
 
 ### R-037 End Process Tree order
-- Sources in conflict: ADR-006 and v1 PROC-052 SIGTERM deepest first; r2 PROC-045 open all pidfds, SIGSTOP all, SIGKILL all.
+- Sources in conflict: ADR-006 and v1 PROC-052 [now PROC-062] SIGTERM deepest first; r2 PROC-045 [now PROC-062] open all pidfds, SIGSTOP all, SIGKILL all.
 - Resolution: r2's order. The engine opens a verified pidfd for every captured target, sends SIGSTOP to all, then SIGKILL to all, then closes the fds; one event per target. `ActionKind` gains `KillTree` so the reducer can order the two passes.
 - Rule: r2 wins on topic; the stop-then-kill order prevents fork races, which ADR-006's goal (race-free actions) supports.
-- Edits: ADR-005 `ActionKind`; ADR-006 "Tree operations"; v1 PROC-052.
+- Edits: ADR-005 `ActionKind`; ADR-006 "Tree operations"; v1 PROC-052 [now PROC-062].
 
 ### R-038 Set Priority, scheduling policy and the action types
-- Sources in conflict: ADR-005 `SetNice(i8)` only; v1 PROC-057 and r2 PROC-049 Custom dialog with policy and RT priority, SCHED_RR 1 for Realtime, Idle item, confirmation text; phases v1 P2 vs r2 P1 for raising nice.
-- Resolution: r2 PROC-049 behaviour and phases (P1 nice classes; P2 Custom, Realtime, Idle). `ActionKind` gains `SetSched { policy: SchedPolicy, rt_prio: u8 }`; tl-ops implements it with `sched_setattr` per TID under the same pidfd check as `SetNice`. Realtime sets SCHED_RR priority 1 with `SCHED_RESET_ON_FORK` after the confirmation "Realtime priority can freeze the desktop if the process spins. Set it anyway?".
+- Sources in conflict: ADR-005 `SetNice(i8)` only; v1 PROC-057 [now PROC-066] and r2 PROC-049 [now PROC-066] Custom dialog with policy and RT priority, SCHED_RR 1 for Realtime, Idle item, confirmation text; phases v1 P2 vs r2 P1 for raising nice.
+- Resolution: r2 PROC-049 [now PROC-066] behaviour and phases (P1 nice classes; P2 Custom, Realtime, Idle). `ActionKind` gains `SetSched { policy: SchedPolicy, rt_prio: u8 }`; tl-ops implements it with `sched_setattr` per TID under the same pidfd check as `SetNice`. Realtime sets SCHED_RR priority 1 with `SCHED_RESET_ON_FORK` after the confirmation "Realtime priority can freeze the desktop if the process spins. Set it anyway?".
 - Rule: r2 wins; ADR-005 extended because the feature is required.
-- Edits: ADR-005 enum; ADR-006 details list; v1 PROC-057.
+- Edits: ADR-005 enum; ADR-006 details list; v1 PROC-057 [now PROC-066].
 
 ### R-039 Set Affinity and Send Signal phases
-- Sources in conflict: v1 Set Affinity P2, r2 P1; v1 Send Signal P1, r2 P2; add PROC-097 multi-select affinity P2.
+- Sources in conflict: v1 Set Affinity P2, r2 P1; v1 Send Signal P1, r2 P2; add PROC-097 [now PROC-069] multi-select affinity P2.
 - Resolution: Set Affinity dialog P1 for one target; multi-select mixed marks P2. Send Signal submenu P2 with r2's top-level list (TERM, KILL, HUP, INT, QUIT, STOP, CONT, USR1, USR2), "Other signals >", "Real-time signal…", suffix "(ends process)", toast "Sent SIGHUP to firefox (1234)".
 - Rule: r2 wins.
-- Edits: v1 PROC-056, PROC-059 phases.
+- Edits: v1 PROC-056 [now PROC-065], PROC-059 [now PROC-067] phases.
 
 ### R-040 Suspend and resume processes vs apps
-- Sources in conflict: v1 PROC-053/054 "Suspend App/Resume App" with toasts "App suspended."; r2 PROC-047/048 Freeze App / Thaw App, toasts "App frozen", "App thawed", "App killed".
+- Sources in conflict: v1 PROC-053/054 [now PROC-063, PROC-064] "Suspend App/Resume App" with toasts "App suspended."; r2 PROC-047/048 [now PROC-063, PROC-064] Freeze App / Thaw App, toasts "App frozen", "App thawed", "App killed".
 - Resolution: r2.
 - Rule: r2 wins.
-- Edits: v1 PROC-054 superseded.
+- Edits: v1 PROC-054 [now PROC-064] superseded.
 
 ### R-041 New and exited linger time
-- Sources in conflict: ADR-003 flags "within the last 2 s", ADR-004 reducer removes exited records 2 s after exit, ADR-009 highlight 2 s; v1 PROC-036 max(1 s, 2 intervals) capped 3 s; r2 PROC-031 2 refresh intervals clamped to 1..3 s.
+- Sources in conflict: ADR-003 flags "within the last 2 s", ADR-004 reducer removes exited records 2 s after exit, ADR-009 highlight 2 s; v1 PROC-036 [now PROC-043] max(1 s, 2 intervals) capped 3 s; r2 PROC-031 [now PROC-043] 2 refresh intervals clamped to 1..3 s.
 - Resolution: linger = 2 × `processes.interval_ms`, clamped to 1..=3 s. The reducer keeps exited records for the linger time, then removes them. Fade over the last 300 ms unless reduced motion.
 - Rule: r2 wins on behaviour; ADR constants follow.
 - Edits: ADR-003 `ProcFlags` comments; ADR-004 "exited records are removed" sentence; ADR-009 highlight bullet.
 
 ### R-042 Ctrl-pause focus condition
-- Sources in conflict: ADR-009 "while Ctrl is held and the table has focus"; r2 PROC-038 and APP-031 "while the main window has focus".
+- Sources in conflict: ADR-009 "while Ctrl is held and the table has focus"; r2 PROC-038 [now PROC-050] and APP-031 "while the main window has focus".
 - Resolution: pause applies while Ctrl is held and the main window is active, whatever has focus inside it. Released on Ctrl-up or window deactivation.
 - Rule: rule 3 (TaskSlinger behaviour as both specs describe it).
 - Edits: ADR-009 Ctrl-pause bullet.
 
 ### R-043 Filter box: fields, Esc and the `filter_cmdline` key
-- Sources in conflict: ADR-011 `processes.filter_cmdline = false` (cmdline matched only when set); v1 PROC-041 and r2 PROC-032 always match the command line; APP-028 first Esc clears, second returns focus; r2 one Esc clears and returns focus.
+- Sources in conflict: ADR-011 `processes.filter_cmdline = false` (cmdline matched only when set); v1 PROC-041 [now PROC-044] and r2 PROC-032 [now PROC-044] always match the command line; APP-028 first Esc clears, second returns focus; r2 one Esc clears and returns focus.
 - Resolution: the filter always matches display name, image name, command line, user, description, app name, unit name, group names, and PID by prefix for numeric input. Drop `filter_cmdline`. One Esc clears the filter and returns focus to the table; a further Esc follows the global Esc rule (APP-031).
-- Rule: rule 3 on fields; r2 on Esc (it owns PROC-032).
+- Rule: rule 3 on fields; r2 on Esc (it owns PROC-032 [now PROC-044]).
 - Edits: ADR-011 key; ADR-009 `TableQuery.filter` comment; APP-028 Esc sentence.
 
 ### R-044 CPU percentage mode
-- Sources in conflict: ADR-008/011 setting `process_cpu_mode = machine|core`; APP-032 `processes.cpu_one_core_100`; v1 PROC-019 and r2 PROC-019 no setting, two columns ("CPU" and "CPU (one core = 100%)").
+- Sources in conflict: ADR-008/011 setting `process_cpu_mode = machine|core`; APP-032 `processes.cpu_one_core_100`; v1 PROC-019 [now PROC-029] and r2 PROC-019 [now PROC-029] no setting, two columns ("CPU" and "CPU (one core = 100%)").
 - Resolution: no setting. Column `cpu` is percent of the whole machine; column `cpu_relative` is labelled "CPU (one core = 100%)". Drop both keys.
 - Rule: rule 3 (TaskSlinger has the two columns; the toggle is Mission Center's).
 - Edits: ADR-008 process CPU paragraph; ADR-011; APP-032.
 
 ### R-045 Keyboard: Enter, End Process names and the merged table
-- Sources in conflict: APP-031 Enter toggles expand, "Force end" names, Ctrl+C TSV; v1 PROC-040 and r2 PROC-037 Enter opens Properties, Space toggles expand; add PROC-096 "End Process"; ADR-009 Ctrl+Tab tab switching.
+- Sources in conflict: APP-031 Enter toggles expand, "Force end" names, Ctrl+C TSV; v1 PROC-040 [now PROC-049] and r2 PROC-037 [now PROC-049] Enter opens Properties, Space toggles expand; add PROC-096 [now PROC-061] "End Process"; ADR-009 Ctrl+Tab tab switching.
 - Resolution: canonical table (b). Enter and Ctrl+I and Alt+Enter open Properties; Space toggles expand. Shift+Delete and Ctrl+X are "End Process". Ctrl+Tab and Ctrl+Shift+Tab switch tabs in addition to Ctrl+1..6 and Alt+1..6. See owner question Q-3 on Enter.
 - Rule: PROC owns the process table keys; ADR-009 keys kept.
 - Edits: APP-031 rows for Enter, Shift+Delete, Ctrl+C; add Ctrl+Tab and Ctrl+Shift+C rows.
 
 ### R-046 KWin bridge: which crate owns it
-- Sources in conflict: APP-009 "the KWin scripting channel lives in tl-ui's KDE integration module"; ADR-001 rule 1 forbids zbus in tl-ui; ADR-004 worker table has no KWin worker; PROC-030 (v1) and r2 PROC-059 describe the bridge without a crate.
-- Resolution: the bridge is a tl-engine D-Bus worker `workers/dbus_kwin.rs`, `SourceId::KWin`, phase P2, event-driven. It writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js`, loads it as plugin "tasklens-bridge", exports the WindowBridge object (R-001) on the engine's session-bus connection, and publishes `windows: Arc<WindowsSnapshot>` as a new `Snapshot` component (window list keyed by pid: internalId, caption, resourceClass, desktopFileName, minimized, maximized, keepAbove, frameGeometry, windowType). Commands (activate, close, keepAbove, pick) go through `Command::KWin(KWinCommand)` and run as one-shot scripts (r2 PROC-059). Availability: `XDG_CURRENT_DESKTOP` contains KDE and `org.kde.KWin` is on the bus; otherwise the window features are hidden with the toast "Window features need KDE Plasma" (v1 PROC-030). The X11 EWMH fallback in r2 PROC-057/058 is dropped for v1 (X11 is best effort per ADR-010).
+- Sources in conflict: APP-009 "the KWin scripting channel lives in tl-ui's KDE integration module"; ADR-001 rule 1 forbids zbus in tl-ui; ADR-004 worker table has no KWin worker; PROC-030 [now PROC-052] (v1) and r2 PROC-059 [now PROC-052] describe the bridge without a crate.
+- Resolution: the bridge is a tl-engine D-Bus worker `workers/dbus_kwin.rs`, `SourceId::KWin`, phase P2, event-driven. It writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js`, loads it as plugin "tasklens-bridge", exports the WindowBridge object (R-001) on the engine's session-bus connection, and publishes `windows: Arc<WindowsSnapshot>` as a new `Snapshot` component (window list keyed by pid: internalId, caption, resourceClass, desktopFileName, minimized, maximized, keepAbove, frameGeometry, windowType). Commands (activate, close, keepAbove, pick) go through `Command::KWin(KWinCommand)` and run as one-shot scripts (r2 PROC-059 [now PROC-052]). Availability: `XDG_CURRENT_DESKTOP` contains KDE and `org.kde.KWin` is on the bus; otherwise the window features are hidden with the toast "Window features need KDE Plasma" (v1 PROC-030 [now PROC-052]). The X11 EWMH fallback in r2 PROC-057/058 [now PROC-054, PROC-055] is dropped for v1 (X11 is best effort per ADR-010).
 - Rule: ADR-001 dependency rule; ADR-004 structure extended.
-- Edits: ADR-003 `Snapshot`; ADR-004 worker table; APP-009, APP-006, APP-011 mechanism lines; r2 PROC-057/058 X11 lines.
+- Edits: ADR-003 `Snapshot`; ADR-004 worker table; APP-009, APP-006, APP-011 mechanism lines; r2 PROC-057/058 [now PROC-054, PROC-055] X11 lines.
 
 ### R-047 Single instance protocol
 - Sources in conflict: ADR-010 `org.freedesktop.Application.Activate` at `/io/github/oysteinkrog/Tasklens`, no bus means no single instance; APP-011 custom `Activate(argv, platform_data)`, flock fallback, KWin activation.
@@ -304,112 +304,112 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: ADR-015 crash paragraph; APP-055 file name.
 
 ### R-050 Validity glyphs and fallback words
-- Sources in conflict: ADR-003 glyph table for cells (`…`, lock, `n/a`, `-`, `!`); v1 PROC "?" for failed; r2 lock tooltip "Needs administrator rights"; v1 "Needs administrator. Click the shield to grant access."; PERF-079 word table for the stats grid ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown").
-- Resolution: table cells, header totals and sidebar readouts use ADR-003's glyphs. Performance stats grids, Information rows and Properties key/value fields use PERF-079's words. Tooltips use ADR-003's texts, with the Restricted tooltip changed to "Needs administrator access. Click the shield to grant it." (before P3: "Needs administrator access."). "Needs setup" is Validity `Unsupported` with a reason tooltip linking to the setup window. "Not reported" is `Unsupported` where the source answers with no value.
+- Sources in conflict: ADR-003 glyph table for cells (`…`, lock, `n/a`, `-`, `!`); v1 PROC "?" for failed; r2 lock tooltip "Needs administrator rights"; v1 "Needs administrator. Click the shield to grant access."; PERF-079 [now PERF-013] word table for the stats grid ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown").
+- Resolution: table cells, header totals and sidebar readouts use ADR-003's glyphs. Performance stats grids, Information rows and Properties key/value fields use PERF-079 [now PERF-013]'s words. Tooltips use ADR-003's texts, with the Restricted tooltip changed to "Needs administrator access. Click the shield to grant it." (before P3: "Needs administrator access."). "Needs setup" is Validity `Unsupported` with a reason tooltip linking to the setup window. "Not reported" is `Unsupported` where the source answers with no value.
 - Rule: ADR-003 structure; TaskSlinger words where TaskSlinger has them (rule 3).
 - Edits: ADR-003 tooltip text; v1 PROC conventions ("?"); r2 conventions.
 
 ### R-051 Stale and suspend thresholds
-- Sources in conflict: ADR-008 stale `max(3 × period, 1.5 s)`, suspend when `Δboot − Δmono > 250 ms`; PERF-019 stale 3 × period, suspend jump over 2 s; r2 "older than 3 sample periods".
+- Sources in conflict: ADR-008 stale `max(3 × period, 1.5 s)`, suspend when `Δboot − Δmono > 250 ms`; PERF-019 [now PERF-022] stale 3 × period, suspend jump over 2 s; r2 "older than 3 sample periods".
 - Resolution: ADR-008 values.
 - Rule: ADR-008.
-- Edits: PERF-019.
+- Edits: PERF-019 [now PERF-022].
 
 ### R-052 Which files the collectors read
-- Sources in conflict: ADR-016 `/proc/net/dev`, `/proc/diskstats`, device enumeration every 5 s; PERF-050 per-interface `statistics/{rx,tx}_bytes`, PERF-043 `/sys/block/<d>/stat`, PERF-005 netlink uevent plus 5 s rescan.
+- Sources in conflict: ADR-016 `/proc/net/dev`, `/proc/diskstats`, device enumeration every 5 s; PERF-050 [now PERF-055] per-interface `statistics/{rx,tx}_bytes`, PERF-043 [now PERF-048] `/sys/block/<d>/stat`, PERF-005 netlink uevent plus 5 s rescan.
 - Resolution: ADR-016 sources: one `pread` of `/proc/net/dev` and `/proc/diskstats` per tick; enumeration by rescan every 5 s while demanded. No uevent netlink socket in v1 (may be added in P4 as an optimisation bead).
 - Rule: ADR-016.
-- Edits: PERF-043, PERF-050, PERF-005.
+- Edits: PERF-043 [now PERF-048], PERF-050 [now PERF-055], PERF-005.
 
 ### R-053 Virtual and tunnel interfaces
-- Sources in conflict: ADR-016 hides `veth*, docker*, br-*, virbr*, tailscale*` by default with key `show_virtual_interfaces = false`; PERF-004/049 Tunnel and VPN group on by default (so `tailscale0` shows), Virtual off, with keys `performance.show_network_{wired,wireless,vpn,virtual,other}`.
+- Sources in conflict: ADR-016 hides `veth*, docker*, br-*, virbr*, tailscale*` by default with key `show_virtual_interfaces = false`; PERF-004/049 [now PERF-004, PERF-054] Tunnel and VPN group on by default (so `tailscale0` shows), Virtual off, with keys `performance.show_network_{wired,wireless,vpn,virtual,other}`.
 - Resolution: PERF classification and keys. `tailscale0` is a Tunnel and is shown. `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default. `lo` never shows.
-- Rule: PERF is more specific and matches TaskSlinger (it shows Tailscale, PERF-049).
+- Rule: PERF is more specific and matches TaskSlinger (it shows Tailscale, PERF-049 [now PERF-054]).
 - Edits: ADR-016 network row and key name.
 
 ### R-054 GPU page graph layout keys
-- Sources in conflict: APP-032 `performance.gpu_graph_middle`, `gpu_graph_bottom` (Mission Center choices); PERF-057 fixed rows: engine grid, then Memory and Temperature, then optional Power and Clocks via a checklist.
-- Resolution: PERF-057 layout. Keys: `performance.hidden_gpu_engines = []` and `performance.gpu_optional_graphs = []` (values `power`, `clocks`). Drop the middle and bottom keys.
+- Sources in conflict: APP-032 `performance.gpu_graph_middle`, `gpu_graph_bottom` (Mission Center choices); PERF-057 [now PERF-063] fixed rows: engine grid, then Memory and Temperature, then optional Power and Clocks via a checklist.
+- Resolution: PERF-057 [now PERF-063] layout. Keys: `performance.hidden_gpu_engines = []` and `performance.gpu_optional_graphs = []` (values `power`, `clocks`). Drop the middle and bottom keys.
 - Rule: rule 3 (TaskSlinger 0.9.2 layout).
 - Edits: APP-032.
 
 ### R-055 Sidebar card headings and lines
 - Sources in conflict: PERF-001 network card title "interface display name, its type, then rate"; PERF addendum (verified against `performance.png`): heading is the interface name, line 1 the type, line 2 the rate.
-- Resolution: addendum. Headings "CPU", "Memory", "GPU N", "Disk N", `<ifname>`, "Fan N", battery kind. Network line 2 shows `↓ 1.2 Mbps ↑ 0.3 Mbps` when both are non-zero, else the total (PERF-084).
+- Resolution: addendum. Headings "CPU", "Memory", "GPU N", "Disk N", `<ifname>`, "Fan N", battery kind. Network line 2 shows `↓ 1.2 Mbps ↑ 0.3 Mbps` when both are non-zero, else the total (PERF-084 [now PERF-055, PERF-056]).
 - Rule: rule 4 (verified screenshot).
 - Edits: PERF-001.
 
 ### R-056 CPU security row
-- Sources in conflict: PERF-032 "CPU security: N mitigated, N not affected, N vulnerable"; PERF addendum "Security features" listing Secure Boot, Kernel lockdown, SME, user shadow stack, IOMMU, with the vulnerability summary in the tooltip.
+- Sources in conflict: PERF-032 [now PERF-037] "CPU security: N mitigated, N not affected, N vulnerable"; PERF addendum "Security features" listing Secure Boot, Kernel lockdown, SME, user shadow stack, IOMMU, with the vulnerability summary in the tooltip.
 - Resolution: addendum. Row label "Security features".
 - Rule: addendum takes precedence (leader note).
-- Edits: PERF-032.
+- Edits: PERF-032 [now PERF-037].
 
 ### R-057 Displays list source
-- Sources in conflict: PERF-065 says the sysfs connector `enabled` file is wrong on NVIDIA 615; PERF addendum found KScreen agreeing with sysfs and asks to withdraw the claim; PERF-065 orientation from `kscreen-doctor --json` vs addendum `-j` key list.
-- Resolution: mode, refresh, connector type and `max bpc` come from DRM KMS read-only ioctls on `/dev/dri/cardN`; enabled state, primary, orientation and scale come from `kscreen-doctor -j` on KDE. The sysfs `enabled` claim is withdrawn and moves to the unverified list. Row format and connector names per PERF-091. HDR, VRR and wide gamut are P4.
+- Sources in conflict: PERF-065 [now PERF-072] says the sysfs connector `enabled` file is wrong on NVIDIA 615; PERF addendum found KScreen agreeing with sysfs and asks to withdraw the claim; PERF-065 [now PERF-072] orientation from `kscreen-doctor --json` vs addendum `-j` key list.
+- Resolution: mode, refresh, connector type and `max bpc` come from DRM KMS read-only ioctls on `/dev/dri/cardN`; enabled state, primary, orientation and scale come from `kscreen-doctor -j` on KDE. The sysfs `enabled` claim is withdrawn and moves to the unverified list. Row format and connector names per PERF-091 [now PERF-073]. HDR, VRR and wide gamut are P4.
 - Rule: rule 4.
-- Edits: PERF-065 (remove the `enabled` sentence; adopt the addendum's mechanism).
+- Edits: PERF-065 [now PERF-072] (remove the `enabled` sentence; adopt the addendum's mechanism).
 
 ### R-058 Public IP setting location and mini window trigger
-- Sources in conflict: PERF-054 setting under Monitoring; PERF addendum and APP-022 under Window & startup. PERF-082 mini window opened by double-click; addendum adds View > Window item and Ctrl+Shift+M.
+- Sources in conflict: PERF-054 [now PERF-060] setting under Monitoring; PERF addendum and APP-022 under Window & startup. PERF-082 [now PERF-093] mini window opened by double-click; addendum adds View > Window item and Ctrl+Shift+M.
 - Resolution: "Auto-fetch Public IP on launch" under Window & startup, key `network.auto_fetch_public_ip`. Mini window: View > Window > "Performance mini window" (checkable), Ctrl+Shift+M, tray menu "Show mini window" (P3), and double-click on the Performance graph area. Double-click on the mini window returns to the main window.
 - Rule: addendum takes precedence; TaskSlinger string order (verified in the inventory).
-- Edits: PERF-054, PERF-082.
+- Edits: PERF-054 [now PERF-060], PERF-082 [now PERF-093].
 
 ### R-059 Heat colouring references
-- Sources in conflict: v1 PROC-033 Power reference "class index/4"; r2 PROC-029 Power 25 W; disk and I/O "100 MB/s".
+- Sources in conflict: v1 PROC-033 [now PROC-040] Power reference "class index/4"; r2 PROC-029 [now PROC-040] Power 25 W; disk and I/O "100 MB/s".
 - Resolution: r2 references with IEC labels: CPU 400/ncpu % (12.5% here), CPU (one core = 100%) 400%, memory columns 10% of MemTotal, disk and I/O rates 100 MiB/s, network 10 MiB/s (or 80 Mbps), GPU 100%, VRAM 25% of total VRAM, power 25 W. Counts are not tinted. On by default, intensity 50%.
 - Rule: r2 wins; R-014 on units.
-- Edits: v1 PROC-033; r2 PROC-029 labels.
+- Edits: v1 PROC-033 [now PROC-040]; r2 PROC-029 [now PROC-040] labels.
 
 ### R-060 Startup placeholders
-- Sources in conflict: v1 PROC-046 no shimmer on the Processes tab; APP-059 skeleton rows on first load for every tab; SYS-016 skeleton rows plus "Loading service data..." toast.
+- Sources in conflict: v1 PROC-046 [now PROC-021] no shimmer on the Processes tab; APP-059 skeleton rows on first load for every tab; SYS-016 skeleton rows plus "Loading service data..." toast.
 - Resolution: Processes tab shows rows from the first sweep with `…` in rate cells and no skeleton. Services, Startup Apps, Connections and Information show skeleton rows or blocks until their first data, once per session. Services also shows the toast "Loading service data...".
 - Rule: rule 3 (TaskSlinger has no shimmer on Processes but does have the services toast).
 - Edits: APP-059 (exclude Processes).
 
 ### R-061 Run dialog and Search File Handles details
-- Sources in conflict: window titles "tasklens Run" (v1, APP-014/045) vs "Run" (r2); administrator run `pkexec /bin/sh -c` (r2) vs `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c` (APP-014); Handle Search result columns (APP-015 four columns) vs r2 PROC-080 six columns and menu.
-- Resolution: titles "tasklens Run" and "tasklens Handle Search" (APP-045 naming). Administrator run uses APP-014's `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper. `kcm_*` names run `systemsettings <name>` (r2). History file and format per r2 PROC-079. Handle Search columns and menu per r2 PROC-080; footer note per r2.
+- Sources in conflict: window titles "tasklens Run" (v1, APP-014/045) vs "Run" (r2); administrator run `pkexec /bin/sh -c` (r2) vs `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c` (APP-014); Handle Search result columns (APP-015 four columns) vs r2 PROC-080 [now PROC-096] six columns and menu.
+- Resolution: titles "tasklens Run" and "tasklens Handle Search" (APP-045 naming). Administrator run uses APP-014's `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper. `kcm_*` names run `systemsettings <name>` (r2). History file and format per r2 PROC-079 [now PROC-095]. Handle Search columns and menu per r2 PROC-080 [now PROC-096]; footer note per r2.
 - Rule: APP owns the window frame and privilege path; r2 owns the content.
-- Edits: r2 PROC-079 title and pkexec line; APP-015 columns.
+- Edits: r2 PROC-079 [now PROC-095] title and pkexec line; APP-015 columns.
 
 ### R-062 Low-memory watcher thresholds
-- Sources in conflict: v1 PROC-093 PSI `full 150000 1000000`, MemAvailable under 5%; r2 PROC-081 `full 100000 1000000`, under 3%, MemAvailable check every 5 s.
+- Sources in conflict: v1 PROC-093 [now PROC-097] PSI `full 150000 1000000`, MemAvailable under 5%; r2 PROC-081 [now PROC-097] `full 100000 1000000`, under 3%, MemAvailable check every 5 s.
 - Resolution: r2 values.
 - Rule: r2 wins.
-- Edits: v1 PROC-093 superseded.
+- Edits: v1 PROC-093 [now PROC-097] superseded.
 
 ### R-063 History hover and header formats
-- Sources in conflict: v1 PROC-084 "Memory: %.2f MiB/GiB", "Disk: %.2f MB/s"; r2 PROC-077 "Memory: 1.22 / 62.70 GiB", "Disk: 4.20 MB/s", "GPU: 41.0%".
+- Sources in conflict: v1 PROC-084 [now PROC-090] "Memory: %.2f MiB/GiB", "Disk: %.2f MB/s"; r2 PROC-077 [now PROC-090] "Memory: 1.22 / 62.70 GiB", "Disk: 4.20 MB/s", "GPU: 41.0%".
 - Resolution: "CPU: 12.3%", "Memory: 1.22 / 62.70 GiB", "Disk: 4.2 MiB/s", "Network: 12.0 Mbps", "GPU: 41.0%".
 - Rule: r2 wins; R-013/R-014 formats.
-- Edits: r2 PROC-077; v1 PROC-084.
+- Edits: r2 PROC-077 [now PROC-090]; v1 PROC-084 [now PROC-090].
 
 ### R-064 Process metadata refresh cadence and time base
-- Sources in conflict: ADR-016 cmdline, exe and cgroup refreshed every 10 sweeps and on comm change; r2 PROC-001 every 10 s; r2 "Times use CLOCK_MONOTONIC"; v1 PROC-002 cgroup re-read only on new pid or exec.
+- Sources in conflict: ADR-016 cmdline, exe and cgroup refreshed every 10 sweeps and on comm change; r2 PROC-001 [now PROC-002] every 10 s; r2 "Times use CLOCK_MONOTONIC"; v1 PROC-002 cgroup re-read only on new pid or exec.
 - Resolution: ADR-016 (every 10 sweeps and immediately when `comm` changes). All timestamps are CLOCK_BOOTTIME (ADR-003). fd count via `fstatat` `st_size` of `/proc/<pid>/fd` with readdir fallback (r2).
 - Rule: ADR-003/016.
-- Edits: r2 PROC-001 two bullets.
+- Edits: r2 PROC-001 [now PROC-002] two bullets.
 
 ### R-065 Column picker title, headings and aliases
-- Sources in conflict: v1 PROC-048 headings "Identity, File, Security, …"; r2 PROC-016 "Image, Process, CPU, Memory, I/O, Disk, Network, GPU, Objects, Security, Linux" and aliases `Working set private - "Private (anon)"`; add PROC-102 "Columns" title, headings "Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux", aliases; APP-018 example alias `Resident memory - "Memory"`.
-- Resolution: add PROC-102 title and headings. Aliases: `Working set private - "Memory"` (R-005) and `GPU memory dedicated - "VRAM"`. The filter field matches full name and alias.
+- Sources in conflict: v1 PROC-048 [now PROC-024] headings "Identity, File, Security, …"; r2 PROC-016 [now PROC-022, PROC-023, PROC-024, PROC-025] "Image, Process, CPU, Memory, I/O, Disk, Network, GPU, Objects, Security, Linux" and aliases `Working set private - "Private (anon)"`; add PROC-102 [now PROC-024] "Columns" title, headings "Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux", aliases; APP-018 example alias `Resident memory - "Memory"`.
+- Resolution: add PROC-102 [now PROC-024] title and headings. Aliases: `Working set private - "Memory"` (R-005) and `GPU memory dedicated - "VRAM"`. The filter field matches full name and alias.
 - Rule: addendum later and more specific.
-- Edits: r2 PROC-016 headings and aliases; APP-018 example.
+- Edits: r2 PROC-016 [now PROC-022, PROC-023, PROC-024, PROC-025] headings and aliases; APP-018 example.
 
 ### R-066 Minigraph card titles for process sources
-- Sources in conflict: v1 PROC-087 "<name> (<pid>) - CPU"; r2 PROC-062 "firefox (Process 1234) CPU", "firefox by name CPU", "Firefox by app CPU"; PERF-077/086 "firefox (Process 1234)", "firefox by name", "Firefox by app", column-keyed cards append " · CPU", and "<name> (<pid>)" with "Process <pid>" only before the name is known.
-- Resolution: PERF-086: `<name> (<pid>) · CPU`, `<name> by name · CPU`, `<App> by app · CPU`; `Process <pid>` only until the name is read. States "No match" and "Ended" per PERF-087; r2's extra toasts stay.
+- Sources in conflict: v1 PROC-087 [now PROC-093] "<name> (<pid>) - CPU"; r2 PROC-062 [now PROC-093] "firefox (Process 1234) CPU", "firefox by name CPU", "Firefox by app CPU"; PERF-077/086 [now PERF-085, PERF-080] "firefox (Process 1234)", "firefox by name", "Firefox by app", column-keyed cards append " · CPU", and "<name> (<pid>)" with "Process <pid>" only before the name is known.
+- Resolution: PERF-086 [now PERF-080, PERF-085]: `<name> (<pid>) · CPU`, `<name> by name · CPU`, `<App> by app · CPU`; `Process <pid>` only until the name is read. States "No match" and "Ended" per PERF-087 [now PERF-086]; r2's extra toasts stay.
 - Rule: PERF owns the card (both PROC files say so).
-- Edits: r2 PROC-062 titles; v1 PROC-087.
+- Edits: r2 PROC-062 [now PROC-093] titles; v1 PROC-087 [now PROC-093].
 
 ### R-067 Tray tooltip for process graphs
-- Sources in conflict: v1 PROC-090 "<name> (PID n): CPU 3.2%"; r2 PROC-063 "firefox: CPU 3.2%"; PERF-079 "CPU Usage: 18.6%" for page graphs, "3 procs: firefox" for name filters.
-- Resolution: PERF-079 forms: page graph "<Title>: 18.6%", process graph "<name> (PID n): CPU 3.2%", name filter "3 procs: firefox", app "<App>: CPU 3.2%".
+- Sources in conflict: v1 PROC-090 [now PROC-094] "<name> (PID n): CPU 3.2%"; r2 PROC-063 [now PROC-094] "firefox: CPU 3.2%"; PERF-079 [now PERF-089] "CPU Usage: 18.6%" for page graphs, "3 procs: firefox" for name filters.
+- Resolution: PERF-079 [now PERF-089] forms: page graph "<Title>: 18.6%", process graph "<name> (PID n): CPU 3.2%", name filter "3 procs: firefox", app "<App>: CPU 3.2%".
 - Rule: PERF owns the tray; v1's PID form kept because it disambiguates (inferred).
-- Edits: r2 PROC-063.
+- Edits: r2 PROC-063 [now PROC-094].
 
 ### R-068 Built-in themes in phase 1
 - Sources in conflict: ADR-009 v1 ships "Default Dark" only; APP-035 P1 Default Dark and Default Light, P2 the other 10.
@@ -430,10 +430,10 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: ADR-010 "GPU selection".
 
 ### R-071 Dropped settings keys
-- Sources in conflict: APP-032 and PROC-095 list keys that no resolved feature uses.
-- Resolution: dropped: `tables.remember_sort`, `tables.remember_columns` (always persisted), `processes.column_graphs` (fixed six), `processes.cpu_one_core_100` and ADR `processes.cpu_mode` (R-044), `processes.filter_cmdline` (R-043), `units.network_base2`, `units.memory_*`, `units.disk_*` (R-015), `performance.gpu_graph_middle/bottom` (R-054), `state.first_run_done` (R-028), `window.system_titlebar` (R-021), `copy_rows_tsv_shortcut` (documentation only, add PROC-095), `processes.tree_view`, `processes.grouping` (R-010), `debug.show_health_window` (the Collector health window is opened from the Debug menu or status bar, not a setting).
+- Sources in conflict: APP-032 and PROC-095 [now PROC-099] list keys that no resolved feature uses.
+- Resolution: dropped: `tables.remember_sort`, `tables.remember_columns` (always persisted), `processes.column_graphs` (fixed six), `processes.cpu_one_core_100` and ADR `processes.cpu_mode` (R-044), `processes.filter_cmdline` (R-043), `units.network_base2`, `units.memory_*`, `units.disk_*` (R-015), `performance.gpu_graph_middle/bottom` (R-054), `state.first_run_done` (R-028), `window.system_titlebar` (R-021), `copy_rows_tsv_shortcut` (documentation only, add PROC-095 [now PROC-099]), `processes.tree_view`, `processes.grouping` (R-010), `debug.show_health_window` (the Collector health window is opened from the Debug menu or status bar, not a setting).
 - Rule: each resolution above.
-- Edits: APP-032, PROC-095, ADR-011.
+- Edits: APP-032, PROC-095 [now PROC-099], ADR-011.
 
 ### R-072 Phase numbering
 - Sources in conflict: ADR-004 worker table and ADR-016 use phases 1, 2, 3 and "later" (Processes worker is phase 2, Connections and Services phase 3); every spec uses P1..P4 with the process table in P1 and Services in P2.
@@ -442,10 +442,10 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: ADR-004 worker table Phase column (2 becomes P1, 3 becomes P2, later becomes P3 or P4); ADR-016 bracketed phases; ADR-001 crate comments.
 
 ### R-073 Process Properties pin and keep-above
-- Sources in conflict: v1 PROC-063 pin via one-shot KWin script; r2 PROC-065 pin hidden without the bridge; APP-009 pin on every dialog.
+- Sources in conflict: v1 PROC-063 [now PROC-056] pin via one-shot KWin script; r2 PROC-065 [now PROC-077] pin hidden without the bridge; APP-009 pin on every dialog.
 - Resolution: the pin button is shown on every secondary window and on the main window; on KDE it sets `keepAbove` through the bridge (R-046); on X11 it sends `_NET_WM_STATE_ABOVE`; elsewhere it is disabled with tooltip "Not supported by this desktop". Only the main window's state persists (`window.always_on_top`).
 - Rule: APP-009 owns the pin; consistent with ADR-010.
-- Edits: r2 PROC-065 ("hidden" becomes "disabled").
+- Edits: r2 PROC-065 [now PROC-077] ("hidden" becomes "disabled").
 
 ### R-074 Journal reading
 - Sources in conflict: ADR-016 `journalctl -o json -n 50 --no-pager -u <unit>` with 5 s timeout; SYS-015 200 entries, follow mode, "Load older", user units via `--user-unit`.
@@ -454,7 +454,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: ADR-016 "Service logs" row.
 
 ### R-075 Column display keys apply to every table
-- Sources in conflict: table (a) keeps `column_resize`, `column_separators` and `dim_zero_values` under `[processes]` (from v1 PROC-095); APP-018 applies View > Columns to every table, and APP-032 had `tables.*` keys.
+- Sources in conflict: table (a) keeps `column_resize`, `column_separators` and `dim_zero_values` under `[processes]` (from v1 PROC-095 [now PROC-099]); APP-018 applies View > Columns to every table, and APP-032 had `tables.*` keys.
 - Resolution: one key each, in a new `[tables]` section of `settings.toml`: `tables.column_resize = "proportional"` (`proportional | last_column`), `tables.column_separators = false`, `tables.dim_zero_values = false`. Each key applies to all five tables (Processes, History, Services, Startup Apps, Connections). There are no per-table keys. The three `processes.*` keys are removed.
 - Rule: APP-018 owns View > Columns, which acts on every table (rule 3); key naming by ADR-011 style.
 - Edits: table (a); ADR-011 section list; merged sys-app APP-018, APP-032; merged proc PROC-025, PROC-041, PROC-042, PROC-099.
@@ -496,7 +496,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: merged sys-app APP-043.
 
 ### R-082 Startup Apps live refresh
-- Sources in conflict: ADR-008 reads startup entries on page open and on `RefreshNow`; SYS-019 (old SYS-020) adds inotify live refresh.
+- Sources in conflict: ADR-008 reads startup entries on page open and on `RefreshNow`; SYS-019 (old SYS-020 [now SYS-019]) adds inotify live refresh.
 - Resolution: while the Startup Apps tab is visible, the `Startup` worker also watches the autostart directories and the two Plasma script directories with inotify and listens to the user manager's `UnitFilesChanged` signal; either triggers a rescan. Both stop when the tab is not visible.
 - Rule: ADR-008 demand rules (work runs only while a surface shows it).
 - Edits: ADR-008 schedule table; merged sys-app SYS-019.
@@ -513,31 +513,31 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: merged sys-app APP-001, APP-030, APP-037, APP-039, APP-045 (the "inferred" marks go).
 
 ### R-084 Detached graph window state
-- Sources in conflict: table (a) has `[[minigraphs]] detached` but no window grouping, size or position; PERF-083 (old PERF-075) persists size, stacked cards and, on KDE, position.
+- Sources in conflict: table (a) has `[[minigraphs]] detached` but no window grouping, size or position; PERF-083 (old PERF-075 [now PERF-083]) persists size, stacked cards and, on KDE, position.
 - Resolution: `[[minigraphs]]` gains `window = 0` (the detached window the card sits in; ignored when `detached = false`). `state.toml` gains `[[detached_windows]]` with `id`, `width`, `height`, `x`, `y`. `x` and `y` are written and applied only on KDE through the KWin bridge. ADR-010's rule against restoring the main window's position is unchanged.
 - Rule: R-018 (window state lives in `state.toml`); R-046 and R-073 (position only through the bridge).
 - Edits: table (a); merged perf PERF-083.
 
 ### R-085 Minigraph GPU source
-- Sources in conflict: the card menu picks a GPU (old PERF-072); the table (a) `source` values have no device.
+- Sources in conflict: the card menu picks a GPU (old PERF-072 [now PERF-080]); the table (a) `source` values have no device.
 - Resolution: `source` accepts `gpu:<device key>`, `vram:<device key>` and `gpu_temp:<device key>` (device keys per PERF-005). The bare values `gpu`, `vram` and `gpu_temp` mean the first GPU in sidebar order.
 - Rule: table (a) shape extended; no rule conflicts.
 - Edits: table (a); merged perf PERF-080.
 
 ### R-086 Matching detached and mini windows through the KWin bridge
-- Sources in conflict: old PERF-075 used its own `/Scripting loadScript` script and a per-window app ID; R-046 makes the KWin bridge worker the only KWin channel.
+- Sources in conflict: old PERF-075 [now PERF-083] used its own `/Scripting loadScript` script and a per-window app ID; R-046 makes the KWin bridge worker the only KWin channel.
 - Resolution: the bridge finds a detached graph window or the mini window by tasklens's pid plus the window caption ("tasklens Graph <n>", "tasklens Mini Window") in `WindowsSnapshot`. All tasklens windows keep the one app ID `io.github.oysteinkrog.Tasklens`.
 - Rule: R-046; R-001 (one app ID).
 - Edits: ADR-004 KWin bridge worker; merged perf PERF-083, PERF-093.
 
 ### R-087 GPU API versions probe mode
-- Sources in conflict: PERF-071 (old PERF-064) needs Vulkan and OpenGL versions from `tl-gpu-probe --api-versions`; ADR-007 describes only the NVML sampler.
+- Sources in conflict: PERF-071 (old PERF-064 [now PERF-071]) needs Vulkan and OpenGL versions from `tl-gpu-probe --api-versions`; ADR-007 describes only the NVML sampler.
 - Resolution: `tl-gpu-probe` has a second, one-shot mode `--api-versions`. It loads Vulkan (ash) and EGL, prints one postcard frame with the versions per GPU to stdout, and exits. The engine runs it once at startup, in its own process, never in the NVML sampler process. A crash or timeout gives `Unknown`.
 - Rule: ADR-007 extended because the feature needs it; the crash isolation goal holds.
 - Edits: ADR-007; ADR-001 `tl-gpu-probe` row (adds `ash` and an EGL loader); merged perf PERF-071.
 
 ### R-088 SMART fallback through pkexec smartctl
-- Sources in conflict: PERF-051 (old PERF-046) runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` when UDisks2 or its NVMe module is missing; table (c) lists `org.freedesktop.policykit.exec` only for Run as administrator.
+- Sources in conflict: PERF-051 (old PERF-046 [now PERF-051]) runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` when UDisks2 or its NVMe module is missing; table (c) lists `org.freedesktop.policykit.exec` only for Run as administrator.
 - Resolution: keep the fallback in P3 under `org.freedesktop.policykit.exec`, and list that use in table (c). It is not a tl-helper operation.
 - Rule: R-002 (third-party actions used as-is); R-004 (no SMART read in the helper).
 - Edits: table (c); merged perf PERF-051.
@@ -555,7 +555,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: merged perf PERF-007.
 
 ### R-091 "Copy rows as table" in the row menu
-- Sources in conflict: R-033's order has no "Copy rows as table"; add PROC-098 gives it a menu label for Ctrl+Shift+C.
+- Sources in conflict: R-033's order has no "Copy rows as table"; add PROC-098 [now PROC-070] gives it a menu label for Ctrl+Shift+C.
 - Resolution: it is row-menu item 14, after "Copy all metrics".
 - Rule: addendum is later and more specific; R-012 defines the command.
 - Edits: merged proc PROC-057.
@@ -603,7 +603,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: R-004 set; ADR-006; merged proc PROC-081.
 
 ### R-099 Environment masking and copying
-- Sources in conflict: v1 PROC-077 masked `*KEY*` and `*COOKIE*`; r2 PROC-071 masked a different list; neither said what copy does with masked values.
+- Sources in conflict: v1 PROC-077 [now PROC-083] masked `*KEY*` and `*COOKIE*`; r2 PROC-071 [now PROC-083] masked a different list; neither said what copy does with masked values.
 - Resolution: mask the union: names matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*KEY*`, `*COOKIE*` or `*CREDENTIAL*` (case-insensitive; `*KEY*` covers `*_KEY` and `*API_KEY*`). "Copy value" and "Copy all" copy a masked value as "••••••" unless its row is revealed.
 - Rule: ADR-015 (secrets never leave by accident); union keeps both sources' protection.
 - Edits: merged proc PROC-083.
@@ -615,13 +615,13 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Edits: table (a); merged proc PROC-093; merged perf PERF-085, PERF-086.
 
 ### R-101 Phase of process minigraph cards
-- Sources in conflict: add PERF-087 put process cards in P2; both PROC sources put the menu items that create them in P3.
+- Sources in conflict: add PERF-087 [now PERF-086] put process cards in P2; both PROC sources put the menu items that create them in P3.
 - Resolution: P3 for the menu items and the process cards (merged PERF-085, PERF-086, PERF-087).
 - Rule: a card cannot ship before the menu that creates it.
 - Edits: merged proc PROC-093; merged perf PERF-086.
 
 ### R-102 Handle Search result menu labels
-- Sources in conflict: R-061 adopts r2 PROC-080's "End Process (SIGTERM)" and "Kill Process (SIGKILL)"; R-045 and table (b) name SIGTERM "End Task" and SIGKILL "End Process".
+- Sources in conflict: R-061 adopts the r2 PROC-080 [now PROC-096] labels "End Process (SIGTERM)" and "Kill Process (SIGKILL)"; R-045 and table (b) name SIGTERM "End Task" and SIGKILL "End Process".
 - Resolution: "End Task" (SIGTERM) and "End Process" (SIGKILL). The rest of R-061 stands.
 - Rule: R-045 naming, the same everywhere.
 - Edits: merged proc PROC-096; merged sys-app APP-015.
@@ -662,7 +662,7 @@ Only choices that no rule settles. Beads use the recommended answer until Oystei
 - Recommendation: (a). It keeps the app row and its child rows on the same definition, so the app value is never smaller than a child's.
 
 ### Q-6 Does History mode show anything while recording is off?
-- Options: (a) nothing, toast with an "Enable" button (R-025); (b) a 10-minute rolling window kept in RAM while the Processes tab is open (r2 PROC-074).
+- Options: (a) nothing, toast with an "Enable" button (R-025); (b) a 10-minute rolling window kept in RAM while the Processes tab is open (r2 PROC-074 [now PROC-086]).
 - Recommendation: (a). Option (b) needs a second store outside ADR-012 and keeps the process sweep running for a feature the user turned off.
 
 ## Canonical tables
@@ -989,7 +989,7 @@ All formatting lives in `tl-model::units`. These forms are used in every languag
 | Addresses | `a.b.c.d:port`, `[v6%scope]:port`, wildcards `0.0.0.0:*`, `[::]:*`, `*:*` | | |
 | Response time | ms, two decimals | | `0.42 ms` |
 
-Numeric cells use tabular figures and are right-aligned; numeric columns have fixed minimum widths from the template strings in add PROC-101 (`"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`). Text columns have a 60 px minimum.
+Numeric cells use tabular figures and are right-aligned; numeric columns have fixed minimum widths from the template strings in add PROC-101 [now PROC-023] (`"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`). Text columns have a 60 px minimum.
 
 ## Unverified assumptions
 
@@ -1008,31 +1008,31 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-9 | The zed#64499 patch outline fixes the frame stall | ADR-010, open question 12 |
 | U-10 | Collection cost gates: 2% (Performance tab) and 3.5% (Processes tab) are reachable; 15 ms sweep for 2,000 processes | ADR-014, ADR-016 |
 | U-11 | History budget: about 200 changed processes per second, 15-byte patches, 3:1 zstd, about 30 MB per 6 h | ADR-012 |
-| U-12 | NVML per-process utilization (`nvmlDeviceGetProcessUtilization`) works unprivileged on driver 615 | r2 PROC-023, r2 conflicts 9 |
-| U-13 | KWin 6.7.5 scripts cannot receive D-Bus signals, so commands must be one-shot scripts (kdotool pattern) | r2 PROC-059, conflicts 8 |
+| U-12 | NVML per-process utilization (`nvmlDeviceGetProcessUtilization`) works unprivileged on driver 615 | r2 PROC-023 [now PROC-033], r2 conflicts 9 |
+| U-13 | KWin 6.7.5 scripts cannot receive D-Bus signals, so commands must be one-shot scripts (kdotool pattern) | r2 PROC-059 [now PROC-052], conflicts 8 |
 | U-14 | `org.kde.KWin.queryWindowInfo()` may already return `pid`; the script path is needed only if it does not | APP-006 |
-| U-15 | GPUI's `prompt_for_paths` (portal FileChooser) pulls in no Tokio | r2 PROC-079, v1 PROC-091 |
+| U-15 | GPUI's `prompt_for_paths` (portal FileChooser) pulls in no Tokio | r2 PROC-079 [now PROC-095], v1 PROC-091 [now PROC-095] |
 | U-16 | `kglobalaccel` `setForeignShortcutKeys` sticks for a `.desktop` launch component | APP-051 |
 | U-17 | TaskSlinger `TS1.` theme share-code encoding (needs one code generated under Wine) | APP-038 |
 | U-18 | TaskSlinger's 17 accent hex values and the 11 non-default theme palettes (to be read from `themes.json` after "Create copy" under Wine) | APP-035, APP-039 |
-| U-19 | Steam `reaper` argv carries `AppId=<n>`; Lutris and Heroic set `LUTRIS_GAME_UUID` / `HEROIC_APP_NAME` | r2 PROC-009 |
-| U-20 | zswap pool size is readable only through debugfs | r2 PROC-010 |
-| U-21 | Interrupt time is never also in task `stime` when `CONFIG_IRQ_TIME_ACCOUNTING=y` (verified set here; the double-count claim is inferred) | add PROC-100 |
-| U-22 | Process history store estimate (about 100 active processes × 18 B × 21,600 s) | r2 PROC-074 |
-| U-23 | socket inode map rebuild under 20 ms on this machine | SYS-032 |
-| U-24 | `OOMScoreAdjust=-900` is accepted for a user unit | r2 PROC-081 |
-| U-25 | udisks2 2.10 NVMe module is present for NVMe SMART | PERF-046 |
-| U-26 | The sysfs DRM connector `enabled` file is wrong on NVIDIA 615 (withdrawn claim; KScreen agreed with sysfs during the check; confirm whether all three monitors were on) | PERF-065, PERF addendum |
+| U-19 | Steam `reaper` argv carries `AppId=<n>`; Lutris and Heroic set `LUTRIS_GAME_UUID` / `HEROIC_APP_NAME` | r2 PROC-009 [now PROC-011] |
+| U-20 | zswap pool size is readable only through debugfs | r2 PROC-010 [now PROC-012] |
+| U-21 | Interrupt time is never also in task `stime` when `CONFIG_IRQ_TIME_ACCOUNTING=y` (verified set here; the double-count claim is inferred) | add PROC-100 [now PROC-012] |
+| U-22 | Process history store estimate (about 100 active processes × 18 B × 21,600 s) | r2 PROC-074 [now PROC-086] |
+| U-23 | socket inode map rebuild under 20 ms on this machine | SYS-032 [now SYS-030] |
+| U-24 | `OOMScoreAdjust=-900` is accepted for a user unit | r2 PROC-081 [now PROC-097] |
+| U-25 | udisks2 2.10 NVMe module is present for NVMe SMART | PERF-046 [now PERF-051] |
+| U-26 | The sysfs DRM connector `enabled` file is wrong on NVIDIA 615 (withdrawn claim; KScreen agreed with sysfs during the check; confirm whether all three monitors were on) | PERF-065 [now PERF-072], PERF addendum |
 | U-27 | Readability of `/sys/kernel/security/lockdown`, efivars SecureBoot and `/sys/class/iommu` without root | PERF addendum, Security features |
-| U-28 | `cpuinfo_avg_freq` and `amd_pstate_prefcore_ranking` exist per policy (reported present; recheck in the fixture) | PERF-025, PERF-028, PERF-035 |
-| U-29 | `/dev/dri/card1` seat ACL allows the KMS read-only ioctls | PERF-065 |
-| U-30 | `ureq` 3 with rustls has no Tokio in its graph | PERF-054, APP-056 |
-| U-31 | ksni 0.3.6 with `async-io` and `blocking` features has no Tokio in its graph | ADR-010, PERF-078 |
-| U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column | r2 PROC-025 |
-| U-33 | Wayland `wl_data_device` clipboard writes work from GPUI for all copy actions | v1 PROC-058 |
-| U-34 | `fstatat` `st_size` of `/proc/<pid>/fd` gives the fd count on kernel 7.2 | r2 PROC-001 |
-| U-35 | Hardware peak reporting: GPU power-limit and fan max values needed for fixed scales are reported by NVML on this card | PERF-015, PERF-061 |
+| U-28 | `cpuinfo_avg_freq` and `amd_pstate_prefcore_ranking` exist per policy (reported present; recheck in the fixture) | PERF-025 [now PERF-028], PERF-028 [now PERF-031], PERF-035 [now PERF-040] |
+| U-29 | `/dev/dri/card1` seat ACL allows the KMS read-only ioctls | PERF-065 [now PERF-072] |
+| U-30 | `ureq` 3 with rustls has no Tokio in its graph | PERF-054 [now PERF-060], APP-056 |
+| U-31 | ksni 0.3.6 with `async-io` and `blocking` features has no Tokio in its graph | ADR-010, PERF-078 [now PERF-088] |
+| U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column | r2 PROC-025 [now PROC-035] |
+| U-33 | Wayland `wl_data_device` clipboard writes work from GPUI for all copy actions | v1 PROC-058 [now PROC-070] |
+| U-34 | `fstatat` `st_size` of `/proc/<pid>/fd` gives the fd count on kernel 7.2 | r2 PROC-001 [now PROC-002] |
+| U-35 | Hardware peak reporting: GPU power-limit and fan max values needed for fixed scales are reported by NVML on this card | PERF-015 [now PERF-018], PERF-061 [now PERF-067] |
 | U-36 | CSD checklist passes on KWin (drag, double-click maximize, restore, resize edges, window menu, tiling); fallback to server decorations if not | ADR-010, D-006 |
-| U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 |
-| U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 |
+| U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 [now PERF-106] |
+| U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 [now PROC-037] |
 
