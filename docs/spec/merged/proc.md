@@ -224,3 +224,112 @@ Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION
 - Verdict: ADAPT
 - Phase: P2
 - Privilege: none
+
+---
+
+## C. Table structure and view modes
+
+### PROC-013 Table widget basis
+- Was: v1 PROC-007
+- Source: claude-gpui-apis.md section 4 DataTable gaps 1-6 | ADR-009 "Process tree-table"
+- Behaviour: a virtualized tree table with tree rows, multi-select, identity-based selection and column show, hide, reorder and resize. Row height is `28 × row_height_pct/100 × ui_scale_pct/100` logical px (R-020).
+- Linux data/mechanism:
+  - Custom table on GPUI `uniform_list` (ADR-009). The kit `DataTable` is not used (index selection, no tree rows, column mode on arrows, fixed row heights, per-frame cell rebuild).
+  - The engine builds `ProcessTableView` (sort, filter, group, tree flatten); the UI never sorts or filters.
+  - Header, resize and drag-reorder are app-owned. Column x offsets are a precomputed `Arc<[Pixels]>`.
+  - After each render the table reports the keys of the visible range plus one viewport above and below (max 512) to `DemandAggregator`, also after a re-sort with an unchanged range.
+  - Right-click opens a gpui-kit `PopupMenu` whose actions carry the captured keys. Every menu item dispatches the same GPUI Action as its key binding.
+- Verdict: BUILD (custom tree table)
+- Phase: P1
+- Privilege: none
+
+### PROC-014 View modes and View > Process View
+- Was: v1 PROC-004; v1 PROC-005 (grouping toggle); r2 PROC-002; add amend PROC-004 (Dropped: R-010)
+- Source: TS 1.3 "Process View" L28488-28490, INI `UI.TreeView`, `UI.TaskManagerGrouping` | MC `table_view/models.rs:313` | R-010
+- Behaviour:
+  - One setting `processes.mode` with values `grouped | tree | flat`, default `grouped`.
+  - View > Process View shows three radio items: "Tree View", "Task Manager Grouping", "List View". The submenu also holds "Tree Connector Lines" (PROC-017), "Highlight New and Exited Processes" (PROC-043) and "Collapse all" (PROC-020).
+  - **Tree View** (`tree`): the ppid forest. A row is a root when its parent is not shown (filtered, hidden by Hide system processes, or exited).
+  - **Task Manager Grouping** (`grouped`): the three groups of PROC-004. Each app or unit row expands into its own ppid subtree.
+  - **List View** (`flat`): one flat list, no groups.
+  - Expand state is kept per identity for the session; group expand state persists (PROC-004).
+  - The addendum's "radio pair plus check item" layout and its two-boolean mapping are Dropped: R-010.
+- Linux data/mechanism: ppid is stat field 4. Orphans are already reparented by the kernel to `systemd --user` or PID 1, so the tree stays connected. A missing parent makes the process a root; reparenting moves it at the next sweep. The engine projection builds the flattened rows with stable identity tie-breaks (ADR-009 `TableQuery.mode`).
+- Verdict: ADAPT (TaskSlinger's two booleans become one enum)
+- Phase: P1
+- Privilege: none
+
+### PROC-015 Toolbar view-mode cycler
+- Was: add PROC-105; r2 PROC-002 (cycle button)
+- Source: TS `chrome.view_mode`, "Toggle view mode" L28332, toast "View mode: %ls" L28638 | APP-005 | R-010
+- Behaviour:
+  - The toolbar "stacked bars" button cycles Tree View, then Task Manager Grouping, then List View, then back to Tree View (TaskSlinger string order).
+  - Toast: "View mode: Tree View", "View mode: Task Manager Grouping" or "View mode: List View".
+  - Tooltip: "Toggle view mode (current: <name>)".
+  - The selection is kept by identity across the change.
+- Linux data/mechanism: sets `processes.mode`; the engine rebuilds the projection.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-016 Processes-tab toolbar buttons
+- Was: add PROC-107
+- Source: TS [IMG processes.png vs performance.png] | cross-check A.8 | APP-002, APP-004, APP-005 | R-031
+- Behaviour:
+  - The Hide system processes toggle (PROC-046) and the view-mode cycler (PROC-015) appear only while the Processes tab is active. When the tab changes they are removed, not greyed out, and the toolbar does not reserve their space.
+  - The shield (APP-003) and the "+" window picker (PROC-055) appear on every tab (APP-002).
+  - In History mode on the Processes tab: Hide system processes stays active and also filters the History table. The view-mode button stays visible but disabled, with tooltip "History shows a flat list".
+  - Both buttons dispatch the same Actions as View > Process View and the settings.
+- Linux data/mechanism: the title-bar toolbar content depends on the active tab.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-017 Tree Connector Lines
+- Was: v1 PROC-006; r2 PROC-003
+- Source: TS 1.3, INI `UI.TreeGuideLines=0`
+- Behaviour: a check item under View > Process View, default off (`processes.tree_guide_lines = false`). It draws 1 px guide lines in the DIVIDER colour from each parent's chevron down to its children, in Tree View and inside groups.
+- Linux data/mechanism: drawn in the Name cell from the depth and "last sibling" bits stored in each flattened row.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-018 PID cell "PID +N children"
+- Was: r2 PROC-012; v1 PROC-015 (PID column format)
+- Source: TS 2.1 `%u +%llu` L35614
+- Behaviour: in Tree View and grouped subtrees, a collapsed parent's PID cell shows "11528 +18", where N is the total number of descendants. Expanded parents show the PID only. App, unit, group and pseudo rows show a blank PID.
+- Linux data/mechanism: computed from the forest in the engine projection.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-019 Subtree totals on parent processes
+- Was: r2 PROC-015; v1 PROC-095 (`subtree_totals` row)
+- Source: MC `apps-page-merged-process-stats`
+- Behaviour:
+  - Settings > Processes > "Show subtree totals on parent processes", default off (`processes.subtree_totals = false`).
+  - When on, process rows that have children show the sum over their subtree for CPU, Disk, Network, GPU, Power usage, Threads and Handles, with a "Σ" prefix.
+  - Memory shows Σ RssAnon over the subtree, also with the "Σ" prefix (R-005).
+  - App and unit rows always aggregate (PROC-008).
+- Linux data/mechanism: tree sums in the engine projection; each process counts once. `subtree_totals` is part of `EngineSettings`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PROC-020 Collapse All
+- Was: v1 PROC-045
+- Source: MC Collapse All button, Ctrl+L
+- Behaviour: View > Process View > "Collapse all" (Ctrl+L) collapses every expanded row and group except the three group headers.
+- Linux data/mechanism: UI expansion state (`TableQuery.expanded`).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-021 Startup placeholder
+- Was: v1 PROC-046
+- Source: MC `window.rs:1150-1239` (shimmer) | R-060
+- Behaviour: the Processes tab shows rows from the first sweep straight away, with `…` in rate cells until the second sweep. There is no skeleton or shimmer on this tab.
+- Linux data/mechanism: Validity `WarmingUp`.
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
