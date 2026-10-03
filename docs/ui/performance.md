@@ -930,7 +930,7 @@ sp4
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-- **Details rows**: Fan speed (`1200 RPM`), PWM (`45%`), Control mode (`Automatic` / `Manual` / `Full speed`), Temperature (`45 °C`; `Not reported` when no sensor is paired... value word `Unknown` is not used here), Chip (`nct6797`).
+- **Details rows**: Fan speed (`1200 RPM`), PWM (`45%`), Control mode (`Automatic` / `Manual` / `Full speed`), Temperature (`45 °C`; `Not reported` when no sensor is paired), Chip (`nct6797`).
 - **Interaction**: page menu page-specific items (P3): "Rename fan…" → `perf::RenameFan { key }` opens a `TlDialog` with one text input (default the current label, placeholder "Fan name") and buttons "Rename" (primary) and "Cancel"; empty input restores the default label. "Temperature sensor >" → radio items, one per hwmon temperature `"<chip> <label>  48 °C"` (value right-aligned in `text_secondary`) plus "None" → `perf::SetFanTempSensor { key, sensor }`.
 - **Sidebar visibility**: fans that read 0 RPM for the whole session and have no label are hidden unless `performance.show_disconnected_fans` (Settings, shell spec).
 - **Data binding**: series `fan.rpm`, `fan.pwm`, `temp.<sensor>` at 1 Hz; demand `sensors`.
@@ -974,3 +974,161 @@ system battery with ≥ 2 history points (P3):
 - **Tests**: `aggregate_exists_only_with_two_devices`, `aggregate_type_multiple`.
 - **Phase**: P4.
 - **Decided here**: aggregate Details rows.
+
+---
+
+## Part D: minigraphs, detached graph windows and the mini window
+
+### UI-PRF-040 Minigraph panel
+
+- **Implements**: PERF-080, PERF-082, R-089, APP-021 (View > Graphs items are the shell's; their effect is here).
+- **Anatomy** (over the Processes tab table, anchored bottom right; measured from `advanced-12.png`: cards 180 × 90 logical, 8 px apart, 16 px from the right and bottom edges of the table area):
+
+```
+                                                 table area
+                                      ┌ card ──────────┐ ┌ card ──────────┐
+                                      │ Network 0.07 Mbps│ │ Disk   0.54 MiB/s│   row 1 (filled from the bottom row upward)
+                                      └────────────────┘ └────────────────┘
+                                      ┌ card ──────────┐ ┌ card ──────────┐
+                                      │ Memory   40.5% │ │ CPU      88.6% │   row 0 (bottom)
+                                      └────────────────┘ └────────────────┘ sp6 16
+                                                                          sp6 16
+slot numbering: slot 0 = bottom right, 1 = left of it, …, up to 4 per row, then the row above; at most 3 rows × 4 columns = 12 cards.
+```
+
+  - **Default cards and slots** (PERF-080): CPU slot 0, Memory slot 1, Disk slot 2, Network slot 3, GPU slot 4, VRAM slot 5; GPU temp off by default (slot 6 when enabled). In `advanced-12.png` the user's layout is CPU 0, Memory 1, Disk 2, Network 3.
+  - The panel is a `div().absolute()` overlay in the Processes page, `pointer-events` only on the cards (the gaps pass clicks to the table).
+  - Panel visibility: only on the Processes tab (also in History mode). Hidden during Ctrl-pause? No: the cards keep sliding (they draw from live series, not the paused table snapshot; chosen).
+- **States**: panel empty (every card hidden): nothing is drawn. Full grid: adding shows `TlToast` "No space for more minigraphs". Reset: `TlToast` "Minigraph layout reset".
+- **Interaction**: View > Graphs check items (shell) dispatch `minigraph::ToggleSystemCard { source }`; "Reset Minigraph Layout" dispatches `minigraph::ResetLayout` (restores the six default cards and slots, removes process cards, resets range and colour per card; chosen: a reset means the default state). Card interactions in UI-PRF-041 to UI-PRF-043.
+- **Data binding**: `state.toml` `[[minigraphs]]` entries with `detached = false` and settings `graphs.minigraph_*`. Demand: the panel adds `cpu: Total`, `memory`, `disks`, `nets`, `gpus` for the system cards it shows; process cards add their identities (PERF-085).
+- **Build**: `pages/minigraph/panel.rs` `MinigraphPanel` entity owned by the Processes page (processes spec mounts it; this spec owns it). Cards are `MinigraphCard` entities in `IndexMap<MinigraphId, Entity<MinigraphCard>>`; `MinigraphId` is the index in `[[minigraphs]]` kept stable through a `u32` id assigned at load.
+- **Performance**: 6 cards at 1 Hz, CPU at 10 Hz when `cpu_fast` (the Processes tab does not set `cpu_fast`; the CPU card runs at 1 Hz there, so the CPU minigraph slides at 1 Hz data, matching the ADR-008 schedule).
+- **Accessibility**: cards are not focusable; every card's value is text; the same series are reachable on the Performance tab.
+- **Tests**: `panel_slots_fill_bottom_right_first`, `panel_full_toast`, `panel_reset_restores_defaults`.
+- **Phase**: P1 (P2 drag and slots beyond the default six, P3 process cards).
+- **Decided here**: margins, slot order, reset semantics, behaviour under Ctrl-pause.
+
+### UI-PRF-041 Minigraph card
+
+- **Implements**: PERF-080, PERF-085, PERF-086, PERF-087, PERF-024 (colour), R-066.
+- **Anatomy** (`mini_card` 180 × 90 × ui_scale):
+
+```
+┌────────────────────────────────────────┐  bg list_bg, 1 px divider, r_md, drop shadow
+│ CPU                             88.6%  │  label t_sm 500 text_primary left; value t_sm 400 tnum right; row 20, inset sp3
+│ ▂▃▅▇▇▅▃▂▁▂▃▅▇▇▆▅▃▂▁▁▂▃▅▇▇▆▅▃▂▁▂▃▅▇▇▅▃ │  chart fills the whole card under the label row (labels overlay the plot top)
+└────────────────────────────────────────┘
+```
+
+  - **Shadow**: `BoxShadow { offset (0, 4), blur 12, spread 0, color black @ (0.35 × shadow_intensity_pct / 100) }` (chosen; "Drop Shadow Intensity" is `appearance.shadow_intensity_pct`). Painted with `paint_drop_shadows` by the card wrapper.
+  - **Chart**: UI-PRF-001 with `heading: None`, value drawn by the card (not the chart), no legend, no range label, no axis max, grid on, outline on. Series per source:
+
+| `source` | Label | Series | Scale | Value |
+|---|---|---|---|---|
+| `cpu` | "CPU" | total filled + kernel line `#C1514E` | Fixed | `88.6%` |
+| `memory` | "Memory" | used | FixedTotal | `40.5%` |
+| `disk` | "Disk" | busiest disk active time | Fixed | `0.54 MiB/s` is TaskSlinger's; tasklens shows the aggregate transfer rate as the value and active time as the graph (PERF-080 says Disk = aggregate active time; the reference frame shows a rate). Value = sum of transfer rates, graph = active time (chosen; both facts shown) |
+| `network` | "Network" | sum over visible physical interfaces, download filled, upload dashed | AutoRate / LinkSpeed | total rate `0.07 Mbps` |
+| `gpu`, `gpu:<key>` | "GPU" | 3D/Compute of that GPU | Fixed | percent |
+| `vram`, `vram:<key>` | "VRAM" | dedicated memory | FixedTotal | `2.80 GiB` |
+| `gpu_temp`, `gpu_temp:<key>` | "GPU temp" | temperature | StickyTemp | `52 °C` |
+| `process:…` | `<name> (<pid>) · <col>` | the process's column series (engine-sampled) | by column | column value |
+| `name:<image>` | `<name> by name · <col>` | sum over matching processes | by column | value |
+| `app:<id>` | `<App> by app · <col>` | app cgroup sum | by column | value |
+
+  - Column labels for process cards (PERF-087): `CPU`, `Memory`, `RSS`, `RSS shared`, `Disk`, `Network`, `GPU`, `VRAM`, `GPU shared`. The label truncates with an ellipsis in the middle of the name part when too long, keeping the ` · <col>` suffix (chosen).
+  - `Process <pid>` is the name until it has been read (PERF-085).
+  - **CPU card tooltip** (PERF-080): hovering the card shows a `TlTooltip` with two lines "── Total 88.6%" and "── Kernel 4.1%" (swatches as in UI-PRF-003).
+  - **Colour**: `color = accent` → the type palette for system cards (CPU uses `cpu_*`, Memory `mem_*`, …) and `TlTheme.accent` for process cards (chosen: the spec's "Accent" for a system card means the default type colour, so TaskSlinger's defaults are kept); a named colour overrides both fill (α 0.85) and line.
+- **States**:
+  - Default, hover (border `accent` @ 0.5; chosen), dragging (UI-PRF-043).
+  - "No match" (PERF-086): value text `No match` in `text_secondary`; the graph records a gap.
+  - "Ended" (PERF-086): value text `Ended` in `text_secondary`; the graph stops at its last sample; the card stays until "Remove graph".
+  - Restricted field (other user's process): value shows the lock glyph; the graph shows a gap.
+  - Boot ID mismatch after restart: "Ended" (R-100).
+- **Interaction**: right-click → UI-PRF-042. Drag → UI-PRF-043. Hover → CPU tooltip or the P2 hover readout (UI-PRF-004) on every card.
+- **Data binding**: series by `source`; the engine adds demand for process identities (PERF-085). Re-render on `SERIES` for its ids, `PROCESSES` for name and exit state of process cards.
+- **Build**: `pages/minigraph/card.rs` `MinigraphCard` entity with one `ChartView`; label and value are `ShapedLine`s cached in the card.
+- **Tests**: `card_labels_system`, `card_labels_process` (three forms), `card_no_match_and_ended_states`, `card_color_named_overrides`, `card_ended_on_boot_id_mismatch`.
+- **Phase**: P1 (system cards); P3 (process cards, colour).
+- **Decided here**: shadow, hover border, Disk card value, label truncation, accent meaning for system cards.
+
+### UI-PRF-042 Minigraph card context menu
+
+- **Implements**: PERF-081, PERF-082 (Reset), PERF-083 (Detach/Attach), PERF-088 (tray).
+- **Anatomy**: `TlMenu`, items in order:
+  1. "Hide graph" → `minigraph::Hide { id }` (system cards: turns the View > Graphs check off; process cards: same as Remove, item hidden on them)
+  2. "Remove graph" → `minigraph::Remove { id }` (process-source cards only)
+  3. "Time range >" → radio "30 seconds", "1 minute", "5 minutes", "10 minutes" → `minigraph::SetRange { id, secs }` (5 and 10 minutes disabled before P2)
+  4. "Graph color >" → radio "Accent", then the 17 APP-039 names, each with a 12 px colour dot before the label (`PopupMenuItem` with `.icon` replaced by a coloured square; chosen) → `minigraph::SetColor { id, color }` (P3)
+  5. separator
+  6. "Detach" (attached cards) or "Attach to main window" (detached cards) → `minigraph::Detach { id }` / `minigraph::Attach { id }` (P3)
+  7. "Add tray icon graph" → `perf::AddTrayGraph { source }` (P3; disabled with tooltip "No system tray available" when no watcher)
+  8. separator
+  9. "Reset minigraph layout" → `minigraph::ResetLayout`
+- **Tests**: `card_menu_order_system`, `card_menu_order_process`.
+- **Phase**: P1 items 1, 3, 9; P3 the rest.
+- **Decided here**: separators, colour dots, Hide hidden on process cards.
+
+### UI-PRF-043 Move and reorder cards
+
+- **Implements**: PERF-082, PERF-083 (drag past the edge detaches).
+- **Behaviour**: mouse-down on a card (not on the label text, anywhere else) starts a GPUI drag with payload `DraggedMinigraph { id }` after 4 px of movement. The card follows the pointer at opacity 0.85 with its shadow; its home slot shows an empty outline (1 px `accent` dashed, `r_md`). Moving over another slot (pointer inside that slot's rect) previews the shift: other cards move to make room, animated over `m_fast` (reduced motion: instant). Drop → `minigraph::MoveToSlot { id, slot }`; cards shift to fill. Dropping on an empty slot beyond the last card places it in the next free slot (no holes; chosen). Dragging the pointer past the main window's edge by more than 24 px and releasing detaches the card (P3): `minigraph::Detach { id }` with the new window placed under the pointer where the compositor allows (KDE through the bridge; else compositor placement).
+- **Tests**: `drag_shifts_cards`, `drag_no_holes`, `drag_past_edge_detaches`.
+- **Phase**: P2 (P3 detach by drag).
+- **Decided here**: 4 px threshold, ghost opacity, 24 px edge margin, no-holes rule.
+
+### UI-PRF-044 Detached graph windows
+
+- **Implements**: PERF-083, PERF-084, R-084, R-086.
+- **Anatomy**:
+
+```
+┌ window "tasklens Graph 1", borderless, Floating, client decorations, no title bar ┐
+│ sp2                                                                               │
+│ ┌ card 180 × 90 ─┐                                                                │
+│ └────────────────┘                                                                │
+│ sp2                                                                               │
+│ ┌ card 180 × 90 ─┐   (stacked vertically when "Add graph >" adds more)            │
+│ └────────────────┘                                                                │
+└───────────────────────────────────────────────────────────────────────────────────┘
+window size = 180 + 2 sp2 wide, n × 90 + (n + 1) sp2 high, × ui_scale; saved in [[detached_windows]] width, height
+background window_bg; 1 px divider border; no shadow (the compositor's); the cards drop their own shadow here (chosen)
+```
+
+- **States**: kept above other windows on KDE (`keepAbove` through the bridge), position restored on KDE only. The window is not resizable (`is_resizable: false`). Minimising the main window does not affect it. With `graphs.keep_detached_on_close` on, closing the main window hides it and the app keeps running while any detached window is open (PERF-084).
+- **Interaction**: dragging anywhere on the window body (including over a card, with no 4 px threshold here) calls `window.start_window_move()`. Right-click → `TlMenu`: "Show Main Window" → `app::ShowMainWindow`; "Close graph" → `minigraph::CloseDetachedWindow { window }` (closes the window and re-attaches every card in it to the main panel; PERF-083 keeps "Remove graph" as the destructive item, so closing never loses a card, chosen); "Attach to main window" → `minigraph::Attach { id }` for the clicked card; "Add graph >" → submenu of the system card sources not already in this window ("CPU", "Memory", "Disk", "Network", "GPU", "VRAM", "GPU temp") → `minigraph::AddToWindow { window, source }`; "Remove graph" → `minigraph::Remove { id }` for the clicked card (removes it from the layout entirely); "Exit tasklens" → `app::Quit`. Each card also keeps the UI-PRF-042 items "Time range >" and "Graph color >" between "Attach to main window" and "Add graph >" (chosen).
+- **Data binding**: `[[minigraphs]]` entries with `detached = true` and `window = n`; `[[detached_windows]]` for size and KDE position. Demand continues from these cards while the main window is hidden (ADR-008).
+- **Build**: `windows/detached_graph.rs` `DetachedGraphWindow` entity opened with `WindowOptions { kind: WindowKind::Floating, window_decorations: Some(Client), titlebar: None, is_resizable: false, is_movable: true, app_id: Some("io.github.oysteinkrog.Tasklens"), window_background: Opaque, .. }` and `window.set_window_title("tasklens Graph <n>")`. Its own `AnimationDriver`. The KWin bridge worker finds it by pid and caption (R-086) and applies `keepAbove` and `frameGeometry`; moves are read back from `WindowsSnapshot` (`WINDOWS` bit) and saved debounced 500 ms.
+- **Tests**: `detached_window_size_for_two_cards`, `close_graph_reattaches`, `keep_detached_on_close_keeps_app`, `detached_state_round_trip`.
+- **Phase**: P3.
+- **Decided here**: padding `sp2`, not resizable, card shadow inside, "Close graph" semantics, extra per-card items.
+
+### UI-PRF-045 Performance mini window
+
+- **Implements**: PERF-093, R-058, R-073 (pin semantics for "Always on top").
+- **Anatomy**:
+
+```
+┌ window "tasklens Mini Window", borderless Floating, width 260 ─┐
+│ sp4                                                            │
+│ ┌ UI-PRF-011 card, width 260 − 2 sp4 = 244, height 80 ───────┐ │  one card per visible sidebar card, in sidebar order
+│ └────────────────────────────────────────────────────────────┘ │
+│ sp4 gap                                                        │
+│ ┌ card ──────────────────────────────────────────────────────┐ │
+│ ...                                                            │
+│ sp4                                                            │
+└────────────────────────────────────────────────────────────────┘
+height = n × 80 + (n + 1) × sp4, capped at 90% of the output's work area height; beyond that the list scrolls (kit scrollbar)
+bg window_bg; 1 px divider border; not resizable
+```
+
+  Cards are the same `DeviceCard` as the sidebar with these differences: no selected border (there is no selection), the hover state shows a `pointer` cursor and `row_hover` bg, and the heading row gains no extra controls.
+- **States**: "Always on top" on by default when opened; not persisted (PERF-093). On KDE via the bridge, on X11 `_NET_WM_STATE_ABOVE`, elsewhere the menu item is disabled with tooltip "Not supported by this desktop".
+- **Interaction**: open with View > Window > "Performance mini window" (check item, shell), Ctrl+Shift+M (`window::ToggleMiniWindow`), the tray item "Show mini window", or a double-click on the Performance graph area. Click on a card → `app::ShowMainWindow` then `perf::SelectDevice { key }` (opens the main window on that page; the mini window stays open, chosen). Double-click on the window background or a card → `app::ShowMainWindow`. Right-click → `TlMenu`: "Always on top" (check) → `window::ToggleMiniAlwaysOnTop`; "Show Main Window"; "Close" → `window::CloseMiniWindow`. Closing unchecks the View menu item. Esc closes it (chosen; it is a secondary window and `Esc` closes dialogs by the global rule).
+- **Data binding**: visible sidebar cards and their series; demand continues while the main window is hidden (PERF-093).
+- **Build**: `windows/mini.rs` `MiniWindow` entity with its own `AnimationDriver`; caption "tasklens Mini Window" for the bridge match (R-086).
+- **Tests**: `mini_window_lists_visible_cards`, `mini_window_card_click_opens_main_on_page`, `mini_window_close_unchecks_menu`.
+- **Phase**: P3.
+- **Decided here**: card width, height cap and scroll, Esc closes, mini window stays open on card click.
