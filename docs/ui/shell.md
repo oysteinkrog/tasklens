@@ -485,7 +485,331 @@ x=0
 - **Implements**: PROC-045, APP-028.
 - **Anatomy** [M cus_sheet_03.png: label then checkbox, left of "Filter:"]: label "Include children" `t_sm` `text_primary`, gap 6, then a `TlCheckbox` 14 × 14, then 16 px to the filter box. Vertically centred in the strip.
 - **Shown**: on the Processes tab only, while the filter text is not empty or `processes.mode = tree` [S PROC-045].
-- **Interaction**: click on the label or box dispatches `ToggleSetting(ProcessesFilterIncludeChildren)`; the process spec owns the toasts ("Including filtered process children." / "Hiding unmatched filtered process children."). Not a Tab stop [C]; keyboard users use the same Action from View > Process View? No: the process spec has no menu item for it, so the checkbox is a Tab stop after the filter input [C].
+- **Interaction**: click on the label or box dispatches `ToggleSetting(ProcessesFilterIncludeChildren)`; the process spec owns the toasts ("Including filtered process children." / "Hiding unmatched filtered process children."). The process spec gives it no menu item, so the checkbox is a Tab stop right after the filter input, and Space toggles it when focused [C].
 - **Tests**: `include_children_visibility`: hidden in grouped mode with an empty filter, shown in tree mode.
 - **Phase**: P1.
 - **Decided here**: label size `t_sm`, spacing, Tab stop after the filter input.
+
+---
+
+## 4. Menus
+
+### UI-SHL-030 Menu bar behaviour and keyboard
+
+- **Implements**: APP-002, APP-012, APP-017, APP-022, APP-024, APP-026, table (b) F10, Alt+F, Alt+V, Alt+S, Alt+H, Esc.
+- **Anatomy**: the menu buttons in UI-SHL-003 part 4. Each button: `TlButton` ghost, height 26, padding-x 16, label `t_md`. Open state: fill `menu_hover` (stays pressed while its popup is open, widgets rule 9).
+- **States**: default (transparent), hover (`menu_hover`), open (`menu_hover`), window inactive (label `text_secondary`). No disabled state (a menu always has at least one item).
+- **Interaction**:
+  - Click a closed menu button: open its popup below the button, left edges aligned, 0 px gap (popup top = title bar bottom) [C].
+  - Click the open menu's button: close it.
+  - While any menu is open, hovering another menu button opens that menu and closes the first (classic menu bar) [S gpui-kit `AppMenuBar::handle_hover` behaviour, copied].
+  - Keys: F10 opens File (`OpenMenu(MenuId::File)`); Alt+F, Alt+V, Alt+S, Alt+H open File, View, Settings, Help (`OpenMenu(..)`) [S table b]. Alt+D opens Debug when present [C]. When a menu opens from the keyboard, its first enabled item is highlighted [C].
+  - Inside an open popup (key context `TlMenu`, kit `PopupMenu` bindings): Up and Down move the highlight and skip separators, headers and disabled rows; Enter or Space activates; Right opens a submenu; Left closes a submenu, or at the top level moves to the previous menu (wrapping); Right at the top level on an item without a submenu moves to the next menu (wrapping) [S kit `SelectLeft`/`SelectRight` in `MenuBar` context]; Home and End jump to the first and last item; Esc closes the innermost popup, and focus returns to the element that had focus before the menu opened (widgets rule 16).
+  - Activating an item closes the whole menu chain, then dispatches the Action to the focus that was active before the menu opened (`PopupMenu::action_context(previous_focus)`), so table-context Actions (for example Collapse all) reach the table.
+  - Pressing and releasing Alt alone does nothing [C] (no Windows-style mnemonic underlines).
+- **Data binding**: `MenuBar { open: Option<MenuId>, popup: Option<Entity<PopupMenu>>, return_focus: Option<FocusHandle> }`. Menus are built fresh each time they open, from `TlSettings` and app state at that moment (cheap; widgets perf note).
+- **Build**: custom `MenuBar` Entity in `window/menubar.rs`, modelled on gpui-kit `menu/app_menu_bar.rs` (open/hover/left/right logic) but with tasklens-built `PopupMenu`s, because the kit's `AppMenuBar` reads static `OwnedMenu`s from `cx.set_menus` and cannot show live checks, sliders or painted theme rows [C]. Popup shown with `deferred(anchored().anchor(Anchor::TopLeft).snap_to_window_with_margin(px(8.)))`.
+- **Performance**: building a menu is about 30 to 60 elements once per open; nothing runs while menus are closed.
+- **Accessibility**: each popup row has its label as accessible name; check and radio states are part of it ("Tree View, selected").
+- **Tests**: `menubar_hover_switch`: open File, hover View: View open, File closed. `menubar_alt_keys`: Alt+V opens View with "Columns" highlighted. `menubar_left_right_wrap`: in File, Left opens Help (or Debug when present). `menu_action_reaches_table`: focus table, open View > Process View > Collapse all; the table receives `CollapseAll`.
+- **Phase**: P1.
+- **Decided here**: zero gap under the button; keyboard highlight of the first item; own `MenuBar` instead of kit `AppMenuBar`; Alt alone does nothing; Alt+D for Debug.
+
+### UI-SHL-031 Menu popup rows (visual spec for every menu)
+
+- **Implements**: APP-012 to APP-026 (all menu entries), reference video frames (menus in `cus_sheet_01.png` to `cus_sheet_03.png`).
+- **Anatomy** (`TlMenu` / kit `PopupMenu` restyled through the theme map; values in px at 100%):
+
+```text
++--------------------------------------------------+  bg=menu_bg, border 1 px divider, radius r_sm, shadow (shadow_intensity_pct)
+| pad-y 4                                          |
+| [✓]  Label text                    Ctrl+N   [›]  |  row h=26, pad-x 8, check col 20, gap 4, hint t_sm text_secondary
+| ------------------------------------------------ |  separator: 1 px divider, margin-y 4, inset 8
+|      HEADER                                      |  header row h=22, t_xs semibold text_secondary, uppercase off
+| [ ]  UI Scale       [====o--------]   100%       |  slider row h=30 (UI-SHL-037)
++--------------------------------------------------+
+```
+
+  - Popup: min width 200 [C, kit default 120 is too narrow for TaskSlinger labels], max width 360, max height = window height − 16, scrollable when taller. Padding-y 4 (`sp2`).
+  - Row: height 26 [C], padding-x 8 (`sp4`), radius `r_sm` for the hover fill, label `t_base` `text_primary`.
+  - Check column: 20 wide at the left of every row of a menu that has any check or radio row; check icon Lucide `check` 14; radio uses Lucide `dot` 14 [C]. Rows without a check leave the column empty so labels align [M reference].
+  - Icon column: none in tasklens menus (labels only, like TaskSlinger), except the theme rows' copy icon (UI-SHL-038).
+  - Shortcut hint: right-aligned, `t_sm` `text_secondary`, from the Action's binding (kit `Kbd` lookup), 24 px minimum gap from the label.
+  - Submenu row: chevron Lucide `chevron-right` 14 at the right in `text_secondary`. Submenu opens to the right, top-aligned with its row minus 4 (so first rows line up), flipping left when there is no room (kit behaviour). Hover delay before opening 0 ms; leaving towards the submenu keeps it open (kit's own pointer logic).
+  - Labels with ">" in the merged spec ("Columns >") show the chevron; the ">" character itself is not drawn [C].
+  - Labels ending in "…" or "..." keep the exact spec text [S].
+  - Separator: 1 px `divider`, 4 px space above and below, inset 8 from both sides.
+  - Group header (Settings menu groups): height 22, label `t_xs` semibold `text_secondary`, not interactive [C].
+- **States**:
+  - Highlighted (hover or keyboard): row fill `menu_hover`, label `text_primary`.
+  - Disabled: label and hint at the foundation's disabled opacity, no highlight on hover, still shows its tooltip if it has one (kit rows support tooltips through `menu_element`).
+  - Checked: check icon in `accent` [C].
+- **Motion**: the popup opens with the kit's 150 ms fade and 8 px slide when animations are on; instant otherwise. No exit animation (kit).
+- **Build**: kit `PopupMenu` with tasklens builder helpers in `window/menubar.rs`: `check(label, checked, action)`, `radio(label, selected, action)`, `header(label)`, `slider_row(..)`, `theme_row(..)`. The kit's row height and paddings are set through `PopupMenu` styling (`.min_w(px(200.))`, and the theme map's `popover` colours); if the kit row height is not 26 at `Size::Small`, the helpers render rows with `menu_element` and own `div` styling [C].
+- **Tests**: `menu_row_metrics` (render test): a check row is 26 tall, the check column 20 wide, the hint right-aligned.
+- **Phase**: P1.
+- **Decided here**: row height 26, min width 200, check and radio icons, header style, chevron replacing ">".
+
+### UI-SHL-032 File menu
+
+- **Implements**: APP-012, APP-013 (dropped), APP-014, APP-015, APP-016, PROC-095, PROC-096.
+- **Items** (in order; an item exists only from its phase, so the menu never has dead items [S]):
+
+  | # | Label | Shortcut | Action | Phase | Notes |
+  |---|---|---|---|---|---|
+  | 1 | Run... | Ctrl+N | `OpenRunDialog` | P2 | Opens or focuses "tasklens Run" (UI-SHL-097) |
+  | 2 | Search File Handles... | | `OpenHandleSearch` | P3 | Opens or focuses "tasklens Handle Search" (UI-SHL-098) |
+  | 3 | Open System Monitor | | `OpenSystemMonitor` | P4 | Hidden when none of `plasma-systemmonitor`, `gnome-system-monitor`, `missioncenter` is on `PATH` (checked once at startup, cached). Failure toast (Error) "Failed to launch System Monitor" [S] |
+  | — | separator | | | P2 | Only when an item above it exists |
+  | 4 | Exit tasklens | Ctrl+Q | `Quit` | P1 | Quits even with tray settings on (UI-SHL-113) |
+
+  - There is no "Run Installer" item (APP-013 DROP).
+- **Tests**: `file_menu_p1_items`: with only P1 features, the menu holds exactly "Exit tasklens" and no separator.
+- **Phase**: P1 (item 4), others as listed.
+
+### UI-SHL-033 View menu (root)
+
+- **Implements**: APP-017, R-089.
+- **Items**: submenus in order "Columns", "Process View", "Window", "Appearance", "Theme", "Graphs" [S]. Alt+V opens it.
+  - Columns: UI-SHL-034 (P1). Disabled when the active tab has no table (Performance, Information), with tooltip "This tab has no table" [C].
+  - Process View: UI-SHL-035 (P1). Enabled on every tab (it changes settings that apply when the Processes tab shows) [C].
+  - Window: UI-SHL-036 (P2: Always On Top; P3: Performance mini window). Absent in P1 [S].
+  - Appearance: UI-SHL-037 (P2). Theme: UI-SHL-038 (P2). Graphs: UI-SHL-039 (P1).
+- **Phase**: P1.
+- **Decided here**: Columns disabled on table-less tabs with tooltip.
+
+### UI-SHL-034 View > Columns
+
+- **Implements**: APP-018, PROC-024, PROC-025, PROC-026, R-065, R-075.
+- **Items** (acting on the active tab's table: Processes, History, Services, Startup Apps or Connections):
+
+  | # | Label | Kind | Action | Notes |
+  |---|---|---|---|---|
+  | 1 | Select Columns… | item | `OpenColumnPicker { table }` | Opens the "Columns" picker popover anchored under the header's right end (the table spec owns the picker) |
+  | 2 | Resize columns to fit content | item | `ResizeColumnsToFit { table }` | Template strings per table (d) |
+  | 3 | Resize Behavior | submenu | | |
+  | 3a | Proportional | radio | `SetSetting { TablesColumnResize, "proportional" }` | |
+  | 3b | Last Column | radio | `SetSetting { TablesColumnResize, "last_column" }` | |
+  | — | separator | | | |
+  | 4 | Reset to default | item | `ResetColumns { table }` | Toast (Info) "Columns reset to default" [S] |
+
+  - "Hide This Column" is only in the header right-click menu [S], which the table specs own.
+- **Tests**: `columns_menu_targets_active_table`: on Services, `ResetColumns` carries `TableId::Services`.
+- **Phase**: P1.
+
+### UI-SHL-035 View > Process View
+
+- **Implements**: APP-019, PROC-014, PROC-017, PROC-020, PROC-043, R-010.
+- **Items**:
+
+  | # | Label | Kind | Bound key | Action |
+  |---|---|---|---|---|
+  | 1 | Tree View | radio | `processes.mode = tree` | `SetViewMode(Tree)` |
+  | 2 | Task Manager Grouping | radio | `grouped` | `SetViewMode(Grouped)` |
+  | 3 | List View | radio | `flat` | `SetViewMode(Flat)` |
+  | — | separator | | | |
+  | 4 | Tree Connector Lines | check | `processes.tree_guide_lines` | `ToggleSetting(ProcessesTreeGuideLines)` |
+  | 5 | Highlight New and Exited Processes | check | `processes.highlight_new_exited` | `ToggleSetting(ProcessesHighlightNewExited)` |
+  | — | separator | | | |
+  | 6 | Collapse all | item (Ctrl+L) | | `CollapseAll` (Table context) |
+
+  - `SetViewMode` writes the key and pushes the same toast as the cycler ("View mode: Tree View") [C, consistent with UI-SHL-013].
+  - In History mode items 1 to 3 are disabled with tooltip "History shows a flat list" [C, from PROC-016].
+  - Collapse all is disabled when the Processes tab is not active [C].
+- **Phase**: P1.
+- **Decided here**: toast on radio change; disabled rules.
+
+### UI-SHL-036 View > Window
+
+- **Implements**: APP-020, APP-009, PERF-093, R-058, R-073.
+- **Items**:
+
+  | # | Label | Kind | Shortcut | Action | Phase |
+  |---|---|---|---|---|---|
+  | 1 | Always On Top | check (`window.always_on_top`) | | `ToggleAlwaysOnTop` | P2 |
+  | 2 | Performance mini window | check (mini window open) | Ctrl+Shift+M | `ToggleMiniWindow` | P3 |
+
+  - Item 1 disabled with tooltip "Not supported by this desktop" where the pin is disabled (UI-SHL-005) [S].
+  - Item 2 is checked while the mini window exists; closing the mini window unchecks it [S PERF-093]. The mini window itself is the Performance spec's.
+- **Phase**: P2, P3.
+
+### UI-SHL-037 View > Appearance (sliders and checks)
+
+- **Implements**: APP-040, R-020, R-077, ADR-009 (Metrics and scale), PROC-040.
+- **Items** [S order; M reference frames show the same rows with the value at the right]:
+
+  | # | Label | Kind | Key | Range, step, format |
+  |---|---|---|---|---|
+  | 1 | UI Scale | slider row | `appearance.ui_scale_pct` | 75 to 200, step 5, "%d%%" |
+  | 2 | Row Height | slider row | `appearance.row_height_pct` | 80 to 150, step 5, "%d%%" |
+  | 3 | Rounded Corners | check | `appearance.rounded_corners` | |
+  | 4 | Value Color Coding | check | `appearance.heat_coloring` | |
+  | 5 | Value Color Coding Intensity | slider row | `appearance.heat_intensity_pct` | 0 to 100, step 5 [C], "%d%%" |
+  | 6 | Drop Shadow Intensity | slider row | `appearance.shadow_intensity_pct` | 0 to 100, step 5 [C], "%d%%" |
+
+- **Slider row anatomy** (height 30 [C]):
+
+```text
+| [chk col 20] Label (w=150, t_base, ellipsis) [==========o------] (w=120)  100% (w=40, right, t_sm tnum text_secondary) |
+```
+
+  - Label column 150 wide, truncated with "…" [M "Value Color Coding I…" in the reference].
+  - `TlSlider` 120 wide, track and thumb from the foundation.
+  - Value text 40 wide, right-aligned, tabular figures.
+- **Interaction**:
+  - Dragging previews live: each `SliderEvent::Change` applies the value to `TlSettings` in memory without persisting [S]. `SliderEvent::Release` persists (one save) [S].
+  - UI Scale release pushes the Info toast "UI scale changed to 120%" (the value) [S]. Ctrl+Plus, Ctrl+Minus, Ctrl+0 do the same steps from anywhere (UI-SHL-130).
+  - Keyboard on a highlighted slider row: Left and Right step by the step value, Home and End jump to min and max; each key press counts as a release (persist plus toast for UI Scale) [C].
+  - The popup stays open while dragging and after release; clicking a check row toggles it and also keeps the popup open [C, matches TaskSlinger's Appearance submenu which stays open in the reference video].
+  - Applying a UI Scale change re-lays out the menu itself; the popup stays anchored to its row [C].
+- **Effects**: UI-SHL-130 (scale and row height), UI-SHL-131 (radius), heat colouring and shadow per their owners.
+- **Build**: `slider_row` helper renders a `menu_element` row holding a kit `Slider` whose `SliderState` entities are created once per `MenuBar` and reused across menu opens (entities are never created in render) [C].
+- **Tests**: `appearance_slider_persist_on_release`: three Change events then Release: one persist call, final value saved, toast "UI scale changed to 115%".
+- **Phase**: P2 (menu), P1 (keys Ctrl+Plus/Minus/0).
+- **Decided here**: steps of 5 for the two 0..100 sliders; row geometry; popup stays open; keyboard on slider rows.
+
+### UI-SHL-038 View > Theme
+
+- **Implements**: APP-035, APP-036, APP-037, APP-038, R-068, R-069; reference `cus_sheet_02.png` (each theme row painted in its own palette, copy icon at right).
+- **Items**:
+
+  | # | Label | Kind | Action |
+  |---|---|---|---|
+  | 1..12 | Default Dark, Vivid Nightfall, Catppuccin Frappé, Catppuccin Macchiato, Catppuccin Mocha, Dracula, OLED Black, Default Light, Windows 7 Aero, Golden Summer Fields, Soft Pink Delight, Catppuccin Latte | theme row (radio) | `SetTheme(name)` |
+  | 13.. | custom themes from `themes.json`, in file order | theme row (radio) | `SetTheme(name)` |
+  | — | separator | | |
+  | | Create copy | item | `CopyTheme(active)` |
+  | | Edit colors | item | `EditTheme(active)` |
+  | | Share theme | item | `ShareTheme(active)` |
+  | | Delete theme | item | `DeleteTheme(active)` |
+  | — | separator | | |
+  | | Import theme | item | `ImportTheme` |
+  | | Sync theme with system | check (`theme.follow_system`) | `ToggleSetting(ThemeFollowSystem)` |
+  | | Preferred Light Theme | submenu: every theme name as radio (`theme.light`) | `SetSetting { ThemeLight, name }` |
+  | | Preferred Dark Theme | submenu: every theme name as radio (`theme.dark`) | `SetSetting { ThemeDark, name }` |
+
+  - In P1 the list holds only Default Dark and Default Light (R-068).
+  - APP-036 lists four per-theme items. This spec places them once, acting on the active theme, so they are reachable from the keyboard without per-row submenus [C]. The copy icon on every row is the per-row "Create copy" shortcut [S].
+- **Theme row anatomy** (height 26, full popup width):
+  - Background: that theme's `menu_bg` [C; reference shows each row in its own palette].
+  - Label: theme name, `t_base`, that theme's `text_primary`.
+  - Check column: radio dot on the active theme (`theme.active`), in that theme's `accent`.
+  - Copy icon: Lucide `copy` 14, at the right, 22 × 22 hit area, that theme's `text_secondary`; tooltip "Create copy". Click dispatches `CopyTheme(name)` and does not apply the theme.
+  - Highlight: the row's own `menu_hover` from that theme.
+- **Behaviour**:
+  - `SetTheme(name)` writes `theme.active`, runs the theme switch (UI-SHL-080) and, if `theme.follow_system` is on, turns it off with the Info toast "Theme sync turned off" [C] (an explicit choice overrides sync).
+  - `CopyTheme(name)` creates "<name> copy" (or "<name> copy 2", 3, ...) in `themes.json`, makes it active, Success toast "Theme copied" [S].
+  - `EditTheme(active)`: built-in active theme gives Info toast "Copy a theme before editing it" [S]; a custom theme opens the Theme Editor (UI-SHL-081). Absent before P3.
+  - `ShareTheme(active)` opens "tasklens Share Theme" (UI-SHL-082). Absent before P3.
+  - `DeleteTheme(active)`: built-in gives Info toast "Built-in themes cannot be deleted" [S]; custom opens the confirm window "Delete this custom theme?" (UI-SHL-084).
+  - `ImportTheme` reads the clipboard (UI-SHL-083). Absent before P3.
+- **Build**: `theme_row` helper (custom `menu_element`) reads the other theme's `TlTheme` from the `ThemeRegistry` (all themes parsed once at startup and after every `themes.json` write).
+- **Performance**: up to about 30 rows; colours are already parsed `Hsla`; no allocation per frame (menu is static while open).
+- **Tests**: `theme_rows_painted`: the "Dracula" row background equals the Dracula theme's `menu_bg`. `delete_builtin_toast`. `set_theme_turns_off_sync`.
+- **Phase**: P2 (themes, sync), P3 (Edit, Share, Import).
+- **Decided here**: per-theme actions act on the active theme; copy naming "<name> copy N"; explicit choice turns sync off with toast "Theme sync turned off".
+
+### UI-SHL-039 View > Graphs
+
+- **Implements**: APP-021, PERF-080, PERF-084, R-089.
+- **Items**:
+
+  | # | Label | Kind | Key | Phase |
+  |---|---|---|---|---|
+  | 1 | CPU Graph | check | `graphs.minigraph_cpu` | P1 |
+  | 2 | Memory Graph | check | `graphs.minigraph_memory` | P1 |
+  | 3 | Disk Graph | check | `graphs.minigraph_disk` | P1 |
+  | 4 | Network Graph | check | `graphs.minigraph_network` | P1 |
+  | 5 | GPU Graph | check | `graphs.minigraph_gpu` | P1 |
+  | 6 | VRAM Graph | check | `graphs.minigraph_vram` | P1 |
+  | 7 | GPU Temperature Graph | check | `graphs.minigraph_gpu_temperature` | P1 |
+  | — | separator | | | |
+  | 8 | Keep detached graphs open when closing main window | check | `graphs.keep_detached_on_close` | P3 |
+  | 9 | Reset Minigraph Layout | item | `ResetMinigraphLayout`; toast (Success) "Minigraph layout reset" [S] | P1 |
+
+  - Each check dispatches `ToggleSetting(<key>)`. GPU, VRAM and GPU temperature are disabled with tooltip "No GPU found" when the device catalog has no GPU [C].
+- **Phase**: P1 (items 1 to 7, 9), P3 (item 8).
+- **Decided here**: disabled rule without a GPU.
+
+### UI-SHL-040 Settings menu
+
+- **Implements**: APP-022, APP-046, APP-048, APP-049, APP-043, PROC-086, PROC-087, PROC-097, R-015, R-025, R-028, R-058, D-003.
+- **Items** (group headers are UI-SHL-031 header rows; Alt+S opens the menu):
+
+  | Group | Label | Kind | Key or Action | Phase |
+  |---|---|---|---|---|
+  | **Monitoring** | Refresh | submenu radio: 0.25s, 0.5s, 1.0s, 2.0s, 5.0s, 10.0s | `processes.interval_ms` 250..10000 | P1 |
+  | | Network transfer unit | submenu radio: Bits per second, Bytes per second | `units.network` | P1 |
+  | | Auto-scale network transfer rates | check | `units.network_auto_scale` | P1 |
+  | | Record history | check | `history.enabled` (`ToggleRecordHistory`) | P3 |
+  | | History storage | submenu radio: 1 hour, 2 hours, 3 hours, 4 hours, 6 hours, 8 hours, 12 hours | `history.retention_h` | P3 |
+  | | Save history to disk | check, disabled while Record history is off (tooltip "Turn on Record history first") [C] | `history.persist` | P3 |
+  | | Rendering GPU | submenu radio (UI-SHL-040a) | `rendering.gpu` | P4 |
+  | **Motion & interaction** | Animations | check | `motion.animations` | P1 |
+  | | Smooth Graphs | check | `motion.smooth_graphs` | P1 |
+  | | Smooth Scroll | check | `motion.smooth_scroll` | P1 |
+  | | Tab Switch | slider row 0 to 500, step 10, "%d ms" | `motion.tab_switch_ms` | P2 |
+  | | Close with Esc | check | `window.close_with_esc` | P1 |
+  | **Window & startup** | Close to tray | check | `tray.close_to_tray` | P3 |
+  | | Minimize to tray | check | `tray.minimize_to_tray` | P3 |
+  | | Always show tray icon | check | `tray.always_show` | P3 |
+  | | Start at login | check | `startup.start_at_login` (`ToggleStartAtLogin`) | P2 |
+  | | Start minimized | check, indented by 16, disabled unless Start at login is on | `startup.start_minimized` | P2 |
+  | | Default tab | submenu radio: Processes, Performance, Services, Startup Apps, Connections, Information, Last used | `general.start_tab` | P1 |
+  | | Unlock privileged actions at launch | check | `privilege.unlock_at_launch` | P3 |
+  | | Skip password prompts (experimental) | check (`TogglePasswordless`) | `privilege.passwordless` | P4 |
+  | | Auto-fetch Public IP on launch | check | `network.auto_fetch_public_ip` | P2 |
+  | | Open rescue window on critical memory pressure | check | `lowmem.enabled` | P3 |
+  | **Language** | Language: | submenu radio: System default, then the locales by their own names (UI-SHL-131) | `general.language` | P1 (P4 for locales other than English) |
+  | — | separator | | | |
+  | | All settings… | item, Ctrl+, | `OpenSettings` | P2 |
+  | | Reset Settings to Defaults | item | `ResetSettings` (UI-SHL-091 confirm) | P1 |
+
+  - Default tab lists only tabs built in the current phase plus "Last used" [C].
+  - Refresh labels are exactly "0.25s", "0.5s", "1.0s", "2.0s", "5.0s", "10.0s" [S].
+  - Named Actions with extra work:
+    - `ToggleRecordHistory`: writes `history.enabled`; Info toast "History recording on" or "History recording off" [C].
+    - `ToggleStartAtLogin`: writes or deletes `~/.config/autostart/io.github.oysteinkrog.Tasklens.desktop` through tl-app (`write_atomic`) [S APP-048]; failure: Error toast "Could not change the autostart entry" and the setting is reverted [C].
+    - `TogglePasswordless`: turning on first opens the modal confirm (UI-SHL-091) with the text "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?" and buttons "Skip prompts" / "Cancel" [S]; then runs `pkexec /usr/lib/tasklens/tasklens-setup polkit-rule on`; success writes the key, cancel leaves it off with toast "Authentication cancelled". Turning off runs `polkit-rule off` without a confirm [S].
+    - Changing `rendering.gpu`: Info toast "Restart tasklens to use the new GPU" [S].
+  - The Additional Setup window is not in this menu [S R-028].
+- **UI-SHL-040a Rendering GPU submenu**: rows "Auto", one row per adapter name, "Software renderer". On open, rows "Auto" and "Software renderer" show at once, plus a disabled row "Detecting adapters…" [C]; a background task runs the short-lived wgpu adapter probe (APP-046) and calls `PopupMenu::rebuild` with the adapter rows when it returns (timeout 2 s, after which the row reads "No adapters found") [C]. Each adapter row stores `pci:<bus id>`.
+- **Tests**: `settings_menu_refresh_radio`: choosing "2.0s" writes 2000 and the engine receives `EngineSettings.interval_ms = 2000`. `start_minimized_disabled`: disabled while `startup.start_at_login = false`.
+- **Phase**: P1 (as listed per row).
+- **Decided here**: indent 16; Save history disabled rule; toasts for Record history and autostart failure; Default tab lists built tabs only; adapter probe UX.
+
+### UI-SHL-041 Help menu
+
+- **Implements**: APP-024, APP-030, APP-041, APP-042, APP-053, R-028.
+- **Items** (Alt+H):
+
+  | # | Label | Shortcut | Action | Phase |
+  |---|---|---|---|---|
+  | 1 | Keyboard Shortcuts | Ctrl+? | `OpenShortcuts` (UI-SHL-095) | P2 |
+  | 2 | System Information… | | `OpenSystemInformation`: selects the Information tab and scrolls to the "Operating System" section [S APP-041] | P2 |
+  | 3 | Additional setup… | | `OpenAdditionalSetup` (UI-SHL-094) | P3 |
+  | 4 | Documentation | | `OpenDocumentation`: `xdg-open /usr/share/doc/tasklens/README.md` through the shared launcher; failure Error toast "Could not open the documentation" [C] | P4 |
+  | — | separator | | | P2 |
+  | 5 | About tasklens… | | `OpenAbout` (UI-SHL-092) | P2 |
+
+  - In P1 the Help menu button is absent because it has no items [C, from the "no dead items" rule].
+- **Phase**: P2.
+- **Decided here**: documentation failure toast; Help absent in P1.
+
+### UI-SHL-042 Debug menu
+
+- **Implements**: APP-026, R-071, ADR-014 (frame stats).
+- **Shown**: only with `--debug` or `TASKLENS_DEBUG=1` [S]. Button label "Debug", after Help, Alt+D [C].
+- **Items**:
+
+  | # | Label | Kind | Action | Notes |
+  |---|---|---|---|---|
+  | 1 | Show FPS | check (`debug.show_fps`) | `ToggleSetting(DebugShowFps)` | Overlay UI-SHL-140 |
+  | 2 | Continuous rendering | check (session only) | `ToggleContinuousRendering` | Requests a frame every vsync through `request_animation_frame` on the main window (debug only) [S] |
+  | 3 | Enable all columns | item | `EnableAllColumns` | Makes every column of the active table visible; Info toast "All columns enabled" [C] |
+  | 4 | Add random process minigraphs | item | `AddRandomMinigraphs` | Toasts "Added %ld random process minigraphs." / "No process minigraphs available." [S] |
+  | — | separator | | | |
+  | 5 | Collector health | item | `OpenCollectorHealth` | UI-SHL-099 |
+
+- **Phase**: P4 (menu); "Show FPS" exists from P1 as a developer flag reachable by `--debug` [S].
+- **Decided here**: Alt+D; "All columns enabled" toast.
