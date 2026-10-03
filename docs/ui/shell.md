@@ -1071,3 +1071,220 @@ x=0, bottom=0
 - **Behaviour**: `ResetSettings` opens the generic confirm window (UI-SHL-091) titled "tasklens", text "Reset all settings to their defaults? Themes and history are kept.", buttons "Reset" (danger, default) and "Cancel" [S]. On Reset: `settings.toml` is replaced by defaults (atomic write), `TlSettings` reloads, the theme and scale re-apply, `EngineSettings` re-sent, Success toast "Settings reset to defaults"; on write failure Error toast "Failed to reset settings" and nothing changes [S]. `state.toml`, `themes.json` and history are untouched [S].
 - **Tests**: `reset_settings_keeps_state`: after reset, `UiState` columns and window size unchanged, `settings.ui_scale_pct == 100`.
 - **Phase**: P1.
+
+---
+
+## 7. Themes, accents and theme management
+
+### UI-SHL-080 Theme application, crossfade and follow-system
+
+- **Implements**: APP-035, APP-036, R-017, R-068, R-069, ADR-009 (Theme model, theme switch).
+- **Behaviour**:
+  - `ThemeRegistry` (Global, `theme/registry.rs`) holds the parsed built-ins (`assets/themes/builtin.json`) and user themes (`$XDG_CONFIG_HOME/tasklens/themes.json`) as `Arc<TlTheme>`, in menu order. It is rebuilt after every write to `themes.json`.
+  - Applying a theme (from `SetTheme`, the Settings page, follow-system, reset, import, delete, or startup):
+    1. Resolve the name; an unknown name falls back to "Default Dark" with a warn log [C].
+    2. With animations on: start a 200 ms [S] crossfade. Each frame for 200 ms, `TlTheme` = `lerp(old, new, ease_out_cubic(t))` per slot in linear sRGB [C], `theme/map.rs::apply` refreshes the gpui-kit `Theme`, and every open tasklens window gets `window.refresh()` so cached views repaint. The frame chain uses `window.on_next_frame` and stops at t = 1.
+    3. With animations off or reduced motion: one step to the new theme [S].
+    4. At the end (or the single step): `TlTheme.version` and `style_version` bump once, so charts rebuild geometry once (ADR-009); `theme.active` is written.
+  - Charts read colours at paint time; during the crossfade their geometry is not rebuilt (only the final `style_version` bump rebuilds it) [C].
+  - Follow system (`theme.follow_system = true`): tl-app watches the portal `org.freedesktop.portal.Settings` key `org.freedesktop.appearance color-scheme` (`ReadOne` at start, then `SettingChanged`) on its own zbus connection and forwards `ColorSchemeChanged(u32)` to the UI over an `async_channel::bounded(4)` [C; zbus stays out of tl-ui, ADR-001]. 1 = prefer dark → `theme.dark`; 2 = prefer light → `theme.light`; 0 = no preference → `theme.dark` [S]. The applied theme is written to `theme.active` [C].
+  - Turning sync on applies the matching preferred theme at once [C].
+- **Performance**: the crossfade costs one full repaint per frame for 200 ms (about 29 frames at 144 Hz); no chart geometry rebuilds until the end. Bench scenes run with animations off, so the gates are not affected.
+- **Tests**: `theme_switch_instant_reduced_motion`: after `SetTheme("Dracula")` with reduced motion, one frame later `TlTheme.name == "Dracula"` and `style_version` bumped by exactly 1. `follow_system_maps_values`: events 1, 2, 0 apply dark, light, dark.
+- **Phase**: P1 (apply, Default Dark and Default Light), P2 (crossfade, other themes, sync).
+- **Decided here**: lerp in linear sRGB; geometry rebuild only at the end; sync turned on applies immediately; portal watcher in tl-app.
+
+### UI-SHL-081 Theme Editor window
+
+- **Implements**: APP-037, APP-035 (22 slots plus accent), APP-045.
+- **Anatomy** (window "tasklens Theme Editor", `WindowKind::Floating`, not modal, default 820 × 560, minimum 720 × 480 [C]):
+
+```text
++--------------------------------------------------------------------------------------+
+| tasklens Theme Editor                                                  [pin] [x]     |  TlWindowFrame
++--------------------------------------------------------------------------------------+
+| Name: [ Default Dark copy                    ]                                       |  h=32, pad 16
++----------------------+---------------------------------+-----------------------------+
+| SLOTS (w=240)        | PICKER (flex, min 280)          | PREVIEW (w=260)             |
+| [■] Window backgr.. #1E1F22 | +-----------------+ +--+   | [Processes][Performance]    |
+| [■] Title bar   #27292B | |  S/V plane      | |H |   | Name        CPU   Memory    |
+| ...22 rows + Accent  |  |  200 x 200      | |16|   | row (alt)   ...             |
+|  row h=26            |  +-----------------+ +--+   | row hover                   |
+|                      |  R 39  G 41  B 43           | row selected                |
+|                      |  H 210 S 009 V 017          | [graph 236 x 60]            |
+|                      |  Hex [#27292B]  hint         |                             |
++----------------------+---------------------------------+-----------------------------+
+| [Random] [Share] [Import]                                       [Cancel] [Done]      |  footer h=48
++--------------------------------------------------------------------------------------+
+```
+
+  - Name input: `TlInput`, label "Name:", width fills, max 64 characters [C].
+  - Slot list: 23 rows (the 22 slots in APP-035 order with their labels, then "Accent"), each 26 tall: swatch 14 × 14 `r_sm` with a 1 px `divider` border, label `t_base`, hex value `t_xs` tabular `text_secondary` right-aligned. Selected row fill `row_selected`, text `text_selected_primary`. Up and Down move the selection when the list has focus.
+  - Picker: saturation (x) and value (y) plane 200 × 200 with a 10 px ring cursor; vertical hue strip 16 × 200 to its right with a 2 px bar cursor; both custom elements. Readouts "R %d G %d B %d" and "H %03d S %03d V %03d" [S] in `t_sm` tabular. Hex input with placeholder "Enter a 6-digit hex color" [S]; accepts with or without "#", applies on Enter or blur; invalid text shows a `status.danger` border and the text "Enter a 6-digit hex color" below it, and does not apply [C].
+  - Preview: a mini tab strip (two tabs, the active one with the accent outline), a mini table (header plus 4 rows: normal, alternate, hover, selected, with secondary text), and a 236 × 60 static graph (fill and line from the theme's graph palette), all painted from the draft theme.
+  - Footer buttons: left "Random", "Share", "Import"; right "Cancel", "Done" (primary, Enter) [S labels].
+- **Behaviour**:
+  - Opened by `EditTheme(name)` for a custom theme; a second `EditTheme` focuses the open editor; editing a different theme while one is open asks nothing and switches after applying Cancel to the first [C].
+  - Edits apply live to the whole app [S]: the preview updates on every pointer move; the app-wide `TlTheme` is replaced at most every 100 ms during a drag and once on release [C, keeps `style_version` rebuilds at most 10 per second].
+  - Keyboard on the plane: arrows move 1 unit of S or V (Shift: 10); on the hue strip Up and Down move hue by 1 degree (Shift: 10) [C].
+  - Random: draft gets a random palette from a seeded HSV generator: background lightness from the current mode, text colours chosen to reach a 4.5:1 contrast against `list_bg` [C]; toast "Random theme generated." [S].
+  - Share: opens UI-SHL-082 with the draft encoded.
+  - Import: reads the clipboard as in UI-SHL-083, and loads the result into the draft (name included) instead of adding a new theme [C].
+  - Cancel or the close button: restores the theme as it was when the editor opened, applies it, closes [S].
+  - Done: validates the name (not empty; not equal to another theme's name, case-insensitive), writes `themes.json` with `write_atomic`, applies, closes, Success toast "Theme saved" [C]. Invalid name: the input shows `status.danger` and the text "Choose a name that no other theme uses" and Done is disabled [C].
+  - Built-in themes never open here ("Copy a theme before editing it", UI-SHL-038).
+- **Build**: `windows/theme_editor.rs`, Entity `ThemeEditor { draft: TlTheme, original: Arc<TlTheme>, selected_slot: SlotId, plane: Entity<ColorPlane>, hue: Entity<HueStrip>, hex: Entity<InputState>, name: Entity<InputState>, apply_throttle: Option<Task<()>> }`. `ColorPlane` paints with two `paint_quad` linear gradients (white to hue horizontally, transparent to black vertically) [C]. The kit `ColorPicker` is not used: it is a popover with featured colours, not the TaskSlinger layout.
+- **Performance**: plane paint is 2 quads; a drag re-renders the editor and the preview only, plus at most 10 app-wide theme applications per second.
+- **Accessibility**: Tab order: Name, slot list, plane, hue strip, hex input, Random, Share, Import, Cancel, Done.
+- **Tests**: `editor_cancel_restores`: edit a slot, Cancel: `TlTheme` equals the original. `editor_hex_invalid`: "12345" does not apply. `editor_done_duplicate_name` disables Done.
+- **Phase**: P3.
+- **Decided here**: layout, sizes, throttle, random generator rule, toasts "Theme saved", name validation text, own colour plane.
+
+### UI-SHL-082 Share Theme window
+
+- **Implements**: APP-038, APP-045.
+- **Anatomy**: "tasklens Share Theme", `WindowKind::Dialog` modal to its parent (the main window or the editor), 520 × 220 [C]. Body: text "Copy this code and send it to someone who uses tasklens." [C], then a read-only multi-line `TlInput` (3 lines, wraps, `t_sm`) holding `TL1.` + base64url(JSON `{"v":1,"name":…,"accent":"#…","SLOT":"#RRGGBB",…}`) [S]. Footer: "Copy" (primary, Enter), "Close".
+- **Behaviour**: Copy writes the code to the clipboard and pushes the toast "Theme code copied" in this window [S]. The code is selected on open so Ctrl+C also works [C].
+- **Phase**: P3.
+
+### UI-SHL-083 Import theme from the clipboard
+
+- **Implements**: APP-038, R-079 (verify U-17).
+- **Behaviour**: `ImportTheme` reads `cx.read_from_clipboard()` text and accepts, in order: a `TL1.` code; a `TS1.` code (only if U-17 verification passed; otherwise not accepted); raw TaskSlinger `themes.json` text (`{"themes":[...]}`, every theme in it is imported) [S]. Missing slots take the "Default Dark" value (or "Default Light" when the imported `WINDOW_BG` lightness is above 50%) [C]. A name that already exists gets " 2", " 3" and so on [C]. Imported themes are written to `themes.json`; the first becomes active; Success toast "Theme imported" [S]. Anything else: Info toast "Clipboard does not contain a theme code" [S].
+- **Tests**: `import_tl1_roundtrip`: share then import gives an equal theme named "<name> 2".
+- **Phase**: P3.
+
+### UI-SHL-084 Delete theme confirmation
+
+- **Implements**: APP-036, APP-045.
+- **Behaviour**: generic confirm (UI-SHL-091) titled "tasklens", text "Delete this custom theme?" [S], buttons "Delete" (danger, default) and "Cancel". On Delete: removed from `themes.json`; if it was active, apply `theme.dark` or `theme.light` matching the deleted theme's mode (falling back to "Default Dark" or "Default Light" when the preferred theme is the deleted one); a `theme.light` or `theme.dark` that named it resets to its default; Success toast "Theme deleted" [S].
+- **Phase**: P2.
+
+### UI-SHL-085 Graph Color submenu (accent colours)
+
+- **Implements**: APP-039, R-083, PERF-081, PERF-090.
+- **Anatomy** (shared builder `graph_color_menu(current: GraphColor, action: fn(GraphColor) -> Box<dyn Action>)` in `window/menubar.rs`, used by the minigraph card menu and any in-app graph menu):
+  - First row "Accent (theme default)" [S], then the 17 named colours in APP-039 order: Coral, Orange, Amber, Yellow, Lime, Green, Mint, Teal, Cyan, Blue, Indigo, Violet, Lavender, Fuchsia, Pink, Rose, Slate.
+  - Each row: radio check column, a 12 × 12 swatch with radius `r_sm` (the accent row shows the current theme's `accent`), then the name.
+  - Stored value: `accent` or the lower-case name [S R-083].
+- **Tray variant**: the tray graph icon menu (dbusmenu through ksni) shows the same names as radio items without swatches, because dbusmenu items here carry text only [C].
+- **Phase**: P3.
+
+---
+
+## 8. Secondary windows
+
+### UI-SHL-090 Secondary window frame (`TlWindowFrame`)
+
+- **Implements**: APP-045, APP-009, R-073, PROC-056, D-006.
+- **Anatomy** (client decorations):
+
+```text
++----------------------------------------------------------------+
+| Title text (t_base, text_primary, pad-l 12)       [pin] [ x ]  |  h=30, bg=titlebar
++----------------------------------------------------------------+
+| content (bg=window_bg)                                         |
+```
+
+  - Title bar height 30 [C], background `titlebar`, title `t_base` medium, left padding 12, truncated with "…".
+  - Pin 36 × 30 and close 36 × 30 at the right, same states as UI-SHL-005 [S R-073]. No minimize or maximize on modal windows; tool windows (Floating, not modal) also show minimize and maximize when the compositor reports them [C].
+  - Drag, double-click (maximize, tool windows only) and right-click window menu as UI-SHL-004.
+  - Server decorations: KWin draws the title bar; the pin moves to the top-right corner of the content as a 28 × 28 `TlIconButton` with 4 px inset [C].
+- **Window kinds** [S APP-045]: modal confirmations use `WindowKind::Dialog` with the parent window (xdg_dialog_v1 `set_modal`); tools, editors and property windows use `WindowKind::Floating` with the parent (xdg parent).
+- **Rules**:
+  - Each window is opened with `gpui_kit::open_window`, so it has its own Root: its own toasts (UI-SHL-100), menus and tooltips [S].
+  - Esc in a modal confirm closes it as Cancel; Enter triggers its default button [S]. In a tool window Esc does nothing unless `window.close_with_esc` is on [C].
+  - Opening a window that is already open focuses it (`window.activate_window()`) instead of opening a second one, except Properties windows, which are per target (process spec) [C].
+  - Closing the main window closes every child window, except detached graphs when `graphs.keep_detached_on_close` is on [S].
+  - Pin state on secondary windows is not persisted [S].
+  - Initial size per window entry; Wayland places the window; minimum sizes are set with `window_min_size`.
+- **Build**: `window/secondary.rs::open_secondary<V>(cx, parent, SecondaryOptions { title, kind, size, min_size, resizable }, build: impl FnOnce(&mut Window, &mut Context<V>) -> V)`, and `TlWindowFrame` (foundation) for the title bar.
+- **Tests**: `secondary_window_refocus`: `OpenAbout` twice opens one window.
+- **Phase**: P1 (frame), each window with its feature.
+- **Decided here**: 30 px title bar, min/max on tool windows only, server-mode pin placement, Esc rule for tool windows, single-instance windows.
+
+### UI-SHL-091 Generic confirmation window
+
+- **Implements**: APP-045, APP-022, APP-036, APP-049, R-083.
+- **Anatomy**: title "tasklens" [S], `WindowKind::Dialog`, width 440, height fits content (minimum 150) [C], not resizable. Padding 16. Optional icon 24 (Lucide `triangle-alert` in `status.warning` for destructive confirms) [C], text `t_base` wrapping, then footer buttons right-aligned with 8 gap: action button (primary, or danger for destructive), then "Cancel" [C: KDE and TaskSlinger both put the action button left of Cancel].
+- **Behaviour**: Enter activates the action button; Esc, Cancel and the close button cancel [S]. The parent window cannot be used while it is open (modal) [S].
+- **Users of this window** (text and buttons are the owners' [S]):
+
+  | Use | Text | Buttons |
+  |---|---|---|
+  | Reset settings | "Reset all settings to their defaults? Themes and history are kept." | Reset / Cancel |
+  | Delete theme | "Delete this custom theme?" | Delete / Cancel |
+  | Skip password prompts | "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?" | Skip prompts / Cancel |
+  | Process, service and connection confirmations | per their specs | per their specs |
+
+- **Build**: `windows/confirm.rs::confirm(cx, parent, ConfirmSpec { text, action_label, destructive, on_confirm })`.
+- **Tests**: `confirm_enter_and_esc`: Enter runs `on_confirm` once; Esc closes without calling it.
+- **Phase**: P1.
+
+### UI-SHL-092 About window
+
+- **Implements**: APP-053, R-078, D-005.
+- **Anatomy**: "tasklens About", Floating, 440 × 380, not resizable [C]. Centred column, padding 24:
+  - App icon 64 × 64.
+  - "tasklens" in `t_xl` semibold.
+  - "Version: 0.1.0 (a1b2c3d, 2026-10-03)" in `t_sm` `text_secondary` [S format].
+  - Buttons row: "Copy version info", "Third-party licenses" [S].
+  - Links row (`TlButton` link variant): "Project repository" (opens the repository URL from `CARGO_PKG_REPOSITORY`) and "Open log folder" (`xdg-open $XDG_STATE_HOME/tasklens/logs`) [S].
+- **Behaviour**:
+  - "Copy version info" copies a block with version, git hash, build date, GPUI revision, kernel, NVIDIA driver, compositor, session type and scale [S], toast "Copied to clipboard".
+  - "Third-party licenses" swaps the body for a scrollable list (crate name, version, licence) from the embedded `cargo-about` output, with a "Back" button at the top [C].
+  - No TaskSlinger or Mission Center branding [S].
+- **Phase**: P2.
+
+### UI-SHL-093 Crash Report window
+
+- **Implements**: APP-055, R-049, ADR-015.
+- **Anatomy**: "tasklens Crash Report", Floating, 480 × 220 [C]. Icon Lucide `triangle-alert` 24 in `status.warning`. Text "tasklens closed unexpectedly last time." [S] in `t_base`; second line in `t_sm` `text_secondary`: "If tasklens crashed without a report, run coredumpctl info tasklens in a terminal." [C wording, S content]. Footer: "Open log folder", "Copy report", "Close" (default) [S].
+- **Behaviour**:
+  - Shown once after the main window's first frame when `$XDG_STATE_HOME/tasklens/crash/` holds a `crash-<t>.txt` without a matching `crash-<t>.seen` file; on show, the `.seen` marker is written [C] (no settings or state key is needed).
+  - "Copy report" copies the newest report's text; toast "Copied to clipboard". "Open log folder" opens `$XDG_STATE_HOME/tasklens/logs`.
+  - Not shown when tasklens starts hidden to the tray; it shows the next time the main window opens [C].
+- **Phase**: P1.
+- **Decided here**: the `.seen` marker; deferral while hidden; second-line wording.
+
+### UI-SHL-094 Additional Setup window (frame)
+
+- **Implements**: APP-042, PERF-105, R-028.
+- **Anatomy**: "tasklens Additional Setup", Floating, 640 × 520, minimum 560 × 400 [C]. Scrollable column of row cards, padding 16, gap 12. Row card (owned content per PERF-105 to PERF-108): background `header`, radius `r_md`, padding 12; line 1: title `t_md` semibold left, status text `t_sm` right (colours: "Enabled" and "Enabled (existing rule)" `status.success`, "Not enabled" `text_secondary`, "Not needed" `text_secondary`); line 2: description `t_sm` `text_secondary`; line 3: buttons "Enable" or "Revert" (primary), "View script", "Copy command" [S]. Busy state while pkexec runs: the row's buttons disabled and the status text "Waiting for authentication…" [C]. Result area under the buttons: "Done. No restart needed." in `status.success`, or the script output in a read-only 6-line `TlInput` with "Copy output" and "Retry" [S].
+- **Opened by**: Help > "Additional setup…", Settings > Privileges "Additional setup…", every "Needs setup" link (which also scrolls to the row) [S].
+- **Phase**: P3.
+- **Decided here**: sizes and row card styling, busy text.
+
+### UI-SHL-095 Keyboard Shortcuts window
+
+- **Implements**: APP-030, APP-031, R-083.
+- **Anatomy**: "tasklens Keyboard Shortcuts", Floating, 560 × 640, minimum 420 × 360 [C]. Search input at top (placeholder "Search shortcuts") [C]. Scrollable list grouped by context with headings in this order [S]: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Each row 28 tall: description `t_base` left; key caps right as `TlKbd` from `Kbd::binding_for_action` (several bindings separated by " or ") [S].
+- **Behaviour**: rows come from the live keymap, so every row in table (b) appears once; actions not built in the current phase are absent. Search matches description and key text. Opened by Help > "Keyboard Shortcuts" and Ctrl+? [S].
+- **Phase**: P2.
+
+### UI-SHL-096 Public IP Notice window
+
+- **Implements**: APP-056, R-058, PERF-060.
+- **Anatomy**: "tasklens Public IP Notice", Dialog (modal), 460 wide [C]. Text lines [S]: "tasklens will fetch your public IP address from an online service.", "Service: https://api.ipify.org", "Continue only if you want this computer to contact that service." Checkbox "Do not ask again for public IP fetches" (`network.public_ip_notice_accepted`). Buttons "Continue" (primary, default) / "Cancel".
+- **Behaviour**: shown before the first fetch while the key is false. Continue runs the fetch (owned by PERF-060) and writes the key when the box is checked [S].
+- **Phase**: P2.
+
+### UI-SHL-097 Run dialog window frame
+
+- **Implements**: APP-014, PROC-095, R-061.
+- **Frame**: "tasklens Run", Floating (pinnable, not modal), 440 × 210, not resizable [C]. Content, keys (RunDialog context) and toasts are PROC-095's [S]. Opened by File > "Run..." and Ctrl+N; a second Ctrl+N focuses it [C].
+- **Phase**: P2.
+
+### UI-SHL-098 Search File Handles window frame
+
+- **Implements**: APP-015, PROC-096, R-061.
+- **Frame**: "tasklens Handle Search", Floating, not modal, 900 × 560, minimum 640 × 400 [C]. Content per PROC-096 [S].
+- **Phase**: P3.
+
+### UI-SHL-099 Collector Health window
+
+- **Implements**: APP-026, APP-029, R-071.
+- **Anatomy**: title "tasklens Collector Health" [C, APP-045 pattern], Floating, 720 × 360 [C]. A table with columns Source (140), State (100), Last data (100, age as "3s ago"), Restarts (80, right-aligned), Last error (fills, truncated, full text in tooltip) [C]. Rows sorted by `SourceId` order. State text uses `status.success` (Running), `status.warning` (Stale, Disabled), `status.danger` (Failed) [C].
+- **Behaviour**: opened from the Debug menu and from health items in the status chip [S]. Re-renders on `ComponentMask::HEALTH` and once per second for the ages [C].
+- **Phase**: P1 (from the status chip), P4 (Debug menu).
+- **Decided here**: title, columns, colours.
