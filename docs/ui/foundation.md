@@ -301,8 +301,8 @@ gives 17 px for `t_base` and leaves 11 px of vertical room in a 28 px row):
 
 | Token | Size | Weight | Used for |
 |---|---|---|---|
-| `t_xs` | 11 | 400 | status bar, chart axis labels, menu shortcut column, badge counts, "+N" child counts |
-| `t_sm` | 12 | 400 | header column names, sidebar card secondary lines, tooltips, key/value labels, tab labels in secondary windows |
+| `t_xs` | 11 | 400 | chart axis labels, menu shortcut column, badge counts, "+N" child counts |
+| `t_sm` | 12 | 400 | status chip text (measured cap height 8.8 px), header column names, sidebar card secondary lines, tooltips, key/value labels, tab labels in secondary windows |
 | `t_base` | 13 | 400 | table cells, menu items, inputs, buttons, body text, key/value values |
 | `t_md` | 14 | 500 | dialog titles, Performance page header, sidebar card title, group rows ("Apps (11)") |
 | `t_lg` | 16 | 600 | header total values are not this; `t_lg` is for the Information section titles and the About window name |
@@ -321,7 +321,9 @@ for the switch track, the radio and the spinner.
 Row height (spec R-020): `28 × row_height_pct/100 × ui_scale`. Also used for: menu item height is
 not tied to it (fixed 26, below); the Performance sidebar card is `4 × row_height` (112 at 100%,
 measured 116 from the ratio in `performance.png`, rounded to a row multiple, decided); the
-in-window tab strip is `row_height + sp2` (32).
+in-window tab strip is `row_height + sp2` (32). The main window's tab strip is the shell's
+`TAB_STRIP_H = 30` (measured 29.5 from `processes.png`) and its title bar `TITLEBAR_H = 34`, both
+exported from `window/main.rs`; this file's toast margin uses them.
 
 Icons (spec ADR-009 for the 16 px process icon; the rest decided): `i_xs` 12 (validity lock, sort
 arrow, menu check mark, submenu chevron, tree expander chevron), `i_sm` 14 (tab suffix icons:
@@ -331,7 +333,8 @@ empty-state icon, About logo is 48). Icons are `gpui_kit::Icon::new(IconName::X)
 with `text_primary`, or `text_secondary` for secondary rows. Lucide names used by this file:
 `check`, `chevron-right`, `chevron-down`, `chevron-up`, `x`, `search`, `pin`, `pin-off`, `lock`,
 `shield`, `shield-check`, `info`, `circle-check`, `triangle-alert`, `circle-x`, `loader-circle`,
-`copy`, `history`, `minus`, `plus`, `eye`, `eye-off`. The bead that writes `components/icons.rs`
+`copy`, `rotate-ccw-clock` (the Processes history toggle; `history` is not in the kit's 1830
+icons), `minus`, `plus`, `eye`, `eye-off`. The bead that writes `components/icons.rs`
 checks each name against `gpui_kit_assets::IconName` and records any rename there. App SVGs under
 `assets/icons/`: `shield-unlocked.svg` (the shield-hi variant APP-003 asks for) and `tasklens.svg`.
 
@@ -441,7 +444,10 @@ up). A button that opens a dialog ends its label with "…" (rule 11).
 - **Interaction**: click and Space and Enter activate. Every button carries a `Box<dyn Action>`
   (`TlButton::action(..)`) and dispatches it on the window's focused handle; `on_click` closures
   are allowed only inside dialogs for OK and Cancel. Tooltip: required for `Icon` and `Toggle`
-  (`TlTooltip::action(text, &action)` so the shortcut shows). Tab stop: yes for every variant.
+  (`TlTooltip::action(text, &action)` so the shortcut shows). Tab stop: yes by default for every
+  variant; the owner may pass `.tab_stop(false)`. The main window toolbar does so (shell), because
+  every toolbar command also has a menu item and a shortcut (table b), so Tab goes straight from
+  the filter box to the table.
 - **Data binding**: none of its own; the owner passes `on` and `disabled`.
 - **Build**: `components/button.rs`, wrapping kit `Button` with `.small()` or default size,
   `.ghost()`, `.primary()`, `.danger()`, `.compact()` for `Icon`; `Toggle` and `Segment` are custom
@@ -741,7 +747,7 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
           │             │ second line wraps (max 3 lines)      │   │  bg menu_bg, 1 px divider
           │             │ [ Retry as administrator ]  (button) │   │  r_md, shadow (toast level)
           └─────────────┴──────────────────────────────────────┴───┘
-   position: horizontally centered in the window, top = title bar 34 + tab strip 32 + sp4 8 = 74
+   position: horizontally centered in the window, top = TITLEBAR_H 34 + TAB_STRIP_H 30 + sp4 8 = 72
    stacked downward with sp3 gap, newest at the bottom of the stack
 ```
 
@@ -791,8 +797,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   the owning spec entries; this file fixes only the shapes.
 - **Build**: `components/toast.rs`: `ToastQueue` (Entity, created in `MainWindow::new`) over kit
   `window.push_notification(Notification::..)`. In `theme::map::apply`: `notification.placement =
-  Anchor::TopCenter`, `margins.top = 34 + tab_strip + sp4` (the shell exports `TAB_STRIP_H`; if
-  the shell's value is not 32 the shell's value wins), `max_items = 4`, `width = px(382)`. Enter and
+  Anchor::TopCenter`, `margins.top = (TITLEBAR_H + TAB_STRIP_H) × ui_scale + sp4` = 72 at 100%
+  (constants from the shell's `window/main.rs`), `max_items = 4`, `width = px(382)`. Enter and
   exit durations: the kit's are fixed at 400 and 200 ms; the queue cannot change them, so the
   entry animation is accepted as 400 ms (noted in "Open").
 - **Performance**: the kit runs a 50 ms tick only while a toast animates or counts down. The queue
@@ -826,7 +832,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 ```
 
   Title bar: kit `TitleBar` (34 px, Linux left padding 12). The caption buttons are the kit's
-  (34 px wide each, close hover `status.danger` fill with white icon, others hover `tab_hover`);
+  (34 px wide each on secondary windows; the main window draws its own at 36 wide, measured, per
+  the shell; close hover `status.danger` fill with white icon, others hover `tab_hover`);
   the pin is a tasklens `TlButton::Toggle` 34 × 34 placed just left of minimize, icon Lucide `pin`
   `i_md`; on: `accent` fill at alpha 0.25 and the icon tinted `accent`, tooltip "Always on top"
   (off) or "Always on top (on)". Where no keep-above mechanism exists it is disabled with tooltip
