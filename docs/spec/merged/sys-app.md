@@ -1215,3 +1215,350 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P1 (Global, Table and ProcessTable keys), P2 (ServiceTable, Performance extras, RunDialog), P3 (Ctrl+Shift+M, History scrubber, Picker, Shift at launch)
 - Privilege: none
+
+## Settings and persistence
+
+### APP-032 Settings registry (every setting)
+- Was: APP-032
+- Source: TS 5 (UserSettings.ini) | MC 5 (gschema, 53 keys) | review "Settings persistence" | R-015 to R-021, R-024, R-025, R-044, R-054, R-069, R-071, canonical table (a)
+- Behaviour: The schema below is canonical table (a), copied exactly. It is the only settings schema; no other key exists.
+
+  Two files, both `#[serde(default)]`, both starting with `schema_version = 1`, both saved atomically with a 500 ms debounce (ADR-011). Ranges are clamped and logged on load. Column ids are the strings from R-007.
+
+  `$XDG_CONFIG_HOME/tasklens/settings.toml`:
+
+  ```toml
+  schema_version = 1
+
+  [general]
+  start_tab = "processes"        # processes | performance | services | startup | connections | information | last_used
+  language = "system"            # system | en-US | de-DE | es-ES | fr-FR | ja-JP | ko-KR | pt-BR | ru-RU | uk-UA | zh-CN | nb-NO
+
+  [theme]
+  active = "Default Dark"        # theme name
+  follow_system = false
+  light = "Default Light"
+  dark = "Default Dark"
+
+  [appearance]
+  ui_scale_pct = 100             # 75..=200, step 5
+  row_height_pct = 100           # 80..=150, step 5
+  decorations = "client"         # client | server  (label "Use system title bar"; restart)
+  rounded_corners = true
+  heat_coloring = true
+  heat_intensity_pct = 50        # 0..=100
+  shadow_intensity_pct = 100     # 0..=100
+
+  [motion]
+  animations = true              # tab, theme, toast motion; ANDed with system reduce-motion
+  smooth_graphs = true           # chart sliding
+  smooth_scroll = true
+  smooth_scroll_amount = 15      # 1..=50
+  tab_switch_ms = 250            # 0..=500, step 10
+
+  [units]
+  network = "bits"               # bits | bytes
+  network_auto_scale = false
+
+  [processes]
+  interval_ms = 1000             # 250..=10000; menu 250 500 1000 2000 5000 10000
+  mode = "grouped"               # grouped | tree | flat
+  tree_guide_lines = false
+  highlight_new_exited = true
+  filter_include_children = false
+  hide_system = false
+  subtree_totals = false         # "Show subtree totals on parent processes"
+  dim_zero_values = false
+  column_separators = false
+  column_resize = "proportional" # proportional | last_column
+  dump_type = "mini"             # mini | full
+
+  [properties]
+  hide_unnamed_handles = true
+  shared_objects_only = true
+  env_mask = true
+
+  [performance]
+  graph_range_s = 60             # 30 | 60 | 300 | 600 (300 and 600 from P2)
+  cpu_graph_mode = "per_core"    # overall | per_core | all_cores_overlaid | all_cores_stacked
+  cpu_kernel = true
+  cpu_secondary_graph = "power"  # none | power | clock | temperature
+  gpu_optional_graphs = []       # subset of ["power", "clocks"]
+  hidden_gpu_engines = []        # engine keys
+  memory_composition = true
+  memory_swap_graph = true
+  show_disks = true
+  show_gpus = true
+  show_fans = true
+  show_batteries = true
+  show_network_wired = true
+  show_network_wireless = true
+  show_network_vpn = true        # VPN and tunnel
+  show_network_virtual = false
+  show_network_other = true
+  show_disconnected_fans = false
+  device_order = []              # device keys (PERF-005)
+  device_overrides = {}          # device key -> "show" | "hide"
+  curved_lines = false
+  network_dynamic_scale = true   # false = link speed
+
+  [fans]                          # per fan key, P3
+  # "<key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }
+
+  [graphs]
+  minigraph_cpu = true
+  minigraph_memory = true
+  minigraph_disk = true
+  minigraph_network = true
+  minigraph_gpu = true
+  minigraph_vram = true
+  minigraph_gpu_temperature = false
+  keep_detached_on_close = false
+
+  [history]                       # P3; D-003
+  enabled = false
+  retention_h = 6                # 1..=12; menu 1 2 3 4 6 8 12
+  persist = true                 # false = delete segments at shutdown
+  max_disk_mb = 256              # not in menus
+
+  [window]
+  close_with_esc = false
+  always_on_top = false
+
+  [tray]                          # P3
+  close_to_tray = false
+  minimize_to_tray = false
+  always_show = false
+
+  [startup]
+  start_at_login = false
+  start_minimized = false
+
+  [network]
+  auto_fetch_public_ip = false
+  public_ip_notice_accepted = false
+
+  [privilege]                     # P3/P4
+  unlock_at_launch = false
+  passwordless = false
+
+  [rendering]                     # P4
+  gpu = "auto"                   # auto | software | pci:<bus id>
+
+  [services]
+  unit_types = ["service", "socket", "timer", "mount"]
+  filter_states = []             # subset of running failed stopped disabled
+
+  [lowmem]                        # P3
+  enabled = false
+
+  [debug]
+  show_fps = false
+  ```
+
+  `$XDG_STATE_HOME/tasklens/state.toml`:
+
+  ```toml
+  schema_version = 1
+
+  [window]
+  width = 1280                   # logical px; clamped to >= 800
+  height = 800                   # clamped to >= 500
+  maximized = false
+
+  [tabs]
+  last_tab = "processes"
+
+  [processes]
+  history_mode = false
+  group_expanded = { apps = true, background = true, system = true }
+
+  [services]
+  group_expanded = { system = true, user = true }
+
+  [performance]
+  nav_width = 252                # 180..=400
+  selected_device = "cpu"
+
+  # one table per view: processes, history, services, startup, connections
+  [sort.processes]
+  column = "pid"
+  ascending = true
+  [sort.history]
+  column = "cpu"
+  ascending = false
+  [sort.services]
+  column = "name"
+  ascending = true
+  [sort.startup]
+  column = "status"
+  ascending = true
+  [sort.connections]
+  column = "proto"
+  ascending = true
+
+  [columns.processes]            # same shape for the other four tables
+  order = ["name", "user", "pid", "cpu", "memory", "disk", "network", "gpu", "description"]
+  visible = ["name", "user", "pid", "cpu", "memory", "disk", "network", "gpu", "description"]
+  widths = { name = 248, user = 92, pid = 96, cpu = 63, memory = 92, disk = 82, network = 92, gpu = 72, description = 342, power = 101 }
+
+  [[minigraphs]]                 # P1 hide and range, P3 colour and detach
+  source = "cpu"                 # cpu | memory | disk | network | gpu | vram | gpu_temp | process:<pid>:<start_ticks> | name:<image name> | app:<app id>
+  column = "cpu"                 # for process sources
+  range_s = 60
+  color = "accent"               # accent | <one of the 17 names>
+  slot = 0
+  detached = false
+
+  [[tray_graphs]]                # P3
+  source = "cpu"
+  column = "cpu"
+  color = "accent"
+  range_s = 60
+  ```
+
+  User themes: `$XDG_CONFIG_HOME/tasklens/themes.json`, TaskSlinger format `{"themes":[{"name":..., "SLOT":"#RRGGBB", ..., "accent":"#RRGGBB", "graph":{...}}]}`.
+
+  `EngineSettings` (derived, never persisted): `interval_ms`, `network` unit, `show_network_*`, `history.*`, `processes.subtree_totals`, `processes.hide_system`.
+
+  Where each key comes from (TS = TaskSlinger INI, MC = Mission Center gschema):
+
+  | Key | Origin |
+  |---|---|
+  | general.start_tab | TS DefaultTab; MC window-selected-page (as `last_used`) |
+  | general.language | TS UI.Language |
+  | theme.active | TS UI.Theme, ThemeName; MC window-interface-style light/dark |
+  | theme.follow_system | TS ThemeSyncWithWindows; MC window-interface-style=system |
+  | theme.light / theme.dark | TS LightTheme/LightThemeName, DarkTheme/DarkThemeName |
+  | appearance.ui_scale_pct | TS UIScale |
+  | appearance.row_height_pct | TS RowHeightPct |
+  | appearance.decorations | new (APP-001, D-006) |
+  | appearance.rounded_corners | TS RoundedCorners |
+  | appearance.heat_coloring | TS ProcessValueColorCoding |
+  | appearance.heat_intensity_pct | TS ProcessValueColorCodingIntensityPct |
+  | appearance.shadow_intensity_pct | TS DropShadowIntensityPct |
+  | motion.animations | TS AnimationsEnabled |
+  | motion.smooth_graphs | TS SmoothGraphs; MC performance-sliding-graphs |
+  | motion.smooth_scroll | TS SmoothScrolling |
+  | motion.smooth_scroll_amount | TS SmoothScrollAmount (scroll easing = 10 ms × value) |
+  | motion.tab_switch_ms | TS MainTabAnimationMs |
+  | units.network | TS ProcessNetworkRateUnit=0; MC network-use-bytes=false |
+  | units.network_auto_scale | TS NetworkRateAutoScale |
+  | processes.interval_ms | TS RefreshIntervalMs; MC app-update-interval-u64 (× 50 ms) |
+  | processes.mode | TS TreeView and TaskManagerGrouping (R-010) |
+  | processes.tree_guide_lines | TS TreeGuideLines |
+  | processes.highlight_new_exited | TS HighlightNewExitedProcesses |
+  | processes.filter_include_children | TS FilterShowChildren |
+  | processes.hide_system | TS HideMicrosoftProcesses |
+  | processes.subtree_totals | MC apps-page-merged-process-stats (inferred mapping of the old `processes.merge_child_stats`) |
+  | processes.dim_zero_values | MC apps-page-hide-is-zero (0.3 opacity) |
+  | processes.column_separators | MC apps-page-show-column-separators |
+  | processes.column_resize | TS ColumnResizeBehavior |
+  | processes.dump_type | process spec (dumps) |
+  | properties.hide_unnamed_handles | TS HideUnnamedHandles |
+  | properties.shared_objects_only | TS ModulesDllOnly |
+  | properties.env_mask | process spec |
+  | performance.graph_range_s | TS minigraph ranges; MC performance-page-data-points (R-016) |
+  | performance.cpu_graph_mode | TS CpuPerCore; MC performance-page-cpu-graph |
+  | performance.cpu_kernel | TS CpuKernel; MC performance-page-kernel-times |
+  | performance.cpu_secondary_graph | MC performance-page-cpu-graph-bottom |
+  | performance.gpu_optional_graphs | PERF-057 (R-054) |
+  | performance.hidden_gpu_engines | TS HiddenGpuEngines |
+  | performance.memory_composition / memory_swap_graph | MC memory-composition-visible / memory-swap-visible |
+  | performance.show_disks / show_gpus / show_fans / show_batteries | MC performance-show-* |
+  | performance.show_network_* | MC performance-show-network-* (R-053) |
+  | performance.show_disconnected_fans | PERF spec |
+  | performance.device_order | TS Columns.Performance; MC performance-sidebar-order |
+  | performance.device_overrides | TS Performance.HiddenPages; MC performance-sidebar-device-overrides |
+  | performance.curved_lines | MC performance-smooth-graphs (monotone cubic, no overshoot) |
+  | performance.network_dynamic_scale | MC performance-page-network-dynamic-scaling |
+  | fans.* | PERF spec |
+  | graphs.minigraph_cpu / _memory / _disk / _network | TS ShowCpuGraph/ShowRamGraph/ShowDiskGraph/ShowNetworkGraph |
+  | graphs.minigraph_gpu / _vram | TS screenshot (inferred) |
+  | graphs.minigraph_gpu_temperature | TS ProcessGraphs.ShowGpuTemperatureGraph |
+  | graphs.keep_detached_on_close | TS KeepDetachedOpenOnMainClose |
+  | history.enabled | D-003 |
+  | history.retention_h | TS HistoryStorageDurationHours |
+  | history.persist | TS HistoryPersistToDisk |
+  | history.max_disk_mb | ADR-011 |
+  | window.close_with_esc / always_on_top | TS CloseWithEsc / Window.AlwaysOnTop |
+  | tray.close_to_tray / minimize_to_tray / always_show | TS CloseToTray / MinimizeToTray / AlwaysShowTrayIcon |
+  | startup.start_at_login / start_minimized | TS StartWithWindows / StartMinimized |
+  | network.auto_fetch_public_ip / public_ip_notice_accepted | TS Connections.AutoFetchPublicIP / PublicIPFetchNoticeAccepted |
+  | privilege.unlock_at_launch | TS AlwaysLaunchElevated (adapted) |
+  | privilege.passwordless | TS UacLessElevation (adapted, APP-049) |
+  | rendering.gpu | TS Graphics.GpuSelectionKind/GpuAdapterId/GpuAdapterName/GpuPreference |
+  | services.unit_types / filter_states | new (SYS-002, SYS-004) |
+  | lowmem.enabled | r2 PROC-081 |
+  | debug.show_fps | TS ShowFps |
+  | state `[window]` | TS Window.Width/Height/Maximized; MC window-width/window-height/is-maximized |
+  | state `[tabs] last_tab` | MC window-selected-page |
+  | state `[processes] history_mode` | TS ProcessesHistoryMode |
+  | state `[processes] group_expanded` | TS TaskManagerAppsExpanded/BackgroundExpanded/WindowsExpanded |
+  | state `[services] group_expanded` | new (SYS-001) |
+  | state `[performance] nav_width` / `selected_device` | TS Performance.NavWidth / MC performance-selected-page |
+  | state `[sort.*]` | TS Sort.*; MC *-sorting-column-name / -sorting-order |
+  | state `[columns.*]` | TS Columns.*, ColumnWidths.*, *VisibilityMask; MC *-column-order |
+  | state `[[minigraphs]]` | TS ProcessGraphs.Column%d, DetachedProcessGraphs, ProcessGraphColors, ProcessGraphTimeRanges, ProcessSpecificMiniGraphs.* |
+  | state `[[tray_graphs]]` | TS TrayIconGraphs.* |
+
+  Old key names in the source spec and their canonical names:
+  - `monitoring.refresh_interval_ms` is `processes.interval_ms`.
+  - `units.network_bits` is `units.network` (`bits | bytes`).
+  - `history.retention_hours` is `history.retention_h`.
+  - `window.system_titlebar` is `appearance.decorations` (R-021).
+  - `startup.default_tab` is `general.start_tab` (R-024).
+  - `tables.column_resize`, `tables.column_separators`, `tables.dim_zero_values` are `processes.column_resize`, `processes.column_separators`, `processes.dim_zero_values` (see O-1).
+  - `processes.hide_system_processes` is `processes.hide_system` (R-031).
+  - `processes.tree_view` and `processes.grouping` are `processes.mode` (R-010).
+  - `processes.merge_child_stats` is `processes.subtree_totals` (inferred).
+  - `graphs.time_range_s` is `performance.graph_range_s` with values 30, 60, 300, 600 (R-016).
+  - `graphs.curved_lines` and `graphs.network_dynamic_scale` are `performance.curved_lines` and `performance.network_dynamic_scale`.
+  - `performance.cpu_graph_mode` values `all_threads_overlay`, `all_threads_stacked` are `all_cores_overlaid`, `all_cores_stacked`.
+  - `tray.graphs` is `state.toml` `[[tray_graphs]]`.
+  - `state.last_tab` is `state.toml` `[tabs] last_tab`.
+
+  Keys not carried over:
+  - Dropped by R-071: `tables.remember_sort`, `tables.remember_columns` (always persisted), `processes.column_graphs` (fixed six), `processes.cpu_one_core_100` and ADR `processes.cpu_mode` (R-044), `processes.filter_cmdline` (R-043), `units.network_base2`, `units.memory_*`, `units.disk_*` (R-015), `performance.gpu_graph_middle` and `performance.gpu_graph_bottom` (R-054), `state.first_run_done` (R-028), `window.system_titlebar` (R-021), `copy_rows_tsv_shortcut`, `processes.tree_view` and `processes.grouping` (R-010), `debug.show_health_window`.
+  - TS Window.X/Y: Wayland cannot restore position (APP-010).
+  - TS Crash.DumpType: systemd-coredump handles native crashes of tasklens itself (APP-055). (`processes.dump_type` is the process-dump setting, not this one.)
+  - TS Updates.CheckForUpdatesOnStartup, Install.*, License.Token, WingetEarlyBirdNoticeShown: dropped (APP-025, APP-050).
+  - TS TripleBuffering: dropped (APP-026).
+  - MC app-update-interval: already deprecated in Mission Center.
+  - MC performance-show-cpu / performance-show-memory: never read by Mission Center; CPU and memory stay hideable per device.
+  - MC performance-sidebar-hidden-graphs: deprecated in Mission Center.
+  - TaskSlinger's ProcessColumnVisibilityMask is not trusted as a visibility mask (cross-check B.2). tasklens stores explicit per-column visibility.
+- Linux data/mechanism: APP-033
+- Verdict: ADAPT
+- Phase: P1 (store and the keys of P1 features), each other key with its feature
+- Privilege: none
+
+### APP-033 Settings persistence
+- Was: APP-033
+- Source: TS UserSettings.ini | MC GSettings | review "Settings persistence" | ADR-011, R-018
+- Behaviour:
+  - Files (R-018, table c; directories 0700, files 0600):
+    - `$XDG_CONFIG_HOME/tasklens/settings.toml`: user choices.
+    - `$XDG_STATE_HOME/tasklens/state.toml`: window size and maximized, sort per table, columns per table, group expand state, last tab, Performance nav width and selected device, `history_mode`, minigraph layout, tray graphs. There is no `window.toml`.
+    - `$XDG_CONFIG_HOME/tasklens/themes.json`: user themes in TaskSlinger's `{"themes":[…]}` format. Built-ins ship as `assets/themes/builtin.json`.
+  - Both TOML files start with `schema_version = 1`. Both structs are `#[serde(default)]`.
+  - Load (ADR-011): a missing file means defaults, and nothing is written until the user changes something. A `schema_version` missing is treated as 1. A lower version runs `migrate_vN_to_vN1` functions in order. A higher version loads what is understood, sets read-only, never saves, and shows the toast "Settings were written by a newer tasklens; changes will not be saved".
+  - Out-of-range values clamp to the range and are logged.
+  - A file that fails to parse is renamed `<name>.corrupt-<unix seconds>`, defaults load, and the toast reads "Settings file was unreadable and has been reset. The old file was kept as {name}".
+  - Unknown keys are ignored and not preserved. Unknown column ids are dropped with a log line.
+  - Columns are stored by string id, never by display index.
+  - Save: debounced 500 ms after the last change, plus on exit. Atomic write through `tl-app/src/atomic.rs::write_atomic`: write `<name>.tmp-<pid>` in the same directory, fsync the file, rename over the target, fsync the directory.
+  - No inotify on the settings files; external edits apply at the next start.
+- Linux data/mechanism: `toml` + `serde`; paths from `tl-app/src/paths.rs` (an env var that is unset, empty or not absolute falls back to the default; no `directories` crate). tl-ui holds settings in a GPUI Global and calls a persist callback from tl-app; engine-relevant parts go to the engine as `EngineSettings` (derived, never persisted).
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### APP-034 Import TaskSlinger settings and themes
+- Was: APP-034
+- Source: TS UserSettings.ini, themes.json (owner runs TaskSlinger under Wine)
+- Behaviour: Settings window > Advanced > "Import from TaskSlinger…" opens a portal file chooser for `UserSettings.ini` or `themes.json`. It maps the keys with the origin table in APP-032 and imports custom themes into `themes.json`. Toast "Imported N settings and M themes".
+- Linux data/mechanism: INI parse, then the APP-032 origin table; theme JSON is TaskSlinger's own format
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: none
