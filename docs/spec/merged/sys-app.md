@@ -1562,3 +1562,142 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P4
 - Privilege: none
+
+## Themes and appearance
+
+### APP-035 Built-in themes and colour slots
+- Was: APP-035
+- Source: TS 6 (12 themes, 22 slots), PLAN 9 palette | ADR-009, R-068
+- Behaviour:
+  - The 12 built-ins in TaskSlinger order: Default Dark, Vivid Nightfall, Catppuccin Frappé, Catppuccin Macchiato, Catppuccin Mocha, Dracula, OLED Black, Default Light, Windows 7 Aero, Golden Summer Fields, Soft Pink Delight, Catppuccin Latte.
+  - The 22 slots:
+
+    | Slot | Label |
+    |---|---|
+    | WINDOW_BG | Window background |
+    | TITLEBAR | Title bar |
+    | TOOLBAR | Toolbar |
+    | INPUT | Input |
+    | INPUT_FOCUS | Input focus |
+    | HEADER | Header |
+    | LIST_BG | List background |
+    | ROW_ALT | Alternate row |
+    | ROW_HOVER | Row hover |
+    | ROW_SELECTED | Selected row |
+    | DIVIDER | Divider |
+    | MENU_BG | Menu background |
+    | MENU_HOVER | Menu hover |
+    | TAB_BG | Tab background |
+    | TAB_HOVER | Tab hover |
+    | SCROLL_TRACK | Scroll track |
+    | SCROLL_THUMB | Scroll thumb |
+    | TEXT_PRIMARY | Primary text |
+    | TEXT_SECONDARY | Secondary text |
+    | TEXT_SELECTED_PRIMARY | Selected primary text |
+    | TEXT_SELECTED_SECONDARY | Selected secondary text |
+    | VALUE_HEAT | Value heat |
+
+  - Each theme also carries an accent and the graph palette (ADR-009 `GraphPalette`: cpu_fill, cpu_line, kernel_line, mem_fill, mem_line, gpu_fill, gpu_line, disk_fill, disk_line, net_fill, net_line, grid). These sit outside the 22 editable slots.
+  - Custom tasklens views read `TlTheme` directly. Kit widgets read the gpui-kit Theme, filled by `theme/map.rs::apply` with ADR-009's mapping (for example LIST_BG to `table`, ROW_ALT to `table_even`, ROW_SELECTED to `table_active`, TITLEBAR to `title_bar`, DIVIDER to `border` and `table_row_border`). Token names are checked against gpui-component 0.7.0 (U-8).
+  - Theme changes animate as a 200 ms colour crossfade, instant when `motion.animations` is off or with reduced motion (R-017).
+- Linux data/mechanism:
+  - Default Dark values are in PLAN 9.
+  - The other 11 come from the running TaskSlinger 0.9.2 under Wine: for each built-in, run "Create copy", then read the resulting `themes.json`, which gives exact `#RRGGBB` per slot (U-18).
+  - Accent and graph colours come from pixel samples of each theme's screenshot (selected tab line, graphs).
+  - The palettes ship as `assets/themes/builtin.json` in TaskSlinger's format plus `accent` and `graph.*` keys (R-018).
+- Verdict: BUILD
+- Phase: P1 (Default Dark, Default Light), P2 (the other 10) (R-068)
+- Privilege: none
+
+### APP-036 Theme menu and follow system light/dark
+- Was: APP-036
+- Source: TS 1.3 Theme submenu L28480-28482, L28542, L28885-28888 | MC theme selector (system, light, dark) | cross-check A.40 | R-069
+- Behaviour:
+  - View > Theme > lists the 12 built-ins and the custom themes. Each entry is painted in its own palette, the active one has a check (`theme.active`), and each has a copy icon.
+  - Per-theme items: "Create copy", "Edit colors", "Share theme", "Delete theme".
+  - Then "Import theme", "Sync theme with system" (`theme.follow_system`), "Preferred Light Theme >" (`theme.light`), "Preferred Dark Theme >" (`theme.dark`).
+  - With sync on, the active theme follows the portal colour scheme live: 1 (prefer dark) uses `theme.dark`; 2 (prefer light) uses `theme.light`; 0 (no preference) uses `theme.dark`.
+  - Toasts: "Theme copied", "Theme deleted", "Built-in themes cannot be deleted", "Copy a theme before editing it". Delete asks first in a modal window: "Delete this custom theme?".
+- Linux data/mechanism: `org.freedesktop.portal.Settings.ReadOne("org.freedesktop.appearance","color-scheme")`, plus the `SettingChanged` signal, through zbus on the session bus (xdg-desktop-portal-kde answers). Custom themes are saved to `themes.json` with `write_atomic`.
+- Verdict: ADAPT (Windows AppsUseLightTheme becomes the XDG portal)
+- Phase: P2
+- Privilege: none
+
+### APP-037 Theme editor
+- Was: APP-037
+- Source: TS 6 "Theme Editor" L28900-28903, L30008-30025
+- Behaviour:
+  - A separate pinnable, non-modal window titled "tasklens Theme Editor" (APP-045 naming, inferred).
+  - Left: the 22-slot list, plus Accent.
+  - Centre: hue strip and colour plane, "R %d G %d B %d" and "H %03d S %03d V %03d" readouts, and a hex input with the hint "Enter a 6-digit hex color".
+  - A title input for the theme name.
+  - A live preview pane: mini table, tab bar and graph.
+  - Buttons: Done, Random (toast "Random theme generated."), Share, Import, Cancel.
+  - Edits apply live to the app; Cancel reverts. Built-in themes cannot be edited ("Copy a theme before editing it").
+- Linux data/mechanism: custom GPUI elements for the colour plane and hue strip; saved to `themes.json`
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### APP-038 Theme share and import codes
+- Was: APP-038
+- Source: TS 6 L29405, L29532-29533, L29667-29675, toasts L28620-28636
+- Behaviour:
+  - "Share theme" opens the window "tasklens Share Theme" with the code and a Copy button. Toast "Theme code copied".
+  - "Import theme" reads the clipboard and accepts:
+    - tasklens codes `TL1.` + base64url(JSON `{"v":1,"name":…,"accent":"#…","SLOT":"#RRGGBB",…}`);
+    - TaskSlinger codes `TS1.…`;
+    - raw TaskSlinger `themes.json` text.
+  - Toasts: "Theme imported", "Clipboard does not contain a theme code".
+- Linux data/mechanism: clipboard read through GPUI; serde_json
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+- Open question: the exact TaskSlinger `TS1.` encoding is inferred (U-17). Recommended answer: generate one code in TaskSlinger under Wine, decode it and match it. If it cannot be decoded, accept tasklens codes and raw JSON only. Listed as O-5.
+
+### APP-039 Graph accent colours
+- Was: APP-039
+- Source: TS 6 L28548-28565
+- Behaviour: The Graph Color menu (minigraphs and tray graphs) offers Accent (theme default), then 17 named colours:
+
+  | Name | Hex | Name | Hex |
+  |---|---|---|---|
+  | Coral | #FF7F50 | Blue | #3B82F6 |
+  | Orange | #F28C28 | Indigo | #6366F1 |
+  | Amber | #F5B700 | Violet | #8B5CF6 |
+  | Yellow | #E8D44D | Lavender | #B4A7F5 |
+  | Lime | #9BCB3C | Fuchsia | #D946EF |
+  | Green | #4CAF50 | Pink | #EC4899 |
+  | Mint | #3EB489 | Rose | #F43F5E |
+  | Teal | #14A098 | Slate | #64748B |
+  | Cyan | #22B8CF | | |
+
+  These hex values are fallbacks. They are replaced by pixel samples of TaskSlinger's swatches when the theme extraction in APP-035 runs (U-18). The stored value in `state.toml` (`color` in `[[minigraphs]]` and `[[tray_graphs]]`) is `accent` or the lower-case name (inferred spelling).
+- Linux data/mechanism: constants in tl-ui
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### APP-040 Appearance sliders
+- Was: APP-040
+- Source: TS 1.3 Appearance L28500-28505, toast "UI scale changed to %d%%" L28643, slider formats L35541-35543 | R-020, R-059
+- Behaviour: View > Appearance > holds, with labels "%d%%":
+  - "UI Scale" slider: 75-200%, step 5 (`appearance.ui_scale_pct`). Toast "UI scale changed to %d%%". Ctrl+Plus, Ctrl+Minus and Ctrl+0 step by 5 or reset to 100.
+  - "Row Height" slider: 80-150%, step 5 (`appearance.row_height_pct`).
+  - "Rounded Corners" check (`appearance.rounded_corners`).
+  - "Value Color Coding" check (`appearance.heat_coloring`).
+  - "Value Color Coding Intensity" slider: 0-100% (`appearance.heat_intensity_pct`, default 50).
+  - "Drop Shadow Intensity" slider: 0-100% (`appearance.shadow_intensity_pct`).
+
+  Effects:
+  - UI scale multiplies the theme font size and rem. The compositor scale (110% here) is applied once by GPUI and never doubled.
+  - Row height = 28 × row_height_pct/100 × ui_scale_pct/100 logical px (R-020).
+  - Rounded corners set radius 4 px (rows, menus) and 6 px (cards), times ui_scale; off sets 0 (see O-3).
+  - Heat colouring blends VALUE_HEAT into the cell background by value / reference × intensity. The per-column references are R-059's (process spec).
+  - Shadow intensity scales the alpha of menu, minigraph and toast shadows.
+  - Dragging previews live. The save happens on release.
+  - A change of scale bumps the style version and clears the cell text cache (ADR-009).
+- Linux data/mechanism: gpui-component Slider (`SliderEvent::Release` saves); `Theme::update` font_size and radius; row-height and text caches invalidated when `rem_size` changes
+- Verdict: BUILD
+- Phase: P2 (Ctrl+Plus/Minus/0 with the global keys in P1)
+- Privilege: none
