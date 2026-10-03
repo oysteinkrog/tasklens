@@ -33,7 +33,7 @@ How to write the output (the terminal restarts often and kills long replies):
 - After each section, commit it: `git -C /home/oystein/work/tasklens add <file>` then
   `git -C /home/oystein/work/tasklens commit -m "<message>" -- <file>`, ending the message with
   these two lines:
-  `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+  `Co-Authored-By: Claude <your model name, for example Opus 5.5 or Fable 5.1> <noreply@anthropic.com>`
   `Claude-Session: https://claude.ai/code/session_01Bmy1XwAdJ5bM8C4UG8Lb4g`
 - Commit only your own file, always with the pathspec. Never switch branches, reset, rebase or
   amend. Other agents commit to the same branch at the same time.
