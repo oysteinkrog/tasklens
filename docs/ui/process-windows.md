@@ -699,3 +699,250 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 - **Tests:** `access_block_texts_per_tab`; `access_button_hidden_before_p3` (feature flag off); `access_cancelled_toast`.
 - **Phase:** P2 (texts); P3 (buttons).
 - **Decided here:** look; Security without button; buttons hidden before P3; waiting label.
+
+---
+
+## C. App Properties window
+
+### UI-PWN-019 App Properties window and General tab
+
+- **Implements:** PROC-085 (window, General tab, live Swap), PROC-077 (frame rules reused), D-008.
+- **Anatomy:**
+
+```text
++----------------------------------------------------------------------+
+| App Properties - Firefox                                  [pin] [x]  | 32
+| General | Processes [34]                                             | 36, two equal tabs
+| [Filter........] [x]                                                 | 32
+| [icon 48]  Firefox                                                   | 64 header block
+|            App                                                       |
+| +-- identity panel ----------------+  +-- usage panel --------------+|
+| | App ID:        org.mozilla.firefox|  | CPU:      3.4%              ||
+| | Type:          App                |  | Memory:   1.22 GiB          ||
+| | Desktop file:  /usr/share/...     |  | Swap:     0 B               ||
+| | Unit:          app-firefox@...    |  | Disk:     Read 0.4 MiB/s,...||
+| | Cgroup:        /user.slice/...    |  | Network:  Receive 1.2 Mbps..||
+| | Processes:     34                 |  | GPU:      5.0%              ||
+| +-----------------------------------+  | VRAM:     812.00 MiB        ||
+|                                         +---------------------------+|
+| Command line (primary process)                               [Copy] |
+| /usr/lib/firefox/firefox                                            |
++----------------------------------------------------------------------+
+  default 720 x 560, minimum 560 x 400
+```
+
+  - Title `App Properties - {app name}` [spec]; for unit rows `App Properties - {unit name}`. Exited: ` (not running)` appended.
+  - Default size 720 × 560, minimum 560 × 400 [chosen]. Frame per UI-PWN-001; tab strip per UI-PWN-004 with two tabs; filter bar per UI-PWN-005 (matches labels and values on General, Name, PID, User and Command line on Processes).
+  - Header block: height 64, padding `sp5`. Icon 48 × 48 (`img(path)` from the engine's icon resolution, ADR-016; fallback Lucide `AppWindow` 48 px `text_secondary`) [spec size]. Name `t_lg` (16) semibold 600 `text_primary`; under it the type word `t_sm` `text_secondary`.
+  - Two panels as UI-PWN-006 (identity left, usage right) when the body is at least 640 px wide, stacked below that [chosen].
+  - Identity fields: `App ID:`; `Type:` `App` or `Unit` [spec]; `Desktop file:` path as a link (Open file location); `Unit:` link to the Services tab (Go to service), hidden when none; `Cgroup:` path; `Processes:` count.
+  - Usage fields, live: `CPU:` percent; `Memory:` cgroup `anon` size [spec]; `Swap:` `memory.swap.current` size, updated live [spec]; `Disk:` `Read 0.4 MiB/s, write 0.1 MiB/s`; `Network:` `Receive 1.2 Mbps, send 0.3 Mbps`; `GPU:` percent; `VRAM:` size [chosen wordings as UI-PWN-006].
+  - Command line block: as UI-PWN-006 with the header "Command line (primary process)" [chosen label].
+- **States:** loading: payload fields `Collecting…`; group gone from the snapshot: title suffix, banner "This app has no running processes. Values are frozen at the last update." [chosen], links disabled; restricted values: R-050 words.
+- **Interaction:**
+  - Opened by `OpenProperties` on an app or unit row (Enter, Alt+Enter, Ctrl+I, row menu "Properties") [spec, D-008]. Opening again for the same group focuses the existing window. A ninth App Properties window gives the toast "Too many app properties windows are already open" (Warning) [chosen, mirrors PROC-077].
+  - Keys as UI-PWN-003 (Alt+1 and Alt+2 select the tabs). Copy on click, field menu and grid keyboard as UI-PWN-007.
+- **Data binding:** `DetailDemand { target: App(group_key), tab: AppGeneral | AppProcesses }`; payload `TabPayload::AppGeneral(Arc<AppGeneralDetail>)` (identity fields and cgroup `memory.stat` anon, `memory.swap.current`, `io.stat` rates); `ProcessTableView.groups` (bit `TABLE`) for CPU, GPU and network sums of the group. Unit rows use the same `GroupKey` the table gives them.
+- **Build:** `crates/tl-ui/src/windows/app_props.rs`, `pub struct AppPropsWindow` (Entity) with `AppGeneralTab` and `AppProcessesTab` children; registered in `PropsRegistry`.
+- **Performance:** one group lookup per snapshot; at most 7 live strings re-formatted per sweep.
+- **Accessibility:** the icon has the text alternative "{app name} icon".
+- **Tests:** `app_props_title_for_app_and_unit`; `app_props_swap_updates_live` (two payloads with different swap, assert the text changes); `app_props_ninth_window_toast`; `app_props_two_panels_breakpoint`.
+- **Phase:** P2.
+- **Decided here:** size; header block; panel split; field wordings; cap toast; banner text.
+
+### UI-PWN-020 App Properties: Processes tab
+
+- **Implements:** PROC-085 (Processes [n] mini table; double-click or Open properties).
+- **Anatomy:** `TlTreeTable` flat under the filter bar:
+
+| Column | Header | Width (min) | Align | Value |
+|---|---|---|---|---|
+| name | Name | 220 (120) | left | 16 px process icon, gap `sp3`, display name |
+| pid | PID | 80 (60) | right | integer |
+| cpu | CPU | 70 (60) | right | percent |
+| mem | Memory | 100 (70) | right | RssAnon size (D-004) |
+| disk | Disk | 90 (70) | right | read + write `MiB/s` |
+| user | User | 110 (60) | left | user name |
+| cmd | Command line | flex (160) | left | first 1 KiB of the command line, ellipsis |
+
+  Tab label count `[n]` is the member process count.
+- **States:** loading "Loading processes..." [chosen]; empty "No processes." [chosen]; filter empty: shared text; exited processes leave the list at the next sweep (no exit highlight here) [chosen].
+- **Interaction:** default sort PID ascending [chosen]; Enter, Alt+Enter, Ctrl+I and double-click on a row open that process's Properties (UI-PWN-003) [spec]; row menu: "Open properties", "Go to process" (PROC-071 entry point, activates the main window), separator, "Copy" (cell), "Copy rows as table" (Ctrl+Shift+C). No end or priority actions here [chosen: those stay in the main table].
+- **Data binding:** `Snapshot.processes` records whose `group` equals the window's `GroupKey` (bit `PROCESSES`), collected only while this tab is active.
+- **Build:** `app_props.rs`, `pub struct AppProcessesTab` (Entity) with a `TlTreeTable`.
+- **Performance:** one linear pass over the records per sweep while the tab is active (about 2,000 records, under 50 µs); member keys are kept as `Arc<[u32]>` record indexes.
+- **Accessibility:** rows announce nothing beyond their cells; the double-click action also has the keyboard path (Enter).
+- **Tests:** `app_processes_members_only`; `app_processes_enter_opens_props`; `app_processes_count_label`.
+- **Phase:** P2.
+- **Decided here:** columns; sort; menu without end or priority actions; texts.
+
+---
+
+## D. Process action dialogs
+
+### UI-PWN-021 Set Affinity dialog
+
+- **Implements:** PROC-067 (dialog, All processors, grid, L3 grouping, SMT pairs, hybrid icons, list field, OK rule, toasts, cpuset limit), PROC-079 (thread affinity), R-039.
+- **Anatomy:**
+
+```text
++------------------------------------------------------------------+
+| tasklens Set Affinity                                  [pin] [x] | 32
++------------------------------------------------------------------+
+| firefox (PID 4321)                                               | t_sm text_secondary, 24
+| [x] All processors                      CPU list [0-31         ] | 32
+| -----------------------------------------------------------------|
+| [-] CCD 0: CPU 0-7, 16-23                                        | group header 24
+| +------++------++------++------++------++------++------++------+ |
+| |[x]CPU 0|[x]CPU 1| ...                              |[x]CPU 7 | | core tiles 72 x 52, gap 4
+| |[x]CPU16|[x]CPU17| ...                              |[x]CPU23 | |   top: first thread, bottom: SMT sibling
+| +------++------++------++------++------++------++------++------+ |
+| [x] CCD 1: CPU 8-15, 24-31                                       |
+| ...                                                              |
+| (!) At least one CPU must stay enabled                           | 20, only when nothing is checked
+|                                              [Cancel]  [OK]      | footer 52
++------------------------------------------------------------------+
+  width 640; height from content, 360 to 640, the group area scrolls beyond that
+```
+
+  - Window: `WindowKind::Dialog`, modal to the window that opened it (main window or Properties window), title "tasklens Set Affinity" [chosen, APP-045 naming], not resizable, width 640 [chosen: 8 tiles × 72 + 7 gaps × 4 + 2 × `sp6` padding = 636].
+  - Subtitle: target description: `firefox (PID 4321)`; several processes: `4 processes`; threads: `Thread 4325 of firefox (PID 4321)` or `3 threads of firefox (PID 4321)`; app row: `Firefox (34 processes)` [chosen].
+  - "All processors": TlCheckbox, tri-state (checked when every allowed CPU is checked, mixed when some are) [spec label]. "CPU list" label `t_sm` `text_secondary` plus TlInput small, width 200, placeholder "0-7,16-23" [spec].
+  - Group header: height 24, a tri-state TlCheckbox for the whole group plus the label `t_base` medium `text_primary`: `CCD {n}: CPU {list}` for L3 groups [spec]; Intel hybrid: `P-cores: CPU {list}` and `E-cores: CPU {list}` with the app SVG icons `cpu-pcore` and `cpu-ecore` (12 px, `text_secondary`) before the label [spec intent, chosen labels]; a machine without L3 data: one group `CPUs: {list}` [chosen].
+  - Core tile: 72 × 52, background `list_bg`, radius `r_sm`, padding `sp2`; two stacked rows of 24: a TlCheckbox with label `CPU {n}` (`t_sm`, tabular figures) for the first thread and, under it, its SMT sibling [spec pairing]. A core without SMT has one row and the lower half empty. Hybrid tiles show the P or E icon (10 px) before the label.
+  - Tiles flow 8 per row in each group, ordered by core; groups follow in L3 order. More than 8 cores in a group wrap to new rows.
+  - Validation line: Lucide `CircleAlert` 14 px `status.danger` and the text "At least one CPU must stay enabled" `t_sm` `status.danger` [spec text], shown only when nothing is checked.
+  - Footer: height 52, top border 1 px `divider`, padding `sp6`; right-aligned TlButton "Cancel" (default variant) and TlButton "OK" (primary) [spec label], gap `sp4`.
+- **States:**
+  - Loading the current masks (until the detail data arrives, at most one sweep): every checkbox disabled, the subtitle line ends with " - reading current affinity…" [chosen].
+  - CPU outside the cgroup's `cpuset.cpus.effective`: checkbox disabled and unchecked, tooltip "Not allowed by the process's cpuset" [chosen wording; spec limits masks to it].
+  - Offline CPU: disabled, tooltip "CPU is offline" [chosen].
+  - Nothing checked: validation line shown; OK disabled [spec].
+  - Invalid CPU list text: input border `status.danger`, helper text under the input "Use CPU numbers and ranges, for example 0-7,16-23" `t_xs` `status.danger`; OK disabled; the grid keeps its last valid state [chosen].
+  - Checkbox states: default, hover (box border `accent`), pressed, focused (2 px `accent` ring around the box and label), checked (box `accent` fill, Lucide `Check` 12 px `text_selected_primary`), mixed (box `accent` fill, Lucide `Minus` 12 px), disabled (40% alpha).
+  - Target exited while open: OK stays enabled; the action is rejected by revalidation and shows the PROC-058 identity toast.
+- **Interaction:**
+  - Opened by the row menu "Set Affinity…" (`OpenSetAffinity { targets }`), by the General tab Affinity link, and by the Threads menu "Set thread affinity…". Targets are captured at menu open (max 256).
+  - The grid and the list field stay in sync: a checkbox change rewrites the field to the canonical list (ranges merged, ascending); a valid field edit updates the grid on every Change event.
+  - Clicking a group checkbox checks the whole group, or unchecks it when it is fully checked.
+  - Keyboard (context `AffinityDialog`): Tab order: All processors, CPU list, the grid (one focus stop), Cancel, OK. Inside the grid: Left and Right move between CPUs in the same tile row and across tiles; Up and Down switch between a tile's two rows and then between tile rows and groups; Home and End go to the first and last CPU; Space toggles; Shift+Space toggles the group. Enter triggers OK when enabled; Esc and Cancel close without action.
+  - OK (`ApplyAffinity`): one target or all targets with the same result mask: one `ActionRequest { kind: SetAffinity(mask) }`. The dialog closes at once; results come as toasts in the parent window.
+  - Toasts [spec PROC-067 and PROC-069]: one process "Affinity updated" or "Could not update selected process affinity."; several "Selected process affinity updated.", "Could not update selected process affinity." or the partial form "Affinity updated for 3 of 4 processes. 1 failed: permission denied" with "Retry as administrator" (P3); threads "Thread affinity updated" [chosen].
+- **Data binding:** CPU topology from `SystemSnapshot.cpu_topology` (L3 groups, sibling pairs, hybrid kind, online set); per-target masks and the cpuset limit from `DetailsSnapshot.affinity`, filled while the dialog registers `Demand.affinity_targets` (max 256) [chosen addition, see open items].
+- **Build:** `crates/tl-ui/src/windows/affinity.rs`, `pub struct AffinityDialog` (Entity): `targets`, `initial: Vec<CpuSet>` (one per target), `state: CpuTriState` (`[u8; 1024]` with Off, On, Mixed), `list_input: Entity<InputState>`. The tri-state checkbox is the foundation's TlCheckbox with a `Mixed` state (the kit Checkbox has none).
+- **Performance:** at most 1,024 checkboxes; the grid is rebuilt only on state change; 32 CPUs render about 70 elements.
+- **Accessibility:** every checkbox has its label as accessible name; tiles have the tooltip `Core {k}: CPU {a} and CPU {b}`; the validation text is also the OK button tooltip while disabled.
+- **Tests:** `affinity_grid_groups_by_l3` (fixture with two L3 groups 0-7,16-23 and 8-15,24-31); `affinity_list_field_sync_both_ways`; `affinity_ok_disabled_when_empty_and_message`; `affinity_cpuset_limited_cpus_disabled`; `affinity_invalid_list_text`.
+- **Phase:** P1 (one target); P2 (threads, several targets).
+- **Decided here:** window size and layout; tile design; group labels for hybrid and no-L3 machines; subtitle forms; loading, offline, cpuset and invalid-list states; keyboard model; data addition.
+
+### UI-PWN-022 Set Affinity with several targets (mixed marks)
+
+- **Implements:** PROC-069 (Set Affinity applies to all targets; mixed marks; clicking a mixed CPU sets it on all), PROC-067.
+- **Anatomy:** the UI-PWN-021 dialog, plus a TlButton xsmall ghost "Reset" (Lucide `RotateCcw` 12 px) at the left end of the footer, shown only with several targets [chosen].
+- **States:**
+  - Initial: each CPU is checked when every target has it, mixed when only some do, unchecked when none do [spec].
+  - Click cycle: mixed to checked (sets it on all targets) [spec]; checked to unchecked; unchecked to checked. A CPU can return to mixed only through Reset, which restores the initial state of every CPU [chosen].
+  - The CPU list field shows only the checked CPUs; while any CPU is mixed, the field shows the helper "Mixed CPUs keep each process's current setting" under it in `t_xs` `text_secondary` [chosen].
+  - "Nothing checked" for this case means: no checked CPU and no mixed CPU.
+- **Interaction:** OK computes each target's new mask: checked CPUs set, unchecked CPUs cleared, mixed CPUs kept from that target's current mask. Targets with equal resulting masks are grouped into one `ActionRequest` each; the `ActionTracker` joins the requests under one toast id, so the user sees one toast with the PROC-069 texts [chosen]. Toast texts as UI-PWN-021.
+- **Data binding:** as UI-PWN-021.
+- **Build:** in `affinity.rs`; `fn resulting_masks(&self) -> SmallVec<[(CpuSet, SmallVec<[ActionTarget; 4]>); 4]>`.
+- **Performance:** grouping is linear in targets (max 256).
+- **Accessibility:** a mixed checkbox has the tooltip "Set for some of the selected processes".
+- **Tests:** `affinity_mixed_initial_marks`; `affinity_mixed_click_sets_all`; `affinity_reset_restores_mixed`; `affinity_ok_groups_targets_by_mask` (3 targets, 2 distinct results, assert 2 requests and 1 toast id).
+- **Phase:** P2.
+- **Decided here:** Reset button; click cycle; helper text; grouping of requests under one toast.
+
+### UI-PWN-023 Custom priority dialog
+
+- **Implements:** PROC-066 ("Custom…" dialog with nice slider, policy combo, RT priority 1-99; autogroup tooltip; app rows), PROC-079 (thread targets), PROC-069.
+- **Anatomy:**
+
+```text
++----------------------------------------------------------+
+| tasklens Set Priority                          [pin] [x] | 32
+| firefox (PID 4321)                                       | subtitle 24
+| Policy             [Normal (SCHED_OTHER)          v]     | 32
+| Nice               [-20 ======o================ 19]  0   | 32
+|                    -20 (highest)            19 (lowest)  | 18, t_xs text_secondary
+| Realtime priority  [ 1 ^v]                               | 32
+| (!) Realtime priority can freeze the desktop if ...      | warning line, FIFO and RR only
+|                                [Cancel] [Set priority]   | footer 52
++----------------------------------------------------------+
+  width 440, height from content
+```
+
+  - `WindowKind::Dialog`, modal to its parent, title "tasklens Set Priority" [chosen], width 440, not resizable. Labels column 128 wide, `t_base` `text_secondary`; controls width 260.
+  - Policy: TlSelect with items [chosen labels]: "Normal (SCHED_OTHER)", "Batch (SCHED_BATCH)", "Idle (SCHED_IDLE)", "Realtime FIFO (SCHED_FIFO)", "Realtime round-robin (SCHED_RR)" [spec policies].
+  - Nice: TlSlider -20..=19, step 1 [spec], plus the current value as text right of the slider (`t_base`, tabular, width 28, right-aligned). End labels "-20 (highest)" and "19 (lowest)".
+  - Realtime priority: TlSpinBox 1..=99, width 72 [spec range].
+  - Warning line (FIFO and RR only): Lucide `TriangleAlert` 14 px `status.warning`, text "Realtime priority can freeze the desktop if the process spins." `t_sm` `text_primary`, and on a second line "Child processes start at normal priority." `t_xs` `text_secondary` [chosen, explains the reset-on-fork flag].
+  - Footer: "Cancel" and "Set priority" (primary) [chosen label naming the result].
+- **States:**
+  - Initial values from the right-clicked target's current policy, nice and rt priority (General payload, thread row, or the record's `nice`).
+  - Normal and Batch: Nice enabled; Realtime priority disabled.
+  - Idle: Nice disabled with tooltip "Not used by this policy"; Realtime priority disabled.
+  - FIFO and RR: Nice disabled (same tooltip); Realtime priority enabled; warning line shown.
+  - Lowering nice below the current value, or any realtime policy, without privileges is allowed in the dialog; the engine returns EPERM and the toast follows PROC-058.
+- **Interaction:**
+  - Opened by "Custom…" in Set Priority (`OpenCustomPriority { targets }`), from the process table, the Threads tab, and app rows (applies to the app's current processes; the subtitle reads `Firefox (34 processes)` and the policy select has the tooltip "Applies to the app's current processes" [spec text]).
+  - The Nice slider has the tooltip "With autogroup on, nice only orders processes within the same session." [spec text].
+  - Keyboard (context `PriorityDialog`): Tab order Policy, Nice, Realtime priority, Cancel, Set priority; Left and Right move the slider by 1, PgUp and PgDn by 5, Home and End to -20 and 19; Up and Down step the spin box; Enter triggers "Set priority"; Esc cancels.
+  - "Set priority" (`ApplyCustomPriority`) [chosen dispatch]:
+    - Normal or Batch, same policy as now: one request `SetNice(n)`.
+    - Normal or Batch, different policy: `SetSched { policy, rt_prio: 0 }`, then, after it succeeds, `SetNice(n)`; one toast id covers both.
+    - Idle: `SetSched { policy: Idle, rt_prio: 0 }`.
+    - FIFO or RR: first the realtime confirmation (UI-PWN-024), then `SetSched { policy, rt_prio }`.
+    - The dialog closes when the request is sent (after the confirmation for realtime).
+  - Toasts [spec]: "Priority updated" (one target), PROC-069 forms for several targets, "Thread priority updated" for threads [chosen].
+- **Data binding:** reads current values as above; sends `Command::Action`.
+- **Build:** `crates/tl-ui/src/windows/priority.rs`, `pub struct PriorityDialog` (Entity) with `policy: Entity<SelectState<..>>`, `nice: Entity<SliderState>`, `rt: Entity<SpinBoxState>` created in the constructor.
+- **Performance:** static dialog.
+- **Accessibility:** slider accessible name "Nice value", spin box "Realtime priority"; the disabled reason is in the tooltip.
+- **Tests:** `priority_dialog_enables_fields_by_policy`; `priority_dialog_dispatch_same_policy_nice_only`; `priority_dialog_policy_change_then_nice`; `priority_dialog_realtime_confirms_first`.
+- **Phase:** P2.
+- **Decided here:** layout and labels; button label; dispatch sequence; warning and child-process lines.
+
+### UI-PWN-024 Realtime priority confirmation
+
+- **Implements:** PROC-066 ("Realtime" asks first; SCHED_RR priority 1 with reset on fork).
+- **Anatomy:** the confirmation window of UI-PWN-025 with:
+  - Message [spec]: "Realtime priority can freeze the desktop if the process spins. Set it anyway?"
+  - Detail line [chosen]: the target subtitle as UI-PWN-021, for example "firefox (PID 4321)".
+  - Buttons: "Cancel" and "Set realtime priority" (danger variant, default button) [chosen label naming the result].
+- **States:** as UI-PWN-025.
+- **Interaction:** opened by the Set Priority menu item "Realtime" (`SetPriorityRealtime`) and by the Custom dialog for FIFO and RR. Confirm sends `SetSched { policy: Rr, rt_prio: 1 }` for the menu item, or the Custom dialog's values. Toasts as UI-PWN-023.
+- **Data binding:** none beyond the captured targets.
+- **Build:** `priority.rs`, `fn confirm_realtime(targets, then: SchedRequest, cx)`.
+- **Tests:** `realtime_menu_item_opens_confirmation`; `realtime_cancel_sends_nothing`.
+- **Phase:** P2.
+- **Decided here:** detail line; button label.
+
+### UI-PWN-025 Confirmation window (frame used by the dialogs in this file)
+
+- **Implements:** APP-045 (confirmations are modal windows titled "tasklens"; Esc and Cancel close; Enter triggers the default button), PROC-059 (confirmation rules), R-083.
+- **Anatomy:**
+
+```text
++--------------------------------------------------+
+| tasklens                               [pin] [x] | 32
+| [TriangleAlert 20]  Message text, t_base,        |
+|                     wraps at 340 px              |
+|                     Detail line, t_sm secondary  |
+|                          [Cancel]  [Action]      | footer 52
++--------------------------------------------------+
+  width 420, height from content, minimum 160
+```
+
+  - `WindowKind::Dialog` (xdg_dialog_v1 modal to the parent), title "tasklens" [spec], width 420, not resizable. Content padding `sp6` (16). Icon Lucide `TriangleAlert` 20 px `status.warning` for warnings, `CircleHelp` 20 px `text_secondary` for plain questions [chosen]; gap `sp5` (12) to the text.
+  - Footer: as UI-PWN-021; the action button uses the danger variant for destructive or risky actions and primary otherwise.
+- **States:** the action button is the default button: it has keyboard focus when the window opens and Enter triggers it [spec APP-045, chosen focus]; Cancel and Esc close with no action. Window close (x) equals Cancel.
+- **Interaction:** Tab cycles Cancel and the action button; Left and Right also move between them [chosen]. The parent window cannot be clicked while the dialog is open (modal).
+- **Data binding:** none.
+- **Build:** the foundation's `TlDialog` content inside a `TlSecondaryWindow` frame, opened by `windows::frame::open_confirmation(parent, ConfirmSpec { message, detail, action_label, variant, on_confirm }, cx)`. Processes-table confirmations from `docs/ui/processes.md` use the same helper when that file does not specify its own.
+- **Performance:** static.
+- **Accessibility:** the window title plus the message are what a window switcher shows; buttons name their result.
+- **Tests:** `confirm_enter_triggers_action`; `confirm_esc_cancels`; `confirm_close_button_is_cancel`.
+- **Phase:** P1.
+- **Decided here:** icon choice; default focus on the action button; Left and Right between buttons; helper name.
