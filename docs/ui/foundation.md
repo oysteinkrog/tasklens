@@ -305,7 +305,7 @@ gives 17 px for `t_base` and leaves 11 px of vertical room in a 28 px row):
 | `t_sm` | 12 | 400 | status chip text (measured cap height 8.8 px), header column names, sidebar card secondary lines, tooltips, key/value labels, tab labels in secondary windows |
 | `t_base` | 13 | 400 | table cells, menu items, inputs, buttons, body text, key/value values |
 | `t_md` | 14 | 500 | dialog titles, Performance page header, sidebar card title, group rows ("Apps (11)") |
-| `t_lg` | 16 | 600 | header total values are not this; `t_lg` is for the Information section titles and the About window name |
+| `t_lg` | 16 | 600 | header total values are not this; `t_lg` is for the About window name, the App Properties header name and the Performance page header; Information section titles are `t_md` 500 (UI-FND-025) |
 | `t_xl` | 20 | 600 | the big value on a Performance mini card is not this either (it is `t_md` 500); `t_xl` is reserved for the crash report heading and the rescue window |
 
 Measured check from `processes.png`: cell text cap height is about 0.46 of the row, which at
@@ -699,7 +699,7 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 ```text
 ┌─────────────────────────────────┐ bg menu_bg, 1 px divider, r_sm, shadow (menu level)
 │ sp4 │ text t_sm text_primary    │ padding y sp2, x sp4
-│     │ second line …             │ max width 360, wraps at word boundaries
+│     │ second line …             │ max width 360 (text) or 560 (lines), wraps at word boundaries
 │     │ Ctrl+E              t_xs  │ optional shortcut line, text_secondary, right-aligned
 └─────────────────────────────────┘
 ```
@@ -707,7 +707,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   Two kinds: `TlTooltip::text(impl Into<SharedString>)` for one short line, and
   `TlTooltip::lines(Vec<SharedString>)` for the row tooltip, where each line is its own text run
   so long lines wrap independently. `.action(&dyn Action)` appends the shortcut line (kit
-  `Tooltip::action`). Max width 360, max height 12 lines (about 190 px); more lines are cut and
+  `Tooltip::action`). Max width 360 for `text` and 560 for `lines` (the row tooltip's command
+  line and path lines need the room, UI-PRC-012), max height 12 lines (about 190 px); more lines are cut and
   the last visible line ends with "…". The command-line line is already cut to 512 characters by
   PROC-039 before it reaches the tooltip; the tooltip itself applies no middle ellipsis.
 - **States**: shown; hidden. No hover state of its own (the pointer never enters it; it closes on
@@ -729,10 +730,11 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   tooltip closure to the Name cell element only; the closure captures the `NodeId`, not the text.
 - **Accessibility**: tooltips repeat the accessible name; nothing is tooltip-only (the row
   tooltip's lines are all available in Properties or Copy details).
-- **Tests**: `tooltip::tests::wraps_at_360`, `tooltip::tests::twelve_line_cut`,
+- **Tests**: `tooltip::tests::text_wraps_at_360`, `tooltip::tests::lines_wrap_at_560`,
+  `tooltip::tests::twelve_line_cut`,
   `tooltip::tests::escape_hides_keeps_focus`.
 - **Phase**: P1.
-- **Decided here**: max width 360, 12-line cut, keyboard show, placement.
+- **Decided here**: max width 360 (text) and 560 (lines), 12-line cut, keyboard show, placement.
 
 ### UI-FND-020 TlToast queue rules
 
@@ -858,7 +860,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 
 ```text
 ┌───────────────────────────────────────────────┐ width 420
-│ [i_lg icon]  Ending kwin_wayland will end     │ padding sp6; icon triangle-alert status.warning
+│ [i_lg icon]  End kwin_wayland?                │ optional heading t_md 500 text_primary, one line
+│              Ending kwin_wayland will end     │ padding sp6; icon triangle-alert status.warning
 │              your desktop session. End it     │ (danger actions) or info status.info; text t_base
 │              anyway?                          │ text_primary, wraps, max 6 lines
 │                                               │
@@ -866,22 +869,27 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 └───────────────────────────────────────────────┘
 ```
 
-  The default button (Enter) is `Primary`, or `Danger` for destructive actions (End, Kill, Delete,
-  Close connection, Reset settings); Cancel is `Secondary` and sits left of it (rule 11; measured
-  TaskSlinger order is Cancel then the action). Buttons name the result ("End tree", "Delete",
-  "Reset"), never "Yes". A confirmation can carry one `TlCheckbox` under the text ("Do not ask
-  again" where a spec allows it; none in P1).
+  The heading is optional (`TlDialog::confirm(..).heading(text)`); owners whose tables give a
+  title use it (UI-PRC-014, UI-SYS-047, UI-SYS-064). The action button is `Primary`, or `Danger`
+  for destructive actions (End, Kill, Delete, Close connection, Reset settings); Cancel is
+  `Secondary` and sits left of it (rule 11; measured TaskSlinger order is Cancel then the
+  action). Buttons name the result ("End tree", "Delete", "Reset"), never "Yes". A confirmation
+  can carry one `TlCheckbox` under the text ("Do not ask again" where a spec allows it; none in
+  P1). Extra lines under the text (an entry name, a path, a list of targets) are the owner's
+  `t_base` or `t_sm` elements inside the body.
 - **States**: active window (full shadow), inactive (kit dims the shadow and border), pinned
   (pin on), modal parent blocked (the parent's content gets `derived.overlay` painted over it and
   ignores input while the confirmation is open; the compositor also marks the dialog modal
   through `xdg_dialog_v1`), too many windows (PROC-077: the owner shows a toast and opens
   nothing), content loading (owner's skeleton, UI-FND-025), error ("Could not open properties."
   toast, no window).
-- **Interaction**: Enter triggers the default button in a confirmation (bound on the window root,
-  not when a multi-line input has focus); Esc cancels or closes per the table; Tab order: content,
-  then footer buttons left to right, then the pin; Ctrl+W closes a tool or properties window;
-  focus on open goes to the first focusable content element, or to Cancel in a destructive
-  confirmation (decided: so a stray Enter does not destroy). Closing the main window closes every
+- **Interaction**: Enter activates the focused button in a confirmation (bound on the window
+  root, not when a multi-line input has focus); Esc cancels or closes per the table; Tab order:
+  content, then footer buttons left to right, then the pin; Ctrl+W closes a tool or properties
+  window; focus on open goes to the first focusable content element, or to Cancel in a
+  destructive confirmation, so a stray Enter cancels and the destructive button needs Tab then
+  Enter, or a click (decided; the one rule for every file). In a non-destructive confirmation
+  focus starts on the action button, so Enter confirms. Closing the main window closes every
   child window except detached graphs when `graphs.keep_detached_on_close` is on (APP-045).
   Opening Properties again for the same key activates the existing window (PROC-077).
 - **Data binding**: `WindowRegistry` (Entity in `window/registry.rs`) holds every open secondary
@@ -902,12 +910,13 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   caching rules as pages (ADR-009). A confirmation window costs one small view.
 - **Accessibility**: title is the window title (compositor reads it); default and cancel buttons
   are keyboard reachable; the warning icon is paired with text.
-- **Tests**: `window_frame::tests::confirm_enter_runs_default_escape_cancels`,
+- **Tests**: `window_frame::tests::confirm_enter_runs_focused_button_escape_cancels`,
   `window_frame::tests::destructive_focuses_cancel`, `registry::tests::ninth_properties_refused`,
   `registry::tests::main_close_closes_children`, `window_frame::tests::pin_disabled_without_bridge`.
 - **Phase**: P1 (frame, confirmation, pin button drawn), P2 (pin working, properties windows).
 - **Decided here**: sizes table, pin placement and look, server-decorations pin fallback, focus on
-  Cancel for destructive confirmations, title truncation rule.
+  Cancel for destructive confirmations with Enter on the focused button, optional heading line,
+  title truncation rule.
 
 ### UI-FND-022 TlMenu and submenu (context, dropdown, menu bar menus)
 
@@ -965,7 +974,9 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   targets (`SmallVec<[ProcessKey; 1]>`, ADR-009). Dynamic availability (disabled items) is
   computed in the same closure from the current snapshot.
 - **Build**: `components/menu.rs`: `TlMenu` is a thin builder over kit `PopupMenu` setting
-  `.min_w(180)`, `.max_w(360)`, `.scrollable(true)`, `.check_side(Side::Left)`, and providing
+  `.min_w(180)` (owners may raise it with `TlMenu::min_w(px)`: the process row and header menus
+  use 240, the system table menus 220), `.max_w(360)`, `.scrollable(true)`,
+  `.check_side(Side::Left)`, and providing
   `item`, `check_item`, `radio_item`, `submenu`, `separator`, `header`, `painted_item`. The look
   comes from the mapped tokens (`popover`, `accent`, `border`); the item height 26 is the kit's
   `text_sm` row at rem 13 plus padding, verified by the render test below. Row menu per table: one
@@ -978,8 +989,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   `menu::tests::right_opens_submenu_left_closes`, `menu::tests::shift_f10_opens_at_row`,
   `menu::tests::item_height_is_26_at_100pct` (render test), `menu::tests::outside_click_consumed`.
 - **Phase**: P1.
-- **Decided here**: item height 26, column widths, min and max width, header row look, painted
-  item API, empty text, submenu overlap and alignment.
+- **Decided here**: item height 26, column widths, min width 180 with an owner override and
+  max width 360, header row look, painted item API, empty text, submenu overlap and alignment.
 
 ### UI-FND-023 TlProgress and TlSpinner
 
@@ -1059,18 +1070,21 @@ Version:             6.17.0-arch1                                label column 18
 Build:               …                                          label ends with ":" (owner's text)
 ```
 
-  Owner overrides for the inline layout: `.row_height(Pixels)` and `.label_width(Pixels)`. The
-  defaults above (28 and 180) are for the Information tab's two wide cards. Process Properties
-  General uses `.row_height(26 × ui_scale)` and `.label_width(126 × ui_scale)` (measured from the
-  TaskSlinger Properties window, where three columns share a 900 px window). Both values are
-  multiplied by `ui_scale` by the owner through `UiMetrics`; the grid never scales twice.
+  Owner overrides for the inline layout: `.row_height(Pixels)`, `.label_width(Pixels)`,
+  `.block_indent(Pixels)` and `.block_gap(Pixels)`. The defaults are 28, 180, `sp6` and `sp4`.
+  The Information tab passes `.label_width(232)`, `.block_indent(sp5)` and `.block_gap(sp5)`
+  (measured from `information.png`, UI-SYS-081). Process Properties General uses
+  `.row_height(26 × ui_scale)` and a per-column label width of 96 to 150 px (UI-PWN-006; 126
+  measured in the TaskSlinger Properties window, where three columns share a 900 px window). Every
+  value is multiplied by `ui_scale` by the owner through `UiMetrics`; the grid never scales twice.
 
   Section title (Information cards, measured): a band of `header` colour, `row_height` high, with
   a 3 px `accent` bar at its left edge, title `t_md` 500 `text_primary` with `sp4` padding, and a
   copy `TlButton::Icon` (`copy` `i_sm`) at the right end that copies the section (PERF-011 format).
-  Cards have `sp6` between them and `sp4` between the band and the first row. A sub-block heading
-  inside a card (memory "Module 1", "Module 2") indents its rows by `sp6` and is separated from the
-  previous block by `sp4`.
+  The gap between cards is the page's (`sp6` by default; the Information page uses `sp8` 32,
+  measured 37, UI-SYS-080) and `sp4` sits between the band and the first row. A sub-block
+  (memory "Module 1", "Module 2") indents its rows by `block_indent` and is separated from the
+  previous block by `block_gap`.
 
   Values are selectable text (PERF-012): the value element is a `Label` with text selection
   enabled; a click on a Properties value copies it with the toast "Process property value copied."
@@ -1779,7 +1793,8 @@ No scope item is unmapped.
 16. TlTextInput states; filter box stays 280 wide while non-empty; 20 px clear hit area.
 17. TlSelect: popup max 10 items, filter field above 12 items, type-ahead.
 18. TlTabs: underline style, min cell 80, overflow menu.
-19. TlTooltip: max width 360, 12-line cut, keyboard show, below-then-above placement.
+19. TlTooltip: max width 360 for text and 560 for lines, 12-line cut, keyboard show,
+    below-then-above placement.
 20. Toast queue: stack grows downward, newest at the bottom; wait list 16; Error evicts oldest
     Info or Success; coalesce within 1 s with " (×N)"; action toasts 15 s; Progress 120 s then
     "Outcome unknown"; 3-line cut; secondary windows' margin 34 + 8.
@@ -1790,7 +1805,8 @@ No scope item is unmapped.
     22 high, submenu overlap 4 px, "No items" row, `painted_item` API.
 23. TlProgress 4 and 6 px, 1% buckets, reduced-motion stand-ins, 2-per-window budget.
 24. TlSkeleton bar pattern, 12-row cap, no fade on replace.
-25. TlKeyValueGrid: label column 180 and row 28 by default with `.row_height` and
+25. TlKeyValueGrid: label column 180 and row 28 by default with `.row_height`, `.block_indent`,
+    `.block_gap` and
     `.label_width` overrides (Properties General 26 and 126), pair height 2 rows, section band
     with 3 px accent bar, copy flash, value context menu.
 26. TlValidityGlyph: lock right-aligned like a number; copy text per glyph.

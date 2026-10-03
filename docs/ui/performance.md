@@ -252,20 +252,24 @@ element height = rows × cell_h + (rows − 1) × gap
 - **Implements**: PERF-024, APP-039 (values), ADR-009 `GraphPalette`.
 - **Behaviour**: `TlTheme.graph` fields and the Default Dark values:
 
-| Field | Default Dark | Used by |
+| Field | Default Dark (UI-FND-001) | Used by |
 |---|---|---|
 | `cpu_fill` | `#0D546D` | CPU total fill, per-core fills, CPU minigraph, CPU sidebar card |
 | `cpu_line` | `#0A7096` | CPU lines |
 | `kernel_line` | `#C1514E` | kernel overlay (no fill) |
-| `mem_fill` | `#7E6A9A` at alpha 0.85 | memory fill |
-| `mem_line` | `#7E6A9A` | memory line, committed dashed, dirty thin |
+| `mem_fill` | `#7E6A9A` | memory fill |
+| `mem_line` | `#A58CC4` | memory line, committed dashed, dirty thin |
 | `gpu_fill` | `#508A59` | GPU fills, VRAM |
 | `gpu_line` | `#71B768` | GPU lines |
-| `disk_fill` | `#D9B567` at alpha 0.85 | disk |
+| `disk_fill` | `#8A7340` | disk |
 | `disk_line` | `#D9B567` | disk line, write dashed |
-| `net_fill` | `#359CAB` at alpha 0.85 | download fill |
+| `net_fill` | `#1E5C66` | download fill |
 | `net_line` | `#359CAB` | download line, upload dashed (tinted) |
-| `grid` | `text_secondary` at alpha 0.12 | grid hairlines |
+| `grid` | `#2A3033` | grid hairlines |
+| `chart_bg` | `#1D2223` | plot background of every chart and mini graph |
+
+  The values are UI-FND-001's (foundation wins; fills are pre-darkened opaque colours, so no
+  per-frame alpha blending). Default Light values are in the same table there.
 
   Fans use the "Violet" accent (`#8B5CF6`) and batteries "Mint" (`#3EB489`) as line, with the fill at alpha 0.85 of the same hue (PERF-024). Where the spec gives one colour for a type, fill = line at alpha 0.85 (chosen; the CPU pair is the only two-value pair in the spec). Two devices of the same type share a colour.
   Per-card colour (P3): `color = "accent"` uses `TlTheme.accent`; a named colour uses the APP-039 table; the fill is the chosen colour at alpha 0.85, the line the colour itself. Themes override every field through `TlTheme.graph`.

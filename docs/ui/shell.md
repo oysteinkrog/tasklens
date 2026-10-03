@@ -452,7 +452,7 @@ x=0
   - Type-to-filter (UI-SHL-124): a printable key while a table has focus moves focus here and inserts the character.
   - Typing: `InputEvent::Change` starts or restarts a 100 ms debounce task [S]; when it fires, the active page receives `FilterChanged { tab, text }`. The process page sends `SetTableQuery` with a new generation (ADR-009); other pages filter as their specs say.
   - Esc in the box (`FilterEscape`, handled before the global Esc chain): if text is not empty, clear it (Change fires, debounce runs at once with an empty query) and move focus to the active page's table; if text is empty, move focus to the table and let the global Esc chain continue only on a further Esc [S R-043].
-  - Enter: moves focus to the table and selects the first row [C].
+  - Enter: moves focus to the table, keeps the filter, and selects the first row when nothing is selected [C; processes.md UI-PRC-016 agrees].
   - Down arrow: same as Enter [C].
 - **Data binding**: `FilterBox { input: Entity<InputState>, per_tab: [SharedString; 6], debounce: Option<Task<()>> }`. Reads only its own state; never subscribes to snapshots.
 - **Build**: `FilterBox` Entity in `window/filter.rs`, embedded in `TabStrip`. The width animation is the `TlFilterBox` one (UI-FND-016).
@@ -465,7 +465,7 @@ x=0
 ### UI-SHL-025 "Include children" checkbox placement
 
 - **Implements**: PROC-045, APP-028.
-- **Anatomy** [M cus_sheet_03.png: label then checkbox, left of "Filter:"]: label "Include children" `t_sm` `text_primary`, gap 6, then a `TlCheckbox` 14 × 14, then 16 px to the filter box. Vertically centred in the strip.
+- **Anatomy** [M cus_sheet_03.png: label then checkbox, left of "Filter:"]: label "Include children" `t_sm` `text_primary`, gap 6, then a `TlCheckbox` 16 × 16 (UI-FND-012), then 16 px to the filter box. Vertically centred in the strip.
 - **Shown**: on the Processes tab only, while the filter text is not empty or `processes.mode = tree` [S PROC-045].
 - **Interaction**: click on the label or box dispatches `ToggleSetting(ProcessesFilterIncludeChildren)`; the process spec owns the toasts ("Including filtered process children." / "Hiding unmatched filtered process children."). The process spec gives it no menu item, so the checkbox is a Tab stop right after the filter input, and Space toggles it when focused [C].
 - **Tests**: `include_children_visibility`: hidden in grouped mode with an empty filter, shown in tree mode.
@@ -550,7 +550,7 @@ x=0
 
   | # | Label | Kind | Action | Notes |
   |---|---|---|---|---|
-  | 1 | Select Columns… | item | `OpenColumnPicker { table }` | Opens the "Columns" picker popover anchored under the header's right end (the table spec owns the picker) |
+  | 1 | Select Columns… | item | `OpenColumnPicker { table }` | Opens the column picker window "tasklens Columns" (processes.md UI-PRC-007, `WindowKey::Columns`), bound to the active tab's table |
   | 2 | Resize columns to fit content | item | `ResizeColumnsToFit { table }` | Template strings per table (d) |
   | 3 | Resize Behavior | submenu | | |
   | 3a | Proportional | radio | `SetSetting { TablesColumnResize, "proportional" }` | |
@@ -903,7 +903,7 @@ x=0, bottom=0
 | Label | Control | Key | Range | Phase |
 |---|---|---|---|---|
 | Animations | switch | `motion.animations` | | P2 |
-| Smooth Graphs | switch | `motion.smooth_graphs` | | P2 |
+| Smooth Graphs | switch | `motion.smooth_graphs` | Under system reduce motion the switch keeps its value and a `t_sm` `text_secondary` note under it reads "Turned off by the system reduce-motion setting" (UI-PRF-003) | P2 |
 | Smooth Scroll | switch | `motion.smooth_scroll` | | P2 |
 | Smooth scroll amount | slider "%d" | `motion.smooth_scroll_amount` | 1..=50 step 1; disabled while Smooth Scroll is off | P2 |
 | Tab Switch | slider "%d ms" | `motion.tab_switch_ms` | 0..=500 step 10 | P2 |
@@ -1117,7 +1117,7 @@ x=0, bottom=0
 ### UI-SHL-084 Delete theme confirmation
 
 - **Implements**: APP-036, APP-045.
-- **Behaviour**: generic confirm (UI-SHL-091) titled "tasklens", text "Delete this custom theme?" [S], buttons "Delete" (danger, default) and "Cancel". On Delete: removed from `themes.json`; if it was active, apply `theme.dark` or `theme.light` matching the deleted theme's mode (falling back to "Default Dark" or "Default Light" when the preferred theme is the deleted one); a `theme.light` or `theme.dark` that named it resets to its default; Success toast "Theme deleted" [S].
+- **Behaviour**: generic confirm (UI-SHL-091) titled "tasklens", text "Delete this custom theme?" [S], buttons "Delete" (danger) and "Cancel". On Delete: removed from `themes.json`; if it was active, apply `theme.dark` or `theme.light` matching the deleted theme's mode (falling back to "Default Dark" or "Default Light" when the preferred theme is the deleted one); a `theme.light` or `theme.dark` that named it resets to its default; Success toast "Theme deleted" [S].
 - **Phase**: P2.
 
 ### UI-SHL-085 Graph Color submenu (accent colours)
@@ -1149,7 +1149,7 @@ x=0, bottom=0
 ### UI-SHL-091 Confirmation windows used by the shell
 
 - **Implements**: APP-045, APP-022, APP-036, APP-049, R-083.
-- **Component**: `TlDialog::confirm` (UI-FND-021): window title "tasklens" [S], width 420, Cancel (Secondary) left of the action button (Primary, or Danger for destructive actions), Enter runs the default button, Esc cancels, focus starts on Cancel for destructive confirmations.
+- **Component**: `TlDialog::confirm` (UI-FND-021): window title "tasklens" [S], width 420, Cancel (Secondary) left of the action button (Primary, or Danger for destructive actions), Enter runs the focused button, Esc cancels, focus starts on Cancel for destructive confirmations (so Enter there cancels; the destructive button needs Tab then Enter, or a click) and on the action button otherwise.
 - **Shell uses** (texts and buttons are the owners' [S]):
 
   | Use | Text | Action button | Destructive |

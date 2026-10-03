@@ -23,7 +23,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   `m_base` 200 ms, `m_slow` 300 ms, `ease_out_cubic`. All sizes are logical px at
   `ui_scale_pct = 100` and are multiplied by `ui_scale = ui_scale_pct / 100` (ADR-009
   `UiMetrics`).
-- `row_h` = `28 × row_height_pct/100 × ui_scale` (R-020). Line height for `t_base` is 18.
+- `row_h` = `28 × row_height_pct/100 × ui_scale` (R-020). Line height for `t_base` is 17
+  (UI-FND-003).
 - Shared components (type names from `docs/ui/foundation.md`): `TlButton` (kinds `Primary`,
   `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle { on }`, `Segment { on }`, UI-FND-010), `TlMenu`
   (UI-FND-022), `ToastQueue::push` with `ToastKey` replace-in-place (UI-FND-020), `TlDialog` and
@@ -83,7 +84,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   ```
 
   Parts:
-  - Background `list_bg`, fills the tab content area below the tab strip and above the status bar.
+  - Background `list_bg`, fills the tab content area below the tab strip; the status chip floats over its bottom-left corner (UI-SHL-050).
   - Header: `header_h`, background `header`, bottom border 1 px `divider`.
   - Body: `uniform_list` (GPUI `elements/uniform_list.rs:22`), item height `row_h`, horizontal
     sizing `ListHorizontalSizingBehavior::Unconstrained` so rows can be wider than the viewport,
@@ -221,8 +222,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - Group header row (`RowKind::GroupHeader`): label `t_md` 14 semibold 600 `text_primary`,
     text "Apps (11)", "Background processes (99)", "System processes (14)" (counts after
     filtering, PROC-044). Chevron `chevron-down` when expanded, `chevron-right` when collapsed, 16 px
-    `text_primary`, at x 8. No zebra: background always `list_bg`; a 1 px `divider` line across the
-    full row width at the row's top edge, except for the first row. No other cell renders. Not
+    `text_primary`, at x 8. No zebra: the row is a band of `header` colour across the full row
+    width (D-011: bold text, a background band and the count), with a 1 px `divider` line at the
+    row's top edge except for the first row. No other cell renders. Not
     selectable, not hoverable (no `row_hover`), click anywhere toggles expand. Decided: the row is
     `row_h` tall, not TaskSlinger's ≈ 36, because `uniform_list` needs one item height; the top
     divider stands in for the extra air.
@@ -496,7 +498,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 ### UI-PRC-006 Header context menu
 
 - **Implements**: PROC-026; PROC-022 (Name cannot be hidden); PROC-025 (resize behaviour).
-- **Anatomy**: `TlMenu` opened at the pointer, min width 240, item height 26, `menu_bg`, hover
+- **Anatomy**: `TlMenu` opened at the pointer, `min_w(240)` (UI-FND-022 override), item height 26, `menu_bg`, hover
   `menu_hover`, text `t_base`:
 
   | # | Item | Kind | Action | Disabled when |
@@ -617,7 +619,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     before any selection when the table has keyboard focus): 1 px `accent` inset ring on the row,
     `r_sm`.
   - Multi-selection: every selected row is filled; adjacent selected rows merge visually (no
-    gap). No count badge in the table; the status bar says "3 processes selected" (UI-PRC-018).
+    gap). No count badge in the table; the status chip says "3 processes selected" (UI-PRC-018).
   - Hover on a selected row: no change (selected wins over `row_hover`).
 - **States**: none, single, multi, focus-without-selection, selection containing exited rows
   (they stay selected and filled until the linger time removes them), selection containing
@@ -655,7 +657,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   row mouse handlers in `tree_table.rs` (`on_mouse_down` with `event.modifiers`, `click_count`
   for double-click).
 - **Performance**: O(visible rows) fill checks per frame; range selection O(range).
-- **Accessibility**: the keyboard model covers every gesture; the status bar reports counts.
+- **Accessibility**: the keyboard model covers every gesture; the status chip reports counts.
 - **Tests**: `selection_click_ctrl_shift_matrix` (table above), `selection_survives_resort`
   (ADR-009), `selection_skips_group_headers`, `selection_drops_exited_after_linger`,
   `selection_hidden_by_filter_not_counted`.
@@ -805,8 +807,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 ### UI-PRC-012 Row hover tooltip
 
 - **Implements**: PROC-039; R-009; PROC-012 (pseudo-row tooltip).
-- **Anatomy**: `TlTooltip` (gpui-kit `Tooltip::element`) anchored below the pointer, max width
-  560, padding `sp4` 8, `menu_bg` fill, 1 px `divider` border, `r_sm`, `t_sm` 12 text
+- **Anatomy**: `TlTooltip::lines` (UI-FND-019) anchored below the pointer, max width 560 (the
+  `lines` width), padding `sp4` 8, `menu_bg` fill, 1 px `divider` border, `r_sm`, `t_sm` 12 text
   `text_primary`, monospace is not used. Lines in the PROC-039 order, each a separate `div`
   (so wrapping stays per line), labels in `text_secondary` and values in `text_primary`:
 
@@ -847,7 +849,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   labels), PROC-054, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-071, PROC-072, PROC-073,
   PROC-074; R-033, R-034, R-091.
 - **Anatomy**: `TlMenu` (`PopupMenu`) opened at the pointer (or at the focus row for
-  Shift+F10), min width 240, max width 360, item height 26, padding `sp2` 4 vertical, text
+  Shift+F10), `min_w(240)` (UI-FND-022 override), max width 360, item height 26, padding `sp2` 4 vertical, text
   `t_base` `text_primary`, disabled `text_secondary`, hover `menu_hover`, separators 1 px
   `divider` with `sp2` margins, submenu chevron `chevron-right` 12 px, `Kbd` hints right-aligned
   `text_secondary`. Items, in order, with the rule for each row type. "P" = process row, "A" =
@@ -919,10 +921,10 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-059, PROC-062, PROC-064, PROC-066 (Realtime), PROC-075 (large dump),
   PROC-074 (VirusTotal notice), PROC-055 (picker Terminate), D-009, R-036.
-- **Anatomy**: `TlDialog::confirm` (UI-FND-021), width 448,
-  title `t_lg` 16 semibold, description `t_base` `text_primary`, buttons right-aligned, the
-  destructive button `danger` variant, Cancel `default`. Enter triggers the confirm button
-  (decided: no, see below), Esc cancels. Window title for every confirmation is "tasklens"
+- **Anatomy**: `TlDialog::confirm` (UI-FND-021), width 420, heading line `t_md` 500 (the
+  "Title" column below, through `.heading(..)`), description `t_base` `text_primary`, buttons
+  right-aligned, the destructive button `TlButton::Danger`, Cancel `TlButton::Secondary`. Focus
+  starts on Cancel; Enter activates the focused button; Esc cancels. Window title for every confirmation is "tasklens"
   (APP-045). Texts, exact:
 
   | Trigger | Title | Description | Confirm | Cancel |
@@ -940,11 +942,12 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   Where two rules match (for example End Process Tree on a protected target), the protected
   text wins and N is still shown: "Ending <name> will end your desktop session. End N
   processes in this tree anyway?" (decided).
-- **States**: open (modal to its window, overlay 40% black, not overlay-closable, no X button);
-  while the action runs the dialog is already closed and the toast carries progress.
-- **Interaction**: Enter does not trigger the danger button; Enter is ignored and the focus
-  starts on Cancel (decided, protects against a stray Enter on a session-ending action). Tab
-  moves between the buttons. Esc cancels. The confirm button dispatches the original action
+- **States**: open (a `WindowKind::Dialog` window modal to the window that opened it; the parent
+  is overlaid with `derived.overlay` and ignores input, UI-FND-021); while the action runs the
+  dialog is already closed and the toast carries progress.
+- **Interaction**: focus starts on Cancel and Enter activates the focused button, so a stray
+  Enter cancels; the destructive button needs Tab then Enter, or a click (UI-FND-021, the one
+  rule for every file). Tab moves between the buttons. Esc cancels. The confirm button dispatches the original action
   with `confirmed = true` so the handler proceeds without re-asking.
 - **Data binding**: target names, counts and owners from the captured targets at open time;
   revalidation still happens after confirm (PROC-058).
@@ -953,24 +956,24 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Performance**: n/a.
 - **Accessibility**: title and description are plain text; buttons name the result; focus
   starts on Cancel.
-- **Tests**: `confirm_text_per_trigger` (table above), `confirm_focus_starts_on_cancel_and_enter
-  _ignored`, `single_end_process_own_unprotected_has_no_dialog` (D-009),
+- **Tests**: `confirm_text_per_trigger` (table above), `confirm_focus_starts_on_cancel_enter
+  _activates_focused`, `single_end_process_own_unprotected_has_no_dialog` (D-009),
   `protected_wins_over_tree_text`.
 - **Phase**: P1 (dump and VirusTotal with their entries).
-- **Decided here**: button labels, titles, focus on Cancel, Enter ignored, combined protected
-  plus tree text, multi-target descriptions.
+- **Decided here**: button labels, titles, combined protected plus tree text, multi-target
+  descriptions (focus and Enter follow UI-FND-021).
 
 ### UI-PRC-015 Toasts for process actions
 
 - **Implements**: PROC-058, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-015, PROC-045,
   PROC-046, PROC-026, PROC-070, PROC-071, PROC-077 (cap toast), R-035.
-- **Anatomy**: a `ToastQueue` toast at the top centre of the main window (foundation: width 382, top
-  margin 16 under the tab strip, `menu_bg`, 1 px `divider`, `r_md`, `t_base`, left icon by
-  type, optional one `TlButton` small on the right). One toast per action request, identified
-  by `ToastKey(request_id.0)`, so later states replace it in place (UI-FND-020 rule 4). Auto-hide 5 s
-  (kit fixed) except toasts with a button, which stay until clicked or closed (kit rule) and
-  are closed by tasklens after 30 s (decided). Types: info for "requested", success for
-  done, error for failures, warning for identity and permission problems.
+- **Anatomy**: a `ToastQueue` toast at the top centre of the main window (UI-FND-020: width 382,
+  top 72 at 100% scale, `menu_bg`, 1 px `divider`, `r_md`, `t_base`, left icon by kind,
+  optional one `TlButton::Secondary` sm under the text). One toast per action request, identified
+  by `ToastKey(request_id.0)`, so later states replace it in place (UI-FND-020 rule 4). Durations per
+  UI-FND-020: Info, Success and Warning 5 s, Error 8 s, a toast with a button 15 s, Progress
+  until replaced. Kinds: Info for "requested", Success for done, Error for failures, Warning for
+  identity and permission problems.
 
   | Event | Text | Type | Button |
   |---|---|---|---|
@@ -1023,12 +1026,12 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Data binding**: `action_events` channel (ADR-005) consumed by `actions.rs::ActionTracker`,
   which owns the toast ids and texts.
 - **Build**: `ToastQueue::push(kind, text, Some(ToastKey(request_id.0)), button)` (UI-FND-020).
-- **Performance**: ≤ 10 toasts live (kit cap).
+- **Performance**: at most 4 visible toasts and a 16-entry wait list (UI-FND-020).
 - **Accessibility**: text first, icon second; buttons are focusable; nothing relies on colour.
 - **Tests**: `action_toast_replaces_in_place_per_request`, `toast_texts_match_spec` (string
   table), `retry_button_only_from_p3_and_only_on_eperm`.
 - **Phase**: P1 (texts arrive with their features).
-- **Decided here**: 30 s cap for button toasts; toast types per event.
+- **Decided here**: toast kinds per event (durations follow UI-FND-020).
 
 ### UI-PRC-016 Filter interaction and Include children
 
@@ -1037,12 +1040,13 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Anatomy** (right end of the tab strip, shell owns the pixels; summarized here for the
   binding): the shell `FilterBox` (a `TlFilterBox`, UI-FND-016, UI-SHL-024): `TlTextInput` sm (24 high)
   with the label "Filter: " as prefix text `text_secondary`,
-  width 160 unfocused, 280 focused (`m_fast` 120 ms width animation, none under reduce motion),
+  width 160 unfocused, 280 focused (150 ms `ease_out_cubic` width animation per UI-FND-016, none
+  under reduce motion),
   cleanable (× button), placeholder empty. To its left, only while the filter is non-empty or the
-  mode is Tree: `TlCheckbox` "Include children" (label `t_base`, checkbox 16, `sp4` gap),
+  mode is Tree: `TlCheckbox` "Include children" (label `t_sm`, checkbox 16, gap 6, UI-SHL-025),
   measured position in customize-28.png: directly left of "Filter:".
 - **States**: idle, focused (`input_focus` fill, 1 px `accent` ring), with text (× visible),
-  matching (status bar "41 / 296 Processes"), no match (table empty state UI-PRC-024), Include
+  matching (status chip "41 / 296 Processes"), no match (table empty state UI-PRC-024), Include
   children checked or unchecked, checkbox hidden (flat mode without a filter).
 - **Interaction**:
   - Typing: 100 ms debounce, then `Command::SetTableQuery` with `filter = lowercased text` and a
@@ -1053,7 +1057,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     at the end (UI-PRC-009).
   - Esc in the input: clears the text (`clean()`, emits Change) and focuses the table; one Esc
     does both. A further Esc follows the global rule.
-  - Enter in the input: focuses the table and keeps the filter (decided).
+  - Enter in the input: focuses the table, keeps the filter and selects the first row when
+    nothing is selected (UI-SHL-024).
   - × button: clears and keeps focus in the input (kit behaviour).
   - Ctrl+F: focuses and selects all text (decided).
   - Include children: `ToggleSetting(ProcessesFilterIncludeChildren)` → `processes.filter_include_children`; toasts
@@ -1080,8 +1085,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 ### UI-PRC-017 Hold-Ctrl pause indicator
 
 - **Implements**: PROC-050; R-042; ADR-009 Ctrl-pause.
-- **Anatomy**: no new element in the table. The status bar text appends " [PAUSED - Ctrl]"
-  (UI-PRC-018) in `status.warning`. The table draws from `paused: Option<Arc<Snapshot>>` so
+- **Anatomy**: no new element in the table. The status chip text appends " [PAUSED - Ctrl]"
+  (UI-PRC-018) in `accent` (UI-SHL-050, R-042). The table draws from `paused: Option<Arc<Snapshot>>` so
   rows, order, values and header totals freeze; the header's sort arrow and the scrollbar still
   respond.
 - **States**: running; paused (Ctrl down and `window.is_window_active()`); resumed on Ctrl up,
@@ -1095,30 +1100,31 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   installing into the hub; on resume the table renders the latest and runs the scroll-anchoring
   rule once (UI-PRC-010).
 - **Data binding**: `SnapshotHub` latest vs. `paused` clone (at most one extra `Arc`, ADR-005).
-- **Build**: `pages/processes/mod.rs` holds `paused`; the status bar reads
+- **Build**: `pages/processes/mod.rs` holds `paused`; the status chip reads
   `ProcessesPage::is_paused()`.
 - **Performance**: while paused the table does not re-render on snapshot installs (the hub
   subscription is ignored), so UI CPU drops to input only.
-- **Accessibility**: the status bar text is the indicator; there is no colour-only cue.
+- **Accessibility**: the status chip text is the indicator; there is no colour-only cue.
 - **Tests**: `ctrl_down_freezes_rows_and_sets_status`, `window_deactivate_resumes`,
   `action_while_paused_revalidates_identity`.
 - **Phase**: P1.
 - **Decided here**: pause survives open menus; status text colour.
 
-### UI-PRC-018 Status bar text
+### UI-PRC-018 Status chip text
 
 - **Implements**: PROC-051; PROC-048 (selected count); PROC-050; PROC-076 (restricted link).
-- **Anatomy** (left slot of the shell `StatusBar`, `t_sm` 12 `text_secondary`, padding
-  `sp2`/`sp4`, measured at the bottom left "296 Processes"):
+- **Anatomy** (the tab-text segment of the shell's floating status chip, UI-SHL-050: `t_sm` 12
+  `text_primary`, separators " | " in `text_secondary`, measured at the bottom left "296
+  Processes"):
 
   ```text
-  41 / 296 Processes  ·  3 processes selected  [PAUSED - Ctrl]  |  42 restricted
+  41 / 296 Processes | 3 processes selected [PAUSED - Ctrl] | 42 restricted
   ```
 
   - Segment 1: "296 Processes" or "41 / 296 Processes" while filtering. Count excludes pseudo
     rows and includes kernel threads only when shown.
-  - Segment 2 (2+ selected): " · 3 processes selected" (separator "·" with `sp2` spaces).
-  - Segment 3 (paused): " [PAUSED - Ctrl]" in `status.warning` (UI-PRC-017).
+  - Segment 2 (2+ selected): " | 3 processes selected" (PROC-051 separator).
+  - Segment 3 (paused): " [PAUSED - Ctrl]" in `accent`, drawn by the shell (UI-SHL-050, UI-PRC-017).
   - Segment 4 (restricted rows exist): " | 42 restricted", tooltip "Some values for other users'
     processes need administrator rights. Click to enable." From P3 the segment is a `TlButton`
     text variant (underline on hover) that dispatches `StartHelperSession`; before P3 plain text with
@@ -1133,7 +1139,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Data binding**: `ProcessTableView` counts (`total`, `shown`, `restricted`), selection size,
   pause flag, helper session state; re-render on `PROCESSES` and selection changes.
 - **Build**: `pages/processes/status.rs::status_text()` returning the segments as `SharedString`s
-  cached by value; the shell's `StatusBar::left(..)` takes the element.
+  cached by value; the page implements `status_text(&self, out: &mut String)` and emits
+  `StatusChanged` for the shell's `StatusChip` (UI-SHL-050).
 - **Performance**: formats only when a count changes.
 - **Accessibility**: text; the clickable segment has a tooltip and focus ring.
 - **Tests**: `status_text_variants` (each segment on and off), `status_count_excludes_pseudo
@@ -1149,8 +1156,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   (hide system) and a `TlButton::Icon` (cycler),, right
   of the shield, `sp2` gap (measured: shield, grid, stacked bars, plus at x ≈ 468, 512, 557, 604
   physical in processes.png):
-  - Hide system processes: Lucide `layout-grid` (TaskSlinger "grid"); toggled state draws the
-    `row_selected` fill behind the icon (kit `Toggle` look). Tooltip "Hide system processes" /
+  - Hide system processes: Lucide `layout-grid` (TaskSlinger "grid"); toggled state is the
+    `Toggle { on }` look (`accent` at alpha 0.25 fill, 1 px `accent` border, icon tinted
+    `accent`, UI-FND-010). Tooltip "Hide system processes" /
     "Show system processes".
   - View-mode cycler: icon per current mode, Lucide `rows-2` (grouped, the stacked bars in
     processes.png), `list-tree` (tree), `list` (flat) (UI-SHL-013). Tooltip "Toggle view mode (current: Tree
@@ -1158,7 +1166,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     flat list".
   - Both are removed, not greyed, on other tabs; the toolbar does not reserve their space.
 - **States**: default, hover (`tab_hover` fill), pressed, toggled (hide system on), disabled
-  (cycler in History), focused (1 px `accent` ring).
+  (cycler in History). Not Tab stops (shell rule UI-SHL-010).
 - **Interaction**: `ToggleHideSystem` → `processes.hide_system`, toasts "Hiding system
   processes" / "Showing system processes"; `CycleViewMode` → `processes.mode` in the order Tree
   View, Task Manager Grouping, List View, toast "View mode: <name>". Both dispatch the same
@@ -1168,8 +1176,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Data binding**: `processes.hide_system`, `processes.mode`; re-render on `SETTINGS`.
 - **Build**: `pages/processes/toolbar.rs` returning the two buttons for the shell's toolbar slot.
 - **Performance**: n/a.
-- **Accessibility**: tooltips carry the labels; keyboard reach through the shell toolbar tab
-  order and through the View menu.
+- **Accessibility**: tooltips carry the labels; keyboard reach through the View menu and its
+  keys (the toolbar is not in the Tab order).
 - **Tests**: `toolbar_buttons_only_on_processes_tab`, `cycle_order_tree_grouping_list`,
   `cycler_disabled_in_history`.
 - **Phase**: P1.
@@ -1326,8 +1334,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     totals and the body is plain `list_bg` with no text (no skeleton, no spinner).
   - First sweep installed, second not yet: rows show with `…` in rate cells (UI-PRC-004).
   - Filter with no match: body shows, centred horizontally at y = 96 from the body top, the
-    text "No processes match the filter" `t_md` `text_secondary`, and below it a `TlButton`
-    ghost "Clear filter" (decided) that dispatches `ClearFilter`. Group headers are not shown
+    `TlEmptyState` (UI-FND-029) with the text "No processes match the filter" `t_base`
+    `text_secondary` and a `TlButton::Secondary` "Clear filter" (decided) that dispatches
+    `ClearFilter`. Group headers are not shown
     when nothing matches at all (decided; "(0)" headers only when some group matches).
   - Hide system processes hides everything (cannot happen: `app.slice` rows stay) and an engine
     error never empties the table: the last view stays with stale dimming (ADR-003) and the shell
@@ -1338,7 +1347,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Build**: `tree_table.rs` renders `delegate.empty_text()` and an optional button when
   `row_count() == 0`.
 - **Performance**: n/a.
-- **Accessibility**: text plus a button; the status bar reads "0 / 296 Processes".
+- **Accessibility**: text plus a button; the status chip reads "0 / 296 Processes".
 - **Tests**: `empty_filter_state_shows_text_and_button`, `no_skeleton_on_processes_tab`.
 - **Phase**: P1.
 - **Decided here**: texts, y position, button, header suppression when nothing matches.
@@ -1367,8 +1376,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   ```
 
   - The history icon: Lucide `rotate-ccw-clock` 16 px inside the Processes tab label (measured: a clock
-    arrow glyph right of "Processes" in processes.png), a `TlButton::Toggle { on }` 20 × 20; toggled
-    look (`row_selected` fill) while History mode is on. Tooltip "Show process history" / "Show
+    arrow glyph right of "Processes" in processes.png), a `TlButton::Toggle { on }` 20 × 20; the UI-FND-010
+    toggled look while History mode is on. Tooltip "Show process history" / "Show
     live processes".
   - Header line: height 32, padding `sp5` 12 horizontal, `t_base` `text_primary`. Text states:
     live: "History - Drag scrubber below to view timeline"; at a scrub point: "History Snapshot:
@@ -1566,7 +1575,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   GPU"; selected process series; clear chip).
 - **Anatomy**: in the header line's right slot, a row of five `TlButton::Segment { on }` chips 24 high
   (`t_sm`, padding `sp4`, `r_sm`): CPU, Memory, Disk, Network, GPU; the active chip has the
-  metric's `graph.*_line` colour as a 8 × 8 dot before the label and `row_selected` fill. Exactly
+  metric's `graph.*_line` colour as a 8 × 8 dot before the label and the `Segment { on }` look
+  (`accent` at alpha 0.25, 1 px `accent` border, UI-FND-010). Exactly
   one metric is active (radio behaviour; decided) and it drives the strip, minimap, top-3 and
   the table's value tooltips. Colours: CPU `graph.cpu_fill`/`cpu_line`, Memory `mem_*`, Disk
   `disk_*`, Network `net_*`, GPU `gpu_*`.
@@ -1719,7 +1729,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 | PROC-048 selection | UI-PRC-008, UI-PRC-013, UI-PRC-018 |
 | PROC-049 keyboard | UI-PRC-009 |
 | PROC-050 Ctrl pause | UI-PRC-017, UI-PRC-018 |
-| PROC-051 status bar | UI-PRC-018 |
+| PROC-051 status bar text | UI-PRC-018 |
 | PROC-053 window button | UI-PRC-003 |
 | PROC-054 Show Window | UI-PRC-003, UI-PRC-013, UI-PRC-015 |
 | PROC-055 picker result | UI-PRC-014, UI-PRC-022 |
@@ -1739,7 +1749,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 | PROC-073 file location, properties | UI-PRC-013, UI-PRC-015 |
 | PROC-074 VirusTotal | UI-PRC-013, UI-PRC-014, UI-PRC-015 |
 | PROC-075 dump | UI-PRC-013, UI-PRC-014, UI-PRC-015 |
-| PROC-076 helper (status bar link, badge, Retry button) | UI-PRC-018, UI-PRC-015 |
+| PROC-076 helper (status chip link, badge, Retry button) | UI-PRC-018, UI-PRC-015 |
 | PROC-077 Properties (cap toast, Enter) | UI-PRC-009, UI-PRC-015 (window itself: other agent) |
 | PROC-086 recording | UI-PRC-036 |
 | PROC-087 persistence toasts | UI-PRC-030, UI-PRC-036 |
@@ -1779,13 +1789,14 @@ shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
 9. Copy commands stay enabled on exited rows; Enter on an exited row toasts "Process exited".
    UI-PRC-011, 013.
 10. Multi-select Suspend/Resume label: Resume only when every target is stopped. UI-PRC-013.
-11. Confirmation dialogs: titles and button labels as tabulated, focus starts on Cancel, Enter
-    ignored, protected text wins and keeps N. UI-PRC-014.
-12. Button toasts auto-close after 30 s. UI-PRC-015.
+11. Confirmation dialogs: titles and button labels as tabulated, protected text wins and keeps
+    N; focus and Enter per UI-FND-021. UI-PRC-014.
+12. Toast kinds per event; durations and stack rules are UI-FND-020's. UI-PRC-015.
 13. Filter: Enter keeps the filter and focuses the table; Ctrl+F selects all; zero-match groups
     show "(0)"; widths 160/280. UI-PRC-016.
 14. Pause survives open menus. UI-PRC-017.
-15. Status bar separators, history text, pre-P3 restricted tooltip. UI-PRC-018.
+15. Status chip history text and pre-P3 restricted tooltip (separators are PROC-051's " | ").
+    UI-PRC-018.
 16. Submenu note lines ("autogroup", "Scheduler: bfq") as disabled first items; "Already added"
     graph items. UI-PRC-020.
 17. Affinity and Custom priority dialogs are owned by process-windows.md (UI-PWN-021 to 023);
@@ -1800,9 +1811,5 @@ shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
 
 ## Open
 
-None left to the implementer. Two items need a reviewer's nod because they diverge from a
-written source:
-
-- Group header row height equals the data row height (UI-PRC-002), against TaskSlinger's taller
-  group rows; the alternative is GPUI `list()` with variable heights, which costs more per frame.
-- Column picker window title "tasklens Columns" (UI-PRC-007), where PROC-024 writes "Columns".
+None. Group header row height equals the data row height by D-011 (R-105 settles the band
+colour); the column picker window title "tasklens Columns" follows APP-045 (R-106).

@@ -585,8 +585,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 ### UI-SYS-014 Services group rows (System and User manager)
 
 - **Implements**: SYS-001, R-019 key `services.group_expanded`.
-- **Anatomy**: same renderer as the process group row (processes.md: chevron 16, label `t_base`
-  semibold, `text_primary`, full-width row, no cells). Label text:
+- **Anatomy**: same renderer as the process group row (processes.md UI-PRC-002: chevron 16, label
+  `t_md` 600 `text_primary`, `header` band across the full row, no cells, D-011). Label text:
   - "System services (N)" and "User services (N)". N counts unit rows after all filters, thin-space
     grouped.
   - Manager not reachable: "System services" followed by `sp3` and the secondary text "System
@@ -2006,7 +2006,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
   (install a snapshot changing only `SYSTEM`; OS and Processor render counters stay).
 - **Phase**: P2.
 - **Decided here**: column split and order, 880 breakpoint, one scroll region, section gap 32
-  (foundation's UI-FND-025 says `sp6`; measured 37, so this page passes 32; open item O-7),
+  (the page's own card gap, UI-FND-025; measured 37),
   demand for GPUs and disks, keyboard scrolling.
 
 ### UI-SYS-081 Information section anatomy
@@ -2031,7 +2031,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
   | Copy button | `TlButton::Icon` sm 24 × 24, icon `copy` `i_sm`, right padding `sp2` | `text_secondary`; hover `text_primary` with `tab_hover` fill; tooltip "Copy section" | spec PERF-094, foundation |
   | Band to first row | 8 (`sp4`) | | measured 8 |
   | Row | `row_h`; label inset `sp4` from the band's left edge | label `t_base` `text_secondary` ending in ":"; value `t_base` `text_primary` | measured |
-  | Label column | 232 from the label start to the value start | | measured 232 (this page passes it; foundation's default is 180) |
+  | Label column | 232 from the label start to the value start | | measured 232 (passed as `.label_width(232)`, UI-FND-025) |
   | Value | rest of the width, one line, end ellipsis, full text in a tooltip | selectable text | foundation |
   | Sub-block (one module, disk, GPU or adapter) | rows indented by `sp5` (12); 12 (`sp5`) between blocks | | measured 11 and 12 |
 
