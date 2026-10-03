@@ -6,14 +6,14 @@ This is the merged feature spec for two areas:
 
 Source: `docs/spec/features-sys-app.md` (old IDs SYS-001 to SYS-039, APP-001 to APP-059).
 
-Binding inputs, in order of precedence: `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-074 and canonical tables a to d), `docs/ARCHITECTURE.md` (ADR-001 to ADR-016) on engineering structure, then the source spec. Every resolution is already applied below. Where an entry cites R-0xx or D-0xx, that record set the value.
+Binding inputs, in order of precedence: `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-103 and canonical tables a to d), `docs/ARCHITECTURE.md` (ADR-001 to ADR-016) on engineering structure, then the source spec. Every resolution is already applied below. Where an entry cites R-0xx or D-0xx, that record set the value.
 
 Conventions:
 - Phases follow R-072. P0 is the spike. P1 is the Performance core, the process table and P1 actions. P2 adds Services, Startup Apps, Connections, Properties windows, the KWin bridge, the 5 and 10 minute ranges and the remaining themes. P3 adds the helper, history, tray, detached graphs, mini window, strings, dumps and low-memory. P4 is everything later.
 - Names, paths, polkit actions and D-Bus names are from canonical table (c). Number formats are from canonical table (d). Settings keys are from canonical table (a). Keys are from canonical table (b).
 - Polkit actions owned by tasklens are exactly three (R-002): `io.github.oysteinkrog.tasklens.helper`, `io.github.oysteinkrog.tasklens.setup` and `io.github.oysteinkrog.tasklens.netmon` (reserved). Every tl-helper operation runs under the helper action.
 - Table cells, header totals and sidebar readouts use ADR-003's validity glyphs. Properties fields and Information rows use the PERF-079 words ("Collecting…", "Restricted", "Needs setup", "Not supported", "Not reported", "Unavailable", "Unknown") (R-050).
-- "Was:" lines name old IDs from `features-sys-app.md`. Cross-references to other areas use their old IDs (PROC, PERF) where the new merged ID is not known.
+- "Was:" lines name old IDs from `features-sys-app.md`. Every other ID reference names a merged entry: SYS and APP in this file, PROC in `proc.md`, PERF in `perf.md`.
 
 # SYS: Services, Startup Apps, Connections
 
@@ -377,7 +377,7 @@ Conventions:
   - Generated `app-*@autostart.service` units are not listed a second time under source 3; they are linked to their desktop entry.
 - Linux data/mechanism:
   - Engine worker `SourceId::Startup`, `workers/startup.rs` (ADR-004). A Desktop Entry spec parser in tl-collect.
-  - Read on page open and on `RefreshNow` (ADR-008). While the tab is open, inotify on all autostart dirs and the two Plasma dirs triggers a rescan (inferred: compatible with ADR-008, since it only runs while the page is in demand).
+  - Read on page open and on `RefreshNow` (ADR-008). While the Startup Apps tab is visible, inotify on all autostart dirs and the two Plasma dirs, plus the user manager's `UnitFilesChanged` signal, trigger a rescan; both stop when the tab is not visible (R-082, ADR-008).
   - Units come from `ListUnitFilesByPatterns` and `ListUnitsByPatterns` on the user manager.
   - Desktop entries map to units by escaping the id with systemd-escape rules: `app-<escaped id>@autostart.service`.
 - Verdict: ADAPT (Run keys, Startup folders and packaged tasks become XDG autostart, systemd user units and Plasma scripts)
@@ -721,7 +721,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Source: TS 1.1 | MC Adw header bar | gpui-component title_bar.rs:258, widgets §2 | D-006, R-021
 - Behaviour:
   - By default tasklens draws its own 34 px title bar in TaskSlinger's layout (APP-002) (D-006).
-  - Setting `appearance.decorations = "client"` (`client | server`). The settings label is "Use system title bar"; checking it sets `server`. A change takes effect after a restart; the toast reads "Restart tasklens to apply the title bar change" (inferred text).
+  - Setting `appearance.decorations = "client"` (`client | server`). The settings label is "Use system title bar"; checking it sets `server`. A change takes effect after a restart; the toast reads "Restart tasklens to apply the title bar change" (R-083).
   - In `server` mode KWin draws the title bar. The menus and toolbar move into a 28 px row under it, then the tab strip. The caption buttons are omitted except the pin, which stays in that row.
   - On compositors without xdg-decoration, GPUI uses client-side mode whatever the setting says.
   - Predetermined fallback (ADR-010, U-36): if any phase-0 CSD check fails (drag, double-click maximize, restore, resize from all edges and corners, right-click window menu, tiling), the default becomes `server` with no further discussion.
@@ -794,7 +794,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
 ### APP-006 Window picker "+"
 - Was: APP-006
-- Source: TS 7 window picker, tooltips L29201-29213, cross-check A.7 | R-046
+- Source: TS 7 window picker, tooltips L29201-29213, cross-check A.7 | R-046, R-076
 - Behaviour:
   - Click "+": KWin asks the user to click a window.
   - Plain click on a window: tasklens selects that window's process in Processes.
@@ -802,16 +802,14 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Esc cancels (table b, Picker context).
   - Toasts: "No window selected", "No window found".
   - Desktop and panel windows (plasmashell) are ignored, with "No window found".
-  - Without the KWin bridge (not KDE, or `org.kde.KWin` not on the bus) the button is hidden (R-046).
+  - Without the KWin bridge (not KDE, or `org.kde.KWin` not on the bus) the button is hidden (R-046). There is no X11 picker path in v1 (R-076).
 - Linux data/mechanism:
   - Through the KWin bridge worker (`workers/dbus_kwin.rs`, `SourceId::KWin`, R-046) as `Command::KWin(KWinCommand::Pick)`.
   - Session D-Bus `org.kde.KWin /KWin org.kde.KWin.queryWindowInfo()` does the interactive selection and returns a map with `uuid`.
   - If the map has no `pid` (U-14), a one-shot KWin script `tasklens-pick`, loaded through `org.kde.kwin.Scripting.loadScript`, looks up `workspace.windowList()` by `internalId == uuid` and returns `pid` through the WindowBridge object.
-  - X11: `XGrabPointer` crosshair, then `_NET_WM_PID` (best effort; see open item O-2).
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: none
-- Open question: does R-046's drop of the X11 EWMH fallback also drop the X11 picker path? Recommended answer: yes, drop it in v1; X11 is best effort (ADR-010) and the button is hidden without the KWin bridge. Listed as O-2.
 
 ### APP-007 Update badge
 - Was: APP-007
@@ -932,7 +930,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Field "Pattern:" (case-insensitive substring; `*` and `?` globs allowed), checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
   - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
   - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
-  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process, Copy path, Open file location. The labels follow PROC-096; see O-10.
+  - Result menu: End Task (SIGTERM), End Process (SIGKILL), Go to process, Copy path, Open file location (R-102, PROC-096).
   - Unprivileged footer: "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button.
 - Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between pids. Other users' processes go through tl-helper `ReadProcessFiles` (R-004).
 - Verdict: ADAPT
@@ -950,7 +948,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
 ### APP-017 View menu structure
 - Was: APP-017
-- Source: TS 1.3
+- Source: TS 1.3 | R-089
 - Behaviour: Submenus, in order: "Columns >", "Process View >", "Window >", "Appearance >", "Theme >", "Graphs >". Alt+V opens it (table b).
 - Linux data/mechanism: PopupMenu submenus
 - Verdict: BUILD
@@ -959,12 +957,13 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
 ### APP-018 View > Columns (all tables)
 - Was: APP-018
-- Source: TS 1.3, header menu L29313-29314, L28434, L28484-28487, toasts L28648, L28652, cross-check A.10 | R-065, table (d)
+- Source: TS 1.3, header menu L29313-29314, L28434, L28484-28487, toasts L28648, L28652, cross-check A.10 | R-065, R-075, table (d)
 - Behaviour: Applies to the active tab's table (Processes, History, Services, Startup Apps, Connections). The same items open from a right-click on a column header.
   - "Select Columns…": the "Columns" picker, a checklist with a filter field, grouped under headings. Process headings (add PROC-102): Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux. Entries show alias text, for example `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"` (R-065). The filter matches full name and alias. Other tables list their columns without headings (inferred).
   - "Hide This Column" (header menu only).
   - "Resize columns to fit content": measures the table (d) template strings `"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`. Text columns have a 60 px minimum.
-  - "Resize Behavior: Proportional / Last Column" (`processes.column_resize`, see O-1).
+  - "Resize Behavior: Proportional / Last Column" (`tables.column_resize`).
+  - The display keys `tables.column_resize`, `tables.column_separators` and `tables.dim_zero_values` apply to every table; there are no per-table keys (R-075).
   - "Reset to default".
   - Toasts: "At least one column must stay visible", "Columns reset to default".
 - Linux data/mechanism: tl-ui table state, persisted per APP-033 in `state.toml` `[columns.<table>]` (`order`, `visible`, `widths`)
@@ -994,7 +993,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
 ### APP-021 View > Graphs
 - Was: APP-021
-- Source: TS 1.3 L28470-28471, L28483, L28543-28544
+- Source: TS 1.3 L28470-28471, L28483, L28543-28544 | R-089
 - Behaviour:
   - Checks: "CPU Graph", "Memory Graph", "Disk Graph", "Network Graph", "GPU Graph", "VRAM Graph", "GPU Temperature Graph" (`graphs.minigraph_cpu`, `_memory`, `_disk`, `_network`, `_gpu`, `_vram`, `_gpu_temperature`).
   - Then "Keep detached graphs open when closing main window" (`graphs.keep_detached_on_close`) and "Reset Minigraph Layout" (toast "Minigraph layout reset"; resets `[[minigraphs]]` in `state.toml`).
@@ -1152,7 +1151,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 ### APP-030 Keyboard Shortcuts window
 - Was: APP-030
 - Source: MC Ctrl+? shortcuts dialog
-- Behaviour: A separate pinnable window titled "tasklens Keyboard Shortcuts" (inferred title), opened by Help > "Keyboard Shortcuts" and Ctrl+?. It lists APP-031 grouped by context: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Key caps come from `Kbd::binding_for_action`.
+- Behaviour: A separate pinnable window titled "tasklens Keyboard Shortcuts" (R-083), opened by Help > "Keyboard Shortcuts" and Ctrl+?. It lists APP-031 grouped by context: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Key caps come from `Kbd::binding_for_action`.
 - Linux data/mechanism: generated from the keymap
 - Verdict: BUILD
 - Phase: P2
@@ -1220,7 +1219,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 
 ### APP-032 Settings registry (every setting)
 - Was: APP-032
-- Source: TS 5 (UserSettings.ini) | MC 5 (gschema, 53 keys) | review "Settings persistence" | R-015 to R-021, R-024, R-025, R-044, R-054, R-069, R-071, canonical table (a)
+- Source: TS 5 (UserSettings.ini) | MC 5 (gschema, 53 keys) | review "Settings persistence" | R-015 to R-021, R-024, R-025, R-044, R-054, R-069, R-071, R-075, R-084, R-085, R-095, R-100, canonical table (a)
 - Behaviour: The schema below is canonical table (a), copied exactly. It is the only settings schema; no other key exists.
 
   Two files, both `#[serde(default)]`, both starting with `schema_version = 1`, both saved atomically with a 500 ms debounce (ADR-011). Ranges are clamped and logged on load. Column ids are the strings from R-007.
@@ -1268,10 +1267,12 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   filter_include_children = false
   hide_system = false
   subtree_totals = false         # "Show subtree totals on parent processes"
-  dim_zero_values = false
-  column_separators = false
-  column_resize = "proportional" # proportional | last_column
   dump_type = "mini"             # mini | full
+
+  [tables]                        # every table (R-075)
+  column_resize = "proportional" # proportional | last_column
+  column_separators = false
+  dim_zero_values = false
 
   [properties]
   hide_unnamed_handles = true
@@ -1372,6 +1373,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   [processes]
   history_mode = false
   group_expanded = { apps = true, background = true, system = true }
+  virustotal_notice_accepted = false   # R-095
 
   [services]
   group_expanded = { system = true, user = true }
@@ -1403,12 +1405,21 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   widths = { name = 248, user = 92, pid = 96, cpu = 63, memory = 92, disk = 82, network = 92, gpu = 72, description = 342, power = 101 }
 
   [[minigraphs]]                 # P1 hide and range, P3 colour and detach
-  source = "cpu"                 # cpu | memory | disk | network | gpu | vram | gpu_temp | process:<pid>:<start_ticks> | name:<image name> | app:<app id>
+  source = "cpu"                 # cpu | memory | disk | network | gpu | vram | gpu_temp | gpu:<device key> | vram:<device key> | gpu_temp:<device key> | process:<boot_id 16 hex>:<pid>:<start_ticks> | name:<image name> | app:<app id>
+                                 # bare gpu, vram, gpu_temp = first GPU in sidebar order (R-085); boot ID per R-100
   column = "cpu"                 # for process sources
   range_s = 60
-  color = "accent"               # accent | <one of the 17 names>
+  color = "accent"               # accent | <one of the 17 names, lower case>
   slot = 0
   detached = false
+  window = 0                     # detached window id; ignored when detached = false (R-084)
+
+  [[detached_windows]]           # P3 (R-084)
+  id = 0
+  width = 180                    # logical px
+  height = 90
+  x = 0                          # x and y written and applied on KDE only, through the KWin bridge
+  y = 0
 
   [[tray_graphs]]                # P3
   source = "cpu"
@@ -1451,9 +1462,9 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | processes.filter_include_children | TS FilterShowChildren |
   | processes.hide_system | TS HideMicrosoftProcesses |
   | processes.subtree_totals | MC apps-page-merged-process-stats (inferred mapping of the old `processes.merge_child_stats`) |
-  | processes.dim_zero_values | MC apps-page-hide-is-zero (0.3 opacity) |
-  | processes.column_separators | MC apps-page-show-column-separators |
-  | processes.column_resize | TS ColumnResizeBehavior |
+  | tables.dim_zero_values | MC apps-page-hide-is-zero (0.3 opacity) |
+  | tables.column_separators | MC apps-page-show-column-separators |
+  | tables.column_resize | TS ColumnResizeBehavior |
   | processes.dump_type | process spec (dumps) |
   | properties.hide_unnamed_handles | TS HideUnnamedHandles |
   | properties.shared_objects_only | TS ModulesDllOnly |
@@ -1500,6 +1511,8 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | state `[sort.*]` | TS Sort.*; MC *-sorting-column-name / -sorting-order |
   | state `[columns.*]` | TS Columns.*, ColumnWidths.*, *VisibilityMask; MC *-column-order |
   | state `[[minigraphs]]` | TS ProcessGraphs.Column%d, DetachedProcessGraphs, ProcessGraphColors, ProcessGraphTimeRanges, ProcessSpecificMiniGraphs.* |
+  | state `[[detached_windows]]` | R-084 (TS stores detached graph windows; tasklens adds KDE-only position) |
+  | state `[processes] virustotal_notice_accepted` | R-095 |
   | state `[[tray_graphs]]` | TS TrayIconGraphs.* |
 
   Old key names in the source spec and their canonical names:
@@ -1508,7 +1521,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - `history.retention_hours` is `history.retention_h`.
   - `window.system_titlebar` is `appearance.decorations` (R-021).
   - `startup.default_tab` is `general.start_tab` (R-024).
-  - `tables.column_resize`, `tables.column_separators`, `tables.dim_zero_values` are `processes.column_resize`, `processes.column_separators`, `processes.dim_zero_values` (see O-1).
+  - `tables.column_resize`, `tables.column_separators` and `tables.dim_zero_values` keep their names and apply to every table (R-075).
   - `processes.hide_system_processes` is `processes.hide_system` (R-031).
   - `processes.tree_view` and `processes.grouping` are `processes.mode` (R-010).
   - `processes.merge_child_stats` is `processes.subtree_totals` (inferred).
@@ -1627,7 +1640,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-037
 - Source: TS 6 "Theme Editor" L28900-28903, L30008-30025
 - Behaviour:
-  - A separate pinnable, non-modal window titled "tasklens Theme Editor" (APP-045 naming, inferred).
+  - A separate pinnable, non-modal window titled "tasklens Theme Editor" (APP-045 naming, R-083).
   - Left: the 22-slot list, plus Accent.
   - Centre: hue strip and colour plane, "R %d G %d B %d" and "H %03d S %03d V %03d" readouts, and a hex input with the hint "Enter a 6-digit hex color".
   - A title input for the theme name.
@@ -1653,7 +1666,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: none
-- Open question: the exact TaskSlinger `TS1.` encoding is inferred (U-17). Recommended answer: generate one code in TaskSlinger under Wine, decode it and match it. If it cannot be decoded, accept tasklens codes and raw JSON only. Listed as O-5.
+- Verify U-17: the TaskSlinger `TS1.` encoding is inferred. The bead generates one code in TaskSlinger under Wine, decodes it and matches it. If it cannot be decoded, tasklens accepts only `TL1.` codes and raw JSON (R-079).
 
 ### APP-039 Graph accent colours
 - Was: APP-039
@@ -1672,7 +1685,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   | Teal | #14A098 | Slate | #64748B |
   | Cyan | #22B8CF | | |
 
-  These hex values are fallbacks. They are replaced by pixel samples of TaskSlinger's swatches when the theme extraction in APP-035 runs (U-18). The stored value in `state.toml` (`color` in `[[minigraphs]]` and `[[tray_graphs]]`) is `accent` or the lower-case name (inferred spelling).
+  These hex values are fallbacks. They are replaced by pixel samples of TaskSlinger's swatches when the theme extraction in APP-035 runs (U-18). The stored value in `state.toml` (`color` in `[[minigraphs]]` and `[[tray_graphs]]`) is `accent` or the lower-case name (R-083).
 - Linux data/mechanism: constants in tl-ui
 - Verdict: BUILD
 - Phase: P3
@@ -1692,7 +1705,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   Effects:
   - UI scale multiplies the theme font size and rem. The compositor scale (110% here) is applied once by GPUI and never doubled.
   - Row height = 28 × row_height_pct/100 × ui_scale_pct/100 logical px (R-020).
-  - Rounded corners set radius 4 px (rows, menus) and 6 px (cards), times ui_scale; off sets 0 (see O-3).
+  - Rounded corners set radius 4 px (rows, menus and other small elements) and 6 px (cards), times ui_scale; off sets 0 (R-077, ADR-009 `radius_small`, `radius_card`).
   - Heat colouring blends VALUE_HEAT into the cell background by value / reference × intensity. The per-column references are R-059's (process spec).
   - Shadow intensity scales the alpha of menu, minigraph and toast shadows.
   - Dragging previews live. The save happens on release.
@@ -1748,7 +1761,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Every user-visible string goes through a message key from P1. The English catalogue ships in P1.
   - "Language: >" lists "System default" (follows `LC_ALL`/`LC_MESSAGES`/`LANG`) and the ten TaskSlinger locales plus nb-NO (`general.language`: `system | en-US | de-DE | es-ES | fr-FR | ja-JP | ko-KR | pt-BR | ru-RU | uk-UA | zh-CN | nb-NO`).
   - Changing the language in tasklens reapplies all text live, without a restart. A change of the system locale applies at the next start, because the KDE portal does not provide a locale setting.
-  - Number and date formats follow the selected locale. The table (d) formats are the en-US forms (inferred: decimal and grouping characters follow the locale; units and patterns stay).
+  - Numbers do not follow the locale in v1: every language uses the table (d) forms, with decimal point "." and thin-space grouping. Dates and times use the table (d) patterns in local time. A language change changes text only (R-081).
   - Missing keys fall back to English.
 - Linux data/mechanism: Fluent (`fluent-bundle` + `unic-langid`), `.ftl` files embedded with `include_str!`; locale from the environment. Translations are drafted by Claude agents and reviewed per locale. No Mission Center po text is copied, because of GPL-3.
 - Verdict: ADAPT
@@ -1786,18 +1799,18 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
     | Public IP notice | "tasklens Public IP Notice" |
     | Delete startup entry | "tasklens Delete Startup Entry" |
     | Theme share code | "tasklens Share Theme" |
-    | About | "tasklens About" (see O-4) |
+    | About | "tasklens About" (R-078) |
     | Additional setup | "tasklens Additional Setup" (R-028) |
     | Crash report | "tasklens Crash Report" (R-049) |
     | Settings | "tasklens Settings" |
-    | Keyboard shortcuts | "tasklens Keyboard Shortcuts" (inferred) |
-    | Theme editor | "tasklens Theme Editor" (inferred) |
+    | Keyboard shortcuts | "tasklens Keyboard Shortcuts" (R-083) |
+    | Theme editor | "tasklens Theme Editor" (R-083) |
     | Service properties | "<id> Properties" (SYS-011) |
     | Startup properties | "Startup properties: <Name>" (SYS-026) |
     | Connection properties | "Connection properties: <Proto> <State>" (SYS-034) |
     | Process properties | per the process spec |
 
-  - Other confirmations (Reset settings, Delete theme, Close listening socket, Skip password prompts, process action confirmations) are modal windows titled "tasklens" (inferred).
+  - Other confirmations (Reset settings, Delete theme, Close listening socket, Skip password prompts, process action confirmations) are modal windows titled "tasklens" (R-083).
   - Closing the main window closes all child windows, except detached graphs when `graphs.keep_detached_on_close` is on.
 - Linux data/mechanism:
   - `cx.open_window` with `WindowKind::Dialog` for modal confirmations (xdg_dialog_v1 set_modal) and `WindowKind::Floating` (xdg parent) for tools.
@@ -1889,7 +1902,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P4
 - Privilege: none
-- Open question: does `setForeignShortcutKeys` stick for a `.desktop` launch component that is not running (U-16)? Recommended answer: test on Plasma 6. If it does not stick, write `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Ctrl+Esc` and ask the user to log out and back in. Listed as O-6.
+- Verify U-16: whether `setForeignShortcutKeys` sticks for a `.desktop` launch component that is not running. The bead tests it on Plasma 6. If it does not stick, tasklens writes `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Ctrl+Esc` and asks the user to log out and back in (R-080).
 
 ### APP-052 Command-line arguments
 - Was: APP-052
@@ -1917,7 +1930,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-053
 - Source: TS About L29358-29368, L35581-35590, cross-check A.33 | MC adw AboutDialog
 - Behaviour:
-  - A separate pinnable window titled "tasklens About" (APP-045, O-4), opened by Help > "About tasklens…".
+  - A separate pinnable window titled "tasklens About" (APP-045, R-078), opened by Help > "About tasklens…".
   - Shows icon, "tasklens", "Version: <semver> (<git short hash>, <build date>)".
   - "Copy version info" copies version, GPUI revision, kernel, NVIDIA driver, compositor, session type and scale for bug reports.
   - "Third-party licenses" opens a scrollable list generated at build time.
@@ -2216,17 +2229,17 @@ Every ID in `features-sys-app.md`. There are no old SYS-019 or SYS-029.
 
 # Still open
 
-Each item has a recommended answer. Beads use it until Oystein decides otherwise.
+Nothing. The open items of this merge were settled in `docs/RECONCILIATION.md`:
 
-| # | Question | Entry | Recommended answer |
-|---|---|---|---|
-| O-1 | Table (a) keeps `column_resize`, `column_separators` and `dim_zero_values` under `[processes]`, but View > Columns works on every table. Do the keys apply to all tables? | APP-018, APP-032 | Yes. One key each, applied to every table. No per-table keys. |
-| O-2 | R-046 drops the X11 EWMH fallback for window features. Does that drop the X11 path of the window picker too? | APP-006 | Yes. Drop it in v1; the "+" button is hidden without the KWin bridge. |
-| O-3 | Corner radius: ADR-009 says 5 × ui_scale for everything; the source says 4 px for rows and menus and 6 px for cards. | APP-040 | Use 4 px and 6 px times the UI scale (TaskSlinger look), and update ADR-009 `UiMetrics.radius`. |
-| O-4 | About window title: "tasklens About" (APP-045 naming pattern) or "About tasklens" (source APP-053). | APP-045, APP-053 | "tasklens About", to match the other window titles. The Help item stays "About tasklens…". |
-| O-5 | TaskSlinger `TS1.` theme code encoding is inferred (U-17). | APP-038 | Generate one code under Wine and decode it. If that fails, import only `TL1.` codes and raw JSON. |
-| O-6 | Does kglobalaccel `setForeignShortcutKeys` stick for a launch component that is not running (U-16)? | APP-051 | Test on Plasma 6. Fallback: write `kglobalshortcutsrc` and ask the user to log out and back in. |
-| O-7 | Number formats per locale: table (d) gives en-US forms; APP-043 says formats follow the locale. | APP-043 | Ship en-US forms until P4. With the P4 locales, only the decimal and grouping characters follow the locale; units and patterns stay. |
-| O-8 | Startup Apps refresh: ADR-008 reads startup entries on page open and on `RefreshNow`; the source adds inotify live refresh. | SYS-019 | Keep inotify only while the tab is open, as written. Note it in ADR-008. |
-| O-9 | Inferred strings with no source: decorations restart toast "Restart tasklens to apply the title bar change"; titles "tasklens Keyboard Shortcuts" and "tasklens Theme Editor"; generic confirm window title "tasklens"; graph colour stored as the lower-case name. | APP-001, APP-030, APP-037, APP-039, APP-045 | Use them as written. |
-| O-10 | Handle Search result menu labels: r2's "End Process (SIGTERM)" and "Kill Process (SIGKILL)", or R-045 naming. Mirrors the open item in merged `proc.md` PROC-096. | APP-015 | "End Task" (SIGTERM) and "End Process" (SIGKILL), to match R-045 and table (b). |
+| Item | Resolution | Entries |
+|---|---|---|
+| O-1 Column display keys for all tables | R-075 | APP-018, APP-032 |
+| O-2 X11 window picker | R-076 | APP-006 |
+| O-3 Corner radius | R-077 | APP-040 |
+| O-4 About window title | R-078 | APP-045, APP-053 |
+| O-5 `TS1.` share code encoding | R-079 (verify U-17) | APP-038 |
+| O-6 kglobalaccel Ctrl+Esc | R-080 (verify U-16) | APP-051 |
+| O-7 Number formats and locale | R-081 | APP-043 |
+| O-8 Startup Apps live refresh | R-082 | SYS-019 |
+| O-9 Strings written in this merge | R-083 | APP-001, APP-030, APP-037, APP-039, APP-045 |
+| O-10 Handle Search result menu labels | R-102 | APP-015 |
