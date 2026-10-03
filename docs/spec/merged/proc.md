@@ -986,3 +986,373 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT
 - Phase: P2
 - Privilege: none
+
+---
+
+## G. Row context menu and process actions
+
+### PROC-057 Row context menu
+- Was: v1 PROC-049; r2 PROC-041; add amend PROC-049
+- Source: TS 2.1 menu table, [IMG adv_sheet_01/02], L29277-29306, cross-check A.1, A.2, B.9 | MC `table_view.blp:121` | R-033, R-034
+- Behaviour:
+  - Process row, in this order ("|" is a separator):
+    1. End Task
+    2. End Process
+    3. End Process Tree
+    |
+    4. Suspend Process / Resume Process (only the one that applies)
+    5. Send Signal >
+    6. Set Priority >
+    7. Set Affinity…
+    8. Set I/O Priority >
+    |
+    9. Show Window
+    10. Restart Plasma Shell / Restart unit "<unit>" (only where it applies)
+    |
+    11. Copy
+    12. Copy details
+    13. Copy all metrics
+    14. Copy rows as table
+    |
+    15. Add Minigraph >
+    16. Add Process Name Graph >
+    17. Add App Name Graph >
+    18. Add tray icon graph > / Remove tray icon graph
+    |
+    19. Properties
+    20. File properties
+    21. Open file location
+    22. Open in VirusTotal
+    23. Create dump file
+    |
+    24. Go to parent process
+    25. Go to service (when the process is a unit's MainPID)
+  - App rows: item 1 reads "End App"; item 2 becomes "Kill App (all processes)"; item 3 is not shown; item 4 becomes "Freeze App" / "Thaw App". Priority, affinity and I/O priority apply to all processes of the app.
+  - Unit rows: as app rows, plus "Go to service".
+  - Multi-select: items 1, 2 and 4 read "End Selected Tasks", "End Selected Processes", "Suspend Selected Tasks" / "Resume Selected Tasks".
+  - Pseudo rows: Copy, Copy details, Copy all metrics and Add Minigraph only.
+  - Exited rows: every item disabled except Copy.
+  - Group header rows: Expand / Collapse only.
+  - An item whose phase has not shipped is not shown. Window items are hidden without the KWin bridge.
+  - The menu captures the target keys when it opens (PROC-001).
+- Linux data/mechanism: gpui-kit `PopupMenu` from the custom table (PROC-013). Every item dispatches the same GPUI Action as its key binding.
+- Verdict: ADAPT (TaskSlinger order, MC signal submenu, Linux items)
+- Phase: P1 for the menu and the P1 items; other items arrive with their own entries.
+- Privilege: per item
+- Open question: item 14 "Copy rows as table" is the add PROC-098 menu label for Ctrl+Shift+C, but R-033's order does not list it. Recommended answer: show it as item 14, as above.
+
+### PROC-058 Action pipeline, results and toasts
+- Was: r2 PROC-042; v1 PROC-050 (result channel, multi-target toast); v1 PROC-001 (revalidation)
+- Source: TS process toasts L28645-28926 | ADR-005, ADR-006 | R-035
+- Behaviour:
+  - Every action captures its targets when the menu opens and revalidates each one just before acting.
+  - Toasts appear at the top centre. Updates for one action replace the same toast.
+  - Short toasts: "Process terminated", "Process tree terminated", "Process suspended.", "Process resumed.", "Priority updated", "Affinity updated", "I/O priority updated", "Selected process priority updated.", "End task requested for selected processes.".
+  - Long-form errors: "Could not end task.", "Could not end process.", "Could not update selected process affinity.".
+  - Identity mismatch: "The selected process changed; wait for the list to update and try again."
+  - EPERM: "Permission denied" with a "Retry as administrator" button that sends the same request with `privileged = true` to the helper (PROC-076). Before P3 the toast has no button. There is no automatic retry; MC's automatic `pkexec kill` is not built.
+  - Multi-target End: "Ended 4 of 5 processes (1 permission denied)".
+  - A pending action older than its deadline plus 5 s shows "Outcome unknown". Destructive actions are never retried automatically.
+- Linux data/mechanism:
+  - `Command::Action(ActionRequest)` with up to 256 targets; admission limits (16 in flight) and event order per ADR-005.
+  - Results arrive on the `action_events` channel, never through the snapshot. States: Rejected, Started, Succeeded, Failed, OutcomeUnknown.
+  - Deadlines per ADR-006: 2 s per target for signal, nice, affinity, ioprio and freeze writes; 120 s for any call that may show a polkit prompt; a timeout reports OutcomeUnknown.
+  - `ActionError` text comes from `tl-ui/src/actions.rs::message`, for example "Permission denied. This process belongs to another user."
+  - Action logs record kind, target PID and result only (ADR-015).
+- Verdict: BUILD
+- Phase: P1 (retry button P3)
+- Privilege: per action
+
+### PROC-059 Protection rules and confirmations
+- Was: v1 PROC-055; r2 PROC-052
+- Source: TS L28779-28781 ("Refusing to terminate the current TaskSlinger process.", "Windows marked the selected process as critical...") | ADR-006 | R-036, D-009
+- Behaviour:
+  - Refused with a toast and no dialog:
+    - tasklens itself: "Refusing to end tasklens itself."
+    - PID 1: "PID 1 (systemd) cannot be ended."
+    - kernel threads: "Kernel threads cannot be signalled."
+  - A confirmation dialog opens for:
+    - any signal, freeze or kill on a protected target: "Ending <name> will end your desktop session. End it anyway?";
+    - End Process Tree: "End N processes in this tree?", buttons "End tree" and "Cancel";
+    - Kill App: "Kill all N processes of <App>?";
+    - End Task or End Process with more than one target;
+    - any action on another user's process.
+  - No confirmation for a single End Task or End Process on one of the user's own unprotected processes (D-009). End Process then shows only the toast "End process requested.".
+  - Protected set (`ProcFlags::PROTECTED`): PID 1, the session's `kwin_wayland`, `plasmashell`, `ksmserver`, `Xwayland`, `sddm`, `systemd-logind`, the session's `login` ancestor, the user's `systemd --user`, the user's `dbus-broker` or `dbus-daemon`, and tasklens itself.
+- Linux data/mechanism:
+  - The compositor PID comes from `SO_PEERCRED` on a connection to `$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`.
+  - The session bus daemon PID comes from `org.freedesktop.DBus.GetConnectionUnixProcessID("org.freedesktop.DBus")`.
+  - `Xwayland`, `plasmashell` and `ksmserver` are found by exe basename in the session; `systemd --user` is the `init.scope` of `user@<uid>.service`; `sddm`, `login` and `systemd-logind` by walking the session leader's ancestors and by unit name.
+  - Refusals map to `Rejected(Protected)` and `Rejected(KernelThread)`.
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### PROC-060 End Task and End App (SIGTERM)
+- Was: v1 PROC-050; r2 PROC-043
+- Source: TS L29277-29280, L28777-28781 | MC Stop (SIGTERM, bwrap unwrap) | R-035
+- Behaviour:
+  - Process rows: send SIGTERM; toast "End task requested.", changing to "Process terminated" when the process is gone, or "Could not end task.".
+  - App and unit rows ("End App"): SIGTERM to each primary process. A `bwrap` primary is replaced by its first non-bwrap descendant (PROC-010).
+  - Multi-select ("End Selected Tasks"): confirmation first (PROC-059), then toast "End task requested for selected processes." and the multi-target result toast.
+- Linux data/mechanism: `ActionKind::Signal(Term)` through the verified pidfd.
+- Verdict: ADAPT (window close or TerminateProcess becomes a graceful SIGTERM)
+- Phase: P1
+- Privilege: own processes need none. EPERM offers "Retry as administrator" (helper `Signal`).
+
+### PROC-061 End Process (SIGKILL)
+- Was: v1 PROC-051; r2 PROC-044; add PROC-096; add amend PROC-051
+- Source: TS L29278, toasts L28845-28846, cross-check A.1 | MC Force Stop | R-033, R-034, D-009
+- Behaviour:
+  - "End Process" sits directly under "End Task" and sends SIGKILL. Tooltip "Ends the process immediately (SIGKILL)".
+  - Toasts: "End process requested." then "Process terminated", or "Could not end process.".
+  - Multi-select label "End Selected Processes", with confirmation (PROC-059).
+  - On app and unit rows the item is "Kill App (all processes)" (PROC-064).
+  - Keys: Shift+Delete and Ctrl+X (PROC-049). TaskSlinger's "Force End Task" label is not used.
+- Linux data/mechanism: `ActionKind::Signal(Kill)` through the verified pidfd.
+- Verdict: ADAPT (TerminateProcess becomes SIGKILL)
+- Phase: P1
+- Privilege: as PROC-060
+
+### PROC-062 End Process Tree
+- Was: v1 PROC-052; r2 PROC-045
+- Source: TS L29279, L28645-28766 "Process tree terminated", "End process tree requested." | R-037
+- Behaviour:
+  - Ends the process and all its descendants.
+  - Always confirms: "End N processes in this tree?", buttons "End tree" and "Cancel".
+  - Toast "End process tree requested.", then "Process tree terminated", with per-target results in one toast.
+- Linux data/mechanism:
+  - The subtree's keys are captured from the engine forest when the menu opens (max 256).
+  - `ActionKind::KillTree`: the engine opens a verified pidfd for every target, sends SIGSTOP to all of them, then SIGKILL to all of them, then closes the fds. Stopping first means no process can fork between the passes. A target that fails `open_verified` is `Rejected(IdentityChanged)`.
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: as PROC-060. With mixed ownership the retry asks once for the helper.
+
+### PROC-063 Suspend and Resume process
+- Was: v1 PROC-053; r2 PROC-047
+- Source: TS L29281-29285 | MC Suspend (STOP), Continue (CONT)
+- Behaviour:
+  - "Suspend Process" sends SIGSTOP; "Resume Process" sends SIGCONT. Only the item that applies is shown, chosen from State T.
+  - A suspended row shows State "Stopped" and a pause glyph in the Name cell.
+  - Multi-select: "Suspend Selected Tasks" / "Resume Selected Tasks".
+  - App and unit rows use Freeze App (PROC-064) instead.
+  - Toasts: "Process suspended.", "Process resumed.".
+- Linux data/mechanism: `ActionKind::Suspend` / `Resume` (SIGSTOP and SIGCONT through the pidfd).
+- Verdict: ADAPT (NtSuspendProcess becomes SIGSTOP)
+- Phase: P1
+- Privilege: as PROC-060
+
+### PROC-064 Freeze App, Thaw App and Kill App
+- Was: v1 PROC-054; v1 PROC-051 (app rows); r2 PROC-048
+- Source: PLAN section 3 | ADR-006 "cgroup operations" | R-033, R-040
+- Behaviour:
+  - On app and unit rows: "Freeze App" / "Thaw App" (the row's State shows "Frozen"), and "Kill App (all processes)" with the confirmation "Kill all N processes of <App>?".
+  - Toasts: "App frozen", "App thawed", "App killed".
+- Linux data/mechanism:
+  - Cgroups under `user@<uid>.service/app.slice/`: `ActionKind::FreezeGroup`, `ThawGroup`, `KillGroup` on a `CgroupRef`, validated by `tl-ops::cgroup::open_validated` (path prefix, `.scope` or `.service` suffix, inode equals the captured `cgroup_id`, owner is our UID, not tasklens's own cgroup). Freeze writes "1" to `cgroup.freeze` and polls `cgroup.events` for `frozen 1` every 50 ms for up to 2 s; thaw writes "0"; kill writes "1" to `cgroup.kill`.
+  - Other user units (`session.slice`, `background.slice`): the user manager's `org.freedesktop.systemd1.Manager.FreezeUnit(name)`, `ThawUnit(name)` and `KillUnit(name, "all", SIGKILL)`.
+  - System units: the same methods on the system manager, with `ALLOW_INTERACTIVE_AUTHORIZATION` so polkit `org.freedesktop.systemd1.manage-units` can prompt.
+  - TaskSlinger's "Suspend App" / "Resume App" and "Force End App" labels are replaced (R-033, R-040).
+- Verdict: ADAPT (new Linux capability)
+- Phase: P2
+- Privilege: own app cgroups need none. System units use the systemd polkit prompt. A denied prompt gives a toast.
+- Open question: ADR-006 validates only `app.slice` cgroups, so Background user units and system units need the systemd D-Bus path above. Recommended answer: dispatch by target type as written (`ActionTarget::Cgroup` for `app.slice`, `ActionTarget::Unit` for the rest), and record it in ADR-006.
+
+### PROC-065 Send Signal submenu
+- Was: v1 PROC-056; r2 PROC-046
+- Source: MC `table_view.blp:121` (8 signals), `PL:processes/manager.rs:29-110` | R-039
+- Behaviour:
+  - Top level: Terminate (TERM), Kill (KILL), Hangup (HUP), Interrupt (INT), Quit (QUIT), Stop (STOP), Continue (CONT), User 1 (USR1), User 2 (USR2).
+  - "Other signals >" lists every other standard signal by name and number: ABRT, ALRM, BUS, CHLD, FPE, ILL, IO/POLL, PIPE, PROF, PWR, SEGV, STKFLT, SYS, TRAP, TSTP, TTIN, TTOU, URG, VTALRM, WINCH, XCPU, XFSZ.
+  - "Real-time signal…" opens a spin box for SIGRTMIN+0 to SIGRTMAX (34 to 64).
+  - Signals that terminate by default carry a trailing "(ends process)".
+  - Toast: "Sent SIGHUP to firefox (1234)".
+  - App rows send to the primary processes.
+- Linux data/mechanism: `ActionKind::Signal(Signal)` with `Signal::Other(u8)` for any number outside the named nine; `pidfd_send_signal`. Names come from `libc` constants.
+- Verdict: BUILD (MC, extended)
+- Phase: P2
+- Privilege: as PROC-060
+
+### PROC-066 Set Priority
+- Was: v1 PROC-057; r2 PROC-049
+- Source: TS menu (Realtime, High, Above normal, Normal, Below normal, Low), L28455-28458, [IMG adv_sheet_02] | R-038
+- Behaviour:
+  - Submenu: Realtime, High (nice -10), Above normal (nice -5), Normal (nice 0), Below normal (nice 5), Low (nice 19), Idle (SCHED_IDLE), "Custom…". The current class has a check mark.
+  - "Custom…" opens a dialog with a nice slider (-20..19) and a policy combo (OTHER, BATCH, IDLE, FIFO, RR) with an RT priority of 1-99 for FIFO and RR.
+  - "Realtime" asks first: "Realtime priority can freeze the desktop if the process spins. Set it anyway?". It sets SCHED_RR priority 1 with `SCHED_RESET_ON_FORK`.
+  - Toast "Priority updated".
+  - Tooltip: "With autogroup on, nice only orders processes within the same session."
+  - App rows apply to every current process of the app; tooltip "Applies to the app's current processes".
+- Linux data/mechanism:
+  - Nice classes: `ActionKind::SetNice(n)`, `setpriority(PRIO_PROCESS, tid, n)` for every TID in `/proc/<pid>/task`, re-listed right before the loop (ADR-006).
+  - Realtime, Idle and Custom: `ActionKind::SetSched { policy, rt_prio }`, `sched_setattr` per TID.
+  - Partial success is `Failed(Partial { done, total })`.
+- Verdict: ADAPT (Windows priority classes become nice and policy)
+- Phase: P1 (High to Low); P2 (Realtime, Idle, Custom)
+- Privilege: raising the nice value of own processes needs none. Lowering it, Realtime, and other UIDs need CAP_SYS_NICE (RLIMIT_NICE is 0 by default): EPERM gives the "Permission denied" toast, with "Retry as administrator" from P3 (helper `SetNice` / `SetSched`).
+
+### PROC-067 Set Affinity
+- Was: v1 PROC-059; r2 PROC-050
+- Source: TS menu "All processors" plus one entry per CPU with P/E icons, L28460, L28649, [CL 0.8.31], cross-check A.2 | R-039
+- Behaviour:
+  - "Set Affinity…" opens a dialog with an "All processors" check and a grid of checkboxes "CPU 0" to "CPU 31".
+  - CPUs are grouped by L3 domain ("CCD 0: CPU 0-7, 16-23") with SMT siblings paired. Intel hybrid CPUs show P-core and E-core icons.
+  - A list field accepts a CPU list such as "0-7,16-23" and stays in sync with the grid.
+  - When nothing is checked, OK is disabled and the dialog shows "At least one CPU must stay enabled".
+  - Toasts: "Affinity updated", "Could not update selected process affinity.".
+  - Multi-target use with mixed marks is PROC-069.
+- Linux data/mechanism:
+  - `ActionKind::SetAffinity(CpuSet)`: `sched_setaffinity(tid, mask)` for every TID; the current mask from `sched_getaffinity`.
+  - Topology from `/sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list` and `topology/thread_siblings_list`; hybrid from `/sys/devices/cpu_core/cpus` and `/sys/devices/cpu_atom/cpus` (absent on this AMD CPU).
+  - Masks are limited to the cgroup's `cpuset.cpus.effective`.
+- Verdict: ADAPT (a dialog instead of a 32-item submenu; CCD grouping in place of P/E on AMD)
+- Phase: P1 (one target); P2 (multi-select mixed marks)
+- Privilege: own processes need none. Other UIDs need CAP_SYS_NICE (helper `SetAffinity`).
+
+### PROC-068 Set I/O Priority
+- Was: v1 PROC-060; r2 PROC-051
+- Source: MC inventory section 3 "Missing: I/O priority" | ADR-006
+- Behaviour:
+  - Submenu: Realtime, High (best-effort 0), Normal (best-effort 4), Low (best-effort 7), Idle, "Default (follows nice)". A check mark shows the current value.
+  - Toast "I/O priority updated".
+  - The tooltip names the active block scheduler, because the setting only takes effect with BFQ or mq-deadline.
+  - Realtime is enabled only while a helper session is active; otherwise it is disabled with the tooltip "Needs administrator access." (or "Needs administrator helper (not installed)" when the helper is missing).
+- Linux data/mechanism: `ActionKind::SetIoPriority(IoPriority)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(class, level))` for every TID through `libc::syscall` in `tl-ops/src/sys.rs`. The scheduler comes from `/sys/block/<dev>/queue/scheduler`.
+- Verdict: ADAPT (Linux-only)
+- Phase: P2
+- Privilege: best-effort and idle on own processes need none. Realtime needs CAP_SYS_ADMIN; other UIDs need the helper.
+- Open question: `IoPriority` in ADR-005 has no value for "Default (follows nice)" (`IOPRIO_CLASS_NONE`). Recommended answer: add `IoPriority::None` to ADR-005.
+
+### PROC-069 Multi-select priority, affinity, I/O priority, copy and end
+- Was: add PROC-097
+- Source: TS toasts L28743-28754, cross-check A.2
+- Behaviour:
+  - **Set Priority** with 2 or more rows applies to every selected process (and every process of a selected app row). A class is checked only when all targets share it. Toasts: "Selected process priority updated." when all succeed; "Could not update selected process priority." when all fail; on partial failure, for example "Priority updated for 3 of 4 processes. 1 failed: permission denied", with "Retry as administrator" (P3) retrying only the failed targets.
+  - **Set Affinity** applies to all targets. Each CPU is checked when every target has it and shows a mixed mark when only some do; clicking a mixed CPU sets it on all targets. Toasts "Selected process affinity updated." and "Could not update selected process affinity.", with the same partial form.
+  - **Set I/O Priority** follows the same rules, with toasts "Selected process I/O priority updated." and "Could not update selected process I/O priority.".
+  - **Copy**, **Copy details** and **Copy all metrics** with several rows: PROC-070.
+  - **End Task** with several rows: confirmation first, then "End task requested for selected processes.".
+- Linux data/mechanism: one `ActionRequest` carries the whole target list and returns per-target results. Syscalls run per target thread as in PROC-066 to PROC-068.
+- Verdict: BUILD
+- Phase: P2 (priority, affinity, I/O priority); P1 (copy and end)
+- Privilege: as PROC-066 to PROC-068, per target
+
+### PROC-070 Copy, Copy details, Copy all metrics and Copy rows as table
+- Was: v1 PROC-058; r2 PROC-053; add PROC-098; add amend PROC-058
+- Source: TS "Copy", "Copy all metrics" L35504-35513, "Process details copied." L28761, cross-check A.2, A.3 | R-012, R-005
+- Behaviour:
+  - **Copy** copies the right-clicked cell's displayed text. With several rows selected, it copies that column's value for each selected row, one per line in view order, with toast "Selected process values copied."; one row gives "Copied to clipboard".
+  - **Copy details** (Ctrl+C) copies this fixed block per selected row, with a blank line between rows:
+    ```
+    Name: firefox
+    PID: 4321
+    Parent PID: 2010
+    CPU: 3.27%
+    Memory: 812 MiB
+    Private bytes: 1490 MiB
+    Working set: 1104 MiB
+    Threads: 97
+    Handles: 412
+    Priority: Normal (0)
+    ```
+    - CPU is `%.2f%%` of the whole machine. Memory is RssAnon, Private bytes is VmData + VmStk, Working set is VmRSS, all in whole MiB. Handles is the fd count. Priority is the PROC-029 class with the nice value in parentheses.
+    - A Restricted value prints "restricted" and an unsupported one prints "n/a"; neither prints 0.
+    - Toast "Process details copied.", or "Failed to copy to clipboard".
+  - **Copy all metrics** copies, per selected row, one `Label: value` line for every column that has data, in picker order, ending with `Command line: …`. Rows are separated by a blank line. Toast "Copied metrics to clipboard", or "Selected process metrics copied." for several rows.
+  - **Copy rows as table** (Ctrl+Shift+C) copies the selected rows as TSV of the visible columns with a header line. Toast "Copied to clipboard".
+  - Command lines appear only in Copy all metrics (and Copy on the Command line cell), and only for rows the user selected (ADR-015 deliberate export). Environment values are never included.
+- Linux data/mechanism: snapshot values; GPUI `cx.write_to_clipboard` through Wayland `wl_data_device` (U-33). Command lines are never logged.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Open question: R-013 sets one decimal for percent everywhere, but the Copy details block is TaskSlinger's fixed format with `%.2f%%`. Recommended answer: keep two decimals in Copy details only.
+
+### PROC-071 Process jump target, Go to parent and Go to service
+- Was: add PROC-099; r2 PROC-061; v1 PROC-064; v1 PROC-065; add amend PROC-064; add amend PROC-065
+- Source: TS L29292, L29320, toasts L28645-28766, L28696, L28700, L28709-28710, L28728, L28830, cross-check A.4 | SYS-010, SYS-035 | R-047
+- Behaviour:
+  - The Processes tab has one "select process by identity" entry point. Go to parent process, the Properties PPID link, Services "Jump to process", Connections "Jump to process", Search File Handles "Go to process", the window picker, the History table, `--select-pid <pid>` and the D-Bus `ActivateAction("select-pid", <uint32>)` all use it.
+  - On success: switch to Processes (toast "Switched to Processes tab" when the source was another tab, unless the caller has its own toast such as "Switched to owning process." or "Switched to service process."), expand the group or tree path, select the row and scroll it to the centre.
+  - When the key is no longer in the snapshot (exited or PID reused): "Process not found in current view".
+  - When the process exists but the filter or Hide system processes hides it: the caller's "not visible" toast with a "Show" button that clears the filter, turns Hide system processes off and then selects the row.
+  - **Go to parent process**: selects the parent; toast "Switched to parent process"; when hidden, "Parent process not found in current view" with "Show".
+  - **Go to service**: switches to the Services tab and selects the unit; toasts "Switched to Services tab" and "Switched to service."; "Service not found in current view" when the Services tab does not list it (SYS-010).
+  - **Properties** failure (target exited between click and open, or `/proc/<pid>` cannot be opened): "Could not open properties.". The window-cap toast stays separate (PROC-077).
+- Linux data/mechanism: a `ProcessKey` lookup in the current projection; a PID match alone is never enough. The unit and its manager come from the cgroup path (`system.slice` or `user@<uid>.service`).
+- Verdict: BUILD
+- Phase: P1 (Go to parent); P2 (the shared entry point for other callers, Go to service)
+- Privilege: none
+
+### PROC-072 Restart Plasma Shell and Restart unit
+- Was: v1 PROC-066; r2 PROC-060
+- Source: TS L29283, L29288, L35562-35572 (Explorer restart toasts)
+- Behaviour:
+  - On the `plasmashell` row: "Restart Plasma Shell". Toasts "Restarting Plasma Shell...", then "Plasma Shell restarted"; "Plasma Shell restart is already in progress." when pressed again before it finishes.
+  - On any row that is a unit's MainPID: "Restart unit <name>".
+  - No item for `kwin_wayland` or `gnome-shell` on Wayland, because restarting them ends the session. Hidden on GNOME Wayland.
+- Linux data/mechanism: `ActionKind::UnitRestart` on `UnitRef`: `RestartUnit("plasma-plasmashell.service", "replace")` on the user manager, tracked to `JobRemoved` with result "done" (30 s deadline, ADR-006). MainPID comes from the unit property `MainPID`.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: user units need none. System units use the polkit `org.freedesktop.systemd1.manage-units` prompt.
+
+### PROC-073 Open file location and File properties
+- Was: v1 PROC-067; v1 PROC-068; r2 PROC-054
+- Source: TS L35502, L29316, toast "Opening file location"
+- Behaviour:
+  - "Open file location" opens the file manager with the executable selected. Toast "Opening file location".
+  - "File properties" opens the file manager's properties dialog for the executable.
+  - Both are disabled with the tooltip "Executable deleted" when the exe link ends " (deleted)". When the exe is Restricted they show the toast "Process image unavailable".
+- Linux data/mechanism: session D-Bus `org.freedesktop.FileManager1.ShowItems(["file://<exe>"], "")` and `ShowItemProperties([...], "")` (Dolphin implements both). If no service owns `org.freedesktop.FileManager1`, Open file location falls back to `xdg-open` on the parent directory, and File properties is hidden.
+- Verdict: ADAPT
+- Phase: P1 (Open file location); P2 (File properties)
+- Privilege: none
+
+### PROC-074 Open in VirusTotal
+- Was: v1 PROC-069; r2 PROC-055
+- Source: TS L35503 (`https://www.virustotal.com/gui/file/<sha256>`), toasts "SHA-256 unavailable", "Process image unavailable"
+- Behaviour:
+  - Computes the executable's SHA-256 in the background (toast "Computing SHA-256…" when it takes longer than 500 ms), then opens `https://www.virustotal.com/gui/file/<sha256>` in the default browser. Nothing is uploaded.
+  - The first use shows a one-time notice: "This opens virustotal.com with the file's hash. The file is not uploaded."
+  - Errors: "SHA-256 unavailable", "Process image unavailable".
+- Linux data/mechanism: streamed hash of `/proc/<pid>/exe` (works for deleted files) on the blocking pool, cached by (dev, inode, mtime). Opened with the portal `org.freedesktop.portal.OpenURI.OpenURI`, falling back to `xdg-open`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: other users' exe gives EACCES; the fallback hashes the absolute argv path when that file is readable, else "Process image unavailable".
+- Open question: the notice needs a persisted "shown" flag and table (a) has none. Recommended answer: add `processes.virustotal_notice_accepted = false` to `settings.toml`, like `network.public_ip_notice_accepted`.
+
+### PROC-075 Create dump file
+- Was: v1 PROC-070; r2 PROC-056
+- Source: TS menu, [IMG adv_sheet_02] `<name>_<pid>_<yyyymmdd_hhmmss>.dmp`, "Dump created: %ls", INI `Crash.DumpType` Mini/Full, L34881-34884 | R-004
+- Behaviour:
+  - Writes `$XDG_STATE_HOME/tasklens/dumps/<name>_<pid>_<yyyymmdd_hhmmss>.core`.
+  - The process pauses while the core is written. Before a dump of a process with VmRSS over 2 GiB, the confirmation says so. A progress toast "Writing core… 1.2 GiB" shows during the write.
+  - Toast "Dump created: <path>" with an "Open folder" button.
+  - Settings > Processes > "Dump type": Mini (default) or Full (`processes.dump_type = "mini"`).
+  - Without `gdb` installed the item is disabled with the tooltip "Install gdb to create dumps".
+  - Without administrator access: toast "Creating a dump needs administrator rights".
+- Linux data/mechanism:
+  - `gcore -o <path-stem> <pid>` from `/usr/bin/gcore`.
+  - Mini uses the process's own `/proc/<pid>/coredump_filter`. Full writes `0x1ff` to it for the duration and restores it afterwards.
+  - With `ptrace_scope = 1` (this machine) a non-descendant needs CAP_SYS_PTRACE, so the helper runs `Dump { key, mode, out_fd }`: gcore by fixed path, writing to a file descriptor that tasklens opened, so the file belongs to the user.
+  - With `ptrace_scope = 0` and the same UID, tasklens runs gcore directly.
+- Verdict: ADAPT (MiniDump becomes a gcore core file)
+- Phase: P3
+- Privilege: CAP_SYS_PTRACE through the helper.
+
+### PROC-076 Privileged helper for process operations
+- Was: v1 PROC-003; r2 PROC-064
+- Source: TS shield "relaunch elevated" L30127 | MC `PL:processes/manager.rs:29-110` (pkexec kill) | APP-003 | ADR-006 | R-001 to R-004
+- Behaviour:
+  - The first privileged request (the shield, "Retry as administrator", "Grant access", "Search all" or the status-bar restricted count) shows one polkit prompt. tasklens never relaunches the GUI as root.
+  - While a helper session is active, the shield shows `shield-hi` (APP-003) and the status bar shows a badge "Administrator mode"; clicking either ends the session.
+  - Restricted cells fill in: Handles, I/O, Disk, Image path, Network attribution, PSS, USS, Working directory, Memory maps and Environment. Helper reads of restricted fields run at 1 Hz, only while those columns or windows are shown.
+  - Without the helper installed, privileged items are disabled with the tooltip "Needs administrator helper (not installed)".
+- Linux data/mechanism:
+  - `pkexec /usr/lib/tasklens/tl-helper --session`, polkit `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`), policy file `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`.
+  - Transport: stdin and stdout with `tl-model::wire` framing, 64 KiB frames, multi-frame replies capped at 4 MiB per request. Idle exit after 300 s or on stdin EOF. `PR_SET_PDEATHSIG = SIGKILL`. No `--once` mode.
+  - Process operations used by this area: `Signal`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`, `FreezeGroup`, `ThawGroup`, `KillGroup`, `ReadProcessDetail`, `ReadProcessFiles { key, files ⊆ {io, fd_list, fdinfo, environ, maps, smaps_rollup, ns, cwd, exe, status} }`, `ScanStrings { key, opts }`, `Dump { key, mode, out_fd }`, `ResolveSocketInodes { inodes }`.
+  - No path, command or free-form file argument. The helper re-runs `open_verified` on every process target.
+  - The eBPF collector `tl-netmon` is a separate binary with its own polkit action (P4).
+- Verdict: ADAPT (a pkexec helper instead of an elevated GUI)
+- Phase: P3
+- Privilege: root through pkexec. Fallback: Restricted states and "Retry as administrator" buttons.
