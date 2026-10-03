@@ -2009,3 +2009,223 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: BUILD
 - Phase: P1 (frame rule), P2 (skeletons with the P2 tabs)
 - Privilege: none
+
+# Summary table
+
+| ID | Name | Verdict | Phase |
+|---|---|---|---|
+| SYS-001 | Services tab, two systemd managers | ADAPT | P2 |
+| SYS-002 | Unit types shown | ADAPT | P2 |
+| SYS-003 | Services columns | ADAPT | P2 (resource columns P2) |
+| SYS-004 | State filters and filter strip | BUILD | P2 |
+| SYS-005 | Live updates and job tracking | ADAPT | P2 |
+| SYS-006 | Start, Stop, Restart, Reload, Reset failed | BUILD | P2 |
+| SYS-007 | Startup type changes (enable, disable, mask) | ADAPT | P2 |
+| SYS-008 | Services context menu | ADAPT | P2 |
+| SYS-009 | Copy formats (services) | BUILD | P2 |
+| SYS-010 | Jump between services and processes | BUILD | P2 |
+| SYS-011 | Service Properties window: frame and General tab | ADAPT | P2 |
+| SYS-012 | Service Properties: Log On tab | ADAPT | P2 |
+| SYS-013 | Service Properties: Recovery tab | ADAPT | P2 view, P3 edit |
+| SYS-014 | Service Properties: Dependencies tab | ADAPT | P2 |
+| SYS-015 | Service logs (journal) | ADAPT | P2 |
+| SYS-016 | Services status bar and loading state | BUILD | P2 |
+| SYS-017 | Services sort and column persistence | BUILD | P2 |
+| SYS-018 | OpenRC backend | BUILD | P4 |
+| SYS-019 | Startup sources and precedence | ADAPT | P2 |
+| SYS-020 | Startup columns and values | ADAPT | P2 |
+| SYS-021 | Startup impact | ADAPT | P2 |
+| SYS-022 | Enable and disable | ADAPT | P2 |
+| SYS-023 | Run now | ADAPT | P2 |
+| SYS-024 | Delete entry | ADAPT | P2 |
+| SYS-025 | Startup context menu, copy and open | BUILD | P2 |
+| SYS-026 | Startup Properties window | ADAPT | P2 |
+| SYS-027 | Startup status bar, sort and persistence | BUILD | P2 |
+| SYS-028 | Connection inventory | ADAPT | P2 |
+| SYS-029 | Connection columns, address formats, states | ADAPT | P2 |
+| SYS-030 | Owning process attribution | ADAPT | P2 (own processes), P3 (helper for others) |
+| SYS-031 | Close TCP connection | ADAPT | P3 (needs tl-helper) |
+| SYS-032 | Connections context menu and copy formats | BUILD | P2 |
+| SYS-033 | Jump to owning process | BUILD | P2 |
+| SYS-034 | Connection Properties window | ADAPT | P2 |
+| SYS-035 | Remote host name column | ADAPT | P4 |
+| SYS-036 | Connections status bar, filter, sort, refresh | BUILD | P2 |
+| SYS-037 | Other network namespaces | ADAPT | P4 |
+| APP-001 | Window decorations (client-drawn title bar by default) | BUILD | P1 |
+| APP-002 | Title bar layout and toolbar | ADAPT | P1 |
+| APP-003 | Shield: unlock privileged actions | ADAPT | P3 |
+| APP-004 | Hide system processes button | ADAPT | P1 |
+| APP-005 | View mode button | BUILD | P1 |
+| APP-006 | Window picker "+" | ADAPT | P3 |
+| APP-007 | Update badge | DROP | P4 (recorded as dropped) |
+| APP-008 | Caption buttons | BUILD | P1 (pin P2) |
+| APP-009 | Always on top and the pin | ADAPT | P2 |
+| APP-010 | Size, minimum size and geometry restore | ADAPT | P1 |
+| APP-011 | Single instance | ADAPT | P1 |
+| APP-012 | File menu | ADAPT | P1 (Exit), later items in their own phase |
+| APP-013 | Run Installer item | DROP | P4 (recorded) |
+| APP-014 | Run dialog (window frame and privilege path) | ADAPT | P2 |
+| APP-015 | Search File Handles window (frame) | ADAPT | P3 |
+| APP-016 | Launch other system monitor | ADAPT | P4 |
+| APP-017 | View menu structure | BUILD | P1 (Columns, Process View, Window, Graphs), P2 (Appearance, Theme) |
+| APP-018 | View > Columns (all tables) | BUILD | P1 |
+| APP-019 | View > Process View | BUILD | P1 |
+| APP-020 | View > Window | ADAPT | P2 (Always On Top), P3 (Performance mini window) |
+| APP-021 | View > Graphs | BUILD | P1 (graph checks and Reset, with the system minigraph cards, PERF-086 and table a), P3 (Keep detached graphs open) |
+| APP-022 | Settings menu | ADAPT | P1 (Refresh, units, Default tab, Close with Esc, motion items), others in their feature's phase |
+| APP-023 | Settings window ("All settings…") | ADAPT | P2 |
+| APP-024 | Help menu | ADAPT | P2 (Additional setup… P3, Documentation P4) |
+| APP-025 | Purchase license, Enter license, early-bird notice | DROP | P4 (recorded) |
+| APP-026 | Debug menu | ADAPT | P4 (Show FPS in P1 as a developer-only flag) |
+| APP-027 | Tab bar and tab animation | BUILD | P1 (animation P2) |
+| APP-028 | Filter box | BUILD | P1 |
+| APP-029 | Status bar | ADAPT | P1 |
+| APP-030 | Keyboard Shortcuts window | BUILD | P2 |
+| APP-031 | Keyboard shortcuts | ADAPT | P1 (Global, Table and ProcessTable keys), P2 (ServiceTable, Performance extras, RunDialog), P3 (Ctrl+Shift+M, History scrubber, Picker, Shift at launch) |
+| APP-032 | Settings registry (every setting) | ADAPT | P1 (store and the keys of P1 features), each other key with its feature |
+| APP-033 | Settings persistence | ADAPT | P1 |
+| APP-034 | Import TaskSlinger settings and themes | ADAPT | P4 |
+| APP-035 | Built-in themes and colour slots | BUILD | P1 (Default Dark, Default Light), P2 (the other 10) (R-068) |
+| APP-036 | Theme menu and follow system light/dark | ADAPT | P2 |
+| APP-037 | Theme editor | BUILD | P3 |
+| APP-038 | Theme share and import codes | ADAPT | P3 |
+| APP-039 | Graph accent colours | BUILD | P3 |
+| APP-040 | Appearance sliders | BUILD | P2 (Ctrl+Plus/Minus/0 with the global keys in P1) |
+| APP-041 | System Information (Mission Center dialog) | ADAPT | P2 |
+| APP-042 | Additional Setup window | ADAPT | P3 |
+| APP-043 | Language and live locale change | ADAPT | P1 (key system and English), P4 (other locales) |
+| APP-044 | Toasts | BUILD | P1 |
+| APP-045 | Dialogs as separate pinnable windows | BUILD | P1 (frame), others with their features |
+| APP-046 | Rendering GPU choice | ADAPT | P4 |
+| APP-047 | Main tray icon and close/minimize to tray | ADAPT | P3 |
+| APP-048 | Start at login | ADAPT | P2 |
+| APP-049 | Privilege settings (unlock at launch, passwordless) | ADAPT | P3 (unlock at launch), P4 (passwordless) |
+| APP-050 | Updater, installer and related items | DROP | P4 (recorded) |
+| APP-051 | Open tasklens with Ctrl+Esc (KDE) | ADAPT | P4 |
+| APP-052 | Command-line arguments | ADAPT | P1 (`--tab`, `--select-pid`, `--version`, `--help`, `--bench`), P2 (`--start-minimized`), P3 (`--low-memory`, `--watch-memory`, `--force-full-memory-mode`), P4 (`--app-id`, `--debug`) |
+| APP-053 | About window | ADAPT | P2 |
+| APP-054 | Logging | ADAPT | P1 |
+| APP-055 | Crash handling and fatal errors | ADAPT | P1 |
+| APP-056 | Public IP fetch notice | BUILD | P2 |
+| APP-057 | NVIDIA G-SYNC profile | DROP | P4 (recorded) |
+| APP-058 | Accessibility and reduced motion | ADAPT | P2 (scale-from-font default P4) |
+| APP-059 | Loading placeholders | BUILD | P1 (frame rule), P2 (skeletons with the P2 tabs) |
+
+# Old ID to new ID map
+
+Every ID in `features-sys-app.md`. There are no old SYS-019 or SYS-029.
+
+| Old ID | New ID |
+|---|---|
+| APP-001 | APP-001 |
+| APP-002 | APP-002 |
+| APP-003 | APP-003 |
+| APP-004 | APP-004 |
+| APP-005 | APP-005 |
+| APP-006 | APP-006 |
+| APP-007 | APP-007 |
+| APP-008 | APP-008 |
+| APP-009 | APP-009 |
+| APP-010 | APP-010 |
+| APP-011 | APP-011 |
+| APP-012 | APP-012 |
+| APP-013 | APP-013 |
+| APP-014 | APP-014 |
+| APP-015 | APP-015 |
+| APP-016 | APP-016 |
+| APP-017 | APP-017 |
+| APP-018 | APP-018 |
+| APP-019 | APP-019 |
+| APP-020 | APP-020 |
+| APP-021 | APP-021 |
+| APP-022 | APP-022 |
+| APP-023 | APP-023 |
+| APP-024 | APP-024 |
+| APP-025 | APP-025 |
+| APP-026 | APP-026 |
+| APP-027 | APP-027 |
+| APP-028 | APP-028 |
+| APP-029 | APP-029 |
+| APP-030 | APP-030 |
+| APP-031 | APP-031 |
+| APP-032 | APP-032 |
+| APP-033 | APP-033 |
+| APP-034 | APP-034 |
+| APP-035 | APP-035 |
+| APP-036 | APP-036 |
+| APP-037 | APP-037 |
+| APP-038 | APP-038 |
+| APP-039 | APP-039 |
+| APP-040 | APP-040 |
+| APP-041 | APP-041 |
+| APP-042 | APP-042 |
+| APP-043 | APP-043 |
+| APP-044 | APP-044 |
+| APP-045 | APP-045 |
+| APP-046 | APP-046 |
+| APP-047 | APP-047 |
+| APP-048 | APP-048 |
+| APP-049 | APP-049 |
+| APP-050 | APP-050 |
+| APP-051 | APP-051 |
+| APP-052 | APP-052 |
+| APP-053 | APP-053 |
+| APP-054 | APP-054 |
+| APP-055 | APP-055 |
+| APP-056 | APP-056 |
+| APP-057 | APP-057 |
+| APP-058 | APP-058 |
+| APP-059 | APP-059 |
+| SYS-001 | SYS-001 |
+| SYS-002 | SYS-002 |
+| SYS-003 | SYS-003 |
+| SYS-004 | SYS-004 |
+| SYS-005 | SYS-005 |
+| SYS-006 | SYS-006 |
+| SYS-007 | SYS-007 |
+| SYS-008 | SYS-008 |
+| SYS-009 | SYS-009 |
+| SYS-010 | SYS-010 |
+| SYS-011 | SYS-011 |
+| SYS-012 | SYS-012 |
+| SYS-013 | SYS-013 |
+| SYS-014 | SYS-014 |
+| SYS-015 | SYS-015 |
+| SYS-016 | SYS-016 |
+| SYS-017 | SYS-017 |
+| SYS-018 | SYS-018 |
+| SYS-020 | SYS-019 |
+| SYS-021 | SYS-020 |
+| SYS-022 | SYS-021 |
+| SYS-023 | SYS-022 |
+| SYS-024 | SYS-023 |
+| SYS-025 | SYS-024 |
+| SYS-026 | SYS-025 |
+| SYS-027 | SYS-026 |
+| SYS-028 | SYS-027 |
+| SYS-030 | SYS-028 |
+| SYS-031 | SYS-029 |
+| SYS-032 | SYS-030 |
+| SYS-033 | SYS-031 |
+| SYS-034 | SYS-032 |
+| SYS-035 | SYS-033 |
+| SYS-036 | SYS-034 |
+| SYS-037 | SYS-035 |
+| SYS-038 | SYS-036 |
+| SYS-039 | SYS-037 |
+
+# Still open
+
+Each item has a recommended answer. Beads use it until Oystein decides otherwise.
+
+| # | Question | Entry | Recommended answer |
+|---|---|---|---|
+| O-1 | Table (a) keeps `column_resize`, `column_separators` and `dim_zero_values` under `[processes]`, but View > Columns works on every table. Do the keys apply to all tables? | APP-018, APP-032 | Yes. One key each, applied to every table. No per-table keys. |
+| O-2 | R-046 drops the X11 EWMH fallback for window features. Does that drop the X11 path of the window picker too? | APP-006 | Yes. Drop it in v1; the "+" button is hidden without the KWin bridge. |
+| O-3 | Corner radius: ADR-009 says 5 × ui_scale for everything; the source says 4 px for rows and menus and 6 px for cards. | APP-040 | Use 4 px and 6 px times the UI scale (TaskSlinger look), and update ADR-009 `UiMetrics.radius`. |
+| O-4 | About window title: "tasklens About" (APP-045 naming pattern) or "About tasklens" (source APP-053). | APP-045, APP-053 | "tasklens About", to match the other window titles. The Help item stays "About tasklens…". |
+| O-5 | TaskSlinger `TS1.` theme code encoding is inferred (U-17). | APP-038 | Generate one code under Wine and decode it. If that fails, import only `TL1.` codes and raw JSON. |
+| O-6 | Does kglobalaccel `setForeignShortcutKeys` stick for a launch component that is not running (U-16)? | APP-051 | Test on Plasma 6. Fallback: write `kglobalshortcutsrc` and ask the user to log out and back in. |
+| O-7 | Number formats per locale: table (d) gives en-US forms; APP-043 says formats follow the locale. | APP-043 | Ship en-US forms until P4. With the P4 locales, only the decimal and grouping characters follow the locale; units and patterns stay. |
+| O-8 | Startup Apps refresh: ADR-008 reads startup entries on page open and on `RefreshNow`; the source adds inotify live refresh. | SYS-019 | Keep inotify only while the tab is open, as written. Note it in ADR-008. |
+| O-9 | Inferred strings with no source: decorations restart toast "Restart tasklens to apply the title bar change"; titles "tasklens Keyboard Shortcuts" and "tasklens Theme Editor"; generic confirm window title "tasklens"; graph colour stored as the lower-case name. | APP-001, APP-030, APP-037, APP-039, APP-045 | Use them as written. |
