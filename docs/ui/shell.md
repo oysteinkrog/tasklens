@@ -128,7 +128,7 @@ WindowOptions {
 - **Anatomy** (height 34, bg `titlebar`; x positions measured on `processes.png` at 1360 px width):
 
 ```text
-|12|16|8| File |1| View |1| Settings |1| Help |1|4|[◈][▦][☰][+]|  drag area (flex)  |[pin][ — ][ □ ][ × ]|
+|12|16|8| File |1| View |1| Settings |1| Help |1|4|[◈][▦][☰][+]|  drag area (flex)  |[pin][ - ][ □ ][ × ]|
  pad ic gap  menu buttons h=26, px=16, t_md     sep  toolbar 30×28, gap 2          caption 36×34 each
 ```
 
@@ -560,7 +560,7 @@ x=0
   | 1 | Run... | Ctrl+N | `OpenRunDialog` | P2 | Opens or focuses "tasklens Run" (UI-SHL-097) |
   | 2 | Search File Handles... | | `OpenHandleSearch` | P3 | Opens or focuses "tasklens Handle Search" (UI-SHL-098) |
   | 3 | Open System Monitor | | `OpenSystemMonitor` | P4 | Hidden when none of `plasma-systemmonitor`, `gnome-system-monitor`, `missioncenter` is on `PATH` (checked once at startup, cached). Failure toast (Error) "Failed to launch System Monitor" [S] |
-  | — | separator | | | P2 | Only when an item above it exists |
+  | sep | separator | | | P2 | Only when an item above it exists |
   | 4 | Exit tasklens | Ctrl+Q | `Quit` | P1 | Quits even with tray settings on (UI-SHL-113) |
 
   - There is no "Run Installer" item (APP-013 DROP).
@@ -590,7 +590,7 @@ x=0
   | 3 | Resize Behavior | submenu | | |
   | 3a | Proportional | radio | `SetSetting { TablesColumnResize, "proportional" }` | |
   | 3b | Last Column | radio | `SetSetting { TablesColumnResize, "last_column" }` | |
-  | — | separator | | | |
+  | sep | separator | | | |
   | 4 | Reset to default | item | `ResetColumns { table }` | Toast (Info) "Columns reset to default" [S] |
 
   - "Hide This Column" is only in the header right-click menu [S], which the table specs own.
@@ -607,10 +607,10 @@ x=0
   | 1 | Tree View | radio | `processes.mode = tree` | `SetViewMode(Tree)` |
   | 2 | Task Manager Grouping | radio | `grouped` | `SetViewMode(Grouped)` |
   | 3 | List View | radio | `flat` | `SetViewMode(Flat)` |
-  | — | separator | | | |
+  | sep | separator | | | |
   | 4 | Tree Connector Lines | check | `processes.tree_guide_lines` | `ToggleSetting(ProcessesTreeGuideLines)` |
   | 5 | Highlight New and Exited Processes | check | `processes.highlight_new_exited` | `ToggleSetting(ProcessesHighlightNewExited)` |
-  | — | separator | | | |
+  | sep | separator | | | |
   | 6 | Collapse all | item (Ctrl+L) | | `CollapseAll` (Table context) |
 
   - `SetViewMode` writes the key and pushes the same toast as the cycler ("View mode: Tree View") [C, consistent with UI-SHL-013].
@@ -677,12 +677,12 @@ x=0
   |---|---|---|---|
   | 1..12 | Default Dark, Vivid Nightfall, Catppuccin Frappé, Catppuccin Macchiato, Catppuccin Mocha, Dracula, OLED Black, Default Light, Windows 7 Aero, Golden Summer Fields, Soft Pink Delight, Catppuccin Latte | theme row (radio) | `SetTheme(name)` |
   | 13.. | custom themes from `themes.json`, in file order | theme row (radio) | `SetTheme(name)` |
-  | — | separator | | |
+  | sep | separator | | |
   | | Create copy | item | `CopyTheme(active)` |
   | | Edit colors | item | `EditTheme(active)` |
   | | Share theme | item | `ShareTheme(active)` |
   | | Delete theme | item | `DeleteTheme(active)` |
-  | — | separator | | |
+  | sep | separator | | |
   | | Import theme | item | `ImportTheme` |
   | | Sync theme with system | check (`theme.follow_system`) | `ToggleSetting(ThemeFollowSystem)` |
   | | Preferred Light Theme | submenu: every theme name as radio (`theme.light`) | `SetSetting { ThemeLight, name }` |
@@ -723,7 +723,7 @@ x=0
   | 5 | GPU Graph | check | `graphs.minigraph_gpu` | P1 |
   | 6 | VRAM Graph | check | `graphs.minigraph_vram` | P1 |
   | 7 | GPU Temperature Graph | check | `graphs.minigraph_gpu_temperature` | P1 |
-  | — | separator | | | |
+  | sep | separator | | | |
   | 8 | Keep detached graphs open when closing main window | check | `graphs.keep_detached_on_close` | P3 |
   | 9 | Reset Minigraph Layout | item | `ResetMinigraphLayout`; toast (Success) "Minigraph layout reset" [S] | P1 |
 
@@ -761,7 +761,7 @@ x=0
   | | Auto-fetch Public IP on launch | check | `network.auto_fetch_public_ip` | P2 |
   | | Open rescue window on critical memory pressure | check | `lowmem.enabled` | P3 |
   | **Language** | Language: | submenu radio: System default, then the locales by their own names (UI-SHL-131) | `general.language` | P1 (P4 for locales other than English) |
-  | — | separator | | | |
+  | sep | separator | | | |
   | | All settings… | item, Ctrl+, | `OpenSettings` | P2 |
   | | Reset Settings to Defaults | item | `ResetSettings` (UI-SHL-091 confirm) | P1 |
 
@@ -789,7 +789,7 @@ x=0
   | 2 | System Information… | | `OpenSystemInformation`: selects the Information tab and scrolls to the "Operating System" section [S APP-041] | P2 |
   | 3 | Additional setup… | | `OpenAdditionalSetup` (UI-SHL-094) | P3 |
   | 4 | Documentation | | `OpenDocumentation`: `xdg-open /usr/share/doc/tasklens/README.md` through the shared launcher; failure Error toast "Could not open the documentation" [C] | P4 |
-  | — | separator | | | P2 |
+  | sep | separator | | | P2 |
   | 5 | About tasklens… | | `OpenAbout` (UI-SHL-092) | P2 |
 
   - In P1 the Help menu button is absent because it has no items [C, from the "no dead items" rule].
@@ -808,7 +808,7 @@ x=0
   | 2 | Continuous rendering | check (session only) | `ToggleContinuousRendering` | Requests a frame every vsync through `request_animation_frame` on the main window (debug only) [S] |
   | 3 | Enable all columns | item | `EnableAllColumns` | Makes every column of the active table visible; Info toast "All columns enabled" [C] |
   | 4 | Add random process minigraphs | item | `AddRandomMinigraphs` | Toasts "Added %ld random process minigraphs." / "No process minigraphs available." [S] |
-  | — | separator | | | |
+  | sep | separator | | | |
   | 5 | Collector health | item | `OpenCollectorHealth` | UI-SHL-099 |
 
 - **Phase**: P4 (menu); "Show FPS" exists from P1 as a developer flag reachable by `--debug` [S].
@@ -833,7 +833,7 @@ x=0, bottom=0
 ```
 
   - Position: absolute, left 0, bottom 0 of the page area [M].
-  - Height 26 [M 27 including border] [C rounded to 26]. Padding-x 12 (`sp5`) [M text starts at x 6.5 logical from the 1 px border, measured 7]: use left padding 8 (`sp4`) and right padding 12 [C].
+  - Height 26 [M 27 including the border; C rounded to 26]. Left padding 8 (`sp4`) [M text starts 7 px from the left edge], right padding 12 (`sp5`) [C].
   - Background `tab_bg` [M #202224]; border 1 physical px `divider` on top and right sides only [M]; top-right corner radius `r_md` [M].
   - Text `t_sm` [C from M cap height] in `text_primary`, tabular figures for the counts.
   - Segments, separated by " | " in `text_secondary` [S PROC-051 " | "]:
@@ -891,7 +891,7 @@ x=0, bottom=0
   - Default size 900 × 640, minimum 720 × 480 [C]. Opens centred on the main window where the compositor allows (Wayland places it; tasklens requests no position) [C].
   - Frame: `TlWindowFrame` (UI-SHL-090) with title, pin and close.
   - Body: gpui-kit `Settings::new("settings").sidebar_width(px(220.))` [S widget; C width]: left sidebar with a search field on top and the page list, right the active page.
-  - Pages in order [S]: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced. Page icons (Lucide, 16): `settings`, `palette`, `activity`, `scaling`, `list-tree`, `gauge`, `chart-area` (falls back to `activity` if missing) [C], `cog` → use `settings-2`, `app-window`, `shield`, `sliders-horizontal`.
+  - Pages in order [S]: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced. Page icons (Lucide, 16), in page order [C]: `settings`, `palette`, `activity`, `scaling`, `list-tree`, `gauge`, `chart-area`, `server`, `app-window`, `shield`, `sliders-horizontal`.
   - Page content: groups (`SettingGroup` with a title, `t_sm` semibold `text_secondary`), items (`SettingItem` title `t_base` `text_primary`, description `t_sm` `text_secondary`), control at the right.
 - **Rules**:
   - Every key of `settings.toml` in table (a) appears exactly once, with the same label as its menu item where one exists [S]. `state.toml` keys never appear [S].
