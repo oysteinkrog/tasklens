@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "mcp-agent-mail": { "type": "http", "url": "http://127.0.0.1:4809/mcp/" }
+  }
+}
