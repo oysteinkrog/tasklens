@@ -455,6 +455,8 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ## Owner questions
 
+Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
+
 Only choices that no rule settles. Beads use the recommended answer until Oystein says otherwise.
 
 ### Q-1 Show DIMM serial numbers?

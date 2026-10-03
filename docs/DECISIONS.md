@@ -2,6 +2,29 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-03
+
+These answer the owner questions in `docs/RECONCILIATION.md`.
+
+### D-010: History mode shows the last 10 minutes when recording is off
+
+While recording is off, tasklens keeps a rolling 10-minute window of process history in RAM, only
+while the Processes tab is open. History mode shows that window. This overrides R-025 and restores
+r2 PROC-074. Turning recording on still switches to the ADR-012 store.
+
+### D-009: A single End Process on your own process does not ask first
+
+End Process (SIGKILL) on one of your own, unprotected processes shows only the toast "End process
+requested." End Process Tree, Kill App, multi-select and protected processes still ask.
+
+### D-008: Enter opens Properties on a process row
+
+Enter, Ctrl+I and Alt+Enter open Properties. Space toggles expand.
+
+### D-007: Memory module serial numbers are hidden everywhere
+
+Not on the Memory page, the Information tab or in any copy text. The udev serial key is not read.
+
 ## 2026-10-02
 
 ### D-006: tasklens draws its own title bar by default
