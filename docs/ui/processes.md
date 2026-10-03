@@ -54,7 +54,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 | sort arrow | 12 wide, `sp1` after the label | spec PROC-023 (12 px reservation) |
 | resize handle hit width | 8 (4 each side of the boundary) | decided |
 | scrollbar width | 12 | decided |
-| menu item height | 28, min width 240 | decided (measured menu pitch = row pitch) |
+| menu item height | 26, min width 240 | foundation (TlMenu); measured TaskSlinger pitch is 28 |
 | tooltip delay | 600 ms rows, 500 ms controls | spec PROC-039, kit default |
 
 ---
@@ -494,7 +494,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 ### UI-PRC-006 Header context menu
 
 - **Implements**: PROC-026; PROC-022 (Name cannot be hidden); PROC-025 (resize behaviour).
-- **Anatomy**: `TlMenu` opened at the pointer, min width 240, item height 28, `menu_bg`, hover
+- **Anatomy**: `TlMenu` opened at the pointer, min width 240, item height 26, `menu_bg`, hover
   `menu_hover`, text `t_base`:
 
   | # | Item | Kind | Action | Disabled when |
@@ -845,7 +845,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   labels), PROC-054, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-071, PROC-072, PROC-073,
   PROC-074; R-033, R-034, R-091.
 - **Anatomy**: `TlMenu` (`PopupMenu`) opened at the pointer (or at the focus row for
-  Shift+F10), min width 240, max width 360, item height 28, padding `sp2` 4 vertical, text
+  Shift+F10), min width 240, max width 360, item height 26, padding `sp2` 4 vertical, text
   `t_base` `text_primary`, disabled `text_secondary`, hover `menu_hover`, separators 1 px
   `divider` with `sp2` margins, submenu chevron `ChevronRight` 12 px, `Kbd` hints right-aligned
   `text_secondary`. Items, in order, with the rule for each row type. "P" = process row, "A" =
@@ -1176,7 +1176,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-065, PROC-066, PROC-068, PROC-069 (check marks for multi-select),
   PROC-093, PROC-094 (column submenus).
-- **Anatomy**: `TlMenu` submenus, item height 28, check marks (Lucide `Check` 14 px) on the
+- **Anatomy**: `TlMenu` submenus, item height 26, check marks (Lucide `Check` 14 px) on the
   left in place of the icon:
   - **Send Signal >**: Terminate (TERM) (ends process), Kill (KILL) (ends process), Hangup (HUP)
     (ends process), Interrupt (INT) (ends process), Quit (QUIT) (ends process), Stop (STOP),
@@ -1184,9 +1184,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     "Other signals >" with ABRT 6, ALRM 14, BUS 7, CHLD 17, FPE 8, ILL 4, IO/POLL 29, PIPE 13,
     PROF 27, PWR 30, SEGV 11, STKFLT 16, SYS 31, TRAP 5, TSTP 20, TTIN 21, TTOU 22, URG 23,
     VTALRM 26, WINCH 28, XCPU 24, XFSZ 25 as "ABRT (6) (ends process)" where the default action
-    terminates, then "Real-time signal…" which opens a small `TlDialog` with a `TlInput` number
-    field 34..64 labelled "Signal number (SIGRTMIN+0 = 34)", buttons Send (primary) and Cancel.
-    Action `SendSignal { signo }`. The "(ends process)" suffix is `text_secondary`.
+    terminates, then "Real-time signal…" which opens the dialog UI-PWN-027 (process-windows.md).
+    Action `SendSignal { signo }`. The "(ends process)" suffix is `text_secondary`. Toasts and
+    the kernel-thread disabled rule: UI-PWN-026, which lists the same signals.
   - **Set Priority >**: Realtime, High, Above normal, Normal, Below normal, Low, Idle,
     separator, Custom…; the current class is checked (multi-select: checked only when all
     targets share it). Realtime and Idle and Custom are P2 and hidden before. Tooltip on the
@@ -1212,58 +1212,29 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Tests**: `signal_menu_lists_all_and_marks_terminating`, `priority_check_only_when_all_share`,
   `ioprio_realtime_disabled_without_helper`.
 - **Phase**: P1 (priority classes High to Low), P2 (rest), P3 (graph submenus).
-- **Decided here**: note lines as disabled first items; "Already added" state; RT dialog layout.
+- **Decided here**: note lines as disabled first items; "Already added" state.
 
-### UI-PRC-021 Set Affinity dialog and Custom priority dialog
+### UI-PRC-021 Set Affinity and Custom priority dialogs (owned by process-windows.md)
 
-- **Implements**: PROC-067 (Set Affinity), PROC-066 (Custom…), PROC-069 (mixed marks).
-- **Anatomy** (a): Set Affinity, `TlWindow` modal-less dialog through `open_dialog`, width 520,
-  title "Set Affinity - firefox (PID 4321)" (multi: "Set Affinity - 3 processes"):
-
-  ```text
-  ┌ Set Affinity - firefox (PID 4321) ───────────────────── ✕ ┐
-  │ [✓] All processors                                          │  TlCheckbox row 28
-  │ CCD 0: CPU 0-7, 16-23                                       │  group heading t_sm text_secondary
-  │ [✓]CPU 0 [✓]CPU 16  [✓]CPU 1 [✓]CPU 17  [✓]CPU 2 [✓]CPU 18 … │  grid: 4 pairs per row, pair = SMT siblings side by side
-  │ CCD 1: CPU 8-15, 24-31                                      │
-  │ [✓]CPU 8 [✓]CPU 24  …                                       │
-  │ CPU list: [0-7,16-23                                   ]    │  TlInput, syncs both ways, invalid text turns ring status.danger
-  │ At least one CPU must stay enabled                          │  status.danger t_sm, only when nothing is checked
-  │                                        [Cancel] [OK]        │  OK primary, disabled when nothing checked or text invalid
-  └──────────────────────────────────────────────────────────────┘
-  ```
-
-  Checkbox cells 24 high, label `t_sm`; each pair in a 112 px cell; grid wraps to the dialog
-  width. Intel hybrid: a 12 px `Zap` icon before P-cores and `Leaf` before E-cores (decided
-  icons). Multi-select mixed marks: `TlCheckbox` has no indeterminate state in the kit, so a
-  mixed CPU draws a filled square `Minus` glyph in the box (custom paint in `TlCheckbox`
-  foundation variant `mixed`); clicking a mixed box checks it for all targets.
-  (b) Custom priority, `open_dialog`, width 448, title "Set Priority - <name>": `TlSlider` "Nice"
-  −20..19 step 1 with the value label; `TlSelect` "Policy" OTHER, BATCH, IDLE, FIFO, RR; `TlInput`
-  number "RT priority" 1..99 enabled only for FIFO and RR; note `t_sm` `text_secondary`
-  "Lowering nice below 0 and realtime policies need administrator access."; buttons Cancel and
-  OK (primary; danger when FIFO or RR, after the UI-PRC-014 realtime confirmation).
-- **States**: valid, nothing checked (OK disabled, message shown), invalid list text, mixed
-  marks (multi), applying (OK shows a spinner for at most 2 s, then the dialog closes and the
-  toast reports), error (dialog stays open with the toast).
-- **Interaction**: Tab order: All processors, grid, list field, Cancel, OK; Space toggles; Enter
-  on a valid dialog triggers OK (here Enter is allowed, decided: not destructive); Esc cancels.
-  OK dispatches `SetAffinity { mask }` / `SetSched { policy, rt_prio }` or `SetNice { n }`
-  with the captured targets.
-- **Data binding**: current masks from `sched_getaffinity` per target (engine detail request),
-  topology (`cache/index3/shared_cpu_list`, `thread_siblings_list`), `cpuset.cpus.effective`
-  limit (CPUs outside it are disabled with tooltip "Not in this cgroup's cpuset").
-- **Build**: `pages/processes/affinity_dialog.rs`, `priority_dialog.rs`; kit `Dialog` with a
-  custom footer (`DialogFooter`, `DialogClose`, `DialogAction`).
-- **Performance**: n/a.
-- **Accessibility**: every box labelled "CPU n"; the list field is the fast path; error text is
-  text.
-- **Tests**: `affinity_grid_groups_by_l3_and_pairs_smt`, `affinity_list_and_grid_stay_in_sync`,
-  `affinity_ok_disabled_when_empty`, `affinity_mixed_marks_for_multi`, `custom_priority_rt_field
-  _enabled_only_for_fifo_rr`.
-- **Phase**: P1 (affinity, one target); P2 (mixed marks, custom priority).
-- **Decided here**: dialog sizes and titles, pair cell width, hybrid icons, mixed-mark glyph,
-  Enter allowed.
+- **Implements**: PROC-066 (Custom…), PROC-067 (Set Affinity), PROC-069 (mixed marks), by
+  reference.
+- **Specification**: the dialogs are specified in `docs/ui/process-windows.md`: Set Affinity for
+  one target UI-PWN-021 (modal window "tasklens Set Affinity", width 640, SMT pairs stacked in
+  72 × 52 core tiles, 8 per row, hybrid icons app SVGs `cpu-pcore` and `cpu-ecore`), multi-target
+  mixed marks UI-PWN-022 (`TlCheckbox` indeterminate, UI-FND-011), Custom priority UI-PWN-023
+  ("tasklens Set Priority", button "Set priority"). This file only wires them:
+  - `SetAffinity` from the row menu (UI-PRC-013 item 7) and from the Properties General tab
+    opens UI-PWN-021 with the captured targets; two or more targets open UI-PWN-022.
+  - `Set Priority > Custom…` (UI-PRC-020) opens UI-PWN-023 with the captured targets.
+  - Current masks come from `Demand.affinity_targets` → `Snapshot.details`
+    (`DetailsSnapshot.affinity`, bit `DETAILS`, UI-PWN-002).
+  - Results and toasts: UI-PRC-015 (affinity and priority rows).
+  - The Realtime confirmation before FIFO or RR: UI-PRC-014.
+- **Tests**: `set_affinity_action_opens_pwn021_with_captured_targets`,
+  `custom_priority_opens_pwn023`.
+- **Phase**: P1 (one target), P2 (mixed marks, custom priority).
+- **Decided here**: nothing; the earlier geometry in this entry is withdrawn in favour of
+  UI-PWN-021 to UI-PWN-023.
 
 ### UI-PRC-022 Jump target: select a process by identity
 
@@ -1691,7 +1662,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 | UI-PRC-018 | Status bar text | PROC-048, 050, 051, 076 | P1 (P3 parts) |
 | UI-PRC-019 | Processes toolbar buttons | PROC-015, 016, 046, APP-004, APP-005 | P1 |
 | UI-PRC-020 | Submenus: signal, priority, I/O priority, graphs | PROC-065, 066, 068, 069, 093, 094 | P1, P2, P3 |
-| UI-PRC-021 | Set Affinity and Custom priority dialogs | PROC-066, 067, 069 | P1, P2 |
+| UI-PRC-021 | Set Affinity and Custom priority dialogs (wiring; owned by UI-PWN-021 to 023) | PROC-066, 067, 069 | P1, P2 |
 | UI-PRC-022 | Jump target by identity | PROC-055, 071, 088 | P1, P2 |
 | UI-PRC-023 | Performance plan for 2,000 rows | PROC-013, ADR-009, ADR-014 | P0, P1 |
 | UI-PRC-024 | Empty, first-sweep and no-match states | PROC-021, 044, R-060 | P1 |
@@ -1785,8 +1756,8 @@ shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
 
 1. Group header rows are `row_h` tall with a top divider, not TaskSlinger's ≈ 36 px
    (`uniform_list` needs one height). UI-PRC-002.
-2. `header_h` 44, indent 18, chevron 16 always reserved, scrollbar 12 Always, menu item 28, min
-   menu width 240. Shared geometry table.
+2. `header_h` 44, indent 18, chevron 16 always reserved, scrollbar 12 Always, menu item 26
+   (foundation), min menu width 240. Shared geometry table.
 3. Zebra counted over the flattened index; stale cells at 60% opacity; heat quad hidden on the
    selected row; exited icons at 60%. UI-PRC-002, 004, 011.
 4. Glyph icons: `Pause`, `Snowflake`, `Binary`, `Cog`, `Cpu`, `Activity`, `Archive`, `AppWindow`,
@@ -1814,8 +1785,8 @@ shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
 15. Status bar separators, history text, pre-P3 restricted tooltip. UI-PRC-018.
 16. Submenu note lines ("autogroup", "Scheduler: bfq") as disabled first items; "Already added"
     graph items. UI-PRC-020.
-17. Affinity dialog 520 wide, SMT pairs in 112 px cells, mixed-mark glyph, Enter allowed.
-    UI-PRC-021.
+17. Affinity and Custom priority dialogs are owned by process-windows.md (UI-PWN-021 to 023);
+    UI-PRC-021 only wires them.
 18. Jump target leaves History mode. UI-PRC-022.
 19. Column culling for horizontal overflow; in-GPUI fallback order. UI-PRC-023.
 20. Empty-filter text "No processes match the filter" with a "Clear filter" button. UI-PRC-024.
