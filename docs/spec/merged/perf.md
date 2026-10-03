@@ -1113,3 +1113,242 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: The PMU needs `CAP_PERFMON` or `kernel.perf_event_paranoid` ≤ 0. tasklens asks for neither. The fdinfo fallback covers only processes tasklens can read.
+
+## Fans and batteries
+
+### PERF-076 Fan pages
+- Was: v2 PERF-068
+- Source: MC 2.6 Fan
+- Behaviour:
+  - One page per fan: "Fan N" or its label, with the chip name ("nct6797").
+  - Graphs: "Fan speed" (RPM filled; PWM % dashed on a 0 to 100 axis) and "Temperature" (paired sensor, PERF-077).
+  - Rows: Fan speed, PWM %, Control mode (Manual, Automatic, Full speed, from `pwmN_enable`), Temperature, Chip.
+  - A fan that reads 0 RPM for the whole session and has no label counts as not connected. Such fans are hidden by default; "Show disconnected fans" shows them.
+  - On this machine nct6797 has fans 1 to 7 (verified).
+- Linux data/mechanism: `/sys/class/hwmon/hwmon*/{name, fanN_input, fanN_label, fanN_max, pwmN, pwmN_enable}` at 1 Hz while shown or in the sidebar. GPU fans are excluded (PERF-068). Key `performance.show_disconnected_fans = false`.
+- Verdict: BUILD. Display only, no fan control.
+- Phase: P2
+- Privilege: none. Missing Super I/O drivers mean no fans; PERF-108 covers that.
+
+### PERF-077 Fan labels and temperature pairing
+- Was: v2 PERF-069
+- Source: MC per-file override directory | MC same-index temperature pairing
+- Behaviour:
+  - The fan page context menu has "Rename fan…" and "Temperature sensor >", which lists every hwmon temperature with its label and current value. The choice persists per fan key.
+  - Default pairing: the same-index `tempN` on the same chip, but only when the chip has exactly one fan. Otherwise no sensor is chosen and the Temperature graph reads "Choose a sensor".
+- Linux data/mechanism: `settings.toml` `[fans]` table: `"<fan key>" = { label = "...", temp = "<hwmon name>:<path>:tempN" }`.
+- Verdict: ADAPT. Mission Center's config-file overrides become in-app settings. Index pairing is often wrong on Super I/O chips, so tasklens does not pair by default there.
+- Phase: P3
+- Privilege: none
+
+### PERF-078 Battery and power device pages
+- Was: v2 PERF-070
+- Source: MC 2.7 Battery (all UPower kinds)
+- Behaviour:
+  - One page per UPower device except `DisplayDevice` and line power. Here that is the Logitech mouse via HID++ (verified).
+  - Header: the kind ("Mouse", "Battery", "UPS"), then vendor and model.
+  - Graph: "Power input"/"Power output" (W, charge positive, discharge negative) for system batteries; "Percentage" for peripherals.
+  - Rows: Percentage, Energy, Voltage, Power, State, Time to full or Time to empty, Charge cycles, Serial, Type, Powering system, Technology, Capacity, Energy empty, Energy full, Energy full (design), Voltage min and max (design), Charge threshold, Charge start threshold, Charge end threshold, Temperature.
+  - Charge threshold shows "Enabled" or "Disabled" (Mission Center always shows "Yes"). Threshold rows are hidden when unsupported (PERF-013).
+- Linux data/mechanism:
+  - UPower `org.freedesktop.UPower.EnumerateDevices`, `DeviceAdded`/`DeviceRemoved`, `PropertiesChanged`.
+  - Properties: `Percentage`, `Energy`, `EnergyRate`, `Voltage`, `State`, `TimeToFull`, `TimeToEmpty`, `ChargeCycles`, `Serial`, `Type`, `PowerSupply`, `Technology`, `Capacity`, `EnergyEmpty`, `EnergyFull`, `EnergyFullDesign`, `VoltageMinDesign`, `VoltageMaxDesign`, `ChargeThresholdSupported`, `ChargeThresholdEnabled`, `ChargeStartThreshold`, `ChargeEndThreshold`, `Temperature`, `Vendor`, `Model`.
+  - Without UPower: `/sys/class/power_supply/*` (`capacity`, `status`, `energy_now`, `power_now`, `cycle_count`), rescanned every 30 s.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-079 Battery charge history
+- Was: v2 PERF-071
+- Source: MC "Battery Charge over past week" (`GetHistory("charge", 604800)`)
+- Behaviour: A 7-day charge graph with day gridlines and dashed lines across gaps. Shown for system batteries with at least 2 history points.
+- Linux data/mechanism: UPower `Device.GetHistory("charge", 604800, 500)` and `GetHistory("rate", …)`. Refreshed every 10 minutes and when `UpdateTime` changes.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+## Minigraphs and detached graphs
+
+### PERF-080 Minigraph panel and system cards
+- Was: v2 PERF-072, add PERF-086 (system card labels)
+- Source: TS 4.2 (cards VRAM, GPU, Network, Disk, Memory, CPU), View > Graphs toggles, labels "GPU temp", "Total"/"Kernel" (crosscheck A.28)
+- Behaviour:
+  - Floating cards in a grid over the bottom right of the Processes tab, each with a drop shadow (scaled by "Drop Shadow Intensity").
+  - Each card shows its label at top left, the value at top right, and a graph.
+  - System cards and labels: "CPU", "Memory", "Disk", "Network", "GPU", "VRAM", "GPU temp". "GPU temp" is off by default.
+  - The CPU card draws total CPU as a filled area and kernel CPU as a #C1514E line. Its hover tooltip shows a two-line legend, "Total" and "Kernel".
+  - View > Graphs has one checkbox per card: "CPU Graph", "Memory Graph", "Disk Graph", "Network Graph", "GPU Graph", "VRAM Graph", "GPU Temperature Graph" (APP-021).
+  - Card size 180×90 logical px, scaled with UI scale.
+- Linux data/mechanism: Reuses the system series. Disk = aggregate active time (busiest disk). Network = the sum over visible physical interfaces. GPU, VRAM and GPU temp = the first GPU in sidebar order (see open item 2 for choosing another GPU). Keys `graphs.minigraph_cpu`, `minigraph_memory`, `minigraph_disk`, `minigraph_network`, `minigraph_gpu`, `minigraph_vram` (all true) and `minigraph_gpu_temperature = false`. Card layout in `state.toml` `[[minigraphs]]` (`source`, `range_s`, `color`, `slot`, `detached`).
+- Verdict: BUILD
+- Phase: P1 (cards and View > Graphs checkboxes; APP-017 and APP-021 list the Graphs submenu as P3, see open item 6)
+- Privilege: none
+
+### PERF-081 Minigraph card context menu
+- Was: v2 PERF-073
+- Source: TS 4.2 menu (Hide Graph, Time Range, Graph Color, Add tray icon graph)
+- Behaviour: Right-click shows "Hide graph", "Time range >" (30 seconds, 1 minute, 5 minutes, 10 minutes), "Graph color >" (Accent plus 17), "Detach" or "Attach to main window", "Add tray icon graph", and "Reset minigraph layout". A process-source card also has "Remove graph". Per-card range and colour persist.
+- Linux data/mechanism: `state.toml` `[[minigraphs]]` `range_s` (30, 60, 300, 600; 300 and 600 from P2) and `color`.
+- Verdict: BUILD
+- Phase: P1 for hide and range; P3 for colour, detach and tray.
+- Privilege: none
+- Applied: R-016
+
+### PERF-082 Move and reorder cards
+- Was: v2 PERF-074
+- Source: TS "Drag to move", "Reset Minigraph Layout", toasts "No space for more minigraphs", "Minigraph layout reset"
+- Behaviour: Dragging a card moves it to another grid slot; other cards shift. The grid fills from the bottom right, at most 3 rows by 4 columns. Adding a card to a full grid shows the toast "No space for more minigraphs". "Reset minigraph layout" (card menu and View > Graphs) restores the default cards and slots and shows "Minigraph layout reset".
+- Linux data/mechanism: `[[minigraphs]] slot`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-083 Detached graph windows
+- Was: v2 PERF-075
+- Source: TS `TaskSlingerDetachedGraph`, always on top, detached menu (Show Main Window, Close Graph, Exit, Add Graph, Remove Graph)
+- Behaviour:
+  - "Detach", or dragging a card past the window edge, opens it as its own small borderless window. Dragging the window body moves it.
+  - Its context menu: "Show Main Window", "Close graph", "Attach to main window", "Add graph >" (adds another card to the same window), "Remove graph", "Exit tasklens".
+  - On KDE the window is kept above other windows and its position is restored. Elsewhere the compositor places it and it is not kept above. Size and stacked cards persist on every desktop.
+- Linux data/mechanism:
+  - GPUI `open_window` with `WindowKind::Floating`, client decorations, no title bar, `app_id` `io.github.oysteinkrog.Tasklens` (the same app ID, so the desktop file and icon match). Moving uses `start_window_move()`.
+  - The window caption is "tasklens Graph <n>". On KDE the KWin bridge worker (`workers/dbus_kwin.rs`, R-046) finds the window by tasklens's pid and that caption in its `WindowsSnapshot`, then sends one-shot `KWinCommand`s to set `keepAbove` and `frameGeometry`, and reads moves back from the snapshot (inferred: v2's separate `/Scripting loadScript` script and per-window app ID are replaced by the bridge).
+  - Persisted window state needs keys that table (a) does not have yet (open item 1).
+- Verdict: ADAPT. Wayland clients cannot set position or keep-above, so the KWin bridge does it on KDE.
+- Phase: P3 (needs the P2 KWin bridge)
+- Privilege: none
+- Applied: R-046, R-073
+
+### PERF-084 Keep detached graphs open
+- Was: v2 PERF-076
+- Source: TS "Keep detached graphs open when closing main window" (`KeepDetachedOpenOnMainClose`, default 0)
+- Behaviour: View > Graphs > "Keep detached graphs open when closing main window". When on, closing the main window hides it, and the app keeps running while any detached graph is open; "Show Main Window" brings it back. When off, closing the main window closes everything (unless a tray setting keeps the app, APP-047).
+- Linux data/mechanism: Key `graphs.keep_detached_on_close = false`. `on_window_should_close` (ADR-010) checks for open detached windows before calling `cx.quit()`; this is a second exception next to close-to-tray. While hidden, demand comes only from the detached graphs (ADR-008).
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PERF-085 Process-source cards and labels
+- Was: v2 PERF-077, add PERF-086 (process card labels)
+- Source: TS process-specific minigraphs (`ProcessSpecificMiniGraphs`), labels "Process %lu", " by app", " by name" (crosscheck A.28)
+- Behaviour:
+  - Cards whose source is one process (captured identity), a process image name, or an app. They are created from the Processes context menu ("Add Minigraph >", "Add Process Name Graph >", "Add App Name Graph >"), which the process spec owns; this spec owns the card.
+  - Labels: `<name> (<pid>) · CPU`, `<name> by name · CPU`, `<App> by app · CPU`. The part after `·` is the column label (PERF-087). `Process <pid>` is used only until the name has been read.
+  - A name card sums all processes with that image name. An app card sums the app's cgroup.
+- Linux data/mechanism: The engine adds demand for these identities, so they are sampled even when off screen and while the window is hidden. `[[minigraphs]] source = "process:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` plus `column`. Process identity is the ADR-003 `ProcessKey`. App name comes from the cgroup scope and its desktop file.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none for the user's own processes. Fields hidden for other users' processes show `Restricted`.
+- Applied: R-066
+
+### PERF-086 Minigraph states "No match" and "Ended"
+- Was: add PERF-087
+- Source: TS crosscheck A.28 (L28582 "No match", L28583 "Ended")
+- Behaviour: The value area at top right shows one of two states:
+  - **No match:** a name or app card that matches no process right now. The graph records a gap, not zero. When a process matches again, the graph resumes.
+  - **Ended:** a single-process card whose process exited (its pid plus start time are gone). The graph stops at its last sample and stays until the user removes the card ("Remove graph"). The card never re-attaches to a new process that reuses the pid. After a restart, a card whose identity is gone shows "Ended".
+- Linux data/mechanism: Exit is detected when the identity is missing from a sweep, or through pidfd readability when the card holds a pidfd.
+- Verdict: BUILD
+- Phase: P3 (with PERF-085; the addendum's P2 is moved to match the menu that creates these cards)
+- Privilege: none
+- Applied: R-066
+
+### PERF-087 Column labels for process cards
+- Was: add PERF-088
+- Source: TS crosscheck A.28 (L28576-28578 "WS total", "WS shared", "GPU shared")
+- Behaviour: The column part of a process card label uses Linux memory terms:
+  - `CPU`, `Disk`, `Network`, `GPU`, `VRAM` as in TaskSlinger;
+  - `Memory` for the default Memory column (RssAnon, private memory);
+  - `RSS` for the "Working set total" column (VmRSS; TaskSlinger "WS total");
+  - `RSS shared` for the shared column (`RssFile + RssShmem`; TaskSlinger "WS shared");
+  - `GPU shared` for GTT or shared GPU memory. On NVIDIA it is not offered, because NVML gives no per-process shared memory; the menu item is greyed out with the tooltip "Not supported on this GPU".
+- Linux data/mechanism: `/proc/<pid>/status` (`RssAnon`, `VmRSS`, `RssFile`, `RssShmem`). AMD and Intel GTT: the `drm-memory-gtt` or `drm-resident-system` keys in `/proc/<pid>/fdinfo`.
+- Verdict: ADAPT (labels renamed for Linux memory terms)
+- Phase: P3
+- Privilege: none for the user's own processes; other users' processes show `Restricted`.
+- Applied: R-005, D-004
+
+## Tray graphs
+
+### PERF-088 Tray icon graph
+- Was: v2 PERF-078
+- Source: TS 4.3 (sources: page, column, process, name filter, app filter), CL 0.8.6, 0.8.27
+- Behaviour:
+  - Each tray graph is its own tray icon. It draws a live mini graph in its graph colour on a transparent background, with the current value as a filled bar height.
+  - Added from a Performance page context menu ("Add tray icon graph"), a minigraph card menu, or the process context menu.
+  - Toasts: "Tray icon graph added", "Tray icon graph removed", "Tray icon graph already exists", "Unable to add tray icon graph".
+  - Tray graphs persist.
+- Linux data/mechanism:
+  - Crate `tl-tray` with `ksni =0.3.6`, features `async-io` and `blocking`, `ksni::blocking::TrayMethods::spawn` on its own thread. `cargo xtask check-deps` proves there is no Tokio (U-31). If that check fails, the fallback is a hand-written SNI and dbusmenu server inside `tl-tray` on its own zbus connection, never inside tl-engine.
+  - One StatusNotifierItem per graph, bus name `org.kde.StatusNotifierItem-<pid>-<n>`, objects `/StatusNotifierItem` and `/MenuBar`, registered with `org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem`.
+  - Icons are ARGB32 buffers at 22×22 and 44×44 px, drawn on the CPU by `tl-tray/src/raster.rs` (fill columns plus a 1 px line, 2×2 supersampling).
+  - Data comes from `EngineClient::latest()` on a 1 Hz GPUI timer. The icon is updated at most once per second, and only when its pixels changed.
+  - `state.toml` `[[tray_graphs]]` with `source`, `column`, `color`, `range_s`.
+- Verdict: ADAPT. Windows `Shell_NotifyIcon` becomes SNI.
+- Phase: P3
+- Privilege: none. With no `StatusNotifierWatcher` on the bus, the "Add tray icon graph" items are disabled with the tooltip "No system tray available".
+- Applied: R-027
+
+### PERF-089 Tray tooltips
+- Was: v2 PERF-079
+- Source: TS tooltip strings ("CPU Usage: ", "%d procs: %s", "CPU:", "RAM:", "GPU:", "Disk:", "Network:")
+- Behaviour:
+  - Page graph icon: `<Title>: 18.6%`, for example "CPU Usage: 18.6%".
+  - Process graph icon: `<name> (PID n): CPU 3.2%`.
+  - Name filter icon: `3 procs: firefox`.
+  - App icon: `<App>: CPU 3.2%`.
+  - Main tray icon (APP-047): five lines, "CPU: 11.9%", "RAM: 54.9%", "GPU: 3.0%", "Disk: 1.2%", "Network: 0.3 Mbps".
+- Linux data/mechanism: SNI `ToolTip` property `(icon, title, description)` and the `NewToolTip` signal, at most 1 Hz.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+- Applied: R-067, table d
+
+### PERF-090 Tray menus and graph colour
+- Was: v2 PERF-080, add PERF-089
+- Source: TS tray menu ("Tray icon graphs", "Close tray icon graph", Show Main Window, Exit), "Graph color" item (crosscheck A.29, L28587)
+- Behaviour:
+  - Tray graph icon menu, in order: "Graph color >", "Time range >", "Close tray icon graph", "Tray icon graphs >" (a checklist to add or remove the other graphs), separator, "Show Main Window", "Show mini window", "Exit tasklens".
+  - "Graph color >" lists Accent and the 17 named accents with check marks, the same list as the minigraph menu. The choice saves per tray graph and the icon redraws at once.
+  - Main tray icon menu (APP-047): "Show Main Window", "Tray icon graphs >", separator, "Exit tasklens".
+  - Left click on any tasklens tray icon shows or hides the main window.
+- Linux data/mechanism: `com.canonical.dbusmenu` on `/MenuBar`. `Activate(x, y)` toggles the window. Colour in `[[tray_graphs]] color`, range in `range_s`.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+- Applied: R-027
+
+### PERF-091 Main tray icon while graphs show
+- Was: v2 PERF-081
+- Source: TS CL 0.9.2 "main tray icon is hidden while a tray graph is shown"
+- Behaviour: While at least one tray graph exists, the plain app icon is not registered, and every graph icon's menu carries the main entries (PERF-090). With no graphs, the plain icon shows when a tray setting needs it (APP-047 owns those settings).
+- Linux data/mechanism: Register or unregister the plain SNI item.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PERF-092 Tray icon re-registration
+- Was: add PERF-090
+- Source: TS crosscheck A.29 (L35761 "TaskbarCreated")
+- Behaviour: When the panel restarts (for example after plasmashell crashes), every tasklens tray item reappears within 1 s with the same graphs and colours.
+- Linux data/mechanism: Watch `NameOwnerChanged` for `org.kde.StatusNotifierWatcher`. When it gains a new owner, call `RegisterStatusNotifierItem` again for each item.
+- Verdict: ADAPT (TaskbarCreated becomes the watcher name owner)
+- Phase: P3
+- Privilege: none
+
+## Performance mini window
+
+### PERF-093 Performance mini window
+- Was: v2 PERF-082, add amend PERF-069 (mini window trigger)
+- Source: TS 4.4 (CL 0.8.4: compact, movable, always on top), crosscheck B.1 (the view-mode button cycles process views and does not open the mini window)
+- Behaviour:
+  - A compact borderless window listing the visible sidebar cards (PERF-001) in one column. Width 260 logical px; height fits the cards.
+  - Open it with View > Window > "Performance mini window" (checkable), Ctrl+Shift+M, the tray menu item "Show mini window", or a double-click on the Performance graph area. Closing the mini window unchecks the menu item. Ctrl+M stays Graph Summary View.
+  - Double-click on the mini window, or "Show Main Window" in its menu, returns to the main window. Clicking a card opens the main window on that page.
+  - Its context menu: "Always on top", "Show Main Window", "Close".
+  - "Always on top" is on by default when the window opens and is not persisted (only the main window's pin persists). On KDE it sets `keepAbove` through the KWin bridge. On X11 it sends `_NET_WM_STATE_ABOVE`. Elsewhere it is disabled with the tooltip "Not supported by this desktop".
+- Linux data/mechanism: GPUI `Floating` window, caption "tasklens Mini Window", matched by the KWin bridge as in PERF-083. While the main window is hidden, demand comes from the cards shown in the mini window.
+- Verdict: ADAPT. TaskSlinger's trigger is unknown, so tasklens defines these.
+- Phase: P3
+- Privilege: none
+- Applied: R-058, R-073, table b (Ctrl+Shift+M)
