@@ -1096,3 +1096,122 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: ADAPT
 - Phase: P4 (Show FPS in P1 as a developer-only flag)
 - Privilege: none
+
+## Tabs, filter, status bar, shortcuts
+
+### APP-027 Tab bar and tab animation
+- Was: APP-027
+- Source: TS 1.7 L28210-28216, INI MainTabAnimationMs=250, Startup.DefaultTab | MC window-selected-page | R-023, R-024
+- Behaviour:
+  - Six tabs in TaskSlinger order: Processes, Performance, Services, Startup Apps, Connections, Information (R-023). There are no Users, Details or App history tabs. Mission Center's Apps maps to Processes.
+  - Processes carries a history icon button that toggles History mode; in History mode the tab label reads "History" (cross-check B.3). Information carries a copy icon (copy all).
+  - The active tab is an accent outline joined to a 2 px accent line along the bar.
+  - A switch slides the indicator and crossfades content over `motion.tab_switch_ms` (default 250). It is instant when `motion.animations` is off or the system asks for reduced motion (R-017).
+  - Ctrl+1 to Ctrl+6 and Alt+1 to Alt+6 select tabs. Ctrl+Tab and Ctrl+Shift+Tab select the next and previous tab (table b).
+  - When narrow, overflowing tabs go into a "»" menu (TabBar `.menu(true)`). There is no Mission Center bottom tab bar.
+  - The start tab follows `general.start_tab` (`processes | performance | services | startup | connections | information | last_used`). `last_used` reads `state.toml` `[tabs] last_tab`, which is saved on every switch.
+- Linux data/mechanism: gpui-component TabBar with custom outline styling; GPUI `Animation` (respects `reduce_motion()`). Page entities are created on first visit and kept; only the active page renders (ADR-009).
+- Verdict: BUILD
+- Phase: P1 (animation P2)
+- Privilege: none
+
+### APP-028 Filter box
+- Was: APP-028
+- Source: TS 1.7 L28339, L30133 [CL 0.8.28, 0.8.32] | MC search (typing forwards to search; name/PID; Levenshtein) | review "Sort/filter execution" | R-043
+- Behaviour:
+  - Sits at the right of the tab bar: "Filter: " label, input and clear button. 160 px wide, growing to 280 px on focus over 150 ms (instant with reduced motion).
+  - Typing any printable character while a table has focus, and no other input or dialog has it, starts filtering.
+  - Ctrl+F focuses the box. One Esc clears the filter and returns focus to the table; a further Esc follows the global Esc rule (table b) (R-043).
+  - Each tab keeps its own filter text for the session.
+  - Matching is case-insensitive substring.
+    - Processes (R-043): display name, image name, command line, user, description, app name, unit name, group names, and PID by prefix for numeric input. There is no command-line toggle.
+    - Services and Startup Apps: all visible columns.
+    - Connections: SYS-036.
+    - Information: field labels and values.
+  - Mission Center's reverse-containment and Levenshtein matching is rejected because it gives false hits.
+  - "Include children" checkbox (`processes.filter_include_children`): Processes only, shown while filtering or in Tree View (process spec).
+  - The UI debounces input 100 ms and sends the query with a new generation; the engine projection filters, and the UI shows a result only when its generation is the latest sent (ADR-009).
+- Linux data/mechanism: gpui-component Input `.cleanable(true)`; normalized name and command-line cache in the engine
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-029 Status bar
+- Was: APP-029
+- Source: TS 1.8 [CL 0.8.9]
+- Behaviour: Compact bar, 22 px at 100% scale.
+  - Left: the tab's own text. Processes: "%zu Processes" or "%zu / %zu Processes", plus " | %d processes selected". Services, Startup Apps and Connections: SYS-016, SYS-027, SYS-036. Performance and Information: blank.
+  - While Ctrl is held and the main window is active: "[PAUSED - Ctrl]", appended in the accent colour (R-042).
+  - Right: collector health. Nothing when all is well; otherwise "GPU data stale", "Restricted: 42 processes" and so on, each clickable to open Collector health (APP-026).
+  - Counts use thin-space grouping (table d).
+- Linux data/mechanism: gpui-component StatusBar; health from `SourceHealth` in the snapshot
+- Verdict: ADAPT (right-side health text added per the review's validity rules)
+- Phase: P1
+- Privilege: none
+
+### APP-030 Keyboard Shortcuts window
+- Was: APP-030
+- Source: MC Ctrl+? shortcuts dialog
+- Behaviour: A separate pinnable window titled "tasklens Keyboard Shortcuts" (inferred title), opened by Help > "Keyboard Shortcuts" and Ctrl+?. It lists APP-031 grouped by context: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Key caps come from `Kbd::binding_for_action`.
+- Linux data/mechanism: generated from the keymap
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### APP-031 Keyboard shortcuts
+- Was: APP-031
+- Source: TS 7 | MC 6 | cross-check C.4 | R-042, R-045, D-008, canonical table (b)
+- Behaviour: The table below is canonical table (b), copied exactly. Q-3 is settled by D-008: Enter, Ctrl+I and Alt+Enter open Properties; Space toggles expand.
+
+  Key contexts: Global, Table (every table), ProcessTable, ServiceTable, Performance, RunDialog, Picker. One GPUI Action per row; menu items dispatch the same Action.
+
+  | Keys | Context | Action |
+  |---|---|---|
+  | Ctrl+1..Ctrl+6, Alt+1..Alt+6 | Global | Select tab 1 to 6 (Processes, Performance, Services, Startup Apps, Connections, Information) |
+  | Ctrl+Tab / Ctrl+Shift+Tab | Global | Next / previous tab |
+  | Ctrl+N | Global | Run… |
+  | Ctrl+Q | Global | Exit tasklens |
+  | Ctrl+W | Global | Close window (follows close behaviour) |
+  | Ctrl+, | Global | All settings… |
+  | Ctrl+? (Ctrl+Shift+/) | Global | Keyboard Shortcuts |
+  | F10 | Global | Open File menu |
+  | Alt+F / Alt+V / Alt+S / Alt+H | Global | Open File / View / Settings / Help menu |
+  | Ctrl+F | Global | Focus filter |
+  | F5 | Global | Refresh current tab now |
+  | Esc | Global | Close topmost dialog or menu; else clear filter and focus the table; else close window if `window.close_with_esc`; else nothing |
+  | Hold Ctrl | Global (main window active) | Pause display, "[PAUSED - Ctrl]" |
+  | Ctrl+Plus / Ctrl+Minus / Ctrl+0 | Global | UI scale +5 / −5 / 100 |
+  | Ctrl+Shift+M | Global | Performance mini window (P3) |
+  | Up / Down / PgUp / PgDn / Home / End | Table | Move row selection (rows, never columns) |
+  | Shift+Up/Down, Shift+click, Ctrl+click | Table | Extend or toggle selection |
+  | Ctrl+A | Table | Select all visible rows |
+  | Right / Left | Table | Expand, or move to first child / collapse, or move to parent |
+  | Space | Table | Toggle expand |
+  | Enter, Alt+Enter, Ctrl+I | Table | Properties (see Q-3) |
+  | Ctrl+C | Table | Copy row (processes: "Copy details") |
+  | Ctrl+Shift+C | Table | Copy rows as table (TSV with header) |
+  | Ctrl+L | Table | Collapse all |
+  | Shift+F10, Menu | Table | Open context menu for the selection |
+  | Delete, Ctrl+E | ProcessTable | End Task (SIGTERM) |
+  | Shift+Delete, Ctrl+X | ProcessTable | End Process (SIGKILL) |
+  | Printable character | ProcessTable, other tables | Start filtering (not when an input or dialog has focus) |
+  | Ctrl+S / Ctrl+E / Ctrl+R | ServiceTable (service row) | Start / Stop / Restart (Ctrl+E on a child process row acts on the process) |
+  | Ctrl+C | Performance | Copy device info |
+  | Ctrl+M | Performance | Graph Summary View |
+  | F9, Ctrl+T | Performance | Toggle device sidebar |
+  | F1..F8 | Performance | Select visible device 1 to 8 |
+  | Up / Down | Performance sidebar focused | Move selection |
+  | Left / Right, Shift+Left / Shift+Right | History scrubber | Step 1 s / 1 min (P3) |
+  | Up / Down, Enter, Shift+Enter | RunDialog | History pick, Run, Run as administrator |
+  | Esc | Picker | Cancel window picking |
+  | Shift held at launch | Startup | Unlock privileged actions (P3) |
+
+  Removed from APP-031: Enter as toggle expand; "Force end" naming.
+
+  Notes:
+  - "Hold Ctrl" pauses while the main window is active, whatever has focus inside it; it releases on Ctrl-up or window deactivation (R-042).
+  - Ctrl+E means End Task on a process table and Stop on a service row.
+- Linux data/mechanism: `cx.bind_keys` with key contexts "Global", "Table", "ProcessTable", "ServiceTable", "Performance", "RunDialog", "Picker". One GPUI Action per row; menu items dispatch the same Action. Ctrl-hold is detected with `on_modifiers_changed`, and window deactivation releases the pause.
+- Verdict: ADAPT
+- Phase: P1 (Global, Table and ProcessTable keys), P2 (ServiceTable, Performance extras, RunDialog), P3 (Ctrl+Shift+M, History scrubber, Picker, Shift at launch)
+- Privilege: none
