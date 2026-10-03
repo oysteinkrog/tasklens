@@ -1400,7 +1400,7 @@ Rules:
 6. Fill is a closed polygon down to the baseline per run, drawn with `paint_path` before the stroke. Stroke uses `PathBuilder::stroke(px(1.0))`.
 7. **Merging:** charts drawn by one element that share colors merge their fills into one `Path` and their strokes into another. The CPU per-core grid is one `ChartGridElement` drawing all 32 cores: one fill path, one total-line path, one kernel-line path. Sidebar mini graphs are one element per device kind.
 8. Grid: hairline quads (`paint_quad(fill(..))`), 1 physical px. Vertical lines every `range_ns / 10`, positioned from absolute time so they scroll with the data; horizontal lines at 25%, 50%, 75%.
-9. Y scale: `Fixed` for percentages (0..100). `AutoRate` picks the smallest 1-2-5 × 10^n ceiling above the visible max, rises at once, and falls only after the visible max stays below half the ceiling for 10 s.
+9. Y scale: `Fixed` for percentages (0..100). `AutoRate` picks the smallest ceiling above the visible max (a power of two for disk rates, 1-2-5 × 10^n for network rates, per canonical table (d)), rises at once, and falls only after the visible max stays below half the ceiling for 10 s.
 10. Labels inside charts are `ShapedLine`s cached in the `ChartView`, re-shaped only when the text changes.
 
 **Animation driver** (one per window, `anim.rs`):
