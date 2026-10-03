@@ -946,3 +946,323 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 - **Tests:** `confirm_enter_triggers_action`; `confirm_esc_cancels`; `confirm_close_button_is_cancel`.
 - **Phase:** P1.
 - **Decided here:** icon choice; default focus on the action button; Left and Right between buttons; helper name.
+
+### UI-PWN-026 Send Signal submenu
+
+- **Implements:** PROC-065 (signals, Other signals, Real-time signal…, "(ends process)", toast, app rows), PROC-059, R-039.
+- **Anatomy:** a TlMenu submenu of the row menu item "Send Signal" (the row menu itself is specified in `docs/ui/processes.md`). Item height 26; min width 240; label `t_base` `text_primary` on the left; the suffix "(ends process)" `t_sm` `text_secondary` right-aligned [spec text, chosen placement].
+
+```text
+Terminate (TERM)            (ends process)
+Kill (KILL)                 (ends process)
+Hangup (HUP)                (ends process)
+Interrupt (INT)             (ends process)
+Quit (QUIT)                 (ends process)
+Stop (STOP)
+Continue (CONT)
+User 1 (USR1)               (ends process)
+User 2 (USR2)               (ends process)
+-----------------------------------------
+Other signals                           >
+Real-time signal…
+```
+
+  - "Other signals" submenu, in this order, label `{NAME} ({number})` with x86-64 numbers [spec list, chosen format]: ABRT (6), ALRM (14), BUS (7), CHLD (17), FPE (8), ILL (4), IO/POLL (29), PIPE (13), PROF (27), PWR (30), SEGV (11), STKFLT (16), SYS (31), TRAP (5), TSTP (20), TTIN (21), TTOU (22), URG (23), VTALRM (26), WINCH (28), XCPU (24), XFSZ (25). Numbers come from `libc` constants at build time, so another architecture shows its own numbers.
+  - "(ends process)" appears on signals whose default action terminates (with or without a core): TERM, KILL, HUP, INT, QUIT, USR1, USR2, ABRT, ALRM, BUS, FPE, ILL, IO/POLL, PIPE, PROF, PWR, SEGV, STKFLT, SYS, TRAP, VTALRM, XCPU, XFSZ. Not on STOP, CONT, CHLD, TSTP, TTIN, TTOU, URG, WINCH.
+- **States:** hover `menu_hover`; keyboard highlight the same; disabled: the whole "Send Signal" item is disabled with tooltip "Kernel threads cannot be signalled." when every target is a kernel thread [chosen; PROC-059 otherwise refuses with that toast].
+- **Interaction:**
+  - Each item dispatches `SendSignal(Signal)` with the captured targets (`Signal::Other(n)` for the other list). App rows send to the primary processes (PROC-065).
+  - Confirmation per PROC-059 (protected target, another user's process, or more than one target) through UI-PWN-025 with the message "Send SIGHUP to 4 processes?" and the action button "Send signal" [chosen], or the protected-target text from PROC-059.
+  - Refusals (tasklens itself, PID 1, kernel threads) show the PROC-059 toasts.
+  - Toasts: one process "Sent SIGHUP to firefox (1234)" [spec]; several "Sent SIGHUP to 4 processes" [chosen]; app row "Sent SIGHUP to Firefox (3 processes)" [chosen]; failures in the PROC-058 forms.
+- **Data binding:** `Command::Action(ActionRequest { kind: Signal(sig), .. })`.
+- **Build:** `crates/tl-ui/src/windows/signal.rs`, `pub fn signal_submenu(menu: PopupMenu, targets: &CapturedTargets, cx) -> PopupMenu`; signal names and default actions in a static table `SIGNALS: [SignalInfo; 31]` (`name`, `number`, `label`, `ends_process`).
+- **Performance:** built on menu open only.
+- **Accessibility:** keyboard navigation of nested kit menus (Right opens, Left closes); the "(ends process)" suffix is part of the item's accessible text.
+- **Tests:** `signal_menu_labels_and_suffixes` (TERM has the suffix, STOP and CHLD do not); `signal_other_numbers_match_libc`; `signal_toast_single_multi_app`.
+- **Phase:** P2.
+- **Decided here:** suffix placement; label formats; disabled rule for kernel threads; multi and app toast texts; confirmation wording.
+
+### UI-PWN-027 Real-time signal dialog
+
+- **Implements:** PROC-065 ("Real-time signal…" spin box SIGRTMIN+0 to SIGRTMAX, 34 to 64).
+- **Anatomy:**
+
+```text
++--------------------------------------------+
+| tasklens Send Signal             [pin] [x] | 32
+| firefox (PID 4321)                         | subtitle 24
+| Signal  [ 34 ^v]  SIGRTMIN+0               | 32
+| Real-time signals end the process unless   | t_sm text_secondary
+| it handles them.                           |
+|                 [Cancel]  [Send signal]    | footer 52
++--------------------------------------------+
+  width 360, height from content
+```
+
+  - `WindowKind::Dialog`, modal to its parent, title "tasklens Send Signal" [chosen]. TlSpinBox width 72, range 34..=64 [spec], then the name `t_base` `text_primary`: `SIGRTMIN+{n - 34}`, and for 64 `SIGRTMIN+30 (SIGRTMAX)` [chosen].
+  - The range comes from `libc::SIGRTMIN()` and `libc::SIGRTMAX()` at run time; on this system 34 and 64.
+- **States:** default value: the last value sent in this session, else 34 [chosen]. Typed values outside the range clamp on blur.
+- **Interaction:** Up and Down step; Enter triggers "Send signal" (primary, default); Esc cancels. Sends `Signal::Other(n)` with the same confirmation rules and toasts as UI-PWN-026 ("Sent SIGRTMIN+2 to firefox (1234)").
+- **Build:** `signal.rs`, `pub struct RtSignalDialog` (Entity).
+- **Tests:** `rt_signal_label_for_34_and_64`; `rt_signal_remembers_last_value`.
+- **Phase:** P2.
+- **Decided here:** title, labels, note text, default value.
+
+---
+
+## E. Run, Search File Handles and low-memory windows
+
+### UI-PWN-028 Run dialog
+
+- **Implements:** PROC-095, APP-014, R-061, table (b) RunDialog keys.
+- **Anatomy:**
+
+```text
++------------------------------------------------------------+
+| tasklens Run                                     [pin] [x] | 32
+| [SquareTerminal 32]  Type the name of a program, folder,   | text t_base, wraps
+|                      document, or Internet resource.       |
+| Open:  [firefox --private-window                      v]   | 32
+|        [ ] Run as administrator                            | 24
+|            GUI programs may not start as root on Wayland   | 18, t_xs text_secondary
+| [Browse…] [Clear command history]         [OK]  [Cancel]   | footer 52
++------------------------------------------------------------+
+  480 x 248, not resizable
+```
+
+  - Separate pinnable window, `WindowKind::Floating`, not modal, title "tasklens Run" [spec]. Size 480 × 248 [chosen]. Content padding `sp6`.
+  - Icon: Lucide `SquareTerminal` 32 px `text_secondary` [chosen], gap `sp5` to the text [spec text].
+  - "Open:" label `t_base` `text_primary`, width 48; the combo (UI-PWN-029) fills the rest.
+  - "Run as administrator": TlCheckbox [spec]; under it, indented to the checkbox label, the note "GUI programs may not start as root on Wayland" [spec].
+  - Footer, top border 1 px `divider`: left "Browse…" and "Clear command history" (TlButton small default); right "OK" (primary, default) and "Cancel" [spec].
+- **States:**
+  - Initial: the combo holds the most recent history command with all text selected, or is empty with no history [chosen].
+  - Launching (portal or polkit prompt pending): OK shows loading, other controls disabled.
+  - History empty: "Clear command history" disabled.
+- **Interaction:**
+  - Ctrl+N or File > "Run..." opens it (`OpenRunDialog`); if open, it is activated.
+  - Enter runs (`RunCommand`), Shift+Enter runs as administrator (`RunCommandElevated`) [spec]; OK runs with the checkbox state; Esc closes the popup first, then the window; Cancel closes.
+  - Validation and toasts [spec texts]: empty text: "Please enter a command" (Warning, in the Run window, window stays); NUL or control character: "Command contains invalid text." (Error, stays); launch failure: "Failed to run command" (Error, stays); polkit prompt cancelled: "Authentication cancelled" (Info, stays); success: the Run window closes and the main window shows "Command launched" (Success) [chosen: closing on success follows the Windows Run box].
+  - "Clear command history" (`ClearRunHistory`): clears the file at once, no confirmation; toast "Command history cleared" [spec].
+  - "Browse…" (`BrowseRunTarget`): opens the portal file chooser with the filters "Programs" (executable files) and "All files" [spec]; the chosen path replaces the combo text, wrapped in single quotes when it contains a space or a shell character [chosen].
+  - Tab order: combo, checkbox, Browse…, Clear command history, OK, Cancel.
+- **Data binding:** history from `$XDG_STATE_HOME/tasklens/run-history.json` (read when the window opens, written after each launch and clear); launching goes through the shared launcher (SYS-023) with the PROC-095 rules (URL or existing non-executable path to OpenURI; `kcm_*` to `systemsettings`; else a transient scope; administrator through `pkexec env …`).
+- **Build:** `crates/tl-ui/src/windows/run.rs`, `pub struct RunWindow` (Entity) with `input: Entity<InputState>`, `history: Arc<[RunEntry]>`, `elevated: bool`, `pending: Option<Task<()>>`.
+- **Performance:** history at most 50 entries; matching is linear on each keystroke.
+- **Accessibility:** the combo's accessible name is "Open"; the checkbox note is linked as its description (tooltip shows it too).
+- **Tests:** `run_empty_command_toast`; `run_invalid_text_toast`; `run_shift_enter_elevated`; `run_success_closes_and_toasts_in_main`; `run_clear_history_toast_and_disabled`.
+- **Phase:** P2.
+- **Decided here:** size; icon; initial text; close on success; Browse quoting.
+
+### UI-PWN-029 Run command combo and history
+
+- **Implements:** PROC-095 ("Open:" combo, 5 visible rows, prefix matches first, Up and Down pick a match), R-061.
+- **Anatomy:** a TlInput (32 high) with a suffix TlButton ghost 24 × 24 Lucide `ChevronDown` 14 px; a popup list under it, same width, 5 visible rows of 26 (130 high) [spec count], background `menu_bg`, 1 px border `divider`, radius `r_sm`, shadow per the foundation's popup style. Each row: the command (`t_base`, single line, ellipsis) and, for elevated entries, Lucide `ShieldCheck` 12 px `text_secondary` at the right with the tooltip "Ran as administrator" [chosen].
+- **States:** popup closed; open with no highlight; highlighted row `menu_hover`; no matches: popup closed.
+- **Interaction:**
+  - Typing filters the history: entries that start with the text (case-insensitive) first, newest first, then entries that contain it, newest first [spec order, chosen tie rule]; the popup opens when at least one entry matches and the text is not empty.
+  - Down opens the popup (all history when the text is empty) and highlights the next row; Up highlights the previous row; the highlighted command is copied into the input as it moves [spec "pick a match"]; Enter runs the input text; Esc closes the popup.
+  - Click on a row puts it in the input and closes the popup; double-click runs it [chosen].
+  - The chevron toggles the popup.
+- **Data binding:** `RunWindow.history`.
+- **Build:** in `run.rs`; the popup is a kit `Popover` anchored to the input, with a plain `v_flex` of up to 50 rows inside a 130 px scroll area (no kit Combobox: its search box and multi-select do not fit) [chosen].
+- **Performance:** at most 50 rows.
+- **Accessibility:** popup rows are reachable only through Up and Down from the input; the chevron's accessible name is "Show command history".
+- **Tests:** `run_combo_prefix_first_then_contains`; `run_combo_up_down_fills_input`; `run_combo_five_rows_visible`.
+- **Phase:** P2.
+- **Decided here:** popup build; tie rule; elevated marker; double-click runs.
+
+### UI-PWN-030 Search File Handles window
+
+- **Implements:** PROC-096, APP-015, R-061, R-102.
+- **Anatomy:**
+
+```text
++------------------------------------------------------------------------------+
+| tasklens Handle Search                                            [pin] [x]  | 32
+| Pattern: [.libreoffice*lock..............................] [Search] [Clear]  | 40
+| [x] Include memory-mapped files, working directories and executables         | 28
+| [=======-----]  Retrieving file handles... 42% (18 234 total handles)        | 24
+| Process          | PID   | User    | Type | FD  | Path                       | TlTreeTable flat
+| soffice.bin      | 8812  | oystein | fd   | 23  | /home/oystein/.~lock.x.odt#|
+| ...                                                                          |
+| Searched 412 of 530 processes. 118 need administrator rights. [Search all]  [Close] | footer 44
++------------------------------------------------------------------------------+
+  default 860 x 560, minimum 560 x 360
+```
+
+  - `WindowKind::Floating`, not modal, title "tasklens Handle Search" [spec]. Default 860 × 560, minimum 560 × 360 [chosen]. Padding `sp5`.
+  - "Pattern:" label `t_base`, then TlInput (32 high, fills), then TlButton "Search" (primary) and "Clear" (default) [spec controls].
+  - TlCheckbox "Include memory-mapped files, working directories and executables", default on [spec].
+  - Progress row: custom bar 200 × 6 (as UI-PWN-017) plus status text `t_sm` `text_secondary`; hidden before the first search.
+  - Footer: the privilege note `t_sm` `text_secondary` and TlButton small "Search all" on the left (only when processes were skipped); TlButton "Close" on the right [spec]. Top border 1 px `divider`.
+- **States:**
+  - Before the first search: the table area shows "Enter a file name or path pattern, then press Search." [chosen].
+  - Empty pattern: Search disabled.
+  - Searching: Search becomes "Stop" (default variant) [chosen; the walk is cancellable between PIDs]; pattern and checkbox disabled; status texts in order [spec]: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...".
+  - Done: "Found 12 matches", "Found 1 match" [chosen singular], or "No results found." [spec].
+  - Stopped: "Search stopped. Found 12 matches" [chosen].
+  - Error: toast "Handle search failed" (Error) and status "Handle search failed" [spec].
+  - Helper prompt pending (Search all): "Search all" loading; cancelled: toast "Authentication cancelled".
+- **Interaction:**
+  - Enter in the pattern field or Search (`StartHandleSearch`) starts a search with a new `SearchId`; Stop (`StopHandleSearch`) or Esc while searching stops it (Esc closes the window only when idle) [chosen].
+  - Clear (`ClearHandleSearch`) empties the pattern and the results.
+  - "Search all" (`HandleSearchAll`) starts the helper (`UnlockPrivileged`) and searches again with `privileged = true` [spec].
+  - Close or Esc when idle closes the window.
+  - Opened by File > "Search File Handles..." (`OpenHandleSearch`); activates the existing window if open.
+- **Data binding:** `Command::HandleSearch { search: SearchId, pattern: Arc<str>, include_maps: bool, privileged: bool }` and `Command::CancelHandleSearch(SearchId)`; results in `DetailsSnapshot.handle_search: Option<Arc<HandleSearchState>>` (progress, phase, `chunks` of hits, `searched`, `total`, `skipped`) [chosen addition, see open items]; bit `DETAILS`.
+- **Build:** `crates/tl-ui/src/windows/handle_search.rs`, `pub struct HandleSearchWindow` (Entity).
+- **Performance:** results are append-only chunks, never copied; status updates at most 4 Hz.
+- **Accessibility:** the pattern field has the tooltip "Case-insensitive. * and ? work as wildcards." [chosen]; progress text is the bar's text alternative.
+- **Tests:** `handle_search_status_sequence`; `handle_search_singular_match_text`; `handle_search_stop_keeps_results`; `handle_search_footer_only_when_skipped`.
+- **Phase:** P3.
+- **Decided here:** size; Stop button; empty, stopped and singular texts; Esc rule; wildcard tooltip; data addition.
+
+### UI-PWN-031 Search File Handles results and menu
+
+- **Implements:** PROC-096 (columns, result menu, footer), R-102, PROC-071, PROC-060, PROC-061, PROC-073.
+- **Anatomy:** `TlTreeTable` flat:
+
+| Column | Header | Width (min) | Align | Value |
+|---|---|---|---|---|
+| proc | Process | 200 (100) | left | 16 px process icon, gap `sp3`, display name |
+| pid | PID | 80 (60) | right | integer |
+| user | User | 110 (60) | left | user name |
+| type | Type | 70 (60) | left | `fd`, `mmap`, `cwd`, `exe`, `root` [spec] |
+| fd | FD | 60 (60) | right | fd number; empty for other types |
+| path | Path | flex (200) | left | full path, middle ellipsis |
+
+  Default sort: Process ascending, then PID, then FD [chosen]. Footer note [spec]: "Searched 412 of 530 processes. 118 need administrator rights." (counts use table d grouping).
+- **States:** standard table states; rows of processes that exited after the search stay listed; actions on them fail revalidation with the PROC-058 identity toast.
+- **Interaction:**
+  - Row menu (TlMenu) [spec labels, R-102]: "End Task" (SIGTERM, PROC-060), "End Process" (SIGKILL, PROC-061), separator, "Go to process" (PROC-071 entry point, activates the main window), separator, "Copy path", "Open file location". Confirmations and toasts follow PROC-059 to PROC-061 (one own process: no confirmation; several rows: "End Selected Tasks" / "End Selected Processes" with confirmation; targets are the distinct process keys of the selected rows).
+  - Keys (context `HandleSearch > Table`): Delete and Ctrl+E End Task; Shift+Delete and Ctrl+X End Process; Enter Go to process [chosen]; Ctrl+C copies the selected paths, one per line; Ctrl+Shift+C copies rows as TSV with header.
+  - "Copy path" toast "Copied to clipboard"; "Open file location" toast "Opening file location" (file manager `ShowItems` with the path selected).
+- **Data binding:** hit rows carry the `ProcessKey` captured during the search; actions go through `Command::Action`.
+- **Build:** in `handle_search.rs`.
+- **Performance:** virtualized; up to 100,000 hits [chosen cap; the search stops with "Showing the first 100 000 matches." in the status when reached].
+- **Accessibility:** menu items show their key bindings (kit `PopupMenu` action keys).
+- **Tests:** `handle_menu_labels_r102`; `handle_end_task_multi_confirms`; `handle_go_to_process_dispatches_entry_point`; `handle_hit_cap_status`.
+- **Phase:** P3.
+- **Decided here:** widths and sort; Enter = Go to process; result cap and its text.
+
+### UI-PWN-032 Low-memory rescue window
+
+- **Implements:** PROC-098 (window, texts, filter, Open Full tasklens, eased text, errors), PROC-097 (started by the watcher), R-062, R-073.
+- **Anatomy:**
+
+```text
++--------------------------------------------------+
+| tasklens - Low memory                [pin] [x]   | 32, pin shown on
+| Your device is running on critically low memory. | t_md semibold, status.danger
+| We recommend you close some of the processes     | t_base text_secondary
+| below.                                           |
+| [Filter...                                   ]   | 32
+| Firefox (34)              Memory 12.0% [End Task]| rows 32 (UI-PWN-033)
+| ...                                              |
+| [Open Full tasklens]                             | footer 52
++--------------------------------------------------+
+  420 x 560, minimum 360 x 400
+```
+
+  - Title "tasklens - Low memory" [spec]. `WindowKind::Floating` with no parent (it is its own process, `tasklens --low-memory`). Kept above other windows from the start: the pin is shown toggled on and can be turned off [spec PROC-056 and R-073].
+  - Size 420 × 560, minimum 360 × 400 [chosen]. Padding `sp6`.
+  - Texts [spec]: "Your device is running on critically low memory." (`t_md` 14 semibold, `status.danger`) and "We recommend you close some of the processes below." (`t_base`, `text_secondary`).
+  - Filter: TlInput 32 high, placeholder "Filter..." [spec], filters names case-insensitively.
+  - Footer: TlButton "Open Full tasklens" (primary) on the left [spec label].
+  - Minimal build [spec]: no charts, no process or app icons, only the two frame icons (pin and close, embedded SVGs); the font set is Noto Sans Regular and SemiBold only.
+- **States:**
+  - Eased (pressure below the threshold for 10 s): the two top lines are replaced by one line in `status.success`: "Memory pressure has eased. You can open the full tasklens or close this window." [spec text]. The list stays usable. If pressure rises again, the original lines return [chosen].
+  - Filter with no match: "No processes match the filter." [chosen].
+  - Errors: toast with title "End Task Failed" and message "kill failed: {errno text}" (Error) [spec texts].
+- **Interaction:**
+  - "Open Full tasklens" (`OpenFullTasklens`): calls `org.freedesktop.Application.Activate` on the main instance, or starts `tasklens` detached when no instance owns the bus name; the rescue window stays open [chosen].
+  - Esc closes the window (no filter text) or clears the filter first; Ctrl+W closes. Closing ends the `--low-memory` process.
+  - Tab order: filter, list (one focus stop), Open Full tasklens, pin, close.
+- **Data binding:** the engine runs in a low-memory mode: a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, published as `Snapshot.processes` and `Snapshot.health` only [chosen naming of the mode: `EngineMode::LowMemory`].
+- **Build:** `crates/tl-ui/src/windows/low_memory.rs`, `pub struct LowMemoryWindow` (Entity); started by `tl-app` for `--low-memory` with `mlockall` already done (PROC-098).
+- **Performance:** at most 30 rows; one re-render per 2 s sweep; no animation; the window opens in under 200 ms (ADR-014 first-frame gate applies).
+- **Accessibility:** End Task buttons carry the row name in their accessible name ("End Task: Firefox").
+- **Tests:** `lowmem_texts_and_title`; `lowmem_eased_after_10s` (fake PSI below threshold for 10 s); `lowmem_starts_pinned`; `lowmem_open_full_activates_or_spawns`.
+- **Phase:** P3.
+- **Decided here:** size; danger colour on the first line; eased replacement and return; window stays open after Open Full tasklens; filter empty text.
+
+### UI-PWN-033 Low-memory process list
+
+- **Implements:** PROC-098 (list of at most 30 apps and processes by memory, "Memory 12.0%", End Task with SIGKILL or KillUnit, no confirmation, tooltip, other users disabled).
+- **Anatomy:** each row 32 high (× UI scale, not affected by row height) [chosen], padding `sp4` horizontal, 1 px bottom border `divider`:
+  - Name, `t_base` `text_primary`, ellipsis: apps as `{app name} ({process count})`, processes as their display name [chosen].
+  - "Memory 12.0%" `t_sm` `text_secondary`, right-aligned, width 100, tabular [spec format].
+  - TlButton small danger "End Task" width 84 [spec label].
+- **States:**
+  - Sorted by memory descending (RssAnon + swap for processes, cgroup `memory.current` for apps), at most 30 rows [spec].
+  - While the pointer is over the list or a row has keyboard focus, the order is held and only values update; it re-sorts when the pointer leaves and focus moves out [chosen, so the target does not move under the click].
+  - Other users' rows: button disabled, tooltip "Needs administrator rights" [spec].
+  - Ending: the button shows loading; on success the row is removed at the next sweep.
+  - End Task tooltip: "Ends immediately, unsaved work is lost" [spec].
+- **Interaction:** End Task (`LowMemEndTask`) sends SIGKILL to a process, or `KillUnit(name, "all", SIGKILL)` to an app, with no confirmation [spec]. Keyboard in the list: Up and Down move a highlight (`row_selected`), Enter or Delete presses End Task on the highlighted row [chosen].
+- **Data binding:** `Snapshot.processes` records and app groups from the low-memory sweep; actions through `Command::Action` with identity revalidation (PROC-001).
+- **Build:** a plain `v_flex` of up to 30 rows in `low_memory.rs` (no `TlTreeTable`, to keep the window minimal) [chosen].
+- **Performance:** 30 rows; strings re-formatted only when the percent changes.
+- **Accessibility:** as UI-PWN-032.
+- **Tests:** `lowmem_list_caps_30_sorted`; `lowmem_order_held_while_hovered`; `lowmem_other_user_disabled_tooltip`; `lowmem_end_task_no_confirmation`.
+- **Phase:** P3.
+- **Decided here:** row design; name format for apps; order hold; keyboard; plain list instead of the table component.
+
+---
+
+## F. Dump toasts and VirusTotal notice
+
+### UI-PWN-034 Dump confirmation and progress toast
+
+- **Implements:** PROC-075 (confirmation over 2 GiB, progress toast, gdb missing, administrator rights), R-004.
+- **Anatomy:**
+  - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PWN-025 with the message "firefox (PID 4321) uses 3.42 GiB. The process is paused while the core file is written. Create the dump anyway?" and the action button "Create dump" (primary) [chosen text and label].
+  - Progress toast: TlToast Info, top centre of the window that started the dump, autohide off while running, id `DumpToast(action_id)`, text "Writing core… 1.2 GiB" [spec], the size in table (d) memory format, updated every 500 ms [chosen].
+- **States:**
+  - Before the first size read: "Writing core…" [chosen].
+  - Menu item states (the row menu is owned by `docs/ui/processes.md`): disabled with tooltip "Install gdb to create dumps" when `/usr/bin/gcore` is missing [spec].
+  - Without administrator access: Warning toast "Creating a dump needs administrator rights" [spec], with the "Retry as administrator" button from P3.
+- **Interaction:** "Create dump file" in the row menu (`CreateDump { key }`) opens the confirmation when needed, then sends the dump request. The progress size comes from the UI stat-ing the output path every 500 ms on the background executor (`std::fs::metadata(path).len()`) while the action is pending [chosen: ADR-005 action events carry no progress].
+- **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the output path `$XDG_STATE_HOME/tasklens/dumps/{name}_{pid}_{yyyymmdd_hhmmss}.core` is chosen by the UI and passed in the request, so it can be stat-ed.
+- **Build:** `crates/tl-ui/src/windows/notices.rs`, `fn start_dump(key, cx)` and the `DumpProgress` task (cancelled when the action ends).
+- **Performance:** one `stat` every 500 ms off the UI thread during a dump.
+- **Accessibility:** toast text is the only progress indicator; it carries the size as text.
+- **Tests:** `dump_confirm_only_over_2gib`; `dump_progress_toast_updates_in_place` (same toast id, new text); `dump_disabled_without_gcore_tooltip`.
+- **Phase:** P3.
+- **Decided here:** confirmation text and button; 500 ms stat polling; the UI picks the output path; "Writing core…" before the first size.
+
+### UI-PWN-035 Dump result toasts
+
+- **Implements:** PROC-075 ("Dump created: <path>" with "Open folder").
+- **Anatomy:** the progress toast is replaced in place (same id) by:
+  - Success: TlToast Success, text "Dump created: {path}" [spec] with `$HOME` shown as `~` [chosen], path ellipsized in the middle at the toast width; action button "Open folder" [spec]. Because the kit turns autohide off for toasts with an action, this toast stays until closed or replaced [consequence of the kit, accepted].
+  - Failure: TlToast Error, "Could not create dump file." with the error text on a second line [chosen]; 8 s.
+  - Rejected for privileges: as UI-PWN-034.
+- **Interaction:** "Open folder" (`OpenDumpFolder`) calls `org.freedesktop.FileManager1.ShowItems(["file://{path}"], "")`, so the file manager opens the dumps folder with the new file selected; toast "Opening file location" [chosen reuse]. Clicking the path text copies the full path, toast "Copied to clipboard" [chosen].
+- **Data binding:** the `ActionEvent` final state for the dump action.
+- **Build:** `notices.rs`.
+- **Tests:** `dump_success_toast_text_and_button`; `dump_failure_toast_text`.
+- **Phase:** P3.
+- **Decided here:** `~` shortening; failure text; path click copies.
+
+### UI-PWN-036 VirusTotal notice and hashing toast
+
+- **Implements:** PROC-074 (background hash, toast after 500 ms, one-time notice, errors, nothing uploaded), R-095.
+- **Anatomy:**
+  - Notice window: UI-PWN-025 frame, title "tasklens VirusTotal Notice" [chosen, APP-045 naming], icon `CircleHelp`, message "This opens virustotal.com with the file's hash. The file is not uploaded." [spec text]; buttons "Cancel" and "Open VirusTotal" (primary, default) [chosen label].
+  - Hashing toast: TlToast Info "Computing SHA-256…" [spec], id `VtToast(action_id)`, shown only when hashing takes longer than 500 ms [spec].
+- **States:**
+  - First use (`state.toml [processes] virustotal_notice_accepted = false`): the notice opens before anything is hashed. "Open VirusTotal" sets the flag to true (saved through the state file's debounced save) and continues; Cancel does nothing and keeps the flag false [spec R-095].
+  - Later uses: no notice.
+  - Hash done: the toast (if shown) is removed and the browser opens `https://www.virustotal.com/gui/file/{sha256}` through the portal OpenURI, falling back to `xdg-open` [spec].
+  - Errors (Error toasts, replacing the hashing toast) [spec]: "SHA-256 unavailable", "Process image unavailable"; browser launch failure: "Could not open the browser." [chosen].
+- **Interaction:** row menu item "Open in VirusTotal" (`OpenVirusTotal { key }`, menu owned by `docs/ui/processes.md`). Enter in the notice triggers "Open VirusTotal"; Esc cancels.
+- **Data binding:** `Command::ComputeHashes(key)` (shared with UI-PWN-008; the engine cache by dev, inode and mtime makes a second request instant); the result arrives in the General detail payload for that key, which the UI demands while the request is pending.
+- **Build:** `notices.rs`, `fn open_virustotal(key, cx)`.
+- **Performance:** hashing off the UI thread; the 500 ms timer is one `Timer::after` task, dropped when the hash arrives first.
+- **Accessibility:** the notice states what is sent (the hash) and what is not (the file).
+- **Tests:** `vt_notice_shown_once_then_flag_saved`; `vt_cancel_keeps_flag_false`; `vt_toast_only_after_500ms`; `vt_error_toasts`.
+- **Phase:** P2.
+- **Decided here:** notice title and button label; browser failure text; reuse of the General hash path.
