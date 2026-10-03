@@ -2039,38 +2039,38 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 - Per-process files are opened with `openat` relative to an `O_DIRECTORY` fd of `/proc/<pid>` during the sweep, read, and closed in the same sweep.
 - An FD cache of at most 128 entries holds `smaps_rollup` fds for `detail_keys` only; entries are dropped when the key leaves demand or the identity check fails.
 
-**Sources** (phase in brackets):
+**Sources** (phase in brackets, R-072 numbering):
 
 | Data | Source | Notes |
 |---|---|---|
-| CPU [1] | `/proc/stat` | math in ADR-008 |
-| CPU frequency [1] | `/sys/devices/system/cpu/cpufreq/policyN/cpuinfo_avg_freq`, else `scaling_cur_freq` | amd-pstate-epp here |
-| CPU temperature [1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only |
-| Memory [1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat`, `/proc/vmstat` | |
-| Disks [1] | `/proc/diskstats`, `/sys/block/*` | active % from `io_ticks` delta; latency = Δ(read_ticks+write_ticks) / Δ(ios); exclude `loop`, `ram`, `zram`, `fd` from the sidebar; partitions and `dm-*` are children |
-| Network [1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net` | `lo` hidden; `veth*`, `docker*`, `br-*`, `virbr*`, `tailscale*` hidden by default, setting `show_virtual_interfaces = false` |
-| NVIDIA GPU [1] | `tl-gpu-probe` (ADR-007) | |
-| AMD/Intel GPU [later] | sysfs `gpu_busy_percent`, `mem_info_vram_*`, hwmon, DRM fdinfo | untested here |
-| Sensors and fans [1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*` | |
-| Processes [2] | `/proc/<pid>/stat`, `statm`, `status` (uid, threads), `io` (own processes), `cgroup` | `io` gives `Restricted` for other users |
-| Process metadata [2] | `comm`, `cmdline`, `exe` | refreshed every 10 sweeps per process and immediately when `comm` changes (exec) |
-| PSS/USS [2] | `/proc/<pid>/smaps_rollup` | `detail_keys` only |
-| App grouping [2] | cgroup v2 path from `/proc/<pid>/cgroup`; current uid from `getuid()` | app id from scope name `app-<launcher>-<app id>-<n>.scope` (KDE: `app-<desktop file id>@<id>.service` or `.scope`); desktop file lookup through `XDG_DATA_DIRS` |
-| Per-process network [3] | `sock_diag` `inet_diag` dump for TCP v4 and v6 with `INET_DIAG_INFO` (`tcpi_bytes_acked`, `tcpi_bytes_received`) | labelled "Network (TCP, attributed)"; sockets shared by several processes count for each and the cell gets a tooltip; UDP not attributed |
-| Socket to pid map [3] | `/proc/<pid>/fd` symlinks `socket:[inode]` | rebuilt every 2 s while demanded; own processes only without the helper |
-| Connections [3] | `sock_diag` dump TCP, UDP, v4, v6 | |
-| Services [3] | systemd Manager over D-Bus: `ListUnits`, `ListUnitFiles`, `Subscribe`, `UnitNew`, `UnitRemoved`, `JobRemoved`, `PropertiesChanged` | system and user managers are separate identities `UnitRef { manager: System | User, name }` |
-| Service logs [3] | `journalctl -o json -n 50 --no-pager -u <unit>` run with `std::process::Command` inside `spawn_blocking`, 5 s timeout, then kill and wait | |
-| Startup apps [3] | XDG autostart: `$XDG_CONFIG_HOME/autostart` overrides `$XDG_CONFIG_DIRS/autostart` (default `/etc/xdg/autostart`) by file name; `Hidden`, `OnlyShowIn`, `NotShowIn` against `XDG_CURRENT_DESKTOP`; systemd user units with `WantedBy=` | disable a system entry by writing a user override with `Hidden=true` (atomic write); enable by removing an override that differs only in `Hidden`, else set `Hidden=false`; units use Enable/DisableUnitFiles |
-| Information [3] | `/proc/cpuinfo`, `/sys/devices/system/cpu`, `/sys/class/dmi/id` (readable fields), `/etc/os-release`, NVML device info | root-only fields (serials, DIMMs) shown as `Restricted` |
-| Disk details [later] | udisks2 over D-Bus | SMART, partitions, eject |
-| Batteries [later] | UPower over D-Bus | |
-| Network details [later] | NetworkManager over D-Bus | |
-| Icons [2] | desktop entry `Icon=`; theme from `~/.config/kdeglobals` `[Icons] Theme=`, then `breeze`, then `hicolor`; sizes 16, 22, 24, 32, then `scalable` | resolved paths cached in `$XDG_CACHE_HOME/tasklens/icons.toml` |
+| CPU [P1] | `/proc/stat` | math in ADR-008 |
+| CPU frequency [P1] | `/sys/devices/system/cpu/cpufreq/policyN/cpuinfo_avg_freq`, else `scaling_cur_freq` | amd-pstate-epp here |
+| CPU temperature [P1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only |
+| Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat`, `/proc/vmstat` | |
+| Disks [P1] | `/proc/diskstats`, `/sys/block/*` | active % from `io_ticks` delta; latency = Δ(read_ticks+write_ticks) / Δ(ios); exclude `loop`, `ram`, `zram`, `fd` from the sidebar; partitions and `dm-*` are children |
+| Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default; settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false) |
+| NVIDIA GPU [P1] | `tl-gpu-probe` (ADR-007) | |
+| AMD/Intel GPU [P2 AMD, P3 Intel] | sysfs `gpu_busy_percent`, `mem_info_vram_*`, hwmon, DRM fdinfo | untested here |
+| Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*` | |
+| Processes [P1] | `/proc/<pid>/stat`, `statm`, `status` (uid, threads, RssAnon), `io` (own processes), `cgroup`; fd count from `fstatat` `st_size` of `/proc/<pid>/fd`, readdir fallback | `io` gives `Restricted` for other users; all timestamps CLOCK_BOOTTIME (ADR-003) |
+| Process metadata [P1] | `comm`, `cmdline`, `exe` | refreshed every 10 sweeps per process and immediately when `comm` changes (exec) |
+| PSS/USS [P1] | `/proc/<pid>/smaps_rollup` | `detail_keys` only |
+| App grouping [P1] | cgroup v2 path from `/proc/<pid>/cgroup`; current uid from `getuid()` | app id from scope name `app-<launcher>-<app id>-<n>.scope` (KDE: `app-<desktop file id>@<id>.service` or `.scope`); desktop file lookup through `XDG_DATA_DIRS` |
+| Per-process network [P2] | `sock_diag` `inet_diag` dump for TCP v4 and v6 with `INET_DIAG_INFO` (`tcpi_bytes_acked`, `tcpi_bytes_received`) | labelled "Network (TCP, attributed)"; sockets shared by several processes count for each and the cell gets a tooltip; UDP not attributed |
+| Socket to pid map [P2] | `/proc/<pid>/fd` symlinks `socket:[inode]` | rebuilt every 2 s while demanded; own processes only without the helper |
+| Connections [P2] | `sock_diag` dump TCP, UDP, v4, v6 | |
+| Services [P2] | systemd Manager over D-Bus: `ListUnits`, `ListUnitFiles`, `Subscribe`, `UnitNew`, `UnitRemoved`, `JobRemoved`, `PropertiesChanged` | system and user managers are separate identities `UnitRef { manager: System | User, name }` |
+| Service logs [P2] | `journalctl -u <id> -b -n 200 -o json --no-pager` (`--user-unit <id>` for user units) run with `std::process::Command` inside `spawn_blocking`; 5 s timeout on this fetch, then kill and wait. With Follow on, `-f` is added and the child runs until Follow is turned off or the tab closes, then it is killed | |
+| Startup apps [P2] | XDG autostart: `$XDG_CONFIG_HOME/autostart` overrides `$XDG_CONFIG_DIRS/autostart` (default `/etc/xdg/autostart`) by file name; `Hidden`, `OnlyShowIn`, `NotShowIn` against `XDG_CURRENT_DESKTOP`; systemd user units with `WantedBy=` | disable a system entry by writing a user override with `Hidden=true` (atomic write); enable by removing an override that differs only in `Hidden`, else set `Hidden=false`; units use Enable/DisableUnitFiles |
+| Information [P2] | `/proc/cpuinfo`, `/sys/devices/system/cpu`, `/sys/class/dmi/id` (readable fields), `/etc/os-release`, NVML device info | root-only DMI fields shown as `Restricted`; memory module serial numbers are not read or shown anywhere, including copy text (D-007) |
+| Disk details [P2] | udisks2 over D-Bus | SMART, partitions, eject |
+| Batteries [P2] | UPower over D-Bus | |
+| Network details [P2] | NetworkManager over D-Bus | |
+| Icons [P1] | desktop entry `Icon=`; theme from `~/.config/kdeglobals` `[Icons] Theme=`, then `breeze`, then `hicolor`; sizes 16, 22, 24, 32, then `scalable` | resolved paths cached in `$XDG_CACHE_HOME/tasklens/icons.toml` |
 
 **Restricted, not zero.** Any `EACCES` or `EPERM` on a field sets that field `Restricted`. Processes owned by other users and capability-raised processes such as `kwin_wayland` show the lock marker for unreadable fields.
 
-**Process power column.** Not shown by default: there is no per-process power source on this machine. The column id `power` is reserved.
+**Process power column.** Columns `power` ("Power usage") and `power_trend` exist and are off by default on every machine, because there is no per-process power source; the value is an estimate.
 
 ### Consequences
 
@@ -2080,7 +2080,7 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 
 - **`procfs` crate.** Rejected: allocates per call; the hot path needs reused buffers.
 - **nethogs screen scraping (Mission Center).** Rejected: fragile, needs capabilities on a third-party binary.
-- **libsystemd for journal reading.** Rejected for v1: `journalctl` is enough for 50 lines and avoids a C binding.
+- **libsystemd for journal reading.** Rejected for v1: `journalctl` is enough for 200 lines and follow mode, and avoids a C binding.
 
 ### Verification
 
