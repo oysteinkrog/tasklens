@@ -387,3 +387,294 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Verdict: BUILD
 - Phase: P1
 - Privilege: none
+
+## CPU page
+
+### PERF-027 CPU header and graph mode
+- Was: v2 PERF-024
+- Source: TS "Overall"/"Per core" toggle (L28233-28236) | MC `performance-page-cpu-graph` 1 to 4
+- Behaviour: The header shows "Processor" and the CPU name. At right is a mode button with the choices "Overall", "Per core" (default), "All cores overlaid" and "All cores stacked". A "Kernel on"/"Kernel off" toggle sits next to it (default on). Both persist.
+- Linux data/mechanism: Keys `performance.cpu_graph_mode = "per_core"` (`overall | per_core | all_cores_overlaid | all_cores_stacked`) and `performance.cpu_kernel = true`. Data from `/proc/stat` (PERF-033).
+- Verdict: ADAPT. TaskSlinger's two-state toggle becomes a four-choice button so Mission Center's two extra modes fit.
+- Phase: P1 for Overall and Per core; P2 for the other two.
+- Privilege: none
+- Applied: R-019
+
+### PERF-028 Per-core grid
+- Was: v2 PERF-025
+- Source: TS grid of "CPU %d" charts | MC `compute_column_count`
+- Behaviour:
+  - One chart per logical CPU, titled "CPU N", with the percent at top right. The first cell carries the "Total"/"Kernel" legend.
+  - Column count is ceil(√(2n)): 16 CPUs give 6 columns (matches TaskSlinger) and 32 give 8 columns in 4 rows. Cells are at least 120 logical px wide; the count drops when needed.
+  - Hovering a cell's title shows "Core C, thread T, 4200 MHz".
+  - Offline CPUs show "Offline" in place of the chart.
+  - This is the 32-chart frame-budget case for phase 0 (ADR-014).
+- Linux data/mechanism:
+  - `/proc/stat` `cpuN` lines, at 10 Hz while a CPU chart is visible and moving, else 1 Hz. Math per ADR-008: `busy = user + nice + system + irq + softirq + steal`, `total = busy + idle + iowait`, `kernel = system + irq + softirq`; guest fields ignored.
+  - Core and thread from `/sys/devices/system/cpu/cpuN/topology/{core_id,thread_siblings_list}`.
+  - Clock from `cpufreq/policyN/cpuinfo_avg_freq`, else `scaling_cur_freq` (U-28).
+  - All cells are drawn by one `ChartGridElement`: one fill path, one total-line path, one kernel-line path (ADR-009 rule 7).
+  - A change in the set of `cpuN` lines re-enumerates CPUs.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-013
+
+### PERF-029 Kernel time overlay
+- Was: v2 PERF-026
+- Source: TS "Kernel on" red line | MC "Show Kernel Times" dashed
+- Behaviour: When on, each per-core and overall chart adds the kernel percent as a solid #C1514E line without fill (TaskSlinger style). Overlaid and stacked modes show no kernel line.
+- Linux data/mechanism: Δ(system + irq + softirq) / Δtotal.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-030 Overlaid and stacked modes
+- Was: v2 PERF-027
+- Source: MC 2.1 values 3 and 4
+- Behaviour: "All cores overlaid" draws one large chart with each core's line at opacity 1/n, minimum 0.08. "All cores stacked" draws stacked filled bands with a maximum of 100 × n%; the axis label then reads, for example, "3200%".
+- Linux data/mechanism: Same per-CPU series.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-031 Core type marks
+- Was: v2 PERF-028
+- Source: TS "Performance core"/"Efficiency core" icons (L28239-28240)
+- Behaviour:
+  - On hybrid CPUs, each cell shows a small P or E icon.
+  - On AMD with preferred-core ranking, the highest-ranked cores show a small star; the tooltip reads "Preferred core (rank 236)". Stars show only when the ranking differs between cores.
+  - Otherwise there is no icon.
+- Linux data/mechanism:
+  - Intel: `/sys/devices/cpu_core/cpus` and `/sys/devices/cpu_atom/cpus`.
+  - AMD Zen 5c hybrids: distinct `cpu_capacity` values.
+  - Preferred cores: `cpufreq/policyN/amd_pstate_prefcore_ranking` (reported present here; U-28).
+- Verdict: ADAPT. The marks come from Linux topology files. The preferred-core star is new.
+- Phase: P2
+- Privilege: none
+
+### PERF-032 CPU secondary graph
+- Was: v2 PERF-029
+- Source: MC `performance-page-cpu-graph-bottom` (power, clock, temperature)
+- Behaviour: Under the chart area sits one wide graph with a choice in its context menu: "None", "Power draw" (W, default), "Clock speed" (MHz, average plus a dashed maximum-core line) or "Temperature" (°C). Choices without data are disabled. When power is not available, the graph shows Temperature, then Clock speed, without changing the saved choice. Label: "Power draw over 60 seconds", with the axis maximum at top right.
+- Linux data/mechanism: Key `performance.cpu_secondary_graph = "power"` (`none | power | clock | temperature`). Data from PERF-038, PERF-039 and PERF-040 at 1 Hz.
+- Verdict: BUILD. TaskSlinger has no such graph.
+- Phase: P2
+- Privilege: Power needs RAPL to be readable (PERF-106). Until then the "Power draw" choice is disabled with the tooltip "Needs setup", which links to the setup window.
+- Applied: R-013, R-019
+
+### PERF-033 CPU live stats
+- Was: v2 PERF-030
+- Source: TS stats rows (L28241-28261) | MC "Live stats panel"
+- Behaviour: Grid rows, in order:
+  - Utilization, Kernel time, Speed;
+  - Processes, Threads, Handles;
+  - Up time, Base speed, Sockets;
+  - then Mission Center additions: Power draw, Temperature, Load average (1/5/15).
+- Linux data/mechanism:
+  - **Utilization:** `/proc/stat` `cpu` line (ADR-008 math).
+  - **Speed:** mean of `cpuinfo_avg_freq` over all policies, else `scaling_cur_freq`, else `/proc/cpuinfo` MHz. The tooltip gives the fastest core. When only the BogoMIPS value exists, the value shows "(?)" with Mission Center's tooltip.
+  - **Processes:** count of numeric `/proc` entries. **Threads:** the sum from the process sweep, or the `procs_running` and `processes` fields of `/proc/stat` when no sweep runs.
+  - **Handles:** field 1 of `/proc/sys/fs/file-nr` (open files system-wide). Label stays "Handles"; tooltip "Open file descriptors, system-wide" (inferred from R-007's rule for the process column).
+  - **Up time:** PERF-034.
+  - **Base speed:** `cpufreq/base_frequency`, then `acpi_cppc/nominal_freq` (amd-pstate), then `bios_limit`.
+  - **Sockets:** distinct `physical_package_id`.
+  - **Load average:** `/proc/loadavg`.
+- Verdict: ADAPT. Handles become open files. Load average is added.
+- Phase: P1 (Power draw row with PERF-038 in P2)
+- Privilege: none
+- Applied: R-007 (label rule), R-013
+
+### PERF-034 Up time format
+- Was: add PERF-080
+- Source: TS crosscheck A.19 (L29523, L28073-28074; `performance.png` shows "2 days, 2h 38m 15s") | MC DD:HH:MM:SS (`cpu.rs:720`)
+- Behaviour: TaskSlinger's format wins.
+  - With days: `1 day, 2h 38m 15s` or `2 days, 2h 38m 15s`.
+  - Under one day: `2h 38m 15s`.
+  - Under one hour: `0h 38m 15s` (hours are always shown).
+
+  The same format is used on the CPU page and for Information > System > System uptime. Boot time uses `YYYY-MM-DD HH:MM:SS` in local time.
+- Linux data/mechanism: `clock_gettime(CLOCK_BOOTTIME)`, which counts time in suspend, like `uptime`. Boot time = now (`CLOCK_REALTIME`) − `CLOCK_BOOTTIME`. `btime` in `/proc/stat` is the cross-check.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: table d
+
+### PERF-035 CPU static stats
+- Was: v2 PERF-031
+- Source: TS Cores, Logical processors, L1/L2/L3 | MC Cpufreq driver, governor, EPP
+- Behaviour: Rows: Cores, Logical processors, Virtualization, Running in VM, Security features, Hypervisor, L1 cache, L2 cache, L3 cache, Cpufreq driver, Governor, Power preference (EPP), Platform profile, Microcode.
+- Linux data/mechanism:
+  - Cores: distinct (package, core_id).
+  - Caches: PERF-036.
+  - `cpu0/cpufreq/{scaling_driver,scaling_governor,energy_performance_preference}`: here "amd-pstate-epp", "powersave", "balance_performance".
+  - `/sys/firmware/acpi/platform_profile`, else power-profiles-daemon `ActiveProfile` over D-Bus.
+  - Microcode from `/proc/cpuinfo`.
+  - Virtualization, Running in VM, Security features and Hypervisor: PERF-037.
+- Verdict: BUILD
+- Phase: P1 for cores, logical processors and caches; P2 for the rest.
+- Privilege: none
+
+### PERF-036 Cache size format
+- Was: add PERF-081
+- Source: TS "%ld KB" (L35646; `performance.png` shows "512 KB", "8192 KB", "98304 KB") | MC binary units (`main.rs:303-438`)
+- Behaviour: Cache sizes use IEC units. Up to 1023 KiB the value is an integer in KiB ("512 KiB"). From 1 MiB it is an integer in MiB when exact ("8 MiB", "96 MiB"), else one decimal. The tooltip gives the exact KiB count ("98 304 KiB", thin-space grouped). Each level shows the total across the CPU, with the instance count in the tooltip ("2 × 32 MiB"). The page shows L1 (data plus instruction), L2 and L3. L4, when present, shows only in the L3 tooltip.
+- Linux data/mechanism: `/sys/devices/system/cpu/cpu*/cache/index*/{level,type,size,shared_cpu_list}`, de-duplicated by `shared_cpu_list`.
+- Verdict: ADAPT ("KB" becomes "KiB"/"MiB")
+- Phase: P1
+- Privilege: none
+- Applied: table d
+
+### PERF-037 Virtualization and security rows
+- Was: v2 PERF-032, add amend (CPU page, Security services row)
+- Source: TS Virtualization, Virtualization-based security, Security services, Hypervisor platform (L28256-28258, crosscheck A.18) | MC Virtualization, Virtual machine
+- Behaviour:
+  - **Virtualization:** "Enabled (KVM available)", "Supported, KVM module not loaded" or "Not supported".
+  - **Running in VM:** "No", or the hypervisor name. Replaces "Virtualization-based security".
+  - **Security features:** a comma-separated list of the active features, in this order: Secure Boot, Kernel lockdown (integrity or confidentiality), Memory encryption (SME), User shadow stack, IOMMU. "None" when none is active. The tooltip summarises CPU vulnerability status, for example "12 mitigated, 0 vulnerable, 3 not affected", and names any source it could not read. Replaces TaskSlinger's "Security services" (Credential Guard, HVCI and the rest have no Linux meaning).
+  - **Hypervisor:** "None", or a vendor.
+- Linux data/mechanism:
+
+  | Field | Source |
+  |---|---|
+  | Virtualization | `svm`/`vmx` in `/proc/cpuinfo` flags plus `/dev/kvm` |
+  | Running in VM | systemd `org.freedesktop.systemd1.Manager.Virtualization` |
+  | Hypervisor | the `hypervisor` cpuinfo flag plus `/sys/hypervisor/type` |
+  | Secure Boot | efivarfs `SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c`, byte 4 |
+  | Kernel lockdown | `/sys/kernel/security/lockdown`, the bracketed value |
+  | Memory encryption | the `sme` flag in `/proc/cpuinfo`, plus `mem_encrypt` on the kernel command line |
+  | User shadow stack | the `user_shstk` flag |
+  | IOMMU | a non-empty `/sys/class/iommu` |
+  | Vulnerabilities | `/sys/devices/system/cpu/vulnerabilities/*` |
+
+  The addendum wrote the Secure Boot GUID as `8be4df61-93ca-11d2-aa0d-e0c98e1ccb4a`; the EFI global variable GUID is `8be4df61-93ca-11d2-aa0d-00e098032b8c` (v2 and PERF-101 agree), so that form is used. Readability of lockdown, efivars and iommu without root is unverified (U-27). A source that cannot be read is left out of the list and named in the tooltip.
+- Verdict: ADAPT. Windows security rows carry the nearest Linux facts.
+- Phase: P2
+- Privilege: none
+- Applied: R-056
+
+### PERF-038 CPU power (RAPL)
+- Was: v2 PERF-033
+- Source: MC "Power: RAPL"
+- Behaviour: "Power draw" in watts (one decimal) on the stats grid and in the secondary graph. The tooltip splits Package and Core.
+- Linux data/mechanism:
+  - `/sys/class/powercap/intel-rapl:0/energy_uj` (package-0) and `intel-rapl:0:0` (core). The AMD driver also uses the `intel-rapl` names.
+  - Rate = Δenergy_uj / Δt. Counter wrap uses `max_energy_range_uj`.
+  - Polled at 1 Hz while demanded. The file is kept open and read with `pread`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: The kernel default is mode 0400 (since the PLATYPUS fix, CVE-2020-8694). It is readable here only because Mission Center's `/etc/udev/rules.d/99-powercap.rules` is installed (verified). When not readable the row shows `Needs setup`, linking to PERF-105. When no RAPL zone exists the row is hidden (PERF-013).
+- Applied: R-050, R-029
+
+### PERF-039 CPU temperature
+- Was: v2 PERF-034
+- Source: MC "Temperature: hwmon k10temp, coretemp or zenpower"
+- Behaviour: "Temperature" in integer °C on the stats grid, the CPU card and the secondary graph. The tooltip lists every sensor of that chip (Tctl, Tccd1, Tccd2).
+- Linux data/mechanism: Find hwmon by `name` in this order: `k10temp`, `zenpower`, `coretemp`, `cpu_thermal`. The main reading is the `tempN_input` whose label is "Tctl" or "Package id 0", else temp1. 1 Hz.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-040 CPU clock
+- Was: v2 PERF-035
+- Source: TS "4631 MHz" | MC Speed
+- Behaviour: Average clock in integer MHz on the card and stats grid, per-core MHz in cell tooltips, and the clock option of the secondary graph.
+- Linux data/mechanism: `cpuinfo_avg_freq` (APERF/MPERF based) per policy, at 1 Hz while shown, else `scaling_cur_freq` (U-28).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-013
+
+## Memory page
+
+### PERF-041 Memory graphs
+- Was: v2 PERF-036
+- Source: TS "Physical memory", "Commit", "Swap" (L28573-28575) | MC memory and swap graphs
+- Behaviour: Three graphs in a column:
+  - "Physical memory": used filled, committed dashed, dirty as a thin line. Max = total.
+  - "Commit": Committed_AS against CommitLimit. It can go above 100%, and the label says so.
+  - "Swap": used. Hidden when there is no swap.
+  - The page context menu has "Show memory composition" and "Show swap usage", both persisted and default on.
+- Linux data/mechanism: `/proc/meminfo` at 1 Hz. Used = MemTotal − MemAvailable (MemFree when Available > Total). Swap used = SwapTotal − SwapFree. Keys `performance.memory_composition = true` and `performance.memory_swap_graph = true`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-019
+
+### PERF-042 Memory composition bar
+- Was: v2 PERF-037
+- Source: TS "Memory composition" (In use, In use (compressed), Modified, Standby, Free) | MC composition widget
+- Behaviour: A horizontal bar with five segments and hover tooltips. Each tooltip gives the amount and a one-line meaning, for example "Standby: cache the kernel can drop".
+- Linux data/mechanism:
+  - Free = MemFree.
+  - Modified = Dirty + Writeback.
+  - Compressed = zram `mm_stat` field 3 (mem_used_total) + meminfo `Zswap`, clamped to In use.
+  - In use = Total − Available − Compressed.
+  - Standby = Total − In use − Compressed − Modified − Free, clamped at 0.
+- Verdict: ADAPT. Windows page lists map to Linux meminfo fields, with zram and zswap as the compressed segment.
+- Phase: P1
+- Privilege: none
+
+### PERF-043 Memory stats
+- Was: v2 PERF-038
+- Source: TS In use, Committed, Cached, Paged pool, Non-paged pool, Slots used, Form factor, Hardware reserved, Speed | MC Available, Swap used, Swap available, Compressed, Savings, Type
+- Behaviour: Rows, in order:
+  - In use, Available, Committed ("46.20 GiB / 67.20 GiB"), Cached;
+  - "Kernel slab (reclaimable)" (replaces Paged pool), "Kernel slab (unreclaimable)" (replaces Non-paged pool);
+  - Speed, Slots used ("2 of 4"), Form factor, Type, Hardware reserved;
+  - Swap used, Swap available;
+  - Compressed, Savings (shown only when at least 1 MiB is compressed);
+  - Huge pages (shown only when non-zero).
+- Linux data/mechanism:
+  - meminfo `Cached`, `SReclaimable`, `SUnreclaim`, `Committed_AS`/`CommitLimit`, `HugePages_*`.
+  - Swap available = SwapFree (Mission Center wrongly shows SwapTotal).
+  - Savings = (zram orig_data_size + Zswapped) − (zram compr_data_size + Zswap).
+  - Hardware reserved = sum of DIMM sizes − MemTotal.
+  - DIMM rows from PERF-046. Speed is the configured speed in MT/s.
+- Verdict: ADAPT. Pools become slab.
+- Phase: P1 for meminfo rows; P2 for DIMM rows.
+- Privilege: none
+- Applied: table d
+
+### PERF-044 zram and zswap details
+- Was: v2 PERF-039
+- Source: MC Compressed/Savings | TS "In use (compressed)"
+- Behaviour: A "Compressed memory" block under the stats.
+  - Per zram device: Device, Size (disksize), Stored (orig), Compressed, Memory used, Ratio ("3.4 : 1"), Algorithm.
+  - zswap: "Enabled: No" here; when enabled, Pool size and Stored.
+- Linux data/mechanism:
+  - `/sys/block/zram*/{disksize,mm_stat,comp_algorithm}`. The active algorithm is the one in brackets.
+  - `/sys/module/zswap/parameters/{enabled,compressor,max_pool_percent}` and meminfo `Zswap`/`Zswapped`.
+- Verdict: ADAPT. The block is new and gives detail Mission Center only sums.
+- Phase: P2
+- Privilege: none
+
+### PERF-045 Swap devices list
+- Was: v2 PERF-040
+- Source: TS "Page file" concept | MC swap graph
+- Behaviour: A table under the compressed block with the columns Name, Type (partition, file, zram), Size, Used and Priority.
+- Linux data/mechanism: `/proc/swaps`.
+- Verdict: ADAPT. Replaces Windows page files.
+- Phase: P2
+- Privilege: none
+
+### PERF-046 Memory modules on the Memory page
+- Was: v2 PERF-041, add PERF-085
+- Source: TS "Memory module" heading (crosscheck A.16, B.5; type list L29453-29482) | MC first-DIMM-only fields (`memory.rs:348-368`)
+- Behaviour: Below the Details grid, a summary line reads "Slots used: 2 of 4". Under it is one collapsible block per populated DIMM, headed "Memory module N" (N from 1 in SMBIOS order). Fields:
+  - **Slot**: bank locator and locator, for example "P0 CHANNEL A (DIMM 0)";
+  - **Capacity** (GiB);
+  - **Speed** (MT/s), plus **Configured speed** when it differs;
+  - **Type** (the SMBIOS string as reported: DDR4, DDR5, LPDDR5, HBM3, MRDIMM and others);
+  - **Form factor**;
+  - **Manufacturer**;
+  - **Part number**;
+  - **Rank**;
+  - **Voltage** (configured, V).
+
+  Serial numbers are never shown, here, on the Information tab or in copy text. Empty slots are left out. Blocks start collapsed when there are more than 4 modules. The Information tab uses the same data (PERF-099).
+- Linux data/mechanism: udev properties of `/sys/devices/virtual/dmi/id`, through libudev or by parsing `/run/udev/data/+dmi:id`: `MEMORY_ARRAY_NUM_DEVICES`, `MEMORY_DEVICE_<n>_{SIZE,LOCATOR,BANK_LOCATOR,SPEED_MTS,CONFIGURED_SPEED_MTS,TYPE,FORM_FACTOR,MANUFACTURER,PART_NUMBER,RANK,CONFIGURED_VOLTAGE}`, from systemd's `dmi_memory_id`. The `SERIAL_NUMBER` key is not read. Read once at startup. Verified readable without root on this machine (DDR4 3200 Kingston KHX3200C18D4/16G). No `dmidecode`. When the keys are missing (systemd-udevd before v252), the block list is replaced by "Module details: Not reported".
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none (this corrects PLAN.md and ADR-016, which say DIMM details need root)
+- Applied: D-007, R-030
