@@ -1978,6 +1978,7 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - Outputs: stderr when stderr is a terminal; always a file through `tracing_appender::rolling::RollingFileAppender::builder().rotation(Rotation::DAILY).filename_prefix("tasklens").filename_suffix("log").max_log_files(7)` in `$XDG_STATE_HOME/tasklens/logs/`, wrapped in `tracing_appender::non_blocking` (its guard is held in `main` and dropped last).
 - Targets: `tasklens::engine`, `tasklens::source::<name>`, `tasklens::action`, `tasklens::ui`, `tasklens::frame`, `tasklens::probe`.
 - No logging inside per-frame or per-process loops above `trace` level.
+- No custom log levels or categories: performance logs use `info` on target `tasklens::perf`. No repeat collapsing. `RUST_LOG` is not read.
 
 **What is never logged** (at any level): command lines, environment, working directories, open file paths, executable paths of other users' processes, window titles, user names other than the current user. Processes are logged as `pid` plus `comm` only, and `comm` only at `debug` and below. Action logs record kind, target PID and result.
 
@@ -1988,9 +1989,10 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 
 **Crash handling.**
 - `panic = "unwind"` (ADR-002). A panic in a worker is handled by its supervisor; in the reducer by the session loop (ADR-004); in an action task, the action reports `Failed(Internal("internal error"))`.
-- A panic hook (installed first in `main`) writes `$XDG_STATE_HOME/tasklens/crash/crash-<unix seconds>.txt` with: tasklens version and git sha, thread name, panic message, location, `std::backtrace::Backtrace::force_capture()`. No process metadata, no settings contents. Then it calls the default hook. Keep the newest 20 reports.
-- A panic on the GPUI main thread ends the process; the next start shows a toast "tasklens closed unexpectedly last time. A crash report was saved to {path}".
-- Native crashes are left to `systemd-coredump`. NVML native crashes only affect `tl-gpu-probe` (ADR-007).
+- A panic hook (installed first in `main`) writes `$XDG_STATE_HOME/tasklens/crash/crash-<unix seconds>.txt` with: tasklens version and git sha, thread name, panic message, location, `std::backtrace::Backtrace::force_capture()`, and the last 200 log lines. No process metadata, no settings contents. Then it calls the default hook. Keep the newest 20 reports.
+- A panic on the GPUI main thread ends the process and shows the desktop notification "tasklens stopped after an unrecoverable error." The next start opens a window titled "tasklens Crash Report" with the text "tasklens closed unexpectedly last time." and the buttons "Open log folder", "Copy report" and "Close".
+- Native crashes are left to `systemd-coredump`; the crash report window mentions `coredumpctl info tasklens`. NVML native crashes only affect `tl-gpu-probe` (ADR-007).
+- GPU device loss: the desktop notification "tasklens lost the graphics device and must restart", then one automatic relaunch.
 
 **Untrusted process text** (`tl-collect/src/sanitize.rs`, applied before any string enters `ProcessMeta`):
 - Read limits: `comm` 64 bytes, `cmdline` 32 KiB (truncate and append `…`), `exe` link 4 KiB, `status` 8 KiB.
@@ -1998,7 +2000,13 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - C0 and C1 control characters become U+FFFD. Bidirectional controls U+202A to U+202E and U+2066 to U+2069, and U+200B to U+200F, are removed.
 - Lines are joined with spaces; NUL separators in `cmdline` become spaces.
 
-**Exports and copy.** "Copy" in the process menu copies only the visible columns of the selected rows, as tab-separated text. There is no automatic export. Any later export feature asks before including command lines.
+**Exports and copy.** In every table:
+- Ctrl+C runs "Copy row" (process menu label "Copy details"; services, startup and connections: "Copy row"). It copies a fixed text block per selected row (add PROC-098, SYS-009, SYS-026, SYS-034).
+- Ctrl+Shift+C runs "Copy rows as table": the visible columns of the selected rows as tab-separated text with a header line.
+- "Copy" copies the clicked cell.
+- "Copy all metrics" copies every column with data as `Label: value` lines, ending with `Command line: …`.
+
+On the Performance tab, Ctrl+C copies the device info. Command lines appear only in "Copy all metrics" and only for rows the user selected; this is the one deliberate export of command lines. There is no automatic export. Any later export feature asks before including command lines.
 
 ### Consequences
 
