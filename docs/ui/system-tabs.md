@@ -38,9 +38,10 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   (U+2009) grouping for counts, percent `%.1f%%`, sizes IEC two decimals.
 - Strings in double quotes are exact UI text. A string marked "(new)" is written by this file and
   is not in the merged specs; it is listed in "Decided here".
-- Action names are GPUI `Action` types. They are written `module::Name` and live in
-  `crates/tl-ui/src/actions/` (one module per page). Menu items and keys dispatch the same Action
-  (widgets rule 10).
+- Action names are GPUI `Action` types in the single `tasklens` namespace (shell.md rule). Page
+  actions carry the page word in the name (`ServiceStart`, `StartupRunNow`, `ConnectionCloseTcp`)
+  and live in `crates/tl-ui/src/pages/<page>/actions.rs`. Menu items and keys dispatch the same
+  Action (widgets rule 10).
 - Snapshot component bits are written `ComponentMask::SERVICES`, `::STARTUP`, `::CONNECTIONS`,
   `::INVENTORY`, `::PROCESSES`, `::SYSTEM`, `::HEALTH`, `::DEVICES` (one bit per `Snapshot`
   component, ADR-005).
@@ -67,8 +68,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 | `TlEmptyState` (UI-FND-029) | foundation.md | empty and error states |
 | `TlBadge` `Neutral` (UI-FND-027) | foundation.md | relation tags in Dependencies |
 | `TlSpinner` (UI-FND-023) | foundation.md | pending buttons |
-| `TlLink` | this file | shorthand for a `TlKeyValueGrid` link value (`status.info`, underline on hover, pointer cursor, UI-FND-025) used outside a grid too |
-| `TlBanner` | this file, UI-SYS-038 | an info strip inside a pane: height 32, padding x `sp5`, `status.info` at alpha 0.12 fill, 1 px `status.info` bottom border, icon `info` 14 in `status.info`, text `t_sm` `text_primary`, trailing buttons `TlButton::Secondary` sm |
+| `TlLink` (UI-FND-032) | foundation.md | inline link text (`status.info`, underline on hover, pointer cursor); the `TlKeyValueGrid` link value uses it |
+| `TlBanner` (UI-FND-031) | foundation.md | info strip inside a pane (UI-SYS-038) |
 | Status chip, page method `fn status_text(&self, out: &mut String)` and event `StatusChanged` (UI-SHL-050) | shell.md | status text per tab (APP-029) |
 | `FilterBox` and the page event `FilterChanged { tab, text }` (UI-SHL-024) | shell.md | the tab filter (APP-028) |
 | Information tab copy icon, action `CopyInformationAll` (UI-SHL-023) | shell.md | copy all |
@@ -309,7 +310,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Case | Icon | Heading | Text | Button |
   |---|---|---|---|---|
   | Services, neither manager answers | `server` | "systemd not found" (spec) | "tasklens lists services from systemd. Neither the system manager nor the user manager answered." (new) | "Retry" → `RefreshCurrentTab` |
-  | Any table, text filter or state filters exclude every row | `funnel-x` | "No matches" (new) | "No services match the current filters." / "No startup entries match the filter." / "No connections match the filter." (new) | Startup Apps and Connections: "Clear filter" dispatching `ClearFilter` (UI-FND-029). Services: "Clear filters" (new) dispatching `services::ClearAllFilters`, which clears the text and resets the strip to defaults |
+  | Any table, text filter or state filters exclude every row | `funnel-x` | "No matches" (new) | "No services match the current filters." / "No startup entries match the filter." / "No connections match the filter." (new) | Startup Apps and Connections: "Clear filter" dispatching `ClearFilter` (UI-FND-029). Services: "Clear filters" (new) dispatching `ServicesClearAllFilters`, which clears the text and resets the strip to defaults |
   | Startup Apps, no entries at all | `app-window` | "No startup entries" (new) | "Nothing starts automatically when you log in." (new) | none |
   | Connections, no sockets | `network` | "No connections" (new) | none | none |
   | Source `Failed` before first data | `circle-alert` in `status.warning` | "Could not load services" / "Could not load startup entries" / "Could not load connections" (new) | `SourceHealth.last_error`, one line, ellipsis | "Retry" → `RefreshCurrentTab` |
@@ -489,8 +490,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
     result with the text filter using AND (SYS-004). Child rows inherit their unit's state.
   - "Remove filters" sets state toggles off, unit types to the default four, System and User on.
     It does not clear the text filter (chosen; Esc does that).
-  - Actions: `services::ToggleStateFilter { state }`, `services::ToggleManagerFilter { manager }`,
-    `services::ToggleUnitType { kind }`, `services::RemoveFilters`. No key bindings (table b has
+  - Actions: `ServicesToggleStateFilter { state }`, `ServicesToggleManagerFilter { manager }`,
+    `ServicesToggleUnitType { kind }`, `ServicesRemoveFilters`. No key bindings (table b has
     none).
 - **Data binding**: writes `settings.toml` `services.filter_states` and `services.unit_types` on
   each change (debounced save per ADR-011). System and User toggles are session-only (chosen; table
@@ -518,7 +519,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   shows.
 - **Interaction**: click toggles an item and keeps the menu open (chosen, so several types can be
   changed at once); Esc or a click outside closes it. Up/Down move, Space or Enter toggles.
-  Action `services::ToggleUnitType { kind }`.
+  Action `ServicesToggleUnitType { kind }`.
 - **Data binding**: `services.unit_types` (array of `service socket timer mount automount path
   target swap slice scope`).
 - **Build**: `TlMenu` with `menu_with_check`; the "keep open" behaviour uses the item's `on_click`
@@ -602,7 +603,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Data binding**: `state.toml` `[services] group_expanded = { system = true, user = true }`,
   saved on each toggle. Manager health from `ServicesSnapshot.managers[System|User].state`
   (`Connected | Unavailable | Reconnecting`, new field).
-- **Build**: delegate row kind `GroupRow`; the paint is the shared group row.
+- **Build**: delegate row kind `RowKind::GroupHeader`; the paint is the shared group row.
 - **Performance**: two rows.
 - **Accessibility**: accessible name "System services, 214 units, expanded" (chosen).
 - **Tests**: `group_row_unavailable_label`; `group_expand_state_persisted`;
@@ -683,7 +684,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   `Snapshot.processes`. While at least one unit row is expanded the page sets
   `Demand.process_table = true` and adds the visible child keys to `detail_keys` (chosen), so the
   sweep runs; it clears it when none is expanded.
-- **Build**: delegate row kind `ProcessChild`; paint delegates to `ProcessRowCells::paint`.
+- **Build**: delegate row kind `RowKind::Process`; paint delegates to `ProcessRowCells::paint`.
 - **Performance**: the process sweep runs only while a unit is expanded on a visible Services tab.
 - **Accessibility**: as process rows.
 - **Tests**: `child_rows_use_process_menu`; `ctrl_e_on_child_ends_process`;
@@ -699,23 +700,23 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | # | Label | Key hint | Action | Shown when | Enabled when |
   |---|---|---|---|---|---|
-  | 1 | "Start" | Ctrl+S | `services::Start` | always | any target not active and not pending |
-  | 2 | "Stop" | Ctrl+E | `services::Stop` | always | any target active and not pending |
-  | 3 | "Restart" | Ctrl+R | `services::Restart` | always | any target active and not pending |
-  | 4 | "Reload" | | `services::Reload` | any target has `CanReload` | that target active |
-  | 5 | "Reset failed state" | | `services::ResetFailed` | any target Failed | always |
+  | 1 | "Start" | Ctrl+S | `ServiceStart` | always | any target not active and not pending |
+  | 2 | "Stop" | Ctrl+E | `ServiceStop` | always | any target active and not pending |
+  | 3 | "Restart" | Ctrl+R | `ServiceRestart` | always | any target active and not pending |
+  | 4 | "Reload" | | `ServiceReload` | any target has `CanReload` | that target active |
+  | 5 | "Reset failed state" | | `ServiceResetFailed` | any target Failed | always |
   | 6 | "Startup type" › | | submenu, UI-SYS-019 | always | see UI-SYS-019 |
   | – | separator | | | | |
-  | 7 | "View logs" | | `services::ViewLogs` | always | one target; disabled on OpenRC |
+  | 7 | "View logs" | | `ServiceViewLogs` | always | one target; disabled on OpenRC |
   | 8 | "Properties" | Enter | `OpenProperties` | always | always |
-  | 9 | "File properties" | | `services::FileProperties` | always | binary or unit file known |
-  | 10 | "Open file location" | | `services::OpenFileLocation` | always | binary known |
-  | 11 | "Open unit file" | | `services::OpenUnitFile` | always | `FragmentPath` not empty |
+  | 9 | "File properties" | | `ServiceFileProperties` | always | binary or unit file known |
+  | 10 | "Open file location" | | `ServiceOpenFileLocation` | always | binary known |
+  | 11 | "Open unit file" | | `ServiceOpenUnitFile` | always | `FragmentPath` not empty |
   | – | separator | | | | |
   | 12 | "Copy" | | `CopyCell { col }` | always | always |
   | 13 | "Copy row" | Ctrl+C | `CopyDetails` | always | always |
   | 14 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always | always |
-  | 15 | "Jump to process" | | `services::JumpToProcess` | always | one target with MainPID ≠ 0 |
+  | 15 | "Jump to process" | | `ServiceJumpToProcess` | always | one target with MainPID ≠ 0 |
 
   Items have no icons (chosen; TaskSlinger menus have none). The kit hides a separator next to a
   hidden item.
@@ -800,7 +801,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
     change startup type" (spec), with ": <error>" appended to the failure (chosen). Polkit may
     prompt twice for system units (spec); the toast stays pending through both.
 - **Interaction**: choosing the current value does nothing. Choosing another sends one request.
-  Action `services::SetStartupType { startup: UnitStartup::{Enabled, Disabled, Masked} }`.
+  Action `ServiceSetStartupType { startup: UnitStartup::{Enabled, Disabled, Masked} }`.
 - **Data binding**: `ActionKind::UnitEnable`, `UnitDisable` (ADR-005) and new `UnitMask`,
   `UnitUnmask` (open item O-2); leaving Masked sends Unmask first, then the chosen kind, as one
   request (engine sequence).
@@ -843,7 +844,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Implements**: SYS-010, PROC-071, SYS-032 (Go to service from Connections).
 - **Anatomy**: no own visuals.
 - **Interaction**:
-  - "Jump to process" (`services::JumpToProcess`): calls the PROC-071 entry point with the MainPID's
+  - "Jump to process" (`ServiceJumpToProcess`): calls the PROC-071 entry point with the MainPID's
     `ProcessKey`. Toasts: "Switched to service process." on success; "Service process not visible
     in the current process view." with a "Show" button when filtered or hidden; "Service not
     running" when MainPID is 0 (spec).
@@ -962,9 +963,9 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Tab strip | `TlTabs`, tabs "General", "Log On", "Recovery", "Dependencies", "Logs" | 32 high | `tab_bg`, active `accent` underline per foundation |
   | Content | per tab | fills | `window_bg` |
   | Footer | `h_flex` right-aligned, gap `sp4`, top border 1 px `divider` | 48 | `toolbar` |
-  | OK | `TlButton` primary, min width 80 | 28 high | |
-  | Cancel | `TlButton` default, min width 80 | | |
-  | Apply | `TlButton` default, min width 80 | | disabled unless a field is changed |
+  | OK | `TlButton::Primary` md, min width 80 | 28 high | |
+  | Cancel | `TlButton::Secondary` md, min width 80 | | |
+  | Apply | `TlButton::Secondary` md, min width 80 | | disabled unless a field is changed |
 
 - **States**:
   - Opening the same unit again focuses the existing window (chosen, as PROC-077).
@@ -1018,7 +1019,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   Drop-ins:   /etc/systemd/system/sshd.service.d/x.conf     (one TlLink per line)
   Startup:    [ Enabled          ▾ ]                        (TlSelect, width 200)
   Status:     ● Running (running) since 2026-10-03 09:12:44
-              [Start] [Stop] [Restart]                      (TlButton small, gap sp4)
+              [Start] [Stop] [Restart]                      (TlButton::Secondary sm, gap sp4)
   Main PID:   812                                           (TlLink)
   Memory:     5.23 MiB
   Tasks:      1
@@ -1135,7 +1136,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Run on failure | `TlTextInput`, full width | unit names separated by spaces |
   | Restarts so far | text | read-only |
   | Saved as | `t_sm` `text_secondary`, selectable | the drop-in path from table (c) |
-  | Remove tasklens settings (new) | `TlButton` small, default | shown only when the tasklens drop-in exists |
+  | Remove tasklens settings (new) | `TlButton::Secondary` sm | shown only when the tasklens drop-in exists |
 
 - **States**:
   - Clean / dirty: Apply enabled only when a value differs from the unit's current value.
@@ -1232,7 +1233,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Toolbar | `h_flex`, gap `sp4`, padding y `sp2` | 32 | `toolbar` background, bottom border |
   | Filter | `TlTextInput` small with `search` prefix, cleanable, placeholder "Filter logs" (new) | width 220 | |
   | Follow | `TlButton::Segment` with icon `arrow-down-to-line` 14, label "Follow" (spec) | 24 | on by default |
-  | Load older | `TlButton` small, label "Load older" (spec) | 24 | |
+  | Load older | `TlButton::Secondary` sm, label "Load older" (spec) | 24 | |
   | Copy | `TlButton::Icon` `copy` 14, tooltip "Copy logs to clipboard" (spec) | 24 × 24 | right side |
   | Open in terminal | `TlButton::Icon` `terminal` 14, tooltip "Open in terminal" (spec) | 24 × 24 | |
   | Banner | `TlBanner` info, `t_sm` | 32 | UI-SYS-038 |
@@ -1240,7 +1241,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | Time column | 19 characters wide, `text_secondary` | | `YYYY-MM-DD HH:MM:SS` local (table d) |
   | Priority column | 7 characters wide, gap `sp4` each side | | words emerg, alert, crit, err, warning, notice, info, debug (journalctl names) |
   | Message | rest, one line, ellipsis | | multi-line messages show the first line plus " (+N lines)" in `text_secondary` |
-  | New-lines pill | `TlButton` small, rounded, `accent` fill, `text_primary`, 16 above the bottom, centred | 24 | "↓ N new lines" (new) |
+  | New-lines pill | `TlButton::Primary` sm, radius full, `accent` fill, 16 above the bottom, centred | 24 | "↓ N new lines" (new) |
 
   Colouring by priority (spec plus chosen detail): 0 to 3 → priority word and message in
   `status.danger`; 4 → `status.warning`; 5 and 6 → `text_primary`; 7 → `text_secondary`. The time
@@ -1468,17 +1469,17 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | # | Label | Key hint | Action | Enabled when |
   |---|---|---|---|---|
-  | 1 | "Disable" or "Enable" (by state; both shown for a mixed selection) | | `startup::Disable` / `startup::Enable` | `can_toggle` for at least one target |
-  | 2 | "Run now" | | `startup::RunNow` | `can_run` for at least one target |
+  | 1 | "Disable" or "Enable" (by state; both shown for a mixed selection) | | `StartupDisable` / `StartupEnable` | `can_toggle` for at least one target |
+  | 2 | "Run now" | | `StartupRunNow` | `can_run` for at least one target |
   | – | separator | | | |
   | 3 | "Copy" | | `CopyCell { col }` | always |
   | 4 | "Copy row" | Ctrl+C | `CopyDetails` | always |
   | 5 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always |
-  | 6 | "Copy command" | | `startup::CopyCommand` | one target |
-  | 7 | "Open file location" | | `startup::OpenFileLocation` | one target |
+  | 6 | "Copy command" | | `StartupCopyCommand` | one target |
+  | 7 | "Open file location" | | `StartupOpenFileLocation` | one target |
   | 8 | "Properties" | Enter | `OpenProperties` | always |
   | – | separator | | | |
-  | 9 | "Delete entry…" | Delete | `startup::Delete` | `can_delete` for at least one target |
+  | 9 | "Delete entry…" | Delete | `StartupDelete` | `can_delete` for at least one target |
 
 - **States**: disabled items carry a tooltip with the reason:
   - Not in this desktop: "This entry is not used in this desktop (OnlyShowIn or NotShowIn)." (new)
@@ -1542,8 +1543,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   └─────────────────────────────────────────────────────────────┘
   ```
 
-  Icon `triangle-alert` 20 in `status.warning`. "Delete" is a danger `TlButton`; "Cancel" is
-  default. Type lines (spec): user XDG entry "The autostart file will be deleted. The app stays
+  Icon `triangle-alert` 20 in `status.warning`. "Delete" is `TlButton::Danger`; "Cancel" is
+  `TlButton::Secondary`. Type lines (spec): user XDG entry "The autostart file will be deleted. The app stays
   installed."; user systemd unit "The unit will be disabled and its unit file deleted."; Plasma
   script "The script file will be deleted.".
 
@@ -1610,7 +1611,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   minimum 480 × 360 (chosen), not modal. Content: `TlKeyValueGrid` in a scroll region, padding
   `sp6`, label column 220, one copy button per line (`TlButton::Icon` `copy` 14 in a 20 × 20 hit
   area at the line's right end, `text_secondary` at 60% alpha, full alpha on row hover or focus).
-  Footer 48 with one `TlButton` "Close" (default).
+  Footer 48 with one `TlButton::Secondary` "Close".
 
   | Label | Value |
   |---|---|
@@ -1768,13 +1769,13 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   | 1 | "Copy" | | `CopyCell { col }` | always (chosen addition, R-012) |
   | 2 | "Copy row" | Ctrl+C | `CopyDetails` | always |
   | 3 | "Copy rows as table" | Ctrl+Shift+C | `CopyRowsAsTable` | always |
-  | 4 | "Copy local address" | | `connections::CopyLocal` | one target |
-  | 5 | "Copy foreign address" | | `connections::CopyForeign` | one target; disabled for `*:*` |
+  | 4 | "Copy local address" | | `ConnectionCopyLocal` | one target |
+  | 5 | "Copy foreign address" | | `ConnectionCopyForeign` | one target; disabled for `*:*` |
   | – | separator | | | |
-  | 6 | "Close TCP connection" | | `connections::CloseTcp` | shown from P3 for TCP targets; see UI-SYS-064 |
+  | 6 | "Close TCP connection" | | `ConnectionCloseTcp` | shown from P3 for TCP targets; see UI-SYS-064 |
   | – | separator | | | |
-  | 7 | "Jump to process" | | `connections::JumpToProcess` | one target; disabled with no owner (tooltip "No owning process for this connection") |
-  | 8 | "Go to service" | | `connections::GoToService` | shown when the owner belongs to a systemd unit |
+  | 7 | "Jump to process" | | `ConnectionJumpToProcess` | one target; disabled with no owner (tooltip "No owning process for this connection") |
+  | 8 | "Go to service" | | `ConnectionGoToService` | shown when the owner belongs to a systemd unit |
   | 9 | "Properties" | Enter | `OpenProperties` | always |
 
 - **States**: disabled tooltips as listed; restricted owner: Jump is disabled with the
@@ -2036,7 +2037,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
 
 - **States**: band hover does nothing. Copy button states as `TlButton::Icon`. Values per
   UI-SYS-082.
-- **Interaction**: copy button dispatches `information::CopySection { section }` (UI-SYS-083).
+- **Interaction**: copy button dispatches `CopyInformationSection { section }` (UI-SYS-083).
   Right-click on a row: `TlMenu` "Copy value", "Copy row", "Copy section" (UI-FND-025).
   Clicking a value does not copy (chosen; text selection must work).
 - **Data binding**: the section's rows as `Arc<[InfoRow { label: SharedString, value: TlValue,
@@ -2103,7 +2104,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
   line; sections by one blank line (spec). Non-valid values copy their word ("Restricted").
   Multi-line values (resolutions, IP addresses) are joined with ", " (chosen).
 - **Interaction**:
-  - Section copy button: `information::CopySection { section }`; toast "Copied to clipboard".
+  - Section copy button: `CopyInformationSection { section }`; toast "Copied to clipboard".
   - Tab copy icon (UI-SHL-023): `CopyInformationAll`; all sections in single-column order; toast
     "Copied to clipboard" (spec).
   - Ctrl+C on this tab: copies the selected text if a value has a text selection, else runs

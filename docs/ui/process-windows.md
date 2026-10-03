@@ -105,7 +105,7 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
   - Title: `Process Properties - {name} - PID {pid}` where `{name}` is the PROC-007 display name of the process (not the app name). When the process has exited: `Process Properties - {name} - PID {pid} (not running)` [spec].
 - **States:**
   - Loading (first detail payload not yet arrived, at most one sweep): title already set from the snapshot record; each tab shows its own loading state (UI-PWN-006 to UI-PWN-018).
-  - Exited (`ProcessKey` no longer in `Snapshot.processes` and `ProcFlags::EXITED` seen, or the detail payload has validity `Missing`): title gains " (not running)"; every value keeps its last shown text (the window keeps the last `Arc<TargetDetail>` and the last `ProcessRecord` it rendered); every action control (Set Affinity link, Verify against package, Threads row actions, Strings Scan, Environment Refresh, Grant access buttons) is disabled with tooltip "The process is not running."; a 24 px banner appears under the tab strip: background `status.warning` at 15% alpha, 1 px bottom border `status.warning` at 40% alpha, Lucide `CircleOff` 14 px `status.warning`, text `t_sm` `text_primary` "This process has exited. Values are frozen at the last update." [chosen]. The window does not close by itself. Demand for the key is removed.
+  - Exited (`ProcessKey` no longer in `Snapshot.processes` and `ProcFlags::EXITED` seen, or the detail payload has validity `Missing`): title gains " (not running)"; every value keeps its last shown text (the window keeps the last `Arc<TargetDetail>` and the last `ProcessRecord` it rendered); every action control (Set Affinity link, Verify against package, Threads row actions, Strings Scan, Environment Refresh, Grant access buttons) is disabled with tooltip "The process is not running."; a 24 px banner appears under the tab strip: background `status.warning` at 15% alpha, 1 px bottom border `status.warning` at 40% alpha, Lucide `circle-off` 14 px `status.warning`, text `t_sm` `text_primary` "This process has exited. Values are frozen at the last update." [chosen]. The window does not close by itself. Demand for the key is removed.
   - Error opening (target exited between click and open, or `/proc/<pid>` cannot be opened): the window is not created; the main window shows the toast "Could not open properties." (Error type) [spec PROC-071].
   - Cap: a ninth process Properties window is not created; the source window shows the toast "Too many process properties windows are already open" (Warning type) [spec]. App Properties windows have their own cap of 8 (UI-PWN-019).
   - Already open for the same `ProcessKey`: the existing window is activated (`window.activate_window()`) and its active tab is not changed [spec].
@@ -209,7 +209,7 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
   - Column panel: background `list_bg` [measured `rgb(27,31,33)`], radius `r_sm`, padding `sp4` (8) horizontal and `sp3` (6) vertical. Gap between panels `sp4` (8) [measured about 16 including padding].
   - Each column is a `TlKeyValueGrid` in the inline layout (UI-FND-025), with two Properties overrides passed by the owner: row height 26 [measured 25.8 in the TaskSlinger General tab], independent of `row_height_pct` but multiplied by the UI scale, and the label width rule below. The foundation's 28 px rows and 180 px label column would leave about 90 px for values in a 290 px column. These overrides need `.row_height(..)` and `.label_width(..)` on the component; listed in "Open items". Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
   - Label width per column: the widest shaped label in that column plus `sp5` (12), clamped to 96..150 px, computed once per UI scale and cached [chosen; TaskSlinger uses 126 px for all columns, measured, but tasklens labels are longer]. Label and value styles, validity words, truncation, tooltips and the click-copy flash are the foundation's.
-  - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton Ghost sm "Copy" with Lucide `Copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
+  - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton Ghost sm "Copy" with Lucide `copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
 - **Fields, in order** (label text exactly as shown; value format; source). Missing values show the R-050 words.
   - **Column 1:**
     1. `Process:` display name (PROC-007).
@@ -557,12 +557,12 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 ```
 
   - Section header: height 24 [chosen; measured about 20 in TaskSlinger at a smaller font], background `row_hover` [measured], padding left `sp5`, text `t_base` medium `text_secondary`: `Capabilities [n]` and `Groups [n]` (count formatting of table d).
-  - Capabilities `TlTreeTable` flat: Name 180 (120) left, the full `CAP_` name; Effective, Permitted, Inheritable, Bounding, Ambient 84 (64) each, centred, Lucide `Check` 14 px `text_primary` when set, empty when not; Description flex (min 160) left, the static `linux/capability.h` description.
+  - Capabilities `TlTreeTable` flat: Name 180 (120) left, the full `CAP_` name; Effective, Permitted, Inheritable, Bounding, Ambient 84 (64) each, centred, Lucide `check` 14 px `text_primary` when set, empty when not; Description flex (min 160) left, the static `linux/capability.h` description.
   - Rows: every capability set in at least one of Effective, Permitted, Inheritable or Ambient [chosen; Bounding alone would list all 41 for most processes]. Default order: rows with Effective set first, then by name [chosen]. Risky capabilities (the PROC-082 list) show the Name in `status.warning` with the tooltip "Risky capability".
   - Groups `TlTreeTable` flat: Name 200 (80), GID 90 (60) right, Kind flex (min 120): `Primary`, `Supplementary`, plus ` (root-equivalent)` for docker, libvirt, lxd and disk, and ` (admin)` for wheel, sudo, root and adm [chosen marking].
 - **States:** empty table: "None reported" centred in the table body, `text_secondary` [spec]; loading: "Collecting…"; exited: frozen.
 - **Interaction:** sortable headers; row menu "Copy" (cell) and "Copy row" (TSV); Ctrl+C copies the selected rows as TSV; toasts "Copied to clipboard". The tab filter (UI-PWN-005) applies to Name and Description (capabilities) and Name and GID (groups).
-- **Data binding:** `SecurityDetail.caps: Arc<[CapRow]>`, `SecurityDetail.groups: Arc<[GroupRow]>`.
+- **Data binding:** `SecurityDetail.caps: Arc<[CapRow]>`, `SecurityDetail.groups: Arc<[GroupMembershipRow]>`.
 - **Build:** two `TlTreeTable` entities in `props/security.rs`; each owns its own vertical scroll (allowed: they are separate regions with their own headers).
 - **Performance:** at most 41 and a few dozen rows.
 - **Accessibility:** check-mark cells carry the text alternative "Yes" (used by copy and by the tooltip on hover) [chosen].
@@ -582,9 +582,9 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 | GITHUB_TOKEN              | ••••••                                   [eye]     |
 ```
 
-  - Filter bar tools (right side): Lucide `Info` 14 px `text_secondary` plus the note "Environment at process start" `t_sm` `text_secondary` [spec text]; then TlButton Ghost sm "Refresh" with Lucide `RefreshCw` 12 px.
+  - Filter bar tools (right side): Lucide `info` 14 px `text_secondary` plus the note "Environment at process start" `t_sm` `text_secondary` [spec text]; then TlButton Ghost sm "Refresh" with Lucide `refresh-cw` 12 px.
   - `TlTreeTable` flat: Name 240 (80) left; Value flex (min 160) left, single line, ellipsis at the end. Default sort Name ascending [chosen; TaskSlinger sorts by Name, measured "Name ↑"].
-  - Masked value: "••••••" (six U+2022) in `text_secondary` [spec]. On hover or keyboard focus of a masked row, an eye button (TlButton Icon sm (24 × 24), Lucide `Eye` 14 px) appears at the right end of the Value cell; on a revealed row it shows Lucide `EyeOff` and stays visible.
+  - Masked value: "••••••" (six U+2022) in `text_secondary` [spec]. On hover or keyboard focus of a masked row, an eye button (TlButton Icon sm (24 × 24), Lucide `eye` 14 px) appears at the right end of the Value cell; on a revealed row it shows Lucide `eye-off` and stays visible.
   - When the environment was cut at 1 MiB, a 24 px footer under the table reads "Showing the first 1 MiB of the environment." in `text_secondary` [chosen].
 - **States:**
   - Loading: "Loading environment..." [chosen].
@@ -620,7 +620,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 | 0x55d3f1a0c2f0   | ASCII    |     14 | /usr/lib/firefox                                       |
 ```
 
-  - Options bar: height 32, padding `sp5` horizontal, gap `sp4`. "Minimum length" label `t_sm` `text_secondary`, TlStepper width 72, range 4..=64, step 1, default 4 [spec]. Three TlCheckboxes "ASCII", "UTF-8", "UTF-16LE", all on [spec]. TlCheckbox "Include file-backed mappings", off [spec]. Right-aligned: TlButton Primary sm "Scan" (Lucide `ScanSearch` 14 px), replaced by TlButton Secondary sm "Cancel" (Lucide `Square` 12 px) while scanning.
+  - Options bar: height 32, padding `sp5` horizontal, gap `sp4`. "Minimum length" label `t_sm` `text_secondary`, TlStepper width 72, range 4..=64, step 1, default 4 [spec]. Three TlCheckboxes "ASCII", "UTF-8", "UTF-16LE", all on [spec]. TlCheckbox "Include file-backed mappings", off [spec]. Right-aligned: TlButton Primary sm "Scan" (Lucide `scan-search` 14 px), replaced by TlButton Secondary sm "Cancel" (Lucide `square` 12 px) while scanning.
   - Progress row (visible while scanning): `TlProgress` md (6 high, UI-FND-023), width 200, determinate; then the status text `t_sm` `text_secondary`, tabular figures. After the scan the bar is removed from the tree and only the status text stays.
   - Table columns: Address 140 (110) right, `0x` plus lowercase hex; Encoding 90 (70) left; Length 70 (60) right, count; Value flex (min 200) left, single line, first 512 characters with an ellipsis after [chosen]; tabs and newlines inside a value show as `\t` and `\n` [chosen].
 - **States:**
@@ -658,7 +658,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
                   [Grant access]
 ```
 
-  - Centred block, 64 px from the top of the body. Icon Lucide `ShieldAlert` 24 px `text_secondary`; `sp4` gap; message `t_base` `text_primary`, centred, max width 420, wraps; `sp5` gap; TlButton Secondary sm with the label from the spec ("Grant access" for File descriptors, Memory maps and Environment; "Enable" for Strings) [spec]; Security has no button (its data comes from world-readable files, so only hidepid causes it) [chosen].
+  - Centred block, 64 px from the top of the body. Icon Lucide `shield-alert` 24 px `text_secondary`; `sp4` gap; message `t_base` `text_primary`, centred, max width 420, wraps; `sp5` gap; TlButton Secondary sm with the label from the spec ("Grant access" for File descriptors, Memory maps and Environment; "Enable" for Strings) [spec]; Security has no button (its data comes from world-readable files, so only hidepid causes it) [chosen].
   - Texts per tab [spec]: File descriptors "Handles unavailable (insufficient privileges)"; Memory maps "Needs administrator access."; Security "Security information unavailable (insufficient privileges)"; Environment "Environment unavailable (insufficient privileges)"; Strings "Strings unavailable: needs administrator rights".
 - **States:**
   - Before P3 (no helper): the button is not shown [chosen, following R-050's "before P3" tooltip rule].
@@ -666,7 +666,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Waiting for authentication: button loading with label "Waiting for authentication…" [chosen].
   - Authentication cancelled: button back to default; toast "Authentication cancelled" [spec APP-044].
   - Granted: the tab reloads through the helper; the block is replaced by the normal loading state.
-- **Interaction:** the button dispatches `UnlockPrivileged` (the same Action as the title-bar shield, APP-003), then the window re-sends its `DetailDemand` with the helper flag. Enter or Space on the focused button activates it. Tab order: the button is the first focus stop of the body.
+- **Interaction:** the button dispatches `StartHelperSession` (the same Action as the title-bar shield, APP-003, UI-FND-028), then the window re-sends its `DetailDemand` with the helper flag. Enter or Space on the focused button activates it. Tab order: the button is the first focus stop of the body.
 - **Data binding:** tab payload validity `Restricted` triggers this state; helper session state from `Snapshot.health` (bit `HEALTH`).
 - **Build:** `props/mod.rs`, `fn access_block(text, button: Option<AccessButton>) -> impl IntoElement` (RenderOnce).
 - **Performance:** static.
@@ -708,7 +708,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 
   - Title `App Properties - {app name}` [spec]; for unit rows `App Properties - {unit name}`. Exited: ` (not running)` appended.
   - Default size 720 × 560 [chosen], minimum 640 × 400 (UI-FND-021 Properties kind). Frame per UI-PWN-001; tab strip per UI-PWN-004 with two tabs; filter bar per UI-PWN-005 (matches labels and values on General, Name, PID, User and Command line on Processes).
-  - Header block: height 64, padding `sp5`. Icon 48 × 48 (`img(path)` from the engine's icon resolution, ADR-016; fallback Lucide `AppWindow` 48 px `text_secondary`) [spec size]. Name `t_lg` (16) semibold 600 `text_primary`; under it the type word `t_sm` `text_secondary`.
+  - Header block: height 64, padding `sp5`. Icon 48 × 48 (`img(path)` from the engine's icon resolution, ADR-016; fallback Lucide `app-window` 48 px `text_secondary`) [spec size]. Name `t_lg` (16) semibold 600 `text_primary`; under it the type word `t_sm` `text_secondary`.
   - Two panels as UI-PWN-006 (identity left, usage right) when the body is at least 640 px wide, stacked below that [chosen].
   - Identity fields: `App ID:`; `Type:` `App` or `Unit` [spec]; `Desktop file:` path as a link (Open file location); `Unit:` link to the Services tab (Go to service), hidden when none; `Cgroup:` path; `Processes:` count.
   - Usage fields, live: `CPU:` percent; `Memory:` cgroup `anon` size [spec]; `Swap:` `memory.swap.current` size, updated live [spec]; `Disk:` `Read 0.4 MiB/s, write 0.1 MiB/s`; `Network:` `Receive 1.2 Mbps, send 0.3 Mbps`; `GPU:` percent; `VRAM:` size [chosen wordings as UI-PWN-006].
@@ -786,7 +786,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Group header: height 24, a TlCheckbox for the whole group (indeterminate when partly checked) plus the label `t_base` medium `text_primary`: `CCD {n}: CPU {list}` for L3 groups [spec]; Intel hybrid: `P-cores: CPU {list}` and `E-cores: CPU {list}` with the app SVG icons `cpu-pcore` and `cpu-ecore` (12 px, `text_secondary`) before the label [spec intent, chosen labels]; a machine without L3 data: one group `CPUs: {list}` [chosen].
   - Core tile: 72 × 52, background `list_bg`, radius `r_sm`, padding `sp2`; two stacked rows of 24: a TlCheckbox with label `CPU {n}` (`t_sm`, tabular figures) for the first thread and, under it, its SMT sibling [spec pairing]. A core without SMT has one row and the lower half empty. Hybrid tiles show the P or E icon (10 px) before the label.
   - Tiles flow 8 per row in each group, ordered by core; groups follow in L3 order. More than 8 cores in a group wrap to new rows.
-  - Validation line: Lucide `CircleAlert` 14 px `status.danger` and the text "At least one CPU must stay enabled" `t_sm` `status.danger` [spec text], shown only when nothing is checked.
+  - Validation line: Lucide `circle-alert` 14 px `status.danger` and the text "At least one CPU must stay enabled" `t_sm` `status.danger` [spec text], shown only when nothing is checked.
   - Footer: height 52, top border 1 px `divider`, padding `sp6`; right-aligned TlButton "Cancel" (Secondary) and TlButton "OK" (Primary) [spec label], gap `sp4`.
 - **States:**
   - Loading the current masks (until the detail data arrives, at most one sweep): every checkbox disabled, the subtitle line ends with " - reading current affinity…" [chosen].
@@ -814,7 +814,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 ### UI-PWN-022 Set Affinity with several targets (mixed marks)
 
 - **Implements:** PROC-069 (Set Affinity applies to all targets; mixed marks; clicking a mixed CPU sets it on all), PROC-067.
-- **Anatomy:** the UI-PWN-021 dialog, plus a TlButton Ghost sm "Reset" (Lucide `RotateCcw` 12 px) at the left end of the footer, shown only with several targets [chosen].
+- **Anatomy:** the UI-PWN-021 dialog, plus a TlButton Ghost sm "Reset" (Lucide `rotate-ccw` 12 px) at the left end of the footer, shown only with several targets [chosen].
 - **States:**
   - Initial: each CPU is checked when every target has it, mixed when only some do, unchecked when none do [spec].
   - Click cycle: mixed to checked (sets it on all targets) [spec]; checked to unchecked; unchecked to checked. A CPU can return to mixed only through Reset, which restores the initial state of every CPU [chosen].
@@ -852,7 +852,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Policy: TlSelect with items [chosen labels]: "Normal (SCHED_OTHER)", "Batch (SCHED_BATCH)", "Idle (SCHED_IDLE)", "Realtime FIFO (SCHED_FIFO)", "Realtime round-robin (SCHED_RR)" [spec policies].
   - Nice: TlSlider -20..=19, step 1 [spec], plus the current value as text right of the slider (`t_base`, tabular, width 28, right-aligned). End labels "-20 (highest)" and "19 (lowest)".
   - Realtime priority: TlStepper 1..=99, width 72 [spec range].
-  - Warning line (FIFO and RR only): Lucide `TriangleAlert` 14 px `status.warning`, text "Realtime priority can freeze the desktop if the process spins." `t_sm` `text_primary`, and on a second line "Child processes start at normal priority." `t_xs` `text_secondary` [chosen, explains the reset-on-fork flag].
+  - Warning line (FIFO and RR only): Lucide `triangle-alert` 14 px `status.warning`, text "Realtime priority can freeze the desktop if the process spins." `t_sm` `text_primary`, and on a second line "Child processes start at normal priority." `t_xs` `text_secondary` [chosen, explains the reset-on-fork flag].
   - Footer: "Cancel" and "Set priority" (Primary) [chosen label naming the result].
 - **States:**
   - Initial values from the right-clicked target's current policy, nice and rt priority (General payload, thread row, or the record's `nice`).
@@ -872,7 +872,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
     - The dialog closes when the request is sent (after the confirmation for realtime).
   - Toasts [spec]: "Priority updated" (one target), PROC-069 forms for several targets, "Thread priority updated" for threads [chosen].
 - **Data binding:** reads current values as above; sends `Command::Action`.
-- **Build:** `crates/tl-ui/src/windows/priority.rs`, `pub struct PriorityDialog` (Entity) with `policy: Entity<SelectState<..>>`, `nice: Entity<SliderState>`, `rt: Entity<SpinBoxState>` created in the constructor.
+- **Build:** `crates/tl-ui/src/windows/priority.rs`, `pub struct PriorityDialog` (Entity) with `policy: Entity<SelectState<..>>`, `nice: Entity<SliderState>`, `rt: TlStepper` state (UI-FND-015) created in the constructor.
 - **Performance:** static dialog.
 - **Accessibility:** slider accessible name "Nice value", spin box "Realtime priority"; the disabled reason is in the tooltip.
 - **Tests:** `priority_dialog_enables_fields_by_policy`; `priority_dialog_dispatch_same_policy_nice_only`; `priority_dialog_policy_change_then_nice`; `priority_dialog_realtime_confirms_first`.
@@ -995,7 +995,7 @@ Real-time signal…
 ```
 
   - Separate pinnable window, `WindowKind::Floating`, not modal, title "tasklens Run" [spec]. Size 480 × 248 [chosen]. Content padding `sp6`.
-  - Icon: Lucide `SquareTerminal` 32 px `text_secondary` [chosen], gap `sp5` to the text [spec text].
+  - Icon: Lucide `square-terminal` 32 px `text_secondary` [chosen], gap `sp5` to the text [spec text].
   - "Open:" label `t_base` `text_primary`, width 48; the combo (UI-PWN-029) fills the rest.
   - "Run as administrator": TlCheckbox [spec]; under it, indented to the checkbox label, the note "GUI programs may not start as root on Wayland" [spec].
   - Footer, top border 1 px `divider`: left "Browse…" and "Clear command history" (TlButton Secondary sm); right "OK" (Primary, default button) and "Cancel" [spec].
@@ -1021,7 +1021,7 @@ Real-time signal…
 ### UI-PWN-029 Run command combo and history
 
 - **Implements:** PROC-095 ("Open:" combo, 5 visible rows, prefix matches first, Up and Down pick a match), R-061.
-- **Anatomy:** a TlTextInput md (28 high) with a suffix TlButton Icon sm (24 × 24), Lucide `ChevronDown` 14 px; a popup list under it, same width, 5 visible rows of 26 (130 high) [spec count], background `menu_bg`, 1 px border `divider`, radius `r_sm`, shadow per the foundation's popup style. Each row: the command (`t_base`, single line, ellipsis) and, for elevated entries, Lucide `ShieldCheck` 12 px `text_secondary` at the right with the tooltip "Ran as administrator" [chosen].
+- **Anatomy:** a TlTextInput md (28 high) with a suffix TlButton Icon sm (24 × 24), Lucide `chevron-down` 14 px; a popup list under it, same width, 5 visible rows of 26 (130 high) [spec count], background `menu_bg`, 1 px border `divider`, radius `r_sm`, shadow per the foundation's popup style. Each row: the command (`t_base`, single line, ellipsis) and, for elevated entries, Lucide `shield-check` 12 px `text_secondary` at the right with the tooltip "Ran as administrator" [chosen].
 - **States:** popup closed; open with no highlight; highlighted row `menu_hover`; no matches: popup closed.
 - **Interaction:**
   - Typing filters the history: entries that start with the text (case-insensitive) first, newest first, then entries that contain it, newest first [spec order, chosen tie rule]; the popup opens when at least one entry matches and the text is not empty.
@@ -1071,7 +1071,7 @@ Real-time signal…
 - **Interaction:**
   - Enter in the pattern field or Search (`StartHandleSearch`) starts a search with a new `SearchId`; Stop (`StopHandleSearch`) or Esc while searching stops it (Esc closes the window only when idle) [chosen].
   - Clear (`ClearHandleSearch`) empties the pattern and the results.
-  - "Search all" (`HandleSearchAll`) starts the helper (`UnlockPrivileged`) and searches again with `privileged = true` [spec].
+  - "Search all" (`HandleSearchAll`) starts the helper (`StartHelperSession`) and searches again with `privileged = true` [spec].
   - Close or Esc when idle closes the window.
   - Opened by File > "Search File Handles..." (`OpenHandleSearch`); activates the existing window if open.
 - **Data binding:** `Command::HandleSearch { search: SearchId, pattern: Arc<str>, include_maps: bool, privileged: bool }` and `Command::CancelHandleSearch(SearchId)`; results in `DetailsSnapshot.handle_search: Option<Arc<HandleSearchState>>` (progress, phase, `chunks` of hits, `searched`, `total`, `skipped`) [chosen addition, see open items]; bit `DETAILS`.

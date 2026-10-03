@@ -886,8 +886,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   Opening Properties again for the same key activates the existing window (PROC-077).
 - **Data binding**: `WindowRegistry` (Entity in `window/registry.rs`) holds every open secondary
   window handle keyed by `WindowKey` (`Properties(ProcessKey)`, `AppProperties(GroupKey)`,
-  `Service(unit)`, `Run`, `HandleSearch`, `Settings`, and the other tool windows; each owning file
-  adds its variants),
+  `Service(unit)`, `Run`, `HandleSearch`, `Settings`, `Columns`, `Smart(DeviceIdx)`,
+  `DiskInUse(DeviceIdx)`, and the other tool windows; the full list is in `docs/ui/INDEX.md`),
   enforces the 8-window limit for Properties, and closes children with the main window. Pin state
   for the main window is `window.always_on_top`; secondary windows keep it in memory only.
 - **Build**: `components/window_frame.rs` (`TlSecondaryWindow::open(cx, kind, title, size,
@@ -1236,6 +1236,56 @@ Build:               …                                          label ends wit
   module list).
 - **Phase**: P1.
 - **Decided here**: the gallery exists and is the golden-image host.
+
+### UI-FND-031 TlBanner (information strip inside a pane)
+
+- **Implements**: SYS-015 journal access notice (UI-SYS-038), PERF-105 "Needs setup" context,
+  UI-PRC-036 recording-off banner, APP-058 (no colour-only meaning).
+- **Anatomy**:
+
+```text
+┌──────────────────────────────────────────────────────────────────────────┐ height 32
+│ sp5 │ i info 14 │ sp3 │ text t_sm text_primary, one line, end ellipsis │ [Button] sp5 │
+└──────────────────────────────────────────────────────────────────────────┘ 1 px bottom border
+```
+
+  Fill `status.info` at alpha 0.12; bottom border 1 px `status.info`; icon Lucide `info` 14 px in
+  `status.info`; text `t_sm` `text_primary`, one line, ellipsis at the end with the full text in a
+  tooltip; zero or more trailing `TlButton::Secondary` sm buttons, gap `sp4`, right-aligned. A
+  Warning banner swaps `status.info` for `status.warning` and the icon for `triangle-alert`.
+  Kinds: `TlBannerKind::{Info, Warning}`.
+- **States**: shown; hidden (the owner removes it; a banner has no close button of its own
+  because it states a fact about the data below it; an owner that wants dismissal adds a "Hide"
+  button).
+- **Interaction**: none on the strip itself; the buttons are ordinary `TlButton`s and Tab stops
+  in reading order.
+- **Data binding**: owner passes `text`, `kind` and `buttons: Vec<(SharedString, Box<dyn
+  Action>)>`.
+- **Build**: `components/banner.rs`, a `RenderOnce` `h_flex`.
+- **Performance**: static; part of the owner's cached subtree.
+- **Accessibility**: the text is plain; the icon is decorative; buttons carry their labels.
+- **Tests**: `banner::tests::info_and_warning_colours`, `banner::tests::long_text_ellipsis_tooltip`.
+- **Phase**: P2 (first use: Logs tab, UI-SYS-038).
+- **Decided here**: height 32, fill alpha 0.12, no close button.
+
+### UI-FND-032 TlLink (inline link text)
+
+- **Implements**: PROC-078 PPID, Executable and Unit links, SYS-011 documentation and Main PID
+  links, PERF-061 "Network settings", PERF-013 "Needs setup", UI-SYS-034 "Additional setup…".
+- **Anatomy**: inline text in the surrounding text style (`t_base` unless the owner says
+  otherwise), colour `status.info`; hover: underline and the pointer cursor; focused (keyboard):
+  focus ring; pressed: `status.info` darkened 8%; disabled: `text_secondary`, no underline, no
+  pointer. No icon. Long link text truncates like its container (UI-FND-052).
+- **Interaction**: click, Enter or Space dispatches the owner's `Box<dyn Action>`; a link is a
+  Tab stop. Right-click: the owner's menu, if any (the `TlKeyValueGrid` adds "Copy value").
+- **Data binding**: `TlLink::new(text, action)`; `.disabled(reason_tooltip)`.
+- **Build**: `components/link.rs`, a `div` with `cursor_pointer`, `on_click` and a focus handle.
+  The `TlKeyValueGrid` link value (UI-FND-025) is a `TlLink`.
+- **Performance**: static.
+- **Accessibility**: the text is the accessible name; links are reachable by keyboard.
+- **Tests**: `link::tests::hover_underlines`, `link::tests::enter_dispatches_action`.
+- **Phase**: P2.
+- **Decided here**: colour `status.info`, underline on hover only, Tab stop.
 
 ## 3. Theme pipeline
 
@@ -1631,6 +1681,8 @@ pub enum ThemeSlot { WindowBg, Titlebar, …, ValueHeat, Accent }  // 22 + accen
 | UI-FND-028 | TlShield | APP-003, APP-002, PROC-058, ADR-003 | P3 |
 | UI-FND-029 | TlEmptyState | PROC-077, PROC-079, SYS-036, APP-059 | P1 |
 | UI-FND-030 | Component gallery | ADR-013 | P1 |
+| UI-FND-031 | TlBanner | SYS-015, PERF-105, APP-058 | P2 |
+| UI-FND-032 | TlLink | PROC-078, SYS-011, PERF-061, PERF-013 | P2 |
 | UI-FND-040 | TlTheme global and switch path | ADR-009, APP-035, APP-036, R-017, R-069 | P1 (P2 crossfade, follow system) |
 | UI-FND-041 | Built-in theme loading | ADR-009, APP-035, R-068, ADR-011 | P1 (P2 12 themes) |
 | UI-FND-042 | User themes file | ADR-011, APP-036, APP-038, R-018, R-079 | P2 (P3 import) |
@@ -1747,6 +1799,8 @@ No scope item is unmapped.
     helper".
 29. TlEmptyState layout and "Clear filter" rule.
 30. Component gallery as the golden-image host, `--gallery` flag.
+30a. TlBanner: height 32, `status.info` at alpha 0.12, no close button. TlLink: `status.info`,
+    underline on hover only, Tab stop.
 31. Theme store: user theme shadows built-in with "(custom)"; animated switch rebuilds geometry
     twice; a second switch restarts from the current colours; mode from `window_bg` lightness.
 32. Built-in JSON embedded with `include_str!`; upper-case slot keys, lower-case tasklens keys;

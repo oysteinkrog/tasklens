@@ -24,11 +24,12 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   `ui_scale_pct = 100` and are multiplied by `ui_scale = ui_scale_pct / 100` (ADR-009
   `UiMetrics`).
 - `row_h` = `28 × row_height_pct/100 × ui_scale` (R-020). Line height for `t_base` is 18.
-- Shared components (type names from the foundation file): `TlButton`, `TlIconButton`, `TlMenu`
-  (gpui-kit `PopupMenu` wrapper), `TlToast` (`push_notification` wrapper with `id1` replace
-  semantics, top centre), `TlDialog` (gpui-kit `AlertDialog` wrapper), `TlTooltip`, `TlCheckbox`,
-  `TlInput`, `TlSwitch`, `TlSlider`, `TlScrollbar`, `TlWindow` (secondary pinnable window frame,
-  APP-045).
+- Shared components (type names from `docs/ui/foundation.md`): `TlButton` (kinds `Primary`,
+  `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle { on }`, `Segment { on }`, UI-FND-010), `TlMenu`
+  (UI-FND-022), `ToastQueue::push` with `ToastKey` replace-in-place (UI-FND-020), `TlDialog` and
+  `TlSecondaryWindow` (UI-FND-021), `TlTooltip` (UI-FND-019), `TlCheckbox`, `TlTextInput` and
+  `TlFilterBox` (UI-FND-016), `TlSwitch`, `TlSlider`, `TlBadge` (UI-FND-027), `TlEmptyState`
+  (UI-FND-029), and the kit `Scrollbar` with the foundation geometry (UI-FND-003).
 - Measured values come from `docs/taskslinger-reference/processes.png` (2720 × 1680, row pitch
   53 physical px, so 1 logical px at `row_h` 28 ≈ 1.9 physical px) and
   `tasklens-ref/evidence-frames/advanced-02.png`, `advanced-11.png`, `customize-28.png`. Each
@@ -87,10 +88,11 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - Body: `uniform_list` (GPUI `elements/uniform_list.rs:22`), item height `row_h`, horizontal
     sizing `ListHorizontalSizingBehavior::Unconstrained` so rows can be wider than the viewport,
     `track_scroll(&UniformListScrollHandle)`.
-  - Vertical scrollbar: `TlScrollbar::vertical(&scroll_handle)` 12 wide, track `scroll_track`,
-    thumb `scroll_thumb`, thumb radius `r_sm`, min thumb length 24, mode Always (decided; the
-    reference shows the scrollbar at all times).
-  - Horizontal scrollbar: same style, 12 high, shown only when the total column width exceeds the
+  - Vertical scrollbar: kit `Scrollbar::vertical(&scroll_handle)` with the foundation geometry
+    (UI-FND-003: width 16, idle thumb 6 and active 8 wide, min thumb length 48, radius 0, track
+    `scroll_track`, thumb `scroll_thumb`), `ScrollbarMode::Always` (the reference shows the
+    scrollbar at all times).
+  - Horizontal scrollbar: same style, 16 high, shown only when the total column width exceeds the
     viewport width; header and body share one `x_offset: Pixels`.
 - **Delegate trait** (`crates/tl-ui/src/table/tree_table.rs`):
 
@@ -218,7 +220,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     `tables.column_separators` is on.
   - Group header row (`RowKind::GroupHeader`): label `t_md` 14 semibold 600 `text_primary`,
     text "Apps (11)", "Background processes (99)", "System processes (14)" (counts after
-    filtering, PROC-044). Chevron `ChevronDown` when expanded, `ChevronRight` when collapsed, 16 px
+    filtering, PROC-044). Chevron `chevron-down` when expanded, `chevron-right` when collapsed, 16 px
     `text_primary`, at x 8. No zebra: background always `list_bg`; a 1 px `divider` line across the
     full row width at the row's top edge, except for the first row. No other cell renders. Not
     selectable, not hoverable (no `row_hover`), click anywhere toggles expand. Decided: the row is
@@ -229,17 +231,17 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     the secondary text (window title, `text_secondary`, after `sp4` 8 gap, same line, ellipsis
     shared with the primary text: the primary text never truncates before the secondary text is
     gone). PID cell blank. User shows the owner. Type "App". Metrics per PROC-008.
-  - Unit row: like the app row with a 16 px service icon (Lucide `Cog`), text `<Description> (N)`
+  - Unit row: like the app row with a 16 px service icon (Lucide `cog`), text `<Description> (N)`
     or `<unit name> (N)` before P2; Type "Unit".
-  - "Kernel threads (N)" row: unit-row shape with the chip icon (Lucide `Cpu`), collapsed by
+  - "Kernel threads (N)" row: unit-row shape with the chip icon (Lucide `cpu`), collapsed by
     default, sits first in System processes.
   - Process row: optional chevron (only when the row has children in the current mode), icon 16
-    (app icon inherited, generic executable icon Lucide `Binary`, or chip for kernel threads),
-    name per PROC-007, then the state glyph when it applies: `Pause` 12 px `text_secondary` for
-    State T (suspended), `Snowflake` 12 px `text_secondary` for Frozen (app and unit rows). PID
+    (app icon inherited, generic executable icon Lucide `binary`, or chip for kernel threads),
+    name per PROC-007, then the state glyph when it applies: `pause` 12 px `text_secondary` for
+    State T (suspended), `snowflake` 12 px `text_secondary` for Frozen (app and unit rows). PID
     cell per PROC-018: collapsed parent `"11528 +18"` where `+18` is drawn in `text_secondary`;
     expanded parent and leaf show the PID only.
-  - Pseudo row: 16 px icon (`Activity` for Interrupts, `Archive` for Memory compression), no
+  - Pseudo row: 16 px icon (`activity` for Interrupts, `archive` for Memory compression), no
     chevron, PID blank, Type "Pseudo", User "root".
   - Subtree totals (PROC-019, P2): when `processes.subtree_totals` is on and the row has children,
     aggregated cells render `Σ ` (U+03A3 and a space) in `text_secondary` before the value.
@@ -276,7 +278,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   `subtree_totals_prefix_only_with_children`.
 - **Phase**: P1 (P2: window titles, pseudo rows, subtree totals, Frozen glyph, unit Description).
 - **Decided here**: group header height equals `row_h`; zebra counted on flattened index; glyph
-  icons `Pause`, `Snowflake`, `Binary`, `Cog`, `Cpu`, `Activity`, `Archive`; secondary text
+  icons `pause`, `snowflake`, `binary`, `cog`, `cpu`, `activity`, `archive`; secondary text
   truncation order; stale cells at 60% opacity; chevron click does not select.
 
 ### UI-PRC-003 Name cell: indent, chevron, connector lines, icon, texts, window button
@@ -295,7 +297,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   ```
 
   - Indent: `8 + depth × 18` from the cell's left edge (8 is the cell padding).
-  - Chevron: 16 × 16 Lucide `ChevronRight` (collapsed) or `ChevronDown` (expanded),
+  - Chevron: 16 × 16 Lucide `chevron-right` (collapsed) or `chevron-down` (expanded),
     `text_secondary`, `text_primary` on hover of its 20 × `row_h` hit area; absent when the row
     has no children, but its 16 px width is still reserved so icons align within one depth.
   - Connector lines (PROC-017, off by default): for each ancestor depth k < d whose
@@ -306,13 +308,13 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     with 1 physical px snapping. Group header rows draw none; depth-0 rows under a group draw
     from the group chevron centre (x = 16).
   - Icon: 24 × 24 for app rows (vertically centred), 16 × 16 for every other row, `sp3` 6 before
-    the text. Missing icon file: generic `Binary` glyph `text_secondary`.
+    the text. Missing icon file: generic `binary` glyph `text_secondary`.
   - Primary text: `t_base` regular `text_primary` (selected: `text_selected_primary`), one
     line, ellipsis. The count suffix `(N)` and the qualifiers are part of the same run.
   - Secondary text (app rows, P2): `t_base` regular `text_secondary` (selected:
     `text_selected_secondary`), after an `sp4` 8 gap, ellipsis; hidden entirely when the cell is
     narrower than the primary text + 8 + 40 px.
-  - Window button (P2, KWin bridge only): `TlIconButton` ghost, 20 × 20, Lucide `AppWindow` 14 px,
+  - Window button (P2, KWin bridge only): `TlButton::Icon` 20 × 20, Lucide `app-window` 14 px,
     placed at the cell's right edge inset `sp2` 4, vertically centred; visible on row hover and on
     selected rows for rows that own at least one top-level window (process rows: own PID; app
     rows: any member PID). Tooltip "Windows (N)". Clicking opens a `TlMenu` popup anchored
@@ -362,7 +364,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   | Time (Start time, File modified time, Build date) | right | `tnum` | `HH:MM:SS` today, else `YYYY-MM-DD HH:MM` |
 
   - Validity glyphs replace the content, same alignment as the column: `…` (`text_secondary`)
-    warming up; Lucide `Lock` 12 px `text_secondary` restricted, tooltip "Needs administrator
+    warming up; Lucide `lock` 12 px `text_secondary` restricted, tooltip "Needs administrator
     access." (P3: "Needs administrator access. Click the shield to grant it."); `n/a`
     `text_secondary` unsupported, tooltip from the column (for example "Linux counts storage
     operations per cgroup, not per process", or "Needs setup" linking to the setup window);
@@ -426,7 +428,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
   - Line 1: column label `t_base` 13 medium 500 `text_primary`, aligned like the column (text
     columns left, numeric right), padding 8, ellipsis. The active sort column appends the sort
-    arrow: Lucide `ArrowUp` (ascending) or `ArrowDown` (descending) 12 px `text_primary` after a
+    arrow: Lucide `arrow-up` (ascending) or `arrow-down` (descending) 12 px `text_primary` after a
     `sp1` 2 gap, inside the 12 px reservation of PROC-023; on right-aligned columns the arrow sits
     at the right edge and the label moves left by 14 (measured: "PID ↑").
   - Line 2: the system total from `ProcessTableView.totals`, `t_base` regular `text_secondary`,
@@ -500,12 +502,12 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   | # | Item | Kind | Action | Disabled when |
   |---|---|---|---|---|
   | 1 | Sort by <label> | check (checked when this column is the sort) | `SortByColumn { id }` | column unsortable |
-  | 2 | Select Columns… | item | `SelectColumns` | never |
+  | 2 | Select Columns… | item | `OpenColumnPicker { table }` | never |
   | 3 | Hide This Column | item | `HideColumn { id }` | id == name, or only one column visible |
   | | separator | | | |
-  | 4 | Resize columns to fit content | item | `FitColumns` | never |
-  | 5 | Resize Behavior > | submenu: radio "Proportional", "Last Column" | `SetResizeBehavior { mode }` | never |
-  | 6 | Reset to default | item | `ResetColumns` | never |
+  | 4 | Resize columns to fit content | item | `ResizeColumnsToFit { table }` | never |
+  | 5 | Resize Behavior > | submenu: radio "Proportional", "Last Column" | `SetSetting { TablesColumnResize, mode }` | never |
+  | 6 | Reset to default | item | `ResetColumns { table }` | never |
 
   Item 1 is added above the PROC-026 list so the keyboard path can sort (decided); the rest is
   the PROC-026 order. The menu names the clicked column in items 1 and 3 ("Hide This Column"
@@ -515,7 +517,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Interaction**: right-click on any header cell; Shift+F10 while the header is hovered does
   nothing (header is not focusable). Toasts: `HideColumn` on the last visible column (reached
   only through the picker) "At least one column must stay visible"; `ResetColumns` "Columns
-  reset to default". `FitColumns`: each visible column takes `max(min width, widest visible cell
+  reset to default". `ResizeColumnsToFit`: each visible column takes `max(min width, widest visible cell
   text + 16, header label + 16 + 12)`, measured over the currently visible rows plus the cached
   texts of the last 3 table versions (decided; measuring all 2,000 rows would need a full
   format pass).
@@ -527,19 +529,19 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Tests**: `header_menu_hide_disabled_on_name`, `reset_columns_restores_r006_defaults`
   (order, visible set and widths equal table a), `fit_columns_never_below_minimum`.
 - **Phase**: P1.
-- **Decided here**: "Sort by" item; FitColumns measurement scope.
+- **Decided here**: "Sort by" item; ResizeColumnsToFit measurement scope.
 
 ### UI-PRC-007 Column picker window
 
 - **Implements**: PROC-024; PROC-022 (visibility by id, Name fixed, GPU N offered per
   adapter); APP-018 (View > Columns applies to every table: the same window serves the other
   tables with their own registries).
-- **Anatomy**: a `TlWindow` (secondary, pinnable, non-modal, APP-045) titled "tasklens Columns",
+- **Anatomy**: a `TlSecondaryWindow` (tool window, pinnable, non-modal, APP-045, `WindowKey::Columns`) titled "tasklens Columns",
   default 420 × 560, minimum 320 × 400, resizable:
 
   ```text
   ┌ tasklens Columns ─────────────────────────────── 📌 ✕ ┐
-  │ [🔍 Filter columns…                                 ✕] │  TlInput, sp5 margin, height 28
+  │ [🔍 Filter columns…                                 ✕] │  TlTextInput md, sp5 margin, height 28
   │ ┌───────────────────────────────────────────────────┐ │
   │ │ IMAGE                                             │ │  group heading t_xs 11 semibold text_secondary, uppercase
   │ │ [✓] Name                              (always on) │ │  row 28: TlCheckbox + label t_base; note text_secondary right
@@ -569,7 +571,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     adapters; the label is "GPU 0 (NVIDIA GeForce RTX 5070 Ti)".
   - Alias rows: `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"`; the filter
     matches both halves.
-  - Filter input: `TlInput` small, prefix `Search` icon, cleanable, placeholder "Filter columns…";
+  - Filter input: `TlTextInput` sm, prefix `search` icon, cleanable, placeholder "Filter columns…";
     matching is case-insensitive substring over label, alias and group name; non-matching rows
     and empty groups hide; no result shows the empty text "No columns match" centred
     `text_secondary`.
@@ -584,15 +586,15 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   Hiding the last visible column other than Name is impossible since Name is always on.
   Keyboard: Tab order filter, list, Reset, Close; in the list Up/Down move, Space toggles, Home
   and End jump; typing in the filter narrows; Esc closes the window (or clears the filter first
-  when it has text, APP-028 rule). Opened by `SelectColumns` from the header menu, View > Columns
+  when it has text, APP-028 rule). Opened by `OpenColumnPicker { table }` from the header menu, View > Columns
   > "Select Columns…", and the shell; opening again focuses the existing window.
 - **Data binding**: the column registry (`ColumnSpec` list with group, label, alias,
   availability), `[columns.<table>]`; the window is bound to the table that opened it and its
   title stays "tasklens Columns" (the list heading shows the table name as the first line, `t_sm`
   `text_secondary`: "Processes table").
-- **Build**: `crates/tl-ui/src/pages/processes/columns_window.rs`, a `TlWindow` whose content is
+- **Build**: `crates/tl-ui/src/pages/processes/columns_window.rs`, a `TlSecondaryWindow` whose content is
   a `uniform_list` of 28 px rows (headings are rows too) with `TlCheckbox` children; filter via
-  `TlInput` with 100 ms debounce.
+  `TlTextInput` with 100 ms debounce.
 - **Performance**: 96 rows at most; trivial.
 - **Accessibility**: every row is a labelled checkbox; headings are plain text; the count line
   reports the result of each toggle.
@@ -718,8 +720,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-013 (uniform_list, demand reporting), PROC-071 (scroll the jump target to
   the centre), ADR-009 "Visible demand", ADR-014 `table-2000` scroll scene.
-- **Anatomy**: `uniform_list` body with `UniformListScrollHandle`; vertical `TlScrollbar` 12 px
-  on the right edge of the body (not over the header); horizontal `TlScrollbar` 12 px at the
+- **Anatomy**: `uniform_list` body with `UniformListScrollHandle`; vertical kit `Scrollbar` 16 px
+  on the right edge of the body (not over the header); horizontal `Scrollbar` 16 px at the
   bottom when needed; the header follows `x_offset`.
 - **Behaviour**:
   - Wheel: GPUI default line scrolling; `motion.smooth_scroll` and `smooth_scroll_amount` are
@@ -847,7 +849,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Anatomy**: `TlMenu` (`PopupMenu`) opened at the pointer (or at the focus row for
   Shift+F10), min width 240, max width 360, item height 26, padding `sp2` 4 vertical, text
   `t_base` `text_primary`, disabled `text_secondary`, hover `menu_hover`, separators 1 px
-  `divider` with `sp2` margins, submenu chevron `ChevronRight` 12 px, `Kbd` hints right-aligned
+  `divider` with `sp2` margins, submenu chevron `chevron-right` 12 px, `Kbd` hints right-aligned
   `text_secondary`. Items, in order, with the rule for each row type. "P" = process row, "A" =
   app row, "U" = unit row, "M" = multi-select (2+ rows, any mix), "X" = exited row, "S" = pseudo
   row, "G" = group header. "hidden" means not built; "disabled" means built with a tooltip.
@@ -917,7 +919,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-059, PROC-062, PROC-064, PROC-066 (Realtime), PROC-075 (large dump),
   PROC-074 (VirusTotal notice), PROC-055 (picker Terminate), D-009, R-036.
-- **Anatomy**: `TlDialog` (gpui-kit `AlertDialog` through `open_alert_dialog`), width 448,
+- **Anatomy**: `TlDialog::confirm` (UI-FND-021), width 448,
   title `t_lg` 16 semibold, description `t_base` `text_primary`, buttons right-aligned, the
   destructive button `danger` variant, Cancel `default`. Enter triggers the confirm button
   (decided: no, see below), Esc cancels. Window title for every confirmation is "tasklens"
@@ -946,9 +948,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   with `confirmed = true` so the handler proceeds without re-asking.
 - **Data binding**: target names, counts and owners from the captured targets at open time;
   revalidation still happens after confirm (PROC-058).
-- **Build**: `pages/processes/confirm.rs::confirm(kind, targets, w, cx)` returning the
-  `AlertDialog` builder; `.confirm().ok_text(..).ok_variant(ButtonVariant::Danger)
-  .on_ok(..)`.
+- **Build**: `pages/processes/confirm.rs::confirm(kind, targets, w, cx)` opening a
+  `TlDialog::confirm` window (UI-FND-021) with the title, text and button labels of the table.
 - **Performance**: n/a.
 - **Accessibility**: title and description are plain text; buttons name the result; focus
   starts on Cancel.
@@ -963,10 +964,10 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-058, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-015, PROC-045,
   PROC-046, PROC-026, PROC-070, PROC-071, PROC-077 (cap toast), R-035.
-- **Anatomy**: `TlToast` at the top centre of the main window (foundation: width 382, top
+- **Anatomy**: a `ToastQueue` toast at the top centre of the main window (foundation: width 382, top
   margin 16 under the tab strip, `menu_bg`, 1 px `divider`, `r_md`, `t_base`, left icon by
   type, optional one `TlButton` small on the right). One toast per action request, identified
-  by `id1::<ActionToast>(request_id)`, so later states replace it in place. Auto-hide 5 s
+  by `ToastKey(request_id.0)`, so later states replace it in place (UI-FND-020 rule 4). Auto-hide 5 s
   (kit fixed) except toasts with a button, which stay until clicked or closed (kit rule) and
   are closed by tasklens after 30 s (decided). Types: info for "requested", success for
   done, error for failures, warning for identity and permission problems.
@@ -1021,8 +1022,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   selects the row. "Open folder" opens the dumps directory through `FileManager1.ShowItems`.
 - **Data binding**: `action_events` channel (ADR-005) consumed by `actions.rs::ActionTracker`,
   which owns the toast ids and texts.
-- **Build**: `TlToast::show(window, kind, text, button)` → `window.push_notification
-  (Notification::<type>(text).id1::<ActionToast>(request_id).action(..), cx)`.
+- **Build**: `ToastQueue::push(kind, text, Some(ToastKey(request_id.0)), button)` (UI-FND-020).
 - **Performance**: ≤ 10 toasts live (kit cap).
 - **Accessibility**: text first, icon second; buttons are focusable; nothing relies on colour.
 - **Tests**: `action_toast_replaces_in_place_per_request`, `toast_texts_match_spec` (string
@@ -1035,7 +1035,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Implements**: PROC-044, PROC-045; R-043; APP-028 (the input itself belongs to the shell's
   tab strip; this entry covers its behaviour for the Processes tab).
 - **Anatomy** (right end of the tab strip, shell owns the pixels; summarized here for the
-  binding): `TlInput` small (24 high) with the label "Filter: " as prefix text `text_secondary`,
+  binding): the shell `FilterBox` (a `TlFilterBox`, UI-FND-016, UI-SHL-024): `TlTextInput` sm (24 high)
+  with the label "Filter: " as prefix text `text_secondary`,
   width 160 unfocused, 280 focused (`m_fast` 120 ms width animation, none under reduce motion),
   cleanable (× button), placeholder empty. To its left, only while the filter is non-empty or the
   mode is Tree: `TlCheckbox` "Include children" (label `t_base`, checkbox 16, `sp4` gap),
@@ -1055,7 +1056,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - Enter in the input: focuses the table and keeps the filter (decided).
   - × button: clears and keeps focus in the input (kit behaviour).
   - Ctrl+F: focuses and selects all text (decided).
-  - Include children: `ToggleIncludeChildren` → `processes.filter_include_children`; toasts
+  - Include children: `ToggleSetting(ProcessesFilterIncludeChildren)` → `processes.filter_include_children`; toasts
     "Including filtered process children." / "Hiding unmatched filtered process children.".
   - Group headers stay visible with filtered counts; a group with zero matches still shows its
     header with "(0)" collapsed to no children (decided, matches "stay visible").
@@ -1063,7 +1064,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - History mode: the same filter applies to the History table and graph (UI-PRC-031).
 - **Data binding**: `TableQuery.filter`, `processes.filter_include_children`; re-renders on the
   matching `query_generation`.
-- **Build**: shell `TlInput` entity shared through `MainWindow`; the Processes page subscribes
+- **Build**: shell `FilterBox` entity shared through `MainWindow`; the Processes page subscribes
   to `InputEvent::Change` and owns the debounce `Task` (keeps the handle, drops to cancel).
   `pages/processes/filter.rs`.
 - **Performance**: one `text()` rope borrow per change, no `value()` allocation; the engine
@@ -1120,12 +1121,12 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - Segment 3 (paused): " [PAUSED - Ctrl]" in `status.warning` (UI-PRC-017).
   - Segment 4 (restricted rows exist): " | 42 restricted", tooltip "Some values for other users'
     processes need administrator rights. Click to enable." From P3 the segment is a `TlButton`
-    text variant (underline on hover) that dispatches `StartHelper`; before P3 plain text with
+    text variant (underline on hover) that dispatches `StartHelperSession`; before P3 plain text with
     the tooltip minus "Click to enable." (decided wording for pre-P3: "Some values for other
     users' processes need administrator rights.").
   - History mode: segment 1 reads "213 processes at 12:04:31" at a scrub point and "Live" when
     live (decided; UI-PRC-030 has the header text), the other segments as above.
-  - Administrator mode badge (P3, PROC-076): a `Tag` "Administrator mode" in `status.info` after
+  - Administrator mode badge (P3, PROC-076): a `TlBadge` Info "Administrator mode" after
     segment 4; clicking ends the helper session.
 - **States**: plain, filtering, selection, paused, restricted, administrator, history.
 - **Interaction**: click on the restricted segment (P3) and on the badge; nothing else.
@@ -1144,13 +1145,15 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-015, PROC-016, PROC-046; APP-004, APP-005 (the title-bar toolbar layout
   itself is in the shell spec).
-- **Anatomy**: two `TlIconButton`s ghost 24 × 24 with 16 px icons in the title-bar toolbar, right
+- **Anatomy**: two buttons 24 × 24 with `i_md` 16 px icons in the title-bar toolbar, a `TlButton::Toggle { on }`
+  (hide system) and a `TlButton::Icon` (cycler),, right
   of the shield, `sp2` gap (measured: shield, grid, stacked bars, plus at x ≈ 468, 512, 557, 604
   physical in processes.png):
-  - Hide system processes: Lucide `LayoutGrid` (TaskSlinger "grid"); toggled state draws the
+  - Hide system processes: Lucide `layout-grid` (TaskSlinger "grid"); toggled state draws the
     `row_selected` fill behind the icon (kit `Toggle` look). Tooltip "Hide system processes" /
     "Show system processes".
-  - View-mode cycler: Lucide `Rows3` (stacked bars). Tooltip "Toggle view mode (current: Tree
+  - View-mode cycler: icon per current mode, Lucide `rows-2` (grouped, the stacked bars in
+    processes.png), `list-tree` (tree), `list` (flat) (UI-SHL-013). Tooltip "Toggle view mode (current: Tree
     View | Task Manager Grouping | List View)". In History mode: disabled, tooltip "History shows a
     flat list".
   - Both are removed, not greyed, on other tabs; the toolbar does not reserve their space.
@@ -1170,13 +1173,13 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Tests**: `toolbar_buttons_only_on_processes_tab`, `cycle_order_tree_grouping_list`,
   `cycler_disabled_in_history`.
 - **Phase**: P1.
-- **Decided here**: icon names `LayoutGrid` and `Rows3`; toggled look.
+- **Decided here**: icon names `layout-grid` and `Rows3`; toggled look.
 
 ### UI-PRC-020 Submenus: Send Signal, Set Priority, Set I/O Priority, graph columns
 
 - **Implements**: PROC-065, PROC-066, PROC-068, PROC-069 (check marks for multi-select),
   PROC-093, PROC-094 (column submenus).
-- **Anatomy**: `TlMenu` submenus, item height 26, check marks (Lucide `Check` 14 px) on the
+- **Anatomy**: `TlMenu` submenus, item height 26, check marks (Lucide `check` 14 px) on the
   left in place of the icon:
   - **Send Signal >**: Terminate (TERM) (ends process), Kill (KILL) (ends process), Hangup (HUP)
     (ends process), Interrupt (INT) (ends process), Quit (QUIT) (ends process), Stop (STOP),
@@ -1363,8 +1366,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   └────────────────────────────────────────────────────────────────────────────────────────────┘
   ```
 
-  - The history icon: Lucide `History` 16 px inside the Processes tab label (measured: a clock
-    arrow glyph right of "Processes" in processes.png), a `TlIconButton` ghost 20 × 20; toggled
+  - The history icon: Lucide `rotate-ccw-clock` 16 px inside the Processes tab label (measured: a clock
+    arrow glyph right of "Processes" in processes.png), a `TlButton::Toggle { on }` 20 × 20; toggled
     look (`row_selected` fill) while History mode is on. Tooltip "Show process history" / "Show
     live processes".
   - Header line: height 32, padding `sp5` 12 horizontal, `t_base` `text_primary`. Text states:
@@ -1417,7 +1420,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   selected identity absent at the scrub time: the row is still listed at the bottom with every
   metric `-` and the Name cell secondary text "Process not running" `text_secondary` (decided
   placement), identities from another boot: Name secondary text "(previous boot)" and a 12 px
-  `History` glyph.
+  `rotate-ccw-clock` glyph.
 - **Interaction**: selection as UI-PRC-008 (single and multi); selecting rows adds their series
   to the strip (UI-PRC-035); double-click or Enter on a row: if the identity is live, jump to it
   in the live table (UI-PRC-022); else toast "Process not running". Right-click menu: Copy, Copy
@@ -1561,7 +1564,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
 - **Implements**: PROC-088 ("Metric chips or legend toggles choose CPU, Memory, Disk, Network or
   GPU"; selected process series; clear chip).
-- **Anatomy**: in the header line's right slot, a `TlButtonGroup` of five chips 24 high
+- **Anatomy**: in the header line's right slot, a row of five `TlButton::Segment { on }` chips 24 high
   (`t_sm`, padding `sp4`, `r_sm`): CPU, Memory, Disk, Network, GPU; the active chip has the
   metric's `graph.*_line` colour as a 8 × 8 dot before the label and `row_selected` fill. Exactly
   one metric is active (radio behaviour; decided) and it drives the strip, minimap, top-3 and
@@ -1620,7 +1623,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Implements**: PROC-088 ("Delete from history", toast), PROC-070 (copy commands reused),
   R-103 (deleted-keys list).
 - **Anatomy**: see UI-PRC-031 menu list. "Delete from history" is the last item, `TlMenu`
-  item with icon `Trash2` 14 px `status.danger` text (decided: danger colour because it cannot be
+  item with icon `trash-2` 14 px `status.danger` text (decided: danger colour because it cannot be
   undone in the UI).
 - **States**: enabled for every history row (also other-boot identities); multi-select deletes
   every selected identity in one command.
@@ -1756,16 +1759,16 @@ shell); PROC-077 to PROC-085, PROC-095 to PROC-098 (windows agent).
 
 1. Group header rows are `row_h` tall with a top divider, not TaskSlinger's ≈ 36 px
    (`uniform_list` needs one height). UI-PRC-002.
-2. `header_h` 44, indent 18, chevron 16 always reserved, scrollbar 12 Always, menu item 26
+2. `header_h` 44, indent 18, chevron 16 always reserved, scrollbar 16 Always (kit geometry), menu item 26
    (foundation), min menu width 240. Shared geometry table.
 3. Zebra counted over the flattened index; stale cells at 60% opacity; heat quad hidden on the
    selected row; exited icons at 60%. UI-PRC-002, 004, 011.
-4. Glyph icons: `Pause`, `Snowflake`, `Binary`, `Cog`, `Cpu`, `Activity`, `Archive`, `AppWindow`,
-   `Lock`, `LayoutGrid`, `Rows3`, `History`, `Trash2`, `Zap`, `Leaf`. UI-PRC-002, 003, 004, 019,
+4. Glyph icons: `pause`, `snowflake`, `binary`, `cog`, `cpu`, `activity`, `archive`, `app-window`,
+   `lock`, `layout-grid`, `rows-2`, `list-tree`, `list`, `rotate-ccw-clock`, `trash-2`, `zap`, `leaf`. UI-PRC-002, 003, 004, 019,
    021, 030, 037.
 5. Header: line 2 always right-aligned; boundary lines always drawn; Name fixed first and
    undraggable; double-click a boundary fits one column; 4 px drag threshold; "Sort by" item in
-   the header menu; FitColumns measures visible rows plus 3 cached versions. UI-PRC-005, 006.
+   the header menu; ResizeColumnsToFit measures visible rows plus 3 cached versions. UI-PRC-005, 006.
 6. Column picker: title "tasklens Columns" (APP-045 pattern over PROC-024's "Columns"), 420 × 560,
    immediate apply, re-shown column returns to its old slot. UI-PRC-007.
 7. Selection: empty-area click clears; Ctrl+Space toggles; hidden selected rows not counted;
