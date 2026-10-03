@@ -1269,7 +1269,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-071 Process jump target, Go to parent and Go to service
 - Was: add PROC-099; r2 PROC-061; v1 PROC-064; v1 PROC-065; add amend PROC-064; add amend PROC-065
-- Source: TS L29292, L29320, toasts L28645-28766, L28696, L28700, L28709-28710, L28728, L28830, cross-check A.4 | SYS-010, SYS-035 | R-047
+- Source: TS L29292, L29320, toasts L28645-28766, L28696, L28700, L28709-28710, L28728, L28830, cross-check A.4 | SYS-010, SYS-033 (merged sys-app IDs) | R-047
 - Behaviour:
   - The Processes tab has one "select process by identity" entry point. Go to parent process, the Properties PPID link, Services "Jump to process", Connections "Jump to process", Search File Handles "Go to process", the window picker, the History table, `--select-pid <pid>` and the D-Bus `ActivateAction("select-pid", <uint32>)` all use it.
   - On success: switch to Processes (toast "Switched to Processes tab" when the source was another tab, unless the caller has its own toast such as "Switched to owning process." or "Switched to service process."), expand the group or tree path, select the row and scroll it to the centre.
@@ -1692,7 +1692,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Linux data/mechanism:
   - A URL with a scheme, or an existing path that is not an executable, opens through the portal `org.freedesktop.portal.OpenURI`, falling back to `xdg-open`.
   - `kcm_*` names (the `.cpl` analogue) run `systemsettings <name>`.
-  - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-024). It then groups as an app and is detached from tasklens.
+  - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-023, merged sys-app ID). It then groups as an app and is detached from tasklens.
   - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`.
   - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
   - Browse uses GPUI `prompt_for_paths` (portal FileChooser). If that pulls in Tokio (U-15), call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.
