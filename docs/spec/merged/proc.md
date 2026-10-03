@@ -2,7 +2,7 @@
 
 This is the merged PROC spec (round 3). It replaces `features-proc.md` (v1), `features-proc-r2.md` (r2) and `features-proc-addendum.md` (add) for implementation. It covers the Processes tab, apps and units, process actions, the Process and App Properties windows, History mode, the process parts of minigraphs and tray graphs, the Run dialog, Search File Handles and the low-memory rescue window.
 
-Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION.md` (R-001 to R-074 and canonical tables a to d), then `docs/ARCHITECTURE.md` on engineering structure, then the source specs (r2 over v1 on a shared topic, the addendum where it is later and more specific). "Was:" lines name every old ID an entry absorbs. Old IDs are prefixed `v1`, `r2` or `add`; "add amend PROC-0xx" means the addendum's amendment to that v1 entry.
+Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION.md` (R-001 to R-103 and canonical tables a to d), then `docs/ARCHITECTURE.md` on engineering structure, then the source specs (r2 over v1 on a shared topic, the addendum where it is later and more specific). "Was:" lines name every old ID an entry absorbs. Old IDs are prefixed `v1`, `r2` or `add`; "add amend PROC-0xx" means the addendum's amendment to that v1 entry.
 
 ## Conventions used in every entry
 
@@ -167,7 +167,7 @@ Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION
   - From P2, a dimmed secondary text shows the title of the app's most recently active window when the KWin bridge is up (PROC-053). Example: "Firefox (14)  Mozilla Firefox - Inbox".
   - Children: the app's primary processes (app PIDs whose parent is not an app PID), each with its full ppid subtree in Tree mode, or flat in List mode. Child rows inherit the app icon at 16 px.
   - PID is blank. Type is "App".
-  - Metrics: CPU, Disk, Network and GPU are sums over the app's processes. Memory is cgroup `memory.stat` `anon`, with the tooltip "Anonymous memory charged to this app's cgroup" (R-005, Q-5). When a member's per-process Disk value is Restricted, the row uses the cgroup `io.stat` rate (Δ(rbytes + wbytes)/Δt over all devices) instead, which every user can read (inferred, so system units still show a value).
+  - Metrics: CPU, Disk, Network and GPU are sums over the app's processes. Memory is cgroup `memory.stat` `anon`, with the tooltip "Anonymous memory charged to this app's cgroup" (R-005, Q-5). When a member's per-process Disk value is Restricted, the row uses the cgroup `io.stat` rate (Δ(rbytes + wbytes)/Δt over all devices) instead, which every user can read, so system units still show a value (R-103).
 - Linux data/mechanism: cgroup `memory.stat`, `io.stat` and `cgroup.procs`; the KWin bridge for titles; the `.desktop` index.
 - Verdict: ADAPT (memory from the cgroup so nothing is counted twice)
 - Phase: P1 (window titles P2)
@@ -398,7 +398,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Source: TS INI `Columns.Processes`, `ColumnWidths`, `ColumnResizeBehavior=0`, L28484-28487 | MC remember-column-order | R-018
 - Behaviour:
   - Drag a header to reorder; drag a header edge to resize (stops at the PROC-023 minimum).
-  - "Resize Behavior: Proportional / Last Column", default Proportional (`processes.column_resize = "proportional"`).
+  - "Resize Behavior: Proportional / Last Column", default Proportional (`tables.column_resize = "proportional"`, one key for every table, R-075).
   - "Resize columns to fit content" and "Reset to default".
   - Order, visibility and widths always persist in `$XDG_STATE_HOME/tasklens/state.toml` under `[columns.processes]` (`order`, `visible`, `widths`). MC's "Remember column order" option is dropped because tasklens always persists.
 - Linux data/mechanism: state file saved atomically with a 500 ms debounce (ADR-011).
@@ -758,7 +758,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 ### PROC-041 Dim zero values
 - Was: v1 PROC-034; r2 PROC-030
 - Source: MC `apps-page-hide-is-zero`
-- Behaviour: Settings > Processes > "Dim zero values", default off (`processes.dim_zero_values = false`). A measured zero draws at 30% opacity. It never applies to validity glyphs.
+- Behaviour: Settings > Processes > "Dim zero values", default off (`tables.dim_zero_values = false`, one key for every table, R-075). A measured zero draws at 30% opacity. It never applies to validity glyphs.
 - Linux data/mechanism: UI only.
 - Verdict: BUILD
 - Phase: P2
@@ -767,7 +767,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 ### PROC-042 Column separators
 - Was: v1 PROC-035
 - Source: MC `apps-page-show-column-separators`
-- Behaviour: Settings > Processes > "Show column separators", default off (`processes.column_separators = false`). It draws 1 px DIVIDER lines between columns.
+- Behaviour: Settings > Processes > "Show column separators", default off (`tables.column_separators = false`, one key for every table, R-075). It draws 1 px DIVIDER lines between columns.
 - Linux data/mechanism: UI only.
 - Verdict: BUILD
 - Phase: P4
@@ -1039,7 +1039,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (TaskSlinger order, MC signal submenu, Linux items)
 - Phase: P1 for the menu and the P1 items; other items arrive with their own entries.
 - Privilege: per item
-- Open question: item 14 "Copy rows as table" is the add PROC-098 menu label for Ctrl+Shift+C, but R-033's order does not list it. Recommended answer: show it as item 14, as above.
+- Item 14 "Copy rows as table" is the menu label for Ctrl+Shift+C (PROC-070), placed after Copy all metrics (R-091).
 
 ### PROC-058 Action pipeline, results and toasts
 - Was: r2 PROC-042; v1 PROC-050 (result channel, multi-target toast); v1 PROC-001 (revalidation)
@@ -1156,7 +1156,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (new Linux capability)
 - Phase: P2
 - Privilege: own app cgroups need none. System units use the systemd polkit prompt. A denied prompt gives a toast.
-- Open question: ADR-006 validates only `app.slice` cgroups, so Background user units and system units need the systemd D-Bus path above. Recommended answer: dispatch by target type as written (`ActionTarget::Cgroup` for `app.slice`, `ActionTarget::Unit` for the rest), and record it in ADR-006.
+- Dispatch by target type (R-092, ADR-006 "Units outside `app.slice`"): `ActionTarget::Cgroup` for cgroups under `app.slice`, `ActionTarget::Unit` for every other unit.
 
 ### PROC-065 Send Signal submenu
 - Was: v1 PROC-056; r2 PROC-046
@@ -1217,11 +1217,10 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Toast "I/O priority updated".
   - The tooltip names the active block scheduler, because the setting only takes effect with BFQ or mq-deadline.
   - Realtime is enabled only while a helper session is active; otherwise it is disabled with the tooltip "Needs administrator access." (or "Needs administrator helper (not installed)" when the helper is missing).
-- Linux data/mechanism: `ActionKind::SetIoPriority(IoPriority)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(class, level))` for every TID through `libc::syscall` in `tl-ops/src/sys.rs`. The scheduler comes from `/sys/block/<dev>/queue/scheduler`.
+- Linux data/mechanism: `ActionKind::SetIoPriority(IoPriority)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, IOPRIO_PRIO_VALUE(class, level))` for every TID ("Default (follows nice)" is `IoPriority::None`, `IOPRIO_CLASS_NONE`, R-093) through `libc::syscall` in `tl-ops/src/sys.rs`. The scheduler comes from `/sys/block/<dev>/queue/scheduler`.
 - Verdict: ADAPT (Linux-only)
 - Phase: P2
 - Privilege: best-effort and idle on own processes need none. Realtime needs CAP_SYS_ADMIN; other UIDs need the helper.
-- Open question: `IoPriority` in ADR-005 has no value for "Default (follows nice)" (`IOPRIO_CLASS_NONE`). Recommended answer: add `IoPriority::None` to ADR-005.
 
 ### PROC-069 Multi-select priority, affinity, I/O priority, copy and end
 - Was: add PROC-097
@@ -1255,7 +1254,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     Handles: 412
     Priority: Normal (0)
     ```
-    - CPU is `%.2f%%` of the whole machine. Memory is RssAnon, Private bytes is VmData + VmStk, Working set is VmRSS, all in whole MiB. Handles is the fd count. Priority is the PROC-029 class with the nice value in parentheses.
+    - CPU is `%.2f%%` of the whole machine, the one exception to the one-decimal percent rule of table (d) (R-094). Memory is RssAnon, Private bytes is VmData + VmStk, Working set is VmRSS, all in whole MiB. Handles is the fd count. Priority is the PROC-029 class with the nice value in parentheses.
     - A Restricted value prints "restricted" and an unsupported one prints "n/a"; neither prints 0.
     - Toast "Process details copied.", or "Failed to copy to clipboard".
   - **Copy all metrics** copies, per selected row, one `Label: value` line for every column that has data, in picker order, ending with `Command line: …`. Rows are separated by a blank line. Toast "Copied metrics to clipboard", or "Selected process metrics copied." for several rows.
@@ -1265,7 +1264,6 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: BUILD
 - Phase: P1
 - Privilege: none
-- Open question: R-013 sets one decimal for percent everywhere, but the Copy details block is TaskSlinger's fixed format with `%.2f%%`. Recommended answer: keep two decimals in Copy details only.
 
 ### PROC-071 Process jump target, Go to parent and Go to service
 - Was: add PROC-099; r2 PROC-061; v1 PROC-064; v1 PROC-065; add amend PROC-064; add amend PROC-065
@@ -1312,13 +1310,12 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Source: TS L35503 (`https://www.virustotal.com/gui/file/<sha256>`), toasts "SHA-256 unavailable", "Process image unavailable"
 - Behaviour:
   - Computes the executable's SHA-256 in the background (toast "Computing SHA-256…" when it takes longer than 500 ms), then opens `https://www.virustotal.com/gui/file/<sha256>` in the default browser. Nothing is uploaded.
-  - The first use shows a one-time notice: "This opens virustotal.com with the file's hash. The file is not uploaded."
+  - The first use shows a one-time notice: "This opens virustotal.com with the file's hash. The file is not uploaded." Accepting it sets `state.toml` `[processes] virustotal_notice_accepted = true` (R-095).
   - Errors: "SHA-256 unavailable", "Process image unavailable".
 - Linux data/mechanism: streamed hash of `/proc/<pid>/exe` (works for deleted files) on the blocking pool, cached by (dev, inode, mtime). Opened with the portal `org.freedesktop.portal.OpenURI.OpenURI`, falling back to `xdg-open`.
 - Verdict: BUILD
 - Phase: P2
 - Privilege: other users' exe gives EACCES; the fallback hashes the absolute argv path when that file is readable, else "Process image unavailable".
-- Open question: the notice needs a persisted "shown" flag and table (a) has none. Recommended answer: add `processes.virustotal_notice_accepted = false` to `settings.toml`, like `network.public_ip_notice_accepted`.
 
 ### PROC-075 Create dump file
 - Was: v1 PROC-070; r2 PROC-056
@@ -1409,7 +1406,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (Windows mitigations become ELF hardening; HWND becomes the KWin ID)
 - Phase: P2
 - Privilege: exe, cwd, root, personality, io and smaps_rollup of other UIDs show "Restricted" until the helper reads them.
-- Open question: SHA-256 and MD5 (here and in PROC-074) need hash crates that ADR-001's dependency table does not list. Recommended answer: allow `sha2` and `md-5` in `tl-collect` and record it in ADR-001.
+- SHA-256 and MD5 (here and in PROC-074) use the `sha2` and `md-5` crates in `tl-collect` (R-096, ADR-001).
 
 ### PROC-079 Threads tab
 - Was: v1 PROC-073; r2 PROC-067; add amend PROC-073
@@ -1421,11 +1418,10 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - States: "Loading threads...", "No threads found.", "No threads match the current filter.".
   - Row menu: Copy, "Set thread priority >" (as PROC-066 for one TID), "Set thread affinity…" (as PROC-067 for one TID), "Send signal to thread >" (TERM, KILL, USR1, USR2 through `tgkill`). STOP is not offered because it stops the whole thread group. The tooltip warns that a fatal signal ends the whole process.
   - TaskSlinger's Start Address and Start Module are not collected (they need ptrace plus symbol resolution); Name and Wait channel take their place.
-- Linux data/mechanism: `/proc/<pid>/task/<tid>/stat` (comm, state, utime, stime, nice, policy, processor field 39), `status` (`Cpus_allowed_list`, context switches), `wchan` and `comm`. Thread actions use `setpriority`, `sched_setaffinity` and `tgkill(pid, tid, sig)` after the pidfd identity check on the process.
+- Linux data/mechanism: `/proc/<pid>/task/<tid>/stat` (comm, state, utime, stime, nice, policy, processor field 39), `status` (`Cpus_allowed_list`, context switches), `wchan` and `comm`. Thread actions use `ActionTarget::Thread { process: ProcessKey, tid: u32 }` (R-097, ADR-005): `setpriority`, `sched_setaffinity` and `tgkill(pid, tid, sig)` after the pidfd identity check on the process and a check that `/proc/<pid>/task/<tid>` exists.
 - Verdict: ADAPT
 - Phase: P2
-- Privilege: `wchan` of other UIDs shows "Restricted". Thread actions on other UIDs need the helper.
-- Open question: ADR-005 has no thread-level target. Recommended answer: add `ActionTarget::Thread { process: ProcessKey, tid: u32 }`, verified through the process pidfd plus a check that `/proc/<pid>/task/<tid>` exists, and accepted by the helper's `Signal`, `SetNice`, `SetSched` and `SetAffinity`.
+- Privilege: `wchan` of other UIDs shows "Restricted". Thread actions on other UIDs need the helper, which accepts the thread target for `Signal`, `SetNice`, `SetSched` and `SetAffinity` (R-097).
 
 ### PROC-080 File descriptors tab
 - Was: v1 PROC-074; r2 PROC-068
@@ -1458,8 +1454,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Linux data/mechanism: `/proc/<pid>/maps`; per-mapping RSS from `/proc/<pid>/smaps`, loaded while the tab is open, at most 1 Hz; the package index from PROC-027.
 - Verdict: ADAPT ("DLL only" becomes "Shared libraries only"; Wine DLLs work literally)
 - Phase: P2
-- Privilege: ptrace read, as PROC-080. Other UIDs need the helper (`ReadProcessFiles { maps }`); otherwise the tab shows "Needs administrator access.".
-- Open question: the helper's `ReadProcessFiles` set has `smaps_rollup` but not `smaps`, so per-mapping RSS stays Restricted for other UIDs. Recommended answer: add `smaps` to the set in ADR-006.
+- Privilege: ptrace read, as PROC-080. Other UIDs need the helper (`ReadProcessFiles { maps, smaps }`, R-098); otherwise the tab shows "Needs administrator access.".
 
 ### PROC-082 Security tab
 - Was: v1 PROC-076; r2 PROC-070
@@ -1491,14 +1486,13 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Behaviour:
   - Columns: Name, Value. Both sortable.
   - A header note "Environment at process start" with a Refresh button.
-  - Values whose names match `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*_KEY`, `*API_KEY*` or `*CREDENTIAL*` (case-insensitive) are masked as "••••••" while `properties.env_mask = true` (default). A "Reveal" toggle shows one row's value.
-  - Copy name, copy value, and copy all as `NAME=value` lines.
+  - Values whose names match `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*KEY*`, `*COOKIE*` or `*CREDENTIAL*` (case-insensitive) are masked as "••••••" while `properties.env_mask = true` (default) (R-099). A "Reveal" toggle shows one row's value.
+  - Copy name, copy value, and copy all as `NAME=value` lines. A masked value is copied as "••••••" unless its row is revealed (R-099).
   - Errors: "Environment unavailable (insufficient privileges)", "(read failed)", "Environment block unavailable" (zombie or kernel thread).
 - Linux data/mechanism: `/proc/<pid>/environ`, NUL-separated, capped at 1 MiB, read when the tab opens and on Refresh. Never logged.
 - Verdict: ADAPT (Linux shows only the initial environment, as the note says; masking added)
 - Phase: P2
 - Privilege: PTRACE_MODE_READ, so the same UID works. Other UIDs need the helper (`ReadProcessFiles { environ }`).
-- Open questions: (1) v1 also masked `*KEY*` and `*COOKIE*`. Recommended answer: mask the union, adding `*KEY*` and `*COOKIE*` to the list above. (2) Whether "copy value" and "copy all" include masked values. Recommended answer: copy a masked value as "••••••" unless that row is revealed.
 
 ### PROC-084 Strings tab
 - Was: v1 PROC-078; r2 PROC-072
@@ -1550,7 +1544,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Storage format per ADR-012: 60 s blocks holding new metadata (comm, display name, exe basename, app ID; never command lines), a keyframe of `HistProcess { key, meta, ppid, cpu_permille, mem_anon_kib, io_r_kibps, io_w_kibps, net_kibps, gpu_pct }` and per-sweep deltas. `mem_anon_kib` holds RssAnon (R-005). `FieldPatch` stores only changes beyond a threshold (CPU ≥ 1 permille, memory ≥ 256 KiB, rates ≥ 1 KiB/s or to or from zero). System series are stored at 1 Hz (10 Hz series reduced to the per-second maximum).
   - Gaps are recorded for suspend and resume and for engine epoch changes.
   - RAM budget 16 MB (open block plus segment indexes).
-  - The rolling window (recording off) uses the same block encoding held in RAM, keeps the last 10 blocks, writes nothing to disk, and is dropped when the Processes tab closes (inferred from D-010).
+  - The rolling window (recording off) uses the same block encoding held in RAM, keeps the last 10 blocks, writes nothing to disk, and is dropped when the Processes tab closes (D-010, R-103).
   - Budget estimates are unverified: U-11, U-22.
   - The v1 and r2 storage designs (64 MiB RAM cap, uncompressed 10-minute tail, per-record layout) are Dropped: R-025.
 - Verdict: ADAPT (TaskSlinger records by default; tasklens does not)
@@ -1591,7 +1585,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Metric chips or legend toggles choose CPU, Memory, Disk, Network or GPU.
 - Linux data/mechanism:
   - The UI sends `Command::HistoryQuery { id, range, what }`; the engine replies with a `HistoryView` snapshot component (max 1,024 points per series, min/max decimation as in ADR-009). Process state at time T is rebuilt from the block keyframe plus deltas up to T.
-  - "Delete from history" adds the key to a per-boot list of deleted keys stored beside the segments, which every query filters out; segments are not rewritten (inferred).
+  - "Delete from history" adds the key to a per-boot list of deleted keys stored beside the segments, which every query filters out; segments are not rewritten (R-103).
 - Verdict: BUILD
 - Phase: P3
 - Privilege: none
@@ -1648,18 +1642,17 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - **Add Minigraph** binds a card to the process key. Title `<name> (<pid>) · CPU`; `Process <pid>` only until the name is read.
   - **Add Process Name Graph** sums all processes whose image name matches exactly and follows restarts. Title `<name> by name · CPU`.
   - **Add App Name Graph** sums all instances of the app ID (or unit name for unit rows). Title `<App> by app · CPU`.
-  - A process card whose process exited shows "Ended", keeps its data and stops. It is never rebound to a new process, also not after a tasklens restart or reboot. A name or app card with no live match shows "No match" and records a gap.
+  - A process card whose process exited shows "Ended", keeps its data and stops. It is never rebound to a new process, also not after a tasklens restart or reboot: a saved card from another boot shows "Ended" (R-100). A name or app card with no live match shows "No match" and records a gap.
   - Toasts: "Minigraph added", "Minigraph already exists", "No space for more minigraphs", "Process name minigraph added", "App name minigraph added", "Unable to add minigraph".
   - The Memory graph is labelled "Memory" and shows RssAnon (R-005).
   - The card's layout, colours, range and detaching belong to the minigraph area (PERF).
 - Linux data/mechanism:
-  - Cards persist in `state.toml` `[[minigraphs]]` with `source = "process:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` and `column`.
+  - Cards persist in `state.toml` `[[minigraphs]]` with `source = "process:<boot_id 16 hex>:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` and `column` (R-100).
   - The engine adds the key, name or app to demand, so the process sweep keeps running for it while the window is hidden.
   - App graphs use cgroup aggregates (`cpu.stat` `usage_usec`, `memory.stat` `anon`, `io.stat`) when the app is one cgroup, else Σ over members.
 - Verdict: BUILD (app name becomes app ID or unit)
-- Phase: P3
+- Phase: P3, for the menu items and the process cards (R-101)
 - Privilege: none
-- Open questions: (1) The `process:<pid>:<start_ticks>` source has no boot ID, so after a reboot a new process could match a saved card. Recommended answer: use `process:<boot_id 16 hex>:<pid>:<start_ticks>` and show "Ended" for any other boot. (2) PERF-086 puts process cards in P2, while both PROC sources put these menu items in P3. Recommended answer: P3 for both the menu items and the process cards.
 
 ### PROC-094 Process tray icon graphs
 - Was: v1 PROC-090; r2 PROC-063
@@ -1706,16 +1699,15 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Behaviour:
   - File > "Search File Handles..." opens a separate pinnable window titled "tasklens Handle Search".
   - Controls: "Pattern:" field (case-insensitive substring; `*` and `?` work as globs), the checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
-  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
+  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
   - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
-  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process (PROC-071), Copy path, Open file location.
+  - Result menu: End Task (SIGTERM), End Process (SIGKILL), Go to process (PROC-071), Copy path, Open file location. The labels follow R-045 naming (R-102).
   - Without the helper, a footer note reads "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button that starts the helper and searches again.
   - Error: "Handle search failed".
 - Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between PIDs. Other UIDs go through the helper (`ReadProcessFiles { fd_list, maps, cwd, exe }`).
 - Verdict: ADAPT (the NT handle table becomes a procfs walk, like lsof)
 - Phase: P3
 - Privilege: own processes need none; other UIDs need the helper.
-- Open question: R-061 adopts r2's menu labels, but "End Process (SIGTERM)" and "Kill Process (SIGKILL)" clash with the table naming, where End Task is SIGTERM and End Process is SIGKILL (R-045). Recommended answer: label them "End Task" (SIGTERM) and "End Process" (SIGKILL).
 
 ### PROC-097 Low-memory watcher
 - Was: v1 PROC-093; r2 PROC-081
@@ -1760,7 +1752,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 
 ### PROC-099 Settings and state keys for this area
 - Was: v1 PROC-095; add amend PROC-095
-- Source: TS INI `UI.*`, `Sort.*`, `Columns.*` | MC gschema `apps-page-*` | ADR-011 | R-018, R-019, R-071, RECONCILIATION table (a)
+- Source: TS INI `UI.*`, `Sort.*`, `Columns.*` | MC gschema `apps-page-*` | ADR-011 | R-018, R-019, R-071, R-075, R-095, RECONCILIATION table (a)
 - Behaviour: this area uses only these canonical keys (table a). Both files start with `schema_version = 1`, load with clamping, and save atomically with a 500 ms debounce.
   - `$XDG_CONFIG_HOME/tasklens/settings.toml`:
 
@@ -1773,9 +1765,9 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     | `processes.filter_include_children` | false | PROC-045 |
     | `processes.hide_system` | false | PROC-046 |
     | `processes.subtree_totals` | false | PROC-019 |
-    | `processes.dim_zero_values` | false | PROC-041 |
-    | `processes.column_separators` | false | PROC-042 |
-    | `processes.column_resize` | "proportional" | PROC-025 |
+    | `tables.dim_zero_values` | false | PROC-041 |
+    | `tables.column_separators` | false | PROC-042 |
+    | `tables.column_resize` | "proportional" | PROC-025 |
     | `processes.dump_type` | "mini" | PROC-075 |
     | `appearance.heat_coloring` | true | PROC-040 |
     | `appearance.heat_intensity_pct` | 50 | PROC-040 |
@@ -1790,9 +1782,9 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     | `units.network`, `units.network_auto_scale` | "bits", false | PROC-003, PROC-032 |
     | `window.always_on_top` | false | PROC-056 |
 
-  - `$XDG_STATE_HOME/tasklens/state.toml`: `[processes] history_mode = false`, `group_expanded = { apps = true, background = true, system = true }`; `[sort.processes]` (`pid`, ascending); `[sort.history]` (`cpu`, descending); `[columns.processes]` and `[columns.history]` (`order`, `visible`, `widths`); `[[minigraphs]]`; `[[tray_graphs]]`.
+  - `$XDG_STATE_HOME/tasklens/state.toml`: `[processes] history_mode = false`, `group_expanded = { apps = true, background = true, system = true }`, `virustotal_notice_accepted = false` (PROC-074, R-095); `[sort.processes]` (`pid`, ascending); `[sort.history]` (`cpu`, descending); `[columns.processes]` and `[columns.history]` (`order`, `visible`, `widths`); `[[minigraphs]]`; `[[tray_graphs]]`.
   - `EngineSettings` (derived, never persisted) carries `interval_ms`, `subtree_totals`, `hide_system`, the network unit and `history.*`.
-  - Old keys from v1 PROC-095: `tree_view` and `grouping` Dropped: R-010; `guide_lines`, `heat`, `heat_intensity_pct`, `dim_zero`, `resize_behavior`, `history.hours` and `props.*` are renamed to the keys above (R-019); `sort.*`, `columns.*`, `history.sort` and `history_mode` move to `state.toml` (R-018); `copy_rows_tsv_shortcut` Dropped: R-071 (the binding is fixed in table b).
+  - Old keys from the v1 settings list (absorbed into this entry): `tree_view` and `grouping` Dropped: R-010; `guide_lines`, `heat`, `heat_intensity_pct`, `dim_zero`, `resize_behavior`, `history.hours` and `props.*` are renamed to the keys above (R-019); `sort.*`, `columns.*`, `history.sort` and `history_mode` move to `state.toml` (R-018); `copy_rows_tsv_shortcut` Dropped: R-071 (the binding is fixed in table b).
   - Never added: `processes.filter_cmdline` (R-043), `processes.cpu_mode` and `processes.cpu_one_core_100` (R-044), `processes.column_graphs` (R-071).
 - Linux data/mechanism: atomic write (temp file, fsync, rename, fsync directory) with migrations on version change (ADR-011). No inotify; external edits apply at the next start.
 - Verdict: ADAPT (INI becomes TOML)
@@ -2141,20 +2133,22 @@ Every old ID in the three sources maps to at least one entry. Where an old entry
 | add amend PROC-095 | PROC-099 |
 ## Still open
 
-Each item has a recommended answer that beads use until Oystein or the architecture owner decides otherwise.
+Nothing. The open items of this merge were settled in `docs/RECONCILIATION.md`:
 
-1. **"Copy rows as table" in the row menu** (PROC-057). R-033's order does not list it. Recommended: show it as item 14, after Copy all metrics.
-2. **Freeze, Thaw and Kill for units outside `app.slice`** (PROC-064). ADR-006 validates only `app.slice` cgroups. Recommended: `ActionTarget::Cgroup` for `app.slice` apps; `ActionTarget::Unit` through the user or system manager's `FreezeUnit`, `ThawUnit` and `KillUnit` for other units; record this in ADR-006.
-3. **`IoPriority` has no "Default (follows nice)" value** (PROC-068). Recommended: add `IoPriority::None` (`IOPRIO_CLASS_NONE`) to ADR-005.
-4. **Copy details CPU decimals** (PROC-070). R-013 says one decimal everywhere; TaskSlinger's fixed block uses `%.2f%%`. Recommended: two decimals in Copy details only.
-5. **VirusTotal one-time notice flag** (PROC-074). Table (a) has no key. Recommended: add `processes.virustotal_notice_accepted = false` to `settings.toml`.
-6. **Hash crates** (PROC-074, PROC-078). ADR-001 allows no SHA-256 or MD5 crate. Recommended: allow `sha2` and `md-5` in `tl-collect` and record it in ADR-001.
-7. **Thread-level action target** (PROC-079). ADR-005 has none. Recommended: `ActionTarget::Thread { process: ProcessKey, tid: u32 }`, checked through the process pidfd and `/proc/<pid>/task/<tid>`, and accepted by the helper's `Signal`, `SetNice`, `SetSched` and `SetAffinity`.
-8. **`smaps` for other users' memory maps** (PROC-081). The helper's `ReadProcessFiles` set has `smaps_rollup` only. Recommended: add `smaps` to the set in ADR-006.
-9. **Environment mask list** (PROC-083). v1 also masked `*KEY*` and `*COOKIE*`. Recommended: mask the union.
-10. **Copying masked environment values** (PROC-083). Recommended: copy a masked value as "••••••" unless its row is revealed.
-11. **Boot ID in saved process minigraphs** (PROC-093). `process:<pid>:<start_ticks>` can match a new process after a reboot. Recommended: `process:<boot_id 16 hex>:<pid>:<start_ticks>`, and "Ended" for any other boot.
-12. **Phase of process minigraph cards** (PROC-093). PERF-086 says P2; both PROC sources say P3. Recommended: P3 for the menu items and the cards.
-13. **Handle Search result menu labels** (PROC-096). R-061 adopts r2's "End Process (SIGTERM)" and "Kill Process (SIGKILL)", which clash with R-045 naming. Recommended: "End Task" (SIGTERM) and "End Process" (SIGKILL).
+| Item | Resolution | Entries |
+|---|---|---|
+| 1. "Copy rows as table" in the row menu | R-091 | PROC-057 |
+| 2. Freeze, Thaw and Kill for units outside `app.slice` | R-092 | PROC-064 |
+| 3. `IoPriority::None` | R-093 | PROC-068 |
+| 4. Copy details CPU decimals | R-094 | PROC-070 |
+| 5. VirusTotal one-time notice flag | R-095 | PROC-074, PROC-099 |
+| 6. Hash crates | R-096 | PROC-074, PROC-078 |
+| 7. Thread-level action target | R-097 | PROC-079 |
+| 8. `smaps` for other users' memory maps | R-098 | PROC-081 |
+| 9 and 10. Environment mask list and copying masked values | R-099 | PROC-083 |
+| 11. Boot ID in saved process minigraphs | R-100 | PROC-093 |
+| 12. Phase of process minigraph cards | R-101 | PROC-093 |
+| 13. Handle Search result menu labels | R-102 | PROC-096 |
+| Inferred mechanisms (app-row `io.stat` fallback, in-RAM rolling history window, deleted-keys list) | R-103 | PROC-008, PROC-086, PROC-088 |
 
-Unverified assumptions this spec depends on (RECONCILIATION list): U-11, U-12, U-13, U-14, U-15, U-19, U-21, U-22, U-24, U-32, U-33, U-34, U-38. Inferred mechanisms written in this merge and marked "inferred" in their entries: the app-row `io.stat` fallback (PROC-008), the in-RAM rolling history window (PROC-086) and the deleted-keys list for "Delete from history" (PROC-088).
+Unverified assumptions this spec depends on (RECONCILIATION list): U-11, U-12, U-13, U-14, U-15, U-19, U-21, U-22, U-24, U-32, U-33, U-34, U-38.

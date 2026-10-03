@@ -929,7 +929,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - A separate pinnable, non-modal window titled "tasklens Handle Search", opened by File > "Search File Handles...".
   - Field "Pattern:" (case-insensitive substring; `*` and `?` globs allowed), checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
   - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
-  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
+  - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
   - Result menu: End Task (SIGTERM), End Process (SIGKILL), Go to process, Copy path, Open file location (R-102, PROC-096).
   - Unprivileged footer: "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button.
 - Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between pids. Other users' processes go through tl-helper `ReadProcessFiles` (R-004).
