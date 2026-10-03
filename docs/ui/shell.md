@@ -148,7 +148,7 @@ WindowOptions {
   - Window inactive: menu labels and toolbar icons in `text_secondary`; title bar background unchanged (UI-SHL-007).
   - Debug menu present: "Debug" button after "Help", with its own separator.
 - **Interaction**: see UI-SHL-004 (drag, double-click, window menu), UI-SHL-030 (menus), UI-SHL-010 (toolbar), UI-SHL-005 (caption buttons).
-- **Data binding**: `TitleBarView` re-renders when: the active tab changes (toolbar content), `TlSettings` sections `window` (pin) or `debug` change, the shield state changes (`HelperState` from `ActionTracker`), the KWin bridge availability changes (`ComponentMask::WINDOWS` validity flip only), window activation changes, or `window.is_maximized()` flips.
+- **Data binding**: `TitleBarView` re-renders when: the active tab changes (toolbar content), `TlSettings` sections `window` (pin) or `debug` change, the helper state changes (`HealthSnapshot.helper`, `ComponentMask::HEALTH`), the KWin bridge availability changes (`ComponentMask::WINDOWS` validity flip only), window activation changes, or `window.is_maximized()` flips.
 - **Build**: `TitleBarView` (Entity) in `window/titlebar.rs`, rendered through gpui-kit `TitleBar::new()` for drag, double-click and window-menu handling, with `.child(..)` for parts 1 to 8. The kit's own window controls are suppressed: `TitleBar` draws controls only under `Decorations::Client`, so tasklens renders its own caption buttons (part 9) as the last child and sets the kit controls off by using `TitleBar::new().controls(false)` if that builder exists, or otherwise by wrapping a plain `h_flex` that copies the kit's drag logic (`title_bar.rs:326-396`: `should_move` state, `start_window_move` on next mouse move, `zoom_window` on double-click, `show_window_menu(pos)` on right-click). The implementer checks `title_bar.rs` in gpui-component 0.7.0; if there is no switch to hide the kit controls, use the copied-logic `h_flex` (decided: own drag code, about 60 lines, `window/titlebar.rs::drag_handlers`).
   - Embedded in `MainWindow` with `.cached(..)`.
   - Height constant `TITLEBAR_H = 34.0`, multiplied by `ui_scale`.
@@ -266,7 +266,7 @@ WindowOptions {
   - Slot 1 is `TlShield` (UI-FND-028); slots 2 and 4 are `TlButton::Toggle`; slot 3 is `TlButton::Icon`. Icons `i_md` 16.
 - **States** (common to all four): the `TlButton` states of UI-FND-010 (hover `tab_hover`, pressed `header`, Toggle on: `accent` at alpha 0.25 with a 1 px `accent` border, disabled at opacity 0.5 with its tooltip still shown). Toolbar buttons are built with `.tab_stop(false)`: they are not Tab stops [C]; keyboard users reach the same Actions through View > Process View, the Settings menu and table (b) keys. Window inactive: icons `text_secondary`.
 - **Interaction**: click dispatches the button's Action (below). Tooltips use `TlTooltip` with the 500 ms delay and, where the Action has a binding, the key hint (`Tooltip::action`).
-- **Data binding**: `MainWindow.active_tab`, `UiState.processes.history_mode`, `processes.hide_system`, `processes.mode`, `HelperState` (UI-SHL-011), KWin availability (UI-SHL-014).
+- **Data binding**: `MainWindow.active_tab`, `UiState.processes.history_mode`, `processes.hide_system`, `processes.mode`, `HealthSnapshot.helper` (UI-SHL-011), KWin availability (UI-SHL-014).
 - **Build**: `Toolbar` is a `RenderOnce` struct built inside `TitleBarView::render` from a small `ToolbarModel { tab, history_mode, hide_system, mode, helper: HelperState, picker_available, picking }` that `TitleBarView` keeps up to date.
 - **Performance**: at most 4 buttons; no allocations beyond the element tree; tooltip text are `SharedString` constants except the view-mode tooltip, which is one of three precomputed `SharedString`s.
 - **Tests**: `toolbar_slots_per_tab` (render test): for each of the six tabs with helper installed and bridge up, assert the visible slot list: Processes [1,2,3,4], every other tab [1,4]. `toolbar_history_mode`: Processes in History mode shows slot 3 disabled with tooltip "History shows a flat list".
@@ -1476,3 +1476,264 @@ x=0, bottom=0
 - **Behaviour**: shown while `debug.show_fps` is on. Reads `AnimationDriver.stats` (frame intervals and UI-thread CPU time per frame, ADR-014) and re-renders at most twice per second, on a 500 ms timer that runs only while the overlay is shown [C]. The overlay never requests frames itself; with no animation running, its fps reads "idle" [C].
 - **Phase**: P1 (developer flag).
 - **Decided here**: placement, text format, 2 Hz refresh, "idle".
+
+---
+
+## 14. Summary table
+
+| ID | Name | Implements (main) | Phase |
+|---|---|---|---|
+| UI-SHL-001 | Main window layout and resizing rules | APP-001, APP-002, APP-010, APP-027, APP-029, R-022 | P1 |
+| UI-SHL-002 | Window creation, size and geometry restore | APP-001, APP-010, APP-048, R-022 | P1 |
+| UI-SHL-003 | Client-drawn title bar layout | APP-001, APP-002, APP-008, D-006 | P1 (pin P2, shield and picker P3) |
+| UI-SHL-004 | Title bar drag region, double-click and window menu | APP-001, APP-002 | P1 |
+| UI-SHL-005 | Caption buttons | APP-008, APP-009, APP-047, R-073, PROC-056 | P1, pin P2 |
+| UI-SHL-006 | Server-decorations variant | APP-001, R-021 | P1 |
+| UI-SHL-007 | Active and inactive window appearance | APP-027 | P1 |
+| UI-SHL-010 | Toolbar slot and per-tab content | APP-002, PERF-014, PROC-016, R-031 | P1, P3 |
+| UI-SHL-011 | Shield | APP-003, APP-049, PROC-058 | P3 |
+| UI-SHL-012 | Hide system processes toggle | APP-004, PROC-046 | P1 |
+| UI-SHL-013 | View mode cycler | APP-005, PROC-015 | P1 |
+| UI-SHL-014 | Window picker "+" | APP-006, PROC-055 | P3 |
+| UI-SHL-020 | Tab strip layout and accent outline | APP-027, R-023 | P1 |
+| UI-SHL-021 | Tab switch animation | APP-027, R-017 | P2 |
+| UI-SHL-022 | Tab overflow menu | APP-027 | P1 |
+| UI-SHL-023 | History toggle and Information copy icon | APP-027, PROC-086, PROC-088, PERF-094, D-010 | P2, P3 |
+| UI-SHL-024 | Filter box | APP-028, PROC-044, R-043 | P1 |
+| UI-SHL-025 | "Include children" placement | PROC-045 | P1 |
+| UI-SHL-030 | Menu bar behaviour and keyboard | APP-012, APP-017, APP-022, APP-024, APP-026 | P1 |
+| UI-SHL-031 | Menu popups in the menu bar | APP-012 to APP-026 | P1 |
+| UI-SHL-032 | File menu | APP-012 to APP-016, PROC-095, PROC-096 | P1 to P4 |
+| UI-SHL-033 | View menu (root) | APP-017, R-089 | P1 |
+| UI-SHL-034 | View > Columns | APP-018, PROC-024 to PROC-026 | P1 |
+| UI-SHL-035 | View > Process View | APP-019, PROC-014, PROC-017, PROC-020, PROC-043 | P1 |
+| UI-SHL-036 | View > Window | APP-020, APP-009, PERF-093 | P2, P3 |
+| UI-SHL-037 | View > Appearance | APP-040, R-020, R-077 | P2 |
+| UI-SHL-038 | View > Theme | APP-035 to APP-038 | P2, P3 |
+| UI-SHL-039 | View > Graphs | APP-021, PERF-080, PERF-084 | P1, P3 |
+| UI-SHL-040 | Settings menu | APP-022, APP-043, APP-046, APP-048, APP-049, PROC-086, PROC-087, PROC-097 | P1 to P4 |
+| UI-SHL-041 | Help menu | APP-024, APP-030, APP-041, APP-042, APP-053 | P2 to P4 |
+| UI-SHL-042 | Debug menu | APP-026 | P4 (Show FPS P1) |
+| UI-SHL-050 | Status chip | APP-029, PROC-050, PROC-051, SYS-016, SYS-027, SYS-036 | P1 |
+| UI-SHL-051 | Health items in the chip | APP-029, PERF-013 | P1 |
+| UI-SHL-060 | Settings window frame | APP-023, APP-032 | P2 |
+| UI-SHL-061 | Settings page: General | APP-023, APP-032, APP-043 | P2 |
+| UI-SHL-062 | Settings page: Appearance | APP-023, APP-032, APP-036, APP-040, R-021 | P2 |
+| UI-SHL-063 | Settings page: Motion | APP-023, APP-032, R-017 | P2 |
+| UI-SHL-064 | Settings page: Units | APP-023, APP-032, R-015 | P2 |
+| UI-SHL-065 | Settings page: Processes | APP-023, APP-032, PROC-099, R-075 | P2 to P4 |
+| UI-SHL-066 | Settings page: Performance | APP-023, APP-032, PERF-004, PERF-016, PERF-021, PERF-027, PERF-032, PERF-041, PERF-063, PERF-076, PERF-077 | P2, P3 |
+| UI-SHL-067 | Settings page: Graphs | APP-023, APP-032, PERF-080, PERF-084 | P2, P3 |
+| UI-SHL-068 | Settings page: Services | APP-023, APP-032, SYS-002, SYS-004 | P2 |
+| UI-SHL-069 | Settings page: Startup and window | APP-023, APP-032, APP-047, APP-048, APP-051, PROC-097 | P2 to P4 |
+| UI-SHL-070 | Settings page: Privileges | APP-023, APP-049, R-028 | P3, P4 |
+| UI-SHL-071 | Settings page: Advanced | APP-023, APP-034, APP-046, APP-056 | P2, P4 |
+| UI-SHL-072 | Reset settings confirmation | APP-022 | P1 |
+| UI-SHL-080 | Theme application and follow-system (shell rules) | APP-035, APP-036 | P1, P2 |
+| UI-SHL-081 | Theme Editor window | APP-037 | P3 |
+| UI-SHL-082 | Share Theme window | APP-038 | P3 |
+| UI-SHL-083 | Import theme from the clipboard | APP-038, R-079 | P3 |
+| UI-SHL-084 | Delete theme confirmation | APP-036 | P2 |
+| UI-SHL-085 | Graph Color submenu | APP-039, PERF-081, PERF-090 | P3 |
+| UI-SHL-090 | Secondary windows (shell rules) | APP-045, R-073 | P1 |
+| UI-SHL-091 | Confirmation windows used by the shell | APP-045, APP-022, APP-036, APP-049 | P1 |
+| UI-SHL-092 | About window | APP-053, R-078 | P2 |
+| UI-SHL-093 | Crash Report window | APP-055, R-049 | P1 |
+| UI-SHL-094 | Additional Setup window (frame) | APP-042, PERF-105 | P3 |
+| UI-SHL-095 | Keyboard Shortcuts window | APP-030, APP-031 | P2 |
+| UI-SHL-096 | Public IP Notice window | APP-056, PERF-060 | P2 |
+| UI-SHL-097 | Run dialog window frame | APP-014, PROC-095 | P2 |
+| UI-SHL-098 | Search File Handles window frame | APP-015, PROC-096 | P3 |
+| UI-SHL-099 | Collector Health window | APP-026, APP-029 | P1, P4 |
+| UI-SHL-100 | Toast placement in the shell | APP-044 | P1 |
+| UI-SHL-110 | Startup sequence and first frame | APP-052, APP-055, APP-059, PROC-098 | P1 to P3 |
+| UI-SHL-111 | Loading placeholders (frame rule) | APP-059, R-060 | P2 |
+| UI-SHL-112 | Single-instance activation | APP-011, R-047 | P1 |
+| UI-SHL-113 | Close behaviour, minimize to tray, main tray icon | APP-047, PERF-084, PERF-088, PERF-090 to PERF-092 | P1, P3 |
+| UI-SHL-114 | Desktop notifications from the shell | APP-055 | P1 |
+| UI-SHL-120 | Key contexts and the binding table | APP-031, table (b), PERF-007 | P1 to P3 |
+| UI-SHL-121 | Focus model and Tab order | APP-058 | P1 |
+| UI-SHL-122 | Esc chain | table (b), R-043 | P1 |
+| UI-SHL-123 | Hold Ctrl to pause | R-042, PROC-050 | P1 |
+| UI-SHL-124 | Type-to-filter routing | APP-028, PROC-044 | P1 |
+| UI-SHL-130 | UI scale and row height at runtime | APP-040, APP-058, R-020 | P1, P2, P4 |
+| UI-SHL-131 | Language change at runtime | APP-043, R-081 | P1, P4 |
+| UI-SHL-132 | Motion in the shell and reduced motion | R-017, APP-058 | P1, P2 |
+| UI-SHL-140 | FPS overlay | APP-026, ADR-014 | P1 |
+
+Entry count: 78.
+
+## 15. Coverage
+
+Every merged spec ID in this file's scope, and the entries that realize it.
+
+**APP (sys-app.md), all 59:**
+
+| ID | Realized by |
+|---|---|
+| APP-001 | UI-SHL-001, 002, 003, 004, 006 |
+| APP-002 | UI-SHL-003, 004, 010 |
+| APP-003 | UI-SHL-010, 011 |
+| APP-004 | UI-SHL-012 |
+| APP-005 | UI-SHL-013 |
+| APP-006 | UI-SHL-014 |
+| APP-007 | DROP in the merged spec; no UI. Nothing in the title bar shows an update badge (UI-SHL-003 part list has none) |
+| APP-008 | UI-SHL-005 |
+| APP-009 | UI-SHL-005, 036, 090 |
+| APP-010 | UI-SHL-001, 002 |
+| APP-011 | UI-SHL-112 |
+| APP-012 | UI-SHL-030, 032 |
+| APP-013 | DROP; UI-SHL-032 records that the File menu has no Run Installer item |
+| APP-014 | UI-SHL-032, 097 |
+| APP-015 | UI-SHL-032, 098 |
+| APP-016 | UI-SHL-032 |
+| APP-017 | UI-SHL-033 |
+| APP-018 | UI-SHL-034 |
+| APP-019 | UI-SHL-035 |
+| APP-020 | UI-SHL-036 |
+| APP-021 | UI-SHL-039 |
+| APP-022 | UI-SHL-040, 072, 091 |
+| APP-023 | UI-SHL-060 to 071 |
+| APP-024 | UI-SHL-041 |
+| APP-025 | DROP; no Help item for licences (UI-SHL-041 item list) |
+| APP-026 | UI-SHL-042, 099, 140 |
+| APP-027 | UI-SHL-020, 021, 022, 023 |
+| APP-028 | UI-SHL-024, 025, 124 |
+| APP-029 | UI-SHL-050, 051 |
+| APP-030 | UI-SHL-095 |
+| APP-031 | UI-SHL-120, 122, 123, 124 |
+| APP-032 | UI-SHL-060 to 071 (every settings.toml key once); conventions (`TlSettings`) |
+| APP-033 | Conventions (`TlSettings`, debounce, persist callback); UI-SHL-002 (state.toml window keys) |
+| APP-034 | UI-SHL-071 |
+| APP-035 | UI-SHL-038, 080, 081 |
+| APP-036 | UI-SHL-038, 080, 084 |
+| APP-037 | UI-SHL-081 |
+| APP-038 | UI-SHL-082, 083 |
+| APP-039 | UI-SHL-085 |
+| APP-040 | UI-SHL-037, 130 |
+| APP-041 | UI-SHL-041 (Help item); the fields themselves are PERF-095 |
+| APP-042 | UI-SHL-094 |
+| APP-043 | UI-SHL-040, 061, 131 |
+| APP-044 | UI-SHL-100 (with UI-FND-020) |
+| APP-045 | UI-SHL-090, 091, and every window entry 060, 081, 082, 092 to 099 |
+| APP-046 | UI-SHL-040 (040a), 071 |
+| APP-047 | UI-SHL-005, 113 |
+| APP-048 | UI-SHL-002, 040, 069, 110 |
+| APP-049 | UI-SHL-011, 040, 070, 091 |
+| APP-050 | DROP; no updater or installer UI anywhere in the shell |
+| APP-051 | UI-SHL-069 |
+| APP-052 | UI-SHL-110, 112 |
+| APP-053 | UI-SHL-092 |
+| APP-054 | UI-SHL-092 and 093 ("Open log folder"); logging itself has no UI |
+| APP-055 | UI-SHL-093, 114 |
+| APP-056 | UI-SHL-096, 071 |
+| APP-057 | DROP; no G-SYNC item in the Settings menu (UI-SHL-040 item list) |
+| APP-058 | UI-SHL-121, 130, 132 |
+| APP-059 | UI-SHL-110, 111 |
+
+**Shell parts of perf.md:**
+
+| ID | Realized by |
+|---|---|
+| PERF-004 | UI-SHL-066 (Devices group) |
+| PERF-007 | UI-SHL-120 (Performance context exists on the page focus; the page binds F1 to F9, Ctrl+T, Ctrl+M) |
+| PERF-013 | UI-SHL-051 (health words) |
+| PERF-014 | UI-SHL-010 |
+| PERF-016, PERF-021, PERF-027, PERF-032, PERF-041, PERF-063, PERF-076, PERF-077 | UI-SHL-066 (their settings keys) |
+| PERF-060 | UI-SHL-096 |
+| PERF-080 | UI-SHL-039, 067 |
+| PERF-081 | UI-SHL-085 |
+| PERF-084 | UI-SHL-039, 067, 113 |
+| PERF-088 | UI-SHL-113 ("Tray icon graphs >" entry point) |
+| PERF-090 | UI-SHL-085 (tray variant), 113 |
+| PERF-091 | UI-SHL-113 |
+| PERF-092 | UI-SHL-113 |
+| PERF-093 | UI-SHL-036 |
+| PERF-094 | UI-SHL-023 (copy icon) |
+| PERF-105 | UI-SHL-094 |
+
+**Shell parts of proc.md:**
+
+| ID | Realized by |
+|---|---|
+| PROC-014 | UI-SHL-035 |
+| PROC-015 | UI-SHL-013 |
+| PROC-016 | UI-SHL-010, 013 |
+| PROC-017 | UI-SHL-035 |
+| PROC-020 | UI-SHL-035 |
+| PROC-024, PROC-025, PROC-026 | UI-SHL-034 |
+| PROC-043 | UI-SHL-035 |
+| PROC-044 | UI-SHL-024, 124 |
+| PROC-045 | UI-SHL-025 |
+| PROC-046 | UI-SHL-012 |
+| PROC-050 | UI-SHL-050, 123 |
+| PROC-051 | UI-SHL-050 |
+| PROC-055 | UI-SHL-014 |
+| PROC-056 | UI-SHL-005, 090 |
+| PROC-058 | UI-SHL-011 (Retry as administrator dispatches the shield Action) |
+| PROC-086, PROC-087 | UI-SHL-023, 040, 065 |
+| PROC-088 | UI-SHL-023, 050 |
+| PROC-095 | UI-SHL-032, 097 |
+| PROC-096 | UI-SHL-032, 098 |
+| PROC-097 | UI-SHL-040, 069 |
+| PROC-098 | UI-SHL-110 (`--low-memory` opens the rescue window instead of the main window) |
+| PROC-099 | UI-SHL-065 |
+
+No ID in scope is unmapped.
+
+## 16. Decided here (all in one list)
+
+Values and rules this file chose, for reviewers:
+
+1. Main window title "tasklens"; title bar shrink order (UI-SHL-001).
+2. Menu bar labels `t_md` at weight 400; menu buttons 26 high with padding 16 and 1 px separators 16 high (UI-SHL-003, measured).
+3. Toolbar buttons 24 × 24 with gap 7 (pitch 31 measured); toolbar, title bar, tabs and caption buttons are not Tab stops (UI-SHL-003, 010, 121).
+4. Own title bar drag code when the kit `TitleBar` cannot hide its controls (UI-SHL-003).
+5. Main window caption buttons 36 wide (measured), pin uses the Toggle on look and tooltip "Always on top" (UI-SHL-005).
+6. Right-click and middle-click on title bar buttons do nothing (UI-SHL-004).
+7. Server-decorations menu row: buttons 24 high; row order follows APP-001 over ADR-010 (UI-SHL-006).
+8. Inactive window: accent outline and line in `divider`, labels `text_secondary` (UI-SHL-007, inferred from the video).
+9. View mode icons `rows-2`, `list-tree`, `list`; hide-system icon `layout-grid` (UI-SHL-012, 013).
+10. Picker look while picking; second click cancels; PROC-055's Ctrl+click confirmation wins over APP-006 (UI-SHL-014).
+11. Custom tab strip instead of kit `TabBar`; tab padding 22 (measured); active tab fill `header`; tab wrap-around; no wheel scrolling (UI-SHL-020).
+12. Tab switch easing `ease_out_cubic`, crossfade realized as page fade-in, restart from the current position (UI-SHL-021).
+13. Overflow menu keeps the active tab visible; icon `chevrons-right`, tooltip "More tabs" (UI-SHL-022).
+14. History icon `rotate-ccw-clock` (no `history` glyph in the kit set), colours, tooltips "Show history" / "Show live processes", "Copy all"; toggling history selects Processes (UI-SHL-023).
+15. Filter box: inner border off in the tab strip, Enter and Down move to the table, Ctrl+F selects all (UI-SHL-024).
+16. "Include children" label `t_sm` and Tab stop after the filter (UI-SHL-025).
+17. Own `MenuBar` entity; first item highlighted when opened by key; Alt alone does nothing; Alt+D for Debug (UI-SHL-030).
+18. Columns submenu disabled on table-less tabs; Process View radios disabled in History mode and give the cycler's toast (UI-SHL-033, 035).
+19. Appearance: steps of 5 on the 0..100 sliders; slider row geometry; popup stays open while adjusting; keyboard on slider rows (UI-SHL-037).
+20. Theme menu: per-theme actions act on the active theme; copy names "<name> copy N"; explicit choice turns sync off with "Theme sync turned off" (UI-SHL-038, 080).
+21. Graph checks disabled without a GPU (UI-SHL-039).
+22. Settings menu: Start minimized indent 16; Save history disabled while recording is off; toasts "History recording on/off" and "Could not change the autostart entry"; Default tab lists built tabs only; adapter probe UX (UI-SHL-040).
+23. Help menu absent in P1; documentation failure toast (UI-SHL-041).
+24. Debug: "All columns enabled" toast (UI-SHL-042).
+25. Status as a floating chip with sizes, separators, visibility rule and table bottom padding (UI-SHL-050; open item 1).
+26. Health item texts, source names, limit of two, restricted item rule (UI-SHL-051).
+27. Settings window size 900 × 640, sidebar 220, page icons, labels written here ("Kernel times", "Secondary graph", "Hidden engine graphs", "Mask secret environment values", "History disk limit" 64..=4096), device order list and fans group forms, locale display names, "Open settings folder" button, Show FPS on the Advanced page (UI-SHL-060 to 071).
+28. Theme Editor layout, sizes, keyboard steps, "Theme saved" toast, name validation text, own colour plane (UI-SHL-081).
+29. Share window size and helper sentence; import naming " 2"; missing slots fill from Default Dark or Default Light (UI-SHL-082, 083).
+30. Delete theme falls back to the preferred theme of the same mode (UI-SHL-084).
+31. Tray graph colour menu without swatches (UI-SHL-085).
+32. Window registry keys for shell windows (UI-SHL-090).
+33. About window size and licence list view; Crash Report `.seen` marker and deferral while hidden (UI-SHL-092, 093).
+34. Additional Setup sizes, row card styling, busy text (UI-SHL-094).
+35. Keyboard Shortcuts search field; Collector Health title, columns and colours (UI-SHL-095, 099).
+36. Startup: queued toasts after the first frame; `--select-pid` waits 3 s, then "Process <pid> not found" (UI-SHL-110).
+37. Skeleton counts and widths; static skeleton under reduced motion (UI-SHL-111, 132).
+38. Tray icon visibility rule; compositor minimize not intercepted (UI-SHL-113).
+39. Both Ctrl+? spellings bound; Ctrl+W closes secondary windows; F5 without toast; Ctrl+F does nothing on Performance (UI-SHL-120).
+40. Initial focus goes to the page's primary target on open and on tab switch (UI-SHL-121).
+41. Ctrl+shortcut presses pause briefly (UI-SHL-123).
+42. UI scale toast id `ui-scale`, no toast at the limits, first visible row kept (UI-SHL-130).
+43. FPS overlay placement, text and 2 Hz refresh (UI-SHL-140).
+
+## 17. Open items (with the recommended answer)
+
+1. **Status bar form.** APP-029 says a 22 px bar on gpui-kit `StatusBar`; the TaskSlinger reference draws a floating chip and nothing on Performance and Information. Recommended: the chip (UI-SHL-050). If the owner prefers the bar, use `StatusBar` 22 high with the same segments, left and health right.
+2. **Status text size.** Foundation's text table puts the status bar at `t_xs`; the measured chip text is 12 px. Recommended: `t_sm`. Raised with the foundation author.
+3. **Shift held at launch on Wayland.** A Wayland client gets no modifier state before focus. Recommended: the 500 ms first-focus rule in UI-SHL-110 step 6; verify in the P3 bead on KWin, and if KWin does not send modifiers on first focus, drop the Shift path on Wayland and keep `privilege.unlock_at_launch`.
+4. **Kit `TitleBar` controls.** Whether gpui-kit 0.7.0's `TitleBar` can hide its own caption buttons is not checked. Recommended: use own drag code (UI-SHL-003) unless the P1 bead finds a switch.
+5. **Kit `Input` and global shortcuts.** Recommended assumption: the kit input does not bind Ctrl+N, Ctrl+Q, Ctrl+W; the P1 keymap test (`keymap_matches_table_b`) must also run with the filter focused.
+6. **Toolbar and chrome Tab stops.** Foundation makes every `TlButton` a Tab stop; the shell opts its chrome out. Recommended: keep the shell rule (TaskSlinger has no keyboard path into its chrome, and every chrome command has a key or menu path).
