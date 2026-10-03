@@ -786,7 +786,7 @@ x=0
 ### UI-SHL-050 Status chip (per-tab status text)
 
 - **Implements**: APP-029, PROC-051, PROC-050, SYS-016, SYS-027, SYS-036, R-042, table (d) counts.
-- **Form**: APP-029 calls for a compact 22 px bar built on gpui-kit `StatusBar`. The TaskSlinger reference draws a floating chip over the bottom-left of the table instead [M processes.png: chip at x 0..112, y 813..840, 1 px border, rounded top-right corner], and shows nothing on Performance and Information [M performance.png, information.png]. This spec follows the reference: a floating chip, hidden when it has no text [C, open item 2].
+- **Form**: APP-029 calls for a compact 22 px bar built on gpui-kit `StatusBar`. The TaskSlinger reference draws a floating chip over the bottom-left of the table instead [M processes.png: chip at x 0..112, y 813..840, 1 px border, rounded top-right corner], and shows nothing on Performance and Information [M performance.png, information.png]. This spec follows the reference: a floating chip, hidden when it has no text [C, R-107].
 - **Anatomy**:
 
 ```text
@@ -824,7 +824,7 @@ x=0, bottom=0
 - **Accessibility**: the chip text is readable as plain text; the clickable parts have tooltips and act on Enter when reached through the keyboard (they are Tab stops only when clickable) [C].
 - **Tests**: `status_chip_processes_text`: 296 rows, filter matching 41, 3 selected: text "41 / 296 Processes | 3 processes selected". `status_chip_hidden_on_performance`. `status_chip_paused`: Ctrl held with the window active appends "[PAUSED - Ctrl]".
 - **Phase**: P1.
-- **Decided here**: chip form instead of a full-width bar (open item 2); sizes; segment separator " · " for health; visibility rule; table bottom padding.
+- **Decided here**: chip form instead of a full-width bar (R-107); sizes; segment separator " · " for health; visibility rule; table bottom padding.
 
 ### UI-SHL-051 Health items in the chip
 
@@ -1259,7 +1259,7 @@ x=0, bottom=0
   3. NVIDIA X11 environment rule (ADR-010) and, in P4, the `rendering.gpu` variables.
   4. Single instance (UI-SHL-112): forward and exit 0 if another copy runs.
   5. Load `settings.toml`, `state.toml`, `themes.json` (APP-033). Corrupt or newer-file toasts are queued, not shown yet.
-  6. Note the Shift key state for "Shift held at launch" (P3). On X11 tl-app reads it with `XkbGetState`. Wayland gives a client no modifier state before its window has focus, so on Wayland the main window counts Shift as held when its first `on_modifiers_changed` event within 500 ms of first focus has `shift` set [C, unverified, open item 3].
+  6. Note the Shift key state for "Shift held at launch" (P3). On X11 tl-app reads it with `XkbGetState`. Wayland gives a client no modifier state before its window has focus, so on Wayland the main window counts Shift as held when its first `on_modifiers_changed` event within 500 ms of first focus has `shift` set [C, verify U-43, R-124].
   7. Start the engine (`EngineHandle::start`) on its own threads; do not wait for any collector.
   8. `Application::run`: load fonts, `gpui_kit::init`, register the asset source, build `ThemeStore` and activate the theme without crossfade (UI-FND-040), `bind_keys` (UI-SHL-120), set the toast globals, create `SnapshotHub`, `DemandAggregator`, `ActionTracker`.
   9. Open the main window (UI-SHL-002) on the start tab: `--tab` if given, else `general.start_tab` (`last_used` reads `UiState.tabs.last_tab`) [S]. Only that page Entity is created.
@@ -1277,7 +1277,7 @@ x=0, bottom=0
 - **Performance**: steps 1 to 9 must fit the ADR-014 first-frame gate (200 ms warm). Theme JSON parse, settings parse and font loading are the main costs; fonts are loaded from bytes embedded with `include_bytes!` [C]. No page except the start page is constructed before the first frame.
 - **Tests**: `startup_tab_arg_wins` (TestAppContext): `--tab services` with `start_tab = performance` opens Services. `first_frame_no_wait`: with a fake engine that never publishes, the first frame renders within one frame cycle.
 - **Phase**: P1 (P2 and P3 steps as marked).
-- **Decided here**: queued toasts after first frame; `--select-pid` wait of 3 s and its toast; Shift detection path (open item 3).
+- **Decided here**: queued toasts after first frame; `--select-pid` wait of 3 s and its toast; Shift detection path (R-124, verify U-43).
 
 ### UI-SHL-111 Loading placeholders (frame rule)
 
@@ -1718,7 +1718,7 @@ Values and rules this file chose, for reviewers:
 22. Settings menu: Start minimized indent 16; Save history disabled while recording is off; toasts "History recording on/off" and "Could not change the autostart entry"; Default tab lists built tabs only; adapter probe UX (UI-SHL-040).
 23. Help menu absent in P1; documentation failure toast (UI-SHL-041).
 24. Debug: "All columns enabled" toast (UI-SHL-042).
-25. Status as a floating chip with sizes, separators, visibility rule and table bottom padding (UI-SHL-050; open item 1).
+25. Status as a floating chip with sizes, separators, visibility rule and table bottom padding (UI-SHL-050; R-107).
 26. Health item texts, source names, limit of two, restricted item rule (UI-SHL-051).
 27. Settings window size 900 × 640, sidebar 220, page icons, labels written here ("Kernel times", "Secondary graph", "Hidden engine graphs", "Mask secret environment values", "History disk limit" 64..=4096), device order list and fans group forms, locale display names, "Open settings folder" button, Show FPS on the Advanced page (UI-SHL-060 to 071).
 28. Theme Editor layout, sizes, keyboard steps, "Theme saved" toast, name validation text, own colour plane (UI-SHL-081).
@@ -1738,11 +1738,8 @@ Values and rules this file chose, for reviewers:
 42. UI scale toast id `ui-scale`, no toast at the limits, first visible row kept (UI-SHL-130).
 43. FPS overlay placement, text and 2 Hz refresh (UI-SHL-140).
 
-## 17. Open items (with the recommended answer)
+## 17. Open items
 
-1. **Status bar form.** APP-029 says a 22 px bar on gpui-kit `StatusBar`; the TaskSlinger reference draws a floating chip and nothing on Performance and Information. Recommended: the chip (UI-SHL-050). If the owner prefers the bar, use `StatusBar` 22 high with the same segments, left and health right.
-2. **Status text size.** Settled with the foundation author: `t_sm` (measured 12 px); foundation.md now lists the status chip under `t_sm`. No action left.
-3. **Shift held at launch on Wayland.** A Wayland client gets no modifier state before focus. Recommended: the 500 ms first-focus rule in UI-SHL-110 step 6; verify in the P3 bead on KWin, and if KWin does not send modifiers on first focus, drop the Shift path on Wayland and keep `privilege.unlock_at_launch`.
-4. **Kit `TitleBar` controls.** Whether gpui-kit 0.7.0's `TitleBar` can hide its own caption buttons is not checked. Recommended: use own drag code (UI-SHL-003) unless the P1 bead finds a switch.
-5. **Kit `Input` and global shortcuts.** Recommended assumption: the kit input does not bind Ctrl+N, Ctrl+Q, Ctrl+W; the P1 keymap test (`keymap_matches_table_b`) must also run with the filter focused.
-6. **Toolbar and chrome Tab stops.** Foundation makes every `TlButton` a Tab stop; the shell opts its chrome out. Recommended: keep the shell rule (TaskSlinger has no keyboard path into its chrome, and every chrome command has a key or menu path).
+None. Settled in `docs/RECONCILIATION.md`: status chip form (R-107); status text size `t_sm`
+(UI-FND-003); Shift held at launch on Wayland (R-124, verify U-43); kit `TitleBar` controls and
+kit `Input` global shortcuts (R-125, verify U-44 and U-45); toolbar and chrome Tab stops (R-108).

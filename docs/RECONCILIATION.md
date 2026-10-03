@@ -635,6 +635,156 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Rule: D-010 and ADR-012 for the rolling window; the others conflict with nothing.
 - Edits: merged proc PROC-008, PROC-086, PROC-088 (the "inferred" marks go).
 
+### R-104 Confirmation focus and Enter rule
+- Sources in conflict: UI-FND-021 and UI-SHL-091 said Enter runs the default (action) button with focus on Cancel for destructive confirmations; UI-PRC-014 said Enter is ignored in danger confirmations; UI-PWN-025 deferred to whichever won.
+- Resolution: one rule for every confirmation window. Focus starts on Cancel in a destructive confirmation and on the action button otherwise. Enter activates the focused button, so a stray Enter in a destructive confirmation cancels; the destructive button needs Tab then Enter, or a click. Esc always cancels. The confirmation width is 420 and an optional `t_md` 500 heading line carries the owner's title.
+- Rule: owner decision (consistency pass, 2026-10-03); UI-FND-021 is the component authority.
+- Edits: UI-FND-021; UI-SHL-091; UI-PRC-014; UI-PWN-025 (open item 6 closed); UI-SYS-047, UI-SYS-064 already matched.
+
+### R-105 Group header row band
+- Sources in conflict: D-011 says group header rows stand out by bold text, a background band and the count; UI-PRC-002 drew them on plain `list_bg` with a top divider; UI-SYS-014 reused the renderer with `t_base` text.
+- Resolution: group header rows are `row_h` tall, filled with the `header` colour across the full row width, with a 1 px `divider` line at the top edge (except the first row), label `t_md` 600 `text_primary` with the count, chevron 16. The same renderer serves the Services manager groups.
+- Rule: D-011; `header` is the band colour the table header and the Information section bands already use.
+- Edits: UI-PRC-002; UI-SYS-014.
+
+### R-106 Column picker form and title
+- Sources in conflict: PROC-024 titles the picker "Columns"; UI-SHL-034 called it a popover anchored under the header; UI-PRC-007 made it a secondary window "tasklens Columns" 420 × 560.
+- Resolution: a `TlSecondaryWindow` tool window titled "tasklens Columns" (APP-045 title pattern), `WindowKey::Columns`, one instance bound to the table that opened it, 420 × 560 default, 320 × 400 minimum, immediate apply. `OpenColumnPicker { table }` opens or focuses it from the header menu, View > Columns and the shell.
+- Rule: APP-045 (every dialog is a pinnable window) over PROC-024's bare title; the table spec owns the picker.
+- Edits: UI-SHL-034; UI-PRC-007 (open item closed).
+
+### R-107 Status text form: floating chip
+- Sources in conflict: APP-029 asks for a 22 px status bar on gpui-kit `StatusBar`; the TaskSlinger reference (`processes.png`, `performance.png`, `information.png`) draws a 26 px floating chip at the bottom-left of the table and nothing on Performance and Information; UI-PRC-018 and UI-SYS-001 drew a bar.
+- Resolution: the chip of UI-SHL-050: floating bottom-left, 26 high, `tab_bg`, text `t_sm` `text_primary`, segments separated by " | " (PROC-051), "[PAUSED - Ctrl]" in `accent`, health items after " · ", hidden when empty. Pages provide `status_text(&self, out: &mut String)` and emit `StatusChanged`. Tables add bottom padding equal to the chip height.
+- Rule: rule 3 (the reference is the visual authority where the text spec disagrees).
+- Edits: UI-SHL-050 (open item 1 closed); UI-PRC-017, UI-PRC-018; UI-SYS-001; merged sys-app APP-029 reads "status chip (UI-SHL-050)" from now on.
+
+### R-108 Toolbar and chrome Tab stops
+- Sources in conflict: UI-FND-010 makes every `TlButton` a Tab stop; UI-SHL-010 keeps the title bar, toolbar and caption buttons out of the Tab order; UI-PRC-019 listed a focus ring and "shell toolbar tab order".
+- Resolution: the shell rule stands. Title bar, toolbar and caption buttons are not Tab stops; every chrome command has a key or menu path (table b). `TlButton` stays a Tab stop everywhere else.
+- Rule: TaskSlinger has no keyboard path into its chrome, and table (b) covers every command.
+- Edits: UI-PRC-019; UI-SHL open item 6 closed.
+
+### R-109 Toast enter animation
+- Sources in conflict: UI-FND-020 specifies a 200 ms enter; gpui-kit 0.7.0 fixes the notification enter at 400 ms and exit at 200 ms and exposes no setting.
+- Resolution: accept the kit's 400 ms enter and 200 ms exit in P1. Reduced motion and `motion.animations = false` still turn both off. Changing it later means vendoring one constant.
+- Rule: no behaviour depends on the number; a fork for 200 ms is not worth it.
+- Edits: UI-FND-020 (open item 1 closed).
+
+### R-110 Information section titles and spacing
+- Sources in conflict: UI-FND-003 listed `t_lg` 600 for Information section titles while UI-FND-025 and UI-SYS-081 use `t_md` 500; UI-FND-025 fixed the card gap at `sp6`, the label column at 180 and the sub-block indent at `sp6`, while `information.png` measures 37, 232 and 11 to 12.
+- Resolution: Information section titles are `t_md` 500 (the measured title is 14 px). `TlKeyValueGrid` takes `.label_width`, `.block_indent` and `.block_gap` as parameters (defaults 180, `sp6`, `sp4`); the card gap belongs to the page. The Information page passes 232, `sp5`, `sp5` and a card gap of `sp8` 32. `t_lg` 600 stays for the About window name, the App Properties header and the Performance page header.
+- Rule: rule 3 for the measured values; one text token per element type.
+- Edits: UI-FND-003, UI-FND-025; UI-SYS-080, UI-SYS-081 (open item O-7 closed).
+
+### R-111 Tooltip width
+- Sources in conflict: UI-FND-019 max width 360; UI-PRC-012 row tooltip max width 560 (PROC-039's command-line line needs it).
+- Resolution: `TlTooltip::text` wraps at 360; `TlTooltip::lines` (row tooltips) wraps at 560. Both keep the 12-line cut.
+- Rule: the multi-line tooltip carries paths and command lines that read badly at 360.
+- Edits: UI-FND-019; UI-PRC-012.
+
+### R-112 Menu minimum width
+- Sources in conflict: UI-FND-022 min width 180; UI-PRC-006 and UI-PRC-013 min width 240; UI-SYS-017, UI-SYS-044, UI-SYS-063 min width 220.
+- Resolution: `TlMenu` defaults to `min_w(180)` and owners may raise it with `TlMenu::min_w(px)`. Process row and header menus use 240, system table row menus 220, every other menu the default. Max width stays 360.
+- Rule: the shortcut column in the process menus needs the room; menus without hints do not.
+- Edits: UI-FND-022; UI-PRC-006, UI-PRC-013.
+
+### R-113 Toast durations, stack and position
+- Sources in conflict: UI-PRC-015 said a 16 px top margin, button toasts closed after 30 s and up to 10 live toasts; UI-FND-020 says top 72, button toasts 15 s, 4 visible plus a 16-entry wait list.
+- Resolution: UI-FND-020 wins on every number. Owners choose kinds, texts and keys only.
+- Rule: the foundation owns the toast queue.
+- Edits: UI-PRC-015.
+
+### R-114 Summary toast for 4 or more action targets
+- Sources in conflict: SYS-006 and SYS-022 say one toast per result; APP-044 shows at most 4 toasts, so a 6-service Start would hide results.
+- Resolution: 1 to 3 targets get one toast per target; 4 or more targets get one summary toast per request ("Starting 6 services...", then "6 services started" or "4 of 6 services started. 2 failed." with a "Details" button opening a `TlDialog` that lists each failed target and its error). The same pattern covers stop, restart, enable, disable, startup enable, disable and run now.
+- Rule: APP-044 stack limit; no result may be lost.
+- Edits: UI-SYS-007 (open item O-10 closed); merged sys-app SYS-006, SYS-022 gain the pointer.
+
+### R-115 "N/A" in the Log On tab
+- Sources in conflict: SYS-012 shows "N/A" for missing Log On values; R-050 sets the PERF-013 words for every Properties field.
+- Resolution: "Not reported" (R-050). "N/A" appears nowhere.
+- Rule: R-050 has precedence over a merged spec entry.
+- Edits: UI-SYS-032 (open item O-11 closed); merged sys-app SYS-012.
+
+### R-116 Namespaces dropdown placement
+- Sources in conflict: SYS-037 puts the Namespaces dropdown in the status bar; the status chip of UI-SHL-050 holds text only.
+- Resolution: the Connections page draws the control itself as a floating element at the bottom-right of the table body (`sp4` from both edges, `menu_bg` fill, 1 px `divider` border, `r_md`), a `TlButton::Ghost` sm "Namespaces: Host only | All" opening a `TlMenu`. The chip gets no control slot.
+- Rule: keeps the chip one component; P4 feature, smallest change.
+- Edits: UI-SYS-070 (open item O-6 closed); merged sys-app SYS-037.
+
+### R-117 Telling a dismissed polkit prompt from a denial
+- Sources in conflict: SYS-005 and APP-044 want "Authentication cancelled" for a dismissed prompt and "<failure>: not authorized" for a denial; for systemd D-Bus calls both are believed to come back as the same access-denied error.
+- Resolution: pkexec paths (helper, setup, Run as administrator) use the exit code: 126 dismissed, 127 not authorized. systemd D-Bus paths show "<failure text>: not authorized" for both until U-39 is verified; if phase 0 finds a distinguishing error name, the dismissed case switches to "Authentication cancelled". `InteractiveAuthorizationRequired` (no agent running) shows "<failure text>: no authentication agent is running".
+- Rule: never claim a cause the code cannot tell apart.
+- Edits: UI-SYS-007 (open item O-3 closed); U-39.
+
+### R-118 Journal stream API and the Logs tab font
+- Sources in conflict: ADR-005 had no path for a streamed journal; ADR-016 runs `journalctl` in the engine; UI-SYS-036 needs follow mode, paging and a monospace font that UI-FND-050 did not bundle.
+- Resolution: `EngineClient::journal(JournalQuery) -> JournalHandle` with `load_older` and `set_follow`, events `Batch`, `Access`, `Error`, batches at most every 100 ms, the child killed when the handle drops (ARCHITECTURE ADR-005). `NotoSansMono-Regular.ttf` (SIL OFL, static) is bundled for the Logs tab, the Strings tab and Environment values, family "Noto Sans Mono"; the font bead checks it loads (U-40).
+- Rule: the engine owns child processes (ADR-001); a log view needs fixed-width columns.
+- Edits: ARCHITECTURE ADR-005, ADR-009; UI-FND-050; UI-SYS-036 (open items O-4 and O-8 closed).
+
+### R-119 Engine additions written by the UI files
+- Sources in conflict: the UI files needed Demand fields, commands, action kinds, snapshot components and modes that ADR-003, ADR-005, ADR-006, ADR-008 and ADR-009 did not have.
+- Resolution: accepted as written in the UI files and now current-state text in ARCHITECTURE: `Demand` fields `details`, `affinity_targets`, `service_cgroup_stats`, `unit_details`, `remote_host_cookies`, `connections_all_netns`; `Command` variants `SetSysTableQuery`, `DetailRefresh`, `ComputeHashes`, `VerifyPackage`, `StringScan`, `CancelStringScan`, `HandleSearch`, `CancelHandleSearch`, `HistoryQuery`, `HistoryDelete`, `ReprobeSource`, `SetupStatus`, `RunSetup`; `ActionKind` variants `UnitReload`, `UnitResetFailed`, `UnitMask`, `UnitUnmask`, `UnitWriteRecovery`, `UnitRemoveRecovery`, `StartupRunNow`, `StartupDelete`, `SockDestroy`, `Dump`; `ActionTarget::Socket`; snapshot components `details` (bit `DETAILS`, with Properties payloads, handle search state and affinity masks), `history` (bit `HISTORY`), `SystemSnapshot.cpu_topology`, the system table rows, counts, manager health, unit details and `destroy_supported` fields; `EngineMode::LowMemory`; dump progress read by the UI from the output file size every 500 ms; `GraphPalette.chart_bg`; `UnitRemoveRecovery` for system units is `WriteServiceDropIn` with an empty key set, which deletes the tasklens drop-in (R-004's allowlist does not grow).
+- Rule: ADR text follows the spec that needs it; the additions conflict with no decision.
+- Edits: ARCHITECTURE ADR-003, ADR-004, ADR-005, ADR-006, ADR-008, ADR-009; UI-PWN open items 1 to 3, UI-SYS open items O-1, O-2, O-5 and UI-FND open item 5 closed.
+
+### R-120 Keys and contexts beyond table (b)
+- Sources in conflict: the UI files bind keys in contexts table (b) did not list (`PropsWindow`, `KvGrid`, `AffinityDialog`, `PriorityDialog`, `SignalDialog`, `HandleSearch`, `LowMemory`, `StartupTable`, `ConnectionTable`, `JournalList`, `ColumnPicker`, `History`, `Information`, `ServiceProps`).
+- Resolution: the contexts and their rows are added to table (b) below. The Keyboard Shortcuts window (APP-030) lists them under the owning window's heading.
+- Rule: table (b) is the one key list.
+- Edits: table (b); UI-SYS open item O-9 closed.
+
+### R-121 Agent-invented UI strings
+- Sources in conflict: none. The UI files wrote strings no source gives, marked "(new)" or "chosen".
+- Resolution: accepted as listed in "Accepted UI strings" below. Every later change to one of them is a RECONCILIATION edit, not a bead decision.
+- Rule: every user-visible string has one home.
+- Edits: none beyond the list.
+
+### R-122 Default Light palette
+- Sources in conflict: UI-FND-001 gives Default Light values with no TaskSlinger frame to measure.
+- Resolution: ship the UI-FND-001 values. When the APP-035 extraction runs (U-18) compare against TaskSlinger's "Default Light" export and replace values that differ, keeping the 4.5:1 contrast floor.
+- Rule: a measured source replaces a derived one when it arrives.
+- Edits: UI-FND open item 2 closed.
+
+### R-123 Kit rem scaling and the focus-ring heuristic
+- Sources in conflict: UI-FND gives target px sizes while kit sizes are rem-based (13/16 of the documented px at `font_size` 13); `TlFocusRing` relies on a "last input was keyboard" heuristic because GPUI has no focus-visible.
+- Resolution: the first component bead measures the kit `Button` small height at rem 13 and picks the kit size (`xsmall` or `small`) that gives 24 px (U-41); the gallery render tests hold every target px. `TlFocusRing` ships with the heuristic; if it misfires the fallback is the kit default of always showing the ring on focus (U-42).
+- Rule: verify, then adjust one constant; no spec text depends on the kit's internal size names.
+- Edits: UI-FND open items 3 and 4 closed.
+
+### R-124 Shift held at launch on Wayland
+- Sources in conflict: table (b) "Shift held at launch" unlocks privileged actions; a Wayland client gets no modifier state before focus.
+- Resolution: UI-SHL-110 step 6's 500 ms first-focus rule, verified on KWin in the P3 bead (U-43). If KWin sends no modifiers on first focus the Shift path is dropped on Wayland and `privilege.unlock_at_launch` remains.
+- Rule: a feature the platform cannot support is dropped there, not faked.
+- Edits: UI-SHL open item 3 closed.
+
+### R-125 Kit TitleBar controls and kit Input global shortcuts
+- Sources in conflict: UI-SHL-003 draws its own caption buttons and drag region; whether gpui-kit 0.7.0's `TitleBar` can hide its own buttons is unchecked. UI-SHL-024 assumes the kit input does not swallow Ctrl+N, Ctrl+Q and Ctrl+W.
+- Resolution: own drag code and caption buttons unless the P1 bead finds a switch (U-44). The P1 keymap test `keymap_matches_table_b` also runs with the filter focused (U-45).
+- Rule: verified by the first bead that touches it.
+- Edits: UI-SHL open items 4 and 5 closed.
+
+### R-126 Performance tab open items
+- Sources in conflict: PERF-012 wants selectable Details values but GPUI text selection on arbitrary elements is unverified; PERF-080 defines the Disk card as active time while the reference shows a rate; per-core labels at 10 Hz and `cpu_fast` with smooth graphs off were undecided; legend orientation was a one-constant choice.
+- Resolution: selectable text ships through the UI-PRF-020 fallback (click selects a value, Ctrl+C copies it, right-click "Copy value") unless the kit gains text selection before the bead runs (U-46). Disk card: graph is aggregate active time, value is the aggregate rate (UI-PRF-041). Per-core value labels update at 10 Hz; if the `perf-cpu` bead's p99 fails the budget they update at 5 Hz while the plot keeps 10 Hz (U-47). `cpu_fast` stays on with smooth graphs off. Legend: vertical under 200 px cell width, horizontal above (UI-PRF-003).
+- Rule: ship the measurable default; the alternatives are one constant each.
+- Edits: UI-PRF open items 1 to 5 closed.
+
+### R-127 Process-windows window exceptions
+- Sources in conflict: UI-FND-021 said tool windows are resizable with a 480 × 320 minimum; the Run window is fixed at 480 × 248; UI-FND-025 named 126 px as the Properties label width while UI-PWN-006 computes 96 to 150 px per column.
+- Resolution: UI-FND-021 carries the Run window as its own row (fixed 480 × 248). Properties General computes its label width per column (96..150 px) and passes it through `.label_width(..)`; 126 is the measured TaskSlinger value, not a constant.
+- Rule: the component takes parameters; the owner decides the values.
+- Edits: UI-FND-021, UI-FND-025; UI-PWN open items 4 and 5 closed.
+
+### R-128 One Action namespace
+- Sources in conflict: shell.md and processes.md put every GPUI Action in the `tasklens` namespace with bare names; performance.md used `perf::` and `minigraph::`; system-tabs.md used `services::`, `startup::`, `connections::` and `information::`.
+- Resolution: one namespace, `tasklens`. Page actions carry the page word in their name (`PerfSelectDevice`, `MinigraphCloseDetachedWindow`, `ServiceStart`, `ServicesRemoveFilters`, `StartupRunNow`, `ConnectionCloseTcp`, `CopyInformationSection`). Window-level actions keep the shell's names (`ShowMainWindow`, `ToggleMainWindow`, `ToggleMiniWindow`, `OpenAdditionalSetup`, `SetSetting`, `RunSetupStep`, `Quit`). The source module is a build detail.
+- Rule: shell.md is the authority for actions; GPUI action names must be unique per namespace.
+- Edits: performance.md, system-tabs.md (job 1 of the consistency pass).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
@@ -881,7 +1031,7 @@ User themes: `$XDG_CONFIG_HOME/tasklens/themes.json`, TaskSlinger format `{"them
 
 ### (b) Keyboard shortcuts
 
-Key contexts: Global, Table (every table), ProcessTable, ServiceTable, Performance, RunDialog, Picker. One GPUI Action per row; menu items dispatch the same Action.
+Key contexts: Global, Table (every table), ProcessTable, ServiceTable, StartupTable, ConnectionTable, History, Information, Performance, RunDialog, Picker, ColumnPicker, PropsWindow (process, app and service Properties windows; nested KvGrid and Table), ServiceProps, AffinityDialog, PriorityDialog, SignalDialog, HandleSearch (nested Table), JournalList, LowMemory. One GPUI Action per row; menu items dispatch the same Action. Secondary windows get the Global rows that make sense in them (Esc, Ctrl+W, Ctrl+F, F5, Ctrl+Plus/Minus/0); the owning UI entry says which.
 
 | Keys | Context | Action |
 |---|---|---|
@@ -923,6 +1073,28 @@ Key contexts: Global, Table (every table), ProcessTable, ServiceTable, Performan
 | Up / Down, Enter, Shift+Enter | RunDialog | History pick, Run, Run as administrator |
 | Esc | Picker | Cancel window picking |
 | Shift held at launch | Startup | Unlock privileged actions (P3) |
+| Delete | StartupTable | Delete entry… (confirmation; toast "This startup entry cannot be deleted" when not allowed) (UI-SYS-044) |
+| Ctrl+S / Ctrl+E / Ctrl+R | ServiceTable (group row) | nothing (UI-SYS-023) |
+| Enter | ServiceTable (group row) | Toggle expand (UI-SYS-023) |
+| Up / Down / PgUp / PgDn / Home / End | Information | Scroll by row, page, to top or bottom (UI-SYS-080) |
+| Ctrl+C | Information | Copy selected text, else Copy all (UI-SYS-083) |
+| 1..5 | History | Metric chip CPU, Memory, Disk, Network, GPU (UI-PRC-035) |
+| Esc | History (scrub point set) | Return to live, before the global Esc rule (UI-PRC-030) |
+| Up / Down, Space, Home / End | ColumnPicker list | Move, toggle, jump (UI-PRC-007) |
+| Alt+1..Alt+7 | PropsWindow | Select tab 1 to 7 (`PropsSelectTab(n)`) (UI-PWN-004) |
+| Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | PropsWindow, ServiceProps | Next / previous tab (UI-PWN-004, UI-SYS-030) |
+| Ctrl+1..Ctrl+5 | ServiceProps | Select tab General, Log On, Recovery, Dependencies, Logs (UI-SYS-030) |
+| Ctrl+F | PropsWindow | Focus the active tab's filter (UI-PWN-003) |
+| F5 | PropsWindow | Refresh the active tab (`Command::DetailRefresh`) (UI-PWN-003) |
+| Up / Down / Left / Right / Home / End, Enter, Ctrl+C | PropsWindow > KvGrid | Move between fields, activate a link, copy the field (UI-PWN-007) |
+| Space | PropsWindow (Environment, masked row) | Reveal or hide the value (UI-PWN-016) |
+| Tab order, Left / Right / Up / Down / Home / End, Space | AffinityDialog | Move between CPU tiles and toggle (UI-PWN-021) |
+| Left / Right, PgUp / PgDn, Home / End, Up / Down, Enter | PriorityDialog | Slider steps 1 and 5, ends, stepper, Set priority (UI-PWN-022) |
+| Up / Down, Enter | SignalDialog | Step the signal number, Send signal (UI-PWN-027) |
+| Enter, Esc | HandleSearch | Start search; stop a running search, else close when idle (UI-PWN-030) |
+| Delete / Ctrl+E, Shift+Delete / Ctrl+X, Enter, Ctrl+C, Ctrl+Shift+C | HandleSearch > Table | End Task, End Process, Go to process, copy paths, copy rows as TSV (UI-PWN-031) |
+| Ctrl+A, Ctrl+C, Home / End, click, Shift+click, Ctrl+click | JournalList | Select all shown lines, copy selected lines, top / bottom (End re-sticks), select (UI-SYS-036, UI-SYS-037) |
+| Esc, Ctrl+W, printable character | LowMemory | Clear filter then close; close; start filtering (UI-PWN-032) |
 
 Removed from APP-031: Enter as toggle expand; "Force end" naming.
 
@@ -991,6 +1163,17 @@ All formatting lives in `tl-model::units`. These forms are used in every languag
 
 Numeric cells use tabular figures and are right-aligned; numeric columns have fixed minimum widths from the template strings in add PROC-101 [now PROC-023] (`"999999 +99"`, `"100.0%"`, `"xxx Mbps"` or `"xxx MiB/s"`, `"xxx GiB/s"`, `"999 MiB"`, `"999999"`, `"999:59:59"`). Text columns have a 60 px minimum.
 
+## Accepted UI strings
+
+Strings the UI files wrote that no merged spec gives (R-121). Placeholders in angle or curly brackets are filled at run time. Each file's entries mark the string "(new)", "chosen" or [C] where it is used; this list is the record of acceptance.
+
+- `docs/ui/system-tabs.md` (UI-SYS): "tasklens lists services from systemd. Neither the system manager nor the user manager answered."; "No matches"; "No services match the current filters."; "No startup entries match the filter."; "No connections match the filter."; "Clear filters"; "No startup entries"; "Nothing starts automatically when you log in."; "No connections"; "Could not load services"; "Could not load startup entries"; "Could not load connections"; "<failure text>: no authentication agent is running"; "Starting 6 services..."; "6 services started"; "4 of 6 services started. 2 failed."; "Details"; "Show all units"; "Reset to default"; "At least one unit type must stay selected"; " (reconnecting…)"; "Reloading service..."; "Service reloaded"; "Failed to reload service: <result>"; "Clearing failed state..."; "Failed state cleared"; "Failed to clear failed state: <error>"; "Could not open the unit file"; "This unit has no unit file"; "Changing startup type..."; "OpenRC services (N)"; " (not loaded)"; "Could not open the link"; "Copy value"; "Editing recovery settings comes in a later version."; "Enter unit names separated by spaces, for example failure-notify@%n.service"; "The computer will restart or power off when this happens."; "Saving recovery settings..."; "Recovery settings saved"; "Failed to save recovery settings: <error>"; "Remove tasklens settings"; "Remove tasklens recovery settings?"; "The unit goes back to the settings in its unit file."; "Remove"; "Ordering (N)"; "Filter logs"; "↓ N new lines"; "Could not open a terminal"; "Loading…"; "No older entries"; "Loading logs…"; "No log entries for this unit in the current boot."; "No log entries match the filter."; "journalctl not found"; "Reading the journal took too long."; "Could not read the journal"; "Copy command"; "Updating…"; "For this unit type only the time to start the program is measured."; "Disabled entries do not run at login."; "This entry did not start through systemd in this session."; "This entry is not used in this desktop (OnlyShowIn or NotShowIn)."; "The program for this entry is not installed (TryExec)."; "This unit is masked. Change its startup type in the Services tab."; "System entries cannot be deleted. Use Disable instead."; "This unit belongs to a package. Use Disable instead."; "3 startup entries enabled"; "2 of 3 startup entries enabled. 1 failed."; "4 startup entries launched"; "Delete startup entries"; "Permanently remove these <n> startup entries?"; "and <n> more"; "<n> entries cannot be deleted and are skipped."; "Not found"; " (removed)"; "Too many startup properties windows are already open"; "Sends reverse DNS queries for foreign addresses."; "Closing…"; "Close <n> listening sockets?"; "Too many connection properties windows are already open"; "not supported in this version"; "Namespaces: Host only"; "Namespaces: All"; "No information matches the filter."; "Information refreshed."; "Could not load system information"; "Not fetched"; "Fetching…"; "Modules: Not reported".
+- `docs/ui/processes.md` (UI-PRC): "No processes match the filter"; "Clear filter"; "Already added"; "Process exited"; "Some values for other users' processes need administrator rights."; "History - Drag scrubber below to view timeline"; "213 processes at 12:04:31"; "Live"; "Show process history"; "Show live processes"; "autogroup"; "Scheduler: bfq"; "Columns reset to default"; "At least one column must stay visible"; "Name cannot be hidden"; "always on"; "n/a on this system"; "No columns match"; "9 of 96 columns shown"; "Processes table"; "Hide <label>"; "Sorted ascending"; "Sorted descending"; "Windows (N)"; "Untitled window".
+- `docs/ui/process-windows.md` (UI-PWN): "This process has exited. Values are frozen at the last update."; "This app has no running processes. Values are frozen at the last update."; "Loading processes..."; "Loading memory maps..."; "Loading environment..."; "No processes."; "No processes match the filter."; "No memory maps."; "Anonymous, heap, stack and other mappings without a file"; "Kernel function the thread is sleeping in"; "Environment at process start"; "Choose at least one encoding"; "Sorting is available after the scan"; "Scan finished. 18 234 strings found."; "Scan cancelled. 18 234 strings found."; "Scan stopped: the process exited. 18 234 strings found."; "Enter a file name or path pattern, then press Search."; "Case-insensitive. * and ? work as wildcards."; "Found 1 match"; "Search stopped. Found 12 matches"; "CPU is offline"; "Not allowed by the process's cpuset"; " - reading current affinity…"; "Child processes start at normal priority."; "Set priority"; "Thread priority updated"; "Thread affinity updated"; "Send signal to N processes?"; "Send SIG{NAME} to N selected processes?"; "Send signal"; "Sent SIGHUP to 4 processes"; "Needs the KDE window bridge."; "Opening file location"; "Could not open the browser."; "Copied to clipboard"; "Writing core…"; "Waiting for authentication…"; "Ran as administrator"; "tasklens Set Affinity"; "tasklens Set Priority"; "tasklens Send Signal"; "Grant access…"; "Risky capability".
+- `docs/ui/performance.md` (UI-PRF): "Add graph >"; " · Graph Summary"; "No battery found"; "Power draw is not available. Showing Temperature."; "Turned off by the system reduce-motion setting"; "At least one performance page must stay visible"; "No space for more minigraphs"; "Minigraph layout reset"; "GPU monitor restarting"; "GPU probe not installed"; "Own processes only"; "Applies to all network values"; "Not reported"; "Done. No restart needed."; "Setup failed"; "Install lm_sensors to detect fan sensors"; "Readable through /etc/udev/rules.d/99-powercap.rules. tasklens leaves that file alone."; "/usr/lib/tasklens/tl-helper was not found"; "Needs setup"; "Enable CPU power draw?"; "Lets every local user read CPU energy counters. This can leak information about other programs. Continue?"; "3 partitions - GPT"; "No partitions"; "Additional mount points: /a, /b"; "Not supported by this desktop"; "tasklens Graph <n>"; "Fan name".
+- `docs/ui/shell.md` (UI-SHL): "More tabs"; "+N more"; "This tab has no table"; "History recording off"; "History shows a flat list"; "Show live processes"; "All columns enabled"; "Copy all"; "Could not open the documentation"; "Detecting adapters…"; "Process <pid> not found"; "Reduced motion is on in your system settings"; "Your system's reduced motion setting turns all of these off."; "Numbers and dates keep the same format in every language."; "Theme saved"; "Theme sync turned off"; "Copy this code and send it to someone who uses tasklens."; "tasklens Collector Health"; "Not installed"; "Last used"; "idle"; "Waiting for authentication…"; "If tasklens crashed without a report, run coredumpctl info tasklens in a terminal."; "144 fps · frame p50 0.62 ms · p99 1.40 ms · stalls 0"; "Skip prompts"; "Reset all settings to their defaults? Themes and history are kept."; "Delete this custom theme?".
+- `docs/ui/foundation.md` (UI-FND): "Collecting first sample"; "Last updated {age} ago"; "Not available on this device"; "Could not read: {last_error}"; "No items"; "Always on top"; "Always on top (on)"; "Not supported by this desktop"; "Could not open properties."; "Outcome unknown"; "Copied to clipboard (×5)"; "Clear filter"; "No properties match the current filter."; "Copy section"; "Copy row"; "Copy value"; "Could not start the privileged helper"; "Authentication cancelled"; "UI scale changed to N%"; "(custom)"; "(editing)"; "Finish or cancel the theme editor first"; "<name> copy N".
+
 ## Unverified assumptions
 
 Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead that touches it must confirm or change it.
@@ -1035,4 +1218,16 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-36 | CSD checklist passes on KWin (drag, double-click maximize, restore, resize edges, window menu, tiling); fallback to server decorations if not | ADR-010, D-006 |
 | U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 [now PERF-106] |
 | U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 [now PROC-037] |
+| U-39 | A dismissed polkit prompt and a denial come back as the same access-denied error on systemd D-Bus calls (`manage-units`); phase 0 records both error names | R-117, UI-SYS-007 |
+| U-40 | The static `NotoSansMono-Regular.ttf` loads under cosmic-text (zed#61660: faces without `m` are dropped) and has `tnum` | R-118, UI-FND-050, UI-SYS-036 |
+| U-41 | gpui-kit 0.7.0 `Button` at rem 13 reaches 24 px with `xsmall` or `small`; the first component bead measures and picks | R-123, UI-FND-010 |
+| U-42 | The `TlFocusRing` "last input was keyboard" heuristic does not show the ring after a mouse click; fallback is the kit's always-on ring | R-123, UI-FND-003 |
+| U-43 | KWin on Wayland delivers the Shift modifier state within 500 ms of first focus, so "Shift held at launch" works; else the path is dropped on Wayland | R-124, UI-SHL-110 |
+| U-44 | gpui-kit 0.7.0 `TitleBar` cannot hide its own caption buttons (so the shell draws its own); checked in the P1 title-bar bead | R-125, UI-SHL-003 |
+| U-45 | The kit `Input` does not bind Ctrl+N, Ctrl+Q or Ctrl+W; `keymap_matches_table_b` runs with the filter focused | R-125, UI-SHL-024 |
+| U-46 | gpui-pre 0.3.7 and gpui-kit 0.7.0 give no text selection on arbitrary elements; if `Label` gains it before the bead, the UI-PRF-020 fallback goes | R-126, UI-PRF-020, UI-FND-025 |
+| U-47 | Re-shaping 32 per-core value labels at 10 Hz fits the ADR-014 `perf-cpu` budget (p99); else labels go to 5 Hz | R-126, UI-PRF-025 |
+| U-48 | The kit `Skeleton` stops requesting frames once removed from the tree (first-load skeletons, UI-SYS-004, UI-FND-024) | UI-SYS-004 |
+| U-49 | `journalctl -f --after-cursor` resumes without gaps or duplicates after a stop and restart of the child | R-118, UI-SYS-037 |
+| U-50 | `/proc/<pid>/stat` field 22 plus boot ID is stable across the low-memory engine's stripped sweep, so `ProcessKey` revalidation works in `EngineMode::LowMemory` | R-119, UI-PWN-032 |
 

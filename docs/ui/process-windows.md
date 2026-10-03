@@ -39,7 +39,7 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 | Low memory | UI-PWN-032 | Tool, no parent | `tasklens - Low memory` | 420 × 560 | 360 × 400 | yes |
 
   - "Confirmation-style modal" means `WindowKind::Dialog`, modal to the window that opened it, with the `TlDialog` footer, but with form content instead of a message.
-  - The Run window is fixed-size, which overrides UI-FND-021's tool-window minimum of 480 × 320 and "resizable: yes" [chosen: its content has a fixed height]. Listed in "Open items" so the foundation table can carry the exception.
+  - The Run window is fixed-size, which overrides UI-FND-021's tool-window minimum of 480 × 320 and "resizable: yes" [chosen: its content has a fixed height]. UI-FND-021 carries the exception as its own row (R-127).
   - The App Properties minimum follows the foundation's Properties kind (640 × 400), not a smaller one.
 - **States:** as UI-FND-021. The low-memory window starts pinned (UI-PWN-032).
 - **Interaction:**
@@ -57,7 +57,7 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 ### UI-PWN-002 Properties data path
 
 - **Implements:** PROC-077 ("the window registers demand for its ProcessKey and the active tab's data"), PROC-078 to PROC-085 data parts, R-097, R-098.
-- **Anatomy:** no visible part. This entry fixes how Properties windows get data, because ADR-005 and ADR-008 do not define it yet. It is an architecture addition and is listed in "Open items" for an ADR edit.
+- **Anatomy:** no visible part. This entry fixes how Properties windows get data, as ARCHITECTURE ADR-003, ADR-005 and ADR-008 now define it (R-119).
 - **Data binding:**
   - `Demand` gains `pub details: Arc<[DetailDemand]>`, max 16 entries (8 process windows plus 8 app windows):
 
@@ -207,7 +207,7 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 
   - Three column panels of equal width when the body is at least 840 px wide; below 840 px the three panels stack in one column in the order 1, 2, 3 [chosen]. At the default 900 px window the body is 876 px, so three columns show.
   - Column panel: background `list_bg` [measured `rgb(27,31,33)`], radius `r_sm`, padding `sp4` (8) horizontal and `sp3` (6) vertical. Gap between panels `sp4` (8) [measured about 16 including padding].
-  - Each column is a `TlKeyValueGrid` in the inline layout (UI-FND-025), with two Properties overrides passed by the owner: row height 26 [measured 25.8 in the TaskSlinger General tab], independent of `row_height_pct` but multiplied by the UI scale, and the label width rule below. The foundation's 28 px rows and 180 px label column would leave about 90 px for values in a 290 px column. These overrides need `.row_height(..)` and `.label_width(..)` on the component; listed in "Open items". Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
+  - Each column is a `TlKeyValueGrid` in the inline layout (UI-FND-025), with two Properties overrides passed by the owner: row height 26 [measured 25.8 in the TaskSlinger General tab], independent of `row_height_pct` but multiplied by the UI scale, and the label width rule below. The foundation's 28 px rows and 180 px label column would leave about 90 px for values in a 290 px column. The component takes `.row_height(..)` and `.label_width(..)` (UI-FND-025, R-127). Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
   - Label width per column: the widest shaped label in that column plus `sp5` (12), clamped to 96..150 px, computed once per UI scale and cached [chosen; TaskSlinger uses 126 px for all columns, measured, but tasklens labels are longer]. Label and value styles, validity words, truncation, tooltips and the click-copy flash are the foundation's.
   - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton Ghost sm "Copy" with Lucide `copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
 - **Fields, in order** (label text exactly as shown; value format; source). Missing values show the R-050 words.
@@ -803,7 +803,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Keyboard (context `AffinityDialog`): Tab order: All processors, CPU list, the grid (one focus stop), Cancel, OK. Inside the grid: Left and Right move between CPUs in the same tile row and across tiles; Up and Down switch between a tile's two rows and then between tile rows and groups; Home and End go to the first and last CPU; Space toggles; Shift+Space toggles the group. Enter triggers OK when enabled; Esc and Cancel close without action.
   - OK (`ApplyAffinity`): one target or all targets with the same result mask: one `ActionRequest { kind: SetAffinity(mask) }`. The dialog closes at once; results come as toasts in the parent window.
   - Toasts [spec PROC-067 and PROC-069]: one process "Affinity updated" or "Could not update selected process affinity."; several "Selected process affinity updated.", "Could not update selected process affinity." or the partial form "Affinity updated for 3 of 4 processes. 1 failed: permission denied" with "Retry as administrator" (P3); threads "Thread affinity updated" [chosen].
-- **Data binding:** CPU topology from `SystemSnapshot.cpu_topology` (L3 groups, sibling pairs, hybrid kind, online set); per-target masks and the cpuset limit from `DetailsSnapshot.affinity`, filled while the dialog registers `Demand.affinity_targets` (max 256) [chosen addition, see open items].
+- **Data binding:** CPU topology from `SystemSnapshot.cpu_topology` (L3 groups, sibling pairs, hybrid kind, online set); per-target masks and the cpuset limit from `DetailsSnapshot.affinity`, filled while the dialog registers `Demand.affinity_targets` (max 256) [ARCHITECTURE ADR-003 and ADR-008, R-119].
 - **Build:** `crates/tl-ui/src/windows/affinity.rs`, `pub struct AffinityDialog` (Entity): `targets`, `initial: Vec<CpuSet>` (one per target), `state: CpuTriState` (`[u8; 1024]` with Off, On, Mixed), `list_input: Entity<InputState>`. Mixed CPUs use TlCheckbox's indeterminate state (UI-FND-011).
 - **Performance:** at most 1,024 checkboxes; the grid is rebuilt only on state change; 32 CPUs render about 70 elements.
 - **Accessibility:** every checkbox has its label as accessible name; tiles have the tooltip `Core {k}: CPU {a} and CPU {b}`; the validation text is also the OK button tooltip while disabled.
@@ -1074,7 +1074,7 @@ Real-time signal…
   - "Search all" (`HandleSearchAll`) starts the helper (`StartHelperSession`) and searches again with `privileged = true` [spec].
   - Close or Esc when idle closes the window.
   - Opened by File > "Search File Handles..." (`OpenHandleSearch`); activates the existing window if open.
-- **Data binding:** `Command::HandleSearch { search: SearchId, pattern: Arc<str>, include_maps: bool, privileged: bool }` and `Command::CancelHandleSearch(SearchId)`; results in `DetailsSnapshot.handle_search: Option<Arc<HandleSearchState>>` (progress, phase, `chunks` of hits, `searched`, `total`, `skipped`) [chosen addition, see open items]; bit `DETAILS`.
+- **Data binding:** `Command::HandleSearch { search: SearchId, pattern: Arc<str>, include_maps: bool, privileged: bool }` and `Command::CancelHandleSearch(SearchId)`; results in `DetailsSnapshot.handle_search: Option<Arc<HandleSearchState>>` (progress, phase, `chunks` of hits, `searched`, `total`, `skipped`) [ARCHITECTURE ADR-003 and ADR-008, R-119]; bit `DETAILS`.
 - **Build:** `crates/tl-ui/src/windows/handle_search.rs`, `pub struct HandleSearchWindow` (Entity).
 - **Performance:** results are append-only chunks, never copied; status updates at most 4 Hz.
 - **Accessibility:** the pattern field has the tooltip "Case-insensitive. * and ? work as wildcards." [chosen]; progress text is the bar's text alternative.
@@ -1143,7 +1143,7 @@ Real-time signal…
   - "Open Full tasklens" (`OpenFullTasklens`): calls `org.freedesktop.Application.Activate` on the main instance, or starts `tasklens` detached when no instance owns the bus name; the rescue window stays open [chosen].
   - Esc closes the window (no filter text) or clears the filter first; Ctrl+W closes. Closing ends the `--low-memory` process.
   - Tab order: filter, list (one focus stop), Open Full tasklens, pin, close.
-- **Data binding:** the engine runs in a low-memory mode: a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, published as `Snapshot.processes` and `Snapshot.health` only [chosen naming of the mode: `EngineMode::LowMemory`].
+- **Data binding:** the engine runs in a low-memory mode: a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, published as `Snapshot.processes` and `Snapshot.health` only [`EngineMode::LowMemory`, ARCHITECTURE ADR-004, R-119].
 - **Build:** `crates/tl-ui/src/windows/low_memory.rs`, `pub struct LowMemoryWindow` (Entity); started by `tl-app` for `--low-memory` with `mlockall` already done (PROC-098).
 - **Performance:** at most 30 rows; one re-render per 2 s sweep; no animation; the window opens in under 200 ms (ADR-014 first-frame gate applies).
 - **Accessibility:** End Task buttons carry the row name in their accessible name ("End Task: Firefox").
@@ -1344,11 +1344,11 @@ Values chosen in this file, for reviewers to check. Each entry also lists its ow
 27. Dump: UI picks the output path and polls its size every 500 ms; "~" shortening; failure text (UI-PWN-034, UI-PWN-035).
 28. VirusTotal browser failure text (UI-PWN-036).
 
-## Open items (recommended answers given; nothing is left to the implementer)
+## Open items
 
-1. **ADR-005 and ADR-008 additions.** The Properties data path (UI-PWN-002), `Demand.affinity_targets` (UI-PWN-021), the handle search commands and state (UI-PWN-030) and `EngineMode::LowMemory` (UI-PWN-032) are not in the ADRs yet. Recommendation: add them to ADR-005 (commands, snapshot component, mask bit `DETAILS`) and ADR-008 (demand fields and cadence) as written here.
-2. **`SystemSnapshot.cpu_topology`.** Set Affinity needs L3 groups, SMT siblings, hybrid kind and the online set. If the CPU page spec does not already put them in `SystemSnapshot`, recommendation: add `cpu_topology: Arc<CpuTopology>` there, read once at start and on CPU hotplug.
-3. **Dump progress.** ADR-005 action events carry no progress. Recommendation as written (UI stats the output file every 500 ms); the alternative, an `ActionState::Progress { bytes }`, is not needed.
-4. **Foundation requests:** resolved. `TlKeyValueGrid` has `.row_height(..)` and `.label_width(..)`, the Run window has its own fixed-size row in UI-FND-021, and `WindowRegistry` lists the new keys (foundation commit 472bf6b). UI-FND-025 names 126 px as the Properties label width; this file computes it per column (96..150 px, 126 measured in TaskSlinger) and passes the result through `.label_width(..)`.
-5. **processes.md overlap:** resolved. UI-PRC-021 and the real-time signal item of UI-PRC-020 now point to UI-PWN-021, UI-PWN-022, UI-PWN-023 and UI-PWN-027; confirmation texts stay in UI-PRC-014; menu items are 26 px in both files (processes commit fef00e0).
-6. **Confirmation focus rule.** UI-FND-021 says Enter triggers the default button and destructive confirmations focus Cancel; UI-PRC-014 says Enter is ignored on danger confirmations. This file follows whatever UI-PRC-014 settles, because it reuses that helper. Recommendation: the foundation and processes files agree on one rule (focus Cancel, Enter activates the focused button).
+None. Settled in `docs/RECONCILIATION.md`: the Properties data path, `Demand.affinity_targets`,
+the handle search commands and state, `EngineMode::LowMemory`, `SystemSnapshot.cpu_topology` and
+dump progress by output file size are current-state text in ARCHITECTURE ADR-003, ADR-004,
+ADR-005 and ADR-008 (R-119); the foundation parameters and the Run window row (R-127); the
+processes.md overlap (R-127); the confirmation focus rule: focus starts on Cancel and Enter
+activates the focused button (R-104).

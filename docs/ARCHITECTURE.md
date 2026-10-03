@@ -562,6 +562,8 @@ pub struct Snapshot {
     pub devices: Arc<DeviceCatalog>,
     pub health: Arc<HealthSnapshot>,
     pub windows: Arc<WindowsSnapshot>, // P2: KWin window list keyed by pid (ADR-004, KWin worker)
+    pub details: Arc<DetailsSnapshot>, // P2: Properties payloads, handle search state, affinity masks
+    pub history: Arc<HistoryView>,     // P3: answer to the latest HistoryQuery (ADR-012)
 }
 
 pub struct SeriesSet {
@@ -576,6 +578,50 @@ pub struct ProcessSnapshot {
 }
 
 pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed by the UI
+// bits: SYSTEM, SERIES, PROCESSES, TABLE, CONNECTIONS, SERVICES, STARTUP, INVENTORY, DEVICES,
+// HEALTH, WINDOWS, DETAILS, HISTORY
+```
+
+**Per-component fields the UI reads** (each type lives in `snapshot.rs` unless named):
+
+- `SystemSnapshot` carries, besides the totals of `system.rs`, `cpu_topology: Arc<CpuTopology>`:
+  `online: CpuSet`, `cores: Arc<[CoreInfo { id, logical: SmallVec<[u16; 2]>, l3_group: u16, kind:
+  CoreKind::{Performance, Efficiency, Standard} }]>`, read once at start and again on CPU hotplug
+  (Set Affinity dialog, UI-PWN-021; per-core grid marks, PERF-031).
+- `DetailsSnapshot` (`details.rs`, bit `DETAILS`): `header`, `targets: FxHashMap<DetailTarget,
+  Arc<TargetDetail>>` where `DetailTarget::{Process(ProcessKey), App(GroupKey)}` and
+  `TargetDetail` holds one `Option<Arc<TabPayload>>` per `DetailTab` (`General`, `Threads`, `Fds`,
+  `Maps`, `Security`, `Environment`, `Strings`, `AppGeneral`, `AppProcesses`) with its own
+  `version` and `validity`; `affinity: FxHashMap<ProcessKey, AffinityInfo { mask: CpuSet, cpuset_limit:
+  CpuSet }>` for the keys in `Demand.affinity_targets`; `handle_search: Option<Arc<HandleSearchState
+  { search: SearchId, phase, progress, chunks: Arc<[HandleHit]>, searched, total, skipped }>>`.
+  Unchanged payloads reuse their `Arc`. The `ProcessDetail` worker fills it at
+  `processes.interval_ms`, except `smaps` at most once per second and Environment only on open
+  and `DetailRefresh` (UI-PWN-002).
+- `ServicesSnapshot`: `rows: Arc<[SysRow]>` with `query_generation` (the engine sorts, filters and
+  flattens, UI-SYS-002), `units` (each with `cgroup_pids: Arc<[ProcessKey]>`, `has_cgroup_procs`
+  and resource fields with `Validity`), `counts { total, running, stopped }`, `managers: [ManagerState
+  { state: Connected | Unavailable | Reconnecting }; 2]`, `details: Arc<FxHashMap<UnitRef,
+  Arc<UnitDetails>>>` for the units in `Demand.unit_details` (`UnitDetails` holds the General,
+  Log On, Recovery (`recovery: RecoverySettings`, `recovery_dropin_exists`) and Dependencies
+  (`deps: Arc<[DepEntry]>`) fields of SYS-011 to SYS-014), `backend: Systemd | OpenRc`.
+- `StartupSnapshot`: `rows`, `query_generation`, `entries` (SYS-019 fields plus `impact_detail`,
+  `can_toggle`, `can_delete`, `can_run`, `overridden_by_user`), `counts { total, enabled, disabled }`.
+- `ConnectionsSnapshot`: `rows`, `query_generation`, `records` with engine-formatted address
+  strings (`Arc<str>`, formatted once per cookie), `counts { total, tcp, udp, established,
+  listening }`, `destroy_supported: Option<bool>` (set after the first `SockDestroy` answer).
+- `HistoryView` (ADR-012): the answer to the latest `HistoryQuery`, max 1,024 points per series.
+
+```rust
+// tl-model/src/table.rs: one query type for the three system tables (UI-SYS-002)
+pub enum SysTable { Services, Startup, Connections }
+pub struct SysTableQuery { pub table: SysTable, pub generation: u64, pub sort: SortSpec,
+                           pub filter: Arc<str>, pub expanded: Arc<[SysNodeId]>,
+                           pub services: Option<ServiceFilter> }
+pub enum SysNodeId { ServiceGroup(Manager), Unit(UnitRef), UnitProcess(UnitRef, ProcessKey),
+                     Startup(StartupRef), Conn(u64) }
+pub struct SysRow { pub node: SysNodeId, pub depth: u8, pub expanded: bool,
+                    pub has_children: bool, pub record: Option<u32> }
 ```
 
 `WindowsSnapshot` holds the KWin window list keyed by pid. Each entry has `internal_id`, `caption`, `resource_class`, `desktop_file_name`, `minimized`, `maximized`, `keep_above`, `frame_geometry` and `window_type`. Without the KWin bridge it is empty with validity `Unsupported`.
@@ -696,6 +742,12 @@ pub struct WorkerIo {
 
 Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `Ref` across any other channel call; use `borrow_and_clone()` (bead `c11v6v`).
 
+**Engine modes.** `EngineMode::{Full, LowMemory}` is fixed at start. `LowMemory` is used by the
+`tasklens --low-memory` rescue process (PROC-098, UI-PWN-032): only the `Processes` worker runs, with
+a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, and the
+engine publishes `Snapshot.processes` and `Snapshot.health` only. Actions still go through the
+ADR-006 pipeline with identity revalidation.
+
 **Worker list** (each is one `ManagedSupervisor`; `SourceId` is the enum in `tl-model::health`):
 
 | SourceId | Module | Phase | Work |
@@ -720,6 +772,7 @@ Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `
 | `UPower` | `workers/dbus_upower.rs` | P2 | batteries |
 | `NetworkManager` | `workers/dbus_nm.rs` | P2 | interface kind, addresses, Wi-Fi |
 | `HistoryRecorder` | `workers/history.rs` | P3 | ADR-012 store and rolling window |
+| `Journal` | `workers/journal.rs` | P2 | one `journalctl` child per open `JournalHandle` (ADR-005, UI-SYS-036) |
 
 **KWin bridge worker.** `workers/dbus_kwin.rs` runs on the engine's session-bus connection. Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus. Otherwise the window features are hidden and the UI shows the toast "Window features need KDE Plasma". The worker:
 - writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js` and loads it as KWin script plugin `tasklens-bridge`;
@@ -842,9 +895,27 @@ pub trait EngineClient: Send + Sync + 'static {
     fn set_settings(&self, settings: EngineSettings);
     /// Queue a command. Never blocks. Err(Busy) when the queue is full.
     fn send(&self, cmd: Command) -> Result<(), CommandError>;
+    /// Open a journal stream for one unit (Service Properties Logs tab, UI-SYS-036). The engine
+    /// runs `journalctl` (ADR-016) and batches entries at most every 100 ms. Dropping the handle
+    /// kills the child.
+    fn journal(&self, query: JournalQuery) -> JournalHandle;
 }
 
 pub enum CommandError { Busy, EngineStopped }
+
+pub struct JournalQuery { pub unit: UnitRef, pub follow: bool }           // last 200 entries of this boot first
+pub struct JournalHandle { /* async_channel receiver plus a control sender */ }
+impl JournalHandle {
+    pub fn events(&self) -> async_channel::Receiver<JournalEvent>;
+    pub fn load_older(&self);          // 200 entries before the oldest loaded one
+    pub fn set_follow(&self, on: bool); // off kills the `-f` child; on resumes with `--after-cursor`
+}
+pub enum JournalEvent { Batch { entries: Arc<[JournalEntry]>, older: bool, exhausted: bool },
+                        Access(JournalAccess), Error(JournalError) }
+pub struct JournalEntry { pub realtime_us: u64, pub priority: u8, pub pid: Option<u32>,
+                          pub message: Arc<str>, pub cursor: Arc<str> }
+pub enum JournalAccess { All, OwnOnly }
+pub enum JournalError { NotFound, Timeout, Exit { code: i32, stderr_first_line: Arc<str> } }
 ```
 
 `tl-engine::EngineHandle` implements it. `tl-ui` tests use `tl-ui/src/testing/fake_engine.rs`.
@@ -893,10 +964,27 @@ The UI sends demand at most every 100 ms and only when it differs from the last 
 ```rust
 pub enum Command {
     SetTableQuery(TableQuery),
+    SetSysTableQuery(SysTableQuery),   // P2: Services, Startup Apps, Connections (UI-SYS-002)
     Action(ActionRequest),
     RefreshNow(SourceId),         // user pressed refresh, or a page opened
     ResetBaselines,               // debugging aid, also used after resume
+    ReprobeSource(SourceId),      // P3: after a setup step succeeded (UI-PRF-053)
     KWin(KWinCommand),            // P2: activate, close, keep above, pick (ADR-004 KWin worker)
+    // P2: Properties windows (UI-PWN-002)
+    DetailRefresh { target: DetailTarget, tab: DetailTab },
+    ComputeHashes(ProcessKey),    // once per window open; result in the General payload
+    VerifyPackage(ProcessKey),
+    StringScan { scan: ScanId, key: ProcessKey, opts: StringScanOpts },
+    CancelStringScan(ScanId),
+    // P2: Search File Handles (UI-PWN-030)
+    HandleSearch { search: SearchId, pattern: Arc<str>, include_maps: bool, privileged: bool },
+    CancelHandleSearch(SearchId),
+    // P3: history (ADR-012, UI-PRC-030)
+    HistoryQuery { id: u64, range: HistoryRange, what: HistoryWhat },
+    HistoryDelete { keys: Arc<[ProcessKey]> },
+    // P3: Additional Setup window (UI-PRF-053)
+    SetupStatus,                  // engine answers with a SetupStatus event (journal group, lm_sensors)
+    RunSetup { step: SetupStep }, // runs tasklens-setup through pkexec, streams SetupEvent lines
 }
 ```
 
@@ -921,6 +1009,7 @@ pub enum ActionTarget {
     Cgroup(CgroupRef),                         // app cgroups under app.slice
     Unit(UnitRef),                             // services; freeze, thaw and kill of units outside app.slice
     Startup(StartupRef),
+    Socket { cookie: u64, family: Family, proto: Proto, four_tuple: FourTuple }, // P3: SockDestroy
 }
 
 pub enum ActionKind {
@@ -933,9 +1022,14 @@ pub enum ActionKind {
     SetAffinity(CpuSet),
     SetIoPriority(IoPriority),
     FreezeGroup, ThawGroup, KillGroup,
+    Dump { mode: DumpMode, path: Arc<str> },   // P2: Create dump file; the UI picks the path (R-119)
     // services and startup
-    UnitStart, UnitStop, UnitRestart, UnitEnable, UnitDisable,
-    StartupEnable, StartupDisable,
+    UnitStart, UnitStop, UnitRestart, UnitReload, UnitResetFailed,
+    UnitEnable, UnitDisable, UnitMask, UnitUnmask,
+    UnitWriteRecovery(RecoveryEdit),           // P3: drop-in with only the changed keys (SYS-013)
+    UnitRemoveRecovery,                        // P3: deletes the tasklens drop-in
+    StartupEnable, StartupDisable, StartupRunNow, StartupDelete,
+    SockDestroy,                               // P3: target ActionTarget::Socket (SYS-031)
 }
 
 pub enum Signal { Term, Kill, Hup, Int, Quit, Stop, Cont, Usr1, Usr2, Other(u8) }  // Other: any other number, incl. SIGRTMIN..=SIGRTMAX
@@ -961,6 +1055,8 @@ pub struct ActionEvent {
 ```
 
 Event order per request: `Started` (or a single `Rejected`), then one final state per target, then one final state with `target: None` summarizing (Succeeded only if every target succeeded; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected).
+
+Action events carry no progress. A dump's progress is the size of its output file, which the UI reads with `std::fs::metadata` every 500 ms on the background executor while the action is in flight (UI-PWN-034). Service jobs have no client-side timeout (SYS-005); every other action keeps the ADR-006 deadlines.
 
 **UI handling.** `ActionTracker` (entity in `tl-ui/src/actions.rs`) keeps `FxHashMap<ActionId, PendingAction>` and shows toasts with `Notification::...id1::<ActionToast>(id.0)` so updates replace the same toast. Pending entries older than the action's deadline plus 5 s become "Outcome unknown". Destructive actions are never retried automatically.
 
@@ -1098,7 +1194,7 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
   - `Dump { key, mode, out_fd }`, which runs `/usr/bin/gcore` by fixed path and writes to the passed fd;
   - `ResolveSocketInodes { inodes }`;
   - `SockDestroy { family, proto, four_tuple, cookie }`;
-  - `WriteServiceDropIn { manager: System, unit, keys }` with keys limited to `Restart*`, `StartLimit*`, `FailureAction` and `OnFailure`, written to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`;
+  - `WriteServiceDropIn { manager: System, unit, keys }` with keys limited to `Restart*`, `StartLimit*`, `FailureAction` and `OnFailure`, written to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`; an empty key set deletes that file (`ActionKind::UnitRemoveRecovery`);
   - `NetnsSockDiagDump { netns_ino }`.
 - No path, command or free-form file argument. The helper re-runs `open_verified` itself on every process target; it never trusts the engine's check.
 - The helper exits after 300 s idle or when stdin reaches EOF. It sets `PR_SET_PDEATHSIG = SIGKILL`.
@@ -1263,9 +1359,17 @@ pub struct Demand {
     pub detail_keys: Arc<[ProcessKey]>, // visible rows plus one viewport of overscan, max 512
     pub gpu_process: bool,
     pub connections: bool, pub services: bool, pub startup: bool, pub inventory: bool,
+    pub details: Arc<[DetailDemand]>,       // P2: open Properties windows, max 16 (UI-PWN-002)
+    pub affinity_targets: Arc<[ProcessKey]>,// P2: open Set Affinity dialog, max 256 (UI-PWN-021)
+    pub service_cgroup_stats: bool,         // P2: a unit resource column is shown (UI-SYS-013)
+    pub unit_details: Arc<[UnitRef]>,       // P2: open Service Properties windows, max 10 (UI-SYS-030)
+    pub remote_host_cookies: Arc<[u64]>,    // P4: visible rows of the Remote host column (UI-SYS-069)
+    pub connections_all_netns: bool,        // P4: Namespaces "All" (UI-SYS-070)
     pub tray: TrayDemand,           // P3
     pub recording: bool,            // history recording enabled (P3)
 }
+
+pub struct DetailDemand { pub target: DetailTarget, pub tab: DetailTab }
 ```
 
 **Schedule.** "Visible" means some visible surface (window page, sidebar mini graph, detached graph, tray icon) displays it.
@@ -1285,6 +1389,11 @@ pub struct Demand {
 | systemd units | event-driven; full resync on connect and every 60 s while the page is visible | events only, no resync | same |
 | Startup entries | on page open and on `RefreshNow`; while the Startup Apps tab is visible, inotify on the autostart directories and the two Plasma script directories plus the user manager's `UnitFilesChanged` signal trigger a rescan | off | off |
 | Inventory | on page open and on `RefreshNow` | off | off |
+| Properties payloads (`details`) | `processes.interval_ms` for the demanded tab; `smaps` at most 1 Hz; Environment on open and `DetailRefresh` only | off | off |
+| Affinity masks (`affinity_targets`) | 1 Hz while the dialog is open | off | off |
+| Unit cgroup stats (`service_cgroup_stats`) | 1 Hz while a resource column is shown | off | off |
+| Unit details (`unit_details`) | `GetAll` once, then `PropertiesChanged` | off | off |
+| Reverse DNS (`remote_host_cookies`) | on demand, at most 4 lookups at once | off | off |
 | Logind sleep signal | event-driven, always on | always on | always on |
 | Device enumeration (disks, nets, hwmon) | every 5 s while any of those is demanded | off | every 5 s |
 
@@ -1484,9 +1593,11 @@ pub struct TlTheme {
     // not slots in TaskSlinger; part of each theme definition
     pub accent: Hsla,
     pub graph: GraphPalette,   // cpu_fill, cpu_line, kernel_line, mem_fill, mem_line, gpu_fill, gpu_line,
-                               // disk_fill, disk_line, net_fill, net_line, grid
+                               // disk_fill, disk_line, net_fill, net_line, grid, chart_bg (13 fields)
 }
 ```
+
+`chart_bg` is the plot background of every chart and mini graph (measured `#1D2223` in Default Dark, UI-FND-001); the values of every field are in `docs/ui/foundation.md` UI-FND-001.
 
 - Built-in themes ship as `assets/themes/builtin.json` in TaskSlinger's format `{"themes":[{"name":..,"SLOT":"#RRGGBB"}]}` plus `accent` and `graph.*` keys. P1 ships "Default Dark" (PLAN.md section 9 palette) and "Default Light", because the `theme.light` default needs it; the other 10 named themes arrive in P2. User themes load from `$XDG_CONFIG_HOME/tasklens/themes.json` in the same format.
 - Custom tasklens views (tree-table, charts, sidebar, tab strip, title bar content) read `TlTheme` directly (a GPUI `Global`).
@@ -1495,7 +1606,7 @@ pub struct TlTheme {
 
 **Metrics and scale.** Settings `appearance.ui_scale_pct` (75..=200, step 5, default 100) and `appearance.row_height_pct` (80..=150, step 5, default 100). With `ui_scale = ui_scale_pct / 100`: `UiMetrics { ui_scale, row_height: 28 × row_height_pct/100 × ui_scale, base_text: 13 × ui_scale, radius_small: 4 × ui_scale, radius_card: 6 × ui_scale }`. `radius_small` is for rows, menus and other small elements; `radius_card` is for cards. `appearance.rounded_corners = false` sets both to 0. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. Ctrl+Plus, Ctrl+Minus and Ctrl+0 step the scale by 5 or reset it to 100, with the toast "UI scale changed to N%". A change in `window.scale_factor()`, `ui_scale_pct` or `row_height_pct` bumps `style_version` and clears `CellTextCache`.
 
-**Fonts.** Bundle in `assets/fonts/` (SIL OFL): `NotoSans-Regular.ttf`, `NotoSans-Medium.ttf`, `NotoSans-SemiBold.ttf` (static weights, not the variable font, because of zed#64783). Load with `cx.text_system().add_fonts(..)` before the first window. Family name `"Noto Sans"`. Numeric cells and chart labels use `FontFeatures(Arc::new(vec![("tnum".into(), 1)]))`. Fallback for non-Latin process names comes from fontconfig system fonts (cosmic-text). The bead must verify that each bundled face loads (zed#61660: faces without `m` are dropped).
+**Fonts.** Bundle in `assets/fonts/` (SIL OFL): `NotoSans-Regular.ttf`, `NotoSans-Medium.ttf`, `NotoSans-SemiBold.ttf` (static weights, not the variable font, because of zed#64783) and `NotoSansMono-Regular.ttf` (family `"Noto Sans Mono"`, used by the Service Properties Logs tab, the Strings tab and Environment values; U-40). Load with `cx.text_system().add_fonts(..)` before the first window. Family name `"Noto Sans"`. Numeric cells and chart labels use `FontFeatures(Arc::new(vec![("tnum".into(), 1)]))`. Fallback for non-Latin process names comes from fontconfig system fonts (cosmic-text). The bead must verify that each bundled face loads (zed#61660: faces without `m` are dropped).
 
 **Icons.** Lucide icons through `gpui_kit_assets::IconName`, plus app SVGs in `assets/icons/` served by an `AssetSource` that tries tasklens icons first and falls back to `gpui_kit::assets::Assets`. Process and app icons are file paths resolved by the engine (ADR-016) and drawn with `img(path)` at 16 × ui_scale px. Material Symbols is not used: it is a variable font with unknown `m`-glyph behaviour under zed#61660.
 
@@ -1507,6 +1618,7 @@ pub struct TlTheme {
 - Delete and Ctrl+E run End Task (SIGTERM); Shift+Delete and Ctrl+X run End Process (SIGKILL); both follow the confirmation rules in ADR-006.
 - Ctrl+C runs "Copy row" (processes: "Copy details"); Ctrl+Shift+C runs "Copy rows as table" (ADR-015).
 - Esc closes the topmost dialog or menu; else clears the filter and focuses the table; else closes the window if `window.close_with_esc` is on; else does nothing.
+- Key contexts beyond the main window (Properties windows, dialogs, Handle Search, the journal list, the low-memory window) are rows of table (b) too (R-120); the owning UI file names the context on each window.
 
 Motion settings: `motion.smooth_graphs` alone decides whether charts slide. `motion.animations` decides tab, theme and toast motion. The system reduce-motion setting (`App::reduce_motion()`) turns all of them off. GPUI has no screen reader support on Linux [inferred]; chart values are also shown as text next to every chart.
 

@@ -1525,9 +1525,10 @@ pub enum ThemeSlot { WindowBg, Titlebar, …, ValueHeat, Accent }  // 22 + accen
   Weights used: 400 (`regular`), 500 (`medium`), 600 (`semibold`); no bold 700 anywhere (a 700
   request would synthesize or fall back; the gallery test asserts the three weights resolve to the
   bundled faces and `FontWeight::BOLD` is not used in tl-ui: `grep` in CI).
-  Monospace: not bundled. `"Noto Sans Mono"` is requested for the Strings tab and Environment
-  values if fontconfig has it; otherwise the kit's mono fallback chain applies (UI-FND-002). No
-  layout depends on the mono font's metrics.
+  Monospace: `NotoSansMono-Regular.ttf` (static, SIL OFL) is bundled too, family
+  `"Noto Sans Mono"`, for the Service Properties Logs tab (UI-SYS-036), the Strings tab and
+  Environment values (R-118). The start-up check covers it (U-40); if it fails to load the kit's
+  mono fallback chain applies (UI-FND-002). No layout depends on the mono font's metrics.
   Fallback: non-Latin process names, window titles and command lines fall back through
   cosmic-text's fontconfig lookup to the system's Noto CJK or whatever is installed. A missing
   glyph shows as the font's `.notdef` box; tasklens does not substitute `U+FFFD` for unknown glyphs
@@ -1540,7 +1541,8 @@ pub enum ThemeSlot { WindowBg, Titlebar, …, ValueHeat, Accent }  // 22 + accen
 - **Tests**: `fonts::tests::three_weights_load` (headless `TestAppContext` with the asset source),
   `fonts::tests::no_bold_in_tl_ui` (source scan).
 - **Phase**: P1.
-- **Decided here**: no 700 weight, mono not bundled, start-up check behaviour and About note.
+- **Decided here**: no 700 weight, Noto Sans Mono bundled (R-118), start-up check behaviour and
+  About note.
 
 ### UI-FND-051 Tabular figures and numeric text
 
@@ -1826,7 +1828,8 @@ No scope item is unmapped.
 33. Preview contract: single preview, `current()` accessor, per-frame coalescing, "(editing)"
     marker, refusal toast "Finish or cancel the theme editor first", Random keeps 4.5:1, Share
     encodes the preview.
-34. Fonts: no 700 weight; mono not bundled; load failure falls back to the system font with a note
+34. Fonts: no 700 weight; Noto Sans Mono bundled (R-118); load failure falls back to the system
+    font with a note
     in About.
 35. Numbers clip rather than ellipsize; live counts are separate `tnum` runs.
 36. Truncation table per element; middle ellipsis keeps the last component (40% rule, 12-char
@@ -1836,21 +1839,8 @@ No scope item is unmapped.
 
 ## 8. Open
 
-1. Toast enter animation: the kit fixes it at 400 ms and exit at 200 ms. This file specifies 200
-   ms enter. Recommended: accept the kit's 400 ms in P1 and record it; if the owner wants 200 ms,
-   the bead vendors a one-line change or draws toasts without the kit's animation.
-2. Default Light has no TaskSlinger reference frame. Recommended: ship the UI-FND-001 values and
-   compare against TaskSlinger's "Default Light" `themes.json` export when the APP-035 extraction
-   runs (U-18); replace the values then if they differ, keeping the contrast floor.
-3. Kit rem scaling: at `font_size` 13 the kit's rem-based sizes are 13/16 of its documented px
-   values (for example a kit `h_8` is 26 px, not 32). This file gives target px for every
-   tasklens component and relies on the gallery render tests to catch mismatches. Recommended: the
-   first component bead measures the kit `Button` small height at rem 13 and adjusts the `TlButton`
-   size choice (`xsmall` vs `small`) to hit 24 px.
-4. `TlFocusRing`'s "last input was keyboard" tracking is tasklens's own heuristic because GPUI has
-   no focus-visible. Recommended: ship it; if it misfires (ring shown after a mouse click), fall
-   back to always showing the ring on focus, which is the kit default.
-5. `chart_bg` as a 13th `GraphPalette` field is an addition to ADR-009's list. Recommended: the
-   architecture file gains the field when the ADR is next edited; until then the field exists in
-   code with a comment.
-
+None. The five items this file carried are settled in `docs/RECONCILIATION.md`: toast enter
+animation stays the kit's 400 ms (R-109); Default Light values ship as given and are checked
+against the TaskSlinger export under U-18 (R-122); kit rem scaling and the `TlFocusRing`
+heuristic are verified by the first component bead (R-123, U-41, U-42); `chart_bg` is the 13th
+`GraphPalette` field in ARCHITECTURE ADR-009 (R-119).

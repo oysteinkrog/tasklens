@@ -1432,10 +1432,10 @@ Tray and setup: icon margin 1 px, 18 history columns, 2 px value bar, fill alpha
 
 Bench: bench-only layout with the overall chart above the grid, synthetic formulas and device list, latency measurement points, JSON shape.
 
-## Open items (recommended answers given; none blocks a bead)
+## Open items
 
-1. **Selectable text in the Details grid** (PERF-012 "Values are selectable text"). gpui-pre 0.3.7 has no text selection on arbitrary elements that this file could verify. Recommended: ship the UI-PRF-020 fallback (click selects a value, Ctrl+C copies it, right-click "Copy value"); if the kit's `Label` or a GPUI text element gains selection before the bead runs, use it instead and drop the fallback.
-2. **Legend orientation**. `performance.png` stacks "Total" over "Kernel" in a 160 px cell. Recommended: the UI-PRF-003 rule (vertical under 200 px, horizontal above). If Oystein wants TaskSlinger's vertical legend everywhere, change one constant.
-3. **Disk minigraph value**. PERF-080 defines the Disk card as aggregate active time; the reference frame shows a rate ("0.54 MiB/s"). Recommended: graph active time, value the aggregate rate (UI-PRF-041). Alternative: both percent.
-4. **Per-core labels at 10 Hz**. Re-shaping 32 short strings 10 times a second is inside the budget on paper; the `perf-cpu` bead measures it. If p99 fails, the fallback is to update per-core value labels at 5 Hz (every second sample) while the plot still moves at 10 Hz.
-5. **`cpu_fast` with smooth graphs off**. Chosen on, so per-core labels and the jumping chart stay at 10 Hz as the ADR-014 fixture describes. Alternative that saves CPU: 1 Hz when smooth is off. Oystein's call; the setting is one line in `DemandAggregator`.
+None. Settled in `docs/RECONCILIATION.md` R-126: selectable Details text ships through the
+UI-PRF-020 fallback unless the kit gains text selection first (verify U-46); legends are vertical
+under 200 px and horizontal above (UI-PRF-003); the Disk minigraph graphs active time and shows
+the aggregate rate (UI-PRF-041); per-core labels update at 10 Hz with a 5 Hz fallback if the
+`perf-cpu` bead's p99 fails (verify U-47); `cpu_fast` stays on with smooth graphs off.

@@ -202,8 +202,8 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   with an older generation, assert the old rows still show); `services_group_rows_not_selectable`
   (Ctrl+A selects only unit and child rows).
 - **Phase**: P2.
-- **Decided here**: `SysTableQuery`, `SysNodeId`, `Command::SetSysTableQuery`. These extend ADR-005
-  and are listed as an open item for the architecture owner.
+- **Decided here**: `SysTableQuery`, `SysNodeId`, `Command::SetSysTableQuery` (now in ARCHITECTURE
+  ADR-003 and ADR-005, R-119).
 
 ### UI-SYS-003 Status rendering in system tables
 
@@ -393,7 +393,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
     "Failed to start service: not authorized" (spec);
   - no agent running (`InteractiveAuthorizationRequired`) → "<failure text>: no authentication
     agent is running" (new, Error).
-  How the engine tells "dismissed" from "not authorized" is open item O-3.
+  How the engine tells "dismissed" from "not authorized" is R-117 (verify U-39).
 
 - **Interaction**: a toast with a result button ("View logs" on service failures, "Show" on
   not-visible jumps) lasts 15 s (UI-FND-020). Clicking the toast body does nothing.
@@ -571,7 +571,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   Services tab is active (APP-018). The column picker lists these columns without headings.
 - **Data binding**: `state.toml` `[sort.services]`, `[columns.services]` (order, visible, widths).
   Showing any of `cpu`, `memory`, `disk`, `tasks` sets `Demand.service_cgroup_stats = true`
-  (new field, open item O-1); hiding all four clears it.
+  (ADR-008, R-119); hiding all four clears it.
 - **Build**: `ServicesDelegate::columns() -> &'static [ColumnDef]` in `pages/services.rs`.
 - **Performance**: resource columns cost 1 Hz cgroup reads in the engine only while shown.
 - **Accessibility**: header cells have the label as accessible name; the sort arrow is also in the
@@ -778,7 +778,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   opens Service Properties on the Logs tab for that unit (UI-SYS-030).
 - **Data binding**: `ActionRequest { kind: UnitStart | UnitStop | UnitRestart | UnitReload |
   UnitResetFailed, targets: [Unit(UnitRef)] }`. `UnitReload` and `UnitResetFailed` are new
-  `ActionKind` variants (open item O-2).
+  `ActionKind` variants (ADR-005, R-119).
 - **Build**: handlers in `pages/services.rs` call `ActionTracker::submit(req, ToastSpec)`.
 - **Performance**: none per frame.
 - **Accessibility**: toast text states the outcome; the overlay label is text.
@@ -803,7 +803,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Interaction**: choosing the current value does nothing. Choosing another sends one request.
   Action `ServiceSetStartupType { startup: UnitStartup::{Enabled, Disabled, Masked} }`.
 - **Data binding**: `ActionKind::UnitEnable`, `UnitDisable` (ADR-005) and new `UnitMask`,
-  `UnitUnmask` (open item O-2); leaving Masked sends Unmask first, then the chosen kind, as one
+  `UnitUnmask` (ADR-005, R-119); leaving Masked sends Unmask first, then the chosen kind, as one
   request (engine sequence).
 - **Build**: submenu built in `ServicesDelegate::context_menu`.
 - **Performance**: none.
@@ -987,7 +987,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
     Ctrl+1..Ctrl+5 select a tab (chosen).
   - Toasts for actions started from this window appear in this window (its own Root).
 - **Data binding**: while open the window adds its `UnitRef` to `Demand.unit_details` (new, max
-  10; open item O-1). The engine fetches `GetAll` once and follows `PropertiesChanged`, publishing
+  10; ADR-008, R-119). The engine fetches `GetAll` once and follows `PropertiesChanged`, publishing
   `ServicesSnapshot.details: Arc<FxHashMap<UnitRef, Arc<UnitDetails>>>`. The window re-renders on
   `ComponentMask::SERVICES` only when its own `UnitDetails` Arc changed (pointer compare).
 - **Build**: `ServicePropertiesWindow` entity in
@@ -1160,7 +1160,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   recovery settings?", text "The unit goes back to the settings in its unit file.", buttons
   "Remove" (danger) and "Cancel" (all new).
 - **Data binding**: `ActionKind::UnitWriteRecovery(RecoveryEdit)` and
-  `UnitRemoveRecovery` (new; open item O-2). `UnitDetails.recovery_dropin_exists: bool` (new).
+  `UnitRemoveRecovery` (ADR-005, R-119). `UnitDetails.recovery_dropin_exists: bool` (new).
 - **Build**: `recovery.rs` (edit mode); form state in a `RecoveryForm` struct created on tab open,
   reset on Cancel.
 - **Performance**: n/a.
@@ -1259,7 +1259,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   - Open in terminal: runs `xdg-terminal-exec journalctl -u <id> -b` (or `--user-unit <id>`), else
     `konsole -e journalctl …`. Failure toast "Could not open a terminal" (new).
 - **Data binding**: `EngineClient::journal(JournalQuery { unit: UnitRef, follow: bool }) ->
-  JournalHandle` (new; open item O-4). The handle yields `JournalEvent::{Batch { entries, older,
+  JournalHandle` (ADR-005, R-118). The handle yields `JournalEvent::{Batch { entries, older,
   exhausted }, Access(JournalAccess), Error(JournalError)}`. Entries:
   `JournalEntry { realtime_us, priority: u8, pid: Option<u32>, message: Arc<str>, cursor: Arc<str> }`.
   Dropping the handle kills the journalctl child.
@@ -1520,7 +1520,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   (spec) with ": <error>" appended (chosen) / "Already running" (spec, Info). No row change.
 - **Interaction**: works whatever the Status. Multi-select launches each target (summary rule at 4
   or more: "4 startup entries launched" (new)).
-- **Data binding**: `ActionKind::StartupRunNow` (new; open item O-2).
+- **Data binding**: `ActionKind::StartupRunNow` (ADR-005, R-119).
 - **Tests**: `run_now_already_running_toast`.
 - **Phase**: P2.
 - **Decided here**: error suffix; summary string; new ActionKind.
@@ -1556,7 +1556,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   motion); the window closes on the result.
 - **Interaction**: results "Startup entry deleted." / "Failed to delete startup entry" (spec) in the
   main window.
-- **Data binding**: `ActionKind::StartupDelete` (new; open item O-2).
+- **Data binding**: `ActionKind::StartupDelete` (ADR-005, R-119).
 - **Build**: `crates/tl-ui/src/windows/confirm_startup_delete.rs` using `TlDialog`.
 - **Tests**: `delete_dialog_texts_per_type`; `delete_dialog_focus_on_cancel`;
   `delete_multi_skips_undeletable`.
@@ -1815,7 +1815,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
      connection: <errno text>" (Error) (spec). EOPNOTSUPP also sets the session flag above.
   5. The row disappears at the next refresh. Until then it shows "Closing…".
 - **Data binding**: `ActionKind::SockDestroy` with target `ActionTarget::Socket { cookie,
-  family, proto, four_tuple }` (new; open item O-2). `ConnectionsSnapshot.destroy_supported:
+  family, proto, four_tuple }` (ADR-005, R-119). `ConnectionsSnapshot.destroy_supported:
   Option<bool>` (new).
 - **Build**: handler in `pages/connections.rs`; dialog through `TlDialog`.
 - **Tests**: `close_listening_requires_confirm`; `close_eopnotsupp_disables_item`;
@@ -1930,11 +1930,10 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Implements**: SYS-037.
 - **Anatomy**: `TlButton::Ghost` sm (24 high) with a `chevron-down` `i_xs` caret, label
   "Namespaces: Host only" or "Namespaces: All" (chosen), opening a `TlMenu` with check items
-  "Host only", "All". SYS-037 puts it in the status bar. The shell's status chip (UI-SHL-050) has
-  no slot for a control, so this file asks the shell for an optional page control slot drawn
-  after the tab text inside the chip (open item O-6). Until that exists, it is drawn by the
-  Connections page as its own floating element at the bottom-right of the table body, `sp4` from
-  both edges, `menu_bg` fill, 1 px `divider` border, `r_md` (chosen fallback).
+  "Host only", "All". SYS-037 puts it in the status bar; the shell's status chip (UI-SHL-050) holds
+  text only, so the Connections page draws the control as its own floating element at the
+  bottom-right of the table body, `sp4` from both edges, `menu_bg` fill, 1 px `divider` border,
+  `r_md` (R-116).
 - **States**: without the helper, "All" is disabled with tooltip "Needs the tasklens helper". With
   "All", the `netns` column is shown and listed first after Proto (chosen); switching back hides it.
 - **Interaction**: choosing "All" with the helper locked starts a helper session (polkit). Cancel:
@@ -2607,51 +2606,10 @@ in full in the entries themselves.
 
 # Open items
 
-Each has a recommended answer. None blocks the UI work; most need a matching change in
-`ARCHITECTURE.md` or a sibling UI file.
-
-- **O-1 Demand fields.** This file needs `Demand.service_cgroup_stats: bool`,
-  `Demand.unit_details: Arc<[UnitRef]>` (max 10), `Demand.remote_host_cookies` (P4) and
-  `Demand.connections_all_netns: bool` (P4), and sets `Demand.process_table` while a service row is
-  expanded. Recommended: add them to ADR-008's `Demand` as named.
-- **O-2 ActionKind and ActionTarget additions.** ADR-005 lacks `UnitReload`, `UnitResetFailed`,
-  `UnitMask`, `UnitUnmask`, `UnitWriteRecovery(RecoveryEdit)`, `UnitRemoveRecovery`,
-  `StartupRunNow`, `StartupDelete`, `SockDestroy` and `ActionTarget::Socket { cookie, family,
-  proto, four_tuple }`. Recommended: add them. `UnitRemoveRecovery` for system units needs a
-  helper operation; recommended: `WriteServiceDropIn` with an empty key set deletes the tasklens
-  drop-in, so R-004's allowlist does not grow.
-- **O-3 Telling a dismissed polkit prompt from a denial.** For pkexec-based paths (helper, setup)
-  exit code 126 means dismissed and 127 means not authorized. For systemd D-Bus calls both are
-  believed to come back as an access-denied error. Recommended: phase 0 records the exact error
-  for "dismissed" and "denied" against `manage-units`; until then systemd calls show
-  "<failure text>: not authorized" for both, and "Authentication cancelled" only where the cause is
-  certain.
-- **O-4 Journal API.** `EngineClient::journal(JournalQuery) -> JournalHandle` with
-  `load_older` and `set_follow`, events `Batch`, `Access`, `Error`; dropping the handle kills the
-  child. Recommended: add to ADR-005 next to the action events channel; the engine owns the
-  `journalctl` child (ADR-016 "Service logs").
-- **O-5 Snapshot fields.** `SysRow` rows and `query_generation` on `ServicesSnapshot`,
-  `StartupSnapshot`, `ConnectionsSnapshot`; `counts` on all three; `ServicesSnapshot.managers`,
-  `details`, `backend`; `UnitDetails` (with `recovery`, `recovery_dropin_exists`, `deps`);
-  `cgroup_pids` per unit; `ConnectionsSnapshot.destroy_supported`. Recommended: ADR-003 adds them
-  as listed in UI-SYS-002, UI-SYS-014, UI-SYS-015, UI-SYS-016, UI-SYS-022, UI-SYS-030, UI-SYS-062,
-  UI-SYS-064.
-- **O-6 Control slot in the status chip.** SYS-037 puts the Namespaces dropdown in the status bar;
-  UI-SHL-050's chip holds text only. Recommended: shell.md adds an optional page control drawn
-  after the tab text inside the chip. Fallback until then: UI-SYS-070's floating control.
-- **O-7 Information spacing vs UI-FND-025.** Measured from `information.png`: section gap 37
-  (foundation `sp6` 16), label column 232 (foundation 180), sub-block indent 11 and gap 12
-  (foundation 16 and 8), band 25 (foundation 28, kept). Recommended: UI-FND-025 takes these as
-  parameters with its values as defaults, and the Information page passes 32, 232, 12, 12.
-  UI-FND-003's text table lists `t_lg` 600 for Information titles while UI-FND-025 says `t_md`
-  500; this file uses `t_md` 500 (closer to the measured title).
-- **O-8 Monospace font for the Logs tab.** The foundation bundles only Noto Sans. Recommended:
-  bundle the static `NotoSansMono-Regular.ttf` (SIL OFL) and check it loads (zed#61660), family
-  "Noto Sans Mono".
-- **O-9 Keys beyond table (b).** Delete in `StartupTable` (delete entry), the `StartupTable`,
-  `ConnectionTable` and `JournalList` contexts, Ctrl+Tab and Ctrl+1..5 inside Service Properties.
-  Recommended: add them to table (b) and the Keyboard Shortcuts window (APP-030).
-- **O-10 Summary toast at 4 or more targets.** SYS-006 says one toast per result; the 4-toast stack
-  (APP-044) cannot show more than 4. Recommended: keep this file's summary rule.
-- **O-11 "N/A" in the Log On tab.** SYS-012 asks for "N/A"; R-050 sets the PERF-013 words for every
-  Properties field and has precedence. This file uses "Not reported". Reviewer to confirm.
+None. Every item this file carried is settled in `docs/RECONCILIATION.md`: Demand fields,
+ActionKind and ActionTarget additions and the snapshot fields are current-state text in
+ARCHITECTURE ADR-003, ADR-005, ADR-006 and ADR-008 (R-119); dismissed versus denied polkit
+prompts (R-117, verify U-39); the journal stream API and the bundled Noto Sans Mono (R-118,
+verify U-40 and U-49); the Namespaces control drawn by the Connections page (R-116); Information
+title size and spacing (R-110); keys and contexts in table (b) (R-120); the summary toast at 4 or
+more targets (R-114); "Not reported" instead of "N/A" in the Log On tab (R-115).
