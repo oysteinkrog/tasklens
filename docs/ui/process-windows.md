@@ -153,7 +153,7 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
   2 px separators between tabs, colour `divider`
 ```
 
-  - Height 36 [measured 38, rounded to the kit `TabVariant::Tab` md height... no kit size gives 36 for this variant, so the strip is custom; see Build].
+  - Height 36 [measured 38, rounded down to 36]. The kit has no 36 px size for this variant, so the strip is custom (see Build).
   - Seven tabs of equal width [measured: TaskSlinger's six tabs are equal cells 166 logical px wide in a 994 px panel]. Separator 2 px `divider` [measured].
   - Label: `t_base` (13), regular 400, centred, `text_secondary` on inactive tabs, `text_primary` medium 500 on the active tab. Count suffix: one space then `[n]` in the same style, with `n` as a count (thin-space grouping, table d), for example `File descriptors [1 204]`.
   - Background: inactive `tab_bg`; hover `tab_hover`; active `window_bg` (the active tab joins the body) [measured].
@@ -210,3 +210,168 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
 - **Tests:** `props_filter_hides_general_fields` (filter "pid" leaves PID and PPID); `props_filter_empty_state_text`; `props_filter_masked_env_matches_name_only` (filter on part of a masked value finds nothing); `props_filter_stale_generation_ignored`.
 - **Phase:** P2.
 - **Decided here:** filter width 280; matched fields per tab; background filtering above 2,000 rows; no Ctrl-pause in secondary windows.
+
+### UI-PWN-006 General tab layout
+
+- **Implements:** PROC-078 (three key/value columns and their fields), R-050, R-096.
+- **Anatomy:**
+
+```text
+body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
++------------------------+  +------------------------+  +------------------------+
+| Process:   firefox     |  | SHA-256:   3f9a0c...   |  | Disk read bytes: 18 MiB|   rows 26 high
+| PID:       4321        |  | MD5:       a0dc71...   |  | ...                    |
+| ...                    |  | ...                    |  | ...                    |
++------------------------+  +------------------------+  +------------------------+
+ gap sp4 (8) between column panels
++------------------------------------------------------------------------------+
+| Command line                                                     [Copy]      |   full-width block
+| /usr/lib/firefox/firefox -contentproc -childID 12 -isForBrowser ... (wrapped) |
++------------------------------------------------------------------------------+
+```
+
+  - Three column panels of equal width when the body is at least 840 px wide; below 840 px the three panels stack in one column in the order 1, 2, 3 [chosen]. At the default 900 px window the body is 876 px, so three columns show.
+  - Column panel: background `list_bg` [measured `rgb(27,31,33)`], radius `r_sm`, padding `sp4` (8) horizontal and `sp3` (6) vertical. Gap between panels `sp4` (8) [measured about 16 including padding].
+  - Field row: height 26 [measured 25.8], independent of `row_height_pct` (key/value grids are not tables) but multiplied by the UI scale. Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
+  - Label width per column: the widest shaped label in that column plus `sp5` (12), clamped to 96..150 px, computed once per UI scale and cached [chosen; TaskSlinger uses 126 px for all columns, measured, but tasklens labels are longer].
+  - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton xsmall ghost "Copy" with Lucide `Copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
+- **Fields, in order** (label text exactly as shown; value format; source). Missing values show the R-050 words.
+  - **Column 1:**
+    1. `Process:` display name (PROC-007).
+    2. `PID:` count without grouping (`4321`).
+    3. `Started:` `YYYY-MM-DD HH:MM:SS` local (table d).
+    4. `PPID:` parent PID as a link (UI-PWN-007); `0` for PID 1 and kernel threads, shown as plain text "0 (none)".
+    5. `User:` `oystein (1000)`; when euid or suid differ: `oystein (1000), euid root (0), suid root (0)`.
+    6. `Priority:` `Nice 0, SCHED_OTHER, kernel prio 120`; realtime: `RT 50, SCHED_FIFO, kernel prio 49`.
+    7. `Autogroup:` `autogroup-12 nice 0`; `Not supported` when `/proc/<pid>/autogroup` is absent.
+    8. `Affinity:` `All (0-31)` or `0-7,16-23 (16 CPUs)`, plus ` (threads differ)`; a link that opens Set Affinity (UI-PWN-021).
+    9. `Hardening:` summary of the enabled items in this order, comma separated: `PIE, NX stack, Full RELRO, Shadow stack, NoNewPrivs, Seccomp`; `None` when none apply.
+    10. `PIE:` `Yes` or `No`.
+    11. `NX stack:` `Yes` or `No (executable stack)`.
+    12. `RELRO:` `Full`, `Partial` or `None`.
+    13. `Shadow stack:` `Enabled`, `Disabled` or `Not supported` (no `x86_Thread_features` line).
+    14. `ASLR:` `Full (2)`, `Partial (1)` or `Off (0)` from the system setting, plus `, disabled for this process` when the personality has `ADDR_NO_RANDOMIZE`.
+    15. `NoNewPrivs:` `Yes` or `No`.
+    16. `Seccomp:` `Disabled`, `Strict` or `Filter (3 filters)`.
+    17. `Architecture:` `x86-64`, `x86 (32-bit)`, `AArch64` or `Unknown` from ELF `e_machine` and `EI_CLASS`.
+    18. `Executable:` absolute path as a link (opens the file location, PROC-073); when the link ends " (deleted)": plain text `{path} (deleted)` in `status.warning`.
+    19. `Location:` one PROC-078 category word (`Temp directory`, `User Downloads`, `User data`, `User profile`, `System`, `Optional software`, `Flatpak`, `AppImage`, `Wine prefix`, `Deleted`), or `Other`.
+    20. `Package:` `firefox 131.0-1`; `Not packaged` when no package owns the file.
+    21. `Description:` package `%DESC%`, else the desktop file `Comment`, else `Not reported`.
+    22. `Working dir:` absolute path.
+    23. `Root:` shown only when not `/`.
+    24. `Cgroup:` the cgroup path relative to the cgroup root, starting with `/`.
+    25. `Unit:` unit name as a link to the Services tab (Go to service, PROC-071); hidden when the process belongs to no unit.
+    26. `App ID:` desktop app ID; hidden when none.
+  - **Column 2:**
+    1. `SHA-256:` and 2. `MD5:` (UI-PWN-008).
+    3. `Package status:` (UI-PWN-008), with the Verify button row.
+    4. `Packager:` `%PACKAGER%` text, hidden when not packaged.
+    5. `Threads:` count. 6. `Handles:` fd count.
+    7. `Memory:` RssAnon, size. 8. `Working set total:` VmRSS. 9. `Working set shared:` RssFile + RssShmem. 10. `PSS:` 11. `USS:` 12. `Swap:` 13. `Commit:` VmData + VmStk. 14. `Memory %:` RssAnon / MemTotal, percent (one decimal).
+    15. `CPU %:` percent of the machine (one decimal). 16. `CPU time:` `h:mm:ss`.
+    17. `I/O read bytes:` rchar. 18. `I/O write bytes:` wchar. 19. `I/O read ops:` syscr, count. 20. `I/O write ops:` syscw, count.
+  - **Column 3:**
+    1. `Disk read bytes:` 2. `Disk write bytes:` 3. `Cancelled write bytes:` sizes.
+    4. `Disk read rate:` 5. `Disk write rate:` 6. `Disk total rate:` fixed `MiB/s` one decimal (table d, table form).
+    7. `Net I/O:` `Receive 1.2 Mbps, send 0.3 Mbps` in the `units.network` unit [chosen wording].
+    8. `GPU %:` percent. 9. `VRAM:` size. 10. `GPU memory shared:` size or `Not supported`. 11. `GPU engine:` engine name (`3D`, `Compute`, `Video decode`, `Video encode`) or `None`.
+    12. Window block (UI-PWN-009).
+- **States:**
+  - Loading: before the first General payload, payload-backed fields show `Collecting…`; record-backed fields (PID, Threads, Memory and the other live numbers) show their values at once.
+  - Restricted fields (exe, cwd, root, personality, io, smaps_rollup of other UIDs): `Restricted` in `text_secondary` with the tooltip "Needs administrator access. Click the shield to grant it." (before P3: "Needs administrator access.") [spec R-050].
+  - Exited: as UI-PWN-003; all links render as plain text in `text_secondary`.
+  - Filtered: UI-PWN-005. Hidden fields leave no gap.
+- **Interaction:** UI-PWN-007 (copy, links, keyboard).
+- **Data binding:** payload `TabPayload::General(Arc<GeneralDetail>)` for static fields and hashes; `ProcessRecord` for live numbers (bit `PROCESSES`); `Snapshot.windows` (bit `WINDOWS`) for the window block. Re-renders when the General payload `Arc` changes, when this key's record changed values (compare the record's value fields with the last rendered copy), or when this pid's window entries change.
+- **Build:** `props/general.rs`, `pub struct GeneralTab` (Entity). Fields are built into `Arc<[KvField]>` per column (`KvField { id: FieldId, label: SharedString, value: SharedString, kind: KvKind, validity: Validity, full: Option<SharedString> }`, `KvKind::{Text, Link(LinkTarget), Hash, Status}`) only when a source changes; each value string is cached by `(FieldId, value bits, validity)` like `CellTextCache`. Rendered with the foundation's `TlKeyValueGrid` (one per column) inside one `v_flex().overflow_y_scroll()` (single scroll owner). The command line block is a separate cached child view `CmdLineBlock`, re-shaped only when the command line text changes.
+- **Performance:** a sweep that changes only live numbers re-formats at most 25 values, writing into reused `String` buffers (table d formatters do not allocate when the buffer is large enough). The 32 KiB command line is shaped once per change, never per frame (cached view).
+- **Accessibility:** values that are truncated show their full text in a tooltip after 500 ms. Hash and path values are selectable through Copy only (no text selection widget) [chosen].
+- **Tests:** unit tests in `props/general.rs`: `fmt_priority_other_and_fifo`, `fmt_affinity_all_and_list_threads_differ`, `fmt_user_with_euid`, `fmt_aslr_personality`, `fmt_seccomp_filters`; render tests: `general_three_columns_at_900`, `general_single_column_below_840`, `general_restricted_word_and_tooltip`, `general_cmdline_not_reshaped_on_sweep` (shape counter stays the same across 10 sweeps with an unchanged command line).
+- **Phase:** P2.
+- **Decided here:** 26 px rows not scaled by row height; label width rule; 840 px breakpoint; command line as a full-width block; Autogroup and Hardening summary as separate rows; Net I/O wording; architecture and hardening value words.
+
+### UI-PWN-007 General tab: copy on click, links and keyboard
+
+- **Implements:** PROC-078 (click copies a value; PPID link; Executable link; Affinity opens Set Affinity), PROC-071, PROC-073, APP-044.
+- **Anatomy:** a field row has a value hit area covering the value cell (from the label's right edge to the panel's right padding), 26 high.
+  - Plain value hover: background `row_hover` on the value cell, radius `r_sm`, cursor arrow.
+  - Link value: text `text_primary` with a 1 px underline in `text_secondary` [measured: TaskSlinger underlines PPID and Executable in the value colour]; hover: text and underline `accent`, cursor pointing hand.
+  - Keyboard cursor: 1 px `accent` outline around the whole field row, radius `r_sm`, inset 1 px.
+- **States:** default, hover (above), pressed (value background `row_selected` for 120 ms (`m_fast`), none with reduced motion), focused (keyboard cursor), disabled (exited: links plain text `text_secondary`, copying still works).
+- **Interaction:**
+  - Left click on a plain or hash value: copies the full value (for hashes the full hex string; for truncated values the untruncated text) with `cx.write_to_clipboard`; toast "Process property value copied." (Success, 5 s) [spec]. Clipboard failure: "Failed to copy to clipboard" (Error, 8 s).
+  - Left click on a link: PPID dispatches `GoToProcess { key: parent_key }` (the PROC-071 entry point, toast as defined there, the main window is activated); Executable dispatches `OpenFileLocation { key }` (PROC-073, toast "Opening file location"); Unit dispatches `GoToService { unit }`; Affinity dispatches `OpenSetAffinity { targets: [key] }` (UI-PWN-021).
+  - Right click on any field opens a TlMenu: "Copy value" (`CopyFieldValue`), "Copy line" (`CopyFieldLine`, copies `Label: value`), "Copy all fields" (`CopyAllFields`, every visible field of all three columns as `Label: value` lines in column order, then `Command line: …`). Toasts: "Process property value copied." for Copy value; "Copied to clipboard" for the other two.
+  - Keyboard (context `PropsWindow > KvGrid`, the grid region is one focus stop with `tab_stop(true)`): Up and Down move the cursor within a column; Left and Right move to the same row index in the neighbouring column (clamped to its last row); Home and End go to the first and last field of the column; Enter activates a link, or copies a plain value; Ctrl+C copies the value; Shift+F10 or the Menu key opens the field menu. Tab leaves the grid to the Command line Copy button, then the Verify button.
+  - Command line "Copy" button: copies the full command line; toast "Process property value copied.".
+- **Data binding:** none beyond UI-PWN-006. Copy reads the cached full strings.
+- **Build:** in `props/general.rs`: one `div().id(("kv", field_id))` per value with `.on_click`, `.on_mouse_down(MouseButton::Right, ..)` and `.cursor(CursorStyle::PointingHand)` only for links. The menu is a TlMenu (`PopupMenu`) built when it opens. Actions in `windows/actions.rs`.
+- **Performance:** no per-frame work; hover uses GPUI `.hover(..)` styles.
+- **Accessibility:** links have the tooltip naming the action: PPID "Go to parent process", Executable "Open file location", Unit "Go to service", Affinity "Set affinity…". Copying is announced by the toast text.
+- **Tests:** `general_click_copies_full_hash` (clipboard holds 64 hex characters, toast text); `general_ppid_link_dispatches_goto` (action captured with the parent key); `general_keyboard_cursor_moves_between_columns`; `general_copy_all_fields_order`.
+- **Phase:** P2.
+- **Decided here:** field menu items; keyboard model of the grid; link look; pressed flash.
+
+### UI-PWN-008 General tab: hashes and Verify against package
+
+- **Implements:** PROC-078 (SHA-256, MD5, errors, Package status, Verify against package, Packager), R-096, PROC-074 (shared hash cache).
+- **Anatomy:**
+
+```text
+| SHA-256:         3f9a0c41e2b77d09…            |
+| MD5:             a0dc71c745d97b1e…            |
+| Package status:  Not verified                 |
+|                  [Verify against package]     |   button row, 26 high
+| Packager:        Arch Linux <...>             |
+```
+
+  - Hash values: the first 16 lowercase hex digits plus "…" [chosen; TaskSlinger shows 16 uppercase digits, measured]. Tabular figures.
+  - Verify button: TlButton xsmall (20 high) default variant, label "Verify against package", aligned with the value column, in its own 26 px row.
+- **States:**
+  - Hashing (hash not yet in the payload): value `Computing…` in `text_secondary` [chosen; the PERF-013 word `Collecting…` is kept for metrics].
+  - Done: hex as above; tooltip shows the full hash.
+  - Hash error: both values show `Unavailable` and the tooltip carries the spec text: "Failed to compute one or more hashes" (read error, with the errno text on a second line) or "Executable path unavailable" (no readable exe and no readable argv path) [spec].
+  - Package status values [chosen wording]: `Not verified` (initial), `Verifying…`, `Matches package` (`status.success` text), `Does not match package` (`status.danger` text), `Not packaged` (no owner; button hidden), `No checksum in package database` (no mtree sha256 for the file; button disabled with that tooltip).
+  - Verify button: default; hover `menu_hover`; pressed; focused (ring); loading while verifying (kit `.loading(true)`, label "Verifying…", inert); disabled when exited (tooltip "The process is not running."), when not packaged (hidden), or when the database has no checksum (tooltip as above).
+- **Interaction:**
+  - Hashes start automatically when the window opens: the window sends `Command::ComputeHashes(key)` once (UI-PWN-002). The engine reuses the PROC-074 cache keyed by (dev, inode, mtime), so a VirusTotal lookup and Properties share one computation.
+  - Verify: click, Enter or Space on the focused button sends `Command::VerifyPackage(key)` (`VerifyPackage` action). The result lands in the General payload. Toast on finish: "Executable matches the package." (Success) or "Executable does not match the package." (Warning) [chosen]. Failure to read the package database: toast "Could not verify against the package." (Error) [chosen].
+  - Clicking a hash copies the full hex (UI-PWN-007).
+- **Data binding:** `GeneralDetail.hashes: HashState { Pending, Done { sha256: [u8; 32], md5: [u8; 16] }, Failed(HashError) }` and `GeneralDetail.package_check: PackageCheck`. Re-renders on General payload change.
+- **Build:** part of `GeneralTab`; the hex strings are formatted once when `HashState` changes.
+- **Performance:** hashing runs on the engine's blocking pool; the UI only formats 2 strings once.
+- **Accessibility:** button accessible name equals its label; status colours always come with words, never colour alone.
+- **Tests:** `hash_pending_then_done_text`; `hash_failed_tooltip_text`; `verify_button_hidden_when_not_packaged`; `verify_result_toasts`.
+- **Phase:** P2.
+- **Decided here:** 16 lowercase digits; `Computing…`; package status words; verify toasts.
+
+### UI-PWN-009 General tab: window block
+
+- **Implements:** PROC-078 (window block), PROC-052, PROC-053.
+- **Anatomy:** the last rows of column 3, after `GPU engine:`, separated by an 8 px gap and a 1 px `divider` line inset `sp4` on both sides.
+
+```text
+| Window title:  Mozilla Firefox — Start page  |
+| Window ID:     {4b1c...}                      |
+| Window state:  Normal                         |
+| Window class:  firefox                        |
+| Window rect:   L:0 T:32 R:1280 B:832          |
+| Window size:   1280 x 800                     |
+| And 2 more                                    |   plain text row, text_secondary, no label
+```
+
+  - Field labels and formats [spec]: `Window title:` caption; `Window ID:` KWin `internalId` as given (a braced UUID); `Window state:` `Minimized`, `Maximized` or `Normal`; `Window class:` `resourceClass`; `Window rect:` `L:%d T:%d R:%d B:%d` in logical px of the frame geometry; `Window size:` `%d x %d`.
+  - Several windows: the block shows the first window in KWin stacking order (topmost first) and then the row "And N more" [spec text], where N is the count of the others.
+- **States:**
+  - No window: a single field `Window:` `No top-level window` [spec text].
+  - Bridge missing (`Snapshot.windows` validity `Unsupported`): a single field `Window:` `Not supported`, tooltip "Needs the KDE window bridge." [chosen].
+  - Bridge starting (`WarmingUp`): `Window:` `Collecting…`.
+  - Exited: frozen as the rest.
+- **Interaction:** values copy on click (UI-PWN-007). "And N more" has the tooltip listing up to 10 more captions, one per line [chosen]. Window title is not a link; Show Window stays in the row menu (PROC-054).
+- **Data binding:** `Snapshot.windows` entries for this pid (bit `WINDOWS`), filtered by pid only (the window bridge reports pids, and the process key's pid is re-checked against the record).
+- **Build:** part of `GeneralTab` column 3 fields.
+- **Performance:** at most 7 strings re-formatted when this pid's window entries change; a lookup by pid in the windows component (sorted by pid) per WINDOWS change.
+- **Tests:** `window_block_none_text`, `window_block_and_n_more`, `window_block_unsupported_without_bridge`, `window_rect_format`.
+- **Phase:** P2 (with the bridge).
+- **Decided here:** which window is shown first; "Needs the KDE window bridge." tooltip; "And N more" tooltip.
