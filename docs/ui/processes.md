@@ -754,3 +754,270 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Phase**: P1.
 - **Decided here**: anchoring rule and its input exception; margin row; demand change detection
   by hash; no header shadow.
+
+### UI-PRC-011 New and exited row highlight
+
+- **Implements**: PROC-043; R-041; ADR-009 highlight bullet.
+- **Anatomy**: a full-row quad over the zebra colour and under heat and selection:
+  - NEW: `status.success` at 35% alpha.
+  - EXITED: `status.danger` at 35% alpha; all text in the row switches to `text_secondary`;
+    icons at 60% opacity; the chevron stays.
+  - Linger `L = clamp(2 × processes.interval_ms, 1000, 3000)` ms from the flag's first
+    appearance (engine timestamp in `ProcFlags`, not UI time). Fade: during the last 300 ms the
+    alpha goes 35% → 0 with `ease_out_cubic`; with `motion.animations` off or system reduce
+    motion on, the tint stays at 35% and switches off at `L`.
+  - Exited rows are not actionable: every menu item except Copy, Copy details, Copy all metrics
+    and Copy rows as table is disabled with the tooltip "Process exited" (PROC-057 says "except
+    Copy"; the three other copy commands only read snapshot text and are kept enabled, decided
+    and listed below). Double-click and Enter show the toast "Process exited" instead of opening
+    Properties (decided).
+- **States**: new, exited, new-and-selected (selection fill wins, tint hidden), exited-and-
+  selected (selection fill with `text_selected_secondary` text), setting off
+  (`processes.highlight_new_exited = false`: no tints; exited rows still linger and are still
+  not actionable, only the colour goes).
+- **Interaction**: none. The fade is driven by the `AnimationDriver` (ADR-009): the table requests
+  frames only while at least one visible row is inside its 300 ms fade window; otherwise the
+  tint is static and costs nothing.
+- **Data binding**: `ProcFlags::NEW | EXITED` plus `flag_since_ns` per record; setting
+  `processes.highlight_new_exited`, `motion.animations`, `App::reduce_motion()`.
+- **Build**: `table/cells.rs::paint_row_tint`; fade alpha computed from `now_boot_ns()` in
+  paint; frame requests through `anim.rs::AnimationDriver::request`.
+- **Performance**: one quad per flagged visible row; the driver is armed only during fades
+  (≤ 300 ms per row event).
+- **Accessibility**: the exited state is also carried by the `text_secondary` text and the
+  "Process exited" tooltip, not colour alone.
+- **Tests**: `highlight_alpha_timeline` (35% until L−300 ms, 0 at L, reduce-motion step),
+  `exited_rows_disable_actions_except_copy`, `driver_idle_when_no_fade_active`.
+- **Phase**: P1.
+- **Decided here**: copy commands stay enabled on exited rows; Enter on an exited row toasts;
+  icon opacity 60% on exited rows.
+
+### UI-PRC-012 Row hover tooltip
+
+- **Implements**: PROC-039; R-009; PROC-012 (pseudo-row tooltip).
+- **Anatomy**: `TlTooltip` (gpui-kit `Tooltip::element`) anchored below the pointer, max width
+  560, padding `sp4` 8, `menu_bg` fill, 1 px `divider` border, `r_sm`, `t_sm` 12 text
+  `text_primary`, monospace is not used. Lines in the PROC-039 order, each a separate `div`
+  (so wrapping stays per line), labels in `text_secondary` and values in `text_primary`:
+
+  ```text
+  /usr/lib/firefox/firefox --name firefox …        (command line, first 512 chars, wraps)
+  path: /usr/lib/firefox/firefox
+  user: oystein (uid 1000)
+  Unit: app-firefox@1234.service (Firefox)
+  cgroup: /user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@1234.service
+  Package: firefox 143.0-1                          (P2)
+  Desktop file: /usr/share/applications/firefox.desktop   (app rows)
+  Some values need administrator access.           (restricted rows, status.warning)
+  ```
+
+  Pseudo rows: one line, "CPU time spent in hardware and software interrupts" or "Memory held
+  by zram compressed swap devices". Group headers: no tooltip. Kernel threads: command line
+  line is replaced by `[comm]`.
+- **States**: shown after 600 ms of hover over the Name cell with no mouse-down; hidden on
+  mouse-down, on leaving the cell, on scroll and on any key. No grace switching between rows
+  (GPUI tooltip path, kit note).
+- **Interaction**: hover only; the command line is selectable nowhere (copy through the menu).
+- **Data binding**: `ProcessMeta` (cmdline, exe, user, unit, cgroup, package, desktop file) and
+  `RESTRICTED` flag; built lazily on show.
+- **Build**: `.id(("name", node_id)).tooltip(move |w, cx| Tooltip::element(..).build(w, cx))
+  .tooltip_show_delay(Duration::from_millis(600))` on the Name cell div.
+- **Performance**: the tooltip view is created on show only; the Name cell id is the only
+  per-row element id.
+- **Accessibility**: the same text is in "Copy all metrics".
+- **Tests**: `row_tooltip_lines_in_order_and_optional` (restricted row adds the last line, app row
+  adds Desktop file), `row_tooltip_truncates_cmdline_512`.
+- **Phase**: P1 (Package line P2).
+- **Decided here**: max width 560, label and value colours, pseudo-row sentences, kernel-thread
+  first line.
+
+### UI-PRC-013 Row context menu
+
+- **Implements**: PROC-057; PROC-012 (pseudo), PROC-043 (exited), PROC-048 (multi-select
+  labels), PROC-054, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-071, PROC-072, PROC-073,
+  PROC-074; R-033, R-034, R-091.
+- **Anatomy**: `TlMenu` (`PopupMenu`) opened at the pointer (or at the focus row for
+  Shift+F10), min width 240, max width 360, item height 28, padding `sp2` 4 vertical, text
+  `t_base` `text_primary`, disabled `text_secondary`, hover `menu_hover`, separators 1 px
+  `divider` with `sp2` margins, submenu chevron `ChevronRight` 12 px, `Kbd` hints right-aligned
+  `text_secondary`. Items, in order, with the rule for each row type. "P" = process row, "A" =
+  app row, "U" = unit row, "M" = multi-select (2+ rows, any mix), "X" = exited row, "S" = pseudo
+  row, "G" = group header. "hidden" means not built; "disabled" means built with a tooltip.
+
+  | # | Label (P) | A / U label | M label | Action | Hidden when | Disabled when (tooltip) |
+  |---|---|---|---|---|---|---|
+  | 1 | End Task | End App | End Selected Tasks | `EndTask` | S, G | X ("Process exited") |
+  | 2 | End Process | Kill App (all processes) | End Selected Processes | `EndProcess` (A/U: `KillApp`) | S, G; A/U before P2 | X |
+  | 3 | End Process Tree | (hidden) | (hidden on M) | `EndProcessTree` | A, U, M, S, G | X |
+  | | separator | | | | | |
+  | 4 | Suspend Process or Resume Process (one of them, by State T) | Freeze App or Thaw App (by Frozen) | Suspend Selected Tasks or Resume Selected Tasks (Resume when every target is stopped, else Suspend; decided) | `SuspendProcess` / `ResumeProcess` / `FreezeApp` / `ThawApp` | S, G; A/U before P2 | X |
+  | 5 | Send Signal > | same (primaries) | same | submenu UI-PRC-020 | S, G; before P2 | X |
+  | 6 | Set Priority > | same (tooltip "Applies to the app's current processes") | same | submenu UI-PRC-020 | S, G | X |
+  | 7 | Set Affinity… | same | same (P2) | `SetAffinity` opens UI-PRC-021 | S, G; M before P2 | X |
+  | 8 | Set I/O Priority > | same | same | submenu UI-PRC-020 | S, G; before P2 | X |
+  | | separator | | | | | |
+  | 9 | Show Window | same (any member window) | hidden | `ShowWindow` | S, G, M; no KWin bridge | X; no window ("No window") |
+  | 10 | Restart Plasma Shell / Restart unit "<unit>" | Restart unit "<unit>" (U only) | hidden | `RestartUnit { unit }` | unless plasmashell row or a unit's MainPID; A, S, G, M; before P2 | X |
+  | | separator | | | | | |
+  | 11 | Copy | same | same | `CopyCell { col }` | G | never |
+  | 12 | Copy details | same | same | `CopyDetails` | G | never |
+  | 13 | Copy all metrics | same | same | `CopyAllMetrics` | G | never |
+  | 14 | Copy rows as table | same | same | `CopyRowsAsTable` | G, S | never |
+  | | separator | | | | | |
+  | 15 | Add Minigraph > | same | hidden | submenu: CPU, Memory, Disk, Network, GPU, VRAM → `AddMinigraph { column }` | G, M; before P3 | X |
+  | 16 | Add Process Name Graph > | hidden | hidden | `AddNameGraph { column }` | A, U, S, G, M; before P3 | X |
+  | 17 | Add App Name Graph > | same (U: unit name) | hidden | `AddAppGraph { column }` | P without app, S, G, M; before P3 | X |
+  | 18 | Add tray icon graph > or Remove tray icon graph | same | hidden | `AddTrayGraph { column }` / `RemoveTrayGraph` | S, G, M; before P3 | X |
+  | | separator | | | | | |
+  | 19 | Properties | same (App Properties) | same (one window each, cap 8) | `OpenProperties` | S, G; before P2 | X |
+  | 20 | File properties | hidden | hidden | `FileProperties` | A, U, S, G, M; no FileManager1 service; before P2 | X; exe deleted ("Executable deleted") |
+  | 21 | Open file location | hidden | hidden | `OpenFileLocation` | A, U, S, G, M | X; exe deleted ("Executable deleted") |
+  | 22 | Open in VirusTotal | hidden | hidden | `OpenVirusTotal` | A, U, S, G, M; before P2 | X |
+  | 23 | Create dump file | hidden | hidden | `CreateDump` | A, U, S, G, M; before P3 | X; no gdb ("Install gdb to create dumps") |
+  | | separator | | | | | |
+  | 24 | Go to parent process | hidden | hidden | `GoToParent` | A, U, S, G, M; ppid 0 | X |
+  | 25 | Go to service | same (U only) | hidden | `GoToService` | unless MainPID or U; A, S, G, M; before P2 | X |
+
+  Group header rows: a two-item menu "Expand" / "Collapse" (the one that applies) →
+  `ToggleExpand`. Pseudo rows: items 11, 12, 13 and 15 only. Items whose phase has not shipped
+  are not built. Leading, trailing and doubled separators collapse (kit behaviour).
+  Items 1 to 3 on a protected target keep their label; the confirmation (UI-PRC-014) carries the
+  warning. Items 9 and 17 for app rows use the app's PID set.
+- **States**: per `TlMenu`; disabled items keep their `Kbd` hint; submenus open on hover after
+  150 ms or on Right/Enter.
+- **Interaction**: opens on right mouse-up over a row (right-click selects first, UI-PRC-008),
+  on Shift+F10 and Menu. On open the menu captures `targets: SmallVec<[NodeId; 1]>` (the
+  selection set at that moment, max 256; for item 3 also the subtree keys from the engine
+  forest) and `clicked_col`; every item action carries nothing and reads the captured targets
+  from the menu's `MenuTargets` state (PROC-001). Esc closes and returns focus to the table.
+- **Data binding**: `TableRow` kind, flags (State T, Frozen, EXITED, RESTRICTED), `ppid`,
+  `WindowsSnapshot`, `UnitRef` MainPID, FileManager1 presence (engine capability bit), gdb
+  presence, tray graph existence for the row's source.
+- **Build**: `pages/processes/menu.rs::row_menu(targets, clicked_col, caps) -> TlMenu`; kit
+  `PopupMenu` with `.menu`, `.menu_with_disabled`, `.submenu`, `.separator`; `.action_context
+  (table.focus)` so `Kbd` hints resolve against the ProcessTable context.
+- **Performance**: built on open; ≤ 30 items.
+- **Accessibility**: full keyboard operation; every disabled item explains itself in a tooltip.
+- **Tests**: `row_menu_items_per_row_kind` (one assertion per row type and multi-select,
+  labels and disabled states as in the table), `row_menu_targets_captured_on_open` (rows move
+  after open, action still hits the captured keys), `row_menu_hides_unshipped_phases`.
+- **Phase**: P1 for the menu and P1 items; other items with their entries.
+- **Decided here**: multi-select Suspend/Resume choice rule; min and max width; submenu hover
+  delay; copy items enabled on exited rows.
+
+### UI-PRC-014 Confirmation dialogs
+
+- **Implements**: PROC-059, PROC-062, PROC-064, PROC-066 (Realtime), PROC-075 (large dump),
+  PROC-074 (VirusTotal notice), PROC-055 (picker Terminate), D-009, R-036.
+- **Anatomy**: `TlDialog` (gpui-kit `AlertDialog` through `open_alert_dialog`), width 448,
+  title `t_lg` 16 semibold, description `t_base` `text_primary`, buttons right-aligned, the
+  destructive button `danger` variant, Cancel `default`. Enter triggers the confirm button
+  (decided: no, see below), Esc cancels. Window title for every confirmation is "tasklens"
+  (APP-045). Texts, exact:
+
+  | Trigger | Title | Description | Confirm | Cancel |
+  |---|---|---|---|---|
+  | signal, freeze or kill on a PROTECTED target | End <name>? | Ending <name> will end your desktop session. End it anyway? | End anyway (danger) | Cancel |
+  | End Process Tree | End process tree? | End N processes in this tree? | End tree (danger) | Cancel |
+  | Kill App | Kill <App>? | Kill all N processes of <App>? | Kill app (danger) | Cancel |
+  | End Task or End Process with 2+ targets | End N processes? | End N selected processes? (SIGTERM) / End N selected processes immediately? (SIGKILL) | End tasks / End processes (danger) | Cancel |
+  | any action on another user's process | Act on another user's process? | <Action> on <name> (PID n), owned by <user>. Continue? | <Action label> (danger for End and Kill, primary otherwise) | Cancel |
+  | Set Priority > Realtime | Set realtime priority? | Realtime priority can freeze the desktop if the process spins. Set it anyway? | Set realtime (danger) | Cancel |
+  | Create dump file, VmRSS > 2 GiB | Create a large dump? | <name> uses 3.4 GiB. The process pauses while the core is written and the file will be about that size. Continue? | Create dump (primary) | Cancel |
+  | Open in VirusTotal, first use | Open VirusTotal? | This opens virustotal.com with the file's hash. The file is not uploaded. | Open (primary) | Cancel |
+  | Window picker Ctrl+click, modifier unknown | Picked <name> (PID n) | What do you want to do with this process? | Select (primary), Terminate (danger) | Cancel |
+
+  Where two rules match (for example End Process Tree on a protected target), the protected
+  text wins and N is still shown: "Ending <name> will end your desktop session. End N
+  processes in this tree anyway?" (decided).
+- **States**: open (modal to its window, overlay 40% black, not overlay-closable, no X button);
+  while the action runs the dialog is already closed and the toast carries progress.
+- **Interaction**: Enter does not trigger the danger button; Enter is ignored and the focus
+  starts on Cancel (decided, protects against a stray Enter on a session-ending action). Tab
+  moves between the buttons. Esc cancels. The confirm button dispatches the original action
+  with `confirmed = true` so the handler proceeds without re-asking.
+- **Data binding**: target names, counts and owners from the captured targets at open time;
+  revalidation still happens after confirm (PROC-058).
+- **Build**: `pages/processes/confirm.rs::confirm(kind, targets, w, cx)` returning the
+  `AlertDialog` builder; `.confirm().ok_text(..).ok_variant(ButtonVariant::Danger)
+  .on_ok(..)`.
+- **Performance**: n/a.
+- **Accessibility**: title and description are plain text; buttons name the result; focus
+  starts on Cancel.
+- **Tests**: `confirm_text_per_trigger` (table above), `confirm_focus_starts_on_cancel_and_enter
+  _ignored`, `single_end_process_own_unprotected_has_no_dialog` (D-009),
+  `protected_wins_over_tree_text`.
+- **Phase**: P1 (dump and VirusTotal with their entries).
+- **Decided here**: button labels, titles, focus on Cancel, Enter ignored, combined protected
+  plus tree text, multi-target descriptions.
+
+### UI-PRC-015 Toasts for process actions
+
+- **Implements**: PROC-058, PROC-060 to PROC-075, PROC-093, PROC-094, PROC-015, PROC-045,
+  PROC-046, PROC-026, PROC-070, PROC-071, PROC-077 (cap toast), R-035.
+- **Anatomy**: `TlToast` at the top centre of the main window (foundation: width 382, top
+  margin 16 under the tab strip, `menu_bg`, 1 px `divider`, `r_md`, `t_base`, left icon by
+  type, optional one `TlButton` small on the right). One toast per action request, identified
+  by `id1::<ActionToast>(request_id)`, so later states replace it in place. Auto-hide 5 s
+  (kit fixed) except toasts with a button, which stay until clicked or closed (kit rule) and
+  are closed by tasklens after 30 s (decided). Types: info for "requested", success for
+  done, error for failures, warning for identity and permission problems.
+
+  | Event | Text | Type | Button |
+  |---|---|---|---|
+  | End Task sent | End task requested. | info | |
+  | process gone | Process terminated | success | |
+  | End Task failed | Could not end task. | error | |
+  | End Process sent | End process requested. | info | |
+  | End Process failed | Could not end process. | error | |
+  | End Process Tree sent | End process tree requested. | info | |
+  | tree done | Process tree terminated | success | |
+  | multi-target End sent | End task requested for selected processes. | info | |
+  | multi-target result | Ended 4 of 5 processes (1 permission denied) | warning when any failed, else success | Retry as administrator (P3, when EPERM) |
+  | Suspend / Resume | Process suspended. / Process resumed. | success | |
+  | Freeze / Thaw / Kill App | App frozen / App thawed / App killed | success | |
+  | priority | Priority updated | success | |
+  | priority, multi | Selected process priority updated. / Could not update selected process priority. / Priority updated for 3 of 4 processes. 1 failed: permission denied | success / error / warning | Retry as administrator (P3) |
+  | affinity | Affinity updated / Could not update selected process affinity. / Selected process affinity updated. | success / error / success | |
+  | I/O priority | I/O priority updated / Selected process I/O priority updated. / Could not update selected process I/O priority. | success / success / error | |
+  | signal | Sent SIGHUP to firefox (1234) | success | |
+  | identity mismatch | The selected process changed; wait for the list to update and try again. | warning | |
+  | EPERM | Permission denied | error | Retry as administrator (P3 only) |
+  | deadline passed | Outcome unknown | warning | |
+  | refused | Refusing to end tasklens itself. / PID 1 (systemd) cannot be ended. / Kernel threads cannot be signalled. | warning | |
+  | Show Window | Process window shown. / No window found | success / warning | |
+  | Window features without KDE | Window features need KDE Plasma | warning (once per session) | |
+  | Restart Plasma Shell | Restarting Plasma Shell... / Plasma Shell restarted / Plasma Shell restart is already in progress. | info / success / warning | |
+  | Copy | Copied to clipboard / Selected process values copied. / Process details copied. / Copied metrics to clipboard / Selected process metrics copied. / Failed to copy to clipboard | success / error | |
+  | Open file location | Opening file location / Process image unavailable | info / warning | |
+  | VirusTotal | Computing SHA-256… (after 500 ms) / SHA-256 unavailable / Process image unavailable | info / error / warning | |
+  | dump | Writing core… 1.2 GiB (progress, replaced) / Dump created: <path> / Creating a dump needs administrator rights | info / success / error | Open folder |
+  | jump target | Switched to Processes tab / Switched to parent process / Parent process not found in current view / Process not found in current view / <caller text> | info / warning | Show (when hidden by filter or Hide system) |
+  | Go to service | Switched to Services tab / Switched to service. / Service not found in current view | info / warning | |
+  | Properties | Could not open properties. / Too many process properties windows are already open | error / warning | |
+  | view mode | View mode: Tree View / View mode: Task Manager Grouping / View mode: List View | info | |
+  | hide system | Hiding system processes / Showing system processes | info | |
+  | include children | Including filtered process children. / Hiding unmatched filtered process children. | info | |
+  | columns | At least one column must stay visible / Columns reset to default | warning / info | |
+  | minigraphs | Minigraph added / Minigraph already exists / No space for more minigraphs / Process name minigraph added / App name minigraph added / Unable to add minigraph | success / warning / warning / success / success / error | |
+  | tray graphs | Tray icon graph added / Tray icon graph removed / Tray icon graph already exists / Unable to add tray icon graph / Unable to remove tray icon graph | success / success / warning / error / error | |
+  | exited row activated | Process exited | warning | |
+  | history | see UI-PRC-036, UI-PRC-037 | | |
+
+- **States**: entering (400 ms kit), visible, counting down (paused while hovered), replaced,
+  exiting (200 ms). With `motion.animations` off or reduce motion: no slide, instant show and
+  hide.
+- **Interaction**: hover pauses; click on the body closes; the button runs its action and
+  closes. "Retry as administrator" re-sends the same `ActionRequest` with `privileged = true`
+  and only the failed targets. "Show" clears the filter, turns Hide system processes off and
+  selects the row. "Open folder" opens the dumps directory through `FileManager1.ShowItems`.
+- **Data binding**: `action_events` channel (ADR-005) consumed by `actions.rs::ActionTracker`,
+  which owns the toast ids and texts.
+- **Build**: `TlToast::show(window, kind, text, button)` → `window.push_notification
+  (Notification::<type>(text).id1::<ActionToast>(request_id).action(..), cx)`.
+- **Performance**: ≤ 10 toasts live (kit cap).
+- **Accessibility**: text first, icon second; buttons are focusable; nothing relies on colour.
+- **Tests**: `action_toast_replaces_in_place_per_request`, `toast_texts_match_spec` (string
+  table), `retry_button_only_from_p3_and_only_on_eperm`.
+- **Phase**: P1 (texts arrive with their features).
+- **Decided here**: 30 s cap for button toasts; toast types per event.
