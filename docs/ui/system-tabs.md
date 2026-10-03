@@ -470,14 +470,14 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
   | Part | Widget | Size | Text | Notes |
   |---|---|---|---|---|
-  | State toggles | `TlButton::Segment` × 4 | height 22, padding x `sp4`, `r_sm` | "Running", "Failed", "Stopped", "Disabled" (`t_sm`) | multi-select; none on = all states |
-  | Unit types | `TlButton` ghost, small, with `chevron-down` caret, opens a `TlMenu` of check items | height 22 | "Unit types" plus " (4)" when not all types are on (chosen) | UI-SYS-012 |
+  | State toggles | `TlButton::Segment` × 4 | height 24, padding x `sp5`, `r_sm` | "Running", "Failed", "Stopped", "Disabled" (`t_sm`) | multi-select; none on = all states |
+  | Unit types | `TlButton::Ghost` sm with a `chevron-down` `i_xs` caret, opens a `TlMenu` of check items | height 24 | "Unit types" plus " (4)" when not all types are on (chosen) | UI-SYS-012 |
   | Manager toggles | `TlButton::Segment` × 2 | as above | "System", "User" | both on by default |
-  | Remove filters | `TlButton` ghost small, icon `funnel-x` 14 | height 22 | "Remove filters" | disabled when the strip is at its defaults |
+  | Remove filters | `TlButton::Ghost` sm, icon `funnel-x` `i_sm` | height 24 | "Remove filters" | disabled when the strip is at its defaults |
 
-  `TlButton::Segment` look (foundation.md owns the values; repeated here for the reviewer): off =
-  transparent fill, 1 px `divider` border, `text_secondary`; on = `accent` at alpha 0.25 fill,
-  1 px `accent` border, `text_primary`; hover = `tab_hover` fill; focus = shared focus ring.
+  `TlButton::Segment` look is UI-FND-010: 24 high, label `t_sm`, off = `toolbar` fill with a 1 px
+  `divider` border, on = `accent` at alpha 0.25 with a 1 px `accent` border, hover `tab_hover`,
+  keyboard focus ring. The strip uses height 24 inside its 28 px band (2 px above and below).
 
 - **States**:
   - Default: no state toggle on, unit types Services, Sockets, Timers, Mounts, System and User on.
@@ -504,7 +504,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Tests**: `strip_state_or_text_and` (fake engine echoes the query; assert `ServiceFilter`);
   `remove_filters_restores_defaults`; `strip_persists_states_and_types`.
 - **Phase**: P2.
-- **Decided here**: chip look reference; " (4)" count suffix; both managers off allowed; Remove
+- **Decided here**: Segment buttons for the toggles; " (4)" count suffix; both managers off allowed; Remove
   filters keeps the text filter; manager toggles not persisted; "Show all units" tooltip.
 
 ### UI-SYS-012 Unit types dropdown
@@ -1943,5 +1943,439 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Tests**: `netns_all_adds_column`.
 - **Phase**: P4.
 - **Decided here**: label, column position, session-only.
+
+---
+
+# E. Information tab
+
+Measurements in this part come from `docs/taskslinger-reference/information.png` (2720 × 1680
+physical px, about 2.1 physical px per logical px). Values are given in logical px.
+
+### UI-SYS-080 Information page layout
+
+- **Implements**: PERF-094, APP-041, R-023 (tab 6).
+- **Anatomy** (1280 × 800 window):
+
+  ```
+  ┌ tab strip: … Connections  Information ⧉ ─────────────────────── Filter: [        ] ┐
+  │ sp6 (16)                                                                          │
+  │ ┌▌Operating System      🐧            ⧉┐ sp7 ┌▌Memory                         ⧉┐ │
+  │ │ OS name:            CachyOS Linux     │ (24)│ Total physical:   62.70 GiB       │ │
+  │ │ Version:            Rolling           │     │ Available physical: 28.44 GiB     │ │
+  │ │ …                                     │     │ …                                 │ │
+  │ sp8 (32)                                │     ┌▌Memory modules                 ⧉┐ │
+  │ ┌▌Processor                           ⧉┐     │ Module:   Module 1                │ │
+  │ │ Name:   AMD Ryzen 9 7950X3D 16-Core … │     │ Slot:     P0 CHANNEL A (DIMM 1)   │ │
+  │ …                                                                               ▐ │ scrollbar
+  └───────────────────────────────────────────────────────────────────────────────────┘
+   page padding: top sp6, left and right sp7, bottom sp7
+  ```
+
+  | Part | Size | Origin |
+  |---|---|---|
+  | Page padding | top 16 (`sp6`), left 24 (`sp7`), right 24 (`sp7`), bottom 24 | measured: left 22, top 18 |
+  | Column gap | 24 (`sp7`) | measured 27 |
+  | Columns | two equal flex columns, each min width 360; one column when the page is narrower than 880 (chosen) | chosen |
+  | Section gap (bottom of one section's last row to the next band) | 32 (`sp8`) | measured 37 |
+  | Scroll | one vertical scroll region for the whole page (both columns move together); scrollbar on the page's right edge, `ScrollbarMode::Scrolling` | measured: one scrollbar at the right edge |
+
+  Section order (chosen so the columns end at similar heights on this machine):
+  - Left column: Operating System, Processor, System, BIOS/Firmware, Motherboard.
+  - Right column: Memory, Memory modules, Disk drives, Graphics, Network adapters.
+  - One column: Operating System, Processor, System, Memory, Memory modules, Disk drives,
+    BIOS/Firmware, Motherboard, Graphics, Network adapters (PERF-094 order).
+- **States**: loading UI-SYS-085; filter UI-SYS-084; error UI-SYS-085. The status chip shows nothing
+  on this tab (UI-SHL-050).
+- **Interaction**: the scroll region is focusable (Tab from the tab strip). Up and Down scroll by
+  `row_h`, PgUp and PgDn by the viewport height minus one row, Home and End to the top and bottom
+  (chosen). Tab moves through the section copy buttons, links ("Needs setup", "Fetch") and the
+  Public IP button in reading order (left column first).
+- **Data binding**: `Snapshot.inventory` (`ComponentMask::INVENTORY`) for static rows;
+  `Snapshot.system` (`::SYSTEM`) for live rows (UI-SYS-085); `Snapshot.devices` (`::DEVICES`) for the
+  disk, GPU and adapter lists. While the tab is active: `Demand.inventory = true`,
+  `Demand.memory = true` (available, committed), `Demand.gpus = true` (GPU temperature, chosen),
+  `Demand.disks = true` (free space, chosen).
+- **Build**: `InformationPage` in `crates/tl-ui/src/pages/information.rs` owns one
+  `Entity<InfoSection>` per section (`pages/information/section.rs`), each embedded with
+  `.cached(..)`, so a 1 Hz change re-renders only the sections that show live values.
+- **Performance**: about 120 text rows in total. Static sections never re-render after load.
+  Live sections re-format only changed values (owner-kept `SharedString`s, UI-FND-025 rule).
+- **Accessibility**: section titles are headings; the page reads top to bottom, left column first.
+- **Tests**: `info_two_columns_above_880`; `info_one_column_order`; `info_only_live_sections_rerender`
+  (install a snapshot changing only `SYSTEM`; OS and Processor render counters stay).
+- **Phase**: P2.
+- **Decided here**: column split and order, 880 breakpoint, one scroll region, section gap 32
+  (foundation's UI-FND-025 says `sp6`; measured 37, so this page passes 32; open item O-7),
+  demand for GPUs and disks, keyboard scrolling.
+
+### UI-SYS-081 Information section anatomy
+
+- **Implements**: PERF-094 (accent bar, copy button), PERF-095 (distro logo), UI-FND-025.
+- **Anatomy**:
+
+  ```
+  ┌▌ Operating System   [logo 16]                                   [⧉] ┐  band, 28 high
+  │                                                                     │  sp4 (8)
+  │ OS name:                    CachyOS Linux                           │  row_h
+  │ Version:                    Rolling                                 │
+  │   Module:                   Module 1                                │  sub-block, indent sp5 (12)
+  ```
+
+  | Part | Size | Colours and text | Origin |
+  |---|---|---|---|
+  | Band | full column width × `row_h` (28) | `header` fill; `r_sm` corners (chosen) | measured 25, foundation 28 |
+  | Accent bar | 3 wide, full band height, at the band's left edge | `accent` | spec PERF-094 |
+  | Title | left padding `sp4` after the bar | `t_md` 500 `text_primary`; titles exactly "Operating System", "Processor", "System", "Memory", "Memory modules", "Disk drives", "BIOS/Firmware", "Motherboard", "Graphics", "Network adapters" | spec PERF-094, foundation |
+  | Distro logo | 16 × 16 after the Operating System title, gap `sp3` | `img(path)` from `os-release LOGO` in the icon theme; omitted when not found | spec PERF-095 |
+  | Copy button | `TlButton::Icon` sm 24 × 24, icon `copy` `i_sm`, right padding `sp2` | `text_secondary`; hover `text_primary` with `tab_hover` fill; tooltip "Copy section" | spec PERF-094, foundation |
+  | Band to first row | 8 (`sp4`) | | measured 8 |
+  | Row | `row_h`; label inset `sp4` from the band's left edge | label `t_base` `text_secondary` ending in ":"; value `t_base` `text_primary` | measured |
+  | Label column | 232 from the label start to the value start | | measured 232 (this page passes it; foundation's default is 180) |
+  | Value | rest of the width, one line, end ellipsis, full text in a tooltip | selectable text | foundation |
+  | Sub-block (one module, disk, GPU or adapter) | rows indented by `sp5` (12); 12 (`sp5`) between blocks | | measured 11 and 12 |
+
+- **States**: band hover does nothing. Copy button states as `TlButton::Icon`. Values per
+  UI-SYS-082.
+- **Interaction**: copy button dispatches `information::CopySection { section }` (UI-SYS-083).
+  Right-click on a row: `TlMenu` "Copy value", "Copy row", "Copy section" (UI-FND-025).
+  Clicking a value does not copy (chosen; text selection must work).
+- **Data binding**: the section's rows as `Arc<[InfoRow { label: SharedString, value: TlValue,
+  live: bool, block: u8 }]>` built by the page from the snapshot.
+- **Build**: `InfoSection` renders a `TlKeyValueGrid` (inline layout) with `label_width = 232`,
+  `block_indent = sp5`, `block_gap = sp5`.
+- **Performance**: as UI-SYS-080.
+- **Accessibility**: the copy button's accessible name is "Copy <section title>".
+- **Tests**: `info_section_band_golden` (render test: bar 3 px, title, copy button);
+  `info_os_logo_omitted_when_missing`.
+- **Phase**: P2.
+- **Decided here**: band corners, label column 232, block indent and gap 12, no click-to-copy.
+
+### UI-SYS-082 Information row values and validity
+
+- **Implements**: PERF-013, R-050, PERF-102 (Restricted), PERF-105 ("Needs setup" link), D-007.
+- **States** (value text per validity, all non-valid words in `text_secondary`):
+
+  | Validity | Shows | Tooltip |
+  |---|---|---|
+  | Valid | the formatted value | full value when cut |
+  | WarmingUp | "Collecting…" | "Collecting first sample" |
+  | Stale (live rows only) | last value in `text_secondary` | "Last updated {age} ago" |
+  | Restricted | "Restricted" | "Needs administrator access." (board serial keeps this text even from P3, because the shield cannot read it, PERF-102); other rows from P3: "Needs administrator access. Click the shield to grant it." |
+  | Unsupported, setup needed | "Needs setup" as a `TlLink` (from P3; plain word before P3) | the reason; click opens the "tasklens Additional Setup" window |
+  | Unsupported, hardware | "Not supported" | "Not available on this device" |
+  | Unsupported, no value | "Not reported" | the source path or call |
+  | Failed | "Unavailable" | "Could not read: {last_error}" |
+  | enum or status unknown | "Unknown" | |
+
+  Rows hidden instead of showing a word: Domain when empty or "(none)" (PERF-097); the APP-041
+  rows Package manager, Desktop and Virtual terminal when missing (APP-041 hides missing rows);
+  disks' serial is never hidden (PERF-100 lists it). No row ever shows a memory module serial
+  (D-007).
+- **Interaction**: tooltips at the kit delay (500 ms).
+- **Data binding**: each value carries its ADR-003 `Validity` and an optional reason.
+- **Build**: `TlValue { text, validity, tooltip }` from UI-FND-025.
+- **Tests**: `info_restricted_board_serial`; `info_domain_hidden_when_none`; `info_no_dimm_serial`
+  (fixture with `SERIAL_NUMBER` set; assert absent everywhere, including copy text).
+- **Phase**: P2 ("Needs setup" link P3).
+- **Decided here**: none (all from specs).
+
+### UI-SYS-083 Information copy: section and all
+
+- **Implements**: PERF-094, APP-041, R-012 (Performance-style copy), D-007.
+- **Anatomy**: text format, exactly:
+
+  ```
+  Operating System
+  OS name: CachyOS Linux
+  Version: Rolling
+  …
+
+  Memory modules
+  Module: Module 1
+  Slot: P0 CHANNEL A (DIMM 1)
+  …
+
+  Module: Module 2
+  …
+  ```
+
+  A section is its title line, then `Label: value` lines. Sub-blocks are separated by one blank
+  line; sections by one blank line (spec). Non-valid values copy their word ("Restricted").
+  Multi-line values (resolutions, IP addresses) are joined with ", " (chosen).
+- **Interaction**:
+  - Section copy button: `information::CopySection { section }`; toast "Copied to clipboard".
+  - Tab copy icon (UI-SHL-023): `CopyInformationAll`; all sections in single-column order; toast
+    "Copied to clipboard" (spec).
+  - Ctrl+C on this tab: copies the selected text if a value has a text selection, else runs
+    `CopyInformationAll` (chosen, follows UI-FND-025).
+  - Copy ignores the filter: it always copies every row (chosen; the filter only narrows the
+    view).
+  - Clipboard failure: "Failed to copy to clipboard".
+- **Build**: `pages/information/copy.rs`, one `String` built per command.
+- **Tests**: `info_copy_all_format_golden`; `info_copy_ignores_filter`.
+- **Phase**: P2.
+- **Decided here**: multi-line join; copy ignores the filter; Ctrl+C fallback.
+
+### UI-SYS-084 Information filter
+
+- **Implements**: PERF-094, APP-028 (Information: labels and values).
+- **States**:
+  - On `FilterChanged { tab: Information, text }` the page filters in the UI (about 120 rows; no
+    engine query): a row stays when its label or value contains the text, case-insensitive.
+  - A section whose title matches shows all its rows (chosen).
+  - In a sub-block with any match, the block's first row (Module, Model, Name, Connection) also
+    stays, so the block keeps its identity (chosen).
+  - A section with no remaining rows is hidden (spec), including its band.
+  - Nothing left: `TlEmptyState` with text "No information matches the filter." (new) and the
+    "Clear filter" button (`ClearFilter`).
+  - Matched text is not highlighted (chosen; kit `Label` highlighting allocates per render).
+- **Interaction**: Esc in the filter box clears it (shell rule).
+- **Data binding**: the page keeps `filter: Arc<str>` and recomputes visible rows once per change.
+- **Build**: `InformationPage::apply_filter`.
+- **Performance**: 120 substring checks per change.
+- **Tests**: `info_filter_hides_empty_sections`; `info_filter_keeps_block_first_row`.
+- **Phase**: P2.
+- **Decided here**: title match rule, block first row rule, empty text, no highlight.
+
+### UI-SYS-085 Information loading, live values, refresh and errors
+
+- **Implements**: PERF-094 (load on open, F5, 1 Hz live values, skeleton once), R-060, APP-059.
+- **States**:
+  - First open in a session, before `InventorySnapshot` has data: every section shows its band
+    (title and a disabled copy button) and a `TlSkeletonBlock` of 8 lines (UI-FND-024) as its
+    body. Shown once per session; never again after data arrives.
+  - Live rows refresh at 1 Hz while the tab is visible: System uptime, Process count, Thread count,
+    Handle count, Available physical, Memory usage, Committed, Peak committed (since tasklens
+    started), each GPU Temperature, each disk Space. All other rows are static until F5.
+  - F5 (`RefreshCurrentTab`): `RefreshNow(Inventory)`; toast "Information refreshed." (new) when
+    the next inventory version arrives or after 2 s. No skeleton on refresh; values swap in place.
+  - Inventory `Failed` before any data: `TlEmptyState` icon `circle-alert`, text "Could not load
+    system information" (new), button "Retry" (`RefreshCurrentTab`). A failure after data keeps the
+    last values.
+  - Partial failures show the per-row words (UI-SYS-082), never an empty section.
+- **Data binding**: `InventorySnapshot.header.validity`; live values from `SystemSnapshot` and
+  `DeviceCatalog`; uptime formatted per PERF-034.
+- **Build**: in `InformationPage`; live sections subscribe to `SYSTEM` and `DEVICES` bits only.
+- **Performance**: at most 4 sections re-render per second (System, Memory, Disk drives, Graphics).
+- **Tests**: `info_skeleton_once`; `info_live_uptime_ticks` (two SYSTEM snapshots 1 s apart; uptime
+  text changes, OS section render count does not); `info_refresh_toast`.
+- **Phase**: P2.
+- **Decided here**: live row list, refresh toast, error texts.
+
+### UI-SYS-086 Operating System section
+
+- **Implements**: PERF-095, APP-041.
+- **Anatomy**: rows in order, with example values from this machine:
+
+  | Label | Example | Notes |
+  |---|---|---|
+  | "OS name" | "CachyOS Linux" | `PRETTY_NAME`; distro logo beside the title |
+  | "Version" | "Rolling" | `VERSION_ID`, else "Rolling" |
+  | "Build" | "Not reported" | `BUILD_ID`, else the word |
+  | "Kernel" | "6.17.1-2-cachyos" | release |
+  | "Kernel version" | "#1 SMP PREEMPT_DYNAMIC …" | `uname` version; ellipsis plus tooltip |
+  | "Architecture" | "x86_64 (64-bit)" | |
+  | "Install date" | "2025-03-14 18:22:05" | `YYYY-MM-DD HH:MM:SS` local |
+  | "Package manager" | "pacman 7.0.0" | hidden when none found (APP-041) |
+  | "Machine ID" | 32 hex characters | |
+
+- **Tests**: `info_os_rows_golden`.
+- **Phase**: P2.
+
+### UI-SYS-087 Processor section
+
+- **Implements**: PERF-096.
+- **Anatomy**:
+
+  | Label | Example |
+  |---|---|
+  | "Name" | "AMD Ryzen 9 7950X3D 16-Core Processor" ("Unknown processor" when missing) |
+  | "Vendor" | "AuthenticAMD" |
+  | "Architecture" | "x86_64" |
+  | "Identifier" | "Family 25 Model 97 Stepping 2" |
+  | "Cores" | "16" |
+  | "Logical processors" | "32" |
+  | "Base speed" | "4200 MHz" |
+  | "Max speed" | "5759 MHz" |
+  | "Microcode" | "0xa601209" |
+  | "Flags summary" | "Virtualization: Yes (AMD-V), AVX-512: Yes" (chosen format) |
+
+- **Tests**: `info_cpu_flags_summary_format`.
+- **Phase**: P2.
+- **Decided here**: Flags summary format.
+
+### UI-SYS-088 System section
+
+- **Implements**: PERF-097, APP-041 (Desktop group merged).
+- **Anatomy**:
+
+  | Label | Example | Live |
+  |---|---|---|
+  | "Computer name" | "Hawk desktop (hawk)": pretty name, then the static hostname in parentheses; only the static name when they are equal or no pretty name is set (chosen) | no |
+  | "User name" | "oystein" | no |
+  | "Domain" | DNS or NIS domain; row hidden when empty or "(none)" | no |
+  | "System uptime" | "2 days, 2h 38m 15s" | yes |
+  | "Boot time" | "2026-10-01 07:12:40" | no |
+  | "Process count" | "412" | yes |
+  | "Thread count" | "5 596" | yes |
+  | "Handle count" | "253 248", label tooltip "Open file descriptors, system-wide" | yes |
+  | "Desktop" | "KDE Plasma 6.4.5"; hidden when unknown | no |
+  | "Windowing system" | "Wayland" | no |
+  | "Session type" | "user (graphical)" from logind Class and Type (chosen format) | no |
+  | "Virtual terminal" | "2"; hidden when not set | no |
+
+- **Tests**: `info_system_computer_name_format`; `info_counts_grouped`.
+- **Phase**: P2.
+- **Decided here**: Computer name and Session type formats.
+
+### UI-SYS-089 Memory section
+
+- **Implements**: PERF-098.
+- **Anatomy**:
+
+  | Label | Example | Live |
+  |---|---|---|
+  | "Total physical" | "62.70 GiB" | no |
+  | "Available physical" | "28.44 GiB" | yes |
+  | "Memory usage" | "54.6%" | yes |
+  | "Committed" | "46.18 GiB" | yes |
+  | "Commit limit" | "67.16 GiB" | no |
+  | "Peak committed (since tasklens started)" | "48.02 GiB" | yes |
+  | "Page size" | "4096 bytes" | no |
+  | "Huge page size" | "2.00 MiB" | no |
+  | "Swap total" | "64.00 GiB" | no |
+  | "zram size" | "31.35 GiB"; "None" when no zram device (chosen) | no |
+
+  The long "Peak committed (since tasklens started)" label is wider than 232 at 100% scale; it wraps
+  to two lines inside the label column and the row grows to `2 × row_h` (chosen; the only row that
+  wraps).
+- **Tests**: `info_memory_peak_label_wraps`.
+- **Phase**: P2.
+- **Decided here**: zram "None"; label wrap rule.
+
+### UI-SYS-090 Memory modules section
+
+- **Implements**: PERF-099, D-007, R-030.
+- **Anatomy**: one sub-block per populated module, in slot order, all expanded (chosen; the Memory
+  page collapses beyond 4, this tab does not):
+
+  | Label | Example |
+  |---|---|
+  | "Module" | "Module 1" |
+  | "Slot" | "P0 CHANNEL A (DIMM 1)" |
+  | "Capacity" | "32.00 GiB" |
+  | "Speed" | "6000 MT/s" |
+  | "Type" | "DDR5" |
+  | "Form factor" | "DIMM" |
+  | "Manufacturer" | "Kingston" |
+  | "Part number" | "KF560C30-32" |
+
+  No serial row (D-007). With no module data at all, the section has one row "Modules: Not
+  reported" (chosen).
+- **Tests**: `info_modules_blocks`; `info_modules_none`.
+- **Phase**: P2.
+- **Decided here**: all expanded; no-data row.
+
+### UI-SYS-091 Disk drives section
+
+- **Implements**: PERF-100.
+- **Anatomy**: one sub-block per physical disk, in Performance sidebar order:
+
+  | Label | Example | Live |
+  |---|---|---|
+  | "Model" | "Samsung SSD 990 PRO 2TB" | no |
+  | "Type" | "SSD" or "HDD" (chosen words, from rotation rate) | no |
+  | "Interface" | "NVMe", "SATA", "USB", "SCSI", "virtio" | no |
+  | "Capacity" | "1.82 TiB" | no |
+  | "Space" | "812.40 GiB free of 1.82 TiB" | yes |
+  | "Volumes" | "/, /home" (mount paths, comma-separated; "None" when unmounted) | no |
+  | "Serial" | serial string | no |
+
+- **Tests**: `info_disk_space_format`.
+- **Phase**: P2.
+- **Decided here**: Type words; "None" for no volumes.
+
+### UI-SYS-092 BIOS/Firmware section
+
+- **Implements**: PERF-101.
+- **Anatomy**: rows "Firmware type" ("UEFI" or "Legacy BIOS"), "BIOS vendor", "BIOS version",
+  "BIOS date", "BIOS release", "Secure Boot" ("Enabled", "Disabled" or "Not reported").
+- **Tests**: `info_bios_rows`.
+- **Phase**: P2.
+
+### UI-SYS-093 Motherboard section
+
+- **Implements**: PERF-102, R-050.
+- **Anatomy**: rows "Manufacturer", "Product", "Version", "System vendor", "System product",
+  "Chassis type", "Serial number". "Serial number" shows "Restricted" with tooltip "Needs
+  administrator access." for an unprivileged user (spec). Chassis type shows the DMI chassis word
+  ("Desktop", "Laptop", "Tower" and so on, SMBIOS table, chosen) rather than the number.
+- **Tests**: `info_board_serial_restricted`.
+- **Phase**: P2.
+- **Decided here**: chassis words.
+
+### UI-SYS-094 Graphics section
+
+- **Implements**: PERF-103, PERF-069.
+- **Anatomy**: one sub-block per GPU:
+
+  | Label | Example | Live |
+  |---|---|---|
+  | "Name" | "NVIDIA GeForce RTX 4090" ("Unknown GPU" when missing) | no |
+  | "Driver version" | "580.82.09" | no |
+  | "Kernel module" | "nvidia" | no |
+  | "Vulkan version" | "1.4.312" | no |
+  | "OpenGL version" | "4.6.0" | no |
+  | "Temperature" | "52 °C" | yes |
+  | "Temperature source" | PERF-069 value | no |
+  | "Dedicated memory" | "24.00 GiB" | no |
+  | "Shared memory" | "31.35 GiB" | no |
+  | "Resolution" | one line per display: "3840x2160 @ 144 Hz (primary)"; the row grows by `row_h` per extra display (chosen) | no |
+
+- **Tests**: `info_gpu_resolution_multiline`.
+- **Phase**: P2.
+- **Decided here**: multi-line Resolution row.
+
+### UI-SYS-095 Network adapters section and Public IP row
+
+- **Implements**: PERF-104, PERF-060.
+- **Anatomy**: one sub-block per interface visible on the Performance sidebar (PERF-004 rules):
+
+  | Label | Example |
+  |---|---|
+  | "Connection" | "enp6s0 (Ethernet)" ("Unknown adapter" when the name is missing) |
+  | "Details" | "Intel Ethernet Controller I225-V, igc, 2500 Mbps" |
+  | "IP address" | one line per address: "192.168.1.10/24", "fe80::1c2:3ff:fe4a:5b6c/64" (rows grow, chosen) |
+  | "MAC address" | "a8:a1:59:12:34:56" |
+
+  After the last block, separated by `sp5`, one unindented row:
+
+  ```
+  Public IP:                  Not fetched   [Fetch]
+  ```
+
+  | State | Value | Button |
+  |---|---|---|
+  | never fetched this session | "Not fetched" (chosen) in `text_secondary` | `TlButton::Secondary` sm "Fetch" |
+  | fetching | "Fetching…" (chosen) | button disabled with `TlSpinner` |
+  | fetched | the address | "Fetch" again (refresh) |
+  | failed | "Unavailable" with the error in the tooltip | "Fetch" |
+
+  "Fetch" runs the PERF-060 flow, including its notice window ("tasklens Public IP Notice") the
+  first time; the row shows the same value as the Network page (one shared fetch result).
+- **Tests**: `info_public_ip_states`.
+- **Phase**: P2.
+- **Decided here**: "Not fetched", "Fetching…", multi-line IP rows.
+
+### UI-SYS-096 Help > System Information… target
+
+- **Implements**: APP-041, PERF-094.
+- **Interaction**: the Help menu item dispatches `ShowSystemInformation` (owner: shell.md). The
+  Information page handles it by becoming the active tab and scrolling so the Operating System
+  band is at the top of the viewport, then focusing the page scroll region (no toast, chosen). With
+  a filter that hides the Operating System section, the filter is cleared first (chosen).
+- **Tests**: `help_system_information_scrolls_to_os`.
+- **Phase**: P2.
+- **Decided here**: filter clearing and no toast.
 
 ---
