@@ -207,8 +207,8 @@ Conventions:
 - Was: SYS-010
 - Source: TS L28709-28710, L28789-28790, L28830, L28700
 - Behaviour:
-  - Services "Jump to process" switches to Processes and selects MainPID by identity (pid plus start time). Toast "Switched to service process.". If filtered out or hidden: "Service process not visible in the current process view.". When MainPID is 0: "Service not running".
-  - The reverse, Processes "Go to service" (menu item owned by the process spec), switches to Services, expands the group and selects the unit. Toasts "Switched to Services tab" / "Switched to service." / "Service not found in current view".
+  - Services "Jump to process" switches to Processes and selects MainPID by identity (pid plus start time) through merged PROC-071. Toast "Switched to service process.". If filtered out or hidden: "Service process not visible in the current process view.". When MainPID is 0: "Service not running".
+  - The reverse, Processes "Go to service" (owned by merged `proc.md` PROC-071, the shared "select process by identity" entry point), switches to Services, expands the group and selects the unit. Toasts "Switched to Services tab" / "Switched to service." / "Service not found in current view".
 - Linux data/mechanism: process to unit lookup through `/proc/<pid>/cgroup`. The last path element ending in `.service` (or any unit suffix) under `system.slice`, or under `user@<uid>.service`, gives manager and unit. Unit to process uses MainPID.
 - Verdict: BUILD
 - Phase: P2
@@ -657,7 +657,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: SYS-035
 - Source: TS L28711, L28812-28814
 - Behaviour: Switches to Processes, expands the group or tree path and selects the owner by ProcessKey. Toast "Switched to owning process.". If filtered out: "Owning process not visible in the current process view.". With no owner: "No owning process for this connection". If the pid exited: "Process not found in current view".
-- Linux data/mechanism: identity lookup in the process snapshot
+- Linux data/mechanism: identity lookup in the process snapshot, through the shared entry point in merged `proc.md` PROC-071
 - Verdict: BUILD
 - Phase: P2
 - Privilege: none
@@ -906,11 +906,11 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-014
 - Source: TS 8 "TaskSlinger Run" L29321-29338, runCommandHistory.json | R-061
 - Behaviour:
-  - Ownership (R-061): this entry owns the window frame and the administrator path. The content (text, combo, buttons, keys, toasts, history format, URL and `kcm_*` handling) is owned by the process spec's Run dialog entry (r2 PROC-079). The summary below matches it.
+  - Ownership (R-061): this entry owns the window frame and the administrator path. The content (text, combo, buttons, keys, toasts, history format, URL and `kcm_*` handling) is owned by merged `proc.md` PROC-095 (r2 PROC-079, v1 PROC-091). The summary below matches it.
   - A separate pinnable window titled "tasklens Run", opened by File > "Run..." and Ctrl+N.
   - Text "Type the name of a program, folder, document, or Internet resource.", then "Open:" and a combo with history (5 visible rows, prefix matches first).
   - Keys (table b, RunDialog): Up and Down pick a history match, Enter runs, Shift+Enter runs as administrator.
-  - Controls per r2 PROC-079: "Run as administrator" checkbox, "Browse…" (Programs filter = executable files; All files), "Clear command history", OK (default), Cancel.
+  - Controls per merged PROC-095: "Run as administrator" checkbox, "Browse…" (Programs filter = executable files; All files), "Clear command history", OK (default), Cancel.
   - Toasts: "Command launched", "Command history cleared", "Please enter a command", "Command contains invalid text." (a NUL byte or a control character), "Failed to run command", "Authentication cancelled".
   - The dialog notes "GUI programs may not start as root on Wayland" next to the administrator checkbox.
 - Linux data/mechanism:
@@ -927,12 +927,12 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Was: APP-015
 - Source: TS 8 "Search File Handles" L29339-29345, L30071-30081 | R-061
 - Behaviour:
-  - Ownership (R-061): this entry owns the menu item and the window frame. Controls, result columns, progress strings, the result menu and the footer note are owned by the process spec (r2 PROC-080). The summary below matches it.
+  - Ownership (R-061): this entry owns the menu item and the window frame. Controls, result columns, progress strings, the result menu and the footer note are owned by merged `proc.md` PROC-096 (r2 PROC-080, v1 PROC-092). The summary below matches it.
   - A separate pinnable, non-modal window titled "tasklens Handle Search", opened by File > "Search File Handles...".
   - Field "Pattern:" (case-insensitive substring; `*` and `?` globs allowed), checkbox "Include memory-mapped files, working directories and executables" (default on), Search, Clear, Close.
   - Result columns: Process, PID, User, Type (fd, mmap, cwd, exe, root), FD, Path.
   - Progress: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...", then "Found 12 matches" or "No results found.".
-  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process, Copy path, Open file location.
+  - Result menu: End Process (SIGTERM), Kill Process (SIGKILL), Go to process, Copy path, Open file location. The labels follow PROC-096; see O-10.
   - Unprivileged footer: "Searched 412 of 530 processes. 118 need administrator rights." with a "Search all" button.
 - Linux data/mechanism: walk `/proc/*/fd` readlinks, `/proc/*/maps` paths, `cwd`, `exe` and `root` on the blocking pool, cancellable between pids. Other users' processes go through tl-helper `ReadProcessFiles` (R-004).
 - Verdict: ADAPT
@@ -2229,3 +2229,4 @@ Each item has a recommended answer. Beads use it until Oystein decides otherwise
 | O-7 | Number formats per locale: table (d) gives en-US forms; APP-043 says formats follow the locale. | APP-043 | Ship en-US forms until P4. With the P4 locales, only the decimal and grouping characters follow the locale; units and patterns stay. |
 | O-8 | Startup Apps refresh: ADR-008 reads startup entries on page open and on `RefreshNow`; the source adds inotify live refresh. | SYS-019 | Keep inotify only while the tab is open, as written. Note it in ADR-008. |
 | O-9 | Inferred strings with no source: decorations restart toast "Restart tasklens to apply the title bar change"; titles "tasklens Keyboard Shortcuts" and "tasklens Theme Editor"; generic confirm window title "tasklens"; graph colour stored as the lower-case name. | APP-001, APP-030, APP-037, APP-039, APP-045 | Use them as written. |
+| O-10 | Handle Search result menu labels: r2's "End Process (SIGTERM)" and "Kill Process (SIGKILL)", or R-045 naming. Mirrors the open item in merged `proc.md` PROC-096. | APP-015 | "End Task" (SIGTERM) and "End Process" (SIGKILL), to match R-045 and table (b). |
