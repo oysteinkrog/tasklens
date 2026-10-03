@@ -525,3 +525,177 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 - **Tests:** `maps_primary_first_outside_last`; `maps_shared_only_filter_includes_wine_dll`; `maps_rss_warming_up_glyph`; `maps_expand_state_survives_refresh`.
 - **Phase:** P2.
 - **Decided here:** widths; node versus region cell contents; address format; collapsed default; loading and empty texts; tooltips.
+
+### UI-PWN-014 Security tab: summary
+
+- **Implements:** PROC-082 (summary rows, error, copy toast), R-050.
+- **Anatomy:** the Security body is a vertical stack with three regions [chosen, following TaskSlinger's Token tab, measured]: the summary (natural height, at most 45% of the body; scrolls inside when taller), then the Capabilities section, then the Groups section (UI-PWN-015). The two tables share the rest at 60% and 40%.
+
+```text
+| User:               oystein (1000)              | Elevated:        No                      |
+| Group:              oystein (1000)              | User namespace:  Shared with init        |
+| Groups:             12                          | PID namespace:   Isolated (4026532211)   |
+| Risky capabilities: None reported               | ...                                      |
+| ...                                             |                                          |
+```
+
+  - Two key/value columns side by side, no panel background [measured: TaskSlinger's Token summary has none], row height 26, label width rule of UI-PWN-006. Padding `sp5` left and right, `sp4` top.
+  - **Left column** (label: value format) [spec content, chosen labels]:
+    1. `User:` `oystein (1000)` when real, effective, saved and fs UID are equal; otherwise `real oystein (1000), effective root (0), saved root (0), fs root (0)`.
+    2. `Group:` the same for GIDs.
+    3. `Groups:` count of supplementary groups.
+    4. `Risky capabilities:` comma list of the PROC-082 risky names present in effective or ambient, without the `CAP_` prefix (`SYS_ADMIN, NET_ADMIN`), in `status.warning`; `None reported` otherwise.
+    5. `Admin groups:` comma list from the PROC-082 set, each root-equivalent one followed by ` (root-equivalent)` (`wheel, docker (root-equivalent)`); `None reported` otherwise.
+    6. `Flags:` comma list of the set flags: `NoNewPrivs`, `Seccomp strict` or `Seccomp filter (3 filters)`, `Dumpable`; `None reported` when none.
+    7. `Security label:` `attr/current` text (`unconfined`), or `Not supported` when no LSM exposes it.
+    8. `Session:` logind session ID (`2`) or `None`.
+    9. `Audit session:` `sessionid`, or `None` for 4294967295.
+    10. `Login UID:` `oystein (1000)`, or `None` for 4294967295.
+  - **Right column:**
+    1. `Elevated:` `Yes (root)`, `Yes (capabilities)`, `Setuid` or `No` [spec].
+    2. to 9. `User namespace:`, `PID namespace:`, `Network namespace:`, `Mount namespace:`, `IPC namespace:`, `UTS namespace:`, `Cgroup namespace:`, `Time namespace:` each `Shared with init`, `Isolated (4026532211)` or, without PID 1 access, `Same as tasklens` / `Isolated (inode)` compared with `/proc/self/ns` [spec].
+    10. `Store bypass:` the `Speculation_Store_Bypass` text as the kernel gives it (`thread vulnerable`).
+    11. `Indirect branch:` the `SpeculationIndirectBranch` text.
+- **States:** loading: values `Collecting…`; `ns/*` of other UIDs: `Restricted` (R-050 tooltip); whole tab unreadable: the access state of UI-PWN-018 with the text "Security information unavailable (insufficient privileges)" [spec]; exited: frozen.
+- **Interaction:** click on a value copies it, toast "Process property value copied."; if the clipboard write fails, the toast is "Could not copy token summary value." [spec]. Field menu and keyboard as UI-PWN-007.
+- **Data binding:** `TabPayload::Security(Arc<SecurityDetail>)`; refreshed every sweep while active.
+- **Build:** `props/security.rs`, `pub struct SecurityTab` (Entity) with two TlKeyValueGrids in an `h_flex` inside a `v_flex` with `max_h(relative(0.45))` and `overflow_y_scroll`.
+- **Performance:** about 21 strings, rebuilt only on payload change.
+- **Accessibility:** "Risky capabilities" values have the tooltip "Capabilities that allow taking over the system"; namespaces have the tooltip "Compared with PID 1" or "Compared with tasklens (PID 1 not readable)" [chosen].
+- **Tests:** `security_user_line_equal_and_mixed`; `security_admin_groups_root_equivalent`; `security_ns_same_as_tasklens_without_helper`; `security_copy_failure_toast_text`.
+- **Phase:** P2.
+- **Decided here:** summary region size and layout; labels; split of session fields; namespace rows; flags wording.
+
+### UI-PWN-015 Security tab: Capabilities and Groups tables
+
+- **Implements:** PROC-082 (tables, "None reported").
+- **Anatomy:**
+
+```text
+| Capabilities [3]                                                         |  section header 24 high
+| Name           | Effective | Permitted | Inheritable | Bounding | Ambient | Description        |
+| CAP_NET_RAW    |     ✓     |     ✓     |             |    ✓     |         | Use RAW and PACKET sockets |
+| Groups [12]                                                              |  section header 24 high
+| Name           | GID     | Kind                                         |
+| oystein        |    1000 | Primary                                      |
+| docker         |     968 | Supplementary (root-equivalent)              |
+```
+
+  - Section header: height 24 [chosen; measured about 20 in TaskSlinger at a smaller font], background `row_hover` [measured], padding left `sp5`, text `t_base` medium `text_secondary`: `Capabilities [n]` and `Groups [n]` (count formatting of table d).
+  - Capabilities `TlTreeTable` flat: Name 180 (120) left, the full `CAP_` name; Effective, Permitted, Inheritable, Bounding, Ambient 84 (64) each, centred, Lucide `Check` 14 px `text_primary` when set, empty when not; Description flex (min 160) left, the static `linux/capability.h` description.
+  - Rows: every capability set in at least one of Effective, Permitted, Inheritable or Ambient [chosen; Bounding alone would list all 41 for most processes]. Default order: rows with Effective set first, then by name [chosen]. Risky capabilities (the PROC-082 list) show the Name in `status.warning` with the tooltip "Risky capability".
+  - Groups `TlTreeTable` flat: Name 200 (80), GID 90 (60) right, Kind flex (min 120): `Primary`, `Supplementary`, plus ` (root-equivalent)` for docker, libvirt, lxd and disk, and ` (admin)` for wheel, sudo, root and adm [chosen marking].
+- **States:** empty table: "None reported" centred in the table body, `text_secondary` [spec]; loading: "Collecting…"; exited: frozen.
+- **Interaction:** sortable headers; row menu "Copy" (cell) and "Copy row" (TSV); Ctrl+C copies the selected rows as TSV; toasts "Copied to clipboard". The tab filter (UI-PWN-005) applies to Name and Description (capabilities) and Name and GID (groups).
+- **Data binding:** `SecurityDetail.caps: Arc<[CapRow]>`, `SecurityDetail.groups: Arc<[GroupRow]>`.
+- **Build:** two `TlTreeTable` entities in `props/security.rs`; each owns its own vertical scroll (allowed: they are separate regions with their own headers).
+- **Performance:** at most 41 and a few dozen rows.
+- **Accessibility:** check-mark cells carry the text alternative "Yes" (used by copy and by the tooltip on hover) [chosen].
+- **Tests:** `caps_rows_exclude_bounding_only`; `caps_risky_name_colour`; `groups_kind_marks`; `security_tables_none_reported`.
+- **Phase:** P2.
+- **Decided here:** which capabilities are rows; order; group kind marks; section header size; check-mark text alternative.
+
+### UI-PWN-016 Environment tab
+
+- **Implements:** PROC-083, R-099, ADR-015.
+- **Anatomy:**
+
+```text
+| [Filter.............] [x]        (i) Environment at process start   [Refresh] |  filter bar
+| Name                      | Value                                              |
+| DISPLAY                   | :1                                                 |
+| GITHUB_TOKEN              | ••••••                                   [eye]     |
+```
+
+  - Filter bar tools (right side): Lucide `Info` 14 px `text_secondary` plus the note "Environment at process start" `t_sm` `text_secondary` [spec text]; then TlButton xsmall ghost "Refresh" with Lucide `RefreshCw` 12 px.
+  - `TlTreeTable` flat: Name 240 (80) left; Value flex (min 160) left, single line, ellipsis at the end. Default sort Name ascending [chosen; TaskSlinger sorts by Name, measured "Name ↑"].
+  - Masked value: "••••••" (six U+2022) in `text_secondary` [spec]. On hover or keyboard focus of a masked row, an eye button (TlButton ghost, 20 × 20, Lucide `Eye` 14 px) appears at the right end of the Value cell; on a revealed row it shows Lucide `EyeOff` and stays visible.
+  - When the environment was cut at 1 MiB, a 24 px footer under the table reads "Showing the first 1 MiB of the environment." in `text_secondary` [chosen].
+- **States:**
+  - Loading: "Loading environment..." [chosen].
+  - Masking off (`properties.env_mask = false`): no masks and no eye buttons.
+  - Revealed row: the real value in `text_primary`. Reveal lasts until the row is hidden again, Refresh is pressed, or the window closes [chosen]; it is never saved.
+  - No access: UI-PWN-018 with "Environment unavailable (insufficient privileges)" [spec].
+  - Zombie or kernel thread: "Environment block unavailable" centred [spec].
+  - Read error: one table row with Name "(read failed)" in `text_secondary` and an empty Value; its tooltip carries the errno text [spec string, chosen placement].
+  - Exited: frozen; Refresh disabled.
+- **Interaction:**
+  - Reveal: click the eye, or Space on the focused masked row (`ToggleRevealEnv`) [chosen; Space has no expand meaning in this flat table], or the row menu item "Reveal value" / "Hide value".
+  - Row menu: "Copy name", "Copy value", "Copy all as NAME=value", separator, "Reveal value" or "Hide value" (masked rows only). "Copy all" copies every row that passes the filter, in table order [chosen]. A masked value is copied as "••••••" unless its row is revealed [spec R-099]. Toast "Copied to clipboard" for each.
+  - Ctrl+C copies the selected rows as `NAME=value` lines with the same masking rule.
+  - Refresh (button, F5): sends `Command::DetailRefresh { tab: Environment }`; re-masks all rows; the button shows loading until the new payload arrives (at most one sweep).
+- **Data binding:** `TabPayload::Environ(Arc<EnvDetail>)` with `vars: Arc<[(Box<str>, Box<str>)]>`, `truncated: bool`. The mask decision is computed once per payload in the UI (`masked: Arc<[bool]>`) from the R-099 patterns, case-insensitive.
+- **Build:** `props/environ.rs`, `pub struct EnvironTab` (Entity) with `revealed: FxHashSet<u32>` (row indexes of the current payload). Values are never logged and never placed in tooltips while masked [chosen].
+- **Performance:** a 1 MiB environment has about 10,000 variables at most; mask and lowercase haystacks are computed once per payload.
+- **Accessibility:** the eye button's accessible name is "Reveal value" or "Hide value"; masked cells have the tooltip "Hidden because the name looks like a secret".
+- **Tests:** `env_masks_patterns_case_insensitive` (`api_key`, `GH_TOKEN`, `MyPassword`, `SESSION_COOKIE` masked; `PATH` not); `env_copy_value_masked_unless_revealed`; `env_refresh_remasks`; `env_mask_off_setting`; `env_read_failed_row`.
+- **Phase:** P2.
+- **Decided here:** reveal controls and lifetime; loading text; truncation footer; read-error placement; Copy all scope; no secrets in tooltips.
+
+### UI-PWN-017 Strings tab
+
+- **Implements:** PROC-084 (scan, cancel, options, progress, columns, limits, errors, access), R-004.
+- **Anatomy:**
+
+```text
+| [Filter.....................] [x]                                            |  filter bar (filters Value)
+| Minimum length [ 4 ^v]  [x] ASCII [x] UTF-8 [x] UTF-16LE  [ ] Include file-backed mappings   [Scan] |  options bar 32
+| [==========------------]  Scanning process memory... 42%  18 234 strings found                |  progress row 24
+| Address          | Encoding | Length | Value                                                  |  TlTreeTable flat
+| 0x55d3f1a0c2f0   | ASCII    |     14 | /usr/lib/firefox                                       |
+```
+
+  - Options bar: height 32, padding `sp5` horizontal, gap `sp4`. "Minimum length" label `t_sm` `text_secondary`, TlSpinBox width 72, range 4..=64, step 1, default 4 [spec]. Three TlCheckboxes "ASCII", "UTF-8", "UTF-16LE", all on [spec]. TlCheckbox "Include file-backed mappings", off [spec]. Right-aligned: TlButton small primary "Scan" (Lucide `ScanSearch` 14 px), replaced by TlButton small default "Cancel" (Lucide `Square` 12 px) while scanning.
+  - Progress row (visible while scanning and after a scan): TlProgressBar small (6 high), width 200, colour `accent`, track `scroll_track`; then the status text `t_sm` `text_secondary`, tabular figures.
+  - Table columns: Address 140 (110) right, `0x` plus lowercase hex; Encoding 90 (70) left; Length 70 (60) right, count; Value flex (min 200) left, single line, first 512 characters with an ellipsis after [chosen]; tabs and newlines inside a value show as `\t` and `\n` [chosen].
+- **States:**
+  - Before the first scan: body text "Press Scan to search this process's memory for text." centred, `text_secondary` [chosen]. The scan never starts by itself [spec].
+  - Scanning: options disabled; Scan becomes Cancel; status "Scanning process memory... 42%  18 234 strings found" [spec text; counts use the thin-space grouping of table d]; rows appear in batches; sorting is off and header clicks show the tooltip "Sorting is available after the scan" [chosen]; rows stay in address order.
+  - Finished: status "Scan finished. 18 234 strings found." [chosen]; progress bar hidden; sorting on.
+  - Cancelled: status "Scan cancelled. 18 234 strings found." [chosen]; results kept.
+  - Limit reached (1,000,000 strings or 256 MiB of text): the scan stops; a 24 px banner above the table, `status.warning` at 15% alpha, text "String scan stopped: not enough memory." [spec]; results kept.
+  - Errors: "Failed to read process memory." (body text when nothing was read, or a Warning toast when a partial result exists) [spec text]; kernel threads: "Strings unavailable for this process." body text, options and Scan disabled [spec].
+  - No access: UI-PWN-018 with "Strings unavailable: needs administrator rights" and the button "Enable" [spec].
+  - No encoding checked: Scan disabled, tooltip "Choose at least one encoding" [chosen].
+  - Exited: Scan disabled; a running scan ends with the status "Scan stopped: the process exited. 18 234 strings found." [chosen].
+- **Interaction:**
+  - Scan (`StartStringScan`): click, or Enter while focus is in the options bar. Sends `Command::StringScan { scan, key, opts }` with a new `ScanId`; results from an older `ScanId` are dropped. A new scan clears the previous results.
+  - Cancel (`CancelStringScan`): click, or Esc while a scan runs and focus is in the tab (Esc cancels before it closes the window) [chosen]. Sends `Command::CancelStringScan(scan)`.
+  - Switching tabs keeps the scan running; closing the window cancels it.
+  - Row menu: "Copy value" (full value, not the 512-character cut), "Copy address", "Copy row" (TSV). Ctrl+C copies the selected values, one per line. Toast "Copied to clipboard".
+  - Filter (UI-PWN-005) matches Value only, off the UI thread, chunked.
+- **Data binding:** `TabPayload::Strings(Arc<StringScanState>)` with `scan: ScanId`, `progress_pct: u8`, `found: u32`, `chunks: Arc<[Arc<[StringHit]>]>` (append-only chunk list, each new payload reuses the old chunk `Arc`s), `state: Scanning | Finished | Cancelled | Stopped(Limit) | Failed(Error)`. Payloads arrive at most 4 times per second while scanning [chosen].
+- **Build:** `props/strings.rs`, `pub struct StringsTab` (Entity). The table reads rows through a chunk index (`row → (chunk, offset)`) so it never copies the hit list. Sorting after the scan runs on the background executor and produces an `Arc<[u32]>` permutation.
+- **Performance:** 1,000,000 rows are virtualized by `uniform_list` (only visible rows are formatted); progress updates at most 4 Hz re-render only the progress row and the table's row count. The kit `Progress` starts a transition per value change, so the bar is a plain custom element (filled `div` width) instead [chosen, widget research section 14].
+- **Accessibility:** the progress text is the text alternative of the bar; Cancel has the tooltip "Stop the scan (Esc)".
+- **Tests:** `strings_never_starts_by_itself`; `strings_progress_text_format`; `strings_stale_scan_results_dropped`; `strings_limit_banner_text`; `strings_kernel_thread_disabled`; `strings_chunks_not_copied` (pointer equality of old chunks across payloads).
+- **Phase:** P3.
+- **Decided here:** layout of the options and progress rows; empty, finished, cancelled and exited texts; Value cut at 512 characters and escapes; Esc cancels first; 4 Hz batches; custom progress element.
+
+### UI-PWN-018 Tab access states (Restricted, Grant access, Enable)
+
+- **Implements:** PROC-080, PROC-081, PROC-082, PROC-083, PROC-084 access texts; R-050; APP-003 (shield unlock); PROC-076.
+- **Anatomy:** replaces the tab body under the filter bar:
+
+```text
+                 [ShieldAlert 24]
+     Handles unavailable (insufficient privileges)
+                  [Grant access]
+```
+
+  - Centred block, 64 px from the top of the body. Icon Lucide `ShieldAlert` 24 px `text_secondary`; `sp4` gap; message `t_base` `text_primary`, centred, max width 420, wraps; `sp5` gap; TlButton small default with the label from the spec ("Grant access" for File descriptors, Memory maps and Environment; "Enable" for Strings) [spec]; Security has no button (its data comes from world-readable files, so only hidepid causes it) [chosen].
+  - Texts per tab [spec]: File descriptors "Handles unavailable (insufficient privileges)"; Memory maps "Needs administrator access."; Security "Security information unavailable (insufficient privileges)"; Environment "Environment unavailable (insufficient privileges)"; Strings "Strings unavailable: needs administrator rights".
+- **States:**
+  - Before P3 (no helper): the button is not shown [chosen, following R-050's "before P3" tooltip rule].
+  - Helper not installed: button disabled, tooltip "Needs administrator helper (not installed)" [spec wording from PROC-068].
+  - Waiting for authentication: button loading with label "Waiting for authentication…" [chosen].
+  - Authentication cancelled: button back to default; toast "Authentication cancelled" [spec APP-044].
+  - Granted: the tab reloads through the helper; the block is replaced by the normal loading state.
+- **Interaction:** the button dispatches `UnlockPrivileged` (the same Action as the title-bar shield, APP-003), then the window re-sends its `DetailDemand` with the helper flag. Enter or Space on the focused button activates it. Tab order: the button is the first focus stop of the body.
+- **Data binding:** tab payload validity `Restricted` triggers this state; helper session state from `Snapshot.health` (bit `HEALTH`).
+- **Build:** `props/mod.rs`, `fn access_block(text, button: Option<AccessButton>) -> impl IntoElement` (RenderOnce).
+- **Performance:** static.
+- **Accessibility:** the icon is decorative; the text carries the meaning.
+- **Tests:** `access_block_texts_per_tab`; `access_button_hidden_before_p3` (feature flag off); `access_cancelled_toast`.
+- **Phase:** P2 (texts); P3 (buttons).
+- **Decided here:** look; Security without button; buttons hidden before P3; waiting label.
