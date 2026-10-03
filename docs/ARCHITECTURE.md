@@ -1708,19 +1708,19 @@ There is no file watching: an external edit applies at the next start.
 
 ---
 
-## ADR-012: History storage (later phase)
+## ADR-012: History storage (P3)
 
 ### Context
 
-The owner wants six-hour process history (TaskSlinger's history mode with a timeline) and recording while hidden. Astra calculated naive 1 Hz retention at about 11 GB and said history needs its own design. This ADR fixes what the phase-1 data model must provide and the storage format so later work does not change phase-1 types.
+The owner wants six-hour process history (TaskSlinger's history mode with a timeline) and recording while hidden. Astra calculated naive 1 Hz retention at about 11 GB and said history needs its own design. This ADR fixes what the P1 data model must provide and the storage format so P3 work does not change P1 types. History recording is off by default (D-003). While it is off, History mode shows a 10-minute rolling window kept in RAM (D-010).
 
 ### Decision
 
-**Constraints on phase-1 code (binding now):**
+**Constraints on P1 code (binding now):**
 1. All timestamps are CLOCK_BOOTTIME `t_ns` (ADR-003), and every snapshot carries `boot_id`.
 2. `SeriesId`, `MetricId` and `ColumnId` numbers and strings are frozen.
 3. `ProcessRecord` numeric fields are fixed-size; text lives in `ProcessMeta`.
-4. The reducer exposes a hook used later by the recorder:
+4. The reducer exposes a hook used in P3 by the recorder and the rolling window:
 
 ```rust
 pub trait RecordSink: Send + 'static {
@@ -1730,7 +1730,7 @@ pub trait RecordSink: Send + 'static {
 }
 ```
 
-In phase 1 the reducer holds `Option<Box<dyn RecordSink>>` set to `None`.
+In P1 and P2 the reducer holds `Option<Box<dyn RecordSink>>` set to `None`.
 
 **Format** (crate `tl-history`):
 - Directory per boot: `history/<boot_id as 16 hex digits>/`.
@@ -1747,20 +1747,31 @@ pub struct Block {
     pub system: Vec<(SeriesId, Vec<(u32 /*ms offset*/, f32)>)>,  // 1 Hz system series
 }
 pub struct HistProcess { pub key: ProcessKey, pub meta: MetaId, pub ppid: u32,
-                         pub cpu_permille: u16, pub rss_kib: u32, pub io_r_kibps: u32, pub io_w_kibps: u32,
+                         pub cpu_permille: u16, pub mem_anon_kib: u32, pub io_r_kibps: u32, pub io_w_kibps: u32,
                          pub net_kibps: u32, pub gpu_pct: u8 }
 pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new index*/, FieldPatch)>,
                         pub started: Vec<HistProcess>, pub exited: Vec<u32> }
 ```
 
-- `FieldPatch` stores only fields that changed beyond a threshold (CPU by ≥ 1 permille, RSS by ≥ 256 KiB, rates by ≥ 1 KiB/s or to/from zero).
+- `mem_anon_kib` is RssAnon, the default Memory column (D-004).
+- `FieldPatch` stores only fields that changed beyond a threshold (CPU by ≥ 1 permille, memory by ≥ 256 KiB, rates by ≥ 1 KiB/s or to/from zero).
 - Footer written when a segment closes: block offset index. A segment without a footer (crash) is read by scanning blocks until the first bad CRC.
 - Command lines are never stored (ADR-015).
 
+**Settings** (canonical table (a)): `history.enabled = false` (D-003); `history.retention_h = 6`, range 1..=12, menu 1, 2, 3, 4, 6, 8, 12 h; `history.max_disk_mb = 256` (not shown in menus); `history.persist = true`. When `persist` is false the recorder deletes its segments at shutdown and loads nothing at start; the on-disk format does not change.
+
 **Retention and budget.**
-- Default retention 6 h; settings 1 to 24 h; disk cap `max_disk_mb = 256`.
-- The recorder deletes segments older than retention and, when over the cap, the oldest segments first. The UI shows the real retained span.
+- The recorder deletes segments older than retention and, when over the disk cap, the oldest segments first. The UI shows the real retained span.
 - On start, directories of other boots older than retention are deleted.
+- Loading the store at start has a 2 s budget; load errors show the toasts from r2 PROC-078.
+
+**Rolling window while recording is off** (D-010).
+- While `history.enabled` is false and the Processes tab is open (`Demand.process_table` is true), the engine keeps the last 10 minutes of process history in RAM. History mode shows this window.
+- It is a second `RecordSink` in `tl-history` (`RollingWindow`). It uses the same `Block` encoding as segments: 60 s blocks, each zstd-compressed when it closes. It holds the open block plus the newest 10 closed blocks and drops the oldest block as a new one closes. Nothing is written to disk.
+- It is fed only by the process sweeps that already run for the Processes tab (ADR-008) and system series that are already demanded. It adds no sweeps and no sources of its own.
+- It is dropped as soon as `Demand.process_table` goes false: the user leaves the Processes tab or the main window closes. Hidden-window detection (ADR-008) stops the sweep but keeps `process_table`, so the window survives a minimize with a gap in its data [inferred].
+- Turning recording on drops the rolling window and switches History mode to the store below; the store starts at that moment [inferred].
+- RAM: worst case (2,000 processes changing every second) is about 18 MB of patches per 10 minutes before compression, about 6 MB compressed at 3:1; it shares the 16 MB history RAM budget below. The recorder and the rolling window never run at the same time.
 
 **Budget math** (estimates, to be measured when the phase starts):
 - Changed processes per 1 s sweep on a desktop: about 200. Patch size about 15 bytes. 200 × 15 B × 21,600 s = 64.8 MB raw for 6 h.
@@ -1770,11 +1781,11 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 - Worst case, all 2,000 processes changing every second: 2,000 × 15 B × 21,600 = 648 MB raw, about 216 MB compressed, still under the 256 MB cap.
 - RAM: the open block (at most 60 s of patches, about 0.2 MB typical, 2 MB worst case) plus segment indexes. Budget 16 MB for history in RAM.
 
-**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }`; the engine replies with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T.
+**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }`; the engine answers from the store when recording is on and from the rolling window when it is off, with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T.
 
 ### Consequences
 
-- Phase-1 code needs no change when history arrives beyond setting the `RecordSink`.
+- P1 code needs no change when history arrives beyond setting the `RecordSink`.
 - Recording while hidden costs the 1 Hz sources in ADR-008's "recording on" column.
 
 ### Rejected alternatives
@@ -1786,6 +1797,7 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 ### Verification
 
 - When the phase starts: write 6 h of synthetic data (2,000 processes, 200 changing per second) in an accelerated test; disk usage under 64 MB; random-time reconstruction equals the recorded state at that time; truncated last block is recovered up to the bad CRC.
+- Rolling window: with recording off and the Processes tab open, 15 minutes of synthetic sweeps leave exactly the newest 10 minutes in RAM; leaving the tab frees the window; RAM stays under 16 MB with 2,000 processes changing every second.
 
 ---
 
