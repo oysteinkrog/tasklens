@@ -1356,3 +1356,178 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (a pkexec helper instead of an elevated GUI)
 - Phase: P3
 - Privilege: root through pkexec. Fallback: Restricted states and "Retry as administrator" buttons.
+
+---
+
+## H. Process Properties and App Properties windows
+
+### PROC-077 Process Properties window
+- Was: v1 PROC-071; r2 PROC-065
+- Source: TS 3.1, L28990, L30218-30237, L28713, L29889-29894, [CL 0.8.4], cross-check A.38 | APP-045 | R-050, R-073
+- Behaviour:
+  - A separate, non-modal top-level window titled "Process Properties - firefox - PID 1234", default 900 × 640 logical px, resizable, with its own title bar, pin (PROC-056) and close.
+  - Tabs: "General", "Threads [n]", "File descriptors [n]", "Memory maps [n]", "Security", "Environment [n]", "Strings".
+  - Each tab has its own filter field with a clear button. Empty state: "No properties match the current filter.".
+  - Contents refresh at `processes.interval_ms`.
+  - Up to 8 windows can be open. A ninth gives "Too many process properties windows are already open". Opening Properties again for the same key focuses the existing window.
+  - When the process exits, the title appends " (not running)", values freeze and actions are disabled.
+  - Esc closes the window.
+  - Failure to open: "Could not open properties." (PROC-071).
+  - Key/value fields use the PERF-079 words for missing values ("Restricted", "Not supported", "Unavailable" and the rest), never a zero (R-050).
+- Linux data/mechanism: GPUI `cx.open_window` (`WindowKind::Floating`, APP-045) with its own gpui-kit Root. The window registers demand for its `ProcessKey` and the active tab's data.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: per tab
+
+### PROC-078 General tab
+- Was: v1 PROC-072; r2 PROC-066; add amend PROC-072
+- Source: TS 3.1 General, L29038-29081, L29094-29103, L29127, L29147, L29175-29198, L35680-35681, cross-check A.21, A.22, A.26 | MC details dialog fields
+- Behaviour: three key/value columns. Clicking a value copies it with toast "Process property value copied.".
+  - **Column 1:**
+    - Process, PID, Started (`YYYY-MM-DD HH:MM:SS` local), PPID (a link to the parent, PROC-071), User (name and UID, plus euid and suid when they differ).
+    - Priority: "Nice 0, SCHED_OTHER, kernel prio 120", plus the autogroup "autogroup-N nice 0" from `/proc/<pid>/autogroup`.
+    - Affinity: "All (0-31)", or the list with a count such as "0-7,16-23 (16 CPUs)", from the leader thread's `Cpus_allowed_list`; " (threads differ)" is appended when any thread differs. Clicking it opens Set Affinity (PROC-067).
+    - Hardening: PIE, NX stack, RELRO (full, partial or none), Shadow stack (status `x86_Thread_features`), ASLR (system setting plus the `ADDR_NO_RANDOMIZE` personality), NoNewPrivs, Seccomp.
+    - Architecture; Executable (a link that opens the file location, PROC-073); Location category; Package; Description; Cmd line (wrapped, full 32 KiB, with a copy button); Working dir; Root (only when it is not "/"); Cgroup; Unit (a link to the Services tab); App ID.
+    - Location category values: Temp directory (`/tmp`, `/var/tmp`, `$XDG_RUNTIME_DIR`), User Downloads (`xdg-user-dir DOWNLOAD`), User data (`~/.local`, `~/.cache`, `~/.config`), User profile (`~`), System (`/usr`), Optional software (`/opt`), Flatpak (`/var/lib/flatpak`, `~/.local/share/flatpak`), AppImage (`/tmp/.mount_*`), Wine prefix (`*/drive_c/*`), Deleted.
+  - **Column 2:**
+    - SHA-256 and MD5, computed in the background when the window opens. Errors "Failed to compute one or more hashes", "Executable path unavailable".
+    - Package status with a "Verify against package" button that compares the file's sha256 with the package mtree; Packager.
+    - Threads, Handles.
+    - Memory (RssAnon), Working set total (VmRSS), Working set shared, PSS, USS, Swap, Commit (VmData + VmStk), Memory % of MemTotal.
+    - CPU %, CPU time.
+    - I/O read bytes (rchar), I/O write bytes (wchar), I/O read ops, I/O write ops.
+  - **Column 3:**
+    - Disk read bytes, Disk write bytes, Cancelled write bytes, Disk read rate, Disk write rate, Disk total rate.
+    - Net I/O (attributed TCP send and receive).
+    - GPU %, VRAM, GPU memory shared, GPU engine.
+    - Window block (P2 with the bridge): Window title, Window ID (KWin `internalId`, replacing HWND), Window state (Minimized, Maximized or Normal), Window class (`resourceClass`), Window rect ("L:%d T:%d R:%d B:%d"), Window size ("%d x %d"), "And N more" when there are several windows, "No top-level window" when there is none.
+- Linux data/mechanism:
+  - Hardening from the ELF of `/proc/<pid>/exe`: `e_type ET_DYN` plus `PT_INTERP` for PIE; `PT_GNU_STACK` flags; `PT_GNU_RELRO` plus `DT_FLAGS BIND_NOW`. System ASLR from `/proc/sys/kernel/randomize_va_space`, personality from `/proc/<pid>/personality`.
+  - `readlink` of `cwd` and `root`. Everything else uses the PROC-027 to PROC-036 sources.
+  - Windows CFG, Dyn code and Strict handle mitigations have no Linux equivalent and are not shown; DEP and ASLR map to NX stack and PIE.
+- Verdict: ADAPT (Windows mitigations become ELF hardening; HWND becomes the KWin ID)
+- Phase: P2
+- Privilege: exe, cwd, root, personality, io and smaps_rollup of other UIDs show "Restricted" until the helper reads them.
+- Open question: SHA-256 and MD5 (here and in PROC-074) need hash crates that ADR-001's dependency table does not list. Recommended answer: allow `sha2` and `md-5` in `tl-collect` and record it in ADR-001.
+
+### PROC-079 Threads tab
+- Was: v1 PROC-073; r2 PROC-067; add amend PROC-073
+- Source: TS 3.1 Threads, L29021-29025, L35489, L35667-35668, cross-check A.24
+- Behaviour:
+  - Columns, all sortable: Thread ID, Name (thread `comm`), State, CPU %, User time (ms), Kernel time (ms), Priority, Base priority, Affinity, Last CPU, Ctx switches (voluntary / involuntary), Wait channel.
+    - Priority: "Variable" for SCHED_OTHER, SCHED_BATCH and SCHED_IDLE (the scheduler adjusts them at run time, like TaskSlinger's "Variable"); "Realtime N" for SCHED_FIFO and SCHED_RR with N = rt_priority (stat field 40); "Deadline" for SCHED_DEADLINE. The tooltip names the policy.
+    - Base priority: nice (stat field 19) for normal policies, rt_priority for realtime threads.
+  - States: "Loading threads...", "No threads found.", "No threads match the current filter.".
+  - Row menu: Copy, "Set thread priority >" (as PROC-066 for one TID), "Set thread affinity…" (as PROC-067 for one TID), "Send signal to thread >" (TERM, KILL, USR1, USR2 through `tgkill`). STOP is not offered because it stops the whole thread group. The tooltip warns that a fatal signal ends the whole process.
+  - TaskSlinger's Start Address and Start Module are not collected (they need ptrace plus symbol resolution); Name and Wait channel take their place.
+- Linux data/mechanism: `/proc/<pid>/task/<tid>/stat` (comm, state, utime, stime, nice, policy, processor field 39), `status` (`Cpus_allowed_list`, context switches), `wchan` and `comm`. Thread actions use `setpriority`, `sched_setaffinity` and `tgkill(pid, tid, sig)` after the pidfd identity check on the process.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: `wchan` of other UIDs shows "Restricted". Thread actions on other UIDs need the helper.
+- Open question: ADR-005 has no thread-level target. Recommended answer: add `ActionTarget::Thread { process: ProcessKey, tid: u32 }`, verified through the process pidfd plus a check that `/proc/<pid>/task/<tid>` exists, and accepted by the helper's `Signal`, `SetNice`, `SetSched` and `SetAffinity`.
+
+### PROC-080 File descriptors tab
+- Was: v1 PROC-074; r2 PROC-068
+- Source: TS 3.1 Handles, L29026-29027, L29154-29174, L28988, L35666, INI `UI.HideUnnamedHandles=1`, cross-check A.25
+- Behaviour:
+  - Columns:
+    - FD.
+    - Type: file, directory, TCP, UDP, unix, netlink, pipe, FIFO, eventfd, eventpoll, timerfd, signalfd, inotify, fanotify, memfd, dmabuf, DRM, pidfd, io_uring, anon_inode (other), device.
+    - Name: the link target. Sockets resolve to "TCP 127.0.0.1:5000 → 10.0.0.2:443 ESTABLISHED" or the Unix path; pipes to "pipe:[ino] ↔ cat (5678)" by matching the pipe inode across processes; DRM fds to "card1 (NVIDIA)"; nameless entries show "(unnamed)".
+    - Access: "R", "W" or "RW", with "+A" for append, "+NB" for non-blocking and "CLOEXEC".
+    - Position: fdinfo `pos`.
+  - A details pane for the selected fd shows "Raw flags: 0o2104002", decoded into access mode, status flags (Append, Non-blocking, Sync, Direct, Path, Temp file) and descriptor flags (Close-on-exec), plus the mount ID and inode.
+  - Checkbox "Hide unnamed handles", default on (`properties.hide_unnamed_handles = true`), hides `anon_inode:*` entries.
+  - States: "Loading handles...", "No handles reported.", "Handle detail query unavailable.". For other UIDs without the helper: "Handles unavailable (insufficient privileges)" with a "Grant access" button.
+  - Row menu: Copy, Open file location (files), Go to connection (sockets; switches to the Connections tab).
+  - Closing another process's fd is not offered (it needs ptrace code injection).
+- Linux data/mechanism: `readlinkat` on `/proc/<pid>/fd/*`; `/proc/<pid>/fdinfo/<fd>` (`pos`, `flags`, `mnt_id`, `eventfd-count`, `drm-*`); the shared sock_diag inode map.
+- Verdict: ADAPT (Windows handles become fds)
+- Phase: P2
+- Privilege: ptrace read access, which Yama allows for the same UID. Other UIDs need the helper (`ReadProcessFiles { fd_list, fdinfo }`).
+
+### PROC-081 Memory maps tab
+- Was: v1 PROC-075; r2 PROC-069
+- Source: TS 3.1 Modules, L29028, L29112, L29215-29216, L29020, [CL 0.8.4], INI `UI.ModulesDllOnly=1`
+- Behaviour:
+  - A tree with one node per backing file and its regions as children (start-end, perms, offset, RSS).
+  - "(Primary)" marks the main executable, which comes first. Anonymous regions (`[heap]`, `[stack]`, `[vdso]`, `[vvar]`, anonymous, memfd) group under "Outside loaded modules".
+  - Columns: Name, Base address (lowest start), Size (sum of region sizes), RSS (sum from `smaps`), Perms (for example "r-xp"), Offset, Path, Description (package `%DESC%`), Package.
+  - Checkbox "Shared libraries only", default on (`properties.shared_objects_only = true`), keeps ELF shared objects (`*.so`, `*.so.*`) and, for Wine processes, `*.dll`, `*.exe`, `*.drv` and `*.sys`.
+- Linux data/mechanism: `/proc/<pid>/maps`; per-mapping RSS from `/proc/<pid>/smaps`, loaded while the tab is open, at most 1 Hz; the package index from PROC-027.
+- Verdict: ADAPT ("DLL only" becomes "Shared libraries only"; Wine DLLs work literally)
+- Phase: P2
+- Privilege: ptrace read, as PROC-080. Other UIDs need the helper (`ReadProcessFiles { maps }`); otherwise the tab shows "Needs administrator access.".
+- Open question: the helper's `ReadProcessFiles` set has `smaps_rollup` but not `smaps`, so per-mapping RSS stays Restricted for other UIDs. Recommended answer: add `smaps` to the set in ADR-006.
+
+### PROC-082 Security tab
+- Was: v1 PROC-076; r2 PROC-070
+- Source: TS 3.1 Token, L29006-29013, L29082-29093, L29104-29119, L30247-30257, L29152, cross-check A.23
+- Behaviour:
+  - Summary rows:
+    - User: real, effective, saved and fs UID with names; GIDs the same way.
+    - Groups: count.
+    - Risky capabilities: CAP_SYS_ADMIN, CAP_SYS_PTRACE, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SYS_MODULE, CAP_SYS_RAWIO, CAP_SETUID, CAP_SETGID, CAP_NET_ADMIN, CAP_BPF, CAP_PERFMON, CAP_SYS_BOOT, CAP_CHOWN, CAP_FOWNER, when effective or ambient.
+    - Admin groups: wheel, sudo, root, adm, docker, libvirt, lxd, disk; docker, libvirt, lxd and disk are marked "root-equivalent".
+    - Flags: NoNewPrivs; Seccomp (disabled, strict or filter, plus the `Seccomp_filters` count); Dumpable.
+    - Security label (LSM).
+    - Session: logind session, audit `sessionid`, `loginuid`.
+    - Elevated: "Yes (root)", "Yes (capabilities)", "Setuid", "No".
+    - Namespaces: user, pid, net, mnt, ipc, uts, cgroup, time; each "Shared with init" or "Isolated (inode)". When PID 1's namespaces cannot be read (no helper), the comparison uses `/proc/self/ns/*` and the label reads "Same as tasklens".
+    - Speculation: Speculation_Store_Bypass, SpeculationIndirectBranch.
+  - Table "Capabilities [n]": Name, Effective, Permitted, Inheritable, Bounding, Ambient (check marks), Description.
+  - Table "Groups [n]": Name, GID, Kind ("Primary" or "Supplementary").
+  - "None reported" when a table is empty. Error "Security information unavailable (insufficient privileges)". Copy failure toast "Could not copy token summary value.".
+  - Windows integrity level, impersonation level, LUIDs and UI access have no Linux meaning and are not shown.
+- Linux data/mechanism: `/proc/<pid>/status` (Uid, Gid, Groups, CapInh, CapPrm, CapEff, CapBnd, CapAmb, NoNewPrivs, Seccomp, Seccomp_filters, Speculation*), `loginuid`, `sessionid`, `attr/current`, `readlink ns/*`. Capability names and descriptions come from a static table of `linux/capability.h`.
+- Verdict: ADAPT (Windows token becomes credentials, capabilities and namespaces)
+- Phase: P2
+- Privilege: `status` is world-readable. `ns/*` of other UIDs shows "Restricted" until the helper reads it (`ReadProcessFiles { ns }`).
+
+### PROC-083 Environment tab
+- Was: v1 PROC-077; r2 PROC-071
+- Source: TS 3.1 Environment, [IMG adv_sheet_01], L29148-29151 | ADR-015
+- Behaviour:
+  - Columns: Name, Value. Both sortable.
+  - A header note "Environment at process start" with a Refresh button.
+  - Values whose names match `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*_KEY`, `*API_KEY*` or `*CREDENTIAL*` (case-insensitive) are masked as "••••••" while `properties.env_mask = true` (default). A "Reveal" toggle shows one row's value.
+  - Copy name, copy value, and copy all as `NAME=value` lines.
+  - Errors: "Environment unavailable (insufficient privileges)", "(read failed)", "Environment block unavailable" (zombie or kernel thread).
+- Linux data/mechanism: `/proc/<pid>/environ`, NUL-separated, capped at 1 MiB, read when the tab opens and on Refresh. Never logged.
+- Verdict: ADAPT (Linux shows only the initial environment, as the note says; masking added)
+- Phase: P2
+- Privilege: PTRACE_MODE_READ, so the same UID works. Other UIDs need the helper (`ReadProcessFiles { environ }`).
+- Open questions: (1) v1 also masked `*KEY*` and `*COOKIE*`. Recommended answer: mask the union, adding `*KEY*` and `*COOKIE*` to the list above. (2) Whether "copy value" and "copy all" include masked values. Recommended answer: copy a masked value as "••••••" unless that row is revealed.
+
+### PROC-084 Strings tab
+- Was: v1 PROC-078; r2 PROC-072
+- Source: TS 3.1 Strings, L29005, L29014, L35669-35671, L29846-29850, cross-check A.27 | R-004
+- Behaviour:
+  - A "Scan" button starts the scan; it never starts by itself. A "Cancel" button stops it.
+  - Options: minimum length (4 to 64, default 4); encodings ASCII, UTF-8 and UTF-16LE (all on; UTF-16LE matters for Wine); "Include file-backed mappings" (off by default).
+  - Progress: "Scanning process memory... 42%  18234 strings found".
+  - Columns: Address (hex), Encoding, Length, Value. The tab filter applies to Value.
+  - The scan stops at 1,000,000 strings or 256 MiB of text with "String scan stopped: not enough memory.".
+  - Errors: "Failed to read process memory.", "Strings unavailable for this process." (kernel threads).
+  - Without access: "Strings unavailable: needs administrator rights" with an "Enable" button that starts the helper.
+- Linux data/mechanism:
+  - Regions from `/proc/<pid>/maps`: readable, private anonymous plus heap and stack (file-backed only with the option), skipping `[vvar]`, `[vsyscall]` and device mappings.
+  - Reads with `process_vm_readv` in 1 MiB chunks.
+  - With `ptrace_scope = 1` this needs CAP_SYS_PTRACE even for own non-child processes, so the helper's `ScanStrings { key, opts }` streams result batches. With `ptrace_scope = 0` and the same UID, tasklens scans in-process.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: CAP_SYS_PTRACE through the helper.
+
+### PROC-085 App Properties window
+- Was: v1 PROC-079; r2 PROC-073
+- Source: MC `process_details_dialog.rs`, `process_details_dialog.blp:24-163`, Ctrl+I
+- Behaviour:
+  - Properties (Enter, Alt+Enter or Ctrl+I) on an app or unit row opens "App Properties - Firefox", a window like PROC-077.
+  - **General** tab: 48 px icon and name, App ID, Type ("App" or "Unit"), Desktop file path, Unit, Cgroup, Process count, the primary process's command line, and live usage rows for CPU, Memory (cgroup `anon`), Swap (`memory.swap.current`), Disk, Network, GPU and VRAM. Swap updates live (MC's binding bug is not copied).
+  - **Processes [n]** tab: a mini table of member processes. Double-click or "Open properties" on a row opens that process's Properties.
+  - On process rows, MC's details dialog fields are covered by PROC-078.
+- Linux data/mechanism: cgroup files (`memory.stat`, `memory.swap.current`, `io.stat`, `cgroup.procs`), the `.desktop` index and the snapshot.
+- Verdict: ADAPT (the MC dialog merges into the TaskSlinger Properties window)
+- Phase: P2
+- Privilege: none
