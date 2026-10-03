@@ -5,8 +5,9 @@ continue one batch. Read `docs/research/brief-beads.md` first and follow it, the
 
 ## Before writing anything
 
-1. List what exists for each of your epics: `br list --parent <epic id> --json --limit 500
-   --lock-timeout 180000` (epic IDs in `docs/plan/anchors.md`). Also read your plan file in
+1. List what exists for each of your epics. Child bead IDs are `<epic id>.<n>` (epic IDs in
+   `docs/plan/anchors.md`), so filter `.beads/issues.jsonl` by that prefix, or run
+   `br show <id> --json` on single beads. Also read your plan file in
    `docs/plan/` if it exists, and your batch's scratch folder
    `/var/tmp/claude/claude-1000/-home-oystein/3bebe002-7be5-4c37-8e3b-0d5332a57446/scratchpad/<batch>/`
    if it exists (earlier writers kept bead drafts, key-to-ID maps and dependency lists there).
