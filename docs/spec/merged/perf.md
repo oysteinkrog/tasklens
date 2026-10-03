@@ -1546,3 +1546,218 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Verdict: ADAPT. tasklens always writes the module file, so the result survives a reboot.
 - Phase: P4
 - Privilege: root through pkexec. Without it: no fan pages.
+
+## Summary table
+
+| ID | Name | Verdict | Phase |
+|---|---|---|---|
+| PERF-001 | Device sidebar cards | BUILD | P1/P2 |
+| PERF-002 | Hide and show page context menu | BUILD | P1 |
+| PERF-003 | Sidebar edit mode | BUILD | P2 |
+| PERF-004 | Per-type default visibility and network groups | ADAPT | P1/P2 |
+| PERF-005 | Device hotplug and stable keys | BUILD | P1/P2 |
+| PERF-006 | Sidebar width splitter | BUILD | P1 |
+| PERF-007 | Performance keys, View submenu and sidebar toggle | BUILD | P1/P2 |
+| PERF-008 | Device type names, headers and empty states | ADAPT | P1/P2/P4 |
+| PERF-009 | Aggregate pages | BUILD | P4 |
+| PERF-010 | Graph summary mode | ADAPT | P2 |
+| PERF-011 | Copy device info | BUILD | P2 |
+| PERF-012 | Page layout | BUILD | P1 |
+| PERF-013 | Fallback value words | ADAPT | P1 |
+| PERF-014 | Performance-tab toolbar contents | BUILD | P1 |
+| PERF-015 | Graph element | BUILD | P1 |
+| PERF-016 | Time range | ADAPT | P1/P2 |
+| PERF-017 | Series rings and the 1 Hz tier | BUILD | P1/P2 |
+| PERF-018 | Scaling modes | ADAPT | P1 |
+| PERF-019 | Axis maximum rounding and label | BUILD | P1 |
+| PERF-020 | Smooth (sliding) graphs | ADAPT | P1 |
+| PERF-021 | Curved lines | ADAPT | P4 |
+| PERF-022 | Gaps and stale data | BUILD | P1 |
+| PERF-023 | Hover readout | BUILD | P2 |
+| PERF-024 | Graph colours | BUILD | P1/P3 |
+| PERF-025 | Units and number formats | ADAPT | P1/P2 |
+| PERF-026 | Legends and secondary series | BUILD | P1 |
+| PERF-027 | CPU header and graph mode | ADAPT | P1/P2 |
+| PERF-028 | Per-core grid | BUILD | P1 |
+| PERF-029 | Kernel time overlay | BUILD | P1 |
+| PERF-030 | Overlaid and stacked modes | BUILD | P2 |
+| PERF-031 | Core type marks | ADAPT | P2 |
+| PERF-032 | CPU secondary graph | BUILD | P2 |
+| PERF-033 | CPU live stats | ADAPT | P1/P2 |
+| PERF-034 | Up time format | BUILD | P1 |
+| PERF-035 | CPU static stats | BUILD | P1/P2 |
+| PERF-036 | Cache size format | ADAPT | P1 |
+| PERF-037 | Virtualization and security rows | ADAPT | P2 |
+| PERF-038 | CPU power (RAPL) | BUILD | P2 |
+| PERF-039 | CPU temperature | BUILD | P1 |
+| PERF-040 | CPU clock | BUILD | P1 |
+| PERF-041 | Memory graphs | BUILD | P1 |
+| PERF-042 | Memory composition bar | ADAPT | P1 |
+| PERF-043 | Memory stats | ADAPT | P1/P2 |
+| PERF-044 | zram and zswap details | ADAPT | P2 |
+| PERF-045 | Swap devices list | ADAPT | P2 |
+| PERF-046 | Memory modules on the Memory page | BUILD | P2 |
+| PERF-047 | Disk list and kind | ADAPT | P1 |
+| PERF-048 | Disk graphs | BUILD | P1 |
+| PERF-049 | Disk stats | ADAPT | P1/P2 |
+| PERF-050 | Partitions table | ADAPT | P2 |
+| PERF-051 | SMART data dialog | BUILD | P2/P3 |
+| PERF-052 | Eject with blocking processes | BUILD | P2 |
+| PERF-053 | Disk temperature | BUILD | P2 |
+| PERF-054 | Interface list and type | ADAPT | P1 |
+| PERF-055 | Throughput graph and legend | BUILD | P1 |
+| PERF-056 | Network stats | BUILD | P1/P2 |
+| PERF-057 | Display unit row | BUILD | P1 |
+| PERF-058 | Wi-Fi details | ADAPT | P2 |
+| PERF-059 | IP addresses | ADAPT | P2 |
+| PERF-060 | Public IP fetch | BUILD | P2 |
+| PERF-061 | Network settings link | ADAPT | P3 |
+| PERF-062 | GPU enumeration and tl-gpu-probe | ADAPT | P1 |
+| PERF-063 | Engine graphs | ADAPT | P1/P2 |
+| PERF-064 | GPU memory | BUILD | P1 |
+| PERF-065 | Video encode and decode | BUILD | P1 |
+| PERF-066 | GPU clocks | BUILD | P2 |
+| PERF-067 | GPU power | BUILD | P2 |
+| PERF-068 | GPU temperature and fan | BUILD | P1/P2 |
+| PERF-069 | GPU temperature source values | ADAPT | P1/P2 |
+| PERF-070 | PCIe link | BUILD | P2 |
+| PERF-071 | GPU static fields | ADAPT | P2 |
+| PERF-072 | Displays list | ADAPT | P2/P4 |
+| PERF-073 | Display connector type names and row format | ADAPT | P2 |
+| PERF-074 | AMD GPU backend | ADAPT | P2 |
+| PERF-075 | Intel GPU backend | ADAPT | P3 |
+| PERF-076 | Fan pages | BUILD | P2 |
+| PERF-077 | Fan labels and temperature pairing | ADAPT | P3 |
+| PERF-078 | Battery and power device pages | BUILD | P2 |
+| PERF-079 | Battery charge history | BUILD | P3 |
+| PERF-080 | Minigraph panel and system cards | BUILD | P1 |
+| PERF-081 | Minigraph card context menu | BUILD | P1/P3 |
+| PERF-082 | Move and reorder cards | BUILD | P2 |
+| PERF-083 | Detached graph windows | ADAPT | P3 |
+| PERF-084 | Keep detached graphs open | BUILD | P3 |
+| PERF-085 | Process-source cards and labels | BUILD | P3 |
+| PERF-086 | Minigraph states "No match" and "Ended" | BUILD | P3 |
+| PERF-087 | Column labels for process cards | ADAPT | P3 |
+| PERF-088 | Tray icon graph | ADAPT | P3 |
+| PERF-089 | Tray tooltips | BUILD | P3 |
+| PERF-090 | Tray menus and graph colour | BUILD | P3 |
+| PERF-091 | Main tray icon while graphs show | BUILD | P3 |
+| PERF-092 | Tray icon re-registration | ADAPT | P3 |
+| PERF-093 | Performance mini window | ADAPT | P3 |
+| PERF-094 | Information layout, copy and filter | BUILD | P2 |
+| PERF-095 | Operating System section | ADAPT | P2 |
+| PERF-096 | Processor section | BUILD | P2 |
+| PERF-097 | System section | ADAPT | P2 |
+| PERF-098 | Memory section | ADAPT | P2 |
+| PERF-099 | Memory modules section | BUILD | P2 |
+| PERF-100 | Disk drives section | ADAPT | P2 |
+| PERF-101 | BIOS/Firmware section | BUILD | P2 |
+| PERF-102 | Motherboard section | BUILD | P2 |
+| PERF-103 | Graphics section | ADAPT | P2 |
+| PERF-104 | Network adapters section | BUILD | P2 |
+| PERF-105 | Additional setup window | ADAPT | P3/P4 |
+| PERF-106 | RAPL udev rule | ADAPT | P3 |
+| PERF-107 | Per-process network row (nethogs capabilities dropped) | DROP | P3 |
+| PERF-108 | Fan sensor detection | ADAPT | P4 |
+
+## Old ID to new ID map
+
+Every ID in `spec/features-perf.md` (v2) and `spec/features-perf-addendum.md` (add), and the unnumbered addendum amendments.
+
+| Old ID | New ID | Old ID | New ID |
+|---|---|---|---|
+| v2 PERF-001 | PERF-001 | v2 PERF-050 | PERF-055 |
+| v2 PERF-002 | PERF-002 | v2 PERF-051 | PERF-056 |
+| v2 PERF-003 | PERF-003 | v2 PERF-052 | PERF-058 |
+| v2 PERF-004 | PERF-004 | v2 PERF-053 | PERF-059 |
+| v2 PERF-005 | PERF-005 | v2 PERF-054 | PERF-060 |
+| v2 PERF-006 | PERF-006 | v2 PERF-055 | PERF-061 |
+| v2 PERF-007 | PERF-007 | v2 PERF-056 | PERF-062 |
+| v2 PERF-008 | PERF-009 | v2 PERF-057 | PERF-063 |
+| v2 PERF-009 | PERF-010 | v2 PERF-058 | PERF-064 |
+| v2 PERF-010 | PERF-011 | v2 PERF-059 | PERF-065 |
+| v2 PERF-011 | PERF-012 | v2 PERF-060 | PERF-066 |
+| v2 PERF-012 | PERF-015 | v2 PERF-061 | PERF-067 |
+| v2 PERF-013 | PERF-016 | v2 PERF-062 | PERF-068 |
+| v2 PERF-014 | PERF-017 | v2 PERF-063 | PERF-070 |
+| v2 PERF-015 | PERF-018 | v2 PERF-064 | PERF-071 |
+| v2 PERF-016 | PERF-019 | v2 PERF-065 | PERF-072 |
+| v2 PERF-017 | PERF-020 | v2 PERF-066 | PERF-074 |
+| v2 PERF-018 | PERF-021 | v2 PERF-067 | PERF-075 |
+| v2 PERF-019 | PERF-022 | v2 PERF-068 | PERF-076 |
+| v2 PERF-020 | PERF-023 | v2 PERF-069 | PERF-077 |
+| v2 PERF-021 | PERF-024 | v2 PERF-070 | PERF-078 |
+| v2 PERF-022 | PERF-025 | v2 PERF-071 | PERF-079 |
+| v2 PERF-023 | PERF-026 | v2 PERF-072 | PERF-080 |
+| v2 PERF-024 | PERF-027 | v2 PERF-073 | PERF-081 |
+| v2 PERF-025 | PERF-028 | v2 PERF-074 | PERF-082 |
+| v2 PERF-026 | PERF-029 | v2 PERF-075 | PERF-083 |
+| v2 PERF-027 | PERF-030 | v2 PERF-076 | PERF-084 |
+| v2 PERF-028 | PERF-031 | v2 PERF-077 | PERF-085 |
+| v2 PERF-029 | PERF-032 | v2 PERF-078 | PERF-088 |
+| v2 PERF-030 | PERF-033 | v2 PERF-079 | PERF-089 |
+| v2 PERF-031 | PERF-035 | v2 PERF-080 | PERF-090 |
+| v2 PERF-032 | PERF-037 | v2 PERF-081 | PERF-091 |
+| v2 PERF-033 | PERF-038 | v2 PERF-082 | PERF-093 |
+| v2 PERF-034 | PERF-039 | v2 PERF-083 | PERF-094 |
+| v2 PERF-035 | PERF-040 | v2 PERF-084 | PERF-095 |
+| v2 PERF-036 | PERF-041 | v2 PERF-085 | PERF-096 |
+| v2 PERF-037 | PERF-042 | v2 PERF-086 | PERF-097 |
+| v2 PERF-038 | PERF-043 | v2 PERF-087 | PERF-098 |
+| v2 PERF-039 | PERF-044 | v2 PERF-088 | PERF-099 |
+| v2 PERF-040 | PERF-045 | v2 PERF-089 | PERF-100 |
+| v2 PERF-041 | PERF-046 | v2 PERF-090 | PERF-101 |
+| v2 PERF-042 | PERF-047 | v2 PERF-091 | PERF-102 |
+| v2 PERF-043 | PERF-048 | v2 PERF-092 | PERF-103 |
+| v2 PERF-044 | PERF-049 | v2 PERF-093 | PERF-104 |
+| v2 PERF-045 | PERF-050 | v2 PERF-094 | PERF-105 |
+| v2 PERF-046 | PERF-051 | v2 PERF-095 | PERF-106 |
+| v2 PERF-047 | PERF-052 | v2 PERF-096 | PERF-107 |
+| v2 PERF-048 | PERF-053 | v2 PERF-097 | PERF-108 |
+| v2 PERF-049 | PERF-054 | | |
+
+| Old ID | New ID |
+|---|---|
+| add amend PERF-069 (mini window trigger) | PERF-093 |
+| add amend (GPU page engine graphs) | PERF-063 |
+| add amend (GPU displays list) | PERF-072 |
+| add amend (Public IP fetch) | PERF-060 |
+| add amend (sidebar device cards) | PERF-001 |
+| add amend (Information tab, System section, User Domain) | PERF-097 |
+| add amend (CPU page, Security services row) | PERF-037 |
+| add PERF-079 Fallback value wording | PERF-013 |
+| add PERF-080 Up time format | PERF-034 |
+| add PERF-081 Cache and fixed-size formats | PERF-036 |
+| add PERF-082 Device type names and empty states | PERF-008 |
+| add PERF-083 Network "Display unit" field | PERF-057 |
+| add PERF-084 Network graph title and Upload/Download legend | PERF-055, PERF-056 |
+| add PERF-085 Memory module blocks on the Memory page | PERF-046 |
+| add PERF-086 Minigraph card labels | PERF-080, PERF-085 |
+| add PERF-087 Minigraph states "No match" and "Ended" | PERF-086 |
+| add PERF-088 Column-graph labels for memory and GPU columns | PERF-087 |
+| add PERF-089 Tray graph "Graph color" menu item | PERF-090 |
+| add PERF-090 Tray icon re-registration | PERF-092 |
+| add PERF-091 Display connector type names | PERF-073 |
+| add PERF-092 GPU temperature source values | PERF-069 |
+| add PERF-093 Performance-tab toolbar contents | PERF-014 |
+| v2 dangling reference PERF-101 (RAPL setup) | PERF-106 |
+| v2 dangling reference PERF-103 (fan sensor setup) | PERF-108 |
+| table b rows F1..F8, F9/Ctrl+T, Ctrl+M, Ctrl+C (Performance), Up/Down (sidebar) | PERF-007 |
+| sys-app APP-042 content (R-028) | PERF-105 |
+
+Nothing from either source was dropped. The only DROP verdict is PERF-107 (the nethogs capability step), which v2 had already dropped; its panel text stays.
+
+v2's "Conflicts with the architecture review" list is settled as follows: item 1 by R-016 (PERF-016, PERF-017); item 2 by R-026 (PERF-062); item 3 by PERF-084 and ADR-010's close rule; item 4 by R-046 and R-073 (PERF-083, PERF-093); item 5 by the `curved_lines` key in table (a) (PERF-021); item 6 is open item 4 below; item 7 by R-030, R-057 and U-26 (PERF-046, PERF-072); item 8 by ADR-008's demand rules, with the hidden-CPU budget measured with one tray graph active.
+
+## Open items
+
+Each has a recommended answer. Beads use it until Oystein says otherwise.
+
+1. **State keys for detached graph windows (PERF-083).** Table (a) has `[[minigraphs]] detached` but no window grouping, size or position. Recommendation: add `window = <n>` to `[[minigraphs]]` and a `[[detached_windows]]` table with `id`, `width`, `height`, `x`, `y` in `state.toml`. `x` and `y` are written and applied only on KDE through the bridge. This does not conflict with ADR-010's rule against restoring the main window's position.
+2. **Choosing which GPU a minigraph card follows (PERF-080).** v2 lets the card menu pick a GPU, but the `source` values in table (a) have no device. Recommendation: allow `source = "gpu:<device key>"`, `"vram:<device key>"` and `"gpu_temp:<device key>"`; the bare values mean the first GPU in sidebar order.
+3. **Detached and mini window matching through the KWin bridge (PERF-083, PERF-093).** Decided here (inferred): match by tasklens's pid plus the window caption, keep one app ID. Confirm with the KWin bridge owner (R-046) that `WindowsSnapshot` carries caption and pid for these windows.
+4. **`tl-gpu-probe --api-versions` (PERF-071).** ADR-007 describes only the NVML sampler. Recommendation: add a second, one-shot mode to ADR-007 that loads Vulkan (ash) and EGL, prints one postcard frame, and exits. It never runs in the same process as NVML sampling.
+5. **SMART fallback through `pkexec smartctl` (PERF-051).** Recommendation: keep it in P3 under `org.freedesktop.policykit.exec`, and add that use to canonical table (c), which today lists that action only for Run as administrator.
+6. **Phase of View > Graphs.** APP-017 and APP-021 put the Graphs submenu in P3 (toggles in P2). Table (a) marks `[[minigraphs]]` hide and range as P1, and the panel is P1 here. Recommendation: the CPU to GPU Temperature checkboxes ship in P1 with the panel; "Keep detached graphs open" ships in P3. The APP merge should match.
+7. **Sidebar toggle state (PERF-007).** F9 and Ctrl+T hide the sidebar, and no key stores that. Recommendation: do not persist it.
+8. **Unverified facts this area depends on:** U-25 (udisks2 NVMe module), U-26 (sysfs `enabled`), U-27 (lockdown, efivars and iommu readable without root), U-28 (`cpuinfo_avg_freq`, `amd_pstate_prefcore_ranking`), U-29 (seat ACL for KMS ioctls), U-30 (`ureq` without Tokio), U-31 (ksni without Tokio), U-33 (Wayland clipboard), U-35 (NVML maxima for fixed scales), U-37 (Mission Center's rule survives reboot). Phase 0 or the first bead that touches each one confirms it.
