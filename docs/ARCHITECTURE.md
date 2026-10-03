@@ -992,12 +992,12 @@ PLAN.md claimed pidfds prevent ever hitting a reused PID. Astra notes this holds
 
 ### Decision
 
-**Where code lives.** All OS calls are synchronous functions in `tl-ops` (`src/process.rs`, `src/cgroup.rs`, `src/sys.rs` for raw syscalls). `tl-engine/src/actions/` admits requests, runs each in its own task, calls `tl-ops` inside `cx.spawn_blocking`, and applies `time::timeout`. The later `tl-helper` calls the same `tl-ops` functions as root.
+**Where code lives.** All OS calls are synchronous functions in `tl-ops` (`src/process.rs`, `src/cgroup.rs`, `src/sys.rs` for raw syscalls). `tl-engine/src/actions/` admits requests, runs each in its own task, calls `tl-ops` inside `cx.spawn_blocking`, and applies `time::timeout`. The P3 `tl-helper` calls the same `tl-ops` functions as root.
 
 **Admission** (in the reducer, on `Command::Action`):
 1. More than 16 actions in flight: `Rejected(Busy)`.
 2. More than 256 targets: `Rejected(TooManyTargets)`.
-3. For each process target: `boot_id` differs from the current boot, or the key is not in the current process table and not exited within 2 s: per-target `Rejected(IdentityChanged)`.
+3. For each process target: `boot_id` differs from the current boot, or the key is not in the current process table and not exited within the linger time (ADR-004): per-target `Rejected(IdentityChanged)`.
 4. `KERNEL_THREAD` flag: `Rejected(KernelThread)`.
 5. Otherwise spawn the action task in the session's actions region.
 
@@ -1023,14 +1023,15 @@ pub fn open_verified(key: ProcessKey, boot: BootId) -> Result<OwnedFd, OpsError>
 
 Details:
 - `SetNice(n)`: `setpriority(PRIO_PROCESS, pid, n)` applies to the thread group leader only on Linux; to change the whole process, apply to every TID from `/proc/<pid>/task/` with the same before/after pidfd check on the main PID. Report `Succeeded` only if every TID succeeded; partial is `Failed(Partial { done, total })`.
+- `SetSched { policy, rt_prio }` (P2): `sched_setattr` on every TID, same rules. Realtime sets `SCHED_RR` priority 1 with `SCHED_RESET_ON_FORK`, after the confirmation "Realtime priority can freeze the desktop if the process spins. Set it anyway?".
 - `SetAffinity(set)`: `sched_setaffinity` on every TID, same rules.
 - `SetIoPriority(p)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, value)` through `libc::syscall(SYS_ioprio_set, ..)` in `tl-ops/src/sys.rs`, on every TID, same rules. `Realtime` needs root and is shown only in the privileged menu.
 - TIDs are re-listed right before the loop. A TID that disappears mid-loop is skipped and not counted as failure.
-- `EPERM` maps to `ActionError::PermissionDenied`. The UI then offers "Try as administrator…" (later phase). Raising priority (lower nice) is expected to fail without `CAP_SYS_NICE`.
+- `EPERM` maps to `ActionError::PermissionDenied`. The UI shows the toast "Permission denied" with the button "Retry as administrator" from P3; before P3 the toast has no button. Raising priority (lower nice) is expected to fail without `CAP_SYS_NICE`.
 
 **Suspend and resume one process:** `Signal(Stop)` and `Signal(Cont)` through the pidfd.
 
-**Tree operations ("End process tree").** The UI captures the subtree's keys when the menu opens (max 256). The engine signals deepest descendants first, then parents, one per-target event each. Missing descendants are skipped with `Rejected(IdentityChanged)`.
+**Tree operations ("End Process Tree", `ActionKind::KillTree`).** The UI captures the subtree's keys when the menu opens (max 256). The engine opens a verified pidfd for every captured target, sends SIGSTOP to all of them, then SIGKILL to all of them, then closes the fds. Stopping first means no process in the tree can fork a new child between the two passes. One per-target event each. A target that fails `open_verified` is skipped with `Rejected(IdentityChanged)`.
 
 **cgroup operations** (`FreezeGroup`, `ThawGroup`, `KillGroup` on an app group):
 
@@ -1048,7 +1049,21 @@ Validation in `tl-ops::cgroup::open_validated(cg, uid)`:
 4. Write with `openat(dirfd, "cgroup.freeze" | "cgroup.kill")`: `"1"` to freeze, `"0"` to thaw, `"1"` to kill.
 5. Freeze completion: poll `cgroup.events` for `frozen 1` every 50 ms for up to 2 s; not frozen by then is `OutcomeUnknown("freeze still in progress")`.
 
-**Protected processes.** `PROTECTED` is set on: PID 1, the current session's `kwin_wayland`, `plasmashell`, `ksmserver`, `Xwayland`, the user's `systemd --user`, the user's `dbus-broker` or `dbus-daemon`, and tasklens itself. Signals, freeze and kill on a protected target, plus Force end and End process tree on anything, open an `AlertDialog` that names the result ("End process", "Force end"), with Cancel. Signals to PID 1 and to tasklens itself are `Rejected(Protected)` with no dialog.
+**Protected processes.** `PROTECTED` is set on: PID 1, the current session's `kwin_wayland`, `plasmashell`, `ksmserver`, `Xwayland`, `sddm`, `systemd-logind`, the session's `login` ancestor, the user's `systemd --user`, the user's `dbus-broker` or `dbus-daemon`, and tasklens itself.
+
+Refused with a toast and no dialog (`Rejected(Protected)` or `Rejected(KernelThread)`):
+- tasklens itself: "Refusing to end tasklens itself."
+- PID 1: "PID 1 (systemd) cannot be ended."
+- kernel threads: "Kernel threads cannot be signalled."
+
+A confirmation `AlertDialog` opens for:
+- any signal, freeze or kill on a `PROTECTED` target: "Ending <name> will end your desktop session. End it anyway?";
+- End Process Tree: "End N processes in this tree?", buttons "End tree" and "Cancel";
+- Kill App: "Kill all N processes of <App>?";
+- End Task or End Process with more than one target;
+- any action on another user's process.
+
+A single End Process (SIGKILL) on one of the user's own, unprotected processes does not ask; it shows only the toast "End process requested." (D-009).
 
 **Deadlines** (`time::timeout` around each target's blocking job):
 
@@ -1065,12 +1080,25 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 
 **systemd units.** Methods `StartUnit(name, "replace")`, `StopUnit(name, "replace")`, `RestartUnit(name, "replace")`, `EnableUnitFiles([name], false, true)` / `DisableUnitFiles([name], false)` then `Reload()`. Calls set the D-Bus `ALLOW_INTERACTIVE_AUTHORIZATION` flag so polkit can ask for a password. Success is the `JobRemoved` signal with result `"done"`; any other result string is `Failed(UnitJob(result))`.
 
-**Privileged helper boundary (later phase, reserved now).**
-- Binary `/usr/lib/tasklens/tl-helper`, started by the engine as `pkexec /usr/lib/tasklens/tl-helper` with polkit action `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`).
-- Transport: the helper's stdin and stdout, using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB.
-- Allowed requests only: `Signal { key, signal }`, `SetNice`, `SetAffinity`, `SetIoPriority`, `FreezeGroup`, `ThawGroup`, `KillGroup` for any uid's cgroup under `/sys/fs/cgroup`, and `ReadProcessDetail { key, what }` for root-only `/proc` fields. No path, command or file arguments. The helper re-runs `open_verified` itself; it never trusts the engine's check.
-- The helper exits after 300 s idle or when stdin closes. It sets `PR_SET_PDEATHSIG = SIGKILL`.
-- The eBPF network collector is a separate binary (`tl-netmon`) with its own polkit action. It never shares a process with the action helper.
+**Privileged helper boundary (P3, reserved now).**
+- Binary `/usr/lib/tasklens/tl-helper`, started by the engine as `pkexec /usr/lib/tasklens/tl-helper --session`.
+- Polkit has exactly three tasklens actions, in `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`: `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation; `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`; `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon` (P4). Polkit authorises the `pkexec` launch once, so per-operation action names inside a running helper would not be enforced.
+- Transport: the helper's stdin and stdout, using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB. A reply larger than one frame is sent as a sequence of frames; the total per request is capped at 4 MiB. There is no single-call `--once` mode.
+- Allowed requests only:
+  - `Signal { key, signal }`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`;
+  - `FreezeGroup`, `ThawGroup`, `KillGroup` for any uid's cgroup under `/sys/fs/cgroup`;
+  - `ReadProcessDetail { key, what }` for root-only `/proc` fields;
+  - `ReadProcessFiles { key, files }`, where `files` is a set of `io`, `fd_list`, `fdinfo`, `environ`, `maps`, `smaps_rollup`, `ns`, `cwd`, `exe`, `status`;
+  - `ScanStrings { key, opts }`, which streams batches;
+  - `Dump { key, mode, out_fd }`, which runs `/usr/bin/gcore` by fixed path and writes to the passed fd;
+  - `ResolveSocketInodes { inodes }`;
+  - `SockDestroy { family, proto, four_tuple, cookie }`;
+  - `WriteServiceDropIn { manager: System, unit, keys }` with keys limited to `Restart*`, `StartLimit*`, `FailureAction` and `OnFailure`, written to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`;
+  - `NetnsSockDiagDump { netns_ino }`.
+- No path, command or free-form file argument. The helper re-runs `open_verified` itself on every process target; it never trusts the engine's check.
+- The helper exits after 300 s idle or when stdin reaches EOF. It sets `PR_SET_PDEATHSIG = SIGKILL`.
+- The eBPF network collector is a separate binary (`tl-netmon`, P4) with its own polkit action. It never shares a process with the action helper.
+- "Run as administrator" in the Run dialog uses `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper.
 - Without the helper, privileged menu items are shown disabled with the tooltip "Needs administrator helper (not installed)".
 
 ### Consequences
@@ -1091,6 +1119,7 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 - Integration test: start `systemd-run --user --scope sleep 60`, freeze, read `cgroup.events` = `frozen 1`, thaw, kill.
 - Unit test: `open_validated` rejects `session-2.scope`, a path with `..`, another uid's slice and a mismatched inode.
 - UI test: right-click row A, the table re-sorts so row A moves, choose End: the request targets A's key.
+- Integration test: spawn a parent with two children, run `KillTree`: every target receives SIGSTOP before any receives SIGKILL, and no process of the tree survives.
 
 ---
 
