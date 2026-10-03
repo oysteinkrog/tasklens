@@ -1911,6 +1911,7 @@ UI and rendering speed are the owner's top priority. Astra found the chart cost 
 - Scene `table-2000`: Processes tab, 2,000 rows, 10 columns, every value changes at 1 Hz, sorted by CPU descending so order changes every second, grouped mode with 40 groups. Programmatic scroll at 1,200 logical px/s, bouncing between top and bottom, through `UniformListScrollHandle`.
 - Scene `bridge`: `perf-cpu` where the total CPU chart is fed by the real `tl-engine` `Cpu` worker at 10 Hz through the real bridge.
 - Scene `static`: `perf-cpu` with smooth graphs off.
+- Scene `history-scrub` is added in P3 with the history store (ADR-012).
 - Checklist (manual, recorded in `docs/spike/phase0-results.md`): CSD checks from ADR-010, three-monitor moves, straddling, maximize per monitor, unplug and replug, lock and unlock, suspend and resume, 10-minute zed#64499 soak, minimize and restore re-renders, text sharpness at 110% (screenshot at 2× zoom shows no blur).
 
 **Gates.** Each gate must pass in the median of 3 runs unless stated.
