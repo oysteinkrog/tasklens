@@ -843,7 +843,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 | Kind | `WindowKind` | Modal | Default size | Min size | Resizable | Esc |
 |---|---|---|---|---|---|---|
 | Confirmation (`TlDialog::confirm`) | `Dialog` | yes, to its parent | content-sized, width 420, height 140 to 320 | 360 × 120 | no | Cancel |
-| Tool window (Settings, Theme Editor, Shortcuts, Run, Handle Search, About, Additional Setup, Crash Report) | `Floating` | no | per owner | 480 × 320 | yes (About and Crash Report: no) | closes (Run: cancels) |
+| Tool window (Settings, Theme Editor, Shortcuts, Handle Search, About, Additional Setup, Crash Report) | `Floating` | no | per owner | 480 × 320 | yes (About and Crash Report: no) | closes |
+| Run window ("tasklens Run", APP-014) | `Floating` | no | 480 × 248 fixed | 480 × 248 | no | cancels |
 | Properties window (process, service, startup, connection) | `Floating` | no | 900 × 640 (PROC-077); service and others per owner | 640 × 400 | yes | closes |
 
   Confirmation body (`TlDialog`):
@@ -877,7 +878,9 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   child window except detached graphs when `graphs.keep_detached_on_close` is on (APP-045).
   Opening Properties again for the same key activates the existing window (PROC-077).
 - **Data binding**: `WindowRegistry` (Entity in `window/registry.rs`) holds every open secondary
-  window handle keyed by `WindowKey` (`Properties(ProcessKey)`, `Service(unit)`, `Settings`, …),
+  window handle keyed by `WindowKey` (`Properties(ProcessKey)`, `AppProperties(GroupKey)`,
+  `Service(unit)`, `Run`, `HandleSearch`, `Settings`, and the other tool windows; each owning file
+  adds its variants),
   enforces the 8-window limit for Properties, and closes children with the main window. Pin state
   for the main window is `window.always_on_top`; secondary windows keep it in memory only.
 - **Build**: `components/window_frame.rs` (`TlSecondaryWindow::open(cx, kind, title, size,
@@ -1048,6 +1051,12 @@ OS Name:             Linux                                      row height row_h
 Version:             6.17.0-arch1                                label column 180, value flex
 Build:               …                                          label ends with ":" (owner's text)
 ```
+
+  Owner overrides for the inline layout: `.row_height(Pixels)` and `.label_width(Pixels)`. The
+  defaults above (28 and 180) are for the Information tab's two wide cards. Process Properties
+  General uses `.row_height(26 × ui_scale)` and `.label_width(126 × ui_scale)` (measured from the
+  TaskSlinger Properties window, where three columns share a 900 px window). Both values are
+  multiplied by `ui_scale` by the owner through `UiMetrics`; the grid never scales twice.
 
   Section title (Information cards, measured): a band of `header` colour, `row_height` high, with
   a 3 px `accent` bar at its left edge, title `t_md` 500 `text_primary` with `sp4` padding, and a
@@ -1715,15 +1724,16 @@ No scope item is unmapped.
 20. Toast queue: stack grows downward, newest at the bottom; wait list 16; Error evicts oldest
     Info or Success; coalesce within 1 s with " (×N)"; action toasts 15 s; Progress 120 s then
     "Outcome unknown"; 3-line cut; secondary windows' margin 34 + 8.
-21. Window kinds table (sizes, modality, Esc); pin placement left of minimize; server-decoration
+21. Window kinds table (sizes, modality, Esc; Run fixed 480 × 248); pin placement left of minimize; server-decoration
     pin fallback at the content's top-right; destructive confirmations focus Cancel; titles
     truncate at the end.
 22. TlMenu: item height 26, check column 20 (collapsing), min 180 and max 360 wide, header rows
     22 high, submenu overlap 4 px, "No items" row, `painted_item` API.
 23. TlProgress 4 and 6 px, 1% buckets, reduced-motion stand-ins, 2-per-window budget.
 24. TlSkeleton bar pattern, 12-row cap, no fade on replace.
-25. TlKeyValueGrid: label column 180, pair height 2 rows, section band with 3 px accent bar,
-    copy flash, value context menu.
+25. TlKeyValueGrid: label column 180 and row 28 by default with `.row_height` and
+    `.label_width` overrides (Properties General 26 and 126), pair height 2 rows, section band
+    with 3 px accent bar, copy flash, value context menu.
 26. TlValidityGlyph: lock right-aligned like a number; copy text per glyph.
 27. TlBadge geometry, tint 0.2, status dot rule.
 28. TlShield single-colour glyph, starting state, failure toast "Could not start the privileged
