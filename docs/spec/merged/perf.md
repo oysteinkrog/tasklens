@@ -1,6 +1,6 @@
 # PERF merged spec: Performance tab, graphs, minigraphs, tray, mini window, Information tab, additional setup
 
-This file replaces `spec/features-perf.md` (v2) and `spec/features-perf-addendum.md` for implementation. It applies `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-074 and canonical tables a to d) and `docs/ARCHITECTURE.md` (ADR-001 to ADR-016), in that order of precedence.
+This file replaces `spec/features-perf.md` (v2) and `spec/features-perf-addendum.md` for implementation. It applies `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-103 and canonical tables a to d) and `docs/ARCHITECTURE.md` (ADR-001 to ADR-016), in that order of precedence.
 
 How to read the "Was:" lines:
 - `v2 PERF-0xx` is an entry in `spec/features-perf.md`.
@@ -8,7 +8,7 @@ How to read the "Was:" lines:
 - `add amend (<subject>)` is an addendum amendment that had no ID of its own. `add amend PERF-069` is the mini window amendment (first-draft number).
 - `table b` is a row of the canonical keyboard table in `docs/RECONCILIATION.md`.
 
-v2 also points at `PERF-101` and `PERF-103`, which do not exist. `PERF-101` meant the RAPL setup (now PERF-106) and `PERF-103` meant sensor detection (now PERF-108).
+v2 also points at two IDs that do not exist in v2: its RAPL setup reference is now PERF-106 and its sensor detection reference is now PERF-108. Every ID outside "Was:" lines and the ID map names a merged entry: PERF in this file, PROC in `proc.md`, SYS and APP in `sys-app.md`.
 
 Labels: "verified" means read in a document or checked on the machine. "Inferred" means this merge decided it from the precedence rules because no document settles it.
 
@@ -120,7 +120,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Behaviour:
   - F1 to F8 select the 1st to 8th **visible** card. This fixes Mission Center's bug of counting hidden cards.
   - Up and Down move the selection when the sidebar has focus.
-  - F9 and Ctrl+T show or hide the device sidebar. The page then fills the width. The state is not persisted (inferred: no key exists in table a).
+  - F9 and Ctrl+T show or hide the device sidebar. The page then fills the width. The state is not persisted; the sidebar shows at every start (R-090).
   - Ctrl+M toggles Graph Summary View (PERF-010). Ctrl+C copies device info (PERF-011).
   - Every page's context menu has "View >" with the type group names from PERF-008 (Processor, Memory, Disks, Graphics adapters, Network adapters, Fans, Batteries). Each jumps to the first visible device of that type. Types with no visible device are disabled.
 - Linux data/mechanism: GPUI actions in the `Performance` key context.
@@ -765,7 +765,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - NVMe: `org.freedesktop.UDisks2.NVMe.Controller.SmartGetAttributes({})` and `SmartUpdate`. Needs udisks2 2.10 or newer with the NVMe module (U-25).
 - Verdict: BUILD
 - Phase: P2 (the smartctl fallback in P3)
-- Privilege: Reading cached attributes is allowed for the active session. `SmartUpdate` uses `org.freedesktop.udisks2.ata-smart-update` (allowed for the active local session by default). When UDisks2 or its NVMe module is missing, a "Read with smartctl (admin)" button runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` under `org.freedesktop.policykit.exec` and parses the JSON. This is not a tl-helper operation (R-004 has no SMART read). See open item 5.
+- Privilege: Reading cached attributes is allowed for the active session. `SmartUpdate` uses `org.freedesktop.udisks2.ata-smart-update` (allowed for the active local session by default). When UDisks2 or its NVMe module is missing, a "Read with smartctl (admin)" button runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` under `org.freedesktop.policykit.exec` and parses the JSON. This is not a tl-helper operation (R-004 has no SMART read). The fallback ships in P3 and is listed in table (c) (R-088).
 
 ### PERF-052 Eject with blocking processes
 - Was: v2 PERF-047
@@ -1054,7 +1054,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
     - Vulkan: ash calls `vkEnumeratePhysicalDevices` and matches the GPU through `VK_EXT_pci_bus_info`; it reads `apiVersion` and `VkPhysicalDeviceDriverProperties`.
     - OpenGL: EGL `EGL_EXT_platform_device` on the matching DRM device, then a context, then `glGetString(GL_VERSION)`.
     - A crash only gives `Unknown`.
-  - ADR-007 does not describe `--api-versions` yet (open item 4).
+  - The mode, its output frame and its 5 s deadline are defined in ADR-007 "API versions mode" (R-087).
 - Verdict: ADAPT. DirectX becomes Vulkan and OpenGL; the driver date becomes the module version.
 - Phase: P2
 - Privilege: none
@@ -1179,9 +1179,9 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - The CPU card draws total CPU as a filled area and kernel CPU as a #C1514E line. Its hover tooltip shows a two-line legend, "Total" and "Kernel".
   - View > Graphs has one checkbox per card: "CPU Graph", "Memory Graph", "Disk Graph", "Network Graph", "GPU Graph", "VRAM Graph", "GPU Temperature Graph" (APP-021).
   - Card size 180×90 logical px, scaled with UI scale.
-- Linux data/mechanism: Reuses the system series. Disk = aggregate active time (busiest disk). Network = the sum over visible physical interfaces. GPU, VRAM and GPU temp = the first GPU in sidebar order (see open item 2 for choosing another GPU). Keys `graphs.minigraph_cpu`, `minigraph_memory`, `minigraph_disk`, `minigraph_network`, `minigraph_gpu`, `minigraph_vram` (all true) and `minigraph_gpu_temperature = false`. Card layout in `state.toml` `[[minigraphs]]` (`source`, `range_s`, `color`, `slot`, `detached`).
+- Linux data/mechanism: Reuses the system series. Disk = aggregate active time (busiest disk). Network = the sum over visible physical interfaces. GPU, VRAM and GPU temp follow the GPU in the card's `source`: `gpu:<device key>`, `vram:<device key>` or `gpu_temp:<device key>`; the bare values `gpu`, `vram` and `gpu_temp` mean the first GPU in sidebar order (R-085). Keys `graphs.minigraph_cpu`, `minigraph_memory`, `minigraph_disk`, `minigraph_network`, `minigraph_gpu`, `minigraph_vram` (all true) and `minigraph_gpu_temperature = false`. Card layout in `state.toml` `[[minigraphs]]` (`source`, `range_s`, `color`, `slot`, `detached`, `window`).
 - Verdict: BUILD
-- Phase: P1 (cards and View > Graphs checkboxes; APP-017 and APP-021 list the Graphs submenu as P3, see open item 6)
+- Phase: P1 (cards, View > Graphs checkboxes and Reset Minigraph Layout; R-089). "Keep detached graphs open" is P3 (PERF-084).
 - Privilege: none
 
 ### PERF-081 Minigraph card context menu
@@ -1212,12 +1212,12 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - On KDE the window is kept above other windows and its position is restored. Elsewhere the compositor places it and it is not kept above. Size and stacked cards persist on every desktop.
 - Linux data/mechanism:
   - GPUI `open_window` with `WindowKind::Floating`, client decorations, no title bar, `app_id` `io.github.oysteinkrog.Tasklens` (the same app ID, so the desktop file and icon match). Moving uses `start_window_move()`.
-  - The window caption is "tasklens Graph <n>". On KDE the KWin bridge worker (`workers/dbus_kwin.rs`, R-046) finds the window by tasklens's pid and that caption in its `WindowsSnapshot`, then sends one-shot `KWinCommand`s to set `keepAbove` and `frameGeometry`, and reads moves back from the snapshot (inferred: v2's separate `/Scripting loadScript` script and per-window app ID are replaced by the bridge).
-  - Persisted window state needs keys that table (a) does not have yet (open item 1).
+  - The window caption is "tasklens Graph <n>". On KDE the KWin bridge worker (`workers/dbus_kwin.rs`, R-046) finds the window by tasklens's pid and that caption in its `WindowsSnapshot`, then sends one-shot `KWinCommand`s to set `keepAbove` and `frameGeometry`, and reads moves back from the snapshot. v2's separate `/Scripting loadScript` script and per-window app ID are replaced by the bridge (R-086, ADR-004).
+  - Persisted state (R-084): each card's `[[minigraphs]]` entry has `detached = true` and `window = <n>`; `state.toml` `[[detached_windows]]` holds `id`, `width`, `height`, `x`, `y`. `x` and `y` are written and applied only on KDE through the bridge. ADR-010's rule against restoring the main window's position is unchanged.
 - Verdict: ADAPT. Wayland clients cannot set position or keep-above, so the KWin bridge does it on KDE.
 - Phase: P3 (needs the P2 KWin bridge)
 - Privilege: none
-- Applied: R-046, R-073
+- Applied: R-046, R-073, R-084, R-086
 
 ### PERF-084 Keep detached graphs open
 - Was: v2 PERF-076
@@ -1235,21 +1235,21 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - Cards whose source is one process (captured identity), a process image name, or an app. They are created from the Processes context menu ("Add Minigraph >", "Add Process Name Graph >", "Add App Name Graph >"), which the process spec owns; this spec owns the card.
   - Labels: `<name> (<pid>) · CPU`, `<name> by name · CPU`, `<App> by app · CPU`. The part after `·` is the column label (PERF-087). `Process <pid>` is used only until the name has been read.
   - A name card sums all processes with that image name. An app card sums the app's cgroup.
-- Linux data/mechanism: The engine adds demand for these identities, so they are sampled even when off screen and while the window is hidden. `[[minigraphs]] source = "process:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` plus `column`. Process identity is the ADR-003 `ProcessKey`. App name comes from the cgroup scope and its desktop file.
+- Linux data/mechanism: The engine adds demand for these identities, so they are sampled even when off screen and while the window is hidden. `[[minigraphs]] source = "process:<boot_id 16 hex>:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` plus `column` (R-100). Process identity is the ADR-003 `ProcessKey`. App name comes from the cgroup scope and its desktop file.
 - Verdict: BUILD
 - Phase: P3
 - Privilege: none for the user's own processes. Fields hidden for other users' processes show `Restricted`.
-- Applied: R-066
+- Applied: R-066, R-100, R-101
 
 ### PERF-086 Minigraph states "No match" and "Ended"
 - Was: add PERF-087
 - Source: TS crosscheck A.28 (L28582 "No match", L28583 "Ended")
 - Behaviour: The value area at top right shows one of two states:
   - **No match:** a name or app card that matches no process right now. The graph records a gap, not zero. When a process matches again, the graph resumes.
-  - **Ended:** a single-process card whose process exited (its pid plus start time are gone). The graph stops at its last sample and stays until the user removes the card ("Remove graph"). The card never re-attaches to a new process that reuses the pid. After a restart, a card whose identity is gone shows "Ended".
+  - **Ended:** a single-process card whose process exited (its pid plus start time are gone). The graph stops at its last sample and stays until the user removes the card ("Remove graph"). The card never re-attaches to a new process that reuses the pid. After a restart, a card whose identity is gone shows "Ended"; so does a card saved in another boot (its source boot ID differs from the current one, R-100).
 - Linux data/mechanism: Exit is detected when the identity is missing from a sweep, or through pidfd readability when the card holds a pidfd.
 - Verdict: BUILD
-- Phase: P3 (with PERF-085; the addendum's P2 is moved to match the menu that creates these cards)
+- Phase: P3 (with PERF-085; the addendum's P2 is moved to match the menu that creates these cards, R-101)
 - Privilege: none
 - Applied: R-066
 
@@ -1347,7 +1347,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - Double-click on the mini window, or "Show Main Window" in its menu, returns to the main window. Clicking a card opens the main window on that page.
   - Its context menu: "Always on top", "Show Main Window", "Close".
   - "Always on top" is on by default when the window opens and is not persisted (only the main window's pin persists). On KDE it sets `keepAbove` through the KWin bridge. On X11 it sends `_NET_WM_STATE_ABOVE`. Elsewhere it is disabled with the tooltip "Not supported by this desktop".
-- Linux data/mechanism: GPUI `Floating` window, caption "tasklens Mini Window", matched by the KWin bridge as in PERF-083. While the main window is hidden, demand comes from the cards shown in the mini window.
+- Linux data/mechanism: GPUI `Floating` window, caption "tasklens Mini Window", matched by the KWin bridge by pid plus caption as in PERF-083 (R-086). While the main window is hidden, demand comes from the cards shown in the mini window.
 - Verdict: ADAPT. TaskSlinger's trigger is unknown, so tasklens defines these.
 - Phase: P3
 - Privilege: none
@@ -1747,17 +1747,20 @@ Every ID in `spec/features-perf.md` (v2) and `spec/features-perf-addendum.md` (a
 
 Nothing from either source was dropped. The only DROP verdict is PERF-107 (the nethogs capability step), which v2 had already dropped; its panel text stays.
 
-v2's "Conflicts with the architecture review" list is settled as follows: item 1 by R-016 (PERF-016, PERF-017); item 2 by R-026 (PERF-062); item 3 by PERF-084 and ADR-010's close rule; item 4 by R-046 and R-073 (PERF-083, PERF-093); item 5 by the `curved_lines` key in table (a) (PERF-021); item 6 is open item 4 below; item 7 by R-030, R-057 and U-26 (PERF-046, PERF-072); item 8 by ADR-008's demand rules, with the hidden-CPU budget measured with one tray graph active.
+v2's "Conflicts with the architecture review" list is settled as follows: item 1 by R-016 (PERF-016, PERF-017); item 2 by R-026 (PERF-062); item 3 by PERF-084 and ADR-010's close rule; item 4 by R-046 and R-073 (PERF-083, PERF-093); item 5 by the `curved_lines` key in table (a) (PERF-021); item 6 by R-087 (PERF-071); item 7 by R-030, R-057 and U-26 (PERF-046, PERF-072); item 8 by ADR-008's demand rules, with the hidden-CPU budget measured with one tray graph active.
 
 ## Open items
 
-Each has a recommended answer. Beads use it until Oystein says otherwise.
+Nothing. The open items of this merge were settled in `docs/RECONCILIATION.md`:
 
-1. **State keys for detached graph windows (PERF-083).** Table (a) has `[[minigraphs]] detached` but no window grouping, size or position. Recommendation: add `window = <n>` to `[[minigraphs]]` and a `[[detached_windows]]` table with `id`, `width`, `height`, `x`, `y` in `state.toml`. `x` and `y` are written and applied only on KDE through the bridge. This does not conflict with ADR-010's rule against restoring the main window's position.
-2. **Choosing which GPU a minigraph card follows (PERF-080).** v2 lets the card menu pick a GPU, but the `source` values in table (a) have no device. Recommendation: allow `source = "gpu:<device key>"`, `"vram:<device key>"` and `"gpu_temp:<device key>"`; the bare values mean the first GPU in sidebar order.
-3. **Detached and mini window matching through the KWin bridge (PERF-083, PERF-093).** Decided here (inferred): match by tasklens's pid plus the window caption, keep one app ID. Confirm with the KWin bridge owner (R-046) that `WindowsSnapshot` carries caption and pid for these windows.
-4. **`tl-gpu-probe --api-versions` (PERF-071).** ADR-007 describes only the NVML sampler. Recommendation: add a second, one-shot mode to ADR-007 that loads Vulkan (ash) and EGL, prints one postcard frame, and exits. It never runs in the same process as NVML sampling.
-5. **SMART fallback through `pkexec smartctl` (PERF-051).** Recommendation: keep it in P3 under `org.freedesktop.policykit.exec`, and add that use to canonical table (c), which today lists that action only for Run as administrator.
-6. **Phase of View > Graphs.** APP-017 and APP-021 put the Graphs submenu in P3 (toggles in P2). Table (a) marks `[[minigraphs]]` hide and range as P1, and the panel is P1 here. Recommendation: the CPU to GPU Temperature checkboxes ship in P1 with the panel; "Keep detached graphs open" ships in P3. The APP merge should match.
-7. **Sidebar toggle state (PERF-007).** F9 and Ctrl+T hide the sidebar, and no key stores that. Recommendation: do not persist it.
-8. **Unverified facts this area depends on:** U-25 (udisks2 NVMe module), U-26 (sysfs `enabled`), U-27 (lockdown, efivars and iommu readable without root), U-28 (`cpuinfo_avg_freq`, `amd_pstate_prefcore_ranking`), U-29 (seat ACL for KMS ioctls), U-30 (`ureq` without Tokio), U-31 (ksni without Tokio), U-33 (Wayland clipboard), U-35 (NVML maxima for fixed scales), U-37 (Mission Center's rule survives reboot). Phase 0 or the first bead that touches each one confirms it.
+| Item | Resolution | Entries |
+|---|---|---|
+| 1. State keys for detached graph windows | R-084 | PERF-083 |
+| 2. Choosing which GPU a minigraph card follows | R-085 | PERF-080 |
+| 3. Detached and mini window matching through the KWin bridge | R-086 | PERF-083, PERF-093 |
+| 4. `tl-gpu-probe --api-versions` | R-087 | PERF-071 |
+| 5. SMART fallback through `pkexec smartctl` | R-088 | PERF-051 |
+| 6. Phase of View > Graphs | R-089 | PERF-080 |
+| 7. Sidebar toggle state | R-090 | PERF-007 |
+
+Unverified facts this area depends on: U-25 (udisks2 NVMe module), U-26 (sysfs `enabled`), U-27 (lockdown, efivars and iommu readable without root), U-28 (`cpuinfo_avg_freq`, `amd_pstate_prefcore_ranking`), U-29 (seat ACL for KMS ioctls), U-30 (`ureq` without Tokio), U-31 (ksni without Tokio), U-33 (Wayland clipboard), U-35 (NVML maxima for fixed scales), U-37 (Mission Center's rule survives reboot). Phase 0 or the first bead that touches each one confirms it.
