@@ -1323,3 +1323,317 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Decided here**: all "(new)" strings; banner not dismissable; no skeleton.
 
 ---
+
+# C. Startup Apps tab
+
+### UI-SYS-040 Startup Apps page layout
+
+- **Implements**: SYS-019, SYS-020, SYS-027, R-023 (tab 4), R-082.
+- **Anatomy** (no filter strip):
+
+  ```
+  ┌ tab strip (shell) ──────────────────────────────────────────── Filter: [        ] ┐
+  ├ Name ─────────── Publisher ────── Status ─ Startup impact ─ Type ──────── Location ─ Command ┤ 28
+  │ ▣ Discord        discord 0.0.111  ● Enabled  Not measured   Autostart (user)  ~/.config/autostart  /usr/bin/discord --start-minimized │
+  │ ▣ KDE Connect    kdeconnect 25.08 ● Enabled  Low            Autostart (system) /etc/xdg/autostart   kdeconnectd │
+  │ ⚙ syncthing      syncthing 2.0.3  ● Enabled  Medium         systemd user unit  ~/.config/systemd/user/… │
+  │ ▤ ssh-agent.sh   User             ○ Disabled None           Plasma pre-startup script ~/.config/plasma-workspace/env │
+  ├────────────────────────────────────────────────────────────────────────────────────┤
+  │ 12 Total | 9 Enabled | 3 Disabled                                                   │ 22
+  └────────────────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  Flat list, no groups, no tree.
+- **States**: loading UI-SYS-004; empty and error UI-SYS-005. Live rescans (inotify, user manager
+  `UnitFilesChanged`) update rows in place; selection is kept by `StartupRef` (R-082).
+- **Interaction**: key context `StartupTable` inside `Table`. Tab order: table only.
+- **Data binding**: `Snapshot.startup` (`ComponentMask::STARTUP`); `Demand.startup = true` while the
+  tab is active (rescans and inotify stop when it is not, R-082).
+- **Build**: `StartupPage` in `crates/tl-ui/src/pages/startup.rs` with
+  `table: Entity<TlTreeTable<StartupDelegate>>`.
+- **Performance**: rows change only on rescans.
+- **Accessibility**: as tables.
+- **Tests**: `startup_page_layout_golden`; `startup_rescan_keeps_selection`.
+- **Phase**: P2.
+- **Decided here**: none beyond the parts.
+
+### UI-SYS-041 Startup columns
+
+- **Implements**: SYS-020, SYS-027, R-011.
+- **Anatomy**:
+
+  | Id | Header label | Default width | Min width | Align | Content |
+  |---|---|---|---|---|---|
+  | `name` | "Name" | 220 | 120 | left | icon 16 and the localised `Name` or unit id |
+  | `publisher` | "Publisher" | 180 | 60 | left | "name version", "User", or empty |
+  | `status` | "Status" | 90 | 80 | left | UI-SYS-003 startup status |
+  | `impact` | "Startup impact" | 100 | 80 | left | UI-SYS-043 |
+  | `type` | "Type" | 190 | 60 | left | Type words from SYS-020 |
+  | `location` | "Location" | 260 | 60 | left | directory path; `$HOME` shown as `~` (chosen) |
+  | `command` | "Command" | 170 | 60 | left | `Exec`, `ExecStart` or script path |
+
+  Display order is as listed (spec). All seven are visible by default; there are no optional
+  columns. Widths are spec.
+- **States**:
+  - Default sort `status` ascending, then `name` ascending (R-011). Status order ascending:
+    Enabled, Disabled, Masked, Not in this desktop, Missing program (chosen; Enabled first per
+    spec). Impact order ascending: High, Medium, Low, None, Not measured (chosen).
+  - Text columns ellipsis at the end; Location and Command show the full value in a tooltip.
+- **Interaction**: header click sorts; header right-click opens the shared header menu; View >
+  Columns acts on this table.
+- **Data binding**: `state.toml` `[sort.startup]`, `[columns.startup]`.
+- **Build**: `StartupDelegate::columns()`.
+- **Tests**: `startup_default_sort_status_then_name`; `startup_columns_widths`.
+- **Phase**: P2.
+- **Decided here**: sort orders for Status and Startup impact; `~` for `$HOME`.
+
+### UI-SYS-042 Startup row anatomy
+
+- **Implements**: SYS-019, SYS-020.
+- **Anatomy**:
+
+  | Cell | Content | Style |
+  |---|---|---|
+  | name | icon 16 (the entry's `Icon=` resolved by the engine; fallback Lucide `app-window` for autostart entries, `cog` for systemd user units, `file-code` for Plasma scripts), gap `sp3`, name | `text_primary` |
+  | publisher | text | `text_primary`; "User" in `text_secondary` |
+  | status | dot and label (UI-SYS-003) | |
+  | impact | UI-SYS-043 | |
+  | type | text | `text_primary`; "Autostart (system, overridden)" in `text_secondary` |
+  | location | text | `text_secondary` |
+  | command | text | `text_primary` |
+
+  Shadowed system entries (overridden) are drawn with all text in `text_secondary` (chosen) so the
+  effective user entry stands out.
+- **States**: hover, selected, focused as tables. Pending enable or disable: the Status cell shows
+  an `status.info` dot and "Updating…" (new) until the result event.
+- **Interaction**: double-click or Enter opens Startup Properties. Name tooltip after 600 ms: the
+  full command and the source file path (two lines).
+- **Data binding**: `StartupSnapshot.entries[record]`: `id: StartupRef`, `name`, `icon_path`,
+  `publisher`, `status`, `impact: Impact`, `impact_detail`, `kind: StartupKind`, `location`,
+  `command`, `source_path`, `can_toggle`, `can_delete`, `can_run`, `overridden_by_user: bool`.
+- **Build**: `StartupDelegate::paint_cell`; icons with `img(path)` at 16 × ui scale.
+- **Performance**: icons are cached by GPUI's image cache by path.
+- **Accessibility**: row name "<Name>, <Status>, <Type>".
+- **Tests**: `startup_row_fallback_icons`; `startup_overridden_row_secondary`.
+- **Phase**: P2.
+- **Decided here**: fallback icons; overridden row styling; "Updating…".
+
+### UI-SYS-043 Startup impact display
+
+- **Implements**: SYS-021.
+- **Anatomy**: text only (no bar), `t_base`:
+
+  | Value | Colour |
+  |---|---|
+  | High | `status.warning` |
+  | Medium | `text_primary` |
+  | Low | `text_primary` |
+  | None | `text_secondary` |
+  | Not measured | `text_secondary` |
+
+  Tooltip (600 ms) for High, Medium, Low, three lines (spec content, chosen wording):
+  ```
+  Activation time: 412 ms
+  Started 3.2 s after login
+  CPU time: 0:00:01
+  ```
+  For units of `Type=simple` or `Type=exec` a fourth line: "For this unit type only the time to
+  start the program is measured." (new). For None: "Disabled entries do not run at login." (new).
+  For Not measured: "This entry did not start through systemd in this session." (new).
+- **States**: the value is computed once when the tab opens and on `UnitFilesChanged`; no live
+  updates otherwise.
+- **Interaction**: none besides the tooltip; sorting per UI-SYS-041.
+- **Data binding**: `entry.impact`, `entry.impact_detail { activation_ms, start_offset_ms, cpu_ns,
+  fork_exec_only: bool }`.
+- **Build**: `StartupDelegate::paint_cell` plus `tooltip`.
+- **Tests**: `impact_tooltip_lines`; `impact_thresholds_1000_300` (fake data 999 ms → Medium,
+  1000 ms → High, 299 ms → Low).
+- **Phase**: P2.
+- **Decided here**: colours; tooltip wording; the three new tooltip strings.
+
+### UI-SYS-044 Startup context menu
+
+- **Implements**: SYS-022 to SYS-025, R-091 (applied).
+- **Anatomy**: `TlMenu`, min width 220:
+
+  | # | Label | Key hint | Action | Enabled when |
+  |---|---|---|---|---|
+  | 1 | "Disable" or "Enable" (by state; both shown for a mixed selection) | | `startup::Disable` / `startup::Enable` | `can_toggle` for at least one target |
+  | 2 | "Run now" | | `startup::RunNow` | `can_run` for at least one target |
+  | – | separator | | | |
+  | 3 | "Copy" | | `table::CopyCell` | always |
+  | 4 | "Copy row" | Ctrl+C | `table::CopyRow` | always |
+  | 5 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always |
+  | 6 | "Copy command" | | `startup::CopyCommand` | one target |
+  | 7 | "Open file location" | | `startup::OpenFileLocation` | one target |
+  | 8 | "Properties" | Enter | `table::OpenProperties` | always |
+  | – | separator | | | |
+  | 9 | "Delete entry…" | Delete | `startup::Delete` | `can_delete` for at least one target |
+
+- **States**: disabled items carry a tooltip with the reason:
+  - Not in this desktop: "This entry is not used in this desktop (OnlyShowIn or NotShowIn)." (new)
+  - Missing program: "The program for this entry is not installed (TryExec)." (new)
+  - Masked systemd unit: "This unit is masked. Change its startup type in the Services tab." (new)
+  - Delete on a system XDG entry: "System entries cannot be deleted. Use Disable instead." (new)
+  - Delete on a package-owned unit: "This unit belongs to a package. Use Disable instead." (new)
+- **Interaction**: as UI-SYS-017 (capture at open, Shift+F10). The Delete key in `StartupTable`
+  opens the delete confirmation (chosen key; table b has no startup row). On an entry that cannot
+  be deleted, Delete shows the toast "This startup entry cannot be deleted" (spec).
+- **Data binding**: captured `SmallVec<[StartupRef; 1]>`.
+- **Build**: `StartupDelegate::context_menu`.
+- **Tests**: `startup_menu_order`; `startup_menu_mixed_shows_both`; `delete_key_on_system_entry_toast`.
+- **Phase**: P2.
+- **Decided here**: both labels for mixed selection; reason tooltips; Delete key.
+
+### UI-SYS-045 Enable and disable flow
+
+- **Implements**: SYS-022.
+- **States**: no pending toast (the action takes at most 2 s); the row shows "Updating…" while
+  pending. Results: "Startup entry enabled." / "Startup entry disabled." (spec); failure "Failed to
+  update startup entry: <error>" (spec text plus the error, chosen). Targets whose state would not
+  change are skipped. With 4 or more targets, the UI-SYS-007 summary rule applies: "3 startup
+  entries enabled", "2 of 3 startup entries enabled. 1 failed." (new pattern).
+- **Interaction**: no confirmation. The change applies at next login; running programs are not
+  stopped (no text says so in the toast; the Properties window shows Status only).
+- **Data binding**: `ActionKind::StartupEnable` / `StartupDisable` (ADR-005), targets
+  `ActionTarget::Startup(StartupRef)`.
+- **Build**: `pages/startup.rs` handlers through `ActionTracker`.
+- **Tests**: `startup_enable_toast`; `startup_disable_skips_already_disabled`.
+- **Phase**: P2.
+- **Decided here**: error suffix; skip rule; summary strings.
+
+### UI-SYS-046 Run now flow
+
+- **Implements**: SYS-023.
+- **States**: result toasts only: "Startup entry launched." / "Failed to launch startup entry"
+  (spec) with ": <error>" appended (chosen) / "Already running" (spec, Info). No row change.
+- **Interaction**: works whatever the Status. Multi-select launches each target (summary rule at 4
+  or more: "4 startup entries launched" (new)).
+- **Data binding**: `ActionKind::StartupRunNow` (new; open item O-2).
+- **Tests**: `run_now_already_running_toast`.
+- **Phase**: P2.
+- **Decided here**: error suffix; summary string; new ActionKind.
+
+### UI-SYS-047 Delete startup entry confirmation
+
+- **Implements**: SYS-024, APP-045.
+- **Anatomy**: `TlDialog` modal window titled "tasklens Delete Startup Entry" (spec), width 440
+  (chosen), height fits content:
+
+  ```
+  ┌ tasklens Delete Startup Entry                          📌 ✕ ┐
+  │  ⚠  Delete startup entry                                    │  heading t_md semibold
+  │     Permanently remove this startup entry?                  │  t_base
+  │     The autostart file will be deleted. The app stays       │  type line, t_base text_secondary
+  │     installed.                                              │
+  │     Discord                                                 │  entry name, t_base medium
+  │     ~/.config/autostart/discord.desktop                     │  source path, t_sm text_secondary, selectable
+  │                                         [Cancel] [Delete]   │  footer
+  └─────────────────────────────────────────────────────────────┘
+  ```
+
+  Icon `triangle-alert` 20 in `status.warning`. "Delete" is a danger `TlButton`; "Cancel" is
+  default. Type lines (spec): user XDG entry "The autostart file will be deleted. The app stays
+  installed."; user systemd unit "The unit will be disabled and its unit file deleted."; Plasma
+  script "The script file will be deleted.".
+
+  Multi-select (chosen): heading "Delete startup entries" (new), text "Permanently remove these
+  <n> startup entries?" (new), then up to 5 names, then "and <n> more" (new). Entries that cannot
+  be deleted are left out and a line says "<n> entries cannot be deleted and are skipped." (new).
+- **States**: focus starts on "Cancel" (chosen); Enter triggers the focused button; Esc cancels.
+  While deleting, both buttons are disabled and "Delete" shows a 14 px spinner (static with reduced
+  motion); the window closes on the result.
+- **Interaction**: results "Startup entry deleted." / "Failed to delete startup entry" (spec) in the
+  main window.
+- **Data binding**: `ActionKind::StartupDelete` (new; open item O-2).
+- **Build**: `crates/tl-ui/src/windows/confirm_startup_delete.rs` using `TlDialog`.
+- **Tests**: `delete_dialog_texts_per_type`; `delete_dialog_focus_on_cancel`;
+  `delete_multi_skips_undeletable`.
+- **Phase**: P2.
+- **Decided here**: width; name and path lines; focus on Cancel; multi-select texts.
+
+### UI-SYS-048 Startup copy formats and Open file location
+
+- **Implements**: SYS-025, R-012.
+- **Anatomy**: "Copy row" block, exactly:
+
+  ```
+  Name: …
+  Publisher: …
+  Status: …
+  Startup impact: …
+  Type: …
+  Location: …
+  Command: …
+  Resolved path: …
+  ```
+
+  Location prints the full path (no `~`; chosen, so the copy is usable in a shell).
+- **Interaction**:
+  - "Copy command" copies the Command value; toast "Startup command copied." (spec).
+  - "Open file location": `FileManager1.ShowItems` on the source file; toasts "Opening file
+    location" / "Failed to open file location" (APP-044); file gone: "Startup file location
+    unavailable." (spec).
+- **Tests**: `startup_copy_block_golden`; `open_location_missing_file_toast`.
+- **Phase**: P2.
+- **Decided here**: full path in copy.
+
+### UI-SYS-049 Startup status bar, refresh and keyboard
+
+- **Implements**: SYS-027.
+- **Anatomy**: status text "12 Total | 9 Enabled | 3 Disabled", plus " | 2 selected". Disabled
+  counts every entry that is not Enabled (chosen, so Total = Enabled + Disabled). Counts follow the
+  text filter.
+- **Interaction**: F5 sends `RefreshNow(Startup)`; toast "Startup entries refreshed." (spec) when the
+  next startup version arrives or after 2 s. Keys: table (b) Table rows; Enter, Alt+Enter, Ctrl+I
+  Properties; Delete delete entry (UI-SYS-044); Ctrl+C, Ctrl+Shift+C copy. Space does nothing (no
+  tree).
+- **Data binding**: `StartupSnapshot.counts` (new).
+- **Tests**: `startup_status_text`; `startup_keymap`.
+- **Phase**: P2.
+- **Decided here**: Disabled count rule; refresh toast timing.
+
+### UI-SYS-050 Startup Properties window
+
+- **Implements**: SYS-026, APP-045.
+- **Anatomy**: `TlSecondaryWindow` titled "Startup properties: <Name>" (spec), default 620 × 520,
+  minimum 480 × 360 (chosen), not modal. Content: `TlKeyValueGrid` in a scroll region, padding
+  `sp6`, label column 220, one copy button per line (`TlIconButton` `copy` 14 in a 20 × 20 hit
+  area at the line's right end, `text_secondary` at 60% alpha, full alpha on row hover or focus).
+  Footer 48 with one `TlButton` "Close" (default).
+
+  | Label | Value |
+  |---|---|
+  | "Name" | name |
+  | "Publisher" | publisher, or "Not reported" |
+  | "Status / Enabled / State code" | for example "Enabled / Yes / active (running)"; State code "-" when there is no generated unit |
+  | "Startup impact" | "Low (212 ms)"; "Not measured" without ms |
+  | "Type / Source / Scope" | for example "Autostart (user) / XDG autostart / user"; Source words "XDG autostart", "systemd user unit", "Plasma pre-startup script", "Plasma logout script" (chosen) |
+  | "Location" | directory |
+  | "Source path" | file path |
+  | "Resolved path" | binary path found on PATH, or "Not found" (chosen) |
+  | "Command" | command, wraps |
+  | "Can run / Can toggle / Can delete / File exists" | "Yes / Yes / No / Yes" |
+  | "OnlyShowIn" | list, shown only when set |
+  | "NotShowIn" | list, shown only when set |
+  | "TryExec" | value, shown only when set |
+  | "Autostart phase" | `X-KDE-autostart-phase`, shown only when set |
+  | "Generated unit" | unit name, shown only for desktop entries |
+  | "Overrides" | system path, shown only when a user file shadows one |
+
+- **States**: values refresh from the snapshot on rescans. Entry removed: the title appends
+  " (removed)" (new) and values stay in `text_secondary`. Up to 10 windows (chosen); the 11th shows
+  "Too many startup properties windows are already open" (new). Opening the same entry focuses its
+  window.
+- **Interaction**: copy button copies that line's value; toast "Copied to clipboard". Esc and
+  "Close" close. Ctrl+C with a line focused copies its value (chosen).
+- **Data binding**: the entry in `Snapshot.startup` by `StartupRef`; `ComponentMask::STARTUP`.
+- **Build**: `crates/tl-ui/src/windows/startup_properties.rs`.
+- **Performance**: re-renders only when its entry changes (pointer compare).
+- **Accessibility**: each copy button has the accessible name "Copy <label>".
+- **Tests**: `startup_props_lines_golden`; `startup_props_removed_title`; `startup_props_cap`.
+- **Phase**: P2.
+- **Decided here**: sizes; Source words; "Not found"; " (removed)"; cap and its toast; optional
+  rows shown only when set; label for X-KDE-autostart-phase.
+
+---
