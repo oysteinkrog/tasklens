@@ -81,6 +81,7 @@ Plan keys are listed per epic below. The ID column is filled once the beads exis
 | E16-003 | `tasklens-fut.6` | SnapshotHub, ComponentMask install and hidden state | P0 | 0 | `hub.rs`, `tests/ui_hub.rs` | E16-001 |
 | E16-004 | `tasklens-fut.7` | DemandAggregator | P0 | 0 | `demand.rs`, `tests/ui_demand.rs` | E16-003 |
 | E16-A1 | `tasklens-fut.1` | TasklensUi::init and the module roots | P0 | 0 | `app.rs`, `window/mod.rs`, `pages/mod.rs`, `windows/mod.rs` | E16-002, E16-004, E15-A1, E15-A2, E17-A1 |
+| E16-012 | `tasklens-fut.15` | tl_ui::run(UiLaunch) entry point for tl-app | P0 | 0 | `app.rs`, `lib.rs`, `tests/ui_hub.rs` | E16-A1 |
 | E16-005 | `tasklens-fut.8` | Headless render helpers and golden compare | P1 | 1 | `testing/render.rs`, `Cargo.toml` | E16-001, E15-001 |
 | E16-006 | `tasklens-fut.9` | ToastQueue and toast rendering | P0 (spec P1) | 0 | `components/toast.rs`, `tests/ui_toasts.rs` | E16-A1 |
 | E16-008 | `tasklens-fut.12` | TlSecondaryWindow frame and pin | P0 (spec P1) | 0 | `components/window_frame.rs` | E16-A1, E16-006 |
@@ -194,3 +195,9 @@ Plan keys are listed per epic below. The ID column is filled once the beads exis
 37. Seven Lucide icons the foundation uses (`x`, `pin`, `pin-off`, `lock`, `shield`,
     `shield-check`, `rotate-ccw-clock`) are not in the kit's default bundle; E15-005 embeds them
     with the kit's `icon_assets!` macro.
+38. tl-app cannot depend on gpui-kit, so E16-012 adds `tl_ui::run(UiLaunch) -> UiExit` (B1 E33-OI-1).
+    `UiLaunch` holds `UiInit` plus `OpenMode` and `StartOptions`; `UiExit` is `Quit`,
+    `RendererFailed(String)` or `DeviceLost`. A renderer failure is detected as a panic before the
+    first window opens; device loss is reported by E33-012 through `request_exit`. B1 must build
+    this shape and add the edge E33-A1 to E16-012. `debug` and `on_quit` from the B1 proposal are
+    dropped.
