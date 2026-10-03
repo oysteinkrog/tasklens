@@ -911,3 +911,205 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: none
+
+## GPU pages
+
+### PERF-062 GPU enumeration and tl-gpu-probe
+- Was: v2 PERF-056
+- Source: TS GPU N cards | MC nvtop | review section 3 "GPU child contract" | ADR-007
+- Behaviour: One page per GPU, keyed by NVML UUID (NVIDIA) or PCI address (PERF-005). A hung or crashed probe shows `Unavailable` on every GPU metric with the tooltip "GPU monitor restarting", never zero. When the probe binary is missing, GPU metrics show `Not supported` with the tooltip "GPU probe not installed".
+- Linux data/mechanism:
+  - **Discovery:** DRM devices from `/sys/class/drm/card*/device` (vendor `0x10de`, `0x1002`, `0x8086`), plus NVIDIA devices from NVML.
+  - **NVIDIA, only inside `tl-gpu-probe`** (ADR-007): `nvmlInit_v2`, `nvmlDeviceGetCount_v2`, `nvmlDeviceGetHandleByIndex_v2`, `nvmlDeviceGetUUID`, `nvmlDeviceGetName`, `nvmlDeviceGetPciInfo_v3` (matched to the DRM card by bus id; here `00000000:2D:00.0` matches card1), `nvmlDeviceGetMinorNumber`. Probe lookup: `$TASKLENS_GPU_PROBE`, the running binary's directory, `/usr/lib/tasklens/tl-gpu-probe`.
+  - Socketpair, postcard framing, `Sample` deadline 500 ms, restart rules per ADR-007.
+  - **Rate:** device totals and GPU process data at 1 Hz, never faster. The Refresh setting does not change it (v2's 500 ms option is dropped).
+  - **AMD and Intel:** read in-process from sysfs, hwmon and fdinfo (PERF-074, PERF-075). No child process is needed, because no native library is loaded.
+- Verdict: ADAPT. nvtop is replaced by direct per-vendor sources.
+- Phase: P1
+- Privilege: none
+- Applied: R-026
+
+### PERF-063 Engine graphs
+- Was: v2 PERF-057, add amend (GPU page engine graphs)
+- Source: TS engine graphs (Utilization/3D, Compute, Video Encode, Video Decode, Video Processing, "Engine %u"), "Select GPU Engine Graphs", "Hide This Engine Graph", `HiddenGpuEngines`, crosscheck B.4
+- Behaviour:
+  - Row 1 is a grid of engine graphs in the CPU-grid style. Row 2 holds "Memory" (PERF-064) and "Temperature" (PERF-068), as in TaskSlinger 0.9.2. Row 3 is optional: "Power" (PERF-067) and "Clocks" (PERF-066).
+  - The page context menu has "Select GPU engine graphs" (a checklist of the engines plus the Power and Clocks graphs) and, on an engine graph, "Hide this engine graph".
+  - **NVIDIA engines** (verified on driver 615.71.09, JPEG and OFA included):
+
+    | Graph | NVML call |
+    |---|---|
+    | 3D / Compute | `nvmlDeviceGetUtilizationRates` `.gpu` |
+    | Memory controller | `nvmlDeviceGetUtilizationRates` `.memory` |
+    | Video Encode | `nvmlDeviceGetEncoderUtilization` |
+    | Video Decode | `nvmlDeviceGetDecoderUtilization` |
+    | JPEG | `nvmlDeviceGetJpgUtilization` |
+    | Optical flow | `nvmlDeviceGetOfaUtilization` |
+
+  - **AMD engines:** "Graphics", "Compute", "Memory controller", "Video Encode", "Video Decode", "JPEG", "DMA".
+  - **Intel engines:** "Render/3D", "Compute", "Copy", "Video", "Video Processing" (the video-enhance engine).
+  - "Video Processing" is used only where AMD or Intel report a video-enhance engine. "Throughput" is never an engine name (it is the network graph title).
+  - The probe checks each call per device. A call returning `NVML_ERROR_NOT_SUPPORTED` hides that engine; it is never drawn as zero. Engines the device does not report are not listed.
+- Linux data/mechanism: NVML as above (probe). AMD and Intel per PERF-074 and PERF-075. Keys `performance.hidden_gpu_engines = []` (engine keys) and `performance.gpu_optional_graphs = []` (subset of `power`, `clocks`). Mission Center's middle and bottom graph choices are not built.
+- Verdict: ADAPT. NVML has no 3D/Compute split and no video-processing engine, so tasklens shows one 3D/Compute engine plus JPEG and optical flow.
+- Phase: P1 for 3D/Compute, Video Encode and Video Decode; P2 for the rest, hiding, and the optional row.
+- Privilege: none
+- Applied: R-054
+
+### PERF-064 GPU memory
+- Was: v2 PERF-058
+- Source: TS GPU memory (dedicated), (shared), Hardware reserved memory | MC memory graph with dedicated solid and shared dashed
+- Behaviour: The "Memory" graph shows dedicated (filled) against its total, and shared (dashed) against its total where the device has shared memory. Rows: "Dedicated memory" ("2.80 GiB / 15.92 GiB"), "Shared memory", "Hardware reserved memory" ("380.00 MiB").
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetMemoryInfo_v2` (`used`, `total`, `reserved`). NVML has no shared (GTT) figure, so that row shows `Not supported`.
+  - AMD: `device/mem_info_vram_{used,total}` and `mem_info_gtt_{used,total}`.
+  - Intel dGPU (xe or i915): the sum of `drm-resident-local0`/`drm-total-local0` over readable fdinfo, plus `device/tile0/vram0` sizes. Intel iGPU: "Shared" from the summed `drm-resident-system0`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: table d
+
+### PERF-065 Video encode and decode
+- Was: v2 PERF-059
+- Source: TS Video Encode/Decode | MC Encode/Decode graph and rows
+- Behaviour: Rows "Video encode" and "Video decode" in percent. When the hardware shares one engine, a single "Video encode/decode" row is shown. Encode and decode are also engine graphs (PERF-063).
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetEncoderUtilization(&util, &periodUs)` and `nvmlDeviceGetDecoderUtilization`. The active session count comes from `nvmlDeviceGetEncoderSessions` (tooltip).
+  - AMD: `gpu_metrics` `vcn_activity[]`, else fdinfo `drm-engine-enc`/`dec`.
+  - Intel: the video engines.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-066 GPU clocks
+- Was: v2 PERF-060
+- Source: MC Clock speed, Memory speed, Clock Speeds graph
+- Behaviour: Rows "Clock speed" ("1905 / 3105 MHz"), "Memory speed" ("7001 / 14001 MHz"), "Video clock". "Clocks" graph (optional row): GPU clock solid, memory clock dashed, scaled to the maximum. The tooltip shows the P-state ("P3") and the throttle reasons.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetClockInfo(NVML_CLOCK_GRAPHICS | NVML_CLOCK_MEM | NVML_CLOCK_VIDEO)`, `nvmlDeviceGetMaxClockInfo`, `nvmlDeviceGetPerformanceState`, `nvmlDeviceGetCurrentClocksEventReasons`.
+  - AMD: hwmon `freq1_input` (sclk) and `freq2_input` (mclk). The maximum is the last line of `pp_dpm_sclk`/`pp_dpm_mclk`.
+  - Intel: `gt_act_freq_mhz`/`gt_max_freq_mhz` (i915) or `device/tile0/gt0/freq0/{act_freq,max_freq}` (xe).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-067 GPU power
+- Was: v2 PERF-061
+- Source: MC Power draw current / limit, Power graph
+- Behaviour: Row "Power draw" ("31.9 / 300 W"). The tooltip gives the limit range ("max 350 W") and energy since boot. "Power" graph (optional row) scaled to the limit.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetPowerUsage` (mW), `nvmlDeviceGetEnforcedPowerLimit`, `nvmlDeviceGetPowerManagementLimitConstraints`, `nvmlDeviceGetTotalEnergyConsumption` (mJ).
+  - AMD: hwmon `power1_input`, else `power1_average` (µW), and `power1_cap`.
+  - Intel dGPU: hwmon `energy1_input` delta and `power1_max`. Intel iGPU: RAPL `intel-rapl:0:1` (uncore), labelled "Package uncore (estimate)".
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none, except the Intel iGPU RAPL source, which needs PERF-106.
+
+### PERF-068 GPU temperature and fan
+- Was: v2 PERF-062
+- Source: TS Temperature | MC Temperature
+- Behaviour: Temperature in integer °C on the card, the stats grid and the "Temperature" graph. A "Temperature source" row (PERF-069). Rows for the slowdown and shutdown thresholds. "Fan speed" ("0% (0 RPM)") belongs to the GPU page and does not appear on the Fans pages. Memory temperature shows `Not reported` on this card.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetTemperatureV` with `NVML_TEMPERATURE_GPU`, else `nvmlDeviceGetTemperature`. Also `nvmlDeviceGetTemperatureThreshold(SLOWDOWN, SHUTDOWN)`, `nvmlDeviceGetNumFans`, `nvmlDeviceGetFanSpeed_v2`, and `nvmlDeviceGetFanSpeedRPM` where available. Memory temperature uses `nvmlDeviceGetFieldValues(NVML_FI_DEV_MEMORY_TEMP)`.
+  - AMD: hwmon `temp1` edge, `temp2` junction, `temp3` mem, `fan1_input`, `pwm1`. The main reading is junction when present, else edge.
+  - Intel dGPU: hwmon `temp1`. The iGPU has no sensor of its own and shows `Not supported`.
+- Verdict: BUILD
+- Phase: P1 for temperature; P2 for fan and thresholds.
+- Privilege: none
+
+### PERF-069 GPU temperature source values
+- Was: add PERF-092
+- Source: TS crosscheck A.17 (L29508-29509 "Windows D3DKMT", "Windows D3DKMT: %s"; NVAPI L35305)
+- Behaviour: The GPU page "Temperature source" row, the temperature tooltip and Information > Graphics > "Temperature source" show where the reading came from:
+  - `NVML (GPU core)`
+  - `hwmon amdgpu: edge`, `hwmon amdgpu: junction`, `hwmon amdgpu: mem`
+  - `hwmon i915` or `hwmon xe: pkg`
+  - `Not reported` when there is no source
+
+  On AMD the tooltip lists all sensors.
+- Linux data/mechanism: NVIDIA per PERF-068. AMD and Intel: `/sys/class/drm/cardN/device/hwmon/hwmon*/temp*_{input,label}`.
+- Verdict: ADAPT
+- Phase: P1 for the value; P2 for the Information row.
+- Privilege: none
+
+### PERF-070 PCIe link
+- Was: v2 PERF-063
+- Source: MC PCI Express speed, Max PCI Express speed
+- Behaviour: Rows "PCI Express" ("Gen 4 x16"), "Max PCI Express" ("Gen 5 x16"; hidden when equal), "PCIe throughput" (RX and TX). Here the card runs at 16 GT/s x16 with a 32 GT/s maximum (verified).
+- Linux data/mechanism:
+  - NVIDIA: `nvmlDeviceGetCurrPcieLinkGeneration`, `nvmlDeviceGetCurrPcieLinkWidth`, `nvmlDeviceGetGpuMaxPcieLinkGeneration`, `nvmlDeviceGetMaxPcieLinkWidth`, `nvmlDeviceGetPcieThroughput(TX_BYTES | RX_BYTES)`.
+  - All vendors, and the fallback: `device/{current_link_speed,current_link_width,max_link_speed,max_link_width}`, mapping GT/s to Gen (2.5→1, 5→2, 8→3, 16→4, 32→5, 64→6).
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-071 GPU static fields
+- Was: v2 PERF-064
+- Source: TS Driver version, Driver date, DirectX version, Physical location | MC OpenGL, Vulkan, PCI bus address
+- Behaviour: Rows: Driver version (615.71.09), Kernel module (replaces Driver date: "nvidia 615.71.09"), CUDA version, Vulkan version, OpenGL version (replaces DirectX version), Physical location ("PCI bus 45, device 0, function 0"), VBIOS version, UUID, Architecture.
+- Linux data/mechanism:
+  - NVIDIA: `nvmlSystemGetDriverVersion`, `nvmlSystemGetCudaDriverVersion_v2`, `nvmlDeviceGetVbiosVersion`, `nvmlDeviceGetArchitecture`.
+  - Kernel module from `/sys/module/<driver>/version`.
+  - Vulkan and OpenGL: a separate short-lived run of `tl-gpu-probe --api-versions`, once at startup, apart from the NVML sampler process:
+    - Vulkan: ash calls `vkEnumeratePhysicalDevices` and matches the GPU through `VK_EXT_pci_bus_info`; it reads `apiVersion` and `VkPhysicalDeviceDriverProperties`.
+    - OpenGL: EGL `EGL_EXT_platform_device` on the matching DRM device, then a context, then `glGetString(GL_VERSION)`.
+    - A crash only gives `Unknown`.
+  - ADR-007 does not describe `--api-versions` yet (open item 4).
+- Verdict: ADAPT. DirectX becomes Vulkan and OpenGL; the driver date becomes the module version.
+- Phase: P2
+- Privilege: none
+
+### PERF-072 Displays list
+- Was: v2 PERF-065, add amend (GPU displays list)
+- Source: TS Displays (connection type, "%s @ %d Hz", "%d-bit, %s", orientation; crosscheck A.17)
+- Behaviour: Under the GPU stats, one row per enabled display on that GPU, in the PERF-073 format. Disconnected and disabled connectors are not listed. HDR, VRR and wide colour gamut are not shown before P4.
+- Linux data/mechanism:
+  - **DRM KMS read-only ioctls** on `/dev/dri/cardN` (no DRM master needed; seat ACL, U-29): `drmModeGetResources`, `drmModeGetConnector` (connector type), `drmModeGetEncoder`/`drmModeGetCrtc` (current mode and refresh), the connector property `max bpc`, and the EDID blob for the monitor name. Bit depth comes only from `max bpc` and is labelled "Max bit depth".
+  - **KScreen on KDE:** run `kscreen-doctor -j` when the GPU page opens and again on a KScreen config change. It supplies enabled state (`enabled`), primary (`priority == 1`), orientation (`rotation`) and scale (`scale`); the current mode is cross-checked through `currentModeId`, `modes[].size` and `refreshRate`. tasklens never parses `kscreen-doctor -o` text output.
+  - Without KScreen: mode and refresh from KMS, enabled state from KMS (a connector with an active CRTC), orientation `Not reported`.
+  - If opening `/dev/dri/cardN` fails: monitor name from `/sys/class/drm/card*-*/edid` and modes from `modes`; Max bit depth `Not reported`.
+  - v2's claim that the sysfs `enabled` file is wrong on NVIDIA 615 is withdrawn: KScreen agreed with sysfs during the check (U-26).
+  - P4: HDR, VRR and wide colour gamut through the `kde_output_device_v2` Wayland protocol.
+- Verdict: ADAPT. Linux has no actual-bit-depth API, so the row shows the maximum.
+- Phase: P2 (HDR, VRR and WCG in P4)
+- Privilege: none
+- Applied: R-057
+
+### PERF-073 Display connector type names and row format
+- Was: add PERF-091
+- Source: TS crosscheck A.17 (L29513-29519, L35237)
+- Behaviour: Connector type is one of: VGA, DVI-I, DVI-D, DVI-A, Composite, S-Video, LVDS, Component, DIN, DisplayPort, HDMI, TV, eDP (Embedded DisplayPort), Virtual, DSI, DPI, Writeback, SPI, USB, Unknown. TaskSlinger's Windows-only names (D-Connector, UDI (Embedded), SDTV Dongle, Miracast) are left out. Row format: `<monitor name> · DisplayPort · 1920x1200 @ 59.95 Hz · Max bit depth 10 · Portrait (left) · 110%`, with ` (primary)` after the monitor name for the primary output.
+- Linux data/mechanism:
+  - Connector type from KMS `drmModeGetConnector().connector_type`, or from the sysfs connector name prefix (`card1-DP-2` gives DisplayPort).
+  - KScreen `type` enum as the KDE cross-check (14 = DisplayPort, verified).
+  - Monitor name from EDID descriptor 0xFC.
+  - Orientation from KScreen `rotation`: 1 Landscape, 2 Portrait (left), 4 Landscape (flipped), 8 Portrait (right). DP-3 here reports 2 (verified).
+- Verdict: ADAPT (DRM connector types replace Windows types)
+- Phase: P2
+- Privilege: none
+- Applied: R-057
+
+### PERF-074 AMD GPU backend
+- Was: v2 PERF-066
+- Source: MC nvtop amdgpu backend, PLAN section 3 "AMD and Intel GPUs"
+- Behaviour: Same pages as NVIDIA. Not tested on this machine.
+- Linux data/mechanism:
+  - `device/gpu_busy_percent` (Graphics), `device/mem_busy_percent` (Memory controller).
+  - `device/gpu_metrics`, a binary struct parsed by its header version: `average_gfx_activity`, `average_umc_activity`, `vcn_activity`, `temperature_*`.
+  - Compute, DMA and JPEG engines from the sum of `/proc/<pid>/fdinfo/*` `drm-engine-{compute,dma,jpeg}` ns deltas over all readable DRM clients, de-duplicated by `drm-client-id`. When any fdinfo read fails, the engine graph tooltip says "Own processes only".
+  - Memory, clocks, power and temperature per PERF-064 to PERF-068.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none. fdinfo engines cover only processes tasklens can read, and say so.
+
+### PERF-075 Intel GPU backend
+- Was: v2 PERF-067
+- Source: PLAN section 3 | MC nvtop i915/xe
+- Behaviour: Same pages as NVIDIA. Not tested on this machine.
+- Linux data/mechanism:
+  - Engines, preferred source: the i915 PMU through `perf_event_open`, type from `/sys/bus/event_source/devices/i915/type`, events `rcs0-busy`, `bcs0-busy`, `vcs0-busy`, `vecs0-busy`, `ccs0-busy`.
+  - Fallback: summed fdinfo `drm-engine-{render,copy,video,video-enhance,compute}` (i915), or `drm-cycles-*`/`drm-total-cycles-*` (xe).
+  - Clocks, power and memory per PERF-064, PERF-066 and PERF-067.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: The PMU needs `CAP_PERFMON` or `kernel.perf_event_paranoid` ≤ 0. tasklens asks for neither. The fdinfo fallback covers only processes tasklens can read.
