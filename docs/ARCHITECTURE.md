@@ -1359,7 +1359,7 @@ text_cache.rs
 testing/fake_engine.rs
 ```
 
-- Tabs, in order: Processes, Performance, App history (later, needs ADR-012), Startup apps, Users (later), Details (later), Services, Connections, Information. A tab that is not built yet is not shown.
+- Six tabs, in TaskSlinger's order and with these labels: Processes, Performance, Services, Startup Apps, Connections, Information. History is a mode of the Processes tab, not a tab; the tab label reads "History" while it is on. There are no Users, Details or App history tabs. A tab that is not built yet is not shown.
 - Page entities are created on first visit and kept. Only the active page renders (`match` in `MainWindow::render`).
 - Every page, sidebar, detail pane, header and status bar is embedded with `.cached(StyleRefinement::default().size_full())` (or its fixed size). The tree-table body is not cached (it owns scrolling).
 - Views subscribe to `SnapshotHub` and notify themselves only for components they draw. Nothing calls `notify` inside `render`. Entities, subscriptions and focus handles are created in constructors only.
@@ -1370,9 +1370,9 @@ testing/fake_engine.rs
 pub struct ChartSpec {
     pub series: SmallVec<[ChartSeries; 2]>,
     pub y: YScale,
-    pub range_ns: u64,           // 60 s default; 15 s option in v1
+    pub range_ns: u64,           // 30 s, 1 min (default), 5 min, 10 min; 5 and 10 min from P2 read the 1 Hz tier (ADR-003)
     pub grid: GridStyle,
-    pub smooth: bool,            // settings "Smooth graphs"
+    pub smooth: bool,            // setting motion.smooth_graphs ("Smooth graphs")
 }
 pub struct ChartSeries { pub id: SeriesId, pub fill: Option<Hsla>, pub line: Hsla, pub line_width: Pixels }
 pub enum YScale { Fixed { min: f32, max: f32 }, AutoRate { floor: f32 } }
@@ -1429,7 +1429,8 @@ pub struct TableQuery {
     pub generation: u64,
     pub mode: TableMode,               // Grouped | Tree | Flat
     pub sort: SortSpec,                // column + Asc/Desc; tie-break ProcessKey
-    pub filter: Arc<str>,              // lowercase; matches name, comm, cmdline (setting), exact PID
+    pub filter: Arc<str>,              // lowercase; matches display name, image name, cmdline, user, description,
+                                       // app name, unit name, group names; numeric input also matches PID by prefix
     pub expanded: Arc<[NodeId]>,       // UI owns expansion state
 }
 pub enum NodeId { Group(GroupKey), Process(ProcessKey) }
@@ -1447,14 +1448,14 @@ pub struct ProcessTableView {
 - Group totals sum each process once; in tree mode a parent row shows its own values, and the collapsed parent shows its subtree sum in secondary text.
 - Missing parent (PPID not visible or exited): the process is a root. Reparenting moves it at the next sweep.
 - Filter: the UI debounces input 100 ms, then sends `SetTableQuery` with a new generation. The UI shows a view only if `query_generation` equals the latest sent; until then it keeps the previous rows.
-- Row height: `28.0 × ui_scale` logical px. Column positions are a precomputed `Arc<[Pixels]>` of x offsets; cells are fixed-width `div`s in one row `div`. Horizontal scroll moves the whole table.
+- Row height: `28 × row_height_pct/100 × ui_scale_pct/100` logical px. Column positions are a precomputed `Arc<[Pixels]>` of x offsets; cells are fixed-width `div`s in one row `div`. Horizontal scroll moves the whole table.
 - Header: custom two-line header (total value over column name), resizable and reorderable columns, sort by clicking anywhere on the header cell (Desc first, then Asc), right-click for column chooser.
 - Selection (`table/selection.rs`): `FxHashSet<NodeId>` plus `anchor` and `focus` `Option<NodeId>`. Click, Ctrl-click, Shift-click, Ctrl-A, arrow keys, Page Up/Down, Home/End move rows. A `FxHashMap<NodeId, u32>` index is rebuilt when `table.header.version` changes.
 - Right-click selects the row if it is not selected, then opens a `PopupMenu` whose actions carry the captured `SmallVec<[ProcessKey; 1]>` (and subtree for tree actions). The menu stays bound to those keys even if rows move.
 - Visible demand: the `uniform_list` range callback records the visible range; after each render the table computes the keys of the range plus one viewport above and below (max 512) and, if the set changed, gives it to `DemandAggregator`. This runs after sorting and filtering even if the range did not change.
-- Ctrl-pause: while Ctrl is held (and the table has focus), the table renders from `paused: Option<Arc<Snapshot>>` instead of the hub's current snapshot. Release on Ctrl-up or focus loss. Actions still revalidate identities.
-- New and exited highlight: rows with `NEW` get the theme's success tint, `EXITED` the danger tint, for 2 s (setting "Highlight new and exited processes", default on).
-- Heat colouring: a cell's background blends `ROW` color toward `VALUE_HEAT` by `value / column_max`, with `column_max` fixed per column type (CPU 100%, memory 25% of RAM, I/O and network by AutoRate).
+- Ctrl-pause: while Ctrl is held and the main window is active, whatever has focus inside it, the table renders from `paused: Option<Arc<Snapshot>>` instead of the hub's current snapshot and the status bar shows "[PAUSED - Ctrl]". Release on Ctrl-up or window deactivation. Actions still revalidate identities.
+- New and exited highlight: rows with `NEW` get the theme's success tint, `EXITED` the danger tint, for the linger time (`2 × processes.interval_ms`, clamped to 1..=3 s), fading over the last 300 ms unless reduced motion is on. Setting `processes.highlight_new_exited`, label "Highlight new and exited processes", default on.
+- Heat colouring: a cell's background blends `ROW` color toward `VALUE_HEAT` by `value / reference`, with a fixed reference per column type: CPU `400 / ncpu` % (12.5% on this machine), CPU (one core = 100%) 400%, memory columns 10% of MemTotal, disk and I/O rates 100 MiB/s, network 10 MiB/s (80 Mbps), GPU 100%, VRAM 25% of total VRAM, power 25 W. Counts are not tinted. Settings `appearance.heat_coloring = true` and `appearance.heat_intensity_pct = 50`.
 
 **Text caching** (`text_cache.rs`):
 - `CellTextCache: FxHashMap<(NodeId, ColumnId), (u64 /*value bits*/, Validity, SharedString)>`, max 8192 entries, cleared of keys not seen in the last 3 table versions.
@@ -1479,25 +1480,27 @@ pub struct TlTheme {
 }
 ```
 
-- Built-in themes ship as `assets/themes/*.json` in TaskSlinger's format `{"themes":[{"name":..,"SLOT":"#RRGGBB"}]}` plus `accent` and `graph.*` keys. v1 ships "Default Dark" with the PLAN.md section 9 palette; the other 11 named themes are added in the customization phase. User themes load from `$XDG_CONFIG_HOME/tasklens/themes/*.json`.
+- Built-in themes ship as `assets/themes/builtin.json` in TaskSlinger's format `{"themes":[{"name":..,"SLOT":"#RRGGBB"}]}` plus `accent` and `graph.*` keys. P1 ships "Default Dark" (PLAN.md section 9 palette) and "Default Light", because the `theme.light` default needs it; the other 10 named themes arrive in P2. User themes load from `$XDG_CONFIG_HOME/tasklens/themes.json` in the same format.
 - Custom tasklens views (tree-table, charts, sidebar, tab strip, title bar content) read `TlTheme` directly (a GPUI `Global`).
 - Kit widgets (menus, dialogs, inputs, tooltips, toasts, buttons, scrollbars) read gpui-kit `Theme`. `theme/map.rs::apply(&TlTheme, &mut gpui_kit Theme)` sets: `background ← window_bg`, `foreground ← text_primary`, `muted_foreground ← text_secondary`, `border ← divider`, `title_bar ← titlebar`, `popover ← menu_bg`, `accent ← menu_hover`, `primary ← accent`, `ring ← accent`, `input ← input`, `scrollbar ← scroll_track`, `scrollbar_thumb ← scroll_thumb`, `table ← list_bg`, `table_even ← row_alt`, `table_hover ← row_hover`, `table_active ← row_selected`, `table_head ← header`, `table_row_border ← divider`, `tab_bar ← tab_bg`, `status_bar ← toolbar`, `chart_1..5 ← graph cpu/mem/gpu/disk/net lines`, `chart_grid ← graph.grid`. The bead that writes `map.rs` must check each token name against `ThemeColor` in gpui-component 0.7.0 source; a missing name maps to the nearest existing token and the mapping is recorded in a comment in `map.rs`.
 - Theme switch: `Theme::update` plus replacing the `TlTheme` global, bumping `style_version` so every chart rebuilds geometry once.
 
-**Metrics and scale.** `UiMetrics { ui_scale: f32 (0.8..=1.5, default 1.0), row_height: 28 × ui_scale, base_text: 13 × ui_scale, radius: 5 × ui_scale }`. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. A change in `window.scale_factor()` or `ui_scale` bumps `style_version` and clears `CellTextCache`.
+**Metrics and scale.** Settings `appearance.ui_scale_pct` (75..=200, step 5, default 100) and `appearance.row_height_pct` (80..=150, step 5, default 100). With `ui_scale = ui_scale_pct / 100`: `UiMetrics { ui_scale, row_height: 28 × row_height_pct/100 × ui_scale, base_text: 13 × ui_scale, radius: 5 × ui_scale }`. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. Ctrl+Plus, Ctrl+Minus and Ctrl+0 step the scale by 5 or reset it to 100, with the toast "UI scale changed to N%". A change in `window.scale_factor()`, `ui_scale_pct` or `row_height_pct` bumps `style_version` and clears `CellTextCache`.
 
 **Fonts.** Bundle in `assets/fonts/` (SIL OFL): `NotoSans-Regular.ttf`, `NotoSans-Medium.ttf`, `NotoSans-SemiBold.ttf` (static weights, not the variable font, because of zed#64783). Load with `cx.text_system().add_fonts(..)` before the first window. Family name `"Noto Sans"`. Numeric cells and chart labels use `FontFeatures(Arc::new(vec![("tnum".into(), 1)]))`. Fallback for non-Latin process names comes from fontconfig system fonts (cosmic-text). The bead must verify that each bundled face loads (zed#61660: faces without `m` are dropped).
 
 **Icons.** Lucide icons through `gpui_kit_assets::IconName`, plus app SVGs in `assets/icons/` served by an `AssetSource` that tries tasklens icons first and falls back to `gpui_kit::assets::Assets`. Process and app icons are file paths resolved by the engine (ADR-016) and drawn with `img(path)` at 16 × ui_scale px. Material Symbols is not used: it is a variable font with unknown `m`-glyph behaviour under zed#61660.
 
-**Accessibility and input.** Everything works from the keyboard:
-- Ctrl+Tab and Ctrl+Shift+Tab switch tabs.
+**Accessibility and input.** Everything works from the keyboard. The full key list is canonical table (b) in `docs/RECONCILIATION.md`. The keys that shape this ADR's design:
+- Ctrl+1..Ctrl+6 and Alt+1..Alt+6 select a tab; Ctrl+Tab and Ctrl+Shift+Tab switch to the next or previous tab.
 - Ctrl+F focuses the filter.
-- A printable key while the table has focus (and no input or dialog has focus) starts filtering.
-- Delete ends the selected process, with the dialog rules from ADR-006.
-- Escape closes the top overlay.
+- A printable key while a table has focus (and no input or dialog has focus) starts filtering.
+- Enter, Ctrl+I and Alt+Enter open Properties on a process row; Space toggles expand (D-008).
+- Delete and Ctrl+E run End Task (SIGTERM); Shift+Delete and Ctrl+X run End Process (SIGKILL); both follow the confirmation rules in ADR-006.
+- Ctrl+C runs "Copy row" (processes: "Copy details"); Ctrl+Shift+C runs "Copy rows as table" (ADR-015).
+- Esc closes the topmost dialog or menu; else clears the filter and focuses the table; else closes the window if `window.close_with_esc` is on; else does nothing.
 
-Reduced motion (`App::reduce_motion()` or setting "Animations" off) disables smooth scrolling of charts. GPUI has no screen reader support on Linux [inferred]; chart values are also shown as text next to every chart.
+Motion settings: `motion.smooth_graphs` alone decides whether charts slide. `motion.animations` decides tab, theme and toast motion. The system reduce-motion setting (`App::reduce_motion()`) turns all of them off. GPUI has no screen reader support on Linux [inferred]; chart values are also shown as text next to every chart.
 
 ### Consequences
 
