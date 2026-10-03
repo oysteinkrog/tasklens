@@ -1535,7 +1535,7 @@ The owner runs KDE Plasma 6 on Wayland, three monitors at 110% and 144 Hz, NVIDI
 - In `main`, before any thread starts: if `WAYLAND_DISPLAY` is empty and `/proc/driver/nvidia/version` exists and `__NV_FORCE_ENABLE_X11_EGL_PLATFORM` is unset, set it to `1` (`unsafe { std::env::set_var }`, allowed in `tl-app/src/main.rs` only).
 - On X11 there is one scale and one refresh rate per process; tasklens does not try to fix this.
 
-**Decorations.** Default: client-side decorations with the TaskSlinger-style title bar.
+**Decorations.** Default: client-side decorations with the TaskSlinger-style title bar: menus and toolbar beside the caption buttons (D-006).
 
 ```rust
 WindowOptions {
@@ -1548,24 +1548,29 @@ WindowOptions {
 }
 ```
 
-- Setting `window.decorations = "client" | "server"`, default `"client"`. With `"server"` KWin draws its own title bar and tasklens draws its tab strip as the first row.
+- Setting `appearance.decorations = "client" | "server"`, default `"client"`, settings label "Use system title bar". A change applies after a restart. With `"server"` KWin draws its own title bar and tasklens draws its tab strip as the first row.
 - Predetermined fallback: if any CSD check in the phase-0 checklist fails (drag, double-click maximize, restore, resize from all edges and corners, right-click window menu, tiling), the default becomes `"server"` with no further discussion.
 
-**Window size persistence.** Save only width, height (logical px) and maximized state, in `$XDG_STATE_HOME/tasklens/window.toml`, on `observe_window_bounds` changes (debounced 500 ms) and on close. Never save or restore position. On start, clamp the size to at least `800 × 500`. Do not pick an output at startup (zed#46378).
+**Window size persistence.** Save only width, height (logical px) and maximized state, in the `[window]` table of `$XDG_STATE_HOME/tasklens/state.toml` (ADR-011), on `observe_window_bounds` changes (debounced 500 ms) and on close. Never save or restore position. Default size `1280 × 800` logical px; minimum `800 × 500`, and on start the saved size is clamped to at least that. Do not pick an output at startup (zed#46378).
 
 **Single instance.** In `tl-app` before GPUI starts:
 1. `zbus::blocking::Connection::session()`, then request the name `io.github.oysteinkrog.Tasklens` with `RequestNameFlags::DoNotQueue`.
 2. If the name is taken (`RequestNameReply::Exists` or a `NameTaken` error): call `org.freedesktop.Application.Activate({"activation-token": $XDG_ACTIVATION_TOKEN if set})` on `/io/github/oysteinkrog/Tasklens` and exit 0.
-3. If owned: serve `org.freedesktop.Application` (`Activate`, `Open` returns an error, `ActivateAction` supports `"quit"`) at that path. `Activate` forwards to the GPUI main thread through an `async_channel::bounded(4)`; a GPUI task receives it and calls `window.activate_window()` on the main window, or reopens it if closed to the tray.
-4. If the session bus is unavailable: log a warning and run without single-instance.
+3. If owned: serve `org.freedesktop.Application` (`Activate`, `Open` returns an error, `ActivateAction(name, parameter, platform_data)` with actions `quit`, `tab` (string) and `select-pid` (uint32)) at that path. Command-line arguments of a second instance are forwarded through `ActivateAction`. `Activate` forwards to the GPUI main thread through an `async_channel::bounded(4)`; a GPUI task receives it and calls `window.activate_window()` on the main window, or reopens it if closed to the tray. When the KWin bridge is up (ADR-004), it also activates the window through the bridge.
+4. If the session bus is unavailable: log a warning and run without single-instance. There is no lock-file fallback.
 Focus stealing prevention on Wayland may only flash the taskbar entry; that is accepted [inferred].
 
 **Close behaviour.** The app uses `QuitMode::Explicit`. `on_window_should_close` on the main window:
-- tray enabled and setting `close_to_tray = true` (later phase): remove the window, keep the app and engine running (demand drops to tray only), return `true`;
+- tray enabled and setting `tray.close_to_tray = true` (P3): remove the window, keep the app and engine running (demand drops to tray only), return `true`;
 - otherwise: call `cx.quit()`.
 After `Application::run` returns, `main` calls `EngineHandle::shutdown(Duration::from_millis(1500))`, then flushes logs, then exits. If `run` does not return on Linux [inferred that it does], the same steps run in `cx.on_app_quit`.
 
-**Tray (later phase).** Crate `tl-tray` with `ksni =0.3.6`, features `async-io` and `blocking`, using `ksni::blocking::TrayMethods::spawn` (its own thread; no Tokio). Tray graphs are drawn on the CPU into ARGB32 buffers (`ksni::Icon { width, height, data }`) at 22×22 and 44×44 px by a small rasterizer in `tl-tray/src/raster.rs` (fill columns plus a 1 px line, no anti-aliasing beyond 2×2 supersampling). Updates at most 1 Hz, skipped when the pixels did not change. Tray menu: Show tasklens, the graph choice (CPU, memory, GPU, disk, network), Quit. Tray data comes from `EngineClient::latest()` on a 1 Hz GPUI timer.
+**Tray (P3).** Crate `tl-tray` with `ksni =0.3.6`, features `async-io` and `blocking`, using `ksni::blocking::TrayMethods::spawn` (its own thread; no Tokio). `cargo xtask check-deps` proves no Tokio enters the graph. If that check fails, the fallback is a hand-written StatusNotifierItem and dbusmenu server inside `tl-tray` on its own zbus connection, never inside `tl-engine`.
+- Tray graphs are drawn on the CPU into ARGB32 buffers (`ksni::Icon { width, height, data }`) at 22×22 and 44×44 px by a small rasterizer in `tl-tray/src/raster.rs` (fill columns plus a 1 px line, no anti-aliasing beyond 2×2 supersampling). Updates at most 1 Hz, skipped when the pixels did not change. Tray data comes from `EngineClient::latest()` on a 1 Hz GPUI timer.
+- Main tray icon menu: Show Main Window, Tray icon graphs >, separator, Exit tasklens.
+- Tray graph icon menu: Graph color >, Time range >, Close tray icon graph, Tray icon graphs >, separator, Show Main Window, Show mini window, Exit tasklens.
+- Left click toggles the main window.
+- Items re-register when the `StatusNotifierWatcher` name changes owner.
 
 **zed#64499 mitigation.**
 1. Detection, always on: the `AnimationDriver` records the time of every frame callback. If a frame was requested and no callback arrives for 250 ms while the window is believed visible, it logs `warn!(target: "tasklens::frame", "frame stall")` with the duration, and increments `FrameStats.stalls`.
@@ -1577,7 +1582,7 @@ After `Application::run` returns, `main` calls `EngineHandle::shutdown(Duration:
 
 **Multi-monitor and refresh.** One window has one frame cadence (the compositor's for its main output). The phase-0 checklist covers: moving across all three monitors, straddling two, maximize on each, unplug and replug one monitor, lock and unlock, and one suspend and resume (zed#58382 atlas corruption check).
 
-**GPU selection.** Default wgpu adapter. Environment `ZED_DEVICE_ID` is respected if the user sets it; tasklens does not set it.
+**GPU selection.** Default wgpu adapter. Environment `ZED_DEVICE_ID` is respected if the user sets it. In P0 to P3 tasklens never sets it. In P4, the setting `rendering.gpu` may set `ZED_DEVICE_ID` or the software-renderer variables before GPUI starts; a `ZED_DEVICE_ID` the user already set in the environment still wins.
 
 ### Consequences
 
