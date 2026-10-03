@@ -244,3 +244,248 @@ WindowOptions {
 - **Tests**: `inactive_window_uses_divider_outline` (render test): with `is_window_active = false`, the tab strip outline paint colour equals `theme.divider`.
 - **Phase**: P1.
 - **Decided here**: the whole entry is inferred from the reference video and chosen here.
+
+---
+
+## 2. Toolbar
+
+### UI-SHL-010 Toolbar slot and per-tab content
+
+- **Implements**: APP-002, R-031, PERF-014, PROC-016, APP-003, APP-004, APP-005, APP-006.
+- **Anatomy**: a horizontal row inside the title bar (UI-SHL-003 part 7), height 28, buttons 30 × 28 [C from M pitch 31], gap 2 (`sp1`), vertically centred in the 34 px bar. Order, left to right [M processes.png: shield, grid, stacked bars, plus]:
+
+  | Slot | Button | Shown on | Entry |
+  |---|---|---|---|
+  | 1 | Shield | every tab, from P3, only when `/usr/lib/tasklens/tl-helper` exists | UI-SHL-011 |
+  | 2 | Hide system processes (toggle) | Processes tab only (including History mode) | UI-SHL-012 |
+  | 3 | View mode cycler | Processes tab only; disabled in History mode | UI-SHL-013 |
+  | 4 | Window picker "+" | every tab, from P3, only with the KWin bridge | UI-SHL-014 |
+
+  - A hidden button takes no space (`.when(cond, ..)`, not `.invisible()`), so the drag area grows [S PROC-016].
+  - All four use `TlIconButton` in the foundation's "toolbar" (ghost) style: transparent fill, icon 16 in `text_primary`, radius `r_sm`.
+- **States** (common to all four):
+  - Hover: fill `menu_hover`.
+  - Pressed: fill `menu_hover` at full strength plus the foundation's pressed overlay.
+  - Toggled on (slot 2 only): fill `accent` at the foundation's "selected subtle" alpha, icon `accent` [C].
+  - Disabled: icon at the foundation's disabled opacity; no hover; tooltip still shows (reason text).
+  - Focus: toolbar buttons are not Tab stops [C]. Keyboard users reach the same Actions through View > Process View, the Settings menu and table (b) keys.
+  - Window inactive: icons `text_secondary`.
+- **Interaction**: click dispatches the button's Action (below). Tooltips use `TlTooltip` with the 500 ms delay and, where the Action has a binding, the key hint (`Tooltip::action`).
+- **Data binding**: `MainWindow.active_tab`, `UiState.processes.history_mode`, `processes.hide_system`, `processes.mode`, `HelperState` (UI-SHL-011), KWin availability (UI-SHL-014).
+- **Build**: `Toolbar` is a `RenderOnce` struct built inside `TitleBarView::render` from a small `ToolbarModel { tab, history_mode, hide_system, mode, helper: HelperState, picker_available, picking }` that `TitleBarView` keeps up to date.
+- **Performance**: at most 4 buttons; no allocations beyond the element tree; tooltip text are `SharedString` constants except the view-mode tooltip, which is one of three precomputed `SharedString`s.
+- **Tests**: `toolbar_slots_per_tab` (render test): for each of the six tabs with helper installed and bridge up, assert the visible slot list: Processes [1,2,3,4], every other tab [1,4]. `toolbar_history_mode`: Processes in History mode shows slot 3 disabled with tooltip "History shows a flat list".
+- **Phase**: P1 (slots 2 and 3), P3 (slots 1 and 4).
+- **Decided here**: toggled-on look of slot 2; toolbar buttons not Tab stops.
+
+### UI-SHL-011 Shield (unlock privileged actions)
+
+- **Implements**: APP-003, APP-049 (unlock at launch), R-002, R-003, table (b) "Shift held at launch".
+- **Anatomy**: `TlIconButton` 30 × 28. Icon: Lucide `shield` (locked) in `text_primary`; Lucide `shield-check` (unlocked) in `accent` [C; APP-003 names them "shield" and "shield-hi"; TaskSlinger's two-colour Windows shield ships nowhere, D-005].
+- **States**:
+  - Locked: `shield`, tooltip "Unlock privileged actions" [S].
+  - Starting (pkexec prompt open): icon `shield` with a 2 px `accent` ring around the button [C]; button inert (`loading` semantics) until the helper answers or fails. No spinner (widgets perf note: spinners request frames).
+  - Unlocked: `shield-check` in `accent`, tooltip "Privileged actions unlocked (click to lock)" [S].
+  - Hidden: before P3, and when `tl-helper` is not installed [S].
+- **Interaction**:
+  - Click while locked: Action `UnlockPrivileged`. The UI calls `ActionTracker::start_helper_session()`, which sends the engine command that runs `pkexec /usr/lib/tasklens/tl-helper --session`. Results:
+    - Success: state Unlocked, Success toast "Privileged actions unlocked" [C].
+    - Cancelled by the user (pkexec exit 126): state Locked, Info toast "Authentication cancelled" [S APP-044].
+    - Failure (exit 127 or other): state Locked, Error toast "Could not start the administrator helper" [C].
+  - Click while unlocked: Action `LockPrivileged`, ends the session (closes the helper's stdin). State Locked, Info toast "Privileged actions locked" [C].
+  - Helper idle exit (300 s) or crash: state Locked, no toast [C] (the next privileged action starts a new session).
+  - Shift held at launch, or `privilege.unlock_at_launch = true`: `UnlockPrivileged` runs once after the first frame (UI-SHL-110 step 9).
+- **Data binding**: `HelperState { Unavailable, Locked, Starting, Unlocked }` held by `ActionTracker` and changed by `ActionEvent`s; `TitleBarView` subscribes to `ActionTracker` events of kind `HelperStateChanged`.
+- **Build**: `window/toolbar.rs::shield_button()`.
+- **Accessibility**: accessible name equals the tooltip text for the current state.
+- **Tests**: `shield_states` (TestAppContext with fake engine): click; fake engine replies Started; icon is `shield-check` and the toast "Privileged actions unlocked" was pushed. Replay with Cancelled; toast "Authentication cancelled".
+- **Phase**: P3.
+- **Decided here**: icons; starting ring; toasts "Privileged actions unlocked", "Privileged actions locked", "Could not start the administrator helper".
+
+### UI-SHL-012 Hide system processes toggle
+
+- **Implements**: APP-004, PROC-046, R-031.
+- **Anatomy**: `TlIconButton` 30 × 28, toggle. Icon Lucide `layout-grid` [C; matches the four-square glyph measured in processes.png].
+- **States**:
+  - Off (`processes.hide_system = false`, showing all): plain toolbar look; tooltip "Hide system processes" [S].
+  - On (hiding): toggled-on look (UI-SHL-010); tooltip "Show system processes" [S].
+  - History mode: stays active and filters the History table [S].
+- **Interaction**: click dispatches `ToggleHideSystem`. It flips `processes.hide_system` (an `EngineSettings` field, so the engine projection rebuilds) and pushes the Info toast "Hiding system processes" or "Showing system processes" [S]. Selection is kept by identity (process spec).
+- **Data binding**: `processes.hide_system`.
+- **Tests**: `hide_system_toggle_toast`: click; setting true; toast text "Hiding system processes"; engine received `set_settings` with `hide_system = true`.
+- **Phase**: P1.
+
+### UI-SHL-013 View mode cycler
+
+- **Implements**: APP-005, PROC-015, PROC-016, R-010.
+- **Anatomy**: `TlIconButton` 30 × 28. The icon shows the current mode [C]: `grouped` Lucide `rows-2` [M: two stacked bars in processes.png, default mode], `tree` Lucide `list-tree`, `flat` Lucide `list`.
+- **States**:
+  - Normal: tooltip "Toggle view mode (current: Task Manager Grouping)" with the current name [S].
+  - History mode: disabled, tooltip "History shows a flat list" [S PROC-016]. (APP-002 says both buttons stay active in History mode, but R-031 only covers the hide button; PROC-016 is the specific rule.)
+- **Interaction**: click dispatches `CycleViewMode`: Tree View, then Task Manager Grouping, then List View, then Tree View (TaskSlinger string order) [S]. It writes `processes.mode` and pushes the Info toast "View mode: Tree View" (or the new name) [S]. `SetViewMode(TableMode)` is the radio-item Action in View > Process View; both write the same key.
+- **Data binding**: `processes.mode`; the process table sends `SetTableQuery` with a new generation on change (process spec).
+- **Tests**: `view_mode_cycle_order`: three clicks from `grouped` give `flat`, `tree`, `grouped`, with toasts "View mode: List View", "View mode: Tree View", "View mode: Task Manager Grouping".
+- **Phase**: P1.
+- **Decided here**: per-mode icons.
+
+### UI-SHL-014 Window picker "+"
+
+- **Implements**: APP-006, PROC-055, R-046, R-076, table (b) Picker context.
+- **Anatomy**: `TlIconButton` 30 × 28, icon Lucide `plus` [M]. Tooltip "Select process by window" [S PROC-055].
+- **States**:
+  - Hidden: no KWin bridge (`Snapshot.windows.header.validity == Unsupported`) [S].
+  - Idle: plain.
+  - Picking: toggled-on look (UI-SHL-010) until the pick ends [C].
+- **Interaction**:
+  - Click dispatches `StartWindowPick`: sends `Command::KWin(KWinCommand::Pick)`, sets `picking = true`, pushes the Info toast "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels." [S PROC-055], and pushes the key context `Picker` on the main window's root focus so Esc maps to `CancelWindowPick`.
+  - The result handling (select row, Ctrl+click confirmation, toasts "No window found", "No window selected", "Unknown process") belongs to PROC-055. Where APP-006 says Ctrl+click ends the process "then gives a toast" and PROC-055 says "after a confirmation", this spec follows PROC-055 (the process spec owns action confirmations, PROC-059) [C].
+  - Click while picking: dispatches `CancelWindowPick` [C].
+- **Data binding**: `ComponentMask::WINDOWS` (availability); the pick reply arrives as an `ActionEvent` or a `KWinEvent` from the engine (ADR-005).
+- **Tests**: `picker_hidden_without_bridge`; `picker_esc_cancels` (fake engine: Esc while picking sends `KWin(CancelPick)` and the toast "No window selected").
+- **Phase**: P3.
+- **Decided here**: picking look; second click cancels; PROC-055 wins over APP-006 on the Ctrl+click confirmation.
+
+---
+
+## 3. Main tab strip
+
+### UI-SHL-020 Tab strip layout and accent outline
+
+- **Implements**: APP-027, R-023, ADR-009 (six tabs), PERF-094 (Information copy icon), PROC-088 (history icon).
+- **Anatomy** (height 30 [M], bg `tab_bg`; text `t_md` [C from M]):
+
+```text
+x=0
+ _______________                                                             ____________________
+/ Processes  ⟲  \  Performance   Services   Startup Apps   Connections   Information   [incl] / Filter: ________ (x)
++               +==========================================================================+                   (to right edge)
+ \_ active tab: fill=header, accent outline 2 px, top corners r_md, open bottom     line 2 px  filter box outline
+```
+
+  Parts:
+  - Tab: height 30, padding-x 22 [M, from label centres 98, 192, 304, 417, 536, 664 at 1360 px], label `t_md` regular. Inactive label `text_primary` [M white text on every tab]; active label `text_primary` medium weight [C].
+  - Tab icons (part of the tab, after the label, gap 6 `sp3`, 16 × 16):
+    - Processes: history toggle, Lucide `rotate-ccw-clock` (UI-SHL-023).
+    - Information: copy-all, Lucide `copy` (UI-SHL-023). Shown only while Information is the active tab [M information.png].
+  - Active tab: fill `header` [M: active fill equals the table header colour, so the tab joins the page header below]; a 2 px [M] outline in `accent` on top, left and right sides, top corners radius `r_md`, bottom open.
+  - Accent line: 2 px high [M], colour `accent`, along the bottom edge of the strip, from x = 0 to the active tab's left edge, and from the active tab's right edge to the filter box's left edge (or to the window's right edge on Performance, which has no filter box [M performance.png]). Where the line meets the active tab's sides and the filter box's left side, the corner is rounded with radius `r_md` (outward curve, as measured) [M].
+  - Filter box (UI-SHL-024) at the right, its own accent outline on top and left sides, joined to the line.
+  - "Include children" checkbox (UI-SHL-025) left of the filter box when shown.
+  - Overflow "»" button (UI-SHL-022) when tabs do not fit.
+- **Tab set and order** [S R-023]: Processes, Performance, Services, Startup Apps, Connections, Information. A tab whose page is not built yet in the current phase is not shown (P1 shows Processes and Performance only; Information arrives P2 with the System Information fields; Services, Startup Apps and Connections in P2) [S ADR-009].
+- **Label in History mode**: the Processes tab reads "History" [S].
+- **States**:
+  - Inactive tab hover: fill `tab_hover`; no outline.
+  - Inactive tab pressed: fill `tab_hover`.
+  - Active tab: as above; hover does not change it.
+  - Window inactive: outline and line in `divider` (UI-SHL-007).
+  - Keyboard focus: tabs are not focusable (gpui-kit tabs are not, and table b gives Ctrl+1..6, Ctrl+Tab) [S widgets §1].
+  - Disabled: never (unbuilt tabs are absent).
+- **Interaction**:
+  - Left click on a tab dispatches `SelectTab(i)` with i = 0..5 in the order above.
+  - Mouse-down on a tab stops propagation (no window drag) [S widgets §1].
+  - Middle-click, right-click: nothing [C].
+  - Mouse wheel over the strip: nothing [C] (no horizontal tab scrolling; overflow uses the "»" menu).
+  - Keys (table b): Ctrl+1..Ctrl+6, Alt+1..Alt+6 (`SelectTab(i)`), Ctrl+Tab (`NextTab`), Ctrl+Shift+Tab (`PrevTab`). Next and previous wrap around and skip tabs that are not shown [C].
+  - `SelectTab` on the already active tab: nothing [C].
+  - Every switch writes `UiState.tabs.last_tab` [S] and updates demand (ADR-008: the newly active page's components become visible; the old page's demand drops).
+- **Data binding**: `MainWindow.active_tab: TabId`; `UiState.processes.history_mode`; `TlSettings` versions `motion` (animation), `appearance` (scale).
+- **Build**: custom `TabStrip` Entity in `window/tabstrip.rs`, embedded `.cached(..)`. Not gpui-kit `TabBar`: the kit has no outline-joined-to-line variant, and its `Outline` variant draws a full border [C]. The strip is `h_flex()` of `div` tabs plus a custom paint element `AccentRule` (implements `Element`) that paints the outline and line in one `paint_path` after layout, using the active tab's bounds and the filter box's bounds recorded in `prepaint` (`window.insert_hitbox` is not needed; bounds come from child layout ids). The path is rebuilt only when those bounds, the colour or the scale change; it is cached in the `TabStrip` (`Option<(AccentRuleKey, Path<Pixels>)>`).
+- **Performance**: re-renders only on tab change, history-mode change, filter focus change (width animation, UI-SHL-024), window activation, theme, scale or language change. Zero snapshot subscriptions. The accent path build is O(1) (about 12 path segments).
+- **Accessibility**: each tab's accessible name is its label; the history icon and copy icon have their own names (UI-SHL-023).
+- **Tests**: `tabstrip_order_and_labels` (render test, all phases on): six labels in order. `tabstrip_history_label`: with `history_mode = true`, first label "History". `tabstrip_keys`: Ctrl+3 selects Services; Ctrl+Tab from Information wraps to Processes; with only P1 tabs, Ctrl+Tab from Performance goes to Processes. `accent_rule_bounds`: with Processes active and filter box at x = 1060..1280, the rule path starts at x = 0 and ends at 1060.
+- **Phase**: P1.
+- **Decided here**: custom strip instead of kit `TabBar`; active label weight medium; wrap-around and skip rule; no wheel scroll.
+
+### UI-SHL-021 Tab switch animation
+
+- **Implements**: APP-027, R-017, ADR-009 (only the active page renders), table (a) `motion.tab_switch_ms`.
+- **Behaviour**:
+  - On switch with animations on and `motion.tab_switch_ms > 0`:
+    - The accent outline slides from the old tab's bounds to the new tab's bounds: x and width interpolate over `tab_switch_ms` (default 250) with `ease_out_cubic` [S duration; C easing].
+    - Content crossfade: the new page fades in from opacity 0 to 1 over the same duration [S "crossfades content"]. The old page is not rendered during the fade (ADR-009 renders only the active page), so the crossfade is a fade-in over `window_bg` [C].
+  - With animations off, reduced motion on, or `tab_switch_ms = 0`: the outline jumps and the page appears at full opacity in the same frame [S].
+  - A new switch during an animation starts from the current interpolated outline position [C].
+- **Build**: GPUI `with_animation(ElementId::from(("tab-switch", generation)), Animation::new(Duration::from_millis(ms)).with_easing(ease_out_cubic), |el, t| ..)` on the page container (opacity) and on the `AccentRule` (geometry, which rebuilds the path each animation frame only during the animation). The animation is one-shot, so frames stop when it ends. This is the one permitted use of `Animation` in the shell besides toasts and the filter width; it is not a continuous redraw (ADR-009 animation driver rule applies to charts).
+- **Performance**: during the 250 ms, each frame rebuilds a 12-segment path and sets an opacity: well under 0.1 ms. Charts in the new page start their own driver requests after the first render.
+- **Tests**: `tab_switch_instant_when_reduced_motion` (TestAppContext with `set_reduce_motion(true)`): after `SelectTab(1)` and one frame, the page container opacity is 1.0 and no animation is running.
+- **Phase**: P2 (the switch is instant in P1) [S APP-027].
+- **Decided here**: easing; crossfade realized as fade-in; restart-from-current rule.
+
+### UI-SHL-022 Tab overflow menu
+
+- **Implements**: APP-027 ("»" menu).
+- **Behaviour**:
+  - The strip measures each tab's width at layout (label shaped once per language and scale change and cached as `Pixels`). Available width = window width − filter box width − include-children checkbox width (if shown) − 16 (left margin of the filter box) − 28 (overflow button).
+  - If the tabs do not fit, trailing tabs that do not fit move into the overflow menu; the active tab is always kept visible by swapping it into the last visible slot [C].
+  - Overflow button: `TlIconButton` 28 × 30, Lucide `chevrons-right` [C], placed right after the last visible tab, tooltip "More tabs" [C].
+  - Click opens a `TlMenu` listing the hidden tabs with the same labels; choosing one dispatches `SelectTab(i)`.
+  - At the minimum width of 800 px with all six tabs, the tabs need about 680 px at 100% and the filter box needs 236, so the overflow appears at 100% scale below about 960 px of window width [C, estimate from M label widths].
+- **Build**: part of `TabStrip`; the menu uses `TlMenu` (PopupMenu with `.menu(label, Box::new(SelectTab(i)))`).
+- **Tests**: `overflow_keeps_active_tab`: window 800 px, Information active: Information is visible and the menu lists the tabs that do not fit.
+- **Phase**: P1.
+- **Decided here**: active tab always visible; icon and tooltip.
+
+### UI-SHL-023 History toggle and Information copy icon on tabs
+
+- **Implements**: APP-027, PROC-088, PROC-086 (toast with Enable), D-010, PERF-094.
+- **Anatomy**:
+  - History icon: 16 × 16 Lucide `rotate-ccw-clock` inside the Processes tab after the label, gap 6. Hit area 22 × 22 centred on the icon [C]. Colour `text_secondary`; in History mode `accent` [C].
+  - Copy icon: 16 × 16 Lucide `copy` inside the Information tab after the label, gap 6, shown only while Information is active [M]. Hit area 22 × 22. Colour `text_secondary`.
+- **States**: hover on the icon: icon `text_primary` and a `tab_hover` rounded square (`r_sm`) behind the hit area. Pressed: same. Disabled: never.
+- **Interaction**:
+  - History icon click dispatches `ToggleHistoryMode`. If the Processes tab is not active, it also selects it [C]. It flips `UiState.processes.history_mode` (persisted) and the tab label. When turning History mode on with `history.enabled = false`: the 10-minute RAM window shows (D-010) and an Info toast "History recording is off" appears with an "Enable" button that dispatches `ToggleSetting(HistoryEnabled)` [S PROC-086]. The toast has autohide off because it has an action button (kit behaviour) and closes when the user clicks Enable or its close button.
+  - Copy icon click dispatches `CopyInformationAll` (owned by PERF-094: copies every section; toast "Copied to clipboard").
+  - Clicks on the icons stop propagation so the tab click does not also fire.
+  - Tooltips: "Show history" / "Show live processes" [C] and "Copy all" [C].
+- **Data binding**: `UiState.processes.history_mode`, `history.enabled`.
+- **Tests**: `history_toggle_selects_processes`: on Performance, clicking the icon (via action dispatch) selects Processes and sets history mode. `history_off_toast`: with recording off, toggling on pushes "History recording is off" with one action button.
+- **Phase**: P3 (history), P2 (copy icon, with Information).
+- **Decided here**: icon colours, hit areas, tooltips, select-tab-on-toggle.
+
+### UI-SHL-024 Filter box
+
+- **Implements**: APP-028, PROC-044, R-043, ADR-009 (debounce and generation), table (b) Ctrl+F, Esc, printable characters.
+- **Anatomy** [M information.png, processes.png]:
+
+```text
+ ____________________________________
+/ Filter:  [text............] (x)     |   <- flush with the window's right edge
+  outline: accent 2 px on top and left, top-left corner r_md, joined to the strip line
+```
+
+  - Placement: right end of the tab strip, flush with the window's right edge, full strip height 30 minus the 2 px line (28) [M].
+  - Width: 220 unfocused [M: 221 at 1360 px], 280 focused [S APP-028]. APP-028 says 160 unfocused; the measured TaskSlinger box is 220, and this spec uses the measured value [C, listed as an open item].
+  - Label "Filter:" `t_md` `text_primary` [M], left padding 10 [C], gap 6 to the input.
+  - Input: `TlInput` without its own border or background (the outline is the border), text `t_md`, fill `tab_bg` unfocused and `input_focus` focused [C]. Placeholder: none [M].
+  - Clear button: Lucide `circle-x` 14 × 14 in `text_secondary`, right padding 8, shown only when the text is not empty (`Input::cleanable(true)` behaviour) [S].
+  - Shown on every tab except Performance [M performance.png]. Each tab keeps its own filter text for the session [S]; switching tabs swaps the text into the single `InputState` with `set_value` (which does not emit Change) [C].
+- **States**:
+  - Unfocused empty, unfocused with text (text stays visible, clear button visible), focused (width 280, fill `input_focus`), hover (cursor I-beam over the input part only).
+  - Width animation: 220 to 280 on focus and back on blur, over 150 ms [S] with `ease_out_cubic` [C]; instant with animations off or reduced motion [S]. The tabs to its left re-layout each animation frame; the overflow rule (UI-SHL-022) applies to the final width only, so no tab jumps into the menu mid-animation [C].
+  - Window inactive: outline in `divider`.
+- **Interaction**:
+  - Click anywhere in the box focuses the input.
+  - Ctrl+F (`FocusFilter`, Global) focuses it and selects all its text [C].
+  - Type-to-filter (UI-SHL-124): a printable key while a table has focus moves focus here and inserts the character.
+  - Typing: `InputEvent::Change` starts or restarts a 100 ms debounce task [S]; when it fires, the active page receives `FilterChanged { tab, text }`. The process page sends `SetTableQuery` with a new generation (ADR-009); other pages filter as their specs say.
+  - Esc in the box (`FilterEscape`, handled before the global Esc chain): if text is not empty, clear it (Change fires, debounce runs at once with an empty query) and move focus to the active page's table; if text is empty, move focus to the table and let the global Esc chain continue only on a further Esc [S R-043].
+  - Enter: moves focus to the table and selects the first row [C].
+  - Down arrow: same as Enter [C].
+- **Data binding**: `FilterBox { input: Entity<InputState>, per_tab: [SharedString; 6], debounce: Option<Task<()>> }`. Reads only its own state; never subscribes to snapshots.
+- **Build**: `FilterBox` Entity in `window/filter.rs`, embedded in `TabStrip`. Width animation with GPUI `with_animation` keyed on the focus generation.
+- **Performance**: keystroke cost is the kit input's own (one rope edit, one notify on the InputState) plus one timer reset. The text is read with `text()` (no allocation) and converted to `Arc<str>` lowercased once per debounced query.
+- **Accessibility**: the input's accessible name is "Filter"; the clear button is "Clear filter".
+- **Tests**: `filter_debounce_100ms` (TestAppContext): type three characters 30 ms apart; exactly one query after 100 ms of quiet, with the latest generation. `filter_esc_rule`: text "fire", Esc: text empty, focus on table; second Esc goes to the global chain. `filter_per_tab_text`: text on Processes survives a switch to Services and back. `filter_hidden_on_performance`.
+- **Phase**: P1.
+- **Decided here**: unfocused width 220 (deviation from APP-028's 160, open item 1); fills; Enter and Down behaviour; select-all on Ctrl+F.
+
+### UI-SHL-025 "Include children" checkbox placement
+
+- **Implements**: PROC-045, APP-028.
+- **Anatomy** [M cus_sheet_03.png: label then checkbox, left of "Filter:"]: label "Include children" `t_sm` `text_primary`, gap 6, then a `TlCheckbox` 14 × 14, then 16 px to the filter box. Vertically centred in the strip.
+- **Shown**: on the Processes tab only, while the filter text is not empty or `processes.mode = tree` [S PROC-045].
+- **Interaction**: click on the label or box dispatches `ToggleSetting(ProcessesFilterIncludeChildren)`; the process spec owns the toasts ("Including filtered process children." / "Hiding unmatched filtered process children."). Not a Tab stop [C]; keyboard users use the same Action from View > Process View? No: the process spec has no menu item for it, so the checkbox is a Tab stop after the filter input [C].
+- **Tests**: `include_children_visibility`: hidden in grouped mode with an empty filter, shown in tree mode.
+- **Phase**: P1.
+- **Decided here**: label size `t_sm`, spacing, Tab stop after the filter input.
