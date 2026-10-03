@@ -1256,8 +1256,8 @@ pub struct Demand {
     pub detail_keys: Arc<[ProcessKey]>, // visible rows plus one viewport of overscan, max 512
     pub gpu_process: bool,
     pub connections: bool, pub services: bool, pub startup: bool, pub inventory: bool,
-    pub tray: TrayDemand,           // later phase
-    pub recording: bool,            // history recording enabled (later phase)
+    pub tray: TrayDemand,           // P3
+    pub recording: bool,            // history recording enabled (P3)
 }
 ```
 
@@ -1271,7 +1271,7 @@ pub struct Demand {
 | Disks, network interfaces | 1 Hz | off | 1 Hz |
 | GPU totals (NVML) | 1 Hz | off | 1 Hz |
 | Sensors (hwmon), fans | 1 Hz | off | off |
-| Process sweep (CPU, RSS, I/O, state) | setting `process_interval_ms`, default 1000, range 250..=10000 | off | same as visible rate |
+| Process sweep (CPU, memory, I/O, state) | setting `processes.interval_ms`, default 1000, range 250..=10000 | off | same as visible rate |
 | PSS/USS for `detail_keys` | 1 Hz, only if a PSS or USS column is shown | off | off |
 | GPU per process | 1 Hz, only if a GPU process column is shown | off | 1 Hz if recording includes GPU |
 | Connections and socket attribution | every 2 s | off | off |
@@ -1279,6 +1279,8 @@ pub struct Demand {
 | Startup entries, inventory | on page open and on `RefreshNow` | off | off |
 | Logind sleep signal | event-driven, always on | always on | always on |
 | Device enumeration (disks, nets, hwmon) | every 5 s while any of those is demanded | off | every 5 s |
+
+While recording is off, the process sweeps that run because the Processes tab is open also feed the 10-minute rolling window (ADR-012, D-010). The window adds no sweeps of its own.
 
 PSS/USS sort and GPU-per-process sort over partial coverage are disabled: the header for PSS and USS is not clickable and shows the tooltip "Only measured for visible rows". `ProcessSnapshot.coverage` lists which keys have PSS/USS so the UI shows `WarmingUp` for others.
 
@@ -1298,10 +1300,10 @@ PSS/USS sort and GPU-per-process sort over partial coverage are disabled: the he
 - `busy = user + nice + system + irq + softirq + steal`; `total = busy + idle + iowait`.
 - `cpu_pct = 100 × Δbusy / Δtotal`; `kernel_pct = 100 × Δ(system + irq + softirq) / Δtotal`.
 - `guest` and `guest_nice` are ignored (already inside `user` and `nice`). `iowait` counts as idle and is reported separately in the CPU details.
-- Process CPU: `100 × Δ(utime + stime) / ticks_per_sec / Δt_s / online_cpus` (whole machine). Setting `process_cpu_mode = "machine" | "core"`, default `"machine"`; `"core"` drops the `/ online_cpus` and is labelled "CPU (1 core = 100%)".
+- Process CPU: column `cpu` is `100 × Δ(utime + stime) / ticks_per_sec / Δt_s / online_cpus` (whole machine). Column `cpu_relative`, labelled "CPU (one core = 100%)", drops the `/ online_cpus`. Both columns are computed from the same sweep; there is no setting.
 - CPU hotplug: a change in the set of `cpuN` lines re-enumerates CPU devices; an offline CPU shows `Missing`.
 
-**Memory math.** `used = MemTotal - MemAvailable`. Commit percent = `Committed_AS / CommitLimit` and may exceed 100%. Process memory column is RSS (`statm` resident × page size) and is labelled "Memory (RSS)".
+**Memory math.** `used = MemTotal - MemAvailable`. Commit percent = `Committed_AS / CommitLimit` and may exceed 100%. The default process Memory column (id `memory`, header "Memory") is RssAnon from `/proc/<pid>/status` (D-004), with the header tooltip "Private memory (RssAnon). Shared and file-backed pages are not counted." App and unit rows use cgroup `memory.stat` `anon`. RSS (`ws_total`, VmRSS), PSS, USS and swap are extra columns.
 
 **Stale threshold.** A value is `Stale` when `now - t_last > max(3 × period, 1.5 s)`.
 
