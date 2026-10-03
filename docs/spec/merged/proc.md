@@ -1798,3 +1798,344 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (INI becomes TOML)
 - Phase: P1 (each key arrives with its feature)
 - Privilege: none
+
+---
+
+## Summary table
+
+| ID | Name | Verdict | Phase |
+|---|---|---|---|
+| PROC-001 | Process identity and action targeting | BUILD | P1 |
+| PROC-002 | Process sweep and per-process data pipeline | BUILD | P1 |
+| PROC-003 | Value formats, zero values and units | ADAPT | P1 |
+| PROC-004 | Process classification and Task Manager groups | ADAPT | P1 |
+| PROC-005 | App detection from cgroups | BUILD | P1 |
+| PROC-006 | Desktop-file index, exe fallback, disambiguation and icons | BUILD | P1 |
+| PROC-007 | Process display naming | ADAPT | P1 |
+| PROC-008 | App row contents | ADAPT | P1 |
+| PROC-009 | Unit rows and the Kernel threads row | ADAPT | P1 |
+| PROC-010 | Flatpak bwrap unwrap | BUILD | P1 |
+| PROC-011 | Launcher split (Steam, Lutris, Heroic) | ADAPT | P4 |
+| PROC-012 | Pseudo-process rows | ADAPT | P2 |
+| PROC-013 | Table widget basis | BUILD | P1 |
+| PROC-014 | View modes and View > Process View | ADAPT | P1 |
+| PROC-015 | Toolbar view-mode cycler | BUILD | P1 |
+| PROC-016 | Processes-tab toolbar buttons | BUILD | P1 |
+| PROC-017 | Tree Connector Lines | BUILD | P1 |
+| PROC-018 | PID cell "PID +N children" | BUILD | P1 |
+| PROC-019 | Subtree totals on parent processes | BUILD | P2 |
+| PROC-020 | Collapse All | BUILD | P1 |
+| PROC-021 | Startup placeholder | ADAPT | P1 |
+| PROC-022 | Column model, default set and visibility | ADAPT | P1 |
+| PROC-023 | Column minimum and default widths | BUILD | P1 |
+| PROC-024 | Column picker | ADAPT | P1 |
+| PROC-025 | Column reorder, resize and persistence | BUILD | P1 |
+| PROC-026 | Header context menu | BUILD | P1 |
+| PROC-027 | Columns: identity, image and package | BUILD/ADAPT | P1-P2 |
+| PROC-028 | Columns: ownership, session and security | BUILD/ADAPT | P1-P2 |
+| PROC-029 | Columns: CPU and scheduling | BUILD/ADAPT | P1, P2, P4 |
+| PROC-030 | Columns: memory | BUILD/ADAPT, 1 DROP | P1-P2 |
+| PROC-031 | Columns: I/O and disk | BUILD/ADAPT, 1 DROP | P1, P2, P4 |
+| PROC-032 | Column: network | ADAPT | P1, P4 |
+| PROC-033 | Columns: GPU | BUILD/ADAPT | P1-P2 |
+| PROC-034 | Columns: Power usage and Power usage trend | ADAPT | P2 |
+| PROC-035 | Columns: object counts | BUILD/ADAPT | P1, P3, P4 |
+| PROC-036 | Linux-only extra columns | ADAPT | P1, P2, P4 |
+| PROC-037 | TaskSlinger column id map | ADAPT | P1 |
+| PROC-038 | Two-line header with system totals | BUILD | P1 |
+| PROC-039 | Row hover tooltip | ADAPT | P1 |
+| PROC-040 | Heat colouring | BUILD | P1 |
+| PROC-041 | Dim zero values | BUILD | P2 |
+| PROC-042 | Column separators | BUILD | P4 |
+| PROC-043 | Highlight new and exited processes | BUILD | P1 |
+| PROC-044 | Filter box and type-to-filter | ADAPT | P1 |
+| PROC-045 | Include children | BUILD | P1 |
+| PROC-046 | Hide system processes | ADAPT | P1 |
+| PROC-047 | Sorting | BUILD | P1 |
+| PROC-048 | Selection and multi-select | BUILD | P1 |
+| PROC-049 | Keyboard in the process table | ADAPT | P1 |
+| PROC-050 | Hold Ctrl to pause | BUILD | P1 |
+| PROC-051 | Processes status bar text | BUILD | P1 |
+| PROC-052 | KWin window bridge | ADAPT | P2 |
+| PROC-053 | App window titles and the Name-cell window button | ADAPT | P2 |
+| PROC-054 | Show Window | ADAPT | P2 |
+| PROC-055 | Window picker ("+" button) | ADAPT | P3 |
+| PROC-056 | Pin on top for tasklens windows | ADAPT | P2 |
+| PROC-057 | Row context menu | ADAPT | P1 (items per entry) |
+| PROC-058 | Action pipeline, results and toasts | BUILD | P1 |
+| PROC-059 | Protection rules and confirmations | ADAPT | P1 |
+| PROC-060 | End Task and End App (SIGTERM) | ADAPT | P1 |
+| PROC-061 | End Process (SIGKILL) | ADAPT | P1 |
+| PROC-062 | End Process Tree | ADAPT | P1 |
+| PROC-063 | Suspend and Resume process | ADAPT | P1 |
+| PROC-064 | Freeze App, Thaw App and Kill App | ADAPT | P2 |
+| PROC-065 | Send Signal submenu | BUILD | P2 |
+| PROC-066 | Set Priority | ADAPT | P1, P2 |
+| PROC-067 | Set Affinity | ADAPT | P1, P2 |
+| PROC-068 | Set I/O Priority | ADAPT | P2 |
+| PROC-069 | Multi-select priority, affinity, I/O priority, copy and end | BUILD | P1, P2 |
+| PROC-070 | Copy, Copy details, Copy all metrics and Copy rows as table | BUILD | P1 |
+| PROC-071 | Process jump target, Go to parent and Go to service | BUILD | P1, P2 |
+| PROC-072 | Restart Plasma Shell and Restart unit | ADAPT | P2 |
+| PROC-073 | Open file location and File properties | ADAPT | P1, P2 |
+| PROC-074 | Open in VirusTotal | BUILD | P2 |
+| PROC-075 | Create dump file | ADAPT | P3 |
+| PROC-076 | Privileged helper for process operations | ADAPT | P3 |
+| PROC-077 | Process Properties window | ADAPT | P2 |
+| PROC-078 | General tab | ADAPT | P2 |
+| PROC-079 | Threads tab | ADAPT | P2 |
+| PROC-080 | File descriptors tab | ADAPT | P2 |
+| PROC-081 | Memory maps tab | ADAPT | P2 |
+| PROC-082 | Security tab | ADAPT | P2 |
+| PROC-083 | Environment tab | ADAPT | P2 |
+| PROC-084 | Strings tab | ADAPT | P3 |
+| PROC-085 | App Properties window | ADAPT | P2 |
+| PROC-086 | History recording | ADAPT | P3 |
+| PROC-087 | History persistence | ADAPT | P3 |
+| PROC-088 | History view and table | BUILD | P3 |
+| PROC-089 | History timeline scrubber | BUILD | P3 |
+| PROC-090 | History top-3 hover | BUILD | P3 |
+| PROC-091 | History first-snapshot state | BUILD | P3 |
+| PROC-092 | History scrub benchmark | BUILD | P3 |
+| PROC-093 | Process minigraphs from the row menu | BUILD | P3 |
+| PROC-094 | Process tray icon graphs | ADAPT | P3 |
+| PROC-095 | Run dialog | ADAPT | P2 |
+| PROC-096 | Search File Handles | ADAPT | P3 |
+| PROC-097 | Low-memory watcher | ADAPT | P3 |
+| PROC-098 | Low-memory rescue window | ADAPT | P3 |
+| PROC-099 | Settings and state keys for this area | ADAPT | P1 |
+
+## Old ID to new ID map
+
+Every old ID in the three sources maps to at least one entry. Where an old entry was split, every target is listed.
+
+### v1 (features-proc.md)
+
+| Old ID | New ID |
+|---|---|
+| v1 conventions | PROC-003 |
+| v1 section D intro | PROC-022 |
+| v1 PROC-001 | PROC-001, PROC-058 |
+| v1 PROC-002 | PROC-002 |
+| v1 PROC-003 | PROC-076 |
+| v1 PROC-004 | PROC-014 |
+| v1 PROC-005 | PROC-004, PROC-008, PROC-009, PROC-014 |
+| v1 PROC-006 | PROC-017 |
+| v1 PROC-007 | PROC-013 |
+| v1 PROC-008 | PROC-005 |
+| v1 PROC-009 | PROC-006 |
+| v1 PROC-010 | PROC-006, PROC-007 |
+| v1 PROC-011 | PROC-004 |
+| v1 PROC-012 | PROC-046 |
+| v1 PROC-013 | PROC-010 |
+| v1 PROC-014 | PROC-011 |
+| v1 PROC-015 | PROC-018, PROC-027, PROC-028 |
+| v1 PROC-016 | PROC-027 |
+| v1 PROC-017 | PROC-028 |
+| v1 PROC-018 | PROC-029 |
+| v1 PROC-019 | PROC-029 |
+| v1 PROC-020 | PROC-030 |
+| v1 PROC-021 | PROC-031 |
+| v1 PROC-022 | PROC-031 |
+| v1 PROC-023 | PROC-032 |
+| v1 PROC-024 | PROC-033 |
+| v1 PROC-025 | PROC-034 |
+| v1 PROC-026 | PROC-035 |
+| v1 PROC-027 | PROC-036 |
+| v1 PROC-028 | PROC-037 |
+| v1 PROC-029 | PROC-038 |
+| v1 PROC-030 | PROC-052 |
+| v1 PROC-031 | PROC-053 |
+| v1 PROC-032 | PROC-039 |
+| v1 PROC-033 | PROC-040 |
+| v1 PROC-034 | PROC-041 |
+| v1 PROC-035 | PROC-042 |
+| v1 PROC-036 | PROC-043 |
+| v1 PROC-037 | PROC-047 |
+| v1 PROC-038 | PROC-025 |
+| v1 PROC-039 | PROC-048 |
+| v1 PROC-040 | PROC-049 |
+| v1 PROC-041 | PROC-044 |
+| v1 PROC-042 | PROC-045 |
+| v1 PROC-043 | PROC-050 |
+| v1 PROC-044 | PROC-051 |
+| v1 PROC-045 | PROC-020 |
+| v1 PROC-046 | PROC-021 |
+| v1 PROC-047 | PROC-026 |
+| v1 PROC-048 | PROC-024 |
+| v1 PROC-049 | PROC-057 |
+| v1 PROC-050 | PROC-058, PROC-060 |
+| v1 PROC-051 | PROC-061, PROC-064 |
+| v1 PROC-052 | PROC-062 |
+| v1 PROC-053 | PROC-063 |
+| v1 PROC-054 | PROC-064 |
+| v1 PROC-055 | PROC-059 |
+| v1 PROC-056 | PROC-065 |
+| v1 PROC-057 | PROC-066 |
+| v1 PROC-058 | PROC-070 |
+| v1 PROC-059 | PROC-067 |
+| v1 PROC-060 | PROC-068 |
+| v1 PROC-061 | PROC-054 |
+| v1 PROC-062 | PROC-055 |
+| v1 PROC-063 | PROC-056 |
+| v1 PROC-064 | PROC-071 |
+| v1 PROC-065 | PROC-071 |
+| v1 PROC-066 | PROC-072 |
+| v1 PROC-067 | PROC-073 |
+| v1 PROC-068 | PROC-073 |
+| v1 PROC-069 | PROC-074 |
+| v1 PROC-070 | PROC-075 |
+| v1 PROC-071 | PROC-077 |
+| v1 PROC-072 | PROC-078 |
+| v1 PROC-073 | PROC-079 |
+| v1 PROC-074 | PROC-080 |
+| v1 PROC-075 | PROC-081 |
+| v1 PROC-076 | PROC-082 |
+| v1 PROC-077 | PROC-083 |
+| v1 PROC-078 | PROC-084 |
+| v1 PROC-079 | PROC-085 |
+| v1 PROC-080 | PROC-086 |
+| v1 PROC-081 | PROC-087 |
+| v1 PROC-082 | PROC-088 |
+| v1 PROC-083 | PROC-089 |
+| v1 PROC-084 | PROC-090 |
+| v1 PROC-085 | PROC-091 |
+| v1 PROC-086 | PROC-092 |
+| v1 PROC-087 | PROC-093 |
+| v1 PROC-088 | PROC-093 |
+| v1 PROC-089 | PROC-093 |
+| v1 PROC-090 | PROC-094 |
+| v1 PROC-091 | PROC-095 |
+| v1 PROC-092 | PROC-096 |
+| v1 PROC-093 | PROC-097 |
+| v1 PROC-094 | PROC-098 |
+| v1 PROC-095 | PROC-019, PROC-099 |
+
+### r2 (features-proc-r2.md)
+
+| Old ID | New ID |
+|---|---|
+| r2 conventions | PROC-001 |
+| r2 PROC-001 | PROC-002 |
+| r2 PROC-002 | PROC-014, PROC-015 |
+| r2 PROC-003 | PROC-017 |
+| r2 PROC-004 | PROC-004 |
+| r2 PROC-005 | PROC-005 |
+| r2 PROC-006 | PROC-006 |
+| r2 PROC-007 | PROC-008 |
+| r2 PROC-008 | PROC-009 |
+| r2 PROC-009 | PROC-011 |
+| r2 PROC-010 | PROC-012 |
+| r2 PROC-011 | PROC-007 |
+| r2 PROC-012 | PROC-018 |
+| r2 PROC-013 | PROC-039 |
+| r2 PROC-014 | PROC-053 |
+| r2 PROC-015 | PROC-019 |
+| r2 PROC-016 | PROC-022, PROC-023, PROC-024, PROC-025 |
+| r2 PROC-017 | PROC-027 |
+| r2 PROC-018 | PROC-028 |
+| r2 PROC-019 | PROC-029 |
+| r2 PROC-020 | PROC-030 |
+| r2 PROC-021 | PROC-031 |
+| r2 PROC-022 | PROC-032 |
+| r2 PROC-023 | PROC-033 |
+| r2 PROC-024 | PROC-034 |
+| r2 PROC-025 | PROC-035 |
+| r2 PROC-026 | PROC-036 |
+| r2 PROC-027 | PROC-003 |
+| r2 PROC-028 | PROC-038 |
+| r2 PROC-029 | PROC-040 |
+| r2 PROC-030 | PROC-041 |
+| r2 PROC-031 | PROC-043 |
+| r2 PROC-032 | PROC-044 |
+| r2 PROC-033 | PROC-045 |
+| r2 PROC-034 | PROC-046 |
+| r2 PROC-035 | PROC-047 |
+| r2 PROC-036 | PROC-048 |
+| r2 PROC-037 | PROC-049 |
+| r2 PROC-038 | PROC-050 |
+| r2 PROC-039 | PROC-051 |
+| r2 PROC-040 | PROC-026 |
+| r2 PROC-041 | PROC-057 |
+| r2 PROC-042 | PROC-058 |
+| r2 PROC-043 | PROC-060 |
+| r2 PROC-044 | PROC-061 |
+| r2 PROC-045 | PROC-062 |
+| r2 PROC-046 | PROC-065 |
+| r2 PROC-047 | PROC-063 |
+| r2 PROC-048 | PROC-064 |
+| r2 PROC-049 | PROC-066 |
+| r2 PROC-050 | PROC-067 |
+| r2 PROC-051 | PROC-068 |
+| r2 PROC-052 | PROC-059 |
+| r2 PROC-053 | PROC-070 |
+| r2 PROC-054 | PROC-073 |
+| r2 PROC-055 | PROC-074 |
+| r2 PROC-056 | PROC-075 |
+| r2 PROC-057 | PROC-054 |
+| r2 PROC-058 | PROC-055 |
+| r2 PROC-059 | PROC-052 |
+| r2 PROC-060 | PROC-072 |
+| r2 PROC-061 | PROC-071 |
+| r2 PROC-062 | PROC-093 |
+| r2 PROC-063 | PROC-094 |
+| r2 PROC-064 | PROC-076 |
+| r2 PROC-065 | PROC-077 |
+| r2 PROC-066 | PROC-078 |
+| r2 PROC-067 | PROC-079 |
+| r2 PROC-068 | PROC-080 |
+| r2 PROC-069 | PROC-081 |
+| r2 PROC-070 | PROC-082 |
+| r2 PROC-071 | PROC-083 |
+| r2 PROC-072 | PROC-084 |
+| r2 PROC-073 | PROC-085 |
+| r2 PROC-074 | PROC-086 |
+| r2 PROC-075 | PROC-088 |
+| r2 PROC-076 | PROC-089 |
+| r2 PROC-077 | PROC-090 |
+| r2 PROC-078 | PROC-087 |
+| r2 PROC-079 | PROC-095 |
+| r2 PROC-080 | PROC-096 |
+| r2 PROC-081 | PROC-097 |
+| r2 PROC-082 | PROC-098 |
+
+### add (features-proc-addendum.md)
+
+| Old ID | New ID |
+|---|---|
+| add PROC-096 | PROC-061 |
+| add PROC-097 | PROC-069 |
+| add PROC-098 | PROC-070 |
+| add PROC-099 | PROC-071 |
+| add PROC-100 | PROC-012 |
+| add PROC-101 | PROC-023 |
+| add PROC-102 | PROC-024 |
+| add PROC-103 | PROC-033 |
+| add PROC-104 | PROC-003 |
+| add PROC-105 | PROC-015 |
+| add PROC-106 | PROC-022 |
+| add PROC-107 | PROC-016 |
+
+### add amendments to v1 entries
+
+| Amendment | New ID |
+|---|---|
+| add amend PROC-004 | PROC-014 (Dropped: R-010) |
+| add amend PROC-012 | PROC-046 |
+| add amend PROC-015 | PROC-023 |
+| add amend PROC-020 | PROC-030 |
+| add amend PROC-024 | PROC-033 |
+| add amend PROC-028 | PROC-037 |
+| add amend PROC-032 | PROC-039 |
+| add amend PROC-038 | PROC-025 |
+| add amend PROC-039 | PROC-048 |
+| add amend PROC-040 | PROC-049 |
+| add amend PROC-048 | PROC-024 |
+| add amend PROC-049 | PROC-057 |
+| add amend PROC-051 | PROC-061 |
+| add amend PROC-058 | PROC-070 |
+| add amend PROC-064 | PROC-071 |
+| add amend PROC-065 | PROC-071 |
+| add amend PROC-072 | PROC-078 |
+| add amend PROC-073 | PROC-079 |
+| add amend PROC-095 | PROC-099 |
