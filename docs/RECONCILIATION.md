@@ -28,7 +28,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-004 Helper operation allowlist
 - Sources in conflict: ADR-006 allows Signal, SetNice, SetAffinity, SetIoPriority, Freeze/Thaw/KillGroup, ReadProcessDetail only. PROC (v1 PROC-003/070/078, r2 PROC-064), SYS-013/032/033/039 need reads of io, fd list, fdinfo, environ, maps, smaps_rollup, ns, cwd, exe; strings scan; gcore dump; socket inode resolution; SOCK_DESTROY; recovery drop-in write; netns sock_diag dump.
-- Resolution: ADR-006's allowlist is extended with exactly: `ReadProcessFiles { key, files: set of {io, fd_list, fdinfo, environ, maps, smaps_rollup, ns, cwd, exe, status} }`; `ScanStrings { key, opts }` (streams batches); `Dump { key, mode, out_fd }` (runs `/usr/bin/gcore` by fixed path, writes to the passed fd); `ResolveSocketInodes { inodes }`; `SockDestroy { family, proto, four_tuple, cookie }`; `WriteServiceDropIn { manager: System, unit, keys limited to Restart*, StartLimit*, FailureAction, OnFailure }` to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`; `NetnsSockDiagDump { netns_ino }`. Still no path, command or free-form file argument. The helper re-runs `open_verified` on every process target.
+- Resolution: ADR-006's allowlist is extended with exactly: `ReadProcessFiles { key, files: set of {io, fd_list, fdinfo, environ, maps, smaps, smaps_rollup, ns, cwd, exe, status} }` (`smaps` per R-098); `ScanStrings { key, opts }` (streams batches); `Dump { key, mode, out_fd }` (runs `/usr/bin/gcore` by fixed path, writes to the passed fd); `ResolveSocketInodes { inodes }`; `SockDestroy { family, proto, four_tuple, cookie }`; `WriteServiceDropIn { manager: System, unit, keys limited to Restart*, StartLimit*, FailureAction, OnFailure }` to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`; `NetnsSockDiagDump { netns_ino }`. Still no path, command or free-form file argument. The helper re-runs `open_verified` on every process target.
 - Rule: rule 2, second clause: the ADR as written makes required features impossible, so the ADR changes.
 - Edits: ADR-006 "Privileged helper boundary" list.
 
@@ -453,6 +453,188 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Rule: SYS owns the feature; ADR-016 updated to match (engineering detail, not a structural rule).
 - Edits: ADR-016 "Service logs" row.
 
+### R-075 Column display keys apply to every table
+- Sources in conflict: table (a) keeps `column_resize`, `column_separators` and `dim_zero_values` under `[processes]` (from v1 PROC-095); APP-018 applies View > Columns to every table, and APP-032 had `tables.*` keys.
+- Resolution: one key each, in a new `[tables]` section of `settings.toml`: `tables.column_resize = "proportional"` (`proportional | last_column`), `tables.column_separators = false`, `tables.dim_zero_values = false`. Each key applies to all five tables (Processes, History, Services, Startup Apps, Connections). There are no per-table keys. The three `processes.*` keys are removed.
+- Rule: APP-018 owns View > Columns, which acts on every table (rule 3); key naming by ADR-011 style.
+- Edits: table (a); ADR-011 section list; merged sys-app APP-018, APP-032; merged proc PROC-025, PROC-041, PROC-042, PROC-099.
+
+### R-076 X11 window picker
+- Sources in conflict: R-046 drops the X11 EWMH fallback for the window features; APP-006 kept an X11 picker path (`XGrabPointer` crosshair, then `_NET_WM_PID`).
+- Resolution: the X11 picker path is dropped in v1. The "+" button is hidden without the KWin bridge.
+- Rule: R-046; ADR-010 (X11 is best effort).
+- Edits: merged sys-app APP-006.
+
+### R-077 Corner radius
+- Sources in conflict: ADR-009 `UiMetrics.radius = 5 × ui_scale` for everything; APP-040 4 px for rows and menus and 6 px for cards.
+- Resolution: `UiMetrics` has two radii: `radius_small = 4 × ui_scale` (rows, menus and other small elements) and `radius_card = 6 × ui_scale` (cards). `appearance.rounded_corners = false` sets both to 0.
+- Rule: rule 3 (TaskSlinger look).
+- Edits: ADR-009 "Metrics and scale"; merged sys-app APP-040.
+
+### R-078 About window title
+- Sources in conflict: APP-045 window naming pattern "tasklens <Name>"; APP-053 "About tasklens".
+- Resolution: the window title is "tasklens About". The Help menu item stays "About tasklens…".
+- Rule: APP-045 naming, applied to every secondary window.
+- Edits: merged sys-app APP-045, APP-053.
+
+### R-079 TaskSlinger theme share codes
+- Sources in conflict: none. The `TS1.` code encoding in APP-038 is inferred (U-17).
+- Resolution: no new decision. APP-038 stands as written: generate one code under Wine and decode it; if that fails, import only `TL1.` codes and raw JSON. The entry is marked "verify U-17".
+- Rule: none needed.
+- Edits: merged sys-app APP-038.
+
+### R-080 Ctrl+Esc through kglobalaccel
+- Sources in conflict: none. Whether `setForeignShortcutKeys` sticks for a launch component that is not running is unverified (U-16).
+- Resolution: no new decision. APP-051 stands as written: test on Plasma 6; the fallback writes `kglobalshortcutsrc` and asks the user to log out and back in. The entry is marked "verify U-16".
+- Rule: none needed.
+- Edits: merged sys-app APP-051.
+
+### R-081 Number formats do not follow the locale in v1
+- Sources in conflict: table (d) gives one fixed form per kind; APP-043 says number and date formats follow the selected locale.
+- Resolution: in v1 every number uses table (d) exactly, whatever the language: decimal point ".", digit grouping with a thin space (U+2009), units and patterns unchanged. Changing the language changes text only. Dates and times use the table (d) patterns in local time; no merged entry asks for a locale-specific date form, so none changes with the language.
+- Rule: table (d) is canonical, and the fixed column widths (template strings in table d) depend on it.
+- Edits: merged sys-app APP-043.
+
+### R-082 Startup Apps live refresh
+- Sources in conflict: ADR-008 reads startup entries on page open and on `RefreshNow`; SYS-019 (old SYS-020) adds inotify live refresh.
+- Resolution: while the Startup Apps tab is visible, the `Startup` worker also watches the autostart directories and the two Plasma script directories with inotify and listens to the user manager's `UnitFilesChanged` signal; either triggers a rescan. Both stop when the tab is not visible.
+- Rule: ADR-008 demand rules (work runs only while a surface shows it).
+- Edits: ADR-008 schedule table; merged sys-app SYS-019.
+
+### R-083 Strings written for the merged specs
+- Sources in conflict: none. These strings have no TaskSlinger or Mission Center source; the merge wrote them.
+- Resolution: accepted as written:
+  - decorations restart toast "Restart tasklens to apply the title bar change" (APP-001);
+  - window title "tasklens Keyboard Shortcuts" (APP-030);
+  - window title "tasklens Theme Editor" (APP-037);
+  - graph colour stored in `state.toml` as `accent` or the lower-case colour name (APP-039);
+  - generic confirmation window title "tasklens" (APP-045).
+- Rule: APP-045 naming pattern; none of them conflicts with a source.
+- Edits: merged sys-app APP-001, APP-030, APP-037, APP-039, APP-045 (the "inferred" marks go).
+
+### R-084 Detached graph window state
+- Sources in conflict: table (a) has `[[minigraphs]] detached` but no window grouping, size or position; PERF-083 (old PERF-075) persists size, stacked cards and, on KDE, position.
+- Resolution: `[[minigraphs]]` gains `window = 0` (the detached window the card sits in; ignored when `detached = false`). `state.toml` gains `[[detached_windows]]` with `id`, `width`, `height`, `x`, `y`. `x` and `y` are written and applied only on KDE through the KWin bridge. ADR-010's rule against restoring the main window's position is unchanged.
+- Rule: R-018 (window state lives in `state.toml`); R-046 and R-073 (position only through the bridge).
+- Edits: table (a); merged perf PERF-083.
+
+### R-085 Minigraph GPU source
+- Sources in conflict: the card menu picks a GPU (old PERF-072); the table (a) `source` values have no device.
+- Resolution: `source` accepts `gpu:<device key>`, `vram:<device key>` and `gpu_temp:<device key>` (device keys per PERF-005). The bare values `gpu`, `vram` and `gpu_temp` mean the first GPU in sidebar order.
+- Rule: table (a) shape extended; no rule conflicts.
+- Edits: table (a); merged perf PERF-080.
+
+### R-086 Matching detached and mini windows through the KWin bridge
+- Sources in conflict: old PERF-075 used its own `/Scripting loadScript` script and a per-window app ID; R-046 makes the KWin bridge worker the only KWin channel.
+- Resolution: the bridge finds a detached graph window or the mini window by tasklens's pid plus the window caption ("tasklens Graph <n>", "tasklens Mini Window") in `WindowsSnapshot`. All tasklens windows keep the one app ID `io.github.oysteinkrog.Tasklens`.
+- Rule: R-046; R-001 (one app ID).
+- Edits: ADR-004 KWin bridge worker; merged perf PERF-083, PERF-093.
+
+### R-087 GPU API versions probe mode
+- Sources in conflict: PERF-071 (old PERF-064) needs Vulkan and OpenGL versions from `tl-gpu-probe --api-versions`; ADR-007 describes only the NVML sampler.
+- Resolution: `tl-gpu-probe` has a second, one-shot mode `--api-versions`. It loads Vulkan (ash) and EGL, prints one postcard frame with the versions per GPU to stdout, and exits. The engine runs it once at startup, in its own process, never in the NVML sampler process. A crash or timeout gives `Unknown`.
+- Rule: ADR-007 extended because the feature needs it; the crash isolation goal holds.
+- Edits: ADR-007; ADR-001 `tl-gpu-probe` row (adds `ash` and an EGL loader); merged perf PERF-071.
+
+### R-088 SMART fallback through pkexec smartctl
+- Sources in conflict: PERF-051 (old PERF-046) runs `pkexec /usr/bin/smartctl -a -j /dev/<d>` when UDisks2 or its NVMe module is missing; table (c) lists `org.freedesktop.policykit.exec` only for Run as administrator.
+- Resolution: keep the fallback in P3 under `org.freedesktop.policykit.exec`, and list that use in table (c). It is not a tl-helper operation.
+- Rule: R-002 (third-party actions used as-is); R-004 (no SMART read in the helper).
+- Edits: table (c); merged perf PERF-051.
+
+### R-089 Phase of View > Graphs
+- Sources in conflict: APP-017 and APP-021 put the Graphs submenu in P3 with the toggles in P2; table (a) marks `[[minigraphs]]` hide and range as P1, and the minigraph panel is P1.
+- Resolution: the Graphs submenu, its seven graph checkboxes and "Reset Minigraph Layout" ship in P1 with the panel. "Keep detached graphs open when closing main window" ships in P3.
+- Rule: table (a) phase marks.
+- Edits: merged sys-app APP-017, APP-021; merged perf PERF-080.
+
+### R-090 Sidebar toggle state
+- Sources in conflict: none. F9 and Ctrl+T hide the Performance device sidebar, and no key stores that.
+- Resolution: the sidebar visibility is not persisted. The sidebar shows at every start.
+- Rule: table (a) is the only schema.
+- Edits: merged perf PERF-007.
+
+### R-091 "Copy rows as table" in the row menu
+- Sources in conflict: R-033's order has no "Copy rows as table"; add PROC-098 gives it a menu label for Ctrl+Shift+C.
+- Resolution: it is row-menu item 14, after "Copy all metrics".
+- Rule: addendum is later and more specific; R-012 defines the command.
+- Edits: merged proc PROC-057.
+
+### R-092 Freeze, Thaw and Kill for units outside app.slice
+- Sources in conflict: ADR-006 validates only `app.slice` cgroups; PROC-064 offers Freeze App, Thaw App and Kill App on every app and unit row, including `session.slice`, `background.slice` and system units.
+- Resolution: dispatch by target. `ActionTarget::Cgroup` for cgroups under `app.slice` (ADR-006 cgroup operations). `ActionTarget::Unit` for every other unit: the user or system manager's `FreezeUnit(name)`, `ThawUnit(name)` and `KillUnit(name, "all", SIGKILL)`, with `ALLOW_INTERACTIVE_AUTHORIZATION` so polkit `org.freedesktop.systemd1.manage-units` can prompt for system units.
+- Rule: ADR-006 extended because the feature needs it; systemd owns units outside `app.slice`.
+- Edits: ADR-006; merged proc PROC-064.
+
+### R-093 I/O priority "Default (follows nice)"
+- Sources in conflict: PROC-068 offers "Default (follows nice)"; ADR-005 `IoPriority` has no such value.
+- Resolution: add `IoPriority::None` (`IOPRIO_CLASS_NONE`, level 0).
+- Rule: ADR-005 extended because the feature needs it.
+- Edits: ADR-005; ADR-006 `SetIoPriority` detail; merged proc PROC-068.
+
+### R-094 CPU decimals in Copy details
+- Sources in conflict: R-013 and table (d) give one decimal for percent everywhere; TaskSlinger's Copy details block uses `%.2f%%`.
+- Resolution: Copy details prints CPU with two decimals (`%.2f%%`, for example `CPU: 3.27%`). This is the only exception to the percent row of table (d).
+- Rule: rule 3 (TaskSlinger's fixed block, verified string).
+- Edits: table (d); merged proc PROC-070.
+
+### R-095 VirusTotal one-time notice flag
+- Sources in conflict: PROC-074 shows a one-time notice; table (a) has no key for it.
+- Resolution: `state.toml` `[processes] virustotal_notice_accepted = false`. It is state, not a user choice, so it is not in `settings.toml` and not in the settings window.
+- Rule: R-018 (state goes to `state.toml`).
+- Edits: table (a); merged proc PROC-074, PROC-099.
+
+### R-096 Hash crates
+- Sources in conflict: PROC-074 and PROC-078 need SHA-256 and MD5; ADR-001's `tl-collect` row lists no hash crate.
+- Resolution: `tl-collect` may depend on `sha2` and `md-5`.
+- Rule: ADR-001 extended because the feature needs it.
+- Edits: ADR-001 dependency table; merged proc PROC-078.
+
+### R-097 Thread-level action target
+- Sources in conflict: PROC-079 has thread actions (priority, affinity, signal); ADR-005 has no thread target.
+- Resolution: `ActionTarget::Thread { process: ProcessKey, tid: u32 }`. The engine opens and verifies the process pidfd (`open_verified`), then checks that `/proc/<pid>/task/<tid>` exists, then acts on the TID; the pidfd is polled after the call as for other PID-based syscalls. The helper accepts this target for `Signal`, `SetNice`, `SetSched` and `SetAffinity`.
+- Rule: ADR-005 and ADR-006 extended because the feature needs it; the identity rule is unchanged.
+- Edits: ADR-005; ADR-006; merged proc PROC-079.
+
+### R-098 smaps in the helper's file set
+- Sources in conflict: PROC-081 needs per-mapping RSS from `/proc/<pid>/smaps`; R-004 and ADR-006 list `smaps_rollup` only.
+- Resolution: add `smaps` to the `ReadProcessFiles` set.
+- Rule: rule 2 (the allowlist made a required feature impossible).
+- Edits: R-004 set; ADR-006; merged proc PROC-081.
+
+### R-099 Environment masking and copying
+- Sources in conflict: v1 PROC-077 masked `*KEY*` and `*COOKIE*`; r2 PROC-071 masked a different list; neither said what copy does with masked values.
+- Resolution: mask the union: names matching `*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*PASSWD*`, `*KEY*`, `*COOKIE*` or `*CREDENTIAL*` (case-insensitive; `*KEY*` covers `*_KEY` and `*API_KEY*`). "Copy value" and "Copy all" copy a masked value as "••••••" unless its row is revealed.
+- Rule: ADR-015 (secrets never leave by accident); union keeps both sources' protection.
+- Edits: merged proc PROC-083.
+
+### R-100 Boot ID in saved process minigraph sources
+- Sources in conflict: `process:<pid>:<start_ticks>` (table a) can match a new process after a reboot.
+- Resolution: the source string is `process:<boot_id 16 hex>:<pid>:<start_ticks>`. A saved card whose boot ID is not the current boot shows "Ended".
+- Rule: ADR-003 `ProcessKey` includes the boot ID.
+- Edits: table (a); merged proc PROC-093; merged perf PERF-085, PERF-086.
+
+### R-101 Phase of process minigraph cards
+- Sources in conflict: add PERF-087 put process cards in P2; both PROC sources put the menu items that create them in P3.
+- Resolution: P3 for the menu items and the process cards (merged PERF-085, PERF-086, PERF-087).
+- Rule: a card cannot ship before the menu that creates it.
+- Edits: merged proc PROC-093; merged perf PERF-086.
+
+### R-102 Handle Search result menu labels
+- Sources in conflict: R-061 adopts r2 PROC-080's "End Process (SIGTERM)" and "Kill Process (SIGKILL)"; R-045 and table (b) name SIGTERM "End Task" and SIGKILL "End Process".
+- Resolution: "End Task" (SIGTERM) and "End Process" (SIGKILL). The rest of R-061 stands.
+- Rule: R-045 naming, the same everywhere.
+- Edits: merged proc PROC-096; merged sys-app APP-015.
+
+### R-103 Inferred mechanisms in the merged PROC spec
+- Sources in conflict: none. The merge wrote three mechanisms that no source gives.
+- Resolution: accepted as written:
+  - app-row Disk falls back to the cgroup `io.stat` rate when a member's per-process value is Restricted (PROC-008);
+  - the in-RAM rolling history window keeps the last 10 blocks in the ADR-012 block encoding, writes nothing to disk and is dropped when the Processes tab closes (PROC-086, D-010);
+  - "Delete from history" adds the key to a per-boot deleted-keys list beside the segments, which every query filters out; segments are not rewritten (PROC-088).
+- Rule: D-010 and ADR-012 for the rolling window; the others conflict with nothing.
+- Edits: merged proc PROC-008, PROC-086, PROC-088 (the "inferred" marks go).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
@@ -532,10 +714,12 @@ highlight_new_exited = true
 filter_include_children = false
 hide_system = false
 subtree_totals = false         # "Show subtree totals on parent processes"
-dim_zero_values = false
-column_separators = false
-column_resize = "proportional" # proportional | last_column
 dump_type = "mini"             # mini | full
+
+[tables]                        # every table (R-075)
+column_resize = "proportional" # proportional | last_column
+column_separators = false
+dim_zero_values = false
 
 [properties]
 hide_unnamed_handles = true
@@ -636,6 +820,7 @@ last_tab = "processes"
 [processes]
 history_mode = false
 group_expanded = { apps = true, background = true, system = true }
+virustotal_notice_accepted = false   # R-095
 
 [services]
 group_expanded = { system = true, user = true }
@@ -667,12 +852,21 @@ visible = ["name", "user", "pid", "cpu", "memory", "disk", "network", "gpu", "de
 widths = { name = 248, user = 92, pid = 96, cpu = 63, memory = 92, disk = 82, network = 92, gpu = 72, description = 342, power = 101 }
 
 [[minigraphs]]                 # P1 hide and range, P3 colour and detach
-source = "cpu"                 # cpu | memory | disk | network | gpu | vram | gpu_temp | process:<pid>:<start_ticks> | name:<image name> | app:<app id>
+source = "cpu"                 # cpu | memory | disk | network | gpu | vram | gpu_temp | gpu:<device key> | vram:<device key> | gpu_temp:<device key> | process:<boot_id 16 hex>:<pid>:<start_ticks> | name:<image name> | app:<app id>
+                               # bare gpu, vram, gpu_temp = first GPU in sidebar order (R-085); boot ID per R-100
 column = "cpu"                 # for process sources
 range_s = 60
-color = "accent"               # accent | <one of the 17 names>
+color = "accent"               # accent | <one of the 17 names, lower case>
 slot = 0
 detached = false
+window = 0                     # detached window id; ignored when detached = false (R-084)
+
+[[detached_windows]]           # P3 (R-084)
+id = 0
+width = 180                    # logical px
+height = 90
+x = 0                          # x and y written and applied on KDE only, through the KWin bridge
+y = 0
 
 [[tray_graphs]]                # P3
 source = "cpu"
@@ -748,7 +942,7 @@ Polkit (policy file `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.
 - `io.github.oysteinkrog.tasklens.helper`, `auth_admin_keep`: `pkexec /usr/lib/tasklens/tl-helper --session`. P3.
 - `io.github.oysteinkrog.tasklens.setup`, `auth_admin_keep`: `pkexec /usr/lib/tasklens/tasklens-setup <rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off>`. P3.
 - `io.github.oysteinkrog.tasklens.netmon`: reserved for `tl-netmon`. P4.
-- Third-party actions used as-is: `org.freedesktop.systemd1.manage-units`, `manage-unit-files`, `reload-daemon`; `org.freedesktop.udisks2.ata-smart-update`, `filesystem-unmount-others`, `eject-media`; `org.freedesktop.policykit.exec` (Run as administrator).
+- Third-party actions used as-is: `org.freedesktop.systemd1.manage-units`, `manage-unit-files`, `reload-daemon`; `org.freedesktop.udisks2.ata-smart-update`, `filesystem-unmount-others`, `eject-media`; `org.freedesktop.policykit.exec` (Run as administrator; the P3 SMART fallback `pkexec /usr/bin/smartctl -a -j /dev/<d>`, R-088).
 - Optional rule (P4, APP-049): `/etc/polkit-1/rules.d/49-tasklens.rules`.
 
 Binaries and scripts:
@@ -772,11 +966,11 @@ Command-line arguments (APP-052): `--start-minimized`, `--low-memory`, `--watch-
 
 ### (d) Number and unit formats
 
-All formatting lives in `tl-model::units`. "Measured zero" means a valid sample equal to zero; missing values use validity glyphs (R-050), never a zero.
+All formatting lives in `tl-model::units`. These forms are used in every language in v1: decimal point ".", grouping with a thin space, no locale-specific number forms (R-081). "Measured zero" means a valid sample equal to zero; missing values use validity glyphs (R-050), never a zero.
 
 | Kind | Format | Measured zero | Examples |
 |---|---|---|---|
-| Percent (CPU, GPU, memory %, header totals, stats grids) | one decimal, `%.1f%%` | `0%` | `11.9%`, `3.4%`, `100.0%` |
+| Percent (CPU, GPU, memory %, header totals, stats grids) | one decimal, `%.1f%%`. One exception: Copy details prints CPU as `%.2f%%` (R-094) | `0%` | `11.9%`, `3.4%`, `100.0%` |
 | Memory and storage sizes | IEC, base 1024, units B KiB MiB GiB TiB, two decimals from 1 KiB up; integer bytes below | `0 B` | `512 B`, `16.00 KiB`, `1.22 GiB`, `34.68 GiB / 63.16 GiB` |
 | Whole-MiB forms (Copy details, history "Memory: 1.22 / 62.70 GiB" excepted) | integer MiB | `0 MiB` | `812 MiB` |
 | Disk and I/O rates in tables | fixed MiB/s, one decimal | `0 MiB/s` | `0.4 MiB/s` |
