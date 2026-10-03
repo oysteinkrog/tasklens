@@ -1626,7 +1626,7 @@ Astra: versioned TOML under `$XDG_CONFIG_HOME/tasklens/`, atomic replacement, mi
 
 Directories are created with mode `0700`; files with `0600`. Built-in themes are not on disk; they ship as `assets/themes/builtin.json` (ADR-009).
 
-**Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout and tray graphs. There is no `window.toml`.
+**Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout and tray graphs.
 
 **Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default)]`). Canonical table (a) in `docs/RECONCILIATION.md` is the only settings schema, for both files: every key, default and range is defined there, and a key not listed there does not exist. Both files start with `schema_version = 1`. The sections of `settings.toml` are `[general]`, `[theme]`, `[appearance]`, `[motion]`, `[units]`, `[processes]`, `[properties]`, `[performance]`, `[fans]`, `[graphs]`, `[history]`, `[window]`, `[tray]`, `[startup]`, `[network]`, `[privilege]`, `[rendering]`, `[services]`, `[lowmem]` and `[debug]`. The keys other ADRs depend on:
 
@@ -1674,7 +1674,7 @@ max_disk_mb = 256
 
 `state.toml` defaults that other ADRs depend on: `[window] width = 1280, height = 800` (clamped to at least 800 × 500); `[sort.processes] column = "pid", ascending = true` (history: `cpu` descending; services: `name` ascending; startup: `status` ascending, then name; connections: `proto` ascending, then local port); `[columns.processes] visible = ["name", "user", "pid", "cpu", "memory", "disk", "network", "gpu", "description"]` with widths Name 248, User 92, PID 96, CPU 63, Memory 92, Disk 82, Network 92, GPU 72, Description 342 (logical px at 100%), and Power usage 101 when shown. `power` and `power_trend` exist and are off by default on every machine. `memory` is RssAnon (D-004).
 
-There is no CPU percentage mode setting (two columns instead, ADR-008) and no `filter_cmdline` setting (the filter always matches the command line, ADR-009). Table (a) and R-071 list the other dropped keys.
+There is no CPU percentage mode setting (two columns instead, ADR-008) and no `filter_cmdline` setting (the filter always matches the command line, ADR-009). R-071 lists the other keys that do not exist and why.
 
 Column ids are stable strings defined once in `tl-model::ids::ColumnId` with `as_str()`/`from_str()`; an unknown id in the file is dropped with a log line.
 
@@ -1960,7 +1960,7 @@ The collection-cost gates replace PLAN.md's single 2% target because of Astra's 
 
 ### Verification
 
-- `docs/spike/phase0-results.md` with the JSON outputs and the checklist, committed before any phase-1 UI bead starts.
+- `docs/spike/phase0-results.md` with the JSON outputs and the checklist, committed before any P1 UI bead starts.
 - Each later phase re-runs `cargo xtask bench`; a regression of more than 20% on any gated metric blocks the phase.
 
 ---
