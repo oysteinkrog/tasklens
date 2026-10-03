@@ -2,7 +2,7 @@
 
 This file specifies the secondary windows of the processes area: the Process Properties window and its seven tabs, the App Properties window, the Set Affinity, Custom priority and Real-time signal dialogs, the Send Signal submenu, the Run dialog, the Search File Handles window, the low-memory rescue window, the dump toasts and the VirusTotal notice. IDs use the prefix UI-PWN.
 
-Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHITECTURE.md`, then `docs/spec/merged/proc.md` and `sys-app.md`. Component and token names come from `docs/ui/foundation.md` (TlSecondaryWindow, TlTabStrip, TlButton, TlCheckbox, TlInput, TlSelect, TlSpinBox, TlSlider, TlKeyValueGrid, TlMenu, TlToast, TlDialog, TlTooltip, TlProgressBar, TlLink and the tokens of `TlTheme`). Tables use `TlTreeTable` from `docs/ui/processes.md`; this file only says which columns, rows and menus each table has. It does not respecify the component.
+Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHITECTURE.md`, then `docs/spec/merged/proc.md` and `sys-app.md`. Component and token names come from `docs/ui/foundation.md` (TlSecondaryWindow, TlDialog, TlTabs, TlButton, TlCheckbox, TlTextInput, TlSelect, TlStepper, TlSlider, TlKeyValueGrid, TlMenu, TlToast, TlTooltip, TlProgress, TlEmptyState, TlFocusRing and the tokens of `TlTheme`). Tables use `TlTreeTable` from `docs/ui/processes.md`; this file only says which columns, rows and menus each table has. It does not respecify the component.
 
 ## Conventions used in every entry
 
@@ -19,60 +19,39 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 
 ## A. Shared frame and data path
 
-### UI-PWN-001 Secondary window frame
+### UI-PWN-001 Secondary window frame (use of TlSecondaryWindow)
 
 - **Implements:** APP-045, APP-009 (pin on secondary windows), R-073, PROC-056, PROC-077 (frame part), D-006.
-- **Anatomy:**
+- **Anatomy:** every window in this file is a `TlSecondaryWindow` from `docs/ui/foundation.md` UI-FND-021: 34 px kit title bar (`titlebar`), title `t_base` 500 with end truncation, pin `TlButton::Toggle` 34 × 34 left of the caption buttons, minimize and maximize only when `window.window_controls()` reports them, close with `status.danger` hover, 1 px `divider` under the bar. This file does not respecify the frame. It fixes only what the foundation leaves to the owner:
 
-```text
-+--------------------------------------------------------------------------+
-| [title text, t_base medium, ellipsis]                    [pin] [ x ]     |  32 px title bar, `titlebar`
-+--------------------------------------------------------------------------+
-| content (window_bg)                                                      |
-|                                                                          |
-+--------------------------------------------------------------------------+
-  1 px border `divider` on all four edges (client-side decorations only)
-```
+| Window | Entry | Kind (UI-FND-021) | Title | Default size | Minimum | Resizable |
+|---|---|---|---|---|---|---|
+| Process Properties | UI-PWN-003 | Properties | `Process Properties - {name} - PID {pid}` | 900 × 640 | 640 × 400 | yes |
+| App Properties | UI-PWN-019 | Properties | `App Properties - {name}` | 720 × 560 | 640 × 400 | yes |
+| Set Affinity | UI-PWN-021 | Confirmation-style modal | `tasklens Set Affinity` | 640 × content (360 to 640) | same | no |
+| Set Priority (Custom) | UI-PWN-023 | Confirmation-style modal | `tasklens Set Priority` | 440 × content | same | no |
+| Real-time signal | UI-PWN-027 | Confirmation-style modal | `tasklens Send Signal` | 360 × content | same | no |
+| Confirmations | UI-PWN-025 | Confirmation | `tasklens` | 420 × content | 360 × 120 | no |
+| VirusTotal notice | UI-PWN-036 | Confirmation | `tasklens VirusTotal Notice` | 420 × content | 360 × 120 | no |
+| Run | UI-PWN-028 | Tool | `tasklens Run` | 480 × 248 | 480 × 248 | no |
+| Handle Search | UI-PWN-030 | Tool | `tasklens Handle Search` | 860 × 560 | 560 × 360 | yes |
+| Low memory | UI-PWN-032 | Tool, no parent | `tasklens - Low memory` | 420 × 560 | 360 × 400 | yes |
 
-  - Title bar: height 32 [chosen; TaskSlinger's panel title row measures 43, which includes the panel's outer padding]. Background `titlebar`. Left padding `sp5` (12). Title text `t_base` (13) medium 500, `text_primary`, single line, ellipsis at the end, vertically centred.
-  - Pin button: TlButton ghost, icon only, 24 × 24, icon Lucide `Pin` 14 px, `text_secondary`. Toggled on: the icon stays `Pin`, the button gets background `accent` at 20% alpha and icon colour `accent`. Placed 8 px left of the close button.
-  - Close button: TlButton ghost, icon only, 24 × 24, Lucide `X` 14 px, `text_secondary`; hover background `status.danger` at 85% alpha, icon `text_selected_primary` [chosen, matches the main window caption close].
-  - Right padding `sp3` (6). Buttons are vertically centred.
-  - No minimize or maximize buttons [chosen; TaskSlinger's panels show only close]. Double-click on the title bar toggles maximize (CSD behaviour from ADR-010). Right-click on the title bar shows the compositor window menu (`window.show_window_menu`).
-  - Resize: 6 px invisible resize border on every edge and corner (gpui-kit `WindowBorder`), CSD only.
-  - With `appearance.decorations = "server"`, KWin draws the title bar. tasklens then omits its own 32 px bar and shows the pin as the first item of a 28 px strip at the top of the content only for windows whose content has no toolbar; Properties windows put the pin at the right end of the tab strip instead (UI-PWN-004).
-- **States:**
-  - Pin default: icon `text_secondary`. Hover: background `menu_hover`. Pressed: background `menu_hover` darkened 8% (L − 0.08). Focused (keyboard): 2 px focus ring `accent`, offset 1 px, radius `r_sm`. Toggled on: as above. Disabled (no mechanism, R-073): icon at 40% alpha, no hover, tooltip "Not supported by this desktop".
-  - Close: default, hover (danger fill), pressed (danger fill at 100%), focused (ring).
-  - Window inactive: title text `text_secondary`; buttons unchanged.
+  - "Confirmation-style modal" means `WindowKind::Dialog`, modal to the window that opened it, with the `TlDialog` footer, but with form content instead of a message.
+  - The Run window is fixed-size, which overrides UI-FND-021's tool-window minimum of 480 × 320 and "resizable: yes" [chosen: its content has a fixed height]. Listed in "Open items" so the foundation table can carry the exception.
+  - The App Properties minimum follows the foundation's Properties kind (640 × 400), not a smaller one.
+- **States:** as UI-FND-021. The low-memory window starts pinned (UI-PWN-032).
 - **Interaction:**
-  - Drag on any title bar area that is not a button moves the window (`window.start_window_move()` on left mouse-down).
-  - Pin click dispatches `TogglePinWindow`. On KDE it sends `Command::KWin(KWinCommand::KeepAbove { pid: own, caption: <window title>, on: bool })` (APP-009); on X11 it sets `_NET_WM_STATE_ABOVE`. The state is held only in the window entity (only the main window persists, R-073).
-  - Close click, Ctrl+W, and Esc (when no menu, popup, select list or sub-dialog in this window is open) dispatch `CloseSecondaryWindow`, which calls `window.remove_window()`.
-  - Esc order inside the window: close the topmost popup or menu; else clear a focused, non-empty filter field; else close the window. This is the table (b) Esc rule applied per window.
-  - Tab order: content first, then pin, then close (the title bar comes last so Tab from a field goes into the content).
-- **Data binding:** none, except the low-memory window, which is always pinned (UI-PWN-032). Pin availability reads `Snapshot.windows.header.validity` (`Unsupported` means no bridge) and the X11 backend flag.
-- **Build:** `crates/tl-ui/src/windows/frame.rs`, `pub struct TlSecondaryWindow` (RenderOnce) from the foundation file, given `title: SharedString`, `pinned: bool`, `pin_available: PinAvailability`, and the content element. Windows open with:
-
-```rust
-WindowOptions {
-    kind: WindowKind::Floating,            // tools and property windows (APP-045)
-    window_decorations: Some(WindowDecorations::Client),   // or Server per appearance.decorations
-    window_background: WindowBackgroundAppearance::Opaque,
-    app_id: Some("io.github.oysteinkrog.Tasklens".into()),
-    window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size, cx))),
-    window_min_size: Some(min_size),
-    titlebar: Some(TitlebarOptions { title: Some(title), ..Default::default() }),
-    ..Default::default()
-}
-```
-
-  Modal confirmations use `WindowKind::Dialog` (UI-PWN-025 and others). Each window gets its own gpui-kit `Root`, so toasts and menus are per window (APP-045). Window titles are set with `window.set_window_title` whenever the title text changes (UI-PWN-003).
-- **Performance:** the frame is static; it re-renders only on pin change, focus change or title change. Title text is a `SharedString` built once per change.
-- **Accessibility:** pin accessible name "Keep window above others", close "Close window". Both have tooltips with those names (500 ms delay). Focus ring on keyboard focus only (`focus_visible`).
-- **Tests:** `frame_esc_closes_window_when_nothing_open` (TestAppContext: open a Properties window, dispatch Esc, assert the window count drops by one); `frame_esc_closes_menu_first` (open a row menu, Esc, assert the window stays open and the menu is gone); `frame_pin_disabled_without_bridge` (windows component `Unsupported`, assert the pin button is disabled and its tooltip text).
-- **Phase:** P1 (frame, close, Esc); P2 (pin through the bridge).
-- **Decided here:** title bar 32 px; pin and close 24 px; no minimize or maximize buttons; pin placement with server decorations.
+  - Esc order inside every window in this file: close the topmost popup or menu; else cancel a running scan or search (Strings, Handle Search); else clear a focused, non-empty filter field; else close the window (Cancel for modals). This is the table (b) Esc rule applied per window.
+  - Ctrl+W closes Properties and tool windows.
+  - Pin: `ToggleAlwaysOnTop { window: WindowKey }` (UI-FND-021), state in memory only (R-073).
+- **Data binding:** windows are registered in the foundation's `WindowRegistry` with these keys, added by this file: `WindowKey::Properties(ProcessKey)` (exists), `WindowKey::AppProperties(GroupKey)`, `WindowKey::Run`, `WindowKey::HandleSearch`. Modal dialogs are not registered (they die with their parent).
+- **Build:** `TlSecondaryWindow::open(cx, kind, title, size, build_content)` from `components/window_frame.rs`. Each window gets its own gpui-kit `Root`, so toasts and menus are per window (APP-045). Titles that change (Properties exited state) call `window.set_window_title`.
+- **Performance:** the frame is static; it re-renders only on pin, focus or title change.
+- **Accessibility:** as UI-FND-021.
+- **Tests:** `pwn_esc_order_scan_then_filter_then_close` (Strings scan running, filter non-empty: three Esc presses cancel the scan, clear the filter, close the window); `pwn_window_sizes_match_table` (open each window kind in TestAppContext and assert default and minimum sizes).
+- **Phase:** P1 (frame), P2 (pin working).
+- **Decided here:** the sizes table above; the Run fixed-size exception; Esc order with scans and searches.
 
 ### UI-PWN-002 Properties data path
 
@@ -109,19 +88,19 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
 
 ```text
 +------------------------------------------------------------------------------+
-| Process Properties - firefox - PID 4321                          [pin] [x]   | 32  (UI-PWN-001)
+| Process Properties - firefox - PID 4321                          [pin] [x]   | 34  (UI-PWN-001)
 +------------------------------------------------------------------------------+
-| General | Threads [97] | File descriptors [412] | Memory maps [210] | Security | Environment [51] | Strings |  36  (UI-PWN-004)
+| General | Threads [97] | File descriptors [412] | Memory maps [210] | Security | Environment [51] | Strings |  32  (UI-PWN-004)
 +------------------------------------------------------------------------------+
 | [search] Filter                                          [x]  | tab tools    |  32  (UI-PWN-005)
 +------------------------------------------------------------------------------+
 | tab body (window_bg), padding sp5 (12) left/right, sp4 (8) top/bottom       |
 |                                                                              |
 +------------------------------------------------------------------------------+
-  default 900 x 640, minimum 640 x 420
+  default 900 x 640, minimum 640 x 400
 ```
 
-  - Default size 900 × 640 [spec PROC-077]; minimum 640 × 420 [chosen]. Opened centred on the main window's output (`Bounds::centered(None, ..)`); position is never saved (ADR-010).
+  - Default size 900 × 640 [spec PROC-077]; minimum 640 × 400 (UI-FND-021 Properties kind). Opened centred on the main window's output (`Bounds::centered(None, ..)`); position is never saved (ADR-010).
   - Title: `Process Properties - {name} - PID {pid}` where `{name}` is the PROC-007 display name of the process (not the app name). When the process has exited: `Process Properties - {name} - PID {pid} (not running)` [spec].
 - **States:**
   - Loading (first detail payload not yet arrived, at most one sweep): title already set from the snapshot record; each tab shows its own loading state (UI-PWN-006 to UI-PWN-018).
@@ -131,45 +110,40 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
   - Already open for the same `ProcessKey`: the existing window is activated (`window.activate_window()`) and its active tab is not changed [spec].
 - **Interaction:**
   - Opened by `OpenProperties` (Enter, Alt+Enter, Ctrl+I on a process row, D-008; the row menu item "Properties"; double-click is not bound, because TaskSlinger double-click expands). The action carries the captured `ProcessKey`.
-  - Keys inside the window (context `PropsWindow`): Ctrl+Tab and Ctrl+PgDn next tab, Ctrl+Shift+Tab and Ctrl+PgUp previous tab (`PropsNextTab`, `PropsPrevTab`); Alt+1 to Alt+7 select tab 1 to 7 (`PropsSelectTab(n)`); Ctrl+F focuses the active tab's filter (`FocusFilter`, same action as table b); F5 refreshes the active tab now (`RefreshNow`, sends `Command::DetailRefresh`); Esc per UI-PWN-001; Ctrl+W closes.
+  - Keys inside the window (context `PropsWindow`): tab keys per UI-PWN-004; Ctrl+F focuses the active tab's filter (`FocusFilter`, same action as table b); F5 refreshes the active tab now (`RefreshNow`, sends `Command::DetailRefresh`); Esc per UI-PWN-001; Ctrl+W closes.
   - Initial focus: the active tab's first focusable element (the table for table tabs, the filter for General and Security).
   - Toasts inside the window appear at the top centre of this window, 8 px under the tab strip (APP-044 rule applied per window).
-- **Data binding:** `ProcessKey` captured at open. Reads `Snapshot.processes` (bit `PROCESSES`) for the record, `Snapshot.details` (bit `DETAILS`) for tab payloads, `Snapshot.windows` (bit `WINDOWS`) for the General window block. Registers `DetailDemand { target: Process(key), tab: active }` (UI-PWN-002). The registry of open windows is `PropsRegistry` (a GPUI `Global`: `FxHashMap<ProcessKey, WindowHandle<PropsWindow>>` plus `FxHashMap<GroupKey, WindowHandle<AppPropsWindow>>`), cleaned in each window's `on_release`.
+- **Data binding:** `ProcessKey` captured at open. Reads `Snapshot.processes` (bit `PROCESSES`) for the record, `Snapshot.details` (bit `DETAILS`) for tab payloads, `Snapshot.windows` (bit `WINDOWS`) for the General window block. Registers `DetailDemand { target: Process(key), tab: active }` (UI-PWN-002). Open windows are tracked by the foundation's `WindowRegistry` under `WindowKey::Properties(ProcessKey)`; it enforces the cap of 8 and closes the window with the main window (UI-FND-021).
 - **Build:** `crates/tl-ui/src/windows/props/mod.rs`, `pub struct PropsWindow` (Entity, root view of the window) owning: `key: ProcessKey`, `active: DetailTab`, `tabs: PropsTabs` (one lazily created entity per tab: `GeneralTab`, `ThreadsTab`, `FdsTab`, `MapsTab`, `SecurityTab`, `EnvironTab`, `StringsTab`), `filter: [Entity<InputState>; 7]` (one per tab, created in the constructor), `exited: bool`, `last_record: Option<ProcessRecord>`, `_subs: Vec<Subscription>`. Each tab body is embedded with `.cached(StyleRefinement::default().size_full())`, except table bodies (they own scrolling, ADR-009).
 - **Performance:** a snapshot install costs one record lookup by `ProcessKey` (binary search in `records`, sorted by key) and one `Arc` pointer compare per visible tab. Only the active tab renders. No `format!` in render: titles and counts are cached `SharedString`s rebuilt only when their number changes.
 - **Accessibility:** the window title names the process, so the window list and the taskbar tooltip identify it. Every tab is reachable by keyboard (Alt+1 to Alt+7 and Ctrl+Tab), because kit tabs are not focusable (widget research section 1).
 - **Tests:** `props_open_focuses_existing_window` (open twice for one key, assert one window and that it became active); `props_ninth_window_shows_toast` (open 9, assert 8 windows and the toast text); `props_exited_freezes_values` (remove the key from the fake snapshot, assert title suffix, banner text, values unchanged, Scan button disabled); `props_open_failure_toast` (key missing at open, assert no window and toast "Could not open properties.").
 - **Phase:** P2.
-- **Decided here:** minimum size 640 × 420; exited banner text and look; Alt+1..7 and Ctrl+PgUp/PgDn tab keys; double-click does not open Properties.
+- **Decided here:** exited banner text and look; initial focus; double-click does not open Properties.
 
 ### UI-PWN-004 Properties tab strip with counts
 
 - **Implements:** PROC-077 (tab labels and counts).
-- **Anatomy:**
+- **Anatomy:** the foundation's `TlTabs` (UI-FND-018): 32 px strip, equal-width cells (min 80), `t_sm` labels, active cell `window_bg` with a 2 px `accent` underline, inactive `tab_bg`, 1 px `divider` below, overflow scroll plus the "»" menu. This entry fixes only the labels and counts.
 
 ```text
 | General | Threads [97] | File descriptors [412] | Memory maps [210] | Security | Environment [51] | Strings |
-  <------ equal widths: (window width - 2 x sp5) / 7, each tab 36 high ------>
-  2 px separators between tabs, colour `divider`
 ```
 
-  - Height 36 [measured 38, rounded down to 36]. The kit has no 36 px size for this variant, so the strip is custom (see Build).
-  - Seven tabs of equal width [measured: TaskSlinger's six tabs are equal cells 166 logical px wide in a 994 px panel]. Separator 2 px `divider` [measured].
-  - Label: `t_base` (13), regular 400, centred, `text_secondary` on inactive tabs, `text_primary` medium 500 on the active tab. Count suffix: one space then `[n]` in the same style, with `n` as a count (thin-space grouping, table d), for example `File descriptors [1 204]`.
-  - Background: inactive `tab_bg`; hover `tab_hover`; active `window_bg` (the active tab joins the body) [measured].
-  - When the strip is narrower than the sum of label widths, labels truncate with an ellipsis and keep the count: "File descr… [412]" [chosen].
-  - Counts shown: Threads (thread count), File descriptors (fd count after the "Hide unnamed handles" filter), Memory maps (number of backing-file nodes after "Shared libraries only"), Environment (variable count). General, Security and Strings show no count [spec]. A count appears only once the tab's payload or the process record has it; before that the label has no suffix (no "[…]" placeholder) [chosen].
-  - Counts for Threads use `ProcessRecord.threads` (live). Counts for the other tabs come from the last payload of that tab; a tab never loaded shows no count.
-  - With server decorations, the pin button (UI-PWN-001) sits at the right end of this strip, 28 × 28, and the tabs share the remaining width.
-- **States:** default, hover (`tab_hover`), pressed (`tab_hover` with L − 0.04), active (as above), disabled: never (all tabs are always available; a tab without access shows its own access state inside the body). Keyboard focus does not land on tabs (kit limitation); the active tab is changed by keys (UI-PWN-003).
-- **Interaction:** left click selects the tab (`PropsSelectTab(n)`). Middle and right click do nothing. Tab switch has no animation (TaskSlinger's strip has none) [chosen]; reduced motion is therefore unaffected.
-- **Data binding:** reads the counts above; re-renders only when one of the seven count strings changes (the strip is its own cached view `PropsTabStrip` with the counts as `[Option<u32>; 7]`, compared on each update).
-- **Build:** custom element in `props/mod.rs` built from `h_flex()` children with `flex_1()` and `min_w_0()`, one `div().id(("props-tab", ix))` per tab with `.on_click`. It is not the kit `TabBar`, because the kit tabs have no 36 px size for this variant and no equal-width mode. The foundation's `TlTabStrip` is used if it offers equal widths and 36 px; otherwise this custom strip is `TlTabStrip`'s equal-width variant and the foundation bead adds it.
-- **Performance:** seven shaped labels, re-shaped only when a count changes. No per-frame work.
-- **Accessibility:** each tab has the tooltip `{label} (Alt+{n})` after 500 ms.
-- **Tests:** `props_tab_counts_format` (counts 1204 and 51 render as "File descriptors [1 204]" and "Environment [51]"); `props_tab_no_count_before_load`.
+  - Labels in this order [spec]: "General", "Threads", "File descriptors", "Memory maps", "Security", "Environment", "Strings".
+  - Count suffix: one space then `[n]`, with `n` formatted as a count (thin-space grouping, table d), for example `File descriptors [1 204]`. Counts shown [spec]: Threads (thread count), File descriptors (fd count after the "Hide unnamed handles" filter), Memory maps (backing-file nodes after "Shared libraries only"), Environment (variable count). General, Security and Strings show none.
+  - A count appears only once its source has a value; before that the label has no suffix (no "[…]" placeholder) [chosen].
+  - Threads uses `ProcessRecord.threads` (live). The other counts come from the last payload of that tab; a tab never loaded shows no count.
+  - At the default 900 px width the seven labels fit at full length (about 610 px of text) [measured with the foundation's `t_sm` metrics, estimated].
+- **States:** as UI-FND-018. No tab is ever disabled in this window: a tab without access shows its access state inside the body (UI-PWN-018) [chosen; UI-FND-018 allows a disabled Strings tab, which this window does not use].
+- **Interaction:** as UI-FND-018 (click, Left and Right in the strip, Ctrl+Tab and Ctrl+Shift+Tab from anywhere in the window). Added here: Alt+1 to Alt+7 select tab 1 to 7 (`PropsSelectTab(n)`) and Ctrl+PgDn and Ctrl+PgUp step tabs [chosen].
+- **Data binding:** the owner keeps `[(Option<u32>, SharedString); 7]` and rebuilds a label only when its count changes.
+- **Build:** `TlTabs` with stable id `("props-tabs", window_id)`, owned by `PropsWindow` in `props/mod.rs`.
+- **Performance:** seven labels, re-shaped only when a count changes.
+- **Accessibility:** each cell has the tooltip `{label} (Alt+{n})`.
+- **Tests:** `props_tab_counts_format` (counts 1204 and 51 render as "File descriptors [1 204]" and "Environment [51]"); `props_tab_no_count_before_load`; `props_alt_number_selects_tab`.
 - **Phase:** P2.
-- **Decided here:** 36 px height; equal widths; truncation keeps the count; no count placeholder; no tab animation.
+- **Decided here:** no count placeholder; no disabled tabs; Alt+1..7 and Ctrl+PgUp/PgDn.
 
 ### UI-PWN-005 Per-tab filter bar and refresh behaviour
 
@@ -183,11 +157,11 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
 ```
 
   - Bar height 32, background `window_bg`, bottom border 1 px `divider`. Padding left and right `sp5` (12), top and bottom `sp2` (4).
-  - Filter: TlInput small (24 high), width 280 [chosen], prefix Lucide `Search` 14 px `text_secondary`, placeholder "Filter" in `text_secondary`, cleanable (clear button Lucide `X` 12 px appears when there is text). Background `input`, focused `input_focus` with a 1 px `accent` border.
+  - Filter: `TlTextInput` sm (24 high, UI-FND-016), fixed width 280 [chosen; the animated `TlFilterBox` belongs to the main tab strip], prefix Lucide `search` `i_sm`, placeholder "Filter", cleanable, `clean_on_escape`. Look and states are the foundation's.
   - Tab tools sit right-aligned in the same bar, gap `sp4` (8): File descriptors: checkbox "Hide unnamed handles"; Memory maps: checkbox "Shared libraries only"; Environment: "Environment at process start" note and Refresh button; Strings: the scan controls (UI-PWN-017). General, Threads and Security have none.
 - **States:**
   - Empty filter: all rows. Non-empty: rows whose searched text contains the filter, case-insensitive (Unicode simple lowercase), substring only, no globs.
-  - Nothing matches: the body shows the empty state "No properties match the current filter." centred, `t_base`, `text_secondary`, 48 px from the top of the body [spec text]. For table tabs, the table keeps its header and shows this text in place of rows. The Threads tab uses its own text "No threads match the current filter." [spec].
+  - Nothing matches: `TlEmptyState` (UI-FND-029) with the text "No properties match the current filter." [spec text] and its "Clear filter" button. For table tabs, the table keeps its header and shows this text in place of rows. The Threads tab uses its own text "No threads match the current filter." [spec].
   - Focused: `input_focus` and the accent border.
 - **Interaction:**
   - Typing debounces 100 ms (same as the main filter, ADR-009), then refilters on the background executor (`cx.background_spawn`) for tables over 2,000 rows, synchronously otherwise. The result is an `Arc<[u32]>` of row indexes, applied only if its generation equals the latest (rule from ADR-009).
@@ -204,7 +178,7 @@ pub enum DetailTab { General, Threads, Fds, Maps, Security, Environment, Strings
   - Hidden tabs are not refreshed (demand covers only the active tab, plus General).
   - Ctrl-pause (hold Ctrl, PROC-050) does not apply to secondary windows [chosen; ADR-009 limits it to the main window].
 - **Data binding:** filter text is local state; filtering reads the tab's last payload. No `Command` is sent by filtering.
-- **Build:** `props/filter.rs`, `pub struct PropsFilter` helper: owns the debounce `Task` and the generation counter; one per tab. The input is the foundation's `TlInput` over a kit `InputState` (read with `text()`, not `value()`, widget research section 7).
+- **Build:** `props/filter.rs`, `pub struct PropsFilter` helper: owns the debounce `Task` and the generation counter; one per tab. The input is the foundation's `TlTextInput` over a kit `InputState` (read with `text()`, not `value()`, widget research section 7).
 - **Performance:** lowercase haystacks are precomputed once per payload version (`Arc<[Box<str>]>`), so a keystroke does no allocation per row except the result index vector. Strings tab filtering of 1,000,000 rows runs off the UI thread and is chunked; the previous result stays visible until the new one arrives.
 - **Accessibility:** the filter has the accessible name "Filter {tab label}". Placeholder text is not the only label: the Search icon has the tooltip "Filter".
 - **Tests:** `props_filter_hides_general_fields` (filter "pid" leaves PID and PPID); `props_filter_empty_state_text`; `props_filter_masked_env_matches_name_only` (filter on part of a masked value finds nothing); `props_filter_stale_generation_ignored`.
@@ -232,9 +206,9 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 
   - Three column panels of equal width when the body is at least 840 px wide; below 840 px the three panels stack in one column in the order 1, 2, 3 [chosen]. At the default 900 px window the body is 876 px, so three columns show.
   - Column panel: background `list_bg` [measured `rgb(27,31,33)`], radius `r_sm`, padding `sp4` (8) horizontal and `sp3` (6) vertical. Gap between panels `sp4` (8) [measured about 16 including padding].
-  - Field row: height 26 [measured 25.8], independent of `row_height_pct` (key/value grids are not tables) but multiplied by the UI scale. Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
-  - Label width per column: the widest shaped label in that column plus `sp5` (12), clamped to 96..150 px, computed once per UI scale and cached [chosen; TaskSlinger uses 126 px for all columns, measured, but tasklens labels are longer].
-  - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton xsmall ghost "Copy" with Lucide `Copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
+  - Each column is a `TlKeyValueGrid` in the inline layout (UI-FND-025), with two Properties overrides passed by the owner: row height 26 [measured 25.8 in the TaskSlinger General tab], independent of `row_height_pct` but multiplied by the UI scale, and the label width rule below. The foundation's 28 px rows and 180 px label column would leave about 90 px for values in a 290 px column. These overrides need `.row_height(..)` and `.label_width(..)` on the component; listed in "Open items". Label: `t_base` regular, `text_secondary`, ending with ":" [measured], left-aligned, single line. Value: `t_base` regular, `text_primary`, left-aligned, single line, ellipsis at the end, tabular figures for numbers.
+  - Label width per column: the widest shaped label in that column plus `sp5` (12), clamped to 96..150 px, computed once per UI scale and cached [chosen; TaskSlinger uses 126 px for all columns, measured, but tasklens labels are longer]. Label and value styles, validity words, truncation, tooltips and the click-copy flash are the foundation's.
+  - Command line block: full width under the panels, `sp4` (8) above it, background `list_bg`, radius `r_sm`, padding `sp4`. Header line 26 high: label "Command line" `t_base` medium `text_secondary`, and a TlButton Ghost sm "Copy" with Lucide `Copy` 12 px at the right. Body: the full command line (up to 32 KiB, PROC-078, R-008), arguments joined by single spaces, wrapped at any character, `t_sm` (12) monospace off (Noto Sans), `text_primary`, line height 18. It is not in column 1, so long command lines do not stretch a column [chosen; the spec lists it in column 1].
 - **Fields, in order** (label text exactly as shown; value format; source). Missing values show the R-050 words.
   - **Column 1:**
     1. `Process:` display name (PROC-007).
@@ -286,7 +260,7 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 - **Data binding:** payload `TabPayload::General(Arc<GeneralDetail>)` for static fields and hashes; `ProcessRecord` for live numbers (bit `PROCESSES`); `Snapshot.windows` (bit `WINDOWS`) for the window block. Re-renders when the General payload `Arc` changes, when this key's record changed values (compare the record's value fields with the last rendered copy), or when this pid's window entries change.
 - **Build:** `props/general.rs`, `pub struct GeneralTab` (Entity). Fields are built into `Arc<[KvField]>` per column (`KvField { id: FieldId, label: SharedString, value: SharedString, kind: KvKind, validity: Validity, full: Option<SharedString> }`, `KvKind::{Text, Link(LinkTarget), Hash, Status}`) only when a source changes; each value string is cached by `(FieldId, value bits, validity)` like `CellTextCache`. Rendered with the foundation's `TlKeyValueGrid` (one per column) inside one `v_flex().overflow_y_scroll()` (single scroll owner). The command line block is a separate cached child view `CmdLineBlock`, re-shaped only when the command line text changes.
 - **Performance:** a sweep that changes only live numbers re-formats at most 25 values, writing into reused `String` buffers (table d formatters do not allocate when the buffer is large enough). The 32 KiB command line is shaped once per change, never per frame (cached view).
-- **Accessibility:** values that are truncated show their full text in a tooltip after 500 ms. Hash and path values are selectable through Copy only (no text selection widget) [chosen].
+- **Accessibility:** values that are truncated show their full text in a tooltip after 500 ms. Values are selectable text (UI-FND-025).
 - **Tests:** unit tests in `props/general.rs`: `fmt_priority_other_and_fifo`, `fmt_affinity_all_and_list_threads_differ`, `fmt_user_with_euid`, `fmt_aslr_personality`, `fmt_seccomp_filters`; render tests: `general_three_columns_at_900`, `general_single_column_below_840`, `general_restricted_word_and_tooltip`, `general_cmdline_not_reshaped_on_sweep` (shape counter stays the same across 10 sweeps with an unchanged command line).
 - **Phase:** P2.
 - **Decided here:** 26 px rows not scaled by row height; label width rule; 840 px breakpoint; command line as a full-width block; Autogroup and Hardening summary as separate rows; Net I/O wording; architecture and hardening value words.
@@ -296,13 +270,13 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 - **Implements:** PROC-078 (click copies a value; PPID link; Executable link; Affinity opens Set Affinity), PROC-071, PROC-073, APP-044.
 - **Anatomy:** a field row has a value hit area covering the value cell (from the label's right edge to the panel's right padding), 26 high.
   - Plain value hover: background `row_hover` on the value cell, radius `r_sm`, cursor arrow.
-  - Link value: text `text_primary` with a 1 px underline in `text_secondary` [measured: TaskSlinger underlines PPID and Executable in the value colour]; hover: text and underline `accent`, cursor pointing hand.
+  - Link value: the foundation's link style (UI-FND-025: `status.info`, underline on hover, pointing-hand cursor). TaskSlinger draws links in the value colour with a permanent underline [measured]; the foundation's style wins.
   - Keyboard cursor: 1 px `accent` outline around the whole field row, radius `r_sm`, inset 1 px.
 - **States:** default, hover (above), pressed (value background `row_selected` for 120 ms (`m_fast`), none with reduced motion), focused (keyboard cursor), disabled (exited: links plain text `text_secondary`, copying still works).
 - **Interaction:**
   - Left click on a plain or hash value: copies the full value (for hashes the full hex string; for truncated values the untruncated text) with `cx.write_to_clipboard`; toast "Process property value copied." (Success, 5 s) [spec]. Clipboard failure: "Failed to copy to clipboard" (Error, 8 s).
   - Left click on a link: PPID dispatches `GoToProcess { key: parent_key }` (the PROC-071 entry point, toast as defined there, the main window is activated); Executable dispatches `OpenFileLocation { key }` (PROC-073, toast "Opening file location"); Unit dispatches `GoToService { unit }`; Affinity dispatches `OpenSetAffinity { targets: [key] }` (UI-PWN-021).
-  - Right click on any field opens a TlMenu: "Copy value" (`CopyFieldValue`), "Copy line" (`CopyFieldLine`, copies `Label: value`), "Copy all fields" (`CopyAllFields`, every visible field of all three columns as `Label: value` lines in column order, then `Command line: …`). Toasts: "Process property value copied." for Copy value; "Copied to clipboard" for the other two.
+  - Right click on any field opens the foundation's value menu (UI-FND-025: "Copy value", "Copy row", "Copy section", where a section is one column panel) plus one item added here: "Copy all fields" (`CopyAllFields`, every visible field of all three columns as `Label: value` lines in column order, then `Command line: …`). Toasts: "Process property value copied." for Copy value; "Copied to clipboard" for the others.
   - Keyboard (context `PropsWindow > KvGrid`, the grid region is one focus stop with `tab_stop(true)`): Up and Down move the cursor within a column; Left and Right move to the same row index in the neighbouring column (clamped to its last row); Home and End go to the first and last field of the column; Enter activates a link, or copies a plain value; Ctrl+C copies the value; Shift+F10 or the Menu key opens the field menu. Tab leaves the grid to the Command line Copy button, then the Verify button.
   - Command line "Copy" button: copies the full command line; toast "Process property value copied.".
 - **Data binding:** none beyond UI-PWN-006. Copy reads the cached full strings.
@@ -327,7 +301,7 @@ body (scrolls vertically as one region; padding sp5 left/right, sp4 top/bottom)
 ```
 
   - Hash values: the first 16 lowercase hex digits plus "…" [chosen; TaskSlinger shows 16 uppercase digits, measured]. Tabular figures.
-  - Verify button: TlButton xsmall (20 high) default variant, label "Verify against package", aligned with the value column, in its own 26 px row.
+  - Verify button: TlButton Secondary sm (24 high), label "Verify against package", aligned with the value column, in its own 26 px row.
 - **States:**
   - Hashing (hash not yet in the payload): value `Computing…` in `text_secondary` [chosen; the PERF-013 word `Collecting…` is kept for metrics].
   - Done: hex as above; tooltip shows the full hash.
@@ -607,9 +581,9 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 | GITHUB_TOKEN              | ••••••                                   [eye]     |
 ```
 
-  - Filter bar tools (right side): Lucide `Info` 14 px `text_secondary` plus the note "Environment at process start" `t_sm` `text_secondary` [spec text]; then TlButton xsmall ghost "Refresh" with Lucide `RefreshCw` 12 px.
+  - Filter bar tools (right side): Lucide `Info` 14 px `text_secondary` plus the note "Environment at process start" `t_sm` `text_secondary` [spec text]; then TlButton Ghost sm "Refresh" with Lucide `RefreshCw` 12 px.
   - `TlTreeTable` flat: Name 240 (80) left; Value flex (min 160) left, single line, ellipsis at the end. Default sort Name ascending [chosen; TaskSlinger sorts by Name, measured "Name ↑"].
-  - Masked value: "••••••" (six U+2022) in `text_secondary` [spec]. On hover or keyboard focus of a masked row, an eye button (TlButton ghost, 20 × 20, Lucide `Eye` 14 px) appears at the right end of the Value cell; on a revealed row it shows Lucide `EyeOff` and stays visible.
+  - Masked value: "••••••" (six U+2022) in `text_secondary` [spec]. On hover or keyboard focus of a masked row, an eye button (TlButton Icon sm (24 × 24), Lucide `Eye` 14 px) appears at the right end of the Value cell; on a revealed row it shows Lucide `EyeOff` and stays visible.
   - When the environment was cut at 1 MiB, a 24 px footer under the table reads "Showing the first 1 MiB of the environment." in `text_secondary` [chosen].
 - **States:**
   - Loading: "Loading environment..." [chosen].
@@ -645,8 +619,8 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 | 0x55d3f1a0c2f0   | ASCII    |     14 | /usr/lib/firefox                                       |
 ```
 
-  - Options bar: height 32, padding `sp5` horizontal, gap `sp4`. "Minimum length" label `t_sm` `text_secondary`, TlSpinBox width 72, range 4..=64, step 1, default 4 [spec]. Three TlCheckboxes "ASCII", "UTF-8", "UTF-16LE", all on [spec]. TlCheckbox "Include file-backed mappings", off [spec]. Right-aligned: TlButton small primary "Scan" (Lucide `ScanSearch` 14 px), replaced by TlButton small default "Cancel" (Lucide `Square` 12 px) while scanning.
-  - Progress row (visible while scanning and after a scan): TlProgressBar small (6 high), width 200, colour `accent`, track `scroll_track`; then the status text `t_sm` `text_secondary`, tabular figures.
+  - Options bar: height 32, padding `sp5` horizontal, gap `sp4`. "Minimum length" label `t_sm` `text_secondary`, TlStepper width 72, range 4..=64, step 1, default 4 [spec]. Three TlCheckboxes "ASCII", "UTF-8", "UTF-16LE", all on [spec]. TlCheckbox "Include file-backed mappings", off [spec]. Right-aligned: TlButton Primary sm "Scan" (Lucide `ScanSearch` 14 px), replaced by TlButton Secondary sm "Cancel" (Lucide `Square` 12 px) while scanning.
+  - Progress row (visible while scanning): `TlProgress` md (6 high, UI-FND-023), width 200, determinate; then the status text `t_sm` `text_secondary`, tabular figures. After the scan the bar is removed from the tree and only the status text stays.
   - Table columns: Address 140 (110) right, `0x` plus lowercase hex; Encoding 90 (70) left; Length 70 (60) right, count; Value flex (min 200) left, single line, first 512 characters with an ellipsis after [chosen]; tabs and newlines inside a value show as `\t` and `\n` [chosen].
 - **States:**
   - Before the first scan: body text "Press Scan to search this process's memory for text." centred, `text_secondary` [chosen]. The scan never starts by itself [spec].
@@ -666,7 +640,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Filter (UI-PWN-005) matches Value only, off the UI thread, chunked.
 - **Data binding:** `TabPayload::Strings(Arc<StringScanState>)` with `scan: ScanId`, `progress_pct: u8`, `found: u32`, `chunks: Arc<[Arc<[StringHit]>]>` (append-only chunk list, each new payload reuses the old chunk `Arc`s), `state: Scanning | Finished | Cancelled | Stopped(Limit) | Failed(Error)`. Payloads arrive at most 4 times per second while scanning [chosen].
 - **Build:** `props/strings.rs`, `pub struct StringsTab` (Entity). The table reads rows through a chunk index (`row → (chunk, offset)`) so it never copies the hit list. Sorting after the scan runs on the background executor and produces an `Arc<[u32]>` permutation.
-- **Performance:** 1,000,000 rows are virtualized by `uniform_list` (only visible rows are formatted); progress updates at most 4 Hz re-render only the progress row and the table's row count. The kit `Progress` starts a transition per value change, so the bar is a plain custom element (filled `div` width) instead [chosen, widget research section 14].
+- **Performance:** 1,000,000 rows are virtualized by `uniform_list` (only visible rows are formatted); progress updates at most 4 Hz re-render only the progress row and the table's row count. `TlProgress` jumps in 1% buckets without a transition (UI-FND-023), so a 4 Hz update requests no extra frames.
 - **Accessibility:** the progress text is the text alternative of the bar; Cancel has the tooltip "Stop the scan (Esc)".
 - **Tests:** `strings_never_starts_by_itself`; `strings_progress_text_format`; `strings_stale_scan_results_dropped`; `strings_limit_banner_text`; `strings_kernel_thread_disabled`; `strings_chunks_not_copied` (pointer equality of old chunks across payloads).
 - **Phase:** P3.
@@ -683,7 +657,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
                   [Grant access]
 ```
 
-  - Centred block, 64 px from the top of the body. Icon Lucide `ShieldAlert` 24 px `text_secondary`; `sp4` gap; message `t_base` `text_primary`, centred, max width 420, wraps; `sp5` gap; TlButton small default with the label from the spec ("Grant access" for File descriptors, Memory maps and Environment; "Enable" for Strings) [spec]; Security has no button (its data comes from world-readable files, so only hidepid causes it) [chosen].
+  - Centred block, 64 px from the top of the body. Icon Lucide `ShieldAlert` 24 px `text_secondary`; `sp4` gap; message `t_base` `text_primary`, centred, max width 420, wraps; `sp5` gap; TlButton Secondary sm with the label from the spec ("Grant access" for File descriptors, Memory maps and Environment; "Enable" for Strings) [spec]; Security has no button (its data comes from world-readable files, so only hidepid causes it) [chosen].
   - Texts per tab [spec]: File descriptors "Handles unavailable (insufficient privileges)"; Memory maps "Needs administrator access."; Security "Security information unavailable (insufficient privileges)"; Environment "Environment unavailable (insufficient privileges)"; Strings "Strings unavailable: needs administrator rights".
 - **States:**
   - Before P3 (no helper): the button is not shown [chosen, following R-050's "before P3" tooltip rule].
@@ -743,7 +717,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Opened by `OpenProperties` on an app or unit row (Enter, Alt+Enter, Ctrl+I, row menu "Properties") [spec, D-008]. Opening again for the same group focuses the existing window. A ninth App Properties window gives the toast "Too many app properties windows are already open" (Warning) [chosen, mirrors PROC-077].
   - Keys as UI-PWN-003 (Alt+1 and Alt+2 select the tabs). Copy on click, field menu and grid keyboard as UI-PWN-007.
 - **Data binding:** `DetailDemand { target: App(group_key), tab: AppGeneral | AppProcesses }`; payload `TabPayload::AppGeneral(Arc<AppGeneralDetail>)` (identity fields and cgroup `memory.stat` anon, `memory.swap.current`, `io.stat` rates); `ProcessTableView.groups` (bit `TABLE`) for CPU, GPU and network sums of the group. Unit rows use the same `GroupKey` the table gives them.
-- **Build:** `crates/tl-ui/src/windows/app_props.rs`, `pub struct AppPropsWindow` (Entity) with `AppGeneralTab` and `AppProcessesTab` children; registered in `PropsRegistry`.
+- **Build:** `crates/tl-ui/src/windows/app_props.rs`, `pub struct AppPropsWindow` (Entity) with `AppGeneralTab` and `AppProcessesTab` children; registered in `WindowRegistry` under `WindowKey::AppProperties(GroupKey)`.
 - **Performance:** one group lookup per snapshot; at most 7 live strings re-formatted per sweep.
 - **Accessibility:** the icon has the text alternative "{app name} icon".
 - **Tests:** `app_props_title_for_app_and_unit`; `app_props_swap_updates_live` (two payloads with different swap, assert the text changes); `app_props_ninth_window_toast`; `app_props_two_panels_breakpoint`.
@@ -807,19 +781,19 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 
   - Window: `WindowKind::Dialog`, modal to the window that opened it (main window or Properties window), title "tasklens Set Affinity" [chosen, APP-045 naming], not resizable, width 640 [chosen: 8 tiles × 72 + 7 gaps × 4 + 2 × `sp6` padding = 636].
   - Subtitle: target description: `firefox (PID 4321)`; several processes: `4 processes`; threads: `Thread 4325 of firefox (PID 4321)` or `3 threads of firefox (PID 4321)`; app row: `Firefox (34 processes)` [chosen].
-  - "All processors": TlCheckbox, tri-state (checked when every allowed CPU is checked, mixed when some are) [spec label]. "CPU list" label `t_sm` `text_secondary` plus TlInput small, width 200, placeholder "0-7,16-23" [spec].
-  - Group header: height 24, a tri-state TlCheckbox for the whole group plus the label `t_base` medium `text_primary`: `CCD {n}: CPU {list}` for L3 groups [spec]; Intel hybrid: `P-cores: CPU {list}` and `E-cores: CPU {list}` with the app SVG icons `cpu-pcore` and `cpu-ecore` (12 px, `text_secondary`) before the label [spec intent, chosen labels]; a machine without L3 data: one group `CPUs: {list}` [chosen].
+  - "All processors": TlCheckbox (checked when every allowed CPU is checked, indeterminate when some are) [spec label]. "CPU list" label `t_sm` `text_secondary` plus TlTextInput sm, width 200, placeholder "0-7,16-23" [spec].
+  - Group header: height 24, a TlCheckbox for the whole group (indeterminate when partly checked) plus the label `t_base` medium `text_primary`: `CCD {n}: CPU {list}` for L3 groups [spec]; Intel hybrid: `P-cores: CPU {list}` and `E-cores: CPU {list}` with the app SVG icons `cpu-pcore` and `cpu-ecore` (12 px, `text_secondary`) before the label [spec intent, chosen labels]; a machine without L3 data: one group `CPUs: {list}` [chosen].
   - Core tile: 72 × 52, background `list_bg`, radius `r_sm`, padding `sp2`; two stacked rows of 24: a TlCheckbox with label `CPU {n}` (`t_sm`, tabular figures) for the first thread and, under it, its SMT sibling [spec pairing]. A core without SMT has one row and the lower half empty. Hybrid tiles show the P or E icon (10 px) before the label.
   - Tiles flow 8 per row in each group, ordered by core; groups follow in L3 order. More than 8 cores in a group wrap to new rows.
   - Validation line: Lucide `CircleAlert` 14 px `status.danger` and the text "At least one CPU must stay enabled" `t_sm` `status.danger` [spec text], shown only when nothing is checked.
-  - Footer: height 52, top border 1 px `divider`, padding `sp6`; right-aligned TlButton "Cancel" (default variant) and TlButton "OK" (primary) [spec label], gap `sp4`.
+  - Footer: height 52, top border 1 px `divider`, padding `sp6`; right-aligned TlButton "Cancel" (Secondary) and TlButton "OK" (Primary) [spec label], gap `sp4`.
 - **States:**
   - Loading the current masks (until the detail data arrives, at most one sweep): every checkbox disabled, the subtitle line ends with " - reading current affinity…" [chosen].
   - CPU outside the cgroup's `cpuset.cpus.effective`: checkbox disabled and unchecked, tooltip "Not allowed by the process's cpuset" [chosen wording; spec limits masks to it].
   - Offline CPU: disabled, tooltip "CPU is offline" [chosen].
   - Nothing checked: validation line shown; OK disabled [spec].
   - Invalid CPU list text: input border `status.danger`, helper text under the input "Use CPU numbers and ranges, for example 0-7,16-23" `t_xs` `status.danger`; OK disabled; the grid keeps its last valid state [chosen].
-  - Checkbox states: default, hover (box border `accent`), pressed, focused (2 px `accent` ring around the box and label), checked (box `accent` fill, Lucide `Check` 12 px `text_selected_primary`), mixed (box `accent` fill, Lucide `Minus` 12 px), disabled (40% alpha).
+  - Checkbox states: the foundation's TlCheckbox states (UI-FND-011), including indeterminate (Lucide `minus`), which this dialog uses for mixed CPUs.
   - Target exited while open: OK stays enabled; the action is rejected by revalidation and shows the PROC-058 identity toast.
 - **Interaction:**
   - Opened by the row menu "Set Affinity…" (`OpenSetAffinity { targets }`), by the General tab Affinity link, and by the Threads menu "Set thread affinity…". Targets are captured at menu open (max 256).
@@ -829,7 +803,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - OK (`ApplyAffinity`): one target or all targets with the same result mask: one `ActionRequest { kind: SetAffinity(mask) }`. The dialog closes at once; results come as toasts in the parent window.
   - Toasts [spec PROC-067 and PROC-069]: one process "Affinity updated" or "Could not update selected process affinity."; several "Selected process affinity updated.", "Could not update selected process affinity." or the partial form "Affinity updated for 3 of 4 processes. 1 failed: permission denied" with "Retry as administrator" (P3); threads "Thread affinity updated" [chosen].
 - **Data binding:** CPU topology from `SystemSnapshot.cpu_topology` (L3 groups, sibling pairs, hybrid kind, online set); per-target masks and the cpuset limit from `DetailsSnapshot.affinity`, filled while the dialog registers `Demand.affinity_targets` (max 256) [chosen addition, see open items].
-- **Build:** `crates/tl-ui/src/windows/affinity.rs`, `pub struct AffinityDialog` (Entity): `targets`, `initial: Vec<CpuSet>` (one per target), `state: CpuTriState` (`[u8; 1024]` with Off, On, Mixed), `list_input: Entity<InputState>`. The tri-state checkbox is the foundation's TlCheckbox with a `Mixed` state (the kit Checkbox has none).
+- **Build:** `crates/tl-ui/src/windows/affinity.rs`, `pub struct AffinityDialog` (Entity): `targets`, `initial: Vec<CpuSet>` (one per target), `state: CpuTriState` (`[u8; 1024]` with Off, On, Mixed), `list_input: Entity<InputState>`. Mixed CPUs use TlCheckbox's indeterminate state (UI-FND-011).
 - **Performance:** at most 1,024 checkboxes; the grid is rebuilt only on state change; 32 CPUs render about 70 elements.
 - **Accessibility:** every checkbox has its label as accessible name; tiles have the tooltip `Core {k}: CPU {a} and CPU {b}`; the validation text is also the OK button tooltip while disabled.
 - **Tests:** `affinity_grid_groups_by_l3` (fixture with two L3 groups 0-7,16-23 and 8-15,24-31); `affinity_list_field_sync_both_ways`; `affinity_ok_disabled_when_empty_and_message`; `affinity_cpuset_limited_cpus_disabled`; `affinity_invalid_list_text`.
@@ -839,7 +813,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 ### UI-PWN-022 Set Affinity with several targets (mixed marks)
 
 - **Implements:** PROC-069 (Set Affinity applies to all targets; mixed marks; clicking a mixed CPU sets it on all), PROC-067.
-- **Anatomy:** the UI-PWN-021 dialog, plus a TlButton xsmall ghost "Reset" (Lucide `RotateCcw` 12 px) at the left end of the footer, shown only with several targets [chosen].
+- **Anatomy:** the UI-PWN-021 dialog, plus a TlButton Ghost sm "Reset" (Lucide `RotateCcw` 12 px) at the left end of the footer, shown only with several targets [chosen].
 - **States:**
   - Initial: each CPU is checked when every target has it, mixed when only some do, unchecked when none do [spec].
   - Click cycle: mixed to checked (sets it on all targets) [spec]; checked to unchecked; unchecked to checked. A CPU can return to mixed only through Reset, which restores the initial state of every CPU [chosen].
@@ -876,9 +850,9 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - `WindowKind::Dialog`, modal to its parent, title "tasklens Set Priority" [chosen], width 440, not resizable. Labels column 128 wide, `t_base` `text_secondary`; controls width 260.
   - Policy: TlSelect with items [chosen labels]: "Normal (SCHED_OTHER)", "Batch (SCHED_BATCH)", "Idle (SCHED_IDLE)", "Realtime FIFO (SCHED_FIFO)", "Realtime round-robin (SCHED_RR)" [spec policies].
   - Nice: TlSlider -20..=19, step 1 [spec], plus the current value as text right of the slider (`t_base`, tabular, width 28, right-aligned). End labels "-20 (highest)" and "19 (lowest)".
-  - Realtime priority: TlSpinBox 1..=99, width 72 [spec range].
+  - Realtime priority: TlStepper 1..=99, width 72 [spec range].
   - Warning line (FIFO and RR only): Lucide `TriangleAlert` 14 px `status.warning`, text "Realtime priority can freeze the desktop if the process spins." `t_sm` `text_primary`, and on a second line "Child processes start at normal priority." `t_xs` `text_secondary` [chosen, explains the reset-on-fork flag].
-  - Footer: "Cancel" and "Set priority" (primary) [chosen label naming the result].
+  - Footer: "Cancel" and "Set priority" (Primary) [chosen label naming the result].
 - **States:**
   - Initial values from the right-clicked target's current policy, nice and rt priority (General payload, thread row, or the record's `nice`).
   - Normal and Batch: Nice enabled; Realtime priority disabled.
@@ -935,17 +909,17 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   width 420, height from content, minimum 160
 ```
 
-  - `WindowKind::Dialog` (xdg_dialog_v1 modal to the parent), title "tasklens" [spec], width 420, not resizable. Content padding `sp6` (16). Icon Lucide `TriangleAlert` 20 px `status.warning` for warnings, `CircleHelp` 20 px `text_secondary` for plain questions [chosen]; gap `sp5` (12) to the text.
+  - `WindowKind::Dialog` (xdg_dialog_v1 modal to the parent), title "tasklens" [spec], width 420, not resizable. Content padding `sp6` (16). Icon and text per the `TlDialog` body (UI-FND-021): `triangle-alert` in `status.warning` for risky or destructive actions, `info` in `status.info` otherwise.
   - Footer: as UI-PWN-021; the action button uses the danger variant for destructive or risky actions and primary otherwise.
-- **States:** the action button is the default button: it has keyboard focus when the window opens and Enter triggers it [spec APP-045, chosen focus]; Cancel and Esc close with no action. Window close (x) equals Cancel.
+- **States:** as UI-FND-021: Enter triggers the action button; Cancel and Esc close with no action; window close (x) equals Cancel. Initial focus: Cancel for danger-variant confirmations (UI-FND-021), the action button otherwise.
 - **Interaction:** Tab cycles Cancel and the action button; Left and Right also move between them [chosen]. The parent window cannot be clicked while the dialog is open (modal).
 - **Data binding:** none.
-- **Build:** the foundation's `TlDialog` content inside a `TlSecondaryWindow` frame, opened by `windows::frame::open_confirmation(parent, ConfirmSpec { message, detail, action_label, variant, on_confirm }, cx)`. Processes-table confirmations from `docs/ui/processes.md` use the same helper when that file does not specify its own.
+- **Build:** `TlDialog::confirm` (UI-FND-021), opened by `windows::frame::open_confirmation(parent, ConfirmSpec { message, detail, action_label, variant, on_confirm }, cx)`. Processes-table confirmations from `docs/ui/processes.md` use the same helper when that file does not specify its own.
 - **Performance:** static.
 - **Accessibility:** the window title plus the message are what a window switcher shows; buttons name their result.
 - **Tests:** `confirm_enter_triggers_action`; `confirm_esc_cancels`; `confirm_close_button_is_cancel`.
 - **Phase:** P1.
-- **Decided here:** icon choice; default focus on the action button; Left and Right between buttons; helper name.
+- **Decided here:** Left and Right between buttons; helper name.
 
 ### UI-PWN-026 Send Signal submenu
 
@@ -1000,10 +974,10 @@ Real-time signal…
   width 360, height from content
 ```
 
-  - `WindowKind::Dialog`, modal to its parent, title "tasklens Send Signal" [chosen]. TlSpinBox width 72, range 34..=64 [spec], then the name `t_base` `text_primary`: `SIGRTMIN+{n - 34}`, and for 64 `SIGRTMIN+30 (SIGRTMAX)` [chosen].
+  - `WindowKind::Dialog`, modal to its parent, title "tasklens Send Signal" [chosen]. TlStepper width 72, range 34..=64 [spec], then the name `t_base` `text_primary`: `SIGRTMIN+{n - 34}`, and for 64 `SIGRTMIN+30 (SIGRTMAX)` [chosen].
   - The range comes from `libc::SIGRTMIN()` and `libc::SIGRTMAX()` at run time; on this system 34 and 64.
 - **States:** default value: the last value sent in this session, else 34 [chosen]. Typed values outside the range clamp on blur.
-- **Interaction:** Up and Down step; Enter triggers "Send signal" (primary, default); Esc cancels. Sends `Signal::Other(n)` with the same confirmation rules and toasts as UI-PWN-026 ("Sent SIGRTMIN+2 to firefox (1234)").
+- **Interaction:** Up and Down step; Enter triggers "Send signal" (Primary, default button); Esc cancels. Sends `Signal::Other(n)` with the same confirmation rules and toasts as UI-PWN-026 ("Sent SIGRTMIN+2 to firefox (1234)").
 - **Build:** `signal.rs`, `pub struct RtSignalDialog` (Entity).
 - **Tests:** `rt_signal_label_for_34_and_64`; `rt_signal_remembers_last_value`.
 - **Phase:** P2.
@@ -1035,7 +1009,7 @@ Real-time signal…
   - Icon: Lucide `SquareTerminal` 32 px `text_secondary` [chosen], gap `sp5` to the text [spec text].
   - "Open:" label `t_base` `text_primary`, width 48; the combo (UI-PWN-029) fills the rest.
   - "Run as administrator": TlCheckbox [spec]; under it, indented to the checkbox label, the note "GUI programs may not start as root on Wayland" [spec].
-  - Footer, top border 1 px `divider`: left "Browse…" and "Clear command history" (TlButton small default); right "OK" (primary, default) and "Cancel" [spec].
+  - Footer, top border 1 px `divider`: left "Browse…" and "Clear command history" (TlButton Secondary sm); right "OK" (Primary, default button) and "Cancel" [spec].
 - **States:**
   - Initial: the combo holds the most recent history command with all text selected, or is empty with no history [chosen].
   - Launching (portal or polkit prompt pending): OK shows loading, other controls disabled.
@@ -1058,7 +1032,7 @@ Real-time signal…
 ### UI-PWN-029 Run command combo and history
 
 - **Implements:** PROC-095 ("Open:" combo, 5 visible rows, prefix matches first, Up and Down pick a match), R-061.
-- **Anatomy:** a TlInput (32 high) with a suffix TlButton ghost 24 × 24 Lucide `ChevronDown` 14 px; a popup list under it, same width, 5 visible rows of 26 (130 high) [spec count], background `menu_bg`, 1 px border `divider`, radius `r_sm`, shadow per the foundation's popup style. Each row: the command (`t_base`, single line, ellipsis) and, for elevated entries, Lucide `ShieldCheck` 12 px `text_secondary` at the right with the tooltip "Ran as administrator" [chosen].
+- **Anatomy:** a TlTextInput md (28 high) with a suffix TlButton Icon sm (24 × 24), Lucide `ChevronDown` 14 px; a popup list under it, same width, 5 visible rows of 26 (130 high) [spec count], background `menu_bg`, 1 px border `divider`, radius `r_sm`, shadow per the foundation's popup style. Each row: the command (`t_base`, single line, ellipsis) and, for elevated entries, Lucide `ShieldCheck` 12 px `text_secondary` at the right with the tooltip "Ran as administrator" [chosen].
 - **States:** popup closed; open with no highlight; highlighted row `menu_hover`; no matches: popup closed.
 - **Interaction:**
   - Typing filters the history: entries that start with the text (case-insensitive) first, newest first, then entries that contain it, newest first [spec order, chosen tie rule]; the popup opens when at least one entry matches and the text is not empty.
@@ -1093,14 +1067,14 @@ Real-time signal…
 ```
 
   - `WindowKind::Floating`, not modal, title "tasklens Handle Search" [spec]. Default 860 × 560, minimum 560 × 360 [chosen]. Padding `sp5`.
-  - "Pattern:" label `t_base`, then TlInput (32 high, fills), then TlButton "Search" (primary) and "Clear" (default) [spec controls].
+  - "Pattern:" label `t_base`, then TlTextInput md (28 high, fills), then TlButton "Search" (Primary) and "Clear" (Secondary) [spec controls].
   - TlCheckbox "Include memory-mapped files, working directories and executables", default on [spec].
-  - Progress row: custom bar 200 × 6 (as UI-PWN-017) plus status text `t_sm` `text_secondary`; hidden before the first search.
-  - Footer: the privilege note `t_sm` `text_secondary` and TlButton small "Search all" on the left (only when processes were skipped); TlButton "Close" on the right [spec]. Top border 1 px `divider`.
+  - Progress row: `TlProgress` md 200 × 6 (as UI-PWN-017) plus status text `t_sm` `text_secondary`; hidden before the first search.
+  - Footer: the privilege note `t_sm` `text_secondary` and TlButton sm "Search all" on the left (only when processes were skipped); TlButton "Close" on the right [spec]. Top border 1 px `divider`.
 - **States:**
   - Before the first search: the table area shows "Enter a file name or path pattern, then press Search." [chosen].
   - Empty pattern: Search disabled.
-  - Searching: Search becomes "Stop" (default variant) [chosen; the walk is cancellable between PIDs]; pattern and checkbox disabled; status texts in order [spec]: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...".
+  - Searching: Search becomes "Stop" (Secondary) [chosen; the walk is cancellable between PIDs]; pattern and checkbox disabled; status texts in order [spec]: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total handles)", "Searching...".
   - Done: "Found 12 matches", "Found 1 match" [chosen singular], or "No results found." [spec].
   - Stopped: "Search stopped. Found 12 matches" [chosen].
   - Error: toast "Handle search failed" (Error) and status "Handle search failed" [spec].
@@ -1169,8 +1143,8 @@ Real-time signal…
   - Title "tasklens - Low memory" [spec]. `WindowKind::Floating` with no parent (it is its own process, `tasklens --low-memory`). Kept above other windows from the start: the pin is shown toggled on and can be turned off [spec PROC-056 and R-073].
   - Size 420 × 560, minimum 360 × 400 [chosen]. Padding `sp6`.
   - Texts [spec]: "Your device is running on critically low memory." (`t_md` 14 semibold, `status.danger`) and "We recommend you close some of the processes below." (`t_base`, `text_secondary`).
-  - Filter: TlInput 32 high, placeholder "Filter..." [spec], filters names case-insensitively.
-  - Footer: TlButton "Open Full tasklens" (primary) on the left [spec label].
+  - Filter: TlTextInput md (28 high), placeholder "Filter..." [spec], filters names case-insensitively.
+  - Footer: TlButton "Open Full tasklens" (Primary) on the left [spec label].
   - Minimal build [spec]: no charts, no process or app icons, only the two frame icons (pin and close, embedded SVGs); the font set is Noto Sans Regular and SemiBold only.
 - **States:**
   - Eased (pressure below the threshold for 10 s): the two top lines are replaced by one line in `status.success`: "Memory pressure has eased. You can open the full tasklens or close this window." [spec text]. The list stays usable. If pressure rises again, the original lines return [chosen].
@@ -1194,7 +1168,7 @@ Real-time signal…
 - **Anatomy:** each row 32 high (× UI scale, not affected by row height) [chosen], padding `sp4` horizontal, 1 px bottom border `divider`:
   - Name, `t_base` `text_primary`, ellipsis: apps as `{app name} ({process count})`, processes as their display name [chosen].
   - "Memory 12.0%" `t_sm` `text_secondary`, right-aligned, width 100, tabular [spec format].
-  - TlButton small danger "End Task" width 84 [spec label].
+  - TlButton Danger sm "End Task" width 84 [spec label].
 - **States:**
   - Sorted by memory descending (RssAnon + swap for processes, cgroup `memory.current` for apps), at most 30 rows [spec].
   - While the pointer is over the list or a row has keyboard focus, the order is held and only values update; it re-sorts when the pointer leaves and focus moves out [chosen, so the target does not move under the click].
@@ -1218,7 +1192,7 @@ Real-time signal…
 
 - **Implements:** PROC-075 (confirmation over 2 GiB, progress toast, gdb missing, administrator rights), R-004.
 - **Anatomy:**
-  - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PWN-025 with the message "firefox (PID 4321) uses 3.42 GiB. The process is paused while the core file is written. Create the dump anyway?" and the action button "Create dump" (primary) [chosen text and label].
+  - Confirmation (only when VmRSS is over 2 GiB) [spec]: UI-PWN-025 with the message "firefox (PID 4321) uses 3.42 GiB. The process is paused while the core file is written. Create the dump anyway?" and the action button "Create dump" (Primary) [chosen text and label].
   - Progress toast: TlToast Info, top centre of the window that started the dump, autohide off while running, id `DumpToast(action_id)`, text "Writing core… 1.2 GiB" [spec], the size in table (d) memory format, updated every 500 ms [chosen].
 - **States:**
   - Before the first size read: "Writing core…" [chosen].
@@ -1251,7 +1225,7 @@ Real-time signal…
 
 - **Implements:** PROC-074 (background hash, toast after 500 ms, one-time notice, errors, nothing uploaded), R-095.
 - **Anatomy:**
-  - Notice window: UI-PWN-025 frame, title "tasklens VirusTotal Notice" [chosen, APP-045 naming], icon `CircleHelp`, message "This opens virustotal.com with the file's hash. The file is not uploaded." [spec text]; buttons "Cancel" and "Open VirusTotal" (primary, default) [chosen label].
+  - Notice window: UI-PWN-025 frame, title "tasklens VirusTotal Notice" [chosen, APP-045 naming], icon `info`, message "This opens virustotal.com with the file's hash. The file is not uploaded." [spec text]; buttons "Cancel" and "Open VirusTotal" (Primary, default button) [chosen label].
   - Hashing toast: TlToast Info "Computing SHA-256…" [spec], id `VtToast(action_id)`, shown only when hashing takes longer than 500 ms [spec].
 - **States:**
   - First use (`state.toml [processes] virustotal_notice_accepted = false`): the notice opens before anything is hashed. "Open VirusTotal" sets the flag to true (saved through the state file's debounced save) and continues; Cancel does nothing and keeps the flag false [spec R-095].
