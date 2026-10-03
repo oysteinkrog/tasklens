@@ -143,3 +143,52 @@ Each bead names the open item it touches in its Notes. Where a bead had to carry
 23. **Test-only dev-dependencies of tl-model.** `proptest` (E03-068) and `toml` (E03-A2) are dev-dependencies. Confirm `xtask check-deps` (E02-A2) treats dev-dependencies separately from the ADR-001 allowed row.
 24. **CpuSet serde.** E03-070 needs `CpuSet` (E03-A1, `system.rs`) to derive `Serialize, Deserialize`.
 
+## E33 tl-app binary and packaging
+
+Epic bead: `tasklens-cr0`. 22 beads (3 anchors, 19 others). Anchors are the wiring capstones: E33-A1 for the P0 binary, E33-A2 for the P1 settings and single-instance wiring, E33-A3 for the P1 package.
+
+| Plan key | Bead ID | Title | P | Depends on |
+|---|---|---|---|---|
+| E33-001 | tasklens-cr0.4 | tl-app Cargo.toml dependencies, bench feature and build.rs git hash | 0 | E02-A1 (tasklens-v9m.1) |
+| E33-002 | tasklens-cr0.5 | paths.rs: XDG path resolution with fallbacks and 0700/0600 modes | 0 | E33-001 |
+| E33-003 | tasklens-cr0.6 | args.rs: clap declaration of every command-line argument | 0 | E33-001 |
+| E33-004 | tasklens-cr0.7 | logging.rs: tracing subscriber, daily log file, 200-line ring | 0 | E33-002 |
+| E33-005 | tasklens-cr0.8 | crash.rs: panic hook writes crash-<unix seconds>.txt, keeps newest 20 | 0 | E33-002, E33-004 |
+| E33-A1 | tasklens-cr0.1 | Binary starts | 0 | E33-002, E33-003, E33-004, E33-005, E03-A2 (tasklens-as2.2), E08-A1 (tasklens-8hz.1), E09-A1 (tasklens-8q0.1), E15-A1 (tasklens-ug9.1), E16-A1 (tasklens-fut.1), E17-A1 (tasklens-lgw.1), E20-A1 (tasklens-jqk.1) |
+| E33-007 | tasklens-cr0.10 | migrations.rs: schema migration chain for both TOML files | 1 | E33-A1 |
+| E33-006 | tasklens-cr0.9 | settings_store.rs: load settings.toml and state.toml (corrupt, newer, clamp) | 1 | E33-A1, E33-007 |
+| E33-008 | tasklens-cr0.11 | settings_store.rs save half, atomic.rs re-export and the persist callback | 1 | E33-006, E07-A3 (tasklens-iuz.3) |
+| E33-009 | tasklens-cr0.12 | single_instance.rs: org.freedesktop.Application on the session bus | 1 | E33-A1, E03-A2 |
+| E33-010 | tasklens-cr0.13 | notify.rs: desktop notifications through org.freedesktop.Notifications | 1 | E33-A1 |
+| E33-A2 | tasklens-cr0.2 | Settings store | 1 | E33-006, E33-007, E33-008, E33-009, E33-010, E16-A1 |
+| E33-011 | tasklens-cr0.14 | main.rs: engine shutdown in 1500 ms after the UI stops (U-2) | 1 | E33-A2, E09-A2 (tasklens-8q0.2) |
+| E33-012 | tasklens-cr0.15 | main.rs: renderer start failure notice and exit 1; device-loss relaunch once | 1 | E33-A2 |
+| E33-013 | tasklens-cr0.16 | Desktop file io.github.oysteinkrog.Tasklens.desktop | 1 | E02-A1 |
+| E33-A3 | tasklens-cr0.3 | Packaging | 1 | E33-013, E33-A1, E15-A1 |
+| E33-014 | tasklens-cr0.17 | autostart.rs: Start at login entry written or removed from settings | 2 | E33-A2, E07-A3 |
+| E33-015 | tasklens-cr0.18 | PKGBUILD: install tl-helper, tasklens-setup and the polkit policy | 3 | E33-A3, E29-A1 (tasklens-qfx.1), E29-A3 (tasklens-qfx.3) |
+| E33-016 | tasklens-cr0.19 | rendering_env.rs: rendering.gpu sets ZED_DEVICE_ID or software rendering | 4 | E33-A2 |
+| E33-017 | tasklens-cr0.20 | kglobalaccel.rs: Open with Ctrl+Esc through KDE kglobalaccel (verify U-16) | 4 | E33-A2 |
+| E33-018 | tasklens-cr0.21 | import_ts.rs: import TaskSlinger UserSettings.ini into settings | 4 | E33-A2 |
+| E33-019 | tasklens-cr0.22 | --app-id: separate instance and settings directory for development builds | 4 | E33-A2 |
+
+Steps of UI-SHL-110 by bead: 1 to 3 and 7 to 10 in E33-A1, 4 and 5 in E33-A2, exit in E33-011. The E01 (`--bench`, `--gallery`) and E32 (`--low-memory`, `--watch-memory`) arms are chain edits owned by those epics; E33-A1 leaves marked insertion points.
+
+### Open items
+
+1. **E33-OI-1. tl-app cannot call `Application::run`.** ADR-001 gives tl-app no gpui-kit dependency, yet UI-SHL-110 step 8 and ADR-010 have `main` run GPUI. Recommendation: E16-A1 exposes `tl_ui::run(UiLaunch) -> UiExit` that wraps `Application::new().run(..)` and `TasklensUi::init`, with `UiLaunch { client: Arc<dyn EngineClient>, settings, state, themes_json: Option<Vec<u8>>, persist: Option<Box<dyn Fn(&Settings, &UiState) + Send + Sync>>, app_requests: Option<async_channel::Receiver<AppRequest>>, queued_toasts: Vec<String>, start_tab: Option<Tab>, select_pid: Option<u32>, debug: bool, start_minimized: bool, pending_crash_report: Option<PathBuf>, on_quit: Box<dyn FnOnce() + Send> }` and `enum UiExit { Quit, RendererFailed(String), DeviceLost }`. Blocks E33-A1, E33-A2, E33-011, E33-012. The B5 writer (E16) must agree.
+2. **E33-OI-2. No argument parser is pinned or allowed.** APP-052 says `clap` derive and UI-SHL-110 says "parse arguments with clap", but `clap` is neither in ADR-002 `[workspace.dependencies]` nor in the tl-app row of ADR-001. Recommendation: add `clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }` to the workspace (exact pin set by E33-001 after `cargo add`) and to the tl-app row; E02 writes the pin.
+3. **E33-OI-3. `async-channel` is not in the tl-app row.** ADR-010 has tl-app create `async_channel::bounded(4)` for `AppRequest`. Recommendation: add `async-channel` to the tl-app row of ADR-001 (it is already a workspace pin).
+4. **E33-OI-4. The persist callback type is not fixed.** ADR-011 says `Box<dyn Fn(&Settings, &State)>`; UI-FND-042 sends theme writes "through the tl-app persist callback" as `PersistTheme::{Save(Vec<ThemeDef>), RenameCorrupt}`; shell.md does not say whether tl-ui debounces before calling. Recommendation: two callbacks in `UiLaunch`: `persist(&Settings, &UiState)` called on every change (tl-app debounces 500 ms, E33-008), and `persist_theme(PersistTheme)` handled by tl-app with `write_atomic` at once. tl-ui passes theme bytes, so `PersistTheme` lives in tl-ui (tl-app depends on tl-ui, allowed).
+5. **E33-OI-5. `write_atomic` arrives in a P2 anchor.** E07-A3 (`fs.rs`, `launch.rs`, `dump.rs`) is P2, but the P1 settings store (E33-008) needs `write_atomic`. Recommendation: the B2 writer splits `fs.rs` into its own P1 bead, or E07-A3 becomes P1.
+6. **E33-OI-6. What `--app-id` changes is undecided.** APP-052 says "separate instance and settings dir". Not decided: the directory name (`$XDG_CONFIG_HOME/<id>/`?), whether state, logs, crash, history and icon cache follow, and the Wayland `app_id`. Recommendation: replace the `tasklens` directory component by the id in all four XDG roots and use the id as Wayland `app_id` and bus name. Blocks E33-019.
+7. **E33-OI-7. Small strings not in the docs.** The clap `about` line ("Task manager for Linux") and per-argument help texts in E33-003, and the notification urgency (critical) in E33-010, are the writer's suggestions. Recommendation: accept as written, or supply wording.
+8. **E33-OI-8. Device-loss relaunch marker.** ADR-015 says "one automatic relaunch" but not how the second process knows it is a relaunch. Recommendation: environment variable `TASKLENS_RELAUNCHED=1`, added to table (c)'s environment list. Also undecided: how GPUI device loss reaches tl-app (part of E33-OI-1).
+9. **E33-OI-9. Desktop file keys and icon install path.** Docs fix only the file name, `Exec=tasklens` and the app ID. Recommendation in E33-013: `Name=tasklens`, `GenericName=Task Manager`, `Comment=See and manage processes, performance and services`, `Icon=io.github.oysteinkrog.Tasklens`, `Categories=System;Monitor;`, `Keywords=process;task;performance;monitor;`, `StartupNotify=true`, `StartupWMClass=io.github.oysteinkrog.Tasklens`, `Terminal=false`; icon installed from `assets/icons/tasklens.svg` to `/usr/share/icons/hicolor/scalable/apps/io.github.oysteinkrog.Tasklens.svg`. The autostart entry (E33-014) reuses `Type`, `Name`, `Icon`.
+10. **E33-OI-10. PKGBUILD metadata.** `pkgver`, `pkgdesc`, `url`, `license`, `source` are not decided, nor whether `nvidia-utils` (listed as a runtime need in ADR-002) is a hard `depends` or an `optdepends`. Recommendation: `pkgver=0.1.0`, build from the local checkout, `nvidia-utils` as `optdepends` because the probe handles a missing NVML; licence is the owner's choice.
+11. **E33-OI-11. Lavapipe ICD path.** APP-046 says "`VK_ICD_FILENAMES` set to lvp_icd" without a path. Recommendation: `/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` (Arch `vulkan-swrast`). Blocks E33-016 software mode only.
+12. **E33-OI-12. How tl-ui reaches tl-app-only features.** The Settings window (tl-ui, E21) triggers Ctrl+Esc (E33-017, kglobalaccel over zbus) and "Import from TaskSlinger…" (E33-018, portal file chooser), but tl-ui cannot use zbus and has no callback for these. Recommendation: add a third `UiLaunch` field `platform: Box<dyn PlatformOps>` with `ctrl_esc_state()`, `set_ctrl_esc(bool)`, `import_taskslinger()`; or route them through `ActionKind` like R-134 did for opener actions.
+13. **E33-OI-13. TaskSlinger INI encodings.** APP-032 gives key names but not the INI section names or value encodings (for example `DefaultTab`, `UIScale`, `TreeView` plus `TaskManagerGrouping`). E33-018 imports only plain booleans and in-range integers until these are supplied from `docs/taskslinger-inventory.md` or the owner's own `UserSettings.ini`.
+14. **E33-OI-14. Tray wiring in `main.rs` is unassigned.** `tl-tray` must be spawned by tl-app (tl-ui cannot depend on it) and connected to `tray_bridge.rs` channels. `main.rs` chain edits are listed only for E01 and E32. Recommendation: add an E31 chain-edit bead "E31: add tray spawn to tl-app/src/main.rs" depending on E33-A1, and allow `tl-tray` in tl-app's `Cargo.toml` by the same bead (ADR-001 already lists `tl-tray (P3)` in the tl-app row).
+15. **E33-OI-15. `build.rs` is not in the section 2 file list.** E33-001 creates `crates/tl-app/build.rs` for the git hash (APP-053, ADR-015). Recommendation: record it as an E33 owner-only file.
+
