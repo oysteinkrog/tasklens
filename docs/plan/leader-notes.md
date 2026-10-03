@@ -10,6 +10,11 @@ pass once all batch writers finish.
   paint step 11), exported by `tasklens-yrf.1`. The hooks sit behind the `test-hooks` feature, so
   `tasklens-wlf.3` must declare `bench = ["test-hooks"]` in tl-ui.
 
+- E01 `first_frame_ms` log line: `tasklens-jqk.10` (E20-008).
+- E31 tray chain-edit points: `tasklens-jqk.1` (`close_decision`, `reopen_main_window`),
+  `tasklens-jqk.10` (`tray_available`), `tasklens-jqk.6` (`titlebar::minimize_main`).
+- E33 needs `tl_ui::run(UiLaunch)`: `tasklens-fut.15` (E16-012, P0).
+
 ## Open items from B1 (infra) still to settle
 
 1. E33-A1: tl-app needs a `tl_ui::run(UiLaunch)` entry point in E16 (asked of B5).
