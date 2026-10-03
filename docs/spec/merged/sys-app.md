@@ -1701,3 +1701,311 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Verdict: BUILD
 - Phase: P2 (Ctrl+Plus/Minus/0 with the global keys in P1)
 - Privilege: none
+
+## Windows, dialogs and system integration
+
+### APP-041 System Information (Mission Center dialog)
+- Was: APP-041
+- Source: MC about_system_dialog (OS, Kernel, Desktop groups; per-row copy; Copy All; Ctrl+A)
+- Behaviour:
+  - Not a separate window. Its fields join the Information tab's "Operating System" section, which the Performance spec owns (PERF-084): Package manager, Package manager version, Kernel release, Kernel version; Desktop name, Desktop version, Windowing system, Virtual terminal; the distro logo beside the section title.
+  - Missing values hide their rows, as in Mission Center.
+  - Help > "System Information…" switches to the Information tab and scrolls to that section.
+  - Mission Center's per-row copy is the Information row copy; its Copy All is the Information tab copy icon. Ctrl+A is Select all (table b); System Information has no shortcut.
+- Linux data/mechanism:
+  - `/etc/os-release` (PRETTY_NAME, VERSION_ID, LOGO);
+  - `/proc/sys/kernel/{osrelease,version}`;
+  - `pacman --version` / `apt --version` / `dnf --version` / `zypper --version` (first found);
+  - `XDG_CURRENT_DESKTOP` and `XDG_SESSION_TYPE`;
+  - desktop version from `plasmashell --version` (KDE) or `gnome-shell --version`;
+  - `XDG_VTNR`.
+- Verdict: ADAPT (merged into the Information tab)
+- Phase: P2
+- Privilege: none
+
+### APP-042 Additional Setup window
+- Was: APP-042
+- Source: MC first_run_dialog (Enabling Additional Values, setup script, revert, view, copy command) | R-028, R-029
+- Behaviour (R-028; the full design is the Performance spec's PERF-094, which owns the rows):
+  - There is no first-run dialog.
+  - One window titled "tasklens Additional Setup", opened from Help > "Additional setup…", from the Settings window's Privileges page, and from every "Needs setup" link.
+  - Rows: "CPU power draw" (PERF-095), "Journal access", "Administrator helper", "Fan sensors" (PERF-097, P4), "Per-process network" (text only, PERF-096).
+    - Journal access shows `sudo usermod -aG systemd-journal $USER` with a Copy button. tasklens never changes groups itself.
+    - Administrator helper shows "Installed" or "Not installed".
+  - Each row has status text, Enable or Revert, "View script" and "Copy command".
+  - CPU power draw shows PERF-095's warning before enabling: "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694)." Status "Enabled (existing rule)" when `energy_uj` is already readable and the tasklens rule file is absent.
+  - Success shows "Done. No restart needed" and re-probes the source at once. Failure shows the output with "Copy output" and "Retry".
+  - Mission Center's `nethogs` capabilities are not needed: tasklens uses sock_diag.
+- Linux data/mechanism: the packaged script `/usr/lib/tasklens/tasklens-setup` (never written to /tmp), run as `pkexec /usr/lib/tasklens/tasklens-setup <rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off>` under polkit `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`). `rapl-enable` writes `/etc/udev/rules.d/99-tasklens-powercap.rules` with the one line `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add` (R-029). Mission Center's `/etc/udev/rules.d/99-powercap.rules` is detected and never touched.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: pkexec under the setup action. Without it, CPU power shows "Needs setup" (R-050), never 0.
+
+### APP-043 Language and live locale change
+- Was: APP-043
+- Source: TS 1.4 Language (10 locales), INI UI.Language, live locale change (cross-check A.40) | MC gettext (48 po files)
+- Behaviour:
+  - Every user-visible string goes through a message key from P1. The English catalogue ships in P1.
+  - "Language: >" lists "System default" (follows `LC_ALL`/`LC_MESSAGES`/`LANG`) and the ten TaskSlinger locales plus nb-NO (`general.language`: `system | en-US | de-DE | es-ES | fr-FR | ja-JP | ko-KR | pt-BR | ru-RU | uk-UA | zh-CN | nb-NO`).
+  - Changing the language in tasklens reapplies all text live, without a restart. A change of the system locale applies at the next start, because the KDE portal does not provide a locale setting.
+  - Number and date formats follow the selected locale. The table (d) formats are the en-US forms (inferred: decimal and grouping characters follow the locale; units and patterns stay).
+  - Missing keys fall back to English.
+- Linux data/mechanism: Fluent (`fluent-bundle` + `unic-langid`), `.ftl` files embedded with `include_str!`; locale from the environment. Translations are drafted by Claude agents and reviewed per locale. No Mission Center po text is copied, because of GPL-3.
+- Verdict: ADAPT
+- Phase: P1 (key system and English), P4 (other locales)
+- Privilege: none
+
+### APP-044 Toasts
+- Was: APP-044
+- Source: TS 8 (top centre) | gpui-component notifications (5 s autohide, placement per toast)
+- Behaviour:
+  - Toasts appear at the top centre of the window, 8 px under the tab bar, at most 4 stacked, auto-hidden after 5 s. Hover pauses the timer. Errors stay 8 s.
+  - Types: Success (green icon), Info, Warning, Error.
+  - An in-progress toast is replaced in place by its result through the same id (service jobs, close connection).
+  - All toast texts come from the owning area's spec (TaskSlinger strings). General ones: "Copied to clipboard", "Copied: <value>", "Failed to copy to clipboard", "No process selected", "Select a process row first." (and the service, startup and connection variants), "Opening file location", "Failed to open file location", "Could not open properties.", "Authentication cancelled".
+  - Toast motion follows `motion.animations` and reduced motion (R-017).
+  - Shown only while the main window is visible. While hidden to the tray, Error results go to a desktop notification instead (`NotificationDelivery::System`).
+  - A collection error never becomes a toast unless the user started an action (ADR-015).
+- Linux data/mechanism: `window.push_notification(Notification::success(..).placement(Anchor::TopCenter).id1::<T>(key))`; system delivery through `org.freedesktop.Notifications`
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### APP-045 Dialogs as separate pinnable windows
+- Was: APP-045
+- Source: TS 8 [CL 0.8.25], cross-check A.38 (`TaskSlingerDetachedModal`, `modal.pin`) | R-061, R-073
+- Behaviour:
+  - Every dialog and property panel is its own top-level window with a title bar pin button (APP-009).
+  - Confirmations are modal to their parent: Esc and Cancel close, Enter triggers the default button. Property, editor and tool windows are not modal.
+  - Window titles:
+
+    | Window | Title |
+    |---|---|
+    | Run | "tasklens Run" (R-061) |
+    | Handle Search | "tasklens Handle Search" (R-061) |
+    | Public IP notice | "tasklens Public IP Notice" |
+    | Delete startup entry | "tasklens Delete Startup Entry" |
+    | Theme share code | "tasklens Share Theme" |
+    | About | "tasklens About" (see O-4) |
+    | Additional setup | "tasklens Additional Setup" (R-028) |
+    | Crash report | "tasklens Crash Report" (R-049) |
+    | Settings | "tasklens Settings" |
+    | Keyboard shortcuts | "tasklens Keyboard Shortcuts" (inferred) |
+    | Theme editor | "tasklens Theme Editor" (inferred) |
+    | Service properties | "<id> Properties" (SYS-011) |
+    | Startup properties | "Startup properties: <Name>" (SYS-026) |
+    | Connection properties | "Connection properties: <Proto> <State>" (SYS-034) |
+    | Process properties | per the process spec |
+
+  - Other confirmations (Reset settings, Delete theme, Close listening socket, Skip password prompts, process action confirmations) are modal windows titled "tasklens" (inferred).
+  - Closing the main window closes all child windows, except detached graphs when `graphs.keep_detached_on_close` is on.
+- Linux data/mechanism:
+  - `cx.open_window` with `WindowKind::Dialog` for modal confirmations (xdg_dialog_v1 set_modal) and `WindowKind::Floating` (xdg parent) for tools.
+  - Each window gets a gpui-kit Root, so it has its own toasts and menus.
+  - In-window gpui-component Dialog is used only for sub-prompts inside those windows.
+- Verdict: BUILD
+- Phase: P1 (frame), others with their features
+- Privilege: none
+
+### APP-046 Rendering GPU choice
+- Was: APP-046
+- Source: TS GPU preference L28527-28529, L28540-28541, Graphics.*, dual-path startup (cross-check A.43) | R-070
+- Behaviour: Settings > Monitoring > "Rendering GPU >" lists "Auto", one entry per Vulkan adapter (name), and "Software renderer" (`rendering.gpu = "auto" | "software" | "pci:<bus id>"`). Changing it shows the toast "Restart tasklens to use the new GPU".
+- Linux data/mechanism:
+  - At startup, before GPUI initialises, set `ZED_DEVICE_ID=0x<pci device id>` for an adapter. A `ZED_DEVICE_ID` already set in the environment by the user wins (R-070).
+  - For software rendering, set `WGPU_ADAPTER_NAME=llvmpipe` together with `VK_ICD_FILENAMES` set to lvp_icd.
+  - Adapters are listed with wgpu `Instance::enumerate_adapters` in a short-lived probe at menu open.
+  - TaskSlinger's WARP first frame has no wgpu equivalent and is not copied.
+  - Before P4 tasklens never sets `ZED_DEVICE_ID` (ADR-010).
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: none
+
+### APP-047 Main tray icon and close/minimize to tray
+- Was: APP-047
+- Source: TS INI Window.CloseToTray/MinimizeToTray/AlwaysShowTrayIcon, tray menu L28588, L29307, tooltip L28584-28586, L30144-30157 | review (closing the last window exits in v1; tray is a later explicit mode) | R-027, ADR-010
+- Behaviour:
+  - When any tray setting is on, a main StatusNotifierItem appears. Tray graph icons are owned by the Performance spec (PERF-078 to PERF-081, PERF-089).
+  - Tooltip: "CPU: 12.3% RAM: 45.6% GPU: 3.0% Disk: 0.4% Network: 2.3 Mbps", percent with one decimal (table d), network in the `units.network` unit. Updated at 1 Hz while the tray is shown.
+  - Left click toggles the main window.
+  - Menu (R-027): "Show Main Window", "Tray icon graphs >", separator, "Exit tasklens".
+  - Close to tray (`tray.close_to_tray`): close (button, Ctrl+W, Esc-close) hides the window instead of exiting.
+  - Minimize to tray (`tray.minimize_to_tray`): minimize hides it.
+  - Always show tray icon (`tray.always_show`): keeps the icon while the window is visible.
+  - The main tray icon is hidden while a tray graph icon is shown [CL 0.9.2] (PERF-081).
+  - With every tray setting off, closing the main window exits.
+  - While hidden: collection stops except tray and graph demand.
+- Linux data/mechanism (R-027, ADR-010):
+  - Crate `tl-tray` with `ksni =0.3.6`, features `async-io` and `blocking`, on its own thread through `ksni::blocking::TrayMethods::spawn`. `cargo xtask check-deps` proves no Tokio (U-31). If that check fails, the fallback is a hand-written SNI and dbusmenu server inside `tl-tray` on its own zbus connection, never inside tl-engine.
+  - Items `org.kde.StatusNotifierItem-<pid>-<n>`, objects `/StatusNotifierItem` and `/MenuBar` (table c). Icons ARGB32 at 22×22 and 44×44 px. Updates at most 1 Hz and only when the pixels changed.
+  - Re-register on `StatusNotifierWatcher` owner change (the Linux form of TaskbarCreated).
+  - Close handling: the app uses `QuitMode::Explicit`. `on_window_should_close` on the main window removes the window and keeps the app and engine running when the tray is enabled and close-to-tray is on; otherwise it calls `cx.quit()`. After `Application::run` returns, `main` shuts the engine down within 1500 ms, flushes logs and exits.
+- Verdict: ADAPT
+- Phase: P3
+- Privilege: none
+
+### APP-048 Start at login
+- Was: APP-048
+- Source: TS Startup.StartWithWindows/StartMinimized (`--start-minimized`)
+- Behaviour: "Start at login" (`startup.start_at_login`) writes the autostart entry; turning it off deletes it. "Start minimized" (`startup.start_minimized`) adds `--start-minimized`. That flag starts hidden to the tray if the tray is enabled, otherwise minimized. The entry then shows in the Startup Apps tab like any other.
+- Linux data/mechanism: `~/.config/autostart/io.github.oysteinkrog.Tasklens.desktop` with `Exec=tasklens [--start-minimized]` and `X-KDE-autostart-phase=2`, written with `write_atomic`
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### APP-049 Privilege settings (unlock at launch, passwordless)
+- Was: APP-049
+- Source: TS AlwaysLaunchElevated, UacLessElevation (IFEO, experimental) L30388-30400 | R-002
+- Behaviour:
+  - "Unlock privileged actions at launch" (`privilege.unlock_at_launch`) runs APP-003 at startup (one prompt).
+  - "Skip password prompts (experimental)" (`privilege.passwordless`) installs a polkit rule so tasklens actions need no password for the active local session of wheel members. Turning it off removes the rule.
+  - A modal confirm window comes first: "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?", buttons "Skip prompts" / "Cancel".
+- Linux data/mechanism: `pkexec /usr/lib/tasklens/tasklens-setup polkit-rule on|off` under `io.github.oysteinkrog.tasklens.setup` writes or removes `/etc/polkit-1/rules.d/49-tasklens.rules`. The rule returns `polkit.Result.YES` for `action.id.indexOf("io.github.oysteinkrog.tasklens.") == 0 && subject.local && subject.active && subject.isInGroup("wheel")`. The prefix covers the helper, setup and netmon actions; the systemd and policykit.exec actions are not covered.
+- Verdict: ADAPT
+- Phase: P3 (unlock at launch), P4 (passwordless)
+- Privilege: pkexec once to install
+
+### APP-050 Updater, installer and related items
+- Was: APP-050
+- Source: TS 8 Updater, TaskSlinger Setup, cross-check A.33-A.36, A.44, C.5 internal flags; INI Updates, Install
+- Behaviour: none. Each item below is DROP:
+  - In-app updater (check, download, signature check, "Click to update", changelog), the CheckForUpdatesOnStartup setting, and the About "Updates" block: pacman and the localbuilds recipe update tasklens.
+  - Installer (install for current user, location, PATH, Start Menu, desktop shortcut, Modify, Use standalone, Uninstall, folder picker, `.ts-migrate`, installed-notification) and the flags `--install-source`, `--internal-install`, `--internal-uninstall-helper`, `--internal-replace-in-place`, `--internal-install-handoff-pid`, `--internal-uninstall-wait-pid`, `--internal-show-installed-notification`: the pacman package installs the binary, `.desktop` file, icon and polkit policy.
+  - AppUserModelID and taskbar pin repair: Wayland uses `app_id` and the `.desktop` file instead (APP-001).
+  - Session 0 check: no Linux equivalent.
+  - "Set as default Task Manager" (IFEO) and `--internal-set-taskmgr-default` / `--internal-clear-taskmgr-default`: replaced by APP-051.
+  - `--internal-elevation-handoff`: tasklens never relaunches elevated (APP-003).
+  - `--internal-skip-single-instance`: replaced by `--app-id` (APP-052).
+- Linux data/mechanism: none
+- Verdict: DROP (reasons per item above)
+- Phase: P4 (recorded)
+- Privilege: none
+
+### APP-051 Open tasklens with Ctrl+Esc (KDE)
+- Was: APP-051
+- Source: TS "Set as default Task Manager" (IFEO), Installer option
+- Behaviour: Settings window > Startup and window > "Open with Ctrl+Esc". When on, KDE's Ctrl+Esc opens tasklens instead of Plasma System Monitor. When off, the KDE default comes back. The check state is read from kglobalaccel; there is no settings key.
+- Linux data/mechanism: kglobalaccel D-Bus `org.kde.kglobalaccel /kglobalaccel`. Register `io.github.oysteinkrog.Tasklens.desktop` `_launch` = Ctrl+Esc, and set `org.kde.plasma-systemmonitor.desktop` `_launch` to none, using `setForeignShortcutKeys`.
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: none
+- Open question: does `setForeignShortcutKeys` stick for a `.desktop` launch component that is not running (U-16)? Recommended answer: test on Plasma 6. If it does not stick, write `~/.config/kglobalshortcutsrc` `[services][io.github.oysteinkrog.Tasklens.desktop] _launch=Ctrl+Esc` and ask the user to log out and back in. Listed as O-6.
+
+### APP-052 Command-line arguments
+- Was: APP-052
+- Source: TS 7 and cross-check C.5 | MC `--app-id`/`-a` | PLAN `--bench` | table (c)
+- Behaviour: Arguments (table c):
+  - `--start-minimized` (APP-048)
+  - `--low-memory`: low-memory rescue window (process spec, r2 PROC-081); TaskSlinger's `/low-memory` and `--internal-low-memory-recovery`
+  - `--watch-memory`: the low-memory watcher mode run by `tasklens-lowmem.service`; it does not start GPUI (r2 PROC-081)
+  - `--tab <processes|performance|services|startup|connections|information>`: TaskSlinger's page argument, whose syntax is unknown, made explicit
+  - `--select-pid <pid>`: opens Processes and selects that pid
+  - `--debug`: Debug menu (APP-026)
+  - `--bench <scene> [--duration --warmup --json]`: ADR-014 scenes `perf-cpu`, `table-2000`, `bridge`, `static`, plus `history-scrub` in P3. This replaces TaskSlinger's `--history-scrub-bench` and `--history-scrub-bench-out`.
+  - `--force-full-memory-mode`: TaskSlinger's `--internal-force-full-memory-mode`, used to test the low-memory path
+  - `--app-id <reverse-dns id>`: separate instance and settings dir, for development builds (Mission Center)
+  - `--version`, `--help`
+
+  Unknown arguments print usage and exit 2. Forwarding to a running instance follows APP-011.
+  Environment variables read (table c): `TASKLENS_LOG`, `TASKLENS_GPU_PROBE`, `TASKLENS_DEBUG`, `ZED_DEVICE_ID`, `__NV_FORCE_ENABLE_X11_EGL_PLATFORM`, `TL_UPDATE_GOLDEN` (tests).
+- Linux data/mechanism: `clap` derive
+- Verdict: ADAPT
+- Phase: P1 (`--tab`, `--select-pid`, `--version`, `--help`, `--bench`), P2 (`--start-minimized`), P3 (`--low-memory`, `--watch-memory`, `--force-full-memory-mode`), P4 (`--app-id`, `--debug`)
+- Privilege: none
+
+### APP-053 About window
+- Was: APP-053
+- Source: TS About L29358-29368, L35581-35590, cross-check A.33 | MC adw AboutDialog
+- Behaviour:
+  - A separate pinnable window titled "tasklens About" (APP-045, O-4), opened by Help > "About tasklens…".
+  - Shows icon, "tasklens", "Version: <semver> (<git short hash>, <build date>)".
+  - "Copy version info" copies version, GPUI revision, kernel, NVIDIA driver, compositor, session type and scale for bug reports.
+  - "Third-party licenses" opens a scrollable list generated at build time.
+  - Links: project repository, and "Open log folder".
+  - No TaskSlinger or Mission Center branding (D-005).
+  - TaskSlinger's author line, Discord, Twitter, bug email, support text and update block are not copied: they belong to TaskSlinger's product.
+- Linux data/mechanism: `cargo-about` output embedded with `include_str!`; `env!("CARGO_PKG_VERSION")` plus a build.rs git hash
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### APP-054 Logging
+- Was: APP-054
+- Source: TS log levels and format (cross-check A.42) L29425-29437, logs\app.log | review risk 7 | ADR-015, R-048
+- Behaviour (ADR-015 as written):
+  - `tracing` everywhere; `tracing-subscriber` with `EnvFilter` from `TASKLENS_LOG`, default `info,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,zbus=warn`. `RUST_LOG` is not read.
+  - Outputs: stderr when stderr is a terminal; always a file in `$XDG_STATE_HOME/tasklens/logs/`, rotated daily as `tasklens.<date>.log`, keeping 7 files, written through `tracing_appender::non_blocking` (its guard is held in `main` and dropped last).
+  - Targets: `tasklens::engine`, `tasklens::source::<name>`, `tasklens::action`, `tasklens::ui`, `tasklens::frame`, `tasklens::probe`. Timing lines (first-frame time, collector timings) use `info` on target `tasklens::perf`. There is no PERF level, no custom categories and no repeat collapsing (R-048).
+  - Never logged at any level: command lines, environment, working directories, open file paths, executable paths of other users' processes, window titles, user names other than the current user. Processes are logged as pid plus comm, and comm only at debug and below. Action logs record kind, target pid and result.
+  - No logging inside per-frame or per-process loops above trace level.
+- Linux data/mechanism: `tracing`, `tracing-subscriber`, `tracing-appender` `RollingFileAppender` with `Rotation::DAILY`, prefix `tasklens`, suffix `log`, `max_log_files(7)`
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### APP-055 Crash handling and fatal errors
+- Was: APP-055
+- Source: TS 8 fatal errors L28904-28920, crash.log, dumps\, Crash.DumpType | review (NVML isolation, device loss) | ADR-015, R-049
+- Behaviour (R-049):
+  - A panic hook, installed first in `main`, writes `$XDG_STATE_HOME/tasklens/crash/crash-<unix seconds>.txt`. Content: tasklens version and git sha, thread name, panic message, location, `Backtrace::force_capture()`, and the last 200 log lines. No process metadata, no settings contents, no command lines or environments. The newest 20 reports are kept. Then the default hook runs.
+  - A panic in an engine worker is handled by its supervisor with backoff and does not crash the app. In an action task, the action reports "internal error".
+  - On a crash of the app: desktop notification "tasklens stopped after an unrecoverable error."
+  - Next start: a window "tasklens Crash Report" with the text "tasklens closed unexpectedly last time." and buttons "Open log folder", "Copy report", "Close". This replaces the ADR-015 toast.
+  - Native crashes (SIGSEGV) are left to systemd-coredump. The report window mentions `coredumpctl info tasklens`. TaskSlinger's Mini/Full dump setting is not needed.
+  - GPU init failure ("tasklens could not start the renderer") goes to stderr and a desktop notification, then exit 1.
+  - GPU device loss: if GPUI cannot recover, the notification "tasklens lost the graphics device and must restart" appears and tasklens relaunches itself once.
+- Linux data/mechanism: `std::panic::set_hook`; `org.freedesktop.Notifications.Notify` through zbus (works without a GPUI window); `panic = "unwind"` (ADR-002)
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### APP-056 Public IP fetch notice
+- Was: APP-056
+- Source: TS 8 "Confirm Public IP Fetch" L29346-29350, Connections.AutoFetchPublicIP | R-058
+- Behaviour:
+  - The first Fetch (Network page or Information tab) shows the modal window "tasklens Public IP Notice" with the text:
+    - "tasklens will fetch your public IP address from an online service."
+    - "Service: https://api.ipify.org"
+    - "Continue only if you want this computer to contact that service."
+  - A checkbox "Do not ask again for public IP fetches" (`network.public_ip_notice_accepted`), and buttons Continue / Cancel.
+  - "Auto-fetch Public IP on launch" (`network.auto_fetch_public_ip`, Settings > Window & startup, R-058) fetches once at startup when the notice has been accepted.
+- Linux data/mechanism: HTTPS GET with `ureq` 3 (rustls, blocking, no Tokio, U-30) on the blocking pool, 5 s timeout
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### APP-057 NVIDIA G-SYNC profile
+- Was: APP-057
+- Source: TS Settings "Create NVIDIA G-SYNC profile" L28530-28535 [CL 0.8.28]
+- Behaviour: none
+- Linux data/mechanism: none
+- Verdict: DROP (KWin applies adaptive sync only to fullscreen windows by default, so a windowed tasklens never triggers VRR flicker; no NVIDIA driver profile is needed)
+- Phase: P4 (recorded)
+- Privilege: none
+
+### APP-058 Accessibility and reduced motion
+- Was: APP-058
+- Source: TS TextScaleFactor [CL 0.8.29] | review "Accessibility/input" | R-017
+- Behaviour:
+  - Full keyboard use per APP-031, with visible focus rings.
+  - Icon-only buttons have accessible names.
+  - Charts show their latest value and unit as text next to the chart. GPUI has no screen reader support on Linux (U-5).
+  - Reduced motion: system reduce-motion turns off tab, theme and toast animations, smooth scrolling and graph sliding, whatever `[motion]` says (R-017).
+  - The UI scale default follows the system font: when `appearance.ui_scale_pct` has never been set, the default is the KDE general font point size / 10 × 100, rounded to step 5 and clamped to 75..=200.
+- Linux data/mechanism: GPUI accesskit adapter if present in gpui-linux (unverified, U-5); `App::reduce_motion()`; `kdeglobals [General] font`
+- Verdict: ADAPT
+- Phase: P2 (scale-from-font default P4)
+- Privilege: none
+
+### APP-059 Loading placeholders
+- Was: APP-059
+- Source: MC shimmer placeholders | TS "Loading service data..." | widgets rule 17 | R-060
+- Behaviour:
+  - The Processes tab shows rows from the first sweep with `…` in rate cells and no skeleton.
+  - Services, Startup Apps, Connections and Information show skeleton rows or blocks until their first data, once per session. Services also shows the toast "Loading service data..." (SYS-016).
+  - Skeletons are never shown when switching between tabs whose data is already loaded.
+  - The first frame is drawn without waiting for collectors.
+- Linux data/mechanism: gpui-component Skeleton, which stops requesting frames once replaced; never used in table cells or charts (ADR-009)
+- Verdict: BUILD
+- Phase: P1 (frame rule), P2 (skeletons with the P2 tabs)
+- Privilege: none
