@@ -1261,30 +1261,32 @@ it, secondary epics in parentheses. Verdicts and phases are the merged specs' (s
 | U-46 | E24 |
 | U-48 | E27 |
 
-## 7. Open items
+## 7. Open items (all settled)
 
-Things the docs do not decide that this structure needs. Each has a recommendation; writers use
-the recommendation until the leader or Oystein says otherwise, and they note the item number in
-the affected beads.
+The sixteen items below were open when this file was first written. The leader accepted every
+recommendation on 2026-10-03. Items 1 to 7, 13 and 16 are resolutions R-129 to R-137 in
+`docs/RECONCILIATION.md` and are current-state text in `docs/ARCHITECTURE.md`; items 8 to 12, 14
+and 15 are the accepted structural choices in R-138. The text of each item is kept so writers can
+see the reasoning; the R entry is the binding form. Nothing here is open.
 
-1. **Two files called `tl-ui/src/actions.rs`.** ADR-009 puts `ActionTracker` there; shell.md puts
+1. **Settled, R-129. Two files called `tl-ui/src/actions.rs`.** ADR-009 puts `ActionTracker` there; shell.md puts
    every GPUI Action and `bind_keys` there. Recommendation: `src/action_tracker.rs` for the
    entity (E16), `src/actions.rs` for the window-level Actions and `bind_keys_global` (E20).
    Section 2 is written that way. One line in ADR-009 to update.
 
-2. **`write_atomic` lives in `tl-app`, but the engine's Startup worker writes autostart
+2. **Settled, R-130. `write_atomic` lives in `tl-app`, but the engine's Startup worker writes autostart
    overrides.** ADR-011 names `tl-app/src/atomic.rs` for both; ADR-001 does not let `tl-engine`
    depend on `tl-app`. Recommendation: the routine lives in `tl-ops/src/fs.rs` (E07-A3);
    `tl-app/src/atomic.rs` re-exports it, which needs `tl-ops` added to `tl-app`'s allowed row in
    ADR-001 (one table cell). Alternative: duplicate the 20 lines. The first is cleaner.
 
-3. **`ureq` is not in any allowed-dependency row.** PERF-060 fixes `ureq` 3 with rustls for the
+3. **Settled, R-131. `ureq` is not in any allowed-dependency row.** PERF-060 fixes `ureq` 3 with rustls for the
    public IP fetch. Recommendation: add `ureq = { version = "3", default-features = false,
    features = ["rustls"] }` to `[workspace.dependencies]` (E02 writes the pin) and to
    `tl-engine`'s row; the E12 bead that adds it runs `check-deps` to settle U-30. Pin the exact
    version in that bead after `cargo add` resolves it.
 
-4. **Fluent is not in `tl-ui`'s allowed row and the catalogue layout is undefined.** APP-043
+4. **Settled, R-132. Fluent is not in `tl-ui`'s allowed row and the catalogue layout is undefined.** APP-043
    fixes `fluent-bundle` and `unic-langid` with embedded `.ftl` files. Recommendation: add both
    to `tl-ui`'s row and the workspace pins; `tl-ui/src/i18n.rs` (E16-A1) exposes `tr(key)` and
    `tr_args(key, args)` returning `SharedString`, with a `Strings` Global and `strings_version`;
@@ -1292,12 +1294,12 @@ the affected beads.
    `<area>-<entry>-<slug>` (for example `processes-menu-end-task`). The locale list comes from
    canonical table (a). Other locales are P4 and not beaded in this round.
 
-5. **`actions!(tl_pwn, ...)` in process-windows.md.** R-128 fixes one namespace, `tasklens`.
+5. **Settled, R-133. `actions!(tl_pwn, ...)` in process-windows.md.** R-128 fixes one namespace, `tasklens`.
    Recommendation: `windows/actions.rs` declares its Actions in `tasklens` with the `Props`,
    `Affinity`, `Priority`, `Signal`, `Run` and `HandleSearch` prefixes; the one sentence in
    process-windows.md is out of date and writers follow R-128.
 
-6. **Opening URLs, file locations and launching programs has no `Command` variant.** PROC-073,
+6. **Settled, R-134. Opening URLs, file locations and launching programs has no `Command` variant.** PROC-073,
    PROC-074, PROC-095, SYS-023, UI-SHL-093 ("Open log folder") and PERF-061 need session-bus
    calls (`FileManager1`, portal `OpenURI`, `StartTransientUnit`) with an `xdg-open` fallback and
    a result toast. `tl-ui` cannot use zbus. Recommendation: add to `tl-model::actions`
@@ -1308,47 +1310,47 @@ the affected beads.
    toasts work. Alternative: a `Box<dyn Fn>` callback from `tl-app` using its blocking zbus
    connection. The first keeps one action path and one place for session-bus code.
 
-7. **`tl-collect` module layout is not in ADR-016.** Section 2 proposes it (`parse/`, `sample/`,
+7. **Settled, R-135. `tl-collect` module layout is not in ADR-016.** Section 2 proposes it (`parse/`, `sample/`,
    `proc/`, `apps/`, `net/`, `startup/`, `inventory/`, `gpu_drm/`). Recommendation: accept it;
    the E04-A1 bead adds the module list to ADR-016 as a doc edit in the same commit.
 
-8. **The phase-0 slice is wide.** E01 needs 21 anchors from 13 epics (section 4). This follows
+8. **Settled, R-138. The phase-0 slice is wide.** E01 needs 21 anchors from 13 epics (section 4). This follows
    from ADR-014 measuring the real chart, table, pages and bridge with synthetic data.
    Recommendation: accept, label those anchors `phase-p0`, and have the leader start them first
    across batches B1, B2, B3, B5, B6, B7 and B8. The alternative, a throwaway spike UI, would
    measure code that is then rewritten and would not satisfy the decision rule.
 
-9. **Where the reducer's `sys_table.rs` body is written.** The builder is reducer code (E09) but
+9. **Settled, R-138. Where the reducer's `sys_table.rs` body is written.** The builder is reducer code (E09) but
    only the P2 D-Bus epic (E14) knows the rows. Recommendation (used in section 2): E09-A1
    writes the signatures and an empty body; E14-A1 fills it. The same pattern is not used
    anywhere else.
 
-10. **`tl-engine/src/workers/processes.rs` is shared with the low-memory mode.** ADR-004 makes
+10. **Settled, R-138. `tl-engine/src/workers/processes.rs` is shared with the low-memory mode.** ADR-004 makes
     `LowMemory` a stripped sweep inside the `Processes` worker. Recommendation (used in section
     2): the stripped sweep is its own `Source` in `workers/lowmem.rs` (E32); E32 chain-edits one
     `match` arm in `processes.rs` that picks it by `EngineMode`.
 
-11. **The `tasklens-setup` script source location and language.** Table (c) gives the install
+11. **Settled, R-138. The `tasklens-setup` script source location and language.** Table (c) gives the install
     path only. Recommendation: `packaging/tasklens-setup`, POSIX `sh`, installed by the PKGBUILD
     with mode 0755, owned by E29.
 
-12. **The KWin bridge scripts.** The docs give the run-time path but not where the JavaScript
+12. **Settled, R-138. The KWin bridge scripts.** The docs give the run-time path but not where the JavaScript
     source lives. Recommendation: `assets/kwin/{kwin-bridge.js,pick.js,cmd-template.js}`
     embedded with `include_str!`, owned by E14.
 
-13. **The `AppRequest` channel type between `tl-app` and `tl-ui`.** UI-SHL-112 names
+13. **Settled, R-136. The `AppRequest` channel type between `tl-app` and `tl-ui`.** UI-SHL-112 names
     `async_channel::bounded(4)` and `AppRequest` but not the enum. Recommendation:
     `tl_model::command::AppRequest { Activate { token: Option<Arc<str>> }, SelectTab(Tab),
     SelectPid(u32), Quit }` in `tl-model` (E03-A2), so neither crate depends on the other for it.
 
-14. **Epic count.** 33 epics against the asked-for 20 to 30. Recommendation: keep 33; the
+14. **Settled, R-138. Epic count.** 33 epics against the asked-for 20 to 30. Recommendation: keep 33; the
     section 1 sizes show that merging any two UI epics passes 40 beads.
 
-15. **The Run dialog's `--bench` neighbour, `--gallery`, is not in APP-052.** UI-FND-030 adds it.
+15. **Settled, R-138. The Run dialog's `--bench` neighbour, `--gallery`, is not in APP-052.** UI-FND-030 adds it.
     Recommendation: `args.rs` (E33-A1) declares `--gallery` beside `--bench`, both behind the
     `bench` feature, and table (c)'s argument list gains it in a doc edit by E01.
 
-16. **Unit rows' and app rows' "Memory" from cgroup `memory.stat` `anon`** needs `memory.stat`
+16. **Settled, R-137. Unit rows' and app rows' "Memory" from cgroup `memory.stat` `anon`** needs `memory.stat`
     reads in the process sweep that ADR-016's sources table does not list. Recommendation: E05-A2
     reads `memory.stat` and `cpu.stat` for app scopes and the demanded unit cgroups
     (`service_cgroup_stats`) and records this in the ADR-016 table in the same commit.
