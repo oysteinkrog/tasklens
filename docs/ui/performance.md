@@ -1132,3 +1132,124 @@ bg window_bg; 1 px divider border; not resizable
 - **Tests**: `mini_window_lists_visible_cards`, `mini_window_card_click_opens_main_on_page`, `mini_window_close_unchecks_menu`.
 - **Phase**: P3.
 - **Decided here**: card width, height cap and scroll, Esc closes, mini window stays open on card click.
+
+---
+
+## Part E: tray graph icons, the Additional Setup rows and the bench scenes
+
+### UI-PRF-050 Tray graph icon rasterizer
+
+- **Implements**: PERF-088, PERF-091, PERF-092 (re-register keeps the same pixels), R-027, ADR-010 tray paragraph.
+- **Anatomy** (22 × 22 px; the 44 × 44 icon is the same drawing at 2× with every size doubled):
+
+```
+col:  0 1 2 ... 18 19 20 21
+row 0 . . . . . . . . . . .   row 0 and row 21: transparent margin (1 px)
+row 1 . ▁ ▁ ▂ ▂ ▃ ▂ ▁ ▁ █ .   columns 1..=18: history, one column per bucket, newest at column 18
+...   . ▂ ▃ ▅ ▇ ▆ ▅ ▃ ▂ █ .   columns 19..=20: the current-value bar, 2 px wide, full line colour
+row 20. █ █ █ █ █ █ █ █ █ █ .
+row 21. . . . . . . . . . .
+```
+
+  - **Background**: fully transparent (ARGB 0).
+  - **History columns** (`cols = 18` at 22 px, 36 at 44 px): the series over `range_s` is resampled into `cols` buckets aligned to absolute time (bucket max, same rule as UI-PRF-007); each column is filled from the bottom to `height × value / max` with the fill colour (line colour at alpha 0.55), and its top pixel row carries the line colour at alpha 1.0 (the "1 px line", ADR-010). Gaps and invalid buckets are left transparent.
+  - **Value bar**: the two right-most inner columns (four at 44 px) are a solid bar in the line colour at alpha 1.0 from the bottom to the current value (PERF-088 "current value as a filled bar height"), separated from the history by nothing (adjacent); when the value is `WarmingUp` or invalid the bar is drawn as a 1 px baseline only.
+  - **Supersampling**: each icon is rasterized at 2× (44 × 44 for the 22 px icon, 88 × 88 for the 44 px icon) and box-filtered down, which anti-aliases the column tops (ADR-010: "no anti-aliasing beyond 2×2 supersampling").
+  - **Colour**: the graph's `color` (accent or named, APP-039) resolved through UI-PRF-008; `accent` on a tray graph means the type palette line colour for a page source (`cpu_line` for CPU), `TlTheme.accent` for process sources (same rule as UI-PRF-041).
+  - **Scale**: as the matching chart (Fixed for percent, FixedTotal for memory, AutoRate for rates with the same 10 s fall rule, kept in the tray graph's own `ScaleState`).
+- **Update rule**: the `tl-tray` thread receives a snapshot pointer from a 1 Hz GPUI timer (`EngineClient::latest()`), rasterizes each graph, compares the new ARGB buffer with the previous one byte for byte, and calls `ksni` `set_icon` only when it differs (PERF-088, ADR-010). With a 1 Hz source every second changes the newest column, so in practice the icon updates once per second while the value moves and not at all when the series is flat (`WarmingUp`, "Ended", idle network at exactly 0).
+- **States**: "No match" and "Ended" process sources (PERF-086): the icon freezes on its last pixels; the tooltip (UI-PRF-051) carries the state word. Probe or source `Failed`: the icon shows the baseline only.
+- **Build**: `crates/tl-tray/src/raster.rs`: `pub fn render(series: &[Sample], now_ns: u64, range_ns: u64, scale: &mut ScaleState, color: Rgba, size: u32, out: &mut Vec<u8>)`, pure CPU, no allocation after the first call (`out` is reused; the 2× buffer is a `thread_local!`). ARGB32 in network byte order as `ksni::Icon { width, height, data }` expects. The tray thread owns one `Vec<u8>` per icon size per graph.
+- **Performance**: 22 px icon: 44 × 44 × 4 bytes = 7.7 KiB at 2×; 44 px icon 31 KiB. Both per graph per second, well under 50 µs on this machine. Nothing touches the GPUI thread except the 1 Hz timer that hands over the `Arc<Snapshot>`.
+- **Accessibility**: the tooltip repeats the value as text (UI-PRF-051).
+- **Tests**: `raster_22_has_transparent_margin`, `raster_value_bar_height`, `raster_identical_input_identical_bytes` (update rule), `raster_gap_columns_transparent`, `raster_44_is_2x_of_22_layout`.
+- **Phase**: P3.
+- **Decided here**: margin 1 px, history 18 columns, value bar 2 px, fill alpha 0.55, baseline for invalid, the accent meaning for page sources.
+
+### UI-PRF-051 Tray graph tooltips and menus
+
+- **Implements**: PERF-089, PERF-090, PERF-091, R-027, R-067.
+- **Tooltip** (SNI `ToolTip` `(icon, title, description)`, `NewToolTip` at most 1 Hz, only when the text changed): title is the graph title, description the value text:
+
+| Source | Title | Description |
+|---|---|---|
+| page graph | `<Title> Usage` ("CPU Usage", "Memory Usage", "Disk Usage", "Network Usage", "GPU Usage") | `18.6%` (so the tooltip reads "CPU Usage: 18.6%" in panels that join title and description with ": "; panels that show two lines show them as two lines) |
+| process | `<name> (PID n)` | `CPU 3.2%` |
+| name filter | `3 procs` | `firefox` (reads "3 procs: firefox") |
+| app | `<App>` | `CPU 3.2%` |
+| main icon (APP-047) | `tasklens` | five lines "CPU: 11.9%", "RAM: 54.9%", "GPU: 3.0%", "Disk: 1.2%", "Network: 0.3 Mbps" |
+
+  "No match" and "Ended" replace the value part (`firefox: No match`).
+- **Menu** (dbusmenu on `/MenuBar`, PERF-090 order):
+  1. "Graph color >" → radio: "Accent", then the 17 names (checked = current) → `tray::SetColor { n, color }`; the icon redraws at once (next tick, ≤ 1 s).
+  2. "Time range >" → radio "30 seconds", "1 minute", "5 minutes", "10 minutes" → `tray::SetRange { n, secs }`.
+  3. "Close tray icon graph" → `tray::Remove { n }`; toast in the main window "Tray icon graph removed".
+  4. "Tray icon graphs >" → check items for the page sources "CPU", "Memory", "Disk", "Network", "GPU", "VRAM", "GPU temp" (checked = a tray graph with that source exists) → `tray::ToggleSource { source }`; process-source graphs are listed below a separator by their label with a check and can be unchecked (removed) here too.
+  5. separator
+  6. "Show Main Window" → `app::ShowMainWindow`
+  7. "Show mini window" → `window::ToggleMiniWindow`
+  8. "Exit tasklens" → `app::Quit`
+  The main tray icon menu (APP-047): "Show Main Window", "Tray icon graphs >", separator, "Exit tasklens". While any graph icon exists the main icon is not registered (PERF-091).
+- **Toasts** (`TlToast` in the main window; when the main window is hidden they are shown on its next render): "Tray icon graph added", "Tray icon graph removed", "Tray icon graph already exists" (adding a source that exists), "Unable to add tray icon graph" (registration failed; the item stays out of `[[tray_graphs]]`).
+- **Left click** (SNI `Activate`): toggles the main window (`app::ToggleMainWindow`).
+- **Re-registration** (PERF-092): on `NameOwnerChanged` for `org.kde.StatusNotifierWatcher` the tray thread calls `RegisterStatusNotifierItem` for every item again with its last rendered icon, within 1 s.
+- **Build**: `crates/tl-tray/src/{lib.rs, item.rs, menu.rs}`; actions are forwarded to the GPUI thread through an `async_channel::bounded(16)` and dispatched as GPUI actions on the main window, or on the app when the window is closed.
+- **Tests**: `tray_tooltip_forms`, `tray_menu_order_graph_icon`, `tray_menu_order_main_icon`, `tray_main_icon_hidden_with_graphs`, integration `tray_reregisters_on_watcher_restart` (fake watcher drops and reappears).
+- **Phase**: P3.
+- **Decided here**: title/description split of the tooltip, process entries in "Tray icon graphs >", toast delivery when hidden.
+
+### UI-PRF-052 Additional Setup window: rows and states
+
+- **Implements**: PERF-105, PERF-106, PERF-107, PERF-108, R-028, R-029. The window frame (title "tasklens Additional Setup", size, pin, close) is the shell's `TlDialog` window pattern; the content below is this spec's.
+- **Anatomy** (content width 560, padding `page_pad`; each row is a card):
+
+```
+┌ row card: bg list_bg, 1 px divider, r_md, padding sp5 ─────────────────────────────────────┐
+│ CPU power draw                                           [Enabled (existing rule)] (TlTag)  │  title t_md 500; status tag right
+│ Reads the CPU energy counters (RAPL) for the Power draw row and graph.   t_sm text_secondary│  one or two lines of description
+│ sp4                                                                                          │
+│ [Enable]  [View script]  [Copy command]                                 buttons left, sp4 gap│  TlButton small: Enable/Revert primary when it applies, others outline
+└──────────────────────────────────────────────────────────────────────────────────────────────┘
+sp4 between cards
+```
+
+  Rows, in order, with their statuses and buttons:
+
+| Row | Description text | Status values (TlTag) | Buttons |
+|---|---|---|---|
+| CPU power draw | "Reads the CPU energy counters (RAPL) for the Power draw row and graph." | `Enabled` (success), `Enabled (existing rule)` (success, tooltip "Readable through /etc/udev/rules.d/99-powercap.rules. tasklens leaves that file alone."), `Not enabled` (warning), `Not needed` (neutral; no RAPL zone, buttons hidden) | "Enable" (when Not enabled) or "Revert" (when Enabled by the tasklens rule; hidden for an existing rule), "View script", "Copy command" |
+| Journal access | "Lets tasklens read service logs. Run this command, then log out and back in:" followed by a code line `sudo usermod -aG systemd-journal $USER` (mono, `t_sm`, bg `input`, padding sp3, r_sm) | `Enabled` (user is in `systemd-journal`), `Not enabled` | "Copy" (copies the command). No Enable: tasklens never changes groups. |
+| Administrator helper | "Needed for actions on other users' processes and for protected reads." | `Installed` (success), `Not installed` (warning, tooltip "/usr/lib/tasklens/tl-helper was not found") | none |
+| Fan sensors (P4) | "Finds motherboard sensor chips and loads their drivers." | `Not needed` (any hwmon fan exists), `Not enabled`, `Enabled`; when lm_sensors is missing the status is `Not available` and the description reads "Install lm_sensors to detect fan sensors" | "Run sensor detection" (→ `setup::Run { step: SensorsDetect }`), "Revert", "View script", "Copy command" |
+| Per-process network | "tasklens attributes TCP traffic per process through sock_diag without setup. Exact numbers for all traffic need the network helper, which arrives in a later version." | `Not needed` | none |
+
+  - "Enable" on CPU power draw first opens a `TlDialog` confirm: title "Enable CPU power draw?", body "Lets every local user read CPU energy counters. This can leak information about other programs (CVE-2020-8694).", buttons "Enable" (primary) and "Cancel" (PERF-106). "Revert" opens: "Revert CPU power draw?", body "Removes the tasklens udev rule. A reboot may be needed before the files return to mode 0400.", buttons "Revert" (danger) and "Cancel".
+  - "View script" opens a read-only `TlDialog` (640 × 480) titled "tasklens-setup <subcommand>" with the script text in a mono scroll area and a "Copy" button. "Copy command" copies `pkexec /usr/lib/tasklens/tasklens-setup rapl-enable` (or the row's subcommand) and shows the toast "Command copied".
+  - **Running**: the row's buttons are disabled, the status tag shows a 12 px spinner icon and the text `Running…`; the pkexec prompt is the system's.
+  - **Success**: status updates, a line under the buttons reads "Done. No restart needed." in `status.success`, and the engine re-probes the source at once (`Command::ReprobeSource(SourceId::Cpu)`), so the Power draw row changes within 2 s.
+  - **Failure**: a block under the buttons: "Setup failed" (`t_sm` 500 `status.danger`), the script output in a mono scroll area (max height 160), buttons "Copy output" and "Retry". A cancelled pkexec prompt (exit 126 or 127) shows no failure block; the row keeps its old status (PERF-105).
+- **Interaction**: Tab order follows the rows top to bottom, buttons left to right. Esc closes the window (shell). Opened from Help > "Additional setup…", Settings > Privileges, and every `Needs setup` link (`app::OpenAdditionalSetup { focus_row: Option<SetupRow> }` scrolls that row into view and flashes its border `accent` for `m_slow`, reduced motion: no flash; chosen).
+- **Data binding**: `Snapshot.health` (`HEALTH` bit) for the RAPL readability and helper presence; a one-shot `Command::SetupStatus` query on open for the journal group and lm_sensors presence (the engine answers with a `SetupStatus` struct; chosen so the UI reads no system files itself, ADR-001 rule).
+- **Build**: `windows/setup.rs` `SetupWindow` entity; rows are `RenderOnce` `SetupRow`s; the script runs through `Command::RunSetup { step }` in the engine's blocking pool with `pkexec`, streaming stdout and stderr lines back as `SetupEvent`s.
+- **Tests**: `setup_rows_order_and_statuses`, `setup_enable_confirm_text`, `setup_cancelled_pkexec_keeps_status`, `setup_failure_block_shows_output`.
+- **Phase**: P3 (Fan sensors row P4).
+- **Decided here**: card layout, description sentences, tag colours, confirm texts beyond the spec's warning sentence, "Command copied" toast, focus-row flash, `SetupStatus` command.
+
+### UI-PRF-053 Bench scenes: perf-cpu, bridge and static
+
+- **Implements**: ADR-014 "Phase-0 fixture" and gates; ADR-009 verification.
+- **Common fixture**: window 1600 × 1000 logical, opened on the 144 Hz output at 110%, focused, `motion.smooth_graphs = true`, theme Default Dark, `ui_scale_pct = 100`, `graph_range_s = 60`. Synthetic data from `tl-ui/src/bench/` with PRNG seed 42 (ChaCha8 or `fastrand` seeded; deterministic across runs). The bench harness replaces the real `EngineClient` with `BenchEngine` (ADR-013 fake engine with a scripted publisher) except in `bridge`. The Processes tab and all other tabs are not built in these scenes (they are never visited).
+- **Scene `perf-cpu`**, exact composition:
+  - Performance tab, CPU page selected, sidebar visible at `nav_width = 252`, `cpu_graph_mode = "overall"` is **not** used: the scene shows the per-core grid **and** the overall chart at once. To get both, the bench sets a scene flag `BenchScene::PerfCpu` that renders the CPU page with the total CPU chart (W × 300, fill + line + kernel line) above the 32-core grid (8 × 4, kernel overlays on). This is a bench-only layout (`CpuPage.bench_show_both`), not a user setting.
+  - Synthetic CPU: 32 logical CPUs, 10 Hz samples; per core `value = clamp(base_c + 25 sin(2π t / P_c) + noise, 0, 100)` with `base_c` in 5..60, `P_c` in 3..17 s, Gaussian noise σ 4; kernel = 0.2 × value + noise σ 1; total = mean of cores. 60 s range (600 samples per series) pre-filled before the first frame so decimation and the geometry rebuild run from frame 1.
+  - Device sidebar with 9 cards: CPU, Memory, GPU 0, Disk 0, Disk 1, Disk 2, Disk 3, enp38s0, tailscale0; each sidebar mini graph at 1 Hz synthetic data (memory 55% ± 1 random walk; GPU 10% ± 8; disks bursts 0..100% with p = 0.1 per second; networks 0.01..5 Mbps bursts). The CPU card's graph receives the 10 Hz total.
+  - Stats block: the Details grid with 12 live values (rows 1 to 12 of UI-PRF-024; rows 13 to 26 static) updated at 1 Hz from the synthetic source (Processes 295 ± 3, Threads 5 596 ± 20, Handles 253 248 ± 500, Up time counting, Speed 4631 ± 200 MHz, Temperature 52 ± 2 °C, Load average random walk).
+  - Per-core percent labels change at 10 Hz (every sample re-formats the value).
+  - Duration 30 s after a 5 s warm-up (`--duration 30 --warmup 5`). Measures per ADR-014: UI thread CPU per frame (p50, p99), missed frames, process CPU, RSS. Gates: p50 ≤ 1.0 ms, p99 ≤ 2.0 ms, 0 missed frames in the median run, ≤ 30% of one core.
+- **Scene `bridge`**: identical to `perf-cpu`, but the total CPU series (the overall chart and the CPU sidebar card) comes from the real `tl-engine` `Cpu` worker at 10 Hz through the real `EngineClient`. The 32 per-core series stay synthetic (the machine has 16 logical CPUs). Extra measure: wake-to-render latency, timestamped from `Snapshot.published_ns` to the first `ChartElement::paint` that includes that sample; gate p99 ≤ 20 ms. The bench verifies that 10 Hz samples arrive (≥ 295 samples in 30 s).
+- **Scene `static`**: `perf-cpu` with `motion.smooth_graphs = false`. Charts redraw once per sample (10 Hz for the CPU series, 1 Hz for the rest); the animation driver must request no frames (asserted: `FrameStats.requested == 0`). Gate: process CPU ≤ 2% of one core.
+- **Outputs**: `--json <out>` writes `{ scene, frames, frame_cpu_ms: { p50, p99, max }, missed_frames, process_cpu_pct, probe_cpu_pct, rss_mb, pss_mb, stalls, bridge_latency_ms: { p50, p99 } | null, gpu: { power_w, util_pct } | null }`. `cargo xtask bench` runs each scene 3 times and writes `target/bench/<date>-<git sha>.json` plus a table in `docs/spike/phase0-results.md`.
+- **Build**: `tl-ui/src/bench/{mod.rs, scenes.rs, synth.rs, stats.rs}` behind `--features bench`; `tl-app` parses `--bench <scene>` (APP-052 form per table c).
+- **Tests**: `synth_is_deterministic` (two runs with seed 42 produce identical first 1,000 samples), `bench_scene_perf_cpu_builds_32_cells_and_9_cards` (render test counts elements).
+- **Phase**: P0.
+- **Decided here**: the bench-only "both charts" layout, the synthetic formulas, the sidebar device list, the latency measurement points, the JSON shape.
