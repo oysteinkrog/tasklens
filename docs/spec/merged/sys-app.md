@@ -530,3 +530,184 @@ Conventions:
 - Verdict: BUILD
 - Phase: P2
 - Privilege: none
+
+## Connections tab
+
+Mission Center's "connections" request lists network interfaces, not sockets, so this tab exists only in TaskSlinger.
+
+### SYS-028 Connection inventory
+- Was: SYS-030
+- Source: TS 2.6 | PLAN data sources | review sampling table (connections every 2 s while consumed)
+- Behaviour:
+  - Lists every TCP and UDP socket, IPv4 and IPv6, in tasklens's network namespace.
+  - Refreshes every 2 s while the tab is visible or the socket map is in demand (the process Network column shares it). Collection is off otherwise (ADR-008).
+  - Rows keep identity across refreshes by socket cookie, so selection is stable.
+  - Holding Ctrl pauses the display as everywhere (R-042).
+  - First load in a session shows skeleton rows until the first data (R-060).
+- Linux data/mechanism:
+  - Engine worker `SourceId::Connections`, `workers/connections.rs` (ADR-004).
+  - Netlink `NETLINK_SOCK_DIAG`, `SOCK_DIAG_BY_FAMILY`, `inet_diag_req_v2`, for AF_INET and AF_INET6 × IPPROTO_TCP and IPPROTO_UDP.
+  - `idiag_states=0xFFF`, with `INET_DIAG_INFO` requested for TCP.
+  - Fields used: `id.{src,dst,sport,dport,if,cookie}`, `state`, `rqueue`, `wqueue`, `uid`, `inode`, and `tcp_info`.
+  - Crates: `netlink-packet-sock-diag` and `netlink-sys`.
+  - Unprivileged dumps work; the `inet_diag`/`udp_diag` modules load on demand.
+- Verdict: ADAPT (TCP and UDP tables become sock_diag; IPv6 included)
+- Phase: P2
+- Privilege: none to list
+
+### SYS-029 Connection columns, address formats, states
+- Was: SYS-031
+- Source: TS 2.6 L28422-28426, L27922-27939 (widths 90,260,260,120,80,180; Columns.Connections=0..5)
+- Behaviour:
+  - Default columns, with ids and default widths (logical px at 100%): Proto (`proto`, 90), Address local (`local`, 260), Address foreign (`foreign`, 260), State (`state`, 120), PID (`pid`, 80), Process (`process`, 180).
+  - Optional columns: User (`user`), Family (`family`), Local port (`local_port`), Foreign port (`foreign_port`), Recv-Q (`recv_q`), Send-Q (`send_q`), Interface (`interface`), Inode (`inode`), Service (`service`, owning systemd unit), Remote host (`remote_host`, SYS-035).
+
+  | Column | Value |
+  |---|---|
+  | Proto | "TCP" or "UDP" |
+  | Address local / foreign | `a.b.c.d:port` or `[v6addr%scope]:port` (table d) |
+  | State | see below |
+  | PID | SYS-030 |
+  | Process | SYS-030 |
+
+  Address details (table d):
+  - Wildcards show as `0.0.0.0:*` and `[::]:*`.
+  - The foreign side of a listener or unconnected UDP socket shows `*:*`.
+  - IPv4-mapped IPv6 addresses show in IPv4 form.
+
+  TCP states use TaskSlinger labels:
+
+  | Kernel state | Label |
+  |---|---|
+  | LISTEN | LISTENING |
+  | SYN_SENT | SYN-SENT |
+  | SYN_RECV and NEW_SYN_RECV | SYN-RECEIVED |
+  | ESTABLISHED | ESTABLISHED |
+  | FIN_WAIT1 / FIN_WAIT2 | FIN-WAIT-1 / FIN-WAIT-2 |
+  | CLOSE_WAIT | CLOSE-WAIT |
+  | CLOSING | CLOSING |
+  | LAST_ACK | LAST-ACK |
+  | TIME_WAIT | TIME-WAIT |
+  | CLOSE | CLOSED |
+  | other | UNKNOWN |
+
+  - DELETE-TCB has no Linux state and is not used. UDP shows "UNCONNECTED" or "CONNECTED".
+  - Recv-Q and Send-Q are counts with thin-space grouping (table d).
+- Linux data/mechanism: as SYS-028; Interface from `if_indextoname(id.if)`
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-030 Owning process attribution
+- Was: SYS-032
+- Source: TS PID/Process columns, "No owning process for this connection" | PLAN (pid map from /proc/*/fd every 2 s) | review "Network attribution" row
+- Behaviour:
+  - PID shows the owning pid. When several processes share the socket (after fork), it shows "pid +N" like the process table, and the tooltip lists all of them.
+  - Process shows the display name and icon.
+  - TIME-WAIT and orphaned sockets (inode 0): PID "-", Process "No owner (kernel)".
+  - Sockets of other users whose `/proc/<pid>/fd` cannot be read: PID "?", Process shows the restricted glyph (ADR-003). The tooltip reads "Owned by <user from diag uid>. Needs the tasklens helper to identify the process". The value is never blank and never 0.
+- Linux data/mechanism:
+  - Walk `/proc/<pid>/fd/*` with `readlinkat` and match `socket:[<inode>]`, producing inode to `ProcessKey{pid,start_ticks}`.
+  - Rebuilt every 2 s while in demand, on the blocking pool, with one outstanding job at a time.
+  - Budget target: under 20 ms per rebuild on this machine, measured in phase 0 (unverified, U-23).
+  - The same map feeds the process TCP Network column.
+  - From P3, tl-helper operation `ResolveSocketInodes { inodes }` (R-004) resolves inodes for other users' processes. Request: a list of inodes. Reply: a list of pids.
+- Verdict: ADAPT
+- Phase: P2 (own processes), P3 (helper for others)
+- Privilege: none for own processes. Others need tl-helper under polkit `io.github.oysteinkrog.tasklens.helper` (auth_admin_keep) (R-002). The fallback is the restricted glyph.
+
+### SYS-031 Close TCP connection
+- Was: SYS-033
+- Source: TS "Close TCP connection" (SetTcpEntry, IPv4 only), toasts L28809-28814 | review "Unsupported feature parity" (defer TCP destruction)
+- Behaviour:
+  - Shown for TCP rows in any state except TIME-WAIT, for IPv4 and IPv6. TaskSlinger's "Only IPv4 TCP connections are supported" never appears.
+  - LISTENING rows first ask for confirmation in a separate modal window. Heading "Close listening socket?", text "The program will stop accepting new connections on <addr>.", buttons "Close socket" (danger) / "Cancel".
+  - Toasts: "TCP connection close requested", then, replaced in place, "TCP connection closed" or "Failed to close TCP connection: <errno text>".
+- Linux data/mechanism: tl-helper operation `SockDestroy { family, proto, four_tuple, cookie }` (R-004) sends the `SOCK_DESTROY` netlink message with `inet_diag_req_v2` filled from the exact 4-tuple, family, protocol and `id.cookie`. The kernel matches the cookie, so a reused 4-tuple cannot be hit. Kernel requirement `CONFIG_INET_DIAG_DESTROY=y` is verified on this machine. If the kernel returns EOPNOTSUPP, the menu item is disabled with tooltip "Kernel lacks CONFIG_INET_DIAG_DESTROY".
+- Verdict: ADAPT
+- Phase: P3 (needs tl-helper)
+- Privilege: CAP_NET_ADMIN, through tl-helper under polkit `io.github.oysteinkrog.tasklens.helper` (auth_admin_keep) (R-002). Before P3 the item is hidden. With the helper not installed, it is disabled with tooltip "Needs the tasklens helper".
+
+### SYS-032 Connections context menu and copy formats
+- Was: SYS-034
+- Source: TS L29298-29301, copy format L35529-35536 (cross-check A.3), toasts L28657-28688
+- Behaviour:
+  - Menu: Copy row, Copy local address, Copy foreign address, separator, Close TCP connection, separator, Jump to process, Go to service (when the owner belongs to a systemd unit), Properties.
+  - "Copy row" (Ctrl+C, R-012) format:
+    ```
+    Protocol: …
+    Local address: …
+    Local port: …
+    Foreign address: …
+    Foreign port: …
+    State: …
+    PID: …
+    Process: …
+    ```
+    Multi-select blocks are separated by a blank line.
+  - "Copy rows as table" (Ctrl+Shift+C): TSV of the visible columns with a header line.
+  - Toasts: "Connection copied", "Local address copied", "Foreign address copied".
+  - "Go to service" switches to Services and selects the unit, with the toasts from SYS-010.
+- Linux data/mechanism: clipboard; owning unit from the owner's `/proc/<pid>/cgroup` as in SYS-010
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### SYS-033 Jump to owning process
+- Was: SYS-035
+- Source: TS L28711, L28812-28814
+- Behaviour: Switches to Processes, expands the group or tree path and selects the owner by ProcessKey. Toast "Switched to owning process.". If filtered out: "Owning process not visible in the current process view.". With no owner: "No owning process for this connection". If the pid exited: "Process not found in current view".
+- Linux data/mechanism: identity lookup in the process snapshot
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### SYS-034 Connection Properties window
+- Was: SYS-036
+- Source: TS L28960, L28979-28983, title "TaskSlinger Connection Properties" L29327
+- Behaviour:
+  - A separate pinnable window titled "Connection properties: <Proto> <State>", with a copy button per line. Opened by Properties (Enter, Alt+Enter, Ctrl+I). Lines:
+    - "Protocol / State / Family"
+    - "Local <addr> Port <n>"
+    - "Foreign <addr> Port <n>"
+    - "Process <name> PID <n>" (link that jumps)
+    - "User", "Inode", "Interface", "Recv-Q / Send-Q"
+    - TCP only: "RTT <ms> (var <ms>)" (ms with two decimals, table d), "Congestion window", "Bytes sent / received" (`tcpi_bytes_acked`/`tcpi_bytes_received`, IEC two decimals), "Retransmits", "Last data received <ms> ago"
+    - "Closable here: Yes/No (reason)"
+  - TaskSlinger's "Protocol rank / State rank" are internal sort keys with no meaning to the user. The tcp_info lines take their place.
+  - The window refreshes every 2 s while open, by cookie. When the socket closes, it shows "(closed)" and keeps the last values.
+- Linux data/mechanism: `INET_DIAG_INFO` (`struct tcp_info`)
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-035 Remote host name column
+- Was: SYS-037
+- Source: none (tasklens addition replacing Windows netstat -f)
+- Behaviour: Optional column "Remote host", hidden and off by default because lookups leak queries. When enabled, it shows the reverse DNS name, or the address while the lookup is pending.
+- Linux data/mechanism: `getnameinfo(NI_NAMEREQD)` on the blocking pool. At most 4 concurrent lookups. Positive answers are cached for 10 minutes, negative ones for 1 minute.
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: none
+
+### SYS-036 Connections status bar, filter, sort, refresh
+- Was: SYS-038
+- Source: TS L28435, Sort.ConnectionsKey=0 asc, ConnectionVisibilityMask=3F
+- Behaviour:
+  - Status bar: "%zu Total | %d TCP | %d UDP | %d EST | %d LISTEN". EST and LISTEN count TCP only. With a selection it adds " | %d selected".
+  - The text filter matches substrings in Proto, both addresses with ports, State, PID, Process and User.
+  - Default sort is Proto ascending, then local port ascending (R-011).
+  - F5 refreshes now and shows "Connections refreshed.".
+- Linux data/mechanism: engine projection; `state.toml` `[sort.connections] column = "proto", ascending = true` and `[columns.connections]`; F5 sends `RefreshNow(Connections)`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### SYS-037 Other network namespaces
+- Was: SYS-039
+- Source: none (Linux gap; containers live in their own namespace)
+- Behaviour: A "Namespaces" dropdown in the status bar, default "Host only". Choosing "All" adds a Namespace column (`netns`, container or netns name) and lists sockets from every network namespace.
+- Linux data/mechanism: tl-helper operation `NetnsSockDiagDump { netns_ino }` (R-004), once per unique `/proc/*/ns/net` target. The helper calls `setns(CLONE_NEWNET)` in a worker thread and dumps sock_diag there. Names come from `/run/netns` and from the cgroup of a member process.
+- Verdict: ADAPT
+- Phase: P4
+- Privilege: root through tl-helper under polkit `io.github.oysteinkrog.tasklens.helper` (R-002). Without it, only "Host only" is offered.
