@@ -1288,3 +1288,267 @@ x=0, bottom=0
 - **Behaviour**: opened from the Debug menu and from health items in the status chip [S]. Re-renders on `ComponentMask::HEALTH` and once per second for the ages [C].
 - **Phase**: P1 (from the status chip), P4 (Debug menu).
 - **Decided here**: title, columns, colours.
+
+---
+
+## 9. Toasts
+
+### UI-SHL-100 Toast placement, stacking and timing
+
+- **Implements**: APP-044, R-017, ADR-015 (no toast for collection errors), widgets §10.
+- **Anatomy**:
+  - Placement: top centre of the window, 8 px (`sp4`) under the tab strip [S]: y = 34 + 30 + 8 = 72 in the main window at 100% (scaled); in secondary windows 8 px under their title bar (y = 38).
+  - Width 380 [C, kit default 382 rounded to the 4 px grid], height fits content (one or two lines; title line optional).
+  - Stack: at most 4 [S], newest at the top [C], gap 8. A fifth toast removes the oldest immediately (no exit animation) [C].
+  - Toast card (`TlToast`): background `menu_bg`, border 1 px `divider`, radius `r_md`, shadow scaled by `appearance.shadow_intensity_pct`, padding 12, icon 16 at the left, text `t_base` `text_primary`, close button (Lucide `x`, 14) at the right on hover.
+  - Type icons and colours [S types; C icons]: Success Lucide `circle-check` in `status.success`; Info `info` in `status.info`; Warning `triangle-alert` in `status.warning`; Error `circle-x` in `status.danger`.
+  - Action button (when a toast has one, for example "Enable"): `TlButton` small, right of the text.
+- **Timing**:
+  - Success, Info, Warning: auto-hide after 5 s [S] (kit default).
+  - Error: 8 s [S]. The kit's delay is fixed at 5 s, so Error toasts are pushed with `.autohide(false)` and a tasklens timer removes them by id after 8 s; the timer pauses while the pointer is over the stack (same rule as the kit) [C].
+  - Toasts with an action button stay until clicked or closed (kit behaviour).
+  - Hover pauses the timer [S].
+- **Motion**: kit enter (400 ms) and exit (200 ms) with animations on; with animations off or reduced motion, they appear and disappear in one frame [S R-017]. If the kit cannot switch off its own animation, tasklens pushes with the kit animation and sets `App::set_reduce_motion(true)` mirroring `motion.animations = false` is not allowed (it would affect other kit widgets the user did not ask for); instead the toast layer is rendered by `TlToast` wrapping kit `Notification` with its own `with_animation` guarded by the motion rule [C].
+- **Replace in place**: an in-progress toast and its result share an id (`Notification::id1::<T>(key)`), so the result replaces it [S].
+- **Visibility rules**:
+  - Toasts show only while the main window is visible [S]. While the main window is hidden to the tray, Error toasts go to a desktop notification (`NotificationDelivery::System`, app name "tasklens", icon `io.github.oysteinkrog.Tasklens`); other types are dropped [S].
+  - A collection error is never a toast unless the user started the action [S].
+- **Global setup**: at init, `cx.theme_mut().notification` is set to placement `TopCenter`, top margin `(34 + 30 + 8) × ui_scale`, `max_items = 4`, width 380 × `ui_scale`; re-set on every scale change (UI-SHL-130) [C].
+- **Shared general toast texts** [S APP-044]: "Copied to clipboard", "Copied: <value>", "Failed to copy to clipboard", "No process selected", "Select a process row first." (and the service, startup and connection variants owned by their specs), "Opening file location", "Failed to open file location", "Could not open properties.", "Authentication cancelled".
+- **Tests**: `toast_stack_limit`: push 5: 4 visible, the oldest gone. `toast_error_8s`: an Error toast is present at 7.9 s and gone at 8.1 s (TestAppContext clock). `toast_hidden_window_system_delivery`: with the main window hidden, an Error toast is delivered as System.
+- **Phase**: P1.
+- **Decided here**: width 380, newest on top, overflow drops oldest, Error timer, icons, motion wrapper.
+
+---
+
+## 10. Startup, single instance and tray
+
+### UI-SHL-110 Startup sequence and first frame
+
+- **Implements**: APP-052, APP-055, APP-059, APP-011, APP-048, APP-049, ADR-010, ADR-014 (first frame gates: 200 ms warm, 500 ms cold).
+- **Sequence** (`tl-app/src/main.rs`, then `TasklensUi::init`):
+  1. Install the panic hook (APP-055). Set up logging (APP-054).
+  2. Parse arguments with clap (APP-052). Unknown arguments print usage and exit 2 (no window).
+  3. NVIDIA X11 environment rule (ADR-010) and, in P4, the `rendering.gpu` variables.
+  4. Single instance (UI-SHL-112): forward and exit 0 if another copy runs.
+  5. Load `settings.toml`, `state.toml`, `themes.json` (APP-033). Corrupt or newer-file toasts are queued, not shown yet.
+  6. Read the Shift key state for "Shift held at launch" (P3): through the KWin bridge is not available yet, so tl-app reads it with `XkbGetState` on X11 or, on Wayland, from the first `on_modifiers_changed` event of the main window within 500 ms of its first focus [C, U-unverified: Wayland gives no modifier state before focus].
+  7. Start the engine (`EngineHandle::start`) on its own threads; do not wait for any collector.
+  8. `Application::run`: load fonts, `gpui_kit::init`, register the asset source, build `ThemeRegistry`, apply the active theme (no crossfade), `bind_keys` (UI-SHL-120), set the toast globals, create `SnapshotHub`, `DemandAggregator`, `ActionTracker`.
+  9. Open the main window (UI-SHL-002) on the start tab: `--tab` if given, else `general.start_tab` (`last_used` reads `UiState.tabs.last_tab`) [S]. Only that page Entity is created.
+  10. First frame renders the chrome and the start page with whatever the hub has (probably nothing): no waiting for collectors [S APP-059]. The page shows its own first-data state (process table: header and empty body, then rows with `…` in rate cells after the first sweep; Performance: charts with "Collecting…" readouts; P2 tabs: skeletons, UI-SHL-111).
+  11. After the first frame callback: log `info!(target: "tasklens::perf", first_frame_ms)`; show queued toasts (settings errors); show the Crash Report window if due (UI-SHL-093); run `--select-pid` (select-and-scroll through the process jump target, PROC-071, as soon as the pid appears in the table, waiting up to 3 s, then Info toast "Process <pid> not found" [C]); start the helper session if Shift was held or `privilege.unlock_at_launch` is on (P3); start the public IP auto-fetch if enabled and accepted (P2).
+- **Start hidden or minimized**: UI-SHL-002 (`--start-minimized`).
+- **`--low-memory`**: opens the rescue window (PROC-098) instead of the main window [S]. `--watch-memory` starts no GPUI [S].
+- **`--debug`** or `TASKLENS_DEBUG=1`: Debug menu present (UI-SHL-042).
+- **Performance**: steps 1 to 9 must fit the ADR-014 first-frame gate (200 ms warm). Theme JSON parse, settings parse and font loading are the main costs; fonts are loaded from bytes embedded with `include_bytes!` [C]. No page except the start page is constructed before the first frame.
+- **Tests**: `startup_tab_arg_wins` (TestAppContext): `--tab services` with `start_tab = performance` opens Services. `first_frame_no_wait`: with a fake engine that never publishes, the first frame renders within one frame cycle.
+- **Phase**: P1 (P2 and P3 steps as marked).
+- **Decided here**: queued toasts after first frame; `--select-pid` wait of 3 s and its toast; Shift detection path (open item 3).
+
+### UI-SHL-111 Loading placeholders (frame rule)
+
+- **Implements**: APP-059, R-060, ADR-009 (Skeleton never in table cells or charts).
+- **Behaviour**: the shell guarantees the first frame never waits. Services, Startup Apps, Connections and Information show `TlSkeleton` blocks until their first data, once per session: 12 skeleton rows of row height with widths cycling 60%, 40%, 75% of the name column for tables, and 4 section blocks 120 tall for Information [C]. Skeletons are never shown again when switching between tabs whose data is loaded [S]. Services also shows the toast "Loading service data..." [S SYS-016]. The process table uses no skeleton [S].
+- **Performance**: the kit Skeleton animates (2 s loop) and requests frames while visible; at most one skeleton page is visible at a time and only until first data (typically under 500 ms) [S widgets].
+- **Phase**: P2.
+- **Decided here**: skeleton counts and widths.
+
+### UI-SHL-112 Single-instance activation
+
+- **Implements**: APP-011, APP-052, R-047, ADR-010.
+- **Behaviour** (UI side; the D-Bus part lives in tl-app):
+  - `Activate`: if the main window was removed (closed to the tray, or hidden while detached graphs stay), reopen it (UI-SHL-002 path, same tab as before hiding) [S]; if minimized or behind other windows, call `window.activate_window()` and, when the KWin bridge is up, also send `KWinCommand::Activate` for the main window [S]. The XDG activation token from the second launch is passed to `activate_window` where GPUI supports it [S].
+  - `ActivateAction("tab", s)`: `SelectTab` for that tab after activating [S].
+  - `ActivateAction("select-pid", u)`: activate, select Processes, run the process jump (same 3 s rule as UI-SHL-110) [S].
+  - `ActivateAction("quit")`: `Quit` [S].
+  - `--start-minimized` from a second launch is ignored [S].
+  - On Wayland KWin may only flash the taskbar entry; that is accepted [S].
+- **Build**: a GPUI task in `TasklensUi::init` receives `AppRequest` values from tl-app's `async_channel::bounded(4)` and dispatches the Actions above.
+- **Tests**: `activate_reopens_hidden_window` (TestAppContext): with the main window removed, sending `Activate` opens a new main window on the last tab.
+- **Phase**: P1.
+
+### UI-SHL-113 Close behaviour, minimize to tray and the main tray icon
+
+- **Implements**: APP-047, APP-048, PERF-084, PERF-090, PERF-091, PERF-092, R-027, ADR-010 (Close behaviour, Tray).
+- **Close decision** (for `CloseWindow` from the close button, Ctrl+W, or Esc-close; and for the compositor's close request through `on_window_should_close`) [S, ordered as ADR-010 plus PERF-084]:
+
+  | # | Condition | Result |
+  |---|---|---|
+  | 1 | tray is running and `tray.close_to_tray` | remove the main window; app and engine keep running; demand drops to tray and detached graphs |
+  | 2 | `graphs.keep_detached_on_close` and at least one detached graph window is open | remove the main window; app keeps running until the last detached window closes, then quits |
+  | 3 | otherwise | `cx.quit()` |
+
+  - `Quit` (Ctrl+Q, File > Exit tasklens, tray "Exit tasklens") always quits [S].
+  - Before removing the window, its size is saved (UI-SHL-002).
+- **Minimize**: with `tray.minimize_to_tray` on and the tray running, the minimize caption button removes the window like row 1 [S]. A compositor-initiated minimize (taskbar click, KWin shortcut) cannot be intercepted on Wayland and minimizes normally [C].
+- **Main tray icon** (SNI through `tl-tray`, owned by the tray crate; this entry fixes its UI contract):
+  - Shown when no tray graph icon exists and either the main window is hidden by row 1 or minimize-to-tray, or `tray.always_show` is on [C, reading of APP-047 "keeps the icon while the window is visible"]. Hidden while any tray graph icon exists [S PERF-091].
+  - Icon: the app icon at 22 × 22 and 44 × 44 ARGB32 [S].
+  - Tooltip: "CPU: 12.3% RAM: 45.6% GPU: 3.0% Disk: 0.4% Network: 2.3 Mbps", updated at most 1 Hz while shown, network in the `units.network` unit [S].
+  - Left click: toggle the main window (hide by row 1 rules if visible and focused; else show and activate) [S].
+  - Menu [S R-027]: "Show Main Window", "Tray icon graphs >" (PERF-088 owns the submenu), separator, "Exit tasklens".
+  - Re-register when `org.kde.StatusNotifierWatcher` changes owner (PERF-092) [S].
+- **Hidden-window effects**: collection drops to tray and detached-graph demand (ADR-008); toasts reroute (UI-SHL-100).
+- **Build**: `tray_bridge.rs` sends `TrayModel { tooltip, menu_state }` to `tl-tray` and receives `TrayEvent::{Activate, ShowMainWindow, Exit, ..}` over channels; tl-ui never links zbus or ksni.
+- **Tests**: `close_to_tray_keeps_app`: with tray on and close-to-tray on, `CloseWindow` removes the window and the app stays alive; `Quit` ends it. `close_quits_by_default`.
+- **Phase**: P1 (rows 3 and Quit), P3 (tray, rows 1 and 2).
+- **Decided here**: icon visibility rule; compositor minimize not intercepted.
+
+### UI-SHL-114 Desktop notifications from the shell
+
+- **Implements**: APP-055, ADR-015, APP-044.
+- **Texts** [S]: "tasklens stopped after an unrecoverable error." (after a crash, sent by the panic path); "tasklens could not start the renderer" (GPU init failure, also on stderr, exit 1); "tasklens lost the graphics device and must restart" (device loss, then one relaunch). Sent through `org.freedesktop.Notifications.Notify` from tl-app, which works without a GPUI window [S].
+- **Phase**: P1.
+
+---
+
+## 11. Keyboard and focus
+
+### UI-SHL-120 Key contexts and the binding table
+
+- **Implements**: APP-031, canonical table (b), R-042, R-045, D-008, PERF-007.
+- **Contexts**: "Global" (set on the main window's root element), "Table" (every table's focus element), "ProcessTable" (added on the process table, together with "Table"), "ServiceTable", "Performance", "RunDialog", "Picker" [S], plus the kit contexts of `PopupMenu`, `Input` and `Dialog`. Bindings are registered once in `actions.rs::bind_keys(cx)` before any menu is built (widgets rule 10).
+- **Shell bindings** (keys in GPUI keystroke syntax; Actions in `tasklens::`):
+
+  | Keys | Context | Action | Notes |
+  |---|---|---|---|
+  | `ctrl-1`..`ctrl-6`, `alt-1`..`alt-6` | Global | `SelectTab(0..5)` | tabs not shown are ignored |
+  | `ctrl-tab` / `ctrl-shift-tab` | Global | `NextTab` / `PrevTab` | |
+  | `ctrl-n` | Global | `OpenRunDialog` | P2 |
+  | `ctrl-q` | Global | `Quit` | |
+  | `ctrl-w` | Global | `CloseWindow` | in a secondary window closes that window [C] |
+  | `ctrl-,` | Global | `OpenSettings` | P2 |
+  | `ctrl-?` and `ctrl-shift-/` | Global | `OpenShortcuts` | both bound [C] |
+  | `f10` | Global | `OpenMenu(File)` | |
+  | `alt-f` / `alt-v` / `alt-s` / `alt-h` | Global | `OpenMenu(File/View/Settings/Help)` | `alt-d` Debug when present [C] |
+  | `ctrl-f` | Global | `FocusFilter` | no-op on Performance (no filter box) [C] |
+  | `f5` | Global | `RefreshNow` | sends `Command::RefreshNow(source of the active tab)`; Info toast none [C] |
+  | `escape` | Global | `EscapeChain` | UI-SHL-122 |
+  | `ctrl-=`, `ctrl-+`, `ctrl-shift-=` | Global | `ScaleUp` | UI-SHL-130 |
+  | `ctrl--` | Global | `ScaleDown` | |
+  | `ctrl-0` | Global | `ScaleReset` | |
+  | `ctrl-shift-m` | Global | `ToggleMiniWindow` | P3 |
+  | `escape` | Picker | `CancelWindowPick` | P3; Picker context sits above Global while picking |
+
+  The table, process, service, Performance, RunDialog and history-scrubber rows of table (b) are bound by their owners with the same mechanism; the shell only guarantees the contexts exist on the right focus elements.
+- **Hold Ctrl**: not a binding; UI-SHL-123.
+- **Shift held at launch**: UI-SHL-110 step 6.
+- **Conflicts resolved by context depth**: Ctrl+C is Table "Copy row" in tables and Performance "Copy device info" on the Performance page; Ctrl+E is End Task on ProcessTable and Stop on a ServiceTable service row [S]. Ctrl+W, Ctrl+N and Ctrl+Q are not intercepted by `Input` (the kit input does not bind them) [C, verify against the kit keymap in the bead].
+- **Tests**: `keymap_matches_table_b` (unit): for every table (b) row the expected binding resolves to the expected Action in the stated context (uses `cx.bindings_for_action`).
+- **Phase**: P1 (Global and Table keys), P2, P3 as listed.
+- **Decided here**: both Ctrl+? spellings, Ctrl+W in secondary windows, F5 without toast, Ctrl+F on Performance.
+
+### UI-SHL-121 Focus model and Tab order
+
+- **Implements**: APP-058, APP-028, widgets rule 16.
+- **Focus targets in the main window** (Tab order, Shift+Tab reverses):
+  1. Filter input (not on Performance).
+  2. "Include children" checkbox (when shown).
+  3. The active page's targets in the page's own order (for Processes: the table; for Performance: the device sidebar, then the page header buttons; for Services: the filter strip, then the table).
+  4. Clickable status chip segments (when present).
+  Tab from the last target wraps to the first. Title bar, toolbar, tabs and caption buttons are not Tab stops [C]; all their commands have keys or menu paths.
+- **Initial focus**: when the main window opens and after every tab switch, focus goes to the page's primary target (the table on table tabs, the device sidebar on Performance, the first section on Information) [C], so arrow keys and type-to-filter work at once.
+- **Return focus**: menus, popovers and in-window dialogs return focus to the element that had it [S widgets rule 16]. Secondary windows are separate windows; closing one returns focus to its parent window, which restores its last focused element (GPUI keeps it per window).
+- **Focus ring**: `TlFocusRing` (foundation) on keyboard focus only (not after mouse clicks); the table's focused row uses the table spec's own focus style.
+- **Build**: `MainWindow` holds `root_focus: FocusHandle` with `.key_context("Global")` and `.track_focus`; each page exposes `fn primary_focus(&self) -> FocusHandle` and `fn focus_order(&self) -> SmallVec<[FocusHandle; 4]>`. Tab and Shift+Tab are handled by GPUI's tab index on handles built with `.tab_stop(true)` in this order [C].
+- **Tests**: `tab_order_processes`: from the filter, Tab reaches the table, then (with 2+ selected rows) nothing else, then wraps to the filter. `focus_after_tab_switch`: after `SelectTab(2)`, the services table is focused.
+- **Phase**: P1.
+- **Decided here**: chrome not in the Tab order; initial focus rule.
+
+### UI-SHL-122 Esc chain
+
+- **Implements**: table (b) Esc, R-043, APP-045, APP-009.
+- **Order** (first match wins) [S table b, with shell detail C]:
+  1. A menu or popover is open: close the innermost one (handled by the kit before `EscapeChain` sees the key).
+  2. An in-window dialog is open: close it (kit).
+  3. Window picking is active: `CancelWindowPick` (Picker context).
+  4. The filter input has focus: its own rule (UI-SHL-024): clear text, or if empty, move focus to the table. Stops here.
+  5. The active tab's filter has text (focus elsewhere): clear it and focus the table [S].
+  6. `window.close_with_esc` is on: `CloseWindow` (with the close decision of UI-SHL-113) [S].
+  7. Otherwise nothing.
+- **Tests**: `esc_chain_order`: filter text set, focus on table: Esc clears the filter; second Esc with `close_with_esc = false` does nothing; with it on, the window closes.
+- **Phase**: P1.
+
+### UI-SHL-123 Hold Ctrl to pause
+
+- **Implements**: R-042, PROC-050, ADR-009 (Ctrl-pause), APP-029.
+- **Behaviour**:
+  - `MainWindow` registers `on_modifiers_changed` on its root. When `control` becomes true while `window.is_window_active()`, it sets `paused = true` and emits `PauseChanged(true)`; when `control` becomes false, or the window deactivates, it emits `PauseChanged(false)` [S].
+  - Pages that freeze (the process and history tables; other tables per their specs) subscribe and render from a retained `Arc<Snapshot>`; the status chip appends "[PAUSED - Ctrl]" [S].
+  - Ctrl pressed as part of a shortcut (Ctrl+F) still pauses for the press duration; that is TaskSlinger's behaviour and accepted [C].
+  - Secondary windows do not pause [S "main window active"].
+- **Tests**: `ctrl_pause_releases_on_deactivate`.
+- **Phase**: P1.
+
+### UI-SHL-124 Type-to-filter routing
+
+- **Implements**: APP-028, PROC-044, table (b) "Printable character".
+- **Behaviour**: each table's focus element has an `on_key_down` handler (after its bindings) that, when `keystroke.key_char` is one printable character, the modifiers are none or Shift only, and the character is not a space (Space toggles expand, D-008), calls `FilterBox::begin_typing(ch)`: focus the filter input, move the cursor to the end, and insert the character [S]. It never fires while an input, menu or dialog has focus [S]. The Performance page does not route (no filter box) [C].
+- **Tests**: `type_to_filter`: focus table, press "f": filter text "f", focus in the input. `space_not_routed`.
+- **Phase**: P1.
+
+---
+
+## 12. Runtime scale, language and motion
+
+### UI-SHL-130 UI scale and row height changes at runtime
+
+- **Implements**: APP-040, R-020, R-077, ADR-009 (Metrics and scale), table (b) Ctrl+Plus, Ctrl+Minus, Ctrl+0, APP-058.
+- **Behaviour**:
+  - `ScaleUp` / `ScaleDown` step `appearance.ui_scale_pct` by 5 within 75..=200; `ScaleReset` sets 100. Each change that alters the value pushes the Info toast "UI scale changed to 125%" with id `ui-scale` so repeated presses replace one toast [S text; C id]. At a limit nothing changes and no toast shows [C].
+  - Applying a new `ui_scale_pct` or `row_height_pct`, or a change of `window.scale_factor()`:
+    1. Recompute `UiMetrics` (ADR-009): `row_height = 28 × row_height_pct/100 × ui_scale`, `base_text = 13 × ui_scale`, `radius_small = 4 × ui_scale` and `radius_card = 6 × ui_scale` (0 when `rounded_corners` is off).
+    2. `Theme::update`: `font_size = base_text`, radius values; kit Root sets `rem_size` on its next render.
+    3. Bump `style_version`; clear `CellTextCache`; drop cached tab label widths and the accent path.
+    4. Re-set the toast globals (UI-SHL-100).
+    5. Tables keep the first visible row at the top: each table records its first visible row identity before the change and scrolls to it after layout [C].
+    6. `window.refresh()` on every tasklens window.
+  - Slider drags apply steps 1 to 6 per change event (preview) and persist on release (UI-SHL-037). Key presses persist with the normal 500 ms debounce.
+  - The compositor scale (110% here) is applied once by GPUI and never multiplied again [S].
+  - Default from the system font (P4): when `appearance.ui_scale_pct` was never set, it is KDE's general font point size / 10 × 100, rounded to a multiple of 5 and clamped to 75..=200 [S APP-058].
+- **Performance**: a scale change is a full re-layout of open windows plus one chart geometry rebuild each; acceptable for a user action. Nothing per frame.
+- **Tests**: `scale_keys_step_and_clamp`: from 195, ScaleUp twice: 200 then 200 with one toast total. `row_height_metrics`: 120% row height at 150% scale gives 50.4 px rows. `scale_keeps_first_row`.
+- **Phase**: P1 (keys and metrics), P2 (sliders), P4 (default from font).
+- **Decided here**: toast id, limit behaviour, first-row anchoring.
+
+### UI-SHL-131 Language change at runtime
+
+- **Implements**: APP-043, R-081.
+- **Behaviour**: `SetSetting { GeneralLanguage, .. }` loads the Fluent bundle for the locale (embedded `.ftl`, English fallback for missing keys), replaces the `Strings` Global, bumps `strings_version`, drops cached label widths (tabs, menus), and refreshes every window, so all text changes without a restart [S]. Numbers, dates and units do not change [S R-081]. "System default" follows `LC_ALL`, `LC_MESSAGES`, `LANG` read at startup; a system locale change applies at the next start [S].
+- **Language submenu labels**: "System default" then each locale in its own language (UI-SHL-061 list) [C].
+- **Tests**: `language_live_switch`: switching to de-DE changes the tab label "Processes" to its German key value in the same frame and leaves "1.0s" unchanged.
+- **Phase**: P1 (key system and English), P4 (other locales).
+
+### UI-SHL-132 Motion in the shell and reduced motion
+
+- **Implements**: R-017, APP-058, ADR-009 (animation driver rule).
+- **Every animation the shell owns**:
+
+  | Animation | Duration and easing | Gate | With animations off or reduced motion |
+  |---|---|---|---|
+  | Tab indicator slide and page fade-in (UI-SHL-021) | `motion.tab_switch_ms` (250), `ease_out_cubic` | `motion.animations` | instant |
+  | Filter box width (UI-SHL-024) | 150 ms, `ease_out_cubic` | `motion.animations` | instant |
+  | Theme crossfade (UI-SHL-080) | 200 ms, `ease_out_cubic` | `motion.animations` | single step |
+  | Toast enter and exit (UI-SHL-100) | kit 400 ms / 200 ms | `motion.animations` | appear and disappear in one frame |
+  | Menu popup open (UI-SHL-031) | kit 150 ms fade and 8 px slide | `motion.animations` | instant |
+  | Skeleton shimmer (UI-SHL-111) | kit 2 s loop | always while loading | static skeleton blocks (no shimmer) [C] |
+  | Smooth scroll | `motion.smooth_scroll_amount` × 10 ms | `motion.smooth_scroll` | jump scrolling |
+  | Chart sliding | per frame | `motion.smooth_graphs` | step per sample |
+
+  - No shell animation is continuous; each one ends and stops requesting frames.
+- **Tests**: `no_frames_when_idle` (TestAppContext): after all animations finish and with no snapshot changes, no frame is requested for 1 s.
+- **Phase**: P1 (gates), P2 (animations that ship in P2).
+- **Decided here**: static skeleton under reduced motion.
+
+---
+
+## 13. Debug overlay
+
+### UI-SHL-140 FPS overlay
+
+- **Implements**: APP-026 ("Show FPS"), ADR-014 (FrameStats), ADR-009 (AnimationDriver).
+- **Anatomy**: absolutely positioned in the page area, top-right, 8 px inset [C]. Background `menu_bg` at 90% opacity, radius `r_sm`, padding 4 × 8, text `t_xs` tabular `text_primary`: "144 fps · frame p50 0.62 ms · p99 1.40 ms · stalls 0" [C].
+- **Behaviour**: shown while `debug.show_fps` is on. Reads `AnimationDriver.stats` (frame intervals and UI-thread CPU time per frame, ADR-014) and re-renders at most twice per second, on a 500 ms timer that runs only while the overlay is shown [C]. The overlay never requests frames itself; with no animation running, its fps reads "idle" [C].
+- **Phase**: P1 (developer flag).
+- **Decided here**: placement, text format, 2 Hz refresh, "idle".
