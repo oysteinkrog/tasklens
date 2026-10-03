@@ -406,3 +406,520 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   no-agent string.
 
 ---
+
+# B. Services tab
+
+### UI-SYS-010 Services page layout
+
+- **Implements**: SYS-001, SYS-004, SYS-016, R-023 (tab 3).
+- **Anatomy** (1280 × 800 window, 100% scale):
+
+  ```
+  ┌ tab strip (shell) ──────────────────────────────────────────── Filter: [        ] ┐
+  ├───────────────────────────────────────────────────────────────────────────────────┤
+  │ [Running][Failed][Stopped][Disabled] │ Unit types ▾ │ [System][User] │ ⊘ Remove filters │  28
+  ├ Name ↑ ─────── Display name ───────── Status ── Startup type ─ PID ── User ── Path ┤  28
+  │ ⌄ System services (214)                                                           │  row_h
+  │   › ⚙ accounts-daemon.service  Accounts Service  ● Running  Enabled  812  root  /usr/l… │
+  │   › ⚙ avahi-daemon.service     Avahi mDNS/DNS-SD ● Running  Enabled  790  avahi /usr/b… │
+  │     ⏲ fstrim.timer             Discard unused…   ○ Active   Enabled       root  fstrim… │
+  │ ⌄ User services (41)                                                              │
+  │   › ⚙ pipewire.service         PipeWire Multim…  ● Running  Enabled  2210 oystein …  │
+  ├───────────────────────────────────────────────────────────────────────────────────┤
+  │ 255 Total | 198 Running | 57 Stopped                                               │  22
+  └───────────────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  Parts: UI-SYS-011 (strip), UI-SYS-013 (columns), UI-SYS-014 (group rows), UI-SYS-015 (unit rows),
+  UI-SYS-016 (child rows), UI-SYS-022 (status bar).
+- **States**: loading UI-SYS-004; empty and error UI-SYS-005; partial manager failure UI-SYS-014.
+- **Interaction**: Tab order: strip toggles left to right, Unit types, System, User, Remove filters,
+  then the table. Key context `ServiceTable` inside `Table`.
+- **Data binding**: `Snapshot.services: Arc<ServicesSnapshot>`, `ComponentMask::SERVICES`. The page
+  sets `Demand.services = true` while the tab is active.
+- **Build**: `ServicesPage` entity in `crates/tl-ui/src/pages/services.rs`; fields
+  `table: Entity<TlTreeTable<ServicesDelegate>>`, `strip: ServiceFilterState`,
+  `unit_types_menu_open: bool`, `first_data_seen: bool`, `_subs: Vec<Subscription>`.
+- **Performance**: ADR-008 resync every 60 s while visible; the UI work is one row rebuild per
+  services version.
+- **Accessibility**: see parts.
+- **Tests**: `services_page_layout_golden` (render test at 1280 × 800 with the fake engine's 20-unit
+  fixture, compares the element tree of the strip and header).
+- **Phase**: P2.
+- **Decided here**: none beyond the parts.
+
+### UI-SYS-011 Services filter strip
+
+- **Implements**: SYS-004, SYS-002, R-019 keys `services.filter_states`, `services.unit_types`.
+- **Anatomy** (height 28, `toolbar` background, padding x `sp4`, gap `sp3`, 1 px `divider` bottom
+  border; groups separated by a 1 × 16 `divider` rule with `sp3` on both sides):
+
+  ```
+  │ [Running][Failed][Stopped][Disabled] │ [Unit types ▾] │ [System][User] │ [⊘ Remove filters] │
+  ```
+
+  | Part | Widget | Size | Text | Notes |
+  |---|---|---|---|---|
+  | State toggles | `TlToggleChip` × 4 | height 22, padding x `sp4`, `r_sm` | "Running", "Failed", "Stopped", "Disabled" (`t_sm`) | multi-select; none on = all states |
+  | Unit types | `TlButton` ghost, small, with `chevron-down` caret, opens a `TlMenu` of check items | height 22 | "Unit types" plus " (4)" when not all types are on (chosen) | UI-SYS-012 |
+  | Manager toggles | `TlToggleChip` × 2 | as above | "System", "User" | both on by default |
+  | Remove filters | `TlButton` ghost small, icon `funnel-x` 14 | height 22 | "Remove filters" | disabled when the strip is at its defaults |
+
+  `TlToggleChip` look (foundation.md owns the values; repeated here for the reviewer): off =
+  transparent fill, 1 px `divider` border, `text_secondary`; on = `accent` at 18% alpha fill,
+  1 px `accent` border, `text_primary`; hover = `tab_hover` fill; focus = shared focus ring.
+
+- **States**:
+  - Default: no state toggle on, unit types Services, Sockets, Timers, Mounts, System and User on.
+  - Turning both System and User off is allowed; the table then shows UI-SYS-005 "No matches"
+    (chosen; no forced toggle).
+  - Strip disabled (all controls `disabled`) while the skeleton shows (UI-SYS-004).
+- **Interaction**:
+  - Click or Space toggles a chip and sends the query at once. State toggles combine with OR, the
+    result with the text filter using AND (SYS-004). Child rows inherit their unit's state.
+  - "Remove filters" sets state toggles off, unit types to the default four, System and User on.
+    It does not clear the text filter (chosen; Esc does that).
+  - Actions: `services::ToggleStateFilter { state }`, `services::ToggleManagerFilter { manager }`,
+    `services::ToggleUnitType { kind }`, `services::RemoveFilters`. No key bindings (table b has
+    none).
+- **Data binding**: writes `settings.toml` `services.filter_states` and `services.unit_types` on
+  each change (debounced save per ADR-011). System and User toggles are session-only (chosen; table
+  a has no key for them). Sends `SysTableQuery.services = Some(ServiceFilter { states, unit_types,
+  system: bool, user: bool })`.
+- **Build**: a `h_flex` rendered by `ServicesPage`, cached with the page. State classification
+  (running, failed, stopped = enabled and not running, else disabled) is done in the engine.
+- **Performance**: a click sends one command; no UI filtering.
+- **Accessibility**: each chip is a toggle with its label as name and `aria`-like `toggled(bool)`
+  set on the kit button; tooltip on "Remove filters": "Show all units" (new).
+- **Tests**: `strip_state_or_text_and` (fake engine echoes the query; assert `ServiceFilter`);
+  `remove_filters_restores_defaults`; `strip_persists_states_and_types`.
+- **Phase**: P2.
+- **Decided here**: chip look reference; " (4)" count suffix; both managers off allowed; Remove
+  filters keeps the text filter; manager toggles not persisted; "Show all units" tooltip.
+
+### UI-SYS-012 Unit types dropdown
+
+- **Implements**: SYS-002.
+- **Anatomy**: `TlMenu` anchored below the "Unit types" button, min width 180, check items:
+  "Services", "Sockets", "Timers", "Mounts", "Automounts", "Paths", "Targets", "Swaps", "Slices",
+  "Scopes", then a separator and "Reset to default" (new).
+- **States**: each item checked per `services.unit_types`. Unchecking the last checked item is
+  refused: the item stays checked and the toast "At least one unit type must stay selected" (new)
+  shows.
+- **Interaction**: click toggles an item and keeps the menu open (chosen, so several types can be
+  changed at once); Esc or a click outside closes it. Up/Down move, Space or Enter toggles.
+  Action `services::ToggleUnitType { kind }`.
+- **Data binding**: `services.unit_types` (array of `service socket timer mount automount path
+  target swap slice scope`).
+- **Build**: `TlMenu` with `menu_with_check`; the "keep open" behaviour uses the item's `on_click`
+  plus `PopupMenu::rebuild`.
+- **Performance**: built on open only.
+- **Accessibility**: the button shows the pressed state while the menu is open (widgets rule 9).
+- **Tests**: `unit_types_last_item_refused`; `unit_types_menu_stays_open_on_toggle`.
+- **Phase**: P2.
+- **Decided here**: "Reset to default" item; last-item refusal toast; menu stays open.
+
+### UI-SYS-013 Services columns
+
+- **Implements**: SYS-003, SYS-017, R-011, R-075, APP-018, table (d).
+- **Anatomy**: column definitions (`ColumnId` values are the spec ids):
+
+  | Id | Header label | Default width | Min width | Align | Format | Visible by default |
+  |---|---|---|---|---|---|---|
+  | `name` | "Name" | 250 | 120 | left | unit id, with icon | yes |
+  | `display_name` | "Display name" | 300 | 60 | left | `Description` | yes |
+  | `status` | "Status" | 100 | 80 | left | UI-SYS-003 | yes |
+  | `startup_type` | "Startup type" | 120 | 80 | left | SYS-003 words | yes |
+  | `pid` | "PID" | 80 | template `"999999"` | right | integer, blank when 0 | yes |
+  | `user` | "User" | 200 | 60 | left | user name | yes |
+  | `path` | "Path" | 260 | 60 | left | SYS-003 per type | yes |
+  | `manager` | "Manager" | 80 | 60 | left | "System" or "User" | no |
+  | `unit_type` | "Unit type" | 90 | 60 | left | "Service", "Socket", "Timer", "Mount", "Automount", "Path", "Target", "Swap", "Slice", "Scope" | no |
+  | `sub_state` | "Sub state" | 100 | 60 | left | raw `SubState` | no |
+  | `load_state` | "Load state" | 100 | 60 | left | raw `LoadState` | no |
+  | `cpu` | "CPU" | 63 | template `"100.0%"` | right | `%.1f%%`, "0%" at zero | no |
+  | `memory` | "Memory" | 92 | template `"999 MiB"` widened to `"999.99 MiB"` | right | IEC two decimals | no |
+  | `disk` | "Disk" | 82 | template `"xxx MiB/s"` | right | MiB/s one decimal | no |
+  | `tasks` | "Tasks" | 72 | template `"999999"` | right | count, thin-space grouped | no |
+  | `active_since` | "Active since" | 150 | template `"9999-99-99 99:99:99"` | left | `YYYY-MM-DD HH:MM:SS` local | no |
+  | `unit_file` | "Unit file" | 300 | 60 | left | `FragmentPath` | no |
+  | `triggered_by` | "Triggered by" | 200 | 60 | left | comma-separated unit ids | no |
+  | `description` | "Description" | 300 | 60 | left | `Description` (same as Display name; kept because SYS-003 lists it) | no |
+
+  Widths of the seven default columns are spec (SYS-017); widths of optional columns are chosen.
+- **States**:
+  - Sort: default `name` ascending (R-011); the header shows "Name ↑". Groups stay grouped while
+    sorting; rows sort within each group; child process rows sort by PID ascending always (chosen).
+  - Resource columns show `…` while warming up and `-` for units without a cgroup.
+  - Heat colouring applies to `cpu`, `memory`, `disk` with the process references (ADR-009) when
+    `appearance.heat_coloring` is on (chosen). `tasks` is a count and is not tinted.
+  - `tables.dim_zero_values` and `tables.column_separators` apply (R-075).
+- **Interaction**: header click sorts (direction rules as `TlTreeTable`); right-click on a header
+  opens the shared header menu ("Select Columns…", "Hide This Column", "Resize columns to fit
+  content", "Resize Behavior", "Reset to default"); View > Columns acts on this table while the
+  Services tab is active (APP-018). The column picker lists these columns without headings.
+- **Data binding**: `state.toml` `[sort.services]`, `[columns.services]` (order, visible, widths).
+  Showing any of `cpu`, `memory`, `disk`, `tasks` sets `Demand.service_cgroup_stats = true`
+  (new field, open item O-1); hiding all four clears it.
+- **Build**: `ServicesDelegate::columns() -> &'static [ColumnDef]` in `pages/services.rs`.
+- **Performance**: resource columns cost 1 Hz cgroup reads in the engine only while shown.
+- **Accessibility**: header cells have the label as accessible name; the sort arrow is also in the
+  tooltip "Sorted ascending" / "Sorted descending" (shared, processes.md).
+- **Tests**: `services_default_columns_and_widths`; `services_sort_keeps_groups`;
+  `services_cgroup_demand_follows_columns`.
+- **Phase**: P2.
+- **Decided here**: optional column widths and minimums; child rows always by PID; heat colouring
+  on unit resource columns; `Demand.service_cgroup_stats`.
+
+### UI-SYS-014 Services group rows (System and User manager)
+
+- **Implements**: SYS-001, R-019 key `services.group_expanded`.
+- **Anatomy**: same renderer as the process group row (processes.md: chevron 16, label `t_base`
+  semibold, `text_primary`, full-width row, no cells). Label text:
+  - "System services (N)" and "User services (N)". N counts unit rows after all filters, thin-space
+    grouped.
+  - Manager not reachable: "System services" followed by `sp3` and the secondary text "System
+    manager not available" (or "User manager not available"), with a `circle-alert` icon 14 in
+    `status.warning` before it. No count, no chevron.
+  - Manager reconnecting after a bus drop: label plus " (reconnecting…)" in `text_secondary`
+    (new). Rows from the last good data stay, drawn in `text_secondary` (stale).
+- **States**: hover `row_hover`; group rows take keyboard focus (for Space, Left, Right) but are not
+  selected for actions (UI-SYS-002). Empty group (filters remove all units): the group row is
+  hidden (chosen).
+- **Interaction**: click on the chevron or double-click on the row toggles; Space toggles; Right
+  expands, Left collapses. Ctrl+L (Collapse all) collapses unit rows and keeps the two group rows
+  expanded (chosen). Action `table::ToggleExpand`.
+- **Data binding**: `state.toml` `[services] group_expanded = { system = true, user = true }`,
+  saved on each toggle. Manager health from `ServicesSnapshot.managers[System|User].state`
+  (`Connected | Unavailable | Reconnecting`, new field).
+- **Build**: delegate row kind `GroupRow`; the paint is the shared group row.
+- **Performance**: two rows.
+- **Accessibility**: accessible name "System services, 214 units, expanded" (chosen).
+- **Tests**: `group_row_unavailable_label`; `group_expand_state_persisted`;
+  `collapse_all_keeps_groups_open`.
+- **Phase**: P2.
+- **Decided here**: reconnecting suffix; empty groups hidden; Ctrl+L keeps groups open;
+  `managers` health field.
+
+### UI-SYS-015 Service unit row
+
+- **Implements**: SYS-001, SYS-003, SYS-005 (live), UI-SYS-003.
+- **Anatomy** (depth 1 under the group row; indent per depth from processes.md):
+
+  ```
+  │   › ⚙ sshd.service      OpenSSH Daemon     ● Running   Enabled    812   root   /usr/bin/sshd │
+  │   ^ ^ name                                  status      startup    pid   user   path         │
+  │   | icon 16                                                                                   │
+  │   chevron 16 (only with child processes)                                                      │
+  ```
+
+  | Cell | Content | Style |
+  |---|---|---|
+  | name | chevron (when the cgroup has processes), unit icon 16, unit id | `text_primary` `t_base`, ellipsis at end |
+  | display_name | `Description` | `text_primary`; empty description shows nothing |
+  | status | UI-SYS-003 dot and label; pending overlay from UI-SYS-018 | |
+  | startup_type | word | Enabled, Enabled (runtime), Static, Indirect, Generated, Transient, Alias, Linked: `text_primary`; Disabled and "-": `text_secondary`; Masked: `status.warning` |
+  | pid | MainPID | right, `tnum`; blank when 0 |
+  | user | owner | ellipsis |
+  | path | per SYS-003 | ellipsis at end; full value in tooltip |
+
+  Unit icons (Lucide, chosen): service `cog`, socket `plug`, timer `clock`, mount and automount
+  `hard-drive`, path `folder-open`, target `circle-dot`, swap `memory-stick`, slice and scope `box`.
+  Icon colour `text_secondary`; on a selected row `text_selected_secondary`.
+- **States**: default `list_bg`/`row_alt`; hover `row_hover`; selected `row_selected` with
+  `text_selected_primary`; focused row gets the shared row focus outline; stale (manager
+  reconnecting) all text `text_secondary`. Failed units keep the danger status label.
+- **Interaction**: click selects; Ctrl+click, Shift+click per table rules; double-click or Enter
+  opens Service Properties (`table::OpenProperties`); right-click opens UI-SYS-017. Hover tooltip on
+  the name cell after 600 ms: three lines "<Description>", "<FragmentPath>", "Manager: System"
+  (chosen).
+- **Data binding**: `ServicesSnapshot.units[record]`: `unit: UnitRef`, `description`, `status:
+  ServiceStatus`, `startup: StartupType`, `main_pid`, `user`, `path`, `kind: UnitKind`,
+  `has_cgroup_procs: bool`, resource fields with `Validity`.
+- **Build**: `ServicesDelegate::paint_cell`; strings come from the snapshot as `Arc<str>` wrapped in
+  `SharedString` without copying; numbers through `CellTextCache`.
+- **Performance**: no allocation for unchanged cells.
+- **Accessibility**: row accessible name "<id>, <Status>, <Startup type>" (chosen).
+- **Tests**: `unit_row_icon_per_kind`; `unit_row_pid_blank_when_zero`;
+  `unit_row_masked_warning_color`.
+- **Phase**: P2.
+- **Decided here**: icons, startup-type colours, tooltip lines, accessible name.
+
+### UI-SYS-016 Service child process rows
+
+- **Implements**: SYS-001 (cgroup subtree), SYS-006 (Ctrl+E on child), PROC-057 (menu reuse).
+- **Anatomy**: depth 2 under the unit row. Cells reuse `ProcessRowCells` mapped onto the Services
+  columns:
+
+  | Services column | Child row content |
+  |---|---|
+  | name | process icon 16 and display name (processes.md naming) |
+  | display_name | process Description |
+  | status | empty |
+  | startup_type | empty |
+  | pid | PID |
+  | user | process user |
+  | path | exe path |
+  | cpu, memory, disk, tasks | process CPU, Memory (RssAnon, D-004), Disk, Threads |
+  | others | empty |
+
+  Processes in nested cgroups are listed flat under the unit (chosen), sorted by PID ascending.
+- **States**: as process rows (processes.md), including the `…` and lock glyphs and the new or
+  exited highlight. A child that exits disappears at the next services update after its linger
+  time.
+- **Interaction**: the full process context menu (PROC-057) with the same keys; Ctrl+E on a child
+  row runs End Task on the process (table b). Enter opens Process Properties.
+- **Data binding**: `ServicesSnapshot.units[i].cgroup_pids: Arc<[ProcessKey]>` (new) joined with
+  `Snapshot.processes`. While at least one unit row is expanded the page sets
+  `Demand.process_table = true` and adds the visible child keys to `detail_keys` (chosen), so the
+  sweep runs; it clears it when none is expanded.
+- **Build**: delegate row kind `ProcessChild`; paint delegates to `ProcessRowCells::paint`.
+- **Performance**: the process sweep runs only while a unit is expanded on a visible Services tab.
+- **Accessibility**: as process rows.
+- **Tests**: `child_rows_use_process_menu`; `ctrl_e_on_child_ends_process`;
+  `expanding_unit_enables_process_demand`.
+- **Phase**: P2.
+- **Decided here**: flat list of nested cgroup processes; column mapping; process demand rule;
+  `cgroup_pids` field.
+
+### UI-SYS-017 Services context menu
+
+- **Implements**: SYS-008, SYS-006, SYS-007, SYS-009, SYS-010, R-012, R-091 (applied).
+- **Anatomy**: `TlMenu`, min width 220, items in this order (keys shown right-aligned by the kit):
+
+  | # | Label | Key hint | Action | Shown when | Enabled when |
+  |---|---|---|---|---|---|
+  | 1 | "Start" | Ctrl+S | `services::Start` | always | any target not active and not pending |
+  | 2 | "Stop" | Ctrl+E | `services::Stop` | always | any target active and not pending |
+  | 3 | "Restart" | Ctrl+R | `services::Restart` | always | any target active and not pending |
+  | 4 | "Reload" | | `services::Reload` | any target has `CanReload` | that target active |
+  | 5 | "Reset failed state" | | `services::ResetFailed` | any target Failed | always |
+  | 6 | "Startup type" › | | submenu, UI-SYS-019 | always | see UI-SYS-019 |
+  | – | separator | | | | |
+  | 7 | "View logs" | | `services::ViewLogs` | always | one target; disabled on OpenRC |
+  | 8 | "Properties" | Enter | `table::OpenProperties` | always | always |
+  | 9 | "File properties" | | `services::FileProperties` | always | binary or unit file known |
+  | 10 | "Open file location" | | `services::OpenFileLocation` | always | binary known |
+  | 11 | "Open unit file" | | `services::OpenUnitFile` | always | `FragmentPath` not empty |
+  | – | separator | | | | |
+  | 12 | "Copy" | | `table::CopyCell` | always | always |
+  | 13 | "Copy row" | Ctrl+C | `table::CopyRow` | always | always |
+  | 14 | "Copy rows as table" | Ctrl+Shift+C | `table::CopyRowsAsTable` | always | always |
+  | 15 | "Jump to process" | | `services::JumpToProcess` | always | one target with MainPID ≠ 0 |
+
+  Items have no icons (chosen; TaskSlinger menus have none). The kit hides a separator next to a
+  hidden item.
+- **States**: disabled items use `text_secondary` at 50% alpha and have a tooltip naming the reason:
+  "A service action is already in progress." (pending), "Service not running" (Jump with MainPID 0,
+  spec toast text reused), "Service image unavailable" (no ExecStart, spec text reused).
+- **Interaction**:
+  - Right-click on an unselected row selects it first; the menu captures the target
+    `SmallVec<[UnitRef; 1]>` at open and stays bound to it (ADR-009).
+  - Shift+F10 or the Menu key opens it for the selection at the focused row's left edge.
+  - Child process rows show the process menu instead. A mixed selection (units and child rows)
+    shows the unit menu and acts on the unit rows only (chosen).
+  - File properties: `FileManager1.ShowItemProperties` on the binary (else the unit file). Toasts
+    "Opened service file properties." / "Could not open service file properties." (spec).
+  - Open file location: `FileManager1.ShowItems` on the binary. Toasts "Opening service file
+    location." / "Could not open service file location."; no ExecStart: "Service image
+    unavailable" (spec).
+  - Open unit file: `xdg-open <FragmentPath>`. Toast on failure "Could not open the unit file"
+    (new). No success toast (chosen).
+- **Data binding**: target records at menu open; `ActionTracker` pending map.
+- **Build**: `ServicesDelegate::context_menu` builds the `TlMenu` with data-carrying actions so key
+  hints show (widgets research section 4).
+- **Performance**: built on open.
+- **Accessibility**: full keyboard path through Shift+F10; every item reachable by Up/Down.
+- **Tests**: `services_menu_order_and_labels` (golden label list); `menu_reload_hidden_without_canreload`;
+  `menu_target_captured_at_open` (rows re-sort while the menu is open; Start acts on the captured unit).
+- **Phase**: P2.
+- **Decided here**: enablement rules for multi-select; no icons; disabled tooltips; mixed
+  selection rule; "Could not open the unit file"; no success toast for Open unit file.
+
+### UI-SYS-018 Start, Stop, Restart, Reload and Reset failed flows
+
+- **Implements**: SYS-005, SYS-006, ADR-005, UI-SYS-007.
+- **Anatomy**: toast plus row overlay. The overlay replaces the Status cell label while the action
+  is pending:
+
+  ```
+  │ ● Starting…  │   dot filled status.info, label text_primary
+  ```
+
+- **States and texts** (spec unless marked new):
+
+  | Action | Pending toast and overlay label | Success toast | Failure toast |
+  |---|---|---|---|
+  | Start | "Starting service..." / "Starting…" | "Service started" | "Failed to start service: <result>" + "View logs" |
+  | Stop | "Stopping service..." / "Stopping…" | "Service stopped" | "Failed to stop service: <result>" + "View logs" |
+  | Restart | "Restarting service..." / "Restarting…" | "Service restarted" | "Failed to restart service: <result>" + "View logs" |
+  | Reload | "Reloading service..." (new) / "Reloading…" | "Service reloaded" (new) | "Failed to reload service: <result>" (new) + "View logs" |
+  | Reset failed state | "Clearing failed state..." (new) / none | "Failed state cleared" (new) | "Failed to clear failed state: <error>" (new) |
+
+  - `<result>` is the systemd job result word (`failed`, `timeout`, `canceled`, `dependency`,
+    `skipped`, `invalid`) or the D-Bus error text, or "not authorized".
+  - `OutcomeUnknown`: "Service action finished." (Warning) and the engine resyncs.
+  - `Rejected(Busy)`: "A service action is already in progress." (Warning).
+  - The overlay starts when the request is sent and ends at the final event; the Status cell then
+    shows the snapshot state.
+  - No confirmation dialog for any of these (spec).
+- **Interaction**: keys Ctrl+S, Ctrl+E, Ctrl+R in `ServiceTable` on unit rows (table b). "View logs"
+  opens Service Properties on the Logs tab for that unit (UI-SYS-030).
+- **Data binding**: `ActionRequest { kind: UnitStart | UnitStop | UnitRestart | UnitReload |
+  UnitResetFailed, targets: [Unit(UnitRef)] }`. `UnitReload` and `UnitResetFailed` are new
+  `ActionKind` variants (open item O-2).
+- **Build**: handlers in `pages/services.rs` call `ActionTracker::submit(req, ToastSpec)`.
+- **Performance**: none per frame.
+- **Accessibility**: toast text states the outcome; the overlay label is text.
+- **Tests**: `start_flow_toasts_and_overlay` (fake engine emits Started then Succeeded);
+  `failed_start_shows_view_logs`; `busy_rejection_toast`.
+- **Phase**: P2.
+- **Decided here**: overlay labels; Reload and Reset failed strings.
+
+### UI-SYS-019 Startup type submenu and flow
+
+- **Implements**: SYS-007, SYS-011 (combo shares the flow).
+- **Anatomy**: submenu "Startup type" › with three check items: "Enabled", "Disabled", "Masked".
+  The current value is checked. "Enabled (runtime)" counts as Enabled.
+- **States**:
+  - Static, Indirect, Generated, Transient: the "Startup type" item is disabled with tooltip "This
+    unit has no install section" (spec).
+  - No unit file ("-"): disabled with tooltip "This unit has no unit file" (new).
+  - Multi-select with different values: no item checked (chosen).
+  - Pending: toast "Changing startup type..." (new), then "Startup type changed" or "Failed to
+    change startup type" (spec), with ": <error>" appended to the failure (chosen). Polkit may
+    prompt twice for system units (spec); the toast stays pending through both.
+- **Interaction**: choosing the current value does nothing. Choosing another sends one request.
+  Action `services::SetStartupType { startup: UnitStartup::{Enabled, Disabled, Masked} }`.
+- **Data binding**: `ActionKind::UnitEnable`, `UnitDisable` (ADR-005) and new `UnitMask`,
+  `UnitUnmask` (open item O-2); leaving Masked sends Unmask first, then the chosen kind, as one
+  request (engine sequence).
+- **Build**: submenu built in `ServicesDelegate::context_menu`.
+- **Performance**: none.
+- **Accessibility**: check items announce their checked state.
+- **Tests**: `startup_submenu_disabled_for_static`; `startup_change_from_masked_unmasks_first`.
+- **Phase**: P2.
+- **Decided here**: "Changing startup type...", "This unit has no unit file", error suffix, no check
+  on mixed selection.
+
+### UI-SYS-020 Services copy formats
+
+- **Implements**: SYS-009, R-012, UI-SYS-006.
+- **Anatomy**: "Copy row" block per unit, exactly:
+
+  ```
+  Name: <id>
+  Display name: <Description>
+  Status: <Status>
+  Start type: <Startup type>
+  PID: <MainPID>
+  User: <User>
+  Binary: <ExecStart[0].path>
+  ```
+
+  Empty values print nothing after the colon and space ("PID: " when MainPID is 0, chosen).
+- **States**: success "Service details copied."; failure "Could not copy service details." (spec).
+- **Interaction**: Ctrl+C, menu "Copy row". Ctrl+Shift+C TSV per UI-SYS-006.
+- **Data binding**: unit records.
+- **Build**: `sys_copy::block_service`.
+- **Performance**: once per command.
+- **Accessibility**: n/a.
+- **Tests**: `service_copy_block_golden`.
+- **Phase**: P2.
+- **Decided here**: empty value rendering.
+
+### UI-SYS-021 Jump between Services and Processes
+
+- **Implements**: SYS-010, PROC-071, SYS-032 (Go to service from Connections).
+- **Anatomy**: no own visuals.
+- **Interaction**:
+  - "Jump to process" (`services::JumpToProcess`): calls the PROC-071 entry point with the MainPID's
+    `ProcessKey`. Toasts: "Switched to service process." on success; "Service process not visible
+    in the current process view." with a "Show" button when filtered or hidden; "Service not
+    running" when MainPID is 0 (spec).
+  - Arriving at Services ("Go to service" from Processes or Connections): the page switches the
+    tab, removes strip filters only if they hide the unit (chosen: it never removes the text
+    filter), expands the manager group, selects the unit, scrolls it to the vertical centre, and
+    focuses the table. Toasts "Switched to Services tab" (when coming from another tab) and
+    "Switched to service." (spec). If the unit is not listed: "Service not found in current view"
+    (spec). If the text filter hides it: the same toast with a "Show" button that clears the text
+    filter, then selects (chosen, mirrors PROC-071).
+- **Data binding**: `UnitRef` from the process's cgroup (engine). Selection waits for the next view
+  whose `query_generation` matches before scrolling (so the row exists).
+- **Build**: `ServicesPage::select_unit(UnitRef, origin: JumpOrigin, cx)`; registered with the main
+  window router as the target of `GoToService`.
+- **Performance**: one query and one scroll.
+- **Accessibility**: focus moves to the table on arrival.
+- **Tests**: `go_to_service_expands_and_selects`; `go_to_service_filtered_shows_button`;
+  `jump_to_process_main_pid_zero_toast`.
+- **Phase**: P2.
+- **Decided here**: strip filter removal rule; "Show" button for text-filter case.
+
+### UI-SYS-022 Services status bar text and refresh
+
+- **Implements**: SYS-016, APP-029.
+- **Anatomy**: left text in the shell status bar, `t_sm`, `text_secondary`:
+  "255 Total | 198 Running | 57 Stopped", plus " | 3 selected" with a selection. Counts are unit
+  rows after all filters (child rows not counted), thin-space grouped. Running counts ActiveState
+  `active` and `reloading`; Stopped counts `inactive` and `failed`; Starting and Stopping count in
+  Total only.
+- **States**: while the skeleton shows: "Loading…". While paused: shell appends "[PAUSED - Ctrl]".
+- **Interaction**: F5 (`page::Refresh`) sends `RefreshNow(SystemdSystem)` and
+  `RefreshNow(SystemdUser)`, then shows "Services refreshed." when the next services version
+  arrives or after 2 s, whichever is first (chosen).
+- **Data binding**: counts precomputed by the engine in `ServicesSnapshot.counts` (new field), so
+  the UI does not iterate rows.
+- **Build**: `ServicesPage::status_text(&self) -> SharedString`, rebuilt only when counts or the
+  selection size change.
+- **Performance**: one short string per change.
+- **Accessibility**: plain text.
+- **Tests**: `services_status_text_counts`; `f5_refresh_toast_after_update`.
+- **Phase**: P2.
+- **Decided here**: count rules for transitional states; F5 toast timing; `counts` field.
+
+### UI-SYS-023 Services keyboard summary
+
+- **Implements**: table (b) rows for Table and ServiceTable, D-008, R-043.
+- **Interaction** (all in the `ServiceTable` and `Table` contexts):
+
+  | Keys | Action | On unit row | On child row | On group row |
+  |---|---|---|---|---|
+  | Up, Down, PgUp, PgDn, Home, End | move focus and selection | yes | yes | focus only |
+  | Shift+Up/Down, Shift+click, Ctrl+click | extend or toggle | yes | yes | skipped |
+  | Ctrl+A | select all visible unit and child rows | | | |
+  | Right / Left | expand or first child / collapse or parent | yes | parent | yes |
+  | Space | toggle expand | yes | no | yes |
+  | Enter, Alt+Enter, Ctrl+I | Properties | Service Properties | Process Properties | toggle (chosen) |
+  | Ctrl+S / Ctrl+E / Ctrl+R | Start / Stop / Restart | yes | Ctrl+E ends the process; others nothing | nothing |
+  | Ctrl+C / Ctrl+Shift+C | Copy row / as table | yes | process block | skipped |
+  | Ctrl+L | collapse all (groups stay open) | | | |
+  | Shift+F10, Menu | context menu | unit menu | process menu | none |
+  | F5 | refresh | | | |
+  | printable key | start filtering | | | |
+  | Esc | global rule | | | |
+
+- **Tests**: `services_keymap_contexts` (each binding resolves to the listed action in
+  `ServiceTable`).
+- **Phase**: P2.
+- **Decided here**: Enter on a group row toggles it.
+
+### UI-SYS-024 OpenRC variant of the Services tab
+
+- **Implements**: SYS-018.
+- **Anatomy**: same page. Differences:
+  - One group row "OpenRC services (N)" (new) replaces the two manager groups; the System and User
+    chips and the Unit types dropdown are hidden.
+  - Columns available: Name, Status, Startup type, PID, User, Path. Status uses Running, Stopped,
+    Failed (from `rc-status`). Startup type shows "Enabled" (in runlevel `default`) or "Disabled".
+  - Menu: Start, Stop, Restart, Startup type › (Enabled, Disabled), separator, Properties, File
+    properties, Open file location, separator, Copy, Copy row, Copy rows as table. No Reload, Reset
+    failed state, View logs, Open unit file, Jump to process (no cgroups).
+  - Properties shows only the General tab.
+- **States**: actions prompt through pkexec; cancellation gives "Authentication cancelled".
+- **Data binding**: `ServicesSnapshot.backend = OpenRc`.
+- **Build**: the delegate checks `backend` when building columns and menus.
+- **Tests**: `openrc_hides_systemd_only_items`.
+- **Phase**: P4.
+- **Decided here**: OpenRC group label and reduced menu.
+
+---
