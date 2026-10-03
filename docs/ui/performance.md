@@ -281,3 +281,225 @@ element height = rows × cell_h + (rows − 1) × gap
 - **Tests**: `monotone_curve_never_overshoots` (max of the curve ≤ max of the points).
 - **Phase**: P4.
 - **Decided here**: 4 subdivisions.
+
+---
+
+## Part B: the Performance tab frame, sidebar and summary mode
+
+### UI-PRF-010 Performance tab layout
+
+- **Implements**: PERF-006, PERF-007 (sidebar toggle), PERF-012, PERF-014, R-090.
+- **Anatomy** (window content below the tab strip; sizes at 100%):
+
+```
+┌─ sidebar (nav_width, default 252) ─┬┬─ page (flex 1, min 400) ───────────────────────────────┐
+│ sp4 pad                            ││ page_pad 16                                             │
+│ ┌ card ───────────────────┐        ││ ┌ header row 36 ────────────────────────────────────┐   │
+│ │ 116×56 graph │ heading  │ 80 h   ││ │ Processor  AMD Ryzen 7 7800X3D   [Per core ▾][Kernel on] │
+│ │              │ line 1   │        ││ └───────────────────────────────────────────────────┘   │
+│ │              │ line 2   │        ││ sp4                                                     │
+│ └─────────────────────────┘        ││ ┌ graph area ───────────────────────────────────────┐   │
+│ sp4 gap                            ││ │ (per page, Part C)                                │   │
+│ ┌ card ───────────────────┐        ││ └───────────────────────────────────────────────────┘   │
+│ │ ...                     │        ││ details_gap 24                                          │
+│ └─────────────────────────┘        ││ Details (t_md 500)                                      │
+│ ...                                ││ ┌ TlKeyValueGrid, 3 columns, kv_row_h 46 ──────────┐   │
+│                                    ││ │ Utilization   Kernel time   Speed                 │   │
+│                                    ││ │ 18.6%         2.3%          4631 MHz              │   │
+│                                    ││ └───────────────────────────────────────────────────┘   │
+│ [vertical scrollbar, 16 px kit]    ││ (page-specific blocks: tables, modules)                 │
+└────────────────────────────────────┴┴─────────────────────────────────────────────────────────┘
+                                      ↑ splitter: 1 px divider line, 8 px hit area (4 each side)
+```
+
+  Parts:
+  - **Sidebar**: background `window_bg`; width `state.performance.nav_width` (180..=400, default 252, PERF-006); padding `sp4` on all sides; cards stacked with `sp4` gaps; vertical scroll with the kit scrollbar in `ScrollbarMode::Hover` (chosen; the kit default). A pencil `TlButton` (ghost, icon `pencil`, 24 px square) sits at the top right of the sidebar from P2 (edit mode, UI-PRF-013); in P1 the sidebar has no header row and cards start at `sp4`.
+  - **Splitter**: gpui-kit `h_resizable("perf-split").with_state(&state)` with two panels: the sidebar `resizable_panel().size(px(nav_width)).size_range(px(180.)..px(400.)).flex_none()` and the page. The handle is the kit's 1 px line (`divider`) with 4 px hit padding each side and the `col-resize` cursor during the drag. `on_resize` (fires on mouse-up) writes `nav_width` to `state.toml` through the settings entity (500 ms debounce, ADR-011). On start the saved width is clamped to 180..=400.
+  - **Page**: `window_bg`; vertical scroll (kit scrollbar, Hover mode); padding `page_pad`; children: header row, graph area, Details heading, `TlKeyValueGrid`, page blocks.
+  - **Sidebar hidden** (F9, Ctrl+T): the sidebar panel gets `.visible(false)`; the page fills the width. Not persisted (R-090). Animation: width from 252 to 0 over `m_base` with `ease_out_cubic`, page reflows each frame; reduced motion: instant.
+  - **Toolbar** (shell owns the toolbar; stated here for the layout contract, PERF-014): on the Performance tab the title bar shows only the shield and the "+" picker. The page header carries the page toggles.
+- **States**: default; sidebar focused (UI-PRF-012); sidebar hidden; summary mode (UI-PRF-016) replaces the whole layout.
+- **Interaction**: F9 and Ctrl+T dispatch `perf::ToggleSidebar`. Ctrl+M `perf::ToggleSummaryMode`. Ctrl+C `perf::CopyDeviceInfo` (UI-PRF-022). F1..F8 `perf::SelectVisibleDevice { index: u8 }`. Up and Down when the sidebar has focus `perf::SelectPrevDevice` / `perf::SelectNextDevice`. Focus order inside the tab: sidebar list (one tab stop, roving selection) → page header toggles → page blocks with controls (Display unit, Fetch, Show SMART data, Eject). Tab out of the last control returns to the shell's tab strip.
+- **Data binding**: `state.performance.nav_width`, `state.performance.selected_device`. The `PerformancePage` entity (`pages/performance/mod.rs`) owns: `sidebar: Entity<DeviceSidebar>`, `pages: FxHashMap<DeviceKey, AnyView>` (device pages created on first visit and kept, ADR-009), `selected: DeviceKey`, `summary: Option<Entity<SummaryView>>`, `sidebar_visible: bool`. It re-renders on `DEVICES` (device list changed) and on selection; the active page renders itself.
+- **Build**: `pages/performance/mod.rs`. Each of sidebar, header and the Details block is embedded with `.cached(StyleRefinement::default().size_full())` or its fixed size (ADR-009). The graph area is not cached as a whole (charts cache themselves); the per-page graph container is a plain `div`.
+- **Performance**: a selection change swaps one `AnyView` in a `match`; no page is rebuilt. The resize handle re-lays out only on drag frames.
+- **Accessibility**: the sidebar has one focus handle with `key_context("Performance")`; the selected card draws the focus ring (UI-PRF-011). Every toggle is a `TlButton` with a tooltip.
+- **Tests**: `nav_width_persists_and_clamps` (save 500 → load 400), `toggle_sidebar_not_persisted` (state file unchanged after F9), `f3_selects_third_visible_card_skipping_hidden`.
+- **Phase**: P1.
+- **Decided here**: sidebar padding `sp4`, scrollbar mode Hover, sidebar hide animation, focus order, page minimum width 400.
+
+### UI-PRF-011 Device sidebar card
+
+- **Implements**: PERF-001, PERF-005 (gap after re-plug), PERF-008 (headings), PERF-013 (glyphs), R-055, PERF-053 (disk temperature on line 2), PERF-054 (network state).
+- **Anatomy** (card_w × 80; measured proportions from `performance.png`: graph 116 × 56 at left with sp5 (12) inset, text column starts 8 px after the graph):
+
+```
+┌──────────────────────────────────────────────────────┐ bg list_bg, 1 px divider, r_md
+│ sp5 ┌────────────────┐ sp4  CPU                  t_md 500 text_primary   │
+│     │ 12.0%  (value) │      AMD Ryzen 7 7800X3…  t_sm 400 text_secondary│  single line, ellipsis
+│     │  ▁▂▃▅▃▂▁▂▃     │      4631 MHz · 52 °C     t_sm 400 text_secondary│
+│     └────────────────┘ 116×56, chart with grid, no heading, value at top-left                │
+└──────────────────────────────────────────────────────┘
+```
+
+  Parts:
+  - **Mini graph**: a UI-PRF-001 chart in a 116 × 56 box, `ChartLabels { heading: None, value shown at top-left, no legend, no range label, no axis max }`. The value label sits top-left inside the graph (`performance.png` shows "12.0%" over the graph's top-left), `t_sm` 500 `text_primary`. Grid on. Outline per UI-PRF-001.
+  - **Text column**: three lines, left-aligned, vertically centred in the card: heading `t_md` 500 `text_primary` (18 px line); line 1 and line 2 `t_sm` 400 `text_secondary` (16 px lines); each one line with `text_ellipsis` and `overflow_hidden`. Network line 2 uses the `accent` colour (R-055) because TaskSlinger draws the rate in the accent.
+  - Headings and lines per device (PERF-001, R-055):
+
+| Kind | Heading | Line 1 | Line 2 | Graph series | Value |
+|---|---|---|---|---|---|
+| CPU | "CPU" | model, or "Unknown processor" | "4631 MHz · 52 °C" (temperature omitted when no CPU hwmon) | total CPU, kernel overlay when `cpu_kernel` | `11.9%` |
+| Memory | "Memory" | "34.68 GiB / 63.16 GiB" | "Commit 69.0%" | used (filled), committed dashed | `55.0%` (used/total) |
+| GPU | "GPU N" | name, or "Unknown GPU" | "52 °C" | 3D/Compute engine (or the max engine, PERF-009 rule) | `10.9%` |
+| Disk | "Disk N" | "NVMe - /" (kind, " - ", primary mount; no mount: kind only) | model; from P2 "<model> · 41 °C" | active time | `0.1%` |
+| Network | `<ifname>` | type ("Ethernet", "Wi-Fi", "Tunnel", …) | `↓ 1.2 Mbps ↑ 0.3 Mbps` when both non-zero, else total rate, in `accent`; disconnected: the state word ("Disconnected") in `text_secondary` | download filled, upload dashed | total rate, e.g. `0.01 Mbps` |
+| Fan | "Fan N" or label | label (or chip) | "1200 RPM · 45 °C" | RPM | `1200 RPM` |
+| Battery | kind ("Battery", "Mouse", "UPS") | vendor and model | "85.0% · Discharging" | percentage (peripheral) or power (system battery) | `85.0%` |
+| Aggregate (P4) | "Aggregate storage" / "Aggregate graphics" | "3 disks" / "2 adapters" | "Multiple" when kinds differ, else the kind | busiest disk active / highest engine | percent |
+
+  - Numbering: "Disk N", "GPU N", "Fan N" count from 0 in sidebar order (`performance.png` shows "GPU 0", "Disk 0"), re-numbered when the order changes.
+  - Disconnected interface: the whole card at opacity 0.6 (PERF-001).
+  - Tooltip (`TlTooltip`, 500 ms): the full model on line 1 when it is truncated; network cards add the NetworkManager connection name on its own line when known.
+- **States**:
+  - Default: bg `list_bg`, border 1 px `divider`.
+  - Hover: bg `row_hover`.
+  - Pressed: bg `row_selected` at alpha 0.6 for the press duration.
+  - Selected: border 2 px `accent` (measured 2 px at 200% as a 4 px line), drawn as an outline quad inside the card bounds so the card does not grow; bg `list_bg`. Text colours unchanged (TaskSlinger keeps them).
+  - Focused (sidebar has keyboard focus): the selected card also gets the focus ring: a second outline 1 px `accent` at alpha 0.5, 2 px outside the border. When the sidebar is not focused, only the 2 px border shows.
+  - Disabled: not used (hidden cards are not rendered outside edit mode).
+  - Loading (`WarmingUp`): value `…`, lines show their static text; rate lines show `…`.
+  - Error / Restricted / Unsupported on a line value: the ADR-003 glyph in place of that value only ("4631 MHz · n/a").
+  - Missing: card removed (UI-PRF-012).
+  - Edit mode (UI-PRF-013): the card gains a drag handle and a switch and loses the selected border.
+- **Interaction**: click → `perf::SelectDevice { key }`. Right-click → UI-PRF-014 menu. Double-click: none (keeps the single click fast; the mini window opens from the page graph area). Drag: edit mode only.
+- **Data binding**: newest sample of the card's series from `Snapshot.series`; static text from `Snapshot.devices` (`DeviceCatalog`) and `Snapshot.system` (CPU model, clock, temperature). Re-render on `SERIES` for its own ids, on `SYSTEM` (CPU clock and temperature lines; memory totals) and `DEVICES`.
+- **Build**: `pages/performance/sidebar.rs`: `DeviceCard` is a `RenderOnce` struct built by `DeviceSidebar::render` from `DeviceCatalog`; its chart is a `ChartView` entity kept in `DeviceSidebar.cards: IndexMap<DeviceKey, CardState { chart: Entity<ChartView>, lines: [SharedString; 3] }>`, created when a device appears. All card graphs of one device kind could share a `ChartGridElement` (ADR-009 rule 7); since the cards are separate rows, each card keeps its own `ChartView` but the sidebar is a single `.cached()` entity that re-renders on data change. The line strings re-format only when their value bits change (same rule as `CellTextCache`).
+- **Performance**: 9 cards at 1 Hz (CPU card at 10 Hz when `cpu_fast`): 9 path clone sets per frame while sliding; text re-shape only when the formatted text changes.
+- **Accessibility**: the card's text lines are the graph's alternative. Selection is keyboard-reachable (Up, Down, F1..F8).
+- **Tests**: `card_lines_cpu`, `card_lines_network_both_directions` ("↓ 1.2 Mbps ↑ 0.3 Mbps"), `card_lines_network_one_direction` (total only), `card_disconnected_opacity`, `card_value_glyph_for_restricted`.
+- **Phase**: P1 (fan and battery cards P2 with their pages; aggregate P4).
+- **Decided here**: `card_h` 80, inset `sp5`, text line heights, selected border 2 px inside, focus ring form, pressed tint, double-click does nothing on cards, numbering from 0.
+
+### UI-PRF-012 Sidebar list: selection, keys, hotplug and visibility
+
+- **Implements**: PERF-002 (hide rule side effects), PERF-004 (type defaults), PERF-005, PERF-007 (F1..F8, Up/Down), PERF-008 (order), R-052 (5 s rescan feeds this).
+- **Behaviour**:
+  - **Order**: `performance.device_order` (device keys) first, in that order; devices not listed follow in type order CPU, Memory, GPU, Disk, Network, Fans, Batteries, then aggregates; within a type, by `DeviceCatalog` order (PCI address, kernel name, ifindex).
+  - **Visibility**: a device is visible when `device_overrides[key]` is `"show"`, or when there is no override and its type default (`show_disks`, `show_gpus`, `show_fans`, `show_batteries`, `show_network_*` by PERF-054 type class) is on. CPU and Memory are visible unless overridden `"hide"`. `lo` never appears. Aggregates (P4) default hidden.
+  - **Selection**: `state.performance.selected_device`. If the saved key is missing or hidden at start, select the first visible card. When the selected device vanishes or is hidden, select the next visible card below it, else the one above (PERF-002, PERF-005).
+  - **Keys** (context `Performance`): F1..F8 select the Nth visible card; Up and Down move selection when the sidebar has focus; Home and End select first and last (chosen, matching Table conventions); Enter and Space do nothing extra (selection already switched the page). Selecting scrolls the card into view (`ScrollHandle::scroll_to_item` Nearest).
+  - **Hotplug add**: a new card appears at its place with an insert animation: height 0 → 80 and opacity 0 → 1 over `m_base`, `ease_out_cubic`; the cards below slide down with the same curve. Reduced motion or `motion.animations = false`: instant.
+  - **Hotplug remove**: the card fades to opacity 0 and its height collapses 80 → 0 over `m_base`; cards below slide up. Reduced motion: instant. The device's page entity is dropped once the animation ends.
+  - **Re-plug**: a device that returns with a new generation is a new card at its saved order position; its series start with `GAP_BEFORE`, so the mini graph shows the gap (PERF-005).
+  - **Empty sidebar**: cannot happen (at least one page visible, PERF-002).
+- **Data binding**: `Snapshot.devices` (`DEVICES` bit), settings `device_order`, `device_overrides`, `show_*`. Demand: the sidebar adds `memory`, `disks`, `nets`, `gpus`, `sensors` to `DemandAggregator` for each visible card type, and `cpu: Total`.
+- **Build**: `pages/performance/sidebar.rs` `DeviceSidebar` entity. The list is a `v_flex` of cards (9 to 15 items; `uniform_list` is not needed). Animations use the GPUI `Animation` on the card wrapper's height and opacity, driven by `with_animation` (respects `reduce_motion`), not by the chart driver.
+- **Tests**: `order_saved_then_type_default`, `hidden_devices_not_counted_by_f_keys`, `selected_device_removed_selects_next`, `device_appears_in_saved_slot`.
+- **Phase**: P1 (hotplug for disks and network); P2 for GPU, fans, batteries.
+- **Decided here**: Home and End, animation forms, next-below-else-above rule when the selected card goes.
+
+### UI-PRF-013 Sidebar edit mode
+
+- **Implements**: PERF-003, PERF-008 (group names, empty states), PERF-002 (at-least-one rule).
+- **Anatomy**:
+
+```
+┌ sidebar ─────────────────────────────────────┐
+│ Select pages            [Enable All] [Disable All]│  header: t_md 500; two TlButton small ghost
+│ [Reset to Default]                      [Done]│  second row; Done is TlButton small primary
+│ ────────────────────────────────────────────  │  1 px divider
+│ PROCESSOR                 t_xs 600 text_secondary, letter-spacing 0.5, sp4 top          │
+│ ┌ ⋮⋮ ┌graph┐ CPU                  [●  ]  ┐   │  drag handle (grip-vertical icon 16 px) + card + TlSwitch
+│ └─────────────────────────────────────────┘   │
+│ MEMORY                                        │
+│ ┌ ⋮⋮ ┌graph┐ Memory               [●  ]  ┐   │
+│ DISKS                                         │
+│ ┌ ⋮⋮ ┌graph┐ Disk 0               [●  ]  ┐   │
+│ ┌ ⋮⋮ ┌graph┐ Disk 1               [  ○]  ┐   │  switch off = hidden card, card at opacity 0.6
+│ GRAPHICS ADAPTERS                             │
+│   No graphics adapter found   (t_sm text_secondary, sp4 indent)                          │
+│ NETWORK ADAPTERS ...  FANS ...  BATTERIES ... │
+└───────────────────────────────────────────────┘
+```
+
+  - Group names (PERF-008): Processor, Memory, Disks, Graphics adapters, Network adapters, Fans, Batteries, and from P4 "Aggregate" for the two aggregate cards. Drawn in upper case `t_xs` 600 `text_secondary`.
+  - Empty-state texts (PERF-008): "No graphics adapter found", "No network adapter found"; for Disks, Fans and Batteries: "No disk found", "No fan found", "No battery found" (chosen, same pattern).
+  - Each card row: 24 px drag handle column (icon `grip-vertical`, `text_secondary`, cursor `grab`) + the UI-PRF-011 card (no selected border) + a `TlSwitch` (kit `Switch` small, 28 × 16) aligned right, vertically centred. Hidden cards appear with the switch off and the card at opacity 0.6.
+  - Drop indicator: a 3 px `accent` line (PERF-003) across the sidebar width at the drop position between two cards; drops are limited to the dragged card's own group (chosen: a disk cannot move into the Fans group, because numbering and type defaults are per group).
+- **States**: entering edit mode: the header appears (height 0 → 64 over `m_base`) and handles and switches fade in over `m_fast`; leaving reverses. Reduced motion: instant. While a drag is in progress the dragged card follows the pointer as a semi-transparent (0.8) copy and the original row shows at opacity 0.3.
+- **Interaction**:
+  - Pencil button or menu "Select Pages" → `perf::EnterEditMode`. "Done" or Esc → `perf::ExitEditMode` (Esc is handled before the global Esc rule while edit mode is on).
+  - Switch → `perf::SetPageVisible { key, visible }`. Turning off the last visible page is refused: the switch snaps back and `TlToast` shows "At least one performance page must stay visible" (PERF-002).
+  - "Enable All" → `perf::EnableAllPages`; "Disable All" → `perf::DisableAllPages` (keeps the current selected page visible and shows the same toast once); "Reset to Default" → `perf::ResetPagesToDefault` (clears `device_order` and `device_overrides`).
+  - Drag with the handle: GPUI `on_drag` with a `DraggedCard { key }` payload; `drag_over` on card rows computes the drop index from pointer y against the row midpoint; drop → `perf::MoveDevice { key, before: Option<DeviceKey> }`.
+  - Keyboard reorder: with a card row focused, Alt+Up and Alt+Down move it one slot (chosen; keeps the feature keyboard-reachable).
+  - Clicking a card in edit mode selects its page as usual.
+- **Data binding**: writes `performance.device_order` and `performance.device_overrides` (`"show"` when the type default is off, entry removed when the default is on, `"hide"` to hide; PERF-002).
+- **Build**: part of `DeviceSidebar`, `edit_mode: bool`, `drag: Option<DragState>`. Group headers and empty states are plain `div`s. Switch is the kit `Switch`.
+- **Tests**: `edit_mode_groups_and_empty_states`, `last_visible_refused_with_toast`, `reorder_within_group_only`, `reset_clears_order_and_overrides`, `show_override_written_only_when_default_off`.
+- **Phase**: P2.
+- **Decided here**: header layout and button variants, group header style, missing empty-state texts, same-group drop rule, Alt+Up/Down, drag ghost opacities.
+
+### UI-PRF-014 Card context menu
+
+- **Implements**: PERF-002, PERF-007 ("View >" is on the page menu, not here).
+- **Anatomy**: `TlMenu` (kit `PopupMenu`) at the pointer, items in order:
+  1. "Select Pages" → `perf::EnterEditMode`
+  2. "Hide This Page" → `perf::SetPageVisible { key, visible: false }`
+  3. "Show This Page" → `perf::SetPageVisible { key, visible: true }` (present only in edit mode and only on hidden cards)
+  4. separator
+  5. "Add tray icon graph" → `perf::AddTrayGraph { source: key }` (P3; disabled with tooltip "No system tray available" when no `StatusNotifierWatcher` is on the bus, PERF-088)
+- **States**: "Hide This Page" is disabled when the card is the only visible one (tooltip "At least one performance page must stay visible").
+- **Interaction**: right-click selects nothing (the card keeps its state) and opens the menu; Shift+F10 on the focused card opens it too. Hiding the selected page selects the next visible card (UI-PRF-012).
+- **Build**: `.context_menu(..)` on the card row.
+- **Tests**: `card_menu_items_default`, `card_menu_show_only_in_edit_mode_hidden`.
+- **Phase**: P1 (item 5 P3).
+- **Decided here**: separator and item 5 placement, disabled-instead-of-toast for the last page in the menu (the toast still shows when the switch is used).
+
+### UI-PRF-015 Page jump "View >" submenu and page context menu
+
+- **Implements**: PERF-007 (View submenu), PERF-010 (Graph Summary View item), PERF-011 (Copy), PERF-016 (Time range), PERF-088 (Add tray icon graph), plus page-specific items defined in Part C.
+- **Anatomy**: `TlMenu` opened by right-click anywhere on a device page (header, graph area, Details). Common items, in order; page-specific items are inserted where Part C says:
+  1. "Copy" → `perf::CopyDeviceInfo` (Ctrl+C hint)
+  2. "Graph Summary View" (check item, checked while on) → `perf::ToggleSummaryMode` (Ctrl+M hint)
+  3. "Time range >" → radio items "30 seconds", "1 minute", "5 minutes", "10 minutes" → `perf::SetGraphRange { secs }` (300 and 600 disabled before P2)
+  4. separator
+  5. page-specific items (CPU: graph mode and kernel; Memory: show composition, show swap; GPU: select engines, hide this engine; Fan: rename, sensor; Network: Network settings)
+  6. separator
+  7. "View >" → "Processor", "Memory", "Disks", "Graphics adapters", "Network adapters", "Fans", "Batteries" → `perf::JumpToType { kind }`; a type with no visible device is disabled (PERF-007)
+  8. "Add tray icon graph" → `perf::AddTrayGraph { source }` (P3)
+- **Build**: `pages/performance/menu.rs` `fn page_menu(menu: PopupMenu, page: &dyn DevicePage, ..) -> PopupMenu`; each page contributes `fn menu_items(&self, menu) -> menu`.
+- **Tests**: `page_menu_common_order`, `view_submenu_disables_empty_types`.
+- **Phase**: P1 (View submenu P2, tray P3).
+- **Decided here**: item order and separators.
+
+### UI-PRF-016 Graph summary mode
+
+- **Implements**: PERF-010.
+- **Anatomy** (replaces the whole window content, including the tab strip; the title bar stays with its caption buttons, menus hidden):
+
+```
+┌ window_bg, padding sp6 ──────────────────────────────────────────────┐
+│ ┌ tile ─────────┐ ┌ tile ─────────┐ ┌ tile ─────────┐                 │
+│ │ CPU     12.0% │ │ Memory  55.0% │ │ GPU 0   10.9% │  heading t_md 500 left, value t_md 400 tnum right │
+│ │ ▁▂▃▅▃▂▁▂▃▂▁▂ │ │ ▇▇▇▇▇▇▇▇▇▇▇▇ │ │ ▁▁▂▁▁▂▁▁▁▂▁▁ │  chart fills the tile below the label row          │
+│ └───────────────┘ └───────────────┘ └───────────────┘                 │
+│ ┌ tile ─────────┐ ┌ tile ─────────┐ ...                                │
+│ gap sp4 between tiles                                                 │
+└───────────────────────────────────────────────────────────────────────┘
+cols = ceil(sqrt(n)), rows = ceil(n / cols); tile_w = (W − 2 sp6 − (cols−1) sp4) / cols; tile_h likewise over H.
+Minimum tile 200 × 120; when the window is too small for that, cols shrink until tiles fit, and the grid scrolls vertically.
+```
+
+  - One tile per **visible** device, in sidebar order, showing its main graph (same series as the sidebar card) with heading = card heading plus line 1 in `text_secondary` after a `·` when the tile is at least 280 px wide ("GPU 0 · NVIDIA GeForce RTX 4080"), and the current value. Legend shown when the tile is at least 200 px wide; range label shown when tile height ≥ 160.
+  - A thin 2 px `accent` line under the heading row marks the tile of the device that was selected when summary mode opened (chosen, so the user can tell where Esc returns).
+- **States**: entering: the sidebar and page fade out over `m_fast` and the tiles fade in over `m_base`; reduced motion: instant. The tab strip is hidden and tab switching is blocked (Ctrl+1..6, Ctrl+Tab are swallowed by the summary view's `key_context("PerformanceSummary")`, PERF-010).
+- **Interaction**: Esc or Ctrl+M → `perf::ToggleSummaryMode` (off). Click on a tile → leaves summary mode and selects that device (chosen). Right-click on a tile → the page menu (UI-PRF-015) for that device. Double-click → mini window (R-058 "Performance graph area" includes tiles). Window resize re-tiles.
+- **Data binding**: visible devices and their main series. Demand is unchanged (same series as the sidebar).
+- **Build**: `pages/performance/summary.rs` `SummaryView` entity, one `ChartView` per tile created on entry (reusing the sidebar cards' `ChartView` entities is not done, because the tile size differs and geometry is keyed by size anyway). The main window's render matches on `summary.is_some()` before the tab strip (shell spec hook: `MainWindow::render` asks the Performance page for `summary_view()`).
+- **Performance**: n tiles at 1 Hz plus CPU at 10 Hz; same costs as the sidebar.
+- **Accessibility**: Esc always exits; the mode is announced by the window title suffix " · Graph Summary" (chosen).
+- **Tests**: `summary_tiles_all_visible_devices`, `summary_blocks_tab_switch`, `summary_esc_returns_to_selected_device`, `summary_tile_grid_for_9` (3 × 3).
+- **Phase**: P2.
+- **Decided here**: tile grid rule and minimums, heading composition, accent marker, click-to-select, title suffix.
