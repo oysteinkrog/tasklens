@@ -2139,3 +2139,22 @@ Every old ID in the three sources maps to at least one entry. Where an old entry
 | add amend PROC-072 | PROC-078 |
 | add amend PROC-073 | PROC-079 |
 | add amend PROC-095 | PROC-099 |
+## Still open
+
+Each item has a recommended answer that beads use until Oystein or the architecture owner decides otherwise.
+
+1. **"Copy rows as table" in the row menu** (PROC-057). R-033's order does not list it. Recommended: show it as item 14, after Copy all metrics.
+2. **Freeze, Thaw and Kill for units outside `app.slice`** (PROC-064). ADR-006 validates only `app.slice` cgroups. Recommended: `ActionTarget::Cgroup` for `app.slice` apps; `ActionTarget::Unit` through the user or system manager's `FreezeUnit`, `ThawUnit` and `KillUnit` for other units; record this in ADR-006.
+3. **`IoPriority` has no "Default (follows nice)" value** (PROC-068). Recommended: add `IoPriority::None` (`IOPRIO_CLASS_NONE`) to ADR-005.
+4. **Copy details CPU decimals** (PROC-070). R-013 says one decimal everywhere; TaskSlinger's fixed block uses `%.2f%%`. Recommended: two decimals in Copy details only.
+5. **VirusTotal one-time notice flag** (PROC-074). Table (a) has no key. Recommended: add `processes.virustotal_notice_accepted = false` to `settings.toml`.
+6. **Hash crates** (PROC-074, PROC-078). ADR-001 allows no SHA-256 or MD5 crate. Recommended: allow `sha2` and `md-5` in `tl-collect` and record it in ADR-001.
+7. **Thread-level action target** (PROC-079). ADR-005 has none. Recommended: `ActionTarget::Thread { process: ProcessKey, tid: u32 }`, checked through the process pidfd and `/proc/<pid>/task/<tid>`, and accepted by the helper's `Signal`, `SetNice`, `SetSched` and `SetAffinity`.
+8. **`smaps` for other users' memory maps** (PROC-081). The helper's `ReadProcessFiles` set has `smaps_rollup` only. Recommended: add `smaps` to the set in ADR-006.
+9. **Environment mask list** (PROC-083). v1 also masked `*KEY*` and `*COOKIE*`. Recommended: mask the union.
+10. **Copying masked environment values** (PROC-083). Recommended: copy a masked value as "••••••" unless its row is revealed.
+11. **Boot ID in saved process minigraphs** (PROC-093). `process:<pid>:<start_ticks>` can match a new process after a reboot. Recommended: `process:<boot_id 16 hex>:<pid>:<start_ticks>`, and "Ended" for any other boot.
+12. **Phase of process minigraph cards** (PROC-093). PERF-086 says P2; both PROC sources say P3. Recommended: P3 for the menu items and the cards.
+13. **Handle Search result menu labels** (PROC-096). R-061 adopts r2's "End Process (SIGTERM)" and "Kill Process (SIGKILL)", which clash with R-045 naming. Recommended: "End Task" (SIGTERM) and "End Process" (SIGKILL).
+
+Unverified assumptions this spec depends on (RECONCILIATION list): U-11, U-12, U-13, U-14, U-15, U-19, U-21, U-22, U-24, U-32, U-33, U-34, U-38. Inferred mechanisms written in this merge and marked "inferred" in their entries: the app-row `io.stat` fallback (PROC-008), the in-RAM rolling history window (PROC-086) and the deleted-keys list for "Delete from history" (PROC-088).
