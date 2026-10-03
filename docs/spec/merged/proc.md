@@ -333,3 +333,364 @@ Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION
 - Verdict: ADAPT
 - Phase: P1
 - Privilege: none
+
+---
+
+## D. Columns
+
+Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs marked "new" are minted here for columns only r2 had). Labels follow r2 where it differs from v1, except where TaskSlinger has the label. App, unit and group rows use the aggregation in each table; process rows show their own values. "Σ" means a sum over member processes with each process counted once. "Restricted" in a privilege line means the lock glyph until the helper reads it (PROC-076).
+
+### PROC-022 Column model, default set and visibility
+- Was: v1 section D intro; r2 PROC-016 (model, default set, GPU slots); add PROC-106
+- Source: TS 2.1 columns, INI `[Columns]`, `[ColumnWidths]`, `ProcessColumnVisibilityMask` | cross-check A.9, B.2 | R-006, R-007
+- Behaviour:
+  - Every column has a stable string ID. Visibility, order and width persist by ID.
+  - Default visible columns, in order: `name, user, pid, cpu, memory, disk, network, gpu, description` (R-006). `power` and `power_trend` exist and are off by default on every machine, whether or not RAPL is readable.
+  - Visibility and width are stored separately (`columns.processes.visible` and `.widths`). Hiding a column and showing it again restores its old width. TaskSlinger's "width > 0 means visible" encoding is not copied; tasklens never imports its INI.
+  - At least one column stays visible; Name cannot be hidden.
+  - GPU 0..GPU 15 columns are offered only for adapters that exist (PROC-033).
+  - The column registry is the union of PROC-027 to PROC-036.
+- Linux data/mechanism: `tl-model::ids::ColumnId` with `as_str()`/`from_str()`; an unknown ID in a file is dropped with a log line (ADR-011).
+- Verdict: ADAPT
+- Phase: P1 (Linux extras P2 and later, per column)
+- Privilege: none
+
+### PROC-023 Column minimum and default widths
+- Was: add PROC-101; r2 PROC-016 (widths, templates); add amend PROC-015
+- Source: TS template strings L35615-35626 | INI `[ColumnWidths] Processes` | cross-check A.9, C.1 | R-006
+- Behaviour:
+  - Minimum width is the measured width of a template string, plus 2 × 8 logical px cell padding, plus 12 px for the sort arrow on the active sort column:
+
+    | Template | Columns |
+    |---|---|
+    | "999999 +99" | PID, Parent PID, SID |
+    | "100.0%" | CPU (all percent kinds), GPU, GPU 0..15, Memory % |
+    | "xxx Mbps" | Network, Network send, Network receive in bits mode; "xxx MiB/s" in bytes mode |
+    | "xxx GiB/s" | Disk and every other rate column |
+    | "999 MiB" | memory columns |
+    | "999999" | counts: Threads, Handles, Page faults, Context switches, Read ops, Write ops |
+    | "999:59:59" | CPU time, CPU time kernel, CPU time user |
+
+  - Text columns (Name, User, Image path, Description, Command line and the rest) have a 60 px minimum.
+  - A drag below the minimum stops at the minimum. "Resize columns to fit content" never goes below it.
+  - Default widths at 100% (logical px): Name 248, User 92, PID 96, CPU 63, Memory 92, Disk 82, Network 92, GPU 72, Description 342, Power usage 101. Every other column defaults to max(minimum, header text width).
+- Linux data/mechanism: GPUI `text_system().layout_line` of each template with the table font and tabular numerals, cached per (font, size, scale) and recomputed when the font, UI scale or row height changes.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-024 Column picker
+- Was: v1 PROC-048; r2 PROC-016 (picker); add PROC-102; add amend PROC-048
+- Source: TS View > Columns, `header_column.filter` L29888, headings L28429-28433, aliases L28427-28428 | cross-check A.10 | R-065 | APP-018
+- Behaviour:
+  - Opened from View > Columns > "Select Columns…" or the header menu. Title "Columns".
+  - A list of all columns with checkboxes and a filter field at the top. The filter matches both the full name and the alias.
+  - Group headings, in order: Image, Identity, Security, Scheduling, CPU, Memory, I/O, Disk, Network, GPU, Power, Objects, Linux. "Objects" holds Handles, Threads, X11 resources and Windows.
+  - Two entries carry TaskSlinger-style alias text (full metric name, then the short header label in quotes): `Working set private - "Memory"` (the default Memory column, RssAnon) and `GPU memory dedicated - "VRAM"`.
+  - Restricted or unsupported columns are still listed, with a note such as "n/a on this system".
+- Linux data/mechanism: UI only.
+- Verdict: ADAPT
+- Phase: P1
+- Privilege: none
+
+### PROC-025 Column reorder, resize and persistence
+- Was: v1 PROC-038; r2 PROC-016 (drag, resize); add amend PROC-038
+- Source: TS INI `Columns.Processes`, `ColumnWidths`, `ColumnResizeBehavior=0`, L28484-28487 | MC remember-column-order | R-018
+- Behaviour:
+  - Drag a header to reorder; drag a header edge to resize (stops at the PROC-023 minimum).
+  - "Resize Behavior: Proportional / Last Column", default Proportional (`processes.column_resize = "proportional"`).
+  - "Resize columns to fit content" and "Reset to default".
+  - Order, visibility and widths always persist in `$XDG_STATE_HOME/tasklens/state.toml` under `[columns.processes]` (`order`, `visible`, `widths`). MC's "Remember column order" option is dropped because tasklens always persists.
+- Linux data/mechanism: state file saved atomically with a 500 ms debounce (ADR-011).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-026 Header context menu
+- Was: v1 PROC-047; r2 PROC-040
+- Source: TS L29313-29314, L28434, L28484, toasts L28648, L28652
+- Behaviour:
+  - Items: "Select Columns…", "Hide This Column", "Resize columns to fit content", "Resize Behavior >" (Proportional, Last Column), "Reset to default".
+  - Toasts: "At least one column must stay visible" and "Columns reset to default".
+  - "Hide This Column" is disabled on Name.
+- Linux data/mechanism: UI only.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PROC-027 Columns: identity, image and package
+- Was: v1 PROC-015; v1 PROC-016; r2 PROC-017
+- Source: TS 2.1 table, L28342-28362, L28345-28349, L29128-29138, cross-check C.1, [CL 0.8.19] | MC columns name, pid | R-007, R-008
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| Name | name | PROC-007 display name plus icon; app rows add the window title (PROC-053) | desktop Name / unit Description | BUILD | P1 |
+| Name display | name_display | desktop Name for app primaries, else `comm` | same | ADAPT | P1 |
+| Image name | image_name | basename of `readlink /proc/<pid>/exe`; Wine: the `.exe` name; " (deleted)" suffix kept | blank | ADAPT | P1 |
+| Image path | image_path | `readlink /proc/<pid>/exe`; " (deleted)" suffix kept and shown in the danger colour | desktop file path | BUILD | P1 |
+| Command line | cmdline | `/proc/<pid>/cmdline`, NUL to space, read limit 32 KiB; the cell shows the first 512 characters, Properties the full text (R-008) | primary process command line | BUILD | P1 |
+| Description | description | desktop Comment, then GenericName, then package `%DESC%`; else blank | desktop Comment | ADAPT | P1 (package part P2) |
+| Type | type | PROC-004 class: "App", "Background process", "System process", "Kernel thread", "Unit", "Pseudo" | "App" / "Unit" | ADAPT | P1 |
+| Start time | start_time | `btime` from `/proc/stat` + starttime / `CLK_TCK`, local time; today `HH:MM:SS`, else `YYYY-MM-DD HH:MM` | earliest member | BUILD | P1 |
+| Version | version | owning package version (below); Flatpak branch or commit; Wine PE `VS_VERSIONINFO` FileVersion; AppImage `X-AppImage-Version` | blank | ADAPT | P2 |
+| Build date | timestamp | package `%BUILDDATE%`; Wine PE COFF `TimeDateStamp`; else `n/a` (ELF has no link time) | blank | ADAPT | P2 |
+| File modified time | file_mtime | `statx` `stx_mtime` of the exe target | blank | BUILD | P2 |
+| File size | file_size | `statx` `stx_size` | blank | BUILD | P2 |
+| Package | company | owning package name, for example `firefox`; Flatpak: app ID; Wine PE CompanyName; `n/a` when unpackaged | blank | ADAPT | P2 |
+| Packager | signer | package `%PACKAGER%` name without the email; Flatpak: origin remote | blank | ADAPT | P2 |
+| Package status | signature | "Packaged"; "Packaged (modified)" only after a Properties integrity check against the mtree sha256 (PROC-078); "Not packaged"; "Deleted (upgraded)" when the exe link ends " (deleted)"; "Flatpak"; "Snap"; "AppImage" (exe under `/tmp/.mount_*`); "Wine" | blank | ADAPT | P2 |
+| Architecture | architecture | ELF `EI_CLASS` + `e_machine`: "x86-64 (64-bit)", "i386 (32-bit)", "AArch64 (64-bit)"; Wine PE Machine: "x64 (64-bit, Wine)", "x86 (32-bit, Wine)". Read once per (dev, inode) | blank | ADAPT | P2 |
+
+- Behaviour:
+  - Text columns sort case-insensitively.
+  - Package and file columns are computed in the background and cached by (path, mtime) or (dev, inode). Cells whose lookup has not finished show `…`. The first click on one of these headers starts a lookup for all rows with a progress tooltip; the sort applies when it finishes.
+- Linux data/mechanism:
+  - Arch: batched `pacman -Qoq <paths…>` for unseen exe paths, debounced 2 s, then `/var/lib/pacman/local/<pkg>-<ver>/desc` (`%VERSION%`, `%DESC%`, `%PACKAGER%`, `%BUILDDATE%`, `%URL%`). The cache is invalidated when the mtime of `/var/lib/pacman/local` changes. Debian uses `dpkg -S`, Fedora `rpm -qf`.
+  - Flatpak: `/proc/<pid>/root/.flatpak-info` `[Application] name`, plus `/var/lib/flatpak/app/<id>/current/active/metadata`.
+  - Wine: the PE header and version resource of the `.exe` from argv, with the path resolved through `WINEPREFIX` from environ, else `~/.wine` (`drive_c`).
+  - Lookups never run on the UI thread.
+- Verdict: see the table (Authenticode becomes package integrity)
+- Phase: see the table
+- Privilege: none for readable files. Other users' exe links give EACCES, so Image path and Image name are Restricted until the helper resolves them (`ReadProcessFiles { exe }`); the file and package columns then use the argv path when it is absolute and readable.
+
+### PROC-028 Columns: ownership, session and security
+- Was: v1 PROC-015 (User, PID, PID parent, Session); v1 PROC-017; r2 PROC-018
+- Source: TS 2.1 table, section 9, L28354-28357, cross-check A.22, [CL 0.8.19] | R-007
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| User | user | real UID from status `Uid:` field 1, name via a cached `getpwuid_r`. Tooltip shows the effective UID when it differs | owner UID | BUILD | P1 |
+| PID | pid | pid, format per PROC-018 | blank | BUILD | P1 |
+| Parent PID | ppid | stat field 4 | blank | BUILD | P1 |
+| Session | session | `/proc/<pid>/sessionid` (audit session, world-readable), mapped to the logind session ID; 4294967295 shows blank | blank | ADAPT | P2 |
+| Security label | security_label | `/proc/<pid>/attr/current`: AppArmor "firefox (enforce)", SELinux context, "unconfined"; `n/a` when no major LSM is active per `/sys/kernel/security/lsm` | blank | ADAPT | P2 |
+| Elevated | elevation | first match: "Full (root)" when euid is 0; "Setuid" when euid differs from ruid; "Capabilities" when CapEff is non-zero for a non-root process; else "Default" | blank | ADAPT | P2 |
+| Sandbox | sandbox | first match: "Flatpak" (flatpak scope or `/.flatpak-info` in `/proc/<pid>/root`), "Snap" (cgroup `snap.`), "bwrap" (user namespace inode differs from init's), "Firejail", "seccomp + NoNewPrivs", "seccomp", "None"; from status `Seccomp` and `NoNewPrivs` | blank | ADAPT | P2 |
+
+- Behaviour: as in the table.
+- Linux data/mechanism: as in the table.
+- Verdict: ADAPT (TaskSlinger's Integrity, Elevation and Protection mapped to Linux)
+- Phase: see the table
+- Privilege: `attr/current`, `sessionid` and `status` are world-readable. `ns/user` and `/proc/<pid>/root` need ptrace read access, so other users' rows fall back to the cgroup name for Flatpak and Snap and show Restricted for bwrap until the helper reads `ns`.
+
+### PROC-029 Columns: CPU and scheduling
+- Was: v1 PROC-018; v1 PROC-019; r2 PROC-019
+- Source: TS 2.1 table, L28351-28353, L28361-28362, L28388-28395, L28455-28460, [CL 0.8.21] | MC `client.rs:880-889` | R-007, R-044
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| CPU | cpu | 100 × Δ(utime + stime) / `CLK_TCK` / Δt / online CPUs: percent of the whole machine | Σ | BUILD | P1 |
+| CPU (kernel) | cpu_kernel | Δstime only, same scaling | Σ | BUILD | P1 |
+| CPU (user) | cpu_user | Δutime only, same scaling | Σ | BUILD | P1 |
+| CPU (one core = 100%) | cpu_relative | same Δ without the division by online CPUs (up to 3200% here) | Σ | BUILD | P1 |
+| CPU time | cpu_time | (utime + stime) / `CLK_TCK` as `h:mm:ss` | Σ | BUILD | P1 |
+| CPU time kernel | cpu_time_kernel | stime | Σ | BUILD | P1 |
+| CPU time user | cpu_time_user | utime | Σ | BUILD | P1 |
+| Priority | priority | class from policy (stat field 41) and nice (field 19): SCHED_FIFO or SCHED_RR "Realtime (rt N)"; SCHED_IDLE "Idle"; nice -20..-11 "High", -10..-1 "Above normal", 0 "Normal", 1..9 "Below normal", 10..19 "Low"; SCHED_BATCH appends " (batch)". Tooltip "nice N" | blank | ADAPT | P1 |
+| Affinity | affinity | status `Cpus_allowed_list` of the leader thread, for example "0-7,16-23"; "All" when it equals the online set | blank | ADAPT | P1 |
+| Cycles | cycles | `perf_event_open(PERF_COUNT_HW_CPU_CYCLES, exclude_kernel=1, inherit=1)` per thread, visible rows of own processes only, global cap 256 counters; past the cap, for other UIDs, or with `perf_event_paranoid` above 2: `n/a` | Σ | ADAPT | P4 |
+| Cycles delta | cycles_delta | Δ of Cycles per interval | Σ | ADAPT | P4 |
+| Context switches | ctx_switches | Σ over `/proc/<pid>/task/*/status` `voluntary_ctxt_switches + nonvoluntary_ctxt_switches`, visible rows only | Σ | ADAPT | P2 |
+| Context switches delta | ctx_switches_delta | Δ per interval, visible rows only | Σ | ADAPT | P2 |
+
+- Behaviour:
+  - There is no "scale CPU to core count" setting. The two columns `cpu` and `cpu_relative` cover both views (R-044). MC's toggle is not built.
+  - Cycles, Cycles delta, Context switches and Context switches delta cannot be sorted (PROC-047).
+- Linux data/mechanism: as in the table; CPU math per ADR-008.
+- Verdict: see the table
+- Phase: see the table
+- Privilege: none, except Cycles for other UIDs (`n/a`).
+
+### PROC-030 Columns: memory
+- Was: v1 PROC-020; r2 PROC-020; add amend PROC-020
+- Source: TS 2.1 table, L28364-28372, L28396, L28411-28412, L28427 | MC columns memory, swap | D-004, R-005
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| Memory | memory | RssAnon from status. Header tooltip "Private memory (RssAnon). Shared and file-backed pages are not counted." Picker alias `Working set private - "Memory"` | cgroup `memory.stat` `anon`, tooltip "Anonymous memory charged to this app's cgroup" | ADAPT | P1 |
+| Working set total | ws_total | VmRSS. Tooltip "Resident set size (VmRSS)" | Σ | BUILD | P1 |
+| Working set peak | ws_peak | VmHWM | blank | BUILD | P1 |
+| Working set shared | ws_shared | RssFile + RssShmem | blank | BUILD | P1 |
+| Commit size | commit | VmData + VmStk | Σ | ADAPT | P1 |
+| Commit size peak | commit_peak | highest VmData + VmStk seen by tasklens since it first saw the process; tooltip "Peak seen by tasklens" | blank | ADAPT | P2 |
+| Commit size delta | commit_delta | change since the previous sample | Σ | BUILD | P2 |
+| Virtual size | vsize | VmSize | blank | BUILD | P1 |
+| Virtual size peak | vsize_peak | VmPeak | blank | BUILD | P1 |
+| Page tables | page_tables | VmPTE (TaskSlinger "Paged pool peak") | Σ | ADAPT | P2 |
+| Non-paged pool peak | (none) | none | n/a | DROP: Linux has no per-process non-paged kernel pool; VmPTE is already Page tables | n/a |
+| Page faults | page_faults | minflt + majflt (stat fields 10 and 12) | Σ | BUILD | P1 |
+| Page faults delta | page_faults_delta | Δ per interval | Σ | BUILD | P1 |
+| Major faults | major_faults (new) | majflt | Σ | ADAPT | P2 |
+| Major faults delta | major_faults_delta (new) | Δ majflt per interval | Σ | ADAPT | P2 |
+| Swap | swap | VmSwap. Not in the default set; MC's auto-hide when the machine has no swap is kept | cgroup `memory.swap.current` | BUILD | P1 |
+| PSS | pss | `smaps_rollup` Pss, visible rows only (`detail_keys`), at most 1 Hz | Σ | ADAPT | P2 |
+| USS | uss | `smaps_rollup` Private_Clean + Private_Dirty, same rules as PSS | Σ | ADAPT | P2 |
+| Working set private | ws_private | Dropped: R-005 (duplicated `memory`) | | | |
+
+- Behaviour:
+  - Values use IEC units with 2 decimals (PROC-003). Sorting is numeric.
+  - PSS and USS cannot be sorted; cells outside `ProcessSnapshot.coverage` show `…` (ADR-008).
+  - MC's `RssAnon + RssShmem + RssFile/share` estimate is not built; the PSS column replaces it.
+  - Column-graph labels: "Memory" for `memory`, "RSS" for `ws_total`, "RSS shared" for `ws_shared` (R-005, PERF-088).
+- Linux data/mechanism: as in the table.
+- Verdict: see the table
+- Phase: see the table
+- Privilege: `status` is world-readable. `smaps_rollup` needs ptrace read access, so it is Restricted for other users until the helper reads it.
+
+### PROC-031 Columns: I/O and disk
+- Was: v1 PROC-021; v1 PROC-022; r2 PROC-021
+- Source: TS 2.1 table, L28372-28378, L28397-28410, INI width id 13 "Disk" | MC column drive (merged into Disk) | R-007, R-014
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| Disk | disk | Δ(read_bytes + write_bytes − cancelled_write_bytes)/Δt from `/proc/<pid>/io`, MiB/s | PROC-008 rule (Σ, or cgroup `io.stat` when a member is Restricted) | ADAPT | P1 |
+| Disk read rate | disk_read_rate | Δread_bytes/Δt | Σ / `io.stat` rbytes | BUILD | P1 |
+| Disk write rate | disk_write_rate | Δwrite_bytes/Δt; tooltip shows cancelled_write_bytes | Σ / `io.stat` wbytes | BUILD | P1 |
+| Disk total rate | disk_total_rate | Δ(read_bytes + write_bytes)/Δt | Σ | BUILD | P1 |
+| Disk read bytes | disk_read_bytes | cumulative read_bytes | Σ / `io.stat` rbytes | BUILD | P2 |
+| Disk write bytes | disk_write_bytes | cumulative write_bytes | Σ / `io.stat` wbytes | BUILD | P2 |
+| Disk total bytes | disk_total_bytes | read_bytes + write_bytes | Σ | BUILD | P2 |
+| Disk read bytes delta | disk_read_delta | Δ per interval | Σ | BUILD | P2 |
+| Disk write bytes delta | disk_write_delta | Δ per interval | Σ | BUILD | P2 |
+| Disk total bytes delta | disk_total_delta | Δ per interval | Σ | BUILD | P2 |
+| Disk reads | disk_reads | process rows `n/a` with tooltip "Linux counts storage operations per cgroup, not per process" | `io.stat` rios summed over devices | ADAPT | P2 (cgroup), P4 (per process) |
+| Disk writes | disk_writes | same with wios | `io.stat` wios | ADAPT | P2, P4 |
+| Disk reads delta | disk_reads_delta | Δ rios | Δ | ADAPT | P2, P4 |
+| Disk writes delta | disk_writes_delta | Δ wios | Δ | ADAPT | P2, P4 |
+| I/O read bytes | io_read_bytes | rchar (all read syscalls, including cache hits, pipes and sockets) | Σ | BUILD | P2 |
+| I/O write bytes | io_write_bytes | wchar | Σ | BUILD | P2 |
+| I/O read bytes delta | io_read_delta | Δrchar | Σ | BUILD | P2 |
+| I/O write bytes delta | io_write_delta | Δwchar | Σ | BUILD | P2 |
+| I/O read rate | io_read_rate | Δrchar/Δt (TaskSlinger "I/O read+other rate") | Σ | ADAPT | P2 |
+| I/O write rate | io_write_rate | Δwchar/Δt | Σ | BUILD | P2 |
+| I/O read ops | io_read_ops | syscr | Σ | ADAPT | P2 |
+| I/O write ops | io_write_ops | syscw | Σ | ADAPT | P2 |
+| I/O other bytes | (none) | none | n/a | DROP: Linux has no per-process counter for I/O outside read and write (ioctl and similar) | n/a |
+
+- Behaviour: as in the table. Rates use fixed MiB/s with 1 decimal (PROC-003).
+- Linux data/mechanism:
+  - As in the table. Per-process storage operations (P4) come from an eBPF `block:block_rq_issue` collector. It is a separate privileged binary, never `tl-helper` (ADR-006); its ADR is written with `tl-netmon` in P4.
+- Verdict: see the table
+- Phase: see the table
+- Privilege: `/proc/<pid>/io` is Restricted for other UIDs until the helper reads it (`ReadProcessFiles { io }`). `io.stat` is world-readable.
+
+### PROC-032 Column: network
+- Was: v1 PROC-023; r2 PROC-022
+- Source: TS INI width id 16, L35329 | MC column network (nethogs) | ADR-016 "Per-process network"
+- Behaviour:
+  - "Network" shows the attributed per-process TCP rate in the chosen unit (`units.network`, default bits; `units.network_auto_scale`, default off).
+  - Header tooltip: "Attributed TCP traffic. UDP and other users' sockets are not counted."
+  - A process with no attributable socket shows "0 Mbps". A process whose fds cannot be read shows the Restricted glyph.
+  - A socket shared by several processes counts toward each of them, and the cell tooltip says "shared".
+  - Extra columns: `net_send_rate` "Network send" and `net_recv_rate` "Network receive".
+  - The column is never hidden on error; validity glyphs show instead. MC's nethogs scraping is not built.
+- Linux data/mechanism:
+  - `NETLINK_SOCK_DIAG` `inet_diag_req_v2` dump for TCP v4 and v6 with `INET_DIAG_INFO`; Δ`tcpi_bytes_acked` (send) and Δ`tcpi_bytes_received` (receive) per socket inode.
+  - The socket inode to PID map comes from `/proc/<pid>/fd` readlinks (`socket:[ino]`), rebuilt every 2 s while demanded, shared with the Connections tab.
+  - The header total includes unattributed traffic and says so.
+  - Exact all-protocol counting comes later from `tl-netmon` (eBPF `cgroup_skb` or kprobes) under its own polkit action `io.github.oysteinkrog.tasklens.netmon`.
+- Verdict: ADAPT
+- Phase: P1 (TCP attribution); P4 (`tl-netmon` exact counting)
+- Privilege: own processes need none. Other users' fds are Restricted until the helper resolves them (`ResolveSocketInodes`). `tl-netmon` needs CAP_BPF and CAP_PERFMON.
+
+### PROC-033 Columns: GPU
+- Was: v1 PROC-024; r2 PROC-023; add PROC-103; add amend PROC-024
+- Source: TS 2.1, L28384-28385, L28428, L35456-35471, [CL 0.8.23], cross-check A.11, C.1 | MC columns gpu, gpu_memory | ADR-007 | R-007, R-026
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| GPU | gpu | max over adapters of the process's max(SM, encoder, decoder) utilization. NVIDIA: `nvmlDeviceGetProcessUtilization` in `tl-gpu-probe`; AMD and Intel: Δ`drm-engine-*` ns / Δt from `/proc/<pid>/fdinfo/*`, de-duplicated by `drm-client-id` | Σ | ADAPT | P1 |
+| VRAM | gpu_mem_dedicated | NVIDIA: `usedGpuMemory` from graphics plus compute running processes (`_v3`), summed per PID across devices; AMD and Intel: fdinfo `drm-memory-vram` / `drm-resident-vram0`. Picker alias `GPU memory dedicated - "VRAM"` | Σ | ADAPT | P1 |
+| GPU memory shared | gpu_mem_shared | AMD fdinfo `drm-memory-gtt`; Intel `drm-resident-system`; NVIDIA `n/a` (no per-process GTT in NVML) | Σ | ADAPT | P2 |
+| GPU engine | gpu_engine | busiest engine label: "GPU 0 - 3D/Compute", "GPU 0 - Encode", "GPU 0 - Decode" from the same NVML samples; DRM engine name for others | most-used member engine | ADAPT | P2 |
+| GPU encode | gpu_encode (new) | NVML encUtil; fdinfo `drm-engine-video*` | Σ | ADAPT | P2 |
+| GPU decode | gpu_decode (new) | NVML decUtil; fdinfo `drm-engine-video*` | Σ | ADAPT | P2 |
+| GPU 0 .. GPU 15 | gpu_0 .. gpu_15 | this process's utilization on adapter N | Σ | BUILD | P2 |
+| (MC) GPU Memory | (merged into VRAM) | same data | | BUILD (merge) | P1 |
+
+- Behaviour:
+  - A process with no NVML sample this interval shows "0%" only when the probe reports that the device supports process utilization (a capability bit per device UUID). Otherwise `n/a`. GPU utilization is never divided among processes as a substitute (ADR-007).
+  - GPU N slots: 16 slots, all off by default, offered in the picker only for adapters that exist (on the owner's machine "GPU 0", the RTX 5070 Ti). Adapter numbering is by PCI bus address ascending across NVIDIA and DRM render nodes, the same numbering as the Performance "GPU N" pages. Header line 2 shows that adapter's total utilization; the header tooltip gives the adapter name and PCI address. The cell tooltip shows that adapter's VRAM ("VRAM on GPU 0: 1.22 GiB"). Per-adapter memory columns are not built.
+- Linux data/mechanism:
+  - NVML runs only in `tl-gpu-probe` (ADR-007). Process data is requested at 1 Hz, only while a GPU column or graph needs it, whatever the Refresh setting.
+  - NVML PIDs are mapped to `ProcessKey` through the current process table; a PID not in the table is dropped.
+  - fdinfo is empty on this NVIDIA driver, so NVML is the only per-process source here.
+  - Unverified: U-12 (NVML per-process utilization unprivileged on driver 615).
+- Verdict: see the table
+- Phase: see the table
+- Privilege: none for NVML. fdinfo of other users' processes is Restricted until the helper reads it (`ReadProcessFiles { fdinfo }`).
+
+### PROC-034 Columns: Power usage and Power usage trend
+- Was: v1 PROC-025; r2 PROC-024
+- Source: TS 2.1 ids 79 and 80, L28378-28383 | ADR-016 | R-006, R-028, R-029, R-059
+- Behaviour:
+  - "Power usage" (`power`) shows a class: "Very low" below 0.5 W, "Low" below 2 W, "Moderate" below 8 W, "High" below 25 W, "Very high" from 25 W. The tooltip gives the estimate, for example "≈ 3.4 W (estimate)".
+  - "Power usage trend" (`power_trend`) uses the same classes over a 2-minute moving average.
+  - Both are off by default on every machine (R-006).
+  - When RAPL exists but `energy_uj` is not readable: `n/a` with the tooltip "Needs setup", which links to the "tasklens Additional Setup" window row "CPU power draw" (R-028). When no power source exists at all: `n/a` with the tooltip "No power sensor available". A guessed class is never shown.
+  - App rows sum their processes.
+- Linux data/mechanism:
+  - Estimate = P_pkg × (process Δcpu_time / total busy Δcpu_time) + Σ over GPUs of P_gpu × (process SM util / Σ SM util on that GPU).
+  - P_pkg from Δ`/sys/class/powercap/intel-rapl:0/energy_uj`, with wrap from `max_energy_range_uj` (AMD uses the same driver name).
+  - P_gpu from NVML `nvmlDeviceGetPowerUsage` through the probe, or hwmon `power1_average` for amdgpu.
+  - Enabling RAPL access is `tasklens-setup rapl-enable` under polkit `io.github.oysteinkrog.tasklens.setup`. It writes `/etc/udev/rules.d/99-tasklens-powercap.rules` with the line `SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"`, then runs `udevadm control --reload` and `udevadm trigger --subsystem-match=powercap --action=add` (R-029). Mission Center's `99-powercap.rules` is detected and left alone.
+- Verdict: ADAPT (measured-power share model in place of Windows' energy estimator)
+- Phase: P2 (the setup window is P3)
+- Privilege: `energy_uj` has been root-only since kernel 5.10; readable here because of Mission Center's rule.
+
+### PROC-035 Columns: object counts
+- Was: v1 PROC-026; r2 PROC-025
+- Source: TS 2.1, L28390-28391, L28248-28249, L35512 | R-007
+
+| Label | ID | Linux source | App/unit row | Verdict | Phase |
+|---|---|---|---|---|---|
+| Handles | handles | fd count: `fstatat` `st_size` of `/proc/<pid>/fd`, readdir count as fallback. Tooltip "Open file descriptors" | Σ | ADAPT | P1 |
+| Threads | threads | stat field 20 `num_threads`, readable for all UIDs | Σ | BUILD | P1 |
+| Windows | windows | top-level windows owned by the PID, from the KWin bridge (PROC-052); `n/a` without the bridge (TaskSlinger "USER objects") | Σ | ADAPT | P3 |
+| X11 resources | x11_resources | XRes `XResQueryClientIds` (PID mask) plus `XResQueryClientResources` total on XWayland; "n/a (Wayland client)" for others (TaskSlinger "GDI objects") | Σ | ADAPT | P4 |
+
+- Behaviour: integers, right-aligned, thin-space grouped.
+- Linux data/mechanism: as in the table. XRes runs over `x11rb` on `$DISPLAY` only while the column is visible (U-32).
+- Verdict: see the table
+- Phase: see the table
+- Privilege: the fd count of other UIDs is Restricted until the helper reads it (`ReadProcessFiles { fd_list }`).
+
+### PROC-036 Linux-only extra columns
+- Was: v1 PROC-027; r2 PROC-026
+- Source: MC inventory section 8 | ADR-016
+
+| Label | ID | Linux source | Verdict | Phase |
+|---|---|---|---|---|
+| State | state | stat field 3: "Running" (R), "Sleeping" (S), "Disk sleep" (D), "Stopped" (T), "Tracing stop" (t), "Zombie" (Z), "Idle" (I), "Dead" (X); "Frozen" when the cgroup's `cgroup.events` has `frozen 1` | BUILD | P1 |
+| Nice | nice | stat field 19 | BUILD | P1 |
+| Scheduling policy | sched_policy | stat field 41: OTHER, BATCH, IDLE, FIFO, RR, DEADLINE, plus the rt priority (field 40) for FIFO and RR | BUILD | P2 |
+| I/O priority | io_priority | `ioprio_get(IOPRIO_WHO_PROCESS, pid)`: "best-effort 4", "idle", "realtime 0", "none (from nice)" | BUILD | P2 |
+| Unit | unit | systemd unit name from the cgroup path | BUILD | P1 |
+| Cgroup | cgroup | full v2 path (`0::` line) | BUILD | P2 |
+| App ID | app_id | app ID from PROC-005 and PROC-006 (desktop ID or Flatpak ID) | BUILD | P2 |
+| OOM score | oom_score | `/proc/<pid>/oom_score`; tooltip shows `oom_score_adj` | BUILD | P2 |
+| OOM adj | oom_score_adj (new) | `/proc/<pid>/oom_score_adj` | BUILD | P2 |
+| TTY | tty | stat field 7 decoded to `pts/3` or `ttyN` | BUILD | P2 |
+| Working directory | cwd (new) | `readlink /proc/<pid>/cwd` | BUILD | P2 |
+| Process group | pgrp (new) | stat field 5 | BUILD | P4 |
+| SID | sid | stat field 6 | BUILD | P4 |
+| Last CPU | last_cpu (new) | stat field 39 | BUILD | P4 |
+| Container | container (new) | PID namespace differs from init's: "container (podman)", "container (docker)", "container (systemd-nspawn)" from the cgroup path (`machine.slice`, `docker-<id>.scope`, `libpod-<id>.scope`) | ADAPT | P4 |
+
+- Behaviour: listed under the "Linux" picker heading. None are visible by default.
+- Linux data/mechanism: as in the table.
+- Verdict: ADAPT (MC wins on Linux-only features)
+- Phase: see the table
+- Privilege: `cwd`, `ns` and `ioprio_get` of other UIDs are Restricted until the helper reads them. Everything else is world-readable.
+
+### PROC-037 TaskSlinger column id map
+- Was: v1 PROC-028; add amend PROC-028
+- Source: TS INI 96 ids (0-95) | cross-check C.1
+- Behaviour:
+  - TaskSlinger's 96 ids are 80 named columns plus "GPU 0" to "GPU 15". All are covered by PROC-027 to PROC-035 (two dropped, one merged).
+  - Reference map only: confirmed 0 Name, 1 User, 3 PID, 6 CPU, 7 Memory, 13 Disk, 16 Network, 17 GPU, 33 Description, 79 Power usage; inferred 18 VRAM, 62-77 GPU 0-15, 80 Power usage trend, 81-83 Package, Packager, Package status.
+  - tasklens uses string IDs, so the unmapped ids (2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95) need no resolution (U-38). `state` is a Linux extra, not a TaskSlinger column.
+- Linux data/mechanism: none.
+- Verdict: ADAPT (numeric ids become string IDs)
+- Phase: P1
+- Privilege: none
