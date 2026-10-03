@@ -8,7 +8,8 @@ ID prefix: UI-SHL. Phase labels follow R-072 (P0 to P4).
 
 - Binding, in order: `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-103, canonical tables a to d), `docs/ARCHITECTURE.md` (ADR-009 and ADR-010 above all), then the merged specs `docs/spec/merged/sys-app.md` (APP entries), `perf.md` and `proc.md` (their shell parts).
 - Tokens and components come from `docs/ui/foundation.md`. This file never defines a colour or token value. It names `TlTheme` fields (`titlebar`, `tab_bg`, `accent` and so on), status colours (`status.danger` and so on), spacing `sp1` to `sp8`, text `t_xs` to `t_xl`, radii `r_sm` and `r_md`, motion `m_fast`, `m_base`, `m_slow` and `ease_out_cubic`.
-- Components are the foundation's `Tl*` types: `TlButton`, `TlIconButton`, `TlToggleButton`, `TlMenu`, `TlMenuItem`, `TlToast`, `TlDialog`, `TlWindowFrame`, `TlTooltip`, `TlInput`, `TlCheckbox`, `TlSwitch`, `TlSlider`, `TlKbd`, `TlSkeleton`, `TlFocusRing`. Where the foundation names one differently, its name wins and this file is read with that name.
+- Components are the foundation's types (`docs/ui/foundation.md` section 2): `TlButton` with its kinds `Primary`, `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle { on }`, `Segment { on }` (UI-FND-010), `TlCheckbox`, `TlSwitch`, `TlSlider`, `TlTextInput` and `TlFilterBox` (UI-FND-016), `TlSelect`, `TlTooltip`, `TlToast` and its `ToastQueue` (UI-FND-020), `TlDialog` and `TlSecondaryWindow` (UI-FND-021), `TlMenu` (UI-FND-022), `TlSpinner`, `TlSkeleton`, `TlShield` (UI-FND-028), `TlFocusRing`, plus the kit `Kbd`. Component visuals (heights, fills, hover and pressed looks, focus rings) are the foundation's; this file sets only placement, size overrides it names explicitly, content and behaviour.
+- Theme state is the foundation's `ThemeStore` Global (UI-FND-040); metrics are `UiMetrics` (UI-FND-003), including icon sizes `i_xs` 12, `i_sm` 14, `i_md` 16, `i_lg` 20.
 
 ## Conventions used in every entry
 
@@ -34,8 +35,8 @@ ID prefix: UI-SHL. Phase labels follow R-072 (P0 to P4).
 | `window/tabstrip.rs` | `TabStrip` (Entity, cached) | 020 to 025 |
 | `window/filter.rs` | `FilterBox` (Entity) | 024 |
 | `window/status.rs` | `StatusChip` (Entity, cached) | 050, 051 |
-| `window/secondary.rs` | `SecondaryWindow<V>` frame helper | 090, 091 |
-| `windows/{settings.rs, theme_editor.rs, share_theme.rs, about.rs, crash_report.rs, setup.rs, shortcuts.rs, public_ip.rs, collector_health.rs, confirm.rs}` | one Entity each | 060 to 099 |
+| foundation `components/window_frame.rs`, `components/dialog.rs`, `window/registry.rs` | `TlSecondaryWindow`, `TlDialog`, `WindowRegistry` | 090, 091 |
+| `window/{settings.rs, theme_editor.rs, share_theme.rs, about.rs, crash_report.rs, setup.rs, shortcuts.rs, public_ip.rs, collector_health.rs}` | one Entity each | 060 to 099 |
 | `actions.rs` | every Action and `bind_keys` | 120 |
 | `focus.rs` | `FocusModel` helpers | 121 to 124 |
 | `settings_global.rs` | `TlSettings` Global | conventions |
@@ -129,17 +130,17 @@ WindowOptions {
 
 ```text
 |12|16|8| File |1| View |1| Settings |1| Help |1|4|[◈][▦][☰][+]|  drag area (flex)  |[pin][ - ][ □ ][ × ]|
- pad ic gap  menu buttons h=26, px=16, t_md     sep  toolbar 30×28, gap 2          caption 36×34 each
+ pad ic gap  menu buttons h=26, px=16, t_md     sep  toolbar 24×24, gap 7          caption 36×34 each
 ```
 
   Part list, left to right:
   1. Left padding 12 [S gpui-kit Linux padding].
   2. App icon: 16 × 16 [S APP-002], app SVG `assets/icons/tasklens.svg`, vertically centred. Not interactive except as drag area (mouse-down propagates). Measured reference has no icon (TaskSlinger draws none); APP-002 requires it [S wins].
   3. Gap 8 (`sp4`).
-  4. Menu buttons "File", "View", "Settings", "Help" (and "Debug" when enabled, UI-SHL-042): UI-SHL-030. Each is 26 tall, padding-x 16 (`sp6`) [M: File, View, Settings, Help centres at 35, 105, 184, 262; separators at 71, 141, 228, 297], label `t_md` regular in `text_primary` [C from M: cap height 11 logical px].
+  4. Menu buttons "File", "View", "Settings", "Help" (and "Debug" when enabled, UI-SHL-042): UI-SHL-030. Each is 26 tall, padding-x 16 (`sp6`) [M: File, View, Settings, Help centres at 35, 105, 184, 262; separators at 71, 141, 228, 297], label `t_md` at weight 400 in `text_primary` [C from M: cap height 11 logical px].
   5. Between two menu buttons, and after the last one: a vertical separator 1 physical px wide, 16 tall [M], colour `divider`, vertically centred.
   6. Gap 4 (`sp2`) [M 5].
-  7. Toolbar (UI-SHL-010): icon buttons 30 × 28 [C from M pitch 31], gap 2 (`sp1`), icon 16 [M 15].
+  7. Toolbar (UI-SHL-010): `TlButton` 24 × 24 (UI-FND-010), gap 7 so the pitch equals the measured 31 [M], icon `i_md` 16 [M 15].
   8. Drag area: `flex_1()`, minimum 24, empty. This is the only purpose-built drag region; every other part that does not stop mouse-down also drags (icon, separators, padding).
   9. Caption buttons (UI-SHL-005): pin, minimize, maximize or restore, close. Each 36 wide [M: centres at 1234, 1270, 1306, 1342] × 34 tall, flush to the right edge.
 - **States**:
@@ -155,7 +156,7 @@ WindowOptions {
 - **Accessibility**: every toolbar and caption button has an accessible name equal to its tooltip text. Keyboard access to menus is F10 and Alt+letter (UI-SHL-030). The title bar has no Tab stops (TaskSlinger has none; toolbar buttons are reachable by their Actions and menus) [C].
 - **Tests**: `titlebar_parts_order` (render test): children in order icon, File, View, Settings, Help, toolbar, drag, pin, minimize, maximize, close. `titlebar_toolbar_by_tab`: Processes shows 4 toolbar buttons (shield and picker only when available), Performance 2, and the drag area width changes accordingly (no reserved space, PROC-016).
 - **Phase**: P1 (pin P2, shield P3, picker P3).
-- **Decided here**: menu label size `t_md`; toolbar button 30 × 28 with gap 2; caption buttons 36 wide; title bar not a Tab stop; own drag code when kit controls cannot be hidden.
+- **Decided here**: menu label `t_md` at weight 400 (the token default is 500); toolbar gap 7; caption buttons 36 wide; title bar not a Tab stop; own drag code when kit controls cannot be hidden.
 
 ### UI-SHL-004 Title bar drag region, double-click and window menu
 
@@ -179,16 +180,16 @@ WindowOptions {
 
   | Button | Icon (off) | Icon (on) | Tooltip | Action |
   |---|---|---|---|---|
-  | Pin | Lucide `pin-off` [M: crossed pin] | Lucide `pin`, drawn in `text_selected_primary` on an `accent` fill | "Keep on top" / "Keep on top (on)" [C]; disabled: "Not supported by this desktop" [S] | `ToggleAlwaysOnTop` |
+  | Pin | Lucide `pin-off` [M: crossed pin] | Lucide `pin` in `accent` on the `TlButton::Toggle` on look (`accent` at alpha 0.25, 1 px `accent` border) | "Always on top" / "Always on top (on)" (UI-FND-021); disabled: "Not supported by this desktop" [S] | `ToggleAlwaysOnTop { window: WindowKey::Main }` |
   | Minimize | Lucide `minus` | | "Minimize" | `MinimizeWindow` |
   | Maximize | Lucide `square` | Lucide `copy` (restore look) when maximized | "Maximize" / "Restore" | `ZoomWindow` |
   | Close | Lucide `x` | | "Close" | `CloseWindow` |
 
 - **States**:
   - Default: transparent background.
-  - Hover: background `tab_hover` (pin, minimize, maximize); close hover background `status.danger`, icon `text_selected_primary` [C, kit uses `danger`].
+  - Hover: background `tab_hover` (pin, minimize, maximize); close hover background `status.danger` with a white icon (same as UI-FND-021).
   - Pressed: hover background with 0.8 opacity [C].
-  - Pin on: fill `accent` across the full 36 × 34 cell [S APP-008 "accent fill when on"]; hover on a pinned pin keeps the accent fill and lightens it with the foundation's hover overlay.
+  - Pin on: the Toggle on look across the full 36 × 34 cell, the same look as the secondary-window pin (UI-FND-021) [S APP-008 "accent fill when on"].
   - Pin disabled (no KWin bridge and not X11): icon at the foundation's disabled opacity, no hover, tooltip "Not supported by this desktop".
   - Minimize and maximize are hidden (not disabled) when `window.window_controls().minimize` or `.maximize` is false [S APP-008]; the remaining buttons stay flush right.
   - Keyboard focus: caption buttons are not Tab stops [C].
@@ -198,12 +199,12 @@ WindowOptions {
   - Maximize: `window.zoom_window()`.
   - Close: dispatches `CloseWindow`, which follows the close behaviour in UI-SHL-113 (quit, hide to tray, or hide while detached graphs are open).
 - **Data binding**: `window.always_on_top`; pin availability from `Snapshot.windows.header.validity` (KDE) or the X11 backend flag. `ComponentMask::WINDOWS` triggers a re-render only when that availability flips.
-- **Build**: `window/titlebar.rs::caption_buttons()`, each a `TlIconButton` variant "caption" (foundation) or, if the foundation has no such variant, `div().id(..).w(36).h(34)` with `.on_click` and `.hover(..)`.
+- **Build**: `window/titlebar.rs::caption_buttons()`, the pin a `TlButton::Toggle` and the other three `div().id(..).w(36).h(34)` cells with `.on_click` and the hover fills above (the kit caption buttons are 34 wide, UI-FND-021).
 - **Performance**: static elements; no per-frame work.
 - **Accessibility**: tooltip text doubles as accessible name; the pin tooltip includes the state.
 - **Tests**: `pin_toggles_setting` (TestAppContext, fake engine): click pin; `window.always_on_top == true` and the fake engine received `KWin(KeepAbove{on:true})`. `caption_hides_unsupported`: fake `window_controls` with `maximize: false` renders three buttons.
 - **Phase**: P1 (minimize, maximize, close); P2 (pin).
-- **Decided here**: pin tooltip text "Keep on top"; hover colours; caption buttons not Tab stops.
+- **Decided here**: caption buttons 36 wide on the main window (secondary windows keep the kit's 34, UI-FND-021); caption buttons not Tab stops.
 
 ### UI-SHL-006 Server-decorations variant ("Use system title bar")
 
@@ -252,7 +253,7 @@ WindowOptions {
 ### UI-SHL-010 Toolbar slot and per-tab content
 
 - **Implements**: APP-002, R-031, PERF-014, PROC-016, APP-003, APP-004, APP-005, APP-006.
-- **Anatomy**: a horizontal row inside the title bar (UI-SHL-003 part 7), height 28, buttons 30 × 28 [C from M pitch 31], gap 2 (`sp1`), vertically centred in the 34 px bar. Order, left to right [M processes.png: shield, grid, stacked bars, plus]:
+- **Anatomy**: a horizontal row inside the title bar (UI-SHL-003 part 7): buttons 24 × 24 (UI-FND-010), gap 7 so the pitch equals the measured 31 [M], vertically centred in the 34 px bar. Order, left to right [M processes.png: shield, grid, stacked bars, plus]:
 
   | Slot | Button | Shown on | Entry |
   |---|---|---|---|
@@ -262,50 +263,31 @@ WindowOptions {
   | 4 | Window picker "+" | every tab, from P3, only with the KWin bridge | UI-SHL-014 |
 
   - A hidden button takes no space (`.when(cond, ..)`, not `.invisible()`), so the drag area grows [S PROC-016].
-  - All four use `TlIconButton` in the foundation's "toolbar" (ghost) style: transparent fill, icon 16 in `text_primary`, radius `r_sm`.
-- **States** (common to all four):
-  - Hover: fill `menu_hover`.
-  - Pressed: fill `menu_hover` at full strength plus the foundation's pressed overlay.
-  - Toggled on (slot 2 only): fill `accent` at the foundation's "selected subtle" alpha, icon `accent` [C].
-  - Disabled: icon at the foundation's disabled opacity; no hover; tooltip still shows (reason text).
-  - Focus: toolbar buttons are not Tab stops [C]. Keyboard users reach the same Actions through View > Process View, the Settings menu and table (b) keys.
-  - Window inactive: icons `text_secondary`.
+  - Slot 1 is `TlShield` (UI-FND-028); slots 2 and 4 are `TlButton::Toggle`; slot 3 is `TlButton::Icon`. Icons `i_md` 16.
+- **States** (common to all four): the `TlButton` states of UI-FND-010 (hover `tab_hover`, pressed `header`, Toggle on: `accent` at alpha 0.25 with a 1 px `accent` border, disabled at opacity 0.5 with its tooltip still shown). Toolbar buttons are built with `.tab_stop(false)`: they are not Tab stops [C]; keyboard users reach the same Actions through View > Process View, the Settings menu and table (b) keys. Window inactive: icons `text_secondary`.
 - **Interaction**: click dispatches the button's Action (below). Tooltips use `TlTooltip` with the 500 ms delay and, where the Action has a binding, the key hint (`Tooltip::action`).
 - **Data binding**: `MainWindow.active_tab`, `UiState.processes.history_mode`, `processes.hide_system`, `processes.mode`, `HelperState` (UI-SHL-011), KWin availability (UI-SHL-014).
 - **Build**: `Toolbar` is a `RenderOnce` struct built inside `TitleBarView::render` from a small `ToolbarModel { tab, history_mode, hide_system, mode, helper: HelperState, picker_available, picking }` that `TitleBarView` keeps up to date.
 - **Performance**: at most 4 buttons; no allocations beyond the element tree; tooltip text are `SharedString` constants except the view-mode tooltip, which is one of three precomputed `SharedString`s.
 - **Tests**: `toolbar_slots_per_tab` (render test): for each of the six tabs with helper installed and bridge up, assert the visible slot list: Processes [1,2,3,4], every other tab [1,4]. `toolbar_history_mode`: Processes in History mode shows slot 3 disabled with tooltip "History shows a flat list".
 - **Phase**: P1 (slots 2 and 3), P3 (slots 1 and 4).
-- **Decided here**: toggled-on look of slot 2; toolbar buttons not Tab stops.
+- **Decided here**: gap 7; toolbar buttons not Tab stops.
 
 ### UI-SHL-011 Shield (unlock privileged actions)
 
 - **Implements**: APP-003, APP-049 (unlock at launch), R-002, R-003, table (b) "Shift held at launch".
-- **Anatomy**: `TlIconButton` 30 × 28. Icon: Lucide `shield` (locked) in `text_primary`; Lucide `shield-check` (unlocked) in `accent` [C; APP-003 names them "shield" and "shield-hi"; TaskSlinger's two-colour Windows shield ships nowhere, D-005].
-- **States**:
-  - Locked: `shield`, tooltip "Unlock privileged actions" [S].
-  - Starting (pkexec prompt open): icon `shield` with a 2 px `accent` ring around the button [C]; button inert (`loading` semantics) until the helper answers or fails. No spinner (widgets perf note: spinners request frames).
-  - Unlocked: `shield-check` in `accent`, tooltip "Privileged actions unlocked (click to lock)" [S].
-  - Hidden: before P3, and when `tl-helper` is not installed [S].
-- **Interaction**:
-  - Click while locked: Action `UnlockPrivileged`. The UI calls `ActionTracker::start_helper_session()`, which sends the engine command that runs `pkexec /usr/lib/tasklens/tl-helper --session`. Results:
-    - Success: state Unlocked, Success toast "Privileged actions unlocked" [C].
-    - Cancelled by the user (pkexec exit 126): state Locked, Info toast "Authentication cancelled" [S APP-044].
-    - Failure (exit 127 or other): state Locked, Error toast "Could not start the administrator helper" [C].
-  - Click while unlocked: Action `LockPrivileged`, ends the session (closes the helper's stdin). State Locked, Info toast "Privileged actions locked" [C].
-  - Helper idle exit (300 s) or crash: state Locked, no toast [C] (the next privileged action starts a new session).
-  - Shift held at launch, or `privilege.unlock_at_launch = true`: `UnlockPrivileged` runs once after the first frame (UI-SHL-110 step 9).
-- **Data binding**: `HelperState { Unavailable, Locked, Starting, Unlocked }` held by `ActionTracker` and changed by `ActionEvent`s; `TitleBarView` subscribes to `ActionTracker` events of kind `HelperStateChanged`.
-- **Build**: `window/toolbar.rs::shield_button()`.
-- **Accessibility**: accessible name equals the tooltip text for the current state.
-- **Tests**: `shield_states` (TestAppContext with fake engine): click; fake engine replies Started; icon is `shield-check` and the toast "Privileged actions unlocked" was pushed. Replay with Cancelled; toast "Authentication cancelled".
+- **Component**: `TlShield` (UI-FND-028) owns the look, states, tooltips, the `StartHelperSession` and `EndHelperSession` Actions, the starting spinner and the failure toasts ("Authentication cancelled", "Could not start the privileged helper"). This entry fixes only its place and launch behaviour.
+- **Placement**: toolbar slot 1, every tab, hidden before P3 and when `/usr/lib/tasklens/tl-helper` is missing [S].
+- **Launch**: Shift held at launch (UI-SHL-110 step 6) or `privilege.unlock_at_launch = true` dispatches `StartHelperSession` once after the first frame (UI-SHL-110 step 11) [S].
+- **Other entry points**: the Processes status chip's " | 42 restricted" segment (UI-SHL-050) and the "Retry as administrator" toast button (PROC-058) dispatch the same Action.
+- **Data binding**: `HealthSnapshot.helper` (`ComponentMask::HEALTH`).
+- **Tests**: `shield_slot_every_tab` (render test): with the helper present, slot 1 is present on all six tabs.
 - **Phase**: P3.
-- **Decided here**: icons; starting ring; toasts "Privileged actions unlocked", "Privileged actions locked", "Could not start the administrator helper".
 
 ### UI-SHL-012 Hide system processes toggle
 
 - **Implements**: APP-004, PROC-046, R-031.
-- **Anatomy**: `TlIconButton` 30 × 28, toggle. Icon Lucide `layout-grid` [C; matches the four-square glyph measured in processes.png].
+- **Anatomy**: `TlButton::Toggle` 24 × 24. Icon Lucide `layout-grid` [C; matches the four-square glyph measured in processes.png].
 - **States**:
   - Off (`processes.hide_system = false`, showing all): plain toolbar look; tooltip "Hide system processes" [S].
   - On (hiding): toggled-on look (UI-SHL-010); tooltip "Show system processes" [S].
@@ -318,7 +300,7 @@ WindowOptions {
 ### UI-SHL-013 View mode cycler
 
 - **Implements**: APP-005, PROC-015, PROC-016, R-010.
-- **Anatomy**: `TlIconButton` 30 × 28. The icon shows the current mode [C]: `grouped` Lucide `rows-2` [M: two stacked bars in processes.png, default mode], `tree` Lucide `list-tree`, `flat` Lucide `list`.
+- **Anatomy**: `TlButton::Icon` 24 × 24. The icon shows the current mode [C]: `grouped` Lucide `rows-2` [M: two stacked bars in processes.png, default mode], `tree` Lucide `list-tree`, `flat` Lucide `list`.
 - **States**:
   - Normal: tooltip "Toggle view mode (current: Task Manager Grouping)" with the current name [S].
   - History mode: disabled, tooltip "History shows a flat list" [S PROC-016]. (APP-002 says both buttons stay active in History mode, but R-031 only covers the hide button; PROC-016 is the specific rule.)
@@ -331,7 +313,7 @@ WindowOptions {
 ### UI-SHL-014 Window picker "+"
 
 - **Implements**: APP-006, PROC-055, R-046, R-076, table (b) Picker context.
-- **Anatomy**: `TlIconButton` 30 × 28, icon Lucide `plus` [M]. Tooltip "Select process by window" [S PROC-055].
+- **Anatomy**: `TlButton::Toggle` 24 × 24 (on while picking), icon Lucide `plus` [M]. Tooltip "Select process by window" [S PROC-055].
 - **States**:
   - Hidden: no KWin bridge (`Snapshot.windows.header.validity == Unsupported`) [S].
   - Idle: plain.
@@ -363,8 +345,8 @@ x=0
 ```
 
   Parts:
-  - Tab: height 30, padding-x 22 [M, from label centres 98, 192, 304, 417, 536, 664 at 1360 px], label `t_md` regular. Inactive label `text_primary` [M white text on every tab]; active label `text_primary` medium weight [C].
-  - Tab icons (part of the tab, after the label, gap 6 `sp3`, 16 × 16):
+  - Tab: height 30, padding-x 22 [M, from label centres 98, 192, 304, 417, 536, 664 at 1360 px], label `t_md` at weight 400 (the token default is 500) [C from M]. Inactive label `text_primary` [M white text on every tab]; active label `text_primary` medium weight [C].
+  - Tab icons (part of the tab, after the label, gap 6 `sp3`, `i_sm` 14 × 14 per UI-FND-003):
     - Processes: history toggle, Lucide `rotate-ccw-clock` (UI-SHL-023).
     - Information: copy-all, Lucide `copy` (UI-SHL-023). Shown only while Information is the active tab [M information.png].
   - Active tab: fill `header` [M: active fill equals the table header colour, so the tab joins the page header below]; a 2 px [M] outline in `accent` on top, left and right sides, top corners radius `r_md`, bottom open.
@@ -418,7 +400,7 @@ x=0
 - **Behaviour**:
   - The strip measures each tab's width at layout (label shaped once per language and scale change and cached as `Pixels`). Available width = window width − filter box width − include-children checkbox width (if shown) − 16 (left margin of the filter box) − 28 (overflow button).
   - If the tabs do not fit, trailing tabs that do not fit move into the overflow menu; the active tab is always kept visible by swapping it into the last visible slot [C].
-  - Overflow button: `TlIconButton` 28 × 30, Lucide `chevrons-right` [C], placed right after the last visible tab, tooltip "More tabs" [C].
+  - Overflow button: `TlButton::Icon` 24 × 24, Lucide `chevrons-right` [C], placed right after the last visible tab, tooltip "More tabs" [C].
   - Click opens a `TlMenu` listing the hidden tabs with the same labels; choosing one dispatches `SelectTab(i)`.
   - At the minimum width of 800 px with all six tabs, the tabs need about 680 px at 100% and the filter box needs 236, so the overflow appears at 100% scale below about 960 px of window width [C, estimate from M label widths].
 - **Build**: part of `TabStrip`; the menu uses `TlMenu` (PopupMenu with `.menu(label, Box::new(SelectTab(i)))`).
@@ -430,8 +412,8 @@ x=0
 
 - **Implements**: APP-027, PROC-088, PROC-086 (toast with Enable), D-010, PERF-094.
 - **Anatomy**:
-  - History icon: 16 × 16 Lucide `rotate-ccw-clock` inside the Processes tab after the label, gap 6. Hit area 22 × 22 centred on the icon [C]. Colour `text_secondary`; in History mode `accent` [C].
-  - Copy icon: 16 × 16 Lucide `copy` inside the Information tab after the label, gap 6, shown only while Information is active [M]. Hit area 22 × 22. Colour `text_secondary`.
+  - History icon: `i_sm` 14 Lucide `rotate-ccw-clock` inside the Processes tab after the label, gap 6. The kit's Lucide set has no `history` glyph (UI-FND-003 lists `history`); `rotate-ccw-clock` is the replacement, recorded by the icon bead [C]. Hit area 22 × 22 centred on the icon [C]. Colour `text_secondary`; in History mode `accent` [C].
+  - Copy icon: `i_sm` 14 Lucide `copy` inside the Information tab after the label, gap 6, shown only while Information is active [M]. Hit area 22 × 22. Colour `text_secondary`.
 - **States**: hover on the icon: icon `text_primary` and a `tab_hover` rounded square (`r_sm`) behind the hit area. Pressed: same. Disabled: never.
 - **Interaction**:
   - History icon click dispatches `ToggleHistoryMode`. If the Processes tab is not active, it also selects it [C]. It flips `UiState.processes.history_mode` (persisted) and the tab label. When turning History mode on with `history.enabled = false`: the 10-minute RAM window shows (D-010) and an Info toast "History recording is off" appears with an "Enable" button that dispatches `ToggleSetting(HistoryEnabled)` [S PROC-086]. The toast has autohide off because it has an action button (kit behaviour) and closes when the user clicks Enable or its close button.
@@ -455,14 +437,14 @@ x=0
 ```
 
   - Placement: right end of the tab strip, flush with the window's right edge, full strip height 30 minus the 2 px line (28) [M].
-  - Width: 220 unfocused [M: 221 at 1360 px], 280 focused [S APP-028]. APP-028 says 160 unfocused; the measured TaskSlinger box is 220, and this spec uses the measured value [C, listed as an open item].
-  - Label "Filter:" `t_md` `text_primary` [M], left padding 10 [C], gap 6 to the input.
-  - Input: `TlInput` without its own border or background (the outline is the border), text `t_md`, fill `tab_bg` unfocused and `input_focus` focused [C]. Placeholder: none [M].
-  - Clear button: Lucide `circle-x` 14 × 14 in `text_secondary`, right padding 8, shown only when the text is not empty (`Input::cleanable(true)` behaviour) [S].
+  - Width: the input is 160 unfocused and 280 focused, and stays 280 while it holds text [S APP-028, UI-FND-016]. With the label and paddings the outlined region is about 220 wide unfocused, which matches the measured 221 at 1360 px [M].
+  - Left padding 10 [C] before the "Filter:" label; gap 6 (`sp3`) between label and input.
+  - Input: `TlFilterBox` (UI-FND-016, label "Filter:" in its own style) with its 1 px border turned off inside the tab strip, because the accent outline is the border here [C]; fill `tab_bg` unfocused and `input_focus` focused. Placeholder: none [M].
+  - Clear button: as UI-FND-016 (Lucide `x` `i_sm`, 20 × 20 hit area), right padding 8, shown only when the text is not empty [S].
   - Shown on every tab except Performance [M performance.png]. Each tab keeps its own filter text for the session [S]; switching tabs swaps the text into the single `InputState` with `set_value` (which does not emit Change) [C].
 - **States**:
   - Unfocused empty, unfocused with text (text stays visible, clear button visible), focused (width 280, fill `input_focus`), hover (cursor I-beam over the input part only).
-  - Width animation: 220 to 280 on focus and back on blur, over 150 ms [S] with `ease_out_cubic` [C]; instant with animations off or reduced motion [S]. The tabs to its left re-layout each animation frame; the overflow rule (UI-SHL-022) applies to the final width only, so no tab jumps into the menu mid-animation [C].
+  - Width animation: 160 to 280 on focus, back to 160 on blur when empty, over 150 ms `ease_out_cubic` (UI-FND-016); instant with animations off or reduced motion [S]. The tabs to its left re-layout each animation frame; the overflow rule (UI-SHL-022) applies to the final width only, so no tab jumps into the menu mid-animation [C].
   - Window inactive: outline in `divider`.
 - **Interaction**:
   - Click anywhere in the box focuses the input.
@@ -473,12 +455,12 @@ x=0
   - Enter: moves focus to the table and selects the first row [C].
   - Down arrow: same as Enter [C].
 - **Data binding**: `FilterBox { input: Entity<InputState>, per_tab: [SharedString; 6], debounce: Option<Task<()>> }`. Reads only its own state; never subscribes to snapshots.
-- **Build**: `FilterBox` Entity in `window/filter.rs`, embedded in `TabStrip`. Width animation with GPUI `with_animation` keyed on the focus generation.
+- **Build**: `FilterBox` Entity in `window/filter.rs`, embedded in `TabStrip`. The width animation is the `TlFilterBox` one (UI-FND-016).
 - **Performance**: keystroke cost is the kit input's own (one rope edit, one notify on the InputState) plus one timer reset. The text is read with `text()` (no allocation) and converted to `Arc<str>` lowercased once per debounced query.
 - **Accessibility**: the input's accessible name is "Filter"; the clear button is "Clear filter".
 - **Tests**: `filter_debounce_100ms` (TestAppContext): type three characters 30 ms apart; exactly one query after 100 ms of quiet, with the latest generation. `filter_esc_rule`: text "fire", Esc: text empty, focus on table; second Esc goes to the global chain. `filter_per_tab_text`: text on Processes survives a switch to Services and back. `filter_hidden_on_performance`.
 - **Phase**: P1.
-- **Decided here**: unfocused width 220 (deviation from APP-028's 160, open item 1); fills; Enter and Down behaviour; select-all on Ctrl+F.
+- **Decided here**: inner border off in the tab strip; fills; Enter and Down behaviour; select-all on Ctrl+F.
 
 ### UI-SHL-025 "Include children" checkbox placement
 
@@ -515,40 +497,20 @@ x=0
 - **Phase**: P1.
 - **Decided here**: zero gap under the button; keyboard highlight of the first item; own `MenuBar` instead of kit `AppMenuBar`; Alt alone does nothing; Alt+D for Debug.
 
-### UI-SHL-031 Menu popup rows (visual spec for every menu)
+### UI-SHL-031 Menu popups in the menu bar
 
 - **Implements**: APP-012 to APP-026 (all menu entries), reference video frames (menus in `cus_sheet_01.png` to `cus_sheet_03.png`).
-- **Anatomy** (`TlMenu` / kit `PopupMenu` restyled through the theme map; values in px at 100%):
-
-```text
-+--------------------------------------------------+  bg=menu_bg, border 1 px divider, radius r_sm, shadow (shadow_intensity_pct)
-| pad-y 4                                          |
-| [✓]  Label text                    Ctrl+N   [›]  |  row h=26, pad-x 8, check col 20, gap 4, hint t_sm text_secondary
-| ------------------------------------------------ |  separator: 1 px divider, margin-y 4, inset 8
-|      HEADER                                      |  header row h=22, t_xs semibold text_secondary, uppercase off
-| [ ]  UI Scale       [====o--------]   100%       |  slider row h=30 (UI-SHL-037)
-+--------------------------------------------------+
-```
-
-  - Popup: min width 200 [C, kit default 120 is too narrow for TaskSlinger labels], max width 360, max height = window height − 16, scrollable when taller. Padding-y 4 (`sp2`).
-  - Row: height 26 [C], padding-x 8 (`sp4`), radius `r_sm` for the hover fill, label `t_base` `text_primary`.
-  - Check column: 20 wide at the left of every row of a menu that has any check or radio row; check icon Lucide `check` 14; radio uses Lucide `dot` 14 [C]. Rows without a check leave the column empty so labels align [M reference].
-  - Icon column: none in tasklens menus (labels only, like TaskSlinger), except the theme rows' copy icon (UI-SHL-038).
-  - Shortcut hint: right-aligned, `t_sm` `text_secondary`, from the Action's binding (kit `Kbd` lookup), 24 px minimum gap from the label.
-  - Submenu row: chevron Lucide `chevron-right` 14 at the right in `text_secondary`. Submenu opens to the right, top-aligned with its row minus 4 (so first rows line up), flipping left when there is no room (kit behaviour). Hover delay before opening 0 ms; leaving towards the submenu keeps it open (kit's own pointer logic).
-  - Labels with ">" in the merged spec ("Columns >") show the chevron; the ">" character itself is not drawn [C].
+- **Component**: every menu bar popup is a `TlMenu` (UI-FND-022). Row height 26, check column 20, min width 180, max width 360, check mark `i_xs`, radio mark, header rows (22 high, `t_xs` `text_secondary`), separators, submenu chevrons and placement, hover and disabled looks, the 120 ms fade, keyboard navigation and automatic shortcut hints are all UI-FND-022's.
+- **Shell rules on top of UI-FND-022**:
+  - Labels written with ">" in the merged spec ("Columns >") are submenus; the ">" itself is replaced by the component's chevron [C].
   - Labels ending in "…" or "..." keep the exact spec text [S].
-  - Separator: 1 px `divider`, 4 px space above and below, inset 8 from both sides.
-  - Group header (Settings menu groups): height 22, label `t_xs` semibold `text_secondary`, not interactive [C].
-- **States**:
-  - Highlighted (hover or keyboard): row fill `menu_hover`, label `text_primary`.
-  - Disabled: label and hint at the foundation's disabled opacity, no highlight on hover, still shows its tooltip if it has one (kit rows support tooltips through `menu_element`).
-  - Checked: check icon in `accent` [C].
-- **Motion**: the popup opens with the kit's 150 ms fade and 8 px slide when animations are on; instant otherwise. No exit animation (kit).
-- **Build**: kit `PopupMenu` with tasklens builder helpers in `window/menubar.rs`: `check(label, checked, action)`, `radio(label, selected, action)`, `header(label)`, `slider_row(..)`, `theme_row(..)`. The kit's row height and paddings are set through `PopupMenu` styling (`.min_w(px(200.))`, and the theme map's `popover` colours); if the kit row height is not 26 at `Size::Small`, the helpers render rows with `menu_element` and own `div` styling [C].
-- **Tests**: `menu_row_metrics` (render test): a check row is 26 tall, the check column 20 wide, the hint right-aligned.
+  - The Settings menu group names (Monitoring, Motion & interaction, Window & startup, Language) are `TlMenu` header rows.
+  - Slider rows (View > Appearance, Settings > Tab Switch) are shell rows, specified in UI-SHL-037.
+  - Theme rows are `TlMenu::painted_item` rows (UI-SHL-038).
+  - The popup's action context is the focus that was active before the menu opened, so table actions such as Collapse all reach the table (UI-SHL-030).
+- **Build**: menu builders in `window/menubar.rs` call `TlMenu` only; the one shell helper is `slider_row(..)`.
 - **Phase**: P1.
-- **Decided here**: row height 26, min width 200, check and radio icons, header style, chevron replacing ">".
+- **Decided here**: chevron replaces ">".
 
 ### UI-SHL-032 File menu
 
@@ -663,7 +625,7 @@ x=0
   - The popup stays open while dragging and after release; clicking a check row toggles it and also keeps the popup open [C, matches TaskSlinger's Appearance submenu which stays open in the reference video].
   - Applying a UI Scale change re-lays out the menu itself; the popup stays anchored to its row [C].
 - **Effects**: UI-SHL-130 (scale and row height), UI-SHL-131 (radius), heat colouring and shadow per their owners.
-- **Build**: `slider_row` helper renders a `menu_element` row holding a kit `Slider` whose `SliderState` entities are created once per `MenuBar` and reused across menu opens (entities are never created in render) [C].
+- **Build**: `slider_row` helper renders a `menu_element` row holding a `TlSlider` (kit `Slider`) whose `SliderState` entities are created once per `MenuBar` and reused across menu opens (entities are never created in render) [C].
 - **Tests**: `appearance_slider_persist_on_release`: three Change events then Release: one persist call, final value saved, toast "UI scale changed to 115%".
 - **Phase**: P2 (menu), P1 (keys Ctrl+Plus/Minus/0).
 - **Decided here**: steps of 5 for the two 0..100 sliders; row geometry; popup stays open; keyboard on slider rows.
@@ -675,8 +637,8 @@ x=0
 
   | # | Label | Kind | Action |
   |---|---|---|---|
-  | 1..12 | Default Dark, Vivid Nightfall, Catppuccin Frappé, Catppuccin Macchiato, Catppuccin Mocha, Dracula, OLED Black, Default Light, Windows 7 Aero, Golden Summer Fields, Soft Pink Delight, Catppuccin Latte | theme row (radio) | `SetTheme(name)` |
-  | 13.. | custom themes from `themes.json`, in file order | theme row (radio) | `SetTheme(name)` |
+  | 1..12 | Default Dark, Vivid Nightfall, Catppuccin Frappé, Catppuccin Macchiato, Catppuccin Mocha, Dracula, OLED Black, Default Light, Windows 7 Aero, Golden Summer Fields, Soft Pink Delight, Catppuccin Latte | theme row (radio) | `ActivateTheme { name }` |
+  | 13.. | custom themes from `themes.json`, in file order | theme row (radio) | `ActivateTheme { name }` |
   | sep | separator | | |
   | | Create copy | item | `CopyTheme(active)` |
   | | Edit colors | item | `EditTheme(active)` |
@@ -690,20 +652,20 @@ x=0
 
   - In P1 the list holds only Default Dark and Default Light (R-068).
   - APP-036 lists four per-theme items. This spec places them once, acting on the active theme, so they are reachable from the keyboard without per-row submenus [C]. The copy icon on every row is the per-row "Create copy" shortcut [S].
-- **Theme row anatomy** (height 26, full popup width):
-  - Background: that theme's `menu_bg` [C; reference shows each row in its own palette].
-  - Label: theme name, `t_base`, that theme's `text_primary`.
-  - Check column: radio dot on the active theme (`theme.active`), in that theme's `accent`.
-  - Copy icon: Lucide `copy` 14, at the right, 22 × 22 hit area, that theme's `text_secondary`; tooltip "Create copy". Click dispatches `CopyTheme(name)` and does not apply the theme.
-  - Highlight: the row's own `menu_hover` from that theme.
+- **Theme row anatomy**: `TlMenu::painted_item(label, bg, fg, suffix_icon, action)` (UI-FND-022), 26 high:
+  - bg = that theme's `menu_bg`, fg = that theme's `text_primary` [M reference shows each row in its own palette].
+  - Radio mark on the active theme.
+  - Suffix: Lucide `copy` `i_sm`, tooltip "Create copy"; clicking it dispatches `CopyTheme(name)` and does not apply the theme [S].
+  - A user theme whose name shadows a built-in shows "(custom)" after its name (UI-FND-040).
+  - While the Theme Editor previews a theme, that row shows " (editing)" and `ActivateTheme` is refused with the toast "Finish or cancel the theme editor first" (UI-FND-043).
 - **Behaviour**:
-  - `SetTheme(name)` writes `theme.active`, runs the theme switch (UI-SHL-080) and, if `theme.follow_system` is on, turns it off with the Info toast "Theme sync turned off" [C] (an explicit choice overrides sync).
+  - `ActivateTheme { name }` writes `theme.active`, runs the theme switch (UI-SHL-080) and, if `theme.follow_system` is on, turns it off with the Info toast "Theme sync turned off" [C] (an explicit choice overrides sync).
   - `CopyTheme(name)` creates "<name> copy" (or "<name> copy 2", 3, ...) in `themes.json`, makes it active, Success toast "Theme copied" [S].
   - `EditTheme(active)`: built-in active theme gives Info toast "Copy a theme before editing it" [S]; a custom theme opens the Theme Editor (UI-SHL-081). Absent before P3.
   - `ShareTheme(active)` opens "tasklens Share Theme" (UI-SHL-082). Absent before P3.
   - `DeleteTheme(active)`: built-in gives Info toast "Built-in themes cannot be deleted" [S]; custom opens the confirm window "Delete this custom theme?" (UI-SHL-084).
   - `ImportTheme` reads the clipboard (UI-SHL-083). Absent before P3.
-- **Build**: `theme_row` helper (custom `menu_element`) reads the other theme's `TlTheme` from the `ThemeRegistry` (all themes parsed once at startup and after every `themes.json` write).
+- **Build**: rows read each theme's colours from `ThemeStore` (UI-FND-040), which parses all themes at startup and after every `themes.json` write.
 - **Performance**: up to about 30 rows; colours are already parsed `Hsla`; no allocation per frame (menu is static while open).
 - **Tests**: `theme_rows_painted`: the "Dracula" row background equals the Dracula theme's `menu_bg`. `delete_builtin_toast`. `set_theme_turns_off_sync`.
 - **Phase**: P2 (themes, sync), P3 (Edit, Share, Import).
@@ -852,7 +814,7 @@ x=0, bottom=0
 - **States**:
   - Hover over the restricted segment (P3) or a health item: underline and pointer arrow cursor stays default (widgets rule 7: not a link) [C]; tooltip shows.
   - Pressed: nothing visible beyond the click action.
-- **Interaction**: click on " | 42 restricted" (P3) dispatches `UnlockPrivileged` [S]. Click on a health item dispatches `OpenCollectorHealth` [S APP-029]. Right-click: nothing.
+- **Interaction**: click on " | 42 restricted" (P3) dispatches `StartHelperSession` [S]. Click on a health item dispatches `OpenCollectorHealth` [S APP-029]. Right-click: nothing.
 - **Data binding**: the active page provides `fn status_text(&self, out: &mut String)`; `StatusChip` re-renders when the page notifies with `StatusChanged` (pages emit it only when their counts or selection count change), on Ctrl-pause flips, and on `ComponentMask::HEALTH`.
 - **Build**: `StatusChip` Entity in `window/status.rs`, positioned by `MainWindow` with `.absolute().left_0().bottom_0()`, embedded `.cached(..)`. Text is one `SharedString` rebuilt into a reused `String` buffer only when inputs change.
 - **Performance**: at most one text shaping per change; with 1 Hz sweeps the count changes at most once per second.
@@ -872,7 +834,7 @@ x=0, bottom=0
     - Disabled (restart budget spent, ADR-004): "<Source> paused after errors".
   - Source display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin [C].
   - At most two items show; more become "+N more" [C].
-  - Restricted process counts are not repeated here; they are in the Processes tab text (PROC-051) [C].
+  - Restricted process counts are not repeated here on the Processes tab; they are in its tab text (PROC-051). On other tabs, for 10 s after a privileged action was refused with EPERM while tl-helper is missing, the item "Restricted: 42 processes" shows (N = refused targets) [S APP-029, UI-FND-028].
   - Tooltip on each item: the source's `last_error` text, or "No new data for 12 s" for Stale [C].
   - Healthy: no item [S].
 - **Tests**: `health_items_limit`: three failed sources: two items plus "+1 more".
@@ -889,7 +851,7 @@ x=0, bottom=0
 - **Anatomy**:
   - Separate top-level window, title "tasklens Settings" [S], `WindowKind::Floating` with the main window as parent, not modal [S APP-045].
   - Default size 900 × 640, minimum 720 × 480 [C]. Opens centred on the main window where the compositor allows (Wayland places it; tasklens requests no position) [C].
-  - Frame: `TlWindowFrame` (UI-SHL-090) with title, pin and close.
+  - Frame: `TlSecondaryWindow` (UI-SHL-090, UI-FND-021) with title, pin and close.
   - Body: gpui-kit `Settings::new("settings").sidebar_width(px(220.))` [S widget; C width]: left sidebar with a search field on top and the page list, right the active page.
   - Pages in order [S]: General, Appearance, Motion, Units, Processes, Performance, Graphs, Services, Startup and window, Privileges, Advanced. Page icons (Lucide, 16), in page order [C]: `settings`, `palette`, `activity`, `scaling`, `list-tree`, `gauge`, `chart-area`, `server`, `app-window`, `shield`, `sliders-horizontal`.
   - Page content: groups (`SettingGroup` with a title, `t_sm` semibold `text_secondary`), items (`SettingItem` title `t_base` `text_primary`, description `t_sm` `text_secondary`), control at the right.
@@ -898,14 +860,14 @@ x=0, bottom=0
   - Changes apply live, except `appearance.decorations` and `rendering.gpu`, which show the description "Takes effect after restart" under the item and push their restart toast on change [S].
   - Search (kit) matches item titles, descriptions and the keywords listed per item below.
   - Opening it again (Ctrl+, or "All settings…") focuses the existing window [C].
-  - Esc closes the window only if `window.close_with_esc` is on [C, the global Esc rule applied to this window].
+  - Esc closes the window (tool window rule, UI-FND-021).
   - Controls bind to `TlSettings` through the kit `SettingField` get and set closures (`Fn(&App) -> T`, `Fn(T, &mut App)`), which call `TlSettings::update`. Sliders persist on release, like the menu sliders.
-- **Build**: `windows/settings.rs`, Entity `SettingsWindow` holding the kit `Settings` builder output; slider and input state entities created in `SettingsWindow::new`.
+- **Build**: `window/settings.rs`, Entity `SettingsWindow` holding the kit `Settings` builder output; slider and input state entities created in `SettingsWindow::new`.
 - **Performance**: the window renders only on input and on `TlSettings` changes; it subscribes to no snapshot data except the device catalog (Performance page device lists) and the GPU engine list.
 - **Accessibility**: Tab moves through the search field, the page list, then the page's controls in reading order; Up and Down move in the page list.
 - **Tests**: `settings_every_key_once` (unit over the page model): the set of keys bound by all items equals the set of `settings.toml` keys in table (a) (with `fans.*` counted once for the Fans group), with no duplicates. `settings_restart_toast`: toggling "Use system title bar" pushes "Restart tasklens to apply the title bar change".
 - **Phase**: P2 (window); each item from its feature's phase.
-- **Decided here**: size, sidebar width, icons, refocus, Esc rule.
+- **Decided here**: size, sidebar width, icons, refocus.
 
 ### UI-SHL-061 Settings page: General
 
@@ -1076,23 +1038,18 @@ x=0, bottom=0
 
 ## 7. Themes, accents and theme management
 
-### UI-SHL-080 Theme application, crossfade and follow-system
+### UI-SHL-080 Theme application and follow-system (shell rules)
 
 - **Implements**: APP-035, APP-036, R-017, R-068, R-069, ADR-009 (Theme model, theme switch).
-- **Behaviour**:
-  - `ThemeRegistry` (Global, `theme/registry.rs`) holds the parsed built-ins (`assets/themes/builtin.json`) and user themes (`$XDG_CONFIG_HOME/tasklens/themes.json`) as `Arc<TlTheme>`, in menu order. It is rebuilt after every write to `themes.json`.
-  - Applying a theme (from `SetTheme`, the Settings page, follow-system, reset, import, delete, or startup):
-    1. Resolve the name; an unknown name falls back to "Default Dark" with a warn log [C].
-    2. With animations on: start a 200 ms [S] crossfade. Each frame for 200 ms, `TlTheme` = `lerp(old, new, ease_out_cubic(t))` per slot in linear sRGB [C], `theme/map.rs::apply` refreshes the gpui-kit `Theme`, and every open tasklens window gets `window.refresh()` so cached views repaint. The frame chain uses `window.on_next_frame` and stops at t = 1.
-    3. With animations off or reduced motion: one step to the new theme [S].
-    4. At the end (or the single step): `TlTheme.version` and `style_version` bump once, so charts rebuild geometry once (ADR-009); `theme.active` is written.
-  - Charts read colours at paint time; during the crossfade their geometry is not rebuilt (only the final `style_version` bump rebuilds it) [C].
-  - Follow system (`theme.follow_system = true`): tl-app watches the portal `org.freedesktop.portal.Settings` key `org.freedesktop.appearance color-scheme` (`ReadOne` at start, then `SettingChanged`) on its own zbus connection and forwards `ColorSchemeChanged(u32)` to the UI over an `async_channel::bounded(4)` [C; zbus stays out of tl-ui, ADR-001]. 1 = prefer dark → `theme.dark`; 2 = prefer light → `theme.light`; 0 = no preference → `theme.dark` [S]. The applied theme is written to `theme.active` [C].
+- **Owner**: `ThemeStore::activate` (UI-FND-040) owns resolving, the 200 ms crossfade (Hsla lerp driven by the `AnimationDriver`, `style_version` bumped at start and end), the instant path with animations off, writing `theme.active`, and follow-system (portal `color-scheme` from the engine through the snapshot; 0 and 1 pick `theme.dark`, 2 picks `theme.light`).
+- **Shell rules**:
+  - Every theme choice in the shell (View > Theme rows, the Settings page dropdown) dispatches `ActivateTheme { name }`.
+  - An explicit choice while `theme.follow_system` is on turns sync off and pushes the Info toast "Theme sync turned off" [C], so the user's pick is not overwritten at the next portal change.
   - Turning sync on applies the matching preferred theme at once [C].
-- **Performance**: the crossfade costs one full repaint per frame for 200 ms (about 29 frames at 144 Hz); no chart geometry rebuilds until the end. Bench scenes run with animations off, so the gates are not affected.
-- **Tests**: `theme_switch_instant_reduced_motion`: after `SetTheme("Dracula")` with reduced motion, one frame later `TlTheme.name == "Dracula"` and `style_version` bumped by exactly 1. `follow_system_maps_values`: events 1, 2, 0 apply dark, light, dark.
-- **Phase**: P1 (apply, Default Dark and Default Light), P2 (crossfade, other themes, sync).
-- **Decided here**: lerp in linear sRGB; geometry rebuild only at the end; sync turned on applies immediately; portal watcher in tl-app.
+  - The shell turns `ThemeEvent::{Activated, Deleted, Copied, ImportFailed}` into the APP-036 and APP-038 toasts (UI-SHL-038, UI-SHL-083, UI-SHL-084).
+- **Tests**: `explicit_choice_turns_off_sync`: with sync on, `ActivateTheme("Dracula")` sets `theme.follow_system = false` and pushes "Theme sync turned off".
+- **Phase**: P1 (Default Dark and Default Light, instant switch), P2 (crossfade, other themes, sync).
+- **Decided here**: explicit choice turns sync off; turning sync on applies at once.
 
 ### UI-SHL-081 Theme Editor window
 
@@ -1101,7 +1058,7 @@ x=0, bottom=0
 
 ```text
 +--------------------------------------------------------------------------------------+
-| tasklens Theme Editor                                                  [pin] [x]     |  TlWindowFrame
+| tasklens Theme Editor                                                  [pin] [x]     |  TlSecondaryWindow
 +--------------------------------------------------------------------------------------+
 | Name: [ Default Dark copy                    ]                                       |  h=32, pad 16
 +----------------------+---------------------------------+-----------------------------+
@@ -1118,32 +1075,32 @@ x=0, bottom=0
 +--------------------------------------------------------------------------------------+
 ```
 
-  - Name input: `TlInput`, label "Name:", width fills, max 64 characters [C].
+  - Name input: `TlTextInput`, label "Name:", width fills, max 64 characters [C].
   - Slot list: 23 rows (the 22 slots in APP-035 order with their labels, then "Accent"), each 26 tall: swatch 14 × 14 `r_sm` with a 1 px `divider` border, label `t_base`, hex value `t_xs` tabular `text_secondary` right-aligned. Selected row fill `row_selected`, text `text_selected_primary`. Up and Down move the selection when the list has focus.
   - Picker: saturation (x) and value (y) plane 200 × 200 with a 10 px ring cursor; vertical hue strip 16 × 200 to its right with a 2 px bar cursor; both custom elements. Readouts "R %d G %d B %d" and "H %03d S %03d V %03d" [S] in `t_sm` tabular. Hex input with placeholder "Enter a 6-digit hex color" [S]; accepts with or without "#", applies on Enter or blur; invalid text shows a `status.danger` border and the text "Enter a 6-digit hex color" below it, and does not apply [C].
   - Preview: a mini tab strip (two tabs, the active one with the accent outline), a mini table (header plus 4 rows: normal, alternate, hover, selected, with secondary text), and a 236 × 60 static graph (fill and line from the theme's graph palette), all painted from the draft theme.
   - Footer buttons: left "Random", "Share", "Import"; right "Cancel", "Done" (primary, Enter) [S labels].
 - **Behaviour**:
-  - Opened by `EditTheme(name)` for a custom theme; a second `EditTheme` focuses the open editor; editing a different theme while one is open asks nothing and switches after applying Cancel to the first [C].
-  - Edits apply live to the whole app [S]: the preview updates on every pointer move; the app-wide `TlTheme` is replaced at most every 100 ms during a drag and once on release [C, keeps `style_version` rebuilds at most 10 per second].
+  - Opened by `EditTheme(name)` for a custom theme, which calls `ThemeStore::begin_preview` (UI-FND-043). A second `EditTheme` for the same theme focuses the open editor; for a different theme it cancels the first preview, closes that editor and opens a new one (UI-FND-043 rule 1).
+  - Edits apply live to the whole app [S] through `ThemeStore::set_preview_slot` on every change; the store applies at most one change per frame (UI-FND-043 rule 3).
   - Keyboard on the plane: arrows move 1 unit of S or V (Shift: 10); on the hue strip Up and Down move hue by 1 degree (Shift: 10) [C].
-  - Random: draft gets a random palette from a seeded HSV generator: background lightness from the current mode, text colours chosen to reach a 4.5:1 contrast against `list_bg` [C]; toast "Random theme generated." [S].
+  - Random: randomizes the 23 editable values under UI-FND-043's 4.5:1 contrast rule; toast "Random theme generated." [S].
   - Share: opens UI-SHL-082 with the draft encoded.
-  - Import: reads the clipboard as in UI-SHL-083, and loads the result into the draft (name included) instead of adding a new theme [C].
-  - Cancel or the close button: restores the theme as it was when the editor opened, applies it, closes [S].
-  - Done: validates the name (not empty; not equal to another theme's name, case-insensitive), writes `themes.json` with `write_atomic`, applies, closes, Success toast "Theme saved" [C]. Invalid name: the input shows `status.danger` and the text "Choose a name that no other theme uses" and Done is disabled [C].
+  - Import: reads the clipboard as in UI-SHL-083, and loads the result into the preview (name included) instead of adding a new theme [C].
+  - Cancel or the close button: `ThemeStore::cancel_preview`, then close [S].
+  - Done: validates the name (not empty; not equal to another theme's name, case-insensitive), then `ThemeStore::commit_preview` (saves to `themes.json` and activates), closes, Success toast "Theme saved" [C]. Invalid name: the input shows `status.danger` and the text "Choose a name that no other theme uses" and Done is disabled [C].
   - Built-in themes never open here ("Copy a theme before editing it", UI-SHL-038).
-- **Build**: `windows/theme_editor.rs`, Entity `ThemeEditor { draft: TlTheme, original: Arc<TlTheme>, selected_slot: SlotId, plane: Entity<ColorPlane>, hue: Entity<HueStrip>, hex: Entity<InputState>, name: Entity<InputState>, apply_throttle: Option<Task<()>> }`. `ColorPlane` paints with two `paint_quad` linear gradients (white to hue horizontally, transparent to black vertically) [C]. The kit `ColorPicker` is not used: it is a popover with featured colours, not the TaskSlinger layout.
-- **Performance**: plane paint is 2 quads; a drag re-renders the editor and the preview only, plus at most 10 app-wide theme applications per second.
+- **Build**: `window/theme_editor.rs`, Entity `ThemeEditor { token: PreviewToken, selected_slot: ThemeSlot, plane: Entity<ColorPlane>, hue: Entity<HueStrip>, hex: Entity<InputState>, name: Entity<InputState> }`. `ColorPlane` paints with two `paint_quad` linear gradients (white to hue horizontally, transparent to black vertically) [C]. The kit `ColorPicker` is not used: it is a popover with featured colours, not the TaskSlinger layout.
+- **Performance**: plane paint is 2 quads; a drag costs one preview application per frame (UI-FND-043).
 - **Accessibility**: Tab order: Name, slot list, plane, hue strip, hex input, Random, Share, Import, Cancel, Done.
-- **Tests**: `editor_cancel_restores`: edit a slot, Cancel: `TlTheme` equals the original. `editor_hex_invalid`: "12345" does not apply. `editor_done_duplicate_name` disables Done.
+- **Tests**: `editor_cancel_restores`: edit a slot, Cancel: `ThemeStore::current()` equals the theme active before opening. `editor_hex_invalid`: "12345" does not apply. `editor_done_duplicate_name` disables Done.
 - **Phase**: P3.
-- **Decided here**: layout, sizes, throttle, random generator rule, toasts "Theme saved", name validation text, own colour plane.
+- **Decided here**: layout, sizes, keyboard steps, toast "Theme saved", name validation text, own colour plane.
 
 ### UI-SHL-082 Share Theme window
 
 - **Implements**: APP-038, APP-045.
-- **Anatomy**: "tasklens Share Theme", `WindowKind::Dialog` modal to its parent (the main window or the editor), 520 × 220 [C]. Body: text "Copy this code and send it to someone who uses tasklens." [C], then a read-only multi-line `TlInput` (3 lines, wraps, `t_sm`) holding `TL1.` + base64url(JSON `{"v":1,"name":…,"accent":"#…","SLOT":"#RRGGBB",…}`) [S]. Footer: "Copy" (primary, Enter), "Close".
+- **Anatomy**: "tasklens Share Theme", `WindowKind::Dialog` modal to its parent (the main window or the editor), 520 × 220 [C]. Body: text "Copy this code and send it to someone who uses tasklens." [C], then a read-only multi-line `TlTextInput` (3 lines, wraps, `t_sm`) holding `TL1.` + base64url(JSON `{"v":1,"name":…,"accent":"#…","SLOT":"#RRGGBB",…}`) [S]. Footer: "Copy" (primary, Enter), "Close".
 - **Behaviour**: Copy writes the code to the clipboard and pushes the toast "Theme code copied" in this window [S]. The code is selected on open so Ctrl+C also works [C].
 - **Phase**: P3.
 
@@ -1174,51 +1131,31 @@ x=0, bottom=0
 
 ## 8. Secondary windows
 
-### UI-SHL-090 Secondary window frame (`TlWindowFrame`)
+### UI-SHL-090 Secondary windows (shell rules on top of `TlSecondaryWindow`)
 
 - **Implements**: APP-045, APP-009, R-073, PROC-056, D-006.
-- **Anatomy** (client decorations):
-
-```text
-+----------------------------------------------------------------+
-| Title text (t_base, text_primary, pad-l 12)       [pin] [ x ]  |  h=30, bg=titlebar
-+----------------------------------------------------------------+
-| content (bg=window_bg)                                         |
-```
-
-  - Title bar height 30 [C], background `titlebar`, title `t_base` medium, left padding 12, truncated with "…".
-  - Pin 36 × 30 and close 36 × 30 at the right, same states as UI-SHL-005 [S R-073]. No minimize or maximize on modal windows; tool windows (Floating, not modal) also show minimize and maximize when the compositor reports them [C].
-  - Drag, double-click (maximize, tool windows only) and right-click window menu as UI-SHL-004.
-  - Server decorations: KWin draws the title bar; the pin moves to the top-right corner of the content as a 28 × 28 `TlIconButton` with 4 px inset [C].
-- **Window kinds** [S APP-045]: modal confirmations use `WindowKind::Dialog` with the parent window (xdg_dialog_v1 `set_modal`); tools, editors and property windows use `WindowKind::Floating` with the parent (xdg parent).
-- **Rules**:
-  - Each window is opened with `gpui_kit::open_window`, so it has its own Root: its own toasts (UI-SHL-100), menus and tooltips [S].
-  - Esc in a modal confirm closes it as Cancel; Enter triggers its default button [S]. In a tool window Esc does nothing unless `window.close_with_esc` is on [C].
-  - Opening a window that is already open focuses it (`window.activate_window()`) instead of opening a second one, except Properties windows, which are per target (process spec) [C].
-  - Closing the main window closes every child window, except detached graphs when `graphs.keep_detached_on_close` is on [S].
-  - Pin state on secondary windows is not persisted [S].
-  - Initial size per window entry; Wayland places the window; minimum sizes are set with `window_min_size`.
-- **Build**: `window/secondary.rs::open_secondary<V>(cx, parent, SecondaryOptions { title, kind, size, min_size, resizable }, build: impl FnOnce(&mut Window, &mut Context<V>) -> V)`, and `TlWindowFrame` (foundation) for the title bar.
-- **Tests**: `secondary_window_refocus`: `OpenAbout` twice opens one window.
+- **Component**: `TlSecondaryWindow` (UI-FND-021) owns the frame: 34 px title bar with icon and title, the kit caption buttons (34 wide), the pin `TlButton::Toggle` with tooltip "Always on top", the server-decorations pin fallback, the window kinds (Dialog for confirmations, Floating for tools and Properties), modality, Esc rules (confirmation: Cancel; tool window: close; Run: cancel), Ctrl+W, and `WindowRegistry` (refocus of an open window, closing children with the main window).
+- **Shell rules**:
+  - Every shell window in this section is opened through `TlSecondaryWindow::open` with the title from the APP-045 table [S], the kind, the default size and the minimum size given in its entry.
+  - Each window has its own kit Root, so toasts in it use its own `ToastQueue` (UI-SHL-100).
+  - A shell window that is already open is focused instead of opened again (`WindowRegistry` keys `Settings`, `ThemeEditor`, `ShareTheme`, `About`, `CrashReport`, `AdditionalSetup`, `Shortcuts`, `PublicIpNotice`, `Run`, `HandleSearch`, `CollectorHealth`) [C].
+- **Tests**: `secondary_window_refocus`: `OpenAbout` twice leaves one About window.
 - **Phase**: P1 (frame), each window with its feature.
-- **Decided here**: 30 px title bar, min/max on tool windows only, server-mode pin placement, Esc rule for tool windows, single-instance windows.
+- **Decided here**: the registry keys of shell windows.
 
-### UI-SHL-091 Generic confirmation window
+### UI-SHL-091 Confirmation windows used by the shell
 
 - **Implements**: APP-045, APP-022, APP-036, APP-049, R-083.
-- **Anatomy**: title "tasklens" [S], `WindowKind::Dialog`, width 440, height fits content (minimum 150) [C], not resizable. Padding 16. Optional icon 24 (Lucide `triangle-alert` in `status.warning` for destructive confirms) [C], text `t_base` wrapping, then footer buttons right-aligned with 8 gap: action button (primary, or danger for destructive), then "Cancel" [C: KDE and TaskSlinger both put the action button left of Cancel].
-- **Behaviour**: Enter activates the action button; Esc, Cancel and the close button cancel [S]. The parent window cannot be used while it is open (modal) [S].
-- **Users of this window** (text and buttons are the owners' [S]):
+- **Component**: `TlDialog::confirm` (UI-FND-021): window title "tasklens" [S], width 420, Cancel (Secondary) left of the action button (Primary, or Danger for destructive actions), Enter runs the default button, Esc cancels, focus starts on Cancel for destructive confirmations.
+- **Shell uses** (texts and buttons are the owners' [S]):
 
-  | Use | Text | Buttons |
-  |---|---|---|
-  | Reset settings | "Reset all settings to their defaults? Themes and history are kept." | Reset / Cancel |
-  | Delete theme | "Delete this custom theme?" | Delete / Cancel |
-  | Skip password prompts | "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?" | Skip prompts / Cancel |
-  | Process, service and connection confirmations | per their specs | per their specs |
+  | Use | Text | Action button | Destructive |
+  |---|---|---|---|
+  | Reset settings (UI-SHL-072) | "Reset all settings to their defaults? Themes and history are kept." | Reset | yes |
+  | Delete theme (UI-SHL-084) | "Delete this custom theme?" | Delete | yes |
+  | Skip password prompts (UI-SHL-040) | "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?" | Skip prompts | no |
 
-- **Build**: `windows/confirm.rs::confirm(cx, parent, ConfirmSpec { text, action_label, destructive, on_confirm })`.
-- **Tests**: `confirm_enter_and_esc`: Enter runs `on_confirm` once; Esc closes without calling it.
+- **Tests**: `reset_confirm_focuses_cancel`: the Reset confirm opens with focus on Cancel; Esc closes it without resetting.
 - **Phase**: P1.
 
 ### UI-SHL-092 About window
@@ -1250,7 +1187,7 @@ x=0, bottom=0
 ### UI-SHL-094 Additional Setup window (frame)
 
 - **Implements**: APP-042, PERF-105, R-028.
-- **Anatomy**: "tasklens Additional Setup", Floating, 640 × 520, minimum 560 × 400 [C]. Scrollable column of row cards, padding 16, gap 12. Row card (owned content per PERF-105 to PERF-108): background `header`, radius `r_md`, padding 12; line 1: title `t_md` semibold left, status text `t_sm` right (colours: "Enabled" and "Enabled (existing rule)" `status.success`, "Not enabled" `text_secondary`, "Not needed" `text_secondary`); line 2: description `t_sm` `text_secondary`; line 3: buttons "Enable" or "Revert" (primary), "View script", "Copy command" [S]. Busy state while pkexec runs: the row's buttons disabled and the status text "Waiting for authentication…" [C]. Result area under the buttons: "Done. No restart needed." in `status.success`, or the script output in a read-only 6-line `TlInput` with "Copy output" and "Retry" [S].
+- **Anatomy**: "tasklens Additional Setup", Floating, 640 × 520, minimum 560 × 400 [C]. Scrollable column of row cards, padding 16, gap 12. Row card (owned content per PERF-105 to PERF-108): background `header`, radius `r_md`, padding 12; line 1: title `t_md` semibold left, status text `t_sm` right (colours: "Enabled" and "Enabled (existing rule)" `status.success`, "Not enabled" `text_secondary`, "Not needed" `text_secondary`); line 2: description `t_sm` `text_secondary`; line 3: buttons "Enable" or "Revert" (primary), "View script", "Copy command" [S]. Busy state while pkexec runs: the row's buttons disabled and the status text "Waiting for authentication…" [C]. Result area under the buttons: "Done. No restart needed." in `status.success`, or the script output in a read-only 6-line `TlTextInput` with "Copy output" and "Retry" [S].
 - **Opened by**: Help > "Additional setup…", Settings > Privileges "Additional setup…", every "Needs setup" link (which also scrolls to the row) [S].
 - **Phase**: P3.
 - **Decided here**: sizes and row card styling, busy text.
@@ -1293,31 +1230,18 @@ x=0, bottom=0
 
 ## 9. Toasts
 
-### UI-SHL-100 Toast placement, stacking and timing
+### UI-SHL-100 Toast placement in the shell
 
 - **Implements**: APP-044, R-017, ADR-015 (no toast for collection errors), widgets §10.
-- **Anatomy**:
-  - Placement: top centre of the window, 8 px (`sp4`) under the tab strip [S]: y = 34 + 30 + 8 = 72 in the main window at 100% (scaled); in secondary windows 8 px under their title bar (y = 38).
-  - Width 380 [C, kit default 382 rounded to the 4 px grid], height fits content (one or two lines; title line optional).
-  - Stack: at most 4 [S], newest at the top [C], gap 8. A fifth toast removes the oldest immediately (no exit animation) [C].
-  - Toast card (`TlToast`): background `menu_bg`, border 1 px `divider`, radius `r_md`, shadow scaled by `appearance.shadow_intensity_pct`, padding 12, icon 16 at the left, text `t_base` `text_primary`, close button (Lucide `x`, 14) at the right on hover.
-  - Type icons and colours [S types; C icons]: Success Lucide `circle-check` in `status.success`; Info `info` in `status.info`; Warning `triangle-alert` in `status.warning`; Error `circle-x` in `status.danger`.
-  - Action button (when a toast has one, for example "Enable"): `TlButton` small, right of the text.
-- **Timing**:
-  - Success, Info, Warning: auto-hide after 5 s [S] (kit default).
-  - Error: 8 s [S]. The kit's delay is fixed at 5 s, so Error toasts are pushed with `.autohide(false)` and a tasklens timer removes them by id after 8 s; the timer pauses while the pointer is over the stack (same rule as the kit) [C].
-  - Toasts with an action button stay until clicked or closed (kit behaviour).
-  - Hover pauses the timer [S].
-- **Motion**: kit enter (400 ms) and exit (200 ms) with animations on; with animations off or reduced motion, they appear and disappear in one frame [S R-017]. If the kit cannot switch off its own animation, tasklens pushes with the kit animation and sets `App::set_reduce_motion(true)` mirroring `motion.animations = false` is not allowed (it would affect other kit widgets the user did not ask for); instead the toast layer is rendered by `TlToast` wrapping kit `Notification` with its own `with_animation` guarded by the motion rule [C].
-- **Replace in place**: an in-progress toast and its result share an id (`Notification::id1::<T>(key)`), so the result replaces it [S].
-- **Visibility rules**:
-  - Toasts show only while the main window is visible [S]. While the main window is hidden to the tray, Error toasts go to a desktop notification (`NotificationDelivery::System`, app name "tasklens", icon `io.github.oysteinkrog.Tasklens`); other types are dropped [S].
-  - A collection error is never a toast unless the user started the action [S].
-- **Global setup**: at init, `cx.theme_mut().notification` is set to placement `TopCenter`, top margin `(34 + 30 + 8) × ui_scale`, `max_items = 4`, width 380 × `ui_scale`; re-set on every scale change (UI-SHL-130) [C].
-- **Shared general toast texts** [S APP-044]: "Copied to clipboard", "Copied: <value>", "Failed to copy to clipboard", "No process selected", "Select a process row first." (and the service, startup and connection variants owned by their specs), "Opening file location", "Failed to open file location", "Could not open properties.", "Authentication cancelled".
-- **Tests**: `toast_stack_limit`: push 5: 4 visible, the oldest gone. `toast_error_8s`: an Error toast is present at 7.9 s and gone at 8.1 s (TestAppContext clock). `toast_hidden_window_system_delivery`: with the main window hidden, an Error toast is delivered as System.
+- **Component**: `TlToast` and `ToastQueue` (UI-FND-020) own the card look, type icons, durations (5 s; Error 8 s; action toasts 15 s; Progress until replaced), the 4-visible limit with a wait list, hover pause, replace-in-place keys, coalescing, motion and reduced motion, and System delivery while the main window is hidden.
+- **Placement** (the shell's numbers, which UI-FND-020 takes from this file):
+  - Main window: horizontally centred, top = title bar 34 + tab strip 30 + `sp4` 8 = 72 at 100% scale, times `ui_scale` [S APP-044 "8 px under the tab bar"]. The shell exports `TAB_STRIP_H = 30.0` and `TITLEBAR_H = 34.0` from `window/main.rs` for this.
+  - Server decorations: top = menu row 28 + tab strip 30 + 8 = 66.
+  - Secondary windows: their title bar 34 + 8 = 42 (UI-FND-020 rule 9).
+  - The toast globals are re-set on every scale change (UI-SHL-130).
+- **Shell toasts**: every toast text in this file is listed with its entry; the shared texts of APP-044 ("Copied to clipboard", "Copied: <value>", "Failed to copy to clipboard", "No process selected", "Select a process row first.", "Opening file location", "Failed to open file location", "Could not open properties.", "Authentication cancelled") are pushed by their owners through the same queue.
+- **Tests**: `toast_top_follows_tab_strip`: at `ui_scale_pct = 150` the stack top is 108.
 - **Phase**: P1.
-- **Decided here**: width 380, newest on top, overflow drops oldest, Error timer, icons, motion wrapper.
 
 ---
 
@@ -1332,9 +1256,9 @@ x=0, bottom=0
   3. NVIDIA X11 environment rule (ADR-010) and, in P4, the `rendering.gpu` variables.
   4. Single instance (UI-SHL-112): forward and exit 0 if another copy runs.
   5. Load `settings.toml`, `state.toml`, `themes.json` (APP-033). Corrupt or newer-file toasts are queued, not shown yet.
-  6. Read the Shift key state for "Shift held at launch" (P3): through the KWin bridge is not available yet, so tl-app reads it with `XkbGetState` on X11 or, on Wayland, from the first `on_modifiers_changed` event of the main window within 500 ms of its first focus [C, U-unverified: Wayland gives no modifier state before focus].
+  6. Note the Shift key state for "Shift held at launch" (P3). On X11 tl-app reads it with `XkbGetState`. Wayland gives a client no modifier state before its window has focus, so on Wayland the main window counts Shift as held when its first `on_modifiers_changed` event within 500 ms of first focus has `shift` set [C, unverified, open item 3].
   7. Start the engine (`EngineHandle::start`) on its own threads; do not wait for any collector.
-  8. `Application::run`: load fonts, `gpui_kit::init`, register the asset source, build `ThemeRegistry`, apply the active theme (no crossfade), `bind_keys` (UI-SHL-120), set the toast globals, create `SnapshotHub`, `DemandAggregator`, `ActionTracker`.
+  8. `Application::run`: load fonts, `gpui_kit::init`, register the asset source, build `ThemeStore` and activate the theme without crossfade (UI-FND-040), `bind_keys` (UI-SHL-120), set the toast globals, create `SnapshotHub`, `DemandAggregator`, `ActionTracker`.
   9. Open the main window (UI-SHL-002) on the start tab: `--tab` if given, else `general.start_tab` (`last_used` reads `UiState.tabs.last_tab`) [S]. Only that page Entity is created.
   10. First frame renders the chrome and the start page with whatever the hub has (probably nothing): no waiting for collectors [S APP-059]. The page shows its own first-data state (process table: header and empty body, then rows with `…` in rate cells after the first sweep; Performance: charts with "Collecting…" readouts; P2 tabs: skeletons, UI-SHL-111).
   11. After the first frame callback: log `info!(target: "tasklens::perf", first_frame_ms)`; show queued toasts (settings errors); show the Crash Report window if due (UI-SHL-093); run `--select-pid` (select-and-scroll through the process jump target, PROC-071, as soon as the pid appears in the table, waiting up to 3 s, then Info toast "Process <pid> not found" [C]); start the helper session if Shift was held or `privilege.unlock_at_launch` is on (P3); start the public IP auto-fetch if enabled and accepted (P2).
@@ -1529,9 +1453,9 @@ x=0, bottom=0
   |---|---|---|---|
   | Tab indicator slide and page fade-in (UI-SHL-021) | `motion.tab_switch_ms` (250), `ease_out_cubic` | `motion.animations` | instant |
   | Filter box width (UI-SHL-024) | 150 ms, `ease_out_cubic` | `motion.animations` | instant |
-  | Theme crossfade (UI-SHL-080) | 200 ms, `ease_out_cubic` | `motion.animations` | single step |
-  | Toast enter and exit (UI-SHL-100) | kit 400 ms / 200 ms | `motion.animations` | appear and disappear in one frame |
-  | Menu popup open (UI-SHL-031) | kit 150 ms fade and 8 px slide | `motion.animations` | instant |
+  | Theme crossfade (UI-FND-040) | 200 ms | `motion.animations` | single step |
+  | Toast enter and exit (UI-SHL-100, UI-FND-020) | enter 400 ms (kit), exit 200 ms | `motion.animations` | appear and disappear in one frame |
+  | Menu popup open (UI-SHL-031, UI-FND-022) | 120 ms fade, no slide | `motion.animations` | instant |
   | Skeleton shimmer (UI-SHL-111) | kit 2 s loop | always while loading | static skeleton blocks (no shimmer) [C] |
   | Smooth scroll | `motion.smooth_scroll_amount` × 10 ms | `motion.smooth_scroll` | jump scrolling |
   | Chart sliding | per frame | `motion.smooth_graphs` | step per sample |
