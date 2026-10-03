@@ -683,4 +683,674 @@ remove), `src/dump.rs`, `src/launch.rs`, `tests/ops_real.rs`, `tests/cgroup_vali
 | `crates/tl-tray/Cargo.toml`, `src/lib.rs`, `src/item.rs`, `src/menu.rs`, `src/raster.rs`, `src/model.rs`, `tests/raster.rs` | E31 | owner only |
 | `crates/tl-netmon/**` (P4) | not planned in this round; its ADR is written when P4 starts | |
 
-<!-- next -->
+## 3. Anchor beads
+
+An anchor is a bead other epics may depend on. Cross-epic dependencies point at anchors only. An
+anchor marked **P0** gets priority 0 because the phase-0 spike (E01) needs it. Within an epic,
+later beads depend on earlier ones as the writer sees fit.
+
+| Plan key | Title | Delivers | Phase |
+|---|---|---|---|
+| E01-A1 | Bench harness and `perf-cpu` scene run end to end | `tl-ui/src/bench/{mod,synth,stats,engine,scenes}.rs`, `BenchEngine`, `FrameStats` JSON writer, `tasklens --bench perf-cpu --duration --warmup --json`, `xtask bench` | P0 |
+| E01-A2 | Phase-0 results and decision recorded | `docs/spike/phase0-results.md` with every gate's numbers, the checklist, the U-nn outcomes and the decision (pass, optimise, or fall back). Not a code dependency; the leader schedules P1 UI beads after it closes (see section 4) | P0 |
+| E02-A1 | Workspace compiles | root `Cargo.toml` with all pins, profiles and lints; `rust-toolchain.toml`; `.cargo/config.toml`; skeleton crates `tl-model`, `tl-collect`, `tl-ops`, `tl-engine`, `tl-gpu-probe`, `tl-ui`, `tl-app`, `xtask` with empty roots; `cargo build --workspace --locked` passes | P0 |
+| E02-A2 | `check-deps` and CI | `xtask check-deps` with its four checks, `scripts/ci.sh`, the GitHub workflow, the recorded failing-branch output | P0 |
+| E03-A1 | Core types compile with size tests | `time.rs`, `ids.rs`, `validity.rs`, `series.rs`, `process.rs`, `system.rs`, `devices.rs`, `health.rs`, `units.rs`; `size_of` tests; frozen `MetricId` and `ColumnId` lists | P0 |
+| E03-A2 | Contracts compile | `snapshot.rs`, `table.rs`, `details.rs`, `demand.rs`, `actions.rs`, `command.rs`, `settings.rs`, `wire.rs`, `gpu_proto.rs`, `helper_proto.rs`, `journal.rs`, `history.rs`, `client.rs`; defaults match canonical table (a) | P0 |
+| E04-A1 | `SysRoot`, counters, fixture infrastructure | `sysroot.rs`, `fdcache.rs`, `counters.rs`, `parse/mod.rs`, the `owner-desktop` and `minimal-vm` fixtures, `xtask capture-fixture`, `insta` wiring, one proptest harness | P0 |
+| E04-A2 | CPU sampler | `parse/stat.rs`, `parse/cpufreq.rs`, `parse/topology.rs`, `sample/cpu.rs` producing `CpuTotals`, per-CPU samples and `CpuTopology` with the ADR-008 math | P0 |
+| E04-A3 | Memory, disk, net, sensors samplers | the other parsers and samplers with fixtures and proptests | P1 |
+| E05-A1 | Process sweep | `sanitize.rs`, `proc/*` readers, `proc/sweep.rs` filling `ProcessRecord` and `FieldValidity`, metadata refresh, flags; fixture and proptests | P1 |
+| E05-A2 | App grouping, naming, icons | `apps/*`: cgroup app id, desktop index, matching, naming, bwrap, icon resolution and cache | P1 |
+| E05-A3 | Detail readers | `proc/{smaps,detail,strings,handles}.rs`, `hash.rs` | P2 |
+| E06-A1 | Sockets | `net/{sock_diag,socket_map,attribution,connections}.rs` with fixtures | P2 |
+| E06-A2 | Startup entries | `startup/*` parsers and watches | P2 |
+| E06-A3 | Inventory readers | `inventory/*` (no DIMM serials) | P2 |
+| E07-A1 | Verified process operations | `process.rs` (`open_verified`, signals, nice, sched, affinity, ioprio, thread targets, kill tree), `sys.rs`, `error.rs`, `tests/ops_real.rs` | P1 |
+| E07-A2 | cgroup operations | `cgroup.rs` with `open_validated`, freeze, thaw, kill, the events wait; validation tests | P1 |
+| E07-A3 | Atomic files and launch | `fs.rs` (`write_atomic`, autostart override), `launch.rs`, `dump.rs` | P2 |
+| E08-A1 | Runtime, supervision, `Source` loop | `config.rs`, `runtime.rs`, `supervise.rs`, `controller.rs`, `source.rs`, `update.rs`, `workers/mod.rs`, `lib.rs`; LabRuntime tests for backoff, budget, cancel, demand rates | P0 |
+| E08-A2 | D-Bus helper and logind worker | `dbus/mod.rs`, `workers/logind.rs` | P1 |
+| E09-A1 | Engine publishes snapshots | `session.rs`, `reducer/*` with the full `ProcessTableView` builder and the `sys_table.rs` stub, `bridge.rs` with `EngineHandle` implementing `EngineClient`, `Engine::start`; tests: coalescing, sequence, session restart, 10,000-publish bridge test | P0 |
+| E09-A2 | Shutdown | `EngineHandle::shutdown` with the five steps and `real_shutdown.rs` | P1 |
+| E10-A1 | Processes worker | `workers/processes.rs` publishing `ProcessSnapshot` at `processes.interval_ms` with the hidden policy | P1 |
+| E10-A2 | Process detail worker | `workers/process_detail.rs`: PSS and USS for `detail_keys`, Properties payloads, hashes, affinity masks, string scan | P1 (PSS), P2 (rest) |
+| E10-A3 | Handle search | `workers/handle_search.rs` with progress and cancel | P3 |
+| E11-A1 | Action pipeline for processes | `actions/mod.rs` admission and events, `actions/process.rs` for every process kind, `lab_actions.rs` (17th action is `Busy`, timeout is `OutcomeUnknown`) | P1 |
+| E11-A2 | cgroup, unit and startup actions | `actions/{cgroup,unit,startup}.rs` with the deadline table | P1 (cgroup), P2 (unit, startup) |
+| E12-A1 | CPU worker | `workers/cpu.rs` at 10 Hz with `cpu_fast`, publishing `CPU_TOTAL`, `CPU_KERNEL`, per-CPU series, `CPU_FREQ`, `CPU_TEMP` | P0 |
+| E12-A2 | Memory, disk, net, sensors workers and enumeration | `workers/{memory,disk,net,sensors,enumerate}.rs` | P1 |
+| E12-A3 | Inventory and the P2 D-Bus device workers | `workers/{inventory,dbus_udisks,dbus_upower,dbus_nm}.rs` | P2 |
+| E13-A1 | Probe binary | `tl-gpu-probe` with `Hello`, `Sample`, `Shutdown`, `--fake`; framing tests | P1 |
+| E13-A2 | `GpuNvidia` worker | `gpu/{spawn,client}.rs`, `workers/gpu_nvidia.rs`, failure table, pid mapping input | P1 |
+| E14-A1 | systemd workers and system table rows | `workers/dbus_systemd.rs`, the `sys_table.rs` body for all three tables, `ServicesSnapshot` | P2 |
+| E14-A2 | KWin bridge | `workers/dbus_kwin.rs`, the scripts, `WindowsSnapshot`, `KWinCommand` handling | P2 |
+| E14-A3 | Startup and connections workers, launcher, opener | `workers/{startup,connections}.rs`, `launcher.rs`, `opener.rs` | P2 |
+| E14-A4 | Journal | `workers/journal.rs`, `EngineClient::journal` | P2 |
+| E15-A1 | Metrics, text, icons and base controls | `theme/metrics.rs` use, `text/*`, `components/{focus,icons,button,checkbox,switch,input,tabs,tooltip}.rs`; U-7, U-41, U-42 recorded | P0 |
+| E15-A2 | Display components | `components/{validity,kv_grid,badge,empty,skeleton,progress,banner,link,radio,slider,stepper,select}.rs` | P0 |
+| E15-A3 | Gallery and render tests | `components/gallery.rs`, `tests/render_gallery.rs`, golden workflow; U-4 recorded | P1 |
+| E16-A1 | App core | `lib.rs`, `app.rs`, `hub.rs`, `demand.rs`, `i18n.rs`, `testing/fake_engine.rs`, `window/mod.rs`, `pages/mod.rs`, `windows/mod.rs`; hub and demand tests | P0 |
+| E16-A2 | Windows, dialogs, toasts | `components/{toast,dialog,window_frame}.rs`, `window/registry.rs` with `WindowKey` | P1 |
+| E16-A3 | Menus, shield, action tracker | `components/{menu,shield}.rs`, `action_tracker.rs` with `message()` | P1 |
+| E17-A1 | Theme model | `theme/{mod,builtin,derived,map,metrics,palette,store}.rs`, `assets/themes/builtin.json` with Default Dark and Default Light, `UiMetrics`; U-8 recorded | P0 |
+| E17-A2 | User themes and follow-system | `theme/user_store.rs`, follow-system switching, `theme/preview.rs` | P2 |
+| E18-A1 | Generic tree table | `table/{tree_table,columns,selection,cells,actions}.rs`, `text_cache.rs`, one-line header; selection and render-counter tests | P0 |
+| E18-A2 | Two-line header, picker and persistence | `table/header.rs` two-line mode, resize, reorder, sort, header menu, `columns_window.rs`, column state by id | P0 |
+| E19-A1 | Chart element | `chart/{element,view,geometry,grid,scale}.rs`, `anim.rs`; geometry and driver tests | P0 |
+| E19-A2 | Grid element, labels, hover | `chart/{grid_element,labels,hover}.rs` | P0 (grid, labels), P2 (hover) |
+| E20-A1 | Main window frame | `window/{main,titlebar,toolbar,tabstrip,status}.rs`, `actions.rs` with `bind_keys_global`, `focus.rs`; U-44 recorded | P0 |
+| E20-A2 | Filter box and settings global | `window/filter.rs`, `settings_global.rs`, type-to-filter routing; U-45 recorded | P1 |
+| E21-A1 | Menu bar | `window/menubar.rs` and the five menu files with every P1 item | P1 |
+| E21-A2 | Settings window | `window/settings/*` with all eleven pages | P2 |
+| E22-A1 | Process table renders | `pages/processes/{mod,table,delegate,name_cell,cells,header_totals,actions}.rs` driven by the fake engine | P0 |
+| E22-A2 | Row menu, confirmations, toasts | `pages/processes/{menu,confirm,toasts}.rs` with the P1 items | P1 |
+| E22-A3 | Jump target | `pages/processes/jump.rs` with `select_by_key(key, source)` | P1 |
+| E23-A1 | Properties window and General tab | `windows/frame.rs`, `windows/props/{mod,general,filter}.rs`, `windows/actions.rs` | P2 |
+| E23-A2 | Action dialogs | `windows/{affinity,priority,signal}.rs` | P2 |
+| E23-A3 | Notices | `windows/notices.rs` (dump and VirusTotal toasts) | P2 |
+| E24-A1 | Performance tab with CPU page | `pages/performance/{mod,page,sidebar,card,details,cpu,cpu_grid,cpu_details,actions}.rs` | P0 |
+| E24-A2 | Sidebar behaviour | selection, keys, hotplug, visibility, edit mode, menus, splitter, summary mode | P1 |
+| E25-A1 | Device pages | `pages/performance/{memory,memory_bar,disk,net,gpu}.rs` | P1 |
+| E26-A1 | Minigraph panel and cards | `pages/minigraph/{mod,panel,card,menu,actions,sources}.rs` | P1 |
+| E26-A2 | Detached graphs and mini window | `windows/{detached_graph,mini}.rs` | P3 |
+| E27-A1 | System table frame | `pages/{sys_table,sys_copy,sys_status}.rs` with the query pattern, skeleton, empty states, copy commands | P2 |
+| E27-A2 | Services page | `pages/services/*` | P2 |
+| E27-A3 | Service Properties | `windows/service_properties/*` | P2 |
+| E28-A1 | Startup Apps page | `pages/startup/*`, `windows/startup_properties.rs`, `windows/confirm_startup_delete.rs` | P2 |
+| E28-A2 | Connections page | `pages/connections/*`, `windows/connection_properties.rs` | P2 |
+| E28-A3 | Information page | `pages/information/*` | P2 |
+| E29-A1 | Helper binary | `tl-helper` with the allowlist and protocol tests | P3 |
+| E29-A2 | Helper session in the engine | `helper/*`, `actions/helper.rs`, `privileged` routing, shield state in health | P3 |
+| E29-A3 | Additional Setup window | `window/setup.rs`, `tasklens-setup`, the policy file | P3 |
+| E30-A1 | History crate | `tl-history` format, store, rolling window | P3 |
+| E30-A2 | Recorder and query | `workers/history.rs`, `history_query.rs`, `RecordSink` wiring | P3 |
+| E30-A3 | History mode UI | `pages/processes/history/*` | P3 |
+| E31-A1 | Tray crate | `tl-tray` with `raster.rs`; U-31 recorded | P3 |
+| E31-A2 | Tray bridge | `tray_bridge.rs` with `TrayModel` and `TrayEvent` | P3 |
+| E32-A1 | Memory watcher | `watch_memory.rs`, `lowmem_unit.rs` | P3 |
+| E32-A2 | Rescue window and low-memory engine | `workers/lowmem.rs`, `windows/low_memory.rs` | P3 |
+| E33-A1 | Binary starts | `main.rs` steps 1 to 4 and 7 to 10 (panic hook, logging, args, X11 rule, engine start, `Application::run`, main window), `paths.rs`, `logging.rs`, `crash.rs`, `args.rs` | P0 |
+| E33-A2 | Settings store | `settings_store.rs`, `migrations.rs`, `atomic.rs`, persist callback, `single_instance.rs`, `notify.rs` | P1 |
+| E33-A3 | Packaging | `PKGBUILD`, desktop file, asset install, `--version` | P1 |
+
+## 4. Epic dependency graph
+
+Each row lists the anchors an epic's beads may depend on. A bead depends only on the anchors it
+compiles or tests against, so most beads use a subset of their epic's row. The graph has no cycle:
+the order E02, E03, E17, E15, E04, E05, E06, E07, E08, E09, E10, E12, E13, E14, E11, E16, E18,
+E19, E20, E21, E22, E23, E24, E25, E26, E27, E28, E29, E31, E33, E32, E01, E30 is a topological
+order (every epic appears after everything it depends on; E30 comes after E01 only because of
+the `history-scrub` scene file).
+
+| Epic | Depends on anchors |
+|---|---|
+| E02 | none |
+| E03 | E02-A1 |
+| E04 | E02-A1, E03-A1 |
+| E05 | E02-A1, E03-A1, E04-A1 |
+| E06 | E02-A1, E03-A1, E04-A1 |
+| E07 | E02-A1, E03-A1, E03-A2 |
+| E08 | E02-A1, E03-A2 |
+| E09 | E03-A2, E08-A1, E08-A2 |
+| E10 | E05-A1, E05-A2, E05-A3, E08-A1, E09-A1 |
+| E11 | E07-A1, E07-A2, E07-A3, E08-A1, E09-A1, E14-A1 (unit actions), E14-A3 (launcher) |
+| E12 | E04-A2, E04-A3, E06-A3, E08-A1, E08-A2, E09-A1 |
+| E13 | E03-A2, E08-A1, E09-A1 |
+| E14 | E06-A1, E06-A2, E07-A3, E08-A1, E08-A2, E09-A1 |
+| E15 | E02-A1, E03-A1, E17-A1 |
+| E16 | E03-A2, E15-A1, E15-A2, E15-A3, E17-A1 |
+| E17 | E02-A1, E03-A1, E03-A2 |
+| E18 | E03-A2, E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E17-A1 |
+| E19 | E03-A1, E15-A1, E16-A1, E17-A1 |
+| E20 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E17-A1 |
+| E21 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E17-A1, E17-A2, E20-A1, E20-A2 |
+| E22 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E18-A1, E18-A2, E20-A1, E20-A2 |
+| E23 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E18-A1, E20-A1, E22-A1, E22-A2, E22-A3 |
+| E24 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E17-A1, E18-A1, E19-A1, E19-A2, E20-A1, E20-A2 |
+| E25 | E16-A2, E18-A1, E19-A1, E19-A2, E24-A1, E24-A2 |
+| E26 | E16-A2, E16-A3, E19-A1, E20-A1, E22-A1, E22-A2, E24-A1 |
+| E27 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E18-A1, E18-A2, E20-A1, E20-A2, E22-A1, E22-A2, E22-A3 |
+| E28 | E15-A1, E15-A2, E16-A1, E16-A2, E16-A3, E18-A1, E18-A2, E20-A1, E20-A2, E22-A3, E27-A1 |
+| E29 | E03-A2, E07-A1, E07-A2, E09-A1, E10-A2, E10-A3, E11-A1, E16-A2, E16-A3, E20-A1, E21-A2, E23-A1 |
+| E30 | E01-A1 (scene), E03-A2, E09-A1, E10-A1, E18-A1, E19-A1, E20-A1, E21-A2, E22-A1 |
+| E31 | E02-A1, E03-A2, E16-A1, E20-A1, E21-A2, E26-A1 |
+| E32 | E05-A1, E07-A1, E08-A1, E09-A1, E10-A1, E11-A1, E16-A2, E18-A1, E21-A2, E33-A1 |
+| E33 | E03-A2, E09-A1, E09-A2, E15-A1, E16-A1, E17-A1, E20-A1 |
+| E01 | E02-A1, E02-A2, E03-A1, E03-A2, E04-A1, E04-A2, E08-A1, E09-A1, E12-A1, E15-A1, E15-A2, E16-A1, E17-A1, E18-A1, E18-A2, E19-A1, E19-A2, E20-A1, E22-A1, E24-A1, E33-A1 |
+
+Notes on the graph:
+
+- **The phase-0 slice.** The spike measures the real chart element, tree table, pages and bridge
+  with synthetic data, so E01 depends on 21 anchors across 13 epics. Those anchors are the P0
+  beads. Everything else in those epics is P1 or later.
+- **The phase-0 gate is a scheduling rule, not a dependency.** ADR-014 says the results file is
+  committed before any P1 UI bead starts. Making every P1 UI bead depend on E01-A2 would create a
+  cycle (E01 depends on the P0 anchors of the same epics). Instead, bead priority does it: P0
+  beads have priority 0, and the leader starts P1 UI beads only after E01-A2 closes. Writers do
+  not add E01-A2 as a dependency.
+- **E11 depends on E14-A1 and E14-A3**, because unit actions run on the systemd worker's bus
+  connection and startup "Run now" uses the shared launcher. E14 does not depend on E11.
+- **E15 depends on E17-A1** (components read `TlTheme` and `UiMetrics`), and E17-A1 depends on
+  nothing in the UI. The theme editor and share windows live in E21 for this reason.
+- **E16 depends on E15** (window frames use `TlButton`), and E15 never uses E16's components.
+  E16's six components add their own gallery pages by chain edit.
+- **Page epics depend on E20-A1, never the reverse.** `MainWindow`'s page match and toolbar
+  content are chain edits made by the page epics.
+- **E23 depends on E22**, never the reverse. The row-menu items that open Properties and the
+  three dialogs are E23 beads that chain-edit `pages/processes/menu.rs` and register handlers in
+  `pages/processes/mod.rs`.
+- **E27 and E28 depend on E22-A3** (jump to process) and E27 on E22-A1 and E22-A2 (service child
+  rows reuse the process delegate cells and row menu). "Go to service" is an E27 bead.
+- **E26 depends on E22-A1** (the panel mounts in the Processes page) and E24-A1 (`DeviceCard`
+  for the mini window). The minigraph row-menu items are E26 beads.
+- **E31 depends on E26-A1** (tray graph sources are minigraph sources); "Show in tray" is an E31
+  bead. E30 depends on E01-A1 only for the `history-scrub` scene file.
+- **E32 depends on E33-A1** (argument arms) and E33 never depends on E32.
+
+## 5. Assignment to bead writers
+
+Eight batches. Each batch is one bead-writing agent. No two batches own the same file; the only
+cross-batch touches are the chain edits listed in section 2, each made in a bead that depends on
+the owning anchor. Sizes are the section 1 estimates.
+
+| Batch | Plan file | Epics | Size | Why these together |
+|---|---|---|---|---|
+| B1 `infra` | `docs/plan/b1-infra.md` | E01, E02, E03, E31, E32, E33 | 117 | workspace, contracts, the binary, the spike harness and the two small P3 crates that sit beside the binary (tray, low memory) |
+| B2 `collect-ops` | `docs/plan/b2-collect-ops.md` | E04, E05, E06, E07 | 100 | all synchronous system access: parsers, samplers, fixtures, verified operations |
+| B3 `engine-core` | `docs/plan/b3-engine-core.md` | E08, E09, E10, E11, E13 | 100 | runtime, reducer, bridge, process workers, actions, the GPU probe |
+| B4 `engine-workers` | `docs/plan/b4-engine-workers.md` | E12, E14, E29, E30 | 115 | the remaining workers, the D-Bus family, and the two P3 features that are mostly engine work (helper, history) with their UI parts |
+| B5 `ui-foundation` | `docs/plan/b5-ui-foundation.md` | E15, E16, E17, E18 | 110 | tokens, components, app core, theme, tree table |
+| B6 `ui-performance` | `docs/plan/b6-ui-performance.md` | E19, E24, E25, E26 | 120 | chart element and every surface that draws charts |
+| B7 `ui-shell` | `docs/plan/b7-ui-shell.md` | E20, E21, E23 | 110 | main window, menus, settings, secondary windows and dialogs |
+| B8 `ui-tables` | `docs/plan/b8-ui-tables.md` | E22, E27, E28 | 120 | the process table page and the three system table pages with the Information tab |
+
+Rules for writers:
+
+- A writer creates the epic beads for its epics first (`br create -t epic`), then the anchors,
+  then the rest, and keeps the plan-key to bead-ID table in its plan file.
+- A dependency on another batch's anchor is written as the plan key (for example `E18-A1`); the
+  leader resolves plan keys to bead IDs with `br dep add` after every batch has finished, from the
+  eight plan files. Dependencies inside a batch are added by the writer directly.
+- A chain edit to another batch's file is one bead, named "<epic>: add <part> to <file>", with
+  the owning anchor as its dependency and the exact lines to add in its Deliverable.
+- A writer who finds a value the docs do not decide stops that bead and lists it under "Open
+  items" in its plan file with a recommendation. It does not invent and it does not edit the docs.
+
+## 6. Coverage
+
+Every spec ID, UI ID and ADR section maps to a primary epic and, where other epics carry part of
+it, secondary epics in parentheses. Verdicts and phases are the merged specs' (see
+`docs/ui/INDEX.md`). Dropped IDs are listed so nothing is missing; they produce no bead.
+
+### PROC
+
+| IDs | Epic (secondary) |
+|---|---|
+| PROC-001 | E03 (E07, E22) |
+| PROC-002 | E05 (E10) |
+| PROC-003 | E03 (E22) |
+| PROC-004 | E05 (E09) |
+| PROC-005, PROC-006, PROC-007 | E05 |
+| PROC-008 | E09 (E22, E14 for window titles) |
+| PROC-009 | E09 (E22) |
+| PROC-010, PROC-011 | E05 |
+| PROC-012 | E09 (E22) |
+| PROC-013 | E18 |
+| PROC-014 | E09 (E21, E22) |
+| PROC-015, PROC-016 | E22 (E20 slot) |
+| PROC-017 | E22 (E21 menu item) |
+| PROC-018, PROC-019 | E09 (E22) |
+| PROC-020 | E18 (E21) |
+| PROC-021 | E22 |
+| PROC-022 | E03 (E18, E22) |
+| PROC-023 | E22 (E18) |
+| PROC-024, PROC-025, PROC-026 | E18 (E33 state store for 025) |
+| PROC-027 to PROC-031 | E05 data (E10, E22 cells) |
+| PROC-032 | E06 (E14, E22) |
+| PROC-033 | E13 (E22) |
+| PROC-034 | E22 (E05 estimate) |
+| PROC-035, PROC-036 | E05 (E22) |
+| PROC-037 | E03 (no UI) |
+| PROC-038 | E18 header (E09 totals, E22 text) |
+| PROC-039 | E22 |
+| PROC-040 | E22 (E17 `value_heat`) |
+| PROC-041 | E22 |
+| PROC-042 | E18 |
+| PROC-043 | E22 (E09 flags) |
+| PROC-044 | E22 (E20 filter box, E09 filter) |
+| PROC-045 | E22 (E20, E09) |
+| PROC-046 | E22 (E09) |
+| PROC-047 | E09 (E18) |
+| PROC-048 | E18 |
+| PROC-049 | E18 (E22) |
+| PROC-050 | E22 (E20 chip and key) |
+| PROC-051 | E22 |
+| PROC-052 | E14 |
+| PROC-053 | E22 (E14) |
+| PROC-054 | E22 (E14) |
+| PROC-055 | E20 button (E14 picker, E22 select) |
+| PROC-056 | E16 (E14, E20) |
+| PROC-057 | E22 (E23, E26, E27, E31 items) |
+| PROC-058 | E11 (E16, E22) |
+| PROC-059 | E22 confirmations (E05 flags, E11 admission) |
+| PROC-060 to PROC-063 | E11 (E22) |
+| PROC-064 | E11 (E07, E22) |
+| PROC-065 | E23 (E11) |
+| PROC-066, PROC-067 | E23 dialogs (E22 submenu, E11, E07, E10 masks) |
+| PROC-068 | E22 (E11, E07) |
+| PROC-069 | E22 (E23) |
+| PROC-070 | E22 (E18 rows-as-table) |
+| PROC-071 | E22 (E27 Go to service) |
+| PROC-072 | E22 (E11) |
+| PROC-073 | E22 (E14 opener) |
+| PROC-074 | E23 (E05 hash, E10) |
+| PROC-075 | E23 toasts (E11, E07) |
+| PROC-076 | E29 |
+| PROC-077 to PROC-084 | E23 (E10 payloads, E05 readers) |
+| PROC-085 | E23 (E10) |
+| PROC-086 to PROC-092 | E30 |
+| PROC-093 | E26 |
+| PROC-094 | E31 |
+| PROC-095 | E23 (E07 launch, E14 launcher, E33 history file path) |
+| PROC-096 | E23 (E10, E05, E29 helper path) |
+| PROC-097, PROC-098 | E32 |
+| PROC-099 | E03 schema (every feature epic for its keys) |
+
+### PERF
+
+| IDs | Epic (secondary) |
+|---|---|
+| PERF-001, PERF-002, PERF-003 | E24 |
+| PERF-004 | E04 classification (E12, E24, E21 settings page) |
+| PERF-005 | E09 catalog (E03, E24) |
+| PERF-006, PERF-007 | E24 (E21 View submenu for 007) |
+| PERF-008 | E24 (E25 page strings) |
+| PERF-009 | E25 |
+| PERF-010, PERF-011, PERF-012 | E24 |
+| PERF-013 | E15 (E03) |
+| PERF-014 | E24 (E20 slot) |
+| PERF-015 | E19 |
+| PERF-016 | E19 (E09 tiers, E21) |
+| PERF-017 | E09 (E03) |
+| PERF-018 to PERF-021 | E19 |
+| PERF-022 | E19 (E09) |
+| PERF-023 | E19 |
+| PERF-024 | E17 (E19, E26 per-card) |
+| PERF-025 | E03 formats (E21 page, E24) |
+| PERF-026 | E19 |
+| PERF-027 to PERF-032 | E24 (E04, E12 data) |
+| PERF-033 to PERF-040 | E24 (E04, E12) |
+| PERF-041, PERF-042 | E25 (E12) |
+| PERF-043 to PERF-045 | E25 (E04) |
+| PERF-046 | E25 (E06 inventory) |
+| PERF-047 to PERF-050 | E25 (E04, E12) |
+| PERF-051, PERF-052 | E25 windows (E12 udisks, E29 smartctl fallback) |
+| PERF-053 | E25 (E12) |
+| PERF-054 to PERF-057 | E25 (E04, E12) |
+| PERF-058, PERF-059 | E25 (E12 NM) |
+| PERF-060 | E12 fetch (E25 row, E21 notice) |
+| PERF-061 | E25 |
+| PERF-062 | E13 (E06 non-NVIDIA) |
+| PERF-063 to PERF-071 | E25 (E13) |
+| PERF-072, PERF-073 | E25 (E06 displays) |
+| PERF-074, PERF-075 | E12 worker (E06 readers, E25) |
+| PERF-076, PERF-077 | E25 (E04, E12, E21 fan settings) |
+| PERF-078, PERF-079 | E25 (E12 UPower) |
+| PERF-080 to PERF-087 | E26 (E21 View > Graphs for 080) |
+| PERF-088 to PERF-092 | E31 |
+| PERF-093 | E26 |
+| PERF-094 to PERF-104 | E28 (E06, E12 data) |
+| PERF-105, PERF-106 | E29 |
+| PERF-107 | E29 (row text only; the capability step is dropped) |
+| PERF-108 | E29 row (E04 detection, E25 page) |
+
+### SYS
+
+| IDs | Epic (secondary) |
+|---|---|
+| SYS-001 to SYS-004 | E27 (E14) |
+| SYS-005 | E14 (E27, E11) |
+| SYS-006, SYS-007 | E11 (E27) |
+| SYS-008, SYS-009 | E27 |
+| SYS-010 | E27 (E22-A3) |
+| SYS-011 to SYS-014 | E27 (E14 details, E11 recovery write, E29 drop-in) |
+| SYS-015 | E27 Logs tab (E14 journal) |
+| SYS-016, SYS-017 | E27 |
+| SYS-018 | E14 (E27 variant) |
+| SYS-019 | E06 (E14) |
+| SYS-020, SYS-021 | E28 (E06) |
+| SYS-022 to SYS-024 | E11 actions (E07, E14 launcher, E28 flows) |
+| SYS-025, SYS-026, SYS-027 | E28 |
+| SYS-028 | E06 (E14) |
+| SYS-029 | E28 (E06 formats) |
+| SYS-030 | E06 (E14, E29 helper) |
+| SYS-031 | E29 (E11, E28 flow) |
+| SYS-032, SYS-033, SYS-034 | E28 |
+| SYS-035 | E28 (E06 rdns) |
+| SYS-036 | E28 |
+| SYS-037 | E28 (E06, E14) |
+
+### APP
+
+| IDs | Epic (secondary) |
+|---|---|
+| APP-001, APP-002 | E20 |
+| APP-003 | E29 (E16 `TlShield`) |
+| APP-004, APP-005 | E22 (E20 slot) |
+| APP-006 | E20 (E14) |
+| APP-007 | dropped |
+| APP-008 | E20 |
+| APP-009 | E16 (E20, E14) |
+| APP-010 | E20 (E33 state) |
+| APP-011 | E33 (E20 UI side) |
+| APP-012 | E21 |
+| APP-013 | dropped |
+| APP-014, APP-015 | E23 |
+| APP-016 to APP-024 | E21 |
+| APP-025 | dropped |
+| APP-026 | E21 (E20 FPS overlay) |
+| APP-027, APP-028, APP-029 | E20 |
+| APP-030 | E21 |
+| APP-031 | E20 keymap (E18 table keys, every page epic for its context) |
+| APP-032 | E03 schema (E21 pages, E33 store) |
+| APP-033 | E33 |
+| APP-034 | E33 (E17 themes) |
+| APP-035 | E17 |
+| APP-036 | E17 (E21 menu) |
+| APP-037, APP-038 | E21 windows (E17 preview and codec) |
+| APP-039 | E17 (E21 submenu) |
+| APP-040 | E21 (E15 metrics, E20 runtime change) |
+| APP-041 | E28 (E21 Help item) |
+| APP-042 | E29 |
+| APP-043 | E16 (E21 submenu, E20 live switch) |
+| APP-044, APP-045 | E16 |
+| APP-046 | E33 |
+| APP-047 | E31 (E20 close rows) |
+| APP-048 | E33 (E21 setting) |
+| APP-049 | E29 |
+| APP-050 | dropped |
+| APP-051 | E33 |
+| APP-052 | E33 (E01, E32 arms) |
+| APP-053 | E21 |
+| APP-054 | E33 |
+| APP-055 | E33 (E21 window) |
+| APP-056 | E21 window (E12 fetch) |
+| APP-057 | dropped |
+| APP-058 | E15 (E20) |
+| APP-059 | E15 skeletons (E20 frame rule, E27, E28) |
+
+### UI-FND
+
+| IDs | Epic |
+|---|---|
+| UI-FND-001, UI-FND-002 | E17 |
+| UI-FND-003 | E15 (`UiMetrics` struct in E17-A1) |
+| UI-FND-010 to UI-FND-019 | E15 |
+| UI-FND-020, UI-FND-021, UI-FND-022 | E16 |
+| UI-FND-023 to UI-FND-027 | E15 |
+| UI-FND-028 | E16 |
+| UI-FND-029, UI-FND-030, UI-FND-031, UI-FND-032 | E15 |
+| UI-FND-040 to UI-FND-043 | E17 |
+| UI-FND-050 to UI-FND-053 | E15 |
+
+### UI-SHL
+
+| IDs | Epic (secondary) |
+|---|---|
+| UI-SHL-001 to UI-SHL-007 | E20 |
+| UI-SHL-010 | E20 |
+| UI-SHL-011 | E29 |
+| UI-SHL-012, UI-SHL-013 | E22 |
+| UI-SHL-014 | E20 (E14) |
+| UI-SHL-020 to UI-SHL-022 | E20 |
+| UI-SHL-023 | E20 (E30 toggle behaviour, E28 copy icon) |
+| UI-SHL-024, UI-SHL-025 | E20 |
+| UI-SHL-030 to UI-SHL-042 | E21 |
+| UI-SHL-050, UI-SHL-051 | E20 |
+| UI-SHL-060 to UI-SHL-072 | E21 |
+| UI-SHL-080 | E17 |
+| UI-SHL-081 to UI-SHL-085 | E21 (E17 codec and palette) |
+| UI-SHL-090 | E20 (E16 frame) |
+| UI-SHL-091, UI-SHL-092, UI-SHL-093 | E21 (E33 report files) |
+| UI-SHL-094 | E29 |
+| UI-SHL-095, UI-SHL-096 | E21 |
+| UI-SHL-097, UI-SHL-098 | E23 |
+| UI-SHL-099 | E21 |
+| UI-SHL-100 | E16 (E20 placement) |
+| UI-SHL-110 | E33 (E20 steps 8 to 11) |
+| UI-SHL-111 | E20 |
+| UI-SHL-112 | E33 (E20 UI side) |
+| UI-SHL-113 | E20 rows 2, 3 and Quit (E31 row 1 and tray) |
+| UI-SHL-114 | E33 |
+| UI-SHL-120 to UI-SHL-124 | E20 |
+| UI-SHL-130 | E20 |
+| UI-SHL-131 | E16 (E20, E21) |
+| UI-SHL-132 | E20 |
+| UI-SHL-140 | E20 |
+
+### UI-PRC
+
+| IDs | Epic (secondary) |
+|---|---|
+| UI-PRC-001 | E18 |
+| UI-PRC-002, UI-PRC-003, UI-PRC-004 | E22 |
+| UI-PRC-005 | E18 header (E22 totals) |
+| UI-PRC-006 to UI-PRC-010 | E18 |
+| UI-PRC-011 to UI-PRC-020 | E22 (E23, E26 items) |
+| UI-PRC-021 | E23 |
+| UI-PRC-022 | E22 |
+| UI-PRC-023 | E22 (E18, E01 scene) |
+| UI-PRC-024 | E22 |
+| UI-PRC-030 to UI-PRC-037 | E30 |
+
+### UI-PWN
+
+| IDs | Epic |
+|---|---|
+| UI-PWN-001 to UI-PWN-031 | E23 |
+| UI-PWN-032, UI-PWN-033 | E32 |
+| UI-PWN-034, UI-PWN-035, UI-PWN-036 | E23 |
+
+### UI-PRF
+
+| IDs | Epic (secondary) |
+|---|---|
+| UI-PRF-001 to UI-PRF-007 | E19 |
+| UI-PRF-008 | E17 (E19) |
+| UI-PRF-009 | E19 |
+| UI-PRF-010 to UI-PRF-016 | E24 |
+| UI-PRF-020 to UI-PRF-025 | E24 |
+| UI-PRF-026 to UI-PRF-036 | E25 |
+| UI-PRF-040 to UI-PRF-045 | E26 (E31 tray item in 042) |
+| UI-PRF-050, UI-PRF-051 | E31 |
+| UI-PRF-052 | E29 |
+| UI-PRF-053 | E01 |
+
+### UI-SYS
+
+| IDs | Epic |
+|---|---|
+| UI-SYS-001 to UI-SYS-007 | E27 |
+| UI-SYS-010 to UI-SYS-024 | E27 |
+| UI-SYS-030 to UI-SYS-038 | E27 |
+| UI-SYS-040 to UI-SYS-050 | E28 |
+| UI-SYS-060 to UI-SYS-070 | E28 |
+| UI-SYS-080 to UI-SYS-096 | E28 |
+
+### ADR sections
+
+| ADR | Part | Epic |
+|---|---|---|
+| ADR-001 | layout, dependency rules, `check-deps` | E02 |
+| ADR-002 | toolchain, pins, profiles, lints | E02 |
+| ADR-003 | all types | E03 |
+| ADR-004 | runtime, supervisor, worker loop, D-Bus workers | E08 |
+| ADR-004 | task tree, session, reducer, shutdown | E09 |
+| ADR-004 | worker list | E10, E12, E13, E14, E30 (each its rows) |
+| ADR-004 | KWin bridge worker | E14 |
+| ADR-004 | engine modes | E08 (`EngineMode`), E32 (`LowMemory` behaviour) |
+| ADR-005 | `EngineClient`, action types, `Command` | E03 |
+| ADR-005 | bridge, publish, channels | E09 |
+| ADR-005 | UI receiver, `ActionTracker` | E16 |
+| ADR-005 | journal | E14 |
+| ADR-006 | `tl-ops` code | E07 |
+| ADR-006 | admission, tasks, deadlines, systemd units, protected rules, confirmations list | E11 (E22 for the dialog texts) |
+| ADR-006 | helper boundary | E29 |
+| ADR-007 | probe, spawn, request rules, failure table | E13 |
+| ADR-007 | framing and messages | E03 |
+| ADR-008 | `Demand` | E03 (E16 aggregator) |
+| ADR-008 | schedule, tick semantics, counter rules, suspend | E08 (loop), E09 (suspend), E04 (counters), E12 (rates) |
+| ADR-008 | CPU and memory math | E04 |
+| ADR-009 | entity structure | E16 |
+| ADR-009 | chart element, animation driver | E19 |
+| ADR-009 | tree-table, text caching | E18 (E22 for row rendering rules) |
+| ADR-009 | theme model | E17 |
+| ADR-009 | metrics, fonts, icons | E15 (E17 `UiMetrics`) |
+| ADR-009 | accessibility and input, motion settings | E20 |
+| ADR-010 | backend, decorations, size, close | E20 (E33 env rule) |
+| ADR-010 | single instance | E33 |
+| ADR-010 | tray | E31 |
+| ADR-010 | zed#64499 mitigation, hidden state, checklist | E01 (E19 stall detection, E16 hidden timer) |
+| ADR-011 | paths, load, save | E33 |
+| ADR-011 | schema | E03 |
+| ADR-012 | all, including the `RecordSink` hook | E30 (E09 holds the hook as `None`) |
+| ADR-013 | layers, `ci.sh`, static checks | E02 |
+| ADR-013 | fixtures | E04 |
+| ADR-013 | LabRuntime cases | E08, E09, E11 |
+| ADR-013 | UI tests, fake engine | E16 |
+| ADR-013 | headless screenshots, goldens | E15 |
+| ADR-013 | real-system tests | the owner of each tested code path |
+| ADR-014 | all | E01 |
+| ADR-015 | logging, crash handling | E33 |
+| ADR-015 | errors (`message`) | E16 (E03 for `ActionError`) |
+| ADR-015 | untrusted text | E05 (E15 display rules) |
+| ADR-015 | exports and copy | E22, E27, E28 (E18 rows-as-table) |
+| ADR-016 | parsers, FD policy, sources table | E04, E05, E06 |
+| ADR-016 | services, journal, startup, connections rows | E14 |
+| ADR-016 | icons | E05 |
+| Open questions 1 to 10 | | E01 (1, 4, 5, 6, 9, 10), E15 (2, 3), E17 (8), E13 (7) |
+
+### Unverified list (U-1 to U-50)
+
+| U | Settled by |
+|---|---|
+| U-1 | E02 |
+| U-2, U-3, U-4, U-7, U-9, U-10, U-36, U-39, U-47 | E01 |
+| U-5, U-6 | E20 (documented, not testable) |
+| U-8 | E17 |
+| U-11, U-22 | E30 |
+| U-12, U-35 | E13 |
+| U-13, U-14, U-49 | E14 |
+| U-15 | E23 (Browse) |
+| U-16 | E33 |
+| U-17, U-18 | E17 |
+| U-19, U-21, U-34 | E05 |
+| U-20 | E04 |
+| U-23, U-26, U-27, U-29, U-32 | E06 |
+| U-24, U-50 | E32 |
+| U-25, U-30, U-37 | E12 |
+| U-28 | E04 |
+| U-31 | E31 |
+| U-33 | E22 (first copy bead) |
+| U-38 | E03 |
+| U-40 | E15 |
+| U-41, U-42 | E15 |
+| U-43 | E29 |
+| U-44, U-45 | E20 |
+| U-46 | E24 |
+| U-48 | E27 |
+
+## 7. Open items
+
+Things the docs do not decide that this structure needs. Each has a recommendation; writers use
+the recommendation until the leader or Oystein says otherwise, and they note the item number in
+the affected beads.
+
+1. **Two files called `tl-ui/src/actions.rs`.** ADR-009 puts `ActionTracker` there; shell.md puts
+   every GPUI Action and `bind_keys` there. Recommendation: `src/action_tracker.rs` for the
+   entity (E16), `src/actions.rs` for the window-level Actions and `bind_keys_global` (E20).
+   Section 2 is written that way. One line in ADR-009 to update.
+
+2. **`write_atomic` lives in `tl-app`, but the engine's Startup worker writes autostart
+   overrides.** ADR-011 names `tl-app/src/atomic.rs` for both; ADR-001 does not let `tl-engine`
+   depend on `tl-app`. Recommendation: the routine lives in `tl-ops/src/fs.rs` (E07-A3);
+   `tl-app/src/atomic.rs` re-exports it, which needs `tl-ops` added to `tl-app`'s allowed row in
+   ADR-001 (one table cell). Alternative: duplicate the 20 lines. The first is cleaner.
+
+3. **`ureq` is not in any allowed-dependency row.** PERF-060 fixes `ureq` 3 with rustls for the
+   public IP fetch. Recommendation: add `ureq = { version = "3", default-features = false,
+   features = ["rustls"] }` to `[workspace.dependencies]` (E02 writes the pin) and to
+   `tl-engine`'s row; the E12 bead that adds it runs `check-deps` to settle U-30. Pin the exact
+   version in that bead after `cargo add` resolves it.
+
+4. **Fluent is not in `tl-ui`'s allowed row and the catalogue layout is undefined.** APP-043
+   fixes `fluent-bundle` and `unic-langid` with embedded `.ftl` files. Recommendation: add both
+   to `tl-ui`'s row and the workspace pins; `tl-ui/src/i18n.rs` (E16-A1) exposes `tr(key)` and
+   `tr_args(key, args)` returning `SharedString`, with a `Strings` Global and `strings_version`;
+   `assets/locales/en-US.ftl` is one file that every epic appends to by chain edit, keys named
+   `<area>-<entry>-<slug>` (for example `processes-menu-end-task`). The locale list comes from
+   canonical table (a). Other locales are P4 and not beaded in this round.
+
+5. **`actions!(tl_pwn, ...)` in process-windows.md.** R-128 fixes one namespace, `tasklens`.
+   Recommendation: `windows/actions.rs` declares its Actions in `tasklens` with the `Props`,
+   `Affinity`, `Priority`, `Signal`, `Run` and `HandleSearch` prefixes; the one sentence in
+   process-windows.md is out of date and writers follow R-128.
+
+6. **Opening URLs, file locations and launching programs has no `Command` variant.** PROC-073,
+   PROC-074, PROC-095, SYS-023, UI-SHL-093 ("Open log folder") and PERF-061 need session-bus
+   calls (`FileManager1`, portal `OpenURI`, `StartTransientUnit`) with an `xdg-open` fallback and
+   a result toast. `tl-ui` cannot use zbus. Recommendation: add to `tl-model::actions`
+   `ActionKind::OpenUri(Arc<str>)`, `ActionKind::ShowInFileManager { path: Arc<str>, properties:
+   bool }` and `ActionKind::Launch(LaunchSpec)` (command text or desktop entry id, `as_admin`,
+   `cwd`), allow an empty `targets` vector for these three kinds, run them in `tl-engine/src/opener.rs`
+   and `launcher.rs` (E14-A3), and report through the normal `ActionEvent` path so the existing
+   toasts work. Alternative: a `Box<dyn Fn>` callback from `tl-app` using its blocking zbus
+   connection. The first keeps one action path and one place for session-bus code.
+
+7. **`tl-collect` module layout is not in ADR-016.** Section 2 proposes it (`parse/`, `sample/`,
+   `proc/`, `apps/`, `net/`, `startup/`, `inventory/`, `gpu_drm/`). Recommendation: accept it;
+   the E04-A1 bead adds the module list to ADR-016 as a doc edit in the same commit.
+
+8. **The phase-0 slice is wide.** E01 needs 21 anchors from 13 epics (section 4). This follows
+   from ADR-014 measuring the real chart, table, pages and bridge with synthetic data.
+   Recommendation: accept, label those anchors `phase-p0`, and have the leader start them first
+   across batches B1, B2, B3, B5, B6, B7 and B8. The alternative, a throwaway spike UI, would
+   measure code that is then rewritten and would not satisfy the decision rule.
+
+9. **Where the reducer's `sys_table.rs` body is written.** The builder is reducer code (E09) but
+   only the P2 D-Bus epic (E14) knows the rows. Recommendation (used in section 2): E09-A1
+   writes the signatures and an empty body; E14-A1 fills it. The same pattern is not used
+   anywhere else.
+
+10. **`tl-engine/src/workers/processes.rs` is shared with the low-memory mode.** ADR-004 makes
+    `LowMemory` a stripped sweep inside the `Processes` worker. Recommendation (used in section
+    2): the stripped sweep is its own `Source` in `workers/lowmem.rs` (E32); E32 chain-edits one
+    `match` arm in `processes.rs` that picks it by `EngineMode`.
+
+11. **The `tasklens-setup` script source location and language.** Table (c) gives the install
+    path only. Recommendation: `packaging/tasklens-setup`, POSIX `sh`, installed by the PKGBUILD
+    with mode 0755, owned by E29.
+
+12. **The KWin bridge scripts.** The docs give the run-time path but not where the JavaScript
+    source lives. Recommendation: `assets/kwin/{kwin-bridge.js,pick.js,cmd-template.js}`
+    embedded with `include_str!`, owned by E14.
+
+13. **The `AppRequest` channel type between `tl-app` and `tl-ui`.** UI-SHL-112 names
+    `async_channel::bounded(4)` and `AppRequest` but not the enum. Recommendation:
+    `tl_model::command::AppRequest { Activate { token: Option<Arc<str>> }, SelectTab(Tab),
+    SelectPid(u32), Quit }` in `tl-model` (E03-A2), so neither crate depends on the other for it.
+
+14. **Epic count.** 33 epics against the asked-for 20 to 30. Recommendation: keep 33; the
+    section 1 sizes show that merging any two UI epics passes 40 beads.
+
+15. **The Run dialog's `--bench` neighbour, `--gallery`, is not in APP-052.** UI-FND-030 adds it.
+    Recommendation: `args.rs` (E33-A1) declares `--gallery` beside `--bench`, both behind the
+    `bench` feature, and table (c)'s argument list gains it in a doc edit by E01.
+
+16. **Unit rows' and app rows' "Memory" from cgroup `memory.stat` `anon`** needs `memory.stat`
+    reads in the process sweep that ADR-016's sources table does not list. Recommendation: E05-A2
+    reads `memory.stat` and `cpu.stat` for app scopes and the demanded unit cgroups
+    (`service_cgroup_stats`) and records this in the ADR-016 table in the same commit.
+
+
