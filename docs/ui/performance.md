@@ -1253,3 +1253,185 @@ sp4 between cards
 - **Tests**: `synth_is_deterministic` (two runs with seed 42 produce identical first 1,000 samples), `bench_scene_perf_cpu_builds_32_cells_and_9_cards` (render test counts elements).
 - **Phase**: P0.
 - **Decided here**: the bench-only "both charts" layout, the synthetic formulas, the sidebar device list, the latency measurement points, the JSON shape.
+
+---
+
+## Summary table
+
+| ID | Name | Implements | Phase |
+|---|---|---|---|
+| UI-PRF-001 | ChartView and ChartElement | PERF-015, 016, 017, 020, 021, 022, 024, 026 | P1 |
+| UI-PRF-002 | ChartGridElement | PERF-028, 063, 001 | P1 |
+| UI-PRF-003 | Chart labels and legends | PERF-015, 016, 019, 026, 030 | P1 |
+| UI-PRF-004 | Hover readout | PERF-023 | P2 |
+| UI-PRF-005 | Smooth scrolling, animation driver, time mapping | PERF-020 | P1 |
+| UI-PRF-006 | Y scale and axis rounding | PERF-018, 019, 030 | P1 |
+| UI-PRF-007 | Decimation, gaps and validity on charts | PERF-017, 022 | P1 |
+| UI-PRF-008 | Graph palette and per-card colour | PERF-024 | P1/P3 |
+| UI-PRF-009 | Curved lines | PERF-021 | P4 |
+| UI-PRF-010 | Performance tab layout | PERF-006, 007, 012, 014 | P1 |
+| UI-PRF-011 | Device sidebar card | PERF-001, 005, 008, 013, 053, 054 | P1/P2/P4 |
+| UI-PRF-012 | Sidebar list: selection, keys, hotplug, visibility | PERF-002, 004, 005, 007, 008 | P1/P2 |
+| UI-PRF-013 | Sidebar edit mode | PERF-003, 008, 002 | P2 |
+| UI-PRF-014 | Card context menu | PERF-002, 088 | P1/P3 |
+| UI-PRF-015 | Page jump submenu and page context menu | PERF-007, 010, 011, 016, 088 | P1/P2/P3 |
+| UI-PRF-016 | Graph summary mode | PERF-010 | P2 |
+| UI-PRF-020 | Device page frame | PERF-008, 012, 014 | P1 |
+| UI-PRF-021 | Details grid | PERF-012, 013 | P1 |
+| UI-PRF-022 | Copy device info | PERF-011 | P2 |
+| UI-PRF-023 | CPU page: header, modes, graph area | PERF-027, 028, 029, 030, 031, 033 | P1/P2 |
+| UI-PRF-024 | CPU page: Details grid | PERF-033 to 040 | P1/P2 |
+| UI-PRF-025 | CPU secondary graph | PERF-032, 038, 039, 040 | P2 |
+| UI-PRF-026 | Memory page: graphs | PERF-041 | P1 |
+| UI-PRF-027 | Memory composition bar | PERF-042 | P1 |
+| UI-PRF-028 | Memory page: Details grid and blocks | PERF-043, 044, 045, 046 | P1/P2 |
+| UI-PRF-029 | Disk page: graphs and header buttons | PERF-047, 048, 051, 052, 053 | P1/P2 |
+| UI-PRF-030 | Disk page: Details, partitions, SMART, Disk in use | PERF-049, 050, 051, 052, 053 | P1/P2/P3 |
+| UI-PRF-031 | Network page | PERF-054 to 061 | P1/P2/P3 |
+| UI-PRF-032 | GPU page: graph rows | PERF-062 to 068 | P1/P2 |
+| UI-PRF-033 | GPU page: Details grid and displays | PERF-064 to 073 | P1/P2 |
+| UI-PRF-034 | Fan page | PERF-076, 077, 108 | P2/P3 |
+| UI-PRF-035 | Battery and power device page | PERF-078, 079 | P2/P3 |
+| UI-PRF-036 | Aggregate pages | PERF-009, 008 | P4 |
+| UI-PRF-040 | Minigraph panel | PERF-080, 082 | P1/P2/P3 |
+| UI-PRF-041 | Minigraph card | PERF-080, 085, 086, 087, 024 | P1/P3 |
+| UI-PRF-042 | Minigraph card context menu | PERF-081, 082, 083, 088 | P1/P3 |
+| UI-PRF-043 | Move and reorder cards | PERF-082, 083 | P2/P3 |
+| UI-PRF-044 | Detached graph windows | PERF-083, 084 | P3 |
+| UI-PRF-045 | Performance mini window | PERF-093 | P3 |
+| UI-PRF-050 | Tray graph icon rasterizer | PERF-088, 091, 092 | P3 |
+| UI-PRF-051 | Tray graph tooltips and menus | PERF-089, 090, 091, 092 | P3 |
+| UI-PRF-052 | Additional Setup window: rows and states | PERF-105, 106, 107, 108 | P3/P4 |
+| UI-PRF-053 | Bench scenes perf-cpu, bridge, static | ADR-014 | P0 |
+
+## Coverage: merged spec IDs in scope to UI entries
+
+PERF-094 to PERF-104 (Information tab) belong to the system tabs spec and are not listed. The AMD and Intel backends (PERF-074, PERF-075) have no UI of their own beyond the GPU page entries; they are mapped to those.
+
+| PERF | UI entries |
+|---|---|
+| PERF-001 | UI-PRF-011, UI-PRF-002 |
+| PERF-002 | UI-PRF-012, UI-PRF-013, UI-PRF-014 |
+| PERF-003 | UI-PRF-013 |
+| PERF-004 | UI-PRF-012 |
+| PERF-005 | UI-PRF-011, UI-PRF-012 |
+| PERF-006 | UI-PRF-010 |
+| PERF-007 | UI-PRF-010, UI-PRF-012, UI-PRF-015 |
+| PERF-008 | UI-PRF-011, UI-PRF-012, UI-PRF-013, UI-PRF-020, UI-PRF-036 |
+| PERF-009 | UI-PRF-036 |
+| PERF-010 | UI-PRF-015, UI-PRF-016 |
+| PERF-011 | UI-PRF-015, UI-PRF-022 |
+| PERF-012 | UI-PRF-010, UI-PRF-020, UI-PRF-021 |
+| PERF-013 | UI-PRF-011, UI-PRF-021 |
+| PERF-014 | UI-PRF-010, UI-PRF-020 |
+| PERF-015 | UI-PRF-001, UI-PRF-003 |
+| PERF-016 | UI-PRF-001, UI-PRF-003, UI-PRF-015 |
+| PERF-017 | UI-PRF-001, UI-PRF-007 |
+| PERF-018 | UI-PRF-006 |
+| PERF-019 | UI-PRF-003, UI-PRF-006 |
+| PERF-020 | UI-PRF-001, UI-PRF-005 |
+| PERF-021 | UI-PRF-009 |
+| PERF-022 | UI-PRF-001, UI-PRF-007 |
+| PERF-023 | UI-PRF-004 |
+| PERF-024 | UI-PRF-008, UI-PRF-041 |
+| PERF-025 | UI-PRF-003 (`ValueFormat`), UI-PRF-031 (Display unit row) |
+| PERF-026 | UI-PRF-001, UI-PRF-003 |
+| PERF-027 | UI-PRF-023 |
+| PERF-028 | UI-PRF-002, UI-PRF-023 |
+| PERF-029 | UI-PRF-023 |
+| PERF-030 | UI-PRF-003, UI-PRF-006, UI-PRF-023 |
+| PERF-031 | UI-PRF-023 |
+| PERF-032 | UI-PRF-025 |
+| PERF-033 | UI-PRF-023, UI-PRF-024 |
+| PERF-034 | UI-PRF-024 |
+| PERF-035 | UI-PRF-024 |
+| PERF-036 | UI-PRF-024 |
+| PERF-037 | UI-PRF-024 |
+| PERF-038 | UI-PRF-024, UI-PRF-025 |
+| PERF-039 | UI-PRF-024, UI-PRF-025 |
+| PERF-040 | UI-PRF-024, UI-PRF-025 |
+| PERF-041 | UI-PRF-026 |
+| PERF-042 | UI-PRF-027 |
+| PERF-043 | UI-PRF-028 |
+| PERF-044 | UI-PRF-028 |
+| PERF-045 | UI-PRF-028 |
+| PERF-046 | UI-PRF-028 |
+| PERF-047 | UI-PRF-029 |
+| PERF-048 | UI-PRF-029 |
+| PERF-049 | UI-PRF-030 |
+| PERF-050 | UI-PRF-030 |
+| PERF-051 | UI-PRF-029, UI-PRF-030 |
+| PERF-052 | UI-PRF-029, UI-PRF-030 |
+| PERF-053 | UI-PRF-011, UI-PRF-030 |
+| PERF-054 | UI-PRF-011, UI-PRF-012, UI-PRF-031 |
+| PERF-055 | UI-PRF-003, UI-PRF-031 |
+| PERF-056 | UI-PRF-031 |
+| PERF-057 | UI-PRF-031 |
+| PERF-058 | UI-PRF-031 |
+| PERF-059 | UI-PRF-031 |
+| PERF-060 | UI-PRF-031 |
+| PERF-061 | UI-PRF-031 |
+| PERF-062 | UI-PRF-032 |
+| PERF-063 | UI-PRF-002, UI-PRF-032 |
+| PERF-064 | UI-PRF-032, UI-PRF-033 |
+| PERF-065 | UI-PRF-032, UI-PRF-033 |
+| PERF-066 | UI-PRF-032, UI-PRF-033 |
+| PERF-067 | UI-PRF-032, UI-PRF-033 |
+| PERF-068 | UI-PRF-032, UI-PRF-033 |
+| PERF-069 | UI-PRF-033 |
+| PERF-070 | UI-PRF-033 |
+| PERF-071 | UI-PRF-033 |
+| PERF-072 | UI-PRF-033 |
+| PERF-073 | UI-PRF-033 |
+| PERF-074 | UI-PRF-032 (engine tooltip "Own processes only"), UI-PRF-033 |
+| PERF-075 | UI-PRF-032, UI-PRF-033 |
+| PERF-076 | UI-PRF-034 |
+| PERF-077 | UI-PRF-034 |
+| PERF-078 | UI-PRF-035 |
+| PERF-079 | UI-PRF-035 |
+| PERF-080 | UI-PRF-040, UI-PRF-041 |
+| PERF-081 | UI-PRF-042 |
+| PERF-082 | UI-PRF-040, UI-PRF-042, UI-PRF-043 |
+| PERF-083 | UI-PRF-042, UI-PRF-043, UI-PRF-044 |
+| PERF-084 | UI-PRF-044 |
+| PERF-085 | UI-PRF-041 |
+| PERF-086 | UI-PRF-041, UI-PRF-050 |
+| PERF-087 | UI-PRF-041 |
+| PERF-088 | UI-PRF-014, UI-PRF-015, UI-PRF-042, UI-PRF-050 |
+| PERF-089 | UI-PRF-051 |
+| PERF-090 | UI-PRF-051 |
+| PERF-091 | UI-PRF-050, UI-PRF-051 |
+| PERF-092 | UI-PRF-050, UI-PRF-051 |
+| PERF-093 | UI-PRF-045 |
+| PERF-105 | UI-PRF-052 |
+| PERF-106 | UI-PRF-052 |
+| PERF-107 | UI-PRF-052 |
+| PERF-108 | UI-PRF-034, UI-PRF-052 |
+
+Also realized: R-055 (UI-PRF-011), R-058 (UI-PRF-001 double-click, UI-PRF-045), R-066 (UI-PRF-041), R-067 (UI-PRF-051), R-084 and R-086 (UI-PRF-044, UI-PRF-045), R-089 (UI-PRF-040), R-090 (UI-PRF-010), R-100 (UI-PRF-041), D-007 (UI-PRF-022, UI-PRF-028), D-009 (UI-PRF-030), ADR-009 chart rules 1 to 10 (UI-PRF-001 to UI-PRF-007), ADR-014 fixture (UI-PRF-053).
+
+## Decided here (all values this file chose; reviewers check these)
+
+Shared sizes: `chart_pad` 6, `chart_label_row` 18, `page_pad` 16, `page_header_h` 36, `details_gap` 24, `kv_row_h` 46, `kv_col_gap` 16, `grid_cell_gap` 8, `grid_cell_h` 112, `graph_h_single` 240, `graph_h_stacked` 150, `graph_h_overall` 300, `secondary_graph_h` 120, `card_h` 80, sidebar padding `sp4`, page minimum width 400.
+
+Chart: legend vertical under 200 px width, axis-max visibility rule (plot ≥ 100 high and non-fixed scale), range-label visibility rule (≥ 100 high and ≥ 160 wide), baseline quad at 40% alpha, dotted-gap quads every 3 physical px, stale tail as a flat continuation at half alpha, 2-period overscan, `TIER_1HZ` metric flag bit, dashed upload tint (30% toward white), dirty line alpha 0.6, fill alpha 0.85 for single-colour types, grid alpha 0.12, temperature scale rounding to 5 °C with the same 10 s fall rule, symmetric battery axis label "±N W", Commit axis text above 100%, curved-line subdivisions 4, hover box geometry and first-series rule for avg and peak, marker pinned in data time, reduce-motion note text under the Smooth graphs switch.
+
+Sidebar: card inset `sp5`, text line heights 18/16/16, selected border 2 px drawn inside, focus ring 1 px accent at 0.5 outside, pressed tint, hover `row_hover`, no double-click on cards, device numbering from 0, Home and End keys, hotplug animations (`m_base` height and opacity), next-below-else-above selection rule, edit-mode header layout and button variants, missing empty-state texts ("No disk found", "No fan found", "No battery found"), drops limited to the same group, Alt+Up/Down keyboard reorder, drag ghost opacities, card menu separator and item 5, disabled "Hide This Page" for the last card, page menu order and separators, scrollbar mode Hover, sidebar hide animation.
+
+Summary mode: tile grid `cols = ceil(sqrt(n))` with 200 × 120 minimum, heading composition, accent marker under the selected tile, click selects and exits, window title suffix " · Graph Summary".
+
+Pages: header text styles, toggle size 24 × ≥ 122, selectable-value fallback (click selects, Ctrl+C copies it), cross-fade on CPU mode change, core-mark icons (`zap`, `leaf`, `star`), disabled-mode tooltip before P2, `cpu_fast` kept on with smooth off, CPU tooltip texts (Up time, Load average, BogoMIPS), secondary graph fallback tooltip and the "Set up CPU power draw…" menu item, commit heading tooltip, composition bar geometry, colours, caption, hatch and tooltip sentences, memory block visibility rules, swap table widths, module block header, Huge pages format, disk Transfer rate value = read + write, partition table widths, usage bar, "No partitions", SMART and Disk-in-use window sizes and button variants, 500 ms retry delay, Shift relabel, network Throughput value = sum, IPv6 second line, Wi-Fi signal icon, Fetch button size and failure tooltip, GPU row 2 split and placeholder cell when the probe is missing, GPU tooltip texts, CUDA row hidden off NVIDIA, display row height and empty text, fan PWM second axis, rename dialog, sensor item format, battery symmetric fill rule, week chart day labels, batteries on the `sensors` demand bit, aggregate Details rows.
+
+Minigraphs: panel margins 16, slot order bottom right first, reset restores defaults and removes process cards, cards keep sliding under Ctrl-pause, shadow `(0, 4, 12)` at 0.35 × intensity, hover border accent 0.5, Disk card value = aggregate rate with active-time graph, middle-ellipsis label truncation, "Accent" means the type palette on system cards, card menu separators and colour dots, Hide hidden on process cards, drag threshold 4 px, ghost 0.85, 24 px detach margin, no-holes rule, detached window padding `sp2`, not resizable, "Close graph" re-attaches, per-card range and colour items in the detached menu, mini window card width 244, height cap 90% of the work area, Esc closes it, it stays open on card click.
+
+Tray and setup: icon margin 1 px, 18 history columns, 2 px value bar, fill alpha 0.55, baseline for invalid, tooltip title/description split, process entries under "Tray icon graphs >", toast delivery when the window is hidden, setup card layout, description sentences, tag colours, confirm dialog titles and the revert body, "Command copied" toast, focus-row flash, `SetupStatus` and `RunSetup` commands.
+
+Bench: bench-only layout with the overall chart above the grid, synthetic formulas and device list, latency measurement points, JSON shape.
+
+## Open items (recommended answers given; none blocks a bead)
+
+1. **Selectable text in the Details grid** (PERF-012 "Values are selectable text"). gpui-pre 0.3.7 has no text selection on arbitrary elements that this file could verify. Recommended: ship the UI-PRF-020 fallback (click selects a value, Ctrl+C copies it, right-click "Copy value"); if the kit's `Label` or a GPUI text element gains selection before the bead runs, use it instead and drop the fallback.
+2. **Legend orientation**. `performance.png` stacks "Total" over "Kernel" in a 160 px cell. Recommended: the UI-PRF-003 rule (vertical under 200 px, horizontal above). If Oystein wants TaskSlinger's vertical legend everywhere, change one constant.
+3. **Disk minigraph value**. PERF-080 defines the Disk card as aggregate active time; the reference frame shows a rate ("0.54 MiB/s"). Recommended: graph active time, value the aggregate rate (UI-PRF-041). Alternative: both percent.
+4. **Per-core labels at 10 Hz**. Re-shaping 32 short strings 10 times a second is inside the budget on paper; the `perf-cpu` bead measures it. If p99 fails, the fallback is to update per-core value labels at 5 Hz (every second sample) while the plot still moves at 10 Hz.
+5. **`cpu_fast` with smooth graphs off**. Chosen on, so per-core labels and the jumping chart stay at 10 Hz as the ADR-014 fixture describes. Alternative that saves CPU: 1 Hz when smooth is off. Oystein's call; the setting is one line in `DemandAggregator`.
