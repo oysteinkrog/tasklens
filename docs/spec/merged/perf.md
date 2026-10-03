@@ -227,3 +227,163 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Phase: P1
 - Privilege: none
 - Applied: R-031
+
+## Graph behaviour
+
+### PERF-015 Graph element
+- Was: v2 PERF-012
+- Source: TS 9 "Layout" (PLAN section 9) | MC 2.0 "Graph engine" | ADR-009 chart element
+- Behaviour:
+  - The newest sample is at the right edge.
+  - The area is filled in the series fill colour, with a brighter top line.
+  - A faint vertical grid scrolls with the data: one line every `range / 10`, placed from absolute time. Horizontal lines at 25, 50 and 75%.
+  - A 1 px outline in the series colour at 40% alpha, with a 4 px corner radius when "Rounded Corners" is on (0 when off).
+  - Heading at top left and current value at top right on page graphs and sidebar cards.
+- Linux data/mechanism: ADR-009 `ChartView` and `ChartElement`, an app-owned GPUI element. Background and grid are quads. Fill and stroke are cached paths, rebuilt only when `ChartGeometryKey` changes (series versions, size, scale, y-range, style) and translated each paint. Points are straight segments. Each contiguous run of valid samples is its own subpath. When there are more samples than pixels, each pixel bucket keeps its min and max, with buckets aligned to absolute time. Stroke width is 1 px (ADR-009 rule 6; v2's 1.5 px is replaced). The CPU per-core grid is one `ChartGridElement` (PERF-028).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+
+### PERF-016 Time range
+- Was: v2 PERF-013
+- Source: TS 4.2 Time Range (30 s, 1 min, 5 min, 10 min) | MC "Data Points" 10 to 600 and the "Utilization over N" label
+- Behaviour:
+  - Choices: 30 seconds, 1 minute (default), 5 minutes, 10 minutes. There is no 15 s or 2 min choice.
+  - The Performance tab has one range for all its pages: Settings > All settings > Performance > "Graph time range", also offered as "Time range >" in every page's context menu.
+  - Each minigraph card and each tray graph has its own range (PERF-081, PERF-090).
+  - The lower-left label reads "Utilization over 60 seconds". The words change per metric: "Throughput over", "Memory usage over", "Power draw over".
+  - Mission Center's data-point slider is not built.
+- Linux data/mechanism: `performance.graph_range_s = 60` (values 30, 60, 300, 600). Ranges up to 60 s read the fast tier; 5 and 10 minutes read the 1 Hz tier (PERF-017).
+- Verdict: ADAPT. Fixed ranges replace data points, so the duration no longer depends on the refresh interval.
+- Phase: P1 for 30 s and 1 min; P2 for 5 and 10 min.
+- Privilege: none
+- Applied: R-016
+
+### PERF-017 Series rings and the 1 Hz tier
+- Was: v2 PERF-014
+- Source: architecture review section 4 "History structures" | ADR-003 ring rule
+- Behaviour: The user sees no difference. Graphs show up to 10 minutes.
+- Linux data/mechanism:
+  - Fast tier: one `SeriesRing` per series at the source rate, capacity `ceil(60 s / period) + 2` (602 at 10 Hz, 62 at 1 Hz).
+  - 1 Hz tier (from P2): a second ring of 602 samples (10 min + 2) per series. Each sample is the **per-second maximum** of the fast tier, the same rule ADR-012 uses for history. There is no per-sample min/max pair; `Sample` stays 16 bytes.
+  - The engine owns both rings and publishes `SeriesView`s. Memory is about 1.5 MB for 80 series.
+- Verdict: BUILD
+- Phase: P1 for the fast tier; P2 for the 1 Hz tier.
+- Privilege: none
+- Applied: R-016
+
+### PERF-018 Scaling modes
+- Was: v2 PERF-015
+- Source: MC 2.0 scaling modes | review "Units and graph ranges" | ADR-009 rule 9
+- Behaviour:
+  - **Percentages:** fixed 0 to 100.
+  - **Memory, VRAM:** fixed 0 to total.
+  - **Commit:** 0 to max(CommitLimit, peak in view).
+  - **Rates (disk, network, GPU PCIe):** the scale rises at once and falls only after the visible maximum stays below half the scale for 10 s.
+  - **Network fixed mode:** when "Scale network graphs dynamically" is off, the scale is the link speed. If the link speed is unknown, the graph falls back to dynamic.
+  - **Temperature:** sticky up and down, starting at 35 to 45 °C.
+  - **Power and clocks:** sticky up from 0. When a hardware maximum is known (GPU max clock, power limit, fan max RPM), the scale is fixed at that maximum (U-35).
+  - **Stacked CPU:** 0 to 100 × n.
+  - **Battery power:** symmetric around 0.
+- Linux data/mechanism: Computed in the UI from the visible samples. Key `performance.network_dynamic_scale = true` (false means link speed).
+- Verdict: ADAPT. Mission Center's nine modes collapse to these rules.
+- Phase: P1
+- Privilege: none
+
+### PERF-019 Axis maximum rounding and label
+- Was: v2 PERF-016
+- Source: MC Pow2/Pow10 rounding, `disk.rs:516-533`
+- Behaviour: Scales that are not fixed round up to 1, 2 or 5 × 10ⁿ for decimal units (network in bits), or to a power of two for IEC units (disk rates, network in bytes). The maximum shows at top right of large graphs, for example "100 Mbps" or "4 GiB/s". This rounding applies whatever the network auto-scale setting is.
+- Linux data/mechanism: `tl-model::units`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-015, table d
+
+### PERF-020 Smooth (sliding) graphs
+- Was: v2 PERF-017
+- Source: TS `UI.SmoothGraphs=1` | MC "Sliding Graphs" (50 ms timer) | ADR-009 animation driver
+- Behaviour: "Smooth Graphs" defaults to on. When on, graphs scroll continuously at the monitor's refresh rate (144 Hz here), drawn one sample period behind the newest data. When off, graphs jump one step per sample. Sliding stops while the window is hidden, and when the system reduce-motion preference is on. Numeric readouts always show the newest sample.
+- Linux data/mechanism: Key `motion.smooth_graphs = true`. This key alone decides sliding; `motion.animations` does not. ADR-009 `AnimationDriver`, one per window, requests frames only while a visible chart is moving. Time mapping: `right_edge_ns = min(now_boot_ns() - period_ns, newest_sample_ns)`.
+- Verdict: ADAPT. TaskSlinger's meaning and default are kept. Compositor-paced frames replace Mission Center's 50 ms timer.
+- Phase: P1
+- Privilege: none
+- Applied: R-017
+
+### PERF-021 Curved lines
+- Was: v2 PERF-018
+- Source: MC "Smooth Graphs" (cubic Bézier)
+- Behaviour: "Curved lines" in Settings > All settings > Performance, off by default.
+- Linux data/mechanism: Key `performance.curved_lines = false`. Monotone cubic (Fritsch-Carlson) curves through the samples. They never overshoot. When off, ADR-009's straight segments apply.
+- Verdict: ADAPT. Monotone curves replace Mission Center's Bézier, which can overshoot.
+- Phase: P4
+- Privilege: none
+
+### PERF-022 Gaps and stale data
+- Was: v2 PERF-019
+- Source: review "Data validity", `Sample.flags` | MC NaN line breaks | ADR-003 chart column
+- Behaviour:
+  - Invalid samples (suspend, collector restart, device re-plug, unsupported) break the line. The gap shows as empty space with a dotted baseline.
+  - A stale series draws its line and fill at 50% alpha after the last fresh sample, then a gap. Its readout shows the last value in secondary colour with the tooltip "Last updated {age} ago".
+  - After suspend and resume, a gap is inserted and counter baselines are reset.
+- Linux data/mechanism: Stale when `now - t_last > max(3 × period, 1.5 s)`. Suspend when `(Δboot_ns - Δmono_ns) > 250 ms` between two samples, or on logind `PrepareForSleep`. The engine sets `GAP_BEFORE` on the next sample (ADR-008).
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
+- Applied: R-051
+
+### PERF-023 Hover readout
+- Was: v2 PERF-020
+- Source: TS 4.2 "Hover shows a value marker" (CL 0.8.28), " avg %.1f%s ", " peak %.1f%s ", " %u samples" | MC has none
+- Behaviour: On every large graph and minigraph, hovering shows a vertical marker and a dot on each series. A tooltip shows the time offset ("-12s"), each series value, and "avg", "peak" and "samples" for the visible window.
+- Linux data/mechanism: The chart element gets a hitbox only when this tooltip is enabled (ADR-009 rule 1). Hit test runs only on hover.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### PERF-024 Graph colours
+- Was: v2 PERF-021
+- Source: TS PLAN section 9 graph colours, TS 6 "Graph accents" | MC per-type colours | APP-039
+- Behaviour:
+  - Per type: CPU #0D546D fill / #0A7096 line; kernel line #C1514E; Memory #7E6A9A; GPU #508A59 / #71B768; Disk #D9B567; Network #359CAB.
+  - Fans use the "Violet" accent and batteries the "Mint" accent (tasklens's choice; TaskSlinger has no colour for them).
+  - Two devices of the same type share a colour.
+  - Minigraph and tray graph cards can be recoloured with "Graph Color >": "Accent" plus the 17 named accents of APP-039 (Coral to Slate).
+  - Themes override the graph colours through `TlTheme.graph`.
+- Linux data/mechanism: Theme `GraphPalette` (ADR-009). Per-card colour in `state.toml` `[[minigraphs]] color` and `[[tray_graphs]] color` (`accent` or one of the 17 names).
+- Verdict: BUILD
+- Phase: P1 for the palette; P3 for per-card colour.
+- Privilege: none
+
+### PERF-025 Units and number formats
+- Was: v2 PERF-022
+- Source: TS "Network transfer unit", "Auto-scale network transfer rates" (INI `NetworkRateAutoScale=0`, verified) | MC 5 "Units"
+- Behaviour:
+  - Network unit: "Bits per second" (default) or "Bytes per second", in Settings > Network transfer unit and on the network page's Display unit row (PERF-057). Bits are SI, base 1000 (Kbps, Mbps, Gbps). Bytes are IEC (KiB/s, MiB/s).
+  - "Auto-scale network transfer rates" defaults to **off**. Off: values are fixed Mbps (or MiB/s) with one decimal, and "0 Mbps" at measured zero. On: the unit steps through Kbps, Mbps and Gbps by size.
+  - Memory and storage are always IEC with two decimals. There are no base-10 options for memory or disk.
+  - Disk rates on graphs and stats use an automatic IEC unit with one decimal.
+  - All other formats follow canonical table (d).
+  - Rates always carry "/s" or "bps".
+- Linux data/mechanism: `[units] network = "bits"`, `network_auto_scale = false`. Formatting lives in `tl-model::units`.
+- Verdict: ADAPT. Mission Center's per-class base options are dropped; TaskSlinger's default wins.
+- Phase: P1 for formats and menu items; P2 for the settings page.
+- Privilege: none
+- Applied: R-013, R-014, R-015, table d
+
+### PERF-026 Legends and secondary series
+- Was: v2 PERF-023
+- Source: TS legend in the first cell ("Total", "Kernel", crosscheck A.28), network "Upload" legend (A.15) | MC dashed secondary series
+- Behaviour: Legends are drawn inside the first graph of a page, top left, as coloured line swatches with labels:
+  - "Total" and "Kernel" (CPU);
+  - "Download" and "Upload" (network; PERF-055);
+  - "Read" and "Write" (disk; write dashed);
+  - "Dedicated" and "Shared" (GPU memory; shared dashed);
+  - "Encode" and "Decode";
+  - "GPU clock" and "Memory clock";
+  - "RPM" and "PWM";
+  - "Used" and "Committed" (memory; committed dashed; the dirty series is a thin line without fill and no legend).
+- Linux data/mechanism: Dash pattern 5/5 px through `PathBuilder::dash_array`.
+- Verdict: BUILD
+- Phase: P1
+- Privilege: none
