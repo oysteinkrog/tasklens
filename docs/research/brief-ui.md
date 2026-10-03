@@ -25,8 +25,10 @@ and the GPUI or gpui-kit building block for each piece.
     (frames from the TaskSlinger advanced and customize videos)
   Measure from the images where you can (pixel sizes at the screenshot's scale), and say when a
   value is measured, when it is taken from a spec, and when you chose it.
-- gpui-kit source, when you need an exact API: `~/.cargo/registry/src/*/gpui-kit-0.7.0/` and the
-  `gpui-pre-*-0.3.7` crates next to it. Clone nothing.
+- gpui-kit source, when you need an exact API: `/home/oystein/work/tasklens-ref/gpui-component/`
+  (gpui-component, published as gpui-kit) and the extracted `gpui-pre-*-0.3.7` crates in
+  `/var/tmp/claude/claude-1000/-home-oystein/3bebe002-7be5-4c37-8e3b-0d5332a57446/scratchpad/crates/`.
+  Clone nothing.
 
 ## Shared vocabulary (use these names exactly; the foundation file defines their values)
 
