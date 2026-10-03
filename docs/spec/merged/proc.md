@@ -1531,3 +1531,146 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Verdict: ADAPT (the MC dialog merges into the TaskSlinger Properties window)
 - Phase: P2
 - Privilege: none
+
+---
+
+## I. History mode
+
+### PROC-086 History recording
+- Was: v1 PROC-080; r2 PROC-074
+- Source: TS 4.1, INI `UI.HistoryStorageDurationHours=6`, L28515-28516, [CL 0.8.9] | ADR-008, ADR-012 | D-003, D-010, R-005, R-025
+- Behaviour:
+  - Settings > Monitoring > "Record process history": one switch, default off (`history.enabled = false`, D-003).
+  - "History storage: N hours", menu 1, 2, 3, 4, 6, 8, 12; default 6; range 1..=12 (`history.retention_h`). The disk cap `history.max_disk_mb = 256` is not shown in menus.
+  - While recording is on, collection continues with the window hidden, at the ADR-008 "recording on" rates (process sweep at `processes.interval_ms`, system series at 1 Hz).
+  - While recording is off, tasklens keeps a rolling 10-minute window of process history in RAM, only while the Processes tab is open, and History mode shows that window (D-010). Opening History mode with recording off also shows the toast "History recording is off" with an "Enable" button. Turning recording on switches to the ADR-012 store.
+  - The UI always shows the real retained time span.
+- Linux data/mechanism:
+  - Crate `tl-history`; the reducer's `RecordSink` receives every process sweep, system sample and device catalog (ADR-012).
+  - Storage format per ADR-012: 60 s blocks holding new metadata (comm, display name, exe basename, app ID; never command lines), a keyframe of `HistProcess { key, meta, ppid, cpu_permille, mem_anon_kib, io_r_kibps, io_w_kibps, net_kibps, gpu_pct }` and per-sweep deltas. `mem_anon_kib` holds RssAnon (R-005). `FieldPatch` stores only changes beyond a threshold (CPU ≥ 1 permille, memory ≥ 256 KiB, rates ≥ 1 KiB/s or to or from zero). System series are stored at 1 Hz (10 Hz series reduced to the per-second maximum).
+  - Gaps are recorded for suspend and resume and for engine epoch changes.
+  - RAM budget 16 MB (open block plus segment indexes).
+  - The rolling window (recording off) uses the same block encoding held in RAM, keeps the last 10 blocks, writes nothing to disk, and is dropped when the Processes tab closes (inferred from D-010).
+  - Budget estimates are unverified: U-11, U-22.
+  - The v1 and r2 storage designs (64 MiB RAM cap, uncompressed 10-minute tail, per-record layout) are Dropped: R-025.
+- Verdict: ADAPT (TaskSlinger records by default; tasklens does not)
+- Phase: P3
+- Privilege: none
+
+### PROC-087 History persistence
+- Was: v1 PROC-081; r2 PROC-078
+- Source: TS INI `HistoryPersistToDisk=1`, `store.tshp` (XPRESS), L34862, L30348, L35751-35760, L30356-30362, cross-check A.30 | ADR-012 | R-025
+- Behaviour:
+  - Settings > Monitoring > "Save history to disk" (`history.persist = true`), available only while recording is on.
+  - When off, the recorder deletes its segments at shutdown and loads nothing at start. The on-disk format does not change.
+  - On launch, history inside the retention window loads in the background, with a 2 s budget.
+  - Load problems show once as toasts: "Could not open process history store.", "Process history store is empty or truncated.", "Process history store version/layout mismatch; starting fresh.", "No in-range process history in store.", "Process history store is stale.", "Process history load timed out; starting fresh.".
+  - Identities from a previous boot are marked as such.
+- Linux data/mechanism:
+  - `$XDG_STATE_HOME/tasklens/history/<boot_id as 16 hex digits>/seg-<boottime seconds, 10 digits>.tlh`, one segment per 10 minutes (ADR-012).
+  - Segment header (64 bytes): magic `TLH\x01`, `format_version`, `boot_id`, `realtime_offset_ns`, `start_t_ns`. Blocks are `u32 length | u32 crc32 | zstd level 3 frame`. A footer with the block index is written when a segment closes; a segment without a footer (crash) is read up to the first bad CRC.
+  - The recorder deletes segments older than retention and, when over `max_disk_mb`, the oldest first. At start, directories of other boots older than retention are deleted.
+  - Directories are mode 0700, files 0600.
+  - r2's `YYYYMMDD-HHMM.tlh` names and `.pending` rename are Dropped: R-025.
+- Verdict: ADAPT (XPRESS becomes zstd)
+- Phase: P3
+- Privilege: none
+
+### PROC-088 History view and table
+- Was: v1 PROC-082; r2 PROC-075
+- Source: TS 4.1, INI `UI.ProcessesHistoryMode`, `HistoryVisibilityMask=1FF`, `Sort.HistoryKey=6`, `chrome.tab.processes.history`, L35690-35692, L35741-35742, [CL 0.8.27], cross-check C.2 | R-011, R-023
+- Behaviour:
+  - The history icon on the Processes tab toggles History mode. While it is on, the tab label reads "History". The state persists in `state.toml` `[processes] history_mode`.
+  - Layout: header text, then the graph with the scrubber (PROC-089), then the table.
+  - Header text: "History - Drag scrubber below to view timeline"; at a scrub point "History Snapshot: 213 processes - 4 min 12 sec ago"; "Live" at the right edge.
+  - Table columns (9): Name, PID, User, Image path, CPU, Memory, Disk, Network, GPU. Memory is RssAnon. At a scrub point it shows that second's values; with a range selected it shows averages over the range with the peak in the tooltip.
+  - Default sort CPU descending, persisted in `[sort.history]`; columns persist in `[columns.history]`.
+  - Selecting a row draws that process's series in the graph; a clear chip (`history.process.clear`) removes it. A selected identity that is absent at the scrub time shows "Process not running".
+  - Row menu "Delete from history" gives the toast "History entry deleted".
+  - The global filter and Hide system processes apply to the table and the graph. The view-mode button is disabled (PROC-016).
+  - Metric chips or legend toggles choose CPU, Memory, Disk, Network or GPU.
+- Linux data/mechanism:
+  - The UI sends `Command::HistoryQuery { id, range, what }`; the engine replies with a `HistoryView` snapshot component (max 1,024 points per series, min/max decimation as in ADR-009). Process state at time T is rebuilt from the block keyframe plus deltas up to T.
+  - "Delete from history" adds the key to a per-boot list of deleted keys stored beside the segments, which every query filters out; segments are not rewritten (inferred).
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PROC-089 History timeline scrubber
+- Was: v1 PROC-083; r2 PROC-076
+- Source: TS 4.1, `history.scrubber`, [CL 0.8.18], L35725-35731 | RECONCILIATION table (b)
+- Behaviour:
+  - A timeline strip with a stacked metric graph, and a minimap of the full retention below it with a viewport box.
+  - Drag the handle to scrub. The mouse wheel zooms around the cursor. Shift+wheel or a middle-drag pans. Shift+drag selects a range. Double-click or the "Live" button returns to live.
+  - Time labels: "-1:02:03", "1h 02m", "2m 05s", "45s".
+  - Keyboard: Left and Right step 1 s; Shift+Left and Shift+Right step 1 min.
+- Linux data/mechanism: the app chart element (ADR-009) drawn from the decimated `HistoryView`; level of detail is min/max per pixel column.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PROC-090 History top-3 hover
+- Was: v1 PROC-084; r2 PROC-077
+- Source: TS 4.1 [CL 0.8.19], L35743-35749, cross-check A.30 | R-063
+- Behaviour: hovering the timeline shows the time and the top 3 processes for the active metric at that second, formatted "CPU: 12.3%", "Memory: 1.22 / 62.70 GiB", "Disk: 4.2 MiB/s", "Network: 12.0 Mbps" (in the chosen network unit), "GPU: 41.0%".
+- Linux data/mechanism: an engine query that rebuilds the sweep at that second from the ADR-012 store and ranks it, with a 50 ms budget. The block format has no stored top-K index.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PROC-091 History first-snapshot state
+- Was: v1 PROC-085
+- Source: TS L28654-28655 "Collecting first history snapshot..."
+- Behaviour: the header shows "Collecting first history snapshot..." until the first frame exists, in the recording store or the rolling window.
+- Linux data/mechanism: none.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+### PROC-092 History scrub benchmark
+- Was: v1 PROC-086
+- Source: TS L35427-35428 `--history-scrub-bench` | ADR-014 | RECONCILIATION table (c)
+- Behaviour: `tasklens --bench history-scrub --duration <s> --warmup <s> --json <out>` replays a synthetic 6 h store and reports p50, p95 and p99 scrub frame times. It is one scene of the ADR-014 `--bench` family and exists only in builds with the `bench` feature.
+- Linux data/mechanism: synthetic data from `tl-ui/src/bench/` with PRNG seed 42.
+- Verdict: BUILD
+- Phase: P3
+- Privilege: none
+
+---
+
+## J. Process graphs and tray graphs
+
+### PROC-093 Process minigraphs from the row menu
+- Was: v1 PROC-087; v1 PROC-088; v1 PROC-089; r2 PROC-062
+- Source: TS 4.2, L29304, L28719, INI `ProcessSpecificMiniGraphs.*`, `NameFilter`, `AppName`, `ProcessGraphColumnMask=720C0`, keys L35545-35557, cross-check A.28 | PERF-077, PERF-086, PERF-087 | R-066
+- Behaviour:
+  - "Add Minigraph >", "Add Process Name Graph >" and "Add App Name Graph >" each list CPU, Memory, Disk, Network, GPU and VRAM (the fixed six graphable columns).
+  - **Add Minigraph** binds a card to the process key. Title `<name> (<pid>) · CPU`; `Process <pid>` only until the name is read.
+  - **Add Process Name Graph** sums all processes whose image name matches exactly and follows restarts. Title `<name> by name · CPU`.
+  - **Add App Name Graph** sums all instances of the app ID (or unit name for unit rows). Title `<App> by app · CPU`.
+  - A process card whose process exited shows "Ended", keeps its data and stops. It is never rebound to a new process, also not after a tasklens restart or reboot. A name or app card with no live match shows "No match" and records a gap.
+  - Toasts: "Minigraph added", "Minigraph already exists", "No space for more minigraphs", "Process name minigraph added", "App name minigraph added", "Unable to add minigraph".
+  - The Memory graph is labelled "Memory" and shows RssAnon (R-005).
+  - The card's layout, colours, range and detaching belong to the minigraph area (PERF).
+- Linux data/mechanism:
+  - Cards persist in `state.toml` `[[minigraphs]]` with `source = "process:<pid>:<start_ticks>" | "name:<image name>" | "app:<app id>"` and `column`.
+  - The engine adds the key, name or app to demand, so the process sweep keeps running for it while the window is hidden.
+  - App graphs use cgroup aggregates (`cpu.stat` `usage_usec`, `memory.stat` `anon`, `io.stat`) when the app is one cgroup, else Σ over members.
+- Verdict: BUILD (app name becomes app ID or unit)
+- Phase: P3
+- Privilege: none
+- Open questions: (1) The `process:<pid>:<start_ticks>` source has no boot ID, so after a reboot a new process could match a saved card. Recommended answer: use `process:<boot_id 16 hex>:<pid>:<start_ticks>` and show "Ended" for any other boot. (2) PERF-086 puts process cards in P2, while both PROC sources put these menu items in P3. Recommended answer: P3 for both the menu items and the process cards.
+
+### PROC-094 Process tray icon graphs
+- Was: v1 PROC-090; r2 PROC-063
+- Source: TS 4.3, L29305-29306, L30441-30446, L28715-28723, L28584-28586, INI `TrayIconGraphs Graph0Mode` | PERF-078, PERF-079 | R-027, R-067
+- Behaviour:
+  - Row menu "Add tray icon graph >" offers the same six metrics. "Remove tray icon graph" appears instead when one exists for this source.
+  - Modes: process, name filter, app.
+  - Tray tooltips: process graph "<name> (PID n): CPU 3.2%"; name filter "3 procs: firefox"; app "<App>: CPU 3.2%".
+  - Toasts: "Tray icon graph added", "Tray icon graph removed", "Tray icon graph already exists", "Unable to add tray icon graph", "Unable to remove tray icon graph".
+  - The tray icon, its rendering and its menu belong to the tray area (PERF-078, R-027).
+- Linux data/mechanism: the same process series as PROC-093; `tl-tray` with `ksni =0.3.6` draws a StatusNotifierItem at 22 and 44 px, updated at most 1 Hz and only when the pixels change. Persisted in `state.toml` `[[tray_graphs]]`.
+- Verdict: ADAPT (Shell_NotifyIcon becomes SNI)
+- Phase: P3
+- Privilege: none
