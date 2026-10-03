@@ -399,3 +399,358 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Phase**: P1 (dim zero P2, separators P4).
 - **Decided here**: heat quad covers the full cell and is hidden on selected rows; stale at 60%
   opacity; cell tooltip list; wrapped command-line tooltip at 80 columns.
+
+### UI-PRC-005 Two-line header: totals, sort arrows, resize, reorder
+
+- **Implements**: PROC-038, PROC-047 (sort gestures), PROC-025 (resize and reorder), PROC-023
+  (minimum widths), PROC-033 (GPU N header line 2 and tooltip), PROC-030 and PROC-032 (header
+  tooltips), ADR-009 "Header".
+- **Anatomy** (one header cell per visible column, at the same x offsets as the body cells):
+
+  ```text
+  header_h = 44, background `header`, bottom border 1 px `divider`
+  ┌──────────┬──────────┬──────────┬─────────┬──────────┬─────────┐
+  │ Name     │ User     │   PID ↑  │    CPU  │  Memory  │   Disk  │  line 1: y 4..22
+  │          │          │          │  11.9%  │  54.9%   │0.01 MiB/s│ line 2: y 22..40
+  └──────────┴──────────┴──────────┴─────────┴──────────┴─────────┘
+             ↑ resize handle: 8 px hit band centred on each boundary (4 + 4)
+  ```
+
+  - Line 1: column label `t_base` 13 medium 500 `text_primary`, aligned like the column (text
+    columns left, numeric right), padding 8, ellipsis. The active sort column appends the sort
+    arrow: Lucide `ArrowUp` (ascending) or `ArrowDown` (descending) 12 px `text_primary` after a
+    `sp1` 2 gap, inside the 12 px reservation of PROC-023; on right-aligned columns the arrow sits
+    at the right edge and the label moves left by 14 (measured: "PID ↑").
+  - Line 2: the system total from `ProcessTableView.totals`, `t_base` regular `text_secondary`,
+    always right-aligned (measured; also on the left-aligned Name column there is no line 2), same
+    validity glyph rules as cells (`n/a` without a GPU, `…` before the second sample). Columns
+    without a total leave line 2 empty. Totals per PROC-038: CPU, Memory, Swap, Disk (busy %),
+    Network (% of link speed, or a rate), GPU, GPU N, VRAM, Threads, Handles.
+  - Header tooltip (hover 500 ms over the cell): Memory "Private memory (RssAnon). Shared and
+    file-backed pages are not counted."; Working set total "Resident set size (VmRSS)"; Network
+    "Attributed TCP traffic. UDP and other users' sockets are not counted."; Handles "Open file
+    descriptors"; GPU N "<adapter name> (<PCI address>)"; unsortable columns "Only measured for
+    visible rows"; every other column: the picker's full name when it differs from the label
+    (for example `Working set private - "Memory"`), else no tooltip.
+  - Resize handle: an 8 px wide hit band centred on each column boundary (and after the last
+    column), full `header_h`; cursor `col-resize` on hover; the boundary draws a 1 px `divider`
+    line in the header at all times (measured: thin vertical dividers in the header), brightened
+    to `accent` while dragging.
+  - Reorder drag: pressing on a header cell and moving more than 4 px starts a drag. The dragged
+    cell is drawn as a ghost (`header` fill at 85% opacity, label, 1 px `divider` border,
+    `r_sm`) following the pointer; a 2 px `accent` insertion line spans the header and body height
+    at the nearest boundary. Name cannot be dragged and nothing can be dropped before it
+    (decided; Name is also the only column that cannot be hidden).
+  - Horizontal scroll: the header is translated by the shared `x_offset` with the body.
+- **States**: default; hover (cell fill `row_hover`); pressed (fill `row_selected` at 50%);
+  sorted (arrow); unsortable (PSS, USS, Cycles, Cycles delta, Context switches, Context switches
+  delta: no hover fill, no arrow, cursor default, tooltip "Only measured for visible rows");
+  resizing (boundary `accent`); dragging (ghost and insertion line); disabled: never.
+- **Interaction**:
+  - Click anywhere on a sortable header cell: `SortByColumn { id }`. First click: descending for
+    numeric kinds, ascending for text kinds; each further click flips. Text columns sort
+    case-insensitively (engine). For background-computed columns (package, file) the first click
+    starts the lookup with a progress tooltip "Looking up N of M…" on the header cell and the sort
+    applies when it finishes (PROC-027).
+  - Drag a boundary: live width change, clamped to the PROC-023 minimum (template width + 16 +
+    12 on the sort column; text columns 60). `tables.column_resize = "proportional"`: the dragged
+    boundary moves and all columns to its right share the remaining width proportionally to
+    their current widths; `"last_column"`: only the dragged column and the last visible column
+    change. Double-click on a boundary fits that column to content (same rule as "Resize columns
+    to fit content" for one column; decided). Release: `on_columns_changed` persists widths.
+  - Reorder: drop commits `order`; Esc during a drag cancels it.
+  - Right-click anywhere on the header: UI-PRC-006.
+  - Keyboard: the header is not focusable; sorting from the keyboard goes through View >
+    Columns > "Sort by >" in the shell menu (shell spec) and the header menu (UI-PRC-006).
+- **Data binding**: `ProcessTableView.totals`, `ColumnLayout` from `state.toml
+  [columns.processes]`, `[sort.processes]`; writes both through `on_columns_changed` and
+  `on_sort` (atomic save, 500 ms debounce, ADR-011). Re-renders on `PROCESSES` (totals) and
+  layout changes.
+- **Build**: `crates/tl-ui/src/table/header.rs::TlTreeTableHeader` custom element: one
+  `canvas` painting fills, dividers, arrows and the insertion line with `paint_quad` and
+  `paint_svg`, plus one text `div` per line per column; hitboxes per cell and per boundary
+  (`insert_hitbox`). Drag state in `with_element_state`. The header is `.cached()` as part of the
+  page and invalidated by the totals change (1 Hz) and pointer events over it.
+- **Performance**: ≤ 2 shaped lines per visible column; totals re-shape only when their cached
+  text changes. No work while idle.
+- **Accessibility**: header tooltips name the figure; sort state is visible as an arrow and
+  repeated in the header menu as a checked "Sort by" item.
+- **Tests**: `header_sort_cycle_numeric_desc_first`, `header_sort_cycle_text_asc_first`,
+  `resize_clamps_to_template_minimum`, `resize_proportional_vs_last_column`,
+  `reorder_cannot_move_name`, `header_line2_blank_for_text_columns`.
+- **Phase**: P1.
+- **Decided here**: line 2 always right-aligned; boundary lines always drawn in the header;
+  ghost and insertion visuals; Name fixed first; double-click boundary fits one column; 4 px drag
+  threshold.
+
+### UI-PRC-006 Header context menu
+
+- **Implements**: PROC-026; PROC-022 (Name cannot be hidden); PROC-025 (resize behaviour).
+- **Anatomy**: `TlMenu` opened at the pointer, min width 240, item height 28, `menu_bg`, hover
+  `menu_hover`, text `t_base`:
+
+  | # | Item | Kind | Action | Disabled when |
+  |---|---|---|---|---|
+  | 1 | Sort by <label> | check (checked when this column is the sort) | `SortByColumn { id }` | column unsortable |
+  | 2 | Select Columns… | item | `SelectColumns` | never |
+  | 3 | Hide This Column | item | `HideColumn { id }` | id == name, or only one column visible |
+  | | separator | | | |
+  | 4 | Resize columns to fit content | item | `FitColumns` | never |
+  | 5 | Resize Behavior > | submenu: radio "Proportional", "Last Column" | `SetResizeBehavior { mode }` | never |
+  | 6 | Reset to default | item | `ResetColumns` | never |
+
+  Item 1 is added above the PROC-026 list so the keyboard path can sort (decided); the rest is
+  the PROC-026 order. The menu names the clicked column in items 1 and 3 ("Hide This Column"
+  keeps the spec label; the tooltip on it reads "Hide <label>").
+- **States**: as `TlMenu` (foundation). Disabled item 3 shows the tooltip "Name cannot be
+  hidden" or "At least one column must stay visible".
+- **Interaction**: right-click on any header cell; Shift+F10 while the header is hovered does
+  nothing (header is not focusable). Toasts: `HideColumn` on the last visible column (reached
+  only through the picker) "At least one column must stay visible"; `ResetColumns` "Columns
+  reset to default". `FitColumns`: each visible column takes `max(min width, widest visible cell
+  text + 16, header label + 16 + 12)`, measured over the currently visible rows plus the cached
+  texts of the last 3 table versions (decided; measuring all 2,000 rows would need a full
+  format pass).
+- **Data binding**: writes `[columns.processes]` and `tables.column_resize`.
+- **Build**: `pages/processes/menu.rs::header_menu(col: ColumnId)`; `TlMenu` over gpui-kit
+  `PopupMenu` with `.menu_with_check`, `.submenu`, `.separator`.
+- **Performance**: built on open only.
+- **Accessibility**: arrow keys, Enter and Esc as every `TlMenu`.
+- **Tests**: `header_menu_hide_disabled_on_name`, `reset_columns_restores_r006_defaults`
+  (order, visible set and widths equal table a), `fit_columns_never_below_minimum`.
+- **Phase**: P1.
+- **Decided here**: "Sort by" item; FitColumns measurement scope.
+
+### UI-PRC-007 Column picker window
+
+- **Implements**: PROC-024; PROC-022 (visibility by id, Name fixed, GPU N offered per
+  adapter); APP-018 (View > Columns applies to every table: the same window serves the other
+  tables with their own registries).
+- **Anatomy**: a `TlWindow` (secondary, pinnable, non-modal, APP-045) titled "tasklens Columns",
+  default 420 × 560, minimum 320 × 400, resizable:
+
+  ```text
+  ┌ tasklens Columns ─────────────────────────────── 📌 ✕ ┐
+  │ [🔍 Filter columns…                                 ✕] │  TlInput, sp5 margin, height 28
+  │ ┌───────────────────────────────────────────────────┐ │
+  │ │ IMAGE                                             │ │  group heading t_xs 11 semibold text_secondary, uppercase
+  │ │ [✓] Name                              (always on) │ │  row 28: TlCheckbox + label t_base; note text_secondary right
+  │ │ [✓] Description                                   │ │
+  │ │ [ ] Image name                                    │ │
+  │ │ [ ] Command line                                  │ │
+  │ │ IDENTITY                                          │ │
+  │ │ [✓] User                                          │ │
+  │ │ [✓] PID                                           │ │
+  │ │ ...                                               │ │
+  │ │ MEMORY                                            │ │
+  │ │ [✓] Working set private - "Memory"                │ │
+  │ │ [ ] PSS                            n/a on this… │ │
+  │ └───────────────────────────────────────────────────┘ │
+  │ 9 of 96 columns shown        [Reset to default] [Close]│  footer, sp5 padding
+  └─────────────────────────────────────────────────────────┘
+  ```
+
+  - Group headings in the fixed order: Image, Identity, Security, Scheduling, CPU, Memory, I/O,
+    Disk, Network, GPU, Power, Objects, Linux (PROC-024). Heading row height 24, padding top
+    `sp4` 8 (first heading `sp2`).
+  - Rows: 28 high, `TlCheckbox` 16 px at x 12, label at x 36, `t_base` `text_primary`; hover
+    `row_hover`; the whole row toggles. Name shows a checked, disabled checkbox and the note
+    "always on". Columns that are `n/a` on this machine (for example Cycles with
+    `perf_event_paranoid` 2, X11 resources without `$DISPLAY`) stay listed, enabled, with the note
+    "n/a on this system" in `text_secondary` right-aligned. GPU 0..15 rows exist only for present
+    adapters; the label is "GPU 0 (NVIDIA GeForce RTX 5070 Ti)".
+  - Alias rows: `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"`; the filter
+    matches both halves.
+  - Filter input: `TlInput` small, prefix `Search` icon, cleanable, placeholder "Filter columns…";
+    matching is case-insensitive substring over label, alias and group name; non-matching rows
+    and empty groups hide; no result shows the empty text "No columns match" centred
+    `text_secondary`.
+  - Footer: count text `t_sm` `text_secondary` left; `TlButton` "Reset to default" (ghost) and
+    "Close" (default) right, `sp4` gap.
+- **States**: default; filtered; empty; a checkbox hover and focus ring per `TlCheckbox`;
+  Name disabled.
+- **Interaction**: toggling a checkbox applies at once (no OK): `SetColumnVisible { id, on }`;
+  showing a column restores its remembered width or the default (PROC-022) and appends it at
+  the end of the order unless it has a remembered position (decided: `order` keeps hidden
+  columns in place, `visible` is the filter, so a re-shown column returns to its old slot).
+  Hiding the last visible column other than Name is impossible since Name is always on.
+  Keyboard: Tab order filter, list, Reset, Close; in the list Up/Down move, Space toggles, Home
+  and End jump; typing in the filter narrows; Esc closes the window (or clears the filter first
+  when it has text, APP-028 rule). Opened by `SelectColumns` from the header menu, View > Columns
+  > "Select Columns…", and the shell; opening again focuses the existing window.
+- **Data binding**: the column registry (`ColumnSpec` list with group, label, alias,
+  availability), `[columns.<table>]`; the window is bound to the table that opened it and its
+  title stays "tasklens Columns" (the list heading shows the table name as the first line, `t_sm`
+  `text_secondary`: "Processes table").
+- **Build**: `crates/tl-ui/src/pages/processes/columns_window.rs`, a `TlWindow` whose content is
+  a `uniform_list` of 28 px rows (headings are rows too) with `TlCheckbox` children; filter via
+  `TlInput` with 100 ms debounce.
+- **Performance**: 96 rows at most; trivial.
+- **Accessibility**: every row is a labelled checkbox; headings are plain text; the count line
+  reports the result of each toggle.
+- **Tests**: `picker_lists_groups_in_order`, `picker_name_always_on`, `picker_alias_filter_matches
+  _both_parts` ("working set" and "memory" both find the Memory row), `picker_gpu_slots_only_for
+  _present_adapters`, `picker_toggle_persists_and_restores_width`.
+- **Phase**: P1.
+- **Decided here**: window title "tasklens Columns" (APP-045 pattern, PROC-024 says "Columns"),
+  size, row height 28, immediate apply, re-shown column position, availability note wording,
+  table-name heading line.
+
+### UI-PRC-008 Selection: visuals and gestures
+
+- **Implements**: PROC-048; PROC-001 (identity); ADR-009 `table/selection.rs`.
+- **Anatomy**:
+  - Selected row: full-width fill `row_selected` (over zebra, tints and heat), radius 0, no
+    border; text `text_selected_primary`, secondary parts `text_selected_secondary`; icons
+    unchanged.
+  - Focus row (keyboard caret) when it is not selected (after Ctrl+click toggled it off, or
+    before any selection when the table has keyboard focus): 1 px `accent` inset ring on the row,
+    `r_sm`.
+  - Multi-selection: every selected row is filled; adjacent selected rows merge visually (no
+    gap). No count badge in the table; the status bar says "3 processes selected" (UI-PRC-018).
+  - Hover on a selected row: no change (selected wins over `row_hover`).
+- **States**: none, single, multi, focus-without-selection, selection containing exited rows
+  (they stay selected and filled until the linger time removes them), selection containing
+  hidden rows (a selected identity that the filter hides stays in the set but is not drawn and
+  not counted in "N processes selected"; decided, it reappears when the filter clears).
+- **Interaction** (`Selection<RowId> { set: FxHashSet, anchor: Option<RowId>, focus:
+  Option<RowId> }`):
+
+  | Gesture | Result |
+  |---|---|
+  | Click | set = {row}, anchor = focus = row |
+  | Ctrl+click | toggle row; focus = row; anchor = row when it was added |
+  | Shift+click | set = rows between anchor and row in current view order (selectable rows only, skipping group headers); focus = row; anchor unchanged |
+  | Ctrl+Shift+click | add the anchor..row range to the set |
+  | Right-click on unselected row | set = {row} then open menu |
+  | Right-click on selected row | keep set, open menu for the whole set |
+  | Right-click on group header | no selection change; Expand/Collapse menu |
+  | Click on empty body area below the last row | clear selection (decided) |
+  | Ctrl+A | select every visible selectable row (process, app, unit, pseudo); anchor = first |
+  | Esc | handled globally (table b); does not clear the selection |
+  | Up/Down | focus moves one selectable row; set = {focus}; anchor = focus |
+  | Shift+Up/Down | extend from anchor to the new focus |
+  | PgUp/PgDn | move focus by (viewport rows − 1); set = {focus} |
+  | Home/End | first / last selectable row; set = {focus} |
+  | Ctrl+Space | toggle the focus row (decided, matches Ctrl+click) |
+
+  Group header rows are never in the set; arrow keys skip them. Selection is kept by identity
+  through re-sorts, filter changes and view-mode changes (PROC-015). A selected identity whose
+  row leaves the view (collapsed parent) stays selected and is drawn again when expanded. Exited
+  identities drop out after the linger time (PROC-043). Every selection change notifies the table
+  only (narrowest entity).
+- **Data binding**: `NodeId` identities from `ProcessTableView.rows`; `row_index` map for
+  gesture arithmetic; nothing is persisted.
+- **Build**: `crates/tl-ui/src/table/selection.rs` (pure logic, unit-tested without GPUI) and the
+  row mouse handlers in `tree_table.rs` (`on_mouse_down` with `event.modifiers`, `click_count`
+  for double-click).
+- **Performance**: O(visible rows) fill checks per frame; range selection O(range).
+- **Accessibility**: the keyboard model covers every gesture; the status bar reports counts.
+- **Tests**: `selection_click_ctrl_shift_matrix` (table above), `selection_survives_resort`
+  (ADR-009), `selection_skips_group_headers`, `selection_drops_exited_after_linger`,
+  `selection_hidden_by_filter_not_counted`.
+- **Phase**: P1.
+- **Decided here**: empty-area click clears; Ctrl+Space; hidden selected rows not counted;
+  focus ring only when the focus row is unselected.
+
+### UI-PRC-009 Keyboard model
+
+- **Implements**: PROC-049; table b (Table and ProcessTable contexts); D-008; PROC-020;
+  PROC-044 (type-to-filter); PROC-050 (Ctrl hold, UI-PRC-017).
+- **Anatomy**: no visible parts beyond the focus visuals of UI-PRC-008 and the `Kbd` hints that
+  `TlMenu` draws from the bindings.
+- **Bindings** (bound with `cx.bind_keys` before any menu is built; context strings exactly
+  `Table` and `ProcessTable`; the process page div carries both):
+
+  | Keys | Context | Action | Behaviour |
+  |---|---|---|---|
+  | Up, Down | Table | `MoveFocus { delta: ±1, extend: false }` | UI-PRC-008; keeps the focus row visible (UI-PRC-010) |
+  | Shift+Up, Shift+Down | Table | `MoveFocus { delta: ±1, extend: true }` | extend |
+  | PgUp, PgDn | Table | `MoveFocusPage { dir, extend }` | by viewport rows − 1 |
+  | Home, End | Table | `MoveFocusEdge { end, extend }` | Shift variants extend |
+  | Ctrl+A | Table | `SelectAll` | |
+  | Right | Table | `ExpandOrChild` | collapsed row with children: expand; expanded: focus first child; leaf: nothing |
+  | Left | Table | `CollapseOrParent` | expanded row: collapse; else: focus parent (group header counts as parent of depth-1 rows only for collapsing: Left on a depth-1 row in Grouped mode collapses its group; decided) |
+  | Space | Table | `ToggleExpand` on the focus row | no-op on leaves |
+  | Ctrl+Space | Table | `ToggleSelectFocus` | decided |
+  | Enter, Alt+Enter, Ctrl+I | Table | `OpenProperties` | one window per selected process, cap 8 (PROC-077); on a group header: `ToggleExpand` |
+  | Ctrl+C | Table | `CopyDetails` | PROC-070 |
+  | Ctrl+Shift+C | Table | `CopyRowsAsTable` | |
+  | Ctrl+L | Table | `CollapseAll` | PROC-020 |
+  | Shift+F10, Menu | Table | `OpenContextMenu` | at the focus row's Name cell, x = text start, y = row bottom |
+  | Delete, Ctrl+E | ProcessTable | `EndTask` | targets = selection |
+  | Shift+Delete, Ctrl+X | ProcessTable | `EndProcess` | |
+  | printable character (no modifier, or Shift) | ProcessTable | `StartFilter { ch }` | focuses the filter input with the character inserted (UI-PRC-016); ignored when an input, menu or dialog has focus |
+  | Ctrl+F | Global | `FocusFilter` | |
+  | Esc | Global | shell rule (table b) | first closes menu or dialog; else clears filter and focuses the table |
+  | Hold Ctrl | Global | pause (UI-PRC-017) | |
+
+  Tab and Shift+Tab move between the filter input, the Include children checkbox and the table
+  (gpui-kit Root handles Tab; the body has `tab_index(0)` and `tab_stop(true)`). Arrow keys
+  never move between columns.
+- **States**: table focused with a focus row; focused without a row (first Down selects the
+  first selectable row); unfocused (keys go nowhere; clicking a row focuses the table).
+- **Interaction**: actions carry no row id; they read the table's `selection.focus` and set at
+  dispatch time and then capture identities exactly as the menu does (PROC-001).
+- **Data binding**: none beyond the selection.
+- **Build**: `pages/processes/actions.rs` (`actions!` list and data actions), bindings in
+  `pages/processes/mod.rs::bind_keys`, handlers via `.on_action(cx.listener(..))` on the page
+  div that also holds `track_focus(&table.focus)`.
+- **Performance**: n/a.
+- **Accessibility**: this is the accessibility path; every menu item shows its `Kbd` hint; the
+  shell's Keyboard Shortcuts window lists table b.
+- **Tests**: `keys_move_focus_and_skip_group_headers`, `right_left_expand_collapse_parent`,
+  `enter_opens_properties_space_toggles` (D-008), `printable_starts_filter_unless_input_focused`,
+  `delete_dispatches_end_task_with_selection`.
+- **Phase**: P1.
+- **Decided here**: Left on a depth-1 row collapses its group; Ctrl+Space; context menu anchor
+  point for Shift+F10; first Down selects the first row.
+
+### UI-PRC-010 Scrolling, scroll anchoring and visible-range demand
+
+- **Implements**: PROC-013 (uniform_list, demand reporting), PROC-071 (scroll the jump target to
+  the centre), ADR-009 "Visible demand", ADR-014 `table-2000` scroll scene.
+- **Anatomy**: `uniform_list` body with `UniformListScrollHandle`; vertical `TlScrollbar` 12 px
+  on the right edge of the body (not over the header); horizontal `TlScrollbar` 12 px at the
+  bottom when needed; the header follows `x_offset`.
+- **Behaviour**:
+  - Wheel: GPUI default line scrolling; `motion.smooth_scroll` and `smooth_scroll_amount` are
+    applied by the shell's wheel handler (foundation), the table does nothing extra.
+  - Scroll anchoring when rows move (re-sort, new rows above the viewport, group expand above):
+    after a new table version is installed, if the previously top-most visible selectable row
+    identity still exists, the list is scrolled so that identity keeps its previous y (using
+    `scroll_to_item_with_offset(ix, ScrollStrategy::Top, offset_rows)`); otherwise the scroll top
+    index is kept. Exception: while the user drags the scrollbar thumb or within 200 ms of a wheel
+    event, anchoring is skipped so programmatic scrolls never fight input (decided). While paused
+    (UI-PRC-017) nothing moves.
+  - Keep selection visible: after a keyboard focus move, `scroll_to_item(ix,
+    ScrollStrategy::Nearest)` with one extra row of margin (decided: `_with_offset(.., 1)`), so
+    the focus row never sits half under the header or bottom edge. Mouse selection never scrolls.
+  - Jump target (PROC-071): `scroll_to_item_strict(ix, ScrollStrategy::Center)` after expanding
+    the path, then select.
+  - Visible-range demand: the `uniform_list` range callback stores `visible_range`; in the
+    page's `after_layout` step (an `on_next_frame` scheduled once per render) the table computes
+    identities for `visible_range` widened by one viewport above and below, capped at 512, and
+    calls `on_visible_range` only if the identity set changed (compared by a 64-bit hash of the
+    sorted keys; decided). It runs again after every table version even when the range did not
+    change (ADR-009). The delegate forwards to `DemandAggregator` (`demand.rs`) as
+    `Demand::ProcessDetail { keys }`.
+  - Scrollbar drag is not frame-capped by the table (kit `Scrollbar.max_fps` is left at
+    default).
+- **States**: at top (no top shadow), scrolled (a 1 px `divider` line under the header is already
+  present; no extra shadow, decided), at bottom, horizontally scrolled (header moves with the
+  body), scrollbar hover (thumb 100% opacity) and drag.
+- **Interaction**: wheel, scrollbar drag, keyboard moves, programmatic jumps.
+- **Data binding**: `visible_range` → `DemandAggregator`; nothing persisted.
+- **Build**: `tree_table.rs` (`scroll: UniformListScrollHandle`, `anchor: Option<(RowId,
+  usize /*rows from top*/)>` recorded in the range callback), `demand.rs` sink.
+- **Performance**: anchoring costs one hash lookup per table version; demand hashing is O(512).
+  At 1,200 px/s the visible range changes every frame, so the demand set is hashed per frame
+  (≤ 512 keys, ~10 µs) but sent only when changed.
+- **Accessibility**: keyboard moves always keep the focus row visible.
+- **Tests**: `scroll_anchor_keeps_top_row_on_resort` (sort flips, top identity stays at same y),
+  `scroll_anchor_skipped_during_wheel`, `focus_move_scrolls_nearest_with_margin`,
+  `jump_target_centres_row`, `visible_demand_capped_512_and_sent_on_change_only`.
+- **Phase**: P1.
+- **Decided here**: anchoring rule and its input exception; margin row; demand change detection
+  by hash; no header shadow.
