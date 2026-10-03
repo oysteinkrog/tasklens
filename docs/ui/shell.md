@@ -8,7 +8,7 @@ ID prefix: UI-SHL. Phase labels follow R-072 (P0 to P4).
 
 - Binding, in order: `docs/DECISIONS.md` (D-001 to D-010), `docs/RECONCILIATION.md` (R-001 to R-103, canonical tables a to d), `docs/ARCHITECTURE.md` (ADR-009 and ADR-010 above all), then the merged specs `docs/spec/merged/sys-app.md` (APP entries), `perf.md` and `proc.md` (their shell parts).
 - Tokens and components come from `docs/ui/foundation.md`. This file never defines a colour or token value. It names `TlTheme` fields (`titlebar`, `tab_bg`, `accent` and so on), status colours (`status.danger` and so on), spacing `sp1` to `sp8`, text `t_xs` to `t_xl`, radii `r_sm` and `r_md`, motion `m_fast`, `m_base`, `m_slow` and `ease_out_cubic`.
-- Components are the foundation's types (`docs/ui/foundation.md` section 2): `TlButton` with its kinds `Primary`, `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle { on }`, `Segment { on }` (UI-FND-010), `TlCheckbox`, `TlSwitch`, `TlSlider`, `TlTextInput` and `TlFilterBox` (UI-FND-016), `TlSelect`, `TlTooltip`, `TlToast` and its `ToastQueue` (UI-FND-020), `TlDialog` and `TlSecondaryWindow` (UI-FND-021), `TlMenu` (UI-FND-022), `TlSpinner`, `TlSkeleton`, `TlShield` (UI-FND-028), `TlFocusRing`, plus the kit `Kbd`. Component visuals (heights, fills, hover and pressed looks, focus rings) are the foundation's; this file sets only placement, size overrides it names explicitly, content and behaviour.
+- Components are the foundation's types (`docs/ui/foundation.md` section 2): `TlButton` with its kinds `Primary`, `Secondary`, `Danger`, `Ghost`, `Icon`, `Toggle { on }`, `Segment { on }` (UI-FND-010), `TlCheckbox`, `TlSwitch`, `TlSlider`, `TlTextInput` and `TlFilterBox` (UI-FND-016), `TlSelect`, `TlTooltip`, `TlToast` and its `ToastQueue` (UI-FND-020), `TlDialog` and `TlSecondaryWindow` (UI-FND-021), `TlMenu` (UI-FND-022), `TlSpinner`, `TlSkeleton`, `TlShield` (UI-FND-028), `TlFocusRing`, plus the kit `Kbd` (no `TlKbd` wrapper). Component visuals (heights, fills, hover and pressed looks, focus rings) are the foundation's; this file sets only placement, size overrides it names explicitly, content and behaviour.
 - Theme state is the foundation's `ThemeStore` Global (UI-FND-040); metrics are `UiMetrics` (UI-FND-003), including icon sizes `i_xs` 12, `i_sm` 14, `i_md` 16, `i_lg` 20.
 
 ## Conventions used in every entry
@@ -612,14 +612,14 @@ x=0
   | 5 | Value Color Coding Intensity | slider row | `appearance.heat_intensity_pct` | 0 to 100, step 5 [C], "%d%%" |
   | 6 | Drop Shadow Intensity | slider row | `appearance.shadow_intensity_pct` | 0 to 100, step 5 [C], "%d%%" |
 
-- **Slider row anatomy** (height 30 [C]):
+- **Slider row anatomy** (UI-FND-014 slider row geometry: height 28):
 
 ```text
-| [chk col 20] Label (w=150, t_base, ellipsis) [==========o------] (w=120)  100% (w=40, right, t_sm tnum text_secondary) |
+| [chk col 20] Label (min w=140, t_base, ellipsis) [==========o------] (track 120 x 4)  100% (w=40, right, t_sm tnum text_secondary) |
 ```
 
-  - Label column 150 wide, truncated with "…" [M "Value Color Coding I…" in the reference].
-  - `TlSlider` 120 wide, track and thumb from the foundation.
+  - Label column at least 140 wide (UI-FND-014), truncated with "…" [M "Value Color Coding I…" in the reference].
+  - `TlSlider` track 120 × 4, thumb from UI-FND-014.
   - Value text 40 wide, right-aligned, tabular figures.
 - **Interaction**:
   - Dragging previews live: each `SliderEvent::Change` applies the value to `TlSettings` in memory without persisting [S]. `SliderEvent::Release` persists (one save) [S].
@@ -631,7 +631,7 @@ x=0
 - **Build**: `slider_row` helper renders a `menu_element` row holding a `TlSlider` (kit `Slider`) whose `SliderState` entities are created once per `MenuBar` and reused across menu opens (entities are never created in render) [C].
 - **Tests**: `appearance_slider_persist_on_release`: three Change events then Release: one persist call, final value saved, toast "UI scale changed to 115%".
 - **Phase**: P2 (menu), P1 (keys Ctrl+Plus/Minus/0).
-- **Decided here**: steps of 5 for the two 0..100 sliders; row geometry; popup stays open; keyboard on slider rows.
+- **Decided here**: steps of 5 for the two 0..100 sliders; popup stays open; keyboard on slider rows.
 
 ### UI-SHL-038 View > Theme
 
@@ -1198,7 +1198,7 @@ x=0, bottom=0
 ### UI-SHL-095 Keyboard Shortcuts window
 
 - **Implements**: APP-030, APP-031, R-083.
-- **Anatomy**: "tasklens Keyboard Shortcuts", Floating, 560 × 640, minimum 420 × 360 [C]. Search input at top (placeholder "Search shortcuts") [C]. Scrollable list grouped by context with headings in this order [S]: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Each row 28 tall: description `t_base` left; key caps right as `TlKbd` from `Kbd::binding_for_action` (several bindings separated by " or ") [S].
+- **Anatomy**: "tasklens Keyboard Shortcuts", Floating, 560 × 640, minimum 420 × 360 [C]. Search input at top (placeholder "Search shortcuts") [C]. Scrollable list grouped by context with headings in this order [S]: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Each row 28 tall: description `t_base` left; key caps right as kit `Kbd` elements from `Kbd::binding_for_action` (several bindings separated by " or ") [S].
 - **Behaviour**: rows come from the live keymap, so every row in table (b) appears once; actions not built in the current phase are absent. Search matches description and key text. Opened by Help > "Keyboard Shortcuts" and Ctrl+? [S].
 - **Phase**: P2.
 
@@ -1712,7 +1712,7 @@ Values and rules this file chose, for reviewers:
 16. "Include children" label `t_sm` and Tab stop after the filter (UI-SHL-025).
 17. Own `MenuBar` entity; first item highlighted when opened by key; Alt alone does nothing; Alt+D for Debug (UI-SHL-030).
 18. Columns submenu disabled on table-less tabs; Process View radios disabled in History mode and give the cycler's toast (UI-SHL-033, 035).
-19. Appearance: steps of 5 on the 0..100 sliders; slider row geometry; popup stays open while adjusting; keyboard on slider rows (UI-SHL-037).
+19. Appearance: steps of 5 on the 0..100 sliders; popup stays open while adjusting; keyboard on slider rows (UI-SHL-037).
 20. Theme menu: per-theme actions act on the active theme; copy names "<name> copy N"; explicit choice turns sync off with "Theme sync turned off" (UI-SHL-038, 080).
 21. Graph checks disabled without a GPU (UI-SHL-039).
 22. Settings menu: Start minimized indent 16; Save history disabled while recording is off; toasts "History recording on/off" and "Could not change the autostart entry"; Default tab lists built tabs only; adapter probe UX (UI-SHL-040).
@@ -1741,7 +1741,7 @@ Values and rules this file chose, for reviewers:
 ## 17. Open items (with the recommended answer)
 
 1. **Status bar form.** APP-029 says a 22 px bar on gpui-kit `StatusBar`; the TaskSlinger reference draws a floating chip and nothing on Performance and Information. Recommended: the chip (UI-SHL-050). If the owner prefers the bar, use `StatusBar` 22 high with the same segments, left and health right.
-2. **Status text size.** Foundation's text table puts the status bar at `t_xs`; the measured chip text is 12 px. Recommended: `t_sm`. Raised with the foundation author.
+2. **Status text size.** Settled with the foundation author: `t_sm` (measured 12 px); foundation.md now lists the status chip under `t_sm`. No action left.
 3. **Shift held at launch on Wayland.** A Wayland client gets no modifier state before focus. Recommended: the 500 ms first-focus rule in UI-SHL-110 step 6; verify in the P3 bead on KWin, and if KWin does not send modifiers on first focus, drop the Shift path on Wayland and keep `privilege.unlock_at_launch`.
 4. **Kit `TitleBar` controls.** Whether gpui-kit 0.7.0's `TitleBar` can hide its own caption buttons is not checked. Recommended: use own drag code (UI-SHL-003) unless the P1 bead finds a switch.
 5. **Kit `Input` and global shortcuts.** Recommended assumption: the kit input does not bind Ctrl+N, Ctrl+Q, Ctrl+W; the P1 keymap test (`keymap_matches_table_b`) must also run with the filter focused.
