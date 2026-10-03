@@ -12,6 +12,7 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 - **Validity words.** Key/value fields use the PERF-013 words (`Collecting…`, `Restricted`, `Needs setup`, `Not supported`, `Not reported`, `Unavailable`, `Unknown`) in `text_secondary`, never a zero (R-050). Table cells inside these windows use the ADR-003 glyphs, as the process table does.
 - **Numbers** follow canonical table (d): tabular figures (`tnum`), right-aligned in table cells, left-aligned in key/value fields.
 - **Actions.** Every command names its GPUI `Action`. Actions are declared with `actions!(tl_pwn, [...])` in `crates/tl-ui/src/windows/actions.rs` unless the entry says otherwise. Key contexts used here: `PropsWindow`, `PropsTable`, `AffinityDialog`, `PriorityDialog`, `SignalDialog`, `RunDialog` (table b), `HandleSearch`, `LowMemory`, plus the shared `Table` context of TlTreeTable.
+- **Tables.** Every table in these windows is a `TlTreeTable` (UI-PRC-001) whose owner implements `TreeTableDelegate`: rows are `RowKind::Plain` (or tree rows in Memory maps), `header_total` returns false so the header has one line, columns are fixed (no picker, `on_columns_changed` keeps widths in memory only), and sorting and filtering are done by the owner.
 - **Files.** New code lives under `crates/tl-ui/src/windows/`: `frame.rs`, `props/{mod.rs, general.rs, threads.rs, fds.rs, maps.rs, security.rs, environ.rs, strings.rs, filter.rs}`, `app_props.rs`, `affinity.rs`, `priority.rs`, `signal.rs`, `run.rs`, `handle_search.rs`, `low_memory.rs`, `notices.rs`, `actions.rs`. This extends the ADR-009 tree; it is listed in "Decided here".
 - **Reduced motion** means `App::reduce_motion()` is true or `motion.animations` is false (R-017).
 
@@ -1227,3 +1228,126 @@ Real-time signal…
 - **Tests:** `vt_notice_shown_once_then_flag_saved`; `vt_cancel_keeps_flag_false`; `vt_toast_only_after_500ms`; `vt_error_toasts`.
 - **Phase:** P2.
 - **Decided here:** browser failure text; reuse of the General hash path.
+
+---
+
+## Summary table
+
+| ID | Name | Implements | Phase |
+|---|---|---|---|
+| UI-PWN-001 | Secondary window frame (use of TlSecondaryWindow) | APP-045, APP-009, R-073, PROC-056, PROC-077, D-006 | P1, P2 |
+| UI-PWN-002 | Properties data path | PROC-077 to PROC-085 data, R-097, R-098 | P2 |
+| UI-PWN-003 | Process Properties window | PROC-077, PROC-071, PROC-056, R-050, D-008 | P2 |
+| UI-PWN-004 | Properties tab strip with counts | PROC-077 | P2 |
+| UI-PWN-005 | Per-tab filter bar and refresh behaviour | PROC-077, PROC-084 | P2 |
+| UI-PWN-006 | General tab layout | PROC-078, R-050, R-096 | P2 |
+| UI-PWN-007 | General tab: copy on click, links and keyboard | PROC-078, PROC-071, PROC-073, APP-044 | P2 |
+| UI-PWN-008 | General tab: hashes and Verify against package | PROC-078, PROC-074, R-096 | P2 |
+| UI-PWN-009 | General tab: window block | PROC-078, PROC-052, PROC-053 | P2 |
+| UI-PWN-010 | Threads tab | PROC-079, R-097 | P2 |
+| UI-PWN-011 | Threads row menu and thread actions | PROC-079, PROC-066, PROC-067, PROC-059, R-097 | P2 |
+| UI-PWN-012 | File descriptors tab | PROC-080 | P2 |
+| UI-PWN-013 | Memory maps tab | PROC-081, R-098 | P2 |
+| UI-PWN-014 | Security tab: summary | PROC-082, R-050 | P2 |
+| UI-PWN-015 | Security tab: Capabilities and Groups tables | PROC-082 | P2 |
+| UI-PWN-016 | Environment tab | PROC-083, R-099 | P2 |
+| UI-PWN-017 | Strings tab | PROC-084, R-004 | P3 |
+| UI-PWN-018 | Tab access states | PROC-080 to PROC-084, PROC-076, APP-003, R-050 | P2, P3 |
+| UI-PWN-019 | App Properties window and General tab | PROC-085, PROC-077, D-008 | P2 |
+| UI-PWN-020 | App Properties: Processes tab | PROC-085 | P2 |
+| UI-PWN-021 | Set Affinity dialog | PROC-067, PROC-079, R-039 | P1, P2 |
+| UI-PWN-022 | Set Affinity with several targets | PROC-069, PROC-067 | P2 |
+| UI-PWN-023 | Custom priority dialog | PROC-066, PROC-069, PROC-079 | P2 |
+| UI-PWN-024 | Realtime priority confirmation | PROC-066 | P2 |
+| UI-PWN-025 | Confirmations used by this file | APP-045, PROC-059, R-083 | P1 |
+| UI-PWN-026 | Send Signal submenu | PROC-065, PROC-059, R-039 | P2 |
+| UI-PWN-027 | Real-time signal dialog | PROC-065 | P2 |
+| UI-PWN-028 | Run dialog | PROC-095, APP-014, R-061 | P2 |
+| UI-PWN-029 | Run command combo and history | PROC-095, R-061 | P2 |
+| UI-PWN-030 | Search File Handles window | PROC-096, APP-015, R-061, R-102 | P3 |
+| UI-PWN-031 | Search File Handles results and menu | PROC-096, R-102, PROC-060, PROC-061, PROC-071, PROC-073 | P3 |
+| UI-PWN-032 | Low-memory rescue window | PROC-098, PROC-097, R-062, R-073 | P3 |
+| UI-PWN-033 | Low-memory process list | PROC-098 | P3 |
+| UI-PWN-034 | Dump confirmation and progress toast | PROC-075, R-004 | P3 |
+| UI-PWN-035 | Dump result toasts | PROC-075 | P3 |
+| UI-PWN-036 | VirusTotal notice and hashing toast | PROC-074, R-095 | P2 |
+
+## Coverage
+
+Every merged spec ID in this file's scope, and the entries that realize it:
+
+- PROC-056 Pin on top for tasklens windows: UI-PWN-001, UI-PWN-003, UI-PWN-032.
+- PROC-058 Action pipeline, results and toasts (as used by these windows): UI-PWN-011, UI-PWN-021, UI-PWN-022, UI-PWN-023, UI-PWN-026, UI-PWN-031.
+- PROC-059 Protection rules and confirmations (as triggered here): UI-PWN-011, UI-PWN-025, UI-PWN-026, UI-PWN-031.
+- PROC-065 Send Signal submenu: UI-PWN-026, UI-PWN-027.
+- PROC-066 Set Priority (Custom dialog and Realtime confirmation): UI-PWN-023, UI-PWN-024, UI-PWN-011.
+- PROC-067 Set Affinity: UI-PWN-021, UI-PWN-007 (Affinity link), UI-PWN-011.
+- PROC-069 Multi-select priority and affinity: UI-PWN-022, UI-PWN-023.
+- PROC-071 Jump target (PPID link, Go to process, Properties failure toast): UI-PWN-003, UI-PWN-007, UI-PWN-020, UI-PWN-031.
+- PROC-073 Open file location (Executable link, menus): UI-PWN-007, UI-PWN-012, UI-PWN-013, UI-PWN-031.
+- PROC-074 Open in VirusTotal: UI-PWN-036, UI-PWN-008 (shared hash).
+- PROC-075 Create dump file: UI-PWN-034, UI-PWN-035.
+- PROC-076 Privileged helper (Grant access, Enable, Search all, Retry as administrator): UI-PWN-018, UI-PWN-030.
+- PROC-077 Process Properties window: UI-PWN-001, UI-PWN-002, UI-PWN-003, UI-PWN-004, UI-PWN-005.
+- PROC-078 General tab: UI-PWN-006, UI-PWN-007, UI-PWN-008, UI-PWN-009.
+- PROC-079 Threads tab: UI-PWN-010, UI-PWN-011.
+- PROC-080 File descriptors tab: UI-PWN-012, UI-PWN-018.
+- PROC-081 Memory maps tab: UI-PWN-013, UI-PWN-018.
+- PROC-082 Security tab: UI-PWN-014, UI-PWN-015, UI-PWN-018.
+- PROC-083 Environment tab: UI-PWN-016, UI-PWN-018.
+- PROC-084 Strings tab: UI-PWN-017, UI-PWN-018, UI-PWN-005 (Value filter).
+- PROC-085 App Properties window: UI-PWN-019, UI-PWN-020.
+- PROC-095 Run dialog: UI-PWN-028, UI-PWN-029.
+- PROC-096 Search File Handles: UI-PWN-030, UI-PWN-031.
+- PROC-097 Low-memory watcher: UI-PWN-032 (the window it starts). The settings switch "Open rescue window on critical memory pressure" belongs to the Settings window spec, not this file.
+- PROC-098 Low-memory rescue window: UI-PWN-032, UI-PWN-033.
+- APP-009 Always on top and the pin (secondary windows): UI-PWN-001.
+- APP-014 Run dialog frame and privilege path: UI-PWN-028.
+- APP-015 Search File Handles frame: UI-PWN-030.
+- APP-044 Toasts (texts and placement in these windows): UI-PWN-003, UI-PWN-007, UI-PWN-028, UI-PWN-034, UI-PWN-035, UI-PWN-036.
+- APP-045 Dialogs as separate pinnable windows: UI-PWN-001, UI-PWN-025.
+- R-050 validity words: UI-PWN-006, UI-PWN-014. R-061: UI-PWN-028, UI-PWN-030. R-073: UI-PWN-001. R-095: UI-PWN-036. R-096: UI-PWN-008. R-097: UI-PWN-010, UI-PWN-011. R-098: UI-PWN-013. R-099: UI-PWN-016. R-102: UI-PWN-031. D-008: UI-PWN-003, UI-PWN-019, UI-PWN-020. D-009: UI-PWN-031.
+
+No in-scope ID is left without an entry.
+
+## Decided here (all entries)
+
+Values chosen in this file, for reviewers to check. Each entry also lists its own.
+
+1. Window sizes and kinds table (UI-PWN-001); App Properties 720 × 560; Run fixed 480 × 248; Handle Search 860 × 560; low memory 420 × 560.
+2. Esc order in these windows: popup, then running scan or search, then filter, then close.
+3. Properties data path: `Demand.details`, `DetailTab`, `Snapshot.details`, bit `DETAILS`, the commands `DetailRefresh`, `ComputeHashes`, `VerifyPackage`, `StringScan`, `CancelStringScan`, `HandleSearch`, `CancelHandleSearch`, and `Demand.affinity_targets` with `DetailsSnapshot.affinity` (UI-PWN-002, UI-PWN-021, UI-PWN-030).
+4. Exited banner text and look; frozen values; actions disabled with "The process is not running." (UI-PWN-003).
+5. Tab counts without placeholders; Alt+1..7 and Ctrl+PgUp/PgDn (UI-PWN-004).
+6. Filter field 280 px fixed; matched fields per tab; background filtering above 2,000 rows; no Ctrl-pause in secondary windows (UI-PWN-005).
+7. General tab: 26 px rows, label width rule (96..150 px), 840 px breakpoint, full-width command line block, Autogroup and Hardening rows, all value words for hardening and architecture, Net I/O wording (UI-PWN-006).
+8. Field menu adds "Copy all fields"; keyboard model of the grid (UI-PWN-007).
+9. Hash display (16 lowercase digits), "Computing…", package status words and verify toasts (UI-PWN-008).
+10. Window block order, "Needs the KDE window bridge." tooltip, "And N more" tooltip (UI-PWN-009).
+11. Column widths, default sorts and copy formats for every table (UI-PWN-010, 012, 013, 015, 016, 017, 020, 031).
+12. Thread action toasts and "(ends process)" on USR1 and USR2 (UI-PWN-011, UI-PWN-026).
+13. File descriptor details pane layout, extra fdinfo fields, decoded flag words (UI-PWN-012).
+14. Memory maps node versus region cells, collapsed default (UI-PWN-013).
+15. Security layout, labels, capability row rule, group marks (UI-PWN-014, UI-PWN-015).
+16. Environment reveal controls and lifetime, read-error row, truncation footer (UI-PWN-016).
+17. Strings texts (before, finished, cancelled, exited), 512-character cut, escapes, 4 Hz batches, Esc cancels first (UI-PWN-017).
+18. Access block look; buttons hidden before P3; no button on Security (UI-PWN-018).
+19. App Properties header block, panel split and wordings (UI-PWN-019, UI-PWN-020).
+20. Set Affinity layout (core tiles), group labels for hybrid and no-L3 machines, loading, cpuset, offline and invalid-list states, keyboard, Reset for mixed marks, request grouping under one toast (UI-PWN-021, UI-PWN-022).
+21. Custom priority labels, button "Set priority", dispatch sequence (UI-PWN-023).
+22. Several-targets signal confirmation text (UI-PWN-025).
+23. Real-time signal dialog title, labels and default value (UI-PWN-027).
+24. Run: icon, initial text, close on success with the toast in the main window, Browse quoting, combo tie rule, elevated marker (UI-PWN-028, UI-PWN-029).
+25. Handle Search: Stop button, texts for empty, stopped and singular results, Enter = Go to process, 100,000-hit cap (UI-PWN-030, UI-PWN-031).
+26. Low memory: danger colour of the first line, eased line return, window stays open after "Open Full tasklens", order hold while hovered, keyboard, `EngineMode::LowMemory` (UI-PWN-032, UI-PWN-033).
+27. Dump: UI picks the output path and polls its size every 500 ms; "~" shortening; failure text (UI-PWN-034, UI-PWN-035).
+28. VirusTotal browser failure text (UI-PWN-036).
+
+## Open items (recommended answers given; nothing is left to the implementer)
+
+1. **ADR-005 and ADR-008 additions.** The Properties data path (UI-PWN-002), `Demand.affinity_targets` (UI-PWN-021), the handle search commands and state (UI-PWN-030) and `EngineMode::LowMemory` (UI-PWN-032) are not in the ADRs yet. Recommendation: add them to ADR-005 (commands, snapshot component, mask bit `DETAILS`) and ADR-008 (demand fields and cadence) as written here.
+2. **`SystemSnapshot.cpu_topology`.** Set Affinity needs L3 groups, SMT siblings, hybrid kind and the online set. If the CPU page spec does not already put them in `SystemSnapshot`, recommendation: add `cpu_topology: Arc<CpuTopology>` there, read once at start and on CPU hotplug.
+3. **Dump progress.** ADR-005 action events carry no progress. Recommendation as written (UI stats the output file every 500 ms); the alternative, an `ActionState::Progress { bytes }`, is not needed.
+4. **Foundation requests** (sent to the foundation agent): `TlKeyValueGrid` owner overrides `.row_height(..)` and `.label_width(..)` (UI-PWN-006); the fixed-size Run window exception in the UI-FND-021 kinds table (UI-PWN-001); `WindowKey::AppProperties`, `WindowKey::Run`, `WindowKey::HandleSearch` in `WindowRegistry`.
+5. **processes.md overlap** (sent to the processes agent): `docs/ui/processes.md` UI-PRC-021 and the real-time signal part of UI-PRC-020 also describe the Set Affinity, Custom priority and Real-time signal dialogs with different sizes and titles. Recommendation: this file owns those dialogs (as the team lead assigned) and UI-PRC-021 becomes a reference to UI-PWN-021 to UI-PWN-023 and UI-PWN-027; processes.md owns all confirmation texts (UI-PRC-014), which this file now reuses, plus the new several-targets signal row from UI-PWN-025.
+6. **Confirmation focus rule.** UI-FND-021 says Enter triggers the default button and destructive confirmations focus Cancel; UI-PRC-014 says Enter is ignored on danger confirmations. This file follows whatever UI-PRC-014 settles, because it reuses that helper. Recommendation: the foundation and processes files agree on one rule (focus Cancel, Enter activates the focused button).
