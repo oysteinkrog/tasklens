@@ -4,7 +4,14 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 
 ## 2026-10-03
 
-These answer the owner questions in `docs/RECONCILIATION.md`.
+D-007 to D-010 answer the owner questions in `docs/RECONCILIATION.md`.
+
+### D-011: Group header rows are the same height as data rows
+
+Group header rows in the process table ("Apps (N)", "Background processes (N)", "System processes
+(N)") use the data row height, so the table can use GPUI's `uniform_list`. They stand out by bold
+text, a background band and the count. TaskSlinger's are about 36 px tall; this is a deliberate
+small difference for scrolling speed.
 
 ### D-010: History mode shows the last 10 minutes when recording is off
 
