@@ -359,3 +359,174 @@ Conventions:
 - Verdict: BUILD
 - Phase: P4
 - Privilege: pkexec (auth_admin) for actions, under `org.freedesktop.policykit.exec`; listing needs none
+
+## Startup Apps tab
+
+### SYS-019 Startup sources and precedence
+- Was: SYS-020
+- Source: TS 2.5 | PLAN data sources | review "Startup applications" row
+- Behaviour: One row per effective entry, from these sources:
+  1. XDG autostart, user: `$XDG_CONFIG_HOME/autostart/*.desktop`.
+  2. XDG autostart, system: each dir in `$XDG_CONFIG_DIRS` (default `/etc/xdg`) + `/autostart`.
+  3. systemd user units enabled into `default.target`, `graphical-session.target` or any `plasma-*.target`, from the user manager's WantedBy closure.
+  4. KDE only: Plasma pre-startup scripts in `~/.config/plasma-workspace/env/*.sh`.
+  5. KDE only: logout scripts in `~/.config/plasma-workspace/shutdown/*`.
+
+  - Precedence follows the XDG Autostart spec. Same file name: user beats system, and an earlier `XDG_CONFIG_DIRS` entry beats a later one. A shadowed system entry is shown once, with Type "Autostart (system, overridden)".
+  - An entry is effectively disabled when any of these hold: `Hidden=true`; `X-GNOME-Autostart-enabled=false`; `OnlyShowIn`/`NotShowIn` excludes `$XDG_CURRENT_DESKTOP`; `TryExec` is not found on PATH.
+  - Generated `app-*@autostart.service` units are not listed a second time under source 3; they are linked to their desktop entry.
+- Linux data/mechanism:
+  - Engine worker `SourceId::Startup`, `workers/startup.rs` (ADR-004). A Desktop Entry spec parser in tl-collect.
+  - Read on page open and on `RefreshNow` (ADR-008). While the tab is open, inotify on all autostart dirs and the two Plasma dirs triggers a rescan (inferred: compatible with ADR-008, since it only runs while the page is in demand).
+  - Units come from `ListUnitFilesByPatterns` and `ListUnitsByPatterns` on the user manager.
+  - Desktop entries map to units by escaping the id with systemd-escape rules: `app-<escaped id>@autostart.service`.
+- Verdict: ADAPT (Run keys, Startup folders and packaged tasks become XDG autostart, systemd user units and Plasma scripts)
+- Phase: P2
+- Privilege: none
+
+### SYS-020 Startup columns and values
+- Was: SYS-021
+- Source: TS 2.5 (Columns.StartupApps=0,1,2,6,3,4,5; widths 220,180,90,100,190,260,170) L28418-28446
+- Behaviour: Columns in display order, with ids and default widths (logical px at 100%): Name (`name`, 220), Publisher (`publisher`, 180), Status (`status`, 90), Startup impact (`impact`, 100), Type (`type`, 190), Location (`location`, 260), Command (`command`, 170).
+
+  | Column | Value |
+  |---|---|
+  | Name | desktop `Name` (localised) or unit id |
+  | Publisher | owning package as "name version"; "User" for files under $HOME not owned by a package; blank if unknown |
+  | Status | see list below |
+  | Startup impact | SYS-021 |
+  | Type | see list below |
+  | Location | directory path |
+  | Command | `Exec`, `ExecStart` or the script path |
+
+  - Status values: Enabled, Disabled, Masked, Not in this desktop, Missing program. The last two replace TaskSlinger's "(Policy)" variants: entries whose state the user cannot get by toggling.
+  - Type values: Autostart (user), Autostart (system), Autostart (system, overridden), systemd user unit, Plasma pre-startup script, Plasma logout script.
+- Linux data/mechanism: a package owner index in tl-collect, shared with the process Package column (R-007). It parses `/var/lib/pacman/local/*/files` once into a path-to-package map. The map is built lazily on first use and rebuilt when the mtime of `/var/lib/pacman/local` changes. On Debian-family systems it reads `/var/lib/dpkg/info/*.list` instead. Other distros leave Publisher blank.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-021 Startup impact
+- Was: SYS-022
+- Source: TS impact values L28976-28978; WDI StartupInfo source (cross-check A.32), which is why TaskSlinger needs admin
+- Behaviour:
+  - Values: High, Medium, Low, None, Not measured. TaskSlinger's "Requires administrator" never occurs, because systemd timing is readable unprivileged.
+  - Thresholds on activation time: High at 1000 ms or more, Medium from 300 to 999 ms, Low under 300 ms.
+  - None means the entry is disabled.
+  - Not measured means the entry did not run through systemd this session. This happens with Plasma's non-systemd boot, Plasma scripts, or units that are inactive and were never activated since login.
+  - The tooltip shows the raw activation time, "Started <s> after login", and CPU time used so far.
+  - Documented limit: `Type=exec`/`simple` units count fork to exec, so most entries show Low.
+  - TaskSlinger's status-bar suffix " | Startup impact requires administrator" is not used.
+- Linux data/mechanism: the same data `systemd-analyze --user blame` uses, read over D-Bus. Per unit: `InactiveExitTimestampMonotonic` and `ActiveEnterTimestampMonotonic`. The start offset is `InactiveExitTimestampMonotonic` minus the Manager's `UserspaceTimestampMonotonic`. CPU time is `CPUUsageNSec`. Read once when the tab opens and again on UnitFilesChanged.
+- Verdict: ADAPT (WDI CPU and disk usage become systemd activation time)
+- Phase: P2
+- Privilege: none
+
+### SYS-022 Enable and disable
+- Was: SYS-023
+- Source: TS context Disable/Enable, toasts L28797-28808 | review "Hidden=true applies to desktop entries, not systemd units"
+- Behaviour:
+  - The context item reads "Disable" or "Enable" by state, and works on multi-select.
+  - Toasts "Startup entry enabled." / "Startup entry disabled." / "Failed to update startup entry".
+  - Changes take effect at next login; running programs are not stopped.
+  - "Not in this desktop" and "Missing program" entries show the item disabled, with the reason as tooltip.
+- Linux data/mechanism (`ActionKind::StartupEnable` / `StartupDisable`, ADR-005; time budget 2 s per ADR-006):
+  - XDG system entry, disable: write `~/.config/autostart/<id>.desktop` as a full copy of the system file plus `Hidden=true` and `X-Tasklens-Override=true`. This is the KDE Autostart module's method.
+  - XDG system entry, enable: delete that user file if it carries `X-Tasklens-Override=true`; otherwise set `Hidden=false` and remove `X-GNOME-Autostart-enabled=false`.
+  - XDG user entry: toggle `Hidden` in place.
+  - All writes use `write_atomic` (ADR-011): temp file in the same dir, fsync, rename, fsync the dir. Unknown keys and comments are kept.
+  - systemd user unit: `EnableUnitFilesWithFlags` / `DisableUnitFilesWithFlags` on the user manager, then `Reload()`.
+  - Plasma scripts: toggle the executable bit (Plasma runs only executable scripts).
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none, because system entries are overridden per user and never edited
+
+### SYS-023 Run now
+- Was: SYS-024
+- Source: TS "Run now" (WdcRunTaskAsInteractiveUser, cross-check A.32), toasts "Startup entry launched." / "Failed to launch startup entry"
+- Behaviour: Starts the entry now, whatever its Status. Toasts "Startup entry launched." / "Failed to launch startup entry". If it is already running as its autostart unit, the toast reads "Already running".
+- Linux data/mechanism:
+  - If `app-<id>@autostart.service` exists: `StartUnit(…, "replace")` on the user manager.
+  - Otherwise: the shared launcher in tl-engine (also used by APP-014 Run). It parses `Exec` per the Desktop Entry spec: field codes %f %F %u %U removed, %i/%c/%k expanded, quoting rules applied.
+  - The launcher runs `posix_spawn` with `setsid`, with stdio set to /dev/null and cwd from `Path=`.
+  - It then calls `StartTransientUnit("app-tasklens-<escaped id>-<random hex>.scope", "fail", [("PIDs",[pid]),("Description",Name),("CollectMode","inactive-or-failed")], [])` on the user manager, so app grouping works. A failed scope creation is logged and not fatal.
+  - systemd unit: `StartUnit`. Script: spawned the same way through `/bin/sh <path>`.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-024 Delete entry
+- Was: SYS-025
+- Source: TS "Delete entry..." and dialog "Delete startup entry" L29399-29404
+- Behaviour:
+  - Confirm window (separate pinnable window, modal to the main window, APP-045). Window title "tasklens Delete Startup Entry". Heading "Delete startup entry", text "Permanently remove this startup entry?", a type-specific line, and buttons "Delete" (danger) and "Cancel".
+  - Type-specific lines: user XDG entry: "The autostart file will be deleted. The app stays installed."; user systemd unit: "The unit will be disabled and its unit file deleted."; Plasma script: "The script file will be deleted.".
+  - Entries that cannot be deleted show the item disabled with the reason, and the toast "This startup entry cannot be deleted" if triggered by key. These are system XDG entries and package-owned units (use Disable instead), because pacman would restore them.
+  - Other toasts: "Startup entry deleted." / "Failed to delete startup entry".
+- Linux data/mechanism: `unlink`. For a unit: `DisableUnitFiles`, then unlink the file in `~/.config/systemd/user`, then `Reload()`.
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-025 Startup context menu, copy and open
+- Was: SYS-026
+- Source: TS L29293-29297, copy format L35521-35528 (cross-check A.3), toasts "Startup command copied.", "Startup file location unavailable."
+- Behaviour:
+  - Menu: Disable/Enable, Run now, separator, Copy, Copy row, Copy command, Open file location, Properties, separator, Delete entry….
+  - "Copy row" (Ctrl+C, R-012) format:
+    ```
+    Name: …
+    Publisher: …
+    Status: …
+    Startup impact: …
+    Type: …
+    Location: …
+    Command: …
+    Resolved path: …
+    ```
+    Resolved path is the absolute path of the binary found on PATH. Multi-select blocks are separated by a blank line.
+  - "Copy rows as table" (Ctrl+Shift+C): TSV of the visible columns with a header line. "Copy" copies the clicked cell.
+  - "Copy command": toast "Startup command copied.".
+  - Open file location: `FileManager1.ShowItems` on the source file. If the file is gone: "Startup file location unavailable.".
+- Linux data/mechanism: as above
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
+
+### SYS-026 Startup Properties window
+- Was: SYS-027
+- Source: TS L28959-28972, title "TaskSlinger Startup Properties" L29326
+- Behaviour: A separate pinnable window titled "Startup properties: <Name>", read-only, with a copy button per line. Opened by Properties (Enter, Alt+Enter, Ctrl+I). Lines:
+
+  | Line | Content |
+  |---|---|
+  | Name | |
+  | Publisher | |
+  | Status, Enabled, State code | State code is the generated unit's ActiveState/SubState, or "-" |
+  | Startup impact | with ms |
+  | Type, Source, Scope | Scope replaces Hive: user or system |
+  | Location | |
+  | Source path | |
+  | Resolved path | |
+  | Command | |
+  | Can run, Can toggle, Can delete, File exists | Yes/No each |
+
+  Linux additions: OnlyShowIn/NotShowIn, TryExec, X-KDE-autostart-phase, generated unit name, "Overrides: <system path>" when a user file shadows one.
+- Linux data/mechanism: parsed entry plus unit properties
+- Verdict: ADAPT
+- Phase: P2
+- Privilege: none
+
+### SYS-027 Startup status bar, sort and persistence
+- Was: SYS-028
+- Source: TS L28437-28438; Sort.StartupAppsKey=2, StartupAppsStatusDefault=1; StartupVisibilityMask=7F | R-060
+- Behaviour:
+  - Status bar: "%zu Total | %d Enabled | %d Disabled", plus " | %d selected".
+  - Default sort is Status ascending, so Enabled comes first, with Name ascending as tie-break (R-011).
+  - Columns are persisted as in APP-033.
+  - First load in a session shows skeleton rows until the first data (R-060).
+  - F5 rescans and shows "Startup entries refreshed.".
+- Linux data/mechanism: `state.toml` `[sort.startup] column = "status", ascending = true` and `[columns.startup]`; F5 sends `RefreshNow(Startup)`.
+- Verdict: BUILD
+- Phase: P2
+- Privilege: none
