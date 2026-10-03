@@ -767,3 +767,210 @@ Memory composition      t_sm 400 text_secondary (caption above the bar, chosen)
 - **Tests**: `memory_details_order`, `memory_hidden_rows_rule`, `modules_collapsed_when_more_than_4`, `no_serial_in_copy_text`.
 - **Phase**: as per row and block.
 - **Decided here**: block visibility rules, table column widths, module header layout, Huge pages format.
+
+### UI-PRF-029 Disk page: graphs and header buttons
+
+- **Implements**: PERF-047, PERF-048, PERF-051 (button), PERF-052 (button), PERF-053.
+- **Anatomy**:
+
+```
+Disk 0  WD_BLACK SN850X 1000GB  (nvme0n1)                 [Show SMART data] [Eject]
+sp4
+┌ Active time                                             12.0% ┐  W × 150, fill disk_fill, line disk_line, Fixed 0..100
+│ Active time over 60 seconds                                   │
+└───────────────────────────────────────────────────────────────┘
+┌ Transfer rate                                     12.3 MiB/s  ┐  W × 150; value = read + write
+│ ── Read  ── Write (dashed)                       16 MiB/s     │  axis max, AutoRate { iec: true }
+│ Throughput over 60 seconds                                    │
+└───────────────────────────────────────────────────────────────┘
+```
+
+  - **Show SMART data** (`TlButton` small outline): present only when SMART is available for the drive (UDisks2 ATA or NVMe interface present, or the P3 smartctl fallback applies); → `perf::ShowSmart { key }` opens the SMART window (UI-PRF-030).
+  - **Eject** (`TlButton` small outline, icon `eject`): present only for ejectable or removable drives; visibility updates live (PERF-052); → `perf::Eject { key }`.
+- **States**: per UI-PRF-001. A disk with no mounted filesystem still has both graphs.
+- **Interaction**: page menu: no page-specific items in P1; P2 adds "Show SMART data…" and "Eject" mirroring the buttons.
+- **Data binding**: series `disk.active`, `disk.read`, `disk.write` from `/proc/diskstats` at 1 Hz (`SERIES`); `DeviceCatalog` for kind, model, removable (`DEVICES`). Demand `disks`.
+- **Build**: `pages/performance/disk.rs` `DiskPage` with two `ChartView`s.
+- **Tests**: `disk_buttons_visibility`, `disk_transfer_value_is_sum`.
+- **Phase**: P1 (buttons P2).
+- **Decided here**: Transfer rate value = read + write.
+
+### UI-PRF-030 Disk page: Details grid, partitions table, SMART window and "Disk is in use" window
+
+- **Implements**: PERF-049, PERF-050, PERF-051, PERF-052, PERF-053, R-036, D-009.
+- **Details rows** (grid order): Active time (`12.0%`), Average response time (`0.42 ms`), Read speed (`4.2 MiB/s`), Write speed, Total read (`812.40 GiB`), Total written, Capacity (`931.51 GiB`), Formatted (`920.10 GiB`), Used space, Free space, System disk (`Yes`/`No`), Swap (`Yes`/`No`), Hardware name (`WD_BLACK SN850X 1000GB`), Type (`NVMe`), Interface (`nvme`), WWN, Serial, Rotation rate (`7200 RPM`), Temperature (`41 °C`). WWN, Serial and Rotation rate hidden when missing. Phases: rows 1 to 4, 7 and 2 are P1; the rest P2.
+- **Partitions table** (PERF-050, P2): heading `"3 partitions - GPT"` (`t_md` 500; `"1 partition - MBR"`; `"No partitions"` when the table is empty, chosen). `TlStaticTable` columns and widths: Partition 120, Size 90 right, Offset 110 right, Device 110, Mount path flex (tooltip "Additional mount points: /a, /b" when more), Label 120, File system 90, Usage 140 (a 12 px high bar: `accent` fill over `divider` track with `r_sm`, plus `42.1%` text right of it in `t_xs`), Flags 110, Type flex. Rows ordered by offset; "Unallocated" rows show `-` in every column except Size, Offset and Type (`Unallocated`), in `text_secondary`. Column widths are not resizable (static table).
+- **SMART window** (PERF-051): own window "tasklens SMART Data" (frame is the shell's `TlDialog` window pattern, 760 × 520 default, minimum 560 × 360). Content: a header `TlKeyValueGrid` with 4 columns: Last updated (`2m 5s ago`), Powered on (`1 day, 4h 12m 0s`, uptime format), Drive health (`OK` in `status.success`, `FAILING` in `status.danger`, `Unknown`), Self-test status (`Completed without error`, `In progress 40%`). A `TlButton` small "Refresh" (→ `perf::SmartRefresh { key }`; shows a 16 px spinner icon inside the button while the request runs) at the right. Then a sortable `TlStaticTable` (the foundation's sortable variant: click a header to sort, Desc first) with the ATA columns ID (40, right), Attribute (flex), Value (80, right), Normalized (90, right), Threshold (80, right), Worst (70, right), Type (80), Updates (80), Assessment (110: `OK` `text_primary`, `Failed in the past` `status.warning`, `FAILING` `status.danger`). NVMe shows a two-column key/value list instead (Attribute flex, Value 160 right) with the PERF-051 rows in order. Failure: the table area shows "Failed to get SMART data" (`t_md` 500) and the reason (`t_sm` `text_secondary`) centred. Fallback (P3): when UDisks2 lacks SMART, the header shows a `TlButton` "Read with smartctl (admin)" → `perf::SmartReadSmartctl { key }`.
+- **"Disk is in use" window** (PERF-052): own window "tasklens Disk is in use" (520 × 400): text line "These programs are using <Disk N> (<model>):", then a list grouped by app: group header row (app icon 16 px, app name `t_sm` 500), process rows 28 px (name, PID in `text_secondary`, then the open paths joined with ", " in `t_xs` `text_secondary`, ellipsis, tooltip with all paths), each with an "End Task" `TlButton` small danger-outline at the right; holding Shift relabels every row button to "End Process" (SIGKILL). Footer buttons right-aligned: "Close" (default), "Retry", "End All" (danger). "End All" with more than one process and any action on another user's or a protected process ask first with the R-036 dialogs; a single End Task on the user's own process does not ask (D-009). After an end action the unmount retries automatically after 500 ms. A note line "Processes of other users may also hold this disk" appears above the footer in `text_secondary` when any `/proc/*/fd` read failed with EACCES. Success closes the window and shows the toast "Disk ejected".
+- **Build**: `pages/performance/disk.rs` for the page; `windows/smart.rs` and `windows/disk_in_use.rs` for the windows (opened through the shell's secondary-window helper).
+- **Tests**: `disk_details_order`, `partitions_heading_text`, `unallocated_row_rendering`, `smart_assessment_colours`, `disk_in_use_shift_relabels`.
+- **Phase**: P1 rows; P2 the rest; P3 smartctl.
+- **Decided here**: all table widths, usage bar, window sizes, "No partitions", button variants, retry delay, Shift relabel behaviour.
+
+### UI-PRF-031 Network page
+
+- **Implements**: PERF-054, PERF-055, PERF-056, PERF-057, PERF-058, PERF-059, PERF-060, PERF-061.
+- **Anatomy**:
+
+```
+enp38s0  Intel I350 Gigabit Network Connection                       (no toggles)
+sp4
+┌ Throughput                                               1.5 Mbps ┐  W × graph_h_single 240; value = download + upload
+│ ── Download  ── Upload (dashed, tinted)                 10 Mbps   │  scale AutoRate { iec: false } or LinkSpeed
+│ Throughput over 60 seconds                                        │
+└───────────────────────────────────────────────────────────────────┘
+details_gap
+Details
+[grid]
+sp6
+Network settings      (link row, accent, Lucide `external-link` 12 px; P3, KDE and GNOME only)
+```
+
+- **Details rows** (grid order): Download speed (`1.2 Mbps`), Upload speed, Total downloaded (`12.40 GiB`), Total uploaded, Adapter name (`Intel I350 Gigabit Network Connection` or `Unknown adapter`), Interface name (`enp38s0`), Connection type (`Ethernet`), Connection status (`Connected`), Link speed (`1000 Mbps`; Wi-Fi: `RX 866 Mbps · TX 866 Mbps`; -1: `Not reported`), IPv4 address (`192.168.1.10/24`; several joined with ", "), IPv6 address (global first; link-local in the tooltip "Link-local: fe80::…"), MAC address, Interface index (`2`), Driver (`igb`), Display unit (link value, UI below), Public IP (UI below). Wi-Fi inserts after Connection status: SSID, Signal (`-52 dBm (78%)` with a 16 px 4-bar icon before the text: bars lit by strength ≥ 25/50/75/100 in `accent`, unlit in `divider`), RX bitrate, TX bitrate, Frequency (`5180 MHz, channel 36`), Security (`WPA2`). Phases: rates and totals P1; Display unit P1; the rest P2; Network settings link P3.
+- **Display unit row** (PERF-057): value text `Mbps`, `MiB/s`, `bits/s, auto` or `bytes/s, auto` in `accent`; tooltip "Applies to all network values"; click opens a `TlMenu` under the value with radio items "Bits per second", "Bytes per second" → `app::SetNetworkUnit { unit }` (global setting `units.network`).
+- **Public IP row** (PERF-060): value `Not fetched` (`text_secondary`) followed by a `TlButton` xsmall outline "Fetch" inline (20 px high, `sp3` left margin). Fetching: button shows the spinner icon and is disabled; value `Fetching…`. Result: `203.0.113.4 (fetched 14:02)`; with IPv6 a second line `2001:db8::4 (fetched 14:02)` (chosen). Failure: `Unavailable` with tooltip "Could not reach api.ipify.org: {error}". The first click opens the "tasklens Public IP Notice" window (APP-056, shell spec) and fetches only after "Continue".
+- **Network settings** link (PERF-061): `perf::OpenNetworkSettings`; hidden on desktops other than KDE and GNOME; also a page menu item.
+- **Data binding**: series `net.rx`, `net.tx`; `DeviceCatalog` for type, state, adapter name; `Snapshot.system.net[ifindex]` for addresses and Wi-Fi (`SYSTEM`); demand `nets`. The `LinkSpeed` scale reads `performance.network_dynamic_scale` and the sysfs speed.
+- **States**: disconnected interface: graph shows a gap after the last sample (the engine marks samples invalid when operstate is down, R-051 rule set), header unchanged, Connection status row shows the state word. `tailscale0` with operstate unknown and no carrier: `Unknown` (PERF-054).
+- **Build**: `pages/performance/net.rs` `NetPage` with one `ChartView` and a `KeyValueModel`; the signal icon is a tiny custom element of 4 quads.
+- **Tests**: `net_details_order_ethernet`, `net_details_order_wifi`, `display_unit_values`, `public_ip_states`, `link_speed_scale_unknown_falls_back`.
+- **Phase**: as per row.
+- **Decided here**: `graph_h_single` 240, Throughput value = sum, IPv6 second line, signal icon geometry, Fetch button size, failure tooltip.
+
+### UI-PRF-032 GPU page: graph rows
+
+- **Implements**: PERF-062, PERF-063, PERF-064, PERF-065, PERF-066, PERF-067, PERF-068, R-054.
+- **Anatomy**:
+
+```
+Graphics adapter  NVIDIA GeForce RTX 4080                                        (no toggles)
+sp4
+row 1: UI-PRF-002 grid of engine cells (cols = ceil(sqrt(2n)) capped by width, grid_cell_h 112)
+┌ 3D / Compute  10.9% │ Memory controller  4.0% │ Video Encode  0.0% │ Video Decode  0.0% │ JPEG 0.0% │ Optical flow 0.0% ┐
+sp4
+row 2: two charts side by side, each (W − sp4) / 2 × graph_h_stacked 150
+┌ Memory                        2.80 GiB / 15.92 GiB ┐ ┌ Temperature                               52 °C ┐
+│ ── Dedicated  ── Shared (dashed; absent on NVIDIA)│ │ StickyTemp; axis max "90 °C"                      │
+│ FixedTotal(total); "Memory usage over 60 seconds" │ │ "Temperature over 60 seconds"                     │
+└───────────────────────────────────────────────────┘ └───────────────────────────────────────────────────┘
+sp4
+row 3 (optional, P2): same split; present per performance.gpu_optional_graphs
+┌ Power                                31.9 / 300 W ┐ ┌ Clocks                           1905 / 3105 MHz ┐
+│ StickyUp { hw_max: power limit }                  │ │ ── GPU clock  ── Memory clock (dashed); hw_max   │
+│ "Power draw over 60 seconds"                      │ │ "Clock speed over 60 seconds"                     │
+└───────────────────────────────────────────────────┘ └───────────────────────────────────────────────────┘
+```
+
+  - Engine names per vendor exactly as PERF-063 (NVIDIA: "3D / Compute", "Memory controller", "Video Encode", "Video Decode", "JPEG", "Optical flow"; AMD: "Graphics", "Compute", "Memory controller", "Video Encode", "Video Decode", "JPEG", "DMA"; Intel: "Render/3D", "Compute", "Copy", "Video", "Video Processing"). Engines the device does not report are not listed; `NVML_ERROR_NOT_SUPPORTED` hides the engine. Hidden engines (`performance.hidden_gpu_engines`) are not drawn and the grid re-tiles. Fills `gpu_fill`, lines `gpu_line`.
+  - When only one optional graph is on, it takes the full width of row 3.
+  - Engine cell tooltip (heading): "Own processes only" on AMD when any fdinfo read failed (PERF-074); the Clocks heading tooltip shows the P-state and throttle reasons ("P3 · Throttled: power cap") and the Power heading tooltip the limit range and energy ("Limit range 100 to 350 W · 1.24 kWh since boot", PERF-066, PERF-067).
+- **States**: probe restarting: every GPU chart value shows `!` with tooltip "GPU monitor restarting" and the plots show a gap (PERF-062). Probe missing: values `n/a` with tooltip "GPU probe not installed"; the engine grid shows one cell "3D / Compute" with `n/a` so the page keeps its shape (chosen).
+- **Interaction**: page menu page-specific items: "Select GPU engine graphs >" (check items: each engine name, then separator, "Power", "Clocks") → `perf::ToggleGpuEngine { key }` and `perf::ToggleGpuOptionalGraph { which }`; on an engine cell the menu also has "Hide this engine graph" → `perf::ToggleGpuEngine { key }` (PERF-063). Unchecking the last engine is allowed (row 1 collapses to height 0 with the `m_base` animation).
+- **Data binding**: series `gpu.engine[k]`, `gpu.mem_dedicated`, `gpu.mem_shared`, `gpu.temp`, `gpu.power`, `gpu.clock_gpu`, `gpu.clock_mem` at 1 Hz (`SERIES`); totals and limits from `Snapshot.system.gpu[idx]` (`SYSTEM`). Demand `gpus`.
+- **Build**: `pages/performance/gpu.rs` `GpuPage`: `engines: Entity<ChartGridView>`, `memory`, `temperature`, `power: Option<..>`, `clocks: Option<..>`.
+- **Tests**: `gpu_engine_names_nvidia`, `gpu_hidden_engine_retiles`, `gpu_probe_restart_glyphs`, `gpu_optional_row_full_width_when_one`.
+- **Phase**: P1 (3D/Compute, encode, decode engines, Memory, Temperature); P2 (other engines, hiding, Power, Clocks).
+- **Decided here**: row 2 split, placeholder engine cell when the probe is missing, tooltip texts.
+
+### UI-PRF-033 GPU page: Details grid and displays list
+
+- **Implements**: PERF-064 to PERF-073.
+- **Details rows** (grid order; TaskSlinger rows first, Mission Center rows after):
+
+| # | Label | Value example | Notes | Phase |
+|---|---|---|---|---|
+| 1 | Utilization | `10.9%` | the 3D/Compute engine | P1 |
+| 2 | Dedicated memory | `2.80 GiB / 15.92 GiB` | | P1 |
+| 3 | Shared memory | `Not supported` on NVIDIA | | P1 |
+| 4 | Hardware reserved memory | `380.00 MiB` | | P1 |
+| 5 | Video encode | `0.0%` | tooltip "2 active sessions" (NVIDIA) | P1 |
+| 6 | Video decode | `0.0%` | one row "Video encode/decode" when shared | P1 |
+| 7 | Temperature | `52 °C` | tooltip lists all sensors on AMD | P1 |
+| 8 | Temperature source | `NVML (GPU core)` | PERF-069 values | P1 |
+| 9 | Fan speed | `0% (0 RPM)` | | P2 |
+| 10 | Slowdown temperature | `88 °C` | | P2 |
+| 11 | Shutdown temperature | `95 °C` | | P2 |
+| 12 | Memory temperature | `Not reported` | | P2 |
+| 13 | Clock speed | `1905 / 3105 MHz` | tooltip "P3" | P2 |
+| 14 | Memory speed | `7001 / 14001 MHz` | | P2 |
+| 15 | Video clock | `1620 MHz` | | P2 |
+| 16 | Power draw | `31.9 / 300 W` | tooltip "max 350 W · 1.24 kWh since boot" | P2 |
+| 17 | PCI Express | `Gen 4 x16` | | P2 |
+| 18 | Max PCI Express | `Gen 5 x16` | hidden when equal to row 17 | P2 |
+| 19 | PCIe throughput | `↓ 12.3 MiB/s ↑ 1.2 MiB/s` | | P2 |
+| 20 | Driver version | `615.71.09` | | P2 |
+| 21 | Kernel module | `nvidia 615.71.09` | | P2 |
+| 22 | CUDA version | `13.2` | NVIDIA only; else row hidden (chosen) | P2 |
+| 23 | Vulkan version | `1.4.312` | | P2 |
+| 24 | OpenGL version | `4.6.0 NVIDIA 615.71.09` | | P2 |
+| 25 | Physical location | `PCI bus 45, device 0, function 0` | | P2 |
+| 26 | VBIOS version | `95.03.3A.00.1B` | | P2 |
+| 27 | UUID | `GPU-…` | tooltip shows the full UUID; cell truncates | P2 |
+| 28 | Architecture | `Ada Lovelace` | | P2 |
+
+- **Displays block** (PERF-072, PERF-073, P2): heading "Displays" (`t_md` 500), one row per enabled display, 24 px, `t_sm` `text_primary`, format exactly `<monitor name> · DisplayPort · 1920x1200 @ 59.95 Hz · Max bit depth 10 · Portrait (left) · 110%`, with ` (primary)` after the name on the primary. Missing orientation prints `Not reported` in its slot; missing bit depth prints `Max bit depth Not reported`. Empty: "No display connected" (`text_secondary`).
+- **Tests**: `gpu_details_order`, `gpu_max_pcie_hidden_when_equal`, `display_row_format`.
+- **Phase**: per row.
+- **Decided here**: CUDA row hidden off NVIDIA, display row height, empty text.
+
+### UI-PRF-034 Fan page
+
+- **Implements**: PERF-076, PERF-077, PERF-108 (link when no fans).
+- **Anatomy**:
+
+```
+Fan 1  nct6797                                                           (no toggles)
+sp4
+┌ Fan speed                                               1200 RPM ┐  W × 150; RPM filled (Violet), PWM % dashed on a second 0..100 axis (right side, no labels; chosen)
+│ ── RPM  ── PWM                                           1800 RPM │  axis max = fanN_max when present (StickyUp hw_max), else sticky 1-2-5
+│ Fan speed over 60 seconds                                         │
+└───────────────────────────────────────────────────────────────────┘
+┌ Temperature                                                45 °C ┐  W × 150; the paired sensor; StickyTemp
+│ Temperature over 60 seconds                                       │  no sensor: plot empty, centred text "Choose a sensor" t_sm text_secondary, value "-"
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- **Details rows**: Fan speed (`1200 RPM`), PWM (`45%`), Control mode (`Automatic` / `Manual` / `Full speed`), Temperature (`45 °C`; `Not reported` when no sensor is paired... value word `Unknown` is not used here), Chip (`nct6797`).
+- **Interaction**: page menu page-specific items (P3): "Rename fan…" → `perf::RenameFan { key }` opens a `TlDialog` with one text input (default the current label, placeholder "Fan name") and buttons "Rename" (primary) and "Cancel"; empty input restores the default label. "Temperature sensor >" → radio items, one per hwmon temperature `"<chip> <label>  48 °C"` (value right-aligned in `text_secondary`) plus "None" → `perf::SetFanTempSensor { key, sensor }`.
+- **Sidebar visibility**: fans that read 0 RPM for the whole session and have no label are hidden unless `performance.show_disconnected_fans` (Settings, shell spec).
+- **Data binding**: series `fan.rpm`, `fan.pwm`, `temp.<sensor>` at 1 Hz; demand `sensors`.
+- **Build**: `pages/performance/sensors.rs` `FanPage`.
+- **Tests**: `fan_choose_a_sensor_state`, `fan_rename_empty_restores_default`.
+- **Phase**: P2 (page); P3 (rename and sensor menu).
+- **Decided here**: dual axis for PWM, rename dialog layout, sensor item format.
+
+### UI-PRF-035 Battery and power device page
+
+- **Implements**: PERF-078, PERF-079.
+- **Anatomy**:
+
+```
+Mouse  Logitech MX Master 3S                                              (no toggles)
+sp4
+system battery:  ┌ Power                                     -12.4 W ┐  W × 150; Symmetric scale, zero line at mid height (1 px divider),
+                 │ charge positive filled above the line, discharge filled below (Mint)   axis "±20 W"
+                 │ Power draw over 60 seconds                        │
+peripheral:      ┌ Percentage                                  85.0% ┐  W × 150; Fixed 0..100
+                 │ Percentage over 60 seconds                        │
+sp4
+system battery with ≥ 2 history points (P3):
+┌ Battery charge over the past week                               ┐  W × 150; x axis = 7 days, vertical grid at local midnight,
+│ day labels "Mon" … under the plot in t_xs text_secondary (chosen) │  line Mint, dashed across gaps (dash 5/5), no fill, Fixed 0..100
+└───────────────────────────────────────────────────────────────────┘
+```
+
+- **Details rows** (grid order): Percentage (`85.0%`), Energy (`42.10 Wh`), Voltage (`11.80 V`), Power (`12.4 W`), State (`Discharging`), Time to empty or Time to full (`2h 14m`, short age form; label changes with state; `Unknown` when UPower reports 0), Charge cycles (`312`), Serial, Type (`Lithium ion`), Powering system (`Yes`/`No`), Technology, Capacity (`92.0%`), Energy empty, Energy full, Energy full (design), Voltage min (design), Voltage max (design), Charge threshold (`Enabled`/`Disabled`), Charge start threshold (`75%`), Charge end threshold (`80%`), Temperature. Threshold rows hidden when unsupported.
+- **Data binding**: UPower properties through `Snapshot.system.batteries[idx]` (`SYSTEM`) and series `bat.power` / `bat.percent`; the week history is a separate `Arc<[Sample]>` on the battery record refreshed every 10 min. Demand `sensors` (batteries ride on the sensors demand bit, chosen; the engine's UPower worker is event-driven anyway).
+- **Build**: `pages/performance/sensors.rs` `BatteryPage`. The week chart is a `ChartView` with `range_ns = 7 days` and `smooth = false` (it never slides).
+- **Tests**: `battery_graph_kind_by_type`, `battery_time_label_follows_state`, `week_chart_hidden_under_2_points`.
+- **Phase**: P2 (P3 history).
+- **Decided here**: symmetric chart fill rule, week chart labels, demand bit.
+
+### UI-PRF-036 Aggregate pages (P4)
+
+- **Implements**: PERF-009, PERF-008 ("Aggregate", "Multiple").
+- **Anatomy**: "Aggregate storage": header "Aggregate storage" + "3 disks"; graphs Active time (busiest disk, Fixed 0..100) and Transfer rate (sum, AutoRate IEC) as UI-PRF-029; Details rows: Active time, Read speed, Write speed, Total read, Total written, Capacity (sum), Used space, Free space, Disks (`nvme0n1, nvme1n1, sda`), Type (`Multiple` when kinds differ). "Aggregate graphics": header "Aggregate graphics" + "2 adapters"; graphs Utilization (highest engine, Fixed) and Memory (VRAM sum, FixedTotal); Details rows: Utilization, Dedicated memory (sum), Adapters (names), Type (`Multiple` when vendors differ). Both exist only with two or more devices and are hidden by default (`device_overrides` keys `aggregate:disk`, `aggregate:gpu`).
+- **Build**: `pages/performance/aggregate.rs`.
+- **Tests**: `aggregate_exists_only_with_two_devices`, `aggregate_type_multiple`.
+- **Phase**: P4.
+- **Decided here**: aggregate Details rows.
