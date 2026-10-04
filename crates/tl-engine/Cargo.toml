@@ -5,15 +5,22 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
-tl-model   = { workspace = true }
-tl-collect = { workspace = true }
-tl-ops     = { workspace = true }
-asupersync = { workspace = true }
-rustc-hash = { workspace = true }
-smallvec   = { workspace = true }
-bitflags   = { workspace = true }
-thiserror  = { workspace = true }
-tracing    = { workspace = true }
+tl-model      = { workspace = true }
+tl-collect    = { workspace = true }
+tl-ops        = { workspace = true }
+asupersync    = { workspace = true }
+arc-swap      = { workspace = true }
+async-channel = { workspace = true }
+zbus          = { workspace = true }
+futures-lite  = { workspace = true }
+rustix        = { workspace = true }
+postcard      = { workspace = true }
+serde         = { workspace = true }
+rustc-hash    = { workspace = true }
+smallvec      = { workspace = true }
+bitflags      = { workspace = true }
+thiserror     = { workspace = true }
+tracing       = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }

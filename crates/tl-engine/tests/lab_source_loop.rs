@@ -332,6 +332,7 @@ use asupersync::channel::oneshot;
 use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
 use fake_sources::{FakeLab, FakeSource, Step, channels, demand_with, drain, io, times_ms};
+use tl_engine::controller::SourceController;
 use tl_engine::supervise::{WorkerFactory, build_supervisor};
 use tl_engine::update::WorkerError;
 
@@ -542,5 +543,84 @@ fn reset_generation_calls_reset_once() {
     assert_eq!(times_ms(&log, "reset"), [300]);
 
     handle.abort();
+    fl.finish();
+}
+
+/// E08-A1: a fake source runs through `SourceController`, its `ManagedSupervisor` and
+/// `source::run` into the reducer's queue. The script is `[Ok, Err, Ok]` over the source's
+/// life; `Source::sample` has no error path, so the failing step is a panic. The second
+/// generation picks the script up after the failure.
+#[test]
+fn end_to_end_controller_runs_fake_source() {
+    const SECOND: Duration = Duration::from_secs(1);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    let wio = io(&updates, &demand, &settings, &control);
+    let first = FakeSource::new(&fl.clock, vec![Step::Ok, Step::Panic], SECOND);
+    let rest = FakeSource::new(&fl.clock, vec![Step::Ok], SECOND);
+    let starts: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+    let record = Arc::clone(&starts);
+    let factory: WorkerFactory = Arc::new(move |cx: Cx, generation: ManagedGeneration| {
+        let record = Arc::clone(&record);
+        let io = wio.clone();
+        let src = if generation.number == 1 {
+            first.clone()
+        } else {
+            rest.clone()
+        };
+        async move {
+            let ms = cx.now().as_nanos() / 1_000_000;
+            record
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((generation.number, ms));
+            source::run(cx, io, src).await
+        }
+    });
+    let ctl = SourceController::new(SourceId::Cpu, factory, updates.clone());
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        ctl.run(cx).await;
+    });
+
+    fl.run_for(10 * SECOND, Duration::from_millis(10));
+    // The sample at 1 s fails; the restart comes after the 500 ms backoff.
+    assert_eq!(
+        *starts.lock().unwrap_or_else(PoisonError::into_inner),
+        [(1, 0), (2, 1_500)]
+    );
+
+    let msgs = drain(&mut rx);
+    let health: Vec<(SourceState, u64)> = msgs
+        .iter()
+        .map(|msg| match msg {
+            EngineMsg::Source(SourceUpdate::Health { state, t_ns, .. }) => (*state, *t_ns),
+            other => panic!("unexpected message {other:?}"),
+        })
+        .collect();
+    // The controller's `Running`, then one `Running` per successful sample.
+    assert_eq!(health.first().map(|h| h.0), Some(SourceState::Running));
+    assert!(
+        health.iter().all(|h| h.0 == SourceState::Running),
+        "{health:?}"
+    );
+    let sample_ms: Vec<u64> = health[1..].iter().map(|h| h.1 / 1_000_000).collect();
+    let mut expected = vec![0];
+    expected.extend((0..9).map(|k| 1_500 + k * 1_000));
+    assert_eq!(sample_ms, expected);
+    assert!(
+        !msgs.iter().any(|msg| matches!(
+            msg,
+            EngineMsg::Source(SourceUpdate::Health {
+                state: SourceState::Disabled { .. },
+                ..
+            })
+        )),
+        "no Disabled"
+    );
+
+    handle.abort();
+    fl.lab.run_until_idle();
+    assert!(handle.is_finished(), "the controller returns after cancel");
     fl.finish();
 }
