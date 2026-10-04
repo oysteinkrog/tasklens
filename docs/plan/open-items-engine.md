@@ -1146,10 +1146,11 @@ beads and only the listed doc edits are needed.
   11. GNOME network settings (E25-OI-6): `LaunchWhat::DbusActivate { bus_name: Arc<str>, object_path: Arc<str>, action: Arc<str>, parameter: Option<Arc<str>> }`
       in E03-053 (as2.19) and the launcher (E14-020, y6k.24) calls
       `org.freedesktop.Application.ActivateAction` on it, 2 s deadline, P3 with PERF-061.
-  12. Run history write route (E23 item 3): `UiInit.run_history: Option<Box<dyn RunHistoryStore>>`
-      with `load() -> Vec<u8>` and `save(&[u8])` built on `write_atomic` in tl-app (E33-008,
-      cr0.11); `executedAt` is RFC 3339 local time from jiff in tl-ui (OI-E04 item 9), no
-      tl-model helper.
+  12. Run history write route (E23 item 3): `AppEnv.run_history: Option<Box<dyn RunHistoryStore>>`
+      (`AppEnv` is the tl-app hand-off struct inside `UiInit`, owned by the UI file) with
+      `load() -> Vec<u8>` and `save(&[u8])` built on `write_atomic` in tl-app (E33-008,
+      cr0.11); `executedAt` is RFC 3339 local time from jiff in tl-ui (OI-E04 item 9 puts jiff
+      in the tl-ui row), so `AppEnv` needs no clock closure.
   13. Grant access (E23 item 6): no flag on `DetailDemand`; the UI sends
       `Command::DetailRefresh { target, tab }` once when `HealthSnapshot.helper` becomes
       `Unlocked`, and E29-015 (qfx.18) routes Restricted targets through the helper.
