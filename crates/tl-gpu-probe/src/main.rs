@@ -5,6 +5,8 @@
 
 use std::process::ExitCode;
 
+#[cfg(feature = "api-versions")]
+mod api_versions;
 #[cfg(feature = "fake")]
 mod fake;
 mod nvml;
@@ -64,7 +66,9 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Ok(Mode::Sampler { fd }) => sampler::run(fd, nvml::NvmlBackend::new),
-        // E13-006 replaces this arm with api_versions::run().
+        #[cfg(feature = "api-versions")]
+        Ok(Mode::ApiVersions) => api_versions::run(),
+        #[cfg(not(feature = "api-versions"))]
         Ok(Mode::ApiVersions) => {
             eprintln!("api-versions not built");
             ExitCode::from(3)

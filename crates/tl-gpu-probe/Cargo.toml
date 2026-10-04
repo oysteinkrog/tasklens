@@ -14,11 +14,14 @@ nvml-wrapper = { workspace = true }
 rustix = { workspace = true }
 postcard = { workspace = true }
 serde = { workspace = true }
+# Loaded at run time, only for the --api-versions mode.
+ash = { workspace = true, optional = true, features = ["loaded"] }
+khronos-egl = { workspace = true, optional = true, features = ["dynamic", "1_5"] }
 
 [features]
 default = ["api-versions"]
-# The --api-versions mode. E13-006 adds ash and khronos-egl here.
-api-versions = []
+# The --api-versions mode.
+api-versions = ["dep:ash", "dep:khronos-egl"]
 # The --fake <script> backend for engine tests.
 fake = []
 

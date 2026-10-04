@@ -23,6 +23,8 @@ publish = false
 asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros"] }
 gpui-kit   = { version = "=0.7.0" }                       # default features: component, assets
 nvml-wrapper = { version = "=0.13.0", default-features = false }
+ash        = { version = "=0.38.0", default-features = false }   # tl-gpu-probe --api-versions (ADR-007)
+khronos-egl = { version = "=6.0.0", default-features = false }   # tl-gpu-probe --api-versions (ADR-007)
 ksni       = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }  # P3
 
 # Bridge
