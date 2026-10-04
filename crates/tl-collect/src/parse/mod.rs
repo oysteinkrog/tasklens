@@ -9,6 +9,7 @@ pub mod meminfo;
 pub mod mountinfo;
 pub mod netdev;
 pub mod netif;
+pub mod partitions;
 pub mod rapl;
 pub mod stat;
 pub mod swaps;
