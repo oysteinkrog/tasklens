@@ -56,14 +56,13 @@ fn four_tuple_v6() -> FourTuple {
         local: SocketAddr::V6(SocketAddrV6::new(
             Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 2, 3, 4),
             443,
-            0,
+            0x0001_2345,
             3,
         )),
         remote: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 50_000, 0, 0)),
     }
 }
 
-/// No scope id, so it survives serde (see `four_tuple_keeps_ipv6_scope_id`).
 fn four_tuple_v6_global() -> FourTuple {
     FourTuple {
         local: SocketAddr::V6(SocketAddrV6::new(
@@ -279,7 +278,7 @@ fn every_request() -> Vec<HelperRequest> {
         HelperRequest::SockDestroy {
             family: Family::Inet6,
             proto: Proto::Tcp,
-            four_tuple: four_tuple_v6_global(),
+            four_tuple: four_tuple_v6(),
             cookie: 0x0102_0304_0506_0708,
         },
         HelperRequest::WriteServiceDropIn {
@@ -416,11 +415,8 @@ fn action_serde_types_roundtrip() {
     roundtrip(&four_tuple_v6_global(), max);
 }
 
-/// serde writes a `SocketAddrV6` as (ip, port) in binary formats and reads it back with scope id
-/// 0, so a link-local four-tuple loses its interface. Fixing it needs a change to `FourTuple` in
-/// `actions.rs` (bead tasklens-as2.36 is open on this question).
+/// serde's own `SocketAddrV6` drops the scope id in binary formats; `FourTuple` keeps it (R-270).
 #[test]
-#[ignore = "serde drops the SocketAddrV6 scope id; FourTuple needs its own serde"]
 fn four_tuple_keeps_ipv6_scope_id() {
     let v6 = four_tuple_v6();
     let SocketAddr::V6(local) = v6.local else {

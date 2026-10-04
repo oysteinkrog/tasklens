@@ -10,9 +10,10 @@
 //! Privacy: `OpenUri`, `Launch` command text and dump paths are user data. Never log them above
 //! debug level (ADR-015).
 
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use smallvec::SmallVec;
 
@@ -62,10 +63,66 @@ pub enum Proto {
     Udp,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+/// serde is hand-written: serde's own `SocketAddrV6` drops flowinfo and the scope id in binary
+/// formats, and a link-local socket needs its scope id (R-270).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct FourTuple {
     pub local: std::net::SocketAddr,
     pub remote: std::net::SocketAddr,
+}
+
+/// Wire form of one address: V4 is (ip, port), V6 is (ip, port, flowinfo, scope_id) (R-270).
+#[derive(Serialize, Deserialize)]
+enum WireAddr {
+    V4(Ipv4Addr, u16),
+    V6(Ipv6Addr, u16, u32, u32),
+}
+
+impl From<SocketAddr> for WireAddr {
+    fn from(addr: SocketAddr) -> Self {
+        match addr {
+            SocketAddr::V4(a) => WireAddr::V4(*a.ip(), a.port()),
+            SocketAddr::V6(a) => WireAddr::V6(*a.ip(), a.port(), a.flowinfo(), a.scope_id()),
+        }
+    }
+}
+
+impl From<WireAddr> for SocketAddr {
+    fn from(addr: WireAddr) -> Self {
+        match addr {
+            WireAddr::V4(ip, port) => SocketAddr::V4(SocketAddrV4::new(ip, port)),
+            WireAddr::V6(ip, port, flowinfo, scope_id) => {
+                SocketAddr::V6(SocketAddrV6::new(ip, port, flowinfo, scope_id))
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "FourTuple")]
+struct WireFourTuple {
+    local: WireAddr,
+    remote: WireAddr,
+}
+
+impl Serialize for FourTuple {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        WireFourTuple {
+            local: self.local.into(),
+            remote: self.remote.into(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FourTuple {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = WireFourTuple::deserialize(deserializer)?;
+        Ok(FourTuple {
+            local: wire.local.into(),
+            remote: wire.remote.into(),
+        })
+    }
 }
 
 /// What an action acts on. Every variant carries a full identity so the engine and the helper
