@@ -73,7 +73,10 @@ fn name_wine_exe() {
 
     let wine = is_wine(exe.map(exe_basename), "wine64-preloader");
     assert!(wine);
-    assert_eq!(image_name(exe, &args, "wine64-preloader", wine), Some("game.exe"));
+    assert_eq!(
+        image_name(exe, &args, "wine64-preloader", wine),
+        Some("game.exe")
+    );
 }
 
 #[test]
