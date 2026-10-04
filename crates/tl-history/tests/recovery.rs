@@ -1,5 +1,8 @@
 //! Segment writer and reader: footer index, crash recovery and corrupt files (ADR-012, ADR-013).
 
+// The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
+#![allow(clippy::unwrap_used)]
+
 use std::fs::OpenOptions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

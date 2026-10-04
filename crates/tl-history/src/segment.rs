@@ -70,9 +70,8 @@ impl SegmentWriter {
     /// Writes the footer, then `fsync`.
     pub fn close(mut self) -> Result<(), HistoryError> {
         let body = postcard::to_stdvec(&self.index)?;
-        let len = u32::try_from(body.len()).map_err(|_| {
-            io_err(&self.path)(std::io::Error::other("footer exceeds 4 GiB"))
-        })?;
+        let len = u32::try_from(body.len())
+            .map_err(|_| io_err(&self.path)(std::io::Error::other("footer exceeds 4 GiB")))?;
         let mut footer = body;
         let crc = crc32fast::hash(&footer);
         footer.extend_from_slice(&len.to_le_bytes());
