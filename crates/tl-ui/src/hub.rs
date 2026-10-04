@@ -169,7 +169,7 @@ impl Global for GlobalHub {}
 mod tests {
     use super::*;
     use crate::testing::fake_engine::FakeEngine;
-    use gpui_kit::TestAppContext;
+    use gpui_kit::{AppContext, TestAppContext};
 
     #[test]
     fn refresh_while_hidden_starts_off() {

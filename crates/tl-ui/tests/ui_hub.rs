@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext, Window, div,
+    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
+    Window, div,
 };
 use tl_model::client::EngineClient;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -221,6 +222,9 @@ fn ten_thousand_publishes_monotonic(cx: &mut TestAppContext) {
         .detach();
     });
 
+    // The publisher wakes the hub task from another thread, which the test scheduler rejects as
+    // non-deterministic unless parking is allowed.
+    cx.executor().allow_parking();
     let publisher = Arc::clone(&engine);
     let thread = std::thread::spawn(move || {
         for _ in 0..LAST {
