@@ -203,15 +203,19 @@ mod tests {
         assert!(matches!(commands[1], Command::ResetBaselines));
 
         let first = Demand::default();
-        let mut second = Demand::default();
-        second.process_table = !first.process_table;
+        let second = Demand {
+            process_table: !first.process_table,
+            ..Demand::default()
+        };
         engine.set_demand(first.clone());
         engine.set_demand(second.clone());
         assert_eq!(engine.demands(), vec![first, second]);
 
-        let mut settings = EngineSettings::default();
-        engine.set_settings(settings.clone());
-        settings.interval_ms = 2000;
+        let settings = EngineSettings {
+            interval_ms: 2000,
+            ..EngineSettings::default()
+        };
+        engine.set_settings(EngineSettings::default());
         engine.set_settings(settings.clone());
         let recorded = engine.settings();
         assert_eq!(recorded.len(), 2);
