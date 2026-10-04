@@ -20,15 +20,15 @@ impl FakeRoot {
     fn new() -> Self {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("tl-ops-cgroup-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&path).unwrap();
+        std::fs::create_dir_all(&path).expect("create fake root");
         FakeRoot { path }
     }
 
     /// Creates the directory chain for `rel` and returns the leaf's inode.
     fn make(&self, rel: &str) -> u64 {
         let dir = self.path.join(rel);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::metadata(&dir).unwrap().ino()
+        std::fs::create_dir_all(&dir).expect("create cgroup dirs");
+        std::fs::metadata(&dir).expect("stat cgroup dir").ino()
     }
 
     fn path(&self) -> &Path {
