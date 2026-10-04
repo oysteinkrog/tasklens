@@ -16,7 +16,10 @@ fn process_key_is_24_bytes() {
 #[test]
 fn process_record_at_most_160() {
     let size = size_of::<tl_model::process::ProcessRecord>();
-    assert!(size <= 160, "ProcessRecord is {size} bytes, the limit is 160");
+    assert!(
+        size <= 160,
+        "ProcessRecord is {size} bytes, the limit is 160"
+    );
 }
 
 #[test]

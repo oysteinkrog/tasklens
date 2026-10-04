@@ -31,7 +31,10 @@ fn metric_ids_frozen() {
     for (name, id) in MetricId::ALL {
         let bytes = postcard::to_allocvec(&id).expect("serialize MetricId");
         let back: u16 = postcard::from_bytes(&bytes).expect("decode MetricId bytes as u16");
-        assert_eq!(back, id.0, "{name} does not serialize as its number. {FROZEN_MSG}");
+        assert_eq!(
+            back, id.0,
+            "{name} does not serialize as its number. {FROZEN_MSG}"
+        );
         lines.push(format!("{name}={}", id.0));
     }
     assert_frozen(
