@@ -67,6 +67,7 @@ Conventions used in every bead of this batch:
 | E22-042 | tasklens-pdu.45 | Offer phase-2 process columns | P2 | E22-033 |
 | E22-043 | tasklens-pdu.46 | Offer phase-3 process columns | P3 | E22-042 |
 | E22-044 | tasklens-pdu.47 | Offer phase-4 process columns | P4 | E22-043 |
+| E22-045 | tasklens-pdu.48 | Window-pick result on the Processes page: select, Picked dialog, toasts (R-239) | P3 | E20-027 (tasklens-jqk.29), E22-A1, E22-A3, E22-015, E22-017, as2.16 |
 
 ### Open items
 

@@ -249,6 +249,7 @@ Files owned: `crates/tl-ui/src/pages/minigraph/{mod,panel,card,menu,actions,sour
 | E26-018 | tasklens-xdh.20 | "Keep detached graphs open": any_open query, registry keep flag, demand while the main window is hidden, Show Main Window | P3 | E26-015,E20-A1 |
 | E26-019 | tasklens-xdh.21 | MiniWindow entity: borderless window listing the visible sidebar cards, height cap and scroll, card variant, Esc closes (windows/mini.rs) | P3 | E26-A1,E24-A1,E16-A2 |
 | E26-020 | tasklens-xdh.22 | mini window interactions: ToggleMiniWindow and PerfShowMiniWindow handlers, card click opens the main window on that page, double-click, context menu, Always on top, View item check state | P3 | E26-019,E26-017 |
+| E26-021 | tasklens-xdh.23 | AddRandomMinigraphs: declare and handle the Debug menu action (R-238) | P4 | E26-013,E26-002,E26-011 |
 | E26-A2 | tasklens-xdh.2 | Detached graphs and mini window | P3 | E26-016,E26-017,E26-018,E26-020,E26-013,E16-A2,E16-A3,E24-A1 |
 
 22 beads.
