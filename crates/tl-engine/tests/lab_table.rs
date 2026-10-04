@@ -326,8 +326,8 @@ fn tie_break_by_key() {
 fn filter_terms_and_pid_prefix() {
     let records = vec![
         rec(1234, 1, "Firefox", 0.0),
-        rec(2123, 1, "Firefox", 0.0),
         rec(1250, 1, "bash", 0.0),
+        rec(2123, 1, "Firefox", 0.0),
     ];
     let view = build(
         &records,
