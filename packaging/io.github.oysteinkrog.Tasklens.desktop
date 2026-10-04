@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=tasklens
+GenericName=Task Manager
+Comment=See and manage processes, performance and services
+Exec=tasklens
+Icon=io.github.oysteinkrog.Tasklens
+Terminal=false
+Categories=System;Monitor;
+Keywords=process;task;performance;monitor;
+StartupNotify=true
+StartupWMClass=io.github.oysteinkrog.Tasklens
