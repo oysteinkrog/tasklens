@@ -97,7 +97,11 @@ impl SeriesRing {
         }
         let cap = self.samples.len() as u32;
         self.samples[self.next as usize] = s;
-        self.next = if self.next + 1 == cap { 0 } else { self.next + 1 };
+        self.next = if self.next + 1 == cap {
+            0
+        } else {
+            self.next + 1
+        };
         if self.len < cap {
             self.len += 1;
         }
