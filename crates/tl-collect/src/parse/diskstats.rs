@@ -131,7 +131,10 @@ mod tests {
             any::<Index>(),
             prop::collection::vec((any::<Index>(), any::<u8>()), 0..=16),
             prop::collection::vec(
-                (any::<Index>(), prop::sample::select(b"\n \t0123456789x".to_vec())),
+                (
+                    any::<Index>(),
+                    prop::sample::select(b"\n \t0123456789x".to_vec()),
+                ),
                 0..=8,
             ),
         )

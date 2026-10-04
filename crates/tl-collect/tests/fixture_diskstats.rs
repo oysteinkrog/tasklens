@@ -65,14 +65,18 @@ fn three_formats_and_bad_line() {
     assert_eq!((sda.major, sda.minor), (8, 0));
     assert_eq!(
         numbers(sda),
-        [101, 2, 3003, 404, 505, 6, 7007, 808, 0, 909, 1212, 0, 0, 0, 0, 0, 0]
+        [
+            101, 2, 3003, 404, 505, 6, 7007, 808, 0, 909, 1212, 0, 0, 0, 0, 0, 0
+        ]
     );
 
     let nvme = &lines[1];
     assert_eq!((nvme.major, nvme.minor), (259, 0));
     assert_eq!(
         numbers(nvme),
-        [11, 12, 13, 14, 15, 16, 17, 18, 0, 20, 21, 22, 23, 24, 25, 0, 0]
+        [
+            11, 12, 13, 14, 15, 16, 17, 18, 0, 20, 21, 22, 23, 24, 25, 0, 0
+        ]
     );
 
     let part = &lines[2];
