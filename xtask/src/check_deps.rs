@@ -1,9 +1,11 @@
 //! `cargo xtask check-deps`: dependency and API rules from ADR-001 and ADR-004.
 //!
-//! Check 1 finds banned crates in the Linux normal graph of the shipped binaries. Check 3 finds
-//! `asupersync::` paths outside tl-engine. Check 4 finds banned asupersync APIs in tl-engine
+//! Check 1 finds banned crates in the Linux normal graph of the shipped binaries. Check 2 holds
+//! each member's direct dependencies to its ADR-001 row and applies the asupersync and tl-ui
+//! closure rules. Check 3 finds `asupersync::` paths outside tl-engine. Check 4 finds banned asupersync APIs in tl-engine
 //! production code. Every check runs before the command fails, so one run lists every violation.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -26,6 +28,151 @@ pub const BANNED_CRATES: &[&str] = &[
 ];
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// ADR-001 allowed direct normal and build dependencies per workspace member, with the R-130,
+/// R-131, R-132 and R-142 additions. Dev-dependencies are outside the rows (R-142 item 18).
+pub const ALLOWED: &[(&str, &[&str])] = &[
+    (
+        "tl-model",
+        &[
+            "serde",
+            "postcard",
+            "thiserror",
+            "async-channel",
+            "bitflags",
+            "smallvec",
+            "rustix",
+            "rustc-hash",
+        ],
+    ),
+    (
+        "tl-collect",
+        &[
+            "tl-model",
+            "rustix",
+            "memchr",
+            "thiserror",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "netlink-packet-core",
+            "netlink-packet-sock-diag",
+            "netlink-sys",
+            "sha2",
+            "md-5",
+        ],
+    ),
+    (
+        "tl-ops",
+        &["tl-model", "rustix", "libc", "thiserror", "tracing"],
+    ),
+    (
+        "tl-engine",
+        &[
+            "tl-model",
+            "tl-collect",
+            "tl-ops",
+            "tl-history",
+            "asupersync",
+            "arc-swap",
+            "async-channel",
+            "zbus",
+            "futures-lite",
+            "rustix",
+            "postcard",
+            "serde",
+            "thiserror",
+            "tracing",
+            "rustc-hash",
+            "smallvec",
+            "ureq",
+            "serde_json",
+        ],
+    ),
+    (
+        "tl-gpu-probe",
+        &[
+            "tl-model",
+            "nvml-wrapper",
+            "rustix",
+            "postcard",
+            "serde",
+            "ash",
+            "khronos-egl",
+        ],
+    ),
+    (
+        "tl-ui",
+        &[
+            "tl-model",
+            "gpui-kit",
+            "tracing",
+            "smallvec",
+            "rustc-hash",
+            "serde",
+            "serde_json",
+            "fluent-bundle",
+            "unic-langid",
+            "async-channel",
+            "jiff",
+            "unicode-segmentation",
+        ],
+    ),
+    (
+        "tl-app",
+        &[
+            "tl-model",
+            "tl-engine",
+            "tl-ui",
+            "tl-ops",
+            "tl-tray",
+            "zbus",
+            "toml",
+            "serde",
+            "anyhow",
+            "tracing",
+            "tracing-subscriber",
+            "tracing-appender",
+            "rustix",
+            "clap",
+            "async-channel",
+        ],
+    ),
+    (
+        "tl-history",
+        &[
+            "tl-model",
+            "zstd",
+            "crc32fast",
+            "postcard",
+            "serde",
+            "thiserror",
+        ],
+    ),
+    ("tl-tray", &["tl-model", "ksni"]),
+    (
+        "tl-helper",
+        &[
+            "tl-model",
+            "tl-ops",
+            "tl-collect",
+            "rustix",
+            "postcard",
+            "serde",
+        ],
+    ),
+    ("xtask", &["serde", "serde_json", "anyhow"]),
+];
+
+/// Members whose normal-dependency closure may contain asupersync (ADR-001 rule 2).
+const ASUPERSYNC_ALLOWED: &[&str] = &["tl-engine", "tl-app"];
+
+/// Names that must not be in tl-ui's normal-dependency closure (ADR-001 check 2).
+const UI_CLOSURE_BANNED: &[&str] = &["tl-engine", "tl-collect", "tl-ops", "arc-swap", "zbus"];
+
+/// tl-ui closure names that count only on a path that avoids gpui-kit. They reach tl-ui through
+/// gpui-kit, and transitive dependencies of an allowed crate do not count (R-158, R-259).
+const UI_CLOSURE_VIA_GPUI_KIT_OK: &[&str] = &["arc-swap", "zbus"];
 
 /// ADR-004 banned names, matched as whole words.
 const BANNED_WORDS: &[&str] = &["AppSpec", "GenServer", "actor", "race_drained", "ctrl_c"];
@@ -56,8 +203,9 @@ pub fn run(args: Vec<String>) -> anyhow::Result<()> {
         bail!("check-deps takes no arguments, got: {}", args.join(" "));
     }
     let root = workspace_root();
-    let checks: [(&str, Check); 3] = [
+    let checks: [(&str, Check); 4] = [
         ("banned crates", check_banned_crates),
+        ("ADR-001 rows and closures", check_rows_and_closures),
         (
             "asupersync outside tl-engine",
             check_asupersync_outside_engine,
@@ -217,6 +365,168 @@ fn shipped_in_tree<'a>(tree: &str, shipped: &[&'a str]) -> Vec<&'a str> {
 /// True when the first whitespace-separated word of `line` is exactly `word`.
 fn first_word_is(line: &str, word: &str) -> bool {
     line.split_whitespace().next() == Some(word)
+}
+
+/// Check 2. Reads the Linux dependency graph from `cargo metadata` and applies the ADR-001 rows
+/// and closure rules.
+fn check_rows_and_closures(root: &Path) -> anyhow::Result<Vec<String>> {
+    let args = [
+        "metadata",
+        "--format-version",
+        "1",
+        "--filter-platform",
+        TARGET,
+    ];
+    let output = run_command(root, "cargo", &args)?;
+    if !output.status.success() {
+        return Err(command_failed("cargo", &args, &output));
+    }
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("cargo metadata printed invalid JSON")?;
+    rows_and_closures(&metadata)
+}
+
+/// The resolved dependency graph: package names and, per package id, its dependency edges.
+struct Graph<'a> {
+    names: HashMap<&'a str, &'a str>,
+    deps: HashMap<&'a str, Vec<Edge<'a>>>,
+}
+
+/// One edge of `resolve.nodes[].deps[]`.
+struct Edge<'a> {
+    pkg: &'a str,
+    normal: bool,
+    build: bool,
+}
+
+impl<'a> Graph<'a> {
+    fn parse(metadata: &'a serde_json::Value) -> anyhow::Result<Self> {
+        let mut names = HashMap::new();
+        for package in array(metadata, "packages")? {
+            names.insert(string(package, "id")?, string(package, "name")?);
+        }
+        let resolve = metadata
+            .get("resolve")
+            .filter(|resolve| !resolve.is_null())
+            .context("cargo metadata has no resolve field")?;
+        let mut deps = HashMap::new();
+        for node in array(resolve, "nodes")? {
+            let mut edges = Vec::new();
+            for dep in array(node, "deps")? {
+                let mut normal = false;
+                let mut build = false;
+                for kind in array(dep, "dep_kinds")? {
+                    match kind
+                        .get("kind")
+                        .context("dep_kinds entry has no kind field")?
+                    {
+                        serde_json::Value::Null => normal = true,
+                        serde_json::Value::String(kind) if kind == "build" => build = true,
+                        _ => {}
+                    }
+                }
+                edges.push(Edge {
+                    pkg: string(dep, "pkg")?,
+                    normal,
+                    build,
+                });
+            }
+            deps.insert(string(node, "id")?, edges);
+        }
+        Ok(Self { names, deps })
+    }
+
+    fn name(&self, id: &'a str) -> &'a str {
+        self.names.get(id).copied().unwrap_or(id)
+    }
+
+    /// Names of the packages reachable from `start` over normal edges, not counting `start`.
+    /// Packages named in `skip` are not entered, so paths through them are not followed.
+    fn closure(&self, start: &'a str, skip: &[&str]) -> BTreeSet<&'a str> {
+        let mut seen = BTreeSet::from([start]);
+        let mut stack = vec![start];
+        while let Some(id) = stack.pop() {
+            for edge in self.deps.get(id).into_iter().flatten() {
+                if edge.normal && !skip.contains(&self.name(edge.pkg)) && seen.insert(edge.pkg) {
+                    stack.push(edge.pkg);
+                }
+            }
+        }
+        seen.remove(start);
+        seen.into_iter().map(|id| self.name(id)).collect()
+    }
+}
+
+fn array<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+) -> anyhow::Result<&'a Vec<serde_json::Value>> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .with_context(|| format!("cargo metadata has no {field} array"))
+}
+
+fn string<'a>(value: &'a serde_json::Value, field: &str) -> anyhow::Result<&'a str> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .with_context(|| format!("cargo metadata has no {field} string"))
+}
+
+/// Check 2 on parsed `cargo metadata` output. Members are checked in name order.
+fn rows_and_closures(metadata: &serde_json::Value) -> anyhow::Result<Vec<String>> {
+    let graph = Graph::parse(metadata)?;
+    let mut members = array(metadata, "workspace_members")?
+        .iter()
+        .map(|id| {
+            id.as_str()
+                .context("cargo metadata has a workspace_members entry that is not a string")
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    members.sort_by_key(|id| graph.name(id));
+
+    let mut violations = Vec::new();
+    for &id in &members {
+        let member = graph.name(id);
+        match ALLOWED.iter().find(|(name, _)| *name == member) {
+            Some((_, row)) => {
+                let direct: BTreeSet<&str> = graph
+                    .deps
+                    .get(id)
+                    .into_iter()
+                    .flatten()
+                    .filter(|edge| edge.normal || edge.build)
+                    .map(|edge| graph.name(edge.pkg))
+                    .collect();
+                for dep in direct.into_iter().filter(|dep| !row.contains(dep)) {
+                    violations.push(format!(
+                        "{member} depends on {dep}, which is not in its ADR-001 row"
+                    ));
+                }
+            }
+            None => violations.push(format!("{member} has no ADR-001 row")),
+        }
+
+        let closure = graph.closure(id, &[]);
+        if closure.contains("asupersync") && !ASUPERSYNC_ALLOWED.contains(&member) {
+            violations.push(format!("asupersync in the closure of {member}"));
+        }
+        if member == "tl-ui" {
+            let without_gpui_kit = graph.closure(id, &["gpui-kit"]);
+            for &name in UI_CLOSURE_BANNED {
+                let reached = if UI_CLOSURE_VIA_GPUI_KIT_OK.contains(&name) {
+                    &without_gpui_kit
+                } else {
+                    &closure
+                };
+                if reached.contains(name) {
+                    violations.push(format!("tl-ui closure contains {name}"));
+                }
+            }
+        }
+    }
+    Ok(violations)
 }
 
 /// Check 3. Any `asupersync::` path under `crates/` outside tl-engine.
@@ -504,6 +814,157 @@ fn matching_close_brace(bytes: &[u8], open: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hand-built `cargo metadata` JSON. Each edge is `(from, to, kind)` with kind `None` for a
+    /// normal edge. Package ids are the names.
+    fn metadata(members: &[&str], edges: &[(&str, &str, Option<&str>)]) -> serde_json::Value {
+        let mut names: Vec<&str> = members.to_vec();
+        for (from, to, _) in edges {
+            for name in [from, to] {
+                if !names.contains(name) {
+                    names.push(name);
+                }
+            }
+        }
+        let packages: Vec<_> = names
+            .iter()
+            .map(|name| serde_json::json!({ "id": name, "name": name }))
+            .collect();
+        let nodes: Vec<_> = names
+            .iter()
+            .map(|name| {
+                let deps: Vec<_> = edges
+                    .iter()
+                    .filter(|(from, _, _)| from == name)
+                    .map(|(_, to, kind)| {
+                        serde_json::json!({
+                            "name": to.replace('-', "_"),
+                            "pkg": to,
+                            "dep_kinds": [{ "kind": kind, "target": null }],
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "id": name, "deps": deps })
+            })
+            .collect();
+        serde_json::json!({
+            "packages": packages,
+            "workspace_members": members,
+            "resolve": { "nodes": nodes },
+        })
+    }
+
+    #[test]
+    fn closure_follows_normal_edges_only() {
+        let json = metadata(&["a"], &[("a", "b", None), ("b", "c", Some("dev"))]);
+        let graph = Graph::parse(&json).unwrap();
+        assert_eq!(graph.closure("a", &[]), BTreeSet::from(["b"]));
+    }
+
+    #[test]
+    fn row_violation_reported() {
+        let json = metadata(
+            &["tl-ops"],
+            &[
+                ("tl-ops", "tl-model", None),
+                ("tl-ops", "serde", None),
+                ("tl-ops", "tempfile", Some("dev")),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec!["tl-ops depends on serde, which is not in its ADR-001 row"]
+        );
+    }
+
+    #[test]
+    fn build_dependency_is_checked() {
+        let json = metadata(&["tl-ops"], &[("tl-ops", "cc", Some("build"))]);
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec!["tl-ops depends on cc, which is not in its ADR-001 row"]
+        );
+    }
+
+    #[test]
+    fn member_without_row_reported() {
+        let json = metadata(&["tl-netmon"], &[]);
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec!["tl-netmon has no ADR-001 row"]
+        );
+    }
+
+    #[test]
+    fn asupersync_closure_rule() {
+        let json = metadata(
+            &["tl-collect", "tl-engine"],
+            &[
+                ("tl-collect", "asupersync", None),
+                ("tl-engine", "asupersync", None),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec![
+                "tl-collect depends on asupersync, which is not in its ADR-001 row",
+                "asupersync in the closure of tl-collect",
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_closure_rule() {
+        let json = metadata(
+            &["tl-ui"],
+            &[("tl-ui", "gpui-kit", None), ("gpui-kit", "zbus", None)],
+        );
+        assert_eq!(rows_and_closures(&json).unwrap(), Vec::<String>::new());
+
+        let json = metadata(
+            &["tl-ui"],
+            &[
+                ("tl-ui", "gpui-kit", None),
+                ("gpui-kit", "zbus", None),
+                ("tl-ui", "serde_json", None),
+                ("serde_json", "zbus", None),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec!["tl-ui closure contains zbus"]
+        );
+    }
+
+    #[test]
+    fn ui_closure_rule_through_engine() {
+        let json = metadata(
+            &["tl-ui", "tl-engine", "tl-collect", "tl-ops"],
+            &[
+                ("tl-ui", "tl-engine", None),
+                ("tl-engine", "tl-collect", None),
+                ("tl-engine", "tl-ops", None),
+                ("tl-engine", "asupersync", None),
+            ],
+        );
+        assert_eq!(
+            rows_and_closures(&json).unwrap(),
+            vec![
+                "tl-ui depends on tl-engine, which is not in its ADR-001 row",
+                "asupersync in the closure of tl-ui",
+                "tl-ui closure contains tl-engine",
+                "tl-ui closure contains tl-collect",
+                "tl-ui closure contains tl-ops",
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_field_is_named() {
+        let json = serde_json::json!({ "packages": [], "workspace_members": [] });
+        let err = rows_and_closures(&json).unwrap_err();
+        assert_eq!(err.to_string(), "cargo metadata has no resolve field");
+    }
 
     #[test]
     fn banned_word_matches_first_word_only() {
