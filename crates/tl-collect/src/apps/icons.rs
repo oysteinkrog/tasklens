@@ -257,6 +257,9 @@ pub fn generic_icon(kind: GenericIcon) -> &'static str {
     }
 }
 
+/// `(icon name, size)` to the resolved path, or `None` for "not found".
+pub type IconMap = FxHashMap<(Arc<str>, u32), Option<Arc<str>>>;
+
 /// Cached icon lookups: `(icon name, size)` to the resolved path, or `None` for "not found".
 ///
 /// The file is a small TOML subset written and read only by this type:
@@ -272,7 +275,7 @@ pub fn generic_icon(kind: GenericIcon) -> &'static str {
 pub struct IconCache {
     path: PathBuf,
     theme: String,
-    map: FxHashMap<(Arc<str>, u32), Option<Arc<str>>>,
+    map: IconMap,
     dirty: bool,
 }
 
@@ -371,10 +374,7 @@ impl IconCache {
 
 /// Parses an icon cache file. `None` when it does not parse, its version is not 1 or its theme
 /// is not `theme`.
-pub fn parse_icon_cache(
-    bytes: &[u8],
-    theme: &str,
-) -> Option<FxHashMap<(Arc<str>, u32), Option<Arc<str>>>> {
+pub fn parse_icon_cache(bytes: &[u8], theme: &str) -> Option<IconMap> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut version = None;
     let mut file_theme = None;
