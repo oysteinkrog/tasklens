@@ -1759,6 +1759,15 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 `TrayItem` holds an `async_channel::Sender<TrayEvent>` (wox.7), so tl-tray names the type directly. The crate
 is already in the graph through tl-model, so nothing new gets built. ADR-001 row and `check_deps.rs` updated.
 
+### R-279 One GroupKey scheme: explicit bytes, defined in tl-model
+
+`GroupKind::key()` in tl-model is the only definition of `GroupKey`. It feeds `rustc_hash::FxHasher` a
+discriminant byte (`App` 1, `Background` 2, `System` 3, `Ungrouped` 4), then for `App` the app id bytes,
+through `write_u8` and `write`. It no longer uses the derived `Hash`, because derived hashing of `str` is not
+a stable format and history (ADR-012) stores the key. `tl_collect::apps::classify::group_key` calls
+`kind.key()`. The tl-collect test `group_key_stable` snapshots the four numbers.
+- Edits: bead yms.18 (chain edit to the body of `GroupKind::key()` in `crates/tl-model/src/process.rs`).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
