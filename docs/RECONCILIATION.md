@@ -1296,6 +1296,109 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: R-114, UI-SYS-007, PROC-058 [verified]; the new strings [inferred from the pattern].
 - Edits: R-114.
 
+### R-204 Status text "| N selected" and the copy block for kernel sockets (OI-U34)
+- Question: when the selected-count suffix appears on Startup Apps and Connections; what the copy block says for kernel-owned and unresolved sockets. Raised by B8-E28-8, B8-E28-14.
+- Resolution: " | N selected" from 2 selected rows, as the Processes text (APP-029) does. Copy block: kernel-owned socket "PID: -" and "Process: No owner (kernel)"; unresolved (restricted) socket "PID: ?" and "Process: Restricted".
+- Basis: APP-029, SYS-027, SYS-036, UI-SYS-049, UI-SYS-066 [verified]; the kernel and restricted lines [inferred from R-050].
+- Edits: UI-SYS-049, UI-SYS-066, UI-SYS-067.
+
+### R-205 Session type wording (OI-U35)
+- Question: UI-SYS-088 shows "user (graphical)" but logind Type is x11, wayland, mir, tty or unspecified. Raised by B8-E28-5.
+- Resolution: "<Class> (graphical)" for x11, wayland and mir; "<Class> (text)" for tty; "<Class> (<Type>)" otherwise. Formatted in the UI from the two raw `InventorySnapshot` strings.
+- Basis: UI-SYS-088 [verified]; mapping [inferred].
+- Edits: UI-SYS-088.
+
+### R-206 Jump target texts for callers without their own (OI-U36)
+- Question: `--select-pid`, the D-Bus `select-pid` action and the window picker reach the jump target without a "not visible" text. Raised by B8-E22-12.
+- Resolution: `JumpTexts::default()` in E22-A3: not found "Process not found in current view" (PROC-071); not visible "Process not found in current view" with a "Show" button that clears the filter, turns Hide system processes off and selects the row; switched "Switched to Processes tab". Callers with their own texts pass theirs.
+- Basis: PROC-071 [verified]; reuse for the hidden case [inferred].
+- Edits: UI-PRC-022.
+
+### R-207 Which block device the I/O priority "Scheduler:" line names (OI-U37)
+- Question: UI-PRC-020 names "the active block scheduler" without saying which device. Raised by B8-E22-13.
+- Resolution: the device holding the root filesystem, read from the snapshot (`DiskDetails.scheduler` of the system disk, R-139). The UI does not read `/sys`.
+- Basis: UI-PRC-020 [verified]; choice [inferred].
+- Edits: UI-PRC-020.
+
+### R-208 Combo filter at 12 items or more (OI-U38)
+- Question: UI-FND-017 says the filter appears "above 12 items" and gives the 12-item language list as an example that has one. Raised by B5-21.
+- Resolution: 12 or more items show the filter.
+- Basis: UI-FND-017 [verified; the example wins].
+- Edits: UI-FND-017.
+
+### R-209 Theme store needs: the animation requester, the E19 edge, new error and event variants (OI-U39)
+- Question: the theme crossfade and preview coalescing need `AnimationDriver` to accept a requester that is not a view entity; E17-006 therefore depends on E19-A1; `ThemeError` and `ThemeEvent` gain variants the E21 toast mapping must cover. Raised by B5-18, B5-13, B5-19.
+- Resolution: `AnimationDriver` accepts any `EntityId` in `request(id)` and gains `request_callback(id: EntityId, f: impl Fn(&mut Window, &mut App) + 'static)`. The theme store reserves one `EntityId` from a zero-sized entity it creates at init. E17-006 depends on E19-A1. `ThemeError` gains `BuiltinCannotBeDeleted` and `BuiltinCannotBeEdited`; `ThemeEvent` gains `Imported { count: u32 }`. E21 toasts: "Built-in themes cannot be deleted" (Warning), "Built-in themes cannot be edited. Copy it first." (Warning), "Imported { $count } themes" (Success).
+- Basis: UI-FND-040 to UI-FND-043 [verified]; texts [guess, writer-level].
+- Edits: 00-epics section 4 (E19-A1 in the E17 row); UI-FND-040; beads yrf.7, the E21 theme menu bead; edge lgw.8 on yrf.1.
+
+### R-210 themes.json from TaskSlinger (U-18) blocks E17-005 (OI-U40)
+- Question: the named built-in palettes come from TaskSlinger under Wine (U-18); E17-005 cannot start without the file. Raised by B5-10.
+- Resolution: D-012. E17-005 ships the two default themes (Default Light, Default Dark) from hand-written values at P0; new bead E17-015 "Eight built-in palettes from the TaskSlinger export" (P2, `theme/builtin.rs`, depends on lgw.7) stays `blocked-open-item` until the owner commits `assets/themes/builtin.json`.
+- Basis: U-18 [verified]; D-012.
+- Edits: bead lgw.7 split; new bead E17-015.
+
+### R-211 One TS1 share code (U-17) blocks E17-010 (OI-U41)
+- Question: the TS1 share-code encoding is unknown until the owner generates one code in TaskSlinger (U-17). Raised by B5-11.
+- Resolution: D-013. E17-010 ships import of the tasklens `TL1` format (UI-FND-043) now and TS1 when the owner records a sample code in U-17. The E21 share-code beads depend on lgw.11.
+- Basis: U-17 [verified]; D-013.
+- Edits: bead lgw.12 (`blocked-open-item` for the TS1 part, TL1-only path noted).
+
+### R-212 `assets/icons/tasklens.svg` artwork (OI-U42)
+- Question: no document specifies the application icon. Raised by B5-12.
+- Resolution: D-014. E15-022 builds a placeholder: a 256 px rounded square in the accent colour with a white monospace "tl". New bead E15-026 "Replace the placeholder application icon" (P3, `assets/icons/tasklens.svg`, depends on ug9.25) stays `blocked-open-item` until artwork exists.
+- Basis: none in the docs [verified absent]; D-014.
+- Edits: bead ug9.25 (drop `blocked-open-item`); new bead E15-026.
+
+### R-213 Recording U-nn outcomes (OI-U43)
+- Question: where a resolved U-nn item is recorded. Raised by B5-15.
+- Resolution: append the outcome to the item's row in the "Unverified assumptions" table, one line "Outcome (date): ...". No other place.
+- Basis: the U table [verified].
+- Edits: none.
+
+### R-214 Priority of spec-P1 components inside P0 anchors (OI-U44)
+- Question: E15-A1 and E15-A2 contain spec-P1 and P2 components; E18-A1 and A2 (P0) need E16-006, 007, 008, A2 and 009. Raised by B5-1.
+- Resolution: accepted; those E16 beads carry priority 0. Shield stays in E16-A3 (P1) and the preview contract in E17-A2 (P2).
+- Basis: 00-epics phase rules [verified].
+- Edits: none.
+
+### R-215 RTL golden needs a Hebrew font on CI (OI-U45)
+- Question: E18-013 renders a Hebrew golden; CI may lack the font. Raised by B5-36.
+- Resolution: the case is skipped with a printed reason when `font_id("Noto Sans Hebrew")` fails. The E02 CI image may add the font later.
+- Basis: UI-FND-050 [verified].
+- Edits: none.
+
+### R-216 Double-click on a process row expands, it does not open Properties (OI-U46)
+- Question: UI-PRC-002 says double-click runs `OpenProperties`; UI-PWN-003 says double-click is not bound and expands, like TaskSlinger. Raised by B7-E23-1.
+- Resolution: double-click toggles expansion on a row with children and does nothing on a leaf. Properties open with Enter, Alt+Enter, Ctrl+I, the menu item, and the delegate's `on_activate` for the system tables (UI-SYS-002 keeps double-click there: those rows have no children).
+- Basis: D-008, UI-PWN-003, UI-SYS-002 [verified].
+- Edits: UI-PRC-002, UI-PRC-008; bead pdu.1 (gesture binds `ToggleExpand`).
+
+### R-217 Health items: sources per tab and display names (OI-U47)
+- Question: UI-SHL-051 says "sources the active tab uses" without a list; UI-SHL-050 names 12 sources but `SourceId` has more. Raised by B7-E20-9, B7-E21-6.
+- Resolution: per tab: Processes: `Processes` plus every source a visible minigraph draws; Performance: `Cpu`, `Memory`, `Disks`, `Network`, `Gpu`, `Sensors` plus `Battery` when a battery page exists; Services: both systemd managers and `Journal`; Startup Apps: `Startup`; Connections: `Connections`; Information: `Inventory`. Display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin, Logind, UDisks, UPower, NetworkManager, Public IP, History, Journal, Battery; any other variant shows its Rust name.
+- Basis: UI-SHL-050, UI-SHL-051 [verified]; the mapping [inferred].
+- Edits: UI-SHL-050, UI-SHL-051.
+
+### R-218 `WindowRegistry` key queries and the keep-detached close row (OI-U48)
+- Question: E20-028 must know whether any `DetachedGraph(_)` window is open and be told when one closes; E26-018 provides `any_detached_open`; `DetachedGraph(u8)` caps ids at 255. Raised by B7-E20-10, E26-OI-3, E26-OI-7.
+- Resolution: E16-A2 adds `pub fn has_key(&self, pred: impl Fn(&WindowKey) -> bool) -> bool` and `pub fn count(&self, pred) -> usize` to `WindowRegistry` and calls `cx.notify()` on every insert and removal. E20-028 uses `has_key(|k| matches!(k, WindowKey::DetachedGraph(_)))` and observes the registry; `any_detached_open` in E26-018 becomes a one-line wrapper and that bead un-ignores `keep_detached_on_close_keeps_app`. `DetachedGraph(u8)` holds: `[[detached_windows]].id` is a `u8`.
+- Basis: UI-SHL-113 row 2, PERF-084, APP-045, jqk.30 [verified].
+- Edits: beads fut.2, jqk.30, xdh.20; edge xdh.20 on jqk.30.
+
+### R-219 Start hidden and `ToggleMainWindow` before the tray exists (OI-U49)
+- Question: `--start-minimized` can hide only when a tray exists; `tray_available` is false until E31. Raised by B7-E20-12, B7-E20-13, E24-8.
+- Resolution: `tray_available(cx)` returns `TrayModel.available` and is `false` until E31-009 fills it (E24-023 stubs the same `Some(false)`). Without a tray `--start-minimized` opens the window and minimizes it (APP-048), and a close that would quit minimizes instead when `ToggleMainWindow` arrives while visible.
+- Basis: APP-048, UI-SHL-113 [verified].
+- Edits: UI-SHL-110 step 6.
+
+### R-220 Keyboard Shortcuts window headings (OI-U50)
+- Question: UI-SHL-095 lists seven headings; table (b) has more contexts. Raised by B7-E21-4.
+- Resolution: eleven headings in order: Global, Tables, Processes, History, Services, Startup Apps, Connections, Information, Performance, Properties windows (PropsWindow, ServiceProps, AffinityDialog, PriorityDialog, SignalDialog), Dialogs (RunDialog, Picker, ColumnPicker, HandleSearch, JournalList, LowMemory). A heading with no shipped bindings is not drawn.
+- Basis: table (b) [verified]; grouping [inferred].
+- Edits: UI-SHL-095.
+
+
 
 
 
