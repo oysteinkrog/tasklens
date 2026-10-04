@@ -75,3 +75,11 @@ pass once all batch writers finish.
   wlf.10 (E01-008) on pdu.1 (scroll handle); E18-A1 must expose `TlTreeTable::scroll_handle`
   (check B5). Order the `window/main.rs` chain edits of E27-023, E27-025 and the E28 anchors
   with edges. Public IP fetch API joins the device-command overlap (blocks 9o0.32).
+- B2 (E04 to E07): done, 111 beads (E04 32, E05 36, E06 26, E07 17), all edges checked, no
+  cycles, plan in 1ac80b1. Open items E04-OI-1 to 13, E05 1 to 13, E06 1 to 11, E07-O1 to O6
+  (plan file). Leader work: build line still old on 36 beads; E04-017, E04-020, E04-025 need a
+  `## Notes` heading; cr0.11 and cr0.17 depend on iuz.13 instead of E07-A3 (E07-O4); PERF-050
+  Partitions table has no bead (E04-OI-13); PERF-037 moves to E06 in 00-epics section 6.
+  Check in the quality pass that E10 to E13 beads depend on the B2 anchors they use.
+- Overlaps: udev reader is E04-OI-2 and E12-OI-4; ProcessRecord extras are E05 1 and B3 item 5;
+  rustix `param` and serde_json join B1 item 2 (dependency rows).
