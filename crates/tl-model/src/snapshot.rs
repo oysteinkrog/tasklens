@@ -699,10 +699,17 @@ mod tests {
             (("bogus", "running"), ServiceStatus::Stopped),
         ];
         for ((active, sub), want) in cases {
-            assert_eq!(ServiceStatus::from_states(active, sub), want, "{active}+{sub}");
+            assert_eq!(
+                ServiceStatus::from_states(active, sub),
+                want,
+                "{active}+{sub}"
+            );
         }
         for sub in ["listening", "mounted", "waiting", "elapsed", "plugged"] {
-            assert_eq!(ServiceStatus::from_states("active", sub), ServiceStatus::Active);
+            assert_eq!(
+                ServiceStatus::from_states("active", sub),
+                ServiceStatus::Active
+            );
         }
     }
 
