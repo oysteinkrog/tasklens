@@ -1283,7 +1283,7 @@ The open items of the bead round (2026-10-04) are settled in `docs/plan/open-ite
 (OI-E01 to OI-E32) and `docs/plan/open-items-ui.md` (OI-U01 to OI-U65). Their binding form is
 R-139 to R-170 and R-171 to R-235 in `docs/RECONCILIATION.md`; the owner answers are D-012 to
 D-020. New beads from that round: E04-030, E04-031, E04-A4, E04-032, E05-030, E05-031, E09-029,
-E09-030, E15-026, E17-015, E18-017, E20-029.
+E09-030, E15-026, E18-017, E20-029, plus the E26 `AddRandomMinigraphs` bead (R-238) and the E22 window-pick result bead (R-239). Leader entries R-236 to R-239 followed on the same day.
 
 1. **Settled, R-129. Two files called `tl-ui/src/actions.rs`.** ADR-009 puts `ActionTracker` there; shell.md puts
    every GPUI Action and `bind_keys` there. Recommendation: `src/action_tracker.rs` for the
