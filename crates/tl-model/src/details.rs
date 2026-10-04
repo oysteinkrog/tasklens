@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::actions::SchedPolicy;
 use crate::ids::{GroupKey, ProcessKey};
 use crate::process::ProcState;
@@ -576,7 +578,7 @@ pub struct SearchId(pub u64);
 
 /// Options of the Strings tab. Default: `min_len` 4, all three encodings on, file-backed
 /// regions off.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StringScanOpts {
     pub min_len: u8,
     pub ascii: bool,
@@ -612,7 +614,7 @@ pub const STRING_SCAN_MAX_HITS: u32 = 1_000_000;
 pub const STRING_SCAN_MAX_TEXT_BYTES: u64 = 256 * 1024 * 1024;
 
 /// UI words: "ASCII", "UTF-8", "UTF-16LE".
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum StringEncoding {
     Ascii,
     Utf8,
