@@ -72,15 +72,9 @@ pub enum SourceUpdate {
         t_ns: TimeNs,
     },
     /// ADR-008 clock check: Δboot − Δmono > 250 ms.
-    ResumeDetected {
-        id: SourceId,
-        t_ns: TimeNs,
-    },
+    ResumeDetected { id: SourceId, t_ns: TimeNs },
     /// Logind `PrepareForSleep`.
-    Sleep {
-        entering: bool,
-        t_ns: TimeNs,
-    },
+    Sleep { entering: bool, t_ns: TimeNs },
     /// E12 `Cpu`.
     Cpu(CpuSample),
     /// E12 `Memory`.
@@ -449,6 +443,21 @@ mod tests {
         }
     }
 
+    fn gpu_info(uuid: [u8; 16]) -> SourceUpdate {
+        SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![GpuStaticInfo {
+                identity: gpu_id(uuid),
+                name: Arc::from(""),
+                mem_total: 0,
+                power_limit_mw: None,
+                driver: Arc::from(""),
+                nvml: Arc::from(""),
+                supports_process_util: false,
+                persistent_key: Arc::from("gpu:0000:01:00.0"),
+            }],
+        })
+    }
+
     fn devices(kinds: DeviceKinds) -> SourceUpdate {
         SourceUpdate::Devices(DeviceList {
             t_ns: 0,
@@ -479,7 +488,7 @@ mod tests {
             state: ManagerState::default(),
             units: Vec::new(),
             details: Vec::new(),
-            backend: ServiceBackend::default(),
+            backend: ServiceBackend::Systemd,
             validity: Validity::default(),
         })
     }
@@ -567,22 +576,8 @@ mod tests {
             (devices(DeviceKinds::GPUS), None),
             (devices(DeviceKinds::CPUS | DeviceKinds::DISKS), None),
             (devices(DeviceKinds::empty()), None),
-            (
-                SourceUpdate::Gpu(GpuSample {
-                    t_ns: 0,
-                    devices: vec![(gpu_id([7; 16]), GpuTotals::default())],
-                    processes: None,
-                }),
-                Some(SourceId::GpuNvidia),
-            ),
-            (
-                SourceUpdate::Gpu(GpuSample {
-                    t_ns: 0,
-                    devices: vec![(gpu_id([0; 16]), GpuTotals::default())],
-                    processes: None,
-                }),
-                Some(SourceId::GpuDrm),
-            ),
+            (gpu_info([7; 16]), Some(SourceId::GpuNvidia)),
+            (gpu_info([0; 16]), Some(SourceId::GpuDrm)),
             (
                 SourceUpdate::Gpu(GpuSample {
                     t_ns: 0,
@@ -590,21 +585,6 @@ mod tests {
                     processes: None,
                 }),
                 None,
-            ),
-            (
-                SourceUpdate::GpuInfo(GpuInfoUpdate {
-                    devices: vec![GpuStaticInfo {
-                        identity: gpu_id([1; 16]),
-                        name: Arc::from(""),
-                        mem_total: 0,
-                        power_limit_mw: None,
-                        driver: Arc::from(""),
-                        nvml: Arc::from(""),
-                        supports_process_util: false,
-                        persistent_key: Arc::from("gpu:x"),
-                    }],
-                }),
-                Some(SourceId::GpuNvidia),
             ),
             (
                 SourceUpdate::GpuApiVersions(ApiVersions {
@@ -614,7 +594,13 @@ mod tests {
             ),
             (sweep(None), Some(SourceId::Processes)),
             (
-                sweep(Some(Arc::new(LowMemoryInfo::default()))),
+                sweep(Some(Arc::new(LowMemoryInfo {
+                    groups: Arc::from([]),
+                    mem_total: 0,
+                    mem_available: 0,
+                    psi_full_pct: None,
+                    critical: true,
+                }))),
                 None,
             ),
             (
@@ -625,9 +611,10 @@ mod tests {
                 Some(SourceId::ProcessDetail),
             ),
             (
-                SourceUpdate::Details(DetailsUpdate::HandleSearch(Arc::new(
-                    HandleSearchState::default(),
-                ))),
+                SourceUpdate::Details(DetailsUpdate::Affinity {
+                    t_ns: 0,
+                    entries: Vec::new(),
+                }),
                 Some(SourceId::ProcessDetail),
             ),
             (
