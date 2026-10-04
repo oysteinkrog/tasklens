@@ -1,0 +1,5 @@
+anon 524288000
+file 104857600
+kernel 8388608
+shmem 1048576
+anon_thp 0

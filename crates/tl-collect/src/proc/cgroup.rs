@@ -1,8 +1,17 @@
-//! Parser for /proc/<pid>/cgroup and cgroup v2 placement.
+//! Parser for /proc/<pid>/cgroup, cgroup v2 placement, and readers for the cgroup stat files
+//! of apps and units (R-103, R-137).
 
+use std::cell::Cell;
+use std::path::Path;
 use std::sync::Arc;
 
+use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
+use rustix::fs::{Dir, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use smallvec::SmallVec;
+
+use crate::CollectError;
+use crate::sysroot::{SMALL_FILE_LIMIT, read_at};
 
 /// The cgroup v2 path of a process, split into the parts the grouping needs.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,4 +151,310 @@ fn parse_uid(s: &str) -> Option<u32> {
         return None;
     }
     s.parse().ok()
+}
+
+/// Largest `memory.stat` kept. The real file is about 1.5 KB.
+const MEMORY_STAT_LIMIT: usize = 4 * SMALL_FILE_LIMIT;
+/// Largest `cgroup.procs` kept: about 500 000 pids.
+const PROCS_LIMIT: usize = 4 << 20;
+
+thread_local! {
+    static MEMORY_CURRENT_OPENS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Test hook: how many times `read_stats` tried to open `memory.current` on this thread.
+#[doc(hidden)]
+pub fn memory_current_opens() -> u32 {
+    MEMORY_CURRENT_OPENS.with(Cell::get)
+}
+
+/// Values from the stat files of one cgroup. `None` means the file was absent, not wanted, or
+/// denied; the sweep maps it to Unsupported or Restricted, never to zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CgroupStats {
+    /// `memory.stat` `anon`, in bytes.
+    pub anon: Option<u64>,
+    /// `memory.swap.current`, in bytes.
+    pub swap_current: Option<u64>,
+    /// `memory.current`, in bytes. Read only in `EngineMode::LowMemory` (R-137).
+    pub memory_current: Option<u64>,
+    /// `cpu.stat` `usage_usec`.
+    pub usage_usec: Option<u64>,
+    /// `io.stat` sums over all devices. Valid only when `io_valid` is true.
+    pub rbytes: u64,
+    pub wbytes: u64,
+    pub rios: u64,
+    pub wios: u64,
+    /// True when `io.stat` was read. An empty file is valid with zeros.
+    pub io_valid: bool,
+    /// `pids.current`.
+    pub pids_current: Option<u64>,
+    /// `cgroup.events` `frozen`.
+    pub frozen: Option<bool>,
+    /// True when any wanted file gave EACCES or EPERM.
+    pub denied: bool,
+}
+
+/// Which stat files `read_stats` opens.
+#[derive(Clone, Copy, Debug)]
+pub struct CgroupWant {
+    pub memory_stat: bool,
+    pub swap: bool,
+    pub memory_current: bool,
+    pub cpu_stat: bool,
+    pub io_stat: bool,
+    pub pids: bool,
+    pub events: bool,
+}
+
+/// An open directory fd on `/sys/fs/cgroup`. Every cgroup file is opened relative to it and
+/// closed in the same call; no other fd is kept (R-137).
+pub struct CgroupRoot {
+    dirfd: OwnedFd,
+}
+
+impl CgroupRoot {
+    /// Opens `<sys>/fs/cgroup`. `sys` is `SysRoot.sys`, so fixtures work.
+    pub fn open(sys: &Path) -> Result<Self, CollectError> {
+        let dirfd = rustix::fs::open(
+            sys.join("fs/cgroup"),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(dir_error)?;
+        Ok(Self { dirfd })
+    }
+
+    /// Reads the wanted stat files of cgroup `rel` (relative to `/sys/fs/cgroup`, empty for the
+    /// root) into `out`, which is reset first. A missing or denied file leaves its field `None`.
+    /// A missing directory gives `ProcRead { file: "cgroup", errno: ENOENT }`.
+    pub fn read_stats(
+        &self,
+        rel: &str,
+        want: CgroupWant,
+        buf: &mut Vec<u8>,
+        out: &mut CgroupStats,
+    ) -> Result<(), CollectError> {
+        *out = CgroupStats::default();
+        let dir = self.open_dir(rel)?;
+        let dir = dir.as_fd();
+        if want.memory_stat && read_file(dir, "memory.stat", MEMORY_STAT_LIMIT, buf, out) {
+            out.anon = parse_memory_stat_anon(buf);
+        }
+        if want.swap && read_file(dir, "memory.swap.current", SMALL_FILE_LIMIT, buf, out) {
+            out.swap_current = parse_u64(buf.trim_ascii());
+        }
+        if want.memory_current {
+            MEMORY_CURRENT_OPENS.with(|n| n.set(n.get().wrapping_add(1)));
+            if read_file(dir, "memory.current", SMALL_FILE_LIMIT, buf, out) {
+                out.memory_current = parse_u64(buf.trim_ascii());
+            }
+        }
+        if want.cpu_stat && read_file(dir, "cpu.stat", SMALL_FILE_LIMIT, buf, out) {
+            out.usage_usec = key_value(buf, b"usage_usec");
+        }
+        if want.io_stat && read_file(dir, "io.stat", SMALL_FILE_LIMIT, buf, out) {
+            parse_io_stat(buf, out);
+        }
+        if want.pids && read_file(dir, "pids.current", SMALL_FILE_LIMIT, buf, out) {
+            out.pids_current = parse_u64(buf.trim_ascii());
+        }
+        if want.events && read_file(dir, "cgroup.events", SMALL_FILE_LIMIT, buf, out) {
+            out.frozen = match key_value(buf, b"frozen") {
+                Some(0) => Some(false),
+                Some(1) => Some(true),
+                _ => None,
+            };
+        }
+        Ok(())
+    }
+
+    /// Appends the pids in `cgroup.procs` of cgroup `rel` to `out`, and when `recursive`, those
+    /// of every descendant, depth-first. A child that goes away during the walk is skipped.
+    pub fn read_procs(
+        &self,
+        rel: &str,
+        recursive: bool,
+        buf: &mut Vec<u8>,
+        out: &mut Vec<u32>,
+    ) -> Result<(), CollectError> {
+        let dir = self.open_dir(rel)?;
+        read_procs_file(dir.as_fd(), buf, out).map_err(procs_error)?;
+        if recursive {
+            let dir = Dir::new(dir).map_err(procs_error)?;
+            walk_children(dir, buf, out).map_err(procs_error)?;
+        }
+        Ok(())
+    }
+
+    /// The inode of the cgroup directory: the `cgroup_id` that `CgroupRef` holds (ADR-006).
+    pub fn dir_ino(&self, rel: &str) -> Result<u64, CollectError> {
+        let dir = self.open_dir(rel)?;
+        let st = rustix::fs::fstat(&dir).map_err(dir_error)?;
+        Ok(st.st_ino)
+    }
+
+    fn open_dir(&self, rel: &str) -> Result<OwnedFd, CollectError> {
+        let rel = rel.trim_start_matches('/');
+        let rel = if rel.is_empty() { "." } else { rel };
+        rustix::fs::openat(
+            &self.dirfd,
+            rel,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(dir_error)
+    }
+}
+
+fn dir_error(e: Errno) -> CollectError {
+    CollectError::ProcRead {
+        file: "cgroup",
+        errno: e.raw_os_error(),
+    }
+}
+
+fn procs_error(e: Errno) -> CollectError {
+    CollectError::ProcRead {
+        file: "cgroup.procs",
+        errno: e.raw_os_error(),
+    }
+}
+
+/// Reads `name` into `buf`. Returns false when the file is absent or unreadable, and sets
+/// `out.denied` on EACCES or EPERM.
+fn read_file(
+    dir: BorrowedFd<'_>,
+    name: &str,
+    limit: usize,
+    buf: &mut Vec<u8>,
+    out: &mut CgroupStats,
+) -> bool {
+    match read_at(dir, name, buf, limit) {
+        Ok(_) => true,
+        Err(CollectError::PermissionDenied) => {
+            out.denied = true;
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn read_procs_file(
+    dir: BorrowedFd<'_>,
+    buf: &mut Vec<u8>,
+    out: &mut Vec<u32>,
+) -> Result<(), Errno> {
+    buf.clear();
+    let fd = rustix::fs::openat(
+        dir,
+        "cgroup.procs",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    while buf.len() < PROCS_LIMIT {
+        if buf.len() == buf.capacity() {
+            buf.reserve(SMALL_FILE_LIMIT.max(buf.len()).min(PROCS_LIMIT - buf.len()));
+        }
+        if rustix::io::read(fd.as_fd(), rustix::buffer::spare_capacity(buf))? == 0 {
+            break;
+        }
+    }
+    out.extend(
+        buf.split(|&b| b == b'\n')
+            .filter_map(|line| parse_u64(line.trim_ascii()))
+            .filter_map(|pid| u32::try_from(pid).ok()),
+    );
+    Ok(())
+}
+
+/// Depth-first over the child directories of `dir`. ENOENT on a child means it was removed
+/// during the walk and is skipped.
+fn walk_children(mut dir: Dir, buf: &mut Vec<u8>, out: &mut Vec<u32>) -> Result<(), Errno> {
+    let mut children: SmallVec<[Vec<u8>; 8]> = SmallVec::new();
+    while let Some(entry) = dir.read() {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
+        if name == b"." || name == b".." {
+            continue;
+        }
+        if matches!(entry.file_type(), FileType::Directory | FileType::Unknown) {
+            children.push(name.to_vec());
+        }
+    }
+    for name in children {
+        let child = match rustix::fs::openat(
+            dir.fd()?,
+            name.as_slice(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(Errno::NOENT | Errno::NOTDIR) => continue,
+            Err(e) => return Err(e),
+        };
+        match read_procs_file(child.as_fd(), buf, out) {
+            Ok(()) => {}
+            Err(Errno::NOENT | Errno::NODEV) => continue,
+            Err(e) => return Err(e),
+        }
+        walk_children(Dir::new(child)?, buf, out)?;
+    }
+    Ok(())
+}
+
+/// The `anon <bytes>` line of `memory.stat`.
+pub fn parse_memory_stat_anon(buf: &[u8]) -> Option<u64> {
+    key_value(buf, b"anon")
+}
+
+/// Sums `rbytes`, `wbytes`, `rios` and `wios` over the device lines of `io.stat` into `out` and
+/// sets `io_valid`. Other keys and malformed pairs are skipped. Sums saturate.
+pub fn parse_io_stat(buf: &[u8], out: &mut CgroupStats) {
+    out.rbytes = 0;
+    out.wbytes = 0;
+    out.rios = 0;
+    out.wios = 0;
+    for line in buf.split(|&b| b == b'\n') {
+        // The first field is `<maj>:<min>`.
+        for pair in line.split(|&b| b == b' ').skip(1) {
+            let Some(eq) = memchr::memchr(b'=', pair) else {
+                continue;
+            };
+            let Some(n) = parse_u64(&pair[eq + 1..]) else {
+                continue;
+            };
+            let field = match &pair[..eq] {
+                b"rbytes" => &mut out.rbytes,
+                b"wbytes" => &mut out.wbytes,
+                b"rios" => &mut out.rios,
+                b"wios" => &mut out.wios,
+                _ => continue,
+            };
+            *field = field.saturating_add(n);
+        }
+    }
+    out.io_valid = true;
+}
+
+/// The value of the first `<key> <n>` line in a flat-keyed cgroup file.
+fn key_value(buf: &[u8], key: &[u8]) -> Option<u64> {
+    buf.split(|&b| b == b'\n').find_map(|line| {
+        let rest = line.strip_prefix(key)?.strip_prefix(b" ")?;
+        parse_u64(rest.trim_ascii())
+    })
+}
+
+/// Decimal digits only, at least one, no overflow.
+fn parse_u64(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0u64, |n, &d| {
+        if d.is_ascii_digit() {
+            n.checked_mul(10)?.checked_add(u64::from(d - b'0'))
+        } else {
+            None
+        }
+    })
 }

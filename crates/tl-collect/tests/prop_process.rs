@@ -104,3 +104,13 @@ proptest! {
         let _ = tl_collect::proc::statm::parse_statm(&bytes, &mut statm);
     }
 }
+
+proptest! {
+    #[test]
+    fn io_stat_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        let mut out = tl_collect::proc::cgroup::CgroupStats::default();
+        tl_collect::proc::cgroup::parse_io_stat(&bytes, &mut out);
+        prop_assert!(out.io_valid);
+        let _ = tl_collect::proc::cgroup::parse_memory_stat_anon(&bytes);
+    }
+}

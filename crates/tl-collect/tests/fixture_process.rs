@@ -743,3 +743,159 @@ fn cgroup_uid_not_hard_coded() {
     assert_eq!(app_slice_unit(&other, 1001), Some("app-x.slice"));
     assert_eq!(app_slice_unit(&other, 1000), None);
 }
+
+use tl_collect::proc::cgroup::{CgroupRoot, CgroupStats, CgroupWant, memory_current_opens};
+
+const FIREFOX_CGROUP: &str =
+    "user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service";
+
+const WANT_ALL: CgroupWant = CgroupWant {
+    memory_stat: true,
+    swap: true,
+    memory_current: true,
+    cpu_stat: true,
+    io_stat: true,
+    pids: true,
+    events: true,
+};
+
+fn cgroup_root() -> CgroupRoot {
+    CgroupRoot::open(&fixture_dir("process-edge").join("sys")).expect("open cgroup root")
+}
+
+/// A throwaway `sys/fs/cgroup/<name>` holding `files`. Returns the tempdir and the root.
+fn cgroup_tmp(name: &str, files: &[(&str, &str)]) -> (tempfile::TempDir, CgroupRoot) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("sys/fs/cgroup").join(name);
+    fs::create_dir_all(&dir).expect("create cgroup dir");
+    for (file, body) in files {
+        fs::write(dir.join(file), body).expect("write cgroup file");
+    }
+    let root = CgroupRoot::open(&tmp.path().join("sys")).expect("open cgroup root");
+    (tmp, root)
+}
+
+#[test]
+fn cgroup_stats_app_scope() {
+    let root = cgroup_root();
+    let mut buf = Vec::new();
+    let mut out = CgroupStats::default();
+    root.read_stats(FIREFOX_CGROUP, WANT_ALL, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.anon, Some(524_288_000));
+    assert_eq!(out.swap_current, Some(4096));
+    assert_eq!(
+        out.memory_current, None,
+        "the fixture has no memory.current"
+    );
+    assert_eq!(out.usage_usec, Some(123_456_789));
+    assert!(out.io_valid);
+    assert_eq!(out.rbytes, 1_048_576 + 4096);
+    assert_eq!(out.wbytes, 2_097_152 + 8192);
+    assert_eq!(out.rios, 100 + 3);
+    assert_eq!(out.wios, 200 + 5);
+    assert_eq!(out.pids_current, Some(14));
+    assert_eq!(out.frozen, Some(false));
+    assert!(!out.denied);
+
+    let ino = root.dir_ino(FIREFOX_CGROUP).expect("dir ino");
+    assert_ne!(ino, 0);
+    assert_ne!(ino, root.dir_ino("").expect("root ino"));
+}
+
+#[test]
+fn cgroup_stats_missing_swap_is_none() {
+    let (_tmp, root) = cgroup_tmp(
+        "system.slice/sshd.service",
+        &[("memory.stat", "anon 4096\n"), ("io.stat", "")],
+    );
+    let mut buf = Vec::new();
+    let mut out = CgroupStats::default();
+    root.read_stats("system.slice/sshd.service", WANT_ALL, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.swap_current, None);
+    assert_eq!(out.anon, Some(4096));
+    assert!(out.io_valid, "an empty io.stat is valid");
+    assert_eq!((out.rbytes, out.wbytes, out.rios, out.wios), (0, 0, 0, 0));
+    assert_eq!(out.usage_usec, None);
+    assert_eq!(out.pids_current, None);
+    assert_eq!(out.frozen, None);
+    assert!(!out.denied);
+}
+
+#[test]
+fn cgroup_stats_memory_current_not_opened() {
+    let (_tmp, root) = cgroup_tmp("a.scope", &[("memory.current", "8192\n")]);
+    let mut buf = Vec::new();
+    let mut out = CgroupStats::default();
+    let want = CgroupWant {
+        memory_current: false,
+        ..WANT_ALL
+    };
+
+    let before = memory_current_opens();
+    let fixture = cgroup_root();
+    fixture
+        .read_stats(FIREFOX_CGROUP, want, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.memory_current, None);
+    root.read_stats("a.scope", want, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.memory_current, None);
+    assert_eq!(memory_current_opens(), before);
+
+    root.read_stats("a.scope", WANT_ALL, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.memory_current, Some(8192));
+    assert_eq!(memory_current_opens(), before + 1);
+}
+
+#[test]
+fn cgroup_stats_missing_dir_is_error() {
+    let root = cgroup_root();
+    let mut buf = Vec::new();
+    let mut out = CgroupStats::default();
+    let err = root
+        .read_stats("system.slice/nope.service", WANT_ALL, &mut buf, &mut out)
+        .expect_err("missing dir");
+    assert!(
+        matches!(
+            err,
+            CollectError::ProcRead {
+                file: "cgroup",
+                errno
+            } if errno == rustix::io::Errno::NOENT.raw_os_error()
+        ),
+        "{err:?}"
+    );
+    let mut pids = Vec::new();
+    assert!(matches!(
+        root.read_procs("system.slice/nope.service", true, &mut buf, &mut pids),
+        Err(CollectError::ProcRead { file: "cgroup", .. })
+    ));
+}
+
+#[test]
+fn cgroup_procs_recursive() {
+    let root = cgroup_root();
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    root.read_procs(FIREFOX_CGROUP, true, &mut buf, &mut out)
+        .expect("read procs");
+    assert_eq!(out, [4201, 4210]);
+
+    out.clear();
+    root.read_procs(FIREFOX_CGROUP, false, &mut buf, &mut out)
+        .expect("read procs");
+    assert_eq!(out, [4201]);
+}
+
+#[test]
+fn cgroup_events_frozen() {
+    let (_tmp, root) = cgroup_tmp("a.scope", &[("cgroup.events", "populated 1\nfrozen 1\n")]);
+    let mut buf = Vec::new();
+    let mut out = CgroupStats::default();
+    root.read_stats("a.scope", WANT_ALL, &mut buf, &mut out)
+        .expect("read stats");
+    assert_eq!(out.frozen, Some(true));
+}
