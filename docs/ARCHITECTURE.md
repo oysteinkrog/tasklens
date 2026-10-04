@@ -2260,8 +2260,11 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
   | `UnitJob { result, .. }` | The service job ended with result: {result}. |
   | `Os(code)` | The system call failed (error {code}). |
   | `Internal(text)` | Internal error: {text}. |
+  | `NotAuthorized` | Administrator access was refused. |
+  | `AuthCancelled` | Authentication was cancelled. |
+  | `Unsupported` | Not supported on this system. |
 
-  `short_reason(&err)` is the first sentence lower-cased without its full stop, for partial summaries. Reject toasts and deadlines are in R-196. The texts for `NotAuthorized`, `AuthCancelled` and `Unsupported` are not written yet; adding them is a RECONCILIATION edit (R-121).
+  `short_reason(&err)` is the first sentence lower-cased without its full stop, for partial summaries. Reject toasts and deadlines are in R-196. The last three texts are R-240.
 - Collection errors appear as `Validity::Failed` plus `SourceHealth.last_error`; a source error never becomes a toast unless the user started an action.
 
 **Crash handling.**
