@@ -1977,12 +1977,13 @@ mod tests {
             [
                 ("Apps (0)".to_string(), 0),
                 ("Background processes (5)".to_string(), 0),
+                // A unit row has no PID, so the PID sort puts it after the processes.
+                ("20".to_string(), 0),
+                ("30".to_string(), 0),
                 ("pipewire.service (3)".to_string(), 0),
                 ("10".to_string(), 1),
                 ("11".to_string(), 1),
                 ("12".to_string(), 1),
-                ("20".to_string(), 0),
-                ("30".to_string(), 0),
                 ("System processes (0)".to_string(), 0),
             ]
         );
