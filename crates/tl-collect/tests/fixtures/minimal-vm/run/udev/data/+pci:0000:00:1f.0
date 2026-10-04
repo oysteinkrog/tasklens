@@ -1,0 +1,5 @@
+I:6669464
+E:ID_VENDOR_FROM_DATABASE=Intel Corporation
+E:ID_MODEL_FROM_DATABASE=82801IB (ICH9) LPC Interface Controller (QEMU Virtual Machine)
+E:ID_PATH=pci-0000:00:1f.0
+V:1

@@ -1,0 +1,462 @@
+kernel 7.2.7-user11-1
+captured-by cargo xtask capture-fixture
+copied:
+proc/stat
+proc/meminfo
+proc/vmstat
+proc/diskstats
+proc/net/dev
+proc/loadavg
+proc/sys/fs/file-nr
+proc/swaps
+proc/cpuinfo
+proc/sys/kernel/random/boot_id
+proc/sys/kernel/osrelease
+sys/devices/system/cpu/online
+sys/devices/system/cpu/possible
+sys/devices/system/cpu/present
+sys/devices/system/cpu/cpu1/online
+sys/devices/system/cpu/cpu0/cpu_capacity
+sys/devices/system/cpu/cpu1/cpu_capacity
+sys/devices/system/cpu/cpu0/topology/core_id
+sys/devices/system/cpu/cpu1/topology/core_id
+sys/devices/system/cpu/cpu0/topology/physical_package_id
+sys/devices/system/cpu/cpu1/topology/physical_package_id
+sys/devices/system/cpu/cpu0/topology/die_id
+sys/devices/system/cpu/cpu1/topology/die_id
+sys/devices/system/cpu/cpu0/topology/thread_siblings_list
+sys/devices/system/cpu/cpu1/topology/thread_siblings_list
+sys/devices/system/cpu/cpu0/topology/core_siblings_list
+sys/devices/system/cpu/cpu1/topology/core_siblings_list
+sys/devices/system/cpu/cpu0/cache/index0/level
+sys/devices/system/cpu/cpu0/cache/index1/level
+sys/devices/system/cpu/cpu0/cache/index2/level
+sys/devices/system/cpu/cpu0/cache/index3/level
+sys/devices/system/cpu/cpu1/cache/index0/level
+sys/devices/system/cpu/cpu1/cache/index1/level
+sys/devices/system/cpu/cpu1/cache/index2/level
+sys/devices/system/cpu/cpu1/cache/index3/level
+sys/devices/system/cpu/cpu0/cache/index0/type
+sys/devices/system/cpu/cpu0/cache/index1/type
+sys/devices/system/cpu/cpu0/cache/index2/type
+sys/devices/system/cpu/cpu0/cache/index3/type
+sys/devices/system/cpu/cpu1/cache/index0/type
+sys/devices/system/cpu/cpu1/cache/index1/type
+sys/devices/system/cpu/cpu1/cache/index2/type
+sys/devices/system/cpu/cpu1/cache/index3/type
+sys/devices/system/cpu/cpu0/cache/index0/size
+sys/devices/system/cpu/cpu0/cache/index1/size
+sys/devices/system/cpu/cpu0/cache/index2/size
+sys/devices/system/cpu/cpu0/cache/index3/size
+sys/devices/system/cpu/cpu1/cache/index0/size
+sys/devices/system/cpu/cpu1/cache/index1/size
+sys/devices/system/cpu/cpu1/cache/index2/size
+sys/devices/system/cpu/cpu1/cache/index3/size
+sys/devices/system/cpu/cpu0/cache/index0/shared_cpu_list
+sys/devices/system/cpu/cpu0/cache/index1/shared_cpu_list
+sys/devices/system/cpu/cpu0/cache/index2/shared_cpu_list
+sys/devices/system/cpu/cpu0/cache/index3/shared_cpu_list
+sys/devices/system/cpu/cpu1/cache/index0/shared_cpu_list
+sys/devices/system/cpu/cpu1/cache/index1/shared_cpu_list
+sys/devices/system/cpu/cpu1/cache/index2/shared_cpu_list
+sys/devices/system/cpu/cpu1/cache/index3/shared_cpu_list
+sys/block/vda/dev
+sys/block/vda/size
+sys/block/vda/removable
+sys/block/vda/ro
+sys/block/vda/stat
+sys/block/vda/queue/rotational
+sys/block/vda/vda1/dev
+sys/block/vda/vda2/dev
+sys/block/vda/vda3/dev
+sys/block/vda/vda1/size
+sys/block/vda/vda2/size
+sys/block/vda/vda3/size
+sys/block/vda/vda1/partition
+sys/block/vda/vda2/partition
+sys/block/vda/vda3/partition
+sys/block/vda/vda1/start
+sys/block/vda/vda2/start
+sys/block/vda/vda3/start
+sys/class/net/eth0/ifindex
+sys/class/net/lo/ifindex
+sys/class/net/eth0/type
+sys/class/net/lo/type
+sys/class/net/eth0/operstate
+sys/class/net/lo/operstate
+sys/class/net/eth0/carrier
+sys/class/net/lo/carrier
+sys/class/net/eth0/speed
+sys/class/net/eth0/address
+sys/class/net/lo/address
+sys/module/zswap/parameters/enabled
+sys/module/zswap/parameters/compressor
+sys/module/zswap/parameters/max_pool_percent
+sys/class/net/eth0/device
+sys/class/net/eth0/device/driver
+proc/self/mountinfo
+proc/self/ns/net
+proc/1/stat
+proc/1/statm
+proc/1/status
+proc/1/comm
+proc/1/cgroup
+proc/1/cmdline
+proc/2/stat
+proc/2/statm
+proc/2/status
+proc/2/comm
+proc/2/cgroup
+proc/2/cmdline
+proc/3/stat
+proc/3/statm
+proc/3/status
+proc/3/comm
+proc/3/cgroup
+proc/3/cmdline
+proc/4/stat
+proc/4/statm
+proc/4/status
+proc/4/comm
+proc/4/cgroup
+proc/4/cmdline
+proc/5/stat
+proc/5/statm
+proc/5/status
+proc/5/comm
+proc/5/cgroup
+proc/5/cmdline
+proc/6/stat
+proc/6/statm
+proc/6/status
+proc/6/comm
+proc/6/cgroup
+proc/6/cmdline
+proc/7/stat
+proc/7/statm
+proc/7/status
+proc/7/comm
+proc/7/cgroup
+proc/7/cmdline
+proc/8/stat
+proc/8/statm
+proc/8/status
+proc/8/comm
+proc/8/cgroup
+proc/8/cmdline
+proc/9/stat
+proc/9/statm
+proc/9/status
+proc/9/comm
+proc/9/cgroup
+proc/9/cmdline
+proc/10/stat
+proc/10/statm
+proc/10/status
+proc/10/comm
+proc/10/cgroup
+proc/10/cmdline
+proc/11/stat
+proc/11/statm
+proc/11/status
+proc/11/comm
+proc/11/cgroup
+proc/11/cmdline
+proc/12/stat
+proc/12/statm
+proc/12/status
+proc/12/comm
+proc/12/cgroup
+proc/12/cmdline
+proc/13/stat
+proc/13/statm
+proc/13/status
+proc/13/comm
+proc/13/cgroup
+proc/13/cmdline
+proc/14/stat
+proc/14/statm
+proc/14/status
+proc/14/comm
+proc/14/cgroup
+proc/14/cmdline
+proc/15/stat
+proc/15/statm
+proc/15/status
+proc/15/comm
+proc/15/cgroup
+proc/15/cmdline
+proc/16/stat
+proc/16/statm
+proc/16/status
+proc/16/comm
+proc/16/cgroup
+proc/16/cmdline
+proc/17/stat
+proc/17/statm
+proc/17/status
+proc/17/comm
+proc/17/cgroup
+proc/17/cmdline
+proc/18/stat
+proc/18/statm
+proc/18/status
+proc/18/comm
+proc/18/cgroup
+proc/18/cmdline
+proc/19/stat
+proc/19/statm
+proc/19/status
+proc/19/comm
+proc/19/cgroup
+proc/19/cmdline
+proc/20/stat
+proc/20/statm
+proc/20/status
+proc/20/comm
+proc/20/cgroup
+proc/20/cmdline
+proc/21/stat
+proc/21/statm
+proc/21/status
+proc/21/comm
+proc/21/cgroup
+proc/21/cmdline
+proc/22/stat
+proc/22/statm
+proc/22/status
+proc/22/comm
+proc/22/cgroup
+proc/22/cmdline
+proc/23/stat
+proc/23/statm
+proc/23/status
+proc/23/comm
+proc/23/cgroup
+proc/23/cmdline
+proc/24/stat
+proc/24/statm
+proc/24/status
+proc/24/comm
+proc/24/cgroup
+proc/24/cmdline
+proc/25/stat
+proc/25/statm
+proc/25/status
+proc/25/comm
+proc/25/cgroup
+proc/25/cmdline
+proc/26/stat
+proc/26/statm
+proc/26/status
+proc/26/comm
+proc/26/cgroup
+proc/26/cmdline
+proc/27/stat
+proc/27/statm
+proc/27/status
+proc/27/comm
+proc/27/cgroup
+proc/27/cmdline
+proc/28/stat
+proc/28/statm
+proc/28/status
+proc/28/comm
+proc/28/cgroup
+proc/28/cmdline
+proc/29/stat
+proc/29/statm
+proc/29/status
+proc/29/comm
+proc/29/cgroup
+proc/29/cmdline
+proc/30/stat
+proc/30/statm
+proc/30/status
+proc/30/comm
+proc/30/cgroup
+proc/30/cmdline
+proc/31/stat
+proc/31/statm
+proc/31/status
+proc/31/comm
+proc/31/cgroup
+proc/31/cmdline
+proc/32/stat
+proc/32/statm
+proc/32/status
+proc/32/comm
+proc/32/cgroup
+proc/32/cmdline
+proc/33/stat
+proc/33/statm
+proc/33/status
+proc/33/comm
+proc/33/cgroup
+proc/33/cmdline
+proc/34/stat
+proc/34/statm
+proc/34/status
+proc/34/comm
+proc/34/cgroup
+proc/34/cmdline
+proc/35/stat
+proc/35/statm
+proc/35/status
+proc/35/comm
+proc/35/cgroup
+proc/35/cmdline
+proc/36/stat
+proc/36/statm
+proc/36/status
+proc/36/comm
+proc/36/cgroup
+proc/36/cmdline
+proc/37/stat
+proc/37/statm
+proc/37/status
+proc/37/comm
+proc/37/cgroup
+proc/37/cmdline
+proc/38/stat
+proc/38/statm
+proc/38/status
+proc/38/comm
+proc/38/cgroup
+proc/38/cmdline
+proc/39/stat
+proc/39/statm
+proc/39/status
+proc/39/comm
+proc/39/cgroup
+proc/39/cmdline
+proc/40/stat
+proc/40/statm
+proc/40/status
+proc/40/comm
+proc/40/cgroup
+proc/40/cmdline
+proc/41/stat
+proc/41/statm
+proc/41/status
+proc/41/comm
+proc/41/cgroup
+proc/41/cmdline
+proc/42/stat
+proc/42/statm
+proc/42/status
+proc/42/comm
+proc/42/cgroup
+proc/42/cmdline
+proc/43/stat
+proc/43/statm
+proc/43/status
+proc/43/comm
+proc/43/cgroup
+proc/43/cmdline
+proc/44/stat
+proc/44/statm
+proc/44/status
+proc/44/comm
+proc/44/cgroup
+proc/44/cmdline
+proc/45/stat
+proc/45/statm
+proc/45/status
+proc/45/comm
+proc/45/cgroup
+proc/45/cmdline
+proc/46/stat
+proc/46/statm
+proc/46/status
+proc/46/comm
+proc/46/cgroup
+proc/46/cmdline
+proc/47/stat
+proc/47/statm
+proc/47/status
+proc/47/comm
+proc/47/cgroup
+proc/47/cmdline
+proc/48/stat
+proc/48/statm
+proc/48/status
+proc/48/comm
+proc/48/cgroup
+proc/48/cmdline
+proc/49/stat
+proc/49/statm
+proc/49/status
+proc/49/comm
+proc/49/cgroup
+proc/49/cmdline
+proc/50/stat
+proc/50/statm
+proc/50/status
+proc/50/comm
+proc/50/cgroup
+proc/50/cmdline
+run/udev/data/+pci:0000:00:00.0
+run/udev/data/+pci:0000:00:01.0
+run/udev/data/+pci:0000:00:02.0
+run/udev/data/+pci:0000:00:1f.0
+run/udev/data/+pci:0000:00:1f.2
+run/udev/data/+pci:0000:00:1f.3
+run/udev/data/b254:0
+run/udev/data/b254:1
+run/udev/data/b254:2
+run/udev/data/b254:3
+run/udev/data/n1
+run/udev/data/n2
+skipped:
+sys/class/net/lo/speed: Invalid argument (os error 22)
+proc/1/io: permission denied
+proc/2/io: permission denied
+proc/3/io: permission denied
+proc/4/io: permission denied
+proc/5/io: permission denied
+proc/6/io: permission denied
+proc/7/io: permission denied
+proc/8/io: permission denied
+proc/9/io: permission denied
+proc/10/io: permission denied
+proc/11/io: permission denied
+proc/12/io: permission denied
+proc/13/io: permission denied
+proc/14/io: permission denied
+proc/15/io: permission denied
+proc/16/io: permission denied
+proc/17/io: permission denied
+proc/18/io: permission denied
+proc/19/io: permission denied
+proc/20/io: permission denied
+proc/21/io: permission denied
+proc/22/io: permission denied
+proc/23/io: permission denied
+proc/24/io: permission denied
+proc/25/io: permission denied
+proc/26/io: permission denied
+proc/27/io: permission denied
+proc/28/io: permission denied
+proc/29/io: permission denied
+proc/30/io: permission denied
+proc/31/io: permission denied
+proc/32/io: permission denied
+proc/33/io: permission denied
+proc/34/io: permission denied
+proc/35/io: permission denied
+proc/36/io: permission denied
+proc/37/io: permission denied
+proc/38/io: permission denied
+proc/39/io: permission denied
+proc/40/io: permission denied
+proc/41/io: permission denied
+proc/42/io: permission denied
+proc/43/io: permission denied
+proc/44/io: permission denied
+proc/45/io: permission denied
+proc/46/io: permission denied
+proc/47/io: permission denied
+proc/48/io: permission denied
+proc/49/io: permission denied
+proc/50/io: permission denied
