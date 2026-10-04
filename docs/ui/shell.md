@@ -321,7 +321,7 @@ WindowOptions {
   - Picking: toggled-on look (UI-SHL-010) until the pick ends [C].
 - **Interaction**:
   - Click dispatches `StartWindowPick`: sends `Command::KWin(KWinCommand::Pick)`, sets `picking = true`, pushes the Info toast "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels." [S PROC-055], and pushes the key context `Picker` on the main window's root focus so Esc maps to `CancelWindowPick`.
-  - The result handling (select row, Ctrl+click confirmation, toasts "No window found", "No window selected", "Unknown process") belongs to PROC-055. Where APP-006 says Ctrl+click ends the process "then gives a toast" and PROC-055 says "after a confirmation", this spec follows PROC-055 (the process spec owns action confirmations, PROC-059) [C].
+  - The result handling (select row, Ctrl+click confirmation, toasts "No window found", "No window selected", "Unknown process") belongs to PROC-055 and is an E22 bead that reads `WindowsSnapshot.pick` and calls `MainWindow::end_window_pick` when done (R-239). Where APP-006 says Ctrl+click ends the process "then gives a toast" and PROC-055 says "after a confirmation", this spec follows PROC-055 (the process spec owns action confirmations, PROC-059) [C].
   - Click while picking: dispatches `CancelWindowPick` [C].
 - **Data binding**: `ComponentMask::WINDOWS` (availability); the pick reply arrives in `WindowsSnapshot.pick` as `PickResult { seq, outcome: Picked { pid } | NoWindow | Cancelled }`; the request is `KWinCommand::Pick { seq }`, cancel is `CancelPick { seq }` (R-149).
 - **Tests**: `picker_hidden_without_bridge`; `picker_esc_cancels` (fake engine: Esc while picking sends `KWin(CancelPick)` and the toast "No window selected").
@@ -720,7 +720,7 @@ x=0
   | | Minimize to tray | check | `tray.minimize_to_tray` | P3 |
   | | Always show tray icon | check | `tray.always_show` | P3 |
   | | Start at login | check | `startup.start_at_login` (`ToggleStartAtLogin`) | P2 |
-  | | Start minimized | check, indented by 16, disabled unless Start at login is on | `startup.start_minimized` | P2 |
+  | | Start minimized | check, indented by 16, disabled unless Start at login is on; toggling it while Start at login is on calls `AppEnv.set_autostart(true, minimized)` again so the `Exec` line gains or loses `--start-minimized` (R-236) | `startup.start_minimized` | P2 |
   | | Default tab | submenu radio: Processes, Performance, Services, Startup Apps, Connections, Information, Last used | `general.start_tab` | P1 |
   | | Unlock privileged actions at launch | check | `privilege.unlock_at_launch` | P3 |
   | | Skip password prompts (experimental) | check (`TogglePasswordless`) | `privilege.passwordless` | P4 |
@@ -735,11 +735,11 @@ x=0
   - Refresh labels are exactly "0.25s", "0.5s", "1.0s", "2.0s", "5.0s", "10.0s" [S].
   - Named Actions with extra work:
     - `ToggleRecordHistory`: writes `history.enabled`; Info toast "History recording on" or "History recording off" [C].
-    - `ToggleStartAtLogin`: writes or deletes `~/.config/autostart/io.github.oysteinkrog.Tasklens.desktop` through tl-app (`write_atomic`) [S APP-048]; failure: Error toast "Could not change the autostart entry" and the setting is reverted [C].
+    - `ToggleStartAtLogin`: calls `AppEnv.set_autostart(enabled, minimized)`, which writes or deletes `~/.config/autostart/io.github.oysteinkrog.Tasklens.desktop` through tl-app (`write_atomic`), with `--start-minimized` on the `Exec` line when `minimized` is true (R-236) [S APP-048]; failure: Error toast "Could not change the autostart entry" and the setting is reverted [C].
     - `TogglePasswordless`: turning on first opens the modal confirm (UI-SHL-091) with the text "tasklens actions that change other users' processes, system services and network connections will run without asking for a password. Continue?" and buttons "Skip prompts" / "Cancel" [S]; then runs `pkexec /usr/lib/tasklens/tasklens-setup polkit-rule on`; success writes the key, cancel leaves it off with toast "Authentication cancelled". Turning off runs `polkit-rule off` without a confirm [S].
     - Changing `rendering.gpu`: Info toast "Restart tasklens to use the new GPU" [S].
   - The Additional Setup window is not in this menu [S R-028].
-- **UI-SHL-040a Rendering GPU submenu**: rows "Auto", one row per adapter name, "Software renderer". On open, rows "Auto" and "Software renderer" show at once, plus a disabled row "Detecting adapters…" [C]; a background task runs the short-lived wgpu adapter probe (APP-046) and calls `PopupMenu::rebuild` with the adapter rows when it returns (timeout 2 s, after which the row reads "No adapters found") [C]. Each adapter row stores `pci:<bus id>`.
+- **UI-SHL-040a Rendering GPU submenu**: rows "Auto", one row per adapter name, "Software renderer". On open, rows "Auto" and "Software renderer" show at once, plus a disabled row "Detecting adapters…" [C]; a background task runs the short-lived wgpu adapter probe (APP-046) and calls `PopupMenu::rebuild` with the adapter rows when it returns (timeout 2 s, after which the row reads "No adapters found") [C]. Each adapter row stores `pci:<bus id>` when `AdapterInfo.pci_bus_id` is known, otherwise `name:<adapter name>` (R-237).
 - **Tests**: `settings_menu_refresh_radio`: choosing "2.0s" writes 2000 and the engine receives `EngineSettings.interval_ms = 2000`. `start_minimized_disabled`: disabled while `startup.start_at_login = false`.
 - **Phase**: P1 (as listed per row).
 - **Decided here**: indent 16; Save history disabled rule; toasts for Record history and autostart failure; Default tab lists built tabs only; adapter probe UX.
@@ -773,7 +773,7 @@ x=0
   | 1 | Show FPS | check (`debug.show_fps`) | `ToggleSetting(DebugShowFps)` | Overlay UI-SHL-140 |
   | 2 | Continuous rendering | check (session only) | `ToggleContinuousRendering` | Requests a frame every vsync through `request_animation_frame` on the main window (debug only) [S] |
   | 3 | Enable all columns | item | `EnableAllColumns` | Makes every column of the active table visible; Info toast "All columns enabled" [C] |
-  | 4 | Add random process minigraphs | item | `AddRandomMinigraphs` | Toasts "Added %ld random process minigraphs." / "No process minigraphs available." [S] |
+  | 4 | Add random process minigraphs | item | `AddRandomMinigraphs` (declared and handled by E26, R-238; this menu only dispatches) | Toasts "Added %ld random process minigraphs." / "No process minigraphs available." [S] |
   | sep | separator | | | |
   | 5 | Collector health | item | `OpenCollectorHealth` | UI-SHL-099 |
 
@@ -1002,8 +1002,8 @@ x=0, bottom=0
 | Tray | Minimize to tray | switch | `tray.minimize_to_tray` | P3 |
 | Tray | Always show tray icon | switch | `tray.always_show` | P3 |
 | Login | Start at login | switch | `startup.start_at_login` | P2 |
-| Login | Start minimized | switch, indented 16, disabled unless Start at login is on | `startup.start_minimized` | P2 |
-| Login | Open with Ctrl+Esc | switch, no settings key; reads and writes kglobalaccel (APP-051); hidden outside KDE | (none) | P4 |
+| Login | Start minimized | switch, indented 16, disabled unless Start at login is on; rewrites the autostart entry through `AppEnv.set_autostart(true, minimized)` (R-236) | `startup.start_minimized` | P2 |
+| Login | Open with Ctrl+Esc | switch, no settings key; reads and writes kglobalaccel through `AppEnv.global_shortcut` (APP-051, R-171); disabled with "Not available" when it is `None`; hidden outside KDE | (none) | P4 |
 | Network | Auto-fetch Public IP on launch | switch | `network.auto_fetch_public_ip` | P2 |
 | Memory | Open rescue window on critical memory pressure (tooltip "systemd-oomd may end processes before the rescue window opens.", plus " The watcher runs with normal OOM priority." when `state.lowmem.oom_score_adjust` is 0; an install or remove failure reverts the switch and sends the desktop notification "Could not set up the rescue window"; R-152) | switch | `lowmem.enabled` | P3 |
 
@@ -1023,10 +1023,10 @@ x=0, bottom=0
 
 | Label | Control | Key | Phase |
 |---|---|---|---|
-| Rendering GPU | dropdown (Auto, adapters, Software renderer), "Takes effect after restart" | `rendering.gpu` | P4 |
+| Rendering GPU | dropdown (Auto, adapters from `AppEnv.list_adapters`, Software renderer), "Takes effect after restart"; stores `pci:<bus id>` when the adapter has one, else `name:<adapter name>` (R-237) | `rendering.gpu` | P4 |
 | Do not ask again for public IP fetches | switch | `network.public_ip_notice_accepted` | P2 |
 | Show FPS | switch | `debug.show_fps` | P2 |
-| Import from TaskSlinger… | button (APP-034: portal file chooser for `UserSettings.ini` or `themes.json`; toast "Imported N settings and M themes"; failure toast "Could not import TaskSlinger settings" (Error, R-201); plain booleans and in-range integers only until the owner supplies `UserSettings.ini`, D-018; disabled with "Not available" while `PlatformOps` is `None`, R-153) | (none) | P4 |
+| Import from TaskSlinger… | button (APP-034: portal file chooser for `UserSettings.ini` or `themes.json`; toast "Imported N settings and M themes"; failure toast "Could not import TaskSlinger settings" (Error, R-201); plain booleans and in-range integers only until the owner supplies `UserSettings.ini`, D-018; the button calls `AppEnv.import_taskslinger`, R-171) | (none) | P4 |
 | Open settings folder | button: `xdg-open $XDG_CONFIG_HOME/tasklens` | (none) [C] | P2 |
 | Reset Settings to Defaults | button (danger style), same confirm as the menu | (none) | P2 |
 
