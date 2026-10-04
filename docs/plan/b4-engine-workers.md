@@ -2,12 +2,87 @@
 
 Batch B4 covers epics E12, E14, E29 and E30 (`docs/plan/00-epics.md` section 5): the system and device workers, the D-Bus workers, the privileged helper and its setup, and the history store. The leader created the epic and anchor beads (`docs/plan/anchors.md`). B4 replaced each anchor's placeholder with the full template and created every other bead under its epic.
 
-Totals: E12 33 beads, E14 25, E29 34, E30 31 (123 task beads, anchors included). Bead titles start with the plan key. Every bead carries the build rule in its Notes: run cargo through `heavy-build`.
+Totals: E12 33 beads, E14 25, E29 34, E30 31 (123 task beads, anchors included). Bead titles start with the plan key. Every bead carries the build rule in its Notes. E12, E30 and most E29 beads already use `heavy-build`; the leader's end pass rewrites the rest.
 
 Conventions used by all four epics:
 
 - **Dependency rule.** Edges inside B4 point at any bead. Edges to other batches point at anchors, except where a needed bead sits outside every anchor; those direct edges are named in the epic's section. The "Depends on" column lists plan keys; anchor IDs are in `docs/plan/anchors.md`.
 - **Open items block, they do not guess.** A bead that needs an undecided contract change carries the `blocked-open-item` label. Each epic's open items list a recommendation.
+
+## E12 engine-system-workers (tasklens-hjn)
+
+33 beads: 3 anchors and 30 others. Code is in `crates/tl-engine/src/workers/`, plus two new `tl-collect` files that E12 owns (`net/addrs.rs` and `net/nl80211.rs`, E12-OI-5). The udev database reader several beads need has no owner yet (E12-OI-4).
+
+- Sampling sources (the E08 `Source` trait, run by `source::run`): `cpu.rs` (E12-001, E12-007 to E12-010), `memory.rs` (E12-003, E12-011), `disk.rs` (E12-004, E12-012, E12-013), `net.rs` (E12-005, E12-014, E12-015), `sensors.rs` (E12-006, E12-030), `gpu_drm.rs` (E12-026 AMD, E12-027 Intel). `enumerate.rs` (E12-002) holds the shared 5 s device rescan and the identity rules.
+- Event-driven workers with their own loop: `inventory.rs` (E12-016 to E12-019, with `public_ip.rs`), `dbus_udisks.rs` (E12-020 to E12-022, with `eject.rs` and the P3 `smartctl.rs` of E12-028), `dbus_upower.rs` (E12-023, E12-029), `dbus_nm.rs` (E12-024, E12-025).
+- Anchors: E12-A1 registers the CPU worker and proves the 10 Hz, 1 Hz and off schedule in LabRuntime. E12-A2 closes the P1 sources and enumeration (hidden with recording off: zero samples). E12-A3 closes every P2 worker and runs them once against the owner machine.
+- Each worker bead adds its own `pub mod` line and one `all_workers()` entry in `workers/mod.rs`. Those are one-line edits; beads that can run in parallel touch different lines of that file.
+- Tests: LabRuntime and fixture tests in `crates/tl-engine/tests/lab_system_workers.rs` (created by E12-001) and in `#[cfg(test)]` modules; owner-machine tests are `#[ignore]` in `tests/real_inventory.rs` (created by E12-016). Fixtures come from `crates/tl-collect/tests/fixtures`, copied under `CARGO_TARGET_TMPDIR` by the E12-001 helpers, so no `tempfile` dev-dependency is needed.
+- Cross-epic edges point at anchors, except seven P2 E04 beads and one P3 E06 bead that sit outside every anchor: E04-013 (tasklens-2dl.16), E04-014 (tasklens-2dl.17), E04-015 (tasklens-2dl.18), E04-019 (tasklens-2dl.22), E04-023 (tasklens-2dl.26), E04-024 (tasklens-2dl.27), E04-028 (tasklens-2dl.31) and E06-023 (tasklens-hx1.26). The beads that need them carry a direct edge.
+- 21 beads carry the `blocked-open-item` label. Almost all wait on E12-OI-1, the contract additions below. That includes E12-004 to E12-006, so E12-A2 (P1) is blocked until E12-OI-1 A is settled.
+
+| Plan key | Bead ID | Title | Priority | Depends on |
+|---|---|---|---|---|
+| E12-A1 | tasklens-hjn.1 | CPU worker | 0 | E12-001, E08-A1, E09-A1 |
+| E12-A2 | tasklens-hjn.2 | Memory, disk, net, sensors workers and enumeration | 1 | E12-002, E12-003, E12-004, E12-005, E12-006, E12-A1, E08-A1, E09-A1 |
+| E12-A3 | tasklens-hjn.3 | Inventory and the P2 D-Bus device workers | 2 | E12-008, E12-009, E12-010, E12-011, E12-012, E12-013, E12-014, E12-015, E12-016, E12-017, E12-018, E12-019, E12-020, E12-021, E12-022, E12-023, E12-024, E12-025, E12-026, E12-030, E12-A2 |
+| E12-001 | tasklens-hjn.4 | CPU source: workers/cpu.rs with demand-driven 10 Hz, 1 Hz and off rates | 0 | E04-A2, E08-A1, E03-A2 |
+| E12-002 | tasklens-hjn.5 | Device enumeration: workers/enumerate.rs with 5 s rescans and stable identities | 1 | E04-A3, E08-A1, E12-001 |
+| E12-003 | tasklens-hjn.6 | Memory source: workers/memory.rs | 1 | E04-A3, E08-A1, E12-002, E12-001 |
+| E12-004 | tasklens-hjn.7 | Disk source: workers/disk.rs with device list and rates | 1 | E04-A3, E08-A1, E12-002 |
+| E12-005 | tasklens-hjn.8 | Net source: workers/net.rs with interface list and rates | 1 | E04-A3, E08-A1, E12-002 |
+| E12-006 | tasklens-hjn.9 | Sensors source: workers/sensors.rs for hwmon temperatures and fans | 1 | E04-A3, E08-A1, E12-002 |
+| E12-007 | tasklens-hjn.10 | CPU live stats: processes, threads, handles, load average | 1 | E12-A1, E04-A3 |
+| E12-008 | tasklens-hjn.11 | CPU package and core power from RAPL | 2 | E12-007, E04-015 |
+| E12-009 | tasklens-hjn.12 | CPU and memory at 1 Hz while the process table is shown | 2 | E12-008, E12-A2 |
+| E12-010 | tasklens-hjn.13 | CPU static info: caches, virtualization, security, power profile | 2 | E12-009, E06-A3, E08-A2, E04-013, E04-014 |
+| E12-011 | tasklens-hjn.14 | Memory details: speed, slots, form factor, swap and zram rows | 2 | E12-009, E04-019 |
+| E12-012 | tasklens-hjn.15 | Disk temperatures and filesystem usage | 2 | E12-A2, E04-023, E04-024 |
+| E12-013 | tasklens-hjn.16 | Disk details from udev and the partition table | 2 | E12-012 |
+| E12-014 | tasklens-hjn.17 | Net details: link speed, state, MAC, adapter name, kind | 2 | E12-A2, E04-028 |
+| E12-015 | tasklens-hjn.18 | IP addresses from an rtnetlink RTM_GETADDR dump | 2 | E12-014, E06-A1 |
+| E12-016 | tasklens-hjn.19 | Inventory worker: scan loop, OS, processor, memory, modules, firmware, board | 2 | E06-A3, E04-A2, E04-A3, E08-A1, E09-A1 |
+| E12-017 | tasklens-hjn.20 | Inventory System section from hostnamed, logind and the environment | 2 | E12-016, E08-A2, E06-A3, E05-A1 |
+| E12-018 | tasklens-hjn.21 | Inventory Disk drives, Graphics and Network adapters sections | 2 | E12-017, E12-013, E12-014, E12-015, E06-A3, E04-024 |
+| E12-019 | tasklens-hjn.22 | Public IP fetch with ureq on request or at startup | 2 | E12-016, E02-A1, E08-A1, E12-018 |
+| E12-020 | tasklens-hjn.23 | UDisks2 worker: drive properties, SMART kind, eject flags, SMART temperature | 2 | E12-A2, E08-A2, E12-016 |
+| E12-021 | tasklens-hjn.24 | UDisks2 SMART read and refresh for ATA and NVMe | 2 | E12-020, E03-A2 |
+| E12-022 | tasklens-hjn.25 | Disk eject through UDisks2 with busy-process report | 2 | E12-020, E03-A1, E12-021 |
+| E12-023 | tasklens-hjn.26 | UPower worker for batteries with a sysfs fallback | 2 | E12-A2, E08-A2, E03-A1, E12-016 |
+| E12-024 | tasklens-hjn.27 | NetworkManager worker: device kind, connection name, Wi-Fi details | 2 | E12-014, E08-A2, E03-A1, E12-016 |
+| E12-025 | tasklens-hjn.28 | Wi-Fi signal and bit rates from nl80211 | 2 | E12-024, E12-015, E06-A1 |
+| E12-026 | tasklens-hjn.29 | GpuDrm worker for AMD cards | 2 | E12-A2, E06-A3, E08-A2, E03-A1 |
+| E12-027 | tasklens-hjn.31 | GpuDrm worker for Intel i915 and xe cards | 3 | E12-026, E06-023 |
+| E12-028 | tasklens-hjn.32 | SMART read with smartctl through pkexec | 3 | E12-021, E06-A2, E12-022 |
+| E12-029 | tasklens-hjn.33 | Battery charge history from UPower | 3 | E12-023 |
+| E12-030 | tasklens-hjn.30 | Fan control mode in sensor readings | 2 | E12-006, E04-A3 |
+
+### Open items
+
+Each item has a recommendation. Beads that wait on one carry the `blocked-open-item` label and say "stop if missing".
+
+- **E12-OI-1 Contract additions for device details (blocks 21 beads, including the P1 anchor E12-A2).** The E03 and E08 contracts have no way to send a device list next to a sample, no field for disk temperature, link state or fan control mode, no device details component, no battery channel, and no commands for SMART, eject, public IP or battery history. Recommendation, in six parts (the full type sketch is in the B4 scratch notes and is repeated in each blocked bead):
+  - A. E08 `source.rs`: `fn take_extra(&mut self) -> Option<SourceUpdate> { None }` on `Source`. `source::run` calls it until `None` after each `sample()` and sends those updates before the sample's own. This is how `Devices` and `GpuInfo` lists travel (E12-004, E12-005, E12-006, E12-026).
+  - B. E03: `LinkState`, `FanControlMode { FullSpeed, Manual, Automatic }`, `DiskTotals.temp_c`, `NetTotals.state`, `SensorReading.fan_control` (E12-012, E12-014, E12-030).
+  - C. E03 `snapshot.rs`: `DeviceDetailsSnapshot` with `CpuStaticInfo`, `MemoryDetails`, `DiskDetails` (partitions, `SmartData`, `EjectState`, `smart_temp_c`), `NetDetails` (`WifiInfo`), `BatteryDetails`, and `ComponentMask::DEVICE_DETAILS = 1 << 13`.
+  - D. E08 `update.rs`: `SourceUpdate::DeviceDetails(DeviceDetailsUpdate { Cpu, Memory, Disks { from, entries }, Nets { from, entries }, Batteries })`. The reducer (E09) merges the sysfs and D-Bus parts per device (D-Bus wins for model, serial, SMART, kind refinement, Wi-Fi) and appends `BATTERY_PCT` from `BatteryDetails.percentage`.
+  - E. E03 `command.rs` and E08 `WorkerCommand`: `Command::Device(DeviceCommand { SmartRead { disk, update }, SmartReadAdmin { disk }, Eject { seq, disk }, FetchPublicIp, BatteryHistory { native_path } })`, routed to `Udisks`, `Inventory` and `UPower`.
+  - F. E03 `EngineSettings.auto_fetch_public_ip: bool` (default false).
+  Owner: the E03 and E08 writers (B1 and B3), as one chain edit each.
+- **E12-OI-2 `ureq` in tl-engine.** R-131 puts the public IP code in tl-engine, but tl-engine's `Cargo.toml` has no `ureq` line. Recommendation: E12-019 adds `ureq = { workspace = true }` as a chain edit on E08-A1, and runs `cargo xtask check-deps` to settle U-30 (no Tokio). E12-028 needs `serde_json` the same way (same question as E14's open item).
+- **E12-OI-3 Demand while only the process table is shown.** The CPU and Memory pseudo-rows of the process table need 1 Hz CPU and memory totals when no performance page is visible. Recommendation: `cpu_period` and `memory_period` also return 1 s when `Demand.process_table` is true (E12-009). No contract change.
+- **E12-OI-4 udev database reader.** Disk model, serial, partition labels and GPU and adapter names come from `/run/udev/data/*`, and no tl-collect bead reads it. Recommendation: one new tl-collect bead in B2 (E04) for `crates/tl-collect/src/parse/udev.rs`: `read_udev_props(path, keys, out)` copying the listed `E:KEY=value` lines, 64 KiB cap. E12-013, E12-014 and E12-018 are blocked until it exists; E12-026 uses it when present and otherwise shows a generic GPU name. The leader decides whether B2 adds that bead or E12-013 takes the file.
+- **E12-OI-5 Netlink readers in tl-collect.** IP addresses (`RTM_GETADDR`) and Wi-Fi (`nl80211`) have no tl-collect file. Recommendation: `crates/tl-collect/src/net/addrs.rs` (E12-015) and `crates/tl-collect/src/net/nl80211.rs` (E12-025), owned by E12, with one `pub mod` line each in `net/mod.rs` as chain edits on E06-A1.
+- **E12-OI-6 Fan persistent key.** PERF-005's key `fan:<hwmon name>:<device path>:<n>` needs the chip's device path, which `DeviceIdentity::Fan` does not hold. Recommendation: `FanReading.chip_device_path` already exists in E04; E03 adds it to the identity or the catalog entry. Same question as B1's persistent key open item.
+- **E12-OI-7 Interface kind mapping.** tl-collect's `IfaceKind` has Bridge, USB network and Cellular, which `NetKind` lacks. Recommendation: Bridge → `Virtual`, USB network → `Wired`, Cellular → `Other` (E12-014, E12-024). Same as B2's E04-OI-9.
+- **E12-OI-8 Peak committed memory.** The Information tab's memory section shows a peak committed value, and nothing in the engine tracks it. Recommendation: the reducer keeps the running maximum of `committed` since start (E09), and the inventory snapshot leaves it `WarmingUp` (E12-016).
+- **E12-OI-9 Session type and windowing system.** PERF-097 names `XDG_SESSION_TYPE` for both rows. Recommendation: "Session type" shows the raw value (`wayland`) and "Windowing system" the display name ("Wayland", "X11", "None (text console)") (E12-017).
+- **E12-OI-10 Device index in inventory rows.** The inventory's disk, GPU and adapter rows have `device: Option<DeviceIdx>`, which a worker cannot know. Recommendation: workers send `None` and the reducer fills it by matching the disk name, PCI slot or interface name against the catalog (E12-018).
+- **E12-OI-11 Per-process GPU use for AMD and Intel.** `GpuProcessSample` is keyed by a 16-byte `uuid`, which AMD and Intel cards lack. Recommendation: identify those cards by `pci_bus_id` with `uuid = [0; 16]` (E12-026) and have the process GPU columns match on the full identity. Per-process DRM use is not in any E12 bead.
+- **Battery demand.** `Demand` has no battery field. The `UPower` worker runs while any surface is visible or recording is on (E12-023), which costs almost nothing because UPower is event-driven. If the UI later wants it tighter, E03 adds `Demand.batteries`.
+- **Battery history span.** PERF-078 names the history chart but not its span. E12-029 asks UPower for 24 h at 288 points.
+- **power-profiles-daemon bus names.** E12-010 reads `ActiveProfile` from `net.hadess.PowerProfiles` and falls back to `org.freedesktop.UPower.PowerProfiles`. The names are inferred from the daemon's docs, not from the spec.
+- **Resume detection.** Sampling sources cannot send `ResumeDetected`; that stays with E08's logind worker.
 
 ## E14 engine-dbus-workers
 
