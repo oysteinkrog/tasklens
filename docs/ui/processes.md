@@ -1259,7 +1259,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 ### UI-PRC-022 Jump target: select a process by identity
 
 - **Implements**: PROC-071 (shared entry point, Go to parent, Go to service, failure toasts),
-  PROC-055 (picker result), PROC-088 (History row to live row).
+  PROC-055 (picker result: a dedicated E22 bead reads `WindowsSnapshot.pick`, selects through
+  `select_by_key`, runs the Ctrl+click confirmation and toasts, then calls
+  `MainWindow::end_window_pick`, R-239), PROC-088 (History row to live row).
 - **Anatomy**: no element; behaviour of `ProcessesPage::select_by_key(key, source)`.
 - **Behaviour**:
   1. If the active tab is not Processes: switch (toast "Switched to Processes tab" unless the
