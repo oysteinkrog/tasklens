@@ -5,7 +5,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3898.491
+cpu MHz		: 3896.110
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -33,7 +33,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3898.770
+cpu MHz		: 3875.561
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -61,7 +61,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.002
+cpu MHz		: 3883.984
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -89,7 +89,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3897.447
+cpu MHz		: 3899.315
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -117,7 +117,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3898.088
+cpu MHz		: 3892.333
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -145,7 +145,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.156
+cpu MHz		: 3896.153
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -173,7 +173,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.854
+cpu MHz		: 3884.437
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -201,7 +201,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3890.803
+cpu MHz		: 3894.105
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -229,7 +229,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3119.241
+cpu MHz		: 3897.424
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -257,7 +257,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3890.194
+cpu MHz		: 3896.178
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -285,7 +285,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.665
+cpu MHz		: 3896.201
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -313,7 +313,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3119.293
+cpu MHz		: 3896.115
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -341,7 +341,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3118.276
+cpu MHz		: 3891.099
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -369,7 +369,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3898.609
+cpu MHz		: 3896.180
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -397,7 +397,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3119.004
+cpu MHz		: 3118.542
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -425,7 +425,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3118.950
+cpu MHz		: 3896.154
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -453,7 +453,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3897.132
+cpu MHz		: 3886.038
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -481,7 +481,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.912
+cpu MHz		: 3896.244
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -509,7 +509,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3900.021
+cpu MHz		: 3896.221
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -537,7 +537,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.929
+cpu MHz		: 3884.131
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -565,7 +565,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3896.978
+cpu MHz		: 3899.853
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -593,7 +593,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3897.972
+cpu MHz		: 3896.115
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -621,7 +621,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.781
+cpu MHz		: 3896.149
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -649,7 +649,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.944
+cpu MHz		: 3885.316
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -677,7 +677,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3113.220
+cpu MHz		: 3884.345
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -705,7 +705,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3899.960
+cpu MHz		: 3869.038
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -733,7 +733,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3883.794
+cpu MHz		: 3872.709
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -761,7 +761,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3110.194
+cpu MHz		: 3123.730
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -789,7 +789,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3108.398
+cpu MHz		: 3891.070
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -817,7 +817,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3897.916
+cpu MHz		: 3687.271
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -845,7 +845,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3119.653
+cpu MHz		: 3111.841
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32
@@ -873,7 +873,7 @@ model		: 33
 model name	: AMD Ryzen 9 5950X 16-Core Processor
 stepping	: 0
 microcode	: 0xa201030
-cpu MHz		: 3114.113
+cpu MHz		: 3877.851
 cache size	: 512 KB
 physical id	: 0
 siblings	: 32

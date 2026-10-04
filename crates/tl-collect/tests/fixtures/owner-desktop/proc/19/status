@@ -9,7 +9,7 @@ TracerPid:	0
 Uid:	0	0	0	0
 Gid:	0	0	0	0
 FDSize:	64
-Groups:
+Groups:	 
 NStgid:	19
 NSpid:	19
 NSpgid:	0
@@ -36,7 +36,7 @@ Cpus_allowed:	ffffffff
 Cpus_allowed_list:	0-31
 Mems_allowed:	00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000000,00000001
 Mems_allowed_list:	0
-voluntary_ctxt_switches:	19377
-nonvoluntary_ctxt_switches:	695
-x86_Thread_features:
-x86_Thread_features_locked:
+voluntary_ctxt_switches:	20035
+nonvoluntary_ctxt_switches:	722
+x86_Thread_features:	
+x86_Thread_features_locked:	
