@@ -151,7 +151,7 @@ fn graphs_submenu(state: &TrayMenuState) -> MenuNode {
         .map(|((source, label), checked)| MenuNode::Check {
             label: Arc::from(*label),
             checked,
-            event: TrayEvent::TogglePageSource { source: *source },
+            event: TrayEvent::TogglePageSource { source },
         })
         .collect();
     if !state.process_graphs.is_empty() {
