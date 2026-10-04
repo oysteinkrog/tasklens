@@ -1,4 +1,9 @@
-//! History segment format, store and in-RAM rolling window (ADR-012).
+//! Process and system history for tasklens (ADR-012). The engine feeds every process sweep and
+//! system sample to a `RecordSink`: the `Recorder` builds 60 s blocks for the on-disk `Store`
+//! (zstd-compressed segment files of 10 minutes per boot, crash-safe through per-block CRCs),
+//! and the `RollingWindow` keeps the last 10 minutes in RAM when history is not persisted. The
+//! read side rebuilds the process state at any second, decimates graphs to at most 1,024 points
+//! and answers range and top-K queries. Command lines are never stored (ADR-015).
 
 #![forbid(unsafe_code)]
 
@@ -12,4 +17,13 @@ pub mod rolling;
 pub mod segment;
 pub mod store;
 
-pub use error::HistoryError;
+pub use {
+    block::{BlockBuilder, EncodedBlock, decode_block, encode_block},
+    error::HistoryError,
+    format::*,
+    read::*,
+    recorder::{ClosedBlock, Recorder},
+    retention::*,
+    rolling::RollingWindow,
+    store::{LoadProblem, LoadReport, Store, StoreConfig},
+};
