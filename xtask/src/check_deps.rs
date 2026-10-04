@@ -49,14 +49,19 @@ const ALLOWABLE_LITERALS: &[&str] = &["RuntimeHandle::spawn(", ".with_poll_quota
 
 const ALLOW_COMMENT: &str = "// check-deps: allow";
 
+type Check = fn(&Path) -> anyhow::Result<Vec<String>>;
+
 pub fn run(args: Vec<String>) -> anyhow::Result<()> {
     if !args.is_empty() {
         bail!("check-deps takes no arguments, got: {}", args.join(" "));
     }
     let root = workspace_root();
-    let checks: [(&str, fn(&Path) -> anyhow::Result<Vec<String>>); 3] = [
+    let checks: [(&str, Check); 3] = [
         ("banned crates", check_banned_crates),
-        ("asupersync outside tl-engine", check_asupersync_outside_engine),
+        (
+            "asupersync outside tl-engine",
+            check_asupersync_outside_engine,
+        ),
         ("banned asupersync APIs", check_banned_apis),
     ];
 
@@ -98,7 +103,10 @@ fn run_command(root: &Path, program: &str, args: &[&str]) -> anyhow::Result<Outp
 }
 
 fn command_line(program: &str, args: &[&str]) -> String {
-    std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>().join(" ")
+    std::iter::once(program)
+        .chain(args.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn command_failed(program: &str, args: &[&str], output: &Output) -> anyhow::Error {
@@ -175,7 +183,11 @@ fn existing_shipped_binaries(root: &Path) -> anyhow::Result<Vec<&'static str>> {
         .iter()
         .filter_map(|package| package["name"].as_str())
         .collect();
-    Ok(SHIPPED_BINARIES.iter().copied().filter(|name| names.contains(name)).collect())
+    Ok(SHIPPED_BINARIES
+        .iter()
+        .copied()
+        .filter(|name| names.contains(name))
+        .collect())
 }
 
 /// The `name@version` specs cargo lists after an "is ambiguous" error for `name`.
@@ -209,7 +221,13 @@ fn first_word_is(line: &str, word: &str) -> bool {
 
 /// Check 3. Any `asupersync::` path under `crates/` outside tl-engine.
 fn check_asupersync_outside_engine(root: &Path) -> anyhow::Result<Vec<String>> {
-    let args = ["-n", "asupersync::", "crates/", "--glob", "!crates/tl-engine/**"];
+    let args = [
+        "-n",
+        "asupersync::",
+        "crates/",
+        "--glob",
+        "!crates/tl-engine/**",
+    ];
     let output = run_command(root, "rg", &args)?;
     match output.status.code() {
         Some(0) => Ok(String::from_utf8_lossy(&output.stdout)
@@ -250,7 +268,9 @@ fn collect_rs_files(dir: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<()> 
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("could not list {}", dir.display()))?;
     for entry in entries {
-        let path = entry.with_context(|| format!("could not list {}", dir.display()))?.path();
+        let path = entry
+            .with_context(|| format!("could not list {}", dir.display()))?
+            .path();
         if path.is_dir() {
             collect_rs_files(&path, files)?;
         } else if path.extension().is_some_and(|ext| ext == "rs") {
@@ -267,25 +287,35 @@ struct ApiHit {
     line: usize,
 }
 
-/// Finds banned API names in one source file, skipping `#[cfg(test)]` modules.
+/// Finds banned API names in one source file, skipping comments and `#[cfg(test)]` modules.
+/// A name in a comment is not a use. The allow comment is read from the original line.
 fn scan_banned_apis(source: &str) -> Vec<ApiHit> {
-    let production = blank_cfg_test_modules(source);
+    let production = blank_cfg_test_modules(&blank_comments(source));
     let mut hits = Vec::new();
-    for (index, line) in production.lines().enumerate() {
+    for (index, (line, original)) in production.lines().zip(source.lines()).enumerate() {
         let line_number = index + 1;
         for &word in BANNED_WORDS {
             if contains_word(line, word) {
-                hits.push(ApiHit { pattern: word, line: line_number });
+                hits.push(ApiHit {
+                    pattern: word,
+                    line: line_number,
+                });
             }
         }
         for &literal in BANNED_LITERALS {
             if line.contains(literal) {
-                hits.push(ApiHit { pattern: literal, line: line_number });
+                hits.push(ApiHit {
+                    pattern: literal,
+                    line: line_number,
+                });
             }
         }
         for &literal in ALLOWABLE_LITERALS {
-            if line.contains(literal) && !has_allow_comment(line) {
-                hits.push(ApiHit { pattern: literal, line: line_number });
+            if line.contains(literal) && !has_allow_comment(original) {
+                hits.push(ApiHit {
+                    pattern: literal,
+                    line: line_number,
+                });
             }
         }
     }
@@ -296,6 +326,82 @@ fn scan_banned_apis(source: &str) -> Vec<ApiHit> {
 fn has_allow_comment(line: &str) -> bool {
     line.find(ALLOW_COMMENT)
         .is_some_and(|start| !line[start + ALLOW_COMMENT.len()..].trim().is_empty())
+}
+
+/// Replaces line and block comments with spaces, keeping newlines and string literals. A small
+/// lexer: it knows string, raw string and char literals so `//` inside them is not a comment.
+fn blank_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = chars.clone();
+    let blank = |out: &mut Vec<char>, i: usize| {
+        if out[i] != '\n' {
+            out[i] = ' ';
+        }
+    };
+    let at = |i: usize| chars.get(i).copied();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let prev = i.checked_sub(1).and_then(at);
+        if c == '/' && at(i + 1) == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                blank(&mut out, i);
+                i += 1;
+            }
+        } else if c == '/' && at(i + 1) == Some('*') {
+            let mut depth = 0usize;
+            while i < chars.len() {
+                if chars[i] == '/' && at(i + 1) == Some('*') {
+                    depth += 1;
+                    blank(&mut out, i);
+                    blank(&mut out, i + 1);
+                    i += 2;
+                } else if chars[i] == '*' && at(i + 1) == Some('/') {
+                    depth -= 1;
+                    blank(&mut out, i);
+                    blank(&mut out, i + 1);
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
+                    blank(&mut out, i);
+                    i += 1;
+                }
+            }
+        } else if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if c == 'r' && !prev.is_some_and(|p| is_ident_char(p) && p != 'b') {
+            let hashes = chars[i + 1..].iter().take_while(|&&h| h == '#').count();
+            if at(i + 1 + hashes) == Some('"') {
+                let close: Vec<char> = std::iter::once('"')
+                    .chain(std::iter::repeat_n('#', hashes))
+                    .collect();
+                i += 2 + hashes;
+                while i < chars.len() && !chars[i..].starts_with(&close) {
+                    i += 1;
+                }
+                i += close.len();
+            } else {
+                i += 1;
+            }
+        } else if c == '\'' && at(i + 1) == Some('\\') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\'' {
+                i += 1;
+            }
+            i += 1;
+        } else if c == '\'' && at(i + 2) == Some('\'') {
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    out.into_iter().collect()
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -363,7 +469,9 @@ fn cfg_test_mod_open_brace(source: &str, from: usize) -> Option<usize> {
         return None;
     }
     let after_mod = after_mod.trim_start();
-    let name_len = after_mod.find(|c: char| !is_ident_char(c)).unwrap_or(after_mod.len());
+    let name_len = after_mod
+        .find(|c: char| !is_ident_char(c))
+        .unwrap_or(after_mod.len());
     if name_len == 0 {
         return None;
     }
@@ -408,7 +516,10 @@ mod tests {
     fn shipped_in_tree_finds_binaries_once() {
         let tree = "tokio v1.40.0\ntl-ui v0.1.0 (/w/crates/tl-ui)\ntl-app v0.1.0 (/w/crates/tl-app)\n\
                     tl-app v0.1.0 (/w/crates/tl-app) (*)\n";
-        assert_eq!(shipped_in_tree(tree, &["tl-app", "tl-gpu-probe"]), vec!["tl-app"]);
+        assert_eq!(
+            shipped_in_tree(tree, &["tl-app", "tl-gpu-probe"]),
+            vec!["tl-app"]
+        );
     }
 
     #[test]
@@ -416,33 +527,92 @@ mod tests {
         let stderr = "error: specification `aes` is ambiguous\n\
                       help: re-run this command with one of the following specifications\n  \
                       aes@0.8.4\n  aes@0.9.3\n";
-        assert_eq!(ambiguous_specs(stderr, "aes"), vec!["aes@0.8.4", "aes@0.9.3"]);
+        assert_eq!(
+            ambiguous_specs(stderr, "aes"),
+            vec!["aes@0.8.4", "aes@0.9.3"]
+        );
     }
 
     #[test]
     fn api_scan_skips_cfg_test_module() {
-        let inside = "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn f() {\n        select!();\n    }\n}\n";
+        let inside =
+            "fn a() {}\n#[cfg(test)]\nmod tests {\n    fn f() {\n        select!();\n    }\n}\n";
         assert_eq!(scan_banned_apis(inside), Vec::new());
 
         let one_line = "#[cfg(test)] mod tests { fn f() { select!(); } }\n";
         assert_eq!(scan_banned_apis(one_line), Vec::new());
 
         let outside = "fn a() {}\n\nfn f() {\n    select!();\n}\n";
-        assert_eq!(scan_banned_apis(outside), vec![ApiHit { pattern: "select!", line: 4 }]);
+        assert_eq!(
+            scan_banned_apis(outside),
+            vec![ApiHit {
+                pattern: "select!",
+                line: 4
+            }]
+        );
 
         let after = "#[cfg(test)]\nmod tests {\n    fn f() {}\n}\nfn g() { select!(); }\n";
-        assert_eq!(scan_banned_apis(after), vec![ApiHit { pattern: "select!", line: 5 }]);
+        assert_eq!(
+            scan_banned_apis(after),
+            vec![ApiHit {
+                pattern: "select!",
+                line: 5
+            }]
+        );
     }
 
     #[test]
     fn api_scan_keeps_cfg_test_items_that_are_not_modules() {
         let source = "#[cfg(test)]\nfn helper() { select!(); }\n";
-        assert_eq!(scan_banned_apis(source), vec![ApiHit { pattern: "select!", line: 2 }]);
+        assert_eq!(
+            scan_banned_apis(source),
+            vec![ApiHit {
+                pattern: "select!",
+                line: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn api_scan_skips_comments() {
+        let source =
+            "//! Banned: `select!`, `actor`.\n/* race! */\nlet url = \"http://x\"; select!();\n";
+        assert_eq!(
+            scan_banned_apis(source),
+            vec![ApiHit {
+                pattern: "select!",
+                line: 3
+            }]
+        );
+
+        let in_string = "let s = \"// not a comment\"; let actor = 1;";
+        assert_eq!(
+            scan_banned_apis(in_string),
+            vec![ApiHit {
+                pattern: "actor",
+                line: 1
+            }]
+        );
+
+        let raw = "let s = r#\"\"//\"#; let c = '/'; let actor = 1;";
+        assert_eq!(
+            scan_banned_apis(raw),
+            vec![ApiHit {
+                pattern: "actor",
+                line: 1
+            }]
+        );
     }
 
     #[test]
     fn api_scan_whole_word() {
-        assert_eq!(scan_banned_apis("let actor = 1;"), vec![ApiHit { pattern: "actor", line: 1 }]);
+        assert_eq!(
+            scan_banned_apis("let actor = 1;"),
+            vec![ApiHit {
+                pattern: "actor",
+                line: 1
+            }]
+        );
         assert_eq!(scan_banned_apis("let factory = 1;"), Vec::new());
         assert_eq!(scan_banned_apis("let actors_count = 1;"), Vec::new());
     }
@@ -455,7 +625,10 @@ mod tests {
         let bare = "budget.with_poll_quota(8)";
         assert_eq!(
             scan_banned_apis(bare),
-            vec![ApiHit { pattern: ".with_poll_quota(", line: 1 }]
+            vec![ApiHit {
+                pattern: ".with_poll_quota(",
+                line: 1
+            }]
         );
 
         let no_reason = "budget.with_poll_quota(8) // check-deps: allow";
