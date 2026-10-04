@@ -113,3 +113,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
   `00000000-0000-4000-8000-000000000001` to `proc/sys/kernel/random/boot_id`, and
   `00000000000040008000000000000001` to a captured machine-id file. Found by the 2dl.10 privacy
   gate. Record in RECONCILIATION and ADR-013 in the next docs pass.
+- Review later: 8q0.4 keeps the fast ring at its old capacity when a source's period changes (bead says keep the ring). Check the visible time span after a rate change in the e2e pass.
