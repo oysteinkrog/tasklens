@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::sysroot::read_file;
 use crate::CollectError;
+use crate::sysroot::read_file;
 
 pub const UDEV_FILE_LIMIT: usize = 64 * 1024;
 
@@ -42,10 +42,7 @@ pub struct UdevProps(pub SmallVec<[(Arc<str>, Arc<str>); 8]>);
 
 impl UdevProps {
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.0
-            .iter()
-            .find(|(k, _)| &**k == key)
-            .map(|(_, v)| &**v)
+        self.0.iter().find(|(k, _)| &**k == key).map(|(_, v)| &**v)
     }
 
     pub fn clear(&mut self) {
@@ -149,7 +146,10 @@ mod tests {
         assert_eq!(out.0.len(), 2);
 
         read_udev_props(&entry_path(&root, &net_entry(2)), &UDEV_KEYS, &mut out).unwrap();
-        assert_eq!(out.get("ID_VENDOR_FROM_DATABASE"), Some("Intel Corporation"));
+        assert_eq!(
+            out.get("ID_VENDOR_FROM_DATABASE"),
+            Some("Intel Corporation")
+        );
         assert_eq!(
             out.get("ID_MODEL_FROM_DATABASE"),
             Some("Ethernet Controller I225-V")
@@ -217,7 +217,11 @@ mod tests {
         read_udev_props(&path, &UDEV_KEYS, &mut out).unwrap();
         assert_eq!(out.get("ID_BUS"), Some("ata"));
         assert_eq!(out.get("ID_MODEL"), None, "the cut last line is dropped");
-        assert_eq!(out.get("ID_PATH"), None, "bytes past the limit are not read");
+        assert_eq!(
+            out.get("ID_PATH"),
+            None,
+            "bytes past the limit are not read"
+        );
     }
 
     #[test]
