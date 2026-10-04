@@ -1,0 +1,126 @@
+---
+source: crates/tl-collect/tests/fixture_cpufreq.rs
+expression: info
+---
+CpuFreqStatic {
+    driver: Measured {
+        value: Some(
+            "amd-pstate-epp",
+        ),
+        validity: Valid,
+    },
+    governor: Measured {
+        value: Some(
+            "powersave",
+        ),
+        validity: Valid,
+    },
+    epp: Measured {
+        value: Some(
+            "balance_performance",
+        ),
+        validity: Valid,
+    },
+    platform_profile: Measured {
+        value: None,
+        validity: Unsupported,
+    },
+    prefcore_rank: [
+        Some(
+            226,
+        ),
+        Some(
+            236,
+        ),
+        Some(
+            231,
+        ),
+        Some(
+            221,
+        ),
+        Some(
+            211,
+        ),
+        Some(
+            206,
+        ),
+        Some(
+            216,
+        ),
+        Some(
+            236,
+        ),
+        Some(
+            176,
+        ),
+        Some(
+            201,
+        ),
+        Some(
+            191,
+        ),
+        Some(
+            181,
+        ),
+        Some(
+            171,
+        ),
+        Some(
+            196,
+        ),
+        Some(
+            166,
+        ),
+        Some(
+            186,
+        ),
+        Some(
+            226,
+        ),
+        Some(
+            236,
+        ),
+        Some(
+            231,
+        ),
+        Some(
+            221,
+        ),
+        Some(
+            211,
+        ),
+        Some(
+            206,
+        ),
+        Some(
+            216,
+        ),
+        Some(
+            236,
+        ),
+        Some(
+            176,
+        ),
+        Some(
+            201,
+        ),
+        Some(
+            191,
+        ),
+        Some(
+            181,
+        ),
+        Some(
+            171,
+        ),
+        Some(
+            196,
+        ),
+        Some(
+            166,
+        ),
+        Some(
+            186,
+        ),
+    ],
+}
