@@ -5,5 +5,6 @@
 pub mod block;
 pub mod error;
 pub mod format;
+pub mod segment;
 
 pub use error::HistoryError;
