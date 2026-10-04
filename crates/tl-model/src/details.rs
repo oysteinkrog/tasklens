@@ -5,11 +5,13 @@
 //! here: the window reads them from `ProcessRecord`. Each tab payload is a whole `Arc`, and an
 //! unchanged tab reuses its `Arc`, so the UI compares pointers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::actions::SchedPolicy;
 use crate::ids::{GroupKey, ProcessKey};
 use crate::process::ProcState;
+use crate::snapshot::ComponentHeader;
 use crate::system::CpuSet;
 use crate::table::{Total, UnitRef};
 use crate::validity::Validity;
@@ -562,13 +564,198 @@ pub fn env_name_is_masked(name: &str) -> bool {
     })
 }
 
-// filled by E03-059
-#[derive(Clone, Debug, Default)]
-pub struct StringScanState {}
+/// One Strings scan. Allocated by the UI, starting at 1.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct ScanId(pub u64);
 
-// filled by E03-059
+/// One handle search. Allocated by the UI, starting at 1.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct SearchId(pub u64);
+
+// ---- Strings (UI-PWN-017, PROC-084) ----
+
+/// Options of the Strings tab. Default: `min_len` 4, all three encodings on, file-backed
+/// regions off.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct StringScanOpts {
+    pub min_len: u8,
+    pub ascii: bool,
+    pub utf8: bool,
+    pub utf16le: bool,
+    pub include_file_backed: bool,
+}
+
+impl StringScanOpts {
+    pub const MIN_LEN_RANGE: std::ops::RangeInclusive<u8> = 4..=64;
+
+    /// False disables Scan ("Choose at least one encoding").
+    pub fn any_encoding(&self) -> bool {
+        self.ascii || self.utf8 || self.utf16le
+    }
+}
+
+impl Default for StringScanOpts {
+    fn default() -> Self {
+        Self {
+            min_len: 4,
+            ascii: true,
+            utf8: true,
+            utf16le: true,
+            include_file_backed: false,
+        }
+    }
+}
+
+/// A scan stops with `ScanPhase::StoppedLimit` at this many hits.
+pub const STRING_SCAN_MAX_HITS: u32 = 1_000_000;
+/// A scan stops with `ScanPhase::StoppedLimit` at this much string text.
+pub const STRING_SCAN_MAX_TEXT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// UI words: "ASCII", "UTF-8", "UTF-16LE".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StringEncoding {
+    Ascii,
+    Utf8,
+    Utf16Le,
+}
+
+/// One string found in process memory. `value` may hold secrets: never log it above debug level.
+#[derive(Clone, Debug)]
+pub struct StringHit {
+    pub address: u64,
+    pub encoding: StringEncoding,
+    pub length: u32,
+    pub value: Arc<str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScanPhase {
+    Scanning,
+    Finished,
+    Cancelled,
+    /// Stopped at `STRING_SCAN_MAX_HITS` or `STRING_SCAN_MAX_TEXT_BYTES`.
+    StoppedLimit,
+    /// "Scan stopped: the process exited."
+    StoppedExited,
+    /// "Failed to read process memory." The text lives in the UI.
+    Failed(Arc<str>),
+}
+
+/// The Strings tab.
+#[derive(Clone, Debug)]
+pub struct StringScanState {
+    pub scan: ScanId,
+    pub progress_pct: u8,
+    pub found: u32,
+    /// Append-only. Each new payload reuses the old chunk `Arc`s, so hits are never copied.
+    pub chunks: Arc<[Arc<[StringHit]>]>,
+    pub phase: ScanPhase,
+}
+
+// ---- App Properties (UI-PWN-020) ----
+
+/// UI words: "App", "Unit".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AppKind {
+    App,
+    Unit,
+}
+
+/// The General tab of an app group.
+#[derive(Clone, Debug)]
+pub struct AppGeneralDetail {
+    pub name: Arc<str>,
+    pub kind: AppKind,
+    pub icon_path: Option<Arc<str>>,
+    pub app_id: Option<Arc<str>>,
+    pub desktop_file: Option<Arc<str>>,
+    pub unit: Option<UnitRef>,
+    pub cgroup: Option<Arc<str>>,
+    pub processes: u32,
+    /// cgroup memory.stat anon.
+    pub memory_anon_bytes: Total<u64>,
+    /// memory.swap.current.
+    pub swap_bytes: Total<u64>,
+    /// io.stat rbytes delta.
+    pub disk_read_bps: Total<f64>,
+    /// io.stat wbytes delta.
+    pub disk_write_bps: Total<f64>,
+    /// "Command line (primary process)".
+    pub primary_cmdline: Total<Arc<str>>,
+}
+
+// ---- Set Affinity (UI-PWN-021) ----
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct AffinityInfo {
+    pub mask: CpuSet,
+    pub cpuset_limit: CpuSet,
+}
+
+// ---- Search File Handles (UI-PWN-030, UI-PWN-031) ----
+
+/// UI words: "Initializing... please wait.", "Retrieving file handles... 42% (18 234 total
+/// handles)", "Searching...", "Found 12 matches" / "Found 1 match" / "No results found.",
+/// "Search stopped. Found 12 matches", "Handle search failed".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HandlePhase {
+    Initializing,
+    Retrieving,
+    Searching,
+    Done,
+    Stopped,
+    Failed,
+}
+
+/// UI words: "fd", "mmap", "cwd", "exe", "root".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HandleKind {
+    Fd,
+    Mmap,
+    Cwd,
+    Exe,
+    Root,
+}
+
+/// One match. `path` may be private: never log it above debug level.
+#[derive(Clone, Debug)]
+pub struct HandleHit {
+    pub key: ProcessKey,
+    pub name: Arc<str>,
+    pub user: Arc<str>,
+    pub kind: HandleKind,
+    pub fd: Option<i32>,
+    pub path: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct HandleSearchState {
+    pub search: SearchId,
+    pub phase: HandlePhase,
+    pub progress_pct: u8,
+    /// "(18 234 total handles)".
+    pub total_handles: u64,
+    /// Append-only, never copied.
+    pub chunks: Arc<[Arc<[HandleHit]>]>,
+    /// Processes searched.
+    pub searched: u32,
+    /// Processes in total.
+    pub total: u32,
+    /// Processes that need administrator rights.
+    pub skipped: u32,
+}
+
+// ---- The component ----
+
 #[derive(Clone, Debug, Default)]
-pub struct AppGeneralDetail {}
+pub struct DetailsSnapshot {
+    pub header: ComponentHeader,
+    /// At most 16 (`Demand.details`).
+    pub targets: HashMap<DetailTarget, Arc<TargetDetail>>,
+    /// Keys of `Demand.affinity_targets`, at most 256.
+    pub affinity: HashMap<ProcessKey, AffinityInfo>,
+    pub handle_search: Option<Arc<HandleSearchState>>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -690,5 +877,40 @@ mod tests {
         assert!(!text.contains("hunter2"));
         assert!(!text.contains("GH_TOKEN"));
         assert!(text.contains("vars: 1"));
+    }
+
+    #[test]
+    fn string_scan_opts_default() {
+        let opts = StringScanOpts::default();
+        assert_eq!(opts.min_len, 4);
+        assert!(opts.ascii && opts.utf8 && opts.utf16le);
+        assert!(!opts.include_file_backed);
+        assert!(opts.any_encoding());
+        assert!(StringScanOpts::MIN_LEN_RANGE.contains(&opts.min_len));
+    }
+
+    #[test]
+    fn string_scan_no_encoding() {
+        let opts = StringScanOpts {
+            ascii: false,
+            utf8: false,
+            utf16le: false,
+            ..StringScanOpts::default()
+        };
+        assert!(!opts.any_encoding());
+    }
+
+    #[test]
+    fn details_snapshot_default_empty() {
+        let snap = DetailsSnapshot::default();
+        assert!(snap.targets.is_empty());
+        assert!(snap.affinity.is_empty());
+        assert!(snap.handle_search.is_none());
+    }
+
+    #[test]
+    fn string_scan_limits() {
+        assert_eq!(STRING_SCAN_MAX_HITS, 1_000_000);
+        assert_eq!(STRING_SCAN_MAX_TEXT_BYTES, 268_435_456);
     }
 }
