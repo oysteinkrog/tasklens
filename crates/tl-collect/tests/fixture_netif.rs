@@ -83,7 +83,10 @@ fn details_eth0() {
     let mut buf = Vec::new();
     let got = netif::read_details(&root, "eth0", &mut buf);
     assert_eq!(got.speed_mbps, Measured::valid(1000));
-    assert_eq!(got.mac, Measured::valid(Some(Arc::from("aa:bb:cc:dd:ee:01"))));
+    assert_eq!(
+        got.mac,
+        Measured::valid(Some(Arc::from("aa:bb:cc:dd:ee:01")))
+    );
     assert_eq!(got.ifindex, 2);
     assert_eq!(got.driver.as_deref(), Some("e1000e"));
 }

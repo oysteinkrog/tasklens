@@ -195,10 +195,8 @@ pub fn read_details(root: &SysRoot, name: &str, buf: &mut Vec<u8>) -> IfaceDetai
     let dir = root.sys_path("class/net").join(name);
     let speed_mbps = match read_i64(&dir.join("speed"), buf) {
         Ok(-1) | Err(CollectError::Os(Errno::INVAL)) => Measured::invalid(Validity::Unsupported),
-        Ok(mbps) => u32::try_from(mbps).map_or_else(
-            |_| Measured::invalid(Validity::Failed),
-            Measured::valid,
-        ),
+        Ok(mbps) => u32::try_from(mbps)
+            .map_or_else(|_| Measured::invalid(Validity::Failed), Measured::valid),
         Err(err) => Measured::invalid(err.validity()),
     };
     let mac = match read_trimmed(&dir.join("address"), buf) {
