@@ -1,7 +1,7 @@
 //! CPU sampler: total, kernel, interrupt and per-core percentages, clocks and temperature from
 //! /proc/stat, cpufreq and the CPU hwmon input (ADR-008, ADR-016, PERF-028, PERF-029, PERF-033,
 //! PERF-039, PERF-040, PROC-012), and the 1 Hz live stats: load average, open files, process
-//! count and uptime (PERF-033, PERF-034).
+//! count and uptime (PERF-033, PERF-034), and RAPL power (PERF-038).
 //!
 //! `sample_at` allocates nothing after the first sample: the two `StatData` buffers are swapped
 //! and the output vectors keep their capacity. Only a CPU hotplug re-reads the topology.
@@ -18,6 +18,7 @@ use crate::parse::cpufreq::{CpuFreq, FreqReading, FreqSource};
 use crate::parse::filenr::parse_file_nr;
 use crate::parse::hwmon::{self, parse_millidegrees};
 use crate::parse::loadavg::{LoadAvg, parse_loadavg};
+use crate::parse::rapl::{Rapl, RaplReading};
 use crate::parse::stat::{CpuTimes, StatData, parse_stat};
 use crate::parse::topology::{TopologyInfo, read_topology};
 use crate::sysroot::{KeptFile, read_file};
@@ -30,6 +31,8 @@ pub struct CpuOpts {
     pub temp: bool,
     /// Load average, open files, process count and uptime. 1 Hz ticks only: it scans /proc.
     pub live_stats: bool,
+    /// RAPL package and core power. Two `pread`s per sample.
+    pub power: bool,
 }
 
 /// Byte limit for the one-shot reads of /proc/loadavg and /proc/sys/fs/file-nr.
@@ -85,6 +88,8 @@ pub struct CpuReading {
     pub btime: u64,
     /// Default when `!opts.live_stats`.
     pub live: LiveStats,
+    /// Default when `!opts.power`.
+    pub power: RaplReading,
 }
 
 pub struct CpuSampler {
@@ -106,6 +111,9 @@ pub struct CpuSampler {
     /// The CPU temperature input, `None` without a CPU temperature chip.
     temp: Option<KeptFile>,
     topology: TopologyInfo,
+    rapl: Rapl,
+    /// Counter generation of the RAPL counters. Bumped on resume and `reset_baselines` (ADR-008).
+    generation: u32,
 }
 
 /// Counter deltas of one `cpu` line between two samples.
@@ -123,6 +131,7 @@ impl CpuSampler {
     pub fn new(root: SysRoot) -> Result<Self, CollectError> {
         let topology = read_topology(&root)?;
         let freq = CpuFreq::open(&root);
+        let rapl = Rapl::open(&root);
         let mut chips = Vec::new();
         let temp = match hwmon::enumerate(&root, &mut chips) {
             Ok(()) => hwmon::cpu_temp_input(&chips).and_then(|(i, n)| {
@@ -145,6 +154,8 @@ impl CpuSampler {
             freq,
             temp,
             topology,
+            rapl,
+            generation: 0,
         })
     }
 
@@ -162,6 +173,19 @@ impl CpuSampler {
         } else {
             LiveStats::default()
         };
+
+        let resumed = self
+            .prev_clock
+            .is_some_and(|prev| resumed_between(prev, clock));
+        if resumed {
+            self.generation = self.generation.wrapping_add(1);
+            self.rapl.reset();
+        }
+        if opts.power {
+            self.rapl.read(clock, self.generation, &mut out.power);
+        } else {
+            out.power = RaplReading::default();
+        }
 
         let parsed = self
             .stat
@@ -181,9 +205,6 @@ impl CpuSampler {
             out.topology_changed = true;
         }
 
-        let resumed = self
-            .prev_clock
-            .is_some_and(|prev| resumed_between(prev, clock));
         let len = self.per_cpu_len();
         if resumed || !self.baseline {
             let flags = if resumed || self.gap_pending {
@@ -290,6 +311,8 @@ impl CpuSampler {
     pub fn reset_baselines(&mut self) {
         self.baseline = false;
         self.gap_pending = true;
+        self.generation = self.generation.wrapping_add(1);
+        self.rapl.reset();
     }
 
     pub fn topology(&self) -> &TopologyInfo {
@@ -473,18 +496,21 @@ mod tests {
         freq: true,
         temp: true,
         live_stats: false,
+        power: false,
     };
     const LIVE: CpuOpts = CpuOpts {
         per_cpu: false,
         freq: false,
         temp: false,
         live_stats: true,
+        power: false,
     };
     const PER_CPU: CpuOpts = CpuOpts {
         per_cpu: true,
         freq: false,
         temp: false,
         live_stats: false,
+        power: false,
     };
 
     fn fixture_dir(name: &str) -> PathBuf {
@@ -780,6 +806,87 @@ mod tests {
             "{} vs {expected}",
             r.live.boot_time_unix_s
         );
+    }
+
+    const POWER: CpuOpts = CpuOpts {
+        per_cpu: false,
+        freq: false,
+        temp: false,
+        live_stats: false,
+        power: true,
+    };
+
+    /// `cpu-math` step 0 plus a package zone holding `energy` µJ.
+    fn power_copy(energy: u64) -> tempfile::TempDir {
+        let dir = step_copy("cpu-math", 0);
+        let zone = dir.path().join("sys/class/powercap/intel-rapl:0");
+        fs::create_dir_all(&zone).unwrap();
+        fs::write(zone.join("max_energy_range_uj"), "262143328850\n").unwrap();
+        set_energy(dir.path(), energy);
+        dir
+    }
+
+    /// Rewrites in place so the kept fd sees the new value.
+    fn set_energy(dir: &Path, energy: u64) {
+        let path = dir.join("sys/class/powercap/intel-rapl:0/energy_uj");
+        fs::write(path, format!("{energy}\n")).unwrap();
+    }
+
+    #[test]
+    fn power_watts() {
+        let dir = power_copy(1_000_000);
+        let mut s = sampler(dir.path());
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), POWER, &mut r);
+        assert_eq!(r.power.package_w.validity, Validity::WarmingUp);
+        apply_step(dir.path(), "cpu-math", 1);
+        set_energy(dir.path(), 6_000_000);
+        s.sample_at(at(2 * SEC), POWER, &mut r);
+        assert_eq!(r.power.package_w, Measured::valid(5.0));
+        assert_eq!(r.power.core_w.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn power_reset_on_reset_baselines() {
+        let dir = power_copy(1_000_000);
+        let mut s = sampler(dir.path());
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), POWER, &mut r);
+        set_energy(dir.path(), 6_000_000);
+        s.sample_at(at(2 * SEC), POWER, &mut r);
+        assert_eq!(r.power.package_w, Measured::valid(5.0));
+
+        s.reset_baselines();
+        set_energy(dir.path(), 11_000_000);
+        s.sample_at(at(3 * SEC), POWER, &mut r);
+        assert_eq!(r.power.package_w.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn power_reset_on_resume() {
+        let dir = power_copy(1_000_000);
+        let mut s = sampler(dir.path());
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), POWER, &mut r);
+        set_energy(dir.path(), 6_000_000);
+        // 5 s of boottime, 10 ms of monotonic time: the machine slept.
+        let resumed = Clock {
+            boot_ns: 6 * SEC,
+            mono_ns: SEC + 10 * MS,
+        };
+        s.sample_at(resumed, POWER, &mut r);
+        assert_eq!(r.power.package_w.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn power_off_default() {
+        let dir = power_copy(1_000_000);
+        let mut s = sampler(dir.path());
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), PER_CPU, &mut r);
+        set_energy(dir.path(), 6_000_000);
+        s.sample_at(at(2 * SEC), PER_CPU, &mut r);
+        assert_eq!(r.power, RaplReading::default());
     }
 
     #[test]
