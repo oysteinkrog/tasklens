@@ -1,0 +1,18 @@
+[package]
+name = "tl-gpu-probe"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tl-gpu-probe"
+path = "src/main.rs"
+
+[dependencies]
+tl-model = { workspace = true }
+
+[features]
+fake = []
+
+[lints]
+workspace = true

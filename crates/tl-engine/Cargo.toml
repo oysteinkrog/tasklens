@@ -1,0 +1,17 @@
+[package]
+name = "tl-engine"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tl-model   = { workspace = true }
+tl-collect = { workspace = true }
+tl-ops     = { workspace = true }
+asupersync = { workspace = true }
+
+[dev-dependencies]
+asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
+
+[lints]
+workspace = true
