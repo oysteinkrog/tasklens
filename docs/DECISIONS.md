@@ -2,6 +2,68 @@
 
 Decisions made by Oystein, newest first. Implementation agents must not reopen these.
 
+## 2026-10-04
+
+D-012 to D-020 answer the owner-decision topics of the settled open items (`docs/RECONCILIATION.md`
+R-139 to R-235). Every answer took the recommended option except D-017.
+
+### D-020: The history chart stacks the top 3 processes plus "other"
+
+Per bucket the history chart draws the three largest per-process values as a stack and the sum
+of the rest as one "other" band, all in the metric colour. Header totals for a selected range are
+averages over the range. (OI-E31, R-169.)
+
+### D-019: Polkit prompt texts are the E29-021 texts
+
+The `<description>` and `<message>` of the three polkit actions ship as E29-021 wrote them.
+`...tasklens.helper`: "Run tasklens administrator actions" / "Authentication is required to let
+tasklens act on other users' processes, system services and network connections."
+`...tasklens.setup`: "Change tasklens system setup" / "Authentication is required to change system
+settings for tasklens." `...tasklens.netmon`: "Run the tasklens network monitor" / "Authentication
+is required to run the tasklens network monitor." No shorter one-line variants. (OI-E30, R-168.)
+
+### D-018: TaskSlinger INI import reads plain booleans and in-range integers only
+
+Until Oystein supplies a `UserSettings.ini` or the inventory section that names the INI sections
+and value encodings, E33-018 imports only plain boolean and in-range integer keys. Everything else
+is skipped. (OI-E21, R-159.)
+
+### D-017: The PKGBUILD licence is MIT
+
+`license=('MIT')` in `packaging/PKGBUILD`. D-005 keeps the repo private; this is the licence the
+package declares, not a publication decision. This went against the "owner's choice, no
+recommendation" line in the open item. (OI-E21, R-159.)
+
+### D-016: `--app-id <id>` isolates everything
+
+`--app-id <id>` replaces the `tasklens` directory component in all four XDG roots (config, state,
+cache, runtime) and is the Wayland `app_id` and the single-instance bus name. History, logs, crash
+reports and the icon cache follow. APP-052's "separate instance and settings dir" means this.
+(OI-E21, R-159.)
+
+### D-015: `--force-full-memory-mode` with `--low-memory` runs the full engine
+
+With `--low-memory` it starts the engine in `EngineMode::Full` while keeping the rescue window, so
+the rescue window can be tested against real data. Alone it does nothing. It gets a bead.
+(OI-E14, R-152.)
+
+### D-014: The application icon is a placeholder for now
+
+E15-022 builds `assets/icons/tasklens.svg` as a 256 px rounded square in the accent colour with
+a white monospace "tl". A new P3 bead E15-026 swaps in final artwork when Oystein supplies it.
+(OI-U42, R-212.)
+
+### D-013: Theme share codes import TL1 now, TS1 later
+
+E17-010 ships import of the tasklens `TL1` format. TS1 import follows when Oystein generates one
+TaskSlinger share code from a known theme and records it in U-17. (OI-U41, R-211.)
+
+### D-012: Two built-in themes ship now, eight follow from the TaskSlinger export
+
+E17-005 ships Default Light and Default Dark from hand-written values. A new P2 bead E17-015 adds
+the eight named palettes when Oystein exports `assets/themes/builtin.json` from TaskSlinger
+(U-18). (OI-U40, R-210.)
+
 ## 2026-10-03
 
 D-007 to D-010 answer the owner questions in `docs/RECONCILIATION.md`.
