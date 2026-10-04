@@ -92,11 +92,11 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - **Persistent keys** (stored in settings and state):
     - `cpu` and `memory`;
     - `gpu:<NVML UUID>` for NVIDIA, else `gpu:pci:<domain:bus:dev.fn>`;
-    - `disk:<udev ID_WWN or ID_SERIAL>`, falling back to the by-path name;
+    - `disk:<udev ID_WWN or ID_SERIAL>`, falling back to the by-path name, then to `disk:<kernel name>` (R-229);
     - `net:<ifname>`;
-    - `fan:<hwmon name>:<device path>:<n>`;
+    - `fan:<hwmon name>:<device path>:<n>`, falling back to `fan:<chip>:<index>` when there is no device path (R-229);
     - `bat:<UPower NativePath>`;
-    - `aggregate:disk` and `aggregate:gpu` for the aggregate pages (PERF-009; inferred).
+    - `aggregate:disk`, `aggregate:net` and `aggregate:gpu` for the aggregate pages (PERF-009; R-154). Workers compute every key and ship it as `DeviceDesc.persistent_key` (R-155).
   - **Runtime identity** adds a generation: major:minor plus a lifecycle counter for block devices; netns plus ifindex plus a counter for interfaces.
   - **Discovery:** rescan every 5 s while any of disks, network or sensors is demanded (ADR-016). There is no `NETLINK_KOBJECT_UEVENT` socket in v1; it may come back in P4 as an optimisation bead. Batteries use UPower `DeviceAdded` and `DeviceRemoved` signals (PERF-078).
   - `performance.selected_device` in `state.toml` keeps the selected key across restarts.
@@ -713,7 +713,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Source: TS Average response time, Read speed, Write speed, Capacity, Formatted, System disk, Page file, Hardware name, Used space, Free space | MC Total read/written, Type, WWN, Serial, Rotation rate
 - Behaviour: Rows: Active time, Average response time (ms, 2 decimals), Read speed, Write speed, Total read, Total written, Capacity, Formatted, Used space, Free space, System disk, Swap (replaces Page file: Yes/No), Hardware name, Type, Interface, WWN, Serial, Rotation rate, Temperature. WWN, Serial and Rotation rate are hidden when missing (PERF-013).
 - Linux data/mechanism:
-  - Response time = Δ(read_ticks + write_ticks + discard_ticks + flush_ticks) / Δ(reads + writes + discards + flushes), from the matching `/proc/diskstats` fields.
+  - Response time = Δ(read_ticks + write_ticks) / Δ(reads + writes), from the matching `/proc/diskstats` fields (ADR-016 form, R-162).
   - Totals from the sector counters since boot.
   - Capacity = `/sys/block/<d>/size` × 512.
   - Formatted, used and free = sums of `statvfs` over mounted filesystems on this disk.
@@ -808,11 +808,11 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Linux data/mechanism:
   - `/sys/class/net/<if>/`, in order:
     - a `wireless/` or `phy80211` entry is Wi-Fi;
+    - a name matching `docker*|veth*|br-*|virbr*|vnet*` is Virtual (checked before `bridge/`, R-162; `mpqemubr*` joins once seen on a Multipass install, U-52);
     - `bridge/` is Bridge;
     - `tun_flags` or `type`=65534 is Tunnel;
     - `device/driver` under a usb parent is USB network;
     - `wwan*` or `type`=519 is Cellular;
-    - a name matching `docker*|veth*|br-*|virbr*|vnet*` is Virtual;
     - `type`=1 with a `device` link is Ethernet;
     - anything else is Other.
   - NetworkManager `Device.DeviceType`, read as `u` (u32), refines VPN and WireGuard when NM is present.
@@ -1346,7 +1346,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - Open it with View > Window > "Performance mini window" (checkable), Ctrl+Shift+M, the tray menu item "Show mini window", or a double-click on the Performance graph area. Closing the mini window unchecks the menu item. Ctrl+M stays Graph Summary View.
   - Double-click on the mini window, or "Show Main Window" in its menu, returns to the main window. Clicking a card opens the main window on that page.
   - Its context menu: "Always on top", "Show Main Window", "Close".
-  - "Always on top" is on by default when the window opens and is not persisted (only the main window's pin persists). On KDE it sets `keepAbove` through the KWin bridge. On X11 it sends `_NET_WM_STATE_ABOVE`. Elsewhere it is disabled with the tooltip "Not supported by this desktop".
+  - "Always on top" is on by default when the window opens and is not persisted (only the main window's pin persists). On KDE it sets `keepAbove` through the KWin bridge. Elsewhere, X11 included, it is disabled with the tooltip "Not supported by this desktop" (R-177).
 - Linux data/mechanism: GPUI `Floating` window, caption "tasklens Mini Window", matched by the KWin bridge by pid plus caption as in PERF-083 (R-086). While the main window is hidden, demand comes from the cards shown in the mini window.
 - Verdict: ADAPT. TaskSlinger's trigger is unknown, so tasklens defines these.
 - Phase: P3
@@ -1410,7 +1410,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
   - Domain: `getdomainname()`, or the DNS domain of the hostname. The row is hidden when that is empty or "(none)". TaskSlinger's "WORKGROUP" fallback is not used.
   - System uptime (PERF-034 format) and Boot time (`YYYY-MM-DD HH:MM:SS` local).
   - Process count, Thread count, Handle count: real values (fixing TaskSlinger's zero bug), computed as in PERF-033. "Handle count" has the tooltip "Open file descriptors, system-wide".
-  - Desktop ("KDE Plasma 6.x"), Windowing system ("Wayland"), Session type, Virtual terminal.
+  - Desktop ("KDE Plasma 6.x"), Windowing system (the display name, "Wayland" or "X11"), Session type (the raw `XDG_SESSION_TYPE`, for example "wayland"; R-166), Virtual terminal.
 - Linux data/mechanism:
   - systemd-hostnamed `org.freedesktop.hostname1` (`PrettyHostname`, `StaticHostname`).
   - `getpwuid(getuid())`; `getdomainname(2)`.
@@ -1424,7 +1424,7 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Was: v2 PERF-087
 - Source: TS Total Physical, Available Physical, Memory Usage, Committed, Commit Limit, Peak Committed, Page Size
 - Behaviour: Rows: Total physical, Available physical, Memory usage (percent), Committed, Commit limit, "Peak committed (since tasklens started)", Page size ("4096 bytes"), Huge page size, Swap total, zram size.
-- Linux data/mechanism: `/proc/meminfo`, `sysconf(_SC_PAGESIZE)`, meminfo `Hugepagesize`. The kernel keeps no peak for Committed_AS, so tasklens tracks the maximum it has seen while running.
+- Linux data/mechanism: `/proc/meminfo`, `sysconf(_SC_PAGESIZE)`, meminfo `Hugepagesize`. The kernel keeps no peak for Committed_AS, so the reducer keeps the running maximum since engine start as `MemoryInfo.peak_committed_bytes`; the inventory worker leaves the field `WarmingUp` (R-166).
 - Verdict: ADAPT. The peak covers the tasklens run, and the label says so.
 - Phase: P2
 - Privilege: none
