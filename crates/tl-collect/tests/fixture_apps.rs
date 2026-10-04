@@ -808,6 +808,7 @@ fn group_key_stable() {
         app_id: Arc::from("firefox"),
     };
     assert_eq!(group_key(&app), group_key(&app.clone()));
+    assert_eq!(group_key(&app), app.key());
     let keys = [
         group_key(&app),
         group_key(&GroupKind::Background),

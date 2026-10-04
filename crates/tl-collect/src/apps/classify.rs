@@ -1,9 +1,7 @@
 //! Classify processes as app, background or system.
 
-use std::hash::Hasher;
 use std::sync::Arc;
 
-use rustc_hash::FxHasher;
 use tl_model::ids::GroupKey;
 use tl_model::process::GroupKind;
 
@@ -89,19 +87,8 @@ pub fn classify(inp: &ClassifyInput<'_>, self_uid: u32) -> (ProcClass, GroupKind
     (ProcClass::Background, GroupKind::Background)
 }
 
-/// The stable hash of a group (ADR-003, ADR-012): FxHasher over a discriminant byte (`App` 1,
-/// `Background` 2, `System` 3, `Ungrouped` 4), then the app id bytes for `App`. FxHasher has no
-/// random seed, so the value is the same in every run.
+/// The stable hash of a group (ADR-003, ADR-012). Same value as `GroupKind::key()`, which
+/// defines the scheme (R-279).
 pub fn group_key(kind: &GroupKind) -> GroupKey {
-    let mut h = FxHasher::default();
-    match kind {
-        GroupKind::App { app_id } => {
-            h.write_u8(1);
-            h.write(app_id.as_bytes());
-        }
-        GroupKind::Background => h.write_u8(2),
-        GroupKind::System => h.write_u8(3),
-        GroupKind::Ungrouped => h.write_u8(4),
-    }
-    GroupKey(h.finish())
+    kind.key()
 }
