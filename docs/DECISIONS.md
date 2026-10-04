@@ -58,11 +58,11 @@ a white monospace "tl". A new P3 bead E15-026 swaps in final artwork when Oystei
 E17-010 ships import of the tasklens `TL1` format. TS1 import follows when Oystein generates one
 TaskSlinger share code from a known theme and records it in U-17. (OI-U41, R-211.)
 
-### D-012: Two built-in themes ship now, eight follow from the TaskSlinger export
+### D-012: Two built-in themes ship now, the ten named palettes follow from the TaskSlinger export
 
-E17-005 ships Default Light and Default Dark from hand-written values. A new P2 bead E17-015 adds
-the eight named palettes when Oystein exports `assets/themes/builtin.json` from TaskSlinger
-(U-18). (OI-U40, R-210.)
+Default Light and Default Dark ship at P0 from hand-written values (E17-002). E17-005 adds all ten
+named APP-035 palettes when Oystein exports `assets/themes/builtin.json` from TaskSlinger (U-18) and
+stays blocked until then. No new bead. (OI-U40, R-210.)
 
 ## 2026-10-03
 
