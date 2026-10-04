@@ -266,10 +266,7 @@ mod tests {
     fn readable_status() {
         let dir = tempfile::tempdir().unwrap();
         zone(dir.path(), "intel-rapl:0", 1_000_000, Some(262_143_328_850));
-        assert_eq!(
-            rapl_status(&SysRoot::at(dir.path())),
-            RaplStatus::Readable
-        );
+        assert_eq!(rapl_status(&SysRoot::at(dir.path())), RaplStatus::Readable);
     }
 
     #[test]
