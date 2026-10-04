@@ -5,6 +5,7 @@ members = [
   "crates/tl-collect",
   "crates/tl-ops",
   "crates/tl-engine",
+  "crates/tl-history",
   "crates/tl-gpu-probe",
   "crates/tl-ui",
   "crates/tl-app",
