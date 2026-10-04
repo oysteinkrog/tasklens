@@ -636,3 +636,110 @@ fn statm_fields_parsed() {
         }
     );
 }
+
+use tl_collect::proc::cgroup::{
+    CgroupPath, UserPlacement, app_slice_unit, parse_cgroup_file, placement, unescape_unit,
+};
+
+fn cgroup(pid: u32) -> CgroupPath {
+    parse_cgroup_file(&fixture_bytes(
+        "process-edge",
+        &format!("proc/{pid}/cgroup"),
+    ))
+    .expect("parse cgroup")
+}
+
+#[test]
+fn cgroup_kde_app_unit() {
+    let p = cgroup(4205);
+    assert_eq!(
+        &*p.rel,
+        "user.slice/user-1000.slice/user@1000.service/app.slice/app-chrome\\x2dwork@00bca6.service"
+    );
+    assert_eq!(
+        p.unit.as_deref(),
+        Some("app-chrome\\x2dwork@00bca6.service")
+    );
+    let slices: Vec<&str> = p.slices.iter().map(|s| &**s).collect();
+    assert_eq!(slices, ["user.slice", "user-1000.slice", "app.slice"]);
+    assert_eq!(
+        app_slice_unit(&p, 1000),
+        Some("app-chrome\\x2dwork@00bca6.service")
+    );
+
+    let firefox = cgroup(4201);
+    assert_eq!(firefox.unit.as_deref(), Some("app-firefox@3a1b.service"));
+    assert_eq!(
+        app_slice_unit(&firefox, 1000),
+        Some("app-firefox@3a1b.service")
+    );
+
+    let root = cgroup(57);
+    assert_eq!(&*root.rel, "");
+    assert_eq!(root.unit, None);
+    assert!(root.slices.is_empty());
+    assert_eq!(app_slice_unit(&root, 1000), None);
+}
+
+#[test]
+fn cgroup_unescape_x2d() {
+    let mut out = String::from("stale");
+    unescape_unit("app-chrome\\x2dwork@00bca6.service", &mut out);
+    assert_eq!(out, "app-chrome-work@00bca6.service");
+    unescape_unit("a\\x2Db\\x2fc", &mut out);
+    assert_eq!(out, "a-b/c");
+    for malformed in ["bad\\x2", "bad\\xg1", "bad\\", "bad\\y2d", "\\x"] {
+        unescape_unit(malformed, &mut out);
+        assert_eq!(out, malformed);
+    }
+}
+
+#[test]
+fn cgroup_placement_classes() {
+    assert_eq!(
+        placement(&cgroup(4205)),
+        UserPlacement::InUserManager { uid: 1000 }
+    );
+    assert_eq!(
+        placement(&cgroup(4206)),
+        UserPlacement::InSessionScope { uid: 1000 }
+    );
+    let pipewire = cgroup(4207);
+    assert_eq!(placement(&pipewire), UserPlacement::OutsideUserSlice);
+    assert_eq!(pipewire.unit.as_deref(), Some("pipewire.service"));
+    assert_eq!(placement(&cgroup(57)), UserPlacement::OutsideUserSlice);
+    for other in ["0::/init.scope\n", "0::/machine.slice/vm.scope\n"] {
+        let p = parse_cgroup_file(other.as_bytes()).expect("parse");
+        assert_eq!(placement(&p), UserPlacement::OutsideUserSlice);
+    }
+    let mismatch =
+        parse_cgroup_file(b"0::/user.slice/user-1000.slice/user@1001.service/app.slice/a.service")
+            .expect("parse");
+    assert_eq!(placement(&mismatch), UserPlacement::OutsideUserSlice);
+    assert_eq!(app_slice_unit(&mismatch, 1000), None);
+}
+
+#[test]
+fn cgroup_v1_only_is_none() {
+    assert_eq!(parse_cgroup_file(b"12:cpu:/foo\n"), None);
+    assert_eq!(parse_cgroup_file(b"12:cpu:/foo\n3:memory:/bar\n"), None);
+    assert_eq!(parse_cgroup_file(b""), None);
+    let hybrid = parse_cgroup_file(b"12:cpu:/foo\n0::/system.slice/sshd.service\n").expect("v2");
+    assert_eq!(&*hybrid.rel, "system.slice/sshd.service");
+}
+
+#[test]
+fn cgroup_uid_not_hard_coded() {
+    let p = cgroup(4205);
+    assert_eq!(app_slice_unit(&p, 1001), None);
+    let other = parse_cgroup_file(
+        b"0::/user.slice/user-1001.slice/user@1001.service/app.slice/app-x.slice/app-y.scope\n",
+    )
+    .expect("parse");
+    assert_eq!(
+        placement(&other),
+        UserPlacement::InUserManager { uid: 1001 }
+    );
+    assert_eq!(app_slice_unit(&other, 1001), Some("app-x.slice"));
+    assert_eq!(app_slice_unit(&other, 1000), None);
+}

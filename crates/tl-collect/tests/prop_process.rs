@@ -65,6 +65,22 @@ proptest! {
 
 proptest! {
     #[test]
+    fn cgroup_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        let mut v2 = b"0::/".to_vec();
+        v2.extend_from_slice(&bytes);
+        for buf in [&bytes, &v2] {
+            if let Some(p) = tl_collect::proc::cgroup::parse_cgroup_file(buf) {
+                let _ = tl_collect::proc::cgroup::placement(&p);
+                let _ = tl_collect::proc::cgroup::app_slice_unit(&p, 1000);
+                let mut out = String::new();
+                tl_collect::proc::cgroup::unescape_unit(&p.rel, &mut out);
+            }
+        }
+    }
+}
+
+proptest! {
+    #[test]
     fn rollup_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
         let mut out = tl_collect::proc::smaps::Rollup::default();
         let _ = tl_collect::proc::smaps::parse_rollup(&bytes, &mut out);
