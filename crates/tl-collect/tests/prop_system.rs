@@ -403,14 +403,14 @@ const RAPL_ENERGY: &str = "sys/class/powercap/intel-rapl:0/energy_uj";
 /// Writes `bytes` to <dir>/<rel>, creating the parent directories.
 fn write_at(dir: &Path, rel: &str, bytes: &[u8]) {
     let path = dir.join(rel);
-    fs::create_dir_all(path.parent().unwrap()).unwrap();
-    fs::write(path, bytes).unwrap();
+    fs::create_dir_all(path.parent().expect("fixture path has a parent")).expect("create dir");
+    fs::write(path, bytes).expect("write fixture file");
 }
 
 /// Writes the three zswap parameter files and reads them back. zswap has no byte-slice parser:
 /// `read_zswap` reads the files itself.
 fn zswap_on(enabled: &[u8], compressor: &[u8], max_pool: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     write_at(dir.path(), &format!("{ZSWAP_PARAMS}/enabled"), enabled);
     write_at(
         dir.path(),
@@ -428,7 +428,7 @@ fn zswap_on(enabled: &[u8], compressor: &[u8], max_pool: &[u8]) {
 /// Two RAPL reads one second apart over the given `energy_uj` contents. The energy parser is
 /// private to `Rapl`, so the bytes go through the kept file.
 fn rapl_on(first: &[u8], second: &[u8]) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("create tempdir");
     write_at(dir.path(), RAPL_ENERGY, first);
     let mut rapl = Rapl::open(&tl_collect::SysRoot::at(dir.path()));
     let mut out = RaplReading::default();
@@ -440,7 +440,7 @@ fn rapl_on(first: &[u8], second: &[u8]) {
         1,
         &mut out,
     );
-    fs::write(dir.path().join(RAPL_ENERGY), second).unwrap();
+    fs::write(dir.path().join(RAPL_ENERGY), second).expect("write energy_uj");
     rapl.read(
         Clock {
             boot_ns: 1_000_000_000,
