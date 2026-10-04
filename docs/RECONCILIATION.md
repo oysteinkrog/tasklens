@@ -1706,6 +1706,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: the lgw.4 contrast test and the agent's measurements on all Dark backgrounds [verified]; WCAG 2 contrast formula [verified by computation].
 - Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; `assets/themes/builtin.json` and `crates/tl-ui/src/theme/builtin.rs` (bead lgw.4, follow-up commit).
 
+### R-270 `FourTuple` keeps the IPv6 scope id over the helper wire
+- Question: E03-070 (`tasklens-as2.36`) needs a round trip of `FourTuple` with an IPv6 scope id. serde's built-in `SocketAddrV6` writes only (ip, port) in binary formats such as postcard and reads the scope id back as 0 (serde_core 1.0.229). A link-local `SockDestroy` would then lose its interface on the way to the helper. Leader decision, 2026-10-04.
+- Resolution: `FourTuple` in `crates/tl-model/src/actions.rs` gets hand-written `Serialize` and `Deserialize` that encode each address as a tagged pair: V4 is (ip, port), V6 is (ip, port, flowinfo, scope_id). The struct fields stay `std::net::SocketAddr`. E03-070 owns this change as a chain edit in `actions.rs`, and its `four_tuple_keeps_ipv6_scope_id` test runs, not ignored.
+- Basis: serde_core 1.0.229 `ser/impls.rs:899`, `de/impls.rs:1779` [verified by the as2.36 agent].
+- Edits: bead as2.36 files (adds `crates/tl-model/src/actions.rs`).
+
 
 
 
