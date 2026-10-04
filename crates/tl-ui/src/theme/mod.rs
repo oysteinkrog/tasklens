@@ -3,6 +3,7 @@
 
 pub mod builtin;
 pub mod derived;
+pub mod metrics;
 pub mod palette;
 
 use std::collections::BTreeMap;
@@ -13,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tl_model::settings::AppearanceSettings;
 
 pub use derived::{Derived, rebuild_derived};
+pub use metrics::{UiMetrics, bump_style_version, metrics};
 pub use palette::GraphPalette;
 
 /// Dark or light. A theme file stores it as `"dark"` or `"light"`.
