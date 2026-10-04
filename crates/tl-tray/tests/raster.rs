@@ -116,8 +116,11 @@ fn raster_gap_columns_transparent() {
 #[test]
 fn raster_44_is_2x_of_22_layout() {
     let now = 100 * S;
-    // Ratios are multiples of 0.05, so 20 * r and 40 * r round the same way.
-    let mut samples = ramp(now);
+    // The 44 px icon has 36 half-width buckets over the same range, so every column gets the
+    // same value. Ratios are multiples of 0.05, so 20 * r and 40 * r round the same way.
+    let mut samples: Vec<Sample> = (0..72u64)
+        .map(|i| Sample::valid(now - 18 * S + (i + 1) * S / 4, 50.0))
+        .collect();
     samples.push(Sample::valid(now, 35.0));
     let small = draw(&samples, now, RANGE, 100.0, 22);
     let big = draw(&samples, now, RANGE, 100.0, 44);

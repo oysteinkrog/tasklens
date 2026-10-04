@@ -145,7 +145,7 @@ fn fill_buckets(
 
 /// The sample with the largest `t_ns`; the later one wins a tie.
 fn newest(samples: &[Sample]) -> Option<&Sample> {
-    samples.iter().rev().max_by_key(|s| s.t_ns)
+    samples.iter().max_by_key(|s| s.t_ns)
 }
 
 /// `round(inner_h * clamp(value / max, 0, 1))`; 0 for a NaN value or an unusable `max`.
