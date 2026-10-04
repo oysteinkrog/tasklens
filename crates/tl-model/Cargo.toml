@@ -12,7 +12,7 @@ async-channel = { workspace = true }
 bitflags      = { workspace = true }
 smallvec      = { workspace = true }
 rustc-hash    = { workspace = true }   # GroupKey hash and FxHashMap (R-142)
-rustix        = { workspace = true, default-features = false, features = ["time"] }   # clock_gettime only
+rustix        = { workspace = true, features = ["time"] }   # clock_gettime only; workspace pin keeps default features
 
 [dev-dependencies]
 proptest = { workspace = true }
