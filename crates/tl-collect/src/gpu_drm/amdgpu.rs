@@ -324,7 +324,10 @@ mod tests {
     fn junction_preferred() {
         let s = sample_from_fixture();
         assert_eq!(main_temp(&s), Some((AmdTemp::Junction, 61_000)));
-        assert_eq!(temp_source_text(AmdTemp::Junction), "hwmon amdgpu: junction");
+        assert_eq!(
+            temp_source_text(AmdTemp::Junction),
+            "hwmon amdgpu: junction"
+        );
         let edge_only = AmdSample {
             temps: SmallVec::from_slice(&[(AmdTemp::Mem, 70_000), (AmdTemp::Edge, 52_000)]),
             ..AmdSample::default()
@@ -398,7 +401,10 @@ mod tests {
 
     #[test]
     fn dpm_max() {
-        assert_eq!(parse_dpm_max_mhz(b"0: 500Mhz\n1: 1905Mhz\n2: 2500Mhz *\n"), Some(2500));
+        assert_eq!(
+            parse_dpm_max_mhz(b"0: 500Mhz\n1: 1905Mhz\n2: 2500Mhz *\n"),
+            Some(2500)
+        );
         assert_eq!(parse_dpm_max_mhz(b"0: 96Mhz *\n1: 1000MHz\n\n"), Some(1000));
         assert_eq!(parse_dpm_max_mhz(b""), None);
         assert_eq!(parse_dpm_max_mhz(b"2: fast"), None);
