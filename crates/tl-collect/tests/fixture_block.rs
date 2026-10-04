@@ -125,3 +125,13 @@ fn owner_desktop_snapshot() {
     }
     insta::assert_snapshot!(report);
 }
+
+#[test]
+fn disk_temp_inputs() {
+    let root = common::fixture("disk-partitions-dm");
+    let nvme = block::disk_temp_input(&root, "nvme0n1").unwrap();
+    assert!(nvme.ends_with("device/hwmon3/temp1_input"), "{nvme:?}");
+    let sda = block::disk_temp_input(&root, "sda").unwrap();
+    assert!(sda.ends_with("device/hwmon/hwmon5/temp1_input"), "{sda:?}");
+    assert_eq!(block::disk_temp_input(&root, "vda"), None);
+}

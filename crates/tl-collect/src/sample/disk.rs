@@ -1,5 +1,8 @@
 //! Disk sampler: per-device active time, read and write rates, average response time and totals
-//! since boot from one read of `/proc/diskstats` (ADR-016, ADR-008, PERF-048, PERF-049, R-052).
+//! since boot from one read of `/proc/diskstats`, and the drive temperature from its hwmon input
+//! (ADR-016, ADR-008, PERF-048, PERF-049, PERF-053, R-052).
+use std::path::PathBuf;
+
 use rustc_hash::FxHashMap;
 use tl_model::series::SampleFlags;
 use tl_model::time::TimeNs;
@@ -8,6 +11,7 @@ use tl_model::validity::Validity;
 use crate::SysRoot;
 use crate::counters::{Clock, Counter, Delta, Measured, resumed_between};
 use crate::parse::diskstats::{DiskStatLine, parse_diskstats};
+use crate::parse::hwmon::parse_millidegrees;
 use crate::sysroot::KeptFile;
 
 /// Bytes per /proc/diskstats sector, whatever the device's real sector size.
@@ -35,6 +39,8 @@ pub struct DiskDevReading {
     /// Raw counters since boot (PERF-049).
     pub total_read_bytes: Measured<u64>,
     pub total_written_bytes: Measured<u64>,
+    /// From the drive's hwmon input. `Unsupported` when the drive has none (PERF-053).
+    pub temp_c: Measured<f32>,
     pub flags: SampleFlags,
 }
 
@@ -81,6 +87,8 @@ pub struct DiskSampler {
     /// (major, minor) to index in `lines`, rebuilt each tick.
     line_index: FxHashMap<(u32, u32), usize>,
     devices: Vec<DevState>,
+    /// (major, minor, temp input) from `set_temp_inputs`.
+    temps: Vec<(u32, u32, KeptFile)>,
     prev_clock: Option<Clock>,
     /// Set by a resume or `reset_baselines`. Cleared by the next successful read.
     gap_pending: bool,
@@ -94,6 +102,7 @@ impl DiskSampler {
             lines: Vec::new(),
             line_index: FxHashMap::default(),
             devices: Vec::new(),
+            temps: Vec::new(),
             prev_clock: None,
             gap_pending: false,
         }
@@ -113,6 +122,24 @@ impl DiskSampler {
                     .map(|i| old.swap_remove(i).counters)
                     .unwrap_or_default();
                 DevState { id: *id, counters }
+            })
+            .collect();
+    }
+
+    /// Called after each enumeration with (major, minor, path from `disk_temp_input`). A device
+    /// with `None` or not listed reads `Unsupported`. An input whose path is unchanged stays open.
+    pub fn set_temp_inputs(&mut self, inputs: &[(u32, u32, Option<PathBuf>)]) {
+        let mut old = std::mem::take(&mut self.temps);
+        self.temps = inputs
+            .iter()
+            .filter_map(|(major, minor, path)| {
+                let path = path.as_ref()?;
+                let file = old
+                    .iter()
+                    .position(|(_, _, f)| f.path() == path)
+                    .map(|i| old.swap_remove(i).2)
+                    .unwrap_or_else(|| KeptFile::new(path.clone()));
+                Some((*major, *minor, file))
             })
             .collect();
     }
@@ -161,6 +188,7 @@ impl DiskSampler {
             let id = state.id;
             reading.major = id.major;
             reading.minor = id.minor;
+            reading.temp_c = read_temp(&mut self.temps, id, &mut self.buf);
             if read.is_err() {
                 fill_invalid(reading, out.validity);
                 continue;
@@ -242,7 +270,21 @@ impl DiskSampler {
     }
 }
 
-/// Every field of `reading` gets `validity`, with `flags` empty.
+/// The temperature of `id`, or `Unsupported` when it has no input.
+fn read_temp(temps: &mut [(u32, u32, KeptFile)], id: DiskId, buf: &mut Vec<u8>) -> Measured<f32> {
+    let Some((_, _, file)) = temps
+        .iter_mut()
+        .find(|(major, minor, _)| *major == id.major && *minor == id.minor)
+    else {
+        return Measured::invalid(Validity::Unsupported);
+    };
+    match file.read(buf).and_then(|_| parse_millidegrees(buf)) {
+        Ok(celsius) => Measured::valid(celsius),
+        Err(err) => Measured::invalid(err.validity()),
+    }
+}
+
+/// Every field of `reading` except `temp_c` gets `validity`, with `flags` empty.
 fn fill_invalid(reading: &mut DiskDevReading, validity: Validity) {
     reading.active_pct = Measured::invalid(validity);
     reading.read_bps = Measured::invalid(validity);
@@ -457,5 +499,56 @@ mod tests {
         assert_rates(r, out.validity);
         assert_eq!(r.total_read_bytes.validity, out.validity);
         assert_eq!(r.total_written_bytes.validity, out.validity);
+    }
+
+    fn id(major: u32, minor: u32) -> DiskId {
+        DiskId {
+            major,
+            minor,
+            generation: 0,
+        }
+    }
+
+    #[test]
+    fn disk_temperatures() {
+        let fixture = SysRoot::at(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/disk-partitions-dm"),
+        );
+        let input = |disk| crate::parse::block::disk_temp_input(&fixture, disk);
+        let dir = tempfile::tempdir().unwrap();
+        load_step(dir.path(), 0);
+        let mut s = sampler(dir.path(), &[id(259, 0), id(8, 0), id(253, 0)]);
+        s.set_temp_inputs(&[
+            (259, 0, input("nvme0n1")),
+            (8, 0, input("sda")),
+            (253, 0, input("vda")),
+        ]);
+        let mut out = DiskReading::default();
+        s.sample_at(at(0), &mut out);
+        assert_eq!(out.devices[0].temp_c, Measured::valid(41.85));
+        assert_eq!(out.devices[1].temp_c, Measured::valid(35.0));
+        assert_eq!(out.devices[2].temp_c.validity, Validity::Unsupported);
+        // sda and vda are not in diskstats, but the temperature is read anyway.
+        assert_eq!(out.devices[1].total_read_bytes.validity, Validity::Missing);
+    }
+
+    #[test]
+    fn no_composite_label_uses_temp1() {
+        let dir = tempfile::tempdir().unwrap();
+        load_step(dir.path(), 0);
+        let chip = dir.path().join("sys/block/nvme0n1/device/hwmon1");
+        fs::create_dir_all(&chip).unwrap();
+        fs::write(chip.join("name"), "nvme\n").unwrap();
+        fs::write(chip.join("temp1_input"), "38500\n").unwrap();
+        fs::write(chip.join("temp2_label"), "Sensor 1\n").unwrap();
+        fs::write(chip.join("temp2_input"), "30000\n").unwrap();
+        let root = SysRoot::at(dir.path());
+        let path = crate::parse::block::disk_temp_input(&root, "nvme0n1");
+        assert!(path.as_ref().unwrap().ends_with("hwmon1/temp1_input"));
+        let mut s = sampler(dir.path(), &[nvme(0)]);
+        s.set_temp_inputs(&[(259, 0, path)]);
+        let mut out = DiskReading::default();
+        s.sample_at(at(0), &mut out);
+        assert_eq!(out.devices[0].temp_c, Measured::valid(38.5));
     }
 }

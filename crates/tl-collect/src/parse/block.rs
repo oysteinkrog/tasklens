@@ -4,7 +4,7 @@
 //! Runs at start and every 5 s while disks are demanded (PERF-005), not per tick, so allocation
 //! is fine here. Disk serials and WWN are not read (R-155 item 7).
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::parse::udev::{UdevProps, block_entry, read_udev_props};
@@ -146,6 +146,62 @@ pub fn parse_dev(buf: &[u8]) -> Result<(u32, u32), CollectError> {
     let major = major.parse().map_err(|_| DEV_ERROR)?;
     let minor = minor.parse().map_err(|_| DEV_ERROR)?;
     Ok((major, minor))
+}
+
+/// The temp input of the disk's hwmon device, if any.
+///
+/// Looks for `hwmon<N>` in root.sys/block/<disk>/device/ and then in
+/// root.sys/block/<disk>/device/hwmon/, lowest N first (PERF-053). In the first one found, the
+/// input labelled `Composite` (nvme), else `temp1_input`.
+pub fn disk_temp_input(root: &SysRoot, disk: &str) -> Option<PathBuf> {
+    let device = root.sys_path(&format!("block/{disk}/device"));
+    let chip = lowest_hwmon(&device).or_else(|| lowest_hwmon(&device.join("hwmon")))?;
+    let mut buf = Vec::new();
+    let mut composite: Option<u32> = None;
+    for entry in std::fs::read_dir(&chip).ok()?.flatten() {
+        let Some(n) = entry
+            .file_name()
+            .to_str()
+            .and_then(|f| f.strip_prefix("temp")?.strip_suffix("_label"))
+            .and_then(parse_digits)
+        else {
+            continue;
+        };
+        if composite.is_none_or(|c| n < c)
+            && matches!(read_trimmed(&entry.path(), &mut buf), Ok(b"Composite"))
+            && chip.join(format!("temp{n}_input")).exists()
+        {
+            composite = Some(n);
+        }
+    }
+    let input = chip.join(format!("temp{}_input", composite.unwrap_or(1)));
+    input.exists().then_some(input)
+}
+
+/// The `hwmon<N>` directory in `dir` with the lowest N.
+fn lowest_hwmon(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let n = e
+                .file_name()
+                .to_str()
+                .and_then(|f| f.strip_prefix("hwmon"))
+                .and_then(parse_digits)?;
+            Some((n, e.path()))
+        })
+        .filter(|(_, path)| path.is_dir())
+        .min_by_key(|(n, _)| *n)
+        .map(|(_, path)| path)
+}
+
+/// A non-empty string of ASCII digits only.
+fn parse_digits(s: &str) -> Option<u32> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 /// The first PERF-047 kind rule that matches.
@@ -311,6 +367,59 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    /// A fake root with one disk whose device dir holds `chip` (relative path) with `files`.
+    fn hwmon_root(chip: &str, files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let chip_dir = dir.path().join("sys/block/nvme0n1/device").join(chip);
+        std::fs::create_dir_all(&chip_dir).unwrap();
+        for (name, value) in files {
+            std::fs::write(chip_dir.join(name), value).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn temp_input_without_composite_uses_temp1() {
+        let dir = hwmon_root(
+            "hwmon2",
+            &[
+                ("temp1_input", "40000\n"),
+                ("temp2_label", "Sensor 1\n"),
+                ("temp2_input", "1\n"),
+            ],
+        );
+        let path = disk_temp_input(&SysRoot::at(dir.path()), "nvme0n1").unwrap();
+        assert!(path.ends_with("device/hwmon2/temp1_input"), "{path:?}");
+    }
+
+    #[test]
+    fn temp_input_composite_not_temp1() {
+        let dir = hwmon_root(
+            "hwmon0",
+            &[
+                ("temp1_input", "1\n"),
+                ("temp2_label", "Composite\n"),
+                ("temp2_input", "2\n"),
+            ],
+        );
+        let path = disk_temp_input(&SysRoot::at(dir.path()), "nvme0n1").unwrap();
+        assert!(path.ends_with("device/hwmon0/temp2_input"), "{path:?}");
+    }
+
+    #[test]
+    fn temp_input_lowest_hwmon_and_none() {
+        let dir = hwmon_root("hwmon7", &[("temp1_input", "1\n")]);
+        let lower = dir.path().join("sys/block/nvme0n1/device/hwmon3");
+        std::fs::create_dir_all(&lower).unwrap();
+        let root = SysRoot::at(dir.path());
+        // The lowest N is chosen even when it has no input.
+        assert_eq!(disk_temp_input(&root, "nvme0n1"), None);
+        std::fs::write(lower.join("temp1_input"), "1\n").unwrap();
+        let path = disk_temp_input(&root, "nvme0n1").unwrap();
+        assert!(path.ends_with("device/hwmon3/temp1_input"), "{path:?}");
+        assert_eq!(disk_temp_input(&root, "sda"), None);
     }
 
     proptest! {
