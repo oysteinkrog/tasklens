@@ -3,8 +3,6 @@
 
 mod common;
 
-use std::fmt::Write as _;
-
 use tl_collect::CollectError;
 use tl_collect::parse::hwmon::{
     FanControl, HwmonChip, any_fan, cpu_temp_input, default_temp_pair, enumerate,
@@ -26,28 +24,24 @@ fn render(fixture: &str, chips: &[HwmonChip]) -> String {
             .dir
             .strip_prefix(&base)
             .expect("chip dir under fixture");
-        writeln!(
-            text,
-            "hwmon{} {:?} dir={}",
+        text.push_str(&format!(
+            "hwmon{} {:?} dir={}\n",
             chip.index,
             chip.name,
             dir.display()
-        )
-        .unwrap();
-        writeln!(text, "  device={:?}", chip.device_path).unwrap();
+        ));
+        text.push_str(&format!("  device={:?}\n", chip.device_path));
         for t in &chip.temps {
-            writeln!(text, "  temp{} label={:?}", t.n, t.label).unwrap();
+            text.push_str(&format!("  temp{} label={:?}\n", t.n, t.label));
         }
         for f in &chip.fans {
-            writeln!(
-                text,
-                "  fan{} label={:?} has_max={}",
+            text.push_str(&format!(
+                "  fan{} label={:?} has_max={}\n",
                 f.n, f.label, f.has_max
-            )
-            .unwrap();
+            ));
         }
         for p in &chip.pwms {
-            writeln!(text, "  pwm{} has_enable={}", p.n, p.has_enable).unwrap();
+            text.push_str(&format!("  pwm{} has_enable={}\n", p.n, p.has_enable));
         }
     }
     text
