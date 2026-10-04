@@ -2083,7 +2083,7 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 | Parser property tests | `tl-collect/tests/prop_*.rs` (proptest: arbitrary bytes never panic) | same | yes |
 | Engine LabRuntime tests | `crates/tl-engine/tests/lab_*.rs` | same | yes |
 | UI logic tests | `crates/tl-ui/tests/ui_*.rs` with `#[gpui_kit::test]` | same | yes |
-| Headless screenshot tests | `crates/tl-ui/tests/render_*.rs`, feature `render-tests` | `cargo test -p tl-ui --features render-tests` | yes, with Mesa lavapipe (`VK_ICD_FILENAMES` set to lavapipe) |
+| Headless screenshot tests and FakeEngine UI tests | `crates/tl-ui/tests/render_*.rs` (feature `render-tests`) and `crates/tl-ui/tests/ui_*.rs` that need `FakeEngine` (feature `test-hooks`) | `cargo test -p tl-ui --features render-tests,test-hooks` | yes, with Mesa lavapipe (`VK_ICD_FILENAMES` set to lavapipe) |
 | Real-system integration | `tests/real_*.rs` in each crate, `#[ignore]` | `cargo test --workspace -- --ignored` | no; owner machine |
 | Performance gates | `cargo xtask bench` | see ADR-014 | no; owner machine |
 | Static checks | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo xtask check-deps` | | yes |

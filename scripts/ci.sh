@@ -26,7 +26,7 @@ if [[ -z "${VK_ICD_FILENAMES:-}" ]]; then
 fi
 
 step cargo test --workspace --locked
-step cargo test -p tl-ui --features render-tests --locked
+step cargo test -p tl-ui --features render-tests,test-hooks --locked
 step cargo fmt --all --check
 step cargo clippy --workspace --all-targets --locked -- -D warnings
 step cargo xtask check-deps
