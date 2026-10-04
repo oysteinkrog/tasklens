@@ -1,0 +1,36 @@
+---
+source: crates/tl-collect/tests/fixture_meminfo.rs
+expression: info
+---
+MemInfo {
+    mem_total: 67331739648,
+    mem_free: 13022302208,
+    mem_available: 33750568960,
+    buffers: 28672,
+    cached: 19861966848,
+    swap_cached: 16588800,
+    dirty: 40775680,
+    writeback: 0,
+    shmem: 496189440,
+    sreclaimable: 2158051328,
+    sunreclaim: 1113051136,
+    committed_as: 126833184768,
+    commit_limit: 100997025792,
+    swap_total: 67331158016,
+    swap_free: 36193026048,
+    zswap: Some(
+        0,
+    ),
+    zswapped: Some(
+        0,
+    ),
+    hugepages_total: Some(
+        0,
+    ),
+    hugepages_free: Some(
+        0,
+    ),
+    hugepagesize: Some(
+        2097152,
+    ),
+}
