@@ -444,12 +444,12 @@ Conventions:
 ### SYS-023 Run now
 - Was: SYS-024
 - Source: TS "Run now" (WdcRunTaskAsInteractiveUser, cross-check A.32), toasts "Startup entry launched." / "Failed to launch startup entry"
-- Behaviour: Starts the entry now, whatever its Status. Toasts "Startup entry launched." / "Failed to launch startup entry". If it is already running as its autostart unit, the toast reads "Already running".
+- Behaviour: Starts the entry now, whatever its Status. Toasts "Startup entry launched." / "Failed to launch startup entry". If it is already running as its autostart unit, the engine answers `Rejected(AlreadyRunning)` and the toast reads "Already running" (Info; R-148).
 - Linux data/mechanism:
   - If `app-<id>@autostart.service` exists: `StartUnit(…, "replace")` on the user manager.
   - Otherwise: the shared launcher in tl-engine (also used by APP-014 Run). It parses `Exec` per the Desktop Entry spec: field codes %f %F %u %U removed, %i/%c/%k expanded, quoting rules applied.
   - The launcher runs `posix_spawn` with `setsid`, with stdio set to /dev/null and cwd from `Path=`.
-  - It then calls `StartTransientUnit("app-tasklens-<escaped id>-<random hex>.scope", "fail", [("PIDs",[pid]),("Description",Name),("CollectMode","inactive-or-failed")], [])` on the user manager, so app grouping works. A failed scope creation is logged and not fatal.
+  - It then calls `StartTransientUnit("app-tasklens-<escaped id>-<rand>.scope", "fail", [("PIDs",[pid]),("Description",Name),("CollectMode","inactive-or-failed")], [])` on the user manager, so app grouping works; `<rand>` is 8 lowercase hex digits from 4 bytes of `/dev/urandom` (R-167). A failed scope creation is logged and not fatal.
   - systemd unit: `StartUnit`. Script: spawned the same way through `/bin/sh <path>`.
 - Verdict: ADAPT
 - Phase: P2
@@ -838,7 +838,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Where no mechanism exists, the pin and the menu item are disabled with tooltip "Not supported by this desktop".
 - Linux data/mechanism:
   - KDE: `keepAbove` through the KWin bridge (R-046), `Command::KWin(KWinCommand::KeepAbove)`, run as a one-shot script `tasklens-cmd-<n>`. The window is found by pid and `resourceClass == "io.github.oysteinkrog.Tasklens"`, plus the caption for secondary windows.
-  - X11: `_NET_WM_STATE_ABOVE` client message.
+  - X11: no keep-above path in v1; the pin is disabled there like on every desktop without the bridge (R-177).
   - The bridge lives in tl-engine (`workers/dbus_kwin.rs`), never in tl-ui (ADR-001 rule 1).
 - Verdict: ADAPT
 - Phase: P2
@@ -1124,7 +1124,8 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - Each tab keeps its own filter text for the session.
   - Matching is case-insensitive substring.
     - Processes (R-043): display name, image name, command line, user, description, app name, unit name, group names, and PID by prefix for numeric input. There is no command-line toggle.
-    - Services and Startup Apps: all visible columns.
+    - Services: every text column of a unit, shown or not (R-167). Startup Apps: all visible columns.
+    - Sort orders follow the SYS-003 tables; `SysTableQuery` carries no column list (R-167).
     - Connections: SYS-036.
     - Information: field labels and values.
   - Mission Center's reverse-containment and Levenshtein matching is rejected because it gives false hits.
@@ -1839,7 +1840,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Source: TS INI Window.CloseToTray/MinimizeToTray/AlwaysShowTrayIcon, tray menu L28588, L29307, tooltip L28584-28586, L30144-30157 | review (closing the last window exits in v1; tray is a later explicit mode) | R-027, ADR-010
 - Behaviour:
   - When any tray setting is on, a main StatusNotifierItem appears. Tray graph icons are owned by the Performance spec (PERF-088 to PERF-092).
-  - Tooltip: "CPU: 12.3% RAM: 45.6% GPU: 3.0% Disk: 0.4% Network: 2.3 Mbps", percent with one decimal (table d), network in the `units.network` unit. Updated at 1 Hz while the tray is shown.
+  - Tooltip: five lines joined by `\n`: "CPU: 12.3%", "RAM: 45.6%", "GPU: 3.0%", "Disk: 0.4%", "Network: 2.3 Mbps" (R-161); percent with one decimal (table d), network in the `units.network` unit. Updated at 1 Hz while the tray is shown.
   - Left click toggles the main window.
   - Menu (R-027): "Show Main Window", "Tray icon graphs >", separator, "Exit tasklens".
   - Close to tray (`tray.close_to_tray`): close (button, Ctrl+W, Esc-close) hides the window instead of exiting.
@@ -1914,13 +1915,13 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
   - `--tab <processes|performance|services|startup|connections|information>`: TaskSlinger's page argument, whose syntax is unknown, made explicit
   - `--select-pid <pid>`: opens Processes and selects that pid
   - `--debug`: Debug menu (APP-026)
-  - `--bench <scene> [--duration --warmup --json]`: ADR-014 scenes `perf-cpu`, `table-2000`, `bridge`, `static`, plus `history-scrub` in P3. This replaces TaskSlinger's `--history-scrub-bench` and `--history-scrub-bench-out`.
-  - `--force-full-memory-mode`: TaskSlinger's `--internal-force-full-memory-mode`, used to test the low-memory path
-  - `--app-id <reverse-dns id>`: separate instance and settings dir, for development builds (Mission Center)
+  - `--bench <scene> [--duration --warmup --json]`: ADR-014 scenes `perf-cpu`, `table-2000`, `bridge`, `static`, `soak` (`--duration 600 --warmup 0`, R-160), plus `history-scrub` in P3. This replaces TaskSlinger's `--history-scrub-bench` and `--history-scrub-bench-out`.
+  - `--force-full-memory-mode`: TaskSlinger's `--internal-force-full-memory-mode`, used to test the low-memory path. With `--low-memory` it starts the engine in `EngineMode::Full` while keeping the rescue window; alone it does nothing (D-015).
+  - `--app-id <reverse-dns id>`: a separate instance for development builds (Mission Center). It replaces the `tasklens` directory component in all four XDG roots (config, state, cache, runtime) and is the Wayland `app_id` and the single-instance bus name; history, logs, crash reports and the icon cache follow (D-016).
   - `--version`, `--help`
 
   Unknown arguments print usage and exit 2. Forwarding to a running instance follows APP-011.
-  Environment variables read (table c): `TASKLENS_LOG`, `TASKLENS_GPU_PROBE`, `TASKLENS_DEBUG`, `ZED_DEVICE_ID`, `__NV_FORCE_ENABLE_X11_EGL_PLATFORM`, `TL_UPDATE_GOLDEN` (tests).
+  Environment variables read (table c): `TASKLENS_LOG`, `TASKLENS_GPU_PROBE`, `TASKLENS_DEBUG`, `ZED_DEVICE_ID`, `__NV_FORCE_ENABLE_X11_EGL_PLATFORM`, `TASKLENS_RELAUNCHED` (set by tasklens on its one relaunch after device loss, R-153), `TASKLENS_SETUP_ROOT` (setup test mode, not root only, R-168), `TL_BUILD_WRAP` (`xtask bench`, R-160), `TL_UPDATE_GOLDEN` (tests). The clap `about` line is "Task manager for Linux" (R-159).
 - Linux data/mechanism: `clap` derive
 - Verdict: ADAPT
 - Phase: P1 (`--tab`, `--select-pid`, `--version`, `--help`, `--bench`), P2 (`--start-minimized`), P3 (`--low-memory`, `--watch-memory`, `--force-full-memory-mode`), P4 (`--app-id`, `--debug`)
