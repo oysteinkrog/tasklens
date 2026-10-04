@@ -998,7 +998,11 @@ mod tests {
             fs::read(dir.join("run/udev/data/b259:0")).unwrap(),
             b"E:ID_MODEL=Foo\nE:ID_SERIAL=SCRUBBED\nE:ID_SERIAL_SHORT=SCRUBBED\nE:ID_WWN=SCRUBBED\nE:ID_BUS=ata\n"
         );
-        assert!(report.copied.contains(&PathBuf::from("run/udev/data/b259:0")));
+        assert!(
+            report
+                .copied
+                .contains(&PathBuf::from("run/udev/data/b259:0"))
+        );
     }
 
     #[test]
