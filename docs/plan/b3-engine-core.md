@@ -141,30 +141,30 @@ file beside the ones `00-epics.md` lists (E11 owns the directory); E29 adds `act
 
 | Plan key | Bead ID | Title | Phase |
 |---|---|---|---|
-| E11-001 | pending | action admission rules (actions/mod.rs part 1) | P1 |
-| E11-002 | pending | run_action task, deadlines, event order, hooks (actions/mod.rs part 2) | P1 |
-| E11-003 | pending | process signals, suspend and resume through the verified pidfd (actions/process.rs part 1) | P1 |
-| E11-004 | pending | kill_tree: SIGSTOP all, then SIGKILL all | P1 |
-| E11-005 | pending | nice and affinity with the pidfd poll rule | P1 |
-| E11-007 | pending | lab_actions.rs part 1: FakeOps harness and the P1 process cases | P1 |
-| E11-008 | pending | real_actions.rs: process actions on real children | P1 |
-| E11-009 | pending | cgroup freeze, thaw and kill on app.slice cgroups (actions/cgroup.rs) | P1 |
-| E11-010 | pending | real_cgroup.rs: transient scope freeze, thaw, kill | P1 |
+| E11-001 | tasklens-i3o.3 | action admission rules (actions/mod.rs part 1) | P1 |
+| E11-002 | tasklens-i3o.4 | run_action task, deadlines, event order, hooks (actions/mod.rs part 2) | P1 |
+| E11-003 | tasklens-i3o.5 | process signals, suspend and resume through the verified pidfd (actions/process.rs part 1) | P1 |
+| E11-004 | tasklens-i3o.6 | kill_tree: SIGSTOP all, then SIGKILL all | P1 |
+| E11-005 | tasklens-i3o.7 | nice and affinity with the pidfd poll rule | P1 |
+| E11-007 | tasklens-i3o.9 | lab_actions.rs part 1: FakeOps harness and the P1 process cases | P1 |
+| E11-008 | tasklens-i3o.10 | real_actions.rs: process actions on real children | P1 |
+| E11-009 | tasklens-i3o.11 | cgroup freeze, thaw and kill on app.slice cgroups (actions/cgroup.rs) | P1 |
+| E11-010 | tasklens-i3o.12 | real_cgroup.rs: transient scope freeze, thaw, kill | P1 |
 | E11-A1 | tasklens-i3o.1 | Action pipeline for processes | P1 |
-| E11-006 | pending | sched policy, I/O priority, Send Signal numbers and thread targets | P2 |
-| E11-011 | pending | unit start, stop, restart, reload, reset-failed with the JobRemoved wait (actions/unit.rs part 1) | P2 |
-| E11-012 | pending | unit freeze, thaw and kill through the manager | P2 |
-| E11-013 | pending | unit enable, disable, mask, unmask and Reload | P2 |
-| E11-014 | pending | startup enable and disable (actions/startup.rs part 1) | P2 |
-| E11-015 | pending | startup Run now and Delete entry | P2 |
-| E11-016 | pending | targetless kinds OpenUri, ShowInFileManager, Launch and RealOpeners | P2 |
-| E11-017 | pending | lab_actions.rs part 2: unit, startup, opener and cgroup cases | P2 |
-| E11-022 | pending | real_actions.rs: user-manager unit actions and recovery drop-in | P2 |
+| E11-006 | tasklens-i3o.8 | sched policy, I/O priority, Send Signal numbers and thread targets | P2 |
+| E11-011 | tasklens-i3o.13 | unit start, stop, restart, reload, reset-failed with the JobRemoved wait (actions/unit.rs part 1) | P2 |
+| E11-012 | tasklens-i3o.14 | unit freeze, thaw and kill through the manager | P2 |
+| E11-013 | tasklens-i3o.15 | unit enable, disable, mask, unmask and Reload | P2 |
+| E11-014 | tasklens-i3o.16 | startup enable and disable (actions/startup.rs part 1) | P2 |
+| E11-015 | tasklens-i3o.17 | startup Run now and Delete entry | P2 |
+| E11-016 | tasklens-i3o.18 | targetless kinds OpenUri, ShowInFileManager, Launch and RealOpeners | P2 |
+| E11-017 | tasklens-i3o.19 | lab_actions.rs part 2: unit, startup, opener and cgroup cases | P2 |
+| E11-022 | tasklens-i3o.24 | real_actions.rs: user-manager unit actions and recovery drop-in | P2 |
 | E11-A2 | tasklens-i3o.2 | cgroup, unit and startup actions | P2 |
-| E11-018 | pending | Dump direct or through the helper (actions/dump.rs) | P3 |
-| E11-019 | pending | SockDestroy through the helper and destroy_supported (actions/socket.rs) | P3 |
-| E11-020 | pending | recovery drop-in write and remove (actions/recovery.rs) | P3 |
-| E11-021 | pending | lab_actions.rs part 3: FakePrivilegedOps, dump, socket, recovery cases | P3 |
+| E11-018 | tasklens-i3o.20 | Dump direct or through the helper (actions/dump.rs) | P3 |
+| E11-019 | tasklens-i3o.21 | SockDestroy through the helper and destroy_supported (actions/socket.rs) | P3 |
+| E11-020 | tasklens-i3o.22 | recovery drop-in write and remove (actions/recovery.rs) | P3 |
+| E11-021 | tasklens-i3o.23 | lab_actions.rs part 3: FakePrivilegedOps, dump, socket, recovery cases | P3 |
 
 Dependencies: 001 on E09-A1 and E03-A2; 002 on 001, E08-A1, E08-009; 003 on 002 and E07-A1; 004
 on 003; 005 and 006 on 003 or 005 plus E07-A1; 007 on 001 to 005; 008 on 003 to 005; 009 on 002
@@ -185,21 +185,21 @@ Epic bead `tasklens-ndy`. 13 task beads plus 2 anchors. Files: `crates/tl-gpu-pr
 
 | Plan key | Bead ID | Title | Phase |
 |---|---|---|---|
-| E13-001 | pending | tl-gpu-probe crate, argument modes and the fd 3 sampler loop (main.rs, sampler.rs) | P1 |
-| E13-002 | pending | NVML init, device enumeration and Hello (nvml.rs part 1) | P1 |
-| E13-003 | pending | NVML per-device sample with Reading per metric | P1 |
-| E13-004 | pending | NVML per-process utilisation and memory rows | P1 |
-| E13-005 | pending | --fake <script> backend and fake_scripts.rs | P1 |
-| E13-007 | pending | gpu/mod.rs: probe lookup order, ProbeError, deadlines | P1 |
-| E13-008 | pending | gpu/spawn.rs: socketpair, pre_exec dup2, death signal (the one unsafe file) | P1 |
-| E13-009 | pending | gpu/client.rs: one outstanding request, poll, deadlines, kill and reap | P1 |
-| E13-010 | pending | GpuNvidia worker with the failure table and 300 s retry (workers/gpu_nvidia.rs) | P1 |
-| E13-012 | pending | probe_integration.rs: client, worker and supervisor cases | P1 |
-| E13-013 | pending | real_nvml.rs: Hello, samples, process rows, kill and restart on the owner machine | P1 |
+| E13-001 | tasklens-ndy.3 | tl-gpu-probe crate, argument modes and the fd 3 sampler loop (main.rs, sampler.rs) | P1 |
+| E13-002 | tasklens-ndy.4 | NVML init, device enumeration and Hello (nvml.rs part 1) | P1 |
+| E13-003 | tasklens-ndy.5 | NVML per-device sample with Reading per metric | P1 |
+| E13-004 | tasklens-ndy.6 | NVML per-process utilisation and memory rows | P1 |
+| E13-005 | tasklens-ndy.7 | --fake <script> backend and fake_scripts.rs | P1 |
+| E13-007 | tasklens-ndy.9 | gpu/mod.rs: probe lookup order, ProbeError, deadlines | P1 |
+| E13-008 | tasklens-ndy.10 | gpu/spawn.rs: socketpair, pre_exec dup2, death signal (the one unsafe file) | P1 |
+| E13-009 | tasklens-ndy.11 | gpu/client.rs: one outstanding request, poll, deadlines, kill and reap | P1 |
+| E13-010 | tasklens-ndy.12 | GpuNvidia worker with the failure table and 300 s retry (workers/gpu_nvidia.rs) | P1 |
+| E13-012 | tasklens-ndy.14 | probe_integration.rs: client, worker and supervisor cases | P1 |
+| E13-013 | tasklens-ndy.15 | real_nvml.rs: Hello, samples, process rows, kill and restart on the owner machine | P1 |
 | E13-A1 | tasklens-ndy.1 | Probe binary | P1 |
 | E13-A2 | tasklens-ndy.2 | GpuNvidia worker | P1 |
-| E13-006 | pending | --api-versions one-shot mode with ash and khronos-egl | P2 |
-| E13-011 | pending | api-versions run once at start with a 5 s deadline | P2 |
+| E13-006 | tasklens-ndy.8 | --api-versions one-shot mode with ash and khronos-egl | P2 |
+| E13-011 | tasklens-ndy.13 | api-versions run once at start with a 5 s deadline | P2 |
 
 Dependencies: 001 on E02-A1 and E03-A2; 002 on 001; 003 on 002; 004 on 003; 005 and 006 on 001;
 A1 on 001 to 005 and E03-A2; 007 on E08-A1; 008 on 007; 009 on 008 and E03-A2; 010 on 009,
