@@ -57,3 +57,9 @@ pass once all batch writers finish.
   `Source::take_extra()`) blocks 21 E12 beads, including the P1 anchor E12-A2; settle it first.
   E12-OI-4 (udev reader) needs a new B2 bead. Build line still old on E14 and on E29 after qfx.8.
 - All batches: `br lint` flags only the epic beads (no Success Criteria section). Leader adds them.
+- B7 (E20, E21, E23): done, 115 beads (E20 30, E21 47, E23 38), no cycles, plan in 56b421a.
+  16 open items (E23 has 8 more in the plan). Cross-batch edges for the leader to add:
+  qfx.32 on jqk.28; 8fx.3 on jqk.27; E22 on jqk.29 (`end_window_pick`); E26 card colour menu on
+  E21-032; E25 and E28 Fetch buttons on E21-017; E29 privileges chain edit on E21-035; E21-043 on
+  the E30, E31 and E32 settings-row beads; E21-029 to E21-031 on E17's share-code bead. 00-epics
+  section 2 needs the E31 chain-edit rule for window/main.rs and window/titlebar.rs.
