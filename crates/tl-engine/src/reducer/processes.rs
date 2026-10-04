@@ -343,7 +343,7 @@ impl ProcessState {
 mod tests {
     use super::*;
 
-    use tl_model::actions::SchedPolicy;
+    use tl_model::actions::{CgroupRef, SchedPolicy};
     use tl_model::devices::DeviceCatalog;
     use tl_model::ids::{GroupKey, SeriesId};
     use tl_model::process::{ProcState, ProcessMeta};
@@ -627,7 +627,10 @@ mod tests {
             rios: 0,
             wios: 0,
             pids: 1,
-            cgroup: Default::default(),
+            cgroup: CgroupRef {
+                rel_path: "app.slice".into(),
+                cgroup_id: g,
+            },
             validity: FieldValidity::all(Validity::Valid),
         };
         s.app_stats = vec![app(9), app(3), app(5)];
