@@ -260,7 +260,7 @@ pub struct GpuStaticInfo {
     pub driver: Arc<str>,
     pub nvml: Arc<str>,
     pub supports_process_util: bool,
-    /// "gpu:<uuid or PCI slot>" (R-155 items 7 and 8).
+    /// `"gpu:<uuid or PCI slot>"` (R-155 items 7 and 8).
     pub persistent_key: Arc<str>,
 }
 
