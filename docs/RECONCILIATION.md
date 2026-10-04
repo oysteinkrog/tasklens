@@ -1098,6 +1098,103 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: ADR-003, R-073, UI-PRF-001, UI-PRF-006, UI-FND-042, UI-SYS-003, PERF-061, UI-PWN-018, as2.6, as2.8, as2.14, as2.18 [verified]; portal `Settings` interface names [inferred].
 - Edits: ADR-003, ADR-004, ADR-005, APP-009, UI-SHL-005; beads as2.6, as2.14, as2.16, as2.18, as2.19, as2.22, 8hz.5, 8q0.24, hjn.9, hjn.19, i3o.13, i3o.15, y6k.24, qfx.18, cr0.11, fut.1.
 
+### R-171 `UiInit` and `AppEnv`: everything tl-app hands to `TasklensUi::init` (OI-U01)
+- Question: ADR-009 gives `TasklensUi::init(cx, client, settings)` and ADR-011 one persist callback; the UI beads need state, the themes text, theme persistence, the `AppRequest` receiver, queued toasts and about ten things only tl-app has. Raised by B5-4, B5-5, B5-29, B7-E21-1, B7-E21-2, B7-E21-5, B7-E21-9, B7-E23-3.
+- Resolution: `TasklensUi::init(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit)` as E16-A1 writes it, plus `env: AppEnv`. In `crates/tl-ui/src/app.rs`: `UiInit { settings: Settings, state: UiState, themes_json: Option<Arc<str>>, persist: Box<dyn Fn(&Settings, &UiState)>, persist_themes: Box<dyn Fn(PersistTheme)>, app_requests: async_channel::Receiver<AppRequest>, startup_toasts: Vec<(ToastKindTag, SharedString)>, env: AppEnv }`; `BuildInfo { version, git_hash, build_date, gpui_rev, licenses_json: &'static str }` (cargo-about output embedded by tl-app); `CrashReport { path: PathBuf, text: Arc<str>, at: SystemTime }`; `AdapterInfo { name, backend, device_type: String }`; `RunHistoryEntry { command: String, executed_at: String /* RFC 3339 */, elevated: bool }`; `ImportSummary { settings: u32, themes: u32 }`; `AppEnv { debug: bool, config_dir, state_dir, logs_dir: PathBuf, build: BuildInfo, pending_crash: Option<CrashReport>, mark_crash_seen: Arc<dyn Fn()>, write_settings_now: Arc<dyn Fn(&Settings) -> Result<(), String>>, set_autostart: Arc<dyn Fn(bool) -> Result<(), String>>, global_shortcut: Option<GlobalShortcutApi>, import_taskslinger: Arc<dyn Fn() -> Result<ImportSummary, String>>, list_adapters: Arc<dyn Fn() -> Vec<AdapterInfo>>, run_history: Option<Box<dyn RunHistoryStore>> }`; `trait RunHistoryStore { fn load(&self) -> Vec<RunHistoryEntry>; fn save(&self, entries: &[RunHistoryEntry]) -> Result<(), String>; }`; `GlobalShortcutApi { get: Arc<dyn Fn() -> Option<String>>, set: Arc<dyn Fn(Option<&str>) -> Result<(), String>> }`; `impl Global for AppEnv {}`. `init` step 8 installs `AppEnv` as a Global next to `BootSettings`. Every closure runs on the main thread; none is `Send`. `PersistTheme` is declared in `app.rs` by E16-A1 and moved to `theme/user_store.rs` with a re-export by E17-008. Reset settings calls `write_settings_now` before replacing `TlSettings` and shows "Failed to reset settings" on `Err` with nothing changed. `executedAt` is RFC 3339 local time formatted with `jiff` in tl-ui (R-142). The adapter probe runs in tl-app. A `FakeEngine` test gets `AppEnv::test()` with empty closures and `debug = false`.
+- Basis: ADR-001 tl-ui row, ADR-009, ADR-011, UI-SHL-072, UI-SHL-092, UI-SHL-093, UI-PWN-028, APP-053, PROC-095 [verified]; field types [inferred].
+- Edits: ADR-009 "Entry point" and ADR-011 (`UiInit`, `AppEnv`, `persist_themes`); beads fut.1, bj6.3, bj6.8, bj6.14, bj6.17, bj6.42, bj6.44, bj6.45, gma.31.
+
+### R-172 `tl_ui::run(UiLaunch) -> UiExit` (OI-U02)
+- Question: tl-app cannot depend on gpui-kit, so who opens the application? Raised by B5-38.
+- Resolution: R-153 holds. UI half: E16-012 builds `tl_ui::run(UiLaunch) -> UiExit`; `debug` and `on_quit` are not in `UiLaunch` (`debug` is `AppEnv.debug`); the UI accepts the optional `platform` field as given.
+- Basis: B5-38, leader notes [verified].
+- Edits: edge cr0.1 on fut.15.
+
+### R-173 Crates the UI batches asked for (OI-U03)
+- Question: five UI beads need a crate that is not in the tl-ui row of ADR-001. Raised by B5-2, B5-22, B5-30, E19-4, B7-E21-9.
+- Resolution: R-142 and R-144 settle the rows. `UiInit.app_requests` stays an `async_channel::Receiver`; E15-003 uses `unicode-segmentation`; E16-005 stops and reports if it needs `image`; tl-ui never needs `wgpu`; `FrameStats` reports 0 thread CPU until `tl_model::time::thread_cpu_ns()` exists.
+- Basis: ADR-001 [verified].
+- Edits: none here.
+
+### R-174 `RefreshCurrentTab` is the F5 action (OI-U04)
+- Question: UI-SHL-120 names F5 `RefreshNow`, which is also `Command::RefreshNow`; E20-002, E27 and E28 use `RefreshCurrentTab`. Raised by B7-E20-1.
+- Resolution: `RefreshCurrentTab`, declared in E20-002 `window/actions.rs`, bound to F5 in the Global context.
+- Basis: INDEX.md action vocabulary, UI-SYS-085 [verified].
+- Edits: UI-SHL-120.
+
+### R-175 `ShowSystemInformation` is the Help action (OI-U05)
+- Question: UI-SHL-041 says `OpenSystemInformation`; INDEX.md and UI-SYS-096 say `ShowSystemInformation`. Raised by B7-E21-3, B8-E28-6.
+- Resolution: `ShowSystemInformation`, declared in E20-002, dispatched by the Help menu, handled by E28-A3 by switching to the Information tab.
+- Basis: INDEX.md, UI-SYS-096 [verified].
+- Edits: UI-SHL-041.
+
+### R-176 `WindowKey::Main` and the caption on `ToggleAlwaysOnTop` (OI-U06)
+- Question: the pin action carries a `WindowKey`, but there is no key for the main window, and the KWin keep-above command needs the window caption. Raised by B7-E20-2, B7-E20-3, B5-27.
+- Resolution: E16-008 adds `Main` to `WindowKey`; `Main` is never stored in `WindowRegistry` and `cap_class()` returns `None` for it. The action becomes `ToggleAlwaysOnTop { window: WindowKey, caption: SharedString }` with `#[action(no_json)]`. The caption is the exact window title at dispatch time; the main window passes `"tasklens"`. E20-022 handles `Main` only. New bead E20-029 (P2, `window/main.rs` handler arm and `components/window_frame.rs` pin button; depends on jqk.24, fut.12, y6k.2) handles secondary windows: it sends `KWinCommand::KeepAbove { caption, on }` and keeps the pin state in memory per key (R-073). Without a KWin bridge the pin is disabled with tooltip "Not supported by this desktop".
+- Basis: UI-FND-021, UI-SHL-005, R-073 [verified]; the caption field [inferred from PERF-083].
+- Edits: UI-FND-021 and UI-PWN-001 (`caption`); bead fut.12; new bead E20-029.
+
+### R-177 No X11 keep-above in v1 (OI-U07)
+- Question: APP-009, UI-SHL-005 and PERF-093 name an X11 `_NET_WM_STATE_ABOVE` path; tl-model has no command for it and gpui-pre 0.3.7 exposes no such call. Raised by B7-E20-4, E26-OI-5.
+- Resolution: dropped for v1. On X11 the pin, View > Window > Always On Top and the mini window's `ToggleMiniAlwaysOnTop` are disabled with tooltip "Not supported by this desktop". KDE through the bridge is the only platform with keep-above (R-170 confirms no engine command).
+- Basis: ADR-004 and ADR-010 (no X11 EWMH fallback in v1), R-046, R-076 [verified].
+- Edits: APP-009, UI-SHL-005, UI-SHL-036, UI-PRF-045, R-073: the X11 clause goes.
+
+### R-178 `QuitMode::Explicit` exists in gpui-pre 0.3.7 (OI-U08)
+- Question: does the pinned gpui let the app survive its last window closing? Raised by B7-E20-5.
+- Resolution: yes. `gpui-pre-0.3.7/src/app.rs:389` defines `QuitMode { Default, LastWindowClosed, Explicit }`; `Application::with_quit_mode` (line 227) and `App::set_quit_mode` (line 1754) set it. E16-012 calls `.with_quit_mode(QuitMode::Explicit)` before `run`; E20-A1 drops its fallback clause. The UI calls `cx.quit()` itself for `UiExit::Quit`.
+- Basis: gpui source on disk, `docs/research/claude-gpui-apis.md:58` [verified].
+- Edits: beads jqk.1, fut.15.
+
+### R-179 Actions declared once, outside the page that uses them (OI-U09)
+- Question: several actions are named by more than one epic; who declares each? Raised by B5-26, B5-28, B8-E22-15, E26 note.
+- Resolution: one declaration each, everyone else imports. `StartHelperSession`, `EndHelperSession`: E16-A3, `components/shield.rs` (E20 `actions.rs` re-exports). `CloseSecondaryWindow`: E16-008, `components/window_frame.rs`, Ctrl+W in secondary windows, independent of E20's `CloseWindow`. `ToggleHideSystem`, `CycleViewMode`, `SetViewMode`, `FocusFilter`, `ClearFilter`, `StartFilter` routing: E20-002, `window/actions.rs`; E22 builds the buttons only. `ResetMinigraphLayout`: E26-002, `pages/minigraph/actions.rs`; E21-003 dispatches it. Table actions (`MoveFocus`, `CopyCell`, `ResetColumns`, `SetColumnResize`, and the rest): E18-A1, `table/actions.rs`. `EnableAllColumns { table: TableId }`: E18 (R-180), `table/actions.rs`. All in the one `tasklens` namespace (R-128).
+- Basis: INDEX.md action vocabulary, R-128 [verified].
+- Edits: UI-PRC-009 Build line and UI-PRC-019: the shell actions are imported from `window/actions.rs`.
+
+### R-180 `EnableAllColumns` belongs to the table (OI-U10)
+- Question: the Debug menu item (UI-SHL-042) changes column visibility, which is E18 state. Raised by B7-E21-8.
+- Resolution: E18-A2 declares `EnableAllColumns { table: TableId }` in `table/actions.rs` and handles it in `TlTreeTable` by setting every column of the owner's column set visible and persisting through `[columns.<table>]`. E21's Debug menu dispatches it with the active tab's `TableId`; on a tab without a table the item is disabled with tooltip "This tab has no table".
+- Basis: UI-SHL-042 [verified]; placement [inferred from UI-SHL-034].
+- Edits: bead rsf.2 (action, handler, test `enable_all_columns_shows_every_column`); the E21 Debug menu bead dispatches only.
+
+### R-181 The column picker file lives in `table/` (OI-U11)
+- Question: 00-epics section 2 puts `pages/processes/columns_window.rs` under E18, but that directory is created by E22-A1, which depends on E18-A2. Raised by B5-3.
+- Resolution: `crates/tl-ui/src/table/columns_window.rs`, owned by E18-A2. The picker is table-generic.
+- Basis: 00-epics section 2, R-106 [verified].
+- Edits: 00-epics section 2 (E18 `src/table/...` row); UI-PRC-007 Build line.
+
+### R-182 Scrollbar width is 16 (OI-U12)
+- Question: processes.md "Shared geometry" and the UI-PRC-001 diagram say 12; UI-PRC-001 anatomy, UI-PRC-010 and UI-FND-003 say 16. Raised by B5-14.
+- Resolution: 16 logical px at 100% scale for every scrollbar. UI-FND-003 is the component authority.
+- Basis: UI-FND-003, UI-PRC-010 [verified].
+- Edits: processes.md "Shared geometry" and the UI-PRC-001 diagram.
+
+### R-183 Column picker: heading rows 28, filter md 28 (OI-U13)
+- Question: UI-PRC-007 gives group headings 24 px and the filter as both "sm" and "md, height 28"; `uniform_list` needs one row height. Raised by B5-32, B5-33.
+- Resolution: every picker row is 28 px, group headings included (heading text bottom-aligned); the filter is `TlTextInput` md, 28 px.
+- Basis: UI-PRC-007 anatomy, gpui `uniform_list` fixed row height [verified]; heading height [inferred].
+- Edits: UI-PRC-007.
+
+### R-184 Delegate trait additions and header-menu actions (OI-U14)
+- Question: E18-005 adds `table_version()` and `guide_lines()` to the UI-PRC-001 delegate; the header menu items and `OpenProperties` need a handler. Raised by B5-16, B5-34.
+- Resolution: `TreeTableDelegate` gains `fn table_version(&self) -> u64` and `fn guide_lines(&self) -> bool`. `TlTreeTable` handles `ResetColumns { table }` itself when the owner called `set_default_layout`, `SetColumnResize` (writes `tables.column_resize` through `TlSettings`), `HideColumn { col }`, `CopyCell { col }`, `CopyRow`, `CollapseAll` and `ResizeColumnsToFit`, and routes `OpenProperties` to `delegate.on_activate()`. Owner pages implement `on_activate`, `context_menu` and the copy formats only. UI-SHL-034 dispatches with the active tab's `TableId`.
+- Basis: UI-PRC-001, UI-PRC-006, UI-SHL-034, B5-16 [verified].
+- Edits: UI-PRC-001 (two trait methods); beads pdu.1, hk6.1, 9o0.1.
+
+### R-185 Icons the foundation adds or drops (OI-U15)
+- Question: E18-009 needs Lucide `arrow-up` and `arrow-down`, which UI-FND-003 does not list; seven Lucide icons are outside the kit bundle; `shield-locked.svg` is in the E15-A1 list but UI-FND-028 uses Lucide `shield`. Raised by B5-35, B5-37, B5-17.
+- Resolution: UI-FND-003's Lucide list gains `arrow-up` and `arrow-down` (sort indicators). E15-005 embeds `x`, `pin`, `pin-off`, `lock`, `shield`, `shield-check`, `rotate-ccw-clock`, `arrow-up`, `arrow-down` with the kit's `icon_assets!` macro. `assets/icons/shield-locked.svg` is not created; the locked shield is Lucide `shield`.
+- Basis: UI-FND-003, UI-FND-028, UI-PRC-005 [verified].
+- Edits: UI-FND-003; beads ug9.1 (drop `shield-locked.svg`), ug9.8 (add the arrows).
+
+### R-186 `TlTreeTable::scroll_handle` for the bench (OI-U16)
+- Question: the E01 `table-2000` scene must scroll the production process table. Raised by B8-E22-19, leader notes.
+- Resolution: E18-A1 exposes `pub fn scroll_handle(&self) -> UniformListScrollHandle` (a clone; `Rc`-backed). E22-A1 exposes `ProcessesPage::scroll_handle(&self, cx: &App) -> UniformListScrollHandle` next to `table()`, with test `scroll_handle_drives_table`. E01-008 calls the page method and drives it with `scroll_to_item_with_offset`.
+- Basis: gpui `UniformListScrollHandle(pub Rc<RefCell<..>>)`, UI-PRC-010 Build line [verified].
+- Edits: bead rsf.1; edge wlf.10 on pdu.1.
+
+
 
 
 ## Owner questions
