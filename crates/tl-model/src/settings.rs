@@ -1029,22 +1029,59 @@ impl Settings {
         let mut changed = Vec::new();
         let c = &mut changed;
         let a = &mut self.appearance;
-        clamp_key(&mut a.ui_scale_pct, (75, 200, 5), "appearance.ui_scale_pct", c);
-        clamp_key(&mut a.row_height_pct, (80, 150, 5), "appearance.row_height_pct", c);
-        let key = "appearance.heat_intensity_pct";
-        clamp_key(&mut a.heat_intensity_pct, (0, 100, 1), key, c);
-        let key = "appearance.shadow_intensity_pct";
-        clamp_key(&mut a.shadow_intensity_pct, (0, 100, 1), key, c);
+        clamp_key(
+            &mut a.ui_scale_pct,
+            (75, 200, 5),
+            "appearance.ui_scale_pct",
+            c,
+        );
+        clamp_key(
+            &mut a.row_height_pct,
+            (80, 150, 5),
+            "appearance.row_height_pct",
+            c,
+        );
+        clamp_key(
+            &mut a.heat_intensity_pct,
+            (0, 100, 1),
+            "appearance.heat_intensity_pct",
+            c,
+        );
+        clamp_key(
+            &mut a.shadow_intensity_pct,
+            (0, 100, 1),
+            "appearance.shadow_intensity_pct",
+            c,
+        );
         let m = &mut self.motion;
-        clamp_key(&mut m.smooth_scroll_amount, (1, 50, 1), "motion.smooth_scroll_amount", c);
-        clamp_key(&mut m.tab_switch_ms, (0, 500, 10), "motion.tab_switch_ms", c);
-        let key = "processes.interval_ms";
-        clamp_key(&mut self.processes.interval_ms, (250, 10_000, 1), key, c);
+        clamp_key(
+            &mut m.smooth_scroll_amount,
+            (1, 50, 1),
+            "motion.smooth_scroll_amount",
+            c,
+        );
+        clamp_key(
+            &mut m.tab_switch_ms,
+            (0, 500, 10),
+            "motion.tab_switch_ms",
+            c,
+        );
+        clamp_key(
+            &mut self.processes.interval_ms,
+            (250, 10_000, 1),
+            "processes.interval_ms",
+            c,
+        );
         if !GRAPH_RANGES_S.contains(&self.performance.graph_range_s) {
             self.performance.graph_range_s = 60;
             c.push("performance.graph_range_s");
         }
-        clamp_key(&mut self.history.retention_h, (1, 12, 1), "history.retention_h", c);
+        clamp_key(
+            &mut self.history.retention_h,
+            (1, 12, 1),
+            "history.retention_h",
+            c,
+        );
         if !LANGUAGES.contains(&self.general.language.as_str()) {
             self.general.language = "system".to_owned();
             c.push("general.language");
@@ -1063,10 +1100,24 @@ impl UiState {
     pub fn clamp(&mut self) -> Vec<&'static str> {
         let mut changed = Vec::new();
         let c = &mut changed;
-        clamp_key(&mut self.window.width, (800, u32::MAX, 1), "window.width", c);
-        clamp_key(&mut self.window.height, (500, u32::MAX, 1), "window.height", c);
-        let key = "performance.nav_width";
-        clamp_key(&mut self.performance.nav_width, (180, 400, 1), key, c);
+        clamp_key(
+            &mut self.window.width,
+            (800, u32::MAX, 1),
+            "window.width",
+            c,
+        );
+        clamp_key(
+            &mut self.window.height,
+            (500, u32::MAX, 1),
+            "window.height",
+            c,
+        );
+        clamp_key(
+            &mut self.performance.nav_width,
+            (180, 400, 1),
+            "performance.nav_width",
+            c,
+        );
         changed
     }
 }
@@ -1319,7 +1370,12 @@ mod tests {
 
         let m = MinigraphState::default();
         assert_eq!(
-            (m.source.as_str(), m.column.as_str(), m.range_s, m.color.as_str()),
+            (
+                m.source.as_str(),
+                m.column.as_str(),
+                m.range_s,
+                m.color.as_str()
+            ),
             ("cpu", "cpu", 60, "accent")
         );
         assert_eq!((m.slot, m.detached, m.window), (0, false, 0));
@@ -1327,7 +1383,12 @@ mod tests {
         assert_eq!((d.id, d.width, d.height, d.x, d.y), (0, 180, 90, 0, 0));
         let t = TrayGraphState::default();
         assert_eq!(
-            (t.source.as_str(), t.column.as_str(), t.color.as_str(), t.range_s),
+            (
+                t.source.as_str(),
+                t.column.as_str(),
+                t.color.as_str(),
+                t.range_s
+            ),
             ("cpu", "cpu", "accent", 60)
         );
     }
