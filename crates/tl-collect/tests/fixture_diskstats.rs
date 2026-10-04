@@ -1,5 +1,8 @@
 //! Fixture tests for the /proc/diskstats parser (E04-020).
 
+// The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use std::fmt::Write as _;
