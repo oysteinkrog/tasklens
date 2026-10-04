@@ -80,12 +80,7 @@ fn to_realtime(seg: &Seg, t: u64) -> i64 {
 
 /// Deletes the segments of `segs[..closed]` for which `old` is true. A segment whose delete
 /// fails stays in the index.
-fn delete_old(
-    segs: &mut Vec<Seg>,
-    closed: usize,
-    del: &mut Deleter,
-    old: impl Fn(&Seg) -> bool,
-) {
+fn delete_old(segs: &mut Vec<Seg>, closed: usize, del: &mut Deleter, old: impl Fn(&Seg) -> bool) {
     let mut i = 0;
     let mut closed = closed;
     while i < closed {
@@ -487,7 +482,10 @@ mod tests {
         fs::write(dir.join(DELETED_KEYS_FILE), b"\xff\xff").unwrap();
 
         let (mut store, report) = Store::open(cfg(root.path()), 20 * MIN, later());
-        assert_eq!(report.bad_deleted_keys, vec![dir.join(BAD_DELETED_KEYS_FILE)]);
+        assert_eq!(
+            report.bad_deleted_keys,
+            vec![dir.join(BAD_DELETED_KEYS_FILE)]
+        );
         let report = enforce(&mut store, 20 * MIN).unwrap();
         assert_eq!(report.deleted_segments, 2);
         assert!(segment_paths(&dir).unwrap().is_empty());
