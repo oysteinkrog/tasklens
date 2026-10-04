@@ -1,11 +1,18 @@
 //! `cargo xtask capture-fixture <name> [--force]`: copies the files tasklens reads from this
 //! machine into `crates/tl-collect/tests/fixtures/<name>/` as a fake root, with personal data
 //! scrubbed (ADR-013, ADR-015, R-162).
+//!
+//! Scrub rules: every occurrence of a regular user's name becomes `user1`, `user2`, ... in uid
+//! order, matched as a case-insensitive (ASCII) substring with longer names tried first. Names
+//! shorter than 3 characters are not scrubbed, so they do not wreck unrelated text (R-260). The
+//! hostname, when at least 3 characters, becomes `REDACTED`. The block, net and PCI files under
+//! `run/udev/data/` are copied with the `ID_SERIAL`, `ID_SERIAL_SHORT` and `ID_WWN` values
+//! replaced by `SCRUBBED` (R-261).
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io;
+use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context as _;
@@ -100,6 +107,18 @@ const HWMON_FILES: &[&str] = &[
     "pwmN_enable",
 ];
 
+/// Name prefixes of the copied `run/udev/data/` files: block, net and PCI (ADR-016 udev row).
+const UDEV_PREFIXES: &[&str] = &["b", "n", "+pci:"];
+
+/// Most bytes copied from one udev data file (ADR-016 udev row).
+const UDEV_CAP: u64 = 64 * 1024;
+
+/// udev property lines whose value is replaced by `SCRUBBED` (ADR-013, R-261).
+const UDEV_SCRUBBED_KEYS: &[&str] = &["E:ID_SERIAL=", "E:ID_SERIAL_SHORT=", "E:ID_WWN="];
+
+/// Shortest user name that is scrubbed (R-260).
+const MIN_USER_LEN: usize = 3;
+
 /// Most symlinks followed while resolving one path, like the kernel's limit.
 const MAX_LINK_HOPS: usize = 40;
 
@@ -177,6 +196,7 @@ pub fn capture(
     let ctx = Ctx::new(src_root, out_dir);
     ctx.copy_proc_self(&mut report)?;
     ctx.copy_pids(opts.max_pids, &mut report)?;
+    ctx.copy_udev(&mut report)?;
 
     write_capture_txt(&ctx, &report)?;
     Ok(report)
@@ -425,6 +445,45 @@ impl<'a> Ctx<'a> {
         }
         Ok(())
     }
+
+    /// Copies the block, net and PCI files directly under `run/udev/data/`, each capped at
+    /// [`UDEV_CAP`] bytes, with the serial values scrubbed and then the ordinary text scrub.
+    fn copy_udev(&self, report: &mut CaptureReport) -> anyhow::Result<()> {
+        let dir = Path::new("run/udev/data");
+        let entries = match fs::read_dir(self.src.join(dir)) {
+            Ok(entries) => entries,
+            Err(e) if is_missing(&e) => return Ok(()),
+            Err(e) => {
+                report.skipped.push((dir.to_path_buf(), reason(&e)));
+                return Ok(());
+            }
+        };
+        let mut names: Vec<OsString> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| e.file_name())
+            .filter(|n| {
+                n.to_str()
+                    .is_some_and(|n| UDEV_PREFIXES.iter().any(|p| n.starts_with(p)))
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            let rel = dir.join(&name);
+            let mut bytes = Vec::new();
+            let read = fs::File::open(self.src.join(&rel))
+                .and_then(|f| f.take(UDEV_CAP).read_to_end(&mut bytes));
+            match read {
+                Ok(_) => {
+                    self.write_file(&rel, &self.scrub(&scrub_udev(&bytes)))?;
+                    report.copied.push(rel);
+                }
+                Err(e) if is_missing(&e) => {}
+                Err(e) => report.skipped.push((rel, reason(&e))),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Why [`Ctx::resolve`] stopped.
@@ -644,26 +703,33 @@ pub(crate) fn user_map(passwd: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Replaces whole-word user names and every occurrence of the hostname.
+/// Replaces every occurrence of each user name of at least [`MIN_USER_LEN`] characters
+/// (case-insensitive substring, longer names first) and every occurrence of the hostname.
 pub(crate) fn scrub_text(text: &str, users: &[(String, String)], hostname: Option<&str>) -> String {
     String::from_utf8_lossy(&scrub_bytes(text.as_bytes(), users, hostname)).into_owned()
 }
 
 /// [`scrub_text`] on raw bytes, so files with invalid UTF-8 keep their other bytes.
 fn scrub_bytes(text: &[u8], users: &[(String, String)], hostname: Option<&str>) -> Vec<u8> {
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+    let mut users: Vec<(&[u8], &[u8])> = users
+        .iter()
+        .filter(|(name, _)| name.len() >= MIN_USER_LEN)
+        .map(|(name, alias)| (name.as_bytes(), alias.as_bytes()))
+        .collect();
+    // Stable sort: names of equal length keep uid order.
+    users.sort_by_key(|&(name, _)| std::cmp::Reverse(name.len()));
+    // One pass, so an alias written into `out` is never scrubbed again.
     let mut out = Vec::with_capacity(text.len());
     let mut i = 0;
     'scan: while i < text.len() {
-        if i == 0 || !is_word(text[i - 1]) {
-            for (name, alias) in users {
-                let name = name.as_bytes();
-                let end = i + name.len();
-                if text[i..].starts_with(name) && (end == text.len() || !is_word(text[end])) {
-                    out.extend_from_slice(alias.as_bytes());
-                    i = end;
-                    continue 'scan;
-                }
+        for &(name, alias) in &users {
+            if text[i..]
+                .get(..name.len())
+                .is_some_and(|w| w.eq_ignore_ascii_case(name))
+            {
+                out.extend_from_slice(alias);
+                i += name.len();
+                continue 'scan;
             }
         }
         out.push(text[i]);
@@ -685,6 +751,27 @@ fn replace_all(text: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
         } else {
             out.push(text[i]);
             i += 1;
+        }
+    }
+    out
+}
+
+/// Replaces the value of each [`UDEV_SCRUBBED_KEYS`] line with `SCRUBBED`, keeping the key.
+fn scrub_udev(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    for line in text.split_inclusive(|&b| b == b'\n') {
+        match UDEV_SCRUBBED_KEYS
+            .iter()
+            .find(|k| line.starts_with(k.as_bytes()))
+        {
+            Some(key) => {
+                out.extend_from_slice(key.as_bytes());
+                out.extend_from_slice(b"SCRUBBED");
+                if line.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+            }
+            None => out.extend_from_slice(line),
         }
     }
     out
@@ -850,7 +937,7 @@ mod tests {
         );
         assert_eq!(
             scrub_text("/home/alice/x bob alicex myhost", &users, Some("myhost")),
-            "/home/user1/x user2 alicex REDACTED"
+            "/home/user1/x user2 user1x REDACTED"
         );
 
         let src = fake_src();
@@ -858,10 +945,87 @@ mod tests {
         let (_out, dir, _) = capture_fresh(&src.0, &CaptureOpts::default());
         assert_eq!(
             fs::read_to_string(dir.join("proc/stat")).unwrap(),
-            "/home/user1/x user2 alicex REDACTED"
+            "/home/user1/x user2 user1x REDACTED"
         );
         let capture_txt = fs::read_to_string(dir.join("CAPTURE.txt")).unwrap();
         assert!(!capture_txt.contains("myhost"));
+    }
+
+    fn users(names: &[&str]) -> Vec<(String, String)> {
+        let passwd: String = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{n}:x:{}:{}::/home/{n}:/bin/sh\n", 1000 + i, 1000 + i))
+            .collect();
+        user_map(&passwd)
+    }
+
+    #[test]
+    fn users_scrubbed_as_substrings() {
+        let users = users(&["oystein", "al"]);
+        assert_eq!(
+            scrub_text(
+                "/home/oystein/x oystein-firefox-1.scope OYSTEIN al alfred",
+                &users,
+                None
+            ),
+            "/home/user1/x user1-firefox-1.scope user1 al alfred"
+        );
+    }
+
+    #[test]
+    fn short_user_names_skipped() {
+        let users = users(&["al", "ali"]);
+        assert_eq!(scrub_text("al ali alix", &users, None), "al user2 user2x");
+    }
+
+    #[test]
+    fn longer_user_name_first() {
+        let users = users(&["alice", "alice2"]);
+        assert_eq!(scrub_text("alice2 alice", &users, None), "user2 user1");
+    }
+
+    #[test]
+    fn udev_values_scrubbed() {
+        let src = fake_src();
+        put(
+            &src.0,
+            "run/udev/data/b259:0",
+            b"E:ID_MODEL=Foo\nE:ID_SERIAL=S123_ABC\nE:ID_SERIAL_SHORT=ABC\nE:ID_WWN=0x5000c500\nE:ID_BUS=ata\n",
+        );
+        let (_out, dir, report) = capture_fresh(&src.0, &CaptureOpts::default());
+        assert_eq!(
+            fs::read(dir.join("run/udev/data/b259:0")).unwrap(),
+            b"E:ID_MODEL=Foo\nE:ID_SERIAL=SCRUBBED\nE:ID_SERIAL_SHORT=SCRUBBED\nE:ID_WWN=SCRUBBED\nE:ID_BUS=ata\n"
+        );
+        assert!(report.copied.contains(&PathBuf::from("run/udev/data/b259:0")));
+    }
+
+    #[test]
+    fn udev_only_block_net_pci() {
+        let src = fake_src();
+        for name in ["b8:0", "n2", "+pci:0000:03:00.0", "c1:3"] {
+            put(&src.0, &format!("run/udev/data/{name}"), b"E:ID_BUS=ata\n");
+        }
+        let (_out, dir, _) = capture_fresh(&src.0, &CaptureOpts::default());
+        for name in ["b8:0", "n2", "+pci:0000:03:00.0"] {
+            assert_eq!(
+                fs::read(dir.join("run/udev/data").join(name)).unwrap(),
+                b"E:ID_BUS=ata\n",
+                "{name}"
+            );
+        }
+        assert!(!dir.join("run/udev/data/c1:3").exists());
+    }
+
+    #[test]
+    fn udev_dir_optional() {
+        let src = fake_src();
+        let (_out, dir, report) = capture_fresh(&src.0, &CaptureOpts::default());
+        assert!(!dir.join("run").exists());
+        assert!(!report.copied.iter().any(|p| p.starts_with("run")));
+        let capture_txt = fs::read_to_string(dir.join("CAPTURE.txt")).unwrap();
+        assert!(!capture_txt.contains("run/udev"));
     }
 
     #[test]
