@@ -139,7 +139,7 @@ pub fn prune(crash_dir: &Path) -> io::Result<()> {
             reports.push((order, stem.to_owned()));
         }
     }
-    reports.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    reports.sort_unstable_by_key(|report| std::cmp::Reverse(report.0));
 
     let mut result = Ok(());
     for (_, stem) in reports.iter().skip(KEEP_REPORTS) {
