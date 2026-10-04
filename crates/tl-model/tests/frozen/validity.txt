@@ -1,0 +1,7 @@
+Valid=0
+WarmingUp=1
+Stale=2
+Restricted=3
+Unsupported=4
+Missing=5
+Failed=6
