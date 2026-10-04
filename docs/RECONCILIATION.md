@@ -1682,6 +1682,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: ADR-005, i3o.1 and hk6.9 text [verified].
 - Edits: bead i3o.1.
 
+### R-266 Fixture capture of `run/udev/data` keeps an allowlist of lines
+- Question: a test capture of `run/udev/data` showed disk serials in `S:disk/by-id/...` symlink lines, the WWN in `ID_WWN_WITH_EXTENSION`, MACs in `ID_NET_NAME_MAC`, and filesystem UUIDs and labels in other `E:` keys, none of which R-261's three-key scrub touched. Leader decision, 2026-10-04.
+- Resolution: `capture-fixture` (E04-033, `tasklens-2dl.37`) writes a udev file from an allowlist: it keeps `I:`, `V:`, `G:` and `Q:` lines and the `E:` lines whose key is one of the 15 `UDEV_KEYS` of E04-030 (`tasklens-2dl.33`): `ID_MODEL`, `ID_MODEL_FROM_DATABASE`, `ID_VENDOR_FROM_DATABASE`, `ID_BUS`, `ID_WWN`, `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_FS_TYPE`, `ID_FS_LABEL`, `ID_PART_TABLE_TYPE`, `ID_PART_ENTRY_TYPE`, `ID_PART_ENTRY_FLAGS`, `ID_PART_ENTRY_OFFSET`, `ID_PART_ENTRY_SIZE`, `ID_PATH`. Every `S:` line and every other `E:` key is dropped. The values of `ID_WWN`, `ID_SERIAL`, `ID_SERIAL_SHORT` and `ID_FS_LABEL` become `SCRUBBED` (R-261 plus the label). E04-030 must not read a key outside this list without adding it here and to the capture allowlist in the same change. Also recorded: the CI workflow (`.github/workflows/ci.yml`, E02-010, `v9m.12`) sets `VK_ICD_FILENAMES` to Ubuntu's `/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`, and `scripts/ci.sh` tries that file and Arch's `lvp_icd.json` (commit `b2a0f5b`).
+- Basis: the test capture on the owner machine [verified]; ADR-013, ADR-016 udev row, R-140, R-261 [verified].
+- Edits: ADR-013 scrub sentences and ADR-016 udev row (`ID_PATH`); beads 2dl.37, 2dl.33.
+
 
 
 
@@ -1697,8 +1703,7 @@ Only choices that no rule settles. Beads use the recommended answer until Oystei
 The owner-decision topics of the settled open items (R-139 to R-235) were answered on 2026-10-04 and are D-012 to D-020. Every answer took the recommended option except the PKGBUILD licence, which is MIT (D-017).
 
 ### Q-7 Copyright holder for the MIT `LICENSE` file (R-258)
-- Options: (a) `Oystein Krog`; (b) a company name; (c) another name the owner gives.
-- Recommendation: none; the owner's call. E02-011 (`tasklens-v9m.13`) waits on this one line.
+- Answered on 2026-10-04: `Øystein Krog` (D-021). `LICENSE` is committed (`daa15ab`) and E02-011 (`tasklens-v9m.13`) is closed.
 
 ### Q-1 Show DIMM serial numbers?
 - Options: (a) hidden everywhere (R-030); (b) shown on the Memory page and Information tab but left out of copy text; (c) shown everywhere.

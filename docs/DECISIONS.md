@@ -7,6 +7,11 @@ Decisions made by Oystein, newest first. Implementation agents must not reopen t
 D-012 to D-020 answer the owner-decision topics of the settled open items (`docs/RECONCILIATION.md`
 R-139 to R-235). Every answer took the recommended option except D-017.
 
+### D-021: The `LICENSE` copyright holder is Øystein Krog
+
+The MIT `LICENSE` file's body starts `Copyright (c) 2026 Øystein Krog`. Committed in `daa15ab`;
+E02-011 (`tasklens-v9m.13`) is closed. (Q-7, R-258.)
+
 ### D-020: The history chart stacks the top 3 processes plus "other"
 
 Per bucket the history chart draws the three largest per-process values as a stack and the sum
