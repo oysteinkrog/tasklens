@@ -120,7 +120,11 @@ mod tests {
     ) {
         let (event_tx, event_rx) = async_channel::bounded(8);
         let (control_tx, control_rx) = async_channel::bounded(8);
-        (JournalHandle::new(event_rx, control_tx), event_tx, control_rx)
+        (
+            JournalHandle::new(event_rx, control_tx),
+            event_tx,
+            control_rx,
+        )
     }
 
     #[test]
@@ -128,7 +132,10 @@ mod tests {
         let (handle, _event_tx, control_rx) = pair();
         handle.load_older();
         handle.set_follow(false);
-        assert_eq!(control_rx.recv_blocking().unwrap(), JournalControl::LoadOlder);
+        assert_eq!(
+            control_rx.recv_blocking().unwrap(),
+            JournalControl::LoadOlder
+        );
         assert_eq!(
             control_rx.recv_blocking().unwrap(),
             JournalControl::SetFollow(false)
