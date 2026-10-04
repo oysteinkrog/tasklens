@@ -79,7 +79,7 @@ impl SortKey {
         match (self, other) {
             (SortKey::Int(a), SortKey::Int(b)) => a.cmp(b),
             (SortKey::Float(a), SortKey::Float(b)) => a.total_cmp(b),
-            (SortKey::Text(a), SortKey::Text(b)) => a.cmp(b),
+            (SortKey::Text(a), SortKey::Text(b)) => cmp_text(a, b),
             _ => self.rank().cmp(&other.rank()),
         }
     }
@@ -92,6 +92,15 @@ impl SortKey {
             SortKey::Absent => 3,
         }
     }
+}
+
+/// Case-insensitive text order (text columns sort case-insensitively), without allocating.
+/// Ties break by byte order, so the order stays total.
+fn cmp_text(a: &str, b: &str) -> Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+        .then_with(|| a.cmp(b))
 }
 
 /// True when the field's validity lets its value take part in the order.
@@ -479,5 +488,18 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
         rows: Arc::from(rows),
         groups: Arc::from([]),
         totals: TableTotals::default(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_sort_case_insensitive() {
+        let mut names = ["bash", "Bash", "zsh", "Xorg"];
+        names.sort_by(|a, b| cmp_text(a, b));
+        // Equal ignoring case: byte order puts "Bash" before "bash".
+        assert_eq!(names, ["Bash", "bash", "Xorg", "zsh"]);
     }
 }
