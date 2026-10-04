@@ -6,6 +6,7 @@ pub mod derived;
 pub mod map;
 pub mod metrics;
 pub mod palette;
+pub mod store;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ use tl_model::settings::AppearanceSettings;
 pub use derived::{Derived, rebuild_derived};
 pub use metrics::{UiMetrics, bump_style_version, metrics};
 pub use palette::GraphPalette;
+pub use store::{ActivateSource, ActivateTheme, ThemeError, ThemeEvent, ThemeStore, current};
 
 /// Dark or light. A theme file stores it as `"dark"` or `"light"`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
