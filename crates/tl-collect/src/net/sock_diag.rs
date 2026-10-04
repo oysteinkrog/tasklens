@@ -1,9 +1,13 @@
-//! `NETLINK_SOCK_DIAG` socket records and the parser for dump replies (SYS-028, PROC-032).
+//! `NETLINK_SOCK_DIAG` socket records, the parser for dump replies and the dump requests
+//! (SYS-028, PROC-032).
 //!
-//! Parsing is pure: bytes in, records out. The caller owns the socket and reuses `out` between
-//! dumps, so the parser allocates nothing except pushes to `out`.
+//! Parsing is pure: bytes in, records out. `SockDiag` owns the socket and one receive buffer, and
+//! the caller reuses `out` between dumps, so a dump allocates nothing except pushes to `out`.
 
+use std::io::ErrorKind;
 use std::net::IpAddr;
+
+use netlink_sys::{Socket, protocols::NETLINK_SOCK_DIAG};
 
 use netlink_packet_core::{NLA_TYPE_MASK, NLMSG_DONE, NLMSG_ERROR, Parseable};
 use netlink_packet_sock_diag::{
@@ -18,6 +22,21 @@ const NLMSG_HDR_LEN: usize = 16;
 const INET_DIAG_MSG_LEN: usize = 72;
 /// Netlink attribute header length (`struct nlattr`).
 const NLA_HDR_LEN: usize = 4;
+/// Length of `struct inet_diag_req_v2`.
+const INET_DIAG_REQ_LEN: usize = 56;
+/// A whole request: netlink header plus `inet_diag_req_v2`.
+const REQUEST_LEN: usize = NLMSG_HDR_LEN + INET_DIAG_REQ_LEN;
+/// Receive buffer capacity, kept between dumps.
+const RECV_BUF_LEN: usize = 64 * 1024;
+/// `NLM_F_REQUEST | NLM_F_DUMP`.
+const NLM_F_REQUEST_DUMP: u16 = 0x1 | 0x300;
+/// `idiag_states`: every TCP state.
+const ALL_STATES: u32 = 0xFFF;
+const IPPROTO_TCP: u8 = 6;
+const IPPROTO_UDP: u8 = 17;
+/// Errnos in `NLMSG_ERROR` that mean the diag module for the protocol is missing.
+const ENOENT: i32 = 2;
+const EINVAL: i32 = 22;
 
 // Offsets in `struct tcp_info` (include/uapi/linux/tcp.h).
 const TCPI_LAST_DATA_RECV: usize = 52;
@@ -47,6 +66,15 @@ impl Family {
 pub enum Proto {
     Tcp,
     Udp,
+}
+
+impl Proto {
+    fn ipproto(self) -> u8 {
+        match self {
+            Proto::Tcp => IPPROTO_TCP,
+            Proto::Udp => IPPROTO_UDP,
+        }
+    }
 }
 
 /// The `struct tcp_info` fields tasklens uses.
@@ -94,6 +122,104 @@ pub struct SockRecord {
     pub inode: u64,
     /// Only for TCP when `INET_DIAG_INFO` was present and long enough.
     pub tcp_info: Option<TcpInfoLite>,
+}
+
+/// A `NETLINK_SOCK_DIAG` socket with a reused 64 KiB receive buffer.
+pub struct SockDiag {
+    sock: Socket,
+    buf: Vec<u8>,
+    seq: u32,
+}
+
+impl SockDiag {
+    /// Opens a NETLINK_SOCK_DIAG (protocol 4) socket with SOCK_CLOEXEC, bound with port id 0.
+    pub fn open() -> Result<Self, CollectError> {
+        // `Socket::new` passes SOCK_CLOEXEC; `bind_auto` binds port id 0 so the kernel picks one.
+        let mut sock = Socket::new(NETLINK_SOCK_DIAG)?;
+        sock.bind_auto()?;
+        Ok(Self {
+            sock,
+            buf: Vec::with_capacity(RECV_BUF_LEN),
+            seq: 0,
+        })
+    }
+
+    /// One dump for one family and protocol. Appends to `out`.
+    pub fn dump(
+        &mut self,
+        family: Family,
+        proto: Proto,
+        out: &mut Vec<SockRecord>,
+    ) -> Result<(), CollectError> {
+        self.seq = self.seq.wrapping_add(1);
+        let request = build_request(family, proto, self.seq);
+        self.sock.send(&request, 0)?;
+
+        let start = out.len();
+        loop {
+            self.buf.clear();
+            match self.sock.recv(&mut self.buf, 0) {
+                Ok(_) => {}
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+            // Every message in one datagram carries the sequence number of its request.
+            if read_u32(&self.buf, 8) != Some(self.seq) {
+                tracing::trace!("sock_diag: skipped reply with a stale sequence number");
+                continue;
+            }
+            match parse_dump(&self.buf, family, proto, out) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(CollectError::SockDiagErrno(ENOENT | EINVAL)) => {
+                    // The diag module for this protocol is missing. Report nothing for it so
+                    // the other dumps still run.
+                    tracing::debug!(?family, ?proto, "sock_diag: protocol not supported");
+                    out.truncate(start);
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// The four dumps TCPv4, TCPv6, UDPv4, UDPv6 in that order. Clears `out` first.
+    pub fn dump_all(&mut self, out: &mut Vec<SockRecord>) -> Result<(), CollectError> {
+        out.clear();
+        self.dump(Family::V4, Proto::Tcp, out)?;
+        self.dump(Family::V6, Proto::Tcp, out)?;
+        self.dump(Family::V4, Proto::Udp, out)?;
+        self.dump(Family::V6, Proto::Udp, out)
+    }
+
+    /// TCP v4 and v6 only, for per-process attribution when the Connections tab is not shown.
+    pub fn dump_tcp(&mut self, out: &mut Vec<SockRecord>) -> Result<(), CollectError> {
+        out.clear();
+        self.dump(Family::V4, Proto::Tcp, out)?;
+        self.dump(Family::V6, Proto::Tcp, out)
+    }
+}
+
+/// A `SOCK_DIAG_BY_FAMILY` dump request: `nlmsghdr` then `inet_diag_req_v2`.
+fn build_request(family: Family, proto: Proto, seq: u32) -> [u8; REQUEST_LEN] {
+    let mut r = [0u8; REQUEST_LEN];
+    r[0..4].copy_from_slice(&(REQUEST_LEN as u32).to_ne_bytes());
+    r[4..6].copy_from_slice(&SOCK_DIAG_BY_FAMILY.to_ne_bytes());
+    r[6..8].copy_from_slice(&NLM_F_REQUEST_DUMP.to_ne_bytes());
+    r[8..12].copy_from_slice(&seq.to_ne_bytes());
+    // r[12..16]: nlmsg_pid 0, the kernel.
+    let req = &mut r[NLMSG_HDR_LEN..];
+    req[0] = family.af();
+    req[1] = proto.ipproto();
+    req[2] = match proto {
+        Proto::Tcp => 1 << (INET_DIAG_INFO - 1),
+        Proto::Udp => 0,
+    };
+    // req[3]: pad.
+    req[4..8].copy_from_slice(&ALL_STATES.to_ne_bytes());
+    // req[8..48]: zeroed ports, addresses and interface; then idiag_cookie = INET_DIAG_NOCOOKIE.
+    req[48..56].fill(0xFF);
+    r
 }
 
 /// Appends every record in one or more netlink messages in `buf` to `out`.
@@ -423,6 +549,47 @@ mod tests {
             err,
             CollectError::NetlinkMalformed("truncated attribute")
         ));
+    }
+
+    #[test]
+    fn request_layout() {
+        let r = build_request(Family::V6, Proto::Tcp, 7);
+        assert_eq!(r.len(), 72);
+        assert_eq!(read_u32(&r, 0), Some(72));
+        assert_eq!(read_u16(&r, 4), Some(20));
+        assert_eq!(read_u16(&r, 6), Some(0x301));
+        assert_eq!(read_u32(&r, 8), Some(7));
+        assert_eq!(read_u32(&r, 12), Some(0));
+        assert_eq!(&r[16..20], &[10, 6, 0b10, 0]);
+        assert_eq!(read_u32(&r, 20), Some(0xFFF));
+        assert!(r[24..64].iter().all(|&b| b == 0));
+        assert!(r[64..72].iter().all(|&b| b == 0xFF));
+
+        let u = build_request(Family::V4, Proto::Udp, 1);
+        assert_eq!(&u[16..20], &[2, 17, 0, 0]);
+    }
+
+    #[test]
+    #[ignore = "real system: opens a NETLINK_SOCK_DIAG socket"]
+    fn dump_all_clears_out() {
+        let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut diag = SockDiag::open().unwrap();
+        let mut out = Vec::new();
+        diag.dump_all(&mut out).unwrap();
+        let first = out.len();
+        assert!(first > 0);
+        let capacity = diag.buf.capacity();
+
+        diag.dump_all(&mut out).unwrap();
+        assert_eq!(diag.buf.capacity(), capacity);
+        assert_eq!(capacity, RECV_BUF_LEN);
+        // Only the second dump: no record appears twice.
+        let mut cookies: Vec<_> = out.iter().map(|r| (r.proto, r.family, r.cookie)).collect();
+        let n = cookies.len();
+        cookies.sort_by_key(|&(p, f, c)| (p as u8, f as u8, c));
+        cookies.dedup();
+        assert_eq!(cookies.len(), n);
+        assert!(n < first * 2);
     }
 
     #[test]
