@@ -7,10 +7,10 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::actions::{Family, FourTuple, Proto};
+use crate::devices::NetKind;
 use crate::health::ManagerState;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{Coverage, ProcessRecord};
-use crate::devices::NetKind;
 use crate::series::SeriesView;
 use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, NetTotals,
