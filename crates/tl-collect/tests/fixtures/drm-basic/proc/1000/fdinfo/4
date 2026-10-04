@@ -1,0 +1,6 @@
+pos:	0
+flags:	02100002
+drm-driver:	amdgpu
+drm-client-id:	12
+drm-pdev:	0000:03:00.0
+drm-engine-gfx:	9999 ns

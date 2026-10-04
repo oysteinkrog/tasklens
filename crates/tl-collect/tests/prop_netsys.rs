@@ -23,6 +23,13 @@ proptest! {
 
 proptest! {
     #[test]
+    fn prop_fdinfo_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=4096)) {
+        let _ = tl_collect::gpu_drm::fdinfo::parse_fdinfo(1, &bytes);
+    }
+}
+
+proptest! {
+    #[test]
     fn netsys_prop_harness_runs(_bytes in any::<Vec<u8>>()) {
         prop_assert!(true);
     }

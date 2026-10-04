@@ -1,0 +1,10 @@
+pos:	0
+flags:	02100002
+drm-driver:	xe
+drm-client-id:	7
+drm-pdev:	0000:00:02.0
+drm-total-system:	8 MiB
+drm-resident-system:	8 MiB
+drm-cycles-rcs:	600
+drm-total-cycles-rcs:	1000
+drm-engine-capacity-vcs:	2
