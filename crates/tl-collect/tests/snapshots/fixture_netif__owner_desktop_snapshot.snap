@@ -1,0 +1,12 @@
+---
+source: crates/tl-collect/tests/fixture_netif.rs
+expression: report
+---
+docker0 ifindex=9 netns=4026531833 type=1 kind=Virtual state=Disconnected/Valid
+enp36s0f0 ifindex=3 netns=4026531833 type=1 kind=Ethernet state=Connected/Valid
+enp36s0f1 ifindex=4 netns=4026531833 type=1 kind=Ethernet state=Connected/Valid
+enp36s0f2 ifindex=5 netns=4026531833 type=1 kind=Ethernet state=Connected/Valid
+enp36s0f3 ifindex=7 netns=4026531833 type=1 kind=Ethernet state=Connected/Valid
+enp38s0 ifindex=2 netns=4026531833 type=1 kind=Ethernet state=Connected/Valid
+tailscale0 ifindex=8 netns=4026531833 type=65534 kind=Tunnel state=Connected/Valid
+wlan0 ifindex=6 netns=4026531833 type=1 kind=WiFi state=Disconnected/Valid
