@@ -2,8 +2,8 @@
 
 pub mod config;
 mod runtime;
-pub mod supervise;
 pub mod source;
+pub mod supervise;
 pub mod update;
 
 pub use config::{EngineConfig, EngineMode};
