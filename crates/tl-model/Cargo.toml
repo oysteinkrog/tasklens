@@ -5,6 +5,17 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde         = { workspace = true }
+postcard      = { workspace = true }
+thiserror     = { workspace = true }
+async-channel = { workspace = true }
+bitflags      = { workspace = true }
+smallvec      = { workspace = true }
+rustc-hash    = { workspace = true }   # GroupKey hash and FxHashMap (R-142)
+rustix        = { workspace = true, default-features = false, features = ["time"] }   # clock_gettime only
+
+[dev-dependencies]
+proptest = { workspace = true }
 
 [lints]
 workspace = true
