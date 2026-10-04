@@ -125,3 +125,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - lgw.5: no test for the hairline at scale 1.1.
 - hx1.6: SockDiag recv blocks with no timeout. Consider SO_RCVTIMEO (e.g. 2 s) so a stuck dump cannot hold a blocking-pool worker (Astra risk 2).
 - yms.16: desktop index snapshot canonicalizes /opt/google/chrome/chrome against the host filesystem, so the snapshot depends on the host. Make the canonicalize root injectable or skip canonicalize in the fixture test.
+- ndy.3: tl-gpu-probe opens fd 3 with pidfd_open(getpid()) + pidfd_getfd, because /proc/self/fd/3 fails with ENXIO for a socket. Needs Linux 5.6+. Check the engine spawn side (tl-engine/src/gpu/spawn.rs) agrees. ndy.4 must remove the dead_code allow in sampler.rs.
+- ndy.3: a failed Hello leaves the probe locked; a second Hello exits 0 with no answer.
+- 2dl.36: /var/tmp/claude/minimal-vm/ (745 MB) is left for the owner to delete.
