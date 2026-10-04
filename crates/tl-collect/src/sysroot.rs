@@ -138,12 +138,7 @@ pub fn read_at(
     limit: usize,
 ) -> Result<(usize, bool), CollectError> {
     buf.clear();
-    let fd = rustix::fs::openat(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
     read_limited(fd.as_fd(), buf, limit)
 }
 
