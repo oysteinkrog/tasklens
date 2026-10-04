@@ -70,3 +70,8 @@ pass once all batch writers finish.
 - Overlaps to settle together: device commands (SMART, eject, public IP) are E12-OI-1, E25-OI-1
   and the E12-A3 placeholder; X11 keep-above is B7 item 4 and E26-OI-5; `QuitMode::Explicit`
   (B7 item 5) is recorded in research/claude-gpui-apis.md:58 (gpui app.rs:202).
+- B8 (E22, E27, E28): done, 115 beads (E22 47, E27 35, E28 33), all 227 planned edges in, no
+  cycles, plan in 16a07bf. Open items: E22 19, E27 9, E28 15 (plan file). Leader edges:
+  wlf.10 (E01-008) on pdu.1 (scroll handle); E18-A1 must expose `TlTreeTable::scroll_handle`
+  (check B5). Order the `window/main.rs` chain edits of E27-023, E27-025 and the E28 anchors
+  with edges. Public IP fetch API joins the device-command overlap (blocks 9o0.32).
