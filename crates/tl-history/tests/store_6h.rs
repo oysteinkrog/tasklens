@@ -64,7 +64,7 @@ impl Rng {
     }
 
     fn chance(&mut self, one_in: u64) -> bool {
-        self.next() % one_in == 0
+        self.next().is_multiple_of(one_in)
     }
 
     /// `v` moved by `lo..=hi` up or down, kept in `0..=max`.
@@ -467,7 +467,7 @@ fn generate() -> Run {
 
     for s in 0..SECS {
         let t = s * SEC;
-        let block_start = t % MIN == 0;
+        let block_start = t.is_multiple_of(MIN);
         // A block that the store will put into a new segment starts a new meta scope. Before the
         // first append the store has no segment, and the first block opens a fresh scope anyway.
         if block_start && blocks > 0 && store.will_rotate(t) {
@@ -481,7 +481,7 @@ fn generate() -> Run {
                 step(&mut actual[i], &mut rng);
                 set_vals(&mut records[i], &actual[i]);
             }
-            if s % REPLACE_EVERY_SECS == 0 {
+            if s.is_multiple_of(REPLACE_EVERY_SECS) {
                 let i = rng.next() as usize % PROCS;
                 records.remove(i);
                 exited = Some(actual.remove(i).key);
