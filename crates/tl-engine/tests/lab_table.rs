@@ -250,7 +250,10 @@ fn settings() -> EngineSettings {
 }
 
 fn node(records: &[ProcessRecord], pid: u32) -> NodeId {
-    let r = records.iter().find(|r| r.key.pid == pid).unwrap();
+    let r = records
+        .iter()
+        .find(|r| r.key.pid == pid)
+        .expect("no record with that PID");
     NodeId::Process(r.key)
 }
 
@@ -427,7 +430,7 @@ fn tree(
     view.rows
         .iter()
         .map(|row| {
-            let r = &records[row.record.unwrap() as usize];
+            let r = &records[row.record.expect("tree rows are processes") as usize];
             (r.key.pid, row.depth, row.has_children, row.descendants)
         })
         .collect()
