@@ -63,6 +63,19 @@ fn four_tuple_v6() -> FourTuple {
     }
 }
 
+/// No scope id, so it survives serde (see `four_tuple_keeps_ipv6_scope_id`).
+fn four_tuple_v6_global() -> FourTuple {
+    FourTuple {
+        local: SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            443,
+            0,
+            0,
+        )),
+        remote: SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::LOCALHOST, 50_000, 0, 0)),
+    }
+}
+
 fn four_tuple_v4() -> FourTuple {
     FourTuple {
         local: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 22)),
@@ -266,7 +279,7 @@ fn every_request() -> Vec<HelperRequest> {
         HelperRequest::SockDestroy {
             family: Family::Inet6,
             proto: Proto::Tcp,
-            four_tuple: four_tuple_v6(),
+            four_tuple: four_tuple_v6_global(),
             cookie: 0x0102_0304_0506_0708,
         },
         HelperRequest::WriteServiceDropIn {
@@ -400,14 +413,7 @@ fn action_serde_types_roundtrip() {
         roundtrip(&proto, max);
     }
     roundtrip(&four_tuple_v4(), max);
-    let mut v6 = four_tuple_v6();
-    v6.local = SocketAddr::V6(SocketAddrV6::new(
-        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-        443,
-        0,
-        0,
-    ));
-    roundtrip(&v6, max);
+    roundtrip(&four_tuple_v6_global(), max);
 }
 
 /// serde writes a `SocketAddrV6` as (ip, port) in binary formats and reads it back with scope id
