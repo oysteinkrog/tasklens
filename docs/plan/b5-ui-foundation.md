@@ -71,6 +71,7 @@ Plan keys are listed per epic below. The ID column is filled once the beads exis
 | E15-A2 | `tasklens-ug9.2` | TlSelect, TlCombo and the display-component test suite | P0 (spec P2) | 0 | `components/select.rs`, `tests/ui_components.rs` | E15-A1, E15-012 to E15-021 |
 | E15-A3 | `tasklens-ug9.3` | Component gallery and headless render tests (U-4) | P1 | 1 | `components/gallery.rs`, `tests/render_gallery.rs`, `tests/golden/gallery_*.png` | E15-A2, E16-005 |
 | E15-022 | `tasklens-ug9.25` | App logo tasklens.svg | P1 | 1 | `assets/icons/tasklens.svg`, `components/icons.rs` | E15-005 |
+| E15-026 | `tasklens-ug9.26` | Replace the placeholder application icon (D-014, R-212; `blocked-open-item` until the owner supplies artwork) | P3 | 3 | `assets/icons/tasklens.svg` | E15-022 |
 
 ## E16 ui-app-core
 
@@ -112,6 +113,7 @@ Plan keys are listed per epic below. The ID column is filled once the beads exis
 | E18-A2 | `tasklens-rsf.2` | Column picker window "tasklens Columns" | P0 | 0 | `table/columns_window.rs` (open item 3), `tests/ui_columns.rs` | E18-012, E16-A2, E15-A1 |
 | E18-013 | `tasklens-rsf.15` | Table render goldens | P1 | 1 | `tests/render_table.rs`, `tests/golden/table_*.png` | E18-A1, E16-005 |
 | E18-014 | `tasklens-rsf.16` | Column separators | P4 | 4 | `table/tree_table.rs`, `table/header.rs` | E18-A2 |
+| E18-017 | `tasklens-rsf.17` | Keep the first visible row across a UI scale change (R-187) | P1 | 1 | `table/tree_table.rs`, `tests/ui_tree_table.rs` | E18-A1 |
 
 
 ## Open items for the leader

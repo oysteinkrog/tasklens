@@ -64,6 +64,7 @@ Contracts other epics use (all under E20-A1 unless marked):
 | E20-026 | tasklens-jqk.28 | Shield toolbar slot and unlock at launch | P3 | E20-003, E20-004, E20-018, fut.3 |
 | E20-027 | tasklens-jqk.29 | Window picker toolbar slot and picking mode | P3 | E20-003, E20-004, E20-011, E20-A1 |
 | E20-028 | tasklens-jqk.30 | Close decision row 2: keep detached graph windows | P3 | E20-A1, fut.2 |
+| E20-029 | tasklens-jqk.31 | ToggleAlwaysOnTop for secondary windows through the KWin bridge (R-176) | P2 | E20-022, fut.12, y6k.2 |
 
 ### Edges for the leader
 
