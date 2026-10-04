@@ -44,7 +44,7 @@ pub fn parse_uuid(s: &str) -> Option<[u8; 16]> {
     }
     let hex: Vec<u8> = groups.concat().into_bytes();
     let mut out = [0u8; 16];
-    for (byte, pair) in out.iter_mut().zip(hex.chunks_exact(2)) {
+    for (byte, pair) in out.iter_mut().zip(hex.as_chunks::<2>().0) {
         let hi = (pair[0] as char).to_digit(16)?;
         let lo = (pair[1] as char).to_digit(16)?;
         *byte = (hi * 16 + lo) as u8;
@@ -199,10 +199,10 @@ mod tests {
             Ok(info) => info,
             Err(e) => panic!("hello failed: {:?} {}", e.kind, e.message),
         };
-        println!("driver {} nvml {}", info.driver, info.nvml);
+        eprintln!("driver {} nvml {}", info.driver, info.nvml);
         assert_eq!(info.devices.len(), 1);
         let d = &info.devices[0];
-        println!(
+        eprintln!(
             "name {:?} bus {} mem_total {} power_limit_mw {:?} cuda {:?} vbios {:?} arch {:?}",
             d.name,
             d.pci_bus_id,
@@ -213,7 +213,7 @@ mod tests {
             d.architecture
         );
         // U-35: the power limit NVML reports on the owner machine.
-        println!("U-35 power_limit_mw = {:?}", d.power_limit_mw);
+        eprintln!("U-35 power_limit_mw = {:?}", d.power_limit_mw);
         assert!(d.name.contains("5070"), "{}", d.name);
         assert_ne!(d.uuid, [0u8; 16]);
         assert!(d.pci_bus_id.ends_with("2D:00.0"), "{}", d.pci_bus_id);
@@ -230,13 +230,12 @@ mod tests {
                 assert_eq!(e.kind, InitFailure::LibraryNotFound, "{}", e.message);
             }
             Ok(_) => {
-                println!("NVML initialised on this machine; the missing-library case is skipped");
+                eprintln!("NVML initialised on this machine; the missing-library case is skipped");
                 // Still check that a library that cannot be loaded maps to LibraryNotFound.
                 let err = Nvml::builder()
                     .lib_path("libnvidia-ml-tasklens-missing.so.1".as_ref())
                     .init()
-                    .err()
-                    .expect("a missing library must fail to load");
+                    .expect_err("a missing library must fail to load");
                 assert_eq!(classify_init_error(&err).0, InitFailure::LibraryNotFound);
             }
         }
