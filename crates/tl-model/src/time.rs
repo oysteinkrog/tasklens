@@ -45,7 +45,7 @@ impl BootId {
                 continue;
             }
             let v = (c as char).to_digit(16)? as u8;
-            b[nibbles / 2] |= if nibbles % 2 == 0 { v << 4 } else { v };
+            b[nibbles / 2] |= if nibbles.is_multiple_of(2) { v << 4 } else { v };
             nibbles += 1;
         }
         let mut hi = [0u8; 8];
