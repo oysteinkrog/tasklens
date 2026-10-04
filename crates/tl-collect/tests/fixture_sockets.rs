@@ -1,6 +1,9 @@
 //! sock_diag tests (E06-003). The `real_*` tests open a NETLINK_SOCK_DIAG socket on the real
 //! system and run with `cargo test -p tl-collect -- --ignored`.
 
+// The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
+#![allow(clippy::unwrap_used)]
+
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream, UdpSocket};
 
