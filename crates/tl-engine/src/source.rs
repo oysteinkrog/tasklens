@@ -333,9 +333,15 @@ pub async fn run<S: Source>(cx: Cx, io: WorkerIo, mut src: S) -> Outcome<(), Wor
             }
         };
         src = s;
+        // A job that ran past the next deadline must not start the next job at once. Skip to
+        // the first deadline on the grid that is still in the future.
+        let now = cx.now();
+        if now > iv.deadline() {
+            iv.tick(now);
+        }
 
         if let Some(p) = period {
-            let took = Duration::from_nanos(cx.now().duration_since(started));
+            let took = Duration::from_nanos(now.duration_since(started));
             if let Some(state) = late.record(took, p) {
                 let health = SourceUpdate::Health {
                     id,

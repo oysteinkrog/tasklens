@@ -383,21 +383,19 @@ fn slow_job_skips_ticks_and_reports_late() {
     let mut fl = FakeLab::new();
     let (updates, mut rx, demand, settings, control) = channels();
     let slow = Step::Slow(Duration::from_millis(250));
-    // A script of only slow jobs would keep the loop busy forever, so the lab never idles.
     let script = vec![slow, slow, slow, slow, Step::Ok];
     let src = FakeSource::new(&fl.clock, script, PERIOD);
     let log = Arc::clone(&src.log);
     let (handle, _) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
 
-    // The slow jobs already ran while the task started: each one moved the clock.
-    assert_eq!(fl.now_ms(), 1_000);
-    fl.run_for(Duration::from_millis(990), TICK);
+    // The first job ran while the task started and moved the clock.
+    assert_eq!(fl.now_ms(), 250);
+    fl.run_for(Duration::from_millis(1_740), TICK);
     let samples = times_ms(&log, "sample");
-    // The tick is taken before the job, so the deadline it left behind has passed when a slow
-    // job ends: the next job starts at once. That is one late tick, never a burst. After the
-    // fast job the loop is back on the 100 ms grid.
-    let mut expected = vec![0, 250, 500, 750, 1_000];
-    expected.extend((11..20).map(|k| k * 100));
+    // Each slow job ends 250 ms after it starts; the next one waits for the next future
+    // 100 ms deadline. After the fast job the loop samples every 100 ms again.
+    let mut expected = vec![0, 300, 600, 900];
+    expected.extend((12..20).map(|k| k * 100));
     assert_eq!(samples, expected);
     for pair in samples.windows(2) {
         assert!(
