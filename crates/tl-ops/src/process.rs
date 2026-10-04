@@ -1062,19 +1062,25 @@ mod tests {
 
     #[test]
     fn sched_attr_rejects_bad_rt_prio() {
-        let out_of_range = Err(OpsError::InvalidInput("rt priority out of range"));
-        assert_eq!(sched_attr_for(SchedPolicy::Fifo, 0, 0), out_of_range);
-        assert_eq!(sched_attr_for(SchedPolicy::Rr, 100, 0), out_of_range);
-        let must_be_zero = Err(OpsError::InvalidInput("rt priority must be 0"));
-        assert_eq!(sched_attr_for(SchedPolicy::Batch, 5, 0), must_be_zero);
+        let out_of_range = Some(OpsError::InvalidInput("rt priority out of range"));
+        assert_eq!(sched_attr_for(SchedPolicy::Fifo, 0, 0).err(), out_of_range);
+        assert_eq!(sched_attr_for(SchedPolicy::Rr, 100, 0).err(), out_of_range);
+        let must_be_zero = Some(OpsError::InvalidInput("rt priority must be 0"));
+        assert_eq!(sched_attr_for(SchedPolicy::Batch, 5, 0).err(), must_be_zero);
         // A key that does not verify: if the check ran after open_verified, the error would differ.
         let key = ProcessKey {
             start_ticks: 0,
             boot_id: BOOT,
             pid: 0,
         };
-        assert_eq!(set_sched(key, BOOT, SchedPolicy::Rr, 100), out_of_range);
-        assert_eq!(set_sched(key, BOOT, SchedPolicy::Batch, 5), must_be_zero);
+        assert_eq!(
+            set_sched(key, BOOT, SchedPolicy::Rr, 100).err(),
+            out_of_range
+        );
+        assert_eq!(
+            set_sched(key, BOOT, SchedPolicy::Batch, 5).err(),
+            must_be_zero
+        );
     }
 
     #[test]
@@ -1182,16 +1188,16 @@ mod tests {
 
     #[test]
     fn ioprio_level_out_of_range_is_invalid() {
-        let invalid = Err(OpsError::InvalidInput("I/O priority level out of range"));
-        assert_eq!(ioprio_for(IoPriority::BestEffort(8)), invalid);
-        assert_eq!(ioprio_for(IoPriority::Realtime(u8::MAX)), invalid);
+        let invalid = Some(OpsError::InvalidInput("I/O priority level out of range"));
+        assert_eq!(ioprio_for(IoPriority::BestEffort(8)).err(), invalid);
+        assert_eq!(ioprio_for(IoPriority::Realtime(u8::MAX)).err(), invalid);
         let key = ProcessKey {
             start_ticks: 0,
             boot_id: BOOT,
             pid: 0,
         };
         assert_eq!(
-            set_io_priority(key, BOOT, IoPriority::BestEffort(8)),
+            set_io_priority(key, BOOT, IoPriority::BestEffort(8)).err(),
             invalid
         );
     }
