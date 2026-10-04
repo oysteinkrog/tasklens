@@ -350,7 +350,7 @@ pub struct StartupUpdate {
 }
 
 /// The worker that produced `update`, for health tracking. `None` for updates that no
-/// supervised source sends (R-150 item 1).
+/// supervised source sends (R-150 item 1). Variants that several workers send follow R-272.
 pub fn source_of(update: &SourceUpdate) -> Option<SourceId> {
     match update {
         SourceUpdate::Health { id, .. } | SourceUpdate::ResumeDetected { id, .. } => Some(*id),

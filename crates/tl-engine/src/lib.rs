@@ -2,5 +2,6 @@
 
 pub mod config;
 mod runtime;
+pub mod update;
 
 pub use config::{EngineConfig, EngineMode};
