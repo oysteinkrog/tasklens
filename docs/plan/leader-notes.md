@@ -114,3 +114,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
   `00000000000040008000000000000001` to a captured machine-id file. Found by the 2dl.10 privacy
   gate. Record in RECONCILIATION and ADR-013 in the next docs pass.
 - Review later: 8q0.4 keeps the fast ring at its old capacity when a source's period changes (bead says keep the ring). Check the visible time span after a rate change in the e2e pass.
+- 8fx.8: replay perf budget (5 ms per block, 2,000 processes) not checked in release mode; check in the e2e pass.
+- 2dl.32: `impl Default for FanControl` lives in sample/sensors.rs as a placeholder; consider moving to a derive in parse/hwmon.rs.
+- 2dl.21: `impl Default for ZramReading` written by hand because counters::Rate has no Default.
+- cpufreq.rs:310 failed `cargo fmt --check` around 20:22; 2dl.16 now owns the file and must leave it formatted. Check in the full-workspace pass.
