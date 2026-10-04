@@ -50,7 +50,10 @@ const MEDIUM_MS: u64 = 300;
 /// Classifies the startup impact of an entry.
 ///
 /// Disabled entries have no impact. Enabled entries without usable timestamps are NotMeasured.
-pub fn classify(enabled: bool, timing: Option<&UnitTiming>) -> (ImpactRaw, Option<ImpactDetailRaw>) {
+pub fn classify(
+    enabled: bool,
+    timing: Option<&UnitTiming>,
+) -> (ImpactRaw, Option<ImpactDetailRaw>) {
     if !enabled {
         return (ImpactRaw::None, None);
     }
@@ -76,7 +79,10 @@ pub fn classify(enabled: bool, timing: Option<&UnitTiming>) -> (ImpactRaw, Optio
         activation_ms,
         start_offset_ms: t.inactive_exit_mono_us.saturating_sub(t.userspace_mono_us) / 1000,
         cpu_ns: (t.cpu_usage_ns != u64::MAX).then_some(t.cpu_usage_ns),
-        fork_exec_only: matches!(t.service_type.as_deref(), None | Some("simple") | Some("exec")),
+        fork_exec_only: matches!(
+            t.service_type.as_deref(),
+            None | Some("simple") | Some("exec")
+        ),
     };
     (impact, Some(detail))
 }
@@ -111,7 +117,10 @@ mod tests {
 
     #[test]
     fn disabled_is_none() {
-        assert_eq!(classify(false, Some(&timing(2000))), (ImpactRaw::None, None));
+        assert_eq!(
+            classify(false, Some(&timing(2000))),
+            (ImpactRaw::None, None)
+        );
         assert_eq!(classify(false, None), (ImpactRaw::None, None));
     }
 
