@@ -1398,6 +1398,97 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: table (b) [verified]; grouping [inferred].
 - Edits: UI-SHL-095.
 
+### R-221 Fans group: partial entries and empty state (OI-U51)
+- Question: UI-SHL-066 says an empty label plus "None" removes the entry but not what a half-set entry stores or what the group shows with no fans. Raised by B7-E21-7.
+- Resolution: `[[sensors.fans]]` entries store `key`, optional `label` (omitted when empty) and optional `temp` (omitted for None); an entry with neither is removed. With no fan in the snapshot the group is hidden. Keys follow PERF-005 (`fan:<hwmon name>:<device path>:<n>`; fallback form in R-229).
+- Basis: UI-SHL-066, table (a) [verified]; storage shape [inferred].
+- Edits: UI-SHL-066; table (a) `[[sensors.fans]]`.
+
+### R-222 Passwordless setup step (OI-U52)
+- Question: the `SetupStep` variant for `polkit-rule on|off` and the result stream belong to E03 and E29. Raised by B7-E21-11.
+- Resolution: R-149 (`SetupStep::PolkitRule { on }`, results in `HealthSnapshot.setup`). UI half: E21-042 dispatches `Command::RunSetup { step }` and reads the result from `HealthSnapshot.setup` on the `HEALTH` bit.
+- Basis: UI-PRF-052 [verified].
+- Edits: none.
+
+### R-223 Set Affinity is P1 inside a P2 anchor (OI-U53)
+- Question: raised by B7-E23-2.
+- Resolution: accepted. E23-001 to E23-004 are P1 and schedulable before E23-A2 closes; the anchor stays P2.
+- Basis: PROC-067, UI-PWN-021 [verified].
+- Edits: none.
+
+### R-224 Dump file name sanitising (OI-U54)
+- Question: `{name}` in `<name>_<pid>_<yyyymmdd_hhmmss>.core` can contain `/` and control characters. Raised by B7-E23-4.
+- Resolution: replace `/`, `\0` and every control character with `_`, cut the name part to 64 bytes on a char boundary, use `process` when the result is empty. The timestamp is local time formatted with `jiff`. The write is engine side (R-145).
+- Basis: PROC-075, UI-PWN-034 [verified]; rule [inferred].
+- Edits: UI-PWN-034.
+
+### R-225 "Shared libraries only" keeps the Primary and "Outside loaded modules" nodes (OI-U55)
+- Question: raised by B7-E23-5.
+- Resolution: with the box on, the Primary node (the executable's own mapping) and the "Outside loaded modules" node stay visible; only file-backed library mappings are filtered by the PROC-081 patterns.
+- Basis: PROC-081 [verified]; choice [inferred].
+- Edits: process-windows.md Memory maps entry.
+
+### R-226 After "Grant access" succeeds (OI-U56)
+- Question: UI-PWN-018 says the window re-sends its demand "with the helper flag", which `DetailDemand` lacks. Raised by B7-E23-6.
+- Resolution: no flag. When `HealthSnapshot.helper` changes to `Unlocked`, every open Properties window whose General payload is `Restricted` sends `Command::DetailRefresh { target, tab }` once for its active tab. Routing Restricted targets through the helper is R-170.
+- Basis: UI-PWN-002, UI-FND-028 [verified].
+- Edits: UI-PWN-018.
+
+### R-227 VirusTotal and dump handlers reach the Processes page by chain edit (OI-U57)
+- Question: raised by B8-E22-14.
+- Resolution: E22-038 and E22-039 add the menu items and dispatch `OpenVirusTotal` and `CreateDump`; E23-032 and E23-034 register the handlers in `pages/processes/mod.rs` under the E23 row of the chain-edit rule. No new bead.
+- Basis: 00-epics section 2 `pages/processes/mod.rs` rule [verified].
+- Edits: edges gma.35 on pdu.41 and gma.37 on pdu.42.
+
+### R-228 Chart validity and the E19 model constants (OI-U58)
+- Question: the chart cannot tell Failed from Restricted from Unsupported by itself; the pages need `MetricId` constants, the `TIER_1HZ` bit, `ceil_pow2`, `ceil_125` and thread CPU time. Raised by E19-1 to E19-5, E25-OI-2.
+- Resolution: the owner page calls `ChartView::set_state` from the `SourceHealth` of the source it knows; the chart derives only WarmingUp and Stale. The model items are R-170 and R-144. E24 and E25 beads name series by their UI-PRF names and stop and report when a constant is missing; E19-013 waits for `TIER_1HZ`; E19-004 defines nothing privately; E19-005 reports 0 thread CPU until `thread_cpu_ns` exists.
+- Basis: UI-PRF-001, UI-PRF-006, ADR-014 [verified].
+- Edits: none here.
+
+### R-229 Performance frame items (OI-U59)
+- Question: raised by E24-6, E24-7, E24-9, E24-10.
+- Resolution: where `DeviceIdentity` has no by-path or device path, the UI key is `disk:<name>` and `fan:<chip>:<index>`; PERF-005 records those as fallback forms. `DevicePage::set_active(&mut self, active: bool, cx)` is on the trait from E24-006. `CpuPage.bench_show_both` is a public field in crw.11; the paint hook is `AnimationDriver.paint_log` behind `cfg(any(test, feature = "test-hooks"))`, so E01-001 declares `bench = ["test-hooks"]` in `tl-ui/Cargo.toml`. The fan `connected` flag is R-170.
+- Basis: PERF-005, UI-PRF-053, leader notes [verified].
+- Edits: PERF-005, UI-PRF-011; beads crw.8, wlf.3.
+
+### R-230 Device page items (OI-U60)
+- Question: raised by E25-OI-1, OI-4 to OI-8.
+- Resolution: `request_public_ip_fetch` lives in E21-017 and shows the notice window first; E25-021 and E28-036 call it (edges on bj6.20). PWM is pre-scaled into the RPM axis through a derived `SeriesView` kept by the page; if E19 gains a per-series `YScale` the derived series goes. The UPower `Type` and `State` word mapping lives in `pages/perf/battery.rs`. `GridStyle.vertical_at: Option<Arc<[f32]>>` and `ChartSeries.gap_style: GapStyle::{Break, Dashed}` are added to E19-001's types by E25-032 as a same-batch chain edit. The device commands are R-139 and `LaunchWhat::DbusActivate` is R-170.
+- Basis: UI-PRF-034, PERF-060, UI-SYS-095 [verified].
+- Edits: bead yrf.3 (note on the E25-032 extension); edges o55.22 and 9o0.32 on bj6.20.
+
+### R-231 Minigraph items (OI-U61)
+- Question: raised by E26-OI-1, OI-2, OI-4, OI-6.
+- Resolution: E26-010 calls the shared Graph Color submenu builder (edge xdh.12 on bj6.35). Card reorder is pointer-only; Reset Minigraph Layout is the keyboard path. Aggregate devices and per-process series are R-154.
+- Basis: UI-PRF-040 to UI-PRF-044 [verified].
+- Edits: edge xdh.12 on bj6.35.
+
+### R-232 Services items (OI-U62)
+- Question: raised by E27-1, E27-5, E27-7, E27-8, E27-9.
+- Resolution: on `CommandError::Busy`, `SysQuery.last_sent` still becomes the new generation, `pending_resend = true`, and the next snapshot resends once with a fresh generation; on `EngineStopped` nothing is resent. `ToastKey` values at or above `0x8000_0000_0000_0000` are fixed keys reserved by E16-006; the tracker's generated keys (`id << 8 | index`) never reach that range because `ActionId` stays below 2^55; `SERVICES_LOADING_TOAST = ToastKey(0x8000_0000_0000_0101)`; the E28 pages take `..0201` (Startup) and `..0301` (Connections). E23-A1 joins the E27 row of 00-epics section 4. The UI sends `UnitEnable` or `UnitDisable` when leaving Masked; the unmask inside that request is R-170. Services column ids are `SysColumnId` (R-170).
+- Basis: UI-SYS-002, UI-SYS-007, UI-FND-020 [verified]; the reserved range [inferred].
+- Edits: 00-epics section 4; UI-FND-020 (fixed-key range); bead fut.9.
+
+### R-233 Startup Apps, Connections and Information items (OI-U63)
+- Question: raised by E28-1 to E28-4, E28-7, E28-9, E28-11 to E28-13, E28-15.
+- Resolution: the Information skeleton follows UI-SYS-085 (every section shows its band and an 8-line skeleton block); shell.md's "4 section blocks 120 tall" is corrected. E27-A2, E29-A2, E29-A3, E25-A1 and E03-A2 join the E28 row of 00-epics section 4. The public IP command, `InventorySnapshot` fields, `committed_peak`, the 64-bit rule, `AlreadyRunning`, system-table column ids, startup entry fields and connection display fields are R-139, R-156, R-166, R-170 and R-148; the E28 beads read "the E03 field of that meaning" and stop and report when it is missing. "Already running" is `RejectReason::AlreadyRunning`, shown as the Info toast (R-196).
+- Basis: UI-SYS-085, UI-SHL-111, SYS-023 [verified].
+- Edits: UI-SHL-111; 00-epics section 4.
+
+### R-234 E22 epic-row additions and the build-rule note (OI-U64)
+- Question: raised by B8-E22-5, B8-E22-16.
+- Resolution: E19-A1 and E01-A1 join the E22 row of 00-epics section 4 (edges exist). The build lines were rewritten by the leader on 405 beads.
+- Basis: 00-epics section 4 [verified].
+- Edits: 00-epics section 4.
+
+### R-235 Topics settled on the engine side (OI-U65)
+- Question: the UI raisers whose answer is an engine-side entry, listed so no raiser is lost.
+- Resolution: E25-OI-1, B8-E28-1, B7-E20-11: R-139. B8-E22-1: R-141. B5-22, E19-4: R-142, R-144. B5-2, B5-30, B7-E21-9: R-142. B5-38: R-153. B5-6: R-170. B5-7: R-148. B7-E21-5: R-170 and R-171. B7-E23-3: R-146. E19-1 to E19-3, E25-OI-2: R-170. E24-9: R-170. E25-OI-6: R-170. E26-OI-1, E26-OI-2: R-154. B7-E21-11: R-149. B7-E23-6 (engine half): R-170. B8-E22-10: R-149, R-170. B8-E27-3 (engine half), B8-E27-7: R-170. B8-E27-5, B8-E28-11: R-170. B8-E28-2, B8-E28-12, B8-E28-13: R-156. B8-E28-3: R-166. B8-E28-4: R-170. B8-E28-9: R-148. B7-E20-4 (engine half): R-170. Not raised by a UI item: udev R-140, gcore R-145, helper hook R-147, PSI R-151, `unsafe` R-143.
+- Basis: `docs/plan/open-items-ui.md` OI-U65 [verified].
+- Edits: none.
+
+
 
 
 
