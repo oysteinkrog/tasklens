@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{ColumnId, NodeId};
+use smallvec::SmallVec;
+
+use crate::ids::{ColumnId, NodeId, ProcessKey};
 use crate::process::GroupRow;
 use crate::snapshot::ComponentHeader;
 use crate::validity::Validity;
@@ -138,6 +140,396 @@ pub struct ProcessTableView {
     pub restricted: u32,
 }
 
+/// Which systemd instance owns a unit.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Manager {
+    System,
+    User,
+}
+
+/// Identity of a systemd unit. `foo.service` may exist in both managers.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct UnitRef {
+    pub manager: Manager,
+    pub name: Arc<str>,
+}
+
+/// Where a Startup Apps entry comes from.
+///
+/// The serde names ("autostartuser" and so on) are never written to disk. They exist for
+/// postcard only.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupSource {
+    AutostartUser,
+    AutostartSystem,
+    UserUnit,
+    PlasmaEnv,
+    PlasmaShutdown,
+}
+
+/// Identity of a Startup Apps entry. Selection is kept by `StartupRef` across rescans (R-082).
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct StartupRef {
+    pub source: StartupSource,
+    /// The .desktop file name for autostart entries, the unit id for user units, the script
+    /// file name for Plasma scripts. Stable across rescans.
+    pub id: Arc<str>,
+}
+
+/// Unit types the Services table can show. Device units are always hidden (SYS-002).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnitType {
+    Service,
+    Socket,
+    Timer,
+    Mount,
+    Automount,
+    Path,
+    Target,
+    Swap,
+    Slice,
+    Scope,
+}
+
+impl UnitType {
+    /// Types shown by default, matching `services.unit_types` in table (a).
+    pub const DEFAULT_SHOWN: [UnitType; 4] = [
+        UnitType::Service,
+        UnitType::Socket,
+        UnitType::Timer,
+        UnitType::Mount,
+    ];
+
+    /// The type from the suffix after the last '.'. `None` for a name without a dot and for
+    /// any other suffix, including "device".
+    pub fn from_unit_name(name: &str) -> Option<UnitType> {
+        let (_, suffix) = name.rsplit_once('.')?;
+        Some(match suffix {
+            "service" => UnitType::Service,
+            "socket" => UnitType::Socket,
+            "timer" => UnitType::Timer,
+            "mount" => UnitType::Mount,
+            "automount" => UnitType::Automount,
+            "path" => UnitType::Path,
+            "target" => UnitType::Target,
+            "swap" => UnitType::Swap,
+            "slice" => UnitType::Slice,
+            "scope" => UnitType::Scope,
+            _ => return None,
+        })
+    }
+}
+
+/// State chips of the Services filter strip (UI-SYS-011).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ServiceStateFilter {
+    Running,
+    Failed,
+    Stopped,
+    Disabled,
+}
+
+/// The Services filter strip (UI-SYS-011).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ServiceFilter {
+    /// OR of the chosen states. Empty means all states.
+    pub states: SmallVec<[ServiceStateFilter; 4]>,
+    /// Never empty: the UI keeps one type selected.
+    pub unit_types: SmallVec<[UnitType; 10]>,
+    /// Show the System group.
+    pub system: bool,
+    /// Show the User group.
+    pub user: bool,
+}
+
+impl Default for ServiceFilter {
+    /// Matches table (a) `[services]`.
+    fn default() -> Self {
+        Self {
+            states: SmallVec::new(),
+            unit_types: SmallVec::from_slice(&UnitType::DEFAULT_SHOWN),
+            system: true,
+            user: true,
+        }
+    }
+}
+
+/// The engine-built system tables (UI-SYS-002).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SysTable {
+    Services,
+    Startup,
+    Connections,
+}
+
+/// One row of a system table (R-155 item 1).
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum SysNodeId {
+    /// "System services (N)" or "User services (N)".
+    ServiceGroup(Manager),
+    Unit(UnitRef),
+    /// Child process row under a unit.
+    UnitProcess(UnitRef, ProcessKey),
+    Startup(StartupRef),
+    /// Socket cookie.
+    Conn(u64),
+}
+
+/// Column ids of the system tables (R-170 item 6). Each table has its own id set, so a shared
+/// string such as "name" is fine. `as_str` and `from_str` work like `ColumnId`'s.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SysColumnId {
+    Services(ServiceColumn),
+    Startup(StartupColumn),
+    Connections(ConnColumn),
+}
+
+/// The 19 Services ids of UI-SYS-013, in this order:
+/// name, display_name, status, startup_type, pid, user, path, manager, unit_type, sub_state,
+/// load_state, cpu, memory, disk, tasks, active_since, unit_file, triggered_by, description.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ServiceColumn {
+    Name,
+    DisplayName,
+    Status,
+    StartupType,
+    Pid,
+    User,
+    Path,
+    Manager,
+    UnitType,
+    SubState,
+    LoadState,
+    Cpu,
+    Memory,
+    Disk,
+    Tasks,
+    ActiveSince,
+    UnitFile,
+    TriggeredBy,
+    Description,
+}
+
+/// The 7 Startup ids: name, publisher, status, impact, type, location, command.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StartupColumn {
+    Name,
+    Publisher,
+    Status,
+    Impact,
+    Type,
+    Location,
+    Command,
+}
+
+/// The 17 Connections ids: proto, local, foreign, state, pid, process, user, family, local_port,
+/// foreign_port, recv_q, send_q, interface, inode, service, remote_host, netns.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ConnColumn {
+    Proto,
+    Local,
+    Foreign,
+    State,
+    Pid,
+    Process,
+    User,
+    Family,
+    LocalPort,
+    ForeignPort,
+    RecvQ,
+    SendQ,
+    Interface,
+    Inode,
+    Service,
+    RemoteHost,
+    Netns,
+}
+
+impl SysColumnId {
+    const SERVICES: [SysColumnId; 19] = {
+        use ServiceColumn as C;
+        use SysColumnId::Services as S;
+        [
+            S(C::Name),
+            S(C::DisplayName),
+            S(C::Status),
+            S(C::StartupType),
+            S(C::Pid),
+            S(C::User),
+            S(C::Path),
+            S(C::Manager),
+            S(C::UnitType),
+            S(C::SubState),
+            S(C::LoadState),
+            S(C::Cpu),
+            S(C::Memory),
+            S(C::Disk),
+            S(C::Tasks),
+            S(C::ActiveSince),
+            S(C::UnitFile),
+            S(C::TriggeredBy),
+            S(C::Description),
+        ]
+    };
+
+    const STARTUP: [SysColumnId; 7] = {
+        use StartupColumn as C;
+        use SysColumnId::Startup as S;
+        [
+            S(C::Name),
+            S(C::Publisher),
+            S(C::Status),
+            S(C::Impact),
+            S(C::Type),
+            S(C::Location),
+            S(C::Command),
+        ]
+    };
+
+    const CONNECTIONS: [SysColumnId; 17] = {
+        use ConnColumn as C;
+        use SysColumnId::Connections as S;
+        [
+            S(C::Proto),
+            S(C::Local),
+            S(C::Foreign),
+            S(C::State),
+            S(C::Pid),
+            S(C::Process),
+            S(C::User),
+            S(C::Family),
+            S(C::LocalPort),
+            S(C::ForeignPort),
+            S(C::RecvQ),
+            S(C::SendQ),
+            S(C::Interface),
+            S(C::Inode),
+            S(C::Service),
+            S(C::RemoteHost),
+            S(C::Netns),
+        ]
+    };
+
+    pub const fn table(self) -> SysTable {
+        match self {
+            Self::Services(_) => SysTable::Services,
+            Self::Startup(_) => SysTable::Startup,
+            Self::Connections(_) => SysTable::Connections,
+        }
+    }
+
+    /// The snake_case id, as written in `[columns.services]`, `[columns.startup]` and
+    /// `[columns.connections]`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Services(c) => match c {
+                ServiceColumn::Name => "name",
+                ServiceColumn::DisplayName => "display_name",
+                ServiceColumn::Status => "status",
+                ServiceColumn::StartupType => "startup_type",
+                ServiceColumn::Pid => "pid",
+                ServiceColumn::User => "user",
+                ServiceColumn::Path => "path",
+                ServiceColumn::Manager => "manager",
+                ServiceColumn::UnitType => "unit_type",
+                ServiceColumn::SubState => "sub_state",
+                ServiceColumn::LoadState => "load_state",
+                ServiceColumn::Cpu => "cpu",
+                ServiceColumn::Memory => "memory",
+                ServiceColumn::Disk => "disk",
+                ServiceColumn::Tasks => "tasks",
+                ServiceColumn::ActiveSince => "active_since",
+                ServiceColumn::UnitFile => "unit_file",
+                ServiceColumn::TriggeredBy => "triggered_by",
+                ServiceColumn::Description => "description",
+            },
+            Self::Startup(c) => match c {
+                StartupColumn::Name => "name",
+                StartupColumn::Publisher => "publisher",
+                StartupColumn::Status => "status",
+                StartupColumn::Impact => "impact",
+                StartupColumn::Type => "type",
+                StartupColumn::Location => "location",
+                StartupColumn::Command => "command",
+            },
+            Self::Connections(c) => match c {
+                ConnColumn::Proto => "proto",
+                ConnColumn::Local => "local",
+                ConnColumn::Foreign => "foreign",
+                ConnColumn::State => "state",
+                ConnColumn::Pid => "pid",
+                ConnColumn::Process => "process",
+                ConnColumn::User => "user",
+                ConnColumn::Family => "family",
+                ConnColumn::LocalPort => "local_port",
+                ConnColumn::ForeignPort => "foreign_port",
+                ConnColumn::RecvQ => "recv_q",
+                ConnColumn::SendQ => "send_q",
+                ConnColumn::Interface => "interface",
+                ConnColumn::Inode => "inode",
+                ConnColumn::Service => "service",
+                ConnColumn::RemoteHost => "remote_host",
+                ConnColumn::Netns => "netns",
+            },
+        }
+    }
+
+    /// Exact, case-sensitive match within that table's id set. `None` for anything else. The
+    /// caller logs and drops unknown ids (ADR-011).
+    #[allow(clippy::should_implement_trait)] // takes a table and returns Option, on purpose
+    pub fn from_str(table: SysTable, s: &str) -> Option<SysColumnId> {
+        Self::all(table).iter().copied().find(|c| c.as_str() == s)
+    }
+
+    /// Every id of the table in the documented order: 19, 7 or 17 entries.
+    pub fn all(table: SysTable) -> &'static [SysColumnId] {
+        match table {
+            SysTable::Services => &Self::SERVICES,
+            SysTable::Startup => &Self::STARTUP,
+            SysTable::Connections => &Self::CONNECTIONS,
+        }
+    }
+}
+
+/// Sort column and direction of a system table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SysSortSpec {
+    pub column: SysColumnId,
+    pub ascending: bool,
+}
+
+/// What the UI asks the engine to show for one system table.
+///
+/// `filter` holds user text: never log it above debug level.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SysTableQuery {
+    pub table: SysTable,
+    pub generation: u64,
+    /// `sort.column.table()` equals `table` (R-170 item 6).
+    pub sort: SysSortSpec,
+    /// Lowercase text filter from the FilterBox.
+    pub filter: Arc<str>,
+    /// Expanded rows. The UI owns expansion state.
+    pub expanded: Arc<[SysNodeId]>,
+    /// `Some` only for `SysTable::Services`.
+    pub services: Option<ServiceFilter>,
+}
+
+/// One visible row of a system table, in display order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SysRow {
+    pub node: SysNodeId,
+    pub depth: u8,
+    pub expanded: bool,
+    pub has_children: bool,
+    /// Index into the component's records, units or entries.
+    pub record: Option<u32>,
+}
+
 #[cfg(test)]
 mod process_table_tests {
     use serde::de::value::{Error as ValueError, StrDeserializer};
@@ -173,7 +565,7 @@ mod process_table_tests {
     }
 
     /// Serializes a unit variant to its name and rejects everything else.
-    struct VariantName;
+    pub(super) struct VariantName;
 
     macro_rules! reject {
         ($($name:ident: $ty:ty),* $(,)?) => {
@@ -327,5 +719,135 @@ mod process_table_tests {
         assert!(v.groups.is_empty());
         assert_eq!(v.totals, TableTotals::default());
         assert_eq!((v.total, v.shown, v.restricted), (0, 0, 0));
+    }
+}
+
+#[cfg(test)]
+mod sys_table_tests {
+    use serde::de::value::{Error as ValueError, StrDeserializer};
+
+    use super::process_table_tests::VariantName;
+    use super::*;
+
+    #[test]
+    fn service_filter_default_matches_table_a() {
+        let f = ServiceFilter::default();
+        assert_eq!(
+            f.unit_types.as_slice(),
+            &[
+                UnitType::Service,
+                UnitType::Socket,
+                UnitType::Timer,
+                UnitType::Mount
+            ]
+        );
+        assert!(f.states.is_empty());
+        assert!(f.system);
+        assert!(f.user);
+    }
+
+    #[test]
+    fn unit_type_from_name_all_ten() {
+        for (name, ty) in [
+            ("sshd.service", UnitType::Service),
+            ("dbus.socket", UnitType::Socket),
+            ("fstrim.timer", UnitType::Timer),
+            ("home.mount", UnitType::Mount),
+            ("proc-sys-fs-binfmt_misc.automount", UnitType::Automount),
+            ("cups.path", UnitType::Path),
+            ("graphical.target", UnitType::Target),
+            ("dev-zram0.swap", UnitType::Swap),
+            ("user.slice", UnitType::Slice),
+            ("session-2.scope", UnitType::Scope),
+        ] {
+            assert_eq!(UnitType::from_unit_name(name), Some(ty), "{name}");
+        }
+    }
+
+    #[test]
+    fn unit_type_from_name_rejects_device_and_bare() {
+        for name in ["foo.device", "noext", ""] {
+            assert_eq!(UnitType::from_unit_name(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn unit_ref_manager_distinguishes() {
+        let system = UnitRef {
+            manager: Manager::System,
+            name: Arc::from("foo.service"),
+        };
+        let user = UnitRef {
+            manager: Manager::User,
+            name: Arc::from("foo.service"),
+        };
+        assert_ne!(system, user);
+        assert_ne!(SysNodeId::Unit(system), SysNodeId::Unit(user));
+    }
+
+    #[test]
+    fn unit_type_and_state_filter_serde_lowercase() {
+        for (ty, name) in [
+            (UnitType::Service, "service"),
+            (UnitType::Socket, "socket"),
+            (UnitType::Timer, "timer"),
+            (UnitType::Mount, "mount"),
+            (UnitType::Automount, "automount"),
+            (UnitType::Path, "path"),
+            (UnitType::Target, "target"),
+            (UnitType::Swap, "swap"),
+            (UnitType::Slice, "slice"),
+            (UnitType::Scope, "scope"),
+        ] {
+            assert_eq!(ty.serialize(VariantName).ok().as_deref(), Some(name));
+            let back = UnitType::deserialize(StrDeserializer::<ValueError>::new(name));
+            assert_eq!(back.ok(), Some(ty));
+        }
+        for (state, name) in [
+            (ServiceStateFilter::Running, "running"),
+            (ServiceStateFilter::Failed, "failed"),
+            (ServiceStateFilter::Stopped, "stopped"),
+            (ServiceStateFilter::Disabled, "disabled"),
+        ] {
+            assert_eq!(state.serialize(VariantName).ok().as_deref(), Some(name));
+            let back = ServiceStateFilter::deserialize(StrDeserializer::<ValueError>::new(name));
+            assert_eq!(back.ok(), Some(state));
+        }
+    }
+
+    #[test]
+    fn sys_column_ids_roundtrip_per_table() {
+        for (table, count) in [
+            (SysTable::Services, 19),
+            (SysTable::Startup, 7),
+            (SysTable::Connections, 17),
+        ] {
+            let all = SysColumnId::all(table);
+            assert_eq!(all.len(), count);
+            for &id in all {
+                assert_eq!(id.table(), table);
+                assert_eq!(SysColumnId::from_str(table, id.as_str()), Some(id));
+            }
+        }
+        let names: Vec<_> = SysColumnId::all(SysTable::Connections)
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert_eq!(names.first(), Some(&"proto"));
+        assert_eq!(names.last(), Some(&"netns"));
+    }
+
+    #[test]
+    fn sys_column_ids_are_table_scoped() {
+        assert_eq!(
+            SysColumnId::from_str(SysTable::Startup, "name"),
+            Some(SysColumnId::Startup(StartupColumn::Name))
+        );
+        assert_eq!(
+            SysColumnId::from_str(SysTable::Services, "name"),
+            Some(SysColumnId::Services(ServiceColumn::Name))
+        );
+        assert_eq!(SysColumnId::from_str(SysTable::Startup, "pid"), None);
+        assert_eq!(SysColumnId::from_str(SysTable::Services, "Name"), None);
     }
 }
