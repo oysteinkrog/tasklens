@@ -74,6 +74,8 @@ pub(crate) fn parse_start_ticks(stat: &[u8]) -> Option<u64> {
 }
 
 /// True when the process behind `pidfd` has exited (zombie or reaped). Does not block.
+// The PID-based calls of E07-004 use this; until then only the tests do.
+#[allow(dead_code)]
 pub(crate) fn has_exited(pidfd: &OwnedFd) -> OpsResult<bool> {
     let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
     let zero = Timespec {
@@ -207,7 +209,7 @@ mod tests {
         assert_eq!(parse_start_ticks(line), None);
         let negative = b"1234 (a) S 1 1234 1234 0 -1 4194304 10 0 0 0 5 6 0 0 20 0 1 0 -5 1000";
         assert_eq!(parse_start_ticks(negative), None);
-        let double_space = b"1234 (a) S 1 1234 1234 0 -1 4194304 10 0 0 0 5 6 0 0 20 0 1  98765";
+        let double_space = b"1234 (a) S 1 1234 1234 0 -1 4194304 10 0 0 0 5 6 0 0 20 0 1 0  98765";
         assert_eq!(parse_start_ticks(double_space), None);
     }
 
