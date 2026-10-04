@@ -733,7 +733,7 @@ mod tests {
         (usage, calls)
     }
 
-    fn named<'a>(usage: &'a [DiskUsage], major: u32, minor: u32) -> &'a DiskUsage {
+    fn named(usage: &[DiskUsage], major: u32, minor: u32) -> &DiskUsage {
         usage
             .iter()
             .find(|u| (u.major, u.minor) == (major, minor))
