@@ -78,7 +78,7 @@ Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION
   | Short ages (tooltips) | `1d 4h`, `4h 12m`, `12m 5s`, `5s` | |
 
   - "MiB/s" and "KiB/s" are used everywhere, never TaskSlinger's "MB/s".
-  - Zero formats apply only to a measured zero. Missing values use the validity glyphs.
+  - Zero formats apply only to a measured zero. Missing values use the validity glyphs. The rule covers every rate, power and time form: a measured zero prints as its unit's zero (`0 MiB/s`, `0.0 W`, `0 ms`); `percent_2dp` zero is `0%`; `watts_pair` prints the limit as an integer (R-155).
   - Numerals are tabular; numeric columns are right-aligned.
 - Linux data/mechanism: all formatting lives in `tl-model::units`, writing into a caller buffer. The UI caches formatted strings per (node, column) and re-formats only when the value bits or validity change (ADR-009 text cache).
 - Verdict: ADAPT (TaskSlinger density with IEC labels)
@@ -120,7 +120,7 @@ Precedence used: `docs/DECISIONS.md` (D-001 to D-010), then `docs/RECONCILIATION
     - `dbus-:<n>-<id>@<n>.service`
     - `snap.<a>.<b>-<uuid>.scope`, which gives app ID `a_b`.
   - PIDs come from `cgroup.procs`, recursively.
-  - Rescan when inotify on `app.slice` sees `IN_CREATE` or `IN_DELETE`, and on every sweep as a fallback.
+  - The app scan runs on every sweep; there is no inotify watch on `app.slice` (R-163).
   - `app-*@autostart.service` units go to Background unless PROC-052 reports a mapped window for one of their PIDs.
   - Units that are clearly not apps (`dconf.service`, `obex.service`, `dbus.socket`, `run-*.scope` without a desktop match, and other non-`app-` units such as `frankenterm-mux`) stay in Background as unit rows (PROC-009).
 - Verdict: BUILD
@@ -927,7 +927,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus.
   - At start it writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js`, loads it with `org.kde.kwin.Scripting.loadScript(path, "tasklens-bridge")` and starts it.
   - tasklens exports `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s json)`, on its bus name `io.github.oysteinkrog.Tasklens`.
-  - The script sends the full window list once, then an update on `workspace.windowAdded`, `windowRemoved`, `windowActivated` and each window's `captionChanged`, through `callDBus(...)` to that method. Each entry carries `internalId`, `pid`, `caption`, `resourceClass`, `desktopFileName`, `minimized`, `maximized`, `keepAbove`, `frameGeometry` and `windowType`.
+  - The script sends the full window list once, then an update on `workspace.windowAdded`, `windowRemoved`, `windowActivated`, each window's `captionChanged`, `minimizedChanged`, maximize changes, `keepAboveChanged` and `interactiveMoveResizeFinished` (R-167), through `callDBus(...)` to that method. The engine writes its connection's unique name into the script as `__TL_BUS_NAME__` and accepts `Update` only from the owner of `org.kde.KWin`; payloads over 1 MiB are rejected and strings cut at 4 KiB (R-167). Each entry carries `internalId`, `pid`, `caption`, `resourceClass`, `desktopFileName`, `minimized`, `maximized`, `keepAbove`, `frameGeometry` and `windowType`.
   - The engine publishes it as the `Snapshot.windows: Arc<WindowsSnapshot>` component keyed by PID; without the bridge it is empty with validity `Unsupported`.
   - Commands (activate, close, keep above, pick) arrive as `Command::KWin(KWinCommand)` and run as one-shot scripts `tasklens-cmd-<n>` with the parameters embedded, which unload themselves. KWin scripts cannot receive D-Bus signals (U-13). The picker uses the script `tasklens-pick`.
   - On exit tasklens calls `unloadScript("tasklens-bridge")`.
@@ -982,7 +982,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Was: v1 PROC-063
 - Source: TS L30218-30221 pin, [CL 0.8.25] | APP-009 | R-073
 - Behaviour: the pin button is shown on every secondary window (Process Properties, App Properties, Run, Handle Search, the rescue window) and on the main window. When pinned, the window stays above other windows. Only the main window's state persists (`window.always_on_top`).
-- Linux data/mechanism: on KDE it sets `keepAbove` through the bridge (one-shot script matched by tasklens's PID and window caption); on X11 it sends `_NET_WM_STATE_ABOVE`; elsewhere the button is disabled with the tooltip "Not supported by this desktop". Wayland has no client protocol for this.
+- Linux data/mechanism: on KDE it sets `keepAbove` through the bridge (one-shot script matched by tasklens's PID and window caption); elsewhere, X11 included, the button is disabled with the tooltip "Not supported by this desktop" (R-177). Wayland has no client protocol for this.
 - Verdict: ADAPT
 - Phase: P2
 - Privilege: none
@@ -1389,7 +1389,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     - Location category values: Temp directory (`/tmp`, `/var/tmp`, `$XDG_RUNTIME_DIR`), User Downloads (`xdg-user-dir DOWNLOAD`), User data (`~/.local`, `~/.cache`, `~/.config`), User profile (`~`), System (`/usr`), Optional software (`/opt`), Flatpak (`/var/lib/flatpak`, `~/.local/share/flatpak`), AppImage (`/tmp/.mount_*`), Wine prefix (`*/drive_c/*`), Deleted.
   - **Column 2:**
     - SHA-256 and MD5, computed in the background when the window opens. Errors "Failed to compute one or more hashes", "Executable path unavailable".
-    - Package status with a "Verify against package" button that compares the file's sha256 with the package mtree; Packager.
+    - Package status with a "Verify against package" button that runs `pacman -Qkk <pkg>` in the detail worker and reads its exit status and lines (no mtree parsing, R-163); Packager. Package names come from the package owner index (`pkg.rs`: batched `pacman -Qoq`, the `/var/lib/pacman/local/<pkg>-<ver>/desc` parser, R-163).
     - Threads, Handles.
     - Memory (RssAnon), Working set total (VmRSS), Working set shared, PSS, USS, Swap, Commit (VmData + VmStk), Memory % of MemTotal.
     - CPU %, CPU time.
@@ -1465,7 +1465,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
     - Groups: count.
     - Risky capabilities: CAP_SYS_ADMIN, CAP_SYS_PTRACE, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SYS_MODULE, CAP_SYS_RAWIO, CAP_SETUID, CAP_SETGID, CAP_NET_ADMIN, CAP_BPF, CAP_PERFMON, CAP_SYS_BOOT, CAP_CHOWN, CAP_FOWNER, when effective or ambient.
     - Admin groups: wheel, sudo, root, adm, docker, libvirt, lxd, disk; docker, libvirt, lxd and disk are marked "root-equivalent".
-    - Flags: NoNewPrivs; Seccomp (disabled, strict or filter, plus the `Seccomp_filters` count); Dumpable.
+    - Flags: NoNewPrivs; Seccomp (disabled, strict or filter, plus the `Seccomp_filters` count); Dumpable ("not dumpable" when `/proc/<pid>` is owned by uid 0 while the real uid is not 0, else "Not reported"; R-163).
     - Security label (LSM).
     - Session: logind session, audit `sessionid`, `loginuid`.
     - Elevated: "Yes (root)", "Yes (capabilities)", "Setuid", "No".
@@ -1507,7 +1507,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Without access: "Strings unavailable: needs administrator rights" with an "Enable" button that starts the helper.
 - Linux data/mechanism:
   - Regions from `/proc/<pid>/maps`: readable, private anonymous plus heap and stack (file-backed only with the option), skipping `[vvar]`, `[vsyscall]` and device mappings.
-  - Reads with `process_vm_readv` in 1 MiB chunks.
+  - Reads with `rustix::fs::pread` on `/proc/<pid>/mem` in 1 MiB chunks, under the same ptrace access rule as `process_vm_readv` (R-144). The scanner is `tl-collect` `proc/strings.rs`; tl-helper reuses it for `ScanStrings`.
   - With `ptrace_scope = 1` this needs CAP_SYS_PTRACE even for own non-child processes, so the helper's `ScanStrings { key, opts }` streams result batches. With `ptrace_scope = 0` and the same UID, tasklens scans in-process.
 - Verdict: ADAPT
 - Phase: P3
@@ -1594,7 +1594,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Was: v1 PROC-083; r2 PROC-076
 - Source: TS 4.1, `history.scrubber`, [CL 0.8.18], L35725-35731 | RECONCILIATION table (b)
 - Behaviour:
-  - A timeline strip with a stacked metric graph, and a minimap of the full retention below it with a viewport box.
+  - A timeline strip with a stacked metric graph (per bucket the three largest per-process values as a stack plus "other" as the sum of the rest, all in the metric colour; D-020), and a minimap of the full retention below it with a viewport box. Header totals for a selected range are averages over the range (R-169).
   - Drag the handle to scrub. The mouse wheel zooms around the cursor. Shift+wheel or a middle-drag pans. Shift+drag selects a range. Double-click or the "Live" button returns to live.
   - Time labels: "-1:02:03", "1h 02m", "2m 05s", "45s".
   - Keyboard: Left and Right step 1 s; Shift+Left and Shift+Right step 1 min.
@@ -1686,7 +1686,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - A URL with a scheme, or an existing path that is not an executable, opens through the portal `org.freedesktop.portal.OpenURI`, falling back to `xdg-open`.
   - `kcm_*` names (the `.cpl` analogue) run `systemsettings <name>`.
   - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-023). It then groups as an app and is detached from tasklens.
-  - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`.
+  - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`. A variable that is unset or empty is left out of the `env` line (R-165). The launch counts as succeeded when the child is still running 2 s after the prompt closed (R-148).
   - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
   - Browse uses GPUI `prompt_for_paths` (portal FileChooser). If that pulls in Tokio (U-15), call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.
 - Verdict: ADAPT
@@ -1716,9 +1716,9 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Settings > Window & startup > "Open rescue window on critical memory pressure", default off (`lowmem.enabled = false`).
   - When turned on, tasklens installs and enables the user unit `tasklens-lowmem.service`, which runs `tasklens --watch-memory`. Turning it off disables and removes the unit.
   - When memory pressure crosses the threshold and no rescue window is open, the watcher starts `tasklens --low-memory`.
-  - Threshold: PSI `full` above 10% over a 1 s window, or MemAvailable below 3% of MemTotal.
+  - Threshold: PSI `full` above 10% over a 2 s window, or MemAvailable below 3% of MemTotal (R-151).
 - Linux data/mechanism:
-  - Write `full 100000 1000000` to an open `/proc/pressure/memory` fd and `poll(POLLPRI)`. Also check MemAvailable every 5 s.
+  - Write `full 200000 2000000` to an open `/proc/pressure/memory` fd and `poll(POLLPRI)`; 2 s is the smallest window an unprivileged trigger may use since Linux 6.5 (U-51). An older kernel refuses the write with `EINVAL` or `EPERM`; the watcher then logs `warn` once and runs on the MemAvailable check alone. Also check MemAvailable every 5 s (R-151).
   - The watcher mode does not initialise GPUI. Target below 4 MiB RSS. It calls `mlockall(MCL_CURRENT|MCL_FUTURE)` (within the systemd default RLIMIT_MEMLOCK of 8 MiB).
   - The unit sets `OOMScoreAdjust=-900` (U-24). A user unit may lower it only to the user manager's own value; if systemd refuses, the unit uses 0 and the setting tooltip says so.
   - It coexists with systemd-oomd; the setting tooltip notes that oomd may act first. The watcher only opens UI and never kills anything itself.
@@ -1741,7 +1741,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Linux data/mechanism:
   - A minimal GPUI window: small font set, no charts, no icons, no history.
   - A stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s.
-  - The process is mlocked after start. The same identity and pidfd rules as PROC-001 apply.
+  - The process is mlocked after start (current pages only: one `mlockall(MCL_CURRENT)` after the first frame, `warn` on failure, never `MCL_FUTURE`; R-152). The same identity and pidfd rules as PROC-001 apply.
 - Verdict: ADAPT
 - Phase: P3
 - Privilege: none for own processes.
