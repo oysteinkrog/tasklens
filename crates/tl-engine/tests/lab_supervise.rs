@@ -281,8 +281,10 @@ fn no_restart_after_cancel() {
 /// Both supervisors share one lab, which also shows that one worker's
 /// failures do not spend the other's budget.
 ///
-/// asupersync 0.5.0 does not re-export `#[explore_seeds]`, so this loop builds
-/// the same config the macro does: seeds 0..16, 2 workers, light chaos.
+/// This loop mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]`:
+/// seeds 0..16, worker_count 2, light chaos, and a quiescence check per seed.
+/// The macro is not used because the asupersync 0.5.0 `proc-macros` feature
+/// does not re-export it, and ADR-001 does not list `asupersync-macros`.
 #[test]
 fn explore_restart() {
     let mut full_runs = 0;
