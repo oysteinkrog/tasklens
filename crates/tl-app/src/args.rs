@@ -12,7 +12,10 @@ use clap::Parser;
 #[derive(clap::Parser, Debug, Clone, PartialEq)]
 #[command(name = "tasklens", version, about = "Task manager for Linux")]
 pub struct Args {
-    #[arg(long, help = "Start hidden to the tray, or minimized when the tray is off")]
+    #[arg(
+        long,
+        help = "Start hidden to the tray, or minimized when the tray is off"
+    )]
     pub start_minimized: bool,
     #[arg(long, help = "Open the low-memory rescue window")]
     pub low_memory: bool,
@@ -20,7 +23,11 @@ pub struct Args {
     pub watch_memory: bool,
     #[arg(long, value_enum, help = "Open on this tab")]
     pub tab: Option<TabArg>,
-    #[arg(long, value_name = "PID", help = "Open Processes and select this process")]
+    #[arg(
+        long,
+        value_name = "PID",
+        help = "Open Processes and select this process"
+    )]
     pub select_pid: Option<u32>,
     #[arg(long, help = "Show the Debug menu")]
     pub debug: bool,
