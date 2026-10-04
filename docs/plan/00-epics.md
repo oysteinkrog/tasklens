@@ -541,7 +541,8 @@ they cover.
 | `src/pkg.rs` (package owner index) | E05 | owner only; E05-030 (R-163) |
 | `src/apps/mod.rs`, `src/apps/{classify,cgroup_app,desktop,icons,naming,launchers}.rs` | E05 | owner only |
 | `src/hash.rs` | E05 | owner only |
-| `src/net/mod.rs`, `src/net/{sock_diag,socket_map,attribution,connections,netns,rdns}.rs` | E06 | owner only |
+| `src/net/mod.rs`, `src/net/{sock_diag,socket_map,attribution,connections,netns,rdns}.rs` | E06 | chain edit: E12 adds the two `pub mod` lines below to `net/mod.rs`, depends on E06-A1 |
+| `src/net/addrs.rs` (rtnetlink `RTM_GETADDR`, E12-015), `src/net/nl80211.rs` (Wi-Fi, E12-025) | E12 | owner only (R-242) |
 | `src/startup/mod.rs`, `src/startup/{autostart,user_units,plasma_scripts,watch,impact}.rs` | E06 | owner only |
 | `src/inventory/mod.rs`, `src/inventory/{cpuinfo,dmi,os_release,displays,modules}.rs` | E06 | owner only |
 | `src/gpu_drm/mod.rs`, `src/gpu_drm/{amdgpu,intel,fdinfo}.rs` | E06 | owner only |
@@ -556,7 +557,7 @@ they cover.
 `Cargo.toml`, `src/lib.rs`, `src/error.rs` (`OpsError`), `src/process.rs`, `src/cgroup.rs`,
 `src/sys.rs` (the one `unsafe` file; `ioprio_get_tid` is `pub`, R-144), `src/fs.rs` (`write_atomic`, autostart override write and
 remove), `src/dump.rs` (gdb `gcore` into a passed fd, R-145), `src/launch.rs`, `tests/ops_real.rs`, `tests/cgroup_validate.rs`,
-`tests/launch_exec_parse.rs`. One exception: `src/dropin.rs` (`render(&RecoveryEdit) -> String`) is an E29-owned file inside
+`tests/launch_exec_parse.rs`. One exception: `src/dropin.rs` (`render(keys: &[(DropInKey, String)]) -> String`, R-248) is an E29-owned file inside
 tl-ops, written by E29-009 and used by E11-020 (R-168).
 
 ### `crates/tl-gpu-probe` (owner E13, owner only)

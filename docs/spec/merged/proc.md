@@ -1686,7 +1686,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - A URL with a scheme, or an existing path that is not an executable, opens through the portal `org.freedesktop.portal.OpenURI`, falling back to `xdg-open`.
   - `kcm_*` names (the `.cpl` analogue) run `systemsettings <name>`.
   - Anything else runs `/bin/sh -c <text>` inside a new transient user scope, `StartTransientUnit("app-tasklens-run-<rand>.scope", "fail", PIDs=[child])` on the user manager, through the shared launcher (SYS-023). It then groups as an app and is detached from tasklens.
-  - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`. A variable that is unset or empty is left out of the `env` line (R-165). The launch counts as succeeded when the child is still running 2 s after the prompt closed (R-148).
+  - Run as administrator: `pkexec env DISPLAY=… WAYLAND_DISPLAY=… XDG_RUNTIME_DIR=… /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never `tl-helper`. A variable that is unset or empty is left out of the `env` line (R-165). The launch counts as succeeded when the child is still running 2 s after the prompt closed; the prompt counts as closed when the child's `/proc/<pid>/stat` comm is no longer `pkexec`, or the child has exited (R-148, R-253).
   - History: `$XDG_STATE_HOME/tasklens/run-history.json`, format `{"entries":[{"command","executedAt","elevated"}]}`, up to 50 entries.
   - Browse uses GPUI `prompt_for_paths` (portal FileChooser). If that pulls in Tokio (U-15), call `org.freedesktop.portal.FileChooser.OpenFile` through zbus directly.
 - Verdict: ADAPT

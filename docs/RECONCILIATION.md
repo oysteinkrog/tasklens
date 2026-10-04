@@ -937,7 +937,7 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 
 ### R-147 Privileged helper hook in E11 (OI-E09)
 - Question: the shape of the hook through which E11 actions reach the P3 helper. Raised by B3 item 9, E29-OI-5, E29-OI-6.
-- Resolution: E11-002 as written: `trait PrivilegedOps: Send + Sync + 'static { fn call(&self, cx: &Cx, req: HelperRequest, fd: Option<OwnedFd>, deadline: Duration) -> Pin<Box<dyn Future<Output = Result<Vec<HelperReply>, HelperCallError>> + Send + '_>>; fn state(&self) -> HelperState; }` and `HelperCallError { Missing, Cancelled, NotAuthorized, Timeout, Exited, Protocol(Arc<str>) }` in `crates/tl-engine/src/actions/mod.rs`; `ActionCtx.helper: Option<Arc<dyn PrivilegedOps>>`, `None` until E29-014 installs the `HelperHandle` implementation and the `req.privileged` routing arm. Until then a privileged request is `Rejected(Unsupported)` and never falls back to an unprivileged call. The `fd` argument is the `Dump` fd of R-145.
+- Resolution: E11-002 as written: `trait PrivilegedOps: Send + Sync + 'static { fn call(&self, cx: &Cx, req: HelperRequest, fd: Option<OwnedFd>, deadline: Duration) -> Pin<Box<dyn Future<Output = Result<Vec<HelperReply>, HelperCallError>> + Send + '_>>; fn state(&self) -> HelperState; }` and `HelperCallError { Missing, Cancelled, NotAuthorized, StartFailed(Arc<str>), Timeout, Exited, Protocol(Arc<str>) }` (`StartFailed` added by R-246) in `crates/tl-engine/src/actions/mod.rs`; `ActionCtx.helper: Option<Arc<dyn PrivilegedOps>>`, `None` until E29-014 installs the `HelperHandle` implementation and the `req.privileged` routing arm. Until then a privileged request is `Rejected(Unsupported)` and never falls back to an unprivileged call. The `fd` argument is the `Dump` fd of R-145.
 - Basis: ADR-005, ADR-006, i3o.4 text [verified].
 - Edits: none to docs; edge qfx.17 on i3o.4.
 
@@ -1523,6 +1523,102 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Resolution: the method is `Picked(s uuid, s pid)`. `pick.js` sends `String(w ? w.pid : 0)`. The engine parses the text as `u32`; `"0"` or text that does not parse means `PickOutcome::NoWindow`. This matches the bridge `Update` call, which already sends one JSON string.
 - Basis: R-149, ADR-010 [verified]; the `callDBus` number conversion is [inferred] from KWin's QJSValue handling.
 - Edits: ADR-010 KWin worker paragraph; R-149 (method signature); `assets/kwin/pick.js`; E14-019 (`tasklens-y6k.23`).
+
+### R-242 Netlink readers in tl-collect are E12 files (E12-OI-5)
+- Question: IP addresses (`RTM_GETADDR`) and Wi-Fi (`nl80211`) need tl-collect readers, but 00-epics section 2 lists only E06's `net/` files, so `tasklens-hjn.18`, `hjn.21` and `hjn.28` stayed `blocked-open-item`. Leader entry, 2026-10-04.
+- Resolution: `crates/tl-collect/src/net/addrs.rs` (E12-015, `hjn.18`) and `crates/tl-collect/src/net/nl80211.rs` (E12-025, `hjn.28`) are E12-owned files inside tl-collect. Each adds one `pub mod` line to `net/mod.rs` as a chain edit on E06-A1 (`tasklens-hx1.1`). Both use the `netlink-sys` crate that E06-003 already puts in tl-collect's `Cargo.toml`; no new crate. The three beads are unblocked.
+- Basis: PERF-058, PERF-059, PERF-104, R-052, ADR-001 tl-collect row [verified]; `docs/plan/b4-engine-workers.md` E12-OI-5 recommendation, accepted.
+- Edits: 00-epics section 2 (tl-collect `net/` row); beads hjn.18, hjn.21, hjn.28 (label removed, Notes).
+
+### R-243 Minimal UI init for `--low-memory` (E32 OI-10)
+- Question: `TasklensUi::init` loads three font faces, the icon set and every page's key bindings; UI-PWN-032 wants Noto Sans Regular and SemiBold only and no icons. `tasklens-m1f.11` and `m1f.12` carried the E32 OI-10 recommendation (`TasklensUi::init_low_memory` in E16) as open. R-153 has since made `tl_ui::run(UiLaunch)` the entry point, with `OpenMode::LowMemory` and `OpenHooks.low_memory`. Leader entry, 2026-10-04.
+- Resolution: `pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit)` lives in `crates/tl-ui/src/windows/low_memory.rs` (E32-009, `m1f.11`), not in `app.rs`. It performs the steps of `TasklensUi::init` with these differences: fonts are `NotoSans-Regular.ttf` and `NotoSans-SemiBold.ttf` only (`cx.text_system().add_fonts` with two `include_bytes!` from `assets/fonts/`); no icon loading (the frame's pin and close SVGs are embedded by E32-009); `bind_keys_low_memory(cx)` is the only key-binding call; no page registration; it installs the theme store without user themes (`init.themes_json` is ignored) and sets `OpenHooks.low_memory = Some(Box::new(move |cx| { LowMemoryWindow::open(cx, client.clone()); }))`. `tl_ui::run` (E16-012, `fut.15`) leaves a `// E32-013: low-memory init` insertion point in step 3; the new bead E32-013 replaces the `TasklensUi::init(..)` call there with `if launch.open == OpenMode::LowMemory { windows::low_memory::init_low_memory(cx, launch.client, launch.init) } else { TasklensUi::init(cx, launch.client, launch.init) }`. tl-app's `--low-memory` arm (E32-010, `m1f.12`) sets `UiLaunch.open = OpenMode::LowMemory` and `EngineConfig.mode = EngineMode::LowMemory`; it opens no window itself. `mlockall(MCL_CURRENT)` runs in tl-app right before `tl_ui::run` (tl-ui has no rustix and `AppEnv` gets no new member); this replaces R-152 OI-12's "after the first frame", and PROC-098's "mlocked after start (current pages only)" stays true.
+- Basis: UI-PWN-032, UI-SHL-110, R-152, R-153, R-171, fut.15 text [verified]; the init step list is the E16-A1 text.
+- Edits: UI-PWN-032 Build line; new bead E32-013 (plan key and ID in `b1-infra.md`); beads m1f.11, m1f.12, fut.15; edges m1f.12 on E32-013, E32-013 on fut.15 and m1f.11.
+
+### R-244 The colour-scheme watcher runs in the `SystemdUser` worker
+- Question: R-170 item 4 put the portal `color-scheme` reader "in E14's session-bus opener worker (y6k.24)", but `opener.rs` is a set of functions E11 calls per action, not a worker; nothing owned the loop that subscribes to `SettingChanged` and sends `SourceUpdate::ColorScheme`. Leader entry, 2026-10-04.
+- Resolution: `opener.rs` (E14-020, `tasklens-y6k.24`) keeps the two functions `read_color_scheme` and `watch_color_scheme` and their tests, as written. The `SystemdUser` generation of the systemd worker (E14-001, `tasklens-y6k.5`, `workers/dbus_systemd.rs`) runs the watcher: after `ManagerConnSlot::set(conn)` succeeds on the session bus and only in `EngineMode::Full`, it spawns `opener::watch_color_scheme(cx, &conn, &io.tx)` as a child task of the generation (the `tx` is the worker's `EngineMsg` sender from `WorkerIo`). The child ends with the generation; a reconnect (E14-002) starts it again, which resends the current value. A watcher error is logged at `debug` and does not restart the worker. The reducer arm (8q0.9) is unchanged.
+- Basis: R-170 item 4, R-166 B3-8, ADR-004 worker table (`SystemdUser` runs over the session bus on every desktop), y6k.24 Notes [verified].
+- Edits: ADR-003 `SystemSnapshot` sentence and ADR-004 opener paragraph ("session-bus opener worker" becomes the `SystemdUser` worker); beads y6k.24, y6k.5; edge y6k.5 on y6k.24.
+
+### R-245 `serde_json` in tl-app for `themes.json` and `run-history.json`
+- Question: `cr0.11` (E33-008) writes `themes.json` (`PersistTheme::Save`) and `run-history.json` (`RunHistoryFile`), both JSON, but `serde_json` is not in ADR-001's tl-app row, so the bead stops and reports. Leader entry, 2026-10-04.
+- Resolution: ADR-001's tl-app row gains `serde_json` (themes JSON and the Run history file). `cr0.11` adds `serde_json = { workspace = true }` to `crates/tl-app/Cargo.toml` (an E33 file; the root `Cargo.toml` already pins `serde_json = "1"`, so no E02 bead is needed). `ThemeDef` and `RunHistoryEntry` derive `Serialize` and `Deserialize` in tl-ui (R-171, fut.1), so tl-app serialises them directly: `themes.json` is the pretty-printed JSON array of `ThemeDef`; `run-history.json` is the pretty-printed JSON array of `RunHistoryEntry`. No alternative format.
+- Basis: ADR-001 rows, R-142 item 1, R-153, R-170 item 12, R-171 [verified].
+- Edits: ADR-001 tl-app row; bead cr0.11.
+
+### R-246 `HelperCallError` gains `StartFailed(Arc<str>)` and lives in `actions/mod.rs`
+- Question: `qfx.2` (E29-A2) declares its own `HelperCallError { Missing, Cancelled, NotAuthorized, StartFailed(Arc<str>), Timeout, Exited, Protocol }` in `helper/mod.rs`, while R-147 fixes `HelperCallError { Missing, Cancelled, NotAuthorized, Timeout, Exited, Protocol(Arc<str>) }` in `actions/mod.rs`; a failed session start had no place. Leader entry, 2026-10-04.
+- Resolution: one enum, in `crates/tl-engine/src/actions/mod.rs` (E11-002, `i3o.4`): `HelperCallError { Missing, Cancelled, NotAuthorized, StartFailed(Arc<str>), Timeout, Exited, Protocol(Arc<str>) }`. `helper/mod.rs` imports it (`pub(crate) use crate::actions::HelperCallError;`) and declares no copy. `StartFailed(reason)` is returned by a `Call` whose implicit start ended in `HelperStartOutcome::Failed(reason)` (a `Call` while `Locked` starts the session first). E29-014 (`qfx.17`) maps it to `Failed(ActionError::Internal(reason))`. A start that a `Call` triggered publishes no `helper_start` outcome: the action's own `Failed(AuthCancelled | NotAuthorized | Internal)` toast reports it, so the user sees one toast; only `HelperMsg::Start` (shield, Grant access, unlock at launch) sets `helper_start`.
+- Basis: R-147, R-148 items 2 and 3, i3o.4 and qfx.17 text [verified].
+- Edits: ADR-006 `PrivilegedOps` sentence; R-147 enum text; beads i3o.4, qfx.2, qfx.17.
+
+### R-247 Setup commands travel on the helper channel
+- Question: `qfx.22` (E29-019) says the setup runner is "called from the routing added in E29-020" and `qfx.23` (E29-020) routes `SetupStatus` and `RunSetup` "to the setup handlers of E29-019", but the reducer has only `helper_tx: Option<mpsc::Sender<HelperCommand>>` with `HelperCommand { Start, End }`; no channel reached a setup runner. Leader entry, 2026-10-04.
+- Resolution: `HelperCommand` (E09, `reducer/mod.rs`, `8q0.3`) becomes `HelperCommand { Start, End, SetupStatus, RunSetup(SetupStep) }`. E09's `apply.rs` (`8q0.9`) forwards `Command::SetupStatus` and `Command::RunSetup { step }` through `helper_tx` with `try_send`, exactly like `Start` and `End` (`None` or a full queue logs at `debug` and drops; the UI can click again). `HelperMsg` (`qfx.2`) gains `SetupStatus` and `RunSetup(SetupStep)`; the forwarding task E29-020 spawns in `session.rs` maps the four `HelperCommand` variants to `HelperMsg` one to one. `helper_task` owns the `SetupState` and runs `probe_status` and `run_step` (E29-019) inside `cx.spawn_blocking`, one message at a time; a `Call` or `Start` that arrives during a setup run waits in the queue (the UI disables the setup buttons while a run is in progress, and two polkit prompts never overlap). The 100 ms output updates are sent from the blocking job through a clone of the `updates` sender with `try_send`. `qfx.23` no longer edits the `SetupStatus` and `RunSetup` arms; its `apply.rs` chain edit is the `SourceUpdate::Helper` and `SourceUpdate::Setup` arms only.
+- Basis: R-148 item 1, R-149 items 1 to 4, R-150 items 1 and 4, 8q0.3 and 8q0.9 text [verified].
+- Edits: ADR-005 or ADR-006 helper session sentence (none needed: the reducer field is R-148's); beads 8q0.3, 8q0.9, qfx.2, qfx.22, qfx.23.
+
+### R-248 One drop-in renderer and one file text
+- Question: `qfx.12` (E29-009) and `i3o.22` (E11-020) render the recovery drop-in differently: `render(&RecoveryEdit)` with `RestartSec=<n>ms`, `StartLimitIntervalSec=<n>` in seconds, `OnFailure` under `[Unit]`, a blank line between sections and no header, against `render(&[(DropInKey, String)])` with `<n>us` values, a header line, `OnFailure` under `[Service]` (wrong: it is a `[Unit]` key) and no blank line. Leader entry, 2026-10-04.
+- Resolution: `pub fn render(keys: &[(DropInKey, String)]) -> String` in `crates/tl-ops/src/dropin.rs` (E29-owned, R-168) is the only renderer; `tl-engine/src/actions/recovery.rs` re-exports it. Values are rendered verbatim; `keys_of` (E11-020) writes time values as `<n>us` for `RestartSec`, `RestartMaxDelaySec` and `StartLimitIntervalSec`, integers in decimal, words as given and `OnFailure` names joined by one space. File text: `HEADER` (`# Written by tasklens. Edit it in the Service Properties Recovery tab or delete this file.\n`), then `[Unit]\n` with `StartLimitIntervalSec`, `StartLimitBurst`, `StartLimitAction`, `FailureAction`, `OnFailure` (only those present, in that order), then `[Service]\n` with `Restart`, `RestartSec`, `RestartSteps`, `RestartMaxDelaySec` (same rule). A section with no keys is omitted; every line is `Key=value\n`; no blank lines; LF only. Example: `HEADER + "[Unit]\nStartLimitIntervalSec=60000000us\nStartLimitBurst=3\n[Service]\nRestart=on-failure\nRestartSec=5000000us\n"`. The helper (E29-009) still parses the keys into typed values for its range checks (`RestartSec` and `RestartMaxDelaySec` 0 to 3 600 000 000 us, `StartLimitIntervalSec` 0 to 86 400 000 000 us, `StartLimitBurst` 0 to 1000, `RestartSteps` 0 to 1000) and then calls `render(keys)` with the validated list.
+- Basis: SYS-013, UI-SYS-034, R-004, R-168, systemd unit syntax (`OnFailure`, `StartLimit*` and `FailureAction` are `[Unit]` keys; `Restart*` are `[Service]` keys) [verified].
+- Edits: 00-epics section 2 tl-ops exception (signature); beads qfx.12, i3o.22.
+
+### R-249 History worker texts and problem states (E30-OI-4 proposals)
+- Question: `8fx.16`, `8fx.17` and `8fx.18` carry three values marked "proposed, E30-OI-4": the health text "History dropped N events", `Problem(OpenFailed)` with a 60 s reopen on a store write error, and `Problem(EmptyOrTruncated)` on a read error. Leader entry, 2026-10-04.
+- Resolution: accepted as written. The `HistoryRecorder` worker writes `SourceHealth.last_error = "History dropped N events"` at most once per minute with the state unchanged (`Running`). A store write error sets `HistoryStoreState::Problem(OpenFailed)`, recording continues in RAM, and the worker tries `Store::open` again 60 s later. A store read error answers with the data that could be read and `store_state = Problem(EmptyOrTruncated)`.
+- Basis: ADR-012, ADR-015 (`last_error` capped at 200 characters), R-156 item 3, R-169 [verified].
+- Edits: ADR-012 "Reading" paragraph (one sentence); beads 8fx.16, 8fx.17, 8fx.18 (the "proposed" tags go).
+
+### R-250 Mission Center's app-matching exceptions table
+- Question: `yms.19` (E05-016) waits for the leader to paste Mission Center's `matching.rs:10-24` exceptions table. The 1.2.0 source is not on disk; the installed binary `/usr/bin/missioncenter-magpie` (metainfo release 1.2.0) is. Leader entry, 2026-10-04.
+- Resolution: the table read from the binary's string data is five pairs, exe basename to desktop id: `firefox-bin` to `firefox`, `soffice.bin` to `libreoffice`, `resources-processes` to `resources`, `gnome-terminal-server` to `gnome-terminal`, `chrome` to `google-chrome-stable`. `EXCEPTIONS` in E05-016 is exactly these five; the bead's `chromium` and `electron` identity entries go (the exe step finds them anyway), and `gnome-terminal-server` maps to `gnome-terminal`, `chrome` to `google-chrome-stable`. A mapped id missing from the index falls through to the normal steps, so a distribution's different desktop file name costs only the shortcut.
+- Basis: `strings /usr/bin/missioncenter-magpie` on the installed 1.2.0 [verified]; the pair direction (basename to id) [inferred] from the names, matching the inventory's description (`docs/research/claude-missioncenter-inventory.md`, `matching.rs:10-24`).
+- Edits: bead yms.19.
+
+### R-251 `tray-22.argb` and `tray-44.argb` are an E31 bead
+- Question: R-161 item 4 names the two pre-rendered ARGB32 files under `assets/icons/` and `wox.10` embeds them, but no bead creates them. Leader entry, 2026-10-04.
+- Resolution: new bead E31-013 renders `assets/icons/tasklens.svg` to `assets/icons/tray-22.argb` (22 x 22 x 4 = 1,936 bytes) and `assets/icons/tray-44.argb` (7,744 bytes), raw ARGB32 in network byte order (one byte each of A, R, G, B per pixel, rows top to bottom), with `rsvg-convert -w N -h N assets/icons/tasklens.svg -o <tmp>.png` then `magick <tmp>.png -depth 8 argb:assets/icons/tray-N.argb`. It is a chain edit to E15's `assets/icons/` and depends on E15-022 (`ug9.25`, the placeholder logo); `wox.10` depends on it. When E15-026 (`ug9.26`) replaces the artwork, the two files are re-rendered with the same commands (sentence added to ug9.26).
+- Basis: UI-SHL-113, R-161 item 4, ksni `Icon { width, height, data }` format [verified]; `rsvg-convert` and `magick` are installed on the owner machine.
+- Edits: new bead E31-013 (plan key and ID in `b1-infra.md`); beads wox.10, ug9.26; edges wox.10 on E31-013, E31-013 on ug9.25.
+
+### R-252 ADR-007 failure table follows R-155
+- Question: ADR-007's failure table still says `InitFailed { LibraryNotFound | DriverNotLoaded }` makes the worker retry `Hello` every 300 s with data state `Missing`, but R-155 item 4 made it terminal and `ndy.12` no longer retries. Leader entry, 2026-10-04.
+- Resolution: the row reads: engine action "health `SourceState::Unsupported` with `last_error` `LibraryNotFound` or `DriverNotLoaded`; the worker shuts the child down and parks (checkpoint loop every 60 s); no retry", data state `Unsupported` (terminal, never retried). A new row covers the missing probe: "`tl-gpu-probe` not installed: health `Unsupported` with `last_error` "GPU probe not installed", no spawn, parked". `ndy.12` is already current.
+- Basis: R-155 item 4, ndy.12 text [verified].
+- Edits: ADR-007 failure table.
+
+### R-253 How the launcher knows the pkexec prompt has closed
+- Question: R-148 item 5 counts an `as_admin` launch as `Succeeded` "when the child is still running 2 s after the prompt closed", but the engine cannot see the polkit agent. Raised by the E14-A3 writer (`y6k.3`). Leader entry, 2026-10-04.
+- Resolution: `pkexec` runs the authentication itself and, once authorised, replaces its own process image with the program (`execv`), so the child pid stays the same and its `comm` changes from `pkexec` to `env` (and then to `sh`). The launcher polls `/proc/<pid>/stat` every 250 ms on the blocking pool: while the comm field (the text between the parentheses) is `pkexec`, the prompt is open or being checked. The prompt counts as closed on the first poll where the comm is not `pkexec`, or when `waitpid(pid, WNOHANG)` reports an exit. Exit while the comm was still `pkexec`: status 126 gives `AuthCancelled`, 127 gives `NotAuthorized`, anything else `Failed(Internal("pkexec exited with status <n>"))`. After the comm changed: still running 2 s later, or exited with status 0 within those 2 s, gives `Launched`; a non-zero exit within the 2 s gives `Failed(Internal("exited with status <n>"))`. The 120 s deadline E11 applies bounds the whole wait. The child is a direct child of the engine (the tl-ops launch helper uses `posix_spawn` with `setsid`, no double fork), so `waitpid` works.
+- Basis: R-148 item 5, ADR-006, E07-A3 spawn helper text [verified]; pkexec's `execv` behaviour [inferred] from polkit's `pkexec.c`.
+- Edits: ADR-006 `Launch` sentence; PROC-095 Run as administrator line; bead y6k.3.
+
+### R-254 Missing edges for `serde_json` and `SourceUpdate::ColorScheme`
+- Question: `y6k.2` (KWin bridge) and `y6k.22` (KWin commands) build JSON with `serde_json`, whose tl-engine `Cargo.toml` line is added by E14-A4 (`y6k.4`, R-142 item 7); `y6k.24` sends `SourceUpdate::ColorScheme`, declared in `8hz.5`. None of the three edges existed. Leader entry, 2026-10-04.
+- Resolution: add `y6k.2` on `y6k.4`, `y6k.22` on `y6k.4` and `y6k.24` on `8hz.5`. No cycle: `y6k.4` depends on `8q0.1`, `8hz.1` and `as2.2`, none of which depend on an E14 bead; `8hz.5` depends on `8hz.4` and `as2.2` only.
+- Basis: y6k.2, y6k.22, y6k.4, 8hz.5 text and dependency lists [verified].
+- Edits: the three edges.
+
+### R-255 Startup "Run now" already running in E28-013
+- Question: `9o0.9` (E28-013) still says "how the engine reports this: open item B8-E28-9". Leader entry, 2026-10-04.
+- Resolution: the engine reports `ActionState::Rejected(RejectReason::AlreadyRunning)` (R-148 item 4); the tracker's reject table maps it to the Info toast "Already running" (R-196, OI-U26). E28-013 reads that reject reason and shows no success text for it.
+- Basis: R-148 item 4, R-196 [verified].
+- Edits: bead 9o0.9.
+
+### R-256 E14-019 matches R-241
+- Question: check that `y6k.23` says `Picked(s uuid, s pid)`, parses the text as `u32`, maps `"0"` or unparsable text to `NoWindow`, and no longer says "open item 7". Leader entry, 2026-10-04.
+- Resolution: verified in the bead text on 2026-10-04; no edit needed.
+- Basis: y6k.23 text, R-241 [verified].
+- Edits: none.
+
+### R-257 The asupersync feature check must exclude dev-dependencies
+- Question: `v9m.1` (E02-A1) and ADR-002 run `cargo tree -p tl-engine -e features -i asupersync` and expect no `test-internals`, but tl-engine's dev-dependencies enable that feature for tests, so the command as written fails on a correct workspace. Leader entry, 2026-10-04.
+- Resolution: the check is `cargo tree -p tl-engine -e normal,features -i asupersync`, which inverts over normal dependencies only. It must show no `nightly-outcome-try` and no `test-internals`.
+- Basis: ADR-002 verification list, ADR-013 (`LabRuntime` tests need `test-internals`) [verified]; `cargo tree -e` edge kinds [verified] in cargo's documentation.
+- Edits: ADR-002 verification item; bead v9m.1.
 
 
 

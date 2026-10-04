@@ -1140,11 +1140,11 @@ Real-time signal…
   - Filter with no match: "No processes match the filter." [chosen].
   - Errors: toast with title "End Task Failed" and message "kill failed: {errno text}" (Error) [spec texts].
 - **Interaction:**
-  - "Open Full tasklens" (`OpenFullTasklens`): calls `org.freedesktop.Application.Activate` on the main instance, or starts `tasklens` detached when no instance owns the bus name; the rescue window stays open [chosen].
+  - "Open Full tasklens" (`OpenFullTasklens`): sends `ActionKind::Launch(LaunchSpec { what: LaunchWhat::Command("tasklens"), as_admin: false, cwd: None })`; the started process activates the running instance or becomes the main one (APP-011, R-152); the rescue window stays open [chosen].
   - Esc closes the window (no filter text) or clears the filter first; Ctrl+W closes. Closing ends the `--low-memory` process.
   - Tab order: filter, list (one focus stop), Open Full tasklens, pin, close.
 - **Data binding:** the engine runs in a low-memory mode: a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, published as `Snapshot.processes` and `Snapshot.health` only [`EngineMode::LowMemory`, ARCHITECTURE ADR-004, R-119].
-- **Build:** `crates/tl-ui/src/windows/low_memory.rs`, `pub struct LowMemoryWindow` (Entity); started by `tl-app` for `--low-memory` with `mlockall` already done (PROC-098).
+- **Build:** `crates/tl-ui/src/windows/low_memory.rs`, `pub struct LowMemoryWindow` (Entity) and `pub fn init_low_memory(cx, client, init)`, the minimal init (`NotoSans-Regular` and `NotoSans-SemiBold` only, no icons, `bind_keys_low_memory` only) that `tl_ui::run` calls instead of `TasklensUi::init` when `UiLaunch.open == OpenMode::LowMemory` (R-243); started by `tl-app` for `--low-memory` with `mlockall(MCL_CURRENT)` already done (PROC-098).
 - **Performance:** at most 30 rows; one re-render per 2 s sweep; no animation; the window opens in under 200 ms (ADR-014 first-frame gate applies).
 - **Accessibility:** End Task buttons carry the row name in their accessible name ("End Task: Firefox").
 - **Tests:** `lowmem_texts_and_title`; `lowmem_eased_after_10s` (fake PSI below threshold for 10 s); `lowmem_starts_pinned`; `lowmem_open_full_activates_or_spawns`.

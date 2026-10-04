@@ -85,7 +85,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
 | tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142) |
-| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142) |
+| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, serde_json (`themes.json` and `run-history.json`, R-245), anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142) |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni |
 | tl-helper | tl-model, tl-ops, tl-collect (shared strings scanner `proc/strings.rs`, R-157) | rustix, postcard, serde |
@@ -287,7 +287,7 @@ unwrap_used = "warn"          # allowed in tests
 ### Verification
 
 - `cargo +1.98.1 build --workspace --locked` succeeds.
-- `cargo tree -p tl-engine -e features -i asupersync` shows no `nightly-outcome-try` and no `test-internals` in the non-dev build.
+- `cargo tree -p tl-engine -e normal,features -i asupersync` shows no `nightly-outcome-try` and no `test-internals` in the non-dev build (`normal` excludes the dev-dependencies, which enable `test-internals` for the `LabRuntime` tests; R-257).
 - `cargo tree -p tl-app -i gpui-pre --prefix none` shows exactly one version, `0.3.7`.
 
 ---
@@ -660,7 +660,7 @@ pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed b
 
 **Per-component fields the UI reads** (each type lives in `snapshot.rs` unless named):
 
-- `SystemSnapshot` carries, besides the totals of `system.rs`, `boot_time_s: i64` (`/proc/stat btime`, R-141), `color_scheme: u8` (portal `org.freedesktop.appearance` `color-scheme` 0, 1, 2, fed by the session-bus opener worker and `SourceUpdate::ColorScheme`, R-170) and `cpu_topology: Arc<CpuTopology>`:
+- `SystemSnapshot` carries, besides the totals of `system.rs`, `boot_time_s: i64` (`/proc/stat btime`, R-141), `color_scheme: u8` (portal `org.freedesktop.appearance` `color-scheme` 0, 1, 2, read by `opener::watch_color_scheme`, which the `SystemdUser` worker runs on its session connection, and shipped as `SourceUpdate::ColorScheme`, R-170, R-244) and `cpu_topology: Arc<CpuTopology>`:
   `online: CpuSet`, `cores: Arc<[CoreInfo { id, logical: SmallVec<[u16; 2]>, l3_group: u16, kind:
   CoreKind::{Performance, Efficiency, Standard} }]>`, read once at start and again on CPU hotplug
   (Set Affinity dialog, UI-PWN-021; per-core grid marks, PERF-031).
@@ -871,7 +871,7 @@ ADR-006 pipeline with identity revalidation.
 | `HistoryRecorder` | `workers/history.rs` | P3 | ADR-012 store and rolling window |
 | `Journal` | `workers/journal.rs` | P2 | one `journalctl` child per open `JournalHandle` (ADR-005, UI-SYS-036) |
 
-The session-bus opener worker (`opener.rs` and `launcher.rs`, ADR-005) also reads the portal colour scheme (`org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")` plus `SettingChanged`) and ships it as `SourceUpdate::ColorScheme(u8)` (R-170). The public IP fetch is a job the `Inventory` worker runs on `DeviceCommand::FetchPublicIp`; the helper session and the setup runner report through `SourceUpdate::Helper` and `SourceUpdate::Setup`, which `source_of()` maps to `None` (R-150). Every `SourceUpdate` variant exists from E08 on, so later epics add arms, not variants. `Source::take_extra()` lets a worker send device lists and details before its sample (R-139).
+`opener.rs` (E14-020) holds the portal colour-scheme reader (`org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")` plus `SettingChanged`); the `SystemdUser` worker runs `opener::watch_color_scheme` as a child task of each session-bus generation in `EngineMode::Full`, and it ships `SourceUpdate::ColorScheme(u8)` (R-170, R-244). The public IP fetch is a job the `Inventory` worker runs on `DeviceCommand::FetchPublicIp`; the helper session and the setup runner report through `SourceUpdate::Helper` and `SourceUpdate::Setup`, which `source_of()` maps to `None` (R-150). Every `SourceUpdate` variant exists from E08 on, so later epics add arms, not variants. `Source::take_extra()` lets a worker send device lists and details before its sample (R-139).
 
 **KWin bridge worker.** `workers/dbus_kwin.rs` runs on the engine's session-bus connection. Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus. Otherwise the window features are hidden and the UI shows the toast "Window features need KDE Plasma". The worker:
 - writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js` and loads it as KWin script plugin `tasklens-bridge`;
@@ -1181,7 +1181,7 @@ pub struct ActionEvent {
 }
 ```
 
-`OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134). A `pkexec` launch counts as `Succeeded` when the child is still running 2 s after the prompt closed; Plasma scripts in Run go as `LaunchWhat::Command` with the shell-quoted path (R-148). `Unsupported` is reported when no `FileManager1` owner exists or the command text is invalid.
+`OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134). A `pkexec` launch counts as `Succeeded` when the child is still running 2 s after the prompt closed; the prompt counts as closed when the child's `/proc/<pid>/stat` comm is no longer `pkexec` (pkexec execs the program in place) or the child has exited (R-253); Plasma scripts in Run go as `LaunchWhat::Command` with the shell-quoted path (R-148). `Unsupported` is reported when no `FileManager1` owner exists or the command text is invalid.
 
 Event order per request: `Started` (or a single `Rejected`), then one final state per target, then one final state with `target: None` summarizing (Succeeded only if every target succeeded; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected).
 
@@ -1328,7 +1328,7 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 - The helper exits after 300 s idle or when stdin reaches EOF. It sets `PR_SET_PDEATHSIG = SIGKILL`.
 - The eBPF network collector is a separate binary (`tl-netmon`, P4) with its own polkit action. It never shares a process with the action helper.
 - "Run as administrator" in the Run dialog uses `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper. Unset or empty `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are left out of the `env` line (R-165).
-- Inside the engine the helper is reached through `trait PrivilegedOps` in `tl-engine/src/actions/mod.rs` (`call(cx, req, fd, deadline) -> Result<Vec<HelperReply>, HelperCallError { Missing, Cancelled, NotAuthorized, Timeout, Exited, Protocol }>` and `state() -> HelperState`); `ActionCtx.helper` is `None` until the helper lands, and a privileged request is then `Rejected(Unsupported)`, never run unprivileged (R-147). A dismissed prompt is `ActionError::AuthCancelled` (pkexec 126), a denial `ActionError::NotAuthorized` (pkexec 127); a failed session start is reported once through `HealthSnapshot.helper_start` (R-148).
+- Inside the engine the helper is reached through `trait PrivilegedOps` in `tl-engine/src/actions/mod.rs` (`call(cx, req, fd, deadline) -> Result<Vec<HelperReply>, HelperCallError { Missing, Cancelled, NotAuthorized, StartFailed(Arc<str>), Timeout, Exited, Protocol(Arc<str>) }>` (one enum, imported by `helper/mod.rs`; `StartFailed` is a `Call` whose implicit session start failed and maps to `Failed(Internal(reason))`, R-246) and `state() -> HelperState`); `ActionCtx.helper` is `None` until the helper lands, and a privileged request is then `Rejected(Unsupported)`, never run unprivileged (R-147). A dismissed prompt is `ActionError::AuthCancelled` (pkexec 126), a denial `ActionError::NotAuthorized` (pkexec 127); a failed session start is reported once through `HealthSnapshot.helper_start` (R-148).
 - Without the helper, privileged menu items are shown disabled with the tooltip "Needs administrator helper (not installed)".
 
 ### Consequences
@@ -1437,7 +1437,8 @@ The probe gets per-process data from `process_utilization_stats(last_seen_timest
 |---|---|---|
 | `Sample` deadline missed | send SIGKILL to the child, `wait()` it in the blocking job, return `Err` (supervisor restarts with backoff) | `Stale`, then `Failed` |
 | Child exit or crash (EOF, `waitpid` status) | reap, return `Err` | `Failed` |
-| `InitFailed { LibraryNotFound | DriverNotLoaded }` | worker stays up, retries `Hello` with a new child every 300 s | `Missing` |
+| `tl-gpu-probe` not installed | health `Unsupported` with `last_error` "GPU probe not installed"; no child is spawned; the worker parks (checkpoint loop every 60 s) | `Unsupported` (terminal, never retried; R-155, R-252) |
+| `InitFailed { LibraryNotFound | DriverNotLoaded }` | health `Unsupported` with `last_error` `LibraryNotFound` or `DriverNotLoaded`; the worker shuts the child down and parks (checkpoint loop every 60 s); no retry | `Unsupported` (terminal, never retried; R-155, R-252) |
 | `InitFailed { NoPermission | Other }` | return `Err` (normal backoff) | `Failed` |
 | Per-metric `Unsupported` | none | that field `Unsupported` |
 
@@ -2046,7 +2047,7 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 - Worst case, all 2,000 processes changing every second: 2,000 × 15 B × 21,600 = 648 MB raw, about 216 MB compressed, still under the 256 MB cap.
 - RAM: the open block (at most 60 s of patches, about 0.2 MB typical, 2 MB worst case) plus segment indexes. Budget 16 MB for history in RAM.
 
-**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }` with `HistoryRange::{Live, At(TimeNs), Span { start_ns, end_ns }}` and `HistoryWhat::{Frame, TopAt { n: u8 }}`; the answer is `HistoryView { query_id, source, store_state, span, gaps, frame_t, range, process_count, rows, totals, series, stack, overview, top, realtime_offset_ns }` with `HistoryProcessRow`, `HistoryTop` and `HistoryLoadProblem` (R-156). The chart stacks the three largest per-process values per bucket plus "other" (D-020); a query without an answer is resent after 1,000 ms (R-169). Then the engine answers from the store when recording is on and from the rolling window when it is off, with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T.
+**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }` with `HistoryRange::{Live, At(TimeNs), Span { start_ns, end_ns }}` and `HistoryWhat::{Frame, TopAt { n: u8 }}`; the answer is `HistoryView { query_id, source, store_state, span, gaps, frame_t, range, process_count, rows, totals, series, stack, overview, top, realtime_offset_ns }` with `HistoryProcessRow`, `HistoryTop` and `HistoryLoadProblem` (R-156). The chart stacks the three largest per-process values per bucket plus "other" (D-020); a query without an answer is resent after 1,000 ms (R-169). Then the engine answers from the store when recording is on and from the rolling window when it is off, with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T. Problems while recording (R-249): a store write error sets `Problem(OpenFailed)`, recording continues in RAM and the store is reopened 60 s later; a read error answers with what could be read and `Problem(EmptyOrTruncated)`; a full worker channel writes `SourceHealth.last_error = "History dropped N events"` at most once per minute with the state unchanged.
 
 ### Consequences
 
