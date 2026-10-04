@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use tl_model::actions::{ActionError, ActionState, RejectReason};
 
+/// Why an operation did not apply. `IdentityChanged` means the target is not the captured
+/// process, and nothing was sent to it.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum OpsError {
     #[error("process identity changed")]
@@ -31,6 +33,7 @@ pub enum OpsError {
     Os(i32),
 }
 
+/// The result of every operation in this crate.
 pub type OpsResult<T = ()> = Result<T, OpsError>;
 
 impl OpsError {
@@ -44,6 +47,7 @@ impl OpsError {
         }
     }
 
+    /// The `ActionState` the UI shows for this error (ADR-015).
     pub fn to_action_state(&self) -> ActionState {
         match self {
             OpsError::IdentityChanged => ActionState::Rejected(RejectReason::IdentityChanged),

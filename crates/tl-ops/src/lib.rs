@@ -16,4 +16,4 @@ pub mod dump;
 
 pub mod launch;
 
-pub use error::OpsError;
+pub use error::{OpsError, OpsResult};

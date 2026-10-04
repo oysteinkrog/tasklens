@@ -247,6 +247,8 @@ fn tid_pid(tid: u32) -> Result<Pid, Errno> {
 }
 
 /// Sets the nice value of every thread of the verified process. `nice` must be -20..=19.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn set_nice(key: ProcessKey, boot: BootId, nice: i8) -> OpsResult {
     if !(-20..=19).contains(&nice) {
         return Err(OpsError::InvalidInput("nice out of range"));
@@ -258,6 +260,8 @@ pub fn set_nice(key: ProcessKey, boot: BootId, nice: i8) -> OpsResult {
 
 /// Sets the CPU affinity of every thread of the verified process. A mask outside the CPUs the
 /// cgroup allows gives `Os(EINVAL)`.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn set_affinity(key: ProcessKey, boot: BootId, set: &CpuSet) -> OpsResult {
     let set = to_rustix_cpuset(set)?;
     for_each_tid(key, boot, &mut |tid| {
@@ -289,6 +293,8 @@ pub(crate) fn to_rustix_cpuset(set: &CpuSet) -> OpsResult<rustix::thread::CpuSet
 
 /// Sets the scheduling policy of every thread of the verified process. `rt_prio` is 1..=99 for
 /// `Fifo` and `Rr`, else 0. Each thread keeps its own nice value.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn set_sched(key: ProcessKey, boot: BootId, policy: SchedPolicy, rt_prio: u8) -> OpsResult {
     let base = sched_attr_for(policy, rt_prio, 0)?;
     let result = for_each_tid(key, boot, &mut |tid| {
@@ -350,6 +356,8 @@ pub(crate) fn sched_attr_for(
 
 /// Sets the I/O priority of every thread of the verified process. `Realtime` needs
 /// `CAP_SYS_ADMIN` and gives `PermissionDenied` without it.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn set_io_priority(key: ProcessKey, boot: BootId, prio: IoPriority) -> OpsResult {
     let value = ioprio_for(prio)?;
     let result = for_each_tid(key, boot, &mut |tid| sys::ioprio_set_tid(tid, value));
@@ -406,6 +414,8 @@ fn io_priority_of_inner(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> 
 
 /// Sends `sig` to one thread of the verified process with `tgkill`, which fails unless `tid` is
 /// in thread group `process.pid`. A stop signal still stops the whole group (Linux group stop).
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn thread_send_signal(process: ProcessKey, boot: BootId, tid: u32, sig: Signal) -> OpsResult {
     let number = signal_number(sig)?;
     with_verified_thread(process, boot, tid, &mut || {
@@ -414,6 +424,8 @@ pub fn thread_send_signal(process: ProcessKey, boot: BootId, tid: u32, sig: Sign
 }
 
 /// Sets the nice value of one thread of the verified process. `nice` must be -20..=19.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn thread_set_nice(process: ProcessKey, boot: BootId, tid: u32, nice: i8) -> OpsResult {
     if !(-20..=19).contains(&nice) {
         return Err(OpsError::InvalidInput("nice out of range"));
@@ -425,6 +437,8 @@ pub fn thread_set_nice(process: ProcessKey, boot: BootId, tid: u32, nice: i8) ->
 
 /// Sets the scheduling policy of one thread of the verified process. `rt_prio` is 1..=99 for
 /// `Fifo` and `Rr`, else 0. The thread keeps its nice value.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn thread_set_sched(
     process: ProcessKey,
     boot: BootId,
@@ -443,6 +457,8 @@ pub fn thread_set_sched(
 
 /// Sets the CPU affinity of one thread of the verified process. A mask outside the CPUs the
 /// cgroup allows gives `Os(EINVAL)`.
+/// The pidfd is opened before the change and polled after it; a pidfd that is readable then
+/// gives `OutcomeUnknown`.
 pub fn thread_set_affinity(process: ProcessKey, boot: BootId, tid: u32, set: &CpuSet) -> OpsResult {
     let set = to_rustix_cpuset(set)?;
     with_verified_thread(process, boot, tid, &mut || {
