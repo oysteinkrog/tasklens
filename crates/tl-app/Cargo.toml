@@ -3,6 +3,7 @@ name = "tl-app"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
+build = "build.rs"
 
 [[bin]]
 name = "tasklens"
@@ -12,10 +13,23 @@ path = "src/main.rs"
 tl-model  = { workspace = true }
 tl-engine = { workspace = true }
 tl-ui     = { workspace = true }
-tl-ops    = { workspace = true }
+tl-ops    = { workspace = true }   # write_atomic (R-130)
+zbus      = { workspace = true }
+toml      = { workspace = true }
+serde     = { workspace = true }
+anyhow    = { workspace = true }
+tracing   = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender   = { workspace = true }
+rustix    = { workspace = true }
+clap          = { workspace = true }   # R-142 item 1
+async-channel = { workspace = true }   # R-142 item 2
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
-bench = ["tl-ui/bench"]
+bench = ["tl-ui/bench"]   # ADR-002; release builds do not enable it
 
 [lints]
 workspace = true
