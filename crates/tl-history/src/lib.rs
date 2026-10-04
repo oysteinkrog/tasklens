@@ -7,5 +7,6 @@ pub mod error;
 pub mod format;
 pub mod read;
 pub mod segment;
+pub mod store;
 
 pub use error::HistoryError;
