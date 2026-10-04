@@ -96,3 +96,15 @@ pass once all batch writers finish.
 - OI-U42 app icon: placeholder now (256 px rounded square, accent colour, white monospace "tl");
   new P3 bead E15-026 swaps in final artwork.
 - Build-line rewrite: done on 405 beads, 0 failures.
+- OI-E14 `--force-full-memory-mode`: with `--low-memory` it starts the full engine and keeps the
+  rescue window; alone it does nothing. Bead it.
+- OI-E21 `--app-id`: isolates everything (config, state, cache, runtime dirs, Wayland app_id,
+  bus name). PKGBUILD licence: MIT. TaskSlinger INI import: plain booleans and in-range integers
+  only until the owner supplies `UserSettings.ini`.
+- OI-E30 polkit texts: the three E29-021 texts as written.
+- OI-E31 history chart: stacked top 3 plus "other" per bucket, in the metric colour.
+
+## R numbering for the settled open items
+
+OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-171 to R-235
+(R = 170 + n). The owner answers above become D-012 to D-020 in DECISIONS.md.
