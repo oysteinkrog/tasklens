@@ -3,17 +3,24 @@
 //! App rows take their name, icon and description from `.desktop` files. The index is built once
 //! off the UI thread from the user and system `applications/` directories. Desktop files are
 //! user-writable, so every value passes through [`sanitize_text`] before it is stored.
+//! [`DesktopWatch`] reports changes in those directories so the index can be rebuilt after a
+//! 500 ms quiet period.
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use rustix::fs::inotify::{self, CreateFlags, WatchFlags};
+use rustix::io::Errno;
 use smallvec::SmallVec;
+use tl_model::time::TimeNs;
 
+use crate::error::CollectError;
 use crate::sanitize::sanitize_text;
 
 /// Limit for one sanitized value, in bytes.
@@ -25,6 +32,8 @@ pub const WALK_DEPTH_MAX: usize = 8;
 /// Fixed `PATH` list for resolving a relative `Exec` binary, so the result does not depend on
 /// the caller's environment.
 pub const EXEC_PATH_DIRS: [&str; 3] = ["/usr/local/bin", "/usr/bin", "/bin"];
+/// Quiet time after the last desktop-file change before the index is rebuilt.
+pub const DESKTOP_DEBOUNCE_NS: u64 = 500_000_000;
 
 /// One indexed `[Desktop Entry]` of type `Application`.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +173,113 @@ impl DesktopIndex {
             self.by_wm_class.entry(key).or_insert_with(|| entry.clone());
         }
         self.by_id.insert(entry.id.clone(), entry);
+    }
+}
+
+impl DesktopIndex {
+    /// Rebuilds the index from `watch`'s directories when [`DesktopWatch::poll`] returns true.
+    /// Increments `generation`, adds watches for new subdirectories and returns true.
+    pub fn rebuild_if(&mut self, watch: &mut DesktopWatch, now: TimeNs) -> bool {
+        if !watch.poll(now) {
+            return false;
+        }
+        let generation = self.generation + 1;
+        *self = DesktopIndex::build(&watch.dirs);
+        self.generation = generation;
+        watch.add_watches();
+        true
+    }
+}
+
+/// A non-blocking inotify fd on the `applications/` directories. The sampler polls it once per
+/// sweep; there is no thread and no runtime.
+#[derive(Debug)]
+pub struct DesktopWatch {
+    fd: OwnedFd,
+    dirs: Vec<PathBuf>,
+    pending_since: Option<TimeNs>,
+}
+
+impl DesktopWatch {
+    /// Watches every existing directory in `dirs` and its subdirectories. Missing or unreadable
+    /// directories are skipped.
+    pub fn new(dirs: &[PathBuf]) -> Result<Self, CollectError> {
+        let fd = inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).map_err(|e| {
+            CollectError::ProcRead {
+                file: "inotify",
+                errno: e.raw_os_error(),
+            }
+        })?;
+        let watch = DesktopWatch {
+            fd,
+            dirs: dirs.to_vec(),
+            pending_since: None,
+        };
+        watch.add_watches();
+        Ok(watch)
+    }
+
+    /// Drains queued events without blocking. Every event, including a queue overflow, restarts
+    /// the debounce at `now`. Returns true once, when no event arrived in this call and the last
+    /// one is at least [`DESKTOP_DEBOUNCE_NS`] old.
+    pub fn poll(&mut self, now: TimeNs) -> bool {
+        // Event contents are not needed: any event means "rescan". File names are never logged.
+        let mut buf = [0u8; 4096];
+        let mut got_event = false;
+        loop {
+            match rustix::io::read(&self.fd, &mut buf) {
+                Ok(0) => break,
+                Ok(_) => got_event = true,
+                Err(Errno::INTR) => continue,
+                // EAGAIN means the queue is empty. Other errors are not expected on an inotify
+                // fd and are treated the same way.
+                Err(_) => break,
+            }
+        }
+        if got_event {
+            self.pending_since = Some(now);
+            return false;
+        }
+        match self.pending_since {
+            Some(since) if now.saturating_sub(since) >= DESKTOP_DEBOUNCE_NS => {
+                self.pending_since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Adds a watch to every existing directory below `dirs`. Adding a watch to a path that is
+    /// already watched only refreshes its mask.
+    fn add_watches(&self) {
+        for dir in &self.dirs {
+            self.watch_tree(dir, 0);
+        }
+    }
+
+    fn watch_tree(&self, dir: &Path, depth: usize) {
+        let flags = WatchFlags::CREATE
+            | WatchFlags::DELETE
+            | WatchFlags::MODIFY
+            | WatchFlags::MOVED_FROM
+            | WatchFlags::MOVED_TO
+            | WatchFlags::CLOSE_WRITE
+            | WatchFlags::ONLYDIR;
+        if inotify::add_watch(&self.fd, dir, flags).is_err() {
+            return;
+        }
+        if depth >= WALK_DEPTH_MAX {
+            return;
+        }
+        let Ok(read) = fs::read_dir(dir) else {
+            return;
+        };
+        for ent in read.filter_map(Result::ok) {
+            // Symlinked directories are not followed, the same as in `DesktopIndex::walk`.
+            if ent.file_type().is_ok_and(|t| t.is_dir()) {
+                self.watch_tree(&ent.path(), depth + 1);
+            }
+        }
     }
 }
 

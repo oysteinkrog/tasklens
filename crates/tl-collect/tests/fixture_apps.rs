@@ -1,11 +1,14 @@
-//! Tests for app naming (E05-018) and the desktop entry index (E05-013).
+//! Tests for app naming (E05-018), the desktop entry index (E05-013) and the desktop watch
+//! (E05-014).
 
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tl_collect::apps::desktop::{DesktopIndex, data_dirs_from_env, exec_binary, exec_binary_in};
+use tl_collect::apps::desktop::{
+    DesktopIndex, DesktopWatch, data_dirs_from_env, exec_binary, exec_binary_in,
+};
 use tl_collect::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
 };
@@ -282,4 +285,97 @@ fn desktop_index_snapshot() {
         .collect();
     rows.sort();
     insta::assert_debug_snapshot!(rows);
+}
+
+const MS: u64 = 1_000_000;
+
+fn write_app(dir: &Path, id: &str) {
+    fs::write(
+        dir.join(format!("{id}.desktop")),
+        format!("[Desktop Entry]\nType=Application\nName={id}\nExec=/usr/bin/{id}\n"),
+    )
+    .expect("write desktop file");
+}
+
+#[test]
+fn desktop_watch_debounce_500ms() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let apps = dir.path().join("applications");
+    fs::create_dir(&apps).expect("create applications dir");
+    let mut watch = DesktopWatch::new(std::slice::from_ref(&apps)).expect("inotify watch");
+
+    write_app(&apps, "one");
+    assert!(!watch.poll(0));
+    assert!(!watch.poll(100 * MS));
+    assert!(!watch.poll(400 * MS));
+    assert!(watch.poll(600 * MS));
+    assert!(!watch.poll(700 * MS));
+
+    // A second write restarts the debounce.
+    write_app(&apps, "two");
+    assert!(!watch.poll(1000 * MS));
+    write_app(&apps, "three");
+    assert!(!watch.poll(1450 * MS));
+    assert!(!watch.poll(1600 * MS));
+    assert!(watch.poll(1951 * MS));
+    assert!(!watch.poll(2100 * MS));
+}
+
+#[test]
+fn desktop_watch_debounce_restarts_on_second_write() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let apps = dir.path().join("applications");
+    fs::create_dir(&apps).expect("create applications dir");
+    let mut watch = DesktopWatch::new(std::slice::from_ref(&apps)).expect("inotify watch");
+
+    write_app(&apps, "one");
+    assert!(!watch.poll(0));
+    write_app(&apps, "two");
+    assert!(!watch.poll(450 * MS));
+    assert!(!watch.poll(600 * MS));
+    assert!(watch.poll(951 * MS));
+}
+
+#[test]
+fn desktop_rebuild_finds_new_entry() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let apps = dir.path().join("applications");
+    fs::create_dir(&apps).expect("create applications dir");
+    write_app(&apps, "old");
+    let dirs = vec![apps.clone()];
+    let mut index = DesktopIndex::build(&dirs);
+    let mut watch = DesktopWatch::new(&dirs).expect("inotify watch");
+    let before = index.generation;
+
+    write_app(&apps, "new");
+    assert!(!index.rebuild_if(&mut watch, 0));
+    assert!(index.by_id("new").is_none());
+    assert!(index.rebuild_if(&mut watch, 600 * MS));
+    assert!(index.by_id("new").is_some());
+    assert!(index.by_id("old").is_some());
+    assert_eq!(index.generation, before + 1);
+
+    // A subdirectory created now is watched after the rebuild.
+    let sub = apps.join("kde");
+    fs::create_dir(&sub).expect("create subdir");
+    assert!(!index.rebuild_if(&mut watch, 700 * MS));
+    assert!(index.rebuild_if(&mut watch, 1200 * MS));
+    assert_eq!(index.generation, before + 2);
+    write_app(&sub, "nested");
+    assert!(!index.rebuild_if(&mut watch, 1300 * MS));
+    assert!(index.rebuild_if(&mut watch, 1800 * MS));
+    assert!(index.by_id("kde-nested").is_some());
+    assert_eq!(index.generation, before + 3);
+}
+
+#[test]
+fn desktop_watch_missing_dir_ok() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let apps = dir.path().join("applications");
+    fs::create_dir(&apps).expect("create applications dir");
+    let missing = dir.path().join("missing/applications");
+    let mut watch = DesktopWatch::new(&[missing, apps.clone()]).expect("missing dir skipped");
+    write_app(&apps, "one");
+    assert!(!watch.poll(0));
+    assert!(watch.poll(500 * MS));
 }
