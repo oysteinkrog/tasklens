@@ -95,24 +95,32 @@ pub fn i915_engine_name(key: &str) -> Option<&'static str> {
     }
 }
 
-/// Memory from fdinfo, summed over the clients on `pdev`: (`drm-resident-local0`,
-/// `drm-total-local0`, `drm-resident-system0`) in bytes. A value is `None` when no client on
-/// `pdev` reports its key. The system value is the iGPU "Shared" memory.
+/// Memory from fdinfo, summed over the clients on `pdev`: (dedicated resident, dedicated total,
+/// shared resident) in bytes. A value is `None` when no client on `pdev` reports its key. The
+/// shared value is the iGPU "Shared" memory.
+///
+/// Region names per R-274: dedicated is `local0` (i915) or `vram0` (xe), shared is `system0`
+/// (i915) or `system` (xe). Other regions (`gtt`, `stolen`) are ignored.
 pub fn fdinfo_memory(scan: &FdinfoScan, pdev: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
     (
-        sum_region(scan, pdev, |c| &c.resident_bytes, "local0"),
-        sum_region(scan, pdev, |c| &c.total_bytes, "local0"),
-        sum_region(scan, pdev, |c| &c.resident_bytes, "system0"),
+        sum_region(scan, pdev, |c| &c.resident_bytes, DEDICATED),
+        sum_region(scan, pdev, |c| &c.total_bytes, DEDICATED),
+        sum_region(scan, pdev, |c| &c.resident_bytes, SHARED),
     )
 }
 
-/// Sum of `region` in the list `field` picks from each client on `pdev`; `None` when no client
-/// has it.
+/// i915 and xe names for the dedicated (VRAM) region.
+const DEDICATED: &[&str] = &["local0", "vram0"];
+/// i915 and xe names for the shared (system memory) region.
+const SHARED: &[&str] = &["system0", "system"];
+
+/// Sum over the clients on `pdev` of the first of `regions` in the list `field` picks; `None`
+/// when no client has one.
 fn sum_region<'a, L: AsRef<[(Arc<str>, u64)]> + 'a>(
     scan: &'a FdinfoScan,
     pdev: &str,
     field: impl Fn(&'a DrmClient) -> &'a L,
-    region: &str,
+    regions: &[&str],
 ) -> Option<u64> {
     scan.clients
         .iter()
@@ -121,7 +129,7 @@ fn sum_region<'a, L: AsRef<[(Arc<str>, u64)]> + 'a>(
             field(c)
                 .as_ref()
                 .iter()
-                .find(|(n, _)| &**n == region)
+                .find(|(n, _)| regions.contains(&&**n))
                 .map(|&(_, v)| v)
         })
         .reduce(u64::saturating_add)
@@ -263,6 +271,35 @@ mod tests {
             t_ns: 0,
         };
         assert_eq!(fdinfo_memory(&scan, p).0, Some(3_145_728));
+    }
+
+    #[test]
+    fn xe_fdinfo_regions() {
+        let p = "0000:03:00.0";
+        let xe = |id: u64| {
+            let text = format!(
+                "drm-driver: xe\ndrm-client-id: {id}\ndrm-pdev: {p}\n\
+                 drm-total-system: 8 MiB\ndrm-resident-system: 2 MiB\n\
+                 drm-total-gtt: 64 MiB\ndrm-resident-gtt: 64 MiB\n\
+                 drm-total-stolen: 32 MiB\n\
+                 drm-total-vram0: 4 MiB\ndrm-resident-vram0: 3 MiB\n"
+            );
+            super::super::fdinfo::parse_fdinfo(1, text.as_bytes()).expect("client")
+        };
+        let scan = FdinfoScan {
+            clients: vec![xe(1), xe(2)],
+            partial: false,
+            t_ns: 0,
+        };
+        // gtt and stolen are not counted.
+        assert_eq!(
+            fdinfo_memory(&scan, p),
+            (
+                Some(6 * 1024 * 1024),
+                Some(8 * 1024 * 1024),
+                Some(4 * 1024 * 1024)
+            )
+        );
     }
 
     #[test]
