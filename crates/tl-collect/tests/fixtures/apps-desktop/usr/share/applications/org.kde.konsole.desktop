@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Konsole
+GenericName=Terminal
+Comment=Command line access
+Exec=konsole
+Icon=utilities-terminal
+StartupWMClass=konsole
+Categories=Qt;KDE;System;TerminalEmulator;

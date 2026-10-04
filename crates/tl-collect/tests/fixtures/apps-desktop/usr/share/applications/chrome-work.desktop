@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Google Chrome (Work)
+Comment=Access the Internet
+Exec=/opt/google/chrome/chrome --profile-directory=Work
+Icon=google-chrome
+Type=Application
+StartupWMClass=crx_work
+Categories=Network;WebBrowser;

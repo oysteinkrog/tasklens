@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Firefox (User)
+Comment=My own Firefox launcher
+Exec=firefox -P default %u
+Icon=firefox
+Type=Application
+StartupWMClass=Firefox

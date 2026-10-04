@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Thunderbird
+Comment=Read and write e-mail
+Exec=flatpak run --branch=stable --command=thunderbird org.mozilla.Thunderbird %U
+Icon=org.mozilla.Thunderbird
+StartupWMClass=thunderbird
+X-Flatpak=org.mozilla.Thunderbird
