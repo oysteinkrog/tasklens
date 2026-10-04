@@ -10,9 +10,11 @@ use crate::actions::{Family, FourTuple, Proto};
 use crate::health::ManagerState;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{Coverage, ProcessRecord};
+use crate::devices::NetKind;
 use crate::series::SeriesView;
 use crate::system::{
-    CpuTopology, CpuTotals, DiskTotals, GpuTotals, MemoryTotals, NetTotals, SensorReading,
+    CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, NetTotals,
+    SensorReading,
 };
 use crate::table::{Manager, StartupRef, SysRow, Total, UnitRef, UnitType};
 use crate::time::TimeNs;
@@ -722,6 +724,533 @@ pub struct ConnectionsSnapshot {
     pub destroy_supported: Option<bool>,
 }
 
+// ---- Inventory ----
+
+/// One Information tab value with its validity. `Restricted` and `Unsupported` ("Not reported")
+/// follow R-050.
+pub type InvField<T> = Total<T>;
+
+/// Operating System section (PERF-095).
+#[derive(Clone, Debug, Default)]
+pub struct OsInfo {
+    /// os-release PRETTY_NAME.
+    pub name: InvField<Arc<str>>,
+    /// os-release LOGO.
+    pub logo_icon: Option<Arc<str>>,
+    /// VERSION_ID, or "Rolling" when missing.
+    pub version: InvField<Arc<str>>,
+    /// BUILD_ID. `Unsupported` when missing.
+    pub build: InvField<Arc<str>>,
+    /// uname release.
+    pub kernel: InvField<Arc<str>>,
+    /// uname version.
+    pub kernel_version: InvField<Arc<str>>,
+    /// uname machine, for example "x86_64".
+    pub architecture: InvField<Arc<str>>,
+    /// Unix seconds.
+    pub install_date_s: InvField<i64>,
+    /// For example "pacman 7.0.0".
+    pub package_manager: InvField<Arc<str>>,
+    /// Shown on screen only. Never log it.
+    pub machine_id: InvField<Arc<str>>,
+}
+
+/// Processor section (PERF-096).
+#[derive(Clone, Debug, Default)]
+pub struct ProcessorInfo {
+    pub name: InvField<Arc<str>>,
+    pub vendor: InvField<Arc<str>>,
+    pub architecture: InvField<Arc<str>>,
+    /// Shown as "Family 25 Model 97 Stepping 2".
+    pub family: InvField<u32>,
+    pub model: InvField<u32>,
+    pub stepping: InvField<u32>,
+    pub cores: InvField<u32>,
+    pub logical: InvField<u32>,
+    pub base_mhz: InvField<u32>,
+    pub max_mhz: InvField<u32>,
+    pub microcode: InvField<Arc<str>>,
+    pub virtualization: InvField<Arc<str>>,
+    pub avx512: InvField<bool>,
+    /// 64 for x86_64, aarch64, riscv64, ppc64, ppc64le, s390x, loongarch64 and mips64, else 32
+    /// (R-170 item 7).
+    pub bits: InvField<u8>,
+}
+
+/// System section, static rows (PERF-097).
+#[derive(Clone, Debug, Default)]
+pub struct SystemInfo {
+    pub pretty_hostname: InvField<Arc<str>>,
+    pub static_hostname: InvField<Arc<str>>,
+    pub user_name: InvField<Arc<str>>,
+    /// `None` hides the row (empty or "(none)").
+    pub domain: Option<Arc<str>>,
+    /// Unix seconds, now minus CLOCK_BOOTTIME.
+    pub boot_time_s: InvField<i64>,
+    pub desktop: InvField<Arc<str>>,
+    pub windowing_system: InvField<Arc<str>>,
+    pub session_type: InvField<Arc<str>>,
+    pub virtual_terminal: InvField<Arc<str>>,
+}
+
+/// Memory section, static rows (PERF-098).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryInfo {
+    pub total_bytes: InvField<u64>,
+    pub page_size: InvField<u64>,
+    pub huge_page_size: InvField<u64>,
+    pub swap_total_bytes: InvField<u64>,
+    pub zram_bytes: InvField<u64>,
+    /// Maximum Committed_AS seen since tasklens started. The reducer fills it; the inventory
+    /// worker leaves it `WarmingUp` (R-166).
+    pub peak_committed_bytes: InvField<u64>,
+}
+
+/// One memory module row (PERF-099). There is no serial field: DIMM serials are never read or
+/// stored (D-007, R-030).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryModule {
+    pub slot: InvField<Arc<str>>,
+    pub capacity_bytes: InvField<u64>,
+    pub speed_mts: InvField<u32>,
+    pub kind: InvField<Arc<str>>,
+    pub form_factor: InvField<Arc<str>>,
+    pub manufacturer: InvField<Arc<str>>,
+    pub part_number: InvField<Arc<str>>,
+}
+
+/// One disk drive row (PERF-100).
+#[derive(Clone, Debug, Default)]
+pub struct DiskDrive {
+    pub device: Option<DeviceIdx>,
+    pub model: InvField<Arc<str>>,
+    pub kind: InvField<Arc<str>>,
+    /// NVMe, SATA, USB, SCSI or virtio.
+    pub interface: InvField<Arc<str>>,
+    pub capacity_bytes: InvField<u64>,
+    pub free_bytes: InvField<u64>,
+    /// Mount paths.
+    pub volumes: Arc<[Arc<str>]>,
+    /// Shown on screen only. Never log it.
+    pub serial: InvField<Arc<str>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FirmwareType {
+    Uefi,
+    LegacyBios,
+}
+
+/// Firmware section (PERF-101).
+#[derive(Clone, Debug, Default)]
+pub struct FirmwareInfo {
+    pub firmware_type: InvField<Option<FirmwareType>>,
+    pub bios_vendor: InvField<Arc<str>>,
+    pub bios_version: InvField<Arc<str>>,
+    pub bios_date: InvField<Arc<str>>,
+    pub bios_release: InvField<Arc<str>>,
+    pub secure_boot: InvField<bool>,
+}
+
+/// Motherboard section (PERF-102).
+#[derive(Clone, Debug, Default)]
+pub struct BoardInfo {
+    pub manufacturer: InvField<Arc<str>>,
+    pub product: InvField<Arc<str>>,
+    pub version: InvField<Arc<str>>,
+    pub system_vendor: InvField<Arc<str>>,
+    pub system_product: InvField<Arc<str>>,
+    pub chassis_type: InvField<Arc<str>>,
+    /// board_serial is mode 0400, so `Restricted` when unprivileged. Never log it.
+    pub serial: InvField<Arc<str>>,
+}
+
+/// One display mode, shown as "3840x2160 @ 144 Hz (primary)".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DisplayMode {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_mhz: u32,
+    pub primary: bool,
+}
+
+/// One graphics adapter, static rows (PERF-103).
+#[derive(Clone, Debug, Default)]
+pub struct GraphicsAdapter {
+    pub device: Option<DeviceIdx>,
+    pub name: InvField<Arc<str>>,
+    pub driver_version: InvField<Arc<str>>,
+    pub kernel_module: InvField<Arc<str>>,
+    pub vulkan_version: InvField<Arc<str>>,
+    pub opengl_version: InvField<Arc<str>>,
+    pub temperature_source: InvField<Arc<str>>,
+    pub dedicated_bytes: InvField<u64>,
+    pub shared_bytes: InvField<u64>,
+    pub displays: Arc<[DisplayMode]>,
+}
+
+/// One network adapter (PERF-104).
+#[derive(Clone, Debug, Default)]
+pub struct NetworkAdapter {
+    pub device: Option<DeviceIdx>,
+    /// Connection name and type.
+    pub connection: InvField<Arc<str>>,
+    pub adapter_name: InvField<Arc<str>>,
+    pub driver: InvField<Arc<str>>,
+    pub link_speed_mbps: InvField<u32>,
+    pub ip_addresses: Arc<[Arc<str>]>,
+    /// Shown on screen only. Never log it.
+    pub mac: InvField<Arc<str>>,
+}
+
+/// Public IP fetch state (PERF-060). Never saved to disk. The UI sends
+/// `DeviceCommand::FetchPublicIp` and the Inventory worker runs the fetch (R-139 items 2 to 4).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum PublicIpState {
+    #[default]
+    NotFetched,
+    Fetching,
+    /// Shown as "203.0.113.4 (fetched 14:02)".
+    Fetched {
+        v4: Option<Arc<str>>,
+        v6: Option<Arc<str>>,
+        fetched_at_s: i64,
+    },
+    Failed(Arc<str>),
+}
+
+/// The Information tab component (ADR-003): the static values of its ten sections. Live rows come
+/// from `SystemSnapshot`, `SeriesSet` and `DeviceCatalog`. The Inventory worker fills it on page
+/// open and on `RefreshNow`. A failed scan sets `header.validity` to `Failed`.
+#[derive(Clone, Debug, Default)]
+pub struct InventorySnapshot {
+    pub header: ComponentHeader,
+    pub os: OsInfo,
+    pub processor: ProcessorInfo,
+    pub system: SystemInfo,
+    pub memory: MemoryInfo,
+    pub modules: Arc<[MemoryModule]>,
+    pub disks: Arc<[DiskDrive]>,
+    pub firmware: FirmwareInfo,
+    pub board: BoardInfo,
+    pub graphics: Arc<[GraphicsAdapter]>,
+    pub network: Arc<[NetworkAdapter]>,
+    pub public_ip: PublicIpState,
+}
+
+// ---- Device details ----
+//
+// R-139 item 6. Worker-side records are the same structs without the `DeviceIdx`; the reducer sets
+// the index.
+
+/// One cache level (E12-010).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CacheLevelInfo {
+    pub instances: u16,
+    pub instance_kib: u64,
+    pub total_kib: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CacheInfo {
+    pub l1d: Option<CacheLevelInfo>,
+    pub l1i: Option<CacheLevelInfo>,
+    pub l2: Option<CacheLevelInfo>,
+    pub l3: Option<CacheLevelInfo>,
+    pub l4: Option<CacheLevelInfo>,
+}
+
+/// `Default` exists only so `InvField<VirtState>` has one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VirtState {
+    EnabledKvm,
+    SupportedNoKvm,
+    #[default]
+    NotSupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecurityFeature {
+    SecureBoot,
+    LockdownIntegrity,
+    LockdownConfidentiality,
+    MemoryEncryption,
+    UserShadowStack,
+    Iommu,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VulnSummary {
+    pub mitigated: u16,
+    pub vulnerable: u16,
+    pub not_affected: u16,
+    pub unknown: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RaplState {
+    NoZone,
+    Unreadable,
+    Readable,
+}
+
+/// CPU static rows (E12-010).
+#[derive(Clone, Debug, Default)]
+pub struct CpuStaticInfo {
+    pub cores: u16,
+    pub logical: u16,
+    pub caches: CacheInfo,
+    pub driver: InvField<Arc<str>>,
+    pub governor: InvField<Arc<str>>,
+    pub epp: InvField<Arc<str>>,
+    pub platform_profile: InvField<Arc<str>>,
+    pub prefcore_rank: Arc<[Option<u32>]>,
+    pub prefcore_differs: bool,
+    pub virtualization: InvField<VirtState>,
+    pub running_in_vm: InvField<Arc<str>>,
+    pub hypervisor: Option<Arc<str>>,
+    pub security: SmallVec<[SecurityFeature; 6]>,
+    pub security_unreadable: SmallVec<[Arc<str>; 4]>,
+    pub vulns: Option<VulnSummary>,
+    pub microcode: InvField<Arc<str>>,
+    pub rapl: Option<RaplState>,
+}
+
+/// One zram device (E12-011).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZramDetail {
+    pub name: Arc<str>,
+    pub disksize: u64,
+    pub algorithm: Option<Arc<str>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ZswapInfo {
+    pub enabled: bool,
+    pub compressor: Option<Arc<str>>,
+    pub max_pool_percent: Option<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwapKindModel {
+    Partition,
+    File,
+    Zram,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SwapDevice {
+    pub name: Arc<str>,
+    pub kind: SwapKindModel,
+    pub size_bytes: u64,
+    pub used_bytes: u64,
+    pub priority: i32,
+}
+
+/// Memory details (E12-011).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryDetails {
+    pub zram: Arc<[ZramDetail]>,
+    pub zswap: InvField<Option<ZswapInfo>>,
+    pub swaps: InvField<Arc<[SwapDevice]>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SmartKind {
+    Ata,
+    Nvme,
+    NeedsFallback,
+    #[default]
+    None,
+}
+
+/// One ATA SMART attribute. Texts as E12-021.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SmartAttr {
+    pub id: u8,
+    pub name: Arc<str>,
+    pub value: i64,
+    pub normalized: i32,
+    pub threshold: i32,
+    pub worst: i32,
+    pub prefail: bool,
+    pub online: bool,
+    pub assessment: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SmartData {
+    pub updated_s: i64,
+    pub health: InvField<Arc<str>>,
+    pub power_on_s: InvField<u64>,
+    pub selftest: InvField<Arc<str>>,
+    pub ata: Arc<[SmartAttr]>,
+    pub nvme: Arc<[(Arc<str>, Arc<str>)]>,
+}
+
+/// A process that blocks an eject. The reducer fills `app` from the process grouping (E12-022).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blocker {
+    pub key: ProcessKey,
+    pub name: Arc<str>,
+    pub app: Option<Arc<str>>,
+    pub paths: Arc<[Arc<str>]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EjectState {
+    Running,
+    Blocked {
+        blockers: Arc<[Blocker]>,
+        others_may_hold: bool,
+    },
+    Done,
+    Failed(Arc<str>),
+}
+
+/// One PERF-050 Partitions table row. tl-collect `parse/partitions.rs` (E04-031) builds it
+/// (R-140 item 4).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartitionRow {
+    pub name: Arc<str>,
+    pub start_bytes: u64,
+    pub size_bytes: u64,
+    pub holder: Option<Arc<str>>,
+    pub mount: Option<Arc<str>>,
+    pub extra_mounts: Arc<[Arc<str>]>,
+    pub label: Option<Arc<str>>,
+    pub fs_type: Option<Arc<str>>,
+    pub usage_pct: InvField<f32>,
+    pub flags: Arc<[Arc<str>]>,
+    pub type_name: Arc<str>,
+    pub read_only: bool,
+    pub unallocated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartitionTable {
+    /// "GPT", "MBR" or "none".
+    pub kind: Arc<str>,
+    /// Ordered by `start_bytes`.
+    pub rows: Arc<[PartitionRow]>,
+}
+
+/// Disk details. `Default` lets a source fill only its own fields; the reducer merges by field.
+#[derive(Clone, Debug, Default)]
+pub struct DiskDetails {
+    /// PERF-049 "Type" row: the E04-021 DiskKind name (sysfs source).
+    pub kind: Arc<str>,
+    /// sysfs removable flag (sysfs source).
+    pub removable: bool,
+    pub model: InvField<Arc<str>>,
+    /// Shown on screen only. Never log it.
+    pub wwn: InvField<Arc<str>>,
+    /// Shown on screen only. Never log it.
+    pub serial: InvField<Arc<str>>,
+    pub interface: InvField<Arc<str>>,
+    pub rotation_rpm: Option<u32>,
+    /// Block scheduler name.
+    pub scheduler: InvField<Arc<str>>,
+    pub smart: SmartKind,
+    /// `None` when never requested, `WarmingUp` while reading.
+    pub smart_data: Option<InvField<Arc<SmartData>>>,
+    pub smart_temp_c: Option<f32>,
+    pub ejectable: bool,
+    pub can_power_off: bool,
+    /// The UI's eject sequence and state. `None` is idle.
+    pub eject: Option<(u64, EjectState)>,
+    /// R-140 item 4. `None` until the table is read.
+    pub partitions: Option<Arc<PartitionTable>>,
+    pub formatted_bytes: InvField<u64>,
+    pub used_bytes: InvField<u64>,
+    pub free_bytes: InvField<u64>,
+    pub system_disk: InvField<bool>,
+    pub swap: InvField<bool>,
+}
+
+/// Wi-Fi link (R-139 field names). Values NetworkManager or nl80211 may not give are `Option`:
+/// missing is never zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WifiInfo {
+    pub ssid: Arc<str>,
+    /// nl80211 only.
+    pub signal_dbm: Option<i32>,
+    pub signal_pct: u8,
+    /// nl80211 only.
+    pub rx_mbps: Option<f32>,
+    pub tx_mbps: Option<f32>,
+    pub freq_mhz: u32,
+    pub channel: Option<u16>,
+    pub security: Arc<str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NetDetails {
+    /// PERF-054 "Type": Ethernet, Wi-Fi, Virtual, USB network, Bridge, Cellular, Tunnel, VPN or
+    /// Other.
+    pub type_label: Arc<str>,
+    /// NetworkManager active connection Id, shown under the adapter name (PERF-054).
+    pub connection: Option<Arc<str>>,
+    pub adapter_name: InvField<Arc<str>>,
+    pub driver: InvField<Arc<str>>,
+    /// Shown on screen only. Never log it.
+    pub mac: InvField<Arc<str>>,
+    pub ifindex: u32,
+    pub link_speed_mbps: InvField<u32>,
+    pub state: LinkState,
+    pub addresses: Arc<[Arc<str>]>,
+    pub kind: NetKind,
+    pub wifi: Option<WifiInfo>,
+}
+
+/// Battery details (E12-023, history from E12-029).
+#[derive(Clone, Debug)]
+pub struct BatteryDetails {
+    pub kind: Arc<str>,
+    pub vendor: InvField<Arc<str>>,
+    pub model: InvField<Arc<str>>,
+    /// Shown on screen only. Never log it.
+    pub serial: InvField<Arc<str>>,
+    pub native_path: Arc<str>,
+    pub percentage: InvField<f32>,
+    pub energy_wh: InvField<f32>,
+    pub energy_rate_w: InvField<f32>,
+    pub voltage_v: InvField<f32>,
+    /// "Charging", "Discharging", "Empty", "Fully charged", "Pending charge",
+    /// "Pending discharge" or "Unknown".
+    pub state: Arc<str>,
+    pub time_to_full_s: InvField<i64>,
+    pub time_to_empty_s: InvField<i64>,
+    pub charge_cycles: InvField<u32>,
+    pub technology: Arc<str>,
+    pub capacity_pct: InvField<f32>,
+    pub energy_empty_wh: InvField<f32>,
+    pub energy_full_wh: InvField<f32>,
+    pub energy_full_design_wh: InvField<f32>,
+    pub voltage_min_design_v: InvField<f32>,
+    pub voltage_max_design_v: InvField<f32>,
+    pub power_supply: bool,
+    /// (enabled, start percent, end percent).
+    pub charge_threshold: Option<(bool, u8, u8)>,
+    pub temperature_c: InvField<f32>,
+    /// (unix seconds, percent) pairs (E12-029).
+    pub history: Option<Arc<[(i64, f32)]>>,
+}
+
+/// The device details component (R-139 item 6; PERF-036 to PERF-046, PERF-050 to PERF-052,
+/// PERF-078).
+#[derive(Clone, Debug, Default)]
+pub struct DeviceDetailsSnapshot {
+    pub header: ComponentHeader,
+    pub cpu: Arc<CpuStaticInfo>,
+    pub memory: Arc<MemoryDetails>,
+    /// Sorted by `DeviceIdx`.
+    pub disks: Arc<[(DeviceIdx, DiskDetails)]>,
+    pub nets: Arc<[(DeviceIdx, NetDetails)]>,
+    pub batteries: Arc<[(DeviceIdx, BatteryDetails)]>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,5 +1641,162 @@ mod tests {
                 Impact::NotMeasured,
             ]
         );
+    }
+
+    #[test]
+    fn inventory_default_warming_up() {
+        let inv = InventorySnapshot::default();
+        let w = Validity::WarmingUp;
+        assert_eq!(inv.header.validity, w);
+        let os = &inv.os;
+        for v in [
+            os.name.validity,
+            os.version.validity,
+            os.build.validity,
+            os.kernel.validity,
+            os.kernel_version.validity,
+            os.architecture.validity,
+            os.install_date_s.validity,
+            os.package_manager.validity,
+            os.machine_id.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        assert!(os.logo_icon.is_none());
+        let p = &inv.processor;
+        for v in [
+            p.name.validity,
+            p.vendor.validity,
+            p.architecture.validity,
+            p.family.validity,
+            p.model.validity,
+            p.stepping.validity,
+            p.cores.validity,
+            p.logical.validity,
+            p.base_mhz.validity,
+            p.max_mhz.validity,
+            p.microcode.validity,
+            p.virtualization.validity,
+            p.avx512.validity,
+            p.bits.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        let s = &inv.system;
+        for v in [
+            s.pretty_hostname.validity,
+            s.static_hostname.validity,
+            s.user_name.validity,
+            s.boot_time_s.validity,
+            s.desktop.validity,
+            s.windowing_system.validity,
+            s.session_type.validity,
+            s.virtual_terminal.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        assert!(s.domain.is_none());
+        let m = &inv.memory;
+        for v in [
+            m.total_bytes.validity,
+            m.page_size.validity,
+            m.huge_page_size.validity,
+            m.swap_total_bytes.validity,
+            m.zram_bytes.validity,
+            m.peak_committed_bytes.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        let f = &inv.firmware;
+        for v in [
+            f.firmware_type.validity,
+            f.bios_vendor.validity,
+            f.bios_version.validity,
+            f.bios_date.validity,
+            f.bios_release.validity,
+            f.secure_boot.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        let b = &inv.board;
+        for v in [
+            b.manufacturer.validity,
+            b.product.validity,
+            b.version.validity,
+            b.system_vendor.validity,
+            b.system_product.validity,
+            b.chassis_type.validity,
+            b.serial.validity,
+        ] {
+            assert_eq!(v, w);
+        }
+        assert!(inv.modules.is_empty());
+        assert!(inv.disks.is_empty());
+        assert!(inv.graphics.is_empty());
+        assert!(inv.network.is_empty());
+        assert_eq!(inv.public_ip, PublicIpState::NotFetched);
+
+        // List element defaults also start as WarmingUp.
+        let d = DiskDrive::default();
+        assert_eq!(d.serial.validity, w);
+        assert!(d.device.is_none() && d.volumes.is_empty());
+        let g = GraphicsAdapter::default();
+        assert_eq!(g.dedicated_bytes.validity, w);
+        assert!(g.displays.is_empty());
+        let n = NetworkAdapter::default();
+        assert_eq!(n.mac.validity, w);
+        assert!(n.ip_addresses.is_empty());
+    }
+
+    #[test]
+    fn device_details_default_warming_up() {
+        let dd = DeviceDetailsSnapshot::default();
+        assert_eq!(dd.header.validity, Validity::WarmingUp);
+        assert!(dd.disks.is_empty());
+        assert!(dd.nets.is_empty());
+        assert!(dd.batteries.is_empty());
+        assert_eq!(dd.cpu.virtualization.validity, Validity::WarmingUp);
+        assert_eq!(dd.cpu.virtualization.value, VirtState::NotSupported);
+        assert_eq!(dd.memory.swaps.validity, Validity::WarmingUp);
+        assert!(dd.memory.zram.is_empty());
+    }
+
+    #[test]
+    fn disk_details_eject_sequence() {
+        let idle = DiskDetails::default();
+        assert!(idle.eject.is_none());
+        assert_eq!(idle.smart, SmartKind::None);
+        assert!(idle.smart_data.is_none() && idle.partitions.is_none());
+        let done = DiskDetails {
+            eject: Some((7, EjectState::Done)),
+            ..DiskDetails::default()
+        };
+        assert_eq!(done.eject, Some((7, EjectState::Done)));
+    }
+
+    #[test]
+    fn memory_module_has_no_serial() {
+        // Exhaustive pattern: adding a field breaks the build and forces a D-007 review.
+        let m = MemoryModule::default();
+        let MemoryModule {
+            slot,
+            capacity_bytes,
+            speed_mts,
+            kind,
+            form_factor,
+            manufacturer,
+            part_number,
+        } = m;
+        for v in [
+            slot.validity,
+            capacity_bytes.validity,
+            speed_mts.validity,
+            kind.validity,
+            form_factor.validity,
+            manufacturer.validity,
+            part_number.validity,
+        ] {
+            assert_eq!(v, Validity::WarmingUp);
+        }
     }
 }
