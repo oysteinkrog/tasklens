@@ -5,8 +5,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tl_model::units::{
     AddrSide, LocalDateTime, NetUnit, bytes, bytes_of, cache_size, ceil_125, ceil_pow2, celsius,
     count, cpu_time, date_time, mhz, mhz_pair, mib_whole, net_rate, percent, percent_2dp,
-    rate_iec_auto, rate_mib_fixed, response_ms, short_age, socket_addr, start_time, uptime,
-    watts, watts_pair,
+    rate_iec_auto, rate_mib_fixed, response_ms, short_age, socket_addr, start_time, uptime, watts,
+    watts_pair,
 };
 
 fn fmt(f: impl FnOnce(&mut String)) -> String {
@@ -315,7 +315,13 @@ fn socket_addr_forms() {
         (any4, 22, None, AddrSide::Local, "0.0.0.0:22"),
         (any4, 0, None, AddrSide::Local, "0.0.0.0:*"),
         (any6, 0, None, AddrSide::Local, "[::]:*"),
-        (link, 5353, Some("eno1"), AddrSide::Local, "[fe80::1%eno1]:5353"),
+        (
+            link,
+            5353,
+            Some("eno1"),
+            AddrSide::Local,
+            "[fe80::1%eno1]:5353",
+        ),
         (any4, 0, None, AddrSide::Foreign, "*:*"),
         (any6, 0, None, AddrSide::Foreign, "*:*"),
         (web, 443, None, AddrSide::Foreign, "93.184.216.34:443"),

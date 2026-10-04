@@ -341,7 +341,7 @@ pub fn watts_pair(out: &mut String, used: f32, limit: f32) {
 pub fn cache_size(out: &mut String, kib: u64) {
     let _ = if kib < 1024 {
         write!(out, "{kib} KiB")
-    } else if kib % 1024 == 0 {
+    } else if kib.is_multiple_of(1024) {
         write!(out, "{} MiB", kib / 1024)
     } else {
         // Precision loss in the cast is far below the one printed decimal.
