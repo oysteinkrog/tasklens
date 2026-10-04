@@ -1748,6 +1748,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: 8hz.6 report [verified]; ADR-005 command rules [inferred].
 - Edits: bead 8hz.6 follow-up (`crates/tl-engine/src/source.rs`).
 
+### R-277 NVML sample time limit in the probe test is 100 ms
+- Question: E13 (`tasklens-ndy.5`) asks `real_sample_under_50ms` to finish one NVML device sample in 50 ms. On the owner's RTX 5070 Ti each `pcie_throughput` call blocks about 21 ms because NVML measures over a 20 ms window, so RX plus TX take about 42 ms, and a full sample takes 47 to 75 ms. Leader decision, 2026-10-05.
+- Resolution: the test limit becomes 100 ms, and the probe keeps reading RX and TX in every sample, one after the other. The time is spent waiting inside NVML, not using CPU, the probe is its own process, and the 500 ms sample deadline keeps a wide margin. No extra threads. If the perf pass shows the probe's sample time matters (for example at a 250 ms GPU period), revisit by reading PCIe throughput every other sample.
+- Basis: per-call timings measured by the ndy.5 agent on the owner machine [verified].
+- Edits: bead ndy.5 test `real_sample_under_50ms` (renamed `real_sample_under_100ms`).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
