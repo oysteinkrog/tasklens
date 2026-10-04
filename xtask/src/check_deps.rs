@@ -150,7 +150,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "thiserror",
         ],
     ),
-    ("tl-tray", &["tl-model", "ksni"]),
+    ("tl-tray", &["tl-model", "ksni", "async-channel"]),
     (
         "tl-helper",
         &[
