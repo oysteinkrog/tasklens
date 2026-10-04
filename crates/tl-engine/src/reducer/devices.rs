@@ -168,13 +168,16 @@ impl Catalog {
                 }
             }
         }
-        for i in 0..self.entries.len() {
-            let entry = &mut self.entries[i];
-            if seen[i] || !entry.present || !covered(list.kinds, &entry.identity) {
+        let mut removed = false;
+        for (entry, &seen) in self.entries.iter_mut().zip(&seen) {
+            if seen || !entry.present || !covered(list.kinds, &entry.identity) {
                 continue;
             }
             entry.present = false;
             changes.push((entry.idx, DeviceChange::Removed));
+            removed = true;
+        }
+        if removed {
             self.touch();
         }
         Ok(changes)
