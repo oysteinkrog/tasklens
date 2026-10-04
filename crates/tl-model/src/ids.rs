@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::table::UnitRef;
 use crate::time::BootId;
 
 /// Identity of one process for one boot. PID alone is never used as identity.
@@ -146,13 +147,17 @@ pub struct GroupKey(pub u64);
 
 /// One row of the process table (ADR-009, R-141 item 3, R-155 item 2).
 ///
-/// Not `Copy`: E03-072 appends `Unit(UnitRef)`, which holds an `Arc<str>`. Callers clone it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+/// Not `Copy`: `Unit(UnitRef)` holds an `Arc<str>`. Callers clone it.
+///
+/// No serde derive: `Arc<str>` needs serde's `rc` feature (ADR-002). `NodeId` is never written
+/// to disk or sent to the helper.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum NodeId {
     Group(GroupKey),
     Process(ProcessKey),
     KernelThreads,
     Pseudo(PseudoKind),
+    Unit(UnitRef),
 }
 
 /// Pseudo rows of the process table (PROC-012).
@@ -870,6 +875,26 @@ mod tests {
         for (i, node) in nodes.iter().enumerate() {
             assert_eq!(map.get(node), Some(&i));
         }
+    }
+
+    #[test]
+    fn node_id_unit_manager_distinguishes() {
+        use crate::table::Manager;
+
+        let system = NodeId::Unit(UnitRef {
+            manager: Manager::System,
+            name: "sshd.service".into(),
+        });
+        let user = NodeId::Unit(UnitRef {
+            manager: Manager::User,
+            name: "sshd.service".into(),
+        });
+        let mut map = HashMap::new();
+        map.insert(system.clone(), 1);
+        map.insert(user.clone(), 2);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&system), Some(&1));
+        assert_eq!(map.get(&user), Some(&2));
     }
 }
 

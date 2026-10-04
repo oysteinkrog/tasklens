@@ -11,7 +11,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::actions::{CgroupRef, SchedPolicy};
 use crate::ids::{GroupKey, NodeId, ProcessKey};
+use crate::system::CpuSet;
+use crate::table::UnitRef;
+use crate::time::TimeNs;
 use crate::validity::FieldValidity;
 
 /// Text of one process. Shared by every record of that process until a field changes.
@@ -220,6 +224,149 @@ impl Coverage {
     }
 }
 
+/// P1 extra-column values, index aligned with `ProcessSnapshot.records` (same length, same
+/// order) (R-141 item 1).
+///
+/// Privacy: `exe_path` is user data. Never log it above debug level (ADR-015).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcessExtras {
+    pub cpu_kernel_pct: f32,
+    pub cpu_user_pct: f32,
+    pub cpu_relative_pct: f32,
+    pub utime_ticks: u64,
+    pub stime_ticks: u64,
+    /// start_ticks × 1e9 / ticks_per_sec, filled by E05-A1.
+    pub start_boot_ns: u64,
+    pub rss_peak_bytes: u64,
+    pub rss_shared_bytes: u64,
+    pub commit_bytes: u64,
+    pub vsize_bytes: u64,
+    pub vsize_peak_bytes: u64,
+    pub page_faults: u64,
+    pub page_faults_delta: u64,
+    pub major_faults: u64,
+    pub policy: SchedPolicy,
+    pub rt_prio: u8,
+    pub affinity: CpuSet,
+    pub handles: Option<u32>,
+    pub exe_name: Arc<str>,
+    pub exe_path: Arc<str>,
+    pub exe_deleted: bool,
+    pub unit: Option<UnitRef>,
+    pub state_letter: u8,
+    pub frozen: bool,
+    pub disk_read_bps: f32,
+    pub disk_write_raw_bps: f32,
+    pub flag_since_ns: TimeNs,
+}
+
+/// One app cgroup sample (R-141 item 2). Filled by the tl-collect sweep (E05-A1).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AppCgroupSample {
+    pub group: GroupKey,
+    pub anon_bytes: u64,
+    pub swap_bytes: u64,
+    pub io_read_bps: f32,
+    pub io_write_bps: f32,
+    pub rios: u64,
+    pub wios: u64,
+    pub pids: u32,
+    pub cgroup: CgroupRef,
+    pub validity: FieldValidity,
+}
+
+/// P2 per-process column values, filled only for `Demand.detail_keys` (ADR-008 visible-rows
+/// rule) by E05-035. The reducer (E09-030) fills `power_w` and `power_trend_w` for every row
+/// (R-163 items 2 and 9). `None` means the value was not read.
+///
+/// Privacy: `security_label` and `cwd` are user data. Never log them above debug level (ADR-015).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ProcessExtrasP2 {
+    /// Some for a filled entry, None for a row outside detail_keys.
+    pub key: Option<ProcessKey>,
+    /// statx mtime of the exe.
+    pub exe_mtime_s: Option<i64>,
+    /// statx size of the exe.
+    pub exe_size_bytes: Option<u64>,
+    /// 32 or 64.
+    pub elf_class: Option<u8>,
+    /// ELF e_machine.
+    pub elf_machine: Option<u16>,
+    /// /proc/<pid>/sessionid.
+    pub session_id: Option<u32>,
+    /// /proc/<pid>/attr/current.
+    pub security_label: Option<Arc<str>>,
+    /// PROC-028 elevation rule.
+    pub elevated: Option<bool>,
+    /// PROC-028 sandbox rule.
+    pub sandbox: Option<Arc<str>>,
+    pub sched_policy_text: Option<Arc<str>>,
+    pub oom_score: Option<i32>,
+    pub oom_score_adj: Option<i16>,
+    /// Decoded tty_nr.
+    pub tty: Option<Arc<str>>,
+    pub cwd: Option<Arc<str>>,
+    /// Sum over task/*/status.
+    pub ctx_switches_voluntary: Option<u64>,
+    /// Sum over task/*/status.
+    pub ctx_switches_involuntary: Option<u64>,
+    /// PROC-034 estimate (E09-030).
+    pub power_w: Option<f32>,
+    /// 2-minute average of power_w (E09-030).
+    pub power_trend_w: Option<f32>,
+    /// Change since the previous fill of this key.
+    pub ctx_switches_delta: Option<u64>,
+    /// Owning package (E05-034 index), PROC-027.
+    pub package: Option<Arc<PackageInfo>>,
+    /// PROC-027 Package status column.
+    pub package_status: Option<PackageStatus>,
+}
+
+/// Owning package of an executable (R-163 item 1, PROC-027), from the E05-034 index.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackageInfo {
+    pub name: Arc<str>,
+    pub version: Arc<str>,
+    pub description: Option<Arc<str>>,
+    pub packager: Option<Arc<str>>,
+    pub build_date_s: Option<i64>,
+    pub url: Option<Arc<str>>,
+}
+
+/// PROC-027 Package status. `PackagedModified` only after a `pacman -Qkk` check (PROC-078).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PackageStatus {
+    Packaged,
+    PackagedModified,
+    NotPackaged,
+    DeletedUpgraded,
+    Flatpak,
+    Snap,
+    AppImage,
+    Wine,
+}
+
+/// One group of the low-memory sweep (R-150 item 2).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LowMemGroup {
+    pub group: GroupKey,
+    pub name: Arc<str>,
+    pub process_count: u32,
+    pub uid: u32,
+    pub cgroup: CgroupRef,
+    pub memory_current: u64,
+}
+
+/// Low-memory sweep data (R-150 item 2), moved from E32's types.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LowMemoryInfo {
+    pub groups: Arc<[LowMemGroup]>,
+    pub mem_total: u64,
+    pub mem_available: u64,
+    pub psi_full_pct: Option<f32>,
+    pub critical: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,5 +479,56 @@ mod tests {
         assert_eq!(a.key(), b.key());
         assert_ne!(GroupKind::Background.key(), a.key());
         assert_ne!(GroupKind::Background.key(), b.key());
+    }
+
+    #[test]
+    fn extras_p2_default_all_none() {
+        let p2 = ProcessExtrasP2::default();
+        assert!(p2.key.is_none());
+        assert!(p2.exe_mtime_s.is_none());
+        assert!(p2.exe_size_bytes.is_none());
+        assert!(p2.elf_class.is_none());
+        assert!(p2.elf_machine.is_none());
+        assert!(p2.session_id.is_none());
+        assert!(p2.security_label.is_none());
+        assert!(p2.elevated.is_none());
+        assert!(p2.sandbox.is_none());
+        assert!(p2.sched_policy_text.is_none());
+        assert!(p2.oom_score.is_none());
+        assert!(p2.oom_score_adj.is_none());
+        assert!(p2.tty.is_none());
+        assert!(p2.cwd.is_none());
+        assert!(p2.ctx_switches_voluntary.is_none());
+        assert!(p2.ctx_switches_involuntary.is_none());
+        assert!(p2.power_w.is_none());
+        assert!(p2.power_trend_w.is_none());
+        assert!(p2.ctx_switches_delta.is_none());
+        assert!(p2.package.is_none());
+        assert!(p2.package_status.is_none());
+    }
+
+    #[test]
+    fn low_memory_info_clone() {
+        let info = LowMemoryInfo {
+            groups: Arc::from([LowMemGroup {
+                group: GroupKey(3),
+                name: Arc::from("firefox"),
+                process_count: 12,
+                uid: 1000,
+                cgroup: CgroupRef {
+                    rel_path: Arc::from("user.slice/app-firefox.scope"),
+                    cgroup_id: 4242,
+                },
+                memory_current: 1 << 30,
+            }]),
+            mem_total: 16 << 30,
+            mem_available: 512 << 20,
+            psi_full_pct: Some(12.5),
+            critical: true,
+        };
+        let copy = info.clone();
+        assert_eq!(copy, info);
+        // The group slice is shared, not copied.
+        assert!(Arc::ptr_eq(&copy.groups, &info.groups));
     }
 }

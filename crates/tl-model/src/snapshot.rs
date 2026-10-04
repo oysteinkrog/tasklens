@@ -10,7 +10,9 @@ use crate::actions::{Family, FourTuple, Proto};
 use crate::devices::NetKind;
 use crate::health::ManagerState;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
-use crate::process::{Coverage, ProcessRecord};
+use crate::process::{
+    AppCgroupSample, Coverage, LowMemoryInfo, ProcessExtras, ProcessExtrasP2, ProcessRecord,
+};
 use crate::series::SeriesView;
 use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, NetTotals,
@@ -136,6 +138,14 @@ pub struct ProcessSnapshot {
     /// Sorted by `ProcessKey`.
     pub records: Arc<[ProcessRecord]>,
     pub coverage: Coverage,
+    /// Index aligned with `records` (R-141 item 1).
+    pub extras: Arc<[ProcessExtras]>,
+    /// Sorted by `GroupKey` (R-141 item 2).
+    pub apps: Arc<[AppCgroupSample]>,
+    /// Index aligned with `records`. Default entries outside `detail_keys` (R-163 item 2).
+    pub extras_p2: Arc<[ProcessExtrasP2]>,
+    /// Some only in `EngineMode::LowMemory` (R-150 item 2).
+    pub low_memory: Option<Arc<LowMemoryInfo>>,
 }
 
 impl ProcessSnapshot {
@@ -1441,6 +1451,63 @@ mod tests {
         };
         assert_eq!(snap.get(key(20, 3)).map(|r| r.key), Some(key(20, 3)));
         assert!(snap.get(key(25, 4)).is_none());
+    }
+
+    #[test]
+    fn process_snapshot_default_extras_empty() {
+        let snap = ProcessSnapshot::default();
+        assert!(snap.extras.is_empty());
+        assert!(snap.apps.is_empty());
+        assert!(snap.extras_p2.is_empty());
+        assert!(snap.low_memory.is_none());
+    }
+
+    fn extras(start_ticks: u64) -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            // 100 ticks per second, so one tick is 10_000_000 ns.
+            start_boot_ns: start_ticks * 10_000_000,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: crate::actions::SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: crate::system::CpuSet::empty(),
+            handles: None,
+            exe_name: Arc::from("x"),
+            exe_path: Arc::from("/usr/bin/x"),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'R',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    #[test]
+    fn extras_index_aligned() {
+        let keys = [key(10, 5), key(20, 3), key(30, 9)];
+        let snap = ProcessSnapshot {
+            records: keys.iter().map(|&k| record(k)).collect(),
+            extras: keys.iter().map(|k| extras(k.start_ticks)).collect(),
+            ..ProcessSnapshot::default()
+        };
+        assert_eq!(snap.records.len(), 3);
+        assert_eq!(snap.extras.len(), snap.records.len());
+        for (r, e) in snap.records.iter().zip(snap.extras.iter()) {
+            assert_eq!(e.start_boot_ns, r.key.start_ticks * 10_000_000);
+        }
     }
 
     #[test]
