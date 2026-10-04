@@ -307,7 +307,10 @@ mod tests {
         for bad in [&b""[..], b" \n", b"abc", b"12x", b"1.5"] {
             assert!(matches!(
                 parse_millidegrees(bad),
-                Err(CollectError::Parse { file: "hwmon", what: "value" })
+                Err(CollectError::Parse {
+                    file: "hwmon",
+                    what: "value"
+                })
             ));
             assert!(parse_rpm(bad).is_err());
             assert!(parse_pwm_pct(bad).is_err());

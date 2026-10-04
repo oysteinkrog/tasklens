@@ -22,14 +22,29 @@ fn render(fixture: &str, chips: &[HwmonChip]) -> String {
     let base = common::fixture_dir(fixture);
     let mut text = String::new();
     for chip in chips {
-        let dir = chip.dir.strip_prefix(&base).expect("chip dir under fixture");
-        writeln!(text, "hwmon{} {:?} dir={}", chip.index, chip.name, dir.display()).unwrap();
+        let dir = chip
+            .dir
+            .strip_prefix(&base)
+            .expect("chip dir under fixture");
+        writeln!(
+            text,
+            "hwmon{} {:?} dir={}",
+            chip.index,
+            chip.name,
+            dir.display()
+        )
+        .unwrap();
         writeln!(text, "  device={:?}", chip.device_path).unwrap();
         for t in &chip.temps {
             writeln!(text, "  temp{} label={:?}", t.n, t.label).unwrap();
         }
         for f in &chip.fans {
-            writeln!(text, "  fan{} label={:?} has_max={}", f.n, f.label, f.has_max).unwrap();
+            writeln!(
+                text,
+                "  fan{} label={:?} has_max={}",
+                f.n, f.label, f.has_max
+            )
+            .unwrap();
         }
         for p in &chip.pwms {
             writeln!(text, "  pwm{} has_enable={}", p.n, p.has_enable).unwrap();
@@ -58,7 +73,11 @@ fn owner_desktop_cpu_temp_is_tctl() {
     let chips = chips("owner-desktop");
     let (i, n) = cpu_temp_input(&chips).expect("cpu temp");
     assert_eq!(&*chips[i].name, "k10temp");
-    let temp = chips[i].temps.iter().find(|t| t.n == n).expect("temp input");
+    let temp = chips[i]
+        .temps
+        .iter()
+        .find(|t| t.n == n)
+        .expect("temp input");
     assert_eq!(temp.label.as_deref(), Some("Tctl"));
 }
 
@@ -83,7 +102,10 @@ fn default_pairing_single_fan_only() {
     let single = chips.iter().find(|c| &*c.name == "single").expect("single");
     assert_eq!(default_temp_pair(single, 1), Some(1));
     assert_eq!(default_temp_pair(single, 2), None);
-    let nct = chips.iter().find(|c| &*c.name == "nct6797").expect("nct6797");
+    let nct = chips
+        .iter()
+        .find(|c| &*c.name == "nct6797")
+        .expect("nct6797");
     assert_eq!(nct.fans.len(), 2);
     assert_eq!(nct.fans[1].label, None);
     assert_eq!(nct.pwms.len(), 1);
