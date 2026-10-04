@@ -1,0 +1,18 @@
+//! One parser per system file (ADR-016, R-135). Each takes `&[u8]` and a reusable output.
+pub mod block;
+pub mod cpufreq;
+pub mod diskstats;
+pub mod filenr;
+pub mod hwmon;
+pub mod loadavg;
+pub mod meminfo;
+pub mod mountinfo;
+pub mod netdev;
+pub mod netif;
+pub mod rapl;
+pub mod stat;
+pub mod swaps;
+pub mod topology;
+pub mod vmstat;
+pub mod zram;
+pub mod zswap;
