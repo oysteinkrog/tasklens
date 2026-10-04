@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
+use crate::actions::{Family, FourTuple, Proto};
 use crate::health::ManagerState;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{Coverage, ProcessRecord};
@@ -11,7 +14,7 @@ use crate::series::SeriesView;
 use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, MemoryTotals, NetTotals, SensorReading,
 };
-use crate::table::{Manager, SysRow, Total, UnitRef, UnitType};
+use crate::table::{Manager, StartupRef, SysRow, Total, UnitRef, UnitType};
 use crate::time::TimeNs;
 use crate::validity::Validity;
 
@@ -465,6 +468,260 @@ impl Default for ServicesSnapshot {
     }
 }
 
+// ---- Startup Apps ----
+
+/// Startup Apps Status column (SYS-020).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StartupStatus {
+    Enabled,
+    Disabled,
+    Masked,
+    NotInThisDesktop,
+    MissingProgram,
+}
+
+impl StartupStatus {
+    pub const fn label(self) -> &'static str {
+        match self {
+            StartupStatus::Enabled => "Enabled",
+            StartupStatus::Disabled => "Disabled",
+            StartupStatus::Masked => "Masked",
+            StartupStatus::NotInThisDesktop => "Not in this desktop",
+            StartupStatus::MissingProgram => "Missing program",
+        }
+    }
+}
+
+/// Startup Apps Type column (SYS-020).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StartupKind {
+    AutostartUser,
+    AutostartSystem,
+    AutostartSystemOverridden,
+    UserUnit,
+    PlasmaPreStartup,
+    PlasmaLogout,
+}
+
+impl StartupKind {
+    pub const fn label(self) -> &'static str {
+        match self {
+            StartupKind::AutostartUser => "Autostart (user)",
+            StartupKind::AutostartSystem => "Autostart (system)",
+            StartupKind::AutostartSystemOverridden => "Autostart (system, overridden)",
+            StartupKind::UserUnit => "systemd user unit",
+            StartupKind::PlasmaPreStartup => "Plasma pre-startup script",
+            StartupKind::PlasmaLogout => "Plasma logout script",
+        }
+    }
+}
+
+/// Startup impact (SYS-021). Ascending sort follows the declared order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub enum Impact {
+    High,
+    Medium,
+    Low,
+    /// The entry is disabled.
+    None,
+    /// The entry did not run through systemd this session.
+    NotMeasured,
+}
+
+impl Impact {
+    /// SYS-021: High at 1000 ms or more, Medium 300..=999 ms, Low under 300 ms.
+    pub const fn from_activation_ms(ms: u64) -> Impact {
+        if ms >= 1000 {
+            Impact::High
+        } else if ms >= 300 {
+            Impact::Medium
+        } else {
+            Impact::Low
+        }
+    }
+}
+
+/// The raw numbers behind the impact tooltip (SYS-021).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ImpactDetail {
+    /// ActiveEnterTimestampMonotonic minus InactiveExitTimestampMonotonic.
+    pub activation_ms: u64,
+    /// InactiveExitTimestampMonotonic minus the Manager's UserspaceTimestampMonotonic.
+    pub started_after_login_ms: u64,
+    /// CPUUsageNSec.
+    pub cpu_nsec: Option<u64>,
+}
+
+/// One Startup Apps row (UI-SYS-042). `command` can hold secrets: never log it above debug
+/// level (ADR-015).
+#[derive(Clone, Debug)]
+pub struct StartupEntry {
+    pub id: StartupRef,
+    pub name: Arc<str>,
+    pub icon_path: Option<Arc<str>>,
+    /// "name version", "User", or `None` (blank).
+    pub publisher: Option<Arc<str>>,
+    pub status: StartupStatus,
+    pub impact: Impact,
+    pub impact_detail: Option<ImpactDetail>,
+    pub kind: StartupKind,
+    /// Directory path.
+    pub location: Arc<str>,
+    /// Exec, ExecStart or the script path.
+    pub command: Arc<str>,
+    pub source_path: Arc<str>,
+    pub can_toggle: bool,
+    pub can_delete: bool,
+    pub can_run: bool,
+    pub overridden_by_user: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct StartupCounts {
+    pub total: u32,
+    pub enabled: u32,
+    pub disabled: u32,
+}
+
+/// The Startup Apps tab component (ADR-003). Filled by the Startup worker, read by the UI.
+#[derive(Clone, Debug, Default)]
+pub struct StartupSnapshot {
+    pub header: ComponentHeader,
+    pub rows: Arc<[SysRow]>,
+    pub query_generation: u64,
+    pub entries: Arc<[StartupEntry]>,
+    pub counts: StartupCounts,
+}
+
+// ---- Connections ----
+
+/// Connection State column (SYS-029). UNCONNECTED and CONNECTED are for UDP, the rest for TCP.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ConnState {
+    Listening,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+    Closed,
+    Unknown,
+    Unconnected,
+    Connected,
+}
+
+impl ConnState {
+    /// Labels (SYS-029): LISTENING, SYN-SENT, SYN-RECEIVED, ESTABLISHED, FIN-WAIT-1, FIN-WAIT-2,
+    /// CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT, CLOSED, UNKNOWN, UNCONNECTED, CONNECTED.
+    pub const fn label(self) -> &'static str {
+        match self {
+            ConnState::Listening => "LISTENING",
+            ConnState::SynSent => "SYN-SENT",
+            ConnState::SynReceived => "SYN-RECEIVED",
+            ConnState::Established => "ESTABLISHED",
+            ConnState::FinWait1 => "FIN-WAIT-1",
+            ConnState::FinWait2 => "FIN-WAIT-2",
+            ConnState::CloseWait => "CLOSE-WAIT",
+            ConnState::Closing => "CLOSING",
+            ConnState::LastAck => "LAST-ACK",
+            ConnState::TimeWait => "TIME-WAIT",
+            ConnState::Closed => "CLOSED",
+            ConnState::Unknown => "UNKNOWN",
+            ConnState::Unconnected => "UNCONNECTED",
+            ConnState::Connected => "CONNECTED",
+        }
+    }
+
+    /// Kernel TCP state number (include/net/tcp_states.h): 1 ESTABLISHED, 2 SYN_SENT, 3 SYN_RECV,
+    /// 4 FIN_WAIT1, 5 FIN_WAIT2, 6 TIME_WAIT, 7 CLOSE, 8 CLOSE_WAIT, 9 LAST_ACK, 10 LISTEN,
+    /// 11 CLOSING, 12 NEW_SYN_RECV (-> SynReceived); anything else -> Unknown.
+    pub const fn from_tcp_state(n: u8) -> ConnState {
+        match n {
+            1 => ConnState::Established,
+            2 => ConnState::SynSent,
+            3 | 12 => ConnState::SynReceived,
+            4 => ConnState::FinWait1,
+            5 => ConnState::FinWait2,
+            6 => ConnState::TimeWait,
+            7 => ConnState::Closed,
+            8 => ConnState::CloseWait,
+            9 => ConnState::LastAck,
+            10 => ConnState::Listening,
+            11 => ConnState::Closing,
+            _ => ConnState::Unknown,
+        }
+    }
+}
+
+/// TCP_INFO values for the connection Properties window (SYS-034).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TcpInfoView {
+    /// Shown as "RTT <ms> (var <ms>)".
+    pub rtt_us: u32,
+    pub rttvar_us: u32,
+    /// "Congestion window".
+    pub snd_cwnd: u32,
+    /// tcpi_bytes_acked.
+    pub bytes_acked: u64,
+    /// tcpi_bytes_received.
+    pub bytes_received: u64,
+    /// tcpi_total_retrans.
+    pub retransmits: u32,
+    /// "Last data received <ms> ago".
+    pub last_data_recv_ms: u32,
+}
+
+/// One socket as the Connections table shows it (UI-SYS-062).
+#[derive(Clone, Debug)]
+pub struct ConnRecord {
+    pub cookie: u64,
+    pub proto: Proto,
+    pub family: Family,
+    /// For SockDestroy targets.
+    pub four_tuple: FourTuple,
+    /// Formatted once per cookie by the engine (table d forms).
+    pub local: Arc<str>,
+    /// "*:*" for listeners and unconnected UDP.
+    pub foreign: Arc<str>,
+    pub state: ConnState,
+    pub owners: SmallVec<[ProcessKey; 1]>,
+    /// `Restricted` when the owner is another user's process and needs the helper, `Missing`
+    /// when the owner is gone.
+    pub owner_validity: Validity,
+    pub uid: u32,
+    pub inode: u64,
+    pub ifindex: u32,
+    pub recv_q: u32,
+    pub send_q: u32,
+    pub unit: Option<UnitRef>,
+    pub tcp: Option<TcpInfoView>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ConnCounts {
+    pub total: u32,
+    pub tcp: u32,
+    pub udp: u32,
+    pub established: u32,
+    pub listening: u32,
+}
+
+/// The Connections tab component (ADR-003). Filled by the Connections worker, read by the UI.
+#[derive(Clone, Debug, Default)]
+pub struct ConnectionsSnapshot {
+    pub header: ComponentHeader,
+    pub rows: Arc<[SysRow]>,
+    pub query_generation: u64,
+    pub records: Arc<[ConnRecord]>,
+    pub counts: ConnCounts,
+    /// Set after the first SockDestroy answer.
+    pub destroy_supported: Option<bool>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,5 +1002,115 @@ mod tests {
         assert_eq!(snap.query_generation, 0);
         assert_eq!(snap.counts, ServiceCounts::default());
         assert_eq!(snap.managers, [ManagerState::Unavailable; 2]);
+    }
+
+    #[test]
+    fn impact_thresholds_sys021() {
+        let cases = [
+            (1000, Impact::High),
+            (999, Impact::Medium),
+            (300, Impact::Medium),
+            (299, Impact::Low),
+            (0, Impact::Low),
+        ];
+        for (ms, want) in cases {
+            assert_eq!(Impact::from_activation_ms(ms), want, "{ms} ms");
+        }
+    }
+
+    #[test]
+    fn conn_state_from_kernel_numbers() {
+        let want = [
+            ConnState::Established,
+            ConnState::SynSent,
+            ConnState::SynReceived,
+            ConnState::FinWait1,
+            ConnState::FinWait2,
+            ConnState::TimeWait,
+            ConnState::Closed,
+            ConnState::CloseWait,
+            ConnState::LastAck,
+            ConnState::Listening,
+            ConnState::Closing,
+            ConnState::SynReceived,
+        ];
+        for (n, state) in (1u8..).zip(want) {
+            assert_eq!(ConnState::from_tcp_state(n), state, "state {n}");
+        }
+        assert_eq!(ConnState::from_tcp_state(0), ConnState::Unknown);
+        assert_eq!(ConnState::from_tcp_state(13), ConnState::Unknown);
+    }
+
+    #[test]
+    fn conn_state_labels_sys029() {
+        let cases = [
+            (ConnState::Listening, "LISTENING"),
+            (ConnState::SynSent, "SYN-SENT"),
+            (ConnState::SynReceived, "SYN-RECEIVED"),
+            (ConnState::Established, "ESTABLISHED"),
+            (ConnState::FinWait1, "FIN-WAIT-1"),
+            (ConnState::FinWait2, "FIN-WAIT-2"),
+            (ConnState::CloseWait, "CLOSE-WAIT"),
+            (ConnState::Closing, "CLOSING"),
+            (ConnState::LastAck, "LAST-ACK"),
+            (ConnState::TimeWait, "TIME-WAIT"),
+            (ConnState::Closed, "CLOSED"),
+            (ConnState::Unknown, "UNKNOWN"),
+            (ConnState::Unconnected, "UNCONNECTED"),
+            (ConnState::Connected, "CONNECTED"),
+        ];
+        for (state, label) in cases {
+            assert_eq!(state.label(), label);
+        }
+    }
+
+    #[test]
+    fn startup_labels_sys020() {
+        let kinds = [
+            (StartupKind::AutostartUser, "Autostart (user)"),
+            (StartupKind::AutostartSystem, "Autostart (system)"),
+            (
+                StartupKind::AutostartSystemOverridden,
+                "Autostart (system, overridden)",
+            ),
+            (StartupKind::UserUnit, "systemd user unit"),
+            (StartupKind::PlasmaPreStartup, "Plasma pre-startup script"),
+            (StartupKind::PlasmaLogout, "Plasma logout script"),
+        ];
+        for (kind, label) in kinds {
+            assert_eq!(kind.label(), label);
+        }
+        let statuses = [
+            (StartupStatus::Enabled, "Enabled"),
+            (StartupStatus::Disabled, "Disabled"),
+            (StartupStatus::Masked, "Masked"),
+            (StartupStatus::NotInThisDesktop, "Not in this desktop"),
+            (StartupStatus::MissingProgram, "Missing program"),
+        ];
+        for (status, label) in statuses {
+            assert_eq!(status.label(), label);
+        }
+    }
+
+    #[test]
+    fn impact_sort_order() {
+        let mut v = vec![
+            Impact::NotMeasured,
+            Impact::Low,
+            Impact::None,
+            Impact::High,
+            Impact::Medium,
+        ];
+        v.sort();
+        assert_eq!(
+            v,
+            [
+                Impact::High,
+                Impact::Medium,
+                Impact::Low,
+                Impact::None,
+                Impact::NotMeasured,
+            ]
+        );
     }
 }
