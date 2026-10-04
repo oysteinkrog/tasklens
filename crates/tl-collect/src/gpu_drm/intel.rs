@@ -99,22 +99,32 @@ pub fn i915_engine_name(key: &str) -> Option<&'static str> {
 /// `drm-total-local0`, `drm-resident-system0`) in bytes. A value is `None` when no client on
 /// `pdev` reports its key. The system value is the iGPU "Shared" memory.
 pub fn fdinfo_memory(scan: &FdinfoScan, pdev: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
-    let clients = || scan.clients.iter().filter(|c| &*c.pdev == pdev);
-    let sum = |field: fn(&DrmClient) -> &[(Arc<str>, u64)], region: &str| {
-        clients()
-            .filter_map(|c| {
-                field(c)
-                    .iter()
-                    .find(|(n, _)| &**n == region)
-                    .map(|&(_, v)| v)
-            })
-            .reduce(u64::saturating_add)
-    };
     (
-        sum(|c| &c.resident_bytes[..], "local0"),
-        sum(|c| &c.total_bytes[..], "local0"),
-        sum(|c| &c.resident_bytes[..], "system0"),
+        sum_region(scan, pdev, |c| &c.resident_bytes, "local0"),
+        sum_region(scan, pdev, |c| &c.total_bytes, "local0"),
+        sum_region(scan, pdev, |c| &c.resident_bytes, "system0"),
     )
+}
+
+/// Sum of `region` in the list `field` picks from each client on `pdev`; `None` when no client
+/// has it.
+fn sum_region<'a, L: AsRef<[(Arc<str>, u64)]> + 'a>(
+    scan: &'a FdinfoScan,
+    pdev: &str,
+    field: impl Fn(&'a DrmClient) -> &'a L,
+    region: &str,
+) -> Option<u64> {
+    scan.clients
+        .iter()
+        .filter(|c| &*c.pdev == pdev)
+        .filter_map(|c| {
+            field(c)
+                .as_ref()
+                .iter()
+                .find(|(n, _)| &**n == region)
+                .map(|&(_, v)| v)
+        })
+        .reduce(u64::saturating_add)
 }
 
 /// Source text for the temperature row (PERF-069).
