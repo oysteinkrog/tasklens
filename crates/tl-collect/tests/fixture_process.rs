@@ -292,3 +292,232 @@ fn status_owner_desktop_snapshot() {
         .collect();
     insta::assert_debug_snapshot!(rows);
 }
+
+use tl_collect::SysRoot;
+use tl_collect::proc::smaps::{
+    CoverageBuilder, PssReader, Rollup, RollupRead, apply_rollups, parse_rollup,
+};
+use tl_model::ids::ProcessKey;
+use tl_model::time::BootId;
+
+/// start_ticks of process-edge 4201, which `fake_procs` copies into every fake process.
+const FAKE_START_TICKS: u64 = 351_220;
+
+fn rollup_key(pid: u32, start_ticks: u64) -> ProcessKey {
+    ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid,
+    }
+}
+
+/// A proc root with `n` processes (pids 10000..) that all have the stat and smaps_rollup of
+/// process-edge 4201.
+fn fake_procs(n: u32) -> (tempfile::TempDir, SysRoot, Vec<ProcessKey>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let stat = fixture_bytes("process-edge", "proc/4201/stat");
+    let rollup = fixture_bytes("process-edge", "proc/4201/smaps_rollup");
+    let mut keys = Vec::new();
+    for pid in 10_000..10_000 + n {
+        let dir = tmp.path().join(format!("proc/{pid}"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("stat"), &stat).unwrap();
+        fs::write(dir.join("smaps_rollup"), &rollup).unwrap();
+        keys.push(rollup_key(pid, FAKE_START_TICKS));
+    }
+    let root = SysRoot::at(tmp.path());
+    (tmp, root, keys)
+}
+
+fn own_key() -> ProcessKey {
+    let pid = std::process::id();
+    let dir = rustix::fs::open(
+        format!("/proc/{pid}"),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .unwrap();
+    let ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).unwrap();
+    rollup_key(pid, ticks)
+}
+
+#[test]
+fn rollup_parse_bytes() {
+    let mut out = Rollup::default();
+    parse_rollup(
+        &fixture_bytes("process-edge", "proc/4201/smaps_rollup"),
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(out.pss, 2_097_152);
+    assert_eq!(out.uss, 1_572_864);
+    assert_eq!(out.swap, 0);
+}
+
+#[test]
+fn rollup_fd_cached_and_reused() {
+    let root = SysRoot::host();
+    let keys = [own_key()];
+    let mut reader = PssReader::new();
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    for _ in 0..2 {
+        reader.read(&root, &keys, &mut buf, &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, keys[0]);
+        assert!(
+            matches!(out[0].1, RollupRead::Ok(r) if r.pss > 0),
+            "{out:?}"
+        );
+        assert_eq!(reader.cached(), 1);
+        assert_eq!(reader.opens(), 1);
+    }
+}
+
+/// Security regression: a reused pid never yields another process's PSS.
+#[test]
+fn rollup_identity_mismatch_gone() {
+    let root = SysRoot::host();
+    let real = own_key();
+    let wrong = rollup_key(real.pid, real.start_ticks + 1);
+    let mut reader = PssReader::new();
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    reader.read(&root, &[wrong], &mut buf, &mut out);
+    assert_eq!(out, vec![(wrong, RollupRead::Gone)]);
+    assert_eq!(reader.cached(), 0);
+    assert_eq!(reader.opens(), 0);
+
+    // Same in a fixture root, where the key's start time differs from the stat file.
+    let (_tmp, root, keys) = fake_procs(1);
+    let wrong = rollup_key(keys[0].pid, FAKE_START_TICKS - 1);
+    reader.read(&root, &[wrong], &mut buf, &mut out);
+    assert_eq!(out, vec![(wrong, RollupRead::Gone)]);
+    assert_eq!(reader.cached(), 0);
+}
+
+#[test]
+fn rollup_cache_cap_128() {
+    let (_tmp, root, keys) = fake_procs(130);
+    let mut reader = PssReader::new();
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    reader.read(&root, &keys, &mut buf, &mut out);
+    assert_eq!(out.len(), 130);
+    assert!(out.iter().all(|(_, r)| matches!(r, RollupRead::Ok(_))));
+    assert_eq!(reader.cached(), 128);
+    assert_eq!(reader.opens(), 130);
+
+    // Second call: the first 128 come from the cache, the last two are opened again.
+    reader.read(&root, &keys, &mut buf, &mut out);
+    assert!(out.iter().all(|(_, r)| matches!(r, RollupRead::Ok(_))));
+    assert_eq!(reader.cached(), 128);
+    assert_eq!(reader.opens(), 132);
+}
+
+#[test]
+fn rollup_drop_left_demand() {
+    let (_tmp, root, keys) = fake_procs(2);
+    let mut reader = PssReader::new();
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    reader.read(&root, &keys, &mut buf, &mut out);
+    assert_eq!(reader.cached(), 2);
+
+    reader.read(&root, &keys[1..], &mut buf, &mut out);
+    assert_eq!(out.len(), 1);
+    assert_eq!(reader.cached(), 1);
+    assert_eq!(reader.opens(), 2);
+
+    // The dropped key is opened again when it comes back.
+    reader.read(&root, &keys, &mut buf, &mut out);
+    assert_eq!(reader.cached(), 2);
+    assert_eq!(reader.opens(), 3);
+}
+
+#[test]
+fn rollup_apply_and_coverage() {
+    use std::sync::Arc;
+    use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::validity::{FieldValidity, ProcessField, Validity};
+
+    let meta = Arc::new(ProcessMeta {
+        comm: "t".into(),
+        name: "t".into(),
+        exe: None,
+        cmdline: None,
+        user: "user".into(),
+        cgroup: None,
+        app_id: None,
+        icon: None,
+        description: None,
+        search_lower: "t".into(),
+    });
+    let mut records: Vec<ProcessRecord> = (1..=5u32)
+        .map(|pid| ProcessRecord {
+            key: rollup_key(pid, 100 * u64::from(pid)),
+            ppid: 1,
+            uid: 1000,
+            meta: meta.clone(),
+            group: GroupKind::Background.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::default(),
+        })
+        .collect();
+    let rollup = |pss: u64| {
+        RollupRead::Ok(Rollup {
+            pss,
+            uss: pss / 2,
+            swap: 0,
+        })
+    };
+    let results = [
+        (records[3].key, rollup(4096)),
+        (records[0].key, rollup(1024)),
+        (records[2].key, rollup(2048)),
+    ];
+    let mut builder = CoverageBuilder::new();
+    apply_rollups(&mut records, &results, &mut builder);
+    let coverage = builder.build();
+
+    let mut expected = vec![records[0].key, records[2].key, records[3].key];
+    expected.sort();
+    assert_eq!(&*coverage.pss_uss, expected.as_slice());
+    for (i, record) in records.iter().enumerate() {
+        let covered = matches!(i, 0 | 2 | 3);
+        assert_eq!(coverage.has_pss_uss(&record.key), covered);
+        let want = if covered {
+            Validity::Valid
+        } else {
+            Validity::WarmingUp
+        };
+        assert_eq!(record.validity.get(ProcessField::Pss), want);
+        assert_eq!(record.validity.get(ProcessField::Uss), want);
+    }
+    assert_eq!(records[2].pss_bytes, 2048);
+    assert_eq!(records[2].uss_bytes, 1024);
+    assert_eq!(records[1].pss_bytes, 0);
+
+    // Restricted sets that validity and does not cover the key.
+    apply_rollups(
+        &mut records,
+        &[(records[1].key, RollupRead::Restricted)],
+        &mut builder,
+    );
+    assert_eq!(
+        records[1].validity.get(ProcessField::Pss),
+        Validity::Restricted
+    );
+    assert!(builder.build().pss_uss.is_empty());
+}

@@ -83,3 +83,31 @@ fn fdcount_st_size_works_on_this_kernel() {
         "st_size was 0, readdir fallback used {used} times (U-34 failed)"
     );
 }
+
+/// PROC-030: PSS of another user's process is Restricted, never zero.
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn rollup_pid1_restricted() {
+    use tl_collect::SysRoot;
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_collect::proc::smaps::{PssReader, RollupRead};
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("pid 1 stat");
+    let key = ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid: 1,
+    };
+    let mut reader = PssReader::new();
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    reader.read(&SysRoot::host(), &[key], &mut buf, &mut out);
+    assert_eq!(out, vec![(key, RollupRead::Restricted)]);
+    assert_eq!(reader.cached(), 0);
+}
