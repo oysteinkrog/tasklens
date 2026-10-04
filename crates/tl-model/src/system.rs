@@ -1,1 +1,399 @@
 //! Machine-wide totals and CPU topology (ADR-003).
+//!
+//! These structs hold the current values and the counters the stats grids show. Graph history
+//! lives in `series.rs`. Every live field is a `Metric` or carries a `validity` field, so a
+//! missing value is never a bare zero.
+
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+
+use crate::ids::DeviceIdx;
+use crate::validity::Validity;
+
+/// A value with its validity. Never read `value` unless `validity == Valid` or `Stale`.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct Metric<T: Copy + Default> {
+    pub value: T,
+    pub validity: Validity,
+}
+
+impl<T: Copy + Default> Metric<T> {
+    /// A valid value.
+    pub fn valid(v: T) -> Self {
+        Self {
+            value: v,
+            validity: Validity::Valid,
+        }
+    }
+
+    /// No value, only a state. `value` is `T::default()`.
+    pub fn with(validity: Validity) -> Self {
+        Self {
+            value: T::default(),
+            validity,
+        }
+    }
+}
+
+/// CPU affinity mask, up to 1024 CPUs (ADR-005).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub struct CpuSet(pub [u64; 16]);
+
+impl CpuSet {
+    pub const MAX_CPUS: u16 = 1024;
+
+    pub const fn empty() -> CpuSet {
+        CpuSet([0; 16])
+    }
+
+    /// Adds `cpu`. Ignores `cpu >= 1024`.
+    pub fn insert(&mut self, cpu: u16) {
+        if cpu < Self::MAX_CPUS {
+            self.0[usize::from(cpu / 64)] |= 1 << (cpu % 64);
+        }
+    }
+
+    /// Removes `cpu`. Ignores `cpu >= 1024`.
+    pub fn remove(&mut self, cpu: u16) {
+        if cpu < Self::MAX_CPUS {
+            self.0[usize::from(cpu / 64)] &= !(1 << (cpu % 64));
+        }
+    }
+
+    pub fn contains(&self, cpu: u16) -> bool {
+        cpu < Self::MAX_CPUS && self.0[usize::from(cpu / 64)] & (1 << (cpu % 64)) != 0
+    }
+
+    /// Number of CPUs in the set.
+    pub fn count(&self) -> u32 {
+        self.0.iter().map(|w| w.count_ones()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|&w| w == 0)
+    }
+
+    /// CPU ids in ascending order.
+    pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+        self.0.iter().enumerate().flat_map(|(i, &word)| {
+            let base = (i as u16) * 64;
+            let mut rest = word;
+            std::iter::from_fn(move || {
+                if rest == 0 {
+                    return None;
+                }
+                let bit = rest.trailing_zeros() as u16;
+                rest &= rest - 1;
+                Some(base + bit)
+            })
+        })
+    }
+
+    pub fn intersection(&self, other: &CpuSet) -> CpuSet {
+        let mut out = CpuSet::empty();
+        for (o, (a, b)) in out.0.iter_mut().zip(self.0.iter().zip(other.0.iter())) {
+            *o = a & b;
+        }
+        out
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum CoreKind {
+    Performance,
+    Efficiency,
+    Standard,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreInfo {
+    /// Core index in the order of (package, core_id).
+    pub id: u16,
+    /// Logical CPU ids of this core (SMT siblings).
+    pub logical: SmallVec<[u16; 2]>,
+    /// Index of the L3 domain (shared_cpu_list of the L3 cache).
+    pub l3_group: u16,
+    pub kind: CoreKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CpuTopology {
+    pub online: CpuSet,
+    pub cores: Arc<[CoreInfo]>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CpuTotals {
+    /// 100 × Δbusy / Δtotal (ADR-008); also series CPU_TOTAL.
+    pub util_pct: Metric<f32>,
+    /// 100 × Δ(system + irq + softirq) / Δtotal; series CPU_KERNEL.
+    pub kernel_pct: Metric<f32>,
+    /// iowait share, reported in CPU details (ADR-008).
+    pub iowait_pct: Metric<f32>,
+    /// Mean of cpuinfo_avg_freq over policies (PERF-033, PERF-040).
+    pub freq_mhz: Metric<u32>,
+    /// Fastest core, for the Speed tooltip (PERF-033).
+    pub freq_fastest_mhz: Metric<u32>,
+    /// base_frequency, else acpi_cppc nominal_freq, else bios_limit.
+    pub base_mhz: Metric<u32>,
+    /// Tctl or Package id 0 (PERF-039).
+    pub temp_c: Metric<f32>,
+    /// RAPL intel-rapl:0 (PERF-038, P2).
+    pub package_power_w: Metric<f32>,
+    /// RAPL intel-rapl:0:0, for the tooltip (PERF-038, P2).
+    pub core_power_w: Metric<f32>,
+    /// Numeric /proc entries (PERF-033).
+    pub processes: Metric<u32>,
+    /// Sum from the sweep, else /proc/stat fallback (PERF-033).
+    pub threads: Metric<u32>,
+    /// /proc/sys/fs/file-nr field 1 (PERF-033).
+    pub handles: Metric<u64>,
+    /// /proc/loadavg 1, 5 and 15 min.
+    pub load_avg: Metric<[f32; 3]>,
+    /// Distinct physical_package_id.
+    pub sockets: Metric<u16>,
+}
+
+/// All bytes, from /proc/meminfo unless noted (PERF-041 to PERF-043).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryTotals {
+    /// Of the meminfo read as a whole.
+    pub validity: Validity,
+    pub total: u64,
+    pub available: u64,
+    /// MemTotal - MemAvailable (MemFree when Available > Total).
+    pub used: u64,
+    pub free: u64,
+    pub cached: u64,
+    pub dirty: u64,
+    pub writeback: u64,
+    /// Committed_AS.
+    pub committed: u64,
+    /// CommitLimit.
+    pub commit_limit: u64,
+    pub slab_reclaimable: u64,
+    pub slab_unreclaimable: u64,
+    pub swap_total: u64,
+    pub swap_free: u64,
+    pub huge_pages_total: u64,
+    pub huge_pages_free: u64,
+    pub huge_page_size: u64,
+    pub zswap: u64,
+    pub zswapped: u64,
+    /// Summed over zram devices; Unsupported when none.
+    pub zram: Metric<ZramTotals>,
+}
+
+/// zram `mm_stat` fields 1, 2 and 3.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ZramTotals {
+    pub orig_data: u64,
+    pub compr_data: u64,
+    pub mem_used: u64,
+}
+
+/// One per disk device (PERF-049).
+#[derive(Clone, Copy, Debug)]
+pub struct DiskTotals {
+    pub device: DeviceIdx,
+    pub active_pct: Metric<f32>,
+    /// Bytes per second.
+    pub read_bps: Metric<f64>,
+    /// Bytes per second.
+    pub write_bps: Metric<f64>,
+    /// Δticks / Δops over reads, writes, discards and flushes.
+    pub response_ms: Metric<f32>,
+    /// Bytes since boot (sectors × 512).
+    pub read_total: u64,
+    /// Bytes since boot (sectors × 512).
+    pub written_total: u64,
+    /// /sys/block/<d>/size × 512.
+    pub capacity: u64,
+    /// Drive temperature (hwmon or SMART); Unsupported when none (R-139).
+    pub temp_c: Metric<f32>,
+}
+
+/// One per interface (PERF-056).
+#[derive(Clone, Copy, Debug)]
+pub struct NetTotals {
+    pub device: DeviceIdx,
+    /// Bytes per second.
+    pub rx_bps: Metric<f64>,
+    /// Bytes per second.
+    pub tx_bps: Metric<f64>,
+    /// Bytes since boot.
+    pub rx_total: u64,
+    /// Bytes since boot.
+    pub tx_total: u64,
+    /// sysfs speed; -1 gives Unsupported ("Not reported").
+    pub link_speed_mbps: Metric<u32>,
+    /// sysfs operstate (R-139).
+    pub state: LinkState,
+}
+
+/// sysfs `operstate`, one variant per kernel value (R-139 names Up, Down, Dormant, Unknown;
+/// PERF-054 shows all seven): "up" Up, "down" Down, "testing" Testing, "dormant" Dormant,
+/// "notpresent" NotPresent, "lowerlayerdown" LowerLayerDown, anything else Unknown. UI labels per
+/// PERF-054 (Connected, Disconnected, ...).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+pub enum LinkState {
+    Up,
+    Down,
+    Testing,
+    Dormant,
+    NotPresent,
+    LowerLayerDown,
+    #[default]
+    Unknown,
+}
+
+/// One per GPU (PERF-063 to PERF-068).
+#[derive(Clone, Copy, Debug)]
+pub struct GpuTotals {
+    pub device: DeviceIdx,
+    pub util_pct: Metric<f32>,
+    pub mem_util_pct: Metric<f32>,
+    pub mem_used: Metric<u64>,
+    pub mem_total: Metric<u64>,
+    pub shared_used: Metric<u64>,
+    pub shared_total: Metric<u64>,
+    pub enc_pct: Metric<f32>,
+    pub dec_pct: Metric<f32>,
+    pub temp_c: Metric<f32>,
+    pub power_w: Metric<f32>,
+    pub power_limit_w: Metric<f32>,
+    pub clock_gfx_mhz: Metric<u32>,
+    pub clock_mem_mhz: Metric<u32>,
+    pub fan_pct: Metric<f32>,
+    /// PCIe receive throughput, bytes per second (R-155).
+    pub pcie_rx_bps: Metric<f32>,
+    /// PCIe transmit throughput, bytes per second (R-155).
+    pub pcie_tx_bps: Metric<f32>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SensorKind {
+    Temperature,
+    Fan,
+}
+
+/// One per hwmon temperature or fan device (PERF-076).
+#[derive(Clone, Copy, Debug)]
+pub struct SensorReading {
+    pub device: DeviceIdx,
+    pub kind: SensorKind,
+    /// °C for Temperature, RPM for Fan.
+    pub value: Metric<f32>,
+    /// Fan only: pwmN / 255 × 100; Unsupported for Temperature.
+    pub pwm_pct: Metric<f32>,
+    /// Fan only: pwm<n>_enable; None for Temperature or no pwm file (R-139).
+    pub fan_control: Option<FanControlMode>,
+    /// Fan only: true once the fan reported a non-zero RPM this session or carries a label (R-170).
+    pub fan_connected: bool,
+}
+
+/// hwmon `pwm<n>_enable`: 0 FullSpeed, 1 Manual, 2 Automatic (R-139). Other values give None.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum FanControlMode {
+    FullSpeed,
+    Manual,
+    Automatic,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use std::collections::BTreeSet;
+
+    fn set_of(cpus: &[u16]) -> CpuSet {
+        let mut s = CpuSet::empty();
+        for &c in cpus {
+            s.insert(c);
+        }
+        s
+    }
+
+    #[test]
+    fn cpuset_insert_contains_iter() {
+        let s = set_of(&[0, 63, 64, 1023]);
+        assert_eq!(s.count(), 4);
+        assert!(s.contains(64));
+        assert!(!s.contains(65));
+        assert!(!s.is_empty());
+        assert_eq!(s.iter().collect::<Vec<_>>(), vec![0, 63, 64, 1023]);
+    }
+
+    #[test]
+    fn cpuset_ignores_out_of_range() {
+        let mut s = set_of(&[5]);
+        let before = s;
+        s.insert(1024);
+        s.insert(u16::MAX);
+        assert_eq!(s, before);
+        s.remove(1024);
+        assert_eq!(s, before);
+        assert!(!s.contains(1024));
+    }
+
+    #[test]
+    fn cpuset_intersection() {
+        let a = set_of(&[0, 1, 2]);
+        let b = set_of(&[1, 2, 3]);
+        assert_eq!(a.intersection(&b), set_of(&[1, 2]));
+    }
+
+    #[test]
+    fn metric_with_validity() {
+        let m = Metric::<f32>::with(Validity::Restricted);
+        assert_eq!(m.value, 0.0);
+        assert_eq!(m.validity, Validity::Restricted);
+        let v = Metric::valid(7u32);
+        assert_eq!((v.value, v.validity), (7, Validity::Valid));
+    }
+
+    #[test]
+    fn metric_default_warming_up() {
+        let m = Metric::<u64>::default();
+        assert_eq!(m.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn topology_default_empty() {
+        let t = CpuTopology::default();
+        assert!(t.online.is_empty());
+        assert!(t.cores.is_empty());
+    }
+
+    #[test]
+    fn link_state_default_unknown() {
+        assert_eq!(LinkState::default(), LinkState::Unknown);
+    }
+
+    proptest! {
+        #[test]
+        fn cpuset_matches_btreeset(ops in proptest::collection::vec((any::<bool>(), 0u16..1100), 0..200)) {
+            let mut set = CpuSet::empty();
+            let mut model = BTreeSet::new();
+            for (add, cpu) in ops {
+                if add {
+                    set.insert(cpu);
+                    if cpu < CpuSet::MAX_CPUS {
+                        model.insert(cpu);
+                    }
+                } else {
+                    set.remove(cpu);
+                    model.remove(&cpu);
+                }
+            }
+            prop_assert_eq!(set.iter().collect::<Vec<_>>(), model.iter().copied().collect::<Vec<_>>());
+            prop_assert_eq!(set.count() as usize, model.len());
+            prop_assert_eq!(set.is_empty(), model.is_empty());
+            for cpu in 0..1100u16 {
+                prop_assert_eq!(set.contains(cpu), model.contains(&cpu));
+            }
+        }
+    }
+}
