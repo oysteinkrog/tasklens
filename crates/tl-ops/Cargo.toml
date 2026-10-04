@@ -6,6 +6,10 @@ publish.workspace = true
 
 [dependencies]
 tl-model = { workspace = true }
+rustix = { workspace = true, features = ["process", "thread", "fs", "event", "std"] }
+libc = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true
