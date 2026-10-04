@@ -1,10 +1,14 @@
 //! The NVML backend (ADR-007, PERF-062, PERF-071).
 //!
 //! `hello` starts NVML and lists the devices. `sample` reads one set of metrics per device
-//! (E13-003).
+//! (E13-003) and, when asked, one row per GPU process (E13-004).
+
+use std::collections::BTreeMap;
 
 use nvml_wrapper::enum_wrappers::device::{Clock, PcieUtilCounter, TemperatureSensor};
+use nvml_wrapper::enums::device::UsedGpuMemory;
 use nvml_wrapper::error::NvmlError;
+use nvml_wrapper::struct_wrappers::device::{ProcessInfo, ProcessUtilizationSample};
 use nvml_wrapper::{Device, Nvml, cuda_driver_version_major, cuda_driver_version_minor};
 use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
 
@@ -15,8 +19,6 @@ struct DeviceSlot {
     index: u32,
     uuid: [u8; 16],
     /// NVML timestamp of the newest process sample seen, for `process_utilization_stats`.
-    // E13-004 (ndy.6) reads this field.
-    #[allow(dead_code)]
     last_process_ts: u64,
 }
 
@@ -129,6 +131,113 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
     }
 }
 
+/// Reads one device's process rows (E13-004, ADR-007). `last_seen` is the NVML timestamp of the
+/// newest utilisation sample seen so far; it moves to the newest one this call returns.
+pub fn process_samples(
+    dev: &Device<'_>,
+    uuid: [u8; 16],
+    last_seen: &mut u64,
+) -> Vec<GpuProcessSample> {
+    let (util, util_supported) = match dev.process_utilization_stats(*last_seen) {
+        Ok(v) => {
+            if let Some(newest) = v.iter().map(|s| s.timestamp).max() {
+                *last_seen = newest;
+            }
+            (v, Reading::Ok(()))
+        }
+        Err(NvmlError::NotSupported) => (Vec::new(), Reading::Unsupported),
+        // No process ran on the device since `last_seen`.
+        Err(NvmlError::NotFound) => (Vec::new(), Reading::Ok(())),
+        Err(_) => (Vec::new(), Reading::Failed),
+    };
+    let graphics = dev.running_graphics_processes();
+    let compute = dev.running_compute_processes();
+    let mem_failed = graphics.is_err() || compute.is_err();
+    let mut rows = merge_process_rows(
+        &util,
+        graphics.as_deref().unwrap_or_default(),
+        compute.as_deref().unwrap_or_default(),
+        uuid,
+        util_supported,
+    );
+    // A sum over one list only would show too little memory, so a failed list fails every row.
+    if mem_failed {
+        for row in &mut rows {
+            row.mem_used = Reading::Failed;
+        }
+    }
+    rows
+}
+
+/// Merges one device's utilisation samples and process lists into one row per pid, in pid order.
+/// Pid 0 is dropped. Device utilisation is never divided among processes (ADR-007).
+pub fn merge_process_rows(
+    util: &[ProcessUtilizationSample],
+    graphics: &[ProcessInfo],
+    compute: &[ProcessInfo],
+    uuid: [u8; 16],
+    util_supported: Reading<()>,
+) -> Vec<GpuProcessSample> {
+    // Per pid: the newest utilisation sample, and the memory sum (`None` once an entry is
+    // `Unavailable`, or when the pid is in neither list).
+    struct Acc<'a> {
+        util: Option<&'a ProcessUtilizationSample>,
+        mem: Option<Option<u64>>,
+    }
+    let mut by_pid: BTreeMap<u32, Acc<'_>> = BTreeMap::new();
+    for s in util {
+        let acc = by_pid.entry(s.pid).or_insert(Acc {
+            util: None,
+            mem: None,
+        });
+        if acc.util.is_none_or(|old| s.timestamp > old.timestamp) {
+            acc.util = Some(s);
+        }
+    }
+    for p in graphics.iter().chain(compute) {
+        let acc = by_pid.entry(p.pid).or_insert(Acc {
+            util: None,
+            mem: None,
+        });
+        let used = match p.used_gpu_memory {
+            UsedGpuMemory::Used(bytes) => Some(bytes),
+            UsedGpuMemory::Unavailable => None,
+        };
+        acc.mem = Some(match acc.mem {
+            None => used,
+            Some(sum) => sum.zip(used).map(|(a, b)| a.saturating_add(b)),
+        });
+    }
+    by_pid.remove(&0);
+
+    // The reading for a pid without a utilisation sample: idle when supported, else the state.
+    let no_sample = match util_supported {
+        Reading::Ok(()) => Reading::Ok(0),
+        Reading::Unsupported => Reading::Unsupported,
+        Reading::Failed => Reading::Failed,
+    };
+    by_pid
+        .into_iter()
+        .map(|(pid, acc)| {
+            let pct = |f: fn(&ProcessUtilizationSample) -> u32| {
+                acc.util.map_or(no_sample, |s| Reading::Ok(f(s)))
+            };
+            GpuProcessSample {
+                uuid,
+                pid,
+                sm_pct: pct(|s| s.sm_util),
+                mem_pct: pct(|s| s.mem_util),
+                enc_pct: pct(|s| s.enc_util),
+                dec_pct: pct(|s| s.dec_util),
+                mem_used: match acc.mem {
+                    Some(Some(bytes)) => Reading::Ok(bytes),
+                    Some(None) | None => Reading::Unsupported,
+                },
+            }
+        })
+        .collect()
+}
+
 /// The sample for a device whose handle could not be read: every metric is `Failed`.
 fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
     GpuDeviceSample {
@@ -161,6 +270,21 @@ impl NvmlBackend {
                 Err(_) => failed_sample(slot.uuid),
             })
             .collect()
+    }
+
+    /// The process rows of every slot, in slot order. Moves each slot's `last_process_ts`.
+    fn process_rows(&mut self) -> Vec<GpuProcessSample> {
+        let Some(nvml) = &self.nvml else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        for slot in &mut self.devices {
+            // A device whose handle cannot be read this sample has no rows.
+            if let Ok(dev) = nvml.device_by_index(slot.index) {
+                rows.extend(process_samples(&dev, slot.uuid, &mut slot.last_process_ts));
+            }
+        }
+        rows
     }
 }
 
@@ -209,8 +333,8 @@ impl Backend for NvmlBackend {
     ) -> (u64, Vec<GpuDeviceSample>, Option<Vec<GpuProcessSample>>) {
         let t_ns = now_boottime_ns();
         let devices = self.device_samples();
-        // E13-004 (ndy.6) fills the process rows.
-        (t_ns, devices, processes.then(Vec::new))
+        let rows = processes.then(|| self.process_rows());
+        (t_ns, devices, rows)
     }
 }
 
@@ -380,6 +504,189 @@ mod tests {
             assert!(processes.is_none());
             assert!(took < std::time::Duration::from_millis(100), "{took:?}");
         }
+    }
+
+    const UUID: [u8; 16] = [7; 16];
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+
+    fn util(pid: u32, timestamp: u64, sm: u32, mem: u32) -> ProcessUtilizationSample {
+        ProcessUtilizationSample {
+            pid,
+            timestamp,
+            sm_util: sm,
+            mem_util: mem,
+            enc_util: 0,
+            dec_util: 0,
+        }
+    }
+
+    fn proc_info(pid: u32, used: UsedGpuMemory) -> ProcessInfo {
+        ProcessInfo {
+            pid,
+            used_gpu_memory: used,
+            gpu_instance_id: None,
+            compute_instance_id: None,
+        }
+    }
+
+    #[test]
+    fn merge_rows_sum_memory_and_newest_util() {
+        let rows = merge_process_rows(
+            &[util(200, 3, 5, 1), util(100, 4, 30, 10)],
+            &[proc_info(100, UsedGpuMemory::Used(GIB))],
+            &[
+                proc_info(100, UsedGpuMemory::Used(512 * MIB)),
+                proc_info(300, UsedGpuMemory::Unavailable),
+            ],
+            UUID,
+            Reading::Ok(()),
+        );
+        let pids: Vec<u32> = rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [100, 200, 300]);
+        assert_eq!(
+            rows[0],
+            GpuProcessSample {
+                uuid: UUID,
+                pid: 100,
+                sm_pct: Reading::Ok(30),
+                mem_pct: Reading::Ok(10),
+                enc_pct: Reading::Ok(0),
+                dec_pct: Reading::Ok(0),
+                mem_used: Reading::Ok(GIB + 512 * MIB),
+            }
+        );
+        assert_eq!(rows[1].sm_pct, Reading::Ok(5));
+        assert_eq!(rows[1].mem_used, Reading::Unsupported);
+        assert_eq!(rows[2].sm_pct, Reading::Ok(0));
+        assert_eq!(rows[2].enc_pct, Reading::Ok(0));
+        assert_eq!(rows[2].mem_used, Reading::Unsupported);
+        assert!(rows.iter().all(|r| r.uuid == UUID));
+    }
+
+    #[test]
+    fn merge_newest_sample_wins() {
+        for samples in [
+            [util(100, 5, 11, 1), util(100, 9, 22, 2)],
+            [util(100, 9, 22, 2), util(100, 5, 11, 1)],
+        ] {
+            let rows = merge_process_rows(&samples, &[], &[], UUID, Reading::Ok(()));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].sm_pct, Reading::Ok(22));
+            assert_eq!(rows[0].mem_pct, Reading::Ok(2));
+        }
+    }
+
+    #[test]
+    fn merge_util_unsupported_keeps_memory() {
+        for state in [Reading::Unsupported, Reading::Failed] {
+            let rows = merge_process_rows(
+                &[],
+                &[proc_info(100, UsedGpuMemory::Used(GIB))],
+                &[],
+                UUID,
+                state,
+            );
+            assert_eq!(rows.len(), 1);
+            let want = match state {
+                Reading::Unsupported => Reading::Unsupported,
+                _ => Reading::Failed,
+            };
+            let r = &rows[0];
+            assert_eq!(r.pid, 100);
+            assert_eq!(
+                [r.sm_pct, r.mem_pct, r.enc_pct, r.dec_pct],
+                [want; 4],
+                "{state:?}"
+            );
+            assert_eq!(r.mem_used, Reading::Ok(GIB));
+        }
+    }
+
+    #[test]
+    fn merge_drops_pid_zero() {
+        let rows = merge_process_rows(
+            &[util(0, 1, 50, 5), util(42, 1, 1, 1)],
+            &[proc_info(0, UsedGpuMemory::Used(GIB))],
+            &[proc_info(0, UsedGpuMemory::Used(GIB))],
+            UUID,
+            Reading::Ok(()),
+        );
+        let pids: Vec<u32> = rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [42]);
+    }
+
+    /// Kills and reaps the child the test started when it goes out of scope.
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    #[ignore = "owner machine with an RTX 5070 and a running GPU process"]
+    fn real_process_utilization_u12() {
+        let mut backend = real_backend();
+        // With a display, start glxgears so a known pid is busy on the GPU. Without one, use a
+        // process that already has a graphics context (the compositor, for example).
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let child = has_display
+            .then(|| {
+                std::process::Command::new("glxgears")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok()
+            })
+            .flatten()
+            .map(ChildGuard);
+        if child.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        let pid = match &child {
+            Some(c) => c.0.id(),
+            None => {
+                let nvml = backend.nvml.as_ref().unwrap();
+                let dev = nvml.device_by_index(backend.devices[0].index).unwrap();
+                let running = dev.running_graphics_processes().unwrap_or_default();
+                match running.iter().find(|p| p.pid != 0) {
+                    Some(p) => p.pid,
+                    None => {
+                        eprintln!("skipped: no display for glxgears and no GPU process running");
+                        return;
+                    }
+                }
+            }
+        };
+        eprintln!("watching pid {pid} (glxgears: {})", child.is_some());
+
+        let (_, _, first) = backend.sample(0, true);
+        let ts_first = backend.devices[0].last_process_ts;
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let (_, _, second) = backend.sample(1, true);
+        let ts_second = backend.devices[0].last_process_ts;
+        eprintln!("first {first:?}");
+        eprintln!("second {second:?}");
+        eprintln!("last_seen {ts_first} -> {ts_second}");
+
+        let second = second.expect("processes: true gives Some");
+        let row = second
+            .iter()
+            .find(|r| r.pid == pid)
+            .unwrap_or_else(|| panic!("no row for pid {pid}"));
+        assert!(matches!(row.sm_pct, Reading::Ok(_)), "{:?}", row.sm_pct);
+        // U-12: per-process utilisation works unprivileged on this driver.
+        eprintln!("U-12 verified: pid {pid} sm_pct {:?}", row.sm_pct);
+        assert!(ts_second > ts_first, "{ts_first} -> {ts_second}");
+
+        // `processes: false` leaves `last_seen` alone.
+        let (_, _, none) = backend.sample(2, false);
+        assert!(none.is_none());
+        assert_eq!(backend.devices[0].last_process_ts, ts_second);
     }
 
     #[test]
