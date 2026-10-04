@@ -133,7 +133,7 @@ pub(crate) fn check_rel_path(rel: &str, uid: u32) -> OpsResult {
         return Err(OpsError::NotOwner);
     }
 
-    match parts.last() {
+    match parts.next_back() {
         Some(last) if last.ends_with(".scope") || last.ends_with(".service") => Ok(()),
         _ => Err(OpsError::NotOwner),
     }
