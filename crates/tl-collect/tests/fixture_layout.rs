@@ -26,10 +26,10 @@ fn walk(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
     while let Some(rel) = stack.pop() {
-        for entry in fs::read_dir(root.join(&rel)).unwrap() {
-            let entry = entry.unwrap();
+        for entry in fs::read_dir(root.join(&rel)).expect("read fixture dir") {
+            let entry = entry.expect("read fixture dir entry");
             let child = rel.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
+            if entry.file_type().expect("file type").is_dir() {
                 stack.push(child.clone());
             }
             out.push(child);
@@ -41,10 +41,15 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 /// The numeric `proc/<pid>` directories in the fixture.
 fn pid_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = fs::read_dir(root.join("proc"))
-        .unwrap()
-        .map(|e| e.unwrap())
-        .filter(|e| e.file_type().unwrap().is_dir())
-        .filter(|e| e.file_name().to_str().unwrap().bytes().all(|b| b.is_ascii_digit()))
+        .expect("read fixture proc/")
+        .map(|e| e.expect("read proc/ entry"))
+        .filter(|e| e.file_type().expect("file type").is_dir())
+        .filter(|e| {
+            e.file_name()
+                .as_encoded_bytes()
+                .iter()
+                .all(u8::is_ascii_digit)
+        })
         .map(|e| e.path())
         .collect();
     dirs.sort();
@@ -74,7 +79,11 @@ fn no_forbidden_files() {
     for rel in walk(&fixture()) {
         for comp in rel.iter() {
             let name = comp.to_str().unwrap();
-            assert!(!FORBIDDEN.contains(&name), "forbidden entry {}", rel.display());
+            assert!(
+                !FORBIDDEN.contains(&name),
+                "forbidden entry {}",
+                rel.display()
+            );
         }
     }
 }
@@ -106,11 +115,11 @@ fn file_list_snapshot() {
     let mut lines: Vec<String> = walk(&fixture())
         .iter()
         .map(|rel| {
-            let mut comps: Vec<String> = rel
-                .iter()
-                .map(|c| c.to_str().unwrap().to_owned())
-                .collect();
-            if comps.len() >= 2 && comps[0] == "proc" && comps[1].bytes().all(|b| b.is_ascii_digit())
+            let mut comps: Vec<String> =
+                rel.iter().map(|c| c.to_str().unwrap().to_owned()).collect();
+            if comps.len() >= 2
+                && comps[0] == "proc"
+                && comps[1].bytes().all(|b| b.is_ascii_digit())
             {
                 comps[1] = "<pid>".to_owned();
             }
