@@ -1,6 +1,7 @@
 //! Theme data: `TlTheme` with TaskSlinger's 22 colour slots, the accent, the graph palette, the
 //! status colours and the derived tints (ADR-009, UI-FND-001, UI-FND-040).
 
+pub mod builtin;
 pub mod derived;
 pub mod palette;
 
