@@ -125,7 +125,7 @@ impl BlockCache {
 
 pub struct Store {
     pub(crate) cfg: StoreConfig,
-    boot_dir: PathBuf,
+    pub(crate) boot_dir: PathBuf,
     /// Segments of this boot inside retention, oldest first. While `writer` is set, the last
     /// one is the open segment.
     pub(crate) segs: Vec<Seg>,
@@ -191,7 +191,7 @@ fn shift_meta(b: &Block, base: MetaId) -> Block {
 }
 
 /// The boot id of a directory named with 16 lowercase hex digits.
-fn parse_boot_dir(name: &str) -> Option<BootId> {
+pub(crate) fn parse_boot_dir(name: &str) -> Option<BootId> {
     let lower_hex = name.len() == 16
         && name
             .bytes()
@@ -202,7 +202,7 @@ fn parse_boot_dir(name: &str) -> Option<BootId> {
 }
 
 /// `seg-*.tlh` files in `dir`, sorted by name (that is, by start time).
-fn segment_paths(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub(crate) fn segment_paths(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -555,6 +555,17 @@ impl Store {
     /// Closes the open segment with its footer.
     pub fn close(&mut self) -> Result<(), HistoryError> {
         self.close_writer()
+    }
+
+    /// True while a segment is open for writing. It is then the last of `segs`.
+    pub(crate) fn has_open_segment(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    /// New retention and disk cap. They apply at the next `retention::enforce`.
+    pub fn set_limits(&mut self, retention_ns: u64, max_disk_bytes: u64) {
+        self.cfg.retention_ns = retention_ns;
+        self.cfg.max_disk_bytes = max_disk_bytes;
     }
 
     /// First block start and last sample time of this boot's history.
