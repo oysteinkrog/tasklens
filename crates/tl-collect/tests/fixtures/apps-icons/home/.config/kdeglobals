@@ -1,0 +1,6 @@
+[General]
+ColorScheme=BreezeDark
+
+# Icon theme
+[Icons]
+Theme = breeze-dark 

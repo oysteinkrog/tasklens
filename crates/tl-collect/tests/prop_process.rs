@@ -5,6 +5,7 @@ mod common;
 use common::{fixture_bytes, mutated};
 use proptest::prelude::*;
 use tl_collect::apps::desktop::{exec_binary_in, parse_entry};
+use tl_collect::apps::icons::{kde_icon_theme, parse_index_theme};
 use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
 use tl_collect::proc::status::{PidStatus, parse_status};
 
@@ -38,6 +39,17 @@ proptest! {
         with_header.extend_from_slice(&bytes);
         let _ = parse_entry("fuzz", "/fuzz.desktop", &with_header, &[]);
         let _ = exec_binary_in(&String::from_utf8_lossy(&bytes), &[]);
+    }
+
+    #[test]
+    fn index_theme_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        let _ = parse_index_theme(&bytes);
+        let mut with_header = b"[Icon Theme]\nDirectories=apps/16,16x16/apps\n[apps/16]\n".to_vec();
+        with_header.extend_from_slice(&bytes);
+        let _ = parse_index_theme(&with_header);
+        let _ = kde_icon_theme(&bytes);
     }
 }
 

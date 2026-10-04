@@ -1,5 +1,5 @@
-//! Tests for app naming (E05-018), the desktop entry index (E05-013) and the desktop watch
-//! (E05-014).
+//! Tests for app naming (E05-018), the desktop entry index (E05-013), the desktop watch
+//! (E05-014) and icon theme resolution (E05-019).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -8,6 +8,10 @@ use std::sync::Arc;
 
 use tl_collect::apps::desktop::{
     DesktopIndex, DesktopWatch, data_dirs_from_env, exec_binary, exec_binary_in,
+};
+use tl_collect::apps::icons::{
+    GenericIcon, ThemeDir, ThemeDirs, generic_icon, kde_icon_theme, load_theme, resolve,
+    theme_order,
 };
 use tl_collect::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
@@ -378,4 +382,125 @@ fn desktop_watch_missing_dir_ok() {
     write_app(&apps, "one");
     assert!(!watch.poll(0));
     assert!(watch.poll(500 * MS));
+}
+
+fn icons_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/apps-icons")
+}
+
+fn icon_themes() -> Vec<ThemeDirs> {
+    let root = icons_root();
+    let bases = vec![
+        root.join("home/.local/share/icons"),
+        root.join("usr/share/icons"),
+    ];
+    let kdeglobals = fs::read(root.join("home/.config/kdeglobals")).expect("read kdeglobals");
+    let user = kde_icon_theme(&kdeglobals);
+    theme_order(user.as_deref())
+        .iter()
+        .filter_map(|name| load_theme(name, &bases))
+        .collect()
+}
+
+fn icon_rel(path: Option<Arc<str>>) -> Option<String> {
+    let path = path?;
+    let base = icons_root().join("usr/share/icons");
+    let rel = Path::new(&*path)
+        .strip_prefix(&base)
+        .expect("icon inside the fixture");
+    Some(rel.to_str().expect("utf-8 path").to_owned())
+}
+
+#[test]
+fn icons_kdeglobals_theme() {
+    let kdeglobals =
+        fs::read(icons_root().join("home/.config/kdeglobals")).expect("read kdeglobals");
+    assert_eq!(kde_icon_theme(&kdeglobals).as_deref(), Some("breeze-dark"));
+    assert_eq!(kde_icon_theme(b"[General]\nTheme=other\n"), None);
+    assert_eq!(kde_icon_theme(b"[Icons]\n#Theme=old\nTheme=\n"), None);
+    assert_eq!(
+        theme_order(Some("breeze-dark")).as_slice(),
+        ["breeze-dark", "breeze", "hicolor"]
+    );
+    assert_eq!(
+        theme_order(Some("breeze")).as_slice(),
+        ["breeze", "hicolor"]
+    );
+    assert_eq!(theme_order(None).as_slice(), ["breeze", "hicolor"]);
+}
+
+#[test]
+fn icons_resolve_user_theme_first() {
+    let themes = icon_themes();
+    let names: Vec<_> = themes.iter().map(|t| t.theme.as_str()).collect();
+    assert_eq!(names, ["breeze-dark", "breeze", "hicolor"]);
+    assert_eq!(
+        themes[0].dirs[2],
+        ThemeDir {
+            rel: "apps/scalable".into(),
+            size: 48,
+            scale: 1,
+            scalable: true,
+        }
+    );
+    assert_eq!(
+        icon_rel(resolve("firefox", 22, &themes)).as_deref(),
+        Some("breeze-dark/apps/22/firefox.svg")
+    );
+}
+
+#[test]
+fn icons_exact_size_before_scalable() {
+    let themes = icon_themes();
+    assert_eq!(
+        icon_rel(resolve("konsole", 24, &themes)).as_deref(),
+        Some("hicolor/24x24/apps/konsole.png")
+    );
+}
+
+#[test]
+fn icons_size_fallback_order() {
+    let themes = icon_themes();
+    assert_eq!(
+        icon_rel(resolve("konsole", 32, &themes)).as_deref(),
+        Some("hicolor/24x24/apps/konsole.png")
+    );
+    assert_eq!(
+        icon_rel(resolve("only16", 24, &themes)).as_deref(),
+        Some("hicolor/16x16/apps/only16.png")
+    );
+}
+
+#[test]
+fn icons_absolute_path() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let icon = dir.path().join("icon.png");
+    fs::write(&icon, b"").expect("write icon");
+    let icon = icon.to_str().expect("utf-8 path");
+    assert_eq!(resolve(icon, 24, &[]).as_deref(), Some(icon));
+
+    let missing = dir.path().join("missing.png");
+    assert_eq!(
+        resolve(missing.to_str().expect("utf-8 path"), 24, &[]),
+        None
+    );
+}
+
+#[test]
+fn icons_unknown_none() {
+    let themes = icon_themes();
+    assert_eq!(resolve("no-such-icon", 24, &themes), None);
+    assert_eq!(resolve("../hicolor/24x24/apps/konsole", 24, &themes), None);
+    assert_eq!(resolve("", 24, &themes), None);
+    assert!(load_theme("no-such-theme", &[icons_root().join("usr/share/icons")]).is_none());
+    assert!(load_theme("..", &[icons_root().join("usr/share/icons")]).is_none());
+    assert_eq!(
+        generic_icon(GenericIcon::Executable),
+        "application-x-executable"
+    );
+    assert_eq!(generic_icon(GenericIcon::KernelThread), "cpu");
+    assert_eq!(
+        generic_icon(GenericIcon::Service),
+        "preferences-system-services"
+    );
 }
