@@ -332,7 +332,11 @@ fn helper_replies_roundtrip() {
         HelperReplyBody::Strings(vec![
             (0x7fff_0000_1000, StringEncoding::Ascii, "hello".to_string()),
             (0x5555_0000_2000, StringEncoding::Utf8, "blåbær".to_string()),
-            (0x5555_0000_3000, StringEncoding::Utf16Le, "wide".to_string()),
+            (
+                0x5555_0000_3000,
+                StringEncoding::Utf16Le,
+                "wide".to_string(),
+            ),
         ]),
         HelperReplyBody::SocketOwners(vec![(77_123, key(200)), (77_124, key(201))]),
         HelperReplyBody::NetlinkDump(vec![0x4c, 0, 0, 0, 0x14, 0, 2, 0]),
@@ -397,7 +401,12 @@ fn action_serde_types_roundtrip() {
     }
     roundtrip(&four_tuple_v4(), max);
     let mut v6 = four_tuple_v6();
-    v6.local = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 443, 0, 0));
+    v6.local = SocketAddr::V6(SocketAddrV6::new(
+        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        443,
+        0,
+        0,
+    ));
     roundtrip(&v6, max);
 }
 

@@ -175,7 +175,10 @@ pub enum HelperError {
     PermissionDenied,
     NoSuchProcess,
     NotAllowed,
-    Partial { done: u16, total: u16 },
+    Partial {
+        done: u16,
+        total: u16,
+    },
     /// errno.
     Os(i32),
     /// The reply would pass the 4 MiB cap: per reply message for `ScanStrings` and
