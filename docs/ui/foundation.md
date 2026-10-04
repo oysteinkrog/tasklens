@@ -333,7 +333,7 @@ empty-state icon, About logo is 48). Icons are `gpui_kit::Icon::new(IconName::X)
 with `text_primary`, or `text_secondary` for secondary rows. Lucide names used by this file:
 `check`, `chevron-right`, `chevron-down`, `chevron-up`, `x`, `search`, `pin`, `pin-off`, `lock`,
 `shield`, `shield-check`, `info`, `circle-check`, `triangle-alert`, `circle-x`, `loader-circle`,
-`copy`, `rotate-ccw-clock` (the Processes history toggle; `history` is not in the kit's 1830
+`copy`, `arrow-up`, `arrow-down` (sort indicators, UI-PRC-005; R-185), `rotate-ccw-clock` (the Processes history toggle; `history` is not in the kit's 1830
 icons), `minus`, `plus`, `eye`, `eye-off`. The bead that writes `components/icons.rs`
 checks each name against `gpui_kit_assets::IconName` and records any rename there. App SVGs under
 `assets/icons/`: `shield-unlocked.svg` (the shield-hi variant APP-003 asks for) and `tasklens.svg`.
@@ -553,7 +553,7 @@ t_base              track 4 h, 120 w    t_sm text_secondary, min w 40, tnum
 - **Implements**: APP-023 ranged integers (`processes.interval_ms` custom value,
   `history.retention_h`, `history.max_disk_mb`, `motion.tab_switch_ms`), Set Priority custom nice,
   Set Affinity count display.
-- **Anatomy**: `[ - ][  1000  ][ + ]`, height 28, minus and plus are `TlButton::Icon` 28 square
+- **Anatomy**: `[ - ][  1000  ][ + ]`, height 28, minus and plus are `TlButton::Icon` 28 square (tooltips "Decrease" and "Increase", R-201)
   with 1 px `divider` border joined to a `TlTextInput` of width 72 (numbers right-aligned, `tnum`);
   outer radius `r_sm` on the group, inner corners square. Unit suffix (`ms`, `h`, `MB`) inside the
   input in `text_secondary`.
@@ -630,8 +630,8 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   and Lucide `chevron-down` `i_xs` right in `text_secondary`. Popup: a `TlMenu` surface
   (UI-FND-023 look: `menu_bg`, 1 px `divider`, `r_sm`, shadow) at least as wide as the trigger,
   max height 10 items (260) then scrolls, items 26 high with `check` `i_xs` on the selected one.
-  `TlCombo` adds a `TlTextInput` at the top of the popup for filtering when the list has more than
-  12 items (the language list has 12, so it gets one).
+  `TlCombo` adds a `TlTextInput` at the top of the popup for filtering when the list has 12 or
+  more items (the language list has 12, so it gets one; R-208).
 - **States**: trigger hover: border `text_secondary`; open: border `accent`, chevron rotated 180°
   (instant); focused: `accent` border; disabled 0.5. Item states as TlMenu. Empty filter result:
   "No matches" in `text_secondary`, `t_base`, centered, 40 px row.
@@ -776,7 +776,10 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   3. Hover or focus on any toast pauses every visible toast's timer; it resumes when the pointer
      leaves the stack (kit behaviour for 5 s toasts; the queue mirrors it for its own timers).
   4. Replace in place: `ToastKey(u64)` chosen by the owner (`ActionId` for actions, a unit hash
-     for service jobs, a fixed key per settings warning). Pushing with an existing key swaps the
+     for service jobs, a fixed key per settings warning). Fixed keys are at or above
+     `0x8000_0000_0000_0000` (`SERVICES_LOADING_TOAST = ToastKey(0x8000_0000_0000_0101)`, Startup
+     `..0201`, Connections `..0301`); the tracker's generated keys (`id << 8 | index`) stay below
+     because `ActionId` stays below 2^55 (R-232). Pushing with an existing key swaps the
      content and kind and restarts the timer; the position in the stack is kept.
   5. Coalescing: a toast with the same kind and text as a visible one pushed within 1 s is not
      added; the visible one's timer restarts and a count suffix " (×2)" is appended from the
@@ -789,8 +792,10 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   8. Visibility: toasts are pushed only while the main window is visible (ADR-010 hidden state);
      while hidden to the tray, Error toasts go to a desktop notification through
      `NotificationDelivery::System` and the others are dropped. On restore nothing is replayed.
-  9. Secondary windows have their own queue and stack (each has a kit Root, APP-045), positioned
-     at top = title bar 34 + sp4.
+  9. Secondary windows have their own queue and stack (each has a kit Root, APP-045). In P1 every
+     window uses the main window's top (72 × `ui_scale`, 66 with server decorations), because the
+     kit `NotificationSettings` is app-global; the per-window top (title bar 34 + sp4 = 42) comes
+     in P2 with a kit change or a `ToastQueue::new(window, cx, top)` that takes it (R-195).
 - **Interaction**: Tab reaches the toast stack last in the window's focus order; inside it Tab
   moves between the action button and the X of each toast. Enter on the X closes, Enter on the
   action runs it.
@@ -902,8 +907,11 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
   build_content)` calls `gpui_kit::open_window` with `WindowOptions { window_decorations:
   Some(Client), window_background: Opaque, kind, window_min_size, app_id: the tasklens app id,
   ..TitleBar::window_options() }`, then the kit Root wraps the view; the pin dispatches
-  `ToggleAlwaysOnTop { window: WindowKey }`, which `tl-ui` forwards to the engine's KWin bridge
-  or X11 path (APP-009; tl-ui never talks to KWin itself)). `components/dialog.rs` (`TlDialog` body
+  `ToggleAlwaysOnTop { window: WindowKey, caption: SharedString }` (`#[action(no_json)]`; the
+  caption is the exact window title at dispatch time, the main window passes "tasklens" and
+  `WindowKey` has a `Main` variant that is never stored in the registry; R-176), which `tl-ui`
+  forwards to the engine's KWin bridge (APP-009; there is no X11 path in v1, R-177; tl-ui never
+  talks to KWin itself)). `components/dialog.rs` (`TlDialog` body
   and footer). In-window kit `Dialog` is used only for sub-prompts inside a secondary window
   (APP-045), styled with the same body and footer.
 - **Performance**: a secondary window has its own frame loop; its content follows the same
@@ -1207,7 +1215,9 @@ Build:               …                                          label ends wit
   to lock)"); hover and pressed and focus as TlButton::Toggle. The helper's 300 s idle exit moves
   the button back to locked without a toast (APP-003).
 - **Interaction**: click or Space or Enter: locked dispatches `StartHelperSession`; unlocked
-  dispatches `EndHelperSession`. Tooltip when locked: "Unlock privileged actions". Shift held at
+  dispatches `EndHelperSession`. Tooltip when locked: "Unlock privileged actions"; while starting:
+  "Waiting for authentication…" (R-201). A failed start is reported once through
+  `HealthSnapshot.helper_start` (R-148). Shift held at
   launch and `privilege.unlock_at_launch` start the session at launch, which shows the starting
   state in the toolbar.
 - **Data binding**: `HealthSnapshot.helper: HelperState { Missing, Locked, Starting, Unlocked }`
@@ -1362,8 +1372,9 @@ pub struct ThemeStore {              // GPUI Global, one per app
   from the current interpolated colours); previewing (UI-FND-043).
 - **Interaction**: View > Theme items dispatch `ActivateTheme { name }`; the Settings window's
   theme fields dispatch the same action. Toasts per APP-036 belong to the shell's menu entry; the
-  store emits `ThemeEvent::{Activated, Deleted, Copied, ImportFailed}` and the shell turns them
-  into toasts.
+  store emits `ThemeEvent::{Activated, Deleted, Copied, ImportFailed, Imported { count: u32 }}` and
+  the shell turns them into toasts; `ThemeError` has `BuiltinCannotBeDeleted` and
+  `BuiltinCannotBeEdited` beside its other variants (R-209).
 - **Data binding**: `[theme]` section of table (a); `system.color_scheme` from the snapshot.
 - **Build**: `theme/mod.rs` (`TlTheme`, `ThemeStore`, `activate`, crossfade), `theme/derived.rs`,
   `theme/map.rs` (UI-FND-002). The crossfade uses the window's `AnimationDriver::request` with a
@@ -1793,7 +1804,7 @@ No scope item is unmapped.
 14. TlSlider geometry and keyboard steps; per-frame coalescing of scale drags.
 15. TlStepper design (kit NumberInput not used).
 16. TlTextInput states; filter box stays 280 wide while non-empty; 20 px clear hit area.
-17. TlSelect: popup max 10 items, filter field above 12 items, type-ahead.
+17. TlSelect: popup max 10 items, filter field at 12 or more items, type-ahead.
 18. TlTabs: underline style, min cell 80, overflow menu.
 19. TlTooltip: max width 360 for text and 560 for lines, 12-line cut, keyboard show,
     below-then-above placement.
