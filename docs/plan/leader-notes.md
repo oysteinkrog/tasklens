@@ -118,3 +118,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 2dl.32: `impl Default for FanControl` lives in sample/sensors.rs as a placeholder; consider moving to a derive in parse/hwmon.rs.
 - 2dl.21: `impl Default for ZramReading` written by hand because counters::Rate has no Default.
 - cpufreq.rs:310 failed `cargo fmt --check` around 20:22; 2dl.16 now owns the file and must leave it formatted. Check in the full-workspace pass.
+- 2dl.30: netif::read_oper_state builds a PathBuf per interface per tick (one alloc per iface per sample). Make it take a reusable buffer or dirfd in the perf pass.
