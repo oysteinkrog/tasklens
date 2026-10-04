@@ -2,18 +2,22 @@
 //!
 //! The engine builds the rows; the UI never sorts or filters. `build` turns the current records
 //! and the UI's `TableQuery` into a `ProcessTableView`. This file holds flat mode
-//! (`TableMode::Flat`); tree mode (E09-010) and grouped mode (E09-011) extend it.
+//! (`TableMode::Flat`) and tree mode (`TableMode::Tree`, E09-010); grouped mode (E09-011) extends
+//! it.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use tl_model::devices::DeviceCatalog;
 use tl_model::ids::{ColumnId, NodeId};
 use tl_model::process::{AppCgroupSample, GroupKind, ProcFlags, ProcessExtras, ProcessRecord};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::SystemSnapshot;
-use tl_model::table::{ProcessTableView, SortSpec, TableQuery, TableRow, TableTotals, UnitRef};
+use tl_model::table::{
+    ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableTotals, UnitRef,
+};
 use tl_model::validity::{ProcessField, Validity};
 
 use crate::update::CgroupStats;
@@ -452,10 +456,259 @@ fn record_only_key(r: &ProcessRecord, column: ColumnId) -> SortKey {
     }
 }
 
-/// Builds the process table for `query` (ADR-009). Flat mode only so far.
-pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
-    let filter = Filter::parse(&query.filter);
-    let mut indexes = filtered(input, &filter);
+/// The ppid forest of the visible records (PROC-014, ADR-009).
+///
+/// Every index is a record index. `children` and `parent` have one entry per record; a record
+/// that is not visible has no parent, no children and is not a root.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Forest {
+    pub children: Vec<SmallVec<[u32; 4]>>,
+    pub parent: Vec<Option<u32>>,
+    pub roots: Vec<u32>,
+}
+
+/// Builds the forest of the records marked in `visible` (index aligned with `records`).
+///
+/// A record's parent is the visible record whose `key.pid` equals its `ppid`. With no such record
+/// (parent filtered, hidden or gone, or `ppid` 0) the record is a root (ADR-009). Kernel threads
+/// have `ppid` 2, so they sit under `kthreadd`. When two visible records share a PID (a lingering
+/// `EXITED` record and its successor), the later record in key order, the newer one, is the
+/// parent. A `ppid` cycle, impossible on Linux but possible in a fixture, is cut so every visible
+/// record still appears once. O(n) with one PID map.
+pub fn forest(records: &[ProcessRecord], visible: &[bool]) -> Forest {
+    let n = records.len();
+    let is_visible = |i: usize| visible.get(i).copied().unwrap_or(false);
+
+    let mut by_pid: FxHashMap<u32, u32> =
+        FxHashMap::with_capacity_and_hasher(n, Default::default());
+    for (i, r) in records.iter().enumerate() {
+        if is_visible(i) {
+            // The snapshot never holds more than u32::MAX records.
+            by_pid.insert(r.key.pid, i as u32);
+        }
+    }
+
+    let mut f = Forest {
+        children: vec![SmallVec::new(); n],
+        parent: vec![None; n],
+        roots: Vec::new(),
+    };
+    for (i, r) in records.iter().enumerate() {
+        if !is_visible(i) {
+            continue;
+        }
+        let i = i as u32;
+        match by_pid.get(&r.ppid) {
+            Some(&p) if p != i => {
+                f.parent[i as usize] = Some(p);
+                f.children[p as usize].push(i);
+            }
+            _ => f.roots.push(i),
+        }
+    }
+    cut_cycles(&mut f, visible);
+    f
+}
+
+/// Makes every visible record reachable from a root. A record not reached from the roots lies in
+/// or under a `ppid` cycle: walk up from it to the first record seen twice, which is on the
+/// cycle, and make that record a root.
+fn cut_cycles(f: &mut Forest, visible: &[bool]) {
+    let n = f.children.len();
+    let mut reached = vec![false; n];
+    let mut stack: Vec<u32> = Vec::new();
+    for &root in &f.roots {
+        mark_subtree(f, root, &mut reached, &mut stack);
+    }
+    // Which start record last walked through each record, so the marks need no reset.
+    let mut walked_from = vec![u32::MAX; n];
+    for start in 0..n {
+        if reached[start] || !visible.get(start).copied().unwrap_or(false) {
+            continue;
+        }
+        let mut cur = start as u32;
+        while walked_from[cur as usize] != start as u32 {
+            walked_from[cur as usize] = start as u32;
+            match f.parent[cur as usize] {
+                Some(p) => cur = p,
+                // Unreached records always have a parent; stop if a hand-built forest has none.
+                None => break,
+            }
+        }
+        if let Some(p) = f.parent[cur as usize].take() {
+            f.children[p as usize].retain(|c| *c != cur);
+        }
+        f.roots.push(cur);
+        mark_subtree(f, cur, &mut reached, &mut stack);
+    }
+}
+
+/// Marks `root` and every record under it in `reached`, with an explicit stack.
+fn mark_subtree(f: &Forest, root: u32, reached: &mut [bool], stack: &mut Vec<u32>) {
+    stack.clear();
+    stack.push(root);
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut reached[i as usize], true) {
+            continue;
+        }
+        stack.extend(f.children[i as usize].iter().copied());
+    }
+}
+
+/// All descendants of `i` in `f`: the N of the collapsed "PID +N" form (PROC-018).
+///
+/// Walks with an explicit stack and a visited bitset, so a cycle in a hand-built forest cannot
+/// loop.
+pub fn descendants_count(f: &Forest, i: u32) -> u32 {
+    let n = f.children.len();
+    if i as usize >= n {
+        return 0;
+    }
+    let mut visited = vec![0u64; n.div_ceil(64)];
+    let mut test_and_set = |j: u32| {
+        let (word, bit) = (j as usize / 64, 1u64 << (j % 64));
+        let was = visited[word] & bit != 0;
+        visited[word] |= bit;
+        was
+    };
+    test_and_set(i);
+    let mut stack = vec![i];
+    let mut count = 0u32;
+    while let Some(j) = stack.pop() {
+        for &c in &f.children[j as usize] {
+            if (c as usize) < n && !test_and_set(c) {
+                count = count.saturating_add(1);
+                stack.push(c);
+            }
+        }
+    }
+    count
+}
+
+/// Appends the tree rows of `f` to `out` in display order, roots at `depth`.
+///
+/// `order` sorts one sibling list (the E09-009 sort) and is applied to the roots and to every
+/// expanded record's children. A row's children follow it only when its `NodeId` is in
+/// `expanded`. `depth` grows by 1 per level and saturates at 255. `descendants` equals
+/// `descendants_count`, computed for all records in one pass. `records` gives each row's
+/// `ProcessKey`.
+pub fn flatten_tree(
+    records: &[ProcessRecord],
+    f: &Forest,
+    order: &dyn Fn(&[u32]) -> Vec<u32>,
+    expanded: &FxHashSet<NodeId>,
+    out: &mut Vec<TableRow>,
+    depth: u8,
+) {
+    let n = f.children.len().min(records.len());
+    let in_range = |i: u32| (i as usize) < n;
+
+    // Pre-order of every record under the roots, then sum the counts bottom up.
+    let mut seen = vec![false; n];
+    let mut pre: Vec<u32> = Vec::with_capacity(n);
+    let mut stack: Vec<u32> = f.roots.iter().copied().filter(|&i| in_range(i)).collect();
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut seen[i as usize], true) {
+            continue;
+        }
+        pre.push(i);
+        stack.extend(
+            f.children[i as usize]
+                .iter()
+                .copied()
+                .filter(|&c| in_range(c)),
+        );
+    }
+    let mut descendants = vec![0u32; n];
+    let mut counted = vec![false; n];
+    for &i in pre.iter().rev() {
+        counted[i as usize] = true;
+        let mut sum = 0u32;
+        for &c in &f.children[i as usize] {
+            // Only children already counted: in an acyclic forest that is every child.
+            if in_range(c) && counted[c as usize] && c != i {
+                sum = sum
+                    .saturating_add(descendants[c as usize])
+                    .saturating_add(1);
+            }
+        }
+        descendants[i as usize] = sum;
+    }
+
+    let mut emitted = vec![false; n];
+    let mut stack: Vec<(u32, u8)> = order(&f.roots)
+        .into_iter()
+        .rev()
+        .filter(|&i| in_range(i))
+        .map(|i| (i, depth))
+        .collect();
+    while let Some((i, d)) = stack.pop() {
+        if std::mem::replace(&mut emitted[i as usize], true) {
+            continue;
+        }
+        let node = NodeId::Process(records[i as usize].key);
+        let kids = &f.children[i as usize];
+        let is_expanded = expanded.contains(&node);
+        out.push(TableRow {
+            node,
+            depth: d,
+            expanded: is_expanded,
+            has_children: !kids.is_empty(),
+            record: Some(i),
+            group: None,
+            descendants: descendants[i as usize],
+            subtree: None,
+        });
+        if is_expanded && !kids.is_empty() {
+            let next = d.saturating_add(1);
+            for c in order(kids).into_iter().rev().filter(|&c| in_range(c)) {
+                stack.push((c, next));
+            }
+        }
+    }
+}
+
+/// Tree mode visibility: a record is visible when it is in `matches` or, with
+/// `include_children`, when any ancestor in the full ppid forest is (PROC-045).
+fn tree_visible(records: &[ProcessRecord], matches: &[u32], include_children: bool) -> Vec<bool> {
+    let mut visible = vec![false; records.len()];
+    for &i in matches {
+        visible[i as usize] = true;
+    }
+    if include_children && matches.len() < records.len() {
+        let all = forest(records, &vec![true; records.len()]);
+        let mut reached = vec![false; records.len()];
+        let mut stack = Vec::new();
+        for &i in matches {
+            mark_subtree(&all, i, &mut reached, &mut stack);
+        }
+        for (v, r) in visible.iter_mut().zip(reached) {
+            *v |= r;
+        }
+    }
+    visible
+}
+
+/// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`.
+fn tree_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Vec<TableRow>, u32) {
+    let matches = filtered(input, filter);
+    let visible = tree_visible(input.records, &matches, query.include_children);
+    let shown = visible.iter().filter(|v| **v).count() as u32;
+    let f = forest(input.records, &visible);
+    let expanded: FxHashSet<NodeId> = query.expanded.iter().cloned().collect();
+    let order = |ids: &[u32]| {
+        let mut v = ids.to_vec();
+        sort_indices(input, &mut v, query.sort);
+        v
+    };
+    let mut rows = Vec::with_capacity(shown as usize);
+    flatten_tree(input.records, &f, &order, &expanded, &mut rows, 0);
+    (rows, shown)
+}
+
+/// Flat mode rows: every match at depth 0, sorted by `query.sort`.
+fn flat_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Vec<TableRow>, u32) {
+    let mut indexes = filtered(input, filter);
     sort_indices(input, &mut indexes, query.sort);
 
     let rows: Vec<TableRow> = indexes
@@ -471,6 +724,18 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
             subtree: None,
         })
         .collect();
+    let shown = rows.len() as u32;
+    (rows, shown)
+}
+
+/// Builds the process table for `query` (ADR-009). Grouped mode (E09-011) still builds flat
+/// rows.
+pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
+    let filter = Filter::parse(&query.filter);
+    let (rows, shown) = match query.mode {
+        TableMode::Tree => tree_rows(input, query, &filter),
+        TableMode::Flat | TableMode::Grouped => flat_rows(input, query, &filter),
+    };
 
     let restricted = input
         .records
@@ -483,7 +748,7 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
         header: Default::default(),
         query_generation: query.generation,
         total: input.records.len() as u32,
-        shown: rows.len() as u32,
+        shown,
         restricted: restricted as u32,
         rows: Arc::from(rows),
         groups: Arc::from([]),
@@ -494,6 +759,254 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::{GroupKey, ProcessKey};
+    use tl_model::process::{ProcState, ProcessMeta};
+    use tl_model::system::CpuSet;
+    use tl_model::time::BootId;
+    use tl_model::validity::FieldValidity;
+
+    fn rec(pid: u32, ppid: u32, name: &str, cpu: f32) -> ProcessRecord {
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: u64::from(pid),
+                boot_id: BootId(1),
+                pid,
+            },
+            ppid,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: name.into(),
+                name: name.into(),
+                exe: None,
+                cmdline: None,
+                user: "user".into(),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                search_lower: name.to_lowercase().into(),
+            }),
+            group: GroupKey(0),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: cpu,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn extras() -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: "x".into(),
+            exe_path: "/usr/bin/x".into(),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    /// Builds `records` in tree mode and returns (pid, depth, has_children, descendants) per row.
+    fn tree(
+        records: &[ProcessRecord],
+        filter: &str,
+        include_children: bool,
+        expanded: &[u32],
+        sort: SortSpec,
+    ) -> Vec<(u32, u8, bool, u32)> {
+        let mut records = records.to_vec();
+        records.sort_by_key(|r| r.key);
+        let extras: Vec<ProcessExtras> = records.iter().map(|_| extras()).collect();
+        let system = SystemSnapshot::default();
+        let devices = DeviceCatalog::default();
+        let settings = EngineSettings::default();
+        let unit_names = FxHashMap::default();
+        let input = TableInput {
+            records: &records,
+            extras: &extras,
+            app_stats: &[],
+            unit_stats: &[],
+            system: &system,
+            devices: &devices,
+            settings: &settings,
+            unit_names: &unit_names,
+        };
+        let expanded: Vec<NodeId> = records
+            .iter()
+            .filter(|r| expanded.contains(&r.key.pid))
+            .map(|r| NodeId::Process(r.key))
+            .collect();
+        let query = TableQuery {
+            mode: TableMode::Tree,
+            sort,
+            filter: Arc::from(filter),
+            expanded: Arc::from(expanded),
+            include_children,
+            ..TableQuery::default()
+        };
+        let view = build(&input, &query);
+        view.rows
+            .iter()
+            .map(|row| {
+                let r = &records[row.record.unwrap() as usize];
+                (r.key.pid, row.depth, row.has_children, row.descendants)
+            })
+            .collect()
+    }
+
+    const PID_ASC: SortSpec = SortSpec {
+        column: ColumnId::Pid,
+        ascending: true,
+    };
+
+    fn abc() -> Vec<ProcessRecord> {
+        vec![
+            rec(1, 0, "alpha", 0.0),
+            rec(2, 1, "bravo", 0.0),
+            rec(3, 2, "charlie", 0.0),
+        ]
+    }
+
+    #[test]
+    fn tree_depths_and_has_children() {
+        let rows = tree(&abc(), "", false, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(1, 0, true, 2), (2, 1, true, 1), (3, 2, false, 0)]);
+    }
+
+    #[test]
+    fn collapsed_parent_descendant_count() {
+        let rows = tree(&abc(), "", false, &[1], PID_ASC);
+        assert_eq!(rows, [(1, 0, true, 2), (2, 1, true, 1)]);
+    }
+
+    #[test]
+    fn filtered_child_becomes_root() {
+        let rows = tree(&abc(), "charlie", false, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(3, 0, false, 0)]);
+    }
+
+    #[test]
+    fn include_children_pulls_descendants() {
+        let rows = tree(&abc(), "alpha", true, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(1, 0, true, 2), (2, 1, true, 1), (3, 2, false, 0)]);
+        let rows = tree(&abc(), "alpha", false, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(1, 0, false, 0)]);
+    }
+
+    #[test]
+    fn exited_parent_keeps_place_then_child_reroots() {
+        let mut records = abc();
+        records[1].flags |= ProcFlags::EXITED;
+        records[1].state = ProcState::Zombie;
+        let rows = tree(&records, "", false, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(1, 0, true, 2), (2, 1, true, 1), (3, 2, false, 0)]);
+        records.remove(1);
+        let rows = tree(&records, "", false, &[1, 2], PID_ASC);
+        assert_eq!(rows, [(1, 0, false, 0), (3, 0, false, 0)]);
+    }
+
+    #[test]
+    fn siblings_sorted_under_parent() {
+        let records = vec![
+            rec(10, 0, "low", 10.0),
+            rec(11, 10, "low-a", 1.0),
+            rec(12, 10, "low-b", 5.0),
+            rec(20, 0, "high", 20.0),
+            rec(21, 20, "high-a", 3.0),
+            rec(22, 20, "high-b", 7.0),
+        ];
+        let cpu_desc = SortSpec {
+            column: ColumnId::Cpu,
+            ascending: false,
+        };
+        let pids: Vec<u32> = tree(&records, "", false, &[10, 20], cpu_desc)
+            .iter()
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(pids, [20, 22, 21, 10, 12, 11]);
+    }
+
+    #[test]
+    fn kernel_threads_sit_under_kthreadd() {
+        let records = vec![
+            rec(1, 0, "systemd", 0.0),
+            rec(2, 0, "kthreadd", 0.0),
+            rec(3, 2, "rcu_gp", 0.0),
+        ];
+        let rows = tree(&records, "", false, &[2], PID_ASC);
+        assert_eq!(rows, [(1, 0, false, 0), (2, 0, true, 1), (3, 1, false, 0)]);
+    }
+
+    #[test]
+    fn ppid_cycle_does_not_loop() {
+        // 5 -> 6 -> 7 -> 5, and 8 under 7. Every record still shows once.
+        let records = vec![
+            rec(5, 7, "a", 0.0),
+            rec(6, 5, "b", 0.0),
+            rec(7, 6, "c", 0.0),
+            rec(8, 7, "d", 0.0),
+        ];
+        let rows = tree(&records, "", false, &[5, 6, 7, 8], PID_ASC);
+        let mut pids: Vec<u32> = rows.iter().map(|r| r.0).collect();
+        pids.sort_unstable();
+        assert_eq!(pids, [5, 6, 7, 8]);
+
+        // A hand-built cycle: descendants_count still ends.
+        let f = Forest {
+            children: vec![SmallVec::from_slice(&[1]), SmallVec::from_slice(&[0])],
+            parent: vec![Some(1), Some(0)],
+            roots: Vec::new(),
+        };
+        assert_eq!(descendants_count(&f, 0), 1);
+    }
+
+    #[test]
+    fn depth_saturates_at_255() {
+        let records: Vec<ProcessRecord> = (1..=300u32)
+            .map(|pid| rec(pid, pid - 1, "p", 0.0))
+            .collect();
+        let all: Vec<u32> = (1..=300).collect();
+        let rows = tree(&records, "", false, &all, PID_ASC);
+        assert_eq!(rows.len(), 300);
+        assert_eq!(rows[0], (1, 0, true, 299));
+        assert_eq!(rows[255].1, 255);
+        assert_eq!(rows[299].1, 255);
+    }
 
     #[test]
     fn text_sort_case_insensitive() {
