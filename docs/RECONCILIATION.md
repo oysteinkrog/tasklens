@@ -1194,6 +1194,109 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: gpui `UniformListScrollHandle(pub Rc<RefCell<..>>)`, UI-PRC-010 Build line [verified].
 - Edits: bead rsf.1; edge wlf.10 on pdu.1.
 
+### R-187 First visible row across a scale change: one E18 bead (OI-U17)
+- Question: UI-SHL-130 step 5 and test `scale_keeps_first_row` belong to `tree_table.rs`, and E18 has no bead for them. Raised by B7-E20-7.
+- Resolution: new bead E18-017 (P1, `table/tree_table.rs`, depends on rsf.1): `TlTreeTable` gains `pub fn first_visible_row(&self) -> Option<(RowId, usize)>` and `pub fn restore_first_visible_row(&mut self, anchor, cx)`, which calls `scroll_to_item_with_offset(ix, ScrollStrategy::Top, 0)` after the new metrics are applied. E20-013 calls them around the metrics re-apply, for the active table only. Test `scale_keeps_first_row` lives in the new bead.
+- Basis: UI-SHL-130 step 5, UI-PRC-010 anchor [verified].
+- Edits: new bead E18-017; edge jqk.15 on it.
+
+### R-188 One filter debounce, in the shell (OI-U18)
+- Question: the shell debounces 100 ms before `FilterChanged` (UI-SHL-024) and E22-024 debounces another 100 ms. Raised by B7-E20-6.
+- Resolution: E22-024 drops its own debounce and sends `Command::SetTableQuery` on every `FilterChanged`. UI-PRC-016's "100 ms debounce" is the shell's.
+- Basis: UI-SHL-024, UI-SYS-002 [verified].
+- Edits: UI-PRC-016 Interaction and Build; bead pdu.27 (test renamed `filter_changed_sends_new_generation`).
+
+### R-189 `SHIPPED_PHASE` and End Process on app rows before P2 (OI-U19)
+- Question: how code decides "a phase has not shipped", and what Shift+Delete does on an app or unit row in P1. Raised by B8-E22-4, B8-E22-17.
+- Resolution: `pub const SHIPPED_PHASE: u8 = 1;` in `pages/processes/delegate.rs`, raised by E22-042 to E22-044 as each phase's columns land; columns and menu items with a higher phase are not built. In P1 `EndProcess` on an app or unit row is a no-op without a toast; E22-035 turns it into Kill App.
+- Basis: UI-PRC-013 [verified]; the mechanism [inferred].
+- Edits: none.
+
+### R-190 Name cell geometry: gap 6 after the chevron and after the icon (OI-U20)
+- Question: UI-PRC-002's app-row and unit-row sketches differ by 4 px and the UI-PRC-003 test formula omits the icon gap. Raised by B8-E22-2.
+- Resolution: one rule for every row kind: indent = depth x 20; chevron 16 wide starting at indent + 6; gap 6; icon 16 (unit) or 24 (app); gap 6; text. For an app row at depth 0: chevron 6..22, icon 28..52, text 58 before the row's left padding of 20 (26..42, 48..72, 78 in the sketch). The unit sketch becomes icon 48..64, text 70.
+- Basis: UI-PRC-002 app sketch [verified]; the generalisation [inferred].
+- Edits: UI-PRC-002 unit sketch, UI-PRC-003 formula.
+
+### R-191 Picker group of each process column (OI-U21)
+- Question: PROC-024 gives 13 headings and the Objects members only. Raised by B8-E22-3.
+- Resolution: E22-002's mapping: each PROC column section goes under its own heading; Start time, Type and the package and file columns under Image; User, PID, Parent PID and Session under Identity. The mapping is the source for `[columns.processes]` defaults and is recorded in UI-PRC-007.
+- Basis: PROC-024 [verified]; the mapping [guess, writer-level].
+- Edits: UI-PRC-007 (the mapping table from pdu.6).
+
+### R-192 Subtree for End Process Tree and the bwrap first descendant (OI-U22)
+- Question: UI-PRC-013 says the subtree comes from "the engine forest", which is not in the snapshot. Raised by B8-E22-8.
+- Resolution: the UI walks `ProcessSnapshot.records` by `ppid`, matching parents by `pid` among non-exited records, breadth first, capped at 256 keys (the `ActionRequest` limit). For a bwrap row the first descendant is the first non-bwrap record in that walk, ties by lowest PID.
+- Basis: ADR-005 256 targets [verified]; the walk [inferred].
+- Edits: UI-PRC-013 Interaction.
+
+### R-193 Flat `TlTreeTable` instead of `TlStaticTable` (OI-U23)
+- Question: UI-PRF-030 names a sortable `TlStaticTable`; foundation.md has no such component. Raised by E25-OI-3.
+- Resolution: no new component. The SMART attribute table and any other static table in the Performance tab is a `TlTreeTable` with a flat delegate (`RowKind::Plain`, no expansion, no selection actions), sorted by the delegate on header click.
+- Basis: UI-PRF-030, UI-SYS-002 [verified].
+- Edits: UI-PRF-030.
+
+### R-194 Toolbar slots: E20 defines the trait, pages draw the buttons (OI-U24)
+- Question: UI-SHL-010 draws slots 2 and 3 inside `TitleBarView` from a `ToolbarModel`; 00-epics gives E22 `toolbar.rs` and a `ToolbarContent` registration. Raised by B8-E22-11.
+- Resolution: E20-003 defines `ToolbarContent` and `ToolbarModel` and draws only the slot frame; each page epic registers one `ToolbarContent` that draws its own buttons (E22-022 draws the Processes buttons). E20 draws no page button.
+- Basis: 00-epics section 2 chain-edit rule, UI-SHL-010 [verified].
+- Edits: UI-SHL-010.
+
+### R-195 Toast top is 72 in every window for P1 (OI-U25)
+- Question: the kit `NotificationSettings` is app-global, so the main window top 72 and the secondary-window top 42 (UI-FND-020 rule 9) cannot both hold. Raised by B5-8.
+- Resolution: 72 x `ui_scale` in every window for P1 (66 with server decorations, app-wide). Rule 9 stays the P2 target: a kit change or `ToastQueue::new(window, cx, top)` taking a per-window top once E16-006's queue no longer goes through the kit global. No bead now.
+- Basis: UI-FND-020 rule 9, UI-SHL-100, R-109, R-113 [verified].
+- Edits: UI-FND-020 rule 9, UI-SHL-100; bead fut.9 (every caller passes the shell's value in P1).
+
+### R-196 `message(&ActionError)`, reject texts and deadlines (OI-U26)
+- Question: the docs give only the `PermissionDenied` text; the tracker also needs reject texts, deadlines and the short reason used in partial-failure summaries. Raised by B5-9, B5-23, B8-E22-6.
+- Resolution, in `tl-ui/src/action_tracker.rs`. `message()`: `PermissionDenied` "Permission denied. This process belongs to another user."; `NoSuchProcess` "The process has already exited."; `Partial { done, total }` "Done for {done} of {total} targets."; `UnitJob { result, error_name }` "The service job ended with result: {result}."; `Os(code)` "The system call failed (error {code})."; `Internal(text)` "Internal error: {text}.". Reject toasts (Warning): `Busy` "Another action on this process is still running."; `TooManyTargets` "Too many processes selected. The limit is 256."; `IdentityChanged` "The selected process changed; wait for the list to update and try again."; `KernelThread` "Kernel threads cannot be signalled."; `Protected` "This process is protected. Confirm the warning to end it."; `NotOwner` "This process belongs to another user. Administrator access is needed."; `Unsupported` "This action is not available for this process."; `AlreadyRunning` "Already running" (Info). `deadline_for`: 2 s per target for signal, nice, affinity, ioprio and freeze writes; 120 s for every call that may show a polkit prompt (`SockDestroy`, `UnitWriteRecovery`, `UnitRemoveRecovery` included); `Dump` has no deadline, its progress toast "Writing core… 1.2 GiB" is the liveness signal. `short_reason(&err)` is the first sentence of `message()` lower-cased without its full stop ("permission denied").
+- Basis: ADR-006 deadline table, ADR-015, PROC-058 [verified]; the new texts [guess]; `Dump` deadline [inferred from PROC-075].
+- Edits: ADR-015 (`message()` table); R-121 accepted strings; beads fut.3, pdu.20.
+
+### R-197 `ActionTracker` contract (OI-U27)
+- Question: five batches need the same tracker API: per-request texts, a summary threshold, a Details dialog, a Progress toast without the auto-dismiss cap, result events by request id and a caller for `StatusChip::note_restricted_refusal`. Raised by B5-24, B7-E23-8, B8-E27-3, B8-E27-4, B7-E20-8.
+- Resolution: E16-A3 as written with these fixed points. `ActionTracker::track(&mut self, request, queue: WeakEntity<ToastQueue>, texts: ToastTexts, cx) -> Result<ActionId, CommandError>`; `ToastTexts.toast_key: Option<ToastKey>` so grouped requests share one toast that replaces in place. `ToastTexts.summary_min_targets` defaults to 4 (R-114); process actions pass 2. A `ToastTexts` whose `started` is `None` pushes no Progress toast; E27's `SysActions` passes `None` when `pending_one` is empty. Progress toasts never auto-dismiss and do not count against the 4-visible cap. The tracker emits `ActionTrackerEvent::{Started(ActionId), Finished { id, ok, total, failed }}` through `cx.emit`. "Details" on a partial summary opens `TlDialog` titled "tasklens", non-destructive, one line per failed target "<target label>: <message(err)>", one button "Close". On `Failed(PermissionDenied)` when `HealthSnapshot.helper == HelperState::Missing`, the tracker calls `StatusChip::note_restricted_refusal(cx)` through the `ShellState` global if present. The D-Bus error name inside `UnitJob` is engine side (R-170).
+- Basis: fut.3 Deliverable, R-114, UI-PRC-015, UI-SYS-007, UI-SYS-045, UI-SYS-046 [verified]; event enum and `toast_key` [inferred].
+- Edits: UI-SYS-007 (Details dialog); beads fut.3, jqk.18, hk6.9, gma.5 to gma.7.
+
+### R-198 Confirmation precedence when several rules match (OI-U28)
+- Question: UI-PRC-014 gives only "protected wins over tree". Raised by B8-E22-7.
+- Resolution: Protected, then End tree, then Kill app, then several targets, then another user's process. The winning row's title and buttons are used; the count N is still shown where the winning text has one.
+- Basis: UI-PRC-014 [verified]; the order [inferred, most destructive first].
+- Edits: UI-PRC-014.
+
+### R-199 Copy details rounding and clipboard failure (OI-U29)
+- Question: rounding and glyph words in the TSV, and whether a clipboard failure can be reported. Raised by B8-E22-9, B8-E27-2.
+- Resolution: whole MiB rounded to nearest; TSV writes the words `restricted`, `n/a` and an empty cell for the other glyphs (R-050). `App::write_to_clipboard` returns `()` in gpui-pre 0.3.7 (`app.rs:1549`), so no failure can be detected. One wrapper `tl_ui::util::clipboard_write(cx, text) -> Result<(), ()>` returns `Ok(())` today; every copy path shows the success toast through it; the "Failed to copy to clipboard" and "Could not copy" texts stay in Fluent and unused.
+- Basis: gpui source, R-050, APP-044 [verified].
+- Edits: UI-PRC-015 and system-tabs.md footnote; beads pdu.2 (hosts the wrapper), hk6.8, hk6.14.
+
+### R-200 Fluent key prefix and slug rule (OI-U30)
+- Question: R-132 fixes `<area>-<entry>-<slug>` but not the area prefixes nor the slug form. Raised by B5-31, B8-E22-18.
+- Resolution: areas `fnd` (foundation), `shl` (shell), `prc` (processes), `pwn` (process windows), `prf` (performance), `sys` (system tabs), `app` (tl-app strings passed through). The slug is the kebab-case of the first five words of the English text, letters and digits only, for example `prc-015-process-terminated`. A key that collides inside one entry gets a numeric suffix `-2`.
+- Basis: R-132 [verified]; the rule [guess, writer-level, already used by every bead].
+- Edits: R-132.
+
+### R-201 Small texts no doc gives (OI-U31)
+- Question: stepper button tooltips, the shield's starting-state tooltip, the TaskSlinger import failure toast. Raised by B5-20, B5-25, B7-E21-10.
+- Resolution: stepper minus "Decrease", plus "Increase". Shield starting state tooltip "Waiting for authentication…". TaskSlinger import failure: Error toast "Could not import TaskSlinger settings"; success stays APP-034's "Imported N settings and M themes".
+- Basis: R-121 [verified]; the two new texts [guess, writer-level].
+- Edits: UI-FND-014, UI-FND-028, UI-SHL-040; R-121.
+
+### R-202 "Grant access" without the ellipsis (OI-U32)
+- Question: R-121 lists "Grant access…"; UI-PWN-018 and the PROC texts use "Grant access". Raised by B7-E23-7.
+- Resolution: "Grant access". The button opens no dialog of its own (the polkit prompt is the system's), so the UI-FND-050 ellipsis rule does not apply.
+- Basis: UI-PWN-018, R-050 [verified].
+- Edits: R-121.
+
+### R-203 Startup and connection action toasts (OI-U33)
+- Question: no busy, unknown or summary strings exist for the startup, connection and the Reload, Reset failed and startup-type service actions. Raised by B8-E28-10, B8-E27-6.
+- Resolution: R-114's pattern extended. Busy: "A startup action is already in progress.", "A connection action is already in progress.". Unknown: "Outcome unknown" for all. Services: "Reloading { $n } services...", "{ $n } services reloaded", "{ $ok } of { $n } services reloaded. { $failed } failed."; "Resetting { $n } services...", "{ $n } services reset", "{ $ok } of { $n } services reset. { $failed } failed."; "Changing startup type of { $n } services...", "Startup type changed for { $n } services", "Startup type changed for { $ok } of { $n } services. { $failed } failed.". Startup Apps: "{ $n } startup entries disabled", "{ $n } startup entries enabled", "{ $n } startup entries launched", "{ $n } startup entries deleted", and the "{ $ok } of { $n } startup entries disabled. { $failed } failed." forms. Connections: "{ $n } TCP connections closed", "{ $ok } of { $n } TCP connections closed. { $failed } failed.". No Progress toast for startup and connection actions (`ToastTexts.started = None`, R-197).
+- Basis: R-114, UI-SYS-007, PROC-058 [verified]; the new strings [inferred from the pattern].
+- Edits: R-114.
+
+
 
 
 
