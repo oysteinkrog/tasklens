@@ -281,21 +281,286 @@ pub struct ThreadRow {
     pub validity: Validity,
 }
 
-// filled by E03-058
-#[derive(Clone, Debug, Default)]
-pub struct FdDetail {}
+// ---- File descriptors (UI-PWN-012) ----
 
-// filled by E03-058
-#[derive(Clone, Debug, Default)]
-pub struct MapsDetail {}
+/// The Type column of the File descriptors tab.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FdKind {
+    File,
+    Directory,
+    Tcp,
+    Udp,
+    Unix,
+    Netlink,
+    Pipe,
+    Fifo,
+    Eventfd,
+    Eventpoll,
+    Timerfd,
+    Signalfd,
+    Inotify,
+    Fanotify,
+    Memfd,
+    Dmabuf,
+    Drm,
+    Pidfd,
+    IoUring,
+    AnonInode,
+    Device,
+}
 
-// filled by E03-058
-#[derive(Clone, Debug, Default)]
-pub struct SecurityDetail {}
+impl FdKind {
+    /// "file", "directory", "TCP", "UDP", "unix", "netlink", "pipe", "FIFO", "eventfd", "eventpoll",
+    /// "timerfd", "signalfd", "inotify", "fanotify", "memfd", "dmabuf", "DRM", "pidfd", "io_uring",
+    /// "anon_inode", "device"
+    pub const fn label(self) -> &'static str {
+        match self {
+            FdKind::File => "file",
+            FdKind::Directory => "directory",
+            FdKind::Tcp => "TCP",
+            FdKind::Udp => "UDP",
+            FdKind::Unix => "unix",
+            FdKind::Netlink => "netlink",
+            FdKind::Pipe => "pipe",
+            FdKind::Fifo => "FIFO",
+            FdKind::Eventfd => "eventfd",
+            FdKind::Eventpoll => "eventpoll",
+            FdKind::Timerfd => "timerfd",
+            FdKind::Signalfd => "signalfd",
+            FdKind::Inotify => "inotify",
+            FdKind::Fanotify => "fanotify",
+            FdKind::Memfd => "memfd",
+            FdKind::Dmabuf => "dmabuf",
+            FdKind::Drm => "DRM",
+            FdKind::Pidfd => "pidfd",
+            FdKind::IoUring => "io_uring",
+            FdKind::AnonInode => "anon_inode",
+            FdKind::Device => "device",
+        }
+    }
+}
 
-// filled by E03-058
+/// One open file descriptor.
+#[derive(Clone, Debug)]
+pub struct FdRow {
+    pub fd: i32,
+    pub kind: FdKind,
+    /// Readlink target or socket text, sanitized.
+    pub name: Arc<str>,
+    /// anon_inode and other unnamed handles ("Hide unnamed handles").
+    pub unnamed: bool,
+    /// fdinfo pos. `None` for sockets and pipes ("-").
+    pub pos: Option<u64>,
+    /// fdinfo flags, shown in octal as "Raw flags". `None` when fdinfo is unreadable.
+    pub flags: Option<u32>,
+    pub mnt_id: Option<u32>,
+    pub inode: Option<u64>,
+    /// fdinfo eventfd-count.
+    pub eventfd_count: Option<u64>,
+    /// fdinfo drm-client-id.
+    pub drm_client_id: Option<u64>,
+    /// fdinfo drm-driver.
+    pub drm_driver: Option<Arc<str>>,
+    /// For "Go to connection" on TCP, UDP and unix rows.
+    pub socket_inode: Option<u64>,
+}
+
+/// The File descriptors tab. `fdinfo_available` false is "Handle detail query unavailable."
 #[derive(Clone, Debug, Default)]
-pub struct EnvDetail {}
+pub struct FdDetail {
+    pub rows: Arc<[FdRow]>,
+    pub fdinfo_available: bool,
+}
+
+// ---- Memory maps (UI-PWN-013) ----
+
+/// One mapping from /proc/<pid>/maps.
+#[derive(Clone, Debug)]
+pub struct MapRegion {
+    pub start: u64,
+    pub end: u64,
+    /// For example `*b"r-xp"`.
+    pub perms: [u8; 4],
+    pub offset: u64,
+    /// From smaps at most once per second. `WarmingUp` before the first read.
+    pub rss_bytes: Total<u64>,
+    /// "[heap]", "[stack]", "[vdso]", "[vvar]", "anonymous" or "memfd:<name>".
+    pub label: Option<Arc<str>>,
+}
+
+/// One module node of the Memory maps tree.
+#[derive(Clone, Debug)]
+pub struct MapNode {
+    /// File name. The UI adds " (Primary)" or shows "Outside loaded modules".
+    pub name: Arc<str>,
+    pub path: Option<Arc<str>>,
+    /// The main executable.
+    pub primary: bool,
+    /// The "Outside loaded modules" node.
+    pub outside: bool,
+    /// Counts for "Shared libraries only", including Wine .dll mappings.
+    pub shared_object: bool,
+    /// Lowest region start.
+    pub base: u64,
+    /// Sum of region sizes.
+    pub size_bytes: u64,
+    /// Sum of region RSS.
+    pub rss_bytes: Total<u64>,
+    /// Package %DESC%.
+    pub description: Option<Arc<str>>,
+    /// For example "glibc 2.42-1".
+    pub package: Option<Arc<str>>,
+    /// Indexes into `MapsDetail.regions`, in address order.
+    pub regions: std::ops::Range<u32>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MapsDetail {
+    pub nodes: Arc<[MapNode]>,
+    pub regions: Arc<[MapRegion]>,
+}
+
+// ---- Security (UI-PWN-014, UI-PWN-015) ----
+
+/// UI words: "Yes (root)", "Yes (capabilities)", "Setuid", "No".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Elevated {
+    Root,
+    Capabilities,
+    Setuid,
+    No,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NsKind {
+    User,
+    Pid,
+    Net,
+    Mnt,
+    Ipc,
+    Uts,
+    Cgroup,
+    Time,
+}
+
+/// UI words: "Shared with init", "Isolated (4026532211)", "Same as tasklens", "Isolated (inode)".
+/// The last two are used without access to PID 1.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NsState {
+    SharedWithInit,
+    Isolated { inode: u64 },
+    SameAsTasklens,
+    IsolatedFromTasklens { inode: u64 },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NsRow {
+    pub kind: NsKind,
+    pub state: NsState,
+    pub validity: Validity,
+}
+
+/// One capability row. Names and descriptions are a UI table keyed by `cap`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CapRow {
+    /// Linux capability number.
+    pub cap: u8,
+    pub effective: bool,
+    pub permitted: bool,
+    pub inheritable: bool,
+    pub bounding: bool,
+    pub ambient: bool,
+    pub risky: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMembershipRow {
+    pub name: Arc<str>,
+    pub gid: u32,
+    pub primary: bool,
+    /// docker, libvirt, lxd, disk.
+    pub root_equivalent: bool,
+    /// wheel, sudo, root, adm.
+    pub admin: bool,
+}
+
+/// The Security tab.
+#[derive(Clone, Debug)]
+pub struct SecurityDetail {
+    pub uids: Total<IdTriple>,
+    /// Real, effective, saved and fs user names.
+    pub uid_names: Total<[Arc<str>; 4]>,
+    pub gids: Total<IdTriple>,
+    /// Real, effective, saved and fs group names.
+    pub gid_names: Total<[Arc<str>; 4]>,
+    pub elevated: Total<Elevated>,
+    pub no_new_privs: Total<bool>,
+    pub seccomp: Total<Seccomp>,
+    pub dumpable: Total<bool>,
+    /// attr/current. `Unsupported` when no LSM exposes it.
+    pub security_label: Total<Arc<str>>,
+    /// logind session id. `None` is "None".
+    pub session: Option<Arc<str>>,
+    /// `None` for 4294967295.
+    pub audit_session: Option<u32>,
+    /// `None` for 4294967295.
+    pub login_uid: Option<u32>,
+    /// In `NsKind` declaration order.
+    pub namespaces: [NsRow; 8],
+    /// Speculation_Store_Bypass text as given.
+    pub store_bypass: Total<Arc<str>>,
+    /// SpeculationIndirectBranch text as given.
+    pub indirect_branch: Total<Arc<str>>,
+    /// Capabilities set in Effective, Permitted, Inheritable or Ambient.
+    pub caps: Arc<[CapRow]>,
+    pub groups: Arc<[GroupMembershipRow]>,
+}
+
+// ---- Environment (UI-PWN-016) ----
+
+/// The Environment tab. Values are secrets in practice: never log this or write it to disk.
+/// `Debug` prints only the number of variables and `truncated`.
+#[derive(Clone, Default)]
+pub struct EnvDetail {
+    /// Name and value. Read once on open and on DetailRefresh.
+    pub vars: Arc<[(Box<str>, Box<str>)]>,
+    /// Cut at 1 MiB.
+    pub truncated: bool,
+    /// A "(read failed)" row with the errno text.
+    pub read_errno: Option<i32>,
+    /// Zombie or kernel thread: "Environment block unavailable".
+    pub unavailable: bool,
+}
+
+impl std::fmt::Debug for EnvDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvDetail")
+            .field("vars", &self.vars.len())
+            .field("truncated", &self.truncated)
+            .finish_non_exhaustive()
+    }
+}
+
+/// R-099: names masked by default, case-insensitive substring match.
+pub const ENV_MASK_PATTERNS: [&str; 7] = [
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "KEY",
+    "COOKIE",
+    "CREDENTIAL",
+];
+
+/// True when `name` contains any of `ENV_MASK_PATTERNS`, ignoring ASCII case.
+pub fn env_name_is_masked(name: &str) -> bool {
+    let name = name.as_bytes();
+    ENV_MASK_PATTERNS.iter().any(|pattern| {
+        let pattern = pattern.as_bytes();
+        name.windows(pattern.len())
+            .any(|window| window.eq_ignore_ascii_case(pattern))
+    })
+}
 
 // filled by E03-059
 #[derive(Clone, Debug, Default)]
@@ -356,5 +621,74 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(hash_of(&a), hash_of(&b));
         assert_ne!(a, DetailTarget::App(GroupKey(1000)));
+    }
+
+    #[test]
+    fn fd_kind_labels() {
+        let expected = [
+            (FdKind::File, "file"),
+            (FdKind::Directory, "directory"),
+            (FdKind::Tcp, "TCP"),
+            (FdKind::Udp, "UDP"),
+            (FdKind::Unix, "unix"),
+            (FdKind::Netlink, "netlink"),
+            (FdKind::Pipe, "pipe"),
+            (FdKind::Fifo, "FIFO"),
+            (FdKind::Eventfd, "eventfd"),
+            (FdKind::Eventpoll, "eventpoll"),
+            (FdKind::Timerfd, "timerfd"),
+            (FdKind::Signalfd, "signalfd"),
+            (FdKind::Inotify, "inotify"),
+            (FdKind::Fanotify, "fanotify"),
+            (FdKind::Memfd, "memfd"),
+            (FdKind::Dmabuf, "dmabuf"),
+            (FdKind::Drm, "DRM"),
+            (FdKind::Pidfd, "pidfd"),
+            (FdKind::IoUring, "io_uring"),
+            (FdKind::AnonInode, "anon_inode"),
+            (FdKind::Device, "device"),
+        ];
+        for (kind, label) in expected {
+            assert_eq!(kind.label(), label);
+        }
+    }
+
+    #[test]
+    fn env_mask_patterns_case_insensitive() {
+        for name in [
+            "api_key",
+            "GH_TOKEN",
+            "MyPassword",
+            "SESSION_COOKIE",
+            "AWS_SECRET_ACCESS_KEY",
+            "DB_PASSWD",
+            "GOOGLE_CREDENTIALS",
+        ] {
+            assert!(env_name_is_masked(name), "{name} should be masked");
+        }
+        for name in ["PATH", "HOME", "DISPLAY", "LANG"] {
+            assert!(!env_name_is_masked(name), "{name} should not be masked");
+        }
+    }
+
+    #[test]
+    fn env_detail_default() {
+        let env = EnvDetail::default();
+        assert!(env.vars.is_empty());
+        assert!(!env.truncated);
+        assert_eq!(env.read_errno, None);
+        assert!(!env.unavailable);
+    }
+
+    #[test]
+    fn env_detail_debug_hides_values() {
+        let env = EnvDetail {
+            vars: Arc::from(vec![("GH_TOKEN".into(), "hunter2-value".into())]),
+            ..EnvDetail::default()
+        };
+        let text = format!("{env:?}");
+        assert!(!text.contains("hunter2"));
+        assert!(!text.contains("GH_TOKEN"));
+        assert!(text.contains("vars: 1"));
     }
 }
