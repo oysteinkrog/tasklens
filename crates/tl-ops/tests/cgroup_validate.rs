@@ -1,13 +1,15 @@
-//! `open_validated_at` against a fake cgroup root built in a temp dir.
+//! `open_validated_at`, the control writes and the frozen wait against a fake cgroup root built
+//! in a temp dir.
 
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use tl_model::actions::CgroupRef;
 use tl_ops::OpsError;
-use tl_ops::cgroup::open_validated_at;
+use tl_ops::cgroup::{CgroupDir, freeze, freeze_group, kill, open_validated_at, thaw, wait_frozen};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -137,4 +139,80 @@ fn symlinked_leaf_is_refused() {
     // The ref carries the target's inode, so only `O_NOFOLLOW` stops the open.
     let result = open_validated_at(root.path(), &cg(&rel, other_ino), u, &unrelated_own(u));
     assert!(result.is_err(), "symlinked leaf must not open");
+}
+
+/// A validated fake cgroup dir with an empty file for each of `files`.
+fn fake_dir(root: &FakeRoot, files: &[&str]) -> (PathBuf, CgroupDir) {
+    let u = uid();
+    let rel = leaf_path(u);
+    let ino = root.make(&rel);
+    let path = root.path().join(&rel);
+    for name in files {
+        std::fs::write(path.join(name), b"").expect("create control file");
+    }
+    let dir = open_validated_at(root.path(), &cg(&rel, ino), u, &unrelated_own(u)).unwrap();
+    (path, dir)
+}
+
+#[test]
+fn fake_freeze_thaw_kill_write_values() {
+    let root = FakeRoot::new();
+    let (path, dir) = fake_dir(&root, &["cgroup.freeze", "cgroup.kill", "cgroup.events"]);
+    freeze(&dir).unwrap();
+    assert_eq!(std::fs::read(path.join("cgroup.freeze")).unwrap(), b"1");
+    thaw(&dir).unwrap();
+    assert_eq!(std::fs::read(path.join("cgroup.freeze")).unwrap(), b"0");
+    kill(&dir).unwrap();
+    assert_eq!(std::fs::read(path.join("cgroup.kill")).unwrap(), b"1");
+}
+
+#[test]
+fn wait_frozen_sees_late_frozen() {
+    let root = FakeRoot::new();
+    let (path, dir) = fake_dir(&root, &[]);
+    let events = path.join("cgroup.events");
+    std::fs::write(&events, b"populated 1\nfrozen 0\n").unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        std::fs::write(&events, b"populated 1\nfrozen 1\n").unwrap();
+    });
+    let start = Instant::now();
+    let result = wait_frozen(&dir, Duration::from_secs(2), Duration::from_millis(50));
+    let elapsed = start.elapsed();
+    writer.join().unwrap();
+    assert_eq!(result, Ok(()));
+    assert!(elapsed < Duration::from_millis(300), "took {elapsed:?}");
+}
+
+#[test]
+fn wait_frozen_times_out_outcome_unknown() {
+    let root = FakeRoot::new();
+    let (path, dir) = fake_dir(&root, &[]);
+    std::fs::write(path.join("cgroup.events"), b"populated 1\nfrozen 0\n").unwrap();
+    let start = Instant::now();
+    let result = wait_frozen(&dir, Duration::from_millis(200), Duration::from_millis(50));
+    let elapsed = start.elapsed();
+    assert_eq!(
+        result,
+        Err(OpsError::OutcomeUnknown("freeze still in progress"))
+    );
+    assert!(elapsed >= Duration::from_millis(200), "took {elapsed:?}");
+}
+
+#[test]
+fn kill_without_cgroup_kill_is_unsupported() {
+    let root = FakeRoot::new();
+    let (_path, dir) = fake_dir(&root, &["cgroup.freeze", "cgroup.events"]);
+    assert_eq!(
+        kill(&dir),
+        Err(OpsError::Unsupported("cgroup.kill not available"))
+    );
+}
+
+#[test]
+fn freeze_group_invalid_ref_writes_nothing() {
+    // A session scope fails the path check before any file is opened, so nothing is written.
+    let u = uid();
+    let rel = format!("user.slice/user-{u}.slice/session-2.scope");
+    assert_eq!(freeze_group(&cg(&rel, 1), u), Err(OpsError::NotOwner));
 }

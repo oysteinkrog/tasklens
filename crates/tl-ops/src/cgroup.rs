@@ -7,6 +7,7 @@
 
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
@@ -15,6 +16,11 @@ use tl_model::actions::CgroupRef;
 use crate::error::{OpsError, OpsResult};
 
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// How often `freeze_group` reads `cgroup.events` while it waits for `frozen 1`.
+pub const FREEZE_POLL: Duration = Duration::from_millis(50);
+/// How long `freeze_group` waits for `frozen 1` before it reports the outcome as unknown.
+pub const FREEZE_WAIT: Duration = Duration::from_secs(2);
 
 /// An `O_DIRECTORY` fd of a validated cgroup.
 #[derive(Debug)]
@@ -147,6 +153,112 @@ fn is_uid(s: &str, uid: u32) -> bool {
     canonical && s.parse::<u32>() == Ok(uid)
 }
 
+/// Freezes every task in the cgroup: writes `1` to `cgroup.freeze`. Does not wait.
+pub fn freeze(dir: &CgroupDir) -> OpsResult {
+    write_control(dir, "cgroup.freeze", b"1", "cgroup.freeze not available")
+}
+
+/// Thaws the cgroup: writes `0` to `cgroup.freeze`.
+pub fn thaw(dir: &CgroupDir) -> OpsResult {
+    write_control(dir, "cgroup.freeze", b"0", "cgroup.freeze not available")
+}
+
+/// Kills every task in the cgroup: writes `1` to `cgroup.kill`.
+pub fn kill(dir: &CgroupDir) -> OpsResult {
+    write_control(dir, "cgroup.kill", b"1", "cgroup.kill not available")
+}
+
+/// One write of `value` to the control file `name`. `ENOENT` gives `Unsupported(missing)`.
+fn write_control(dir: &CgroupDir, name: &str, value: &[u8], missing: &'static str) -> OpsResult {
+    let fd = match rustix::fs::openat(
+        dir.as_fd(),
+        name,
+        OFlags::WRONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Err(OpsError::Unsupported(missing)),
+        Err(e) => return Err(e.into()),
+    };
+    let n = rustix::io::write(&fd, value)?;
+    if n != value.len() {
+        return Err(OpsError::Os(libc::EIO));
+    }
+    Ok(())
+}
+
+/// Reads `frozen` from `cgroup.events`. A missing or malformed line gives `Os(EIO)`.
+pub fn is_frozen(dir: &CgroupDir) -> OpsResult<bool> {
+    let fd = rustix::fs::openat(
+        dir.as_fd(),
+        "cgroup.events",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut buf = [0u8; 256];
+    let n = rustix::io::read(&fd, &mut buf)?;
+    parse_frozen(&buf[..n]).ok_or(OpsError::Os(libc::EIO))
+}
+
+/// Waits until `cgroup.events` says `frozen 1`. Checks at once, then every `poll` until `wait`
+/// has passed. Sleeps the calling thread, so it must run on the blocking pool.
+pub fn wait_frozen(dir: &CgroupDir, wait: Duration, poll: Duration) -> OpsResult {
+    let start = Instant::now();
+    loop {
+        if is_frozen(dir)? {
+            return Ok(());
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= wait {
+            return Err(OpsError::OutcomeUnknown("freeze still in progress"));
+        }
+        std::thread::sleep(poll.min(wait - elapsed));
+    }
+}
+
+/// The value of the `frozen` line in `cgroup.events` text: `Some(true)` for `1`, `Some(false)`
+/// for `0`, `None` when the line is missing or malformed.
+pub(crate) fn parse_frozen(events: &[u8]) -> Option<bool> {
+    let value = events
+        .split(|&b| b == b'\n')
+        .find_map(|line| line.strip_prefix(b"frozen "))?;
+    match value {
+        b"1" => Some(true),
+        b"0" => Some(false),
+        _ => None,
+    }
+}
+
+/// Validates `cg`, freezes it and waits up to `FREEZE_WAIT` for every task to stop.
+pub fn freeze_group(cg: &CgroupRef, uid: u32) -> OpsResult {
+    let result = open_validated(cg, uid).and_then(|dir| {
+        freeze(&dir)?;
+        wait_frozen(&dir, FREEZE_WAIT, FREEZE_POLL)
+    });
+    log_result("freeze", cg, &result);
+    result
+}
+
+/// Validates `cg` and thaws it.
+pub fn thaw_group(cg: &CgroupRef, uid: u32) -> OpsResult {
+    let result = open_validated(cg, uid).and_then(|dir| thaw(&dir));
+    log_result("thaw", cg, &result);
+    result
+}
+
+/// Validates `cg` and kills every task in it.
+pub fn kill_group(cg: &CgroupRef, uid: u32) -> OpsResult {
+    let result = open_validated(cg, uid).and_then(|dir| kill(&dir));
+    log_result("kill", cg, &result);
+    result
+}
+
+/// Logs only the cgroup's last component, never the full path.
+fn log_result(op: &str, cg: &CgroupRef, result: &OpsResult) {
+    let leaf = cg.rel_path.rsplit('/').next().unwrap_or("");
+    tracing::debug!(op, cgroup = leaf, ok = result.is_ok(), error = ?result.as_ref().err(), "cgroup op");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +343,18 @@ mod tests {
         for bad in [leading.as_str(), &trailing, &double, &nul, ""] {
             assert_eq!(check_rel_path(bad, u), Err(OpsError::NotOwner), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn parse_frozen_values() {
+        assert_eq!(parse_frozen(b"populated 1\nfrozen 1\n"), Some(true));
+        assert_eq!(parse_frozen(b"populated 1\nfrozen 0\n"), Some(false));
+        assert_eq!(parse_frozen(b"populated 1\n"), None);
+        assert_eq!(parse_frozen(b"frozen 1"), Some(true));
+        assert_eq!(parse_frozen(b"frozen 2\n"), None);
+        assert_eq!(parse_frozen(b"frozen \n"), None);
+        assert_eq!(parse_frozen(b"unfrozen 1\n"), None);
+        assert_eq!(parse_frozen(b""), None);
     }
 
     #[test]
