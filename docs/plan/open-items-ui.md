@@ -10,8 +10,8 @@ Raiser IDs are written `B5-13` (batch 5, item 13), `B7-E21-4` (batch 7, E21 list
 `E25-OI-4` and `E26-OI-3` (the B6 lists keep their own IDs). Bead IDs are `tasklens-<epic>.<n>`;
 the `tasklens-` prefix is dropped in the text and kept in the Edges section.
 
-Engine-side topics are owned by `open-items-engine.md` (oi-engine). This file points to them as
-"see engine side" and lists them once in OI-U65. Topics that have a UI half and an engine half
+Engine-side topics are owned by `open-items-engine.md` (oi-engine, OI-Enn IDs). This file points to them as
+"see engine side" and lists them once in OI-U65 with their OI-E IDs. Topics that have a UI half and an engine half
 state the UI half here.
 
 Tags: [verified] the cited doc or source says it; [inferred] follows from the docs or the kit
@@ -70,7 +70,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U02 `tl_ui::run(UiLaunch) -> UiExit`
 - Raised by: B5-38
 - Question: tl-app cannot depend on gpui-kit, so who opens the application?
-- Answer: see engine side (E33 UiLaunch). UI half: E16-012 (fut.15) builds `tl_ui::run(UiLaunch) -> UiExit` with `UiLaunch { init: UiInit, open_mode: OpenMode, start: StartOptions }` and `UiExit::{Quit, RendererFailed(String), DeviceLost}`, exactly as B5-38 states. `debug` and `on_quit` are not in `UiLaunch` (`debug` is `AppEnv.debug`).
+- Answer: see engine side (OI-E15). UI half: E16-012 (fut.15) builds `tl_ui::run(UiLaunch) -> UiExit` with `UiLaunch { init: UiInit, open_mode: OpenMode, start: StartOptions }` and `UiExit::{Quit, RendererFailed(String), DeviceLost}`, exactly as B5-38 states. `debug` and `on_quit` are not in `UiLaunch` (`debug` is `AppEnv.debug`). OI-E15 adds one optional field `platform: Option<Arc<dyn PlatformOps>>`, which the UI accepts as given.
 - Basis: B5-38, leader-notes "E33 needs `tl_ui::run(UiLaunch)` fut.15" [verified].
 - Owner decision: no
 - Changes: edge `cr0.1` depends on `fut.15` (Edges). No doc edit beyond OI-U01's ADR-009 line.
@@ -78,7 +78,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U03 Crates the UI batches asked for
 - Raised by: B5-2 (`unicode-segmentation`), B5-22 (`async-channel`), B5-30 (`image`), E19-4 (thread CPU time), B7-E21-9 (`wgpu`)
 - Question: five UI beads need a crate that is not in the tl-ui row of ADR-001.
-- Answer: see engine side (crate allow-list). UI facts the engine answer must keep: `UiInit.app_requests` is an `async_channel::Receiver` (OI-U01), so `async-channel` must be in the tl-ui row or `UiInit` changes to a `Box<dyn Fn() -> Option<AppRequest>>` poll closure; E15-003 (ug9.6) stays blocked until `unicode-segmentation` is decided; E16-005 (fut.8) stops and reports if it needs `image`; `wgpu` is settled on the UI side by `AppEnv::list_adapters` (OI-U01), so tl-ui never needs it; `FrameStats` reports 0 thread CPU until `tl_model::time::thread_cpu_ns()` exists (E19-005, yrf.7).
+- Answer: see engine side (OI-E04 crate rows, OI-E06 thread CPU time, OI-E32 for `unicode-segmentation`, `image` and `wgpu`). OI-E04 puts `async-channel` in the tl-ui row, so `UiInit.app_requests` stays an `async_channel::Receiver` (OI-U01); E15-003 (ug9.6) stays blocked until `unicode-segmentation` is decided; E16-005 (fut.8) stops and reports if it needs `image`; `wgpu` is settled on the UI side by `AppEnv::list_adapters` (OI-U01), so tl-ui never needs it; `FrameStats` reports 0 thread CPU until `tl_model::time::thread_cpu_ns()` exists (E19-005, yrf.7).
 - Basis: ADR-001 [verified]; B5-2 notes the crate is already in Cargo.lock through gpui-base [verified by the writer].
 - Owner decision: no
 - Changes: none here; the engine file carries the row edits.
@@ -302,6 +302,7 @@ source; [guess] a writer-level choice no doc settles.
   | `Protected` | This process is protected. Confirm the warning to end it. |
   | `NotOwner` | This process belongs to another user. Administrator access is needed. |
   | `Unsupported` | This action is not available for this process. |
+  | `AlreadyRunning` (OI-E10, startup entries) | Already running (kind Info, not Warning) |
 
   Deadlines (`deadline_for`): 2 s per target for signal, nice, affinity, ioprio and freeze writes; 120 s for every call that may show a polkit prompt, which includes `SockDestroy`, `UnitWriteRecovery` and `UnitRemoveRecovery`; `Dump` has no deadline (`None`), because a core of several GiB is a normal case and the progress toast "Writing core… 1.2 GiB" is its liveness signal. `short_reason(&err)` for summaries ("Ended 4 of 5 processes (1 permission denied)") is the first sentence of `message()` lower-cased without its full stop; `PermissionDenied` gives "permission denied" as today.
 - Basis: ADR-006 deadline table, ADR-015 `ActionError`, PROC-058 texts [verified]; `IdentityChanged` text is PROC-058's [verified]; the other texts [guess]; `Dump` deadline [inferred from PROC-075].
@@ -532,7 +533,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U52 Passwordless setup step
 - Raised by: B7-E21-11
 - Question: the `SetupStep` variant for `polkit-rule on|off` and the result stream belong to E03 and E29.
-- Answer: see engine side (`SetupStep::PolkitRule(bool)`, `SetupEvent`). UI half: E21-042 (bj6.46) dispatches `Command::RunSetup { step }` and listens on the E29 `SetupEvent` stream; it already depends on qfx.2 and qfx.3 (verified with `br show`).
+- Answer: see engine side (OI-E11: `SetupStep::PolkitRule { on }`, results in `HealthSnapshot.setup`). UI half: E21-042 (bj6.46) dispatches `Command::RunSetup { step }` and reads the result from `HealthSnapshot.setup` on the `HEALTH` bit; it already depends on qfx.2 and qfx.3 (verified with `br show`).
 - Basis: UI-PRF-052 `Command::RunSetup`, `SetupEvent` [verified].
 - Owner decision: no
 - Changes: none.
@@ -620,7 +621,7 @@ source; [guess] a writer-level choice no doc settles.
 
 ### OI-U63 Startup Apps, Connections and Information items
 - Raised by: E28-7, E28-15, E28-1, E28-2, E28-3, E28-4, E28-9, E28-11, E28-12, E28-13
-- Answer: E28-7: the Information skeleton follows UI-SYS-085 (every section shows its band and an 8-line skeleton block); shell.md's "4 section blocks 120 tall" is corrected. E28-15 accepted: E27-A2, E29-A2, E29-A3, E25-A1 and E03-A2 join the E28 row of 00-epics §4. The other eight (public IP command and `SourceId`, `InventorySnapshot` fields, `committed_peak`, the 64-bit rule, `ActionError::AlreadyRunning`, system-table `ColumnId`s, startup entry fields, connection display fields) are see engine side; the E28 beads read "the E03 field of that meaning" and stop and report when it is missing. UI half of E28-9: `ActionError::AlreadyRunning` maps to the Info toast "Already running" in `message()` once it exists.
+- Answer: E28-7: the Information skeleton follows UI-SYS-085 (every section shows its band and an 8-line skeleton block); shell.md's "4 section blocks 120 tall" is corrected. E28-15 accepted: E27-A2, E29-A2, E29-A3, E25-A1 and E03-A2 join the E28 row of 00-epics §4. The other eight (public IP command and `SourceId`, `InventorySnapshot` fields, `committed_peak`, the 64-bit rule, `ActionError::AlreadyRunning`, system-table `ColumnId`s, startup entry fields, connection display fields) are see engine side; the E28 beads read "the E03 field of that meaning" and stop and report when it is missing. UI half of E28-9: OI-E10 makes it `RejectReason::AlreadyRunning`, not an `ActionError`; the tracker maps it to the Info toast "Already running" (OI-U26 table).
 - Basis: UI-SYS-085, UI-SHL-111, SYS-023 [verified].
 - Owner decision: no
 - Changes: shell.md UI-SHL-111: skeleton per UI-SYS-085. 00-epics §4: the five E28 row additions.
@@ -634,29 +635,33 @@ source; [guess] a writer-level choice no doc settles.
 
 ### OI-U65 Topics settled on the engine side
 - Raised by: the items below
-- Answer: see engine side (`open-items-engine.md`) for every one of these. Listed here so no raiser is lost:
-  | Raiser | Topic |
-  |---|---|
-  | E25-OI-1, B8-E28-1, B7-E20-11 | SMART, eject, public IP commands, `SourceId::PublicIp`, `PublicIpState` |
-  | B8-E22-1 | `ProcessRecord`, `TableRow`, `GroupRow`, `TableTotals` fields and capability bits |
-  | B5-2, B5-22, B5-30, E19-4, B7-E21-9 | crate allow-list rows (OI-U03 has the UI facts) |
-  | B5-38 | E33 `UiLaunch` (OI-U02 has the UI half) |
-  | B5-6 | `SystemSnapshot.color_scheme` and its portal reader |
-  | B5-7 | `HealthSnapshot.helper: HelperState` |
-  | B7-E21-5 | `tl-app/build.rs` and the licence file (OI-U01 names the fields) |
-  | B7-E23-3 | `write_atomic` for run history (OI-U01 names the callbacks) |
-  | E19-1, E19-2, E19-3, E25-OI-2 | `MetricId` constants, `TIER_1HZ` bit, `ceil_pow2`, `ceil_125` |
-  | E24-9 | fan `connected` flag |
-  | E25-OI-6 | `LaunchWhat::DbusActivate` |
-  | E26-OI-1, E26-OI-2 | aggregate devices, per-process series |
-  | B7-E21-11 | `SetupStep::PolkitRule`, `SetupEvent` |
-  | B7-E23-6 (engine half) | helper routing for Restricted detail targets |
-  | B8-E22-10 | KWin command result event |
-  | B8-E27-3 (engine half), B8-E27-7 | D-Bus error name in `UnitJob`, unmask before enable |
-  | B8-E27-5, B8-E28-11 | `ColumnId` constants for the system tables |
-  | B8-E28-2, B8-E28-3, B8-E28-4 | `InventorySnapshot` fields, `committed_peak`, 64-bit rule |
-  | B8-E28-9 | `ActionError::AlreadyRunning` |
-  | B8-E28-12, B8-E28-13 | startup entry and connection display fields |
+- Answer: see engine side (`open-items-engine.md`) for every one of these. Listed here so no raiser is lost. IDs confirmed by oi-engine on 2026-10-04; OI-E32 was still being written.
+  | Raiser | Topic | Engine ID |
+  |---|---|---|
+  | E25-OI-1, B8-E28-1, B7-E20-11 | `Command::Device(DeviceCommand)` keyed by kernel disk name; public IP in `InventorySnapshot.public_ip`; E20-024 sends the fetch command at startup | OI-E01 |
+  | B8-E22-1 | `ProcessRecord`, `TableRow`, `GroupRow`, `TableTotals`, `ProcessTableView` fields | OI-E03 |
+  | B5-22, E19-4 | `async-channel` in tl-ui and tl-app; `tl_model::time::thread_cpu_ns()` through rustix | OI-E04, OI-E06 |
+  | B5-2, B5-30, B7-E21-9 | `unicode-segmentation`, `image`, `wgpu` rows | OI-E32 |
+  | B5-38 | E33 `UiLaunch` (OI-U02 has the UI half) | OI-E15 |
+  | B5-6 | `SystemSnapshot.color_scheme` and its portal reader | OI-E32 |
+  | B5-7 | `HealthSnapshot.helper` exists in as2.13 and gains `helper_start` | OI-E10 |
+  | B7-E21-5 | `tl-app/build.rs` and the licence file (OI-U01 names the fields) | OI-E32 |
+  | B7-E23-3 | `write_atomic` for run history (OI-U01 names the callbacks) | OI-E08 |
+  | E19-1, E19-2, E19-3, E25-OI-2 | `MetricId` constants, `TIER_1HZ` bit, `ceil_pow2`, `ceil_125` | OI-E32 |
+  | E24-9 | fan `connected` flag | OI-E32 |
+  | E25-OI-6 | `LaunchWhat::DbusActivate` | OI-E32 |
+  | E26-OI-1, E26-OI-2 | aggregate devices, per-process series | OI-E16 |
+  | B7-E21-11 | `SetupStep::PolkitRule { on }`, results in `HealthSnapshot.setup` | OI-E11 |
+  | B7-E23-6 (engine half) | `DetailRefresh` routed through the helper | OI-E32 |
+  | B8-E22-10 | KWin pick result in `WindowsSnapshot.pick`; command result | OI-E11, OI-E32 |
+  | B8-E27-3 (engine half), B8-E27-7 | D-Bus error name in `UnitJob`, unmask inside enable and disable | OI-E32 |
+  | B8-E27-5, B8-E28-11 | `SysColumnId` constants | OI-E32 |
+  | B8-E28-2, B8-E28-12, B8-E28-13 | `InventorySnapshot`, startup and connection record fields (E03-055, E03-056) | OI-E18 |
+  | B8-E28-3 | `committed_peak` (reducer running max) | OI-E28 |
+  | B8-E28-4 | 64-bit rule | OI-E32 |
+  | B8-E28-9 | `RejectReason::AlreadyRunning` | OI-E10 |
+  | B7-E20-4 (engine half) | no X11 keep-above command in v1 | OI-E32 |
+  | udev, gcore, helper hook, PSI, unsafe | not raised by a UI item; listed for completeness | OI-E02, OI-E07, OI-E09, OI-E13, OI-E05 |
 - Owner decision: no
 - Changes: none here.
 
