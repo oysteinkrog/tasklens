@@ -79,16 +79,16 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 
 | Crate | Workspace deps allowed | External deps allowed |
 |---|---|---|
-| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustix (feature `time` only, for `clock_gettime`) |
+| tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`) |
 | tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
-| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131) |
+| tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |
-| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132) |
-| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix |
+| tl-ui | tl-model | gpui-kit, tracing, smallvec, rustc-hash, serde, serde_json (theme JSON), fluent-bundle, unic-langid (strings, R-132), async-channel (`AppRequest` receiver and tray channels), jiff (local time formatting), unicode-segmentation (R-142) |
+| tl-app | tl-model, tl-engine, tl-ui, tl-ops (`write_atomic`, R-130), tl-tray (P3) | zbus, toml, serde, anyhow, tracing, tracing-subscriber, tracing-appender, rustix, clap, async-channel (R-142) |
 | tl-history | tl-model | zstd, crc32fast, postcard, serde, thiserror |
 | tl-tray | tl-model | ksni |
-| tl-helper | tl-model, tl-ops | rustix, postcard, serde |
+| tl-helper | tl-model, tl-ops, tl-collect (shared strings scanner `proc/strings.rs`, R-157) | rustix, postcard, serde |
 | tl-netmon | tl-model | decided in its own ADR when that phase starts |
 | xtask | none | serde, serde_json, anyhow |
 
@@ -97,14 +97,14 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 ```text
 tl-app -> tl-ui -> tl-model
 tl-app -> tl-engine -> {tl-collect, tl-ops, tl-history} -> tl-model
-tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-ops)
+tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-ops; tl-helper also -> tl-collect)
 ```
 
 Hard rules:
 1. `tl-ui` never depends on `tl-engine`, `tl-collect`, `tl-ops`, `asupersync`, `arc-swap` or `zbus`. It talks to the engine only through the `EngineClient` trait in `tl-model` (ADR-005).
 2. `asupersync` appears in the normal dependency closure of `tl-engine` and `tl-app` only. No public item of `tl-engine` names an asupersync type. `tl-engine`'s public API is `EngineConfig`, `Engine::start`, `EngineHandle` (implements `EngineClient`) and `ShutdownReport`.
 3. `tl-model`, `tl-collect` and `tl-ops` contain no async code and no runtime.
-4. `unsafe` is denied workspace-wide (`unsafe_code = "deny"`). It is allowed only in these files, each with `#![allow(unsafe_code)]` at file level and a `// SAFETY:` comment per block: `crates/tl-ops/src/sys.rs`, `crates/tl-engine/src/gpu/spawn.rs`, `crates/tl-app/src/main.rs` (environment setup before any thread starts). Adding a file to this list needs an ADR change.
+4. `unsafe` is denied workspace-wide (`unsafe_code = "deny"`). It is allowed only in these files, each with `#![allow(unsafe_code)]` at file level and a `// SAFETY:` comment per block: `crates/tl-ops/src/sys.rs`, `crates/tl-engine/src/gpu/spawn.rs`, `crates/tl-app/src/main.rs` (environment setup before any thread starts), `crates/tl-gpu-probe/src/api_versions.rs` (`ash` and `khronos-egl` entry points for the `--api-versions` mode, R-143). Adding a file to this list needs an ADR change.
 
 **"No Tokio" definition.** None of these crates appear in the resolved normal or build dependency graph of any shipped binary (`tasklens`, `tl-gpu-probe`, `tl-helper`, `tl-netmon`) for target `x86_64-unknown-linux-gnu`: `tokio`, `tokio-util`, `tokio-stream`, `tokio-macros`, `async-std`, `async-global-executor`, `actix-rt`, `reqwest`, `hyper`. GPUI's own executor, smol, async-io, async-executor and blocking are allowed. A banned crate that is only a dev-dependency is allowed.
 
@@ -113,7 +113,7 @@ Hard rules:
 1. For each shipped binary package `P`:
    `cargo tree -p P -e normal,build --target x86_64-unknown-linux-gnu --prefix none --format "{p}"`
    Fail if any line's first word is in the banned list. (This avoids depending on how `cargo tree -i` reports a package that is absent.)
-2. `cargo metadata --format-version 1` and compute each workspace member's normal-dependency closure. Fail if a member depends on anything outside its row in the table above (direct dependencies), if `asupersync` is in the closure of any member other than `tl-engine` and `tl-app`, or if `tl-ui`'s closure contains `tl-engine`, `tl-collect`, `tl-ops`, `arc-swap` or `zbus`.
+2. `cargo metadata --format-version 1` and compute each workspace member's normal-dependency closure. Fail if a member depends on anything outside its row in the table above (direct dependencies), if `asupersync` is in the closure of any member other than `tl-engine` and `tl-app`, or if `tl-ui`'s closure contains `tl-engine`, `tl-collect`, `tl-ops`, `arc-swap` or `zbus`. If `zbus` turns out to enter `tl-ui`'s closure through gpui-kit, the `zbus` part of this check narrows to "no direct dependency and no path that avoids gpui-kit" (R-158). Only normal edges are checked; dev-dependencies are outside the rows.
 3. `rg -n "asupersync::" crates/ --glob '!crates/tl-engine/**'` must return nothing.
 
 ### Consequences
@@ -176,7 +176,7 @@ async-channel = "2.5.0"
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
 
 # System access
-rustix = { version = "1.1.5", features = ["fs", "process", "net", "event", "system", "thread", "time", "pipe"] }
+rustix = { version = "1.1.5", features = ["fs", "process", "net", "event", "system", "thread", "time", "pipe", "mm", "param"] }  # mm: mlockall (R-152); param: clock_ticks_per_second, page_size (R-142)
 libc   = "0.2.189"
 memchr = "2.8.3"
 netlink-packet-core      = "0.9.0"
@@ -188,13 +188,16 @@ serde    = { version = "1.0.228", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 toml     = "1.1.6"
-bitflags = "2"
+bitflags = { version = "2", features = ["serde"] }
 smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
 rustc-hash = "2.1.3"
 futures-lite = "2.6.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }   # tl-engine public IP only; exact pin set by the bead that adds it (R-131)
 fluent-bundle = "0.15"   # tl-ui strings (R-132); exact pins set by the bead that adds them
 unic-langid = "0.9"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }  # tl-app arguments (APP-052, R-142)
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }   # tl-ui local time; no libc (R-142)
+unicode-segmentation = "1.12"   # tl-ui grapheme handling (R-142)
 zstd      = "0.13.3"     # P3
 crc32fast = "1"          # P3
 
@@ -224,10 +227,11 @@ asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
 gpui-kit = { workspace = true, features = ["test-support"] }
 
 [features]
-bench = ["gpui-kit/profiler"]     # frame histograms for --bench (ADR-014)
+test-hooks = []                   # render counters, paint record (ADR-013)
+bench = ["gpui-kit/profiler", "test-hooks"]     # frame histograms for --bench (ADR-014); the paint record sits behind test-hooks (R-160)
 ```
 
-`tl-app` has `[features] bench = ["tl-ui/bench"]`. Release packages are built without `bench`; perf gate runs use a separate build with it.
+`tl-app` has `[features] bench = ["tl-ui/bench"]`. Release packages are built without `bench`; perf gate runs use a separate build with it. The binary package is `tl-app` with `[[bin]] name = "tasklens"`; every crate has `version = "0.1.0"` and `publish = false`; there is no `rustfmt.toml` (R-158).
 
 Not used: `lyon` (GPUI's `PathBuilder` tessellates with lyon internally), `procfs` (allocation-heavy; parsers are hand-written, ADR-016), `sysinfo`, `directories` (XDG paths are resolved by hand, ADR-011), `tokio` in any form, `smol` directly (it comes in through gpui-kit only).
 
@@ -284,7 +288,7 @@ unwrap_used = "warn"          # allowed in tests
 
 - `cargo +1.98.1 build --workspace --locked` succeeds.
 - `cargo tree -p tl-engine -e features -i asupersync` shows no `nightly-outcome-try` and no `test-internals` in the non-dev build.
-- `cargo tree -p tasklens -i gpui-pre --prefix none` shows exactly one version, `0.3.7`.
+- `cargo tree -p tl-app -i gpui-pre --prefix none` shows exactly one version, `0.3.7`.
 
 ---
 
@@ -303,17 +307,18 @@ Astra requires immutable snapshots with per-component versions, process identity
 ```text
 src/lib.rs        # re-exports
 src/time.rs       # now_boot_ns(), now_mono_ns(), BootId
-src/ids.rs        # ProcessKey, DeviceIdx, SeriesId, MetricId, GroupKey, NodeId, ColumnId
+src/ids.rs        # ProcessKey, DeviceIdx, SeriesId, MetricId, GroupKey, NodeId, ColumnId, GraphTarget, ProcessSeriesId (R-154)
 src/validity.rs   # Validity, FieldValidity
 src/series.rs     # Sample, SampleFlags, SeriesRing, SeriesView
 src/snapshot.rs   # Snapshot and component types
-src/process.rs    # ProcessRecord, ProcessMeta, ProcState, ProcFlags, groups
-src/table.rs      # TableQuery, ProcessTableView, TableRow
+src/process.rs    # ProcessRecord, ProcessMeta, ProcState, ProcFlags, groups, ProcessExtras, ProcessExtrasP2, AppCgroupSample (R-141, R-163), LowMemoryInfo (R-150)
+src/table.rs      # TableQuery, ProcessTableView, TableRow, TableTotals, SysTableQuery, SysNodeId, SysColumnId (R-155, R-170)
 src/devices.rs    # DeviceCatalog, DeviceIdentity
 src/system.rs     # CpuTotals, MemoryTotals, DiskTotals, NetTotals, GpuTotals, SensorReading
-src/health.rs     # SourceId, SourceHealth, SourceState
+src/health.rs     # SourceId, SourceHealth, SourceState, EngineCaps, SetupState (R-141, R-149)
 src/actions.rs    # ActionId, ActionRequest, ActionKind, ActionTarget, ActionState, ActionEvent, ActionError
-src/command.rs    # Command, KWinCommand, SetupStep, HistoryRange, HistoryWhat, CommandError, AppRequest (ADR-005, R-136)
+src/command.rs    # Command, DeviceCommand, KWinCommand, SetupStep, HistoryRange, HistoryWhat, CommandError, AppRequest (ADR-005, R-136, R-139)
+src/tray.rs       # TrayModel, TrayEvent (P3, R-161)
 src/details.rs    # DetailsSnapshot and the Properties payload types
 src/demand.rs     # Demand and its parts (ADR-008)
 src/settings.rs   # Settings types (ADR-011); no file I/O
@@ -442,6 +447,19 @@ impl MetricId {
     pub const GPU_CLOCK: Self = Self(46);
     pub const FAN_RPM: Self = Self(50);    pub const SENSOR_TEMP: Self = Self(51);
     pub const BATTERY_PCT: Self = Self(60);
+    // added for the Performance pages (R-170); 50, 51 and 60 were taken
+    pub const CPU_POWER_PKG: Self = Self(5);  pub const CPU_POWER_CORE: Self = Self(6);
+    pub const CPU_CLOCK_MAX: Self = Self(7);  pub const MEM_DIRTY: Self = Self(14);
+    pub const GPU_MEM_SHARED: Self = Self(47); pub const GPU_MEM_CLOCK: Self = Self(48);
+    pub const GPU_PCIE_RX: Self = Self(49);   pub const GPU_PCIE_TX: Self = Self(52);
+    pub const GPU_FAN: Self = Self(53);       pub const GPU_ENGINE_MEMCTL: Self = Self(54);
+    pub const GPU_ENGINE_JPEG: Self = Self(55); pub const GPU_ENGINE_OFA: Self = Self(56);
+    pub const GPU_ENGINE_OTHER: Self = Self(57); // busiest vendor-specific engine, named by GpuDeviceInfo
+    pub const FAN_PWM: Self = Self(58);       pub const BATTERY_POWER: Self = Self(61);
+    // ALL lists 39 metrics. Bit 15 (0x8000) marks the 1 Hz tier view of a metric:
+    pub const TIER_1HZ: u16 = 0x8000;
+    pub fn with_tier_1hz(self) -> Self; pub fn is_tier_1hz(self) -> bool; pub fn base(self) -> Self;
+    // metric numbers stay below 0x8000
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
@@ -463,16 +481,22 @@ pub enum DeviceIdentity {
     Sensor { chip: Arc<str>, label: Arc<str> },   // hwmon name plus label
     Fan { chip: Arc<str>, index: u16 },
     Battery { native_path: Arc<str> },
+    Aggregate(AggregateKind),                     // Disks, Nets, Gpus: the card series of the Disk, Network and GPU pages (R-154)
 }
+pub enum AggregateKind { Disks, Nets, Gpus }
 pub struct DeviceEntry {
     pub idx: DeviceIdx, pub identity: DeviceIdentity, pub generation: u32,
     pub display_name: Arc<str>, pub present: bool,
     pub parent: Option<DeviceIdx>,  // partitions and device-mapper children point to their disk
+    pub persistent_key: Arc<str>,   // PERF-005 key computed by the worker (R-155): disk:<ID_WWN or ID_SERIAL> with by-path fallback,
+                                    // fan:<hwmon name>:<device path>:<n>, bat:<NativePath>, net:<MAC or name>, gpu:<uuid or PCI slot>,
+                                    // aggregate:disk, aggregate:net, aggregate:gpu
+    pub net_kind: Option<NetKind>,  // network interfaces only
 }
 pub struct DeviceCatalog { pub version: u64, pub entries: Arc<[DeviceEntry]> }
 ```
 
-A device that disappears keeps its `DeviceIdx` with `present = false`. A device that comes back with the same identity gets the same index and `generation + 1`. Counters are never subtracted across generations.
+A device that disappears keeps its `DeviceIdx` with `present = false`. A device that comes back with the same identity gets the same index and `generation + 1`. Counters are never subtracted across generations. The three `Aggregate` devices exist from session start with `present = true`; the reducer computes their series from the per-device values: `DISK_ACTIVE` is the maximum over present physical disks, `DISK_READ` and `DISK_WRITE` are sums; `NET_RX` and `NET_TX` are sums over the interfaces whose `NetKind` is shown under `EngineSettings.show_network_*`; `GPU_UTIL` is the maximum and `GPU_MEM` the sum (R-154). AMD and Intel GPUs use `Gpu { uuid: [0; 16], pci_bus_id }` (R-166). GPU devices are created on first sight (`devices.ensure` per identity); there is no fixed GPU list in P1 (R-155).
 
 **Process record and metadata.**
 
@@ -531,6 +555,28 @@ pub struct ProcessRecord {
 
 Size target: 160 bytes or less per record excluding the shared `ProcessMeta` (check with `size_of` in a test).
 
+The P1 extra-column values live beside the records, index aligned (same length, same order), so `ProcessRecord` stays small (R-141):
+
+```rust
+pub struct ProcessExtras {
+    pub cpu_kernel_pct: f32, pub cpu_user_pct: f32, pub cpu_relative_pct: f32,
+    pub utime_ticks: u64, pub stime_ticks: u64, pub start_ticks: u64,
+    pub rss_peak_bytes: u64, pub rss_shared_bytes: u64, pub commit_bytes: u64, pub vsize_bytes: u64, pub vsize_peak_bytes: u64,
+    pub page_faults: u64, pub page_faults_delta: u64, pub major_faults: u64,
+    pub policy: SchedPolicy, pub rt_prio: u8, pub affinity: CpuSet, pub handles: Option<u32>,
+    pub exe_name: Arc<str>, pub exe_path: Arc<str>, pub exe_deleted: bool, pub unit: Option<UnitRef>,
+    pub state_letter: u8, pub frozen: bool, pub disk_read_bps: f32, pub disk_write_raw_bps: f32, pub flag_since_ns: TimeNs,
+}
+// P2 columns, filled only for Demand.detail_keys (R-163): exe mtime and size, ELF class and machine, sessionid,
+// attr/current, elevation and sandbox, scheduling policy text, oom_score, oom_score_adj, TTY, cwd, context switches,
+// power_w: Option<f32> (reducer estimate, PROC-034)
+pub struct ProcessExtrasP2 { /* fields listed in bead E05-031 */ }
+pub struct AppCgroupSample { pub group: GroupKey, pub anon_bytes: u64, pub swap_bytes: u64, pub io_read_bps: f32, pub io_write_bps: f32,
+                             pub rios: u64, pub wios: u64, pub pids: u32, pub cgroup: CgroupRef, pub validity: FieldValidity }
+```
+
+The Priority and State column texts are formatted in the UI from `policy`, `nice`, `rt_prio`, `state_letter` and `frozen`. Start time is `SystemSnapshot.boot_time_s + start_ticks / CLK_TCK`. Columns whose data is in neither the record nor the extras sort `Absent` (R-141).
+
 **Groups.**
 
 ```rust
@@ -542,7 +588,17 @@ pub enum GroupKind {
     System,                     // other uids, system.slice, init.scope, kernel threads
     Ungrouped,                  // cgroup unreadable
 }
+
+/// One aggregated row of the process table (R-141). The numeric mirrors of ProcessRecord sit beside these.
+pub struct GroupRow {
+    pub node: NodeId, pub kind: GroupRowKind, pub name: Arc<str>, pub icon: Option<Arc<str>>,
+    pub cpu_pct: f32, pub memory_bytes: u64, pub disk_bps: f32, pub net_bps: f32, pub gpu_pct: f32,
+    pub pids: u32, pub note: Option<Arc<str>>, pub validity: FieldValidity,
+}
+pub enum GroupRowKind { App, Unit, KernelThreads, Pseudo }
 ```
+
+`GroupKind` classifies; `NodeId` (ADR-009) identifies table rows and has `Unit(UnitRef)`, `KernelThreads` and `Pseudo(PseudoKind { Interrupts, MemoryCompression })` beside `Group` and `Process`.
 
 **Snapshot.**
 
@@ -572,6 +628,8 @@ pub struct Snapshot {
     pub windows: Arc<WindowsSnapshot>, // P2: KWin window list keyed by pid (ADR-004, KWin worker)
     pub details: Arc<DetailsSnapshot>, // P2: Properties payloads, handle search state, affinity masks
     pub history: Arc<HistoryView>,     // P3: answer to the latest HistoryQuery (ADR-012)
+    pub process_series: Arc<ProcessSeriesSet>,     // P2: engine-sampled per-process, name and app series (R-154)
+    pub device_details: Arc<DeviceDetailsSnapshot>, // P2: static and D-Bus device details, SMART, partitions, eject (R-139)
 }
 
 pub struct SeriesSet {
@@ -582,17 +640,27 @@ pub struct SeriesSet {
 pub struct ProcessSnapshot {
     pub header: ComponentHeader,
     pub records: Arc<[ProcessRecord]>,  // sorted by ProcessKey
+    pub extras: Arc<[ProcessExtras]>,   // index aligned with records (R-141)
+    pub extras_p2: Arc<[ProcessExtrasP2]>, // index aligned; filled only for detail_keys (R-163)
+    pub apps: Arc<[AppCgroupSample]>,   // one per app group (R-141)
     pub coverage: Coverage,             // which expensive fields cover which keys (ADR-008)
+    pub low_memory: Option<Arc<LowMemoryInfo>>, // EngineMode::LowMemory only (R-150)
 }
 
+pub struct SeriesSet { /* as above */ pub slow: Arc<[Arc<SeriesView>]> } // 1 Hz tier views with the TIER_1HZ bit set, from P2 (R-141, R-170)
+
+pub struct ProcessSeriesSet { pub header: ComponentHeader, pub series: Arc<[(ProcessSeriesId, Arc<SeriesView>)]> }
+pub struct ProcessSeriesId { pub target: GraphTarget, pub column: ColumnId }
+pub enum GraphTarget { Process(ProcessKey), Name(Arc<str>), App(Arc<str>) }
+
 pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed by the UI
-// bits: SYSTEM, SERIES, PROCESSES, TABLE, CONNECTIONS, SERVICES, STARTUP, INVENTORY, DEVICES,
-// HEALTH, WINDOWS, DETAILS, HISTORY
+// bits 0..=12: SYSTEM, SERIES, PROCESSES, TABLE, CONNECTIONS, SERVICES, STARTUP, INVENTORY, DEVICES,
+// HEALTH, WINDOWS, DETAILS, HISTORY; PROCESS_SERIES = 1 << 13, DEVICE_DETAILS = 1 << 14; ALL = 0x7FFF (fifteen bits)
 ```
 
 **Per-component fields the UI reads** (each type lives in `snapshot.rs` unless named):
 
-- `SystemSnapshot` carries, besides the totals of `system.rs`, `cpu_topology: Arc<CpuTopology>`:
+- `SystemSnapshot` carries, besides the totals of `system.rs`, `boot_time_s: i64` (`/proc/stat btime`, R-141), `color_scheme: u8` (portal `org.freedesktop.appearance` `color-scheme` 0, 1, 2, fed by the session-bus opener worker and `SourceUpdate::ColorScheme`, R-170) and `cpu_topology: Arc<CpuTopology>`:
   `online: CpuSet`, `cores: Arc<[CoreInfo { id, logical: SmallVec<[u16; 2]>, l3_group: u16, kind:
   CoreKind::{Performance, Efficiency, Standard} }]>`, read once at start and again on CPU hotplug
   (Set Affinity dialog, UI-PWN-021; per-core grid marks, PERF-031).
@@ -619,13 +687,23 @@ pub struct ComponentMask(pub u16); // one bit per Snapshot component, computed b
   strings (`Arc<str>`, formatted once per cookie), `counts { total, tcp, udp, established,
   listening }`, `destroy_supported: Option<bool>` (set after the first `SockDestroy` answer).
 - `HistoryView` (ADR-012): the answer to the latest `HistoryQuery`, max 1,024 points per series.
+- `HealthSnapshot`: a plain `version: u64` (no `ComponentHeader`, R-155), one `SourceHealth` per `SourceId` with `last_error` capped at 200 characters, `helper: HelperState`, `helper_start: Option<(u64 /* seq */, HelperStartOutcome { Cancelled, NotAuthorized, Failed(Arc<str>) })>` (R-148), `setup: Arc<SetupState { status: Option<SetupStatus>, run: Option<SetupRun> }>` (R-149) and `caps: EngineCaps` (bitflags u16: `FILE_MANAGER1 = 1`, `GDB = 2`, `CONNECTIONS_DESTROY = 4`, `KWIN_BRIDGE = 8`; R-141). `SourceState` is `{ Off, Running, Late, Stale, Failed, Disabled { until: TimeNs }, Unsupported }`; `Unsupported` is terminal and never retried (GPU probe not installed, `LibraryNotFound`, `DriverNotLoaded`, KWin bridge not available; R-155). There is no `SourceId` for the public IP fetch or the low-memory sweep.
+- `WindowsSnapshot.pick: Option<PickResult { seq: u64, outcome: PickOutcome { Picked { pid: u32 }, NoWindow, Cancelled } }>` carries the window picker result (R-149).
+- `InventorySnapshot` holds one struct per Information section (R-156), `public_ip: PublicIpState { NotFetched, Fetching, Fetched { v4: Option<Arc<str>>, v6: Option<Arc<str>>, fetched_at_s: i64 }, Failed(Arc<str>) }` (R-139) and `ProcessorInfo.bits: InvField<u8>` (64 for `x86_64`, `aarch64`, `riscv64`, `ppc64`, `ppc64le`, `s390x`, `loongarch64`, `mips64`, else 32; R-170). Inventory rows arrive with `device: None`; the reducer matches disk name, PCI slot or interface name against the catalog (R-166). `MemoryInfo.peak_committed_bytes` is the reducer's running maximum of `Committed_AS` (R-166).
+- `DeviceDetailsSnapshot { header, cpu: Arc<CpuStaticInfo>, memory: Arc<MemoryDetails>, disks: Arc<[(DeviceIdx, DiskDetails)]>, nets: Arc<[(DeviceIdx, NetDetails)]>, batteries: Arc<[(DeviceIdx, BatteryDetails)]> }` (R-139). `DiskDetails` carries `model`, `wwn`, `serial`, `interface`, `scheduler` as `InvField<Arc<str>>`, `rotation_rpm`, `smart: SmartKind { Ata, Nvme, NeedsFallback, None }`, `smart_data: Option<InvField<Arc<SmartData>>>`, `smart_temp_c`, `ejectable`, `can_power_off`, `eject: Option<(u64, EjectState { Running, Blocked { blockers: Arc<[Blocker]>, others_may_hold: bool }, Done, Failed(Arc<str>) })>`, `partitions: Arc<[PartitionRow]>` (R-140), `formatted_bytes`, `used_bytes`, `free_bytes`, `system_disk`, `swap`. `NetDetails` carries `adapter_name`, `driver`, `mac`, `ifindex`, `link_speed_mbps`, `state: LinkState`, `addresses`, `kind: NetKind`, `wifi: Option<WifiInfo>`. `BatteryDetails` is the E12-023 field list plus `history: Option<Arc<[(i64, f32)]>>`. The reducer merges one record per device: the sysfs source fills every field it knows and a D-Bus source (`Udisks`, `NetworkManager`) overwrites `model`, `wwn`, `serial`, `rotation_rpm`, `smart*`, `ejectable`, `can_power_off`, `eject`, `kind` and `wifi`.
+- Totals in `system.rs` (R-139, R-155, R-170): `DiskTotals.temp_c: Metric<f32>`; `NetTotals.state: LinkState { Up, Down, Dormant, Unknown }` from sysfs `operstate`; `GpuTotals.pcie_rx_bps`, `pcie_tx_bps: Metric<f32>`; `SensorReading.fan_control: Option<FanControlMode { FullSpeed, Manual, Automatic }>` from `pwm<n>_enable` 0, 1, 2 and `fan_connected: bool` (a non-zero RPM seen this session, or a label).
 
 ```rust
 // tl-model/src/table.rs: one query type for the three system tables (UI-SYS-002)
 pub enum SysTable { Services, Startup, Connections }
-pub struct SysTableQuery { pub table: SysTable, pub generation: u64, pub sort: SortSpec,
+pub struct SysTableQuery { pub table: SysTable, pub generation: u64, pub sort: (SysColumnId, bool /* ascending */),
                            pub filter: Arc<str>, pub expanded: Arc<[SysNodeId]>,
-                           pub services: Option<ServiceFilter> }
+                           pub services: Option<ServiceFilter> }   // no column list; the Services filter matches every text column (R-167)
+/// String ids for the system tables, separate from the process ColumnId (R-170): the 19 Services columns
+/// (UI-SYS-003), the 7 Startup ids (name, publisher, status, impact, type, location, command) and the
+/// 17 Connections ids (proto, local, foreign, state, pid, process, user, family, local_port, foreign_port,
+/// recv_q, send_q, interface, inode, service, remote_host, netns), with as_str and from_str.
+pub struct SysColumnId(/* ... */);
 pub enum SysNodeId { ServiceGroup(Manager), Unit(UnitRef), UnitProcess(UnitRef, ProcessKey),
                      Startup(StartupRef), Conn(u64) }
 pub struct SysRow { pub node: SysNodeId, pub depth: u8, pub expanded: bool,
@@ -634,10 +712,12 @@ pub struct SysRow { pub node: SysNodeId, pub depth: u8, pub expanded: bool,
 
 `WindowsSnapshot` holds the KWin window list keyed by pid. Each entry has `internal_id`, `caption`, `resource_class`, `desktop_file_name`, `minimized`, `maximized`, `keep_above`, `frame_geometry` and `window_type`. Without the KWin bridge it is empty with validity `Unsupported`.
 
+`ColumnId` numbers 1 to 121 follow PROC-027 to PROC-036 order and are frozen; the dense index is the number minus 1, `ColumnSet([u64; 4])` holds 256, and new columns append after 121 (R-155).
+
 Every component except `series` is replaced as a whole new `Arc` when it changes. A publish that changes only CPU series reuses every other `Arc`.
 
 **Units and formatting (`units.rs`).** Canonical table (d) in `docs/RECONCILIATION.md` is the full list. In short:
-- Percent: one decimal everywhere (`%.1f%%`: `3.4%`, `37.0%`); a measured zero is `0%`.
+- Percent: one decimal everywhere (`%.1f%%`: `3.4%`, `37.0%`); a measured zero is `0%`. The same rule holds for every rate, power and time form: a measured zero prints as its unit's zero, never as a blank (R-155). `percent_2dp` zero is `0%`; `watts_pair` prints the limit as an integer.
 - Memory and storage sizes: IEC, base 1024, labels `B KiB MiB GiB TiB`, two decimals from 1 KiB up (`1.22 GiB`, `16.00 KiB`); integer bytes below 1 KiB (`512 B`). Copy details lines use whole MiB.
 - Disk and I/O rates: `MiB/s` with one decimal in tables; auto-scaled IEC (`KiB/s`, `MiB/s`, `GiB/s`) with one decimal on Performance graphs and stats.
 - Network rates: setting `units.network = "bits" | "bytes"`, default `"bits"`, and `units.network_auto_scale`, default `false`. Bits use SI, base 1000 (`Kbps Mbps Gbps`); bytes use IEC (`KiB/s`, `MiB/s`). With auto-scale off, values are fixed `Mbps` (or `MiB/s`) with one decimal, `0 Mbps` at zero. Graph axes use 1-2-5 × 10ⁿ rounding whatever the setting.
@@ -646,6 +726,7 @@ Every component except `series` is replaced as a whole new `Arc` when it changes
 - Temperatures: integer `°C`. Power: one decimal `W`.
 - Uptime: `2 days, 2h 38m 15s`. Short ages (tooltips and the Start time column's age text only): `1d 4h`, `4h 12m`, `12m 5s`, `5s`.
 - Formatting functions write into a caller-provided `String` and never allocate when the buffer is large enough.
+- Axis helpers `ceil_pow2(u64) -> u64` and `ceil_125(f64) -> f64` live here too (`ceil_125(1234) = 2000`, `ceil_125(60) = 100`, `ceil_125(0.3) = 0.5`, `ceil_pow2(3 MiB) = 4 MiB`; R-170). `format_local(LocalDateTime)` stays; the local time zone conversion is done in tl-ui with jiff (R-142).
 
 ### Consequences
 
@@ -745,15 +826,23 @@ pub struct WorkerIo {
     pub updates: mpsc::Sender<EngineMsg>,        // clone per generation
     pub demand: watch::Receiver<Demand>,         // clone per generation
     pub settings: watch::Receiver<EngineSettings>,
+    pub control: watch::Receiver<WorkerControl>, // reset_generation plus the newest-64 QueuedCommand queue (R-166)
+    pub shared: SharedHandles,                   // ManagerConnSlot and the other D-Bus handles owned by dbus/mod.rs (R-166)
 }
 ```
 
 Never move an `mpsc::Receiver` into a restartable worker. Never hold a `watch` `Ref` across any other channel call; use `borrow_and_clone()` (bead `c11v6v`).
 
+`EngineConfig { mode, sys_root, state_dir, history_dir: Option<PathBuf>, helper_path: Option<PathBuf> }` is the whole start-up configuration; tl-app sets `history_dir = $XDG_STATE_HOME/tasklens/history` and `helper_path = /usr/lib/tasklens/tl-helper` when that file exists (R-150). `EngineHooks.action_gate: Fn(HookCtx) -> Box<dyn ActionGate>` is the test seam for action admission (R-166). `all_workers()` is the one registry of `WorkerSpec` lines (R-167).
+
 **Engine modes.** `EngineMode::{Full, LowMemory}` is fixed at start. `LowMemory` is used by the
-`tasklens --low-memory` rescue process (PROC-098, UI-PWN-032): only the `Processes` worker runs, with
-a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, and the
-engine publishes `Snapshot.processes` and `Snapshot.health` only. The stripped sweep is its own `Source` in `workers/lowmem.rs`, chosen by one `match` on `EngineMode` in `workers/processes.rs` (R-138). Actions still go through the
+`tasklens --low-memory` rescue process (PROC-098, UI-PWN-032): the `Processes` worker runs with
+a stripped sweep (`stat`, `status`, cgroup `memory.current`) every 2 s plus the PSI state, the `KWin`
+worker runs only for `KWinCommand::KeepAbove` (the window starts pinned), and the engine publishes
+`Snapshot.processes` and `Snapshot.health` only (R-152). The sweep's `LowMemoryInfo` travels in
+`ProcessSweep.low_memory` and lands in `ProcessSnapshot.low_memory` (R-150). The actions region and the
+targetless launcher run in both modes, so "Open Full tasklens" is an ordinary `Launch`. With
+`--force-full-memory-mode` the rescue process runs `EngineMode::Full` instead (D-015). The stripped sweep is its own `Source` in `workers/lowmem.rs`, chosen by one `match` on `EngineMode` in `workers/processes.rs` (R-138). Actions still go through the
 ADR-006 pipeline with identity revalidation.
 
 **Worker list** (each is one `ManagedSupervisor`; `SourceId` is the enum in `tl-model::health`):
@@ -761,7 +850,7 @@ ADR-006 pipeline with identity revalidation.
 | SourceId | Module | Phase | Work |
 |---|---|---|---|
 | `Cpu` | `workers/cpu.rs` | P1 | `/proc/stat`, cpufreq, CPU temperature |
-| `Memory` | `workers/memory.rs` | P1 | `/proc/meminfo`, zram `mm_stat`, `/proc/vmstat` |
+| `Memory` | `workers/memory.rs` | P1 | `/proc/meminfo`, zram `mm_stat` (no `/proc/vmstat` in v1, R-162) |
 | `Disk` | `workers/disk.rs` | P1 | `/proc/diskstats`, `/sys/block` enumeration |
 | `Net` | `workers/net.rs` | P1 | `/proc/net/dev`, `/sys/class/net` enumeration |
 | `GpuNvidia` | `workers/gpu_nvidia.rs` | P1 | client of `tl-gpu-probe` (ADR-007) |
@@ -782,11 +871,14 @@ ADR-006 pipeline with identity revalidation.
 | `HistoryRecorder` | `workers/history.rs` | P3 | ADR-012 store and rolling window |
 | `Journal` | `workers/journal.rs` | P2 | one `journalctl` child per open `JournalHandle` (ADR-005, UI-SYS-036) |
 
+The session-bus opener worker (`opener.rs` and `launcher.rs`, ADR-005) also reads the portal colour scheme (`org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")` plus `SettingChanged`) and ships it as `SourceUpdate::ColorScheme(u8)` (R-170). The public IP fetch is a job the `Inventory` worker runs on `DeviceCommand::FetchPublicIp`; the helper session and the setup runner report through `SourceUpdate::Helper` and `SourceUpdate::Setup`, which `source_of()` maps to `None` (R-150). Every `SourceUpdate` variant exists from E08 on, so later epics add arms, not variants. `Source::take_extra()` lets a worker send device lists and details before its sample (R-139).
+
 **KWin bridge worker.** `workers/dbus_kwin.rs` runs on the engine's session-bus connection. Availability: `XDG_CURRENT_DESKTOP` contains `KDE` and `org.kde.KWin` is on the bus. Otherwise the window features are hidden and the UI shows the toast "Window features need KDE Plasma". The worker:
 - writes `$XDG_RUNTIME_DIR/tasklens/kwin-bridge.js` and loads it as KWin script plugin `tasklens-bridge`;
 - exports object `/io/github/oysteinkrog/Tasklens/WindowBridge`, interface `io.github.oysteinkrog.Tasklens.WindowBridge`, method `Update(s json)`, which the script calls with the window list;
-- publishes the list as `Snapshot.windows` (ADR-003);
-- runs commands (activate, close, keep above, pick) from `Command::KWin(KWinCommand)` (ADR-005) as one-shot scripts named `tasklens-cmd-<n>`; the window picker uses `tasklens-pick`;
+- publishes the list as `Snapshot.windows` (ADR-003); the script also reports `minimizedChanged`, maximize changes, `keepAboveChanged` and `interactiveMoveResizeFinished` (R-167);
+- writes its connection's unique name into the script as `__TL_BUS_NAME__` and accepts `Update` only from the owner of `org.kde.KWin`; payloads over 1 MiB are rejected and strings cut at 4 KiB (R-167);
+- runs commands (activate, close, keep above, pick) from `Command::KWin(KWinCommand)` (ADR-005) as one-shot scripts named `tasklens-cmd-<n>`; the window picker uses `tasklens-pick`, and its result comes back through the `Picked(s uuid, u pid)` method of the `WindowBridge` interface into `WindowsSnapshot.pick` (R-149). Commands have no result event; a failed one-shot script is logged at `warn` (R-170);
 - finds tasklens's own secondary windows (detached graph windows "tasklens Graph <n>", the mini window "tasklens Mini Window") in `WindowsSnapshot` by tasklens's pid plus the window caption. Every tasklens window keeps the one app ID `io.github.oysteinkrog.Tasklens`; there are no per-window app IDs.
 
 There is no X11 EWMH fallback for the window features in v1 (X11 is best effort, ADR-010).
@@ -822,6 +914,7 @@ pub trait Source: Send + 'static {
     fn id(&self) -> SourceId;
     fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration>; // None = off
     fn sample(self) -> (Self, SourceUpdate) where Self: Sized;   // runs on the blocking pool
+    fn take_extra(&mut self) -> Option<SourceUpdate> { None }   // device lists and details; drained after each sample and sent first (R-139)
 }
 ```
 
@@ -843,10 +936,11 @@ pub enum EngineMsg {
     Source(SourceUpdate),                 // from workers
     Command(Command),                     // from the UI (ADR-005)
     ActionFinished { id: ActionId },      // from action tasks; triggers a targeted refresh
+    Tick,                                 // every 1 s: stale checks, linger expiry (R-166)
 }
 ```
 
-Loop: `recv(&cx)` one message, then drain with `try_recv` until empty (at most 256 messages), apply all, then publish once. It never awaits between `latest.store(..)` and `wake_tx.try_send(())`. It owns: all `SeriesRing`s, the process table state, the current `TableQuery`, metadata caches, the device catalog and health. It builds `ProcessTableView` (sort, filter, group, tree flatten) whenever processes or the query change.
+Loop: `recv(&cx)` one message, then drain with `try_recv` until empty (at most 256 messages), apply all, then publish once. It never awaits between `latest.store(..)` and `wake_tx.try_send(())`. It owns: all `SeriesRing`s, the process table state, the current `TableQuery`, metadata caches, the device catalog and health. It builds `ProcessTableView` (sort, filter, group, tree flatten) whenever processes or the query change. It also computes the aggregate device series and the per-process series for `Demand.graph_targets` (R-154), the process power estimate (R-163), `TableTotals.handles` from `ProcessSweep.file_nr` and the running maximum of `Committed_AS` (R-166). `Command::Device` is forwarded to the `Udisks`, `Inventory` or `UPower` worker (R-139); `StartHelperSession` and `EndHelperSession` go through `Reducer.helper_tx: Option<mpsc::Sender<HelperCommand { Start, End }>>`, which E29 sets (R-148).
 
 Reducer state is bounded: process metadata cache holds live processes plus at most 256 exited ones. Exited records are kept for the linger time, `2 × processes.interval_ms` clamped to 1..=3 s, then removed.
 
@@ -980,7 +1074,9 @@ pub enum Command {
     RefreshNow(SourceId),         // user pressed refresh, or a page opened
     ResetBaselines,               // debugging aid, also used after resume
     ReprobeSource(SourceId),      // P3: after a setup step succeeded (UI-PRF-053)
-    KWin(KWinCommand),            // P2: activate, close, keep above, pick (ADR-004 KWin worker)
+    KWin(KWinCommand),            // P2: activate, close, keep above, pick { seq }, cancel pick { seq } (ADR-004 KWin worker, R-149)
+    Device(DeviceCommand),        // P2: SMART, eject, public IP, battery history (R-139)
+    StartHelperSession, EndHelperSession, // P3: the shield starts or ends the pkexec helper (R-148)
     // P2: Properties windows (UI-PWN-002)
     DetailRefresh { target: DetailTarget, tab: DetailTab },
     ComputeHashes(ProcessKey),    // once per window open; result in the General payload
@@ -994,9 +1090,20 @@ pub enum Command {
     HistoryQuery { id: u64, range: HistoryRange, what: HistoryWhat },
     HistoryDelete { keys: Arc<[ProcessKey]> },
     // P3: Additional Setup window (UI-PRF-053)
-    SetupStatus,                  // engine answers with a SetupStatus event (journal group, lm_sensors)
-    RunSetup { step: SetupStep }, // runs tasklens-setup through pkexec, streams SetupEvent lines
+    SetupStatus,                  // engine refreshes HealthSnapshot.setup.status (R-149)
+    RunSetup { step: SetupStep }, // runs tasklens-setup through pkexec; progress and output in HealthSnapshot.setup.run (R-149)
 }
+
+/// Keyed by the kernel disk name (`sda`, `nvme0n1`), the same string as `DeviceIdentity::Disk.name`;
+/// the UI resolves a DeviceIdx through DeviceCatalog, workers never see one (R-139).
+pub enum DeviceCommand {
+    SmartRead { disk: Arc<str>, update: bool },   // udisks2 SMART, optionally refresh first
+    SmartReadAdmin { disk: Arc<str> },            // pkexec smartctl fallback (R-088)
+    Eject { seq: u64, disk: Arc<str> },           // seq is a UI counter; progress in DiskDetails.eject
+    FetchPublicIp,                                // Inventory worker job; result in InventorySnapshot.public_ip
+    BatteryHistory { native_path: Arc<str> },
+}
+pub enum SetupStep { RaplEnable, RaplRevert, SensorsDetect, SensorsRevert, PolkitRule { on: bool } } // args(): rapl-enable, rapl-revert, sensors-detect, sensors-revert, polkit-rule on|off
 ```
 
 **Engine to UI, action events.** `async_channel::bounded::<ActionEvent>(256)`. Action tasks call `events_tx.send(ev).await` wrapped in `time::timeout(.., 1 s)`; a timeout there is logged and the event is dropped (the UI is not draining, which only happens during shutdown). Admission limits in-flight actions to 16, and each action emits at most 2 + number of targets events, with targets capped at 256 per request, so the channel only fills if the UI stops reading.
@@ -1048,7 +1155,8 @@ pub enum ActionKind {
 }
 
 pub struct LaunchSpec { pub what: LaunchWhat, pub as_admin: bool, pub cwd: Option<Arc<str>> }
-pub enum LaunchWhat { Command(Arc<str>), DesktopEntry(Arc<str>), Unit(UnitRef) }
+pub enum LaunchWhat { Command(Arc<str>), DesktopEntry(Arc<str>), Unit(UnitRef),
+                      DbusActivate { bus_name: Arc<str>, object_path: Arc<str>, action: Arc<str>, parameter: Option<Arc<str>> } } // org.freedesktop.Application.ActivateAction, 2 s (P3, R-170)
 
 pub enum Signal { Term, Kill, Hup, Int, Quit, Stop, Cont, Usr1, Usr2, Other(u8) }  // Other: any other number, incl. SIGRTMIN..=SIGRTMAX
 pub enum SchedPolicy { Other, Batch, Idle, Fifo, Rr }   // rt_prio 1..=99 for Fifo and Rr, else 0
@@ -1063,7 +1171,8 @@ pub enum ActionState {
     OutcomeUnknown(Arc<str>),  // timed out or target vanished after the effect may have happened
 }
 
-pub enum RejectReason { Busy, TooManyTargets, IdentityChanged, KernelThread, Protected, NotOwner, Unsupported }
+pub enum RejectReason { Busy, TooManyTargets, IdentityChanged, KernelThread, Protected, NotOwner, Unsupported,
+                        AlreadyRunning } // StartupRunNow and Launch when the entry already runs: not an error, not a success (R-148)
 
 pub struct ActionEvent {
     pub id: ActionId,
@@ -1072,7 +1181,7 @@ pub struct ActionEvent {
 }
 ```
 
-`OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134).
+`OpenUri`, `ShowInFileManager` and `Launch` carry no targets; admission skips the target checks for them and they run in `tl-engine/src/opener.rs` and `launcher.rs` on the engine's session-bus connection with a 2 s deadline (120 s when `as_admin`), reporting through the same events (R-134). A `pkexec` launch counts as `Succeeded` when the child is still running 2 s after the prompt closed; Plasma scripts in Run go as `LaunchWhat::Command` with the shell-quoted path (R-148). `Unsupported` is reported when no `FileManager1` owner exists or the command text is invalid.
 
 Event order per request: `Started` (or a single `Rejected`), then one final state per target, then one final state with `target: None` summarizing (Succeeded only if every target succeeded; otherwise the worst state in the order Failed, OutcomeUnknown, Rejected).
 
@@ -1141,7 +1250,7 @@ pub fn open_verified(key: ProcessKey, boot: BootId) -> Result<OwnedFd, OpsError>
 
 Details:
 - `SetNice(n)`: `setpriority(PRIO_PROCESS, pid, n)` applies to the thread group leader only on Linux; to change the whole process, apply to every TID from `/proc/<pid>/task/` with the same before/after pidfd check on the main PID. Report `Succeeded` only if every TID succeeded; partial is `Failed(Partial { done, total })`.
-- `SetSched { policy, rt_prio }` (P2): `sched_setattr` on every TID, same rules. Realtime sets `SCHED_RR` priority 1 with `SCHED_RESET_ON_FORK`, after the confirmation "Realtime priority can freeze the desktop if the process spins. Set it anyway?".
+- `SetSched { policy, rt_prio }` (P2): `sched_setattr` on every TID, same rules. Every FIFO and RR request sets `SCHED_RESET_ON_FORK` (R-165); the Realtime menu item is `SCHED_RR` priority 1, after the confirmation "Realtime priority can freeze the desktop if the process spins. Set it anyway?".
 - `SetAffinity(set)`: `sched_setaffinity` on every TID, same rules.
 - `SetIoPriority(p)`: `ioprio_set(IOPRIO_WHO_PROCESS, tid, value)` through `libc::syscall(SYS_ioprio_set, ..)` in `tl-ops/src/sys.rs`, on every TID, same rules. `Realtime` needs root and is shown only in the privileged menu.
 - TIDs are re-listed right before the loop. A TID that disappears mid-loop is skipped and not counted as failure.
@@ -1192,26 +1301,25 @@ A single End Process (SIGKILL) on one of the user's own, unprotected processes d
 |---|---|
 | Signal, nice, affinity, ioprio, freeze write | 2 s per target |
 | Freeze completion wait | 2 s (above) |
-| systemd unit start/stop/restart | 30 s until `JobRemoved` for the returned job path |
+| systemd unit start/stop/restart | no client-side timeout for the job (SYS-005); the method call itself 10 s on the user manager, 120 s on the system manager (R-166) |
 | systemd enable/disable + `Reload` | 10 s |
 | Any call that may show a polkit prompt | 120 s |
 | Startup entry write | 2 s |
 
 A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the blocking pool is not interrupted (ASX section 6).
 
-**systemd units.** Methods `StartUnit(name, "replace")`, `StopUnit(name, "replace")`, `RestartUnit(name, "replace")`, `EnableUnitFiles([name], false, true)` / `DisableUnitFiles([name], false)` then `Reload()`. Calls set the D-Bus `ALLOW_INTERACTIVE_AUTHORIZATION` flag so polkit can ask for a password. Success is the `JobRemoved` signal with result `"done"`; any other result string is `Failed(UnitJob(result))`.
+**systemd units.** Methods `StartUnit(name, "replace")`, `StopUnit(name, "replace")`, `RestartUnit(name, "replace")`, `EnableUnitFiles([name], false, true)` / `DisableUnitFiles([name], false)` then `Reload()`. Calls set the D-Bus `ALLOW_INTERACTIVE_AUTHORIZATION` flag so polkit can ask for a password. Success is the `JobRemoved` signal with result `"done"`; any other result string is `Failed(UnitJob { result, error_name: None })`, and a failed method call is `Failed(UnitJob { result, error_name: Some(<zbus error name>) })` (R-170). systemd `AccessDenied` maps to `Failed(NotAuthorized)` (R-148). `UnitEnable` and `UnitDisable` on a masked unit call `UnmaskUnitFiles` first inside the same action (R-170).
 
 **Privileged helper boundary (P3, reserved now).**
 - Binary `/usr/lib/tasklens/tl-helper`, started by the engine as `pkexec /usr/lib/tasklens/tl-helper --session`.
 - Polkit has exactly three tasklens actions, in `/usr/share/polkit-1/actions/io.github.oysteinkrog.Tasklens.policy`: `io.github.oysteinkrog.tasklens.helper` (`auth_admin_keep`) covers every tl-helper operation; `io.github.oysteinkrog.tasklens.setup` (`auth_admin_keep`) covers `/usr/lib/tasklens/tasklens-setup`; `io.github.oysteinkrog.tasklens.netmon` is reserved for `tl-netmon` (P4). Polkit authorises the `pkexec` launch once, so per-operation action names inside a running helper would not be enforced.
-- Transport: the helper's stdin and stdout, using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB. A reply larger than one frame is sent as a sequence of frames; the total per request is capped at 4 MiB. There is no single-call `--once` mode.
+- Transport: the helper's stdin and stdout, a Unix socketpair so a file descriptor can travel as `SCM_RIGHTS` ancillary data with the `Dump` frame (R-145), using the same `tl-model::wire` framing as the GPU probe (ADR-007), max frame 64 KiB. Frames are `HelperFrame { seq: u32, request }` and `HelperReply { seq: u32, last: bool, body }` after a `Hello { proto }` handshake both ways, `HELPER_PROTO_VERSION = 1` (R-157). A reply larger than one frame is sent as a sequence of frames; the 4 MiB cap is per reply message for the streamed requests (`ScanStrings`, `NetnsSockDiagDump`) and total per request for the rest. There is no single-call `--once` mode.
 - Allowed requests only:
   - `Signal { key, signal }`, `SetNice`, `SetSched`, `SetAffinity`, `SetIoPriority`; `Signal`, `SetNice`, `SetSched` and `SetAffinity` also accept a thread target (`ActionTarget::Thread`);
   - `FreezeGroup`, `ThawGroup`, `KillGroup` for any uid's cgroup under `/sys/fs/cgroup`;
-  - `ReadProcessDetail { key, what }` for root-only `/proc` fields;
-  - `ReadProcessFiles { key, files }`, where `files` is a set of `io`, `fd_list`, `fdinfo`, `environ`, `maps`, `smaps`, `smaps_rollup`, `ns`, `cwd`, `exe`, `status`;
-  - `ScanStrings { key, opts }`, which streams batches;
-  - `Dump { key, mode, out_fd }`, which runs `/usr/bin/gcore` by fixed path and writes to the passed fd;
+  - `ReadProcessFiles { key, files }`, where `files` is a set of `io`, `fd_list`, `fdinfo`, `environ`, `maps`, `smaps`, `smaps_rollup`, `ns`, `cwd`, `exe`, `status`, `root` (`ProcFiles::ROOT = 1 << 11`, R-157);
+  - `ScanStrings { key, opts }`, which streams batches, and `CancelScan { seq }` (17 request variants in all, R-157);
+  - `Dump { key, mode }`, which runs `/usr/bin/gdb` by fixed path with the arguments `--nx --nh --batch -p <pid> -ex "gcore /proc/<caller pid>/fd/<n>"`, a cleared environment except `PATH=/usr/bin:/bin` and `LC_ALL=C`, stdio on `/dev/null`, writing to the file descriptor passed with the frame; `dump_available()` requires both `/usr/bin/gdb` and `/usr/bin/gcore` (R-145). The engine's direct path opens `<state_dir>/dumps/<name>.core` with `O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC` mode 0600 and calls the same `tl_ops::dump::dump_to_fd`;
   - `ResolveSocketInodes { inodes }`;
   - `SockDestroy { family, proto, four_tuple, cookie }`;
   - `WriteServiceDropIn { manager: System, unit, keys }` with keys limited to `Restart*`, `StartLimit*`, `FailureAction` and `OnFailure`, written to the fixed path `/etc/systemd/system/<unit>.d/50-tasklens-recovery.conf`; an empty key set deletes that file (`ActionKind::UnitRemoveRecovery`);
@@ -1219,7 +1327,8 @@ A timeout reports `OutcomeUnknown`, never `Failed`. Work already running on the 
 - No path, command or free-form file argument. The helper re-runs `open_verified` itself on every process target; it never trusts the engine's check.
 - The helper exits after 300 s idle or when stdin reaches EOF. It sets `PR_SET_PDEATHSIG = SIGKILL`.
 - The eBPF network collector is a separate binary (`tl-netmon`, P4) with its own polkit action. It never shares a process with the action helper.
-- "Run as administrator" in the Run dialog uses `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper.
+- "Run as administrator" in the Run dialog uses `pkexec env … /bin/sh -c <text>` under `org.freedesktop.policykit.exec`, never tl-helper. Unset or empty `DISPLAY`, `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` are left out of the `env` line (R-165).
+- Inside the engine the helper is reached through `trait PrivilegedOps` in `tl-engine/src/actions/mod.rs` (`call(cx, req, fd, deadline) -> Result<Vec<HelperReply>, HelperCallError { Missing, Cancelled, NotAuthorized, Timeout, Exited, Protocol }>` and `state() -> HelperState`); `ActionCtx.helper` is `None` until the helper lands, and a privileged request is then `Rejected(Unsupported)`, never run unprivileged (R-147). A dismissed prompt is `ActionError::AuthCancelled` (pkexec 126), a denial `ActionError::NotAuthorized` (pkexec 127); a failed session start is reported once through `HealthSnapshot.helper_start` (R-148).
 - Without the helper, privileged menu items are shown disabled with the tooltip "Needs administrator helper (not installed)".
 
 ### Consequences
@@ -1385,11 +1494,13 @@ pub struct Demand {
     pub unit_details: Arc<[UnitRef]>,       // P2: open Service Properties windows, max 10 (UI-SYS-030)
     pub remote_host_cookies: Arc<[u64]>,    // P4: visible rows of the Remote host column (UI-SYS-069)
     pub connections_all_netns: bool,        // P4: Namespaces "All" (UI-SYS-070)
+    pub graph_targets: Arc<[(GraphTarget, ColumnId)]>, // P2: process, name and app graphs, max 16 (GRAPH_TARGETS_MAX, R-154)
     pub tray: TrayDemand,           // P3
     pub recording: bool,            // history recording enabled (P3)
 }
 
 pub struct DetailDemand { pub target: DetailTarget, pub tab: DetailTab }
+pub struct TrayDemand { pub icons_shown: bool, pub cpu: bool, pub memory: bool, pub disks: bool, pub nets: bool, pub gpus: bool } // icons_shown counts as a visible surface (R-156)
 ```
 
 **Schedule.** "Visible" means some visible surface (window page, sidebar mini graph, detached graph, tray icon) displays it.
@@ -1401,8 +1512,10 @@ pub struct DetailDemand { pub target: DetailTarget, pub tab: DetailTab }
 | Memory, swap, zram | 1 Hz | off | 1 Hz |
 | Disks, network interfaces | 1 Hz | off | 1 Hz |
 | GPU totals (NVML) | 1 Hz | off | 1 Hz |
+| CPU and memory while `process_table` is true | 1 Hz (the table header needs them, R-166) | | |
 | Sensors (hwmon), fans | 1 Hz | off | off |
-| Process sweep (CPU, memory, I/O, state) | setting `processes.interval_ms`, default 1000, range 250..=10000 | off | same as visible rate |
+| Process sweep (CPU, memory, I/O, state) | setting `processes.interval_ms`, default 1000, range 250..=10000 | off, unless `graph_targets` is non-empty: then `processes.interval_ms` (PROC-093, R-154) | same as visible rate |
+| Per-process series (`graph_targets`) | one sample per sweep per target, summed over matching processes for `Name` and `App`, gap when none matches; columns `cpu`, `memory`, `disk`, `network`, `gpu`, `gpu_mem_dedicated` only | same | same |
 | PSS/USS for `detail_keys` | 1 Hz, only if a PSS or USS column is shown | off | off |
 | GPU per process | 1 Hz, only if a GPU process column is shown | off | 1 Hz if recording includes GPU |
 | Connections and socket attribution | every 2 s | off | off |
@@ -1480,7 +1593,7 @@ GPUI and KIT notes: `DataTable` has single, index-based selection, no tree rows,
 **Entity structure** (`crates/tl-ui/src/`):
 
 ```text
-app.rs            TasklensUi::init(cx, client: Arc<dyn EngineClient>, settings) and window opening
+app.rs            tl_ui::run(UiLaunch) -> UiExit; TasklensUi::init(cx, client: Arc<dyn EngineClient>, init: UiInit); AppEnv Global (R-153, R-171)
 hub.rs            SnapshotHub (Entity, one per app)
 demand.rs         DemandAggregator (Entity, one per app)
 anim.rs           AnimationDriver (Entity, one per window)
@@ -1493,7 +1606,7 @@ pages/performance/{mod.rs, sidebar.rs, cpu.rs, memory.rs, gpu.rs, disk.rs, net.r
 pages/processes/{mod.rs, table.rs, header.rs, filter.rs, menu.rs}
 pages/{services.rs, startup.rs, connections.rs, information.rs}
 chart/{element.rs, view.rs, geometry.rs, grid.rs, scale.rs}
-table/{tree_table.rs, columns.rs, selection.rs, cells.rs}
+table/{tree_table.rs, columns.rs, columns_window.rs, selection.rs, cells.rs, actions.rs}   # the column picker is table-generic (R-181)
 text_cache.rs
 testing/fake_engine.rs
 ```
@@ -1572,21 +1685,25 @@ pub struct TableQuery {
                                        // app name, unit name, group names; numeric input also matches PID by prefix
     pub expanded: Arc<[NodeId]>,       // UI owns expansion state
 }
-pub enum NodeId { Group(GroupKey), Process(ProcessKey) }
+pub enum NodeId { Group(GroupKey), Process(ProcessKey), Unit(UnitRef), KernelThreads, Pseudo(PseudoKind) } // R-141
+pub enum PseudoKind { Interrupts, MemoryCompression }
 pub struct TableRow { pub node: NodeId, pub depth: u8, pub expanded: bool, pub has_children: bool,
-                      pub record: Option<u32>, pub group: Option<u32> }  // indexes into records/groups
+                      pub record: Option<u32>, pub group: Option<u32>,   // indexes into records/groups
+                      pub descendants: u32, pub subtree: Option<u32> }   // subtree row count and the subtree-total index (R-141)
 pub struct ProcessTableView {
     pub header: ComponentHeader,
     pub query_generation: u64,
     pub rows: Arc<[TableRow]>,
     pub groups: Arc<[GroupRow]>,       // aggregated values, no double counting of descendants
-    pub totals: TableTotals,           // two-line header numbers
+    pub totals: TableTotals,           // two-line header numbers: cpu_pct, memory_pct, swap_pct, disk_pct, net_bps, net_link_bps, gpu_pct, vram_pct, threads, handles, one Total<T> each (R-141)
+    pub total: u32, pub shown: u32, pub restricted: u32,   // status text counts (R-141)
 }
+// TableQuery also carries include_children: bool (R-141).
 ```
 
 - Group totals sum each process once; in tree mode a parent row shows its own values, and the collapsed parent shows its subtree sum in secondary text.
 - Missing parent (PPID not visible or exited): the process is a root. Reparenting moves it at the next sweep.
-- Filter: the UI debounces input 100 ms, then sends `SetTableQuery` with a new generation. The UI shows a view only if `query_generation` equals the latest sent; until then it keeps the previous rows.
+- Filter: the shell debounces input 100 ms (the one debounce, R-188), then sends `SetTableQuery` with a new generation. The UI shows a view only if `query_generation` equals the latest sent; until then it keeps the previous rows.
 - Row height: `28 × row_height_pct/100 × ui_scale_pct/100` logical px. Column positions are a precomputed `Arc<[Pixels]>` of x offsets; cells are fixed-width `div`s in one row `div`. Horizontal scroll moves the whole table.
 - Header: custom two-line header (total value over column name), resizable and reorderable columns, sort by clicking anywhere on the header cell (Desc first, then Asc), right-click for column chooser.
 - Selection (`table/selection.rs`): `FxHashSet<NodeId>` plus `anchor` and `focus` `Option<NodeId>`. Click, Ctrl-click, Shift-click, Ctrl-A, arrow keys, Page Up/Down, Home/End move rows. A `FxHashMap<NodeId, u32>` index is rebuilt when `table.header.version` changes.
@@ -1621,10 +1738,12 @@ pub struct TlTheme {
 
 `chart_bg` is the plot background of every chart and mini graph (measured `#1D2223` in Default Dark, UI-FND-001); the values of every field are in `docs/ui/foundation.md` UI-FND-001.
 
-- Built-in themes ship as `assets/themes/builtin.json` in TaskSlinger's format `{"themes":[{"name":..,"SLOT":"#RRGGBB"}]}` plus `accent` and `graph.*` keys. P1 ships "Default Dark" (PLAN.md section 9 palette) and "Default Light", because the `theme.light` default needs it; the other 10 named themes arrive in P2. User themes load from `$XDG_CONFIG_HOME/tasklens/themes.json` in the same format.
+- Built-in themes ship as `assets/themes/builtin.json` in TaskSlinger's format `{"themes":[{"name":..,"SLOT":"#RRGGBB"}]}` plus `accent` and `graph.*` keys. "Default Dark" (PLAN.md section 9 palette) and "Default Light" ship first from hand-written values, because the `theme.light` default needs it; the eight other named palettes land in P2 once the owner exports the file from TaskSlinger (D-012, R-210). Share codes import the tasklens `TL1` format first and TaskSlinger `TS1` when a sample code exists (D-013). User themes load from `$XDG_CONFIG_HOME/tasklens/themes.json` in the same format.
 - Custom tasklens views (tree-table, charts, sidebar, tab strip, title bar content) read `TlTheme` directly (a GPUI `Global`).
 - Kit widgets (menus, dialogs, inputs, tooltips, toasts, buttons, scrollbars) read gpui-kit `Theme`. `theme/map.rs::apply(&TlTheme, &mut gpui_kit Theme)` sets: `background ← window_bg`, `foreground ← text_primary`, `muted_foreground ← text_secondary`, `border ← divider`, `title_bar ← titlebar`, `popover ← menu_bg`, `accent ← menu_hover`, `primary ← accent`, `ring ← accent`, `input ← input`, `scrollbar ← scroll_track`, `scrollbar_thumb ← scroll_thumb`, `table ← list_bg`, `table_even ← row_alt`, `table_hover ← row_hover`, `table_active ← row_selected`, `table_head ← header`, `table_row_border ← divider`, `tab_bar ← tab_bg`, `status_bar ← toolbar`, `chart_1..5 ← graph cpu/mem/gpu/disk/net lines`, `chart_grid ← graph.grid`. The bead that writes `map.rs` must check each token name against `ThemeColor` in gpui-component 0.7.0 source; a missing name maps to the nearest existing token and the mapping is recorded in a comment in `map.rs`.
 - Theme switch: `Theme::update` plus replacing the `TlTheme` global, bumping `style_version` so every chart rebuilds geometry once.
+
+**Entry point and the tl-app hand-off** (R-153, R-171). tl-app calls `tl_ui::run(UiLaunch) -> UiExit` with `UiLaunch { client, init: UiInit, open: OpenMode { Main, Gallery, LowMemory }, start: StartOptions { tab, select_pid, start_minimized, shift_held, pending_crash_report }, platform: Option<Arc<dyn PlatformOps>> }`; it returns `UiExit::{Quit, RendererFailed(String), DeviceLost}`. `UiInit` carries `settings`, `state`, `themes_json: Option<Arc<str>>`, the persist callbacks `persist: Box<dyn Fn(&Settings, &UiState)>` and `persist_themes: Box<dyn Fn(PersistTheme::{Save(..), RenameCorrupt})>`, `app_requests: async_channel::Receiver<AppRequest>`, `startup_toasts` and `env: AppEnv`. `AppEnv` (a Global installed in `init` step 8) holds everything only tl-app has: `debug`, the config, state and logs directories, `build: BuildInfo` (version, git hash, build date, gpui revision, cargo-about licences JSON), `pending_crash: Option<CrashReport>`, `mark_crash_seen`, `write_settings_now`, `set_autostart`, `global_shortcut: Option<GlobalShortcutApi>`, `import_taskslinger`, `list_adapters` (the wgpu probe runs in tl-app) and `run_history: Option<Box<dyn RunHistoryStore>>`. Every closure runs on the main thread. `PlatformOps` (`ctrl_esc_state`, `set_ctrl_esc`, `import_taskslinger`) is `None` until P4 and its settings rows show "Not available" meanwhile. Tests use `AppEnv::test()`.
 
 **Metrics and scale.** Settings `appearance.ui_scale_pct` (75..=200, step 5, default 100) and `appearance.row_height_pct` (80..=150, step 5, default 100). With `ui_scale = ui_scale_pct / 100`: `UiMetrics { ui_scale, row_height: 28 × row_height_pct/100 × ui_scale, base_text: 13 × ui_scale, radius_small: 4 × ui_scale, radius_card: 6 × ui_scale }`. `radius_small` is for rows, menus and other small elements; `radius_card` is for cards. `appearance.rounded_corners = false` sets both to 0. The theme's `font_size` (rem) is `base_text`. GPUI applies the compositor scale (1.1 here); tasklens multiplies by `ui_scale` once. Ctrl+Plus, Ctrl+Minus and Ctrl+0 step the scale by 5 or reset it to 100, with the toast "UI scale changed to N%". A change in `window.scale_factor()`, `ui_scale_pct` or `row_height_pct` bumps `style_version` and clears `CellTextCache`.
 
@@ -1702,13 +1821,13 @@ WindowOptions {
 4. If the session bus is unavailable: log a warning and run without single-instance. There is no lock-file fallback.
 Focus stealing prevention on Wayland may only flash the taskbar entry; that is accepted [inferred].
 
-**Close behaviour.** The app uses `QuitMode::Explicit`. `on_window_should_close` on the main window:
+**Close behaviour.** The app uses `QuitMode::Explicit`, which gpui-pre 0.3.7 provides (`Application::with_quit_mode`, `app.rs:227`; R-178); `tl_ui::run` sets it before `run`. `on_window_should_close` on the main window:
 - tray enabled and setting `tray.close_to_tray = true` (P3): remove the window, keep the app and engine running (demand drops to tray only), return `true`;
 - otherwise: call `cx.quit()`.
-After `Application::run` returns, `main` calls `EngineHandle::shutdown(Duration::from_millis(1500))`, then flushes logs, then exits. If `run` does not return on Linux [inferred that it does], the same steps run in `cx.on_app_quit`.
+After `tl_ui::run` returns `UiExit`, `main` calls `EngineHandle::shutdown(Duration::from_millis(1500))`, then flushes logs, then exits. If `Application::run` does not return on Linux [inferred that it does, U-2], the same steps run in `cx.on_app_quit`. On `UiExit::DeviceLost` tl-app relaunches itself once with `TASKLENS_RELAUNCHED=1` in the environment (R-153). Without a tray, `--start-minimized` opens the window and minimizes it, and a close that would quit minimizes instead when `ToggleMainWindow` arrives while visible (R-219).
 
 **Tray (P3).** Crate `tl-tray` with `ksni =0.3.6`, features `async-io` and `blocking`, using `ksni::blocking::TrayMethods::spawn` (its own thread; no Tokio). `cargo xtask check-deps` proves no Tokio enters the graph. If that check fails, the fallback is a hand-written StatusNotifierItem and dbusmenu server inside `tl-tray` on its own zbus connection, never inside `tl-engine`.
-- Tray graphs are drawn on the CPU into ARGB32 buffers (`ksni::Icon { width, height, data }`) at 22×22 and 44×44 px by a small rasterizer in `tl-tray/src/raster.rs` (fill columns plus a 1 px line, no anti-aliasing beyond 2×2 supersampling). Updates at most 1 Hz, skipped when the pixels did not change. Tray data comes from `EngineClient::latest()` on a 1 Hz GPUI timer.
+- Tray graphs are drawn on the CPU into ARGB32 buffers (`ksni::Icon { width, height, data }`) at 22×22 and 44×44 px by a small rasterizer in `tl-tray/src/raster.rs` (fill columns plus a 1 px line, no anti-aliasing beyond 2×2 supersampling; `raster::render(max: f32)`). Updates at most 1 Hz, skipped when the pixels did not change. Tray data comes from `EngineClient::latest()` on a 1 Hz GPUI timer and reaches the tray through a `bounded(2)` model channel with `try_send`. The tray types `TrayModel` and `TrayEvent` live in `tl-model/src/tray.rs`; the static icon is the pre-rendered `assets/icons/tray-22.argb` and `tray-44.argb`, embedded with `include_bytes!` (R-161). Tray process graphs use `Demand.graph_targets` (R-154).
 - Main tray icon menu: Show Main Window, Tray icon graphs >, separator, Exit tasklens.
 - Tray graph icon menu: Graph color >, Time range >, Close tray icon graph, Tray icon graphs >, separator, Show Main Window, Show mini window, Exit tasklens.
 - Left click toggles the main window.
@@ -1768,7 +1887,7 @@ Astra: versioned TOML under `$XDG_CONFIG_HOME/tasklens/`, atomic replacement, mi
 
 Directories are created with mode `0700`; files with `0600`. Built-in themes are not on disk; they ship as `assets/themes/builtin.json` (ADR-009).
 
-**Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout and tray graphs.
+**Two files.** `settings.toml` holds user choices. `state.toml` holds what the app remembers: window size and maximized state, sort per table, columns (order, visibility, widths) per table, group expand state, last tab, Performance sidebar width and selected device, `history_mode`, minigraph layout, tray graphs and the `[lowmem] oom_score_adjust` the watcher unit accepted (R-152).
 
 **Schema** (`tl-model/src/settings.rs`; all structs `#[serde(default)]`). Canonical table (a) in `docs/RECONCILIATION.md` is the only settings schema, for both files: every key, default and range is defined there, and a key not listed there does not exist. Both files start with `schema_version = 1`. The sections of `settings.toml` are `[general]`, `[theme]`, `[appearance]`, `[motion]`, `[units]`, `[processes]`, `[tables]`, `[properties]`, `[performance]`, `[fans]`, `[graphs]`, `[history]`, `[window]`, `[tray]`, `[startup]`, `[network]`, `[privilege]`, `[rendering]`, `[services]`, `[lowmem]` and `[debug]`. The keys other ADRs depend on:
 
@@ -1831,7 +1950,7 @@ There is no file watching: an external edit applies at the next start.
 
 **Save.** Debounced 500 ms after the last change, plus on exit. Atomic write: write `<name>.tmp-<pid>` in the same directory, `fsync` the file, `rename` over the target, `fsync` the directory. The routine is `tl-ops/src/fs.rs::write_atomic`, re-exported by `tl-app/src/atomic.rs` (R-130); it is used for `settings.toml`, `state.toml`, `themes.json` and, from the engine's `Startup` worker, XDG autostart overrides (ADR-016).
 
-**Ownership.** `tl-ui` holds settings and state in GPUI `Global`s and calls a `Box<dyn Fn(&Settings, &State)>` persist callback given by `tl-app`. Engine-relevant parts are pushed with `EngineClient::set_settings` as `EngineSettings` (derived, never persisted): `processes.interval_ms`, `units.network`, the `performance.show_network_*` keys, `history.*`, `processes.subtree_totals` and `processes.hide_system`.
+**Ownership.** `tl-ui` holds settings and state in GPUI `Global`s and calls the `UiInit.persist: Box<dyn Fn(&Settings, &UiState)>` callback given by `tl-app` on every change; tl-app debounces the write 500 ms. Themes go through `UiInit.persist_themes: Box<dyn Fn(PersistTheme)>` with `PersistTheme::{Save(..), RenameCorrupt}`, and `AppEnv.write_settings_now` is the synchronous write Reset settings uses (R-153, R-171). The Run dialog history goes through `AppEnv.run_history` (`RunHistoryStore::{load, save}`), also built on `write_atomic` (R-170). Engine-relevant parts are pushed with `EngineClient::set_settings` as `EngineSettings` (derived, never persisted): `processes.interval_ms`, `units.network`, the `performance.show_network_*` keys, `history.*`, `processes.subtree_totals` and `processes.hide_system`.
 
 ### Consequences
 
@@ -1883,7 +2002,10 @@ In P1 and P2 the reducer holds `Option<Box<dyn RecordSink>>` set to `None`.
 ```rust
 pub struct Block {
     pub start_t_ns: u64,
-    pub new_meta: Vec<(MetaId, HistMeta)>,       // comm, display name, exe basename, app id; no cmdline
+    pub gap_before: bool,                        // R-169
+    pub mem_total_kib: u64,
+    pub catalog: Option<Vec<HistDevice>>,        // HistDevice { idx, kind, parent, name }, when the catalog changed
+    pub new_meta: Vec<(MetaId, HistMeta)>,       // HistMeta { exe_path, user, uid, system } plus comm, display name, app id; no cmdline
     pub keyframe: Vec<HistProcess>,              // every live process at block start
     pub deltas: Vec<SweepDelta>,                 // one per process sweep in the block
     pub system: Vec<(SeriesId, Vec<(u32 /*ms offset*/, f32)>)>,  // 1 Hz system series
@@ -1897,7 +2019,8 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 
 - `mem_anon_kib` is RssAnon, the default Memory column (D-004).
 - `FieldPatch` stores only fields that changed beyond a threshold (CPU by ≥ 1 permille, memory by ≥ 256 KiB, rates by ≥ 1 KiB/s or to/from zero).
-- Footer written when a segment closes: block offset index. A segment without a footer (crash) is read by scanning blocks until the first bad CRC.
+- Footer written when a segment closes: block offset index, postcard with the magic `TLHF`. A segment without a footer (crash) is read by scanning blocks until the first bad CRC.
+- Format details fixed before any file exists (R-169): header fields are little-endian at offsets 0, 4, 6, 14, 22; the boot directory is lowercase hex; `FieldPatch` is a struct of `Option`s; keyframe entries and `started` entries share one index space in that order; one `MetaId` space per segment; a gap is a NaN sample; a value whose validity is not `Valid` is stored as 0; `deleted-keys.bin` (History delete) has mode 0600.
 - Command lines are never stored (ADR-015).
 
 **Settings** (canonical table (a)): `history.enabled = false` (D-003); `history.retention_h = 6`, range 1..=12, menu 1, 2, 3, 4, 6, 8, 12 h; `history.max_disk_mb = 256` (not shown in menus); `history.persist = true`. When `persist` is false the recorder deletes its segments at shutdown and loads nothing at start; the on-disk format does not change.
@@ -1923,7 +2046,7 @@ pub struct SweepDelta { pub dt_ms: u32, pub changed: Vec<(u32 /*keyframe or new 
 - Worst case, all 2,000 processes changing every second: 2,000 × 15 B × 21,600 = 648 MB raw, about 216 MB compressed, still under the 256 MB cap.
 - RAM: the open block (at most 60 s of patches, about 0.2 MB typical, 2 MB worst case) plus segment indexes. Budget 16 MB for history in RAM.
 
-**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }`; the engine answers from the store when recording is on and from the rolling window when it is off, with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T.
+**Reading.** The UI asks for a time range through a new `Command::HistoryQuery { id, range, what }` with `HistoryRange::{Live, At(TimeNs), Span { start_ns, end_ns }}` and `HistoryWhat::{Frame, TopAt { n: u8 }}`; the answer is `HistoryView { query_id, source, store_state, span, gaps, frame_t, range, process_count, rows, totals, series, stack, overview, top, realtime_offset_ns }` with `HistoryProcessRow`, `HistoryTop` and `HistoryLoadProblem` (R-156). The chart stacks the three largest per-process values per bucket plus "other" (D-020); a query without an answer is resent after 1,000 ms (R-169). Then the engine answers from the store when recording is on and from the rolling window when it is off, with a `HistoryView` component in the snapshot (max 1,024 points per series, decimated min/max as in ADR-009). Process history at a time T is rebuilt from the block's keyframe plus deltas up to T.
 
 ### Consequences
 
@@ -1968,8 +2091,8 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 
 **Parser fixtures.**
 - `cargo xtask capture-fixture <name>` copies the files tasklens reads (`/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`, `/proc/<pid>/{stat,statm,status,io,comm,cmdline,cgroup}` for up to 50 pids, the relevant `/sys` files) into `crates/tl-collect/tests/fixtures/<name>/` as a fake root.
-- It scrubs: `cmdline` becomes `comm` plus `--arg`, user names become `user1..`, hostnames and serials become `REDACTED`. It never copies `environ`, `maps` or `fd` targets.
-- Samplers take a root path (`SysRoot { proc: PathBuf, sys: PathBuf }`), so tests point them at a fixture.
+- It scrubs: `cmdline` becomes `comm` plus `--arg`, user names become `user1..`, hostnames and serials become `REDACTED`, the udev `ID_SERIAL`, `ID_SERIAL_SHORT` and `ID_WWN` values become `SCRUBBED`, and MAC addresses become `00:00:00:00:00:00` (R-140, R-162). It never copies `environ`, `maps` or `fd` targets.
+- Samplers take a root path (`SysRoot { proc: PathBuf, sys: PathBuf, run: PathBuf }`, `run` default `/run`), so tests point them at a fixture, which may carry a scrubbed `run/udev/data/` directory (R-140).
 - Expected output is checked with `insta` snapshots (`.snap` files committed).
 - Required fixtures: `owner-desktop` (this machine), `minimal-vm`, plus hand-made edge cases: CPU hotplug, counter reset, process name with spaces and parentheses, invalid UTF-8 in `comm`, cmdline longer than 32 KiB, missing `cpufreq`, a zram device, a disk with partitions and a dm device.
 
@@ -2027,7 +2150,7 @@ Astra: LabRuntime for engine scheduling and state transitions, fixtures for pars
 
 ### Verification
 
-- `scripts/ci.sh` green on every commit; each bead names the tests it adds.
+- `scripts/ci.sh` green on every commit; each bead names the tests it adds. The script builds `tl-gpu-probe` with `--features fake` before the engine tests (R-166). The CI image uses the lavapipe ICD `/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` (R-158); the RTL golden is skipped with a printed reason when `Noto Sans Hebrew` is missing (R-215).
 
 ---
 
@@ -2121,12 +2244,24 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - Targets: `tasklens::engine`, `tasklens::source::<name>`, `tasklens::action`, `tasklens::ui`, `tasklens::frame`, `tasklens::probe`.
 - No logging inside per-frame or per-process loops above `trace` level.
 - No custom log levels or categories: performance logs use `info` on target `tasklens::perf`. No repeat collapsing. `RUST_LOG` is not read.
+- The `tasklens --watch-memory` process logs `warn` and above to stderr only, with no file appender (R-152).
 
 **What is never logged** (at any level): command lines, environment, working directories, open file paths, executable paths of other users' processes, window titles, user names other than the current user. Processes are logged as `pid` plus `comm` only, and `comm` only at `debug` and below. Action logs record kind, target PID and result.
 
 **Errors.**
 - Libraries use `thiserror` enums: `CollectError` (tl-collect), `OpsError` (tl-ops), `ProbeError` and `WorkerError` (tl-engine), `HistoryError` (tl-history). `anyhow` only in `tl-app::main` and `xtask`.
-- `ActionError` (tl-model) has variants `PermissionDenied`, `NoSuchProcess`, `Partial { done: u16, total: u16 }`, `UnitJob(Arc<str>)`, `Os(i32)`, `Internal(Arc<str>)`. `tl-ui/src/action_tracker.rs::message(&ActionError) -> SharedString` turns each into plain, sentence-case text, for example "Permission denied. This process belongs to another user."
+- `ActionError` (tl-model) has variants `PermissionDenied`, `NoSuchProcess`, `Partial { done: u16, total: u16 }`, `UnitJob { result: Arc<str>, error_name: Option<Arc<str>> }`, `Os(i32)`, `Internal(Arc<str>)`, `NotAuthorized` (pkexec 127, polkit `NotAuthorized`, systemd `AccessDenied`), `AuthCancelled` (pkexec 126, `NotAuthorizedDismissed`) and `Unsupported` (R-148, R-170). `tl-ui/src/action_tracker.rs::message(&ActionError) -> SharedString` turns each into plain, sentence-case text (R-196):
+
+  | `ActionError` | `message()` |
+  |---|---|
+  | `PermissionDenied` | Permission denied. This process belongs to another user. |
+  | `NoSuchProcess` | The process has already exited. |
+  | `Partial { done, total }` | Done for {done} of {total} targets. |
+  | `UnitJob { result, .. }` | The service job ended with result: {result}. |
+  | `Os(code)` | The system call failed (error {code}). |
+  | `Internal(text)` | Internal error: {text}. |
+
+  `short_reason(&err)` is the first sentence lower-cased without its full stop, for partial summaries. Reject toasts and deadlines are in R-196. The texts for `NotAuthorized`, `AuthCancelled` and `Unsupported` are not written yet; adding them is a RECONCILIATION edit (R-121).
 - Collection errors appear as `Validity::Failed` plus `SourceHealth.last_error`; a source error never becomes a toast unless the user started an action.
 
 **Crash handling.**
@@ -2134,7 +2269,7 @@ Astra risk 7: process metadata is sensitive and can be hostile (control characte
 - A panic hook (installed first in `main`) writes `$XDG_STATE_HOME/tasklens/crash/crash-<unix seconds>.txt` with: tasklens version and git sha, thread name, panic message, location, `std::backtrace::Backtrace::force_capture()`, and the last 200 log lines. No process metadata, no settings contents. Then it calls the default hook. Keep the newest 20 reports.
 - A panic on the GPUI main thread ends the process and shows the desktop notification "tasklens stopped after an unrecoverable error." The next start opens a window titled "tasklens Crash Report" with the text "tasklens closed unexpectedly last time." and the buttons "Open log folder", "Copy report" and "Close".
 - Native crashes are left to `systemd-coredump`; the crash report window mentions `coredumpctl info tasklens`. NVML native crashes only affect `tl-gpu-probe` (ADR-007).
-- GPU device loss: the desktop notification "tasklens lost the graphics device and must restart", then one automatic relaunch.
+- GPU device loss: whoever detects it calls `tl_ui::request_exit(cx, UiExit::DeviceLost)`; tl-app shows the desktop notification "tasklens lost the graphics device and must restart", then relaunches once with `TASKLENS_RELAUNCHED=1` set (R-153).
 
 **Untrusted process text** (`tl-collect/src/sanitize.rs`, applied before any string enters `ProcessMeta`):
 - Read limits: `comm` 64 bytes, `cmdline` 32 KiB (truncate and append `…`), `exe` link 4 KiB, `status` 8 KiB.
@@ -2176,10 +2311,10 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 
 **Parsers.** Hand-written in `tl-collect`, no `procfs` crate. Each parser takes `&[u8]` and a reusable output struct, uses `memchr`, and allocates only for new strings. `/proc/<pid>/stat` is parsed from the last `)` to handle names with spaces and parentheses.
 
-**Module layout of `tl-collect`** (R-135): `sysroot.rs` (`SysRoot`, kept-open files, `pread`), `fdcache.rs`, `counters.rs` (rates, resets, suspend gap), `sanitize.rs`, `hash.rs`; `parse/` with one file per system file (`stat`, `meminfo`, `vmstat`, `diskstats`, `netdev`, `cpufreq`, `hwmon`, `zram`, `block`, `netif`, `topology`, `rapl`); `sample/{cpu,memory,disk,net,sensors}.rs`; `proc/` (`pid_stat`, `status`, `statm`, `io`, `cgroup`, `meta`, `fdcount`, `sweep`, `smaps`, `detail`, `strings`, `handles`); `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`); `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`); `startup/` (`autostart`, `user_units`, `plasma_scripts`, `watch`, `impact`); `inventory/` (`cpuinfo`, `dmi`, `os_release`, `displays`, `modules`); `gpu_drm/` (`amdgpu`, `intel`, `fdinfo`).
+**Module layout of `tl-collect`** (R-135): `sysroot.rs` (`SysRoot`, kept-open files, `pread`), `fdcache.rs`, `counters.rs` (rates, resets, suspend gap), `sanitize.rs`, `hash.rs`; `parse/` with one file per system file (`stat`, `meminfo`, `vmstat` (stub in v1), `diskstats`, `netdev`, `cpufreq`, `hwmon`, `zram`, `block`, `netif`, `topology`, `rapl`, `udev` (R-140), `partitions` (R-140)); `sample/{cpu,memory,disk,net,sensors}.rs`; `proc/` (`pid_stat`, `status`, `statm`, `io`, `cgroup`, `meta`, `fdcount`, `sweep`, `smaps`, `detail`, `strings`, `handles`, `extras_p2` (R-163)); `pkg.rs` (package owner index, R-163); `apps/` (`classify`, `cgroup_app`, `desktop`, `icons`, `naming`, `launchers`); `net/` (`sock_diag`, `socket_map`, `attribution`, `connections`, `netns`, `rdns`); `startup/` (`autostart`, `user_units`, `plasma_scripts`, `watch`, `impact`); `inventory/` (`cpuinfo`, `dmi`, `os_release`, `displays`, `modules`); `gpu_drm/` (`amdgpu`, `intel`, `fdinfo`).
 
 **File descriptor policy.**
-- Kept open and re-read with `pread` at offset 0: `/proc/stat`, `/proc/meminfo`, `/proc/vmstat`, `/proc/diskstats`, `/proc/net/dev`, each used `cpufreq` and `hwmon` file, zram `mm_stat`. Reopened after any read error.
+- Kept open and re-read with `pread` at offset 0: `/proc/stat`, `/proc/meminfo`, `/proc/diskstats`, `/proc/net/dev`, each used `cpufreq` and `hwmon` file, zram `mm_stat`. Reopened after any read error. `/proc/vmstat` is not read in v1 (R-162).
 - Per-process files are opened with `openat` relative to an `O_DIRECTORY` fd of `/proc/<pid>` during the sweep, read, and closed in the same sweep.
 - An FD cache of at most 128 entries holds `smaps_rollup` fds for `detail_keys` only; entries are dropped when the key leaves demand or the identity check fails.
 
@@ -2190,23 +2325,28 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 | CPU [P1] | `/proc/stat` | math in ADR-008 |
 | CPU frequency [P1] | `/sys/devices/system/cpu/cpufreq/policyN/cpuinfo_avg_freq`, else `scaling_cur_freq` | amd-pstate-epp here |
 | CPU temperature [P1] | hwmon `k10temp` `temp1_input` (`Tctl`), else `coretemp`, `zenpower` | board chips such as `nct6797` at 1 Hz only |
-| Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat`, `/proc/vmstat` | |
+| Memory [P1] | `/proc/meminfo`, `/sys/block/zram*/mm_stat` | no `/proc/vmstat` in v1 (R-162) |
 | Disks [P1] | `/proc/diskstats`, `/sys/block/*` | active % from `io_ticks` delta; latency = Δ(read_ticks+write_ticks) / Δ(ios); exclude `loop`, `ram`, `zram`, `fd` from the sidebar; partitions and `dm-*` are children |
-| Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049 [now PERF-054]); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default; settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false) |
+| udev properties [P1] | `/run/udev/data/b<major>:<minor>` (block), `n<ifindex>` (net), `+pci:<slot>` (PCI) read by `parse/udev.rs`, 64 KiB cap, `E:KEY=value` lines only for the asked keys (`ID_MODEL`, `ID_MODEL_FROM_DATABASE`, `ID_VENDOR_FROM_DATABASE`, `ID_BUS`, `ID_WWN`, `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_FS_TYPE`, `ID_FS_LABEL`, `ID_PART_TABLE_TYPE`, `ID_PART_ENTRY_TYPE`, `ID_PART_ENTRY_FLAGS`, `ID_PART_ENTRY_OFFSET`, `ID_PART_ENTRY_SIZE`) | no libudev; values are untrusted text and go through `sanitize`; `ID_BUS=usb` gives the USB kind and `ID_MODEL` the model, else the sysfs rules (R-140) |
+| Partitions [P2] | sysfs `/sys/block/<disk>/<part>/{start,size,ro}` plus the udev `ID_PART_*` and `ID_FS_*` keys, `/proc/self/mountinfo` for mounts | `parse/partitions.rs`: rows ordered by `start_bytes`, gaps over 1 MiB as `unallocated`, GPT GUID names and attribute flags per PERF-050, MBR types as `MBR 0x%02X` (R-140) |
+| Network [P1] | `/proc/net/dev`; `ifindex` from `/sys/class/net/<if>/ifindex`; netns inode from `/proc/self/ns/net`; `operstate` for `LinkState` | classified Wired, Wireless, VPN and tunnel, Virtual, Other (PERF-049 [now PERF-054]); the virtual name patterns are checked before `bridge/` (R-162); `lo` never shows; `tailscale0` is a tunnel and is shown; `docker0`, `veth*`, `br-*`, `virbr*`, `vnet*` are Virtual and hidden by default (`mpqemubr` joins once seen, U-52); settings `performance.show_network_{wired,wireless,vpn,virtual,other}` (only `virtual` defaults to false); visibility groups: Ethernet and USB to Wired, Wi-Fi and Cellular to Wireless, Tunnel and VPN to VpnTunnel, Virtual and Bridge to Virtual (R-162) |
 | NVIDIA GPU [P1] | `tl-gpu-probe` (ADR-007) | |
 | AMD/Intel GPU [P2 AMD, P3 Intel] | sysfs `gpu_busy_percent`, `mem_info_vram_*`, hwmon, DRM fdinfo | untested here |
-| Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*` | |
+| Sensors and fans [P1] | `/sys/class/hwmon/hwmon*/{temp,fan,pwm}*`, `pwm<n>_enable` for `FanControlMode` | `fan_connected` is kept across samples (R-170) |
 | Processes [P1] | `/proc/<pid>/stat`, `statm`, `status` (uid, threads, RssAnon), `io` (own processes), `cgroup`; fd count from `fstatat` `st_size` of `/proc/<pid>/fd`, readdir fallback | `io` gives `Restricted` for other users; all timestamps CLOCK_BOOTTIME (ADR-003) |
 | Process metadata [P1] | `comm`, `cmdline`, `exe` | refreshed every 10 sweeps per process and immediately when `comm` changes (exec) |
 | PSS/USS [P1] | `/proc/<pid>/smaps_rollup` | `detail_keys` only |
+| Strings scan [P2] | `rustix::fs::pread` on `/proc/<pid>/mem` over the readable mappings | same ptrace access rule as `process_vm_readv`; scanner in `proc/strings.rs`, shared with tl-helper (R-144) |
+| Package owner [P2] | batched `pacman -Qoq <paths…>` for unseen exe paths (debounced 2 s), `/var/lib/pacman/local/<pkg>-<ver>/desc` (`%VERSION%`, `%DESC%`, `%PACKAGER%`, `%BUILDDATE%`, `%URL%`); integrity check `pacman -Qkk <pkg>` | cache keyed by exe path and mtime, invalidated on the `local` directory mtime; `dpkg -S` and `rpm -qf` behind the same trait at P4 (R-163) |
+| I/O priority [P2] | `ioprio_get` through `tl_ops::sys::ioprio_get_tid`, re-exported as `tl_ops::process::io_priority_of(key, boot)` | read by the detail worker, never by tl-collect (R-144) |
 | App and unit cgroup stats [P1 apps, P2 units] | cgroup v2 `memory.stat` (`anon`), `memory.swap.current`, `cpu.stat` (`usage_usec`), `io.stat` (`rbytes`, `wbytes`, `rios`, `wios`), `pids.current`, `cgroup.procs`; `memory.current` only in `EngineMode::LowMemory` | app scopes every sweep; demanded unit cgroups (`service_cgroup_stats`, `unit_details`) at 1 Hz; opened with `openat` from a dirfd on `/sys/fs/cgroup` and closed in the same sweep (R-137) |
 | App grouping [P1] | cgroup v2 path from `/proc/<pid>/cgroup`; current uid from `getuid()` | app id from scope name `app-<launcher>-<app id>-<n>.scope` (KDE: `app-<desktop file id>@<id>.service` or `.scope`); desktop file lookup through `XDG_DATA_DIRS` |
 | Per-process network [P2] | `sock_diag` `inet_diag` dump for TCP v4 and v6 with `INET_DIAG_INFO` (`tcpi_bytes_acked`, `tcpi_bytes_received`) | labelled "Network (TCP, attributed)"; sockets shared by several processes count for each and the cell gets a tooltip; UDP not attributed |
 | Socket to pid map [P2] | `/proc/<pid>/fd` symlinks `socket:[inode]` | rebuilt every 2 s while demanded; own processes only without the helper |
 | Connections [P2] | `sock_diag` dump TCP, UDP, v4, v6 | |
-| Services [P2] | systemd Manager over D-Bus: `ListUnits`, `ListUnitFiles`, `Subscribe`, `UnitNew`, `UnitRemoved`, `JobRemoved`, `PropertiesChanged` | system and user managers are separate identities `UnitRef { manager: System | User, name }` |
-| Service logs [P2] | `journalctl -u <id> -b -n 200 -o json --no-pager` (`--user-unit <id>` for user units) run with `std::process::Command` inside `spawn_blocking`; 5 s timeout on this fetch, then kill and wait. With Follow on, `-f` is added and the child runs until Follow is turned off or the tab closes, then it is killed | |
-| Startup apps [P2] | XDG autostart: `$XDG_CONFIG_HOME/autostart` overrides `$XDG_CONFIG_DIRS/autostart` (default `/etc/xdg/autostart`) by file name; `Hidden`, `OnlyShowIn`, `NotShowIn` against `XDG_CURRENT_DESKTOP`; systemd user units with `WantedBy=` | disable a system entry by writing a user override with `Hidden=true` (atomic write); enable by removing an override that differs only in `Hidden`, else set `Hidden=false`; units use Enable/DisableUnitFiles |
+| Services [P2] | systemd Manager over D-Bus: `ListUnits`, `ListUnitFiles`, `Subscribe`, `UnitNew`, `UnitRemoved`, `JobRemoved`, `PropertiesChanged`; unit `memory.stat` and `cpu.stat` with the E05 cgroup readers | system and user managers are separate identities `UnitRef { manager: System | User, name }`; a missing manager is retried on `RefreshNow` or every 60 s (R-167) |
+| Service logs [P2] | `journalctl -u <id> -b -n 200 -o json --no-pager` (`--user-unit <id>` for user units) run with `std::process::Command` inside `spawn_blocking`; 5 s timeout on this fetch, then kill and wait. Older pages use `--reverse --cursor=<oldest> -n 201`. With Follow on, `-f` is added and the child runs until Follow is turned off or the tab closes, then it is killed | missing `PRIORITY` is 6; `Access(OwnOnly)` for system units only (R-167) |
+| Startup apps [P2] | XDG autostart: `$XDG_CONFIG_HOME/autostart` overrides `$XDG_CONFIG_DIRS/autostart` (default `/etc/xdg/autostart`) by file name; `Hidden`, `OnlyShowIn`, `NotShowIn` against `XDG_CURRENT_DESKTOP`; systemd user units with `WantedBy=` | disable a system entry by writing a user override with `Hidden=true` and `X-Tasklens-Override=true` (atomic write, mode 0600 for new files, existing mode kept, files over 1 MiB refused); enable by deleting the user file when it carries `X-Tasklens-Override=true`, else set `Hidden=false` and remove `X-GNOME-Autostart-enabled=false` (SYS-022, R-165); units use Enable/DisableUnitFiles; status precedence NotInThisDesktop, then MissingProgram, then Disabled (R-164) |
 | Information [P2] | `/proc/cpuinfo`, `/sys/devices/system/cpu`, `/sys/class/dmi/id` (readable fields), `/etc/os-release`, NVML device info | root-only DMI fields shown as `Restricted`; memory module serial numbers are not read or shown anywhere, including copy text (D-007) |
 | Disk details [P2] | udisks2 over D-Bus | SMART, partitions, eject |
 | Batteries [P2] | UPower over D-Bus | |
@@ -2242,6 +2382,8 @@ Settled since these records were first written:
 - History recording default: off, 6 h retention when turned on (D-003); 10-minute rolling window while off (D-010).
 - Decorations default: client-side (D-006), with the fallback rule in ADR-010.
 - Users and Details tabs and Mission Center's Apps page: not required. tasklens has six tabs (R-023); grouped mode covers the Apps page.
+- Surviving the last window close: gpui-pre 0.3.7 has `QuitMode::Explicit` (R-178). Whether `Application::run` returns on Linux (U-2) stays open until E33-011.
+- The open items of the bead round are R-139 to R-235 in `docs/RECONCILIATION.md` and D-012 to D-020.
 
 Still open. Each has a recommended default that beads use unless Oystein decides otherwise. The unverified list in `docs/RECONCILIATION.md` (U-1 to U-38) tracks every assumption that phase 0 or the first bead touching it must confirm; the U-numbers below point there.
 
