@@ -55,7 +55,6 @@ source; [guess] a writer-level choice no doc settles.
       pub import_taskslinger: Arc<dyn Fn() -> Result<ImportSummary, String>>,
       pub list_adapters: Arc<dyn Fn() -> Vec<AdapterInfo>>,
       pub run_history: Option<Box<dyn RunHistoryStore>>, // None in tests; tl-app builds it on write_atomic (OI-E08, OI-E32)
-      pub now_rfc3339: Arc<dyn Fn() -> String>,          // local time, for executedAt; drops if jiff joins the tl-ui row (OI-E04)
   }
   pub trait RunHistoryStore { fn load(&self) -> Vec<RunHistoryEntry>;
                               fn save(&self, entries: &[RunHistoryEntry]) -> Result<(), String>; }
@@ -63,7 +62,7 @@ source; [guess] a writer-level choice no doc settles.
                                  pub set: Arc<dyn Fn(Option<&str>) -> Result<(), String>> }
   impl Global for AppEnv {}
   ```
-  `init` step 8 installs `AppEnv` as a Global next to `BootSettings`. Every closure runs on the main thread; none is `Send`. `PersistTheme` is declared in `app.rs` by E16-A1 and moved to `theme/user_store.rs` with a re-export by E17-008 (lgw.10), as B5-29 says. Reset settings (UI-SHL-072) calls `write_settings_now` before replacing `TlSettings` and shows "Failed to reset settings" on `Err`, with nothing changed. `executedAt` comes from `now_rfc3339`, so tl-ui needs no date crate and `tl_model::units` gains nothing; OI-E32 proposes `jiff` in tl-ui instead, and if OI-E04 lists it there the closure goes and tl-ui formats the time itself. The store sits inside `AppEnv`, not as a bare `UiInit` field, so every tl-app hand-off has one home. The adapter probe runs in tl-app (`wgpu` stays out of tl-ui). A `FakeEngine` test gets `AppEnv::test()` with empty closures and `debug = false`.
+  `init` step 8 installs `AppEnv` as a Global next to `BootSettings`. Every closure runs on the main thread; none is `Send`. `PersistTheme` is declared in `app.rs` by E16-A1 and moved to `theme/user_store.rs` with a re-export by E17-008 (lgw.10), as B5-29 says. Reset settings (UI-SHL-072) calls `write_settings_now` before replacing `TlSettings` and shows "Failed to reset settings" on `Err`, with nothing changed. `executedAt` is RFC 3339 local time formatted in tl-ui with `jiff` (OI-E04 item 9 pins `jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }` in the tl-ui row), so `tl_model::units` gains nothing and `AppEnv` carries no clock. The store sits inside `AppEnv`, not as a bare `UiInit` field, so every tl-app hand-off has one home (OI-E32 item 12 agrees). The adapter probe runs in tl-app (`wgpu` stays out of tl-ui). A `FakeEngine` test gets `AppEnv::test()` with empty closures and `debug = false`.
 - Basis: ADR-001 tl-ui dependency row [verified]; ADR-009 and ADR-011 (the contract is extended, not changed) [verified]; UI-SHL-072, UI-SHL-092, UI-SHL-093, UI-PWN-028, APP-053, PROC-095 for the field list [verified]; field types [inferred].
 - Owner decision: no
 - Changes: ARCHITECTURE.md ADR-009 "Entry point" and ADR-011: replace the `(cx, client, settings)` signature with `UiInit` and name `AppEnv` and `persist_themes`. Bead fut.1: add `env: AppEnv` and the types above to the Deliverable and the Global to step 8. Beads bj6.8, bj6.14, bj6.17, bj6.42, bj6.44, bj6.45 (E21-006, 011, 015, 038, 040, 041), bj6.3 (Reset) and gma.31 (E23-028): replace "needs an interface from tl-app" with the named `AppEnv` member. Engine side fills every member (E33-A1 cr0.1, E33-A2 cr0.2, see engine side).
@@ -553,7 +552,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U54 Dump file name sanitising
 - Raised by: B7-E23-4
 - Question: `{name}` in `<name>_<pid>_<yyyymmdd_hhmmss>.core` can contain `/` and control characters.
-- Answer: replace `/`, `\0` and every control character with `_`, cut the name part to 64 bytes on a char boundary, and use `process` when the result is empty. The timestamp is local time from `AppEnv::now_rfc3339` reformatted (OI-U01). The write itself is engine side (gcore, helper).
+- Answer: replace `/`, `\0` and every control character with `_`, cut the name part to 64 bytes on a char boundary, and use `process` when the result is empty. The timestamp is local time formatted with `jiff` (OI-U01). The write itself is engine side (gcore, helper).
 - Basis: PROC-075, UI-PWN-034 [verified]; rule [inferred].
 - Owner decision: no
 - Changes: process-windows.md UI-PWN-034: add the rule. No bead change (gma.36).
