@@ -12,13 +12,16 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 use tl_model::time::{TimeNs, now_boot_ns};
 
-use crate::sysroot::{SysRoot, read_file};
 use crate::CollectError;
+use crate::sysroot::{SysRoot, read_file};
 
 /// fdinfo files are small; this bounds a read of a bad or huge file.
 const FDINFO_LIMIT: usize = 16 * 1024;
 
 const DRI_PREFIX: &str = "/dev/dri/";
+
+/// Reads one fdinfo file into the buffer. A test hook replaces it to simulate EACCES.
+type ReadFdinfo<'a> = dyn FnMut(&Path, &mut Vec<u8>) -> Result<(), CollectError> + 'a;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrmClient {
@@ -65,12 +68,7 @@ pub fn scan(root: &SysRoot, out: &mut FdinfoScan) {
 }
 
 /// `scan` with the clock value and the fdinfo reader passed in, so tests can simulate EACCES.
-fn scan_with(
-    root: &SysRoot,
-    out: &mut FdinfoScan,
-    t_ns: TimeNs,
-    read_fdinfo: &mut dyn FnMut(&Path, &mut Vec<u8>) -> Result<(), CollectError>,
-) {
+fn scan_with(root: &SysRoot, out: &mut FdinfoScan, t_ns: TimeNs, read_fdinfo: &mut ReadFdinfo<'_>) {
     out.clients.clear();
     out.partial = false;
     out.t_ns = t_ns;
@@ -104,7 +102,11 @@ fn scan_with(
                     continue;
                 }
             };
-            if !target.as_os_str().as_encoded_bytes().starts_with(DRI_PREFIX.as_bytes()) {
+            if !target
+                .as_os_str()
+                .as_encoded_bytes()
+                .starts_with(DRI_PREFIX.as_bytes())
+            {
                 continue;
             }
             path.pop();
@@ -232,7 +234,11 @@ fn add_share(out: &mut SmallVec<[(Arc<str>, f32); 8]>, name: &Arc<str>, share: f
 
 fn clamp_percent(out: &mut SmallVec<[(Arc<str>, f32); 8]>) {
     for (_, v) in out.iter_mut() {
-        *v = if v.is_finite() { v.clamp(0.0, 100.0) } else { 0.0 };
+        *v = if v.is_finite() {
+            v.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
     }
 }
 
@@ -302,7 +308,12 @@ fn parse_counter(key: &str, value: &str, client: &mut DrmClient, interner: &mut 
             .and_then(|n| n.trim_end().parse().ok());
         push_value(&mut client.engine_ns, name, ns, interner);
     } else if let Some(name) = key.strip_prefix("resident-") {
-        push_value(&mut client.resident_bytes, name, parse_bytes(value), interner);
+        push_value(
+            &mut client.resident_bytes,
+            name,
+            parse_bytes(value),
+            interner,
+        );
     } else if let Some(name) = key.strip_prefix("total-") {
         push_value(&mut client.total_bytes, name, parse_bytes(value), interner);
     }
@@ -507,8 +518,12 @@ mod tests {
         assert!(Arc::ptr_eq(&a.driver, &b.driver));
         assert!(Arc::ptr_eq(&a.engine_ns[0].0, &b.engine_ns[0].0));
         // "vram" in resident and total is one Arc too.
-        let c = parse_with(3, b"drm-driver: x\ndrm-client-id: 1\ndrm-total-vram: 1\n", &mut interner)
-            .expect("client");
+        let c = parse_with(
+            3,
+            b"drm-driver: x\ndrm-client-id: 1\ndrm-total-vram: 1\n",
+            &mut interner,
+        )
+        .expect("client");
         assert!(Arc::ptr_eq(&a.resident_bytes[0].0, &c.total_bytes[0].0));
     }
 
