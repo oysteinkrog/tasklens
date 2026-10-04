@@ -1,0 +1,92 @@
+---
+source: crates/tl-collect/src/sample/memory.rs
+assertion_line: 489
+expression: r
+---
+MemoryReading {
+    t_ns: 1000000000,
+    validity: Valid,
+    info: MemInfo {
+        mem_total: 67331739648,
+        mem_free: 13022302208,
+        mem_available: 33750568960,
+        buffers: 28672,
+        cached: 19861966848,
+        swap_cached: 16588800,
+        dirty: 40775680,
+        writeback: 0,
+        shmem: 496189440,
+        sreclaimable: 2158051328,
+        sunreclaim: 1113051136,
+        committed_as: 126833184768,
+        commit_limit: 100997025792,
+        swap_total: 67331158016,
+        swap_free: 36193026048,
+        zswap: Some(
+            0,
+        ),
+        zswapped: Some(
+            0,
+        ),
+        hugepages_total: Some(
+            0,
+        ),
+        hugepages_free: Some(
+            0,
+        ),
+        hugepagesize: Some(
+            2097152,
+        ),
+    },
+    used_bytes: 33581170688,
+    commit_pct: Measured {
+        value: 125.58111,
+        validity: Valid,
+    },
+    swap_used_bytes: 31138131968,
+    composition: Composition {
+        in_use: 26522247168,
+        compressed: 7058923520,
+        modified: 40775680,
+        standby: 20687491072,
+        free: 13022302208,
+    },
+    zram: [
+        ZramReading {
+            name: "zram0",
+            disksize_bytes: 67331162112,
+            algorithm: Some(
+                "zstd",
+            ),
+            mm: Measured {
+                value: ZramMmStat {
+                    orig_data_size: 29526052864,
+                    compr_data_size: 6871065127,
+                    mem_used_total: 7058923520,
+                    mem_limit: 0,
+                    mem_used_max: 17746206720,
+                    same_pages: 153497,
+                    pages_compacted: 24729263,
+                    huge_pages: 107263,
+                },
+                validity: Valid,
+            },
+            read_bps: Rate {
+                per_sec: 0.0,
+                validity: WarmingUp,
+                flags: SampleFlags(
+                    0x0,
+                ),
+            },
+            write_bps: Rate {
+                per_sec: 0.0,
+                validity: WarmingUp,
+                flags: SampleFlags(
+                    0x0,
+                ),
+            },
+        },
+    ],
+    zram_mem_used_total: 7058923520,
+    savings_bytes: 22654987737,
+}

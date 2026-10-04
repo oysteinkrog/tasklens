@@ -239,10 +239,11 @@ impl MemorySampler {
                         state
                             .read
                             .update(read.saturating_mul(SECTOR_BYTES), t, self.generation);
-                    reading.write_bps =
-                        state
-                            .write
-                            .update(written.saturating_mul(SECTOR_BYTES), t, self.generation);
+                    reading.write_bps = state.write.update(
+                        written.saturating_mul(SECTOR_BYTES),
+                        t,
+                        self.generation,
+                    );
                 }
                 Err(err) => {
                     state.read.reset();
@@ -459,7 +460,9 @@ mod tests {
         assert_eq!(out.composition, Composition::default());
         assert_eq!(out.commit_pct.validity, Validity::Failed);
 
+        // A new sampler, since the kept fd still reads the removed file.
         fs::remove_file(&path).expect("remove meminfo");
+        let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
         sampler.sample_at(at(2 * SEC), &mut out);
         assert_eq!(out.validity, Validity::Missing);
 
