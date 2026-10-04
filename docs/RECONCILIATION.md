@@ -1724,6 +1724,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: E12 uuid rule, ARCHITECTURE probe section [verified by the 8hz.5 agent].
 - Edits: bead 8hz.5.
 
+### R-273 tl-engine may depend on `bitflags`
+- Question: E08 (`tasklens-8hz.5`) adds `bitflags` to tl-engine for `DeviceKinds`, as its bead says, but ADR-001's tl-engine row and `cargo xtask check-deps` did not list it, so check-deps failed. Leader decision, 2026-10-04.
+- Resolution: `bitflags` (workspace pin) joins tl-engine's allowed external dependencies in ADR-001 and in `xtask/src/check_deps.rs`.
+- Basis: 8hz.5 bead Files section; tl-model already uses bitflags [verified].
+- Edits: ARCHITECTURE.md ADR-001 table; xtask/src/check_deps.rs.
+
 
 
 
