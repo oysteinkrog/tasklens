@@ -1,0 +1,16 @@
+---
+source: crates/tl-collect/tests/fixture_zram.rs
+assertion_line: 99
+expression: report
+---
+zram0 disksize=67331162112 algorithm=Some("zstd") sectors=(1505318968, 1892571072)
+ZramMmStat {
+    orig_data_size: 29526052864,
+    compr_data_size: 6871065127,
+    mem_used_total: 7058923520,
+    mem_limit: 0,
+    mem_used_max: 17746206720,
+    same_pages: 153497,
+    pages_compacted: 24729263,
+    huge_pages: 107263,
+}

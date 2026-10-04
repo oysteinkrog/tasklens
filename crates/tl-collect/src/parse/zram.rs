@@ -210,7 +210,10 @@ mod tests {
 
     #[test]
     fn comp_algorithm_edges() {
-        assert_eq!(parse_comp_algorithm(b"[lzo-rle] zstd\n"), Some(&b"lzo-rle"[..]));
+        assert_eq!(
+            parse_comp_algorithm(b"[lzo-rle] zstd\n"),
+            Some(&b"lzo-rle"[..])
+        );
         assert_eq!(parse_comp_algorithm(b"lzo [] zstd\n"), None);
         assert_eq!(parse_comp_algorithm(b"lzo [zstd\n"), None);
     }
