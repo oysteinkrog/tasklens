@@ -1,0 +1,10 @@
+processor	: 0
+vendor_id	: GenuineIntel
+model name	: Test CPU
+cpu MHz		: 3400.000
+
+processor	: 1
+vendor_id	: GenuineIntel
+model name	: Test CPU
+cpu MHz		: 3600.000
+
