@@ -130,3 +130,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 2dl.36: /var/tmp/claude/minimal-vm/ (745 MB) is left for the owner to delete.
 - iuz.5: sys.rs reads `environ` directly; its SAFETY comment assumes tasklens never calls setenv after startup. Make that a written rule (ARCHITECTURE or AGENTS.md) in the review pass, and grep for set_var. sys.rs has a file-wide allow(dead_code) to drop when E07-003/005/014 land.
 - lgw.1 / fut.5: no tracing test subscriber, so "a warning is logged" criteria are untested. Consider a small test subscriber helper in tl-ui testing.
+- 8hz.7: `budget_exhausted` is inferred (outcome Ok + restart_batches >= 5 + last generation errored), because asupersync gives no direct signal with EscalationPolicy::Stop. Review in the e2e pass.
+- 8hz.7: cancelling the task that awaits `run_supervised` does NOT stop the supervisor (join ignores cancellation); shutdown must cancel the region or call handle.abort(). The engine shutdown bead must do this; add a lab test there.
