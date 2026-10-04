@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::command::SetupState;
 use crate::time::TimeNs;
 
 /// One per supervised worker (ADR-004 worker list). Order and numbers are frozen.
@@ -129,7 +130,8 @@ pub struct HealthSnapshot {
     pub helper_start: Option<(u64, HelperStartOutcome)>,
     /// R-141 item 5.
     pub caps: EngineCaps,
-    // `pub setup: Arc<SetupState>` is appended by E03-063 (command.rs owns SetupState, R-149 item 1).
+    /// R-149 item 1. Bumps `version` when it changes.
+    pub setup: Arc<SetupState>,
 }
 
 impl HealthSnapshot {
@@ -171,6 +173,7 @@ mod tests {
             helper: HelperState::default(),
             helper_start: None,
             caps: EngineCaps::empty(),
+            setup: Arc::default(),
         }
     }
 
