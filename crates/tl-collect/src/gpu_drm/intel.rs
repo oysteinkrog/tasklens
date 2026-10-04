@@ -99,7 +99,7 @@ pub fn i915_engine_name(key: &str) -> Option<&'static str> {
 /// shared resident) in bytes. A value is `None` when no client on `pdev` reports its key. The
 /// shared value is the iGPU "Shared" memory.
 ///
-/// Region names per R-274: dedicated is `local0` (i915) or `vram0` (xe), shared is `system0`
+/// Region names per R-275: dedicated is `local0` (i915) or `vram0` (xe), shared is `system0`
 /// (i915) or `system` (xe). Other regions (`gtt`, `stolen`) are ignored.
 pub fn fdinfo_memory(scan: &FdinfoScan, pdev: &str) -> (Option<u64>, Option<u64>, Option<u64>) {
     (
