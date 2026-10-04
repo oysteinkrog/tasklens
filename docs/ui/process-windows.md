@@ -45,7 +45,7 @@ Precedence: `docs/DECISIONS.md`, then `docs/RECONCILIATION.md`, then `docs/ARCHI
 - **Interaction:**
   - Esc order inside every window in this file: close the topmost popup or menu; else cancel a running scan or search (Strings, Handle Search); else clear a focused, non-empty filter field; else close the window (Cancel for modals). This is the table (b) Esc rule applied per window.
   - Ctrl+W closes Properties and tool windows.
-  - Pin: `ToggleAlwaysOnTop { window: WindowKey }` (UI-FND-021), state in memory only (R-073).
+  - Pin: `ToggleAlwaysOnTop { window: WindowKey, caption }` (UI-FND-021; the caption is the window title, R-176), state in memory only (R-073); handled by E20-029 through `KWinCommand::KeepAbove`.
 - **Data binding:** windows are registered in the foundation's `WindowRegistry` with these keys, added by this file: `WindowKey::Properties(ProcessKey)` (exists), `WindowKey::AppProperties(GroupKey)`, `WindowKey::Run`, `WindowKey::HandleSearch`. Modal dialogs are not registered (they die with their parent).
 - **Build:** `TlSecondaryWindow::open(cx, kind, title, size, build_content)` from `components/window_frame.rs`. Each window gets its own gpui-kit `Root`, so toasts and menus are per window (APP-045). Titles that change (Properties exited state) call `window.set_window_title`.
 - **Performance:** the frame is static; it re-renders only on pin, focus or title change.
@@ -473,7 +473,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
 ### UI-PWN-013 Memory maps tab
 
 - **Implements:** PROC-081 (tree, Primary, Outside loaded modules, columns, Shared libraries only), R-098.
-- **Anatomy:** filter bar with the TlCheckbox "Shared libraries only" on the right (setting `properties.shared_objects_only`, default true, applies to all windows) [spec]; then a `TlTreeTable` in tree mode (expand chevrons and indentation from the processes spec).
+- **Anatomy:** filter bar with the TlCheckbox "Shared libraries only" on the right (setting `properties.shared_objects_only`, default true, applies to all windows) [spec]; with the box on, the Primary node and the "Outside loaded modules" node stay visible and only file-backed library mappings are filtered by the PROC-081 patterns (R-225); then a `TlTreeTable` in tree mode (expand chevrons and indentation from the processes spec).
 
 | Column | Header text | Width (min) | Align | Node row | Region row |
 |---|---|---|---|---|---|
@@ -666,7 +666,7 @@ Send signal to thread        >   Terminate (TERM) / Kill (KILL) / User 1 (USR1) 
   - Waiting for authentication: button loading with label "Waiting for authentication…" [chosen].
   - Authentication cancelled: button back to default; toast "Authentication cancelled" [spec APP-044].
   - Granted: the tab reloads through the helper; the block is replaced by the normal loading state.
-- **Interaction:** the button dispatches `StartHelperSession` (the same Action as the title-bar shield, APP-003, UI-FND-028), then the window re-sends its `DetailDemand` with the helper flag. Enter or Space on the focused button activates it. Tab order: the button is the first focus stop of the body.
+- **Interaction:** the button dispatches `StartHelperSession` (the same Action as the title-bar shield, APP-003, UI-FND-028), then, when `HealthSnapshot.helper` changes to `Unlocked`, every open Properties window whose General payload is `Restricted` sends `Command::DetailRefresh { target, tab }` once for its active tab; there is no flag on `DetailDemand` (R-226). Enter or Space on the focused button activates it. Tab order: the button is the first focus stop of the body.
 - **Data binding:** tab payload validity `Restricted` triggers this state; helper session state from `Snapshot.health` (bit `HEALTH`).
 - **Build:** `props/mod.rs`, `fn access_block(text, button: Option<AccessButton>) -> impl IntoElement` (RenderOnce).
 - **Performance:** static.
@@ -1188,7 +1188,7 @@ Real-time signal…
   - Menu item states (the row menu is owned by `docs/ui/processes.md`): disabled with tooltip "Install gdb to create dumps" when `/usr/bin/gcore` is missing [spec].
   - Without administrator access: Warning toast "Creating a dump needs administrator rights" [spec], with the "Retry as administrator" button from P3.
 - **Interaction:** "Create dump file" in the row menu (`CreateDump { key }`) opens the confirmation when needed, then sends the dump request. The progress size comes from the UI stat-ing the output path every 500 ms on the background executor (`std::fs::metadata(path).len()`) while the action is pending [chosen: ADR-005 action events carry no progress].
-- **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the output path `$XDG_STATE_HOME/tasklens/dumps/{name}_{pid}_{yyyymmdd_hhmmss}.core` is chosen by the UI and passed in the request, so it can be stat-ed.
+- **Data binding:** setting `processes.dump_type` decides the mode (`Mini` or `Full`) [spec]; the output path `$XDG_STATE_HOME/tasklens/dumps/{name}_{pid}_{yyyymmdd_hhmmss}.core` is chosen by the UI and passed in the request, so it can be stat-ed. `{name}`: `/`, `\0` and every control character become `_`, the name part is cut to 64 bytes on a char boundary, and `process` is used when the result is empty; the timestamp is local time formatted with `jiff` (R-224). The engine opens the file itself (`O_EXCL`, mode 0600) and runs gdb's `gcore` into it (R-145).
 - **Build:** `crates/tl-ui/src/windows/notices.rs`, `fn start_dump(key, cx)` and the `DumpProgress` task (cancelled when the action ends).
 - **Performance:** one `stat` every 500 ms off the UI thread during a dump.
 - **Accessibility:** toast text is the only progress indicator; it carries the size as text.
