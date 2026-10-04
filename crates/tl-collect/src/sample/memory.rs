@@ -1,5 +1,6 @@
 //! Memory and swap sampler: used memory, commit, swap, the five composition segments, savings
 //! and zram rates (ADR-008, PERF-041 to PERF-043, PROC-012, ADR-016).
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tl_model::time::TimeNs;
@@ -7,12 +8,24 @@ use tl_model::validity::Validity;
 
 use crate::counters::{Clock, Counter, Measured, Rate, resumed_between};
 use crate::parse::meminfo::{MemInfo, parse_meminfo};
+use crate::parse::swaps::{SwapEntry, parse_swaps};
 use crate::parse::zram::{self, ZramDevice, ZramMmStat};
-use crate::sysroot::KeptFile;
+use crate::parse::zswap::{ZswapParams, read_zswap};
+use crate::sysroot::{KeptFile, read_file};
 use crate::{CollectError, SysRoot};
 
 /// Bytes per block layer sector in `/sys/block/<d>/stat`.
 const SECTOR_BYTES: u64 = 512;
+
+/// Read limit for `/proc/swaps`.
+const SWAPS_LIMIT: usize = 64 * 1024;
+
+/// What a memory sample reads besides meminfo and zram.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemOpts {
+    /// Swap devices and zswap parameters (P2 memory details). Only while details are shown.
+    pub details: bool,
+}
 
 /// The five memory composition segments in bytes (PERF-042).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,6 +76,10 @@ pub struct MemoryReading {
     /// Σ mm.mem_used_total over Valid devices.
     pub zram_mem_used_total: u64,
     pub savings_bytes: i64,
+    /// From `/proc/swaps`. Updated only by detailed samples.
+    pub swaps: Measured<Vec<SwapEntry>>,
+    /// `None` when zswap is not built. Updated only by detailed samples.
+    pub zswap: Measured<Option<ZswapParams>>,
 }
 
 /// One zram device with its read and write sector counters.
@@ -77,6 +94,9 @@ pub struct MemorySampler {
     meminfo: KeptFile,
     zram: Vec<ZramState>,
     buf: Vec<u8>,
+    swaps_path: PathBuf,
+    /// Read in `new` and `rescan_zram`.
+    zswap: Measured<Option<ZswapParams>>,
     prev_clock: Option<Clock>,
     /// Counter generation. Bumped on resume and `reset_baselines` (ADR-008).
     generation: u32,
@@ -85,11 +105,14 @@ pub struct MemorySampler {
 impl MemorySampler {
     pub fn new(root: SysRoot) -> Self {
         let meminfo = KeptFile::new(root.proc_path("meminfo"));
+        let swaps_path = root.proc_path("swaps");
         let mut sampler = Self {
             root,
             meminfo,
             zram: Vec::new(),
             buf: Vec::new(),
+            swaps_path,
+            zswap: Measured::default(),
             prev_clock: None,
             generation: 0,
         };
@@ -97,11 +120,11 @@ impl MemorySampler {
         sampler
     }
 
-    pub fn sample(&mut self, out: &mut MemoryReading) {
-        self.sample_at(Clock::now(), out);
+    pub fn sample(&mut self, opts: MemOpts, out: &mut MemoryReading) {
+        self.sample_at(Clock::now(), opts, out);
     }
 
-    pub fn sample_at(&mut self, clock: Clock, out: &mut MemoryReading) {
+    pub fn sample_at(&mut self, clock: Clock, opts: MemOpts, out: &mut MemoryReading) {
         if let Some(prev) = self.prev_clock
             && resumed_between(prev, clock)
         {
@@ -123,6 +146,9 @@ impl MemorySampler {
         };
 
         self.sample_zram(clock, out);
+        if opts.details {
+            self.sample_details(out);
+        }
 
         let info = out.info;
         let zswap = info.zswap.unwrap_or(0);
@@ -182,9 +208,14 @@ impl MemorySampler {
         };
     }
 
-    /// Re-runs zram device enumeration (every 5 s). A device that is still present keeps its
-    /// rate baselines. When enumeration fails, the device list is empty.
+    /// Re-runs zram device enumeration (every 5 s) and rereads the zswap parameters. A device
+    /// that is still present keeps its rate baselines. When enumeration fails, the device list
+    /// is empty.
     pub fn rescan_zram(&mut self) {
+        self.zswap = match read_zswap(&self.root) {
+            Ok(params) => Measured::valid(params),
+            Err(err) => Measured::invalid(err.validity()),
+        };
         let mut found = Vec::new();
         if zram::enumerate(&self.root, &mut found).is_err() {
             found.clear();
@@ -209,6 +240,20 @@ impl MemorySampler {
     /// The next zram rates are `WarmingUp` with `GAP_BEFORE`.
     pub fn reset_baselines(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// One-shot read of `/proc/swaps` into the reused vector, and the zswap parameters.
+    fn sample_details(&mut self, out: &mut MemoryReading) {
+        let swaps = read_file(&self.swaps_path, &mut self.buf, SWAPS_LIMIT)
+            .and_then(|_| parse_swaps(&self.buf, &mut out.swaps.value));
+        out.swaps.validity = match swaps {
+            Ok(()) => Validity::Valid,
+            Err(err) => {
+                out.swaps.value.clear();
+                err.validity()
+            }
+        };
+        out.zswap.clone_from(&self.zswap);
     }
 
     fn sample_zram(&mut self, clock: Clock, out: &mut MemoryReading) {
@@ -285,6 +330,8 @@ mod tests {
 
     const SEC: u64 = 1_000_000_000;
     const GIB: u64 = 1 << 30;
+    const OFF: MemOpts = MemOpts { details: false };
+    const DETAILS: MemOpts = MemOpts { details: true };
 
     fn fixture_dir(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -302,7 +349,7 @@ mod tests {
     fn sample(name: &str) -> MemoryReading {
         let mut sampler = MemorySampler::new(SysRoot::at(&fixture_dir(name)));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         out
     }
 
@@ -370,13 +417,13 @@ mod tests {
         write_stat(dir.path(), 800, 1600);
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         assert_eq!(out.zram.len(), 1);
         assert_eq!(out.zram[0].read_bps.validity, Validity::WarmingUp);
         assert_eq!(out.zram[0].write_bps.validity, Validity::WarmingUp);
 
         write_stat(dir.path(), 800 + 2048, 1600 + 4096);
-        sampler.sample_at(at(2 * SEC), &mut out);
+        sampler.sample_at(at(2 * SEC), OFF, &mut out);
         let z = &out.zram[0];
         assert_eq!(&*z.name, "zram0");
         assert_eq!(z.algorithm.as_deref(), Some("zstd"));
@@ -387,7 +434,7 @@ mod tests {
         // A rescan keeps the baselines of a device that is still there.
         sampler.rescan_zram();
         write_stat(dir.path(), 800 + 4096, 1600 + 8192);
-        sampler.sample_at(at(3 * SEC), &mut out);
+        sampler.sample_at(at(3 * SEC), OFF, &mut out);
         assert_eq!(out.zram[0].read_bps.per_sec, 1_048_576.0);
     }
 
@@ -396,7 +443,7 @@ mod tests {
         let dir = temp_copy();
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         write_stat(dir.path(), 900, 1700);
         // Boot time moved 10 s while monotonic time moved 1 s: the machine slept.
         sampler.sample_at(
@@ -404,6 +451,7 @@ mod tests {
                 boot_ns: 11 * SEC,
                 mono_ns: 2 * SEC,
             },
+            OFF,
             &mut out,
         );
         for rate in [out.zram[0].read_bps, out.zram[0].write_bps] {
@@ -418,6 +466,7 @@ mod tests {
                 boot_ns: 12 * SEC,
                 mono_ns: 3 * SEC,
             },
+            OFF,
             &mut out,
         );
         assert_eq!(out.zram[0].read_bps.validity, Validity::Valid);
@@ -427,6 +476,7 @@ mod tests {
                 boot_ns: 13 * SEC,
                 mono_ns: 4 * SEC,
             },
+            OFF,
             &mut out,
         );
         assert_eq!(out.zram[0].read_bps.validity, Validity::WarmingUp);
@@ -442,7 +492,7 @@ mod tests {
         fs::write(&path, text).expect("write meminfo");
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         assert_eq!(out.validity, Validity::Valid);
         assert_eq!(out.commit_pct.validity, Validity::Unsupported);
     }
@@ -454,7 +504,7 @@ mod tests {
         fs::write(&path, "MemTotal: 1 kB\n").expect("write meminfo");
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         assert_eq!(out.validity, Validity::Failed);
         assert_eq!(out.used_bytes, 0);
         assert_eq!(out.composition, Composition::default());
@@ -463,13 +513,13 @@ mod tests {
         // A new sampler, since the kept fd still reads the removed file.
         fs::remove_file(&path).expect("remove meminfo");
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
-        sampler.sample_at(at(2 * SEC), &mut out);
+        sampler.sample_at(at(2 * SEC), OFF, &mut out);
         assert_eq!(out.validity, Validity::Missing);
 
         // A zram device error marks only that device.
         fs::remove_file(dir.path().join("sys/block/zram0/mm_stat")).expect("remove mm_stat");
         let mut sampler = MemorySampler::new(SysRoot::at(dir.path()));
-        sampler.sample_at(at(3 * SEC), &mut out);
+        sampler.sample_at(at(3 * SEC), OFF, &mut out);
         assert_eq!(out.zram[0].mm.validity, Validity::Missing);
         assert_eq!(out.zram_mem_used_total, 0);
     }
@@ -478,9 +528,9 @@ mod tests {
     fn no_allocation_after_first_sample() {
         let mut sampler = MemorySampler::new(SysRoot::at(&fixture_dir("mem-composition")));
         let mut out = MemoryReading::default();
-        sampler.sample_at(at(SEC), &mut out);
+        sampler.sample_at(at(SEC), OFF, &mut out);
         let (buf_cap, zram_cap) = (sampler.buf.capacity(), out.zram.capacity());
-        sampler.sample_at(at(2 * SEC), &mut out);
+        sampler.sample_at(at(2 * SEC), OFF, &mut out);
         assert_eq!(sampler.buf.capacity(), buf_cap);
         assert_eq!(out.zram.capacity(), zram_cap);
     }
@@ -490,5 +540,39 @@ mod tests {
         let r = sample("owner-desktop");
         assert_eq!(r.validity, Validity::Valid);
         insta::assert_debug_snapshot!(r);
+    }
+
+    #[test]
+    fn details_owner_desktop_snapshot() {
+        let mut sampler = MemorySampler::new(SysRoot::at(&fixture_dir("owner-desktop")));
+        let mut out = MemoryReading::default();
+        sampler.sample_at(at(SEC), DETAILS, &mut out);
+        assert_eq!(out.swaps.validity, Validity::Valid);
+        assert_eq!(out.zswap.validity, Validity::Valid);
+        insta::assert_debug_snapshot!((&out.swaps, &out.zswap));
+    }
+
+    #[test]
+    fn details_off_keeps_defaults() {
+        let mut sampler = MemorySampler::new(SysRoot::at(&fixture_dir("owner-desktop")));
+        let mut out = MemoryReading::default();
+        sampler.sample_at(at(SEC), OFF, &mut out);
+        assert_eq!(out.swaps.validity, Validity::WarmingUp);
+        assert!(out.swaps.value.is_empty());
+        assert_eq!(out.zswap, Measured::invalid(Validity::WarmingUp));
+
+        // After a detailed sample, a plain sample keeps the detailed values.
+        sampler.sample_at(at(2 * SEC), DETAILS, &mut out);
+        let (swaps, zswap) = (out.swaps.clone(), out.zswap.clone());
+        sampler.sample_at(at(3 * SEC), OFF, &mut out);
+        assert_eq!(out.swaps, swaps);
+        assert_eq!(out.zswap, zswap);
+
+        // A fixture without /proc/swaps or zswap.
+        let mut sampler = MemorySampler::new(SysRoot::at(&fixture_dir("mem-composition")));
+        let mut out = MemoryReading::default();
+        sampler.sample_at(at(SEC), DETAILS, &mut out);
+        assert_eq!(out.swaps.validity, Validity::Missing);
+        assert_eq!(out.zswap, Measured::valid(None));
     }
 }
