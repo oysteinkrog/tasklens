@@ -150,7 +150,8 @@ fn fake_dir(root: &FakeRoot, files: &[&str]) -> (PathBuf, CgroupDir) {
     for name in files {
         std::fs::write(path.join(name), b"").expect("create control file");
     }
-    let dir = open_validated_at(root.path(), &cg(&rel, ino), u, &unrelated_own(u)).unwrap();
+    let dir = open_validated_at(root.path(), &cg(&rel, ino), u, &unrelated_own(u))
+        .expect("open fake cgroup dir");
     (path, dir)
 }
 
