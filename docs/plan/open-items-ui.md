@@ -151,3 +151,119 @@ source; [guess] a writer-level choice no doc settles.
 - Basis: UI-SHL-042 names the action [verified]; placement [inferred from UI-SHL-034, where `ResetColumns { table }` follows the same pattern].
 - Owner decision: no
 - Changes: bead rsf.2: add the action and handler plus test `enable_all_columns_shows_every_column`. Bead for the Debug menu (E21, UI-SHL-042): dispatch, do not declare.
+
+---
+
+## C. Tree table and the Processes page
+
+### OI-U11 The column picker file lives in `table/`
+- Raised by: B5-3
+- Question: 00-epics §2 puts `pages/processes/columns_window.rs` under E18, but that directory is created by E22-A1, which depends on E18-A2: a cycle.
+- Answer: `crates/tl-ui/src/table/columns_window.rs`, owned by E18-A2 (rsf.2). The picker is table-generic (UI-PRC-007 binds it to a `TableId`), so nothing in it is Processes-specific.
+- Basis: 00-epics §2 ownership table [verified]; R-106 (`WindowKey::Columns`, one window bound to the active table) [verified].
+- Owner decision: no
+- Changes: 00-epics §2: move the file into the E18 `src/table/...` row. processes.md UI-PRC-007 Build line: new path. Bead rsf.2 already uses the new path (B5 says so); no bead change.
+
+### OI-U12 Scrollbar width is 16
+- Raised by: B5-14
+- Question: processes.md "Shared geometry" and the UI-PRC-001 diagram say 12; UI-PRC-001 anatomy, UI-PRC-010 and UI-FND-003 say 16.
+- Answer: 16 logical px at 100% scale, for every scrollbar. UI-FND-003 is the component authority.
+- Basis: UI-FND-003 and UI-PRC-010 anatomy "kit Scrollbar 16 px" [verified].
+- Owner decision: no
+- Changes: processes.md "Shared geometry" and the UI-PRC-001 diagram: 12 to 16. No bead change.
+
+### OI-U13 Column picker: heading rows 28, filter md 28
+- Raised by: B5-32, B5-33
+- Question: UI-PRC-007 gives group headings 24 px and the filter as both "sm" and "md, height 28"; `uniform_list` needs one row height.
+- Answer: every picker row is 28 px (group headings included, heading text bottom-aligned); the filter is `TlTextInput` md, 28 px. Rows stay 28 per UI-PRC-007.
+- Basis: UI-PRC-007 anatomy "md, height 28" [verified]; `uniform_list` fixed row height [verified, gpui `elements/uniform_list.rs`]; heading height [inferred].
+- Owner decision: no
+- Changes: processes.md UI-PRC-007: headings 28, filter md only. No bead change.
+
+### OI-U14 Delegate trait additions and header-menu actions
+- Raised by: B5-16, B5-34
+- Question: E18-005 adds `table_version()` and `guide_lines()` to the UI-PRC-001 delegate; header menu items (Resize Behavior, Reset to default, Hide This Column) and `OpenProperties` need a handler.
+- Answer: the `TreeTableDelegate` trait gains `fn table_version(&self) -> u64` and `fn guide_lines(&self) -> bool` (E18-005, rsf.6). `TlTreeTable` handles `ResetColumns { table }` itself when the owner called `set_default_layout`, handles `SetColumnResize` (writes `tables.column_resize` through `TlSettings`), `HideColumn { col }`, `CopyCell { col }`, `CopyRow`, `CollapseAll` and `ResizeColumnsToFit`, and routes `OpenProperties` to `delegate.on_activate()`. The owner pages (E22, E27, E28) implement `on_activate`, `context_menu` and the copy formats; they do not re-handle the table actions. UI-SHL-034 dispatches with the active tab's `TableId`.
+- Basis: UI-PRC-001 delegate, UI-PRC-006 header menu, UI-SHL-034 [verified]; the split follows B5-16's text [verified].
+- Owner decision: no
+- Changes: processes.md UI-PRC-001: add the two trait methods. Beads pdu.1, hk6.1, 9o0.1: say "the table handles the header-menu actions; implement `on_activate` and `context_menu`". No new bead.
+
+### OI-U15 Icons the foundation adds or drops
+- Raised by: B5-35, B5-37, B5-17
+- Question: E18-009 needs Lucide `arrow-up` and `arrow-down`, which UI-FND-003 does not list; seven Lucide icons are outside the kit bundle; `shield-locked.svg` is in the E15-A1 list but UI-FND-028 uses Lucide `shield`.
+- Answer: UI-FND-003's Lucide list gains `arrow-up` and `arrow-down` (sort indicators, UI-PRC-005). E15-005 (ug9.8) embeds `x`, `pin`, `pin-off`, `lock`, `shield`, `shield-check`, `rotate-ccw-clock`, `arrow-up`, `arrow-down` with the kit's `icon_assets!` macro. `assets/icons/shield-locked.svg` is not created; the locked shield is Lucide `shield` (UI-FND-028).
+- Basis: UI-FND-003 icon list, UI-FND-028, UI-PRC-005 [verified].
+- Owner decision: no
+- Changes: foundation.md UI-FND-003: add the two arrows, note the nine embedded icons. Bead ug9.1 (E15-A1): drop `shield-locked.svg` from its asset list. Bead ug9.8: add the two arrows.
+
+### OI-U16 `TlTreeTable::scroll_handle` for the bench
+- Raised by: B8-E22-19, leader-notes B8 report
+- Question: the E01 `table-2000` scene (E01-008, wlf.10) must scroll the production process table.
+- Answer: E18-A1 (rsf.1) exposes `pub fn scroll_handle(&self) -> UniformListScrollHandle` (a clone; the handle is `Rc`-backed). E22-A1 (pdu.1) exposes `ProcessesPage::scroll_handle(&self, cx: &App) -> UniformListScrollHandle` next to `table()`, with test `scroll_handle_drives_table`. E01-008 calls the page method and drives it with `scroll_to_item_with_offset`.
+- Basis: gpui `UniformListScrollHandle(pub Rc<RefCell<..>>)` [verified]; UI-PRC-010 Build line (`scroll: UniformListScrollHandle`) [verified].
+- Owner decision: no
+- Changes: bead rsf.1: add the accessor. Edge `wlf.10` depends on `pdu.1` (Edges).
+
+### OI-U17 First visible row across a scale change: one E18 bead
+- Raised by: B7-E20-7
+- Question: UI-SHL-130 step 5 and test `scale_keeps_first_row` belong to `tree_table.rs`, and E18 has no bead for them.
+- Answer: new E18 bead. `TlTreeTable` gains `pub fn first_visible_row(&self) -> Option<(RowId, usize)>` (the anchor UI-PRC-010 already records) and `pub fn restore_first_visible_row(&mut self, anchor, cx)`, which calls `scroll_to_item_with_offset(ix, ScrollStrategy::Top, 0)` after the new metrics are applied. E20-013 (jqk.15) calls them around the metrics re-apply, for the active table only. Test `scale_keeps_first_row` lives in the new bead.
+- Basis: UI-SHL-130 step 5 and UI-PRC-010 anchor [verified].
+- Owner decision: no
+- Changes: new bead, plan key E18-017: "Keep the first visible row across a UI scale change", epic E18, phase P1, file `table/tree_table.rs`, depends on rsf.1. Edge `jqk.15` depends on the new bead.
+
+### OI-U18 One filter debounce, in the shell
+- Raised by: B7-E20-6
+- Question: the shell debounces 100 ms before `FilterChanged` (UI-SHL-024) and E22-024 debounces another 100 ms.
+- Answer: E22-024 (pdu.27) drops its own debounce and sends `Command::SetTableQuery` on every `FilterChanged`. UI-PRC-016's "100 ms debounce" is the shell's.
+- Basis: UI-SHL-024, UI-SYS-002 ("already debounced 100 ms by the shell") [verified].
+- Owner decision: no
+- Changes: processes.md UI-PRC-016 Interaction and Build: the debounce and its `Task` are the shell's. Bead pdu.27: remove the debounce and rename test `filter_debounce_100ms_new_generation` to `filter_changed_sends_new_generation`.
+
+### OI-U19 `SHIPPED_PHASE` and End Process on app rows before P2
+- Raised by: B8-E22-4, B8-E22-17
+- Question: how does code decide "a phase has not shipped", and what does Shift+Delete do on an app or unit row in P1?
+- Answer: `pub const SHIPPED_PHASE: u8 = 1;` in `pages/processes/delegate.rs`, raised by E22-042 to E22-044 as each phase's columns land; columns and menu items with a higher phase are not built. Menu items appear when the bead that adds them lands, so they need no constant. In P1 `EndProcess` on an app or unit row is a no-op (no toast); E22-035 (pdu.38) turns it into Kill App.
+- Basis: UI-PRC-013 "items whose phase has not shipped are not built" [verified]; the mechanism [inferred].
+- Owner decision: no
+- Changes: none; both beads already carry this.
+
+### OI-U20 Name cell geometry: gap 6 after the chevron and after the icon
+- Raised by: B8-E22-2
+- Question: UI-PRC-002's app-row and unit-row sketches differ by 4 px and the UI-PRC-003 test formula omits the icon gap.
+- Answer: one rule for every row kind: indent = depth × 20; chevron 16 wide starting at indent + 6; gap 6; icon 16 (unit) or 24 (app); gap 6; text. For an app row at depth 0 that gives chevron 6..22, icon 28..52, text 58 before the row's left padding of 20 (so 26..42, 48..72, 78 as the app sketch says). The unit sketch and the test formula are corrected to the same gaps.
+- Basis: UI-PRC-002 app sketch [verified]; the generalisation [inferred].
+- Owner decision: no
+- Changes: processes.md UI-PRC-002 unit sketch (icon 48..64, text 70) and UI-PRC-003 formula. Bead pdu.9 already uses gap 6; no change.
+
+### OI-U21 Picker group of each process column
+- Raised by: B8-E22-3
+- Question: PROC-024 gives 13 headings and the Objects members only.
+- Answer: E22-002 (pdu.6)'s mapping: each PROC column section goes under its own heading; Start time, Type and the package and file columns under Image; User, PID, Parent PID and Session under Identity. The mapping is a table in the bead and is the source for `[columns.processes]` defaults.
+- Basis: PROC-024 [verified]; the mapping [guess, writer-level].
+- Owner decision: no
+- Changes: processes.md UI-PRC-007: add the mapping table from pdu.6 so the doc, not the bead, is the reference.
+
+### OI-U22 Subtree for End Process Tree and the bwrap first descendant
+- Raised by: B8-E22-8
+- Question: UI-PRC-013 says the subtree comes from "the engine forest", which is not in the snapshot.
+- Answer: the UI walks `ProcessSnapshot.records` by `ppid`, matching parents by `pid` among non-exited records, breadth first; the result is capped at 256 keys (the `ActionRequest` limit). For a bwrap row the "first descendant" is the first non-bwrap record in that walk, ties by lowest PID. See engine side if `ProcessRecord` gains a children index; until then this walk stands.
+- Basis: ADR-005 256 targets [verified]; the walk [inferred].
+- Owner decision: no
+- Changes: processes.md UI-PRC-013 Interaction: replace "from the engine forest" with the walk. No bead change.
+
+### OI-U23 Flat `TlTreeTable` instead of `TlStaticTable`
+- Raised by: E25-OI-3
+- Question: UI-PRF-030 names a sortable `TlStaticTable`; foundation.md has no such component.
+- Answer: no new component. The SMART attribute table is a `TlTreeTable` with a flat delegate (`RowKind::Plain`, no expansion, no selection actions) and E18-A2 header sorting done in the delegate (the rows are a small in-memory `Vec`, sorted by the delegate on header click). Same for any other static table in the Performance tab.
+- Basis: UI-PRF-030 [verified]; UI-SYS-002 shows the same flat-delegate pattern [verified].
+- Owner decision: no
+- Changes: performance.md UI-PRF-030: `TlStaticTable` to "`TlTreeTable` with a flat delegate". No bead change (E25-018, o55.19, already does this).
+
+### OI-U24 Toolbar slots: E20 defines the trait, pages draw the buttons
+- Raised by: B8-E22-11
+- Question: UI-SHL-010 draws slots 2 and 3 inside `TitleBarView` from a `ToolbarModel`; 00-epics gives E22 `toolbar.rs` and a `ToolbarContent` registration.
+- Answer: E20-003 (jqk.5) defines `ToolbarContent` and `ToolbarModel` and draws only the slot frame; each page epic registers one `ToolbarContent` that draws its own buttons (E22-022, pdu.25, draws the Processes buttons). E20 draws no page button. The chain-edit rule of 00-epics §2 (one `ToolbarContent` registration per page epic) stands.
+- Basis: 00-epics §2 chain-edit rule [verified]; UI-SHL-010 [verified].
+- Owner decision: no
+- Changes: shell.md UI-SHL-010: "slots 2 and 3 are filled by the active page's `ToolbarContent`". No bead change.
