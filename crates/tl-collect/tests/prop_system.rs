@@ -385,3 +385,204 @@ fn samplers_smoke_owner_desktop() {
             .any(|t| t.celsius.validity == Validity::Valid)
     );
 }
+
+// P2 parser cases: added by E04-A4.
+
+use tl_collect::parse::mountinfo::{MountEntry, parse_mountinfo};
+use tl_collect::parse::partitions::partition_table;
+use tl_collect::parse::rapl::{Rapl, RaplReading};
+use tl_collect::parse::swaps::parse_swaps;
+use tl_collect::parse::udev::{UDEV_KEYS, UdevProps, read_udev_props};
+use tl_collect::parse::zswap::read_zswap;
+use tl_collect::sample::disk::{FsStat, disk_usage};
+
+const PARTS: &str = "disk-partitions-dm";
+const ZSWAP_PARAMS: &str = "sys/module/zswap/parameters";
+const RAPL_ENERGY: &str = "sys/class/powercap/intel-rapl:0/energy_uj";
+
+/// Writes `bytes` to <dir>/<rel>, creating the parent directories.
+fn write_at(dir: &Path, rel: &str, bytes: &[u8]) {
+    let path = dir.join(rel);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+/// Writes the three zswap parameter files and reads them back. zswap has no byte-slice parser:
+/// `read_zswap` reads the files itself.
+fn zswap_on(enabled: &[u8], compressor: &[u8], max_pool: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    write_at(dir.path(), &format!("{ZSWAP_PARAMS}/enabled"), enabled);
+    write_at(
+        dir.path(),
+        &format!("{ZSWAP_PARAMS}/compressor"),
+        compressor,
+    );
+    write_at(
+        dir.path(),
+        &format!("{ZSWAP_PARAMS}/max_pool_percent"),
+        max_pool,
+    );
+    let _ = read_zswap(&tl_collect::SysRoot::at(dir.path()));
+}
+
+/// Two RAPL reads one second apart over the given `energy_uj` contents. The energy parser is
+/// private to `Rapl`, so the bytes go through the kept file.
+fn rapl_on(first: &[u8], second: &[u8]) {
+    let dir = tempfile::tempdir().unwrap();
+    write_at(dir.path(), RAPL_ENERGY, first);
+    let mut rapl = Rapl::open(&tl_collect::SysRoot::at(dir.path()));
+    let mut out = RaplReading::default();
+    rapl.read(
+        Clock {
+            boot_ns: 0,
+            mono_ns: 0,
+        },
+        1,
+        &mut out,
+    );
+    fs::write(dir.path().join(RAPL_ENERGY), second).unwrap();
+    rapl.read(
+        Clock {
+            boot_ns: 1_000_000_000,
+            mono_ns: 1_000_000_000,
+        },
+        1,
+        &mut out,
+    );
+}
+
+/// statvfs stand-in: 1 GiB filesystems, a quarter used.
+fn fake_statvfs(_: &str) -> Result<FsStat, tl_collect::CollectError> {
+    Ok(FsStat {
+        blocks: 262_144,
+        bfree: 196_608,
+        bavail: 196_608,
+        frsize: 4096,
+    })
+}
+
+/// sda of a SysRoot over a disk-partitions-dm tree, if it enumerates.
+fn sda_of(root: &tl_collect::SysRoot) -> Option<tl_collect::parse::block::BlockDevice> {
+    let mut disks = Vec::new();
+    enumerate_disks(root, &mut disks).ok()?;
+    disks.into_iter().find(|d| &*d.name == "sda")
+}
+
+proptest! {
+    #[test]
+    fn prop_parse_mountinfo(
+        a in common::arbitrary_bytes(),
+        m in mutated(fixture_bytes(PARTS, "proc/self/mountinfo")),
+    ) {
+        let mut out = Vec::new();
+        let _ = parse_mountinfo(&a, &mut out);
+        let _ = parse_mountinfo(&m, &mut out);
+    }
+
+    #[test]
+    fn prop_parse_swaps(
+        a in common::arbitrary_bytes(),
+        m in mutated(fixture_bytes(OWNER, "proc/swaps")),
+    ) {
+        let mut out = Vec::new();
+        let _ = parse_swaps(&a, &mut out);
+        let _ = parse_swaps(&m, &mut out);
+    }
+
+    #[test]
+    fn prop_parse_zswap_params(
+        a in common::arbitrary_bytes(),
+        enabled in mutated(fixture_bytes(OWNER, &format!("{ZSWAP_PARAMS}/enabled"))),
+        compressor in mutated(fixture_bytes(OWNER, &format!("{ZSWAP_PARAMS}/compressor"))),
+        max_pool in mutated(fixture_bytes(OWNER, &format!("{ZSWAP_PARAMS}/max_pool_percent"))),
+    ) {
+        zswap_on(&a, &a, &a);
+        zswap_on(&enabled, &compressor, &max_pool);
+    }
+
+    #[test]
+    fn prop_parse_rapl_energy(
+        a in common::arbitrary_bytes(),
+        m in mutated(fixture_bytes(OWNER, RAPL_ENERGY)),
+    ) {
+        let seed = fixture_bytes(OWNER, RAPL_ENERGY);
+        rapl_on(&seed, &a);
+        rapl_on(&seed, &m);
+        rapl_on(&m, &seed);
+    }
+
+    #[test]
+    fn prop_read_udev_props(
+        a in common::arbitrary_bytes(),
+        m in mutated(fixture_bytes("udev-basic", "run/udev/data/b8:0")),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("b8:0");
+        let mut out = UdevProps::default();
+        for bytes in [&a, &m] {
+            fs::write(&path, bytes).unwrap();
+            let _ = read_udev_props(&path, &UDEV_KEYS, &mut out);
+        }
+    }
+}
+
+proptest! {
+    // Each case copies the fixture to a tempdir, so keep the case count low.
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn prop_partition_table_on_mutated_udev(
+        part_udev in mutated(fixture_bytes(PARTS, "run/udev/data/b8:1")),
+        disk_udev in mutated(fixture_bytes(PARTS, "run/udev/data/b8:0")),
+        sda1_start in mutated(fixture_bytes(PARTS, "sys/block/sda/sda1/start")),
+        sda2_size in mutated(fixture_bytes(PARTS, "sys/block/sda/sda2/size")),
+        disk_size in mutated(fixture_bytes(PARTS, "sys/block/sda/size")),
+        mountinfo in mutated(fixture_bytes(PARTS, "proc/self/mountinfo")),
+    ) {
+        let copy = fixture_copy(PARTS, None);
+        let dir = copy.path();
+        fs::write(dir.join("run/udev/data/b8:1"), &part_udev).unwrap();
+        fs::write(dir.join("run/udev/data/b8:0"), &disk_udev).unwrap();
+        fs::write(dir.join("sys/block/sda/sda1/start"), &sda1_start).unwrap();
+        fs::write(dir.join("sys/block/sda/sda2/size"), &sda2_size).unwrap();
+        fs::write(dir.join("sys/block/sda/size"), &disk_size).unwrap();
+        let root = tl_collect::SysRoot::at(dir);
+
+        let mut mounts = Vec::new();
+        let _ = parse_mountinfo(&mountinfo, &mut mounts);
+        // Mutated sysfs files may hide sda or make enumeration fail; that is a result.
+        if let Some(sda) = sda_of(&root) {
+            let mut udev = UdevProps::default();
+            let table = partition_table(&root, &sda, &mounts, &mut fake_statvfs, &mut udev);
+            prop_assert!(table.rows.windows(2).all(|w| w[0].start_bytes <= w[1].start_bytes));
+        }
+    }
+}
+
+#[test]
+fn p2_details_smoke() {
+    let root = fixture(PARTS);
+    let mut disks = Vec::new();
+    enumerate_disks(&root, &mut disks).expect("enumerate disk-partitions-dm disks");
+    let sda = disks
+        .iter()
+        .find(|d| &*d.name == "sda")
+        .expect("sda in disk-partitions-dm");
+
+    let mut mounts: Vec<MountEntry> = Vec::new();
+    parse_mountinfo(&fixture_bytes(PARTS, "proc/self/mountinfo"), &mut mounts).unwrap();
+
+    let usage = disk_usage(
+        std::slice::from_ref(sda),
+        &mounts,
+        &[],
+        &mut fake_statvfs,
+        &mut |_| None,
+    );
+    assert_eq!(usage.len(), 1);
+    assert!(usage[0].system_disk);
+
+    let mut udev = UdevProps::default();
+    let table = partition_table(&root, sda, &mounts, &mut fake_statvfs, &mut udev);
+    assert_eq!(table.rows.iter().filter(|r| !r.unallocated).count(), 2);
+}
