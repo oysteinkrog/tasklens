@@ -7,8 +7,10 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use crate::actions::{Family, FourTuple, Proto};
-use crate::devices::NetKind;
-use crate::health::ManagerState;
+use crate::details::DetailsSnapshot;
+use crate::devices::{DeviceCatalog, NetKind};
+use crate::health::{EngineCaps, HealthSnapshot, HelperState, ManagerState, SourceHealth};
+use crate::history::HistoryView;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{
     AppCgroupSample, Coverage, LowMemoryInfo, ProcessExtras, ProcessExtrasP2, ProcessRecord,
@@ -18,8 +20,8 @@ use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, NetTotals,
     SensorReading,
 };
-use crate::table::{Manager, StartupRef, SysRow, Total, UnitRef, UnitType};
-use crate::time::TimeNs;
+use crate::table::{Manager, ProcessTableView, StartupRef, SysRow, Total, UnitRef, UnitType};
+use crate::time::{BootId, TimeNs};
 use crate::validity::Validity;
 
 /// Common to every snapshot component. The default validity is `WarmingUp`.
@@ -1261,12 +1263,222 @@ pub struct DeviceDetailsSnapshot {
     pub batteries: Arc<[(DeviceIdx, BatteryDetails)]>,
 }
 
+// ---- The snapshot ----
+
+/// One published state of the engine (ADR-003). Unchanged components reuse their `Arc` across
+/// snapshots, and the UI hub compares versions to build the `ComponentMask` (ADR-005).
+#[derive(Clone, Debug)]
+pub struct Snapshot {
+    /// Strictly increasing per engine process.
+    pub sequence: u64,
+    /// Engine session number (ADR-004).
+    pub epoch: u32,
+    pub boot_id: BootId,
+    pub published_ns: TimeNs,
+    pub system: Arc<SystemSnapshot>,
+    pub series: Arc<SeriesSet>,
+    pub processes: Arc<ProcessSnapshot>,
+    pub table: Arc<ProcessTableView>,
+    pub connections: Arc<ConnectionsSnapshot>,
+    pub services: Arc<ServicesSnapshot>,
+    pub startup: Arc<StartupSnapshot>,
+    pub inventory: Arc<InventorySnapshot>,
+    pub devices: Arc<DeviceCatalog>,
+    pub health: Arc<HealthSnapshot>,
+    /// P2.
+    pub windows: Arc<WindowsSnapshot>,
+    /// P2.
+    pub details: Arc<DetailsSnapshot>,
+    /// P3.
+    pub history: Arc<HistoryView>,
+    /// P2, mask bit `PROCESS_SERIES` (R-154).
+    pub process_series: Arc<ProcessSeriesSet>,
+    /// P1 and P2, mask bit `DEVICE_DETAILS` (R-139).
+    pub device_details: Arc<DeviceDetailsSnapshot>,
+}
+
+impl Snapshot {
+    /// Sequence 0, the given epoch and boot id, `published_ns` 0, and every component at its
+    /// default: headers `WarmingUp`, empty lists, versions 0. The windows header is `WarmingUp`
+    /// too; the KWin worker sets `Unsupported` when the bridge is not available. The engine
+    /// publishes this before its first data, and the fake engine uses it in UI tests.
+    pub fn empty(boot_id: BootId, epoch: u32) -> Snapshot {
+        Snapshot {
+            sequence: 0,
+            epoch,
+            boot_id,
+            published_ns: 0,
+            system: Arc::default(),
+            series: Arc::default(),
+            processes: Arc::default(),
+            table: Arc::default(),
+            connections: Arc::default(),
+            services: Arc::default(),
+            startup: Arc::default(),
+            inventory: Arc::default(),
+            devices: Arc::default(),
+            // HealthSnapshot has no Default: version 0, every source Off.
+            health: Arc::new(HealthSnapshot {
+                version: 0,
+                sources: std::array::from_fn(|_| SourceHealth::default()),
+                helper: HelperState::default(),
+                helper_start: None,
+                caps: EngineCaps::default(),
+            }),
+            windows: Arc::default(),
+            details: Arc::default(),
+            history: Arc::default(),
+            process_series: Arc::default(),
+            device_details: Arc::default(),
+        }
+    }
+
+    /// The components whose version differs from `prev`: `header.version` for each component,
+    /// `DeviceCatalog::version` for `DEVICES` and `HealthSnapshot::version` for `HEALTH`.
+    ///
+    /// Clears `changed_series`, then fills it with the ids whose `SeriesView::version` differs or
+    /// which are new, in `SeriesId` order (`series` first, then `slow`). `SERIES` is set when the
+    /// set header changed or any series changed, appeared or went away.
+    ///
+    /// Compares versions only, never content. Walks each sorted series list in one merge pass and
+    /// does not allocate while at most 64 series changed.
+    pub fn changed_since(
+        &self,
+        prev: &Snapshot,
+        changed_series: &mut SmallVec<[SeriesId; 64]>,
+    ) -> ComponentMask {
+        changed_series.clear();
+        let versions = [
+            (
+                ComponentMask::SYSTEM,
+                self.system.header.version,
+                prev.system.header.version,
+            ),
+            (
+                ComponentMask::SERIES,
+                self.series.header.version,
+                prev.series.header.version,
+            ),
+            (
+                ComponentMask::PROCESSES,
+                self.processes.header.version,
+                prev.processes.header.version,
+            ),
+            (
+                ComponentMask::TABLE,
+                self.table.header.version,
+                prev.table.header.version,
+            ),
+            (
+                ComponentMask::CONNECTIONS,
+                self.connections.header.version,
+                prev.connections.header.version,
+            ),
+            (
+                ComponentMask::SERVICES,
+                self.services.header.version,
+                prev.services.header.version,
+            ),
+            (
+                ComponentMask::STARTUP,
+                self.startup.header.version,
+                prev.startup.header.version,
+            ),
+            (
+                ComponentMask::INVENTORY,
+                self.inventory.header.version,
+                prev.inventory.header.version,
+            ),
+            (
+                ComponentMask::DEVICES,
+                self.devices.version,
+                prev.devices.version,
+            ),
+            (
+                ComponentMask::HEALTH,
+                self.health.version,
+                prev.health.version,
+            ),
+            (
+                ComponentMask::WINDOWS,
+                self.windows.header.version,
+                prev.windows.header.version,
+            ),
+            (
+                ComponentMask::DETAILS,
+                self.details.header.version,
+                prev.details.header.version,
+            ),
+            (
+                ComponentMask::HISTORY,
+                self.history.header.version,
+                prev.history.header.version,
+            ),
+            (
+                ComponentMask::PROCESS_SERIES,
+                self.process_series.header.version,
+                prev.process_series.header.version,
+            ),
+            (
+                ComponentMask::DEVICE_DETAILS,
+                self.device_details.header.version,
+                prev.device_details.header.version,
+            ),
+        ];
+        let mut mask = ComponentMask::NONE;
+        for (bit, now, before) in versions {
+            if now != before {
+                mask |= bit;
+            }
+        }
+        if !Arc::ptr_eq(&self.series, &prev.series) {
+            let fast = diff_series(&self.series.series, &prev.series.series, changed_series);
+            let slow = diff_series(&self.series.slow, &prev.series.slow, changed_series);
+            if fast || slow {
+                mask |= ComponentMask::SERIES;
+            }
+        }
+        mask
+    }
+}
+
+/// One merge pass over two lists sorted by `SeriesId`. Pushes the ids in `now` that are new or
+/// have a different version. Returns true when anything changed, removed series included.
+fn diff_series(
+    now: &[Arc<SeriesView>],
+    before: &[Arc<SeriesView>],
+    changed: &mut SmallVec<[SeriesId; 64]>,
+) -> bool {
+    let mut any = false;
+    let mut j = 0;
+    for view in now {
+        // Ids only in `before` were removed.
+        while j < before.len() && before[j].id < view.id {
+            any = true;
+            j += 1;
+        }
+        match before.get(j) {
+            Some(old) if old.id == view.id => {
+                if old.version != view.version {
+                    changed.push(view.id);
+                    any = true;
+                }
+                j += 1;
+            }
+            _ => {
+                changed.push(view.id);
+                any = true;
+            }
+        }
+    }
+    any || j < before.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::{ColumnId, GraphTarget, GroupKey, MetricId};
     use crate::process::{ProcFlags, ProcState, ProcessMeta};
-    use crate::time::BootId;
     use crate::validity::FieldValidity;
 
     const BITS: [ComponentMask; 15] = [
@@ -1865,5 +2077,184 @@ mod tests {
         ] {
             assert_eq!(v, Validity::WarmingUp);
         }
+    }
+
+    fn view_at(id: SeriesId, version: u64) -> Arc<SeriesView> {
+        Arc::new(SeriesView {
+            id,
+            version,
+            period_ns: 1_000_000_000,
+            samples: Arc::from([]),
+        })
+    }
+
+    fn with_series(base: &Snapshot, views: Vec<Arc<SeriesView>>) -> Snapshot {
+        let mut snap = base.clone();
+        snap.series = Arc::new(SeriesSet {
+            header: base.series.header,
+            series: Arc::from(views),
+            slow: Arc::from([]),
+        });
+        snap
+    }
+
+    fn three_ids() -> [SeriesId; 3] {
+        [
+            sid(0, MetricId::CPU_TOTAL),
+            sid(0, MetricId::MEM_USED),
+            sid(1, MetricId::NET_RX),
+        ]
+    }
+
+    #[test]
+    fn snapshot_empty_defaults() {
+        let s = Snapshot::empty(BootId(7), 3);
+        assert_eq!(s.sequence, 0);
+        assert_eq!(s.epoch, 3);
+        assert_eq!(s.boot_id, BootId(7));
+        assert_eq!(s.published_ns, 0);
+        let headers = [
+            s.system.header,
+            s.series.header,
+            s.processes.header,
+            s.table.header,
+            s.connections.header,
+            s.services.header,
+            s.startup.header,
+            s.inventory.header,
+            s.windows.header,
+            s.details.header,
+            s.history.header,
+            s.process_series.header,
+            s.device_details.header,
+        ];
+        for h in headers {
+            assert_eq!(h.validity, Validity::WarmingUp);
+            assert_eq!(h.version, 0);
+        }
+        assert_eq!(s.devices.version, 0);
+        assert!(s.devices.entries.is_empty());
+        assert_eq!(s.health.version, 0);
+        assert!(s.series.series.is_empty());
+        assert!(s.processes.records.is_empty());
+        assert!(s.table.rows.is_empty());
+    }
+
+    #[test]
+    fn changed_since_none_when_shared() {
+        let prev = with_series(
+            &Snapshot::empty(BootId(1), 1),
+            three_ids().map(|id| view_at(id, 4)).to_vec(),
+        );
+        let next = prev.clone();
+        let mut changed = SmallVec::new();
+        changed.push(sid(9, MetricId::GPU_UTIL));
+        assert_eq!(next.changed_since(&prev, &mut changed), ComponentMask::NONE);
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn changed_since_table_only() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.table).header.version += 1;
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::TABLE
+        );
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn changed_since_one_series() {
+        let ids = three_ids();
+        let base = Snapshot::empty(BootId(1), 1);
+        let prev = with_series(&base, ids.map(|id| view_at(id, 4)).to_vec());
+        // The other two views keep their Arc, like the engine does.
+        let mut views = prev.series.series.to_vec();
+        views[1] = view_at(ids[1], 5);
+        let next = with_series(&prev, views);
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::SERIES
+        );
+        assert_eq!(changed.as_slice(), &[ids[1]]);
+        assert!(!changed.spilled());
+    }
+
+    #[test]
+    fn changed_since_new_series() {
+        let ids = three_ids();
+        let base = Snapshot::empty(BootId(1), 1);
+        let prev = with_series(&base, vec![view_at(ids[0], 4), view_at(ids[2], 4)]);
+        let next = with_series(&prev, ids.map(|id| view_at(id, 4)).to_vec());
+        let mut changed = SmallVec::new();
+        let mask = next.changed_since(&prev, &mut changed);
+        assert!(mask.contains(ComponentMask::SERIES));
+        assert_eq!(changed.as_slice(), &[ids[1]]);
+    }
+
+    #[test]
+    fn changed_since_removed_series() {
+        let ids = three_ids();
+        let base = Snapshot::empty(BootId(1), 1);
+        let prev = with_series(&base, ids.map(|id| view_at(id, 4)).to_vec());
+        let next = with_series(&prev, vec![view_at(ids[0], 4)]);
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::SERIES
+        );
+        assert!(changed.is_empty());
+    }
+
+    #[test]
+    fn changed_since_devices() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.devices).version += 1;
+        let mut changed = SmallVec::new();
+        assert!(
+            next.changed_since(&prev, &mut changed)
+                .contains(ComponentMask::DEVICES)
+        );
+    }
+
+    #[test]
+    fn changed_since_health() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.health).version += 1;
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::HEALTH
+        );
+    }
+
+    #[test]
+    fn changed_since_process_series() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.process_series).header.version += 1;
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::PROCESS_SERIES
+        );
+    }
+
+    #[test]
+    fn changed_since_device_details() {
+        let prev = Snapshot::empty(BootId(1), 1);
+        let mut next = prev.clone();
+        Arc::make_mut(&mut next.device_details).header.version += 1;
+        let mut changed = SmallVec::new();
+        assert_eq!(
+            next.changed_since(&prev, &mut changed),
+            ComponentMask::DEVICE_DETAILS
+        );
     }
 }
