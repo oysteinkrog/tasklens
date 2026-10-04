@@ -2,6 +2,7 @@
 
 pub mod config;
 mod runtime;
+pub mod supervise;
 pub mod source;
 pub mod update;
 
