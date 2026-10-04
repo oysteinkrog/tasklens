@@ -12,6 +12,7 @@
 
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use rustix::io::Errno;
 
@@ -123,6 +124,24 @@ pub(crate) fn tgkill(pid: u32, tid: u32, sig: i32) -> Result<(), Errno> {
             pid as libc::pid_t,
             tid as libc::pid_t,
             sig,
+        )
+    };
+    check_syscall(ret)
+}
+
+/// Sends `sig` (1..=64, checked by the caller) to the process behind `pidfd`. The raw syscall
+/// takes real-time signal numbers that `rustix::process::Signal` cannot name.
+pub(crate) fn pidfd_send_signal_raw(pidfd: BorrowedFd<'_>, sig: i32) -> Result<(), Errno> {
+    // SAFETY: `pidfd` is a live borrowed descriptor for the duration of the call. The `info`
+    // pointer is null, which the kernel accepts and treats as a plain `kill`-style signal, and
+    // flags are 0. No memory is read or written.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            sig,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
         )
     };
     check_syscall(ret)
@@ -251,18 +270,18 @@ pub(crate) fn spawn_setsid(argv: &[CString], cwd: Option<&CStr>) -> Result<u32, 
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::process::ExitStatusExt;
     use std::path::Path;
     use std::sync::Mutex;
 
     use super::*;
 
-    /// Held by every test that starts a child, so `waitpid(-1, ..)` in one test cannot reap or
-    /// see another test's child.
+    /// Held by every test in this crate that starts a child, so `waitpid(-1, ..)` in one test
+    /// cannot reap or see another test's child.
     static CHILDREN: Mutex<()> = Mutex::new(());
 
-    fn lock_children() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn lock_children() -> std::sync::MutexGuard<'static, ()> {
         CHILDREN.lock().unwrap_or_else(|e| e.into_inner())
     }
 
