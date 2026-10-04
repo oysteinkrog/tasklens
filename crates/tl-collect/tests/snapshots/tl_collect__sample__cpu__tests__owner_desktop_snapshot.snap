@@ -1,6 +1,6 @@
 ---
 source: crates/tl-collect/src/sample/cpu.rs
-assertion_line: 645
+assertion_line: 738
 expression: "(s.topology(), &r)"
 ---
 (
@@ -1312,5 +1312,27 @@ expression: "(s.topology(), &r)"
         procs_blocked: 0,
         processes_forked: 61685681,
         btime: 1791035185,
+        live: LiveStats {
+            load: Measured {
+                value: LoadAvg {
+                    one: 0.0,
+                    five: 0.0,
+                    fifteen: 0.0,
+                    running: 0,
+                    total: 0,
+                },
+                validity: WarmingUp,
+            },
+            open_files: Measured {
+                value: 0,
+                validity: WarmingUp,
+            },
+            process_count: Measured {
+                value: 0,
+                validity: WarmingUp,
+            },
+            uptime_ns: 0,
+            boot_time_unix_s: 0,
+        },
     },
 )

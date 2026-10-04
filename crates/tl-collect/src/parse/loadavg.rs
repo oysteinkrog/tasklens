@@ -18,9 +18,7 @@ pub struct LoadAvg {
 
 /// "0.52 0.58 0.59 2/1523 12345\n": three averages, then running/total scheduling entities.
 pub fn parse_loadavg(buf: &[u8]) -> Result<LoadAvg, CollectError> {
-    let mut fields = buf
-        .split(u8::is_ascii_whitespace)
-        .filter(|w| !w.is_empty());
+    let mut fields = buf.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty());
     let (Some(one), Some(five), Some(fifteen), Some(entities)) =
         (fields.next(), fields.next(), fields.next(), fields.next())
     else {

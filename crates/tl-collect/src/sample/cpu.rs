@@ -252,8 +252,12 @@ impl CpuSampler {
     /// One-shot reads of loadavg and file-nr and one pass over `root.proc`. Each field gets its
     /// own validity.
     fn live_stats(&mut self, clock: Clock, realtime_s: i64) -> LiveStats {
-        let load = match read_file(&self.root.proc_path("loadavg"), &mut self.buf, LIVE_FILE_LIMIT)
-            .and_then(|_| parse_loadavg(&self.buf))
+        let load = match read_file(
+            &self.root.proc_path("loadavg"),
+            &mut self.buf,
+            LIVE_FILE_LIMIT,
+        )
+        .and_then(|_| parse_loadavg(&self.buf))
         {
             Ok(load) => Measured::valid(load),
             Err(err) => Measured::invalid(err.validity()),

@@ -38,7 +38,13 @@ mod tests {
 
     #[test]
     fn parse_error() {
-        for text in ["", "\n", "x\t0\t1\n", "+5\t0\t1\n", "99999999999999999999\t0\t1\n"] {
+        for text in [
+            "",
+            "\n",
+            "x\t0\t1\n",
+            "+5\t0\t1\n",
+            "99999999999999999999\t0\t1\n",
+        ] {
             assert!(
                 matches!(
                     parse_file_nr(text.as_bytes()),
