@@ -2187,7 +2187,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column | r2 PROC-025 [now PROC-035] |
 | U-33 | Wayland `wl_data_device` clipboard writes work from GPUI for all copy actions | v1 PROC-058 [now PROC-070] |
 | U-34 | `fstatat` `st_size` of `/proc/<pid>/fd` gives the fd count on kernel 7.2 | r2 PROC-001 [now PROC-002] |
-| U-35 | Hardware peak reporting: GPU power-limit and fan max values needed for fixed scales are reported by NVML on this card | PERF-015 [now PERF-018], PERF-061 [now PERF-067] |
+| U-35 | Hardware peak reporting: GPU power-limit and fan max values needed for fixed scales are reported by NVML on this card. Outcome (2026-10-05): the RTX 5070 Ti reports a power limit of 300000 mW (`real_hello_5070`, ndy.4); fan max not yet checked | PERF-015 [now PERF-018], PERF-061 [now PERF-067] |
 | U-36 | CSD checklist passes on KWin (drag, double-click maximize, restore, resize edges, window menu, tiling); fallback to server decorations if not | ADR-010, D-006 |
 | U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 [now PERF-106] |
 | U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 [now PROC-037] |
