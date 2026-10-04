@@ -57,10 +57,18 @@ fn walk(root: &Path) -> Vec<PathBuf> {
 #[test]
 fn layout() {
     let root = fixture_dir(NAME);
-    for rel in ["proc/stat", "proc/meminfo", "proc/diskstats", "proc/net/dev"] {
+    for rel in [
+        "proc/stat",
+        "proc/meminfo",
+        "proc/diskstats",
+        "proc/net/dev",
+    ] {
         assert!(root.join(rel).is_file(), "missing {rel}");
     }
-    assert!(root.join("sys/block/vda").is_dir(), "missing sys/block/vda/");
+    assert!(
+        root.join("sys/block/vda").is_dir(),
+        "missing sys/block/vda/"
+    );
     for iface in ["eth0", "lo"] {
         assert!(
             root.join("sys/class/net").join(iface).is_dir(),
@@ -168,7 +176,10 @@ fn samplers_handle_missing_sources() {
     // (PERF-033), and everything that only cpufreq gives is Unsupported.
     assert_eq!(cpu_out.online_cpus, 2);
     assert_eq!(cpu_out.freq.source, FreqSource::CpuinfoMhz);
-    assert_eq!(read_base_mhz(&fixture(NAME)).validity, Validity::Unsupported);
+    assert_eq!(
+        read_base_mhz(&fixture(NAME)).validity,
+        Validity::Unsupported
+    );
     let freq_static = read_static(&fixture(NAME));
     assert_eq!(freq_static.driver.validity, Validity::Unsupported);
     assert_eq!(freq_static.governor.validity, Validity::Unsupported);
@@ -186,7 +197,12 @@ fn samplers_handle_missing_sources() {
 
     assert_eq!(net_out.validity, Validity::Valid);
     assert_eq!(net_out.ifaces.len(), 2);
-    assert!(net_out.ifaces.iter().all(|i| i.total_rx_bytes.validity.is_valid()));
+    assert!(
+        net_out
+            .ifaces
+            .iter()
+            .all(|i| i.total_rx_bytes.validity.is_valid())
+    );
 
     assert!(sensors.chips().is_empty());
     assert!(sensors_out.temps.is_empty(), "{:?}", sensors_out.temps);
