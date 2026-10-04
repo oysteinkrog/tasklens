@@ -292,6 +292,7 @@ const ALL_CPU: CpuOpts = CpuOpts {
     freq: true,
     temp: true,
     live_stats: true,
+    power: true,
 };
 
 const ALL_MEM: MemOpts = MemOpts { details: true };
