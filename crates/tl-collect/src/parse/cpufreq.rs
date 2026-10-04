@@ -5,7 +5,8 @@
 //! cpuinfo fallback is read with a fresh open every tick, because it is not on the ADR-016
 //! kept-open list.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 use tl_model::validity::Validity;
@@ -76,29 +77,13 @@ impl CpuFreq {
     /// /proc/cpuinfo is the source.
     pub fn open(root: &SysRoot) -> Self {
         let dir = root.sys_path(CPUFREQ_DIR);
-        let mut ids: Vec<u16> = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| policy_id(e.file_name().as_encoded_bytes()))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        ids.sort_unstable();
+        let ids = policy_ids(&dir);
 
         let mut buf = Vec::new();
-        let mut list = SmallVec::<[u16; 64]>::new();
         let mut policies = Vec::with_capacity(ids.len());
         for id in ids {
             let pdir = dir.join(format!("policy{id}"));
-            let mut cpus = SmallVec::new();
-            for name in ["related_cpus", "affected_cpus"] {
-                let parsed = read_trimmed(&pdir.join(name), &mut buf)
-                    .and_then(|bytes| parse_cpu_list(bytes, &mut list));
-                if parsed.is_ok() && !list.is_empty() {
-                    cpus.extend(list.iter().copied());
-                    break;
-                }
-            }
+            let cpus = policy_cpus(&pdir, &mut buf);
             let mut avg = KeptFile::new(pdir.join("cpuinfo_avg_freq"));
             let (file, source) = if avg.read(&mut buf).is_ok() {
                 (avg, FreqSource::AvgFreq)
@@ -116,12 +101,7 @@ impl CpuFreq {
             });
         }
 
-        let cpu_count = policies
-            .iter()
-            .flat_map(|p| p.cpus.iter())
-            .map(|&cpu| usize::from(cpu) + 1)
-            .max()
-            .unwrap_or(0);
+        let cpu_count = cpu_count(policies.iter().map(|p| &p.cpus));
         let source = if policies.is_empty() {
             FreqSource::None
         } else if policies.iter().all(|p| p.source == FreqSource::AvgFreq) {
@@ -252,6 +232,124 @@ pub fn read_base_mhz(root: &SysRoot) -> Measured<u32> {
     Measured::invalid(Validity::Unsupported)
 }
 
+/// Static cpufreq facts for the CPU page (PERF-035, PERF-031), read once at start.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CpuFreqStatic {
+    /// `scaling_driver` of the policy covering cpu0.
+    pub driver: Measured<Option<Arc<str>>>,
+    /// `scaling_governor` of the policy covering cpu0.
+    pub governor: Measured<Option<Arc<str>>>,
+    /// `energy_performance_preference` of the policy covering cpu0.
+    pub epp: Measured<Option<Arc<str>>>,
+    /// /sys/firmware/acpi/platform_profile. The power-profiles-daemon fallback is the
+    /// engine's job (E12).
+    pub platform_profile: Measured<Option<Arc<str>>>,
+    /// Index is the logical CPU id; from `policy<N>/amd_pstate_prefcore_ranking`.
+    pub prefcore_rank: Vec<Option<u32>>,
+}
+
+impl CpuFreqStatic {
+    /// True when at least two different ranking values exist (PERF-031: stars only then).
+    pub fn prefcore_differs(&self) -> bool {
+        let mut ranks = self.prefcore_rank.iter().flatten();
+        match ranks.next() {
+            Some(first) => ranks.any(|rank| rank != first),
+            None => false,
+        }
+    }
+
+    /// Highest ranking value, if any.
+    pub fn top_rank(&self) -> Option<u32> {
+        self.prefcore_rank.iter().flatten().copied().max()
+    }
+}
+
+/// Reads the static cpufreq facts once (PERF-035, PERF-031).
+///
+/// The string fields come from the policy whose `related_cpus` (else `affected_cpus`)
+/// contains cpu0. A missing file gives `Unsupported`.
+pub fn read_static(root: &SysRoot) -> CpuFreqStatic {
+    let dir = root.sys_path(CPUFREQ_DIR);
+    let mut buf = Vec::new();
+    let policies: Vec<(PathBuf, SmallVec<[u16; 4]>)> = policy_ids(&dir)
+        .into_iter()
+        .map(|id| {
+            let pdir = dir.join(format!("policy{id}"));
+            let cpus = policy_cpus(&pdir, &mut buf);
+            (pdir, cpus)
+        })
+        .collect();
+
+    let mut out = CpuFreqStatic {
+        driver: Measured::invalid(Validity::Unsupported),
+        governor: Measured::invalid(Validity::Unsupported),
+        epp: Measured::invalid(Validity::Unsupported),
+        platform_profile: read_string(&root.sys_path("firmware/acpi/platform_profile"), &mut buf),
+        prefcore_rank: vec![None; cpu_count(policies.iter().map(|(_, cpus)| cpus))],
+    };
+    if let Some((pdir, _)) = policies.iter().find(|(_, cpus)| cpus.contains(&0)) {
+        out.driver = read_string(&pdir.join("scaling_driver"), &mut buf);
+        out.governor = read_string(&pdir.join("scaling_governor"), &mut buf);
+        out.epp = read_string(&pdir.join("energy_performance_preference"), &mut buf);
+    }
+    for (pdir, cpus) in &policies {
+        let Ok(rank) = read_u64(&pdir.join("amd_pstate_prefcore_ranking"), &mut buf) else {
+            continue;
+        };
+        let Ok(rank) = u32::try_from(rank) else {
+            continue;
+        };
+        for &cpu in cpus {
+            out.prefcore_rank[usize::from(cpu)] = Some(rank);
+        }
+    }
+    out
+}
+
+/// A small text file, trimmed, as lossy UTF-8. A missing file gives `Unsupported`.
+fn read_string(path: &Path, buf: &mut Vec<u8>) -> Measured<Option<Arc<str>>> {
+    match read_trimmed(path, buf) {
+        Ok(bytes) => Measured::valid(Some(Arc::from(String::from_utf8_lossy(bytes)))),
+        Err(CollectError::NotFound) => Measured::invalid(Validity::Unsupported),
+        Err(err) => Measured::invalid(err.validity()),
+    }
+}
+
+/// The ids of the `policy<N>` directories in `dir`, sorted. Empty when `dir` does not read.
+fn policy_ids(dir: &Path) -> Vec<u16> {
+    let mut ids: Vec<u16> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter_map(|e| policy_id(e.file_name().as_encoded_bytes()))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    ids.sort_unstable();
+    ids
+}
+
+/// The CPUs of one policy: `related_cpus`, else `affected_cpus`, else none.
+fn policy_cpus(pdir: &Path, buf: &mut Vec<u8>) -> SmallVec<[u16; 4]> {
+    let mut list = SmallVec::<[u16; 64]>::new();
+    for name in ["related_cpus", "affected_cpus"] {
+        let parsed =
+            read_trimmed(&pdir.join(name), buf).and_then(|bytes| parse_cpu_list(bytes, &mut list));
+        if parsed.is_ok() && !list.is_empty() {
+            return list.iter().copied().collect();
+        }
+    }
+    SmallVec::new()
+}
+
+/// Highest CPU id in any policy + 1, or 0.
+fn cpu_count<'a>(policies: impl Iterator<Item = &'a SmallVec<[u16; 4]>>) -> usize {
+    policies
+        .flat_map(|cpus| cpus.iter())
+        .map(|&cpu| usize::from(cpu) + 1)
+        .max()
+        .unwrap_or(0)
+}
+
 /// Clears `out`, then pushes one entry per line whose key (the text before `:`, trimmed)
 /// equals `key` ignoring ASCII case. The value is a decimal such as `3400.000`, rounded to the
 /// nearest integer; a value that does not parse gives a `Failed` entry.
@@ -336,6 +434,19 @@ mod tests {
         assert_eq!(policy_id(b"policy12"), Some(12));
         assert_eq!(policy_id(b"policy"), None);
         assert_eq!(policy_id(b"policy1a"), None);
+    }
+
+    #[test]
+    fn prefcore_helpers() {
+        let info = |ranks: Vec<Option<u32>>| CpuFreqStatic {
+            prefcore_rank: ranks,
+            ..CpuFreqStatic::default()
+        };
+        assert!(!info(vec![]).prefcore_differs());
+        assert!(!info(vec![None, Some(5), None, Some(5)]).prefcore_differs());
+        assert!(info(vec![Some(5), None, Some(7)]).prefcore_differs());
+        assert_eq!(info(vec![Some(5), None, Some(7)]).top_rank(), Some(7));
+        assert_eq!(info(vec![None, None]).top_rank(), None);
     }
 
     proptest! {

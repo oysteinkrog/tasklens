@@ -1,5 +1,5 @@
-//! `CpuFreq` and `read_base_mhz` against the captured `owner-desktop` fixture and the hand-made
-//! cpufreq edge fixtures (E04-010).
+//! `CpuFreq`, `read_base_mhz` and `read_static` against the captured `owner-desktop` fixture and
+//! the hand-made cpufreq edge fixtures (E04-010, E04-013).
 
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
 #![allow(clippy::unwrap_used)]
@@ -7,10 +7,11 @@
 mod common;
 
 use std::fs;
+use std::sync::Arc;
 
 use tl_collect::SysRoot;
 use tl_collect::counters::Measured;
-use tl_collect::parse::cpufreq::{CpuFreq, FreqReading, FreqSource, read_base_mhz};
+use tl_collect::parse::cpufreq::{CpuFreq, FreqReading, FreqSource, read_base_mhz, read_static};
 use tl_model::validity::Validity;
 
 fn read(root: &SysRoot) -> FreqReading {
@@ -157,4 +158,64 @@ fn policy_error_is_per_policy() {
     assert_eq!(out.per_cpu_mhz[0], Measured::valid(4200));
     assert_eq!(out.avg_mhz, Measured::valid(4200));
     assert_eq!(out.max_mhz, Measured::valid(4200));
+}
+
+fn text(s: &str) -> Measured<Option<Arc<str>>> {
+    Measured::valid(Some(Arc::from(s)))
+}
+
+const MIXED_CPUFREQ: &str = "sys/devices/system/cpu/cpufreq";
+
+#[test]
+fn static_mixed() {
+    let info = read_static(&common::fixture("cpufreq-mixed"));
+    assert_eq!(info.driver, text("amd-pstate-epp"));
+    assert_eq!(info.governor, text("powersave"));
+    assert_eq!(info.epp, text("balance_performance"));
+    assert_eq!(info.platform_profile.validity, Validity::Unsupported);
+    assert_eq!(info.platform_profile.value, None);
+}
+
+#[test]
+fn prefcore_ranking() {
+    let info = read_static(&common::fixture("cpufreq-mixed"));
+    assert_eq!(
+        info.prefcore_rank,
+        [Some(236), Some(236), Some(231), Some(231)]
+    );
+    assert!(info.prefcore_differs());
+    assert_eq!(info.top_rank(), Some(236));
+}
+
+#[test]
+fn prefcore_equal() {
+    let copy = common::fixture_copy("cpufreq-mixed", None);
+    let dir = copy.path().join(MIXED_CPUFREQ);
+    fs::write(dir.join("policy2/amd_pstate_prefcore_ranking"), "236\n").unwrap();
+
+    let info = read_static(&SysRoot::at(copy.path()));
+    assert_eq!(info.prefcore_rank, [Some(236); 4]);
+    assert!(!info.prefcore_differs());
+    assert_eq!(info.top_rank(), Some(236));
+}
+
+#[test]
+fn prefcore_absent() {
+    let copy = common::fixture_copy("cpufreq-mixed", None);
+    let dir = copy.path().join(MIXED_CPUFREQ);
+    for policy in ["policy0", "policy2"] {
+        fs::remove_file(dir.join(policy).join("amd_pstate_prefcore_ranking")).unwrap();
+    }
+
+    let info = read_static(&SysRoot::at(copy.path()));
+    assert_eq!(info.prefcore_rank, [None; 4]);
+    assert!(!info.prefcore_differs());
+    assert_eq!(info.top_rank(), None);
+}
+
+#[test]
+fn static_owner_desktop_snapshot() {
+    let info = read_static(&common::fixture("owner-desktop"));
+    assert_eq!(info.driver.validity, Validity::Valid);
+    insta::assert_debug_snapshot!(info);
 }
