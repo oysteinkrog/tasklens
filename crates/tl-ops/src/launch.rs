@@ -29,8 +29,7 @@ pub fn parse_exec(raw: &str, ctx: &ExecContext<'_>) -> OpsResult<Vec<String>> {
     if raw.contains('\0') {
         return Err(OpsError::InvalidInput("Exec contains a NUL byte"));
     }
-    let value = unescape_string_value(raw);
-    let words = split_words(&value)?;
+    let words = split_words(&unescape_marked(raw))?;
 
     let mut args = Vec::with_capacity(words.len());
     for word in words {
@@ -63,38 +62,46 @@ pub fn parse_exec(raw: &str, ctx: &ExecContext<'_>) -> OpsResult<Vec<String>> {
 
 /// Applies the spec "string" escapes: `\s`, `\n`, `\t`, `\r` and `\\`. Any other `\x` pair is
 /// kept as both characters.
+#[allow(dead_code, reason = "no caller yet; parse_exec uses unescape_marked")]
 pub(crate) fn unescape_string_value(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
+    unescape_marked(raw).into_iter().map(|(c, _)| c).collect()
+}
+
+/// `unescape_string_value`, with each character marked `true` when it came from `\s`. That space
+/// belongs to its argument and does not separate arguments.
+fn unescape_marked(raw: &str) -> Vec<(char, bool)> {
+    let mut out = Vec::with_capacity(raw.len());
     let mut chars = raw.chars();
     while let Some(c) = chars.next() {
         if c != '\\' {
-            out.push(c);
+            out.push((c, false));
             continue;
         }
         match chars.next() {
-            Some('s') => out.push(' '),
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
+            Some('s') => out.push((' ', true)),
+            Some('n') => out.push(('\n', false)),
+            Some('t') => out.push(('\t', false)),
+            Some('r') => out.push(('\r', false)),
+            Some('\\') => out.push(('\\', false)),
             Some(other) => {
-                out.push('\\');
-                out.push(other);
+                out.push(('\\', false));
+                out.push((other, false));
             }
-            None => out.push('\\'),
+            None => out.push(('\\', false)),
         }
     }
     out
 }
 
-/// Splits on runs of spaces outside quotes. Inside a quoted argument `\"`, `` \` ``, `\$` and
-/// `\\` give the second character; any other backslash is literal.
-fn split_words(value: &str) -> OpsResult<Vec<Word>> {
+/// Splits on runs of spaces outside quotes. A space that came from `\s` does not split. Inside a
+/// quoted argument `\"`, `` \` ``, `\$` and `\\` give the second character; any other backslash
+/// is literal.
+fn split_words(value: &[(char, bool)]) -> OpsResult<Vec<Word>> {
     let mut words = Vec::new();
-    let mut chars = value.chars().peekable();
+    let mut chars = value.iter().copied().peekable();
     loop {
-        while chars.next_if_eq(&' ').is_some() {}
-        let Some(&first) = chars.peek() else {
+        while chars.next_if_eq(&(' ', false)).is_some() {}
+        let Some(&(first, _)) = chars.peek() else {
             break;
         };
 
@@ -102,11 +109,11 @@ fn split_words(value: &str) -> OpsResult<Vec<Word>> {
             chars.next();
             let mut text = String::new();
             loop {
-                match chars.next() {
+                match chars.next().map(|(c, _)| c) {
                     None => return Err(OpsError::InvalidInput("unterminated quote in Exec")),
                     Some('"') => break,
-                    Some('\\') => match chars.peek() {
-                        Some(&e @ ('"' | '`' | '$' | '\\')) => {
+                    Some('\\') => match chars.peek().map(|&(c, _)| c) {
+                        Some(e @ ('"' | '`' | '$' | '\\')) => {
                             chars.next();
                             text.push(e);
                         }
@@ -116,7 +123,7 @@ fn split_words(value: &str) -> OpsResult<Vec<Word>> {
                 }
             }
             // The spec requires a quoted argument to be quoted as a whole.
-            if chars.peek().is_some_and(|&c| c != ' ') {
+            if chars.peek().is_some_and(|&p| p != (' ', false)) {
                 return Err(OpsError::InvalidInput(
                     "quote inside an unquoted Exec argument",
                 ));
@@ -124,7 +131,7 @@ fn split_words(value: &str) -> OpsResult<Vec<Word>> {
             words.push(Word { text, quoted: true });
         } else {
             let mut text = String::new();
-            while let Some(c) = chars.next_if(|&c| c != ' ') {
+            while let Some((c, _)) = chars.next_if(|&p| p != (' ', false)) {
                 if c == '"' {
                     return Err(OpsError::InvalidInput(
                         "quote inside an unquoted Exec argument",
