@@ -141,3 +141,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - qfx.10: resolve_socket_inodes has cfg_attr(not(test), expect(dead_code)); E29-A1 must remove it when wiring dispatch.
 - ndy.8: crates/tl-gpu-probe/src/api_versions.rs has #![allow(unsafe_code)] (ash and EGL FFI) with SAFETY comments. Second place with unsafe besides tl-ops/src/sys.rs; check against the ADR unsafe rule and review each block in the security pass.
 - 8hz.10: on a rate change the source loop takes a reset sample at the same instant as the old-rate sample (log 2000, reset, 2000). Check the samplers handle dt = 0 (no divide by zero, WarmingUp), and consider skipping the immediate sample when one was taken this instant. Also: after switching to Off, one already-scheduled sample still runs.
+
+- iuz.9 thread ops: if a thread exits between the task-dir check and the nice, sched or affinity call, a reused TID in another process can get the change. Signals are safe (tgkill). Review whether a pidfd-based thread check or a post-call recheck is worth it.
+- wox.5 tray raster: heights round to whole target pixels and then double in the 2x buffer, so the box filter never changes a value. The supersampling does nothing visible. Decide if fractional heights are wanted.
+- yms.9 cgroup: a `\xNN` escape that is not valid UTF-8 becomes U+FFFD in the unit name.
