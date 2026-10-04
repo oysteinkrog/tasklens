@@ -186,7 +186,10 @@ impl Catalog {
         let before = self.version;
         for id in online.iter() {
             let identity = DeviceIdentity::CpuLogical { id };
-            if self.idx(&identity).is_some_and(|idx| self.entries[usize::from(idx.0)].present) {
+            if self
+                .idx(&identity)
+                .is_some_and(|idx| self.entries[usize::from(idx.0)].present)
+            {
                 continue;
             }
             let name = format!("CPU {id}");
@@ -369,8 +372,11 @@ mod tests {
     fn list_scoped_by_kinds() {
         let mut c = Catalog::new();
         let eno1 = net("eno1", 2);
-        c.apply_list(&list(DeviceKinds::NETS, vec![desc(eno1.clone(), "net:eno1")]))
-            .unwrap();
+        c.apply_list(&list(
+            DeviceKinds::NETS,
+            vec![desc(eno1.clone(), "net:eno1")],
+        ))
+        .unwrap();
         let before = entry(&c, &eno1);
 
         let changes = c
@@ -401,7 +407,12 @@ mod tests {
         let second = c.publish().unwrap();
         assert!(second.version > first.version);
         assert!(!second.find(&cpu31).unwrap().present);
-        assert!(second.find(&DeviceIdentity::CpuLogical { id: 30 }).unwrap().present);
+        assert!(
+            second
+                .find(&DeviceIdentity::CpuLogical { id: 30 })
+                .unwrap()
+                .present
+        );
 
         // The same set again changes nothing.
         assert!(!c.set_cpus(&cpus(0..31)).unwrap());
@@ -431,8 +442,11 @@ mod tests {
         let mut part = desc(sda1.clone(), "disk:sda1");
         part.parent = Some(sda.clone());
         // The partition comes first, so the parent is resolved after the whole list.
-        c.apply_list(&list(DeviceKinds::DISKS, vec![part, desc(sda.clone(), "disk:sda")]))
-            .unwrap();
+        c.apply_list(&list(
+            DeviceKinds::DISKS,
+            vec![part, desc(sda.clone(), "disk:sda")],
+        ))
+        .unwrap();
         assert_eq!(entry(&c, &sda1).parent, c.idx(&sda));
         assert!(c.idx(&sda).is_some());
     }
@@ -455,7 +469,10 @@ mod tests {
         let e = published.find(&sda).unwrap();
         assert_eq!(&*e.persistent_key, "disk:0x5002538e40a1b2c3");
         assert_eq!(e.net_kind, None);
-        assert_eq!(published.find(&eno1).unwrap().net_kind, Some(NetKind::Wired));
+        assert_eq!(
+            published.find(&eno1).unwrap().net_kind,
+            Some(NetKind::Wired)
+        );
     }
 
     #[test]
@@ -464,9 +481,18 @@ mod tests {
         let published = c.publish().expect("a new catalog publishes once");
         let expected = [
             (DeviceIdentity::CpuPackage, "cpu"),
-            (DeviceIdentity::Aggregate(AggregateKind::Disks), "aggregate:disk"),
-            (DeviceIdentity::Aggregate(AggregateKind::Nets), "aggregate:net"),
-            (DeviceIdentity::Aggregate(AggregateKind::Gpus), "aggregate:gpu"),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::Disks),
+                "aggregate:disk",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::Nets),
+                "aggregate:net",
+            ),
+            (
+                DeviceIdentity::Aggregate(AggregateKind::Gpus),
+                "aggregate:gpu",
+            ),
         ];
         assert_eq!(published.entries.len(), expected.len());
         for (i, (identity, key)) in expected.into_iter().enumerate() {
