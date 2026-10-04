@@ -314,15 +314,15 @@ fn rollup_key(pid: u32, start_ticks: u64) -> ProcessKey {
 /// A proc root with `n` processes (pids 10000..) that all have the stat and smaps_rollup of
 /// process-edge 4201.
 fn fake_procs(n: u32) -> (tempfile::TempDir, SysRoot, Vec<ProcessKey>) {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = tempfile::tempdir().expect("tempdir");
     let stat = fixture_bytes("process-edge", "proc/4201/stat");
     let rollup = fixture_bytes("process-edge", "proc/4201/smaps_rollup");
     let mut keys = Vec::new();
     for pid in 10_000..10_000 + n {
         let dir = tmp.path().join(format!("proc/{pid}"));
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("stat"), &stat).unwrap();
-        fs::write(dir.join("smaps_rollup"), &rollup).unwrap();
+        fs::create_dir_all(&dir).expect("create proc dir");
+        fs::write(dir.join("stat"), &stat).expect("write stat");
+        fs::write(dir.join("smaps_rollup"), &rollup).expect("write smaps_rollup");
         keys.push(rollup_key(pid, FAKE_START_TICKS));
     }
     let root = SysRoot::at(tmp.path());
@@ -336,8 +336,8 @@ fn own_key() -> ProcessKey {
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
-    .unwrap();
-    let ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).unwrap();
+    .expect("open own proc dir");
+    let ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("own start ticks");
     rollup_key(pid, ticks)
 }
 
