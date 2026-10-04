@@ -382,15 +382,23 @@ fn absolute_deadlines_no_drift() {
 fn slow_job_skips_ticks_and_reports_late() {
     let mut fl = FakeLab::new();
     let (updates, mut rx, demand, settings, control) = channels();
-    let slow = Duration::from_millis(250);
-    let src = FakeSource::new(&fl.clock, vec![Step::Slow(slow)], PERIOD);
+    let slow = Step::Slow(Duration::from_millis(250));
+    // A script of only slow jobs would keep the loop busy forever, so the lab never idles.
+    let script = vec![slow, slow, slow, slow, Step::Ok];
+    let src = FakeSource::new(&fl.clock, script, PERIOD);
     let log = Arc::clone(&src.log);
     let (handle, _) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
 
-    fl.run_for(Duration::from_secs(2), TICK);
+    // The slow jobs already ran while the task started: each one moved the clock.
+    assert_eq!(fl.now_ms(), 1_000);
+    fl.run_for(Duration::from_millis(990), TICK);
     let samples = times_ms(&log, "sample");
-    // Each job ends 250 ms after it starts; the next one waits for the next 100 ms deadline.
-    assert_eq!(samples, [0, 300, 600, 900, 1_200, 1_500, 1_800]);
+    // The tick is taken before the job, so the deadline it left behind has passed when a slow
+    // job ends: the next job starts at once. That is one late tick, never a burst. After the
+    // fast job the loop is back on the 100 ms grid.
+    let mut expected = vec![0, 250, 500, 750, 1_000];
+    expected.extend((11..20).map(|k| k * 100));
+    assert_eq!(samples, expected);
     for pair in samples.windows(2) {
         assert!(
             pair[1] - pair[0] >= 100,
@@ -398,16 +406,21 @@ fn slow_job_skips_ticks_and_reports_late() {
         );
     }
 
-    // Each sample sends `Running`; the loop sends `Late` once, before the third sample's update.
+    // Each sample sends `Running`. The loop sends `Late` after the third slow job and
+    // `Running` after the fast one, each before that job's own update.
     let states = health_states(&drain(&mut rx));
-    let late: Vec<usize> = states
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| **s == SourceState::Late)
-        .map(|(i, _)| i)
-        .collect();
-    assert_eq!(late, [2], "{states:?}");
-    assert_eq!(states.len(), samples.len() + 1, "{states:?}");
+    let loop_states: Vec<(usize, SourceState)> =
+        vec![(2, SourceState::Late), (5, SourceState::Running)];
+    for (i, state) in &loop_states {
+        assert_eq!(states.get(*i), Some(state), "{states:?}");
+    }
+    let late = states.iter().filter(|s| **s == SourceState::Late).count();
+    assert_eq!(late, 1, "{states:?}");
+    assert_eq!(
+        states.len(),
+        samples.len() + loop_states.len(),
+        "{states:?}"
+    );
 
     handle.abort();
     fl.finish();
