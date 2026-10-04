@@ -24,8 +24,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::paths;
 
-pub const DEFAULT_FILTER: &str =
-    "info,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,zbus=warn";
+pub const DEFAULT_FILTER: &str = "info,wgpu=warn,wgpu_core=warn,wgpu_hal=warn,naga=warn,zbus=warn";
 pub const RING_LINES: usize = 200;
 
 const FILE_PREFIX: &str = "tasklens";
@@ -296,20 +295,37 @@ mod tests {
 
         let names: Vec<String> = std::fs::read_dir(&logs)
             .expect("read logs")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         assert_eq!(names.len(), 1, "{names:?}");
         let name = &names[0];
-        assert!(name.starts_with("tasklens.") && name.ends_with(".log"), "{name}");
+        assert!(
+            name.starts_with("tasklens.") && name.ends_with(".log"),
+            "{name}"
+        );
         // tasklens.yyyy-mm-dd.log
         assert_eq!(name.len(), "tasklens.".len() + 10 + ".log".len(), "{name}");
 
         let path = logs.join(name);
         let text = std::fs::read_to_string(&path).expect("read log");
         assert!(text.contains("file event"));
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
-        let dir_mode = std::fs::metadata(&logs).expect("metadata").permissions().mode() & 0o777;
+        let dir_mode = std::fs::metadata(&logs)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(dir_mode, 0o700);
     }
 
