@@ -108,3 +108,4 @@ pass once all batch writers finish.
 
 OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-171 to R-235
 (R = 170 + n). The owner answers above become D-012 to D-020 in DECISIONS.md.
+- v9m.1 (E02-A1): the asupersync feature check must use `cargo tree -p tl-engine -e normal,features -i asupersync` (dev-deps include test-internals). Tell the v9m.1 implementer.
