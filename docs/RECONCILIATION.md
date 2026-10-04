@@ -1730,6 +1730,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: 8hz.5 bead Files section; tl-model already uses bitflags [verified].
 - Edits: ARCHITECTURE.md ADR-001 table; xtask/src/check_deps.rs.
 
+### R-274 gpui-kit 0.7.0 theme token names (U-8 settled)
+- Question: E17-004 (`tasklens-lgw.6`) must check every kit token name in its mapping against the gpui-kit 0.7.0 source and say what happens to kit fields the mapping does not name.
+- Resolution: every `ThemeColor` field the mapping names exists in gpui-component 0.7.0 `src/theme/theme_color.rs`, so `theme/map.rs` has no substitutions. One kit field, `list_head`, is neither mapped nor in the bead's "left at the kit default" list; it stays at the kit default through the reset line, like `table_foot`. Note for the caller of `map::apply` (the theme store): `Theme::update` reloads the kit's registered theme config when `mode` changes inside the closure, which overwrites the mapped colours. A mode switch must therefore set `mode` in one `Theme::update` and run `map::apply` in a second one, or write through `Theme::global_mut` and then call `Theme::sync_base` and refresh the windows.
+- Basis: gpui-component 0.7.0 `src/theme/theme_color.rs` and `src/theme/mod.rs` (`Theme::update`, `Theme::edit`) [verified by the lgw.6 agent]; `every_mapped_field_is_set` test.
+- Edits: `crates/tl-ui/src/theme/map.rs`; U-8 row below.
+
 
 
 
@@ -2148,7 +2154,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-5 | GPUI has no screen reader support on Linux | ADR-009 |
 | U-6 | Wayland focus-stealing prevention only flashes the taskbar entry on second-instance activation | ADR-010 |
 | U-7 | Bundled Noto Sans static faces contain `tnum` and load under zed#61660; Inter is the alternative | ADR-009, open question 5 |
-| U-8 | Exact gpui-kit `ThemeColor` token names match ADR-009's mapping | ADR-009, open question 11 |
+| U-8 | Exact gpui-kit `ThemeColor` token names match ADR-009's mapping | ADR-009, open question 11. Verified by tasklens-lgw.6: all mapped names exist in gpui-kit 0.7.0, no substitutions; `list_head` stays at the kit default (R-274). |
 | U-9 | The zed#64499 patch outline fixes the frame stall | ADR-010, open question 12 |
 | U-10 | Collection cost gates: 2% (Performance tab) and 3.5% (Processes tab) are reachable; 15 ms sweep for 2,000 processes | ADR-014, ADR-016 |
 | U-11 | History budget: about 200 changed processes per second, 15-byte patches, 3:1 zstd, about 30 MB per 6 h | ADR-012 |
