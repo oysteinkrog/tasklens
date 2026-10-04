@@ -1,6 +1,6 @@
 ---
 source: crates/tl-collect/src/sample/cpu.rs
-assertion_line: 738
+assertion_line: 764
 expression: "(s.topology(), &r)"
 ---
 (
@@ -1333,6 +1333,16 @@ expression: "(s.topology(), &r)"
             },
             uptime_ns: 0,
             boot_time_unix_s: 0,
+        },
+        power: RaplReading {
+            package_w: Measured {
+                value: 0.0,
+                validity: WarmingUp,
+            },
+            core_w: Measured {
+                value: 0.0,
+                validity: WarmingUp,
+            },
         },
     },
 )
