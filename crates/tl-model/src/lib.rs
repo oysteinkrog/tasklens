@@ -45,3 +45,5 @@ pub mod journal;
 pub mod history;
 
 pub mod client;
+
+pub mod tray;
