@@ -5,13 +5,14 @@
 //! `ProcessKey`. Signals then go through that pidfd, so they can never hit a reused PID. There is
 //! no fallback to `kill(pid)`.
 
+use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags};
-use tl_model::{actions::Signal, ids::ProcessKey, time::BootId};
+use tl_model::{actions::Signal, ids::ProcessKey, system::CpuSet, time::BootId};
 
 use crate::error::{OpsError, OpsResult};
 use crate::sys;
@@ -74,8 +75,6 @@ pub(crate) fn parse_start_ticks(stat: &[u8]) -> Option<u64> {
 }
 
 /// True when the process behind `pidfd` has exited (zombie or reaped). Does not block.
-// The PID-based calls of E07-004 use this; until then only the tests do.
-#[allow(dead_code)]
 pub(crate) fn has_exited(pidfd: &OwnedFd) -> OpsResult<bool> {
     let mut fds = [PollFd::new(pidfd, PollFlags::IN)];
     let zero = Timespec {
@@ -159,6 +158,130 @@ pub(crate) fn kill_tree_with(
         tracing::debug!(pid = key.pid, ok = result.is_ok(), error = ?result.as_ref().err(), "kill_tree target");
     }
     results
+}
+
+/// The thread ids of `pid` from `/proc/<pid>/task`, sorted ascending. Names that are not a
+/// number are skipped. A process that is gone gives `NoSuchProcess`.
+pub(crate) fn list_tids(pid: u32) -> OpsResult<Vec<u32>> {
+    let path = format!("/proc/{pid}/task");
+    let dir = match rustix::fs::open(
+        path.as_str(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Err(OpsError::NoSuchProcess),
+        Err(e) => return Err(e.into()),
+    };
+    let mut buf = [MaybeUninit::<u8>::uninit(); 4096];
+    let mut entries = rustix::fs::RawDir::new(&dir, &mut buf);
+    let mut tids = Vec::new();
+    while let Some(entry) = entries.next() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(Errno::NOENT) => return Err(OpsError::NoSuchProcess),
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(tid) = entry
+            .file_name()
+            .to_str()
+            .ok()
+            .and_then(|name| name.parse().ok())
+        {
+            tids.push(tid);
+        }
+    }
+    tids.sort_unstable();
+    Ok(tids)
+}
+
+/// Runs `op` on every thread of the verified process (ADR-006). Nice and affinity take a PID, not
+/// a pidfd, so the pidfd is held open for the whole loop and polled after it: a live process
+/// cannot have its PID reused, so a pidfd that is still not readable proves every call hit the
+/// target. A thread that exits mid-loop (`ESRCH`) is skipped and not counted.
+pub(crate) fn for_each_tid(
+    key: ProcessKey,
+    boot: BootId,
+    op: &mut dyn FnMut(u32) -> Result<(), Errno>,
+) -> OpsResult {
+    let pidfd = open_verified(key, boot)?;
+    let tids = list_tids(key.pid)?;
+    let (mut done, mut total) = (0usize, 0usize);
+    let mut first_err = None;
+    for &tid in &tids {
+        match op(tid) {
+            Err(Errno::SRCH) => continue,
+            Ok(()) => done += 1,
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+        total += 1;
+    }
+    let result = if has_exited(&pidfd)? || total == 0 {
+        Err(OpsError::OutcomeUnknown("process exited during the change"))
+    } else if done == total {
+        Ok(())
+    } else if done == 0 {
+        Err(first_err.map_or(OpsError::Os(libc::EIO), OpsError::from))
+    } else {
+        Err(OpsError::Partial {
+            done: u16::try_from(done).unwrap_or(u16::MAX),
+            total: u16::try_from(total).unwrap_or(u16::MAX),
+        })
+    };
+    tracing::debug!(pid = key.pid, tids = tids.len(), ok = result.is_ok(), error = ?result.as_ref().err(), "for_each_tid");
+    result
+}
+
+/// A thread id as a rustix `Pid`. A tid that does not fit gives `ESRCH`, so the loop skips it;
+/// it must never become `None`, which means the calling process.
+fn tid_pid(tid: u32) -> Result<Pid, Errno> {
+    i32::try_from(tid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(Errno::SRCH)
+}
+
+/// Sets the nice value of every thread of the verified process. `nice` must be -20..=19.
+pub fn set_nice(key: ProcessKey, boot: BootId, nice: i8) -> OpsResult {
+    if !(-20..=19).contains(&nice) {
+        return Err(OpsError::InvalidInput("nice out of range"));
+    }
+    for_each_tid(key, boot, &mut |tid| {
+        rustix::process::setpriority_process(Some(tid_pid(tid)?), i32::from(nice))
+    })
+}
+
+/// Sets the CPU affinity of every thread of the verified process. A mask outside the CPUs the
+/// cgroup allows gives `Os(EINVAL)`.
+pub fn set_affinity(key: ProcessKey, boot: BootId, set: &CpuSet) -> OpsResult {
+    let set = to_rustix_cpuset(set)?;
+    for_each_tid(key, boot, &mut |tid| {
+        rustix::thread::sched_setaffinity(Some(tid_pid(tid)?), &set)
+    })
+}
+
+/// Bit `i` of word `w` is CPU `w * 64 + i`. An empty set gives `InvalidInput`.
+pub(crate) fn to_rustix_cpuset(set: &CpuSet) -> OpsResult<rustix::thread::CpuSet> {
+    let mut out = rustix::thread::CpuSet::new();
+    let mut any = false;
+    for (w, &word) in set.0.iter().enumerate() {
+        for i in 0..64 {
+            if word & (1 << i) != 0 {
+                let cpu = w * 64 + i;
+                if cpu >= rustix::thread::CpuSet::MAX_CPU {
+                    return Err(OpsError::InvalidInput("CPU number out of range"));
+                }
+                out.set(cpu);
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return Err(OpsError::InvalidInput("empty CPU set"));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -551,5 +674,237 @@ mod tests {
     #[test]
     fn kill_tree_empty() {
         assert_eq!(kill_tree(&[], BOOT), Vec::<OpsResult>::new());
+    }
+
+    /// The child half of the threaded test child. It returns at once unless
+    /// `TL_OPS_THREADED_CHILD=1`; with it set, it starts 2 extra threads, prints `ready` and sleeps
+    /// 60 s.
+    #[test]
+    fn threaded_child_entry() {
+        if std::env::var_os("TL_OPS_THREADED_CHILD").is_none_or(|v| v != "1") {
+            return;
+        }
+        for _ in 0..2 {
+            std::thread::spawn(|| std::thread::sleep(Duration::from_secs(60)));
+        }
+        println!("ready");
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// Starts this test binary as a child with at least 3 threads and waits until they all run.
+    fn threaded_child() -> Children {
+        use std::io::BufRead;
+        let mut command = Command::new(std::env::current_exe().expect("current_exe"));
+        command
+            .args([
+                "--exact",
+                "process::tests::threaded_child_entry",
+                "--nocapture",
+            ])
+            .env("TL_OPS_THREADED_CHILD", "1")
+            .stdout(std::process::Stdio::piped());
+        let mut children = Children::spawn(&mut [&mut command]);
+        let stdout = children.children[0].stdout.take().expect("child stdout");
+        let ready = std::io::BufReader::new(stdout)
+            .lines()
+            .any(|line| line.is_ok_and(|l| l.trim() == "ready"));
+        assert!(ready, "threaded child never printed ready");
+        children
+    }
+
+    /// Field 19 (`nice`) of `/proc/<pid>/task/<tid>/stat`.
+    fn tid_nice(pid: u32, tid: u32) -> i32 {
+        let stat = std::fs::read(format!("/proc/{pid}/task/{tid}/stat")).expect("read task stat");
+        let close = stat.iter().rposition(|&b| b == b')').expect("no )");
+        let rest = String::from_utf8_lossy(&stat[close + 1..]).into_owned();
+        // Field 3 (state) is the first field after the name.
+        rest.split_whitespace()
+            .nth(19 - 3)
+            .expect("no nice field")
+            .parse()
+            .expect("parse nice")
+    }
+
+    fn all_nice(pid: u32) -> Vec<i32> {
+        let tids = list_tids(pid).expect("list_tids");
+        tids.iter().map(|&tid| tid_nice(pid, tid)).collect()
+    }
+
+    #[test]
+    fn set_nice_applies_to_every_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        assert!(list_tids(pid).expect("list_tids").len() >= 3);
+        assert_eq!(set_nice(children.key(0), BOOT, 5), Ok(()));
+        let nice = all_nice(pid);
+        assert!(nice.iter().all(|&n| n == 5), "nice values {nice:?}");
+    }
+
+    #[test]
+    fn lowering_nice_without_cap_is_permission_denied() {
+        if rustix::process::geteuid().is_root() {
+            println!("skipped: running as root, which may lower nice");
+            return;
+        }
+        let children = threaded_child();
+        let pid = children.pid(0);
+        // RLIMIT_NICE above 20 lets an unprivileged process lower nice; take that away.
+        let zero = rustix::process::Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        };
+        rustix::process::prlimit(
+            Pid::from_raw(pid as i32),
+            rustix::process::Resource::Nice,
+            zero,
+        )
+        .expect("prlimit");
+        assert_eq!(set_nice(children.key(0), BOOT, 5), Ok(()));
+        assert_eq!(
+            set_nice(children.key(0), BOOT, 0),
+            Err(OpsError::PermissionDenied)
+        );
+        let nice = all_nice(pid);
+        assert!(nice.iter().all(|&n| n == 5), "nice values {nice:?}");
+    }
+
+    #[test]
+    fn nice_out_of_range_is_invalid() {
+        // A key that does not verify: if the range check ran later, the error would differ.
+        let key = ProcessKey {
+            start_ticks: 0,
+            boot_id: BOOT,
+            pid: 0,
+        };
+        for nice in [20, -21, i8::MAX, i8::MIN] {
+            assert_eq!(
+                set_nice(key, BOOT, nice),
+                Err(OpsError::InvalidInput("nice out of range"))
+            );
+        }
+    }
+
+    #[test]
+    fn set_affinity_cpu0_every_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let mut set = CpuSet::empty();
+        set.insert(0);
+        assert_eq!(set_affinity(children.key(0), BOOT, &set), Ok(()));
+        for tid in list_tids(pid).expect("list_tids") {
+            let got = rustix::thread::sched_getaffinity(Pid::from_raw(tid as i32))
+                .expect("sched_getaffinity");
+            assert_eq!(got.count(), 1, "tid {tid}");
+            assert!(got.is_set(0), "tid {tid}");
+        }
+    }
+
+    #[test]
+    fn empty_cpuset_is_invalid() {
+        let child = ChildGuard::sleep();
+        assert_eq!(
+            set_affinity(child.key(), BOOT, &CpuSet::empty()),
+            Err(OpsError::InvalidInput("empty CPU set"))
+        );
+    }
+
+    #[test]
+    fn to_rustix_cpuset_maps_bits() {
+        let mut set = CpuSet::empty();
+        for cpu in [0, 63, 64, 130, 1023] {
+            set.insert(cpu);
+        }
+        let out = to_rustix_cpuset(&set).expect("to_rustix_cpuset");
+        assert_eq!(out.count(), 5);
+        for cpu in [0, 63, 64, 130, 1023] {
+            assert!(out.is_set(cpu), "cpu {cpu}");
+        }
+    }
+
+    #[test]
+    fn for_each_tid_partial() {
+        let children = threaded_child();
+        let mut calls = 0;
+        // Ok for the first TID, EPERM for the second; the rest act as vanished threads.
+        let mut op = |_: u32| {
+            calls += 1;
+            match calls {
+                1 => Ok(()),
+                2 => Err(Errno::PERM),
+                _ => Err(Errno::SRCH),
+            }
+        };
+        assert_eq!(
+            for_each_tid(children.key(0), BOOT, &mut op),
+            Err(OpsError::Partial { done: 1, total: 2 })
+        );
+    }
+
+    #[test]
+    fn for_each_tid_all_failed_is_first_error() {
+        let children = threaded_child();
+        let mut op = |_: u32| Err(Errno::PERM);
+        assert_eq!(
+            for_each_tid(children.key(0), BOOT, &mut op),
+            Err(OpsError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn for_each_tid_skips_vanished_tid() {
+        let children = threaded_child();
+        let mut calls = 0;
+        let mut op = |_: u32| {
+            calls += 1;
+            if calls == 2 { Err(Errno::SRCH) } else { Ok(()) }
+        };
+        assert_eq!(for_each_tid(children.key(0), BOOT, &mut op), Ok(()));
+        assert!(calls >= 3);
+    }
+
+    /// Regression test for ADR-006: a target that exits during a PID-based change must never
+    /// report success.
+    #[test]
+    fn for_each_tid_exit_during_change_is_outcome_unknown() {
+        let children = threaded_child();
+        let key = children.key(0);
+        let pidfd = open_verified(key, BOOT).expect("open_verified");
+        let mut killed = false;
+        let mut op = |_: u32| {
+            if !killed {
+                sys::pidfd_send_signal_raw(pidfd.as_fd(), libc::SIGKILL).expect("kill child");
+                assert!(
+                    wait_for(|| has_exited(&pidfd) == Ok(true)),
+                    "pidfd never became readable"
+                );
+                killed = true;
+            }
+            Ok(())
+        };
+        assert_eq!(
+            for_each_tid(key, BOOT, &mut op),
+            Err(OpsError::OutcomeUnknown("process exited during the change"))
+        );
+        assert!(killed);
+    }
+
+    #[test]
+    fn set_nice_shifted_key_is_identity_changed() {
+        let child = ChildGuard::sleep();
+        let before = all_nice(child.pid());
+        let mut key = child.key();
+        key.start_ticks += 1;
+        let target = if before[0] == 5 { 6 } else { 5 };
+        assert_eq!(set_nice(key, BOOT, target), Err(OpsError::IdentityChanged));
+        assert_eq!(all_nice(child.pid()), before);
+    }
+
+    #[test]
+    fn list_tids_gone_pid_is_no_such_process() {
+        let mut child = ChildGuard::sleep();
+        let pid = child.pid();
+        child.child.kill().expect("kill child");
+        child.wait();
+        assert_eq!(list_tids(pid), Err(OpsError::NoSuchProcess));
     }
 }
