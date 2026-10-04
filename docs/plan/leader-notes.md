@@ -83,3 +83,7 @@ pass once all batch writers finish.
   Check in the quality pass that E10 to E13 beads depend on the B2 anchors they use.
 - Overlaps: udev reader is E04-OI-2 and E12-OI-4; ProcessRecord extras are E05 1 and B3 item 5;
   rustix `param` and serde_json join B1 item 2 (dependency rows).
+- B5 (E15 to E18): done, 70 beads (E15 25, E16 15, E17 14, E18 16), all 139 edges in, no
+  cycles, plan in d69765a. Open items 1 to 38 in the plan file. Leader edge: E33-A1 on fut.15,
+  and B1's E33-OI-1 proposal follows the `UiLaunch` shape in fut.15. Check that E18-A1 exposes
+  `TlTreeTable::scroll_handle` (B8).
