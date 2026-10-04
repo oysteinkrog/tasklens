@@ -2,7 +2,9 @@
 //! captured `owner-desktop` fixture (ADR-016, PERF-054, R-162).
 #![allow(clippy::unwrap_used)]
 use std::fmt::Write as _;
+use std::sync::Arc;
 
+use tl_collect::counters::Measured;
 use tl_collect::parse::netif::{self, IfaceKind, NetIface, OperState};
 use tl_model::validity::Validity;
 
@@ -73,6 +75,37 @@ fn missing_operstate() {
     let got = netif::read_oper_state(&root, "gone0", &mut buf);
     assert_eq!(got.validity, Validity::Missing);
     assert_eq!(got.value, OperState::Unknown);
+}
+
+#[test]
+fn details_eth0() {
+    let root = common::fixture("netif-kinds");
+    let mut buf = Vec::new();
+    let got = netif::read_details(&root, "eth0", &mut buf);
+    assert_eq!(got.speed_mbps, Measured::valid(1000));
+    assert_eq!(got.mac, Measured::valid(Some(Arc::from("aa:bb:cc:dd:ee:01"))));
+    assert_eq!(got.ifindex, 2);
+    assert_eq!(got.driver.as_deref(), Some("e1000e"));
+}
+
+#[test]
+fn details_speed_minus_one() {
+    let root = common::fixture("netif-kinds");
+    let mut buf = Vec::new();
+    let got = netif::read_details(&root, "wlan0", &mut buf);
+    assert_eq!(got.speed_mbps.validity, Validity::Unsupported);
+    assert_eq!(got.ifindex, 3);
+}
+
+#[test]
+fn details_no_speed_no_driver() {
+    let root = common::fixture("netif-kinds");
+    let mut buf = Vec::new();
+    let got = netif::read_details(&root, "tailscale0", &mut buf);
+    assert_eq!(got.speed_mbps.validity, Validity::Missing);
+    assert_eq!(got.mac.validity, Validity::Missing);
+    assert_eq!(got.ifindex, 8);
+    assert_eq!(got.driver, None);
 }
 
 #[test]

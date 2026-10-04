@@ -1,13 +1,14 @@
-//! Network interfaces under /sys/class/net/<if>/: identity, kind and connection state
-//! (ADR-016, PERF-054, R-053, R-162).
+//! Network interfaces under /sys/class/net/<if>/: identity, kind, connection state and details
+//! (ADR-016, PERF-054, PERF-056, R-053, R-162).
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
 
+use rustix::io::Errno;
 use tl_model::validity::Validity;
 
 use crate::counters::Measured;
-use crate::sysroot::{read_trimmed, read_u64};
+use crate::sysroot::{read_i64, read_trimmed, read_u64};
 use crate::{CollectError, SysRoot};
 
 const NETNS_FILE: &str = "/proc/self/ns/net";
@@ -54,6 +55,20 @@ pub struct NetIface {
     pub kind: IfaceKind,
     /// The ARPHRD number from `type`.
     pub arphrd_type: u32,
+}
+
+/// The PERF-056 details rows of one interface. Read at enumeration time, not per tick.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IfaceDetails {
+    /// Link speed in Mb/s. `Unsupported` ("Not reported") when `speed` reads `-1` or fails with
+    /// EINVAL, which the kernel returns for an interface that is down.
+    pub speed_mbps: Measured<u32>,
+    /// `address`, trimmed. Empty gives `None`. `00:00:00:00:00:00` is kept as is.
+    pub mac: Measured<Option<Arc<str>>>,
+    /// 0 when `ifindex` cannot be read. The kernel never gives an interface index 0.
+    pub ifindex: u32,
+    /// The last component of the `device/driver` link. `None` when there is no link.
+    pub driver: Option<Arc<str>>,
 }
 
 /// Names that are always Virtual, checked before every other rule (PERF-004, R-162).
@@ -171,6 +186,38 @@ pub fn read_oper_state(root: &SysRoot, name: &str, buf: &mut Vec<u8>) -> Measure
             })
         }
         None => unknown(Validity::Failed),
+    }
+}
+
+/// Link speed, MAC address, interface index and driver of root.sys/class/net/<name>
+/// (PERF-056). Each field carries its own failure; this never fails as a whole.
+pub fn read_details(root: &SysRoot, name: &str, buf: &mut Vec<u8>) -> IfaceDetails {
+    let dir = root.sys_path("class/net").join(name);
+    let speed_mbps = match read_i64(&dir.join("speed"), buf) {
+        Ok(-1) | Err(CollectError::Os(Errno::INVAL)) => Measured::invalid(Validity::Unsupported),
+        Ok(mbps) => u32::try_from(mbps).map_or_else(
+            |_| Measured::invalid(Validity::Failed),
+            Measured::valid,
+        ),
+        Err(err) => Measured::invalid(err.validity()),
+    };
+    let mac = match read_trimmed(&dir.join("address"), buf) {
+        Ok(b"") => Measured::valid(None),
+        Ok(text) => std::str::from_utf8(text).map_or_else(
+            |_| Measured::invalid(Validity::Failed),
+            |mac| Measured::valid(Some(Arc::from(mac))),
+        ),
+        Err(err) => Measured::invalid(err.validity()),
+    };
+    let ifindex = read_u32(&dir.join("ifindex"), buf).unwrap_or(0);
+    let driver = std::fs::read_link(dir.join("device/driver"))
+        .ok()
+        .and_then(|link| link.file_name()?.to_str().map(Arc::from));
+    IfaceDetails {
+        speed_mbps,
+        mac,
+        ifindex,
+        driver,
     }
 }
 
@@ -315,6 +362,31 @@ mod tests {
         assert_eq!(&*out[0].name, "a0");
         assert_eq!(out[0].netns_ino, 7);
         assert_eq!(out[0].kind, IfaceKind::Other);
+    }
+
+    #[test]
+    fn details_bad_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let iface = dir.path().join("sys/class/net/x0");
+        fs::create_dir_all(&iface).unwrap();
+        fs::write(iface.join("speed"), "-2\n").unwrap();
+        fs::write(iface.join("address"), "\n").unwrap();
+        let root = SysRoot::at(dir.path());
+        let mut buf = Vec::new();
+        let got = read_details(&root, "x0", &mut buf);
+        assert_eq!(got.speed_mbps.validity, Validity::Failed);
+        assert_eq!(got.mac, Measured::valid(None));
+        assert_eq!(got.ifindex, 0);
+        assert_eq!(got.driver, None);
+
+        fs::write(iface.join("speed"), "4294967296").unwrap();
+        fs::write(iface.join("address"), "00:00:00:00:00:00").unwrap();
+        let got = read_details(&root, "x0", &mut buf);
+        assert_eq!(got.speed_mbps.validity, Validity::Failed);
+        assert_eq!(
+            got.mac,
+            Measured::valid(Some(Arc::from("00:00:00:00:00:00")))
+        );
     }
 
     #[test]
