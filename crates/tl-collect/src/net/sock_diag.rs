@@ -5,7 +5,7 @@
 
 use std::net::IpAddr;
 
-use netlink_packet_core::{NLMSG_DONE, NLMSG_ERROR, NLA_TYPE_MASK, Parseable};
+use netlink_packet_core::{NLA_TYPE_MASK, NLMSG_DONE, NLMSG_ERROR, Parseable};
 use netlink_packet_sock_diag::{
     AF_INET, AF_INET6, INET_DIAG_INFO, SOCK_DIAG_BY_FAMILY, inet::InetResponseHeader,
 };
@@ -134,7 +134,11 @@ pub fn parse_dump(
 }
 
 /// Parses one `inet_diag_msg` and its attributes.
-fn parse_inet_diag(payload: &[u8], family: Family, proto: Proto) -> Result<SockRecord, CollectError> {
+fn parse_inet_diag(
+    payload: &[u8],
+    family: Family,
+    proto: Proto,
+) -> Result<SockRecord, CollectError> {
     if payload.len() < INET_DIAG_MSG_LEN {
         return Err(CollectError::NetlinkMalformed("short inet_diag_msg"));
     }
@@ -371,7 +375,10 @@ mod tests {
     #[test]
     fn short_tcp_info_is_none() {
         let mut p = header(AF_INET6, 1, v6_id(), 99);
-        p.extend(attr(INET_DIAG_INFO, &tcp_info_bytes(TCPI_BYTES_RECEIVED, 1, 2)));
+        p.extend(attr(
+            INET_DIAG_INFO,
+            &tcp_info_bytes(TCPI_BYTES_RECEIVED, 1, 2),
+        ));
         let buf = msg(SOCK_DIAG_BY_FAMILY, &p);
 
         let mut out = Vec::new();
@@ -393,7 +400,10 @@ mod tests {
 
     #[test]
     fn overlong_header_is_malformed() {
-        let mut buf = msg(SOCK_DIAG_BY_FAMILY, &header(AF_INET, 10, SocketId::new_v4(), 1));
+        let mut buf = msg(
+            SOCK_DIAG_BY_FAMILY,
+            &header(AF_INET, 10, SocketId::new_v4(), 1),
+        );
         let too_long = (buf.len() + 8) as u32;
         buf[0..4].copy_from_slice(&too_long.to_ne_bytes());
         let mut out = Vec::new();
@@ -409,7 +419,10 @@ mod tests {
         let buf = msg(SOCK_DIAG_BY_FAMILY, &p);
         let mut out = Vec::new();
         let err = parse_dump(&buf, Family::V4, Proto::Tcp, &mut out).unwrap_err();
-        assert!(matches!(err, CollectError::NetlinkMalformed("truncated attribute")));
+        assert!(matches!(
+            err,
+            CollectError::NetlinkMalformed("truncated attribute")
+        ));
     }
 
     #[test]
