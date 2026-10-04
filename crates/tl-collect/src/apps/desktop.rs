@@ -450,19 +450,20 @@ fn resolve(token: &str, path_dirs: &[&Path]) -> Option<Arc<str>> {
     }
     if token.contains('/') {
         let path = Path::new(token);
-        if path.is_absolute() && path.is_file() {
-            if let Some(canon) = canonical(path) {
-                return Some(canon);
-            }
+        if path.is_absolute()
+            && path.is_file()
+            && let Some(canon) = canonical(path)
+        {
+            return Some(canon);
         }
         return Some(Arc::from(token));
     }
     for dir in path_dirs {
         let candidate = dir.join(token);
-        if candidate.is_file() {
-            if let Some(canon) = canonical(&candidate) {
-                return Some(canon);
-            }
+        if candidate.is_file()
+            && let Some(canon) = canonical(&candidate)
+        {
+            return Some(canon);
         }
     }
     Some(Arc::from(token))
