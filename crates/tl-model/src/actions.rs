@@ -74,7 +74,10 @@ pub struct FourTuple {
 pub enum ActionTarget {
     Process(ProcessKey),
     /// P2, Threads tab. Allowed kinds: `Signal`, `SetNice`, `SetSched`, `SetAffinity`.
-    Thread { process: ProcessKey, tid: u32 },
+    Thread {
+        process: ProcessKey,
+        tid: u32,
+    },
     /// App cgroups under app.slice.
     Cgroup(CgroupRef),
     /// Services, and freeze, thaw and kill of units outside app.slice.
