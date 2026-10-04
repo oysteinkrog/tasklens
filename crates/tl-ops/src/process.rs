@@ -12,7 +12,8 @@ use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use rustix::process::{Pid, PidfdFlags};
-use tl_model::{actions::Signal, ids::ProcessKey, system::CpuSet, time::BootId};
+use tl_model::actions::{IoPriority, SchedPolicy, Signal};
+use tl_model::{ids::ProcessKey, system::CpuSet, time::BootId};
 
 use crate::error::{OpsError, OpsResult};
 use crate::sys;
@@ -282,6 +283,123 @@ pub(crate) fn to_rustix_cpuset(set: &CpuSet) -> OpsResult<rustix::thread::CpuSet
         return Err(OpsError::InvalidInput("empty CPU set"));
     }
     Ok(out)
+}
+
+/// Sets the scheduling policy of every thread of the verified process. `rt_prio` is 1..=99 for
+/// `Fifo` and `Rr`, else 0. Each thread keeps its own nice value.
+pub fn set_sched(key: ProcessKey, boot: BootId, policy: SchedPolicy, rt_prio: u8) -> OpsResult {
+    let base = sched_attr_for(policy, rt_prio, 0)?;
+    let result = for_each_tid(key, boot, &mut |tid| {
+        let nice = rustix::process::getpriority_process(Some(tid_pid(tid)?))?;
+        // The values were checked above, so this only fills in the nice value.
+        let attr = sched_attr_for(policy, rt_prio, nice).unwrap_or(base);
+        sys::sched_setattr_tid(tid, &attr)
+    });
+    tracing::debug!(pid = key.pid, policy = ?policy, rt_prio, ok = result.is_ok(), error = ?result.as_ref().err(), "set_sched");
+    result
+}
+
+/// The kernel `sched_attr` for a policy. Every `Fifo` and `Rr` request sets
+/// `SCHED_FLAG_RESET_ON_FORK` (R-165), so a child of a real-time process starts as `SCHED_OTHER`.
+/// The other policies carry `current_nice`, because `sched_setattr` would otherwise reset it.
+pub(crate) fn sched_attr_for(
+    policy: SchedPolicy,
+    rt_prio: u8,
+    current_nice: i32,
+) -> OpsResult<sys::SchedAttr> {
+    let base = sys::SchedAttr {
+        size: sys::SCHED_ATTR_SIZE_VER0,
+        ..sys::SchedAttr::default()
+    };
+    match policy {
+        SchedPolicy::Fifo | SchedPolicy::Rr => {
+            if !(1..=99).contains(&rt_prio) {
+                return Err(OpsError::InvalidInput("rt priority out of range"));
+            }
+            let sched_policy = if policy == SchedPolicy::Fifo {
+                sys::SCHED_FIFO
+            } else {
+                sys::SCHED_RR
+            };
+            Ok(sys::SchedAttr {
+                sched_policy,
+                sched_flags: sys::SCHED_FLAG_RESET_ON_FORK,
+                sched_priority: u32::from(rt_prio),
+                ..base
+            })
+        }
+        SchedPolicy::Other | SchedPolicy::Batch | SchedPolicy::Idle => {
+            if rt_prio != 0 {
+                return Err(OpsError::InvalidInput("rt priority must be 0"));
+            }
+            let sched_policy = match policy {
+                SchedPolicy::Other => sys::SCHED_OTHER,
+                SchedPolicy::Batch => sys::SCHED_BATCH,
+                _ => sys::SCHED_IDLE,
+            };
+            Ok(sys::SchedAttr {
+                sched_policy,
+                sched_nice: current_nice,
+                ..base
+            })
+        }
+    }
+}
+
+/// Sets the I/O priority of every thread of the verified process. `Realtime` needs
+/// `CAP_SYS_ADMIN` and gives `PermissionDenied` without it.
+pub fn set_io_priority(key: ProcessKey, boot: BootId, prio: IoPriority) -> OpsResult {
+    let value = ioprio_for(prio)?;
+    let result = for_each_tid(key, boot, &mut |tid| sys::ioprio_set_tid(tid, value));
+    tracing::debug!(pid = key.pid, ioprio = value, ok = result.is_ok(), error = ?result.as_ref().err(), "set_io_priority");
+    result
+}
+
+/// The kernel ioprio value. Levels are 0..=7.
+pub(crate) fn ioprio_for(prio: IoPriority) -> OpsResult<u16> {
+    let (class, level) = match prio {
+        IoPriority::None => (sys::IOPRIO_CLASS_NONE, 0),
+        IoPriority::Realtime(level) => (sys::IOPRIO_CLASS_RT, level),
+        IoPriority::BestEffort(level) => (sys::IOPRIO_CLASS_BE, level),
+        IoPriority::Idle => (sys::IOPRIO_CLASS_IDLE, 0),
+    };
+    if level > 7 {
+        return Err(OpsError::InvalidInput("I/O priority level out of range"));
+    }
+    Ok(sys::ioprio_value(class, u16::from(level)))
+}
+
+/// Current I/O priority of the main thread, after the identity check (R-144 item 1). A thread
+/// with no I/O class set (`IOPRIO_CLASS_NONE`) reads as the kernel's default, best effort at
+/// level `(nice + 20) / 5`. The pidfd is polled after the reads, as in `for_each_tid`, so a
+/// process that exited in between gives `NoSuchProcess`, never another process's value.
+pub fn io_priority_of(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> {
+    let result = io_priority_of_inner(key, boot);
+    tracing::debug!(pid = key.pid, ok = result.is_ok(), error = ?result.as_ref().err(), "io_priority_of");
+    result
+}
+
+fn io_priority_of_inner(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> {
+    let pidfd = open_verified(key, boot)?;
+    let value = sys::ioprio_get_tid(key.pid)?;
+    let class = value >> sys::IOPRIO_CLASS_SHIFT;
+    // The level is in bits 0 to 2, so it always fits in a u8.
+    let level = (value & 0x7) as u8;
+    let prio = match class {
+        sys::IOPRIO_CLASS_NONE => {
+            let nice = rustix::process::getpriority_process(Some(tid_pid(key.pid)?))?;
+            let level = u8::try_from((nice.clamp(-20, 19) + 20) / 5).unwrap_or(4);
+            IoPriority::BestEffort(level)
+        }
+        sys::IOPRIO_CLASS_RT => IoPriority::Realtime(level),
+        sys::IOPRIO_CLASS_BE => IoPriority::BestEffort(level),
+        sys::IOPRIO_CLASS_IDLE => IoPriority::Idle,
+        _ => return Err(OpsError::Os(libc::EIO)),
+    };
+    if has_exited(&pidfd)? {
+        return Err(OpsError::NoSuchProcess);
+    }
+    Ok(prio)
 }
 
 #[cfg(test)]
@@ -923,5 +1041,235 @@ mod tests {
         child.child.kill().expect("kill child");
         child.wait();
         assert_eq!(list_tids(pid), Err(OpsError::NoSuchProcess));
+    }
+
+    #[test]
+    fn sched_attr_rt_has_reset_on_fork() {
+        let attr = sched_attr_for(SchedPolicy::Rr, 1, 7).expect("sched_attr_for");
+        assert_eq!(attr.sched_policy, 2);
+        assert_eq!(attr.sched_priority, 1);
+        assert_eq!(attr.sched_flags, 0x01);
+        assert_eq!(attr.size, 48);
+        assert_eq!(attr.sched_nice, 0);
+        assert_eq!(
+            (attr.sched_runtime, attr.sched_deadline, attr.sched_period),
+            (0, 0, 0)
+        );
+        let fifo = sched_attr_for(SchedPolicy::Fifo, 99, 0).expect("sched_attr_for");
+        assert_eq!((fifo.sched_policy, fifo.sched_priority), (1, 99));
+        assert_eq!(fifo.sched_flags, 0x01);
+    }
+
+    #[test]
+    fn sched_attr_rejects_bad_rt_prio() {
+        let out_of_range = Err(OpsError::InvalidInput("rt priority out of range"));
+        assert_eq!(sched_attr_for(SchedPolicy::Fifo, 0, 0), out_of_range);
+        assert_eq!(sched_attr_for(SchedPolicy::Rr, 100, 0), out_of_range);
+        let must_be_zero = Err(OpsError::InvalidInput("rt priority must be 0"));
+        assert_eq!(sched_attr_for(SchedPolicy::Batch, 5, 0), must_be_zero);
+        // A key that does not verify: if the check ran after open_verified, the error would differ.
+        let key = ProcessKey {
+            start_ticks: 0,
+            boot_id: BOOT,
+            pid: 0,
+        };
+        assert_eq!(set_sched(key, BOOT, SchedPolicy::Rr, 100), out_of_range);
+        assert_eq!(set_sched(key, BOOT, SchedPolicy::Batch, 5), must_be_zero);
+    }
+
+    #[test]
+    fn sched_attr_non_rt_keeps_nice() {
+        let attr = sched_attr_for(SchedPolicy::Idle, 0, 7).expect("sched_attr_for");
+        assert_eq!(attr.sched_policy, 5);
+        assert_eq!(attr.sched_priority, 0);
+        assert_eq!(attr.sched_flags, 0);
+        assert_eq!(attr.sched_nice, 7);
+        assert_eq!(attr.size, 48);
+        for (policy, number) in [(SchedPolicy::Other, 0), (SchedPolicy::Batch, 3)] {
+            let attr = sched_attr_for(policy, 0, -3).expect("sched_attr_for");
+            assert_eq!((attr.sched_policy, attr.sched_nice), (number, -3));
+        }
+    }
+
+    /// Field 41 (`policy`) of `/proc/<pid>/task/<tid>/stat` for every thread.
+    fn all_policies(pid: u32) -> Vec<u32> {
+        let tids = list_tids(pid).expect("list_tids");
+        tids.iter()
+            .map(|&tid| {
+                let stat =
+                    std::fs::read(format!("/proc/{pid}/task/{tid}/stat")).expect("read task stat");
+                let close = stat.iter().rposition(|&b| b == b')').expect("no )");
+                let rest = String::from_utf8_lossy(&stat[close + 1..]).into_owned();
+                rest.split_whitespace()
+                    .nth(41 - 3)
+                    .expect("no policy field")
+                    .parse()
+                    .expect("parse policy")
+            })
+            .collect()
+    }
+
+    fn all_ioprio(pid: u32) -> Vec<u16> {
+        let tids = list_tids(pid).expect("list_tids");
+        tids.iter()
+            .map(|&tid| sys::ioprio_get_tid(tid).expect("ioprio_get"))
+            .collect()
+    }
+
+    #[test]
+    fn set_sched_batch_keeps_nice_every_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        // 5, or higher when the child starts above 5 (a daemon such as ananicy may raise it).
+        let target = raised_nice(pid);
+        assert_eq!(set_nice(children.key(0), BOOT, target), Ok(()));
+        assert_eq!(
+            set_sched(children.key(0), BOOT, SchedPolicy::Batch, 0),
+            Ok(())
+        );
+        let policies = all_policies(pid);
+        assert!(policies.iter().all(|&p| p == 3), "policies {policies:?}");
+        let nice = all_nice(pid);
+        assert!(
+            nice.iter().all(|&n| n == i32::from(target)),
+            "nice values {nice:?}"
+        );
+    }
+
+    #[test]
+    fn set_sched_rr_without_cap_is_permission_denied() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: running as root, which may set a real-time policy");
+            return;
+        }
+        let children = threaded_child();
+        let pid = children.pid(0);
+        // RLIMIT_RTPRIO above 0 lets an unprivileged process pick a real-time policy; take that
+        // away.
+        let zero = rustix::process::Rlimit {
+            current: Some(0),
+            maximum: Some(0),
+        };
+        rustix::process::prlimit(
+            Pid::from_raw(pid as i32),
+            rustix::process::Resource::Rtprio,
+            zero,
+        )
+        .expect("prlimit");
+        let before = all_policies(pid);
+        assert_eq!(
+            set_sched(children.key(0), BOOT, SchedPolicy::Rr, 1),
+            Err(OpsError::PermissionDenied)
+        );
+        assert_eq!(all_policies(pid), before);
+    }
+
+    #[test]
+    fn ioprio_for_table() {
+        let table = [
+            (IoPriority::None, 0),
+            (IoPriority::BestEffort(0), 0x4000),
+            (IoPriority::BestEffort(4), 0x4004),
+            (IoPriority::BestEffort(7), 0x4007),
+            (IoPriority::Realtime(0), 0x2000),
+            (IoPriority::Realtime(7), 0x2007),
+            (IoPriority::Idle, 0x6000),
+        ];
+        for (prio, value) in table {
+            assert_eq!(ioprio_for(prio), Ok(value), "{prio:?}");
+        }
+    }
+
+    #[test]
+    fn ioprio_level_out_of_range_is_invalid() {
+        let invalid = Err(OpsError::InvalidInput("I/O priority level out of range"));
+        assert_eq!(ioprio_for(IoPriority::BestEffort(8)), invalid);
+        assert_eq!(ioprio_for(IoPriority::Realtime(u8::MAX)), invalid);
+        let key = ProcessKey {
+            start_ticks: 0,
+            boot_id: BOOT,
+            pid: 0,
+        };
+        assert_eq!(
+            set_io_priority(key, BOOT, IoPriority::BestEffort(8)),
+            invalid
+        );
+    }
+
+    #[test]
+    fn set_io_priority_best_effort_7_every_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        assert_eq!(
+            set_io_priority(children.key(0), BOOT, IoPriority::BestEffort(7)),
+            Ok(())
+        );
+        let values = all_ioprio(pid);
+        assert!(values.iter().all(|&v| v == 0x4007), "ioprio {values:x?}");
+    }
+
+    #[test]
+    fn set_io_priority_realtime_needs_admin() {
+        if rustix::process::geteuid().is_root() {
+            eprintln!("skipped: running as root, which may set real-time I/O");
+            return;
+        }
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let before = all_ioprio(pid);
+        assert_eq!(
+            set_io_priority(children.key(0), BOOT, IoPriority::Realtime(0)),
+            Err(OpsError::PermissionDenied)
+        );
+        assert_eq!(all_ioprio(pid), before);
+    }
+
+    #[test]
+    fn io_priority_of_reads_back() {
+        let children = threaded_child();
+        let key = children.key(0);
+        let pid = children.pid(0);
+        // The child inherits our I/O class, which a daemon such as ananicy may have set. Clear it
+        // so the child reads as one that never set one.
+        if sys::ioprio_get_tid(pid).expect("ioprio_get") >> sys::IOPRIO_CLASS_SHIFT != 0 {
+            assert_eq!(set_io_priority(key, BOOT, IoPriority::None), Ok(()));
+        }
+        // The kernel default follows nice: level 4 at nice 0. The child may not start at 0.
+        let nice =
+            rustix::process::getpriority_process(Pid::from_raw(pid as i32)).expect("getpriority");
+        let level = u8::try_from((nice + 20) / 5).expect("level fits u8");
+        assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::BestEffort(level)));
+        if nice == 0 {
+            assert_eq!(level, 4);
+        }
+
+        assert_eq!(
+            set_io_priority(key, BOOT, IoPriority::BestEffort(7)),
+            Ok(())
+        );
+        assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::BestEffort(7)));
+        assert_eq!(set_io_priority(key, BOOT, IoPriority::Idle), Ok(()));
+        assert_eq!(io_priority_of(key, BOOT), Ok(IoPriority::Idle));
+    }
+
+    #[test]
+    fn sched_and_ioprio_shifted_key_is_identity_changed() {
+        let child = ChildGuard::sleep();
+        let pid = child.pid();
+        let policies = all_policies(pid);
+        let ioprio = all_ioprio(pid);
+        let mut key = child.key();
+        key.start_ticks += 1;
+        assert_eq!(
+            set_sched(key, BOOT, SchedPolicy::Batch, 0),
+            Err(OpsError::IdentityChanged)
+        );
+        assert_eq!(
+            set_io_priority(key, BOOT, IoPriority::BestEffort(7)),
+            Err(OpsError::IdentityChanged)
+        );
+        assert_eq!(io_priority_of(key, BOOT), Err(OpsError::IdentityChanged));
+        assert_eq!(all_policies(pid), policies);
+        assert_eq!(all_ioprio(pid), ioprio);
     }
 }

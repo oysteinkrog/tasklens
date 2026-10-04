@@ -98,6 +98,16 @@ pub(crate) fn ioprio_set_tid(tid: u32, value: u16) -> Result<(), Errno> {
     check_syscall(ret)
 }
 
+/// The I/O priority of one thread (`IOPRIO_WHO_PROCESS` takes a TID), as the raw kernel value.
+pub fn ioprio_get_tid(tid: u32) -> Result<u16, Errno> {
+    // SAFETY: ioprio_get takes two integers and no pointers, so no memory is touched.
+    let ret =
+        unsafe { libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, tid as libc::c_int) };
+    check_syscall(ret)?;
+    // The kernel value is 16 bits: class in bits 13 to 15, hint and level below.
+    Ok(ret as u16)
+}
+
 /// Sets the scheduling policy, flags, nice and priority of one thread.
 pub(crate) fn sched_setattr_tid(tid: u32, attr: &SchedAttr) -> Result<(), Errno> {
     debug_assert_eq!(attr.size, SCHED_ATTR_SIZE_VER0);
@@ -289,11 +299,6 @@ pub(crate) mod tests {
         rustix::thread::gettid().as_raw_nonzero().get() as u32
     }
 
-    fn ioprio_get_tid(tid: u32) -> i64 {
-        // SAFETY: ioprio_get takes two integers and no pointers.
-        unsafe { libc::syscall(libc::SYS_ioprio_get, IOPRIO_WHO_PROCESS, tid as libc::c_int) }
-    }
-
     #[test]
     fn sched_attr_is_48_bytes() {
         assert_eq!(std::mem::size_of::<SchedAttr>(), 48);
@@ -314,12 +319,11 @@ pub(crate) mod tests {
     #[test]
     fn ioprio_set_own_thread_roundtrip() {
         let tid = own_tid();
-        let old = ioprio_get_tid(tid);
-        assert!(old >= 0, "ioprio_get failed");
+        let old = ioprio_get_tid(tid).expect("ioprio_get");
         ioprio_set_tid(tid, ioprio_value(IOPRIO_CLASS_BE, 7)).expect("ioprio_set");
         let now = ioprio_get_tid(tid);
-        ioprio_set_tid(tid, old as u16).expect("restore ioprio");
-        assert_eq!(now, 0x4007);
+        ioprio_set_tid(tid, old).expect("restore ioprio");
+        assert_eq!(now, Ok(0x4007));
     }
 
     #[test]
