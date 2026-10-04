@@ -115,7 +115,7 @@ WindowOptions {
 
   - `restored_bounds`: `WindowBounds::Windowed(Bounds { origin: point(px(0.), px(0.)), size })` with `size = (max(state.width, 800), max(state.height, 500))`, or `WindowBounds::Maximized(..)` with the same size when `state.maximized`. The origin is ignored by Wayland; tasklens never sets a display (zed#46378).
   - Save: `cx.observe_window_bounds(window, ..)` records `window.window_bounds()`; a 500 ms debounce task writes `[window] width, height, maximized` to `UiState` (logical px, rounded to integers). On close the latest value is written without waiting. Position is never saved [S].
-  - `start_hidden` is true when `--start-minimized` was given and a tray setting is on (APP-048). If `--start-minimized` is given and no tray setting is on, the window opens shown and `window.minimize_window()` runs after the first frame callback [S APP-048].
+  - `start_hidden` is true when `--start-minimized` was given and a tray setting is on (APP-048). If `--start-minimized` is given and no tray setting is on, the window opens shown and `window.minimize_window()` runs after the first frame callback [S APP-048]. `tray_available(cx)` returns `TrayModel.available` and is `false` until E31 fills it; without a tray, a close that would quit minimizes instead when `ToggleMainWindow` arrives while the window is visible (R-219).
 - **States**: none visible.
 - **Data binding**: reads `appearance.decorations` once at startup (a change needs a restart, UI-SHL-006). Writes `UiState.window`.
 - **Build**: `window/main.rs` function `open_main_window(cx, settings, state) -> Result<WindowHandle<MainWindow>>`.
@@ -190,15 +190,15 @@ WindowOptions {
   - Hover: background `tab_hover` (pin, minimize, maximize); close hover background `status.danger` with a white icon (same as UI-FND-021).
   - Pressed: hover background with 0.8 opacity [C].
   - Pin on: the Toggle on look across the full 36 × 34 cell, the same look as the secondary-window pin (UI-FND-021) [S APP-008 "accent fill when on"].
-  - Pin disabled (no KWin bridge and not X11): icon at the foundation's disabled opacity, no hover, tooltip "Not supported by this desktop".
+  - Pin disabled (no KWin bridge; X11 included, R-177): icon at the foundation's disabled opacity, no hover, tooltip "Not supported by this desktop".
   - Minimize and maximize are hidden (not disabled) when `window.window_controls().minimize` or `.maximize` is false [S APP-008]; the remaining buttons stay flush right.
   - Keyboard focus: caption buttons are not Tab stops [C].
 - **Interaction**:
-  - Pin: `ToggleAlwaysOnTop` flips `window.always_on_top` and sends `Command::KWin(KWinCommand::KeepAbove { pid: self_pid, caption: None, on })` on KDE; on X11 it sends `_NET_WM_STATE_ABOVE` through the tl-engine X11 helper (APP-009). Settings write is immediate. No toast [C].
+  - Pin: `ToggleAlwaysOnTop { window: WindowKey::Main, caption: "tasklens" }` (R-176) flips `window.always_on_top` and sends `Command::KWin(KWinCommand::KeepAbove { pid: self_pid, caption: None, on })` on KDE; there is no X11 path in v1 (R-177). Settings write is immediate. No toast [C].
   - Minimize: `window.minimize_window()`, or, when `tray.minimize_to_tray` is on and the tray is up, hide the window (UI-SHL-113).
   - Maximize: `window.zoom_window()`.
   - Close: dispatches `CloseWindow`, which follows the close behaviour in UI-SHL-113 (quit, hide to tray, or hide while detached graphs are open).
-- **Data binding**: `window.always_on_top`; pin availability from `Snapshot.windows.header.validity` (KDE) or the X11 backend flag. `ComponentMask::WINDOWS` triggers a re-render only when that availability flips.
+- **Data binding**: `window.always_on_top`; pin availability from `Snapshot.windows.header.validity` (KDE). `ComponentMask::WINDOWS` triggers a re-render only when that availability flips.
 - **Build**: `window/titlebar.rs::caption_buttons()`, the pin a `TlButton::Toggle` and the other three `div().id(..).w(36).h(34)` cells with `.on_click` and the hover fills above (the kit caption buttons are 34 wide, UI-FND-021).
 - **Performance**: static elements; no per-frame work.
 - **Accessibility**: tooltip text doubles as accessible name; the pin tooltip includes the state.
@@ -264,6 +264,7 @@ WindowOptions {
 
   - A hidden button takes no space (`.when(cond, ..)`, not `.invisible()`), so the drag area grows [S PROC-016].
   - Slot 1 is `TlShield` (UI-FND-028); slots 2 and 4 are `TlButton::Toggle`; slot 3 is `TlButton::Icon`. Icons `i_md` 16.
+  - Slots 2 and 3 are filled by the active page's `ToolbarContent`: E20 defines `ToolbarContent` and `ToolbarModel` and draws only the slot frame; each page epic registers one `ToolbarContent` that draws its own buttons (R-194).
 - **States** (common to all four): the `TlButton` states of UI-FND-010 (hover `tab_hover`, pressed `header`, Toggle on: `accent` at alpha 0.25 with a 1 px `accent` border, disabled at opacity 0.5 with its tooltip still shown). Toolbar buttons are built with `.tab_stop(false)`: they are not Tab stops [C]; keyboard users reach the same Actions through View > Process View, the Settings menu and table (b) keys. Window inactive: icons `text_secondary`.
 - **Interaction**: click dispatches the button's Action (below). Tooltips use `TlTooltip` with the 500 ms delay and, where the Action has a binding, the key hint (`Tooltip::action`).
 - **Data binding**: `MainWindow.active_tab`, `UiState.processes.history_mode`, `processes.hide_system`, `processes.mode`, `HealthSnapshot.helper` (UI-SHL-011), KWin availability (UI-SHL-014).
@@ -322,7 +323,7 @@ WindowOptions {
   - Click dispatches `StartWindowPick`: sends `Command::KWin(KWinCommand::Pick)`, sets `picking = true`, pushes the Info toast "Click a window to select its process. Hold CTRL while clicking to terminate process. Esc cancels." [S PROC-055], and pushes the key context `Picker` on the main window's root focus so Esc maps to `CancelWindowPick`.
   - The result handling (select row, Ctrl+click confirmation, toasts "No window found", "No window selected", "Unknown process") belongs to PROC-055. Where APP-006 says Ctrl+click ends the process "then gives a toast" and PROC-055 says "after a confirmation", this spec follows PROC-055 (the process spec owns action confirmations, PROC-059) [C].
   - Click while picking: dispatches `CancelWindowPick` [C].
-- **Data binding**: `ComponentMask::WINDOWS` (availability); the pick reply arrives as an `ActionEvent` or a `KWinEvent` from the engine (ADR-005).
+- **Data binding**: `ComponentMask::WINDOWS` (availability); the pick reply arrives in `WindowsSnapshot.pick` as `PickResult { seq, outcome: Picked { pid } | NoWindow | Cancelled }`; the request is `KWinCommand::Pick { seq }`, cancel is `CancelPick { seq }` (R-149).
 - **Tests**: `picker_hidden_without_bridge`; `picker_esc_cancels` (fake engine: Esc while picking sends `KWin(CancelPick)` and the toast "No window selected").
 - **Phase**: P3.
 - **Decided here**: picking look; second click cancels; PROC-055 wins over APP-006 on the Ctrl+click confirmation.
@@ -751,7 +752,7 @@ x=0
   | # | Label | Shortcut | Action | Phase |
   |---|---|---|---|---|
   | 1 | Keyboard Shortcuts | Ctrl+? | `OpenShortcuts` (UI-SHL-095) | P2 |
-  | 2 | System Information… | | `OpenSystemInformation`: selects the Information tab and scrolls to the "Operating System" section [S APP-041] | P2 |
+  | 2 | System Information… | | `ShowSystemInformation` (declared by E20-002, R-175): selects the Information tab and scrolls to the "Operating System" section [S APP-041] | P2 |
   | 3 | Additional setup… | | `OpenAdditionalSetup` (UI-SHL-094) | P3 |
   | 4 | Documentation | | `OpenDocumentation`: `xdg-open /usr/share/doc/tasklens/README.md` through the shared launcher; failure Error toast "Could not open the documentation" [C] | P4 |
   | sep | separator | | | P2 |
@@ -835,7 +836,8 @@ x=0, bottom=0
     - Stale: "<Source> data stale", for example "GPU data stale" [S example].
     - Failed: "<Source> unavailable".
     - Disabled (restart budget spent, ADR-004): "<Source> paused after errors".
-  - Source display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin [C].
+  - Sources per tab (R-217): Processes: `Processes` plus every source a visible minigraph draws; Performance: `Cpu`, `Memory`, `Disks`, `Network`, `Gpu`, `Sensors`, plus `Battery` when a battery page exists; Services: both systemd managers and `Journal`; Startup Apps: `Startup`; Connections: `Connections`; Information: `Inventory`.
+  - Source display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin, Logind, UDisks, UPower, NetworkManager, Public IP, History, Journal, Battery; any other variant shows its Rust name [C, R-217].
   - At most two items show; more become "+N more" [C].
   - Restricted process counts are not repeated here on the Processes tab; they are in its tab text (PROC-051). On other tabs, for 10 s after a privileged action was refused with EPERM while tl-helper is missing, the item "Restricted: 42 processes" shows (N = refused targets) [S APP-029, UI-FND-028].
   - Tooltip on each item: the source's `last_error` text, or "No new data for 12 s" for Stale [C].
@@ -963,7 +965,7 @@ x=0, bottom=0
 | Fans | one row per fan: label input and temperature sensor dropdown | custom (below) | `fans.<key>` | | P3 |
 
 - **Device order list** [C]: one row per device in the catalog (name, type), 28 tall, with a drag handle (Lucide `grip-vertical`) to reorder, and a three-way segmented control "Default", "Show", "Hide" bound to `device_overrides` (Default removes the key). Buttons below: "Reset order" (clears `device_order`, toast "Sidebar order reset") and "Show all" (clears `device_overrides`). Keyboard: Alt+Up and Alt+Down move the focused row.
-- **Fans group** [C]: per fan, a text input "Label" (empty = default name) and a dropdown "Temperature sensor" listing hwmon temperatures as "<label> (<chip>) 45 °C", plus "None". Writes `fans."<key>" = { label, temp }`; an empty label and "None" remove the entry.
+- **Fans group** [C]: per fan, a text input "Label" (empty = default name) and a dropdown "Temperature sensor" listing hwmon temperatures as "<label> (<chip>) 45 °C", plus "None". Writes `fans."<key>" = { label, temp }` with both fields optional (`label` omitted when empty, `temp` omitted for None); an entry with neither is removed. With no fan in the snapshot the group is hidden. Keys follow PERF-005 (R-221).
 - **Decided here**: labels "Kernel times", "Secondary graph", "Hidden engine graphs", the device list control, the fans group form.
 
 ### UI-SHL-067 Settings page: Graphs
@@ -1003,7 +1005,7 @@ x=0, bottom=0
 | Login | Start minimized | switch, indented 16, disabled unless Start at login is on | `startup.start_minimized` | P2 |
 | Login | Open with Ctrl+Esc | switch, no settings key; reads and writes kglobalaccel (APP-051); hidden outside KDE | (none) | P4 |
 | Network | Auto-fetch Public IP on launch | switch | `network.auto_fetch_public_ip` | P2 |
-| Memory | Open rescue window on critical memory pressure | switch | `lowmem.enabled` | P3 |
+| Memory | Open rescue window on critical memory pressure (tooltip "systemd-oomd may end processes before the rescue window opens.", plus " The watcher runs with normal OOM priority." when `state.lowmem.oom_score_adjust` is 0; an install or remove failure reverts the switch and sends the desktop notification "Could not set up the rescue window"; R-152) | switch | `lowmem.enabled` | P3 |
 
 - "Open with Ctrl+Esc" on failure to stick (U-16 fallback) shows the description "Log out and back in to apply" [S R-080].
 
@@ -1024,7 +1026,7 @@ x=0, bottom=0
 | Rendering GPU | dropdown (Auto, adapters, Software renderer), "Takes effect after restart" | `rendering.gpu` | P4 |
 | Do not ask again for public IP fetches | switch | `network.public_ip_notice_accepted` | P2 |
 | Show FPS | switch | `debug.show_fps` | P2 |
-| Import from TaskSlinger… | button (APP-034: portal file chooser for `UserSettings.ini` or `themes.json`; toast "Imported N settings and M themes") | (none) | P4 |
+| Import from TaskSlinger… | button (APP-034: portal file chooser for `UserSettings.ini` or `themes.json`; toast "Imported N settings and M themes"; failure toast "Could not import TaskSlinger settings" (Error, R-201); plain booleans and in-range integers only until the owner supplies `UserSettings.ini`, D-018; disabled with "Not available" while `PlatformOps` is `None`, R-153) | (none) | P4 |
 | Open settings folder | button: `xdg-open $XDG_CONFIG_HOME/tasklens` | (none) [C] | P2 |
 | Reset Settings to Defaults | button (danger style), same confirm as the menu | (none) | P2 |
 
@@ -1049,7 +1051,7 @@ x=0, bottom=0
   - Every theme choice in the shell (View > Theme rows, the Settings page dropdown) dispatches `ActivateTheme { name }`.
   - An explicit choice while `theme.follow_system` is on turns sync off and pushes the Info toast "Theme sync turned off" [C], so the user's pick is not overwritten at the next portal change.
   - Turning sync on applies the matching preferred theme at once [C].
-  - The shell turns `ThemeEvent::{Activated, Deleted, Copied, ImportFailed}` into the APP-036 and APP-038 toasts (UI-SHL-038, UI-SHL-083, UI-SHL-084).
+  - The shell turns `ThemeEvent::{Activated, Deleted, Copied, ImportFailed, Imported { count }}` into the APP-036 and APP-038 toasts (UI-SHL-038, UI-SHL-083, UI-SHL-084), plus "Imported { $count } themes" (Success), and `ThemeError::BuiltinCannotBeDeleted` and `BuiltinCannotBeEdited` into "Built-in themes cannot be deleted" and "Built-in themes cannot be edited. Copy it first." (Warning; R-209).
 - **Tests**: `explicit_choice_turns_off_sync`: with sync on, `ActivateTheme("Dracula")` sets `theme.follow_system = false` and pushes "Theme sync turned off".
 - **Phase**: P1 (Default Dark and Default Light, instant switch), P2 (crossfade, other themes, sync).
 - **Decided here**: explicit choice turns sync off; turning sync on applies at once.
@@ -1198,7 +1200,7 @@ x=0, bottom=0
 ### UI-SHL-095 Keyboard Shortcuts window
 
 - **Implements**: APP-030, APP-031, R-083.
-- **Anatomy**: "tasklens Keyboard Shortcuts", Floating, 560 × 640, minimum 420 × 360 [C]. Search input at top (placeholder "Search shortcuts") [C]. Scrollable list grouped by context with headings in this order [S]: Global, Tables, Processes, Services, Performance, Dialogs (Run dialog, window picker), Startup. Each row 28 tall: description `t_base` left; key caps right as kit `Kbd` elements from `Kbd::binding_for_action` (several bindings separated by " or ") [S].
+- **Anatomy**: "tasklens Keyboard Shortcuts", Floating, 560 × 640, minimum 420 × 360 [C]. Search input at top (placeholder "Search shortcuts") [C]. Scrollable list grouped by context with headings in this order [S, R-220]: Global, Tables, Processes, History, Services, Startup Apps, Connections, Information, Performance, Properties windows (PropsWindow, ServiceProps, AffinityDialog, PriorityDialog, SignalDialog), Dialogs (RunDialog, Picker, ColumnPicker, HandleSearch, JournalList, LowMemory). A heading with no shipped bindings is not drawn. Each row 28 tall: description `t_base` left; key caps right as kit `Kbd` elements from `Kbd::binding_for_action` (several bindings separated by " or ") [S].
 - **Behaviour**: rows come from the live keymap, so every row in table (b) appears once; actions not built in the current phase are absent. Search matches description and key text. Opened by Help > "Keyboard Shortcuts" and Ctrl+? [S].
 - **Phase**: P2.
 
@@ -1240,7 +1242,7 @@ x=0, bottom=0
 - **Placement** (the shell's numbers, which UI-FND-020 takes from this file):
   - Main window: horizontally centred, top = title bar 34 + tab strip 30 + `sp4` 8 = 72 at 100% scale, times `ui_scale` [S APP-044 "8 px under the tab bar"]. The shell exports `TAB_STRIP_H = 30.0` and `TITLEBAR_H = 34.0` from `window/main.rs` for this.
   - Server decorations: top = menu row 28 + tab strip 30 + 8 = 66.
-  - Secondary windows: their title bar 34 + 8 = 42 (UI-FND-020 rule 9).
+  - Secondary windows: 72 × `ui_scale` as well in P1 (66 with server decorations), because the kit `NotificationSettings` is app-global; 42 (title bar 34 + 8) once the queue takes a per-window top in P2 (UI-FND-020 rule 9, R-195).
   - The toast globals are re-set on every scale change (UI-SHL-130).
 - **Shell toasts**: every toast text in this file is listed with its entry; the shared texts of APP-044 ("Copied to clipboard", "Copied: <value>", "Failed to copy to clipboard", "No process selected", "Select a process row first.", "Opening file location", "Failed to open file location", "Could not open properties.", "Authentication cancelled") are pushed by their owners through the same queue.
 - **Tests**: `toast_top_follows_tab_strip`: at `ui_scale_pct = 150` the stack top is 108.
@@ -1282,7 +1284,7 @@ x=0, bottom=0
 ### UI-SHL-111 Loading placeholders (frame rule)
 
 - **Implements**: APP-059, R-060, ADR-009 (Skeleton never in table cells or charts).
-- **Behaviour**: the shell guarantees the first frame never waits. Services, Startup Apps, Connections and Information show `TlSkeleton` blocks until their first data, once per session: 12 skeleton rows of row height with widths cycling 60%, 40%, 75% of the name column for tables, and 4 section blocks 120 tall for Information [C]. Skeletons are never shown again when switching between tabs whose data is loaded [S]. Services also shows the toast "Loading service data..." [S SYS-016]. The process table uses no skeleton [S].
+- **Behaviour**: the shell guarantees the first frame never waits. Services, Startup Apps, Connections and Information show `TlSkeleton` blocks until their first data, once per session: 12 skeleton rows of row height with widths cycling 60%, 40%, 75% of the name column for tables, and, for Information, every section's band with an 8-line skeleton block (UI-SYS-085, R-233) [C]. Skeletons are never shown again when switching between tabs whose data is loaded [S]. Services also shows the toast "Loading service data..." [S SYS-016]. The process table uses no skeleton [S].
 - **Performance**: the kit Skeleton animates (2 s loop) and requests frames while visible; at most one skeleton page is visible at a time and only until first data (typically under 500 ms) [S widgets].
 - **Phase**: P2.
 - **Decided here**: skeleton counts and widths.
@@ -1318,7 +1320,7 @@ x=0, bottom=0
 - **Main tray icon** (SNI through `tl-tray`, owned by the tray crate; this entry fixes its UI contract):
   - Shown when no tray graph icon exists and either the main window is hidden by row 1 or minimize-to-tray, or `tray.always_show` is on [C, reading of APP-047 "keeps the icon while the window is visible"]. Hidden while any tray graph icon exists [S PERF-091].
   - Icon: the app icon at 22 × 22 and 44 × 44 ARGB32 [S].
-  - Tooltip: "CPU: 12.3% RAM: 45.6% GPU: 3.0% Disk: 0.4% Network: 2.3 Mbps", updated at most 1 Hz while shown, network in the `units.network` unit [S].
+  - Tooltip: five lines joined by `\n`: "CPU: 12.3%", "RAM: 45.6%", "GPU: 3.0%", "Disk: 0.4%", "Network: 2.3 Mbps" (R-161), updated at most 1 Hz while shown, network in the `units.network` unit [S].
   - Left click: toggle the main window (hide by row 1 rules if visible and focused; else show and activate) [S].
   - Menu [S R-027]: "Show Main Window", "Tray icon graphs >" (PERF-088 owns the submenu), separator, "Exit tasklens".
   - Re-register when `org.kde.StatusNotifierWatcher` changes owner (PERF-092) [S].
@@ -1356,7 +1358,7 @@ x=0, bottom=0
   | `f10` | Global | `OpenMenu(File)` | |
   | `alt-f` / `alt-v` / `alt-s` / `alt-h` | Global | `OpenMenu(File/View/Settings/Help)` | `alt-d` Debug when present [C] |
   | `ctrl-f` | Global | `FocusFilter` | no-op on Performance (no filter box) [C] |
-  | `f5` | Global | `RefreshNow` | sends `Command::RefreshNow(source of the active tab)`; Info toast none [C] |
+  | `f5` | Global | `RefreshCurrentTab` (R-174) | sends `Command::RefreshNow(source of the active tab)`; Info toast none [C] |
   | `escape` | Global | `EscapeChain` | UI-SHL-122 |
   | `ctrl-=`, `ctrl-+`, `ctrl-shift-=` | Global | `ScaleUp` | UI-SHL-130 |
   | `ctrl--` | Global | `ScaleDown` | |
