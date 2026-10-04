@@ -62,6 +62,10 @@ E04 has 32 beads: the 3 anchors plus E04-001 to E04-029. Each anchor in section 
 | E04-027 | tasklens-2dl.30 | Network sampler: rates, totals, state | P1 | E04-025, E04-026 |
 | E04-028 | tasklens-2dl.31 | Network interface details: speed, MAC, driver | P2 | E04-026 |
 | E04-029 | tasklens-2dl.32 | Sensors sampler: temperatures and fans | P1 | E04-011 |
+| E04-030 | tasklens-2dl.33 | udev database reader (`read_udev_props`) (R-140) | P1 | E04-A1 |
+| E04-031 | tasklens-2dl.34 | Partitions table rows (PERF-050, R-140) | P2 | E04-021, E04-024, E04-030, E03-A2 |
+| E04-032 | tasklens-2dl.36 | `minimal-vm` fixture capture (R-140) | P1 | E04-A1 |
+| E04-A4 | tasklens-2dl.35 | Anchor: P2 system details (R-140) | P2 | E04-013, E04-014, E04-015, E04-019, E04-023, E04-024, E04-028, E04-031 |
 
 Cross-epic edges: E04-001 depends on E02-A1 (tasklens-v9m.1) and E03-A1 (tasklens-as2.1). E04-005 and E04-006 depend on E02-A1. No other cross-epic edge.
 
@@ -157,6 +161,8 @@ Choices made inside beads. The docs fix only the outcome of each, so the beads c
 | E05-031 | tasklens-yms.34 | Handle walk and pipe peers in proc/handles.rs | P2 | E05-027 |
 | E05-032 | tasklens-yms.35 | Strings scanner core | P2 | E05-027 |
 | E05-033 | tasklens-yms.36 | Launcher split: Steam, Lutris and Heroic games | P4 | E05-A2, E05-029, E05-019 |
+| E05-034 | tasklens-yms.37 | Package owner index (`pkg.rs`) (R-163 item 1; "E05-030" in open-items-engine.md, renamed because E05-030 exists) | P2 | E05-A1 |
+| E05-035 | tasklens-yms.38 | P2 per-process column readers (`proc/extras_p2.rs`) (R-163 item 2; "E05-031" in open-items-engine.md, renamed because E05-031 exists) | P2 | E05-A1, E05-034 |
 
 ### Open items (E05)
 

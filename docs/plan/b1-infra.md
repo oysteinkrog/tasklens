@@ -112,6 +112,7 @@ Every bead is priority 0 and labelled `phase-p0`, `crate-tl-model`, `area-model`
 | E03-069 | tasklens-as2.35 | gpu_proto.rs: GPU probe messages | 0 | E03-068 |
 | E03-070 | tasklens-as2.36 | helper_proto.rs: helper allowlist, replies and protocol round trips | 0 | E03-053, E03-059, E03-068, E03-069 |
 | E03-071 | tasklens-as2.37 | client.rs: EngineClient trait | 0 | E03-064, E03-060, E03-061, E03-063, E03-067 |
+| E03-072 | tasklens-as2.38 | process.rs and snapshot.rs: ProcessExtras, AppCgroupSample, ProcessExtrasP2, PackageInfo, LowMemoryInfo, NodeId::Unit (R-141, R-150, R-163; open-items-engine.md New beads) | 0 | E03-053, E03-052, E03-050, E03-A1 |
 | E03-A2 | tasklens-as2.2 | E03-A2 Contracts compile (anchor; `tests/settings_defaults.rs`, table (a) defaults) | 0 | E03-A1, E03-050 to E03-071 |
 
 ### Open items (E03 contracts half)
@@ -300,6 +301,7 @@ Epic bead `tasklens-m1f`. 13 beads, all P3 (priority 3). Anchors are capstones: 
 | E32-A2 | tasklens-m1f.2 | Rescue window and low-memory engine (process list, End Task) | 3 | E32-009, E32-007, E16-A3 (tasklens-fut.3), E11-A1 (tasklens-i3o.1), E07-A1 (tasklens-iuz.1), E07-A2 (tasklens-iuz.2) |
 | E32-010 | tasklens-m1f.12 | E32: add --low-memory arm to tl-app/src/main.rs | 3 | E32-A2, E32-003, E33-A1 (tasklens-cr0.1), E09-A1 (tasklens-8q0.1) |
 | E32-011 | tasklens-m1f.13 | E32: add the lowmem row to tl-ui/src/window/settings/startup_window.rs | 3 | E32-004, E21-A2 (tasklens-bj6.2), E20-A2 (tasklens-jqk.2) |
+| E32-012 | tasklens-m1f.14 | --force-full-memory-mode in the --low-memory arm (D-015, R-152) | 3 | E32-010, E33-003 (tasklens-cr0.6) |
 
 Notes on dependencies outside the E32 row of 00-epics section 4: E05-A2 (app classification and the scope-name parser), E15-A1, E15-A2, E16-A1, E16-A3, E07-A2, E20-A2 and E33-A2 are anchors the beads compile or test against. E18-A1 from the row is not used: the rescue list is a plain `v_flex`, not `TlTreeTable` (UI-PWN-033).
 

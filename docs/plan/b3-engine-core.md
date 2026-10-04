@@ -99,13 +99,16 @@ Epic bead `tasklens-8q0`. 28 task beads plus 2 anchors. Files: `session.rs`, `re
 | E09-026 | tasklens-8q0.28 | DetailsSnapshot assembly with Arc reuse and demand retain | P2 |
 | E09-027 | tasklens-8q0.29 | P2 components (connections, services, startup, inventory, windows) and sys_table calls | P2 |
 | E09-028 | tasklens-8q0.30 | HistoryView component and the remaining RecordSink calls | P3 |
+| E09-029 | tasklens-8q0.31 | Per-process series from Demand.graph_targets (R-154) | P2 |
+| E09-030 | tasklens-8q0.32 | Process power estimate, PROC-034 (R-163 item 9) | P2 |
 
 Dependencies: 001 on E08-A1 and E03-A2; 002, 003, 004 on E03-A1; 005 and 009 on E03-A2 and
 E08-003; 006 on 005 and A1; 007 on 001 to 005; 008 on A1; 010 on 009; 011 on 010; 012 on 011;
 013 on 009; 014 on 009 to 011; 015 on E03-A2; 016 on 001, 007, E08-A1; 017 on 016; 018 on 001 and
 E08-A1; 019 on 018, 016, E08-002; 020 on 019 and 017; 021 on 007; A1 on 001 to 005, 007, 009 to
 011, 014 to 021, E08-A1, E08-A2, E03-A2; A2 on A1; 022, 024, 025, 026, 028 on A1; 023 on A1 and
-012; 027 on A1 and 026.
+012; 027 on A1 and 026; 029 on A1 and E03-A2 (wox.9 and E26-011 depend on 029); 030 on A1,
+E12-008 (hjn.11) and E13-A1 (ndy.2).
 
 ## E10 engine-processes
 
