@@ -36,7 +36,10 @@ pub enum HistoryRange {
     #[default]
     Live,
     At(TimeNs),
-    Span { from: TimeNs, to: TimeNs },
+    Span {
+        from: TimeNs,
+        to: TimeNs,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
