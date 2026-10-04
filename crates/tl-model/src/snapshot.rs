@@ -1324,6 +1324,7 @@ impl Snapshot {
                 helper: HelperState::default(),
                 helper_start: None,
                 caps: EngineCaps::default(),
+                setup: Arc::default(),
             }),
             windows: Arc::default(),
             details: Arc::default(),
