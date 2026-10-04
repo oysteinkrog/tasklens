@@ -107,12 +107,15 @@ fn ignores_old_sequence(cx: &mut TestAppContext) {
     assert_eq!(seen.borrow().len(), 1);
 }
 
+/// Bumps one component version.
+type Bump = fn(&mut Snapshot);
+
 #[gpui_kit::test]
 fn mask_per_component(cx: &mut TestAppContext) {
     let (engine, hub) = hub_with_engine(cx);
     let seen = record_changes(&hub, cx);
 
-    let bumps: [(ComponentMask, fn(&mut Snapshot)); 13] = [
+    let bumps: [(ComponentMask, Bump); 13] = [
         (ComponentMask::SYSTEM, |s| {
             Arc::make_mut(&mut s.system).header.version += 1
         }),
