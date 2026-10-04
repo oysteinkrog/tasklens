@@ -174,6 +174,74 @@ impl SeriesRing {
     }
 }
 
+/// Capacity of the 1 Hz tier: 10 min + 2.
+pub const SLOW_TIER_CAPACITY: u32 = 602;
+
+const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// Flags a 1 Hz bucket keeps from its folded samples (VALID is handled apart).
+const BUCKET_OR_FLAGS: SampleFlags = SampleFlags::GAP_BEFORE
+    .union(SampleFlags::RESET)
+    .union(SampleFlags::STALE);
+
+/// Fast ring plus the 1 Hz tier built from it. Each 1 Hz sample is the
+/// per-second maximum of the fast tier (ADR-012).
+pub struct TieredRing {
+    pub fast: SeriesRing,
+    /// Capacity SLOW_TIER_CAPACITY.
+    pub slow: SeriesRing,
+    /// `t_ns / 1_000_000_000` of the open bucket.
+    bucket_sec: Option<u64>,
+    /// Running maximum of the open second.
+    bucket: Option<Sample>,
+}
+
+impl TieredRing {
+    /// Fast capacity = `SeriesRing::fast_capacity(period_ns)`; slow capacity = 602.
+    pub fn new(period_ns: u64) -> TieredRing {
+        TieredRing {
+            fast: SeriesRing::with_capacity(SeriesRing::fast_capacity(period_ns)),
+            slow: SeriesRing::with_capacity(SLOW_TIER_CAPACITY),
+            bucket_sec: None,
+            bucket: None,
+        }
+    }
+
+    /// Pushes into the fast ring and folds the sample into the open 1 Hz bucket.
+    /// A sample from an earlier second than the open bucket goes to the fast ring only.
+    pub fn push(&mut self, s: Sample) {
+        self.fast.push(s);
+        let sec = s.t_ns / NS_PER_SEC;
+        match self.bucket_sec {
+            Some(open) if sec < open => return,
+            Some(open) if sec > open => {
+                if let Some(b) = self.bucket.take() {
+                    self.slow.push(b);
+                }
+                self.bucket_sec = Some(sec);
+            }
+            Some(_) => {}
+            None => self.bucket_sec = Some(sec),
+        }
+        let b = self.bucket.get_or_insert(Sample::gap(sec * NS_PER_SEC));
+        b.flags |= s.flags & BUCKET_OR_FLAGS;
+        if s.is_valid() {
+            b.value = if b.is_valid() {
+                b.value.max(s.value)
+            } else {
+                s.value
+            };
+            b.flags |= SampleFlags::VALID;
+        }
+    }
+
+    /// Calls `mark_gap` on both tiers.
+    pub fn mark_gap(&mut self) {
+        self.fast.mark_gap();
+        self.slow.mark_gap();
+    }
+}
+
 /// Published, immutable, chronological copy of a ring.
 #[derive(Clone, Debug)]
 pub struct SeriesView {
@@ -306,5 +374,131 @@ mod tests {
             prop_assert_eq!(r.version(), pushes.len() as u64);
             prop_assert_eq!(r.last(), model.last().copied());
         }
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    const SEC: u64 = 1_000_000_000;
+
+    fn slow(r: &TieredRing) -> Vec<Sample> {
+        r.slow.iter().collect()
+    }
+
+    #[test]
+    fn slow_tier_per_second_max() {
+        let mut r = TieredRing::new(100_000_000);
+        for i in 0..10u64 {
+            r.push(Sample::valid(5 * SEC + i * 100_000_000, (i + 1) as f32));
+        }
+        assert!(r.slow.is_empty());
+        r.push(Sample::valid(6 * SEC, 1.0));
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 10.0)]);
+        assert_eq!(r.fast.len(), 11);
+    }
+
+    #[test]
+    fn slow_tier_all_gap_bucket_invalid() {
+        let mut r = TieredRing::new(100_000_000);
+        for i in 0..10u64 {
+            r.push(Sample::gap(5 * SEC + i * 100_000_000));
+        }
+        r.push(Sample::valid(6 * SEC, 1.0));
+        let got = slow(&r);
+        assert_eq!(got.len(), 1);
+        assert!(!got[0].is_valid());
+        assert_eq!(got[0].value, 0.0);
+        assert_eq!(got[0].t_ns, 5 * SEC);
+    }
+
+    #[test]
+    fn slow_tier_flags_ored() {
+        let mut r = TieredRing::new(100_000_000);
+        for i in 0..10u64 {
+            let mut s = Sample::valid(5 * SEC + i * 100_000_000, 1.0);
+            if i == 4 {
+                s.flags |= SampleFlags::GAP_BEFORE;
+            }
+            if i == 7 {
+                s.flags |= SampleFlags::STALE;
+            }
+            r.push(s);
+        }
+        r.push(Sample::valid(6 * SEC, 1.0));
+        let got = slow(&r);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].flags,
+            SampleFlags::VALID | SampleFlags::GAP_BEFORE | SampleFlags::STALE
+        );
+        assert!(!got[0].flags.contains(SampleFlags::RESET));
+    }
+
+    #[test]
+    fn slow_tier_ignores_invalid_values_in_max() {
+        let mut r = TieredRing::new(100_000_000);
+        let mut bad = Sample::gap(5 * SEC);
+        bad.value = 99.0;
+        r.push(bad);
+        r.push(Sample::valid(5 * SEC + 100_000_000, 3.0));
+        r.push(Sample::valid(6 * SEC, 1.0));
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 3.0)]);
+    }
+
+    #[test]
+    fn slow_tier_capacities() {
+        let r = TieredRing::new(100_000_000);
+        assert_eq!(r.fast.capacity(), 602);
+        assert_eq!(r.slow.capacity(), 602);
+        let r = TieredRing::new(SEC);
+        assert_eq!(r.fast.capacity(), 62);
+        assert_eq!(r.slow.capacity(), SLOW_TIER_CAPACITY as usize);
+    }
+
+    #[test]
+    fn slow_tier_no_fill_for_skipped_seconds() {
+        let mut r = TieredRing::new(100_000_000);
+        r.push(Sample::valid(5 * SEC, 2.0));
+        r.push(Sample::valid(9 * SEC, 4.0));
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 2.0)]);
+        r.push(Sample::valid(10 * SEC, 1.0));
+        assert_eq!(
+            slow(&r),
+            vec![Sample::valid(5 * SEC, 2.0), Sample::valid(9 * SEC, 4.0)]
+        );
+    }
+
+    #[test]
+    fn slow_tier_clock_back_goes_to_fast_only() {
+        let mut r = TieredRing::new(100_000_000);
+        r.push(Sample::valid(5 * SEC, 2.0));
+        r.push(Sample::valid(4 * SEC, 50.0));
+        r.push(Sample::valid(6 * SEC, 1.0));
+        assert_eq!(r.fast.len(), 3);
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 2.0)]);
+    }
+
+    #[test]
+    fn slow_tier_mark_gap_both() {
+        let mut r = TieredRing::new(100_000_000);
+        r.mark_gap();
+        r.push(Sample::valid(5 * SEC, 1.0));
+        r.push(Sample::valid(5 * SEC + 100_000_000, 2.0));
+        r.push(Sample::valid(6 * SEC, 3.0));
+        r.push(Sample::valid(7 * SEC, 4.0));
+        let fast: Vec<bool> = r
+            .fast
+            .iter()
+            .map(|x| x.flags.contains(SampleFlags::GAP_BEFORE))
+            .collect();
+        assert_eq!(fast, vec![true, false, false, false]);
+        let slow: Vec<bool> = r
+            .slow
+            .iter()
+            .map(|x| x.flags.contains(SampleFlags::GAP_BEFORE))
+            .collect();
+        assert_eq!(slow, vec![true, false]);
     }
 }
