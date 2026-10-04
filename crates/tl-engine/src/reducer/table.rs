@@ -1082,12 +1082,12 @@ fn leaf_row(input: &TableInput<'_>, i: u32, depth: u8) -> TableRow {
     }
 }
 
-/// A group row (app, unit or Kernel threads) at depth 0 under its header.
+/// A group row (app, unit or Kernel threads) at depth 1 under its header.
 fn group_row(groups: &[GroupRow], g: u32, expanded: &FxHashSet<NodeId>) -> TableRow {
     let gr = &groups[g as usize];
     TableRow {
         node: gr.node.clone(),
-        depth: 0,
+        depth: 1,
         expanded: expanded.contains(&gr.node),
         has_children: gr.members > 0,
         record: None,
@@ -1120,12 +1120,14 @@ fn restrict_to_owners(f: &mut Forest, owner: &[u32]) {
 ///
 /// The three headers come in `GROUP_ORDER` at depth 0, `descendants` set to the number of
 /// processes under the header after filtering. A header's rows follow only when it is in
-/// `query.expanded`. Under Apps: one row per app at depth 0, sorted by its aggregated value,
-/// holding the app's primary processes at depth 1, each with its subtree among the app's
-/// members. Under Background and System: the processes of the class at depth 0, except that the
-/// processes of a systemd unit with more than one process fold under a unit row. Kernel threads
-/// fold under one "Kernel threads" row after the other System rows. A filter term also matches
-/// a group, app or unit name, which matches every member of it. Each process counts once.
+/// `query.expanded`. Under Apps: one row per app at depth 1, sorted by its aggregated value,
+/// holding the app's primary processes at depth 2, each with its subtree among the app's
+/// members. Under Background and System: the processes of the class at depth 1, except that the
+/// processes of a systemd unit with more than one process fold under a unit row at depth 1 and
+/// sit at depth 2. Kernel threads fold under one "Kernel threads" row at depth 1, first in
+/// System, with the threads as a flat sorted list at depth 2 (UI-PRC-002). A filter term also
+/// matches a group, app or unit name, which matches every member of it. Each process counts
+/// once.
 pub fn build_grouped(
     input: &TableInput<'_>,
     query: &TableQuery,
@@ -1319,6 +1321,19 @@ fn grouped_rows(
             continue;
         }
 
+        if c == GroupClass::System
+            && let Some(g) = kernel_group
+        {
+            let row = group_row(&groups, g, &expanded);
+            let open = row.expanded;
+            rows.push(row);
+            if open {
+                for i in order(&kthreads) {
+                    rows.push(leaf_row(input, i, 2));
+                }
+            }
+        }
+
         let mut items: Vec<Item> = loose[c.index()].iter().map(|&i| Item::Record(i)).collect();
         if c == GroupClass::Apps {
             items.extend((0..apps.len()).map(|a| Item::Group(a as u32)));
@@ -1334,27 +1349,14 @@ fn grouped_rows(
         sort_items(input, &groups, &mut items, query.sort);
         for item in items {
             match item {
-                Item::Record(i) => rows.push(leaf_row(input, i, 0)),
+                Item::Record(i) => rows.push(leaf_row(input, i, 1)),
                 Item::Group(g) => {
                     let row = group_row(&groups, g, &expanded);
                     let open = row.expanded;
                     rows.push(row);
                     if open {
-                        tree.emit(&roots_of[g as usize], 1, &mut emitted, &mut rows);
+                        tree.emit(&roots_of[g as usize], 2, &mut emitted, &mut rows);
                     }
-                }
-            }
-        }
-
-        if c == GroupClass::System
-            && let Some(g) = kernel_group
-        {
-            let row = group_row(&groups, g, &expanded);
-            let open = row.expanded;
-            rows.push(row);
-            if open {
-                for i in order(&kthreads) {
-                    rows.push(leaf_row(input, i, 1));
                 }
             }
         }
@@ -1908,9 +1910,9 @@ mod tests {
             labels(&view, &fx.records),
             [
                 ("Apps (2)".to_string(), 0),
-                ("Firefox (2)".to_string(), 0),
-                ("100".to_string(), 1),
-                ("101".to_string(), 2),
+                ("Firefox (2)".to_string(), 1),
+                ("100".to_string(), 2),
+                ("101".to_string(), 3),
                 ("Background processes (0)".to_string(), 0),
                 ("System processes (0)".to_string(), 0),
             ]
@@ -1978,19 +1980,19 @@ mod tests {
                 ("Apps (0)".to_string(), 0),
                 ("Background processes (5)".to_string(), 0),
                 // A unit row has no PID, so the PID sort puts it after the processes.
-                ("20".to_string(), 0),
-                ("30".to_string(), 0),
-                ("pipewire.service (3)".to_string(), 0),
-                ("10".to_string(), 1),
-                ("11".to_string(), 1),
-                ("12".to_string(), 1),
+                ("20".to_string(), 1),
+                ("30".to_string(), 1),
+                ("pipewire.service (3)".to_string(), 1),
+                ("10".to_string(), 2),
+                ("11".to_string(), 2),
+                ("12".to_string(), 2),
                 ("System processes (0)".to_string(), 0),
             ]
         );
     }
 
     #[test]
-    fn kernel_threads_row_last_in_system() {
+    fn kernel_threads_row_first_in_system() {
         let mut entries: Vec<(ProcessRecord, Option<UnitRef>)> =
             (1000..1050).map(|pid| (kthread(pid), None)).collect();
         entries.push((system(rec(1, 0, "systemd", 0.0)), None));
@@ -2003,25 +2005,26 @@ mod tests {
             rows[2..],
             [
                 ("System processes (52)".to_string(), 0),
-                ("1".to_string(), 0),
-                ("5000".to_string(), 0),
-                ("Kernel threads (50)".to_string(), 0),
+                ("Kernel threads (50)".to_string(), 1),
+                ("1".to_string(), 1),
+                ("5000".to_string(), 1),
             ]
         );
-        let last = view.rows.last().unwrap();
-        assert_eq!(last.node, NodeId::KernelThreads);
-        assert!(!last.expanded);
-        assert!(last.has_children);
-        assert_eq!(last.descendants, 50);
+        let kernel = &view.rows[3];
+        assert_eq!(kernel.node, NodeId::KernelThreads);
+        assert!(!kernel.expanded);
+        assert!(kernel.has_children);
+        assert_eq!(kernel.descendants, 50);
 
         let mut expanded = headers();
         expanded.push(NodeId::KernelThreads);
         let view = fx.build("", &expanded, PID_ASC);
         let rows = labels(&view, &fx.records);
         assert_eq!(rows.len(), 6 + 50);
-        assert_eq!(rows[5], ("Kernel threads (50)".to_string(), 0));
-        assert_eq!(rows[6], ("1000".to_string(), 1));
-        assert_eq!(rows[55], ("1049".to_string(), 1));
+        assert_eq!(rows[3], ("Kernel threads (50)".to_string(), 1));
+        assert_eq!(rows[4], ("1000".to_string(), 2));
+        assert_eq!(rows[53], ("1049".to_string(), 2));
+        assert_eq!(rows[54..], [("1".to_string(), 1), ("5000".to_string(), 1)]);
     }
 
     #[test]
@@ -2101,7 +2104,7 @@ mod tests {
             let in_groups = view
                 .rows
                 .iter()
-                .filter(|r| r.record.is_some() && r.depth > 0)
+                .filter(|r| r.record.is_some() && r.depth > 1)
                 .count();
             assert_eq!(members as usize, in_groups, "filter {filter:?}");
         }
