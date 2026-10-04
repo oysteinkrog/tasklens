@@ -3,8 +3,162 @@
 //! `parse_exec` turns a desktop entry's `Exec` value into an argument vector as the Desktop Entry
 //! Specification 1.5 says ("Possible value types" and "The Exec key"). No shell is involved:
 //! `$`, `;`, `|`, `&` and `` ` `` reach the program as literal characters.
+//!
+//! The Run dialog and Startup "Run now" go through `shell_argv`, `script_argv` or `admin_argv`,
+//! then `spawn_detached` and `wait_exit` (SYS-023, PROC-095, ADR-006). Never log a command text,
+//! argument, environment value or working directory (ADR-015).
+
+use std::ffi::CString;
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+use rustix::io::Errno;
+use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 
 use crate::error::{OpsError, OpsResult};
+use crate::sys;
+
+pub const SH_PATH: &str = "/bin/sh";
+pub const PKEXEC_PATH: &str = "/usr/bin/pkexec";
+/// pkexec(1): not authorized, or authentication failed.
+pub const PKEXEC_NOT_AUTHORIZED: i32 = 127;
+/// pkexec(1): the user dismissed the authentication dialog.
+pub const PKEXEC_DISMISSED: i32 = 126;
+/// The variables passed through `pkexec env`, in this order.
+pub const ADMIN_ENV_KEYS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"];
+
+/// A child started by `spawn_detached`. Pass it to `wait_exit` so it is reaped.
+#[derive(Debug)]
+pub struct Spawned {
+    pub pid: u32,
+    pub pidfd: OwnedFd,
+}
+
+/// How a child ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitKind {
+    /// The exit code.
+    Exited(i32),
+    /// The number of the signal that ended it.
+    Signaled(i32),
+}
+
+/// Checks a command typed by the user: not blank, and no C0 or C1 control character or DEL.
+pub fn validate_command_text(text: &str) -> OpsResult {
+    if text.trim_ascii().is_empty() {
+        return Err(OpsError::InvalidInput("command is empty"));
+    }
+    let invalid = |c: char| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}');
+    if text.chars().any(invalid) {
+        return Err(OpsError::InvalidInput("command contains invalid text"));
+    }
+    Ok(())
+}
+
+/// `["/bin/sh", "-c", text]`, with `text` unchanged.
+pub fn shell_argv(text: &str) -> OpsResult<Vec<String>> {
+    validate_command_text(text)?;
+    Ok(vec![SH_PATH.to_owned(), "-c".to_owned(), text.to_owned()])
+}
+
+/// `["/bin/sh", path]` for an absolute UTF-8 script path.
+pub fn script_argv(script: &Path) -> OpsResult<Vec<String>> {
+    match script.to_str() {
+        Some(path) if script.is_absolute() => Ok(vec![SH_PATH.to_owned(), path.to_owned()]),
+        _ => Err(OpsError::InvalidInput("script path is not absolute UTF-8")),
+    }
+}
+
+/// `pkexec env KEY=value... /bin/sh -c text`. `env` holds the caller's value of each key in
+/// `ADMIN_ENV_KEYS`; an unset or empty value is left out. `text` is only ever the single argument
+/// after `-c`.
+pub fn admin_argv(text: &str, env: &[(&str, Option<&str>)]) -> OpsResult<Vec<String>> {
+    validate_command_text(text)?;
+    let mut argv = vec![PKEXEC_PATH.to_owned(), "env".to_owned()];
+    for key in ADMIN_ENV_KEYS {
+        let value = env
+            .iter()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| *v)
+            .filter(|v| !v.is_empty());
+        if let Some(value) = value {
+            if value.contains(['\0', '\n']) {
+                return Err(OpsError::InvalidInput(
+                    "environment value contains invalid text",
+                ));
+            }
+            argv.push(format!("{key}={value}"));
+        }
+    }
+    argv.extend([SH_PATH.to_owned(), "-c".to_owned(), text.to_owned()]);
+    Ok(argv)
+}
+
+/// Starts `argv` in a new session with stdio on `/dev/null`, default signal handling and `cwd`
+/// as its working directory. The caller must pass the result to `wait_exit`.
+pub fn spawn_detached(argv: &[String], cwd: Option<&Path>) -> OpsResult<Spawned> {
+    if argv.is_empty() {
+        return Err(OpsError::InvalidInput("empty argument list"));
+    }
+    let args = argv
+        .iter()
+        .map(|arg| CString::new(arg.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| OpsError::InvalidInput("argument contains a NUL byte"))?;
+    let cwd = match cwd {
+        Some(dir) if dir.is_dir() => Some(
+            CString::new(dir.as_os_str().as_bytes())
+                .map_err(|_| OpsError::InvalidInput("working directory does not exist"))?,
+        ),
+        Some(_) => return Err(OpsError::InvalidInput("working directory does not exist")),
+        None => None,
+    };
+
+    let result = sys::spawn_setsid(&args, cwd.as_deref())
+        .map_err(OpsError::from)
+        .and_then(open_child_pidfd);
+    tracing::debug!(pid = result.as_ref().ok().map(|s| s.pid), ok = result.is_ok(), error = ?result.as_ref().err(), "spawn_detached");
+    result
+}
+
+/// Opens a pidfd for a child we have not reaped yet, so its pid cannot have been reused. If that
+/// fails, the child is killed and reaped so it is not left behind.
+fn open_child_pidfd(pid: u32) -> OpsResult<Spawned> {
+    let raw = Pid::from_raw(pid as i32).ok_or(OpsError::Os(libc::EINVAL))?;
+    match rustix::process::pidfd_open(raw, PidfdFlags::empty()) {
+        Ok(pidfd) => Ok(Spawned { pid, pidfd }),
+        Err(errno) => {
+            let _ = rustix::process::kill_process(raw, rustix::process::Signal::KILL);
+            while matches!(
+                rustix::process::waitpid(Some(raw), rustix::process::WaitOptions::empty()),
+                Err(Errno::INTR)
+            ) {}
+            Err(errno.into())
+        }
+    }
+}
+
+/// Blocks until the child ends and reaps it.
+pub fn wait_exit(child: &Spawned) -> OpsResult<ExitKind> {
+    let status = loop {
+        match rustix::process::waitid(WaitId::PidFd(child.pidfd.as_fd()), WaitIdOptions::EXITED) {
+            Err(Errno::INTR) => continue,
+            other => break other,
+        }
+    };
+    let result = match status {
+        Ok(Some(status)) => match (status.exit_status(), status.terminating_signal()) {
+            (Some(code), _) => Ok(ExitKind::Exited(code)),
+            (None, Some(signo)) => Ok(ExitKind::Signaled(signo)),
+            (None, None) => Err(OpsError::OutcomeUnknown("child state not reported")),
+        },
+        Ok(None) => Err(OpsError::OutcomeUnknown("child state not reported")),
+        Err(errno) => Err(errno.into()),
+    };
+    tracing::debug!(pid = child.pid, result = ?result, "wait_exit");
+    result
+}
 
 /// The entry values that the `%i`, `%c` and `%k` field codes expand to.
 pub struct ExecContext<'a> {
@@ -168,4 +322,107 @@ fn expand_codes(text: &str, ctx: &ExecContext<'_>) -> OpsResult<String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use rustix::process::{Signal, WaitOptions};
+
+    use super::*;
+    use crate::sys::tests::lock_children;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|a| (*a).to_owned()).collect()
+    }
+
+    fn assert_no_child_left() {
+        assert_eq!(
+            rustix::process::wait(WaitOptions::NOHANG).map(|r| r.is_some()),
+            Err(Errno::CHILD),
+            "a child was left behind"
+        );
+    }
+
+    #[test]
+    fn spawn_detached_new_session_devnull_cwd_default_signals() {
+        let _children = lock_children();
+        let child = spawn_detached(&args(&["sleep", "30"]), Some(Path::new("/tmp"))).unwrap();
+
+        let proc_dir = Path::new("/proc").join(child.pid.to_string());
+        let stat = std::fs::read_to_string(proc_dir.join("stat"));
+        let status = std::fs::read_to_string(proc_dir.join("status"));
+        let cwd = std::fs::read_link(proc_dir.join("cwd"));
+        let fds: Vec<_> = (0..3)
+            .map(|fd| std::fs::read_link(proc_dir.join("fd").join(fd.to_string())))
+            .collect();
+
+        rustix::process::pidfd_send_signal(&child.pidfd, Signal::KILL).unwrap();
+        assert_eq!(wait_exit(&child), Ok(ExitKind::Signaled(libc::SIGKILL)));
+
+        // Fields after the `)` that ends comm: state, ppid, pgrp, session (field 6).
+        let stat = stat.unwrap();
+        let after_comm = &stat[stat.rfind(')').unwrap() + 1..];
+        let session: u32 = after_comm
+            .split_whitespace()
+            .nth(3)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(session, child.pid);
+        assert_eq!(
+            cwd.unwrap(),
+            std::fs::canonicalize("/tmp").expect("canonicalize /tmp")
+        );
+        for fd in fds {
+            assert_eq!(fd.unwrap(), Path::new("/dev/null"));
+        }
+        let sig_ign = status
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("SigIgn:").map(|v| v.trim().to_owned()));
+        assert_eq!(sig_ign.as_deref(), Some("0000000000000000"));
+    }
+
+    #[test]
+    fn wait_exit_code_and_signal() {
+        let _children = lock_children();
+        let child = spawn_detached(&args(&["sh", "-c", "exit 3"]), None).unwrap();
+        assert_eq!(wait_exit(&child), Ok(ExitKind::Exited(3)));
+
+        let child = spawn_detached(&args(&["sleep", "30"]), None).unwrap();
+        rustix::process::pidfd_send_signal(&child.pidfd, Signal::KILL).unwrap();
+        assert_eq!(wait_exit(&child), Ok(ExitKind::Signaled(9)));
+        assert_no_child_left();
+    }
+
+    #[test]
+    fn spawn_missing_binary_is_enoent() {
+        let _children = lock_children();
+        let result = spawn_detached(&args(&["tasklens-no-such-binary-xyz"]), None);
+        assert_eq!(result.err(), Some(OpsError::Os(libc::ENOENT)));
+        assert_no_child_left();
+    }
+
+    #[test]
+    fn spawn_missing_cwd_is_invalid() {
+        let _children = lock_children();
+        let result = spawn_detached(&args(&["true"]), Some(Path::new("/nonexistent")));
+        assert_eq!(
+            result.err(),
+            Some(OpsError::InvalidInput("working directory does not exist"))
+        );
+        assert_no_child_left();
+    }
+
+    #[test]
+    fn spawn_rejects_empty_argv_and_nul() {
+        assert_eq!(
+            spawn_detached(&[], None).err(),
+            Some(OpsError::InvalidInput("empty argument list"))
+        );
+        assert_eq!(
+            spawn_detached(&args(&["a\0b"]), None).err(),
+            Some(OpsError::InvalidInput("argument contains a NUL byte"))
+        );
+    }
 }

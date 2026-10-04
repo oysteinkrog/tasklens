@@ -1,9 +1,13 @@
 //! `parse_exec` against the Desktop Entry Exec rules: field codes, quoting, string escapes and
 //! the errors for malformed values.
 
+use std::path::Path;
+
 use proptest::prelude::*;
 use tl_ops::OpsError;
-use tl_ops::launch::{ExecContext, parse_exec};
+use tl_ops::launch::{
+    ExecContext, admin_argv, parse_exec, script_argv, shell_argv, validate_command_text,
+};
 
 const NO_CTX: ExecContext<'static> = ExecContext {
     name: "App",
@@ -139,4 +143,108 @@ proptest! {
     fn prop_never_panics(raw in "(?s).{0,4096}") {
         let _ = parse(&raw);
     }
+}
+
+#[test]
+fn command_text_empty() {
+    assert_eq!(
+        validate_command_text("   "),
+        Err(OpsError::InvalidInput("command is empty"))
+    );
+}
+
+/// Regression test for the PROC-095 rule: C0, DEL and C1 control characters are rejected.
+#[test]
+fn command_text_control_chars_rejected() {
+    for text in ["ls\u{0}x", "ls\nrm", "ls\u{7f}", "ls\u{85}"] {
+        assert_eq!(
+            validate_command_text(text),
+            Err(OpsError::InvalidInput("command contains invalid text")),
+            "{text:?}"
+        );
+    }
+    assert_eq!(validate_command_text("ls -la ~"), Ok(()));
+}
+
+#[test]
+fn shell_argv_keeps_text() {
+    assert_eq!(
+        shell_argv("echo hi > /tmp/x").unwrap(),
+        ["/bin/sh", "-c", "echo hi > /tmp/x"]
+    );
+    assert_eq!(shell_argv("  kate ").unwrap(), ["/bin/sh", "-c", "  kate "]);
+}
+
+#[test]
+fn admin_argv_full_env() {
+    let env = [
+        ("DISPLAY", Some(":0")),
+        ("WAYLAND_DISPLAY", Some("wayland-0")),
+        ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+    ];
+    assert_eq!(
+        admin_argv("kate", &env).unwrap(),
+        [
+            "/usr/bin/pkexec",
+            "env",
+            "DISPLAY=:0",
+            "WAYLAND_DISPLAY=wayland-0",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "/bin/sh",
+            "-c",
+            "kate",
+        ]
+    );
+}
+
+#[test]
+fn admin_argv_skips_unset_env() {
+    let env = [
+        ("DISPLAY", None),
+        ("WAYLAND_DISPLAY", Some("wayland-0")),
+        ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+    ];
+    let argv = admin_argv("kate", &env).unwrap();
+    assert!(!argv.iter().any(|a| a.starts_with("DISPLAY=")));
+    assert_eq!(
+        argv,
+        [
+            "/usr/bin/pkexec",
+            "env",
+            "WAYLAND_DISPLAY=wayland-0",
+            "XDG_RUNTIME_DIR=/run/user/1000",
+            "/bin/sh",
+            "-c",
+            "kate",
+        ]
+    );
+
+    let empty = [("DISPLAY", Some(""))];
+    assert_eq!(
+        admin_argv("kate", &empty).unwrap(),
+        ["/usr/bin/pkexec", "env", "/bin/sh", "-c", "kate"]
+    );
+    let bad = [("DISPLAY", Some(":0\nX=1"))];
+    assert_eq!(
+        admin_argv("kate", &bad),
+        Err(OpsError::InvalidInput(
+            "environment value contains invalid text"
+        ))
+    );
+    assert_eq!(
+        admin_argv("ls\nrm", &env),
+        Err(OpsError::InvalidInput("command contains invalid text"))
+    );
+}
+
+#[test]
+fn script_argv_requires_absolute() {
+    assert_eq!(
+        script_argv(Path::new("bin/run.sh")),
+        Err(OpsError::InvalidInput("script path is not absolute UTF-8"))
+    );
+    assert_eq!(
+        script_argv(Path::new("/home/u/run.sh")).unwrap(),
+        ["/bin/sh", "/home/u/run.sh"]
+    );
 }
