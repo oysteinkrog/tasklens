@@ -10,8 +10,16 @@ path = "src/main.rs"
 
 [dependencies]
 tl-model = { workspace = true }
+nvml-wrapper = { workspace = true }
+rustix = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
 
 [features]
+default = ["api-versions"]
+# The --api-versions mode. E13-006 adds ash and khronos-egl here.
+api-versions = []
+# The --fake <script> backend for engine tests.
 fake = []
 
 [lints]
