@@ -35,7 +35,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   53 physical px, so 1 logical px at `row_h` 28 ≈ 1.9 physical px) and
   `tasklens-ref/evidence-frames/advanced-02.png`, `advanced-11.png`, `customize-28.png`. Each
   value says "measured", "spec" or "decided".
-- Every GPUI `Action` named here lives in `crates/tl-ui/src/pages/processes/actions.rs`, namespace
+- Every GPUI `Action` named here lives in `crates/tl-ui/src/pages/processes/actions.rs` (except the shell actions `ToggleHideSystem`, `CycleViewMode`, `SetViewMode`, `FocusFilter`, `ClearFilter` and `StartFilter`, which E20 declares in `window/actions.rs` and this page imports, R-179), namespace
   `tasklens`, and is dispatched identically from key binding, menu item and toolbar button
   (table b, rule "one command, one Action").
 - "Phase" uses P0 to P4 as in the merged spec (R-072).
@@ -55,7 +55,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 | cell horizontal padding | 8 each side | spec PROC-023 |
 | sort arrow | 12 wide, `sp1` after the label | spec PROC-023 (12 px reservation) |
 | resize handle hit width | 8 (4 each side of the boundary) | decided |
-| scrollbar width | 12 | decided |
+| scrollbar width | 16 | UI-FND-003 (R-182) |
 | menu item height | 26, min width 240 | foundation (TlMenu); measured TaskSlinger pitch is 28 |
 | tooltip delay | 600 ms rows, 500 ms controls | spec PROC-039, kit default |
 
@@ -79,7 +79,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   │   row 2 (process row, depth 2)                               │  │
   │   ...                                                        │  │
   ├──────────────────────────────────────────────────────────────┴──┤
-  │ horizontal scrollbar (only when Σ widths > viewport)   12       │
+  │ horizontal scrollbar (only when Σ widths > viewport)   16       │
   └─────────────────────────────────────────────────────────────────┘
   ```
 
@@ -122,6 +122,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
       fn on_activate(&mut self, id: Self::RowId, cx);                // Enter / double-click
       fn row_tooltip(&self, ix: usize) -> Option<AnyView>;
       fn empty_text(&self) -> Option<SharedString>;                  // UI-PRC-024
+      fn table_version(&self) -> u64;                                // bumps when rows change (R-184)
+      fn guide_lines(&self) -> bool;                                 // connector lines on (R-184)
       fn header_lines(&self) -> HeaderLines { HeaderLines::Two }     // One: header_h = 28, no totals (Properties tables, Handle Search)
       fn columns_fixed(&self) -> bool { false }                      // true: no picker, no header menu items 2, 3, 6; resize and sort still work
   }
@@ -173,7 +175,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   viewport capped at 512); `tree_table_text_cache_hit_rate` (10 identical table versions, hit rate
   above 95%, ADR-009).
 - **Phase**: P1.
-- **Decided here**: delegate trait shape; scrollbar mode Always and width 12; keyboard focus ring
+- **Decided here**: delegate trait shape; scrollbar mode Always and width 16 (R-182); the table handles the header-menu actions (`ResetColumns` when the owner called `set_default_layout`, `SetColumnResize`, `HideColumn`, `CopyCell`, `CopyRow`, `CollapseAll`, `ResizeColumnsToFit`) and routes `OpenProperties` to `on_activate`; owner pages implement only `on_activate`, `context_menu` and the copy formats (R-184); keyboard focus ring
   only without a selection; horizontal scrollbar only on overflow.
 
 ### UI-PRC-002 Process table delegate and row anatomy
@@ -197,7 +199,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
        chevron x=26..42, icon x=48..72, text x=78, PID blank
   Unit row
   │   ▸ [16] PipeWire Multimedia Service (3)                  │          │      │ 0%  │…
-       chevron x=26..42, icon x=52..68 (vertically centred, 16), text x=74
+       chevron x=26..42, icon x=48..64 (vertically centred, 16), text x=70   (gap 6 after the chevron and after the icon, R-190)
   Process row (depth 2 under an app)
   │       ▸ [16] firefox (Web Content) ⏸                       │ oystein  │ 4321 +3 │ 0.4% │…
   Kernel-thread row (child of "Kernel threads (N)")
@@ -253,8 +255,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   happens after Ctrl+click deselect), disabled (never; exited rows are "not actionable", drawn
   per UI-PRC-011), stale (every metric cell text at 60% opacity, the ADR-003 "dimmed value
   stale"), restricted (lock glyph cells, UI-PRC-004), new and exited (UI-PRC-011).
-- **Interaction**: click selects (UI-PRC-008); double-click on a row runs `OpenProperties` for
-  process, app and unit rows and `ToggleExpand` for group headers; chevron click runs
+- **Interaction**: click selects (UI-PRC-008); double-click toggles expansion on any row with
+  children and does nothing on a leaf (R-216; Properties open with Enter, Alt+Enter, Ctrl+I and
+  the menu item, D-008); chevron click runs
   `ToggleExpand { id }` without changing the selection; click on the Name cell of a group header
   also toggles. Right-click: UI-PRC-013. Hover 600 ms over the Name cell: UI-PRC-012.
 - **Data binding**: reads `Snapshot.processes: Arc<ProcessTableView>` (rows, groups, totals,
@@ -298,7 +301,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     guide lines at x = 8 + k×18 + 8 (chevron centre of ancestor k), 1 px divider
   ```
 
-  - Indent: `8 + depth × 18` from the cell's left edge (8 is the cell padding).
+  - Indent: `depth × 20` after the row's left padding of 20; the chevron starts at indent + 6, then gap 6, icon (16 unit, 24 app), gap 6, text (R-190).
   - Chevron: 16 × 16 Lucide `chevron-right` (collapsed) or `chevron-down` (expanded),
     `text_secondary`, `text_primary` on hover of its 20 × `row_h` hit area; absent when the row
     has no children, but its 16 px width is still reserved so icons align within one depth.
@@ -339,7 +342,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   string work.
 - **Accessibility**: window button has a tooltip and is a tab stop only while visible on the
   focused row.
-- **Tests**: `name_cell_indent_by_depth` (assert text x = 8 + 18 × depth + 16 + 6 + icon);
+- **Tests**: `name_cell_indent_by_depth` (assert text x = 20 + depth × 20 + 6 + 16 + 6 + icon + 6; 78 for an app row at depth 0, R-190);
   `connector_lines_only_when_enabled`; `window_button_hidden_without_bridge`.
 - **Phase**: P1 (window button and secondary text P2).
 - **Decided here**: chevron width always reserved; secondary text hide threshold; window button
@@ -563,8 +566,11 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   ```
 
   - Group headings in the fixed order: Image, Identity, Security, Scheduling, CPU, Memory, I/O,
-    Disk, Network, GPU, Power, Objects, Linux (PROC-024). Heading row height 24, padding top
-    `sp4` 8 (first heading `sp2`).
+    Disk, Network, GPU, Power, Objects, Linux (PROC-024). Heading rows are 28 high like every other
+    row (`uniform_list` needs one height), heading text bottom-aligned (R-183).
+  - Group of each column (R-191, the source for the `[columns.processes]` defaults): every PROC
+    column section goes under its own heading; Start time, Type and the package and file columns
+    under Image; User, PID, Parent PID and Session under Identity.
   - Rows: 28 high, `TlCheckbox` 16 px at x 12, label at x 36, `t_base` `text_primary`; hover
     `row_hover`; the whole row toggles. Name shows a checked, disabled checkbox and the note
     "always on". Columns that are `n/a` on this machine (for example Cycles with
@@ -573,7 +579,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     adapters; the label is "GPU 0 (NVIDIA GeForce RTX 5070 Ti)".
   - Alias rows: `Working set private - "Memory"` and `GPU memory dedicated - "VRAM"`; the filter
     matches both halves.
-  - Filter input: `TlTextInput` sm, prefix `search` icon, cleanable, placeholder "Filter columns…";
+  - Filter input: `TlTextInput` md, 28 high (R-183), prefix `search` icon, cleanable, placeholder "Filter columns…";
     matching is case-insensitive substring over label, alias and group name; non-matching rows
     and empty groups hide; no result shows the empty text "No columns match" centred
     `text_secondary`.
@@ -594,7 +600,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   availability), `[columns.<table>]`; the window is bound to the table that opened it and its
   title stays "tasklens Columns" (the list heading shows the table name as the first line, `t_sm`
   `text_secondary`: "Processes table").
-- **Build**: `crates/tl-ui/src/pages/processes/columns_window.rs`, a `TlSecondaryWindow` whose content is
+- **Build**: `crates/tl-ui/src/table/columns_window.rs` (table-generic, owned by E18; R-181), a `TlSecondaryWindow` whose content is
   a `uniform_list` of 28 px rows (headings are rows too) with `TlCheckbox` children; filter via
   `TlTextInput` with 100 ms debounce.
 - **Performance**: 96 rows at most; trivial.
@@ -705,7 +711,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Interaction**: actions carry no row id; they read the table's `selection.focus` and set at
   dispatch time and then capture identities exactly as the menu does (PROC-001).
 - **Data binding**: none beyond the selection.
-- **Build**: `pages/processes/actions.rs` (`actions!` list and data actions), bindings in
+- **Build**: `pages/processes/actions.rs` (`actions!` list and data actions; the shell actions are imported from `window/actions.rs`, R-179), bindings in
   `pages/processes/mod.rs::bind_keys`, handlers via `.on_action(cx.listener(..))` on the page
   div that also holds `track_focus(&table.focus)`.
 - **Performance**: n/a.
@@ -899,8 +905,10 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   150 ms or on Right/Enter.
 - **Interaction**: opens on right mouse-up over a row (right-click selects first, UI-PRC-008),
   on Shift+F10 and Menu. On open the menu captures `targets: SmallVec<[NodeId; 1]>` (the
-  selection set at that moment, max 256; for item 3 also the subtree keys from the engine
-  forest) and `clicked_col`; every item action carries nothing and reads the captured targets
+  selection set at that moment, max 256; for item 3 also the subtree keys from a breadth-first
+  walk of `ProcessSnapshot.records` by `ppid` among non-exited records, capped at 256; for a bwrap
+  row the first descendant is the first non-bwrap record in that walk, ties by lowest PID; R-192)
+  and `clicked_col`; every item action carries nothing and reads the captured targets
   from the menu's `MenuTargets` state (PROC-001). Esc closes and returns focus to the table.
 - **Data binding**: `TableRow` kind, flags (State T, Frozen, EXITED, RESTRICTED), `ppid`,
   `WindowsSnapshot`, `UnitRef` MainPID, FileManager1 presence (engine capability bit), gdb
@@ -939,8 +947,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   | Open in VirusTotal, first use | Open VirusTotal? | This opens virustotal.com with the file's hash. The file is not uploaded. | Open (primary) | Cancel |
   | Window picker Ctrl+click, modifier unknown | Picked <name> (PID n) | What do you want to do with this process? | Select (primary), Terminate (danger) | Cancel |
 
-  Where two rules match (for example End Process Tree on a protected target), the protected
-  text wins and N is still shown: "Ending <name> will end your desktop session. End N
+  Where several rules match, the order is Protected, then End tree, then Kill app, then several
+  targets, then another user's process (R-198); for End Process Tree on a protected target the
+  protected text wins and N is still shown: "Ending <name> will end your desktop session. End N
   processes in this tree anyway?" (decided).
 - **States**: open (a `WindowKind::Dialog` window modal to the window that opened it; the parent
   is overlaid with `derived.overlay` and ignores input, UI-FND-021); while the action runs the
@@ -1000,7 +1009,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   | Show Window | Process window shown. / No window found | success / warning | |
   | Window features without KDE | Window features need KDE Plasma | warning (once per session) | |
   | Restart Plasma Shell | Restarting Plasma Shell... / Plasma Shell restarted / Plasma Shell restart is already in progress. | info / success / warning | |
-  | Copy | Copied to clipboard / Selected process values copied. / Process details copied. / Copied metrics to clipboard / Selected process metrics copied. / Failed to copy to clipboard | success / error | |
+  | Copy | Copied to clipboard / Selected process values copied. / Process details copied. / Copied metrics to clipboard / Selected process metrics copied. / Failed to copy to clipboard (unreachable in v1: `write_to_clipboard` returns `()`, R-199) | success / error | |
   | Open file location | Opening file location / Process image unavailable | info / warning | |
   | VirusTotal | Computing SHA-256… (after 500 ms) / SHA-256 unavailable / Process image unavailable | info / error / warning | |
   | dump | Writing core… 1.2 GiB (progress, replaced) / Dump created: <path> / Creating a dump needs administrator rights | info / success / error | Open folder |
@@ -1049,7 +1058,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   matching (status chip "41 / 296 Processes"), no match (table empty state UI-PRC-024), Include
   children checked or unchecked, checkbox hidden (flat mode without a filter).
 - **Interaction**:
-  - Typing: 100 ms debounce, then `Command::SetTableQuery` with `filter = lowercased text` and a
+  - Typing: the shell's 100 ms debounce (UI-SHL-024, the only one; R-188), then `Command::SetTableQuery` with `filter = lowercased text` and a
     new generation (ADR-009); the table keeps the previous rows until the matching generation
     arrives. Space-separated terms must all match; numeric input also matches PID prefixes
     (engine).
@@ -1070,13 +1079,13 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 - **Data binding**: `TableQuery.filter`, `processes.filter_include_children`; re-renders on the
   matching `query_generation`.
 - **Build**: shell `FilterBox` entity shared through `MainWindow`; the Processes page subscribes
-  to `InputEvent::Change` and owns the debounce `Task` (keeps the handle, drops to cancel).
+  to the shell's `FilterChanged` and sends on every one; the debounce `Task` is the shell's (R-188).
   `pages/processes/filter.rs`.
 - **Performance**: one `text()` rope borrow per change, no `value()` allocation; the engine
   filters.
 - **Accessibility**: "Filter:" is the visible label; the checkbox has a visible label; Esc and
   Ctrl+F paths.
-- **Tests**: `filter_debounce_100ms_new_generation`, `esc_clears_and_focuses_table`,
+- **Tests**: `filter_changed_sends_new_generation`, `esc_clears_and_focuses_table`,
   `stale_generation_results_ignored`, `include_children_checkbox_visibility_rule`.
 - **Phase**: P1.
 - **Decided here**: Enter keeps the filter; Ctrl+F selects all; zero-match groups show "(0)";
@@ -1205,7 +1214,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
     (shown as the first, disabled, `text_secondary` item of the submenu, decided, because
     submenu headers have no tooltip). Action `SetPriority { class }`; Custom opens UI-PRC-021b.
   - **Set I/O Priority >**: Realtime, High, Normal, Low, Idle, separator, Default (follows nice);
-    current checked; first disabled line "Scheduler: bfq" names the active block scheduler
+    current checked; first disabled line "Scheduler: bfq" names the block scheduler of the device holding `/` (`DiskDetails.scheduler` of the system disk, R-207)
     (decided placement, same reason). Realtime disabled without a helper session, tooltip "Needs
     administrator access." or "Needs administrator helper (not installed)". Action
     `SetIoPriority { class }`.
@@ -1260,7 +1269,9 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   2. Look up `key` in the current `ProcessTableView`. Not present: toast "Process not found in
      current view" (or the caller's "Parent process not found in current view").
   3. Present but hidden (filter or Hide system): the caller's "not visible" toast with the
-     "Show" button (UI-PRC-015); on Show: clear the filter, set `hide_system = false`, wait for
+     "Show" button (UI-PRC-015; `JumpTexts::default()` for `--select-pid`, the D-Bus `select-pid`
+     action and the window picker: not found and not visible both "Process not found in current
+     view", switched "Switched to Processes tab"; R-206); on Show: clear the filter, set `hide_system = false`, wait for
      the matching generation, then continue at 4.
   4. Expand the path: in Grouped mode the group and every collapsed ancestor; in Tree mode every
      collapsed ancestor (`TableQuery.expanded` grows; one `SetTableQuery`).
@@ -1455,7 +1466,7 @@ and the shared tokens and components (`docs/ui/foundation.md`).
 
   ```text
   y 0   ┌─────────────────────────────────────────────────────────────────────┐
-        │ ▁▂▃▅▆▇█▇▆▅▃▂▁ stacked metric graph (top-3 + other, UI-PRC-035)       │  plot area y 0..100
+        │ ▁▂▃▅▆▇█▇▆▅▃▂▁ stacked metric graph (top-3 + other per bucket, D-020, UI-PRC-035)       │  plot area y 0..100
         │                              ╎ handle: 1 px accent line, 10×10 grip  │
   y 100 ├──┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┤  axis 1 px divider
         │ -10:00    -8:20      -6:40      -5:00      -3:20      -1:40     now│  labels t_xs text_secondary, y 104..118
