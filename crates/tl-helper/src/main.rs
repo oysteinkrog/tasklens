@@ -3,6 +3,8 @@
 //! The only accepted invocation is `tl-helper --session`. There is no `--once` mode and no other
 //! flag. The session loop arrives with E29-A1.
 
+mod sockets;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: tl-helper --session";
