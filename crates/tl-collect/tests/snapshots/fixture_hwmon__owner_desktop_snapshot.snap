@@ -1,0 +1,56 @@
+---
+source: crates/tl-collect/tests/fixture_hwmon.rs
+expression: "render(\"owner-desktop\", &chips)"
+---
+hwmon0 "nvme" dir=sys/class/hwmon/hwmon0
+  device=Some("devices/pci0000:00/0000:00:01.1/0000:01:00.0/nvme/nvme0")
+  temp1 label=Some("Composite")
+  temp3 label=Some("Sensor 2")
+hwmon1 "nvme" dir=sys/class/hwmon/hwmon1
+  device=Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:01.0/0000:23:00.0/nvme/nvme1")
+  temp1 label=Some("Composite")
+hwmon2 "k10temp" dir=sys/class/hwmon/hwmon2
+  device=Some("devices/pci0000:00/0000:00:18.3")
+  temp1 label=Some("Tctl")
+  temp3 label=Some("Tccd1")
+  temp4 label=Some("Tccd2")
+hwmon3 "r8169_0_2600:00" dir=sys/class/hwmon/hwmon3
+  device=Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:04.0/0000:26:00.0/mdio_bus/r8169-0-2600/r8169-0-2600:00")
+  temp1 label=None
+hwmon4 "i350bb" dir=sys/class/hwmon/hwmon4
+  device=Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:02.0/0000:24:00.0")
+  temp1 label=Some("loc1")
+hwmon5 "iwlwifi_1" dir=sys/class/hwmon/hwmon5
+  device=Some("devices/virtual/thermal/thermal_zone0")
+  temp1 label=None
+hwmon6 "nct6797" dir=sys/class/hwmon/hwmon6
+  device=Some("devices/platform/nct6775.2592")
+  temp1 label=Some("SYSTIN")
+  temp2 label=Some("CPUTIN")
+  temp3 label=Some("AUXTIN0")
+  temp4 label=Some("AUXTIN1")
+  temp5 label=Some("AUXTIN2")
+  temp6 label=Some("AUXTIN3")
+  temp7 label=Some("SMBUSMASTER 0")
+  temp8 label=Some("PCH_CHIP_CPU_MAX_TEMP")
+  temp9 label=Some("PCH_CHIP_TEMP")
+  temp10 label=Some("PCH_CPU_TEMP")
+  temp11 label=Some("PCH_MCH_TEMP")
+  temp12 label=Some("Agent0 Dimm0")
+  temp13 label=Some("TSI0_TEMP")
+  fan1 label=None has_max=false
+  fan2 label=None has_max=false
+  fan3 label=None has_max=false
+  fan4 label=None has_max=false
+  fan5 label=None has_max=false
+  fan6 label=None has_max=false
+  fan7 label=None has_max=false
+  pwm1 has_enable=true
+  pwm2 has_enable=true
+  pwm3 has_enable=true
+  pwm4 has_enable=true
+  pwm5 has_enable=true
+  pwm6 has_enable=true
+  pwm7 has_enable=true
+hwmon7 "hidpp_battery_0" dir=sys/class/hwmon/hwmon7
+  device=Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:08.0/0000:2a:00.1/usb1/1-5/1-5.1/1-5.1.3/1-5.1.3:1.2/0003:046D:C52B.000A/0003:046D:407B.000B/power_supply/hidpp_battery_0")
