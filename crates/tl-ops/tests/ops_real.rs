@@ -1,20 +1,25 @@
-//! Real-system tests for the verified process operations (ADR-006, ADR-013). They need a normal
+//! Real-system tests for the verified process and cgroup operations (ADR-006, ADR-013). They need a normal
 //! user on the owner machine, so every test is `#[ignore]`. Run them with
 //! `cargo test -p tl-ops -- --ignored`.
 //!
 //! Each test spawns its own children and kills and reaps them in a `Drop` guard. No signal is
-//! ever sent to a process the test did not spawn.
+//! ever sent to a process the test did not spawn, and only scopes the test started are frozen,
+//! thawed or killed.
 
 use std::collections::BTreeSet;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use tl_model::actions::{IoPriority, Signal};
+use tl_model::actions::{CgroupRef, IoPriority, Signal};
 use tl_model::ids::ProcessKey;
 use tl_model::system::CpuSet;
 use tl_model::time::BootId;
 use tl_ops::OpsError;
+use tl_ops::cgroup::{CGROUP_ROOT, freeze_group, kill_group, own_cgroup, thaw_group};
 use tl_ops::process::{kill_tree, send_signal, set_affinity, set_io_priority, set_nice};
 
 /// `PF_KTHREAD` in `/proc/<pid>/stat` field 9.
@@ -355,5 +360,174 @@ fn real_other_user_process_permission_denied() {
     assert_eq!(
         set_nice(key, key.boot_id, 10),
         Err(OpsError::PermissionDenied)
+    );
+}
+
+/// Numbers the test scopes of this process, so parallel tests get distinct unit names.
+static SCOPE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn uid() -> u32 {
+    rustix::process::getuid().as_raw()
+}
+
+/// The cgroup v2 path of `pid` relative to the cgroup root. None when the process is gone.
+fn cgroup_of(pid: u32) -> Option<String> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let line = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+    Some(line.trim_start_matches('/').to_owned())
+}
+
+/// A `CgroupRef` for `rel_path` with the directory's current inode.
+fn cgroup_ref(rel_path: &str) -> CgroupRef {
+    let meta = std::fs::metadata(format!("{CGROUP_ROOT}/{rel_path}")).expect("stat cgroup dir");
+    CgroupRef {
+        rel_path: Arc::from(rel_path),
+        cgroup_id: meta.ino(),
+    }
+}
+
+/// The `frozen` value in the cgroup's `cgroup.events`. None when the file is gone or has no
+/// valid `frozen` line.
+fn events_frozen(rel_path: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(format!("{CGROUP_ROOT}/{rel_path}/cgroup.events")).ok()?;
+    match text.lines().find_map(|l| l.strip_prefix("frozen "))? {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
+/// True when the cgroup has no processes. A removed cgroup counts as empty.
+fn procs_empty(rel_path: &str) -> bool {
+    match std::fs::read_to_string(format!("{CGROUP_ROOT}/{rel_path}/cgroup.procs")) {
+        Ok(text) => text.trim().is_empty(),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// A transient user scope `tasklens-test-<pid>-<n>.scope` running `sleep 60`. On drop it kills
+/// the scope through `kill_group`, reaps the child and stops the unit, so no test scope stays
+/// behind even when an assertion fails.
+struct ScopeGuard {
+    child: ChildGuard,
+    unit: String,
+    cg: CgroupRef,
+}
+
+impl ScopeGuard {
+    fn start() -> Self {
+        let n = SCOPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let unit = format!("tasklens-test-{}-{n}", std::process::id());
+        let unit_arg = format!("--unit={unit}");
+        // `systemd-run --scope` moves itself into the new scope and then execs the command, so
+        // the child pid becomes the `sleep` pid.
+        let child = ChildGuard::spawn(
+            "systemd-run",
+            &["--user", "--scope", "--quiet", &unit_arg, "sleep", "60"],
+        );
+        let pid = child.pid();
+        eprintln!("unit {unit}.scope pid {pid}");
+        let suffix = format!("/{unit}.scope");
+        let mut path = None;
+        let found = wait_for(Duration::from_secs(2), || {
+            path = cgroup_of(pid);
+            path.as_deref().is_some_and(|p| p.ends_with(&suffix))
+        });
+        let mut guard = ScopeGuard {
+            child,
+            unit,
+            cg: CgroupRef {
+                rel_path: Arc::from(""),
+                cgroup_id: 0,
+            },
+        };
+        assert!(found, "the child did not move into {suffix}: {path:?}");
+        let rel_path = path.expect("cgroup path");
+        let u = uid();
+        let app_slice = format!("user.slice/user-{u}.slice/user@{u}.service/app.slice/");
+        assert!(
+            rel_path.starts_with(&app_slice),
+            "systemd put the scope outside app.slice: {rel_path}"
+        );
+        guard.cg = cgroup_ref(&rel_path);
+        guard
+    }
+
+    fn rel_path(&self) -> &str {
+        &self.cg.rel_path
+    }
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        if self.cg.cgroup_id != 0 {
+            let _ = kill_group(&self.cg, uid());
+        }
+        // `ChildGuard` kills and reaps the child itself; reap it here so the scope empties
+        // before systemd is asked to stop it.
+        if !self.child.reaped {
+            let _ = self.child.child.kill();
+            let _ = self.child.child.wait();
+            self.child.reaped = true;
+        }
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", &format!("{}.scope", self.unit)])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_cgroup_freeze_thaw_kill() {
+    let mut scope = ScopeGuard::start();
+    let u = uid();
+
+    assert_eq!(freeze_group(&scope.cg, u), Ok(()));
+    assert_eq!(events_frozen(scope.rel_path()), Some(true));
+
+    assert_eq!(thaw_group(&scope.cg, u), Ok(()));
+    assert!(
+        wait_for(Duration::from_secs(2), || events_frozen(scope.rel_path())
+            == Some(false)),
+        "frozen after thaw: {:?}",
+        events_frozen(scope.rel_path())
+    );
+
+    assert_eq!(kill_group(&scope.cg, u), Ok(()));
+    let status = scope.child.wait();
+    assert_eq!(status.signal(), Some(9), "wait status {status:?}");
+    assert!(
+        wait_for(Duration::from_secs(2), || procs_empty(scope.rel_path())),
+        "the scope still has processes"
+    );
+}
+
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_cgroup_stale_inode_refused() {
+    let scope = ScopeGuard::start();
+    let stale = CgroupRef {
+        rel_path: scope.cg.rel_path.clone(),
+        cgroup_id: scope.cg.cgroup_id + 1,
+    };
+    assert_eq!(freeze_group(&stale, uid()), Err(OpsError::IdentityChanged));
+    assert_eq!(events_frozen(scope.rel_path()), Some(false));
+    assert_eq!(kill_group(&scope.cg, uid()), Ok(()));
+}
+
+/// Regression test: tasklens never freezes its own session or app scope.
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_cgroup_session_scope_refused() {
+    let own = own_cgroup().expect("read own cgroup");
+    eprintln!("own cgroup leaf {}", own.rsplit('/').next().unwrap_or(""));
+    let cg = cgroup_ref(&own);
+    let result = freeze_group(&cg, uid());
+    assert!(
+        matches!(result, Err(OpsError::NotOwner) | Err(OpsError::Protected)),
+        "result {result:?}"
     );
 }

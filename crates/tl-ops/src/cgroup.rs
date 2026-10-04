@@ -15,6 +15,7 @@ use tl_model::actions::CgroupRef;
 
 use crate::error::{OpsError, OpsResult};
 
+/// Mount point of the cgroup v2 hierarchy. `CgroupRef::rel_path` is relative to it.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// How often `freeze_group` reads `cgroup.events` while it waits for `frozen 1`.
@@ -29,6 +30,7 @@ pub struct CgroupDir {
 }
 
 impl CgroupDir {
+    /// The directory fd, for `openat` of the cgroup's control files.
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         use std::os::fd::AsFd;
         self.fd.as_fd()
