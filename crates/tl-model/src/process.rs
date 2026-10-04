@@ -6,7 +6,7 @@
 //! Privacy: `ProcessMeta` may hold user data (cmdline, exe, cgroup). Never implement `Display`
 //! for these types and never log `ProcessMeta` at any level (ADR-015). `Debug` is for tests only.
 
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -148,10 +148,20 @@ pub enum GroupKind {
 }
 
 impl GroupKind {
-    /// FxHash (rustc_hash::FxHasher) of the value, as ADR-003 defines GroupKey (R-142 item 3).
+    /// FxHash (rustc_hash::FxHasher) of the value, as ADR-003 defines GroupKey (R-279): a
+    /// discriminant byte (`App` 1, `Background` 2, `System` 3, `Ungrouped` 4), then the app id
+    /// bytes for `App`. FxHasher has no random seed, so history (ADR-012) can store the value.
     pub fn key(&self) -> GroupKey {
         let mut hasher = rustc_hash::FxHasher::default();
-        self.hash(&mut hasher);
+        match self {
+            GroupKind::App { app_id } => {
+                hasher.write_u8(1);
+                hasher.write(app_id.as_bytes());
+            }
+            GroupKind::Background => hasher.write_u8(2),
+            GroupKind::System => hasher.write_u8(3),
+            GroupKind::Ungrouped => hasher.write_u8(4),
+        }
         GroupKey(hasher.finish())
     }
 }
