@@ -25,15 +25,37 @@ fn spawn_sleep() -> Child {
         .expect("spawn sleep")
 }
 
+/// Kernel (major, minor) from uname, or None when the release string does not parse.
+fn kernel_version() -> Option<(u32, u32)> {
+    let uname = rustix::system::uname();
+    let release = uname.release().to_str().ok()?;
+    let mut parts = release.split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// R-268: the kernel's `st_size` count is shown for any owner. Since kernel 6.2 `st_size` of
+/// another user's fd dir gives the count even though readdir there gives EACCES.
 #[test]
 #[ignore = "real system: needs a non-root user"]
-fn fdcount_pid1_restricted() {
+fn fdcount_pid1_other_user() {
     if rustix::process::geteuid().is_root() {
         eprintln!("skipped: running as root");
         return;
     }
     let dir = open_dir("/proc/1");
-    assert_eq!(fd_count(dir.as_fd()), FdCount::Restricted);
+    let got = fd_count(dir.as_fd());
+    assert!(
+        matches!(got, FdCount::Count(n) if n > 0) || got == FdCount::Restricted,
+        "PID 1 gave {got:?}"
+    );
+    if kernel_version().is_some_and(|v| v >= (6, 2)) {
+        assert!(
+            matches!(got, FdCount::Count(_)),
+            "kernel 6.2+ must count, got {got:?}"
+        );
+    }
 }
 
 /// Settles U-34: `st_size` of /proc/<pid>/fd gives the count on this kernel.

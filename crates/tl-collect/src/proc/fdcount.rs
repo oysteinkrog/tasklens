@@ -2,6 +2,9 @@
 //!
 //! R-064: the count is `st_size` of `/proc/<pid>/fd`. Kernels that report 0 there get a readdir
 //! count instead. Only counts are read here, never fd targets.
+//!
+//! R-268: the `st_size` count is shown for any owner. Since kernel 6.2 it works for other users'
+//! processes too, where readdir gives EACCES. Only the fallback can give Restricted.
 use std::os::fd::BorrowedFd;
 use std::sync::atomic::{AtomicU32, Ordering};
 
