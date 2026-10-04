@@ -280,7 +280,13 @@ mod tests {
     fn cpu_index_overflow_errors() {
         let mut out = StatData::default();
         let err = parse_stat(b"cpu  1 1 1 1\ncpu65536 1 1 1 1\n", &mut out).unwrap_err();
-        assert!(matches!(err, CollectError::Parse { what: "cpu index", .. }));
+        assert!(matches!(
+            err,
+            CollectError::Parse {
+                what: "cpu index",
+                ..
+            }
+        ));
         parse_stat(b"cpu  1 1 1 1\ncpu65535 1 1 1 1\n", &mut out).unwrap();
         assert_eq!(out.per_cpu[0].0, 65535);
     }

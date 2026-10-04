@@ -87,7 +87,13 @@ fn no_cpu_line_errors() {
         }
     ));
     let err = parse_stat(b"", &mut out).unwrap_err();
-    assert!(matches!(err, CollectError::Parse { what: "no cpu line", .. }));
+    assert!(matches!(
+        err,
+        CollectError::Parse {
+            what: "no cpu line",
+            ..
+        }
+    ));
 }
 
 #[test]
