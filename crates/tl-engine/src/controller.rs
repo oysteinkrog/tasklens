@@ -91,12 +91,7 @@ impl SourceController {
     }
 
     /// Sends one health message. Returns false when the loop must stop.
-    async fn health(
-        &self,
-        cx: &Cx,
-        state: SourceState,
-        last_error: Option<Arc<str>>,
-    ) -> bool {
+    async fn health(&self, cx: &Cx, state: SourceState, last_error: Option<Arc<str>>) -> bool {
         let update = SourceUpdate::Health {
             id: self.id,
             state,
