@@ -4,6 +4,7 @@
 //! Discovery also lists NVIDIA cards so their PCI slot can be matched to NVML; NVIDIA metrics
 //! come from `tl-gpu-probe`.
 
+pub mod amdgpu;
 pub mod fdinfo;
 
 use std::fs;
