@@ -1742,6 +1742,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: PERF-064 [verified]; the xe region names [inferred from the xe driver's TTM placement names and the fixture, not checked on hardware].
 - Edits: bead hx1.26 (`crates/tl-collect/src/gpu_drm/intel.rs`).
 
+### R-276 Worker commands after a restart: skip the one that crashed, run the rest
+- Question: E08 (`tasklens-8hz.6`) starts a new worker generation at the newest queued command seq, so a command that crashed the last generation does not run again, but a command queued during the restart (up to 500 ms) is silently dropped. A user's Eject or Run Setup could then do nothing. Leader decision, 2026-10-04.
+- Resolution: `WorkerControl` records the seq of the command a generation has started (`started_seq`, written before the command runs). A new generation starts at `last_seq = started_seq`, so it skips only the command that was running when the old generation died and runs every later queued command once. A command that crashes two generations in a row is never retried (it was the started one both times). Each skipped command produces one `WorkerError` naming the command kind, so the UI can report it.
+- Basis: 8hz.6 report [verified]; ADR-005 command rules [inferred].
+- Edits: bead 8hz.6 follow-up (`crates/tl-engine/src/source.rs`).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
