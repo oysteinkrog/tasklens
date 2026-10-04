@@ -1,0 +1,8 @@
+I:6651519
+E:ID_BUS=pci
+E:ID_VENDOR_FROM_DATABASE=Intel Corporation
+E:ID_MODEL_FROM_DATABASE=Wi-Fi 6 AX200 (NGW)
+E:ID_PATH=pci-0000:28:00.0
+G:systemd
+Q:systemd
+V:1
