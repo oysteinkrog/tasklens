@@ -377,7 +377,7 @@ mod tests {
     const LIGHT: [u32; 23] = [
         0xF3F4F6, 0xE4E6E9, 0xEBEDEF, 0xFFFFFF, 0xFFFFFF, 0xDDE1E5, 0xFFFFFF, 0xF6F7F8, 0xE8EBEE,
         0xCFE6F2, 0xD4D8DC, 0xFFFFFF, 0xE1EEF5, 0xEBEDEF, 0xE0E3E6, 0xEBEDEF, 0xB5BBC0, 0x1B1F22,
-        0x5F666B, 0x0F1416, 0x3E5460, 0xF6D5CF, 0x0277A6,
+        0x5E656A, 0x0F1416, 0x3E5460, 0xF6D5CF, 0x0277A6,
     ];
 
     fn hex(v: u32) -> Hsla {
@@ -599,7 +599,7 @@ mod tests {
         // Secondary text is checked on every background slot (R-269).
         let secondary_bgs = [
             ListBg, WindowBg, RowAlt, RowHover, Header, MenuBg, Toolbar, Input, InputFocus, TabBg,
-            Titlebar,
+            TabHover, Titlebar,
         ];
         let pairs: Vec<(ThemeSlot, ThemeSlot, f32)> = [
             (TextPrimary, ListBg, 4.5),
