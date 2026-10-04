@@ -360,8 +360,7 @@ impl Store {
                 self.deleted.insert_all(&read_deleted_keys(&dir));
             }
         }
-        self.segs
-            .sort_by_key(|s| s.reader.header.start_t_ns);
+        self.segs.sort_by_key(|s| s.reader.header.start_t_ns);
         self.last_end = self.newest_block_end();
 
         if version {
@@ -383,7 +382,11 @@ impl Store {
 
     /// End of the newest indexed block of this boot. Decodes that one block.
     fn newest_block_end(&self) -> Option<TimeNs> {
-        let seg = self.segs.iter().rev().find(|s| !s.reader.index.is_empty())?;
+        let seg = self
+            .segs
+            .iter()
+            .rev()
+            .find(|s| !s.reader.index.is_empty())?;
         let entry = seg.reader.index.last()?;
         Some(
             self.cached_block(seg, entry)
