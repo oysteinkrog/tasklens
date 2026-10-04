@@ -398,10 +398,13 @@ fn extra_strings<'a>(input: &TableInput<'a>, x: Option<&'a ProcessExtras>) -> [&
     [unit.name.as_ref(), description]
 }
 
-/// The record indexes that pass `filter`, in record order.
+/// The record indexes that pass `filter` and are not hidden by `hide_system`, in record order.
 pub(crate) fn filtered(input: &TableInput<'_>, filter: &Filter) -> Vec<u32> {
     let mut out = Vec::with_capacity(input.records.len());
     for (i, r) in input.records.iter().enumerate() {
+        if hidden(input, i) {
+            continue;
+        }
         let pass = filter.is_empty() || {
             let extra = extra_strings(input, input.extras.get(i));
             filter.matches(r, &extra)
@@ -719,7 +722,9 @@ impl TreeEmit<'_> {
 
 /// Tree mode visibility: a record is visible when it is in `matches` or, with
 /// `include_children`, when any ancestor in the full ppid forest is (PROC-045).
-fn tree_visible(records: &[ProcessRecord], matches: &[u32], include_children: bool) -> Vec<bool> {
+/// Records hidden by `hide_system` never become visible this way.
+fn tree_visible(input: &TableInput<'_>, matches: &[u32], include_children: bool) -> Vec<bool> {
+    let records = input.records;
     let mut visible = vec![false; records.len()];
     for &i in matches {
         visible[i as usize] = true;
@@ -731,8 +736,8 @@ fn tree_visible(records: &[ProcessRecord], matches: &[u32], include_children: bo
         for &i in matches {
             mark_subtree(&all, i, &mut reached, &mut stack);
         }
-        for (v, r) in visible.iter_mut().zip(reached) {
-            *v |= r;
+        for (i, (v, r)) in visible.iter_mut().zip(reached).enumerate() {
+            *v |= r && !hidden(input, i);
         }
     }
     visible
@@ -741,7 +746,7 @@ fn tree_visible(records: &[ProcessRecord], matches: &[u32], include_children: bo
 /// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`.
 fn tree_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Vec<TableRow>, u32) {
     let matches = filtered(input, filter);
-    let visible = tree_visible(input.records, &matches, query.include_children);
+    let visible = tree_visible(input, &matches, query.include_children);
     let shown = visible.iter().filter(|v| **v).count() as u32;
     let f = forest(input.records, &visible);
     let expanded: FxHashSet<NodeId> = query.expanded.iter().cloned().collect();
@@ -815,6 +820,68 @@ pub fn group_class(r: &ProcessRecord) -> GroupClass {
         GroupClass::System
     } else {
         GroupClass::Apps
+    }
+}
+
+/// User slices whose units are desktop infrastructure, hidden by `hide_system` (PROC-046).
+pub const INFRA_SLICES: [&str; 2] = ["session.slice", "background.slice"];
+
+/// Units in `INFRA_SLICES` that `hide_system` keeps visible (PROC-046).
+pub const HIDE_SYSTEM_EXCEPTIONS: [&str; 3] = [
+    "plasma-plasmashell.service",
+    "plasma-kwin_wayland.service",
+    "org.gnome.Shell@wayland.service",
+];
+
+/// true when the record is hidden by `settings.hide_system` (PROC-046, R-031). `class` is
+/// `group_class(r)`.
+///
+/// Hidden: every System record (kernel threads, other users, system units, PID 1), and a
+/// Background record whose cgroup path has a unit in `INFRA_SLICES` that is not in
+/// `HIDE_SYSTEM_EXCEPTIONS`, or ends in `user@<uid>.service/init.scope` (`systemd --user`).
+/// Apps and the rest of Background, `app.slice` included, stay. Pseudo rows are not records;
+/// the pseudo row builder hides them.
+pub fn hidden_by_hide_system(r: &ProcessRecord, class: GroupClass) -> bool {
+    match class {
+        GroupClass::System => true,
+        GroupClass::Apps => false,
+        GroupClass::Background => r.meta.cgroup.as_deref().is_some_and(is_infra_cgroup),
+    }
+}
+
+/// The desktop infrastructure test of `hidden_by_hide_system` on a cgroup path relative to
+/// `/sys/fs/cgroup`. One pass over the path components.
+fn is_infra_cgroup(path: &str) -> bool {
+    let mut parts = path.split('/').filter(|c| !c.is_empty()).peekable();
+    let mut prev: Option<&str> = None;
+    while let Some(c) = parts.next() {
+        if INFRA_SLICES.contains(&c) && prev.is_some() {
+            // The unit is the component right under the slice. A path that ends at the slice
+            // has no unit and is not hidden.
+            return parts
+                .peek()
+                .is_some_and(|unit| !HIDE_SYSTEM_EXCEPTIONS.contains(unit));
+        }
+        if c == "init.scope" && parts.peek().is_none() {
+            return prev.is_some_and(is_user_manager);
+        }
+        prev = Some(c);
+    }
+    false
+}
+
+/// true for `user@<digits>.service`.
+fn is_user_manager(c: &str) -> bool {
+    c.strip_prefix("user@")
+        .and_then(|rest| rest.strip_suffix(".service"))
+        .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `hidden_by_hide_system` of record `i`, false when `hide_system` is off.
+fn hidden(input: &TableInput<'_>, i: usize) -> bool {
+    input.settings.hide_system && {
+        let r = &input.records[i];
+        hidden_by_hide_system(r, group_class(r))
     }
 }
 
@@ -1118,7 +1185,8 @@ fn restrict_to_owners(f: &mut Forest, owner: &[u32]) {
 
 /// Builds grouped mode (PROC-004, PROC-008, PROC-009): the rows and the group rows they index.
 ///
-/// The three headers come in `GROUP_ORDER` at depth 0, `descendants` set to the number of
+/// With `hide_system`, the records of `hidden_by_hide_system` are dropped first and the System
+/// header is left out. The other headers come in `GROUP_ORDER` at depth 0, `descendants` set to the number of
 /// processes under the header after filtering. A header's rows follow only when it is in
 /// `query.expanded`. Under Apps: one row per app at depth 1, sorted by its aggregated value,
 /// holding the app's primary processes at depth 2, each with its subtree among the app's
@@ -1146,6 +1214,16 @@ fn grouped_rows(
     let records = input.records;
     let n = records.len();
     let class: Vec<GroupClass> = records.iter().map(group_class).collect();
+    // Applied before grouping, so a hidden record counts nowhere (PROC-046).
+    let hidden: Vec<bool> = if input.settings.hide_system {
+        records
+            .iter()
+            .zip(&class)
+            .map(|(r, c)| hidden_by_hide_system(r, *c))
+            .collect()
+    } else {
+        vec![false; n]
+    };
     let is_kthread = |i: usize| records[i].flags.contains(ProcFlags::KERNEL_THREAD);
     let unit_of = |i: usize| input.extras.get(i).and_then(|x| x.unit.as_ref());
 
@@ -1170,6 +1248,7 @@ fn grouped_rows(
     let mut unit_total: FxHashMap<(GroupClass, &UnitRef), u32> = FxHashMap::default();
     for (i, c) in class.iter().enumerate() {
         if *c != GroupClass::Apps
+            && !hidden[i]
             && !is_kthread(i)
             && let Some(u) = unit_of(i)
         {
@@ -1187,6 +1266,9 @@ fn grouped_rows(
     let mut kthreads: Vec<u32> = Vec::new();
     for (i, r) in records.iter().enumerate() {
         let c = class[i];
+        if hidden[i] {
+            continue;
+        }
         let pass = filter.is_empty() || {
             let [unit, description] = extra_strings(input, input.extras.get(i));
             let app = if c == GroupClass::Apps {
@@ -1304,6 +1386,10 @@ fn grouped_rows(
     let shown: u32 = counts.iter().sum();
     let mut rows = Vec::with_capacity(shown as usize + groups.len() + GROUP_ORDER.len());
     for c in GROUP_ORDER {
+        if c == GroupClass::System && input.settings.hide_system {
+            // `hide_system` removes the whole group, header included (PROC-046).
+            continue;
+        }
         let node = NodeId::Group(c.key());
         let count = counts[c.index()];
         let is_expanded = expanded.contains(&node);
@@ -1718,6 +1804,10 @@ mod tests {
         records: Vec<ProcessRecord>,
         extras: Vec<ProcessExtras>,
         app_stats: Vec<AppCgroupSample>,
+        /// Grouped unless a test sets it.
+        mode: TableMode,
+        hide_system: bool,
+        include_children: bool,
     }
 
     impl Fixture {
@@ -1733,13 +1823,19 @@ mod tests {
                 records,
                 extras,
                 app_stats: Vec::new(),
+                mode: TableMode::Grouped,
+                hide_system: false,
+                include_children: false,
             }
         }
 
         fn build(&self, filter: &str, expanded: &[NodeId], sort: SortSpec) -> ProcessTableView {
             let system = SystemSnapshot::default();
             let devices = DeviceCatalog::default();
-            let settings = EngineSettings::default();
+            let settings = EngineSettings {
+                hide_system: self.hide_system,
+                ..EngineSettings::default()
+            };
             let unit_names = FxHashMap::default();
             let input = TableInput {
                 records: &self.records,
@@ -1752,10 +1848,11 @@ mod tests {
                 unit_names: &unit_names,
             };
             let query = TableQuery {
-                mode: TableMode::Grouped,
+                mode: self.mode,
                 sort,
                 filter: Arc::from(filter),
                 expanded: Arc::from(expanded.to_vec()),
+                include_children: self.include_children,
                 ..TableQuery::default()
             };
             build(&input, &query)
@@ -2110,5 +2207,152 @@ mod tests {
         }
         let view = fx.build("", &all, CPU_DESC);
         assert_eq!(view.shown as usize, fx.records.len());
+    }
+
+    fn in_cgroup(mut r: ProcessRecord, cgroup: &str) -> ProcessRecord {
+        Arc::make_mut(&mut r.meta).cgroup = Some(cgroup.into());
+        r
+    }
+
+    const USER: &str = "user.slice/user-1000.slice/user@1000.service";
+
+    /// pipewire and plasmashell in session.slice, firefox in app.slice, cron as a system unit,
+    /// the user manager, PID 1 and two kernel threads.
+    fn desktop() -> Fixture {
+        let bg = |pid: u32, ppid: u32, name: &str, path: &str| {
+            let r = background(rec(pid, ppid, name, 0.0));
+            (in_cgroup(r, &format!("{USER}/{path}")), None)
+        };
+        Fixture::new(vec![
+            (
+                in_cgroup(system(rec(1, 0, "systemd", 0.0)), "init.scope"),
+                None,
+            ),
+            bg(200, 1, "systemd", "init.scope"),
+            bg(201, 204, "pipewire", "session.slice/pipewire.service"),
+            bg(
+                202,
+                200,
+                "plasmashell",
+                "session.slice/plasma-plasmashell.service",
+            ),
+            bg(203, 200, "kded6", "background.slice/plasma-kded6.service"),
+            bg(204, 200, "bash", "app.slice/app-konsole@1.service"),
+            (
+                in_cgroup(
+                    in_app(rec(100, 200, "firefox", 0.0), "firefox", true),
+                    &format!("{USER}/app.slice/app-firefox@1.service"),
+                ),
+                None,
+            ),
+            (
+                in_cgroup(
+                    system(rec(300, 1, "cron", 0.0)),
+                    "system.slice/cron.service",
+                ),
+                None,
+            ),
+            (kthread(1000), None),
+            (kthread(1001), None),
+        ])
+    }
+
+    fn pids(view: &ProcessTableView, records: &[ProcessRecord]) -> Vec<u32> {
+        let mut v: Vec<u32> = view
+            .rows
+            .iter()
+            .filter_map(|r| r.record)
+            .map(|i| records[i as usize].key.pid)
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn hide_system_flat_keeps_apps_and_exceptions() {
+        let mut fx = desktop();
+        fx.mode = TableMode::Flat;
+        fx.hide_system = true;
+        let view = fx.build("", &[], PID_ASC);
+        assert_eq!(pids(&view, &fx.records), [100, 202, 204]);
+        assert_eq!(view.shown, 3);
+        assert_eq!(view.total as usize, fx.records.len());
+    }
+
+    #[test]
+    fn hide_system_off_is_noop() {
+        for mode in [TableMode::Flat, TableMode::Tree, TableMode::Grouped] {
+            let mut fx = desktop();
+            fx.mode = mode;
+            let all = fx.all_nodes();
+            let view = fx.build("", &all, PID_ASC);
+            assert_eq!(view.shown as usize, fx.records.len(), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn hide_system_grouped_drops_system_header() {
+        let mut fx = desktop();
+        fx.hide_system = true;
+        let all = fx.all_nodes();
+        let view = fx.build("", &all, PID_ASC);
+        assert!(
+            !view
+                .rows
+                .iter()
+                .any(|r| r.node == NodeId::Group(GroupClass::System.key())
+                    || r.node == NodeId::KernelThreads)
+        );
+        assert_eq!(header_counts(&view), [1, 2]);
+        assert_eq!(pids(&view, &fx.records), [100, 202, 204]);
+        assert_eq!(view.shown, 3);
+    }
+
+    #[test]
+    fn hide_system_tree_hidden_parent_makes_child_root() {
+        let mut fx = desktop();
+        fx.mode = TableMode::Tree;
+        fx.hide_system = true;
+        let all = fx.all_nodes();
+        // firefox's parent is the hidden user manager (PID 200).
+        let view = fx.build("", &all, PID_ASC);
+        assert_eq!(pids(&view, &fx.records), [100, 202, 204]);
+        assert!(view.rows.iter().all(|r| r.depth == 0));
+        // pipewire (hidden) is bash's child: include children must not bring it back.
+        fx.include_children = true;
+        let view = fx.build("bash", &all, PID_ASC);
+        assert_eq!(pids(&view, &fx.records), [204]);
+        assert!(!view.rows[0].has_children);
+    }
+
+    #[test]
+    fn hide_system_rules() {
+        let bg = |path: &str| in_cgroup(background(rec(5, 1, "x", 0.0)), path);
+        let hidden = |path: &str| hidden_by_hide_system(&bg(path), GroupClass::Background);
+        assert!(hidden(&format!("{USER}/session.slice/pipewire.service")));
+        assert!(hidden(&format!(
+            "{USER}/background.slice/plasma-kded6.service"
+        )));
+        assert!(hidden(&format!("{USER}/init.scope")));
+        assert!(hidden(
+            "user.slice/user-42.slice/user@42.service/init.scope"
+        ));
+        for unit in HIDE_SYSTEM_EXCEPTIONS {
+            assert!(!hidden(&format!("{USER}/session.slice/{unit}")), "{unit}");
+        }
+        assert!(!hidden(&format!("{USER}/app.slice/app-firefox@1.service")));
+        assert!(!hidden(&format!("{USER}/app.slice/init.scope")));
+        assert!(!hidden(
+            "user.slice/user-1000.slice/user@x.service/init.scope"
+        ));
+        assert!(!hidden("user.slice/user-1000.slice/session-2.scope"));
+        assert!(!hidden_by_hide_system(
+            &background(rec(5, 1, "x", 0.0)),
+            GroupClass::Background
+        ));
+        let pid1 = in_cgroup(system(rec(1, 0, "systemd", 0.0)), "init.scope");
+        assert_eq!(group_class(&pid1), GroupClass::System);
+        assert!(hidden_by_hide_system(&pid1, GroupClass::System));
+        assert!(!hidden_by_hide_system(&bg("x"), GroupClass::Apps));
     }
 }
