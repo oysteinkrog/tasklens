@@ -254,7 +254,9 @@ pub enum Command {
     /// P3. The answer arrives in `HealthSnapshot.setup`.
     SetupStatus,
     /// Progress arrives in `HealthSnapshot.setup.run`.
-    RunSetup { step: SetupStep },
+    RunSetup {
+        step: SetupStep,
+    },
     /// P2 (R-139 item 2).
     Device(DeviceCommand),
     /// P3. Shield unlock (R-148 item 1).
