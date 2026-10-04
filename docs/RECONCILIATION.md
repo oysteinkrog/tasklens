@@ -1632,6 +1632,18 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: E02-A1 reading on 2026-10-04 [verified]; leader decision.
 - Edits: ADR-001 rule 1, check 1, check 2 and the rejected-alternatives line; R-158 item 4 is superseded; beads v9m.10, v9m.1 (reading 2 is now informational); 00-epics unchanged.
 
+### R-260 Fixture user names are scrubbed as substrings
+- Question: `capture-fixture` (E04-005, `2dl.8`, commits 4976667 and 319dc22) replaced user names as whole words with `-` counted as a word character, so `oystein-firefox-...` in `proc/self/mountinfo` survived. Raised by the 2dl.8 implementer. Leader decision, 2026-10-04.
+- Resolution: every occurrence of a user name is replaced, as a case-insensitive substring, longer names first. Names shorter than 3 characters are skipped so unrelated text is not wrecked. The mapping `user1`, `user2`, ... by uid order stays. E04-005's acceptance line "`alicex` stays" is superseded. Implemented by the new bead E04-033 (`tasklens-2dl.37`), which E04-A1 (`2dl.1`, the `owner-desktop` capture) depends on, so no fixture is committed before the fix.
+- Basis: ADR-013 scrub list, ADR-015 [verified]; the leak seen on the owner machine [verified].
+- Edits: ADR-013 scrub sentence; new bead E04-033 (plan key and ID in `b2-collect-ops.md`); edges E04-033 on 2dl.8, 2dl.1 on E04-033.
+
+### R-261 Fixtures carry scrubbed `run/udev/data` files
+- Question: ADR-013 says a fixture may carry a scrubbed `run/udev/data/` directory with `ID_SERIAL`, `ID_SERIAL_SHORT` and `ID_WWN` replaced by `SCRUBBED`, but E04-005 never captured those files. Leader decision, 2026-10-04.
+- Resolution: `capture-fixture` copies the regular files under `run/udev/data/` whose names start with `b`, `n` or `+pci:` (block, net, PCI; the ADR-016 udev row), 64 KiB cap each, and replaces the values of the `E:ID_SERIAL=`, `E:ID_SERIAL_SHORT=` and `E:ID_WWN=` lines with `SCRUBBED` before the ordinary text scrub. A missing directory is not an error. Implemented by E04-033 (`tasklens-2dl.37`), with regression tests.
+- Basis: ADR-013, ADR-016 udev row, R-140 [verified].
+- Edits: ADR-013 (the capture list names `run/udev/data`); bead E04-033.
+
 
 
 

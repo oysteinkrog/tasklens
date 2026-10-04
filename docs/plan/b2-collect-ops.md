@@ -65,6 +65,7 @@ E04 has 32 beads: the 3 anchors plus E04-001 to E04-029. Each anchor in section 
 | E04-030 | tasklens-2dl.33 | udev database reader (`read_udev_props`) (R-140) | P1 | E04-A1 |
 | E04-031 | tasklens-2dl.34 | Partitions table rows (PERF-050, R-140) | P2 | E04-021, E04-024, E04-030, E03-A2 |
 | E04-032 | tasklens-2dl.36 | `minimal-vm` fixture capture (R-140) | P1 | E04-A1 |
+| E04-033 | tasklens-2dl.37 | capture-fixture: substring user scrubbing and scrubbed udev data (R-260, R-261) | P0 | E04-005; E04-A1 depends on it |
 | E04-A4 | tasklens-2dl.35 | Anchor: P2 system details (R-140) | P2 | E04-013, E04-014, E04-015, E04-019, E04-023, E04-024, E04-028, E04-031 |
 
 Cross-epic edges: E04-001 depends on E02-A1 (tasklens-v9m.1) and E03-A1 (tasklens-as2.1). E04-005 and E04-006 depend on E02-A1. No other cross-epic edge.
