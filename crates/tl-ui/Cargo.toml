@@ -7,6 +7,11 @@ publish.workspace = true
 [dependencies]
 tl-model = { workspace = true }
 gpui-kit = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+smallvec = { workspace = true }
+rustc-hash = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
