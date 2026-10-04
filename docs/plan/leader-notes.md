@@ -63,3 +63,10 @@ pass once all batch writers finish.
   E21-032; E25 and E28 Fetch buttons on E21-017; E29 privileges chain edit on E21-035; E21-043 on
   the E30, E31 and E32 settings-row beads; E21-029 to E21-031 on E17's share-code bead. 00-epics
   section 2 needs the E31 chain-edit rule for window/main.rs and window/titlebar.rs.
+- B6 (E19, E24, E25, E26): done, 102 beads (E19 18, E24 27, E25 35, E26 22), no cycles, plan in
+  2c96816. Open items E24-6 to E24-10, E25-OI-1 to 8, E26-OI-1 to 7 (plan file). Cross-batch
+  edges for the leader: o55.22 on bj6.20; xdh.12 on bj6.35; E20's close bead gets the
+  `any_detached_open` call (E26-OI-3). Build line still old on 40 E19 and E24 beads.
+- Overlaps to settle together: device commands (SMART, eject, public IP) are E12-OI-1, E25-OI-1
+  and the E12-A3 placeholder; X11 keep-above is B7 item 4 and E26-OI-5; `QuitMode::Explicit`
+  (B7 item 5) is recorded in research/claude-gpui-apis.md:58 (gpui app.rs:202).
