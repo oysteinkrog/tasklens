@@ -323,3 +323,213 @@ fn sample_crash_blames_no_command() {
     handle.abort();
     rig.lab.run_until_idle();
 }
+
+#[path = "fake_sources.rs"]
+mod fake_sources;
+
+use asupersync::Outcome;
+use asupersync::channel::oneshot;
+use asupersync::runtime::TaskHandle;
+use asupersync::supervision::ManagedGeneration;
+use fake_sources::{FakeLab, FakeSource, Step, channels, demand_with, drain, io, times_ms};
+use tl_engine::supervise::{WorkerFactory, build_supervisor};
+use tl_engine::update::WorkerError;
+
+const PERIOD: Duration = Duration::from_millis(100);
+const TICK: Duration = Duration::from_millis(10);
+
+type OutcomeSlot = Arc<Mutex<Option<Outcome<(), WorkerError>>>>;
+
+/// Starts `source::run` as a root task. Its outcome lands in the returned slot.
+fn spawn_run(fl: &mut FakeLab, io: WorkerIo, src: FakeSource) -> (TaskHandle<()>, OutcomeSlot) {
+    let slot = OutcomeSlot::default();
+    let out = Arc::clone(&slot);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let outcome = source::run(cx, io, src).await;
+        *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
+    });
+    (handle, slot)
+}
+
+/// The state of every `Health` message, in order.
+fn health_states(msgs: &[EngineMsg]) -> Vec<SourceState> {
+    msgs.iter()
+        .filter_map(|msg| match msg {
+            EngineMsg::Source(SourceUpdate::Health { state, .. }) => Some(*state),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn absolute_deadlines_no_drift() {
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    let src = FakeSource::new(&fl.clock, vec![Step::Ok], PERIOD);
+    let log = Arc::clone(&src.log);
+    let (handle, _) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
+
+    fl.run_for(Duration::from_millis(990), TICK);
+    let expected: Vec<u64> = (0..10).map(|k| k * 100).collect();
+    assert_eq!(times_ms(&log, "sample"), expected);
+
+    handle.abort();
+    fl.finish();
+}
+
+#[test]
+fn slow_job_skips_ticks_and_reports_late() {
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    let slow = Duration::from_millis(250);
+    let src = FakeSource::new(&fl.clock, vec![Step::Slow(slow)], PERIOD);
+    let log = Arc::clone(&src.log);
+    let (handle, _) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
+
+    fl.run_for(Duration::from_secs(2), TICK);
+    let samples = times_ms(&log, "sample");
+    // Each job ends 250 ms after it starts; the next one waits for the next 100 ms deadline.
+    assert_eq!(samples, [0, 300, 600, 900, 1_200, 1_500, 1_800]);
+    for pair in samples.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= 100,
+            "burst after a slow job: {samples:?}"
+        );
+    }
+
+    // Each sample sends `Running`; the loop sends `Late` once, before the third sample's update.
+    let states = health_states(&drain(&mut rx));
+    let late: Vec<usize> = states
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| **s == SourceState::Late)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(late, [2], "{states:?}");
+    assert_eq!(states.len(), samples.len() + 1, "{states:?}");
+
+    handle.abort();
+    fl.finish();
+}
+
+/// `Source::sample` has no error path, so a failing job is a panicking one.
+#[test]
+fn panic_returns_outcome_panicked() {
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    let src = FakeSource::new(&fl.clock, vec![Step::Panic], PERIOD);
+    let (_handle, slot) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
+
+    let outcome = slot
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
+        .expect("the loop ended");
+    assert!(matches!(outcome, Outcome::Panicked(_)), "{outcome:?}");
+
+    fl.finish();
+}
+
+#[test]
+fn panic_under_supervisor_restarts() {
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    let wio = io(&updates, &demand, &settings, &control);
+    let base = FakeSource::new(&fl.clock, vec![Step::Panic], PERIOD);
+    let starts: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+    let record = Arc::clone(&starts);
+    let factory: WorkerFactory = Arc::new(move |cx: Cx, generation: ManagedGeneration| {
+        let record = Arc::clone(&record);
+        let io = wio.clone();
+        let src = base.clone();
+        async move {
+            let ms = cx.now().as_nanos() / 1_000_000;
+            record
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((generation.number, ms));
+            source::run(cx, io, src).await
+        }
+    });
+    let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
+    fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let supervisor = build_supervisor("fake", factory).expect("supervisor builds");
+        let mut handle = supervisor.spawn(&cx).expect("supervisor spawns");
+        let _ = abort_rx.recv(&cx).await;
+        handle.abort();
+        let _ = handle.join().await;
+    });
+
+    fl.run_for(Duration::from_millis(600), TICK);
+    assert_eq!(
+        *starts.lock().unwrap_or_else(PoisonError::into_inner),
+        [(1, 0), (2, 500)]
+    );
+
+    abort_tx.send_blocking(()).expect("the root task waits");
+    fl.lab.run_until_idle();
+    fl.finish();
+}
+
+#[test]
+fn demand_change_seen_within_idle_recheck() {
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    let wio = io(&updates, &demand, &settings, &control);
+    demand
+        .send(demand_with(|d| d.cpu_fast = true))
+        .expect("watch has receivers");
+    let mut src = FakeSource::new(&fl.clock, vec![Step::Ok], PERIOD);
+    src.on = |d, _| d.cpu_fast;
+    let log = Arc::clone(&src.log);
+    let (handle, _) = spawn_run(&mut fl, wio, src);
+
+    fl.run_for(Duration::from_millis(250), TICK);
+    demand
+        .send(demand_with(|d| d.cpu_fast = false))
+        .expect("watch has receivers");
+    // The loop read demand before its 300 ms sleep, so that one sample still runs.
+    fl.run_for(Duration::from_millis(1_780), TICK);
+    assert_eq!(times_ms(&log, "sample"), [0, 100, 200, 300]);
+
+    let on_at = fl.now_ms();
+    demand
+        .send(demand_with(|d| d.cpu_fast = true))
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(600), TICK);
+    let after: Vec<u64> = times_ms(&log, "sample")
+        .into_iter()
+        .filter(|t| *t > on_at)
+        .collect();
+    let first = *after.first().expect("sampling resumed");
+    assert!(
+        first - on_at <= 500,
+        "demand seen {} ms after the change",
+        first - on_at
+    );
+    assert_eq!(after, [2_300, 2_400, 2_500, 2_600]);
+
+    handle.abort();
+    fl.finish();
+}
+
+#[test]
+fn reset_generation_calls_reset_once() {
+    let mut fl = FakeLab::new();
+    let (updates, _rx, demand, settings, control) = channels();
+    let src = FakeSource::new(&fl.clock, vec![Step::Ok], PERIOD);
+    let log = Arc::clone(&src.log);
+    let (handle, _) = spawn_run(&mut fl, io(&updates, &demand, &settings, &control), src);
+
+    fl.run_for(Duration::from_millis(250), TICK);
+    control
+        .send_modify(|c| c.reset_generation += 1)
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_millis(750), TICK);
+    assert_eq!(times_ms(&log, "reset"), [300]);
+
+    handle.abort();
+    fl.finish();
+}
