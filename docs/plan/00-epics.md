@@ -465,7 +465,7 @@ touches the file. The two sharing rules are:
 Aggregator files (`lib.rs`, `mod.rs`, root `Cargo.toml` members, `xtask` dispatch, `app.rs` wiring,
 `MainWindow` page match) all use the chain-edit rule. Tests live next to the code they test
 (`#[cfg(test)]`) unless a `tests/` file is listed; `tests/` files belong to the owner of the code
-they cover.
+they cover. When an earlier bead's struct needs a field, variant, arm, parameter or re-export whose type a later bead creates, the earlier bead leaves an insertion comment and the later bead adds it to that file as a named chain edit (R-262).
 
 ### Repository root
 

@@ -1644,6 +1644,44 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: ADR-013, ADR-016 udev row, R-140 [verified].
 - Edits: ADR-013 (the capture list names `run/udev/data`); bead E04-033.
 
+### R-262 A later bead adds the field it defines the type for
+- Question: Codex's edge scan found 18 pairs where an earlier bead A declares a field, variant, match arm, parameter or re-export whose type a later bead B creates, while B already depends on A (adding A on B would be a cycle). Raised by the leader from `scratchpad/codex/missing-edges.out`, 2026-10-04.
+- Resolution, one rule: the earlier bead does not name the later type. It leaves an insertion comment `// <B plan key>: <field>` where the field, arm or parameter will go, and the later bead B adds the field, its initialiser, its `mod` or `use` line and its uses to A's file as a named chain edit (B's Files list names A's file). Only when the type is a small shared contract with no behaviour does it move into the earlier bead instead. Applied:
+  - `8fx.16` / `8fx.17`: `Mode { Off, Rolling(RollingWindow) }`; E30-014 adds `Recording(RecordingState)` and the struct (same file).
+  - `8hz.6` / `8hz.11`: `WorkerIo` has four fields in E08-004; E08-009 adds `pub shared: crate::dbus::SharedHandles` and its construction to `source.rs`.
+  - `8q0.20` / `8q0.21` / `8q0.2`: E09-018's `lib.rs` line re-exports `EngineHandle` and `EngineHooks`; E09-019 appends `Engine`, E09-A2 appends `ShutdownReport` to the same `pub use`.
+  - `8q0.3` / `8q0.10`: `Reducer` has no `suspend` field in E09-001; E09-008 adds `pub suspend: suspend::SuspendState` and its init to `reducer/mod.rs`.
+  - `8q0.3` / `8q0.5` (the leader added `8q0.3` on `8q0.5`): `InvariantViolation` is the small shared type and moves to `reducer/devices.rs` (E09-003); `reducer/mod.rs` re-exports it (`pub use devices::InvariantViolation;`).
+  - `9o0.15` / `9o0.16`: no `menu_targets` field in E28-020; E28-021 adds `menu_targets: Option<ConnMenuTargets>` to `ConnectionsPage`.
+  - `bj6.30` / `bj6.31`: no `plane`, `hue`, `hex` fields in E21-027; E21-028 adds them (same file).
+  - `crw.3` / `crw.6` and `crw.3` / `crw.17`: `PerformancePage` has neither `sidebar` nor `summary` in E24-001; E24-004 adds `pub(crate) sidebar: Entity<sidebar::DeviceSidebar>` and its construction, E24-015 adds `pub(crate) summary: Option<Entity<summary::SummaryView>>`, both to `pages/performance/mod.rs`.
+  - `crw.8` / `crw.11`: `build_page` in E24-006 has only the placeholder arm; E24-009 adds the `Cpu` arm to `page.rs`, as E25 adds the other kinds.
+  - `gma.1` / `gma.28`: `access_block(text: &'static str)` in E23-A1 (no button); E23-028 adds the `button: Option<AccessButton>` parameter and updates every caller.
+  - `ndy.3` / `ndy.4` / `ndy.7`: `main.rs` in E13-001 has the `Sampler` arm exit 3 with "nvml backend not built" (like `ApiVersions`); E13-002 adds `mod nvml;` and the real `Sampler` arm; E13-005 adds the `Fake` arm.
+  - `o55.2` / `o55.3`, `o55.5` / `o55.17`, `o55.7` / `o55.22`: no `bar`, `partitions`, `public_ip` field in the page beads; E25-002, E25-016 and E25-021 add them to `memory.rs`, `disk.rs` and `net.rs`.
+  - `yrf.3` / `yrf.6`: `ChartView` has no `scale_state` in E19-001; E19-004 adds `pub(crate) scale_state: scale::ScaleState` and its init to `chart/view.rs`.
+  Module lists written up front with empty "filled by" files stay as they are; they create no type dependency.
+- Basis: `missing-edges.out` CYCLE_RISKS and the bead texts [verified]; 00-epics section 2 chain-edit rules.
+- Edits: 00-epics section 2 (aggregator-file paragraph, one sentence); the 26 beads named above.
+
+### R-263 `GraphColor` is one type, owned by E26-001
+- Question: E21-032 (`bj6.35`) defines `pub enum GraphColor` (18 variants, `as_str`, `from_str`, `label`) in `window/menubar.rs`; E26 (`xdh.3`, `xdh.4`, `xdh.5`, `xdh.7`) uses a `GraphColor /* Accent | Named(AccentName) */` of another shape. Leader entry, 2026-10-04.
+- Resolution: one type, `pub enum GraphColor { Accent, Coral, Orange, Amber, Yellow, Lime, Green, Mint, Teal, Cyan, Blue, Indigo, Violet, Lavender, Fuchsia, Pink, Rose, Slate }` with `as_str` (`"accent"` or the lower-case name, the stored value of R-083), `from_str` and `label`, defined in `crates/tl-ui/src/pages/minigraph/mod.rs` by E26-001 (`xdh.3`, P1). E21-032 (`bj6.35`, P3) imports it and keeps `graph_color_menu`; it depends on `xdh.3`. E26 texts say `GraphColor::Coral` and so on, not `Named(..)`.
+- Basis: UI-SHL-085, R-083, R-231 [verified].
+- Edits: beads xdh.3, xdh.5, bj6.35; edge bj6.35 on xdh.3.
+
+### R-264 `HelloInfo` on each side of the probe protocol
+- Question: `tl-gpu-probe` (`ndy.3`, `ndy.4`) and `tl-engine/src/gpu/client.rs` (`ndy.11`, `ndy.12`) both name a `HelloInfo`; the owners were unclear. Leader entry, 2026-10-04.
+- Resolution: the wire type is `ProbeResponse::Hello { proto, driver: String, nvml: String, devices: Vec<GpuDeviceInfo> }` in tl-model `gpu_proto.rs` (E03-069, `as2.35`). Two crate-local structs sit on its two sides and keep their names: `sampler::HelloInfo { driver: String, nvml: String, devices: Vec<GpuDeviceInfo> }` in `tl-gpu-probe/src/sampler.rs`, owned by E13-001 (`ndy.3`), returned by `Backend::hello` and written into the wire variant by the sampler loop; `client::HelloInfo { proto: u16, driver: Arc<str>, nvml: Arc<str>, devices: Arc<[GpuDeviceInfo]> }` in `tl-engine/src/gpu/client.rs`, owned by E13-009 (`ndy.11`), built from the wire variant. Neither crate imports the other's struct.
+- Basis: ADR-007, as2.35, ndy.3 and ndy.11 text [verified].
+- Edits: beads ndy.3 (owner note), ndy.4 (uses `sampler::HelloInfo`; its stale "retried every 300 s" goes, R-155).
+
+### R-265 The engine's in-flight record keeps `ActionKind`, not `ActionKindTag`
+- Question: E11-A1 (`i3o.1`) declares `InFlight { kind: ActionKindTag, .. }` in tl-engine, and E27 (`hk6.9`) defines `pub enum ActionKindTag` in `tl-ui/src/pages/sys_table.rs`; tl-engine cannot use a tl-ui type and no engine bead defines one. Leader entry, 2026-10-04.
+- Resolution: `InFlight.kind` is the request's `ActionKind` (tl-model `actions.rs`, cloned from the request), so the busy-unit and dedup logic matches on `ActionKind` variants. `ActionKindTag` is a tl-ui type owned by E27-008 (`hk6.9`) and used only by the system-table pages.
+- Basis: ADR-005, i3o.1 and hk6.9 text [verified].
+- Edits: bead i3o.1.
+
 
 
 
