@@ -20,6 +20,18 @@ pub enum CollectError {
         file: &'static str,
         what: &'static str,
     },
+    /// ENOENT or ESRCH on a `/proc/<pid>` file during a sweep.
+    #[error("process {pid} is gone")]
+    ProcessGone { pid: u32 },
+    /// `file` is a static name such as "stat", never a path.
+    #[error("could not parse {file} of process {pid}")]
+    ProcParse { pid: u32, file: &'static str },
+    #[error("could not read {file}: errno {errno}")]
+    ProcRead { file: &'static str, errno: i32 },
+    #[error("not an ELF file")]
+    NotElf,
+    #[error("scan cancelled")]
+    Cancelled,
 }
 
 impl From<Errno> for CollectError {
@@ -46,8 +58,13 @@ impl CollectError {
     pub fn validity(&self) -> Validity {
         match self {
             Self::PermissionDenied => Validity::Restricted,
-            Self::NotFound => Validity::Missing,
-            Self::Os(_) | Self::Parse { .. } => Validity::Failed,
+            Self::NotFound | Self::ProcessGone { .. } => Validity::Missing,
+            Self::Os(_)
+            | Self::Parse { .. }
+            | Self::ProcParse { .. }
+            | Self::ProcRead { .. }
+            | Self::NotElf
+            | Self::Cancelled => Validity::Failed,
         }
     }
 }
@@ -95,6 +112,15 @@ mod tests {
             what: "cpu line",
         };
         assert_eq!(parse.validity(), Validity::Failed);
+    }
+
+    #[test]
+    fn proc_parse_display() {
+        let err = CollectError::ProcParse {
+            pid: 7,
+            file: "stat",
+        };
+        assert_eq!(err.to_string(), "could not parse stat of process 7");
     }
 
     #[test]
