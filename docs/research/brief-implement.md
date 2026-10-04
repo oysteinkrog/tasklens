@@ -29,6 +29,9 @@ Do not pick up any other bead.
    report it. Fix your own failures in follow-up commits. Never amend.
    To format, run `rustfmt --edition 2024 <your files>` only. Never run `cargo fmt` without
    `--check`: it rewrites other agents' files while they are working on them.
+   Name every build output or scratch file after your bead (for example
+   `/var/tmp/claude/<bead-id>-clippy.txt`). Generic names such as `out.txt` get overwritten by
+   other agents.
 7. If the bead cannot be finished as written (an API that does not exist, a decision the docs do
    not make, a missing dependency), do not invent. Commit what is sound, run
    `br update <id> --status open --no-auto-flush --lock-timeout 180000`, and report the exact

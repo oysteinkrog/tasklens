@@ -139,3 +139,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - fut.6: REFRESH_WHILE_HIDDEN path calls cx.refresh_windows() (no main window handle); whoever settles U-3 should pass a window handle.
 - 8hz.8: bead timeline was wrong (budget runs out at 15.5 s, not 7.5 s); tests assert the real 8hz.7 timeline.
 - qfx.10: resolve_socket_inodes has cfg_attr(not(test), expect(dead_code)); E29-A1 must remove it when wiring dispatch.
+- ndy.8: crates/tl-gpu-probe/src/api_versions.rs has #![allow(unsafe_code)] (ash and EGL FFI) with SAFETY comments. Second place with unsafe besides tl-ops/src/sys.rs; check against the ADR unsafe rule and review each block in the security pass.
