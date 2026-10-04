@@ -29,6 +29,12 @@ Do not pick up any other bead.
    question.
 8. Done: `br close <id> --reason "<what changed, commit sha>" --no-auto-flush --lock-timeout 180000`.
 
+Test in the real workspace. Do not copy the workspace to a scratch folder or add a worktree for
+testing: each copy builds its own target directory (over 100 MB) and the safety hook blocks
+deleting it afterwards. If a file is not wired in yet (for example a module whose `mod` line comes
+from a later bead), test it with a small `#[cfg(test)]` include in your own file or say in the
+report that the test runs with the later bead.
+
 Never test against the live desktop in a way that changes it (no loading KWin scripts, no ending
 real processes, no writing system files). UI tests use GPUI `TestAppContext` unless the bead says
 otherwise.
