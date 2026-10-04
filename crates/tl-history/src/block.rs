@@ -21,9 +21,8 @@ pub struct EncodedBlock {
 pub fn encode_block(b: &Block) -> Result<EncodedBlock, HistoryError> {
     let raw = postcard::to_stdvec(b)?;
     let compressed = zstd::bulk::compress(&raw, ZSTD_LEVEL).map_err(HistoryError::Zstd)?;
-    let len = u32::try_from(compressed.len()).map_err(|_| {
-        HistoryError::Zstd(std::io::Error::other("compressed block exceeds 4 GiB"))
-    })?;
+    let len = u32::try_from(compressed.len())
+        .map_err(|_| HistoryError::Zstd(std::io::Error::other("compressed block exceeds 4 GiB")))?;
     let mut bytes = Vec::with_capacity(FRAME_PREFIX_LEN + compressed.len());
     bytes.extend_from_slice(&len.to_le_bytes());
     bytes.extend_from_slice(&crc32fast::hash(&compressed).to_le_bytes());

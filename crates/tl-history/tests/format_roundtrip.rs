@@ -125,12 +125,18 @@ fn crc_mismatch_detected() {
     let mut bytes = encode_block(&sample_block()).unwrap().bytes;
     let mid = FRAME_PREFIX_LEN + (bytes.len() - FRAME_PREFIX_LEN) / 2;
     bytes[mid] ^= 0x01;
-    assert!(matches!(decode_block(&bytes, 64), Err(HistoryError::Crc(64))));
+    assert!(matches!(
+        decode_block(&bytes, 64),
+        Err(HistoryError::Crc(64))
+    ));
 
     // A flipped crc byte is a mismatch too.
     let mut bytes = encode_block(&sample_block()).unwrap().bytes;
     bytes[4] ^= 0x80;
-    assert!(matches!(decode_block(&bytes, 64), Err(HistoryError::Crc(64))));
+    assert!(matches!(
+        decode_block(&bytes, 64),
+        Err(HistoryError::Crc(64))
+    ));
 }
 
 #[test]
@@ -159,7 +165,10 @@ fn truncated_detected() {
 #[test]
 fn bad_zstd_with_good_crc_is_zstd_error() {
     let frame = frame_with_crc(b"not a zstd frame at all");
-    assert!(matches!(decode_block(&frame, 0), Err(HistoryError::Zstd(_))));
+    assert!(matches!(
+        decode_block(&frame, 0),
+        Err(HistoryError::Zstd(_))
+    ));
 }
 
 #[test]
@@ -168,7 +177,10 @@ fn oversized_block_is_zstd_error() {
     let raw = vec![0u8; (64 << 20) + 1];
     let compressed = zstd::bulk::compress(&raw, 3).unwrap();
     let frame = frame_with_crc(&compressed);
-    assert!(matches!(decode_block(&frame, 0), Err(HistoryError::Zstd(_))));
+    assert!(matches!(
+        decode_block(&frame, 0),
+        Err(HistoryError::Zstd(_))
+    ));
 }
 
 #[test]
@@ -306,7 +318,14 @@ fn arb_block() -> impl Strategy<Value = Block> {
         proptest::collection::vec(series, 0..3),
     )
         .prop_map(
-            |((start_t_ns, gap_before, mem_total_kib), catalog, new_meta, keyframe, deltas, system)| {
+            |(
+                (start_t_ns, gap_before, mem_total_kib),
+                catalog,
+                new_meta,
+                keyframe,
+                deltas,
+                system,
+            )| {
                 Block {
                     start_t_ns,
                     gap_before,
