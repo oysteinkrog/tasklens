@@ -1,0 +1,17 @@
+MemTotal:       16777216 kB
+MemFree:         2097152 kB
+MemAvailable:    8388608 kB
+Buffers:               0 kB
+Cached:                0 kB
+SwapCached:            0 kB
+SwapTotal:       8388608 kB
+SwapFree:        7340032 kB
+Zswap:                 0 kB
+Zswapped:              0 kB
+Dirty:            102400 kB
+Writeback:             0 kB
+Shmem:                 0 kB
+SReclaimable:          0 kB
+SUnreclaim:            0 kB
+CommitLimit:    16777216 kB
+Committed_AS:   20971520 kB
