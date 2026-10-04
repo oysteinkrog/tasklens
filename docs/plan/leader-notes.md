@@ -121,3 +121,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 2dl.30: netif::read_oper_state builds a PathBuf per interface per tick (one alloc per iface per sample). Make it take a reusable buffer or dirfd in the perf pass.
 - 8fx.11: a `deleted-keys.bin` that fails to decode loads as empty and the next delete overwrites it, so earlier user deletions come back. Review: keep the bad file aside, or refuse to show those boots, rather than silently forget deletions.
 - 8fx.11: history of other boots is opened (counts in disk_bytes and Stale) but never returned by span()/blocks(). Check the history spec for whether past boots are ever shown.
+- hx1.25: amdgpu gpu_metrics has no vcn_activity in any supported struct; video engine falls back to fdinfo. `average_mm_activity` not mapped (needs a decision). v2 structs give no edge/hotspot/mem temperature.
+- lgw.5: no test for the hairline at scale 1.1.
