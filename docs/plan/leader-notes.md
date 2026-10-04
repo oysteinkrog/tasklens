@@ -135,3 +135,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - iuz.14: script_set_enabled does lstat then fchmodat (TOCTOU symlink swap, same-user folder). Kernel 6.6+ has fchmodat2 with AT_SYMLINK_NOFOLLOW; or open O_NOFOLLOW|O_NONBLOCK and fchmod the fd. Fix in the security review.
 - 2dl.34 vs 2dl.24: partitions.rs stores udev and dm/name text unsanitized (bead: "sanitized by the UI"), while block.rs sanitizes dm names in tl-collect. Pick one rule (sanitize in tl-collect with sanitize_text, as E05-002 does for process text) and apply it to every collector text field in the review pass. 2dl.34's proptest covers type_name and gpt_flags only, not mutated udev/sysfs files.
 - 8fx.13: rolling window worst case (2,000 processes changing each second) passes under 16 MiB but the peak was not recorded; measure the margin in the perf pass.
+- ndy.5: real_sample_under_100ms hit 99.99 ms once under heavy machine load (quiet machine: 43 to 50 ms). It is #[ignore]; if it fails on the owner machine, read RX and TX concurrently.
+- fut.6: REFRESH_WHILE_HIDDEN path calls cx.refresh_windows() (no main window handle); whoever settles U-3 should pass a window handle.
+- 8hz.8: bead timeline was wrong (budget runs out at 15.5 s, not 7.5 s); tests assert the real 8hz.7 timeline.
+- qfx.10: resolve_socket_inodes has cfg_attr(not(test), expect(dead_code)); E29-A1 must remove it when wiring dispatch.
