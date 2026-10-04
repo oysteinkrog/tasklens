@@ -70,7 +70,7 @@ pub fn parse_pid_stat(buf: &[u8], out: &mut PidStat) -> Result<(), CollectError>
     let open = memchr(b'(', buf);
     let pid = open
         .and_then(|i| buf[..i].strip_suffix(b" "))
-        .and_then(|digits| parse_u64(digits))
+        .and_then(parse_u64)
         .and_then(|n| u32::try_from(n).ok());
     let err = CollectError::ProcParse {
         pid: pid.unwrap_or(0),
@@ -207,9 +207,23 @@ mod tests {
     }
 
     #[test]
-    fn close_paren_before_open_is_error() {
+    fn missing_close_paren_is_error() {
         let mut out = PidStat::default();
-        let err = parse_pid_stat(b"7 )x( S 1", &mut out).unwrap_err();
-        assert!(matches!(err, CollectError::ProcParse { pid: 7, file: "stat" }));
+        let err = parse_pid_stat(b"7 (x S 1", &mut out).unwrap_err();
+        assert!(matches!(
+            err,
+            CollectError::ProcParse {
+                pid: 7,
+                file: "stat"
+            }
+        ));
+        let err = parse_pid_stat(b"7 (x S 1\n) ", &mut out).unwrap_err();
+        assert!(matches!(
+            err,
+            CollectError::ProcParse {
+                pid: 7,
+                file: "stat"
+            }
+        ));
     }
 }

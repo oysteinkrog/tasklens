@@ -16,8 +16,11 @@ use tl_model::process::ProcState;
 
 fn stat(fixture: &str, pid: u32) -> PidStat {
     let mut out = PidStat::default();
-    parse_pid_stat(&fixture_bytes(fixture, &format!("proc/{pid}/stat")), &mut out)
-        .expect("parse stat");
+    parse_pid_stat(
+        &fixture_bytes(fixture, &format!("proc/{pid}/stat")),
+        &mut out,
+    )
+    .expect("parse stat");
     out
 }
 
@@ -71,12 +74,30 @@ fn stat_truncated_is_parse_error() {
 
     let mut out = PidStat::default();
     let err = parse_pid_stat(truncated, &mut out).unwrap_err();
-    assert!(matches!(err, CollectError::ProcParse { pid: 4201, file: "stat" }));
+    assert!(matches!(
+        err,
+        CollectError::ProcParse {
+            pid: 4201,
+            file: "stat"
+        }
+    ));
 
     let err = parse_pid_stat(b"x (a) S 1", &mut out).unwrap_err();
-    assert!(matches!(err, CollectError::ProcParse { pid: 0, file: "stat" }));
+    assert!(matches!(
+        err,
+        CollectError::ProcParse {
+            pid: 0,
+            file: "stat"
+        }
+    ));
     let err = parse_pid_stat(b"", &mut out).unwrap_err();
-    assert!(matches!(err, CollectError::ProcParse { pid: 0, file: "stat" }));
+    assert!(matches!(
+        err,
+        CollectError::ProcParse {
+            pid: 0,
+            file: "stat"
+        }
+    ));
 }
 
 #[test]
