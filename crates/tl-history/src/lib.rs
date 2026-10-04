@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod block;
 pub mod error;
 pub mod format;
 
