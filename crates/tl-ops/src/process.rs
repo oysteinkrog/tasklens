@@ -5,6 +5,8 @@
 //! `ProcessKey`. Signals then go through that pidfd, so they can never hit a reused PID. There is
 //! no fallback to `kill(pid)`.
 
+use std::ffi::CStr;
+use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
@@ -400,6 +402,98 @@ fn io_priority_of_inner(key: ProcessKey, boot: BootId) -> OpsResult<IoPriority> 
         return Err(OpsError::NoSuchProcess);
     }
     Ok(prio)
+}
+
+/// Sends `sig` to one thread of the verified process with `tgkill`, which fails unless `tid` is
+/// in thread group `process.pid`. A stop signal still stops the whole group (Linux group stop).
+pub fn thread_send_signal(process: ProcessKey, boot: BootId, tid: u32, sig: Signal) -> OpsResult {
+    let number = signal_number(sig)?;
+    with_verified_thread(process, boot, tid, &mut || {
+        sys::tgkill(process.pid, tid, number)
+    })
+}
+
+/// Sets the nice value of one thread of the verified process. `nice` must be -20..=19.
+pub fn thread_set_nice(process: ProcessKey, boot: BootId, tid: u32, nice: i8) -> OpsResult {
+    if !(-20..=19).contains(&nice) {
+        return Err(OpsError::InvalidInput("nice out of range"));
+    }
+    with_verified_thread(process, boot, tid, &mut || {
+        rustix::process::setpriority_process(Some(tid_pid(tid)?), i32::from(nice))
+    })
+}
+
+/// Sets the scheduling policy of one thread of the verified process. `rt_prio` is 1..=99 for
+/// `Fifo` and `Rr`, else 0. The thread keeps its nice value.
+pub fn thread_set_sched(
+    process: ProcessKey,
+    boot: BootId,
+    tid: u32,
+    policy: SchedPolicy,
+    rt_prio: u8,
+) -> OpsResult {
+    let base = sched_attr_for(policy, rt_prio, 0)?;
+    with_verified_thread(process, boot, tid, &mut || {
+        let nice = rustix::process::getpriority_process(Some(tid_pid(tid)?))?;
+        // The values were checked above, so this only fills in the nice value.
+        let attr = sched_attr_for(policy, rt_prio, nice).unwrap_or(base);
+        sys::sched_setattr_tid(tid, &attr)
+    })
+}
+
+/// Sets the CPU affinity of one thread of the verified process. A mask outside the CPUs the
+/// cgroup allows gives `Os(EINVAL)`.
+pub fn thread_set_affinity(process: ProcessKey, boot: BootId, tid: u32, set: &CpuSet) -> OpsResult {
+    let set = to_rustix_cpuset(set)?;
+    with_verified_thread(process, boot, tid, &mut || {
+        rustix::thread::sched_setaffinity(Some(tid_pid(tid)?), &set)
+    })
+}
+
+/// Runs `op` on thread `tid` of the verified process (R-097). The pidfd pins the process, and
+/// `/proc/<pid>/task/<tid>` must exist, so a TID of another process is never accepted. A thread
+/// that ends before `op` (`ESRCH`) gives `IdentityChanged`. The pidfd is polled after `op`, as in
+/// `for_each_tid`.
+fn with_verified_thread(
+    process: ProcessKey,
+    boot: BootId,
+    tid: u32,
+    op: &mut dyn FnMut() -> Result<(), Errno>,
+) -> OpsResult {
+    let result = with_verified_thread_inner(process, boot, tid, op);
+    tracing::debug!(pid = process.pid, tid, ok = result.is_ok(), error = ?result.as_ref().err(), "with_verified_thread");
+    result
+}
+
+fn with_verified_thread_inner(
+    process: ProcessKey,
+    boot: BootId,
+    tid: u32,
+    op: &mut dyn FnMut() -> Result<(), Errno>,
+) -> OpsResult {
+    let pidfd = open_verified(process, boot)?;
+    if tid == 0 {
+        return Err(OpsError::IdentityChanged);
+    }
+    // "/proc/4294967295/task/4294967295" plus the nul is 34 bytes, so the path fits on the stack.
+    let mut buf = [0u8; 40];
+    let mut cursor = &mut buf[..];
+    write!(cursor, "/proc/{}/task/{tid}\0", process.pid).map_err(|_| OpsError::Os(libc::EIO))?;
+    let path = CStr::from_bytes_until_nul(&buf).map_err(|_| OpsError::Os(libc::EIO))?;
+    match rustix::fs::stat(path) {
+        Ok(_) => {}
+        Err(Errno::NOENT) => return Err(OpsError::IdentityChanged),
+        Err(e) => return Err(e.into()),
+    }
+    match op() {
+        Ok(()) => {}
+        Err(Errno::SRCH) => return Err(OpsError::IdentityChanged),
+        Err(e) => return Err(e.into()),
+    }
+    if has_exited(&pidfd)? {
+        return Err(OpsError::OutcomeUnknown("process exited during the change"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1277,5 +1371,174 @@ mod tests {
         assert_eq!(io_priority_of(key, BOOT), Err(OpsError::IdentityChanged));
         assert_eq!(all_policies(pid), policies);
         assert_eq!(all_ioprio(pid), ioprio);
+    }
+
+    /// A thread of `pid` other than the main thread.
+    fn non_main_tid(pid: u32) -> u32 {
+        list_tids(pid)
+            .expect("list_tids")
+            .into_iter()
+            .find(|&tid| tid != pid)
+            .expect("no non-main thread")
+    }
+
+    fn tid_affinity(tid: u32) -> Vec<usize> {
+        let set = rustix::thread::sched_getaffinity(Pid::from_raw(tid as i32))
+            .expect("sched_getaffinity");
+        (0..rustix::thread::CpuSet::MAX_CPU)
+            .filter(|&cpu| set.is_set(cpu))
+            .collect()
+    }
+
+    #[test]
+    fn thread_set_nice_only_that_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let tid = non_main_tid(pid);
+        let main_before = tid_nice(pid, pid);
+        let target = raised_nice(pid);
+        assert_eq!(thread_set_nice(children.key(0), BOOT, tid, target), Ok(()));
+        assert_eq!(tid_nice(pid, tid), i32::from(target));
+        assert_eq!(tid_nice(pid, pid), main_before);
+    }
+
+    #[test]
+    fn thread_set_affinity_only_that_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let tid = non_main_tid(pid);
+        let others: Vec<(u32, Vec<usize>)> = list_tids(pid)
+            .expect("list_tids")
+            .into_iter()
+            .filter(|&t| t != tid)
+            .map(|t| (t, tid_affinity(t)))
+            .collect();
+        let mut set = CpuSet::empty();
+        set.insert(0);
+        assert_eq!(
+            thread_set_affinity(children.key(0), BOOT, tid, &set),
+            Ok(())
+        );
+        assert_eq!(tid_affinity(tid), vec![0]);
+        for (t, before) in others {
+            assert_eq!(tid_affinity(t), before, "tid {t}");
+        }
+    }
+
+    #[test]
+    fn thread_set_sched_only_that_tid() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let tid = non_main_tid(pid);
+        let tids = list_tids(pid).expect("list_tids");
+        let before = all_policies(pid);
+        assert_eq!(
+            thread_set_sched(children.key(0), BOOT, tid, SchedPolicy::Batch, 0),
+            Ok(())
+        );
+        let after = all_policies(pid);
+        for ((&t, &b), &a) in tids.iter().zip(&before).zip(&after) {
+            if t == tid {
+                assert_eq!(a, 3, "tid {t}");
+            } else {
+                assert_eq!(a, b, "tid {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn thread_signal_stop_stops_group() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let tid = non_main_tid(pid);
+        let key = children.key(0);
+        let state = || stat_fields(pid).map(|f| f[0].clone());
+        assert_eq!(thread_send_signal(key, BOOT, tid, Signal::Stop), Ok(()));
+        assert!(
+            wait_for(|| state().as_deref() == Some("T")),
+            "state {:?}",
+            state()
+        );
+        assert_eq!(thread_send_signal(key, BOOT, tid, Signal::Cont), Ok(()));
+        assert!(
+            wait_for(|| state().as_deref() != Some("T")),
+            "state {:?}",
+            state()
+        );
+    }
+
+    #[test]
+    fn thread_missing_tid_is_identity_changed() {
+        let children = threaded_child();
+        let key = children.key(0);
+        let tid = 0x7fff_fff0;
+        assert!(
+            !list_tids(children.pid(0))
+                .expect("list_tids")
+                .contains(&tid)
+        );
+        let mut called = false;
+        assert_eq!(
+            with_verified_thread(key, BOOT, tid, &mut || {
+                called = true;
+                Ok(())
+            }),
+            Err(OpsError::IdentityChanged)
+        );
+        assert!(!called, "op ran for a missing TID");
+        let mut set = CpuSet::empty();
+        set.insert(0);
+        for result in [
+            thread_send_signal(key, BOOT, tid, Signal::Term),
+            thread_set_nice(key, BOOT, tid, 5),
+            thread_set_sched(key, BOOT, tid, SchedPolicy::Batch, 0),
+            thread_set_affinity(key, BOOT, tid, &set),
+            thread_set_nice(key, BOOT, 0, 5),
+        ] {
+            assert_eq!(result, Err(OpsError::IdentityChanged));
+        }
+    }
+
+    #[test]
+    fn thread_foreign_tid_is_identity_changed() {
+        let children = threaded_child();
+        let own_tid = rustix::thread::gettid();
+        let own = u32::try_from(own_tid.as_raw_nonzero().get()).expect("tid fits u32");
+        let before = rustix::process::getpriority_process(Some(own_tid)).expect("getpriority");
+        let target = if before == 5 { 6 } else { 5 };
+        assert_eq!(
+            thread_set_nice(children.key(0), BOOT, own, target),
+            Err(OpsError::IdentityChanged)
+        );
+        assert_eq!(
+            rustix::process::getpriority_process(Some(own_tid)).expect("getpriority"),
+            before
+        );
+    }
+
+    #[test]
+    fn thread_shifted_key_is_identity_changed() {
+        let children = threaded_child();
+        let pid = children.pid(0);
+        let tid = non_main_tid(pid);
+        let nice = all_nice(pid);
+        let policies = all_policies(pid);
+        let affinity = tid_affinity(tid);
+        let mut key = children.key(0);
+        key.start_ticks += 1;
+        let mut set = CpuSet::empty();
+        set.insert(0);
+        for result in [
+            thread_send_signal(key, BOOT, tid, Signal::Stop),
+            thread_set_nice(key, BOOT, tid, 19),
+            thread_set_sched(key, BOOT, tid, SchedPolicy::Batch, 0),
+            thread_set_affinity(key, BOOT, tid, &set),
+        ] {
+            assert_eq!(result, Err(OpsError::IdentityChanged));
+        }
+        assert_eq!(stat_fields(pid).expect("stat")[0], "S");
+        assert_eq!(all_nice(pid), nice);
+        assert_eq!(all_policies(pid), policies);
+        assert_eq!(tid_affinity(tid), affinity);
     }
 }
