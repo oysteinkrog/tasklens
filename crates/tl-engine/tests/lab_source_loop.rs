@@ -1,6 +1,6 @@
 //! LabRuntime tests for the sampling loop in `source.rs` (ADR-004, ADR-013).
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use asupersync::channel::{mpsc, watch};
@@ -136,7 +136,10 @@ impl Source for CmdSource {
 
     fn sample(mut self) -> (Self, SourceUpdate) {
         self.samples += 1;
-        self.log.lock().unwrap().push("sample");
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push("sample");
         assert_ne!(Some(self.samples), self.crash_on_sample, "sample crash");
         let update = SourceUpdate::Health {
             id: SourceId::Udisks,
@@ -148,7 +151,10 @@ impl Source for CmdSource {
     }
 
     fn command(&mut self, cmd: &WorkerCommand) -> bool {
-        self.log.lock().unwrap().push(cmd.kind());
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(cmd.kind());
         assert_ne!(Some(cmd.kind()), self.crash_on, "command crash");
         true
     }
@@ -225,6 +231,8 @@ impl Rig {
 
     fn advance(&mut self, d: Duration) {
         self.lab.advance_time(d.as_nanos() as u64);
+        // `run_until_idle` stops when no task is ready; one step fires the due timers.
+        self.lab.step_for_test();
         self.lab.run_until_idle();
     }
 
@@ -246,7 +254,7 @@ impl Rig {
 }
 
 fn entries(log: &Log) -> Vec<&'static str> {
-    log.lock().unwrap().clone()
+    log.lock().unwrap_or_else(PoisonError::into_inner).clone()
 }
 
 #[test]
