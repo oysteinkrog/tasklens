@@ -19,7 +19,11 @@ fn resolve(vars: &[(&str, &str)]) -> anyhow::Result<Paths> {
 }
 
 fn mode(path: &Path) -> u32 {
-    std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    std::fs::metadata(path)
+        .expect("metadata")
+        .permissions()
+        .mode()
+        & 0o7777
 }
 
 #[test]
