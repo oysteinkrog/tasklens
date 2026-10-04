@@ -1,5 +1,6 @@
 //! Tests for app naming (E05-018), the desktop entry index (E05-013), the desktop watch
-//! (E05-014), icon theme resolution (E05-019) and the icon path cache (E05-020).
+//! (E05-014), icon theme resolution (E05-019), the icon path cache (E05-020) and process
+//! classification (E05-015).
 
 use std::ffi::OsStr;
 use std::fs;
@@ -7,6 +8,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tl_collect::apps::classify::{ClassifyInput, ProcClass, classify, group_key};
 use tl_collect::apps::desktop::{
     DesktopIndex, DesktopWatch, data_dirs_from_env, exec_binary, exec_binary_in,
 };
@@ -17,6 +19,9 @@ use tl_collect::apps::icons::{
 use tl_collect::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
 };
+use tl_collect::proc::cgroup::{CgroupPath, parse_cgroup_file};
+use tl_model::ids::GroupKey;
+use tl_model::process::GroupKind;
 
 fn argv(tokens: &[&str]) -> Vec<Arc<str>> {
     tokens.iter().map(|t| Arc::from(*t)).collect()
@@ -666,4 +671,157 @@ fn icon_cache_no_write_when_clean() {
     assert_eq!(after.ino(), before.ino());
     assert_eq!(after.mtime_nsec(), before.mtime_nsec());
     assert_eq!(after.mtime(), before.mtime());
+}
+
+// ---- Classification and GroupKey (E05-015) ----
+
+const SELF_UID: u32 = 1000;
+
+fn cgroup(path: &str) -> CgroupPath {
+    parse_cgroup_file(format!("0::/{path}\n").as_bytes()).expect("cgroup path")
+}
+
+fn class_input<'a>(cg: Option<&'a CgroupPath>, app_id: Option<&'a Arc<str>>) -> ClassifyInput<'a> {
+    ClassifyInput {
+        pid: 4242,
+        ruid: SELF_UID,
+        kernel_thread: false,
+        cgroup: cg,
+        cgroup_denied: false,
+        app_id,
+        owns_window: false,
+    }
+}
+
+#[test]
+fn classify_kernel_thread() {
+    let cg = cgroup("");
+    let inp = ClassifyInput {
+        ruid: 0,
+        kernel_thread: true,
+        ..class_input(Some(&cg), None)
+    };
+    let (class, kind) = classify(&inp, SELF_UID);
+    assert_eq!((class, kind), (ProcClass::KernelThread, GroupKind::System));
+    assert_eq!(class.type_label(), "Kernel thread");
+}
+
+#[test]
+fn classify_other_uid_is_system() {
+    let cg = cgroup("user.slice/user-1000.slice/user@1000.service/app.slice/foo.service");
+    let inp = ClassifyInput {
+        ruid: 0,
+        ..class_input(Some(&cg), None)
+    };
+    let (class, kind) = classify(&inp, SELF_UID);
+    assert_eq!((class, kind), (ProcClass::System, GroupKind::System));
+    assert_eq!(class.type_label(), "System process");
+}
+
+#[test]
+fn classify_system_slice_is_system() {
+    let cg = cgroup("system.slice/pipewire.service");
+    let inp = class_input(Some(&cg), None);
+    assert_eq!(
+        classify(&inp, SELF_UID),
+        (ProcClass::System, GroupKind::System)
+    );
+    // Another user's slice is System too, even with our ruid.
+    let cg = cgroup("user.slice/user-1001.slice/user@1001.service/app.slice/foo.service");
+    let inp = class_input(Some(&cg), None);
+    assert_eq!(
+        classify(&inp, SELF_UID),
+        (ProcClass::System, GroupKind::System)
+    );
+}
+
+#[test]
+fn classify_app_scope_is_app() {
+    let cg =
+        cgroup("user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service");
+    let app: Arc<str> = Arc::from("firefox");
+    let inp = class_input(Some(&cg), Some(&app));
+    let (class, kind) = classify(&inp, SELF_UID);
+    assert_eq!(
+        (class, kind),
+        (
+            ProcClass::App,
+            GroupKind::App {
+                app_id: Arc::from("firefox")
+            }
+        )
+    );
+    assert_eq!(class.type_label(), "App");
+}
+
+#[test]
+fn classify_session_slice_is_background() {
+    for path in [
+        "user.slice/user-1000.slice/user@1000.service/session.slice/plasma-kwin_wayland.service",
+        "user.slice/user-1000.slice/user@1000.service/init.scope",
+        "user.slice/user-1000.slice/session-2.scope",
+    ] {
+        let cg = cgroup(path);
+        let inp = class_input(Some(&cg), None);
+        let (class, kind) = classify(&inp, SELF_UID);
+        assert_eq!(
+            (class, kind),
+            (ProcClass::Background, GroupKind::Background),
+            "{path}"
+        );
+        assert_eq!(class.type_label(), "Background process");
+    }
+}
+
+#[test]
+fn classify_autostart_without_window_is_background() {
+    let cg =
+        cgroup("user.slice/user-1000.slice/user@1000.service/app.slice/app-foo@autostart.service");
+    let inp = class_input(Some(&cg), None);
+    assert_eq!(
+        classify(&inp, SELF_UID),
+        (ProcClass::Background, GroupKind::Background)
+    );
+}
+
+#[test]
+fn classify_unreadable_cgroup_ungrouped() {
+    let cg = cgroup("user.slice/user-1000.slice/session-2.scope");
+    let denied = ClassifyInput {
+        cgroup_denied: true,
+        ..class_input(Some(&cg), None)
+    };
+    assert_eq!(
+        classify(&denied, SELF_UID),
+        (ProcClass::Background, GroupKind::Ungrouped)
+    );
+    let missing = class_input(None, None);
+    assert_eq!(
+        classify(&missing, SELF_UID),
+        (ProcClass::Background, GroupKind::Ungrouped)
+    );
+}
+
+#[test]
+fn group_key_stable() {
+    let app = GroupKind::App {
+        app_id: Arc::from("firefox"),
+    };
+    assert_eq!(group_key(&app), group_key(&app.clone()));
+    let keys = [
+        group_key(&app),
+        group_key(&GroupKind::Background),
+        group_key(&GroupKind::System),
+        group_key(&GroupKind::Ungrouped),
+    ];
+    // History (ADR-012) stores these values. A change here breaks stored history.
+    assert_eq!(
+        keys,
+        [
+            GroupKey(8_670_821_890_558_686_982),
+            GroupKey(5_869_058_164_875_963_351),
+            GroupKey(18_026_959_284_135_166_402),
+            GroupKey(11_738_116_329_684_817_838),
+        ]
+    );
 }
