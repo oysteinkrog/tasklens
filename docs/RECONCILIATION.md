@@ -1688,6 +1688,18 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: the test capture on the owner machine [verified]; ADR-013, ADR-016 udev row, R-140, R-261 [verified].
 - Edits: ADR-013 scrub sentences and ADR-016 udev row (`ID_PATH`); beads 2dl.37, 2dl.33.
 
+### R-267 Fixture capture replaces the boot ID and machine ID with fixed fake values
+- Question: the E04 fixture privacy gate (`tasklens-2dl.10`) found the owner machine's real `proc/sys/kernel/random/boot_id` in a capture. ADR-013's scrub list did not name it. Leader decision, 2026-10-04.
+- Resolution: `capture-fixture` writes `00000000-0000-4000-8000-000000000001` to `proc/sys/kernel/random/boot_id`, and `00000000000040008000000000000001` to a captured machine-id file. Both are valid in form, so parsers and `ProcessKey` tests still work.
+- Basis: the 2dl.10 privacy gate and commit `3255e91` [verified].
+- Edits: ADR-013 scrub sentence in ARCHITECTURE.md.
+
+### R-268 The fd count of another user's process shows the kernel's number
+- Question: E05-008 (`tasklens-yms.11`) expects `fd_count(1)` to return `Restricted` for a normal user. On kernel 7.2.8, `stat /proc/1/fd` as uid 1000 returns the real count in `st_size` (U-34 confirmed: all 20 test children counted by `st_size`, no fallback), while `readdir` on the same folder fails with EACCES. Leader decision, 2026-10-04.
+- Resolution: `fd_count` returns `Count(st_size)` whenever `st_size` is above 0, for any owner. The kernel gives this number to unprivileged users on purpose, and it is a count only, with no fd targets. When `st_size` is 0 (kernels before 6.2), the readdir fallback runs, and EACCES or EPERM gives `Restricted`. The real-system test `fdcount_pid1_restricted` becomes `fdcount_pid1_other_user`: it passes on `Count(n)` with n above 0 or on `Restricted`, and asserts `Count` when the kernel is 6.2 or newer. The Handles column therefore shows numbers for other users' processes on current kernels, as TaskSlinger does on Windows. No access check is added.
+- Basis: the yms.11 run on the owner machine [verified]; the kernel 6.2 `st_size` change [inferred from U-34's purpose and the observed behaviour].
+- Edits: bead yms.11 acceptance criteria.
+
 
 
 
