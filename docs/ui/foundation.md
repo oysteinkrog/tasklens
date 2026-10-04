@@ -56,7 +56,7 @@ value is used, because the PNGs went through WebP compression; the difference is
 | `scroll_track` | `#1A1C1E` | measured (`processes.png` 2706,900) |
 | `scroll_thumb` | `#494F54` | measured (`processes.png` 2706,340) |
 | `text_primary` | `#D6D8D9` | plan; measured status bar text `#D6D8D9` |
-| `text_secondary` | `#6C7072` | plan |
+| `text_secondary` | `#818587` | decided: TaskSlinger's `#6C7072` is 3.45:1 on `list_bg`; the lightest grey on the same hue that clears the 4.5:1 floor with margin is 4.64:1 (R-269) |
 | `text_selected_primary` | `#FFFFFF` | decided: white on `row_selected` gives contrast 5.9:1 |
 | `text_selected_secondary` | `#BFD9E6` | decided: a light tint of the accent, 4.4:1 on `row_selected` |
 | `value_heat` | `#3E2A28` | plan ("heat tint at maximum"); measured `#3D2725` |
@@ -1403,7 +1403,7 @@ pub struct ThemeStore {              // GPUI Global, one per app
   "INPUT_FOCUS":"#25282B","HEADER":"#2E3235","LIST_BG":"#191B1D","ROW_ALT":"#1D1F20",
   "ROW_HOVER":"#232629","ROW_SELECTED":"#075B84","DIVIDER":"#2B2F33","MENU_BG":"#2A2E31",
   "MENU_HOVER":"#104B68","TAB_BG":"#202224","TAB_HOVER":"#27292B","SCROLL_TRACK":"#1A1C1E",
-  "SCROLL_THUMB":"#494F54","TEXT_PRIMARY":"#D6D8D9","TEXT_SECONDARY":"#6C7072",
+  "SCROLL_THUMB":"#494F54","TEXT_PRIMARY":"#D6D8D9","TEXT_SECONDARY":"#818587",
   "TEXT_SELECTED_PRIMARY":"#FFFFFF","TEXT_SELECTED_SECONDARY":"#BFD9E6","VALUE_HEAT":"#3E2A28",
   "accent":"#0277A6",
   "status":{"success":"#4CAF50","warning":"#E0A526","danger":"#D9534F","info":"#2A9FD6"},

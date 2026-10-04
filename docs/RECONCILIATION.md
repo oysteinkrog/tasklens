@@ -1700,6 +1700,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: the yms.11 run on the owner machine [verified]; the kernel 6.2 `st_size` change [inferred from U-34's purpose and the observed behaviour].
 - Edits: bead yms.11 acceptance criteria.
 
+### R-269 Default Dark `text_secondary` becomes `#818587`
+- Question: E17-002 (`tasklens-lgw.4`) ships Default Dark with `text_secondary` `#6C7072` (TaskSlinger's value, marked "plan" in UI-FND-001), but its own `contrast_floor` test needs every text pair at 4.5:1 or above. `#6C7072` on `list_bg` and `window_bg` (`#191B1D`) is 3.45:1. Leader decision, 2026-10-04.
+- Resolution: Default Dark `text_secondary` is `#818587`, which is 4.64:1 on `#191B1D`. It keeps the hue of `#6C7072` and is the first grey on that hue that clears 4.5:1 with a small margin. The 4.5:1 floor (UI-FND-043, R-122) stays the rule, so no pair is exempted. TaskSlinger fidelity for this one slot gives way to legibility.
+- Basis: the lgw.4 contrast test [verified]; WCAG 2 contrast formula [verified by computation].
+- Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; bead lgw.4 data (`assets/themes/builtin.json`, `crates/tl-ui/src/theme/builtin.rs`).
+
 
 
 
