@@ -2,8 +2,8 @@
 
 use proptest::prelude::*;
 use tl_model::units::{
-    bytes, bytes_of, ceil_125, ceil_pow2, mib_whole, net_rate, percent, percent_2dp,
-    rate_iec_auto, rate_mib_fixed, NetUnit,
+    NetUnit, bytes, bytes_of, ceil_125, ceil_pow2, mib_whole, net_rate, percent, percent_2dp,
+    rate_iec_auto, rate_mib_fixed,
 };
 
 fn fmt(f: impl FnOnce(&mut String)) -> String {
@@ -89,7 +89,10 @@ fn rate_auto_step_up() {
 
 #[test]
 fn net_bits_fixed() {
-    assert_eq!(fmt(|s| net_rate(s, 287_500.0, NetUnit::Bits, false)), "2.3 Mbps");
+    assert_eq!(
+        fmt(|s| net_rate(s, 287_500.0, NetUnit::Bits, false)),
+        "2.3 Mbps"
+    );
     assert_eq!(fmt(|s| net_rate(s, 0.0, NetUnit::Bits, false)), "0 Mbps");
     assert_eq!(fmt(|s| net_rate(s, 6.0, NetUnit::Bits, false)), "0 Mbps");
 }
@@ -97,14 +100,23 @@ fn net_bits_fixed() {
 #[test]
 fn net_bits_auto() {
     assert_eq!(fmt(|s| net_rate(s, 50.0, NetUnit::Bits, true)), "0.4 Kbps");
-    assert_eq!(fmt(|s| net_rate(s, 287_500.0, NetUnit::Bits, true)), "2.3 Mbps");
-    assert_eq!(fmt(|s| net_rate(s, 250_000_000.0, NetUnit::Bits, true)), "2.0 Gbps");
+    assert_eq!(
+        fmt(|s| net_rate(s, 287_500.0, NetUnit::Bits, true)),
+        "2.3 Mbps"
+    );
+    assert_eq!(
+        fmt(|s| net_rate(s, 250_000_000.0, NetUnit::Bits, true)),
+        "2.0 Gbps"
+    );
     assert_eq!(fmt(|s| net_rate(s, 0.0, NetUnit::Bits, true)), "0 Mbps");
 }
 
 #[test]
 fn net_bytes_forms() {
-    assert_eq!(fmt(|s| net_rate(s, 1_572_864.0, NetUnit::Bytes, false)), "1.5 MiB/s");
+    assert_eq!(
+        fmt(|s| net_rate(s, 1_572_864.0, NetUnit::Bytes, false)),
+        "1.5 MiB/s"
+    );
     assert_eq!(fmt(|s| net_rate(s, 0.0, NetUnit::Bytes, true)), "0 MiB/s");
 }
 

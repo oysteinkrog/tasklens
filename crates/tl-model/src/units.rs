@@ -17,14 +17,17 @@ const MIB: f64 = 1024.0 * 1024.0;
 /// Writes `v` with `prec` decimals and `suffix`. If `v` is not positive, or the printed digits
 /// are all zero, the written text is replaced by `zero`.
 fn write_or_zero(out: &mut String, v: f64, prec: usize, suffix: &str, zero: &str) {
-    // `!(v > 0.0)` also catches NaN and -0.0.
-    if !(v > 0.0) {
+    // `v <= 0.0` also catches -0.0.
+    if v.is_nan() || v <= 0.0 {
         out.push_str(zero);
         return;
     }
     let start = out.len();
     let _ = write!(out, "{v:.prec$}");
-    if out.as_bytes()[start..].iter().all(|&b| b == b'0' || b == b'.') {
+    if out.as_bytes()[start..]
+        .iter()
+        .all(|&b| b == b'0' || b == b'.')
+    {
         out.truncate(start);
         out.push_str(zero);
         return;
@@ -146,7 +149,7 @@ pub fn ceil_pow2(n: u64) -> u64 {
 /// Smallest value of the form {1, 2, 5} × 10^k that is >= x (k may be negative). Network axis maximum.
 /// x <= 0 or NaN gives 1.0.
 pub fn ceil_125(x: f64) -> f64 {
-    if !(x > 0.0) {
+    if x.is_nan() || x <= 0.0 {
         return 1.0;
     }
     // log10 can be off by one near a power of ten, so try the decade below as well.
