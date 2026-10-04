@@ -40,14 +40,19 @@ fn control_chars_replaced() {
     assert_eq!(text(b"a\tb", 64), "a\u{FFFD}b");
     assert_eq!(text(b"a\x01b\x1fc", 64), "a\u{FFFD}b\u{FFFD}c");
     assert_eq!(text(b"a\x7fb", 64), "a\u{FFFD}b");
-    assert_eq!(text("a\u{0080}b\u{0085}c\u{009F}d".as_bytes(), 64), "a\u{FFFD}b\u{FFFD}c\u{FFFD}d");
+    assert_eq!(
+        text("a\u{0080}b\u{0085}c\u{009F}d".as_bytes(), 64),
+        "a\u{FFFD}b\u{FFFD}c\u{FFFD}d"
+    );
     assert_eq!(text(b"a\nb\rc\0d", 64), "a b c d");
     assert_eq!(text(b"line\n\n", 64), "line");
 }
 
 #[test]
 fn bidi_and_zero_width_removed() {
-    let removed = ('\u{202A}'..='\u{202E}').chain('\u{2066}'..='\u{2069}').chain('\u{200B}'..='\u{200F}');
+    let removed = ('\u{202A}'..='\u{202E}')
+        .chain('\u{2066}'..='\u{2069}')
+        .chain('\u{200B}'..='\u{200F}');
     for c in removed {
         let raw = format!("a{c}b");
         let out = text(raw.as_bytes(), 64);
@@ -63,7 +68,10 @@ fn bidi_and_zero_width_removed() {
 fn invalid_utf8_lossy() {
     assert_eq!(text(b"a\xff\xfeb", 64), "a\u{FFFD}\u{FFFD}b");
     // A multi-byte sequence cut by the limit becomes U+FFFD, then the ellipsis.
-    assert_eq!(text("ab\u{00E9}".as_bytes(), 3), format!("ab\u{FFFD}{ELLIPSIS}"));
+    assert_eq!(
+        text("ab\u{00E9}".as_bytes(), 3),
+        format!("ab\u{FFFD}{ELLIPSIS}")
+    );
     // Same result as from_utf8_lossy for valid characters.
     let raw = b"caf\xc3\xa9 \xe2\x82 x";
     assert_eq!(text(raw, 64), String::from_utf8_lossy(raw));
@@ -74,7 +82,9 @@ fn cmdline_1mib_truncated_to_32kib() {
     let raw = vec![b'x'; 1024 * 1024];
     let mut out = String::new();
     sanitize_cmdline(&raw, &mut out);
-    let expected: String = std::iter::repeat_n('x', CMDLINE_MAX).chain([ELLIPSIS]).collect();
+    let expected: String = std::iter::repeat_n('x', CMDLINE_MAX)
+        .chain([ELLIPSIS])
+        .collect();
     assert_eq!(out.chars().count(), 32_768 + 1);
     assert_eq!(out, expected);
 }
@@ -99,7 +109,9 @@ fn link_deleted_suffix_kept() {
 fn reuses_buffer() {
     let mut out = String::with_capacity(64 * 1024);
     let before = out.capacity();
-    let raw: Vec<u8> = (0..32 * 1024).map(|i| if i % 7 == 0 { 0 } else { b'a' + (i % 26) as u8 }).collect();
+    let raw: Vec<u8> = (0..32 * 1024)
+        .map(|i| if i % 7 == 0 { 0 } else { b'a' + (i % 26) as u8 })
+        .collect();
     sanitize_cmdline(&raw, &mut out);
     assert_eq!(out.capacity(), before);
     sanitize_text(b"a\xff\xfeb", CMDLINE_MAX, &mut out);
