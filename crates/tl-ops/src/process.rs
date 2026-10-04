@@ -677,7 +677,8 @@ mod tests {
     }
 
     /// The child half of the threaded test child. It returns at once unless
-    /// `TL_OPS_THREADED_CHILD=1`; with it set, it starts 2 extra threads, prints `ready` and sleeps
+    /// `TL_OPS_THREADED_CHILD=1`; with it set, it starts 2 extra threads, prints `ready` to stderr
+    /// and sleeps
     /// 60 s.
     #[test]
     fn threaded_child_entry() {
@@ -687,7 +688,7 @@ mod tests {
         for _ in 0..2 {
             std::thread::spawn(|| std::thread::sleep(Duration::from_secs(60)));
         }
-        println!("ready");
+        eprintln!("ready");
         std::thread::sleep(Duration::from_secs(60));
     }
 
@@ -702,10 +703,10 @@ mod tests {
                 "--nocapture",
             ])
             .env("TL_OPS_THREADED_CHILD", "1")
-            .stdout(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped());
         let mut children = Children::spawn(&mut [&mut command]);
-        let stdout = children.children[0].stdout.take().expect("child stdout");
-        let ready = std::io::BufReader::new(stdout)
+        let stderr = children.children[0].stderr.take().expect("child stderr");
+        let ready = std::io::BufReader::new(stderr)
             .lines()
             .any(|line| line.is_ok_and(|l| l.trim() == "ready"));
         assert!(ready, "threaded child never printed ready");
@@ -730,20 +731,31 @@ mod tests {
         tids.iter().map(|&tid| tid_nice(pid, tid)).collect()
     }
 
+    /// 5, or one above the highest nice of `pid` when that is already 5 or more, capped at 19.
+    /// Raising nice needs no privilege, so this works under any RLIMIT_NICE.
+    fn raised_nice(pid: u32) -> i8 {
+        let max = all_nice(pid).into_iter().max().expect("no threads");
+        i8::try_from((max + 1).clamp(5, 19)).expect("nice fits i8")
+    }
+
     #[test]
     fn set_nice_applies_to_every_tid() {
         let children = threaded_child();
         let pid = children.pid(0);
         assert!(list_tids(pid).expect("list_tids").len() >= 3);
-        assert_eq!(set_nice(children.key(0), BOOT, 5), Ok(()));
+        let target = raised_nice(pid);
+        assert_eq!(set_nice(children.key(0), BOOT, target), Ok(()));
         let nice = all_nice(pid);
-        assert!(nice.iter().all(|&n| n == 5), "nice values {nice:?}");
+        assert!(
+            nice.iter().all(|&n| n == i32::from(target)),
+            "nice values {nice:?}"
+        );
     }
 
     #[test]
     fn lowering_nice_without_cap_is_permission_denied() {
         if rustix::process::geteuid().is_root() {
-            println!("skipped: running as root, which may lower nice");
+            eprintln!("skipped: running as root, which may lower nice");
             return;
         }
         let children = threaded_child();
@@ -759,13 +771,18 @@ mod tests {
             zero,
         )
         .expect("prlimit");
-        assert_eq!(set_nice(children.key(0), BOOT, 5), Ok(()));
+        // The child inherits our nice, which a daemon such as ananicy may have raised above 5.
+        let high = raised_nice(pid);
+        assert_eq!(set_nice(children.key(0), BOOT, high), Ok(()));
         assert_eq!(
-            set_nice(children.key(0), BOOT, 0),
+            set_nice(children.key(0), BOOT, high - 5),
             Err(OpsError::PermissionDenied)
         );
         let nice = all_nice(pid);
-        assert!(nice.iter().all(|&n| n == 5), "nice values {nice:?}");
+        assert!(
+            nice.iter().all(|&n| n == i32::from(high)),
+            "nice values {nice:?}"
+        );
     }
 
     #[test]
