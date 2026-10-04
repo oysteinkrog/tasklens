@@ -117,7 +117,7 @@ Files owned: `crates/tl-ui/src/pages/performance/{mod,page,sidebar,card,summary,
 | E24-022 | tasklens-crw.24 | Details value selection fallback: click selects, Ctrl+C copies the value, Esc clears, "Copy value" context item (U-46) | P1 | E24-A1,E16-A3 |
 | E24-023 | tasklens-crw.25 | "Add tray icon graph" items on the card and page menus (P3 slot) | P3 | E24-A2 |
 | E24-024 | tasklens-crw.26 | aggregate sidebar cards and group (P4) | P4 | E24-A2 |
-| E24-025 | (not created) | disconnected-fan visibility rule in the sidebar (0 RPM all session and no label, unless show_disconnected_fans) | P2 | E24-A2 |
+| E24-025 | tasklens-crw.27 | disconnected-fan visibility rule in the sidebar (0 RPM all session and no label, unless show_disconnected_fans) | P2 | E24-A2 |
 
 27 beads.
 
@@ -149,41 +149,41 @@ Files owned: `crates/tl-ui/src/pages/performance/{memory,memory_bar,disk,net,gpu
 
 | Plan key | Bead ID | Title | Phase | Depends on |
 |---|---|---|---|---|
-| E25-001 | (not created) | MemoryPage: Physical memory, Commit and Swap charts, page menu checks, demand (pages/performance/memory.rs) | P1 | E24-A1,E19-A1 |
-| E25-002 | (not created) | memory composition bar element: five segments, hatching, min width, labels, tooltips, hover (pages/performance/memory_bar.rs) | P1 | E25-001,E15-A1 |
-| E25-003 | (not created) | Memory Details grid P1 rows (In use to Kernel slab, Swap, Compressed, Savings, Huge pages) with hidden-row rules | P1 | E25-001 |
-| E25-004 | (not created) | DiskPage: Active time and Transfer rate charts, header, demand, states (pages/performance/disk.rs) | P1 | E24-A1,E19-A1 |
-| E25-005 | (not created) | Disk Details grid P1 rows: Active time, Average response time, Read speed, Write speed, Capacity | P1 | E25-004 |
-| E25-006 | (not created) | NetPage: Throughput chart, AutoRate or LinkSpeed scale, disconnected state, demand (pages/performance/net.rs) | P1 | E24-A1,E19-A1 |
-| E25-007 | (not created) | Network Details P1 rows (rates, totals) and the Display unit row with its menu | P1 | E25-006,E16-A3 |
-| E25-008 | (not created) | GpuPage: engine grid (3D/Compute, Video Encode, Video Decode), Memory and Temperature charts, probe states (pages/performance/gpu.rs) | P1 | E24-A1,E19-A2 |
-| E25-009 | (not created) | GPU Details grid P1 rows 1 to 8 (Utilization to Temperature source) | P1 | E25-008 |
-| E25-010 | (not created) | build_page arms for Memory, Disk, Net and Gpu (chain edit page.rs) and page activation wiring | P1 | E25-001,E25-004,E25-006,E25-008 |
-| E25-A1 | (not created) | Device pages | P1 | E25-003,E25-005,E25-007,E25-009,E25-010,E24-A2,E16-A2,E18-A1,E19-A2 |
-| E25-011 | (not created) | Memory Details P2 rows from the DIMM inventory: Speed, Slots used, Form factor, Type, Hardware reserved | P2 | E25-A1 |
-| E25-012 | (not created) | "Compressed memory" block: per-zram grids and the zswap grid | P2 | E25-A1 |
-| E25-013 | (not created) | "Swap devices" table block (flat TlTreeTable: Name, Type, Size, Used, Priority) | P2 | E25-A1,E18-A1 |
-| E25-014 | (not created) | "Memory modules" block: Slots used line and collapsible per-DIMM grids without serials | P2 | E25-A1,E15-A1 |
-| E25-015 | (not created) | Disk Details P2 rows: totals, Formatted, Used, Free, System disk, Swap, Hardware name, Type, Interface, WWN, Serial, Rotation rate, Temperature with hidden rules | P2 | E25-A1 |
-| E25-016 | (not created) | Partitions table block: heading, columns, usage bar, Unallocated rows | P2 | E25-A1,E18-A1 |
-| E25-017 | (not created) | Disk header buttons "Show SMART data" and "Eject" with live visibility, and the page menu items | P2 | E25-A1 |
-| E25-018 | (not created) | "tasklens SMART Data" window: header grid, Refresh, ATA table, NVMe list, failure state (windows/smart.rs) | P2 | E25-017,E16-A2,E18-A2 |
-| E25-019 | (not created) | "tasklens Disk is in use" window: grouped blocker list, End Task and End Process, footer, retry, toasts (windows/disk_in_use.rs) | P2 | E25-017,E16-A2,E16-A3,E22-A2 |
-| E25-020 | (not created) | Network Details P2 rows: adapter, type, status, link speed, addresses, MAC, index, driver, and the Wi-Fi rows with the signal icon | P2 | E25-A1 |
-| E25-021 | (not created) | Public IP row: Fetch button, notice entry point, Fetching, result and failure states | P2 | E25-A1,E16-A2 |
-| E25-022 | (not created) | GPU engine grid P2: all vendor engines, hidden engines, "Select GPU engine graphs" and "Hide this engine graph" menu items, re-tile and collapse | P2 | E25-A1 |
-| E25-023 | (not created) | GPU optional row: Power and Clocks charts, menu checks, full-width rule, heading tooltips | P2 | E25-022 |
-| E25-024 | (not created) | GPU Details P2 rows 9 to 28 with the hidden and vendor rules | P2 | E25-A1 |
-| E25-025 | (not created) | GPU "Displays" block: one row per enabled display in the PERF-073 format | P2 | E25-A1 |
-| E25-026 | (not created) | FanPage: Fan speed chart with the PWM second axis, Temperature chart with "Choose a sensor", Details rows (pages/performance/sensors.rs) | P2 | E25-A1 |
-| E25-027 | (not created) | BatteryPage: Power or Percentage chart by device kind, Details rows, time label follows state (pages/performance/sensors.rs) | P2 | E25-026 |
-| E25-028 | (not created) | build_page arms for Fan and Battery (chain edit page.rs) and the P2 device-page smoke tests | P2 | E25-026,E25-027 |
-| E25-029 | (not created) | copy_text for every device page: header, Details rows, blocks and tables in the PERF-011 format | P2 | E25-A1,E24-016 |
-| E25-030 | (not created) | Network settings link row and page menu item (KDE and GNOME only) | P3 | E25-A1 |
-| E25-031 | (not created) | Fan page menu: "Rename fan…" dialog and "Temperature sensor >" submenu with [fans] persistence | P3 | E25-026,E16-A2,E16-A3 |
-| E25-032 | (not created) | Battery charge history chart over the past week | P3 | E25-027 |
-| E25-033 | (not created) | SMART window smartctl fallback button "Read with smartctl (admin)" | P3 | E25-018 |
-| E25-034 | (not created) | Aggregate storage and Aggregate graphics pages (pages/performance/aggregate.rs) and their build_page arms | P4 | E25-A1,E24-024 |
+| E25-001 | tasklens-o55.2 | MemoryPage: Physical memory, Commit and Swap charts, page menu checks, demand (pages/performance/memory.rs) | P1 | E24-A1,E19-A1 |
+| E25-002 | tasklens-o55.3 | memory composition bar element: five segments, hatching, min width, labels, tooltips, hover (pages/performance/memory_bar.rs) | P1 | E25-001,E15-A1 |
+| E25-003 | tasklens-o55.4 | Memory Details grid P1 rows (In use to Kernel slab, Swap, Compressed, Savings, Huge pages) with hidden-row rules | P1 | E25-001 |
+| E25-004 | tasklens-o55.5 | DiskPage: Active time and Transfer rate charts, header, demand, states (pages/performance/disk.rs) | P1 | E24-A1,E19-A1 |
+| E25-005 | tasklens-o55.6 | Disk Details grid P1 rows: Active time, Average response time, Read speed, Write speed, Capacity | P1 | E25-004 |
+| E25-006 | tasklens-o55.7 | NetPage: Throughput chart, AutoRate or LinkSpeed scale, disconnected state, demand (pages/performance/net.rs) | P1 | E24-A1,E19-A1 |
+| E25-007 | tasklens-o55.8 | Network Details P1 rows (rates, totals) and the Display unit row with its menu | P1 | E25-006,E16-A3 |
+| E25-008 | tasklens-o55.9 | GpuPage: engine grid (3D/Compute, Video Encode, Video Decode), Memory and Temperature charts, probe states (pages/performance/gpu.rs) | P1 | E24-A1,E19-A2 |
+| E25-009 | tasklens-o55.10 | GPU Details grid P1 rows 1 to 8 (Utilization to Temperature source) | P1 | E25-008 |
+| E25-010 | tasklens-o55.11 | build_page arms for Memory, Disk, Net and Gpu (chain edit page.rs) and page activation wiring | P1 | E25-001,E25-004,E25-006,E25-008 |
+| E25-A1 | tasklens-o55.1 | Device pages | P1 | E25-003,E25-005,E25-007,E25-009,E25-010,E24-A2,E16-A2,E18-A1,E19-A2 |
+| E25-011 | tasklens-o55.12 | Memory Details P2 rows from the DIMM inventory: Speed, Slots used, Form factor, Type, Hardware reserved | P2 | E25-A1 |
+| E25-012 | tasklens-o55.13 | "Compressed memory" block: per-zram grids and the zswap grid | P2 | E25-A1 |
+| E25-013 | tasklens-o55.14 | "Swap devices" table block (flat TlTreeTable: Name, Type, Size, Used, Priority) | P2 | E25-A1,E18-A1 |
+| E25-014 | tasklens-o55.15 | "Memory modules" block: Slots used line and collapsible per-DIMM grids without serials | P2 | E25-A1,E15-A1 |
+| E25-015 | tasklens-o55.16 | Disk Details P2 rows: totals, Formatted, Used, Free, System disk, Swap, Hardware name, Type, Interface, WWN, Serial, Rotation rate, Temperature with hidden rules | P2 | E25-A1 |
+| E25-016 | tasklens-o55.17 | Partitions table block: heading, columns, usage bar, Unallocated rows | P2 | E25-A1,E18-A1 |
+| E25-017 | tasklens-o55.18 | Disk header buttons "Show SMART data" and "Eject" with live visibility, and the page menu items | P2 | E25-A1 |
+| E25-018 | tasklens-o55.19 | "tasklens SMART Data" window: header grid, Refresh, ATA table, NVMe list, failure state (windows/smart.rs) | P2 | E25-017,E16-A2,E18-A2 |
+| E25-019 | tasklens-o55.20 | "tasklens Disk is in use" window: grouped blocker list, End Task and End Process, footer, retry, toasts (windows/disk_in_use.rs) | P2 | E25-017,E16-A2,E16-A3,E22-A2 |
+| E25-020 | tasklens-o55.21 | Network Details P2 rows: adapter, type, status, link speed, addresses, MAC, index, driver, and the Wi-Fi rows with the signal icon | P2 | E25-A1 |
+| E25-021 | tasklens-o55.22 | Public IP row: Fetch button, notice entry point, Fetching, result and failure states | P2 | E25-A1,E16-A2 |
+| E25-022 | tasklens-o55.23 | GPU engine grid P2: all vendor engines, hidden engines, "Select GPU engine graphs" and "Hide this engine graph" menu items, re-tile and collapse | P2 | E25-A1 |
+| E25-023 | tasklens-o55.24 | GPU optional row: Power and Clocks charts, menu checks, full-width rule, heading tooltips | P2 | E25-022 |
+| E25-024 | tasklens-o55.25 | GPU Details P2 rows 9 to 28 with the hidden and vendor rules | P2 | E25-A1 |
+| E25-025 | tasklens-o55.26 | GPU "Displays" block: one row per enabled display in the PERF-073 format | P2 | E25-A1 |
+| E25-026 | tasklens-o55.27 | FanPage: Fan speed chart with the PWM second axis, Temperature chart with "Choose a sensor", Details rows (pages/performance/sensors.rs) | P2 | E25-A1 |
+| E25-027 | tasklens-o55.28 | BatteryPage: Power or Percentage chart by device kind, Details rows, time label follows state (pages/performance/sensors.rs) | P2 | E25-026 |
+| E25-028 | tasklens-o55.29 | build_page arms for Fan and Battery (chain edit page.rs) and the P2 device-page smoke tests | P2 | E25-026,E25-027 |
+| E25-029 | tasklens-o55.30 | copy_text for every device page: header, Details rows, blocks and tables in the PERF-011 format | P2 | E25-A1,E24-016 |
+| E25-030 | tasklens-o55.31 | Network settings link row and page menu item (KDE and GNOME only) | P3 | E25-A1 |
+| E25-031 | tasklens-o55.32 | Fan page menu: "Rename fan…" dialog and "Temperature sensor >" submenu with [fans] persistence | P3 | E25-026,E16-A2,E16-A3 |
+| E25-032 | tasklens-o55.33 | Battery charge history chart over the past week | P3 | E25-027 |
+| E25-033 | tasklens-o55.34 | SMART window smartctl fallback button "Read with smartctl (admin)" | P3 | E25-018 |
+| E25-034 | tasklens-o55.35 | Aggregate storage and Aggregate graphics pages (pages/performance/aggregate.rs) and their build_page arms | P4 | E25-A1,E24-024 |
 
 35 beads.
 
@@ -228,28 +228,28 @@ Files owned: `crates/tl-ui/src/pages/minigraph/{mod,panel,card,menu,actions,sour
 
 | Plan key | Bead ID | Title | Phase | Depends on |
 |---|---|---|---|---|
-| E26-001 | (not created) | minigraph model: MinigraphId, MinigraphSource parse and format, slot geometry, default layout, state mapping (pages/minigraph/{mod,sources}.rs) | P1 | E16-A1,E03-A2,E24-A1 |
-| E26-002 | (not created) | minigraph actions: Minigraph*, ResetMinigraphLayout, AddMinigraph, AddNameGraph, AddAppGraph (pages/minigraph/actions.rs) | P1 | E26-001,E20-A1 |
-| E26-003 | (not created) | MinigraphCard entity: chart per system source, label and value lines, shadow, hover border, CPU tooltip, colour resolution (pages/minigraph/card.rs) | P1 | E26-001,E19-A1,E17-A1,E15-A1 |
-| E26-004 | (not created) | MinigraphPanel entity: overlay layout from the bottom right, settings-driven system cards, demand, full-grid toast, reset, state persistence (pages/minigraph/panel.rs) | P1 | E26-003,E26-002,E16-A2 |
-| E26-005 | (not created) | minigraph card context menu P1 items: Hide graph, Time range, Reset minigraph layout (pages/minigraph/menu.rs) | P1 | E26-004,E16-A3 |
-| E26-006 | (not created) | mount MinigraphPanel in ProcessesPage (chain edit), visible only on the Processes tab and in History mode | P1 | E26-004,E22-A1 |
-| E26-A1 | (not created) | Minigraph panel and cards | P1 | E26-005,E26-006,E16-A3,E19-A1,E20-A1,E22-A1 |
-| E26-007 | (not created) | hover readout on minigraph cards (P2) | P2 | E26-A1,E19-014 |
-| E26-008 | (not created) | drag to move and reorder cards: 4 px threshold, ghost, home outline, shift preview, drop to slot, no holes | P2 | E26-A1 |
-| E26-009 | (not created) | 5 and 10 minute ranges on minigraph cards (1 Hz tier) | P2 | E26-A1,E19-013 |
-| E26-010 | (not created) | "Graph color >" submenu with colour dots and MinigraphSetColor persistence | P3 | E26-A1 |
-| E26-011 | (not created) | process-source cards: process, name and app sources, labels, Process <pid>, column labels, series binding, demand identities | P3 | E26-A1,E22-A1 |
-| E26-012 | (not created) | minigraph states "No match", "Ended", Restricted and the boot-ID mismatch rule | P3 | E26-011 |
-| E26-013 | (not created) | process row-menu items "Add Minigraph >", "Add Process Name Graph >", "Add App Name Graph >" (chain edit pages/processes/menu.rs), handlers and toasts | P3 | E26-012,E22-A2 |
-| E26-014 | (not created) | DetachedGraphWindow entity: window options, size from the card stack, body drag move, own AnimationDriver, caption (windows/detached_graph.rs) | P3 | E26-A1,E16-A2 |
-| E26-015 | (not created) | Detach and Attach: menu items, drag past the window edge, window ids, [[minigraphs]] detached flags and [[detached_windows]] round trip | P3 | E26-014,E26-008 |
-| E26-016 | (not created) | detached window context menu: Show Main Window, Close graph, Attach, Time range, Graph color, Add graph >, Remove graph, Exit tasklens | P3 | E26-015,E26-010 |
-| E26-017 | (not created) | KWin bridge for detached graph windows and the mini window: keepAbove, geometry restore, move read-back debounced 500 ms | P3 | E26-015,E14-A2 |
-| E26-018 | (not created) | "Keep detached graphs open": any_open query, registry keep flag, demand while the main window is hidden, Show Main Window | P3 | E26-015,E20-A1 |
-| E26-019 | (not created) | MiniWindow entity: borderless window listing the visible sidebar cards, height cap and scroll, card variant, Esc closes (windows/mini.rs) | P3 | E26-A1,E24-A1,E16-A2 |
-| E26-020 | (not created) | mini window interactions: ToggleMiniWindow and PerfShowMiniWindow handlers, card click opens the main window on that page, double-click, context menu, Always on top, View item check state | P3 | E26-019,E26-017 |
-| E26-A2 | (not created) | Detached graphs and mini window | P3 | E26-016,E26-017,E26-018,E26-020,E26-013,E16-A2,E16-A3,E24-A1 |
+| E26-001 | tasklens-xdh.3 | minigraph model: MinigraphId, MinigraphSource parse and format, slot geometry, default layout, state mapping (pages/minigraph/{mod,sources}.rs) | P1 | E16-A1,E03-A2,E24-A1 |
+| E26-002 | tasklens-xdh.4 | minigraph actions: Minigraph*, ResetMinigraphLayout, AddMinigraph, AddNameGraph, AddAppGraph (pages/minigraph/actions.rs) | P1 | E26-001,E20-A1 |
+| E26-003 | tasklens-xdh.5 | MinigraphCard entity: chart per system source, label and value lines, shadow, hover border, CPU tooltip, colour resolution (pages/minigraph/card.rs) | P1 | E26-001,E19-A1,E17-A1,E15-A1 |
+| E26-004 | tasklens-xdh.6 | MinigraphPanel entity: overlay layout from the bottom right, settings-driven system cards, demand, full-grid toast, reset, state persistence (pages/minigraph/panel.rs) | P1 | E26-003,E26-002,E16-A2 |
+| E26-005 | tasklens-xdh.7 | minigraph card context menu P1 items: Hide graph, Time range, Reset minigraph layout (pages/minigraph/menu.rs) | P1 | E26-004,E16-A3 |
+| E26-006 | tasklens-xdh.8 | mount MinigraphPanel in ProcessesPage (chain edit), visible only on the Processes tab and in History mode | P1 | E26-004,E22-A1 |
+| E26-A1 | tasklens-xdh.1 | Minigraph panel and cards | P1 | E26-005,E26-006,E16-A3,E19-A1,E20-A1,E22-A1 |
+| E26-007 | tasklens-xdh.9 | hover readout on minigraph cards (P2) | P2 | E26-A1,E19-014 |
+| E26-008 | tasklens-xdh.10 | drag to move and reorder cards: 4 px threshold, ghost, home outline, shift preview, drop to slot, no holes | P2 | E26-A1 |
+| E26-009 | tasklens-xdh.11 | 5 and 10 minute ranges on minigraph cards (1 Hz tier) | P2 | E26-A1,E19-013 |
+| E26-010 | tasklens-xdh.12 | "Graph color >" submenu with colour dots and MinigraphSetColor persistence | P3 | E26-A1 |
+| E26-011 | tasklens-xdh.13 | process-source cards: process, name and app sources, labels, Process <pid>, column labels, series binding, demand identities | P3 | E26-A1,E22-A1 |
+| E26-012 | tasklens-xdh.14 | minigraph states "No match", "Ended", Restricted and the boot-ID mismatch rule | P3 | E26-011 |
+| E26-013 | tasklens-xdh.15 | process row-menu items "Add Minigraph >", "Add Process Name Graph >", "Add App Name Graph >" (chain edit pages/processes/menu.rs), handlers and toasts | P3 | E26-012,E22-A2 |
+| E26-014 | tasklens-xdh.16 | DetachedGraphWindow entity: window options, size from the card stack, body drag move, own AnimationDriver, caption (windows/detached_graph.rs) | P3 | E26-A1,E16-A2 |
+| E26-015 | tasklens-xdh.17 | Detach and Attach: menu items, drag past the window edge, window ids, [[minigraphs]] detached flags and [[detached_windows]] round trip | P3 | E26-014,E26-008 |
+| E26-016 | tasklens-xdh.18 | detached window context menu: Show Main Window, Close graph, Attach, Time range, Graph color, Add graph >, Remove graph, Exit tasklens | P3 | E26-015,E26-010 |
+| E26-017 | tasklens-xdh.19 | KWin bridge for detached graph windows and the mini window: keepAbove, geometry restore, move read-back debounced 500 ms | P3 | E26-015,E14-A2 |
+| E26-018 | tasklens-xdh.20 | "Keep detached graphs open": any_open query, registry keep flag, demand while the main window is hidden, Show Main Window | P3 | E26-015,E20-A1 |
+| E26-019 | tasklens-xdh.21 | MiniWindow entity: borderless window listing the visible sidebar cards, height cap and scroll, card variant, Esc closes (windows/mini.rs) | P3 | E26-A1,E24-A1,E16-A2 |
+| E26-020 | tasklens-xdh.22 | mini window interactions: ToggleMiniWindow and PerfShowMiniWindow handlers, card click opens the main window on that page, double-click, context menu, Always on top, View item check state | P3 | E26-019,E26-017 |
+| E26-A2 | tasklens-xdh.2 | Detached graphs and mini window | P3 | E26-016,E26-017,E26-018,E26-020,E26-013,E16-A2,E16-A3,E24-A1 |
 
 22 beads.
 
