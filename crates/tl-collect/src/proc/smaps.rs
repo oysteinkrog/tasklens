@@ -198,7 +198,8 @@ fn read_rollup(fd: BorrowedFd<'_>, buf: &mut Vec<u8>) -> RollupRead {
         if buf.len() == buf.capacity() {
             buf.reserve(4096.max(buf.len()).min(ROLLUP_READ_MAX - buf.len()));
         }
-        match rustix::io::pread(fd, spare_capacity(buf), buf.len() as u64) {
+        let offset = buf.len() as u64;
+        match rustix::io::pread(fd, spare_capacity(buf), offset) {
             Ok(0) => break,
             Ok(_) => {}
             Err(e) => return errno_result(e),
