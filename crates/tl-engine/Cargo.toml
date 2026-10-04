@@ -11,6 +11,8 @@ tl-ops     = { workspace = true }
 asupersync = { workspace = true }
 rustc-hash = { workspace = true }
 smallvec   = { workspace = true }
+bitflags   = { workspace = true }
+thiserror  = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
