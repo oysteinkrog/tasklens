@@ -1,0 +1,21 @@
+[package]
+name = "tl-app"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "tasklens"
+path = "src/main.rs"
+
+[dependencies]
+tl-model  = { workspace = true }
+tl-engine = { workspace = true }
+tl-ui     = { workspace = true }
+tl-ops    = { workspace = true }
+
+[features]
+bench = ["tl-ui/bench"]
+
+[lints]
+workspace = true

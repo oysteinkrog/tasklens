@@ -1,0 +1,20 @@
+[package]
+name = "tl-ui"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+tl-model = { workspace = true }
+gpui-kit = { workspace = true }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+
+[features]
+bench = ["gpui-kit/profiler"]     # frame histograms for --bench (ADR-014)
+render-tests = []
+test-hooks = []
+
+[lints]
+workspace = true
