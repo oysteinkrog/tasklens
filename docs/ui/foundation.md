@@ -87,7 +87,7 @@ Dark, and keep every text pair at or above 4.5:1 contrast (`text_secondary` on `
 | `scroll_track` | `#EBEDEF` |
 | `scroll_thumb` | `#B5BBC0` |
 | `text_primary` | `#1B1F22` |
-| `text_secondary` | `#5F666B` |
+| `text_secondary` | `#5E656A` (R-269: `#5F666B` was 4.44:1 on `header`) |
 | `text_selected_primary` | `#0F1416` |
 | `text_selected_secondary` | `#3E5460` |
 | `value_heat` | `#F6D5CF` |
