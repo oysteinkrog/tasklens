@@ -1,0 +1,7 @@
+cpu  150 0 70 830 10 0 0 0 0 0
+cpu0 150 0 70 830 10 0 0 0 0 0
+ctxt 200
+btime 1700000000
+processes 52
+procs_running 2
+procs_blocked 0
