@@ -97,7 +97,7 @@ pub fn system_locale() -> LanguageIdentifier {
 fn locale_from_env(var: impl Fn(&str) -> Option<String>) -> LanguageIdentifier {
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
-        .filter_map(|name| var(name))
+        .filter_map(var)
         .find(|value| !value.is_empty())
         .and_then(|value| parse_posix_locale(&value))
         .unwrap_or_else(en_us)
@@ -238,14 +238,14 @@ mod tests {
                     .map(|(_, v)| (*v).to_owned())
             }
         };
-        let all = [
+        const ALL: &[(&str, &str)] = &[
             ("LC_ALL", "de_DE.UTF-8"),
             ("LC_MESSAGES", "fr_FR.UTF-8"),
             ("LANG", "nb_NO.UTF-8"),
         ];
-        assert_eq!(locale_from_env(env(&all)), langid("de-DE"));
-        assert_eq!(locale_from_env(env(&all[1..])), langid("fr-FR"));
-        assert_eq!(locale_from_env(env(&all[2..])), langid("nb-NO"));
+        assert_eq!(locale_from_env(env(ALL)), langid("de-DE"));
+        assert_eq!(locale_from_env(env(&ALL[1..])), langid("fr-FR"));
+        assert_eq!(locale_from_env(env(&ALL[2..])), langid("nb-NO"));
         assert_eq!(
             locale_from_env(env(&[("LC_ALL", ""), ("LANG", "ja_JP.UTF-8")])),
             langid("ja-JP")
