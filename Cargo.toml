@@ -50,8 +50,8 @@ smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
 rustc-hash = "2.1.3"
 futures-lite = "2.6.1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }   # tl-engine public IP only; exact pin set by the E12 bead that adds it (R-131)
-fluent-bundle = "0.15"   # tl-ui strings (R-132); exact pins set by the E16 bead that adds them
-unic-langid = "0.9"
+fluent-bundle = "=0.15.3"   # tl-ui strings (R-132)
+unic-langid = "=0.9.6"
 zstd      = "0.13.3"     # P3
 crc32fast = "1"          # P3
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }   # tl-ui local time (R-142 item 9)
