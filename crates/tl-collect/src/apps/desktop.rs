@@ -101,7 +101,14 @@ impl DesktopIndex {
         self.by_id.is_empty()
     }
 
-    fn walk(&mut self, dir: &Path, prefix: &str, depth: usize, path_dirs: &[&Path], buf: &mut Vec<u8>) {
+    fn walk(
+        &mut self,
+        dir: &Path,
+        prefix: &str,
+        depth: usize,
+        path_dirs: &[&Path],
+        buf: &mut Vec<u8>,
+    ) {
         let Ok(read) = fs::read_dir(dir) else {
             return;
         };
@@ -164,7 +171,12 @@ impl DesktopIndex {
 /// indexed: `NoDisplay=true`, `Hidden=true`, `Type` other than `Application`, or no `Name`.
 /// Localised keys such as `Name[de]` are ignored. `path_dirs` is the `PATH` list for
 /// [`exec_binary_in`].
-pub fn parse_entry(id: &str, path: &str, bytes: &[u8], path_dirs: &[&Path]) -> Option<DesktopEntry> {
+pub fn parse_entry(
+    id: &str,
+    path: &str,
+    bytes: &[u8],
+    path_dirs: &[&Path],
+) -> Option<DesktopEntry> {
     let mut raw = RawEntry::default();
     let mut in_group = false;
     for line in bytes.split(|&b| b == b'\n') {

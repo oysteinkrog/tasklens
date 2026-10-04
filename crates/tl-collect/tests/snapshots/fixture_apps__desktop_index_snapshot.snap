@@ -1,0 +1,66 @@
+---
+source: crates/tl-collect/tests/fixture_apps.rs
+expression: rows
+---
+[
+    (
+        "chrome-work",
+        "Google Chrome (Work)",
+        Some(
+            "/opt/google/chrome/chrome",
+        ),
+        Some(
+            "google-chrome",
+        ),
+    ),
+    (
+        "env",
+        "Foo Viewer",
+        Some(
+            "/usr/bin/foo",
+        ),
+        Some(
+            "foo",
+        ),
+    ),
+    (
+        "firefox",
+        "Firefox (User)",
+        Some(
+            "firefox",
+        ),
+        Some(
+            "firefox",
+        ),
+    ),
+    (
+        "flatpak-tb",
+        "Thunderbird",
+        Some(
+            "thunderbird",
+        ),
+        Some(
+            "org.mozilla.Thunderbird",
+        ),
+    ),
+    (
+        "kde-org.kde.dolphin",
+        "Dolphin",
+        Some(
+            "dolphin",
+        ),
+        Some(
+            "system-file-manager",
+        ),
+    ),
+    (
+        "org.kde.konsole",
+        "Konsole",
+        Some(
+            "konsole",
+        ),
+        Some(
+            "utilities-terminal",
+        ),
+    ),
+]

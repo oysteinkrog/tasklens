@@ -149,7 +149,11 @@ fn desktop_user_overrides_system() {
     let index = desktop_index();
     let firefox = index.by_id("firefox").expect("firefox indexed");
     assert_eq!(&*firefox.name, "Firefox (User)");
-    assert!(firefox.path.ends_with("home/.local/share/applications/firefox.desktop"));
+    assert!(
+        firefox
+            .path
+            .ends_with("home/.local/share/applications/firefox.desktop")
+    );
 }
 
 #[test]
@@ -185,7 +189,10 @@ fn exec_binary_env_flatpak_quotes() {
         Some("/opt/My App/app")
     );
 
-    assert_eq!(exec_binary_in("snap run spotify %U", &[]).as_deref(), Some("spotify"));
+    assert_eq!(
+        exec_binary_in("snap run spotify %U", &[]).as_deref(),
+        Some("spotify")
+    );
     assert_eq!(exec_binary_in("%f %U", &[]), None);
     assert_eq!(exec_binary_in("", &[]), None);
 }
@@ -195,8 +202,14 @@ fn desktop_wm_class_case_insensitive() {
     let index = desktop_index();
     let firefox = index.by_wm_class("firefox").expect("wm class indexed");
     assert_eq!(&*firefox.id, "firefox");
-    assert_eq!(index.by_wm_class("FIREFOX").map(|e| &*e.id), Some("firefox"));
-    assert_eq!(index.by_wm_class("Konsole").map(|e| &*e.id), Some("org.kde.konsole"));
+    assert_eq!(
+        index.by_wm_class("FIREFOX").map(|e| &*e.id),
+        Some("firefox")
+    );
+    assert_eq!(
+        index.by_wm_class("Konsole").map(|e| &*e.id),
+        Some("org.kde.konsole")
+    );
 }
 
 #[test]
