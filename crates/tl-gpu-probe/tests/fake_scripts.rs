@@ -4,6 +4,7 @@
 //! the child inherits it without `pre_exec` or `dup2`.
 
 #![cfg(feature = "fake")]
+#![allow(clippy::unwrap_used)]
 
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
