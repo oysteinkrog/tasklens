@@ -392,6 +392,9 @@ struct CtlRig {
     seen: Vec<Seen>,
     handle: TaskHandle<()>,
     probe: Probe,
+    /// The virtual ms the rig last advanced to. `lab.state.now` can run ahead of the timer
+    /// clock, so messages are stamped with this.
+    now_ms: u64,
 }
 
 impl CtlRig {
@@ -416,18 +419,15 @@ impl CtlRig {
             seen: Vec::new(),
             handle,
             probe,
+            now_ms: 0,
         };
         rig.lab.run_until_idle();
         rig.drain();
         rig
     }
 
-    fn now_ms(&self) -> u64 {
-        self.lab.state.now.as_nanos() / 1_000_000
-    }
-
     fn drain(&mut self) {
-        let now = self.now_ms();
+        let now = self.now_ms;
         while let Ok(EngineMsg::Source(update)) = self.rx.try_recv() {
             if let SourceUpdate::Health {
                 state,
@@ -451,6 +451,7 @@ impl CtlRig {
             self.drain();
             match self.lab.next_timer_deadline() {
                 Some(next) if next <= end => {
+                    self.now_ms = next.as_nanos() / 1_000_000;
                     self.lab.advance_time_to(next);
                     // `run_until_idle` stops when no task is ready; one step fires due timers.
                     self.lab.step_for_test();
@@ -458,6 +459,7 @@ impl CtlRig {
                 _ => break,
             }
         }
+        self.now_ms = ms;
         self.lab.advance_time_to(end);
         self.lab.step_for_test();
         self.lab.run_until_idle();

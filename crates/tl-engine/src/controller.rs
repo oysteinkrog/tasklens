@@ -18,7 +18,7 @@ use asupersync::supervision::ManagedSupervisorReport;
 use asupersync::time::sleep;
 use asupersync::types::Outcome;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::time::now_boot_ns;
+use tl_model::time::{TimeNs, now_boot_ns};
 
 use crate::supervise::{WorkerFactory, budget_exhausted, build_supervisor};
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
@@ -46,7 +46,10 @@ impl SourceController {
     /// Runs until `cx` is cancelled. Spawn with `cx.spawn(|cx| ctl.run(cx))` from the session.
     pub async fn run(self, cx: Cx) {
         loop {
-            if !self.health(&cx, SourceState::Running, None).await {
+            if !self
+                .health(&cx, SourceState::Running, None, now_boot_ns())
+                .await
+            {
                 return;
             }
             let report = match build_supervisor(self.name, self.factory.clone()) {
@@ -65,9 +68,13 @@ impl SourceController {
                 return;
             }
             if budget_exhausted(&report) {
-                let until = now_boot_ns().saturating_add(DISABLE_FOR.as_nanos() as u64);
+                let t_ns = now_boot_ns();
+                let until = t_ns.saturating_add(DISABLE_FOR.as_nanos() as u64);
                 let state = SourceState::Disabled { until };
-                if !self.health(&cx, state, Some(last_error(&report))).await {
+                if !self
+                    .health(&cx, state, Some(last_error(&report)), t_ns)
+                    .await
+                {
                     return;
                 }
                 sleep(cx.now(), DISABLE_FOR).await;
@@ -91,12 +98,18 @@ impl SourceController {
     }
 
     /// Sends one health message. Returns false when the loop must stop.
-    async fn health(&self, cx: &Cx, state: SourceState, last_error: Option<Arc<str>>) -> bool {
+    async fn health(
+        &self,
+        cx: &Cx,
+        state: SourceState,
+        last_error: Option<Arc<str>>,
+        t_ns: TimeNs,
+    ) -> bool {
         let update = SourceUpdate::Health {
             id: self.id,
             state,
             last_error,
-            t_ns: now_boot_ns(),
+            t_ns,
         };
         self.updates
             .send(cx, EngineMsg::Source(update))
