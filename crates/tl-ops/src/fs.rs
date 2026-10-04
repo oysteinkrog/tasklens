@@ -702,12 +702,9 @@ mod tests {
                 Err(OpsError::NotOwner)
             );
         }
-        let bad_roots = StartupRoots {
-            autostart: roots.autostart.join(".."),
-            ..roots.clone()
-        };
+        // A system path ending in `..` has no file name to copy.
         assert_eq!(
-            autostart_disable_system(&other, &bad_roots),
+            autostart_disable_system(&other_dir.join(".."), &roots),
             Err(OpsError::NotOwner)
         );
         assert_eq!(
