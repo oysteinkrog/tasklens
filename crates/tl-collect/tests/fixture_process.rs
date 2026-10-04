@@ -12,6 +12,9 @@ use tl_collect::CollectError;
 use tl_collect::proc::pid_stat::{
     PidStat, is_kernel_thread, map_state, parse_pid_stat, read_start_ticks, state_label,
 };
+use tl_collect::proc::status::{
+    PidStatus, STATUS_READ_MAX, commit_bytes, parse_status, ws_shared_bytes,
+};
 use tl_model::process::ProcState;
 
 fn stat(fixture: &str, pid: u32) -> PidStat {
@@ -148,6 +151,138 @@ fn stat_owner_desktop_snapshot() {
             let s = stat("owner-desktop", pid);
             assert_eq!(s.pid, pid);
             (s.pid, s.ppid, char::from(s.state), s.num_threads)
+        })
+        .collect();
+    insta::assert_debug_snapshot!(rows);
+}
+
+fn status(fixture: &str, pid: u32) -> PidStatus {
+    let mut out = PidStatus::default();
+    parse_status(
+        &fixture_bytes(fixture, &format!("proc/{pid}/status")),
+        &mut out,
+    )
+    .expect("parse status");
+    out
+}
+
+#[test]
+fn status_memory_fields_in_bytes() {
+    let s = status("process-edge", 4201);
+    assert_eq!(s.uid, [1000; 4]);
+    assert_eq!(s.gid, [1000; 4]);
+    assert_eq!(s.groups.as_slice(), [10, 998, 1000]);
+    assert_eq!(s.threads, 27);
+    assert_eq!(s.rss_anon, Some(1_263_616));
+    assert_eq!(s.rss_file, Some(198_520 * 1024));
+    assert_eq!(s.rss_shmem, Some(45_182 * 1024));
+    assert_eq!(s.vm_rss, Some(244_936 * 1024));
+    assert_eq!(s.vm_swap, Some(5120 * 1024));
+    assert_eq!(s.vm_hwm, Some(301_220 * 1024));
+    assert_eq!(s.vm_peak, Some(2_734_592 * 1024));
+    assert_eq!(s.vm_size, Some(2_667_832 * 1024));
+    assert_eq!(s.vm_data, Some(100 * 1024));
+    assert_eq!(s.vm_stk, Some(132 * 1024));
+    assert_eq!(s.vm_pte, Some(1388 * 1024));
+    assert_eq!(commit_bytes(&s), Some(237_568));
+    assert_eq!(ws_shared_bytes(&s), Some((198_520 + 45_182) * 1024));
+    assert_eq!(s.cpus_allowed_list.as_slice(), b"0-7,16-23");
+    assert_eq!(s.cap_eff, 0);
+    assert_eq!(s.cap_bnd, 0x1ff_ffff_ffff);
+    assert_eq!(s.no_new_privs, Some(true));
+    assert_eq!(s.seccomp, Some(2));
+    assert_eq!(s.seccomp_filters, Some(3));
+    assert_eq!(
+        s.speculation_store_bypass.as_slice(),
+        b"thread force mitigated"
+    );
+    assert_eq!(
+        s.speculation_indirect_branch.as_slice(),
+        b"conditional force disabled"
+    );
+    assert_eq!(s.x86_thread_features.as_deref(), Some(&b"shstk wrss"[..]));
+    assert_eq!(s.voluntary_ctxt_switches, Some(88120));
+    assert_eq!(s.nonvoluntary_ctxt_switches, Some(1542));
+}
+
+#[test]
+fn status_kernel_thread_has_no_rss() {
+    let s = status("process-edge", 57);
+    assert_eq!(s.rss_anon, None);
+    assert_eq!(s.vm_rss, None);
+    assert_eq!(commit_bytes(&s), None);
+    assert_eq!(ws_shared_bytes(&s), None);
+    assert!(s.groups.is_empty());
+    assert_eq!(s.x86_thread_features, None);
+    assert_eq!(s.threads, 1);
+}
+
+#[test]
+fn status_setuid_uids_and_caps() {
+    let s = status("process-edge", 4204);
+    assert_eq!(s.uid, [1000, 0, 0, 0]);
+    assert_ne!(s.cap_eff, 0);
+}
+
+#[test]
+fn status_missing_uid_is_error() {
+    let buf = fixture_bytes("process-edge", "proc/4201/status");
+    let without_uid: Vec<u8> = buf
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !line.starts_with(b"Uid:"))
+        .flatten()
+        .copied()
+        .collect();
+    let mut out = PidStatus::default();
+    let err = parse_status(&without_uid, &mut out).unwrap_err();
+    assert!(matches!(
+        err,
+        CollectError::ProcParse {
+            pid: 0,
+            file: "status"
+        }
+    ));
+    assert!(parse_status(b"", &mut out).is_err());
+}
+
+#[test]
+fn status_long_file_parsed_up_to_cut() {
+    // A 20 KiB file: the real lines, then filler lines with unknown keys. The caller reads
+    // STATUS_READ_MAX bytes, so the cut lands inside a filler line.
+    let mut buf = fixture_bytes("process-edge", "proc/4201/status");
+    let mut n = 0;
+    while buf.len() < 20 * 1024 {
+        buf.extend_from_slice(format!("Filler{n}:\t{n}\n").as_bytes());
+        n += 1;
+    }
+    buf.extend_from_slice(b"VmSwap:\t9 kB\n");
+    let cut = &buf[..STATUS_READ_MAX];
+    assert!(!cut.ends_with(b"\n"));
+
+    let mut out = PidStatus::default();
+    parse_status(cut, &mut out).expect("parse cut status");
+    assert_eq!(out.uid, [1000; 4]);
+    assert_eq!(out.rss_anon, Some(1_263_616));
+    assert_eq!(out.vm_swap, Some(5120 * 1024));
+    assert_eq!(out.nonvoluntary_ctxt_switches, Some(1542));
+}
+
+#[test]
+fn status_owner_desktop_snapshot() {
+    let proc_dir = fixture_dir("owner-desktop").join("proc");
+    let mut pids: Vec<u32> = fs::read_dir(&proc_dir)
+        .unwrap()
+        .filter_map(|e| e.unwrap().file_name().to_str()?.parse().ok())
+        .filter(|pid: &u32| proc_dir.join(pid.to_string()).join("status").exists())
+        .collect();
+    pids.sort_unstable();
+    assert!(!pids.is_empty());
+
+    let rows: Vec<(u32, u32, u32, Option<u64>, Option<u64>)> = pids
+        .iter()
+        .map(|&pid| {
+            let s = status("owner-desktop", pid);
+            (pid, s.uid[0], s.threads, s.rss_anon, s.vm_rss)
         })
         .collect();
     insta::assert_debug_snapshot!(rows);
