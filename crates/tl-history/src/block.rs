@@ -625,14 +625,14 @@ mod tests {
         assert_eq!(block.deltas[1].started.len(), 1);
         assert_eq!(block.deltas[1].started[0].key, key(10));
         assert!(block.deltas[1].exited.is_empty());
-        // Delta 2's started entry has index 10 (keyframe-then-started index space).
         assert_eq!(block.deltas[2].exited, vec![4]);
         assert!(block.deltas[2].started.is_empty());
         assert_eq!(block.deltas[3].exited, vec![0]);
         assert_eq!(block.new_meta.len(), 11);
         assert_eq!(block.new_meta[10].0, block.deltas[1].started[0].meta);
 
-        // The started process is index 10: a change to it is written under index 10.
+        // Delta 2's started entry has index 10 (keyframe-then-started index space), so a later
+        // change to it is written under index 10.
         let mut changed = exited_flag.clone();
         changed.last_mut().unwrap().cpu_pct = 50.0;
         let mut b2 = BlockBuilder::new(BootId(7));
@@ -697,9 +697,11 @@ mod tests {
         assert!(first.gap_before);
         assert!(b.flush().is_none());
 
+        // The second gap flags the block after it; a flush does not.
         b.on_process_sweep(10 * SEC, &sweep(2));
-        let first = b.flush().unwrap();
-        assert!(!first.gap_before);
+        assert!(b.flush().unwrap().gap_before);
+        b.on_process_sweep(15 * SEC, &sweep(2));
+        assert!(!b.flush().unwrap().gap_before);
 
         b.on_process_sweep(20 * SEC, &sweep(2));
         let closed = b.mark_gap(21 * SEC).unwrap();
