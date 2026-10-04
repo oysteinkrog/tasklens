@@ -9,6 +9,7 @@ members = [
   "crates/tl-gpu-probe",
   "crates/tl-ui",
   "crates/tl-app",
+  "crates/tl-helper",
   "xtask",
 ]
 

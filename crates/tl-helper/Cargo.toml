@@ -1,0 +1,20 @@
+[package]
+name = "tl-helper"
+edition = "2024"
+version.workspace = true
+publish = false
+
+[[bin]]
+name = "tl-helper"
+path = "src/main.rs"
+
+[dependencies]
+tl-model = { workspace = true }
+tl-ops = { workspace = true }
+# The workspace row enables the features later beads need: process, fs, net, thread, event, pipe.
+rustix = { workspace = true }
+postcard = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true
