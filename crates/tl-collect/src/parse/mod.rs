@@ -13,6 +13,7 @@ pub mod rapl;
 pub mod stat;
 pub mod swaps;
 pub mod topology;
+pub mod udev;
 pub mod vmstat;
 pub mod zram;
 pub mod zswap;
