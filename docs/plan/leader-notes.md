@@ -52,3 +52,8 @@ pass once all batch writers finish.
   `docs/plan/b3-engine-core.md`, and the beads follow the recommendations. The build line is
   already replaced in 8hz, 8q0, dwy, i3o and ndy. E13-006 is blocked on open item 13 (`unsafe`
   in tl-gpu-probe).
+- B4 (E12, E14, E29, E30): done, 123 beads, no cycles, plan in d456386 and e98c11f. Open items:
+  E12 has 11 (see the plan file), E14 has 16, E29 19, E30 9. E12-OI-1 (contract additions, first
+  `Source::take_extra()`) blocks 21 E12 beads, including the P1 anchor E12-A2; settle it first.
+  E12-OI-4 (udev reader) needs a new B2 bead. Build line still old on E14 and on E29 after qfx.8.
+- All batches: `br lint` flags only the epic beads (no Success Criteria section). Leader adds them.
