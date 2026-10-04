@@ -91,10 +91,7 @@ fn apply_step_keeps_inodes() {
         .map(|rel| copy.path().join(rel))
         .collect();
     let link = copy.path().join("sys/link");
-    assert_eq!(
-        fs::read_link(&link).unwrap(),
-        PathBuf::from("../proc/stat")
-    );
+    assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("../proc/stat"));
     assert_eq!(fs::read(&files[0]).unwrap(), b"cpu 1 2 3\n");
     let inodes: Vec<u64> = files
         .iter()
