@@ -8,7 +8,7 @@ use tl_collect::parse::stat::{CpuTimes, StatData, parse_stat};
 
 fn parse(buf: &[u8]) -> StatData {
     let mut out = StatData::default();
-    parse_stat(buf, &mut out).unwrap();
+    parse_stat(buf, &mut out).expect("parse /proc/stat");
     out
 }
 
