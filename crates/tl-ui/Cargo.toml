@@ -12,11 +12,15 @@ serde_json = { workspace = true }
 smallvec = { workspace = true }
 rustc-hash = { workspace = true }
 tracing = { workspace = true }
+async-channel = { workspace = true }
+jiff = { workspace = true }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
 
 [features]
+default = []
 bench = ["gpui-kit/profiler"]     # frame histograms for --bench (ADR-014)
 render-tests = []
 test-hooks = []
