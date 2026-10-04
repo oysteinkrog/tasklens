@@ -281,7 +281,17 @@ beads and only the listed doc edits are needed.
       runs `pacman -Qkk <pkg>` and reads its exit status and lines; no gzip crate.
   14. tl-helper row gains `tl-collect` (E29-OI-7), so the strings scanner is shared; see
       OI-E19.
-  15. Dev-dependencies (`insta`, `proptest`, `tempfile`, `criterion`, `toml`,
+  15. `unicode-segmentation` (B5 item 2): pin `unicode-segmentation = "1.12"` and add to the
+      tl-ui row. Versions 1.12.0 to 1.13.3 are on disk through gpui-base; the crate has no
+      dependencies [verified]. E15-003 is unblocked.
+  16. `image` (B5 item 30): not added. E16-005's PNG read and write go through gpui-kit's
+      image support; if the bead finds it cannot, it stops and reports, and the fallback is
+      `image = { version = "0.25", default-features = false, features = ["png"] }` in the tl-ui
+      row (0.25.10 is on disk).
+  17. `wgpu` (E21 item 9): not in any row. tl-app runs the adapter probe through the GPUI
+      platform it already links (`AppEnv::list_adapters`), as B7 recommends; no direct `wgpu`
+      dependency.
+  18. Dev-dependencies (`insta`, `proptest`, `tempfile`, `criterion`, `toml`,
       `tracing-subscriber`) are outside the allowed rows; `xtask check-deps` (E02-008, v9m.10)
       checks `normal` edges only (E03 contracts item 23). E05 item 12's three `Cargo.toml`
       lines (the `[[bench]] sweep` block, `criterion`, `tracing-subscriber` dev-dep) are
@@ -929,7 +939,7 @@ beads and only the listed doc edits are needed.
   6. Item 10: E05-016 (yms.19) checks Mission Center's `matching.rs:10-24` table before it
      starts; the leader pastes the table into the bead.
   7. Item 11: P4, decide then.
-  8. Item 12: the three `Cargo.toml` lines are allowed (OI-E04 item 15).
+  8. Item 12: the three `Cargo.toml` lines are allowed (OI-E04 item 18).
   9. Item 13: the reducer computes the PROC-034 power estimate; new bead E09-030 "process
      power estimate" (P2, file `reducer/power.rs`; depends on 8q0.1, hjn.11 (RAPL), ndy.2),
      writing `ProcessExtrasP2.power_w: Option<f32>` for every row (it is cheap: one multiply per
@@ -1083,6 +1093,80 @@ beads and only the listed doc edits are needed.
 - Changes: ADR-012 (`HistMeta`, `Block`, `HistDevice`, the nine format lines); PROC-089 or
   UI-PRC-032 (the stack rule once confirmed); UI-PRC-036 (range totals are averages).
 
+### OI-E32 Smaller tl-model and engine contract additions asked by the UI batches
+- Raised by: E19-OI-1, E19-OI-2, E19-OI-3, B5 item 6, E24 item 9, E27 items 3, 5 and 7,
+  E28 items 4 and 11, E22 item 10, E25-OI-6, E23 items 3 and 6, B7 item 4, E21 item 11
+  (settled in OI-E11).
+- Question: the engine-side half of UI open items that add a field, constant or command.
+- Answer:
+  1. `MetricId` constants (E19-OI-1), appended after the existing numbers in E03-004 (as2.6),
+     one per series the UI pages name: `CPU_POWER_PKG = 5`, `CPU_POWER_CORE = 6`,
+     `CPU_CLOCK_MAX = 7`, `MEM_DIRTY = 14`, `GPU_MEM_SHARED = 47`, `GPU_MEM_CLOCK = 48`,
+     `GPU_PCIE_RX = 49`, `GPU_PCIE_TX = 52`, `GPU_FAN = 53`, `GPU_ENGINE_MEMCTL = 54`,
+     `GPU_ENGINE_JPEG = 55`, `GPU_ENGINE_OFA = 56`, `GPU_ENGINE_OTHER = 57` (one slot for the
+     busiest vendor-specific engine, named by `GpuDeviceInfo`), `FAN_PWM = 58`,
+     `BATTERY_POWER = 61` (50, 51 and 60 are taken). `ALL` grows to 39 entries. E12-008, E12-003, E12-006, E12-023,
+     E12-026, E12-027 and E13-005 publish them when the value exists.
+  2. `TIER_1HZ` (E19-OI-2): bit 15 of `MetricId` (`0x8000`), `MetricId::with_tier_1hz()`,
+     `is_tier_1hz()` and `base()` in E03-004; metric numbers stay below 0x8000. The reducer
+     publishes the slow views in `SeriesSet.slow` with the flagged id from P2 (E09 1 Hz tier
+     bead, 8q0.24). E19-013 is unblocked.
+  3. `ceil_pow2(u64) -> u64` and `ceil_125(f64) -> f64` go into `tl_model::units` (E03-012,
+     as2.14) with the UI-PRF-006 examples as tests (`ceil_125(1234) = 2000`,
+     `ceil_125(60) = 100`, `ceil_125(0.3) = 0.5`, `ceil_pow2(3 MiB) = 4 MiB`).
+  4. `SystemSnapshot.color_scheme: u8` (B5 item 6; portal `color-scheme` 0, 1, 2) fed by a
+     reader of `org.freedesktop.portal.Settings` `Read("org.freedesktop.appearance", "color-scheme")`
+     plus the `SettingChanged` signal, inside E14's session-bus opener worker (y6k.24, E14-020,
+     the one E14 worker that holds a session-bus connection) and shipped as
+     `SourceUpdate::ColorScheme(u8)` (added to 8hz.5). ADR-003 and ADR-004 gain one line each.
+  5. Fan `connected` flag (E24 item 9): `SensorReading.fan_connected: bool`, true when the fan
+     has reported a non-zero RPM in this session or carries a label; kept by the sensors worker
+     (E12-006, hjn.9) across samples.
+  6. System-table column ids (E27 item 5, E28 item 11): E03-052 (as2.18) has no column id type
+     yet, so it adds `SysColumnId` in `table.rs` with string ids for the 19 Services columns
+     (UI-SYS-003), the 7 Startup ids (`name`, `publisher`, `status`, `impact`, `type`,
+     `location`, `command`) and the 17 Connections ids (`proto`, `local`, `foreign`, `state`,
+     `pid`, `process`, `user`, `family`, `local_port`, `foreign_port`, `recv_q`, `send_q`,
+     `interface`, `inode`, `service`, `remote_host`, `netns`), with `as_str` and `from_str`
+     like `ColumnId`. `SysTableQuery.sort` and the `[columns.*]` settings use it; a shared string
+     like `name` is fine because the tables are separate (OI-E17 item 1 holds: no process
+     `ColumnId` for these).
+  7. Architecture bit width (E28 item 4): the inventory worker (E12-016) computes it from the
+     machine string: 64 for `x86_64`, `aarch64`, `riscv64`, `ppc64`, `ppc64le`, `s390x`,
+     `loongarch64`, `mips64`; else 32; `ProcessorInfo.bits: InvField<u8>`.
+  8. KWin command result (E22 item 10): no result event. "Process window shown." is shown on
+     send and "No window found" when the window is absent from `WindowsSnapshot`; a failed
+     one-shot script is logged by the worker at `warn`. This matches ADR-005 as written.
+  9. D-Bus error name (E27 item 3): `ActionError::UnitJob { result: Arc<str>, error_name: Option<Arc<str>> }`;
+     E11-011 (i3o.13) fills `error_name` from the zbus error when the method call fails and
+     `result` from `JobRemoved` otherwise.
+  10. Leaving Masked (E27 item 7): `UnitEnable` and `UnitDisable` on a masked unit call
+      `UnmaskUnitFiles` first inside the same action (E11-013, i3o.15); the summary is one
+      event.
+  11. GNOME network settings (E25-OI-6): `LaunchWhat::DbusActivate { bus_name: Arc<str>, object_path: Arc<str>, action: Arc<str>, parameter: Option<Arc<str>> }`
+      in E03-053 (as2.19) and the launcher (E14-020, y6k.24) calls
+      `org.freedesktop.Application.ActivateAction` on it, 2 s deadline, P3 with PERF-061.
+  12. Run history write route (E23 item 3): `UiInit.run_history: Option<Box<dyn RunHistoryStore>>`
+      with `load() -> Vec<u8>` and `save(&[u8])` built on `write_atomic` in tl-app (E33-008,
+      cr0.11); `executedAt` is RFC 3339 local time from jiff in tl-ui (OI-E04 item 9), no
+      tl-model helper.
+  13. Grant access (E23 item 6): no flag on `DetailDemand`; the UI sends
+      `Command::DetailRefresh { target, tab }` once when `HealthSnapshot.helper` becomes
+      `Unlocked`, and E29-015 (qfx.18) routes Restricted targets through the helper.
+  14. X11 keep-above (B7 item 4): no engine command in v1; KDE goes through
+      `KWinCommand::KeepAbove`, other desktops show the pin disabled (R-073 wording "elsewhere
+      it is disabled" covers X11 without KWin; APP-009 and UI-SHL-005 drop the "tl-engine X11
+      helper" sentence).
+- Basis: ADR-003 `MetricId` list and R-073 [verified]; UI-PRF-001, UI-PRF-006, UI-FND-042
+  theme follow-system rule, UI-SYS-003, PERF-061, UI-PWN-018 [verified]; as2.6, as2.8,
+  as2.14, as2.18 text [verified]; portal `Settings` interface names [inferred].
+- Owner decision: no.
+- Changes: ADR-003 (`MetricId` numbers and the tier bit, `SystemSnapshot.color_scheme`,
+  `SensorReading.fan_connected`, `SysColumnId`, `ProcessorInfo.bits`); ADR-004 (colour scheme
+  reader row); ADR-005 (`UnitJob.error_name`, `LaunchWhat::DbusActivate`); APP-009 and
+  UI-SHL-005 X11 sentence. as2.6, as2.14, as2.16, as2.18, as2.19, as2.22, 8hz.5, 8q0.24,
+  hjn.9, hjn.19, i3o.13, i3o.15, y6k.24, qfx.18, cr0.11, fut.1 as above.
+
 ## New beads
 
 | Plan key | Title | Epic | Phase | Files | Depends on |
@@ -1179,6 +1263,7 @@ E09-029; its bead ID is in the UI file.
 | OI-E29 | E14 D-Bus worker choices | no | y6k.5, y6k.7, y6k.12 to y6k.14, y6k.18, y6k.20, y6k.22 |
 | OI-E30 | E29 helper and setup choices | yes (OI-16 prompt texts) | qfx.6, qfx.12, qfx.20, qfx.21, qfx.22, qfx.24, qfx.28, qfx.32 |
 | OI-E31 | E30 history choices | yes (OI-5 chart shape) | E30-002 onward (engine side) |
+| OI-E32 | Smaller tl-model and engine additions asked by the UI | no | E19-004, E19-013, E15-003, E17-007, E24-025, E27-006, E27-011, E27-018, E25-030, E23-025, E23-028, the E24 and E25 series beads |
 
 Owner decisions in one list: OI-E14 (`--force-full-memory-mode` meaning), OI-E21 (`--app-id`
 scope, PKGBUILD licence, TaskSlinger INI encodings), OI-E30 (polkit prompt texts), OI-E31
