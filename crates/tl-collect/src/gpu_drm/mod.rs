@@ -91,7 +91,11 @@ fn first_hwmon(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
         .flatten()
-        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("hwmon")))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("hwmon"))
+        })
         .map(|e| e.path())
         .min()
 }
@@ -132,7 +136,14 @@ fn parse_link_speed(text: &str) -> Option<u8> {
 /// 2.5 GT/s is gen 1, 5 is 2, 8 is 3, 16 is 4, 32 is 5 and 64 is 6, within 0.1. Other values
 /// give `None`.
 pub fn gts_to_gen(gts: f32) -> Option<u8> {
-    const GENS: [(f32, u8); 6] = [(2.5, 1), (5.0, 2), (8.0, 3), (16.0, 4), (32.0, 5), (64.0, 6)];
+    const GENS: [(f32, u8); 6] = [
+        (2.5, 1),
+        (5.0, 2),
+        (8.0, 3),
+        (16.0, 4),
+        (32.0, 5),
+        (64.0, 6),
+    ];
     GENS.iter()
         .find(|(rate, _)| (gts - rate).abs() < 0.1)
         .map(|&(_, generation)| generation)
