@@ -75,6 +75,9 @@ mod tests {
         let (blocking_id, blocking_name) = joined.expect("blocking job completes");
         let name = blocking_name.expect("blocking thread has a name");
         assert!(name.starts_with(THREAD_NAME_PREFIX), "thread name {name:?}");
-        assert_ne!(blocking_id, worker_id, "blocking job ran on the async worker");
+        assert_ne!(
+            blocking_id, worker_id,
+            "blocking job ran on the async worker"
+        );
     }
 }
