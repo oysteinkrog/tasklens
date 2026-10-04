@@ -8,7 +8,8 @@
 //! hostname, when at least 3 characters, becomes `REDACTED`. The block, net and PCI files under
 //! `run/udev/data/` are copied with only the `I:`, `V:`, `G:` and `Q:` lines and the `E:` keys
 //! the udev reader parses; the `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_WWN` and `ID_FS_LABEL` values
-//! become `SCRUBBED` (R-261, R-266).
+//! become `SCRUBBED` (R-261, R-266). `proc/sys/kernel/random/boot_id` gets a fixed fake UUID
+//! (R-267).
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -66,6 +67,12 @@ const FORBIDDEN_NAMES: &[&str] = &[
     "fdinfo",
     "cwd",
 ];
+
+/// Relative path of the boot ID, which is copied with [`FAKE_BOOT_ID`] as content (R-267).
+const BOOT_ID_PATH: &str = "proc/sys/kernel/random/boot_id";
+
+/// Fixed boot ID written in place of the real one, so a fixture never holds a real boot ID.
+const FAKE_BOOT_ID: &[u8] = b"00000000-0000-4000-8000-000000000001\n";
 
 /// Basenames whose content is always replaced by `REDACTED\n`.
 const SERIAL_NAMES: &[&str] = &[
@@ -313,6 +320,8 @@ impl<'a> Ctx<'a> {
                         b"REDACTED\n".to_vec()
                     } else if is_mac_address(rel) {
                         b"00:00:00:00:00:00\n".to_vec()
+                    } else if rel == Path::new(BOOT_ID_PATH) {
+                        FAKE_BOOT_ID.to_vec()
                     } else {
                         self.scrub(&bytes)
                     };
@@ -1096,6 +1105,23 @@ mod tests {
         assert!(!report.copied.iter().any(|p| p.starts_with("run")));
         let capture_txt = fs::read_to_string(dir.join("CAPTURE.txt")).unwrap();
         assert!(!capture_txt.contains("run/udev"));
+    }
+
+    #[test]
+    fn boot_id_replaced_by_fixed_uuid() {
+        let src = fake_src();
+        put(
+            &src.0,
+            BOOT_ID_PATH,
+            b"3f2b6c1e-9a4d-4e8b-b1c2-7d5e6f708192\n",
+        );
+        let out = TempDir::new();
+        let report = capture_entries(&src.0, &out.0, &[Wanted::File(BOOT_ID_PATH.into())]).unwrap();
+        assert_eq!(report.copied.len(), 1);
+        assert_eq!(
+            fs::read(out.0.join(BOOT_ID_PATH)).unwrap(),
+            b"00000000-0000-4000-8000-000000000001\n"
+        );
     }
 
     #[test]
