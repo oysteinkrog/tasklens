@@ -6,8 +6,9 @@
 //! order, matched as a case-insensitive (ASCII) substring with longer names tried first. Names
 //! shorter than 3 characters are not scrubbed, so they do not wreck unrelated text (R-260). The
 //! hostname, when at least 3 characters, becomes `REDACTED`. The block, net and PCI files under
-//! `run/udev/data/` are copied with the `ID_SERIAL`, `ID_SERIAL_SHORT` and `ID_WWN` values
-//! replaced by `SCRUBBED` (R-261).
+//! `run/udev/data/` are copied with only the `I:`, `V:`, `G:` and `Q:` lines and the `E:` keys
+//! the udev reader parses; the `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_WWN` and `ID_FS_LABEL` values
+//! become `SCRUBBED` (R-261, R-263).
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -113,8 +114,31 @@ const UDEV_PREFIXES: &[&str] = &["b", "n", "+pci:"];
 /// Most bytes copied from one udev data file (ADR-016 udev row).
 const UDEV_CAP: u64 = 64 * 1024;
 
-/// udev property lines whose value is replaced by `SCRUBBED` (ADR-013, R-261).
-const UDEV_SCRUBBED_KEYS: &[&str] = &["E:ID_SERIAL=", "E:ID_SERIAL_SHORT=", "E:ID_WWN="];
+/// udev line types kept in a captured file; `S:` link lines and the rest are dropped (R-263).
+const UDEV_KEPT_TYPES: &[&str] = &["I:", "V:", "G:", "Q:"];
+
+/// The only `E:` keys kept in a captured udev file: the keys the udev reader parses (ADR-016
+/// udev row, `UDEV_KEYS` of E04-030). Every other `E:` line is dropped (R-263).
+const UDEV_KEPT_KEYS: &[&str] = &[
+    "ID_MODEL",
+    "ID_MODEL_FROM_DATABASE",
+    "ID_VENDOR_FROM_DATABASE",
+    "ID_BUS",
+    "ID_WWN",
+    "ID_SERIAL",
+    "ID_SERIAL_SHORT",
+    "ID_FS_TYPE",
+    "ID_FS_LABEL",
+    "ID_PART_TABLE_TYPE",
+    "ID_PART_ENTRY_TYPE",
+    "ID_PART_ENTRY_FLAGS",
+    "ID_PART_ENTRY_OFFSET",
+    "ID_PART_ENTRY_SIZE",
+    "ID_PATH",
+];
+
+/// Kept `E:` keys whose value is replaced by `SCRUBBED` (ADR-013, R-261, R-263).
+const UDEV_SCRUBBED_KEYS: &[&str] = &["ID_SERIAL", "ID_SERIAL_SHORT", "ID_WWN", "ID_FS_LABEL"];
 
 /// Shortest user name that is scrubbed (R-260).
 const MIN_USER_LEN: usize = 3;
@@ -756,22 +780,36 @@ fn replace_all(text: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Replaces the value of each [`UDEV_SCRUBBED_KEYS`] line with `SCRUBBED`, keeping the key.
+/// Keeps only the [`UDEV_KEPT_TYPES`] lines and the `E:` lines of [`UDEV_KEPT_KEYS`], and
+/// replaces the value of each [`UDEV_SCRUBBED_KEYS`] line with `SCRUBBED`, keeping the key.
 fn scrub_udev(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     for line in text.split_inclusive(|&b| b == b'\n') {
-        match UDEV_SCRUBBED_KEYS
+        if UDEV_KEPT_TYPES
             .iter()
-            .find(|k| line.starts_with(k.as_bytes()))
+            .any(|t| line.starts_with(t.as_bytes()))
         {
-            Some(key) => {
-                out.extend_from_slice(key.as_bytes());
-                out.extend_from_slice(b"SCRUBBED");
-                if line.ends_with(b"\n") {
-                    out.push(b'\n');
-                }
+            out.extend_from_slice(line);
+            continue;
+        }
+        let Some((key, _)) = line
+            .strip_prefix(b"E:")
+            .and_then(|rest| rest.split_at_checked(rest.iter().position(|&b| b == b'=')?))
+        else {
+            continue;
+        };
+        if !UDEV_KEPT_KEYS.iter().any(|k| k.as_bytes() == key) {
+            continue;
+        }
+        if UDEV_SCRUBBED_KEYS.iter().any(|k| k.as_bytes() == key) {
+            out.extend_from_slice(b"E:");
+            out.extend_from_slice(key);
+            out.extend_from_slice(b"=SCRUBBED");
+            if line.ends_with(b"\n") {
+                out.push(b'\n');
             }
-            None => out.extend_from_slice(line),
+        } else {
+            out.extend_from_slice(line);
         }
     }
     out
@@ -1003,6 +1041,34 @@ mod tests {
                 .copied
                 .contains(&PathBuf::from("run/udev/data/b259:0"))
         );
+    }
+
+    #[test]
+    fn udev_unlisted_lines_dropped() {
+        let src = fake_src();
+        put(
+            &src.0,
+            "run/udev/data/b8:0",
+            b"S:disk/by-id/ata-WDC_X_WD-SER123\nS:disk/by-uuid/1234-abcd\nL:0\nI:123\n\
+              E:ID_BUS=ata\nE:ID_WWN_WITH_EXTENSION=0x5000cca2\nE:ID_NET_NAME_MAC=enxaabbccddeeff\n\
+              E:ID_FS_UUID=1234-abcd\nE:ID_FS_LABEL=alice-photos\nE:ID_PATH=pci-0000:00:17.0-ata-1\n",
+        );
+        let (_out, dir, _) = capture_fresh(&src.0, &CaptureOpts::default());
+        let text = fs::read_to_string(dir.join("run/udev/data/b8:0")).unwrap();
+        assert_eq!(
+            text,
+            "I:123\nE:ID_BUS=ata\nE:ID_FS_LABEL=SCRUBBED\nE:ID_PATH=pci-0000:00:17.0-ata-1\n"
+        );
+        for gone in [
+            "SER123",
+            "0x5000cca2",
+            "aabbccddeeff",
+            "1234-abcd",
+            "alice",
+            "S:",
+        ] {
+            assert!(!text.contains(gone), "{gone}");
+        }
     }
 
     #[test]
