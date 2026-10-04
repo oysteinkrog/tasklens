@@ -1768,6 +1768,14 @@ a stable format and history (ADR-012) stores the key. `tl_collect::apps::classif
 `kind.key()`. The tl-collect test `group_key_stable` snapshots the four numbers.
 - Edits: bead yms.18 (chain edit to the body of `GroupKind::key()` in `crates/tl-model/src/process.rs`).
 
+### R-280 Process count when Hide system processes is on
+
+`ProcessTableView.total` counts the process records left after Hide system processes and before the text
+filter. Rows hidden by Hide system processes are not counted, the same way UI-PRC-018 counts kernel threads
+only when they are shown. Pseudo rows are never counted (UI-PRC-018). `shown` stays the count after the text
+filter, so the status chip reads "41 / 296 Processes" against the visible total.
+- Edits: follow-up to bead 8q0.14 in `crates/tl-engine/src/reducer/table.rs`.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
