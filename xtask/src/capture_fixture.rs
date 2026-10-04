@@ -8,7 +8,7 @@
 //! hostname, when at least 3 characters, becomes `REDACTED`. The block, net and PCI files under
 //! `run/udev/data/` are copied with only the `I:`, `V:`, `G:` and `Q:` lines and the `E:` keys
 //! the udev reader parses; the `ID_SERIAL`, `ID_SERIAL_SHORT`, `ID_WWN` and `ID_FS_LABEL` values
-//! become `SCRUBBED` (R-261, R-263).
+//! become `SCRUBBED` (R-261, R-266).
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -114,11 +114,11 @@ const UDEV_PREFIXES: &[&str] = &["b", "n", "+pci:"];
 /// Most bytes copied from one udev data file (ADR-016 udev row).
 const UDEV_CAP: u64 = 64 * 1024;
 
-/// udev line types kept in a captured file; `S:` link lines and the rest are dropped (R-263).
+/// udev line types kept in a captured file; `S:` link lines and the rest are dropped (R-266).
 const UDEV_KEPT_TYPES: &[&str] = &["I:", "V:", "G:", "Q:"];
 
 /// The only `E:` keys kept in a captured udev file: the keys the udev reader parses (ADR-016
-/// udev row, `UDEV_KEYS` of E04-030). Every other `E:` line is dropped (R-263).
+/// udev row, `UDEV_KEYS` of E04-030). Every other `E:` line is dropped (R-266).
 const UDEV_KEPT_KEYS: &[&str] = &[
     "ID_MODEL",
     "ID_MODEL_FROM_DATABASE",
@@ -137,7 +137,7 @@ const UDEV_KEPT_KEYS: &[&str] = &[
     "ID_PATH",
 ];
 
-/// Kept `E:` keys whose value is replaced by `SCRUBBED` (ADR-013, R-261, R-263).
+/// Kept `E:` keys whose value is replaced by `SCRUBBED` (ADR-013, R-261, R-266).
 const UDEV_SCRUBBED_KEYS: &[&str] = &["ID_SERIAL", "ID_SERIAL_SHORT", "ID_WWN", "ID_FS_LABEL"];
 
 /// Shortest user name that is scrubbed (R-260).
