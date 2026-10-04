@@ -122,7 +122,8 @@ pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
         clock_gfx_mhz: reading(dev.clock_info(Clock::Graphics)),
         clock_mem_mhz: reading(dev.clock_info(Clock::Memory)),
         fan_pct: reading(dev.fan_speed(0)),
-        // NVML reports KB/s over a 20 ms window.
+        // NVML reports KB/s measured over a 20 ms window, and each call blocks for that window.
+        // The two calls run one after the other, so they add about 42 ms to a sample (R-277).
         pcie_rx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Receive)),
         pcie_tx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Send)),
     }
@@ -365,7 +366,7 @@ mod tests {
 
     #[test]
     #[ignore = "owner machine with an RTX 5070"]
-    fn real_sample_under_50ms() {
+    fn real_sample_under_100ms() {
         let mut backend = real_backend();
         for i in 0..2 {
             if i > 0 {
@@ -377,7 +378,7 @@ mod tests {
             eprintln!("sample {i}: {took:?}, t_ns {t_ns}");
             assert_eq!(devices.len(), backend.devices.len());
             assert!(processes.is_none());
-            assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+            assert!(took < std::time::Duration::from_millis(100), "{took:?}");
         }
     }
 
