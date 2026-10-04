@@ -158,11 +158,7 @@ pub fn opengl_version(pci_bus_id: &str) -> Option<String> {
     catch_unwind(AssertUnwindSafe(|| {
         let lib = load_egl()?;
         let ext = DeviceExt::load(&lib)?;
-        let dev = ext
-            .devices()
-            .into_iter()
-            .find(|&(_, ref id)| *id == want)?
-            .0;
+        let dev = ext.devices().into_iter().find(|(_, id)| *id == want)?.0;
         gl_version_on_device(&lib, &ext, dev)
     }))
     .ok()
