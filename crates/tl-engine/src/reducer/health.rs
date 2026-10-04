@@ -140,9 +140,9 @@ impl HealthState {
 
     /// True when the source is `Failed` or `Disabled`.
     pub fn is_down(&self, id: SourceId) -> bool {
-        self.by_id.get(&id).is_some_and(|e| {
-            matches!(e.state, SourceState::Failed | SourceState::Disabled { .. })
-        })
+        self.by_id
+            .get(&id)
+            .is_some_and(|e| matches!(e.state, SourceState::Failed | SourceState::Disabled { .. }))
     }
 
     /// A new snapshot when anything changed since the last call, else `None`.
@@ -225,7 +225,10 @@ mod tests {
         h.apply(SourceId::Cpu, SourceState::Running, None, T);
         h.sample_ok(SourceId::Cpu, T, 100 * MS);
         assert!(!h.tick(T + 1_400 * MS));
-        assert_eq!(h.publish().map(|s| s.get(SourceId::Cpu).state), Some(SourceState::Running));
+        assert_eq!(
+            h.publish().map(|s| s.get(SourceId::Cpu).state),
+            Some(SourceState::Running)
+        );
         assert!(h.tick(T + 1_600 * MS));
         let snap = h.publish().expect("stale is a change");
         assert_eq!(snap.get(SourceId::Cpu).state, SourceState::Stale);
@@ -258,10 +261,18 @@ mod tests {
 
         let until = T + 62 * S;
         let err: Arc<str> = Arc::from("read /proc/stat failed");
-        h.apply(SourceId::Cpu, SourceState::Disabled { until }, Some(err.clone()), T + 2 * S);
+        h.apply(
+            SourceId::Cpu,
+            SourceState::Disabled { until },
+            Some(err.clone()),
+            T + 2 * S,
+        );
         assert!(h.is_down(SourceId::Cpu));
         let snap = h.publish().expect("state change");
-        assert_eq!(snap.get(SourceId::Cpu).state, SourceState::Disabled { until });
+        assert_eq!(
+            snap.get(SourceId::Cpu).state,
+            SourceState::Disabled { until }
+        );
         assert_eq!(snap.get(SourceId::Cpu).last_error, Some(err));
 
         h.apply(SourceId::Cpu, SourceState::Running, None, until);
@@ -322,9 +333,18 @@ mod tests {
     fn last_error_is_one_line() {
         let mut h = HealthState::new();
         let long = format!("first\u{7}line{}\nsecond line", "x".repeat(300));
-        h.apply(SourceId::Sensors, SourceState::Failed, Some(Arc::from(long)), T);
+        h.apply(
+            SourceId::Sensors,
+            SourceState::Failed,
+            Some(Arc::from(long)),
+            T,
+        );
         let snap = h.publish().expect("change");
-        let err = snap.get(SourceId::Sensors).last_error.clone().expect("error");
+        let err = snap
+            .get(SourceId::Sensors)
+            .last_error
+            .clone()
+            .expect("error");
         assert!(err.starts_with("firstline"));
         assert_eq!(err.chars().count(), MAX_ERROR_CHARS);
         assert!(!err.contains('\n'));
