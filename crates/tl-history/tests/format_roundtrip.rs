@@ -13,7 +13,7 @@ fn meta(i: u32) -> HistMeta {
     HistMeta {
         comm: Arc::from(format!("comm{i}")),
         name: Arc::from(format!("Name {i}")),
-        exe_basename: (i % 2 == 0).then(|| Arc::from(format!("exe{i}"))),
+        exe_basename: i.is_multiple_of(2).then(|| Arc::from(format!("exe{i}"))),
         app_id: None,
         exe_path: Some(Arc::from(format!("/usr/bin/exe{i}"))),
         user: Arc::from("alice"),
@@ -57,7 +57,7 @@ fn sample_block() -> Block {
                     gpu_pct: Some(1),
                 },
             )],
-            started: if d % 20 == 0 {
+            started: if d.is_multiple_of(20) {
                 vec![process(50 + d)]
             } else {
                 vec![]
