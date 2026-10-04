@@ -310,8 +310,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    const OWNER_DESKTOP: &[u8] =
-        include_bytes!("../../tests/fixtures/owner-desktop/proc/cpuinfo");
+    const OWNER_DESKTOP: &[u8] = include_bytes!("../../tests/fixtures/owner-desktop/proc/cpuinfo");
 
     #[test]
     fn scan_owner_desktop() {

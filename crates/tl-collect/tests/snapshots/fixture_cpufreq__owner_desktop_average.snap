@@ -1,0 +1,145 @@
+---
+source: crates/tl-collect/tests/fixture_cpufreq.rs
+expression: out
+---
+FreqReading {
+    source: AvgFreq,
+    avg_mhz: Measured {
+        value: 3875,
+        validity: Valid,
+    },
+    max_mhz: Measured {
+        value: 3875,
+        validity: Valid,
+    },
+    per_cpu_mhz: [
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+        Measured {
+            value: 3875,
+            validity: Valid,
+        },
+    ],
+}
