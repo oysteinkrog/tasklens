@@ -1730,23 +1730,17 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: 8hz.5 bead Files section; tl-model already uses bitflags [verified].
 - Edits: ARCHITECTURE.md ADR-001 table; xtask/src/check_deps.rs.
 
-### R-274 Intel xe fdinfo memory regions
-- Question: PERF-064 names the fdinfo regions `local0` and `system0`, which are i915's names. The xe driver names its regions after its TTM placements, so an xe client reports `drm-total-system` and, on a dGPU, `drm-total-vram0` (the `drm-basic` fixture's xe client uses `drm-total-system`). E06-023 (`tasklens-hx1.26`) would then give `None` for xe memory. Leader decision, 2026-10-04.
-- Resolution: `fdinfo_memory` maps dedicated memory from `local0` (i915) or `vram0` (xe), and shared memory from `system0` (i915) or `system` (xe). Other region names (`gtt`, `stolen`) are ignored. Check against a real xe machine when one is available (no Intel GPU on the owner machine).
-- Basis: PERF-064 [verified]; the xe region names [inferred from the xe driver's TTM placement names and the fixture, not checked on hardware].
-- Edits: bead hx1.26 (`crates/tl-collect/src/gpu_drm/intel.rs`).
-
 ### R-274 gpui-kit 0.7.0 theme token names (U-8 settled)
 - Question: E17-004 (`tasklens-lgw.6`) must check every kit token name in its mapping against the gpui-kit 0.7.0 source and say what happens to kit fields the mapping does not name.
 - Resolution: every `ThemeColor` field the mapping names exists in gpui-component 0.7.0 `src/theme/theme_color.rs`, so `theme/map.rs` has no substitutions. One kit field, `list_head`, is neither mapped nor in the bead's "left at the kit default" list; it stays at the kit default through the reset line, like `table_foot`. Note for the caller of `map::apply` (the theme store): `Theme::update` reloads the kit's registered theme config when `mode` changes inside the closure, which overwrites the mapped colours. A mode switch must therefore set `mode` in one `Theme::update` and run `map::apply` in a second one, or write through `Theme::global_mut` and then call `Theme::sync_base` and refresh the windows.
 - Basis: gpui-component 0.7.0 `src/theme/theme_color.rs` and `src/theme/mod.rs` (`Theme::update`, `Theme::edit`) [verified by the lgw.6 agent]; `every_mapped_field_is_set` test.
 - Edits: `crates/tl-ui/src/theme/map.rs`; U-8 row below.
 
-
-
-
-
-
+### R-275 Intel xe fdinfo memory regions
+- Question: PERF-064 names the fdinfo regions `local0` and `system0`, which are i915's names. The xe driver names its regions after its TTM placements, so an xe client reports `drm-total-system` and, on a dGPU, `drm-total-vram0` (the `drm-basic` fixture's xe client uses `drm-total-system`). E06-023 (`tasklens-hx1.26`) would then give `None` for xe memory. Leader decision, 2026-10-04.
+- Resolution: `fdinfo_memory` maps dedicated memory from `local0` (i915) or `vram0` (xe), and shared memory from `system0` (i915) or `system` (xe). Other region names (`gtt`, `stolen`) are ignored. Check against a real xe machine when one is available (no Intel GPU on the owner machine).
+- Basis: PERF-064 [verified]; the xe region names [inferred from the xe driver's TTM placement names and the fixture, not checked on hardware].
+- Edits: bead hx1.26 (`crates/tl-collect/src/gpu_drm/intel.rs`).
 
 ## Owner questions
 
