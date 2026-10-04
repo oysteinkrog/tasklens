@@ -111,7 +111,9 @@ mod tests {
 
     #[test]
     fn io_error_without_errno_maps_to_eio() {
-        let io = std::io::Error::new(ErrorKind::Other, "x");
+        // The same value as `Error::new(ErrorKind::Other, "x")`.
+        let io = std::io::Error::other("x");
+        assert_eq!(io.kind(), ErrorKind::Other);
         assert_eq!(OpsError::from(io), OpsError::Os(libc::EIO));
     }
 
