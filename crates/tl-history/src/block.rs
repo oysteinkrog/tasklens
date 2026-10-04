@@ -403,27 +403,50 @@ impl BlockBuilder {
     fn close(&mut self) -> Option<Block> {
         let open = self.open.take()?;
         let mut block = open.block;
-        let start = block.start_t_ns;
-        let mut system: Vec<_> = open
-            .system
-            .into_iter()
-            .map(|(id, mut points)| {
-                points.sort_unstable_by_key(|(sec, _)| *sec);
-                let points = points
-                    .into_iter()
-                    .map(|(sec, v)| (ms_since(start, sec * NS_PER_SEC), v))
-                    .collect();
-                (id, points)
-            })
-            .collect();
-        system.sort_unstable_by_key(|(id, _)| *id);
-        block.system = system;
+        block.system = system_points(block.start_t_ns, &open.system);
         if self.catalog_due && self.catalog.is_some() {
             self.catalog_due = false;
             block.catalog = self.catalog.clone();
         }
         Some(block)
     }
+
+    /// A copy of the open block as it would close now, for queries. `None` when no block is open.
+    pub fn open_snapshot(&self) -> Option<Block> {
+        let open = self.open.as_ref()?;
+        let mut block = open.block.clone();
+        block.system = system_points(block.start_t_ns, &open.system);
+        if self.catalog_due {
+            block.catalog = self.catalog.clone();
+        }
+        Some(block)
+    }
+
+    /// `new_meta` of the open block so far, in id order. Empty when no block is open.
+    pub fn open_new_meta(&self) -> &[(MetaId, HistMeta)] {
+        self.open.as_ref().map_or(&[], |o| &o.block.new_meta)
+    }
+}
+
+/// Per-second system points as `Block.system`: sorted by series, points by time.
+fn system_points(
+    start: TimeNs,
+    system: &HashMap<SeriesId, Vec<(u64, f32)>>,
+) -> Vec<(SeriesId, Vec<(u32, f32)>)> {
+    let mut out: Vec<_> = system
+        .iter()
+        .map(|(id, points)| {
+            let mut points = points.clone();
+            points.sort_unstable_by_key(|(sec, _)| *sec);
+            let points = points
+                .into_iter()
+                .map(|(sec, v)| (ms_since(start, sec * NS_PER_SEC), v))
+                .collect();
+            (*id, points)
+        })
+        .collect();
+    out.sort_unstable_by_key(|(id, _)| *id);
+    out
 }
 
 /// Milliseconds from `start` to `t_ns`, 0 when `t_ns` is earlier.
@@ -809,6 +832,25 @@ mod tests {
         let needle = b"hunter2";
         assert!(!bytes.windows(needle.len()).any(|w| w == needle));
         assert!(b.open_bytes_estimate() == 0);
+    }
+
+    #[test]
+    fn open_snapshot_matches_flush() {
+        let mut b = BlockBuilder::new(BootId(7));
+        assert!(b.open_snapshot().is_none());
+        assert!(b.open_new_meta().is_empty());
+        b.on_device_catalog(&catalog(1));
+        b.on_process_sweep(0, &sweep(3));
+        let mut more = sweep(3);
+        more.push(record(3, 20.0));
+        b.on_process_sweep(SEC, &more);
+        b.on_system_sample(SEC, &[(cpu(), Sample::valid(SEC, 7.0))]);
+        assert_eq!(b.open_new_meta().len(), 4);
+        let snap = b.open_snapshot().unwrap();
+        // The snapshot leaves the builder as it was.
+        assert_eq!(b.flush().unwrap(), snap);
+        assert!(snap.catalog.is_some());
+        assert_eq!(snap.system[0].1, vec![(1000, 7.0)]);
     }
 
     #[test]
