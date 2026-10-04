@@ -68,11 +68,20 @@ pub fn run(cmd: BenchCmd) -> anyhow::Result<()> {
     build(&root)?;
 
     let tmp = root.join("target/bench/tmp");
-    std::fs::create_dir_all(&tmp).with_context(|| format!("bench: cannot create {}", tmp.display()))?;
+    std::fs::create_dir_all(&tmp)
+        .with_context(|| format!("bench: cannot create {}", tmp.display()))?;
     let binary = root.join("target/release/tasklens");
     let reports = run_scenes(&cmd.scenes, cmd.runs, &tmp, |scene, out| {
         Command::new(&binary)
-            .args(["--bench", scene, "--duration", "30", "--warmup", "5", "--json"])
+            .args([
+                "--bench",
+                scene,
+                "--duration",
+                "30",
+                "--warmup",
+                "5",
+                "--json",
+            ])
             .arg(out)
             .current_dir(&root)
             .status()
@@ -229,7 +238,8 @@ fn table(summary: &Value) -> String {
     let scenes = summary["scenes"].as_object().unwrap_or(&empty);
     for (scene, entry) in scenes {
         let median = &entry["median"];
-        let cell = |path: &str| metric(median, path).map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
+        let cell =
+            |path: &str| metric(median, path).map_or_else(|| "-".to_owned(), |v| format!("{v:.2}"));
         out.push_str(&format!(
             "| {scene} | {} | {} | {} | {} | {} | {} | {} |\n",
             cell("frame_cpu_ms.p50"),
@@ -294,7 +304,10 @@ fn git_sha(root: &Path) -> anyhow::Result<String> {
         .output()
         .context("bench: cannot run git rev-parse")?;
     if !rev.status.success() {
-        bail!("bench: git rev-parse failed with exit code {}", exit_code(rev.status));
+        bail!(
+            "bench: git rev-parse failed with exit code {}",
+            exit_code(rev.status)
+        );
     }
     let mut sha = String::from_utf8_lossy(&rev.stdout).trim().to_owned();
     let status = Command::new("git")
@@ -303,7 +316,10 @@ fn git_sha(root: &Path) -> anyhow::Result<String> {
         .output()
         .context("bench: cannot run git status")?;
     if !status.status.success() {
-        bail!("bench: git status failed with exit code {}", exit_code(status.status));
+        bail!(
+            "bench: git status failed with exit code {}",
+            exit_code(status.status)
+        );
     }
     if !status.stdout.iter().all(u8::is_ascii_whitespace) {
         sha.push_str("-dirty");
@@ -360,7 +376,10 @@ mod tests {
         summarize(
             "2026-10-04",
             "abc",
-            vec![("perf-cpu".to_owned(), vec![report("perf-cpu", 0.5, p99, 20.0)])],
+            vec![(
+                "perf-cpu".to_owned(),
+                vec![report("perf-cpu", 0.5, p99, 20.0)],
+            )],
         )
         .unwrap()
     }
@@ -414,9 +433,12 @@ mod tests {
             report("perf-cpu", 0.6, 1.4, 21.0),
             report("perf-cpu", 0.7, 1.2, 22.0),
         ];
-        let summary =
-            summarize("2026-10-04", "0123456789ab-dirty", vec![("perf-cpu".to_owned(), runs.clone())])
-                .unwrap();
+        let summary = summarize(
+            "2026-10-04",
+            "0123456789ab-dirty",
+            vec![("perf-cpu".to_owned(), runs.clone())],
+        )
+        .unwrap();
         assert_eq!(
             summary,
             json!({
@@ -448,7 +470,10 @@ mod tests {
         })
         .unwrap_err();
         std::fs::remove_dir_all(&tmp).unwrap();
-        assert_eq!(err.to_string(), "bench: bridge run 2 failed with exit code 1");
+        assert_eq!(
+            err.to_string(),
+            "bench: bridge run 2 failed with exit code 1"
+        );
         assert_eq!(calls, 2);
     }
 
