@@ -3,19 +3,20 @@
 //! `hello` starts NVML and lists the devices. `sample` reads one set of metrics per device
 //! (E13-003).
 
+use nvml_wrapper::enum_wrappers::device::{Clock, PcieUtilCounter, TemperatureSensor};
 use nvml_wrapper::error::NvmlError;
-use nvml_wrapper::{Nvml, cuda_driver_version_major, cuda_driver_version_minor};
-use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure};
+use nvml_wrapper::{Device, Nvml, cuda_driver_version_major, cuda_driver_version_minor};
+use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
 
 use crate::sampler::{Backend, HelloInfo, InitFailed, now_boottime_ns};
 
 /// One device that `hello` listed. NVML device handles borrow `Nvml`, so the slot keeps the index.
-// E13-003 (ndy.5) reads these fields in `sample`.
-#[allow(dead_code)]
 struct DeviceSlot {
     index: u32,
     uuid: [u8; 16],
     /// NVML timestamp of the newest process sample seen, for `process_utilization_stats`.
+    // E13-004 (ndy.6) reads this field.
+    #[allow(dead_code)]
     last_process_ts: u64,
 }
 
@@ -90,6 +91,78 @@ fn read_device(nvml: &Nvml, index: u32, cuda: Option<&str>) -> Option<GpuDeviceI
     })
 }
 
+/// Maps one NVML call result to a `Reading`. `NotSupported` is `Unsupported`; every other error
+/// is `Failed`, so a missing metric is never zero.
+pub fn reading<T>(r: Result<T, NvmlError>) -> Reading<T> {
+    match r {
+        Ok(v) => Reading::Ok(v),
+        Err(NvmlError::NotSupported) => Reading::Unsupported,
+        Err(_) => Reading::Failed,
+    }
+}
+
+/// Reads one device's metrics for a sample (PERF-063 to PERF-070). Each call is independent, so
+/// one failed metric never skips the others.
+pub fn device_sample(dev: &Device<'_>, uuid: [u8; 16]) -> GpuDeviceSample {
+    // One call fills both utilisation fields, so they share its `Reading`.
+    let (util_pct, mem_util_pct) = match reading(dev.utilization_rates()) {
+        Reading::Ok(u) => (Reading::Ok(u.gpu), Reading::Ok(u.memory)),
+        Reading::Unsupported => (Reading::Unsupported, Reading::Unsupported),
+        Reading::Failed => (Reading::Failed, Reading::Failed),
+    };
+    GpuDeviceSample {
+        uuid,
+        util_pct,
+        mem_util_pct,
+        mem_used: reading(dev.memory_info().map(|m| m.used)),
+        enc_pct: reading(dev.encoder_utilization().map(|u| u.utilization)),
+        dec_pct: reading(dev.decoder_utilization().map(|u| u.utilization)),
+        temp_c: reading(dev.temperature(TemperatureSensor::Gpu)),
+        power_mw: reading(dev.power_usage()),
+        clock_gfx_mhz: reading(dev.clock_info(Clock::Graphics)),
+        clock_mem_mhz: reading(dev.clock_info(Clock::Memory)),
+        fan_pct: reading(dev.fan_speed(0)),
+        // NVML reports KB/s over a 20 ms window.
+        pcie_rx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Receive)),
+        pcie_tx_kbps: reading(dev.pcie_throughput(PcieUtilCounter::Send)),
+    }
+}
+
+/// The sample for a device whose handle could not be read: every metric is `Failed`.
+fn failed_sample(uuid: [u8; 16]) -> GpuDeviceSample {
+    GpuDeviceSample {
+        uuid,
+        util_pct: Reading::Failed,
+        mem_util_pct: Reading::Failed,
+        mem_used: Reading::Failed,
+        enc_pct: Reading::Failed,
+        dec_pct: Reading::Failed,
+        temp_c: Reading::Failed,
+        power_mw: Reading::Failed,
+        clock_gfx_mhz: Reading::Failed,
+        clock_mem_mhz: Reading::Failed,
+        fan_pct: Reading::Failed,
+        pcie_rx_kbps: Reading::Failed,
+        pcie_tx_kbps: Reading::Failed,
+    }
+}
+
+impl NvmlBackend {
+    /// One `GpuDeviceSample` per slot, in index order. Empty before `hello`.
+    fn device_samples(&self) -> Vec<GpuDeviceSample> {
+        let Some(nvml) = &self.nvml else {
+            return Vec::new();
+        };
+        self.devices
+            .iter()
+            .map(|slot| match nvml.device_by_index(slot.index) {
+                Ok(dev) => device_sample(&dev, slot.uuid),
+                Err(_) => failed_sample(slot.uuid),
+            })
+            .collect()
+    }
+}
+
 impl Backend for NvmlBackend {
     fn hello(&mut self) -> Result<HelloInfo, InitFailed> {
         let nvml = match self.nvml.take() {
@@ -133,8 +206,10 @@ impl Backend for NvmlBackend {
         _seq: u32,
         processes: bool,
     ) -> (u64, Vec<GpuDeviceSample>, Option<Vec<GpuProcessSample>>) {
-        // E13-003 (ndy.5) fills the device and process samples.
-        (now_boottime_ns(), Vec::new(), processes.then(Vec::new))
+        let t_ns = now_boottime_ns();
+        let devices = self.device_samples();
+        // E13-004 (ndy.6) fills the process rows.
+        (t_ns, devices, processes.then(Vec::new))
     }
 }
 
@@ -221,6 +296,89 @@ mod tests {
         assert!(d.power_limit_mw.is_some());
         assert_eq!(backend.devices.len(), 1);
         assert_eq!(backend.devices[0].uuid, d.uuid);
+    }
+
+    #[test]
+    fn reading_mapping() {
+        assert_eq!(reading(Ok(5u32)), Reading::Ok(5));
+        assert_eq!(
+            reading::<u32>(Err(NvmlError::NotSupported)),
+            Reading::Unsupported
+        );
+        assert_eq!(reading::<u32>(Err(NvmlError::Unknown)), Reading::Failed);
+        assert_eq!(reading::<u32>(Err(NvmlError::GpuLost)), Reading::Failed);
+        assert_eq!(
+            reading::<u64>(Err(NvmlError::NoPermission)),
+            Reading::Failed
+        );
+    }
+
+    /// Starts NVML and returns the backend after `hello`, with one device or more.
+    fn real_backend() -> NvmlBackend {
+        let mut backend = NvmlBackend::new();
+        if let Err(e) = backend.hello() {
+            panic!("hello failed: {:?} {}", e.kind, e.message);
+        }
+        assert!(!backend.devices.is_empty());
+        backend
+    }
+
+    #[test]
+    #[ignore = "owner machine with an RTX 5070"]
+    fn real_device_sample_fields() {
+        let backend = real_backend();
+        let nvml = backend.nvml.as_ref().unwrap();
+        let slot = &backend.devices[0];
+        let dev = nvml.device_by_index(slot.index).unwrap();
+        let mem_total = dev.memory_info().unwrap().total;
+        let s = device_sample(&dev, slot.uuid);
+        eprintln!("{s:?}");
+        assert_eq!(s.uuid, slot.uuid);
+        assert!(matches!(s.util_pct, Reading::Ok(_)), "{:?}", s.util_pct);
+        assert!(matches!(s.power_mw, Reading::Ok(_)), "{:?}", s.power_mw);
+        assert!(
+            matches!(s.clock_gfx_mhz, Reading::Ok(_)),
+            "{:?}",
+            s.clock_gfx_mhz
+        );
+        assert!(
+            matches!(s.clock_mem_mhz, Reading::Ok(_)),
+            "{:?}",
+            s.clock_mem_mhz
+        );
+        let Reading::Ok(temp) = s.temp_c else {
+            panic!("temp_c {:?}", s.temp_c);
+        };
+        assert!((10..=110).contains(&temp), "{temp}");
+        let Reading::Ok(used) = s.mem_used else {
+            panic!("mem_used {:?}", s.mem_used);
+        };
+        assert!(used <= mem_total, "{used} > {mem_total}");
+        // U-35: whether the owner card reports a fan speed.
+        eprintln!("U-35 fan_pct = {:?}", s.fan_pct);
+        assert!(
+            matches!(s.fan_pct, Reading::Ok(_) | Reading::Unsupported),
+            "{:?}",
+            s.fan_pct
+        );
+    }
+
+    #[test]
+    #[ignore = "owner machine with an RTX 5070"]
+    fn real_sample_under_50ms() {
+        let mut backend = real_backend();
+        for i in 0..2 {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            let start = std::time::Instant::now();
+            let (t_ns, devices, processes) = backend.sample(i, false);
+            let took = start.elapsed();
+            eprintln!("sample {i}: {took:?}, t_ns {t_ns}");
+            assert_eq!(devices.len(), backend.devices.len());
+            assert!(processes.is_none());
+            assert!(took < std::time::Duration::from_millis(50), "{took:?}");
+        }
     }
 
     #[test]
