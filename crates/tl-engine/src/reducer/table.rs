@@ -10,15 +10,17 @@ use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::devices::DeviceCatalog;
-use tl_model::ids::{ColumnId, GroupKey, NodeId};
+use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, DeviceKind, NetKind};
+use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessExtras, ProcessRecord,
 };
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::SystemSnapshot;
+use tl_model::system::{GpuTotals, Metric};
 use tl_model::table::{
-    Manager, ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableTotals, UnitRef,
+    Manager, ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableTotals, Total,
+    UnitRef,
 };
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
@@ -1499,6 +1501,228 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
     }
 }
 
+/// The process sweep numbers the header totals need (E08-003).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct SweepTotals {
+    pub system_threads: u32,
+    /// `/proc/sys/fs/file-nr` field 1. `None` when the file could not be read (R-166 B3-7).
+    pub file_nr: Option<u64>,
+}
+
+/// Bytes per second in 1 Mbit/s.
+const BYTES_PER_MBIT: u64 = 125_000;
+
+/// A value that may be read: `Valid` or `Stale`.
+const fn readable(v: Validity) -> bool {
+    matches!(v, Validity::Valid | Validity::Stale)
+}
+
+fn total<T: Copy + Default>(m: Metric<T>) -> Total<T> {
+    Total {
+        value: m.value,
+        validity: m.validity,
+    }
+}
+
+fn state<T: Default>(validity: Validity) -> Total<T> {
+    Total {
+        value: T::default(),
+        validity,
+    }
+}
+
+/// The worst validity of the values a device provides. A device that does not provide the
+/// metric (`Unsupported`) is skipped; `Unsupported` when no device provides it.
+fn combine(vs: impl Iterator<Item = Validity>) -> Validity {
+    vs.filter(|&v| v != Validity::Unsupported)
+        .reduce(worse)
+        .unwrap_or(Validity::Unsupported)
+}
+
+/// Highest readable value, with the combined validity. `empty` when there is no device.
+fn max_total(ms: &[Metric<f32>], empty: Validity) -> Total<f32> {
+    if ms.is_empty() {
+        return state(empty);
+    }
+    let validity = combine(ms.iter().map(|m| m.validity));
+    if !readable(validity) {
+        return state(validity);
+    }
+    let value = ms
+        .iter()
+        .filter(|m| readable(m.validity))
+        .map(|m| m.value)
+        .fold(0.0, f32::max);
+    Total { value, validity }
+}
+
+/// The present catalog entry of `idx` when it is of `kind`.
+fn present(devices: &DeviceCatalog, idx: DeviceIdx, kind: DeviceKind) -> Option<&DeviceEntry> {
+    devices
+        .get(idx)
+        .filter(|e| e.present && e.identity.kind() == kind)
+}
+
+/// Physical interfaces carry the machine's own traffic. VPN tunnels and virtual interfaces
+/// repeat traffic that a physical interface also counts, so they are left out.
+fn physical_net(e: &DeviceEntry) -> bool {
+    matches!(
+        e.net_kind,
+        Some(NetKind::Wired | NetKind::Wireless | NetKind::Other)
+    )
+}
+
+/// `domain:bus:device.function` as numbers, so `0000:2d:00.0` and NVML's `00000000:2D:00.0`
+/// order the same way.
+fn pci_order(bus_id: &str) -> Option<(u32, u8, u8, u8)> {
+    let (rest, function) = bus_id.rsplit_once('.')?;
+    let mut parts = rest.split(':');
+    let domain = u32::from_str_radix(parts.next()?, 16).ok()?;
+    let bus = u8::from_str_radix(parts.next()?, 16).ok()?;
+    let device = u8::from_str_radix(parts.next()?, 16).ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((domain, bus, device, u8::from_str_radix(function, 16).ok()?))
+}
+
+/// The two-line header numbers (PROC-038) from the latest system snapshot and sweep.
+///
+/// Every total carries its own validity. A device that does not provide a metric is skipped;
+/// otherwise the worst device validity wins, so the header shows "collecting" until every
+/// device has a rate. Disk and network use present physical devices only: disks with no parent
+/// (E04 already drops `loop`, `ram`, `zram` and `fd`) and wired, wireless and other
+/// interfaces. O(devices).
+pub fn totals(
+    system: &SystemSnapshot,
+    devices: &DeviceCatalog,
+    sweep: &SweepTotals,
+) -> TableTotals {
+    let mem = &system.memory;
+    let (memory_pct, swap_pct) = if !readable(mem.validity) {
+        (state(mem.validity), state(mem.validity))
+    } else {
+        let pct = |used: u64, all: u64| -> Total<f32> {
+            if all == 0 {
+                return state(Validity::Unsupported);
+            }
+            Total {
+                value: (used as f64 / all as f64 * 100.0) as f32,
+                validity: mem.validity,
+            }
+        };
+        (
+            pct(mem.total.saturating_sub(mem.available), mem.total),
+            pct(mem.swap_total.saturating_sub(mem.swap_free), mem.swap_total),
+        )
+    };
+
+    let disks: SmallVec<[Metric<f32>; 8]> = system
+        .disks
+        .iter()
+        .filter(|(idx, _)| {
+            present(devices, *idx, DeviceKind::Disk).is_some_and(|e| e.parent.is_none())
+        })
+        .map(|(_, d)| d.active_pct)
+        .collect();
+
+    let mut net_validity: SmallVec<[Validity; 8]> = SmallVec::new();
+    let mut net_sum = 0.0;
+    let mut link_mbps = Some(0u64);
+    for (idx, n) in system.nets.iter() {
+        if !present(devices, *idx, DeviceKind::Net).is_some_and(physical_net) {
+            continue;
+        }
+        for m in [n.rx_bps, n.tx_bps] {
+            net_validity.push(m.validity);
+            if readable(m.validity) {
+                net_sum += m.value;
+            }
+        }
+        link_mbps = link_mbps.and_then(|sum| {
+            readable(n.link_speed_mbps.validity).then(|| sum + u64::from(n.link_speed_mbps.value))
+        });
+    }
+    let (net_bps, net_link_bps) = if net_validity.is_empty() {
+        (state(Validity::Missing), None)
+    } else {
+        let validity = combine(net_validity.iter().copied());
+        let net_bps = if readable(validity) {
+            Total {
+                value: net_sum,
+                validity,
+            }
+        } else {
+            state(validity)
+        };
+        (net_bps, link_mbps.map(|mbps| mbps * BYTES_PER_MBIT))
+    };
+
+    let mut gpus: SmallVec<[(&str, &GpuTotals); 4]> = system
+        .gpus
+        .iter()
+        .filter_map(
+            |(idx, g)| match &present(devices, *idx, DeviceKind::Gpu)?.identity {
+                DeviceIdentity::Gpu { pci_bus_id, .. } => Some((&**pci_bus_id, g)),
+                _ => None,
+            },
+        )
+        .collect();
+    gpus.sort_by(|a, b| {
+        let (ka, kb) = (pci_order(a.0), pci_order(b.0));
+        // Unparsable bus ids sort last, by text.
+        (ka.is_none(), ka, a.0).cmp(&(kb.is_none(), kb, b.0))
+    });
+    let utils: SmallVec<[Metric<f32>; 4]> = gpus.iter().map(|(_, g)| g.util_pct).collect();
+    let gpu_pct = max_total(&utils, Validity::Unsupported);
+    let mut gpu_adapter_pct = [state(Validity::Unsupported); 16];
+    for (slot, m) in gpu_adapter_pct.iter_mut().zip(&utils) {
+        *slot = total(*m);
+    }
+    let vram_validity = combine(
+        gpus.iter()
+            .flat_map(|(_, g)| [g.mem_used.validity, g.mem_total.validity]),
+    );
+    let (vram_used, vram_all) = gpus
+        .iter()
+        .filter(|(_, g)| readable(g.mem_used.validity) && readable(g.mem_total.validity))
+        .fold((0u64, 0u64), |(u, t), (_, g)| {
+            (u + g.mem_used.value, t + g.mem_total.value)
+        });
+    let vram_pct = if !readable(vram_validity) {
+        state(vram_validity)
+    } else if vram_all == 0 {
+        state(Validity::Unsupported)
+    } else {
+        Total {
+            value: (vram_used as f64 / vram_all as f64 * 100.0) as f32,
+            validity: vram_validity,
+        }
+    };
+
+    TableTotals {
+        cpu_pct: total(system.cpu.util_pct),
+        memory_pct,
+        swap_pct,
+        disk_pct: max_total(&disks, Validity::Missing),
+        net_bps,
+        net_link_bps,
+        gpu_pct,
+        gpu_adapter_pct,
+        vram_pct,
+        threads: Total {
+            value: u64::from(sweep.system_threads),
+            validity: Validity::Valid,
+        },
+        handles: sweep
+            .file_nr
+            .map_or(state(Validity::Unsupported), |n| Total {
+                value: n,
+                validity: Validity::Valid,
+            }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2380,5 +2604,309 @@ mod tests {
         assert_eq!(group_class(&pid1), GroupClass::System);
         assert!(hidden_by_hide_system(&pid1, GroupClass::System));
         assert!(!hidden_by_hide_system(&bg("x"), GroupClass::Apps));
+    }
+
+    mod totals {
+        use super::super::*;
+
+        use tl_model::system::{DiskTotals, LinkState, MemoryTotals, NetTotals};
+
+        const GIB: u64 = 1 << 30;
+
+        fn entry(idx: u16, identity: DeviceIdentity, parent: Option<u16>) -> DeviceEntry {
+            let net_kind = matches!(identity, DeviceIdentity::Net { .. }).then_some(NetKind::Wired);
+            DeviceEntry {
+                idx: DeviceIdx(idx),
+                identity,
+                generation: 0,
+                display_name: Arc::from("device"),
+                present: true,
+                parent: parent.map(DeviceIdx),
+                persistent_key: Arc::from("key"),
+                net_kind,
+            }
+        }
+
+        fn catalog(entries: Vec<DeviceEntry>) -> DeviceCatalog {
+            DeviceCatalog {
+                version: 1,
+                entries: entries.into(),
+            }
+        }
+
+        fn disk_id(name: &str) -> DeviceIdentity {
+            DeviceIdentity::Disk {
+                major: 8,
+                minor: 0,
+                name: Arc::from(name),
+                wwn_or_serial: None,
+            }
+        }
+
+        fn disk(idx: u16, busy: f32) -> (DeviceIdx, DiskTotals) {
+            let d = DiskTotals {
+                device: DeviceIdx(idx),
+                active_pct: Metric::valid(busy),
+                read_bps: Metric::valid(0.0),
+                write_bps: Metric::valid(0.0),
+                response_ms: Metric::valid(0.0),
+                read_total: 0,
+                written_total: 0,
+                capacity: 0,
+                temp_c: Metric::with(Validity::Unsupported),
+            };
+            (DeviceIdx(idx), d)
+        }
+
+        fn net(idx: u16, rx: f64, tx: f64, speed: Metric<u32>) -> (DeviceIdx, NetTotals) {
+            let n = NetTotals {
+                device: DeviceIdx(idx),
+                rx_bps: Metric::valid(rx),
+                tx_bps: Metric::valid(tx),
+                rx_total: 0,
+                tx_total: 0,
+                link_speed_mbps: speed,
+                state: LinkState::Up,
+            };
+            (DeviceIdx(idx), n)
+        }
+
+        fn net_id(ifindex: u32) -> DeviceIdentity {
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex,
+                name: Arc::from("eno1"),
+            }
+        }
+
+        fn gpu(idx: u16, util: f32, used: u64, all: u64) -> (DeviceIdx, GpuTotals) {
+            let g = GpuTotals {
+                device: DeviceIdx(idx),
+                util_pct: Metric::valid(util),
+                mem_util_pct: Metric::valid(0.0),
+                mem_used: Metric::valid(used),
+                mem_total: Metric::valid(all),
+                shared_used: Metric::with(Validity::Unsupported),
+                shared_total: Metric::with(Validity::Unsupported),
+                enc_pct: Metric::with(Validity::Unsupported),
+                dec_pct: Metric::with(Validity::Unsupported),
+                temp_c: Metric::with(Validity::Unsupported),
+                power_w: Metric::with(Validity::Unsupported),
+                power_limit_w: Metric::with(Validity::Unsupported),
+                clock_gfx_mhz: Metric::with(Validity::Unsupported),
+                clock_mem_mhz: Metric::with(Validity::Unsupported),
+                fan_pct: Metric::with(Validity::Unsupported),
+                pcie_rx_bps: Metric::with(Validity::Unsupported),
+                pcie_tx_bps: Metric::with(Validity::Unsupported),
+            };
+            (DeviceIdx(idx), g)
+        }
+
+        fn gpu_id(bus: &str) -> DeviceIdentity {
+            DeviceIdentity::Gpu {
+                uuid: [0; 16],
+                pci_bus_id: Arc::from(bus),
+            }
+        }
+
+        fn memory(total: u64, available: u64, swap_total: u64, swap_free: u64) -> MemoryTotals {
+            MemoryTotals {
+                validity: Validity::Valid,
+                total,
+                available,
+                swap_total,
+                swap_free,
+                ..Default::default()
+            }
+        }
+
+        const SWEEP: SweepTotals = SweepTotals {
+            system_threads: 1234,
+            file_nr: Some(5678),
+        };
+
+        #[test]
+        fn totals_memory_and_swap() {
+            let mut sys = SystemSnapshot {
+                memory: memory(32 * GIB, 8 * GIB, 0, 0),
+                ..Default::default()
+            };
+            let t = totals(&sys, &DeviceCatalog::default(), &SWEEP);
+            assert_eq!(t.memory_pct.value, 75.0);
+            assert_eq!(t.memory_pct.validity, Validity::Valid);
+            assert_eq!(t.swap_pct.validity, Validity::Unsupported);
+
+            sys.memory = memory(32 * GIB, 8 * GIB, 8 * GIB, 6 * GIB);
+            let t = totals(&sys, &DeviceCatalog::default(), &SWEEP);
+            assert_eq!(
+                t.swap_pct,
+                Total {
+                    value: 25.0,
+                    validity: Validity::Valid
+                }
+            );
+
+            // Before the first meminfo read, swap is still collecting, not unsupported.
+            sys.memory = MemoryTotals::default();
+            let t = totals(&sys, &DeviceCatalog::default(), &SWEEP);
+            assert_eq!(t.memory_pct.validity, Validity::WarmingUp);
+            assert_eq!(t.swap_pct.validity, Validity::WarmingUp);
+        }
+
+        #[test]
+        fn totals_disk_max_physical_only() {
+            let devices = catalog(vec![
+                entry(0, disk_id("sda"), None),
+                entry(1, disk_id("nvme0n1"), None),
+                entry(2, disk_id("sda1"), Some(0)),
+            ]);
+            let sys = SystemSnapshot {
+                disks: vec![disk(0, 40.0), disk(1, 70.0), disk(2, 90.0)].into(),
+                ..Default::default()
+            };
+            let t = totals(&sys, &devices, &SWEEP);
+            assert_eq!(
+                t.disk_pct,
+                Total {
+                    value: 70.0,
+                    validity: Validity::Valid
+                }
+            );
+
+            let none = totals(&SystemSnapshot::default(), &devices, &SWEEP);
+            assert_eq!(none.disk_pct.validity, Validity::Missing);
+
+            // A disk without a rate yet keeps the total collecting.
+            let mut warming = disk(0, 0.0);
+            warming.1.active_pct = Metric::with(Validity::WarmingUp);
+            let sys = SystemSnapshot {
+                disks: vec![warming, disk(1, 70.0)].into(),
+                ..Default::default()
+            };
+            assert_eq!(
+                totals(&sys, &devices, &SWEEP).disk_pct.validity,
+                Validity::WarmingUp
+            );
+        }
+
+        #[test]
+        fn totals_net_pct_or_rate() {
+            let mut vpn = entry(2, net_id(3), None);
+            vpn.net_kind = Some(NetKind::VpnTunnel);
+            let mut veth = entry(3, net_id(4), None);
+            veth.net_kind = Some(NetKind::Virtual);
+            let devices = catalog(vec![
+                entry(0, net_id(1), None),
+                entry(1, net_id(2), None),
+                vpn,
+                veth,
+            ]);
+            // 350 Mbit/s = 43 750 000 bytes per second, split over two interfaces.
+            let sys = SystemSnapshot {
+                nets: vec![
+                    net(0, 20_000_000.0, 5_000_000.0, Metric::valid(1000)),
+                    net(1, 15_000_000.0, 3_750_000.0, Metric::valid(2500)),
+                    net(
+                        2,
+                        9_000_000.0,
+                        9_000_000.0,
+                        Metric::with(Validity::Unsupported),
+                    ),
+                    net(3, 9_000_000.0, 9_000_000.0, Metric::valid(10_000)),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            let t = totals(&sys, &devices, &SWEEP);
+            assert_eq!(
+                t.net_bps,
+                Total {
+                    value: 43_750_000.0,
+                    validity: Validity::Valid
+                }
+            );
+            assert_eq!(t.net_link_bps, Some(437_500_000));
+
+            let mut nets = sys.nets.to_vec();
+            nets[1].1.link_speed_mbps = Metric::with(Validity::Unsupported);
+            let sys = SystemSnapshot {
+                nets: nets.into(),
+                ..Default::default()
+            };
+            let t = totals(&sys, &devices, &SWEEP);
+            assert_eq!(t.net_bps.value, 43_750_000.0);
+            assert_eq!(t.net_link_bps, None);
+        }
+
+        #[test]
+        fn totals_gpu_order_by_pci() {
+            let devices = catalog(vec![
+                entry(0, gpu_id("0000:2d:00.0"), None),
+                entry(1, gpu_id("00000000:01:00.0"), None),
+            ]);
+            let sys = SystemSnapshot {
+                gpus: vec![
+                    gpu(0, 80.0, 6 * GIB, 8 * GIB),
+                    gpu(1, 20.0, 2 * GIB, 8 * GIB),
+                ]
+                .into(),
+                ..Default::default()
+            };
+            let t = totals(&sys, &devices, &SWEEP);
+            assert_eq!(
+                t.gpu_pct,
+                Total {
+                    value: 80.0,
+                    validity: Validity::Valid
+                }
+            );
+            assert_eq!(t.gpu_adapter_pct[0].value, 20.0);
+            assert_eq!(t.gpu_adapter_pct[1].value, 80.0);
+            assert!(
+                t.gpu_adapter_pct[2..]
+                    .iter()
+                    .all(|g| g.validity == Validity::Unsupported)
+            );
+            assert_eq!(
+                t.vram_pct,
+                Total {
+                    value: 50.0,
+                    validity: Validity::Valid
+                }
+            );
+
+            let none = totals(&SystemSnapshot::default(), &devices, &SWEEP);
+            assert_eq!(none.gpu_pct.validity, Validity::Unsupported);
+            assert_eq!(none.vram_pct.validity, Validity::Unsupported);
+        }
+
+        #[test]
+        fn totals_handles_unsupported_without_file_nr() {
+            let sys = SystemSnapshot::default();
+            let devices = DeviceCatalog::default();
+            let t = totals(&sys, &devices, &SWEEP);
+            assert_eq!(
+                t.threads,
+                Total {
+                    value: 1234,
+                    validity: Validity::Valid
+                }
+            );
+            assert_eq!(
+                t.handles,
+                Total {
+                    value: 5678,
+                    validity: Validity::Valid
+                }
+            );
+            let sweep = SweepTotals {
+                file_nr: None,
+                ..SWEEP
+            };
+            assert_eq!(
+                totals(&sys, &devices, &sweep).handles.validity,
+                Validity::Unsupported
+            );
+        }
     }
 }
