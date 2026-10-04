@@ -7955,6 +7955,7 @@ dependencies = [
 name = "tl-tray"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
  "ksni",
  "proptest",
  "tl-model",
