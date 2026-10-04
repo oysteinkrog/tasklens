@@ -29,11 +29,17 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> HistoryError + '_ {
 }
 
 /// Writes one segment. Each appended block is on disk before `append` returns.
+///
+/// After a failed write the file may end in a partial frame. The writer is then broken: every
+/// later `append` and `close` fails at once and writes nothing, so the file has no footer and a
+/// reader keeps every block before the partial frame.
 pub struct SegmentWriter {
     file: File,
     path: PathBuf,
     offset: u64,
     index: Vec<FooterEntry>,
+    /// Kind of the first failed write, or `None` while the writer is healthy.
+    broken: Option<std::io::ErrorKind>,
 }
 
 impl SegmentWriter {
@@ -52,13 +58,32 @@ impl SegmentWriter {
             path,
             offset: HEADER_LEN as u64,
             index: Vec::new(),
+            broken: None,
         })
     }
 
-    /// Writes the frame, then `fdatasync`.
+    /// `Io` with the kind of the first failed write when the writer is broken.
+    fn check_broken(&self) -> Result<(), HistoryError> {
+        match self.broken {
+            Some(kind) => Err(io_err(&self.path)(std::io::Error::new(
+                kind,
+                "segment writer is broken by an earlier failed write",
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Writes the frame, then `fdatasync`. Any write error breaks the writer.
     pub fn append(&mut self, b: &EncodedBlock) -> Result<(), HistoryError> {
-        self.file.write_all(&b.bytes).map_err(io_err(&self.path))?;
-        self.file.sync_data().map_err(io_err(&self.path))?;
+        self.check_broken()?;
+        let written = self
+            .file
+            .write_all(&b.bytes)
+            .and_then(|()| self.file.sync_data());
+        if let Err(e) = written {
+            self.broken = Some(e.kind());
+            return Err(io_err(&self.path)(e));
+        }
         self.index.push(FooterEntry {
             start_t_ns: b.start_t_ns,
             offset: self.offset,
@@ -67,8 +92,9 @@ impl SegmentWriter {
         Ok(())
     }
 
-    /// Writes the footer, then `fsync`.
+    /// Writes the footer, then `fsync`. A broken writer writes no footer and returns `Io`.
     pub fn close(mut self) -> Result<(), HistoryError> {
+        self.check_broken()?;
         let body = postcard::to_stdvec(&self.index)?;
         let len = u32::try_from(body.len())
             .map_err(|_| io_err(&self.path)(std::io::Error::other("footer exceeds 4 GiB")))?;
@@ -226,4 +252,69 @@ fn scan(file: &mut File, path: &Path, size: u64) -> Result<Vec<FooterEntry>, His
         offset += used as u64;
     }
     Ok(index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::encode_block;
+    use crate::format::Block;
+    use tl_model::time::BootId;
+
+    fn block(i: u64) -> Block {
+        Block {
+            start_t_ns: i * 60_000_000_000,
+            gap_before: false,
+            mem_total_kib: 1024,
+            catalog: None,
+            new_meta: vec![],
+            keyframe: vec![],
+            deltas: vec![],
+            system: vec![],
+        }
+    }
+
+    #[test]
+    fn failed_append_breaks_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let header = SegmentHeader {
+            boot_id: BootId(1),
+            realtime_offset_ns: 0,
+            start_t_ns: 0,
+        };
+        let mut w = SegmentWriter::create(dir.path(), header).unwrap();
+        w.append(&encode_block(&block(0)).unwrap()).unwrap();
+        let good_len = w.bytes_written();
+
+        // Swap in a read-only handle so the next write fails with EBADF.
+        w.file = File::open(&w.path).unwrap();
+        let second = encode_block(&block(1)).unwrap();
+        let first_err = w.append(&second).unwrap_err();
+        let HistoryError::Io { source, .. } = first_err else {
+            panic!("expected Io, got {first_err:?}");
+        };
+        let kind = source.kind();
+
+        // A partial frame, as a short write before the failure would leave it.
+        let mut raw = OpenOptions::new().append(true).open(&w.path).unwrap();
+        raw.write_all(&second.bytes[..second.bytes.len() / 2])
+            .unwrap();
+        let size = std::fs::metadata(&w.path).unwrap().len();
+
+        // Later appends fail at once with the same kind and write nothing.
+        w.file = OpenOptions::new().append(true).open(&w.path).unwrap();
+        let again = w.append(&encode_block(&block(2)).unwrap()).unwrap_err();
+        assert!(matches!(again, HistoryError::Io { ref source, .. } if source.kind() == kind));
+        assert_eq!(w.bytes_written(), good_len);
+
+        // Close writes no footer.
+        let path = w.path.clone();
+        assert!(matches!(w.close(), Err(HistoryError::Io { .. })));
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+
+        let r = SegmentReader::open(&path).unwrap();
+        assert!(r.recovered);
+        assert_eq!(r.index.len(), 1);
+        assert_eq!(r.read_block(&path, &r.index[0]).unwrap(), block(0));
+    }
 }
