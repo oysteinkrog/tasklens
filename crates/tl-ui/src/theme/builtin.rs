@@ -54,11 +54,7 @@ pub struct ColorParseError {
 
 impl fmt::Display for ColorParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "colour {:?} is not #RRGGBB or #RRGGBBAA",
-            self.value
-        )
+        write!(f, "colour {:?} is not #RRGGBB or #RRGGBBAA", self.value)
     }
 }
 
@@ -411,7 +407,9 @@ mod tests {
                 for (k, v) in map {
                     if k != "name" && k != "mode" {
                         assert!(
-                            v.is_object() || v.is_array() || v.as_str().is_some_and(|s| s.starts_with('#')),
+                            v.is_object()
+                                || v.is_array()
+                                || v.as_str().is_some_and(|s| s.starts_with('#')),
                             "key {k} has a non-colour value {v}"
                         );
                     }
@@ -496,7 +494,10 @@ mod tests {
             other => panic!("expected MissingSlot, got {other:?}"),
         }
         let msg = parse_theme_object(&obj, true).unwrap_err().to_string();
-        assert!(msg.contains("Default Dark") && msg.contains("HEADER"), "{msg}");
+        assert!(
+            msg.contains("Default Dark") && msg.contains("HEADER"),
+            "{msg}"
+        );
 
         let mut obj = dark_object();
         obj.insert("accent".into(), "blue".into());
@@ -549,7 +550,10 @@ mod tests {
         ));
         assert!(matches!(
             parse_builtin("{\"themes\":[{\"name\":\"A\"},{}]}"),
-            Err(ThemeParseError::MissingSlot { key: "WINDOW_BG", .. })
+            Err(ThemeParseError::MissingSlot {
+                key: "WINDOW_BG",
+                ..
+            })
         ));
         assert!(matches!(
             parse_builtin("{\"themes\":[{}]}"),
@@ -559,7 +563,9 @@ mod tests {
 
     #[test]
     fn parse_hex_forms() {
-        for bad in ["#12345", "red", "#GG0000", "", "#", "0277A6", "#+277A6", "#0277A6C"] {
+        for bad in [
+            "#12345", "red", "#GG0000", "", "#", "0277A6", "#+277A6", "#0277A6C",
+        ] {
             assert!(parse_hex(bad).is_err(), "{bad:?} should be rejected");
         }
         assert_eq!(parse_hex("#0277A6").unwrap(), hex(0x0277A6));
