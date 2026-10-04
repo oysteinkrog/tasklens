@@ -39,6 +39,9 @@ deleting it afterwards. If a file is not wired in yet (for example a module whos
 from a later bead), test it with a small `#[cfg(test)]` include in your own file or say in the
 report that the test runs with the later bead.
 
+Never run `cargo xtask capture-fixture` unless your bead is the one that captures a fixture. Use
+the committed fixtures under `crates/tl-collect/tests/fixtures/`.
+
 Never test against the live desktop in a way that changes it (no loading KWin scripts, no ending
 real processes, no writing system files). UI tests use GPUI `TestAppContext` unless the bead says
 otherwise.
