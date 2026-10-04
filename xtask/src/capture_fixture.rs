@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::Context as _;
 
 /// Options for [`capture`].
+#[derive(Debug)]
 pub struct CaptureOpts {
     /// How many processes to copy, lowest pids first.
     pub max_pids: usize,
@@ -28,6 +29,7 @@ impl Default for CaptureOpts {
 }
 
 /// What [`capture`] copied and what it could not read.
+#[derive(Debug)]
 pub struct CaptureReport {
     /// Relative paths written to the fixture.
     pub copied: Vec<PathBuf>,
@@ -301,20 +303,23 @@ impl<'a> Ctx<'a> {
                 Err(e) if is_missing(&e) => return Ok(None),
                 Err(e) => return Err(Resolve::Skip(reason(&e))),
             };
-            if !meta.file_type().is_symlink() {
+            // `proc/self` stays a real directory in the fixture, so `proc/net -> self/net`
+            // resolves to `proc/self/net` there too.
+            if !meta.file_type().is_symlink() || cand == Path::new("proc/self") {
                 cur = cand;
                 continue;
             }
-            let target = fs::read_link(self.src.join(&cand)).map_err(|e| {
-                Resolve::Skip(reason(&e))
-            })?;
+            let target =
+                fs::read_link(self.src.join(&cand)).map_err(|e| Resolve::Skip(reason(&e)))?;
             self.make_link(&cand, &target).map_err(Resolve::Fatal)?;
             if pending.is_empty() && keep_last_link {
                 return Ok(Some(cand));
             }
             hops += 1;
             if hops > MAX_LINK_HOPS {
-                return Err(Resolve::Skip("too many levels of symbolic links".to_owned()));
+                return Err(Resolve::Skip(
+                    "too many levels of symbolic links".to_owned(),
+                ));
             }
             if target.is_absolute() {
                 cur = PathBuf::new();
@@ -336,7 +341,8 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating parent of {}", rel.display()))?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent of {}", rel.display()))?;
         }
         std::os::unix::fs::symlink(target, &path)
             .with_context(|| format!("creating symlink {}", rel.display()))
@@ -352,7 +358,8 @@ impl<'a> Ctx<'a> {
             anyhow::bail!("refusing to write through symlink {}", rel.display());
         }
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("creating parent of {}", rel.display()))?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent of {}", rel.display()))?;
         }
         fs::write(&path, content).with_context(|| format!("writing {}", rel.display()))
     }
@@ -431,8 +438,8 @@ enum Resolve {
 /// Writes `CAPTURE.txt`: kernel release, tool name, then the copied and skipped paths. No date,
 /// hostname or user name.
 fn write_capture_txt(ctx: &Ctx<'_>, report: &CaptureReport) -> anyhow::Result<()> {
-    let kernel = fs::read(ctx.src.join("proc/sys/kernel/osrelease"))
-        .map(|b| String::from_utf8_lossy(&ctx.scrub(&b)).trim().to_owned())
+    let kernel = fs::read_to_string(ctx.src.join("proc/sys/kernel/osrelease"))
+        .map(|k| scrub_text(k.trim(), &ctx.users, ctx.hostname.as_deref()))
         .unwrap_or_else(|_| "unknown".to_owned());
     let mut text = format!("kernel {kernel}\ncaptured-by cargo xtask capture-fixture\ncopied:\n");
     for path in &report.copied {
@@ -456,7 +463,10 @@ fn sys_wanted(src_root: &Path) -> Vec<Wanted> {
     };
 
     files.extend(with(CPU, &["online", "possible", "present"]));
-    files.extend(with(&format!("{CPU}/cpuN"), &["online", "cpu_capacity", "acpi_cppc/nominal_freq"]));
+    files.extend(with(
+        &format!("{CPU}/cpuN"),
+        &["online", "cpu_capacity", "acpi_cppc/nominal_freq"],
+    ));
     files.extend(with(
         &format!("{CPU}/cpuN/topology"),
         &[
@@ -511,17 +521,37 @@ fn sys_wanted(src_root: &Path) -> Vec<Wanted> {
             "dm/name",
         ],
     ));
-    files.extend(with("sys/block/*/*", &["dev", "size", "partition", "start"]));
-    links.extend(["sys/block/*/holders/*".to_owned(), "sys/block/*/slaves/*".to_owned()]);
-    files.extend(with("sys/block/zram*", &["disksize", "mm_stat", "comp_algorithm"]));
+    files.extend(with(
+        "sys/block/*/*",
+        &["dev", "size", "partition", "start"],
+    ));
+    links.extend([
+        "sys/block/*/holders/*".to_owned(),
+        "sys/block/*/slaves/*".to_owned(),
+    ]);
+    files.extend(with(
+        "sys/block/zram*",
+        &["disksize", "mm_stat", "comp_algorithm"],
+    ));
     files.extend(with("sys/block/*/device/hwmonN", HWMON_FILES));
     files.extend(with("sys/block/*/device/hwmon/hwmonN", HWMON_FILES));
 
     files.extend(with(
         "sys/class/net/*",
-        &["ifindex", "type", "operstate", "carrier", "speed", "address", "tun_flags"],
+        &[
+            "ifindex",
+            "type",
+            "operstate",
+            "carrier",
+            "speed",
+            "address",
+            "tun_flags",
+        ],
     ));
-    links.extend(with("sys/class/net/*", &["phy80211", "device", "device/driver"]));
+    links.extend(with(
+        "sys/class/net/*",
+        &["phy80211", "device", "device/driver"],
+    ));
     markers.extend(with("sys/class/net/*", &["wireless", "bridge"]));
 
     files.extend(with(
@@ -708,7 +738,10 @@ fn target_components(target: &Path) -> Vec<OsString> {
 }
 
 fn is_missing(e: &io::Error) -> bool {
-    matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+    matches!(
+        e.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 fn reason(e: &io::Error) -> String {
@@ -732,10 +765,8 @@ mod tests {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "tasklens-capture-{}-{n}",
-                std::process::id()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("tasklens-capture-{}-{n}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -800,7 +831,10 @@ mod tests {
     fn cmdline_is_scrubbed() {
         let src = fake_src();
         let (_out, dir, _) = capture_fresh(&src.0, &CaptureOpts::default());
-        assert_eq!(fs::read(dir.join("proc/1/cmdline")).unwrap(), b"bash\0--arg\0");
+        assert_eq!(
+            fs::read(dir.join("proc/1/cmdline")).unwrap(),
+            b"bash\0--arg\0"
+        );
         assert_eq!(scrubbed_cmdline(b"bash"), b"bash\0--arg\0");
     }
 
@@ -879,7 +913,21 @@ mod tests {
         put(&src.0, "sys/devices/x/block/sda/size", b"1000\n");
         fs::create_dir_all(src.0.join("sys/block")).unwrap();
         symlink("../devices/x/block/sda", src.0.join("sys/block/sda")).unwrap();
+        put(&src.0, "proc/7/net/dev", b"eth0: 1 2\n");
+        put(&src.0, "proc/7/mountinfo", b"1 2 0:1 / /home/alice rw\n");
+        symlink("7", src.0.join("proc/self")).unwrap();
+        symlink("self/net", src.0.join("proc/net")).unwrap();
         let (_out, dir, _) = capture_fresh(&src.0, &CaptureOpts::default());
+        assert!(!dir.join("proc/self").is_symlink());
+        assert_eq!(
+            fs::read_link(dir.join("proc/net")).unwrap(),
+            Path::new("self/net")
+        );
+        assert_eq!(fs::read(dir.join("proc/net/dev")).unwrap(), b"eth0: 1 2\n");
+        assert_eq!(
+            fs::read(dir.join("proc/self/mountinfo")).unwrap(),
+            b"1 2 0:1 / /home/user1 rw\n"
+        );
         assert_eq!(
             fs::read_link(dir.join("sys/block/sda")).unwrap(),
             Path::new("../devices/x/block/sda")
