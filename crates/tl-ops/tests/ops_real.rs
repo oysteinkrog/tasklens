@@ -1,5 +1,5 @@
-//! Real-system tests for the verified process and cgroup operations (ADR-006, ADR-013). They need a normal
-//! user on the owner machine, so every test is `#[ignore]`. Run them with
+//! Real-system tests for the process, cgroup, file, launch and dump operations (ADR-006, ADR-013).
+//! They need a normal user on the owner machine, so every test is `#[ignore]`. Run them with
 //! `cargo test -p tl-ops -- --ignored`.
 //!
 //! Each test spawns its own children and kills and reaps them in a `Drop` guard. No signal is
@@ -7,20 +7,27 @@
 //! thawed or killed.
 
 use std::collections::BTreeSet;
-use std::os::unix::fs::MetadataExt;
+use std::io::Read;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use tl_model::actions::{CgroupRef, IoPriority, Signal};
+use tl_model::actions::{CgroupRef, DumpMode, IoPriority, Signal};
 use tl_model::ids::ProcessKey;
 use tl_model::system::CpuSet;
 use tl_model::time::BootId;
-use tl_ops::OpsError;
 use tl_ops::cgroup::{CGROUP_ROOT, freeze_group, kill_group, own_cgroup, thaw_group};
+use tl_ops::dump::{GDB_PATH, dump_to_path};
+use tl_ops::fs::{
+    EnableOutcome, StartupRoots, autostart_disable_system, autostart_enable_override,
+};
+use tl_ops::launch::{ExitKind, Spawned, spawn_detached, wait_exit};
 use tl_ops::process::{kill_tree, send_signal, set_affinity, set_io_priority, set_nice};
+use tl_ops::{OpsError, PRIVATE_FILE_MODE, write_atomic};
 
 /// `PF_KTHREAD` in `/proc/<pid>/stat` field 9.
 const PF_KTHREAD: u64 = 0x0020_0000;
@@ -530,4 +537,219 @@ fn real_cgroup_session_scope_refused() {
         matches!(result, Err(OpsError::NotOwner) | Err(OpsError::Protected)),
         "result {result:?}"
     );
+}
+
+/// A directory the test creates with mode `0700` and removes on drop, even when an assertion
+/// fails.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// Creates `<parent>/tasklens-test-<pid>-<name>`. The parent must exist.
+    fn create_in(parent: &Path, name: &str) -> Self {
+        let path = parent.join(format!("tasklens-test-{}-{name}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .expect("create test directory");
+        TempDir(path)
+    }
+
+    /// A directory under cargo's per-target scratch directory, never under the real config.
+    fn scratch(name: &str) -> Self {
+        let parent = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        std::fs::create_dir_all(parent).expect("create target tmp directory");
+        Self::create_in(parent, name)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The permission bits of `path`, without following a symlink.
+fn file_mode(path: &Path) -> u32 {
+    std::fs::symlink_metadata(path).expect("stat file").mode() & 0o7777
+}
+
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_write_atomic_in_xdg_config() {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").expect("HOME is set")).join(".config")
+        });
+    let dir = TempDir(config_home.join(format!("tasklens-test-{}", std::process::id())));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir.0)
+        .expect("create test directory");
+    assert_eq!(file_mode(&dir.0), 0o700);
+
+    let path = dir.0.join("settings.toml");
+    let bytes = b"[general]\nrefresh_ms = 1000\n";
+    assert_eq!(write_atomic(&path, bytes, PRIVATE_FILE_MODE), Ok(()));
+    assert_eq!(std::fs::read(&path).expect("read back"), bytes);
+    assert_eq!(file_mode(&path), 0o600);
+
+    let entries: Vec<_> = std::fs::read_dir(&dir.0)
+        .expect("list test directory")
+        .map(|e| e.expect("dir entry").file_name())
+        .collect();
+    assert_eq!(entries, vec![std::ffi::OsString::from("settings.toml")]);
+}
+
+/// Every `[Desktop Entry]` line of `path` with surrounding spaces removed.
+fn desktop_entry_lines(path: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).expect("read desktop file");
+    let mut in_entry = false;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+        } else if in_entry {
+            lines.push(line.trim().to_string());
+        }
+    }
+    lines
+}
+
+/// Regression test: the override goes only under the given root, never the real
+/// `~/.config/autostart`.
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_autostart_disable_enable_roundtrip() {
+    let system_dir = Path::new("/etc/xdg/autostart");
+    let mut names: Vec<_> = std::fs::read_dir(system_dir)
+        .map(|it| {
+            it.filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .filter(|n| Path::new(n).extension().is_some_and(|x| x == "desktop"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let Some(name) = names.first() else {
+        eprintln!("skip: /etc/xdg/autostart has no .desktop file");
+        return;
+    };
+
+    let tmp = TempDir::scratch("autostart");
+    let system_copy_dir = tmp.0.join("system");
+    std::fs::create_dir(&system_copy_dir).expect("create system copy directory");
+    let system_file = system_copy_dir.join(name);
+    std::fs::copy(system_dir.join(name), &system_file).expect("copy system entry");
+
+    let config_home = tmp.0.join("config");
+    std::fs::create_dir(&config_home).expect("create config home");
+    let roots = StartupRoots::from_config_home(&config_home);
+
+    let target = autostart_disable_system(&system_file, &roots).expect("disable");
+    assert_eq!(target, roots.autostart.join(name));
+    assert_eq!(file_mode(&roots.autostart), 0o700);
+    assert_eq!(file_mode(&target), 0o600);
+    let lines = desktop_entry_lines(&target);
+    assert!(lines.iter().any(|l| l == "Hidden=true"), "no Hidden=true");
+    assert!(
+        lines.iter().any(|l| l == "X-Tasklens-Override=true"),
+        "no X-Tasklens-Override=true"
+    );
+
+    assert_eq!(
+        autostart_enable_override(&target, &roots),
+        Ok(EnableOutcome::OverrideDeleted)
+    );
+    assert!(!target.exists(), "override still present after enable");
+}
+
+/// Field 6 (`session`) of `/proc/<pid>/stat`.
+fn session_of(pid: u32) -> u32 {
+    stat_field(pid, 6)
+        .expect("read stat")
+        .parse()
+        .expect("parse session")
+}
+
+/// A child of `spawn_detached`, killed through its pidfd and reaped on drop if the test has not
+/// reaped it.
+struct SpawnedGuard {
+    child: Spawned,
+    reaped: bool,
+}
+
+impl SpawnedGuard {
+    fn kill_and_wait(&mut self) -> ExitKind {
+        rustix::process::pidfd_send_signal(&self.child.pidfd, rustix::process::Signal::KILL)
+            .expect("kill spawned child");
+        let exit = wait_exit(&self.child).expect("wait spawned child");
+        self.reaped = true;
+        exit
+    }
+}
+
+impl Drop for SpawnedGuard {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = rustix::process::pidfd_send_signal(
+                &self.child.pidfd,
+                rustix::process::Signal::KILL,
+            );
+            let _ = wait_exit(&self.child);
+        }
+    }
+}
+
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_spawn_detached_survives_parent_session() {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+    let argv = vec!["/usr/bin/sleep".to_string(), "30".to_string()];
+    let mut guard = SpawnedGuard {
+        child: spawn_detached(&argv, Some(&home)).expect("spawn sleep"),
+        reaped: false,
+    };
+    let pid = guard.child.pid;
+
+    assert_eq!(session_of(pid), pid);
+    assert_ne!(session_of(pid), session_of(std::process::id()));
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{pid}/cwd")).expect("read child cwd"),
+        home
+    );
+
+    assert_eq!(guard.kill_and_wait(), ExitKind::Signaled(9));
+}
+
+#[test]
+#[ignore = "real system: run with --ignored on the owner machine"]
+fn real_dump_as_root_writes_core() {
+    if !rustix::process::geteuid().is_root() {
+        eprintln!("skip: the dump test needs root");
+        return;
+    }
+    if !Path::new(GDB_PATH).exists() {
+        eprintln!("skip: {GDB_PATH} is not installed");
+        return;
+    }
+
+    let child = ChildGuard::sleep();
+    let tmp = TempDir::scratch("dump");
+    let out = tmp.0.join("sleep.core");
+    assert_eq!(
+        dump_to_path(child.key(), child.boot, DumpMode::Mini, &out),
+        Ok(())
+    );
+
+    let meta = std::fs::metadata(&out).expect("stat core");
+    assert!(meta.len() > 0, "core file is empty");
+    assert_eq!(meta.mode() & 0o7777, 0o600);
+    let mut magic = [0u8; 4];
+    std::fs::File::open(&out)
+        .expect("open core")
+        .read_exact(&mut magic)
+        .expect("read core header");
+    assert_eq!(magic, [0x7f, b'E', b'L', b'F']);
 }

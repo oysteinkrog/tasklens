@@ -19,7 +19,9 @@ use rustix::process::{Pid, PidfdFlags, WaitId, WaitIdOptions};
 use crate::error::{OpsError, OpsResult};
 use crate::sys;
 
+/// The shell that runs typed commands and startup scripts.
 pub const SH_PATH: &str = "/bin/sh";
+/// The polkit helper that runs a command as an administrator.
 pub const PKEXEC_PATH: &str = "/usr/bin/pkexec";
 /// pkexec(1): not authorized, or authentication failed.
 pub const PKEXEC_NOT_AUTHORIZED: i32 = 127;
@@ -31,7 +33,9 @@ pub const ADMIN_ENV_KEYS: [&str; 3] = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIM
 /// A child started by `spawn_detached`. Pass it to `wait_exit` so it is reaped.
 #[derive(Debug)]
 pub struct Spawned {
+    /// The child's process id.
     pub pid: u32,
+    /// A pidfd for the child, opened before it could be reaped.
     pub pidfd: OwnedFd,
 }
 

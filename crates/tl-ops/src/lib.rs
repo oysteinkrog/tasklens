@@ -17,3 +17,4 @@ pub mod dump;
 pub mod launch;
 
 pub use error::{OpsError, OpsResult};
+pub use fs::{PRIVATE_FILE_MODE, write_atomic};

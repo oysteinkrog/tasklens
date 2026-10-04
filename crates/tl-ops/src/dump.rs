@@ -15,7 +15,9 @@ use tl_model::{actions::DumpMode, ids::ProcessKey, time::BootId};
 use crate::error::{OpsError, OpsResult};
 use crate::process::open_verified;
 
+/// The debugger that writes the core file (R-145).
 pub const GDB_PATH: &str = "/usr/bin/gdb";
+/// gdb's `gcore` script. `dump_available` checks that it exists.
 pub const GCORE_PATH: &str = "/usr/bin/gcore";
 /// The `coredump_filter` value that dumps every mapping type.
 pub const FULL_COREDUMP_FILTER: &str = "0x1ff";

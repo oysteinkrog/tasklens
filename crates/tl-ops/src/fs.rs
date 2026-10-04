@@ -116,6 +116,7 @@ pub struct StartupRoots {
 }
 
 impl StartupRoots {
+    /// The four roots under `config_home`, which is `$XDG_CONFIG_HOME`.
     pub fn from_config_home(config_home: &Path) -> Self {
         StartupRoots {
             autostart: config_home.join("autostart"),
