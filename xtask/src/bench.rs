@@ -385,6 +385,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_args_defaults() {
+        let cmd = parse_args(&[]).unwrap();
+        assert_eq!(cmd.scenes, DEFAULT_SCENES);
+        assert_eq!(cmd.scenes.len(), 4);
+        assert_eq!(cmd.runs, 3);
+        assert!(cmd.compare.is_none());
+    }
+
+    #[test]
+    fn parse_args_rejects_bad_runs() {
+        for bad in ["x", "0", "-1"] {
+            let err = parse_args(&["--runs".to_owned(), bad.to_owned()]).unwrap_err();
+            assert_eq!(err.to_string(), "bench: --runs needs a positive integer");
+        }
+        let err = parse_args(&["--runs".to_owned()]).unwrap_err();
+        assert_eq!(err.to_string(), "bench: --runs needs a positive integer");
+    }
+
+    #[test]
     fn median_by_p99() {
         let runs = vec![
             report("perf-cpu", 0.5, 1.0, 20.0),
