@@ -1,5 +1,6 @@
 //! tl-ui: GPUI views, chart element, process table and theme.
 
+pub mod demand;
 pub mod hub;
 pub mod i18n;
 pub mod theme;
