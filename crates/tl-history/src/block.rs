@@ -157,7 +157,11 @@ impl BlockBuilder {
             return;
         };
         open.block.new_meta.clear();
-        let started = open.block.deltas.iter_mut().flat_map(|d| d.started.iter_mut());
+        let started = open
+            .block
+            .deltas
+            .iter_mut()
+            .flat_map(|d| d.started.iter_mut());
         for p in open.block.keyframe.iter_mut().chain(started) {
             if let Some((id, _)) = self.metas.get(&p.key) {
                 p.meta = *id;
@@ -307,7 +311,8 @@ impl BlockBuilder {
         let open = self.open.as_mut().expect("advance opens a block");
         for (id, s) in series {
             let sec = s.t_ns / NS_PER_SEC;
-            let gap = !s.flags.contains(SampleFlags::VALID) || s.flags.contains(SampleFlags::GAP_BEFORE);
+            let gap =
+                !s.flags.contains(SampleFlags::VALID) || s.flags.contains(SampleFlags::GAP_BEFORE);
             let value = if gap { f32::NAN } else { s.value };
             let points = open.system.entry(*id).or_default();
             match points.iter_mut().rev().find(|(s, _)| *s == sec) {
@@ -757,7 +762,10 @@ mod tests {
         assert_eq!(first.keyframe[2].meta, 2);
         assert_eq!(&*first.new_meta[1].1.comm, "proc1");
         assert_eq!(first.new_meta[1].1.exe_basename.as_deref(), Some("proc1"));
-        assert_eq!(first.new_meta[1].1.exe_path.as_deref(), Some("/usr/bin/proc1"));
+        assert_eq!(
+            first.new_meta[1].1.exe_path.as_deref(),
+            Some("/usr/bin/proc1")
+        );
         assert!(!first.new_meta[1].1.system);
 
         // The open block (opened by the sweep at 60 s) reuses the ids.
