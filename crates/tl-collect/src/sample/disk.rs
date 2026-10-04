@@ -1,6 +1,7 @@
 //! Disk sampler: per-device active time, read and write rates, average response time and totals
-//! since boot from one read of `/proc/diskstats`, and the drive temperature from its hwmon input
-//! (ADR-016, ADR-008, PERF-048, PERF-049, PERF-053, R-052).
+//! since boot from one read of `/proc/diskstats`, the drive temperature from its hwmon input, and
+//! filesystem usage from the mount table and `statvfs` (ADR-016, ADR-008, PERF-048, PERF-049,
+//! PERF-053, R-052).
 use std::path::PathBuf;
 
 use rustc_hash::FxHashMap;
@@ -8,11 +9,14 @@ use tl_model::series::SampleFlags;
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
-use crate::SysRoot;
 use crate::counters::{Clock, Counter, Delta, Measured, resumed_between};
+use crate::parse::block::BlockDevice;
 use crate::parse::diskstats::{DiskStatLine, parse_diskstats};
 use crate::parse::hwmon::parse_millidegrees;
+use crate::parse::mountinfo::MountEntry;
+use crate::parse::swaps::SwapEntry;
 use crate::sysroot::KeptFile;
+use crate::{CollectError, SysRoot};
 
 /// Bytes per /proc/diskstats sector, whatever the device's real sector size.
 const SECTOR_BYTES: u64 = 512;
@@ -295,6 +299,127 @@ fn fill_invalid(reading: &mut DiskDevReading, validity: Validity) {
     reading.flags = SampleFlags::empty();
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FsStat {
+    pub blocks: u64,
+    pub bfree: u64,
+    pub bavail: u64,
+    pub frsize: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DiskUsage {
+    pub major: u32,
+    pub minor: u32,
+    pub formatted_bytes: Measured<u64>,
+    pub used_bytes: Measured<u64>,
+    pub free_bytes: Measured<u64>,
+    /// A filesystem on the disk is mounted at `/` or `/boot`.
+    pub system_disk: bool,
+    /// A `/proc/swaps` entry lives on the disk or one of its children.
+    pub swap: bool,
+}
+
+/// For each disk: sums over the distinct filesystems on the disk, its partitions and its dm children.
+///
+/// Each mounted device gets one `statvfs` call, on its first mount point. Devices with major 0
+/// (tmpfs, proc, network filesystems) are never owned, so they are never passed to `statvfs`.
+pub fn disk_usage(
+    disks: &[BlockDevice],
+    mounts: &[MountEntry],
+    swaps: &[SwapEntry],
+    statvfs: &mut dyn FnMut(&str) -> Result<FsStat, CollectError>,
+    swap_dev: &mut dyn FnMut(&str) -> Option<(u32, u32)>,
+) -> Vec<DiskUsage> {
+    let swap_devs: Vec<(u32, u32)> = swaps.iter().filter_map(|s| swap_dev(&s.name)).collect();
+    let mut owned: Vec<(u32, u32)> = Vec::new();
+    let mut seen: Vec<(u32, u32)> = Vec::new();
+    disks
+        .iter()
+        .map(|disk| {
+            owned.clear();
+            owned.push((disk.major, disk.minor));
+            owned.extend(disk.children.iter().map(|c| (c.major, c.minor)));
+            owned.retain(|&(major, _)| major != 0);
+
+            let mut usage = DiskUsage {
+                major: disk.major,
+                minor: disk.minor,
+                ..DiskUsage::default()
+            };
+            seen.clear();
+            let (mut formatted, mut used, mut free) = (0u64, 0u64, 0u64);
+            let mut error: Option<CollectError> = None;
+            for mount in mounts {
+                let dev = (mount.major, mount.minor);
+                if !owned.contains(&dev) {
+                    continue;
+                }
+                if matches!(&*mount.mount_point, "/" | "/boot") {
+                    usage.system_disk = true;
+                }
+                if seen.contains(&dev) || error.is_some() {
+                    continue;
+                }
+                seen.push(dev);
+                match statvfs(&mount.mount_point) {
+                    Ok(st) => {
+                        formatted = formatted.saturating_add(st.blocks.saturating_mul(st.frsize));
+                        used = used.saturating_add(
+                            st.blocks.saturating_sub(st.bfree).saturating_mul(st.frsize),
+                        );
+                        free = free.saturating_add(st.bavail.saturating_mul(st.frsize));
+                    }
+                    Err(err) => error = Some(err),
+                }
+            }
+            let validity = match (&error, seen.is_empty()) {
+                (Some(err), _) => Some(err.validity()),
+                (None, true) => Some(Validity::Unsupported),
+                (None, false) => None,
+            };
+            match validity {
+                Some(validity) => {
+                    usage.formatted_bytes = Measured::invalid(validity);
+                    usage.used_bytes = Measured::invalid(validity);
+                    usage.free_bytes = Measured::invalid(validity);
+                }
+                None => {
+                    usage.formatted_bytes = Measured::valid(formatted);
+                    usage.used_bytes = Measured::valid(used);
+                    usage.free_bytes = Measured::valid(free);
+                }
+            }
+            usage.swap = swap_devs.iter().any(|dev| owned.contains(dev));
+            usage
+        })
+        .collect()
+}
+
+/// The real `statvfs` callback for `disk_usage`.
+pub fn host_statvfs(path: &str) -> Result<FsStat, CollectError> {
+    let st = rustix::fs::statvfs(path)?;
+    Ok(FsStat {
+        blocks: st.f_blocks,
+        bfree: st.f_bfree,
+        bavail: st.f_bavail,
+        frsize: st.f_frsize,
+    })
+}
+
+/// The real `swap_dev` callback for `disk_usage`: the device number of a swap partition, or the
+/// device holding a swap file.
+pub fn host_swap_dev(name: &str) -> Option<(u32, u32)> {
+    let st = rustix::fs::stat(name).ok()?;
+    let dev =
+        if rustix::fs::FileType::from_raw_mode(st.st_mode) == rustix::fs::FileType::BlockDevice {
+            st.st_rdev
+        } else {
+            st.st_dev
+        };
+    Some((rustix::fs::major(dev), rustix::fs::minor(dev)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +675,119 @@ mod tests {
         let mut out = DiskReading::default();
         s.sample_at(at(0), &mut out);
         assert_eq!(out.devices[0].temp_c, Measured::valid(38.5));
+    }
+
+    fn fixture_root() -> SysRoot {
+        SysRoot::at(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/disk-partitions-dm"),
+        )
+    }
+
+    fn fixture_disks() -> Vec<BlockDevice> {
+        let mut disks = Vec::new();
+        crate::parse::block::enumerate_disks(&fixture_root(), &mut disks).unwrap();
+        disks
+    }
+
+    fn fixture_mounts() -> Vec<MountEntry> {
+        let buf = fs::read(fixture_root().proc_path("self/mountinfo")).unwrap();
+        let mut mounts = Vec::new();
+        crate::parse::mountinfo::parse_mountinfo(&buf, &mut mounts).unwrap();
+        mounts
+    }
+
+    const FAKE_STAT: FsStat = FsStat {
+        blocks: 1000,
+        bfree: 400,
+        bavail: 300,
+        frsize: 4096,
+    };
+
+    fn swap(name: &str) -> SwapEntry {
+        SwapEntry {
+            name: name.into(),
+            kind: crate::parse::swaps::SwapKind::Partition,
+            size_bytes: 0,
+            used_bytes: 0,
+            priority: -2,
+        }
+    }
+
+    /// Runs `disk_usage` on the fixture with `statvfs_result` for every path. Returns the usage
+    /// and every path passed to `statvfs`.
+    fn run_usage(
+        swaps: &[SwapEntry],
+        statvfs_result: Result<FsStat, CollectError>,
+    ) -> (Vec<DiskUsage>, Vec<String>) {
+        let mut calls = Vec::new();
+        let usage = disk_usage(
+            &fixture_disks(),
+            &fixture_mounts(),
+            swaps,
+            &mut |path| {
+                calls.push(path.to_owned());
+                statvfs_result.clone()
+            },
+            &mut |name| (name == "/dev/sda2").then_some((8, 2)),
+        );
+        (usage, calls)
+    }
+
+    fn named<'a>(usage: &'a [DiskUsage], major: u32, minor: u32) -> &'a DiskUsage {
+        usage
+            .iter()
+            .find(|u| (u.major, u.minor) == (major, minor))
+            .unwrap()
+    }
+
+    #[test]
+    fn usage_sums_distinct_filesystems() {
+        let (usage, calls) = run_usage(&[], Ok(FAKE_STAT));
+        assert_eq!(calls, vec!["/".to_owned(), "/boot".to_owned()]);
+        let sda = named(&usage, 8, 0);
+        assert_eq!(sda.formatted_bytes, Measured::valid(8_192_000));
+        assert_eq!(sda.used_bytes, Measured::valid(4_915_200));
+        assert_eq!(sda.free_bytes, Measured::valid(2_457_600));
+        assert!(sda.system_disk);
+        assert!(!sda.swap);
+    }
+
+    #[test]
+    fn usage_unmounted_disk_unsupported() {
+        let (usage, _) = run_usage(&[], Ok(FAKE_STAT));
+        let nvme = named(&usage, 259, 0);
+        assert_eq!(nvme.formatted_bytes.validity, Validity::Unsupported);
+        assert_eq!(nvme.used_bytes.validity, Validity::Unsupported);
+        assert_eq!(nvme.free_bytes.validity, Validity::Unsupported);
+        assert!(!nvme.system_disk);
+    }
+
+    #[test]
+    fn usage_swap_on_partition() {
+        let (usage, _) = run_usage(&[swap("/dev/sda2")], Ok(FAKE_STAT));
+        assert!(named(&usage, 8, 0).swap);
+        assert!(!named(&usage, 259, 0).swap);
+    }
+
+    #[test]
+    fn usage_statvfs_error() {
+        let (usage, _) = run_usage(&[], Err(CollectError::PermissionDenied));
+        let sda = named(&usage, 8, 0);
+        assert_eq!(sda.formatted_bytes.validity, Validity::Restricted);
+        assert_eq!(sda.used_bytes.validity, Validity::Restricted);
+        assert_eq!(sda.free_bytes.validity, Validity::Restricted);
+        assert!(sda.system_disk);
+    }
+
+    #[test]
+    fn usage_skips_virtual_mounts() {
+        let (_, calls) = run_usage(&[], Ok(FAKE_STAT));
+        assert!(!calls.iter().any(|c| c == "/run"));
+    }
+
+    #[test]
+    fn host_statvfs_root_works() {
+        let st = host_statvfs("/").unwrap();
+        assert!(st.blocks > 0);
     }
 }

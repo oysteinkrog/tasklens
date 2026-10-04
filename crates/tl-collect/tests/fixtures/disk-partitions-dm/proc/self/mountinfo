@@ -1,0 +1,4 @@
+22 1 254:0 / / rw,relatime shared:1 - ext4 /dev/mapper/cryptroot rw
+25 22 8:1 / /boot rw,relatime shared:5 - vfat /dev/sda1 rw,fmask=0022
+26 22 8:1 / /mnt/boot\040copy rw,relatime shared:5 - vfat /dev/sda1 rw,fmask=0022
+27 22 0:25 / /run rw,nosuid,nodev shared:6 - tmpfs tmpfs rw,mode=755
