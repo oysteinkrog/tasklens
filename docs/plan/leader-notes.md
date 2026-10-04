@@ -128,3 +128,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ndy.3: tl-gpu-probe opens fd 3 with pidfd_open(getpid()) + pidfd_getfd, because /proc/self/fd/3 fails with ENXIO for a socket. Needs Linux 5.6+. Check the engine spawn side (tl-engine/src/gpu/spawn.rs) agrees. ndy.4 must remove the dead_code allow in sampler.rs.
 - ndy.3: a failed Hello leaves the probe locked; a second Hello exits 0 with no answer.
 - 2dl.36: /var/tmp/claude/minimal-vm/ (745 MB) is left for the owner to delete.
+- iuz.5: sys.rs reads `environ` directly; its SAFETY comment assumes tasklens never calls setenv after startup. Make that a written rule (ARCHITECTURE or AGENTS.md) in the review pass, and grep for set_var. sys.rs has a file-wide allow(dead_code) to drop when E07-003/005/014 land.
+- lgw.1 / fut.5: no tracing test subscriber, so "a warning is logged" criteria are untested. Consider a small test subscriber helper in tl-ui testing.
