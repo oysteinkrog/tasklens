@@ -651,3 +651,536 @@ beads and only the listed doc edits are needed.
   from Demand.graph_targets" (P2, files `reducer/process_series.rs`, `reducer/mod.rs` module
   line; depends on 8q0.1, as2.2; xdh's E26-011 and wox.9 depend on it). dwy.4 (E10
   ProcessesSource): period rule for `graph_targets`.
+
+### OI-E17 tl-model core types: ColumnId numbers, NodeId, health and device entries
+- Raised by: E03 first-half items 1, 2, 3, 7, 8, 9, 10, 11, 13; B1 item 6; E12-OI-6; B3
+  items 11 and 14; E13 health note.
+- Question: the derived values in E03-A1's beads that B1 asked to have reviewed.
+- Answer:
+  1. `ColumnId` numbers 1 to 121 in PROC-027 to PROC-036 order (E03-005, as2.7) are accepted
+     and frozen. Dense index = number minus 1; `ColumnSet([u64; 4])` holds 256. New columns
+     append after 121 and are never renumbered (ADR-012 constraint 2). The system tables use
+     a separate `SysColumnId` in `table.rs` (item 2 accepted); `SysNodeId` lives in `table.rs`
+     (item 3 and contracts item 1 accepted; 00-epics section 2 moves it from `ids.rs`).
+  2. `NodeId` gains `Unit`, `KernelThreads`, `Pseudo` (OI-E03 item 3; ADR-009 edit).
+  3. System totals (item 7): E03-009's field sets with `Metric<T>` are accepted, plus the
+     OI-E01 part-B fields and B3 item 12's `GpuTotals.pcie_rx_bps`, `pcie_tx_bps:
+     Metric<f32>`.
+  4. `HealthSnapshot` keeps a plain `version: u64` instead of `ComponentHeader` (item 8
+     accepted; no module cycle). `SourceState` becomes
+     `{ Off, Running, Late, Stale, Failed, Disabled { until: TimeNs }, Unsupported }`:
+     `Unsupported` is a terminal state the controller never retries, used for "GPU probe not
+     installed", `LibraryNotFound`, `DriverNotLoaded` and "KWin bridge not available" (B3 item
+     14 alternative chosen, because a string match in the UI on `last_error` would break with
+     any text change). `last_error` capped at 200 characters; no `SourceId` for the public IP
+     fetch or the low-memory sweep (item 9).
+  5. 1 Hz tier (item 10): accepted as E03-007 writes it; the fast ring is sized for the
+     fastest period a source can use (CPU 10 Hz, 600 samples for 60 s).
+  6. Measured zero (item 11): PROC-003's rule applies to every rate, power and time form;
+     `percent_2dp` zero is "0%"; `watts_pair` prints the limit as an integer. PROC-003 gets the
+     generalised sentence.
+  7. Device entries (item 13, E12-OI-6): `DeviceDesc` (the list entry in E08-003's
+     `DeviceList`) gains `persistent_key: Arc<str>`; workers compute it per PERF-005
+     (`disk:<ID_WWN or ID_SERIAL>` with by-path fallback through OI-E02,
+     `fan:<hwmon name>:<device path>:<n>` from `FanReading.chip_device_path`,
+     `bat:<NativePath>`, `net:<MAC or name>`, `gpu:<uuid or PCI slot>`). `DeviceEntry` stores
+     `persistent_key` and `net_kind: Option<NetKind>`; `DeviceIdentity` is unchanged.
+  8. GPU catalog (B3 item 11): no `GPUS` list in P1; the `Gpu` and `GpuInfo` arms call
+     `devices.ensure` per identity; `GpuTotals.device` is a placeholder the reducer overwrites.
+     The `GpuInfo` payload carries `persistent_key`.
+- Basis: PROC-003, PROC-027 to PROC-036, PERF-005, PERF-062 [verified]; ADR-003, ADR-007,
+  ADR-009, ADR-012 [verified]; as2.7, as2.11, as2.13 text [verified].
+- Owner decision: no.
+- Changes: ADR-003 (`DeviceEntry` fields, `SourceState::Unsupported`, `GpuTotals` pcie
+  fields); ADR-009 (`NodeId`); PROC-003 zero rule; 00-epics section 2 (`SysNodeId`).
+  as2.13: `Unsupported`. as2.12: `DeviceEntry` fields. as2.11: pcie fields. 8hz.5:
+  `DeviceDesc.persistent_key`, `GpuDeviceInfo.persistent_key`. 8hz.8 (controller): treat
+  `Unsupported` as never-retry. ndy.12 (GpuNvidia worker): report `Unsupported` for the three
+  cases. 8q0.5 (catalog): store the key. hjn.5 (E12-002): compute the keys.
+
+### OI-E18 tl-model contract types: the derived field lists
+- Raised by: E03 contracts items 3, 5, 6, 8, 9, 11, 12, 13, 14, 15, 18, 20, 21, 22, 24;
+  E30-OI-1; E14 item 1; B1 item 6.
+- Question: confirm the field lists E03-A2 derived, and settle the history types conflict.
+- Answer:
+  1. Accepted as the beads write them: `StartupRef { source: StartupSource, id: Arc<str> }`
+     (item 3); `SystemSnapshot` and `WindowEntry` layout (item 6); the services, startup and
+     connections records (item 8, `ImpactDetail`, `TcpInfoView`, `ConnRecord.four_tuple`);
+     `InventorySnapshot` per-section structs (item 9); the Properties payloads (item 11);
+     `FourTuple { local: SocketAddr, remote: SocketAddr }`, `Family { Inet, Inet6 }`,
+     `Proto { Tcp, Udp }` (item 12); `RecoveryEdit` with one `Option` per SYS-013 key
+     (item 13); `tl_model::command::Tab` with the six R-023 names, and tl-ui's `TabId` is this
+     type (item 14); `KWinCommand` variants of E03-063 plus `seq` on `Pick` and `CancelPick`
+     (item 15, OI-E11); `GpuApiVersions { pci_bus_id, vulkan_api, vulkan_driver, opengl }`
+     plus `GpuDeviceInfo.cuda_version`, `vbios`, `architecture: Option<String>` (item 20, B3
+     item 12); clamp then round to the nearest step (item 21); `Snapshot::empty` and
+     `changed_since` (item 22); `CpuSet` derives `Serialize, Deserialize` (item 24, as2.11).
+  2. `TrayDemand` (item 5, E31-8 a): `{ icons_shown: bool, cpu: bool, memory: bool, disks: bool, nets: bool, gpus: bool }`.
+     No `process_keys`: tray process graphs use `Demand.graph_targets` (OI-E16).
+     `icons_shown` counts as a visible surface in the aggregator.
+  3. History types (item 18, E30-OI-1): the E30 block wins over E03-062 and E03-063's
+     sketches, because all 30 E30 beads on both sides are written to it:
+     `HistoryMetric`, `HistoryRange::{Live, At(TimeNs), Span { start_ns, end_ns }}`,
+     `HistoryWhat::{Frame, TopAt { n: u8 }}` and `HistoryView` with `query_id`, `source`,
+     `store_state`, `span`, `gaps`, `frame_t`, `range`, `process_count`, `rows`, `totals`,
+     `series`, `stack`, `overview`, `top`, `realtime_offset_ns`, plus `HistoryProcessRow`,
+     `HistoryTop`, `HistoryLoadProblem` as the "tl-model history types" block in the E30 beads
+     (for example E30-012) spells them. `ColumnId` has `image_path` (number per PROC-027
+     order) [verified in the PROC-027 table].
+  4. E14 item 1's list is a check, not a change: the services unit record carries
+     `cgroup_pids`, `has_cgroup_procs`, the four resource fields with `Validity`, `can_reload`,
+     `main_pid`; `ManagerState`; `UnitDetails` with `RecoverySettings` and `DepEntry`;
+     `JournalHandle` with `JournalControl::{LoadOlder, SetFollow(bool)}` and the
+     `bounded(64)` event channel (E14 item 9). The leader checks as2.20, as2.21, as2.27
+     against the E14-001 and E14-004 field names before E14-A1 starts; an E14 bead that finds
+     a field missing stops and reports.
+- Basis: UI-PRC-030 to UI-PRC-037, UI-SYS data bindings, SYS-013, R-023 [verified]; the E30
+  block in the E30 beads [verified in b4 plan text]; as2.26, as2.29, as2.36 text [verified].
+- Owner decision: no.
+- Changes: ADR-012: the history type names. as2.26: `TrayDemand` fields. as2.28 (E03-062),
+  as2.29 (E03-063): replace the history types with the E30 block. as2.35 (E03-069): the
+  three `GpuDeviceInfo` fields. Leader check of as2.20, as2.21, as2.27 against E14-001 and
+  E14-004.
+
+### OI-E19 Helper protocol: frame, replies, handshake and request set
+- Raised by: E29-OI-1, E29-OI-7, E29-OI-9, E03 contracts item 19 (non-fd part), B3 item 16
+  (security label).
+- Question: two shapes exist, E03-070's and E29-OI-1's; which one holds, and what is added.
+- Answer: E03-070 (as2.36) holds: `HelperFrame { seq: u32, request }`,
+  `HelperReply { seq: u32, last: bool, body: HelperReplyBody }`, `Hello { proto }` both ways,
+  `HELPER_PROTO_VERSION = 1`, `HelperError { IdentityChanged, PermissionDenied, NoSuchProcess, NotAllowed, Partial { done, total }, Os(i32) }`,
+  `validate_drop_in`, the 64 KiB frame and the exhaustive-variant tests. It is the type owner
+  and carries the security regression tests, and the engine parser for `NetlinkDump` is E06's.
+  E29 beads rename their `req` to `seq`, `Done` to `Ok`, `Error` to `Err`, `Files` to `File`,
+  `Inodes` to `SocketOwners`, `SockDiag` to `NetlinkDump`. Added from E29-OI-1 and E29-OI-9:
+  `HelperRequest::CancelScan { seq: u32 }` (17 variants; the exhaustive test changes to 17),
+  `HelperError::TooLarge`, `ProcFiles::ROOT = 1 << 11` (so `/proc/<pid>/root` reads for
+  PROC-078 and PROC-096 are in the allowlist; R-004 file set gains `root`).
+  `ReadProcessDetail` is dropped from ADR-006 (already absent in as2.36). The 4 MiB cap is per
+  reply message for streamed requests (`ScanStrings`, `NetnsSockDiagDump`), total for the
+  rest (E29-OI-7). tl-helper may depend on tl-collect (OI-E04 item 14) so `ScanStrings` reuses
+  `proc/strings.rs`. The `Dump` fd is OI-E07.
+- Basis: ADR-006, R-003, R-004, R-097, R-098 [verified]; as2.36 text [verified];
+  E29-OI-1 text [verified].
+- Owner decision: no.
+- Changes: ADR-006: drop `ReadProcessDetail`, add `CancelScan`, `root`, the per-message cap
+  sentence; R-004 likewise. as2.36: `CancelScan`, `TooLarge`, `ROOT`, test counts. qfx.4 to
+  qfx.13, qfx.16: the renames; qfx.8 (E29-005): `CancelScan` handling.
+
+### OI-E20 E02 workspace choices
+- Raised by: E02 items 1 to 7, B1 item 3.
+- Question: package name, `bench` lines, banned-API greps, zbus in tl-ui's closure, CI packages,
+  version, rustfmt.
+- Answer: accept all seven as E02 wrote them: package `tl-app` with `[[bin]] name = "tasklens"`
+  and ADR-002's command becomes `cargo tree -p tl-app` (item 1); E02-005 (v9m.7) writes both
+  `bench` feature lines up front, so E01-001 (wlf.3) and E01-002 (wlf.4) are closed as
+  duplicates and 00-epics section 2 drops the E01 `Cargo.toml` chain edits (item 2, B1 item 3);
+  `check-deps` matches the literals `RuntimeHandle::spawn(` and `.with_poll_quota(` with the
+  `// check-deps: allow <reason>` escape (item 3); if `zbus` shows up in tl-ui's closure through
+  gpui-kit, the ADR-001 check 2 rule narrows to "no direct dependency and no path that avoids
+  gpui-kit", recorded by E02-A1 (item 4); the Ubuntu CI package list of E02-010 and the lavapipe
+  ICD path `/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` (item 5, also E33-OI-11);
+  `version = "0.1.0"`, `publish = false` (item 6); no `rustfmt.toml` (item 7).
+- Basis: ADR-001, ADR-002, ADR-013 [verified]; v9m.7 and wlf.3 text [verified].
+- Owner decision: no.
+- Changes: ADR-002 `-p tl-app`, version line; 00-epics section 2 (drop the two E01 chain
+  edits); close wlf.3 and wlf.4 ("duplicate of v9m.7"); wlf.1 (E01-A1) loses those two
+  dependencies.
+
+### OI-E21 E33 binary and packaging choices
+- Raised by: E33-OI-6 to E33-OI-11, E33-OI-13 to E33-OI-15 (OI-1 to OI-5, OI-8 and OI-12
+  are in OI-E15, OI-E04 and OI-E08).
+- Question: the remaining tl-app choices.
+- Answer:
+  - OI-6 `--app-id <id>`: replaces the `tasklens` directory component in all four XDG roots
+    (config, state, cache, runtime), and is the Wayland `app_id` and the single-instance bus
+    name. History, logs, crash reports and the icon cache follow. Recommended; owner to
+    confirm because APP-052 says only "separate instance and settings dir".
+  - OI-7: the clap `about` line "Task manager for Linux", the per-argument help texts of
+    E33-003 (cr0.6) and the critical notification urgency (cr0.13) are accepted as written.
+  - OI-9: the desktop file keys of E33-013 (cr0.16) are accepted; the icon installs to
+    `/usr/share/icons/hicolor/scalable/apps/io.github.oysteinkrog.Tasklens.svg`.
+  - OI-10: `pkgver=0.1.0`, build from the local checkout, `nvidia-utils` as `optdepends`.
+    `license` is the owner's choice (D-005 keeps the repo private, so no licence is implied).
+  - OI-13: TaskSlinger INI section names and value encodings are not in the docs; E33-018
+    (cr0.21) imports plain booleans and in-range integers only until the owner supplies
+    `UserSettings.ini` or the inventory section.
+  - OI-14: the tray start in `main.rs` is E31-008 (wox.10), a chain edit depending on cr0.1,
+    which also adds the `tl-tray` dependency line (00-epics section 2 row).
+  - OI-15: `crates/tl-app/build.rs` is an E33 owner-only file (section 2 row).
+- Basis: APP-052, APP-053, ADR-010, ADR-015, D-005 [verified]; cr0.4 to cr0.22 text [verified
+  by title and the B1 summaries].
+- Owner decision: yes, for OI-6 (what `--app-id` isolates), OI-10 (licence) and OI-13 (INI
+  encodings; the owner holds the file). Recommended answers above; alternative for OI-6: only
+  the config directory and the bus name change.
+- Changes: APP-052: the `--app-id` sentence; 00-epics section 2: `build.rs`, the E31 main.rs
+  chain edit. cr0.22: as above once confirmed.
+
+### OI-E22 E01 bench harness choices
+- Raised by: E01-OI-2 to E01-OI-8, E01-OI-10 to E01-OI-16 (OI-1 and OI-9 are in OI-E04 and
+  OI-E06).
+- Question: the synthetic rules, report fields, cross-epic hooks and the soak launch.
+- Answer: accept the E01 recommendations with these fixed values: OI-2 ("X +- N" is a fresh
+  uniform draw each second; random walk steps uniform in [-1, 1] for memory and [-0.05, 0.05]
+  for load average; network bursts p = 0.1 per second else 0.01 Mbps; the placeholder catalog
+  of 16 cores x 2 threads, disks 259:0 to 259:3, ifindex 2 and 3); OI-3 `long_missed_frames`
+  after `missed_frames` in the JSON (UI-PRF-053 shape edit); OI-4 MB = 1,000,000 bytes;
+  OI-5 `CpuPage.bench_show_both` behind `#[cfg(feature = "bench")]` in E24-A1 (crw.1);
+  OI-6 the E19-A1 (yrf.1) paint record behind `bench` (leader notes say yrf.7 and yrf.9
+  carry it, feature `test-hooks`, so tl-ui's `bench = ["test-hooks"]`); OI-7 the nine R-006
+  columns plus `power`, 40 app groups of 50 processes, the value ranges as written;
+  OI-8 `TlTreeTable::scroll_handle()` from E18-A1 (rsf.1) and the table entity from E22-A1
+  (pdu.1); OI-10 `xtask bench` runs its build through `heavy-build` when `TL_BUILD_WRAP=1`
+  (replaces the old flock line); OI-11 "tasklens Gallery"; OI-12 scene `soak` added to table
+  (c), run `--duration 600 --warmup 0`; OI-13 E01 owns `vendor/gpui-pre-linux/` and one root
+  `Cargo.toml` chain edit (section 2 rows); OI-14 phase-0 reports carry `gpu: null`, E01-023
+  (wlf.25) depends on ndy.2; OI-15 collection cost = utime + stime of `tl-engine*` threads plus
+  the probe child over 60 s, in E01-024 (wlf.26); OI-16 E20-008 (jqk.10) writes
+  `first_frame_ms`, so E01-017 (wlf.19) depends on it.
+- Basis: UI-PRF-053, ADR-014, ADR-010 (soak), R-006 [verified]; leader notes on yrf.7, yrf.9,
+  jqk.10 [verified].
+- Owner decision: no.
+- Changes: UI-PRF-053 (`long_missed_frames`, the value rules); table (c) `soak` scene; 00-epics
+  section 2 (`vendor/gpui-pre-linux/`, root `Cargo.toml` line). crw.1: the flag. rsf.1:
+  `scroll_handle`. Edges in the Edges section.
+
+### OI-E23 E31 tray choices
+- Raised by: E31 items 1 to 11, E33-OI-14.
+- Question: the tray type home, the chain edits, the icon pixels, menu plumbing and wording.
+- Answer:
+  - Item 1: approve E31-001 (wox.3) as written: `crates/tl-model/src/tray.rs` plus one
+    `pub mod tray;` line, after E03-A2 (edge exists). E03's frozen module list gains `tray.rs`
+    (00-epics section 2). `raster::render(max: f32)` and the model channel `bounded(2)` with
+    `try_send` are accepted.
+  - Item 2: E31-008 (wox.10) is the allowed `main.rs` chain edit (OI-E21).
+  - Item 3: E31-009 (wox.11) may chain-edit E20's `window/main.rs` (close decision row 1) and
+    `window/titlebar.rs` (minimize to tray), depending on jqk.1 (E20-A1); 00-epics section 2
+    gets the row (the B7 report asked for the same).
+  - Item 4: two pre-rendered files `assets/icons/tray-22.argb` and `tray-44.argb` under E15's
+    assets, `include_bytes!` in tl-app. Alternative SNI `IconName` loses the icon when the
+    hicolor theme is not installed (development runs).
+  - Item 5: (a) `PerfAddTrayGraph { source }` is declared in `tray_bridge.rs` and E24's P3
+    menu items depend on wox.9 (E31-A2 surface); (b) the row menu dispatches
+    `AddTrayGraph { source, column }` / `RemoveTrayGraph { source, column }` built at menu
+    time; (c) process row `process:<pid>`, app row `app:<id>`, unit row `app:<unit>`; the
+    PROC-094 "name filter" mode is reached from the minigraph "Add Process Name Graph" item,
+    not from the row menu (UI-side detail for E26).
+  - Item 6: "Accent (theme default)" (UI-SHL-085 wins over the shorter UI-PRF-051 word).
+  - Item 7: UI-FND toast rule 8 holds; the UI-PRF-051 "shown on the next render" sentence
+    goes.
+  - Item 8: (a) `TrayDemand` per OI-E18 item 2; (b) `VRAM Usage` and `GPU temp` tooltip
+    forms accepted; (c) busiest disk active time and the first GPU in sidebar order; (d) five
+    lines joined by `\n` (PERF-089 and UI-PRF-051 win; APP-047 and UI-SHL-113 get the edit).
+  - Item 9: UI side (E26-A1 names), left to the UI file.
+  - Item 10: assume a watcher is available until the first ksni callback says otherwise.
+- Basis: ADR-001 rows, UI-SHL-113, UI-PRF-050, UI-PRF-051, UI-SHL-085, PERF-089 [verified];
+  wox.3 text [verified].
+- Owner decision: no.
+- Changes: 00-epics section 2 (`tray.rs` in E03's list, the E31 chain-edit rows for
+  `main.rs`, `window/main.rs`, `window/titlebar.rs`); APP-047 and UI-SHL-113 tooltip lines;
+  UI-PRF-051 toast sentence. wox.3, wox.10, wox.11: drop the pending notes. Edge
+  `br dep add tasklens-wox.11 tasklens-jqk.1`.
+
+### OI-E24 E04 collect-system choices
+- Raised by: E04-OI-3 to E04-OI-10, E04-OI-12 (OI-1, OI-2, OI-11 and OI-13 are in OI-E02).
+- Question: the remaining E04 choices.
+- Answer: OI-3 MAC addresses scrubbed to `00:00:00:00:00:00` and added to ADR-013's list;
+  OI-4 `/proc/vmstat` dropped from v1 (ADR-004 and ADR-016 `Memory` worker rows lose it;
+  `parse/vmstat.rs` stays a stub until a spec row needs it); OI-5 PERF-037 moves to E06
+  (hx1.18 builds the readers; 00-epics section 6 edit); OI-6 E12 maps tl-collect readings to
+  the tl-model totals (accepted; E04 keeps its own reading types); OI-7 the ADR-016 latency
+  formula (read and write ticks over read and write counts) stands, because ADR-016 outranks
+  PERF-049; PERF-049's response-time line gets the ADR-016 form; OI-8 Virtual name patterns are
+  checked before `bridge/` (PERF-054 order edit); OI-9 visibility groups: Ethernet and USB
+  network to Wired, Wi-Fi and Cellular to Wireless, Tunnel and VPN to VpnTunnel, Virtual and
+  Bridge to Virtual, Other to Other; this replaces E12-OI-7's Cellular to Other, and the
+  mapping lives in E12-014 (hjn.17); OI-10 `mpqemubr` added to `VIRTUAL_NAME_PREFIXES` once
+  seen on a Multipass install (U-51); OI-12 build lines are the leader's pass.
+- Basis: ADR-013, ADR-016, PERF-004, PERF-049, PERF-054 [verified].
+- Owner decision: no.
+- Changes: ADR-013 scrub list; ADR-004 and ADR-016 vmstat rows; PERF-049 response-time
+  line; PERF-054 order; 00-epics section 6 (PERF-037); U-51. hjn.17: the mapping table.
+
+### OI-E25 E05 collect-process choices and the P2 column readers
+- Raised by: E05 items 5, 7 to 13 (items 1 to 4 and 6 are in OI-E03, OI-E04 and OI-E06).
+- Question: the package index, the P2 per-process columns and the smaller choices.
+- Answer:
+  1. Package index (item 5): new file `crates/tl-collect/src/pkg.rs`, owner E05, new bead
+     E05-030 "package owner index" (P2): batched `pacman -Qoq <paths…>` for unseen exe paths
+     debounced 2 s, the `/var/lib/pacman/local/<pkg>-<ver>/desc` parser (`%VERSION%`, `%DESC%`,
+     `%PACKAGER%`, `%BUILDDATE%`, `%URL%`), cache keyed by exe path and mtime, invalidated on
+     the `local` directory mtime; `dpkg -S` and `rpm -qf` behind the same trait (P4). The
+     PROC-078 integrity check is `pacman -Qkk <pkg>` run by the detail worker (no mtree
+     parsing, no gzip crate). SYS-020's Publisher uses the same index (E06 item 6: one E06
+     bead depends on E05-030).
+  2. P2 column readers (item 5, second half): new bead E05-031 "P2 per-process column
+     readers" in `proc/extras_p2.rs`: `statx` mtime and size of the exe, ELF class and
+     machine, `sessionid`, `attr/current`, elevation and sandbox rules (PROC-028), scheduling
+     policy text, `oom_score`, `oom_score_adj`, TTY decode, `cwd`, context switches over
+     `task/*/status` for `detail_keys`. Values go into a second index-aligned slice
+     `ProcessSnapshot.extras_p2: Arc<[ProcessExtrasP2]>` filled only for `detail_keys`
+     (ADR-008 visible-rows rule). `ProcessExtrasP2` is defined in tl-model `process.rs` with
+     those fields; E03-008 gets the list from the bead.
+  3. Item 7: PROC-005's inotify sentence is dropped; the app scan runs every sweep.
+  4. Item 8: "not dumpable" when `/proc/<pid>` is owned by uid 0 while the real uid is not 0,
+     else "Not reported" (PROC-082 edit).
+  5. Item 9: U-21 belongs to E09 with the rule "`irq` stays 0 across 10 samples"; no
+     `/proc/config.gz` read.
+  6. Item 10: E05-016 (yms.19) checks Mission Center's `matching.rs:10-24` table before it
+     starts; the leader pastes the table into the bead.
+  7. Item 11: P4, decide then.
+  8. Item 12: the three `Cargo.toml` lines are allowed (OI-E04 item 15).
+  9. Item 13: the reducer computes the PROC-034 power estimate; new bead E09-030 "process
+     power estimate" (P2, file `reducer/power.rs`; depends on 8q0.1, hjn.11 (RAPL), ndy.2),
+     writing `ProcessExtrasP2.power_w: Option<f32>` for every row (it is cheap: one multiply per
+     process per sweep) and the 2-minute trend.
+- Basis: PROC-005, PROC-027, PROC-028, PROC-034, PROC-036, PROC-078, PROC-082, SYS-020,
+  ADR-008 [verified].
+- Owner decision: no.
+- Changes: PROC-005 inotify sentence; PROC-082 rule; PROC-078 mechanism (`pacman -Qkk`);
+  00-epics section 2 (`pkg.rs`, `proc/extras_p2.rs`, `reducer/power.rs`). New beads E05-030,
+  E05-031, E09-030 as above. as2.10: `ProcessExtrasP2`. yms.19: the table.
+
+### OI-E26 E06 collect-netsys choices
+- Raised by: E06 items 5, 8, 9, 10 (items 1, 2, 3, 4, 6, 7, 11 are in OI-E04, OI-E06 and
+  OI-E25).
+- Question: the remaining E06 choices.
+- Answer: item 5 (xe VRAM total file): new U-52 "xe VRAM total sysfs file"; E06-023 (hx1.26)
+  leaves VRAM total out for xe until it is named; item 8: E06 owns the PERF-037 readers
+  (OI-E24); item 9: E12-027 (hjn.31) may depend on hx1.26 directly (named exception); item 10:
+  all six small choices accepted (IPv6 scope as interface name, autostart precedence
+  NotInThisDesktop then MissingProgram then Disabled, 64 KiB read caps, fdinfo busy summed and
+  clamped to 100%, first attribution pass WarmingUp, pacman.log timestamp form).
+- Basis: PERF-064, PERF-075, SYS-022, PROC-032 [verified].
+- Owner decision: no.
+- Changes: U-52. `br dep add tasklens-hjn.31 tasklens-hx1.26`.
+
+### OI-E27 E07 ops choices
+- Raised by: E07-O2, E07-O3, E07-O5, E07-O6 (O1 and O4 are OI-E07 and OI-E08).
+- Question: the remaining tl-ops choices.
+- Answer: O2: SYS-022's rule holds (delete the user file when it carries
+  `X-Tasklens-Override=true`, else set `Hidden=false` and remove
+  `X-GNOME-Autostart-enabled=false`); the ADR-016 row changes to match. O3:
+  `SCHED_RESET_ON_FORK` is set for every FIFO and RR request (accepted; ADR-006 sentence
+  generalised). O5: unset or empty `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` are omitted
+  from the `pkexec env` line (PROC-095 sentence). O6: new overrides mode 0600, existing mode
+  kept, desktop files over 1 MiB refused (accepted).
+- Basis: SYS-022, ADR-016, ADR-006, R-038, PROC-095, ADR-011 [verified].
+- Owner decision: no.
+- Changes: ADR-016 autostart re-enable row; ADR-006 reset-on-fork sentence; PROC-095 env
+  sentence.
+
+### OI-E28 Engine runtime and reducer choices from B3
+- Raised by: B3 items 1, 2, 3, 4, 7, 8, 15, 16 (b); E12-OI-3; E12-OI-8; E12-OI-9; E12-OI-10;
+  E12-OI-11.
+- Question: the remaining engine-core and E12 choices.
+- Answer:
+  - B3-1: `WorkerIo.control: watch::Receiver<WorkerControl>` with `reset_generation` and the
+    newest-64 `QueuedCommand` queue (accepted; ADR-004 sentence).
+  - B3-2: `EngineConfig` per OI-E12 item 3.
+  - B3-3: the E08-003 payloads are the contract for B4; the leader hands 8hz.5's text to the
+    E12 and E14 beads (already the case in the bead texts read).
+  - B3-4: `EngineMsg::Tick` every 1 s (accepted; ADR-004 sentence).
+  - B3-7: the E05 sweep fills `ProcessSweep.file_nr` from `/proc/sys/fs/file-nr`; the
+    reducer copies it into `TableTotals.handles`.
+  - B3-8: `dbus/mod.rs` owns `ManagerConnSlot` and `SharedHandles`; `WorkerIo.shared`;
+    `EngineHooks.action_gate: Fn(HookCtx) -> Box<dyn ActionGate>`; E14-001 (y6k.5) uses the
+    E08 type (accepted; ADR-004 paragraph).
+  - B3-15: service jobs have no client-side timeout (ADR-005 wins); the method call has 10 s
+    (user) or 120 s (system); ADR-006's 30 s row is edited.
+  - B3-16 (b): `scripts/ci.sh` gets the line `cargo build -p tl-gpu-probe --features fake`
+    before the engine tests, written up front by E02-009 (v9m.11) since the file is E02's; the
+    probe crate exists from E02-004.
+  - E12-OI-3: `cpu_period` and `memory_period` return 1 s when `Demand.process_table` is true
+    (accepted; ADR-008 schedule note).
+  - E12-OI-8: the reducer keeps the running maximum of `Committed_AS` since start and writes
+    `MemoryInfo.peak_committed_bytes`; the inventory worker leaves it `WarmingUp`.
+  - E12-OI-9: "Session type" shows the raw `XDG_SESSION_TYPE`, "Windowing system" the display
+    name (PERF-097 edit).
+  - E12-OI-10: inventory rows carry `device: None` from the worker; the reducer matches disk
+    name, PCI slot or interface name against the catalog.
+  - E12-OI-11: AMD and Intel GPUs use `DeviceIdentity::Gpu { uuid: [0; 16], pci_bus_id }`;
+    process GPU columns match on the full identity.
+  - Battery demand, 24 h history at 288 points, power-profiles-daemon bus names: accepted.
+- Basis: ADR-004, ADR-005, ADR-006, ADR-008, ADR-013, PERF-078, PERF-097, PERF-098 [verified].
+- Owner decision: no.
+- Changes: ADR-004 (control channel, `Tick`, `SharedHandles`, `HookCtx`); ADR-006 job row;
+  ADR-008 process-table note; PERF-097 wording; PERF-098 "peak" mechanism. v9m.11: the
+  ci.sh line.
+
+### OI-E29 E14 D-Bus worker choices
+- Raised by: E14 items 2, 4, 5, 6, 8, 9, 10, 12, 14, 15, 16 (items 1, 3, 7, 11, 13 are in
+  OI-E18, OI-E04, OI-E11, OI-E10, OI-E06).
+- Question: the remaining E14 choices.
+- Answer: item 2: settled by B3-8 and the `all_workers()` registry (one `WorkerSpec` line per
+  worker; the journal opener is one allowed line in `bridge.rs`); item 4: the systemd worker
+  reads unit `memory.stat` and `cpu.stat` with E05-A2's readers (R-138 item 16 sentence
+  edited); E05-A1 and E05-A2 join E14's anchor row (section 4); item 5: the engine writes its
+  connection's unique name into the KWin script as `__TL_BUS_NAME__` and accepts `Update` only
+  from the owner of `org.kde.KWin` (accepted; ADR-004 KWin paragraph); item 6: the extra
+  KWin signals (`minimizedChanged`, maximize change, `keepAboveChanged`,
+  `interactiveMoveResizeFinished`) are accepted (PROC-052 list extended); item 8: the
+  `journalctl ... --reverse --cursor=<oldest> -n 201` form, verified by E14-010 (y6k.14);
+  item 9: `Access(OwnOnly)` for system units only, `bounded(64)`, missing `PRIORITY` = 6;
+  item 10: no column list in `SysTableQuery`; the Services filter matches every text column of
+  a unit; sort orders follow the SYS-003 tables (APP-028 sentence edit); item 12: 8 lowercase
+  hex digits from 4 bytes of `/dev/urandom` for `<rand>` (table (c) and SYS-023); item 14:
+  retry a missing manager on `RefreshNow` or every 60 s; item 15: `Update` payloads over 1 MiB
+  rejected, strings cut at 4 KiB; item 16: the OpenRC word mapping and 5 s refresh (P4).
+- Basis: ADR-004, ADR-010, PROC-052, SYS-003, SYS-005, SYS-018, SYS-023, APP-028, R-138
+  [verified].
+- Owner decision: no.
+- Changes: R-138 item 16; 00-epics section 4 (E14 anchor row); ADR-004 KWin paragraph;
+  PROC-052 signal list; APP-028 filter sentence; table (c) and SYS-023 `<rand>` length.
+
+### OI-E30 E29 helper and setup choices
+- Raised by: E29-OI-8, OI-10 to OI-13, OI-15 to OI-19 (OI-1 to OI-7, OI-9, OI-14 are in
+  OI-E19, OI-E07, OI-E10, OI-E11, OI-E12, OI-E09, OI-E04).
+- Question: the remaining E29 choices.
+- Answer: OI-8: the helper cgroup validation rule of E29-003 (qfx.6) is accepted and E07
+  exposes the write helpers that take a validated dirfd; OI-10: `render(&RecoveryEdit) -> String`
+  lives in a new tl-ops file `crates/tl-ops/src/dropin.rs`, written by E29-009 (qfx.12) as an
+  E29-owned file inside tl-ops (section 2 row), and E11-020 (i3o.22) uses it; OI-11: E16 and
+  E23 build the "Retry as administrator" and "Grant access" buttons from their own specs and
+  E29-029 (qfx.31) tests them (UI side; noted for the UI file); OI-12: the chain edits
+  E29-017 (qfx.20) and E29-018 (qfx.21) are allowed; OI-13: `tl-engine/src/helper/setup.rs`
+  is an E29 file and the `TASKLENS_SETUP_ROOT` test mode (honoured only when not root) is
+  accepted; OI-15: the setup script is embedded with `include_str!` and shown whole; OI-16:
+  the three polkit prompt texts proposed by E29-021 are recommended; OI-17: cr0.18 (E33-015)
+  depends on qfx.24 (E29-021) and qfx.34 (E29-022) as well as qfx.1; OI-18: UI-PRF-052 for
+  the cards, UI-SHL-094 for the frame (UI side); OI-19: E29-030 (qfx.32) may chain-edit
+  `window/main.rs` and uses the first-focus modifier rule on X11 too.
+- Basis: ADR-006, R-004, SYS-013, PERF-108, table (c), UI-SHL-094, UI-PRF-052 [verified].
+- Owner decision: yes, for OI-16 only (polkit prompt wording is user-visible product text;
+  recommended: the E29-021 texts; alternative: shorter one-line messages). The rest: no.
+- Changes: 00-epics section 2 (`tl-ops/src/dropin.rs`, `helper/setup.rs`, the two worker
+  chain edits, `window/main.rs` E29 row); table (c) note on `TASKLENS_SETUP_ROOT`. Edges
+  `br dep add tasklens-cr0.18 tasklens-qfx.24`, `br dep add tasklens-cr0.18 tasklens-qfx.34`.
+
+### OI-E31 E30 history choices
+- Raised by: E30-OI-2, OI-3, OI-5, OI-6, OI-7, OI-8 (OI-1 and OI-4 are in OI-E18 and
+  OI-E12).
+- Question: the on-disk block fields and format details, and the two data shapes.
+- Answer: OI-2: `HistMeta { exe_path, user, uid, system }`,
+  `Block { gap_before, mem_total_kib, catalog: Option<Vec<HistDevice>> }`,
+  `HistDevice { idx, kind, parent, name }` are accepted and ADR-012 is edited to match before
+  any file exists; OI-3: all nine on-disk details accepted as written (little-endian header
+  offsets 0, 4, 6, 14, 22; lowercase hex boot dir; postcard footer with `TLHF` magic;
+  `FieldPatch` of `Option`s; keyframe-then-started index space; `MetaId` per segment; NaN gap
+  marker; non-`Valid` stored as 0; `deleted-keys.bin` mode 0600); ADR-012 gains these lines;
+  OI-5: per bucket the three largest per-process values plus "other" as the sum of the rest,
+  drawn in the metric colour; header totals for a selected range are averages over the range;
+  OI-6: resend a query after 1,000 ms without an answer; Copy details on a history row prints
+  Name, PID, Parent PID, CPU, Memory, Disk, Network and GPU, Copy all metrics every visible
+  history column, never a command line; OI-7: E20 declares `ToggleHistoryMode` and selects the
+  Processes tab, E30-A3 flips the mode; E16's aggregator sets `Demand.recording` from
+  `history.enabled`; OI-8: "-M:SS" axis labels under an hour and the disk-limit input snapping
+  to multiples of 64.
+- Basis: ADR-012, R-136, PROC-089, UI-PRC-030 to UI-PRC-036, UI-SHL-023 [verified].
+- Owner decision: yes, for OI-5 (the stacked "top-3 plus other" chart is a visual design not in
+  any spec; recommended as above; alternative: a plain total line with the top-3 only in the
+  hover card). The rest: no.
+- Changes: ADR-012 (`HistMeta`, `Block`, `HistDevice`, the nine format lines); PROC-089 or
+  UI-PRC-032 (the stack rule once confirmed); UI-PRC-036 (range totals are averages).
+
+## New beads
+
+| Plan key | Title | Epic | Phase | Files | Depends on |
+|---|---|---|---|---|---|
+| E04-030 | udev database reader (`read_udev_props`) | E04 | P1 | `crates/tl-collect/src/parse/udev.rs`, `parse/mod.rs` line, fixture `run/udev/data/` | 2dl.1 |
+| E04-031 | Partitions table rows (PERF-050) | E04 | P2 | `crates/tl-collect/src/parse/partitions.rs`, `parse/mod.rs` line | 2dl.24, 2dl.27, E04-030 |
+| E04-A4 | Anchor: P2 system details | E04 | P2 | none (closes 2dl.16, 2dl.17, 2dl.18, 2dl.22, 2dl.26, 2dl.27, 2dl.31, E04-031) | those beads |
+| E04-032 | `minimal-vm` fixture capture | E04 | P1 | `crates/tl-collect/tests/fixtures/minimal-vm/` | 2dl.1 |
+| E05-030 | Package owner index (`pkg.rs`) | E05 | P2 | `crates/tl-collect/src/pkg.rs`, `lib.rs` line | yms.1 |
+| E05-031 | P2 per-process column readers | E05 | P2 | `crates/tl-collect/src/proc/extras_p2.rs`, `proc/mod.rs` line | yms.1, E05-030 |
+| E09-029 | Per-process series from `Demand.graph_targets` | E09 | P2 | `crates/tl-engine/src/reducer/process_series.rs`, `reducer/mod.rs` line | 8q0.1, as2.2 |
+| E09-030 | Process power estimate (PROC-034) | E09 | P2 | `crates/tl-engine/src/reducer/power.rs`, `reducer/mod.rs` line | 8q0.1, hjn.11, ndy.2 |
+
+## Edges
+
+Each line is a `br dep add <bead> <depends-on>` for the leader, with the reason.
+
+```
+br dep add tasklens-cr0.1   tasklens-fut.15    # OI-E15: E33-A1 calls tl_ui::run(UiLaunch)
+br dep add tasklens-cr0.14  tasklens-fut.15    # OI-E15: shutdown reads UiExit
+br dep add tasklens-cr0.15  tasklens-fut.15    # OI-E15: RendererFailed and DeviceLost paths
+br dep add tasklens-cr0.11  tasklens-iuz.13    # OI-E08: settings save needs write_atomic at P1
+br dep add tasklens-cr0.17  tasklens-iuz.13    # OI-E08: autostart writer needs write_atomic at P1
+br dep add tasklens-qfx.17  tasklens-i3o.4     # OI-E09: PrivilegedOps trait before its implementation
+br dep add tasklens-m1f.11  tasklens-y6k.3     # OI-E14: "Open Full tasklens" uses the launcher
+br dep add tasklens-wox.11  tasklens-jqk.1     # OI-E23: chain edit into E20's window files
+br dep add tasklens-hjn.31  tasklens-hx1.26    # OI-E26: Intel GpuDrm worker needs the i915/xe readers
+br dep add tasklens-cr0.18  tasklens-qfx.24    # OI-E30: PKGBUILD installs the polkit policy
+br dep add tasklens-cr0.18  tasklens-qfx.34    # OI-E30: PKGBUILD installs tasklens-setup
+br dep add tasklens-wlf.10  tasklens-pdu.1     # OI-E22: table-2000 drives the production table
+br dep add tasklens-wlf.10  tasklens-rsf.1     # OI-E22: TlTreeTable::scroll_handle
+br dep add tasklens-wlf.9   tasklens-crw.1     # OI-E22: CpuPage.bench_show_both
+br dep add tasklens-wlf.9   tasklens-yrf.1     # OI-E22: paint record behind bench
+br dep add tasklens-wlf.25  tasklens-ndy.2     # OI-E22: GPU power baseline through the probe
+br dep add tasklens-wlf.19  tasklens-jqk.10    # OI-E22: first_frame_ms log line
+br dep add tasklens-jqk.26  tasklens-hjn.22    # OI-E01: startup auto-fetch sends the command the worker handles
+br dep add tasklens-o55.22  tasklens-hjn.22    # OI-E01: Fetch button and public_ip state
+br dep add tasklens-9o0.32  tasklens-hjn.22    # OI-E01: Information Public IP row
+br dep add tasklens-o55.18  tasklens-hjn.23    # OI-E01: SMART and Eject button visibility fields
+br dep add tasklens-o55.19  tasklens-hjn.24    # OI-E01: SMART window data
+br dep add tasklens-o55.20  tasklens-hjn.25    # OI-E01: Disk is in use window blockers
+br dep add tasklens-o55.34  tasklens-hjn.32    # OI-E01: smartctl fallback button
+br dep add tasklens-o55.33  tasklens-hjn.33    # OI-E01: battery history chart
+br dep add tasklens-o55.17  <E04-A4>           # OI-E02: Partitions table block reads PartitionRow
+br dep add tasklens-hjn.16  <E04-030>          # OI-E02: disk details from udev
+br dep add tasklens-hjn.16  <E04-031>          # OI-E02: partition rows
+br dep add tasklens-hjn.17  <E04-030>          # OI-E02: adapter name from udev
+br dep add tasklens-hjn.21  <E04-030>          # OI-E02: inventory disk and adapter rows
+br dep add tasklens-hjn.29  <E04-030>          # OI-E02: GPU names from udev
+br dep add <E09-029>        tasklens-8q0.1     # OI-E16: reducer anchor
+br dep add <E09-029>        tasklens-as2.2     # OI-E16: ProcessSeriesId and the component
+br dep add tasklens-wox.9   <E09-029>          # OI-E16: tray process graphs use graph_targets
+br dep add <E09-030>        tasklens-8q0.1     # OI-E25: reducer anchor
+br dep add <E09-030>        tasklens-hjn.11    # OI-E25: RAPL package power
+br dep add <E09-030>        tasklens-ndy.2     # OI-E25: GPU power and per-process SM share
+```
+
+Edges to remove (leader command): cr0.11 and cr0.17 on iuz.3 (OI-E08). Beads to close as
+duplicates: wlf.3 and wlf.4 (OI-E20). E26-011 (per-process minigraph cards, P3) also depends on
+E09-029; its bead ID is in the UI file.
+
+## Summary
+
+| OI | Title | Owner decision | Beads unblocked |
+|---|---|---|---|
+| OI-E01 | Device commands, device details, public IP state | no | hjn.7, hjn.22 to hjn.26, hjn.32, hjn.33, hjn.2 (E12-A2) and the 21 E12 beads behind E12-OI-1; o55.18, o55.19, o55.20, o55.22, o55.33, o55.34; 9o0.32; jqk.26 |
+| OI-E02 | udev data source and the Partitions table | no | hjn.16, hjn.17, hjn.21, hjn.29 (once E04-030 exists); o55.17 |
+| OI-E03 | ProcessRecord extras, group rows, table fields | no | yms.1, 8q0.7, 8q0.11 to 8q0.15, the E22 column beads |
+| OI-E04 | Crate pins and allowed-dependency rows | no | cr0.4, cr0.6, m1f.1, hjn.22, hjn.32, y6k.4, y6k.13, wlf.6, dwy.4 (CLK_TCK) |
+| OI-E05 | `unsafe` in tl-gpu-probe api_versions.rs | no | ndy.8 |
+| OI-E06 | Other `unsafe` or libc needs | no | yms (strings scanner), iuz.8 |
+| OI-E07 | Core dump tool and the passed fd | no | iuz.15, iuz.3, qfx.9, i3o.20 |
+| OI-E08 | `write_atomic` phase | no | cr0.11, cr0.17 (P1 path) |
+| OI-E09 | Privileged helper hook | no | qfx.17 |
+| OI-E10 | Helper session commands and action error values | no | qfx.16, qfx.23, i3o.13, i3o.17, i3o.18, i3o.20 |
+| OI-E11 | Setup state and window pick answers | no | qfx.22, qfx.25, y6k.21, y6k.23 |
+| OI-E12 | SourceUpdate variants and EngineConfig up front | no | qfx.23, E30-A2, m1f.8 |
+| OI-E13 | PSI trigger window | no | m1f.1, m1f.3 |
+| OI-E14 | Low-memory mode details | yes (OI-13 flag meaning) | m1f.4, m1f.6, m1f.11 |
+| OI-E15 | UiLaunch shape | no | cr0.1, cr0.2, cr0.14, cr0.15 |
+| OI-E16 | Aggregate devices and per-process series | no | E26-003, E26-011, wox.9 |
+| OI-E17 | tl-model core types review | no | as2.1 and its 13 beads; ndy.12 |
+| OI-E18 | tl-model contract types review | no | as2.2 and its 22 beads; E30 beads; y6k.1 |
+| OI-E19 | Helper protocol shape | no | as2.36, qfx.1 to qfx.16 |
+| OI-E20 | E02 workspace choices | no | v9m.1 to v9m.12 |
+| OI-E21 | E33 binary and packaging choices | yes (OI-6, OI-10, OI-13) | cr0.16, cr0.19, cr0.21, cr0.22, cr0.3 |
+| OI-E22 | E01 bench harness choices | no | wlf.6 to wlf.26 |
+| OI-E23 | E31 tray choices | no | wox.3, wox.10, wox.11 |
+| OI-E24 | E04 collect-system choices | no | 2dl.24, 2dl.29, hjn.17 |
+| OI-E25 | E05 choices and P2 column readers | no | yms.19, E05-030, E05-031, E09-030 |
+| OI-E26 | E06 choices | no | hjn.31 |
+| OI-E27 | E07 choices | no | iuz.8, iuz.14, iuz.17 |
+| OI-E28 | Engine runtime and reducer choices | no | 8hz.3, 8hz.6, v9m.11, hjn.12, hjn.19 to hjn.21, hjn.29 |
+| OI-E29 | E14 D-Bus worker choices | no | y6k.5, y6k.7, y6k.12 to y6k.14, y6k.18, y6k.20, y6k.22 |
+| OI-E30 | E29 helper and setup choices | yes (OI-16 prompt texts) | qfx.6, qfx.12, qfx.20, qfx.21, qfx.22, qfx.24, qfx.28, qfx.32 |
+| OI-E31 | E30 history choices | yes (OI-5 chart shape) | E30-002 onward (engine side) |
+
+Owner decisions in one list: OI-E14 (`--force-full-memory-mode` meaning), OI-E21 (`--app-id`
+scope, PKGBUILD licence, TaskSlinger INI encodings), OI-E30 (polkit prompt texts), OI-E31
+(history stacked chart shape). Every one has a recommended answer above and no bead waits on
+it except cr0.22 (`--app-id`).
