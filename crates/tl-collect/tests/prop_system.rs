@@ -255,7 +255,7 @@ proptest! {
 /// Every disk and child of the owner-desktop fixture, generation 1.
 fn owner_disk_ids() -> Vec<DiskId> {
     let mut disks = Vec::new();
-    enumerate_disks(&fixture(OWNER), &mut disks).unwrap();
+    enumerate_disks(&fixture(OWNER), &mut disks).expect("enumerate owner-desktop disks");
     let mut ids = Vec::new();
     for disk in &disks {
         ids.push(DiskId {
@@ -277,7 +277,7 @@ fn owner_disk_ids() -> Vec<DiskId> {
 /// Every interface of the owner-desktop fixture, generation 1.
 fn owner_iface_ids() -> Vec<IfaceId> {
     let mut ifaces = Vec::new();
-    netif::enumerate(&fixture(OWNER), &mut ifaces).unwrap();
+    netif::enumerate(&fixture(OWNER), &mut ifaces).expect("enumerate owner-desktop interfaces");
     ifaces
         .iter()
         .map(|iface| IfaceId {
