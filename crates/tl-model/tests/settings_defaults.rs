@@ -234,18 +234,27 @@ fn empty_files_are_defaults() {
 #[test]
 fn unknown_keys_ignored() {
     let text = "schema_version = 1\n\n[general]\nfoo = 1\n\n[bogus]\nbar = \"baz\"\n";
-    assert_eq!(toml::from_str::<Settings>(text).unwrap(), Settings::default());
+    assert_eq!(
+        toml::from_str::<Settings>(text).unwrap(),
+        Settings::default()
+    );
     assert_eq!(toml::from_str::<UiState>(text).unwrap(), UiState::default());
 }
 
 #[test]
 fn settings_save_load_roundtrip() {
     let text = toml::to_string(&Settings::default()).unwrap();
-    assert_eq!(toml::from_str::<Settings>(&text).unwrap(), Settings::default());
+    assert_eq!(
+        toml::from_str::<Settings>(&text).unwrap(),
+        Settings::default()
+    );
 }
 
 #[test]
 fn state_save_load_roundtrip() {
     let text = toml::to_string(&UiState::default()).unwrap();
-    assert_eq!(toml::from_str::<UiState>(&text).unwrap(), UiState::default());
+    assert_eq!(
+        toml::from_str::<UiState>(&text).unwrap(),
+        UiState::default()
+    );
 }
