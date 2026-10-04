@@ -32,6 +32,11 @@ pub struct InitFailed {
 /// The NVML side of the probe. The real backend and the fake backend implement it.
 pub trait Backend {
     fn hello(&mut self) -> Result<HelloInfo, InitFailed>;
+    /// The `proto` that a successful `Hello` answers with. Only the fake `proto-mismatch` script
+    /// changes it.
+    fn hello_proto(&self) -> u16 {
+        PROTO
+    }
     /// Returns `t_ns` (CLOCK_BOOTTIME), the device samples and, when `processes` is true, the
     /// process samples.
     fn sample(
@@ -77,7 +82,7 @@ pub fn run<B: Backend>(fd: i32, make: impl FnOnce() -> B) -> ExitCode {
                 let _ = write_frame(&mut f, &resp, MAX_PROBE_FRAME);
                 return ExitCode::SUCCESS;
             }
-            ProbeRequest::Hello { proto } => {
+            ProbeRequest::Hello { .. } => {
                 let b = match (backend.as_mut(), make.take()) {
                     (Some(b), _) => b,
                     (None, Some(make)) => backend.insert(make()),
@@ -86,7 +91,7 @@ pub fn run<B: Backend>(fd: i32, make: impl FnOnce() -> B) -> ExitCode {
                 };
                 match b.hello() {
                     Ok(info) => ProbeResponse::Hello {
-                        proto,
+                        proto: b.hello_proto(),
                         driver: info.driver,
                         nvml: info.nvml,
                         devices: info.devices,
@@ -134,7 +139,7 @@ pub fn run<B: Backend>(fd: i32, make: impl FnOnce() -> B) -> ExitCode {
 /// `OwnedFd::from_raw_fd` and `BorrowedFd::borrow_raw` are `unsafe`, and opening
 /// `/proc/self/fd/<n>` fails with ENXIO for a socket. `pidfd_getfd` on our own pidfd duplicates
 /// the descriptor safely; a process may always do this to itself.
-fn open_fd(fd: i32) -> Option<File> {
+pub(crate) fn open_fd(fd: i32) -> Option<File> {
     let pidfd = pidfd_open(getpid(), PidfdFlags::empty()).ok()?;
     let owned = pidfd_getfd(&pidfd, fd, PidfdGetfdFlags::empty()).ok()?;
     Some(File::from(owned))

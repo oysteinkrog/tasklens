@@ -5,6 +5,8 @@
 
 use std::process::ExitCode;
 
+#[cfg(feature = "fake")]
+mod fake;
 mod nvml;
 mod sampler;
 
@@ -67,11 +69,11 @@ fn main() -> ExitCode {
             eprintln!("api-versions not built");
             ExitCode::from(3)
         }
-        // E13-005 (ndy.7) replaces this arm with sampler::run(fd, fake::FakeBackend::from_script).
+        // Built before the loop so an unknown script exits 2 at once.
         #[cfg(feature = "fake")]
-        Ok(Mode::Fake { .. }) => {
-            eprintln!("fake backend not built");
-            ExitCode::from(3)
+        Ok(Mode::Fake { script, fd }) => {
+            let backend = fake::FakeBackend::from_script(&script).with_fd(fd);
+            sampler::run(fd, move || backend)
         }
     }
 }
