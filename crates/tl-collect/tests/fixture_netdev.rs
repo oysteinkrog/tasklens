@@ -1,5 +1,8 @@
 //! Fixture tests for the /proc/net/dev parser (E04-025).
 
+// The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
+#![allow(clippy::unwrap_used)]
+
 mod common;
 
 use std::fmt::Write as _;
