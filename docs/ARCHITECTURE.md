@@ -101,7 +101,7 @@ tl-gpu-probe, tl-helper, tl-tray -> tl-model (tl-helper and tl-app also -> tl-op
 ```
 
 Hard rules:
-1. `tl-ui` never depends on `tl-engine`, `tl-collect`, `tl-ops`, `asupersync`, `arc-swap` or `zbus`. It talks to the engine only through the `EngineClient` trait in `tl-model` (ADR-005).
+1. `tl-ui` never declares a direct dependency on `tl-engine`, `tl-collect`, `tl-ops`, `asupersync`, `arc-swap` or `zbus`. It talks to the engine only through the `EngineClient` trait in `tl-model` (ADR-005). Rule 1 and the allowed-dependency table are about direct dependencies in our own `Cargo.toml` files; what an allowed crate pulls in does not count (`zbus` reaches `tl-ui` through `gpui-pre-linux` and `gpui-base`, `arc-swap` through `gpui-component`; R-259).
 2. `asupersync` appears in the normal dependency closure of `tl-engine` and `tl-app` only. No public item of `tl-engine` names an asupersync type. `tl-engine`'s public API is `EngineConfig`, `Engine::start`, `EngineHandle` (implements `EngineClient`) and `ShutdownReport`.
 3. `tl-model`, `tl-collect` and `tl-ops` contain no async code and no runtime.
 4. `unsafe` is denied workspace-wide (`unsafe_code = "deny"`). It is allowed only in these files, each with `#![allow(unsafe_code)]` at file level and a `// SAFETY:` comment per block: `crates/tl-ops/src/sys.rs`, `crates/tl-engine/src/gpu/spawn.rs`, `crates/tl-app/src/main.rs` (environment setup before any thread starts), `crates/tl-gpu-probe/src/api_versions.rs` (`ash` and `khronos-egl` entry points for the `--api-versions` mode, R-143). Adding a file to this list needs an ADR change.
@@ -110,10 +110,10 @@ Hard rules:
 
 **CI check: `cargo xtask check-deps`.** It runs and fails on any violation:
 
-1. For each shipped binary package `P`:
-   `cargo tree -p P -e normal,build --target x86_64-unknown-linux-gnu --prefix none --format "{p}"`
-   Fail if any line's first word is in the banned list. (This avoids depending on how `cargo tree -i` reports a package that is absent.)
-2. `cargo metadata --format-version 1` and compute each workspace member's normal-dependency closure. Fail if a member depends on anything outside its row in the table above (direct dependencies), if `asupersync` is in the closure of any member other than `tl-engine` and `tl-app`, or if `tl-ui`'s closure contains `tl-engine`, `tl-collect`, `tl-ops`, `arc-swap` or `zbus`. If `zbus` turns out to enter `tl-ui`'s closure through gpui-kit, the `zbus` part of this check narrows to "no direct dependency and no path that avoids gpui-kit" (R-158). Only normal edges are checked; dev-dependencies are outside the rows.
+1. For each banned crate `C`:
+   `cargo tree --workspace -e normal --target x86_64-unknown-linux-gnu -i C`
+   Fail if any output line's first word is `C`. No output means the crate is absent; the exit status is not used (R-259).
+2. `cargo metadata --format-version 1`. Fail if a member's direct normal or build dependencies (`[dependencies]`, `[build-dependencies]`; the same set as `cargo tree --depth 1 -e normal`) include anything outside its row in the table above, or if `asupersync` is in the normal-dependency closure of any member other than `tl-engine` and `tl-app`. Transitive dependencies of allowed crates are not checked against the rows or rule 1 (R-259). Only normal edges are checked; dev-dependencies are outside the rows.
 3. `rg -n "asupersync::" crates/ --glob '!crates/tl-engine/**'` must return nothing.
 
 ### Consequences
@@ -126,7 +126,7 @@ Hard rules:
 
 - **Five crates as in PLAN.md.** Rejected: NVML must be in a separate process (ADR-007), and process operations must be shareable with the helper.
 - **A full magpie-style sampler process.** Rejected per Astra section 3: adds serialization and resync cost without improving UI responsiveness.
-- **`cargo tree -i tokio` alone.** Rejected: its exit status when the package is absent from the graph is not something we want to depend on.
+- **Relying on the exit status of `cargo tree -i tokio`.** Rejected: check 1 uses the `-i` form but reads its output lines, never its exit status (R-259).
 - **`cargo deny`.** Not needed for one rule; may be added later for license checks.
 
 ### Verification

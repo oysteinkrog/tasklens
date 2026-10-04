@@ -1620,6 +1620,18 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: ADR-002 verification list, ADR-013 (`LabRuntime` tests need `test-internals`) [verified]; `cargo tree -e` edge kinds [verified] in cargo's documentation.
 - Edits: ADR-002 verification item; bead v9m.1.
 
+### R-258 The `LICENSE` file is an E02 bead
+- Question: the PKGBUILD (E33-A3, `cr0.3`) installs the repo's `LICENSE` file for `license=('MIT')` (D-017) and stops when the repo has none; no bead wrote the file. Leader entry, 2026-10-04.
+- Resolution: new bead E02-011 (`tasklens-v9m.13`) writes `LICENSE` at the repo root: the OSI MIT text, LF line ends, first body line `Copyright (c) 2026 <HOLDER>`. `cr0.3` depends on it. The copyright holder name is an owner question; E02-011 stays `blocked-open-item` on that one line and nothing else.
+- Basis: D-017, R-159 OI-10, Arch packaging rule for MIT (licence file under `/usr/share/licenses/<pkg>/`) [verified].
+- Edits: new bead E02-011 (plan key and ID in `b1-infra.md`); bead cr0.3; edge cr0.3 on v9m.13. Owner question Q-7 below.
+
+### R-259 ADR-001 rule 1 and check 2 cover direct dependencies only
+- Question: E02-A1's first reading shows `zbus` 5.19.0 in `tl-ui`'s normal closure through `gpui-pre-linux` 0.3.7 (`accesskit_unix`, `ashpd`, `oo7`, `notify-rust`) and `gpui-base` 0.7.0 (`ashpd`), and `arc-swap` 1.9.2 through `gpui-component` 0.7.0 (`rust-i18n`). Rule 1 and check 2 as written fail on a correct workspace. Leader decision, 2026-10-04.
+- Resolution: ADR-001 rule 1 (crate layering) and check 2 apply to direct dependencies only, as declared under `[dependencies]` and `[build-dependencies]` in our own `Cargo.toml` files; transitive dependencies of allowed crates do not count. The R-158 "no path that avoids gpui-kit" narrowing is replaced by this rule. Rule 2 (`asupersync` in the closure of `tl-engine` and `tl-app` only) keeps its closure form. The banned-crate rule (`tokio` and the others of the "No Tokio" definition, U-1) still covers the whole normal graph for `x86_64-unknown-linux-gnu`: check 1 runs `cargo tree --workspace -e normal --target x86_64-unknown-linux-gnu -i <crate>` once per banned crate and fails on any output line whose first word is that crate; no output means absent, and the exit status is not used. E02-008 (`v9m.10`) reads each member's `[dependencies]` and `[build-dependencies]` from `cargo metadata` (equivalent to `cargo tree --depth 1 -e normal`) for the row check and drops the `tl-ui` closure violation; E02-007 (`v9m.9`) is in progress, so E02-008 also switches check 1 to the `-i` form.
+- Basis: E02-A1 reading on 2026-10-04 [verified]; leader decision.
+- Edits: ADR-001 rule 1, check 1, check 2 and the rejected-alternatives line; R-158 item 4 is superseded; beads v9m.10, v9m.1 (reading 2 is now informational); 00-epics unchanged.
+
 
 
 
@@ -1633,6 +1645,10 @@ Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `d
 Only choices that no rule settles. Beads use the recommended answer until Oystein says otherwise.
 
 The owner-decision topics of the settled open items (R-139 to R-235) were answered on 2026-10-04 and are D-012 to D-020. Every answer took the recommended option except the PKGBUILD licence, which is MIT (D-017).
+
+### Q-7 Copyright holder for the MIT `LICENSE` file (R-258)
+- Options: (a) `Oystein Krog`; (b) a company name; (c) another name the owner gives.
+- Recommendation: none; the owner's call. E02-011 (`tasklens-v9m.13`) waits on this one line.
 
 ### Q-1 Show DIMM serial numbers?
 - Options: (a) hidden everywhere (R-030); (b) shown on the Memory page and Information tab but left out of copy text; (c) shown everywhere.

@@ -25,6 +25,7 @@ Epic bead: `tasklens-v9m`. 12 beads, all P0 (priority 0), labels `phase-p0`, `ar
 | E02-008 | tasklens-v9m.10 | check-deps: allowed rows and closure rules (check 2) | 0 | E02-007 |
 | E02-009 | tasklens-v9m.11 | scripts/ci.sh running the ADR-013 CI rows | 0 | E02-008 |
 | E02-010 | tasklens-v9m.12 | GitHub Actions workflow with lavapipe | 0 | E02-009 |
+| E02-011 | tasklens-v9m.13 | LICENSE file (MIT, D-017; `blocked-open-item` on the copyright holder line, R-258) | 1 | none |
 | E02-A2 | tasklens-v9m.2 | check-deps and CI (failing-branch run recorded, U-1 settled) | 0 | E02-008, E02-009, E02-010 |
 
 Structural choices made by this batch (no doc gives them; each is the smallest option):
