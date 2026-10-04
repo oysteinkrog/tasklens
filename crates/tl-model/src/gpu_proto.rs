@@ -182,7 +182,10 @@ mod tests {
 
     #[test]
     fn reading_validity_and_ok() {
-        assert_eq!(Reading::<u32>::Unsupported.validity(), Validity::Unsupported);
+        assert_eq!(
+            Reading::<u32>::Unsupported.validity(),
+            Validity::Unsupported
+        );
         assert_eq!(Reading::<u32>::Failed.validity(), Validity::Failed);
         assert_eq!(Reading::Ok(5u32).validity(), Validity::Valid);
         assert_eq!(Reading::Ok(5u32).ok(), Some(5));
