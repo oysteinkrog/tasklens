@@ -1718,6 +1718,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: ADR-012 privacy rule that a deleted key is never shown again [inferred from the deleted-keys design]; 8fx.11 report [verified].
 - Edits: bead 8fx.12 (store.rs, as a chain edit).
 
+### R-272 `SourceUpdate::source_of()` for variants that several workers send
+- Question: E08 (`tasklens-8hz.5`) does not say which `SourceId` `source_of()` returns for variants sent by more than one worker. Leader decision, 2026-10-04, from the implementer's proposal.
+- Resolution: `Gpu` and `GpuInfo` give `GpuNvidia` when any device has a nonzero uuid, else `GpuDrm` (AMD and Intel use uuid `[0; 16]`), and `None` for an empty device list. `GpuApiVersions` gives `None` (a one-shot startup probe, not a supervised source). `Devices(list)` maps by kinds when one source owns all the bits: `CPUS` to `Cpu`, `DISKS` to `Disk`, `NETS` to `Net`, `SENSORS` and/or `FANS` to `Sensors`, `BATTERIES` to `UPower`; `GPUS` or any other mix gives `None`. `Processes(sweep)` gives `Processes`, or `None` when `low_memory` is `Some` (the low-memory sweep has no `SourceId`). `Details` to `ProcessDetail`, `Services` to `SystemdSystem` or `SystemdUser` by manager, `Windows` to `KWin`, `Inventory`, `Connections` and `Startup` to their own ids. The tl-model type is `ConnRecord` (the bead's `ConnectionRecord`).
+- Basis: E12 uuid rule, ARCHITECTURE probe section [verified by the 8hz.5 agent].
+- Edits: bead 8hz.5.
+
 
 
 
