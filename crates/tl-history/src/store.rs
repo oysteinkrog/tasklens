@@ -9,6 +9,11 @@
 //! retention are indexed (they count in `disk_bytes` and decide `Stale`), but their boottime
 //! values cannot be expressed as a `TimeNs` of this boot, so queries do not return them.
 //!
+//! A `deleted-keys.bin` that exists but does not decode is renamed to `deleted-keys.bin.bad`
+//! (R-271). The `.bad` file's mtime is set to the newest segment mtime of that boot at that time,
+//! and every segment of the boot with an mtime at or before it is expired: not read, not queried,
+//! and deleted by retention. The deleted keys are lost, so deleted history never comes back.
+//!
 //! `MetaId`s restart at 0 in every segment. When `blocks` returns blocks of more than one
 //! segment, it shifts the meta ids of each later segment past the ids of the earlier ones, so
 //! the one returned `MetaTable` resolves every block.
@@ -35,6 +40,8 @@ use crate::segment::{SegmentReader, SegmentWriter};
 
 /// Name of the per-boot deleted-keys file (R-169 OI-3).
 pub const DELETED_KEYS_FILE: &str = "deleted-keys.bin";
+/// A deleted-keys file that did not decode is renamed to this (R-271).
+pub const BAD_DELETED_KEYS_FILE: &str = "deleted-keys.bin.bad";
 /// Most decoded blocks kept in RAM (16 MB history budget, ADR-012).
 pub const BLOCK_CACHE_LEN: usize = 16;
 
@@ -69,6 +76,9 @@ pub struct LoadReport {
     /// Segments loaded for reading, of this boot and of other boots.
     pub segments: usize,
     pub span: Option<(TimeNs, TimeNs)>,
+    /// Deleted-keys files renamed to `.bad` during this open (R-271). The engine logs one warning
+    /// for each, since `tl-history` has no logger.
+    pub bad_deleted_keys: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -119,8 +129,9 @@ pub struct Store {
     /// Segments of this boot inside retention, oldest first. While `writer` is set, the last
     /// one is the open segment.
     pub(crate) segs: Vec<Seg>,
-    /// Files of this boot that are not read: past retention at open, or without a block.
-    /// Retention deletes them.
+    /// Segment files that are not read, with their sizes: of this boot past retention at open or
+    /// without a block, and of any boot whose deleted keys were lost (R-271). Retention deletes
+    /// them.
     pub(crate) expired: Vec<(PathBuf, u64)>,
     /// Segments of other boots inside retention.
     pub(crate) others: Vec<Seg>,
@@ -132,6 +143,8 @@ pub struct Store {
     own_deleted: Vec<ProcessKey>,
     realtime_offset_ns: i64,
     cache: Mutex<BlockCache>,
+    /// Deleted-keys files renamed to `.bad` by `open` (R-271).
+    bad_deleted_keys: Vec<PathBuf>,
 }
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> HistoryError + '_ {
@@ -203,12 +216,64 @@ fn segment_paths(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-/// The keys in `dir/deleted-keys.bin`; empty when the file is missing or does not decode.
-fn read_deleted_keys(dir: &Path) -> Vec<ProcessKey> {
-    fs::read(dir.join(DELETED_KEYS_FILE))
-        .ok()
-        .and_then(|bytes| postcard::from_bytes(&bytes).ok())
-        .unwrap_or_default()
+/// The deleted keys of one boot directory (R-271).
+#[derive(Default)]
+struct BootKeys {
+    keys: Vec<ProcessKey>,
+    /// Segments with an mtime at or before this are expired: their deleted keys were lost.
+    hidden_until: Option<SystemTime>,
+    /// Set when `deleted-keys.bin` was renamed to `.bad` just now.
+    renamed: Option<PathBuf>,
+}
+
+impl BootKeys {
+    fn hides(&self, segment: &Path) -> bool {
+        self.hidden_until.is_some_and(|until| {
+            fs::metadata(segment)
+                .and_then(|m| m.modified())
+                .map_or(true, |m| m <= until)
+        })
+    }
+}
+
+/// Reads `dir/deleted-keys.bin`. A file that exists but cannot be read or decoded is renamed to
+/// `deleted-keys.bin.bad`, whose mtime is then set to the newest mtime of `segments`, so every
+/// segment written before stays hidden after a restart (R-271).
+fn load_boot_keys(dir: &Path, segments: &[PathBuf]) -> BootKeys {
+    let path = dir.join(DELETED_KEYS_FILE);
+    let bad = dir.join(BAD_DELETED_KEYS_FILE);
+    let decoded = match fs::read(&path) {
+        Ok(bytes) => postcard::from_bytes::<Vec<ProcessKey>>(&bytes).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => None,
+    };
+    if let Some(keys) = decoded {
+        let hidden_until = fs::metadata(&bad).and_then(|m| m.modified()).ok();
+        return BootKeys {
+            keys,
+            hidden_until,
+            renamed: None,
+        };
+    }
+    let newest = segments
+        .iter()
+        .filter_map(|p| fs::metadata(p).and_then(|m| m.modified()).ok())
+        .max()
+        .unwrap_or(UNIX_EPOCH);
+    let renamed = fs::rename(&path, &bad).is_ok().then(|| {
+        // When this fails, the next open hides only segments older than the old file.
+        let _ = OpenOptions::new()
+            .write(true)
+            .open(&bad)
+            .and_then(|f| f.set_modified(newest));
+        bad
+    });
+    BootKeys {
+        keys: Vec::new(),
+        // Hide every segment present now, even when the rename failed.
+        hidden_until: Some(SystemTime::now().max(newest)),
+        renamed,
+    }
 }
 
 /// Writes `dir/deleted-keys.bin` (mode 0600) through a temp file, fsync and rename.
@@ -245,6 +310,7 @@ impl Store {
             own_deleted: Vec::new(),
             realtime_offset_ns,
             cache: Mutex::new(BlockCache::default()),
+            bad_deleted_keys: Vec::new(),
         }
     }
 
@@ -264,6 +330,7 @@ impl Store {
             problem,
             segments: store.segs.len() + store.others.len(),
             span: store.span(),
+            bad_deleted_keys: store.bad_deleted_keys.clone(),
         };
         (store, report)
     }
@@ -280,8 +347,11 @@ impl Store {
             return None;
         }
         // This boot's deleted keys apply to new data too, so they load before any deadline.
-        self.own_deleted = read_deleted_keys(&self.boot_dir);
+        let own_paths = segment_paths(&self.boot_dir).unwrap_or_default();
+        let mut own_keys = load_boot_keys(&self.boot_dir, &own_paths);
+        self.own_deleted = std::mem::take(&mut own_keys.keys);
         self.deleted.insert_all(&self.own_deleted);
+        self.bad_deleted_keys.extend(own_keys.renamed.take());
 
         let Ok(entries) = fs::read_dir(&self.cfg.root) else {
             return Some(LoadProblem::OpenFailed);
@@ -309,10 +379,23 @@ impl Store {
                 Err(_) if current => return Some(LoadProblem::OpenFailed),
                 Err(_) => continue,
             };
+            let other_keys;
+            let keys = if current {
+                &own_keys
+            } else {
+                other_keys = load_boot_keys(&dir, &paths);
+                self.bad_deleted_keys.extend(other_keys.renamed.clone());
+                &other_keys
+            };
             let mut boot_has_segments = false;
             for path in paths {
                 if Instant::now() >= deadline {
                     return Some(LoadProblem::TimedOut);
+                }
+                if keys.hides(&path) {
+                    let size = fs::metadata(&path).map_or(0, |m| m.len());
+                    self.expired.push((path, size));
+                    continue;
                 }
                 let reader = match SegmentReader::open(&path) {
                     Ok(r) => r,
@@ -357,7 +440,7 @@ impl Store {
                 }
             }
             if boot_has_segments {
-                self.deleted.insert_all(&read_deleted_keys(&dir));
+                self.deleted.insert_all(&keys.keys);
             }
         }
         self.segs.sort_by_key(|s| s.reader.header.start_t_ns);
@@ -560,7 +643,12 @@ impl Store {
                 if !dir.is_dir() {
                     continue;
                 }
-                let mut list = read_deleted_keys(&dir);
+                let paths = segment_paths(&dir).unwrap_or_default();
+                let lost = load_boot_keys(&dir, &paths);
+                if lost.hidden_until.is_some() {
+                    self.hide_other_segments(&dir, &lost);
+                }
+                let mut list = lost.keys;
                 for k in of_boot {
                     if !list.contains(k) {
                         list.push(*k);
@@ -571,6 +659,16 @@ impl Store {
             result = result.and(written);
         }
         result
+    }
+
+    /// Moves the segments in `dir`, of another boot, that `keys` hides to `expired` (R-271).
+    fn hide_other_segments(&mut self, dir: &Path, keys: &BootKeys) {
+        let (hidden, kept) = std::mem::take(&mut self.others)
+            .into_iter()
+            .partition::<Vec<Seg>, _>(|s| s.path.parent() == Some(dir) && keys.hides(&s.path));
+        self.others = kept;
+        self.expired
+            .extend(hidden.into_iter().map(|s| (s.path, s.reader.size)));
     }
 
     pub fn deleted(&self) -> &DeletedKeys {
@@ -872,8 +970,8 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
-        assert_eq!(read_deleted_keys(&dir), vec![k]);
-        assert_eq!(read_deleted_keys(&other_dir), vec![other]);
+        assert_eq!(load_boot_keys(&dir, &[]).keys, vec![k]);
+        assert_eq!(load_boot_keys(&other_dir, &[]).keys, vec![other]);
 
         let (store, _) = Store::open(cfg(root.path()), 15 * MIN, later());
         assert!(store.deleted().contains(&k));
@@ -896,5 +994,67 @@ mod tests {
         let (blocks, _) = store.blocks(0, 25 * MIN).unwrap();
         assert_eq!(blocks.len(), 25);
         assert_eq!(store.lock_cache().entries.len(), BLOCK_CACHE_LEN);
+    }
+
+    /// R-271: a deleted-keys file that does not decode hides that boot's history for good.
+    #[test]
+    fn bad_deleted_keys_hide_boot_history() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(boot_dir_name(BOOT));
+        let other = BootId(0x99);
+        let other_dir = root.path().join(boot_dir_name(other));
+        {
+            let (mut store, _) = Store::open(cfg(root.path()), 0, later());
+            fill(&mut store, 15);
+            store.close().unwrap();
+        }
+        fs::create_dir_all(&other_dir).unwrap();
+        let header = SegmentHeader {
+            boot_id: other,
+            realtime_offset_ns: realtime_now_ns() - (15 * MIN) as i64,
+            start_t_ns: 0,
+        };
+        let mut w = SegmentWriter::create(&other_dir, header).unwrap();
+        w.append(&encode_block(&block(0)).unwrap()).unwrap();
+        w.close().unwrap();
+        fs::write(dir.join(DELETED_KEYS_FILE), b"\xff\xff\xff").unwrap();
+        fs::write(other_dir.join(DELETED_KEYS_FILE), b"\xff\xff\xff").unwrap();
+        // New segments must get a later mtime than the ones hidden now.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let (store, report) = Store::open(cfg(root.path()), 15 * MIN, later());
+        assert_eq!(report.span, None);
+        let mut bad = report.bad_deleted_keys.clone();
+        bad.sort();
+        assert_eq!(
+            bad,
+            vec![
+                other_dir.join(BAD_DELETED_KEYS_FILE),
+                dir.join(BAD_DELETED_KEYS_FILE)
+            ]
+        );
+        assert!(!dir.join(DELETED_KEYS_FILE).exists());
+        assert!(!other_dir.join(DELETED_KEYS_FILE).exists());
+        assert_eq!(store.span(), None);
+        assert!(store.blocks(0, 20 * MIN).unwrap().0.is_empty());
+        assert!(store.others.is_empty());
+        assert_eq!(store.expired.len(), 3);
+        drop(store);
+
+        // Hidden after a restart too, and the rename is reported only once.
+        let (mut store, report) = Store::open(cfg(root.path()), 15 * MIN, later());
+        assert!(report.bad_deleted_keys.is_empty());
+        assert_eq!(report.span, None);
+        assert_eq!(store.expired.len(), 3);
+
+        // New data of this boot is not hidden, and a delete writes a new file.
+        store.append(block(20), 1_000).unwrap();
+        store.delete_keys(&[key(2)]).unwrap();
+        store.close().unwrap();
+        let (store, report) = Store::open(cfg(root.path()), 21 * MIN, later());
+        assert_eq!(report.span, Some((20 * MIN, 20 * MIN)));
+        assert!(store.deleted().contains(&key(2)));
+        assert_eq!(load_boot_keys(&dir, &[]).keys, vec![key(2)]);
+        assert_eq!(store.expired.len(), 3);
     }
 }
