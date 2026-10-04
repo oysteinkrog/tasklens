@@ -1700,11 +1700,11 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: the yms.11 run on the owner machine [verified]; the kernel 6.2 `st_size` change [inferred from U-34's purpose and the observed behaviour].
 - Edits: bead yms.11 acceptance criteria.
 
-### R-269 Default Dark `text_secondary` becomes `#818587`
-- Question: E17-002 (`tasklens-lgw.4`) ships Default Dark with `text_secondary` `#6C7072` (TaskSlinger's value, marked "plan" in UI-FND-001), but its own `contrast_floor` test needs every text pair at 4.5:1 or above. `#6C7072` on `list_bg` and `window_bg` (`#191B1D`) is 3.45:1. Leader decision, 2026-10-04.
-- Resolution: Default Dark `text_secondary` is `#818587`, which is 4.64:1 on `#191B1D`. It keeps the hue of `#6C7072` and is the first grey on that hue that clears 4.5:1 with a small margin. The 4.5:1 floor (UI-FND-043, R-122) stays the rule, so no pair is exempted. TaskSlinger fidelity for this one slot gives way to legibility.
-- Basis: the lgw.4 contrast test [verified]; WCAG 2 contrast formula [verified by computation].
-- Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; bead lgw.4 data (`assets/themes/builtin.json`, `crates/tl-ui/src/theme/builtin.rs`).
+### R-269 Default Dark `text_secondary` becomes `#959A9C`
+- Question: E17-002 (`tasklens-lgw.4`) ships Default Dark with `text_secondary` `#6C7072` (TaskSlinger's value, marked "plan" in UI-FND-001), but its own `contrast_floor` test needs every text pair at 4.5:1 or above. `#6C7072` on `list_bg` and `window_bg` (`#191B1D`) is 3.45:1. Secondary text is also drawn on alternate rows, headers, menus, toolbars, inputs and the title bar. Leader decision, 2026-10-04.
+- Resolution: Default Dark `text_secondary` is `#959A9C`. It keeps the hue of `#6C7072` and is the lightest grey on that hue that reaches 4.5:1 on every Dark background: 4.54:1 on `header` (`#2E3235`), 4.81:1 on `menu_bg`, 5.82:1 on `row_alt`. The 4.5:1 floor (UI-FND-043, R-122) stays the rule for every pair, with no exemption. `contrast_floor` checks `text_secondary` against every background slot in both themes, not only `list_bg` and `window_bg`. TaskSlinger fidelity for this one slot gives way to legibility.
+- Basis: the lgw.4 contrast test and the agent's measurements on all Dark backgrounds [verified]; WCAG 2 contrast formula [verified by computation].
+- Edits: UI-FND-001 table row and theme JSON block in docs/ui/foundation.md; `assets/themes/builtin.json` and `crates/tl-ui/src/theme/builtin.rs` (bead lgw.4, follow-up commit).
 
 
 
