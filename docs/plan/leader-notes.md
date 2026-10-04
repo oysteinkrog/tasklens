@@ -140,3 +140,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8hz.8: bead timeline was wrong (budget runs out at 15.5 s, not 7.5 s); tests assert the real 8hz.7 timeline.
 - qfx.10: resolve_socket_inodes has cfg_attr(not(test), expect(dead_code)); E29-A1 must remove it when wiring dispatch.
 - ndy.8: crates/tl-gpu-probe/src/api_versions.rs has #![allow(unsafe_code)] (ash and EGL FFI) with SAFETY comments. Second place with unsafe besides tl-ops/src/sys.rs; check against the ADR unsafe rule and review each block in the security pass.
+- 8hz.10: on a rate change the source loop takes a reset sample at the same instant as the old-rate sample (log 2000, reset, 2000). Check the samplers handle dt = 0 (no divide by zero, WarmingUp), and consider skipping the immediate sample when one was taken this instant. Also: after switching to Off, one already-scheduled sample still runs.
