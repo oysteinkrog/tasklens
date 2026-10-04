@@ -123,3 +123,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8fx.11: history of other boots is opened (counts in disk_bytes and Stale) but never returned by span()/blocks(). Check the history spec for whether past boots are ever shown.
 - hx1.25: amdgpu gpu_metrics has no vcn_activity in any supported struct; video engine falls back to fdinfo. `average_mm_activity` not mapped (needs a decision). v2 structs give no edge/hotspot/mem temperature.
 - lgw.5: no test for the hairline at scale 1.1.
+- hx1.6: SockDiag recv blocks with no timeout. Consider SO_RCVTIMEO (e.g. 2 s) so a stuck dump cannot hold a blocking-pool worker (Astra risk 2).
