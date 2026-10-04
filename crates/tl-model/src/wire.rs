@@ -45,7 +45,8 @@ pub enum WireError {
 /// Fails with `TooLarge` when the payload is over `max` or does not fit in a u32. On any error
 /// `out` is left as it was.
 pub fn encode_frame<T: Serialize>(msg: &T, max: usize, out: &mut Vec<u8>) -> Result<(), WireError> {
-    let len = postcard::serialized_size(msg).map_err(WireError::Encode)?;
+    let len = postcard::serialize_with_flavor(msg, postcard::ser_flavors::Size::default())
+        .map_err(WireError::Encode)?;
     let max = max.min(u32::MAX as usize);
     if len > max {
         return Err(WireError::TooLarge { len, max });
@@ -62,7 +63,11 @@ pub fn encode_frame<T: Serialize>(msg: &T, max: usize, out: &mut Vec<u8>) -> Res
 }
 
 /// Writes one frame. A payload over `max` fails with `TooLarge` before anything is written.
-pub fn write_frame<W: Write, T: Serialize>(w: &mut W, msg: &T, max: usize) -> Result<(), WireError> {
+pub fn write_frame<W: Write, T: Serialize>(
+    w: &mut W,
+    msg: &T,
+    max: usize,
+) -> Result<(), WireError> {
     let mut buf = Vec::new();
     encode_frame(msg, max, &mut buf)?;
     w.write_all(&buf).map_err(WireError::Io)
@@ -94,11 +99,17 @@ pub fn read_reply<R: Read, T: DeserializeOwned>(
     loop {
         let len = read_prefix(r)?;
         if len > max_frame {
-            return Err(WireError::TooLarge { len, max: max_frame });
+            return Err(WireError::TooLarge {
+                len,
+                max: max_frame,
+            });
         }
         total = total.saturating_add(len);
         if total > max_total {
-            return Err(WireError::ReplyTooLarge { total, max: max_total });
+            return Err(WireError::ReplyTooLarge {
+                total,
+                max: max_total,
+            });
         }
         let msg: T = read_payload(r, len)?;
         let last = is_last(&msg);

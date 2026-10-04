@@ -22,7 +22,13 @@ fn msg_with_payload(payload_len: usize, last: bool) -> TestMsg {
     for varint in 1..=5 {
         let data = vec![0xA5; payload_len - 1 - varint];
         let msg = TestMsg { last, data };
-        if postcard::serialized_size(&msg).unwrap() == payload_len {
+        if postcard::serialize_with_flavor::<_, _, usize>(
+            &msg,
+            postcard::ser_flavors::Size::default(),
+        )
+        .expect("a Vec<u8> always serializes")
+            == payload_len
+        {
             return msg;
         }
     }
@@ -31,7 +37,7 @@ fn msg_with_payload(payload_len: usize, last: bool) -> TestMsg {
 
 fn frame(msg: &TestMsg, max: usize) -> Vec<u8> {
     let mut out = Vec::new();
-    write_frame(&mut out, msg, max).unwrap();
+    write_frame(&mut out, msg, max).expect("frame fits the limit");
     out
 }
 
@@ -76,12 +82,11 @@ fn truncated_payload() {
 
 #[test]
 fn truncated_prefix_and_clean_eof() {
-    let err = read_frame::<_, TestMsg>(&mut Cursor::new(vec![7u8, 0]), MAX_HELPER_FRAME)
-        .unwrap_err();
+    let err =
+        read_frame::<_, TestMsg>(&mut Cursor::new(vec![7u8, 0]), MAX_HELPER_FRAME).unwrap_err();
     assert!(matches!(err, WireError::Truncated), "{err:?}");
 
-    let err =
-        read_frame::<_, TestMsg>(&mut Cursor::new(Vec::new()), MAX_HELPER_FRAME).unwrap_err();
+    let err = read_frame::<_, TestMsg>(&mut Cursor::new(Vec::new()), MAX_HELPER_FRAME).unwrap_err();
     assert!(matches!(err, WireError::Eof), "{err:?}");
 }
 
@@ -134,17 +139,27 @@ fn reply_total_cap() {
 #[test]
 fn reply_reads_until_last() {
     let msgs: Vec<TestMsg> = (0..3u8)
-        .map(|i| TestMsg { last: i == 2, data: vec![i; 3] })
+        .map(|i| TestMsg {
+            last: i == 2,
+            data: vec![i; 3],
+        })
         .collect();
     let mut bytes = Vec::new();
     for m in &msgs {
         bytes.extend(frame(m, MAX_HELPER_FRAME));
     }
     // A frame after the last one must stay unread.
-    bytes.extend(frame(&TestMsg { last: true, data: vec![9] }, MAX_HELPER_FRAME));
+    bytes.extend(frame(
+        &TestMsg {
+            last: true,
+            data: vec![9],
+        },
+        MAX_HELPER_FRAME,
+    ));
     let mut r = Cursor::new(bytes);
-    let got = read_reply::<_, TestMsg>(&mut r, MAX_HELPER_FRAME, MAX_HELPER_REPLY_TOTAL, |m| m.last)
-        .unwrap();
+    let got =
+        read_reply::<_, TestMsg>(&mut r, MAX_HELPER_FRAME, MAX_HELPER_REPLY_TOTAL, |m| m.last)
+            .unwrap();
     assert_eq!(got, msgs);
     let rest: TestMsg = read_frame(&mut r, MAX_HELPER_FRAME).unwrap();
     assert_eq!(rest.data, vec![9]);
