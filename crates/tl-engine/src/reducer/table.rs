@@ -1481,11 +1481,16 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
         .filter(|r| r.validity.0.contains(&Validity::Restricted))
         .count();
 
+    // Records left after `hide_system`, before the text filter (R-280).
+    let total = (0..input.records.len())
+        .filter(|&i| !hidden(input, i))
+        .count();
+
     // Counts fit u32: the snapshot never holds more than u32::MAX records.
     ProcessTableView {
         header: Default::default(),
         query_generation: query.generation,
-        total: input.records.len() as u32,
+        total: total as u32,
         shown,
         restricted: restricted as u32,
         rows: Arc::from(rows),
@@ -2276,7 +2281,28 @@ mod tests {
         let view = fx.build("", &[], PID_ASC);
         assert_eq!(pids(&view, &fx.records), [100, 202, 204]);
         assert_eq!(view.shown, 3);
-        assert_eq!(view.total as usize, fx.records.len());
+    }
+
+    #[test]
+    fn hide_system_total_and_shown() {
+        // desktop() has 10 records; hide_system leaves 100, 202 and 204. "bash" matches 204.
+        for mode in [TableMode::Flat, TableMode::Tree, TableMode::Grouped] {
+            let mut fx = desktop();
+            fx.mode = mode;
+            let all = fx.all_nodes();
+            for (hide, filter, total, shown) in [
+                (false, "", 10, 10),
+                (false, "bash", 10, 1),
+                (true, "", 3, 3),
+                (true, "bash", 3, 1),
+            ] {
+                fx.hide_system = hide;
+                let view = fx.build(filter, &all, PID_ASC);
+                let case = format!("{mode:?} hide {hide} filter {filter:?}");
+                assert_eq!(view.total, total, "{case}");
+                assert_eq!(view.shown, shown, "{case}");
+            }
+        }
     }
 
     #[test]
