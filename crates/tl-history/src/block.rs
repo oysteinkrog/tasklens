@@ -120,6 +120,8 @@ pub struct BlockBuilder {
     catalog_due: bool,
     /// The next opened block gets `gap_before = true`.
     gap_pending: bool,
+    /// The next opened block starts a new meta scope.
+    scope_reset_pending: bool,
 }
 
 impl BlockBuilder {
@@ -136,6 +138,7 @@ impl BlockBuilder {
             catalog_version: None,
             catalog_due: true,
             gap_pending: false,
+            scope_reset_pending: false,
         }
     }
 
@@ -146,41 +149,10 @@ impl BlockBuilder {
 
     /// MetaId counter restarts at 0 (store: new segment).
     ///
-    /// If a block is open, its processes are renumbered from 0 and its `new_meta` lists all of
-    /// them, so that block can be the first of the new segment. The next closed block carries
-    /// the catalog.
+    /// Takes effect when the next block opens; the block open now is unchanged. That block's
+    /// `new_meta` lists every process in its keyframe, and it carries the catalog.
     pub fn reset_meta_scope(&mut self) {
-        let old = std::mem::take(&mut self.metas);
-        self.next_meta = 0;
-        self.catalog_due = true;
-        let Some(open) = self.open.as_mut() else {
-            return;
-        };
-        open.block.new_meta.clear();
-        let started = open
-            .block
-            .deltas
-            .iter_mut()
-            .flat_map(|d| d.started.iter_mut());
-        for p in open.block.keyframe.iter_mut().chain(started) {
-            if let Some((id, _)) = self.metas.get(&p.key) {
-                p.meta = *id;
-                continue;
-            }
-            let Some((_, meta)) = old.get(&p.key) else {
-                continue;
-            };
-            let id = self.next_meta;
-            self.next_meta += 1;
-            open.block.new_meta.push((id, meta.clone()));
-            self.metas.insert(p.key, (id, meta.clone()));
-            p.meta = id;
-        }
-        for (key, live) in self.live.iter_mut() {
-            if let Some((id, _)) = self.metas.get(key) {
-                live.stored.meta = *id;
-            }
-        }
+        self.scope_reset_pending = true;
     }
 
     pub fn on_device_catalog(&mut self, catalog: &DeviceCatalog) {
@@ -381,6 +353,11 @@ impl BlockBuilder {
             _ => None,
         };
         if self.open.is_none() {
+            if std::mem::take(&mut self.scope_reset_pending) {
+                self.metas.clear();
+                self.next_meta = 0;
+                self.catalog_due = true;
+            }
             self.open = Some(OpenBlock {
                 block: Block {
                     start_t_ns: t_ns,
@@ -801,17 +778,23 @@ mod tests {
         let third_open = b.on_process_sweep(121 * SEC, &more);
         assert!(third_open.is_none());
 
-        // Reset with an open block: its processes are renumbered from 0 and listed again.
+        // Reset with an open block: that block is unchanged, the next one starts from 0.
         b.reset_meta_scope();
         let third = b.flush().unwrap();
         let ids: Vec<MetaId> = third.new_meta.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![3]);
+        assert!(third.new_meta[0].1.system);
+        let fourth = b.on_process_sweep(200 * SEC, &more);
+        assert!(fourth.is_none());
+        let fourth = b.flush().unwrap();
+        let ids: Vec<MetaId> = fourth.new_meta.iter().map(|(id, _)| *id).collect();
         assert_eq!(ids, vec![0, 1, 2, 3]);
-        assert!(third.new_meta[3].1.system);
-        let metas: Vec<MetaId> = third.keyframe.iter().map(|p| p.meta).collect();
+        assert!(fourth.new_meta[3].1.system);
+        let metas: Vec<MetaId> = fourth.keyframe.iter().map(|p| p.meta).collect();
         assert_eq!(metas, vec![0, 1, 2, 3]);
 
         // After the reset the next block assigns nothing new.
-        b.on_process_sweep(200 * SEC, &more);
+        b.on_process_sweep(250 * SEC, &more);
         assert!(b.flush().unwrap().new_meta.is_empty());
         b.reset_meta_scope();
         b.on_process_sweep(300 * SEC, &more);

@@ -6,6 +6,7 @@ pub mod block;
 pub mod error;
 pub mod format;
 pub mod read;
+pub mod recorder;
 pub mod retention;
 pub mod rolling;
 pub mod segment;
