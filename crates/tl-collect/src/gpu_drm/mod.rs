@@ -6,6 +6,7 @@
 
 pub mod amdgpu;
 pub mod fdinfo;
+pub mod intel;
 
 use std::fs;
 use std::path::{Path, PathBuf};
