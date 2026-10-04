@@ -32,6 +32,14 @@ pub enum CollectError {
     NotElf,
     #[error("scan cancelled")]
     Cancelled,
+    /// An `NLMSG_ERROR` reply. The field is the positive errno.
+    #[error("sock_diag request failed: errno {0}")]
+    SockDiagErrno(i32),
+    #[error("malformed netlink message: {0}")]
+    NetlinkMalformed(&'static str),
+    /// A helper program such as `pacman --version` did not run or timed out.
+    #[error("child command failed: {0}")]
+    Command(&'static str),
 }
 
 impl From<Errno> for CollectError {
@@ -64,7 +72,10 @@ impl CollectError {
             | Self::ProcParse { .. }
             | Self::ProcRead { .. }
             | Self::NotElf
-            | Self::Cancelled => Validity::Failed,
+            | Self::Cancelled
+            | Self::SockDiagErrno(_)
+            | Self::NetlinkMalformed(_)
+            | Self::Command(_) => Validity::Failed,
         }
     }
 }
@@ -121,6 +132,14 @@ mod tests {
             file: "stat",
         };
         assert_eq!(err.to_string(), "could not parse stat of process 7");
+    }
+
+    #[test]
+    fn sock_diag_errno_message() {
+        assert_eq!(
+            CollectError::SockDiagErrno(13).to_string(),
+            "sock_diag request failed: errno 13"
+        );
     }
 
     #[test]
