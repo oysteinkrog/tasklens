@@ -1,0 +1,33 @@
+---
+source: crates/tl-collect/src/sample/memory.rs
+assertion_line: 552
+expression: "(&out.swaps, &out.zswap)"
+---
+(
+    Measured {
+        value: [
+            SwapEntry {
+                name: "/dev/zram0",
+                kind: Zram,
+                size_bytes: 67331158016,
+                used_bytes: 31138131968,
+                priority: 100,
+            },
+        ],
+        validity: Valid,
+    },
+    Measured {
+        value: Some(
+            ZswapParams {
+                enabled: false,
+                compressor: Some(
+                    "zstd",
+                ),
+                max_pool_percent: Some(
+                    20,
+                ),
+            },
+        ),
+        validity: Valid,
+    },
+)

@@ -1,6 +1,6 @@
 ---
 source: crates/tl-collect/src/sample/memory.rs
-assertion_line: 489
+assertion_line: 542
 expression: r
 ---
 MemoryReading {
@@ -89,4 +89,12 @@ MemoryReading {
     ],
     zram_mem_used_total: 7058923520,
     savings_bytes: 22654987737,
+    swaps: Measured {
+        value: [],
+        validity: WarmingUp,
+    },
+    zswap: Measured {
+        value: None,
+        validity: WarmingUp,
+    },
 }
