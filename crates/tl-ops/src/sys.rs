@@ -180,9 +180,9 @@ pub(crate) fn spawn_setsid(argv: &[CString], cwd: Option<&CStr>) -> Result<u32, 
         libc::sigfillset(all.as_mut_ptr());
         (empty.assume_init(), all.assume_init())
     };
-    let flags = (libc::POSIX_SPAWN_SETSID
-        | libc::POSIX_SPAWN_SETSIGMASK
-        | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short;
+    // libc types SETSID as `c_short` and the other flags as `c_int`; all fit in `c_short`.
+    let flags = libc::POSIX_SPAWN_SETSID
+        | (libc::POSIX_SPAWN_SETSIGMASK | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short;
     // SAFETY: `attr` is an initialised attribute object and the sigset pointers point to
     // initialised `sigset_t` values that live until these calls return; glibc copies them.
     unsafe {
