@@ -3,7 +3,7 @@
 
 mod common;
 
-use tl_collect::parse::topology::{parse_cache_size_kib, read_topology, CacheLevel};
+use tl_collect::parse::topology::{CacheLevel, parse_cache_size_kib, read_topology};
 use tl_model::system::CoreKind;
 
 fn kinds(info: &tl_collect::parse::topology::TopologyInfo) -> Vec<CoreKind> {

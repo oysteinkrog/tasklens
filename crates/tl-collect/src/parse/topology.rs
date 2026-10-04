@@ -136,6 +136,9 @@ enum Slot {
     L4,
 }
 
+/// (package, core_id) and the online CPU ids of that core.
+type CoreGroup = ((u16, u16), SmallVec<[u16; 2]>);
+
 /// One deduplicated cache instance.
 struct CacheInstance {
     slot: Slot,
@@ -175,7 +178,13 @@ pub fn read_topology(root: &SysRoot) -> Result<TopologyInfo, CollectError> {
 
     let mut logical = Vec::with_capacity(present.len());
     for &id in &present {
-        logical.push(read_logical(&cpu_dir, id, online.contains(id), &mut buf, &mut list)?);
+        logical.push(read_logical(
+            &cpu_dir,
+            id,
+            online.contains(id),
+            &mut buf,
+            &mut list,
+        )?);
     }
 
     let caches = read_caches(&cpu_dir, &logical, &mut buf)?;
@@ -195,7 +204,7 @@ pub fn read_topology(root: &SysRoot) -> Result<TopologyInfo, CollectError> {
     let mixed_capacity = capacities.iter().any(|&c| Some(c) != max_capacity);
 
     // Distinct (package, core_id) among online CPUs, each with its online CPU ids ascending.
-    let mut keyed: Vec<((u16, u16), SmallVec<[u16; 2]>)> = Vec::new();
+    let mut keyed: Vec<CoreGroup> = Vec::new();
     for cpu in logical.iter().filter(|c| c.online) {
         let (Some(package), Some(core_id)) = (cpu.package, cpu.core_id) else {
             continue;

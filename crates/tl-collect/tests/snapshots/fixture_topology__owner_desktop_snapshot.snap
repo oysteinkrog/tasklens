@@ -1,0 +1,722 @@
+---
+source: crates/tl-collect/tests/fixture_topology.rs
+expression: info
+---
+TopologyInfo {
+    topology: CpuTopology {
+        online: CpuSet(
+            [
+                4294967295,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        ),
+        cores: [
+            CoreInfo {
+                id: 0,
+                logical: [
+                    0,
+                    16,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 1,
+                logical: [
+                    1,
+                    17,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 2,
+                logical: [
+                    2,
+                    18,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 3,
+                logical: [
+                    3,
+                    19,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 4,
+                logical: [
+                    4,
+                    20,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 5,
+                logical: [
+                    5,
+                    21,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 6,
+                logical: [
+                    6,
+                    22,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 7,
+                logical: [
+                    7,
+                    23,
+                ],
+                l3_group: 0,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 8,
+                logical: [
+                    8,
+                    24,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 9,
+                logical: [
+                    9,
+                    25,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 10,
+                logical: [
+                    10,
+                    26,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 11,
+                logical: [
+                    11,
+                    27,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 12,
+                logical: [
+                    12,
+                    28,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 13,
+                logical: [
+                    13,
+                    29,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 14,
+                logical: [
+                    14,
+                    30,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+            CoreInfo {
+                id: 15,
+                logical: [
+                    15,
+                    31,
+                ],
+                l3_group: 1,
+                kind: Standard,
+            },
+        ],
+    },
+    logical: [
+        LogicalCpu {
+            id: 0,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                0,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 1,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                1,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 2,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                2,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 3,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                3,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 4,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                4,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 5,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                5,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 6,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                6,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 7,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                7,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 8,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                8,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 9,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                9,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 10,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                10,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 11,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                11,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 12,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                12,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 13,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                13,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 14,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                14,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 15,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                15,
+            ),
+            thread_index: Some(
+                0,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 16,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                0,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 17,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                1,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 18,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                2,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 19,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                3,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 20,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                4,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 21,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                5,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 22,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                6,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 23,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                7,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 24,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                8,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 25,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                9,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 26,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                10,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 27,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                11,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 28,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                12,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 29,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                13,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 30,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                14,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+        LogicalCpu {
+            id: 31,
+            online: true,
+            package: Some(
+                0,
+            ),
+            core_id: Some(
+                15,
+            ),
+            thread_index: Some(
+                1,
+            ),
+            capacity: Some(
+                1024,
+            ),
+        },
+    ],
+    sockets: 1,
+    cores: 16,
+    logical_count: 32,
+    caches: CacheSummary {
+        l1d: Some(
+            CacheLevel {
+                instances: 16,
+                instance_kib: 32,
+                total_kib: 512,
+            },
+        ),
+        l1i: Some(
+            CacheLevel {
+                instances: 16,
+                instance_kib: 32,
+                total_kib: 512,
+            },
+        ),
+        l2: Some(
+            CacheLevel {
+                instances: 16,
+                instance_kib: 512,
+                total_kib: 8192,
+            },
+        ),
+        l3: Some(
+            CacheLevel {
+                instances: 2,
+                instance_kib: 32768,
+                total_kib: 65536,
+            },
+        ),
+        l4: None,
+    },
+}
