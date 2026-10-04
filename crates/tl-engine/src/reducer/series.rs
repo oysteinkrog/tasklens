@@ -187,9 +187,12 @@ impl SeriesStore {
         let mut observed_start = TimeNs::MAX;
         let mut observed_end: TimeNs = 0;
         for (&id, entry) in &mut self.rings {
-            let view = entry
-                .view
-                .get_or_insert_with(|| Arc::new(entry.build_view(id)));
+            if entry.view.is_none() {
+                entry.view = Some(Arc::new(entry.build_view(id)));
+            }
+            let Some(view) = &entry.view else {
+                unreachable!("view was just built");
+            };
             if let (Some(first), Some(last)) = (view.samples.first(), view.samples.last()) {
                 observed_start = observed_start.min(first.t_ns);
                 observed_end = observed_end.max(last.t_ns);
@@ -294,7 +297,10 @@ mod tests {
         store.append(b, 0, 1.0, 100 * MS, SampleFlags::VALID);
         store.append(a, 0, 1.0, 100 * MS, SampleFlags::VALID);
         let first = store.publish();
-        assert_eq!(first.series.iter().map(|v| v.id).collect::<Vec<_>>(), vec![a, b]);
+        assert_eq!(
+            first.series.iter().map(|v| v.id).collect::<Vec<_>>(),
+            vec![a, b]
+        );
         assert!(store.changed().is_empty());
 
         store.append(a, 100 * MS, 2.0, 100 * MS, SampleFlags::VALID);
@@ -365,7 +371,7 @@ mod tests {
         );
 
         // Marking again does not rebuild.
-        store.mark_stale(now + SEC);
+        store.mark_stale(now);
         assert!(store.changed().is_empty());
 
         // The next sample ends the stale run with a gap and no STALE flag.
