@@ -1,20 +1,26 @@
 //! CPU sampler: total, kernel, interrupt and per-core percentages, clocks and temperature from
 //! /proc/stat, cpufreq and the CPU hwmon input (ADR-008, ADR-016, PERF-028, PERF-029, PERF-033,
-//! PERF-039, PERF-040, PROC-012).
+//! PERF-039, PERF-040, PROC-012), and the 1 Hz live stats: load average, open files, process
+//! count and uptime (PERF-033, PERF-034).
 //!
 //! `sample_at` allocates nothing after the first sample: the two `StatData` buffers are swapped
 //! and the output vectors keep their capacity. Only a CPU hotplug re-reads the topology.
 
+use std::os::unix::ffi::OsStrExt;
+
+use rustix::time::{ClockId, clock_gettime};
 use tl_model::series::SampleFlags;
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
 use crate::counters::{Clock, Measured, ratio_pct, resumed_between};
 use crate::parse::cpufreq::{CpuFreq, FreqReading, FreqSource};
+use crate::parse::filenr::parse_file_nr;
 use crate::parse::hwmon::{self, parse_millidegrees};
+use crate::parse::loadavg::{LoadAvg, parse_loadavg};
 use crate::parse::stat::{CpuTimes, StatData, parse_stat};
 use crate::parse::topology::{TopologyInfo, read_topology};
-use crate::sysroot::KeptFile;
+use crate::sysroot::{KeptFile, read_file};
 use crate::{CollectError, SysRoot};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -22,6 +28,24 @@ pub struct CpuOpts {
     pub per_cpu: bool,
     pub freq: bool,
     pub temp: bool,
+    /// Load average, open files, process count and uptime. 1 Hz ticks only: it scans /proc.
+    pub live_stats: bool,
+}
+
+/// Byte limit for the one-shot reads of /proc/loadavg and /proc/sys/fs/file-nr.
+const LIVE_FILE_LIMIT: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LiveStats {
+    pub load: Measured<LoadAvg>,
+    /// "Handles" in the UI: allocated file handles, system-wide (field 1 of file-nr).
+    pub open_files: Measured<u64>,
+    /// Entries of `root.proc` whose names are all ASCII digits.
+    pub process_count: Measured<u32>,
+    /// `Clock::boot_ns`. CLOCK_BOOTTIME counts time spent in suspend.
+    pub uptime_ns: u64,
+    /// CLOCK_REALTIME seconds minus `boot_ns / 1e9`.
+    pub boot_time_unix_s: i64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -59,6 +83,8 @@ pub struct CpuReading {
     pub procs_blocked: u32,
     pub processes_forked: u64,
     pub btime: u64,
+    /// Default when `!opts.live_stats`.
+    pub live: LiveStats,
 }
 
 pub struct CpuSampler {
@@ -130,6 +156,12 @@ impl CpuSampler {
         out.t_ns = clock.boot_ns;
         out.flags = SampleFlags::empty();
         out.topology_changed = false;
+        out.live = if opts.live_stats {
+            let realtime = clock_gettime(ClockId::Realtime);
+            self.live_stats(clock, realtime.tv_sec)
+        } else {
+            LiveStats::default()
+        };
 
         let parsed = self
             .stat
@@ -215,6 +247,39 @@ impl CpuSampler {
         } else {
             Measured::invalid(Validity::Unsupported)
         };
+    }
+
+    /// One-shot reads of loadavg and file-nr and one pass over `root.proc`. Each field gets its
+    /// own validity.
+    fn live_stats(&mut self, clock: Clock, realtime_s: i64) -> LiveStats {
+        let load = match read_file(&self.root.proc_path("loadavg"), &mut self.buf, LIVE_FILE_LIMIT)
+            .and_then(|_| parse_loadavg(&self.buf))
+        {
+            Ok(load) => Measured::valid(load),
+            Err(err) => Measured::invalid(err.validity()),
+        };
+        let open_files = match read_file(
+            &self.root.proc_path("sys/fs/file-nr"),
+            &mut self.buf,
+            LIVE_FILE_LIMIT,
+        )
+        .and_then(|_| parse_file_nr(&self.buf))
+        {
+            Ok(n) => Measured::valid(n),
+            Err(err) => Measured::invalid(err.validity()),
+        };
+        let process_count = match count_pid_dirs(&self.root) {
+            Ok(n) => Measured::valid(n),
+            Err(err) => Measured::invalid(err.validity()),
+        };
+        let boot_s = i64::try_from(clock.boot_ns / 1_000_000_000).unwrap_or(i64::MAX);
+        LiveStats {
+            load,
+            open_files,
+            process_count,
+            uptime_ns: clock.boot_ns,
+            boot_time_unix_s: realtime_s.saturating_sub(boot_s),
+        }
     }
 
     /// ADR-008 ResetBaselines: the next sample is `WarmingUp` with GAP_BEFORE.
@@ -369,6 +434,19 @@ fn reset_cores(cores: &mut Vec<CpuCoreReading>, len: usize) {
     );
 }
 
+/// Entries of `root.proc` whose names are non-empty and all ASCII digits.
+fn count_pid_dirs(root: &SysRoot) -> Result<u32, CollectError> {
+    let mut count = 0u32;
+    for entry in std::fs::read_dir(&root.proc)? {
+        let name = entry?.file_name();
+        let name = name.as_bytes();
+        if !name.is_empty() && name.iter().all(u8::is_ascii_digit) {
+            count = count.saturating_add(1);
+        }
+    }
+    Ok(count)
+}
+
 fn same_cpu_ids(a: &StatData, b: &StatData) -> bool {
     a.per_cpu
         .iter()
@@ -390,11 +468,19 @@ mod tests {
         per_cpu: true,
         freq: true,
         temp: true,
+        live_stats: false,
+    };
+    const LIVE: CpuOpts = CpuOpts {
+        per_cpu: false,
+        freq: false,
+        temp: false,
+        live_stats: true,
     };
     const PER_CPU: CpuOpts = CpuOpts {
         per_cpu: true,
         freq: false,
         temp: false,
+        live_stats: false,
     };
 
     fn fixture_dir(name: &str) -> PathBuf {
@@ -415,7 +501,10 @@ mod tests {
         for entry in fs::read_dir(src).unwrap() {
             let entry = entry.unwrap();
             let to = dst.join(entry.file_name());
-            if entry.file_type().unwrap().is_dir() {
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &to).unwrap();
+            } else if file_type.is_dir() {
                 copy_tree(&entry.path(), &to);
             } else {
                 // Truncate and rewrite, so a kept fd on an existing file sees the new content.
@@ -644,5 +733,61 @@ mod tests {
         insta::with_settings!({ snapshot_path => "../../tests/snapshots" }, {
             insta::assert_debug_snapshot!((s.topology(), &r));
         });
+    }
+    fn now_unix_s() -> i64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(now.as_secs()).unwrap()
+    }
+
+    #[test]
+    fn live_stats_owner_desktop() {
+        let mut s = CpuSampler::new(SysRoot::at(&fixture_dir("owner-desktop"))).unwrap();
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), LIVE, &mut r);
+        let proc_dir = fixture_dir("owner-desktop").join("proc");
+        let load = parse_loadavg(&fs::read(proc_dir.join("loadavg")).unwrap()).unwrap();
+        let files = parse_file_nr(&fs::read(proc_dir.join("sys/fs/file-nr")).unwrap()).unwrap();
+        assert_eq!(r.live.process_count, Measured::valid(50));
+        assert_eq!(r.live.load, Measured::valid(load));
+        assert_eq!(r.live.load.value.total, 6667);
+        assert_eq!(r.live.open_files, Measured::valid(files));
+        assert_eq!(r.live.open_files, Measured::valid(26143));
+    }
+
+    #[test]
+    fn live_stats_off_keeps_default() {
+        let mut s = CpuSampler::new(SysRoot::at(&fixture_dir("owner-desktop"))).unwrap();
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), PER_CPU, &mut r);
+        assert_eq!(r.live, LiveStats::default());
+    }
+
+    #[test]
+    fn uptime_and_boot_time() {
+        let mut s = CpuSampler::new(SysRoot::at(&fixture_dir("owner-desktop"))).unwrap();
+        let mut r = CpuReading::default();
+        s.sample_at(at(90_000 * SEC), LIVE, &mut r);
+        assert_eq!(r.live.uptime_ns, 90_000_000_000_000);
+        let expected = now_unix_s() - 90_000;
+        assert!(
+            (r.live.boot_time_unix_s - expected).abs() <= 5,
+            "{} vs {expected}",
+            r.live.boot_time_unix_s
+        );
+    }
+
+    #[test]
+    fn missing_loadavg_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        copy_tree(&fixture_dir("owner-desktop"), dir.path());
+        fs::remove_file(dir.path().join("proc/loadavg")).unwrap();
+        let mut s = sampler(dir.path());
+        let mut r = CpuReading::default();
+        s.sample_at(at(SEC), LIVE, &mut r);
+        assert_eq!(r.live.load.validity, Validity::Missing);
+        assert_eq!(r.live.open_files, Measured::valid(26143));
+        assert_eq!(r.live.process_count, Measured::valid(50));
     }
 }
