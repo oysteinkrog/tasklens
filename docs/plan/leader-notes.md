@@ -132,3 +132,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - lgw.1 / fut.5: no tracing test subscriber, so "a warning is logged" criteria are untested. Consider a small test subscriber helper in tl-ui testing.
 - 8hz.7: `budget_exhausted` is inferred (outcome Ok + restart_batches >= 5 + last generation errored), because asupersync gives no direct signal with EscalationPolicy::Stop. Review in the e2e pass.
 - 8hz.7: cancelling the task that awaits `run_supervised` does NOT stop the supervisor (join ignores cancellation); shutdown must cancel the region or call handle.abort(). The engine shutdown bead must do this; add a lab test there.
+- iuz.14: script_set_enabled does lstat then fchmodat (TOCTOU symlink swap, same-user folder). Kernel 6.6+ has fchmodat2 with AT_SYMLINK_NOFOLLOW; or open O_NOFOLLOW|O_NONBLOCK and fchmod the fd. Fix in the security review.
