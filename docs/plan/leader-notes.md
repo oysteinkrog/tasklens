@@ -145,3 +145,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - iuz.9 thread ops: if a thread exits between the task-dir check and the nice, sched or affinity call, a reused TID in another process can get the change. Signals are safe (tgkill). Review whether a pidfd-based thread check or a post-call recheck is worth it.
 - wox.5 tray raster: heights round to whole target pixels and then double in the 2x buffer, so the box filter never changes a value. The supersampling does nothing visible. Decide if fractional heights are wanted.
 - yms.9 cgroup: a `\xNN` escape that is not valid UTF-8 becomes U+FFFD in the unit name.
+- 8fx.1 store_6h writes ~65 MB to target/tmp/store_6h and never removes it; two parallel runs clash. Consider a tempdir.
+- Store::will_rotate is true before the first append. Decide whether to fix in tl-history instead of guarding in callers.
+- iuz.1 real_other_user_process_permission_denied skips when root or CAP_SYS_NICE (so CI as root never runs it).
