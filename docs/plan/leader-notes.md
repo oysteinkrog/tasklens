@@ -45,3 +45,10 @@ pass once all batch writers finish.
 - Quality pass: `br dep cycles`, `br lint`, orphan and coverage checks.
 - Astra review of the plan and beads after Codex returns (Sunday 4 October 11:12), then oracle
   review.
+
+## Batch final reports
+
+- B3 (E08 to E11, E13): done, 91 beads, no cycles, plan committed in 17c2c8e. 17 open items are in
+  `docs/plan/b3-engine-core.md`, and the beads follow the recommendations. The build line is
+  already replaced in 8hz, 8q0, dwy, i3o and ndy. E13-006 is blocked on open item 13 (`unsafe`
+  in tl-gpu-probe).
