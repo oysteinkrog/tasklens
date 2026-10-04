@@ -114,3 +114,14 @@ proptest! {
         let _ = tl_collect::proc::cgroup::parse_memory_stat_anon(&bytes);
     }
 }
+
+proptest! {
+    #[test]
+    fn passwd_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        use tl_collect::proc::meta::{PasswdUserNames, UserNames};
+        let mut names = PasswdUserNames::from_bytes(&bytes);
+        for uid in [0, 1, 1000, u32::MAX] {
+            prop_assert!(!names.name(uid).is_empty());
+        }
+    }
+}

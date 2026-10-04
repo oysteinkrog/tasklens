@@ -111,3 +111,27 @@ fn rollup_pid1_restricted() {
     assert_eq!(out, vec![(key, RollupRead::Restricted)]);
     assert_eq!(reader.cached(), 0);
 }
+
+/// PROC-027: the exe link of another user's process is Restricted.
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn meta_pid1_exe_restricted() {
+    use tl_collect::proc::meta::{ExeLink, MetaCache, ReadBufs};
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let key = ProcessKey {
+        start_ticks: 0,
+        boot_id: BootId(1),
+        pid: 1,
+    };
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) = cache.get_or_refresh(key, dir.as_fd(), b"systemd", &mut bufs);
+    assert_eq!(meta.exe, ExeLink::Restricted);
+}

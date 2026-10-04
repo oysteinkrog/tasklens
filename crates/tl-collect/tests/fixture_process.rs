@@ -899,3 +899,148 @@ fn cgroup_events_frozen() {
         .expect("read stats");
     assert_eq!(out.frozen, Some(true));
 }
+
+use tl_collect::proc::meta::{
+    ExeLink, META_REFRESH_SWEEPS, MetaCache, MetaChange, ReadBufs, meta_file_reads,
+};
+
+fn edge_dir(pid: u32) -> rustix::fd::OwnedFd {
+    open_dir(&fixture_dir("process-edge").join(format!("proc/{pid}")))
+}
+
+#[test]
+fn meta_first_read() {
+    let dir = edge_dir(4201);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, change) = cache.get_or_refresh(
+        rollup_key(4201, 351_220),
+        dir.as_fd(),
+        b"Web Content",
+        &mut bufs,
+    );
+    assert_eq!(change, MetaChange::New);
+    assert_eq!(&*meta.comm, "Web Content");
+    assert_eq!(meta.cmdline.as_deref(), Some("firefox -P default"));
+    let argv: Vec<&str> = meta.argv.iter().map(|a| &**a).collect();
+    assert_eq!(argv, ["firefox", "-P", "default"]);
+    assert_eq!(
+        meta.exe,
+        ExeLink::Path {
+            path: "/usr/lib/firefox/firefox".into(),
+            deleted: false
+        }
+    );
+    let cgroup = meta.cgroup.as_ref().expect("cgroup");
+    assert_eq!(cgroup.unit.as_deref(), Some("app-firefox@3a1b.service"));
+    assert!(!meta.cgroup_denied);
+}
+
+#[test]
+fn meta_refresh_every_10_sweeps() {
+    let dir = edge_dir(4201);
+    let key = rollup_key(4201, 351_220);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    assert_eq!(
+        cache
+            .get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs)
+            .1,
+        MetaChange::New
+    );
+    let reads = meta_file_reads();
+    for _ in 1..META_REFRESH_SWEEPS {
+        let (_, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+        assert_eq!(change, MetaChange::Unchanged);
+    }
+    assert_eq!(meta_file_reads(), reads, "no file re-read");
+    let (meta, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+    assert_eq!(change, MetaChange::Refreshed);
+    assert_eq!(meta.cmdline.as_deref(), Some("firefox -P default"));
+    assert!(meta_file_reads() > reads);
+    assert_eq!(
+        cache
+            .get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs)
+            .1,
+        MetaChange::Unchanged,
+        "the counter restarts"
+    );
+
+    cache.retain_live(&Default::default());
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn meta_refresh_on_comm_change() {
+    let dir = edge_dir(4201);
+    let key = rollup_key(4201, 351_220);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    assert_eq!(
+        cache.get_or_refresh(key, dir.as_fd(), b"sh", &mut bufs).1,
+        MetaChange::New
+    );
+    assert_eq!(
+        cache.get_or_refresh(key, dir.as_fd(), b"bash", &mut bufs).1,
+        MetaChange::Refreshed
+    );
+    assert_eq!(
+        cache.get_or_refresh(key, dir.as_fd(), b"bash", &mut bufs).1,
+        MetaChange::Unchanged
+    );
+}
+
+#[test]
+fn meta_deleted_exe_kept() {
+    let dir = edge_dir(4208);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) = cache.get_or_refresh(rollup_key(4208, 1), dir.as_fd(), b"foo", &mut bufs);
+    assert_eq!(
+        meta.exe,
+        ExeLink::Path {
+            path: "/usr/bin/foo (deleted)".into(),
+            deleted: true
+        }
+    );
+}
+
+#[test]
+fn meta_cmdline_over_32k_truncated() {
+    let dir = edge_dir(4208);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) = cache.get_or_refresh(rollup_key(4208, 1), dir.as_fd(), b"foo", &mut bufs);
+    let cmdline = meta.cmdline.as_deref().expect("cmdline");
+    assert_eq!(cmdline.chars().count(), 32_768 + 1);
+    assert!(cmdline.starts_with("longarg aaa"));
+    assert!(cmdline.ends_with("a\u{2026}"));
+    assert_eq!(&*meta.argv[0], "longarg");
+    assert_eq!(meta.argv[1].len(), 4096 + "\u{2026}".len());
+}
+
+#[test]
+fn meta_kernel_thread_has_no_cmdline() {
+    let dir = edge_dir(57);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) =
+        cache.get_or_refresh(rollup_key(57, 140), dir.as_fd(), b"kworker/0:1", &mut bufs);
+    assert_eq!(meta.cmdline, None);
+    assert!(meta.argv.is_empty());
+    assert_eq!(meta.exe, ExeLink::None);
+    assert_eq!(&*meta.comm, "kworker/0:1");
+}
+
+#[test]
+fn meta_comm_falls_back_to_stat() {
+    // process-edge 4202 has a stat file but no comm file.
+    let dir = edge_dir(4202);
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) = cache.get_or_refresh(rollup_key(4202, 98_765), dir.as_fd(), b"a\nb", &mut bufs);
+    assert_eq!(&*meta.comm, "a b");
+    assert_eq!(meta.cmdline, None);
+    assert_eq!(meta.cgroup, None);
+    assert!(!meta.cgroup_denied);
+}
