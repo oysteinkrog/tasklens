@@ -5,6 +5,7 @@
 
 use std::process::ExitCode;
 
+mod nvml;
 mod sampler;
 
 const USAGE: &str = "usage: tl-gpu-probe --fd <n> | --api-versions | --fake <script> [--fd <n>]";
@@ -60,11 +61,7 @@ fn main() -> ExitCode {
             eprintln!("{usage}");
             ExitCode::from(2)
         }
-        // E13-002 (ndy.4) replaces this arm with sampler::run(fd, nvml::NvmlBackend::new).
-        Ok(Mode::Sampler { fd: _ }) => {
-            eprintln!("nvml backend not built");
-            ExitCode::from(3)
-        }
+        Ok(Mode::Sampler { fd }) => sampler::run(fd, nvml::NvmlBackend::new),
         // E13-006 replaces this arm with api_versions::run().
         Ok(Mode::ApiVersions) => {
             eprintln!("api-versions not built");

@@ -4,9 +4,6 @@
 //! work to a `Backend`. Every protocol or I/O error ends the loop with exit 0 and no output: the
 //! engine owns the restart.
 
-// Nothing outside the tests calls `run` until E13-002 (ndy.4) wires the NVML backend into main.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::File;
 use std::process::ExitCode;
 
