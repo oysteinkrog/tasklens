@@ -6,6 +6,7 @@ pub mod block;
 pub mod error;
 pub mod format;
 pub mod read;
+pub mod retention;
 pub mod segment;
 pub mod store;
 
