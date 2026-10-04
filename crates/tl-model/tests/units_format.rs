@@ -1,9 +1,12 @@
 //! Formatting cases for `tl_model::units`, canonical table (d).
 
 use proptest::prelude::*;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tl_model::units::{
-    NetUnit, bytes, bytes_of, ceil_125, ceil_pow2, mib_whole, net_rate, percent, percent_2dp,
-    rate_iec_auto, rate_mib_fixed,
+    AddrSide, LocalDateTime, NetUnit, bytes, bytes_of, cache_size, ceil_125, ceil_pow2, celsius,
+    count, cpu_time, date_time, mhz, mhz_pair, mib_whole, net_rate, percent, percent_2dp,
+    rate_iec_auto, rate_mib_fixed, response_ms, short_age, socket_addr, start_time, uptime,
+    watts, watts_pair,
 };
 
 fn fmt(f: impl FnOnce(&mut String)) -> String {
@@ -197,5 +200,165 @@ proptest! {
         }
         let q = ceil_pow2(n);
         prop_assert!(q.is_power_of_two());
+    }
+}
+
+#[test]
+fn count_grouping() {
+    let cases = [
+        (0, "0"),
+        (999, "999"),
+        (1000, "1\u{2009}000"),
+        (12345, "12\u{2009}345"),
+        (1_234_567, "1\u{2009}234\u{2009}567"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(fmt(|s| count(s, n)), want, "count({n})");
+    }
+}
+
+#[test]
+fn cpu_time_forms() {
+    let cases = [
+        (0, "0:00:00"),
+        (43_424, "12:03:44"),
+        (3_599_999, "999:59:59"),
+        (3_600_000, "41d 16:00"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(fmt(|s| cpu_time(s, n)), want, "cpu_time({n})");
+    }
+}
+
+#[test]
+fn uptime_forms() {
+    let cases = [
+        (0, "0h 0m 0s"),
+        (2_295, "0h 38m 15s"),
+        (9_495, "2h 38m 15s"),
+        (95_895, "1 day, 2h 38m 15s"),
+        (182_295, "2 days, 2h 38m 15s"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(fmt(|s| uptime(s, n)), want, "uptime({n})");
+    }
+}
+
+#[test]
+fn short_age_forms() {
+    let cases = [
+        (0, "0s"),
+        (5, "5s"),
+        (725, "12m 5s"),
+        (15_120, "4h 12m"),
+        (100_800, "1d 4h"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(fmt(|s| short_age(s, n)), want, "short_age({n})");
+    }
+}
+
+#[test]
+fn start_time_and_date_time() {
+    let t = LocalDateTime {
+        year: 2026,
+        month: 10,
+        day: 3,
+        hour: 9,
+        minute: 5,
+        second: 7,
+    };
+    assert_eq!(fmt(|s| start_time(s, t, true)), "09:05:07");
+    assert_eq!(fmt(|s| start_time(s, t, false)), "2026-10-03 09:05");
+    let t = LocalDateTime {
+        year: 2026,
+        month: 1,
+        day: 2,
+        hour: 3,
+        minute: 4,
+        second: 5,
+    };
+    assert_eq!(fmt(|s| date_time(s, t)), "2026-01-02 03:04:05");
+}
+
+#[test]
+fn freq_temp_power_forms() {
+    assert_eq!(fmt(|s| mhz(s, 4631.4)), "4631 MHz");
+    assert_eq!(fmt(|s| mhz_pair(s, 1905.0, 3105.0)), "1905 / 3105 MHz");
+    assert_eq!(fmt(|s| celsius(s, 51.6)), "52 \u{b0}C");
+    assert_eq!(fmt(|s| watts(s, 31.94)), "31.9 W");
+    assert_eq!(fmt(|s| watts(s, 0.0)), "0 W");
+    assert_eq!(fmt(|s| watts_pair(s, 31.9, 300.0)), "31.9 / 300 W");
+}
+
+#[test]
+fn cache_size_forms() {
+    let cases = [
+        (512, "512 KiB"),
+        (1023, "1023 KiB"),
+        (8192, "8 MiB"),
+        (98_304, "96 MiB"),
+        (1536, "1.5 MiB"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(fmt(|s| cache_size(s, n)), want, "cache_size({n})");
+    }
+}
+
+#[test]
+fn socket_addr_forms() {
+    let any4 = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+    let any6 = IpAddr::V6(Ipv6Addr::UNSPECIFIED);
+    let link: IpAddr = "fe80::1".parse().unwrap();
+    let web: IpAddr = "93.184.216.34".parse().unwrap();
+    let cases = [
+        (any4, 22, None, AddrSide::Local, "0.0.0.0:22"),
+        (any4, 0, None, AddrSide::Local, "0.0.0.0:*"),
+        (any6, 0, None, AddrSide::Local, "[::]:*"),
+        (link, 5353, Some("eno1"), AddrSide::Local, "[fe80::1%eno1]:5353"),
+        (any4, 0, None, AddrSide::Foreign, "*:*"),
+        (any6, 0, None, AddrSide::Foreign, "*:*"),
+        (web, 443, None, AddrSide::Foreign, "93.184.216.34:443"),
+    ];
+    for (ip, port, scope, side, want) in cases {
+        assert_eq!(
+            fmt(|s| socket_addr(s, ip, port, scope, side)),
+            want,
+            "socket_addr({ip}, {port}, {scope:?}, {side:?})"
+        );
+    }
+}
+
+#[test]
+fn response_ms_forms() {
+    assert_eq!(fmt(|s| response_ms(s, 0.4213)), "0.42 ms");
+    assert_eq!(fmt(|s| response_ms(s, 0.0)), "0 ms");
+}
+
+prop_compose! {
+    fn any_local_date_time()(
+        year in any::<i32>(),
+        month in any::<u8>(),
+        day in any::<u8>(),
+        hour in any::<u8>(),
+        minute in any::<u8>(),
+        second in any::<u8>(),
+    ) -> LocalDateTime {
+        LocalDateTime { year, month, day, hour, minute, second }
+    }
+}
+
+proptest! {
+    #[test]
+    fn time_formatters_never_panic(
+        n in any::<u64>(),
+        t in any_local_date_time(),
+        today in any::<bool>(),
+    ) {
+        check(&fmt(|s| cpu_time(s, n)));
+        check(&fmt(|s| uptime(s, n)));
+        check(&fmt(|s| short_age(s, n)));
+        check(&fmt(|s| start_time(s, t, today)));
+        check(&fmt(|s| date_time(s, t)));
     }
 }

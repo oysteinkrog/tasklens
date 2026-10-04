@@ -180,3 +180,212 @@ fn scale10(m: f64, k: i32) -> f64 {
         m * 10f64.powi(k)
     }
 }
+
+/// Digit group separator for `count`.
+pub const THIN_SPACE: char = '\u{2009}';
+
+/// Digits grouped in threes with U+2009: "0", "999", "1 000", "12 345" (thin spaces).
+pub fn count(out: &mut String, n: u64) {
+    // u64::MAX has 20 digits.
+    let mut digits = [0u8; 20];
+    let mut len = 0;
+    let mut rest = n;
+    loop {
+        // `rest % 10` is below 10, so the cast cannot truncate.
+        digits[len] = b'0' + (rest % 10) as u8;
+        len += 1;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    for i in (0..len).rev() {
+        out.push(char::from(digits[i]));
+        if i > 0 && i % 3 == 0 {
+            out.push(THIN_SPACE);
+        }
+    }
+}
+
+/// CPU time from whole seconds: "h:mm:ss" ("0:00:00", "12:03:44", "999:59:59"); from
+/// 3_600_000 s on (past 999:59:59): "Nd hh:mm" with days = s / 86400, e.g. 3_600_000 -> "41d 16:00".
+pub fn cpu_time(out: &mut String, secs: u64) {
+    if secs < 3_600_000 {
+        let _ = write!(
+            out,
+            "{}:{:02}:{:02}",
+            secs / 3600,
+            secs % 3600 / 60,
+            secs % 60
+        );
+    } else {
+        let _ = write!(
+            out,
+            "{}d {:02}:{:02}",
+            secs / 86_400,
+            secs % 86_400 / 3600,
+            secs % 3600 / 60
+        );
+    }
+}
+
+/// Uptime (CPU page, Information): "N day(s), Hh Mm Ss"; hours always shown.
+/// 9_495 -> "2h 38m 15s"; 2_295 -> "0h 38m 15s"; 95_895 -> "1 day, 2h 38m 15s";
+/// 182_295 -> "2 days, 2h 38m 15s"; 0 -> "0h 0m 0s".
+pub fn uptime(out: &mut String, secs: u64) {
+    match secs / 86_400 {
+        0 => {}
+        1 => out.push_str("1 day, "),
+        days => {
+            let _ = write!(out, "{days} days, ");
+        }
+    }
+    let _ = write!(
+        out,
+        "{}h {}m {}s",
+        secs % 86_400 / 3600,
+        secs % 3600 / 60,
+        secs % 60
+    );
+}
+
+/// Short ages for tooltips and the Start time age text: >= 1 day "1d 4h"; >= 1 h "4h 12m";
+/// >= 1 min "12m 5s"; else "5s" ("0s" for 0). Two parts at most; lower parts are dropped, not rounded.
+pub fn short_age(out: &mut String, secs: u64) {
+    let _ = if secs >= 86_400 {
+        write!(out, "{}d {}h", secs / 86_400, secs % 86_400 / 3600)
+    } else if secs >= 3600 {
+        write!(out, "{}h {}m", secs / 3600, secs % 3600 / 60)
+    } else if secs >= 60 {
+        write!(out, "{}m {}s", secs / 60, secs % 60)
+    } else {
+        write!(out, "{secs}s")
+    };
+}
+
+/// Broken-down local time supplied by the caller (tl-model does no time-zone work).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LocalDateTime {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// Start time column: today "HH:MM:SS", otherwise "YYYY-MM-DD HH:MM" (R-007).
+pub fn start_time(out: &mut String, t: LocalDateTime, is_today: bool) {
+    let _ = if is_today {
+        write!(out, "{:02}:{:02}:{:02}", t.hour, t.minute, t.second)
+    } else {
+        write!(
+            out,
+            "{:04}-{:02}-{:02} {:02}:{:02}",
+            t.year, t.month, t.day, t.hour, t.minute
+        )
+    };
+}
+
+/// Properties "Started" and Boot time: "YYYY-MM-DD HH:MM:SS".
+pub fn date_time(out: &mut String, t: LocalDateTime) {
+    let _ = write!(
+        out,
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        t.year, t.month, t.day, t.hour, t.minute, t.second
+    );
+}
+
+/// Writes `v` rounded to the nearest integer (half away from zero). -0 prints "0" and NaN
+/// prints "0".
+fn write_round0(out: &mut String, v: f32) {
+    let r = if v.is_nan() { 0.0 } else { v.round() + 0.0 };
+    let _ = write!(out, "{r:.0}");
+}
+
+/// Integer MHz, rounded to nearest: "4631 MHz".
+pub fn mhz(out: &mut String, mhz: f32) {
+    write_round0(out, mhz);
+    out.push_str(" MHz");
+}
+
+/// "1905 / 3105 MHz".
+pub fn mhz_pair(out: &mut String, cur: f32, max: f32) {
+    write_round0(out, cur);
+    out.push_str(" / ");
+    mhz(out, max);
+}
+
+/// Integer °C rounded to nearest, with a space: "52 °C".
+pub fn celsius(out: &mut String, c: f32) {
+    write_round0(out, c);
+    out.push_str(" °C");
+}
+
+/// One decimal W: "31.9 W"; zero form "0 W".
+pub fn watts(out: &mut String, w: f32) {
+    write_or_zero(out, f64::from(w), 1, " W", "0 W");
+}
+
+/// "31.9 / 300 W": used with one decimal, limit as an integer rounded to nearest.
+/// Used follows the measured-zero rule ("0 / 300 W").
+pub fn watts_pair(out: &mut String, used: f32, limit: f32) {
+    write_or_zero(out, f64::from(used), 1, "", "0");
+    out.push_str(" / ");
+    write_round0(out, limit);
+    out.push_str(" W");
+}
+
+/// Cache sizes from KiB: up to 1023 KiB integer KiB ("512 KiB"); from 1024 KiB in MiB,
+/// integer when exact ("8 MiB", "96 MiB"), else one decimal ("1.5 MiB").
+pub fn cache_size(out: &mut String, kib: u64) {
+    let _ = if kib < 1024 {
+        write!(out, "{kib} KiB")
+    } else if kib % 1024 == 0 {
+        write!(out, "{} MiB", kib / 1024)
+    } else {
+        // Precision loss in the cast is far below the one printed decimal.
+        write!(out, "{:.1} MiB", kib as f64 / KIB)
+    };
+}
+
+/// Which end of a connection `socket_addr` formats.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AddrSide {
+    Local,
+    Foreign,
+}
+
+/// Socket address forms: IPv4 "a.b.c.d:port"; IPv6 "[addr%scope]:port" ("%scope" only when
+/// scope is Some); port 0 prints "*" ("0.0.0.0:*", "[::]:*"). Foreign side with an unspecified
+/// address and port 0 prints "*:*" (listeners and unconnected UDP).
+pub fn socket_addr(
+    out: &mut String,
+    ip: std::net::IpAddr,
+    port: u16,
+    scope: Option<&str>,
+    side: AddrSide,
+) {
+    if side == AddrSide::Foreign && port == 0 && ip.is_unspecified() {
+        out.push_str("*:*");
+        return;
+    }
+    // IpAddr's Display gives the RFC 5952 compressed form for IPv6.
+    let _ = match ip {
+        std::net::IpAddr::V4(v4) => write!(out, "{v4}"),
+        std::net::IpAddr::V6(v6) => match scope {
+            Some(scope) => write!(out, "[{v6}%{scope}]"),
+            None => write!(out, "[{v6}]"),
+        },
+    };
+    if port == 0 {
+        out.push_str(":*");
+    } else {
+        let _ = write!(out, ":{port}");
+    }
+}
+
+/// Response time: milliseconds with two decimals, "0.42 ms"; zero form "0 ms".
+pub fn response_ms(out: &mut String, ms: f64) {
+    write_or_zero(out, ms, 2, " ms", "0 ms");
+}
