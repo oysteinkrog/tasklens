@@ -119,12 +119,11 @@ pub fn recompute(appearance: &AppearanceSettings, cx: &mut App) -> bool {
     let prev = cx.has_global::<UiMetrics>().then(|| *metrics(cx));
     let prev_version = prev.map_or(0, |m| m.style_version);
     let next = compute(appearance, prev_version);
-    if let Some(prev) = prev
-        && UiMetrics {
-            style_version: prev.style_version,
-            ..next
-        } == prev
-    {
+    let same = UiMetrics {
+        style_version: prev_version,
+        ..next
+    };
+    if prev == Some(same) {
         return false;
     }
     cx.set_global(next);
