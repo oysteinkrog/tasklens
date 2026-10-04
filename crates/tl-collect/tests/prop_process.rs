@@ -77,4 +77,14 @@ proptest! {
         let mut out = tl_collect::proc::smaps::Rollup::default();
         let _ = tl_collect::proc::smaps::parse_rollup(&bytes, &mut out);
     }
+
+    #[test]
+    fn io_and_statm_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        let mut io = tl_collect::proc::io::PidIo::default();
+        let _ = tl_collect::proc::io::parse_io(&bytes, &mut io);
+        let mut statm = tl_collect::proc::statm::PidStatm::default();
+        let _ = tl_collect::proc::statm::parse_statm(&bytes, &mut statm);
+    }
 }

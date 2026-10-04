@@ -518,3 +518,121 @@ fn rollup_apply_and_coverage() {
     );
     assert!(builder.build().pss_uss.is_empty());
 }
+
+use std::os::unix::fs::PermissionsExt;
+
+use tl_collect::proc::io::{IoRead, PidIo, disk_bytes, parse_io, read_io};
+use tl_collect::proc::statm::{PidStatm, parse_statm};
+
+fn open_dir(path: &std::path::Path) -> rustix::fd::OwnedFd {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("open proc dir")
+}
+
+#[test]
+fn io_fields_parsed() {
+    let mut out = PidIo::default();
+    parse_io(&fixture_bytes("process-edge", "proc/4201/io"), &mut out).expect("parse io");
+    assert_eq!(
+        out,
+        PidIo {
+            rchar: 48_213_377,
+            wchar: 9_120_044,
+            syscr: 61_204,
+            syscw: 18_840,
+            read_bytes: 31_571_968,
+            write_bytes: 6_627_328,
+            cancelled_write_bytes: 1_048_576,
+        }
+    );
+
+    let dir = open_dir(&fixture_dir("process-edge").join("proc/4201"));
+    let mut buf = Vec::new();
+    assert_eq!(read_io(dir.as_fd(), &mut buf).unwrap(), IoRead::Ok(out));
+}
+
+#[test]
+fn io_missing_key_is_error() {
+    let full = fixture_bytes("process-edge", "proc/4201/io");
+    let without: Vec<u8> = full
+        .split_inclusive(|&b| b == b'\n')
+        .filter(|line| !line.starts_with(b"cancelled_write_bytes"))
+        .flatten()
+        .copied()
+        .collect();
+    let mut out = PidIo::default();
+    let err = parse_io(&without, &mut out).unwrap_err();
+    assert!(matches!(err, CollectError::ProcParse { file: "io", .. }));
+}
+
+/// Security regression (ADR-016): an unreadable `io` must be Restricted, never zeros.
+#[test]
+fn io_eacces_is_restricted() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("4201");
+    fs::create_dir(&dir).expect("create dir");
+    for name in ["stat", "statm", "io"] {
+        let rel = format!("proc/4201/{name}");
+        fs::write(dir.join(name), fixture_bytes("process-edge", &rel)).expect("copy file");
+    }
+    fs::set_permissions(dir.join("io"), fs::Permissions::from_mode(0o000)).expect("chmod");
+
+    let fd = open_dir(&dir);
+    let mut buf = Vec::new();
+    assert_eq!(read_io(fd.as_fd(), &mut buf).unwrap(), IoRead::Restricted);
+}
+
+#[test]
+fn io_missing_file_is_gone() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let fd = open_dir(tmp.path());
+    let mut buf = Vec::new();
+    assert_eq!(read_io(fd.as_fd(), &mut buf).unwrap(), IoRead::Gone);
+}
+
+#[test]
+fn disk_bytes_saturates() {
+    let io = PidIo {
+        read_bytes: 10,
+        write_bytes: 5,
+        cancelled_write_bytes: 20,
+        ..PidIo::default()
+    };
+    assert_eq!(disk_bytes(&io), 0);
+    let io = PidIo {
+        cancelled_write_bytes: 3,
+        ..io
+    };
+    assert_eq!(disk_bytes(&io), 12);
+}
+
+#[test]
+fn statm_fields_parsed() {
+    let bytes = fixture_bytes("process-edge", "proc/4201/statm");
+    let fields: Vec<u64> = std::str::from_utf8(&bytes)
+        .expect("utf8")
+        .split_ascii_whitespace()
+        .map(|f| f.parse().expect("number"))
+        .collect();
+    let mut out = PidStatm::default();
+    parse_statm(&bytes, &mut out).expect("parse statm");
+    assert_eq!(out.resident, fields[1]);
+    assert_eq!(
+        out,
+        PidStatm {
+            size: 666_958,
+            resident: 61_234,
+            shared: 60_925,
+            text: 181,
+            data: 58,
+        }
+    );
+}
