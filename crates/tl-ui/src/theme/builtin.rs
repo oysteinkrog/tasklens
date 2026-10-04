@@ -372,7 +372,7 @@ mod tests {
     const DARK: [u32; 23] = [
         0x191B1D, 0x27292B, 0x202224, 0x202224, 0x25282B, 0x2E3235, 0x191B1D, 0x1D1F20, 0x232629,
         0x075B84, 0x2B2F33, 0x2A2E31, 0x104B68, 0x202224, 0x27292B, 0x1A1C1E, 0x494F54, 0xD6D8D9,
-        0x818587, 0xFFFFFF, 0xBFD9E6, 0x3E2A28, 0x0277A6,
+        0x959A9C, 0xFFFFFF, 0xBFD9E6, 0x3E2A28, 0x0277A6,
     ];
     const LIGHT: [u32; 23] = [
         0xF3F4F6, 0xE4E6E9, 0xEBEDEF, 0xFFFFFF, 0xFFFFFF, 0xDDE1E5, 0xFFFFFF, 0xF6F7F8, 0xE8EBEE,
@@ -596,28 +596,37 @@ mod tests {
     #[test]
     fn contrast_floor() {
         use ThemeSlot::*;
-        let pairs: [(ThemeSlot, ThemeSlot, f32); 9] = [
+        // Secondary text is checked on every background slot (R-269).
+        let secondary_bgs = [
+            ListBg, WindowBg, RowAlt, RowHover, Header, MenuBg, Toolbar, Input, InputFocus, TabBg,
+            Titlebar,
+        ];
+        let pairs: Vec<(ThemeSlot, ThemeSlot, f32)> = [
             (TextPrimary, ListBg, 4.5),
             (TextPrimary, WindowBg, 4.5),
             (TextPrimary, RowAlt, 4.5),
             (TextPrimary, MenuBg, 4.5),
             (TextPrimary, Header, 4.5),
-            (TextSecondary, ListBg, 4.5),
-            (TextSecondary, WindowBg, 4.5),
             (TextSelectedPrimary, RowSelected, 4.4),
             (TextSelectedSecondary, RowSelected, 4.4),
-        ];
+        ]
+        .into_iter()
+        .chain(secondary_bgs.map(|bg| (TextSecondary, bg, 4.5)))
+        .collect();
+        let mut failures = Vec::new();
         for def in load().iter() {
-            for (fg, bg, floor) in pairs {
+            for &(fg, bg, floor) in &pairs {
                 let ratio = contrast(def.slots[fg as usize], def.slots[bg as usize]);
-                assert!(
-                    ratio >= floor,
-                    "{}: {} on {} is {ratio:.2}, below {floor}",
-                    def.name,
-                    fg.json_key(),
-                    bg.json_key()
-                );
+                if ratio < floor {
+                    failures.push(format!(
+                        "{}: {} on {} is {ratio:.2}, below {floor}",
+                        def.name,
+                        fg.json_key(),
+                        bg.json_key()
+                    ));
+                }
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }
