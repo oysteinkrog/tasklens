@@ -1,13 +1,16 @@
 //! Settings and state schema, canonical table (a) (ADR-011). No file I/O.
 //!
-//! `tl-app` loads and saves `settings.toml`; this module only defines its shape and defaults.
-//! TOML section names are the `Settings` field names and keys are the struct field names.
+//! `tl-app` loads and saves `settings.toml` and `state.toml`; this module only defines their
+//! shape, defaults and clamp rules. TOML section names are the `Settings` and `UiState` field
+//! names and keys are the struct field names.
 
 use std::collections::BTreeMap;
+use std::ops::{Add, Div, Mul};
 
 use serde::{Deserialize, Serialize};
 
 use crate::actions::DumpMode;
+use crate::command::Tab;
 use crate::table::{ServiceStateFilter, TableMode, UnitType};
 
 /// First line of `settings.toml` and `state.toml`.
@@ -546,6 +549,528 @@ impl Default for Settings {
     }
 }
 
+/// `[window]` in `state.toml`. The main window position is never restored (ADR-010).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowState {
+    /// Logical px, at least 800.
+    pub width: u32,
+    /// Logical px, at least 500.
+    pub height: u32,
+    pub maximized: bool,
+}
+
+impl Default for WindowState {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 800,
+            maximized: false,
+        }
+    }
+}
+
+/// `[tabs]` in `state.toml`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TabsState {
+    /// Opened at start when `general.start_tab = "last_used"`.
+    pub last_tab: Tab,
+}
+
+impl Default for TabsState {
+    fn default() -> Self {
+        Self {
+            last_tab: Tab::Processes,
+        }
+    }
+}
+
+/// Group expand state of the Processes table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupExpandedProcesses {
+    pub apps: bool,
+    pub background: bool,
+    pub system: bool,
+}
+
+impl Default for GroupExpandedProcesses {
+    fn default() -> Self {
+        Self {
+            apps: true,
+            background: true,
+            system: true,
+        }
+    }
+}
+
+/// `[processes]` in `state.toml`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcessesState {
+    pub history_mode: bool,
+    pub group_expanded: GroupExpandedProcesses,
+    /// Consent flag for the VirusTotal lookup (R-095).
+    pub virustotal_notice_accepted: bool,
+}
+
+/// Group expand state of the Services table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupExpandedServices {
+    pub system: bool,
+    pub user: bool,
+}
+
+impl Default for GroupExpandedServices {
+    fn default() -> Self {
+        Self {
+            system: true,
+            user: true,
+        }
+    }
+}
+
+/// `[services]` in `state.toml`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServicesState {
+    pub group_expanded: GroupExpandedServices,
+}
+
+/// `[performance]` in `state.toml`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceState {
+    /// Sidebar width in logical px, 180..=400.
+    pub nav_width: u16,
+    /// Device key.
+    pub selected_device: String,
+}
+
+impl Default for PerformanceState {
+    fn default() -> Self {
+        Self {
+            nav_width: 252,
+            selected_device: "cpu".to_owned(),
+        }
+    }
+}
+
+/// Sort state of one table. `column` is a column id.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SortState {
+    pub column: String,
+    pub ascending: bool,
+}
+
+impl SortState {
+    fn new(column: &str, ascending: bool) -> Self {
+        Self {
+            column: column.to_owned(),
+            ascending,
+        }
+    }
+}
+
+/// `[sort.*]`, one entry per table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SortTables {
+    pub processes: SortState,
+    pub history: SortState,
+    pub services: SortState,
+    pub startup: SortState,
+    pub connections: SortState,
+}
+
+impl Default for SortTables {
+    fn default() -> Self {
+        Self {
+            processes: SortState::new("pid", true),
+            history: SortState::new("cpu", false),
+            services: SortState::new("name", true),
+            startup: SortState::new("status", true),
+            connections: SortState::new("proto", true),
+        }
+    }
+}
+
+/// Column layout of one table. Ids stay strings here; the UI and the loader convert them to
+/// `ColumnId` and drop unknown ids (ADR-011).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnState {
+    pub order: Vec<String>,
+    pub visible: Vec<String>,
+    /// Column id to width in logical px.
+    pub widths: BTreeMap<String, u32>,
+}
+
+impl ColumnState {
+    /// `order` and `visible` both get `columns`.
+    fn new(columns: &[&str], widths: &[(&str, u32)]) -> Self {
+        let list: Vec<String> = columns.iter().map(|&c| c.to_owned()).collect();
+        Self {
+            order: list.clone(),
+            visible: list,
+            widths: widths.iter().map(|&(c, w)| (c.to_owned(), w)).collect(),
+        }
+    }
+}
+
+/// `[columns.*]`, one entry per table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColumnTables {
+    pub processes: ColumnState,
+    pub history: ColumnState,
+    pub services: ColumnState,
+    pub startup: ColumnState,
+    pub connections: ColumnState,
+}
+
+impl Default for ColumnTables {
+    fn default() -> Self {
+        Self {
+            processes: ColumnState::new(
+                &[
+                    "name",
+                    "user",
+                    "pid",
+                    "cpu",
+                    "memory",
+                    "disk",
+                    "network",
+                    "gpu",
+                    "description",
+                ],
+                &[
+                    ("name", 248),
+                    ("user", 92),
+                    ("pid", 96),
+                    ("cpu", 63),
+                    ("memory", 92),
+                    ("disk", 82),
+                    ("network", 92),
+                    ("gpu", 72),
+                    ("description", 342),
+                    ("power", 101),
+                ],
+            ),
+            // UI-PRC-031; `image_path` is the R-007 id.
+            history: ColumnState::new(
+                &[
+                    "name",
+                    "pid",
+                    "user",
+                    "image_path",
+                    "cpu",
+                    "memory",
+                    "disk",
+                    "network",
+                    "gpu",
+                ],
+                &[
+                    ("name", 248),
+                    ("pid", 96),
+                    ("user", 92),
+                    ("image_path", 200),
+                    ("cpu", 63),
+                    ("memory", 92),
+                    ("disk", 82),
+                    ("network", 92),
+                    ("gpu", 72),
+                ],
+            ),
+            // SYS-003.
+            services: ColumnState::new(
+                &[
+                    "name",
+                    "display_name",
+                    "status",
+                    "startup_type",
+                    "pid",
+                    "user",
+                    "path",
+                ],
+                &[
+                    ("name", 250),
+                    ("display_name", 300),
+                    ("status", 100),
+                    ("startup_type", 120),
+                    ("pid", 80),
+                    ("user", 200),
+                    ("path", 260),
+                ],
+            ),
+            // SYS-020.
+            startup: ColumnState::new(
+                &[
+                    "name",
+                    "publisher",
+                    "status",
+                    "impact",
+                    "type",
+                    "location",
+                    "command",
+                ],
+                &[
+                    ("name", 220),
+                    ("publisher", 180),
+                    ("status", 90),
+                    ("impact", 100),
+                    ("type", 190),
+                    ("location", 260),
+                    ("command", 170),
+                ],
+            ),
+            // SYS-029.
+            connections: ColumnState::new(
+                &["proto", "local", "foreign", "state", "pid", "process"],
+                &[
+                    ("proto", 90),
+                    ("local", 260),
+                    ("foreign", 260),
+                    ("state", 120),
+                    ("pid", 80),
+                    ("process", 180),
+                ],
+            ),
+        }
+    }
+}
+
+/// One `[[minigraphs]]` card. Process sources are `process:<boot_id 16 hex>:<pid>:<start_ticks>`
+/// (R-100); command lines are never stored.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MinigraphState {
+    pub source: String,
+    /// Column id for process sources.
+    pub column: String,
+    pub range_s: u16,
+    /// `"accent"` or a lower-case colour name.
+    pub color: String,
+    pub slot: u16,
+    pub detached: bool,
+    /// Detached window id; ignored when `detached` is false (R-084).
+    pub window: u32,
+}
+
+impl Default for MinigraphState {
+    fn default() -> Self {
+        Self {
+            source: "cpu".to_owned(),
+            column: "cpu".to_owned(),
+            range_s: 60,
+            color: "accent".to_owned(),
+            slot: 0,
+            detached: false,
+            window: 0,
+        }
+    }
+}
+
+/// One `[[detached_windows]]` entry (P3, R-084). `x` and `y` are written and applied on KDE
+/// only, through the KWin bridge.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DetachedWindowState {
+    pub id: u32,
+    /// Logical px.
+    pub width: u32,
+    /// Logical px.
+    pub height: u32,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl Default for DetachedWindowState {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            width: 180,
+            height: 90,
+            x: 0,
+            y: 0,
+        }
+    }
+}
+
+/// One `[[tray_graphs]]` entry (P3).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrayGraphState {
+    pub source: String,
+    pub column: String,
+    pub color: String,
+    pub range_s: u16,
+}
+
+impl Default for TrayGraphState {
+    fn default() -> Self {
+        Self {
+            source: "cpu".to_owned(),
+            column: "cpu".to_owned(),
+            color: "accent".to_owned(),
+            range_s: 60,
+        }
+    }
+}
+
+/// The whole of `state.toml`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiState {
+    pub schema_version: u32,
+    pub window: WindowState,
+    pub tabs: TabsState,
+    pub processes: ProcessesState,
+    pub services: ServicesState,
+    pub performance: PerformanceState,
+    pub sort: SortTables,
+    pub columns: ColumnTables,
+    pub minigraphs: Vec<MinigraphState>,
+    /// P3.
+    pub detached_windows: Vec<DetachedWindowState>,
+    /// P3.
+    pub tray_graphs: Vec<TrayGraphState>,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            window: WindowState::default(),
+            tabs: TabsState::default(),
+            processes: ProcessesState::default(),
+            services: ServicesState::default(),
+            performance: PerformanceState::default(),
+            sort: SortTables::default(),
+            columns: ColumnTables::default(),
+            minigraphs: Vec::new(),
+            detached_windows: Vec::new(),
+            tray_graphs: Vec::new(),
+        }
+    }
+}
+
+/// The settings the engine uses, sent with `EngineClient::set_settings`. Derived from
+/// `Settings`, never persisted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EngineSettings {
+    /// `processes.interval_ms`.
+    pub interval_ms: u32,
+    /// `units.network`.
+    pub network: NetworkUnit,
+    pub show_network_wired: bool,
+    pub show_network_wireless: bool,
+    pub show_network_vpn: bool,
+    pub show_network_virtual: bool,
+    pub show_network_other: bool,
+    pub history: HistorySettings,
+    /// `processes.subtree_totals`.
+    pub subtree_totals: bool,
+    /// `processes.hide_system`.
+    pub hide_system: bool,
+}
+
+impl From<&Settings> for EngineSettings {
+    fn from(s: &Settings) -> Self {
+        let p = &s.performance;
+        Self {
+            interval_ms: s.processes.interval_ms,
+            network: s.units.network,
+            show_network_wired: p.show_network_wired,
+            show_network_wireless: p.show_network_wireless,
+            show_network_vpn: p.show_network_vpn,
+            show_network_virtual: p.show_network_virtual,
+            show_network_other: p.show_network_other,
+            history: s.history.clone(),
+            subtree_totals: s.processes.subtree_totals,
+            hide_system: s.processes.hide_system,
+        }
+    }
+}
+
+impl Default for EngineSettings {
+    fn default() -> Self {
+        Self::from(&Settings::default())
+    }
+}
+
+/// Clamps `value` into `min..=max`, then rounds it to the nearest multiple of `step` (ties
+/// round up). Pushes `key` to `changed` when the value changes.
+fn clamp_key<T>(
+    value: &mut T,
+    (min, max, step): (T, T, T),
+    key: &'static str,
+    changed: &mut Vec<&'static str>,
+) where
+    T: Copy + Ord + From<u8> + Add<Output = T> + Div<Output = T> + Mul<Output = T>,
+{
+    let mut v = (*value).clamp(min, max);
+    if step > T::from(1) {
+        v = (v + step / T::from(2)) / step * step;
+    }
+    if v != *value {
+        *value = v;
+        changed.push(key);
+    }
+}
+
+impl Settings {
+    /// Load step 4: clamp out-of-range values, return the dotted keys that changed (the caller
+    /// logs them). Valid values are left alone.
+    pub fn clamp(&mut self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        let c = &mut changed;
+        let a = &mut self.appearance;
+        clamp_key(&mut a.ui_scale_pct, (75, 200, 5), "appearance.ui_scale_pct", c);
+        clamp_key(&mut a.row_height_pct, (80, 150, 5), "appearance.row_height_pct", c);
+        let key = "appearance.heat_intensity_pct";
+        clamp_key(&mut a.heat_intensity_pct, (0, 100, 1), key, c);
+        let key = "appearance.shadow_intensity_pct";
+        clamp_key(&mut a.shadow_intensity_pct, (0, 100, 1), key, c);
+        let m = &mut self.motion;
+        clamp_key(&mut m.smooth_scroll_amount, (1, 50, 1), "motion.smooth_scroll_amount", c);
+        clamp_key(&mut m.tab_switch_ms, (0, 500, 10), "motion.tab_switch_ms", c);
+        let key = "processes.interval_ms";
+        clamp_key(&mut self.processes.interval_ms, (250, 10_000, 1), key, c);
+        if !GRAPH_RANGES_S.contains(&self.performance.graph_range_s) {
+            self.performance.graph_range_s = 60;
+            c.push("performance.graph_range_s");
+        }
+        clamp_key(&mut self.history.retention_h, (1, 12, 1), "history.retention_h", c);
+        if !LANGUAGES.contains(&self.general.language.as_str()) {
+            self.general.language = "system".to_owned();
+            c.push("general.language");
+        }
+        if self.services.unit_types.is_empty() {
+            self.services.unit_types = UnitType::DEFAULT_SHOWN.to_vec();
+            c.push("services.unit_types");
+        }
+        changed
+    }
+}
+
+impl UiState {
+    /// Load step 4 for `state.toml`: clamp out-of-range values, return the dotted keys that
+    /// changed (the caller logs them).
+    pub fn clamp(&mut self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        let c = &mut changed;
+        clamp_key(&mut self.window.width, (800, u32::MAX, 1), "window.width", c);
+        clamp_key(&mut self.window.height, (500, u32::MAX, 1), "window.height", c);
+        let key = "performance.nav_width";
+        clamp_key(&mut self.performance.nav_width, (180, 400, 1), key, c);
+        changed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::de::value::{Error as ValueError, StrDeserializer};
@@ -757,6 +1282,288 @@ mod tests {
     fn menus_and_ranges_constants() {
         assert_eq!(GRAPH_RANGES_S, [30, 60, 300, 600]);
         assert_eq!(HISTORY_RETENTION_MENU_H, [1, 2, 3, 4, 6, 8, 12]);
+    }
+
+    #[test]
+    fn ui_state_defaults_table_a() {
+        let s = UiState::default();
+        assert_eq!(s.schema_version, 1);
+        assert_eq!(
+            s.window,
+            WindowState {
+                width: 1280,
+                height: 800,
+                maximized: false
+            }
+        );
+        assert_eq!(s.tabs.last_tab, Tab::Processes);
+        assert!(!s.processes.history_mode);
+        let g = &s.processes.group_expanded;
+        assert!(g.apps && g.background && g.system);
+        assert!(!s.processes.virustotal_notice_accepted);
+        let g = &s.services.group_expanded;
+        assert!(g.system && g.user);
+        assert_eq!(s.performance.nav_width, 252);
+        assert_eq!(s.performance.selected_device, "cpu");
+
+        let sort = |st: &SortState| (st.column.clone(), st.ascending);
+        assert_eq!(sort(&s.sort.processes), ("pid".to_owned(), true));
+        assert_eq!(sort(&s.sort.history), ("cpu".to_owned(), false));
+        assert_eq!(sort(&s.sort.services), ("name".to_owned(), true));
+        assert_eq!(sort(&s.sort.startup), ("status".to_owned(), true));
+        assert_eq!(sort(&s.sort.connections), ("proto".to_owned(), true));
+
+        assert!(s.minigraphs.is_empty());
+        assert!(s.detached_windows.is_empty());
+        assert!(s.tray_graphs.is_empty());
+
+        let m = MinigraphState::default();
+        assert_eq!(
+            (m.source.as_str(), m.column.as_str(), m.range_s, m.color.as_str()),
+            ("cpu", "cpu", 60, "accent")
+        );
+        assert_eq!((m.slot, m.detached, m.window), (0, false, 0));
+        let d = DetachedWindowState::default();
+        assert_eq!((d.id, d.width, d.height, d.x, d.y), (0, 180, 90, 0, 0));
+        let t = TrayGraphState::default();
+        assert_eq!(
+            (t.source.as_str(), t.column.as_str(), t.color.as_str(), t.range_s),
+            ("cpu", "cpu", "accent", 60)
+        );
+    }
+
+    fn assert_columns(state: &ColumnState, columns: &[&str], widths: &[(&str, u32)]) {
+        assert_eq!(state.order, columns);
+        assert_eq!(state.visible, columns);
+        let expected: BTreeMap<String, u32> =
+            widths.iter().map(|&(c, w)| (c.to_owned(), w)).collect();
+        assert_eq!(state.widths, expected);
+    }
+
+    #[test]
+    fn column_defaults_all_tables() {
+        let t = ColumnTables::default();
+        assert_columns(
+            &t.processes,
+            &[
+                "name",
+                "user",
+                "pid",
+                "cpu",
+                "memory",
+                "disk",
+                "network",
+                "gpu",
+                "description",
+            ],
+            &[
+                ("name", 248),
+                ("user", 92),
+                ("pid", 96),
+                ("cpu", 63),
+                ("memory", 92),
+                ("disk", 82),
+                ("network", 92),
+                ("gpu", 72),
+                ("description", 342),
+                ("power", 101),
+            ],
+        );
+        assert_columns(
+            &t.history,
+            &[
+                "name",
+                "pid",
+                "user",
+                "image_path",
+                "cpu",
+                "memory",
+                "disk",
+                "network",
+                "gpu",
+            ],
+            &[
+                ("name", 248),
+                ("pid", 96),
+                ("user", 92),
+                ("image_path", 200),
+                ("cpu", 63),
+                ("memory", 92),
+                ("disk", 82),
+                ("network", 92),
+                ("gpu", 72),
+            ],
+        );
+        assert_columns(
+            &t.services,
+            &[
+                "name",
+                "display_name",
+                "status",
+                "startup_type",
+                "pid",
+                "user",
+                "path",
+            ],
+            &[
+                ("name", 250),
+                ("display_name", 300),
+                ("status", 100),
+                ("startup_type", 120),
+                ("pid", 80),
+                ("user", 200),
+                ("path", 260),
+            ],
+        );
+        assert_columns(
+            &t.startup,
+            &[
+                "name",
+                "publisher",
+                "status",
+                "impact",
+                "type",
+                "location",
+                "command",
+            ],
+            &[
+                ("name", 220),
+                ("publisher", 180),
+                ("status", 90),
+                ("impact", 100),
+                ("type", 190),
+                ("location", 260),
+                ("command", 170),
+            ],
+        );
+        assert_columns(
+            &t.connections,
+            &["proto", "local", "foreign", "state", "pid", "process"],
+            &[
+                ("proto", 90),
+                ("local", 260),
+                ("foreign", 260),
+                ("state", 120),
+                ("pid", 80),
+                ("process", 180),
+            ],
+        );
+        assert_eq!(UiState::default().columns, t);
+    }
+
+    #[test]
+    fn settings_clamp_out_of_range() {
+        let mut s = Settings::default();
+        s.appearance.ui_scale_pct = 203;
+        s.appearance.row_height_pct = 79;
+        s.motion.tab_switch_ms = 247;
+        s.processes.interval_ms = 100;
+        s.performance.graph_range_s = 45;
+        s.history.retention_h = 0;
+        s.general.language = "xx-XX".to_owned();
+
+        let mut changed = s.clamp();
+
+        assert_eq!(s.appearance.ui_scale_pct, 200);
+        assert_eq!(s.appearance.row_height_pct, 80);
+        assert_eq!(s.motion.tab_switch_ms, 250);
+        assert_eq!(s.processes.interval_ms, 250);
+        assert_eq!(s.performance.graph_range_s, 60);
+        assert_eq!(s.history.retention_h, 1);
+        assert_eq!(s.general.language, "system");
+        changed.sort_unstable();
+        assert_eq!(
+            changed,
+            [
+                "appearance.row_height_pct",
+                "appearance.ui_scale_pct",
+                "general.language",
+                "history.retention_h",
+                "motion.tab_switch_ms",
+                "performance.graph_range_s",
+                "processes.interval_ms",
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_clamp_other_keys() {
+        let mut s = Settings::default();
+        s.appearance.ui_scale_pct = 112;
+        s.appearance.heat_intensity_pct = 101;
+        s.appearance.shadow_intensity_pct = 255;
+        s.motion.smooth_scroll_amount = 0;
+        s.motion.tab_switch_ms = 900;
+        s.processes.interval_ms = 20_000;
+        s.history.retention_h = 13;
+        s.services.unit_types.clear();
+
+        let changed = s.clamp();
+
+        assert_eq!(s.appearance.ui_scale_pct, 110);
+        assert_eq!(s.appearance.heat_intensity_pct, 100);
+        assert_eq!(s.appearance.shadow_intensity_pct, 100);
+        assert_eq!(s.motion.smooth_scroll_amount, 1);
+        assert_eq!(s.motion.tab_switch_ms, 500);
+        assert_eq!(s.processes.interval_ms, 10_000);
+        assert_eq!(s.history.retention_h, 12);
+        assert_eq!(s.services.unit_types, UnitType::DEFAULT_SHOWN);
+        assert_eq!(changed.len(), 8);
+        assert!(changed.contains(&"services.unit_types"));
+    }
+
+    #[test]
+    fn settings_clamp_noop_on_defaults() {
+        let mut s = Settings::default();
+        assert!(s.clamp().is_empty());
+        assert_eq!(s, Settings::default());
+
+        let mut u = UiState::default();
+        assert!(u.clamp().is_empty());
+        assert_eq!(u, UiState::default());
+    }
+
+    #[test]
+    fn ui_state_clamp() {
+        let mut u = UiState::default();
+        u.window.width = 640;
+        u.window.height = 300;
+        u.performance.nav_width = 500;
+
+        let changed = u.clamp();
+
+        assert_eq!(u.window.width, 800);
+        assert_eq!(u.window.height, 500);
+        assert_eq!(u.performance.nav_width, 400);
+        assert_eq!(
+            changed,
+            ["window.width", "window.height", "performance.nav_width"]
+        );
+
+        u.performance.nav_width = 100;
+        assert_eq!(u.clamp(), ["performance.nav_width"]);
+        assert_eq!(u.performance.nav_width, 180);
+    }
+
+    #[test]
+    fn engine_settings_from_settings() {
+        let mut s = Settings::default();
+        s.processes.interval_ms = 2000;
+        s.units.network = NetworkUnit::Bytes;
+
+        let e = EngineSettings::from(&s);
+
+        assert_eq!(e.interval_ms, 2000);
+        assert_eq!(e.network, NetworkUnit::Bytes);
+        assert_eq!(e.history, HistorySettings::default());
+        assert!(e.show_network_wired);
+        assert!(e.show_network_wireless);
+        assert!(e.show_network_vpn);
+        assert!(!e.show_network_virtual);
+        assert!(e.show_network_other);
+        assert!(!e.subtree_totals);
+        assert!(!e.hide_system);
+        assert_eq!(EngineSettings::default().interval_ms, 1000);
     }
 
     fn not_unit_variant() -> ValueError {
