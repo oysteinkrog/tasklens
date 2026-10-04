@@ -5,7 +5,7 @@ mod common;
 use common::{fixture_bytes, mutated};
 use proptest::prelude::*;
 use tl_collect::apps::desktop::{exec_binary_in, parse_entry};
-use tl_collect::apps::icons::{kde_icon_theme, parse_index_theme};
+use tl_collect::apps::icons::{kde_icon_theme, parse_icon_cache, parse_index_theme};
 use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
 use tl_collect::proc::status::{PidStatus, parse_status};
 
@@ -50,6 +50,16 @@ proptest! {
         with_header.extend_from_slice(&bytes);
         let _ = parse_index_theme(&with_header);
         let _ = kde_icon_theme(&bytes);
+    }
+
+    #[test]
+    fn icon_cache_parser_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        let _ = parse_icon_cache(&bytes, "breeze-dark");
+        let mut with_header = b"version = 1\ntheme = \"breeze-dark\"\n[paths]\n\"a@1\" = \"".to_vec();
+        with_header.extend_from_slice(&bytes);
+        let _ = parse_icon_cache(&with_header, "breeze-dark");
     }
 }
 

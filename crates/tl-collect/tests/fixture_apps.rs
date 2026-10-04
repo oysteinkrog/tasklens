@@ -1,8 +1,9 @@
 //! Tests for app naming (E05-018), the desktop entry index (E05-013), the desktop watch
-//! (E05-014) and icon theme resolution (E05-019).
+//! (E05-014), icon theme resolution (E05-019) and the icon path cache (E05-020).
 
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +11,7 @@ use tl_collect::apps::desktop::{
     DesktopIndex, DesktopWatch, data_dirs_from_env, exec_binary, exec_binary_in,
 };
 use tl_collect::apps::icons::{
-    GenericIcon, ThemeDir, ThemeDirs, generic_icon, kde_icon_theme, load_theme, resolve,
+    GenericIcon, IconCache, ThemeDir, ThemeDirs, generic_icon, kde_icon_theme, load_theme, resolve,
     theme_order,
 };
 use tl_collect::apps::naming::{
@@ -503,4 +504,166 @@ fn icons_unknown_none() {
         generic_icon(GenericIcon::Service),
         "preferences-system-services"
     );
+}
+
+fn firefox_path() -> String {
+    icons_root()
+        .join("usr/share/icons/breeze-dark/apps/22/firefox.svg")
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
+/// Writes a cache with `firefox@24` through `IconCache` and returns its path.
+fn written_cache(dir: &Path) -> PathBuf {
+    let path = dir.join("cache/tasklens/icons.toml");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    let themes = icon_themes();
+    assert_eq!(
+        cache.lookup("firefox", 24, &themes).as_deref(),
+        Some(firefox_path().as_str())
+    );
+    cache.save().expect("save cache");
+    path
+}
+
+#[test]
+fn icon_cache_write_and_mode() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = written_cache(dir.path());
+    let text = fs::read_to_string(&path).expect("read cache");
+    assert!(text.contains("version = 1\n"), "{text}");
+    assert!(text.contains("theme = \"breeze-dark\"\n"), "{text}");
+    assert!(
+        text.contains(&format!("\"firefox@24\" = \"{}\"\n", firefox_path())),
+        "{text}"
+    );
+    let mode = fs::metadata(&path)
+        .expect("stat cache")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let parent = path.parent().expect("parent");
+    let mode = fs::metadata(parent).expect("stat dir").permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    let names: Vec<_> = fs::read_dir(parent)
+        .expect("list dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(names, [OsStr::new("icons.toml")]);
+}
+
+#[test]
+fn icon_cache_hit_skips_resolve() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = written_cache(dir.path());
+    let mut cache = IconCache::load(path, "breeze-dark");
+    assert_eq!(
+        cache.lookup("firefox", 24, &[]).as_deref(),
+        Some(firefox_path().as_str())
+    );
+}
+
+#[test]
+fn icon_cache_theme_change_discards() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = written_cache(dir.path());
+    let mut cache = IconCache::load(path.clone(), "breeze");
+    assert_eq!(cache.lookup("firefox", 24, &[]), None);
+    cache.save().expect("save cache");
+    let text = fs::read_to_string(&path).expect("read cache");
+    assert!(text.contains("theme = \"breeze\"\n"), "{text}");
+    assert!(!text.contains(&firefox_path()), "{text}");
+}
+
+#[test]
+fn icon_cache_stale_path_reresolved() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("icons.toml");
+    let gone = dir.path().join("gone.svg");
+    fs::write(
+        &path,
+        format!(
+            "version = 1\ntheme = \"breeze-dark\"\n[paths]\n\"firefox@24\" = \"{}\"\n",
+            gone.display()
+        ),
+    )
+    .expect("write cache");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    assert_eq!(
+        cache.lookup("firefox", 24, &icon_themes()).as_deref(),
+        Some(firefox_path().as_str())
+    );
+    cache.save().expect("save cache");
+    let text = fs::read_to_string(&path).expect("read cache");
+    assert!(text.contains(&firefox_path()), "{text}");
+}
+
+#[test]
+fn icon_cache_corrupt_starts_empty() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("icons.toml");
+    fs::write(
+        &path,
+        format!(
+            "version = 1\ntheme = \"breeze-dark\"\n[paths\n\"firefox@24\" = \"{}\"\n",
+            firefox_path()
+        ),
+    )
+    .expect("write cache");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    assert_eq!(cache.lookup("firefox", 24, &[]), None);
+    cache.save().expect("save cache");
+    let text = fs::read_to_string(&path).expect("read cache");
+    assert!(text.contains("\"firefox@24\" = \"\"\n"), "{text}");
+}
+
+#[test]
+fn icon_cache_quote_roundtrip() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let icon = dir.path().join("we\"ird\\name.png");
+    fs::write(&icon, b"").expect("write icon");
+    let icon = icon.to_str().expect("utf-8 path");
+    let path = dir.path().join("icons.toml");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    assert_eq!(cache.lookup(icon, 16, &[]).as_deref(), Some(icon));
+    // A control character drops the entry when writing.
+    let bad = dir.path().join("tab\there.png");
+    fs::write(&bad, b"").expect("write icon");
+    let bad = bad.to_str().expect("utf-8 path");
+    assert_eq!(cache.lookup(bad, 16, &[]).as_deref(), Some(bad));
+    cache.save().expect("save cache");
+
+    let text = fs::read_to_string(&path).expect("read cache");
+    assert!(text.contains("we\\\"ird\\\\name.png@16"), "{text}");
+    assert!(!text.contains("tab"), "{text}");
+    let mut cache = IconCache::load(path, "breeze-dark");
+    assert_eq!(cache.lookup(icon, 16, &[]).as_deref(), Some(icon));
+}
+
+#[test]
+fn icon_cache_negative_entry() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("icons.toml");
+    fs::write(
+        &path,
+        "version = 1\ntheme = \"breeze-dark\"\n[paths]\n\"firefox@24\" = \"\"\n",
+    )
+    .expect("write cache");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    assert_eq!(cache.lookup("firefox", 24, &icon_themes()), None);
+}
+
+#[test]
+fn icon_cache_no_write_when_clean() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = written_cache(dir.path());
+    let before = fs::metadata(&path).expect("stat cache");
+    let mut cache = IconCache::load(path.clone(), "breeze-dark");
+    assert!(cache.lookup("firefox", 24, &[]).is_some());
+    cache.save().expect("save cache");
+    let after = fs::metadata(&path).expect("stat cache");
+    assert_eq!(after.ino(), before.ino());
+    assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+    assert_eq!(after.mtime(), before.mtime());
 }
