@@ -247,17 +247,20 @@ fn status_missing_uid_is_error() {
 
 #[test]
 fn status_long_file_parsed_up_to_cut() {
-    // A 20 KiB file: the real lines, then filler lines with unknown keys. The caller reads
-    // STATUS_READ_MAX bytes, so the cut lands inside a filler line.
+    // A 20 KiB file: the real lines, filler lines with unknown keys, then a `VmSwap:` line that
+    // the cut at STATUS_READ_MAX splits after `VmSwap:\t9`. The partial line must be skipped.
     let mut buf = fixture_bytes("process-edge", "proc/4201/status");
-    let mut n = 0;
+    let swap_line = b"VmSwap:\t99999 kB\n";
+    let filler_len = STATUS_READ_MAX - 9 - buf.len();
+    buf.extend_from_slice(b"Filler:");
+    buf.resize(buf.len() + filler_len - 8, b'x');
+    buf.push(b'\n');
+    buf.extend_from_slice(swap_line);
     while buf.len() < 20 * 1024 {
-        buf.extend_from_slice(format!("Filler{n}:\t{n}\n").as_bytes());
-        n += 1;
+        buf.extend_from_slice(b"Filler:\t1\n");
     }
-    buf.extend_from_slice(b"VmSwap:\t9 kB\n");
     let cut = &buf[..STATUS_READ_MAX];
-    assert!(!cut.ends_with(b"\n"));
+    assert!(cut.ends_with(b"VmSwap:\t9"));
 
     let mut out = PidStatus::default();
     parse_status(cut, &mut out).expect("parse cut status");
@@ -278,7 +281,9 @@ fn status_owner_desktop_snapshot() {
     pids.sort_unstable();
     assert!(!pids.is_empty());
 
-    let rows: Vec<(u32, u32, u32, Option<u64>, Option<u64>)> = pids
+    // (pid, real uid, threads, RssAnon, VmRSS)
+    type Row = (u32, u32, u32, Option<u64>, Option<u64>);
+    let rows: Vec<Row> = pids
         .iter()
         .map(|&pid| {
             let s = status("owner-desktop", pid);

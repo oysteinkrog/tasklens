@@ -195,8 +195,14 @@ pub fn ws_shared_bytes(s: &PidStatus) -> Option<u64> {
 
 fn trim(value: &[u8]) -> &[u8] {
     let is_blank = |b: &u8| *b == b' ' || *b == b'\t';
-    let start = value.iter().position(|b| !is_blank(b)).unwrap_or(value.len());
-    let end = value.iter().rposition(|b| !is_blank(b)).map_or(start, |i| i + 1);
+    let start = value
+        .iter()
+        .position(|b| !is_blank(b))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|b| !is_blank(b))
+        .map_or(start, |i| i + 1);
     &value[start..end]
 }
 
