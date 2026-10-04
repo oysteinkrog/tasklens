@@ -1,6 +1,8 @@
 //! Developer tasks for tasklens. Not shipped.
 #![allow(clippy::print_stdout)]
 
+mod check_deps;
+
 fn main() -> anyhow::Result<()> {
     dispatch(std::env::args().skip(1).collect())
 }
@@ -9,8 +11,9 @@ fn main() -> anyhow::Result<()> {
 fn dispatch(args: Vec<String>) -> anyhow::Result<()> {
     let mut args = args.into_iter();
     let cmd = args.next();
-    let _rest_args: Vec<String> = args.collect();
+    let rest: Vec<String> = args.collect();
     match cmd.as_deref() {
+        Some("check-deps") => check_deps::run(rest),
         Some(other) => anyhow::bail!("unknown xtask subcommand: {other}"),
         None => anyhow::bail!("usage: cargo xtask <subcommand> [args]"),
     }
