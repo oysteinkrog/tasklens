@@ -5,7 +5,7 @@
 //! `ProcessKey`. Signals then go through that pidfd, so they can never hit a reused PID. There is
 //! no fallback to `kill(pid)`.
 
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::event::{PollFd, PollFlags, Timespec};
 use rustix::fs::{Mode, OFlags};
@@ -113,6 +113,52 @@ pub fn suspend(key: ProcessKey, boot: BootId) -> OpsResult {
 /// Continues the process with SIGCONT.
 pub fn resume(key: ProcessKey, boot: BootId) -> OpsResult {
     send_signal(key, boot, Signal::Cont)
+}
+
+/// The most targets one tree operation takes (ADR-006). The engine rejects more first.
+const MAX_TREE_TARGETS: usize = 256;
+
+/// Ends every process in `keys` (R-037). It opens a verified pidfd for each target, sends SIGSTOP
+/// to all of them, then SIGKILL to all of them, so no target can fork a new child between passes.
+/// Returns one result per key, in input order.
+pub fn kill_tree(keys: &[ProcessKey], boot: BootId) -> Vec<OpsResult> {
+    kill_tree_with(keys, boot, &mut sys::pidfd_send_signal_raw)
+}
+
+/// `kill_tree` with the signal call passed in, so tests can record the order of signals.
+pub(crate) fn kill_tree_with(
+    keys: &[ProcessKey],
+    boot: BootId,
+    send: &mut dyn FnMut(BorrowedFd<'_>, i32) -> Result<(), Errno>,
+) -> Vec<OpsResult> {
+    tracing::debug!(count = keys.len(), "kill_tree");
+    if keys.len() > MAX_TREE_TARGETS {
+        return vec![Err(OpsError::InvalidInput("too many targets")); keys.len()];
+    }
+    // Pass 0: a key that does not verify keeps its open error and gets no signal.
+    let pidfds: Vec<OpsResult<OwnedFd>> =
+        keys.iter().map(|&key| open_verified(key, boot)).collect();
+    let mut results: Vec<OpsResult> = pidfds
+        .iter()
+        .map(|pidfd| pidfd.as_ref().map(|_| ()).map_err(Clone::clone))
+        .collect();
+    // Pass 1 stops every target, pass 2 kills every target, even one whose SIGSTOP failed. Each
+    // target keeps its first error.
+    for sig in [libc::SIGSTOP, libc::SIGKILL] {
+        for (pidfd, result) in pidfds.iter().zip(results.iter_mut()) {
+            let Ok(pidfd) = pidfd else { continue };
+            if let Err(errno) = send(pidfd.as_fd(), sig)
+                && result.is_ok()
+            {
+                *result = Err(errno.into());
+            }
+        }
+    }
+    drop(pidfds);
+    for (key, result) in keys.iter().zip(&results) {
+        tracing::debug!(pid = key.pid, ok = result.is_ok(), error = ?result.as_ref().err(), "kill_tree target");
+    }
+    results
 }
 
 #[cfg(test)]
@@ -332,5 +378,178 @@ mod tests {
             "pidfd never became readable"
         );
         assert_eq!(child.state(), b'Z');
+    }
+
+    /// Several children under one hold of the crate-wide child lock. Every child is killed and
+    /// reaped on drop.
+    struct Children {
+        children: Vec<Child>,
+        _lock: MutexGuard<'static, ()>,
+    }
+
+    impl Children {
+        fn spawn(commands: &mut [&mut Command]) -> Self {
+            let lock = lock_children();
+            let children = commands
+                .iter_mut()
+                .map(|command| command.spawn().expect("spawn child"))
+                .collect();
+            Children {
+                children,
+                _lock: lock,
+            }
+        }
+
+        fn sleeps(n: usize) -> Self {
+            let mut commands: Vec<Command> = (0..n)
+                .map(|_| {
+                    let mut command = Command::new("sleep");
+                    command.arg("60");
+                    command
+                })
+                .collect();
+            Self::spawn(&mut commands.iter_mut().collect::<Vec<_>>())
+        }
+
+        fn pid(&self, i: usize) -> u32 {
+            self.children[i].id()
+        }
+
+        fn key(&self, i: usize) -> ProcessKey {
+            key_of(self.pid(i))
+        }
+    }
+
+    impl Drop for Children {
+        fn drop(&mut self) {
+            for child in &mut self.children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn key_of(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: read_start_ticks(pid).expect("read start ticks"),
+            boot_id: BOOT,
+            pid,
+        }
+    }
+
+    /// The fields after the name in `/proc/<pid>/stat`, or `None` when the process is gone.
+    fn stat_fields(pid: u32) -> Option<Vec<String>> {
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+        let close = stat.iter().rposition(|&b| b == b')')?;
+        let rest = String::from_utf8_lossy(&stat[close + 1..]).into_owned();
+        Some(rest.split_whitespace().map(str::to_owned).collect())
+    }
+
+    /// The pid behind a pidfd, from the `Pid:` line of `/proc/self/fdinfo/<fd>`.
+    fn pidfd_pid(pidfd: BorrowedFd<'_>) -> u32 {
+        use std::os::fd::AsRawFd;
+        let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))
+            .expect("read fdinfo");
+        info.lines()
+            .find_map(|line| line.strip_prefix("Pid:"))
+            .expect("no Pid line")
+            .trim()
+            .parse()
+            .expect("parse Pid")
+    }
+
+    /// Regression test for R-037: every SIGSTOP goes out before any SIGKILL.
+    #[test]
+    fn kill_tree_stops_all_before_killing_any() {
+        let children = Children::sleeps(3);
+        let keys: Vec<ProcessKey> = (0..3).map(|i| children.key(i)).collect();
+        let mut log = Vec::new();
+        let mut send = |pidfd: BorrowedFd<'_>, sig: i32| {
+            log.push((pidfd_pid(pidfd), sig));
+            sys::pidfd_send_signal_raw(pidfd, sig)
+        };
+        let results = kill_tree_with(&keys, BOOT, &mut send);
+        assert_eq!(results, vec![Ok(()), Ok(()), Ok(())]);
+        let (a, b, c) = (children.pid(0), children.pid(1), children.pid(2));
+        assert_eq!(log, vec![(a, 19), (b, 19), (c, 19), (a, 9), (b, 9), (c, 9)]);
+    }
+
+    #[test]
+    fn kill_tree_ends_parent_and_children() {
+        let mut parent = Command::new("sh");
+        parent.args(["-c", "sleep 60 & sleep 60 & wait"]);
+        let mut children = Children::spawn(&mut [&mut parent]);
+        let parent_pid = children.pid(0);
+        let mut sleeps = Vec::new();
+        let found = wait_for(|| {
+            sleeps = std::fs::read_dir("/proc")
+                .expect("read /proc")
+                .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+                .filter(|&pid| {
+                    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"));
+                    stat_fields(pid).is_some_and(|f| f.get(1) == Some(&parent_pid.to_string()))
+                        && comm.is_ok_and(|c| c.trim() == "sleep")
+                })
+                .collect();
+            sleeps.len() == 2
+        });
+        assert!(found, "sh did not start two sleep children");
+        let mut keys = vec![key_of(parent_pid)];
+        keys.extend(sleeps.iter().map(|&pid| key_of(pid)));
+
+        assert_eq!(kill_tree(&keys, BOOT), vec![Ok(()), Ok(()), Ok(())]);
+        let status = children.children[0].wait().expect("wait parent");
+        assert_eq!(status.signal(), Some(9));
+        // The sleeps are reparented to init or a subreaper, which reaps them.
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(2)
+            && sleeps.iter().any(|&pid| stat_fields(pid).is_some())
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for pid in sleeps {
+            assert!(stat_fields(pid).is_none(), "sleep {pid} still in /proc");
+        }
+    }
+
+    #[test]
+    fn kill_tree_skips_changed_identity() {
+        let children = Children::sleeps(3);
+        let mut shifted = children.key(1);
+        shifted.start_ticks += 1;
+        let keys = [children.key(0), shifted, children.key(2)];
+        assert_eq!(
+            kill_tree(&keys, BOOT),
+            vec![Ok(()), Err(OpsError::IdentityChanged), Ok(())]
+        );
+        let state = stat_fields(children.pid(1)).expect("X is gone")[0].clone();
+        assert!(
+            state != "Z" && state != "T",
+            "X got a signal: state {state}"
+        );
+    }
+
+    #[test]
+    fn kill_tree_over_256_is_invalid() {
+        let key = key_of(std::process::id());
+        let keys = vec![key; 257];
+        let mut calls = 0;
+        let mut send = |_: BorrowedFd<'_>, _: i32| {
+            calls += 1;
+            Ok(())
+        };
+        let results = kill_tree_with(&keys, BOOT, &mut send);
+        assert_eq!(results.len(), 257);
+        assert!(
+            results
+                .iter()
+                .all(|r| *r == Err(OpsError::InvalidInput("too many targets")))
+        );
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn kill_tree_empty() {
+        assert_eq!(kill_tree(&[], BOOT), Vec::<OpsResult>::new());
     }
 }
