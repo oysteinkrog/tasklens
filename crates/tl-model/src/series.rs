@@ -220,6 +220,8 @@ impl TieredRing {
                 }
                 self.bucket_sec = Some(sec);
             }
+            // mark_gap already closed this second; do not emit it twice.
+            Some(_) if self.bucket.is_none() => return,
             Some(_) => {}
             None => self.bucket_sec = Some(sec),
         }
@@ -235,8 +237,13 @@ impl TieredRing {
         }
     }
 
-    /// Calls `mark_gap` on both tiers.
+    /// Closes the open 1 Hz bucket, then calls `mark_gap` on both tiers.
+    /// The gap lies after the open bucket, so that bucket does not get GAP_BEFORE.
+    /// Later samples from the closed second go to the fast ring only.
     pub fn mark_gap(&mut self) {
+        if let Some(b) = self.bucket.take() {
+            self.slow.push(b);
+        }
         self.fast.mark_gap();
         self.slow.mark_gap();
     }
@@ -500,5 +507,28 @@ mod tier_tests {
             .map(|x| x.flags.contains(SampleFlags::GAP_BEFORE))
             .collect();
         assert_eq!(slow, vec![true, false]);
+    }
+
+    #[test]
+    fn slow_tier_mark_gap_mid_bucket() {
+        let mut r = TieredRing::new(100_000_000);
+        r.push(Sample::valid(5 * SEC, 1.0));
+        r.push(Sample::valid(5 * SEC + 100_000_000, 2.0));
+        r.mark_gap();
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 2.0)]);
+        // A late sample from the closed second does not emit second 5 again.
+        r.push(Sample::valid(5 * SEC + 900_000_000, 9.0));
+        r.push(Sample::valid(7 * SEC, 3.0));
+        r.push(Sample::valid(7 * SEC + 100_000_000, 4.0));
+        r.push(Sample::valid(8 * SEC, 5.0));
+        let mut gap7 = Sample::valid(7 * SEC, 4.0);
+        gap7.flags |= SampleFlags::GAP_BEFORE;
+        assert_eq!(slow(&r), vec![Sample::valid(5 * SEC, 2.0), gap7]);
+        let fast_gap: Vec<bool> = r
+            .fast
+            .iter()
+            .map(|x| x.flags.contains(SampleFlags::GAP_BEFORE))
+            .collect();
+        assert_eq!(fast_gap, vec![false, false, true, false, false, false]);
     }
 }
