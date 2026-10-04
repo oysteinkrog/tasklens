@@ -144,8 +144,11 @@ impl FakeBackend {
 }
 
 fn segv() -> ! {
+    // The std runtime's stack overflow handler catches the first SIGSEGV, sees no guard page
+    // fault, restores the default action and returns. The second one ends the process.
     let _ = kill_process(getpid(), Signal::SEGV);
-    // The signal is delivered before kill returns; this only runs if it was blocked.
+    let _ = kill_process(getpid(), Signal::SEGV);
+    // Only reached if the signal was blocked.
     exit(139);
 }
 
