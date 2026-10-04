@@ -9,7 +9,7 @@ mod common;
 
 fn devices(name: &str) -> Vec<ZramDevice> {
     let mut out = Vec::new();
-    zram::enumerate(&common::fixture(name), &mut out).unwrap();
+    zram::enumerate(&common::fixture(name), &mut out).expect("enumerate zram devices");
     out
 }
 
