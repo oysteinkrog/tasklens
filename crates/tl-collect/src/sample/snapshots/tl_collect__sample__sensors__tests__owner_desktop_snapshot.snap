@@ -1,0 +1,34 @@
+---
+source: crates/tl-collect/src/sample/sensors.rs
+assertion_line: 376
+expression: text
+---
+temp nvme Some("devices/pci0000:00/0000:00:01.1/0000:01:00.0/nvme/nvme0") temp1 "Composite" Measured { value: 31.85, validity: Valid }
+temp nvme Some("devices/pci0000:00/0000:00:01.1/0000:01:00.0/nvme/nvme0") temp3 "Sensor 2" Measured { value: 74.85, validity: Valid }
+temp nvme Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:01.0/0000:23:00.0/nvme/nvme1") temp1 "Composite" Measured { value: 42.85, validity: Valid }
+temp k10temp Some("devices/pci0000:00/0000:00:18.3") temp1 "Tctl" Measured { value: 56.75, validity: Valid }
+temp k10temp Some("devices/pci0000:00/0000:00:18.3") temp3 "Tccd1" Measured { value: 51.75, validity: Valid }
+temp k10temp Some("devices/pci0000:00/0000:00:18.3") temp4 "Tccd2" Measured { value: 50.0, validity: Valid }
+temp r8169_0_2600:00 Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:04.0/0000:26:00.0/mdio_bus/r8169-0-2600/r8169-0-2600:00") temp1 "temp1" Measured { value: 37.5, validity: Valid }
+temp i350bb Some("devices/pci0000:00/0000:00:01.2/0000:20:00.0/0000:21:02.0/0000:24:00.0") temp1 "loc1" Measured { value: 52.0, validity: Valid }
+temp iwlwifi_1 Some("devices/virtual/thermal/thermal_zone0") temp1 "temp1" Measured { value: 36.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp1 "SYSTIN" Measured { value: 32.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp2 "CPUTIN" Measured { value: 43.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp3 "AUXTIN0" Measured { value: 41.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp4 "AUXTIN1" Measured { value: -128.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp5 "AUXTIN2" Measured { value: 50.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp6 "AUXTIN3" Measured { value: -2.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp7 "SMBUSMASTER 0" Measured { value: 57.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp8 "PCH_CHIP_CPU_MAX_TEMP" Measured { value: 0.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp9 "PCH_CHIP_TEMP" Measured { value: 0.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp10 "PCH_CPU_TEMP" Measured { value: 0.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp11 "PCH_MCH_TEMP" Measured { value: 0.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp12 "Agent0 Dimm0" Measured { value: 0.0, validity: Valid }
+temp nct6797 Some("devices/platform/nct6775.2592") temp13 "TSI0_TEMP" Measured { value: 57.125, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan1 label=None rpm=Measured { value: 4623, validity: Valid } max=None pwm=Measured { value: 100.0, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan2 label=None rpm=Measured { value: 810, validity: Valid } max=None pwm=Measured { value: 94.117645, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan3 label=None rpm=Measured { value: 1965, validity: Valid } max=None pwm=Measured { value: 78.82353, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan4 label=None rpm=Measured { value: 1982, validity: Valid } max=None pwm=Measured { value: 79.60784, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan5 label=None rpm=Measured { value: 0, validity: Valid } max=None pwm=Measured { value: 57.64706, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan6 label=None rpm=Measured { value: 2036, validity: Valid } max=None pwm=Measured { value: 80.0, validity: Valid } control=Measured { value: Automatic, validity: Valid }
+fan nct6797 Some("devices/platform/nct6775.2592") fan7 label=None rpm=Measured { value: 0, validity: Valid } max=None pwm=Measured { value: 0.0, validity: Valid } control=Measured { value: Automatic, validity: Valid }
