@@ -9,6 +9,7 @@ tl-model   = { workspace = true }
 tl-collect = { workspace = true }
 tl-ops     = { workspace = true }
 asupersync = { workspace = true }
+rustc-hash = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
