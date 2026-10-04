@@ -1,6 +1,7 @@
 //! Developer tasks for tasklens. Not shipped.
 #![allow(clippy::print_stdout)]
 
+mod bench;
 mod capture_fixture;
 mod check_deps;
 
@@ -14,6 +15,7 @@ fn dispatch(args: Vec<String>) -> anyhow::Result<()> {
     let cmd = args.next();
     let rest: Vec<String> = args.collect();
     match cmd.as_deref() {
+        Some("bench") => bench::run(bench::parse_args(&rest)?),
         Some("capture-fixture") => capture_fixture::run(&rest),
         Some("check-deps") => check_deps::run(rest),
         Some(other) => anyhow::bail!("unknown xtask subcommand: {other}"),
