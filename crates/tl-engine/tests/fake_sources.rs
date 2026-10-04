@@ -129,13 +129,16 @@ pub fn lab() -> LabRuntime {
     LabRuntime::new(LabConfig::new(42).max_steps(1_000_000))
 }
 
-pub fn channels() -> (
+/// The reducer's queue (both ends) and the three watch senders.
+pub type Channels = (
     mpsc::Sender<EngineMsg>,
     mpsc::Receiver<EngineMsg>,
     watch::Sender<Demand>,
     watch::Sender<EngineSettings>,
     watch::Sender<WorkerControl>,
-) {
+);
+
+pub fn channels() -> Channels {
     let (updates, rx) = mpsc::channel::<EngineMsg>(256);
     let (demand, _) = watch::channel(Demand::default());
     let (settings, _) = watch::channel(EngineSettings::default());
@@ -178,6 +181,12 @@ pub struct FakeLab {
     pub lab: LabRuntime,
     pub clock: Arc<VirtualClock>,
     pub root: RegionId,
+}
+
+impl Default for FakeLab {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FakeLab {
