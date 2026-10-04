@@ -577,3 +577,182 @@ source; [guess] a writer-level choice no doc settles.
 - Basis: 00-epics §2 `pages/processes/mod.rs` sharing rule names E23 [verified].
 - Owner decision: no
 - Changes: none; confirm gma.35 and gma.37 depend on pdu.41 and pdu.42 (Edges).
+
+---
+
+## H. Charts, Performance, minigraphs, system tables
+
+### OI-U58 Chart validity and the E19 model constants
+- Raised by: E19-5, E19-1, E19-2, E19-3, E19-4, E25-OI-2
+- Question: the chart cannot tell Failed from Restricted from Unsupported by itself; the pages need `MetricId` constants, the `TIER_1HZ` bit, `ceil_pow2` and `ceil_125`, and thread CPU time that tl-model does not yet define.
+- Answer: E19-5 accepted: the owner page calls `ChartView::set_state` from the `SourceHealth` of the source it knows; the chart derives only WarmingUp and Stale. The four model items are see engine side (E03-A1). UI consequences that hold whatever the engine answer: E24 and E25 beads name series by their UI-PRF names and stop and report when a constant is missing; E19-013 (yrf.15) waits for the `TIER_1HZ` bit; E19-004 (yrf.6) defines nothing privately and stops and reports if `tl_model::units::{ceil_pow2, ceil_125}` are absent; E19-005 reports 0 thread CPU until `thread_cpu_ns` exists (OI-U03).
+- Basis: UI-PRF-001, UI-PRF-006, ADR-014 [verified].
+- Owner decision: no
+- Changes: none here.
+
+### OI-U59 Performance frame items
+- Raised by: E24-6, E24-7, E24-10, E24-9
+- Answer: E24-6 accepted: where `DeviceIdentity` has no by-path or device path, the UI key is `disk:<name>` and `fan:<chip>:<index>`; PERF-005 gets those as its fallback forms. E24-7 accepted: `DevicePage::set_active(&mut self, active: bool, cx)` is on the trait from E24-006 (crw.8); E25-010 (o55.11) adds it only if missing. E24-10 accepted: `CpuPage.bench_show_both` is a public field in crw.11; the paint hook is `AnimationDriver.paint_log` behind `cfg(any(test, feature = "test-hooks"))`, so E01-001 (wlf.3) declares `bench = ["test-hooks"]` in `tl-ui/Cargo.toml`. E24-9 (fan `connected` flag on the record) is see engine side.
+- Basis: PERF-005, UI-PRF-053, leader-notes E01 lines [verified].
+- Owner decision: no
+- Changes: performance.md PERF-005 (merged spec) and UI-PRF-011: add the fallback key forms. Bead crw.8: `set_active` on the trait. Bead wlf.3: the feature line.
+
+### OI-U60 Device page items
+- Raised by: E25-OI-4, E25-OI-5, E25-OI-7, E25-OI-8, E25-OI-1, E25-OI-6
+- Answer: E25-OI-4: edge `o55.22` depends on `bj6.20` (`request_public_ip_fetch` lives in E21-017 and shows the notice window first; E28-036, 9o0.32, calls the same helper). E25-OI-5 accepted: PWM is pre-scaled into the RPM axis through a derived `SeriesView` kept by the page; if E19 gains a per-series `YScale` the derived series goes. E25-OI-7 accepted: the UPower `Type` and `State` word mapping lives in `pages/perf/battery.rs` (E25-027, o55.28). E25-OI-8: `GridStyle.vertical_at: Option<Arc<[f32]>>` and `ChartSeries.gap_style: GapStyle::{Break, Dashed}` are added to E19-001's types by E25-032 (o55.33) as a same-batch chain edit; no E19 follow-up bead. E25-OI-1 (SMART, eject, public IP commands and records) and E25-OI-6 (`LaunchWhat::DbusActivate`) are see engine side; the five E25 beads that need them stop and report.
+- Basis: UI-PRF-034, PERF-060, UI-SYS-095 [verified].
+- Owner decision: no
+- Changes: edge `o55.22` depends on `bj6.20` (Edges). Bead yrf.3 (E19-001): a note that E25-032 extends `GridStyle` and `ChartSeries`.
+
+### OI-U61 Minigraph items
+- Raised by: E26-OI-4, E26-OI-6, E26-OI-1, E26-OI-2
+- Answer: E26-OI-4: edge `xdh.12` depends on `bj6.35` and E26-010 calls the shared Graph Color submenu builder. E26-OI-6 accepted: card reorder is pointer-only; Reset Minigraph Layout is the keyboard path. E26-OI-1 (aggregate devices) and E26-OI-2 (per-process series) are see engine side; E26-003 (xdh.5) and E26-011 (xdh.13) stop and report if undecided.
+- Basis: UI-PRF-040 to 044 [verified].
+- Owner decision: no
+- Changes: edge `xdh.12` depends on `bj6.35` (Edges).
+
+### OI-U62 Services items
+- Raised by: E27-1, E27-8, E27-9, E27-7, E27-5
+- Answer: E27-1 accepted: on `CommandError::Busy`, `SysQuery.last_sent` still becomes the new generation (older views are refused), `pending_resend = true`, and the next snapshot resends once with a fresh generation; on `EngineStopped` nothing is resent. E27-8: `ToastKey` values at or above `0x8000_0000_0000_0000` are fixed keys reserved by E16-006 (fut.9); the tracker's generated keys (`id << 8 | index`) never reach that range because `ActionId` stays below 2^55; `SERVICES_LOADING_TOAST = ToastKey(0x8000_0000_0000_0101)`; the E28 pages take `..0201` (Startup) and `..0301` (Connections). E27-9 accepted: `hk6.23` depends on `gma.1` (exists) and E23-A1 joins the E27 row of 00-epics §4. E27-7: the UI sends `UnitEnable` or `UnitDisable` when leaving Masked; the unmask inside that request is see engine side. E27-5 (Services `ColumnId` constants) is see engine side.
+- Basis: UI-SYS-002, UI-SYS-007, UI-FND-020 `ToastKey` [verified]; the reserved range [inferred].
+- Owner decision: no
+- Changes: 00-epics §4: E23-A1 in the E27 row. foundation.md UI-FND-020: the fixed-key range. Bead fut.9: document the range.
+
+### OI-U63 Startup Apps, Connections and Information items
+- Raised by: E28-7, E28-15, E28-1, E28-2, E28-3, E28-4, E28-9, E28-11, E28-12, E28-13
+- Answer: E28-7: the Information skeleton follows UI-SYS-085 (every section shows its band and an 8-line skeleton block); shell.md's "4 section blocks 120 tall" is corrected. E28-15 accepted: E27-A2, E29-A2, E29-A3, E25-A1 and E03-A2 join the E28 row of 00-epics §4. The other eight (public IP command and `SourceId`, `InventorySnapshot` fields, `committed_peak`, the 64-bit rule, `ActionError::AlreadyRunning`, system-table `ColumnId`s, startup entry fields, connection display fields) are see engine side; the E28 beads read "the E03 field of that meaning" and stop and report when it is missing. UI half of E28-9: `ActionError::AlreadyRunning` maps to the Info toast "Already running" in `message()` once it exists.
+- Basis: UI-SYS-085, UI-SHL-111, SYS-023 [verified].
+- Owner decision: no
+- Changes: shell.md UI-SHL-111: skeleton per UI-SYS-085. 00-epics §4: the five E28 row additions.
+
+### OI-U64 E22 epic-row additions and the build-rule note
+- Raised by: B8-E22-5, B8-E22-16
+- Answer: E19-A1 and E01-A1 join the E22 row of 00-epics §4 (edges exist). B8-E22-16 needs no answer: the leader is rewriting the build lines in every bead.
+- Basis: 00-epics §4 [verified].
+- Owner decision: no
+- Changes: 00-epics §4: E22 row.
+
+### OI-U65 Topics settled on the engine side
+- Raised by: the items below
+- Answer: see engine side (`open-items-engine.md`) for every one of these. Listed here so no raiser is lost:
+  | Raiser | Topic |
+  |---|---|
+  | E25-OI-1, B8-E28-1, B7-E20-11 | SMART, eject, public IP commands, `SourceId::PublicIp`, `PublicIpState` |
+  | B8-E22-1 | `ProcessRecord`, `TableRow`, `GroupRow`, `TableTotals` fields and capability bits |
+  | B5-2, B5-22, B5-30, E19-4, B7-E21-9 | crate allow-list rows (OI-U03 has the UI facts) |
+  | B5-38 | E33 `UiLaunch` (OI-U02 has the UI half) |
+  | B5-6 | `SystemSnapshot.color_scheme` and its portal reader |
+  | B5-7 | `HealthSnapshot.helper: HelperState` |
+  | B7-E21-5 | `tl-app/build.rs` and the licence file (OI-U01 names the fields) |
+  | B7-E23-3 | `write_atomic` for run history (OI-U01 names the callbacks) |
+  | E19-1, E19-2, E19-3, E25-OI-2 | `MetricId` constants, `TIER_1HZ` bit, `ceil_pow2`, `ceil_125` |
+  | E24-9 | fan `connected` flag |
+  | E25-OI-6 | `LaunchWhat::DbusActivate` |
+  | E26-OI-1, E26-OI-2 | aggregate devices, per-process series |
+  | B7-E21-11 | `SetupStep::PolkitRule`, `SetupEvent` |
+  | B7-E23-6 (engine half) | helper routing for Restricted detail targets |
+  | B8-E22-10 | KWin command result event |
+  | B8-E27-3 (engine half), B8-E27-7 | D-Bus error name in `UnitJob`, unmask before enable |
+  | B8-E27-5, B8-E28-11 | `ColumnId` constants for the system tables |
+  | B8-E28-2, B8-E28-3, B8-E28-4 | `InventorySnapshot` fields, `committed_peak`, 64-bit rule |
+  | B8-E28-9 | `ActionError::AlreadyRunning` |
+  | B8-E28-12, B8-E28-13 | startup entry and connection display fields |
+- Owner decision: no
+- Changes: none here.
+
+---
+
+## Edges
+
+Lines for the leader; each is new unless marked "exists" (checked with `br dep list` on 2026-10-04).
+
+```
+br dep add tasklens-cr0.1  tasklens-fut.15   # E33-A1 calls tl_ui::run(UiLaunch) (OI-U02)
+br dep add tasklens-o55.22 tasklens-bj6.20   # E25-021 calls request_public_ip_fetch from E21-017 (OI-U60)
+br dep add tasklens-9o0.32 tasklens-bj6.20   # E28-036 calls the same helper (OI-U60)
+br dep add tasklens-xdh.12 tasklens-bj6.35   # E26-010 uses the shared Graph Color submenu (OI-U61)
+br dep add tasklens-xdh.20 tasklens-jqk.30   # E26-018 wraps has_key and un-ignores the keep-detached test (OI-U48)
+br dep add tasklens-jqk.15 <E18-017>         # scale change calls restore_first_visible_row (OI-U17)
+br dep add <E18-017>       tasklens-rsf.1    # new E18 bead builds on the tree table (OI-U17)
+br dep add <E20-029>       tasklens-jqk.24   # secondary-window keep-above extends the Main handler (OI-U06)
+br dep add <E20-029>       tasklens-fut.12   # needs WindowKey::Main and the caption field (OI-U06)
+br dep add <E20-029>       tasklens-y6k.2    # KWin bridge sends KeepAbove (OI-U06)
+br dep add <E17-015>       tasklens-lgw.7    # eight palettes after the two defaults (OI-U40)
+br dep add <E15-026>       tasklens-ug9.25   # final icon replaces the placeholder (OI-U42)
+br dep add tasklens-gma.35 tasklens-pdu.41   # optional: handler after the menu item (OI-U57); anchor edge to pdu.2 exists
+br dep add tasklens-gma.37 tasklens-pdu.42   # optional, same (OI-U57)
+# exists: tasklens-lgw.8 -> tasklens-yrf.1 (OI-U39); tasklens-wlf.10 -> tasklens-pdu.1 (OI-U16);
+#         tasklens-hk6.23 -> tasklens-gma.1 (OI-U62); tasklens-bj6.46 -> tasklens-qfx.2, qfx.3 (OI-U52)
+```
+
+New beads named above: E18-017 (OI-U17), E20-029 (OI-U06), E17-015 (OI-U40), E15-026 (OI-U42).
+
+## Summary
+
+| OI | Title | Owner decision | Beads unblocked or changed |
+|---|---|---|---|
+| OI-U01 | `UiInit` and `AppEnv` | no | fut.1, bj6.3, bj6.8, bj6.14, bj6.17, bj6.42, bj6.44, bj6.45, gma.31 |
+| OI-U02 | `tl_ui::run(UiLaunch)` | no | fut.15, cr0.1 |
+| OI-U03 | Crates the UI asked for | no | engine side; ug9.6, fut.8 wait |
+| OI-U04 | `RefreshCurrentTab` | no | none |
+| OI-U05 | `ShowSystemInformation` | no | none |
+| OI-U06 | `WindowKey::Main`, caption on pin | no | fut.12, new E20-029 |
+| OI-U07 | No X11 keep-above in v1 | no | none |
+| OI-U08 | `QuitMode::Explicit` verified | no | jqk.1, fut.15 |
+| OI-U09 | Action declaration homes | no | none |
+| OI-U10 | `EnableAllColumns` in E18 | no | rsf.2 |
+| OI-U11 | Picker file in `table/` | no | none |
+| OI-U12 | Scrollbar 16 | no | none |
+| OI-U13 | Picker rows 28, filter md | no | none |
+| OI-U14 | Delegate methods, header actions | no | pdu.1, hk6.1, 9o0.1 |
+| OI-U15 | Icons added and dropped | no | ug9.1, ug9.8 |
+| OI-U16 | `scroll_handle` for the bench | no | rsf.1, wlf.10 |
+| OI-U17 | First row across scale change | no | new E18-017, jqk.15 |
+| OI-U18 | One filter debounce | no | pdu.27 |
+| OI-U19 | `SHIPPED_PHASE` | no | none |
+| OI-U20 | Name cell gaps | no | none |
+| OI-U21 | Picker groups | no | none |
+| OI-U22 | Subtree walk | no | none |
+| OI-U23 | Flat table, no `TlStaticTable` | no | none |
+| OI-U24 | Toolbar slot ownership | no | none |
+| OI-U25 | Toast top 72 everywhere | no | fut.9 |
+| OI-U26 | `message()`, reject texts, deadlines | no | fut.3, pdu.20 |
+| OI-U27 | `ActionTracker` contract | no | fut.3, jqk.18, hk6.9, gma.5, gma.6, gma.7 |
+| OI-U28 | Confirmation precedence | no | none |
+| OI-U29 | Copy rounding, clipboard | no | pdu.2, hk6.8, hk6.14 |
+| OI-U30 | Fluent prefixes and slugs | no | none |
+| OI-U31 | Small texts | no | none |
+| OI-U32 | "Grant access" | no | none |
+| OI-U33 | System-table action toasts | no | none |
+| OI-U34 | "N selected", kernel sockets | no | none |
+| OI-U35 | Session type wording | no | none |
+| OI-U36 | Jump default texts | no | none |
+| OI-U37 | Scheduler line device | no | none |
+| OI-U38 | Combo filter at 12 | no | none |
+| OI-U39 | Theme store needs | no | yrf.7, E21 theme toasts |
+| OI-U40 | themes.json (U-18) | yes | lgw.7 split, new E17-015 |
+| OI-U41 | TS1 code (U-17) | yes | lgw.12 |
+| OI-U42 | Application icon artwork | yes | ug9.25, new E15-026 |
+| OI-U43 | Recording U-nn | no | none |
+| OI-U44 | P0 pull-forward | no | none |
+| OI-U45 | RTL golden font | no | none |
+| OI-U46 | Double-click expands | no | pdu.1 |
+| OI-U47 | Health items per tab | no | none |
+| OI-U48 | Registry queries, close row 2 | no | fut.2, jqk.30, xdh.20 |
+| OI-U49 | Start hidden without tray | no | none |
+| OI-U50 | Shortcut headings | no | none |
+| OI-U51 | Fans group storage | no | none |
+| OI-U52 | Passwordless setup step | no | engine side |
+| OI-U53 | Set Affinity P1 | no | none |
+| OI-U54 | Dump name sanitising | no | none |
+| OI-U55 | Shared libraries nodes | no | none |
+| OI-U56 | After Grant access | no | none |
+| OI-U57 | VirusTotal and dump handlers | no | none |
+| OI-U58 | Chart validity, E19 constants | no | engine side |
+| OI-U59 | Performance frame items | no | crw.8, wlf.3 |
+| OI-U60 | Device page items | no | o55.22, 9o0.32, yrf.3 |
+| OI-U61 | Minigraph items | no | xdh.12 |
+| OI-U62 | Services items | no | fut.9 |
+| OI-U63 | Startup, Connections, Information | no | engine side |
+| OI-U64 | E22 row additions | no | none |
+| OI-U65 | Engine-side pointer list | no | none |
