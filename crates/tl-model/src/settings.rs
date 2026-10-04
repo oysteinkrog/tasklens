@@ -3,10 +3,12 @@
 //! `tl-app` loads and saves `settings.toml`; this module only defines its shape and defaults.
 //! TOML section names are the `Settings` field names and keys are the struct field names.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::actions::DumpMode;
-use crate::table::TableMode;
+use crate::table::{ServiceStateFilter, TableMode, UnitType};
 
 /// First line of `settings.toml` and `state.toml`.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -52,6 +54,12 @@ pub enum NetworkUnit {
     Bytes,
 }
 
+/// `performance.graph_range_s` choices in seconds. 300 and 600 come with P2.
+pub const GRAPH_RANGES_S: [u16; 4] = [30, 60, 300, 600];
+
+/// The menu choices for `history.retention_h`.
+pub const HISTORY_RETENTION_MENU_H: [u8; 7] = [1, 2, 3, 4, 6, 8, 12];
+
 /// `tables.column_resize` (R-075), applied to every table.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +67,44 @@ pub enum ColumnResize {
     #[default]
     Proportional,
     LastColumn,
+}
+
+/// `performance.cpu_graph_mode`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuGraphMode {
+    Overall,
+    #[default]
+    PerCore,
+    AllCoresOverlaid,
+    AllCoresStacked,
+}
+
+/// `performance.cpu_secondary_graph`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CpuSecondaryGraph {
+    None,
+    #[default]
+    Power,
+    Clock,
+    Temperature,
+}
+
+/// Entries of `performance.gpu_optional_graphs`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuOptionalGraph {
+    Power,
+    Clocks,
+}
+
+/// Values of `performance.device_overrides`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeviceVisibility {
+    Show,
+    Hide,
 }
 
 /// `[general]`.
@@ -225,6 +271,223 @@ impl Default for PropertiesSettings {
     }
 }
 
+/// `[performance]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PerformanceSettings {
+    /// One of `GRAPH_RANGES_S`.
+    pub graph_range_s: u16,
+    pub cpu_graph_mode: CpuGraphMode,
+    pub cpu_kernel: bool,
+    pub cpu_secondary_graph: CpuSecondaryGraph,
+    pub gpu_optional_graphs: Vec<GpuOptionalGraph>,
+    /// Engine keys.
+    pub hidden_gpu_engines: Vec<String>,
+    pub memory_composition: bool,
+    pub memory_swap_graph: bool,
+    pub show_disks: bool,
+    pub show_gpus: bool,
+    pub show_fans: bool,
+    pub show_batteries: bool,
+    pub show_network_wired: bool,
+    pub show_network_wireless: bool,
+    /// VPN and tunnel interfaces.
+    pub show_network_vpn: bool,
+    pub show_network_virtual: bool,
+    pub show_network_other: bool,
+    pub show_disconnected_fans: bool,
+    /// Device keys in sidebar order (PERF-005).
+    pub device_order: Vec<String>,
+    /// Device key to show or hide.
+    pub device_overrides: BTreeMap<String, DeviceVisibility>,
+    pub curved_lines: bool,
+    /// `false` scales the network graph to the link speed.
+    pub network_dynamic_scale: bool,
+}
+
+impl Default for PerformanceSettings {
+    fn default() -> Self {
+        Self {
+            graph_range_s: 60,
+            cpu_graph_mode: CpuGraphMode::PerCore,
+            cpu_kernel: true,
+            cpu_secondary_graph: CpuSecondaryGraph::Power,
+            gpu_optional_graphs: Vec::new(),
+            hidden_gpu_engines: Vec::new(),
+            memory_composition: true,
+            memory_swap_graph: true,
+            show_disks: true,
+            show_gpus: true,
+            show_fans: true,
+            show_batteries: true,
+            show_network_wired: true,
+            show_network_wireless: true,
+            show_network_vpn: true,
+            show_network_virtual: false,
+            show_network_other: true,
+            show_disconnected_fans: false,
+            device_order: Vec::new(),
+            device_overrides: BTreeMap::new(),
+            curved_lines: false,
+            network_dynamic_scale: true,
+        }
+    }
+}
+
+/// One `[fans]` entry, keyed by fan key (P3). Both fields are left out of the file when `None`.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FanOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// `"<hwmon name>:<path>:tempN"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temp: Option<String>,
+}
+
+/// `[graphs]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GraphsSettings {
+    pub minigraph_cpu: bool,
+    pub minigraph_memory: bool,
+    pub minigraph_disk: bool,
+    pub minigraph_network: bool,
+    pub minigraph_gpu: bool,
+    pub minigraph_vram: bool,
+    pub minigraph_gpu_temperature: bool,
+    pub keep_detached_on_close: bool,
+}
+
+impl Default for GraphsSettings {
+    fn default() -> Self {
+        Self {
+            minigraph_cpu: true,
+            minigraph_memory: true,
+            minigraph_disk: true,
+            minigraph_network: true,
+            minigraph_gpu: true,
+            minigraph_vram: true,
+            minigraph_gpu_temperature: false,
+            keep_detached_on_close: false,
+        }
+    }
+}
+
+/// `[history]` (P3, D-003).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistorySettings {
+    pub enabled: bool,
+    /// 1..=12; the menu offers `HISTORY_RETENTION_MENU_H`.
+    pub retention_h: u8,
+    /// `false` deletes the segments at shutdown.
+    pub persist: bool,
+    /// Not in menus.
+    pub max_disk_mb: u32,
+}
+
+impl Default for HistorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            retention_h: 6,
+            persist: true,
+            max_disk_mb: 256,
+        }
+    }
+}
+
+/// `[window]`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowSettings {
+    pub close_with_esc: bool,
+    pub always_on_top: bool,
+}
+
+/// `[tray]` (P3).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraySettings {
+    pub close_to_tray: bool,
+    pub minimize_to_tray: bool,
+    pub always_show: bool,
+}
+
+/// `[startup]`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupSettings {
+    pub start_at_login: bool,
+    pub start_minimized: bool,
+}
+
+/// `[network]`. The fetched public IP is never stored here (PERF-060).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NetworkSettings {
+    pub auto_fetch_public_ip: bool,
+    /// Consent flag for the public IP lookup.
+    pub public_ip_notice_accepted: bool,
+}
+
+/// `[privilege]` (P3, P4).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivilegeSettings {
+    pub unlock_at_launch: bool,
+    pub passwordless: bool,
+}
+
+/// `[rendering]` (P4).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderingSettings {
+    /// `"auto"`, `"software"`, `"pci:<bus id>"` or `"name:<adapter name>"` (R-237).
+    pub gpu: String,
+}
+
+impl Default for RenderingSettings {
+    fn default() -> Self {
+        Self {
+            gpu: "auto".to_owned(),
+        }
+    }
+}
+
+/// `[services]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServicesSettings {
+    pub unit_types: Vec<UnitType>,
+    /// Empty means all states.
+    pub filter_states: Vec<ServiceStateFilter>,
+}
+
+impl Default for ServicesSettings {
+    fn default() -> Self {
+        Self {
+            unit_types: UnitType::DEFAULT_SHOWN.to_vec(),
+            filter_states: Vec::new(),
+        }
+    }
+}
+
+/// `[lowmem]` (P3).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LowmemSettings {
+    pub enabled: bool,
+}
+
+/// `[debug]`.
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugSettings {
+    pub show_fps: bool,
+}
+
 /// The whole of `settings.toml`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -238,6 +501,20 @@ pub struct Settings {
     pub processes: ProcessesSettings,
     pub tables: TablesSettings,
     pub properties: PropertiesSettings,
+    pub performance: PerformanceSettings,
+    /// Fan key to override (P3).
+    pub fans: BTreeMap<String, FanOverride>,
+    pub graphs: GraphsSettings,
+    pub history: HistorySettings,
+    pub window: WindowSettings,
+    pub tray: TraySettings,
+    pub startup: StartupSettings,
+    pub network: NetworkSettings,
+    pub privilege: PrivilegeSettings,
+    pub rendering: RenderingSettings,
+    pub services: ServicesSettings,
+    pub lowmem: LowmemSettings,
+    pub debug: DebugSettings,
 }
 
 impl Default for Settings {
@@ -252,6 +529,19 @@ impl Default for Settings {
             processes: ProcessesSettings::default(),
             tables: TablesSettings::default(),
             properties: PropertiesSettings::default(),
+            performance: PerformanceSettings::default(),
+            fans: BTreeMap::new(),
+            graphs: GraphsSettings::default(),
+            history: HistorySettings::default(),
+            window: WindowSettings::default(),
+            tray: TraySettings::default(),
+            startup: StartupSettings::default(),
+            network: NetworkSettings::default(),
+            privilege: PrivilegeSettings::default(),
+            rendering: RenderingSettings::default(),
+            services: ServicesSettings::default(),
+            lowmem: LowmemSettings::default(),
+            debug: DebugSettings::default(),
         }
     }
 }
@@ -360,6 +650,113 @@ mod tests {
         assert_name(NetworkUnit::Bytes, "bytes");
         assert_name(ColumnResize::Proportional, "proportional");
         assert_name(ColumnResize::LastColumn, "last_column");
+    }
+
+    #[test]
+    fn defaults_performance_to_debug() {
+        let s = Settings::default();
+
+        let p = &s.performance;
+        assert_eq!(p.graph_range_s, 60);
+        assert_eq!(p.cpu_graph_mode, CpuGraphMode::PerCore);
+        assert!(p.cpu_kernel);
+        assert_eq!(p.cpu_secondary_graph, CpuSecondaryGraph::Power);
+        assert!(p.gpu_optional_graphs.is_empty());
+        assert!(p.hidden_gpu_engines.is_empty());
+        assert!(p.memory_composition);
+        assert!(p.memory_swap_graph);
+        assert!(p.show_disks);
+        assert!(p.show_gpus);
+        assert!(p.show_fans);
+        assert!(p.show_batteries);
+        assert!(p.show_network_wired);
+        assert!(p.show_network_wireless);
+        assert!(p.show_network_vpn);
+        assert!(!p.show_network_virtual);
+        assert!(p.show_network_other);
+        assert!(!p.show_disconnected_fans);
+        assert!(p.device_order.is_empty());
+        assert!(p.device_overrides.is_empty());
+        assert!(!p.curved_lines);
+        assert!(p.network_dynamic_scale);
+
+        assert!(s.fans.is_empty());
+        assert_eq!(
+            FanOverride::default(),
+            FanOverride {
+                label: None,
+                temp: None
+            }
+        );
+
+        let g = &s.graphs;
+        assert!(g.minigraph_cpu);
+        assert!(g.minigraph_memory);
+        assert!(g.minigraph_disk);
+        assert!(g.minigraph_network);
+        assert!(g.minigraph_gpu);
+        assert!(g.minigraph_vram);
+        assert!(!g.minigraph_gpu_temperature);
+        assert!(!g.keep_detached_on_close);
+
+        assert!(!s.history.enabled);
+        assert_eq!(s.history.retention_h, 6);
+        assert!(s.history.persist);
+        assert_eq!(s.history.max_disk_mb, 256);
+
+        assert!(!s.window.close_with_esc);
+        assert!(!s.window.always_on_top);
+
+        assert!(!s.tray.close_to_tray);
+        assert!(!s.tray.minimize_to_tray);
+        assert!(!s.tray.always_show);
+
+        assert!(!s.startup.start_at_login);
+        assert!(!s.startup.start_minimized);
+
+        assert!(!s.network.auto_fetch_public_ip);
+        assert!(!s.network.public_ip_notice_accepted);
+
+        assert!(!s.privilege.unlock_at_launch);
+        assert!(!s.privilege.passwordless);
+
+        assert_eq!(s.rendering.gpu, "auto");
+
+        assert_eq!(
+            s.services.unit_types,
+            [
+                UnitType::Service,
+                UnitType::Socket,
+                UnitType::Timer,
+                UnitType::Mount
+            ]
+        );
+        assert!(s.services.filter_states.is_empty());
+
+        assert!(!s.lowmem.enabled);
+        assert!(!s.debug.show_fps);
+    }
+
+    #[test]
+    fn enum_serde_names_part_two() {
+        assert_name(CpuGraphMode::Overall, "overall");
+        assert_name(CpuGraphMode::PerCore, "per_core");
+        assert_name(CpuGraphMode::AllCoresOverlaid, "all_cores_overlaid");
+        assert_name(CpuGraphMode::AllCoresStacked, "all_cores_stacked");
+        assert_name(CpuSecondaryGraph::None, "none");
+        assert_name(CpuSecondaryGraph::Power, "power");
+        assert_name(CpuSecondaryGraph::Clock, "clock");
+        assert_name(CpuSecondaryGraph::Temperature, "temperature");
+        assert_name(GpuOptionalGraph::Power, "power");
+        assert_name(GpuOptionalGraph::Clocks, "clocks");
+        assert_name(DeviceVisibility::Show, "show");
+        assert_name(DeviceVisibility::Hide, "hide");
+    }
+
+    #[test]
+    fn menus_and_ranges_constants() {
+        assert_eq!(GRAPH_RANGES_S, [30, 60, 300, 600]);
+        assert_eq!(HISTORY_RETENTION_MENU_H, [1, 2, 3, 4, 6, 8, 12]);
     }
 
     fn not_unit_variant() -> ValueError {
