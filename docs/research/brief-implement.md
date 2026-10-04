@@ -20,7 +20,11 @@ Do not pick up any other bead.
    `index.lock`, wait and retry; never delete it.
 6. Run the bead's tests, `cargo fmt --check` and `cargo clippy -p <crate> --all-targets -- -D
    warnings`, all through `heavy-build`. Builds queue on one machine-wide lock, so start them in
-   the background and wait for the result; always read the output before you report. If another
+   the background and wait for the result; always read the output before you report. Completion
+   notices for background commands are sometimes lost, so do not go idle waiting for one: write
+   the build output to a file and wait with a foreground loop such as
+   `until grep -qE '^(EXIT|exit) ' out.txt; do sleep 10; done` (append `; echo "EXIT $?"` to the
+   build command), then read the file. If another
    agent's half-finished work breaks the workspace build, wait a few minutes and retry once, then
    report it. Fix your own failures in follow-up commits. Never amend.
 7. If the bead cannot be finished as written (an API that does not exist, a decision the docs do
