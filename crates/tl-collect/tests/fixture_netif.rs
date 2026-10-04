@@ -1,5 +1,6 @@
 //! Network interface enumeration, kinds and state against the `netif-kinds` hand fixture and the
 //! captured `owner-desktop` fixture (ADR-016, PERF-054, R-162).
+#![allow(clippy::unwrap_used)]
 use std::fmt::Write as _;
 
 use tl_collect::parse::netif::{self, IfaceKind, NetIface, OperState};

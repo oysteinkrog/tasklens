@@ -88,10 +88,10 @@ pub fn enumerate(root: &SysRoot, out: &mut Vec<NetIface>) -> Result<(), CollectE
     let mut names: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&class)? {
         let entry = entry?;
-        if let Ok(name) = entry.file_name().into_string() {
-            if name != "lo" {
-                names.push(name);
-            }
+        if let Ok(name) = entry.file_name().into_string()
+            && name != "lo"
+        {
+            names.push(name);
         }
     }
     names.sort_unstable();
@@ -301,7 +301,11 @@ mod tests {
         fs::create_dir_all(&ns).unwrap();
         symlink("net:[7]", ns.join("net")).unwrap();
         let net = dir.path().join("sys/class/net");
-        for (name, ty, ifindex) in [("a0", "1", "2"), ("b0", "x", "3"), ("c0", "1", "4294967296")] {
+        for (name, ty, ifindex) in [
+            ("a0", "1", "2"),
+            ("b0", "x", "3"),
+            ("c0", "1", "4294967296"),
+        ] {
             fs::create_dir_all(net.join(name)).unwrap();
             fs::write(net.join(name).join("type"), ty).unwrap();
             fs::write(net.join(name).join("ifindex"), ifindex).unwrap();
