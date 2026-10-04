@@ -310,7 +310,7 @@ beads and only the listed doc edits are needed.
   (ADR-007). Rule 4 list becomes four files: `crates/tl-ops/src/sys.rs`,
   `crates/tl-engine/src/gpu/spawn.rs`, `crates/tl-app/src/main.rs`,
   `crates/tl-gpu-probe/src/api_versions.rs`, each with `#![allow(unsafe_code)]` and a `// SAFETY:`
-  comment per block. ndy.8 is written to this answer and is unblocked. Alternative: drop the
+  comment per block. ndy.8 already follows this answer; it is unblocked. Alternative: drop the
   mode and show `Unknown` for Vulkan and OpenGL (loses PERF-071 rows on every machine).
 - Basis: ADR-001 rule 4 [verified]; ADR-007 API versions mode and R-087 [verified]; ndy.8 text
   [verified]; ash and khronos-egl API shape [inferred, crates not on disk].
@@ -449,7 +449,7 @@ beads and only the listed doc edits are needed.
     drop the "until E29-OI-3 lands" notes.
   - 9o0 "Already running" bead (UI side): match `Rejected(AlreadyRunning)`.
 
-### OI-E11 Engine answers outside ActionEvent: setup state and the window pick
+### OI-E11 Setup state and window pick answers
 - Raised by: E03 contracts items 16 and 17, E29-OI-4, E29-OI-14, E14 item 7.
 - Question: where `SetupStatus`, setup run progress and the KWin pick result travel, and the
   final `SetupStep` list.
@@ -652,7 +652,7 @@ beads and only the listed doc edits are needed.
   line; depends on 8q0.1, as2.2; xdh's E26-011 and wox.9 depend on it). dwy.4 (E10
   ProcessesSource): period rule for `graph_targets`.
 
-### OI-E17 tl-model core types: ColumnId numbers, NodeId, health and device entries
+### OI-E17 tl-model core types review
 - Raised by: E03 first-half items 1, 2, 3, 7, 8, 9, 10, 11, 13; B1 item 6; E12-OI-6; B3
   items 11 and 14; E13 health note.
 - Question: the derived values in E03-A1's beads that B1 asked to have reviewed.
@@ -1063,7 +1063,7 @@ beads and only the listed doc edits are needed.
 - Question: the on-disk block fields and format details, and the two data shapes.
 - Answer: OI-2: `HistMeta { exe_path, user, uid, system }`,
   `Block { gap_before, mem_total_kib, catalog: Option<Vec<HistDevice>> }`,
-  `HistDevice { idx, kind, parent, name }` are accepted and ADR-012 is edited to match before
+  `HistDevice { idx, kind, parent, name }` hold; ADR-012 gets the same fields now, before
   any file exists; OI-3: all nine on-disk details accepted as written (little-endian header
   offsets 0, 4, 6, 14, 22; lowercase hex boot dir; postcard footer with `TLHF` magic;
   `FieldPatch` of `Option`s; keyframe-then-started index space; `MetaId` per segment; NaN gap
