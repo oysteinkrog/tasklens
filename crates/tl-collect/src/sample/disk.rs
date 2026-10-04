@@ -713,11 +713,11 @@ mod tests {
         }
     }
 
-    /// Runs `disk_usage` on the fixture with `statvfs_result` for every path. Returns the usage
+    /// Runs `disk_usage` on the fixture with `statvfs_result()` for every path. Returns the usage
     /// and every path passed to `statvfs`.
     fn run_usage(
         swaps: &[SwapEntry],
-        statvfs_result: Result<FsStat, CollectError>,
+        statvfs_result: fn() -> Result<FsStat, CollectError>,
     ) -> (Vec<DiskUsage>, Vec<String>) {
         let mut calls = Vec::new();
         let usage = disk_usage(
@@ -726,7 +726,7 @@ mod tests {
             swaps,
             &mut |path| {
                 calls.push(path.to_owned());
-                statvfs_result.clone()
+                statvfs_result()
             },
             &mut |name| (name == "/dev/sda2").then_some((8, 2)),
         );
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn usage_sums_distinct_filesystems() {
-        let (usage, calls) = run_usage(&[], Ok(FAKE_STAT));
+        let (usage, calls) = run_usage(&[], || Ok(FAKE_STAT));
         assert_eq!(calls, vec!["/".to_owned(), "/boot".to_owned()]);
         let sda = named(&usage, 8, 0);
         assert_eq!(sda.formatted_bytes, Measured::valid(8_192_000));
@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn usage_unmounted_disk_unsupported() {
-        let (usage, _) = run_usage(&[], Ok(FAKE_STAT));
+        let (usage, _) = run_usage(&[], || Ok(FAKE_STAT));
         let nvme = named(&usage, 259, 0);
         assert_eq!(nvme.formatted_bytes.validity, Validity::Unsupported);
         assert_eq!(nvme.used_bytes.validity, Validity::Unsupported);
@@ -764,14 +764,14 @@ mod tests {
 
     #[test]
     fn usage_swap_on_partition() {
-        let (usage, _) = run_usage(&[swap("/dev/sda2")], Ok(FAKE_STAT));
+        let (usage, _) = run_usage(&[swap("/dev/sda2")], || Ok(FAKE_STAT));
         assert!(named(&usage, 8, 0).swap);
         assert!(!named(&usage, 259, 0).swap);
     }
 
     #[test]
     fn usage_statvfs_error() {
-        let (usage, _) = run_usage(&[], Err(CollectError::PermissionDenied));
+        let (usage, _) = run_usage(&[], || Err(CollectError::PermissionDenied));
         let sda = named(&usage, 8, 0);
         assert_eq!(sda.formatted_bytes.validity, Validity::Restricted);
         assert_eq!(sda.used_bytes.validity, Validity::Restricted);
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn usage_skips_virtual_mounts() {
-        let (_, calls) = run_usage(&[], Ok(FAKE_STAT));
+        let (_, calls) = run_usage(&[], || Ok(FAKE_STAT));
         assert!(!calls.iter().any(|c| c == "/run"));
     }
 
