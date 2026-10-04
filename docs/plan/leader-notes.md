@@ -90,7 +90,7 @@ pass once all batch writers finish.
 
 ## Owner answers on 2026-10-04
 
-- OI-U40 themes: ship the two default themes now; a new P2 bead E17-015 adds the eight palettes
+- OI-U40 themes: the two default themes ship at P0 in E17-002 (lgw.4); E17-005 (lgw.7, P2) adds the ten palettes
   when the owner exports `assets/themes/builtin.json`.
 - OI-U41 share codes: TL1 import now; TS1 import when the owner supplies a sample code (U-17).
 - OI-U42 app icon: placeholder now (256 px rounded square, accent colour, white monospace "tl");
