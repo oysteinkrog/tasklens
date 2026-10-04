@@ -190,6 +190,7 @@ fn empty_snapshot() -> HealthSnapshot {
         helper: HelperState::default(),
         helper_start: None,
         caps: EngineCaps::empty(),
+        setup: Arc::default(),
     }
 }
 
