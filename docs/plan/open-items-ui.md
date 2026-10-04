@@ -54,15 +54,16 @@ source; [guess] a writer-level choice no doc settles.
       pub global_shortcut: Option<GlobalShortcutApi>,    // None outside KDE
       pub import_taskslinger: Arc<dyn Fn() -> Result<ImportSummary, String>>,
       pub list_adapters: Arc<dyn Fn() -> Vec<AdapterInfo>>,
-      pub run_history_load: Arc<dyn Fn() -> Vec<RunHistoryEntry>>,
-      pub run_history_save: Arc<dyn Fn(&[RunHistoryEntry]) -> Result<(), String>>,
-      pub now_rfc3339: Arc<dyn Fn() -> String>,          // local time, for executedAt
+      pub run_history: Option<Box<dyn RunHistoryStore>>, // None in tests; tl-app builds it on write_atomic (OI-E08, OI-E32)
+      pub now_rfc3339: Arc<dyn Fn() -> String>,          // local time, for executedAt; drops if jiff joins the tl-ui row (OI-E04)
   }
+  pub trait RunHistoryStore { fn load(&self) -> Vec<RunHistoryEntry>;
+                              fn save(&self, entries: &[RunHistoryEntry]) -> Result<(), String>; }
   pub struct GlobalShortcutApi { pub get: Arc<dyn Fn() -> Option<String>>,
                                  pub set: Arc<dyn Fn(Option<&str>) -> Result<(), String>> }
   impl Global for AppEnv {}
   ```
-  `init` step 8 installs `AppEnv` as a Global next to `BootSettings`. Every closure runs on the main thread; none is `Send`. `PersistTheme` is declared in `app.rs` by E16-A1 and moved to `theme/user_store.rs` with a re-export by E17-008 (lgw.10), as B5-29 says. Reset settings (UI-SHL-072) calls `write_settings_now` before replacing `TlSettings` and shows "Failed to reset settings" on `Err`, with nothing changed. `executedAt` comes from `now_rfc3339`, so tl-ui needs no date crate and `tl_model::units` gains nothing. The adapter probe runs in tl-app (`wgpu` stays out of tl-ui). A `FakeEngine` test gets `AppEnv::test()` with empty closures and `debug = false`.
+  `init` step 8 installs `AppEnv` as a Global next to `BootSettings`. Every closure runs on the main thread; none is `Send`. `PersistTheme` is declared in `app.rs` by E16-A1 and moved to `theme/user_store.rs` with a re-export by E17-008 (lgw.10), as B5-29 says. Reset settings (UI-SHL-072) calls `write_settings_now` before replacing `TlSettings` and shows "Failed to reset settings" on `Err`, with nothing changed. `executedAt` comes from `now_rfc3339`, so tl-ui needs no date crate and `tl_model::units` gains nothing; OI-E32 proposes `jiff` in tl-ui instead, and if OI-E04 lists it there the closure goes and tl-ui formats the time itself. The store sits inside `AppEnv`, not as a bare `UiInit` field, so every tl-app hand-off has one home. The adapter probe runs in tl-app (`wgpu` stays out of tl-ui). A `FakeEngine` test gets `AppEnv::test()` with empty closures and `debug = false`.
 - Basis: ADR-001 tl-ui dependency row [verified]; ADR-009 and ADR-011 (the contract is extended, not changed) [verified]; UI-SHL-072, UI-SHL-092, UI-SHL-093, UI-PWN-028, APP-053, PROC-095 for the field list [verified]; field types [inferred].
 - Owner decision: no
 - Changes: ARCHITECTURE.md ADR-009 "Entry point" and ADR-011: replace the `(cx, client, settings)` signature with `UiInit` and name `AppEnv` and `persist_themes`. Bead fut.1: add `env: AppEnv` and the types above to the Deliverable and the Global to step 8. Beads bj6.8, bj6.14, bj6.17, bj6.42, bj6.44, bj6.45 (E21-006, 011, 015, 038, 040, 041), bj6.3 (Reset) and gma.31 (E23-028): replace "needs an interface from tl-app" with the named `AppEnv` member. Engine side fills every member (E33-A1 cr0.1, E33-A2 cr0.2, see engine side).
@@ -289,7 +290,7 @@ source; [guess] a writer-level choice no doc settles.
   | `PermissionDenied` | Permission denied. This process belongs to another user. |
   | `NoSuchProcess` | The process has already exited. |
   | `Partial { done, total }` | Done for {done} of {total} targets. |
-  | `UnitJob(result)` | The service job ended with result: {result}. |
+  | `UnitJob { result, error_name }` | The service job ended with result: {result}. (the error name feeds E27's D-Bus mapping, not this text) |
   | `Os(code)` | The system call failed (error {code}). |
   | `Internal(text)` | Internal error: {text}. |
 
@@ -567,7 +568,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U56 After "Grant access" succeeds
 - Raised by: B7-E23-6
 - Question: UI-PWN-018 says the window re-sends its demand "with the helper flag", which `DetailDemand` lacks.
-- Answer: no flag. When `HealthSnapshot.helper` changes to `Unlocked`, every open Properties window whose General payload is `Restricted` sends `Command::DetailRefresh { target, tab }` once for its active tab. Routing Restricted targets through the helper is engine side (E29 chain edit in `process_detail.rs`).
+- Answer: no flag. When `HealthSnapshot.helper` changes to `Unlocked`, every open Properties window whose General payload is `Restricted` sends `Command::DetailRefresh { target, tab }` once for its active tab. Routing Restricted targets through the helper is engine side (OI-E32 confirms: no `DetailDemand` flag, the UI resends `DetailRefresh`).
 - Basis: UI-PWN-002 `DetailRefresh`, UI-FND-028 `HelperState` [verified].
 - Owner decision: no
 - Changes: process-windows.md UI-PWN-018: replace "with the helper flag" with the refresh rule. No bead change (gma.28).
@@ -586,7 +587,7 @@ source; [guess] a writer-level choice no doc settles.
 ### OI-U58 Chart validity and the E19 model constants
 - Raised by: E19-5, E19-1, E19-2, E19-3, E19-4, E25-OI-2
 - Question: the chart cannot tell Failed from Restricted from Unsupported by itself; the pages need `MetricId` constants, the `TIER_1HZ` bit, `ceil_pow2` and `ceil_125`, and thread CPU time that tl-model does not yet define.
-- Answer: E19-5 accepted: the owner page calls `ChartView::set_state` from the `SourceHealth` of the source it knows; the chart derives only WarmingUp and Stale. The four model items are see engine side (E03-A1). UI consequences that hold whatever the engine answer: E24 and E25 beads name series by their UI-PRF names and stop and report when a constant is missing; E19-013 (yrf.15) waits for the `TIER_1HZ` bit; E19-004 (yrf.6) defines nothing privately and stops and reports if `tl_model::units::{ceil_pow2, ceil_125}` are absent; E19-005 reports 0 thread CPU until `thread_cpu_ns` exists (OI-U03).
+- Answer: E19-5 accepted: the owner page calls `ChartView::set_state` from the `SourceHealth` of the source it knows; the chart derives only WarmingUp and Stale. The four model items are settled in OI-E32: the `MetricId` numbers 5, 6, 7, 14, 47 to 49, 52 to 58 and 61; `TIER_1HZ` is bit 15 with `with_tier_1hz()` and `is_tier_1hz()`; `ceil_pow2` and `ceil_125` land in `tl_model::units` through E03-012. UI consequences that hold whatever the engine answer: E24 and E25 beads name series by their UI-PRF names and stop and report when a constant is missing; E19-013 (yrf.15) waits for the `TIER_1HZ` bit; E19-004 (yrf.6) defines nothing privately and stops and reports if `tl_model::units::{ceil_pow2, ceil_125}` are absent; E19-005 reports 0 thread CPU until `thread_cpu_ns` exists (OI-U03).
 - Basis: UI-PRF-001, UI-PRF-006, ADR-014 [verified].
 - Owner decision: no
 - Changes: none here.
@@ -635,13 +636,13 @@ source; [guess] a writer-level choice no doc settles.
 
 ### OI-U65 Topics settled on the engine side
 - Raised by: the items below
-- Answer: see engine side (`open-items-engine.md`) for every one of these. Listed here so no raiser is lost. IDs confirmed by oi-engine on 2026-10-04; OI-E32 was still being written.
+- Answer: see engine side (`open-items-engine.md`) for every one of these. Listed here so no raiser is lost. IDs confirmed by oi-engine on 2026-10-04 (OI-E32 landed in engine commit 6ff1ce2).
   | Raiser | Topic | Engine ID |
   |---|---|---|
   | E25-OI-1, B8-E28-1, B7-E20-11 | `Command::Device(DeviceCommand)` keyed by kernel disk name; public IP in `InventorySnapshot.public_ip`; E20-024 sends the fetch command at startup | OI-E01 |
   | B8-E22-1 | `ProcessRecord`, `TableRow`, `GroupRow`, `TableTotals`, `ProcessTableView` fields | OI-E03 |
   | B5-22, E19-4 | `async-channel` in tl-ui and tl-app; `tl_model::time::thread_cpu_ns()` through rustix | OI-E04, OI-E06 |
-  | B5-2, B5-30, B7-E21-9 | `unicode-segmentation`, `image`, `wgpu` rows | OI-E32 |
+  | B5-2, B5-30, B7-E21-9 | `unicode-segmentation = "1.12"` added to tl-ui; `image` not added (gpui-kit image path first); no `wgpu`, tl-app probes through GPUI | OI-E04 items 15 to 17 |
   | B5-38 | E33 `UiLaunch` (OI-U02 has the UI half) | OI-E15 |
   | B5-6 | `SystemSnapshot.color_scheme` and its portal reader | OI-E32 |
   | B5-7 | `HealthSnapshot.helper` exists in as2.13 and gains `helper_start` | OI-E10 |
@@ -654,8 +655,8 @@ source; [guess] a writer-level choice no doc settles.
   | B7-E21-11 | `SetupStep::PolkitRule { on }`, results in `HealthSnapshot.setup` | OI-E11 |
   | B7-E23-6 (engine half) | `DetailRefresh` routed through the helper | OI-E32 |
   | B8-E22-10 | KWin pick result in `WindowsSnapshot.pick`; command result | OI-E11, OI-E32 |
-  | B8-E27-3 (engine half), B8-E27-7 | D-Bus error name in `UnitJob`, unmask inside enable and disable | OI-E32 |
-  | B8-E27-5, B8-E28-11 | `SysColumnId` constants | OI-E32 |
+  | B8-E27-3 (engine half), B8-E27-7 | `ActionError::UnitJob { result, error_name }`, unmask inside `UnitEnable` and `UnitDisable` | OI-E32 |
+  | B8-E27-5, B8-E28-11 | `SysColumnId` in `table.rs`, separate from the process `ColumnId` | OI-E32 |
   | B8-E28-2, B8-E28-12, B8-E28-13 | `InventorySnapshot`, startup and connection record fields (E03-055, E03-056) | OI-E18 |
   | B8-E28-3 | `committed_peak` (reducer running max) | OI-E28 |
   | B8-E28-4 | 64-bit rule | OI-E32 |
