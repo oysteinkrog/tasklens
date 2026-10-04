@@ -1712,6 +1712,12 @@ PROC IDs below are prefixed `v1`, `r2` or `add` to say which file they come from
 - Basis: serde_core 1.0.229 `ser/impls.rs:899`, `de/impls.rs:1779` [verified by the as2.36 agent].
 - Edits: bead as2.36 files (adds `crates/tl-model/src/actions.rs`).
 
+### R-271 A `deleted-keys.bin` that does not decode hides that boot's history
+- Question: E30-008 (`tasklens-8fx.11`) loads a `deleted-keys.bin` that does not decode as an empty set, and the next delete overwrites it. Processes the user deleted from history would then show again. Leader decision, 2026-10-04.
+- Resolution: when a boot's `deleted-keys.bin` exists but does not decode, the store renames it to `deleted-keys.bin.bad`, logs one warning, and treats that boot's segments as expired: they are not returned by `span()` or `blocks()`, and retention (E30-009) deletes them. A later delete in that boot writes a new `deleted-keys.bin`. Deleted history never comes back.
+- Basis: ADR-012 privacy rule that a deleted key is never shown again [inferred from the deleted-keys design]; 8fx.11 report [verified].
+- Edits: bead 8fx.12 (store.rs, as a chain edit).
+
 
 
 
