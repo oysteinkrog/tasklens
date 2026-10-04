@@ -87,3 +87,12 @@ pass once all batch writers finish.
   cycles, plan in d69765a. Open items 1 to 38 in the plan file. Leader edge: E33-A1 on fut.15,
   and B1's E33-OI-1 proposal follows the `UiLaunch` shape in fut.15. Check that E18-A1 exposes
   `TlTreeTable::scroll_handle` (B8).
+
+## Owner answers on 2026-10-04
+
+- OI-U40 themes: ship the two default themes now; a new P2 bead E17-015 adds the eight palettes
+  when the owner exports `assets/themes/builtin.json`.
+- OI-U41 share codes: TL1 import now; TS1 import when the owner supplies a sample code (U-17).
+- OI-U42 app icon: placeholder now (256 px rounded square, accent colour, white monospace "tl");
+  new P3 bead E15-026 swaps in final artwork.
+- Build-line rewrite: done on 405 beads, 0 failures.
