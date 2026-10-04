@@ -1,0 +1,103 @@
+[workspace]
+resolver = "3"
+members = [
+  "crates/tl-model",
+  "crates/tl-collect",
+  "crates/tl-ops",
+  "crates/tl-engine",
+  "crates/tl-gpu-probe",
+  "crates/tl-ui",
+  "crates/tl-app",
+  "xtask",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+# Runtime and UI (exact pins; upgrades only through an ADR change)
+asupersync = { version = "=0.5.0", default-features = false, features = ["proc-macros"] }
+gpui-kit   = { version = "=0.7.0" }                       # default features: component, assets
+nvml-wrapper = { version = "=0.13.0", default-features = false }
+ksni       = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }  # P3
+
+# Bridge
+arc-swap      = "1.9.2"
+async-channel = "2.5.0"
+
+# D-Bus: async-io backend; blocking API used by tl-app only
+zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }
+
+# System access
+rustix = { version = "1.1.5", features = ["fs", "process", "net", "event", "system", "thread", "time", "pipe", "mm", "param"] }   # mm, param: R-142 item 5
+libc   = "0.2.189"
+memchr = "2.8.3"
+netlink-packet-core      = "0.9.0"
+netlink-packet-sock-diag = "0.5.0"
+netlink-sys = { version = "0.9.0", default-features = false }
+
+# Data and encoding
+serde    = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+toml     = "1.1.6"
+bitflags = { version = "2", features = ["serde"] }   # R-142 item 4
+smallvec = { version = "1.15.2", features = ["union", "const_generics"] }
+rustc-hash = "2.1.3"
+futures-lite = "2.6.1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }   # tl-engine public IP only; exact pin set by the E12 bead that adds it (R-131)
+fluent-bundle = "0.15"   # tl-ui strings (R-132); exact pins set by the E16 bead that adds them
+unic-langid = "0.9"
+zstd      = "0.13.3"     # P3
+crc32fast = "1"          # P3
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }   # tl-ui local time (R-142 item 9)
+unicode-segmentation = "1.12"   # tl-ui text editing (R-142 item 15)
+
+# Command line (tl-app, R-142 item 1)
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+
+# Errors and logging
+thiserror = "2.0.21"
+anyhow    = "1.0.104"
+tracing   = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
+tracing-appender   = "0.2.5"
+
+# Test only
+insta     = "1.48.0"
+proptest  = "1.11.0"
+tempfile  = "3.27.0"
+criterion = "0.8.2"
+
+# Workspace crates
+tl-model   = { path = "crates/tl-model" }
+tl-collect = { path = "crates/tl-collect" }
+tl-ops     = { path = "crates/tl-ops" }
+tl-engine  = { path = "crates/tl-engine" }
+tl-ui      = { path = "crates/tl-ui" }
+
+[profile.dev]
+opt-level = 1
+[profile.dev.package."*"]
+opt-level = 2                 # GPUI and wgpu are too slow at opt-level 0 for UI work
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"              # required: supervisors and the engine session catch panics
+debug = "line-tables-only"    # readable crash backtraces
+strip = "none"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+[workspace.lints.clippy]
+dbg_macro = "deny"
+print_stdout = "deny"         # xtask and the bench output module allow it locally
+unwrap_used = "warn"          # allowed in tests
