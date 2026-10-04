@@ -1,0 +1,15 @@
+---
+source: crates/tl-collect/tests/fixture_block.rs
+expression: report
+---
+nvme0n1 dev=259:0 size=4000787030016 kind=Nvme model=Some("KINGSTON SFYRDK4000G") removable=false
+  nvme0n1p1 dev=259:2 size=104857600 Partition { number: 1, start_sector: 2048 }
+  nvme0n1p2 dev=259:3 size=16777216 Partition { number: 2, start_sector: 206848 }
+  nvme0n1p3 dev=259:4 size=966367641600 Partition { number: 3, start_sector: 239616 }
+  nvme0n1p4 dev=259:5 size=993001472 Partition { number: 4, start_sector: 7812096000 }
+nvme1n1 dev=259:1 size=1000204886016 kind=Nvme model=Some("WDS100T1X0E-00AFY0") removable=false
+  nvme1n1p1 dev=259:6 size=4294967296 Partition { number: 1, start_sector: 4096 }
+  nvme1n1p2 dev=259:7 size=995907784704 Partition { number: 2, start_sector: 8392704 }
+sda dev=8:0 size=4000787030016 kind=Hdd model=Some("HGST HDS724040ALE640") removable=false
+  sda1 dev=8:1 size=134217728 Partition { number: 1, start_sector: 34 }
+  sda2 dev=8:2 size=4000650887168 Partition { number: 2, start_sector: 264192 }
