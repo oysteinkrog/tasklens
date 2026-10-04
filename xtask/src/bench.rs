@@ -24,6 +24,7 @@ const GATED_METRICS: [&str; 6] = [
     "bridge_latency_ms.p99",
 ];
 
+#[derive(Debug)]
 pub struct BenchCmd {
     pub scenes: Vec<String>,
     pub runs: u32,
