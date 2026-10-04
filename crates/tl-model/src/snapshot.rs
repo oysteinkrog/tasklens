@@ -1,14 +1,17 @@
 //! The published snapshot and its components (ADR-003).
 
+use std::collections::HashMap;
 use std::ops::{BitOr, BitOrAssign};
 use std::sync::Arc;
 
+use crate::health::ManagerState;
 use crate::ids::{DeviceIdx, ProcessKey, ProcessSeriesId, SeriesId};
 use crate::process::{Coverage, ProcessRecord};
 use crate::series::SeriesView;
 use crate::system::{
     CpuTopology, CpuTotals, DiskTotals, GpuTotals, MemoryTotals, NetTotals, SensorReading,
 };
+use crate::table::{Manager, SysRow, Total, UnitRef, UnitType};
 use crate::time::TimeNs;
 use crate::validity::Validity;
 
@@ -216,6 +219,250 @@ pub enum PickOutcome {
     Picked { pid: u32 },
     NoWindow,
     Cancelled,
+}
+
+/// Services table status (SYS-003).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ServiceStatus {
+    Running,
+    Active,
+    Starting,
+    Stopping,
+    Reloading,
+    Stopped,
+    Failed,
+    Maintenance,
+}
+
+impl ServiceStatus {
+    /// SYS-003 mapping: active+running is Running; any other active sub-state (exited,
+    /// listening, mounted, waiting, elapsed, plugged) is Active; activating is Starting;
+    /// deactivating is Stopping; reloading or refreshing is Reloading; inactive is Stopped;
+    /// failed is Failed; maintenance is Maintenance. An unknown active state is Stopped.
+    pub fn from_states(active_state: &str, sub_state: &str) -> ServiceStatus {
+        match active_state {
+            "active" if sub_state == "running" => ServiceStatus::Running,
+            "active" => ServiceStatus::Active,
+            "activating" => ServiceStatus::Starting,
+            "deactivating" => ServiceStatus::Stopping,
+            "reloading" | "refreshing" => ServiceStatus::Reloading,
+            "failed" => ServiceStatus::Failed,
+            "maintenance" => ServiceStatus::Maintenance,
+            _ => ServiceStatus::Stopped,
+        }
+    }
+}
+
+/// Startup type column, from the systemd UnitFileState word.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum StartupType {
+    Enabled,
+    EnabledRuntime,
+    Disabled,
+    Static,
+    Indirect,
+    Masked,
+    Generated,
+    Transient,
+    Alias,
+    Linked,
+    /// No unit file. Shown as "-".
+    NoUnitFile,
+}
+
+impl StartupType {
+    /// masked-runtime maps to Masked and linked-runtime to Linked. An empty or unknown word is
+    /// NoUnitFile.
+    pub fn from_unit_file_state(s: &str) -> StartupType {
+        match s {
+            "enabled" => StartupType::Enabled,
+            "enabled-runtime" => StartupType::EnabledRuntime,
+            "disabled" => StartupType::Disabled,
+            "static" => StartupType::Static,
+            "indirect" => StartupType::Indirect,
+            "masked" | "masked-runtime" => StartupType::Masked,
+            "generated" => StartupType::Generated,
+            "transient" => StartupType::Transient,
+            "alias" => StartupType::Alias,
+            "linked" | "linked-runtime" => StartupType::Linked,
+            _ => StartupType::NoUnitFile,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum ServiceBackend {
+    Systemd,
+    OpenRc,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ServiceCounts {
+    pub total: u32,
+    pub running: u32,
+    pub stopped: u32,
+}
+
+/// One unit as the Services table shows it (UI-SYS-015). Resource fields are `Missing` when the
+/// unit has no cgroup, so the column shows "-" and never 0 (SYS-003).
+#[derive(Clone, Debug)]
+pub struct UnitRecord {
+    pub unit: UnitRef,
+    pub kind: UnitType,
+    /// Description=, the "Display name" column.
+    pub description: Arc<str>,
+    pub status: ServiceStatus,
+    pub sub_state: Arc<str>,
+    pub load_state: Arc<str>,
+    pub startup: StartupType,
+    /// 0 means none, and the column is blank.
+    pub main_pid: u32,
+    /// SYS-003 rule: the real uid owner of MainPID, else User=, else root or the current user.
+    pub user: Arc<str>,
+    /// SYS-003 Path column rule.
+    pub path: Arc<str>,
+    /// FragmentPath.
+    pub unit_file: Option<Arc<str>>,
+    /// ActiveEnterTimestamp in CLOCK_REALTIME microseconds. `None` when systemd reports 0.
+    pub active_since_us: Option<u64>,
+    pub triggered_by: Arc<[Arc<str>]>,
+    pub has_cgroup_procs: bool,
+    /// Child process rows, sorted by `ProcessKey`.
+    pub cgroup_pids: Arc<[ProcessKey]>,
+    /// cgroup cpu.stat usage_usec delta.
+    pub cpu_pct: Total<f32>,
+    /// memory.current.
+    pub memory_bytes: Total<u64>,
+    /// io.stat rbytes + wbytes delta per second.
+    pub disk_bps: Total<f64>,
+    /// pids.current.
+    pub tasks: Total<u64>,
+}
+
+/// Recovery tab values (SYS-013), all from unit properties. `None` shows "Not reported".
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct RecoverySettings {
+    /// Restart= word.
+    pub restart: Option<Arc<str>>,
+    /// RestartUSec.
+    pub restart_usec: Option<u64>,
+    /// RestartSteps.
+    pub restart_steps: Option<u32>,
+    /// RestartMaxDelayUSec.
+    pub restart_max_delay_usec: Option<u64>,
+    pub start_limit_burst: Option<u32>,
+    pub start_limit_interval_usec: Option<u64>,
+    pub start_limit_action: Option<Arc<str>>,
+    pub failure_action: Option<Arc<str>>,
+    /// OnFailure= units. Empty shows "None".
+    pub on_failure: Arc<[Arc<str>]>,
+    /// NRestarts.
+    pub n_restarts: Option<u32>,
+}
+
+/// A dependency relation on the Dependencies tab (SYS-014).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Relation {
+    // "Depends on:"
+    Requires,
+    Requisite,
+    Wants,
+    BindsTo,
+    PartOf,
+    Upholds,
+    // "Dependents:"
+    RequiredBy,
+    RequisiteOf,
+    WantedBy,
+    BoundBy,
+    ConsistsOf,
+    UpheldBy,
+    // "Ordering"
+    After,
+    Before,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DepEntry {
+    pub unit: UnitRef,
+    pub relation: Relation,
+}
+
+/// Shown as "Runs as: uid 1000, gid 1000".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PidIds {
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// What the Service Properties window shows for one unit. `exec_start_argv` can hold secrets
+/// passed on command lines: never log it above debug level (ADR-015).
+#[derive(Clone, Debug)]
+pub struct UnitDetails {
+    // General (SYS-011, UI-SYS-031)
+    pub id: Arc<str>,
+    pub description: Arc<str>,
+    pub documentation: Arc<[Arc<str>]>,
+    pub exec_start_argv: Arc<[Arc<str>]>,
+    pub fragment_path: Option<Arc<str>>,
+    pub drop_in_paths: Arc<[Arc<str>]>,
+    pub startup: StartupType,
+    pub active_state: Arc<str>,
+    pub sub_state: Arc<str>,
+    /// CLOCK_REALTIME microseconds.
+    pub active_enter_timestamp_us: Option<u64>,
+    pub main_pid: u32,
+    /// `None` when systemd reports u64::MAX.
+    pub memory_current: Option<u64>,
+    /// `None` when systemd reports u64::MAX.
+    pub tasks_current: Option<u64>,
+    pub cpu_usage_nsec: Option<u64>,
+    pub manager: Manager,
+    // Log On (SYS-012, UI-SYS-032)
+    pub user: Option<Arc<str>>,
+    pub group: Option<Arc<str>>,
+    pub dynamic_user: bool,
+    pub supplementary_groups: Arc<[Arc<str>]>,
+    pub pam_name: Option<Arc<str>>,
+    /// `None` when MainPID is 0 ("Not running").
+    pub main_pid_ids: Option<PidIds>,
+    pub graphical_session: bool,
+    // Recovery (SYS-013, UI-SYS-033)
+    pub recovery: RecoverySettings,
+    pub recovery_dropin_exists: bool,
+    // Dependencies (SYS-014, UI-SYS-034)
+    /// Sorted by unit name, one row per relation.
+    pub deps: Arc<[DepEntry]>,
+}
+
+/// The Services tab component (ADR-003). Filled by the systemd workers, read by the UI.
+#[derive(Clone, Debug)]
+pub struct ServicesSnapshot {
+    pub header: ComponentHeader,
+    pub rows: Arc<[SysRow]>,
+    pub query_generation: u64,
+    pub units: Arc<[UnitRecord]>,
+    pub counts: ServiceCounts,
+    /// Index 0 is System, 1 is User.
+    pub managers: [ManagerState; 2],
+    /// Units in `Demand.unit_details`, at most 10.
+    pub details: Arc<HashMap<UnitRef, Arc<UnitDetails>>>,
+    pub backend: ServiceBackend,
+}
+
+impl Default for ServicesSnapshot {
+    fn default() -> Self {
+        Self {
+            header: ComponentHeader::default(),
+            rows: Arc::from([]),
+            query_generation: 0,
+            units: Arc::from([]),
+            counts: ServiceCounts::default(),
+            managers: [ManagerState::default(); 2],
+            details: Arc::default(),
+            backend: ServiceBackend::Systemd,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -435,5 +682,61 @@ mod tests {
         let h = ComponentHeader::default();
         assert_eq!(h.version, 0);
         assert_eq!(h.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn service_status_mapping_sys003() {
+        let cases = [
+            (("active", "running"), ServiceStatus::Running),
+            (("active", "exited"), ServiceStatus::Active),
+            (("activating", "start"), ServiceStatus::Starting),
+            (("deactivating", "stop"), ServiceStatus::Stopping),
+            (("reloading", ""), ServiceStatus::Reloading),
+            (("refreshing", ""), ServiceStatus::Reloading),
+            (("inactive", "dead"), ServiceStatus::Stopped),
+            (("failed", "failed"), ServiceStatus::Failed),
+            (("maintenance", ""), ServiceStatus::Maintenance),
+            (("bogus", "running"), ServiceStatus::Stopped),
+        ];
+        for ((active, sub), want) in cases {
+            assert_eq!(ServiceStatus::from_states(active, sub), want, "{active}+{sub}");
+        }
+        for sub in ["listening", "mounted", "waiting", "elapsed", "plugged"] {
+            assert_eq!(ServiceStatus::from_states("active", sub), ServiceStatus::Active);
+        }
+    }
+
+    #[test]
+    fn startup_type_from_unit_file_state_all() {
+        let cases = [
+            ("enabled-runtime", StartupType::EnabledRuntime),
+            ("masked-runtime", StartupType::Masked),
+            ("linked-runtime", StartupType::Linked),
+            ("", StartupType::NoUnitFile),
+            ("enabled", StartupType::Enabled),
+            ("disabled", StartupType::Disabled),
+            ("static", StartupType::Static),
+            ("indirect", StartupType::Indirect),
+            ("masked", StartupType::Masked),
+            ("generated", StartupType::Generated),
+            ("transient", StartupType::Transient),
+            ("alias", StartupType::Alias),
+            ("linked", StartupType::Linked),
+        ];
+        for (word, want) in cases {
+            assert_eq!(StartupType::from_unit_file_state(word), want, "{word:?}");
+        }
+    }
+
+    #[test]
+    fn services_snapshot_default_empty() {
+        let snap = ServicesSnapshot::default();
+        assert!(snap.units.is_empty());
+        assert!(snap.rows.is_empty());
+        assert!(snap.details.is_empty());
+        assert_eq!(snap.backend, ServiceBackend::Systemd);
+        assert_eq!(snap.query_generation, 0);
+        assert_eq!(snap.counts, ServiceCounts::default());
+        assert_eq!(snap.managers, [ManagerState::Unavailable; 2]);
     }
 }
