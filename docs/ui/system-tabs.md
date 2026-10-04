@@ -400,8 +400,11 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 - **Multi-select** (chosen): with 1 to 3 targets, one toast per target (spec). With 4 or more
   targets, one summary toast (to stay under the 4-toast stack limit): "Starting 6 services..."
   then "6 services started" or "4 of 6 services started. 2 failed." (new; same pattern for stop,
-  restart, enable, disable). Its "Details" button (new) opens a `TlDialog` titled "tasklens" that
-  lists each failed unit with its error text.
+  restart, enable, disable). Its "Details" button (new) opens a `TlDialog` titled "tasklens",
+  non-destructive, one line per failed target "<target label>: <message(err)>", one button "Close"
+  (R-197). The tracker emits `ActionTrackerEvent::{Started(ActionId), Finished { id, ok, total, failed }}`,
+  which `SysActions` subscribes to by id; a `ToastTexts` whose `started` is `None` pushes no Progress
+  toast (R-197).
 - **Data binding**: `ActionTracker` receives `ActionEvent`s; pages subscribe to
   `ActionTracker` events `PendingChanged { target: ActionTarget }` to repaint the affected row.
   Pending map `FxHashMap<ActionTarget, ActionId>` gives the row overlay.
@@ -1592,7 +1595,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 ### UI-SYS-049 Startup status text, refresh and keyboard
 
 - **Implements**: SYS-027.
-- **Anatomy**: status text "12 Total | 9 Enabled | 3 Disabled", plus " | 2 selected". Disabled
+- **Anatomy**: status text "12 Total | 9 Enabled | 3 Disabled", plus " | 2 selected" from 2 selected rows (R-204). Disabled
   counts every entry that is not Enabled (chosen, so Total = Enabled + Disabled). Counts follow the
   text filter.
 - **Interaction**: F5 sends `RefreshNow(Startup)`; toast "Startup entries refreshed." (spec) when the
@@ -1853,7 +1856,9 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   ```
 
   Addresses without the port; IPv6 without brackets (chosen). `*` ports print "*". Shared sockets
-  print all PIDs comma-separated (chosen). Toast "Connection copied" (spec).
+  print all PIDs comma-separated (chosen). A kernel-owned socket prints "PID: -" and "Process: No
+  owner (kernel)"; an unresolved (restricted) socket prints "PID: ?" and "Process: Restricted"
+  (R-204). Toast "Connection copied" (spec).
 - **Tests**: `conn_copy_block_golden`.
 - **Phase**: P2.
 - **Decided here**: address and port split rules; all PIDs.
@@ -1862,7 +1867,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
 
 - **Implements**: SYS-036, SYS-037 (dropdown place).
 - **Anatomy**: status text "214 Total | 168 TCP | 46 UDP | 97 EST | 31 LISTEN", plus " | 3
-  selected". Counts follow the filter. From P4 the Namespaces control follows the text after `sp6`
+  selected" from 2 selected rows (R-204). Counts follow the filter. From P4 the Namespaces control follows the text after `sp6`
   (UI-SYS-070).
 - **Interaction**:
   - Filter: case-insensitive substring over Proto, both addresses with ports as shown, State, PID,
@@ -2110,7 +2115,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
     `CopyInformationAll` (chosen, follows UI-FND-025).
   - Copy ignores the filter: it always copies every row (chosen; the filter only narrows the
     view).
-  - Clipboard failure: "Failed to copy to clipboard".
+  - Clipboard failure: "Failed to copy to clipboard" (unreachable in v1: `write_to_clipboard` returns `()`; every copy path goes through `tl_ui::util::clipboard_write`, R-199).
 - **Build**: `pages/information/copy.rs`, one `String` built per command.
 - **Tests**: `info_copy_all_format_golden`; `info_copy_ignores_filter`.
 - **Phase**: P2.
@@ -2221,7 +2226,7 @@ physical px, about 2.1 physical px per logical px). Values are given in logical 
   | "Handle count" | "253 248", label tooltip "Open file descriptors, system-wide" | yes |
   | "Desktop" | "KDE Plasma 6.4.5"; hidden when unknown | no |
   | "Windowing system" | "Wayland" | no |
-  | "Session type" | "user (graphical)" from logind Class and Type (chosen format) | no |
+  | "Session type" | "<Class> (graphical)" for Type x11, wayland or mir; "<Class> (text)" for tty; "<Class> (<Type>)" otherwise, from the two raw logind strings in `InventorySnapshot` (R-205) | no |
   | "Virtual terminal" | "2"; hidden when not set | no |
 
 - **Tests**: `info_system_computer_name_format`; `info_counts_grouped`.
