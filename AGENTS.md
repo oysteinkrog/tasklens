@@ -44,6 +44,13 @@ stop, leave the bead open, and report the question in your final message.
 - Never build or clone in `/tmp`. Scratch work goes in `/var/tmp/claude/`.
 - Tests follow ADR-013: engine logic uses `LabRuntime` tests, parsers use fixtures plus proptest,
   UI uses GPUI `TestAppContext` tests. Security-relevant work needs a regression test.
+- asupersync 0.5.0 lab runtime: `run_until_idle` does not fire due timers when no task is ready.
+  After `advance_time`, call `lab.step_for_test()` once, then `run_until_idle()` (see
+  `Rig::advance` in `crates/tl-engine/tests/lab_source_loop.rs`). Cancelling the task that awaits
+  `run_supervised` does not stop the supervisor; cancel its region or call the handle's `abort()`.
+- A module that has no `mod` line yet is tested through a temporary integration test that pulls
+  it in with `#[path]`. Name it `tests/tmp_<bead>_<name>.rs`, never commit it, and delete it
+  before you close the bead.
 - Before closing: `cargo fmt --check`, `cargo clippy -p <crate> --all-targets -- -D warnings` and
   the bead's tests must pass.
 
