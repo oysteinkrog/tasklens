@@ -4,6 +4,7 @@ mod common;
 
 use common::{fixture_bytes, mutated};
 use proptest::prelude::*;
+use tl_collect::apps::desktop::{exec_binary_in, parse_entry};
 use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
 use tl_collect::proc::status::{PidStatus, parse_status};
 
@@ -26,5 +27,16 @@ proptest! {
     ) {
         let mut out = PidStatus::default();
         let _ = parse_status(&bytes, &mut out);
+    }
+
+    #[test]
+    fn desktop_parser_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        let _ = parse_entry("fuzz", "/fuzz.desktop", &bytes, &[]);
+        let mut with_header = b"[Desktop Entry]\nType=Application\n".to_vec();
+        with_header.extend_from_slice(&bytes);
+        let _ = parse_entry("fuzz", "/fuzz.desktop", &with_header, &[]);
+        let _ = exec_binary_in(&String::from_utf8_lossy(&bytes), &[]);
     }
 }

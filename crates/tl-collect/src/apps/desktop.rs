@@ -333,8 +333,8 @@ fn read_capped(path: &Path, buf: &mut Vec<u8>) -> bool {
     }
 }
 
-/// Unescapes a string value (`\s` and `\t` become a space, plus `\n`, `\r`, `\\`), then sanitizes it. Empty values
-/// become `None`.
+/// Unescapes a string value (`\s` and `\t` become a space, plus `\n`, `\r` and `\\`), then
+/// sanitizes it. Empty values become `None`.
 fn clean(raw: Option<&[u8]>) -> Option<Arc<str>> {
     let raw = raw?;
     let mut unescaped = Vec::with_capacity(raw.len());
