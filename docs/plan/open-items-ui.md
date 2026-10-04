@@ -416,3 +416,164 @@ source; [guess] a writer-level choice no doc settles.
 - Basis: UI-FND-017 [verified, self-contradictory; the example wins].
 - Owner decision: no
 - Changes: foundation.md UI-FND-017: "12 or more items". No bead change.
+
+---
+
+## E. Themes and foundation leftovers
+
+### OI-U39 Theme store needs: the animation requester, the E19 edge, new error and event variants
+- Raised by: B5-18, B5-13, B5-19
+- Question: the theme crossfade (E17-006) and preview coalescing (E17-A2) need the `AnimationDriver` to accept a requester that is not a view entity; E17-006 therefore depends on E19-A1, which the E17 row of 00-epics lacks; `ThemeError` and `ThemeEvent` gain variants the E21 toast mapping must cover.
+- Answer: `AnimationDriver` (E19-005, yrf.7) accepts any `EntityId` in `request(id)` and does not require the id to be a view; it also gains `request_callback(id: EntityId, f: impl Fn(&mut Window, &mut App) + 'static)`. The theme store reserves one `EntityId` from a zero-sized entity it creates at init (UI-FND-040 already says "reserved EntityId"). E17-006 (lgw.8) depends on E19-A1 (yrf.1). `ThemeError` gains `BuiltinCannotBeDeleted` and `BuiltinCannotBeEdited`; `ThemeEvent` gains `Imported { count: u32 }`. E21 toast mapping: "Built-in themes cannot be deleted" (Warning), "Built-in themes cannot be edited. Copy it first." (Warning), "Imported { $count } themes" (Success).
+- Basis: UI-FND-040 crossfade and reserved id [verified]; UI-FND-041 to 043 [verified]; texts [guess, writer-level].
+- Owner decision: no
+- Changes: 00-epics §4: add E19-A1 to the E17 row. Edge `lgw.8` depends on `yrf.1` (Edges). foundation.md UI-FND-040: list the two error and one event variant. Bead yrf.7: add `request_callback` and the "any EntityId" note. Bead for the theme menu toasts (E21, UI-SHL-038): add the three texts.
+
+### OI-U40 themes.json from TaskSlinger (U-18) blocks E17-005
+- Raised by: B5-10
+- Question: the 10 named built-in palettes are exported from TaskSlinger under Wine by the owner (U-18); E17-005 (lgw.7) cannot start without the file.
+- Answer: blocked until the owner supplies `assets/themes/builtin.json`. Recommended: the owner runs the export once and commits the file; E17-005 then parses it at build time. Alternative: E17-005 ships the two default themes only (Default Light, Default Dark) and the other eight land in a follow-up bead when the file arrives, which unblocks P0 and P1.
+- Basis: RECONCILIATION U-18 [verified].
+- Owner decision: yes (owner step; recommended: ship the two defaults now, follow-up bead for the eight)
+- Changes: bead lgw.7: split into "two defaults from hand-written values" (P0) and a new bead E17-015 "Eight built-in palettes from the TaskSlinger export", P2, file `theme/builtin.rs`, depends on lgw.7, blocked-open-item until the file exists.
+
+### OI-U41 One TS1 share code (U-17) blocks E17-010
+- Raised by: B5-11
+- Question: the TS1 share-code encoding is unknown until the owner generates one code in TaskSlinger (U-17).
+- Answer: blocked. Recommended: the owner generates one code from a known theme and records it in RECONCILIATION U-17; E17-010 (lgw.12) decodes it. Alternative: ship import of the tasklens format (`TL1`, documented in UI-FND-043) only and leave TS1 for P3.
+- Basis: U-17 [verified].
+- Owner decision: yes (owner step; recommended: TL1 now, TS1 when the code exists)
+- Changes: bead lgw.12: `blocked-open-item` label, note the TL1-only path; the E21 share-code beads (bj6.32 to bj6.34, E21-029 to 031) depend on lgw.11 as leader-notes say.
+
+### OI-U42 `assets/icons/tasklens.svg` artwork
+- Raised by: B5-12
+- Question: no document specifies the application icon.
+- Answer: owner choice. Recommended: a placeholder icon for P0 and P1 (a 256 px rounded square in the accent colour with a white monospace "tl"), so E15-022 (ug9.25) is not blocked, and a follow-up bead replaces the file when the owner supplies artwork. Alternative: keep E15-022 blocked.
+- Basis: none in the docs [verified absent].
+- Owner decision: yes (recommended: placeholder now)
+- Changes: bead ug9.25: build the placeholder, drop `blocked-open-item`. New bead E15-026 "Replace the placeholder application icon", P3, files `assets/icons/tasklens.svg`, depends on ug9.25, blocked-open-item until artwork exists.
+
+### OI-U43 Recording U-nn outcomes
+- Raised by: B5-15
+- Question: where a resolved U-nn item is recorded.
+- Answer: append the outcome to the item's U row in RECONCILIATION.md (the "U-1 to U-50" table), one line "Outcome (date): ...". No other place.
+- Basis: RECONCILIATION U table [verified].
+- Owner decision: no
+- Changes: none.
+
+### OI-U44 Priority of spec-P1 components inside P0 anchors
+- Raised by: B5-1
+- Question: E15-A1 and E15-A2 contain spec-P1 and P2 components; E18-A1 and A2 (P0) need E16-006, 007, 008, A2 and 009.
+- Answer: accept. Those E16 beads carry priority 0. Shield stays in E16-A3 (P1) and the preview contract in E17-A2 (P2).
+- Basis: 00-epics phase rules [verified].
+- Owner decision: no
+- Changes: none (already set in the beads).
+
+### OI-U45 RTL golden needs a Hebrew font on CI
+- Raised by: B5-36
+- Question: E18-013 (rsf.15) renders a Hebrew golden; CI may lack the font.
+- Answer: accept the bead's rule: the case is skipped with a printed reason when `font_id("Noto Sans Hebrew")` fails. Engine side (E02 CI image) may add the font later.
+- Basis: UI-FND-050 bundled fonts [verified].
+- Owner decision: no
+- Changes: none.
+
+---
+
+## F. Shell, windows and settings
+
+### OI-U46 Double-click on a process row expands, it does not open Properties
+- Raised by: B7-E23-1
+- Question: UI-PRC-002 says double-click runs `OpenProperties`; UI-PWN-003 says double-click is not bound and expands, like TaskSlinger.
+- Answer: double-click toggles expansion on a row with children and does nothing on a leaf. Properties open with Enter, Alt+Enter, Ctrl+I, the menu item and the delegate's `on_activate` for the system tables (UI-SYS-002 lists double-click there, which stays: those rows have no children).
+- Basis: D-008 lists Enter, Ctrl+I and Alt+Enter only [verified]; UI-PWN-003 and the source app [verified]; UI-SYS-002 [verified].
+- Owner decision: no
+- Changes: processes.md UI-PRC-002 and UI-PRC-008: double-click toggles expansion. Bead pdu.1 (E22-A1) gesture binding: `ToggleExpand`.
+
+### OI-U47 Health items: sources per tab and display names
+- Raised by: B7-E20-9, B7-E21-6
+- Question: UI-SHL-051 says "sources the active tab uses" without a list; UI-SHL-050 names 12 sources but `SourceId` has more.
+- Answer: per tab: Processes: `Processes` plus every source a visible minigraph draws; Performance: `Cpu`, `Memory`, `Disks`, `Network`, `Gpu`, `Sensors` plus `Battery` when a battery page exists; Services: both systemd managers and `Journal`; Startup Apps: `Startup`; Connections: `Connections`; Information: `Inventory`. Display names: CPU, Memory, Disks, Network, GPU, Sensors, Processes, Services, Startup, Connections, Inventory, KWin, Logind, UDisks, UPower, NetworkManager, Public IP, History, Journal, Battery; any other variant shows its Rust name.
+- Basis: UI-SHL-050, UI-SHL-051 [verified]; the mapping [inferred].
+- Owner decision: no
+- Changes: shell.md UI-SHL-050 and UI-SHL-051: add both lists. No bead change (jqk.18 carries the mapping).
+
+### OI-U48 `WindowRegistry` key queries and the keep-detached close row
+- Raised by: B7-E20-10, E26-OI-3, E26-OI-7
+- Question: E20-028 must know whether any `DetachedGraph(_)` window is open and be told when one closes; E26-018 provides `any_detached_open`; `DetachedGraph(u8)` caps ids at 255.
+- Answer: E16-A2 (fut.2) adds `pub fn has_key(&self, pred: impl Fn(&WindowKey) -> bool) -> bool` and `pub fn count(&self, pred) -> usize` to `WindowRegistry`, and calls `cx.notify()` on every insert and removal. E20-028 (jqk.30) uses `has_key(|k| matches!(k, WindowKey::DetachedGraph(_)))` directly and observes the registry; `any_detached_open` in E26-018 (xdh.20) becomes a one-line wrapper, and that bead un-ignores `keep_detached_on_close_keeps_app`, so xdh.20 depends on jqk.30. `DetachedGraph(u8)` is accepted: state.toml `[[detached_windows]].id` is a `u8` too.
+- Basis: UI-SHL-113 row 2, PERF-084, APP-045 [verified]; jqk.30 Deliverable [verified by `br show`].
+- Owner decision: no
+- Changes: bead fut.2: add the two accessors and notify. Bead jqk.30: use `has_key`. Bead xdh.20: wrapper plus test. Edge `xdh.20` depends on `jqk.30` (Edges).
+
+### OI-U49 Start hidden and `ToggleMainWindow` before the tray exists
+- Raised by: B7-E20-12, B7-E20-13, E24-8
+- Question: `--start-minimized` can hide only when a tray exists; `tray_available` is false until E31; the tray click action is defined only with a tray.
+- Answer: accept both E20 rules. `tray_available(cx)` returns `TrayModel.available` and is `false` until E31-009 fills it (E24-023, crw.25, stubs the same `Some(false)`). Without a tray `--start-minimized` opens the window and minimizes it (APP-048) and a close that would quit minimizes instead when `ToggleMainWindow` arrives while visible.
+- Basis: APP-048, UI-SHL-113 [verified].
+- Owner decision: no
+- Changes: shell.md UI-SHL-110 step 6: add the no-tray rule. No bead change.
+
+### OI-U50 Keyboard Shortcuts window headings
+- Raised by: B7-E21-4
+- Question: UI-SHL-095 lists seven headings; table (b) has more contexts.
+- Answer: headings in order: Global, Tables, Processes, History, Services, Startup Apps, Connections, Information, Performance, Properties windows (PropsWindow, ServiceProps, AffinityDialog, PriorityDialog, SignalDialog), Dialogs (RunDialog, Picker, ColumnPicker, HandleSearch, JournalList, LowMemory). A heading with no shipped bindings is not drawn.
+- Basis: table (b) contexts [verified]; grouping [inferred].
+- Owner decision: no
+- Changes: shell.md UI-SHL-095: the eleven headings. No bead change.
+
+### OI-U51 Fans group: partial entries and empty state
+- Raised by: B7-E21-7
+- Question: UI-SHL-066 says an empty label plus "None" removes the entry but not what a half-set entry stores or what the group shows with no fans.
+- Answer: store `[[sensors.fans]]` entries with `key`, optional `label` (omitted when empty) and optional `temp` (omitted for None); an entry with neither is removed. With no fan in the snapshot the group is hidden. Keys follow PERF-005 (`fan:<hwmon name>:<device path>:<n>`; see OI-U59 for the fallback form).
+- Basis: UI-SHL-066, table (a) [verified]; storage shape [inferred].
+- Owner decision: no
+- Changes: shell.md UI-SHL-066 and table (a) `[[sensors.fans]]`: optional fields. No bead change (bj6.41).
+
+### OI-U52 Passwordless setup step
+- Raised by: B7-E21-11
+- Question: the `SetupStep` variant for `polkit-rule on|off` and the result stream belong to E03 and E29.
+- Answer: see engine side (`SetupStep::PolkitRule(bool)`, `SetupEvent`). UI half: E21-042 (bj6.46) dispatches `Command::RunSetup { step }` and listens on the E29 `SetupEvent` stream; it already depends on qfx.2 and qfx.3 (verified with `br show`).
+- Basis: UI-PRF-052 `Command::RunSetup`, `SetupEvent` [verified].
+- Owner decision: no
+- Changes: none.
+
+---
+
+## G. Process windows (E23)
+
+### OI-U53 Set Affinity is P1 inside a P2 anchor
+- Raised by: B7-E23-2
+- Answer: accept. E23-003 (gma.6) and E23-001, 002, 004 (gma.4, gma.5, gma.7) are P1 and schedulable before E23-A2 (gma.2) closes; the anchor stays P2.
+- Basis: PROC-067, UI-PWN-021 P1 [verified].
+- Owner decision: no
+- Changes: none.
+
+### OI-U54 Dump file name sanitising
+- Raised by: B7-E23-4
+- Question: `{name}` in `<name>_<pid>_<yyyymmdd_hhmmss>.core` can contain `/` and control characters.
+- Answer: replace `/`, `\0` and every control character with `_`, cut the name part to 64 bytes on a char boundary, and use `process` when the result is empty. The timestamp is local time from `AppEnv::now_rfc3339` reformatted (OI-U01). The write itself is engine side (gcore, helper).
+- Basis: PROC-075, UI-PWN-034 [verified]; rule [inferred].
+- Owner decision: no
+- Changes: process-windows.md UI-PWN-034: add the rule. No bead change (gma.36).
+
+### OI-U55 "Shared libraries only" keeps the Primary and "Outside loaded modules" nodes
+- Raised by: B7-E23-5
+- Answer: with the box on, the Primary node (the executable's own mapping) and the "Outside loaded modules" node stay visible; only file-backed library mappings are filtered by the PROC-081 patterns.
+- Basis: PROC-081 [verified]; choice [inferred].
+- Owner decision: no
+- Changes: process-windows.md Memory maps entry: one sentence. No bead change (gma.23).
+
+### OI-U56 After "Grant access" succeeds
+- Raised by: B7-E23-6
+- Question: UI-PWN-018 says the window re-sends its demand "with the helper flag", which `DetailDemand` lacks.
+- Answer: no flag. When `HealthSnapshot.helper` changes to `Unlocked`, every open Properties window whose General payload is `Restricted` sends `Command::DetailRefresh { target, tab }` once for its active tab. Routing Restricted targets through the helper is engine side (E29 chain edit in `process_detail.rs`).
+- Basis: UI-PWN-002 `DetailRefresh`, UI-FND-028 `HelperState` [verified].
+- Owner decision: no
+- Changes: process-windows.md UI-PWN-018: replace "with the helper flag" with the refresh rule. No bead change (gma.28).
+
+### OI-U57 VirusTotal and dump handlers reach the Processes page by chain edit
+- Raised by: B8-E22-14
+- Answer: E22-038 and E22-039 (pdu.41, pdu.42) add the menu items and dispatch `OpenVirusTotal` and `CreateDump`; E23-032 (gma.35) and E23-034 (gma.37) register the handlers in `pages/processes/mod.rs` under the E23 row of the chain-edit rule. No new bead.
+- Basis: 00-epics §2 `pages/processes/mod.rs` sharing rule names E23 [verified].
+- Owner decision: no
+- Changes: none; confirm gma.35 and gma.37 depend on pdu.41 and pdu.42 (Edges).
