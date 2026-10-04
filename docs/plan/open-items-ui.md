@@ -267,3 +267,152 @@ source; [guess] a writer-level choice no doc settles.
 - Basis: 00-epics §2 chain-edit rule [verified]; UI-SHL-010 [verified].
 - Owner decision: no
 - Changes: shell.md UI-SHL-010: "slots 2 and 3 are filled by the active page's `ToolbarContent`". No bead change.
+
+---
+
+## D. Toasts, action tracking and texts
+
+### OI-U25 Toast top is 72 in every window for P1
+- Raised by: B5-8
+- Question: the kit `NotificationSettings` is app-global, so the main window top 72 and the secondary-window top 42 (UI-FND-020 rule 9) cannot both hold.
+- Answer: 72 × `ui_scale` in every window for P1 (66 with server decorations, as UI-SHL-100 says, also app-wide). Rule 9 is kept as the target for P2: a kit change (per-window `NotificationSettings`) or `ToastQueue::new(window, cx, top)` taking the per-window top once E16-006's own queue no longer goes through the kit global. No bead now.
+- Basis: UI-FND-020 rule 9, UI-SHL-100 [verified]; R-109 and R-113 precedent (kit limits are accepted and recorded) [verified].
+- Owner decision: no
+- Changes: foundation.md UI-FND-020 rule 9 and shell.md UI-SHL-100: "P1: 72 in every window; secondary windows get 42 when the queue takes a per-window top (P2)". Bead fut.9 (E16-006): `ToastQueue::new` keeps the `top` parameter but every caller passes the shell's value in P1.
+
+### OI-U26 `message(&ActionError)`, reject texts and deadlines
+- Raised by: B5-9, B5-23, B8-E22-6
+- Question: the docs give only the `PermissionDenied` text; the tracker also needs reject texts for five `RejectReason`s, deadlines for four action kinds, and the short reason used inside partial-failure summaries.
+- Answer: in `tl-ui/src/action_tracker.rs`:
+  | `ActionError` | `message()` |
+  |---|---|
+  | `PermissionDenied` | Permission denied. This process belongs to another user. |
+  | `NoSuchProcess` | The process has already exited. |
+  | `Partial { done, total }` | Done for {done} of {total} targets. |
+  | `UnitJob(result)` | The service job ended with result: {result}. |
+  | `Os(code)` | The system call failed (error {code}). |
+  | `Internal(text)` | Internal error: {text}. |
+
+  | `RejectReason` | toast text (Warning) |
+  |---|---|
+  | `Busy` | Another action on this process is still running. |
+  | `TooManyTargets` | Too many processes selected. The limit is 256. |
+  | `IdentityChanged` | The selected process changed; wait for the list to update and try again. |
+  | `KernelThread` | Kernel threads cannot be signalled. |
+  | `Protected` | This process is protected. Confirm the warning to end it. |
+  | `NotOwner` | This process belongs to another user. Administrator access is needed. |
+  | `Unsupported` | This action is not available for this process. |
+
+  Deadlines (`deadline_for`): 2 s per target for signal, nice, affinity, ioprio and freeze writes; 120 s for every call that may show a polkit prompt, which includes `SockDestroy`, `UnitWriteRecovery` and `UnitRemoveRecovery`; `Dump` has no deadline (`None`), because a core of several GiB is a normal case and the progress toast "Writing core… 1.2 GiB" is its liveness signal. `short_reason(&err)` for summaries ("Ended 4 of 5 processes (1 permission denied)") is the first sentence of `message()` lower-cased without its full stop; `PermissionDenied` gives "permission denied" as today.
+- Basis: ADR-006 deadline table, ADR-015 `ActionError`, PROC-058 texts [verified]; `IdentityChanged` text is PROC-058's [verified]; the other texts [guess]; `Dump` deadline [inferred from PROC-075].
+- Owner decision: no
+- Changes: ARCHITECTURE.md ADR-015: add the `message()` table. RECONCILIATION.md R-121 accepted strings: append the seven reject texts. Bead fut.3: replace "proposed" with these values; add `short_reason`. Bead pdu.20 (E22-017) uses `short_reason`.
+
+### OI-U27 `ActionTracker` contract: per-request texts, summary threshold, Details dialog, Progress hook, restricted refusals
+- Raised by: B5-24, B7-E23-8, B8-E27-3 (UI half), B8-E27-4, B7-E20-8
+- Question: five batches need the same tracker API: per-request texts, a summary threshold that differs between process and system actions, a Details dialog for partial summaries, a Progress toast without the auto-dismiss cap, result events by request id, and a caller for `StatusChip::note_restricted_refusal`.
+- Answer: E16-A3 (fut.3) as written, with these fixed points:
+  - `ActionTracker::track(&mut self, request, queue: WeakEntity<ToastQueue>, texts: ToastTexts, cx) -> Result<ActionId, CommandError>` returns the id. `ToastTexts` gains `pub toast_key: Option<ToastKey>` so grouped requests (affinity on several targets, the SetSched then SetNice pair) share one toast that replaces in place.
+  - `ToastTexts.summary_min_targets` defaults to 4 (R-114); process actions pass 2 (UI-PRC-015 "Ended 4 of 5 processes"). A `ToastTexts` whose `started` is `None` pushes no Progress toast (UI-SYS-045 and UI-SYS-046 want none for startup and connection actions); E27's `SysActions` passes `None` when `pending_one` is empty.
+  - Progress toasts (`ToastKind::Progress`) never auto-dismiss and do not count against the 4-visible cap (E16-006, fut.9).
+  - The tracker emits `ActionTrackerEvent::{Started(ActionId), Finished { id, ok, total, failed }}` through `cx.emit`, so `SysActions` (E27-006, hk6.9) and the dialogs (E23) subscribe by id instead of reading toasts.
+  - "Details" on a partial summary opens `TlDialog` titled "tasklens", non-destructive, one line per failed target "<target label>: <message(err)>", one button "Close" (B8-E27-4; same dialog fut.3 already names).
+  - On `Failed(PermissionDenied)` when `HealthSnapshot.helper == HelperState::Missing`, the tracker calls `StatusChip::note_restricted_refusal(cx)` through the `ShellState` global if present (E20-016, jqk.18); in tests without a shell it is a no-op.
+  - The D-Bus error name inside `ActionError::UnitJob` is engine side (E11); the UI maps whatever string arrives.
+- Basis: fut.3 Deliverable [verified by `br show`]; R-114, UI-PRC-015, UI-SYS-007, UI-SYS-045, UI-SYS-046 [verified]; event enum and `toast_key` [inferred].
+- Owner decision: no
+- Changes: bead fut.3: return `ActionId`, add `toast_key`, the event enum, the `note_restricted_refusal` call, the no-Progress rule. Bead jqk.18: name fut.3 as the caller. Beads hk6.9, gma.5 to gma.7 (E23-002 to 004): subscribe to `ActionTrackerEvent`. system-tabs.md UI-SYS-007: describe the Details dialog.
+
+### OI-U28 Confirmation precedence when several rules match
+- Raised by: B8-E22-7
+- Question: UI-PRC-014 gives only "protected wins over tree".
+- Answer: Protected, then End tree, then Kill app, then several targets, then another user's process. The winning row's title and buttons are used; the count N is still shown where the winning text has one.
+- Basis: UI-PRC-014 "protected wins" [verified]; the rest of the order [inferred, most destructive first].
+- Owner decision: no
+- Changes: processes.md UI-PRC-014: add the order sentence. No bead change (pdu.20 carries it).
+
+### OI-U29 Copy details rounding and clipboard failure
+- Raised by: B8-E22-9, B8-E27-2
+- Question: rounding and glyph words in the TSV, and whether a clipboard failure can be reported.
+- Answer: whole MiB rounded to nearest; TSV writes the words `restricted`, `n/a` and an empty cell for the other glyphs (R-050). `App::write_to_clipboard(&self, item: ClipboardItem)` returns `()` in gpui-pre 0.3.7 (`app.rs:1549`), so no failure can be detected. One wrapper `tl_ui::util::clipboard_write(cx, text) -> Result<(), ()>` returns `Ok(())` today; every copy path shows the success toast through it, the "Failed to copy to clipboard" and "Could not copy" texts stay in Fluent and unused, and no read-back check is added.
+- Basis: gpui source [verified]; R-050 [verified]; APP-044 lists the failure text [verified].
+- Owner decision: no
+- Changes: processes.md UI-PRC-015 and system-tabs.md: footnote that the copy-failure toasts are unreachable in v1. Bead pdu.2 (E22-A2) hosts the wrapper (it is the first copier); hk6.8 and hk6.14 (E27-005, 016) call it.
+
+### OI-U30 Fluent key prefix and slug rule
+- Raised by: B5-31, B8-E22-18
+- Question: R-132 fixes `<area>-<entry>-<slug>` but not the area prefix of the foundation nor how the slug is formed.
+- Answer: areas: `fnd` (foundation), `shl` (shell), `prc` (processes), `pwn` (process windows), `prf` (performance), `sys` (system tabs), `app` (tl-app strings passed through). The slug is the kebab-case of the first five words of the English text, letters and digits only, for example `prc-015-process-terminated`. A key that collides inside one entry gets a numeric suffix `-2`.
+- Basis: R-132 [verified]; the rule [guess, writer-level, already used by every bead].
+- Owner decision: no
+- Changes: RECONCILIATION.md R-132: add the area list and the slug rule. No bead change.
+
+### OI-U31 Small texts no doc gives
+- Raised by: B5-20, B5-25, B7-E21-10
+- Question: stepper button tooltips, the shield's starting-state tooltip, the TaskSlinger import failure toast.
+- Answer: stepper minus "Decrease", plus "Increase" (UI-FND-014). Shield starting state tooltip "Waiting for authentication…" (the accepted string, R-121). TaskSlinger import failure: Error toast "Could not import TaskSlinger settings" (success stays APP-034's "Imported N settings and M themes").
+- Basis: R-121 accepted strings [verified]; the two others [guess, writer-level].
+- Owner decision: no
+- Changes: foundation.md UI-FND-014 and UI-FND-028, shell.md UI-SHL-040 (import row): add the texts. R-121: append "Decrease", "Increase", "Could not import TaskSlinger settings". No bead change.
+
+### OI-U32 "Grant access" without the ellipsis
+- Raised by: B7-E23-7
+- Question: R-121 lists "Grant access…"; UI-PWN-018 and the PROC texts use "Grant access".
+- Answer: "Grant access". The button opens no further dialog of its own (the polkit prompt is the system's), so the UI-FND-050 ellipsis rule does not apply.
+- Basis: UI-PWN-018 [verified]; R-050 and the ellipsis convention [verified].
+- Owner decision: no
+- Changes: RECONCILIATION.md R-121: replace "Grant access…" with "Grant access". No bead change.
+
+### OI-U33 Startup and connection action toasts
+- Raised by: B8-E28-10, B8-E27-6
+- Question: no busy, unknown or summary strings exist for the startup, connection and the Reload, Reset failed and startup-type service actions.
+- Answer: R-114's pattern extended, exact strings:
+  - Busy: "A startup action is already in progress.", "A connection action is already in progress." (the Services one is R-114's).
+  - Unknown: "Outcome unknown" (PROC-058) for all.
+  - Services: "Reloading { $n } services...", "{ $n } services reloaded", "{ $ok } of { $n } services reloaded. { $failed } failed."; "Resetting { $n } services...", "{ $n } services reset", "{ $ok } of { $n } services reset. { $failed } failed."; startup type: "Changing startup type of { $n } services...", "Startup type changed for { $n } services", "Startup type changed for { $ok } of { $n } services. { $failed } failed.".
+  - Startup Apps: "{ $n } startup entries disabled", "{ $n } startup entries enabled", "{ $n } startup entries launched", "{ $n } startup entries deleted", and "{ $ok } of { $n } startup entries disabled. { $failed } failed." forms.
+  - Connections: "{ $n } TCP connections closed" and "{ $ok } of { $n } TCP connections closed. { $failed } failed.".
+  - No Progress toast for startup and connection actions (UI-SYS-045, UI-SYS-046): `ToastTexts.started = None` (OI-U27).
+- Basis: R-114 pattern, UI-SYS-007, PROC-058 [verified]; the new strings [inferred from the pattern].
+- Owner decision: no
+- Changes: RECONCILIATION.md R-114: add the three service forms and the two system-table families. Beads hk6.15, hk6.16, 9o0.7, 9o0.15 already carry them; no change.
+
+### OI-U34 Status text "| N selected" and the copy block for kernel sockets
+- Raised by: B8-E28-8, B8-E28-14
+- Question: when the selected-count suffix appears on Startup Apps and Connections; what the copy block says for kernel-owned and unresolved sockets.
+- Answer: " | N selected" from 2 selected rows, as the Processes text (APP-029) does. Copy block: kernel-owned socket "PID: -" and "Process: No owner (kernel)"; unresolved (restricted) socket "PID: ?" and "Process: Restricted".
+- Basis: APP-029, SYS-027, SYS-036, UI-SYS-049, UI-SYS-066 [verified]; the kernel and restricted lines [inferred from R-050's words].
+- Owner decision: no
+- Changes: system-tabs.md UI-SYS-049, UI-SYS-067 (status) and UI-SYS-066 (copy): add the rule and lines. No bead change.
+
+### OI-U35 Session type wording
+- Raised by: B8-E28-5
+- Question: UI-SYS-088 shows "user (graphical)" but logind Type is x11, wayland, mir, tty or unspecified.
+- Answer: "<Class> (graphical)" for x11, wayland and mir; "<Class> (text)" for tty; "<Class> (<Type>)" otherwise. Formatted in the UI from the two raw strings; see engine side for the fields (`InventorySnapshot`).
+- Basis: UI-SYS-088 [verified]; mapping [inferred].
+- Owner decision: no
+- Changes: system-tabs.md UI-SYS-088: add the mapping. No bead change.
+
+### OI-U36 Jump target texts for callers without their own
+- Raised by: B8-E22-12
+- Question: `--select-pid`, the D-Bus `select-pid` action and the window picker reach the jump target without a "not visible" text.
+- Answer: `JumpTexts::default()` in E22-A3 (pdu.3): not found "Process not found in current view" (PROC-071); not visible "Process not found in current view" with a "Show" button that clears the filter, turns Hide system processes off and selects the row; switched "Switched to Processes tab". Callers with their own texts (Go to parent, Services, Connections, Handle Search) pass theirs.
+- Basis: PROC-071 [verified]; reuse of the same text for the hidden case [inferred].
+- Owner decision: no
+- Changes: processes.md UI-PRC-022: list the default texts. No bead change.
+
+### OI-U37 Which block device the I/O priority "Scheduler:" line names
+- Raised by: B8-E22-13
+- Question: UI-PRC-020 names "the active block scheduler" without saying which device.
+- Answer: the device holding the root filesystem, as a capability string in the snapshot. See engine side for the field (the UI does not read `/sys`).
+- Basis: UI-PRC-020 [verified]; choice [inferred].
+- Owner decision: no
+- Changes: processes.md UI-PRC-020: "the scheduler of the device holding /". No bead change.
+
+### OI-U38 Combo filter at 12 items or more
+- Raised by: B5-21
+- Question: UI-FND-017 says the filter appears "above 12 items" and in the same sentence gives the 12-item language list one.
+- Answer: 12 or more items show the filter.
+- Basis: UI-FND-017 [verified, self-contradictory; the example wins].
+- Owner decision: no
+- Changes: foundation.md UI-FND-017: "12 or more items". No bead change.
