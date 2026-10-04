@@ -510,11 +510,8 @@ fn rollup_apply_and_coverage() {
     assert_eq!(records[1].pss_bytes, 0);
 
     // Restricted sets that validity and does not cover the key.
-    apply_rollups(
-        &mut records,
-        &[(records[1].key, RollupRead::Restricted)],
-        &mut builder,
-    );
+    let restricted = [(records[1].key, RollupRead::Restricted)];
+    apply_rollups(&mut records, &restricted, &mut builder);
     assert_eq!(
         records[1].validity.get(ProcessField::Pss),
         Validity::Restricted
