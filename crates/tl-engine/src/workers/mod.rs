@@ -4,6 +4,7 @@
 //! (chain edit). The logind worker (E08-A2) is the first entry.
 
 pub mod cpu;
+mod dbus_kwin;
 mod dbus_systemd;
 pub mod disk;
 pub mod enumerate;
@@ -46,6 +47,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         gpu_nvidia::spec(),
         dbus_systemd::spec_system(),
         dbus_systemd::spec_user(),
+        dbus_kwin::spec(),
     ]
 }
 
