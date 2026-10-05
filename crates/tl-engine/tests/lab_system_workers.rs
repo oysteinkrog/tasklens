@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use asupersync::Cx;
+use asupersync::channel::mpsc;
 use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
@@ -241,6 +242,217 @@ fn cpu_hotplug_sends_topology() {
     // Sent once per change.
     let (_, s) = cpu_sample(src, 3 * SEC);
     assert!(s.topology.is_none());
+}
+
+/// Writes `proc/stat` with one CPU and these jiffies.
+fn write_stat(dir: &Path, user: u64, system: u64, idle: u64) {
+    let line = format!("{user} 0 {system} {idle} 10 0 0 0 0 0");
+    let stat = format!(
+        "cpu  {line}\ncpu0 {line}\nctxt 100\nbtime 1700000000\nprocesses 50\n\
+         procs_running 1\nprocs_blocked 0\n"
+    );
+    fs::write(dir.join("proc/stat"), stat).expect("write proc/stat");
+}
+
+/// Runs the lab for `total` in 10 ms steps. Returns every `Cpu` message with the time in ms
+/// it was received, including those already queued.
+fn cpu_messages(
+    fl: &mut FakeLab,
+    rx: &mut mpsc::Receiver<EngineMsg>,
+    total: Duration,
+) -> Vec<(u64, CpuSample)> {
+    let end = fl.now_ms() + total.as_millis() as u64;
+    let mut out = Vec::new();
+    loop {
+        for msg in drain(rx) {
+            if let EngineMsg::Source(SourceUpdate::Cpu(sample)) = msg {
+                out.push((fl.now_ms(), sample));
+            }
+        }
+        if fl.now_ms() >= end {
+            return out;
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+}
+
+fn times(messages: &[(u64, CpuSample)]) -> Vec<u64> {
+    messages.iter().map(|(t, _)| *t).collect()
+}
+
+/// The loop reads demand once per turn, before it sleeps, so the sample already scheduled at a
+/// change still runs at the old rate (as in `lab_demand.rs`).
+#[test]
+fn cpu_rates_follow_demand() {
+    let dir = fixture_copy("cpu-math", Some(0));
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    demand
+        .send(Demand {
+            cpu: CpuDemand::Total,
+            cpu_fast: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let worker_io = io(&updates, &demand, &settings, &control);
+    let src = cpu_source(&dir);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    });
+
+    let fast = times(&cpu_messages(
+        &mut fl,
+        &mut rx,
+        Duration::from_millis(1_950),
+    ));
+    let expected: Vec<u64> = (0..20).map(|k| k * 100).collect();
+    assert_eq!(fast, expected);
+
+    // 1 Hz. The 2000 ms sample was already scheduled at 10 Hz; the new rate starts with it.
+    let changed = fl.now_ms();
+    demand
+        .send(demand(CpuDemand::Total))
+        .expect("watch has receivers");
+    let slow = times(&cpu_messages(
+        &mut fl,
+        &mut rx,
+        Duration::from_millis(3_050),
+    ));
+    assert_eq!(slow, [2_000, 2_000, 3_000, 4_000, 5_000]);
+    assert!(
+        slow[1] - changed <= 500,
+        "new rate {} ms late",
+        slow[1] - changed
+    );
+    assert!(
+        slow[1..].windows(2).all(|w| w[1] - w[0] == 1_000),
+        "{slow:?}"
+    );
+
+    // Off. The 6000 ms sample was already scheduled; nothing after it for 60 s.
+    demand
+        .send(demand(CpuDemand::Off))
+        .expect("watch has receivers");
+    let off = times(&cpu_messages(&mut fl, &mut rx, Duration::from_secs(61)));
+    assert_eq!(off, [6_000]);
+
+    handle.abort();
+    fl.finish();
+}
+
+#[test]
+fn cpu_recording_keeps_1hz() {
+    let dir = fixture_copy("cpu-math", Some(0));
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    demand
+        .send(Demand {
+            cpu: CpuDemand::Off,
+            recording: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let worker_io = io(&updates, &demand, &settings, &control);
+    let src = cpu_source(&dir);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    });
+
+    let got = times(&cpu_messages(
+        &mut fl,
+        &mut rx,
+        Duration::from_millis(9_990),
+    ));
+    let expected: Vec<u64> = (0..10).map(|k| k * 1_000).collect();
+    assert_eq!(got, expected);
+
+    handle.abort();
+    fl.finish();
+}
+
+#[test]
+fn cpu_reset_generation_warms_up() {
+    let dir = fixture_copy("cpu-math", Some(0));
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    demand
+        .send(demand(CpuDemand::Total))
+        .expect("watch has receivers");
+    let worker_io = io(&updates, &demand, &settings, &control);
+    let src = cpu_source(&dir);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    });
+
+    let first = cpu_messages(&mut fl, &mut rx, Duration::ZERO);
+    assert_eq!(times(&first), [0]);
+    assert_eq!(first[0].1.totals.util_pct.validity, Validity::WarmingUp);
+    apply_step(&dir, "cpu-math", 1);
+    let second = cpu_messages(&mut fl, &mut rx, Duration::from_secs(1));
+    assert_eq!(times(&second), [1_000]);
+    assert_eq!(second[0].1.totals.util_pct, Metric::valid(70.0));
+
+    // The counters move again, so only a reset can make the next sample `WarmingUp`.
+    write_stat(&dir, 200, 90, 860);
+    control.send_modify(|c| c.reset_generation += 1);
+    let after_reset = cpu_messages(&mut fl, &mut rx, Duration::from_secs(1));
+    assert_eq!(times(&after_reset), [2_000]);
+    assert_eq!(
+        after_reset[0].1.totals.util_pct.validity,
+        Validity::WarmingUp
+    );
+
+    write_stat(&dir, 250, 110, 890);
+    let next = cpu_messages(&mut fl, &mut rx, Duration::from_secs(1));
+    assert_eq!(times(&next), [3_000]);
+    assert_eq!(next[0].1.totals.util_pct, Metric::valid(70.0));
+
+    handle.abort();
+    fl.finish();
+}
+
+/// Reads the live host: run on the owner machine with `--ignored`.
+#[test]
+#[ignore]
+fn cpu_real_host_two_samples() {
+    let src = CpuSource::new(SysRoot::host()).expect("host topology reads");
+    src.period(&demand(CpuDemand::PerCore), &EngineSettings::default());
+    let (src, first) = match src.sample() {
+        (src, SourceUpdate::Cpu(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Cpu, got {other:?}"),
+    };
+    assert!(first.topology.is_some());
+    std::thread::sleep(Duration::from_secs(1));
+    let second = match src.sample() {
+        (_, SourceUpdate::Cpu(sample)) => sample,
+        (_, other) => panic!("expected SourceUpdate::Cpu, got {other:?}"),
+    };
+    let util = second.totals.util_pct;
+    assert_eq!(util.validity, Validity::Valid);
+    assert!((0.0..=100.0).contains(&util.value), "{util:?}");
+    let cpus = std::thread::available_parallelism()
+        .expect("available parallelism")
+        .get();
+    assert_eq!(second.per_cpu.len(), cpus);
+}
+
+#[test]
+fn cpu_listed_once_in_full_mode() {
+    let full = workers_for(EngineMode::Full);
+    let cpu: Vec<&str> = full
+        .iter()
+        .filter(|spec| spec.id == SourceId::Cpu)
+        .map(|spec| spec.name)
+        .collect();
+    assert_eq!(cpu, ["cpu"]);
+    assert!(
+        workers_for(EngineMode::LowMemory)
+            .iter()
+            .all(|spec| spec.id != SourceId::Cpu)
+    );
 }
 
 #[test]
