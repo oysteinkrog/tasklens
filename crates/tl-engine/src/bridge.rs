@@ -77,15 +77,9 @@ struct Inner {
     /// The last demand sent, so an equal demand does not wake the workers.
     last_demand: Mutex<Demand>,
     journal: Option<JournalSpawner>,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")
-    )]
+    #[allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")]
     rt: Mutex<Option<Runtime>>,
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")
-    )]
+    #[allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")]
     rt_handle: Mutex<Option<RuntimeHandle>>,
     stopped: AtomicBool,
 }
