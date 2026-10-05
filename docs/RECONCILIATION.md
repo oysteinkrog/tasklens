@@ -2282,7 +2282,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-4 | Headless wgpu screenshots work with gpui-kit's `HeadlessAppContext` on Mesa lavapipe | ADR-013, open question 8 |
 | U-5 | GPUI has no screen reader support on Linux | ADR-009 |
 | U-6 | Wayland focus-stealing prevention only flashes the taskbar entry on second-instance activation | ADR-010 |
-| U-7 | Bundled Noto Sans static faces contain `tnum` and load under zed#61660; Inter is the alternative | ADR-009, open question 5 |
+| U-7 | Bundled Noto Sans static faces contain `tnum` and load under zed#61660; Inter is the alternative | ADR-009, open question 5. Verified by tasklens-ug9.4: NotoSans-Regular, Medium and SemiBold (hinted static TTFs, notofonts release NotoSans-v2.015) load under cosmic-text and resolve to their bundled face at 400, 500 and 600; with `tnum` all ten digit advances are equal. Inter is not needed. |
 | U-8 | Exact gpui-kit `ThemeColor` token names match ADR-009's mapping | ADR-009, open question 11. Verified by tasklens-lgw.6: all mapped names exist in gpui-kit 0.7.0, no substitutions; `list_head` stays at the kit default (R-274). |
 | U-9 | The zed#64499 patch outline fixes the frame stall | ADR-010, open question 12 |
 | U-10 | (settled by R-286) Collection cost gates: 2% (Performance tab) and 3.5% (Processes tab) are reachable; 15 ms sweep for 2,000 processes | ADR-014, ADR-016 |
@@ -2315,7 +2315,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-37 | Mission Center's `99-powercap.rules` keeps `energy_uj` readable after reboot (so the tasklens rule is only needed on other machines) | PERF-095 [now PERF-106] |
 | U-38 | Columns ids 2, 4, 5, 8-12, 14, 15, 19-32, 34-61, 84-95 of TaskSlinger have no names tasklens lacks (string ids make this moot) | add PROC-028 [now PROC-037] |
 | U-39 | A dismissed polkit prompt and a denial come back as the same access-denied error on systemd D-Bus calls (`manage-units`); phase 0 records both error names | R-117, UI-SYS-007 |
-| U-40 | The static `NotoSansMono-Regular.ttf` loads under cosmic-text (zed#61660: faces without `m` are dropped) and has `tnum` | R-118, UI-FND-050, UI-SYS-036 |
+| U-40 | The static `NotoSansMono-Regular.ttf` loads under cosmic-text (zed#61660: faces without `m` are dropped) and has `tnum` | R-118, UI-FND-050, UI-SYS-036. Verified by tasklens-ug9.4: NotoSansMono-Regular (hinted static TTF, notofonts release NotoSansMono-v2.014) loads under cosmic-text and resolves at 400; with `tnum` all ten digit advances are equal. |
 | U-41 | gpui-kit 0.7.0 `Button` at rem 13 reaches 24 px with `xsmall` or `small`; the first component bead measures and picks | R-123, UI-FND-010 |
 | U-42 | The `TlFocusRing` "last input was keyboard" heuristic does not show the ring after a mouse click; fallback is the kit's always-on ring | R-123, UI-FND-003. Verified by tasklens-ug9.8: `focus::tests::ring_only_after_keyboard` passes (no ring after a click, ring after Tab), so `KEYBOARD_ONLY_RING` stays `true`. |
 | U-43 | KWin on Wayland delivers the Shift modifier state within 500 ms of first focus, so "Shift held at launch" works; else the path is dropped on Wayland | R-124, UI-SHL-110 |
