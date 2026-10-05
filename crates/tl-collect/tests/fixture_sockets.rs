@@ -1,5 +1,6 @@
-//! sock_diag tests (E06-003). The `real_*` tests open a NETLINK_SOCK_DIAG socket on the real
-//! system and run with `cargo test -p tl-collect -- --ignored`.
+//! sock_diag tests (E06-003) and socket map tests (E06-004). The `real_*` tests open a
+//! NETLINK_SOCK_DIAG socket or walk /proc on the real system and run with
+//! `cargo test -p tl-collect -- --ignored`.
 
 // The helpers below are not `#[test]` functions, so `allow-unwrap-in-tests` does not cover them.
 #![allow(clippy::unwrap_used)]
@@ -7,7 +8,10 @@
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv6Addr, TcpListener, TcpStream, UdpSocket};
 
+use tl_collect::SysRoot;
 use tl_collect::net::sock_diag::{Family, Proto, SockDiag, SockRecord};
+use tl_collect::net::socket_map::SocketMap;
+use tl_model::time::BootId;
 
 fn dump_all() -> Vec<SockRecord> {
     let mut diag = SockDiag::open().unwrap();
@@ -80,4 +84,40 @@ fn real_tcp_info_bytes_acked() {
     }
     assert!(acked >= 1000, "bytes_acked {acked}");
     assert!(out.iter().all(|r| r.proto == Proto::Tcp));
+}
+
+#[test]
+#[ignore = "real system: walks /proc/<pid>/fd, must run as a normal user"]
+fn real_socket_map_pid1_restricted() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let inode = rustix::fs::fstat(&listener).unwrap().st_ino;
+
+    let mut map = SocketMap::new();
+    map.rebuild(&SysRoot::host(), BootId(0)).unwrap();
+    assert_eq!(
+        map.restricted.get(&1),
+        Some(&0),
+        "pid 1 not restricted as uid 0"
+    );
+    let owners = map.owners_of(inode);
+    assert!(
+        owners.iter().any(|k| k.pid == std::process::id()),
+        "listener inode {inode} owners {owners:?}"
+    );
+}
+
+#[test]
+#[ignore = "real system: walks /proc/<pid>/fd"]
+fn real_socket_map_timing() {
+    let mut map = SocketMap::new();
+    map.rebuild(&SysRoot::host(), BootId(0)).unwrap();
+    // Second walk: the maps and buffers are warm, as in the engine loop.
+    map.rebuild(&SysRoot::host(), BootId(0)).unwrap();
+    println!(
+        "socket map rebuild: {} us, {} inodes, {} restricted pids",
+        map.elapsed_ns / 1000,
+        map.owners.len(),
+        map.restricted.len()
+    );
+    assert!(map.elapsed_ns > 0);
 }
