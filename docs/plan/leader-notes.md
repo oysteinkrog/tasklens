@@ -213,3 +213,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.13: switch built from kit base parts (styled Switch cannot meet spec). M_FAST 120 ms is a local const until a motion tokens module exists. motion.animations=false only works if the shell maps it to set_reduce_motion: needs a bead (affects switch, radio, skeleton).
 - LEADER TODO: ndy.2 is closed; rerun clippy -p tl-engine --all-targets passes (blocked by 8fx.16 history.rs). Commits 13af3d6 ff6fee3 a967de5 a5b4b89 b745e7f 7e9713f.
 - LEADER TODO: check-deps matches "race!" as plain text, so tracing::trace!( is a false positive (y6k.13 worked around it in 4f6749d with tracing::event!). Fix the matcher with a word boundary, then revert that workaround.
+- LEADER TODO: close tasklens-hjn.10 (cf304f6) after clippy passes; its live-stats slow-tick test checks behaviour since no E12-001 call counter exists.
