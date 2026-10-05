@@ -214,3 +214,8 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - LEADER TODO: ndy.2 is closed; rerun clippy -p tl-engine --all-targets passes (blocked by 8fx.16 history.rs). Commits 13af3d6 ff6fee3 a967de5 a5b4b89 b745e7f 7e9713f.
 - LEADER TODO: check-deps matches "race!" as plain text, so tracing::trace!( is a false positive (y6k.13 worked around it in 4f6749d with tracing::event!). Fix the matcher with a word boundary, then revert that workaround.
 - LEADER TODO: close tasklens-hjn.10 (cf304f6) after clippy passes; its live-stats slow-tick test checks behaviour since no E12-001 call counter exists.
+- eal2 closed (efcf924, de17346): demand_rx in Reducer, keep set = detail_keys while pss/uss shown. Watch: processes.rs overlay() adds Valid-Pss sweep records to coverage.
+- ug9.12: checkbox hover on checked box lightens fill+border 8% (not text_primary); min radius 3*ui_scale even with rounded_corners off. bind_keys_components lives in checkbox.rs.
+- ug9.9: progress built on kit base parts; TlSpinner has reduced_motion(bool) builder. Doc conflict: spinner sizes 14/16 (bead) vs 16/20 (foundation.md). Fix docs.
+- ug9.4: fonts from NotoSans-v2.015 and NotoSansMono-v2.014; pre-commit hook stripped a trailing space on LICENSE-OFL.txt line 21 (restore with \x20 trick, as with MAPS_GROUPING). Empty commit 77c2b56.
+- Motion: no shared motion tokens; M_FAST 120 ms is copied into checkbox, switch and radio. Needs a bead with the motion.animations -> set_reduce_motion wiring.
