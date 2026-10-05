@@ -11,6 +11,7 @@ pub mod controller;
 pub mod dbus;
 pub mod gpu;
 mod helper;
+mod opener;
 pub mod reducer;
 pub mod runtime;
 pub mod session;
