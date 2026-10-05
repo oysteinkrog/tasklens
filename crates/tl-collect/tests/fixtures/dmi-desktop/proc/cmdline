@@ -1,0 +1,1 @@
+BOOT_IMAGE=/vmlinuz-linux root=UUID=00000000 rw mem_encrypt=on
