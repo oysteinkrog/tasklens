@@ -30,17 +30,19 @@ fn fixtures() -> PathBuf {
 /// Copies `src` into `dst`, recreating symlinks. Files are rewritten in place, so a kept fd on
 /// an existing file sees the new content.
 fn copy_tree(src: &Path, dst: &Path) {
-    fs::create_dir_all(dst).unwrap();
-    for entry in fs::read_dir(src).unwrap() {
-        let entry = entry.unwrap();
+    fs::create_dir_all(dst).expect("create fixture dir");
+    for entry in fs::read_dir(src).expect("list fixture dir") {
+        let entry = entry.expect("fixture dir entry");
         let to = dst.join(entry.file_name());
-        let file_type = entry.file_type().unwrap();
+        let file_type = entry.file_type().expect("fixture file type");
         if file_type.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &to).unwrap();
+            let target = fs::read_link(entry.path()).expect("read fixture symlink");
+            std::os::unix::fs::symlink(target, &to).expect("create fixture symlink");
         } else if file_type.is_dir() {
             copy_tree(&entry.path(), &to);
         } else {
-            fs::write(&to, fs::read(entry.path()).unwrap()).unwrap();
+            let bytes = fs::read(entry.path()).expect("read fixture file");
+            fs::write(&to, bytes).expect("write fixture file");
         }
     }
 }
@@ -51,7 +53,7 @@ fn fixture_copy(name: &str, step: Option<u32>) -> PathBuf {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dst = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{n}"));
     if dst.exists() {
-        fs::remove_dir_all(&dst).unwrap();
+        fs::remove_dir_all(&dst).expect("remove old fixture copy");
     }
     let mut src = fixtures().join(name);
     if let Some(step) = step {
@@ -74,7 +76,7 @@ fn at(t: u64) -> Clock {
 }
 
 fn cpu_source(dir: &Path) -> CpuSource {
-    CpuSource::new(SysRoot::at(dir)).unwrap()
+    CpuSource::new(SysRoot::at(dir)).expect("fixture topology reads")
 }
 
 fn cpu_sample(src: CpuSource, t: u64) -> (CpuSource, CpuSample) {
@@ -101,7 +103,7 @@ fn cpu_with_freq() -> PathBuf {
 /// Rewrites policy0's clock in place.
 fn set_policy0_khz(dir: &Path, khz: u64) {
     let file = dir.join("sys/devices/system/cpu/cpufreq/policy0/cpuinfo_avg_freq");
-    fs::write(file, format!("{khz}\n")).unwrap();
+    fs::write(file, format!("{khz}\n")).expect("write cpuinfo_avg_freq");
 }
 
 #[test]
