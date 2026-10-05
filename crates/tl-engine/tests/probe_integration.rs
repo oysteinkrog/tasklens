@@ -446,36 +446,22 @@ fn spawn_fd3_env_and_fds() {
     let child = spawn_probe(&probe, &[OsStr::new("--fake"), OsStr::new("normal")]).expect("spawn");
     let pid = child.child.id();
 
-    // After the Hello reply the probe is in its loop, so the dynamic loader's short-lived fds
-    // are closed again.
-    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
-    sock.set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("read timeout");
-    let hello = ProbeRequest::Hello {
-        proto: GPU_PROTO_VERSION,
-    };
-    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
-    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
-    assert!(
-        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
-        "{reply:?}"
-    );
-
-    let fds: Vec<i32> = {
+    // Before `Hello`: once the probe answers, it opens a second fd on its socket. Its start-up
+    // may hold short-lived fds of its own, so the set is polled for 500 ms; a leaked fd stays.
+    let fd_set = || -> Vec<i32> {
         let mut fds: Vec<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
             .expect("read fd dir")
-            .map(|e| {
-                e.expect("fd entry")
-                    .file_name()
-                    .to_str()
-                    .expect("utf-8")
-                    .parse()
-                    .expect("fd number")
-            })
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
             .collect();
         fds.sort_unstable();
         fds
     };
+    let end = Instant::now() + Duration::from_millis(500);
+    let mut fds = fd_set();
+    while fds != [0, 1, 2, 3] && Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(5));
+        fds = fd_set();
+    }
     let targets: Vec<String> = fds
         .iter()
         .map(|fd| {
@@ -505,6 +491,19 @@ fn spawn_fd3_env_and_fds() {
     got.sort();
     want.sort();
     assert_eq!(got, want);
+
+    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
+    sock.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let hello = ProbeRequest::Hello {
+        proto: GPU_PROTO_VERSION,
+    };
+    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
+    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
+    assert!(
+        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
+        "{reply:?}"
+    );
 
     drop(child);
     assert_eq!(stat(pid), None, "drop kills and reaps");
