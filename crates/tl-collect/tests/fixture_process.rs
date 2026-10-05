@@ -2496,3 +2496,340 @@ fn sweep_io_on_demand() {
     assert_eq!(p.validity.get(ProcessField::IoRead), Validity::Valid);
     assert_eq!(p.validity.get(ProcessField::IoWrite), Validity::Valid);
 }
+
+// ---- P2 per-process columns (E05-035) ----
+
+use std::time::{Duration, Instant};
+
+use tl_collect::pkg::{PackageIndex, PathOwners, PkgBackend, VerifyOutcome};
+use tl_collect::proc::extras_p2::{ExtrasP2Reader, elf_reads};
+use tl_collect::proc::meta::RawMeta;
+use tl_collect::proc::sweep::PidDir;
+use tl_model::process::{PackageInfo, PackageStatus, ProcessExtrasP2};
+
+/// Package backend that owns nothing and counts `owners` calls.
+#[derive(Default)]
+struct NoPackages {
+    calls: Arc<Mutex<usize>>,
+}
+
+impl PkgBackend for NoPackages {
+    fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(paths.iter().map(|p| (p.to_path_buf(), None)).collect())
+    }
+    fn info(&mut self, _name: &str) -> Result<Option<PackageInfo>, CollectError> {
+        Ok(None)
+    }
+    fn verify(&mut self, _name: &str) -> Result<VerifyOutcome, CollectError> {
+        Ok(VerifyOutcome::Unmodified)
+    }
+    fn db_stamp(&mut self) -> Option<i64> {
+        Some(1)
+    }
+}
+
+fn no_packages() -> PackageIndex {
+    PackageIndex::new(Box::new(NoPackages::default()))
+}
+
+fn raw_meta(exe: ExeLink, cgroup: Option<CgroupPath>) -> RawMeta {
+    RawMeta {
+        comm: Arc::from("comm"),
+        exe,
+        cmdline: None,
+        argv: Default::default(),
+        cgroup,
+        cgroup_denied: false,
+    }
+}
+
+fn exe_path(path: &str) -> ExeLink {
+    let deleted = path.ends_with(" (deleted)");
+    ExeLink::Path {
+        path: Arc::from(path),
+        deleted,
+    }
+}
+
+/// Opens `<root>/proc` and runs one `ExtrasP2Reader::read` for `pid` with the fixture stat and
+/// status of that pid.
+fn read_p2(
+    reader: &mut ExtrasP2Reader,
+    root: &SysRoot,
+    pid: u32,
+    meta: &RawMeta,
+    pkg: &mut PackageIndex,
+) -> ProcessExtrasP2 {
+    let proc_fd = open_dir(&root.proc);
+    let mut st = PidStat::default();
+    parse_pid_stat(
+        &fs::read(root.proc_path(&format!("{pid}/stat"))).unwrap(),
+        &mut st,
+    )
+    .unwrap();
+    let mut status = PidStatus::default();
+    let status_ok = fs::read(root.proc_path(&format!("{pid}/status")))
+        .ok()
+        .is_some_and(|b| parse_status(&b, &mut status).is_ok());
+    reader.read(
+        root,
+        PidDir {
+            proc_fd: proc_fd.as_fd(),
+            pid,
+        },
+        rollup_key(pid, st.start_ticks),
+        &st,
+        status_ok.then_some(&status),
+        meta,
+        pkg,
+        Instant::now(),
+        &mut ReadBufs::default(),
+    )
+}
+
+/// A copy of process-edge 4201 at `pid` under `tmp`.
+fn copy_4201(tmp: &Path, pid: u32) {
+    let dir = tmp.join(format!("proc/{pid}"));
+    fs::create_dir_all(&dir).expect("create proc dir");
+    for name in ["stat", "status"] {
+        let rel = format!("proc/4201/{name}");
+        fs::write(dir.join(name), fixture_bytes("process-edge", &rel)).expect("copy file");
+    }
+}
+
+#[test]
+fn extras_p2_basic_fields() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let mut reader = ExtrasP2Reader::new();
+    let meta = raw_meta(ExeLink::None, None);
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut no_packages());
+    assert_eq!(p.key.map(|k| k.pid), Some(4201));
+    assert_eq!(p.session_id, Some(3));
+    assert_eq!(p.oom_score, Some(667));
+    assert_eq!(p.oom_score_adj, Some(200));
+    assert_eq!(p.tty.as_deref(), Some("pts/1"));
+    assert_eq!(p.cwd.as_deref(), Some("/home/user"));
+    assert_eq!(p.sched_policy_text.as_deref(), Some("Normal"));
+    // Uid 1000 everywhere and CapEff 0.
+    assert_eq!(p.elevated, Some(false));
+    // The fixture has no /sys/kernel/security/lsm, so no major LSM is active.
+    assert_eq!(p.security_label, None);
+    assert_eq!(p.power_w, None);
+    assert_eq!(p.power_trend_w, None);
+}
+
+#[test]
+fn extras_p2_security_label_with_apparmor() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    copy_4201(tmp.path(), 4201);
+    let dir = tmp.path().join("proc/4201/attr");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("current"), b"firefox (enforce)\n\0").unwrap();
+    fs::create_dir_all(tmp.path().join("sys/kernel/security")).unwrap();
+    fs::write(
+        tmp.path().join("sys/kernel/security/lsm"),
+        b"capability,landlock,lockdown,yama,apparmor,bpf",
+    )
+    .unwrap();
+    let root = SysRoot::at(tmp.path());
+    let meta = raw_meta(ExeLink::None, None);
+    let p = read_p2(
+        &mut ExtrasP2Reader::new(),
+        &root,
+        4201,
+        &meta,
+        &mut no_packages(),
+    );
+    assert_eq!(p.security_label.as_deref(), Some("firefox (enforce)"));
+}
+
+#[test]
+fn extras_p2_elf_cached() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut header = vec![0u8; 64];
+    header[..5].copy_from_slice(b"\x7fELF\x02");
+    header[18] = 62;
+    let exe = tmp.path().join("foo");
+    fs::write(&exe, &header).unwrap();
+    for pid in [100, 101] {
+        copy_4201(tmp.path(), pid);
+        std::os::unix::fs::symlink(&exe, tmp.path().join(format!("proc/{pid}/exe"))).unwrap();
+    }
+    let root = SysRoot::at(tmp.path());
+    let meta = raw_meta(exe_path(exe.to_str().unwrap()), None);
+    let mut reader = ExtrasP2Reader::new();
+    let mut pkg = no_packages();
+    let before = elf_reads();
+    let a = read_p2(&mut reader, &root, 100, &meta, &mut pkg);
+    let b = read_p2(&mut reader, &root, 101, &meta, &mut pkg);
+    assert_eq!(elf_reads(), before + 1, "header read once per (dev, inode)");
+    for p in [&a, &b] {
+        assert_eq!(p.elf_class, Some(64));
+        assert_eq!(p.elf_machine, Some(62));
+        assert_eq!(p.exe_size_bytes, Some(64));
+        assert!(p.exe_mtime_s.is_some());
+    }
+}
+
+#[test]
+fn extras_p2_ctx_switch_delta() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    copy_4201(tmp.path(), 4201);
+    let write_tasks = |v: [u64; 2], n: [u64; 2]| {
+        for (i, tid) in [1, 2].into_iter().enumerate() {
+            let dir = tmp.path().join(format!("proc/4201/task/{tid}"));
+            fs::create_dir_all(&dir).unwrap();
+            let text = format!(
+                "Name:\tt\nvoluntary_ctxt_switches:\t{}\nnonvoluntary_ctxt_switches:\t{}\n",
+                v[i], n[i]
+            );
+            fs::write(dir.join("status"), text).unwrap();
+        }
+    };
+    let root = SysRoot::at(tmp.path());
+    let meta = raw_meta(ExeLink::None, None);
+    let mut reader = ExtrasP2Reader::new();
+    let mut pkg = no_packages();
+
+    write_tasks([10, 5], [1, 2]);
+    let first = read_p2(&mut reader, &root, 4201, &meta, &mut pkg);
+    assert_eq!(first.ctx_switches_voluntary, Some(15));
+    assert_eq!(first.ctx_switches_involuntary, Some(3));
+    assert_eq!(first.ctx_switches_delta, None);
+
+    write_tasks([20, 5], [1, 2]);
+    let second = read_p2(&mut reader, &root, 4201, &meta, &mut pkg);
+    assert_eq!(second.ctx_switches_voluntary, Some(25));
+    assert_eq!(second.ctx_switches_involuntary, Some(3));
+    assert_eq!(second.ctx_switches_delta, Some(10));
+
+    // A dead key loses its baseline.
+    reader.retain_live(&Default::default());
+    let third = read_p2(&mut reader, &root, 4201, &meta, &mut pkg);
+    assert_eq!(third.ctx_switches_delta, None);
+}
+
+#[test]
+fn extras_p2_sandbox_seccomp() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // process-edge 4201 has Seccomp 2 and NoNewPrivs 1. PID 1 shares its user namespace.
+    copy_4201(tmp.path(), 4201);
+    for pid in [1, 4201] {
+        let ns = tmp.path().join(format!("proc/{pid}/ns"));
+        fs::create_dir_all(&ns).unwrap();
+        std::os::unix::fs::symlink("user:[4026531837]", ns.join("user")).unwrap();
+    }
+    let root = SysRoot::at(tmp.path());
+    let meta = raw_meta(ExeLink::None, Some(cgroup(4201)));
+    let mut reader = ExtrasP2Reader::new();
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut no_packages());
+    assert_eq!(p.sandbox.as_deref(), Some("seccomp + NoNewPrivs"));
+
+    // A different user namespace than PID 1's is bwrap.
+    let link = tmp.path().join("proc/4201/ns/user");
+    fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("user:[4026532000]", &link).unwrap();
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut no_packages());
+    assert_eq!(p.sandbox.as_deref(), Some("bwrap"));
+
+    // No readable ns/user: unknown, unless the cgroup names a Flatpak scope.
+    fs::remove_file(&link).unwrap();
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut no_packages());
+    assert_eq!(p.sandbox, None);
+    let flatpak = CgroupPath {
+        rel: Arc::from(
+            "user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-org.x.y-1.scope",
+        ),
+        unit: None,
+        slices: Default::default(),
+    };
+    let meta = raw_meta(exe_path("/app/bin/y"), Some(flatpak));
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut no_packages());
+    assert_eq!(p.sandbox.as_deref(), Some("Flatpak"));
+    assert_eq!(p.package_status, Some(PackageStatus::Flatpak));
+}
+
+#[test]
+fn extras_p2_deleted_exe_status() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let meta = raw_meta(exe_path("/usr/bin/foo (deleted)"), None);
+    let mut pkg = no_packages();
+    let p = read_p2(&mut ExtrasP2Reader::new(), &root, 4201, &meta, &mut pkg);
+    assert_eq!(p.package_status, Some(PackageStatus::DeletedUpgraded));
+    assert_eq!(p.package, None);
+    assert!(!pkg.due(Instant::now() + Duration::from_secs(60)));
+}
+
+#[test]
+fn extras_p2_package_miss_queues() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    copy_4201(tmp.path(), 4201);
+    let exe = tmp.path().join("bar");
+    fs::write(&exe, b"#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink(&exe, tmp.path().join("proc/4201/exe")).unwrap();
+    let root = SysRoot::at(tmp.path());
+    let meta = raw_meta(exe_path(exe.to_str().unwrap()), None);
+    let mut pkg = no_packages();
+    let mut reader = ExtrasP2Reader::new();
+
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut pkg);
+    assert_eq!(p.package, None);
+    assert_eq!(p.package_status, None);
+    assert_eq!(p.elf_class, None, "not an ELF file");
+    assert!(
+        pkg.due(Instant::now() + Duration::from_secs(60)),
+        "path queued"
+    );
+
+    // After the batch the index knows the path is not packaged.
+    assert_eq!(pkg.run_batch().unwrap(), 1);
+    let p = read_p2(&mut reader, &root, 4201, &meta, &mut pkg);
+    assert_eq!(p.package_status, Some(PackageStatus::NotPackaged));
+}
+
+#[test]
+fn extras_p2_only_detail_keys() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for pid in [4201, 4202, 4203] {
+        let dir = tmp.path().join(format!("proc/{pid}"));
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["stat", "statm", "status", "comm", "cmdline", "sessionid"] {
+            let bytes = fixture_bytes("process-edge", &format!("proc/4201/{name}"));
+            let bytes = if name == "stat" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replacen("4201", &pid.to_string(), 1)
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            fs::write(dir.join(name), bytes).unwrap();
+        }
+    }
+    fs::create_dir_all(tmp.path().join("sys/fs/cgroup")).unwrap();
+    let root = SysRoot::at(tmp.path());
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path());
+    *s.pkg_mut() = no_packages();
+    let protect = ProtectInputs::default();
+    let key = rollup_key(4201, FAKE_START_TICKS);
+    let inp = SweepInputs {
+        detail_keys: &[key],
+        ..no_inputs(&protect)
+    };
+    let mut out = SweepOutput::default();
+    s.sweep(&sweep_ctx(false), &inp, &mut out);
+    assert_eq!(out.records.len(), 3);
+    assert_eq!(out.extras_p2.len(), 3);
+    let at = index_of(&out, 4201);
+    for (i, p) in out.extras_p2.iter().enumerate() {
+        assert_eq!(p.key.is_some(), i == at, "entry {i}");
+    }
+    assert_eq!(out.extras_p2[at].key, Some(key));
+    assert_eq!(out.extras_p2[at].session_id, Some(3));
+
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+    assert_eq!(out.records.len(), 3);
+    assert!(out.extras_p2.is_empty());
+}

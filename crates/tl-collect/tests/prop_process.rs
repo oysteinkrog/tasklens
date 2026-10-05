@@ -252,3 +252,108 @@ proptest! {
         let _ = parse_qkk("x", &summary, b"");
     }
 }
+
+/// Package backend that owns nothing.
+struct NoPackages;
+
+impl tl_collect::pkg::PkgBackend for NoPackages {
+    fn owners(
+        &mut self,
+        paths: &[&std::path::Path],
+    ) -> Result<tl_collect::pkg::PathOwners, tl_collect::CollectError> {
+        Ok(paths.iter().map(|p| (p.to_path_buf(), None)).collect())
+    }
+    fn info(
+        &mut self,
+        _name: &str,
+    ) -> Result<Option<tl_model::process::PackageInfo>, tl_collect::CollectError> {
+        Ok(None)
+    }
+    fn verify(
+        &mut self,
+        _name: &str,
+    ) -> Result<tl_collect::pkg::VerifyOutcome, tl_collect::CollectError> {
+        Ok(tl_collect::pkg::VerifyOutcome::Unmodified)
+    }
+    fn db_stamp(&mut self) -> Option<i64> {
+        None
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Security regression: every P2 file is untrusted input (E05-035).
+    #[test]
+    fn extras_p2_arbitrary_files_never_panic(
+        sessionid in prop::collection::vec(any::<u8>(), 0..=64),
+        label in prop::collection::vec(any::<u8>(), 0..=8192),
+        oom in prop::collection::vec(any::<u8>(), 0..=64),
+        status in prop::collection::vec(any::<u8>(), 0..=4096),
+        elf in prop::collection::vec(any::<u8>(), 0..=32),
+        stat_bytes in prop::collection::vec(any::<u8>(), 0..=512),
+    ) {
+        use std::fs;
+        use std::sync::Arc;
+        use rustix::fd::AsFd;
+        use rustix::fs::{Mode, OFlags};
+        use tl_collect::SysRoot;
+        use tl_collect::pkg::PackageIndex;
+        use tl_collect::proc::extras_p2::ExtrasP2Reader;
+        use tl_collect::proc::meta::{ExeLink, RawMeta, ReadBufs};
+        use tl_collect::proc::sweep::PidDir;
+        use tl_model::ids::ProcessKey;
+        use tl_model::time::BootId;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("proc/7");
+        fs::create_dir_all(dir.join("attr")).unwrap();
+        fs::create_dir_all(dir.join("task/7")).unwrap();
+        fs::create_dir_all(tmp.path().join("sys/kernel/security")).unwrap();
+        fs::write(tmp.path().join("sys/kernel/security/lsm"), b"apparmor").unwrap();
+        fs::write(dir.join("sessionid"), &sessionid).unwrap();
+        fs::write(dir.join("attr/current"), &label).unwrap();
+        fs::write(dir.join("oom_score"), &oom).unwrap();
+        fs::write(dir.join("oom_score_adj"), &oom).unwrap();
+        fs::write(dir.join("task/7/status"), &status).unwrap();
+        let exe = tmp.path().join("exe-file");
+        fs::write(&exe, &elf).unwrap();
+        std::os::unix::fs::symlink(&exe, dir.join("exe")).unwrap();
+
+        let mut st = PidStat::default();
+        let _ = parse_pid_stat(&stat_bytes, &mut st);
+        let mut parsed = PidStatus::default();
+        let _ = parse_status(&status, &mut parsed);
+        let root = SysRoot::at(tmp.path());
+        let proc_fd = rustix::fs::open(
+            &root.proc,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap();
+        let meta = RawMeta {
+            comm: Arc::from("x"),
+            exe: ExeLink::Path {
+                path: Arc::from(String::from_utf8_lossy(&label).as_ref()),
+                deleted: false,
+            },
+            cmdline: None,
+            argv: Default::default(),
+            cgroup: None,
+            cgroup_denied: false,
+        };
+        let mut pkg = PackageIndex::new(Box::new(NoPackages));
+        let p = ExtrasP2Reader::new().read(
+            &root,
+            PidDir { proc_fd: proc_fd.as_fd(), pid: 7 },
+            ProcessKey { start_ticks: 1, boot_id: BootId(1), pid: 7 },
+            &st,
+            Some(&parsed),
+            &meta,
+            &mut pkg,
+            std::time::Instant::now(),
+            &mut ReadBufs::default(),
+        );
+        prop_assert!(p.key.is_some());
+    }
+}
