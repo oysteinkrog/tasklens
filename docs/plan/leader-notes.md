@@ -192,3 +192,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.2 added #[doc(hidden)] pub Engine::start_with_workers(config, hooks, workers); start() calls it with workers_for(mode). Solves the fake-worker gap from 8q0.21/8q0.22/8q0.1; later tests should use it.
 - 8q0.8: reducer keeps last GPU and PSS values per key across sweeps (sweep sends 0 WarmingUp). ProcessState::gpu_process() instead of a Coverage field. Wiring into apply.rs is bead tasklens-eal2 (after 8q0.10).
 - hx1.9: connections address cache key includes foreign_unbound. hx1.13: duplicate Type= takes the last value. hx1.21: populated-slot-free MEMORY_DEVICE file gives Modules([]), not NotReported.
+- dwy.1: health stays `Running` with `last_ok_ns: None` while a source keeps failing to build. Check supervisor health reporting (relates to 8q0.23).
+- dwy.1: want_io uses `d.recording || s.history.enabled`; R-286 says "history recording is on". Both count; harmless, confirm in review.
+- owner-desktop fixture has no sys/fs/cgroup, so ProcessesSource::new fails on it; tests create an empty cgroup dir.
