@@ -1,10 +1,11 @@
 //! Engine configuration that `tl-app` fills once at start (ADR-001, ADR-004).
 //!
-//! `state_dir` and `history_dir` hold user paths. Never log them above `debug`.
+//! `state_dir`, `history_dir` and `app_paths` hold user paths. Never log them above `debug`.
 
 use std::path::PathBuf;
 
 use tl_collect::SysRoot;
+use tl_collect::apps::AppPaths;
 
 /// Which worker set the engine runs. Fixed at start (ADR-004).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28,6 +29,10 @@ pub struct EngineConfig {
     pub history_dir: Option<PathBuf>,
     /// `tl-app` sets `/usr/lib/tasklens/tl-helper` when the file exists (ADR-006, R-150 item 3).
     pub helper_path: Option<PathBuf>,
+    /// Desktop files, icon themes and the icon cache for app grouping. `None` means the
+    /// `Processes` worker reads them from the environment, with the icon cache at
+    /// `$XDG_CACHE_HOME/tasklens/icons.toml`. Tests set it so they never write the real cache.
+    pub app_paths: Option<AppPaths>,
 }
 
 impl EngineConfig {
@@ -39,6 +44,7 @@ impl EngineConfig {
             state_dir,
             history_dir: None,
             helper_path: None,
+            app_paths: None,
         }
     }
 
@@ -54,6 +60,11 @@ impl EngineConfig {
 
     pub fn with_helper_path(mut self, path: PathBuf) -> Self {
         self.helper_path = Some(path);
+        self
+    }
+
+    pub fn with_app_paths(mut self, paths: AppPaths) -> Self {
+        self.app_paths = Some(paths);
         self
     }
 }
@@ -87,6 +98,7 @@ mod tests {
         let config = EngineConfig::new(EngineMode::Full, "/tmp/x".into());
         assert_eq!(config.history_dir, None);
         assert_eq!(config.helper_path, None);
+        assert!(config.app_paths.is_none());
 
         let config = config
             .with_history_dir("/s/h".into())
