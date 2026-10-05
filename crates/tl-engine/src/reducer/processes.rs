@@ -6,12 +6,18 @@
 //! for the linger time, `2 × processes.interval_ms` clamped to 1..=3 s; `expire` on `Tick`
 //! clears `NEW` and drops exited records after it.
 //!
+//! Two workers enrich the records after the sweep (ADR-007, ADR-008, PROC-033). GPU samples map
+//! to keys through the pids of the live table; a pid not in the table is dropped. PSS and USS come
+//! for the detail keys only, and `coverage` lists the keys that have them. Both kinds of values are
+//! kept per key and copied onto the next sweep's records, because the sweep sends them as zero.
+//!
 //! Privacy: never log `ProcessMeta` text from here. Debug logs carry counts only (ADR-015).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use tl_model::gpu_proto::{GpuProcessSample, Reading};
 use tl_model::history::RecordSink;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{
@@ -20,9 +26,9 @@ use tl_model::process::{
 };
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
 use tl_model::time::TimeNs;
-use tl_model::validity::Validity;
+use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
-use crate::update::{CgroupStats, ProcessSweep};
+use crate::update::{CgroupStats, ProcessSweep, PssEntry};
 
 /// Exited records kept at most. The oldest by exit time go first.
 pub const MAX_EXITED: usize = 256;
@@ -43,10 +49,29 @@ struct Live {
     first_seen_ns: TimeNs,
 }
 
+/// Per-process GPU values of the last `apply_gpu_processes`.
+#[derive(Clone, Copy)]
+struct GpuValue {
+    util_pct: f32,
+    mem_bytes: u64,
+    validity: Validity,
+}
+
+/// Per-process PSS values of the last `apply_pss` (or of a sweep that read them).
+#[derive(Clone, Copy)]
+struct PssValue {
+    pss_bytes: u64,
+    uss_bytes: u64,
+    swap_bytes: u64,
+    validity: Validity,
+}
+
 pub struct ProcessState {
     live: FxHashMap<ProcessKey, Live>,
     /// Flags of every live key, kept equal to `live[key].record.flags`.
     live_flags: FxHashMap<ProcessKey, ProcFlags>,
+    /// Pid of every live key, for GPU pid mapping (ADR-007).
+    live_pids: FxHashMap<u32, ProcessKey>,
     /// `(key, exit seen, last record)`, oldest exit first.
     exited: VecDeque<(ProcessKey, TimeNs, ProcessRecord)>,
     /// From `ProcessSweep.extras` (R-141 item 1). Exited keys keep their last extras.
@@ -58,6 +83,14 @@ pub struct ProcessState {
     unit_stats: Vec<CgroupStats>,
     /// From `ProcessSweep.low_memory` (R-150 item 2).
     low_memory: Option<Arc<LowMemoryInfo>>,
+    /// GPU values of the keys in the last GPU sample.
+    gpu: FxHashMap<ProcessKey, GpuValue>,
+    /// GPU validity of live keys without a sample; `None` before the first GPU sample.
+    gpu_default: Option<Validity>,
+    /// True when the last GPU sample had process rows.
+    gpu_process: bool,
+    /// PSS values of the detail keys.
+    pss: FxHashMap<ProcessKey, PssValue>,
     system_threads: u32,
     file_nr: Option<u64>,
     online_cpus: u16,
@@ -80,12 +113,17 @@ impl ProcessState {
         Self {
             live: FxHashMap::default(),
             live_flags: FxHashMap::default(),
+            live_pids: FxHashMap::default(),
             exited: VecDeque::new(),
             extras: FxHashMap::default(),
             extras_p2: FxHashMap::default(),
             app_stats: Vec::new(),
             unit_stats: Vec::new(),
             low_memory: None,
+            gpu: FxHashMap::default(),
+            gpu_default: None,
+            gpu_process: false,
+            pss: FxHashMap::default(),
             system_threads: 0,
             file_nr: None,
             online_cpus: 0,
@@ -109,8 +147,10 @@ impl ProcessState {
         let seen_ns = sweep.observed_end;
         let mut old = std::mem::take(&mut self.live);
         self.live_flags.clear();
+        self.live_pids.clear();
         self.live.reserve(sweep.records.len());
         self.live_flags.reserve(sweep.records.len());
+        self.live_pids.reserve(sweep.records.len());
 
         let aligned = sweep.extras.len() == sweep.records.len();
         debug_assert!(
@@ -139,6 +179,7 @@ impl ProcessState {
                 flags |= ProcFlags::NEW;
             }
             record.flags = flags;
+            self.overlay(&mut record);
 
             if aligned && let Some(e) = extras.next() {
                 self.extras.insert(key, e);
@@ -153,6 +194,7 @@ impl ProcessState {
             }
 
             self.live_flags.insert(key, flags);
+            self.live_pids.insert(key.pid, key);
             self.live.insert(
                 key,
                 Live {
@@ -193,6 +235,148 @@ impl ProcessState {
             records.sort_unstable_by_key(|r| r.key);
             let records: Arc<[ProcessRecord]> = records.into();
             sink.on_process_sweep(seen_ns, &records);
+        }
+    }
+
+    /// Copies the kept GPU and PSS values onto a new sweep record. A record whose PSS the sweep
+    /// read itself (validity `Valid`) keeps it and updates the kept value.
+    fn overlay(&mut self, record: &mut ProcessRecord) {
+        let key = record.key;
+        if let Some(g) = self.gpu.get(&key) {
+            set_gpu(record, g.util_pct, g.mem_bytes, g.validity);
+        } else if let Some(v) = self.gpu_default {
+            set_gpu(record, 0.0, 0, v);
+        }
+        if record.validity.get(ProcessField::Pss) == Validity::Valid {
+            self.pss.insert(
+                key,
+                PssValue {
+                    pss_bytes: record.pss_bytes,
+                    uss_bytes: record.uss_bytes,
+                    swap_bytes: record.swap_bytes,
+                    validity: Validity::Valid,
+                },
+            );
+        } else if let Some(p) = self.pss.get(&key) {
+            set_pss(record, p);
+        }
+    }
+
+    /// pid → key through `live`; sums over devices per pid; sets gpu_util_pct = max over devices
+    /// of max(sm, enc, dec), gpu_mem_bytes = Σ mem_used; validity Valid, or Unsupported when the
+    /// device has `supports_process_util == false`. Returns the number of keys matched.
+    ///
+    /// Live keys without a sample get 0 with validity `Valid` when some device has
+    /// `supports_process_util`, else `Unsupported` (PROC-033). A device missing from
+    /// `device_caps` counts as unsupported. Utilization is never divided among processes.
+    pub fn apply_gpu_processes(
+        &mut self,
+        samples: &[GpuProcessSample],
+        device_caps: &FxHashMap<[u8; 16], bool>,
+    ) -> u32 {
+        let any_supported = device_caps.values().any(|&s| s);
+        let default = if any_supported {
+            Validity::Valid
+        } else {
+            Validity::Unsupported
+        };
+
+        self.gpu.clear();
+        for s in samples {
+            let Some(&key) = self.live_pids.get(&s.pid) else {
+                continue;
+            };
+            let supported = device_caps.get(&s.uuid).copied().unwrap_or(false);
+            let util = [s.sm_pct, s.enc_pct, s.dec_pct]
+                .into_iter()
+                .filter_map(Reading::ok)
+                .max()
+                .unwrap_or(0) as f32;
+            let mem = s.mem_used.ok().unwrap_or(0);
+            let entry = self.gpu.entry(key).or_insert(GpuValue {
+                util_pct: 0.0,
+                mem_bytes: 0,
+                validity: Validity::Unsupported,
+            });
+            entry.util_pct = entry.util_pct.max(util);
+            entry.mem_bytes = entry.mem_bytes.saturating_add(mem);
+            if supported {
+                entry.validity = Validity::Valid;
+            }
+        }
+
+        for live in self.live.values_mut() {
+            match self.gpu.get(&live.record.key) {
+                Some(g) => set_gpu(&mut live.record, g.util_pct, g.mem_bytes, g.validity),
+                None => set_gpu(&mut live.record, 0.0, 0, default),
+            }
+        }
+        self.gpu_default = Some(default);
+        self.gpu_process = !samples.is_empty();
+        self.dirty = true;
+        u32::try_from(self.gpu.len()).unwrap_or(u32::MAX)
+    }
+
+    /// For each entry: set pss_bytes, uss_bytes, swap_bytes and the Pss/Uss validity; keys not
+    /// in `live` are ignored. An entry with validity `Valid` puts its key in `coverage().pss_uss`.
+    pub fn apply_pss(&mut self, entries: &[PssEntry]) {
+        for e in entries {
+            let Some(live) = self.live.get_mut(&e.key) else {
+                continue;
+            };
+            let value = PssValue {
+                pss_bytes: e.pss_bytes,
+                uss_bytes: e.uss_bytes,
+                swap_bytes: e.swap_bytes,
+                validity: e.validity,
+            };
+            set_pss(&mut live.record, &value);
+            self.pss.insert(e.key, value);
+            self.dirty = true;
+        }
+    }
+
+    /// Keys with valid PSS and USS, sorted ascending.
+    pub fn coverage(&self) -> Coverage {
+        let mut keys: Vec<ProcessKey> = self
+            .pss
+            .iter()
+            .filter(|(_, p)| p.validity == Validity::Valid)
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_unstable();
+        Coverage {
+            pss_uss: keys.into(),
+        }
+    }
+
+    /// True when the last GPU sample had process rows. `Coverage` has no field for it yet.
+    pub fn gpu_process(&self) -> bool {
+        self.gpu_process
+    }
+
+    /// When detail_keys shrink, PSS of dropped keys becomes WarmingUp.
+    pub fn clear_pss_outside(&mut self, keep: &[ProcessKey]) {
+        let keep: FxHashSet<ProcessKey> = keep.iter().copied().collect();
+        let dropped: Vec<ProcessKey> = self
+            .pss
+            .keys()
+            .filter(|k| !keep.contains(k))
+            .copied()
+            .collect();
+        for key in dropped {
+            self.pss.remove(&key);
+            if let Some(live) = self.live.get_mut(&key) {
+                live.record.pss_bytes = 0;
+                live.record.uss_bytes = 0;
+                live.record
+                    .validity
+                    .set(ProcessField::Pss, Validity::WarmingUp);
+                live.record
+                    .validity
+                    .set(ProcessField::Uss, Validity::WarmingUp);
+                self.dirty = true;
+            }
         }
     }
 
@@ -336,6 +520,35 @@ impl ProcessState {
     fn forget(&mut self, key: &ProcessKey) {
         self.extras.remove(key);
         self.extras_p2.remove(key);
+        self.gpu.remove(key);
+        self.pss.remove(key);
+    }
+}
+
+fn set_gpu(record: &mut ProcessRecord, util_pct: f32, mem_bytes: u64, validity: Validity) {
+    record.gpu_util_pct = util_pct;
+    record.gpu_mem_bytes = mem_bytes;
+    set_fields(
+        &mut record.validity,
+        &[ProcessField::GpuUtil, ProcessField::GpuMem],
+        validity,
+    );
+}
+
+fn set_pss(record: &mut ProcessRecord, p: &PssValue) {
+    record.pss_bytes = p.pss_bytes;
+    record.uss_bytes = p.uss_bytes;
+    record.swap_bytes = p.swap_bytes;
+    set_fields(
+        &mut record.validity,
+        &[ProcessField::Pss, ProcessField::Uss],
+        p.validity,
+    );
+}
+
+fn set_fields(validity: &mut FieldValidity, fields: &[ProcessField], v: Validity) {
+    for &f in fields {
+        validity.set(f, v);
     }
 }
 
@@ -350,7 +563,6 @@ mod tests {
     use tl_model::series::Sample;
     use tl_model::system::CpuSet;
     use tl_model::time::BootId;
-    use tl_model::validity::FieldValidity;
 
     const MS: u64 = 1_000_000;
     const INTERVAL_MS: u32 = 1000;
@@ -397,8 +609,22 @@ mod tests {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
-            validity: FieldValidity::all(Validity::Valid),
+            validity: sweep_validity(),
         }
+    }
+
+    /// What the sweep sends: PSS, USS and GPU fields not measured yet.
+    fn sweep_validity() -> FieldValidity {
+        let mut v = FieldValidity::all(Validity::Valid);
+        for f in [
+            ProcessField::Pss,
+            ProcessField::Uss,
+            ProcessField::GpuUtil,
+            ProcessField::GpuMem,
+        ] {
+            v.set(f, Validity::WarmingUp);
+        }
+        v
     }
 
     /// `start_boot_ns` carries the key's `start_ticks` so tests can check index alignment.
@@ -684,5 +910,156 @@ mod tests {
         state.expire(2_500 * MS, INTERVAL_MS);
         state.apply_sweep(sweep(&keys, 3_000 * MS), 3_000 * MS, INTERVAL_MS, None);
         assert_eq!(sink.sweeps, [(1_000 * MS, 3), (2_000 * MS, 2)]);
+    }
+
+    const GIB: u64 = 1 << 30;
+    const DEV_A: [u8; 16] = [1; 16];
+    const DEV_B: [u8; 16] = [2; 16];
+
+    fn gpu(uuid: [u8; 16], pid: u32, sm: u32, mem: u64) -> GpuProcessSample {
+        GpuProcessSample {
+            uuid,
+            pid,
+            sm_pct: Reading::Ok(sm),
+            mem_pct: Reading::Ok(0),
+            enc_pct: Reading::Ok(0),
+            dec_pct: Reading::Unsupported,
+            mem_used: Reading::Ok(mem),
+        }
+    }
+
+    fn caps(supported: bool) -> FxHashMap<[u8; 16], bool> {
+        [(DEV_A, supported), (DEV_B, supported)]
+            .into_iter()
+            .collect()
+    }
+
+    fn live_record(state: &ProcessState, key: ProcessKey) -> ProcessRecord {
+        state.live[&key].record.clone()
+    }
+
+    fn pss(key: ProcessKey, bytes: u64) -> PssEntry {
+        PssEntry {
+            key,
+            pss_bytes: bytes,
+            uss_bytes: bytes / 2,
+            swap_bytes: 7,
+            validity: Validity::Valid,
+        }
+    }
+
+    #[test]
+    fn gpu_pid_mapping_max_and_sum() {
+        let (a, b) = (key(100, 10), key(200, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        let samples = [gpu(DEV_A, 100, 30, GIB), gpu(DEV_B, 100, 60, 2 * GIB)];
+        assert_eq!(state.apply_gpu_processes(&samples, &caps(true)), 1);
+
+        let r = live_record(&state, a);
+        assert_eq!(r.gpu_util_pct, 60.0);
+        assert_eq!(r.gpu_mem_bytes, 3 * GIB);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+        assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
+        // A live key without a sample shows a valid 0 because a device supports process util.
+        let r = live_record(&state, b);
+        assert_eq!(r.gpu_util_pct, 0.0);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+        assert!(state.gpu_process());
+
+        // The next sweep sends GPU fields as zero; the reducer keeps the last values.
+        apply(&mut state, &[a, b], 2_000 * MS);
+        let r = live_record(&state, a);
+        assert_eq!(r.gpu_util_pct, 60.0);
+        assert_eq!(r.gpu_mem_bytes, 3 * GIB);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    }
+
+    #[test]
+    fn gpu_unknown_pid_dropped() {
+        let a = key(100, 10);
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a], 1_000 * MS);
+        let before = live_record(&state, a);
+        assert_eq!(
+            state.apply_gpu_processes(&[gpu(DEV_A, 999, 50, GIB)], &caps(true)),
+            0
+        );
+        let after = live_record(&state, a);
+        assert_eq!(after.gpu_util_pct, before.gpu_util_pct);
+        assert_eq!(after.gpu_mem_bytes, before.gpu_mem_bytes);
+        assert!(!state.gpu.values().any(|g| g.mem_bytes == GIB));
+    }
+
+    #[test]
+    fn gpu_unsupported_without_capability() {
+        let keys = [key(1, 10), key(2, 20)];
+        let mut state = ProcessState::new();
+        apply(&mut state, &keys, 1_000 * MS);
+        assert_eq!(state.apply_gpu_processes(&[], &caps(false)), 0);
+        for k in keys {
+            let r = live_record(&state, k);
+            assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+            assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Unsupported);
+        }
+        assert!(!state.gpu_process());
+
+        // A sample from an unsupported device is matched but stays Unsupported.
+        assert_eq!(
+            state.apply_gpu_processes(&[gpu(DEV_A, 1, 40, GIB)], &caps(false)),
+            1
+        );
+        let r = live_record(&state, keys[0]);
+        assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Unsupported);
+    }
+
+    #[test]
+    fn pss_coverage_tracks_keys() {
+        let (a, b) = (key(1, 10), key(2, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        state.apply_pss(&[pss(a, 4096), pss(key(9, 90), 1)]);
+
+        let cov = state.coverage();
+        assert!(cov.has_pss_uss(&a));
+        assert!(!cov.has_pss_uss(&b));
+        assert_eq!(cov.pss_uss.len(), 1);
+
+        let r = live_record(&state, a);
+        assert_eq!((r.pss_bytes, r.uss_bytes, r.swap_bytes), (4096, 2048, 7));
+        assert_eq!(r.validity.get(ProcessField::Pss), Validity::Valid);
+        assert_eq!(r.validity.get(ProcessField::Uss), Validity::Valid);
+        let r = live_record(&state, b);
+        assert_eq!(r.validity.get(ProcessField::Pss), Validity::WarmingUp);
+
+        // PSS survives the next sweep, and the snapshot carries it.
+        apply(&mut state, &[a, b], 2_000 * MS);
+        assert_eq!(live_record(&state, a).pss_bytes, 4096);
+        let snap = state
+            .publish(state.coverage(), (1_000 * MS, 2_000 * MS))
+            .unwrap();
+        assert!(snap.coverage.has_pss_uss(&a));
+        assert_eq!(snap.get(a).unwrap().pss_bytes, 4096);
+    }
+
+    #[test]
+    fn pss_cleared_when_key_leaves_demand() {
+        let (a, b) = (key(1, 10), key(2, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        state.apply_pss(&[pss(a, 4096)]);
+        state.clear_pss_outside(&[b]);
+
+        let r = live_record(&state, a);
+        assert_eq!(r.validity.get(ProcessField::Pss), Validity::WarmingUp);
+        assert_eq!(r.validity.get(ProcessField::Uss), Validity::WarmingUp);
+        assert_eq!(r.pss_bytes, 0);
+        assert!(state.coverage().pss_uss.is_empty());
+
+        apply(&mut state, &[a, b], 2_000 * MS);
+        assert_eq!(
+            live_record(&state, a).validity.get(ProcessField::Pss),
+            Validity::WarmingUp
+        );
     }
 }
