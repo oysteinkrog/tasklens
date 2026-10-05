@@ -458,6 +458,71 @@ fn cpu_listed_once_in_full_mode() {
 }
 
 #[test]
+fn cpu_live_stats_owner_desktop() {
+    let dir = fixture_copy("owner-desktop", None);
+    let (_, s) = cpu_sample(cpu_source(&dir), SEC);
+    // The fixture holds 50 pid directories.
+    assert_eq!(s.totals.processes, Metric::valid(50));
+    // file-nr "26143 0 2097152": field 1.
+    assert_eq!(s.totals.handles, Metric::valid(26143));
+    // loadavg "31.35 27.73 27.82 19/6667 3047020".
+    assert_eq!(s.totals.load_avg, Metric::valid([31.35, 27.73, 27.82]));
+    // The reducer fills Threads.
+    assert_eq!(s.totals.threads.validity, Validity::WarmingUp);
+}
+
+#[test]
+fn cpu_missing_loadavg_is_missing() {
+    let dir = fixture_copy("owner-desktop", None);
+    fs::remove_file(dir.join("proc/loadavg")).expect("remove loadavg");
+    let (_, s) = cpu_sample(cpu_source(&dir), SEC);
+    assert_eq!(s.totals.load_avg.validity, Validity::Missing);
+    assert_eq!(s.totals.processes, Metric::valid(50));
+    assert_eq!(s.totals.handles, Metric::valid(26143));
+}
+
+#[test]
+fn cpu_live_stats_only_on_slow_ticks() {
+    let dir = fixture_copy("owner-desktop", None);
+    let src = cpu_source(&dir);
+    let fast = Demand {
+        cpu: CpuDemand::Total,
+        cpu_fast: true,
+        ..Demand::default()
+    };
+    assert_eq!(
+        src.period(&fast, &EngineSettings::default()),
+        Some(Duration::from_millis(100))
+    );
+    let (mut src, first) = cpu_sample(src, SEC);
+
+    // New file values and one more pid directory. Only a read of the live stats sees them.
+    fs::write(dir.join("proc/loadavg"), "1.00 2.00 3.00 1/100 42\n").expect("write loadavg");
+    fs::write(dir.join("proc/sys/fs/file-nr"), "999\t0\t2097152\n").expect("write file-nr");
+    fs::create_dir(dir.join("proc/99999")).expect("add pid dir");
+
+    // Samples 2 to 10, 100 ms apart, repeat the first sample's values.
+    for n in 1..10 {
+        let (next, s) = cpu_sample(src, SEC + n * 100 * MS);
+        src = next;
+        assert_eq!(
+            s.totals.processes,
+            first.totals.processes,
+            "sample {}",
+            n + 1
+        );
+        assert_eq!(s.totals.handles, first.totals.handles, "sample {}", n + 1);
+        assert_eq!(s.totals.load_avg, first.totals.load_avg, "sample {}", n + 1);
+    }
+
+    // The eleventh sample, 1 s after the first, reads them again.
+    let (_, s) = cpu_sample(src, 2 * SEC);
+    assert_eq!(s.totals.processes, Metric::valid(51));
+    assert_eq!(s.totals.handles, Metric::valid(999));
+    assert_eq!(s.totals.load_avg, Metric::valid([1.0, 2.0, 3.0]));
+}
+
+#[test]
 fn enum_disk_list_children_and_parents() {
     let dir = fixture_copy("disk-partitions-dm", None);
     let root = SysRoot::at(&dir);

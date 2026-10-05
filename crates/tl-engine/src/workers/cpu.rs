@@ -2,8 +2,9 @@
 //! each `CpuReading` into a `SourceUpdate::Cpu(CpuSample)`.
 //!
 //! It samples at 10 Hz while a visible CPU chart animates, at 1 Hz while CPU is otherwise
-//! demanded or history recording is on, and not at all otherwise. Clock and temperature are read
-//! at most once per second; fast ticks repeat the last values (PERF-028, PERF-039, PERF-040).
+//! demanded or history recording is on, and not at all otherwise. Clock, temperature and live stats
+//! are read at most once per second; fast ticks repeat the last values (PERF-028, PERF-033,
+//! PERF-039, PERF-040).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::{Cx, Outcome};
 use tl_collect::counters::{Clock, Measured};
 use tl_collect::parse::cpufreq::{FreqReading, read_base_mhz};
-use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler};
+use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler, LiveStats};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::health::SourceId;
@@ -51,6 +52,7 @@ pub fn cpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
 struct SlowFields {
     freq: FreqReading,
     temp_c: Measured<f32>,
+    live: LiveStats,
 }
 
 pub struct CpuSource {
@@ -59,7 +61,7 @@ pub struct CpuSource {
     reading: CpuReading,
     /// Written by `period()`, read by `sample()`.
     per_cpu_wanted: Arc<AtomicBool>,
-    /// Boot ns of the last sample that read clock and temperature.
+    /// Boot ns of the last sample that read clock, temperature and live stats.
     last_slow_ns: Option<TimeNs>,
     last: SlowFields,
     /// Read once in `new`.
@@ -97,6 +99,7 @@ impl CpuSource {
             per_cpu,
             freq: slow,
             temp: slow,
+            live_stats: slow,
             ..CpuOpts::default()
         };
         self.sampler.sample_at(clock, opts, &mut self.reading);
@@ -108,6 +111,7 @@ impl CpuSource {
             freq.max_mhz = r.freq.max_mhz;
             freq.per_cpu_mhz.clone_from(&r.freq.per_cpu_mhz);
             self.last.temp_c = r.temp_c;
+            self.last.live = r.live;
             self.last_slow_ns = Some(clock.boot_ns);
         }
         if r.topology_changed {
@@ -126,11 +130,18 @@ impl CpuSource {
             temp_c: metric(last.temp_c),
             package_power_w: Metric::with(Validity::Unsupported),
             core_power_w: Metric::with(Validity::Unsupported),
-            processes: Metric::with(Validity::WarmingUp),
+            processes: metric(last.live.process_count),
             // The reducer fills Threads from `ProcessSweep.system_threads` (PERF-033).
             threads: Metric::with(Validity::WarmingUp),
-            handles: Metric::with(Validity::WarmingUp),
-            load_avg: Metric::with(Validity::WarmingUp),
+            handles: metric(last.live.open_files),
+            load_avg: Metric {
+                value: [
+                    last.live.load.value.one,
+                    last.live.load.value.five,
+                    last.live.load.value.fifteen,
+                ],
+                validity: last.live.load.validity,
+            },
             sockets: Metric::valid(self.sampler.topology().sockets),
         };
         let irq_pct = if r.interrupts_pct.validity.is_valid() {
