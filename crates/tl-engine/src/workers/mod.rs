@@ -10,6 +10,7 @@ pub mod enumerate;
 pub mod gpu_nvidia;
 pub mod journal;
 pub mod logind;
+pub mod lowmem;
 pub mod memory;
 pub mod net;
 pub mod processes;
