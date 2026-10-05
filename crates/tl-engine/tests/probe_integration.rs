@@ -1427,7 +1427,7 @@ fn gpu_util(snap: &Snapshot) -> Vec<Sample> {
 #[test]
 fn engine_gpu_end_to_end_lab() {
     let (mut rig, link) =
-        EngineRig::start(0xe13_a2, visible_gpus(), |clock| FakeLink::timed([], clock));
+        EngineRig::start(0xe13a2, visible_gpus(), |clock| FakeLink::timed([], clock));
     // Samples at 0, 1 and 2 s.
     rig.run_for(Duration::from_secs(3) - Duration::from_millis(1));
     let snap = rig.latest();
@@ -1476,7 +1476,7 @@ fn engine_gpu_end_to_end_lab() {
 /// supervisor starts a new one 0.5 s later, and samples resume on the new connection.
 #[test]
 fn engine_gpu_failure_table_lab() {
-    let (mut rig, link) = EngineRig::start(0xe13_a3, visible_gpus(), |clock| {
+    let (mut rig, link) = EngineRig::start(0xe13a3, visible_gpus(), |clock| {
         FakeLink::timed(
             [
                 LinkStep::Sample(Ok(())),
