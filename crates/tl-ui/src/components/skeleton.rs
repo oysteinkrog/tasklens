@@ -94,7 +94,12 @@ impl RenderOnce for TlSkeletonRows {
                         .w(width)
                         .pl(m.sp[4])
                         .overflow_hidden()
-                        .child(bar(bar_width(width, row, col), height, m.radius_small, cx))
+                        .child(bar(
+                            bar_width(width, row, col).into(),
+                            height,
+                            m.radius_small,
+                            cx,
+                        ))
                 }))
         }))
     }
@@ -129,14 +134,14 @@ impl RenderOnce for TlSkeletonBlock {
         let height = px(BAR_HEIGHT * m.ui_scale);
         v_flex().gap(m.sp[3]).children((0..self.lines).map(|i| {
             let fraction = BLOCK_PATTERN[i % BLOCK_PATTERN.len()];
-            bar(relative(fraction), height, m.radius_small, cx)
+            bar(relative(fraction).into(), height, m.radius_small, cx)
         }))
     }
 }
 
 /// One bar: the pulsing kit `Skeleton`, or a static bar under reduced motion. The kit
 /// animation shows its start state (opacity 1.0) under reduced motion, so it is not used then.
-fn bar(width: impl Into<Length>, height: Pixels, radius: Pixels, cx: &App) -> AnyElement {
+fn bar(width: Length, height: Pixels, radius: Pixels, cx: &App) -> AnyElement {
     if cx.reduce_motion() {
         static_bar(width, height, radius, cx.theme().skeleton).into_any_element()
     } else {
@@ -148,7 +153,7 @@ fn bar(width: impl Into<Length>, height: Pixels, radius: Pixels, cx: &App) -> An
     }
 }
 
-fn static_bar(width: impl Into<Length>, height: Pixels, radius: Pixels, color: Hsla) -> Div {
+fn static_bar(width: Length, height: Pixels, radius: Pixels, color: Hsla) -> Div {
     div()
         .w(width)
         .h(height)
@@ -226,7 +231,7 @@ mod tests {
             .unwrap();
         assert_eq!(frames, 0, "reduced motion requests no frame");
 
-        let mut b = static_bar(px(60.), px(10.), px(4.), gpui_kit::black());
+        let mut b = static_bar(px(60.).into(), px(10.), px(4.), gpui_kit::black());
         assert_eq!(b.style().opacity, Some(STATIC_OPACITY));
         assert_eq!(STATIC_OPACITY, 0.7);
     }
