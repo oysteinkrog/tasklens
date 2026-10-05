@@ -136,6 +136,7 @@ impl RenderOnce for TlRadio {
             theme.text_secondary
         };
         let mut circle = div()
+            .id("circle")
             .relative()
             .flex_none()
             .flex()
