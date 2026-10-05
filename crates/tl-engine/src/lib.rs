@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 pub mod config;
 pub mod controller;
+pub mod gpu;
 pub mod runtime;
 pub mod source;
 pub mod supervise;
