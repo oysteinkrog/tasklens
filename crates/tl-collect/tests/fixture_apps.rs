@@ -1421,3 +1421,300 @@ fn compositor_pid_missing_socket() {
     assert_eq!(wayland_compositor_pid(dir.path(), OsStr::new("sock")), None);
     assert_eq!(wayland_compositor_pid(dir.path(), OsStr::new("")), None);
 }
+
+// ---- App resolver (E05-A2) ----
+
+use rustc_hash::FxHashSet;
+use tl_collect::apps::{AppInfo, AppPaths, AppResolver, ResolveInput, is_app_primary};
+use tl_collect::proc::meta::{ExeLink, MetaCache, RawMeta};
+use tl_model::ids::ProcessKey;
+
+fn edge_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/process-edge")
+}
+
+fn edge_cgroups() -> CgroupRoot {
+    CgroupRoot::open(&edge_root().join("sys")).expect("open cgroup root")
+}
+
+fn fixture_share(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}/usr/share"))
+}
+
+/// The `apps-icons` home (kdeglobals, no user desktop files) with the `apps-desktop` and
+/// `apps-icons` system dirs. `extra` data dirs come first.
+fn resolver_paths(cache: &Path, data_home: Option<&Path>, extra: &[&Path]) -> AppPaths {
+    let mut dirs: Vec<PathBuf> = extra.iter().map(|p| p.to_path_buf()).collect();
+    dirs.push(fixture_share("apps-desktop"));
+    dirs.push(fixture_share("apps-icons"));
+    AppPaths {
+        home: icons_root().join("home"),
+        xdg_data_home: data_home.map(|p| p.as_os_str().to_owned()),
+        xdg_data_dirs: Some(std::env::join_paths(dirs).expect("join data dirs")),
+        xdg_config_home: None,
+        icon_cache: cache.join("icons.toml"),
+    }
+}
+
+fn edge_key(pid: u32) -> ProcessKey {
+    bwrap_key(pid, 0)
+}
+
+/// The metadata of a `process-edge` pid, read through `MetaCache`.
+fn edge_meta(pid: u32) -> RawMeta {
+    use rustix::fd::AsFd;
+    let dir = fs::File::open(edge_root().join(format!("proc/{pid}"))).expect("open pid dir");
+    let mut cache = MetaCache::new();
+    let mut bufs = ReadBufs::default();
+    let (meta, _) = cache.get_or_refresh(edge_key(pid), dir.as_fd(), b"", &mut bufs);
+    meta.clone()
+}
+
+/// A process of the current user with a fixed exe and cgroup.
+fn made_meta(comm: &str, exe: Option<&str>, cgroup_path: &str) -> RawMeta {
+    RawMeta {
+        comm: Arc::from(comm),
+        exe: exe.map_or(ExeLink::None, |p| ExeLink::Path {
+            path: Arc::from(p),
+            deleted: false,
+        }),
+        cmdline: exe.map(Arc::from),
+        argv: exe.into_iter().map(Arc::from).collect(),
+        cgroup: Some(cgroup(cgroup_path)),
+        cgroup_denied: false,
+    }
+}
+
+/// pids 2 and 57 have `PF_KTHREAD` in their stat flags and run as root.
+fn edge_input(pid: u32, meta: &RawMeta) -> ResolveInput<'_> {
+    let kernel_thread = matches!(pid, 2 | 57);
+    ResolveInput {
+        pid,
+        ruid: if kernel_thread { 0 } else { SELF_UID },
+        kernel_thread,
+        meta,
+        owns_window: false,
+        wm_class: None,
+    }
+}
+
+fn resolve_edge(resolver: &mut AppResolver, pid: u32) -> Arc<AppInfo> {
+    let meta = edge_meta(pid);
+    resolver.resolve(edge_key(pid), &edge_input(pid, &meta), SELF_UID)
+}
+
+fn edge_resolver(cache: &Path) -> AppResolver {
+    let mut resolver = AppResolver::new(&resolver_paths(cache, None, &[]));
+    resolver.begin_sweep(&edge_cgroups(), SELF_UID, 0);
+    resolver
+}
+
+#[test]
+fn resolver_firefox_app() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let info = resolve_edge(&mut resolver, 4201);
+    assert_eq!(info.class, ProcClass::App);
+    assert_eq!(info.app_id.as_deref(), Some("firefox"));
+    assert_eq!(info.app_name.as_deref(), Some("Firefox"));
+    assert_eq!(
+        info.description.as_deref(),
+        Some("Browse the World Wide Web")
+    );
+    assert_eq!(info.icon_app.as_deref(), Some(firefox_path().as_str()));
+    assert_eq!(info.unit.as_deref(), Some("app-firefox@3a1b.service"));
+    assert_eq!(
+        info.group_key,
+        group_key(&GroupKind::App {
+            app_id: Arc::from("firefox")
+        })
+    );
+    assert_eq!(info.group_key, info.group.key());
+}
+
+#[test]
+fn resolver_kde_escaped_app_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let info = resolve_edge(&mut resolver, 4205);
+    assert_eq!(info.app_id.as_deref(), Some("chrome-work"));
+    assert_eq!(info.app_name.as_deref(), Some("Google Chrome (Work)"));
+    assert_eq!(info.class, ProcClass::App);
+}
+
+#[test]
+fn resolver_system_unit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let info = resolve_edge(&mut resolver, 4207);
+    assert_eq!(info.class, ProcClass::System);
+    assert_eq!(info.group, GroupKind::System);
+    assert_eq!(info.unit.as_deref(), Some("pipewire.service"));
+    assert_eq!(info.app_id, None);
+}
+
+#[test]
+fn resolver_generic_icon() {
+    // The fixture themes have no `application-x-executable`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let info = resolve_edge(&mut resolver, 4206);
+    assert_eq!(info.app_id, None);
+    assert_eq!(info.class, ProcClass::Background);
+    assert_eq!(info.icon_app, None);
+    assert_eq!(info.icon_process, None);
+
+    // A hicolor theme that has it.
+    let share = dir.path().join("share");
+    let theme = share.join("icons/hicolor");
+    fs::create_dir_all(theme.join("16x16/apps")).expect("create theme dirs");
+    fs::write(
+        theme.join("index.theme"),
+        "[Icon Theme]\nName=Hicolor\nDirectories=16x16/apps\n\n[16x16/apps]\nSize=16\n",
+    )
+    .expect("write index.theme");
+    let icon = theme.join("16x16/apps/application-x-executable.png");
+    fs::write(&icon, b"png").expect("write icon");
+    let mut resolver = AppResolver::new(&resolver_paths(dir.path(), None, &[&share]));
+    resolver.begin_sweep(&edge_cgroups(), SELF_UID, 0);
+    let info = resolve_edge(&mut resolver, 4206);
+    assert_eq!(info.app_id, None);
+    assert_eq!(info.icon_process.as_deref(), icon.to_str());
+}
+
+#[test]
+fn resolver_rebuild_on_desktop_change() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_home = dir.path().join("data");
+    let apps = data_home.join("applications");
+    fs::create_dir_all(&apps).expect("create applications dir");
+    let mut resolver = AppResolver::new(&resolver_paths(dir.path(), Some(&data_home), &[]));
+    let cg = edge_cgroups();
+    let meta = made_meta(
+        "newapp",
+        Some("/opt/tl-test/newapp"),
+        "user.slice/user-1000.slice/session-2.scope",
+    );
+    let inp = edge_input(7001, &meta);
+
+    resolver.begin_sweep(&cg, SELF_UID, 0);
+    let before = resolver.resolve(edge_key(7001), &inp, SELF_UID);
+    assert_eq!(before.app_id, None);
+    assert_eq!(before.class, ProcClass::Background);
+
+    fs::write(
+        apps.join("newapp.desktop"),
+        "[Desktop Entry]\nType=Application\nName=New App\nExec=/opt/tl-test/newapp %U\n",
+    )
+    .expect("write desktop file");
+    resolver.begin_sweep(&cg, SELF_UID, 100 * MS);
+    resolver.begin_sweep(&cg, SELF_UID, 700 * MS);
+    let after = resolver.resolve(edge_key(7001), &inp, SELF_UID);
+    assert_eq!(after.app_id.as_deref(), Some("newapp"));
+    assert_eq!(after.app_name.as_deref(), Some("New App"));
+    assert_eq!(after.class, ProcClass::App);
+}
+
+#[test]
+fn resolver_caches_per_key() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let cg = edge_cgroups();
+    let meta = edge_meta(4201);
+    let inp = edge_input(4201, &meta);
+    let first = resolver.resolve(edge_key(4201), &inp, SELF_UID);
+    let live: FxHashSet<ProcessKey> = [edge_key(4201)].into_iter().collect();
+    resolver.end_sweep(&live, 0);
+    resolver.begin_sweep(&cg, SELF_UID, 1000 * MS);
+    let second = resolver.resolve(edge_key(4201), &inp, SELF_UID);
+    assert!(Arc::ptr_eq(&first, &second));
+
+    // Refreshed metadata gives a new result.
+    let fresh = edge_meta(4201);
+    let third = resolver.resolve(edge_key(4201), &edge_input(4201, &fresh), SELF_UID);
+    assert!(!Arc::ptr_eq(&first, &third));
+    assert_eq!(third.app_id, first.app_id);
+
+    // A dead key's result is dropped.
+    resolver.end_sweep(&FxHashSet::default(), 2000 * MS);
+    let fourth = resolver.resolve(edge_key(4201), &edge_input(4201, &fresh), SELF_UID);
+    assert!(!Arc::ptr_eq(&third, &fourth));
+}
+
+#[test]
+fn resolver_scope_prefers_split_id_in_index() {
+    // `app-gnome-org.gnome.Nautilus-777.scope`: the whole remainder is not a desktop id, the
+    // split form is.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_home = dir.path().join("data");
+    let apps = data_home.join("applications");
+    fs::create_dir_all(&apps).expect("create applications dir");
+    fs::write(
+        apps.join("org.gnome.Nautilus.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Files\nExec=nautilus --new-window %U\n",
+    )
+    .expect("write desktop file");
+    let mut resolver = AppResolver::new(&resolver_paths(dir.path(), Some(&data_home), &[]));
+    resolver.begin_sweep(&edge_cgroups(), SELF_UID, 0);
+    let meta = made_meta(
+        "nautilus",
+        None,
+        "user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-org.gnome.Nautilus-777.scope",
+    );
+    let info = resolver.resolve(edge_key(5301), &edge_input(5301, &meta), SELF_UID);
+    assert_eq!(info.app_id.as_deref(), Some("org.gnome.Nautilus"));
+    assert_eq!(info.class, ProcClass::App);
+    assert_eq!(
+        info.unit.as_deref(),
+        Some("app-gnome-org.gnome.Nautilus-777.scope")
+    );
+}
+
+#[test]
+fn resolver_unwrap_bwrap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let resolver = edge_resolver(dir.path());
+    let records = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(11, 10, 101, "thunderbird"),
+    ];
+    assert_eq!(
+        resolver
+            .unwrap_bwrap(&[bwrap_key(10, 100)], &records)
+            .as_slice(),
+        [bwrap_key(11, 101)]
+    );
+}
+
+#[test]
+fn app_primary_rule() {
+    let app_pids: FxHashSet<u32> = [100, 101].into_iter().collect();
+    assert!(is_app_primary(100, 1, &app_pids));
+    assert!(!is_app_primary(101, 100, &app_pids));
+    assert!(!is_app_primary(102, 100, &app_pids));
+}
+
+#[test]
+fn resolver_fixture_snapshot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut resolver = edge_resolver(dir.path());
+    let mut pids: Vec<u32> = fs::read_dir(edge_root().join("proc"))
+        .expect("read proc fixture")
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    pids.sort_unstable();
+    let rows: Vec<_> = pids
+        .into_iter()
+        .map(|pid| {
+            let info = resolve_edge(&mut resolver, pid);
+            (
+                pid,
+                info.class,
+                info.app_id.as_deref().map(str::to_owned),
+                info.app_name.as_deref().map(str::to_owned),
+                info.qualifier,
+            )
+        })
+        .collect();
+    insta::assert_debug_snapshot!(rows);
+}
