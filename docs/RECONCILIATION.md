@@ -1859,6 +1859,18 @@ entry per parent row whose subtree total is shown (collapsed parents in tree mod
 ("descendants that match the filter") is wrong and is replaced. Found by bead 8q0.26.
 - Edits: ARCHITECTURE ProcessTableView block; chain edit to `crates/tl-model/src/table.rs` by bead 8q0.26.
 
+### R-289 A worker restart puts a gap in that source's series
+
+When a source's health changes to Running from any other state (Failed, Starting after a restart), the reducer
+calls a per-source `mark_gap` on every series that `source_of()` (R-272) maps to that source, so the first
+sample after the restart carries `GAP_BEFORE`. Staleness alone cannot do this, because a 0.5 s backoff after
+a 1 Hz sample leaves a gap shorter than the stale threshold. The first Running of a session needs no gap
+(epoch rule, 8q0.18).
+- Basis: found by bead ndy.2; Reducer::tick's stale check reads real CLOCK_BOOTTIME and cannot fire in lab
+  time [verified in code].
+- Edits: new bead for `reducer/apply.rs` and `reducer/series.rs`; ndy.2 drops its gap assertion and the new
+  bead's test covers it.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
