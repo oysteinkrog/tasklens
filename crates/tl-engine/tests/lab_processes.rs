@@ -28,10 +28,10 @@ use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
 use tl_engine::workers::processes::ProcessesSource;
 use tl_model::demand::Demand;
 use tl_model::ids::ProcessKey;
-use tl_model::process::{ProcessField, ProcessRecord};
+use tl_model::process::ProcessRecord;
 use tl_model::settings::EngineSettings;
 use tl_model::time::TimeNs;
-use tl_model::validity::Validity;
+use tl_model::validity::{ProcessField, Validity};
 
 /// The process-edge process the metadata tests change: no exe link, uid 1000.
 const TOKENPROC: u32 = 4209;
@@ -161,7 +161,7 @@ fn lab_clock() -> (TimeNs, u64) {
 }
 
 /// A `ProcessesSource` running under `source::run` in a `FakeLab`, and the receive time in ms of
-/// every sweep it sent.
+/// every sweep it sent. With demand on from the start, the first sweep runs at 0 ms.
 struct Rig {
     fl: FakeLab,
     rx: mpsc::Receiver<EngineMsg>,
@@ -172,6 +172,8 @@ struct Rig {
     _control: watch::Sender<WorkerControl>,
     handle: TaskHandle<()>,
     sweeps: Vec<(u64, ProcessSweep)>,
+    /// Sweeps `next_sweep` has returned.
+    taken: usize,
 }
 
 impl Rig {
@@ -194,7 +196,7 @@ impl Rig {
             let cx = Cx::current().expect("task has a Cx");
             let _ = source::run(cx, worker_io, src).await;
         });
-        Rig {
+        let mut rig = Rig {
             fl,
             rx,
             demand: demand_tx,
@@ -203,6 +205,21 @@ impl Rig {
             _control: control,
             handle,
             sweeps: Vec::new(),
+            taken: 0,
+        };
+        rig.collect();
+        rig
+    }
+
+    fn collect(&mut self) {
+        for msg in drain(&mut self.rx) {
+            match msg {
+                EngineMsg::Source(SourceUpdate::Processes(sweep)) => {
+                    self.sweeps.push((self.fl.now_ms(), sweep));
+                }
+                EngineMsg::Source(other) => panic!("unexpected update {other:?}"),
+                _ => {}
+            }
         }
     }
 
@@ -211,33 +228,33 @@ impl Rig {
         let end = self.fl.now_ms() + total.as_millis() as u64;
         while self.fl.now_ms() < end {
             self.fl.advance(step);
-            for msg in drain(&mut self.rx) {
-                match msg {
-                    EngineMsg::Source(SourceUpdate::Processes(sweep)) => {
-                        self.sweeps.push((self.fl.now_ms(), sweep));
-                    }
-                    EngineMsg::Source(other) => panic!("unexpected update {other:?}"),
-                    _ => {}
-                }
-            }
+            self.collect();
         }
     }
 
-    /// Runs until one more sweep arrives and returns it.
+    /// The oldest sweep not yet returned, running the lab until one arrives.
     fn next_sweep(&mut self) -> &ProcessSweep {
-        let before = self.sweeps.len();
         for _ in 0..1_000 {
-            self.run(Duration::from_millis(10), Duration::from_millis(10));
-            if self.sweeps.len() > before {
-                assert_eq!(self.sweeps.len(), before + 1, "one sweep per step");
-                return &self.sweeps[before].1;
+            if self.taken < self.sweeps.len() {
+                self.taken += 1;
+                return &self.sweeps[self.taken - 1].1;
             }
+            self.run(Duration::from_millis(10), Duration::from_millis(10));
         }
         panic!("no sweep within 10 s");
     }
 
+    /// Receive times of the sweeps before `end_ms`.
+    fn times_before(&self, end_ms: u64) -> Vec<u64> {
+        self.sweeps
+            .iter()
+            .map(|(t, _)| *t)
+            .filter(|t| *t < end_ms)
+            .collect()
+    }
+
     fn times(&self) -> Vec<u64> {
-        self.sweeps.iter().map(|(t, _)| *t).collect()
+        self.times_before(u64::MAX)
     }
 
     fn finish(self) {
@@ -272,9 +289,8 @@ fn rate_follows_interval() {
     let root = FixtureRoot::merged();
     let mut rig = Rig::start(&root, table_demand(), 1000);
     rig.run(Duration::from_secs(5), Duration::from_millis(10));
-    let times = rig.times();
-    assert_eq!(times.len(), 5, "{times:?}");
-    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
+    let times = rig.times_before(5_000);
+    assert_eq!(times, [0, 1_000, 2_000, 3_000, 4_000]);
     assert!(rig.sweeps.iter().all(|(_, s)| !s.records.is_empty()));
     rig.finish();
 }
@@ -290,7 +306,11 @@ fn hidden_zero_sweeps_60s() {
     };
     let mut rig = Rig::start(&root, hidden, 1000);
     rig.run(Duration::from_secs(60), Duration::from_millis(100));
-    assert!(rig.sweeps.is_empty(), "swept while hidden: {:?}", rig.times());
+    assert!(
+        rig.sweeps.is_empty(),
+        "swept while hidden: {:?}",
+        rig.times()
+    );
     rig.finish();
 }
 
@@ -305,7 +325,7 @@ fn recording_keeps_sweeps() {
     };
     let mut rig = Rig::start(&root, recording, 1000);
     rig.run(Duration::from_secs(10), Duration::from_millis(10));
-    let times = rig.times();
+    let times = rig.times_before(10_000);
     assert_eq!(times.len(), 10, "{times:?}");
     assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
     rig.finish();
@@ -380,13 +400,17 @@ fn restricted_io_stays_restricted() {
     fs::set_permissions(&io, fs::Permissions::from_mode(0o000)).expect("chmod io");
 
     let mut rig = Rig::start(&root, table_demand(), 1000);
-    rig.run(Duration::from_secs(3), Duration::from_millis(100));
-    assert_eq!(rig.sweeps.len(), 3);
+    rig.run(Duration::from_secs(2), Duration::from_millis(100));
+    assert_eq!(rig.times(), [0, 1_000, 2_000]);
     for (t, sweep) in &rig.sweeps {
         let r = record(sweep, 1);
         assert_eq!(r.uid, 0);
         for field in [ProcessField::IoRead, ProcessField::IoWrite] {
-            assert_eq!(r.validity.get(field), Validity::Restricted, "{field:?} at {t} ms");
+            assert_eq!(
+                r.validity.get(field),
+                Validity::Restricted,
+                "{field:?} at {t} ms"
+            );
         }
         assert_eq!(r.io_read_bps, 0.0);
         assert_eq!(r.io_write_bps, 0.0);
