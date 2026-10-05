@@ -124,12 +124,13 @@ pub(crate) async fn activate_action(
     };
     let params: Vec<Value<'_>> = parameter.into_iter().map(Value::from).collect();
     let platform_data: HashMap<&str, Value<'_>> = HashMap::new();
+    let body = (action, params, platform_data);
     let call = conn.call_method(
         Some(bus_name),
         object_path,
         Some(APPLICATION_IFACE),
         "ActivateAction",
-        &(action, params, platform_data),
+        &body,
     );
     timed(cx, call)
         .await
@@ -268,12 +269,13 @@ async fn show_in_file_manager_with(
         } else {
             "ShowItems"
         };
+        let body = (vec![file_uri(path)], "");
         let call = conn.call_method(
             Some(FILE_MANAGER_DEST),
             FILE_MANAGER_PATH,
             Some(FILE_MANAGER_DEST),
             method,
-            &(vec![file_uri(path)], ""),
+            &body,
         );
         return timed(cx, call)
             .await
@@ -308,12 +310,13 @@ async fn has_file_manager(cx: &Cx, conn: &zbus::Connection) -> bool {
 
 async fn portal_open_uri(cx: &Cx, conn: &zbus::Connection, uri: &str) -> Result<(), Arc<str>> {
     let options: HashMap<&str, Value<'_>> = HashMap::new();
+    let body = ("", uri, options);
     let call = conn.call_method(
         Some(PORTAL_DEST),
         PORTAL_PATH,
         Some(OPEN_URI_IFACE),
         "OpenURI",
-        &("", uri, options),
+        &body,
     );
     timed(cx, call).await.map(drop)
 }
@@ -335,12 +338,13 @@ async fn portal_open_file(cx: &Cx, conn: &zbus::Connection, target: &str) -> Res
         Err(_) => return Err("open job failed".into()),
     };
     let options: HashMap<&str, Value<'_>> = HashMap::new();
+    let body = ("", Fd::from(&file), options);
     let call = conn.call_method(
         Some(PORTAL_DEST),
         PORTAL_PATH,
         Some(OPEN_URI_IFACE),
         "OpenFile",
-        &("", Fd::from(&file), options),
+        &body,
     );
     timed(cx, call).await.map(drop)
 }
@@ -771,6 +775,10 @@ mod tests {
         assert_eq!(result, Err(internal("not an absolute path")));
         assert!(fake.calls().is_empty(), "D-Bus calls {:?}", fake.calls());
         assert!(spawner.calls().is_empty());
+
+        // The production entry point checks before it can spawn anything.
+        let result = run(async move { show_in_file_manager(&cx(), None, "a/b", false).await });
+        assert_eq!(result, Err(internal("not an absolute path")));
     }
 
     #[test]
