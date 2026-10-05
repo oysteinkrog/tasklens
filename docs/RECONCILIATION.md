@@ -1785,6 +1785,18 @@ helper copies no write code. tl-helper keeps its ADR-001 dependency list (no `tr
 log. A bead line asking for a helper debug log is dropped; tl-ops already logs pid and result at debug level.
 - Edits: bead qfx.6 (chain edit to `crates/tl-ops/src/cgroup.rs`, the one constructor plus a test).
 
+### R-282 FieldPatch is written as a presence mask (replaces R-169's "struct of Options")
+
+`FieldPatch` keeps its seven `Option` fields in Rust, but its serde is hand-written: one `u8` mask (bit 0 ppid,
+1 cpu, 2 mem, 3 io_r, 4 io_w, 5 net, 6 gpu), then only the present values in postcard varint form. A set bit 7
+or short input fails to decode. `FORMAT_VERSION` stays 1, because no history file existed before this change.
+zstd stays at level 3 (level 6 measured larger).
+- Basis: the 8fx.1 6-hour synthetic store went from 67,597,197 bytes (64.47 MiB, over the ADR-012 64 MB limit)
+  to 60,044,245 bytes (57.26 MiB). The old encoding spent 7 of each patch's 15 bytes on Option tags. U-11's
+  3:1 compression does not hold for random-walk data (measured 1.36:1); the 64 MB verification passes anyway.
+  A column layout per sweep would save another 1.7 MiB and is not adopted [measured].
+- Edits: ARCHITECTURE ADR-012 format details line; commit d156e83 (bead 8fx.1).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
