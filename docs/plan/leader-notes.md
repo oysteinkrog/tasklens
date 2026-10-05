@@ -165,3 +165,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - qfx.7 helper ReadProcessFiles: empty set gives one Err(NotAllowed); other open_verified errors give Err(Os(errno)) per file; unknown ProcFiles bits ignored. Review in security pass.
 - hjn.5: leader approved net_key(i, mac: Option<&str>) and net_list(t_ns, ifaces, sys_root) reading class/net/<name>/address.
 - yms.27 read_smaps has no size cap (buffer grows 64 KiB steps). A process with very many mappings could cost tens of MB per read. Decide a cap (the helper uses 4 MiB) in review.
+- yms.19 qualifier marks any process with a .exe argv token as Wine when no Flatpak or Snap unit; a native tool given a .exe argument gets Wine. Tighten by requiring a Wine loader exe (wine, wine64, wine64-preloader, wineserver children).
+- 8hz.11 dbus: zbus p2p dev feature for tests; DbusConn Drop aborts the tick task; error_name keeps a full fdo variant name list (update when zbus changes).
