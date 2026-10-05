@@ -446,6 +446,26 @@ mod tests {
     }
 
     #[test]
+    fn wake_after_first_publish() {
+        let base =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
+        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
+            .with_sys_root(SysRoot::at(&base));
+        let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
+        let wake = handle.wake();
+        // The first `Tick` after 1 s makes the reducer publish.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(futures_lite::future::block_on(wake.recv()));
+        });
+        let woke = done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("wake within 5 s");
+        assert_eq!(woke, Ok(()));
+        assert!(handle.latest().sequence >= 1);
+    }
+
+    #[test]
     fn missing_boot_id_reads_zero() {
         assert_eq!(
             read_boot_id(&SysRoot::at(Path::new("/nonexistent"))),
