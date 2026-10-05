@@ -11,26 +11,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use asupersync::Cx;
-use asupersync::channel::{mpsc, watch};
+use asupersync::lab::LabConfig;
+use asupersync::lab::chaos::ChaosConfig;
 use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
 use smallvec::SmallVec;
 use tl_engine::bridge::{EngineHooks, HookCtx};
 use tl_engine::config::{EngineConfig, EngineMode};
-use tl_engine::reducer::{ActionGate, AdmissionView, Publisher};
+use tl_engine::reducer::{ActionGate, AdmissionView};
 use tl_engine::session::{RESTART_DELAY, RootEndpoints, engine_root};
-use tl_engine::source::{WorkerControl, WorkerIo};
+use tl_engine::source::WorkerIo;
 use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{
     CpuCoreSample, CpuSample, DeviceDesc, DeviceKinds, DeviceList, EngineMsg, NetSample,
     SourceUpdate,
 };
 use tl_engine::workers::WorkerSpec;
-use tl_model::actions::{ActionEvent, ActionId, ActionKind, ActionRequest, Signal};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, Signal};
 use tl_model::command::Command;
-use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{MetricId, SeriesId};
@@ -38,12 +37,11 @@ use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, CpuTotals, LinkState, Metric, NetTotals};
-use tl_model::time::{BootId, TimeNs};
+use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
-use fake_sources::{FakeLab, FakeSource, Step};
+use fake_sources::{FakeLab, FakeSource, Step, UiSide, fake_worker_set, times_ms, worker_log};
 
-const BOOT: BootId = BootId(0x5e55);
 const MS: TimeNs = 1_000_000;
 
 struct PanicGate;
@@ -86,68 +84,39 @@ fn fake_spec() -> WorkerSpec {
 struct Rig {
     fake: FakeLab,
     root: Option<TaskHandle<()>>,
-    latest: Arc<ArcSwap<Snapshot>>,
-    msgs_tx: mpsc::Sender<EngineMsg>,
     /// Gate factory calls, one per session.
     sessions: Arc<AtomicU32>,
-    // Held so the root's channels stay open.
-    _wake_rx: async_channel::Receiver<()>,
-    _events_rx: async_channel::Receiver<ActionEvent>,
-    _demand_tx: watch::Sender<Demand>,
-    settings_tx: watch::Sender<EngineSettings>,
+    // Holds the UI's channel ends, so the root's channels stay open.
+    ui: UiSide,
     ep: Option<RootEndpoints>,
 }
 
 impl Rig {
     fn new(workers: Vec<WorkerSpec>, next_sequence: u64) -> Rig {
-        let fake = FakeLab::new();
-        let (msgs_tx, msgs) = mpsc::channel(256);
-        let (demand_tx, demand) = watch::channel(Demand::default());
-        let (settings_tx, settings) = watch::channel(EngineSettings::default());
-        let (control, _) = watch::channel(WorkerControl::default());
-        let (wake_tx, wake_rx) = async_channel::bounded(1);
-        let (events_tx, events_rx) = async_channel::bounded(256);
-        let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(BOOT, 0)));
+        Rig::with_lab(FakeLab::new(), workers, next_sequence)
+    }
+
+    fn with_lab(fake: FakeLab, workers: Vec<WorkerSpec>, next_sequence: u64) -> Rig {
+        let config = Arc::new(EngineConfig::new(
+            EngineMode::Full,
+            "/var/tmp/claude/8q0.18-state".into(),
+        ));
+        let (mut ep, ui) = fake_sources::root_endpoints(config, workers);
         let sessions = Arc::new(AtomicU32::new(0));
         let counter = Arc::clone(&sessions);
-        let hooks = EngineHooks {
+        ep.hooks = EngineHooks {
             action_gate: Some(Arc::new(move |_ctx: HookCtx| {
                 counter.fetch_add(1, Ordering::Relaxed);
                 Box::new(PanicGate) as Box<dyn ActionGate>
             })),
             ..EngineHooks::default()
         };
-        let ep = RootEndpoints {
-            msgs,
-            msgs_tx: msgs_tx.clone(),
-            demand,
-            settings,
-            control,
-            publisher: Publisher {
-                latest: Arc::clone(&latest),
-                wake_tx,
-                stop_publishing: false,
-            },
-            events_tx,
-            config: Arc::new(EngineConfig::new(
-                EngineMode::Full,
-                "/var/tmp/claude/8q0.18-state".into(),
-            )),
-            boot_id: BOOT,
-            hooks,
-            workers,
-            next_sequence,
-        };
+        ep.next_sequence = next_sequence;
         Rig {
             fake,
             root: None,
-            latest,
-            msgs_tx,
             sessions,
-            _wake_rx: wake_rx,
-            _events_rx: events_rx,
-            _demand_tx: demand_tx,
-            settings_tx,
+            ui,
             ep: Some(ep),
         }
     }
@@ -162,14 +131,15 @@ impl Rig {
     }
 
     fn send(&mut self, msg: EngineMsg) {
-        self.msgs_tx
+        self.ui
+            .msgs_tx
             .try_send(msg)
             .expect("the queue has room for the message");
         self.fake.lab.run_until_idle();
     }
 
     fn latest(&self) -> Arc<Snapshot> {
-        self.latest.load_full()
+        self.ui.latest.load_full()
     }
 
     fn sessions(&self) -> u32 {
@@ -185,6 +155,12 @@ impl Rig {
         self.root.as_ref().expect("root started").abort();
         self.fake.advance(Duration::from_millis(10));
         assert!(self.root_finished(), "engine_root returned after cancel");
+    }
+
+    /// Stops the root, runs to quiescence and checks the lab's oracles.
+    fn finish(mut self) {
+        self.stop();
+        self.fake.finish();
     }
 }
 
@@ -263,7 +239,7 @@ fn reducer_panic_restarts_with_new_epoch() {
             view.id
         );
     }
-    rig.stop();
+    rig.finish();
 }
 
 #[test]
@@ -271,7 +247,10 @@ fn four_restarts_publish_all_failed_and_stay_alive() {
     let mut rig = Rig::new(Vec::new(), 0);
     // One action per session: each new reducer panics on its first message.
     for i in 1..=8 {
-        rig.msgs_tx.try_send(action(i)).expect("room in the queue");
+        rig.ui
+            .msgs_tx
+            .try_send(action(i))
+            .expect("room in the queue");
     }
     rig.start();
     for _ in 0..10 {
@@ -292,7 +271,7 @@ fn four_restarts_publish_all_failed_and_stay_alive() {
         .run_for(Duration::from_secs(120), Duration::from_secs(10));
     assert!(!rig.root_finished(), "the root stays alive");
     assert_eq!(rig.sessions(), 4);
-    rig.stop();
+    rig.finish();
 }
 
 #[test]
@@ -313,6 +292,7 @@ fn cancel_stops_everything() {
         .run_for(Duration::from_secs(5), Duration::from_millis(100));
     assert_eq!(samples(), after_cancel, "no sample() after the cancel");
     FAKE.with(|f| *f.borrow_mut() = None);
+    rig.fake.finish();
 }
 
 #[test]
@@ -323,7 +303,7 @@ fn tick_every_second() {
         .run_for(Duration::from_secs(10), Duration::from_millis(100));
     // Nothing else reaches the reducer, so each publish is one `Tick`.
     assert_eq!(rig.latest().sequence, 10);
-    rig.stop();
+    rig.finish();
 }
 
 #[test]
@@ -340,7 +320,7 @@ fn sequence_continues_across_epochs() {
     rig.send(cpu_msg(1_200 * MS, 50.0));
     let next = rig.latest();
     assert_eq!((next.epoch, next.sequence), (2, 501));
-    rig.stop();
+    rig.finish();
 }
 
 fn net_id(name: &str, ifindex: u32) -> DeviceIdentity {
@@ -390,7 +370,8 @@ fn settings_change_reaches_reducer() {
         show_network_wired: true,
         ..EngineSettings::default()
     };
-    rig.settings_tx
+    rig.ui
+        .settings_tx
         .send(with_virtual(false))
         .expect("the root holds a receiver");
     rig.start();
@@ -428,10 +409,133 @@ fn settings_change_reaches_reducer() {
     ));
     assert_eq!(agg_rx(&rig), 5000.0, "virtual interfaces hidden");
 
-    rig.settings_tx
+    rig.ui
+        .settings_tx
         .send(with_virtual(true))
         .expect("the root holds a receiver");
     rig.send(net_msg(300 * MS, vec![(eno1, 5000.0), (docker0, 700.0)]));
     assert_eq!(agg_rx(&rig), 5700.0, "the new settings reached the reducer");
-    rig.stop();
+    rig.finish();
+}
+
+// Chaos runs and the fake worker set (E09) ---------------------------------------------------
+
+/// Delay and wakeup-storm injection for `seed`, plus cancel injection at `cancel` per poll.
+/// The chaos seed derives from `seed`.
+fn chaos_lab(seed: u64, cancel: f64) -> FakeLab {
+    let chaos = ChaosConfig::default()
+        .with_cancel_probability(cancel)
+        .with_delay_probability(0.05)
+        .with_delay_range(Duration::ZERO..Duration::from_millis(10))
+        .with_wakeup_storm_probability(0.01);
+    FakeLab::with_config(
+        LabConfig::new(seed)
+            .worker_count(2)
+            .max_steps(1_000_000)
+            .with_chaos(chaos),
+    )
+}
+
+/// Every series of `snap` starts with `GAP_BEFORE`.
+fn assert_gap_before_all(snap: &Snapshot, seed: u64) {
+    for view in snap.series.series.iter() {
+        let first = view.samples.first().expect("a sample in epoch 2");
+        assert!(
+            first.flags.contains(SampleFlags::GAP_BEFORE),
+            "seed {seed}: {:?} starts epoch 2 without GAP_BEFORE",
+            view.id
+        );
+    }
+}
+
+/// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]`, which asupersync 0.5.0 does
+/// not re-export (see `lab_supervise.rs::explore_restart`).
+#[test]
+fn explore_session_restart() {
+    let mut cancels = 0;
+    for seed in 0..16 {
+        let fake = chaos_lab(seed, 0.01);
+        let workers = fake_worker_set(vec![(
+            SourceId::Cpu,
+            vec![Step::Ok],
+            Duration::from_millis(100),
+        )]);
+        let mut rig = Rig::with_lab(fake, workers, 0);
+        rig.start();
+        rig.fake
+            .run_for(Duration::from_millis(500), Duration::from_millis(100));
+        assert_eq!(rig.latest().epoch, 1, "seed {seed}");
+
+        rig.send(action(1));
+        rig.fake.advance(RESTART_DELAY);
+        assert_eq!(rig.sessions(), 2, "seed {seed}: session 2 starts");
+        rig.fake
+            .run_for(Duration::from_millis(300), Duration::from_millis(100));
+        let after = rig.latest();
+        assert_eq!(after.epoch, 2, "seed {seed}");
+        assert!(!after.series.series.is_empty(), "seed {seed}");
+        assert_gap_before_all(&after, seed);
+        cancels += rig.fake.lab.chaos_stats().cancellations;
+        rig.finish();
+    }
+    // The seeds are fixed, so this count is too. Chaos must have cancelled some tasks.
+    assert!(cancels > 0);
+}
+
+/// A worker that panics on every sample starts 6 times: 1 start plus 5 restarts, then the
+/// controller disables it for a minute.
+///
+/// No cancel injection here: a chaos cancel ends a `Transient` generation for good, so the
+/// budget would never be spent (`lab_supervise.rs::explore_restart` shows this). Delays move
+/// the lab's own clock, which no timer reads, so the backoff schedule stays exact.
+#[test]
+fn explore_supervisor_budget() {
+    for seed in 0..16 {
+        let fake = chaos_lab(seed, 0.0);
+        let workers = fake_worker_set(vec![(
+            SourceId::Cpu,
+            vec![Step::Panic],
+            Duration::from_millis(100),
+        )]);
+        let mut rig = Rig::with_lab(fake, workers, 0);
+        rig.start();
+        rig.fake
+            .run_for(Duration::from_secs(30), Duration::from_millis(100));
+        // Each generation samples once, at its first deadline, and panics.
+        let starts = times_ms(&worker_log(SourceId::Cpu), "sample");
+        eprintln!(
+            "DBG seed {seed}: starts {starts:?} stats {:?} root_done {}",
+            rig.fake.lab.chaos_stats(),
+            rig.root_finished()
+        );
+        rig.finish();
+    }
+}
+
+#[test]
+fn fake_worker_set_publishes_series() {
+    let fake = FakeLab::with_config(LabConfig::new(42).max_steps(1_000_000));
+    let workers = fake_worker_set(vec![
+        (SourceId::Cpu, vec![Step::Ok], Duration::from_millis(100)),
+        (SourceId::Memory, vec![Step::Ok], Duration::from_secs(1)),
+    ]);
+    let mut rig = Rig::with_lab(fake, workers, 0);
+    rig.start();
+    // The first samples run at 0 ms, so the 2 s window [0, 2 s) holds 20 CPU samples.
+    rig.fake.run_for(
+        Duration::from_secs(2) - Duration::from_millis(1),
+        Duration::from_millis(100),
+    );
+    let snap = rig.latest();
+    let samples = |identity: DeviceIdentity, metric: MetricId| {
+        let device = snap.devices.find(&identity).expect("the device exists").idx;
+        snap.series
+            .get(SeriesId { device, metric })
+            .expect("the series exists")
+            .samples
+            .len()
+    };
+    assert_eq!(samples(DeviceIdentity::CpuPackage, MetricId::CPU_TOTAL), 20);
+    assert_eq!(samples(DeviceIdentity::Memory, MetricId::MEM_USED), 2);
+    rig.finish();
 }

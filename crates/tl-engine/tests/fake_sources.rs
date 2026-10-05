@@ -245,3 +245,268 @@ impl FakeLab {
         assert!(report.lab_test_passed(), "{report:?}");
     }
 }
+
+// Fake worker set and root endpoints (E09) -------------------------------------------------
+
+use std::cell::RefCell;
+
+use arc_swap::ArcSwap;
+use asupersync::Cx;
+use asupersync::supervision::ManagedGeneration;
+use tl_engine::config::EngineConfig;
+use tl_engine::reducer::Publisher;
+use tl_engine::session::RootEndpoints;
+use tl_engine::supervise::WorkerFactory;
+use tl_engine::update::{CpuCoreSample, CpuSample, MemorySample};
+use tl_engine::workers::WorkerSpec;
+use tl_model::actions::ActionEvent;
+use tl_model::snapshot::Snapshot;
+use tl_model::system::{CpuSet, CpuTopology, CpuTotals, MemoryTotals, Metric};
+use tl_model::time::BootId;
+use tl_model::validity::Validity;
+
+/// The boot ID `root_endpoints` uses.
+pub const FAKE_BOOT: BootId = BootId(0x5e55);
+
+/// Most workers one `fake_worker_set` can hold. Each slot has its own factory fn.
+pub const MAX_FAKE_WORKERS: usize = 8;
+
+/// A fake worker: `Cpu` sends a `CpuSample`, `Memory` a `MemorySample`, any other source a
+/// `Health { Running }`. Each sample is logged as `(t, "sample")`.
+#[derive(Clone)]
+pub struct ScriptedSource {
+    pub id: SourceId,
+    /// Consumed in order; the last step repeats.
+    pub script: Vec<Step>,
+    pub period: Duration,
+    pub log: Log,
+    pub clock: Arc<VirtualClock>,
+}
+
+impl Source for ScriptedSource {
+    fn id(&self) -> SourceId {
+        self.id
+    }
+
+    fn period(&self, _: &Demand, _: &EngineSettings) -> Option<Duration> {
+        Some(self.period)
+    }
+
+    fn sample(mut self) -> (Self, SourceUpdate) {
+        let t_ns = self.clock.now().as_nanos();
+        self.log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((t_ns, "sample"));
+        let step = if self.script.len() > 1 {
+            self.script.remove(0)
+        } else {
+            self.script[0]
+        };
+        match step {
+            Step::Ok => {}
+            Step::Panic => panic!("scripted panic"),
+            Step::Slow(d) => self.clock.advance(d.as_nanos() as u64),
+        }
+        let t_ns = self.clock.now().as_nanos();
+        let update = match self.id {
+            SourceId::Cpu => SourceUpdate::Cpu(fake_cpu(t_ns)),
+            SourceId::Memory => SourceUpdate::Memory(fake_memory(t_ns)),
+            id => SourceUpdate::Health {
+                id,
+                state: SourceState::Running,
+                last_error: None,
+                t_ns,
+            },
+        };
+        (self, update)
+    }
+}
+
+fn fake_cpu(t_ns: TimeNs) -> CpuSample {
+    let mut online = CpuSet::empty();
+    online.insert(0);
+    CpuSample {
+        t_ns,
+        totals: CpuTotals {
+            util_pct: Metric::valid(50.0),
+            kernel_pct: Metric::valid(10.0),
+            ..CpuTotals::default()
+        },
+        irq_pct: 0.0,
+        per_cpu: vec![CpuCoreSample {
+            cpu: 0,
+            pct: 50.0,
+            kernel_pct: 10.0,
+            freq_mhz: Some(3000),
+            validity: Validity::Valid,
+        }],
+        freq_mhz: Some(3000),
+        temp_c: None,
+        temp_validity: Validity::Unsupported,
+        topology: Some(Arc::new(CpuTopology {
+            online,
+            cores: Arc::from([]),
+        })),
+        validity: Validity::Valid,
+    }
+}
+
+fn fake_memory(t_ns: TimeNs) -> MemorySample {
+    MemorySample {
+        t_ns,
+        totals: MemoryTotals {
+            validity: Validity::Valid,
+            total: 8 << 30,
+            available: 6 << 30,
+            used: 2 << 30,
+            ..MemoryTotals::default()
+        },
+        zram: Vec::new(),
+        validity: Validity::Valid,
+    }
+}
+
+thread_local! {
+    /// The sources the slot factories clone. The lab runs every task on the test thread.
+    static WORKER_SET: RefCell<Vec<ScriptedSource>> = const { RefCell::new(Vec::new()) };
+    /// The clock of the newest `FakeLab::with_config` on this thread.
+    static LAB_CLOCK: RefCell<Option<Arc<VirtualClock>>> = const { RefCell::new(None) };
+}
+
+/// `WorkerSpec::factory` is a fn pointer, so each slot of `WORKER_SET` gets its own fn.
+fn slot_factory<const N: usize>(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let src = WORKER_SET
+        .with(|set| set.borrow().get(N).cloned())
+        .expect("fake_worker_set filled this slot");
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let src = src.clone();
+        async move { tl_engine::source::run(cx, io, src).await }
+    })
+}
+
+const SLOT_FACTORIES: [fn(Arc<EngineConfig>, WorkerIo) -> WorkerFactory; MAX_FAKE_WORKERS] = [
+    slot_factory::<0>,
+    slot_factory::<1>,
+    slot_factory::<2>,
+    slot_factory::<3>,
+    slot_factory::<4>,
+    slot_factory::<5>,
+    slot_factory::<6>,
+    slot_factory::<7>,
+];
+
+/// One `ScriptedSource` worker per entry, sampling every `Duration`. Replaces the set of any
+/// earlier call on this thread. Build the lab with `FakeLab::with_config` first: the sources
+/// read its clock.
+pub fn fake_worker_set(scripts: Vec<(SourceId, Vec<Step>, Duration)>) -> Vec<WorkerSpec> {
+    assert!(
+        scripts.len() <= MAX_FAKE_WORKERS,
+        "at most {MAX_FAKE_WORKERS} fake workers"
+    );
+    let clock = LAB_CLOCK
+        .with(|c| c.borrow().clone())
+        .expect("FakeLab::with_config ran on this thread");
+    let sources: Vec<ScriptedSource> = scripts
+        .into_iter()
+        .map(|(id, script, period)| {
+            assert!(!script.is_empty(), "a script needs at least one step");
+            ScriptedSource {
+                id,
+                script,
+                period,
+                log: Log::default(),
+                clock: Arc::clone(&clock),
+            }
+        })
+        .collect();
+    let specs = sources
+        .iter()
+        .zip(SLOT_FACTORIES)
+        .map(|(src, factory)| WorkerSpec {
+            id: src.id,
+            name: "fake",
+            modes: &[tl_engine::config::EngineMode::Full],
+            factory,
+        })
+        .collect();
+    WORKER_SET.with(|set| *set.borrow_mut() = sources);
+    specs
+}
+
+/// The log of the fake worker for `id` in the current set.
+pub fn worker_log(id: SourceId) -> Log {
+    WORKER_SET
+        .with(|set| {
+            set.borrow()
+                .iter()
+                .find(|src| src.id == id)
+                .map(|src| Arc::clone(&src.log))
+        })
+        .expect("the current fake_worker_set has this source")
+}
+
+/// The UI's ends of the channels `root_endpoints` makes.
+pub struct UiSide {
+    pub latest: Arc<ArcSwap<Snapshot>>,
+    pub wake_rx: async_channel::Receiver<()>,
+    pub events_rx: async_channel::Receiver<ActionEvent>,
+    pub demand_tx: watch::Sender<Demand>,
+    pub settings_tx: watch::Sender<EngineSettings>,
+    pub msgs_tx: mpsc::Sender<EngineMsg>,
+}
+
+/// Root endpoints with default hooks, `FAKE_BOOT` and sequence 0, and the UI side to drive them.
+pub fn root_endpoints(
+    config: Arc<EngineConfig>,
+    workers: Vec<WorkerSpec>,
+) -> (RootEndpoints, UiSide) {
+    let (msgs_tx, msgs) = mpsc::channel(256);
+    let (demand_tx, demand) = watch::channel(Demand::default());
+    let (settings_tx, settings) = watch::channel(EngineSettings::default());
+    let (control, _) = watch::channel(WorkerControl::default());
+    let (wake_tx, wake_rx) = async_channel::bounded(1);
+    let (events_tx, events_rx) = async_channel::bounded(256);
+    let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(FAKE_BOOT, 0)));
+    let ep = RootEndpoints {
+        msgs,
+        msgs_tx: msgs_tx.clone(),
+        demand,
+        settings,
+        control,
+        publisher: Publisher {
+            latest: Arc::clone(&latest),
+            wake_tx,
+            stop_publishing: false,
+        },
+        events_tx,
+        config,
+        boot_id: FAKE_BOOT,
+        hooks: tl_engine::bridge::EngineHooks::default(),
+        workers,
+        next_sequence: 0,
+    };
+    let ui = UiSide {
+        latest,
+        wake_rx,
+        events_rx,
+        demand_tx,
+        settings_tx,
+        msgs_tx,
+    };
+    (ep, ui)
+}
+
+impl FakeLab {
+    /// Like `new`, with `config` (a seed, chaos). `fake_worker_set` reads this lab's clock.
+    pub fn with_config(config: LabConfig) -> Self {
+        let mut lab = LabRuntime::new(config);
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        lab.state
+            .set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        LAB_CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&clock)));
+        FakeLab { lab, clock, root }
+    }
+}
