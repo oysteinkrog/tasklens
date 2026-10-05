@@ -47,13 +47,14 @@ use crate::source::WorkerIo;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
 /// Capacity of the channel each worker generation creates.
-pub(crate) const HISTORY_CHANNEL_CAPACITY: usize = 512;
+pub const HISTORY_CHANNEL_CAPACITY: usize = 512;
 
 /// One event for the `HistoryRecorder` worker.
-pub(crate) enum HistoryMsg {
-    // The session wiring (E30-A2) sends this variant.
-    #[allow(dead_code)]
-    SessionStart { epoch: u32, t_ns: TimeNs },
+pub enum HistoryMsg {
+    SessionStart {
+        epoch: u32,
+        t_ns: TimeNs,
+    },
     System {
         t_ns: TimeNs,
         series: Box<[(SeriesId, Sample)]>,
@@ -64,42 +65,38 @@ pub(crate) enum HistoryMsg {
     },
     /// `DeviceCatalog` holds its entries in an `Arc`, so the clone is cheap.
     Catalog(DeviceCatalog),
-    // The session wiring (E30-A2) sends this variant.
-    #[allow(dead_code)]
     Query {
         id: u64,
         range: HistoryRange,
         what: HistoryWhat,
     },
-    // The session wiring (E30-A2) sends this variant.
-    #[allow(dead_code)]
-    Delete { keys: Arc<[ProcessKey]> },
+    Delete {
+        keys: Arc<[ProcessKey]>,
+    },
     /// The sink's running count of dropped messages, sent after the next message that got
     /// through.
-    Dropped { total: u64 },
-    /// Test seam: runs on the blocking pool with the worker's mode, in message order.
-    #[cfg(test)]
-    // Only `tests/lab_history.rs` sends it.
-    #[allow(dead_code)]
+    Dropped {
+        total: u64,
+    },
+    /// Test seam for `tests/lab_history.rs`: runs on the blocking pool with the worker's mode, in message order.
+    #[doc(hidden)]
     Inspect(Box<dyn FnOnce(&Mode) + Send>),
 }
 
 /// Each worker generation creates a fresh `mpsc::channel(512)` and stores its `Sender` here; the
 /// sink reads it.
-pub(crate) type HistorySlot = Arc<ArcSwapOption<mpsc::Sender<HistoryMsg>>>;
+pub type HistorySlot = Arc<ArcSwapOption<mpsc::Sender<HistoryMsg>>>;
 
 /// The reducer's `RecordSink` while history is on. A thin forwarder to the worker's channel.
-pub(crate) struct HistorySink {
+pub struct HistorySink {
     slot: HistorySlot,
     dropped: u64,
     /// The last `dropped` value the worker received.
     reported: u64,
 }
 
-// The session wiring (E30-A2) creates the sink and routes the history commands to it.
-#[allow(dead_code)]
 impl HistorySink {
-    pub(crate) fn new(slot: HistorySlot) -> Self {
+    pub fn new(slot: HistorySlot) -> Self {
         HistorySink {
             slot,
             dropped: 0,
@@ -108,12 +105,12 @@ impl HistorySink {
     }
 
     /// For `Command::HistoryQuery` and `Command::HistoryDelete` routed by the reducer (E30-A2).
-    pub(crate) fn command(&mut self, msg: HistoryMsg) {
+    pub fn command(&mut self, msg: HistoryMsg) {
         self.send(msg);
     }
 
     /// Messages dropped so far: no sender, queue full or channel closed.
-    pub(crate) fn dropped(&self) -> u64 {
+    pub fn dropped(&self) -> u64 {
         self.dropped
     }
 
@@ -166,17 +163,16 @@ const BATCH_MAX: usize = 64;
 /// MemTotal and the clock offset are read this often, and drops are reported at most this often.
 const MINUTE_NS: u64 = 60_000_000_000;
 
-pub(crate) struct HistoryWorkerConfig {
+pub struct HistoryWorkerConfig {
     pub boot: BootId,
     /// `EngineConfig.history_dir` (R-150 item 3). The store mode (E30-014) reads it.
-    #[allow(dead_code)]
     pub history_dir: Option<PathBuf>,
 }
 
 /// What the worker holds. E30-014 adds `Recording(RecordingState)` (R-262).
 // One `Mode` per worker, moved into each job by value; the move of about 550 bytes is cheap.
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum Mode {
+pub enum Mode {
     Off,
     Rolling(RollingWindow),
 }
@@ -246,7 +242,6 @@ impl State {
         for msg in msgs.drain(..) {
             match msg {
                 HistoryMsg::Dropped { total } => self.dropped = self.dropped.max(total),
-                #[cfg(test)]
                 HistoryMsg::Inspect(f) => f(&self.mode),
                 HistoryMsg::Query { id, range, what } => {
                     let view = self.answer(id, range, &what);
@@ -297,7 +292,6 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         // E30-015 re-answers the last Frame query after a delete.
         HistoryMsg::Delete { keys } => window.delete_keys(&keys),
         HistoryMsg::Query { .. } | HistoryMsg::Dropped { .. } => {}
-        #[cfg(test)]
         HistoryMsg::Inspect(_) => {}
     }
 }
@@ -334,9 +328,7 @@ impl Drop for SlotGuard {
 /// One generation of the `HistoryRecorder` worker. Returns `Outcome::Ok(())` when `cx` is
 /// cancelled and `Outcome::Err` when a job cannot be spawned or the reducer's queue is closed,
 /// so the supervisor restarts it.
-// The session wiring (E30-A2) starts this worker under its own supervisor.
-#[allow(dead_code)]
-pub(crate) async fn run_history(
+pub async fn run_history(
     cx: Cx,
     io: WorkerIo,
     slot: HistorySlot,

@@ -1,7 +1,4 @@
 //! LabRuntime tests for the `HistoryRecorder` worker in rolling-window mode (ADR-012, ADR-013).
-//!
-//! `workers::history` is crate-private, so this test pulls the file in with `#[path]`. The
-//! `source` and `update` modules below stand in for the crate paths the file uses.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,27 +14,18 @@ use tl_engine::dbus::SharedHandles;
 use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::{WorkerFactory, build_supervisor};
 use tl_engine::update::{EngineMsg, SourceUpdate, WorkerError};
+use tl_engine::workers::history::{
+    HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, run_history,
+};
 use tl_model::command::HistoryWhat;
 use tl_model::demand::Demand;
+use tl_model::health::{SourceId, SourceState};
 use tl_model::history::{HistoryMetric, HistoryRange, HistorySource, HistoryView, RecordSink};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::EngineSettings;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-
-mod source {
-    pub(crate) use tl_engine::source::WorkerIo;
-}
-
-mod update {
-    pub(crate) use tl_engine::update::{EngineMsg, SourceUpdate, WorkerError};
-}
-
-#[path = "../src/workers/history.rs"]
-mod history;
-
-use history::{HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, run_history};
 
 const SEC: u64 = 1_000_000_000;
 const MIN: u64 = 60 * SEC;
@@ -221,6 +209,35 @@ impl Rig {
         got.expect("the worker ran the inspect message")
     }
 
+    /// `last_error` of every HistoryRecorder health message received so far.
+    fn health_texts(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = self.rx.try_recv() {
+            if let EngineMsg::Source(SourceUpdate::Health {
+                id: SourceId::HistoryRecorder,
+                state,
+                last_error,
+                ..
+            }) = msg
+            {
+                assert_eq!(state, SourceState::Running, "R-249 keeps the state");
+                out.push(last_error.as_deref().unwrap_or_default().to_owned());
+            }
+        }
+        out
+    }
+
+    /// 600 sweeps while the worker cannot run: 512 fill the queue, 88 are dropped. Then the
+    /// worker drains the queue and one more sweep carries the new drop total.
+    fn overflow(&mut self, records: &Arc<[ProcessRecord]>) {
+        for t in 0..600 {
+            self.sink.on_process_sweep(T0 + t, records);
+        }
+        self.lab.run_until_idle();
+        self.sink.on_process_sweep(T0 + 600, records);
+        self.lab.run_until_idle();
+    }
+
     fn finish(mut self, handle: &TaskHandle<Outcome<(), WorkerError>>) {
         handle.abort();
         let report = self.lab.run_until_quiescent_with_report();
@@ -380,5 +397,28 @@ fn session_start_marks_gap() {
         flags[2..].iter().all(|&(_, gap)| !gap),
         "later blocks have no gap: {flags:?}"
     );
+    rig.finish(&handle);
+}
+
+#[test]
+fn dropped_events_reported_once_per_minute() {
+    let mut rig = Rig::new(false);
+    let handle = rig.spawn_worker();
+    let records = sweep(2);
+
+    rig.overflow(&records);
+    assert_eq!(rig.sink.dropped(), 88);
+    assert_eq!(rig.health_texts(), ["History dropped 88 events"]);
+
+    // More drops inside the same minute wait for the next report.
+    rig.overflow(&records);
+    assert_eq!(rig.sink.dropped(), 176);
+    assert!(
+        rig.health_texts().is_empty(),
+        "at most one report per minute"
+    );
+
+    rig.advance(Duration::from_secs(60));
+    assert_eq!(rig.health_texts(), ["History dropped 176 events"]);
     rig.finish(&handle);
 }
