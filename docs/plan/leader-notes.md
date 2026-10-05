@@ -173,3 +173,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yms.20 protected set: empty WAYLAND_DISPLAY falls back to wayland-0; ppid walk capped at 64; plasmashell walk start only for self_uid.
 - yms.29 fd reader stats /proc/<pid>/fd/<n> following the link; stat on a file on a hung NFS or FUSE mount can block the Details read. Check whether the per-fd stat is needed (fdinfo has ino and flags) or should run with a deadline.
 - Reducer Tick reads real CLOCK_BOOTTIME (now_boot_ns), so lab tests cannot drive stale or linger timing with virtual time; 8q0.23 backdates samples instead. Consider passing time in the Tick message or through a clock trait.
+- 8q0.23 fix 0282f38: health last_ok_ns updates every sample without republishing HEALTH, so the published value lags. Decide if the UI shows last_ok_ns (then publish on change at most 1 Hz).
+- yms.2 resolver: icon cache saved at first end_sweep then every 60 s, no shutdown save (needs an engine shutdown hook). Undecided: owns_window with neither scope id in the index keeps the whole remainder as group id; settle when the KWin window bead lands.
+- hjn.6: worker factories build sources inside cx.spawn_blocking because constructors read sysfs; cpu.rs has no spec or factory yet.
