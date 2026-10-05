@@ -30,3 +30,17 @@ fn real_security_readability() {
     eprintln!("vulns: {:?}", info.vulns);
     eprintln!("unreadable: {:?}", info.unreadable);
 }
+
+/// PERF-102: `board_serial` is mode 0400, so uid 1000 sees `Restricted`. The value is never read
+/// or printed. Run as uid 1000 with
+/// `cargo test -p tl-collect --test fixture_inventory -- --ignored real_board_serial_restricted`.
+#[test]
+#[ignore = "reads the real /sys"]
+fn real_board_serial_restricted() {
+    use tl_collect::inventory::dmi::{Field, read_dmi};
+    let info = read_dmi(Path::new("/sys"));
+    assert!(
+        info.board_serial == Field::Restricted,
+        "board_serial is not Restricted"
+    );
+}
