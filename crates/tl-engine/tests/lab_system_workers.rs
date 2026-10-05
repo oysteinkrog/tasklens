@@ -19,12 +19,14 @@ use tl_collect::parse::{block, hwmon, netif};
 use tl_engine::config::EngineMode;
 use tl_engine::source::{self, Source};
 use tl_engine::update::{
-    CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, SourceUpdate,
+    CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, NetSample,
+    SourceUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::disk::DiskSource;
 use tl_engine::workers::enumerate::{disk_list, net_list, sensor_list};
 use tl_engine::workers::memory::MemorySource;
+use tl_engine::workers::net::NetSource;
 use tl_engine::workers::workers_for;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
@@ -610,4 +612,122 @@ fn disk_listed_once_in_full_mode() {
         .map(|spec| spec.id)
         .collect();
     assert_eq!(ids.iter().filter(|id| **id == SourceId::Disk).count(), 1);
+}
+
+/// `net-two-steps` step 0 plus `proc/self/ns/net` linking to `net:[4026531840]`.
+fn net_fixture() -> PathBuf {
+    let dir = fixture_copy("net-two-steps", Some(0));
+    let ns = dir.join("proc/self/ns");
+    fs::create_dir_all(&ns).expect("create fixture ns dir");
+    std::os::unix::fs::symlink("net:[4026531840]", ns.join("net")).expect("create netns link");
+    dir
+}
+
+fn net_sample(src: NetSource, t: u64) -> (NetSource, NetSample) {
+    match src.sample_at(at(t)) {
+        (src, SourceUpdate::Nets(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Nets, got {other:?}"),
+    }
+}
+
+fn net_devices(src: &mut NetSource) -> DeviceList {
+    match src.take_extra() {
+        Some(SourceUpdate::Devices(list)) => list,
+        other => panic!("expected SourceUpdate::Devices, got {other:?}"),
+    }
+}
+
+fn net_iface(ifindex: u32, name: &str) -> DeviceIdentity {
+    DeviceIdentity::Net {
+        netns_ino: 4026531840,
+        ifindex,
+        name: name.into(),
+    }
+}
+
+#[test]
+fn net_first_sample_and_device_list() {
+    let dir = net_fixture();
+    let (mut src, s) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    let list = net_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::NETS);
+    assert_eq!(names(&list), ["eth0"]);
+
+    assert_eq!(s.t_ns, SEC);
+    assert_eq!(s.nets.len(), 1);
+    let (identity, totals) = &s.nets[0];
+    let ifindex = match identity {
+        DeviceIdentity::Net { ifindex, .. } => *ifindex,
+        other => panic!("expected a Net identity, got {other:?}"),
+    };
+    assert_eq!(*identity, net_iface(ifindex, "eth0"));
+    assert_eq!(totals.rx_bps.validity, Validity::WarmingUp);
+    assert_eq!(totals.tx_bps.validity, Validity::WarmingUp);
+    assert_eq!(totals.rx_total, 1_000_000);
+    assert_eq!(totals.tx_total, 500_000);
+    assert_eq!(totals.link_speed_mbps.validity, Validity::WarmingUp);
+}
+
+#[test]
+fn net_rates_step1() {
+    let dir = net_fixture();
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    net_devices(&mut src);
+
+    apply_step(&dir, "net-two-steps", 1);
+    let (mut src, s) = net_sample(src, 2 * SEC);
+    let (_, totals) = &s.nets[0];
+    assert_eq!(totals.rx_bps, Metric::valid(2_500_000.0));
+    assert_eq!(totals.tx_bps, Metric::valid(1_000_000.0));
+    assert_eq!(totals.rx_total, 3_500_000);
+    assert!(src.take_extra().is_none(), "no enumeration due");
+}
+
+#[test]
+fn net_list_no_loopback() {
+    let dir = fixture_copy("netif-kinds", None);
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    let list = net_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::NETS);
+    let names = names(&list);
+    assert!(!names.contains(&"lo"), "{names:?}");
+    assert!(names.contains(&"docker0"), "{names:?}");
+    assert!(names.contains(&"tailscale0"), "{names:?}");
+}
+
+#[test]
+fn net_rename_is_new_identity() {
+    let dir = net_fixture();
+    let (mut src, s) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    net_devices(&mut src);
+    let old = s.nets[0].0.clone();
+    let ifindex = match &old {
+        DeviceIdentity::Net { ifindex, .. } => *ifindex,
+        other => panic!("expected a Net identity, got {other:?}"),
+    };
+
+    let class = dir.join("sys/class/net");
+    fs::rename(class.join("eth0"), class.join("eth1")).expect("rename fixture eth0");
+    let (mut src, s) = net_sample(src, 6 * SEC);
+    let list = net_devices(&mut src);
+    let identities: Vec<&DeviceIdentity> = list.entries.iter().map(|e| &e.identity).collect();
+    let new = net_iface(ifindex, "eth1");
+    assert!(!identities.contains(&&old), "{identities:?}");
+    assert!(identities.contains(&&new), "{identities:?}");
+    assert_eq!(s.nets.len(), 1);
+    assert_eq!(s.nets[0].0, new);
+    let ids: Vec<(&str, u32)> = src
+        .iface_ids()
+        .map(|id| (&*id.name, id.generation))
+        .collect();
+    assert_eq!(ids, [("eth1", 0)]);
+}
+
+#[test]
+fn net_listed_once_in_full_mode() {
+    let ids: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(ids.iter().filter(|id| **id == SourceId::Net).count(), 1);
 }
