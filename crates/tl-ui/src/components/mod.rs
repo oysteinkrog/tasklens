@@ -3,3 +3,4 @@
 pub mod focus;
 pub mod icons;
 pub mod skeleton;
+pub mod switch;
