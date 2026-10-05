@@ -122,7 +122,12 @@ struct Rig {
 
 impl Rig {
     fn new(process_table: bool) -> Self {
-        let lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000_000));
+        let lab = LabRuntime::new(
+            LabConfig::new(7)
+                .max_steps(100_000_000)
+                // 15 virtual minutes of sweeps overflow the default 4,096-event trace.
+                .trace_capacity(1 << 20),
+        );
         let (updates, rx) = mpsc::channel::<EngineMsg>(256);
         let (demand_tx, demand) = watch::channel(Demand {
             process_table,
@@ -271,15 +276,16 @@ fn restart_reinstalls_sender() {
     let mut rig = Rig::new(true);
     let io = rig.io.clone();
     let slot = Arc::clone(&rig.slot);
-    // The first generation runs the worker for 1 s, then panics. Later ones run it for good.
+    // Generation 1 (numbers start at one) runs the worker for 1 s, then panics. Later ones run
+    // it for good.
     let factory: WorkerFactory = Arc::new(move |cx: Cx, generation: ManagedGeneration| {
         let io = io.clone();
         let slot = Arc::clone(&slot);
         async move {
-            if generation.number == 0 {
+            if generation.number == 1 {
                 let run = run_history(cx.clone(), io, slot, config());
                 let _ = time::timeout(cx.now(), Duration::from_secs(1), run).await;
-                panic!("generation 0 panics");
+                panic!("generation 1 panics");
             }
             run_history(cx, io, slot, config()).await
         }
@@ -305,14 +311,18 @@ fn restart_reinstalls_sender() {
     let first = rig
         .slot
         .load_full()
-        .expect("generation 0 installed a sender");
-    // Generation 0 panics at 1 s; the restart backoff is 500 ms.
+        .expect("generation 1 installed a sender");
+    // Generation 1 panics at 1 s; the restart backoff is 500 ms.
     rig.advance(Duration::from_secs(1));
+    assert!(
+        rig.slot.load().is_none(),
+        "the panicking generation cleared the slot"
+    );
     rig.advance(Duration::from_secs(1));
     let second = rig
         .slot
         .load_full()
-        .expect("generation 1 installed a sender");
+        .expect("generation 2 installed a sender");
     assert!(!Arc::ptr_eq(&first, &second), "a new sender");
     drop(first);
     drop(second);

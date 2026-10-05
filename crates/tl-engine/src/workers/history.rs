@@ -51,10 +51,9 @@ pub(crate) const HISTORY_CHANNEL_CAPACITY: usize = 512;
 
 /// One event for the `HistoryRecorder` worker.
 pub(crate) enum HistoryMsg {
-    SessionStart {
-        epoch: u32,
-        t_ns: TimeNs,
-    },
+    // The session wiring (E30-A2) sends this variant.
+    #[allow(dead_code)]
+    SessionStart { epoch: u32, t_ns: TimeNs },
     System {
         t_ns: TimeNs,
         series: Box<[(SeriesId, Sample)]>,
@@ -65,19 +64,19 @@ pub(crate) enum HistoryMsg {
     },
     /// `DeviceCatalog` holds its entries in an `Arc`, so the clone is cheap.
     Catalog(DeviceCatalog),
+    // The session wiring (E30-A2) sends this variant.
+    #[allow(dead_code)]
     Query {
         id: u64,
         range: HistoryRange,
         what: HistoryWhat,
     },
-    Delete {
-        keys: Arc<[ProcessKey]>,
-    },
+    // The session wiring (E30-A2) sends this variant.
+    #[allow(dead_code)]
+    Delete { keys: Arc<[ProcessKey]> },
     /// The sink's running count of dropped messages, sent after the next message that got
     /// through.
-    Dropped {
-        total: u64,
-    },
+    Dropped { total: u64 },
     /// Test seam: runs on the blocking pool with the worker's mode, in message order.
     #[cfg(test)]
     Inspect(Box<dyn FnOnce(&Mode) + Send>),
@@ -531,6 +530,33 @@ mod tests {
         }
         assert_eq!(rx.len(), 512);
         assert_eq!(sink.dropped(), 88);
+    }
+
+    #[test]
+    fn sink_reports_drops_after_next_send() {
+        let (slot, mut rx) = slot_with_channel();
+        let mut sink = HistorySink::new(slot);
+        let records = sweep(1);
+        for t in 0..520 {
+            sink.on_process_sweep(t, &records);
+        }
+        while rx.try_recv().is_ok() {}
+        sink.on_process_sweep(600, &records);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HistoryMsg::Sweep { t_ns: 600, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HistoryMsg::Dropped { total: 8 })
+        ));
+        // The count is sent once.
+        sink.on_process_sweep(601, &records);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HistoryMsg::Sweep { t_ns: 601, .. })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
