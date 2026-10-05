@@ -78,6 +78,9 @@ pub(crate) enum HistoryMsg {
     Dropped {
         total: u64,
     },
+    /// Test seam: runs on the blocking pool with the worker's mode, in message order.
+    #[cfg(test)]
+    Inspect(Box<dyn FnOnce(&Mode) + Send>),
 }
 
 /// Each worker generation creates a fresh `mpsc::channel(512)` and stores its `Sender` here; the
@@ -240,6 +243,8 @@ impl State {
         for msg in msgs.drain(..) {
             match msg {
                 HistoryMsg::Dropped { total } => self.dropped = self.dropped.max(total),
+                #[cfg(test)]
+                HistoryMsg::Inspect(f) => f(&self.mode),
                 HistoryMsg::Query { id, range, what } => {
                     let view = self.answer(id, range, &what);
                     out.push(SourceUpdate::History(Arc::new(view)));
@@ -289,6 +294,8 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         // E30-015 re-answers the last Frame query after a delete.
         HistoryMsg::Delete { keys } => window.delete_keys(&keys),
         HistoryMsg::Query { .. } | HistoryMsg::Dropped { .. } => {}
+        #[cfg(test)]
+        HistoryMsg::Inspect(_) => {}
     }
 }
 
