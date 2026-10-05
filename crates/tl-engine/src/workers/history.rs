@@ -9,7 +9,7 @@
 //! no `mpsc::Receiver` moves into a restartable worker (ADR-004 factory contract).
 
 // The worker loop (E30-013) and the session wiring (E30-A2) use these items.
-#![cfg_attr(not(test), allow(dead_code))]
+#![allow(dead_code)]
 
 use std::sync::Arc;
 
