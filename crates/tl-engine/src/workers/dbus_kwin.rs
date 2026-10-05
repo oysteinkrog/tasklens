@@ -42,7 +42,6 @@ pub const SCRIPTING_INTERFACE: &str = "org.kde.kwin.Scripting";
 /// The KWin script plugin name.
 pub const PLUGIN: &str = "tasklens-bridge";
 pub const BRIDGE_PATH: &str = "/io/github/oysteinkrog/Tasklens/WindowBridge";
-pub const BRIDGE_INTERFACE: &str = "io.github.oysteinkrog.Tasklens.WindowBridge";
 
 const DBUS_NAME: &str = "org.freedesktop.DBus";
 const DBUS_PATH: &str = "/org/freedesktop/DBus";
@@ -777,6 +776,15 @@ mod tests {
         // The name goes in as a JSON string, so a quote cannot end it.
         let hostile = bridge_script("\"); evil(\"");
         assert!(hostile.contains(r#"const BUS_NAME = "\"); evil(\"";"#));
+        // The script calls the path and interface this worker serves.
+        let iface = <WindowBridge as zbus::object_server::Interface>::name();
+        assert_eq!(
+            iface.as_str(),
+            "io.github.oysteinkrog.Tasklens.WindowBridge"
+        );
+        assert!(script.contains(&format!("\"{BRIDGE_PATH}\"")));
+        assert!(script.contains(&format!("\"{iface}\"")));
+        assert!(script.contains("\"Update\""));
     }
 
     #[test]
