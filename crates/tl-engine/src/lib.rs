@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+pub mod actions;
 pub mod bridge;
 pub mod config;
 pub mod controller;
