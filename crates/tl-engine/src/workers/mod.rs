@@ -38,6 +38,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         net::spec(),
         sensors::spec(),
         cpu::spec(),
+        processes::spec(),
     ]
 }
 
@@ -65,8 +66,12 @@ mod tests {
                 .collect();
             assert_eq!(ids, expected, "{mode:?}");
         }
-        // The `Processes` entry arrives with E10-A1, the low-memory arm with E32.
-        assert!(workers_for(EngineMode::LowMemory).is_empty());
+        // E32's low-memory arm changes the sweep, not the set.
+        let low: Vec<SourceId> = workers_for(EngineMode::LowMemory)
+            .iter()
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(low, [SourceId::Processes]);
         assert_eq!(
             workers_for(EngineMode::Full)
                 .iter()
