@@ -39,6 +39,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         sensors::spec(),
         cpu::spec(),
         processes::spec(),
+        gpu_nvidia::spec(),
     ]
 }
 
@@ -76,6 +77,13 @@ mod tests {
             workers_for(EngineMode::Full)
                 .iter()
                 .filter(|spec| spec.id == SourceId::Cpu && spec.name == "cpu")
+                .count(),
+            1
+        );
+        assert_eq!(
+            workers_for(EngineMode::Full)
+                .iter()
+                .filter(|spec| spec.id == SourceId::GpuNvidia)
                 .count(),
             1
         );
