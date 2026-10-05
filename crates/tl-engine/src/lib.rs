@@ -9,6 +9,7 @@ pub mod config;
 pub mod controller;
 pub mod dbus;
 pub mod gpu;
+mod helper;
 pub mod reducer;
 pub mod runtime;
 pub mod source;
