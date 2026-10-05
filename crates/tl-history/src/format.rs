@@ -102,7 +102,11 @@ pub struct SweepDelta {
 }
 
 /// Fields of one process that crossed their threshold. `None` means unchanged.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// On disk: one `u8` presence mask (bit 0 ppid, 1 cpu, 2 mem, 3 io_r, 4 io_w, 5 net, 6 gpu),
+/// then only the present values in that order, as postcard writes them. A mask with bit 7 set
+/// does not decode.
+#[derive(Clone, Debug, PartialEq)]
 pub struct FieldPatch {
     pub ppid: Option<u32>,
     pub cpu_permille: Option<u16>,
@@ -111,6 +115,118 @@ pub struct FieldPatch {
     pub io_w_kibps: Option<u32>,
     pub net_kibps: Option<u32>,
     pub gpu_pct: Option<u8>,
+}
+
+/// Mask bits of the `FieldPatch` fields, in field order.
+const PATCH_PPID: u8 = 1 << 0;
+const PATCH_CPU: u8 = 1 << 1;
+const PATCH_MEM: u8 = 1 << 2;
+const PATCH_IO_R: u8 = 1 << 3;
+const PATCH_IO_W: u8 = 1 << 4;
+const PATCH_NET: u8 = 1 << 5;
+const PATCH_GPU: u8 = 1 << 6;
+const PATCH_ALL: u8 = 0x7f;
+/// The mask plus at most 7 values.
+const PATCH_MAX_ELEMS: usize = 8;
+
+impl FieldPatch {
+    fn mask(&self) -> u8 {
+        let bit = |present: bool, b: u8| if present { b } else { 0 };
+        bit(self.ppid.is_some(), PATCH_PPID)
+            | bit(self.cpu_permille.is_some(), PATCH_CPU)
+            | bit(self.mem_anon_kib.is_some(), PATCH_MEM)
+            | bit(self.io_r_kibps.is_some(), PATCH_IO_R)
+            | bit(self.io_w_kibps.is_some(), PATCH_IO_W)
+            | bit(self.net_kibps.is_some(), PATCH_NET)
+            | bit(self.gpu_pct.is_some(), PATCH_GPU)
+    }
+}
+
+impl Serialize for FieldPatch {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeTuple;
+        let mask = self.mask();
+        // postcard writes a tuple as its elements with no length.
+        let mut t = s.serialize_tuple(1 + mask.count_ones() as usize)?;
+        t.serialize_element(&mask)?;
+        if let Some(v) = &self.ppid {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.cpu_permille {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.mem_anon_kib {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.io_r_kibps {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.io_w_kibps {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.net_kibps {
+            t.serialize_element(v)?;
+        }
+        if let Some(v) = &self.gpu_pct {
+            t.serialize_element(v)?;
+        }
+        t.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FieldPatch {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct PatchVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for PatchVisitor {
+            type Value = FieldPatch;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a FieldPatch presence mask and its values")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<FieldPatch, A::Error> {
+                use serde::de::Error;
+                let mask: u8 = seq
+                    .next_element()?
+                    .ok_or_else(|| A::Error::invalid_length(0, &self))?;
+                let mut read = 1usize;
+                if mask & !PATCH_ALL != 0 {
+                    return Err(A::Error::custom("FieldPatch mask has bit 7 set"));
+                }
+                fn field<'de, A: serde::de::SeqAccess<'de>, T: Deserialize<'de>>(
+                    seq: &mut A,
+                    mask: u8,
+                    bit: u8,
+                    read: &mut usize,
+                    exp: &PatchVisitor,
+                ) -> Result<Option<T>, A::Error> {
+                    if mask & bit == 0 {
+                        return Ok(None);
+                    }
+                    let v = seq.next_element()?;
+                    let v = v.ok_or_else(|| serde::de::Error::invalid_length(*read, exp))?;
+                    *read += 1;
+                    Ok(Some(v))
+                }
+                Ok(FieldPatch {
+                    ppid: field(&mut seq, mask, PATCH_PPID, &mut read, &self)?,
+                    cpu_permille: field(&mut seq, mask, PATCH_CPU, &mut read, &self)?,
+                    mem_anon_kib: field(&mut seq, mask, PATCH_MEM, &mut read, &self)?,
+                    io_r_kibps: field(&mut seq, mask, PATCH_IO_R, &mut read, &self)?,
+                    io_w_kibps: field(&mut seq, mask, PATCH_IO_W, &mut read, &self)?,
+                    net_kibps: field(&mut seq, mask, PATCH_NET, &mut read, &self)?,
+                    gpu_pct: field(&mut seq, mask, PATCH_GPU, &mut read, &self)?,
+                })
+            }
+        }
+
+        // The length is an upper bound: the visitor reads only the values the mask names.
+        d.deserialize_tuple(PATCH_MAX_ELEMS, PatchVisitor)
+    }
 }
 
 /// One footer entry: a block start and the byte offset of its length field from file start.
@@ -522,5 +638,90 @@ mod tests {
         assert_eq!(p.mem_anon_kib, 0);
         assert_eq!(p.net_kibps, 1);
         assert_eq!(p.gpu_pct, 42);
+    }
+
+    /// The patch with exactly the fields of `mask` present, each at value `v` cut to its type.
+    fn patch_of(mask: u8, v: u32) -> FieldPatch {
+        let on = |bit: u8| mask & bit != 0;
+        FieldPatch {
+            ppid: on(PATCH_PPID).then_some(v),
+            cpu_permille: on(PATCH_CPU).then_some(v as u16),
+            mem_anon_kib: on(PATCH_MEM).then_some(v),
+            io_r_kibps: on(PATCH_IO_R).then_some(v),
+            io_w_kibps: on(PATCH_IO_W).then_some(v),
+            net_kibps: on(PATCH_NET).then_some(v),
+            gpu_pct: on(PATCH_GPU).then_some(v as u8),
+        }
+    }
+
+    #[test]
+    fn patch_mask_roundtrip_all_128() {
+        for mask in 0..=PATCH_ALL {
+            for v in [0, 1, 300, u32::MAX] {
+                let p = patch_of(mask, v);
+                assert_eq!(p.mask(), mask);
+                let bytes = postcard::to_stdvec(&p).unwrap();
+                assert_eq!(bytes[0], mask);
+                assert_eq!(postcard::from_bytes::<FieldPatch>(&bytes).unwrap(), p);
+                // Inside a list the next entry starts right after the present values.
+                let list = vec![(7u32, p.clone()), (9, patch_of(PATCH_ALL ^ mask, v))];
+                let bytes = postcard::to_stdvec(&list).unwrap();
+                let back: Vec<(u32, FieldPatch)> = postcard::from_bytes(&bytes).unwrap();
+                assert_eq!(back, list);
+            }
+        }
+    }
+
+    #[test]
+    fn patch_mask_writes_only_present_values() {
+        assert_eq!(postcard::to_stdvec(&NONE).unwrap(), vec![0]);
+        let p = FieldPatch {
+            cpu_permille: Some(5),
+            mem_anon_kib: Some(300),
+            ..NONE
+        };
+        // Mask, cpu 5 (1 byte), mem 300 (2-byte varint).
+        assert_eq!(postcard::to_stdvec(&p).unwrap(), vec![0b110, 5, 0xac, 0x02]);
+    }
+
+    #[test]
+    fn patch_bad_mask_or_short_input_fails() {
+        assert!(postcard::from_bytes::<FieldPatch>(&[0x80]).is_err());
+        assert!(postcard::from_bytes::<FieldPatch>(&[0xff, 1, 1, 1, 1, 1, 1, 1]).is_err());
+        assert!(postcard::from_bytes::<FieldPatch>(&[]).is_err());
+        // Mask names cpu and mem, input ends after cpu.
+        assert!(postcard::from_bytes::<FieldPatch>(&[0b110, 5]).is_err());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn patch_roundtrip_any(
+            fields in (
+                proptest::option::of(proptest::prelude::any::<u32>()),
+                proptest::option::of(proptest::prelude::any::<u16>()),
+                proptest::option::of(proptest::prelude::any::<u32>()),
+                proptest::option::of(proptest::prelude::any::<u32>()),
+                proptest::option::of(proptest::prelude::any::<u32>()),
+                proptest::option::of(proptest::prelude::any::<u32>()),
+                proptest::option::of(proptest::prelude::any::<u8>()),
+            ),
+            index in proptest::prelude::any::<u32>(),
+        ) {
+            let (ppid, cpu_permille, mem_anon_kib, io_r_kibps, io_w_kibps, net_kibps, gpu_pct) =
+                fields;
+            let p = FieldPatch {
+                ppid,
+                cpu_permille,
+                mem_anon_kib,
+                io_r_kibps,
+                io_w_kibps,
+                net_kibps,
+                gpu_pct,
+            };
+            let list = vec![(index, p.clone()), (index, NONE), (0, p)];
+            let bytes = postcard::to_stdvec(&list).unwrap();
+            let back: Vec<(u32, FieldPatch)> = postcard::from_bytes(&bytes).unwrap();
+            proptest::prop_assert_eq!(back, list);
+        }
     }
 }
