@@ -14,10 +14,10 @@ use smallvec::SmallVec;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
 use tl_engine::source::{WorkerCommand, WorkerControl};
 use tl_engine::update::{
-    ConnectionsUpdate, CpuCoreSample, CpuSample, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
-    DeviceList, DiskSample, EngineMsg, GpuInfoUpdate, GpuSample, GpuStaticInfo, HelperUpdate,
-    MemorySample, NetSample, ProcessSweep, SensorSample, ServicesUpdate, SourceUpdate,
-    StartupUpdate,
+    ConnectionsUpdate, CpuCoreSample, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate,
+    DeviceKinds, DeviceList, DiskSample, EngineMsg, GpuInfoUpdate, GpuSample, GpuStaticInfo,
+    HelperUpdate, MemorySample, NetSample, ProcessSweep, PssEntry, SensorSample, ServicesUpdate,
+    SourceUpdate, StartupUpdate,
 };
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
@@ -26,7 +26,7 @@ use tl_model::actions::{
 use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
 use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
-use tl_model::gpu_proto::ApiVersions;
+use tl_model::gpu_proto::{ApiVersions, GpuProcessSample, Reading};
 use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
 use tl_model::history::{HistoryMetric, HistoryRange, RecordSink};
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
@@ -42,7 +42,7 @@ use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
 };
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
-use tl_model::validity::{FieldValidity, Validity};
+use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
 const BOOT: BootId = BootId(0x1234);
 const CPU_TOTAL: SeriesId = SeriesId {
@@ -1402,5 +1402,122 @@ fn set_table_query_older_generation_still_applied() {
     // The UI drops tables older than its newest query; the engine applies them in order.
     rig.run(vec![query(5)]).expect("no invariant violation");
     assert_eq!(rig.latest().table.query_generation, 5);
+    rig.passed();
+}
+
+// ---- GPU process rows and PSS (E09-006) ----
+
+/// `sweep_of` with PSS and USS `WarmingUp`, as a sweep that did not read `smaps_rollup`.
+fn sweep_without_pss(t_ns: TimeNs, pids: &[u32]) -> EngineMsg {
+    let mut sweep = sweep_of(t_ns, pids);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        for r in &mut s.records {
+            r.validity.set(ProcessField::Pss, Validity::WarmingUp);
+            r.validity.set(ProcessField::Uss, Validity::WarmingUp);
+        }
+    }
+    sweep
+}
+
+fn gpu_info(uuid: [u8; 16], supports_process_util: bool) -> EngineMsg {
+    src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+        devices: vec![GpuStaticInfo {
+            identity: DeviceIdentity::Gpu {
+                uuid,
+                pci_bus_id: Arc::from("0000:01:00.0"),
+            },
+            name: Arc::from("Card"),
+            mem_total: 0,
+            power_limit_mw: None,
+            driver: Arc::from(""),
+            nvml: Arc::from(""),
+            supports_process_util,
+            persistent_key: Arc::from("gpu:0000:01:00.0"),
+        }],
+    }))
+}
+
+fn pss_msg(keys: &[ProcessKey], pss_bytes: u64) -> EngineMsg {
+    src(SourceUpdate::Details(DetailsUpdate::Pss {
+        t_ns: now_boot_ns(),
+        entries: keys
+            .iter()
+            .map(|&key| PssEntry {
+                key,
+                pss_bytes,
+                uss_bytes: pss_bytes / 2,
+                swap_bytes: 0,
+                validity: Validity::Valid,
+            })
+            .collect(),
+    }))
+}
+
+fn record_of(snap: &Snapshot, key: ProcessKey) -> ProcessRecord {
+    snap.processes
+        .records
+        .iter()
+        .find(|r| r.key == key)
+        .expect("the record is published")
+        .clone()
+}
+
+#[test]
+fn gpu_rows_reach_records() {
+    let mut rig = Rig::new();
+    let uuid = [7; 16];
+    let gpu = src(SourceUpdate::Gpu(GpuSample {
+        t_ns: now_boot_ns(),
+        devices: Vec::new(),
+        processes: Some(vec![GpuProcessSample {
+            uuid,
+            pid: 2,
+            sm_pct: Reading::Ok(40),
+            mem_pct: Reading::Ok(0),
+            enc_pct: Reading::Ok(55),
+            dec_pct: Reading::Unsupported,
+            mem_used: Reading::Ok(4096),
+        }]),
+    }));
+    rig.run(vec![
+        gpu_info(uuid, true),
+        sweep_without_pss(now_boot_ns(), &[1, 2]),
+        gpu,
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let busy = record_of(&snap, proc_key(2));
+    assert_eq!(busy.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    assert!(
+        (busy.gpu_util_pct - 55.0).abs() < f32::EPSILON,
+        "max of sm, enc, dec"
+    );
+    assert_eq!(busy.gpu_mem_bytes, 4096);
+    let idle = record_of(&snap, proc_key(1));
+    assert_eq!(idle.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    assert!(idle.gpu_util_pct.abs() < f32::EPSILON);
+    rig.passed();
+}
+
+#[test]
+fn pss_coverage_published() {
+    let mut rig = Rig::new();
+    let key = proc_key(2);
+    rig.run(vec![sweep_without_pss(now_boot_ns(), &[1, 2])])
+        .expect("no invariant violation");
+    assert!(rig.latest().processes.coverage.pss_uss.is_empty());
+    rig.run(vec![pss_msg(&[key], 8192)])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(&*snap.processes.coverage.pss_uss, &[key]);
+    let record = record_of(&snap, key);
+    assert_eq!(record.validity.get(ProcessField::Pss), Validity::Valid);
+    assert_eq!(record.pss_bytes, 8192);
+    assert_eq!(
+        record_of(&snap, proc_key(1))
+            .validity
+            .get(ProcessField::Pss),
+        Validity::WarmingUp
+    );
     rig.passed();
 }
