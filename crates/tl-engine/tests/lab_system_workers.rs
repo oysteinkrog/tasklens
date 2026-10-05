@@ -397,7 +397,9 @@ fn cpu_reset_generation_warms_up() {
 
     // The counters move again, so only a reset can make the next sample `WarmingUp`.
     write_stat(&dir, 200, 90, 860);
-    control.send_modify(|c| c.reset_generation += 1);
+    control
+        .send_modify(|c| c.reset_generation += 1)
+        .expect("watch has receivers");
     let after_reset = cpu_messages(&mut fl, &mut rx, Duration::from_secs(1));
     assert_eq!(times(&after_reset), [2_000]);
     assert_eq!(
