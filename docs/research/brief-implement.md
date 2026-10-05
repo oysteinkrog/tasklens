@@ -24,7 +24,8 @@ Do not pick up any other bead.
    notices for background commands are sometimes lost, so do not go idle waiting for one: write
    the build output to a file and wait with a foreground loop such as
    `until grep -qE '^(EXIT|exit) ' out.txt; do sleep 10; done` (append `; echo "EXIT $?"` to the
-   build command), then read the file. If another
+   build command), then read the file. The safety hook blocks `>` redirects into `/var/tmp/claude`, so
+   write the file with `2>&1 | tee /var/tmp/claude/<bead-id>-build.txt` instead. If another
    agent's half-finished work breaks the workspace build, wait a few minutes and retry once, then
    report it. Fix your own failures in follow-up commits. Never amend.
    To format, run `rustfmt --edition 2024 <your files>` only. Never run `cargo fmt` without
