@@ -25,7 +25,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use rustix::event::{PollFd, PollFlags, poll};
-use rustix::io::{Errno, dup};
+use rustix::io::Errno;
 use rustix::net::sockopt::{Timeout, set_socket_timeout};
 use rustix::time::Timespec;
 use tl_model::gpu_proto::{
@@ -52,7 +52,7 @@ const MAX_API_VERSIONS_OUTPUT: usize = MAX_PROBE_FRAME + 4;
 pub struct ProbeClient {
     /// Dropped first: kills and reaps the child if it still runs.
     child: ProbeChild,
-    /// A dup of `child.sock` for `Read` and `Write`.
+    /// A `CLOEXEC` dup of `child.sock` for `Read` and `Write`.
     file: File,
     /// Set by a `Ready` hello.
     pub info: Option<HelloInfo>,
@@ -101,7 +101,10 @@ impl ProbeClient {
     /// `--fake <script>` in tests.
     pub fn start_with_args(probe: &Path, extra_args: &[&OsStr]) -> Result<ProbeClient, ProbeError> {
         let (child, spawner) = SpawnThread::spawn(probe, extra_args)?;
-        let file = dup(&child.sock)
+        // `try_clone` sets CLOEXEC (F_DUPFD_CLOEXEC); a plain dup would leak into later children.
+        let file = child
+            .sock
+            .try_clone()
             .map(File::from)
             .map_err(|e| ProbeError::Spawn(format!("dup: {e}").into()))?;
         let mut client = ProbeClient {
@@ -658,5 +661,23 @@ mod tests {
         assert_eq!(&*status_text(ExitStatus::from_raw(3 << 8)), "status 3");
         assert_eq!(&*status_text(ExitStatus::from_raw(11)), "signal 11");
         assert_eq!(&*status_text(ExitStatus::from_raw(9)), "signal 9");
+    }
+
+    /// The socket copy keeps `CLOEXEC`, so it never leaks into a child spawned later.
+    #[test]
+    fn socket_copy_is_cloexec() {
+        let probe = std::env::var_os(crate::gpu::PROBE_ENV)
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/tl-gpu-probe")
+            });
+        if !probe.is_file() {
+            eprintln!("skipped: no probe at {}", probe.display());
+            return;
+        }
+        let client = ProbeClient::start(&probe).expect("start probe");
+        let flags = rustix::io::fcntl_getfd(&client.file).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
     }
 }

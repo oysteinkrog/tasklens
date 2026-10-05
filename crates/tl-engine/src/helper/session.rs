@@ -839,7 +839,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let (pipe_read, pipe_write) = rustix::pipe::pipe().unwrap();
+        let (pipe_read, pipe_write) =
+            rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).unwrap();
         let frame = HelperFrame {
             seq: 5,
             request: HelperRequest::Dump {
