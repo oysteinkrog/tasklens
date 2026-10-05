@@ -125,3 +125,19 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #[test]
+    fn app_unit_arbitrary_names_never_panic(name in "(?s).{0,256}") {
+        use tl_collect::apps::cgroup_app::{is_not_app, parse_app_unit};
+        for prefix in ["", "app-", "flatpak-", "dbus-:", "snap."] {
+            for suffix in ["", ".scope", ".service"] {
+                let unit = format!("{prefix}{name}{suffix}");
+                let _ = is_not_app(&unit);
+                if let Some(id) = parse_app_unit(&unit) {
+                    prop_assert!(!id.app_id.is_empty());
+                }
+            }
+        }
+    }
+}

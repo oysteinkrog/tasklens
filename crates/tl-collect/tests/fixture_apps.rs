@@ -826,3 +826,161 @@ fn group_key_stable() {
         ]
     );
 }
+
+// ---- App id from app.slice unit names (E05-011) ----
+
+use tl_collect::apps::cgroup_app::{
+    AppSliceScan, AppUnitKind, is_not_app, parse_app_unit, scan_app_slice,
+};
+use tl_collect::proc::cgroup::CgroupRoot;
+use tl_collect::proc::meta::ReadBufs;
+
+fn pair(a: &str, b: &str) -> Option<(Arc<str>, Arc<str>)> {
+    Some((Arc::from(a), Arc::from(b)))
+}
+
+#[test]
+fn app_unit_kde_service_unescaped() {
+    let id = parse_app_unit("app-chrome\\x2dwork@00bca6.service").expect("parses");
+    assert_eq!(&*id.app_id, "chrome-work");
+    assert_eq!(id.kind, AppUnitKind::KdeService);
+    assert_eq!(id.alt, None);
+    assert!(!id.autostart);
+}
+
+#[test]
+fn app_unit_scope_with_launcher() {
+    let id = parse_app_unit("app-gnome-org.gnome.Nautilus-777.scope").expect("parses");
+    assert_eq!(&*id.app_id, "gnome-org.gnome.Nautilus");
+    assert_eq!(id.alt, pair("gnome", "org.gnome.Nautilus"));
+    assert_eq!(id.kind, AppUnitKind::Scope);
+    // An `@<instance>` part is removed before the split.
+    let id = parse_app_unit("app-kde-org.kde.dolphin@x-9.scope").expect("parses");
+    assert_eq!(&*id.app_id, "kde-org.kde.dolphin");
+    assert_eq!(id.alt, pair("kde", "org.kde.dolphin"));
+}
+
+#[test]
+fn app_unit_scope_without_launcher() {
+    let id = parse_app_unit("app-org.kde.konsole-12345.scope").expect("parses");
+    assert_eq!(&*id.app_id, "org.kde.konsole");
+    assert_eq!(id.alt, None);
+    assert_eq!(id.kind, AppUnitKind::Scope);
+    assert_eq!(parse_app_unit("app-konsole.scope"), None);
+}
+
+#[test]
+fn app_unit_flatpak() {
+    let id = parse_app_unit("flatpak-org.mozilla.Thunderbird-4321.scope").expect("parses");
+    assert_eq!(&*id.app_id, "org.mozilla.Thunderbird");
+    assert_eq!(id.kind, AppUnitKind::Flatpak);
+}
+
+#[test]
+fn app_unit_snap() {
+    let id = parse_app_unit("snap.code.code-0f1e.scope").expect("parses");
+    assert_eq!(&*id.app_id, "code_code");
+    assert_eq!(id.kind, AppUnitKind::Snap);
+    let id =
+        parse_app_unit("snap.snap-store.snap-store-0e3a6b1c-2f4d-4a5b-9c8d-7e6f5a4b3c2d.scope")
+            .expect("parses");
+    assert_eq!(&*id.app_id, "snap-store_snap-store");
+}
+
+#[test]
+fn app_unit_dbus() {
+    let id = parse_app_unit("dbus-:1.2-org.kde.kded6@0.service").expect("parses");
+    assert_eq!(&*id.app_id, "org.kde.kded6");
+    assert_eq!(id.kind, AppUnitKind::DbusActivated);
+}
+
+#[test]
+fn app_unit_autostart() {
+    let id = parse_app_unit("app-org.kde.kalendarac@autostart.service").expect("parses");
+    assert_eq!(&*id.app_id, "org.kde.kalendarac");
+    assert!(id.autostart);
+}
+
+#[test]
+fn not_app_units() {
+    for unit in [
+        "dconf.service",
+        "obex.service",
+        "dbus.socket",
+        "frankenterm-mux.service",
+        "run-u12.scope",
+    ] {
+        assert!(is_not_app(unit), "{unit}");
+    }
+    for unit in [
+        "app-firefox@3a1b.service",
+        "flatpak-org.mozilla.Thunderbird-4321.scope",
+        "dbus-:1.2-org.kde.kded6@0.service",
+        "snap.code.code-0f1e.scope",
+    ] {
+        assert!(!is_not_app(unit), "{unit}");
+    }
+    assert_eq!(parse_app_unit("frankenterm-mux.service"), None);
+}
+
+#[test]
+fn scan_app_slice_fixture() {
+    let sys = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/process-edge/sys");
+    let cg = CgroupRoot::open(&sys).expect("open cgroup root");
+    let mut bufs = ReadBufs::default();
+    let mut scan = AppSliceScan::default();
+    scan_app_slice(&cg, 1000, &mut bufs, &mut scan);
+    let slice = "user.slice/user-1000.slice/user@1000.service/app.slice/";
+    let got: Vec<(&str, &str, Vec<u32>)> = scan
+        .units
+        .iter()
+        .map(|u| {
+            let mut pids = u.pids.to_vec();
+            pids.sort_unstable();
+            (
+                u.rel.strip_prefix(slice).expect("in app.slice"),
+                &*u.id.app_id,
+                pids,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                "app-chrome\\x2dwork@00bca6.service",
+                "chrome-work",
+                vec![5101, 5102]
+            ),
+            ("app-firefox@3a1b.service", "firefox", vec![4201, 4210]),
+            (
+                "app-gnome-org.gnome.Nautilus-777.scope",
+                "gnome-org.gnome.Nautilus",
+                vec![5301]
+            ),
+            (
+                "app-org.kde.kalendarac@autostart.service",
+                "org.kde.kalendarac",
+                vec![5601]
+            ),
+            (
+                "app-org.kde.konsole-12345.scope",
+                "org.kde.konsole",
+                vec![5201]
+            ),
+            (
+                "flatpak-org.mozilla.Thunderbird-4321.scope",
+                "org.mozilla.Thunderbird",
+                vec![5401, 5402]
+            ),
+            ("snap.code.code-0f1e.scope", "code_code", vec![5501]),
+        ]
+    );
+    for u in &scan.units {
+        let meta = fs::metadata(sys.join("fs/cgroup").join(&*u.rel)).expect("unit dir");
+        assert_eq!(u.cgroup_id, meta.ino());
+    }
+    // Another uid has no app.slice in the fixture.
+    scan_app_slice(&cg, 1001, &mut bufs, &mut scan);
+    assert!(scan.units.is_empty());
+}
