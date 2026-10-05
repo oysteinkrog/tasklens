@@ -176,3 +176,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.23 fix 0282f38: health last_ok_ns updates every sample without republishing HEALTH, so the published value lags. Decide if the UI shows last_ok_ns (then publish on change at most 1 Hz).
 - yms.2 resolver: icon cache saved at first end_sweep then every 60 s, no shutdown save (needs an engine shutdown hook). Undecided: owns_window with neither scope id in the index keeps the whole remainder as group id; settle when the KWin window bead lands.
 - hjn.6: worker factories build sources inside cx.spawn_blocking because constructors read sysfs; cpu.rs has no spec or factory yet.
+- hjn.7 disk replug: sampler drops counters of absent disks, so a replugged disk starts with empty flags, not GAP_BEFORE. Accepted: the reducer writes gap samples while present == false (8q0.9 point 5), so the chart still shows the gap. DiskSource::disk_ids() added for tests.
+- MANUAL DESKTOP CHECKS for the validation phase (owner present): y6k.24 real_open_uri_portal (opens a browser); portal OpenFile with a directory fd (does it open the folder?).
+- y6k.24 opener: FileManager1 call failure gives Internal(name) with no xdg-open fallback; consider falling back.
