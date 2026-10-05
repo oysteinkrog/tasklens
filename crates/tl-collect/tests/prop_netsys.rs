@@ -46,6 +46,13 @@ proptest! {
     }
 }
 
+proptest! {
+    #[test]
+    fn prop_os_release_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=8192)) {
+        let _ = tl_collect::inventory::os_release::parse_os_release(&bytes);
+    }
+}
+
 // == gpu_drm (E06-A3) ==
 
 proptest! {
