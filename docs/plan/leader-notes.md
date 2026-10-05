@@ -187,3 +187,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.1: after dropping the engine handle, 2 extra threads (blocking-1, async-io) remain, process-wide from zbus/async-io via the logind worker. E09-A2's hard thread assert must allow for them.
 - ndy.14: one early run saw an extra fd in the fake probe before Hello; unconfirmed. Ties in with the fd-leak investigation.
 - yms.26 sweep gate (U-10): 35 ms on the 2,000-pid fixture against 15 ms; live /proc 34 us per process (992 procs 33.9 ms, near the 3.5% Processes-tab budget). Syscalls are 80%. Measuring fewer-files options before deciding.
+- Socket map optimisation (R-287): skip pids whose /proc/<pid>/fd st_size is unchanged since the last rebuild; full rebuild every 10 s.

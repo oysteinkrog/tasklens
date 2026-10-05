@@ -2374,7 +2374,7 @@ PLAN.md section 3 lists sources measured on this machine. MAGPIE section 7 recor
 ### Verification
 
 - Fixture tests per source (ADR-013).
-- Criterion bench `tl-collect/benches/sweep.rs`: a sweep of the `owner-desktop` fixture's processes scaled to 2,000 entries runs in ≤ 15 ms on this machine.
+- Criterion bench `tl-collect/benches/sweep.rs`: a sweep of the `owner-desktop` fixture's processes scaled to 2,000 entries runs in ≤ 20 ms on this machine with the default columns (R-286).
 - Real-system test: a process of another user shows `Restricted` for I/O, not zero.
 
 ---

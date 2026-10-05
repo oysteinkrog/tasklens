@@ -1823,6 +1823,35 @@ children. `kwin_wayland` is also added to `SESSION_NAMES` as a second safety net
 `CpuFlags` in the cpuinfo parser (hx1.17) uses `bitflags`, already in the graph through tl-model and tl-engine.
 ADR-001 row and `check_deps.rs` updated.
 
+### R-286 Process sweep reads fewer files per process; the 15 ms fixture gate becomes 20 ms (U-10 settled)
+
+- Every per-process file is opened relative to the `/proc` dirfd as `"<pid>/<file>"`. The pid directory is no
+  longer opened.
+- Each sweep reads `stat` and `statm` for every pid. `RssAnon` = (statm resident − statm shared) × page size,
+  `rss_bytes` = statm resident, threads from stat field 20, commit and vsize from statm.
+- `status` is read for a pid when a status-only field is demanded (per-process Swap, peak RSS, peak VmSize,
+  CPU affinity), and otherwise for one tenth of the pids each sweep (pid % 10 == sweep % 10), so those fields
+  and the real uid are at most 10 s old. The real uid comes from the meta cache, never from `fstat` (which
+  gives the effective uid, or root for non-dumpable processes).
+- `io` is read when any I/O or disk column is demanded, or history recording is on. A column turned on later
+  shows WarmingUp for one interval.
+- A field filled from an older read keeps its value and its validity. No new validity state is added.
+- Gates: the Criterion bench `tl-collect/benches/sweep.rs` on the 2,000-pid scaled fixture, default columns
+  (no Swap, no I/O), must run in ≤ 20 ms. The binding product gate stays ADR-014's real-engine collection cost
+  of ≤ 3.5% of one core with the Processes tab visible on this machine.
+- Basis: yms.26 measured on this machine: baseline 30.4 ms fixture and 34.7 µs per live process (≈ 69 ms at
+  2,000); stat + statm only 16.1 ms fixture and 16.8 µs live; status costs 7.7 µs, io 3 µs and the pid dir open
+  4.7 µs per live process. The RssAnon identity matched status exactly on 20 live processes. 15 ms for 2,000
+  live processes would need 7.5 µs per process, below the cost of two file reads [measured].
+- Edits: ARCHITECTURE ADR-016 verification line; bead yms.26 implements it in `proc/sweep.rs` with tests.
+
+### R-287 Socket inode map rebuild target is 40 ms (U-23 settled)
+
+The socket-to-pid map is rebuilt every 2 s while demanded (ADR-016 table). Measured on this machine: 33 to 36 ms
+per rebuild over about 11,800 fds, almost all of it one `readlinkat` per fd (hx1.7). The target becomes ≤ 40 ms,
+which is under 2% of one core while the Connections view or a network column is shown. Skipping pids whose
+`fd` directory size (R-268) has not changed is a later optimisation, logged in leader notes.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
@@ -2237,7 +2266,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-7 | Bundled Noto Sans static faces contain `tnum` and load under zed#61660; Inter is the alternative | ADR-009, open question 5 |
 | U-8 | Exact gpui-kit `ThemeColor` token names match ADR-009's mapping | ADR-009, open question 11. Verified by tasklens-lgw.6: all mapped names exist in gpui-kit 0.7.0, no substitutions; `list_head` stays at the kit default (R-274). |
 | U-9 | The zed#64499 patch outline fixes the frame stall | ADR-010, open question 12 |
-| U-10 | Collection cost gates: 2% (Performance tab) and 3.5% (Processes tab) are reachable; 15 ms sweep for 2,000 processes | ADR-014, ADR-016 |
+| U-10 | (settled by R-286) Collection cost gates: 2% (Performance tab) and 3.5% (Processes tab) are reachable; 15 ms sweep for 2,000 processes | ADR-014, ADR-016 |
 | U-11 | History budget: about 200 changed processes per second, 15-byte patches, 3:1 zstd, about 30 MB per 6 h | ADR-012 |
 | U-12 | NVML per-process utilization (`nvmlDeviceGetProcessUtilization`) works unprivileged on driver 615 | r2 PROC-023 [now PROC-033], r2 conflicts 9 |
 | U-13 | KWin 6.7.5 scripts cannot receive D-Bus signals, so commands must be one-shot scripts (kdotool pattern) | r2 PROC-059 [now PROC-052], conflicts 8 |
@@ -2250,7 +2279,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-20 | zswap pool size is readable only through debugfs | r2 PROC-010 [now PROC-012] |
 | U-21 | Interrupt time is never also in task `stime` when `CONFIG_IRQ_TIME_ACCOUNTING=y` (verified set here; the double-count claim is inferred) | add PROC-100 [now PROC-012] |
 | U-22 | Process history store estimate (about 100 active processes × 18 B × 21,600 s) | r2 PROC-074 [now PROC-086] |
-| U-23 | socket inode map rebuild under 20 ms on this machine | SYS-032 [now SYS-030] |
+| U-23 | (settled by R-287) socket inode map rebuild under 20 ms on this machine | SYS-032 [now SYS-030] |
 | U-24 | `OOMScoreAdjust=-900` is accepted for a user unit | r2 PROC-081 [now PROC-097] |
 | U-25 | udisks2 2.10 NVMe module is present for NVMe SMART | PERF-046 [now PERF-051] |
 | U-26 | The sysfs DRM connector `enabled` file is wrong on NVIDIA 615 (withdrawn claim; KScreen agreed with sysfs during the check; confirm whether all three monitors were on) | PERF-065 [now PERF-072], PERF addendum |
