@@ -79,6 +79,8 @@ pub(crate) enum HistoryMsg {
     Dropped { total: u64 },
     /// Test seam: runs on the blocking pool with the worker's mode, in message order.
     #[cfg(test)]
+    // Only `tests/lab_history.rs` sends it.
+    #[allow(dead_code)]
     Inspect(Box<dyn FnOnce(&Mode) + Send>),
 }
 
@@ -172,6 +174,8 @@ pub(crate) struct HistoryWorkerConfig {
 }
 
 /// What the worker holds. E30-014 adds `Recording(RecordingState)` (R-262).
+// One `Mode` per worker, moved into each job by value; the move of about 550 bytes is cheap.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Mode {
     Off,
     Rolling(RollingWindow),
