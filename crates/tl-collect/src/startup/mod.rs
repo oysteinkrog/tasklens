@@ -1,6 +1,7 @@
 //! Startup entries: XDG autostart, systemd user units, Plasma scripts, impact, watches.
 pub mod autostart;
 pub mod impact;
+pub mod plasma_scripts;
 pub mod user_units;
 
 use std::sync::Arc;
