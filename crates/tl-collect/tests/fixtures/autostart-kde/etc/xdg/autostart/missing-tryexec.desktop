@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Missing Program
+Exec=/nonexistent/bin --run
+TryExec=/nonexistent/bin

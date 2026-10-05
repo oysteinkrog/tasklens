@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Gnome Only Panel
+Exec=gnome-only-panel
+OnlyShowIn=GNOME;

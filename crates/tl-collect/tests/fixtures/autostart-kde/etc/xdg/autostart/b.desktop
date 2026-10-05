@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Bravo One
+Exec="/opt/bravo tools/bravo" --start

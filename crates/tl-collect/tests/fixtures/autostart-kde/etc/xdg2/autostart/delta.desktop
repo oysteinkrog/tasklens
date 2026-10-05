@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Exec=delta-sync
+X-KDE-autostart-phase=2
