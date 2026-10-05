@@ -228,13 +228,13 @@ pub async fn run_with<L: ProbeLink>(
 
     let mut iv = interval(cx.now(), PERIOD);
     iv.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // Commands queued before this generation started are not run.
-    let mut last_seq = io
-        .control
-        .borrow_and_clone()
-        .commands
-        .last()
-        .map_or(0, |c| c.seq);
+    // R-276: resume after the last command a generation started. If it never finished, it
+    // was a `RefreshNow` whose sample failed; it is skipped without a message.
+    let progress = Arc::clone(&io.control.borrow_and_clone().progress);
+    let mut last_seq = progress.started(SourceId::GpuNvidia);
+    if last_seq > progress.done(SourceId::GpuNvidia) {
+        progress.set_done(SourceId::GpuNvidia, last_seq);
+    }
 
     loop {
         sleep_until(iv.deadline()).await;
@@ -246,11 +246,21 @@ pub async fn run_with<L: ProbeLink>(
 
         let (totals, processes) = wanted(&io.demand.borrow_and_clone());
         let control = io.control.borrow_and_clone();
-        let forced = control.commands.iter().any(|c| {
-            c.seq > last_seq
-                && c.target == SourceId::GpuNvidia
-                && c.command == WorkerCommand::RefreshNow
-        });
+        // The newest `RefreshNow`, done once this turn's sample is sent. The worker has no
+        // other command, so any other one is done at once.
+        let mut pending_done = None;
+        for queued in control.commands.iter().filter(|c| c.seq > last_seq) {
+            if queued.target != SourceId::GpuNvidia {
+                continue;
+            }
+            progress.set_started(SourceId::GpuNvidia, queued.seq);
+            if queued.command == WorkerCommand::RefreshNow || pending_done.is_some() {
+                pending_done = Some(queued.seq);
+            } else {
+                progress.set_done(SourceId::GpuNvidia, queued.seq);
+            }
+        }
+        let forced = pending_done.is_some();
         if let Some(newest) = control.commands.last() {
             last_seq = last_seq.max(newest.seq);
         }
@@ -290,6 +300,9 @@ pub async fn run_with<L: ProbeLink>(
                 link.shutdown();
                 return stop;
             }
+        }
+        if let Some(seq) = pending_done {
+            progress.set_done(SourceId::GpuNvidia, seq);
         }
     }
 }
@@ -741,9 +754,19 @@ mod tests {
 
     impl Rig {
         fn start(installed: bool, hello: Hello, rows: Rows, sample_err: bool, d: Demand) -> Rig {
-            Self::start_with(installed, hello, rows, sample_err, d, None, fresh_once())
+            Self::start_with(
+                installed,
+                hello,
+                rows,
+                sample_err,
+                d,
+                None,
+                fresh_once(),
+                WorkerControl::default(),
+            )
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn start_with(
             installed: bool,
             hello: Hello,
@@ -752,12 +775,13 @@ mod tests {
             d: Demand,
             api: Option<ApiVersions>,
             api_once: &'static AtomicBool,
+            initial: WorkerControl,
         ) -> Rig {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
             let (demand, demand_rx) = watch::channel(d);
             let (_settings_tx, settings) = watch::channel(EngineSettings::default());
-            let (control, control_rx) = watch::channel(WorkerControl::default());
+            let (control, control_rx) = watch::channel(initial);
             let io = WorkerIo::new(
                 updates,
                 demand_rx,
@@ -1036,6 +1060,57 @@ mod tests {
         assert_eq!(gpu_samples(&rig.drain()).len(), 1);
     }
 
+    fn refresh(seq: u64) -> QueuedCommand {
+        QueuedCommand {
+            seq,
+            target: SourceId::GpuNvidia,
+            command: WorkerCommand::RefreshNow,
+        }
+    }
+
+    /// R-276: a generation resumes after `started`. A `RefreshNow` that was running when the
+    /// last generation died is skipped without a message; one queued during the restart runs.
+    #[test]
+    fn worker_refresh_now_progress_after_restart() {
+        let progress = Arc::new(crate::source::CommandProgress::default());
+        progress.set_started(SourceId::GpuNvidia, 3);
+        progress.set_done(SourceId::GpuNvidia, 2);
+        let initial = WorkerControl {
+            commands: Arc::from([refresh(2), refresh(3), refresh(4)]),
+            progress: Arc::clone(&progress),
+            ..WorkerControl::default()
+        };
+        let mut rig = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            false,
+            Demand::default(),
+            None,
+            fresh_once(),
+            initial,
+        );
+        let got = rig.drain();
+        assert_eq!(progress.done(SourceId::GpuNvidia), 3, "3 is skipped");
+        assert!(
+            !got.iter().any(|u| matches!(
+                u,
+                SourceUpdate::Health {
+                    state: SourceState::Failed,
+                    ..
+                }
+            )),
+            "no message for a skipped RefreshNow: {got:?}"
+        );
+        for _ in 0..3 {
+            rig.advance(PERIOD);
+        }
+        assert_eq!(rig.calls.samples(), vec![false], "4 runs once");
+        assert_eq!(progress.started(SourceId::GpuNvidia), 4);
+        assert_eq!(progress.done(SourceId::GpuNvidia), 4);
+        assert_eq!(gpu_samples(&rig.drain()).len(), 1);
+    }
+
     #[test]
     fn worker_sample_error_restarts() {
         let mut rig = Rig::start(true, Hello::Ready, Rows::Supported, true, visible_gpus());
@@ -1080,6 +1155,7 @@ mod tests {
             visible_gpus(),
             Some(api_fixture()),
             once,
+            WorkerControl::default(),
         );
         let got = rig.drain();
         let api: Vec<usize> = got
@@ -1109,6 +1185,7 @@ mod tests {
             visible_gpus(),
             Some(api_fixture()),
             once,
+            WorkerControl::default(),
         );
         again.advance(PERIOD);
         let got = again.drain();

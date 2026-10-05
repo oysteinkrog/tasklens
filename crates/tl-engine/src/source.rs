@@ -116,11 +116,11 @@ impl CommandProgress {
         self.done[id.index()].load(Ordering::Acquire)
     }
 
-    fn set_started(&self, id: SourceId, seq: u64) {
+    pub(crate) fn set_started(&self, id: SourceId, seq: u64) {
         self.started[id.index()].store(seq, Ordering::Release);
     }
 
-    fn set_done(&self, id: SourceId, seq: u64) {
+    pub(crate) fn set_done(&self, id: SourceId, seq: u64) {
         self.done[id.index()].store(seq, Ordering::Release);
     }
 }
