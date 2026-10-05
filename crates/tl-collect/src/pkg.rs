@@ -49,13 +49,15 @@ const POLL: Duration = Duration::from_millis(5);
 /// Set once the missing pacman binary was logged, so the log line appears only once.
 static PACMAN_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// Owner of each queried path: `Some(package name)` or `None` when no package owns it.
+pub type PathOwners = Vec<(PathBuf, Option<Arc<str>>)>;
+
 /// Backend that maps paths to owning packages. Arch is the only v1 backend; `dpkg -S` and
 /// `rpm -qf` come in P4 behind the same trait.
 pub trait PkgBackend: Send {
     /// One batched owner query. Returns (path, Some(name)) for owned paths, (path, None) for
     /// unowned ones.
-    fn owners(&mut self, paths: &[&Path])
-    -> Result<Vec<(PathBuf, Option<Arc<str>>)>, CollectError>;
+    fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError>;
     /// Reads the package's metadata.
     fn info(&mut self, name: &str) -> Result<Option<PackageInfo>, CollectError>;
     /// PROC-078 integrity check.
@@ -87,10 +89,7 @@ impl Default for Pacman {
 }
 
 impl PkgBackend for Pacman {
-    fn owners(
-        &mut self,
-        paths: &[&Path],
-    ) -> Result<Vec<(PathBuf, Option<Arc<str>>)>, CollectError> {
+    fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -167,7 +166,7 @@ impl PkgBackend for Pacman {
 
 /// Parses `pacman -Qo` stdout. Each line is `<path> is owned by <name> <version>`. A requested
 /// path that no line names is `(path, None)`. The result keeps the order of `paths`.
-pub fn parse_qo(stdout: &[u8], paths: &[&Path]) -> Vec<(PathBuf, Option<Arc<str>>)> {
+pub fn parse_qo(stdout: &[u8], paths: &[&Path]) -> PathOwners {
     const OWNED_BY: &[u8] = b" is owned by ";
     let mut owned: FxHashMap<&[u8], Arc<str>> = FxHashMap::default();
     let mut name = String::new();
@@ -537,10 +536,7 @@ mod tests {
     }
 
     impl PkgBackend for Fake {
-        fn owners(
-            &mut self,
-            paths: &[&Path],
-        ) -> Result<Vec<(PathBuf, Option<Arc<str>>)>, CollectError> {
+        fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
             self.seen.lock().unwrap().push(paths.len());
             Ok(paths
                 .iter()
