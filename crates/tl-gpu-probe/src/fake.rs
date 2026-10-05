@@ -4,15 +4,21 @@
 //! loop, so the framing path is the real one. Each script makes the probe reply like a one-GPU
 //! machine, hang, crash or break the protocol at a set point. Built only with the `fake` feature;
 //! release builds and the packaged binary leave it out.
+//!
+//! `--api-versions` in a fake build answers from [`API_VERSIONS_ENV`] when it is set: `1` writes
+//! one fixed device, `sleep` hangs for 60 s, `crash` ends with `SIGSEGV` (E13-010).
 
 use std::io::Write;
-use std::process::exit;
+use std::process::{ExitCode, exit};
 use std::thread::sleep;
 use std::time::Duration;
 
 use rustix::process::{Signal, getpid, getppid, kill_process};
-use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
-use tl_model::wire::MAX_PROBE_FRAME;
+use tl_model::gpu_proto::{
+    ApiVersions, GpuApiVersions, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure,
+    Reading,
+};
+use tl_model::wire::{MAX_PROBE_FRAME, write_frame};
 
 use crate::sampler::{Backend, HelloInfo, InitFailed, PROTO, now_boottime_ns, open_fd};
 
@@ -29,6 +35,12 @@ pub const SCRIPTS: &[&str] = &[
     "exit-after-3",
     "proto-mismatch",
 ];
+
+/// Selects the fake `--api-versions` reply: `1`, `sleep` or `crash`.
+pub const API_VERSIONS_ENV: &str = "TL_FAKE_API_VERSIONS";
+
+/// How long the `sleep` reply hangs. The engine's deadline is 5 s.
+const API_VERSIONS_SLEEP: Duration = Duration::from_secs(60);
 
 const UUID: [u8; 16] = [0x42; 16];
 const GIB: u64 = 1 << 30;
@@ -210,6 +222,48 @@ impl Backend for FakeBackend {
     }
 }
 
+/// The fake `--api-versions` reply, or `None` when [`API_VERSIONS_ENV`] is not set and the real
+/// mode should run. An unknown value prints the accepted ones and exits 2.
+pub fn api_versions_from_env() -> Option<ExitCode> {
+    let value = std::env::var_os(API_VERSIONS_ENV)?;
+    Some(match value.to_str() {
+        Some("1") => {
+            let mut out = std::io::stdout().lock();
+            let written = write_frame(&mut out, &fake_api_versions(), MAX_PROBE_FRAME)
+                .map_err(|e| e.to_string())
+                .and_then(|()| out.flush().map_err(|e| e.to_string()));
+            match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tl-gpu-probe: writing the fake api-versions frame failed: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("sleep") => {
+            sleep(API_VERSIONS_SLEEP);
+            ExitCode::SUCCESS
+        }
+        Some("crash") => segv(),
+        _ => {
+            eprintln!("unknown {API_VERSIONS_ENV} value {value:?}; values: 1, sleep, crash");
+            ExitCode::from(2)
+        }
+    })
+}
+
+/// The one device the fake `--api-versions` reports, on the fake GPU's PCI bus ID.
+fn fake_api_versions() -> ApiVersions {
+    ApiVersions {
+        devices: vec![GpuApiVersions {
+            pci_bus_id: "00000000:2D:00.0".to_owned(),
+            vulkan_api: Some("1.4.312".to_owned()),
+            vulkan_driver: Some("NVIDIA 615.71.09".to_owned()),
+            opengl: Some("4.6.0 NVIDIA 615.71.09".to_owned()),
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +276,15 @@ mod tests {
             assert_eq!(b.samples, 0);
         }
         assert!(FakeBackend::try_from_script("bogus").is_none());
+    }
+
+    #[test]
+    fn fake_api_versions_round_trips() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &fake_api_versions(), MAX_PROBE_FRAME).expect("write");
+        let got: ApiVersions =
+            tl_model::wire::read_frame(&mut &buf[..], MAX_PROBE_FRAME).expect("read");
+        assert_eq!(got, fake_api_versions());
+        assert_eq!(got.devices[0].pci_bus_id, "00000000:2D:00.0");
     }
 }

@@ -10,12 +10,17 @@
 //! `Unsupported`, and a protocol version mismatch gives `Failed`. In those cases the worker
 //! parks and never retries. Deadlines, crashes, `NoPermission` and `Other` are `Err`.
 //!
+//! Once per process, the first generation that reaches `GpuInfo` runs `tl-gpu-probe
+//! --api-versions` (E13-010) and sends `GpuApiVersions` before the first sample. A failure is
+//! logged at info and not retried; the UI shows `Unknown`.
+//!
 //! The reducer maps pids and assigns `DeviceIdx`. The probe is not restarted after resume, so
 //! `reset_generation` is ignored. Device names are logged at debug only; pids never.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use asupersync::channel::mpsc;
@@ -25,7 +30,9 @@ use asupersync::time::{MissedTickBehavior, interval, sleep, sleep_until};
 use asupersync::{Cx, Outcome};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
-use tl_model::gpu_proto::{GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading};
+use tl_model::gpu_proto::{
+    ApiVersions, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, Reading,
+};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
 use tl_model::system::{GpuTotals, Metric};
@@ -34,7 +41,7 @@ use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::gpu::client::{HelloInfo, HelloOutcome, ProbeClient, ProbeResponseSample};
-use crate::gpu::{NOT_INSTALLED, ProbeError, VERSION_MISMATCH};
+use crate::gpu::{API_VERSIONS_DEADLINE, NOT_INSTALLED, ProbeError, VERSION_MISMATCH};
 use crate::source::{WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{
@@ -52,6 +59,10 @@ pub const PARK_RECHECK: Duration = Duration::from_secs(60);
 /// the identity (R-155 item 8).
 const DEVICE_PLACEHOLDER: DeviceIdx = DeviceIdx(u16::MAX);
 
+/// Set by the first generation that runs `--api-versions`. `io` has no generation counter, and
+/// the versions do not change while the app runs, so a restart does not run it again.
+static ONCE_PER_PROCESS: AtomicBool = AtomicBool::new(false);
+
 /// What the worker needs from a probe connection. [`ProbeClient`] is the real one; tests
 /// inject a fake.
 pub trait ProbeLink: Sized + Send + 'static {
@@ -63,6 +74,10 @@ pub trait ProbeLink: Sized + Send + 'static {
 
     /// One `Sample` request. Runs on the blocking pool. On `Err` the child is already gone.
     fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError>;
+
+    /// Runs `probe --api-versions` in its own process under [`API_VERSIONS_DEADLINE`]. Runs on
+    /// the blocking pool.
+    fn api_versions(&self, probe: &Path) -> Result<ApiVersions, ProbeError>;
 
     /// Asks the child to exit, then kills and reaps it. Blocks for at most about 200 ms.
     fn shutdown(self);
@@ -90,6 +105,10 @@ impl ProbeLink for ProbeClient {
 
     fn sample(&mut self, processes: bool) -> Result<ProbeResponseSample, ProbeError> {
         ProbeClient::sample(self, processes)
+    }
+
+    fn api_versions(&self, probe: &Path) -> Result<ApiVersions, ProbeError> {
+        crate::gpu::client::api_versions(probe, API_VERSIONS_DEADLINE)
     }
 
     fn shutdown(self) {
@@ -122,21 +141,24 @@ pub async fn run(
     _cfg: Arc<EngineConfig>,
     locate: fn() -> Option<PathBuf>,
 ) -> Outcome<(), WorkerError> {
-    run_with::<ProbeClient>(cx, io, locate, ()).await
+    run_with::<ProbeClient>(cx, io, locate, (), &ONCE_PER_PROCESS).await
 }
 
-/// The worker body over any [`ProbeLink`]. `locate` is called once.
+/// The worker body over any [`ProbeLink`]. `locate` is called once. `--api-versions` runs only
+/// in the generation that flips `api_once` from false to true.
 pub async fn run_with<L: ProbeLink>(
     cx: Cx,
     io: WorkerIo,
     locate: impl FnOnce() -> Option<PathBuf>,
     starter: L::Starter,
+    api_once: &'static AtomicBool,
 ) -> Outcome<(), WorkerError> {
     let Some(probe) = locate() else {
         return park(&cx, &io, SourceState::Unsupported, NOT_INSTALLED.into()).await;
     };
 
-    let started = match blocking(&cx, move || L::start(starter, &probe)).await {
+    let start_probe = probe.clone();
+    let started = match blocking(&cx, move || L::start(starter, &start_probe)).await {
         Ok(started) => started,
         Err(stop) => return stop,
     };
@@ -178,6 +200,29 @@ pub async fn run_with<L: ProbeLink>(
         if let Some(stop) = send(&cx, &io, update).await {
             link.shutdown();
             return stop;
+        }
+    }
+
+    if !api_once.swap(true, Ordering::SeqCst) {
+        // On cancel the closure, and with it the link, is dropped, which kills the child.
+        let (back, result) = match blocking(&cx, move || {
+            let result = link.api_versions(&probe);
+            (link, result)
+        })
+        .await
+        {
+            Ok(done) => done,
+            Err(stop) => return stop,
+        };
+        link = back;
+        match result {
+            Ok(versions) => {
+                if let Some(stop) = send(&cx, &io, SourceUpdate::GpuApiVersions(versions)).await {
+                    link.shutdown();
+                    return stop;
+                }
+            }
+            Err(e) => tracing::info!(target: "tasklens::probe", %e, "api versions unavailable"),
         }
     }
 
@@ -441,11 +486,12 @@ mod tests {
     use super::*;
 
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::AtomicU32;
 
     use asupersync::channel::watch;
     use asupersync::types::Budget;
     use asupersync::{LabConfig, LabRuntime};
+    use tl_model::gpu_proto::GpuApiVersions;
     use tl_model::settings::EngineSettings;
 
     use crate::source::{QueuedCommand, WorkerControl};
@@ -579,6 +625,7 @@ mod tests {
     struct Calls {
         starts: AtomicU32,
         shutdowns: AtomicU32,
+        api_versions: AtomicU32,
         /// The `processes` flag of each sample request.
         samples: Mutex<Vec<bool>>,
     }
@@ -608,12 +655,15 @@ mod tests {
         hello: Hello,
         rows: Rows,
         sample_err: bool,
+        /// `None` makes `api_versions` fail.
+        api: Option<ApiVersions>,
     }
 
     struct FakeLink {
         calls: Arc<Calls>,
         rows: Rows,
         sample_err: bool,
+        api: Option<ApiVersions>,
     }
 
     impl ProbeLink for FakeLink {
@@ -632,6 +682,7 @@ mod tests {
                 calls: fake.calls,
                 rows: fake.rows,
                 sample_err: fake.sample_err,
+                api: fake.api,
             };
             Ok((link, hello))
         }
@@ -663,6 +714,13 @@ mod tests {
             })
         }
 
+        fn api_versions(&self, _probe: &Path) -> Result<ApiVersions, ProbeError> {
+            self.calls.api_versions.fetch_add(1, Ordering::SeqCst);
+            self.api
+                .clone()
+                .ok_or(ProbeError::Exited("signal 11".into()))
+        }
+
         fn shutdown(self) {
             self.calls.shutdowns.fetch_add(1, Ordering::SeqCst);
         }
@@ -683,6 +741,18 @@ mod tests {
 
     impl Rig {
         fn start(installed: bool, hello: Hello, rows: Rows, sample_err: bool, d: Demand) -> Rig {
+            Self::start_with(installed, hello, rows, sample_err, d, None, fresh_once())
+        }
+
+        fn start_with(
+            installed: bool,
+            hello: Hello,
+            rows: Rows,
+            sample_err: bool,
+            d: Demand,
+            api: Option<ApiVersions>,
+            api_once: &'static AtomicBool,
+        ) -> Rig {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
             let (demand, demand_rx) = watch::channel(d);
@@ -701,6 +771,7 @@ mod tests {
                 hello,
                 rows,
                 sample_err,
+                api,
             };
             let locates = Arc::new(AtomicU32::new(0));
             let counter = Arc::clone(&locates);
@@ -715,7 +786,7 @@ mod tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let outcome = run_with::<FakeLink>(cx, io, locate, fake).await;
+                    let outcome = run_with::<FakeLink>(cx, io, locate, fake, api_once).await;
                     *sink.lock().expect("slot lock") = Some(outcome);
                 })
                 .expect("task is created");
@@ -755,6 +826,22 @@ mod tests {
 
         fn take_outcome(&self) -> Option<Outcome<(), WorkerError>> {
             self.out.lock().expect("slot lock").take()
+        }
+    }
+
+    /// A flag of its own per test, so parallel tests do not share the process-wide one.
+    fn fresh_once() -> &'static AtomicBool {
+        Box::leak(Box::new(AtomicBool::new(false)))
+    }
+
+    fn api_fixture() -> ApiVersions {
+        ApiVersions {
+            devices: vec![GpuApiVersions {
+                pci_bus_id: "00000000:01:00.0".into(),
+                vulkan_api: Some("1.4.312".into()),
+                vulkan_driver: Some("NVIDIA 615.71.09".into()),
+                opengl: Some("4.6.0 NVIDIA 615.71.09".into()),
+            }],
         }
     }
 
@@ -980,5 +1067,75 @@ mod tests {
         assert_eq!(rig.calls.shutdowns.load(Ordering::SeqCst), 1);
         let report = rig.lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn worker_api_versions_once() {
+        let once = fresh_once();
+        let mut rig = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            false,
+            visible_gpus(),
+            Some(api_fixture()),
+            once,
+        );
+        let got = rig.drain();
+        let api: Vec<usize> = got
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| matches!(u, SourceUpdate::GpuApiVersions(v) if *v == api_fixture()))
+            .map(|(i, _)| i)
+            .collect();
+        let first_gpu = got
+            .iter()
+            .position(|u| matches!(u, SourceUpdate::Gpu(_)))
+            .expect("a first sample");
+        assert_eq!(api.len(), 1, "{got:?}");
+        assert!(api[0] < first_gpu, "{got:?}");
+        assert!(
+            matches!(&got[0], SourceUpdate::GpuInfo(_)),
+            "after GpuInfo: {got:?}"
+        );
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
+
+        // A second generation in the same process does not run it again.
+        let mut again = Rig::start_with(
+            true,
+            Hello::Ready,
+            Rows::Supported,
+            false,
+            visible_gpus(),
+            Some(api_fixture()),
+            once,
+        );
+        again.advance(PERIOD);
+        let got = again.drain();
+        assert!(
+            !got.iter()
+                .any(|u| matches!(u, SourceUpdate::GpuApiVersions(_))),
+            "{got:?}"
+        );
+        assert_eq!(gpu_samples(&got).len(), 2, "{got:?}");
+        assert_eq!(again.calls.api_versions.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn worker_api_versions_error_is_quiet() {
+        let mut rig = Rig::start(true, Hello::Ready, Rows::Supported, false, visible_gpus());
+        let got = rig.drain();
+        assert_eq!(rig.calls.api_versions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            got.len(),
+            3,
+            "GpuInfo, Running and the first sample: {got:?}"
+        );
+        assert!(matches!(&got[0], SourceUpdate::GpuInfo(_)), "{got:?}");
+        assert!(is_health(&got[1], SourceState::Running, None), "{got:?}");
+        assert!(matches!(&got[2], SourceUpdate::Gpu(_)), "{got:?}");
+        rig.advance(PERIOD);
+        assert_eq!(gpu_samples(&rig.drain()).len(), 1);
+        assert!(!rig.ended());
     }
 }

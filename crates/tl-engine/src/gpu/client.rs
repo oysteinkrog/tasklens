@@ -9,12 +9,16 @@
 //! The probe is forked on its own long-lived thread, `tl-gpu-spawn`, never on the blocking pool
 //! (R-283). `PR_SET_PDEATHSIG` fires when the forking thread exits, and pool threads retire after
 //! 10 s idle. The thread lives until the client is dropped, after the child is reaped.
+//!
+//! [`api_versions`] runs the one-shot `--api-versions` mode in its own process (E13-010). It
+//! needs no fd 3 and no `pre_exec`, so it is forked from the calling thread.
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
+use std::io::{ErrorKind, Read};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
@@ -25,12 +29,12 @@ use rustix::io::{Errno, dup};
 use rustix::net::sockopt::{Timeout, set_socket_timeout};
 use rustix::time::Timespec;
 use tl_model::gpu_proto::{
-    GPU_PROTO_VERSION, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure, ProbeRequest,
-    ProbeResponse,
+    ApiVersions, GPU_PROTO_VERSION, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure,
+    ProbeRequest, ProbeResponse,
 };
 use tl_model::wire::{MAX_PROBE_FRAME, WireError, read_frame, write_frame};
 
-use super::spawn::{ProbeChild, spawn_probe};
+use super::spawn::{ProbeChild, child_env, spawn_probe};
 use super::{HELLO_DEADLINE, ProbeError, SAMPLE_DEADLINE, SHUTDOWN_GRACE};
 
 /// Name of the thread that forks the probe and stays alive while it runs (R-283).
@@ -41,6 +45,9 @@ const SHUTDOWN_POLL: Duration = Duration::from_millis(10);
 
 /// The smallest receive timeout set for the payload read. Zero would mean "no timeout".
 const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
+
+/// The most `--api-versions` output kept: one frame of [`MAX_PROBE_FRAME`] and its prefix.
+const MAX_API_VERSIONS_OUTPUT: usize = MAX_PROBE_FRAME + 4;
 
 pub struct ProbeClient {
     /// Dropped first: kills and reaps the child if it still runs.
@@ -250,21 +257,116 @@ impl ProbeClient {
         ProbeError::Protocol(text.into())
     }
 
-    /// Sends `SIGKILL` and waits for the child. Returns "status N" or "signal N". A child that
-    /// already exited is only reaped, so its own status is reported.
+    /// [`kill_and_reap`] for the probe child.
     fn kill_and_reap(&mut self) -> Arc<str> {
-        let child = &mut self.child.child;
-        let status = match child.try_wait() {
-            Ok(Some(status)) => Ok(status),
-            _ => {
-                let _ = child.kill();
-                child.wait()
-            }
-        };
-        match status {
-            Ok(status) => status_text(status),
-            Err(e) => format!("wait failed: {e}").into(),
+        kill_and_reap(&mut self.child.child)
+    }
+}
+
+/// Runs `probe --api-versions` and reads its one `ApiVersions` frame from stdout. Blocking.
+///
+/// The whole run, from spawn to exit, is bounded by `deadline`. On a missed deadline, too much
+/// output or any read error the child is killed and reaped before the error is returned. A
+/// non-zero exit or a signal is [`ProbeError::Exited`].
+pub fn api_versions(probe: &Path, deadline: Duration) -> Result<ApiVersions, ProbeError> {
+    let start = Instant::now();
+    let mut child = Command::new(probe)
+        .arg("--api-versions")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .env_clear()
+        .envs(child_env())
+        .spawn()
+        .map_err(|e| ProbeError::Spawn(e.to_string().into()))?;
+    let output = read_api_versions_output(&mut child, start, deadline);
+    let output = match output {
+        Ok(output) => output,
+        Err(e) => {
+            kill_and_reap(&mut child);
+            return Err(e);
         }
+    };
+    let status = wait_until(&mut child, start, deadline)?;
+    if !status.success() {
+        return Err(ProbeError::Exited(status_text(status)));
+    }
+    read_frame::<_, ApiVersions>(&mut &output[..], MAX_PROBE_FRAME)
+        .map_err(|e| ProbeError::Protocol(e.to_string().into()))
+}
+
+/// Reads the child's stdout until EOF, waiting with `poll` for at most the rest of `deadline`.
+/// The caller kills and reaps the child on `Err`.
+fn read_api_versions_output(
+    child: &mut Child,
+    start: Instant,
+    deadline: Duration,
+) -> Result<Vec<u8>, ProbeError> {
+    let Some(mut stdout) = child.stdout.take() else {
+        return Err(ProbeError::Spawn("no stdout pipe".into()));
+    };
+    let mut output = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let Some(left) = remaining(deadline, start.elapsed()) else {
+            return Err(ProbeError::Deadline(deadline));
+        };
+        let mut fds = [PollFd::new(&stdout, PollFlags::IN)];
+        match poll(&mut fds, Some(&timespec(left))) {
+            // Timed out: the next turn sees the deadline as passed.
+            Ok(0) | Err(Errno::INTR) => continue,
+            Ok(_) => {}
+            Err(e) => return Err(ProbeError::Protocol(format!("poll: {e}").into())),
+        }
+        // Readable or hung up, so this read does not block.
+        match stdout.read(&mut chunk) {
+            Ok(0) => return Ok(output),
+            Ok(n) if output.len() + n > MAX_API_VERSIONS_OUTPUT => {
+                return Err(ProbeError::Protocol("api-versions output too large".into()));
+            }
+            Ok(n) => output.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(ProbeError::Protocol(format!("read: {e}").into())),
+        }
+    }
+}
+
+/// Waits for the child to exit within the rest of `deadline`, checking every
+/// [`SHUTDOWN_POLL`]. A child that closed stdout but keeps running is killed at the deadline.
+fn wait_until(
+    child: &mut Child,
+    start: Instant,
+    deadline: Duration,
+) -> Result<ExitStatus, ProbeError> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if remaining(deadline, start.elapsed()).is_none() => {
+                kill_and_reap(child);
+                return Err(ProbeError::Deadline(deadline));
+            }
+            Ok(None) => thread::sleep(SHUTDOWN_POLL),
+            Err(e) => {
+                kill_and_reap(child);
+                return Err(ProbeError::Exited(format!("wait failed: {e}").into()));
+            }
+        }
+    }
+}
+
+/// Sends `SIGKILL` and waits for the child. Returns "status N" or "signal N". A child that
+/// already exited is only reaped, so its own status is reported.
+fn kill_and_reap(child: &mut Child) -> Arc<str> {
+    let status = match child.try_wait() {
+        Ok(Some(status)) => Ok(status),
+        _ => {
+            let _ = child.kill();
+            child.wait()
+        }
+    };
+    match status {
+        Ok(status) => status_text(status),
+        Err(e) => format!("wait failed: {e}").into(),
     }
 }
 
@@ -337,7 +439,194 @@ impl Drop for SpawnThread {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    use tl_model::gpu_proto::GpuApiVersions;
+
     use super::*;
+    use crate::gpu::{API_VERSIONS_DEADLINE, PROBE_ENV};
+
+    /// Serializes the process tests so their timings do not disturb each other.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    /// A directory of small shell scripts under the system temp dir, removed on drop.
+    struct Scripts(PathBuf);
+
+    impl Scripts {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tl-engine-api-versions-{name}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("create temp dir");
+            Self(dir)
+        }
+
+        fn script(&self, name: &str, body: &str) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            path
+        }
+
+        /// A wrapper that runs `probe` with `TL_FAKE_API_VERSIONS=value`, because
+        /// `api_versions` clears the child's environment. `exec` keeps the pid and the status.
+        /// The pid is written to [`Scripts::pid`].
+        fn fake(&self, probe: &Path, value: &str) -> PathBuf {
+            let body = format!(
+                "echo $$ > '{}'\nexport TL_FAKE_API_VERSIONS={value}\nexec '{}' \"$@\"",
+                self.0.join("pid").display(),
+                probe.display()
+            );
+            self.script(&format!("fake-{value}"), &body)
+        }
+    }
+
+    impl Scripts {
+        /// The pid the last [`Scripts::fake`] wrapper ran as.
+        fn pid(&self) -> u32 {
+            let text = fs::read_to_string(self.0.join("pid")).expect("read pid");
+            text.trim().parse().expect("pid")
+        }
+    }
+
+    impl Drop for Scripts {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The probe built with `--features fake`: `$TASKLENS_GPU_PROBE`, else the workspace debug
+    /// build. `None` skips the test with a note.
+    fn fake_probe() -> Option<PathBuf> {
+        let path = std::env::var_os(PROBE_ENV)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/tl-gpu-probe")
+            });
+        let fake = Command::new(&path)
+            .args(["--fake", "no-such-script"])
+            .stderr(Stdio::piped())
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stderr).contains("unknown fake script"));
+        if !fake {
+            eprintln!(
+                "skipped: no fake probe at {} (build it with \
+                 `cargo build -p tl-gpu-probe --features fake`)",
+                path.display()
+            );
+        }
+        fake.then_some(path)
+    }
+
+    /// No `/proc/<pid>` entry, or one that is not a zombie.
+    fn reaped(pid: u32) -> bool {
+        match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => true,
+            Ok(stat) => stat.rsplit_once(") ").map(|(_, rest)| &rest[..1]) != Some("Z"),
+        }
+    }
+
+    #[test]
+    fn api_versions_fake_ok() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(probe) = fake_probe() else { return };
+        let scripts = Scripts::new("ok");
+        let got = api_versions(&scripts.fake(&probe, "1"), API_VERSIONS_DEADLINE).expect("ok");
+        assert_eq!(
+            got.devices,
+            vec![GpuApiVersions {
+                pci_bus_id: "00000000:2D:00.0".to_owned(),
+                vulkan_api: Some("1.4.312".to_owned()),
+                vulkan_driver: Some("NVIDIA 615.71.09".to_owned()),
+                opengl: Some("4.6.0 NVIDIA 615.71.09".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn api_versions_deadline() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(probe) = fake_probe() else { return };
+        let scripts = Scripts::new("deadline");
+        let start = Instant::now();
+        let got = api_versions(&scripts.fake(&probe, "sleep"), API_VERSIONS_DEADLINE);
+        let took = start.elapsed();
+        assert!(matches!(got, Err(ProbeError::Deadline(d)) if d == API_VERSIONS_DEADLINE));
+        assert!(took >= API_VERSIONS_DEADLINE, "{took:?}");
+        assert!(
+            took < API_VERSIONS_DEADLINE + Duration::from_secs(1),
+            "{took:?}"
+        );
+        assert!(reaped(scripts.pid()), "the probe was not reaped");
+    }
+
+    #[test]
+    fn api_versions_crash() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(probe) = fake_probe() else { return };
+        let scripts = Scripts::new("crash");
+        let got = api_versions(&scripts.fake(&probe, "crash"), API_VERSIONS_DEADLINE);
+        assert!(
+            matches!(&got, Err(ProbeError::Exited(text)) if &**text == "signal 11"),
+            "{got:?}"
+        );
+        assert!(reaped(scripts.pid()), "the probe was not reaped");
+    }
+
+    #[test]
+    fn api_versions_nonzero_exit_and_garbage() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("exit");
+        let got = api_versions(&scripts.script("exit3", "exit 3"), API_VERSIONS_DEADLINE);
+        assert!(
+            matches!(&got, Err(ProbeError::Exited(text)) if &**text == "status 3"),
+            "{got:?}"
+        );
+        // Exit 0 without a frame.
+        let got = api_versions(&scripts.script("empty", "exit 0"), API_VERSIONS_DEADLINE);
+        assert!(matches!(got, Err(ProbeError::Protocol(_))), "{got:?}");
+    }
+
+    #[test]
+    fn api_versions_output_too_large_kills() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("large");
+        // Writes zeros without end; the read stops past the cap.
+        let script = scripts.script("zeros", "exec cat /dev/zero");
+        let got = api_versions(&script, API_VERSIONS_DEADLINE);
+        assert!(
+            matches!(&got, Err(ProbeError::Protocol(text))
+                if &**text == "api-versions output too large"),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn api_versions_closed_stdout_still_bounded() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scripts = Scripts::new("closed");
+        // Closes stdout at once, then keeps running.
+        let script = scripts.script("closed", "exec >&-\nexec sleep 30");
+        let deadline = Duration::from_millis(500);
+        let start = Instant::now();
+        let got = api_versions(&script, deadline);
+        assert!(matches!(got, Err(ProbeError::Deadline(_))), "{got:?}");
+        assert!(start.elapsed() < deadline + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn api_versions_missing_binary_is_spawn() {
+        let got = api_versions(
+            Path::new("/nonexistent/tasklens/tl-gpu-probe"),
+            API_VERSIONS_DEADLINE,
+        );
+        assert!(matches!(got, Err(ProbeError::Spawn(_))), "{got:?}");
+    }
 
     #[test]
     fn poll_deadline_math() {

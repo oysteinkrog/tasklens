@@ -68,12 +68,12 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
         Ok(Mode::Sampler { fd }) => sampler::run(fd, nvml::NvmlBackend::new),
-        #[cfg(feature = "api-versions")]
-        Ok(Mode::ApiVersions) => api_versions::run(),
-        #[cfg(not(feature = "api-versions"))]
         Ok(Mode::ApiVersions) => {
-            eprintln!("api-versions not built");
-            ExitCode::from(3)
+            #[cfg(feature = "fake")]
+            if let Some(code) = fake::api_versions_from_env() {
+                return code;
+            }
+            run_api_versions()
         }
         // Built before the loop so an unknown script exits 2 at once.
         #[cfg(feature = "fake")]
@@ -82,6 +82,17 @@ fn main() -> ExitCode {
             sampler::run(fd, move || backend)
         }
     }
+}
+
+#[cfg(feature = "api-versions")]
+fn run_api_versions() -> ExitCode {
+    api_versions::run()
+}
+
+#[cfg(not(feature = "api-versions"))]
+fn run_api_versions() -> ExitCode {
+    eprintln!("api-versions not built");
+    ExitCode::from(3)
 }
 
 #[cfg(test)]
