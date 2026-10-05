@@ -404,6 +404,12 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
+        // The next frame still delivers the requests made by the last frame that drew them.
+        assert!(
+            frames(cx, window) <= 2,
+            "at most one request per animated element"
+        );
+        cx.run_until_parked();
         assert_eq!(frames(cx, window), 0, "removed: no further frames");
         cx.run_until_parked();
         assert_eq!(frames(cx, window), 0);
