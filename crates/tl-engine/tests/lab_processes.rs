@@ -442,6 +442,8 @@ fn pid_count(root: &FixtureRoot) -> usize {
 #[test]
 fn engine_publishes_table_from_fixture() {
     let root = FixtureRoot::new(&["owner-desktop"]);
+    // The capture has no cgroup tree; the sampler only needs the directory to open.
+    fs::create_dir_all(root.root().join("sys/fs/cgroup")).expect("create cgroup dir");
     let mut fl = FakeLab::new();
     let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![processes::spec()]);
     let handle = fl.spawn(async move {
