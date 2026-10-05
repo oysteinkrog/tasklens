@@ -1946,3 +1946,351 @@ fn maps_live_self_has_primary() {
     assert!(nodes.iter().any(|n| n.shared_object));
     assert!(nodes.iter().all(|n| n.rss.is_some()));
 }
+
+// ---- Process sampler (E05-A1) ----
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use tl_collect::apps::AppPaths;
+use tl_collect::apps::classify::{ProcClass, ProtectInputs};
+use tl_collect::proc::meta::PasswdUserNames;
+use tl_collect::proc::sweep::{ProcessSampler, SweepInputs, SweepOutput};
+use tl_model::process::{GroupKind, ProcFlags, ProcessRecord};
+
+const FIREFOX_UNIT: &str =
+    "sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-firefox@3a1b.service";
+
+/// Copies every entry of `src` over `dst`, replacing files that exist in both.
+fn overlay(src: &Path, dst: &Path) {
+    for entry in fs::read_dir(src).expect("read fixture dir") {
+        let entry = entry.expect("fixture dir entry");
+        let (from, to) = (entry.path(), dst.join(entry.file_name()));
+        let kind = entry.file_type().expect("file type");
+        if kind.is_dir() {
+            fs::create_dir_all(&to).expect("create dir");
+            overlay(&from, &to);
+        } else if kind.is_symlink() {
+            let _ = fs::remove_file(&to);
+            std::os::unix::fs::symlink(fs::read_link(&from).expect("read link"), &to)
+                .expect("create symlink");
+        } else {
+            fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
+/// `owner-desktop` with `process-edge` copied over it. process-edge wins for pids in both.
+fn merged_root() -> (tempfile::TempDir, SysRoot) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    overlay(&fixture_dir("owner-desktop"), tmp.path());
+    overlay(&fixture_dir("process-edge"), tmp.path());
+    let root = SysRoot::at(tmp.path());
+    (tmp, root)
+}
+
+fn sampler_paths(cache: &Path) -> AppPaths {
+    let share = |name: &str| fixture_dir(name).join("usr/share");
+    let dirs: Vec<PathBuf> = vec![share("apps-desktop"), share("apps-icons")];
+    AppPaths {
+        home: fixture_dir("apps-icons").join("home"),
+        xdg_data_home: None,
+        xdg_data_dirs: Some(std::env::join_paths(dirs).expect("join data dirs")),
+        xdg_config_home: None,
+        icon_cache: cache.join("icons.toml"),
+    }
+}
+
+fn sampler(root: SysRoot, cache: &Path) -> ProcessSampler {
+    let users = PasswdUserNames::from_bytes(
+        b"root:x:0:0::/root:/bin/sh\nuser1:x:1000:1000::/home/user1:/bin/sh\n",
+    );
+    ProcessSampler::new(root, &sampler_paths(cache), Box::new(users)).expect("open sampler")
+}
+
+fn no_inputs(protect: &ProtectInputs) -> SweepInputs<'_> {
+    SweepInputs {
+        protect,
+        detail_keys: &[],
+        want_pss: false,
+        window_pids: None,
+        wm_class: None,
+    }
+}
+
+/// Runs `n` sweeps 1 s apart on the test clock and returns the last output.
+fn sweep_n(s: &mut ProcessSampler, set: fn(u64, u64), n: u64) -> SweepOutput {
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+    for i in 1..=n {
+        set(i * SEC, i * SEC);
+        s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+    }
+    out
+}
+
+fn index_of(out: &SweepOutput, pid: u32) -> usize {
+    out.records
+        .iter()
+        .position(|r| r.key.pid == pid)
+        .unwrap_or_else(|| panic!("pid {pid} not swept"))
+}
+
+sweep_clock!(full_snapshot_clock);
+
+#[test]
+fn sweep_full_snapshot() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(full_snapshot_clock::now);
+    let out = sweep_n(&mut s, full_snapshot_clock::set, 2);
+
+    assert_eq!(out.records.len(), out.extras.len());
+    assert_eq!(out.records.len(), out.side.len());
+    assert!(
+        out.records.windows(2).all(|w| w[0].key < w[1].key),
+        "records sorted by ProcessKey"
+    );
+    let rows: Vec<_> = out
+        .records
+        .iter()
+        .zip(&out.side)
+        .map(|(r, side)| {
+            (
+                r.key.pid,
+                r.meta.name.to_string(),
+                r.meta.user.to_string(),
+                side.class,
+                r.flags,
+                r.state,
+                r.threads,
+                r.validity.get(ProcessField::Cpu),
+                r.rss_anon_bytes,
+            )
+        })
+        .collect();
+    insta::assert_debug_snapshot!(rows);
+}
+
+sweep_clock!(app_member_clock);
+
+#[test]
+fn sweep_app_member_grouped() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(app_member_clock::now);
+    let out = sweep_n(&mut s, app_member_clock::set, 1);
+    let i = index_of(&out, 4201);
+    let firefox = GroupKind::App {
+        app_id: Arc::from("firefox"),
+    };
+    assert_eq!(out.records[i].group, firefox.key());
+    assert_eq!(out.side[i].class, ProcClass::App);
+    assert!(out.side[i].is_app_primary);
+    assert_eq!(&*out.records[i].meta.name, "Firefox");
+    assert_eq!(out.records[i].meta.app_id.as_deref(), Some("firefox"));
+
+    let unit = out
+        .apps
+        .iter()
+        .find(|a| a.rel.ends_with("app-firefox@3a1b.service"))
+        .expect("firefox unit sampled");
+    assert_eq!(unit.group_key, firefox.key());
+    assert_eq!(unit.app_name.as_deref(), Some("Firefox"));
+    let model = unit.to_model();
+    assert_eq!(model.group, firefox.key());
+    assert_eq!(model.anon_bytes, 524_288_000);
+    assert_eq!(model.pids, 14);
+    assert_eq!(
+        model.validity.get(ProcessField::IoRead),
+        Validity::WarmingUp
+    );
+}
+
+sweep_clock!(kernel_thread_clock);
+
+#[test]
+fn sweep_kernel_thread_record() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(kernel_thread_clock::now);
+    let out = sweep_n(&mut s, kernel_thread_clock::set, 1);
+    let r = &out.records[index_of(&out, 57)];
+    assert_eq!(&*r.meta.name, "[kworker/0:1]");
+    assert!(r.flags.contains(ProcFlags::KERNEL_THREAD));
+    assert_eq!(r.validity.get(ProcessField::RssAnon), Validity::Unsupported);
+    assert_eq!(out.side[index_of(&out, 57)].class, ProcClass::KernelThread);
+}
+
+sweep_clock!(other_user_clock);
+
+/// Security regression (ADR-016): another user's unreadable `io` gives Restricted, not zero.
+#[test]
+fn sweep_other_user_flags_and_restricted() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let (_tmp, root) = merged_root();
+    // owner-desktop pid 1 runs as root and has no io file in the capture.
+    let io = root.proc_path("1/io");
+    fs::write(&io, fixture_bytes("process-edge", "proc/4201/io")).expect("write io");
+    fs::set_permissions(&io, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(other_user_clock::now);
+    let out = sweep_n(&mut s, other_user_clock::set, 2);
+    let r = &out.records[index_of(&out, 1)];
+    assert_eq!(r.uid, 0);
+    assert!(r.flags.contains(ProcFlags::OTHER_USER));
+    assert!(r.flags.contains(ProcFlags::PROTECTED), "pid 1 is protected");
+    assert_eq!(&*r.meta.user, "root");
+    assert_eq!(r.validity.get(ProcessField::IoRead), Validity::Restricted);
+    assert_eq!(r.validity.get(ProcessField::IoWrite), Validity::Restricted);
+    assert_eq!(r.io_read_bps, 0.0);
+}
+
+sweep_clock!(meta_arc_clock);
+
+#[test]
+fn sweep_meta_arc_reused() {
+    let (_tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(meta_arc_clock::now);
+    let first = sweep_n(&mut s, meta_arc_clock::set, 1);
+    let mut second = SweepOutput::default();
+    meta_arc_clock::set(2 * SEC, 2 * SEC);
+    let protect = ProtectInputs::default();
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut second);
+
+    assert_eq!(first.records.len(), second.records.len());
+    for (a, b) in first.records.iter().zip(&second.records) {
+        assert_eq!(a.key, b.key);
+        assert!(
+            Arc::ptr_eq(&a.meta, &b.meta),
+            "pid {} got a new meta",
+            a.key.pid
+        );
+    }
+}
+
+sweep_clock!(frozen_clock);
+
+#[test]
+fn sweep_frozen_app_members() {
+    let (tmp, root) = merged_root();
+    fs::write(
+        tmp.path().join(FIREFOX_UNIT).join("cgroup.events"),
+        "populated 1\nfrozen 1\n",
+    )
+    .expect("write cgroup.events");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(frozen_clock::now);
+    let out = sweep_n(&mut s, frozen_clock::set, 1);
+
+    assert!(out.extras[index_of(&out, 4201)].frozen);
+    let members = [4201];
+    for (r, x) in out.records.iter().zip(&out.extras) {
+        if !members.contains(&r.key.pid) {
+            assert!(!x.frozen, "pid {} is not in the frozen unit", r.key.pid);
+        }
+    }
+    let unit = out
+        .apps
+        .iter()
+        .find(|a| a.rel.ends_with("app-firefox@3a1b.service"))
+        .expect("firefox unit sampled");
+    assert_eq!(unit.stats.frozen, Some(true));
+}
+
+/// A `MakeWriter` that keeps every formatted line.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("capture lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
+    type Writer = Captured;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+sweep_clock!(never_logs_clock);
+
+/// Security regression (ADR-015): a full sweep never logs a command line, at any level.
+#[test]
+fn sweep_never_logs_cmdline() {
+    let captured = Captured::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::FULL)
+        .with_ansi(false)
+        .with_writer(captured.clone())
+        .finish();
+    let (tmp, root) = merged_root();
+    // A missing io file and an unreadable cmdline give the sweep things to log.
+    let _ = fs::remove_file(tmp.path().join("proc/4209/io"));
+    let out = tracing::subscriber::with_default(subscriber, || {
+        tracing::trace!(probe = "yms1-capture-works");
+        let cache = tempfile::tempdir().expect("tempdir");
+        let mut s = sampler(root, cache.path()).with_clock(never_logs_clock::now);
+        sweep_n(&mut s, never_logs_clock::set, 2)
+    });
+
+    let r = &out.records[index_of(&out, 4209)];
+    assert!(
+        r.meta
+            .cmdline
+            .as_deref()
+            .is_some_and(|c| c.contains("secret-token-123")),
+        "the fixture command line was read"
+    );
+    let text = String::from_utf8_lossy(&captured.0.lock().expect("capture lock")).into_owned();
+    assert!(text.contains("yms1-capture-works"), "capture works");
+    assert!(
+        !text.contains("secret-token-123"),
+        "a command line was logged"
+    );
+}
+
+#[test]
+fn sweep_pss_for_detail_keys() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(SysRoot::host(), cache.path());
+    let key = own_key();
+    let protect = ProtectInputs::default();
+    let inp = SweepInputs {
+        protect: &protect,
+        detail_keys: &[key],
+        want_pss: true,
+        window_pids: None,
+        wm_class: None,
+    };
+    let ctx = SweepCtx {
+        self_uid: rustix::process::getuid().as_raw(),
+        ..sweep_ctx(false)
+    };
+    let mut out = SweepOutput::default();
+    s.sweep(&ctx, &inp, &mut out);
+
+    let r: &ProcessRecord = out
+        .records
+        .iter()
+        .find(|r| r.key == key)
+        .expect("own process swept");
+    assert_eq!(r.validity.get(ProcessField::Pss), Validity::Valid);
+    assert_eq!(r.validity.get(ProcessField::Uss), Validity::Valid);
+    assert!(r.pss_bytes > 0);
+    assert!(out.coverage.has_pss_uss(&key));
+    assert_eq!(out.coverage.pss_uss.len(), 1);
+}

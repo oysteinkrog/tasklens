@@ -1,0 +1,22 @@
+Name:	tokenproc
+Umask:	0022
+State:	S (sleeping)
+Tgid:	4209
+Pid:	4209
+PPid:	4100
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+Groups:	1000 
+Kthread:	0
+VmPeak:	   12288 kB
+VmSize:	   12288 kB
+VmHWM:	    3200 kB
+VmRSS:	    3200 kB
+RssAnon:	     800 kB
+RssFile:	    2300 kB
+RssShmem:	     100 kB
+VmData:	     900 kB
+VmStk:	     132 kB
+VmSwap:	       0 kB
+Threads:	1
+Cpus_allowed_list:	0-31
