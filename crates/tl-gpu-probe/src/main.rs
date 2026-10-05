@@ -32,6 +32,8 @@ pub enum Mode {
 }
 
 /// Parses the arguments after the program name. Anything not listed in `USAGE` is an error.
+/// `--fd` and `--fake` are accepted in either order, because the engine's `spawn_probe` always
+/// passes `--fd 3` first (R-283).
 pub fn parse_args(args: &[String]) -> Result<Mode, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
@@ -43,7 +45,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
             fd: DEFAULT_FAKE_FD,
         }),
         #[cfg(feature = "fake")]
-        ["--fake", script, "--fd", n] => Ok(Mode::Fake {
+        ["--fake", script, "--fd", n] | ["--fd", n, "--fake", script] => Ok(Mode::Fake {
             script: (*script).to_owned(),
             fd: parse_fd(n)?,
         }),
@@ -127,5 +129,29 @@ mod tests {
         }
         #[cfg(not(feature = "fake"))]
         assert!(parse_args(&args(&["--fake", "normal"])).is_err());
+    }
+
+    /// R-283: `spawn_probe` passes `--fd 3` before the extra arguments.
+    #[test]
+    fn parse_args_fd_and_fake_in_either_order() {
+        #[cfg(feature = "fake")]
+        {
+            let expected = Ok(Mode::Fake {
+                script: "normal".to_owned(),
+                fd: 3,
+            });
+            assert_eq!(
+                parse_args(&args(&["--fd", "3", "--fake", "normal"])),
+                expected
+            );
+            assert_eq!(
+                parse_args(&args(&["--fake", "normal", "--fd", "3"])),
+                expected
+            );
+            assert!(parse_args(&args(&["--fd", "x", "--fake", "normal"])).is_err());
+            assert!(parse_args(&args(&["--fd", "3", "--fake"])).is_err());
+        }
+        #[cfg(not(feature = "fake"))]
+        assert!(parse_args(&args(&["--fd", "3", "--fake", "normal"])).is_err());
     }
 }
