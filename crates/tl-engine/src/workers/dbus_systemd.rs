@@ -223,7 +223,12 @@ async fn connected(
             }
         };
         let took = Duration::from_nanos(cx.now().duration_since(started));
-        tracing::debug!(?manager, units = units.len(), ?took, "systemd: listing done");
+        tracing::debug!(
+            ?manager,
+            units = units.len(),
+            ?took,
+            "systemd: listing done"
+        );
         if let Some(stop) = send(cx, io, services(manager, ManagerState::Connected, units)).await {
             return stop;
         }
@@ -287,9 +292,10 @@ fn newest_seq(control: &WorkerControl) -> u64 {
 /// True when a `RefreshNow` for `id` newer than `last_seq` is queued. Moves `last_seq` to the
 /// newest queued seq.
 fn take_refresh(control: &WorkerControl, id: SourceId, last_seq: &mut u64) -> bool {
-    let found = control.commands.iter().any(|c| {
-        c.seq > *last_seq && c.target == id && c.command == WorkerCommand::RefreshNow
-    });
+    let found = control
+        .commands
+        .iter()
+        .any(|c| c.seq > *last_seq && c.target == id && c.command == WorkerCommand::RefreshNow);
     *last_seq = (*last_seq).max(newest_seq(control));
     found
 }
@@ -409,7 +415,7 @@ impl RawUnit {
             let Some(Value::Array(rows)) = typed.get(key).map(|v| unwrap(v)) else {
                 return Arc::from("");
             };
-            match rows.inner().first() {
+            match rows.inner().first().map(unwrap) {
                 Some(Value::Structure(row)) => row.fields().get(index).map_or_else(
                     || Arc::from(""),
                     |v| Arc::from(str_of(v).unwrap_or_default()),
@@ -521,7 +527,12 @@ fn resolve_user(
 }
 
 /// The real uid in `<proc>/<pid>/status`, or `None` when the process is gone or unreadable.
-fn pid_real_uid(sys_root: &SysRoot, pid: u32, buf: &mut Vec<u8>, st: &mut PidStatus) -> Option<u32> {
+fn pid_real_uid(
+    sys_root: &SysRoot,
+    pid: u32,
+    buf: &mut Vec<u8>,
+    st: &mut PidStatus,
+) -> Option<u32> {
     let path = sys_root.proc_path(&format!("{pid}/status"));
     read_file(&path, buf, STATUS_READ_MAX).ok()?;
     parse_status(buf, st).ok()?;
@@ -586,7 +597,12 @@ fn is_unit_error(e: &DbusError) -> bool {
     matches!(e, DbusError::Call { name, .. } if &**name != "zbus")
 }
 
-async fn manager_call<B, T>(cx: &Cx, conn: &DbusConn, method: &str, body: &B) -> Result<T, DbusError>
+async fn manager_call<B, T>(
+    cx: &Cx,
+    conn: &DbusConn,
+    method: &str,
+    body: &B,
+) -> Result<T, DbusError>
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
     T: for<'d> serde::Deserialize<'d> + zbus::zvariant::Type,
@@ -604,9 +620,14 @@ async fn get_all(
     path: &OwnedObjectPath,
     iface: &str,
 ) -> Result<Props, DbusError> {
-    let call = conn
-        .raw()
-        .call_method(Some(BUS_NAME), path, Some(PROPERTIES_IFACE), "GetAll", &(iface,));
+    let body = (iface,);
+    let call = conn.raw().call_method(
+        Some(BUS_NAME),
+        path,
+        Some(PROPERTIES_IFACE),
+        "GetAll",
+        &body,
+    );
     let reply = conn.read(cx, call).await?;
     reply.body().deserialize::<Props>().map_err(decode_error)
 }
@@ -915,7 +936,11 @@ mod tests {
             "Stream",
             "/run/foo.sock",
         )))]));
-        let raw = RawUnit::from_props("foo.socket", &Props::new(), &props(vec![("Listen", listen)]));
+        let raw = RawUnit::from_props(
+            "foo.socket",
+            &Props::new(),
+            &props(vec![("Listen", listen)]),
+        );
         assert_eq!(&*path_of(UnitType::Socket, &raw), "/run/foo.sock");
 
         let typed = props(vec![("What", Value::from("/dev/sda1"))]);
@@ -927,7 +952,10 @@ mod tests {
         assert_eq!(&*path_of(UnitType::Timer, &raw), "foo.service");
         // MainPID is a services-only column.
         let typed = props(vec![("MainPID", Value::U32(5))]);
-        assert_eq!(RawUnit::from_props("foo.timer", &Props::new(), &typed).main_pid, 0);
+        assert_eq!(
+            RawUnit::from_props("foo.timer", &Props::new(), &typed).main_pid,
+            0
+        );
 
         let raw = RawUnit::from_props("multi-user.target", &Props::new(), &Props::new());
         assert_eq!(&*path_of(UnitType::Target, &raw), "");
@@ -941,7 +969,10 @@ mod tests {
             ("ActiveState", Value::from("active")),
             ("SubState", Value::from("running")),
             ("UnitFileState", Value::from("enabled")),
-            ("FragmentPath", Value::from("/usr/lib/systemd/system/foo.service")),
+            (
+                "FragmentPath",
+                Value::from("/usr/lib/systemd/system/foo.service"),
+            ),
             ("ActiveEnterTimestamp", Value::U64(1_700_000_000_000_000)),
             ("TriggeredBy", Value::from(vec!["foo.socket"])),
         ]);
@@ -982,7 +1013,11 @@ mod tests {
             ..WorkerControl::default()
         };
         let mut last = 0;
-        let other = control(vec![(1, SourceId::SystemdSystem, WorkerCommand::RefreshNow)]);
+        let other = control(vec![(
+            1,
+            SourceId::SystemdSystem,
+            WorkerCommand::RefreshNow,
+        )]);
         assert!(!take_refresh(&other, SourceId::SystemdUser, &mut last));
         assert_eq!(last, 1);
         let mine = control(vec![
@@ -1000,7 +1035,9 @@ mod tests {
 
     impl Opener for NoBus {
         async fn open(&self, _cx: &Cx, _manager: Manager) -> Result<DbusConn, OpenError> {
-            Err(OpenError::Unavailable(DbusError::Connect("no session bus".into())))
+            Err(OpenError::Unavailable(DbusError::Connect(
+                "no session bus".into(),
+            )))
         }
     }
 
@@ -1073,7 +1110,10 @@ mod tests {
             .expect("control send");
         advance(&mut lab, IDLE_RECHECK);
         assert_eq!(unavailable_count(&mut rx), 1, "retried on RefreshNow");
-        assert!(out.lock().expect("slot lock").is_none(), "worker still runs");
+        assert!(
+            out.lock().expect("slot lock").is_none(),
+            "worker still runs"
+        );
 
         handle.abort();
         advance(&mut lab, IDLE_RECHECK);
