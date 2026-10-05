@@ -302,6 +302,16 @@ fn thread_count() -> usize {
     std::fs::read_dir("/proc/self/task").map_or(0, |dir| dir.count())
 }
 
+/// The names of this process's threads, for the leak log.
+fn thread_names() -> Vec<String> {
+    let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
+        return Vec::new();
+    };
+    dir.filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("comm")).ok())
+        .map(|name| name.trim_end().to_string())
+        .collect()
+}
+
 /// Header rows have neither a record nor a group row (`lab_table.rs::header_counts`).
 fn header_rows(snap: &Snapshot) -> usize {
     snap.table
@@ -385,9 +395,10 @@ fn end_to_end_engine_real_runtime() {
         std::thread::sleep(Duration::from_millis(20));
     }
     eprintln!(
-        "end_to_end_engine_real_runtime: {} threads before, {} after the drop ({:?})",
+        "end_to_end_engine_real_runtime: {} threads before, {} after the drop ({:?}): {:?}",
         threads_before,
         thread_count(),
-        dropped.elapsed()
+        dropped.elapsed(),
+        thread_names()
     );
 }

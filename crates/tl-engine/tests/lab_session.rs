@@ -16,7 +16,7 @@ use asupersync::lab::LabConfig;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
-use asupersync::time::VirtualClock;
+use asupersync::time::{TimeSource, VirtualClock};
 use smallvec::SmallVec;
 use tl_engine::bridge::{EngineHooks, HookCtx};
 use tl_engine::config::{EngineConfig, EngineMode};
