@@ -1116,9 +1116,10 @@ fn every_variant_applies_without_panic() {
     assert_eq!(snap.connections.header.validity, Validity::Failed);
     assert_eq!(snap.system.color_scheme, 1);
     assert_eq!(snap.inventory.memory.peak_committed_bytes.value, 5);
+    // 13 forwarded variants, plus `RefreshNow` to Disk, Net and Sensors from the resume.
     assert_eq!(
         rig.commands().len(),
-        13,
+        16,
         "one queued command per forwarded variant"
     );
 }
