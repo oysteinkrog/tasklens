@@ -13,6 +13,7 @@ pub mod gpu;
 mod helper;
 pub mod reducer;
 pub mod runtime;
+pub mod session;
 pub mod source;
 pub mod supervise;
 pub mod update;
