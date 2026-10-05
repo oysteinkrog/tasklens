@@ -5,4 +5,5 @@ pub mod focus;
 pub mod icons;
 pub mod radio;
 pub mod skeleton;
+pub mod slider;
 pub mod switch;
