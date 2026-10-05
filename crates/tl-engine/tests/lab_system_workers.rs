@@ -1,23 +1,33 @@
 //! Tests for the E12 system workers' sources, on copies of the tl-collect fixtures.
 //!
-//! Time is injected through each source's `sample_at`, so these are plain `#[test]`s.
+//! Time is injected through each source's `sample_at`, so these are plain `#[test]`s. The
+//! demand tests run `source::run` in a `FakeLab`.
+
+#[path = "fake_sources.rs"]
+mod fake_sources;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use asupersync::Cx;
+use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
 use tl_collect::parse::{block, hwmon, netif};
-use tl_engine::source::Source;
-use tl_engine::update::{CpuSample, DeviceKinds, SourceUpdate};
+use tl_engine::config::EngineMode;
+use tl_engine::source::{self, Source};
+use tl_engine::update::{CpuSample, DeviceKinds, EngineMsg, MemorySample, SourceUpdate};
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::enumerate::{disk_list, net_list, sensor_list};
+use tl_engine::workers::memory::MemorySource;
+use tl_engine::workers::workers_for;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
+use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
-use tl_model::system::Metric;
+use tl_model::system::{Metric, ZramTotals};
 use tl_model::validity::Validity;
 
 const SEC: u64 = 1_000_000_000;
@@ -341,4 +351,133 @@ fn enum_sensor_list_skips_gpu_chips() {
     assert_eq!(&*fan1.display_name, "nct6797 fan1");
     assert!(fan1.persistent_key.starts_with("fan:nct6797:"));
     assert!(fan1.persistent_key.ends_with(":1"));
+}
+
+fn memory_sample(src: MemorySource, t: u64) -> (MemorySource, MemorySample) {
+    match src.sample_at(at(t)) {
+        (src, SourceUpdate::Memory(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Memory, got {other:?}"),
+    }
+}
+
+/// `mem-composition` without its zram device. Returns the removed device's fixture path.
+fn memory_without_zram() -> (PathBuf, PathBuf) {
+    let dir = fixture_copy("mem-composition", None);
+    fs::remove_dir_all(dir.join("sys/block/zram0")).expect("remove fixture zram0");
+    (dir, fixtures().join("mem-composition/sys/block/zram0"))
+}
+
+#[test]
+fn memory_composition_fixture_totals() {
+    let dir = fixture_copy("mem-composition", None);
+    let (_, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), SEC);
+    let t = &s.totals;
+    assert_eq!(s.validity, Validity::Valid);
+    assert_eq!(t.validity, Validity::Valid);
+    assert_eq!(t.used, 8_589_934_592);
+    assert_eq!(t.committed, 21_474_836_480);
+    assert_eq!(t.commit_limit, 17_179_869_184);
+    assert_eq!(t.swap_total - t.swap_free, 1_073_741_824);
+    assert_eq!(
+        t.zram,
+        Metric::valid(ZramTotals {
+            orig_data: 1_048_576,
+            compr_data: 262_144,
+            mem_used: 300_000,
+        })
+    );
+}
+
+#[test]
+fn memory_zram_stats() {
+    let dir = fixture_copy("mem-composition", None);
+    let (_, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(s.zram.len(), 1);
+    let z = &s.zram[0];
+    assert_eq!(&*z.name, "zram0");
+    assert_eq!(z.disksize, 8_589_934_592);
+    assert_eq!(z.orig_bytes, 1_048_576);
+    assert_eq!(z.compr_bytes, 262_144);
+    assert_eq!(z.mem_used_total, 300_000);
+    // First sample: the rates warm up and read as 0.
+    assert_eq!(z.read_bps, 0.0);
+    assert_eq!(z.write_bps, 0.0);
+}
+
+#[test]
+fn memory_no_zram_unsupported() {
+    let (dir, _) = memory_without_zram();
+    let (_, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(s.totals.zram.validity, Validity::Unsupported);
+    assert!(s.zram.is_empty());
+    assert_eq!(s.totals.validity, Validity::Valid);
+}
+
+#[test]
+fn memory_zram_rescan_every_5s() {
+    let (dir, zram0) = memory_without_zram();
+    let (src, s) = memory_sample(MemorySource::new(SysRoot::at(&dir)), 0);
+    assert!(s.zram.is_empty());
+
+    copy_tree(&zram0, &dir.join("sys/block/zram0"));
+    let (src, s) = memory_sample(src, SEC);
+    assert!(s.zram.is_empty(), "no rescan before 5 s");
+    assert_eq!(s.totals.zram.validity, Validity::Unsupported);
+
+    let (_, s) = memory_sample(src, 5 * SEC);
+    let names: Vec<&str> = s.zram.iter().map(|z| &*z.name).collect();
+    assert_eq!(names, ["zram0"]);
+    assert_eq!(s.totals.zram.validity, Validity::Valid);
+}
+
+#[test]
+fn memory_listed_once_in_full_mode() {
+    let ids: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(ids.iter().filter(|id| **id == SourceId::Memory).count(), 1);
+}
+
+#[test]
+fn memory_demand_off_then_on() {
+    let dir = fixture_copy("mem-composition", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    let worker_io = io(&updates, &demand, &settings, &control);
+    let src = MemorySource::new(SysRoot::at(&dir));
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    });
+
+    // Receive times in ms of the `Memory` messages, read after every 10 ms step.
+    let mut times = Vec::new();
+    let mut run = |fl: &mut FakeLab, total: Duration, times: &mut Vec<u64>| {
+        let end = fl.now_ms() + total.as_millis() as u64;
+        while fl.now_ms() < end {
+            fl.advance(Duration::from_millis(10));
+            for msg in drain(&mut rx) {
+                if matches!(msg, EngineMsg::Source(SourceUpdate::Memory(_))) {
+                    times.push(fl.now_ms());
+                }
+            }
+        }
+    };
+
+    run(&mut fl, Duration::from_secs(60), &mut times);
+    assert!(times.is_empty(), "sampled while off: {times:?}");
+
+    demand
+        .send(Demand {
+            memory: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    run(&mut fl, Duration::from_secs(3), &mut times);
+    assert_eq!(times.len(), 3, "{times:?}");
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
+
+    handle.abort();
+    fl.finish();
 }
