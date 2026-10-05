@@ -421,3 +421,24 @@ fn compositor_protected() {
         );
     }
 }
+
+/// R-163 item 1: on an Arch system pacman owns its own binary.
+#[test]
+#[ignore = "real system: needs pacman"]
+fn pacman_owns_itself() {
+    use std::path::Path;
+    use tl_collect::pkg::{Pacman, PkgBackend};
+
+    let mut pacman = Pacman::default();
+    let got = pacman
+        .owners(&[Path::new("/usr/bin/pacman")])
+        .expect("pacman -Qo");
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].1.as_deref(), Some("pacman"));
+    let info = pacman
+        .info("pacman")
+        .expect("read desc")
+        .expect("pacman desc");
+    assert_eq!(&*info.name, "pacman");
+    assert!(pacman.db_stamp().is_some());
+}

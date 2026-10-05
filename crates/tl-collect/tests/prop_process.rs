@@ -227,3 +227,26 @@ proptest! {
         let _ = tl_collect::proc::detail::parse_maps(&bytes, &mut out);
     }
 }
+
+proptest! {
+    #[test]
+    fn pkg_parsers_arbitrary_bytes_never_panic(
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        use std::path::Path;
+        use tl_collect::pkg::{parse_desc, parse_qkk, parse_qo};
+
+        let _ = parse_desc(&bytes);
+        let mut with_header = b"%NAME%\nx\n\n%VERSION%\n".to_vec();
+        with_header.extend_from_slice(&bytes);
+        let _ = parse_desc(&with_header);
+        let _ = parse_qo(&bytes, &[Path::new("/usr/bin/x"), Path::new("")]);
+        let mut owned = b"/usr/bin/x is owned by ".to_vec();
+        owned.extend_from_slice(&bytes);
+        let _ = parse_qo(&owned, &[Path::new("/usr/bin/x")]);
+        let _ = parse_qkk("x", &bytes, &bytes);
+        let mut summary = b"x: ".to_vec();
+        summary.extend_from_slice(&bytes);
+        let _ = parse_qkk("x", &summary, b"");
+    }
+}
