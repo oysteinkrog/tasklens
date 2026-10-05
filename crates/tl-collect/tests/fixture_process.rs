@@ -1310,3 +1310,214 @@ fn sweep_fd_count_only_when_wanted() {
     assert!(only(&out).fd_count.is_some());
     assert_eq!(fd_count_fallbacks(), before + 1);
 }
+
+use tl_collect::proc::detail::{DetailRead, ThreadInfo, ThreadReader, WchanValue, thread_exists};
+
+/// process-edge 4201, which has threads 4201 and 4211.
+fn thread_key(start_ticks: u64) -> ProcessKey {
+    rollup_key(4201, start_ticks)
+}
+
+fn thread_row(out: &[ThreadInfo], tid: u32) -> &ThreadInfo {
+    out.iter()
+        .find(|t| t.tid == tid)
+        .unwrap_or_else(|| panic!("thread {tid} missing"))
+}
+
+/// Rewrites stat field 14 (utime) of thread 4211 under `root`.
+fn set_thread_utime(root: &SysRoot, utime: u64) {
+    let rel = "4201/task/4211/stat";
+    let line = fs::read_to_string(root.proc_path(rel)).expect("read thread stat");
+    let close = line.rfind(')').expect("stat has a close paren");
+    let mut fields: Vec<&str> = line[close + 2..].trim_end().split(' ').collect();
+    let utime = utime.to_string();
+    // fields[0] is field 3.
+    fields[14 - 3] = &utime;
+    let new = format!("{} {}\n", &line[..=close], fields.join(" "));
+    fs::write(root.proc_path(rel), new).expect("write thread stat");
+}
+
+sweep_clock!(thread_cpu_clock);
+
+#[test]
+fn threads_rows_and_cpu() {
+    let tmp = common::fixture_copy("process-edge", None);
+    let root = SysRoot::at(tmp.path());
+    let mut reader = ThreadReader::new().with_clock(thread_cpu_clock::now);
+    let mut bufs = ReadBufs::default();
+    let mut out = Vec::new();
+    let key = thread_key(FAKE_START_TICKS);
+
+    thread_cpu_clock::set(10 * SEC, 10 * SEC);
+    let r = reader.read(&root, key, 100, 32, &mut bufs, &mut out);
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert_eq!(out.len(), 2);
+    assert!(out.iter().all(|t| t.cpu_validity == Validity::WarmingUp));
+    assert!(out.iter().all(|t| t.cpu_pct == 0.0));
+
+    let t = thread_row(&out, 4211);
+    assert_eq!(&*t.comm, "DOM Worker");
+    assert_eq!(t.state, b'S');
+    assert_eq!(t.utime_ms, 3000);
+    assert_eq!(t.stime_ms, 500);
+    assert_eq!(t.nice, -5);
+    assert_eq!(t.policy, 0);
+    assert_eq!(t.rt_prio, 0);
+    assert_eq!(t.last_cpu, 7);
+    assert_eq!(&*t.cpus, "8-11");
+    assert_eq!(t.vol_ctx, Some(5120));
+    assert_eq!(t.invol_ctx, Some(77));
+    assert_eq!(&*thread_row(&out, 4201).comm, "Web Content");
+
+    // 10 more ticks on 4211 over 1 s: 100 × 10 / 100 / 1 / 32 = 0.3125%.
+    set_thread_utime(&root, 310);
+    thread_cpu_clock::set(11 * SEC, 11 * SEC);
+    let r = reader.read(&root, key, 100, 32, &mut bufs, &mut out);
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert_eq!(out.len(), 2);
+    let t = thread_row(&out, 4211);
+    assert_eq!(t.cpu_validity, Validity::Valid);
+    assert!((t.cpu_pct - 0.3125).abs() < 1e-6, "cpu_pct {}", t.cpu_pct);
+    assert_eq!(t.utime_ms, 3100);
+    let main = thread_row(&out, 4201);
+    assert_eq!(main.cpu_validity, Validity::Valid);
+    assert_eq!(main.cpu_pct, 0.0);
+
+    // A vanished thread drops out; its baseline goes with it.
+    fs::remove_dir_all(root.proc_path("4201/task/4211")).expect("remove thread");
+    thread_cpu_clock::set(12 * SEC, 12 * SEC);
+    reader
+        .read(&root, key, 100, 32, &mut bufs, &mut out)
+        .unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].tid, 4201);
+    assert_eq!(out[0].cpu_validity, Validity::Valid);
+}
+
+#[test]
+fn threads_wchan_values() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let mut reader = ThreadReader::new();
+    let mut out = Vec::new();
+    let r = reader.read(
+        &root,
+        thread_key(FAKE_START_TICKS),
+        100,
+        32,
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert_eq!(
+        thread_row(&out, 4201).wchan,
+        WchanValue::Name("do_epoll_wait".into())
+    );
+    assert_eq!(thread_row(&out, 4211).wchan, WchanValue::Running);
+}
+
+/// Security regression (ADR-016): an unreadable `wchan` is Restricted and the row stays.
+#[test]
+fn threads_wchan_restricted() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let tmp = common::fixture_copy("process-edge", None);
+    let root = SysRoot::at(tmp.path());
+    fs::set_permissions(
+        root.proc_path("4201/task/4211/wchan"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .expect("chmod");
+    let mut out = Vec::new();
+    let r = ThreadReader::new().read(
+        &root,
+        thread_key(FAKE_START_TICKS),
+        100,
+        32,
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert_eq!(out.len(), 2);
+    let t = thread_row(&out, 4211);
+    assert_eq!(t.wchan, WchanValue::Restricted);
+    assert_eq!(&*t.comm, "DOM Worker");
+}
+
+/// Security regression (R-097): a pid whose start time differs is another process, so nothing
+/// of it is read.
+#[test]
+fn threads_identity_mismatch_gone() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let mut reader = ThreadReader::new();
+    let mut bufs = ReadBufs::default();
+    let mut out = Vec::new();
+    reader
+        .read(
+            &root,
+            thread_key(FAKE_START_TICKS),
+            100,
+            32,
+            &mut bufs,
+            &mut out,
+        )
+        .unwrap();
+    assert_eq!(out.len(), 2);
+
+    let r = reader.read(
+        &root,
+        thread_key(FAKE_START_TICKS + 1),
+        100,
+        32,
+        &mut bufs,
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+    assert!(out.is_empty());
+
+    let r = reader.read(&root, rollup_key(4299, 1), 100, 32, &mut bufs, &mut out);
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn threads_live_self() {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let rx = rx.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _ = rx.lock().expect("lock").recv();
+            })
+        })
+        .collect();
+    barrier.wait();
+
+    let key = own_key();
+    let mut out = Vec::new();
+    let r = ThreadReader::new().read(
+        &SysRoot::host(),
+        key,
+        rustix::param::clock_ticks_per_second(),
+        1,
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert!(out.len() >= 3, "{} threads", out.len());
+    assert!(out.iter().any(|t| t.tid == key.pid));
+
+    let dir = open_dir(&std::path::PathBuf::from(format!("/proc/{}", key.pid)));
+    assert!(thread_exists(dir.as_fd(), key.pid));
+    assert!(!thread_exists(dir.as_fd(), 999_999_999));
+
+    drop(tx);
+    for w in workers {
+        w.join().expect("join worker");
+    }
+}
