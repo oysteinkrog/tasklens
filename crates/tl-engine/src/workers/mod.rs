@@ -37,6 +37,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         disk::spec(),
         net::spec(),
         sensors::spec(),
+        cpu::spec(),
     ]
 }
 
@@ -66,5 +67,12 @@ mod tests {
         }
         // The `Processes` entry arrives with E10-A1, the low-memory arm with E32.
         assert!(workers_for(EngineMode::LowMemory).is_empty());
+        assert_eq!(
+            workers_for(EngineMode::Full)
+                .iter()
+                .filter(|spec| spec.id == SourceId::Cpu && spec.name == "cpu")
+                .count(),
+            1
+        );
     }
 }

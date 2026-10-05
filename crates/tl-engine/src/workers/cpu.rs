@@ -9,6 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use asupersync::runtime::JoinError;
+use asupersync::supervision::ManagedGeneration;
+use asupersync::{Cx, Outcome};
 use tl_collect::counters::{Clock, Measured};
 use tl_collect::parse::cpufreq::{FreqReading, read_base_mhz};
 use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler};
@@ -20,8 +23,11 @@ use tl_model::system::{CpuTopology, CpuTotals, Metric};
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
-use crate::source::Source;
-use crate::update::{CpuCoreSample, CpuSample, SourceUpdate};
+use crate::config::{EngineConfig, EngineMode};
+use crate::source::{self, Source, WorkerIo};
+use crate::supervise::WorkerFactory;
+use crate::update::{CpuCoreSample, CpuSample, SourceUpdate, WorkerError};
+use crate::workers::WorkerSpec;
 
 /// `cpu_fast`: a visible CPU chart animates.
 pub const FAST_PERIOD: Duration = Duration::from_millis(100);
@@ -179,6 +185,47 @@ impl Source for CpuSource {
         self.sampler.reset_baselines();
         self.last_slow_ns = None;
     }
+}
+
+/// In the full engine only.
+pub fn spec() -> WorkerSpec {
+    WorkerSpec {
+        id: SourceId::Cpu,
+        name: "cpu",
+        modes: &[EngineMode::Full],
+        factory,
+    }
+}
+
+/// A new `CpuSource` per generation, built on the blocking pool (it reads sysfs), then
+/// `source::run`. Nothing is carried across a restart: each generation starts with fresh
+/// baselines. A `CpuSource::new` failure is `WorkerError::Collect`.
+pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let root = cfg.sys_root.clone();
+        async move {
+            let mut job = match cx.spawn_blocking(move |_| CpuSource::new(root)) {
+                Ok(job) => job,
+                Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
+            };
+            let src = match job.join(&cx).await {
+                Ok(Ok(src)) => src,
+                Ok(Err(e)) => return Outcome::Err(WorkerError::Collect(e)),
+                Err(JoinError::Cancelled(reason)) => {
+                    if cx.checkpoint().is_err() {
+                        return Outcome::Ok(());
+                    }
+                    return Outcome::Cancelled(reason);
+                }
+                Err(JoinError::Panicked(payload)) => return Outcome::Panicked(payload),
+                Err(JoinError::PolledAfterCompletion) => {
+                    return Outcome::Err(WorkerError::Other("job polled after completion".into()));
+                }
+            };
+            source::run(cx, io, src).await
+        }
+    })
 }
 
 fn metric<T: Copy + Default>(m: Measured<T>) -> Metric<T> {
