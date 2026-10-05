@@ -161,7 +161,7 @@ pub fn parse_udev_dmi(bytes: &[u8]) -> ModulesInfo {
 pub fn read_modules(udev_dmi: &Path) -> ModulesInfo {
     let mut buf = Vec::new();
     match File::open(udev_dmi) {
-        Ok(f) if f.take(UDEV_DMI_MAX).read_to_end(&mut buf).is_ok() => parse_udev_dmi(&buf),
+        Ok(f) if (&f).take(UDEV_DMI_MAX).read_to_end(&mut buf).is_ok() => parse_udev_dmi(&buf),
         _ => ModulesInfo::NotReported,
     }
 }
