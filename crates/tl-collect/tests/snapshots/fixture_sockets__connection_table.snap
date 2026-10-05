@@ -1,0 +1,76 @@
+---
+source: crates/tl-collect/tests/fixture_sockets.rs
+expression: rows
+---
+[
+    Row {
+        cookie: 1,
+        proto: Tcp,
+        state: "LISTENING",
+        local: "0.0.0.0:22",
+        foreign: "*:*",
+        owner: Some(
+            [
+                100,
+                200,
+            ],
+        ),
+        interface: None,
+    },
+    Row {
+        cookie: 2,
+        proto: Tcp,
+        state: "ESTABLISHED",
+        local: "192.168.1.10:51000",
+        foreign: "140.82.112.3:443",
+        owner: Some(
+            [
+                100,
+                200,
+            ],
+        ),
+        interface: None,
+    },
+    Row {
+        cookie: 3,
+        proto: Tcp,
+        state: "TIME-WAIT",
+        local: "127.0.0.1:40000",
+        foreign: "127.0.0.1:8080",
+        owner: None,
+        interface: None,
+    },
+    Row {
+        cookie: 4,
+        proto: Tcp,
+        state: "LISTENING",
+        local: "[::]:631",
+        foreign: "*:*",
+        owner: Some(
+            [],
+        ),
+        interface: None,
+    },
+    Row {
+        cookie: 5,
+        proto: Udp,
+        state: "UNCONNECTED",
+        local: "0.0.0.0:5353",
+        foreign: "*:*",
+        owner: Some(
+            [],
+        ),
+        interface: None,
+    },
+    Row {
+        cookie: 6,
+        proto: Udp,
+        state: "UNCONNECTED",
+        local: "[fe80::1%enp5s0]:546",
+        foreign: "*:*",
+        owner: None,
+        interface: Some(
+            "enp5s0",
+        ),
+    },
+]

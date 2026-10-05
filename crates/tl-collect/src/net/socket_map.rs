@@ -239,7 +239,8 @@ mod tests {
         map.rebuild(&fixture("sockets-basic"), BOOT).unwrap();
         assert_eq!(map.owners_of(5001), &[key(100, 5000), key(200, 6000)]);
         assert!(map.owners_of(4).is_empty());
-        assert_eq!(map.owners.len(), 1);
+        assert_eq!(map.owners_of(5002), &[key(100, 5000), key(200, 6000)]);
+        assert_eq!(map.owners.len(), 2);
         assert!(map.restricted.is_empty());
         assert!(map.built_ns > 0);
 
