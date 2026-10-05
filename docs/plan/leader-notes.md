@@ -219,3 +219,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.9: progress built on kit base parts; TlSpinner has reduced_motion(bool) builder. Doc conflict: spinner sizes 14/16 (bead) vs 16/20 (foundation.md). Fix docs.
 - ug9.4: fonts from NotoSans-v2.015 and NotoSansMono-v2.014; pre-commit hook stripped a trailing space on LICENSE-OFL.txt line 21 (restore with \x20 trick, as with MAPS_GROUPING). Empty commit 77c2b56.
 - Motion: no shared motion tokens; M_FAST 120 ms is copied into checkbox, switch and radio. Needs a bead with the motion.animations -> set_reduce_motion wiring.
+- MANUAL DESKTOP CHECK (y6k.2): on Plasma 6.7.5, a new window appears in Snapshot.windows within 1 s (loads a script into live KWin; owner runs it). KWin Scripting names unverified: org.kde.kwin.Scripting /Scripting loadScript(s,s)->i, unloadScript(s)->b, start().
+- y6k.2: captions map \n \r NUL to U+FFFD before sanitize_text; windows stable-sorted by pid (tl-model doc "Sorted by (pid, internal_id)" now out of date); KWin worker Full mode only (LowMemory KeepAbove belongs with E14-018); KWin owner gone -> Unsupported snapshot but health stays Running.
