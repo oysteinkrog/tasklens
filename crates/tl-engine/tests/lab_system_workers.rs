@@ -286,15 +286,15 @@ fn times(messages: &[(u64, CpuSample)]) -> Vec<u64> {
 fn cpu_rates_follow_demand() {
     let dir = fixture_copy("cpu-math", Some(0));
     let mut fl = FakeLab::new();
-    let (updates, mut rx, demand, settings, control) = channels();
-    demand
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx
         .send(Demand {
             cpu: CpuDemand::Total,
             cpu_fast: true,
             ..Demand::default()
         })
         .expect("watch has receivers");
-    let worker_io = io(&updates, &demand, &settings, &control);
+    let worker_io = io(&updates, &demand_tx, &settings, &control);
     let src = cpu_source(&dir);
     let handle = fl.spawn(async move {
         let cx = Cx::current().expect("task has a Cx");
@@ -311,7 +311,7 @@ fn cpu_rates_follow_demand() {
 
     // 1 Hz. The 2000 ms sample was already scheduled at 10 Hz; the new rate starts with it.
     let changed = fl.now_ms();
-    demand
+    demand_tx
         .send(demand(CpuDemand::Total))
         .expect("watch has receivers");
     let slow = times(&cpu_messages(
@@ -331,7 +331,7 @@ fn cpu_rates_follow_demand() {
     );
 
     // Off. The 6000 ms sample was already scheduled; nothing after it for 60 s.
-    demand
+    demand_tx
         .send(demand(CpuDemand::Off))
         .expect("watch has receivers");
     let off = times(&cpu_messages(&mut fl, &mut rx, Duration::from_secs(61)));
@@ -345,15 +345,15 @@ fn cpu_rates_follow_demand() {
 fn cpu_recording_keeps_1hz() {
     let dir = fixture_copy("cpu-math", Some(0));
     let mut fl = FakeLab::new();
-    let (updates, mut rx, demand, settings, control) = channels();
-    demand
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx
         .send(Demand {
             cpu: CpuDemand::Off,
             recording: true,
             ..Demand::default()
         })
         .expect("watch has receivers");
-    let worker_io = io(&updates, &demand, &settings, &control);
+    let worker_io = io(&updates, &demand_tx, &settings, &control);
     let src = cpu_source(&dir);
     let handle = fl.spawn(async move {
         let cx = Cx::current().expect("task has a Cx");
@@ -376,11 +376,11 @@ fn cpu_recording_keeps_1hz() {
 fn cpu_reset_generation_warms_up() {
     let dir = fixture_copy("cpu-math", Some(0));
     let mut fl = FakeLab::new();
-    let (updates, mut rx, demand, settings, control) = channels();
-    demand
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx
         .send(demand(CpuDemand::Total))
         .expect("watch has receivers");
-    let worker_io = io(&updates, &demand, &settings, &control);
+    let worker_io = io(&updates, &demand_tx, &settings, &control);
     let src = cpu_source(&dir);
     let handle = fl.spawn(async move {
         let cx = Cx::current().expect("task has a Cx");
