@@ -19,7 +19,8 @@ use tl_model::process::{GroupKind, ProcessRecord};
 use tl_model::time::TimeNs;
 
 use crate::apps::cgroup_app::{
-    AppSliceScan, AppUnit, UnitAppId, is_bwrap, parse_app_unit, scan_app_slice, unwrap_bwrap_targets,
+    AppSliceScan, AppUnit, UnitAppId, is_bwrap, parse_app_unit, scan_app_slice,
+    unwrap_bwrap_targets,
 };
 use crate::apps::classify::{ClassifyInput, MatchInput, ProcClass, classify, match_app, qualifier};
 use crate::apps::desktop::{DesktopIndex, DesktopWatch, data_dirs_from_env};
