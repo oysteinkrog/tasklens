@@ -399,7 +399,15 @@ impl EngineClient for EngineHandle {
     fn journal(&self, query: JournalQuery) -> JournalHandle {
         match &self.inner.journal {
             Some(spawn) => spawn(query),
-            None => closed_journal(JournalError::NotFound),
+            None => match &*self
+                .inner
+                .rt_handle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+            {
+                Some(rt) => crate::workers::journal::open(rt, query),
+                None => closed_journal(JournalError::NotFound),
+            },
         }
     }
 }

@@ -7,6 +7,7 @@ pub mod cpu;
 pub mod disk;
 pub mod enumerate;
 pub mod gpu_nvidia;
+pub mod journal;
 pub mod logind;
 pub mod memory;
 pub mod net;
