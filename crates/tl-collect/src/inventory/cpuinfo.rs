@@ -536,7 +536,7 @@ mod tests {
             &vulns.join("spectre_v1"),
             &vulns.join("spectre_v2"),
         ] {
-            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0)).unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
         if std::fs::read(&lockdown).is_ok() {
             // Root ignores file modes, so there is nothing to test.
