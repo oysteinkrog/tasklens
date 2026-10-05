@@ -79,7 +79,6 @@ fn classify(e: Errno) -> FdCount {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::File;
     use std::os::fd::{AsFd, OwnedFd};
     use std::process::{Command, Stdio};
 
@@ -92,39 +91,39 @@ mod tests {
         .expect("open proc dir")
     }
 
-    fn readdir_self() -> u32 {
-        u32::try_from(
-            std::fs::read_dir("/proc/self/fd")
-                .expect("read fd dir")
+    #[test]
+    fn child_count_matches_readdir() {
+        // A child's fd table does not change once it has exec'd, unlike this test process,
+        // where other test threads open and close fds at any time.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let comm = format!("/proc/{pid}/comm");
+        for _ in 0..200 {
+            if std::fs::read_to_string(&comm).is_ok_and(|c| c.trim_end() == "sleep") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let dir = open_dir(&format!("/proc/{pid}"));
+        let got = fd_count(dir.as_fd());
+        let want = u32::try_from(
+            std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .expect("read child fd dir")
                 .count(),
         )
-        .expect("fd count fits u32")
-    }
-
-    #[test]
-    fn self_count_matches_readdir() {
-        let _extra: Vec<File> = (0..3)
-            .map(|_| File::open("/dev/null").expect("open /dev/null"))
-            .collect();
-        let dir = open_dir("/proc/self");
-        // Other test threads open and close fds too, so retry until the count is stable.
-        for _ in 0..50 {
-            let before = readdir_self();
-            let got = fd_count(dir.as_fd());
-            let after = readdir_self();
-            if before != after {
-                continue;
-            }
-            let FdCount::Count(n) = got else {
-                panic!("own process must give a count, got {got:?}");
-            };
-            assert!(
-                n.abs_diff(before) <= 1,
-                "fd_count {n} vs readdir {before} differ by more than 1"
-            );
-            return;
-        }
-        panic!("fd table never stable for 50 tries");
+        .expect("fd count fits u32");
+        child.kill().expect("kill sleep");
+        child.wait().expect("reap sleep");
+        let FdCount::Count(n) = got else {
+            panic!("own child must give a count, got {got:?}");
+        };
+        assert_eq!(n, want, "fd_count {n} vs readdir {want}");
     }
 
     #[test]
