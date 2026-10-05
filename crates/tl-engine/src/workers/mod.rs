@@ -4,6 +4,7 @@
 //! (chain edit). The logind worker (E08-A2) is the first entry.
 
 pub mod cpu;
+pub mod disk;
 pub mod enumerate;
 pub mod logind;
 pub mod memory;
@@ -26,7 +27,7 @@ pub struct WorkerSpec {
 
 /// Every worker of the engine. Each worker bead appends exactly one `WorkerSpec` here.
 pub fn all_workers() -> Vec<WorkerSpec> {
-    vec![logind::spec(), memory::spec()]
+    vec![logind::spec(), memory::spec(), disk::spec()]
 }
 
 /// The workers that run in `mode`.
