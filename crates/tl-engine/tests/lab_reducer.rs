@@ -1330,11 +1330,8 @@ fn tick_marks_stale_series_and_health() {
     assert_eq!(state, SourceState::Stale);
 }
 
-/// Fresh data clears both marks again. Ignored: `HealthState::sample_ok` clears `stale` and
-/// sets its own dirty flag, but apply never marks `ComponentMask::HEALTH` for it, so the
-/// published health stays `Stale` until another health change.
+/// Fresh data clears both marks again, and the health change is published.
 #[test]
-#[ignore = "reducer bug: fresh data after Stale does not republish health"]
 fn fresh_data_clears_stale() {
     let mut rig = Rig::new();
     let last = now_boot_ns() - 4 * SEC;

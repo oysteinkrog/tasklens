@@ -362,7 +362,7 @@ impl Reducer {
                     .apply_sweep(sweep, now_boot_ns(), settings.interval_ms, sink);
                 if let Some(id) = source {
                     let period = u64::from(settings.interval_ms) * 1_000_000;
-                    self.health.sample_ok(id, observed.1, period);
+                    self.sample_ok(id, observed.1, period);
                 }
                 self.publish_processes(observed);
                 self.rebuild_table(settings);
@@ -535,6 +535,13 @@ impl Reducer {
         };
         if tx.try_send(cmd).is_err() {
             tracing::debug!(target: "tasklens::engine", ?cmd, "helper queue full or closed: command dropped");
+        }
+    }
+
+    /// Records fresh data for `id`; marks `HEALTH` when that cleared a stale mark.
+    fn sample_ok(&mut self, id: SourceId, t_ns: TimeNs, period_ns: u64) {
+        if self.health.sample_ok(id, t_ns, period_ns) {
+            self.mark(ComponentMask::HEALTH);
         }
     }
 
@@ -733,7 +740,7 @@ impl Reducer {
         }
         self.apply_state.irq_pct = s.irq_pct;
         self.system_mut(t).cpu = totals;
-        self.health.sample_ok(SourceId::Cpu, t, period);
+        self.sample_ok(SourceId::Cpu, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
     }
@@ -761,7 +768,7 @@ impl Reducer {
         }
         self.apply_state.zram = s.zram;
         self.system_mut(t).memory = m;
-        self.health.sample_ok(SourceId::Memory, t, period);
+        self.sample_ok(SourceId::Memory, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
     }
@@ -840,7 +847,7 @@ impl Reducer {
         self.push(agg, MetricId::DISK_WRITE, t, write as f32, write_ok, period);
         rows.sort_unstable_by_key(|(idx, _)| *idx);
         self.system_mut(t).disks = rows.into();
-        self.health.sample_ok(SourceId::Disk, t, period);
+        self.sample_ok(SourceId::Disk, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
     }
@@ -899,7 +906,7 @@ impl Reducer {
         self.push(agg, MetricId::NET_TX, t, tx as f32, tx_ok, period);
         rows.sort_unstable_by_key(|(idx, _)| *idx);
         self.system_mut(t).nets = rows.into();
-        self.health.sample_ok(SourceId::Net, t, period);
+        self.sample_ok(SourceId::Net, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
     }
@@ -932,7 +939,7 @@ impl Reducer {
         }
         rows.sort_unstable_by_key(|(idx, _)| *idx);
         self.system_mut(t).sensors = rows.into();
-        self.health.sample_ok(SourceId::Sensors, t, period);
+        self.sample_ok(SourceId::Sensors, t, period);
         self.mark(ComponentMask::SERIES);
         Ok(())
     }
@@ -994,7 +1001,7 @@ impl Reducer {
         rows.sort_unstable_by_key(|(idx, _)| *idx);
         self.system_mut(t).gpus = rows.into();
         if let Some(id) = source {
-            self.health.sample_ok(id, t, period);
+            self.sample_ok(id, t, period);
         }
         if s.processes.is_some() {
             tracing::debug!(target: "tasklens::engine", "gpu processes: E09-006");

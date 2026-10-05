@@ -113,15 +113,18 @@ impl HealthState {
         }
     }
 
-    /// Records fresh data from a source. Called by apply.rs for every data update.
-    pub fn sample_ok(&mut self, id: SourceId, t_ns: TimeNs, period_ns: u64) {
+    /// Records fresh data from a source. Called by apply.rs for every data update. Returns true
+    /// when it cleared a stale mark, so the caller marks `HEALTH` for the next publish.
+    pub fn sample_ok(&mut self, id: SourceId, t_ns: TimeNs, period_ns: u64) -> bool {
         let entry = self.by_id.entry(id).or_insert_with(Entry::new);
         entry.last_ok_ns = Some(t_ns);
         entry.period_ns = Some(period_ns);
-        if entry.stale {
-            entry.stale = false;
-            self.dirty = true;
+        if !entry.stale {
+            return false;
         }
+        entry.stale = false;
+        self.dirty = true;
+        true
     }
 
     /// Marks running sources stale or fresh. Returns true when any mark changed.
