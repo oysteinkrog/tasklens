@@ -2,15 +2,16 @@
 //! (ADR-005, ADR-001 rule 2).
 //!
 //! No public signature here names an asupersync type (D-001). The one exception is `HookCtx`,
-//! which is `#[doc(hidden)]` and used only inside the crate and by E11's gate factory.
-//! The shutdown steps (E09-A2) are added by a later bead.
+//! which is `#[doc(hidden)]` and used only inside the crate and by E11's gate factory, and
+//! `Engine::start_with_workers`, which is `#[doc(hidden)]` and used only by tests.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
-use asupersync::runtime::{Runtime, RuntimeHandle};
+use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeHandle};
 use tl_collect::sysroot::{SysRoot, read_trimmed};
 use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
@@ -30,12 +31,16 @@ use crate::reducer::{ActionGate, Publisher};
 use crate::session::{RootEndpoints, engine_root};
 use crate::source::WorkerControl;
 use crate::update::EngineMsg;
-use crate::workers::workers_for;
+use crate::workers::{WorkerSpec, workers_for};
 
 /// Capacity of the action event channel (ADR-005).
 pub const EVENTS_CAPACITY: usize = 256;
 /// Capacity of the command and update queue (ADR-005).
 pub const MSGS_CAPACITY: usize = 256;
+/// How long `shutdown` waits for the root region to drain (ADR-004 step 2).
+pub const DRAIN_BUDGET: Duration = Duration::from_millis(1000);
+/// How long `shutdown` waits for runtime teardown (ADR-004 step 4).
+pub const TEARDOWN_BUDGET: Duration = Duration::from_millis(500);
 
 /// Opens one journal stream. Installed by E14-A4 through `EngineHooks`.
 pub type JournalSpawner = Arc<dyn Fn(JournalQuery) -> JournalHandle + Send + Sync>;
@@ -72,6 +77,23 @@ pub struct HookCtx {
     pub shared: SharedHandles,
 }
 
+/// What `EngineHandle::shutdown` reports. `tl-app` calls `std::process::exit(0)` when it is not
+/// clean (ADR-004).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownReport {
+    /// The root region drained within `DRAIN_BUDGET`.
+    pub drained: bool,
+    /// Runtime teardown finished within `TEARDOWN_BUDGET`.
+    pub torn_down: bool,
+    pub elapsed: Duration,
+}
+
+impl ShutdownReport {
+    pub fn clean(&self) -> bool {
+        self.drained && self.torn_down
+    }
+}
+
 /// The UI side of a running engine. Cheap to clone: every clone shares one `Inner`.
 #[derive(Clone)]
 pub struct EngineHandle {
@@ -81,18 +103,24 @@ pub struct EngineHandle {
 struct Inner {
     latest: Arc<ArcSwap<Snapshot>>,
     wake_rx: async_channel::Receiver<()>,
+    /// `None` once `shutdown` has dropped them (ADR-004 step 1).
+    links: Mutex<Option<Links>>,
+    /// The last demand sent, so an equal demand does not wake the workers.
+    last_demand: Mutex<Demand>,
+    journal: Option<JournalSpawner>,
+    rt: Mutex<Option<Runtime>>,
+    /// Dropped with `Inner`, so a live `EngineHandle` clone keeps the runtime alive.
+    #[allow(dead_code, reason = "held only to keep the runtime alive")]
+    rt_handle: Mutex<Option<RuntimeHandle>>,
+    stopped: AtomicBool,
+}
+
+/// The UI-side channel ends that `shutdown` drops first.
+struct Links {
     events_rx: async_channel::Receiver<ActionEvent>,
     demand_tx: watch::Sender<Demand>,
     settings_tx: watch::Sender<EngineSettings>,
     msgs_tx: mpsc::Sender<EngineMsg>,
-    /// The last demand sent, so an equal demand does not wake the workers.
-    last_demand: Mutex<Demand>,
-    journal: Option<JournalSpawner>,
-    #[allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")]
-    rt: Mutex<Option<Runtime>>,
-    #[allow(dead_code, reason = "Engine::start and shutdown (E09) own the runtime")]
-    rt_handle: Mutex<Option<RuntimeHandle>>,
-    stopped: AtomicBool,
 }
 
 impl EngineHandle {
@@ -112,10 +140,12 @@ impl EngineHandle {
             inner: Arc::new(Inner {
                 latest,
                 wake_rx,
-                events_rx,
-                demand_tx,
-                settings_tx,
-                msgs_tx,
+                links: Mutex::new(Some(Links {
+                    events_rx,
+                    demand_tx,
+                    settings_tx,
+                    msgs_tx,
+                })),
                 last_demand,
                 journal,
                 rt: Mutex::new(None),
@@ -123,6 +153,71 @@ impl EngineHandle {
                 stopped: AtomicBool::new(false),
             }),
         }
+    }
+
+    fn links(&self) -> std::sync::MutexGuard<'_, Option<Links>> {
+        self.inner
+            .links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Stops the engine in the five ADR-004 steps and consumes the handle. Call it on the main
+    /// thread after GPUI has stopped (ADR-010), and drop every other `EngineHandle` clone first:
+    /// a live clone keeps the runtime alive, so teardown cannot finish and `torn_down` is false.
+    ///
+    /// `total` is advisory. `DRAIN_BUDGET` and `TEARDOWN_BUDGET` are the real bounds, 1.5 s
+    /// together. A blocking job that is still running is not interrupted; teardown then goes on
+    /// in the background and `torn_down` is false.
+    pub fn shutdown(self, total: Duration) -> ShutdownReport {
+        let begin = Instant::now();
+        let inner = self.inner;
+        inner.stopped.store(true, Ordering::Release);
+        // Step 1: drop the UI-side senders.
+        drop(
+            inner
+                .links
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take(),
+        );
+        let rt = inner
+            .rt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(rt) = rt else {
+            tracing::warn!(target: "tasklens::engine", "shutdown: no runtime; it already ran");
+            return ShutdownReport {
+                drained: false,
+                torn_down: false,
+                elapsed: begin.elapsed(),
+            };
+        };
+        // Step 2: cancel the root region with `CancelKind::Shutdown` and wait for it.
+        let drained = rt.drain_root_region(DRAIN_BUDGET) == RootDrainOutcome::Quiescent;
+        // Step 3: drop `rt_handle`. This is the last owner of `Inner` unless the caller kept a
+        // clone.
+        drop(inner);
+        // Step 4.
+        let torn_down = rt.shutdown_timeout(TEARDOWN_BUDGET);
+        // Step 5.
+        let report = ShutdownReport {
+            drained,
+            torn_down,
+            elapsed: begin.elapsed(),
+        };
+        if !report.clean() {
+            tracing::warn!(
+                target: "tasklens::engine",
+                drained,
+                torn_down,
+                elapsed_ms = report.elapsed.as_millis() as u64,
+                total_ms = total.as_millis() as u64,
+                "engine shutdown did not finish cleanly",
+            );
+        }
+        report
     }
 }
 
@@ -133,6 +228,19 @@ impl Engine {
     /// Builds the runtime and the channels, publishes the empty snapshot and spawns
     /// `engine_root` in the root region, so shutdown cancellation reaches it (ADR-004).
     pub fn start(config: EngineConfig, hooks: EngineHooks) -> Result<EngineHandle, EngineError> {
+        let workers = workers_for(config.mode);
+        Self::start_with_workers(config, hooks, workers)
+    }
+
+    /// `start` with `workers` in place of `workers_for(config.mode)`, so tests can run fake
+    /// workers on the real runtime. A `WorkerSpec` factory takes an asupersync `Cx`, so this
+    /// stays out of the documented API (ADR-001).
+    #[doc(hidden)]
+    pub fn start_with_workers(
+        config: EngineConfig,
+        hooks: EngineHooks,
+        workers: Vec<WorkerSpec>,
+    ) -> Result<EngineHandle, EngineError> {
         let rt = crate::runtime::build_runtime()
             .map_err(|e| EngineError::Runtime(e.to_string().into()))?;
         let boot_id = read_boot_id(&config.sys_root);
@@ -146,7 +254,6 @@ impl Engine {
         let latest = Arc::new(ArcSwap::from_pointee(empty_snapshot(boot_id)));
 
         let journal = hooks.journal.clone();
-        let workers = workers_for(config.mode);
         let ep = RootEndpoints {
             msgs: msgs_rx,
             msgs_tx: msgs_tx.clone(),
@@ -240,7 +347,11 @@ impl EngineClient for EngineHandle {
     }
 
     fn action_events(&self) -> async_channel::Receiver<ActionEvent> {
-        self.inner.events_rx.clone()
+        match &*self.links() {
+            Some(links) => links.events_rx.clone(),
+            // After `shutdown`: a receiver whose sender is already gone.
+            None => async_channel::bounded(1).1,
+        }
     }
 
     fn set_demand(&self, demand: Demand) {
@@ -255,18 +366,26 @@ impl EngineClient for EngineHandle {
         *last = demand.clone();
         // `watch::Sender::send` needs no `Cx` and never blocks. An error means the engine has
         // stopped, and then the demand no longer matters.
-        let _ = self.inner.demand_tx.send(demand);
+        if let Some(links) = &*self.links() {
+            let _ = links.demand_tx.send(demand);
+        }
     }
 
     fn set_settings(&self, settings: EngineSettings) {
-        let _ = self.inner.settings_tx.send(settings);
+        if let Some(links) = &*self.links() {
+            let _ = links.settings_tx.send(settings);
+        }
     }
 
     fn send(&self, cmd: Command) -> Result<(), CommandError> {
         if self.inner.stopped.load(Ordering::Acquire) {
             return Err(CommandError::EngineStopped);
         }
-        self.inner
+        let links = self.links();
+        let Some(links) = &*links else {
+            return Err(CommandError::EngineStopped);
+        };
+        links
             .msgs_tx
             .try_send(EngineMsg::Command(cmd))
             .map_err(|e| match e {
