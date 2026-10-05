@@ -1096,8 +1096,9 @@ fn sweep_root() -> (tempfile::TempDir, SysRoot) {
 
 /// Rewrites stat fields 14 (utime), 15 (stime) and 22 (start_ticks) of the 4201 copy.
 fn set_stat(root: &SysRoot, utime: u64, stime: u64, start_ticks: u64) {
-    let line = String::from_utf8(fixture_bytes("process-edge", "proc/4201/stat")).unwrap();
-    let close = line.rfind(')').unwrap();
+    let line =
+        String::from_utf8(fixture_bytes("process-edge", "proc/4201/stat")).expect("stat is UTF-8");
+    let close = line.rfind(')').expect("stat has a close paren");
     let mut fields: Vec<String> = line[close + 2..]
         .trim_end()
         .split(' ')
