@@ -420,12 +420,14 @@ mod tests {
         // A peer-to-peer pair over a socketpair gives a real connection without a bus.
         let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
         let conn = futures_lite::future::block_on(async {
-            let server = zbus::connection::Builder::unix_stream(a)
+            let server = zbus::connection::Builder::async_io_unix_stream(a)
                 .server(zbus::Guid::generate())
                 .expect("server builder")
                 .p2p()
                 .build();
-            let client = zbus::connection::Builder::unix_stream(b).p2p().build();
+            let client = zbus::connection::Builder::async_io_unix_stream(b)
+                .p2p()
+                .build();
             let (server, client) = futures_lite::future::zip(server, client).await;
             drop(client.expect("client connects"));
             server.expect("server connects")
