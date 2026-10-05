@@ -20,7 +20,8 @@ use tl_engine::update::{
     StartupUpdate,
 };
 use tl_model::actions::{
-    ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, Signal,
+    ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
+    Signal,
 };
 use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
 use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
@@ -28,9 +29,10 @@ use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
 use tl_model::history::{HistoryMetric, HistoryRange, RecordSink};
-use tl_model::ids::{DeviceIdx, MetricId, ProcessKey, SeriesId};
-use tl_model::process::ProcessRecord;
+use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
+use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SampleFlags};
+use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
 use tl_model::system::{
     CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric,
@@ -39,8 +41,8 @@ use tl_model::system::{
 use tl_model::table::{
     Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
 };
-use tl_model::time::{BootId, TimeNs};
-use tl_model::validity::Validity;
+use tl_model::time::{BootId, TimeNs, now_boot_ns};
+use tl_model::validity::{FieldValidity, Validity};
 
 const BOOT: BootId = BootId(0x1234);
 const CPU_TOTAL: SeriesId = SeriesId {
@@ -1119,4 +1121,282 @@ fn every_variant_applies_without_panic() {
         13,
         "one queued command per forwarded variant"
     );
+}
+
+// ---- Sequence, versions and Tick effects (E09, ADR-005, ADR-008, ADR-013) ----
+
+impl Rig {
+    /// Runs the lab to quiescence and checks its oracles.
+    fn passed(mut self) {
+        let report = self.lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+}
+
+/// xorshift64, so the message mix is the same on every run.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+fn proc_key(pid: u32) -> ProcessKey {
+    ProcessKey {
+        start_ticks: u64::from(pid) * 10,
+        boot_id: BOOT,
+        pid,
+    }
+}
+
+fn proc_record(pid: u32) -> ProcessRecord {
+    ProcessRecord {
+        key: proc_key(pid),
+        ppid: 1,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: "x".into(),
+            name: "x".into(),
+            exe: None,
+            cmdline: None,
+            user: "user".into(),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            search_lower: "x user".into(),
+        }),
+        group: GroupKey(0),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+fn proc_extras() -> ProcessExtras {
+    ProcessExtras {
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        start_boot_ns: 0,
+        rss_peak_bytes: 0,
+        rss_shared_bytes: 0,
+        commit_bytes: 0,
+        vsize_bytes: 0,
+        vsize_peak_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        policy: SchedPolicy::Other,
+        rt_prio: 0,
+        affinity: CpuSet::empty(),
+        handles: None,
+        exe_name: "x".into(),
+        exe_path: "/usr/bin/x".into(),
+        exe_deleted: false,
+        unit: None,
+        state_letter: b'S',
+        frozen: false,
+        disk_read_bps: 0.0,
+        disk_write_raw_bps: 0.0,
+        flag_since_ns: 0,
+    }
+}
+
+/// A sweep at `t_ns` that sees the processes `pids`, with index aligned extras.
+fn sweep_of(t_ns: TimeNs, pids: &[u32]) -> EngineMsg {
+    let mut sweep = sweep_msg(t_ns);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        s.records = pids.iter().map(|&pid| proc_record(pid)).collect();
+        s.extras = pids.iter().map(|_| proc_extras()).collect();
+    }
+    sweep
+}
+
+fn ticks(n: u64) -> Vec<EngineMsg> {
+    (0..n).map(|_| EngineMsg::Tick).collect()
+}
+
+#[test]
+fn sequence_strictly_increases_over_1000_mixed_messages() {
+    let mut rig = Rig::new();
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut prev = rig.latest().sequence;
+    let mut sent = 0u64;
+    let mut publishes = 0u64;
+    while sent < 1000 {
+        // Batches of 1 to 4 messages, each batch one publish.
+        let size = (1 + rng.below(4)).min(1000 - sent);
+        let mut batch = Vec::new();
+        for _ in 0..size {
+            sent += 1;
+            let t = sent * 100 * MS;
+            batch.push(match rng.below(4) {
+                0 => cpu_msg(t, rng.below(100) as f32, sent == 1),
+                1 => sweep_of(t, &[1, 2 + (rng.below(3) as u32)]),
+                2 => query(sent),
+                _ => EngineMsg::Tick,
+            });
+        }
+        rig.run(batch).expect("no invariant violation");
+        let next = rig.latest().sequence;
+        assert_eq!(next, prev + 1, "publish after {sent} messages");
+        assert_eq!(rig.reducer().sequence, next);
+        prev = next;
+        publishes += 1;
+    }
+    assert!(publishes >= 250, "{publishes} publishes");
+    rig.passed();
+}
+
+#[test]
+fn component_versions_bump_only_when_changed() {
+    let mut rig = Rig::new();
+    rig.run(vec![cpu_msg(SEC, 50.0, true), sweep_of(SEC, &[1])])
+        .expect("no invariant violation");
+    let prev = rig.latest();
+    assert!(prev.series.header.version > 0);
+
+    rig.run(vec![sweep_of(2 * SEC, &[1, 2])])
+        .expect("no invariant violation");
+    let next = rig.latest();
+    assert!(next.processes.header.version > prev.processes.header.version);
+    assert!(next.table.header.version > prev.table.header.version);
+    assert_eq!(next.series.header.version, prev.series.header.version);
+    assert!(Arc::ptr_eq(&next.series, &prev.series));
+    assert_eq!(next.processes.records.len(), 2);
+    rig.passed();
+}
+
+/// The reducer reads CLOCK_BOOTTIME on `Tick`, so the test places the last CPU sample `n`
+/// seconds in the past: the same as `n` one-second ticks after the source stopped. Returns
+/// the newest `CPU_TOTAL` flags and the CPU health state after `n` ticks.
+fn after_cpu_stops(n: u64) -> (SampleFlags, SourceState) {
+    let mut rig = Rig::new();
+    let last = now_boot_ns() - n * SEC;
+    rig.run(vec![
+        health_msg(0),
+        cpu_msg(last - 2 * SEC, 50.0, true),
+        cpu_msg(last - SEC, 50.0, false),
+        cpu_msg(last, 50.0, false),
+    ])
+    .expect("no invariant violation");
+    assert!(
+        !rig.last_sample(CPU_TOTAL)
+            .flags
+            .contains(SampleFlags::STALE)
+    );
+    assert_eq!(
+        rig.latest().health.get(SourceId::Cpu).state,
+        SourceState::Running
+    );
+
+    rig.run(ticks(n)).expect("no invariant violation");
+    let flags = rig.last_sample(CPU_TOTAL).flags;
+    let state = rig.latest().health.get(SourceId::Cpu).state;
+    rig.passed();
+    (flags, state)
+}
+
+#[test]
+fn tick_marks_stale_series_and_health() {
+    // Stale after max(3 × 1 s, 1.5 s) without data (ADR-008).
+    let (flags, state) = after_cpu_stops(1);
+    assert!(!flags.contains(SampleFlags::STALE));
+    assert_eq!(state, SourceState::Running);
+
+    let (flags, state) = after_cpu_stops(4);
+    assert!(flags.contains(SampleFlags::STALE));
+    assert_eq!(state, SourceState::Stale);
+
+    // Fresh data clears the health mark again.
+    let mut rig = Rig::new();
+    let last = now_boot_ns() - 4 * SEC;
+    rig.run(vec![
+        health_msg(0),
+        cpu_msg(last - SEC, 50.0, true),
+        cpu_msg(last, 50.0, false),
+        EngineMsg::Tick,
+    ])
+    .expect("no invariant violation");
+    assert_eq!(
+        rig.latest().health.get(SourceId::Cpu).state,
+        SourceState::Stale
+    );
+    rig.run(vec![cpu_msg(now_boot_ns(), 50.0, false), EngineMsg::Tick])
+        .expect("no invariant violation");
+    assert_eq!(
+        rig.latest().health.get(SourceId::Cpu).state,
+        SourceState::Running
+    );
+    assert!(
+        !rig.last_sample(CPU_TOTAL)
+            .flags
+            .contains(SampleFlags::STALE)
+    );
+    rig.passed();
+}
+
+/// Process 2 exits in a sweep `n` seconds before now, as if `n` one-second ticks followed
+/// it (see `after_cpu_stops`). Returns whether its record is in the snapshot after them.
+fn exited_present_after(n: u64) -> bool {
+    assert_eq!(EngineSettings::default().interval_ms, 1000);
+    let mut rig = Rig::new();
+    let exit = now_boot_ns() - n * SEC;
+    rig.run(vec![sweep_of(exit - SEC, &[1, 2]), sweep_of(exit, &[1])])
+        .expect("no invariant violation");
+    let gone = proc_key(2);
+    let snap = rig.latest();
+    let record = snap
+        .processes
+        .records
+        .iter()
+        .find(|r| r.key == gone)
+        .expect("the exited record is published at once");
+    assert!(record.flags.contains(ProcFlags::EXITED));
+
+    rig.run(ticks(n)).expect("no invariant violation");
+    let snap = rig.latest();
+    let present = snap.processes.records.iter().any(|r| r.key == gone);
+    assert!(snap.processes.records.iter().any(|r| r.key == proc_key(1)));
+    rig.passed();
+    present
+}
+
+#[test]
+fn tick_drops_exited_after_linger() {
+    // Linger is clamp(2 × 1000 ms, 1 s, 3 s) = 2 s (R-041).
+    assert!(exited_present_after(1), "present after 1 tick");
+    assert!(!exited_present_after(3), "gone after 3 ticks");
+}
+
+#[test]
+fn set_table_query_older_generation_still_applied() {
+    let mut rig = Rig::new();
+    rig.run(vec![query(7)]).expect("no invariant violation");
+    assert_eq!(rig.latest().table.query_generation, 7);
+    // The UI drops tables older than its newest query; the engine applies them in order.
+    rig.run(vec![query(5)]).expect("no invariant violation");
+    assert_eq!(rig.latest().table.query_generation, 5);
+    rig.passed();
 }
