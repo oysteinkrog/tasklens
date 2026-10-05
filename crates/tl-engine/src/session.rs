@@ -160,6 +160,7 @@ async fn run_session(
 ) -> Result<(), SessionEnd> {
     reducer.sequence = ep.next_sequence;
     reducer.settings_rx = Some(ep.settings.clone());
+    reducer.demand_rx = Some(ep.demand.clone());
     if epoch > 1 {
         // The rings are new, but the charts must not join the old epoch's line to this one.
         reducer.series.mark_gap_all();

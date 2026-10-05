@@ -13,9 +13,10 @@ use asupersync::Cx;
 use rustc_hash::FxHashMap;
 use tl_model::actions::{ActionEvent, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
+use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -82,6 +83,9 @@ pub struct ApplyState {
     net_dbus: FxHashMap<DeviceIdx, NetDetails>,
     /// `supports_process_util` per GPU UUID from the last `GpuInfo` (E09-006).
     gpu_caps: FxHashMap<[u8; 16], bool>,
+    /// Keys whose PSS the last demand asked for: `detail_keys` while a PSS or USS column is
+    /// shown, else none (E09-006).
+    pss_keys: Arc<[ProcessKey]>,
 }
 
 impl ApplyState {
@@ -1132,6 +1136,24 @@ impl Reducer {
             self.components.processes = next;
             self.mark(ComponentMask::PROCESSES);
         }
+    }
+
+    /// Applies the demand of this batch: PSS of keys no longer demanded becomes `WarmingUp`
+    /// and leaves coverage. A hidden PSS and USS column demands no keys.
+    pub fn apply_demand(&mut self, demand: &Demand, settings: &EngineSettings) {
+        let shown = demand.process_columns.contains(ColumnId::Pss)
+            || demand.process_columns.contains(ColumnId::Uss);
+        let keys: Arc<[ProcessKey]> = if shown {
+            Arc::clone(&demand.detail_keys)
+        } else {
+            Arc::from([])
+        };
+        if *keys == *self.apply_state.pss_keys {
+            return;
+        }
+        self.processes.clear_pss_outside(&keys);
+        self.apply_state.pss_keys = keys;
+        self.republish_processes(settings);
     }
 
     /// Publishes a change between sweeps with the last sweep's observed times, then rebuilds

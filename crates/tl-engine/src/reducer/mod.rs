@@ -25,6 +25,7 @@ use asupersync::channel::{mpsc, watch};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionId, ActionRequest};
 use tl_model::command::SetupStep;
+use tl_model::demand::Demand;
 use tl_model::details::DetailsSnapshot;
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HealthSnapshot, SourceId};
@@ -139,6 +140,9 @@ pub struct Reducer {
     /// The engine settings watch. `run` reads it once per publish; `None` uses
     /// `EngineSettings::default()`.
     pub settings_rx: Option<watch::Receiver<EngineSettings>>,
+    /// The UI demand watch. `run` reads it once per publish for the PSS keys (E09-006); `None`
+    /// leaves PSS as the updates set it.
+    pub demand_rx: Option<watch::Receiver<Demand>>,
     /// State only `apply` reads and writes (E09-007).
     pub apply_state: apply::ApplyState,
     dirty: ComponentMask,
@@ -214,6 +218,7 @@ impl Reducer {
             events_tx,
             helper_tx: None,
             settings_rx: None,
+            demand_rx: None,
             apply_state: apply::ApplyState::default(),
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
@@ -245,6 +250,13 @@ impl Reducer {
                 };
                 self.apply(cx, msg, &settings)?;
                 applied += 1;
+            }
+            if let Some(demand) = self
+                .demand_rx
+                .as_ref()
+                .map(watch::Receiver::borrow_and_clone)
+            {
+                self.apply_demand(&demand, &settings);
             }
             tracing::debug!(target: "tasklens::engine", applied, "reducer publish");
             // No await between the store and the wake (ADR-005).
