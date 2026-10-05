@@ -2,10 +2,13 @@
 
 use std::sync::Arc;
 
+use smallvec::SmallVec;
 use tl_model::ids::GroupKey;
 use tl_model::process::GroupKind;
 
-use crate::apps::cgroup_app::parse_app_unit;
+use crate::apps::cgroup_app::{AppUnitKind, UnitAppId, parse_app_unit};
+use crate::apps::desktop::{DesktopEntry, DesktopIndex};
+use crate::apps::naming::exe_basename;
 use crate::proc::cgroup::{CgroupPath, UserPlacement, app_slice_unit, placement};
 
 // ---- Classification (E05-015) ----
@@ -96,4 +99,165 @@ pub fn classify(inp: &ClassifyInput<'_>, self_uid: u32) -> (ProcClass, GroupKind
 /// defines the scheme (R-279).
 pub fn group_key(kind: &GroupKind) -> GroupKey {
     kind.key()
+}
+
+// ---- App matching (E05-016) ----
+
+/// Exe basename to the desktop id tried first for it. Mission Center 1.2.0's table (R-250). When
+/// the mapped id is not in the index, matching goes on with the normal steps.
+pub const EXCEPTIONS: &[(&str, &str)] = &[
+    ("firefox-bin", "firefox"),
+    ("soffice.bin", "libreoffice"),
+    ("resources-processes", "resources"),
+    ("gnome-terminal-server", "gnome-terminal"),
+    ("chrome", "google-chrome-stable"),
+];
+
+/// Exe basenames never matched to an app.
+pub const STAY_BACKGROUND: &[&str] = &["xdg-desktop-portal-kde", "Xwayland"];
+
+/// Exe basenames never matched to an app. `foot` only when its argv contains `--server` (the
+/// foot server); `guake-prefs` always.
+pub const IGNORE: &[&str] = &["guake-prefs", "foot"];
+
+/// Command-line tokens that tell apart entries sharing one binary.
+const TIE_TOKENS: [&str; 3] = ["--app-id=", "--profile-directory=", "--class="];
+
+/// What `match_app` needs to know about one process. Command lines are read for tokens only and
+/// never logged.
+pub struct MatchInput<'a> {
+    /// The app id of the app.slice unit the process runs in (E05-011).
+    pub unit_app: Option<&'a UnitAppId>,
+    /// The `/proc/<pid>/exe` link target.
+    pub exe: Option<&'a str>,
+    pub argv0: Option<&'a str>,
+    /// The command line, tokens joined by spaces.
+    pub cmdline: Option<&'a str>,
+    /// KWin `resourceClass` (P2). Always `None` in P1.
+    pub wm_class: Option<&'a str>,
+}
+
+/// Finds the desktop entry of the app a process belongs to (PROC-005, PROC-006). Steps in
+/// order: the ignore lists, the unit app id, the window class, the exe (with the exceptions
+/// table and argv tie-breaking), then the Wine `.exe` name.
+pub fn match_app(inp: &MatchInput<'_>, index: &DesktopIndex) -> Option<Arc<DesktopEntry>> {
+    let exe = inp.exe.map(|e| e.strip_suffix(" (deleted)").unwrap_or(e));
+    let base = exe.map(exe_basename);
+    if let Some(base) = base
+        && (STAY_BACKGROUND.contains(&base)
+            || base == "guake-prefs"
+            || (base == "foot" && cmdline_tokens(inp).any(|t| t == "--server")))
+    {
+        return None;
+    }
+    if let Some(unit) = inp.unit_app
+        && let Some(entry) = match_unit(unit, index)
+    {
+        return Some(entry.clone());
+    }
+    if let Some(entry) = inp.wm_class.and_then(|c| index.by_wm_class(c)) {
+        return Some(entry.clone());
+    }
+    if let (Some(exe), Some(base)) = (exe, base) {
+        if let Some(entry) = EXCEPTIONS
+            .iter()
+            .find(|(b, _)| *b == base)
+            .and_then(|(_, id)| index.by_id(id))
+        {
+            return Some(entry.clone());
+        }
+        match index.by_exe(exe) {
+            [] => {}
+            [one] => return Some(one.clone()),
+            many => return break_tie(inp, many),
+        }
+    }
+    let name = wine_exe(inp)?;
+    let mut found = index.entries().filter(|e| wine_entry_matches(e, name));
+    match (found.next(), found.next()) {
+        (Some(one), None) => Some(one.clone()),
+        _ => None,
+    }
+}
+
+/// The qualifier shown on an app row (PROC-008): `Flatpak` or `Snap` from the unit kind, `Wine`
+/// when the process carries a Windows `.exe` name (the key of `match_app`'s Wine step), else
+/// `None`. `unit` falls back to `inp.unit_app`.
+pub fn qualifier(inp: &MatchInput<'_>, unit: Option<&UnitAppId>) -> Option<&'static str> {
+    match unit.or(inp.unit_app).map(|u| u.kind) {
+        Some(AppUnitKind::Flatpak) => Some("Flatpak"),
+        Some(AppUnitKind::Snap) => Some("Snap"),
+        _ => wine_exe(inp).map(|_| "Wine"),
+    }
+}
+
+/// The unit's app id, then the launcher form's `alt` id (E05-011), then for a Flatpak unit the
+/// entry whose `X-Flatpak` equals the id.
+fn match_unit<'i>(unit: &UnitAppId, index: &'i DesktopIndex) -> Option<&'i Arc<DesktopEntry>> {
+    index
+        .by_id(&unit.app_id)
+        .or_else(|| unit.alt.as_ref().and_then(|(_, id)| index.by_id(id)))
+        .or_else(|| {
+            (unit.kind == AppUnitKind::Flatpak)
+                .then(|| {
+                    index
+                        .entries()
+                        .find(|e| e.flatpak.as_deref() == Some(&*unit.app_id))
+                })
+                .flatten()
+        })
+}
+
+/// Keeps the entries whose `Exec` holds every tie token of the command line with the same value.
+/// Exactly one left is the match; none or several is a true tie and stays unmatched.
+fn break_tie(inp: &MatchInput<'_>, entries: &[Arc<DesktopEntry>]) -> Option<Arc<DesktopEntry>> {
+    let wanted: SmallVec<[&str; 3]> = cmdline_tokens(inp)
+        .filter(|t| TIE_TOKENS.iter().any(|p| t.starts_with(p)))
+        .collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut kept = entries.iter().filter(|e| {
+        e.exec.as_deref().is_some_and(|exec| {
+            wanted
+                .iter()
+                .all(|w| exec.split_ascii_whitespace().any(|t| t == *w))
+        })
+    });
+    match (kept.next(), kept.next()) {
+        (Some(one), None) => Some(one.clone()),
+        _ => None,
+    }
+}
+
+fn cmdline_tokens<'a>(inp: &MatchInput<'a>) -> impl Iterator<Item = &'a str> {
+    inp.cmdline.unwrap_or("").split_ascii_whitespace()
+}
+
+/// The Windows `.exe` name: `argv0`, else the first command-line token, ending in `.exe` (any
+/// case), cut to its last segment split on `/` and `\`.
+fn wine_exe<'a>(inp: &MatchInput<'a>) -> Option<&'a str> {
+    let token = inp
+        .argv0
+        .filter(|a| ends_with_exe(a))
+        .or_else(|| cmdline_tokens(inp).find(|t| ends_with_exe(t)))?;
+    token.rsplit(['/', '\\']).next()
+}
+
+fn wine_entry_matches(entry: &DesktopEntry, name: &str) -> bool {
+    let name = name.to_lowercase();
+    let by_exec = entry.exec.as_deref().is_some_and(|exec| {
+        let exec = exec.to_lowercase();
+        exec.contains("wine") && exec.contains(&name)
+    });
+    by_exec
+        || entry
+            .startup_wm_class
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(&name))
+}
+
+fn ends_with_exe(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".exe")
 }

@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Foo Game
+Exec=wine "C:\Games\Foo\foo.exe"
+Icon=foo-game

@@ -154,7 +154,7 @@ fn desktop_skip_rules() {
     assert!(index.by_id("hidden").is_none());
     assert!(index.by_id("link").is_none());
     assert!(index.by_id("org.kde.konsole").is_some());
-    assert_eq!(index.len(), 6);
+    assert_eq!(index.len(), 8);
 }
 
 #[test]
@@ -1188,4 +1188,146 @@ fn children_file_parsed() {
     let other = fs::File::open(proc.join("57")).expect("open /proc/57 fixture");
     children_from_proc(other.as_fd(), 57, &mut buf, &mut out);
     assert!(out.is_empty());
+}
+
+// ---- App matching (E05-016) ----
+
+use tl_collect::apps::cgroup_app::UnitAppId;
+use tl_collect::apps::classify::{MatchInput, match_app, qualifier};
+
+fn match_input<'a>(exe: Option<&'a str>, cmdline: Option<&'a str>) -> MatchInput<'a> {
+    MatchInput {
+        unit_app: None,
+        exe,
+        argv0: cmdline.and_then(|c| c.split_ascii_whitespace().next()),
+        cmdline,
+        wm_class: None,
+    }
+}
+
+fn matched_id(inp: &MatchInput<'_>, index: &DesktopIndex) -> Option<String> {
+    match_app(inp, index).map(|e| e.id.to_string())
+}
+
+#[test]
+fn match_by_unit_app_id() {
+    let index = desktop_index();
+    let unit: UnitAppId = parse_app_unit("app-firefox@1234.service").expect("unit parses");
+    let inp = MatchInput {
+        unit_app: Some(&unit),
+        ..match_input(
+            Some("/usr/lib/firefox/firefox"),
+            Some("/usr/lib/firefox/firefox"),
+        )
+    };
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("firefox"));
+    assert_eq!(qualifier(&inp, Some(&unit)), None);
+
+    // A Flatpak unit also matches the entry whose X-Flatpak equals its id.
+    let flatpak = parse_app_unit("flatpak-org.mozilla.Thunderbird-12345.scope").expect("parses");
+    let inp = MatchInput {
+        unit_app: Some(&flatpak),
+        ..match_input(Some("/app/lib/thunderbird/thunderbird"), None)
+    };
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("flatpak-tb"));
+    assert_eq!(qualifier(&inp, Some(&flatpak)), Some("Flatpak"));
+}
+
+#[test]
+fn match_exception_firefox_bin() {
+    let index = desktop_index();
+    let inp = match_input(
+        Some("/usr/lib/firefox/firefox-bin"),
+        Some("/usr/lib/firefox/firefox-bin"),
+    );
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("firefox"));
+}
+
+#[test]
+fn match_disambiguate_profile_directory() {
+    let index = desktop_index();
+    assert_eq!(index.by_exe("/opt/google/chrome/chrome").len(), 2);
+    let inp = match_input(
+        Some("/opt/google/chrome/chrome"),
+        Some("/opt/google/chrome/chrome --profile-directory=Work --no-first-run"),
+    );
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("chrome-work"));
+}
+
+#[test]
+fn match_true_tie_unmatched() {
+    let index = desktop_index();
+    let inp = match_input(
+        Some("/opt/google/chrome/chrome"),
+        Some("/opt/google/chrome/chrome --type=renderer"),
+    );
+    assert_eq!(matched_id(&inp, &index), None);
+}
+
+#[test]
+fn match_wine_exe() {
+    let index = desktop_index();
+    let inp = MatchInput {
+        unit_app: None,
+        exe: Some("/usr/bin/wine64-preloader"),
+        argv0: Some(r"C:\Games\Foo\foo.exe"),
+        cmdline: Some(r"C:\Games\Foo\foo.exe"),
+        wm_class: None,
+    };
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("foo-wine"));
+    assert_eq!(qualifier(&inp, None), Some("Wine"));
+
+    // The .exe name in a later argv token, matched case-insensitively.
+    let inp = MatchInput {
+        argv0: Some("/usr/bin/wine"),
+        cmdline: Some(r"/usr/bin/wine Z:\home\u\FOO.EXE"),
+        ..inp
+    };
+    assert_eq!(matched_id(&inp, &index).as_deref(), Some("foo-wine"));
+}
+
+#[test]
+fn match_stay_background_and_ignore() {
+    let index = desktop_index();
+    let xwayland = match_input(Some("/usr/bin/Xwayland"), Some("/usr/bin/Xwayland :0"));
+    assert_eq!(matched_id(&xwayland, &index), None);
+    let foot_server = match_input(Some("/usr/bin/foot"), Some("foot --server"));
+    assert_eq!(matched_id(&foot_server, &index), None);
+    let guake = match_input(Some("/usr/bin/guake-prefs"), Some("guake-prefs"));
+    assert_eq!(matched_id(&guake, &index), None);
+
+    // A STAY_BACKGROUND exe is not matched even inside an app unit.
+    let unit = parse_app_unit("app-firefox@1234.service").expect("unit parses");
+    let portal = MatchInput {
+        unit_app: Some(&unit),
+        ..match_input(Some("/usr/lib/xdg-desktop-portal-kde"), None)
+    };
+    assert_eq!(matched_id(&portal, &index), None);
+}
+
+#[test]
+fn match_scope_launcher_alt() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let apps = dir.path().join("applications");
+    fs::create_dir(&apps).expect("create applications dir");
+    fs::write(
+        apps.join("org.gnome.Nautilus.desktop"),
+        "[Desktop Entry]\nType=Application\nName=Files\nExec=nautilus --new-window %U\n",
+    )
+    .expect("write desktop file");
+    let index = DesktopIndex::build_in(&[apps], &[]);
+
+    let unit = parse_app_unit("app-gnome-org.gnome.Nautilus-777.scope").expect("unit parses");
+    assert_eq!(&*unit.app_id, "gnome-org.gnome.Nautilus");
+    let inp = MatchInput {
+        unit_app: Some(&unit),
+        ..match_input(
+            Some("/usr/bin/nautilus"),
+            Some("nautilus --gapplication-service"),
+        )
+    };
+    assert_eq!(
+        matched_id(&inp, &index).as_deref(),
+        Some("org.gnome.Nautilus")
+    );
 }

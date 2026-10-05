@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Name=Google Chrome
+Comment=Access the Internet
+Exec=/opt/google/chrome/chrome %U
+Icon=google-chrome
+Type=Application
+StartupWMClass=Google-chrome
+Categories=Network;WebBrowser;

@@ -44,6 +44,26 @@ expression: rows
         ),
     ),
     (
+        "foo-wine",
+        "Foo Game",
+        Some(
+            "wine",
+        ),
+        Some(
+            "foo-game",
+        ),
+    ),
+    (
+        "google-chrome",
+        "Google Chrome",
+        Some(
+            "/opt/google/chrome/chrome",
+        ),
+        Some(
+            "google-chrome",
+        ),
+    ),
+    (
         "kde-org.kde.dolphin",
         "Dolphin",
         Some(
