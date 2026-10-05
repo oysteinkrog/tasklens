@@ -3,6 +3,7 @@ pub mod autostart;
 pub mod impact;
 pub mod plasma_scripts;
 pub mod user_units;
+pub mod watch;
 
 use std::sync::Arc;
 
