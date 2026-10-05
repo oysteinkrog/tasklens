@@ -188,3 +188,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ndy.14: one early run saw an extra fd in the fake probe before Hello; unconfirmed. Ties in with the fd-leak investigation.
 - yms.26 sweep gate (U-10): 35 ms on the 2,000-pid fixture against 15 ms; live /proc 34 us per process (992 procs 33.9 ms, near the 3.5% Processes-tab budget). Syscalls are 80%. Measuring fewer-files options before deciding.
 - Socket map optimisation (R-287): skip pids whose /proc/<pid>/fd st_size is unchanged since the last rebuild; full rebuild every 10 s.
+- 8q0.26 subtree totals: tree mode only; grouped-mode process rows with children (depth 2+) get none, check against UI-PRC spec. Handles not summed (GroupRow has no handles field). Bead AC had a wrong number (B subtree CPU is 5, not 3).
