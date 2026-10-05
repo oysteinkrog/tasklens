@@ -9,36 +9,42 @@ mod fake_sources;
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::lab::LabConfig;
 use asupersync::lab::chaos::ChaosConfig;
 use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
+use asupersync::time::VirtualClock;
 use smallvec::SmallVec;
 use tl_engine::bridge::{EngineHooks, HookCtx};
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::reducer::{ActionGate, AdmissionView};
 use tl_engine::session::{RESTART_DELAY, RootEndpoints, engine_root};
-use tl_engine::source::WorkerIo;
+use tl_engine::source::{Source, WorkerIo};
 use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{
     CpuCoreSample, CpuSample, DeviceDesc, DeviceKinds, DeviceList, EngineMsg, NetSample,
-    SourceUpdate,
+    ProcessSweep, SourceUpdate,
 };
 use tl_engine::workers::WorkerSpec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, Signal};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
 use tl_model::command::Command;
+use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::{MetricId, SeriesId};
+use tl_model::ids::{MetricId, ProcessKey, SeriesId};
+use tl_model::process::{
+    GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
+};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, CpuTotals, LinkState, Metric, NetTotals};
+use tl_model::table::{TableMode, TableQuery};
 use tl_model::time::TimeNs;
-use tl_model::validity::Validity;
+use tl_model::validity::{FieldValidity, Validity};
 
 use fake_sources::{FakeLab, FakeSource, Step, UiSide, fake_worker_set, times_ms, worker_log};
 
@@ -538,4 +544,218 @@ fn fake_worker_set_publishes_series() {
     assert_eq!(samples(DeviceIdentity::CpuPackage, MetricId::CPU_TOTAL), 20);
     assert_eq!(samples(DeviceIdentity::Memory, MetricId::MEM_USED), 2);
     rig.finish();
+}
+
+// End to end (E09-A1) ------------------------------------------------------------------------
+
+/// Processes in every fake sweep: PIDs 1 to 20 Background, 21 to 50 System.
+const SWEEP_SIZE: u32 = 50;
+
+thread_local! {
+    /// The clock `sweep_factory` reads. The lab runs every task on the test thread.
+    static SWEEP_CLOCK: RefCell<Option<Arc<VirtualClock>>> = const { RefCell::new(None) };
+}
+
+/// A `Processes` worker that sees the same `SWEEP_SIZE` processes every second.
+#[derive(Clone)]
+struct FakeSweep {
+    clock: Arc<VirtualClock>,
+}
+
+impl Source for FakeSweep {
+    fn id(&self) -> SourceId {
+        SourceId::Processes
+    }
+
+    fn period(&self, _: &Demand, _: &EngineSettings) -> Option<Duration> {
+        Some(Duration::from_secs(1))
+    }
+
+    fn sample(self) -> (Self, SourceUpdate) {
+        let t_ns = self.clock.now().as_nanos();
+        let pids = 1..=SWEEP_SIZE;
+        let sweep = ProcessSweep {
+            observed_start: t_ns,
+            observed_end: t_ns,
+            records: pids.clone().map(sweep_record).collect(),
+            extras: pids.map(|_| sweep_extras()).collect(),
+            extras_p2: Vec::new(),
+            app_stats: Vec::new(),
+            unit_stats: Vec::new(),
+            system_threads: 0,
+            file_nr: None,
+            online_cpus: 1,
+            low_memory: None,
+        };
+        (self, SourceUpdate::Processes(sweep))
+    }
+}
+
+/// `start_ticks = pid × 10`, so ascending PIDs are sorted by key.
+fn sweep_record(pid: u32) -> ProcessRecord {
+    let group = if pid <= 20 {
+        GroupKind::Background
+    } else {
+        GroupKind::System
+    };
+    ProcessRecord {
+        key: ProcessKey {
+            start_ticks: u64::from(pid) * 10,
+            boot_id: fake_sources::FAKE_BOOT,
+            pid,
+        },
+        ppid: 0,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: "x".into(),
+            name: "x".into(),
+            exe: None,
+            cmdline: None,
+            user: "user".into(),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            search_lower: "x user".into(),
+        }),
+        group: group.key(),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+fn sweep_extras() -> ProcessExtras {
+    ProcessExtras {
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        start_boot_ns: 0,
+        rss_peak_bytes: 0,
+        rss_shared_bytes: 0,
+        commit_bytes: 0,
+        vsize_bytes: 0,
+        vsize_peak_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        policy: SchedPolicy::Other,
+        rt_prio: 0,
+        affinity: CpuSet::empty(),
+        handles: None,
+        exe_name: "x".into(),
+        exe_path: "/usr/bin/x".into(),
+        exe_deleted: false,
+        unit: None,
+        state_letter: b'S',
+        frozen: false,
+        disk_read_bps: 0.0,
+        disk_write_raw_bps: 0.0,
+        flag_since_ns: 0,
+    }
+}
+
+fn sweep_factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let clock = SWEEP_CLOCK
+        .with(|c| c.borrow().clone())
+        .expect("the test set SWEEP_CLOCK");
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let src = FakeSweep {
+            clock: Arc::clone(&clock),
+        };
+        async move { tl_engine::source::run(cx, io, src).await }
+    })
+}
+
+fn table_query(mode: TableMode, generation: u64) -> EngineMsg {
+    EngineMsg::Command(Command::SetTableQuery(TableQuery {
+        generation,
+        mode,
+        ..TableQuery::default()
+    }))
+}
+
+/// Header rows have neither a record nor a group row (`lab_table.rs::header_counts`).
+fn header_rows(snap: &Snapshot) -> usize {
+    snap.table
+        .rows
+        .iter()
+        .filter(|row| row.record.is_none() && row.group.is_none())
+        .count()
+}
+
+#[test]
+fn end_to_end_engine_in_lab() {
+    let begin = Instant::now();
+    let fake = FakeLab::with_config(LabConfig::new(42).max_steps(1_000_000));
+    SWEEP_CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fake.clock)));
+    let mut workers = fake_worker_set(vec![
+        (SourceId::Cpu, vec![Step::Ok], Duration::from_millis(100)),
+        (SourceId::Memory, vec![Step::Ok], Duration::from_secs(1)),
+    ]);
+    workers.push(WorkerSpec {
+        id: SourceId::Processes,
+        name: "fake-processes",
+        modes: &[EngineMode::Full],
+        factory: sweep_factory,
+    });
+    let mut rig = Rig::with_lab(fake, workers, 0);
+    rig.start();
+    rig.send(table_query(TableMode::Flat, 1));
+    // The first samples run at 0 ms, so the 5 s window [0, 5 s) holds 50 CPU samples.
+    rig.fake.run_for(
+        Duration::from_secs(5) - Duration::from_millis(1),
+        Duration::from_millis(100),
+    );
+
+    let snap = rig.latest();
+    assert!(snap.sequence >= 50, "sequence {}", snap.sequence);
+    let cpu = snap
+        .devices
+        .find(&DeviceIdentity::CpuPackage)
+        .expect("the CPU package exists")
+        .idx;
+    let cpu_total = snap
+        .series
+        .get(SeriesId {
+            device: cpu,
+            metric: MetricId::CPU_TOTAL,
+        })
+        .expect("the CPU_TOTAL series exists");
+    assert_eq!(cpu_total.samples.len(), 50);
+    assert_eq!(snap.processes.records.len(), SWEEP_SIZE as usize);
+    assert_eq!(snap.table.query_generation, 1);
+    assert_eq!(snap.table.rows.len(), SWEEP_SIZE as usize, "Flat mode");
+    assert_eq!(snap.health.get(SourceId::Cpu).state, SourceState::Running);
+
+    let before = snap.sequence;
+    rig.send(table_query(TableMode::Grouped, 2));
+    let grouped = rig.latest();
+    assert!(grouped.sequence > before, "the query change publishes");
+    assert_eq!(grouped.table.query_generation, 2);
+    assert_eq!(header_rows(&grouped), 3, "{:?}", grouped.table.rows);
+    assert_eq!(
+        grouped.health.get(SourceId::Cpu).state,
+        SourceState::Running
+    );
+
+    rig.finish();
+    eprintln!("end_to_end_engine_in_lab: {:?} wall time", begin.elapsed());
 }
