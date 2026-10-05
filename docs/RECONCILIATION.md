@@ -1852,6 +1852,13 @@ per rebuild over about 11,800 fds, almost all of it one `readlinkat` per fd (hx1
 which is under 2% of one core while the Connections view or a network column is shown. Skipping pids whose
 `fd` directory size (R-268) has not changed is a later optimisation, logged in leader notes.
 
+### R-288 ProcessTableView.subtree holds the subtree totals
+
+`TableRow.subtree: Option<u32>` is an index into a new field `ProcessTableView.subtree: Arc<[GroupRow]>`, one
+entry per parent row whose subtree total is shown (collapsed parents in tree mode). The old tl-model comment
+("descendants that match the filter") is wrong and is replaced. Found by bead 8q0.26.
+- Edits: ARCHITECTURE ProcessTableView block; chain edit to `crates/tl-model/src/table.rs` by bead 8q0.26.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.

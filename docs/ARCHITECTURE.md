@@ -1696,6 +1696,7 @@ pub struct ProcessTableView {
     pub query_generation: u64,
     pub rows: Arc<[TableRow]>,
     pub groups: Arc<[GroupRow]>,       // aggregated values, no double counting of descendants
+    pub subtree: Arc<[GroupRow]>,      // subtree totals of parent rows; TableRow.subtree indexes here (R-288)
     pub totals: TableTotals,           // two-line header numbers: cpu_pct, memory_pct, swap_pct, disk_pct, net_bps, net_link_bps, gpu_pct, vram_pct, threads, handles, one Total<T> each (R-141)
     pub total: u32, pub shown: u32, pub restricted: u32,   // status text counts (R-141)
 }
