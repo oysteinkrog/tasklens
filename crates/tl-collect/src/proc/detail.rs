@@ -17,6 +17,7 @@ use crate::CollectError;
 use crate::counters::{Clock, resumed_between};
 use crate::proc::meta::ReadBufs;
 use crate::proc::pid_stat::{PidStat, parse_pid_stat, read_start_ticks};
+use crate::proc::smaps::{SmapsRead, read_smaps, rss_by_start};
 use crate::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
 use crate::proc::{is_denied, is_gone};
 use crate::sanitize::{EXE_LINK_MAX, sanitize_comm, sanitize_link, sanitize_text};
@@ -724,6 +725,336 @@ fn parse_radix(digits: &[u8], radix: u32) -> Option<u64> {
         let d = char::from(d).to_digit(radix)?;
         n.checked_mul(u64::from(radix))?.checked_add(u64::from(d))
     })
+}
+
+// Memory maps tab (PROC-081).
+
+/// Read limit for `maps`. A large process has tens of thousands of lines of about 100 bytes.
+const MAPS_READ_MAX: usize = 16 * 1024 * 1024;
+/// Name of the node that holds every region not backed by a loaded file.
+const OUTSIDE_NAME: &str = "Outside loaded modules";
+const DELETED_SUFFIX: &str = " (deleted)";
+
+const MAPS_PARSE_ERROR: CollectError = CollectError::ProcParse {
+    pid: 0,
+    file: "maps",
+};
+
+/// One line of `maps`. The path is a mapped file path and is never logged (ADR-015).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapRegionInfo {
+    pub start: u64,
+    /// Exclusive.
+    pub end: u64,
+    /// For example `r-xp`.
+    pub perms: [u8; 4],
+    pub offset: u64,
+    pub inode: u64,
+    /// Sanitized path or pseudo-path such as `[heap]`. `None` for an anonymous region.
+    pub path: Option<Arc<str>>,
+    /// RSS in bytes from `smaps`, when it was read and has this region.
+    pub rss: Option<u64>,
+}
+
+/// One node of the Memory maps tree: a backing file, or the outside node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MapNodeInfo {
+    /// The file basename, `<basename> (Primary)` for the executable, or
+    /// `Outside loaded modules`.
+    pub name: Arc<str>,
+    /// The file path. `None` for the outside node.
+    pub path: Option<Arc<str>>,
+    pub primary: bool,
+    pub outside: bool,
+    /// A shared library, for the "Shared libraries only" filter.
+    pub shared_object: bool,
+    /// Lowest start address of the node's regions.
+    pub base: u64,
+    /// Sum of the region sizes in bytes.
+    pub size: u64,
+    /// Sum of the region RSS in bytes. `None` when RSS was not read.
+    pub rss: Option<u64>,
+    /// Perms of the lowest region.
+    pub perms: [u8; 4],
+    /// File offset of the lowest region.
+    pub offset: u64,
+    /// The node's regions, as indices into the reordered region list.
+    pub regions: std::ops::Range<u32>,
+}
+
+/// Parses `maps` into `out` (cleared first), one region per line
+/// `<start>-<end> <perms> <offset> <dev> <inode> [path]`. The path is the rest of the line after
+/// the inode with leading spaces removed, so it may hold spaces. A line that does not parse is
+/// `ProcParse { file: "maps" }`.
+pub fn parse_maps(buf: &[u8], out: &mut Vec<MapRegionInfo>) -> Result<(), CollectError> {
+    out.clear();
+    let mut text = String::new();
+    for line in buf.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let (mut region, path_at) = parse_maps_line(line).ok_or(MAPS_PARSE_ERROR)?;
+        let raw_path = &line[path_at..];
+        if !raw_path.is_empty() {
+            sanitize_link(raw_path, &mut text);
+            if !text.is_empty() {
+                // Consecutive regions of one file share the Arc.
+                let same = out
+                    .last()
+                    .and_then(|r| r.path.clone())
+                    .filter(|p| **p == *text);
+                region.path = Some(same.unwrap_or_else(|| Arc::from(text.as_str())));
+            }
+        }
+        out.push(region);
+    }
+    Ok(())
+}
+
+/// The fields of one `maps` line, without the path, and the byte index where the path starts.
+fn parse_maps_line(line: &[u8]) -> Option<(MapRegionInfo, usize)> {
+    let mut at = 0;
+    let range = next_field(line, &mut at)?;
+    let dash = memchr::memchr(b'-', range)?;
+    let start = parse_radix(&range[..dash], 16)?;
+    let end = parse_radix(&range[dash + 1..], 16)?;
+    let perms: [u8; 4] = next_field(line, &mut at)?.try_into().ok()?;
+    let offset = parse_radix(next_field(line, &mut at)?, 16)?;
+    memchr::memchr(b':', next_field(line, &mut at)?)?;
+    let inode = parse_radix(next_field(line, &mut at)?, 10)?;
+    if end < start {
+        return None;
+    }
+    while line.get(at) == Some(&b' ') {
+        at += 1;
+    }
+    let region = MapRegionInfo {
+        start,
+        end,
+        perms,
+        offset,
+        inode,
+        path: None,
+        rss: None,
+    };
+    Some((region, at))
+}
+
+/// The next field of `line` from `*at`, after any spaces. Moves `*at` past it.
+fn next_field<'a>(line: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
+    while line.get(*at) == Some(&b' ') {
+        *at += 1;
+    }
+    let rest = &line[*at..];
+    let len = memchr::memchr(b' ', rest).unwrap_or(rest.len());
+    *at += len;
+    (len > 0).then(|| &rest[..len])
+}
+
+/// True for a region backed by a loaded file. Pseudo-paths such as `[heap]` and `[anon:...]`
+/// and memfd regions are not.
+fn is_file_backed(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("/memfd:")
+}
+
+fn strip_deleted(path: &str) -> &str {
+    path.strip_suffix(DELETED_SUFFIX).unwrap_or(path)
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// A Linux shared object (`.so`, `.so.<n>`) or a Wine module (`.dll`, `.exe`, `.drv`, `.sys`).
+fn is_shared_object(base: &str) -> bool {
+    let lower = base.to_ascii_lowercase();
+    lower.ends_with(".so")
+        || lower.contains(".so.")
+        || [".dll", ".exe", ".drv", ".sys"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+}
+
+/// Groups `regions` into tree nodes in `out` (cleared first) and reorders `regions` to node
+/// order, so each node's `regions` range indexes them.
+///
+/// File-backed regions group by path. Every other region goes to one `Outside loaded modules`
+/// node. The node whose path is `exe` (both without ` (deleted)`) is the primary node. Order:
+/// primary, then file nodes by lowest start, then the outside node. When `rss` (from
+/// `rss_by_start`) is given, each region gets its RSS and each node the sum.
+pub fn group_maps(
+    regions: &mut Vec<MapRegionInfo>,
+    exe: Option<&str>,
+    rss: Option<&FxHashMap<u64, u64>>,
+    out: &mut Vec<MapNodeInfo>,
+) {
+    out.clear();
+    let exe = exe.map(strip_deleted);
+    let mut by_path: FxHashMap<Arc<str>, usize> = FxHashMap::default();
+    let mut outside = None;
+    let mut node_of = Vec::with_capacity(regions.len());
+    for region in regions.iter_mut() {
+        region.rss = rss.and_then(|m| m.get(&region.start).copied());
+        let n = match region.path.as_ref().filter(|p| is_file_backed(p)) {
+            Some(path) => *by_path
+                .entry(Arc::clone(path))
+                .or_insert_with(|| push_file_node(out, path, exe)),
+            None => *outside.get_or_insert_with(|| {
+                let mut node = new_node(Arc::from(OUTSIDE_NAME), None);
+                node.outside = true;
+                out.push(node);
+                out.len() - 1
+            }),
+        };
+        let node = &mut out[n];
+        if region.start < node.base {
+            node.base = region.start;
+            node.perms = region.perms;
+            node.offset = region.offset;
+        }
+        node.size = node
+            .size
+            .saturating_add(region.end.saturating_sub(region.start));
+        if rss.is_some() {
+            node.rss = Some(
+                node.rss
+                    .unwrap_or(0)
+                    .saturating_add(region.rss.unwrap_or(0)),
+            );
+        }
+        node_of.push(n);
+    }
+
+    // `pos[n]` is the place of node `n` after sorting.
+    let mut order: Vec<usize> = (0..out.len()).collect();
+    order.sort_unstable_by_key(|&n| (!out[n].primary, out[n].outside, out[n].base));
+    let mut pos = vec![0usize; out.len()];
+    for (place, &n) in order.iter().enumerate() {
+        pos[n] = place;
+    }
+    let mut nodes: Vec<Option<MapNodeInfo>> = out.drain(..).map(Some).collect();
+    out.extend(order.iter().filter_map(|&n| nodes[n].take()));
+
+    let mut tagged: Vec<(usize, MapRegionInfo)> = node_of
+        .iter()
+        .zip(regions.drain(..))
+        .map(|(&n, r)| (pos[n], r))
+        .collect();
+    tagged.sort_by_key(|(p, r)| (*p, r.start));
+    let mut counts = vec![0u32; out.len()];
+    for (p, r) in tagged {
+        counts[p] = counts[p].saturating_add(1);
+        regions.push(r);
+    }
+    let mut next = 0u32;
+    for (node, count) in out.iter_mut().zip(counts) {
+        node.regions = next..next.saturating_add(count);
+        next = node.regions.end;
+    }
+}
+
+fn push_file_node(out: &mut Vec<MapNodeInfo>, path: &Arc<str>, exe: Option<&str>) -> usize {
+    let plain = strip_deleted(path);
+    let base = basename(plain);
+    let primary = exe == Some(plain);
+    let name = if primary {
+        Arc::from(format!("{base} (Primary)"))
+    } else {
+        Arc::from(basename(path))
+    };
+    let mut node = new_node(name, Some(Arc::clone(path)));
+    node.primary = primary;
+    node.shared_object = is_shared_object(base);
+    out.push(node);
+    out.len() - 1
+}
+
+fn new_node(name: Arc<str>, path: Option<Arc<str>>) -> MapNodeInfo {
+    MapNodeInfo {
+        name,
+        path,
+        primary: false,
+        outside: false,
+        shared_object: false,
+        base: u64::MAX,
+        size: 0,
+        rss: None,
+        perms: [b'-'; 4],
+        offset: 0,
+        regions: 0..0,
+    }
+}
+
+/// Reads `maps` of `key` into `regions` and its tree nodes into `nodes` (both cleared first).
+/// When `with_rss`, also reads `smaps` for the RSS of each region; an `smaps` that cannot be
+/// read or parsed leaves RSS `None`. EACCES or EPERM on `maps` is `Restricted` (the tab shows
+/// "Needs administrator access.").
+pub fn read_maps(
+    root: &SysRoot,
+    key: ProcessKey,
+    with_rss: bool,
+    bufs: &mut ReadBufs,
+    regions: &mut Vec<MapRegionInfo>,
+    nodes: &mut Vec<MapNodeInfo>,
+) -> Result<DetailRead, CollectError> {
+    regions.clear();
+    nodes.clear();
+    let pid_dir = match open_checked(root, key, &mut bufs.small)? {
+        Ok(dir) => dir,
+        Err(r) => return Ok(r),
+    };
+    match read_at(pid_dir.as_fd(), "maps", &mut bufs.small, MAPS_READ_MAX) {
+        Ok((_, truncated)) => {
+            if truncated {
+                // Drop the cut last line.
+                let keep = memchr::memrchr(b'\n', &bufs.small).map_or(0, |i| i + 1);
+                bufs.small.truncate(keep);
+            }
+        }
+        Err(CollectError::PermissionDenied) => return Ok(DetailRead::Restricted),
+        Err(CollectError::NotFound) => return Ok(DetailRead::Gone),
+        Err(e) => return Err(e),
+    }
+    if parse_maps(&bufs.small, regions).is_err() {
+        regions.clear();
+        return Err(CollectError::ProcParse {
+            pid: key.pid,
+            file: "maps",
+        });
+    }
+
+    let rss = if with_rss {
+        let mut smaps = Vec::new();
+        match read_smaps(pid_dir.as_fd(), &mut bufs.small, &mut smaps) {
+            Ok(SmapsRead::Ok) => Some(rss_by_start(&smaps)),
+            Ok(SmapsRead::Gone) => {
+                regions.clear();
+                return Ok(DetailRead::Gone);
+            }
+            Ok(SmapsRead::Restricted) => None,
+            Err(e) => {
+                tracing::trace!(pid = key.pid, error = %e, "smaps not read, no RSS");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let exe = read_exe(pid_dir.as_fd(), bufs);
+    group_maps(regions, exe.as_deref(), rss.as_ref(), nodes);
+    Ok(DetailRead::Ok)
+}
+
+/// The sanitized `exe` link target, for the primary node. `None` when it cannot be read.
+fn read_exe(pid_dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> Option<String> {
+    // One byte past the limit, so `sanitize_link` sees the cut and adds `…`.
+    bufs.small.clear();
+    bufs.small.resize(EXE_LINK_MAX + 1, 0);
+    let n = rustix::fs::readlinkat_raw(pid_dir, "exe", &mut bufs.small[..]).ok()?;
+    bufs.small.truncate(n);
+    sanitize_link(&bufs.small, &mut bufs.text);
+    Some(bufs.text.clone())
 }
 
 #[cfg(test)]
