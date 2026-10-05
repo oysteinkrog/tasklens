@@ -80,7 +80,7 @@ Crates for P3 and P4 are not created until their phase starts. Their names and d
 | Crate | Workspace deps allowed | External deps allowed |
 |---|---|---|
 | tl-model | none | serde, postcard, thiserror, async-channel, bitflags, smallvec, rustc-hash (`GroupKey` is an FxHash of `GroupKind`, R-142), rustix (feature `time` only, for `clock_gettime`) |
-| tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal) |
+| tl-collect | tl-model | rustix, memchr, thiserror, tracing, smallvec, rustc-hash, netlink-packet-core, netlink-packet-sock-diag, netlink-sys, sha2, md-5 (file hashes for Properties and VirusTotal), bitflags (`CpuFlags`, R-285) |
 | tl-ops | tl-model | rustix, libc, thiserror, tracing |
 | tl-engine | tl-model, tl-collect, tl-ops, tl-history (P3) | asupersync, arc-swap, async-channel, zbus, futures-lite, rustix, postcard, serde, serde_json (KWin `Update` payload, `journalctl -o json`, `kscreen-doctor -j`, smartctl JSON; R-142), thiserror, tracing, rustc-hash, smallvec, ureq (public IP fetch only, R-131), bitflags (`DeviceKinds`, E08; R-273) |
 | tl-gpu-probe | tl-model | nvml-wrapper, rustix, postcard, serde, ash, khronos-egl (both only for the `--api-versions` mode, ADR-007) |

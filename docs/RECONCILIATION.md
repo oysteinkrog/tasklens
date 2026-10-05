@@ -1809,6 +1809,20 @@ zstd stays at level 3 (level 6 measured larger).
   documents the 10 s blocking-thread retirement [verified in code].
 - Edits: beads ndy.11 (spawn thread), the probe's argument parser (follow-up in tl-gpu-probe), ndy.14 tests.
 
+### R-284 Compositor protection covers the socket owner's direct children
+
+On KDE the Wayland socket is held by `kwin_wayland_wrapper`, and the compositor `kwin_wayland` is its child.
+`protected_set` protects the socket owner found by `SO_PEERCRED`, its ancestors (as before), and its direct
+children. `kwin_wayland` is also added to `SESSION_NAMES` as a second safety net.
+- Basis: yms.25 real-system test `compositor_protected` failed on the owner machine: kwin_wayland had flags 0x0
+  while kwin_wayland_wrapper held /run/user/1000/wayland-0 [verified with ss -xlp].
+- Edits: chain edit to `crates/tl-collect/src/apps/classify.rs` by bead yms.25, plus a fixture test.
+
+### R-285 tl-collect may depend on `bitflags`
+
+`CpuFlags` in the cpuinfo parser (hx1.17) uses `bitflags`, already in the graph through tl-model and tl-engine.
+ADR-001 row and `check_deps.rs` updated.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.

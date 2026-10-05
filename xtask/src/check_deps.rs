@@ -60,6 +60,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "netlink-sys",
             "sha2",
             "md-5",
+            "bitflags",
         ],
     ),
     (
