@@ -1090,8 +1090,8 @@ mod tests {
             fresh_once(),
             initial,
         );
+        // The first turn at 0 s skips 3 and runs 4.
         let got = rig.drain();
-        assert_eq!(progress.done(SourceId::GpuNvidia), 3, "3 is skipped");
         assert!(
             !got.iter().any(|u| matches!(
                 u,
@@ -1102,13 +1102,14 @@ mod tests {
             )),
             "no message for a skipped RefreshNow: {got:?}"
         );
+        assert_eq!(gpu_samples(&got).len(), 1, "{got:?}");
         for _ in 0..3 {
             rig.advance(PERIOD);
         }
         assert_eq!(rig.calls.samples(), vec![false], "4 runs once");
         assert_eq!(progress.started(SourceId::GpuNvidia), 4);
         assert_eq!(progress.done(SourceId::GpuNvidia), 4);
-        assert_eq!(gpu_samples(&rig.drain()).len(), 1);
+        assert!(rig.drain().is_empty());
     }
 
     #[test]
