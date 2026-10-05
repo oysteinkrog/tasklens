@@ -53,6 +53,13 @@ proptest! {
     }
 }
 
+proptest! {
+    #[test]
+    fn prop_udev_dmi_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=8192)) {
+        let _ = tl_collect::inventory::modules::parse_udev_dmi(&bytes);
+    }
+}
+
 // == gpu_drm (E06-A3) ==
 
 proptest! {
