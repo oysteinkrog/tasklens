@@ -22,9 +22,6 @@ use tl_model::actions::RecoveryEdit;
 use tl_model::helper_proto::{DropInKey, HelperError, HelperReplyBody, validate_drop_in};
 use tl_ops::OpsError;
 
-/// The directory that holds system unit drop-ins.
-const SYSTEM_UNIT_DIR: &str = "/etc/systemd/system";
-
 /// The one file name tasklens writes in a drop-in directory.
 const DROPIN_FILE: &str = "50-tasklens-recovery.conf";
 
@@ -66,8 +63,11 @@ const ON_FAILURE_SUFFIXES: [&str; 8] = [
 ];
 
 /// Answers `WriteServiceDropIn`. Empty `keys` removes the drop-in (`UnitRemoveRecovery`).
-#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
+/// Tests use `write_service_dropin_in` with a temp dir instead.
+#[expect(dead_code, reason = "dispatch arrives with E29-A1")]
 pub fn write_service_dropin(unit: &str, keys: &[(DropInKey, String)]) -> HelperReplyBody {
+    /// The directory that holds system unit drop-ins.
+    const SYSTEM_UNIT_DIR: &str = "/etc/systemd/system";
     let flags = OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC;
     match rustix::fs::open(SYSTEM_UNIT_DIR, flags, Mode::empty()) {
         Ok(root) => write_service_dropin_in(root.as_fd(), unit, keys),
