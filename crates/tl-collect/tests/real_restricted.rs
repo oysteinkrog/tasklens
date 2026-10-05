@@ -260,6 +260,8 @@ fn live_ctx() -> tl_collect::proc::sweep::SweepCtx {
         ticks_per_sec: 100,
         online_cpus: u32::try_from(cpus.len()).expect("cpu count"),
         want_fd_count: true,
+        want_status_fields: true,
+        want_io: true,
     }
 }
 

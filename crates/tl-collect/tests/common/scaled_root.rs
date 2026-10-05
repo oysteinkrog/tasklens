@@ -58,6 +58,9 @@ pub fn sweep_ctx(want_fd_count: bool) -> SweepCtx {
         ticks_per_sec: 100,
         online_cpus: 32,
         want_fd_count,
+        // Default columns: no Swap, no I/O (R-286).
+        want_status_fields: false,
+        want_io: false,
     }
 }
 

@@ -101,6 +101,9 @@ impl ProcessesSource {
             ticks_per_sec: rustix::param::clock_ticks_per_second(),
             online_cpus: 1,
             want_fd_count: false,
+            // Until the worker passes the demand (dwy.4): status staggered, io always (R-286).
+            want_status_fields: false,
+            want_io: true,
         };
         let protect = ProtectInputs {
             self_pids: smallvec![

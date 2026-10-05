@@ -80,7 +80,17 @@ pub fn parse_io(buf: &[u8], out: &mut PidIo) -> Result<(), CollectError> {
 /// or read is `Restricted`, ENOENT or ESRCH is `Gone`, any other errno is
 /// `ProcRead { file: "io", errno }`.
 pub fn read_io(dirfd: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<IoRead, CollectError> {
-    match read_file(dirfd, buf) {
+    read_io_at(dirfd, FILE, buf)
+}
+
+/// `read_io` for the file `name` relative to `dirfd`, for example `"<pid>/io"` relative to the
+/// `/proc` directory (R-286).
+pub fn read_io_at(
+    dirfd: BorrowedFd<'_>,
+    name: &str,
+    buf: &mut Vec<u8>,
+) -> Result<IoRead, CollectError> {
+    match read_file(dirfd, name, buf) {
         Ok(()) => {}
         Err(e) if is_denied(e) => return Ok(IoRead::Restricted),
         Err(e) if is_gone(e) => return Ok(IoRead::Gone),
@@ -104,9 +114,9 @@ pub fn disk_bytes(io: &PidIo) -> u64 {
 }
 
 /// Reads `io` into `buf` until EOF or `SMALL_FILE_LIMIT` bytes. The real file is about 200 bytes.
-fn read_file(dirfd: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<(), Errno> {
+fn read_file(dirfd: BorrowedFd<'_>, name: &str, buf: &mut Vec<u8>) -> Result<(), Errno> {
     buf.clear();
-    let fd = rustix::fs::openat(dirfd, FILE, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    let fd = rustix::fs::openat(dirfd, name, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
     while buf.len() < SMALL_FILE_LIMIT {
         if buf.len() == buf.capacity() {
             buf.reserve(SMALL_FILE_LIMIT - buf.len());

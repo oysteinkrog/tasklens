@@ -1078,6 +1078,8 @@ fn sweep_ctx(want_fd_count: bool) -> SweepCtx {
         ticks_per_sec: 100,
         online_cpus: 32,
         want_fd_count,
+        want_status_fields: true,
+        want_io: true,
     }
 }
 

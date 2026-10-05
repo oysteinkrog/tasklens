@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustc_hash::{FxHashMap, FxHashSet};
-use rustix::fd::BorrowedFd;
+use rustix::fd::{AsFd, BorrowedFd};
 use smallvec::SmallVec;
 use tl_model::ids::ProcessKey;
 
@@ -176,27 +176,45 @@ impl MetaCache {
         stat_comm_raw: &[u8],
         bufs: &mut ReadBufs,
     ) -> (&RawMeta, MetaChange) {
+        match self.get_or_refresh_with(key, stat_comm_raw, bufs, || Some(dir)) {
+            Some(found) => found,
+            None => unreachable!("open always gives the directory"),
+        }
+    }
+
+    /// `get_or_refresh` that opens the `/proc/<pid>` directory with `open` only when the entry
+    /// must be read (R-286). `None` when `open` gives no directory: the process is gone. An
+    /// entry due for a refresh is then left as it was.
+    pub fn get_or_refresh_with<D: AsFd>(
+        &mut self,
+        key: ProcessKey,
+        stat_comm_raw: &[u8],
+        bufs: &mut ReadBufs,
+        open: impl FnOnce() -> Option<D>,
+    ) -> Option<(&RawMeta, MetaChange)> {
         match self.entries.entry(key) {
             Entry::Vacant(v) => {
-                let meta = read_meta(dir, stat_comm_raw, bufs, &mut self.interner);
+                let dir = open()?;
+                let meta = read_meta(dir.as_fd(), stat_comm_raw, bufs, &mut self.interner);
                 let e = v.insert(CacheEntry {
                     meta,
                     stat_comm: SmallVec::from_slice(stat_comm_raw),
                     sweeps: 0,
                 });
-                (&e.meta, MetaChange::New)
+                Some((&e.meta, MetaChange::New))
             }
             Entry::Occupied(o) => {
                 let e = o.into_mut();
-                e.sweeps += 1;
-                if e.sweeps < META_REFRESH_SWEEPS && e.stat_comm.as_slice() == stat_comm_raw {
-                    return (&e.meta, MetaChange::Unchanged);
+                if e.sweeps + 1 < META_REFRESH_SWEEPS && e.stat_comm.as_slice() == stat_comm_raw {
+                    e.sweeps += 1;
+                    return Some((&e.meta, MetaChange::Unchanged));
                 }
-                e.meta = read_meta(dir, stat_comm_raw, bufs, &mut self.interner);
+                let dir = open()?;
+                e.meta = read_meta(dir.as_fd(), stat_comm_raw, bufs, &mut self.interner);
                 e.stat_comm.clear();
                 e.stat_comm.extend_from_slice(stat_comm_raw);
                 e.sweeps = 0;
-                (&e.meta, MetaChange::Refreshed)
+                Some((&e.meta, MetaChange::Refreshed))
             }
         }
     }

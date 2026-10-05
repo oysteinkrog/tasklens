@@ -1,14 +1,18 @@
 //! One sweep over all processes in /proc (PROC-002, PROC-029, PROC-030, PROC-031, ADR-008,
 //! ADR-016).
 //!
-//! Each pid directory is opened once as an `O_DIRECTORY` fd, its files are read relative to it,
-//! and it is closed again. Rates follow the ADR-008 counter rules: no rate on the first sample,
+//! Per-process files are opened as `"<pid>/<file>"` relative to the `/proc` dirfd; the pid
+//! directory itself is opened only for a metadata read or an fd count (R-286). `stat` and `statm`
+//! are read every sweep, `status` for a tenth of the pids (or all when a status-only field is
+//! demanded), `io` only when demanded. Rates follow the ADR-008 counter rules: no rate on the first sample,
 //! after a counter reset or across a suspend. Nothing here logs above `trace` per process.
 //!
 //! `ProcessSampler` (E05-A1) adds metadata, app groups, flags, the P1 extra columns and the app
 //! unit samples on top of `SweepCore`. Command lines, paths and user names are never logged
 //! (ADR-015).
 
+use std::cell::Cell;
+use std::fmt::Write as _;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
@@ -39,18 +43,41 @@ use crate::proc::cgroup::{
     CgroupPath, CgroupRoot, CgroupStats, CgroupWant, UserPlacement, placement,
 };
 use crate::proc::fdcount::{FdCount, fd_count};
-use crate::proc::io::{IoRead, PidIo, read_io};
+use crate::proc::io::{IoRead, PidIo, read_io_at};
 use crate::proc::meta::{ExeLink, Interner, MetaCache, MetaChange, RawMeta, ReadBufs, UserNames};
 use crate::proc::pid_stat::{PF_KTHREAD, PidStat, parse_pid_stat};
 use crate::proc::smaps::{CoverageBuilder, PssReader, RollupRead, apply_rollups};
 use crate::proc::statm::{PidStatm, parse_statm};
-use crate::proc::status::{
-    PidStatus, STATUS_READ_MAX, commit_bytes, parse_status, ws_shared_bytes,
-};
+use crate::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
 use crate::sysroot::{SMALL_FILE_LIMIT, SysRoot, read_at};
 
 /// getdents buffer for the `<proc>` directory listing.
 const DIRENT_BUF: usize = 32 * 1024;
+
+/// Without a demand, `status` is read for the pids with `pid % STATUS_STAGGER == sweep %
+/// STATUS_STAGGER`, so its fields are at most this many sweeps old (R-286).
+pub const STATUS_STAGGER: u64 = 10;
+
+thread_local! {
+    static STATUS_READS: Cell<u32> = const { Cell::new(0) };
+    static IO_READS: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Test hook: how many per-process `status` files the sweep opened on this thread.
+#[doc(hidden)]
+pub fn status_reads() -> u32 {
+    STATUS_READS.with(Cell::get)
+}
+
+/// Test hook: how many per-process `io` files the sweep opened on this thread.
+#[doc(hidden)]
+pub fn io_reads() -> u32 {
+    IO_READS.with(Cell::get)
+}
+
+fn count(c: &'static std::thread::LocalKey<Cell<u32>>) {
+    c.with(|c| c.set(c.get() + 1));
+}
 
 /// What the engine passes to every sweep.
 #[derive(Clone, Debug)]
@@ -64,6 +91,12 @@ pub struct SweepCtx {
     pub online_cpus: u32,
     /// Read the open fd count of every process.
     pub want_fd_count: bool,
+    /// A status-only field is demanded (per-process Swap, peak RSS, peak VmSize or CPU
+    /// affinity): read `status` for every pid, not only the staggered tenth (R-286).
+    pub want_status_fields: bool,
+    /// An I/O or disk column is demanded, or history recording is on: read `io` for every pid.
+    /// Without it the I/O rates are WarmingUp, and stay so for one interval after it is set.
+    pub want_io: bool,
 }
 
 /// The counters of one process at its last sample.
@@ -95,8 +128,21 @@ pub struct SweptProc {
     /// CLOCK_BOOTTIME right before the first read of this process.
     pub t_ns: TimeNs,
     pub stat: PidStat,
+    /// From this sweep or, when `status_fresh` is false, from an earlier one (at most
+    /// `STATUS_STAGGER` sweeps old). Validity of its fields is from the same read.
     pub status: PidStatus,
+    pub status_fresh: bool,
     pub statm: PidStatm,
+    /// statm (resident − shared) × page size: the kernel's `RssAnon` (R-286).
+    pub rss_anon_bytes: u64,
+    /// statm resident × page size (`VmRSS`).
+    pub rss_bytes: u64,
+    /// statm shared × page size (`RssFile` + `RssShmem`).
+    pub rss_shared_bytes: u64,
+    /// statm data × page size (`VmData` + `VmStk`).
+    pub commit_bytes: u64,
+    /// statm size × page size (`VmSize`).
+    pub vsize_bytes: u64,
     pub io: IoState,
     /// `None` when the sweep did not ask for fd counts.
     pub fd_count: Option<FdCount>,
@@ -122,10 +168,14 @@ pub struct SweepCore {
     prev: FxHashMap<ProcessKey, Prev>,
     /// Filled during a sweep, then swapped with `prev`, so unseen keys drop out.
     next: FxHashMap<ProcessKey, Prev>,
+    /// The last `status` read of each key and the validity it gave (`None` when it parsed).
+    status: FxHashMap<ProcessKey, (PidStatus, Option<Validity>)>,
+    sweeps: u64,
+    page_size: u64,
     bufs: ReadBufs,
+    path: String,
     dirents: Vec<MaybeUninit<u8>>,
     stat: PidStat,
-    status: PidStatus,
     clock: fn() -> (TimeNs, u64),
 }
 
@@ -135,10 +185,13 @@ impl SweepCore {
             root,
             prev: FxHashMap::default(),
             next: FxHashMap::default(),
+            status: FxHashMap::default(),
+            sweeps: 0,
+            page_size: rustix::param::page_size() as u64,
             bufs: ReadBufs::default(),
+            path: String::new(),
             dirents: vec![MaybeUninit::uninit(); DIRENT_BUF],
             stat: PidStat::default(),
-            status: PidStatus::default(),
             clock: real_clock,
         }
     }
@@ -168,16 +221,17 @@ impl SweepCore {
         self.sweep_core_with(ctx, out, &mut |_, _| {})
     }
 
-    /// `sweep_core` that also calls `per_pid` for each process with its `/proc/<pid>` dirfd,
-    /// before the dirfd is closed, so metadata is read from the same process.
+    /// `sweep_core` that also calls `per_pid` for each process with the `/proc` dirfd, right
+    /// after its files are read, so metadata is read from the same process.
     pub fn sweep_core_with(
         &mut self,
         ctx: &SweepCtx,
         out: &mut Vec<SweptProc>,
-        per_pid: &mut dyn FnMut(&SweptProc, BorrowedFd<'_>),
+        per_pid: &mut dyn FnMut(&SweptProc, PidDir<'_>),
     ) -> (TimeNs, TimeNs) {
         out.clear();
         self.next.clear();
+        self.sweeps += 1;
         let observed_start = (self.clock)().0;
 
         if let Ok(proc_fd) = rustix::fs::open(
@@ -192,27 +246,23 @@ impl SweepCore {
                 let Some(pid) = parse_pid(name.to_bytes()) else {
                     continue;
                 };
-                let Ok(pid_fd) = rustix::fs::openat(
-                    proc_fd.as_fd(),
-                    name,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-                    Mode::empty(),
-                ) else {
-                    tracing::trace!(pid, "pid directory not opened");
-                    continue;
-                };
-                if let Some(p) = sweep_one(
-                    ctx,
+                let dir = PidDir {
+                    proc_fd: proc_fd.as_fd(),
                     pid,
-                    &pid_fd,
-                    self.clock,
-                    &self.prev,
-                    &mut self.next,
-                    &mut self.bufs,
-                    &mut self.stat,
-                    &mut self.status,
-                ) {
-                    per_pid(&p, pid_fd.as_fd());
+                };
+                let mut core = SweepIo {
+                    sweep: self.sweeps,
+                    page_size: self.page_size,
+                    clock: self.clock,
+                    prev: &self.prev,
+                    next: &mut self.next,
+                    status: &mut self.status,
+                    bufs: &mut self.bufs,
+                    path: &mut self.path,
+                    stat: &mut self.stat,
+                };
+                if let Some(p) = sweep_one(ctx, dir, &mut core) {
+                    per_pid(&p, dir);
                     out.push(p);
                 }
             }
@@ -220,6 +270,8 @@ impl SweepCore {
 
         std::mem::swap(&mut self.prev, &mut self.next);
         self.next.clear();
+        let live = &self.prev;
+        self.status.retain(|k, _| live.contains_key(k));
         let observed_end = (self.clock)().0;
         (observed_start, observed_end)
     }
@@ -248,73 +300,160 @@ fn parse_pid(name: &[u8]) -> Option<u32> {
     })
 }
 
+/// One process's place in `/proc`: its files are opened as `"<pid>/<file>"` relative to
+/// `proc_fd`, and the `/proc/<pid>` directory only when a reader needs a dirfd (R-286).
+#[derive(Clone, Copy, Debug)]
+pub struct PidDir<'a> {
+    pub proc_fd: BorrowedFd<'a>,
+    pub pid: u32,
+}
+
+impl PidDir<'_> {
+    /// Opens `/proc/<pid>` as an `O_DIRECTORY` fd. `None` when the process is gone.
+    pub fn open(&self) -> Option<OwnedFd> {
+        let name = self.pid.to_string();
+        rustix::fs::openat(
+            self.proc_fd,
+            name.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .inspect_err(|_| tracing::trace!(pid = self.pid, "pid directory not opened"))
+        .ok()
+    }
+}
+
+/// Split borrows of `SweepCore` for `sweep_one`.
+struct SweepIo<'a> {
+    sweep: u64,
+    page_size: u64,
+    clock: fn() -> (TimeNs, u64),
+    prev: &'a FxHashMap<ProcessKey, Prev>,
+    next: &'a mut FxHashMap<ProcessKey, Prev>,
+    status: &'a mut FxHashMap<ProcessKey, (PidStatus, Option<Validity>)>,
+    bufs: &'a mut ReadBufs,
+    path: &'a mut String,
+    stat: &'a mut PidStat,
+}
+
+/// Sets `path` to `"<pid>/<file>"`.
+fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
+    path.clear();
+    let _ = write!(path, "{pid}/{file}");
+    path
+}
+
 /// Reads one process and computes its rates. `None` when the process is gone or its `stat`
 /// cannot be read, since then it has no key.
-#[allow(clippy::too_many_arguments, reason = "split borrows of SweepCore")]
-fn sweep_one(
-    ctx: &SweepCtx,
-    pid: u32,
-    dir: &OwnedFd,
-    clock: fn() -> (TimeNs, u64),
-    prev: &FxHashMap<ProcessKey, Prev>,
-    next: &mut FxHashMap<ProcessKey, Prev>,
-    bufs: &mut ReadBufs,
-    stat: &mut PidStat,
-    status: &mut PidStatus,
-) -> Option<SweptProc> {
-    let dir = dir.as_fd();
+fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<SweptProc> {
+    let SweepIo {
+        sweep,
+        page_size,
+        clock,
+        prev,
+        next,
+        status: status_cache,
+        bufs,
+        path,
+        stat,
+    } = core;
+    let (proc_fd, pid) = (dir.proc_fd, dir.pid);
     let (t_ns, mono_ns) = clock();
 
-    let stat_read = read_at(dir, "stat", &mut bufs.small, SMALL_FILE_LIMIT)
-        .and_then(|_| parse_pid_stat(&bufs.small, stat));
+    let stat_read = read_at(
+        proc_fd,
+        pid_path(path, pid, "stat"),
+        &mut bufs.small,
+        SMALL_FILE_LIMIT,
+    )
+    .and_then(|_| parse_pid_stat(&bufs.small, stat));
     if let Err(e) = stat_read {
         tracing::trace!(pid, error = %e, "stat not read, process skipped");
         return None;
     }
-
-    let mut validity = FieldValidity::default();
-
-    let mem_validity = match read_at(dir, "status", &mut bufs.small, STATUS_READ_MAX) {
-        Ok(_) => match parse_status(&bufs.small, status) {
-            Ok(()) => None,
-            Err(e) => Some(e.validity()),
-        },
-        Err(e) => Some(e.validity()),
-    };
-    if mem_validity.is_some() {
-        *status = PidStatus::default();
-    }
-    let present = |v: Option<u64>| match (mem_validity, v) {
-        (Some(failed), _) => failed,
-        (None, Some(_)) => Validity::Valid,
-        (None, None) => Validity::Unsupported,
-    };
-    validity.set(ProcessField::RssAnon, present(status.rss_anon));
-    validity.set(ProcessField::Rss, present(status.vm_rss));
-    validity.set(ProcessField::Swap, present(status.vm_swap));
-    validity.set(ProcessField::Threads, Validity::Valid);
-
-    let mut statm = PidStatm::default();
-    if read_at(dir, "statm", &mut bufs.small, SMALL_FILE_LIMIT).is_err()
-        || parse_statm(&bufs.small, &mut statm).is_err()
-    {
-        statm = PidStatm::default();
-    }
-
-    let (io, io_validity) = match read_io(dir, &mut bufs.small) {
-        Ok(IoRead::Ok(io)) => (IoState::Valid(io), None),
-        Ok(IoRead::Restricted) => (IoState::Restricted, Some(Validity::Restricted)),
-        Ok(IoRead::Gone) => (IoState::WarmingUp, Some(Validity::Missing)),
-        Err(e) => (IoState::WarmingUp, Some(e.validity())),
-    };
-
-    let fd_count = ctx.want_fd_count.then(|| fd_count(dir));
-
     let key = ProcessKey {
         start_ticks: stat.start_ticks,
         boot_id: ctx.boot_id,
         pid,
     };
+    let kernel_thread = stat.flags & PF_KTHREAD != 0;
+
+    let mut validity = FieldValidity::default();
+
+    // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). A kernel thread
+    // has no mm: its status has no memory lines, so the fields stay Unsupported.
+    let mut statm = PidStatm::default();
+    let statm_validity = match read_at(
+        proc_fd,
+        pid_path(path, pid, "statm"),
+        &mut bufs.small,
+        SMALL_FILE_LIMIT,
+    )
+    .and_then(|_| parse_statm(&bufs.small, &mut statm))
+    {
+        Ok(()) if kernel_thread => Validity::Unsupported,
+        Ok(()) => Validity::Valid,
+        Err(e) => {
+            statm = PidStatm::default();
+            e.validity()
+        }
+    };
+    validity.set(ProcessField::RssAnon, statm_validity);
+    validity.set(ProcessField::Rss, statm_validity);
+    validity.set(ProcessField::Threads, Validity::Valid);
+
+    // status: on first sight, when a status-only field is demanded, or for this sweep's tenth.
+    // Otherwise the last read's values and validity stand (R-286).
+    let due = ctx.want_status_fields
+        || u64::from(pid) % STATUS_STAGGER == *sweep % STATUS_STAGGER
+        || !status_cache.contains_key(&key);
+    if due {
+        count(&STATUS_READS);
+        let slot = status_cache.entry(key).or_default();
+        slot.1 = match read_at(
+            proc_fd,
+            pid_path(path, pid, "status"),
+            &mut bufs.small,
+            STATUS_READ_MAX,
+        ) {
+            Ok(_) => parse_status(&bufs.small, &mut slot.0)
+                .err()
+                .map(|e| e.validity()),
+            Err(e) => Some(e.validity()),
+        };
+        if slot.1.is_some() {
+            slot.0 = PidStatus::default();
+        }
+    }
+    let (status, mem_validity) = status_cache.get(&key)?;
+    let present = |v: Option<u64>| match (*mem_validity, v) {
+        (Some(failed), _) => failed,
+        (None, Some(_)) => Validity::Valid,
+        (None, None) => Validity::Unsupported,
+    };
+    validity.set(ProcessField::Swap, present(status.vm_swap));
+
+    let (io, io_validity) = if ctx.want_io {
+        count(&IO_READS);
+        match read_io_at(proc_fd, pid_path(path, pid, "io"), &mut bufs.small) {
+            Ok(IoRead::Ok(io)) => (IoState::Valid(io), None),
+            Ok(IoRead::Restricted) => (IoState::Restricted, Some(Validity::Restricted)),
+            Ok(IoRead::Gone) => (IoState::WarmingUp, Some(Validity::Missing)),
+            Err(e) => (IoState::WarmingUp, Some(e.validity())),
+        }
+    } else {
+        // Not read: no counters, so the rates are WarmingUp now and for one interval after
+        // `want_io` is set.
+        (IoState::WarmingUp, None)
+    };
+
+    let fd_count = if ctx.want_fd_count {
+        Some(dir.open().map_or(FdCount::Gone, |d| fd_count(d.as_fd())))
+    } else {
+        None
+    };
+    let page = *page_size;
+
     let cur = Prev {
         t_ns,
         mono_ns,
@@ -334,7 +473,16 @@ fn sweep_one(
         t_ns,
         stat: stat.clone(),
         status: status.clone(),
+        status_fresh: due,
         statm,
+        rss_anon_bytes: statm
+            .resident
+            .saturating_sub(statm.shared)
+            .saturating_mul(page),
+        rss_bytes: statm.resident.saturating_mul(page),
+        rss_shared_bytes: statm.shared.saturating_mul(page),
+        commit_bytes: statm.data.saturating_mul(page),
+        vsize_bytes: statm.size.saturating_mul(page),
         io,
         fd_count,
         cpu_pct: 0.0,
@@ -909,14 +1057,20 @@ struct Build<'a, 'b> {
 }
 
 impl Build<'_, '_> {
-    fn push(&mut self, p: &SweptProc, dir: BorrowedFd<'_>) {
+    fn push(&mut self, p: &SweptProc, dir: PidDir<'_>) {
         let key = p.key;
         let pid = key.pid;
+        // The real uid of the last status read, at most STATUS_STAGGER sweeps old (R-286).
         let ruid = p.status.uid[0];
         let kernel_thread = p.stat.flags & PF_KTHREAD != 0;
-        let (raw, change) = self
-            .meta
-            .get_or_refresh(key, dir, &p.stat.comm_raw, self.bufs);
+        // The pid directory is opened only when the metadata is read. A process gone by then
+        // is left out of this sweep.
+        let Some((raw, change)) =
+            self.meta
+                .get_or_refresh_with(key, &p.stat.comm_raw, self.bufs, || dir.open())
+        else {
+            return;
+        };
 
         let owns_window = self.inp.window_pids.is_some_and(|s| s.contains(&pid));
         let wm_class = self.inp.wm_class.and_then(|m| m.get(&pid)).map(|c| &**c);
@@ -960,11 +1114,7 @@ impl Build<'_, '_> {
         };
 
         let status = &p.status;
-        let threads = if status.threads > 0 {
-            status.threads
-        } else {
-            p.stat.num_threads
-        };
+        let threads = p.stat.num_threads;
         // Only KERNEL_THREAD is known here; `set_flags` computes the full set.
         let mut flags = ProcFlags::empty();
         flags.set(ProcFlags::KERNEL_THREAD, kernel_thread);
@@ -979,8 +1129,8 @@ impl Build<'_, '_> {
             nice: p.stat.nice,
             threads,
             cpu_pct: p.cpu_pct,
-            rss_anon_bytes: status.rss_anon.unwrap_or(0),
-            rss_bytes: status.vm_rss.unwrap_or(0),
+            rss_anon_bytes: p.rss_anon_bytes,
+            rss_bytes: p.rss_bytes,
             pss_bytes: 0,
             uss_bytes: 0,
             swap_bytes: status.vm_swap.unwrap_or(0),
@@ -1009,9 +1159,9 @@ impl Build<'_, '_> {
             stime_ticks: p.stat.stime,
             start_boot_ns: u64::try_from(start_boot_ns).unwrap_or(u64::MAX),
             rss_peak_bytes: status.vm_hwm.unwrap_or(0),
-            rss_shared_bytes: ws_shared_bytes(status).unwrap_or(0),
-            commit_bytes: commit_bytes(status).unwrap_or(0),
-            vsize_bytes: status.vm_size.unwrap_or(0),
+            rss_shared_bytes: p.rss_shared_bytes,
+            commit_bytes: p.commit_bytes,
+            vsize_bytes: p.vsize_bytes,
             vsize_peak_bytes: status.vm_peak.unwrap_or(0),
             page_faults: p.stat.minflt.saturating_add(p.stat.majflt),
             page_faults_delta: p.page_faults_delta,

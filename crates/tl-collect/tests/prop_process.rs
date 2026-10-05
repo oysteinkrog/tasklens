@@ -170,6 +170,8 @@ proptest! {
             ticks_per_sec: 100,
             online_cpus: 4,
             want_fd_count: true,
+            want_status_fields: true,
+            want_io: true,
         };
         let mut core = SweepCore::new(SysRoot::at(tmp.path()));
         let mut out = Vec::new();
