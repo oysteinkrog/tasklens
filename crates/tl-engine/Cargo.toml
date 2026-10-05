@@ -8,6 +8,7 @@ publish.workspace = true
 tl-model      = { workspace = true }
 tl-collect    = { workspace = true }
 tl-ops        = { workspace = true }
+tl-history    = { path = "../tl-history" }
 asupersync    = { workspace = true }
 arc-swap      = { workspace = true }
 async-channel = { workspace = true }

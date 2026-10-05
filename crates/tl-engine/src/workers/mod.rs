@@ -8,6 +8,7 @@ mod dbus_systemd;
 pub mod disk;
 pub mod enumerate;
 pub mod gpu_nvidia;
+pub(crate) mod history;
 pub mod journal;
 pub mod logind;
 pub mod lowmem;
