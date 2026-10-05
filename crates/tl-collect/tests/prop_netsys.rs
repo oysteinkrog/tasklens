@@ -17,6 +17,22 @@ proptest! {
 
 // == startup (E06-A2) ==
 
+proptest! {
+    #[test]
+    fn prop_desktop_entry_never_panics(
+        bytes in proptest::collection::vec(any::<u8>(), 0..=128 * 1024),
+        locale in "[a-z_A-Z.@0-9-]{0,16}",
+    ) {
+        use tl_collect::startup::autostart::{locale_match_list, parse_desktop_entry};
+        let list = locale_match_list(&locale);
+        let refs: Vec<&str> = list.iter().map(String::as_str).collect();
+        let _ = parse_desktop_entry(&bytes, &refs);
+        let mut file = b"[Desktop Entry]\n".to_vec();
+        file.extend_from_slice(&bytes);
+        let _ = parse_desktop_entry(&file, &refs);
+    }
+}
+
 // == inventory (E06-A3) ==
 
 // == gpu_drm (E06-A3) ==
