@@ -4,6 +4,7 @@
 //! flag. The session loop arrives with E29-A1.
 
 mod dropin;
+mod files;
 mod ops;
 mod sockets;
 
