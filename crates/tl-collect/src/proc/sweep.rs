@@ -28,6 +28,7 @@ use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
 use crate::CollectError;
+use crate::apps::cgroup_app::{AppSliceScan, scan_app_slice};
 use crate::apps::classify::{ProcClass, ProtectInputs, flags_for, protected_set};
 use crate::apps::naming::{
     NameInput, display_name, exe_basename, image_name, is_wine, search_lower,
@@ -570,6 +571,9 @@ pub struct ProcessSampler {
     core: SweepCore,
     meta: MetaCache,
     apps: AppResolver,
+    /// This sweep's app units. `AppResolver` keeps its own scan private, so the sampler scans
+    /// app.slice once more for the unit stats and the app pid set.
+    scan: AppSliceScan,
     cg: CgroupRoot,
     pss: PssReader,
     users: Box<dyn UserNames + Send>,
@@ -597,6 +601,7 @@ impl ProcessSampler {
             core: SweepCore::new(root),
             meta: MetaCache::new(),
             apps: AppResolver::new(paths),
+            scan: AppSliceScan::default(),
             cg,
             pss: PssReader::new(),
             users,
@@ -633,10 +638,12 @@ impl ProcessSampler {
 
         let now = (self.core.clock)().0;
         self.apps.begin_sweep(&self.cg, ctx.self_uid, now);
+        scan_app_slice(&self.cg, ctx.self_uid, &mut self.bufs, &mut self.scan);
         let Self {
             core,
             meta,
             apps,
+            scan,
             users,
             interner,
             metas,
@@ -654,7 +661,7 @@ impl ProcessSampler {
             ..
         } = scratch;
         app_pids.clear();
-        for unit in apps.app_units() {
+        for unit in &scan.units {
             app_pids.extend(unit.pids.iter().copied());
         }
 
@@ -747,7 +754,7 @@ impl ProcessSampler {
         pid_index.clear();
         pid_index.extend(out.records.iter().enumerate().map(|(i, r)| (r.key.pid, i)));
 
-        for unit in self.apps.app_units() {
+        for unit in &self.scan.units {
             let mut stats = CgroupStats::default();
             let (t_ns, mono_ns) = (self.core.clock)();
             if self
@@ -829,7 +836,7 @@ impl ProcessSampler {
                 io_validity,
             });
         }
-        let units = self.apps.app_units();
+        let units = &self.scan.units;
         self.app_prev
             .retain(|id, _| units.iter().any(|u| u.cgroup_id == *id));
     }

@@ -20,6 +20,7 @@ netlink-sys = { workspace = true }
 insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
+tracing-subscriber = { workspace = true }   # E05 chain edit (R-142 item 18)
 
 [lints]
 workspace = true
