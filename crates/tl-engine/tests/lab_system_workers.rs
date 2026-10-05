@@ -9,10 +9,13 @@ use std::time::Duration;
 
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
+use tl_collect::parse::{block, hwmon, netif};
 use tl_engine::source::Source;
-use tl_engine::update::{CpuSample, SourceUpdate};
+use tl_engine::update::{CpuSample, DeviceKinds, SourceUpdate};
 use tl_engine::workers::cpu::CpuSource;
+use tl_engine::workers::enumerate::{disk_list, net_list, sensor_list};
 use tl_model::demand::{CpuDemand, Demand};
+use tl_model::devices::DeviceIdentity;
 use tl_model::settings::EngineSettings;
 use tl_model::system::Metric;
 use tl_model::validity::Validity;
@@ -222,4 +225,120 @@ fn cpu_hotplug_sends_topology() {
     // Sent once per change.
     let (_, s) = cpu_sample(src, 3 * SEC);
     assert!(s.topology.is_none());
+}
+
+#[test]
+fn enum_disk_list_children_and_parents() {
+    let dir = fixture_copy("disk-partitions-dm", None);
+    let root = SysRoot::at(&dir);
+    let mut disks = Vec::new();
+    block::enumerate_disks(&root, &mut disks).expect("fixture disks enumerate");
+    let list = disk_list(7 * SEC, &disks, &root.run);
+    assert_eq!(list.kinds, DeviceKinds::DISKS);
+    assert_eq!(list.t_ns, 7 * SEC);
+
+    let names: Vec<&str> = list.entries.iter().map(|e| &*e.display_name).collect();
+    assert_eq!(
+        names,
+        [
+            "mmcblk0", "nvme0n1", "sda", "sda1", "sda2", "dm-0", "sdb", "sr0", "vda"
+        ]
+    );
+    let sda = DeviceIdentity::Disk {
+        major: 8,
+        minor: 0,
+        name: "sda".into(),
+        wwn_or_serial: None,
+    };
+    for entry in &list.entries {
+        let is_child = matches!(&*entry.display_name, "sda1" | "sda2" | "dm-0");
+        let want = is_child.then(|| sda.clone());
+        assert_eq!(entry.parent, want, "{}", entry.display_name);
+        assert!(entry.net_kind.is_none());
+        // The fixture's udev entries carry no WWN, serial or path: the kernel name is the key.
+        assert_eq!(
+            &*entry.persistent_key,
+            format!("disk:{}", entry.display_name)
+        );
+    }
+}
+
+#[test]
+fn enum_net_list_no_loopback() {
+    let dir = fixture_copy("netif-kinds", None);
+    let root = SysRoot::at(&dir);
+    let mut ifaces = Vec::new();
+    netif::enumerate(&root, &mut ifaces).expect("fixture interfaces enumerate");
+    let list = net_list(SEC, &ifaces, &root.sys);
+    assert_eq!(list.kinds, DeviceKinds::NETS);
+    assert!(list.entries.iter().all(|e| &*e.display_name != "lo"));
+    assert_eq!(list.entries.len(), ifaces.len());
+
+    let tailscale = list
+        .entries
+        .iter()
+        .find(|e| &*e.display_name == "tailscale0")
+        .expect("tailscale0 listed");
+    assert_eq!(
+        tailscale.identity,
+        DeviceIdentity::Net {
+            netns_ino: 4026531840,
+            ifindex: 8,
+            name: "tailscale0".into(),
+        }
+    );
+    // No `address` file: the name is the key.
+    assert_eq!(&*tailscale.persistent_key, "net:tailscale0");
+    let eth0 = list
+        .entries
+        .iter()
+        .find(|e| &*e.display_name == "eth0")
+        .expect("eth0 listed");
+    assert_eq!(&*eth0.persistent_key, "net:aa:bb:cc:dd:ee:01");
+}
+
+#[test]
+fn enum_sensor_list_skips_gpu_chips() {
+    let dir = fixture_copy("fans", None);
+    let root = SysRoot::at(&dir);
+    let mut chips = Vec::new();
+    hwmon::enumerate(&root, &mut chips).expect("fixture chips enumerate");
+    let list = sensor_list(SEC, &chips);
+    assert_eq!(list.kinds, DeviceKinds::SENSORS | DeviceKinds::FANS);
+
+    let mut nct_fans = Vec::new();
+    let mut nct_temps = Vec::new();
+    for entry in &list.entries {
+        match &entry.identity {
+            DeviceIdentity::Fan { chip, index } => {
+                assert_ne!(&**chip, "amdgpu");
+                if &**chip == "nct6797" {
+                    nct_fans.push(*index);
+                }
+            }
+            DeviceIdentity::Sensor { chip, label } => {
+                assert_ne!(&**chip, "amdgpu");
+                if &**chip == "nct6797" {
+                    nct_temps.push(label.to_string());
+                }
+            }
+            other => panic!("unexpected identity {other:?}"),
+        }
+    }
+    assert_eq!(nct_fans, [1, 2]);
+    assert_eq!(nct_temps, ["temp1", "temp2"]);
+    let fan1 = list
+        .entries
+        .iter()
+        .find(|e| {
+            e.identity
+                == DeviceIdentity::Fan {
+                    chip: "nct6797".into(),
+                    index: 1,
+                }
+        })
+        .expect("nct6797 fan1 listed");
+    assert_eq!(&*fan1.display_name, "nct6797 fan1");
+    assert!(fan1.persistent_key.starts_with("fan:nct6797:"));
+    assert!(fan1.persistent_key.ends_with(":1"));
 }

@@ -188,9 +188,7 @@ pub fn sensor_key(chip: &HwmonChip, t: &TempInput) -> Arc<str> {
 /// A file that cannot be read gives the kernel-name fallback.
 fn disk_key_from_udev(udev_root: &Path, name: &str, major: u32, minor: u32) -> Arc<str> {
     let mut props = UdevProps::default();
-    let path = udev_root
-        .join("udev/data")
-        .join(block_entry(major, minor));
+    let path = udev_root.join("udev/data").join(block_entry(major, minor));
     if read_udev_props(&path, &DISK_KEY_UDEV, &mut props).is_err() {
         props.clear();
     }
@@ -316,7 +314,12 @@ mod tests {
     }
 
     fn udev(pairs: &[(&str, &str)]) -> UdevProps {
-        UdevProps(pairs.iter().map(|(k, v)| ((*k).into(), (*v).into())).collect())
+        UdevProps(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+        )
     }
 
     #[test]
