@@ -446,6 +446,21 @@ fn spawn_fd3_env_and_fds() {
     let child = spawn_probe(&probe, &[OsStr::new("--fake"), OsStr::new("normal")]).expect("spawn");
     let pid = child.child.id();
 
+    // After the Hello reply the probe is in its loop, so the dynamic loader's short-lived fds
+    // are closed again.
+    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
+    sock.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let hello = ProbeRequest::Hello {
+        proto: GPU_PROTO_VERSION,
+    };
+    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
+    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
+    assert!(
+        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
+        "{reply:?}"
+    );
+
     let fds: Vec<i32> = {
         let mut fds: Vec<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
             .expect("read fd dir")
@@ -461,7 +476,14 @@ fn spawn_fd3_env_and_fds() {
         fds.sort_unstable();
         fds
     };
-    assert_eq!(fds, vec![0, 1, 2, 3]);
+    let targets: Vec<String> = fds
+        .iter()
+        .map(|fd| {
+            let target = std::fs::read_link(format!("/proc/{pid}/fd/{fd}"));
+            format!("{fd}: {target:?}")
+        })
+        .collect();
+    assert_eq!(fds, vec![0, 1, 2, 3], "{targets:?}");
     let fd3 = std::fs::read_link(format!("/proc/{pid}/fd/3")).expect("readlink fd 3");
     assert!(fd3.to_string_lossy().starts_with("socket:["), "{fd3:?}");
 
@@ -483,19 +505,6 @@ fn spawn_fd3_env_and_fds() {
     got.sort();
     want.sort();
     assert_eq!(got, want);
-
-    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
-    sock.set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("read timeout");
-    let hello = ProbeRequest::Hello {
-        proto: GPU_PROTO_VERSION,
-    };
-    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
-    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
-    assert!(
-        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
-        "{reply:?}"
-    );
 
     drop(child);
     assert_eq!(stat(pid), None, "drop kills and reaps");
@@ -744,16 +753,16 @@ fn worker_io(
     (io, rx, demand_tx, control_tx)
 }
 
-/// One `run_with` call as a lab root task, run until idle.
-fn lab_worker(
-    link: Arc<FakeLink>,
-    demand: Demand,
-) -> (
+/// What [`lab_worker`] returns: the lab, the update queue, the demand sender and the task.
+type LabWorker = (
     LabRuntime,
     mpsc::Receiver<EngineMsg>,
     watch::Sender<Demand>,
     TaskHandle<Outcome<(), WorkerError>>,
-) {
+);
+
+/// One `run_with` call as a lab root task, run until idle.
+fn lab_worker(link: Arc<FakeLink>, demand: Demand) -> LabWorker {
     lab_worker_with(link, demand, true, fresh_once())
 }
 
@@ -762,12 +771,7 @@ fn lab_worker_with(
     demand: Demand,
     installed: bool,
     api_once: &'static AtomicBool,
-) -> (
-    LabRuntime,
-    mpsc::Receiver<EngineMsg>,
-    watch::Sender<Demand>,
-    TaskHandle<Outcome<(), WorkerError>>,
-) {
+) -> LabWorker {
     let mut lab = LabRuntime::new(LabConfig::new(0xe13).max_steps(10_000_000));
     let (io, rx, demand_tx, _control) = worker_io(demand);
     let locate = move || installed.then(|| PathBuf::from(FAKE_PATH));
