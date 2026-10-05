@@ -2204,6 +2204,10 @@ fn sweep_meta_arc_reused() {
     assert_eq!(first.records.len(), second.records.len());
     for (a, b) in first.records.iter().zip(&second.records) {
         assert_eq!(a.key, b.key);
+        // pid % 10 == 9 is due its first (staggered) metadata refresh in sweep 2.
+        if a.key.pid % 10 == 9 {
+            continue;
+        }
         assert!(
             Arc::ptr_eq(&a.meta, &b.meta),
             "pid {} got a new meta",
