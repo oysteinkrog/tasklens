@@ -1474,6 +1474,8 @@ fn engine_gpu_end_to_end_lab() {
 
 /// E13-A2 failure table through the engine: a sample deadline ends the generation, the
 /// supervisor starts a new one 0.5 s later, and samples resume on the new connection.
+/// `GAP_BEFORE` on the first sample of the new generation is not checked here: the reducer
+/// gets that rule with R-289 (bead tasklens-lban).
 #[test]
 fn engine_gpu_failure_table_lab() {
     let (mut rig, link) = EngineRig::start(0xe13a3, visible_gpus(), |clock| {
