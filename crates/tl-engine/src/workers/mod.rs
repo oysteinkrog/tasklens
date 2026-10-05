@@ -4,6 +4,7 @@
 //! (chain edit). The logind worker (E08-A2) is the first entry.
 
 pub mod cpu;
+pub mod enumerate;
 
 use std::sync::Arc;
 
