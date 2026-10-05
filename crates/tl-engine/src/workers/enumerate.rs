@@ -162,7 +162,8 @@ pub fn disk_key(name: &str, udev: &UdevProps) -> Arc<str> {
 }
 
 /// `net:<MAC>` when `mac` (sysfs `address`) is present and not all zero, else
-/// `net:<interface name>`.
+/// `net:<interface name>`. `NetIface` has no address field, so the caller passes the MAC
+/// (leader decision, hjn.5).
 pub fn net_key(i: &NetIface, mac: Option<&str>) -> Arc<str> {
     match mac.filter(|m| m.bytes().any(|b| b != b'0' && b != b':')) {
         Some(mac) => format!("net:{mac}").into(),
@@ -232,7 +233,8 @@ pub fn disk_list(t_ns: TimeNs, disks: &[BlockDevice], udev_root: &Path) -> Devic
 
 /// Full NETS list: every interface `netif::enumerate` returned (it already leaves out `lo`).
 /// The MAC for the key comes from `<sys_root>/class/net/<name>/address`; `sys_root` is
-/// `SysRoot.sys`.
+/// `SysRoot.sys`. The `sys_root` argument is a leader decision (hjn.5), the same shape as
+/// `disk_list`'s `udev_root`.
 pub fn net_list(t_ns: TimeNs, ifaces: &[NetIface], sys_root: &Path) -> DeviceList {
     let mut buf = Vec::new();
     let entries = ifaces
