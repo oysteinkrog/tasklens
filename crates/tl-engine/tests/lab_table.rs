@@ -1070,3 +1070,134 @@ fn deterministic_order() {
         );
     }
 }
+
+// Subtree totals (E09-026).
+
+/// A → B → C with CPU 1, 2, 3.
+fn abc_cpu() -> Vec<ProcessRecord> {
+    vec![
+        rec(1, 0, "A", 1.0),
+        rec(2, 1, "B", 2.0),
+        rec(3, 2, "C", 3.0),
+    ]
+}
+
+fn subtree_on() -> EngineSettings {
+    EngineSettings {
+        subtree_totals: true,
+        ..EngineSettings::default()
+    }
+}
+
+/// Tree build sorted by PID ascending with `expanded` open.
+fn tree_view(
+    records: &[ProcessRecord],
+    filter: &str,
+    expanded: &[u32],
+    settings: &EngineSettings,
+) -> ProcessTableView {
+    let q = query(
+        TableMode::Tree,
+        "pid",
+        true,
+        filter,
+        &nodes(records, expanded),
+    );
+    build(records, &q, settings)
+}
+
+/// The subtree row of the row for `pid`, if it has one.
+fn subtree_of<'a>(
+    view: &'a ProcessTableView,
+    records: &[ProcessRecord],
+    pid: u32,
+) -> Option<&'a GroupRow> {
+    let row = view
+        .rows
+        .iter()
+        .find(|row| {
+            row.record
+                .is_some_and(|i| records[i as usize].key.pid == pid)
+        })
+        .expect("no row with that PID");
+    row.subtree.map(|s| &view.subtree[s as usize])
+}
+
+#[test]
+fn subtree_totals_bottom_up() {
+    let records = abc_cpu();
+    let view = tree_view(&records, "", &[1, 2], &subtree_on());
+    let a = subtree_of(&view, &records, 1).expect("A has a subtree row");
+    assert_eq!(a.cpu_pct, 6.0);
+    assert_eq!(a.node, node(&records, 1));
+    assert_eq!(a.members, 3);
+    let b = subtree_of(&view, &records, 2).expect("B has a subtree row");
+    assert_eq!(b.cpu_pct, 5.0);
+    assert!(subtree_of(&view, &records, 3).is_none());
+    assert_eq!(view.subtree.len(), 2);
+}
+
+#[test]
+fn subtree_validity_is_worst_of() {
+    let mut records = abc_cpu();
+    records[2]
+        .validity
+        .set(ProcessField::Cpu, Validity::Restricted);
+    let view = tree_view(&records, "", &[1, 2], &subtree_on());
+    let a = subtree_of(&view, &records, 1).expect("A has a subtree row");
+    assert_eq!(a.validity.get(ProcessField::Cpu), Validity::Restricted);
+    assert_eq!(a.validity.get(ProcessField::RssAnon), Validity::Valid);
+}
+
+#[test]
+fn subtree_only_for_collapsed_when_setting_off() {
+    let records = abc_cpu();
+    let view = tree_view(&records, "", &[1, 2], &settings());
+    assert!(view.rows.iter().all(|row| row.subtree.is_none()));
+    assert!(view.subtree.is_empty());
+
+    let view = tree_view(&records, "", &[], &settings());
+    let a = subtree_of(&view, &records, 1).expect("collapsed A has a subtree row");
+    assert_eq!(a.cpu_pct, 6.0);
+    assert_eq!(view.rows.len(), 1);
+}
+
+#[test]
+fn subtree_memory_sum() {
+    const MIB: u64 = 1 << 20;
+    let mut records = abc_cpu();
+    for (r, mib) in records.iter_mut().zip([100, 200, 300]) {
+        r.rss_anon_bytes = mib * MIB;
+    }
+    let view = tree_view(&records, "", &[1, 2], &subtree_on());
+    let a = subtree_of(&view, &records, 1).expect("A has a subtree row");
+    assert_eq!(a.rss_anon_bytes, 600 * MIB);
+    assert_eq!(a.memory_bytes, 600 * MIB);
+}
+
+#[test]
+fn subtree_sums_visible_only() {
+    // A → B → C, plus A → D. The filter drops B; without include_children C becomes a root.
+    let records = vec![
+        rec(1, 0, "keep-a", 1.0),
+        rec(2, 1, "drop-b", 2.0),
+        rec(3, 2, "keep-c", 3.0),
+        rec(4, 1, "keep-d", 4.0),
+    ];
+    let view = tree_view(&records, "keep", &[1], &subtree_on());
+    let roots: Vec<u32> = view
+        .rows
+        .iter()
+        .filter(|row| row.depth == 0)
+        .map(|row| {
+            records[row.record.expect("tree rows are processes") as usize]
+                .key
+                .pid
+        })
+        .collect();
+    assert_eq!(roots, [1, 3]);
+    let a = subtree_of(&view, &records, 1).expect("A has a subtree row");
+    assert_eq!(a.cpu_pct, 5.0);
+    assert_eq!(a.members, 2);
+    assert!(subtree_of(&view, &records, 3).is_none());
+}

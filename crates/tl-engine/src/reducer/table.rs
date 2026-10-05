@@ -745,8 +745,16 @@ fn tree_visible(input: &TableInput<'_>, matches: &[u32], include_children: bool)
     visible
 }
 
-/// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`.
-fn tree_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Vec<TableRow>, u32) {
+/// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`, and the
+/// subtree totals the rows index with `TableRow.subtree`.
+///
+/// With `subtree_totals` on, every row with children gets a subtree total. With it off, only
+/// collapsed parents do (ADR-009: the collapsed parent shows its subtree sum).
+fn tree_rows(
+    input: &TableInput<'_>,
+    query: &TableQuery,
+    filter: &Filter,
+) -> (Vec<TableRow>, Vec<GroupRow>, u32) {
     let matches = filtered(input, filter);
     let visible = tree_visible(input, &matches, query.include_children);
     let shown = visible.iter().filter(|v| **v).count() as u32;
@@ -759,7 +767,21 @@ fn tree_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Ve
     };
     let mut rows = Vec::with_capacity(shown as usize);
     flatten_tree(input.records, &f, &order, &expanded, &mut rows, 0);
-    (rows, shown)
+
+    let all = input.settings.subtree_totals;
+    let wanted: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.has_children && (all || !row.expanded))
+        .map(|(k, _)| k)
+        .collect();
+    let indexes: Vec<u32> = wanted.iter().filter_map(|&k| rows[k].record).collect();
+    let subtree = subtree_totals(&f, input.records, &indexes);
+    // Every wanted row has a record with children, so `subtree` lines up with `wanted`.
+    for (s, &k) in wanted.iter().enumerate() {
+        rows[k].subtree = Some(s as u32);
+    }
+    (rows, subtree, shown)
 }
 
 /// The three fixed groups of grouped mode (PROC-004). Every process sits under exactly one.
@@ -1025,6 +1047,87 @@ pub fn aggregate(
         threads,
         validity,
     }
+}
+
+/// Adds the sums of `from` into `into`. Each field's validity becomes the worse of the two.
+fn add_sums(into: &mut GroupRow, from: &GroupRow) {
+    into.members = into.members.saturating_add(from.members);
+    into.pids = into.pids.saturating_add(from.pids);
+    into.memory_bytes = into.memory_bytes.saturating_add(from.memory_bytes);
+    into.disk_bps += from.disk_bps;
+    into.net_bps += from.net_bps;
+    into.gpu_pct += from.gpu_pct;
+    into.cpu_pct += from.cpu_pct;
+    into.rss_anon_bytes = into.rss_anon_bytes.saturating_add(from.rss_anon_bytes);
+    into.rss_bytes = into.rss_bytes.saturating_add(from.rss_bytes);
+    into.pss_bytes = into.pss_bytes.saturating_add(from.pss_bytes);
+    into.uss_bytes = into.uss_bytes.saturating_add(from.uss_bytes);
+    into.swap_bytes = into.swap_bytes.saturating_add(from.swap_bytes);
+    into.io_read_bps += from.io_read_bps;
+    into.io_write_bps += from.io_write_bps;
+    into.net_rx_bps += from.net_rx_bps;
+    into.net_tx_bps += from.net_tx_bps;
+    into.gpu_util_pct += from.gpu_util_pct;
+    into.gpu_mem_bytes = into.gpu_mem_bytes.saturating_add(from.gpu_mem_bytes);
+    into.threads = into.threads.saturating_add(from.threads);
+    for f in ProcessField::ALL {
+        into.validity
+            .set(f, worse(into.validity.get(f), from.validity.get(f)));
+    }
+}
+
+/// Subtree totals (PROC-019, R-005): one row per entry of `visible` (record indexes, in that
+/// order) that has children in `f`, summing the record and all its descendants in `f`.
+///
+/// Each process counts once. Memory is the RssAnon sum. Each field's validity is the worst over
+/// the subtree. `f` holds only the visible records, so the sums cover visible descendants only.
+/// A row's `node` is the record's `NodeId::Process`, its name and icon the record's. The sums
+/// are computed bottom up for every record in one pass, O(n).
+pub fn subtree_totals(f: &Forest, records: &[ProcessRecord], visible: &[u32]) -> Vec<GroupRow> {
+    let n = f.children.len().min(records.len());
+    let in_range = |i: u32| (i as usize) < n;
+
+    let mut seen = vec![false; n];
+    let mut pre: Vec<u32> = Vec::with_capacity(n);
+    let mut stack: Vec<u32> = f.roots.iter().copied().filter(|&i| in_range(i)).collect();
+    while let Some(i) = stack.pop() {
+        if std::mem::replace(&mut seen[i as usize], true) {
+            continue;
+        }
+        pre.push(i);
+        stack.extend(
+            f.children[i as usize]
+                .iter()
+                .copied()
+                .filter(|&c| in_range(c)),
+        );
+    }
+
+    let mut sums: Vec<Option<GroupRow>> = (0..n).map(|_| None).collect();
+    for &i in pre.iter().rev() {
+        let r = &records[i as usize];
+        let mut row = aggregate(records, &[i], None, None);
+        row.node = NodeId::Process(r.key);
+        row.name = r.meta.name.clone();
+        row.icon = r.meta.icon.clone();
+        for &c in &f.children[i as usize] {
+            // Children come later in pre-order, so they are summed already. In an acyclic
+            // forest that is every child.
+            if in_range(c)
+                && c != i
+                && let Some(child) = &sums[c as usize]
+            {
+                add_sums(&mut row, child);
+            }
+        }
+        sums[i as usize] = Some(row);
+    }
+
+    visible
+        .iter()
+        .filter(|&&i| in_range(i) && !f.children[i as usize].is_empty())
+        .filter_map(|&i| sums[i as usize].clone())
+        .collect()
 }
 
 /// The sort value of a group row in column `col`: the aggregated value it displays. Columns a
@@ -1465,16 +1568,19 @@ fn flat_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Ve
 /// Builds the process table for `query` (ADR-009).
 pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
     let filter = Filter::parse(&query.filter);
-    let (rows, groups, shown) = match query.mode {
+    let (rows, groups, subtree, shown) = match query.mode {
         TableMode::Tree => {
-            let (rows, shown) = tree_rows(input, query, &filter);
-            (rows, Vec::new(), shown)
+            let (rows, subtree, shown) = tree_rows(input, query, &filter);
+            (rows, Vec::new(), subtree, shown)
         }
         TableMode::Flat => {
             let (rows, shown) = flat_rows(input, query, &filter);
-            (rows, Vec::new(), shown)
+            (rows, Vec::new(), Vec::new(), shown)
         }
-        TableMode::Grouped => grouped_rows(input, query, &filter),
+        TableMode::Grouped => {
+            let (rows, groups, shown) = grouped_rows(input, query, &filter);
+            (rows, groups, Vec::new(), shown)
+        }
     };
 
     let restricted = input
@@ -1497,6 +1603,7 @@ pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
         restricted: restricted as u32,
         rows: Arc::from(rows),
         groups: Arc::from(groups),
+        subtree: Arc::from(subtree),
         totals: TableTotals::default(),
     }
 }
