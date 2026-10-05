@@ -7,7 +7,13 @@
 //! - `worker_*`, `supervised_*` and `explore_*` run the `GpuNvidia` worker in a `LabRuntime` on
 //!   virtual time over a scripted [`FakeLink`]. More worker cases (resent `GpuInfo`,
 //!   `RefreshNow`) are unit tests in `workers/gpu_nvidia.rs`.
+//! - `engine_gpu_*` run the whole engine (`engine_root` with the reducer) in a lab, with the
+//!   `GpuNvidia` spec over a [`FakeLink`] as its only worker (E13-A2).
 
+#[path = "fake_sources.rs"]
+mod fake_sources;
+
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::Write as _;
@@ -24,7 +30,9 @@ use asupersync::channel::{mpsc, watch};
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{JoinError, TaskHandle};
 use asupersync::supervision::ManagedGeneration;
+use asupersync::time::{TimeSource, VirtualClock};
 use asupersync::types::{Budget, Outcome, RegionId, Time};
+use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::controller::SourceController;
 use tl_engine::dbus::SharedHandles;
 use tl_engine::gpu::client::{HelloInfo, HelloOutcome, ProbeClient, ProbeResponseSample};
@@ -33,17 +41,25 @@ use tl_engine::gpu::{
     API_VERSIONS_DEADLINE, HELLO_DEADLINE, NOT_INSTALLED, PROBE_ENV, ProbeError, SAMPLE_DEADLINE,
     SHUTDOWN_GRACE,
 };
+use tl_engine::session::engine_root;
 use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::WorkerFactory;
 use tl_engine::update::{EngineMsg, GpuSample, SourceUpdate, WorkerError};
-use tl_engine::workers::gpu_nvidia::{PARK_RECHECK, PERIOD, ProbeLink, run_with};
+use tl_engine::workers::WorkerSpec;
+use tl_engine::workers::gpu_nvidia::{self, PARK_RECHECK, PERIOD, ProbeLink, run_with};
 use tl_model::demand::Demand;
+use tl_model::devices::DeviceIdentity;
 use tl_model::gpu_proto::{
     ApiVersions, GPU_PROTO_VERSION, GpuApiVersions, GpuDeviceInfo, GpuDeviceSample,
     GpuProcessSample, InitFailure, ProbeRequest, ProbeResponse, Reading,
 };
 use tl_model::health::{SourceId, SourceState};
+use tl_model::ids::{MetricId, SeriesId};
+use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
+use tl_model::snapshot::Snapshot;
+use tl_model::system::Metric;
+use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::wire::{MAX_PROBE_FRAME, read_frame, write_frame};
 
 // Real fake binary ----------------------------------------------------------------------------
@@ -541,6 +557,9 @@ enum LinkCall {
 struct FakeLink {
     script: Mutex<VecDeque<LinkStep>>,
     calls: Mutex<Vec<LinkCall>>,
+    /// Sample times for the engine tests: the base plus the clock's virtual time. `None` gives
+    /// the connection's sample number.
+    time: Option<(Arc<VirtualClock>, TimeNs)>,
 }
 
 impl FakeLink {
@@ -548,6 +567,17 @@ impl FakeLink {
         Arc::new(FakeLink {
             script: Mutex::new(script.into_iter().collect()),
             calls: Mutex::new(Vec::new()),
+            time: None,
+        })
+    }
+
+    /// Samples stamped `base + clock`. The base is an hour after the real boot time now, so
+    /// the reducer's stale check, which reads the real clock, never sees an old sample.
+    fn timed(script: impl IntoIterator<Item = LinkStep>, clock: &Arc<VirtualClock>) -> Arc<Self> {
+        Arc::new(FakeLink {
+            script: Mutex::new(script.into_iter().collect()),
+            calls: Mutex::new(Vec::new()),
+            time: Some((Arc::clone(clock), now_boot_ns() + 3_600 * 1_000_000_000)),
         })
     }
 
@@ -623,9 +653,13 @@ impl ProbeLink for Conn {
             return Err(e);
         }
         self.seq += 1;
+        let t_ns = match &self.link.time {
+            Some((clock, base)) => base + clock.now().as_nanos(),
+            None => u64::from(self.seq),
+        };
         Ok(ProbeResponseSample {
             seq: self.seq,
-            t_ns: u64::from(self.seq),
+            t_ns,
             devices: vec![device_sample()],
             processes: processes.then(|| vec![process_sample()]),
         })
@@ -650,7 +684,7 @@ fn device_info() -> GpuDeviceInfo {
         uuid: UUID,
         name: "NVIDIA GeForce RTX 4070".into(),
         pci_bus_id: "00000000:2D:00.0".into(),
-        mem_total: 12 << 30,
+        mem_total: 16 << 30,
         power_limit_mw: Some(200_000),
         cuda_version: None,
         vbios: None,
@@ -1268,4 +1302,224 @@ fn explore_worker_restart() {
             "seed {seed}"
         );
     }
+}
+
+// Engine ------------------------------------------------------------------------------------
+
+thread_local! {
+    /// The link and `--api-versions` flag `engine_gpu_factory` hands to each generation. The lab
+    /// runs every task on the test thread.
+    static ENGINE_LINK: RefCell<Option<(Arc<FakeLink>, &'static AtomicBool)>> =
+        const { RefCell::new(None) };
+}
+
+/// `WorkerSpec::factory` is a fn pointer, so the link comes from `ENGINE_LINK`.
+fn engine_gpu_factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let (link, once) = ENGINE_LINK
+        .with(|l| l.borrow().clone())
+        .expect("spec_with set the link");
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        let link = Arc::clone(&link);
+        async move {
+            let locate = || Some(PathBuf::from(FAKE_PATH));
+            run_with::<Conn>(cx, io, locate, link, once).await
+        }
+    })
+}
+
+/// `gpu_nvidia::spec()` with the factory swapped for one that runs the real worker body over
+/// `link`.
+fn spec_with(link: Arc<FakeLink>) -> WorkerSpec {
+    ENGINE_LINK.with(|l| *l.borrow_mut() = Some((link, fresh_once())));
+    WorkerSpec {
+        factory: engine_gpu_factory,
+        ..gpu_nvidia::spec()
+    }
+}
+
+/// The engine root in a lab, with the `GpuNvidia` spec over `link` as its only worker.
+struct EngineRig {
+    fake: fake_sources::FakeLab,
+    ui: fake_sources::UiSide,
+    root: TaskHandle<()>,
+}
+
+impl EngineRig {
+    /// `link` is made by the closure from the lab's clock. `demand` is set before the engine
+    /// starts.
+    fn start(
+        seed: u64,
+        demand: Demand,
+        link: impl FnOnce(&Arc<VirtualClock>) -> Arc<FakeLink>,
+    ) -> (Self, Arc<FakeLink>) {
+        let mut fake =
+            fake_sources::FakeLab::with_config(LabConfig::new(seed).max_steps(10_000_000));
+        let link = link(&fake.clock);
+        let config = Arc::new(EngineConfig::new(
+            EngineMode::Full,
+            "/var/tmp/claude/ndy.2-state".into(),
+        ));
+        let (ep, ui) = fake_sources::root_endpoints(config, vec![spec_with(Arc::clone(&link))]);
+        ui.demand_tx.send(demand).expect("demand sends");
+        let root = fake.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            engine_root(cx, ep).await;
+        });
+        (EngineRig { fake, ui, root }, link)
+    }
+
+    fn set_demand(&self, demand: Demand) {
+        self.ui.demand_tx.send(demand).expect("demand sends");
+    }
+
+    /// Runs `total` of virtual time in 100 ms steps.
+    fn run_for(&mut self, total: Duration) {
+        self.fake.run_for(total, Duration::from_millis(100));
+    }
+
+    fn latest(&self) -> Arc<Snapshot> {
+        self.ui.latest.load_full()
+    }
+
+    /// Cancels the root, runs to quiescence and checks the lab's oracles.
+    fn finish(mut self) {
+        self.root.abort();
+        self.fake.advance(Duration::from_millis(10));
+        assert!(self.root.is_finished(), "engine_root returned after cancel");
+        self.fake.finish();
+    }
+}
+
+fn gpu_identity(snap: &Snapshot) -> DeviceIdentity {
+    let gpus: Vec<&DeviceIdentity> = snap
+        .devices
+        .entries
+        .iter()
+        .map(|e| &e.identity)
+        .filter(|id| matches!(id, DeviceIdentity::Gpu { .. }))
+        .collect();
+    assert_eq!(gpus.len(), 1, "{gpus:?}");
+    assert!(
+        matches!(gpus[0], DeviceIdentity::Gpu { uuid, .. } if *uuid == UUID),
+        "{gpus:?}"
+    );
+    gpus[0].clone()
+}
+
+/// The `GPU_UTIL` samples of the one GPU.
+fn gpu_util(snap: &Snapshot) -> Vec<Sample> {
+    let idx = snap
+        .devices
+        .find(&gpu_identity(snap))
+        .expect("the GPU is in the catalog")
+        .idx;
+    snap.series
+        .get(SeriesId {
+            device: idx,
+            metric: MetricId::GPU_UTIL,
+        })
+        .map(|view| view.samples.to_vec())
+        .unwrap_or_default()
+}
+
+/// E13-A2: the registered spec, the real worker body and the reducer, end to end.
+#[test]
+fn engine_gpu_end_to_end_lab() {
+    let (mut rig, link) =
+        EngineRig::start(0xe13_a2, visible_gpus(), |clock| FakeLink::timed([], clock));
+    // Samples at 0, 1 and 2 s.
+    rig.run_for(Duration::from_secs(3) - Duration::from_millis(1));
+    let snap = rig.latest();
+    assert_eq!(
+        snap.health.get(SourceId::GpuNvidia).state,
+        SourceState::Running
+    );
+    let idx = snap
+        .devices
+        .find(&gpu_identity(&snap))
+        .expect("the GPU is in the catalog")
+        .idx;
+    assert_eq!(gpu_util(&snap).len(), 3, "{:?}", gpu_util(&snap));
+    assert!(gpu_util(&snap).iter().all(|s| s.value == 37.0));
+    // The reducer replaces the worker's placeholder index with the catalog index.
+    assert_eq!(snap.system.gpus.len(), 1);
+    let (row_idx, totals) = &snap.system.gpus[0];
+    assert_eq!(*row_idx, idx);
+    assert_eq!(totals.device, idx);
+    assert_eq!(totals.mem_total, Metric::valid(16 << 30));
+    assert_eq!(link.samples(), vec![false; 3]);
+
+    rig.set_demand(Demand {
+        gpu_process: true,
+        ..visible_gpus()
+    });
+    rig.run_for(Duration::from_secs(1));
+    assert_eq!(link.samples().last(), Some(&true), "{:?}", link.calls());
+
+    rig.set_demand(Demand::default());
+    rig.run_for(Duration::from_millis(100));
+    let samples = link.samples().len();
+    let util = gpu_util(&rig.latest()).len();
+    rig.run_for(Duration::from_secs(10));
+    assert_eq!(link.samples().len(), samples, "no request while idle");
+    assert_eq!(
+        gpu_util(&rig.latest()).len(),
+        util,
+        "no Gpu message while idle"
+    );
+    assert_eq!(link.starts(), 1);
+    rig.finish();
+}
+
+/// E13-A2 failure table through the engine: a sample deadline ends the generation, the
+/// supervisor starts a new one 0.5 s later, and samples resume on the new connection.
+#[test]
+fn engine_gpu_failure_table_lab() {
+    let (mut rig, link) = EngineRig::start(0xe13_a3, visible_gpus(), |clock| {
+        FakeLink::timed(
+            [
+                LinkStep::Sample(Ok(())),
+                LinkStep::Sample(Ok(())),
+                LinkStep::Sample(Err(ProbeError::Deadline(SAMPLE_DEADLINE))),
+            ],
+            clock,
+        )
+    });
+    rig.run_for(Duration::from_millis(1_900));
+    let snap = rig.latest();
+    assert_eq!(
+        snap.health.get(SourceId::GpuNvidia).state,
+        SourceState::Running
+    );
+    assert_eq!(gpu_util(&snap).len(), 2);
+
+    // The deadline at 2 s, the restart at 2.5 s and its first sample at once.
+    rig.run_for(Duration::from_millis(700));
+    let snap = rig.latest();
+    assert_eq!(link.starts(), 2, "{:?}", link.calls());
+    assert_eq!(
+        snap.health.get(SourceId::GpuNvidia).state,
+        SourceState::Running
+    );
+    let util = gpu_util(&snap);
+    assert_eq!(util.len(), 3, "{util:?}");
+    let gap_ns = util[2].t_ns - util[1].t_ns;
+    assert_eq!(gap_ns, 1_500_000_000, "{util:?}");
+    assert!(util.iter().all(|s| s.flags.contains(SampleFlags::VALID)));
+    assert_eq!(
+        link.calls()
+            .iter()
+            .filter(|c| matches!(c, LinkCall::Sample { conn: 2, .. }))
+            .count(),
+        1
+    );
+
+    rig.run_for(Duration::from_secs(2));
+    assert_eq!(gpu_util(&rig.latest()).len(), 5);
+    assert_eq!(
+        rig.latest().health.get(SourceId::GpuNvidia).state,
+        SourceState::Running
+    );
+    rig.finish();
 }
