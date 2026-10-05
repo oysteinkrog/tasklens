@@ -1,10 +1,14 @@
 //! Classify processes as app, background or system.
 
+use std::ffi::OsStr;
+use std::path::Path;
 use std::sync::Arc;
 
+use rustc_hash::{FxHashMap, FxHashSet};
+use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType, connect, socket_with};
 use smallvec::SmallVec;
 use tl_model::ids::GroupKey;
-use tl_model::process::GroupKind;
+use tl_model::process::{GroupKind, ProcFlags};
 
 use crate::apps::cgroup_app::{AppUnitKind, UnitAppId, parse_app_unit};
 use crate::apps::desktop::{DesktopEntry, DesktopIndex};
@@ -260,4 +264,145 @@ fn wine_entry_matches(entry: &DesktopEntry, name: &str) -> bool {
 fn ends_with_exe(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 4 && b[b.len() - 4..].eq_ignore_ascii_case(b".exe")
+}
+
+// ---- Process flags and the protected set (E05-017) ----
+
+/// Inputs to the protected set that need sockets or D-Bus. Filled by the engine (E10).
+#[derive(Clone, Debug, Default)]
+pub struct ProtectInputs {
+    /// tasklens's own pid and the `tl-gpu-probe` pid when it runs.
+    pub self_pids: SmallVec<[u32; 2]>,
+    /// The Wayland compositor, from `wayland_compositor_pid`.
+    pub compositor_pid: Option<u32>,
+    /// The session bus daemon, from `GetConnectionUnixProcessID("org.freedesktop.DBus")`.
+    pub session_bus_pid: Option<u32>,
+}
+
+/// The pid of the process that serves the Wayland socket, read with `SO_PEERCRED`. The socket is
+/// `<runtime_dir>/<display>`, or `display` itself when it is absolute. An empty `display` means
+/// `wayland-0`. Returns `None` when the socket cannot be reached.
+pub fn wayland_compositor_pid(runtime_dir: &Path, display: &OsStr) -> Option<u32> {
+    let display = if display.is_empty() {
+        OsStr::new("wayland-0")
+    } else {
+        display
+    };
+    let path = runtime_dir.join(display);
+    let addr = SocketAddrUnix::new(path.as_path()).ok()?;
+    // Non-blocking so a full listen backlog fails at once instead of stalling the sweep.
+    let fd = socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+        None,
+    )
+    .ok()?;
+    connect(&fd, &addr).ok()?;
+    let cred = rustix::net::sockopt::socket_peercred(&fd).ok()?;
+    u32::try_from(cred.pid.as_raw_nonzero().get()).ok()
+}
+
+/// The pids that must not be ended or signalled without care (ADR-006, PROC-059).
+#[derive(Clone, Debug, Default)]
+pub struct ProtectedSet {
+    pids: FxHashSet<u32>,
+}
+
+impl ProtectedSet {
+    pub fn contains(&self, pid: u32) -> bool {
+        self.pids.contains(&pid)
+    }
+
+    pub fn len(&self) -> usize {
+        self.pids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pids.is_empty()
+    }
+}
+
+/// Session processes protected for the current user only.
+const SESSION_NAMES: [&str; 3] = ["plasmashell", "ksmserver", "Xwayland"];
+
+/// Login ancestors of the compositor or of plasmashell.
+const LOGIN_NAMES: [&str; 2] = ["sddm", "login"];
+
+/// Longest ppid walk. Real chains are under 10; the cap guards against a ppid loop in racy data.
+const MAX_WALK: usize = 64;
+
+/// Builds the protected set from one sweep's records: `(pid, ppid, exe basename or comm,
+/// cgroup, ruid)`. Missing inputs give a smaller set, never a panic.
+pub fn protected_set(
+    records: &[(u32, u32, &str, Option<&CgroupPath>, u32)],
+    self_uid: u32,
+    inp: &ProtectInputs,
+) -> ProtectedSet {
+    let mut pids = FxHashSet::default();
+    pids.insert(1);
+    pids.extend(inp.compositor_pid);
+    pids.extend(inp.session_bus_pid);
+    pids.extend(inp.self_pids.iter().copied());
+
+    let user_init = format!("user.slice/user-{self_uid}.slice/user@{self_uid}.service/init.scope");
+    let mut parents: FxHashMap<u32, (u32, &str)> = FxHashMap::default();
+    let mut shells: SmallVec<[u32; 2]> = SmallVec::new();
+    for &(pid, ppid, name, cgroup, ruid) in records {
+        parents.insert(pid, (ppid, name));
+        let rel = cgroup.map(|c| &*c.rel);
+        if ruid == self_uid && SESSION_NAMES.contains(&name) {
+            pids.insert(pid);
+            if name == "plasmashell" {
+                shells.push(pid);
+            }
+        }
+        if name == "systemd" && rel == Some(user_init.as_str()) {
+            pids.insert(pid);
+        }
+        if rel == Some("system.slice/systemd-logind.service") {
+            pids.insert(pid);
+        }
+    }
+
+    let starts: SmallVec<[u32; 2]> = match inp.compositor_pid {
+        Some(pid) => SmallVec::from_slice(&[pid]),
+        None => shells,
+    };
+    for start in starts {
+        let mut pid = start;
+        for _ in 0..MAX_WALK {
+            let Some(&(ppid, _)) = parents.get(&pid) else {
+                break;
+            };
+            if ppid <= 1 || ppid == pid {
+                break;
+            }
+            if let Some(&(_, name)) = parents.get(&ppid)
+                && LOGIN_NAMES.contains(&name)
+            {
+                pids.insert(ppid);
+            }
+            pid = ppid;
+        }
+    }
+    ProtectedSet { pids }
+}
+
+/// The flags this module owns for one process. `NEW` and `EXITED` belong to the reducer (E09)
+/// and are never set here.
+pub fn flags_for(
+    pid: u32,
+    kernel_thread: bool,
+    ruid: u32,
+    self_uid: u32,
+    set: &ProtectedSet,
+    inp: &ProtectInputs,
+) -> ProcFlags {
+    let mut flags = ProcFlags::empty();
+    flags.set(ProcFlags::KERNEL_THREAD, kernel_thread);
+    flags.set(ProcFlags::OTHER_USER, ruid != self_uid);
+    flags.set(ProcFlags::IS_SELF, inp.self_pids.contains(&pid));
+    flags.set(ProcFlags::PROTECTED, set.contains(pid));
+    flags
 }
