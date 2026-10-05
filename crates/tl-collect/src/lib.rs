@@ -8,6 +8,7 @@ pub mod hash;
 pub mod inventory;
 pub mod net;
 pub mod parse;
+pub mod pkg;
 pub mod proc;
 pub mod sample;
 pub mod sanitize;
