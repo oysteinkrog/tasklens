@@ -9,6 +9,7 @@ pub mod enumerate;
 pub mod gpu_nvidia;
 pub mod logind;
 pub mod memory;
+pub mod net;
 
 use std::sync::Arc;
 
@@ -28,7 +29,7 @@ pub struct WorkerSpec {
 
 /// Every worker of the engine. Each worker bead appends exactly one `WorkerSpec` here.
 pub fn all_workers() -> Vec<WorkerSpec> {
-    vec![logind::spec(), memory::spec(), disk::spec()]
+    vec![logind::spec(), memory::spec(), disk::spec(), net::spec()]
 }
 
 /// The workers that run in `mode`.
