@@ -8,6 +8,7 @@ publish.workspace = true
 tl-model = { workspace = true }
 rustix = { workspace = true }
 memchr = { workspace = true }
+bitflags = { workspace = true }   # E06-014 CpuFlags (R-142 item 4)
 thiserror = { workspace = true }
 tracing = { workspace = true }
 smallvec = { workspace = true }

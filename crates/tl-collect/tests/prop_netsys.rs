@@ -35,6 +35,17 @@ proptest! {
 
 // == inventory (E06-A3) ==
 
+proptest! {
+    #[test]
+    fn prop_cpuinfo_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=8192)) {
+        use tl_collect::inventory::cpuinfo::{identifier, parse_cpuinfo, CpuInfo};
+        let mut info = CpuInfo::default();
+        parse_cpuinfo(&bytes, &mut info);
+        let mut text = String::new();
+        let _ = identifier(&info, &mut text);
+    }
+}
+
 // == gpu_drm (E06-A3) ==
 
 proptest! {
