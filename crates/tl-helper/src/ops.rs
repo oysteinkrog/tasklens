@@ -186,6 +186,7 @@ mod tests {
             let mut child = Command::new(std::env::current_exe().expect("current_exe"))
                 .args(["--exact", "ops::tests::threaded_child_entry", "--nocapture"])
                 .env("TL_HELPER_TEST_THREADS", "3")
+                .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()
                 .expect("spawn threaded child");
