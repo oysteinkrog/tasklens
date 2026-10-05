@@ -10,6 +10,7 @@ pub mod gpu_nvidia;
 pub mod logind;
 pub mod memory;
 pub mod net;
+pub mod processes;
 pub mod sensors;
 
 use std::sync::Arc;
