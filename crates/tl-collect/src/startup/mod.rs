@@ -1,6 +1,7 @@
 //! Startup entries: XDG autostart, systemd user units, Plasma scripts, impact, watches.
 pub mod autostart;
 pub mod impact;
+pub mod user_units;
 
 use std::sync::Arc;
 
@@ -58,6 +59,8 @@ pub struct StartupRaw {
     pub tasklens_override: bool,
     /// User units only (E06-010).
     pub unit_file_state: Option<Arc<str>>,
+    /// User units only: `[Service] Type=`, for impact (E06-012).
+    pub service_type: Option<Arc<str>>,
     pub can_toggle: bool,
     pub can_delete: bool,
     pub can_run: bool,

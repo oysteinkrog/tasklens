@@ -1,0 +1,9 @@
+[Unit]
+Description=Foo tray helper
+
+[Service]
+Type=simple
+ExecStart=-/usr/bin/foo --x
+
+[Install]
+WantedBy=graphical-session.target

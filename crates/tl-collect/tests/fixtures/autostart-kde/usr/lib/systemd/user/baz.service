@@ -1,0 +1,10 @@
+# A Plasma session helper.
+[Unit]
+Description=Baz session helper
+
+[Service]
+Type=dbus
+ExecStart=@/usr/bin/baz baz --session
+
+[Install]
+WantedBy=plasma-workspace.target

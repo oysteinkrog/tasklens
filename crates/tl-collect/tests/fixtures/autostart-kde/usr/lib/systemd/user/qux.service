@@ -1,0 +1,13 @@
+[Unit]
+Description=Qux, its WantedBy list is reset
+
+[Service]
+ExecStart=
+ExecStart=/usr/bin/qux \
+    --flag
+; WantedBy=graphical-session.target
+
+[Install]
+WantedBy=a.target
+WantedBy=
+WantedBy=default.target

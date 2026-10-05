@@ -33,6 +33,19 @@ proptest! {
     }
 }
 
+proptest! {
+    #[test]
+    fn prop_unit_file_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=128 * 1024)) {
+        use tl_collect::startup::user_units::parse_unit_file;
+        let _ = parse_unit_file(&bytes);
+        for header in [&b"[Service]\nExecStart="[..], b"[Install]\nWantedBy="] {
+            let mut file = header.to_vec();
+            file.extend_from_slice(&bytes);
+            let _ = parse_unit_file(&file);
+        }
+    }
+}
+
 // == inventory (E06-A3) ==
 
 proptest! {

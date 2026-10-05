@@ -420,6 +420,7 @@ fn make_row(
         overrides,
         tasklens_override: entry.tasklens_override,
         unit_file_state: None,
+        service_type: None,
         can_toggle: !matches!(
             status,
             StartupStatusRaw::NotInThisDesktop | StartupStatusRaw::MissingProgram
@@ -476,7 +477,7 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// The program word of an `Exec` value, with `"..."` quoting and its backslash escapes removed.
-fn first_word(exec: &str) -> Option<String> {
+pub(super) fn first_word(exec: &str) -> Option<String> {
     let exec = exec.trim_start();
     let mut word = String::new();
     if let Some(rest) = exec.strip_prefix('"') {
