@@ -1611,3 +1611,164 @@ fn smaps_self_has_rss() {
     );
     assert!(out.iter().any(|r| r.rss > 0), "{} regions", out.len());
 }
+
+// ---- E05-026: file descriptors ----
+
+use tl_collect::proc::detail::{FdInfo, FdType, access_text, decode_flags, read_fds};
+
+fn fd_row(out: &[FdInfo], fd: u32) -> &FdInfo {
+    out.iter()
+        .find(|r| r.fd == fd)
+        .unwrap_or_else(|| panic!("fd {fd} missing"))
+}
+
+/// The fds of process-edge 4201.
+fn fixture_fds() -> Vec<FdInfo> {
+    let mut out = Vec::new();
+    let r = read_fds(
+        &SysRoot::at(&fixture_dir("process-edge")),
+        thread_key(FAKE_START_TICKS),
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    out
+}
+
+#[test]
+fn fd_flags_decode() {
+    let w = decode_flags(0o2104002);
+    assert_eq!(w.access, "Read/write");
+    assert_eq!(w.status.as_slice(), ["Non-blocking"]);
+    assert!(w.cloexec);
+
+    let w = decode_flags(0o10002000);
+    assert_eq!(w.access, "Path only");
+    assert_eq!(w.status.as_slice(), ["Append", "Path"]);
+    assert!(!w.cloexec);
+
+    let w = decode_flags(0o4010000 | 0o40000 | 0o20200000 | 1);
+    assert_eq!(w.access, "Write only");
+    assert_eq!(w.status.as_slice(), ["Sync", "Direct", "Temp file"]);
+
+    // O_DSYNC alone is not O_SYNC, and O_DIRECTORY alone is not O_TMPFILE.
+    let w = decode_flags(0o10000 | 0o200000);
+    assert_eq!(w.access, "Read only");
+    assert!(w.status.is_empty());
+}
+
+#[test]
+fn fd_access_text() {
+    let mut s = String::new();
+    access_text(0o2104002, &mut s);
+    assert_eq!(s, "RW +NB CLOEXEC");
+    access_text(0, &mut s);
+    assert_eq!(s, "R");
+    access_text(0o2001, &mut s);
+    assert_eq!(s, "W +A");
+}
+
+#[test]
+fn fd_kinds_classified() {
+    let out = fixture_fds();
+    let fds: Vec<u32> = out.iter().map(|r| r.fd).collect();
+    assert_eq!(fds, [0, 1, 2, 3, 4, 12]);
+    let kinds: Vec<FdType> = out.iter().map(|r| r.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            FdType::Socket,
+            FdType::Pipe,
+            FdType::EventFd,
+            FdType::MemFd,
+            FdType::Drm,
+            FdType::File,
+        ]
+    );
+    assert_eq!(fd_row(&out, 0).inode, Some(1234));
+    assert_eq!(fd_row(&out, 1).inode, Some(99));
+    assert_eq!(fd_row(&out, 0).kind.label(), "socket");
+    assert_eq!(&*fd_row(&out, 3).target, "/memfd:wayland-shm (deleted)");
+    assert_eq!(&*fd_row(&out, 12).target, "/home/user1/file.txt");
+    assert_eq!(fd_row(&out, 2).eventfd_count, Some(0x2a));
+    let drm = fd_row(&out, 4);
+    assert_eq!(drm.drm_driver.as_deref(), Some("amdgpu"));
+    assert_eq!(drm.drm_client_id, Some(17));
+
+    // Security regression (R-097): another start time is another process.
+    let mut out = Vec::new();
+    let r = read_fds(
+        &SysRoot::at(&fixture_dir("process-edge")),
+        thread_key(FAKE_START_TICKS + 1),
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn fdinfo_fields() {
+    let out = fixture_fds();
+    let f = fd_row(&out, 12);
+    assert!(f.fdinfo_ok);
+    assert_eq!(f.pos, Some(42));
+    assert_eq!(f.flags, Some(0o2100000));
+    assert_eq!(f.mnt_id, Some(31));
+    assert_eq!(f.inode, Some(777));
+    // The link inode wins over `ino:`.
+    assert_eq!(fd_row(&out, 0).inode, Some(1234));
+}
+
+#[test]
+fn fdinfo_missing_row_kept() {
+    let out = fixture_fds();
+    let p = fd_row(&out, 1);
+    assert_eq!(p.kind, FdType::Pipe);
+    assert!(!p.fdinfo_ok);
+    assert_eq!(p.pos, None);
+    assert_eq!(p.flags, None);
+}
+
+#[test]
+fn fd_dir_denied_restricted() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let tmp = common::fixture_copy("process-edge", None);
+    let root = SysRoot::at(tmp.path());
+    let fd_dir = root.proc_path("4201/fd");
+    fs::set_permissions(&fd_dir, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let mut out = Vec::new();
+    let r = read_fds(
+        &root,
+        thread_key(FAKE_START_TICKS),
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    fs::set_permissions(&fd_dir, fs::Permissions::from_mode(0o755)).expect("chmod back");
+    assert_eq!(r.unwrap(), DetailRead::Restricted);
+    assert!(out.is_empty());
+}
+
+#[test]
+fn fd_live_socket() {
+    use std::os::fd::AsRawFd;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let fd = u32::try_from(listener.as_raw_fd()).expect("fd number");
+    let mut out = Vec::new();
+    let r = read_fds(
+        &SysRoot::host(),
+        own_key(),
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Ok);
+    let row = fd_row(&out, fd);
+    assert_eq!(row.kind, FdType::Socket);
+    assert!(row.inode.is_some());
+    assert!(row.fdinfo_ok);
+    assert!(out.windows(2).all(|w| w[0].fd < w[1].fd));
+}

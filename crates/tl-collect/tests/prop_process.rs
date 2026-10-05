@@ -194,3 +194,14 @@ proptest! {
         let _ = tl_collect::proc::smaps::parse_smaps(&bytes, &mut out);
     }
 }
+
+proptest! {
+    #[test]
+    fn fdinfo_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=4096)) {
+        use tl_collect::proc::detail::{FdInfo, FdType, parse_fdinfo};
+
+        let mut row = FdInfo::new(3, FdType::File, std::sync::Arc::from(""), None);
+        parse_fdinfo(&bytes, &mut row);
+        prop_assert!(row.fdinfo_ok);
+    }
+}

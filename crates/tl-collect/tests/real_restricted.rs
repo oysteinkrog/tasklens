@@ -154,3 +154,32 @@ fn smaps_pid1_restricted() {
     );
     assert!(out.is_empty());
 }
+
+/// PROC-080: the open fds of another user's process are Restricted without the helper
+/// (security regression).
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn fds_pid1_restricted() {
+    use tl_collect::SysRoot;
+    use tl_collect::proc::detail::{DetailRead, read_fds};
+    use tl_collect::proc::meta::ReadBufs;
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("pid 1 start ticks");
+    let key = ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid: 1,
+    };
+    let mut out = Vec::new();
+    let r = read_fds(&SysRoot::host(), key, &mut ReadBufs::default(), &mut out);
+    assert_eq!(r.expect("read pid 1 fds"), DetailRead::Restricted);
+    assert!(out.is_empty());
+}

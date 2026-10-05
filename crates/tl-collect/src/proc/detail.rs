@@ -1,12 +1,14 @@
 //! Readers for the process detail window. One section per tab.
 
+use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
-use rustix::fs::{AtFlags, Mode, OFlags, RawDir};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawDir};
+use smallvec::SmallVec;
 use tl_model::ids::ProcessKey;
 use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
@@ -17,7 +19,7 @@ use crate::proc::meta::ReadBufs;
 use crate::proc::pid_stat::{PidStat, parse_pid_stat, read_start_ticks};
 use crate::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
 use crate::proc::{is_denied, is_gone};
-use crate::sanitize::{sanitize_comm, sanitize_text};
+use crate::sanitize::{EXE_LINK_MAX, sanitize_comm, sanitize_link, sanitize_text};
 use crate::sysroot::{SMALL_FILE_LIMIT, SysRoot, read_at};
 
 /// What a detail reader found at the process directory.
@@ -367,6 +369,360 @@ fn parse_tid(name: &[u8]) -> Option<u32> {
     }
     name.iter().try_fold(0u32, |n, &d| {
         n.checked_mul(10)?.checked_add(u32::from(d - b'0'))
+    })
+}
+
+// File descriptors tab (PROC-080).
+
+/// getdents buffer for one `fd/` listing.
+const FD_DIRENT_BUF: usize = 8 * 1024;
+/// Read limit for one `fdinfo/<n>` file. The fields read here come first; epoll and inotify fds
+/// add one line per watch after them.
+const FDINFO_MAX: usize = 4096;
+/// Kept length of `drm-driver`.
+const DRM_DRIVER_MAX: usize = 64;
+
+const O_ACCMODE: u32 = 0o3;
+const O_APPEND: u32 = 0o2000;
+const O_NONBLOCK: u32 = 0o4000;
+const O_SYNC: u32 = 0o4010000;
+const O_DIRECT: u32 = 0o40000;
+const O_PATH: u32 = 0o10000000;
+const O_TMPFILE: u32 = 0o20200000;
+const O_CLOEXEC: u32 = 0o2000000;
+
+/// What an open fd refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FdType {
+    File,
+    Directory,
+    Tcp,
+    Udp,
+    Unix,
+    Netlink,
+    Pipe,
+    Fifo,
+    EventFd,
+    EventPoll,
+    TimerFd,
+    SignalFd,
+    Inotify,
+    Fanotify,
+    MemFd,
+    DmaBuf,
+    Drm,
+    PidFd,
+    IoUring,
+    AnonInode,
+    Device,
+    /// A socket not yet resolved to TCP, UDP, unix or netlink. The engine refines it with the
+    /// sock_diag inode map (E06).
+    Socket,
+}
+
+impl FdType {
+    /// The type word in the File descriptors tab.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Directory => "directory",
+            Self::Tcp => "TCP",
+            Self::Udp => "UDP",
+            Self::Unix => "unix",
+            Self::Netlink => "netlink",
+            Self::Pipe => "pipe",
+            Self::Fifo => "FIFO",
+            Self::EventFd => "eventfd",
+            Self::EventPoll => "eventpoll",
+            Self::TimerFd => "timerfd",
+            Self::SignalFd => "signalfd",
+            Self::Inotify => "inotify",
+            Self::Fanotify => "fanotify",
+            Self::MemFd => "memfd",
+            Self::DmaBuf => "dmabuf",
+            Self::Drm => "DRM",
+            Self::PidFd => "pidfd",
+            Self::IoUring => "io_uring",
+            Self::AnonInode => "anon_inode",
+            Self::Device => "device",
+            Self::Socket => "socket",
+        }
+    }
+}
+
+/// One row of the File descriptors tab. The target is an open file path and is never logged
+/// (ADR-015).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FdInfo {
+    pub fd: u32,
+    pub kind: FdType,
+    /// Sanitized link target. Empty when the link could not be read.
+    pub target: Arc<str>,
+    /// The socket or pipe inode from the link, else `ino:` from fdinfo.
+    pub inode: Option<u64>,
+    pub flags: Option<u32>,
+    pub pos: Option<u64>,
+    pub mnt_id: Option<u32>,
+    pub eventfd_count: Option<u64>,
+    pub drm_client_id: Option<u64>,
+    pub drm_driver: Option<Arc<str>>,
+    /// False when `fdinfo/<n>` could not be read. The pane then shows "Handle detail query
+    /// unavailable."
+    pub fdinfo_ok: bool,
+}
+
+impl FdInfo {
+    /// A row with the link fields set and no fdinfo fields.
+    pub fn new(fd: u32, kind: FdType, target: Arc<str>, inode: Option<u64>) -> Self {
+        Self {
+            fd,
+            kind,
+            target,
+            inode,
+            flags: None,
+            pos: None,
+            mnt_id: None,
+            eventfd_count: None,
+            drm_client_id: None,
+            drm_driver: None,
+            fdinfo_ok: false,
+        }
+    }
+}
+
+/// Open flags in words for the details pane.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlagWords {
+    pub access: &'static str,
+    pub status: SmallVec<[&'static str; 6]>,
+    pub cloexec: bool,
+}
+
+/// Decodes the `flags:` value of fdinfo. `O_LARGEFILE` is ignored.
+pub fn decode_flags(flags: u32) -> FlagWords {
+    let access = if flags & O_PATH != 0 {
+        "Path only"
+    } else {
+        match flags & O_ACCMODE {
+            0 => "Read only",
+            1 => "Write only",
+            _ => "Read/write",
+        }
+    };
+    let mut status = SmallVec::new();
+    for (bits, word) in [
+        (O_APPEND, "Append"),
+        (O_NONBLOCK, "Non-blocking"),
+        (O_SYNC, "Sync"),
+        (O_DIRECT, "Direct"),
+        (O_PATH, "Path"),
+        (O_TMPFILE, "Temp file"),
+    ] {
+        if flags & bits == bits {
+            status.push(word);
+        }
+    }
+    FlagWords {
+        access,
+        status,
+        cloexec: flags & O_CLOEXEC != 0,
+    }
+}
+
+/// Writes the short access column into `out` (cleared first), for example `RW +NB CLOEXEC`.
+pub fn access_text(flags: u32, out: &mut String) {
+    out.clear();
+    out.push_str(match flags & O_ACCMODE {
+        0 => "R",
+        1 => "W",
+        _ => "RW",
+    });
+    if flags & O_APPEND != 0 {
+        out.push_str(" +A");
+    }
+    if flags & O_NONBLOCK != 0 {
+        out.push_str(" +NB");
+    }
+    if flags & O_CLOEXEC != 0 {
+        out.push_str(" CLOEXEC");
+    }
+}
+
+/// Reads every open fd of `key` into `out` (cleared first), sorted by fd. An fd closed during
+/// the read is skipped. A link or fdinfo file that cannot be read keeps the row. `Gone` and
+/// `Restricted` leave `out` empty.
+pub fn read_fds(
+    root: &SysRoot,
+    key: ProcessKey,
+    bufs: &mut ReadBufs,
+    out: &mut Vec<FdInfo>,
+) -> Result<DetailRead, CollectError> {
+    out.clear();
+    let pid_dir = match open_checked(root, key, &mut bufs.small)? {
+        Ok(dir) => dir,
+        Err(r) => return Ok(r),
+    };
+    let fd_dir = match open_subdir(pid_dir.as_fd(), "fd") {
+        Ok(fd) => fd,
+        Err(e) => return read_error(e),
+    };
+    let mut fds = Vec::new();
+    let mut dirents = [MaybeUninit::<u8>::uninit(); FD_DIRENT_BUF];
+    let mut dir = RawDir::new(fd_dir.as_fd(), &mut dirents[..]);
+    while let Some(entry) = dir.next() {
+        match entry {
+            Ok(entry) => fds.extend(parse_tid(entry.file_name().to_bytes())),
+            Err(e) => return read_error(e),
+        }
+    }
+    fds.sort_unstable();
+
+    // A missing or denied `fdinfo/` leaves every row with `fdinfo_ok == false`.
+    let fdinfo_dir = open_subdir(pid_dir.as_fd(), "fdinfo").ok();
+    let mut name = String::new();
+    for fd in fds {
+        name.clear();
+        let _ = write!(name, "{fd}");
+        let Some(mut row) = read_fd_link(fd_dir.as_fd(), &name, fd, bufs) else {
+            continue;
+        };
+        if let Some(info) = &fdinfo_dir
+            && read_at(info.as_fd(), &name, &mut bufs.small, FDINFO_MAX).is_ok()
+        {
+            parse_fdinfo(&bufs.small, &mut row);
+        }
+        out.push(row);
+    }
+    Ok(DetailRead::Ok)
+}
+
+/// `Gone` or `Restricted` for a directory error, or the error itself.
+fn read_error(e: rustix::io::Errno) -> Result<DetailRead, CollectError> {
+    let Err(r) = dir_error::<Infallible>(e)?;
+    Ok(r)
+}
+
+fn open_subdir(dir: BorrowedFd<'_>, name: &str) -> Result<OwnedFd, rustix::io::Errno> {
+    rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+/// Reads and classifies the link `fd/<name>`. `None` when the fd was closed meanwhile.
+fn read_fd_link(
+    fd_dir: BorrowedFd<'_>,
+    name: &str,
+    fd: u32,
+    bufs: &mut ReadBufs,
+) -> Option<FdInfo> {
+    // One byte past the limit, so `sanitize_link` sees the cut and adds `…`.
+    bufs.small.clear();
+    bufs.small.resize(EXE_LINK_MAX + 1, 0);
+    match rustix::fs::readlinkat_raw(fd_dir, name, &mut bufs.small[..]) {
+        Ok(n) => bufs.small.truncate(n),
+        Err(e) if is_gone(e) => return None,
+        Err(e) => {
+            tracing::trace!(fd, errno = ?e, "fd link not read");
+            return Some(FdInfo::new(fd, FdType::File, Arc::from(""), None));
+        }
+    }
+    let (kind, inode) =
+        classify_link(&bufs.small).unwrap_or_else(|| (stat_kind(fd_dir, name), None));
+    sanitize_link(&bufs.small, &mut bufs.text);
+    Some(FdInfo::new(fd, kind, Arc::from(bufs.text.as_str()), inode))
+}
+
+/// Classifies a link target by its text. `None` for a plain path, which needs a stat.
+fn classify_link(raw: &[u8]) -> Option<(FdType, Option<u64>)> {
+    if let Some(rest) = raw.strip_prefix(b"socket:") {
+        return Some((FdType::Socket, bracket_inode(rest)));
+    }
+    if let Some(rest) = raw.strip_prefix(b"pipe:") {
+        return Some((FdType::Pipe, bracket_inode(rest)));
+    }
+    if let Some(rest) = raw.strip_prefix(b"anon_inode:") {
+        let kind = match rest {
+            b"[eventfd]" => FdType::EventFd,
+            b"[eventpoll]" => FdType::EventPoll,
+            b"[timerfd]" => FdType::TimerFd,
+            b"[signalfd]" => FdType::SignalFd,
+            b"inotify" => FdType::Inotify,
+            b"[fanotify]" => FdType::Fanotify,
+            b"[pidfd]" => FdType::PidFd,
+            b"[io_uring]" => FdType::IoUring,
+            b"[dmabuf]" => FdType::DmaBuf,
+            _ => FdType::AnonInode,
+        };
+        return Some((kind, None));
+    }
+    let kind = if raw.starts_with(b"/dmabuf:") {
+        FdType::DmaBuf
+    } else if raw.starts_with(b"/memfd:") {
+        FdType::MemFd
+    } else if raw.starts_with(b"/dev/dri/") {
+        FdType::Drm
+    } else {
+        return None;
+    };
+    Some((kind, None))
+}
+
+/// The number in `[<ino>]`.
+fn bracket_inode(rest: &[u8]) -> Option<u64> {
+    parse_radix(rest.strip_prefix(b"[")?.strip_suffix(b"]")?, 10)
+}
+
+/// Kind of a plain path, from a stat that follows the link. A failed stat gives `File`.
+fn stat_kind(fd_dir: BorrowedFd<'_>, name: &str) -> FdType {
+    // fstatat follows the link when AT_SYMLINK_NOFOLLOW is not given.
+    match rustix::fs::statat(fd_dir, name, AtFlags::empty()) {
+        Ok(st) => match FileType::from_raw_mode(st.st_mode) {
+            FileType::Directory => FdType::Directory,
+            FileType::Fifo => FdType::Fifo,
+            FileType::CharacterDevice | FileType::BlockDevice => FdType::Device,
+            _ => FdType::File,
+        },
+        Err(_) => FdType::File,
+    }
+}
+
+/// Fills the fdinfo fields of `row` from the bytes of `fdinfo/<n>` and sets `fdinfo_ok`.
+/// Unknown lines and values that do not parse are skipped.
+pub fn parse_fdinfo(raw: &[u8], row: &mut FdInfo) {
+    row.fdinfo_ok = true;
+    for line in raw.split(|&b| b == b'\n') {
+        let Some(colon) = memchr::memchr(b':', line) else {
+            continue;
+        };
+        let value = line[colon + 1..].trim_ascii();
+        match &line[..colon] {
+            b"pos" => row.pos = parse_radix(value, 10),
+            b"flags" => row.flags = parse_radix(value, 8).and_then(|v| u32::try_from(v).ok()),
+            b"mnt_id" => row.mnt_id = parse_radix(value, 10).and_then(|v| u32::try_from(v).ok()),
+            b"ino" if row.inode.is_none() => row.inode = parse_radix(value, 10),
+            b"eventfd-count" => row.eventfd_count = parse_radix(value, 16),
+            b"drm-client-id" => row.drm_client_id = parse_radix(value, 10),
+            b"drm-driver" => {
+                let mut text = String::new();
+                sanitize_text(value, DRM_DRIVER_MAX, &mut text);
+                row.drm_driver = Some(Arc::from(text));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// ASCII digits in `radix` that fit a `u64`. Empty input gives `None`.
+fn parse_radix(digits: &[u8], radix: u32) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0u64, |n, &d| {
+        let d = char::from(d).to_digit(radix)?;
+        n.checked_mul(u64::from(radix))?.checked_add(u64::from(d))
     })
 }
 
