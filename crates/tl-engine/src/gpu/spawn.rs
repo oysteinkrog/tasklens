@@ -245,11 +245,54 @@ mod tests {
         let child = spawn(&probe);
 
         // The probe opens nothing before the first Hello, and `spawn` returns after exec.
-        let fds: BTreeSet<i32> = std::fs::read_dir(format!("/proc/{}/fd", child.child.id()))
+        let pid = child.child.id();
+        let fds: BTreeSet<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
             .unwrap()
             .map(|e| e.unwrap().file_name().to_str().unwrap().parse().unwrap())
             .collect();
-        assert_eq!(fds, BTreeSet::from([0, 1, 2, 3]));
+        let expected = BTreeSet::from([0, 1, 2, 3]);
+        if fds != expected {
+            let extra: Vec<String> = fds
+                .difference(&expected)
+                .map(|&fd| describe_leaked_fd(pid, fd))
+                .collect();
+            panic!(
+                "probe fds {fds:?}, expected {expected:?}; extra fds (a parallel test opened \
+                 these without CLOEXEC):\n{}",
+                extra.join("\n")
+            );
+        }
+    }
+
+    /// One line for a leaked fd: its link target, the fds in this process with the same target
+    /// and, for a socket, its `/proc/net/unix` line.
+    fn describe_leaked_fd(pid: u32, fd: i32) -> String {
+        let target = match std::fs::read_link(format!("/proc/{pid}/fd/{fd}")) {
+            Ok(t) => t.to_string_lossy().into_owned(),
+            Err(e) => return format!("  fd {fd}: readlink failed: {e}"),
+        };
+        // The fd may be closed here by now, so an empty list does not clear the suspect.
+        let ours: Vec<String> = std::fs::read_dir("/proc/self/fd")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| std::fs::read_link(e.path()).is_ok_and(|t| t.to_string_lossy() == target))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let unix = target
+            .strip_prefix("socket:[")
+            .and_then(|rest| rest.strip_suffix(']'))
+            .and_then(|inode| {
+                let table = std::fs::read_to_string("/proc/self/net/unix").ok()?;
+                table
+                    .lines()
+                    .find(|l| l.split_whitespace().nth(6) == Some(inode))
+                    .map(str::to_owned)
+            });
+        format!(
+            "  fd {fd}: {target}; same target in test process fds {ours:?}; unix: {}",
+            unix.as_deref().unwrap_or("-")
+        )
     }
 
     #[test]
