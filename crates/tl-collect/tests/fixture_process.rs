@@ -2515,7 +2515,7 @@ struct NoPackages {
 
 impl PkgBackend for NoPackages {
     fn owners(&mut self, paths: &[&Path]) -> Result<PathOwners, CollectError> {
-        *self.calls.lock().unwrap() += 1;
+        *self.calls.lock().expect("calls lock") += 1;
         Ok(paths.iter().map(|p| (p.to_path_buf(), None)).collect())
     }
     fn info(&mut self, _name: &str) -> Result<Option<PackageInfo>, CollectError> {
@@ -2564,10 +2564,10 @@ fn read_p2(
     let proc_fd = open_dir(&root.proc);
     let mut st = PidStat::default();
     parse_pid_stat(
-        &fs::read(root.proc_path(&format!("{pid}/stat"))).unwrap(),
+        &fs::read(root.proc_path(&format!("{pid}/stat"))).expect("read stat"),
         &mut st,
     )
-    .unwrap();
+    .expect("parse stat");
     let mut status = PidStatus::default();
     let status_ok = fs::read(root.proc_path(&format!("{pid}/status")))
         .ok()
