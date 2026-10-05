@@ -12,8 +12,8 @@ use std::time::Duration;
 use gpui_kit::component::Colorize;
 use gpui_kit::{
     Animation, AnimationExt, App, ClickEvent, ElementId, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, Pixels, RenderOnce, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px, relative,
+    IntoElement, KeyBinding, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement,
+    Styled, Window, div, px, relative,
 };
 
 use crate::components::focus::TlFocusRing;
@@ -43,11 +43,7 @@ const GROUP: &str = "tl-checkbox";
 /// Binds the keys of every shared component. Called once from `TasklensUi::init` (E16-A1).
 /// Later component beads add their bindings here.
 pub fn bind_keys_components(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "space",
-        ToggleCheckbox,
-        Some("TlCheckbox"),
-    )]);
+    cx.bind_keys([KeyBinding::new("space", ToggleCheckbox, Some("TlCheckbox"))]);
 }
 
 type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
@@ -291,8 +287,7 @@ mod tests {
     use std::cell::RefCell;
 
     use gpui_kit::{
-        Context, Keystroke, KeyUpEvent, Modifiers, Render, TestAppContext, VisualTestContext,
-        point,
+        Context, KeyUpEvent, Keystroke, Modifiers, Render, TestAppContext, VisualTestContext, point,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 
@@ -390,7 +385,11 @@ mod tests {
 
         focus_checkbox(cx);
         cx.simulate_keystrokes("space");
-        assert_eq!(*changes.borrow(), vec![true], "indeterminate toggles to checked");
+        assert_eq!(
+            *changes.borrow(),
+            vec![true],
+            "indeterminate toggles to checked"
+        );
     }
 
     #[gpui_kit::test]
@@ -420,6 +419,10 @@ mod tests {
         });
         cx.run_until_parked();
         let mark = cx.debug_bounds("TlCheckbox-check").expect("mark drawn");
-        assert!(mark.size.width < full, "{:?} grows from 0.6", mark.size.width);
+        assert!(
+            mark.size.width < full,
+            "{:?} grows from 0.6",
+            mark.size.width
+        );
     }
 }
