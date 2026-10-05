@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
-use rustix::fs::{Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use smallvec::SmallVec;
 
@@ -295,18 +295,25 @@ impl CgroupRoot {
     }
 
     /// Appends the names of the child directories of cgroup `rel` to `out`. Names that are not
-    /// UTF-8 are skipped.
+    /// UTF-8 are skipped. Symlinks are never followed, so a symlink to a directory is skipped.
     pub fn child_dirs(&self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), CollectError> {
         let mut dir = Dir::new(self.open_dir(rel)?).map_err(dir_error)?;
         while let Some(entry) = dir.read() {
             let entry = entry.map_err(dir_error)?;
-            let name = entry.file_name().to_bytes();
-            if name == b"." || name == b".." {
+            let name = entry.file_name();
+            if matches!(name.to_bytes(), b"." | b"..") {
                 continue;
             }
-            if matches!(entry.file_type(), FileType::Directory | FileType::Unknown)
-                && let Ok(name) = std::str::from_utf8(name)
-            {
+            let is_dir = match entry.file_type() {
+                FileType::Directory => true,
+                // No d_type: ask lstat.
+                FileType::Unknown => dir.fd().is_ok_and(|fd| {
+                    rustix::fs::statat(fd, name, AtFlags::SYMLINK_NOFOLLOW)
+                        .is_ok_and(|st| FileType::from_raw_mode(st.st_mode) == FileType::Directory)
+                }),
+                _ => false,
+            };
+            if is_dir && let Ok(name) = std::str::from_utf8(name.to_bytes()) {
                 out.push(Arc::from(name));
             }
         }
@@ -476,4 +483,30 @@ fn parse_u64(digits: &[u8]) -> Option<u64> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::sync::Arc;
+
+    use super::CgroupRoot;
+
+    #[test]
+    fn child_dirs_skips_files_symlinks_and_non_utf8() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("fs/cgroup/app.slice");
+        std::fs::create_dir_all(base.join("a.service/sub")).expect("mkdir");
+        std::fs::create_dir(base.join("b.scope")).expect("mkdir");
+        std::fs::create_dir(base.join(OsStr::from_bytes(b"bad\xff.scope"))).expect("mkdir");
+        std::fs::write(base.join("cgroup.procs"), "1\n").expect("write");
+        std::os::unix::fs::symlink(base.join("b.scope"), base.join("link.scope")).expect("ln");
+        let cg = CgroupRoot::open(tmp.path()).expect("open");
+        let mut out: Vec<Arc<str>> = Vec::new();
+        cg.child_dirs("app.slice", &mut out).expect("list");
+        out.sort();
+        assert_eq!(out, [Arc::from("a.service"), Arc::from("b.scope")]);
+        assert!(cg.child_dirs("missing.slice", &mut out).is_err());
+    }
 }
