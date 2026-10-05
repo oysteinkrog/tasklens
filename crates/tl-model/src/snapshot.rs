@@ -343,6 +343,11 @@ pub struct UnitRecord {
     /// ActiveEnterTimestamp in CLOCK_REALTIME microseconds. `None` when systemd reports 0.
     pub active_since_us: Option<u64>,
     pub triggered_by: Arc<[Arc<str>]>,
+    /// ControlGroup, the unit's cgroup path. `None` when systemd reports it empty or the unit
+    /// type has none.
+    pub control_group: Option<Arc<str>>,
+    /// CanReload: the Reload action is offered only when true.
+    pub can_reload: bool,
     pub has_cgroup_procs: bool,
     /// Child process rows, sorted by `ProcessKey`.
     pub cgroup_pids: Arc<[ProcessKey]>,
