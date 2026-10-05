@@ -69,11 +69,14 @@ pub struct ProcessesSource {
 }
 
 impl ProcessesSource {
-    /// Host app paths and `/etc/passwd` user names. Fails when the boot id cannot be read or
-    /// `<sys>/fs/cgroup` cannot be opened.
+    /// `cfg.app_paths`, or the paths from the environment when it is `None`, and the user names
+    /// of `<root>/etc/passwd`, where `<root>` is the parent of `cfg.sys_root.proc`. Fails when
+    /// the boot id cannot be read or `<sys>/fs/cgroup` cannot be opened.
     pub fn new(cfg: Arc<EngineConfig>) -> Result<Self, CollectError> {
-        let users = PasswdUserNames::load(Path::new("/etc/passwd"));
-        Self::with_parts(cfg, &host_app_paths(), Box::new(users))
+        let base = cfg.sys_root.proc.parent().unwrap_or(Path::new("/"));
+        let users = PasswdUserNames::load(&base.join("etc/passwd"));
+        let paths = cfg.app_paths.clone().unwrap_or_else(host_app_paths);
+        Self::with_parts(cfg, &paths, Box::new(users))
     }
 
     /// `new` with the app paths and user names given, for tests.
