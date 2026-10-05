@@ -2317,7 +2317,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-39 | A dismissed polkit prompt and a denial come back as the same access-denied error on systemd D-Bus calls (`manage-units`); phase 0 records both error names | R-117, UI-SYS-007 |
 | U-40 | The static `NotoSansMono-Regular.ttf` loads under cosmic-text (zed#61660: faces without `m` are dropped) and has `tnum` | R-118, UI-FND-050, UI-SYS-036 |
 | U-41 | gpui-kit 0.7.0 `Button` at rem 13 reaches 24 px with `xsmall` or `small`; the first component bead measures and picks | R-123, UI-FND-010 |
-| U-42 | The `TlFocusRing` "last input was keyboard" heuristic does not show the ring after a mouse click; fallback is the kit's always-on ring | R-123, UI-FND-003 |
+| U-42 | The `TlFocusRing` "last input was keyboard" heuristic does not show the ring after a mouse click; fallback is the kit's always-on ring | R-123, UI-FND-003. Verified by tasklens-ug9.8: `focus::tests::ring_only_after_keyboard` passes (no ring after a click, ring after Tab), so `KEYBOARD_ONLY_RING` stays `true`. |
 | U-43 | KWin on Wayland delivers the Shift modifier state within 500 ms of first focus, so "Shift held at launch" works; else the path is dropped on Wayland | R-124, UI-SHL-110 |
 | U-44 | gpui-kit 0.7.0 `TitleBar` cannot hide its own caption buttons (so the shell draws its own); checked in the P1 title-bar bead | R-125, UI-SHL-003 |
 | U-45 | The kit `Input` does not bind Ctrl+N, Ctrl+Q or Ctrl+W; `keymap_matches_table_b` runs with the filter focused | R-125, UI-SHL-024 |
