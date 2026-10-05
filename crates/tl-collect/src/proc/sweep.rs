@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use rustix::buffer::spare_capacity;
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
 use rustix::fs::{Mode, OFlags, RawDir};
 use smallvec::SmallVec;
@@ -52,7 +53,7 @@ use crate::proc::pid_stat::{PF_KTHREAD, PidStat, parse_pid_stat};
 use crate::proc::smaps::{CoverageBuilder, PssReader, RollupRead, apply_rollups};
 use crate::proc::statm::{PidStatm, parse_statm};
 use crate::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
-use crate::sysroot::{SMALL_FILE_LIMIT, SysRoot, read_at};
+use crate::sysroot::{SMALL_FILE_LIMIT, SysRoot};
 
 /// getdents buffer for the `<proc>` directory listing.
 const DIRENT_BUF: usize = 32 * 1024;
@@ -339,6 +340,23 @@ struct SweepIo<'a> {
     stat: &'a mut PidStat,
 }
 
+/// Reads `name` relative to `dir` into `buf` with one `read` (R-286). The per-process files are
+/// seq_files that hand over their whole text in one call, so a read shorter than the buffer is
+/// the end of the file and the EOF read `sysroot::read_at` makes is skipped. Text past `limit` is cut.
+fn read_once(
+    dir: BorrowedFd<'_>,
+    name: &str,
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> Result<(), CollectError> {
+    buf.clear();
+    buf.reserve(limit + 1);
+    let fd = rustix::fs::openat(dir, name, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    rustix::io::read(&fd, spare_capacity(buf))?;
+    buf.truncate(limit);
+    Ok(())
+}
+
 /// Sets `path` to `"<pid>/<file>"`.
 fn pid_path<'p>(path: &'p mut String, pid: u32, file: &str) -> &'p str {
     path.clear();
@@ -363,13 +381,13 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     let (proc_fd, pid) = (dir.proc_fd, dir.pid);
     let (t_ns, mono_ns) = clock();
 
-    let stat_read = read_at(
+    let stat_read = read_once(
         proc_fd,
         pid_path(path, pid, "stat"),
         &mut bufs.small,
         SMALL_FILE_LIMIT,
     )
-    .and_then(|_| parse_pid_stat(&bufs.small, stat));
+    .and_then(|()| parse_pid_stat(&bufs.small, stat));
     if let Err(e) = stat_read {
         tracing::trace!(pid, error = %e, "stat not read, process skipped");
         return None;
@@ -386,13 +404,13 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     // RssAnon, VmRSS, commit and VmSize come from statm every sweep (R-286). A kernel thread
     // has no mm: its status has no memory lines, so the fields stay Unsupported.
     let mut statm = PidStatm::default();
-    let statm_validity = match read_at(
+    let statm_validity = match read_once(
         proc_fd,
         pid_path(path, pid, "statm"),
         &mut bufs.small,
         SMALL_FILE_LIMIT,
     )
-    .and_then(|_| parse_statm(&bufs.small, &mut statm))
+    .and_then(|()| parse_statm(&bufs.small, &mut statm))
     {
         Ok(()) if kernel_thread => Validity::Unsupported,
         Ok(()) => Validity::Valid,
@@ -413,13 +431,13 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
     if due {
         count(&STATUS_READS);
         let slot = status_cache.entry(key).or_default();
-        slot.1 = match read_at(
+        slot.1 = match read_once(
             proc_fd,
             pid_path(path, pid, "status"),
             &mut bufs.small,
             STATUS_READ_MAX,
         ) {
-            Ok(_) => parse_status(&bufs.small, &mut slot.0)
+            Ok(()) => parse_status(&bufs.small, &mut slot.0)
                 .err()
                 .map(|e| e.validity()),
             Err(e) => Some(e.validity()),
