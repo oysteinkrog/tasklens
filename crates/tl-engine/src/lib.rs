@@ -27,7 +27,7 @@ pub use config::{EngineConfig, EngineMode};
 
 /// The hooks `EngineHooks::default()` returns. Later beads replace one field each: E11-A1 the
 /// action gate, E14-A4 the journal, E30-A2 the record sink.
-pub fn default_hooks() -> EngineHooks {
+pub(crate) fn default_hooks() -> EngineHooks {
     EngineHooks {
         action_gate: None,
         record_sink: None,
