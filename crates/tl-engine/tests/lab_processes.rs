@@ -23,11 +23,14 @@ use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::apps::AppPaths;
 use tl_engine::config::{EngineConfig, EngineMode};
+use tl_engine::session::engine_root;
 use tl_engine::source::{self, WorkerControl};
 use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
-use tl_engine::workers::processes::ProcessesSource;
+use tl_engine::workers::processes::{self, ProcessesSource};
+use tl_engine::workers::workers_for;
 use tl_model::demand::Demand;
-use tl_model::ids::ProcessKey;
+use tl_model::health::{SourceId, SourceState};
+use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::process::ProcessRecord;
 use tl_model::settings::EngineSettings;
 use tl_model::time::TimeNs;
@@ -399,7 +402,10 @@ fn restricted_io_stays_restricted() {
     fs::copy(root.pid_dir(4201).join("io"), &io).expect("copy io");
     fs::set_permissions(&io, fs::Permissions::from_mode(0o000)).expect("chmod io");
 
-    let mut rig = Rig::start(&root, table_demand(), 1000);
+    // `io` is read only while an I/O column is shown (R-286).
+    let mut demand = table_demand();
+    demand.process_columns.insert(ColumnId::IoReadRate);
+    let mut rig = Rig::start(&root, demand, 1000);
     rig.run(Duration::from_secs(2), Duration::from_millis(100));
     assert_eq!(rig.times(), [0, 1_000, 2_000]);
     for (t, sweep) in &rig.sweeps {
@@ -416,4 +422,74 @@ fn restricted_io_stays_restricted() {
         assert_eq!(r.io_write_bps, 0.0);
     }
     rig.finish();
+}
+
+/// Pid directories under the fixture's `proc`.
+fn pid_count(root: &FixtureRoot) -> usize {
+    fs::read_dir(root.root().join("proc"))
+        .expect("list fixture proc")
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .count()
+}
+
+/// E10-A1: `engine_root` with the real `Processes` spec publishes the sweep and the grouped
+/// table while the table is demanded, and stops sweeping once it is not.
+#[test]
+fn engine_publishes_table_from_fixture() {
+    let root = FixtureRoot::new(&["owner-desktop"]);
+    let mut fl = FakeLab::new();
+    let (ep, ui) = fake_sources::root_endpoints(root.config(), vec![processes::spec()]);
+    let handle = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+
+    ui.demand_tx
+        .send(table_demand())
+        .expect("watch has receivers");
+    fl.run_for(Duration::from_secs(2), Duration::from_millis(10));
+
+    let snap = ui.latest.load_full();
+    assert_eq!(snap.processes.records.len(), pid_count(&root));
+    let headers = snap
+        .table
+        .rows
+        .iter()
+        .filter(|row| row.record.is_none() && row.group.is_none())
+        .count();
+    assert!(!snap.table.rows.is_empty());
+    assert_eq!(headers, 3, "{:?}", snap.table.rows);
+    assert_eq!(
+        snap.health.get(SourceId::Processes).state,
+        SourceState::Running
+    );
+
+    ui.demand_tx
+        .send(Demand::default())
+        .expect("watch has receivers");
+    // A sweep already running when the demand changed may still land.
+    fl.run_for(Duration::from_secs(1), Duration::from_millis(100));
+    let version = ui.latest.load_full().processes.header.version;
+    fl.run_for(Duration::from_secs(60), Duration::from_millis(100));
+    assert_eq!(ui.latest.load_full().processes.header.version, version);
+
+    handle.abort();
+    fl.advance(Duration::from_millis(10));
+    assert!(handle.is_finished(), "engine_root returned after cancel");
+    drop(ui);
+    fl.finish();
+}
+
+#[test]
+fn low_memory_mode_runs_only_processes() {
+    let ids: Vec<SourceId> = workers_for(EngineMode::LowMemory)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(ids, [SourceId::Processes]);
 }
