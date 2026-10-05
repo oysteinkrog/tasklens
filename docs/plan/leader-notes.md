@@ -197,3 +197,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - owner-desktop fixture has no sys/fs/cgroup, so ProcessesSource::new fails on it; tests create an empty cgroup dir.
 - 8q0.10: while sleeping, every series sample pushed becomes a gap (memory and temperature too), not only rates. ADR-008 says "pauses publication of rates". Review.
 - i3o.3: a key that exited within the linger has no flags, so only the pid 1 check applies; thread targets get their process checks.
+- y6k.4: journal fetch stdout has no cap (stderr capped 64 KiB). Perf/security pass: confirm the query is bounded (-n) or add a cap.
+- y6k.4: bridge.rs rt_handle comment "held only to keep the runtime alive" is out of date; spawn/IO errors map to Exit{code:-1}.
