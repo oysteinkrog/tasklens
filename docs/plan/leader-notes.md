@@ -200,3 +200,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.4: journal fetch stdout has no cap (stderr capped 64 KiB). Perf/security pass: confirm the query is bounded (-n) or add a cap.
 - y6k.4: bridge.rs rt_handle comment "held only to keep the runtime alive" is out of date; spawn/IO errors map to Exit{code:-1}.
 - eal2: Demand reaches the reducer through `Reducer.demand_rx` (mirror of settings_rx), wired in session.rs. Hidden PSS column clears all PSS. Candidate R entry.
+- 8fx.15: history.rs has #![allow(dead_code)]; E30-013 and E30-A2 must remove it.
+- y6k.5: real system unit listing takes 3.4 s with one GetAll at a time. Perf pass: batch or pipeline. CommandProgress setters are private, so the systemd worker does not report progress.
+- hx1.1: sockets-basic fixture uses public address 140.82.112.3 (bead names it, against its own privacy note). Polish: switch to 203.0.113.x and refresh the snapshot.

@@ -82,6 +82,7 @@ tl-collect = { path = "crates/tl-collect" }
 tl-ops     = { path = "crates/tl-ops" }
 tl-engine  = { path = "crates/tl-engine" }
 tl-ui      = { path = "crates/tl-ui" }
+tl-history = { path = "crates/tl-history" }
 
 [profile.dev]
 opt-level = 1
