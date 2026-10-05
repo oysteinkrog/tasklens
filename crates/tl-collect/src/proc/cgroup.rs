@@ -294,6 +294,25 @@ impl CgroupRoot {
         Ok(st.st_ino)
     }
 
+    /// Appends the names of the child directories of cgroup `rel` to `out`. Names that are not
+    /// UTF-8 are skipped.
+    pub fn child_dirs(&self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), CollectError> {
+        let mut dir = Dir::new(self.open_dir(rel)?).map_err(dir_error)?;
+        while let Some(entry) = dir.read() {
+            let entry = entry.map_err(dir_error)?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            if matches!(entry.file_type(), FileType::Directory | FileType::Unknown)
+                && let Ok(name) = std::str::from_utf8(name)
+            {
+                out.push(Arc::from(name));
+            }
+        }
+        Ok(())
+    }
+
     fn open_dir(&self, rel: &str) -> Result<OwnedFd, CollectError> {
         let rel = rel.trim_start_matches('/');
         let rel = if rel.is_empty() { "." } else { rel };
