@@ -729,7 +729,7 @@ mod tests {
         });
         assert_eq!(result, Ok(()));
         assert_eq!(calls, 1);
-        let state = state.lock().unwrap();
+        let mut state = state.lock().unwrap();
         assert_eq!(state.sent.len(), 3);
         assert_eq!(
             state.sent[2],
