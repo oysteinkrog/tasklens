@@ -16,7 +16,6 @@ use tl_model::command::{Command, DeviceCommand};
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::process::Coverage;
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
@@ -33,8 +32,8 @@ use super::table::{self, SweepTotals, TableInput};
 use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
-    CpuSample, DeviceDetailsUpdate, DiskSample, EngineMsg, GpuSample, MemorySample, NetSample,
-    SensorSample, SourceUpdate, ZramStat, source_of,
+    CpuSample, DetailsUpdate, DeviceDetailsUpdate, DiskSample, EngineMsg, GpuSample, MemorySample,
+    NetSample, SensorSample, SourceUpdate, ZramStat, source_of,
 };
 
 /// Forwarded commands kept in the control watch (E08-004).
@@ -81,6 +80,8 @@ pub struct ApplyState {
     disk_dbus: FxHashMap<DeviceIdx, DiskDetails>,
     net_sysfs: FxHashMap<DeviceIdx, NetDetails>,
     net_dbus: FxHashMap<DeviceIdx, NetDetails>,
+    /// `supports_process_util` per GPU UUID from the last `GpuInfo` (E09-006).
+    gpu_caps: FxHashMap<[u8; 16], bool>,
 }
 
 impl ApplyState {
@@ -340,9 +341,15 @@ impl Reducer {
                 }
                 self.mark(ComponentMask::DEVICES);
             }
-            SourceUpdate::Gpu(s) => self.apply_gpu(s, source)?,
+            SourceUpdate::Gpu(s) => self.apply_gpu(s, source, settings)?,
             SourceUpdate::GpuInfo(info) => {
+                self.apply_state.gpu_caps.clear();
                 for gpu in &info.devices {
+                    if let DeviceIdentity::Gpu { uuid, .. } = &gpu.identity {
+                        self.apply_state
+                            .gpu_caps
+                            .insert(*uuid, gpu.supports_process_util);
+                    }
                     self.devices.ensure(
                         &gpu.identity,
                         &gpu.name,
@@ -352,7 +359,6 @@ impl Reducer {
                     )?;
                 }
                 self.mark(ComponentMask::DEVICES);
-                tracing::debug!(target: "tasklens::engine", gpus = info.devices.len(), "gpu caps: not applied yet");
             }
             SourceUpdate::GpuApiVersions(_) => {
                 tracing::debug!(target: "tasklens::engine", "gpu api versions: E09-027");
@@ -374,8 +380,12 @@ impl Reducer {
                 Arc::make_mut(&mut self.components.system).color_scheme = v;
                 self.mark(ComponentMask::SYSTEM);
             }
+            SourceUpdate::Details(DetailsUpdate::Pss { entries, .. }) => {
+                self.processes.apply_pss(&entries);
+                self.republish_processes(settings);
+            }
             SourceUpdate::Details(_) => {
-                tracing::debug!(target: "tasklens::engine", "details update: E09-006, E09-026");
+                tracing::debug!(target: "tasklens::engine", "details update: E09-026");
             }
             SourceUpdate::Connections(_)
             | SourceUpdate::ConnectionsDestroySupport(_)
@@ -567,9 +577,7 @@ impl Reducer {
             self.mark(ComponentMask::SERIES);
         }
         if self.processes.expire(now, settings.interval_ms) {
-            let header = self.components.processes.header;
-            self.publish_processes((header.observed_start, header.observed_end));
-            self.rebuild_table(settings);
+            self.republish_processes(settings);
         }
     }
 
@@ -956,6 +964,7 @@ impl Reducer {
         &mut self,
         s: GpuSample,
         source: Option<SourceId>,
+        settings: &EngineSettings,
     ) -> Result<(), InvariantViolation> {
         let t = s.t_ns;
         let period = match source {
@@ -1011,10 +1020,12 @@ impl Reducer {
         if let Some(id) = source {
             self.sample_ok(id, t, period);
         }
-        if s.processes.is_some() {
-            tracing::debug!(target: "tasklens::engine", "gpu processes: E09-006");
-        }
         self.mark(ComponentMask::SERIES);
+        if let Some(processes) = &s.processes {
+            self.processes
+                .apply_gpu_processes(processes, &self.apply_state.gpu_caps);
+            self.republish_processes(settings);
+        }
         Ok(())
     }
 
@@ -1116,10 +1127,19 @@ impl Reducer {
 
     /// Publishes the process cache into `components.processes` when it changed.
     fn publish_processes(&mut self, observed: (TimeNs, TimeNs)) {
-        if let Some(next) = self.processes.publish(Coverage::default(), observed) {
+        let coverage = self.processes.coverage();
+        if let Some(next) = self.processes.publish(coverage, observed) {
             self.components.processes = next;
             self.mark(ComponentMask::PROCESSES);
         }
+    }
+
+    /// Publishes a change between sweeps with the last sweep's observed times, then rebuilds
+    /// the table.
+    fn republish_processes(&mut self, settings: &EngineSettings) {
+        let header = self.components.processes.header;
+        self.publish_processes((header.observed_start, header.observed_end));
+        self.rebuild_table(settings);
     }
 
     /// Rebuilds the process table and its header totals from the current state. Always marks
