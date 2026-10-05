@@ -2390,7 +2390,11 @@ fn sweep_rss_anon_from_statm() {
     assert_eq!(p.vsize_bytes, 666_958 * page);
     assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
     assert_eq!(p.validity.get(ProcessField::Rss), Validity::Valid);
-    assert_eq!(p.status.vm_rss, Some(p.rss_bytes), "VmRSS is statm resident");
+    assert_eq!(
+        p.status.vm_rss,
+        Some(p.rss_bytes),
+        "VmRSS is statm resident"
+    );
 }
 
 sweep_clock!(stagger_clock);
@@ -2419,16 +2423,20 @@ fn sweep_status_staggered() {
     stagger_clock::set(2 * SEC, 2 * SEC);
     core.sweep_core(&ctx, &mut out);
     assert_eq!(status_reads() - before, 2);
-    let fresh: Vec<u32> = out
+    let mut fresh: Vec<u32> = out
         .iter()
         .filter(|p| p.status_fresh)
         .map(|p| p.key.pid)
         .collect();
+    fresh.sort_unstable();
     assert_eq!(fresh, [12, 22]);
     let p13 = swept(&out, 13);
     assert_eq!(p13.status.vm_swap, Some(5_242_880));
     assert_eq!(p13.validity.get(ProcessField::Swap), Validity::Valid);
-    assert_eq!(p13.status.uid[0], 1000, "the real uid comes from the last status read");
+    assert_eq!(
+        p13.status.uid[0], 1000,
+        "the real uid comes from the last status read"
+    );
 
     // Sweep 3 is pid 13's turn.
     stagger_clock::set(3 * SEC, 3 * SEC);
