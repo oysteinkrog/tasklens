@@ -1331,3 +1331,93 @@ fn match_scope_launcher_alt() {
         Some("org.gnome.Nautilus")
     );
 }
+
+// ---- Process flags and the protected set (E05-017) ----
+
+use smallvec::smallvec;
+use tl_collect::apps::classify::{ProtectInputs, flags_for, protected_set, wayland_compositor_pid};
+use tl_model::process::ProcFlags;
+
+fn session_inputs() -> ProtectInputs {
+    ProtectInputs {
+        self_pids: smallvec![3000],
+        compositor_pid: Some(900),
+        session_bus_pid: Some(810),
+    }
+}
+
+#[test]
+fn protected_set_full_session() {
+    let user_init = cgroup("user.slice/user-1000.slice/user@1000.service/init.scope");
+    let logind = cgroup("system.slice/systemd-logind.service");
+    let session = cgroup("user.slice/user-1000.slice/session-2.scope");
+    let records = [
+        (1, 0, "systemd", None, 0),
+        (450, 1, "systemd-logind", Some(&logind), 0),
+        (500, 1, "sddm", None, 0),
+        (600, 500, "startplasma-wayland", Some(&session), SELF_UID),
+        (900, 600, "kwin_wayland", Some(&session), SELF_UID),
+        (901, 800, "plasmashell", None, SELF_UID),
+        (902, 800, "ksmserver", None, SELF_UID),
+        (903, 900, "Xwayland", None, SELF_UID),
+        (800, 1, "systemd", Some(&user_init), SELF_UID),
+        (810, 800, "dbus-broker", None, SELF_UID),
+        (2000, 800, "bash", None, SELF_UID),
+        (3000, 800, "tasklens", None, SELF_UID),
+    ];
+    let set = protected_set(&records, SELF_UID, &session_inputs());
+    for &(pid, ..) in &records {
+        let want = !matches!(pid, 2000 | 600);
+        assert_eq!(set.contains(pid), want, "pid {pid}");
+    }
+}
+
+#[test]
+fn protected_set_other_uid_excluded() {
+    let records = [(901, 1, "plasmashell", None, 1001)];
+    let set = protected_set(&records, SELF_UID, &ProtectInputs::default());
+    assert!(!set.contains(901));
+    assert!(set.contains(1));
+}
+
+#[test]
+fn flags_self_and_protected() {
+    // Security regression: tasklens must never lose IS_SELF.
+    let inp = session_inputs();
+    let records = [(3000, 1, "tasklens", None, SELF_UID)];
+    let set = protected_set(&records, SELF_UID, &inp);
+    let flags = flags_for(3000, false, SELF_UID, SELF_UID, &set, &inp);
+    assert!(flags.contains(ProcFlags::IS_SELF | ProcFlags::PROTECTED));
+    assert!(!flags.intersects(ProcFlags::NEW | ProcFlags::EXITED | ProcFlags::OTHER_USER));
+}
+
+#[test]
+fn flags_kernel_thread_other_user() {
+    let inp = ProtectInputs::default();
+    let set = protected_set(&[], SELF_UID, &inp);
+    let flags = flags_for(42, true, 0, SELF_UID, &set, &inp);
+    assert!(flags.contains(ProcFlags::KERNEL_THREAD | ProcFlags::OTHER_USER));
+    assert!(!flags.intersects(ProcFlags::IS_SELF | ProcFlags::PROTECTED));
+}
+
+#[test]
+fn compositor_pid_via_peercred() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let _server = std::os::unix::net::UnixListener::bind(dir.path().join("sock")).expect("bind");
+    assert_eq!(
+        wayland_compositor_pid(dir.path(), OsStr::new("sock")),
+        Some(std::process::id())
+    );
+    let absolute = dir.path().join("sock");
+    assert_eq!(
+        wayland_compositor_pid(Path::new("/nonexistent"), absolute.as_os_str()),
+        Some(std::process::id())
+    );
+}
+
+#[test]
+fn compositor_pid_missing_socket() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert_eq!(wayland_compositor_pid(dir.path(), OsStr::new("sock")), None);
+    assert_eq!(wayland_compositor_pid(dir.path(), OsStr::new("")), None);
+}
