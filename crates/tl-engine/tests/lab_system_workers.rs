@@ -20,19 +20,20 @@ use tl_engine::config::EngineMode;
 use tl_engine::source::{self, Source};
 use tl_engine::update::{
     CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, NetSample,
-    SourceUpdate,
+    SensorSample, SourceUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::disk::DiskSource;
 use tl_engine::workers::enumerate::{disk_list, net_list, sensor_list};
 use tl_engine::workers::memory::MemorySource;
 use tl_engine::workers::net::NetSource;
+use tl_engine::workers::sensors::SensorsSource;
 use tl_engine::workers::workers_for;
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
-use tl_model::system::{Metric, ZramTotals};
+use tl_model::system::{Metric, SensorKind, SensorReading, ZramTotals};
 use tl_model::validity::Validity;
 
 const SEC: u64 = 1_000_000_000;
@@ -730,4 +731,186 @@ fn net_listed_once_in_full_mode() {
         .map(|spec| spec.id)
         .collect();
     assert_eq!(ids.iter().filter(|id| **id == SourceId::Net).count(), 1);
+}
+
+fn sensors_sample(src: SensorsSource, t: u64) -> (SensorsSource, SensorSample) {
+    match src.sample_at(at(t)) {
+        (src, SourceUpdate::Sensors(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Sensors, got {other:?}"),
+    }
+}
+
+fn sensors_devices(src: &mut SensorsSource) -> DeviceList {
+    match src.take_extra() {
+        Some(SourceUpdate::Devices(list)) => list,
+        other => panic!("expected a Devices list, got {other:?}"),
+    }
+}
+
+fn hwmon_dir(dir: &Path, n: u32) -> PathBuf {
+    dir.join(format!("sys/class/hwmon/hwmon{n}"))
+}
+
+fn fan(chip: &str, index: u16) -> DeviceIdentity {
+    DeviceIdentity::Fan {
+        chip: chip.into(),
+        index,
+    }
+}
+
+fn temp(chip: &str, label: &str) -> DeviceIdentity {
+    DeviceIdentity::Sensor {
+        chip: chip.into(),
+        label: label.into(),
+    }
+}
+
+fn reading<'a>(s: &'a SensorSample, id: &DeviceIdentity) -> &'a SensorReading {
+    &s.readings
+        .iter()
+        .find(|(identity, _)| identity == id)
+        .unwrap_or_else(|| panic!("{id:?} missing from the sample"))
+        .1
+}
+
+fn chip_of(id: &DeviceIdentity) -> &str {
+    match id {
+        DeviceIdentity::Sensor { chip, .. } | DeviceIdentity::Fan { chip, .. } => &**chip,
+        other => panic!("unexpected identity {other:?}"),
+    }
+}
+
+#[test]
+fn sensors_fans_fixture() {
+    let dir = fixture_copy("fans", None);
+    let (mut src, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    let list = sensors_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::SENSORS | DeviceKinds::FANS);
+    assert!(
+        list.entries
+            .iter()
+            .all(|e| chip_of(&e.identity) != "amdgpu")
+    );
+    assert!(s.readings.iter().all(|(id, _)| chip_of(id) != "amdgpu"));
+
+    let fan1 = reading(&s, &fan("nct6797", 1));
+    assert_eq!(fan1.kind, SensorKind::Fan);
+    assert_eq!(fan1.value, Metric::valid(1200.0));
+    assert_eq!(fan1.pwm_pct, Metric::valid(50.19608));
+    assert_eq!(fan1.fan_control, None);
+    assert!(fan1.fan_connected);
+    // Every reading's identity is in the device list (same identity rule as enumerate).
+    for (id, _) in &s.readings {
+        assert!(list.entries.iter().any(|e| &e.identity == id), "{id:?}");
+    }
+}
+
+#[test]
+fn sensors_temps_fixture() {
+    let dir = fixture_copy("fans", None);
+    let (_, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    for (id, celsius) in [
+        (temp("nct6797", "temp1"), 40.0),
+        (temp("nct6797", "temp2"), 45.0),
+        (temp("single", "temp1"), 35.0),
+    ] {
+        let r = reading(&s, &id);
+        assert_eq!(r.kind, SensorKind::Temperature, "{id:?}");
+        assert_eq!(r.value, Metric::valid(celsius), "{id:?}");
+        assert_eq!(r.pwm_pct.validity, Validity::Unsupported, "{id:?}");
+        assert_eq!(r.fan_control, None, "{id:?}");
+        assert!(!r.fan_connected, "{id:?}");
+    }
+}
+
+#[test]
+fn sensors_unreadable_restricted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = fixture_copy("fans", None);
+    let file = hwmon_dir(&dir, 0).join("temp2_input");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod temp2_input");
+    if fs::read(&file).is_ok() {
+        eprintln!("skipped: running as root, mode 000 does not block reads");
+        return;
+    }
+    let (_, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(
+        reading(&s, &temp("nct6797", "temp2")).value.validity,
+        Validity::Restricted
+    );
+    assert_eq!(
+        reading(&s, &temp("nct6797", "temp1")).value,
+        Metric::valid(40.0)
+    );
+    assert_eq!(
+        reading(&s, &fan("nct6797", 1)).value.validity,
+        Validity::Valid
+    );
+}
+
+#[test]
+fn sensors_rescan_every_5s() {
+    let dir = fixture_copy("fans", None);
+    let (mut src, _) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), 0);
+    sensors_devices(&mut src);
+
+    let extra = hwmon_dir(&dir, 3);
+    copy_tree(&hwmon_dir(&dir, 2), &extra);
+    fs::write(extra.join("name"), "extra\n").expect("write new chip name");
+    let new_temp = temp("extra", "temp1");
+
+    let (mut src, s) = sensors_sample(src, SEC);
+    assert!(src.take_extra().is_none(), "no rescan before 5 s");
+    assert!(s.readings.iter().all(|(id, _)| chip_of(id) != "extra"));
+
+    let (mut src, s) = sensors_sample(src, 5 * SEC);
+    let list = sensors_devices(&mut src);
+    assert!(list.entries.iter().any(|e| e.identity == new_temp));
+    assert!(list.entries.iter().any(|e| e.identity == fan("extra", 1)));
+    assert_eq!(reading(&s, &new_temp).value, Metric::valid(35.0));
+    assert_eq!(reading(&s, &fan("extra", 1)).value, Metric::valid(900.0));
+}
+
+#[test]
+fn sensors_fan_connected_sticky() {
+    let dir = fixture_copy("fans", None);
+    let input = hwmon_dir(&dir, 2).join("fan1_input");
+    let single = fan("single", 1);
+    fs::write(&input, "0\n").expect("write fan1_input");
+    let (src, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    assert!(!reading(&s, &single).fan_connected);
+
+    fs::write(&input, "900\n").expect("write fan1_input");
+    let (src, s) = sensors_sample(src, 2 * SEC);
+    assert!(reading(&s, &single).fan_connected);
+
+    fs::write(&input, "0\n").expect("write fan1_input");
+    let (_, s) = sensors_sample(src, 3 * SEC);
+    let r = reading(&s, &single);
+    assert_eq!(r.value, Metric::valid(0.0));
+    assert!(r.fan_connected);
+}
+
+#[test]
+fn sensors_fan_label_connected() {
+    let dir = fixture_copy("fans", None);
+    let (_, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    assert!(!reading(&s, &fan("nct6797", 2)).fan_connected);
+
+    let dir = fixture_copy("fans", None);
+    fs::write(hwmon_dir(&dir, 0).join("fan2_label"), "SYS_FAN\n").expect("write fan2_label");
+    let (_, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    let r = reading(&s, &fan("nct6797", 2));
+    assert_eq!(r.value, Metric::valid(0.0));
+    assert!(r.fan_connected);
+}
+
+#[test]
+fn sensors_listed_once_in_full_mode() {
+    let ids: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(ids.iter().filter(|id| **id == SourceId::Sensors).count(), 1);
 }
