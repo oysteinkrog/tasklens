@@ -1380,6 +1380,34 @@ fn protected_set_other_uid_excluded() {
     assert!(set.contains(1));
 }
 
+/// R-284: KDE's kwin_wayland_wrapper owns the Wayland socket, so its direct child kwin_wayland
+/// is protected too. Grandchildren are not.
+#[test]
+fn protected_set_compositor_wrapper_child() {
+    let records = [
+        (1, 0, "systemd", None, 0),
+        (900, 1, "kwin_wayland_wrapper", None, SELF_UID),
+        (905, 900, "kwin_wayland", None, SELF_UID),
+        (950, 905, "konsole", None, SELF_UID),
+    ];
+    let inp = ProtectInputs {
+        compositor_pid: Some(900),
+        ..ProtectInputs::default()
+    };
+    let set = protected_set(&records, SELF_UID, &inp);
+    assert!(set.contains(900) && set.contains(905));
+    assert!(!set.contains(950));
+
+    // No socket: kwin_wayland is still protected by name, for the current user only.
+    let records = [
+        (905, 900, "kwin_wayland", None, SELF_UID),
+        (906, 900, "kwin_wayland", None, 1001),
+    ];
+    let set = protected_set(&records, SELF_UID, &ProtectInputs::default());
+    assert!(set.contains(905));
+    assert!(!set.contains(906));
+}
+
 #[test]
 fn flags_self_and_protected() {
     // Security regression: tasklens must never lose IS_SELF.

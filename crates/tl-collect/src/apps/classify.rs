@@ -323,8 +323,9 @@ impl ProtectedSet {
     }
 }
 
-/// Session processes protected for the current user only.
-const SESSION_NAMES: [&str; 3] = ["plasmashell", "ksmserver", "Xwayland"];
+/// Session processes protected for the current user only. `kwin_wayland` is here too in case
+/// the compositor socket cannot be reached (R-284).
+const SESSION_NAMES: [&str; 4] = ["plasmashell", "ksmserver", "Xwayland", "kwin_wayland"];
 
 /// Login ancestors of the compositor or of plasmashell.
 const LOGIN_NAMES: [&str; 2] = ["sddm", "login"];
@@ -356,6 +357,10 @@ pub fn protected_set(
             if name == "plasmashell" {
                 shells.push(pid);
             }
+        }
+        // KDE's kwin_wayland_wrapper owns the socket and runs kwin_wayland as its child (R-284).
+        if ppid > 1 && inp.compositor_pid == Some(ppid) {
+            pids.insert(pid);
         }
         if name == "systemd" && rel == Some(user_init.as_str()) {
             pids.insert(pid);
