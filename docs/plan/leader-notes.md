@@ -205,3 +205,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hx1.1: sockets-basic fixture uses public address 140.82.112.3 (bead names it, against its own privacy note). Polish: switch to 203.0.113.x and refresh the snapshot.
 - ug9.16: reduced motion draws a plain div at opacity 0.7 instead of kit Skeleton; bar width test checks the helper, not rendered bounds. UI validation item.
 - i3o.4: dispatch has no process arm until i3o.5; targetless kinds return Rejected(Unsupported) until E11-016; unit kind with no Unit target gets the system-manager deadline. HelperCallError is ready for qfx.2.
+- ug9.23/ug9.22: no bind_keys_components exists. slider.rs (and radio) expose bind_keys(cx); nothing calls them. Need a bead: app keymap calls every component bind_keys. Slider uses kit base parts, not component::Slider (spec thumb). set_from_elsewhere rebuilds kit state, resets drag flag. Chose 8 px gaps and 16 px hit height.
