@@ -211,3 +211,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.23: slider::bind_keys now called from bind_keys_components (a1cb21f). Remaining gap: the app keymap must call bind_keys_components.
 - y6k.13: journal follow has no byte cap on initial fetch / Load older stdout or on one unfinished line (docs set no number; decide in perf/security pass). set_follow(false) can block while the UI does not drain the 64-slot channel (send_blocking).
 - ug9.13: switch built from kit base parts (styled Switch cannot meet spec). M_FAST 120 ms is a local const until a motion tokens module exists. motion.animations=false only works if the shell maps it to set_reduce_motion: needs a bead (affects switch, radio, skeleton).
+- LEADER TODO: close tasklens-ndy.2 after clippy -p tl-engine --all-targets passes (blocked by 8fx.16 history.rs). Commits 13af3d6 ff6fee3 a967de5 a5b4b89 b745e7f 7e9713f.
