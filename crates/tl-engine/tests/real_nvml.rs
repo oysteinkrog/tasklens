@@ -150,7 +150,7 @@ fn real_ten_samples_valid() {
 #[ignore = "owner machine: RTX 5070 and a release tl-gpu-probe"]
 fn real_process_rows_u12() {
     let _lock = one_probe();
-    let gears = match Command::new("glxgears")
+    let mut gears = match Command::new("glxgears")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -158,12 +158,20 @@ fn real_process_rows_u12() {
     {
         Ok(child) => OwnChild(child),
         Err(e) => {
-            println!("real_process_rows_u12: skipped, glxgears did not start: {e}");
+            println!("real_process_rows_u12: skipped, U-12 not verified: glxgears absent: {e}");
             return;
         }
     };
     let pid = gears.0.id();
     std::thread::sleep(Duration::from_secs(2));
+    // Without DISPLAY, glxgears exits at once with "couldn't open display".
+    if let Ok(Some(status)) = gears.0.try_wait() {
+        println!(
+            "real_process_rows_u12: skipped, U-12 not verified: glxgears exited ({status}); \
+             run from a desktop session"
+        );
+        return;
+    }
 
     let mut client = ProbeClient::start(&probe()).expect("probe starts");
     let first = client.sample(true).expect("first sample");
