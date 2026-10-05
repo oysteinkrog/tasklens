@@ -179,3 +179,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.7 disk replug: sampler drops counters of absent disks, so a replugged disk starts with empty flags, not GAP_BEFORE. Accepted: the reducer writes gap samples while present == false (8q0.9 point 5), so the chart still shows the gap. DiskSource::disk_ids() added for tests.
 - MANUAL DESKTOP CHECKS for the validation phase (owner present): y6k.24 real_open_uri_portal (opens a browser); portal OpenFile with a directory fd (does it open the folder?).
 - y6k.24 opener: FileManager1 call failure gives Internal(name) with no xdg-open fallback; consider falling back.
+- 8q0.21: Snapshot::empty sets windows WarmingUp, so both Reducer::new and bridge empty_snapshot() override it to Unsupported (ADR-003). Fix Snapshot::empty in tl-model and drop the overrides. read_boot_id now exists twice (tl-helper ops.rs and tl-engine bridge.rs); move one into tl-collect sysroot or tl-model.
