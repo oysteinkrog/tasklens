@@ -24,12 +24,13 @@ use tl_model::actions::{
     Signal,
 };
 use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
+use tl_model::demand::Demand;
 use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::gpu_proto::{ApiVersions, GpuProcessSample, Reading};
 use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
 use tl_model::history::{HistoryMetric, HistoryRange, RecordSink};
-use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
+use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
@@ -1519,5 +1520,70 @@ fn pss_coverage_published() {
             .get(ProcessField::Pss),
         Validity::WarmingUp
     );
+    rig.passed();
+}
+
+fn pss_demand(keys: &[ProcessKey], shown: bool) -> Demand {
+    let mut d = Demand {
+        detail_keys: Arc::from(keys),
+        ..Demand::default()
+    };
+    if shown {
+        d.process_columns.insert(ColumnId::Pss);
+    }
+    d
+}
+
+/// Sweeps processes 1 to 3, demands PSS for 2 and 3 and applies their PSS. Returns the rig
+/// and the demand sender.
+fn rig_with_pss() -> (Rig, watch::Sender<Demand>) {
+    let mut rig = Rig::new();
+    let (demand_tx, demand_rx) = watch::channel(pss_demand(&[proc_key(2), proc_key(3)], true));
+    rig.reducer().demand_rx = Some(demand_rx);
+    rig.run(vec![
+        sweep_without_pss(now_boot_ns(), &[1, 2, 3]),
+        pss_msg(&[proc_key(2), proc_key(3)], 8192),
+    ])
+    .expect("no invariant violation");
+    assert_eq!(
+        &*rig.latest().processes.coverage.pss_uss,
+        &[proc_key(2), proc_key(3)]
+    );
+    (rig, demand_tx)
+}
+
+#[test]
+fn pss_cleared_outside_detail_keys() {
+    let (mut rig, demand_tx) = rig_with_pss();
+    demand_tx
+        .send(pss_demand(&[proc_key(3)], true))
+        .expect("the reducer holds the receiver");
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(&*snap.processes.coverage.pss_uss, &[proc_key(3)]);
+    let left = record_of(&snap, proc_key(2));
+    assert_eq!(left.validity.get(ProcessField::Pss), Validity::WarmingUp);
+    assert_eq!(left.pss_bytes, 0);
+    let kept = record_of(&snap, proc_key(3));
+    assert_eq!(kept.validity.get(ProcessField::Pss), Validity::Valid);
+    assert_eq!(kept.pss_bytes, 8192);
+    rig.passed();
+}
+
+#[test]
+fn pss_cleared_when_column_hidden() {
+    let (mut rig, demand_tx) = rig_with_pss();
+    demand_tx
+        .send(pss_demand(&[proc_key(2), proc_key(3)], false))
+        .expect("the reducer holds the receiver");
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert!(snap.processes.coverage.pss_uss.is_empty());
+    for pid in [2, 3] {
+        let record = record_of(&snap, proc_key(pid));
+        assert_eq!(record.validity.get(ProcessField::Pss), Validity::WarmingUp);
+    }
     rig.passed();
 }
