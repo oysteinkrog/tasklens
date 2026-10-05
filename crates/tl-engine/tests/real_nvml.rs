@@ -98,7 +98,7 @@ fn real_hello_5070() {
     let info = client.info.clone().unwrap_or_else(|| {
         panic!("Hello is not Ready: {:?}", client.init_failed);
     });
-    println!(
+    eprintln!(
         "real_hello_5070: start and Hello in {took:?}, driver {}, NVML {}",
         info.driver, info.nvml
     );
@@ -107,7 +107,7 @@ fn real_hello_5070() {
     assert!(dev.name.contains("5070"), "name {:?}", dev.name);
     assert!(info.driver.starts_with("615."), "driver {:?}", info.driver);
     assert_eq!(dev.pci_bus_id, "00000000:2D:00.0");
-    println!("U-35: power_limit_mw = {:?}", dev.power_limit_mw);
+    eprintln!("U-35: power_limit_mw = {:?}", dev.power_limit_mw);
     assert!(dev.power_limit_mw.is_some());
     client.shutdown();
 }
@@ -142,7 +142,7 @@ fn real_ten_samples_valid() {
             "sample {i} took {took:?}"
         );
     }
-    println!("real_ten_samples_valid: sample(false) times {times:?}");
+    eprintln!("real_ten_samples_valid: sample(false) times {times:?}");
     client.shutdown();
 }
 
@@ -158,7 +158,7 @@ fn real_process_rows_u12() {
     {
         Ok(child) => OwnChild(child),
         Err(e) => {
-            println!("real_process_rows_u12: skipped, U-12 not verified: glxgears absent: {e}");
+            eprintln!("real_process_rows_u12: skipped, U-12 not verified: glxgears absent: {e}");
             return;
         }
     };
@@ -166,7 +166,7 @@ fn real_process_rows_u12() {
     std::thread::sleep(Duration::from_secs(2));
     // Without DISPLAY, glxgears exits at once with "couldn't open display".
     if let Ok(Some(status)) = gears.0.try_wait() {
-        println!(
+        eprintln!(
             "real_process_rows_u12: skipped, U-12 not verified: glxgears exited ({status}); \
              run from a desktop session"
         );
@@ -185,7 +185,7 @@ fn real_process_rows_u12() {
         panic!("no row for glxgears pid {pid} in {rows:?}");
     });
     assert!(matches!(row.sm_pct, Reading::Ok(_)), "{row:?}");
-    println!(
+    eprintln!(
         "real_process_rows_u12: U-12 verified, glxgears sm_pct {:?}, {} rows, sample(true) {took:?}",
         row.sm_pct,
         rows.len()
@@ -219,7 +219,7 @@ fn real_kill_and_restart() {
     let begin = Instant::now();
     let result = client.sample(false);
     let took = begin.elapsed();
-    println!("real_kill_and_restart: stopped probe answered {result:?} after {took:?}");
+    eprintln!("real_kill_and_restart: stopped probe answered {result:?} after {took:?}");
     assert!(
         matches!(result, Err(ProbeError::Deadline(d)) if d == SAMPLE_DEADLINE),
         "{result:?}"
@@ -235,7 +235,7 @@ fn real_kill_and_restart() {
     let begin = Instant::now();
     let restarted = ProbeClient::start(&probe).expect("restart");
     let took = begin.elapsed();
-    println!("real_kill_and_restart: restart and Hello in {took:?}");
+    eprintln!("real_kill_and_restart: restart and Hello in {took:?}");
     assert!(restarted.info.is_some(), "{:?}", restarted.init_failed);
     assert!(took < Duration::from_secs(3), "restart took {took:?}");
     restarted.shutdown();
@@ -247,7 +247,7 @@ fn real_api_versions() {
     let _lock = one_probe();
     let begin = Instant::now();
     let versions = api_versions(&probe(), API_VERSIONS_DEADLINE).expect("api versions");
-    println!("real_api_versions: {versions:?} in {:?}", begin.elapsed());
+    eprintln!("real_api_versions: {versions:?} in {:?}", begin.elapsed());
     assert_eq!(versions.devices.len(), 1, "{versions:?}");
     let dev = &versions.devices[0];
     assert!(
@@ -314,7 +314,7 @@ fn real_worker_end_to_end() {
     let gpus: Vec<_> = snap.devices.present_of(DeviceKind::Gpu).collect();
     assert_eq!(gpus.len(), 1, "{:?}", snap.devices.entries);
     let samples = gpu_util(&snap);
-    println!("real_worker_end_to_end: after 3 s, GPU_UTIL (samples, last t_ns) {samples:?}");
+    eprintln!("real_worker_end_to_end: after 3 s, GPU_UTIL (samples, last t_ns) {samples:?}");
     assert!(samples.is_some_and(|(n, _)| n >= 2), "{samples:?}");
     let health = snap.health.get(SourceId::GpuNvidia);
     assert_eq!(health.state, SourceState::Running, "{health:?}");
@@ -325,7 +325,7 @@ fn real_worker_end_to_end() {
     let idle_from = gpu_util(&ui.latest.load_full());
     std::thread::sleep(Duration::from_secs(5));
     let idle_to = gpu_util(&ui.latest.load_full());
-    println!("real_worker_end_to_end: idle GPU_UTIL {idle_from:?} then {idle_to:?}");
+    eprintln!("real_worker_end_to_end: idle GPU_UTIL {idle_from:?} then {idle_to:?}");
     assert_eq!(
         idle_from.map(|(_, t)| t),
         idle_to.map(|(_, t)| t),
@@ -343,7 +343,7 @@ fn real_worker_end_to_end() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    println!(
+    eprintln!(
         "real_worker_end_to_end: runtime dropped, probes left {left:?} after {:?}",
         dropped.elapsed()
     );
