@@ -32,6 +32,7 @@ const CPU_TOTAL: SeriesId = SeriesId {
 
 struct Rig {
     lab: LabRuntime,
+    root: asupersync::types::RegionId,
     reducer: Option<Reducer>,
     publisher: Option<Publisher>,
     wake_rx: Option<async_channel::Receiver<()>>,
@@ -51,8 +52,11 @@ impl Rig {
             wake_tx,
             stop_publishing: false,
         };
+        let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(1_000_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
         Rig {
-            lab: LabRuntime::new(LabConfig::new(42).max_steps(1_000_000)),
+            lab,
+            root,
             reducer: Some(Reducer::new(1, BOOT, control_tx, events_tx)),
             publisher: Some(publisher),
             wake_rx: Some(wake_rx),
@@ -92,11 +96,10 @@ impl Rig {
         let mut publisher = self.publisher.take().expect("one run at a time");
         let out: RunOutput = Arc::default();
         let slot = Arc::clone(&out);
-        let root = self.lab.state.create_root_region(Budget::INFINITE);
         let (task, _handle) = self
             .lab
             .state
-            .create_task(root, Budget::INFINITE, async move {
+            .create_task(self.root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
                 let result = reducer.run(&cx, &mut rx, &mut publisher).await;
                 *slot.lock().unwrap_or_else(PoisonError::into_inner) =
