@@ -189,3 +189,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yms.26 sweep gate (U-10): 35 ms on the 2,000-pid fixture against 15 ms; live /proc 34 us per process (992 procs 33.9 ms, near the 3.5% Processes-tab budget). Syscalls are 80%. Measuring fewer-files options before deciding.
 - Socket map optimisation (R-287): skip pids whose /proc/<pid>/fd st_size is unchanged since the last rebuild; full rebuild every 10 s.
 - 8q0.26 subtree totals: tree mode only; grouped-mode process rows with children (depth 2+) get none, check against UI-PRC spec. Handles not summed (GroupRow has no handles field). Bead AC had a wrong number (B subtree CPU is 5, not 3).
+- 8q0.2 added #[doc(hidden)] pub Engine::start_with_workers(config, hooks, workers); start() calls it with workers_for(mode). Solves the fake-worker gap from 8q0.21/8q0.22/8q0.1; later tests should use it.
+- 8q0.8: reducer keeps last GPU and PSS values per key across sweeps (sweep sends 0 WarmingUp). ProcessState::gpu_process() instead of a Coverage field. Wiring into apply.rs is bead tasklens-eal2 (after 8q0.10).
+- hx1.9: connections address cache key includes foreign_unbound. hx1.13: duplicate Type= takes the last value. hx1.21: populated-slot-free MEMORY_DEVICE file gives Modules([]), not NotReported.
