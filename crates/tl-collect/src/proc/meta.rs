@@ -167,8 +167,9 @@ impl MetaCache {
     }
 
     /// Returns the cached metadata of `key`, read from `dir` (its `/proc/<pid>` directory) on
-    /// first sight, every `META_REFRESH_SWEEPS` calls, and when `stat_comm_raw` differs from the
-    /// stat `comm` of the last read.
+    /// first sight, then after `META_REFRESH_SWEEPS - pid % META_REFRESH_SWEEPS` calls and every
+    /// `META_REFRESH_SWEEPS` calls after that, and when `stat_comm_raw` differs from the stat
+    /// `comm` of the last read. No entry is older than `META_REFRESH_SWEEPS` calls.
     pub fn get_or_refresh(
         &mut self,
         key: ProcessKey,
@@ -196,10 +197,12 @@ impl MetaCache {
             Entry::Vacant(v) => {
                 let dir = open()?;
                 let meta = read_meta(dir.as_fd(), stat_comm_raw, bufs, &mut self.interner);
+                // Staggered by pid, so a population first seen in one sweep does not refresh
+                // in one sweep: the first refresh comes after 10 - (pid % 10) calls.
                 let e = v.insert(CacheEntry {
                     meta,
                     stat_comm: SmallVec::from_slice(stat_comm_raw),
-                    sweeps: 0,
+                    sweeps: key.pid % META_REFRESH_SWEEPS,
                 });
                 Some((&e.meta, MetaChange::New))
             }

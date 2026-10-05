@@ -939,35 +939,72 @@ fn meta_first_read() {
 #[test]
 fn meta_refresh_every_10_sweeps() {
     let dir = edge_dir(4201);
-    let key = rollup_key(4201, 351_220);
-    let mut cache = MetaCache::new();
     let mut bufs = ReadBufs::default();
-    assert_eq!(
-        cache
-            .get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs)
-            .1,
-        MetaChange::New
-    );
-    let reads = meta_file_reads();
-    for _ in 1..META_REFRESH_SWEEPS {
+    // The first refresh comes after 10 - (pid % 10) calls, then every 10 (R-064 as a maximum).
+    for (pid, first) in [(4201, 9), (4200, 10), (4209, 1)] {
+        let key = rollup_key(pid, 351_220);
+        let mut cache = MetaCache::new();
+        let new = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+        assert_eq!(new.1, MetaChange::New);
+        let reads = meta_file_reads();
+        for _ in 1..first {
+            let (_, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+            assert_eq!(change, MetaChange::Unchanged, "pid {pid}");
+        }
+        assert_eq!(meta_file_reads(), reads, "no file re-read");
+        let (meta, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+        assert_eq!(
+            change,
+            MetaChange::Refreshed,
+            "pid {pid} after {first} calls"
+        );
+        assert_eq!(meta.cmdline.as_deref(), Some("firefox -P default"));
+        assert!(meta_file_reads() > reads);
+        for _ in 1..META_REFRESH_SWEEPS {
+            let (_, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+            assert_eq!(change, MetaChange::Unchanged, "the counter restarts");
+        }
         let (_, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
-        assert_eq!(change, MetaChange::Unchanged);
-    }
-    assert_eq!(meta_file_reads(), reads, "no file re-read");
-    let (meta, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
-    assert_eq!(change, MetaChange::Refreshed);
-    assert_eq!(meta.cmdline.as_deref(), Some("firefox -P default"));
-    assert!(meta_file_reads() > reads);
-    assert_eq!(
-        cache
-            .get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs)
-            .1,
-        MetaChange::Unchanged,
-        "the counter restarts"
-    );
+        assert_eq!(
+            change,
+            MetaChange::Refreshed,
+            "then every {META_REFRESH_SWEEPS}"
+        );
 
-    cache.retain_live(&Default::default());
-    assert!(cache.is_empty());
+        cache.retain_live(&Default::default());
+        assert!(cache.is_empty());
+    }
+}
+
+#[test]
+fn meta_refresh_spread_across_sweeps() {
+    let dir = edge_dir(4201);
+    let mut bufs = ReadBufs::default();
+    let mut cache = MetaCache::new();
+    let keys: Vec<ProcessKey> = (1000..1200).map(|pid| rollup_key(pid, 351_220)).collect();
+    for &key in &keys {
+        cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+    }
+    let mut last = vec![0u32; keys.len()];
+    for sweep in 1..=30u32 {
+        let mut refreshed = 0;
+        for (i, &key) in keys.iter().enumerate() {
+            let (_, change) = cache.get_or_refresh(key, dir.as_fd(), b"Web Content", &mut bufs);
+            if change == MetaChange::Refreshed {
+                refreshed += 1;
+                last[i] = sweep;
+            }
+            assert!(
+                sweep - last[i] < META_REFRESH_SWEEPS,
+                "no entry older than 10 sweeps"
+            );
+        }
+        assert_eq!(
+            refreshed,
+            keys.len() / 10,
+            "sweep {sweep}: a tenth refreshes"
+        );
+    }
 }
 
 #[test]
