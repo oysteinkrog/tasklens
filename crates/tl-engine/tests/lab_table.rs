@@ -850,6 +850,169 @@ fn counts_sum_to_visible_records() {
     assert_eq!(view.shown as usize, records.len());
 }
 
+// Hide system processes (E09-012, PROC-046).
+
+fn hide_system() -> EngineSettings {
+    EngineSettings {
+        hide_system: true,
+        ..EngineSettings::default()
+    }
+}
+
+/// `r` with cgroup path `path`, relative to /sys/fs/cgroup.
+fn in_cgroup(mut r: ProcessRecord, path: &str) -> ProcessRecord {
+    Arc::make_mut(&mut r.meta).cgroup = Some(path.into());
+    r
+}
+
+/// PID 1, the user manager, desktop infrastructure, an exception, a terminal in `app.slice`,
+/// an app, a system unit and two kernel threads. With `hide_system`, 100, 202 and 204 remain.
+fn desktop() -> Vec<ProcessRecord> {
+    let mut pid1 = in_cgroup(rec(1, 0, "systemd", 0.0), "init.scope");
+    pid1.group = GroupKind::System.key();
+    pid1.uid = 0;
+    let mut records = vec![
+        pid1,
+        in_app(rec(100, 200, "firefox", 0.0), "firefox"),
+        in_cgroup(
+            rec(200, 1, "systemd-user", 0.0),
+            &format!("{USER_MANAGER}/init.scope"),
+        ),
+        in_unit(
+            rec(201, 204, "pipewire", 0.0),
+            "session.slice",
+            "pipewire.service",
+        ),
+        in_unit(
+            rec(202, 200, "plasmashell", 0.0),
+            "session.slice",
+            "plasma-plasmashell.service",
+        ),
+        in_unit(
+            rec(203, 200, "kded6", 0.0),
+            "background.slice",
+            "plasma-kded6.service",
+        ),
+        in_unit(
+            rec(204, 200, "bash", 0.0),
+            "app.slice",
+            "app-konsole@1.service",
+        ),
+        in_unit(rec(300, 1, "cron", 0.0), "system.slice", "cron.service"),
+    ];
+    records.extend((1000..1002).map(kthread));
+    records
+}
+
+#[test]
+fn hide_system_removes_system_and_infra() {
+    let records = vec![
+        in_unit(
+            rec(10, 1, "pipewire", 0.0),
+            "session.slice",
+            "pipewire.service",
+        ),
+        in_cgroup(
+            in_app(rec(20, 1, "firefox", 0.0), "firefox"),
+            &format!("{USER_MANAGER}/app.slice/app-firefox@1.service"),
+        ),
+        in_unit(rec(30, 1, "cron", 0.0), "system.slice", "cron.service"),
+    ];
+    for mode in [TableMode::Flat, TableMode::Tree, TableMode::Grouped] {
+        let q = query(mode, "pid", true, "", &all_nodes(&records));
+        let view = build(&records, &q, &hide_system());
+        assert_eq!(pids(&view, &records), [20], "{mode:?}");
+        // R-280: total leaves out hidden records too.
+        assert_eq!(view.total, 1, "{mode:?}");
+        assert_eq!(view.shown, 1, "{mode:?}");
+    }
+
+    let view = build(
+        &desktop(),
+        &query(TableMode::Flat, "pid", true, "", &[]),
+        &hide_system(),
+    );
+    assert_eq!(pids(&view, &desktop()), [100, 202, 204]);
+    assert_eq!(view.total, 3);
+}
+
+#[test]
+fn hide_system_exceptions_stay() {
+    let records: Vec<ProcessRecord> = table::HIDE_SYSTEM_EXCEPTIONS
+        .iter()
+        .zip(10u32..)
+        .map(|(unit, pid)| in_unit(rec(pid, 1, unit, 0.0), "session.slice", unit))
+        .collect();
+    let view = build(
+        &records,
+        &query(TableMode::Flat, "pid", true, "", &[]),
+        &hide_system(),
+    );
+    assert_eq!(pids(&view, &records), [10, 11, 12]);
+}
+
+#[test]
+fn hide_system_grouped_drops_system_header() {
+    let records = desktop();
+    let view = build(
+        &records,
+        &query(TableMode::Grouped, "pid", true, "", &all_nodes(&records)),
+        &hide_system(),
+    );
+    assert!(!view.rows.iter().any(|r| {
+        r.node == NodeId::Group(GroupKind::System.key()) || r.node == NodeId::KernelThreads
+    }));
+    // Background keeps plasmashell and bash; pipewire, kded6 and the user manager are hidden.
+    assert_eq!(header_counts(&view), [1, 2]);
+    assert_eq!(
+        names(&view, &records),
+        [
+            row("Apps", 0),
+            row("firefox", 1),
+            row("firefox", 2),
+            row("Background processes", 0),
+            row("plasmashell", 1),
+            row("bash", 1),
+        ]
+    );
+    assert_eq!(view.shown, 3);
+}
+
+#[test]
+fn hide_system_off_is_noop() {
+    let records = desktop();
+    for mode in [TableMode::Flat, TableMode::Tree, TableMode::Grouped] {
+        let q = query(mode, "pid", true, "", &all_nodes(&records));
+        let off = build(&records, &q, &settings());
+        assert_eq!(off.shown as usize, records.len(), "{mode:?}");
+        assert_eq!(off.total as usize, records.len(), "{mode:?}");
+        let mut shown = pids(&off, &records);
+        shown.sort_unstable();
+        let all: Vec<u32> = records.iter().map(|r| r.key.pid).collect();
+        assert_eq!(shown, all, "{mode:?}");
+    }
+}
+
+#[test]
+fn hide_system_user_init_scope() {
+    let records = desktop();
+    let user_manager = &records[2];
+    assert_eq!(user_manager.key.pid, 200);
+    let class = table::group_class(user_manager);
+    assert_eq!(class, table::GroupClass::Background);
+    assert!(table::hidden_by_hide_system(user_manager, class));
+    let pid1 = &records[0];
+    let class = table::group_class(pid1);
+    assert_eq!(class, table::GroupClass::System);
+    assert!(table::hidden_by_hide_system(pid1, class));
+
+    // In tree mode the hidden user manager's children become roots (PROC-014).
+    let q = query(TableMode::Tree, "pid", true, "", &all_nodes(&records));
+    let view = build(&records, &q, &hide_system());
+    assert_eq!(pids(&view, &records), [100, 202, 204]);
+    assert!(view.rows.iter().all(|r| r.depth == 0));
+}
+
 // Whole-builder checks (E09-014).
 
 /// `n` records: 20 apps of 10 processes each, one in four of the rest in units of 5, the rest
