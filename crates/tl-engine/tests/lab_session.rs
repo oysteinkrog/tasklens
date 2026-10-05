@@ -23,16 +23,21 @@ use tl_engine::reducer::{ActionGate, AdmissionView, Publisher};
 use tl_engine::session::{RESTART_DELAY, RootEndpoints, engine_root};
 use tl_engine::source::{WorkerControl, WorkerIo};
 use tl_engine::supervise::WorkerFactory;
-use tl_engine::update::{CpuCoreSample, CpuSample, EngineMsg, SourceUpdate};
+use tl_engine::update::{
+    CpuCoreSample, CpuSample, DeviceDesc, DeviceKinds, DeviceList, EngineMsg, NetSample,
+    SourceUpdate,
+};
 use tl_engine::workers::WorkerSpec;
 use tl_model::actions::{ActionEvent, ActionId, ActionKind, ActionRequest, Signal};
 use tl_model::command::Command;
 use tl_model::demand::Demand;
+use tl_model::devices::{AggregateKind, DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
+use tl_model::ids::{MetricId, SeriesId};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
-use tl_model::system::{CpuSet, CpuTopology, CpuTotals, Metric};
+use tl_model::system::{CpuSet, CpuTopology, CpuTotals, LinkState, Metric, NetTotals};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 
@@ -89,7 +94,7 @@ struct Rig {
     _wake_rx: async_channel::Receiver<()>,
     _events_rx: async_channel::Receiver<ActionEvent>,
     _demand_tx: watch::Sender<Demand>,
-    _settings_tx: watch::Sender<EngineSettings>,
+    settings_tx: watch::Sender<EngineSettings>,
     ep: Option<RootEndpoints>,
 }
 
@@ -142,7 +147,7 @@ impl Rig {
             _wake_rx: wake_rx,
             _events_rx: events_rx,
             _demand_tx: demand_tx,
-            _settings_tx: settings_tx,
+            settings_tx,
             ep: Some(ep),
         }
     }
@@ -335,5 +340,98 @@ fn sequence_continues_across_epochs() {
     rig.send(cpu_msg(1_200 * MS, 50.0));
     let next = rig.latest();
     assert_eq!((next.epoch, next.sequence), (2, 501));
+    rig.stop();
+}
+
+fn net_id(name: &str, ifindex: u32) -> DeviceIdentity {
+    DeviceIdentity::Net {
+        netns_ino: 1,
+        ifindex,
+        name: Arc::from(name),
+    }
+}
+
+fn net_desc(identity: DeviceIdentity, kind: NetKind) -> DeviceDesc {
+    DeviceDesc {
+        identity,
+        display_name: Arc::from("if"),
+        parent: None,
+        persistent_key: Arc::from("net:if"),
+        net_kind: Some(kind),
+    }
+}
+
+fn net_msg(t_ns: TimeNs, nets: Vec<(DeviceIdentity, f64)>) -> EngineMsg {
+    EngineMsg::Source(SourceUpdate::Nets(NetSample {
+        t_ns,
+        nets: nets
+            .into_iter()
+            .map(|(id, rx)| {
+                let totals = NetTotals {
+                    device: tl_model::ids::DeviceIdx(0),
+                    rx_bps: Metric::valid(rx),
+                    tx_bps: Metric::valid(0.0),
+                    rx_total: 0,
+                    tx_total: 0,
+                    link_speed_mbps: Metric::with(Validity::Unsupported),
+                    state: LinkState::Up,
+                };
+                (id, totals)
+            })
+            .collect(),
+    }))
+}
+
+#[test]
+fn settings_change_reaches_reducer() {
+    let mut rig = Rig::new(Vec::new(), 0);
+    let with_virtual = |show: bool| EngineSettings {
+        show_network_virtual: show,
+        show_network_wired: true,
+        ..EngineSettings::default()
+    };
+    rig.settings_tx
+        .send(with_virtual(false))
+        .expect("the root holds a receiver");
+    rig.start();
+    let (eno1, docker0) = (net_id("eno1", 2), net_id("docker0", 3));
+    rig.send(EngineMsg::Source(SourceUpdate::Devices(DeviceList {
+        t_ns: 100 * MS,
+        kinds: DeviceKinds::NETS,
+        entries: vec![
+            net_desc(eno1.clone(), NetKind::Wired),
+            net_desc(docker0.clone(), NetKind::Virtual),
+        ],
+    })));
+    let agg_rx = |rig: &Rig| {
+        let snap = rig.latest();
+        let agg = snap
+            .devices
+            .find(&DeviceIdentity::Aggregate(AggregateKind::Nets))
+            .expect("the net aggregate exists")
+            .idx;
+        snap.series
+            .get(SeriesId {
+                device: agg,
+                metric: MetricId::NET_RX,
+            })
+            .expect("NET_RX exists")
+            .samples
+            .last()
+            .expect("a sample")
+            .value
+    };
+
+    rig.send(net_msg(
+        200 * MS,
+        vec![(eno1.clone(), 5000.0), (docker0.clone(), 700.0)],
+    ));
+    assert_eq!(agg_rx(&rig), 5000.0, "virtual interfaces hidden");
+
+    rig.settings_tx
+        .send(with_virtual(true))
+        .expect("the root holds a receiver");
+    rig.send(net_msg(300 * MS, vec![(eno1, 5000.0), (docker0, 700.0)]));
+    assert_eq!(agg_rx(&rig), 5700.0, "the new settings reached the reducer");
     rig.stop();
 }
