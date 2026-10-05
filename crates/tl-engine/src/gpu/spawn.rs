@@ -244,23 +244,47 @@ mod tests {
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
 
-        // The probe opens nothing before the first Hello, and `spawn` returns after exec.
+        // `spawn` returns after exec, so any fd the test process held without CLOEXEC is in
+        // the child now. At startup the probe copies fd 3 with `pidfd_open` and `pidfd_getfd`
+        // (`open_fd` in tl-gpu-probe): the copy stays and the pidfd is closed at once. So an
+        // extra fd is fine when it is the same socket as fd 3, and a pidfd is waited out.
         let pid = child.child.id();
-        let fds: BTreeSet<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_str().unwrap().parse().unwrap())
-            .collect();
-        let expected = BTreeSet::from([0, 1, 2, 3]);
-        if fds != expected {
-            let extra: Vec<String> = fds
-                .difference(&expected)
-                .map(|&fd| describe_leaked_fd(pid, fd))
+        let target = |fd: i32| {
+            std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
+                .map(|t| t.to_string_lossy().into_owned())
+                .ok()
+        };
+        let socket = target(CHILD_FD).expect("probe has fd 3");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let fds: BTreeSet<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_str().unwrap().parse().unwrap())
                 .collect();
-            panic!(
-                "probe fds {fds:?}, expected {expected:?}; extra fds (a parallel test opened \
-                 these without CLOEXEC):\n{}",
-                extra.join("\n")
-            );
+            assert!(fds.is_superset(&BTreeSet::from([0, 1, 2, 3])), "{fds:?}");
+            let extra: Vec<i32> = fds
+                .into_iter()
+                .filter(|&fd| fd > CHILD_FD)
+                .filter(|&fd| target(fd).is_some_and(|t| t != socket))
+                .collect();
+            if extra.is_empty() {
+                break;
+            }
+            let only_pidfd = extra
+                .iter()
+                .all(|&fd| target(fd).as_deref() == Some("anon_inode:[pidfd]"));
+            if !only_pidfd || Instant::now() >= deadline {
+                let lines: Vec<String> = extra
+                    .iter()
+                    .map(|&fd| describe_leaked_fd(pid, fd))
+                    .collect();
+                panic!(
+                    "probe has fds that are not 0 to 2 or its own socket {socket}; a test opened \
+                     these without CLOEXEC:\n{}",
+                    lines.join("\n")
+                );
+            }
+            std::thread::sleep(Duration::from_millis(2));
         }
     }
 
