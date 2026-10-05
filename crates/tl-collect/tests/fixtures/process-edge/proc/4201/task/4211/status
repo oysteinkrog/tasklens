@@ -1,0 +1,19 @@
+Name:	DOM Worker
+Umask:	0022
+State:	S (sleeping)
+Tgid:	4201
+Ngid:	0
+Pid:	4211
+PPid:	4100
+TracerPid:	0
+Uid:	1000	1000	1000	1000
+Gid:	1000	1000	1000	1000
+FDSize:	256
+Groups:	10 998 1000 
+Threads:	27
+Cpus_allowed:	000f00
+Cpus_allowed_list:	8-11
+Mems_allowed:	00000000,00000001
+Mems_allowed_list:	0
+voluntary_ctxt_switches:	5120
+nonvoluntary_ctxt_switches:	77
