@@ -56,6 +56,40 @@ pub fn processes_period(d: &Demand, s: &EngineSettings) -> Option<Duration> {
     })
 }
 
+/// The status-only columns (R-286): with one shown, `status` is read for every pid.
+const STATUS_COLUMNS: [ColumnId; 4] = [
+    ColumnId::Swap,
+    ColumnId::WsPeak,
+    ColumnId::VsizePeak,
+    ColumnId::Affinity,
+];
+
+/// The optional per-process reads of a sweep, from the demand and settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SweepWants {
+    /// The Handles column: one directory read per process.
+    pub fd_count: bool,
+    /// A status-only column or the affinity dialog: `status` for every pid (R-286).
+    pub status_fields: bool,
+    /// An I/O or disk column, or history recording: `io` for every pid (R-286).
+    pub io: bool,
+}
+
+/// The reads `period` turns on for the next sweep.
+pub fn sweep_wants(d: &Demand, s: &EngineSettings) -> SweepWants {
+    let columns = &d.process_columns;
+    SweepWants {
+        fd_count: columns.contains(ColumnId::Handles),
+        status_fields: STATUS_COLUMNS.iter().any(|&c| columns.contains(c))
+            || !d.affinity_targets.is_empty(),
+        io: columns
+            .iter()
+            .any(|c| (ColumnId::Disk..=ColumnId::IoWriteOps).contains(&c))
+            || d.recording
+            || s.history.enabled,
+    }
+}
+
 pub struct ProcessesSource {
     sampler: ProcessSampler,
     /// Reused every sweep.
@@ -63,9 +97,8 @@ pub struct ProcessesSource {
     ctx: SweepCtx,
     protect: ProtectInputs,
     cfg: Arc<EngineConfig>,
-    /// Set by `period` from the Handles column: open fd counts cost one directory read per
-    /// process, so they are read only while the column is shown.
-    want_fd_count: Cell<bool>,
+    /// Set by `period`: the optional reads run only while something shows them.
+    wants: Cell<SweepWants>,
 }
 
 impl ProcessesSource {
@@ -101,9 +134,8 @@ impl ProcessesSource {
             ticks_per_sec: rustix::param::clock_ticks_per_second(),
             online_cpus: 1,
             want_fd_count: false,
-            // Until the worker passes the demand (dwy.4): status staggered, io always (R-286).
             want_status_fields: false,
-            want_io: true,
+            want_io: false,
         };
         let protect = ProtectInputs {
             self_pids: smallvec![
@@ -121,7 +153,7 @@ impl ProcessesSource {
             ctx,
             protect,
             cfg,
-            want_fd_count: Cell::new(false),
+            wants: Cell::new(SweepWants::default()),
         })
     }
 
@@ -157,14 +189,16 @@ impl Source for ProcessesSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
-        self.want_fd_count
-            .set(d.process_columns.contains(ColumnId::Handles));
+        self.wants.set(sweep_wants(d, s));
         processes_period(d, s)
     }
 
     fn sample(mut self) -> (Self, SourceUpdate) {
         self.ctx.online_cpus = self.read_online_cpus();
-        self.ctx.want_fd_count = self.want_fd_count.get();
+        let wants = self.wants.get();
+        self.ctx.want_fd_count = wants.fd_count;
+        self.ctx.want_status_fields = wants.status_fields;
+        self.ctx.want_io = wants.io;
         let inputs = SweepInputs {
             protect: &self.protect,
             // PSS and USS for detail keys come from the ProcessDetail worker (E10-A2).
@@ -328,6 +362,43 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(processes_period(&details, &s), Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn wants_follow_columns_and_recording() {
+        let s = settings(1000);
+        assert_eq!(sweep_wants(&Demand::default(), &s), SweepWants::default());
+
+        let mut d = Demand::default();
+        d.process_columns.insert(ColumnId::Handles);
+        d.process_columns.insert(ColumnId::WsPeak);
+        d.process_columns.insert(ColumnId::DiskReadRate);
+        let w = sweep_wants(&d, &s);
+        assert!(w.fd_count && w.status_fields && w.io, "{w:?}");
+
+        let mut d = Demand::default();
+        d.process_columns.insert(ColumnId::Memory);
+        d.process_columns.insert(ColumnId::Cpu);
+        assert_eq!(sweep_wants(&d, &s), SweepWants::default());
+
+        let affinity = Demand {
+            affinity_targets: Arc::from(vec![ProcessKey {
+                boot_id: BootId(1),
+                pid: 1,
+                start_ticks: 1,
+            }]),
+            ..Demand::default()
+        };
+        assert!(sweep_wants(&affinity, &s).status_fields);
+
+        let recording = Demand {
+            recording: true,
+            ..Demand::default()
+        };
+        assert!(sweep_wants(&recording, &s).io);
+        let mut history = settings(1000);
+        history.history.enabled = true;
+        assert!(sweep_wants(&Demand::default(), &history).io);
     }
 
     #[test]
