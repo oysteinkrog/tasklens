@@ -21,6 +21,11 @@ insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }   # E05 chain edit (R-142 item 18)
+criterion = { workspace = true }   # E05 chain edit (R-142 item 18)
+
+[[bench]]
+name = "sweep"
+harness = false
 
 [lints]
 workspace = true

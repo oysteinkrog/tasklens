@@ -2294,3 +2294,43 @@ fn sweep_pss_for_detail_keys() {
     assert!(out.coverage.has_pss_uss(&key));
     assert_eq!(out.coverage.pss_uss.len(), 1);
 }
+
+// ---- Sweep gate (E05-023) ----
+
+#[path = "common/scaled_root.rs"]
+mod scaled_root;
+
+/// The ADR-016 gate: the median of 50 steady sweeps of the 2,000-process root is at most 15 ms.
+/// Owner machine, release build only:
+/// `cargo test -p tl-collect --release --test fixture_process sweep_2000_under_gate -- --ignored`.
+#[test]
+#[ignore = "perf gate: owner machine, release build"]
+fn sweep_2000_under_gate() {
+    const GATE: std::time::Duration = std::time::Duration::from_millis(15);
+    let mut scaled = scaled_root::scaled();
+    let mut times: Vec<std::time::Duration> = (0..50)
+        .map(|_| {
+            let t = std::time::Instant::now();
+            scaled.sweep(false);
+            t.elapsed()
+        })
+        .collect();
+    assert_eq!(scaled.out.records.len(), scaled_root::SCALED_PIDS);
+    times.sort_unstable();
+    let median = times[times.len() / 2];
+    assert!(
+        median <= GATE,
+        "median steady sweep {median:?} over the {GATE:?} gate (min {:?}, max {:?})",
+        times[0],
+        times[times.len() - 1]
+    );
+}
+
+#[test]
+fn scaled_root_has_2000_pid_dirs() {
+    let dir = tempfile::Builder::new()
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("tempdir");
+    // Asserts the count itself.
+    scaled_root::build_scaled_root(dir.path());
+}
