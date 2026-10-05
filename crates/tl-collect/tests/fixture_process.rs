@@ -1631,7 +1631,7 @@ fn fixture_fds() -> Vec<FdInfo> {
         &mut ReadBufs::default(),
         &mut out,
     );
-    assert_eq!(r.unwrap(), DetailRead::Ok);
+    assert_eq!(r.expect("read fixture fds"), DetailRead::Ok);
     out
 }
 
