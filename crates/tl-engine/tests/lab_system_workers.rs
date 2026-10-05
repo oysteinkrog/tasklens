@@ -33,7 +33,7 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
-use tl_model::system::{Metric, SensorKind, SensorReading, ZramTotals};
+use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading, ZramTotals};
 use tl_model::validity::Validity;
 
 const SEC: u64 = 1_000_000_000;
@@ -797,7 +797,7 @@ fn sensors_fans_fixture() {
     assert_eq!(fan1.kind, SensorKind::Fan);
     assert_eq!(fan1.value, Metric::valid(1200.0));
     assert_eq!(fan1.pwm_pct, Metric::valid(50.19608));
-    assert_eq!(fan1.fan_control, None);
+    assert_eq!(fan1.fan_control, Some(FanControlMode::Automatic));
     assert!(fan1.fan_connected);
     // Every reading's identity is in the device list (same identity rule as enumerate).
     for (id, _) in &s.readings {
@@ -913,4 +913,40 @@ fn sensors_listed_once_in_full_mode() {
         .map(|spec| spec.id)
         .collect();
     assert_eq!(ids.iter().filter(|id| **id == SourceId::Sensors).count(), 1);
+}
+
+#[test]
+fn sensors_fan_control_mode() {
+    let dir = fixture_copy("fans", None);
+    let (_, s) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(
+        reading(&s, &fan("nct6797", 1)).fan_control,
+        Some(FanControlMode::Automatic)
+    );
+    assert_eq!(reading(&s, &fan("nct6797", 2)).fan_control, None);
+    for (id, r) in &s.readings {
+        if r.kind == SensorKind::Temperature {
+            assert_eq!(r.fan_control, None, "{id:?}");
+        }
+    }
+}
+
+/// Writes only the fixture copy under the target tmpdir, never a real hwmon file.
+#[test]
+fn sensors_fan_control_changes() {
+    let dir = fixture_copy("fans", None);
+    let enable = hwmon_dir(&dir, 0).join("pwm1_enable");
+    let fan1 = fan("nct6797", 1);
+    let (src, _) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+
+    fs::write(&enable, "1\n").expect("write fixture pwm1_enable");
+    let (src, s) = sensors_sample(src, 2 * SEC);
+    assert_eq!(reading(&s, &fan1).fan_control, Some(FanControlMode::Manual));
+
+    fs::write(&enable, "0\n").expect("write fixture pwm1_enable");
+    let (_, s) = sensors_sample(src, 3 * SEC);
+    assert_eq!(
+        reading(&s, &fan1).fan_control,
+        Some(FanControlMode::FullSpeed)
+    );
 }

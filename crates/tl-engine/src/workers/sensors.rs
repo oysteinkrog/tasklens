@@ -17,13 +17,14 @@ use asupersync::{Cx, Outcome};
 use rustc_hash::FxHashSet;
 use tl_collect::SysRoot;
 use tl_collect::counters::{Clock, Measured};
+use tl_collect::parse::hwmon::FanControl;
 use tl_collect::sample::sensors::{FanReading, SensorsReading, SensorsSampler, TempReading};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::EngineSettings;
-use tl_model::system::{Metric, SensorKind, SensorReading};
+use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading};
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
@@ -184,7 +185,7 @@ fn temp_reading(t: &TempReading) -> (DeviceIdentity, SensorReading) {
     (identity, reading)
 }
 
-/// `fan_control` is filled by E12-030.
+/// `fan_control` is `None` when `pwm<n>_enable` is missing or unreadable (R-139).
 fn fan_reading(f: &FanReading, connected: bool) -> SensorReading {
     SensorReading {
         device: DeviceIdx(0),
@@ -194,8 +195,16 @@ fn fan_reading(f: &FanReading, connected: bool) -> SensorReading {
             validity: f.rpm.validity,
         },
         pwm_pct: metric(f.pwm_pct),
-        fan_control: None,
+        fan_control: (f.control.validity == Validity::Valid).then(|| control_mode(f.control.value)),
         fan_connected: connected,
+    }
+}
+
+fn control_mode(c: FanControl) -> FanControlMode {
+    match c {
+        FanControl::FullSpeed => FanControlMode::FullSpeed,
+        FanControl::Manual => FanControlMode::Manual,
+        FanControl::Automatic => FanControlMode::Automatic,
     }
 }
 
