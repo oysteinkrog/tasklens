@@ -1044,3 +1044,268 @@ fn meta_comm_falls_back_to_stat() {
     assert_eq!(meta.cgroup, None);
     assert!(!meta.cgroup_denied);
 }
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use tl_collect::proc::fdcount::fd_count_fallbacks;
+use tl_collect::proc::sweep::{IoState, SweepCore, SweepCtx, SweptProc};
+use tl_model::validity::{ProcessField, Validity};
+
+/// A settable clock for `SweepCore::with_clock`, one per test so parallel tests do not share it.
+macro_rules! sweep_clock {
+    ($name:ident) => {
+        mod $name {
+            use super::*;
+            static BOOT: AtomicU64 = AtomicU64::new(0);
+            static MONO: AtomicU64 = AtomicU64::new(0);
+            pub fn now() -> (u64, u64) {
+                (BOOT.load(Ordering::SeqCst), MONO.load(Ordering::SeqCst))
+            }
+            pub fn set(boot_ns: u64, mono_ns: u64) {
+                BOOT.store(boot_ns, Ordering::SeqCst);
+                MONO.store(mono_ns, Ordering::SeqCst);
+            }
+        }
+    };
+}
+
+const SEC: u64 = 1_000_000_000;
+
+fn sweep_ctx(want_fd_count: bool) -> SweepCtx {
+    SweepCtx {
+        boot_id: BootId(1),
+        self_uid: 1000,
+        ticks_per_sec: 100,
+        online_cpus: 32,
+        want_fd_count,
+    }
+}
+
+/// A proc root holding a copy of process-edge 4201 (stat, statm, status, io).
+fn sweep_root() -> (tempfile::TempDir, SysRoot) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proc/4201");
+    fs::create_dir_all(&dir).expect("create proc dir");
+    for name in ["stat", "statm", "status", "io"] {
+        let rel = format!("proc/4201/{name}");
+        fs::write(dir.join(name), fixture_bytes("process-edge", &rel)).expect("copy file");
+    }
+    let root = SysRoot::at(tmp.path());
+    (tmp, root)
+}
+
+/// Rewrites stat fields 14 (utime), 15 (stime) and 22 (start_ticks) of the 4201 copy.
+fn set_stat(root: &SysRoot, utime: u64, stime: u64, start_ticks: u64) {
+    let line = String::from_utf8(fixture_bytes("process-edge", "proc/4201/stat")).unwrap();
+    let close = line.rfind(')').unwrap();
+    let mut fields: Vec<String> = line[close + 2..]
+        .trim_end()
+        .split(' ')
+        .map(str::to_owned)
+        .collect();
+    // fields[0] is field 3.
+    fields[14 - 3] = utime.to_string();
+    fields[15 - 3] = stime.to_string();
+    fields[22 - 3] = start_ticks.to_string();
+    let new = format!("{} {}\n", &line[..=close], fields.join(" "));
+    fs::write(root.proc_path("4201/stat"), new).expect("write stat");
+}
+
+fn only(out: &[SweptProc]) -> &SweptProc {
+    assert_eq!(out.len(), 1, "one process expected");
+    &out[0]
+}
+
+sweep_clock!(cpu_rate_clock);
+
+#[test]
+fn sweep_cpu_rate_from_elapsed_time() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(cpu_rate_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    cpu_rate_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+
+    set_stat(&root, 8812 + 30, 1204 + 20, 351_220);
+    cpu_rate_clock::set(11 * SEC, 11 * SEC);
+    let (start, end) = core.sweep_core(&ctx, &mut out);
+    assert_eq!((start, end), (11 * SEC, 11 * SEC));
+
+    let p = only(&out);
+    assert_eq!(p.key.pid, 4201);
+    assert_eq!(p.key.start_ticks, 351_220);
+    assert!((p.cpu_pct - 1.5625).abs() < 0.001, "cpu_pct {}", p.cpu_pct);
+    assert!((p.cpu_relative_pct - 50.0).abs() < 0.001);
+    assert!((p.cpu_user_pct - 0.9375).abs() < 0.001);
+    assert!((p.cpu_kernel_pct - 0.625).abs() < 0.001);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::Valid);
+    // io did not change: a valid zero rate.
+    assert_eq!(p.io_read_bps, 0.0);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::IoWrite), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::Threads), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::Pss), Validity::WarmingUp);
+    assert_eq!(p.statm.resident, 61_234);
+}
+
+#[test]
+fn sweep_first_sample_warming_up() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    let p = only(&out);
+    assert_eq!(p.cpu_pct, 0.0);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+    assert!(matches!(p.io, IoState::Valid(io) if io.read_bytes == 31_571_968));
+
+    // reset_baselines makes the next sweep a first sample again.
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    assert_eq!(only(&out).validity.get(ProcessField::Cpu), Validity::Valid);
+    core.reset_baselines();
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    assert_eq!(
+        only(&out).validity.get(ProcessField::Cpu),
+        Validity::WarmingUp
+    );
+}
+
+sweep_clock!(reset_clock);
+
+#[test]
+fn sweep_counter_reset_warming_up() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(reset_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    reset_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+
+    set_stat(&root, 100, 1204, 351_220);
+    reset_clock::set(11 * SEC, 11 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.cpu_pct, 0.0);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+
+    set_stat(&root, 200, 1204, 351_220);
+    reset_clock::set(12 * SEC, 12 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::Valid);
+    assert!((p.cpu_relative_pct - 100.0).abs() < 0.001);
+}
+
+sweep_clock!(suspend_clock);
+
+/// ADR-008: a 5 s boottime gap with a 10 ms monotonic gap is a suspend and gives no rate.
+#[test]
+fn sweep_suspend_gap_no_rate() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(suspend_clock::now);
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    suspend_clock::set(10 * SEC, 10 * SEC);
+    core.sweep_core(&ctx, &mut out);
+
+    set_stat(&root, 8812 + 400, 1204, 351_220);
+    suspend_clock::set(15 * SEC, 10 * SEC + 10_000_000);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_eq!(p.cpu_pct, 0.0);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+}
+
+#[test]
+fn sweep_pid_reuse_new_key() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root.clone());
+    let ctx = sweep_ctx(false);
+    let mut out = Vec::new();
+
+    set_stat(&root, 8812, 1204, 351_220);
+    core.sweep_core(&ctx, &mut out);
+    let old = only(&out).key;
+    assert!(core.has_baseline(&old));
+
+    set_stat(&root, 10, 5, 900_000);
+    core.sweep_core(&ctx, &mut out);
+    let p = only(&out);
+    assert_ne!(p.key, old);
+    assert_eq!(p.key.start_ticks, 900_000);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::WarmingUp);
+    assert!(!core.has_baseline(&old));
+    assert!(core.has_baseline(&p.key));
+}
+
+#[test]
+fn sweep_vanished_pid_skipped() {
+    let (tmp, root) = sweep_root();
+    let proc_dir = tmp.path().join("proc");
+    // Gone before openat: a dangling entry. Gone before stat: an empty directory.
+    std::os::unix::fs::symlink(tmp.path().join("nowhere"), proc_dir.join("4299")).expect("symlink");
+    fs::create_dir(proc_dir.join("4298")).expect("create dir");
+    fs::create_dir(proc_dir.join("self")).expect("create dir");
+
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    assert_eq!(only(&out).key.pid, 4201);
+
+    // A missing proc directory gives an empty result.
+    let mut core = SweepCore::new(SysRoot::at(&tmp.path().join("missing")));
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    assert!(out.is_empty());
+}
+
+/// Security regression (ADR-016): an unreadable `io` gives Restricted, never a zero rate.
+#[test]
+fn sweep_io_restricted_not_zero() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let (_tmp, root) = sweep_root();
+    fs::set_permissions(root.proc_path("4201/io"), fs::Permissions::from_mode(0o000))
+        .expect("chmod");
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+    for _ in 0..2 {
+        core.sweep_core(&sweep_ctx(false), &mut out);
+        let p = only(&out);
+        assert_eq!(p.io, IoState::Restricted);
+        assert_eq!(p.validity.get(ProcessField::IoRead), Validity::Restricted);
+        assert_eq!(p.validity.get(ProcessField::IoWrite), Validity::Restricted);
+        assert_eq!(p.io_read_bps, 0.0);
+    }
+    assert_eq!(only(&out).validity.get(ProcessField::Cpu), Validity::Valid);
+}
+
+#[test]
+fn sweep_fd_count_only_when_wanted() {
+    let (_tmp, root) = sweep_root();
+    // An empty `fd` file has st_size 0, so a count would take the readdir fallback, which
+    // `fd_count_fallbacks` counts. No other test in this binary reads fd counts.
+    fs::write(root.proc_path("4201/fd"), b"").expect("write fd");
+    let mut core = SweepCore::new(root);
+    let mut out = Vec::new();
+
+    let before = fd_count_fallbacks();
+    core.sweep_core(&sweep_ctx(false), &mut out);
+    assert!(out.iter().all(|p| p.fd_count.is_none()));
+    assert_eq!(fd_count_fallbacks(), before, "fd was stat-ed");
+
+    core.sweep_core(&sweep_ctx(true), &mut out);
+    assert!(only(&out).fd_count.is_some());
+    assert_eq!(fd_count_fallbacks(), before + 1);
+}

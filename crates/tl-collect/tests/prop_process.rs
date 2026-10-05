@@ -141,3 +141,40 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn sweep_random_fake_root_never_panics(
+        procs in prop::collection::vec(
+            prop::collection::vec(prop::collection::vec(any::<u8>(), 0..=512), 4),
+            1..=20,
+        )
+    ) {
+        use tl_collect::SysRoot;
+        use tl_collect::proc::sweep::{SweepCore, SweepCtx};
+        use tl_model::time::BootId;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for (i, files) in procs.iter().enumerate() {
+            let dir = tmp.path().join(format!("proc/{}", 100 + i));
+            std::fs::create_dir_all(&dir).expect("create proc dir");
+            for (name, bytes) in ["stat", "statm", "status", "io"].iter().zip(files) {
+                std::fs::write(dir.join(name), bytes).expect("write file");
+            }
+        }
+        let ctx = SweepCtx {
+            boot_id: BootId(1),
+            self_uid: 1000,
+            ticks_per_sec: 100,
+            online_cpus: 4,
+            want_fd_count: true,
+        };
+        let mut core = SweepCore::new(SysRoot::at(tmp.path()));
+        let mut out = Vec::new();
+        core.sweep_core(&ctx, &mut out);
+        core.sweep_core(&ctx, &mut out);
+        prop_assert!(out.len() <= procs.len());
+    }
+}
