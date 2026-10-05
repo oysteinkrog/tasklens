@@ -30,6 +30,13 @@ pub struct CgroupDir {
 }
 
 impl CgroupDir {
+    /// Wraps a cgroup directory fd that the caller has already validated (R-281). Only tl-helper
+    /// may call this, after its own E29-003 validation of a cgroup of any uid. Every other
+    /// caller gets its `CgroupDir` from `open_validated`.
+    pub fn from_validated_fd(fd: OwnedFd) -> CgroupDir {
+        CgroupDir { fd }
+    }
+
     /// The directory fd, for `openat` of the cgroup's control files.
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         use std::os::fd::AsFd;
@@ -371,6 +378,20 @@ mod tests {
             parse_own_cgroup("1:name=systemd:/x\n"),
             Err(OpsError::Unsupported("cgroup v2 not mounted"))
         );
+    }
+
+    #[test]
+    fn from_validated_fd_keeps_the_fd() {
+        use std::os::fd::AsRawFd;
+        let fd = rustix::fs::open(
+            "/",
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open /");
+        let raw = fd.as_raw_fd();
+        let dir = CgroupDir::from_validated_fd(fd);
+        assert_eq!(dir.as_fd().as_raw_fd(), raw);
     }
 
     #[test]
