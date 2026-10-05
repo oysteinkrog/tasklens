@@ -17,6 +17,7 @@ use asupersync::lab::chaos::ChaosConfig;
 use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::{TimeSource, VirtualClock};
+use asupersync::types::{CancelKind, CancelReason};
 use smallvec::SmallVec;
 use tl_engine::bridge::{EngineHooks, HookCtx};
 use tl_engine::config::{EngineConfig, EngineMode};
@@ -758,4 +759,51 @@ fn end_to_end_engine_in_lab() {
 
     rig.finish();
     eprintln!("end_to_end_engine_in_lab: {:?} wall time", begin.elapsed());
+}
+
+// Shutdown (E09-A2) --------------------------------------------------------------------------
+
+/// What `Runtime::drain_root_region` does, in the lab: the root region gets
+/// `CancelKind::Shutdown`, and the drain is `Quiescent` when no task and no obligation is left
+/// (ADR-013 "shutdown drain is Quiescent").
+#[test]
+fn drain_is_quiescent_on_shutdown_cancel() {
+    let fake = FakeLab::with_config(LabConfig::new(42).max_steps(1_000_000));
+    let workers = fake_worker_set(vec![
+        (SourceId::Cpu, vec![Step::Ok], Duration::from_millis(100)),
+        (SourceId::Memory, vec![Step::Ok], Duration::from_secs(1)),
+    ]);
+    let mut rig = Rig::with_lab(fake, workers, 0);
+    rig.start();
+    rig.fake
+        .run_for(Duration::from_secs(2), Duration::from_millis(100));
+    assert!(rig.latest().sequence >= 1, "the engine publishes");
+    assert!(rig.fake.lab.state.live_task_count() > 1, "workers run");
+
+    let reason = CancelReason::new(CancelKind::Shutdown);
+    let (tasks, wakes) = rig
+        .fake
+        .lab
+        .state
+        .cancel_request(rig.fake.root, &reason, None)
+        .into_parts();
+    {
+        let mut scheduler = rig.fake.lab.scheduler.lock();
+        for (task, priority) in tasks {
+            scheduler.schedule_cancel(task, priority);
+        }
+    }
+    wakes.dispatch();
+    // The drain budget is 1 s (ADR-004).
+    rig.fake
+        .run_for(Duration::from_secs(1), Duration::from_millis(10));
+
+    assert!(rig.root_finished(), "engine_root returned");
+    assert_eq!(rig.fake.lab.state.live_task_count(), 0, "a task is left");
+    assert_eq!(
+        rig.fake.lab.state.pending_obligation_count(),
+        0,
+        "an obligation is left"
+    );
+    rig.fake.finish();
 }

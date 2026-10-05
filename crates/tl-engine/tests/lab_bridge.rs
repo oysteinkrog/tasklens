@@ -6,6 +6,7 @@
 #[path = "fake_sources.rs"]
 mod fake_sources;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -15,7 +16,7 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::supervision::ManagedGeneration;
 use tl_collect::sysroot::SysRoot;
-use tl_engine::bridge::{Engine, EngineHooks, HookCtx};
+use tl_engine::bridge::{DRAIN_BUDGET, Engine, EngineHooks, HookCtx, TEARDOWN_BUDGET};
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::reducer::{ActionGate, AdmissionView, Publisher};
 use tl_engine::session::engine_root;
@@ -297,21 +298,6 @@ fn start_with_fake_workers_publishes() {
     drop(rt);
 }
 
-/// Threads of this process, from `/proc/self/task`.
-fn thread_count() -> usize {
-    std::fs::read_dir("/proc/self/task").map_or(0, |dir| dir.count())
-}
-
-/// The names of this process's threads, for the leak log.
-fn thread_names() -> Vec<String> {
-    let Ok(dir) = std::fs::read_dir("/proc/self/task") else {
-        return Vec::new();
-    };
-    dir.filter_map(|entry| std::fs::read_to_string(entry.ok()?.path().join("comm")).ok())
-        .map(|name| name.trim_end().to_string())
-        .collect()
-}
-
 /// Header rows have neither a record nor a group row (`lab_table.rs::header_counts`).
 fn header_rows(snap: &Snapshot) -> usize {
     snap.table
@@ -327,7 +313,6 @@ fn header_rows(snap: &Snapshot) -> usize {
 /// memory worker and the table query instead.
 #[test]
 fn end_to_end_engine_real_runtime() {
-    let threads_before = thread_count();
     let handle =
         Engine::start(fixture_config(EngineMode::Full), EngineHooks::default()).expect("starts");
     let wake = handle.wake();
@@ -388,17 +373,132 @@ fn end_to_end_engine_real_runtime() {
     );
 
     drop(wake);
-    drop(handle);
-    // Soft check: other tests of this binary start threads too. E09-A2 makes it hard.
-    let dropped = Instant::now();
-    while thread_count() > threads_before && dropped.elapsed() < Duration::from_secs(2) {
+    // A clean report means teardown joined the runtime's worker and blocking threads. Other
+    // tests of this binary start threads at the same time, and the logind worker leaves the
+    // process-wide zbus and async-io threads running, so the thread count is not checked.
+    let report = handle.shutdown(Duration::from_secs(2));
+    assert!(report.clean(), "{report:?}");
+}
+
+// Shutdown (E09-A2) --------------------------------------------------------------------------
+
+fn wall_cpu_spec() -> WorkerSpec {
+    WorkerSpec {
+        id: SourceId::Cpu,
+        name: "wall-cpu",
+        modes: &[EngineMode::Full],
+        factory: wall_cpu_factory,
+    }
+}
+
+/// Starts the engine with the fake `Cpu` worker and waits until its samples reach a snapshot.
+fn start_wall_cpu() -> tl_engine::EngineHandle {
+    let handle = Engine::start_with_workers(
+        fixture_config(EngineMode::Full),
+        EngineHooks::default(),
+        vec![wall_cpu_spec()],
+    )
+    .expect("engine starts");
+    let begin = Instant::now();
+    while handle.latest().sequence < 2 {
+        assert!(
+            begin.elapsed() < Duration::from_secs(5),
+            "no publish within 5 s"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
-    eprintln!(
-        "end_to_end_engine_real_runtime: {} threads before, {} after the drop ({:?}): {:?}",
-        threads_before,
-        thread_count(),
-        dropped.elapsed(),
-        thread_names()
+    handle
+}
+
+#[test]
+fn shutdown_clean_with_fake_workers() {
+    let handle = start_wall_cpu();
+    let report = handle.shutdown(Duration::from_secs(2));
+    assert!(report.drained, "{report:?}");
+    assert!(report.torn_down, "{report:?}");
+    assert!(report.clean());
+    assert!(
+        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
+        "{report:?}"
     );
+}
+
+/// Set when `BlockedCpu::sample` starts. Only `shutdown_times_out_on_blocked_job` reads it.
+static BLOCKED_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// A CPU worker whose first sample blocks its blocking-pool thread for 3 s.
+struct BlockedCpu;
+
+impl Source for BlockedCpu {
+    fn id(&self) -> SourceId {
+        SourceId::Cpu
+    }
+
+    fn period(&self, _: &Demand, _: &EngineSettings) -> Option<Duration> {
+        Some(Duration::from_millis(100))
+    }
+
+    fn sample(self) -> (Self, SourceUpdate) {
+        BLOCKED_STARTED.store(true, Ordering::Release);
+        std::thread::sleep(Duration::from_secs(3));
+        let update = SourceUpdate::Cpu(cpu_sample(now_boot_ns()));
+        (self, update)
+    }
+}
+
+fn blocked_cpu_factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let io = io.clone();
+        async move { tl_engine::source::run(cx, io, BlockedCpu).await }
+    })
+}
+
+#[test]
+fn shutdown_times_out_on_blocked_job() {
+    let handle = Engine::start_with_workers(
+        fixture_config(EngineMode::Full),
+        EngineHooks::default(),
+        vec![WorkerSpec {
+            id: SourceId::Cpu,
+            name: "blocked-cpu",
+            modes: &[EngineMode::Full],
+            factory: blocked_cpu_factory,
+        }],
+    )
+    .expect("engine starts");
+    let begin = Instant::now();
+    while !BLOCKED_STARTED.load(Ordering::Acquire) {
+        assert!(
+            begin.elapsed() < Duration::from_secs(5),
+            "the blocking job did not start within 5 s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let report = handle.shutdown(Duration::from_secs(2));
+    // The job is not interrupted. Teardown goes on in the background and the process would
+    // exit anyway.
+    assert!(!report.torn_down, "{report:?}");
+    assert!(!report.clean());
+    assert!(report.elapsed < Duration::from_millis(1600), "{report:?}");
+}
+
+#[test]
+fn shutdown_not_torn_down_with_live_clone() {
+    let handle = start_wall_cpu();
+    let clone = handle.clone();
+    let report = handle.shutdown(Duration::from_secs(2));
+    // The clone still holds `Inner` and with it a `RuntimeHandle` (API notes section 8).
+    assert!(!report.torn_down, "{report:?}");
+    assert!(
+        report.elapsed < DRAIN_BUDGET + TEARDOWN_BUDGET,
+        "{report:?}"
+    );
+    // The clone sees the stopped engine.
+    assert_eq!(
+        clone.send(Command::ResetBaselines),
+        Err(CommandError::EngineStopped)
+    );
+    assert!(clone.action_events().is_closed());
+    // Dropping the clone lets the background teardown finish.
+    drop(clone);
 }
