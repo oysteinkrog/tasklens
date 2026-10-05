@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tl_model::ids::GroupKey;
 use tl_model::process::GroupKind;
 
-use crate::proc::cgroup::{CgroupPath, UserPlacement, placement};
+use crate::apps::cgroup_app::parse_app_unit;
+use crate::proc::cgroup::{CgroupPath, UserPlacement, app_slice_unit, placement};
 
 // ---- Classification (E05-015) ----
 
@@ -81,9 +82,13 @@ pub fn classify(inp: &ClassifyInput<'_>, self_uid: u32) -> (ProcClass, GroupKind
         );
     }
     // Rule 6: a process with a KWin window (`owns_window`) in an app.slice unit becomes an App
-    // under the unit's app id. That id comes from the unit name parser (E05-011,
-    // tasklens-yms.14), which does not exist yet, and `owns_window` is false in P1. Until then
-    // such a process stays Background, the rule's fallback for a unit that does not parse.
+    // under the app id parsed from the unit name (E05-011). A unit that does not parse stays
+    // Background. `owns_window` is always false in P1.
+    if inp.owns_window
+        && let Some(id) = app_slice_unit(cgroup, self_uid).and_then(parse_app_unit)
+    {
+        return (ProcClass::App, GroupKind::App { app_id: id.app_id });
+    }
     (ProcClass::Background, GroupKind::Background)
 }
 

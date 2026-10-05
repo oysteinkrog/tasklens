@@ -785,6 +785,50 @@ fn classify_autostart_without_window_is_background() {
 }
 
 #[test]
+fn classify_window_in_app_slice_unit_is_app() {
+    let with_window = |path: &str| {
+        let cg = cgroup(path);
+        let inp = ClassifyInput {
+            owns_window: true,
+            ..class_input(Some(&cg), None)
+        };
+        classify(&inp, SELF_UID)
+    };
+    let base = "user.slice/user-1000.slice/user@1000.service/app.slice/";
+    for (unit, app_id) in [
+        ("app-foo@autostart.service", "foo"),
+        ("app-chrome\\x2dwork@00bca6.service/sub", "chrome-work"),
+        (
+            "app-gnome-org.gnome.Nautilus-777.scope",
+            "gnome-org.gnome.Nautilus",
+        ),
+    ] {
+        assert_eq!(
+            with_window(&format!("{base}{unit}")),
+            (
+                ProcClass::App,
+                GroupKind::App {
+                    app_id: Arc::from(app_id)
+                }
+            ),
+            "{unit}"
+        );
+    }
+    // A unit that does not parse, or a window outside app.slice, stays Background.
+    for path in [
+        format!("{base}dconf.service"),
+        format!("{base}app-x.slice/app-y.scope"),
+        "user.slice/user-1000.slice/session-2.scope".to_owned(),
+    ] {
+        assert_eq!(
+            with_window(&path),
+            (ProcClass::Background, GroupKind::Background),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn classify_unreadable_cgroup_ungrouped() {
     let cg = cgroup("user.slice/user-1000.slice/session-2.scope");
     let denied = ClassifyInput {
