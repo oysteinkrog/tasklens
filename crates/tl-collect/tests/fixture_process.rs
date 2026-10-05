@@ -1772,3 +1772,177 @@ fn fd_live_socket() {
     assert!(row.fdinfo_ok);
     assert!(out.windows(2).all(|w| w[0].fd < w[1].fd));
 }
+
+// ---- E05-027: memory maps ----
+
+use tl_collect::proc::detail::{MapNodeInfo, MapRegionInfo, group_maps, parse_maps, read_maps};
+
+const MAPS_GROUPING: &[u8] = b"\
+555555554000-555555556000 r--p 00000000 08:01 1001                       /usr/bin/foo
+555555556000-55555555a000 r-xp 00002000 08:01 1001                       /usr/bin/foo
+55555555a000-55555557b000 rw-p 00000000 00:00 0                          [heap]
+7f0000000000-7f0000021000 rw-p 00000000 00:00 0
+7f0000100000-7f0000101000 rw-s 00000000 00:01 2002                       /memfd:x (deleted)
+7f0000200000-7f0000228000 r--p 00000000 08:01 3003                       /usr/lib/libc.so.6
+7f0000228000-7f00003bd000 r-xp 00028000 08:01 3003                       /usr/lib/libc.so.6
+7f00003bd000-7f0000415000 r--p 001bd000 08:01 3003                       /usr/lib/libc.so.6
+7ffd00000000-7ffd00021000 rw-p 00000000 00:00 0                          [stack]
+";
+
+fn grouped(buf: &[u8], exe: Option<&str>) -> (Vec<MapRegionInfo>, Vec<MapNodeInfo>) {
+    let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+    parse_maps(buf, &mut regions).expect("parse maps");
+    group_maps(&mut regions, exe, None, &mut nodes);
+    (regions, nodes)
+}
+
+fn region_sum(regions: &[MapRegionInfo], node: &MapNodeInfo) -> u64 {
+    regions[node.regions.start as usize..node.regions.end as usize]
+        .iter()
+        .map(|r| r.end - r.start)
+        .sum()
+}
+
+#[test]
+fn maps_nodes_grouped_and_ordered() {
+    let (regions, nodes) = grouped(MAPS_GROUPING, Some("/usr/bin/foo"));
+    let names: Vec<&str> = nodes.iter().map(|n| &*n.name).collect();
+    assert_eq!(
+        names,
+        ["foo (Primary)", "libc.so.6", "Outside loaded modules"]
+    );
+    assert!(nodes[0].primary && !nodes[0].outside && !nodes[0].shared_object);
+    assert!(!nodes[1].primary && nodes[1].shared_object);
+    assert!(nodes[2].outside && nodes[2].path.is_none());
+    assert_eq!(
+        nodes.iter().map(|n| n.regions.len()).collect::<Vec<_>>(),
+        [2, 3, 4]
+    );
+    assert_eq!(nodes[0].size, 0x6000);
+    assert_eq!(nodes[1].size, 0x215000);
+    assert_eq!(nodes[2].size, 0x21000 + 0x21000 + 0x1000 + 0x21000);
+    for node in &nodes {
+        assert_eq!(node.size, region_sum(&regions, node), "{}", node.name);
+        assert_eq!(node.base, regions[node.regions.start as usize].start);
+        assert_eq!(node.rss, None);
+    }
+    assert_eq!(nodes[0].base, 0x5555_5555_4000);
+    assert_eq!(&nodes[0].perms, b"r--p");
+    assert_eq!(nodes[1].offset, 0);
+    assert_eq!(
+        nodes.last().map(|n| n.regions.end as usize),
+        Some(regions.len())
+    );
+}
+
+#[test]
+fn maps_primary_deleted_exe() {
+    let buf = b"555555554000-555555556000 r-xp 00000000 08:01 1001 /usr/bin/foo (deleted)\n";
+    let (_, nodes) = grouped(buf, Some("/usr/bin/foo"));
+    assert_eq!(&*nodes[0].name, "foo (Primary)");
+    assert!(nodes[0].primary);
+}
+
+#[test]
+fn maps_path_with_spaces() {
+    let buf = b"7f0000000000-7f0000001000 r-xp 00000000 08:01 42      /opt/My App/libx.so\n";
+    let mut regions = Vec::new();
+    parse_maps(buf, &mut regions).expect("parse maps");
+    assert_eq!(regions.len(), 1);
+    assert_eq!(regions[0].path.as_deref(), Some("/opt/My App/libx.so"));
+    assert_eq!(regions[0].inode, 42);
+    assert_eq!(&regions[0].perms, b"r-xp");
+}
+
+#[test]
+fn maps_wine_dll_shared_object() {
+    let buf = b"\
+7f0000000000-7f0000010000 r--p 00000000 08:01 7 /home/u/.wine/drive_c/windows/system32/kernel32.dll
+7f0000010000-7f0000020000 r--p 00000000 08:01 8 /home/u/.wine/drive_c/Game/GAME.EXE
+7f0000020000-7f0000030000 r--p 00000000 08:01 9 /home/u/data.bin
+";
+    let (_, nodes) = grouped(buf, None);
+    assert_eq!(&*nodes[0].name, "kernel32.dll");
+    assert!(nodes[0].shared_object);
+    assert!(nodes[1].shared_object);
+    assert!(!nodes[2].shared_object);
+}
+
+#[test]
+fn maps_bad_line_is_parse_error() {
+    let mut regions = Vec::new();
+    let err = parse_maps(b"7f00-7e00 r-xp 0 08:01 1 /x\n", &mut regions).unwrap_err();
+    assert!(matches!(err, CollectError::ProcParse { file: "maps", .. }));
+    let err = parse_maps(b"7f00-7f10 r-x 0 08:01 1\n", &mut regions).unwrap_err();
+    assert!(matches!(err, CollectError::ProcParse { file: "maps", .. }));
+}
+
+#[test]
+fn maps_rss_summed() {
+    let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+    let r = read_maps(
+        &SysRoot::at(&fixture_dir("process-edge")),
+        thread_key(FAKE_START_TICKS),
+        true,
+        &mut ReadBufs::default(),
+        &mut regions,
+        &mut nodes,
+    );
+    assert_eq!(r.expect("read fixture maps"), DetailRead::Ok);
+    let names: Vec<&str> = nodes.iter().map(|n| &*n.name).collect();
+    assert_eq!(names, ["libexample.so.1", "Outside loaded modules"]);
+    assert_eq!(nodes[0].rss, Some(2560 * 1024));
+    assert_eq!(nodes[1].rss, Some((1024 + 512) * 1024));
+    for node in &nodes {
+        let sum: u64 = regions[node.regions.start as usize..node.regions.end as usize]
+            .iter()
+            .map(|r| r.rss.expect("region rss"))
+            .sum();
+        assert_eq!(node.rss, Some(sum), "{}", node.name);
+    }
+
+    read_maps(
+        &SysRoot::at(&fixture_dir("process-edge")),
+        thread_key(FAKE_START_TICKS),
+        false,
+        &mut ReadBufs::default(),
+        &mut regions,
+        &mut nodes,
+    )
+    .expect("read fixture maps");
+    assert!(nodes.iter().all(|n| n.rss.is_none()));
+    assert!(regions.iter().all(|r| r.rss.is_none()));
+}
+
+#[test]
+fn maps_wrong_start_ticks_gone() {
+    let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+    let r = read_maps(
+        &SysRoot::at(&fixture_dir("process-edge")),
+        thread_key(FAKE_START_TICKS + 1),
+        false,
+        &mut ReadBufs::default(),
+        &mut regions,
+        &mut nodes,
+    );
+    assert_eq!(r.expect("read"), DetailRead::Gone);
+    assert!(regions.is_empty() && nodes.is_empty());
+}
+
+#[test]
+fn maps_live_self_has_primary() {
+    let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+    let r = read_maps(
+        &SysRoot::host(),
+        own_key(),
+        true,
+        &mut ReadBufs::default(),
+        &mut regions,
+        &mut nodes,
+    );
+    assert_eq!(r.expect("read own maps"), DetailRead::Ok);
+    assert!(nodes[0].primary, "first node {}", nodes[0].name);
+    assert!(nodes.iter().filter(|n| n.primary).count() == 1);
+    assert!(nodes.iter().any(|n| n.shared_object));
+    assert!(nodes.iter().all(|n| n.rss.is_some()));
+}

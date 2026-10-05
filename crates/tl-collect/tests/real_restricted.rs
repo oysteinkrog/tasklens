@@ -183,3 +183,39 @@ fn fds_pid1_restricted() {
     assert_eq!(r.expect("read pid 1 fds"), DetailRead::Restricted);
     assert!(out.is_empty());
 }
+
+/// PROC-081: the memory maps of another user's process are Restricted without the helper
+/// (security regression).
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn maps_pid1_restricted() {
+    use tl_collect::SysRoot;
+    use tl_collect::proc::detail::{DetailRead, read_maps};
+    use tl_collect::proc::meta::ReadBufs;
+    use tl_collect::proc::pid_stat::read_start_ticks;
+    use tl_model::ids::ProcessKey;
+    use tl_model::time::BootId;
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let start_ticks = read_start_ticks(dir.as_fd(), &mut Vec::new()).expect("pid 1 start ticks");
+    let key = ProcessKey {
+        start_ticks,
+        boot_id: BootId(1),
+        pid: 1,
+    };
+    let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+    let r = read_maps(
+        &SysRoot::host(),
+        key,
+        true,
+        &mut ReadBufs::default(),
+        &mut regions,
+        &mut nodes,
+    );
+    assert_eq!(r.expect("read pid 1 maps"), DetailRead::Restricted);
+    assert!(regions.is_empty() && nodes.is_empty());
+}

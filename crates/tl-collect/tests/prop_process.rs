@@ -205,3 +205,25 @@ proptest! {
         prop_assert!(row.fdinfo_ok);
     }
 }
+
+proptest! {
+    #[test]
+    fn maps_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=8192)) {
+        use tl_collect::proc::detail::{group_maps, parse_maps};
+
+        let (mut regions, mut nodes) = (Vec::new(), Vec::new());
+        let _ = parse_maps(&bytes, &mut regions);
+        let n = regions.len();
+        group_maps(&mut regions, Some("/usr/bin/foo"), None, &mut nodes);
+        prop_assert_eq!(regions.len(), n);
+        prop_assert_eq!(nodes.last().map_or(0, |node| node.regions.end as usize), n);
+    }
+
+    #[test]
+    fn maps_mutated_fixture_never_panics(
+        bytes in mutated(fixture_bytes("process-edge", "proc/4201/maps"))
+    ) {
+        let mut out = Vec::new();
+        let _ = tl_collect::proc::detail::parse_maps(&bytes, &mut out);
+    }
+}
