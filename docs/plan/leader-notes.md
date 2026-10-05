@@ -149,3 +149,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - Store::will_rotate is true before the first append. Decide whether to fix in tl-history instead of guarding in callers.
 - iuz.1 real_other_user_process_permission_denied skips when root or CAP_SYS_NICE (so CI as root never runs it).
 - iuz.2 real_cgroup_session_scope_refused ran outside app.slice, so it hit NotOwner; the Protected path (own scope inside app.slice) was never exercised. Needs a test that runs from a real app scope.
+- iuz.3 real_write_atomic_in_xdg_config writes into the real ~/.config when XDG_CONFIG_HOME is unset. Check it only creates and removes its own uniquely named file. real_dump_as_root_writes_core has never run as root.
