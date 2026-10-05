@@ -108,6 +108,10 @@ fn real_socket_map_pid1_restricted() {
 
 #[test]
 #[ignore = "real system: walks /proc/<pid>/fd"]
+#[allow(
+    clippy::print_stdout,
+    reason = "the bead asks the test to print the walk time (U-23)"
+)]
 fn real_socket_map_timing() {
     let mut map = SocketMap::new();
     map.rebuild(&SysRoot::host(), BootId(0)).unwrap();
