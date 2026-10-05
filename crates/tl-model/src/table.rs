@@ -81,7 +81,7 @@ pub struct TableRow {
     pub group: Option<u32>,
     /// All descendants of the node, for the Tree-mode "PID +N" form (R-141 item 4).
     pub descendants: u32,
-    /// Descendants that match the filter. `None` when no filter is set (R-141 item 4).
+    /// Index into `ProcessTableView.subtree` (R-288).
     pub subtree: Option<u32>,
 }
 
@@ -131,6 +131,8 @@ pub struct ProcessTableView {
     pub rows: Arc<[TableRow]>,
     /// Aggregated values, with no double counting of descendants.
     pub groups: Arc<[GroupRow]>,
+    /// Subtree totals of parent process rows, indexed by `TableRow.subtree` (PROC-019, R-288).
+    pub subtree: Arc<[GroupRow]>,
     pub totals: TableTotals,
     /// Processes in the snapshot.
     pub total: u32,
