@@ -104,19 +104,22 @@ impl IconNamed for TlIcon {
     }
 }
 
-/// tasklens's own SVGs. `Tasklens` (the logo) is added by E15-022.
+/// tasklens's own SVGs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppIcon {
     /// The unlocked shield (APP-003, UI-FND-028). The locked state uses Lucide `shield`.
     ShieldUnlocked,
+    /// The app logo (UI-FND-003). A placeholder until E15-026 (D-014).
+    Logo,
 }
 
 impl AppIcon {
-    pub const ALL: [Self; 1] = [Self::ShieldUnlocked];
+    pub const ALL: [Self; 2] = [Self::ShieldUnlocked, Self::Logo];
 
     pub fn path_str(self) -> &'static str {
         match self {
             Self::ShieldUnlocked => "icons/tl/shield-unlocked.svg",
+            Self::Logo => "icons/tl/tasklens.svg",
         }
     }
 
@@ -125,6 +128,10 @@ impl AppIcon {
             Self::ShieldUnlocked => include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../assets/icons/shield-unlocked.svg"
+            )),
+            Self::Logo => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../assets/icons/tasklens.svg"
             )),
         }
     }
@@ -196,16 +203,27 @@ mod tests {
 
     #[test]
     fn asset_source_prefers_tasklens() {
-        let own = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/icons/shield-unlocked.svg"
-        ));
-        let loaded = TlAssets
-            .load("icons/tl/shield-unlocked.svg")
-            .unwrap()
-            .unwrap();
-        assert_eq!(&*loaded, own);
-        assert!(matches!(loaded, Cow::Borrowed(_)));
+        let own: [(&str, &[u8]); 2] = [
+            (
+                "icons/tl/shield-unlocked.svg",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/icons/shield-unlocked.svg"
+                )),
+            ),
+            (
+                "icons/tl/tasklens.svg",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../assets/icons/tasklens.svg"
+                )),
+            ),
+        ];
+        for (path, bytes) in own {
+            let loaded = TlAssets.load(path).unwrap().unwrap();
+            assert_eq!(&*loaded, bytes, "{path}");
+            assert!(matches!(loaded, Cow::Borrowed(_)));
+        }
 
         let kit = Assets.load("icons/chevron-down.svg").unwrap().unwrap();
         let loaded = TlAssets.load("icons/chevron-down.svg").unwrap().unwrap();
