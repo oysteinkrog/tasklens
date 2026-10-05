@@ -407,6 +407,9 @@ struct RawUnit {
     what: Arc<str>,
     /// The unit a timer starts, timers only.
     timer_unit: Arc<str>,
+    /// From the type interface; empty for kinds that are not read.
+    control_group: Arc<str>,
+    can_reload: bool,
 }
 
 impl RawUnit {
@@ -444,6 +447,8 @@ impl RawUnit {
             listen: first_field("Listen", 1),
             what: prop_str(typed, "What"),
             timer_unit: prop_str(typed, "Unit"),
+            control_group: prop_str(typed, "ControlGroup"),
+            can_reload: prop_bool(unit, "CanReload"),
         }
     }
 }
@@ -473,6 +478,10 @@ fn prop_u32(props: &Props, key: &str) -> u32 {
         Some(Value::U32(n)) => *n,
         _ => 0,
     }
+}
+
+fn prop_bool(props: &Props, key: &str) -> bool {
+    matches!(props.get(key).map(|v| unwrap(v)), Some(Value::Bool(true)))
 }
 
 fn prop_u64(props: &Props, key: &str) -> u64 {
@@ -564,6 +573,8 @@ fn record(manager: Manager, kind: UnitType, raw: &RawUnit, user: Arc<str>) -> Un
         unit_file: (!raw.fragment_path.is_empty()).then(|| Arc::clone(&raw.fragment_path)),
         active_since_us: (raw.active_enter_us != 0).then_some(raw.active_enter_us),
         triggered_by: Arc::clone(&raw.triggered_by),
+        control_group: (!raw.control_group.is_empty()).then(|| Arc::clone(&raw.control_group)),
+        can_reload: raw.can_reload,
         has_cgroup_procs: false,
         cgroup_pids: Arc::from([]),
         cpu_pct: missing(),
@@ -975,8 +986,13 @@ mod tests {
             ),
             ("ActiveEnterTimestamp", Value::U64(1_700_000_000_000_000)),
             ("TriggeredBy", Value::from(vec!["foo.socket"])),
+            ("CanReload", Value::Bool(true)),
         ]);
-        let raw = RawUnit::from_props("foo.service", &unit, &Props::new());
+        let typed = props(vec![(
+            "ControlGroup",
+            Value::from("/system.slice/foo.service"),
+        )]);
+        let raw = RawUnit::from_props("foo.service", &unit, &typed);
         let rec = record(Manager::System, UnitType::Service, &raw, "root".into());
         assert_eq!(rec.unit.name.as_ref(), "foo.service");
         assert_eq!(rec.unit.manager, Manager::System);
@@ -992,11 +1008,18 @@ mod tests {
         assert_eq!(rec.triggered_by.len(), 1);
         assert_eq!(&*rec.triggered_by[0], "foo.socket");
         assert_eq!(rec.cpu_pct.validity, Validity::Missing);
+        assert_eq!(
+            rec.control_group.as_deref(),
+            Some("/system.slice/foo.service")
+        );
+        assert!(rec.can_reload);
 
         let raw = RawUnit::from_props("bar.service", &Props::new(), &Props::new());
         let rec = record(Manager::User, UnitType::Service, &raw, "u".into());
         assert_eq!(rec.unit_file, None);
         assert_eq!(rec.active_since_us, None);
+        assert_eq!(rec.control_group, None);
+        assert!(!rec.can_reload);
     }
 
     #[test]
