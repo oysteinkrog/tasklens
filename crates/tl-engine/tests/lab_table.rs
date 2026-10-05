@@ -1,27 +1,17 @@
 //! Table builder tests (E09-014, ADR-013): flat mode (E09-009), tree mode (E09-010), grouped
-//! mode (E09-011), plus a 2,000-row timing smoke check and a determinism check.
+//! mode (E09-011), hide system processes (E09-012), plus a 2,000-row timing smoke check and a
+//! determinism check.
 //!
 //! The builder is pure (records in, rows out), so these tests need no runtime. Each test builds
 //! its records with `rec` and the `in_app`, `in_unit` and `kthread` helpers, then calls `build`.
 //! Records passed to `build` must be sorted by `ProcessKey`, as the reducer keeps them;
 //! `rec` sets `start_ticks = pid × 10`, so ascending PIDs are sorted.
 
-// The reducer module is not wired into lib.rs yet (its `mod` line comes with the E09 session
-// bead), so the table builder is compiled into this test crate. `crate::update` in table.rs
-// resolves to the shim below. Switch to `tl_engine::reducer::table` once the module is public.
-#[allow(dead_code)]
-#[path = "../src/reducer/table.rs"]
-mod table;
-
-mod update {
-    pub use tl_engine::update::CgroupStats;
-}
-
 use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
-use table::{GROUP_ORDER, TableInput};
+use tl_engine::reducer::table::{self, GROUP_ORDER, TableInput};
 use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::devices::DeviceCatalog;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey};
