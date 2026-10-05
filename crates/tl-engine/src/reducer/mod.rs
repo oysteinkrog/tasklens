@@ -8,6 +8,7 @@
 //! Privacy: never log record contents from here. Debug logs carry counts only (ADR-015).
 
 // Chain-edit lines added by later beads: apply (E09-007, 8q0.9); suspend (E09-008, 8q0.10).
+pub mod apply;
 pub mod devices;
 pub mod health;
 pub mod processes;
@@ -28,7 +29,7 @@ use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
 use tl_model::ids::ProcessKey;
-use tl_model::process::{Coverage, ProcFlags};
+use tl_model::process::ProcFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, InventorySnapshot,
@@ -40,7 +41,7 @@ use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
 use crate::source::WorkerControl;
-use crate::update::{EngineMsg, SourceUpdate};
+use crate::update::EngineMsg;
 
 pub use devices::InvariantViolation;
 
@@ -133,6 +134,11 @@ pub struct Reducer {
     pub events_tx: async_channel::Sender<ActionEvent>,
     /// `None` until E29-020 (qfx.23) sets it (R-148 item 1).
     pub helper_tx: Option<mpsc::Sender<HelperCommand>>,
+    /// The engine settings watch. `run` reads it once per publish; `None` uses
+    /// `EngineSettings::default()`.
+    pub settings_rx: Option<watch::Receiver<EngineSettings>>,
+    /// State only `apply` reads and writes (E09-007).
+    pub apply_state: apply::ApplyState,
     dirty: ComponentMask,
     /// Header version of each header component at the last publish, in `HEADER_BITS` order.
     published: [u64; HEADER_BITS.len()],
@@ -204,6 +210,8 @@ impl Reducer {
             action_gate: None,
             events_tx,
             helper_tx: None,
+            settings_rx: None,
+            apply_state: apply::ApplyState::default(),
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
         }
@@ -222,13 +230,17 @@ impl Reducer {
             let Ok(first) = rx.recv(cx).await else {
                 return Ok(());
             };
-            self.apply_msg(first)?;
+            let settings = self
+                .settings_rx
+                .as_ref()
+                .map_or_else(EngineSettings::default, watch::Receiver::borrow_and_clone);
+            self.apply(cx, first, &settings)?;
             let mut applied = 1;
             while applied < DRAIN_MAX {
                 let Ok(msg) = rx.try_recv() else {
                     break;
                 };
-                self.apply_msg(msg)?;
+                self.apply(cx, msg, &settings)?;
                 applied += 1;
             }
             tracing::debug!(target: "tasklens::engine", applied, "reducer publish");
@@ -242,24 +254,6 @@ impl Reducer {
     /// Marks a component as changed for the next publish. Called by apply.
     pub fn mark(&mut self, bit: ComponentMask) {
         self.dirty |= bit;
-    }
-
-    /// The apply step of `run`. At this anchor it handles a process sweep only, so the record
-    /// sink is called; every other message is dropped. E09 `apply.rs` (8q0.9) replaces this
-    /// with `Reducer::apply`, which has an arm for every message.
-    fn apply_msg(&mut self, msg: EngineMsg) -> Result<(), InvariantViolation> {
-        if let EngineMsg::Source(SourceUpdate::Processes(sweep)) = msg {
-            let observed = (sweep.observed_start, sweep.observed_end);
-            let interval_ms = EngineSettings::default().interval_ms;
-            let sink = self.record_sink.as_deref_mut();
-            self.processes
-                .apply_sweep(sweep, now_boot_ns(), interval_ms, sink);
-            if let Some(next) = self.processes.publish(Coverage::default(), observed) {
-                self.components.processes = next;
-            }
-            self.mark(ComponentMask::PROCESSES);
-        }
-        Ok(())
     }
 
     /// `sequence += 1`. Dirty components get a new version; every other component reuses its
