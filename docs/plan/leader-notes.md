@@ -167,3 +167,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yms.27 read_smaps has no size cap (buffer grows 64 KiB steps). A process with very many mappings could cost tens of MB per read. Decide a cap (the helper uses 4 MiB) in review.
 - yms.19 qualifier marks any process with a .exe argv token as Wine when no Flatpak or Snap unit; a native tool given a .exe argument gets Wine. Tighten by requiring a Wine loader exe (wine, wine64, wine64-preloader, wineserver children).
 - 8hz.11 dbus: zbus p2p dev feature for tests; DbusConn Drop aborts the tick task; error_name keeps a full fdo variant name list (update when zbus changes).
+- ROOT-RUN LIST for the validation phase (needs Oystein or sudo): tl-ops real_dump_as_root_writes_core (iuz.3); tl-helper dump_child_writes_elf and dump_restores_coredump_filter with a real gdb run (qfx.9, ptrace_scope is 1 here); iuz.2 Protected path from inside app.slice.
