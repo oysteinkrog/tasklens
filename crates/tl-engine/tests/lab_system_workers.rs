@@ -18,8 +18,11 @@ use tl_collect::counters::Clock;
 use tl_collect::parse::{block, hwmon, netif};
 use tl_engine::config::EngineMode;
 use tl_engine::source::{self, Source};
-use tl_engine::update::{CpuSample, DeviceKinds, EngineMsg, MemorySample, SourceUpdate};
+use tl_engine::update::{
+    CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, SourceUpdate,
+};
 use tl_engine::workers::cpu::CpuSource;
+use tl_engine::workers::disk::DiskSource;
 use tl_engine::workers::enumerate::{disk_list, net_list, sensor_list};
 use tl_engine::workers::memory::MemorySource;
 use tl_engine::workers::workers_for;
@@ -480,4 +483,131 @@ fn memory_demand_off_then_on() {
 
     handle.abort();
     fl.finish();
+}
+
+/// `disk-two-steps` step 0 plus `sys/block/nvme0n1` with `dev` 259:0.
+fn disk_fixture() -> PathBuf {
+    let dir = fixture_copy("disk-two-steps", Some(0));
+    add_nvme0n1(&dir);
+    dir
+}
+
+fn add_nvme0n1(dir: &Path) {
+    let nvme = dir.join("sys/block/nvme0n1");
+    fs::create_dir_all(&nvme).expect("create fixture nvme0n1");
+    fs::write(nvme.join("dev"), "259:0\n").expect("write nvme0n1 dev");
+    fs::write(nvme.join("size"), "1000215216\n").expect("write nvme0n1 size");
+}
+
+fn disk_sample(src: DiskSource, t: u64) -> (DiskSource, DiskSample) {
+    match src.sample_at(at(t)) {
+        (src, SourceUpdate::Disks(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Disks, got {other:?}"),
+    }
+}
+
+fn disk_devices(src: &mut DiskSource) -> DeviceList {
+    match src.take_extra() {
+        Some(SourceUpdate::Devices(list)) => list,
+        other => panic!("expected SourceUpdate::Devices, got {other:?}"),
+    }
+}
+
+fn names(list: &DeviceList) -> Vec<&str> {
+    list.entries.iter().map(|e| &*e.display_name).collect()
+}
+
+fn nvme0n1() -> DeviceIdentity {
+    DeviceIdentity::Disk {
+        major: 259,
+        minor: 0,
+        name: "nvme0n1".into(),
+        wwn_or_serial: None,
+    }
+}
+
+#[test]
+fn disk_first_sample_and_device_list() {
+    let dir = disk_fixture();
+    let (mut src, s) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    let list = disk_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::DISKS);
+    assert_eq!(names(&list), ["nvme0n1"]);
+
+    assert_eq!(s.t_ns, SEC);
+    assert_eq!(s.disks.len(), 1);
+    let (identity, totals) = &s.disks[0];
+    assert_eq!(*identity, nvme0n1());
+    assert_eq!(totals.active_pct.validity, Validity::WarmingUp);
+    assert_eq!(totals.read_bps.validity, Validity::WarmingUp);
+    // 100000 sectors of 512 bytes.
+    assert_eq!(totals.read_total, 51_200_000);
+    assert_eq!(totals.written_total, 102_400_000);
+    assert_eq!(totals.temp_c.validity, Validity::Unsupported);
+}
+
+#[test]
+fn disk_rates_step1() {
+    let dir = disk_fixture();
+    let (mut src, _) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    disk_devices(&mut src);
+
+    apply_step(&dir, "disk-two-steps", 1);
+    let (mut src, s) = disk_sample(src, 2 * SEC);
+    let (identity, totals) = &s.disks[0];
+    assert_eq!(*identity, nvme0n1());
+    assert_eq!(totals.active_pct, Metric::valid(50.0));
+    assert_eq!(totals.read_bps, Metric::valid(1_048_576.0));
+    assert_eq!(totals.write_bps, Metric::valid(2_097_152.0));
+    assert_eq!(totals.response_ms, Metric::valid(3.0));
+    assert_eq!(totals.capacity, 1_000_215_216 * 512);
+    assert!(src.take_extra().is_none(), "no enumeration due");
+}
+
+#[test]
+fn disk_unplug_and_replug_generation() {
+    let dir = disk_fixture();
+    let (mut src, _) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    disk_devices(&mut src);
+    let gens: Vec<u32> = src.disk_ids().map(|id| id.generation).collect();
+    assert_eq!(gens, [0]);
+
+    fs::remove_dir_all(dir.join("sys/block/nvme0n1")).expect("remove fixture nvme0n1");
+    let (mut src, s) = disk_sample(src, 6 * SEC);
+    let list = disk_devices(&mut src);
+    assert!(names(&list).is_empty(), "{:?}", names(&list));
+    assert!(s.disks.is_empty());
+
+    add_nvme0n1(&dir);
+    let (mut src, s) = disk_sample(src, 11 * SEC);
+    assert_eq!(names(&disk_devices(&mut src)), ["nvme0n1"]);
+    let gens: Vec<u32> = src.disk_ids().map(|id| id.generation).collect();
+    assert_eq!(gens, [1]);
+    let (identity, totals) = &s.disks[0];
+    assert_eq!(*identity, nvme0n1());
+    assert_eq!(totals.active_pct.validity, Validity::WarmingUp);
+    assert_eq!(totals.read_bps.validity, Validity::WarmingUp);
+}
+
+#[test]
+fn disk_reset_forces_enumeration() {
+    let dir = disk_fixture();
+    let (mut src, _) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    disk_devices(&mut src);
+    apply_step(&dir, "disk-two-steps", 1);
+
+    src.reset_baselines();
+    let (mut src, s) = disk_sample(src, 2 * SEC);
+    assert_eq!(names(&disk_devices(&mut src)), ["nvme0n1"]);
+    assert_eq!(s.disks[0].1.active_pct.validity, Validity::WarmingUp);
+    assert_eq!(s.disks[0].1.read_bps.validity, Validity::WarmingUp);
+}
+
+#[test]
+fn disk_listed_once_in_full_mode() {
+    let ids: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    assert_eq!(ids.iter().filter(|id| **id == SourceId::Disk).count(), 1);
 }
