@@ -11,19 +11,25 @@
 //! `app.slice`, so the helper has its own rule (R-168 E29-OI-8) and then writes with the same
 //! `tl-ops` cgroup helpers through `CgroupDir::from_validated_fd` (R-281). The helper does not
 //! log (R-281).
+//!
+//! `Dump` as root (`run_dump`): gdb writes a core of any user's process into an fd the engine
+//! opened and passed with the frame (R-145 items 3 and 4), so the file belongs to the user. The
+//! helper never opens a path for the core. It checks that the fd is an empty regular file opened
+//! for writing, because gdb reopens it through `/proc/<helper pid>/fd/<n>` as root.
 
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
-use tl_model::actions::{IoPriority, SchedPolicy, Signal};
+use tl_model::actions::{DumpMode, IoPriority, SchedPolicy, Signal};
 use tl_model::helper_proto::{
     HelperCgroup, HelperError, HelperReplyBody, HelperRequest, HelperTarget,
 };
+use tl_model::ids::ProcessKey;
 use tl_model::system::CpuSet;
 use tl_model::time::BootId;
 use tl_ops::OpsError;
-use tl_ops::{cgroup, process};
+use tl_ops::{cgroup, dump, process};
 
 /// Reads the boot id once at helper start. `None` when the file is missing or does not parse.
 #[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
@@ -320,6 +326,50 @@ fn check_not_inside(rel: &str, protected: &[String]) -> Result<(), HelperError> 
         Err(HelperError::NotAllowed)
     } else {
         Ok(())
+    }
+}
+
+/// Answers `Dump { key, mode }` with the fd that came with the frame. Blocks until gdb exits.
+/// `out_fd` is closed when this returns.
+///
+/// The checks run in this order, and each one that fails returns before gdb runs:
+/// `open_verified`, the fd, gdb installed. A gdb failure gives `Err(Os(EIO))`.
+#[cfg_attr(not(test), expect(dead_code, reason = "dispatch arrives with E29-A1"))]
+pub fn run_dump(key: ProcessKey, mode: DumpMode, out_fd: OwnedFd, boot: BootId) -> HelperReplyBody {
+    match dump_into(key, mode, out_fd, boot) {
+        Ok(()) => HelperReplyBody::Ok,
+        Err(e) => HelperReplyBody::Err(e),
+    }
+}
+
+fn dump_into(
+    key: ProcessKey,
+    mode: DumpMode,
+    out_fd: OwnedFd,
+    boot: BootId,
+) -> Result<(), HelperError> {
+    drop(process::open_verified(key, boot).map_err(map_error)?);
+    check_dump_fd(out_fd.as_fd())?;
+    // Rule "gdb not installed".
+    if !dump::dump_available() {
+        return Err(HelperError::NotAllowed);
+    }
+    dump::dump_to_fd(key, boot, mode, out_fd).map_err(map_error)
+}
+
+/// Rule "bad dump fd": the fd must be a regular file of size 0 opened for writing. Each failure,
+/// and an fd that cannot be inspected, is `NotAllowed`.
+fn check_dump_fd(fd: BorrowedFd<'_>) -> Result<(), HelperError> {
+    let stat = rustix::fs::fstat(fd).map_err(|_| HelperError::NotAllowed)?;
+    let regular =
+        rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile;
+    let flags = rustix::fs::fcntl_getfl(fd).map_err(|_| HelperError::NotAllowed)?;
+    let access = flags & OFlags::RWMODE;
+    let writable = access == OFlags::WRONLY || access == OFlags::RDWR;
+    if regular && stat.st_size == 0 && writable {
+        Ok(())
+    } else {
+        Err(HelperError::NotAllowed)
     }
 }
 
@@ -1129,5 +1179,143 @@ mod tests {
         stop_unit(&unit);
         assert_eq!(status.signal(), None, "the child was killed: {status:?}");
         assert_eq!(status.code(), Some(0), "child status {status:?}");
+    }
+
+    /// A file under the system temp dir, removed on drop.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(contents: &[u8]) -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("tl-helper-dump-test-{}-{n}", std::process::id()));
+            std::fs::write(&path, contents).expect("write temp file");
+            TempFile(path)
+        }
+
+        fn open(&self, access: OFlags) -> OwnedFd {
+            rustix::fs::open(&self.0, access | OFlags::CLOEXEC, Mode::empty()).expect("open temp")
+        }
+
+        fn read(&self) -> Vec<u8> {
+            std::fs::read(&self.0).expect("read temp file")
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// True when gdb run by this test user may attach to a child of the test, as `tl-ops` decides
+    /// it: root, or Yama `ptrace_scope` 0 or absent.
+    fn ptrace_allows_child() -> bool {
+        let scope = std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+            .map(|text| text.trim().to_owned())
+            .unwrap_or_else(|_| "0".to_owned());
+        rustix::process::geteuid().is_root() || scope == "0"
+    }
+
+    fn coredump_filter(pid: u32) -> String {
+        std::fs::read_to_string(format!("/proc/{pid}/coredump_filter")).expect("read filter")
+    }
+
+    #[test]
+    fn dump_child_writes_elf() {
+        if !dump::dump_available() || !ptrace_allows_child() {
+            eprintln!("skipped: needs /usr/bin/gdb, /usr/bin/gcore and ptrace_scope 0");
+            return;
+        }
+        let child = ChildGuard::sleep();
+        let file = TempFile::new(b"");
+        let reply = run_dump(child.key(), DumpMode::Mini, file.open(OFlags::WRONLY), BOOT);
+        assert_eq!(reply, HelperReplyBody::Ok);
+        assert!(file.read().starts_with(b"\x7fELF"), "not an ELF core");
+    }
+
+    #[test]
+    fn dump_restores_coredump_filter() {
+        let child = ChildGuard::sleep();
+        let before = coredump_filter(child.pid());
+        assert_ne!(
+            before.trim(),
+            "000001ff",
+            "the test needs a filter other than 0x1ff"
+        );
+        let file = TempFile::new(b"");
+        let reply = run_dump(child.key(), DumpMode::Full, file.open(OFlags::WRONLY), BOOT);
+        if dump::dump_available() && ptrace_allows_child() {
+            assert_eq!(reply, HelperReplyBody::Ok);
+        } else {
+            eprintln!("gdb did not run ({reply:?}); only the unchanged filter is checked");
+        }
+        assert_eq!(coredump_filter(child.pid()), before);
+    }
+
+    #[test]
+    fn dump_rejects_bad_fd() {
+        let child = ChildGuard::sleep();
+        let not_allowed = HelperReplyBody::Err(HelperError::NotAllowed);
+
+        // Rule "bad dump fd": read-only.
+        let empty = TempFile::new(b"");
+        let reply = run_dump(
+            child.key(),
+            DumpMode::Mini,
+            empty.open(OFlags::RDONLY),
+            BOOT,
+        );
+        assert_eq!(reply, not_allowed);
+        assert!(empty.read().is_empty(), "gdb wrote into a read-only fd");
+
+        // Rule "bad dump fd": not empty.
+        let full = TempFile::new(b"keep me");
+        let reply = run_dump(child.key(), DumpMode::Mini, full.open(OFlags::WRONLY), BOOT);
+        assert_eq!(reply, not_allowed);
+        assert_eq!(full.read(), b"keep me");
+
+        // Rule "bad dump fd": a directory.
+        let dir = rustix::fs::open(
+            std::env::temp_dir(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .expect("open temp dir");
+        assert_eq!(
+            run_dump(child.key(), DumpMode::Mini, dir, BOOT),
+            not_allowed
+        );
+
+        // Rule "bad dump fd": a pipe.
+        let (_read, write) = rustix::pipe::pipe().expect("pipe");
+        assert_eq!(
+            run_dump(child.key(), DumpMode::Mini, write, BOOT),
+            not_allowed
+        );
+
+        // Rule "bad dump fd": an `O_PATH` fd.
+        let path_fd = empty.open(OFlags::PATH);
+        assert_eq!(
+            run_dump(child.key(), DumpMode::Mini, path_fd, BOOT),
+            not_allowed
+        );
+    }
+
+    #[test]
+    fn dump_stale_key() {
+        let child = ChildGuard::sleep();
+        let mut key = child.key();
+        key.start_ticks += 1;
+        let file = TempFile::new(b"");
+        let reply = run_dump(key, DumpMode::Full, file.open(OFlags::WRONLY), BOOT);
+        assert_eq!(reply, HelperReplyBody::Err(HelperError::IdentityChanged));
+        assert!(file.read().is_empty(), "gdb ran for a stale key");
+
+        let mut key = child.key();
+        key.boot_id = BootId(BOOT.0 + 1);
+        let reply = run_dump(key, DumpMode::Mini, file.open(OFlags::WRONLY), BOOT);
+        assert_eq!(reply, HelperReplyBody::Err(HelperError::IdentityChanged));
     }
 }
