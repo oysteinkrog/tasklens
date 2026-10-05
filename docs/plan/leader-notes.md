@@ -199,3 +199,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.3: a key that exited within the linger has no flags, so only the pid 1 check applies; thread targets get their process checks.
 - y6k.4: journal fetch stdout has no cap (stderr capped 64 KiB). Perf/security pass: confirm the query is bounded (-n) or add a cap.
 - y6k.4: bridge.rs rt_handle comment "held only to keep the runtime alive" is out of date; spawn/IO errors map to Exit{code:-1}.
+- eal2: Demand reaches the reducer through `Reducer.demand_rx` (mirror of settings_rx), wired in session.rs. Hidden PSS column clears all PSS. Candidate R entry.
