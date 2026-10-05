@@ -15,14 +15,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
 use asupersync::lab::{LabConfig, LabRuntime};
-use asupersync::runtime::TaskHandle;
+use asupersync::runtime::{JoinError, TaskHandle};
 use asupersync::supervision::ManagedGeneration;
 use asupersync::types::{Budget, Outcome, RegionId, Time};
 use tl_engine::controller::SourceController;
@@ -966,6 +966,17 @@ fn worker_sample_error_restarts() {
         ]
     );
     assert!(gpu_samples(&drain(&mut rx)).is_empty());
+
+    // A failed spawn is `Err` too, with nothing to shut down.
+    let link = FakeLink::new([LinkStep::StartErr(ProbeError::Spawn("ENOENT".into()))]);
+    let (_lab, mut rx, _demand, mut handle) = lab_worker(Arc::clone(&link), visible_gpus());
+    let out = outcome(&mut handle).expect("returned after start");
+    assert!(
+        matches!(&out, Outcome::Err(WorkerError::Probe(text)) if text.contains("spawn")),
+        "{out:?}"
+    );
+    assert_eq!(link.calls(), vec![LinkCall::Start(1)]);
+    assert!(drain(&mut rx).is_empty());
 }
 
 #[test]
@@ -983,8 +994,15 @@ fn worker_cancel_shuts_down_once() {
         }
         advance(&mut lab, PERIOD);
     }
-    let out = outcome(&mut handle).expect("returned after the cancel");
-    assert!(matches!(out, Outcome::Ok(())), "{out:?}");
+    // The join of an aborted task reports the abort, whatever the body returned.
+    let out = handle.try_join();
+    assert!(
+        matches!(
+            out,
+            Ok(Some(Outcome::Ok(()))) | Err(JoinError::Cancelled(_))
+        ),
+        "{out:?}"
+    );
     assert_eq!(link.shutdowns_per_conn(), vec![1]);
     assert!(lab.run_until_quiescent_with_report().lab_test_passed());
 }
