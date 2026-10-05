@@ -775,7 +775,7 @@ fn reading<'a>(s: &'a SensorSample, id: &DeviceIdentity) -> &'a SensorReading {
 
 fn chip_of(id: &DeviceIdentity) -> &str {
     match id {
-        DeviceIdentity::Sensor { chip, .. } | DeviceIdentity::Fan { chip, .. } => &**chip,
+        DeviceIdentity::Sensor { chip, .. } | DeviceIdentity::Fan { chip, .. } => chip,
         other => panic!("unexpected identity {other:?}"),
     }
 }
