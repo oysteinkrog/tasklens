@@ -28,6 +28,7 @@ use tl_model::table::{SysTable, Total};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
+use super::suspend::Transition;
 use super::table::{self, SweepTotals, TableInput};
 use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer};
 use crate::source::{QueuedCommand, WorkerCommand};
@@ -75,8 +76,6 @@ pub struct ApplyState {
     pub zram: Vec<ZramStat>,
     /// The running maximum of `Committed_AS` since engine start (R-166).
     pub peak_committed: u64,
-    /// Between logind `PrepareForSleep(true)` and `(false)` (E09-008 takes this over).
-    pub sleeping: bool,
     /// Device details per contributing source (R-139 item 7): sysfs and D-Bus.
     disk_sysfs: FxHashMap<DeviceIdx, DiskDetails>,
     disk_dbus: FxHashMap<DeviceIdx, DiskDetails>,
@@ -309,10 +308,13 @@ impl Reducer {
                     _ => {}
                 }
             }
-            SourceUpdate::ResumeDetected { .. } => self.resume(),
-            SourceUpdate::Sleep { entering, .. } => {
-                self.apply_state.sleeping = entering;
-                if !entering {
+            SourceUpdate::ResumeDetected { id, t_ns } => {
+                if self.suspend.on_clock_resume(id, t_ns) == Transition::Resumed {
+                    self.resume();
+                }
+            }
+            SourceUpdate::Sleep { entering, t_ns } => {
+                if self.suspend.on_sleep(entering, t_ns) == Transition::Resumed {
                     self.resume();
                 }
             }
@@ -545,10 +547,14 @@ impl Reducer {
         }
     }
 
-    /// Resume from suspend: new baselines and a gap in every series (ADR-008).
+    /// Resume from suspend: a gap in every series, new baselines and device re-enumeration
+    /// (ADR-008). The GPU probe gets no command.
     fn resume(&mut self) {
         self.series.mark_gap_all();
         self.bump_reset_generation();
+        for source in [SourceId::Disk, SourceId::Net, SourceId::Sensors] {
+            self.forward(source, WorkerCommand::RefreshNow);
+        }
     }
 
     fn tick(&mut self, settings: &EngineSettings) {
@@ -642,6 +648,8 @@ impl Reducer {
         valid: bool,
         period: u64,
     ) {
+        // Samples between `PrepareForSleep(true)` and the resume are gaps (ADR-008).
+        let valid = valid && !self.suspend.drop_rates();
         self.series
             .append(sid(device, metric), t, value, period, flags(valid));
     }

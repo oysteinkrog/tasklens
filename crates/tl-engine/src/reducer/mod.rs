@@ -13,6 +13,7 @@ pub mod devices;
 pub mod health;
 pub mod processes;
 pub mod series;
+pub mod suspend;
 pub mod sys_table;
 pub mod table;
 
@@ -121,7 +122,8 @@ pub struct Reducer {
     pub devices: devices::Catalog,
     pub health: health::HealthState,
     pub processes: processes::ProcessState,
-    // E09-008: pub suspend: suspend::SuspendState (added by 8q0.10 as a chain edit, R-262)
+    /// Sleep and resume state (E09-008).
+    pub suspend: suspend::SuspendState,
     pub query: TableQuery,
     pub sys_queries: [Option<SysTableQuery>; 3],
     pub components: Components,
@@ -186,6 +188,7 @@ impl Reducer {
             devices: devices::Catalog::new(),
             health: health::HealthState::new(),
             processes: processes::ProcessState::new(),
+            suspend: suspend::SuspendState::default(),
             query: TableQuery::default(),
             sys_queries: [None, None, None],
             components: Components {
