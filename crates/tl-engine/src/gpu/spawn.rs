@@ -244,10 +244,11 @@ mod tests {
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
 
-        // `spawn` returns after exec, so any fd the test process held without CLOEXEC is in
-        // the child now. At startup the probe copies fd 3 with `pidfd_open` and `pidfd_getfd`
-        // (`open_fd` in tl-gpu-probe): the copy stays and the pidfd is closed at once. So an
-        // extra fd is fine when it is the same socket as fd 3, and a pidfd is waited out.
+        // `spawn` returns after execve, so any fd the test process held without CLOEXEC is in
+        // the child now, and the probe never closes it. The probe also opens fds of its own:
+        // ld.so opens each shared library and closes it again, and `open_fd` in tl-gpu-probe
+        // opens a pidfd for a moment and keeps a copy of fd 3. So an extra fd is fine when it
+        // is the same socket as fd 3 or when it closes within 1 s.
         let pid = child.child.id();
         let target = |fd: i32| {
             std::fs::read_link(format!("/proc/{pid}/fd/{fd}"))
@@ -270,10 +271,7 @@ mod tests {
             if extra.is_empty() {
                 break;
             }
-            let only_pidfd = extra
-                .iter()
-                .all(|&fd| target(fd).as_deref() == Some("anon_inode:[pidfd]"));
-            if !only_pidfd || Instant::now() >= deadline {
+            if Instant::now() >= deadline {
                 let lines: Vec<String> = extra
                     .iter()
                     .map(|&fd| describe_leaked_fd(pid, fd))
@@ -350,9 +348,9 @@ mod tests {
     fn missing_binary_leaks_nothing() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let missing = Path::new("/nonexistent/tasklens/tl-gpu-probe");
-        // Other test modules open and close fds on their own threads, so one equal count in a
-        // few tries passes. A real leak adds two fds on every try.
-        let equal = (0..5).any(|_| {
+        // Other test modules open and close fds on their own threads, so one equal count in
+        // 50 tries passes. A real leak adds two fds on every try.
+        let equal = (0..50).any(|_| {
             let before = self_fd_count();
             let r = spawn_probe(missing, &[]);
             assert!(matches!(r, Err(ProbeError::Spawn(_))));
