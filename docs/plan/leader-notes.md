@@ -160,3 +160,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ndy.10 uses per-item #[allow(unsafe_code)] on two fns, stricter than ADR-001 rule 4's file-level allow. Fine; update ADR text in the doc pass.
 - 8q0.3: Snapshot::empty doc says windows starts WarmingUp; Reducer::new sets Unsupported per ADR-003. Fix the doc comment in tl-model.
 - hjn.4: no cfg(test) counter (integration tests cannot see it); fast-tick freq reuse proven through file change instead.
+- yms.14 rule 6 for app-...-<rand>.scope uses the whole remainder as app id (gnome-org.gnome.Nautilus); E05-A2's desktop index must pick between it and the split form. Close reason predates ea30b8f and 4d054a0.
+- yms.28 ThreadReader keeps per-key baselines until that key reads Gone or Restricted; a process whose details are closed and never read again leaves its entry. Check for growth when Details windows close (drop key on close).
+- qfx.7 helper ReadProcessFiles: empty set gives one Err(NotAllowed); other open_verified errors give Err(Os(errno)) per file; unknown ProcFiles bits ignored. Review in security pass.
+- hjn.5: leader approved net_key(i, mac: Option<&str>) and net_list(t_ns, ifaces, sys_root) reading class/net/<name>/address.
