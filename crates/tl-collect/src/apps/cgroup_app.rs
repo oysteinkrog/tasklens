@@ -1,12 +1,18 @@
 //! Group processes into apps by cgroup: the app id from the unit names under
 //! `user@<uid>.service/app.slice/`, and the scan of that slice (PROC-005, ADR-016, R-137).
+//! Also the Flatpak `bwrap` unwrap for app-level action targets (PROC-060, ADR-006).
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
+use rustix::fd::BorrowedFd;
 use smallvec::SmallVec;
+use tl_model::ids::ProcessKey;
+use tl_model::process::ProcessRecord;
 
 use crate::proc::cgroup::{CgroupRoot, unescape_unit};
 use crate::proc::meta::ReadBufs;
+use crate::sysroot::read_at;
 
 /// Which launcher naming form a unit name used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,4 +214,97 @@ fn is_uuid(s: &str) -> bool {
             8 | 13 | 18 | 23 => b == b'-',
             _ => b.is_ascii_hexdigit(),
         })
+}
+
+/// True when the exe basename is `bwrap`, or when the exe is unreadable and `comm` is `bwrap`.
+pub fn is_bwrap(exe_basename: Option<&str>, comm: &str) -> bool {
+    match exe_basename {
+        Some(base) => base == "bwrap",
+        None => comm == "bwrap",
+    }
+}
+
+/// Replaces each wrapper root with the first non-wrapper descendant on each of its branches,
+/// searched breadth-first in `records`. A child is a record with `ppid == parent.pid` and
+/// `start_ticks >= parent.start_ticks`, so a reused pid is never followed (ADR-006). A
+/// non-wrapper root, or one not in `records`, is returned as is; a wrapper with no non-wrapper
+/// descendant is dropped. Duplicates are removed and the order follows `roots`.
+pub fn unwrap_bwrap_targets(
+    roots: &[ProcessKey],
+    records: &[ProcessRecord],
+    is_wrapper: impl Fn(&ProcessRecord) -> bool,
+) -> SmallVec<[ProcessKey; 4]> {
+    let mut out: SmallVec<[ProcessKey; 4]> = SmallVec::new();
+    let mut push = |key: ProcessKey| {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    };
+    let mut queue = VecDeque::new();
+    for root in roots {
+        let Some(rec) = records.iter().find(|r| r.key == *root) else {
+            push(*root);
+            continue;
+        };
+        if !is_wrapper(rec) {
+            push(*root);
+            continue;
+        }
+        // Each direct child starts one branch, in record order.
+        for child in children(rec.key, records) {
+            queue.clear();
+            queue.push_back(child);
+            // Every record is visited at most once per branch, even for a malformed cycle.
+            let mut steps = records.len();
+            while let Some(node) = queue.pop_front() {
+                if steps == 0 {
+                    break;
+                }
+                steps -= 1;
+                if is_wrapper(node) {
+                    queue.extend(children(node.key, records));
+                } else {
+                    push(node.key);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn children(parent: ProcessKey, records: &[ProcessRecord]) -> impl Iterator<Item = &ProcessRecord> {
+    records.iter().filter(move |r| {
+        r.ppid == parent.pid
+            && r.key.boot_id == parent.boot_id
+            && r.key.start_ticks >= parent.start_ticks
+            && r.key != parent
+    })
+}
+
+/// Upper bound on one `task/<pid>/children` read.
+const CHILDREN_LIMIT: usize = 64 << 10;
+
+/// Reads the child pids of `pid` from `task/<pid>/children`, relative to the `/proc/<pid>`
+/// dirfd `dir`, into `out` (cleared first). Used when the record list is stale. A missing file
+/// (kernel without `CONFIG_PROC_CHILDREN`) or any read error leaves `out` empty.
+pub fn children_from_proc(
+    dir: BorrowedFd<'_>,
+    pid: u32,
+    buf: &mut Vec<u8>,
+    out: &mut SmallVec<[u32; 8]>,
+) {
+    out.clear();
+    let Ok((_, truncated)) = read_at(dir, &format!("task/{pid}/children"), buf, CHILDREN_LIMIT)
+    else {
+        return;
+    };
+    if truncated {
+        // Drop the last token, which may be a cut pid.
+        let keep = buf.iter().rposition(u8::is_ascii_whitespace).unwrap_or(0);
+        buf.truncate(keep);
+    }
+    let pids = buf
+        .split(|b| b.is_ascii_whitespace())
+        .filter_map(|tok| std::str::from_utf8(tok).ok()?.parse().ok());
+    out.extend(pids);
 }

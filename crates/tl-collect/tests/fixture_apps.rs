@@ -1028,3 +1028,164 @@ fn scan_app_slice_fixture() {
     scan_app_slice(&cg, 1001, &mut bufs, &mut scan);
     assert!(scan.units.is_empty());
 }
+
+fn bwrap_key(pid: u32, start_ticks: u64) -> tl_model::ids::ProcessKey {
+    tl_model::ids::ProcessKey {
+        start_ticks,
+        boot_id: tl_model::time::BootId(1),
+        pid,
+    }
+}
+
+fn bwrap_record(
+    pid: u32,
+    ppid: u32,
+    start_ticks: u64,
+    comm: &str,
+) -> tl_model::process::ProcessRecord {
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::validity::FieldValidity;
+    ProcessRecord {
+        key: bwrap_key(pid, start_ticks),
+        ppid,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: comm.into(),
+            name: comm.into(),
+            exe: Some(format!("/usr/bin/{comm}").into()),
+            cmdline: None,
+            user: "user".into(),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            search_lower: comm.into(),
+        }),
+        group: GroupKind::Background.key(),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        validity: FieldValidity::default(),
+    }
+}
+
+fn unwrap_targets(
+    roots: &[tl_model::ids::ProcessKey],
+    records: &[tl_model::process::ProcessRecord],
+) -> Vec<tl_model::ids::ProcessKey> {
+    use tl_collect::apps::cgroup_app::{is_bwrap, unwrap_bwrap_targets};
+    unwrap_bwrap_targets(roots, records, |r| {
+        let base = r.meta.exe.as_deref().map(exe_basename);
+        is_bwrap(base, &r.meta.comm)
+    })
+    .to_vec()
+}
+
+#[test]
+fn bwrap_chain_unwrapped() {
+    let records = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(11, 10, 101, "bwrap"),
+        bwrap_record(12, 11, 102, "thunderbird"),
+    ];
+    assert_eq!(
+        unwrap_targets(&[bwrap_key(10, 100)], &records),
+        [bwrap_key(12, 102)]
+    );
+}
+
+#[test]
+fn bwrap_branches_each_unwrapped() {
+    let records = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(11, 10, 101, "bwrap"),
+        bwrap_record(12, 11, 102, "app"),
+        bwrap_record(13, 10, 103, "helper"),
+    ];
+    assert_eq!(
+        unwrap_targets(&[bwrap_key(10, 100)], &records),
+        [bwrap_key(12, 102), bwrap_key(13, 103)]
+    );
+    // A root named twice, or reached through another root, is returned once.
+    assert_eq!(
+        unwrap_targets(
+            &[bwrap_key(10, 100), bwrap_key(12, 102), bwrap_key(10, 100)],
+            &records
+        ),
+        [bwrap_key(12, 102), bwrap_key(13, 103)]
+    );
+    // A wrapper with only wrapper descendants is dropped.
+    let only = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(11, 10, 101, "bwrap"),
+    ];
+    assert!(unwrap_targets(&[bwrap_key(10, 100)], &only).is_empty());
+}
+
+#[test]
+fn non_bwrap_root_unchanged() {
+    let records = [
+        bwrap_record(20, 1, 200, "firefox"),
+        bwrap_record(21, 20, 201, "firefox"),
+    ];
+    assert_eq!(
+        unwrap_targets(&[bwrap_key(20, 200)], &records),
+        [bwrap_key(20, 200)]
+    );
+    // The exe decides; comm counts only when the exe is unreadable.
+    use tl_collect::apps::cgroup_app::is_bwrap;
+    assert!(is_bwrap(Some("bwrap"), "x"));
+    assert!(!is_bwrap(Some("firefox"), "bwrap"));
+    assert!(is_bwrap(None, "bwrap"));
+    assert!(!is_bwrap(None, "firefox"));
+}
+
+/// Security regression (ADR-006): a record whose pid was reused before the wrapper started
+/// is not the wrapper's child and must never become a target.
+#[test]
+fn bwrap_reused_pid_not_followed() {
+    let records = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(14, 10, 50, "stale"),
+        bwrap_record(12, 10, 102, "app"),
+    ];
+    assert_eq!(
+        unwrap_targets(&[bwrap_key(10, 100)], &records),
+        [bwrap_key(12, 102)]
+    );
+    let stale_only = [
+        bwrap_record(10, 1, 100, "bwrap"),
+        bwrap_record(14, 10, 50, "stale"),
+    ];
+    assert!(unwrap_targets(&[bwrap_key(10, 100)], &stale_only).is_empty());
+}
+
+#[test]
+fn children_file_parsed() {
+    use rustix::fd::AsFd;
+    use smallvec::SmallVec;
+    use tl_collect::apps::cgroup_app::children_from_proc;
+    let proc = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/process-edge/proc");
+    let dir = fs::File::open(proc.join("10")).expect("open /proc/10 fixture");
+    let mut buf = Vec::new();
+    let mut out: SmallVec<[u32; 8]> = SmallVec::new();
+    children_from_proc(dir.as_fd(), 10, &mut buf, &mut out);
+    assert_eq!(out.as_slice(), [11, 13]);
+    // No children file: out is cleared and stays empty.
+    let other = fs::File::open(proc.join("57")).expect("open /proc/57 fixture");
+    children_from_proc(other.as_fd(), 57, &mut buf, &mut out);
+    assert!(out.is_empty());
+}
