@@ -28,11 +28,12 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
 use tl_model::demand::Demand;
 use tl_model::devices::DeviceIdentity;
-use tl_model::health::SourceId;
+use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{MetricId, SeriesId};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, CpuTotals, Metric};
+use tl_model::table::{TableMode, TableQuery};
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
@@ -294,4 +295,99 @@ fn start_with_fake_workers_publishes() {
     );
     drop(ui);
     drop(rt);
+}
+
+/// Threads of this process, from `/proc/self/task`.
+fn thread_count() -> usize {
+    std::fs::read_dir("/proc/self/task").map_or(0, |dir| dir.count())
+}
+
+/// Header rows have neither a record nor a group row (`lab_table.rs::header_counts`).
+fn header_rows(snap: &Snapshot) -> usize {
+    snap.table
+        .rows
+        .iter()
+        .filter(|row| row.record.is_none() && row.group.is_none())
+        .count()
+}
+
+/// `Engine::start` on the fixture tree for 2 s of wall time, driven only through
+/// `EngineHandle`. `Engine::start` always takes `workers_for(Full)`, so no fake worker can be
+/// added: no `Cpu` or `Processes` worker exists yet (E12-A1, E10-A1), and the checks use the
+/// memory worker and the table query instead.
+#[test]
+fn end_to_end_engine_real_runtime() {
+    let threads_before = thread_count();
+    let handle =
+        Engine::start(fixture_config(EngineMode::Full), EngineHooks::default()).expect("starts");
+    let wake = handle.wake();
+    handle.set_demand(Demand {
+        memory: true,
+        ..Demand::default()
+    });
+    let send = |mode: TableMode, generation: u64| {
+        handle.send(Command::SetTableQuery(TableQuery {
+            generation,
+            mode,
+            ..TableQuery::default()
+        }))
+    };
+    assert_eq!(send(TableMode::Flat, 1), Ok(()));
+
+    let mem_samples = |snap: &Snapshot| {
+        let device = snap.devices.find(&DeviceIdentity::Memory)?.idx;
+        let series = snap.series.get(SeriesId {
+            device,
+            metric: MetricId::MEM_USED,
+        })?;
+        Some(series.samples.len())
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut wakes = 0u32;
+    let mut sent_grouped = false;
+    let mut prev_sequence = 0;
+    // The UI waits on `wake`; polling it every 10 ms keeps this test free of an executor.
+    while Instant::now() < deadline {
+        if wake.try_recv().is_err() {
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        wakes += 1;
+        let snap = handle.latest();
+        assert!(snap.sequence > prev_sequence, "sequence goes up on wake");
+        prev_sequence = snap.sequence;
+        if !sent_grouped && snap.table.query_generation == 1 {
+            assert_eq!(send(TableMode::Grouped, 2), Ok(()));
+            sent_grouped = true;
+        }
+    }
+
+    let snap = handle.latest();
+    assert!(wakes >= 2, "{wakes} wakes in 2 s");
+    assert!(sent_grouped, "query generation 1 never published");
+    assert_eq!(snap.table.query_generation, 2);
+    assert_eq!(header_rows(&snap), 3, "{:?}", snap.table.rows);
+    assert!(
+        mem_samples(&snap).is_some_and(|n| n >= 2),
+        "MEM_USED has {:?} samples",
+        mem_samples(&snap)
+    );
+    assert_eq!(
+        snap.health.get(SourceId::Memory).state,
+        SourceState::Running
+    );
+
+    drop(wake);
+    drop(handle);
+    // Soft check: other tests of this binary start threads too. E09-A2 makes it hard.
+    let dropped = Instant::now();
+    while thread_count() > threads_before && dropped.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    eprintln!(
+        "end_to_end_engine_real_runtime: {} threads before, {} after the drop ({:?})",
+        threads_before,
+        thread_count(),
+        dropped.elapsed()
+    );
 }
