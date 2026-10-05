@@ -1,4 +1,4 @@
-//! The 2,000-process fake root for the sweep bench and its 15 ms gate (ADR-016, ADR-014).
+//! The 2,000-process fake root for the sweep bench and its 20 ms gate (ADR-016, ADR-014, R-286).
 //!
 //! Included with `#[path]` from `benches/sweep.rs` and `tests/fixture_process.rs`, so it uses
 //! only `std`, `tempfile` and `tl-collect`.

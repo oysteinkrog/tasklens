@@ -1,5 +1,6 @@
-//! Sweep cost on the `owner-desktop` processes scaled to 2,000 (ADR-016, ADR-014). Criterion
-//! only reports; the 15 ms gate is `tests/fixture_process.rs::sweep_2000_under_gate`.
+//! Sweep cost on the `owner-desktop` processes scaled to 2,000 with default columns (ADR-016,
+//! ADR-014, R-286). Criterion only reports; the 20 ms gate is
+//! `tests/fixture_process.rs::sweep_2000_under_gate`.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 

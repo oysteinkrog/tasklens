@@ -2302,13 +2302,13 @@ fn sweep_pss_for_detail_keys() {
 #[path = "common/scaled_root.rs"]
 mod scaled_root;
 
-/// The ADR-016 gate: the median of 50 steady sweeps of the 2,000-process root is at most 15 ms.
-/// Owner machine, release build only:
+/// The R-286 gate: the median of 50 steady sweeps of the 2,000-process root with default columns
+/// (no Swap, no I/O) is at most 20 ms. Owner machine, release build only:
 /// `cargo test -p tl-collect --release --test fixture_process sweep_2000_under_gate -- --ignored`.
 #[test]
 #[ignore = "perf gate: owner machine, release build"]
 fn sweep_2000_under_gate() {
-    const GATE: std::time::Duration = std::time::Duration::from_millis(15);
+    const GATE: std::time::Duration = std::time::Duration::from_millis(20);
     let mut scaled = scaled_root::scaled();
     let mut times: Vec<std::time::Duration> = (0..50)
         .map(|_| {
@@ -2335,4 +2335,156 @@ fn scaled_root_has_2000_pid_dirs() {
         .expect("tempdir");
     // Asserts the count itself.
     scaled_root::build_scaled_root(dir.path());
+}
+
+// ---- Fewer files per process (R-286) ----
+
+use tl_collect::proc::sweep::{io_reads, status_reads};
+
+/// A proc root with copies of process-edge 4201 (stat, statm, status, io) at pids 10 to 29.
+fn stagger_root() -> (tempfile::TempDir, SysRoot, Vec<u32>) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let pids: Vec<u32> = (10..30).collect();
+    for pid in &pids {
+        let dir = tmp.path().join(format!("proc/{pid}"));
+        fs::create_dir_all(&dir).expect("create proc dir");
+        for name in ["stat", "statm", "status", "io"] {
+            let rel = format!("proc/4201/{name}");
+            fs::write(dir.join(name), fixture_bytes("process-edge", &rel)).expect("copy file");
+        }
+    }
+    let root = SysRoot::at(tmp.path());
+    (tmp, root, pids)
+}
+
+fn default_columns() -> SweepCtx {
+    SweepCtx {
+        want_status_fields: false,
+        want_io: false,
+        ..sweep_ctx(false)
+    }
+}
+
+fn swept(out: &[SweptProc], pid: u32) -> &SweptProc {
+    out.iter()
+        .find(|p| p.key.pid == pid)
+        .unwrap_or_else(|| panic!("pid {pid} not swept"))
+}
+
+sweep_clock!(rss_anon_clock);
+
+#[test]
+fn sweep_rss_anon_from_statm() {
+    let (_tmp, root) = sweep_root();
+    let mut core = SweepCore::new(root).with_clock(rss_anon_clock::now);
+    let mut out = Vec::new();
+    rss_anon_clock::set(SEC, SEC);
+    core.sweep_core(&default_columns(), &mut out);
+    let p = only(&out);
+    // process-edge 4201 statm: size 666958, resident 61234, shared 60925, data 58.
+    let page = rustix::param::page_size() as u64;
+    assert_eq!(p.rss_anon_bytes, (61_234 - 60_925) * page);
+    assert_eq!(p.rss_bytes, 61_234 * page);
+    assert_eq!(p.rss_shared_bytes, 60_925 * page);
+    assert_eq!(p.commit_bytes, 58 * page);
+    assert_eq!(p.vsize_bytes, 666_958 * page);
+    assert_eq!(p.validity.get(ProcessField::RssAnon), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::Rss), Validity::Valid);
+    assert_eq!(p.status.vm_rss, Some(p.rss_bytes), "VmRSS is statm resident");
+}
+
+sweep_clock!(stagger_clock);
+
+#[test]
+fn sweep_status_staggered() {
+    let (_tmp, root, pids) = stagger_root();
+    let mut core = SweepCore::new(root.clone()).with_clock(stagger_clock::now);
+    let mut out = Vec::new();
+    let ctx = default_columns();
+
+    // Sweep 1: every pid is new, so every status is read.
+    let before = status_reads();
+    stagger_clock::set(SEC, SEC);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(status_reads() - before, 20);
+    assert!(out.iter().all(|p| p.status_fresh));
+    assert_eq!(swept(&out, 13).status.vm_swap, Some(5_242_880));
+
+    // Pid 13 swaps more. Sweep 2 reads only pids 12 and 22; 13 keeps its old value and validity.
+    let status = String::from_utf8(fixture_bytes("process-edge", "proc/4201/status"))
+        .expect("status is UTF-8")
+        .replace("VmSwap:\t    5120 kB", "VmSwap:\t    8192 kB");
+    fs::write(root.proc_path("13/status"), status).expect("write status");
+    let before = status_reads();
+    stagger_clock::set(2 * SEC, 2 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(status_reads() - before, 2);
+    let fresh: Vec<u32> = out
+        .iter()
+        .filter(|p| p.status_fresh)
+        .map(|p| p.key.pid)
+        .collect();
+    assert_eq!(fresh, [12, 22]);
+    let p13 = swept(&out, 13);
+    assert_eq!(p13.status.vm_swap, Some(5_242_880));
+    assert_eq!(p13.validity.get(ProcessField::Swap), Validity::Valid);
+    assert_eq!(p13.status.uid[0], 1000, "the real uid comes from the last status read");
+
+    // Sweep 3 is pid 13's turn.
+    stagger_clock::set(3 * SEC, 3 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p13 = swept(&out, 13);
+    assert!(p13.status_fresh);
+    assert_eq!(p13.status.vm_swap, Some(8 * 1024 * 1024));
+
+    // A demanded status-only field reads every pid.
+    let before = status_reads();
+    stagger_clock::set(4 * SEC, 4 * SEC);
+    let demand = SweepCtx {
+        want_status_fields: true,
+        ..default_columns()
+    };
+    core.sweep_core(&demand, &mut out);
+    assert_eq!(status_reads() - before, 20);
+    assert_eq!(out.len(), pids.len());
+}
+
+sweep_clock!(io_demand_clock);
+
+#[test]
+fn sweep_io_on_demand() {
+    let (_tmp, root, _pids) = stagger_root();
+    let mut core = SweepCore::new(root).with_clock(io_demand_clock::now);
+    let mut out = Vec::new();
+
+    // Not demanded: no io file is opened and the rates are WarmingUp.
+    let before = io_reads();
+    io_demand_clock::set(SEC, SEC);
+    core.sweep_core(&default_columns(), &mut out);
+    io_demand_clock::set(2 * SEC, 2 * SEC);
+    core.sweep_core(&default_columns(), &mut out);
+    assert_eq!(io_reads() - before, 0);
+    let p = swept(&out, 10);
+    assert_eq!(p.io, IoState::WarmingUp);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+    assert_eq!(p.validity.get(ProcessField::Cpu), Validity::Valid);
+
+    // Turned on: read for every pid, WarmingUp for one interval, then Valid.
+    let ctx = SweepCtx {
+        want_io: true,
+        ..default_columns()
+    };
+    let before = io_reads();
+    io_demand_clock::set(3 * SEC, 3 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    assert_eq!(io_reads() - before, 20);
+    let p = swept(&out, 10);
+    assert!(matches!(p.io, IoState::Valid(_)));
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::WarmingUp);
+
+    io_demand_clock::set(4 * SEC, 4 * SEC);
+    core.sweep_core(&ctx, &mut out);
+    let p = swept(&out, 10);
+    assert_eq!(p.validity.get(ProcessField::IoRead), Validity::Valid);
+    assert_eq!(p.validity.get(ProcessField::IoWrite), Validity::Valid);
 }
