@@ -73,6 +73,21 @@ proptest! {
     }
 }
 
+proptest! {
+    #[test]
+    fn prop_edid_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..=512), header in any::<bool>()) {
+        use tl_collect::inventory::displays::edid_monitor_name;
+        let _ = edid_monitor_name(&bytes);
+        let mut edid = bytes;
+        if header && edid.len() >= 8 {
+            edid[..8].copy_from_slice(&[0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0]);
+        }
+        if let Some(name) = edid_monitor_name(&edid) {
+            prop_assert!(!name.is_empty() && name.bytes().all(|b| (0x20..=0x7E).contains(&b)));
+        }
+    }
+}
+
 // == gpu_drm (E06-A3) ==
 
 proptest! {

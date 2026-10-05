@@ -44,3 +44,25 @@ fn real_board_serial_restricted() {
         "board_serial is not Restricted"
     );
 }
+
+/// Settles U-26: whether sysfs `enabled` is reported for every monitor (NVIDIA 615). Prints every
+/// connector of every card. Run with
+/// `cargo test -p tl-collect --test fixture_inventory -- --ignored real_connectors_listed --nocapture`.
+#[test]
+#[ignore = "reads the real /sys"]
+fn real_connectors_listed() {
+    use tl_collect::inventory::displays::read_connectors;
+    let mut cards: Vec<u32> = std::fs::read_dir("/sys/class/drm")
+        .unwrap()
+        .filter_map(|e| {
+            let name = e.ok()?.file_name().into_string().ok()?;
+            name.strip_prefix("card")?.parse().ok()
+        })
+        .collect();
+    cards.sort_unstable();
+    for card in cards {
+        for c in read_connectors(Path::new("/sys"), card) {
+            eprintln!("{c:?}");
+        }
+    }
+}
