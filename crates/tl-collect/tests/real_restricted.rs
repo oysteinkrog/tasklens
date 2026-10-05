@@ -135,3 +135,22 @@ fn meta_pid1_exe_restricted() {
     let (meta, _) = cache.get_or_refresh(key, dir.as_fd(), b"systemd", &mut bufs);
     assert_eq!(meta.exe, ExeLink::Restricted);
 }
+
+/// PROC-081: the memory maps of another user's process are Restricted.
+#[test]
+#[ignore = "real system: needs a non-root user"]
+fn smaps_pid1_restricted() {
+    use tl_collect::proc::smaps::{SmapsRead, read_smaps};
+
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let dir = open_dir("/proc/1");
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    assert_eq!(
+        read_smaps(dir.as_fd(), &mut buf, &mut out).expect("read pid 1 smaps"),
+        SmapsRead::Restricted
+    );
+    assert!(out.is_empty());
+}

@@ -4,6 +4,9 @@
 //! read only for the keys the engine asks for (`Demand.detail_keys`, at most 512). The fds stay
 //! in the 128-entry `FdCache` (ADR-016). The engine applies the 1 Hz cap and the "only while a
 //! PSS or USS column is shown" rule (ADR-008); this reader does what it is asked.
+//!
+//! The full `smaps` gives RSS per mapping for the Memory maps tab (PROC-081). It is read only
+//! while that tab is open, at most once per second; the engine applies that cap too.
 
 use std::sync::Arc;
 
@@ -280,6 +283,151 @@ pub fn apply_rollups(
         record.validity.set(ProcessField::Pss, validity);
         record.validity.set(ProcessField::Uss, validity);
     }
+}
+
+const SMAPS_FILE: &str = "smaps";
+
+const SMAPS_PARSE_ERROR: CollectError = CollectError::ProcParse {
+    pid: 0,
+    file: SMAPS_FILE,
+};
+
+/// One mapping from `smaps`, in bytes (PROC-081).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SmapsRegion {
+    /// Start address from the header line.
+    pub start: u64,
+    /// End address from the header line (exclusive).
+    pub end: u64,
+    /// `Rss:`.
+    pub rss: u64,
+    /// `Pss:`.
+    pub pss: u64,
+    /// `Swap:`.
+    pub swap: u64,
+}
+
+/// Parses `smaps` into `out` (cleared first), one region per header line
+/// `<start>-<end> <perms> <offset> <dev> <inode> [path]`. `Rss:`, `Pss:` and `Swap:` are kB × 1024;
+/// other keys are skipped. A header that does not parse, or a key line before the first header,
+/// is `ProcParse { file: "smaps" }`.
+pub fn parse_smaps(buf: &[u8], out: &mut Vec<SmapsRegion>) -> Result<(), CollectError> {
+    out.clear();
+    let mut rest = buf;
+    while !rest.is_empty() {
+        let (line, tail) = match memchr(b'\n', rest) {
+            Some(i) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, &rest[rest.len()..]),
+        };
+        rest = tail;
+        if line.is_empty() {
+            continue;
+        }
+        let first = line.split(|&b| b == b' ').next().unwrap_or(line);
+        if let Some(name) = first.strip_suffix(b":") {
+            let region = out.last_mut().ok_or(SMAPS_PARSE_ERROR)?;
+            let slot = match name {
+                b"Rss" => &mut region.rss,
+                b"Pss" => &mut region.pss,
+                b"Swap" => &mut region.swap,
+                _ => continue,
+            };
+            *slot = kb_value(&line[first.len()..]).ok_or(SMAPS_PARSE_ERROR)?;
+        } else {
+            out.push(parse_header(line).ok_or(SMAPS_PARSE_ERROR)?);
+        }
+    }
+    Ok(())
+}
+
+/// The address range of a header line. The perms, offset, dev and inode fields must be present;
+/// the path, which may hold spaces, is not looked at.
+fn parse_header(line: &[u8]) -> Option<SmapsRegion> {
+    let mut fields = line.split(|&b| b == b' ').filter(|f| !f.is_empty());
+    let range = fields.next()?;
+    let dash = memchr(b'-', range)?;
+    let start = parse_hex(&range[..dash])?;
+    let end = parse_hex(&range[dash + 1..])?;
+    if end < start || fields.take(4).count() != 4 {
+        return None;
+    }
+    Some(SmapsRegion {
+        start,
+        end,
+        ..SmapsRegion::default()
+    })
+}
+
+/// Hex digits only, at least one, no overflow.
+fn parse_hex(digits: &[u8]) -> Option<u64> {
+    if digits.is_empty() {
+        return None;
+    }
+    digits.iter().try_fold(0u64, |n, &d| {
+        let v = char::from(d).to_digit(16)?;
+        n.checked_mul(16)?.checked_add(u64::from(v))
+    })
+}
+
+/// The result of [`read_smaps`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SmapsRead {
+    /// `out` holds the regions (none for a kernel thread).
+    Ok,
+    /// EACCES or EPERM: another user's process. The tab shows "Needs administrator access."
+    Restricted,
+    /// The process exited.
+    Gone,
+}
+
+/// Reads all of `smaps` relative to an open `/proc/<pid>` directory and parses it into `out`.
+/// The file can be several MiB for a large process; `buf` grows as needed and is reused. EACCES
+/// or EPERM is `Restricted`, ENOENT or ESRCH is `Gone`, any other errno is
+/// `ProcRead { file: "smaps", errno }`.
+pub fn read_smaps(
+    pid_dir: BorrowedFd<'_>,
+    buf: &mut Vec<u8>,
+    out: &mut Vec<SmapsRegion>,
+) -> Result<SmapsRead, CollectError> {
+    out.clear();
+    match read_whole(pid_dir, buf) {
+        Ok(()) => {}
+        Err(e) if is_denied(e) => return Ok(SmapsRead::Restricted),
+        Err(e) if is_gone(e) => return Ok(SmapsRead::Gone),
+        Err(e) => {
+            return Err(CollectError::ProcRead {
+                file: SMAPS_FILE,
+                errno: e.raw_os_error(),
+            });
+        }
+    }
+    parse_smaps(buf, out)?;
+    Ok(SmapsRead::Ok)
+}
+
+/// Reads `smaps` into `buf` until EOF, with no size cap.
+fn read_whole(pid_dir: BorrowedFd<'_>, buf: &mut Vec<u8>) -> Result<(), Errno> {
+    buf.clear();
+    let fd = rustix::fs::openat(
+        pid_dir,
+        SMAPS_FILE,
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    loop {
+        if buf.len() == buf.capacity() {
+            buf.reserve((64 * 1024).max(buf.len()));
+        }
+        if rustix::io::read(fd.as_fd(), spare_capacity(buf))? == 0 {
+            return Ok(());
+        }
+    }
+}
+
+/// Region start address to RSS in bytes. The maps reader (E05-027) attaches RSS to the
+/// `/proc/<pid>/maps` regions with it.
+pub fn rss_by_start(regions: &[SmapsRegion]) -> FxHashMap<u64, u64> {
+    regions.iter().map(|r| (r.start, r.rss)).collect()
 }
 
 #[cfg(test)]

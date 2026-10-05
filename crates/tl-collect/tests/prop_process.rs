@@ -178,3 +178,19 @@ proptest! {
         prop_assert!(out.len() <= procs.len());
     }
 }
+
+proptest! {
+    #[test]
+    fn smaps_arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..=8192)) {
+        let mut out = Vec::new();
+        let _ = tl_collect::proc::smaps::parse_smaps(&bytes, &mut out);
+    }
+
+    #[test]
+    fn smaps_mutated_fixture_never_panics(
+        bytes in mutated(fixture_bytes("process-edge", "proc/4201/smaps"))
+    ) {
+        let mut out = Vec::new();
+        let _ = tl_collect::proc::smaps::parse_smaps(&bytes, &mut out);
+    }
+}

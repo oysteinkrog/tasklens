@@ -1521,3 +1521,93 @@ fn threads_live_self() {
         w.join().expect("join worker");
     }
 }
+
+// ---- E05-024: full smaps ----
+
+use tl_collect::proc::smaps::{SmapsRead, SmapsRegion, parse_smaps, read_smaps, rss_by_start};
+
+#[test]
+fn smaps_regions_parsed() {
+    let mut out = Vec::new();
+    parse_smaps(&fixture_bytes("process-edge", "proc/4201/smaps"), &mut out).expect("parse");
+    assert_eq!(
+        out,
+        vec![
+            SmapsRegion {
+                start: 0x55d0_c1a2_e000,
+                end: 0x55d0_c1b4_f000,
+                rss: 1024 * 1024,
+                pss: 1024 * 1024,
+                swap: 8 * 1024,
+            },
+            SmapsRegion {
+                start: 0x7f3a_1000_0000,
+                end: 0x7f3a_1020_0000,
+                rss: 2560 * 1024,
+                pss: 512 * 1024,
+                swap: 0,
+            },
+            SmapsRegion {
+                start: 0x7f3a_2000_0000,
+                end: 0x7f3a_2002_1000,
+                rss: 512 * 1024,
+                pss: 512 * 1024,
+                swap: 16 * 1024,
+            },
+        ]
+    );
+    let by_start = rss_by_start(&out);
+    assert_eq!(by_start.len(), 3);
+    assert_eq!(by_start[&0x7f3a_1000_0000], 2560 * 1024);
+}
+
+#[test]
+fn smaps_path_with_spaces() {
+    let buf = b"7f00aa000000-7f00aa001000 r--p 00001000 08:01 42                         /opt/My App/lib.so\n\
+Rss:                   4 kB\n\
+Pss:                   2 kB\n\
+Swap:                  0 kB\n";
+    let mut out = Vec::new();
+    parse_smaps(buf, &mut out).expect("parse");
+    assert_eq!(
+        out,
+        vec![SmapsRegion {
+            start: 0x7f00_aa00_0000,
+            end: 0x7f00_aa00_1000,
+            rss: 4096,
+            pss: 2048,
+            swap: 0,
+        }]
+    );
+}
+
+#[test]
+fn smaps_bad_header_error() {
+    let mut out = Vec::new();
+    for buf in [
+        &b"this is not a header line\nRss: 4 kB\n"[..],
+        b"zzzz-1000 rw-p 00000000 00:00 0\n",
+        b"1000-2000 rw-p\n",
+        b"Rss: 4 kB\n",
+    ] {
+        let err = parse_smaps(buf, &mut out).unwrap_err();
+        assert!(
+            matches!(err, CollectError::ProcParse { file: "smaps", .. }),
+            "{err:?}"
+        );
+    }
+}
+
+#[test]
+fn smaps_self_has_rss() {
+    let dir = open_dir(&std::path::PathBuf::from(format!(
+        "/proc/{}",
+        std::process::id()
+    )));
+    let (mut buf, mut out) = (Vec::new(), Vec::new());
+    assert_eq!(
+        read_smaps(dir.as_fd(), &mut buf, &mut out).expect("read own smaps"),
+        SmapsRead::Ok
+    );
+    assert!(out.iter().any(|r| r.rss > 0), "{} regions", out.len());
+}
