@@ -4,6 +4,7 @@ pub mod components;
 pub mod demand;
 pub mod hub;
 pub mod i18n;
+pub mod text;
 pub mod theme;
 
 #[cfg(any(test, feature = "test-hooks"))]
