@@ -1,6 +1,7 @@
 //! Per-process readers for /proc/<pid>.
 pub mod cgroup;
 pub mod detail;
+pub mod extras_p2;
 pub mod fdcount;
 pub mod handles;
 pub mod io;

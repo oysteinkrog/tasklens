@@ -15,6 +15,7 @@ use std::cell::Cell;
 use std::fmt::Write as _;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
+use std::time::Instant;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -23,8 +24,8 @@ use smallvec::SmallVec;
 use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{
-    AppCgroupSample, Coverage, GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
-    ProcessRecord,
+    AppCgroupSample, Coverage, GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
+    ProcessMeta, ProcessRecord,
 };
 use tl_model::system::CpuSet;
 use tl_model::table::{Manager, UnitRef};
@@ -39,9 +40,11 @@ use crate::apps::naming::{
 use crate::apps::{AppInfo, AppPaths, AppResolver, ResolveInput, is_app_primary};
 use crate::counters::{Clock, resumed_between};
 use crate::parse::topology::parse_cpu_list;
+use crate::pkg::{PackageIndex, Pacman};
 use crate::proc::cgroup::{
     CgroupPath, CgroupRoot, CgroupStats, CgroupWant, UserPlacement, placement,
 };
+use crate::proc::extras_p2::ExtrasP2Reader;
 use crate::proc::fdcount::{FdCount, fd_count};
 use crate::proc::io::{IoRead, PidIo, read_io_at};
 use crate::proc::meta::{ExeLink, Interner, MetaCache, MetaChange, RawMeta, ReadBufs, UserNames};
@@ -636,8 +639,9 @@ impl AppUnitSample {
 }
 
 /// The result of one `ProcessSampler::sweep`. `records`, `extras` and `side` have the same
-/// length and order (sorted by `ProcessKey`). Reuse one value across sweeps: the vectors keep
-/// their capacity.
+/// length and order (sorted by `ProcessKey`); so does `extras_p2` when `detail_keys` is not
+/// empty, and it is empty otherwise. Reuse one value across sweeps: the vectors keep their
+/// capacity.
 #[derive(Default)]
 pub struct SweepOutput {
     pub observed_start: TimeNs,
@@ -645,6 +649,9 @@ pub struct SweepOutput {
     pub records: Vec<ProcessRecord>,
     pub extras: Vec<ProcessExtras>,
     pub side: Vec<SweepSide>,
+    /// P2 columns (E05-035): filled for `detail_keys`, `ProcessExtrasP2::default()` for every
+    /// other record.
+    pub extras_p2: Vec<ProcessExtrasP2>,
     pub apps: Vec<AppUnitSample>,
     pub coverage: Coverage,
 }
@@ -652,7 +659,7 @@ pub struct SweepOutput {
 /// What the engine passes to `ProcessSampler::sweep` besides `SweepCtx`.
 pub struct SweepInputs<'a> {
     pub protect: &'a ProtectInputs,
-    /// Keys whose PSS and USS are read when `want_pss` is set.
+    /// Keys whose PSS and USS are read when `want_pss` is set, and whose P2 columns are read.
     pub detail_keys: &'a [ProcessKey],
     pub want_pss: bool,
     /// Pids that own a KWin window (P2). `None` in P1.
@@ -694,6 +701,8 @@ struct Scratch {
     pid_index: FxHashMap<u32, usize>,
     live: FxHashSet<ProcessKey>,
     sorted: Vec<(ProcessRecord, ProcessExtras, SweepSide)>,
+    sorted_p2: Vec<(ProcessKey, ProcessExtrasP2)>,
+    detail: FxHashSet<ProcessKey>,
     rollups: Vec<(ProcessKey, RollupRead)>,
     rollup_buf: Vec<u8>,
     coverage: CoverageBuilder,
@@ -729,6 +738,8 @@ pub struct ProcessSampler {
     bufs: ReadBufs,
     empty: Arc<str>,
     scratch: Scratch,
+    p2: ExtrasP2Reader,
+    pkg: PackageIndex,
 }
 
 impl ProcessSampler {
@@ -755,7 +766,14 @@ impl ProcessSampler {
             bufs: ReadBufs::default(),
             empty,
             scratch: Scratch::default(),
+            p2: ExtrasP2Reader::new(),
+            pkg: PackageIndex::new(Box::new(Pacman::default())),
         })
+    }
+
+    /// The package index, so the engine can run `run_batch` in its own job.
+    pub fn pkg_mut(&mut self) -> &mut PackageIndex {
+        &mut self.pkg
     }
 
     /// Test hook: `clock` returns (CLOCK_BOOTTIME ns, CLOCK_MONOTONIC ns) in place of the real
@@ -776,8 +794,13 @@ impl ProcessSampler {
         out.records.clear();
         out.extras.clear();
         out.side.clear();
+        out.extras_p2.clear();
         out.apps.clear();
         out.coverage = Coverage::default();
+        // P2 columns only for the visible rows; nothing per record when there are none.
+        let p2_root = (!inp.detail_keys.is_empty()).then(|| self.core.root.clone());
+        self.scratch.detail.clear();
+        self.scratch.detail.extend(inp.detail_keys.iter().copied());
 
         let now = (self.core.clock)().0;
         self.apps.begin_sweep(&self.cg, ctx.self_uid, now);
@@ -791,6 +814,8 @@ impl ProcessSampler {
             bufs,
             empty,
             scratch,
+            p2,
+            pkg,
             ..
         } = self;
         let Scratch {
@@ -799,6 +824,7 @@ impl ProcessSampler {
             search,
             cpus,
             app_pids,
+            detail,
             ..
         } = scratch;
         app_pids.clear();
@@ -820,6 +846,13 @@ impl ProcessSampler {
             search,
             cpus,
             app_pids,
+            p2: p2_root.as_ref().map(|root| P2Build {
+                root,
+                reader: p2,
+                pkg,
+                detail,
+                now: Instant::now(),
+            }),
             out,
         };
         let (start, end) = core.sweep_core_with(ctx, swept, &mut |p, dir| build.push(p, dir));
@@ -848,6 +881,7 @@ impl ProcessSampler {
         self.apps.end_sweep(live, out.observed_end);
         self.metas.retain(|k, _| live.contains(k));
         self.flag_since.retain(|k, _| live.contains(k));
+        self.p2.retain_live(live);
     }
 
     /// Step 5: the protected set from this sweep's processes, then the flags of each record.
@@ -982,8 +1016,22 @@ impl ProcessSampler {
             .retain(|id, _| units.iter().any(|u| u.cgroup_id == *id));
     }
 
-    /// Step 10: sorts `records`, `extras` and `side` together by `ProcessKey`.
+    /// Step 10: sorts `records`, `extras`, `side` and a non-empty `extras_p2` together by
+    /// `ProcessKey`.
     fn sort(&mut self, out: &mut SweepOutput) {
+        if !out.extras_p2.is_empty() {
+            // Keys are unique, so sorting by key gives the same order as `records` below.
+            let sorted_p2 = &mut self.scratch.sorted_p2;
+            sorted_p2.clear();
+            sorted_p2.extend(
+                out.records
+                    .iter()
+                    .map(|r| r.key)
+                    .zip(out.extras_p2.drain(..)),
+            );
+            sorted_p2.sort_unstable_by_key(|(k, _)| *k);
+            out.extras_p2.extend(sorted_p2.drain(..).map(|(_, p)| p));
+        }
         let sorted = &mut self.scratch.sorted;
         sorted.clear();
         sorted.extend(
@@ -1053,7 +1101,18 @@ struct Build<'a, 'b> {
     search: &'a mut String,
     cpus: &'a mut SmallVec<[u16; 64]>,
     app_pids: &'a FxHashSet<u32>,
+    /// `Some` when `detail_keys` is not empty.
+    p2: Option<P2Build<'a>>,
     out: &'a mut SweepOutput,
+}
+
+/// What `Build` needs to read the P2 columns of the detail keys (E05-035).
+struct P2Build<'a> {
+    root: &'a SysRoot,
+    reader: &'a mut ExtrasP2Reader,
+    pkg: &'a mut PackageIndex,
+    detail: &'a FxHashSet<ProcessKey>,
+    now: Instant,
 }
 
 impl Build<'_, '_> {
@@ -1187,6 +1246,30 @@ impl Build<'_, '_> {
             class: app.class,
             is_app_primary: primary,
         });
+        if let Some(b) = self.p2.as_mut() {
+            let entry = if b.detail.contains(&key) {
+                // A failed status read shows as the Swap validity; then the status fields are
+                // zeros, not values.
+                let status_ok = matches!(
+                    p.validity.get(ProcessField::Swap),
+                    Validity::Valid | Validity::Unsupported
+                );
+                b.reader.read(
+                    b.root,
+                    dir,
+                    key,
+                    &p.stat,
+                    status_ok.then_some(&p.status),
+                    raw,
+                    b.pkg,
+                    b.now,
+                    self.bufs,
+                )
+            } else {
+                ProcessExtrasP2::default()
+            };
+            self.out.extras_p2.push(entry);
+        }
     }
 }
 
