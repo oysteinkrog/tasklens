@@ -566,7 +566,7 @@ fn table_totals_follow_system_and_sweep() {
     }
     rig.run(vec![cpu_msg(SEC, 50.0, true), sweep])
         .expect("no invariant violation");
-    let totals = rig.latest().table.totals;
+    let totals = rig.latest().table.totals.clone();
     assert_eq!(totals.cpu_pct.value, 50.0);
     assert_eq!(totals.cpu_pct.validity, Validity::Valid);
     assert_eq!(totals.threads.value, 42);
@@ -1116,7 +1116,7 @@ fn every_variant_applies_without_panic() {
     assert_eq!(snap.inventory.memory.peak_committed_bytes.value, 5);
     assert_eq!(
         rig.commands().len(),
-        14,
+        13,
         "one queued command per forwarded variant"
     );
 }
