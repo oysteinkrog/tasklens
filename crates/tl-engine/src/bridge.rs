@@ -3,7 +3,7 @@
 //!
 //! No public signature here names an asupersync type (D-001). The one exception is `HookCtx`,
 //! which is `#[doc(hidden)]` and used only inside the crate and by E11's gate factory.
-//! `Engine::start` (part 2) and the shutdown steps (E09-A2) are added by later beads.
+//! The shutdown steps (E09-A2) are added by a later bead.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::{Runtime, RuntimeHandle};
+use tl_collect::sysroot::{SysRoot, read_trimmed};
 use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError};
@@ -18,13 +19,23 @@ use tl_model::demand::Demand;
 use tl_model::history::RecordSink;
 use tl_model::journal::{JournalError, JournalEvent, JournalHandle, JournalQuery};
 use tl_model::settings::EngineSettings;
-use tl_model::snapshot::Snapshot;
+use tl_model::snapshot::{ComponentHeader, Snapshot, WindowsSnapshot};
 use tl_model::time::BootId;
+use tl_model::validity::Validity;
 
+use crate::EngineError;
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
-use crate::reducer::ActionGate;
+use crate::reducer::{ActionGate, Publisher};
+use crate::session::{RootEndpoints, engine_root};
+use crate::source::WorkerControl;
 use crate::update::EngineMsg;
+use crate::workers::workers_for;
+
+/// Capacity of the action event channel (ADR-005).
+pub const EVENTS_CAPACITY: usize = 256;
+/// Capacity of the command and update queue (ADR-005).
+pub const MSGS_CAPACITY: usize = 256;
 
 /// Opens one journal stream. Installed by E14-A4 through `EngineHooks`.
 pub type JournalSpawner = Arc<dyn Fn(JournalQuery) -> JournalHandle + Send + Sync>;
@@ -87,10 +98,6 @@ struct Inner {
 impl EngineHandle {
     /// Builds a handle from the channel ends `Engine::start` creates. The runtime slots start
     /// empty; the last demand starts as the demand channel's current value.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "Engine::start (E09) is the first caller")
-    )]
     pub(crate) fn new(
         latest: Arc<ArcSwap<Snapshot>>,
         wake_rx: async_channel::Receiver<()>,
@@ -117,6 +124,101 @@ impl EngineHandle {
             }),
         }
     }
+}
+
+/// Starts the engine. `tl-app` calls this once (ADR-001).
+pub struct Engine;
+
+impl Engine {
+    /// Builds the runtime and the channels, publishes the empty snapshot and spawns
+    /// `engine_root` in the root region, so shutdown cancellation reaches it (ADR-004).
+    pub fn start(config: EngineConfig, hooks: EngineHooks) -> Result<EngineHandle, EngineError> {
+        let rt = crate::runtime::build_runtime()
+            .map_err(|e| EngineError::Runtime(e.to_string().into()))?;
+        let boot_id = read_boot_id(&config.sys_root);
+
+        let (wake_tx, wake_rx) = async_channel::bounded::<()>(1);
+        let (events_tx, events_rx) = async_channel::bounded::<ActionEvent>(EVENTS_CAPACITY);
+        let (msgs_tx, msgs_rx) = mpsc::channel::<EngineMsg>(MSGS_CAPACITY);
+        let (demand_tx, demand_rx) = watch::channel(Demand::default());
+        let (settings_tx, settings_rx) = watch::channel(EngineSettings::default());
+        let (control_tx, _control_rx) = watch::channel(WorkerControl::default());
+        let latest = Arc::new(ArcSwap::from_pointee(empty_snapshot(boot_id)));
+
+        let journal = hooks.journal.clone();
+        let workers = workers_for(config.mode);
+        let ep = RootEndpoints {
+            msgs: msgs_rx,
+            msgs_tx: msgs_tx.clone(),
+            demand: demand_rx,
+            settings: settings_rx,
+            control: control_tx,
+            publisher: Publisher {
+                latest: latest.clone(),
+                wake_tx,
+                stop_publishing: false,
+            },
+            events_tx,
+            config: Arc::new(config),
+            boot_id,
+            hooks,
+            workers,
+            next_sequence: 0,
+        };
+        let rt_handle = rt.handle();
+        rt_handle
+            .try_spawn_with_cx(move |cx| engine_root(cx, ep))
+            .map_err(|e| EngineError::Spawn(e.to_string().into()))?;
+
+        let handle = EngineHandle::new(
+            latest,
+            wake_rx,
+            events_rx,
+            demand_tx,
+            settings_tx,
+            msgs_tx,
+            journal,
+        );
+        *handle
+            .inner
+            .rt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(rt);
+        *handle
+            .inner
+            .rt_handle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(rt_handle);
+        Ok(handle)
+    }
+}
+
+/// The folded boot id from `proc/sys/kernel/random/boot_id` under `root` (ADR-003). A missing
+/// or malformed file gives `BootId(0)` and a warning; the engine still runs.
+fn read_boot_id(root: &SysRoot) -> BootId {
+    let mut buf = Vec::new();
+    let parsed = read_trimmed(&root.proc_path("sys/kernel/random/boot_id"), &mut buf)
+        .ok()
+        .and_then(|bytes| std::str::from_utf8(bytes).ok())
+        .and_then(BootId::from_uuid_text);
+    parsed.unwrap_or_else(|| {
+        tracing::warn!(target: "tasklens::engine", "boot id not readable; using 0");
+        BootId(0)
+    })
+}
+
+/// Sequence 0 and epoch 1, the first session's epoch. Every component is `WarmingUp` except
+/// `windows`, which is `Unsupported` until the KWin worker publishes, as in `Reducer::new`.
+fn empty_snapshot(boot_id: BootId) -> Snapshot {
+    let mut snapshot = Snapshot::empty(boot_id, 1);
+    snapshot.windows = Arc::new(WindowsSnapshot {
+        header: ComponentHeader {
+            validity: Validity::Unsupported,
+            ..snapshot.windows.header
+        },
+        ..(*snapshot.windows).clone()
+    });
+    snapshot
 }
 
 /// A journal handle whose stream yields one `Error(err)` and then ends.
@@ -187,7 +289,12 @@ impl EngineClient for EngineHandle {
 mod tests {
     use super::*;
 
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
     use tl_model::table::{Manager, UnitRef};
+
+    use crate::config::EngineMode;
 
     /// Command queue size from ADR-005.
     const QUEUE: usize = 256;
@@ -312,5 +419,37 @@ mod tests {
             events.try_recv(),
             Ok(JournalEvent::Error(JournalError::Timeout))
         ));
+    }
+
+    #[test]
+    fn start_returns_empty_snapshot() {
+        let base =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../tl-collect/tests/fixtures/minimal-vm");
+        let config = EngineConfig::new(EngineMode::LowMemory, base.join("state"))
+            .with_sys_root(SysRoot::at(&base));
+        let begin = Instant::now();
+        let handle = Engine::start(config, EngineHooks::default()).expect("engine starts");
+        assert!(
+            begin.elapsed() < Duration::from_millis(100),
+            "start took {:?}",
+            begin.elapsed()
+        );
+        let snap = handle.latest();
+        assert_eq!(snap.sequence, 0);
+        // The fixture's boot id is 00000000-0000-4000-8000-000000000001 (R-267).
+        assert_eq!(
+            snap.boot_id,
+            BootId::from_uuid_text("00000000-0000-4000-8000-000000000001").unwrap()
+        );
+        assert_eq!(snap.windows.header.validity, Validity::Unsupported);
+        assert_eq!(snap.system.header.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn missing_boot_id_reads_zero() {
+        assert_eq!(
+            read_boot_id(&SysRoot::at(Path::new("/nonexistent"))),
+            BootId(0)
+        );
     }
 }

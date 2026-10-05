@@ -22,7 +22,7 @@ pub mod workers;
 // Chain-edit lines added by later beads: dbus (E08-A2); session, reducer, bridge (E09);
 // actions (E11); gpu (E13); launcher, opener (E14); helper (E29); history_query (E30).
 
-pub use bridge::{EngineHandle, EngineHooks}; // E09-019 appends `Engine`, E09-A2 appends `ShutdownReport` (R-262).
+pub use bridge::{Engine, EngineHandle, EngineHooks}; // E09-A2 appends `ShutdownReport` (R-262).
 pub use config::{EngineConfig, EngineMode};
 
 /// The hooks `EngineHooks::default()` returns. Later beads replace one field each: E11-A1 the
