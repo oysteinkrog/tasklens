@@ -13,11 +13,10 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use gpui_kit::base::{Switch, SwitchThumb, SwitchTrack};
+use gpui_kit::base::{Switch, SwitchThumb, SwitchTrack, Transition, transition};
 use gpui_kit::{
     App, ElementId, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Transition, Window, div, gpui, prelude::FluentBuilder as _, px, rgb,
-    transition,
+    SharedString, Styled, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 use super::focus::TlFocusRing;
