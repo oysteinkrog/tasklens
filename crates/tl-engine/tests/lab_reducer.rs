@@ -10,17 +10,35 @@ use arc_swap::ArcSwap;
 use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
+use smallvec::SmallVec;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
-use tl_engine::source::WorkerControl;
-use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
-use tl_model::actions::ActionEvent;
-use tl_model::devices::DeviceCatalog;
-use tl_model::health::{SourceId, SourceState};
-use tl_model::history::RecordSink;
-use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+use tl_engine::source::{WorkerCommand, WorkerControl};
+use tl_engine::update::{
+    ConnectionsUpdate, CpuCoreSample, CpuSample, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
+    DeviceList, DiskSample, EngineMsg, GpuInfoUpdate, GpuSample, GpuStaticInfo, HelperUpdate,
+    MemorySample, NetSample, ProcessSweep, SensorSample, ServicesUpdate, SourceUpdate,
+    StartupUpdate,
+};
+use tl_model::actions::{
+    ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, Signal,
+};
+use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
+use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
+use tl_model::gpu_proto::ApiVersions;
+use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
+use tl_model::history::{HistoryMetric, HistoryRange, RecordSink};
+use tl_model::ids::{DeviceIdx, MetricId, ProcessKey, SeriesId};
 use tl_model::process::ProcessRecord;
 use tl_model::series::{Sample, SampleFlags};
-use tl_model::snapshot::{ComponentMask, Snapshot};
+use tl_model::snapshot::{BatteryDetails, ComponentMask, DiskDetails, ServiceBackend, Snapshot};
+use tl_model::system::{
+    CpuSet, CpuTopology, CpuTotals, DiskTotals, GpuTotals, LinkState, MemoryTotals, Metric,
+    NetTotals,
+};
+use tl_model::table::{
+    Manager, SysColumnId, SysSortSpec, SysTable, SysTableQuery, TableQuery, Total,
+};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 
@@ -36,8 +54,8 @@ struct Rig {
     reducer: Option<Reducer>,
     publisher: Option<Publisher>,
     wake_rx: Option<async_channel::Receiver<()>>,
-    _control_rx: watch::Receiver<WorkerControl>,
-    _events_rx: async_channel::Receiver<ActionEvent>,
+    control_rx: watch::Receiver<WorkerControl>,
+    events_rx: async_channel::Receiver<ActionEvent>,
 }
 
 type RunOutput = Arc<Mutex<Option<(Reducer, Publisher, Result<(), InvariantViolation>)>>>;
@@ -60,8 +78,8 @@ impl Rig {
             reducer: Some(Reducer::new(1, BOOT, control_tx, events_tx)),
             publisher: Some(publisher),
             wake_rx: Some(wake_rx),
-            _control_rx: control_rx,
-            _events_rx: events_rx,
+            control_rx,
+            events_rx,
         }
     }
 
@@ -292,4 +310,813 @@ fn record_sink_called_when_installed() {
     assert_eq!(counts[1].load(Ordering::Relaxed), 2, "once per sweep");
     assert_eq!(counts[0].load(Ordering::Relaxed), 0);
     assert_eq!(counts[2].load(Ordering::Relaxed), 0);
+}
+
+// ---- apply.rs (E09-007) ----
+
+const MS: TimeNs = 1_000_000;
+
+fn src(update: SourceUpdate) -> EngineMsg {
+    EngineMsg::Source(update)
+}
+
+fn cmd(command: Command) -> EngineMsg {
+    EngineMsg::Command(command)
+}
+
+fn cpus(n: u16) -> CpuSet {
+    let mut set = CpuSet::empty();
+    for id in 0..n {
+        set.insert(id);
+    }
+    set
+}
+
+fn cpu_msg(t_ns: TimeNs, pct: f32, topology: bool) -> EngineMsg {
+    let topology = topology.then(|| {
+        Arc::new(CpuTopology {
+            online: cpus(2),
+            cores: Arc::from([]),
+        })
+    });
+    src(SourceUpdate::Cpu(CpuSample {
+        t_ns,
+        totals: CpuTotals {
+            util_pct: Metric::valid(pct),
+            kernel_pct: Metric::valid(pct / 2.0),
+            ..CpuTotals::default()
+        },
+        irq_pct: 0.0,
+        per_cpu: (0..2)
+            .map(|cpu| CpuCoreSample {
+                cpu,
+                pct,
+                kernel_pct: 0.0,
+                freq_mhz: Some(3000),
+                validity: Validity::Valid,
+            })
+            .collect(),
+        freq_mhz: Some(3000),
+        temp_c: None,
+        temp_validity: Validity::Unsupported,
+        topology,
+        validity: Validity::Valid,
+    }))
+}
+
+fn disk_id(name: &str, minor: u32) -> DeviceIdentity {
+    DeviceIdentity::Disk {
+        major: 259,
+        minor,
+        name: Arc::from(name),
+        wwn_or_serial: None,
+    }
+}
+
+fn net_id(name: &str, ifindex: u32) -> DeviceIdentity {
+    DeviceIdentity::Net {
+        netns_ino: 1,
+        ifindex,
+        name: Arc::from(name),
+    }
+}
+
+fn disk_totals(active: f32, read: f64) -> DiskTotals {
+    DiskTotals {
+        device: DeviceIdx(0),
+        active_pct: Metric::valid(active),
+        read_bps: Metric::valid(read),
+        write_bps: Metric::valid(0.0),
+        response_ms: Metric::valid(1.0),
+        read_total: 0,
+        written_total: 0,
+        capacity: 0,
+        temp_c: Metric::with(Validity::Unsupported),
+    }
+}
+
+fn net_totals(rx: f64) -> NetTotals {
+    NetTotals {
+        device: DeviceIdx(0),
+        rx_bps: Metric::valid(rx),
+        tx_bps: Metric::valid(0.0),
+        rx_total: 0,
+        tx_total: 0,
+        link_speed_mbps: Metric::with(Validity::Unsupported),
+        state: LinkState::Up,
+    }
+}
+
+fn disks_msg(t_ns: TimeNs, disks: Vec<(DeviceIdentity, DiskTotals)>) -> EngineMsg {
+    src(SourceUpdate::Disks(DiskSample { t_ns, disks }))
+}
+
+fn battery(native_path: &str, pct: f32) -> BatteryDetails {
+    BatteryDetails {
+        kind: Arc::from("Battery"),
+        vendor: Total::default(),
+        model: Total::default(),
+        serial: Total::default(),
+        native_path: Arc::from(native_path),
+        percentage: Total {
+            value: pct,
+            validity: Validity::Valid,
+        },
+        energy_wh: Total::default(),
+        energy_rate_w: Total::default(),
+        voltage_v: Total::default(),
+        state: Arc::from("Discharging"),
+        time_to_full_s: Total::default(),
+        time_to_empty_s: Total::default(),
+        charge_cycles: Total::default(),
+        technology: Arc::from("Li-ion"),
+        capacity_pct: Total::default(),
+        energy_empty_wh: Total::default(),
+        energy_full_wh: Total::default(),
+        energy_full_design_wh: Total::default(),
+        voltage_min_design_v: Total::default(),
+        voltage_max_design_v: Total::default(),
+        power_supply: true,
+        charge_threshold: None,
+        temperature_c: Total::default(),
+        history: None,
+    }
+}
+
+fn text(v: &str) -> Total<Arc<str>> {
+    Total {
+        value: Arc::from(v),
+        validity: Validity::Valid,
+    }
+}
+
+impl Rig {
+    fn idx(&self, id: &DeviceIdentity) -> DeviceIdx {
+        self.latest()
+            .devices
+            .find(id)
+            .map(|e| e.idx)
+            .expect("device in the catalog")
+    }
+
+    fn last_sample(&self, id: SeriesId) -> Sample {
+        *self
+            .latest()
+            .series
+            .get(id)
+            .expect("series exists")
+            .samples
+            .last()
+            .expect("series has a sample")
+    }
+
+    fn commands(&self) -> Arc<[tl_engine::source::QueuedCommand]> {
+        self.control_rx.borrow_and_clone().commands
+    }
+}
+
+#[test]
+fn cpu_update_appends_series() {
+    let mut rig = Rig::new();
+    rig.run(vec![cpu_msg(100 * MS, 50.0, true)])
+        .expect("no invariant violation");
+    let mut prev = rig.latest();
+    for step in 2..=5u64 {
+        rig.run(vec![cpu_msg(step * 100 * MS, 50.0, false)])
+            .expect("no invariant violation");
+        let next = rig.latest();
+        assert_eq!(next.series.header.version, prev.series.header.version + 1);
+        let view = next.series.get(CPU_TOTAL).expect("CPU_TOTAL exists");
+        assert_eq!(view.samples.len() as u64, step);
+        let last = view.samples.last().expect("a sample");
+        assert_eq!(last.value, 50.0);
+        assert!(last.flags.contains(SampleFlags::VALID));
+        assert!(!last.flags.contains(SampleFlags::GAP_BEFORE));
+        prev = next;
+    }
+    let core = rig.idx(&DeviceIdentity::CpuLogical { id: 1 });
+    assert_eq!(
+        rig.last_sample(SeriesId {
+            device: core,
+            metric: MetricId::CPU_TOTAL
+        })
+        .value,
+        50.0
+    );
+    assert_eq!(rig.latest().system.cpu_topology.online, cpus(2));
+}
+
+#[test]
+fn unknown_disk_identity_is_added() {
+    let mut rig = Rig::new();
+    let id = disk_id("nvme0n1", 0);
+    rig.run(vec![disks_msg(
+        SEC,
+        vec![(id.clone(), disk_totals(10.0, 1e6))],
+    )])
+    .expect("no invariant violation");
+    let idx = rig.idx(&id);
+    let snap = rig.latest();
+    assert!(
+        snap.series
+            .get(SeriesId {
+                device: idx,
+                metric: MetricId::DISK_READ
+            })
+            .is_some()
+    );
+    assert_eq!(snap.system.disks.len(), 1);
+    assert_eq!(snap.system.disks[0].0, idx);
+    assert_eq!(snap.system.disks[0].1.device, idx);
+}
+
+const SEC: TimeNs = 1_000_000_000;
+
+fn query(generation: u64) -> EngineMsg {
+    cmd(Command::SetTableQuery(TableQuery {
+        generation,
+        ..TableQuery::default()
+    }))
+}
+
+#[test]
+fn set_table_query_echoes_generation() {
+    let mut rig = Rig::new();
+    rig.run(vec![query(6)]).expect("no invariant violation");
+    let prev = rig.latest();
+    assert_eq!(prev.table.query_generation, 6);
+    rig.run(vec![query(7)]).expect("no invariant violation");
+    let next = rig.latest();
+    assert_eq!(next.table.query_generation, 7);
+    assert_eq!(next.table.rows, prev.table.rows);
+    let mut changed = SmallVec::new();
+    assert!(
+        next.changed_since(&prev, &mut changed)
+            .contains(ComponentMask::TABLE)
+    );
+}
+
+#[test]
+fn table_totals_follow_system_and_sweep() {
+    let mut rig = Rig::new();
+    let mut sweep = sweep_msg(SEC);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        s.system_threads = 42;
+        s.file_nr = Some(1234);
+    }
+    rig.run(vec![cpu_msg(SEC, 50.0, true), sweep])
+        .expect("no invariant violation");
+    let totals = rig.latest().table.totals;
+    assert_eq!(totals.cpu_pct.value, 50.0);
+    assert_eq!(totals.cpu_pct.validity, Validity::Valid);
+    assert_eq!(totals.threads.value, 42);
+    assert_eq!(totals.handles.value, 1234);
+
+    // A query change alone recomputes them too.
+    rig.run(vec![cpu_msg(2 * SEC, 75.0, false), query(3)])
+        .expect("no invariant violation");
+    let table = &rig.latest().table;
+    assert_eq!(table.totals.cpu_pct.value, 75.0);
+    assert_eq!(table.query_generation, 3);
+}
+
+#[test]
+fn refresh_now_is_forwarded() {
+    let mut rig = Rig::new();
+    rig.run(vec![cmd(Command::RefreshNow(SourceId::Cpu))])
+        .expect("no invariant violation");
+    let before = rig.commands().last().expect("one command").seq;
+    rig.run(vec![cmd(Command::RefreshNow(SourceId::Startup))])
+        .expect("no invariant violation");
+    let commands = rig.commands();
+    let last = commands.last().expect("a command");
+    assert_eq!(last.seq, before + 1);
+    assert_eq!(last.target, SourceId::Startup);
+    assert_eq!(last.command, WorkerCommand::RefreshNow);
+}
+
+#[test]
+fn forward_queue_keeps_newest_64() {
+    let mut rig = Rig::new();
+    let progress = Arc::clone(&rig.control_rx.borrow_and_clone().progress);
+    let msgs = (0..70)
+        .map(|_| cmd(Command::RefreshNow(SourceId::Disk)))
+        .collect();
+    rig.run(msgs).expect("no invariant violation");
+    let control = rig.control_rx.borrow_and_clone();
+    let seqs: Vec<u64> = control.commands.iter().map(|c| c.seq).collect();
+    assert_eq!(seqs, (7..=70).collect::<Vec<u64>>());
+    // R-276: forwarding keeps the session's progress Arc.
+    assert!(Arc::ptr_eq(&control.progress, &progress));
+}
+
+fn action(id: u64) -> ActionRequest {
+    ActionRequest {
+        id: ActionId(id),
+        kind: ActionKind::Signal(Signal::Term),
+        targets: SmallVec::new(),
+        privileged: false,
+    }
+}
+
+#[test]
+fn action_without_gate_is_rejected_unsupported() {
+    let mut rig = Rig::new();
+    rig.run(vec![cmd(Command::Action(action(9)))])
+        .expect("no invariant violation");
+    let event = rig.events_rx.try_recv().expect("one event");
+    assert_eq!(
+        event,
+        ActionEvent {
+            id: ActionId(9),
+            target: None,
+            state: ActionState::Rejected(RejectReason::Unsupported),
+        }
+    );
+    assert!(rig.events_rx.try_recv().is_err(), "exactly one event");
+}
+
+#[test]
+fn resume_bumps_reset_and_gaps() {
+    let mut rig = Rig::new();
+    let disk = disk_id("sda", 0);
+    rig.run(vec![
+        cpu_msg(SEC, 10.0, true),
+        disks_msg(SEC, vec![(disk.clone(), disk_totals(1.0, 1.0))]),
+    ])
+    .expect("no invariant violation");
+    let before = rig.control_rx.borrow_and_clone().reset_generation;
+    rig.run(vec![src(SourceUpdate::ResumeDetected {
+        id: SourceId::Logind,
+        t_ns: 2 * SEC,
+    })])
+    .expect("no invariant violation");
+    assert_eq!(
+        rig.control_rx.borrow_and_clone().reset_generation,
+        before + 1
+    );
+    rig.run(vec![
+        cpu_msg(3 * SEC, 10.0, false),
+        disks_msg(3 * SEC, vec![(disk.clone(), disk_totals(1.0, 1.0))]),
+    ])
+    .expect("no invariant violation");
+    let disk_idx = rig.idx(&disk);
+    let snap = rig.latest();
+    for view in snap.series.series.iter() {
+        let last = view.samples.last().expect("a sample");
+        assert!(
+            last.flags.contains(SampleFlags::GAP_BEFORE),
+            "{:?} has no gap",
+            view.id
+        );
+    }
+    assert!(
+        snap.series
+            .get(SeriesId {
+                device: disk_idx,
+                metric: MetricId::DISK_ACTIVE
+            })
+            .is_some()
+    );
+}
+
+#[test]
+fn aggregate_disk_max_and_sum() {
+    let mut rig = Rig::new();
+    rig.run(vec![disks_msg(
+        SEC,
+        vec![
+            (disk_id("sda", 0), disk_totals(30.0, 1_000_000.0)),
+            (disk_id("sdb", 16), disk_totals(70.0, 2_000_000.0)),
+        ],
+    )])
+    .expect("no invariant violation");
+    let agg = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::Disks));
+    let active = rig.last_sample(SeriesId {
+        device: agg,
+        metric: MetricId::DISK_ACTIVE,
+    });
+    let read = rig.last_sample(SeriesId {
+        device: agg,
+        metric: MetricId::DISK_READ,
+    });
+    assert_eq!(active.value, 70.0);
+    assert_eq!(read.value, 3_000_000.0);
+    assert!(read.flags.contains(SampleFlags::VALID));
+}
+
+fn net_desc(id: DeviceIdentity, kind: NetKind) -> DeviceDesc {
+    DeviceDesc {
+        identity: id,
+        display_name: Arc::from("if"),
+        parent: None,
+        persistent_key: Arc::from("net:if"),
+        net_kind: Some(kind),
+    }
+}
+
+#[test]
+fn aggregate_net_respects_visibility() {
+    let mut rig = Rig::new();
+    let (eno1, docker0) = (net_id("eno1", 2), net_id("docker0", 3));
+    rig.run(vec![
+        src(SourceUpdate::Devices(DeviceList {
+            t_ns: SEC,
+            kinds: DeviceKinds::NETS,
+            entries: vec![
+                net_desc(eno1.clone(), NetKind::Wired),
+                net_desc(docker0.clone(), NetKind::Virtual),
+            ],
+        })),
+        src(SourceUpdate::Nets(NetSample {
+            t_ns: SEC,
+            nets: vec![(eno1, net_totals(5000.0)), (docker0, net_totals(700.0))],
+        })),
+    ])
+    .expect("no invariant violation");
+    let agg = rig.idx(&DeviceIdentity::Aggregate(AggregateKind::Nets));
+    let rx = rig.last_sample(SeriesId {
+        device: agg,
+        metric: MetricId::NET_RX,
+    });
+    assert_eq!(rx.value, 5000.0);
+}
+
+#[test]
+fn battery_details_append_battery_pct() {
+    let mut rig = Rig::new();
+    let bat0 = DeviceIdentity::Battery {
+        native_path: Arc::from("BAT0"),
+    };
+    rig.run(vec![health_msg(0)])
+        .expect("no invariant violation");
+    let prev = rig.latest();
+    rig.run(vec![src(SourceUpdate::DeviceDetails(
+        DeviceDetailsUpdate::Batteries(vec![(bat0.clone(), battery("BAT0", 81.0))]),
+    ))])
+    .expect("no invariant violation");
+    let next = rig.latest();
+    let idx = rig.idx(&bat0);
+    let pct = rig.last_sample(SeriesId {
+        device: idx,
+        metric: MetricId::BATTERY_PCT,
+    });
+    assert_eq!(pct.value, 81.0);
+    assert_eq!(next.device_details.batteries.len(), 1);
+    let mut changed = SmallVec::new();
+    assert!(
+        next.changed_since(&prev, &mut changed)
+            .contains(ComponentMask::DEVICE_DETAILS)
+    );
+}
+
+#[test]
+fn disk_details_merge_by_source() {
+    let mut rig = Rig::new();
+    let sda = disk_id("sda", 0);
+    let from_udisks = DiskDetails {
+        model: text("X"),
+        ejectable: true,
+        ..DiskDetails::default()
+    };
+    let from_sysfs = DiskDetails {
+        model: text("Y"),
+        scheduler: text("mq-deadline"),
+        kind: Arc::from("SSD"),
+        ..DiskDetails::default()
+    };
+    rig.run(vec![
+        src(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks {
+            from: SourceId::Udisks,
+            entries: vec![(sda.clone(), from_udisks)],
+        })),
+        src(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks {
+            from: SourceId::Disk,
+            entries: vec![(sda.clone(), from_sysfs)],
+        })),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let [(idx, disk)] = &*snap.device_details.disks else {
+        panic!("one disk record");
+    };
+    assert_eq!(*idx, rig.idx(&sda));
+    assert_eq!(&*disk.model.value, "X");
+    assert!(disk.ejectable);
+    assert_eq!(&*disk.scheduler.value, "mq-deadline");
+    assert_eq!(&*disk.kind, "SSD");
+
+    // A UDisks list without the disk drops the UDisks fields.
+    rig.run(vec![src(SourceUpdate::DeviceDetails(
+        DeviceDetailsUpdate::Disks {
+            from: SourceId::Udisks,
+            entries: Vec::new(),
+        },
+    ))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(&*snap.device_details.disks[0].1.model.value, "Y");
+    assert!(!snap.device_details.disks[0].1.ejectable);
+}
+
+#[test]
+fn device_commands_forward_to_owner() {
+    let mut rig = Rig::new();
+    let disk: Arc<str> = Arc::from("sda");
+    let cases = [
+        (DeviceCommand::FetchPublicIp, SourceId::Inventory),
+        (
+            DeviceCommand::SmartRead {
+                disk: disk.clone(),
+                update: false,
+            },
+            SourceId::Udisks,
+        ),
+        (DeviceCommand::Eject { seq: 1, disk }, SourceId::Udisks),
+        (
+            DeviceCommand::BatteryHistory {
+                native_path: Arc::from("BAT0"),
+            },
+            SourceId::UPower,
+        ),
+    ];
+    for (device, target) in cases {
+        rig.run(vec![cmd(Command::Device(device.clone()))])
+            .expect("no invariant violation");
+        let commands = rig.commands();
+        let last = commands.last().expect("a command");
+        assert_eq!(last.target, target);
+        assert_eq!(last.command, WorkerCommand::Device(device));
+    }
+}
+
+#[test]
+fn helper_session_without_tx_is_dropped() {
+    let mut rig = Rig::new();
+    assert!(rig.reducer().helper_tx.is_none());
+    rig.run(vec![
+        cmd(Command::StartHelperSession),
+        cmd(Command::EndHelperSession),
+        cmd(Command::SetupStatus),
+    ])
+    .expect("no invariant violation");
+    assert!(rig.commands().is_empty(), "nothing forwarded to workers");
+}
+
+#[test]
+fn helper_session_with_tx_is_sent() {
+    let mut rig = Rig::new();
+    let (tx, mut rx) = mpsc::channel(4);
+    rig.reducer().helper_tx = Some(tx);
+    rig.run(vec![
+        cmd(Command::StartHelperSession),
+        cmd(Command::RunSetup {
+            step: SetupStep::RaplEnable,
+        }),
+    ])
+    .expect("no invariant violation");
+    use tl_engine::reducer::HelperCommand;
+    assert_eq!(rx.try_recv().ok(), Some(HelperCommand::Start));
+    assert_eq!(
+        rx.try_recv().ok(),
+        Some(HelperCommand::RunSetup(SetupStep::RaplEnable))
+    );
+}
+
+fn every_source_update() -> Vec<SourceUpdate> {
+    vec![
+        SourceUpdate::Health {
+            id: SourceId::Connections,
+            state: SourceState::Failed,
+            last_error: Some(Arc::from("boom")),
+            t_ns: 0,
+        },
+        SourceUpdate::ResumeDetected {
+            id: SourceId::Logind,
+            t_ns: 0,
+        },
+        SourceUpdate::Sleep {
+            entering: true,
+            t_ns: 0,
+        },
+        SourceUpdate::Cpu(CpuSample {
+            t_ns: SEC,
+            totals: CpuTotals::default(),
+            irq_pct: 0.0,
+            per_cpu: Vec::new(),
+            freq_mhz: None,
+            temp_c: None,
+            temp_validity: Validity::default(),
+            topology: None,
+            validity: Validity::WarmingUp,
+        }),
+        SourceUpdate::Memory(MemorySample {
+            t_ns: SEC,
+            totals: MemoryTotals {
+                validity: Validity::Valid,
+                committed: 5,
+                ..MemoryTotals::default()
+            },
+            zram: Vec::new(),
+            validity: Validity::Valid,
+        }),
+        SourceUpdate::Disks(DiskSample {
+            t_ns: SEC,
+            disks: vec![(disk_id("sda", 0), disk_totals(1.0, 1.0))],
+        }),
+        SourceUpdate::Nets(NetSample {
+            t_ns: SEC,
+            nets: vec![(net_id("eno1", 2), net_totals(1.0))],
+        }),
+        SourceUpdate::Sensors(SensorSample {
+            t_ns: SEC,
+            readings: Vec::new(),
+        }),
+        SourceUpdate::Devices(DeviceList {
+            t_ns: SEC,
+            kinds: DeviceKinds::DISKS,
+            entries: Vec::new(),
+        }),
+        SourceUpdate::Gpu(GpuSample {
+            t_ns: SEC,
+            devices: vec![(
+                DeviceIdentity::Gpu {
+                    uuid: [0; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                GpuTotals {
+                    device: DeviceIdx(0),
+                    util_pct: Metric::valid(5.0),
+                    mem_util_pct: Metric::default(),
+                    mem_used: Metric::valid(1024),
+                    mem_total: Metric::valid(4096),
+                    shared_used: Metric::default(),
+                    shared_total: Metric::default(),
+                    enc_pct: Metric::default(),
+                    dec_pct: Metric::default(),
+                    temp_c: Metric::default(),
+                    power_w: Metric::default(),
+                    power_limit_w: Metric::default(),
+                    clock_gfx_mhz: Metric::default(),
+                    clock_mem_mhz: Metric::default(),
+                    fan_pct: Metric::default(),
+                    pcie_rx_bps: Metric::default(),
+                    pcie_tx_bps: Metric::default(),
+                },
+            )],
+            processes: Some(Vec::new()),
+        }),
+        SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![GpuStaticInfo {
+                identity: DeviceIdentity::Gpu {
+                    uuid: [0; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                name: Arc::from("Card"),
+                mem_total: 0,
+                power_limit_mw: None,
+                driver: Arc::from(""),
+                nvml: Arc::from(""),
+                supports_process_util: false,
+                persistent_key: Arc::from("gpu:0000:01:00.0"),
+            }],
+        }),
+        SourceUpdate::GpuApiVersions(ApiVersions {
+            devices: Vec::new(),
+        }),
+        SourceUpdate::Processes(ProcessSweep {
+            observed_start: SEC,
+            observed_end: SEC,
+            records: Vec::new(),
+            extras: Vec::new(),
+            extras_p2: Vec::new(),
+            app_stats: Vec::new(),
+            unit_stats: Vec::new(),
+            system_threads: 0,
+            file_nr: None,
+            online_cpus: 1,
+            low_memory: None,
+        }),
+        SourceUpdate::Details(tl_engine::update::DetailsUpdate::Pss {
+            t_ns: 0,
+            entries: Vec::new(),
+        }),
+        SourceUpdate::Connections(ConnectionsUpdate {
+            t_ns: 0,
+            records: Vec::new(),
+            validity: Validity::default(),
+        }),
+        SourceUpdate::ConnectionsDestroySupport(true),
+        SourceUpdate::Services(ServicesUpdate {
+            manager: Manager::System,
+            state: ManagerState::default(),
+            units: Vec::new(),
+            details: Vec::new(),
+            backend: ServiceBackend::Systemd,
+            validity: Validity::default(),
+        }),
+        SourceUpdate::Startup(StartupUpdate {
+            entries: Vec::new(),
+            validity: Validity::default(),
+        }),
+        SourceUpdate::Inventory(Box::default()),
+        SourceUpdate::Windows(Box::default()),
+        SourceUpdate::History(Arc::default()),
+        SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Cpu(Arc::default())),
+        SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Memory(Arc::default())),
+        SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Nets {
+            from: SourceId::NetworkManager,
+            entries: Vec::new(),
+        }),
+        SourceUpdate::Helper(HelperUpdate {
+            state: HelperState::default(),
+            start: None,
+        }),
+        SourceUpdate::Setup(Arc::default()),
+        SourceUpdate::ColorScheme(1),
+    ]
+}
+
+fn every_command() -> Vec<Command> {
+    let key = ProcessKey {
+        start_ticks: 100,
+        boot_id: BOOT,
+        pid: 7,
+    };
+    vec![
+        Command::SetTableQuery(TableQuery::default()),
+        Command::SetSysTableQuery(SysTableQuery {
+            table: SysTable::Startup,
+            generation: 1,
+            sort: SysSortSpec {
+                column: SysColumnId::all(SysTable::Startup)[0],
+                ascending: true,
+            },
+            filter: Arc::from(""),
+            expanded: Arc::from([]),
+            services: None,
+        }),
+        Command::Action(action(1)),
+        Command::RefreshNow(SourceId::Cpu),
+        Command::ResetBaselines,
+        Command::ReprobeSource(SourceId::Sensors),
+        Command::KWin(KWinCommand::Pick { seq: 1 }),
+        Command::DetailRefresh {
+            target: DetailTarget::Process(key),
+            tab: DetailTab::General,
+        },
+        Command::ComputeHashes(key),
+        Command::VerifyPackage(key),
+        Command::StringScan {
+            scan: ScanId(1),
+            key,
+            opts: StringScanOpts::default(),
+        },
+        Command::CancelStringScan(ScanId(1)),
+        Command::HandleSearch {
+            search: SearchId(1),
+            pattern: Arc::from("libc"),
+            include_maps: false,
+            privileged: false,
+        },
+        Command::CancelHandleSearch(SearchId(1)),
+        Command::HistoryQuery {
+            id: 1,
+            range: HistoryRange::Live,
+            what: HistoryWhat::TopAt {
+                t: 0,
+                metric: HistoryMetric::Cpu,
+                n: 3,
+            },
+        },
+        Command::HistoryDelete {
+            keys: Arc::from([key]),
+        },
+        Command::SetupStatus,
+        Command::RunSetup {
+            step: SetupStep::RaplEnable,
+        },
+        Command::Device(DeviceCommand::FetchPublicIp),
+        Command::StartHelperSession,
+        Command::EndHelperSession,
+    ]
+}
+
+#[test]
+fn every_variant_applies_without_panic() {
+    let mut rig = Rig::new();
+    let mut msgs: Vec<EngineMsg> = every_source_update().into_iter().map(src).collect();
+    msgs.extend(every_command().into_iter().map(cmd));
+    msgs.push(EngineMsg::ActionFinished { id: ActionId(1) });
+    msgs.push(EngineMsg::Tick);
+    rig.run(msgs).expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.connections.header.validity, Validity::Failed);
+    assert_eq!(snap.system.color_scheme, 1);
+    assert_eq!(snap.inventory.memory.peak_committed_bytes.value, 5);
+    assert_eq!(
+        rig.commands().len(),
+        14,
+        "one queued command per forwarded variant"
+    );
 }
