@@ -23,6 +23,7 @@ use asupersync::channel::{mpsc, watch};
 use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionId, ActionRequest};
 use tl_model::command::SetupStep;
+use tl_model::details::DetailsSnapshot;
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
@@ -30,9 +31,9 @@ use tl_model::ids::ProcessKey;
 use tl_model::process::{Coverage, ProcFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnectionsSnapshot, DetailsSnapshot, DeviceDetailsSnapshot,
-    InventorySnapshot, ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot,
-    StartupSnapshot, SystemSnapshot, WindowsSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, InventorySnapshot,
+    ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot, StartupSnapshot,
+    SystemSnapshot, WindowsSnapshot,
 };
 use tl_model::table::{ProcessTableView, SysTableQuery, TableQuery};
 use tl_model::time::{BootId, now_boot_ns};
