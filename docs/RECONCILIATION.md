@@ -1776,6 +1776,15 @@ only when they are shown. Pseudo rows are never counted (UI-PRC-018). `shown` st
 filter, so the status chip reads "41 / 296 Processes" against the visible total.
 - Edits: follow-up to bead 8q0.14 in `crates/tl-engine/src/reducer/table.rs`.
 
+### R-281 Helper cgroup writes use a validated fd; no logging in tl-helper
+
+R-168 says E07 exposes cgroup write helpers that take a validated dirfd. tl-ops gets
+`CgroupDir::from_validated_fd(fd: OwnedFd) -> CgroupDir`, whose rustdoc says only tl-helper may call it, after
+its own E29-003 validation. The existing `freeze`, `thaw`, `kill` and `wait_frozen` are used unchanged; the
+helper copies no write code. tl-helper keeps its ADR-001 dependency list (no `tracing`), so the helper does not
+log. A bead line asking for a helper debug log is dropped; tl-ops already logs pid and result at debug level.
+- Edits: bead qfx.6 (chain edit to `crates/tl-ops/src/cgroup.rs`, the one constructor plus a test).
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
