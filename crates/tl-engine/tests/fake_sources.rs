@@ -158,6 +158,7 @@ pub fn io(
         demand.subscribe(),
         settings.subscribe(),
         control.subscribe(),
+        tl_engine::dbus::SharedHandles::default(),
     )
 }
 

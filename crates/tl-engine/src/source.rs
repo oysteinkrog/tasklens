@@ -45,7 +45,8 @@ pub struct WorkerIo {
     pub demand: watch::Receiver<Demand>,
     pub settings: watch::Receiver<EngineSettings>,
     pub control: watch::Receiver<WorkerControl>,
-    // E08-009: shared
+    /// D-Bus handles owned by `dbus/mod.rs`, such as the systemd manager connections (R-166).
+    pub shared: crate::dbus::SharedHandles,
 }
 
 impl WorkerIo {
@@ -54,14 +55,14 @@ impl WorkerIo {
         demand: watch::Receiver<Demand>,
         settings: watch::Receiver<EngineSettings>,
         control: watch::Receiver<WorkerControl>,
-        // E08-009: shared
+        shared: crate::dbus::SharedHandles,
     ) -> Self {
         Self {
             updates,
             demand,
             settings,
             control,
-            // E08-009: shared
+            shared,
         }
     }
 }

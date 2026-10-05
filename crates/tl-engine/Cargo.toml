@@ -24,6 +24,8 @@ tracing       = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
+# `p2p` builds a bus-free connection over a socketpair for the `ManagerConnSlot` test.
+zbus       = { workspace = true, features = ["p2p"] }
 
 [lints]
 workspace = true

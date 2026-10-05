@@ -6,6 +6,7 @@ use std::time::Duration;
 use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
+use tl_engine::dbus::SharedHandles;
 use tl_engine::source::{
     self, CommandProgress, QueuedCommand, Source, WorkerCommand, WorkerControl, WorkerIo,
 };
@@ -59,7 +60,7 @@ fn extras_sent_before_sample() {
     let (_demand_tx, demand) = watch::channel(Demand::default());
     let (_settings_tx, settings) = watch::channel(EngineSettings::default());
     let (_control_tx, control) = watch::channel(WorkerControl::default());
-    let io = WorkerIo::new(updates, demand, settings, control);
+    let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
     let src = ExtraSource {
         extra: None,
         sampled: false,
@@ -183,7 +184,7 @@ impl Rig {
         let control = WorkerControl::default();
         let progress = Arc::clone(&control.progress);
         let (control_tx, control) = watch::channel(control);
-        let io = WorkerIo::new(updates, demand, settings, control);
+        let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
         Rig {
             lab,
             root,
