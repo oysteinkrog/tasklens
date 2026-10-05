@@ -86,12 +86,12 @@ fn ten_thousand_publishes_monotonic() {
             (last, wakes)
         })
     });
+    // The UI can see sequence 10,000 and drop its receiver before the last `try_send`, so
+    // `stop_publishing` may end up set here; it is not checked.
     let producer = std::thread::spawn(move || {
         publish_range(&mut publisher, &base, 1, PUBLISHES);
-        publisher
     });
-    let publisher = producer.join().expect("the publisher thread ends");
-    assert!(!publisher.stop_publishing);
+    producer.join().expect("the publisher thread ends");
 
     let (done_tx, done_rx) = std_mpsc::channel();
     std::thread::spawn(move || {
