@@ -11,10 +11,7 @@
 //! - Inputs: the `input_focus` background plus a 1 px `accent` border, no ring. The input
 //!   component draws that itself.
 
-use gpui_kit::{
-    AbsoluteLength, Hsla, ParentElement, Pixels, Styled, Window, div, prelude::FluentBuilder as _,
-    px,
-};
+use gpui_kit::{AbsoluteLength, Hsla, ParentElement, Pixels, Styled, Window, div, px};
 
 use crate::theme::TlTheme;
 
@@ -45,7 +42,6 @@ impl TlFocusRing {
         };
         el.child(
             div()
-                .when(cfg!(test), |d| d.debug_selector(|| "tl-focus-ring".into()))
                 .absolute()
                 .flex_none()
                 .top(-(RING + width(borders.top)))
