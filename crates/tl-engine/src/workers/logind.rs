@@ -126,11 +126,10 @@ trait SleepSignals {
     async fn next(&mut self, cx: &Cx, d: Duration) -> Result<Option<bool>, DbusError>;
 }
 
-/// The real subscription. Fields drop in order, so the stream and proxy go before the
-/// connection's tick task stops.
+/// The real subscription. Fields drop in order, so the stream goes before the connection's
+/// tick task stops. The stream holds its own connection handle, so the proxy is not kept.
 struct LogindSignals {
     stream: zbus::proxy::SignalStream<'static>,
-    proxy: zbus::Proxy<'static>,
     conn: DbusConn,
 }
 
@@ -150,11 +149,8 @@ impl LogindSignals {
             .read(cx, zbus::Proxy::new(raw, BUS_NAME, PATH, INTERFACE))
             .await?;
         let stream = conn.read(cx, proxy.receive_signal(SIGNAL)).await?;
-        Ok(Self {
-            stream,
-            proxy,
-            conn,
-        })
+        drop(proxy);
+        Ok(Self { stream, conn })
     }
 }
 
@@ -191,6 +187,8 @@ mod tests {
     use crate::source::WorkerControl;
 
     type Slot<T> = Arc<Mutex<Option<T>>>;
+    /// The pump's outcome and the lab time in ns when it returned.
+    type Ended = Slot<(Outcome<(), WorkerError>, u64)>;
 
     /// Yields the queued values, then nothing: each later call waits `d` and returns `Ok(None)`.
     struct FakeSignals(VecDeque<bool>);
@@ -233,11 +231,8 @@ mod tests {
         lab: &mut LabRuntime,
         io: WorkerIo,
         mut signals: FakeSignals,
-    ) -> (
-        asupersync::runtime::TaskHandle<()>,
-        Slot<(Outcome<(), WorkerError>, u64)>,
-    ) {
-        let out: Slot<(Outcome<(), WorkerError>, u64)> = Slot::default();
+    ) -> (asupersync::runtime::TaskHandle<()>, Ended) {
+        let out = Ended::default();
         let sink = Arc::clone(&out);
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task, handle) = lab
@@ -364,11 +359,16 @@ mod tests {
             let _ = worker.join(&cx).await;
 
             let signals = LogindSignals::open(&cx).await.expect("logind");
-            let preparing: bool = signals
-                .conn
-                .read(&cx, signals.proxy.get_property("PreparingForSleep"))
+            let conn = &signals.conn;
+            let proxy = conn
+                .read(&cx, zbus::Proxy::new(conn.raw(), BUS_NAME, PATH, INTERFACE))
+                .await
+                .expect("logind proxy");
+            let preparing: bool = conn
+                .read(&cx, proxy.get_property("PreparingForSleep"))
                 .await
                 .expect("PreparingForSleep reads");
+            drop(proxy);
             preparing
         });
         let preparing = rt.block_on(join).expect("task completes");
