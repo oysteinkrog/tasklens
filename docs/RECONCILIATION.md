@@ -1797,6 +1797,18 @@ zstd stays at level 3 (level 6 measured larger).
   A column layout per sweep would save another 1.7 MiB and is not adopted [measured].
 - Edits: ARCHITECTURE ADR-012 format details line; commit d156e83 (bead 8fx.1).
 
+### R-283 GPU probe spawn: argument order and the parent-death signal
+
+- The probe's `parse_args` accepts `--fd <n>` and `--fake <script>` in either order. `spawn_probe` keeps passing
+  `--fd 3` first, then the extra arguments.
+- `PR_SET_PDEATHSIG` fires when the spawning thread exits, not the process. `spawn_probe` is therefore called
+  only from one long-lived thread that the GPU worker owns for its whole life (named `tl-gpu-spawn`), never
+  from the asupersync blocking pool, whose idle threads retire after 10 s. The probe also exits on EOF of fd 3,
+  so the death signal stays a backup.
+- Basis: found by bead ndy.10 (commit 049a41f): the fake probe failed with usage error 2, and runtime.rs
+  documents the 10 s blocking-thread retirement [verified in code].
+- Edits: beads ndy.11 (spawn thread), the probe's argument parser (follow-up in tl-gpu-probe), ndy.14 tests.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
