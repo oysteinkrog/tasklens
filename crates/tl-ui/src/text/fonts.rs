@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use gpui_kit::{App, Font, FontId, FontWeight, Global, TextSystem, font};
+use gpui_kit::{App, Font, FontId, FontWeight, Global, TextSystem, font, px};
 use smallvec::SmallVec;
 
 /// Family of the bundled UI faces.
@@ -24,18 +24,50 @@ const BUNDLED_FACES: [&[u8]; 4] = [
     include_bytes!("../../../../assets/fonts/NotoSansMono-Regular.ttf"),
 ];
 
-/// The UI weights tl-ui uses (400, 500, 600) and the face name logged when one fails.
-const UI_FACES: [(&str, FontWeight); 3] = [
-    ("Noto Sans Regular", FontWeight::NORMAL),
-    ("Noto Sans Medium", FontWeight::MEDIUM),
-    ("Noto Sans SemiBold", FontWeight::SEMIBOLD),
+/// One bundled face as the start-up check expects to find it.
+struct ExpectedFace {
+    /// Name logged and listed in [`FontLoadReport::failed`] when the check fails.
+    name: &'static str,
+    family: &'static str,
+    weight: FontWeight,
+    /// Advance width of `m` in font units (1000 per em), read from the bundled file's `hmtx`
+    /// table. The weights differ here, so it tells the bundled face apart from the nearest
+    /// weight the text system picks when a face is missing.
+    m_advance: f32,
+}
+
+/// The UI weights tl-ui uses (400, 500, 600).
+const UI_FACES: [ExpectedFace; 3] = [
+    ExpectedFace {
+        name: "Noto Sans Regular",
+        family: UI_FAMILY,
+        weight: FontWeight::NORMAL,
+        m_advance: 935.,
+    },
+    ExpectedFace {
+        name: "Noto Sans Medium",
+        family: UI_FAMILY,
+        weight: FontWeight::MEDIUM,
+        m_advance: 947.,
+    },
+    ExpectedFace {
+        name: "Noto Sans SemiBold",
+        family: UI_FAMILY,
+        weight: FontWeight::SEMIBOLD,
+        m_advance: 960.,
+    },
 ];
-const MONO_FACE: &str = "Noto Sans Mono Regular";
+const MONO_FACE: ExpectedFace = ExpectedFace {
+    name: "Noto Sans Mono Regular",
+    family: MONO_FAMILY,
+    weight: FontWeight::NORMAL,
+    m_advance: 600.,
+};
 
 /// Result of [`load_bundled_fonts`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FontLoadReport {
-    /// True only when all three Noto Sans weights resolve to their own face.
+    /// True only when all three Noto Sans weights resolve to their bundled face.
     pub ui_ok: bool,
     /// True when Noto Sans Mono 400 resolves.
     pub mono_ok: bool,
@@ -62,24 +94,18 @@ pub fn load_bundled_fonts(cx: &mut App) -> FontLoadReport {
     }
 
     let mut failed = SmallVec::new();
-    let mut ui_ids = SmallVec::<[FontId; 3]>::new();
-    for (name, weight) in UI_FACES {
-        match resolve_face(&text_system, UI_FAMILY, weight) {
-            // A weight that resolves to the same face as a lighter one means its own face is
-            // missing and the text system picked the nearest weight.
-            Some(id) if !ui_ids.contains(&id) => ui_ids.push(id),
-            _ => {
-                tracing::error!(target: "tasklens::ui", face = name, "bundled font failed to load");
-                failed.push(name);
-            }
+    for face in &UI_FACES {
+        if resolve_face(&text_system, face).is_none() {
+            tracing::error!(target: "tasklens::ui", face = face.name, "bundled font failed to load");
+            failed.push(face.name);
         }
     }
     let ui_ok = failed.is_empty();
 
-    let mono_ok = resolve_face(&text_system, MONO_FAMILY, FontWeight::NORMAL).is_some();
+    let mono_ok = resolve_face(&text_system, &MONO_FACE).is_some();
     if !mono_ok {
-        tracing::warn!(target: "tasklens::ui", face = MONO_FACE, "bundled font failed to load");
-        failed.push(MONO_FACE);
+        tracing::warn!(target: "tasklens::ui", face = MONO_FACE.name, "bundled font failed to load");
+        failed.push(MONO_FACE.name);
     }
 
     let report = FontLoadReport {
@@ -100,21 +126,26 @@ pub fn effective_ui_family(report: &FontLoadReport) -> &'static str {
     }
 }
 
-/// Resolves `family` at `weight` and returns the font ID only when it belongs to that family.
+/// Resolves `face` and returns its font ID only when the text system picked that face.
 ///
-/// `TextSystem::font_id` is private in gpui-pre 0.3.7 and `resolve_font` falls back to the
-/// default stack without saying so. The text system caches a failed lookup as an error, so after
-/// a fallback the returned ID maps back to a font of another family.
-fn resolve_face(text_system: &TextSystem, family: &str, weight: FontWeight) -> Option<FontId> {
+/// `TextSystem::font_id` is private in gpui-pre 0.3.7 and `resolve_font` falls back without
+/// saying so, in two ways. A missing family falls back to the default stack; the text system
+/// caches the failed lookup as an error, so the returned ID then maps back to a font of another
+/// family. A missing weight in a present family resolves to the nearest weight; the `m` advance
+/// catches that.
+fn resolve_face(text_system: &TextSystem, face: &ExpectedFace) -> Option<FontId> {
     let requested = Font {
-        weight,
-        ..font(family.to_owned())
+        weight: face.weight,
+        ..font(face.family)
     };
     let id = text_system.resolve_font(&requested);
-    text_system
-        .get_font_for_id(id)
-        .filter(|resolved| resolved.family.as_ref() == family)
-        .map(|_| id)
+    let resolved = text_system.get_font_for_id(id)?;
+    if resolved.family.as_ref() != face.family {
+        return None;
+    }
+    // At 1000 px the advance in pixels is the advance in font units.
+    let m_advance = text_system.advance(id, px(1000.), 'm').ok()?.width;
+    ((f32::from(m_advance) - face.m_advance).abs() < 0.5).then_some(id)
 }
 
 #[cfg(test)]
@@ -123,7 +154,7 @@ mod tests {
     use std::sync::Arc;
 
     use gpui_kit::{
-        FontFeatures, TestAppContext, TestDispatcher, TextRun, WindowTextSystem, black, px,
+        FontFeatures, TestAppContext, TestDispatcher, TextRun, WindowTextSystem, black,
     };
 
     use super::*;
@@ -144,16 +175,16 @@ mod tests {
 
     #[test]
     fn three_weights_load() {
-        let mut cx = cosmic_cx();
+        let cx = cosmic_cx();
         cx.update(|cx| {
             let report = load_bundled_fonts(cx);
             assert!(report.ui_ok, "failed faces: {:?}", report.failed);
             let text_system = cx.text_system().clone();
             let ids: Vec<_> = UI_FACES
                 .iter()
-                .map(|(name, weight)| {
-                    resolve_face(&text_system, UI_FAMILY, *weight)
-                        .unwrap_or_else(|| panic!("{name} did not resolve"))
+                .map(|face| {
+                    resolve_face(&text_system, face)
+                        .unwrap_or_else(|| panic!("{} did not resolve", face.name))
                 })
                 .collect();
             assert_ne!(ids[0], ids[1]);
@@ -165,18 +196,18 @@ mod tests {
 
     #[test]
     fn mono_loads() {
-        let mut cx = cosmic_cx();
+        let cx = cosmic_cx();
         cx.update(|cx| {
             let report = load_bundled_fonts(cx);
             assert!(report.mono_ok, "failed faces: {:?}", report.failed);
             let text_system = cx.text_system().clone();
-            assert!(resolve_face(&text_system, MONO_FAMILY, FontWeight::NORMAL).is_some());
+            assert!(resolve_face(&text_system, &MONO_FACE).is_some());
         });
     }
 
     #[test]
     fn tnum_digits_equal_width() {
-        let mut cx = cosmic_cx();
+        let cx = cosmic_cx();
         cx.update(|cx| {
             load_bundled_fonts(cx);
             let window_text = WindowTextSystem::new(cx.text_system().clone());
