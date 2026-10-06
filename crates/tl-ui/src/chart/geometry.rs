@@ -249,7 +249,7 @@ pub struct Scratch {
 /// An empty or inverted scale puts every value on the baseline.
 pub fn y_of(value: f32, y_min: f32, y_max: f32, plot_height: f32) -> f32 {
     let span = y_max - y_min;
-    if !(span > 0.0) {
+    if span.is_nan() || span <= 0.0 {
         return plot_height;
     }
     (plot_height - (value - y_min) / span * plot_height).clamp(0.0, plot_height.max(0.0))
