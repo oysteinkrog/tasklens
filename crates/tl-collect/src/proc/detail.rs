@@ -1057,6 +1057,497 @@ fn read_exe(pid_dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> Option<String> {
     Some(bufs.text.clone())
 }
 
+// Security tab (PROC-082, PROC-028).
+
+/// Capability names (without `CAP_`) and descriptions, indexed by capability number
+/// (`linux/capability.h`).
+pub const CAPS: [(&str, &str); 41] = [
+    ("CHOWN", "Change file owners"),
+    (
+        "DAC_OVERRIDE",
+        "Bypass file read, write and execute permission checks",
+    ),
+    (
+        "DAC_READ_SEARCH",
+        "Bypass file read and directory search checks",
+    ),
+    ("FOWNER", "Bypass checks that need the file owner"),
+    (
+        "FSETID",
+        "Keep set-user-ID and set-group-ID bits on modified files",
+    ),
+    ("KILL", "Send signals to any process"),
+    ("SETGID", "Change group IDs"),
+    ("SETUID", "Change user IDs"),
+    ("SETPCAP", "Change capability sets"),
+    (
+        "LINUX_IMMUTABLE",
+        "Set immutable and append-only file flags",
+    ),
+    ("NET_BIND_SERVICE", "Bind to ports below 1024"),
+    ("NET_BROADCAST", "Broadcast and listen to multicast"),
+    (
+        "NET_ADMIN",
+        "Configure network interfaces, routes and firewall",
+    ),
+    ("NET_RAW", "Use raw and packet sockets"),
+    ("IPC_LOCK", "Lock memory"),
+    ("IPC_OWNER", "Bypass IPC permission checks"),
+    ("SYS_MODULE", "Load and unload kernel modules"),
+    ("SYS_RAWIO", "Raw I/O port and device access"),
+    ("SYS_CHROOT", "Use chroot"),
+    ("SYS_PTRACE", "Trace and inspect any process"),
+    ("SYS_PACCT", "Configure process accounting"),
+    ("SYS_ADMIN", "Broad system administration"),
+    ("SYS_BOOT", "Reboot and load kernels"),
+    (
+        "SYS_NICE",
+        "Raise priority and set other processes' scheduling",
+    ),
+    ("SYS_RESOURCE", "Override resource limits"),
+    ("SYS_TIME", "Set the system clock"),
+    ("SYS_TTY_CONFIG", "Configure terminals"),
+    ("MKNOD", "Create device files"),
+    ("LEASE", "Take file leases"),
+    ("AUDIT_WRITE", "Write audit log records"),
+    ("AUDIT_CONTROL", "Configure kernel auditing"),
+    ("SETFCAP", "Set file capabilities"),
+    ("MAC_OVERRIDE", "Override mandatory access control"),
+    ("MAC_ADMIN", "Configure mandatory access control"),
+    ("SYSLOG", "Use privileged syslog operations"),
+    ("WAKE_ALARM", "Set alarms that wake the system"),
+    ("BLOCK_SUSPEND", "Block system suspend"),
+    ("AUDIT_READ", "Read the audit log"),
+    ("PERFMON", "Use performance monitoring"),
+    ("BPF", "Use BPF"),
+    ("CHECKPOINT_RESTORE", "Checkpoint and restore processes"),
+];
+
+/// Capabilities counted as risky when effective or ambient: SYS_ADMIN, SYS_PTRACE,
+/// DAC_OVERRIDE, DAC_READ_SEARCH, SYS_MODULE, SYS_RAWIO, SETUID, SETGID, NET_ADMIN, BPF, PERFMON,
+/// SYS_BOOT, CHOWN, FOWNER.
+pub const RISKY_CAPS: [u8; 14] = [21, 19, 1, 2, 16, 17, 7, 6, 12, 39, 38, 22, 0, 3];
+
+/// Admin group names. The bool is true for a group that is root-equivalent.
+pub const ADMIN_GROUPS: [(&str, bool); 8] = [
+    ("wheel", false),
+    ("sudo", false),
+    ("root", false),
+    ("adm", false),
+    ("docker", true),
+    ("libvirt", true),
+    ("lxd", true),
+    ("disk", true),
+];
+
+/// Namespace link names in `SecurityInfo::namespaces` order.
+const NS_NAMES: [&str; 8] = ["user", "pid", "net", "mnt", "ipc", "uts", "cgroup", "time"];
+/// LSMs that set a process label in `attr/current` (PROC-028).
+const LABEL_LSMS: [&[u8]; 4] = [b"apparmor", b"selinux", b"smack", b"tomoyo"];
+/// Read limit for `attr/current`.
+const LABEL_MAX: usize = 4096;
+/// Read limit for `loginuid` and `sessionid`. Both hold one `u32`.
+const ID_FILE_MAX: usize = 32;
+/// Buffer for one `ns/<name>` link, `<name>:[<ino>]`.
+const NS_LINK_MAX: usize = 64;
+/// Kept length of each speculation text.
+const SPECULATION_MAX: usize = 64;
+/// Kept length of a group name.
+const GROUP_NAME_MAX: usize = 256;
+/// `loginuid` and `sessionid` of a process outside any login or audit session.
+const UNSET_ID: u32 = u32::MAX;
+
+/// The process's LSM label (PROC-028 Security label).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LsmLabel {
+    /// `attr/current`, sanitized.
+    Label(Arc<str>),
+    /// `/sys/kernel/security/lsm` lists none of apparmor, selinux, smack and tomoyo, or the label
+    /// is empty.
+    NotApplicable,
+    /// `attr/current` could not be read.
+    Restricted,
+}
+
+/// The Elevated row, first match in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Elevated {
+    /// Effective uid 0: "Yes (root)".
+    Root,
+    /// A non-root process with effective capabilities: "Yes (capabilities)".
+    Capabilities,
+    /// Effective uid differs from real uid: "Setuid".
+    Setuid,
+    No,
+}
+
+/// One namespace of the process compared with PID 1, or with tasklens when PID 1's link cannot
+/// be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NsState {
+    /// Same inode as PID 1: "Shared with init".
+    SharedWithInit,
+    /// PID 1's link could not be read and the inode equals `/proc/self`'s: "Same as tasklens".
+    SameAsTasklens,
+    /// A different inode, shown as "Isolated (inode)".
+    Isolated(u64),
+    /// The process's own link could not be read or parsed.
+    Restricted,
+}
+
+/// The Security tab of one process. Group and user names are resolved by the caller and never
+/// logged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SecurityInfo {
+    /// Real, effective, saved, fs.
+    pub uid: [u32; 4],
+    /// Real, effective, saved, fs.
+    pub gid: [u32; 4],
+    /// Supplementary groups.
+    pub groups: SmallVec<[u32; 16]>,
+    pub cap_inh: u64,
+    pub cap_prm: u64,
+    pub cap_eff: u64,
+    pub cap_bnd: u64,
+    pub cap_amb: u64,
+    pub no_new_privs: Option<bool>,
+    /// 0 disabled, 1 strict, 2 filter.
+    pub seccomp: Option<u8>,
+    pub seccomp_filters: Option<u32>,
+    /// `Some(false)` ("not dumpable") when `/proc/<pid>` is owned by uid 0 and the real uid is
+    /// not 0, else `None` ("Not reported"; R-163).
+    pub dumpable: Option<bool>,
+    pub lsm_label: LsmLabel,
+    /// `None` when unset (4294967295) or unreadable.
+    pub loginuid: Option<u32>,
+    /// `None` when unset (4294967295) or unreadable.
+    pub sessionid: Option<u32>,
+    /// Sanitized `Speculation_Store_Bypass`.
+    pub speculation_store_bypass: Arc<str>,
+    /// Sanitized `SpeculationIndirectBranch`.
+    pub speculation_indirect_branch: Arc<str>,
+    pub elevated: Elevated,
+    /// user, pid, net, mnt, ipc, uts, cgroup, time.
+    pub namespaces: [NsState; 8],
+}
+
+impl Default for SecurityInfo {
+    fn default() -> Self {
+        Self {
+            uid: [0; 4],
+            gid: [0; 4],
+            groups: SmallVec::new(),
+            cap_inh: 0,
+            cap_prm: 0,
+            cap_eff: 0,
+            cap_bnd: 0,
+            cap_amb: 0,
+            no_new_privs: None,
+            seccomp: None,
+            seccomp_filters: None,
+            dumpable: None,
+            lsm_label: LsmLabel::NotApplicable,
+            loginuid: None,
+            sessionid: None,
+            speculation_store_bypass: Arc::from(""),
+            speculation_indirect_branch: Arc::from(""),
+            elevated: Elevated::No,
+            namespaces: [NsState::Restricted; 8],
+        }
+    }
+}
+
+/// The name of `gid` in `/etc/group` text (`name:x:gid:members` lines), sanitized. `None` when
+/// no line has that gid. Lines that do not parse are skipped.
+pub fn group_name(gid: u32, group_file: &[u8]) -> Option<Arc<str>> {
+    for line in group_file.split(|&b| b == b'\n') {
+        let mut fields = line.split(|&b| b == b':');
+        let (Some(name), Some(_), Some(id)) = (fields.next(), fields.next(), fields.next()) else {
+            continue;
+        };
+        if name.is_empty() || parse_radix(id, 10).and_then(|v| u32::try_from(v).ok()) != Some(gid) {
+            continue;
+        }
+        let mut text = String::new();
+        sanitize_text(name, GROUP_NAME_MAX, &mut text);
+        if !text.is_empty() {
+            return Some(Arc::from(text));
+        }
+    }
+    None
+}
+
+/// Reads the Security tab of `key` into `out`. Fields come from `status` (E05-004),
+/// `loginuid`, `sessionid`, `attr/current` and the `ns/*` links. A file other than `status` that
+/// cannot be read gives `None` or `Restricted` for its fields. `Gone` and `Restricted` reset
+/// `out` to its default.
+///
+/// Every file is opened one path part at a time with `O_NOFOLLOW` and read up to a fixed limit,
+/// so a symlink never leads outside `root`.
+///
+/// `etc_group` is not read here: `out` holds gids, and the caller turns them into names with
+/// [`group_name`] over the same bytes.
+pub fn read_security(
+    root: &SysRoot,
+    key: ProcessKey,
+    _etc_group: &[u8],
+    bufs: &mut ReadBufs,
+    out: &mut SecurityInfo,
+) -> Result<DetailRead, CollectError> {
+    *out = SecurityInfo::default();
+    let pid_dir = match open_checked(root, key, &mut bufs.small)? {
+        Ok(dir) => dir,
+        Err(r) => return Ok(r),
+    };
+    let pid_dir = pid_dir.as_fd();
+
+    let read = open_beneath(pid_dir, &["status"], READ_FLAGS)
+        .and_then(|fd| read_bounded(fd.as_fd(), &mut bufs.small, STATUS_READ_MAX));
+    if let Err(e) = read {
+        return read_error(e);
+    }
+    let mut status = PidStatus::default();
+    if parse_status(&bufs.small, &mut status).is_err() {
+        return Err(CollectError::ProcParse {
+            pid: key.pid,
+            file: "status",
+        });
+    }
+
+    out.uid = status.uid;
+    out.gid = status.gid;
+    out.groups = status.groups;
+    out.cap_inh = status.cap_inh;
+    out.cap_prm = status.cap_prm;
+    out.cap_eff = status.cap_eff;
+    out.cap_bnd = status.cap_bnd;
+    out.cap_amb = status.cap_amb;
+    out.no_new_privs = status.no_new_privs;
+    out.seccomp = status.seccomp;
+    out.seccomp_filters = status.seccomp_filters;
+    sanitize_text(
+        &status.speculation_store_bypass,
+        SPECULATION_MAX,
+        &mut bufs.text,
+    );
+    out.speculation_store_bypass = Arc::from(bufs.text.as_str());
+    sanitize_text(
+        &status.speculation_indirect_branch,
+        SPECULATION_MAX,
+        &mut bufs.text,
+    );
+    out.speculation_indirect_branch = Arc::from(bufs.text.as_str());
+    out.elevated = elevated(&out.uid, out.cap_eff);
+
+    // R-163: only a root-owned directory of a non-root process is reported.
+    out.dumpable = rustix::fs::fstat(pid_dir)
+        .ok()
+        .filter(|st| st.st_uid == 0 && out.uid[0] != 0)
+        .map(|_| false);
+    out.loginuid = read_id(pid_dir, "loginuid", &mut bufs.small);
+    out.sessionid = read_id(pid_dir, "sessionid", &mut bufs.small);
+    out.lsm_label = read_label(root, pid_dir, bufs);
+    out.namespaces = read_namespaces(root, pid_dir);
+    Ok(DetailRead::Ok)
+}
+
+/// Flags for opening a file to read. `O_NONBLOCK` keeps a FIFO in a fixture tree from blocking
+/// the open.
+const READ_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
+
+/// Opens `parts` below `dir` one part at a time with `O_NOFOLLOW`, so no symlink is followed.
+/// Directories on the way open with `O_PATH`, which needs no read permission. The last part
+/// opens with `flags`. Each part is one plain name without `/`.
+fn open_beneath(
+    dir: BorrowedFd<'_>,
+    parts: &[&str],
+    flags: OFlags,
+) -> Result<OwnedFd, rustix::io::Errno> {
+    let Some((last, dirs)) = parts.split_last() else {
+        return Err(rustix::io::Errno::INVAL);
+    };
+    let mut held: Option<OwnedFd> = None;
+    for part in dirs {
+        let base = held.as_ref().map_or(dir, AsFd::as_fd);
+        held = Some(rustix::fs::openat(
+            base,
+            *part,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?);
+    }
+    let base = held.as_ref().map_or(dir, AsFd::as_fd);
+    rustix::fs::openat(
+        base,
+        *last,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+/// Reads at most `limit` bytes of `fd` into `buf` (cleared first). Returns true when the file
+/// had more.
+fn read_bounded(
+    fd: BorrowedFd<'_>,
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> Result<bool, rustix::io::Errno> {
+    buf.clear();
+    buf.resize(limit + 1, 0);
+    let mut len = 0;
+    while len < buf.len() {
+        match rustix::io::read(fd, &mut buf[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(e) => {
+                buf.clear();
+                return Err(e);
+            }
+        }
+    }
+    buf.truncate(len.min(limit));
+    Ok(len > limit)
+}
+
+/// The Elevated rule, first match.
+fn elevated(uid: &[u32; 4], cap_eff: u64) -> Elevated {
+    if uid[1] == 0 {
+        Elevated::Root
+    } else if cap_eff != 0 {
+        Elevated::Capabilities
+    } else if uid[1] != uid[0] {
+        Elevated::Setuid
+    } else {
+        Elevated::No
+    }
+}
+
+/// One decimal `u32` file such as `loginuid`. `None` when it cannot be read, does not parse, or
+/// holds the unset value 4294967295.
+fn read_id(pid_dir: BorrowedFd<'_>, name: &str, buf: &mut Vec<u8>) -> Option<u32> {
+    let fd = open_beneath(pid_dir, &[name], READ_FLAGS).ok()?;
+    if read_bounded(fd.as_fd(), buf, ID_FILE_MAX).ok()? {
+        return None;
+    }
+    let id = u32::try_from(parse_radix(buf.trim_ascii(), 10)?).ok()?;
+    (id != UNSET_ID).then_some(id)
+}
+
+/// The LSM label of the process. `NotApplicable` when no label LSM is active, read from
+/// `/sys/kernel/security/lsm` on every call.
+fn read_label(root: &SysRoot, pid_dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> LsmLabel {
+    if !label_lsm_active(root, &mut bufs.small) {
+        return LsmLabel::NotApplicable;
+    }
+    let read = open_beneath(pid_dir, &["attr", "current"], READ_FLAGS)
+        .and_then(|fd| read_bounded(fd.as_fd(), &mut bufs.small, LABEL_MAX));
+    if read.is_err() {
+        return LsmLabel::Restricted;
+    }
+    let mut raw = bufs.small.as_slice();
+    while let Some(rest) = raw.strip_suffix(b"\0").or_else(|| raw.strip_suffix(b"\n")) {
+        raw = rest;
+    }
+    sanitize_text(raw, LABEL_MAX, &mut bufs.text);
+    if bufs.text.is_empty() {
+        LsmLabel::NotApplicable
+    } else {
+        LsmLabel::Label(Arc::from(bufs.text.as_str()))
+    }
+}
+
+/// True when `/sys/kernel/security/lsm` lists apparmor, selinux, smack or tomoyo. False when it
+/// cannot be read.
+fn label_lsm_active(root: &SysRoot, buf: &mut Vec<u8>) -> bool {
+    let Ok(sys) = rustix::fs::open(
+        &root.sys,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) else {
+        return false;
+    };
+    let read = open_beneath(sys.as_fd(), &["kernel", "security", "lsm"], READ_FLAGS)
+        .and_then(|fd| read_bounded(fd.as_fd(), buf, SMALL_FILE_LIMIT));
+    read.is_ok()
+        && buf
+            .trim_ascii()
+            .split(|&b| b == b',')
+            .any(|name| LABEL_LSMS.contains(&name.trim_ascii()))
+}
+
+/// Compares each `ns/<name>` link of the process with PID 1's, or with `/proc/self`'s when PID
+/// 1's link cannot be read.
+fn read_namespaces(root: &SysRoot, pid_dir: BorrowedFd<'_>) -> [NsState; 8] {
+    let mut out = [NsState::Restricted; 8];
+    let Ok(own) = open_beneath(pid_dir, &["ns"], OFlags::PATH | OFlags::DIRECTORY) else {
+        return out;
+    };
+    let proc = rustix::fs::open(
+        &root.proc,
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok();
+    let init = proc
+        .as_ref()
+        .and_then(|p| open_beneath(p.as_fd(), &["1", "ns"], OFlags::PATH | OFlags::DIRECTORY).ok());
+    // Opened only when a PID 1 link cannot be read.
+    let mut own_self: Option<Option<OwnedFd>> = None;
+    for (state, name) in out.iter_mut().zip(NS_NAMES) {
+        let Some(ino) = ns_inode(own.as_fd(), name) else {
+            continue;
+        };
+        if let Some(init_ino) = init.as_ref().and_then(|d| ns_inode(d.as_fd(), name)) {
+            *state = if ino == init_ino {
+                NsState::SharedWithInit
+            } else {
+                NsState::Isolated(ino)
+            };
+            continue;
+        }
+        let self_ns =
+            own_self.get_or_insert_with(|| proc.as_ref().and_then(|p| open_self_ns(p.as_fd())));
+        let self_ino = self_ns.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
+        *state = if self_ino == Some(ino) {
+            NsState::SameAsTasklens
+        } else {
+            NsState::Isolated(ino)
+        };
+    }
+    out
+}
+
+/// `self/ns` below the proc root. On the host `self` is a symlink to `<pid>`, which is followed
+/// only when the target is a plain number, so it stays below the root. A fixture may hold `self`
+/// as a directory.
+fn open_self_ns(proc: BorrowedFd<'_>) -> Option<OwnedFd> {
+    let flags = OFlags::PATH | OFlags::DIRECTORY;
+    let mut link = [0u8; 16];
+    match rustix::fs::readlinkat_raw(proc, "self", &mut link[..]) {
+        // A full buffer may be a cut link.
+        Ok(n) if n < link.len() => {
+            let pid = parse_tid(&link[..n])?;
+            open_beneath(proc, &[&pid.to_string(), "ns"], flags).ok()
+        }
+        Ok(_) => None,
+        Err(rustix::io::Errno::INVAL) => open_beneath(proc, &["self", "ns"], flags).ok(),
+        Err(_) => None,
+    }
+}
+
+/// The inode in the link `<ns_dir>/<name>`, which must read `<name>:[<ino>]`. The link is read,
+/// never followed.
+fn ns_inode(ns_dir: BorrowedFd<'_>, name: &str) -> Option<u64> {
+    let mut link = [0u8; NS_LINK_MAX];
+    let n = rustix::fs::readlinkat_raw(ns_dir, name, &mut link[..]).ok()?;
+    if n >= link.len() {
+        return None;
+    }
+    let rest = link[..n].strip_prefix(name.as_bytes())?;
+    bracket_inode(rest.strip_prefix(b":")?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
