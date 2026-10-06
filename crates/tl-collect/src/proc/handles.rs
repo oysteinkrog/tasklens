@@ -155,6 +155,9 @@ pub struct WalkProgress {
     pub total: u32,
     /// Processes whose `fd/` could not be read, for example another user's without the helper.
     pub skipped: u32,
+    /// Searched processes with more than `FD_WALK_MAX` fds, whose later fds were not searched.
+    /// When it is not 0 the results are partial.
+    pub truncated_pids: u32,
     /// fd links read.
     pub handles: u64,
 }
@@ -175,6 +178,8 @@ pub struct HandleWalk {
     progress: WalkProgress,
     /// Reused lowercase buffer for matching.
     lower: String,
+    /// Most fds read per process: `FD_WALK_MAX`, lower in tests.
+    fd_cap: usize,
 }
 
 /// What happened to one pid.
@@ -202,6 +207,7 @@ impl HandleWalk {
                 ..WalkProgress::default()
             },
             lower: String::new(),
+            fd_cap: FD_WALK_MAX,
         }
     }
 
@@ -289,12 +295,14 @@ impl HandleWalk {
         let mut dirents = [MaybeUninit::<u8>::uninit(); FD_DIRENT_BUF];
         let mut dir = RawDir::new(fd_dir.as_fd(), &mut dirents[..]);
         let mut read = 0;
-        while read < FD_WALK_MAX
-            && let Some(Ok(entry)) = dir.next()
-        {
+        while let Some(Ok(entry)) = dir.next() {
             let Some(fd) = parse_tid(entry.file_name().to_bytes()) else {
                 continue;
             };
+            if read == self.fd_cap {
+                self.progress.truncated_pids += 1;
+                break;
+            }
             read += 1;
             if !read_link(fd_dir.as_fd(), entry.file_name(), bufs) {
                 continue;
@@ -612,6 +620,41 @@ mod tests {
         bytes.extend(std::iter::repeat_n(b'x', MAPS_CHUNK * 2 + 10));
         bytes.extend_from_slice(b"\nlast\n");
         assert_eq!(lines_of(&bytes), [b"first".to_vec(), b"last".to_vec()]);
+    }
+
+    #[test]
+    fn fd_cap_counts_truncated_pid() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let proc = tmp.path().join("proc");
+        let stat = "(x) S 1 1 1 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 500 0 0 0 0 0 0 0 0 0 0 0 0 0 17 0 0 0 0 0 0";
+        // 7 has 3 fds, 8 has exactly 2.
+        for (pid, fds) in [(7, 3), (8, 2)] {
+            let dir = proc.join(format!("{pid}"));
+            std::fs::create_dir_all(dir.join("fd")).expect("mkdir");
+            std::fs::write(dir.join("stat"), format!("{pid} {stat}\n")).expect("stat");
+            for fd in 0..fds {
+                std::os::unix::fs::symlink("/f", dir.join(format!("fd/{fd}"))).expect("link");
+            }
+        }
+        let root = SysRoot::at(tmp.path());
+        let run = |cap: usize| {
+            let mut walk = HandleWalk::start(&root, "/f", false);
+            walk.fd_cap = cap;
+            let mut bufs = ReadBufs::default();
+            let mut hits = Vec::new();
+            while walk.step(&root, BootId(1), 8, &mut bufs, &mut hits) == StepResult::More {}
+            (walk.progress(), hits.len())
+        };
+        let (p, hits) = run(2);
+        assert_eq!(
+            (p.searched, p.truncated_pids, p.handles, hits),
+            (2, 1, 4, 4)
+        );
+        let (p, hits) = run(FD_WALK_MAX);
+        assert_eq!(
+            (p.searched, p.truncated_pids, p.handles, hits),
+            (2, 0, 5, 5)
+        );
     }
 
     #[test]
