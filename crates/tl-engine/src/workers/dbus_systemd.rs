@@ -628,7 +628,8 @@ struct RawUnit {
     what: Arc<str>,
     /// The unit a timer starts, timers only.
     timer_unit: Arc<str>,
-    /// From the type interface; empty for kinds that are not read.
+    /// From the type interface (services, sockets, mounts, timers, slices and scopes); empty
+    /// for kinds that are not read.
     control_group: Arc<str>,
     can_reload: bool,
 }
@@ -871,13 +872,16 @@ fn record(manager: Manager, kind: UnitType, raw: &RawUnit, user: Arc<str>) -> Un
     }
 }
 
-/// The type interface read besides `Unit`, for the four types whose columns need it.
+/// The type interface read besides `Unit`: for the four types whose columns need it, and for
+/// slices and scopes, whose `ControlGroup` gives their cgroup pids and resource columns.
 fn type_iface(kind: UnitType) -> Option<&'static str> {
     match kind {
         UnitType::Service => Some("org.freedesktop.systemd1.Service"),
         UnitType::Socket => Some("org.freedesktop.systemd1.Socket"),
         UnitType::Mount => Some("org.freedesktop.systemd1.Mount"),
         UnitType::Timer => Some("org.freedesktop.systemd1.Timer"),
+        UnitType::Slice => Some("org.freedesktop.systemd1.Slice"),
+        UnitType::Scope => Some("org.freedesktop.systemd1.Scope"),
         _ => None,
     }
 }
@@ -3992,6 +3996,83 @@ mod tests {
         assert!(!fake_tick(&mut state, usage(1, 1)));
         assert!(Arc::ptr_eq(&foo, state.record("foo.service").expect("foo")));
         assert!(Arc::ptr_eq(&bar, state.record("bar.service").expect("bar")));
+    }
+
+    const SCOPE_CG: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-foo.scope";
+    const SLICE_CG: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice";
+
+    /// `app-foo.scope` holds pids 100 and 200; `app.slice` holds no pid itself.
+    fn scope_fixture(name: &str) -> std::path::PathBuf {
+        let base = fixture_root(name);
+        put(&base, &format!("sys/fs/cgroup{SLICE_CG}/cgroup.procs"), "");
+        put(
+            &base,
+            &format!("sys/fs/cgroup{SCOPE_CG}/cgroup.procs"),
+            "100\n200\n",
+        );
+        put(&base, "proc/100/stat", &stat_line(100, 5000));
+        put(&base, "proc/200/stat", &stat_line(200, 6000));
+        put(&base, "proc/sys/kernel/random/boot_id", BOOT_TEXT);
+        base
+    }
+
+    #[test]
+    fn slice_and_scope_cgroup_pids() {
+        assert_eq!(
+            type_iface(UnitType::Scope),
+            Some("org.freedesktop.systemd1.Scope")
+        );
+        assert_eq!(
+            type_iface(UnitType::Slice),
+            Some("org.freedesktop.systemd1.Slice")
+        );
+        let mut state = ServicesState::new(Manager::User);
+        assert!(state.replace(
+            vec![
+                unit("app-foo.scope", "active", "running", ""),
+                unit("app.slice", "active", "active", ""),
+            ],
+            UnitFiles::new(),
+        ));
+        assert!(state.cgroup_units().is_empty());
+
+        // The ControlGroup comes on the type interface, as systemd sends it.
+        let mut fx = Effects::default();
+        for (name, iface, cg) in [
+            ("app-foo.scope", "org.freedesktop.systemd1.Scope", SCOPE_CG),
+            ("app.slice", "org.freedesktop.systemd1.Slice", SLICE_CG),
+        ] {
+            let signal = Signal::Properties {
+                path: unit_path(name),
+                iface: iface.to_owned(),
+                changed: props(vec![("ControlGroup", Value::from(cg))]),
+                invalidated: Vec::new(),
+            };
+            state.apply(&signal, &mut fx);
+        }
+        assert!(fx.changed);
+        let mut units = state.cgroup_units();
+        units.sort();
+        assert_eq!(
+            units,
+            cg_units(&[("app-foo.scope", SCOPE_CG), ("app.slice", SLICE_CG)])
+        );
+
+        let fs = HostFs {
+            root: SysRoot::at(&scope_fixture("dbus_systemd_scope_pids")),
+        };
+        let want = TickWant {
+            pids: true,
+            stats: false,
+            fresh: false,
+        };
+        let read = read_tick(&mut fs.open(), &units, want, None);
+        assert!(state.apply_tick(read, 1_000_000_000, false));
+        for name in ["app-foo.scope", "app.slice"] {
+            let rec = state.record(name).expect("listed");
+            assert!(rec.has_cgroup_procs, "{name}");
+            assert_eq!(&rec.cgroup_pids[..], &fixture_keys()[..], "{name}");
+        }
     }
 
     #[test]
