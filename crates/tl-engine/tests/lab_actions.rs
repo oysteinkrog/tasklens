@@ -2742,7 +2742,7 @@ fn explore_helper_calls() {
             std::fs::remove_file(p3.dumps.join(name)).expect("remove a dump");
         }
 
-        let succeeded = destroy_states.iter().any(|s| *s == ActionState::Succeeded);
+        let succeeded = destroy_states.contains(&ActionState::Succeeded);
         let unsupported = destroy_states
             .iter()
             .filter(|s| **s == ActionState::Rejected(RejectReason::Unsupported))
