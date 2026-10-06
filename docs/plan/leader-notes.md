@@ -516,3 +516,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.34 (1990509): FilterWords on PropsFilter; asked to cache no_match too. m1f.11: set_pinned on TlSecondaryWindow approved.
 - yms.34 (93d05f4, 372b6d0): handle walk and pipe peers. FD_WALK_MAX 65536 accepted; asked for a truncated_pids count. Fixture 4201 paths changed and 4214 rows added to the snapshots (accepted). HandleHitInfo.uid is the /proc/<pid> owner.
 - yms.34 follow-up (d534b38): WalkProgress.truncated_pids. find_pipe_peers keeps the cap but has no counter (accepted).
+- pdu.10 (844aa96, 1551b0e): header_total uses the cell contract and the header_state.totals cache. Network percent mode sets bit 63. No words.
