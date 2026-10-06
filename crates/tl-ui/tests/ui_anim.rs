@@ -181,7 +181,10 @@ fn driver_counts_stall_after_250ms(cx: &mut TestAppContext) {
     advance(vcx, 1000);
     assert_eq!(stats(&driver, vcx).2, 1, "one count per stall");
     assert_eq!(stats(&driver, vcx).0, 1, "a stall never re-arms");
-    assert_eq!(warnings.lock().unwrap().as_slice(), ["frame stall"]);
+    assert_eq!(
+        warnings.lock().expect("warnings lock").as_slice(),
+        ["frame stall"]
+    );
 
     // The late frame ends the stall; the loop stops once nothing is armed.
     assert_eq!(frame(vcx), 1);
@@ -260,7 +263,7 @@ impl Subscriber for Capture {
         let mut m = Message(String::new(), false);
         event.record(&mut m);
         assert!(m.1, "the warning carries elapsed_ms");
-        self.0.lock().unwrap().push(m.0);
+        self.0.lock().expect("warnings lock").push(m.0);
     }
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
