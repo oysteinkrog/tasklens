@@ -28,9 +28,10 @@ use crate::workers::enumerate::EnumClock;
 
 pub const PERIOD: Duration = Duration::from_secs(1);
 
-/// The memory rate table (ADR-008 row "Memory, swap, zram").
+/// The memory rate table (ADR-008 row "Memory, swap, zram"). The process table keeps it at
+/// 1 Hz for the "Memory compression (zram)" pseudo row (PROC-012, R-166).
 pub fn memory_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.memory || d.recording {
+    if d.memory || d.recording || d.process_table {
         Some(PERIOD)
     } else {
         None
@@ -213,5 +214,11 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(memory_period(&recording, &s), Some(Duration::from_secs(1)));
+
+        let table = Demand {
+            process_table: true,
+            ..Demand::default()
+        };
+        assert_eq!(memory_period(&table, &s), Some(Duration::from_secs(1)));
     }
 }

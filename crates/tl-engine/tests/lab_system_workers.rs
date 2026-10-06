@@ -1694,3 +1694,66 @@ fn cpu_power_only_on_slow_ticks() {
     let (_, s) = cpu_sample(src, 3 * SEC);
     assert_eq!(s.totals.package_power_w, Metric::valid(10.0));
 }
+
+/// E12-009: the process table alone keeps `Cpu` and `Memory` at 1 Hz for the pseudo rows, and
+/// `Cpu` carries no per-core data.
+#[test]
+fn pseudo_rows_keep_cpu_and_memory_at_1hz() {
+    let cpu_dir = fixture_copy("cpu-math", Some(0));
+    let mem_dir = fixture_copy("mem-composition", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx
+        .send(Demand {
+            process_table: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let cpu_io = io(&updates, &demand_tx, &settings, &control);
+    let mem_io = io(&updates, &demand_tx, &settings, &control);
+    let cpu = cpu_source(&cpu_dir);
+    let memory = MemorySource::new(SysRoot::at(&mem_dir));
+    let handles = [
+        fl.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let _ = source::run(cx, cpu_io, cpu).await;
+        }),
+        fl.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let _ = source::run(cx, mem_io, memory).await;
+        }),
+    ];
+
+    // 5 s: samples at 0, 1, 2, 3 and 4 s.
+    let end = fl.now_ms() + 4_990;
+    let mut cpu_times = Vec::new();
+    let mut memory_times = Vec::new();
+    loop {
+        for msg in drain(&mut rx) {
+            match msg {
+                EngineMsg::Source(SourceUpdate::Cpu(sample)) => {
+                    assert!(
+                        sample.per_cpu.is_empty(),
+                        "per-core data at {}",
+                        fl.now_ms()
+                    );
+                    cpu_times.push(fl.now_ms());
+                }
+                EngineMsg::Source(SourceUpdate::Memory(_)) => memory_times.push(fl.now_ms()),
+                _ => {}
+            }
+        }
+        if fl.now_ms() >= end {
+            break;
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+    let every_second: Vec<u64> = (0..5).map(|k| k * 1_000).collect();
+    assert_eq!(cpu_times, every_second);
+    assert_eq!(memory_times, every_second);
+
+    for handle in &handles {
+        handle.abort();
+    }
+    fl.finish();
+}

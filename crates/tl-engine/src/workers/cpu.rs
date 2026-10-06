@@ -37,9 +37,11 @@ pub const SLOW_PERIOD: Duration = Duration::from_secs(1);
 /// Clock, temperature, live stats and power are read at most this often.
 pub const SLOW_EVERY_NS: u64 = 1_000_000_000;
 
-/// The CPU rate table (ADR-008). `tests/lab_demand.rs` holds a copy of this function.
+/// The CPU rate table (ADR-008). The process table keeps it at 1 Hz for the "Interrupts"
+/// pseudo row (PROC-012, R-166). `tests/lab_demand.rs` holds an E08-008 copy of this function
+/// that predates the pseudo-row rule.
 pub fn cpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.cpu == CpuDemand::Off && !d.recording {
+    if d.cpu == CpuDemand::Off && !d.recording && !d.process_table {
         None
     } else if d.cpu_fast {
         Some(FAST_PERIOD)
@@ -283,5 +285,24 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(cpu_period(&recording, &s), Some(Duration::from_secs(1)));
+
+        let table = Demand {
+            cpu: CpuDemand::Off,
+            recording: false,
+            process_table: true,
+            ..Demand::default()
+        };
+        assert_eq!(cpu_period(&table, &s), Some(Duration::from_secs(1)));
+
+        let table_fast = Demand {
+            cpu: CpuDemand::Total,
+            cpu_fast: true,
+            process_table: true,
+            ..Demand::default()
+        };
+        assert_eq!(
+            cpu_period(&table_fast, &s),
+            Some(Duration::from_millis(100))
+        );
     }
 }
