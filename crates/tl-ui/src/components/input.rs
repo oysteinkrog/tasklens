@@ -27,8 +27,8 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Escape, Input, InputState};
 use gpui_kit::{
     App, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, TextAlign,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 
 use super::icons::{TlIcon, icon};
@@ -87,6 +87,9 @@ pub struct TlTextInput {
     disabled: bool,
     placeholder: Option<SharedString>,
     width: Option<Pixels>,
+    align_right: bool,
+    suffix_text: Option<SharedString>,
+    square_corners: bool,
 }
 
 impl TlTextInput {
@@ -103,6 +106,9 @@ impl TlTextInput {
             disabled: false,
             placeholder: None,
             width: None,
+            align_right: false,
+            suffix_text: None,
+            square_corners: false,
         }
     }
 
@@ -159,6 +165,24 @@ impl TlTextInput {
         self.width = Some(width);
         self
     }
+
+    /// Right-aligns the text, for numbers.
+    pub fn align_right(mut self, align_right: bool) -> Self {
+        self.align_right = align_right;
+        self
+    }
+
+    /// A unit such as "ms", drawn after the text in `t_base` `text_secondary`.
+    pub fn suffix_text(mut self, text: impl Into<SharedString>) -> Self {
+        self.suffix_text = Some(text.into());
+        self
+    }
+
+    /// Draws all four corners square, for a field joined to other controls (TlStepper).
+    pub fn square_corners(mut self, square: bool) -> Self {
+        self.square_corners = square;
+        self
+    }
 }
 
 impl RenderOnce for TlTextInput {
@@ -176,7 +200,11 @@ impl RenderOnce for TlTextInput {
         let focused = !self.disabled && state.read(cx).focus_handle(cx).is_focused(window);
         let has_text = state.read(cx).text().len() > 0;
         let h = px(self.size.height() * m.ui_scale);
-        let radius = m.radius_small;
+        let radius = if self.square_corners {
+            px(0.)
+        } else {
+            m.radius_small
+        };
 
         let border = if self.invalid {
             theme.status.danger
@@ -187,13 +215,26 @@ impl RenderOnce for TlTextInput {
         };
         let show_clear = self.clear_button && has_text && !self.loading && !self.disabled;
 
-        let suffix = (show_clear || self.loading).then(|| {
+        let suffix_text = self.suffix_text.map(|text| {
+            let mut unit = div()
+                .debug_selector(|| "TlTextInput-suffix".into())
+                .flex_none()
+                .whitespace_nowrap()
+                .text_color(theme.text_secondary);
+            *unit.text_style() = t_base(&m);
+            unit.child(text)
+        });
+        let suffix = (show_clear || self.loading || suffix_text.is_some()).then(|| {
             let slot = div()
                 .flex()
                 .items_center()
+                .gap(m.sp[3])
                 // The kit pads a field with a suffix by its own amount; bring it back to sp4.
-                .mr(m.sp[4] - self.size.kit_suffix_pad());
-            if self.loading {
+                .mr(m.sp[4] - self.size.kit_suffix_pad())
+                .children(suffix_text);
+            if !(show_clear || self.loading) {
+                slot
+            } else if self.loading {
                 slot.child(
                     div()
                         .debug_selector(|| "TlTextInput-spinner".into())
@@ -242,6 +283,9 @@ impl RenderOnce for TlTextInput {
             })
             .when_some(suffix, |i, suffix| i.suffix(suffix));
         *input.text_style() = t_base(&m);
+        if self.align_right {
+            input.text_style().text_align = Some(TextAlign::Right);
+        }
         // `Input::h` sets the multi-line height only, so the size goes through `Styled`.
         let input = Styled::size_full(input)
             .px(m.sp[4])
@@ -659,6 +703,71 @@ mod tests {
             cx.debug_bounds("TlTextInput-clear").is_none(),
             "loading: no clear button"
         );
+    }
+
+    #[gpui_kit::test]
+    fn align_right_sets_text_align(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx, |state| {
+            TlTextInput::new("field", state)
+                .align_right(true)
+                .width(px(72.))
+                .into_any_element()
+        });
+        let align = cx.update(|_, cx| view.read(cx).state.read(cx).presentation().text_align());
+        assert_eq!(align, gpui_kit::TextAlign::Right);
+    }
+
+    #[gpui_kit::test]
+    fn suffix_text_inside_field(cx: &mut TestAppContext) {
+        let (_, cx) = host(cx, |state| {
+            TlTextInput::new("field", state)
+                .suffix_text("ms")
+                .width(px(72.))
+                .into_any_element()
+        });
+        draw(cx);
+        let field = cx.debug_bounds("TlTextInput-field").expect("field drawn");
+        let unit = cx.debug_bounds("TlTextInput-suffix").expect("suffix drawn");
+        assert!(field.contains(&unit.center()));
+        assert!(
+            unit.right() < field.right(),
+            "the suffix sits inside the border"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn square_corners_drop_radius(cx: &mut TestAppContext) {
+        let square = Rc::new(Cell::new(false));
+        let (view, cx) = host(cx, {
+            let square = square.clone();
+            move |state| {
+                TlTextInput::new("field", state)
+                    .square_corners(square.get())
+                    .width(px(72.))
+                    .into_any_element()
+            }
+        });
+        cx.simulate_mouse_move(
+            gpui_kit::point(px(500.), px(500.)),
+            None,
+            gpui_kit::Modifiers::none(),
+        );
+        let max_radius = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let color = current(cx).divider;
+                window
+                    .painted_quads()
+                    .iter()
+                    .filter(|q| q.border_color == color)
+                    .map(|q| q.corner_radii.top_left.0)
+                    .fold(0., f32::max)
+            })
+        };
+        assert!(max_radius(cx) > 0., "rounded by default");
+        square.set(true);
+        cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
+        assert_eq!(max_radius(cx), 0., "square corners");
     }
 
     #[gpui_kit::test]
