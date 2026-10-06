@@ -164,16 +164,20 @@ impl ZbusUnitBus {
     /// Sends the call, then reads the incoming messages until its reply. The message stream is
     /// opened before the send, so the reply cannot be missed.
     async fn call_raw(&self, method: &str, args: &[Value<'static>]) -> zbus::Result<OwnedValue> {
-        let mut body = StructureBuilder::new();
-        for arg in args {
-            body = body.append_field(arg.try_clone()?);
-        }
-        let body = body.build()?;
-        let msg = zbus::Message::method_call(MANAGER_PATH, method)?
+        let builder = zbus::Message::method_call(MANAGER_PATH, method)?
             .destination(MANAGER_BUS)?
             .interface(MANAGER_IFACE)?
-            .with_flags(Flags::AllowInteractiveAuth)?
-            .build(&body)?;
+            .with_flags(Flags::AllowInteractiveAuth)?;
+        // A structure needs at least one field, so a call with no arguments sends `()`.
+        let msg = if args.is_empty() {
+            builder.build(&())?
+        } else {
+            let mut body = StructureBuilder::new();
+            for arg in args {
+                body = body.append_field(arg.try_clone()?);
+            }
+            builder.build(&body.build()?)?
+        };
         let serial = msg.primary_header().serial_num();
         let mut incoming = zbus::MessageStream::from(&*self.conn);
         self.conn.send(&msg).await?;
