@@ -690,6 +690,7 @@ mod page {
     struct Rig<'a> {
         page: Entity<CpuPage>,
         demand: Entity<DemandAggregator>,
+        engine: Arc<FakeEngine>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -746,7 +747,12 @@ mod page {
         let focus = vcx.update(|_, cx| page.read(cx).focus_handle(cx));
         vcx.update(|window, cx| focus.focus(window, cx));
         draw(vcx);
-        Rig { page, demand, vcx }
+        Rig {
+            page,
+            demand,
+            engine,
+            vcx,
+        }
     }
 
     fn draw(cx: &mut VisualTestContext) {
@@ -998,5 +1004,48 @@ mod page {
         });
         assert_eq!(mode, CpuGraphMode::PerCore);
         assert_eq!(later, "Available in a later version");
+    }
+
+    #[gpui_kit::test]
+    fn cpu_clocks_from_snapshot_reach_grid_tooltips(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        let page = r.page.clone();
+        let publish = |r: &mut Rig, clocks: &Arc<[Metric<u32>]>| {
+            let clocks = Arc::clone(clocks);
+            r.engine.publish_with(move |s| {
+                let sys = Arc::make_mut(&mut s.system);
+                sys.header.version += 1;
+                sys.cpu.per_cpu_mhz = clocks;
+            });
+            draw(r.vcx);
+        };
+        let tip = |r: &mut Rig, i: usize| -> (Option<String>, usize) {
+            r.vcx.update(|_, cx| {
+                let t = page.read(cx).grid().view.read(cx).spec.cells[i]
+                    .tooltip
+                    .clone();
+                (
+                    t.as_ref().map(|t| t.to_string()),
+                    t.as_ref().map_or(0, |t| t.as_ptr() as usize),
+                )
+            })
+        };
+
+        let mut mhz: Vec<Metric<u32>> = (0..16).map(|id| Metric::valid(4000 + id * 10)).collect();
+        let clocks: Arc<[Metric<u32>]> = Arc::from(mhz.as_slice());
+        publish(&mut r, &clocks);
+        let (text, first) = tip(&mut r, 2);
+        assert_eq!(text.as_deref(), Some("Core 2, thread 0, 4020 MHz"));
+
+        // A new Arc with the same values: the tooltip is not re-formatted.
+        publish(&mut r, &Arc::from(mhz.as_slice()));
+        assert_eq!(tip(&mut r, 2).1, first);
+
+        // CPU 2 changes.
+        mhz[2] = Metric::valid(4500);
+        publish(&mut r, &Arc::from(mhz.as_slice()));
+        let (text, second) = tip(&mut r, 2);
+        assert_eq!(text.as_deref(), Some("Core 2, thread 0, 4500 MHz"));
+        assert_ne!(second, first);
     }
 }
