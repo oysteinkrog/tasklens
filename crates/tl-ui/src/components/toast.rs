@@ -225,6 +225,7 @@ impl ToastEntry {
             shown: self.shown,
             kind: self.kind,
             text: self.text.clone(),
+            full: self.display_text(),
             count: self.count,
             action: self.action.clone(),
             focus: self.focus.clone(),
@@ -244,6 +245,8 @@ struct ToastView {
     shown: u64,
     kind: ToastKind,
     text: SharedString,
+    /// The text with any count suffix, for the tooltip.
+    full: SharedString,
     count: u32,
     action: Option<ToastAction>,
     focus: Option<FocusHandle>,
@@ -848,11 +851,7 @@ fn toast_card(
         .min_w_0()
         .child(text_box.line_clamp(MAX_LINES).text_ellipsis().child(text));
     let text_box = if live {
-        let full = if view.count >= 2 {
-            format!("{}{}", view.text, count_suffix(view.count))
-        } else {
-            view.text.to_string()
-        };
+        let full = view.full.to_string();
         let tip_text = tr_args(cx, view.kind.tooltip_key(), &[("text", full.into())]);
         let tip_id = ElementId::NamedChild(
             Arc::new(ElementId::Name(name.clone().into())),
