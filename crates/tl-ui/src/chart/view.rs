@@ -15,6 +15,7 @@ pub struct ChartView {
     pub spec: ChartSpec,
     pub labels: ChartLabels,
     pub state: ChartState,
+    #[allow(dead_code, reason = "read by the test hooks now and by E19-009 on")]
     pub(crate) cache: Rc<RefCell<ChartCache>>,
     // E19-004: scale_state: scale::ScaleState (added by yrf.6 as a chain edit, R-262)
     /// Filled by E19-009; empty struct until then.
