@@ -1469,6 +1469,8 @@ struct Engine {
     root: asupersync::types::RegionId,
     reducer: Option<Reducer>,
     publisher: Option<Publisher>,
+    /// Kept so the publisher does not stop when it finds the receiver gone.
+    _wake_rx: async_channel::Receiver<()>,
 }
 
 type RunOutput = Arc<Mutex<Option<(Reducer, Publisher)>>>;
@@ -1477,7 +1479,7 @@ impl Engine {
     fn new() -> Self {
         let (control_tx, _control_rx) = watch::channel(WorkerControl::default());
         let (events_tx, _events_rx) = async_channel::bounded(64);
-        let (wake_tx, _wake_rx) = async_channel::bounded(1);
+        let (wake_tx, wake_rx) = async_channel::bounded(1);
         let publisher = Publisher {
             latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(NAMES_BOOT, 1))),
             wake_tx,
@@ -1490,6 +1492,7 @@ impl Engine {
             root,
             reducer: Some(Reducer::new(1, NAMES_BOOT, control_tx, events_tx)),
             publisher: Some(publisher),
+            _wake_rx: wake_rx,
         }
     }
 
