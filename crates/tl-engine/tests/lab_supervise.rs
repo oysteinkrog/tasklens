@@ -486,25 +486,49 @@ fn is_disabled(state: SourceState) -> bool {
     matches!(state, SourceState::Disabled { .. })
 }
 
+/// `Running` then `Failed` at each generation start in `starts` (R-289: each generation sends
+/// `Running` first and `Failed` when it fails), with `Disabled` as `until: 0`.
+fn failing_generations(starts: &[u64]) -> Vec<(u64, SourceState)> {
+    starts
+        .iter()
+        .flat_map(|&ms| [(ms, SourceState::Running), (ms, SourceState::Failed)])
+        .collect()
+}
+
+fn without_until(states: Vec<(u64, SourceState)>) -> Vec<(u64, SourceState)> {
+    states
+        .into_iter()
+        .map(|(ms, state)| match state {
+            SourceState::Disabled { .. } => (ms, SourceState::Disabled { until: 0 }),
+            other => (ms, other),
+        })
+        .collect()
+}
+
 #[test]
 fn controller_disables_for_60s_then_retries() {
     let mut rig = CtlRig::new(0x8d8_0001, |_| Gen::Fail);
     rig.run_to(130_000);
-    // Six starts spend the budget: backoffs 0.5 + 1 + 2 + 4 + 8 s end at 15.5 s.
-    let states = rig.states();
-    assert_eq!(states.len(), 4, "{states:?}");
-    assert_eq!(states[0], (0, SourceState::Running));
-    assert_eq!(states[1].0, 15_500);
-    assert!(is_disabled(states[1].1));
-    assert_eq!(states[2], (75_500, SourceState::Running));
-    assert_eq!(states[3].0, 91_000);
-    assert!(is_disabled(states[3].1));
-    for (_, state, last_error, t_ns) in [&rig.seen[1], &rig.seen[3]] {
+    // Six starts spend the budget: backoffs 0.5 + 1 + 2 + 4 + 8 s end at 15.5 s. Every
+    // generation shows as `Running` then `Failed` (R-289); the first `Running` of each
+    // supervisor is the controller's.
+    let off = SourceState::Disabled { until: 0 };
+    let mut expected = failing_generations(&[0, 500, 1_500, 3_500, 7_500, 15_500]);
+    expected.push((15_500, off));
+    expected.extend(failing_generations(&[
+        75_500, 76_000, 77_000, 79_000, 83_000, 91_000,
+    ]));
+    expected.push((91_000, off));
+    assert_eq!(without_until(rig.states()), expected);
+    for (_, state, last_error, t_ns) in [&rig.seen[12], &rig.seen[25]] {
         let SourceState::Disabled { until } = *state else {
             unreachable!()
         };
         assert_eq!(until, t_ns + 60_000_000_000);
         assert_eq!(last_error.as_deref(), Some("fail"));
+    }
+    for seen in rig.seen.iter().filter(|s| s.1 == SourceState::Failed) {
+        assert_eq!(seen.2.as_deref(), Some("fail"));
     }
     // The worker does not run while the source is off.
     let starts = rig.probe.starts();
@@ -514,7 +538,7 @@ fn controller_disables_for_60s_then_retries() {
     // At 130 s the controller sleeps in its second off minute. Shutdown ends it at once.
     let rig = rig.shutdown();
     assert_eq!(rig.probe.starts().len(), 12);
-    assert_eq!(rig.seen.len(), 4);
+    assert_eq!(rig.seen.len(), 26);
 }
 
 #[test]
@@ -527,7 +551,9 @@ fn controller_no_disable_under_budget() {
         }
     });
     rig.run_to(60_000);
-    assert_eq!(rig.states(), [(0, SourceState::Running)]);
+    let mut expected = failing_generations(&[0, 500, 1_500]);
+    expected.push((3_500, SourceState::Running));
+    assert_eq!(rig.states(), expected);
     assert_eq!(rig.probe.starts(), [0, 500, 1_500, 3_500]);
     let rig = rig.shutdown();
     // Shutdown reaches the running generation.
