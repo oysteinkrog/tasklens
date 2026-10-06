@@ -422,7 +422,7 @@ impl<V: Render> TlSecondaryWindow<V> {
     }
 }
 
-impl<V> TlSecondaryWindow<V> {
+impl<V: 'static> TlSecondaryWindow<V> {
     pub fn content(&self) -> &Entity<V> {
         &self.content
     }
@@ -560,7 +560,7 @@ impl<V> TlSecondaryWindow<V> {
             })
             .child(icon(TlIcon::Pin, m.icon.md, fg));
         let tip = TlTooltip::text(look.tooltip);
-        let hover_tip = HoverTooltip::state((id, "hover-tooltip"), window, cx);
+        let hover_tip = HoverTooltip::state("TlWindowPin-hover-tooltip", window, cx);
         button = HoverTooltip::attach(
             &hover_tip,
             button,
@@ -569,7 +569,7 @@ impl<V> TlSecondaryWindow<V> {
             window,
             cx,
         );
-        let focus_tip = FocusTooltip::state((id, "focus-tooltip"), window, cx);
+        let focus_tip = FocusTooltip::state("TlWindowPin-focus-tooltip", window, cx);
         button = FocusTooltip::attach(
             &focus_tip,
             button,
