@@ -31,6 +31,7 @@ use tl_model::details::{
     TargetDetail,
 };
 use tl_model::devices::DeviceCatalog;
+use tl_model::gpu_proto::GpuApiVersions;
 use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
 use tl_model::ids::ProcessKey;
@@ -41,7 +42,7 @@ use tl_model::snapshot::{
     ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot, StartupSnapshot,
     SystemSnapshot, WindowsSnapshot,
 };
-use tl_model::table::{ProcessTableView, SysTableQuery, TableQuery, UnitRef};
+use tl_model::table::{ProcessTableView, SysTable, SysTableQuery, TableQuery, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
@@ -129,6 +130,7 @@ pub struct Reducer {
     /// Sleep and resume state (E09-008).
     pub suspend: suspend::SuspendState,
     pub query: TableQuery,
+    /// The last `SetSysTableQuery` per system table: Services, Startup, Connections (E09-027).
     pub sys_queries: [Option<SysTableQuery>; 3],
     pub components: Components,
     /// Reducer-to-worker control (E08-004).
@@ -153,6 +155,8 @@ pub struct Reducer {
     pub unit_names: FxHashMap<UnitRef, Arc<str>>,
     /// Properties payloads, affinity masks and handle search state (E09-026).
     pub details: DetailsState,
+    /// The last `GpuApiVersions`, merged into every later `Inventory` (E09-027).
+    pub api_versions: Vec<GpuApiVersions>,
     dirty: ComponentMask,
     /// Header version of each header component at the last publish, in `HEADER_BITS` order.
     published: [u64; HEADER_BITS.len()],
@@ -230,6 +234,7 @@ impl Reducer {
             apply_state: apply::ApplyState::default(),
             unit_names: FxHashMap::default(),
             details: DetailsState::default(),
+            api_versions: Vec::new(),
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
         }
@@ -274,6 +279,21 @@ impl Reducer {
             publisher.publish(next);
         }
         Ok(())
+    }
+
+    /// The stored query of `table`, or the default one: generation 0, default sort, no filter,
+    /// nothing expanded (E09-027).
+    pub fn sys_query(&self, table: SysTable) -> SysTableQuery {
+        self.sys_queries[sys_table_index(table)]
+            .clone()
+            .unwrap_or_else(|| SysTableQuery {
+                table,
+                generation: 0,
+                sort: sys_table::default_sort(table),
+                filter: Arc::from(""),
+                expanded: Arc::from([]),
+                services: None,
+            })
     }
 
     /// Marks a component as changed for the next publish. Called by apply.
@@ -431,6 +451,15 @@ impl DetailsState {
             affinity: self.affinity.iter().map(|(k, v)| (*k, *v)).collect(),
             handle_search: self.handle_search.clone(),
         }))
+    }
+}
+
+/// The `sys_queries` slot of `table`.
+pub fn sys_table_index(table: SysTable) -> usize {
+    match table {
+        SysTable::Services => 0,
+        SysTable::Startup => 1,
+        SysTable::Connections => 2,
     }
 }
 

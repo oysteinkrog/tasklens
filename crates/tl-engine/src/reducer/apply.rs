@@ -11,30 +11,35 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tl_model::actions::{ActionEvent, ActionState, RejectReason};
+use tl_model::actions::{ActionEvent, ActionState, Proto, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
+use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, DeviceDetailsSnapshot, DiskDetails, EjectState, NetDetails,
-    SystemSnapshot, UnitRecord,
+    ComponentHeader, ComponentMask, ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot,
+    DeviceDetailsSnapshot, DiskDetails, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
+    ServicesSnapshot, StartupCounts, StartupEntry, StartupSnapshot, StartupStatus, SystemSnapshot,
+    UnitRecord, WindowsSnapshot,
 };
 use tl_model::system::{Metric, SensorKind};
-use tl_model::table::{SysTable, Total, UnitRef};
+use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
 use super::suspend::Transition;
+use super::sys_table::{self, SysTableInput};
 use super::table::{self, PseudoInput, SweepTotals, TableInput};
-use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer};
+use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
-    CpuSample, DetailsUpdate, DeviceDetailsUpdate, DiskSample, EngineMsg, GpuSample, MemorySample,
-    NetSample, SensorSample, SourceUpdate, source_of,
+    ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDetailsUpdate, DiskSample, EngineMsg,
+    GpuSample, MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate,
+    source_of,
 };
 
 /// Valid CPU samples whose irq share stays 0 before the Interrupts row shows `n/a` (U-21).
@@ -208,11 +213,59 @@ fn net_shown(kind: Option<NetKind>, settings: &EngineSettings) -> bool {
     }
 }
 
-fn sys_table_index(table: SysTable) -> usize {
-    match table {
-        SysTable::Services => 0,
-        SysTable::Startup => 1,
-        SysTable::Connections => 2,
+/// The `ServicesSnapshot.managers` slot of `manager`: 0 is System, 1 is User.
+fn manager_index(manager: Manager) -> usize {
+    match manager {
+        Manager::System => 0,
+        Manager::User => 1,
+    }
+}
+
+/// The Connections status counts over all records (SYS-028).
+fn conn_counts(records: &[ConnRecord]) -> ConnCounts {
+    let mut c = ConnCounts::default();
+    for r in records {
+        c.total += 1;
+        match r.proto {
+            Proto::Tcp => c.tcp += 1,
+            Proto::Udp => c.udp += 1,
+        }
+        match r.state {
+            ConnState::Established => c.established += 1,
+            ConnState::Listening => c.listening += 1,
+            _ => {}
+        }
+    }
+    c
+}
+
+/// The Startup status counts. Disabled counts every entry that is not Enabled, so Total is
+/// Enabled plus Disabled (UI-SYS-049).
+fn startup_counts(entries: &[StartupEntry]) -> StartupCounts {
+    let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    let enabled = entries
+        .iter()
+        .filter(|e| e.status == StartupStatus::Enabled)
+        .count();
+    let enabled = u32::try_from(enabled).unwrap_or(u32::MAX);
+    StartupCounts {
+        total,
+        enabled,
+        disabled: total - enabled,
+    }
+}
+
+/// A probe value: `Valid` when the probe reported it, else `Unsupported` ("Not reported").
+fn probe_field(value: Option<&str>) -> Total<Arc<str>> {
+    match value {
+        Some(v) => Total {
+            value: Arc::from(v),
+            validity: Validity::Valid,
+        },
+        None => Total {
+            value: Arc::from(""),
+            validity: Validity::Unsupported,
+        },
     }
 }
 
@@ -386,8 +439,13 @@ impl Reducer {
                 }
                 self.mark(ComponentMask::DEVICES);
             }
-            SourceUpdate::GpuApiVersions(_) => {
-                tracing::debug!(target: "tasklens::engine", "gpu api versions: E09-027");
+            SourceUpdate::GpuApiVersions(ApiVersions { devices }) => {
+                self.api_versions = devices;
+                let mut next = (*self.components.inventory).clone();
+                if self.merge_api_versions(&mut next) {
+                    self.components.inventory = Arc::new(next);
+                    self.mark(ComponentMask::INVENTORY);
+                }
             }
             SourceUpdate::Processes(sweep) => {
                 let observed = (sweep.observed_start, sweep.observed_end);
@@ -422,18 +480,22 @@ impl Reducer {
             SourceUpdate::Details(DetailsUpdate::HandleSearch(state)) => {
                 self.details.apply_handle_search(state);
             }
-            SourceUpdate::Services(s) => {
-                if self.apply_unit_names(&s.units) {
-                    self.rebuild_table(settings);
-                }
-                tracing::debug!(target: "tasklens::engine", ?source, "system update: E09-027");
+            SourceUpdate::Services(s) => self.apply_services(s, settings),
+            SourceUpdate::Connections(c) => self.apply_connections(c, settings),
+            SourceUpdate::ConnectionsDestroySupport(supported) => {
+                let mut next = (*self.components.connections).clone();
+                next.destroy_supported = Some(supported);
+                self.components.connections = Arc::new(next);
+                self.mark(ComponentMask::CONNECTIONS);
             }
-            SourceUpdate::Connections(_)
-            | SourceUpdate::ConnectionsDestroySupport(_)
-            | SourceUpdate::Startup(_)
-            | SourceUpdate::Inventory(_)
-            | SourceUpdate::Windows(_) => {
-                tracing::debug!(target: "tasklens::engine", ?source, "system update: E09-027");
+            SourceUpdate::Startup(s) => self.apply_startup(s, settings),
+            SourceUpdate::Inventory(b) => self.apply_inventory(*b),
+            SourceUpdate::Windows(b) => {
+                let mut next: WindowsSnapshot = *b;
+                next.header.version = 0;
+                next.header.validity = Validity::Valid;
+                self.components.windows = Arc::new(next);
+                self.mark(ComponentMask::WINDOWS);
             }
             SourceUpdate::History(_) => {
                 tracing::debug!(target: "tasklens::engine", "history view: E09-028");
@@ -452,9 +514,9 @@ impl Reducer {
                 self.rebuild_table(settings);
             }
             Command::SetSysTableQuery(q) => {
-                // E09-027 rebuilds the table from the stored query.
-                let i = sys_table_index(q.table);
-                self.sys_queries[i] = Some(q);
+                let table = q.table;
+                self.sys_queries[sys_table_index(table)] = Some(q);
+                self.rebuild_sys(table, settings);
             }
             Command::Action(req) => {
                 if let Some(gate) = self.action_gate.as_mut() {
@@ -1197,6 +1259,7 @@ impl Reducer {
         } else {
             Arc::from([])
         };
+        self.retain_unit_details(&demand.unit_details);
         if *keys == *self.apply_state.pss_keys {
             return;
         }
@@ -1272,5 +1335,204 @@ impl Reducer {
         };
         self.components.table = Arc::new(view);
         self.mark(ComponentMask::TABLE);
+    }
+
+    /// Merges one manager's update into `services`: the other manager's units and details stay,
+    /// this manager's are replaced (E09-027). Then rebuilds the Services rows and counts.
+    fn apply_services(&mut self, u: ServicesUpdate, settings: &EngineSettings) {
+        if self.apply_unit_names(&u.units) {
+            self.rebuild_table(settings);
+        }
+        let old = &self.components.services;
+        let mut units: Vec<UnitRecord> = old
+            .units
+            .iter()
+            .filter(|r| r.unit.manager != u.manager)
+            .cloned()
+            .collect();
+        units.extend(u.units);
+        // Stable: System units first, each manager in the worker's order.
+        units.sort_by_key(|r| manager_index(r.unit.manager));
+        let mut details: std::collections::HashMap<_, _> = old
+            .details
+            .iter()
+            .filter(|(unit, _)| unit.manager != u.manager)
+            .map(|(unit, d)| (unit.clone(), Arc::clone(d)))
+            .collect();
+        details.extend(u.details);
+        let mut managers = old.managers;
+        managers[manager_index(u.manager)] = u.state;
+        let t = now_boot_ns();
+        self.components.services = Arc::new(ServicesSnapshot {
+            header: ComponentHeader {
+                version: 0,
+                observed_start: t,
+                observed_end: t,
+                validity: u.validity,
+            },
+            rows: Arc::clone(&old.rows),
+            query_generation: old.query_generation,
+            units: units.into(),
+            counts: old.counts,
+            managers,
+            details: Arc::new(details),
+            backend: u.backend,
+        });
+        if let Some(wanted) = self
+            .demand_rx
+            .as_ref()
+            .map(|rx| rx.borrow().unit_details.clone())
+        {
+            self.retain_unit_details(&wanted);
+        }
+        self.rebuild_sys(SysTable::Services, settings);
+    }
+
+    /// Drops the unit details not in `wanted` (`Demand.unit_details`), so a closed Service
+    /// Properties window frees its payload. The other entries keep their `Arc`.
+    fn retain_unit_details(&mut self, wanted: &[UnitRef]) {
+        let details = &self.components.services.details;
+        if details.keys().all(|unit| wanted.contains(unit)) {
+            return;
+        }
+        let kept = details
+            .iter()
+            .filter(|(unit, _)| wanted.contains(unit))
+            .map(|(unit, d)| (unit.clone(), Arc::clone(d)))
+            .collect();
+        Arc::make_mut(&mut self.components.services).details = Arc::new(kept);
+        self.mark(ComponentMask::SERVICES);
+    }
+
+    /// Replaces `connections` with the update's records and counts. `destroy_supported` stays
+    /// (E09-027).
+    fn apply_connections(&mut self, u: ConnectionsUpdate, settings: &EngineSettings) {
+        let old = &self.components.connections;
+        self.components.connections = Arc::new(ConnectionsSnapshot {
+            header: ComponentHeader {
+                version: 0,
+                observed_start: u.t_ns,
+                observed_end: u.t_ns,
+                validity: u.validity,
+            },
+            rows: Arc::clone(&old.rows),
+            query_generation: old.query_generation,
+            counts: conn_counts(&u.records),
+            records: u.records.into(),
+            destroy_supported: old.destroy_supported,
+        });
+        self.rebuild_sys(SysTable::Connections, settings);
+    }
+
+    fn apply_startup(&mut self, u: StartupUpdate, settings: &EngineSettings) {
+        let old = &self.components.startup;
+        let t = now_boot_ns();
+        self.components.startup = Arc::new(StartupSnapshot {
+            header: ComponentHeader {
+                version: 0,
+                observed_start: t,
+                observed_end: t,
+                validity: u.validity,
+            },
+            rows: Arc::clone(&old.rows),
+            query_generation: old.query_generation,
+            counts: startup_counts(&u.entries),
+            entries: u.entries.into(),
+        });
+        self.rebuild_sys(SysTable::Startup, settings);
+    }
+
+    /// Replaces `inventory` with the worker's box: new version and observed time, the box's
+    /// validity. The reducer-owned peak commit and the API versions are merged in.
+    fn apply_inventory(&mut self, mut next: InventorySnapshot) {
+        let t = now_boot_ns();
+        next.header = ComponentHeader {
+            version: 0,
+            observed_start: t,
+            observed_end: t,
+            validity: next.header.validity,
+        };
+        if self.apply_state.peak_committed > 0 {
+            next.memory.peak_committed_bytes = Total {
+                value: self.apply_state.peak_committed,
+                validity: Validity::Valid,
+            };
+        }
+        self.merge_api_versions(&mut next);
+        self.components.inventory = Arc::new(next);
+        self.mark(ComponentMask::INVENTORY);
+    }
+
+    /// Sets the Vulkan and OpenGL versions of each graphics adapter from the stored
+    /// `GpuApiVersions`, matched by the PCI bus ID of the adapter's catalog device. Returns true
+    /// when an adapter matched.
+    fn merge_api_versions(&self, inventory: &mut InventorySnapshot) -> bool {
+        if self.api_versions.is_empty() {
+            return false;
+        }
+        let mut graphics: Vec<GraphicsAdapter> = inventory.graphics.to_vec();
+        let mut matched = false;
+        for adapter in &mut graphics {
+            let Some(DeviceIdentity::Gpu { pci_bus_id, .. }) = adapter
+                .device
+                .and_then(|idx| self.devices.entry(idx))
+                .map(|e| &e.identity)
+            else {
+                continue;
+            };
+            let Some(v) = self
+                .api_versions
+                .iter()
+                .find(|v| v.pci_bus_id.eq_ignore_ascii_case(pci_bus_id))
+            else {
+                continue;
+            };
+            adapter.vulkan_version = probe_field(v.vulkan_api.as_deref());
+            adapter.opengl_version = probe_field(v.opengl.as_deref());
+            matched = true;
+        }
+        if matched {
+            inventory.graphics = graphics.into();
+        }
+        matched
+    }
+
+    /// Rebuilds the rows of one system table from its component and stored query, and echoes
+    /// the query generation. Services also stores its counts. Always marks the component, so
+    /// the generation is echoed even when the rows are equal (E09-027).
+    fn rebuild_sys(&mut self, table: SysTable, settings: &EngineSettings) {
+        let query = self.sys_query(table);
+        let c = &self.components;
+        let input = SysTableInput {
+            services: &c.services,
+            startup: &c.startup,
+            connections: &c.connections,
+            processes: &c.processes,
+            settings,
+        };
+        match table {
+            SysTable::Services => {
+                let (out, counts) = sys_table::build_services(&input, &query);
+                let next = Arc::make_mut(&mut self.components.services);
+                next.rows = out.rows;
+                next.query_generation = out.query_generation;
+                next.counts = counts;
+                self.mark(ComponentMask::SERVICES);
+            }
+            SysTable::Startup => {
+                let out = sys_table::build(&input, &query);
+                let next = Arc::make_mut(&mut self.components.startup);
+                next.rows = out.rows;
+                next.query_generation = out.query_generation;
+                self.mark(ComponentMask::STARTUP);
+            }
+            SysTable::Connections => {
+                let out = sys_table::build(&input, &query);
+                let next = Arc::make_mut(&mut self.components.connections);
+                next.rows = out.rows;
+                next.query_generation = out.query_generation;
+                self.mark(ComponentMask::CONNECTIONS);
+            }
+        }
     }
 }
