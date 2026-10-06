@@ -790,13 +790,13 @@ mod tests {
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_idle();
 
-        let mut advance = |lab: &mut LabRuntime, d: Duration| {
+        let advance = |lab: &mut LabRuntime, d: Duration| {
             lab.advance_time(u64::try_from(d.as_nanos()).expect("fits in u64"));
             // `run_until_idle` stops when no task is ready; one step fires the due timers.
             lab.step_for_test();
             lab.run_until_idle();
         };
-        let mut count = |rx: &mut mpsc::Receiver<EngineMsg>| {
+        let count = |rx: &mut mpsc::Receiver<EngineMsg>| {
             let mut n = 0;
             while let Ok(msg) = rx.try_recv() {
                 if matches!(msg, EngineMsg::Source(SourceUpdate::Connections(_))) {
