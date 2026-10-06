@@ -380,7 +380,7 @@ fn translated(path: &Path<Pixels>, offset: Point<Pixels>, scale_factor: f32) -> 
     let inv = 1.0 / scale_factor;
     let mut path = path.clone();
     path.bounds.origin = path.bounds.origin * inv + offset;
-    path.bounds.size = path.bounds.size * inv;
+    path.bounds.size = size(path.bounds.size.width * inv, path.bounds.size.height * inv);
     for vertex in &mut path.vertices {
         vertex.xy_position = vertex.xy_position * inv + offset;
     }
