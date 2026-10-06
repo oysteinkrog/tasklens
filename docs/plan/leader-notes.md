@@ -510,3 +510,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yms.31 (e887376, a4305ca): security reader with O_NOFOLLOW and a read cap on each path part. Snapshot rows for pids 1 and 4212 accepted. Leader fix requested: no readable ns reference gives Restricted, not Isolated.
 - yms.31 fix (a6f50c2): no ns reference gives Restricted.
 - ug9.33 (82678f8, a814452, 4f3af54): KvWords covers the empty text and copy labels; props fields store the UnsupportedWord variant. Follow-up bead filed for tr calls per frame in props filter.rs.
+- jqk.1 (2c59d78): close decision, window actions, size saving with a 500 ms debounce. Show and toggle run through cx.defer; Quit saves the last observed bounds. TitleBarProbe.minimizes added (accepted). The test window cannot report maximized, so the test sets the probe flag.
+- hk6.5 (529322c, efdc4e7, a568f66): sys status cell with a StatusWords global (R-132), cell_colors, STALE_DOT_ALPHA 0.5.
