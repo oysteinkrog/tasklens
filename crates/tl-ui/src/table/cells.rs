@@ -28,9 +28,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, Div, Element, ElementId, GlobalElementId, Hsla,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style,
-    Styled, StyledText, TextStyleRefinement, Window, div, point, relative, size,
+    App, Bounds, ContentMask, Div, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
+    IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled, StyledText,
+    TextStyleRefinement, Window, div, point, relative, size,
 };
 use tl_model::validity::Validity;
 
@@ -127,7 +127,12 @@ pub fn text_cell(text: SharedString, ctx: &CellCtx, truncated: Rc<Cell<bool>>) -
         .debug_selector(|| "TlCell-text".into())
         .text_color(ctx.primary())
         .text_ellipsis()
-        .child(CellText::new(text, Align::Start, Fit::Ellipsis, Some(truncated)))
+        .child(CellText::new(
+            text,
+            Align::Start,
+            Fit::Ellipsis,
+            Some(truncated),
+        ))
 }
 
 /// A path cell. `text` is already cut by `text::ellipsis::middle_ellipsis` through
@@ -390,8 +395,7 @@ impl Element for CellText {
             }
             // GPUI may also leave a text whole that is a fraction of a pixel too wide.
             Fit::Ellipsis => {
-                shown_width > available
-                    || self.ellipsized(shown_len, last_glyph, available, window)
+                shown_width > available || self.ellipsized(shown_len, last_glyph, available, window)
             }
         };
         cut.set(was_cut);
@@ -409,7 +413,8 @@ impl Element for CellText {
     ) {
         let mask = (self.fit == Fit::Clip).then_some(ContentMask { bounds });
         window.with_content_mask(mask, |window| {
-            self.inner.paint(None, None, bounds, &mut (), &mut (), window, cx);
+            self.inner
+                .paint(None, None, bounds, &mut (), &mut (), window, cx);
         });
     }
 }
