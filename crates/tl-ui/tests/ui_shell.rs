@@ -1730,3 +1730,551 @@ mod status {
         assert_eq!(r.admin.get(), 1);
     }
 }
+
+mod main_window {
+    use std::sync::{Arc, Mutex};
+
+    use gpui_kit::{
+        AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Global,
+        InteractiveElement, IntoElement, Pixels, Render, Styled, TestAppContext, VisualTestContext,
+        Window, WindowBounds, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{
+        AppearanceSettings, Settings, StartTab, ThemeSettings, UiState, WindowState,
+    };
+    use tl_ui::actions::{NextTab, PrevTab, RefreshCurrentTab, SelectTab};
+    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::components::toast::{self, ToastKind};
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, MainWindow, PageFactory, PageSlot, ShellPage, first_frame_ms_from,
+        main_window_options, main_window_view, open_main_window, push_main_toast, restored_bounds,
+        set_test_page,
+    };
+    use tl_ui::window::status::StatusChanged;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    /// Pages built and pages refreshed, in order.
+    #[derive(Default)]
+    struct Log {
+        created: Vec<Tab>,
+        refreshed: Vec<Tab>,
+    }
+
+    impl Global for Log {}
+
+    struct FakePage {
+        tab: Tab,
+        focus: FocusHandle,
+        text: String,
+    }
+
+    impl EventEmitter<StatusChanged> for FakePage {}
+
+    impl Render for FakePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id(self.tab.as_str())
+                .track_focus(&self.focus)
+                .size_full()
+        }
+    }
+
+    impl ShellPage for FakePage {
+        fn status_text(&self, out: &mut String) {
+            out.push_str(&self.text);
+        }
+
+        fn primary_focus(&self) -> FocusHandle {
+            self.focus.clone()
+        }
+
+        fn refresh(&mut self, cx: &mut Context<Self>) {
+            cx.default_global::<Log>().refreshed.push(self.tab);
+        }
+    }
+
+    fn fake<const I: usize>(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let tab = Tab::ALL[I];
+        cx.default_global::<Log>().created.push(tab);
+        let page = cx.new(|cx| FakePage {
+            tab,
+            focus: cx.focus_handle().tab_stop(true),
+            text: String::new(),
+        });
+        PageSlot::new(page, cx)
+    }
+
+    const FAKES: [PageFactory; 6] = [
+        fake::<0>, fake::<1>, fake::<2>, fake::<3>, fake::<4>, fake::<5>,
+    ];
+
+    struct Opts {
+        ui_scale_pct: u16,
+        pages: &'static [Tab],
+        start_tab: StartTab,
+        arg: Option<StartTab>,
+        last_tab: Tab,
+        engine: bool,
+    }
+
+    impl Default for Opts {
+        fn default() -> Self {
+            Self {
+                ui_scale_pct: 100,
+                pages: &Tab::ALL,
+                start_tab: StartTab::Processes,
+                arg: None,
+                last_tab: Tab::Processes,
+                engine: false,
+            }
+        }
+    }
+
+    /// Every Global the main window needs, with fake pages for `opts.pages`. Opens no window.
+    fn setup(cx: &mut TestAppContext, opts: &Opts) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings {
+                ui_scale_pct: opts.ui_scale_pct,
+                ..AppearanceSettings::default()
+            };
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::i18n::init_strings(cx, "en-US");
+            let mut settings = Settings::default();
+            settings.appearance = appearance;
+            settings.general.start_tab = opts.start_tab;
+            let mut state = UiState::default();
+            state.tabs.last_tab = opts.last_tab;
+            cx.set_global(BootSettings {
+                settings,
+                state,
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            if opts.engine {
+                let engine = FakeEngine::new();
+                let client: Arc<dyn EngineClient> = engine;
+                cx.set_global(EngineGlobal(client.clone()));
+                let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+                let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+                cx.set_global(GlobalHub(hub));
+                cx.set_global(GlobalDemand(demand));
+            }
+            toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            cx.set_global(StartOptions {
+                tab: opts.arg,
+                ..StartOptions::default()
+            });
+            for tab in opts.pages {
+                set_test_page(cx, *tab, FAKES[*tab as usize]);
+            }
+            cx.set_global(Log::default());
+            shell::init(cx);
+        });
+    }
+
+    fn open(cx: &mut TestAppContext) -> VisualTestContext {
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        vcx
+    }
+
+    fn rig(cx: &mut TestAppContext, opts: Opts) -> VisualTestContext {
+        setup(cx, &opts);
+        open(cx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn frame(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+    }
+
+    fn main(vcx: &mut VisualTestContext) -> Entity<MainWindow> {
+        vcx.update(|_, cx| main_window_view(cx).expect("main window open"))
+    }
+
+    fn active(vcx: &mut VisualTestContext) -> Tab {
+        let main = main(vcx);
+        vcx.read_entity(&main, |m, _| m.active_tab())
+    }
+
+    fn page(vcx: &mut VisualTestContext, tab: Tab) -> Option<Entity<FakePage>> {
+        let main = main(vcx);
+        vcx.read_entity(&main, |m, _| m.page_entity::<FakePage>(tab))
+    }
+
+    fn act(vcx: &mut VisualTestContext, action: impl gpui_kit::Action) {
+        vcx.dispatch_action(action);
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    fn log<R>(vcx: &mut VisualTestContext, f: impl FnOnce(&Log) -> R) -> R {
+        vcx.update(|_, cx| f(cx.global::<Log>()))
+    }
+
+    fn bounds(vcx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn chip_text(vcx: &mut VisualTestContext) -> String {
+        let main = main(vcx);
+        let chip = vcx.read_entity(&main, |m, _| m.status_chip().clone());
+        vcx.read_entity(&chip, |c, _| c.drawn_text())
+    }
+
+    fn emit_status(vcx: &mut VisualTestContext, tab: Tab, text: &str) {
+        let page = page(vcx, tab).expect("page built");
+        let text = text.to_owned();
+        vcx.update(|_, cx| {
+            page.update(cx, |p, cx| {
+                p.text = text;
+                cx.emit(StatusChanged);
+            })
+        });
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn main_window_layout_regions(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
+        for (cx, scale, expect) in [(cx_a, 100, [34., 30., 736.]), (cx_b, 150, [51., 45., 704.])] {
+            let mut vcx = rig(
+                cx,
+                Opts {
+                    ui_scale_pct: scale,
+                    pages: &[Tab::Processes],
+                    ..Opts::default()
+                },
+            );
+            assert_eq!(
+                vcx.update(|window, _| window.viewport_size()),
+                size(px(1280.), px(800.))
+            );
+            let heights = [
+                bounds(&mut vcx, "TitleBar").size.height,
+                bounds(&mut vcx, "TabStrip").size.height,
+                bounds(&mut vcx, "MainWindowPage").size.height,
+            ];
+            assert_eq!(heights, expect.map(px), "at {scale} %");
+            assert_eq!(bounds(&mut vcx, "MainWindowPage").size.width, px(1280.));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn main_window_min_size(cx: &mut TestAppContext) {
+        setup(cx, &Opts::default());
+        let options = cx.update(|cx| main_window_options(cx));
+        assert_eq!(options.window_min_size, Some(size(px(800.), px(500.))));
+        assert_eq!(
+            options.app_id.as_deref(),
+            Some("io.github.oysteinkrog.Tasklens")
+        );
+        assert_eq!(
+            options.titlebar.and_then(|t| t.title).as_deref(),
+            Some("tasklens")
+        );
+        assert!(options.show && options.focus);
+    }
+
+    #[test]
+    fn geometry_restore_clamps() {
+        let small = WindowState {
+            width: 640,
+            height: 400,
+            maximized: false,
+        };
+        match restored_bounds(&small) {
+            WindowBounds::Windowed(b) => {
+                assert_eq!(b.size, size(px(800.), px(500.)));
+                assert_eq!(b.origin, gpui_kit::point(px(0.), px(0.)));
+            }
+            other => panic!("windowed bounds expected, got {other:?}"),
+        }
+        let maximized = WindowState {
+            maximized: true,
+            ..small
+        };
+        assert!(matches!(
+            restored_bounds(&maximized),
+            WindowBounds::Maximized(b) if b.size == size(px(800.), px(500.))
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn startup_tab_arg_wins(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                pages: &[Tab::Performance, Tab::Services],
+                start_tab: StartTab::Performance,
+                arg: Some(StartTab::Services),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(active(&mut vcx), Tab::Services);
+        assert!(page(&mut vcx, Tab::Services).is_some());
+        assert!(page(&mut vcx, Tab::Performance).is_none());
+        assert_eq!(log(&mut vcx, |l| l.created.clone()), vec![Tab::Services]);
+    }
+
+    #[gpui_kit::test]
+    fn startup_tab_last_used(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                pages: &[Tab::Processes, Tab::Connections],
+                start_tab: StartTab::LastUsed,
+                last_tab: Tab::Connections,
+                ..Opts::default()
+            },
+        );
+        assert_eq!(active(&mut vcx), Tab::Connections);
+    }
+
+    #[gpui_kit::test]
+    fn startup_tab_unbuilt_falls_back(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                pages: &[Tab::Performance, Tab::Services],
+                start_tab: StartTab::Processes,
+                ..Opts::default()
+            },
+        );
+        assert_eq!(active(&mut vcx), Tab::Performance);
+    }
+
+    #[gpui_kit::test]
+    fn tabstrip_keys(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.simulate_keystrokes("ctrl-3");
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(active(&mut vcx), Tab::Services);
+        let services = page(&mut vcx, Tab::Services).expect("Services built");
+        assert_eq!(
+            vcx.update(|_, cx| TlSettings::state(cx).tabs.last_tab),
+            Tab::Services
+        );
+        let focus = vcx.read_entity(&services, |p, _| p.focus.clone());
+        assert!(vcx.update(|window, _| focus.is_focused(window)));
+    }
+
+    #[gpui_kit::test]
+    fn tab_wraps_and_skips_unbuilt(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx_a,
+            Opts {
+                start_tab: StartTab::Information,
+                ..Opts::default()
+            },
+        );
+        assert_eq!(active(&mut vcx), Tab::Information);
+        act(&mut vcx, NextTab);
+        assert_eq!(active(&mut vcx), Tab::Processes);
+        act(&mut vcx, PrevTab);
+        assert_eq!(active(&mut vcx), Tab::Information);
+
+        let mut vcx = rig(
+            cx_b,
+            Opts {
+                pages: &[Tab::Processes, Tab::Performance],
+                start_tab: StartTab::Performance,
+                ..Opts::default()
+            },
+        );
+        act(&mut vcx, NextTab);
+        assert_eq!(active(&mut vcx), Tab::Processes);
+        act(&mut vcx, SelectTab(2));
+        assert_eq!(
+            active(&mut vcx),
+            Tab::Processes,
+            "an unbuilt tab is not selected"
+        );
+        act(&mut vcx, SelectTab(9));
+        assert_eq!(
+            active(&mut vcx),
+            Tab::Processes,
+            "out of range does nothing"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn status_text_from_active_page(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        act(&mut vcx, SelectTab(2));
+        act(&mut vcx, SelectTab(0));
+        emit_status(&mut vcx, Tab::Processes, "12 Items");
+        assert_eq!(chip_text(&mut vcx), "12 Items");
+        // The cached chip keeps its content width and sits at the page's bottom-left.
+        let chip = bounds(&mut vcx, "StatusChip");
+        let page = bounds(&mut vcx, "MainWindowPage");
+        assert!(chip.size.width > px(0.) && chip.size.width < px(200.), "{chip:?}");
+        assert_eq!(chip.size.height, px(26.));
+        assert_eq!(chip.bottom_left(), page.bottom_left());
+        emit_status(&mut vcx, Tab::Services, "99 Items");
+        assert_eq!(
+            chip_text(&mut vcx),
+            "12 Items",
+            "an inactive page changes nothing"
+        );
+        act(&mut vcx, SelectTab(2));
+        assert_eq!(
+            chip_text(&mut vcx),
+            "99 Items",
+            "a switch reads the new page"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn page_created_once_and_kept(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        act(&mut vcx, SelectTab(2));
+        let first = page(&mut vcx, Tab::Services).expect("Services built");
+        act(&mut vcx, SelectTab(0));
+        act(&mut vcx, SelectTab(2));
+        let again = page(&mut vcx, Tab::Services).expect("Services kept");
+        assert_eq!(first.entity_id(), again.entity_id());
+        assert_eq!(
+            log(&mut vcx, |l| l.created.clone()),
+            vec![Tab::Processes, Tab::Services]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn refresh_routes_to_active_page(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        act(&mut vcx, SelectTab(2));
+        act(&mut vcx, SelectTab(0));
+        act(&mut vcx, RefreshCurrentTab);
+        assert_eq!(log(&mut vcx, |l| l.refreshed.clone()), vec![Tab::Processes]);
+    }
+
+    #[gpui_kit::test]
+    fn first_frame_no_wait(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        let main = main(&mut vcx);
+        assert_eq!(vcx.read_entity(&main, |m, _| m.first_frames()), 0);
+        frame(&mut vcx);
+        assert_eq!(vcx.read_entity(&main, |m, _| m.first_frames()), 1);
+        frame(&mut vcx);
+        assert_eq!(
+            vcx.read_entity(&main, |m, _| m.first_frames()),
+            1,
+            "once per window"
+        );
+    }
+
+    #[test]
+    fn first_frame_ms_parse() {
+        let stat = "1234 (tl (x) y) S 1 1 1 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 8 0 4200 1 2";
+        assert_eq!(first_frame_ms_from(stat, "45.31 100.00"), Some(3310));
+    }
+
+    #[test]
+    fn first_frame_ms_parse_garbage() {
+        assert_eq!(first_frame_ms_from("garbage", "45.31 100.00"), None);
+        assert_eq!(first_frame_ms_from("1 (a) S 1 2", "45.31 100.00"), None);
+        let stat = "1234 (tl) S 1 1 1 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 8 0 4200 1 2";
+        assert_eq!(first_frame_ms_from(stat, "x.y 1"), None);
+        assert_eq!(first_frame_ms_from(stat, ""), None);
+    }
+
+    /// Keeps the `first_frame_ms` values of `tasklens::perf` events.
+    struct Capture(Arc<Mutex<Vec<u64>>>);
+
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            if event.metadata().target() != "tasklens::perf" {
+                return;
+            }
+            struct Ms(Option<u64>);
+            impl tracing::field::Visit for Ms {
+                fn record_u64(&mut self, f: &tracing::field::Field, v: u64) {
+                    if f.name() == "first_frame_ms" {
+                        self.0 = Some(v);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            let mut ms = Ms(None);
+            event.record(&mut ms);
+            let ms = ms.0.expect("the perf event carries first_frame_ms");
+            self.0.lock().expect("capture lock").push(ms);
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[gpui_kit::test]
+    fn first_frame_logged_once(cx: &mut TestAppContext) {
+        let logged = Arc::new(Mutex::new(Vec::new()));
+        tracing::subscriber::with_default(Capture(logged.clone()), || {
+            // Other tests hit the same callsite on other threads with no subscriber; without a
+            // rebuild the callsite can stay cached as never enabled.
+            tracing::callsite::rebuild_interest_cache();
+            let mut vcx = rig(cx, Opts::default());
+            frame(&mut vcx);
+            assert_eq!(logged.lock().expect("capture lock").len(), 1);
+
+            vcx.update(|window, _| window.remove_window());
+            vcx.run_until_parked();
+            let mut vcx = open(cx);
+            frame(&mut vcx);
+            let main = main(&mut vcx);
+            assert_eq!(vcx.read_entity(&main, |m, _| m.first_frames()), 1);
+        });
+        assert_eq!(logged.lock().expect("capture lock").len(), 1, "logged once");
+    }
+
+    #[gpui_kit::test]
+    fn push_main_toast_targets_main_window(cx: &mut TestAppContext) {
+        setup(cx, &Opts::default());
+        cx.update(|cx| push_main_toast(cx, ToastKind::Info, "x", None, None));
+        let mut vcx = open(cx);
+        let main = main(&mut vcx);
+        let toasts = vcx.read_entity(&main, |m, _| m.toasts().clone());
+        assert!(
+            vcx.read_entity(&toasts, |q, _| q.visible_texts())
+                .is_empty()
+        );
+        vcx.update(|_, cx| push_main_toast(cx, ToastKind::Info, "x", None, None));
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.read_entity(&toasts, |q, _| q.visible_texts()),
+            vec!["x".to_owned()]
+        );
+    }
+}

@@ -20,8 +20,8 @@ use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
     AnyView, App, AppContext as _, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString, StyleRefinement,
-    Styled, Subscription, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowHandle, WindowOptions, div, point, px, size,
+    Styled, Subscription, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -218,8 +218,11 @@ impl Global for GlobalShellEvents {}
 /// Shell state other parts of the UI read.
 pub struct ShellState {
     /// `gpui_kit::open_window` roots every window in the kit `Root`, so the handle is typed on
-    /// `Root`. [`main_window_view`] finds the `MainWindow` inside it.
+    /// `Root`. `main_view` is the `MainWindow` inside it.
     pub main_window: Option<WindowHandle<Root>>,
+    /// Read through [`main_window_view`]. Works inside the window's own updates, where the
+    /// window's root cannot be read.
+    pub main_view: Option<WeakEntity<MainWindow>>,
     pub active_tab: Tab,
     /// `Tab::ALL` filtered by `page_factory`, R-023 order.
     pub built_tabs: SmallVec<[Tab; 6]>,
@@ -235,6 +238,7 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             main_window: None,
+            main_view: None,
             active_tab: Tab::Processes,
             built_tabs: SmallVec::new(),
             history_mode: false,
@@ -270,14 +274,7 @@ pub fn init(cx: &mut App) {
 
 /// The `MainWindow` view of the open main window.
 pub fn main_window_view(cx: &App) -> Option<Entity<MainWindow>> {
-    let handle = cx.try_global::<ShellState>()?.main_window?;
-    handle
-        .read(cx)
-        .ok()?
-        .view()
-        .clone()
-        .downcast::<MainWindow>()
-        .ok()
+    cx.try_global::<ShellState>()?.main_view.as_ref()?.upgrade()
 }
 
 /// The tab the window opens on (UI-SHL-002): `--tab`, else `general.start_tab`, where
@@ -371,11 +368,13 @@ pub fn open_main_window_on(start: Tab, cx: &mut App) -> gpui_kit::Result<WindowH
     };
     cx.default_global::<ShellState>().built_tabs = built;
     let options = main_window_options(cx);
-    let (handle, _) = gpui_kit::open_window(options, cx, move |window, cx| {
+    let (handle, view) = gpui_kit::open_window(options, cx, move |window, cx| {
         cx.new(|cx| MainWindow::new(start, window, cx))
     })?;
     let handle = WindowHandle::<Root>::new(handle.window_id());
-    cx.default_global::<ShellState>().main_window = Some(handle);
+    let state = cx.default_global::<ShellState>();
+    state.main_window = Some(handle);
+    state.main_view = Some(view.downgrade());
     Ok(handle)
 }
 
@@ -533,6 +532,11 @@ impl MainWindow {
 
     pub fn toasts(&self) -> &Entity<ToastQueue> {
         &self.toasts
+    }
+
+    /// The status chip. E20-012 sets its paused tag through it.
+    pub fn status_chip(&self) -> &Entity<StatusChip> {
+        &self.status
     }
 
     /// `after_first_frame` runs.
