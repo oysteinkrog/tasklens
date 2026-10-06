@@ -713,7 +713,7 @@ pub fn smart_from_nvme(
         units::celsius(&mut text, (k as f64 - KELVIN_ZERO) as f32);
         row("Temperature", text);
     }
-    let fields: [(&str, &str, fn(u64) -> String); 13] = [
+    let fields: [NvmeField; 13] = [
         ("avail_spare", "Available spare", percent),
         ("spare_thresh", "Available spare threshold", percent),
         ("percent_used", "Percentage used", percent),
@@ -754,6 +754,9 @@ pub fn smart_from_nvme(
         nvme: rows.into(),
     }
 }
+
+/// Map key (empty for the `SmartPowerOnHours` property), row label, value format.
+type NvmeField = (&'static str, &'static str, fn(u64) -> String);
 
 fn percent(n: u64) -> String {
     format!("{n} %")
@@ -2282,20 +2285,7 @@ mod tests {
 
     #[zbus::interface(name = "org.freedesktop.UDisks2.Drive.Ata")]
     impl FakeAta {
-        fn smart_get_attributes(
-            &self,
-            _options: HashMap<String, OwnedValue>,
-        ) -> Vec<(
-            u8,
-            String,
-            u16,
-            i32,
-            i32,
-            i32,
-            i64,
-            i32,
-            HashMap<String, OwnedValue>,
-        )> {
+        fn smart_get_attributes(&self, _options: HashMap<String, OwnedValue>) -> Vec<RawAtaAttr> {
             vec![(
                 194,
                 "temperature-celsius-2".into(),
