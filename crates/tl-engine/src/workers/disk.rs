@@ -4,8 +4,10 @@
 //! It samples `/proc/diskstats` at 1 Hz while disks are demanded or history recording is on,
 //! and not at all otherwise. The block devices are enumerated again every 5 s; each enumeration
 //! also sends a full `DeviceList` for `DISKS` and then the sysfs `DiskDetails` (kind, usage,
-//! system disk, swap) through `take_extra` (R-052, PERF-005, PERF-047 to PERF-049). The drive
-//! temperature is read every sample from the hwmon input found at enumeration (PERF-053).
+//! system disk, swap) through `take_extra` (R-052, PERF-005, PERF-047 to PERF-049). The details
+//! also carry the udev model, interface, WWN and serial, and the Partitions table (PERF-050,
+//! R-140). The drive temperature is read every sample from the hwmon input found at enumeration
+//! (PERF-053). Only sysfs, `/proc` and the udev database are read: never a block device.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -17,7 +19,9 @@ use asupersync::{Cx, Outcome};
 use tl_collect::counters::{Clock, Measured};
 use tl_collect::parse::block::{self, BlockDevice, DiskKind};
 use tl_collect::parse::mountinfo::{MountEntry, parse_mountinfo};
+use tl_collect::parse::partitions::partition_table;
 use tl_collect::parse::swaps::{SwapEntry, parse_swaps};
+use tl_collect::parse::udev::{UdevProps, block_entry, read_udev_props};
 use tl_collect::sample::disk::{
     DiskId, DiskReading, DiskSampler, DiskUsage, FsStat, disk_usage, host_statvfs, host_swap_dev,
 };
@@ -43,6 +47,9 @@ pub const PERIOD: Duration = Duration::from_secs(1);
 
 /// Most bytes read from `/proc/self/mountinfo` or `/proc/swaps`.
 const TABLE_LIMIT: usize = 1 << 20;
+
+/// The udev keys read for the disk rows (R-140 item 1); `partition_table` reads its own.
+const DISK_UDEV_KEYS: [&str; 4] = ["ID_MODEL", "ID_BUS", "ID_WWN", "ID_SERIAL_SHORT"];
 
 /// The `statvfs` callback given to `disk_usage`.
 type StatVfs = Box<dyn FnMut(&str) -> Result<FsStat, CollectError> + Send>;
@@ -76,6 +83,8 @@ pub struct DiskSource {
     buf: Vec<u8>,
     mounts: Vec<MountEntry>,
     swaps: Vec<SwapEntry>,
+    /// Reused for every udev database file.
+    udev: UdevProps,
 }
 
 impl DiskSource {
@@ -106,6 +115,7 @@ impl DiskSource {
             buf: Vec::new(),
             mounts: Vec::new(),
             swaps: Vec::new(),
+            udev: UdevProps::default(),
         }
     }
 
@@ -221,8 +231,8 @@ impl DiskSource {
             }));
     }
 
-    /// Kind, model, removable, usage, system disk and swap of every whole disk. Mount points and
-    /// swap paths are never logged.
+    /// Kind, model, removable, usage, system disk, swap, interface, WWN, serial and partitions of
+    /// every whole disk. Mount points, swap paths, serials and WWNs are never logged.
     fn details(&mut self) -> Vec<(DeviceIdentity, DiskDetails)> {
         let mounts = read_file(
             &self.root.proc_path("self/mountinfo"),
@@ -261,14 +271,25 @@ impl DiskSource {
             )
         };
 
-        self.disks
-            .iter()
-            .zip(usage)
-            .map(|(disk, u)| {
-                let details = disk_details(disk, &u, mounts.as_ref().err(), swaps_ok);
-                (enumerate::disk_identity(disk), details)
-            })
-            .collect()
+        let mut entries = Vec::with_capacity(self.disks.len());
+        for (disk, u) in self.disks.iter().zip(usage) {
+            let mut details = disk_details(disk, &u, mounts.as_ref().err(), swaps_ok);
+            let path = self.root.run_path(&format!(
+                "udev/data/{}",
+                block_entry(disk.major, disk.minor)
+            ));
+            let props = read_udev_props(&path, &DISK_UDEV_KEYS, &mut self.udev);
+            udev_details(disk, props.map(|()| &self.udev), &mut details);
+            details.partitions = Some(Arc::new(partition_table(
+                &self.root,
+                disk,
+                &self.mounts,
+                &mut *self.statvfs,
+                &mut self.udev,
+            )));
+            entries.push((enumerate::disk_identity(disk), details));
+        }
+        entries
     }
 }
 
@@ -383,6 +404,62 @@ fn disk_details(
         system_disk: flag(usage.system_disk, mounts_err.is_none()),
         swap: flag(usage.swap, swaps_ok),
         ..DiskDetails::default()
+    }
+}
+
+/// The udev fields of one disk (PERF-047, PERF-049). `props` empty means no database file: the
+/// interface, WWN and serial read `Unsupported`. A failed read gives them the error's validity.
+/// Either way the sysfs model stays.
+fn udev_details(
+    disk: &BlockDevice,
+    props: Result<&UdevProps, CollectError>,
+    out: &mut DiskDetails,
+) {
+    let none = |validity| InvField {
+        value: Arc::from(""),
+        validity,
+    };
+    let props = match props {
+        Ok(props) if !props.0.is_empty() => props,
+        other => {
+            let validity = other.err().map_or(Validity::Unsupported, |e| e.validity());
+            out.interface = none(validity);
+            out.wwn = none(validity);
+            out.serial = none(validity);
+            return;
+        }
+    };
+    let text = |value: Option<&str>| match value.map(str::trim) {
+        Some(v) if !v.is_empty() => InvField {
+            value: Arc::from(v),
+            validity: Validity::Valid,
+        },
+        _ => none(Validity::Unsupported),
+    };
+    if let Some(model) = props.get("ID_MODEL").map(|m| m.replace('_', " "))
+        && !model.trim().is_empty()
+    {
+        out.model = InvField {
+            value: Arc::from(model.trim()),
+            validity: Validity::Valid,
+        };
+    }
+    out.interface = text(interface_name(props.get("ID_BUS"), &disk.name));
+    out.wwn = text(props.get("ID_WWN"));
+    out.serial = text(props.get("ID_SERIAL_SHORT"));
+}
+
+/// The PERF-049 Interface row from udev `ID_BUS`, else from the transport in the disk name.
+fn interface_name(bus: Option<&str>, name: &str) -> Option<&'static str> {
+    match bus.map(str::trim) {
+        Some("ata") => Some("SATA"),
+        Some("usb") => Some("USB"),
+        Some("scsi") => Some("SCSI"),
+        Some("virtio") => Some("virtio"),
+        Some(b) if b.starts_with("nvme") => Some("NVMe"),
+        _ if name.starts_with("nvme") => Some("NVMe"),
+        _ if name.starts_with("vd") => Some("virtio"),
+        _ => None,
     }
 }
 

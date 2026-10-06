@@ -2345,3 +2345,80 @@ fn cpu_bus_facts_real_host() {
     );
     assert_eq!(facts.running_in_vm, valid(Arc::from("")));
 }
+
+/// Writes the E12-013 udev files for `sda` and `sda1` into the fixture copy.
+fn write_sda_udev(dir: &Path) {
+    let data = dir.join("run/udev/data");
+    fs::write(
+        data.join("b8:1"),
+        "E:ID_FS_TYPE=vfat\nE:ID_FS_LABEL=EFI\n\
+         E:ID_PART_ENTRY_TYPE=c12a7328-f81f-11d2-ba4b-00a0c93ec93b\nE:ID_PART_ENTRY_FLAGS=0x1\n",
+    )
+    .expect("write udev b8:1");
+    fs::write(
+        data.join("b8:0"),
+        "E:ID_BUS=ata\nE:ID_WWN=0x50014ee2b5f1c0de\nE:ID_SERIAL_SHORT=WD-TEST01\n\
+         E:ID_PART_TABLE_TYPE=gpt\nE:ID_MODEL=WDC_WD10EZEX-08W\n",
+    )
+    .expect("write udev b8:0");
+}
+
+#[test]
+fn disk_udev_rows() {
+    let dir = disk_partitions_fixture();
+    write_sda_udev(&dir);
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+    let sda = details_of(&entries, "sda");
+    assert_eq!(sda.interface, valid(Arc::from("SATA")));
+    assert_eq!(sda.wwn, valid(Arc::from("0x50014ee2b5f1c0de")));
+    assert_eq!(sda.serial, valid(Arc::from("WD-TEST01")));
+    assert_eq!(sda.model, valid(Arc::from("WDC WD10EZEX-08W")));
+    // The fixture's sdb file has `ID_BUS=usb` and a model with an underscore.
+    let sdb = details_of(&entries, "sdb");
+    assert_eq!(sdb.interface, valid(Arc::from("USB")));
+    assert_eq!(sdb.model, valid(Arc::from("Flash Disk")));
+    assert_eq!(sdb.serial.validity, Validity::Unsupported);
+}
+
+#[test]
+fn disk_partitions_present() {
+    let dir = disk_partitions_fixture();
+    write_sda_udev(&dir);
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+    let table = details_of(&entries, "sda")
+        .partitions
+        .clone()
+        .expect("sda has a partition table");
+    assert_eq!(&*table.kind, "GPT");
+    let parts: Vec<&str> = table
+        .rows
+        .iter()
+        .filter(|r| !r.unallocated)
+        .map(|r| &*r.name)
+        .collect();
+    assert_eq!(parts, ["sda1", "sda2"]);
+}
+
+#[test]
+fn disk_no_udev_data() {
+    let dir = disk_partitions_fixture();
+    fs::remove_file(dir.join("run/udev/data/b8:0")).expect("remove udev b8:0");
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+    for name in ["sda", "nvme0n1"] {
+        let d = details_of(&entries, name);
+        assert_eq!(d.interface.validity, Validity::Unsupported, "{name}");
+        assert_eq!(d.wwn.validity, Validity::Unsupported, "{name}");
+        assert_eq!(d.serial.validity, Validity::Unsupported, "{name}");
+    }
+    assert_eq!(
+        details_of(&entries, "sda").model,
+        valid(Arc::from("WDC WD10EZEX-08W"))
+    );
+    assert_eq!(
+        details_of(&entries, "nvme0n1").model.validity,
+        Validity::Valid
+    );
+}
