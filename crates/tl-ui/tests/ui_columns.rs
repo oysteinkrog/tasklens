@@ -1,11 +1,14 @@
 //! Column header tests in a real window (UI-PRC-005, ADR-013): the two-line header with totals,
 //! the sort arrow and the sort click (E18-009); column resize and fit (E18-010); column reorder
-//! drag (E18-011). Later column beads append their own sections.
+//! drag (E18-011); the header menu (E18-012). Later column beads append their own sections.
 //!
 //! The header texts are measured, so the window uses the real text system with the bundled fonts.
 
 use std::rc::Rc;
 
+use gpui_kit::Role;
+use gpui_kit::base::Root;
+use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     AnyView, AppContext as _, Context, CursorStyle, Entity, IntoElement, Modifiers, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
@@ -17,17 +20,22 @@ use tl_model::ids::ColumnId;
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
-use tl_ui::components::menu::TlMenu;
+use tl_ui::components::menu::{TlMenu, context_menu_layer};
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::validity::{GlyphContent, glyph_parts};
-use tl_ui::table::actions::ResizeColumnsToFit;
+use tl_ui::table::actions::{ResetColumns, ResizeColumnsToFit};
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
-use tl_ui::table::header::{GHOST_OPACITY, UNSORTABLE_TOOLTIP, ghost_fill, header_tooltip};
+use tl_ui::table::header::{
+    GHOST_OPACITY, HeaderMenuItem, HeaderMenuRow, UNSORTABLE_TOOLTIP, ghost_fill, header_menu_rows,
+    header_tooltip, resize_behavior_rows,
+};
 use tl_ui::table::tree_table::{
-    HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
+    ColumnResizeMode, HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable,
+    TreeTableDelegate,
 };
 use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::text::metrics::TextMetricsCache;
@@ -41,6 +49,9 @@ fn cosmic_cx() -> TestAppContext {
         assert!(report.ui_ok, "failed faces: {:?}", report.failed);
         gpui_kit::init(cx);
         tl_ui::table::actions::bind_keys_table(cx);
+        tl_ui::components::menu::bind_keys(cx);
+        tl_ui::components::toast::init(cx);
+        tl_ui::i18n::init_strings(cx, "en-US");
         tl_ui::theme::store::init(
             cx,
             &ThemeSettings::default(),
@@ -96,6 +107,8 @@ struct HDelegate {
     texts: Vec<(ColumnId, &'static str)>,
     /// Calls of `on_columns_changed`.
     columns_changed: usize,
+    /// `columns_fixed`.
+    fixed: bool,
 }
 
 impl HDelegate {
@@ -122,6 +135,7 @@ impl HDelegate {
             sorted: Vec::new(),
             texts: Vec::new(),
             columns_changed: 0,
+            fixed: false,
         }
     }
 }
@@ -230,6 +244,9 @@ impl TreeTableDelegate for HDelegate {
     }
     fn header_lines(&self) -> HeaderLines {
         self.lines
+    }
+    fn columns_fixed(&self) -> bool {
+        self.fixed
     }
 }
 
@@ -977,4 +994,345 @@ fn escape_cancels_reorder() {
     assert_eq!(visible_order(vcx, &table), ORDER);
     assert_eq!(changed_count(vcx, &table), 0);
     assert!(sorted_cols(vcx, &table).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Header menu (E18-012, UI-PRC-006)
+// ---------------------------------------------------------------------------------------------
+
+/// The table under a kit Root with a toast queue, the context menu layer and a `ResetColumns`
+/// handler that records what reaches the page.
+struct MenuHost {
+    table: Entity<TlTreeTable<HDelegate>>,
+    resets: Rc<std::cell::RefCell<Vec<ResetColumns>>>,
+}
+
+impl Render for MenuHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let resets = self.resets.clone();
+        div()
+            .w(px(600.))
+            .h(px(300.))
+            .flex()
+            .flex_col()
+            .on_action(move |a: &ResetColumns, _, _| resets.borrow_mut().push(a.clone()))
+            .child(self.table.clone())
+            .children(context_menu_layer(window, cx))
+    }
+}
+
+struct MenuRig {
+    table: Entity<TlTreeTable<HDelegate>>,
+    host: Entity<MenuHost>,
+    toasts: Entity<ToastQueue>,
+    vcx: VisualTestContext,
+}
+
+fn open_menu_rig(cx: &mut TestAppContext, delegate: HDelegate) -> MenuRig {
+    let slot = Rc::new(std::cell::RefCell::new(None));
+    let out = slot.clone();
+    let window = cx.add_window(move |window, cx| {
+        let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+        let host = cx.new(|_| MenuHost {
+            table: table.clone(),
+            resets: Rc::default(),
+        });
+        *out.borrow_mut() = Some((table, host.clone()));
+        Root::new(host, window, cx)
+    });
+    let mut vcx = VisualTestContext::from_window(window.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    let toasts = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+    redraw(&mut vcx);
+    let (table, host) = slot.borrow_mut().take().expect("table created");
+    vcx.update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
+    redraw(&mut vcx);
+    MenuRig {
+        table,
+        host,
+        toasts,
+        vcx,
+    }
+}
+
+fn right_click(vcx: &mut VisualTestContext, at: Point<Pixels>) {
+    vcx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+    redraw(vcx);
+}
+
+/// The open top menu's bounds, if a menu is open.
+fn open_menu(vcx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<Pixels>> {
+    vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::Menu))
+            .map(|s| s.bounds())
+    })
+}
+
+/// The labels of the open top menu's items, in order. Submenus are closed.
+fn menu_labels(vcx: &mut VisualTestContext) -> Vec<String> {
+    vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .filter(|s| s.role() == Some(Role::MenuItem))
+            .filter_map(|s| s.label().map(str::to_owned))
+            .collect()
+    })
+}
+
+fn click_menu_item(vcx: &mut VisualTestContext, label: &str) {
+    let at = vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::MenuItem) && s.label() == Some(label))
+            .unwrap_or_else(|| panic!("menu item {label:?}"))
+            .bounds()
+            .center()
+    });
+    click(vcx, at);
+}
+
+/// The header menu rows for a right-click on `col` of the rig's table.
+fn rows_for(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<HDelegate>>,
+    col: ColumnId,
+) -> Vec<HeaderMenuRow> {
+    vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        header_menu_rows(d.column_spec(col), &d.layout, d.sort.column, d.fixed, cx).to_vec()
+    })
+}
+
+fn toast_texts(vcx: &mut VisualTestContext, toasts: &Entity<ToastQueue>) -> Vec<SharedString> {
+    vcx.update(|_, cx| toasts.read(cx).visible_texts())
+}
+
+#[test]
+fn header_menu_hide_disabled_on_name() {
+    let mut cx = cosmic_cx();
+    let mut rig = open_menu_rig(&mut cx, HDelegate::new());
+    right_click(&mut rig.vcx, header_at(100.));
+    let menu = open_menu(&mut rig.vcx).expect("the menu opens");
+    assert_eq!(
+        menu.origin,
+        header_at(100.),
+        "the menu opens at the pointer"
+    );
+    assert!(
+        menu.size.width >= px(240.),
+        "menu width {:?}",
+        menu.size.width
+    );
+
+    let hide = rows_for(&mut rig.vcx, &rig.table, ColumnId::Name)
+        .into_iter()
+        .find(|r| r.item == HeaderMenuItem::Hide)
+        .expect("hide row");
+    assert!(!hide.enabled);
+    assert_eq!(hide.tooltip.as_deref(), Some("Name cannot be hidden"));
+
+    // Only Name visible: still disabled.
+    rig.vcx.update(|_, cx| {
+        rig.table.update(cx, |t, _| {
+            for col in &ORDER[1..] {
+                t.delegate.layout.set_visible(*col, false).expect("hide");
+            }
+        })
+    });
+    let hide = rows_for(&mut rig.vcx, &rig.table, ColumnId::Name)
+        .into_iter()
+        .find(|r| r.item == HeaderMenuItem::Hide)
+        .expect("hide row");
+    assert!(!hide.enabled);
+}
+
+#[test]
+fn header_menu_items_and_order() {
+    let mut cx = cosmic_cx();
+    let mut d = HDelegate::new();
+    d.sort = SortSpec {
+        column: ColumnId::Cpu,
+        ascending: false,
+    };
+    let mut rig = open_menu_rig(&mut cx, d);
+    right_click(&mut rig.vcx, header_at(420.));
+    assert_eq!(
+        menu_labels(&mut rig.vcx),
+        [
+            "Sort by CPU",
+            "Select Columns…",
+            "Hide This Column",
+            "Resize columns to fit content",
+            "Resize Behavior",
+            "Reset to default",
+        ]
+    );
+    let rows = rows_for(&mut rig.vcx, &rig.table, ColumnId::Cpu);
+    let items: Vec<_> = rows.iter().map(|r| r.item).collect();
+    assert_eq!(
+        items,
+        [
+            HeaderMenuItem::SortBy,
+            HeaderMenuItem::SelectColumns,
+            HeaderMenuItem::Hide,
+            HeaderMenuItem::Separator,
+            HeaderMenuItem::FitColumns,
+            HeaderMenuItem::ResizeBehavior,
+            HeaderMenuItem::Reset,
+        ]
+    );
+    assert!(rows[0].enabled && rows[0].checked, "Sort by CPU is checked");
+    assert!(rows[2].enabled);
+    assert_eq!(rows[2].tooltip.as_deref(), Some("Hide CPU"));
+
+    let user = rows_for(&mut rig.vcx, &rig.table, ColumnId::User);
+    assert!(
+        user[0].enabled && !user[0].checked,
+        "Sort by User is not checked"
+    );
+
+    // PSS is unsortable: item 1 is disabled.
+    let pss = rows_for(&mut rig.vcx, &rig.table, ColumnId::Pss);
+    assert_eq!(pss[0].label.as_ref(), "Sort by PSS");
+    assert!(!pss[0].enabled);
+}
+
+#[test]
+fn header_menu_fixed_columns_hides_items_2_3_6() {
+    let mut cx = cosmic_cx();
+    let mut d = HDelegate::new();
+    d.fixed = true;
+    let mut rig = open_menu_rig(&mut cx, d);
+    right_click(&mut rig.vcx, header_at(250.));
+    assert_eq!(
+        menu_labels(&mut rig.vcx),
+        [
+            "Sort by User",
+            "Resize columns to fit content",
+            "Resize Behavior",
+        ]
+    );
+}
+
+#[test]
+fn hide_column_persists() {
+    let mut cx = cosmic_cx();
+    let mut rig = open_menu_rig(&mut cx, HDelegate::new());
+    right_click(&mut rig.vcx, header_at(250.));
+    click_menu_item(&mut rig.vcx, "Hide This Column");
+    assert!(
+        open_menu(&mut rig.vcx).is_none(),
+        "running the item closes the menu"
+    );
+    assert_eq!(
+        visible_order(&mut rig.vcx, &rig.table),
+        [ColumnId::Name, ColumnId::Pid, ColumnId::Cpu, ColumnId::Pss]
+    );
+    assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
+    assert!(
+        toast_texts(&mut rig.vcx, &rig.toasts).is_empty(),
+        "no toast"
+    );
+}
+
+#[test]
+fn resize_behavior_radio_reflects_mode() {
+    let mut cx = cosmic_cx();
+    let mut rig = open_menu_rig(&mut cx, HDelegate::new());
+    let radios = rig
+        .vcx
+        .update(|_, cx| resize_behavior_rows(ColumnResizeMode::LastColumn, cx));
+    assert_eq!(
+        radios.map(|(label, mode, on)| (label.to_string(), mode, on)),
+        [
+            (
+                "Proportional".to_owned(),
+                ColumnResizeMode::Proportional,
+                false
+            ),
+            ("Last Column".to_owned(), ColumnResizeMode::LastColumn, true),
+        ]
+    );
+
+    // The submenu of the open menu shows the same radios.
+    rig.vcx.update(|_, cx| {
+        rig.table
+            .update(cx, |t, _| t.set_resize_mode(ColumnResizeMode::LastColumn))
+    });
+    right_click(&mut rig.vcx, header_at(420.));
+    click_menu_item(&mut rig.vcx, "Resize Behavior");
+    let labels = menu_labels(&mut rig.vcx);
+    assert!(
+        labels.iter().any(|l| l == "Proportional") && labels.iter().any(|l| l == "Last Column"),
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn reset_columns_restores_defaults_and_toasts() {
+    let mut cx = cosmic_cx();
+    let mut rig = open_menu_rig(&mut cx, HDelegate::new());
+    let defaults = rig
+        .vcx
+        .update(|_, cx| rig.table.read(cx).delegate.layout.clone());
+    rig.vcx.update(|_, cx| {
+        rig.table.update(cx, |t, _| {
+            t.set_default_layout(defaults.clone());
+            let layout = &mut t.delegate.layout;
+            layout.set_visible(ColumnId::User, false).expect("hide");
+            layout.set_width(ColumnId::Cpu, px(150.));
+            layout
+                .move_column(ColumnId::Pss, Some(ColumnId::Pid))
+                .expect("move");
+        })
+    });
+    redraw(&mut rig.vcx);
+    right_click(&mut rig.vcx, header_at(250.));
+    click_menu_item(&mut rig.vcx, "Reset to default");
+    let layout = rig
+        .vcx
+        .update(|_, cx| rig.table.read(cx).delegate.layout.clone());
+    assert_eq!(layout, defaults);
+    assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
+    assert_eq!(
+        toast_texts(&mut rig.vcx, &rig.toasts),
+        [SharedString::new_static("Columns reset to default")]
+    );
+    assert!(
+        rig.vcx
+            .update(|_, cx| rig.host.read(cx).resets.borrow().is_empty())
+    );
+}
+
+#[test]
+fn reset_columns_without_defaults_propagates() {
+    let mut cx = cosmic_cx();
+    let mut rig = open_menu_rig(&mut cx, HDelegate::new());
+    right_click(&mut rig.vcx, header_at(250.));
+    click_menu_item(&mut rig.vcx, "Reset to default");
+    let resets = rig
+        .vcx
+        .update(|_, cx| rig.host.read(cx).resets.borrow().clone());
+    assert_eq!(
+        resets,
+        [ResetColumns {
+            table: TableId::Processes
+        }]
+    );
+    assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
+    assert!(toast_texts(&mut rig.vcx, &rig.toasts).is_empty());
 }
