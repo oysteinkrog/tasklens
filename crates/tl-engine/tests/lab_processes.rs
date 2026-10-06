@@ -66,7 +66,8 @@ fn overlay(src: &Path, dst: &Path) {
 }
 
 /// A writable copy of one or more tl-collect fixtures under the target tmpdir. Later names win
-/// for files in both.
+/// for files in both. The directory name holds the process id and a counter, so parallel test
+/// runs never share a copy. Dropping the root removes the copy.
 struct FixtureRoot {
     dir: PathBuf,
 }
@@ -75,7 +76,8 @@ impl FixtureRoot {
     fn new(names: &[&str]) -> Self {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("lab-processes-{n}"));
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("lab-processes-{}-{n}", std::process::id()));
         if dir.exists() {
             fs::remove_dir_all(&dir).expect("remove old fixture copy");
         }
@@ -143,6 +145,13 @@ impl FixtureRoot {
                 .with_sys_root(SysRoot::at(&self.root()))
                 .with_app_paths(paths),
         )
+    }
+}
+
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        // Best effort: a failed cleanup must not hide the test result.
+        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
