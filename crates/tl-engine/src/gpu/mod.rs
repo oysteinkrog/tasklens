@@ -111,16 +111,18 @@ mod tests {
 
     use super::*;
 
-    /// A fresh directory under the system temp dir, removed on drop.
+    /// A fresh directory under `target/tmp`, removed on drop.
     struct TempDir(PathBuf);
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "tl-engine-gpu-{name}-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!(
+                    "tl-engine-gpu-{name}-{}-{:?}",
+                    std::process::id(),
+                    std::thread::current().id()
+                ));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("create temp dir");
             Self(dir)

@@ -1331,7 +1331,7 @@ mod run_tests {
 #[cfg(test)]
 mod real_ops_tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use tl_model::actions::CgroupRef;
     use tl_ops::cgroup::CgroupDir;
@@ -1345,11 +1345,13 @@ mod real_ops_tests {
 
     impl FakeCgroup {
         fn new() -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "tl-engine-realops-{}-{:?}",
-                std::process::id(),
-                std::thread::current().id()
-            ));
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!(
+                    "tl-engine-realops-{}-{:?}",
+                    std::process::id(),
+                    std::thread::current().id()
+                ));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("create temp dir");
             for name in ["cgroup.freeze", "cgroup.kill"] {

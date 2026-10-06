@@ -151,7 +151,7 @@ mod tests {
             assert_eq!(uid, 1000);
             self.log.lock().unwrap().push("open".into());
             self.open.clone()?;
-            let dir = File::open(std::env::temp_dir()).expect("temp dir opens");
+            let dir = File::open(env!("CARGO_MANIFEST_DIR")).expect("crate dir opens");
             Ok(CgroupDir::from_validated_fd(OwnedFd::from(dir)))
         }
 

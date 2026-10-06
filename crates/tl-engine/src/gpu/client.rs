@@ -454,15 +454,17 @@ mod tests {
     /// Serializes the process tests so their timings do not disturb each other.
     static LOCK: Mutex<()> = Mutex::new(());
 
-    /// A directory of small shell scripts under the system temp dir, removed on drop.
+    /// A directory of small shell scripts under `target/tmp`, removed on drop.
     struct Scripts(PathBuf);
 
     impl Scripts {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
-                "tl-engine-api-versions-{name}-{}",
-                std::process::id()
-            ));
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!(
+                    "tl-engine-api-versions-{name}-{}",
+                    std::process::id()
+                ));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("create temp dir");
             Self(dir)
