@@ -27,7 +27,7 @@ use crate::theme::{TlTheme, UiMetrics};
 const NS_PER_S: u64 = 1_000_000_000;
 
 /// Label row height at 100% (`chart_label_row`).
-const LABEL_ROW: f32 = 18.0;
+pub(crate) const LABEL_ROW: f32 = 18.0;
 /// Legend swatch size and spacing at 100%.
 const SWATCH_W: f32 = 12.0;
 const SWATCH_H: f32 = 2.0;
@@ -35,20 +35,20 @@ const DASH_W: f32 = 3.0;
 const DASH_GAP: f32 = 2.0;
 const LEGEND_ITEM_GAP: f32 = 12.0;
 /// Below this box width the legend stacks one item per row.
-const LEGEND_STACK_BELOW_W: f32 = 200.0;
+pub(crate) const LEGEND_STACK_BELOW_W: f32 = 200.0;
 /// The axis max, range label and legend need a plot at least this tall.
 const MIN_PLOT_H: f32 = 100.0;
 /// The range label and legend need a box at least this wide.
 const MIN_BOX_W: f32 = 160.0;
 
-static WARMING: &str = "…";
+pub(crate) static WARMING: &str = "…";
 static UNSUPPORTED: &str = "n/a";
-static MISSING: &str = "-";
+pub(crate) static MISSING: &str = "-";
 static FAILED: &str = "!";
 
 /// One label and what it was shaped from.
 #[derive(Debug)]
-struct CachedLine {
+pub(crate) struct CachedLine {
     text: String,
     line: Option<ShapedLine>,
     font_size: Pixels,
@@ -70,17 +70,17 @@ impl Default for CachedLine {
 
 /// How one line is drawn.
 #[derive(Clone, Copy)]
-struct LineStyle {
-    size: Pixels,
-    weight: FontWeight,
-    color: Hsla,
-    tnum: bool,
+pub(crate) struct LineStyle {
+    pub(crate) size: Pixels,
+    pub(crate) weight: FontWeight,
+    pub(crate) color: Hsla,
+    pub(crate) tnum: bool,
 }
 
 impl CachedLine {
     /// Re-shapes when `text`, the size, the weight or the colour changed. Returns whether it
     /// shaped. The text compare is a byte compare; on a change the buffer is reused.
-    fn sync(&mut self, window: &mut Window, text: &str, style: LineStyle) -> bool {
+    pub(crate) fn sync(&mut self, window: &mut Window, text: &str, style: LineStyle) -> bool {
         if self.line.is_some()
             && self.text == text
             && self.font_size == style.size
@@ -121,7 +121,7 @@ impl CachedLine {
         true
     }
 
-    fn width(&self) -> Pixels {
+    pub(crate) fn width(&self) -> Pixels {
         self.line.as_ref().map_or(px(0.), |l| l.width)
     }
 }
@@ -358,38 +358,24 @@ pub fn paint(
     // Legend: row 2, horizontal, or one item per row when the box is narrow.
     if !p.labels.legend.is_empty() && tall && wide {
         let stack = f32::from(b.size.width) < LEGEND_STACK_BELOW_W * s;
-        let n = p.labels.legend.len();
-        if cache.legend.len() != n {
-            cache.legend.resize_with(n, CachedLine::default);
-        }
-        let mut x = b.left() + pad;
-        let mut y = row2;
-        for (i, (label, style)) in p.labels.legend.iter().enumerate() {
-            let shaped = cache.legend[i].sync(window, label, secondary);
-            cache.shaped(shaped);
-            let line_color = p
-                .spec
+        let colors = |i: usize| {
+            p.spec
                 .series
                 .get(i)
-                .map_or(p.theme.text_secondary, |s| s.line);
-            paint_swatch(
-                window,
-                point(x, y + (row - px(SWATCH_H * s)) / 2.0),
-                s,
-                *style,
-                line_color,
-            );
-            let origin = point(x + px(SWATCH_W * s) + m.sp[2], y);
-            paint_line(window, cx, &cache.legend[i], origin, row);
-            let width = cache.legend[i].width();
-            #[cfg(any(test, feature = "test-hooks"))]
-            cache.record(LabelKind::Legend(i), origin, width, secondary.color);
-            if stack {
-                y += row;
-            } else {
-                x = origin.x + width + px(LEGEND_ITEM_GAP * s);
-            }
-        }
+                .map_or(p.theme.text_secondary, |s| s.line)
+        };
+        let origin = point(b.left() + pad, row2);
+        paint_legend(
+            window,
+            cx,
+            cache,
+            &p.labels.legend,
+            colors,
+            origin,
+            stack,
+            m,
+            p.theme,
+        );
     }
 
     // Axis max: row 2, right-aligned. Only with data on a tall plot.
@@ -429,7 +415,61 @@ pub fn paint(
     }
 }
 
-fn paint_line(
+/// The legend items from `origin`, horizontal, or one item per row when `stack`. `color` gives
+/// item `i`'s swatch colour.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one paint call, every input is distinct"
+)]
+pub(crate) fn paint_legend(
+    window: &mut Window,
+    cx: &mut App,
+    cache: &mut LabelCache,
+    items: &[(SharedString, LegendStyle)],
+    color: impl Fn(usize) -> Hsla,
+    origin: gpui_kit::Point<Pixels>,
+    stack: bool,
+    m: &UiMetrics,
+    theme: &TlTheme,
+) {
+    let s = m.ui_scale;
+    let row = px(LABEL_ROW * s);
+    let secondary = LineStyle {
+        size: m.text.xs,
+        weight: FontWeight::NORMAL,
+        color: theme.text_secondary,
+        tnum: false,
+    };
+    let n = items.len();
+    if cache.legend.len() != n {
+        cache.legend.resize_with(n, CachedLine::default);
+    }
+    let mut x = origin.x;
+    let mut y = origin.y;
+    for (i, (label, style)) in items.iter().enumerate() {
+        let shaped = cache.legend[i].sync(window, label, secondary);
+        cache.shaped(shaped);
+        paint_swatch(
+            window,
+            point(x, y + (row - px(SWATCH_H * s)) / 2.0),
+            s,
+            *style,
+            color(i),
+        );
+        let origin = point(x + px(SWATCH_W * s) + m.sp[2], y);
+        paint_line(window, cx, &cache.legend[i], origin, row);
+        let width = cache.legend[i].width();
+        #[cfg(any(test, feature = "test-hooks"))]
+        cache.record(LabelKind::Legend(i), origin, width, secondary.color);
+        if stack {
+            y += row;
+        } else {
+            x = origin.x + width + px(LEGEND_ITEM_GAP * s);
+        }
+    }
+}
+
+pub(crate) fn paint_line(
     window: &mut Window,
     cx: &mut App,
     line: &CachedLine,

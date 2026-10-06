@@ -302,7 +302,7 @@ impl Render for ChartView {
 }
 
 /// `id` in `set`: the 1 Hz tier list when the id carries the tier bit, else the fast list.
-fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
+pub(crate) fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
     let views = if id.metric.is_tier_1hz() {
         &set.slow
     } else {

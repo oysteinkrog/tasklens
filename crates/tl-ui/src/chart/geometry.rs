@@ -6,7 +6,7 @@
 //! allocates inside lyon's tessellator. Time math is `u64` and the pixel scale is `f64`: 60 s in
 //! ns against 1,600 px loses precision in `f32`.
 
-use gpui_kit::{FillOptions, Hsla, PathBuilder, PathStyle, point, px};
+use gpui_kit::{FillOptions, Hsla, PathBuilder, PathStyle, Pixels, Point, point, px};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
@@ -250,6 +250,8 @@ pub struct Scratch {
     floors: Vec<f32>,
     pt_floors: Vec<f32>,
     acc: Vec<f32>,
+    /// Grid cells: the decimated points after clipping to the cell, physical px.
+    clipped: Vec<Point<Pixels>>,
     live: Builders,
     stale: Builders,
 }
@@ -505,6 +507,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         acc,
         live,
         stale,
+        ..
     } = scratch;
     cache.gaps.clear();
     let bucket = bucket_ns(map.range_ns, map.plot_width.max(1.0).round() as u32);
@@ -532,31 +535,18 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         }
 
         for run in runs.iter() {
-            // Alternating stretches of fresh and `STALE` samples within the run.
-            let mut i = run.start;
-            while i < run.end {
-                let is_stale_flag = samples[i].flags.contains(SampleFlags::STALE);
-                let mut j = i + 1;
-                while j < run.end && samples[j].flags.contains(SampleFlags::STALE) == is_stale_flag
-                {
-                    j += 1;
-                }
-                let (span, out, builders) = if is_stale_flag {
-                    let span = Run {
-                        start: i.saturating_sub(1).max(run.start),
-                        end: (j + 1).min(run.end),
-                    };
-                    (span, &mut *stale_pts, &mut *stale)
+            for_each_stretch(samples, *run, |span, is_stale_flag| {
+                let (out, builders) = if is_stale_flag {
+                    (&mut *stale_pts, &mut *stale)
                 } else {
-                    (Run { start: i, end: j }, &mut *pts, &mut *live)
+                    (&mut *pts, &mut *live)
                 };
                 decimate(samples, span, bucket, out);
                 if let Some(f) = band_floors {
                     floors_of(samples, f, span, out, pt_floors);
                 }
                 builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input);
-                i = j;
-            }
+            });
         }
 
         // Flat continuation of a stale series to the right edge (UI-PRF-007).
@@ -613,4 +603,258 @@ fn push_gaps(
         let b = samples[w[1].start].t_ns;
         gaps.push(map.x_local(a)..map.x_local(b));
     }
+}
+
+/// Calls `f` for each stretch of fresh or `STALE` samples within `run`, in order, with whether it
+/// is stale. A stale span takes one fresh neighbour on each side so the line does not break.
+fn for_each_stretch(samples: &[Sample], run: Run, mut f: impl FnMut(Run, bool)) {
+    let mut i = run.start;
+    while i < run.end {
+        let is_stale_flag = samples[i].flags.contains(SampleFlags::STALE);
+        let mut j = i + 1;
+        while j < run.end && samples[j].flags.contains(SampleFlags::STALE) == is_stale_flag {
+            j += 1;
+        }
+        let span = if is_stale_flag {
+            Run {
+                start: i.saturating_sub(1).max(run.start),
+                end: (j + 1).min(run.end),
+            }
+        } else {
+            Run { start: i, end: j }
+        };
+        f(span, is_stale_flag);
+        i = j;
+    }
+}
+
+/// Builds one grid cell into shared builders (UI-PRF-002, ADR-009 rule 7). Series 0 goes to
+/// `fill` (when it has a fill colour) and `stroke`; series 1, when present, goes to `overlay`
+/// as a stroke only; further series are ignored. Every vertex is moved by `origin` (physical px,
+/// the cell's plot corner relative to the element). `STALE` stretches and the stale tail go to
+/// the scratch's stale builders, which `finish_grid` tessellates.
+///
+/// One content mask covers the whole grid, so x is clipped at build time to the `clip_w` wide
+/// window that `map` puts on screen (chart-local `−map.dx(clip_w) ..` that plus `clip_w`):
+/// points outside are dropped and the boundary point is interpolated. No stacking, no gaps.
+pub fn build_cell(
+    input: &BuildInput,
+    origin: (f32, f32),
+    clip_w: f32,
+    fill: &mut PathBuilder,
+    stroke: &mut PathBuilder,
+    mut overlay: Option<&mut PathBuilder>,
+    scratch: &mut Scratch,
+) {
+    let map = &input.map;
+    let Scratch {
+        runs,
+        pts,
+        stale_pts,
+        clipped,
+        stale,
+        ..
+    } = scratch;
+    let bucket = bucket_ns(map.range_ns, clip_w.max(1.0).round() as u32);
+    let place = CellPlace {
+        origin,
+        lo: -map.dx(clip_w),
+        clip_w,
+    };
+
+    for (si, (spec, view)) in input.series.iter().enumerate().take(2) {
+        let Some(view) = view else {
+            continue;
+        };
+        let period = view.period_ns;
+        let samples = &view.samples[..];
+        let from = window_start(samples, map.right_edge_ns, map.range_ns, period);
+        split_runs(samples, from, runs);
+
+        for run in runs.iter() {
+            for_each_stretch(samples, *run, |span, is_stale_flag| {
+                let out = if is_stale_flag {
+                    &mut *stale_pts
+                } else {
+                    &mut *pts
+                };
+                decimate(samples, span, bucket, out);
+                place.clip(out, input, clipped);
+                if is_stale_flag {
+                    emit_stale(stale, spec, si == 0, clipped, &place, input);
+                } else if si == 0 {
+                    let f = spec.fill.is_some().then_some(&mut *fill);
+                    emit_cell(f, stroke, clipped, &place, input);
+                } else if let Some(o) = overlay.as_deref_mut() {
+                    emit_cell(None, o, clipped, &place, input);
+                }
+            });
+        }
+
+        // Flat continuation of a stale series to the right edge (UI-PRF-007).
+        if let Some(last_run) = runs.last() {
+            let newest = samples[last_run.end - 1];
+            if is_stale(newest.t_ns, input.now_boot_ns, period) && map.right_edge_ns > newest.t_ns {
+                stale_pts.clear();
+                stale_pts.push(Pt {
+                    t_ns: newest.t_ns,
+                    value: newest.value,
+                });
+                stale_pts.push(Pt {
+                    t_ns: map.right_edge_ns,
+                    value: newest.value,
+                });
+                place.clip(stale_pts, input, clipped);
+                emit_stale(stale, spec, si == 0, clipped, &place, input);
+            }
+        }
+    }
+}
+
+/// Tessellates a grid's shared builders into `cache`: `fills[0]` from `fill`, `strokes[0]` from
+/// `stroke` and `strokes[1]` from `overlay`, plus the stale sets from `scratch`. Empty paths add
+/// no set. Also stores the time map and y range the geometry was built for.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one builder and colour per path set"
+)]
+pub fn finish_grid(
+    input: &BuildInput,
+    fill: (Hsla, PathBuilder),
+    stroke: (Hsla, PathBuilder),
+    overlay: Option<(Hsla, PathBuilder)>,
+    cache: &mut ChartCache,
+    scratch: &mut Scratch,
+) {
+    cache.fills.clear();
+    cache.strokes.clear();
+    cache.gaps.clear();
+    cache.fills.extend(set(fill.0, false, fill.1));
+    cache.strokes.extend(set(stroke.0, false, stroke.1));
+    if let Some((color, b)) = overlay {
+        cache.strokes.extend(set(color, false, b));
+    }
+    scratch
+        .stale
+        .finish(&mut cache.stale_fills, &mut cache.stale_strokes);
+    cache.anchor_ns = input.map.anchor_ns;
+    cache.px_per_ns = input.map.px_per_ns();
+    cache.y_min = input.y_min;
+    cache.y_max = input.y_max;
+}
+
+/// Where one grid cell's points go: chart-local x in `lo .. lo + clip_w` is on screen.
+struct CellPlace {
+    origin: (f32, f32),
+    lo: f32,
+    clip_w: f32,
+}
+
+impl CellPlace {
+    /// `pts` mapped to physical px, clipped to the window and moved by `origin`, into `out`.
+    /// Points are sorted by time, so x never decreases.
+    fn clip(&self, pts: &[Pt], input: &BuildInput, out: &mut Vec<Point<Pixels>>) {
+        out.clear();
+        let (lo, hi) = (self.lo, self.lo + self.clip_w);
+        let (ox, oy) = self.origin;
+        let mut push = |x: f32, y: f32| out.push(point(px(ox + x), px(oy + y)));
+        let lerp =
+            |a: (f32, f32), b: (f32, f32), x: f32| a.1 + (b.1 - a.1) * (x - a.0) / (b.0 - a.0);
+        let mut prev: Option<(f32, f32)> = None;
+        for p in pts {
+            let cur = (
+                input.map.x_local(p.t_ns),
+                y_of(p.value, input.y_min, input.y_max, input.plot_height),
+            );
+            if let Some(a) = prev {
+                if a.0 < lo && cur.0 > lo {
+                    push(lo, lerp(a, cur, lo));
+                }
+                if a.0 < hi && cur.0 > hi {
+                    push(hi, lerp(a, cur, hi));
+                }
+            }
+            if cur.0 > hi {
+                break;
+            }
+            if cur.0 >= lo {
+                push(cur.0, cur.1);
+            }
+            prev = Some(cur);
+        }
+    }
+
+    /// The plot bottom, physical px relative to the element.
+    fn baseline(&self, input: &BuildInput) -> Pixels {
+        px(self.origin.1 + input.plot_height)
+    }
+}
+
+/// A fill polygon down to the cell's baseline (when `fill` is given and there are 2 or more
+/// points) and a stroke along `pts`. A single point strokes 1 px to the right.
+fn emit_cell(
+    fill: Option<&mut PathBuilder>,
+    stroke: &mut PathBuilder,
+    pts: &[Point<Pixels>],
+    place: &CellPlace,
+    input: &BuildInput,
+) {
+    let Some((&first, rest)) = pts.split_first() else {
+        return;
+    };
+    if let Some(b) = fill
+        && let Some(&last) = rest.last()
+    {
+        emit_cell_fill(b, first, rest, last, place.baseline(input));
+    }
+    emit_cell_stroke(stroke, first, rest);
+}
+
+fn emit_cell_fill(
+    b: &mut PathBuilder,
+    first: Point<Pixels>,
+    rest: &[Point<Pixels>],
+    last: Point<Pixels>,
+    baseline: Pixels,
+) {
+    b.move_to(point(first.x, baseline));
+    b.line_to(first);
+    for &p in rest {
+        b.line_to(p);
+    }
+    b.line_to(point(last.x, baseline));
+    b.close();
+}
+
+fn emit_cell_stroke(b: &mut PathBuilder, first: Point<Pixels>, rest: &[Point<Pixels>]) {
+    b.move_to(first);
+    if rest.is_empty() {
+        b.line_to(point(first.x + px(1.0), first.y));
+    } else {
+        for &p in rest {
+            b.line_to(p);
+        }
+    }
+}
+
+/// `emit_cell` into the stale builders: series 0 (`main`) gets its fill when it has one; the
+/// overlay gets a stroke only.
+fn emit_stale(
+    stale: &mut Builders,
+    spec: &ChartSeries,
+    main: bool,
+    pts: &[Point<Pixels>],
+    place: &CellPlace,
+    input: &BuildInput,
+) {
+    let Some((&first, rest)) = pts.split_first() else {
+        return;
+    };
+    if main
+        && let Some(color) = spec.fill
+        && let Some(&last) = rest.last()
+    {
+        emit_cell_fill(stale.fill(color), first, rest, last, place.baseline(input));
+    }
+    emit_cell_stroke(stale.stroke(spec), first, rest);
 }
