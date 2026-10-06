@@ -434,7 +434,10 @@ impl TreeTableDelegate for TDelegate {
         &self.layout
     }
     fn column_spec(&self, id: ColumnId) -> &ColumnSpec {
-        self.specs.iter().find(|s| s.id == id).unwrap()
+        self.specs
+            .iter()
+            .find(|s| s.id == id)
+            .expect("spec for every column")
     }
     fn cell(&self, ix: usize, _: ColumnId, out: &mut CellOut) {
         out.bits = ix as u64;
@@ -542,7 +545,7 @@ fn open_table(
     vcx.update(|window, _| window.activate_window());
     vcx.run_until_parked();
     redraw(vcx);
-    let table = slot.borrow_mut().take().unwrap();
+    let table = slot.borrow_mut().take().expect("table created");
     (table, vcx)
 }
 
@@ -576,7 +579,8 @@ fn zebra_on_flattened_index_and_group_band() {
         let t = table.read(cx);
         (0..3).map(|ix| t.row_background(ix, &theme)).collect()
     });
-    assert_eq!(fills, vec![theme.header, theme.list_bg, theme.row_alt]);
+    // Zebra on the flattened index (processes.md:285): the group header takes index 0.
+    assert_eq!(fills, vec![theme.header, theme.row_alt, theme.list_bg]);
     assert!(vcx.debug_bounds("TlGroupHeaderCell").is_some());
     assert!(
         vcx.debug_bounds("TlTreeTable-group-line").is_none(),
@@ -660,8 +664,11 @@ fn name_cell_indent_by_depth() {
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![deep]), 600., 100.);
     let cell = vcx.debug_bounds("TlNameCell").expect("name cell");
     let text = vcx.debug_bounds("TlNameCell-primary").expect("primary");
-    // 8 + 18 × 2 + 16 + 6 + 16.
-    assert_eq!(text.left() - cell.left(), px(8. + 36. + 16. + 6. + 16.));
+    // R-190: pad 20, indent 20 per level, gap 6, chevron 16, gap 6, icon 16, gap 6.
+    assert_eq!(
+        text.left() - cell.left(),
+        px(20. + 40. + 6. + 16. + 6. + 16. + 6.)
+    );
 
     let mut cx = cosmic_cx();
     let app = TRow {
@@ -671,7 +678,8 @@ fn name_cell_indent_by_depth() {
     let (_, vcx) = open_table(&mut cx, TDelegate::new(vec![app]), 600., 100.);
     let cell = vcx.debug_bounds("TlNameCell").expect("name cell");
     let text = vcx.debug_bounds("TlNameCell-primary").expect("primary");
-    assert_eq!(text.left() - cell.left(), px(8. + 16. + 6. + 24.));
+    // R-190: an app row at depth 0 has its text at 78.
+    assert_eq!(text.left() - cell.left(), px(78.));
 }
 
 #[test]
@@ -702,12 +710,14 @@ fn connector_lines_only_when_enabled() {
     };
     let quads = guide_quads(2, flags, point(px(0.), px(0.)), px(28.), 1.0, 1.0);
     assert_eq!(quads.len(), 3);
-    assert_eq!(quads[0].origin, point(px(16.), px(0.)));
+    // Guide lines run through the chevron centre of each level: 20 + 20k + 14 (R-190).
+    assert_eq!(quads[0].origin, point(px(34.), px(0.)));
     assert_eq!(quads[0].size, gpui_kit::size(px(1.), px(28.)));
-    assert_eq!(quads[1].origin, point(px(34.), px(0.)));
+    assert_eq!(quads[1].origin, point(px(54.), px(0.)));
     assert_eq!(quads[1].size.height, px(15.));
-    assert_eq!(quads[2].origin, point(px(34.), px(14.)));
-    assert_eq!(quads[2].size, gpui_kit::size(px(10.), px(1.)));
+    // To the chevron's left edge at 20 + 40 + 6.
+    assert_eq!(quads[2].origin, point(px(54.), px(14.)));
+    assert_eq!(quads[2].size, gpui_kit::size(px(12.), px(1.)));
     // Not the last sibling: the elbow runs to the bottom. Depth 0 has no elbow.
     let open = guide_quads(
         2,
@@ -756,8 +766,12 @@ fn horizontal_scrollbar_only_on_overflow() {
     vcx.update(|window, _| window.refresh());
     redraw(vcx);
     assert_eq!(vcx.update(|_, cx| table.read(cx).x_offset()), px(200.));
-    let label2 = vcx.debug_bounds("TlTreeTableHeader-label-cpu").unwrap();
-    let cell2 = vcx.debug_bounds("TlCell-numeric").unwrap();
+    let label2 = vcx
+        .debug_bounds("TlTreeTableHeader-label-cpu")
+        .expect("cpu label after scroll");
+    let cell2 = vcx
+        .debug_bounds("TlCell-numeric")
+        .expect("cpu cell after scroll");
     assert_eq!(label2.left(), label.left() - px(200.));
     assert_eq!(cell2.left(), cell.left() - px(200.));
 

@@ -35,7 +35,7 @@ use gpui_kit::{
     App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
     InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Point,
     SharedString, Style, Styled, StyledImage, StyledText, TextRun, TextStyleRefinement, Window,
-    canvas, div, fill, font, img, point, prelude::FluentBuilder, px, relative, size, svg,
+    canvas, div, fill, font, img, point, px, relative, size, svg,
 };
 use smallvec::SmallVec;
 use tl_model::validity::Validity;
@@ -43,7 +43,7 @@ use tl_model::validity::Validity;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat};
 use crate::table::tree_table::{
-    CELL_PAD, CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NameCell, NameIcon, RowFlags,
+    CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
 };
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style, numeric_style, t_base};
@@ -435,14 +435,14 @@ pub fn icon_px(slot: IconSlot) -> f32 {
     }
 }
 
-/// x of the chevron box's left edge at `depth`, × ui_scale: `8 + depth × 18`.
+/// x of the chevron box's left edge at `depth`, × ui_scale: `20 + depth × 20 + 6` (R-190).
 pub fn name_indent(depth: u8, ui_scale: f32) -> Pixels {
-    px((CELL_PAD + f32::from(depth) * INDENT) * ui_scale)
+    px((NAME_PAD + f32::from(depth) * INDENT + ICON_GAP) * ui_scale)
 }
 
-/// x of the guide line of tree level `k`: the chevron centre of that level, `8 + k × 18 + 8`.
+/// x of the guide line of tree level `k`: the chevron centre of that level, `20 + k × 20 + 14`.
 fn guide_x(k: u8, ui_scale: f32) -> f32 {
-    (CELL_PAD + f32::from(k) * INDENT + CHEVRON / 2.0) * ui_scale
+    (NAME_PAD + f32::from(k) * INDENT + ICON_GAP + CHEVRON / 2.0) * ui_scale
 }
 
 /// The connector quads of one Name cell (PROC-017, UI-PRC-003), in window coordinates for a
@@ -544,9 +544,10 @@ fn primary_runs(
     Some(runs)
 }
 
-/// The Name cell (UI-PRC-003): indent `8 + depth × 18`, a 16 px chevron box (always reserved),
-/// the connector lines when `guide_lines`, the icon, the primary text, the secondary text, the
-/// state glyphs and the trailing element.
+/// The Name cell (UI-PRC-003, R-190): the 16 px chevron box (always reserved) at
+/// `20 + depth × 20 + 6`, gap 6, the icon (16 or 24) and gap 6 when there is one, then the
+/// primary text, the secondary text, the state glyphs and the trailing element. The connector
+/// lines are drawn under them when `guide_lines`.
 ///
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
@@ -646,6 +647,7 @@ pub fn paint_name_cell(
         .pr(m.sp[4])
         .child(chevron_slot);
 
+    let gap = px(ICON_GAP * s);
     let icon_w = px(icon_px(cell.icon_size) * s);
     let icon_color = ctx.secondary();
     let has_icon = !matches!(cell.icon, NameIcon::None);
@@ -655,6 +657,7 @@ pub fn paint_name_cell(
             content = content.child(
                 img(std::path::Path::new(&*path))
                     .flex_none()
+                    .ml(gap)
                     .size(icon_w)
                     .with_fallback(move || {
                         svg()
@@ -670,6 +673,7 @@ pub fn paint_name_cell(
                 svg()
                     .path(name.path())
                     .flex_none()
+                    .ml(gap)
                     .size(icon_w)
                     .text_color(icon_color),
             );
@@ -677,7 +681,6 @@ pub fn paint_name_cell(
         NameIcon::None => {}
     }
 
-    let gap = px(ICON_GAP * s);
     let primary_color = ctx.primary();
     let text = match primary_runs(
         &cell.primary,
@@ -692,7 +695,7 @@ pub fn paint_name_cell(
     content = content.child(
         div()
             .debug_selector(|| "TlNameCell-primary".into())
-            .when(has_icon, |d| d.ml(gap))
+            .ml(gap)
             .min_w_0()
             .flex_shrink(1.)
             .overflow_hidden()
@@ -715,7 +718,8 @@ pub fn paint_name_cell(
             .text_system()
             .shape_line(cell.primary.clone(), font_size, &[run], None)
             .width;
-        let text_x = indent + px(CHEVRON * s) + if has_icon { icon_w + gap } else { px(0.) };
+        let icon_room = if has_icon { icon_w + gap } else { px(0.) };
+        let text_x = indent + px(CHEVRON * s) + gap + icon_room;
         let room = ctx.width - text_x - m.sp[4];
         if room >= primary_w + px((NAME_SECONDARY_GAP + NAME_SECONDARY_MIN) * s) {
             content = content.child(

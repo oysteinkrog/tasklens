@@ -44,8 +44,10 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 /// `tables.column_resize` (R-075). The one enum the settings parse.
 pub use tl_model::settings::ColumnResize as ColumnResizeMode;
 
-/// Indent per tree level.
-pub const INDENT: f32 = 18.0;
+/// Name cell padding before tree level 0 (R-190).
+pub const NAME_PAD: f32 = 20.0;
+/// Indent per tree level (R-190).
+pub const INDENT: f32 = 20.0;
 /// Chevron glyph size.
 pub const CHEVRON: f32 = 16.0;
 /// Chevron hit width.
@@ -122,6 +124,17 @@ pub trait TreeTableDelegate: 'static + Sized {
     /// True: no column picker and no header-menu items 2, 3 and 6. Resize and sort still work.
     fn columns_fixed(&self) -> bool {
         false
+    }
+
+    /// The column that shows the Name cell. The default is the column type's pinned first
+    /// column (Name on the process tables, none on the system tables). On `None` the table uses
+    /// the first visible column.
+    fn name_column(&self) -> Option<Self::Column> {
+        self.columns()
+            .order
+            .iter()
+            .copied()
+            .find(|c| c.pinned_first())
     }
 
     /// `processes.tree_guide_lines` (PROC-017).
@@ -332,7 +345,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             guide_lines: self.delegate.guide_lines(),
             visible: layout.visible_columns().clone(),
             offsets: layout.offsets().clone(),
-            name_col: name_column(layout),
+            name_col: name_column(&self.delegate),
         };
         let columns = frame.visible.len();
         if self.hover_clips.len() < columns {
@@ -596,15 +609,11 @@ fn row_tint(flags: RowFlags, theme: &TlTheme) -> Option<Hsla> {
     }
 }
 
-/// The column that shows the Name cell: the pinned first column (Name on the process tables),
-/// else the first visible column.
-pub fn name_column<C: TableColumn>(layout: &ColumnLayout<C>) -> Option<C> {
-    let visible = layout.visible_columns();
-    visible
-        .iter()
-        .copied()
-        .find(|c| c.pinned_first())
-        .or_else(|| visible.first().copied())
+/// The column that shows the Name cell: `delegate.name_column()`, else the first visible column.
+pub fn name_column<D: TreeTableDelegate>(delegate: &D) -> Option<D::Column> {
+    delegate
+        .name_column()
+        .or_else(|| delegate.columns().visible_columns().first().copied())
 }
 
 impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
