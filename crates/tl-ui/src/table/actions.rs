@@ -7,7 +7,7 @@
 //! table beads (E18-009 to E18-A2).
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, App, KeyBinding, gpui};
+use gpui_kit::{Action, App, KeyBinding, SharedString, gpui};
 use serde::Deserialize;
 use tl_model::ids::ColumnId;
 
@@ -75,8 +75,10 @@ pub struct CopyCell {
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]
 pub struct SortByColumn {
+    /// The column key, `TableColumn::key()`. The table parses it into its own id set, so the
+    /// process and the system tables share the action.
     #[schemars(with = "String")]
-    pub id: ColumnId,
+    pub id: SharedString,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
@@ -90,8 +92,9 @@ pub struct OpenColumnPicker {
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]
 pub struct HideColumn {
+    /// The column key, as on [`SortByColumn`].
     #[schemars(with = "String")]
-    pub id: ColumnId,
+    pub id: SharedString,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]

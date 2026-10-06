@@ -1510,11 +1510,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 
     /// `HideColumn` from the header menu: hides the column and calls `on_columns_changed` once.
-    /// Hiding the last visible column shows the Warning toast instead. An id outside this
+    /// Hiding the last visible column shows the Warning toast instead. A key outside this
     /// table's column set goes on to the next handler.
     fn on_hide_column(&mut self, a: &HideColumn, window: &mut Window, cx: &mut Context<Self>) {
         let layout = self.delegate.columns();
-        let Some(col) = D::Column::parse(layout.table, a.id.as_str()) else {
+        let Some(col) = D::Column::parse(layout.table, &a.id) else {
             cx.propagate();
             return;
         };
@@ -1838,10 +1838,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         cx.notify();
     }
 
-    /// `SortByColumn` from the header menu. An id outside this table's column set is ignored.
+    /// `SortByColumn` from the header menu. A key outside this table's column set is ignored.
     fn on_sort_by_column(&mut self, a: &SortByColumn, _: &mut Window, cx: &mut Context<Self>) {
         let table = self.columns().table;
-        if let Some(col) = D::Column::parse(table, a.id.as_str()) {
+        if let Some(col) = D::Column::parse(table, &a.id) {
             self.sort_by_column(col, cx);
         }
     }

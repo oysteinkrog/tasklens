@@ -35,7 +35,6 @@ use gpui_kit::{
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
-use tl_model::ids::ColumnId;
 use tl_model::validity::Validity;
 
 use crate::components::icons::TlIcon;
@@ -817,13 +816,6 @@ pub struct HeaderMenuRow {
     pub tooltip: Option<SharedString>,
 }
 
-/// The id the column actions carry. `SortByColumn` and `HideColumn` hold a `ColumnId`, so a
-/// column of the system tables only has one when its key is also a process column key; the
-/// table parses the key back into its own id set.
-fn action_id<C: TableColumn>(id: C) -> Option<ColumnId> {
-    ColumnId::from_str(id.key())
-}
-
 /// The header menu rows for a right-click on `col`, in menu order (UI-PRC-006). `fixed` drops
 /// "Select Columns…", "Hide This Column" and "Reset to default".
 pub fn header_menu_rows<C: TableColumn>(
@@ -834,7 +826,6 @@ pub fn header_menu_rows<C: TableColumn>(
     cx: &App,
 ) -> SmallVec<[HeaderMenuRow; 7]> {
     let label_arg = [("label", col.label.as_ref().into())];
-    let has_id = action_id(col.id).is_some();
     let row = |item, label: SharedString| HeaderMenuRow {
         item,
         label,
@@ -843,10 +834,9 @@ pub fn header_menu_rows<C: TableColumn>(
         tooltip: None,
     };
     let mut rows = SmallVec::new();
-    let sortable = col.sortable && has_id;
     rows.push(HeaderMenuRow {
-        enabled: sortable,
-        checked: sortable && col.id == sort_col,
+        enabled: col.sortable,
+        checked: col.sortable && col.id == sort_col,
         tooltip: (!col.sortable).then(|| SharedString::new_static(UNSORTABLE_TOOLTIP)),
         ..row(
             HeaderMenuItem::SortBy,
@@ -866,7 +856,7 @@ pub fn header_menu_rows<C: TableColumn>(
             None
         };
         rows.push(HeaderMenuRow {
-            enabled: why_not.is_none() && has_id,
+            enabled: why_not.is_none(),
             tooltip: why_not
                 .or_else(|| Some(tr_args(cx, "table-header-menu-hide-tooltip", &label_arg))),
             ..row(HeaderMenuItem::Hide, tr(cx, "table-header-menu-hide"))
@@ -921,7 +911,7 @@ pub fn header_menu<C: TableColumn, S: TableSort<C>>(
     window: &mut Window,
     cx: &mut App,
 ) -> TlMenu {
-    let id = action_id(col.id);
+    let id = SharedString::new_static(col.id.key());
     let table = layout.table;
     let mut menu = menu.min_w(px(HEADER_MENU_MIN_W));
     for row in header_menu_rows(col, layout, sort.column(), fixed, cx) {
@@ -933,12 +923,13 @@ pub fn header_menu<C: TableColumn, S: TableSort<C>>(
             menu = menu.item_disabled(row.label, row.tooltip);
             continue;
         }
-        let action: Box<dyn Action> = match (row.item, id) {
-            (HeaderMenuItem::SortBy, Some(id)) => {
-                menu = menu.check_item(row.label, row.checked, Box::new(SortByColumn { id }));
+        let action: Box<dyn Action> = match row.item {
+            HeaderMenuItem::SortBy => {
+                let action = Box::new(SortByColumn { id: id.clone() });
+                menu = menu.check_item(row.label, row.checked, action);
                 continue;
             }
-            (HeaderMenuItem::ResizeBehavior, _) => {
+            HeaderMenuItem::ResizeBehavior => {
                 menu = menu.submenu(row.label, window, cx, move |sub, _, cx| {
                     resize_behavior_rows(resize_mode, cx).into_iter().fold(
                         sub,
@@ -949,13 +940,11 @@ pub fn header_menu<C: TableColumn, S: TableSort<C>>(
                 });
                 continue;
             }
-            (HeaderMenuItem::Hide, Some(id)) => Box::new(HideColumn { id }),
-            (HeaderMenuItem::SelectColumns, _) => Box::new(OpenColumnPicker { table }),
-            (HeaderMenuItem::FitColumns, _) => Box::new(ResizeColumnsToFit { table }),
-            (HeaderMenuItem::Reset, _) => Box::new(ResetColumns { table }),
-            (HeaderMenuItem::SortBy | HeaderMenuItem::Hide | HeaderMenuItem::Separator, _) => {
-                continue;
-            }
+            HeaderMenuItem::Hide => Box::new(HideColumn { id: id.clone() }),
+            HeaderMenuItem::SelectColumns => Box::new(OpenColumnPicker { table }),
+            HeaderMenuItem::FitColumns => Box::new(ResizeColumnsToFit { table }),
+            HeaderMenuItem::Reset => Box::new(ResetColumns { table }),
+            HeaderMenuItem::Separator => continue,
         };
         menu = menu.item(row.label, action);
     }

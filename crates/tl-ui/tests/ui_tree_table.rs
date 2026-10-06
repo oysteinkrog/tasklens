@@ -19,7 +19,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
-use tl_model::table::SortSpec;
+use tl_model::table::{ServiceColumn, SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 use tl_ui::components::menu::{TlMenu, context_menu_layer};
 use tl_ui::components::tooltip::DELAY_CONTROL;
@@ -36,6 +36,7 @@ use tl_ui::table::cells::{
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
+use tl_ui::table::header::{HeaderMenuItem, header_menu_rows};
 use tl_ui::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
     TreeTableEvent, metric_cell_opacity,
@@ -2324,4 +2325,224 @@ mod name_cell_fixes {
         let name_w = vcx.update(|_, cx| table.read(cx).delegate.layout.widths[&ColumnId::Name]);
         assert_eq!(name_w, px(120.));
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Header menu on a system table (rsf.22)
+// ---------------------------------------------------------------------------------------------
+
+/// A Services table with Name and Display Name. Display Name has no process column key, so the
+/// header menu actions must carry the key itself.
+struct SysDelegate {
+    specs: Vec<ColumnSpec<SysColumnId>>,
+    layout: ColumnLayout<SysColumnId>,
+    sort: SysSortSpec,
+}
+
+const SYS_NAME: SysColumnId = SysColumnId::Services(ServiceColumn::Name);
+const SYS_DISPLAY: SysColumnId = SysColumnId::Services(ServiceColumn::DisplayName);
+
+impl SysDelegate {
+    fn new() -> Self {
+        let spec = |id, label: &'static str| ColumnSpec {
+            id,
+            label: label.into(),
+            full_name: label.into(),
+            group: label.into(),
+            align: ColumnAlign::Left,
+            kind: ColumnKind::Text,
+            sortable: true,
+            template: None,
+            default_width: px(248.),
+            tooltip: None,
+            availability: Availability::Available,
+            hideable: true,
+        };
+        let specs = vec![spec(SYS_NAME, "Name"), spec(SYS_DISPLAY, "Display Name")];
+        let order = [SYS_NAME, SYS_DISPLAY];
+        Self {
+            layout: ColumnLayout::defaults(TableId::Services, &specs, &order, &order),
+            specs,
+            sort: SysSortSpec {
+                column: SYS_NAME,
+                ascending: true,
+            },
+        }
+    }
+}
+
+impl TreeTableDelegate for SysDelegate {
+    type RowId = u32;
+    type Column = SysColumnId;
+    type Sort = SysSortSpec;
+
+    fn row_count(&self) -> usize {
+        2
+    }
+    fn row_id(&self, ix: usize) -> u32 {
+        ix as u32
+    }
+    fn row_index(&self, id: u32) -> Option<usize> {
+        (id < 2).then_some(id as usize)
+    }
+    fn row_kind(&self, _: usize) -> RowKind {
+        RowKind::Plain
+    }
+    fn row_depth(&self, _: usize) -> u8 {
+        0
+    }
+    fn row_expandable(&self, _: usize) -> Option<bool> {
+        None
+    }
+    fn row_flags(&self, _: usize) -> RowFlags {
+        RowFlags::default()
+    }
+    fn table_version(&self) -> u64 {
+        1
+    }
+    fn columns(&self) -> &ColumnLayout<SysColumnId> {
+        &self.layout
+    }
+    fn column_spec(&self, id: SysColumnId) -> &ColumnSpec<SysColumnId> {
+        self.specs
+            .iter()
+            .find(|s| s.id == id)
+            .expect("spec for every column")
+    }
+    fn cell(&self, ix: usize, _: SysColumnId, out: &mut CellOut) {
+        out.bits = ix as u64;
+    }
+    fn name_cell(&self, _: usize) -> NameCell {
+        NameCell {
+            icon: NameIcon::None,
+            icon_size: IconSlot::Small,
+            primary: SharedString::new_static("unit"),
+            count_run: None,
+            secondary: None,
+            glyphs: SmallVec::new(),
+            highlight_fffd: true,
+            trailing: None,
+        }
+    }
+    fn header_total(&self, _: SysColumnId, _: &mut CellOut) -> bool {
+        false
+    }
+    fn sort(&self) -> SysSortSpec {
+        self.sort
+    }
+    fn selectable(&self, _: usize) -> bool {
+        true
+    }
+    fn context_menu(
+        &mut self,
+        _: &[u32],
+        _: SysColumnId,
+        menu: TlMenu,
+        _: &mut Window,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) -> TlMenu {
+        menu
+    }
+    fn on_toggle_expand(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_sort(&mut self, col: SysColumnId, _: &mut Context<TlTreeTable<Self>>) {
+        self.sort = SysSortSpec {
+            column: col,
+            ascending: !(self.sort.column == col && self.sort.ascending),
+        };
+    }
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<SysColumnId>,
+        _: &mut Context<TlTreeTable<Self>>,
+    ) {
+        self.layout = layout.clone();
+    }
+    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
+    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
+        None
+    }
+    fn empty_text(&self) -> Option<SharedString> {
+        None
+    }
+    fn header_lines(&self) -> HeaderLines {
+        HeaderLines::One
+    }
+}
+
+/// The system table with the window's context menu layer.
+struct SysMenuHost {
+    table: Entity<TlTreeTable<SysDelegate>>,
+}
+
+impl Render for SysMenuHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(600.))
+            .h(px(HEADER_H + 10. * ROW_H))
+            .flex()
+            .flex_col()
+            .child(self.table.clone())
+            .children(context_menu_layer(window, cx))
+    }
+}
+
+/// Right-clicks the Display Name header and clicks the menu item `label`.
+fn sys_header_menu_click(vcx: &mut VisualTestContext, label: &str) {
+    right_click(vcx, point(px(300.), px(12.)));
+    let item = vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::MenuItem) && s.label() == Some(label))
+            .unwrap_or_else(|| panic!("menu item {label:?}"))
+            .bounds()
+    });
+    click(vcx, item.center(), Modifiers::none());
+}
+
+#[test]
+fn sys_table_header_menu_sorts_and_hides() {
+    assert!(
+        ColumnId::from_str(SYS_DISPLAY.as_str()).is_none(),
+        "Display Name has no process column key"
+    );
+    let mut cx = cosmic_cx();
+    cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    let slot = Rc::new(RefCell::new(None));
+    let out = slot.clone();
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let table = cx.new(|cx| TlTreeTable::new(SysDelegate::new(), window, cx));
+        *out.borrow_mut() = Some(table.clone());
+        SysMenuHost { table }
+    });
+    vcx.update(|window, _| window.activate_window());
+    redraw(vcx);
+    let table = slot.borrow_mut().take().expect("table created");
+    let handle = vcx.update(|_, cx| table.read(cx).focus_handle().clone());
+    vcx.update(|window, cx| window.focus(&handle, cx));
+    redraw(vcx);
+
+    let rows = vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        header_menu_rows(
+            d.column_spec(SYS_DISPLAY),
+            &d.layout,
+            d.sort.column,
+            false,
+            cx,
+        )
+        .to_vec()
+    });
+    for item in [HeaderMenuItem::SortBy, HeaderMenuItem::Hide] {
+        let row = rows.iter().find(|r| r.item == item).expect("row");
+        assert!(row.enabled, "{item:?} is enabled on a system column");
+    }
+
+    sys_header_menu_click(vcx, "Sort by Display Name");
+    let sort = vcx.update(|_, cx| table.read(cx).delegate.sort);
+    assert_eq!(sort.column, SYS_DISPLAY, "sorted by the clicked column");
+
+    sys_header_menu_click(vcx, "Hide This Column");
+    let visible = vcx.update(|_, cx| table.read(cx).delegate.layout.visible_columns().to_vec());
+    assert_eq!(visible, vec![SYS_NAME], "Display Name is hidden");
 }
