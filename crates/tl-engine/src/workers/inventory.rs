@@ -12,6 +12,12 @@
 //! The System section (PERF-097) adds two system bus reads per scan (hostnamed, and logind when
 //! `XDG_VTNR` is missing), the environment, and one run of the desktop shell's `--version` per
 //! worker generation. Hostnames and the user name are shown on screen only and never logged.
+//!
+//! The Disk drives, Graphics and Network adapters sections (PERF-100, PERF-103, PERF-104) use the
+//! device page readers: block devices, mountinfo and `statvfs`, the udev database, DRM cards and
+//! connectors, `/sys/class/net` and one rtnetlink address dump. Rows carry `device: None`; the
+//! reducer merges the catalog device and the API versions (R-166). Disk serials, MACs and IP
+//! addresses are shown on screen only and never logged.
 
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -24,21 +30,33 @@ use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
-use tl_collect::SysRoot;
+use tl_collect::gpu_drm::intel::{self, IntelDriver};
+use tl_collect::gpu_drm::{
+    self, AmdSample, DrmCard, VENDOR_AMD, VENDOR_INTEL, VENDOR_NVIDIA, amdgpu, main_temp, read_amd,
+};
 use tl_collect::inventory::{
     self, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, KernelInfo, ModulesInfo,
     Virtualization, read_inventory,
 };
+use tl_collect::net::addrs::{AddrDump, AddrFamily, AddrScope, IfAddr, format_cidr};
+use tl_collect::parse::block::{self, BlockDevice, DiskKind};
 use tl_collect::parse::cpufreq::read_base_mhz;
 use tl_collect::parse::meminfo::{MemInfo, parse_meminfo};
+use tl_collect::parse::mountinfo::{MountEntry, parse_mountinfo};
+use tl_collect::parse::netif;
 use tl_collect::parse::topology::read_topology;
+use tl_collect::parse::udev::{UdevProps, block_entry, net_entry, pci_entry, read_udev_props};
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
+use tl_collect::sample::disk::{FsStat, disk_usage, host_statvfs};
 use tl_collect::sanitize::sanitize_text;
-use tl_collect::sysroot::{read_file, read_u64};
+use tl_collect::sysroot::{read_file, read_trimmed, read_u64};
+use tl_collect::{CollectError, SysRoot};
+use tl_model::devices::NetKind;
 use tl_model::health::{SourceId, SourceState};
+use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    BoardInfo, FirmwareInfo, FirmwareType, InvField, InventorySnapshot, MemoryInfo, MemoryModule,
-    OsInfo, ProcessorInfo, SystemInfo,
+    BoardInfo, DiskDrive, DisplayMode, FirmwareInfo, FirmwareType, GraphicsAdapter, InvField,
+    InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo, ProcessorInfo, SystemInfo,
 };
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -49,11 +67,20 @@ use crate::source::{IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
+use crate::workers::net::net_kind;
 
 /// Read limit for `/proc/meminfo`, in bytes.
 const MEMINFO_MAX: usize = 64 * 1024;
 /// Longest hostname or bus text kept, in bytes.
 const TEXT_MAX: usize = 256;
+/// Read limit for `/proc/self/mountinfo`, in bytes.
+const MOUNTINFO_MAX: usize = 1 << 20;
+/// The udev keys read for a disk row (R-140 item 1).
+const DISK_UDEV_KEYS: [&str; 2] = ["ID_BUS", "ID_SERIAL_SHORT"];
+/// The udev key read for a GPU name.
+const GPU_UDEV_KEYS: [&str; 1] = ["ID_MODEL_FROM_DATABASE"];
+/// The udev keys read for a network adapter name (R-140 item 1).
+const NET_UDEV_KEYS: [&str; 2] = ["ID_VENDOR_FROM_DATABASE", "ID_MODEL_FROM_DATABASE"];
 /// Longest wait for the desktop shell's `--version`.
 const SHELL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Poll period while waiting for it.
@@ -114,9 +141,11 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
     // The shell version, read at most once per generation.
     let shell: Arc<OnceLock<Option<Arc<str>>>> = Arc::new(OnceLock::new());
     let bus_env = host.then(|| Arc::clone(&env));
+    let settings = io.settings.clone();
     let scan = move |bus: SystemBus| {
         let raw = read_inventory(&paths);
         let mut snap = from_raw(&raw, &root);
+        add_devices(&mut snap, &raw, &root, &settings.borrow_and_clone(), host);
         let version = shell.get_or_init(|| desktop_shell_version(&env)).clone();
         let user = user_name(&paths.etc.join("passwd"));
         snap.system = build_system(&env, &bus, &raw.kernel, user, version);
@@ -242,10 +271,23 @@ async fn send(cx: &Cx, io: &WorkerIo, update: SourceUpdate) -> Option<Outcome<()
     }
 }
 
-/// Blocking part of one scan. Pure function of the files under `paths`, plus `uname` and the
-/// page size.
+/// Blocking part of one scan with the default settings. A function of the files under `paths`,
+/// plus `uname` and the page size. On the host root it also calls `statvfs` and runs one
+/// address dump.
 pub fn scan_files(paths: &InventoryPaths, root: &SysRoot) -> InventorySnapshot {
-    from_raw(&read_inventory(paths), root)
+    scan_with(paths, root, &EngineSettings::default())
+}
+
+/// `scan_files` with `settings` choosing the visible network adapters.
+pub fn scan_with(
+    paths: &InventoryPaths,
+    root: &SysRoot,
+    settings: &EngineSettings,
+) -> InventorySnapshot {
+    let raw = read_inventory(paths);
+    let mut snap = from_raw(&raw, root);
+    add_devices(&mut snap, &raw, root, settings, *root == SysRoot::host());
+    snap
 }
 
 /// Builds the snapshot from one `read_inventory` result plus the topology, cpufreq, meminfo and
@@ -261,6 +303,302 @@ pub fn from_raw(raw: &InventoryRaw, root: &SysRoot) -> InventorySnapshot {
     snap.firmware = firmware_info(raw);
     snap.board = board_info(&raw.dmi);
     snap
+}
+
+/// Fills the Disk drives, Graphics and Network adapters sections. `host` allows `statvfs` and
+/// the address dump; under a fixture root free space reads `Unsupported` and no address is listed.
+#[doc(hidden)]
+pub fn add_devices(
+    snap: &mut InventorySnapshot,
+    raw: &InventoryRaw,
+    root: &SysRoot,
+    settings: &EngineSettings,
+    host: bool,
+) {
+    snap.disks = disk_drives(root, host);
+    snap.graphics = graphics(raw, root);
+    let mut addrs = Vec::new();
+    if host {
+        host_addrs(&mut addrs);
+    }
+    snap.network = network(root, settings, &addrs);
+}
+
+/// PERF-100: one row per disk from `enumerate_disks`. No disk list gives no rows.
+fn disk_drives(root: &SysRoot, host: bool) -> Arc<[DiskDrive]> {
+    let mut disks = Vec::new();
+    if block::enumerate_disks(root, &mut disks).is_err() {
+        return Arc::from([]);
+    }
+    let mut buf = Vec::new();
+    let mut mounts = Vec::new();
+    let mounts_read = read_file(&root.proc_path("self/mountinfo"), &mut buf, MOUNTINFO_MAX)
+        .and_then(|_| parse_mountinfo(&buf, &mut mounts));
+    if mounts_read.is_err() {
+        mounts.clear();
+    }
+    // The E04-024 rule: `statvfs` only on the disks' own devices, and only on the host.
+    let mut statvfs = |path: &str| -> Result<FsStat, CollectError> {
+        if host {
+            host_statvfs(path)
+        } else {
+            Err(CollectError::NotFound)
+        }
+    };
+    let usage = disk_usage(&disks, &mounts, &[], &mut statvfs, &mut |_: &str| None);
+    let mut props = UdevProps::default();
+    disks
+        .iter()
+        .zip(usage)
+        .map(|(disk, u)| {
+            let path = root.run_path(&format!(
+                "udev/data/{}",
+                block_entry(disk.major, disk.minor)
+            ));
+            let read = read_udev_props(&path, &DISK_UDEV_KEYS, &mut props);
+            let (interface, serial) = match read {
+                Ok(()) => (
+                    opt(interface_name(props.get("ID_BUS"), &disk.name).map(Arc::from)),
+                    udev_text(props.get("ID_SERIAL_SHORT")),
+                ),
+                Err(e) => (with(e.validity()), with(e.validity())),
+            };
+            DiskDrive {
+                device: None,
+                model: opt(disk.model.clone()),
+                kind: valid(Arc::from(kind_name(disk.kind))),
+                interface,
+                capacity_bytes: valid(disk.size_bytes),
+                free_bytes: InvField {
+                    value: u.free_bytes.value,
+                    validity: u.free_bytes.validity,
+                },
+                volumes: volumes(disk, &mounts),
+                serial,
+            }
+        })
+        .collect()
+}
+
+/// The mount points of the disk, its partitions and its dm children, in mountinfo order.
+fn volumes(disk: &BlockDevice, mounts: &[MountEntry]) -> Arc<[Arc<str>]> {
+    let owns = |major: u32, minor: u32| {
+        major != 0
+            && ((disk.major, disk.minor) == (major, minor)
+                || disk
+                    .children
+                    .iter()
+                    .any(|c| (c.major, c.minor) == (major, minor)))
+    };
+    mounts
+        .iter()
+        .filter(|m| owns(m.major, m.minor))
+        .map(|m| Arc::clone(&m.mount_point))
+        .collect()
+}
+
+/// The PERF-049 interface from udev `ID_BUS`, else from the disk name (the E12-013 mapping).
+fn interface_name(bus: Option<&str>, name: &str) -> Option<&'static str> {
+    match bus.map(str::trim) {
+        Some("ata") => Some("SATA"),
+        Some("usb") => Some("USB"),
+        Some("scsi") => Some("SCSI"),
+        Some("virtio") => Some("virtio"),
+        Some(b) if b.starts_with("nvme") => Some("NVMe"),
+        _ if name.starts_with("nvme") => Some("NVMe"),
+        _ if name.starts_with("vd") => Some("virtio"),
+        _ => None,
+    }
+}
+
+/// The PERF-047 kind word.
+fn kind_name(kind: DiskKind) -> &'static str {
+    match kind {
+        DiskKind::Nvme => "NVMe",
+        DiskKind::Ssd => "SSD",
+        DiskKind::Hdd => "HDD",
+        DiskKind::Emmc => "eMMC",
+        DiskKind::Sd => "SD",
+        DiskKind::Usb => "USB",
+        DiskKind::Optical => "Optical",
+        DiskKind::Virtual => "Virtual",
+    }
+}
+
+/// Sanitized udev text. Missing or empty is `Unsupported`.
+fn udev_text(value: Option<&str>) -> InvField<Arc<str>> {
+    bus_text(value.unwrap_or(""))
+}
+
+/// PERF-103: one adapter per DRM card, all vendors. No card list gives no rows.
+fn graphics(raw: &InventoryRaw, root: &SysRoot) -> Arc<[GraphicsAdapter]> {
+    let mut props = UdevProps::default();
+    let mut buf = Vec::new();
+    gpu_drm::discover_cards(&root.sys)
+        .iter()
+        .map(|card| {
+            let path = root.run_path(&format!("udev/data/{}", pci_entry(&card.pci_slot)));
+            let name = match read_udev_props(&path, &GPU_UDEV_KEYS, &mut props) {
+                Ok(()) => udev_text(props.get("ID_MODEL_FROM_DATABASE")),
+                Err(e) => with(e.validity()),
+            };
+            let version = card.driver.as_deref().and_then(|driver| {
+                let file = root.sys.join(format!("module/{driver}/version"));
+                let text = read_trimmed(&file, &mut buf).ok()?;
+                let clean = bus_text(&String::from_utf8_lossy(text));
+                (clean.validity == Validity::Valid).then_some(clean.value)
+            });
+            let kernel_module = match (&card.driver, &version) {
+                (Some(driver), Some(v)) => valid(Arc::from(format!("{driver} {v}"))),
+                (Some(driver), None) => valid(Arc::clone(driver)),
+                (None, _) => with(Validity::Unsupported),
+            };
+            let mut amd = AmdSample::default();
+            if card.vendor == VENDOR_AMD {
+                read_amd(card, &root.sys, &mut amd);
+            }
+            let (dedicated_bytes, shared_bytes) = match card.vendor {
+                VENDOR_AMD => (opt(amd.vram_total), opt(amd.gtt_total)),
+                // NVIDIA dedicated memory comes from `GpuInfo` in the reducer (PERF-064).
+                _ => (with(Validity::WarmingUp), with(Validity::Unsupported)),
+            };
+            GraphicsAdapter {
+                device: None,
+                name,
+                driver_version: opt(version),
+                kernel_module,
+                vulkan_version: with(Validity::WarmingUp),
+                opengl_version: with(Validity::WarmingUp),
+                temperature_source: valid(Arc::from(temp_source(card, &amd))),
+                dedicated_bytes,
+                shared_bytes,
+                displays: displays(raw, card.card),
+            }
+        })
+        .collect()
+}
+
+/// The PERF-069 temperature source text.
+fn temp_source(card: &DrmCard, amd: &AmdSample) -> &'static str {
+    let text = match card.vendor {
+        VENDOR_AMD => main_temp(amd).map(|(t, _)| amdgpu::temp_source_text(t)),
+        VENDOR_NVIDIA => Some("NVML (GPU core)"),
+        VENDOR_INTEL => IntelDriver::from_card(card).map(intel::temp_source_text),
+        _ => None,
+    };
+    text.unwrap_or("Not reported")
+}
+
+/// The connected, not disabled connectors of `card` with their preferred mode (PERF-072). Sysfs
+/// has no refresh rate or primary flag.
+fn displays(raw: &InventoryRaw, card: u32) -> Arc<[DisplayMode]> {
+    raw.connectors
+        .iter()
+        .filter(|c| c.card == card && c.connected && c.enabled != Some(false))
+        .filter_map(|c| {
+            let &(width, height) = c.modes.first()?;
+            Some(DisplayMode {
+                width,
+                height,
+                refresh_mhz: 0,
+                primary: false,
+            })
+        })
+        .collect()
+}
+
+/// One rtnetlink address dump into `out`. A failed open or dump leaves it empty.
+fn host_addrs(out: &mut Vec<IfAddr>) {
+    let dumped = AddrDump::open().and_then(|mut dump| dump.dump(out));
+    if let Err(err) = dumped {
+        tracing::debug!(%err, "inventory: rtnetlink address dump failed");
+        out.clear();
+    }
+}
+
+/// PERF-104: one adapter per interface whose kind `settings` shows. No interface list gives no
+/// rows.
+fn network(root: &SysRoot, settings: &EngineSettings, addrs: &[IfAddr]) -> Arc<[NetworkAdapter]> {
+    let mut ifaces = Vec::new();
+    if netif::enumerate(root, &mut ifaces).is_err() {
+        return Arc::from([]);
+    }
+    let mut buf = Vec::new();
+    let mut props = UdevProps::default();
+    ifaces
+        .iter()
+        .filter_map(|iface| {
+            let (kind, label) = net_kind(iface.kind);
+            if !kind_shown(kind, settings) {
+                return None;
+            }
+            let details = netif::read_details(root, &iface.name, &mut buf);
+            let path = root.run_path(&format!("udev/data/{}", net_entry(iface.ifindex)));
+            let adapter_name = match read_udev_props(&path, &NET_UDEV_KEYS, &mut props) {
+                Ok(()) => adapter_name(&props),
+                Err(e) => with(e.validity()),
+            };
+            let mac = match details.mac.validity {
+                Validity::Valid => opt(details.mac.value),
+                validity => with(validity),
+            };
+            Some(NetworkAdapter {
+                device: None,
+                connection: valid(Arc::from(format!("{} ({label})", iface.name))),
+                adapter_name,
+                driver: opt(details.driver),
+                link_speed_mbps: InvField {
+                    value: details.speed_mbps.value,
+                    validity: details.speed_mbps.validity,
+                },
+                ip_addresses: adapter_addrs(addrs, iface.ifindex),
+                mac,
+            })
+        })
+        .collect()
+}
+
+/// The `EngineSettings.show_network_*` flag of `kind`.
+fn kind_shown(kind: NetKind, s: &EngineSettings) -> bool {
+    match kind {
+        NetKind::Wired => s.show_network_wired,
+        NetKind::Wireless => s.show_network_wireless,
+        NetKind::VpnTunnel => s.show_network_vpn,
+        NetKind::Virtual => s.show_network_virtual,
+        NetKind::Other => s.show_network_other,
+    }
+}
+
+/// "<vendor> <model>" from the udev hwdb, either alone when the other is missing (E12-014).
+/// Neither gives `Unsupported`.
+fn adapter_name(props: &UdevProps) -> InvField<Arc<str>> {
+    let part = |key| props.get(key).map(str::trim).filter(|v| !v.is_empty());
+    match (
+        part("ID_VENDOR_FROM_DATABASE"),
+        part("ID_MODEL_FROM_DATABASE"),
+    ) {
+        (Some(vendor), Some(model)) => bus_text(&format!("{vendor} {model}")),
+        (Some(one), None) | (None, Some(one)) => bus_text(one),
+        (None, None) => with(Validity::Unsupported),
+    }
+}
+
+/// The CIDR text of every IPv4 address of `ifindex` (scope Global or Site first), then its
+/// global IPv6 addresses (scope Global or Site), each group in dump order.
+fn adapter_addrs(all: &[IfAddr], ifindex: u32) -> Arc<[Arc<str>]> {
+    let group = |a: &IfAddr| match (a.family, a.scope) {
+        (AddrFamily::V4, AddrScope::Global | AddrScope::Site) => Some(0),
+        (AddrFamily::V4, _) => Some(1),
+        (AddrFamily::V6, AddrScope::Global | AddrScope::Site) => Some(2),
+        (AddrFamily::V6, _) => None,
+    };
+    (0..3)
+        .flat_map(|g| {
+            all.iter()
+                .filter(move |a| a.ifindex == ifindex && group(a) == Some(g))
+        })
+        .map(|a| Arc::from(format_cidr(a)))
+        .collect()
 }
 
 fn valid<T>(value: T) -> InvField<T> {
