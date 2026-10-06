@@ -474,7 +474,7 @@ pub fn range_label(range_word: &str, range_ns: u64, out: &mut String) {
     let secs = range_ns / NS_PER_S;
     out.push_str(range_word);
     out.push_str(" over ");
-    if secs >= 120 && secs % 60 == 0 {
+    if secs >= 120 && secs.is_multiple_of(60) {
         let _ = write!(out, "{} minutes", secs / 60);
     } else {
         let _ = write!(out, "{secs} seconds");
