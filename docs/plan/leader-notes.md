@@ -552,3 +552,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.9 (ef0e8f0, 1d57223, f7c0eb1): settings store. A corrupt file is renamed to .corrupt-<unix>; a newer file opens read-only. Clamp logs name the key only, with no values (leader privacy rule overrides the bead text).
 - wlf.15 (b5eb1b4, 8d691f8, de6315c): gallery entry and the tl-ui hook behind bench. The gallery window opened at 1850 ms (bench build, machine under load). MANUAL DESKTOP CHECK after wlf.16: run tasklens --gallery, close the window, and check it exits 0 within 2 s.
 - ug9.35 (6ad0e77, 27f0ff6): the Enter double fire was not real; a key binding runs before button key-down. Fixed: Enter in a text field now runs the default button; the Share Theme title follows strings_version. Key-up tests added.
+- gma.4 (b9d5809, 31029cd): process window actions; OpenVirusTotal and CreateDump are re-exported from pdu.5 (accepted). jqk.11's build break was fixed in f41d785.
