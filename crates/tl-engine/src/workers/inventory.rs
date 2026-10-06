@@ -11,7 +11,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
@@ -57,9 +56,7 @@ pub fn spec() -> WorkerSpec {
 /// fixture root never reads host files.
 pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     let paths = paths_for(&cfg.sys_root);
-    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
-        run(cx, io.clone(), paths.clone())
-    })
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| run(cx, io.clone(), paths.clone()))
 }
 
 /// `InventoryPaths::system()` for the host root, else every path under the fixture base (the
@@ -241,7 +238,11 @@ fn os_info(raw: &InventoryRaw) -> OsInfo {
         Some(os) => (
             opt(os.pretty_name.clone()),
             os.logo.clone(),
-            valid(os.version_id.clone().unwrap_or_else(|| Arc::from("Rolling"))),
+            valid(
+                os.version_id
+                    .clone()
+                    .unwrap_or_else(|| Arc::from("Rolling")),
+            ),
             opt(os.build_id.clone()),
         ),
         None => (
@@ -482,6 +483,7 @@ mod tests {
 
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
 
     use asupersync::channel::watch;
     use asupersync::types::Budget;
@@ -605,7 +607,10 @@ mod tests {
 
         /// Cancels the worker and checks that it ends with `Ok` and leaves the lab clean.
         fn finish(mut self) {
-            assert!(self.out.lock().expect("slot lock").is_none(), "worker ended");
+            assert!(
+                self.out.lock().expect("slot lock").is_none(),
+                "worker ended"
+            );
             self.handle.abort();
             self.lab.run_until_idle();
             for _ in 0..5 {
@@ -712,7 +717,12 @@ mod tests {
     #[test]
     fn processor_bits_from_machine() {
         let root = SysRoot::at(Path::new("/nonexistent-tasklens-root"));
-        for (machine, bits) in [("x86_64", 64), ("aarch64", 64), ("i686", 32), ("armv7l", 32)] {
+        for (machine, bits) in [
+            ("x86_64", 64),
+            ("aarch64", 64),
+            ("i686", 32),
+            ("armv7l", 32),
+        ] {
             let snap = from_raw(&raw(machine), &root);
             assert_eq!(snap.processor.bits, valid(bits), "{machine}");
         }
@@ -734,7 +744,10 @@ mod tests {
         assert_eq!(&*snap.processor.virtualization.value, "Not supported");
         assert_eq!(snap.memory.total_bytes.validity, Validity::Failed);
         assert_eq!(snap.memory.zram_bytes, valid(0));
-        assert_eq!(snap.memory.peak_committed_bytes.validity, Validity::WarmingUp);
+        assert_eq!(
+            snap.memory.peak_committed_bytes.validity,
+            Validity::WarmingUp
+        );
         assert!(snap.modules.is_empty());
         assert_eq!(snap.firmware.secure_boot.validity, Validity::Unsupported);
         assert_eq!(snap.board.chassis_type.validity, Validity::Unsupported);

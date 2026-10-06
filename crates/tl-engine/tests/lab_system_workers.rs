@@ -2660,3 +2660,118 @@ fn net_addresses_into_details() {
     assert_eq!(eth0, ["192.168.1.10/24", "2001:db8::5/64", "fe80::1/64"]);
     assert!(net_details_of(&entries, "wlan0").addresses.is_empty());
 }
+
+// ---- Inventory (E12-016) ----
+
+use std::os::unix::fs::PermissionsExt;
+
+use tl_collect::inventory::InventoryPaths;
+use tl_engine::workers::inventory::scan_files;
+use tl_model::snapshot::{FirmwareType, InventorySnapshot};
+
+fn inventory_scan(dir: &Path) -> InventorySnapshot {
+    scan_files(&InventoryPaths::under(dir), &SysRoot::at(dir))
+}
+
+fn inv_text(value: &str) -> tl_model::snapshot::InvField<Arc<str>> {
+    tl_model::snapshot::InvField {
+        value: Arc::from(value),
+        validity: Validity::Valid,
+    }
+}
+
+#[test]
+fn inventory_files_sections() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.header.validity, Validity::Valid);
+    assert_eq!(
+        snap.firmware.bios_vendor,
+        inv_text("American Megatrends International, LLC.")
+    );
+    assert_eq!(snap.firmware.firmware_type.value, Some(FirmwareType::Uefi));
+    assert_eq!(snap.firmware.firmware_type.validity, Validity::Valid);
+    assert_eq!(snap.board.product, inv_text("ROG STRIX X570-E GAMING"));
+    assert_eq!(snap.board.chassis_type, inv_text("Desktop"));
+    // No `board_serial` file in the fixture.
+    assert_eq!(snap.board.serial.validity, Validity::Unsupported);
+    assert_eq!(snap.os.name, inv_text("CachyOS Linux"));
+    assert_eq!(snap.os.logo_icon.as_deref(), Some("cachyos"));
+    assert_eq!(snap.modules.len(), 2);
+    assert_eq!(snap.modules[0].slot, inv_text("P0 CHANNEL A (DIMM 0)"));
+    assert_eq!(snap.modules[0].kind, inv_text("DDR4"));
+    assert_eq!(snap.modules[0].capacity_bytes.value, 17_179_869_184);
+    assert_eq!(
+        snap.memory.peak_committed_bytes.validity,
+        Validity::WarmingUp
+    );
+    assert!(!format!("{snap:?}").contains("SERIAL-MUST-NOT-APPEAR"));
+}
+
+#[test]
+fn inventory_board_serial_restricted() {
+    if rustix::process::geteuid().is_root() {
+        eprintln!("skipped: root can read a mode 000 file");
+        return;
+    }
+    let dir = fixture_copy("dmi-desktop", None);
+    let serial = dir.join("sys/class/dmi/id/board_serial");
+    fs::write(&serial, "BOARD-SERIAL\n").expect("write board_serial");
+    fs::set_permissions(&serial, fs::Permissions::from_mode(0o000)).expect("chmod board_serial");
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.board.serial.validity, Validity::Restricted);
+    assert!(!format!("{snap:?}").contains("BOARD-SERIAL"));
+}
+
+#[test]
+fn inventory_os_release_fallbacks() {
+    let dir = fixture_copy("dmi-desktop", None);
+    // The fixture has no VERSION_ID.
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.os.version, inv_text("Rolling"));
+    assert_eq!(snap.os.build, inv_text("rolling"));
+
+    fs::write(
+        dir.join("etc/os-release"),
+        "PRETTY_NAME=\"Fedora Linux 42\"\nVERSION_ID=42\n",
+    )
+    .expect("write os-release");
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.os.version, inv_text("42"));
+    assert_eq!(snap.os.build.validity, Validity::Unsupported);
+
+    fs::remove_file(dir.join("etc/os-release")).expect("remove os-release");
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.os.name.validity, Validity::Failed);
+    assert_eq!(snap.os.version.validity, Validity::Failed);
+    assert_eq!(snap.os.build.validity, Validity::Failed);
+}
+
+#[test]
+fn inventory_chassis_names() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let chassis = dir.join("sys/class/dmi/id/chassis_type");
+    for (code, name) in [("3", "Desktop"), ("10", "Notebook"), ("36", "Stick PC")] {
+        fs::write(&chassis, format!("{code}\n")).expect("write chassis_type");
+        assert_eq!(inventory_scan(&dir).board.chassis_type, inv_text(name));
+    }
+    fs::write(&chassis, "99\n").expect("write chassis_type");
+    assert_eq!(inventory_scan(&dir).board.chassis_type, inv_text("Type 99"));
+    fs::remove_file(&chassis).expect("remove chassis_type");
+    assert_eq!(
+        inventory_scan(&dir).board.chassis_type.validity,
+        Validity::Unsupported
+    );
+}
+
+/// D-007: memory module serials are never read or stored.
+#[test]
+fn inventory_no_module_serials() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let udev = fs::read_to_string(dir.join("run/udev/data/+dmi:id")).expect("read udev dmi");
+    assert!(udev.contains("SERIAL_NUMBER=SERIAL-MUST-NOT-APPEAR"));
+    let snap = inventory_scan(&dir);
+    assert!(!snap.modules.is_empty());
+    let text = format!("{:?}", snap.modules);
+    assert!(!text.contains("SERIAL-MUST-NOT-APPEAR"), "{text}");
+}
