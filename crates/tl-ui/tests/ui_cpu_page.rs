@@ -403,13 +403,17 @@ fn cpu_grid_heading_tooltip_text() {
 
 #[cfg(feature = "test-hooks")]
 mod grid {
-    use gpui_kit::{App, AppContext as _, Entity, TestAppContext, px};
+    use gpui_kit::{
+        App, AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
     use tl_model::client::EngineClient;
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::chart::LegendStyle;
     use tl_ui::chart::grid_element::grid_layout;
+    use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::performance::cpu_grid::CpuGrid;
+    use tl_ui::pages::performance::cpu_grid::{CpuGrid, GRID_ID, TRIGGER_ID};
     use tl_ui::testing::fake_engine::FakeEngine;
 
     use super::*;
@@ -425,6 +429,7 @@ mod grid {
                 Vec::new(),
             );
             tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
             let client: Arc<dyn EngineClient> = FakeEngine::new();
             let hub: Entity<SnapshotHub> = cx.new(|cx| SnapshotHub::new(client, cx));
             let theme = tl_ui::theme::current(cx).clone();
@@ -555,5 +560,80 @@ mod grid {
         changed[11].2 = Validity::Stale;
         cx.update(|cx| grid.update_clocks(&changed, cx));
         assert_eq!(tip(&grid, 11, cx).as_deref(), Some("Core 3, thread 1"));
+    }
+
+    struct Root {
+        grid: CpuGrid,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1300.)).child(self.grid.element(window, cx))
+        }
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
+        vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn cpu_grid_heading_hover_shows_tooltip(cx: &mut TestAppContext) {
+        let grid = grid(cx, 16, false);
+        let (root, vcx) = cx.add_window_view(move |_, _| Root { grid });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        root.update(vcx, |r, cx| {
+            r.grid.update_clocks(&[(7, 4200.0, Validity::Valid)], cx);
+        });
+        draw(vcx);
+        draw(vcx);
+
+        // 16 cells in 6 columns of 210 px and 3 rows of 112 px with 8 px gaps.
+        let bounds = vcx.debug_bounds(GRID_ID).expect("grid box");
+        assert_eq!(bounds.size.height, px(352.));
+        assert!(
+            vcx.debug_bounds(TRIGGER_ID).is_none(),
+            "no trigger before hover"
+        );
+
+        // Cell 7 is column 1, row 1, at (218, 120); its heading starts 6 px in.
+        hover(vcx, 218. + 12., 120. + 14.);
+        hover(vcx, 218. + 14., 120. + 14.);
+        let trigger = vcx
+            .debug_bounds(TRIGGER_ID)
+            .expect("trigger over the heading");
+        assert_eq!(trigger.origin, point(px(224.), px(126.)));
+        assert!(
+            vcx.debug_bounds("TlTooltip").is_none(),
+            "not before the delay"
+        );
+
+        vcx.executor().advance_clock(DELAY_CONTROL * 2);
+        vcx.run_until_parked();
+        draw(vcx);
+        assert!(vcx.debug_bounds("TlTooltip").is_some(), "tooltip shows");
+        let text = vcx.update(|_, cx| {
+            root.read(cx)
+                .grid
+                .view
+                .read(cx)
+                .hovered_tooltip()
+                .map(|t| t.to_string())
+        });
+        assert_eq!(text.as_deref(), Some("Core 7, thread 0, 4200 MHz"));
+
+        // Off every heading: the trigger goes.
+        hover(vcx, 218. + 100., 120. + 80.);
+        draw(vcx);
+        assert!(vcx.debug_bounds(TRIGGER_ID).is_none());
     }
 }
