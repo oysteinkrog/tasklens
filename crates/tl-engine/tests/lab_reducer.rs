@@ -2449,13 +2449,21 @@ fn startup_counts_follow_text_filter() {
     rig.passed();
 }
 
+use tl_model::snapshot::DiskDrive;
+
 #[test]
-fn inventory_gpu_device_from_pci_slot() {
-    // The worker sends `device: None` and the slot; the reducer finds the catalog GPU.
+fn inventory_devices_from_pci_slot_and_disk_name() {
+    // The worker sends `device: None` with the slot or name; the reducer finds the catalog entry.
     let mut rig = Rig::new();
-    rig.run(vec![gpu_info_msg(), api_versions_msg()])
-        .expect("no invariant violation");
-    let idx = gpu_idx(&rig);
+    let disk = disk_id("nvme0n1", 0);
+    rig.run(vec![
+        gpu_info_msg(),
+        api_versions_msg(),
+        disks_msg(SEC, vec![(disk.clone(), disk_totals(1.0, 1.0))]),
+    ])
+    .expect("no invariant violation");
+    let gpu = gpu_idx(&rig);
+    let disk_idx = rig.idx(&disk);
     rig.run(vec![src(SourceUpdate::Inventory(Box::new(
         InventorySnapshot {
             graphics: Arc::from([
@@ -2468,14 +2476,27 @@ fn inventory_gpu_device_from_pci_slot() {
                     ..GraphicsAdapter::default()
                 },
             ]),
+            disks: Arc::from([
+                DiskDrive {
+                    name: Some(Arc::from("nvme0n1")),
+                    ..DiskDrive::default()
+                },
+                DiskDrive {
+                    name: Some(Arc::from("sr0")),
+                    ..DiskDrive::default()
+                },
+            ]),
             ..InventorySnapshot::default()
         },
     )))])
     .expect("no invariant violation");
-    assert_eq!(rig.latest().inventory.graphics[0].device, Some(idx));
+    let snap = rig.latest();
+    assert_eq!(snap.inventory.graphics[0].device, Some(gpu));
     assert_versions(&rig);
-    let other = &rig.latest().inventory.graphics[1];
+    let other = &snap.inventory.graphics[1];
     assert_eq!(other.device, None);
     assert_eq!(other.vulkan_version.validity, Validity::WarmingUp);
+    assert_eq!(snap.inventory.disks[0].device, Some(disk_idx));
+    assert_eq!(snap.inventory.disks[1].device, None);
     rig.passed();
 }
