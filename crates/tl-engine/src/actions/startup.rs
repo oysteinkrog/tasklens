@@ -1,5 +1,5 @@
-//! Startup Apps actions on an `ActionTarget::Startup` (SYS-022, ADR-006, E11-014). Part 1:
-//! Enable and Disable.
+//! Startup Apps actions on an `ActionTarget::Startup`: Enable and Disable (SYS-022, E11-014),
+//! Run now and Delete entry (SYS-023, SYS-024, E11-015).
 //!
 //! A system XDG entry is disabled by writing a user override and enabled by removing it. A user
 //! XDG entry toggles `Hidden` in place. A Plasma script toggles its executable bit. A systemd
@@ -7,20 +7,29 @@
 //! blocking pool through `ActionOps`, and `tl-ops` confines every path to the roots a second
 //! time. Changes take effect at next login; running programs are not stopped.
 //!
+//! Run now goes through the shared launcher behind `ActionCtx::openers` (E14-A3). Delete unlinks
+//! a user file; a user unit is disabled first and the manager reloads after the unlink. A system
+//! XDG entry cannot be deleted.
+//!
 //! The entry id is checked by `valid_id` before any path is built. Log the id at debug only and
-//! never file contents (ADR-015).
+//! never file contents, a script path or a command text (ADR-015).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use asupersync::Cx;
-use tl_model::actions::{ActionError, ActionKind, ActionState, ActionTarget, RejectReason};
+use tl_model::actions::{
+    ActionError, ActionKind, ActionState, ActionTarget, LaunchSpec, LaunchWhat, RejectReason,
+};
 use tl_model::table::{Manager, StartupRef, StartupSource, UnitRef};
 use tl_ops::OpsError;
 use tl_ops::fs::StartupRoots;
 
-use super::{ActionCtx, TIMED_OUT, deadline, internal_error, map_ops_error, unit, with_deadline};
+use super::{
+    ActionCtx, LaunchOutcome, TIMED_OUT, deadline, internal_error, map_ops_error, unit,
+    with_deadline,
+};
 
 /// The unit suffixes a user-unit startup entry may have.
 const UNIT_SUFFIXES: [&str; 8] = [
@@ -127,26 +136,159 @@ fn valid_for(source: StartupSource, id: &str) -> bool {
     }
 }
 
-/// Runs one startup target. This part handles `StartupEnable` and `StartupDisable`; any other
-/// kind is `Rejected(Unsupported)`. A bad id is `Rejected(Unsupported)` before any I/O.
+/// The `LaunchSpec` that runs `r` now (R-148 item 5). An autostart entry is
+/// `DesktopEntry(<id without ".desktop">)`, a user unit is `Unit` on the user manager, and a
+/// Plasma script is `Command("/bin/sh '<user_file>'")` with `cwd` set to `$HOME`. A bad id is
+/// `Err(Rejected(Unsupported))`.
+pub fn launch_spec(paths: &StartupPaths, r: &StartupRef) -> Result<LaunchSpec, ActionState> {
+    if !valid_for(r.source, &r.id) {
+        return Err(ActionState::Rejected(RejectReason::Unsupported));
+    }
+    let (what, cwd) = match r.source {
+        StartupSource::AutostartUser | StartupSource::AutostartSystem => {
+            let id = r.id.strip_suffix(".desktop").unwrap_or(&r.id);
+            (LaunchWhat::DesktopEntry(Arc::from(id)), None)
+        }
+        StartupSource::UserUnit => (
+            LaunchWhat::Unit(UnitRef {
+                manager: Manager::User,
+                name: Arc::clone(&r.id),
+            }),
+            None,
+        ),
+        StartupSource::PlasmaEnv | StartupSource::PlasmaShutdown => {
+            let Some(script) = user_file(paths, r) else {
+                return Err(internal_error());
+            };
+            let argv = tl_ops::launch::script_argv(&script).map_err(|e| map_ops_error(&e))?;
+            let text = argv
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| if i == 0 { arg.clone() } else { sh_quote(arg) })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let home = std::env::var("HOME")
+                .ok()
+                .filter(|h| h.starts_with('/'))
+                .map(Arc::from);
+            (LaunchWhat::Command(Arc::from(text)), home)
+        }
+    };
+    Ok(LaunchSpec {
+        what,
+        as_admin: false,
+        cwd,
+    })
+}
+
+/// `arg` in single quotes for `/bin/sh`, each `'` written as `'\''`.
+fn sh_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+/// Runs one startup target: Enable, Disable, Run now or Delete. Any other kind is
+/// `Rejected(Unsupported)`. A bad id is `Rejected(Unsupported)` before any I/O.
 pub async fn run_target(
     cx: &Cx,
     actx: &ActionCtx,
     kind: &ActionKind,
     r: &StartupRef,
 ) -> ActionState {
-    let enable = match kind {
-        ActionKind::StartupEnable => true,
-        ActionKind::StartupDisable => false,
-        _ => return ActionState::Rejected(RejectReason::Unsupported),
-    };
+    if !matches!(
+        kind,
+        ActionKind::StartupEnable
+            | ActionKind::StartupDisable
+            | ActionKind::StartupRunNow
+            | ActionKind::StartupDelete
+    ) {
+        return ActionState::Rejected(RejectReason::Unsupported);
+    }
     if !valid_for(r.source, &r.id) {
         tracing::debug!(target: "tasklens::action", "startup entry id refused");
         return ActionState::Rejected(RejectReason::Unsupported);
     }
-    let state = set_enabled(cx, actx, kind, r, enable).await;
-    tracing::debug!(target: "tasklens::action", id = &*r.id, enable, result = ?state, "startup action");
+    let state = match kind {
+        ActionKind::StartupEnable => set_enabled(cx, actx, kind, r, true).await,
+        ActionKind::StartupDisable => set_enabled(cx, actx, kind, r, false).await,
+        ActionKind::StartupRunNow => run_now(cx, actx, r).await,
+        _ => delete(cx, actx, r).await,
+    };
+    tracing::debug!(target: "tasklens::action", id = &*r.id, ?kind, result = ?state, "startup action");
     state
+}
+
+/// Starts `r` whatever its status through the shared launcher. No action deadline applies; the
+/// launcher bounds its own calls.
+async fn run_now(cx: &Cx, actx: &ActionCtx, r: &StartupRef) -> ActionState {
+    let Some(openers) = &actx.openers else {
+        return ActionState::Rejected(RejectReason::Unsupported);
+    };
+    let spec = match launch_spec(&actx.startup_paths, r) {
+        Ok(spec) => spec,
+        Err(state) => return state,
+    };
+    match openers.launch(cx, &spec).await {
+        Ok(LaunchOutcome::Launched) => ActionState::Succeeded,
+        // R-148 item 4: the UI shows the Info toast "Already running".
+        Ok(LaunchOutcome::AlreadyRunning) => ActionState::Rejected(RejectReason::AlreadyRunning),
+        Err(e) => ActionState::Failed(e),
+    }
+}
+
+/// Deletes the user file of `r`. A user unit is disabled first, without a reload, and the user
+/// manager reloads after the unlink. A file that is already gone counts as deleted.
+async fn delete(cx: &Cx, actx: &ActionCtx, r: &StartupRef) -> ActionState {
+    let kind = ActionKind::StartupDelete;
+    let limit = deadline(&kind, Some(&ActionTarget::Startup(r.clone())), false);
+    let Some(file) = user_file(&actx.startup_paths, r) else {
+        // A system XDG entry belongs to a package.
+        return ActionState::Rejected(RejectReason::Unsupported);
+    };
+    if r.source != StartupSource::UserUnit {
+        return match with_deadline(cx, limit, delete_file(cx, actx, file)).await {
+            Ok(state) => state,
+            Err(_) => ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)),
+        };
+    }
+    let Some(bus) = unit::bus_for(actx, Manager::User) else {
+        return ActionState::Failed(ActionError::Internal(Arc::from(NOT_CONNECTED)));
+    };
+    let unit = UnitRef {
+        manager: Manager::User,
+        name: Arc::clone(&r.id),
+    };
+    let steps = async {
+        let state =
+            unit::set_unit_file_state(cx, &*bus, &unit, &ActionKind::UnitDisable, false).await;
+        if state != ActionState::Succeeded {
+            return state;
+        }
+        let state = delete_file(cx, actx, file).await;
+        if state != ActionState::Succeeded {
+            return state;
+        }
+        unit::reload_after_change(cx, &*bus, Manager::User).await
+    };
+    match with_deadline(cx, limit, steps).await {
+        Ok(state) => state,
+        Err(_) => ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)),
+    }
+}
+
+/// `ActionOps::startup_delete_file` on the blocking pool. `ENOENT` is `Succeeded`.
+async fn delete_file(cx: &Cx, actx: &ActionCtx, file: PathBuf) -> ActionState {
+    let ops = Arc::clone(&actx.ops);
+    let roots = actx.startup_paths.roots.clone();
+    let mut handle = match cx.spawn_blocking(move |_| ops.startup_delete_file(&file, &roots)) {
+        Ok(handle) => handle,
+        Err(_) => return internal_error(),
+    };
+    match handle.join(cx).await {
+        Ok(Ok(())) => ActionState::Succeeded,
+        Ok(Err(OpsError::Os(libc::ENOENT))) => ActionState::Succeeded,
+        Ok(Err(e)) => map_ops_error(&e),
+        Err(_) => internal_error(),
+    }
 }
 
 async fn set_enabled(
@@ -173,7 +315,7 @@ async fn set_enabled(
         return match with_deadline(
             cx,
             limit,
-            unit::set_unit_file_state(cx, &*bus, &unit, &kind),
+            unit::set_unit_file_state(cx, &*bus, &unit, &kind, true),
         )
         .await
         {
@@ -238,7 +380,9 @@ async fn set_enabled(
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::path::Path;
+    use std::pin::Pin;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
     use std::time::Duration;
@@ -250,8 +394,8 @@ mod tests {
     use zbus::zvariant::{OwnedValue, Value};
 
     use super::*;
-    use crate::actions::ActionOps;
     use crate::actions::unit::{BusFuture, JobStream, UnitBus, UnitBusError, UnitBusOverride};
+    use crate::actions::{ActionOps, Openers};
     use crate::config::{EngineConfig, EngineMode};
     use crate::dbus::ManagerConnSlot;
 
@@ -261,6 +405,8 @@ mod tests {
         disable_system: Result<(), OpsError>,
         result: Result<(), OpsError>,
         log: Mutex<Vec<String>>,
+        /// Shared with `FakeUnitBus::calls` when a test checks the order across both.
+        order: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     impl FakeOps {
@@ -270,6 +416,7 @@ mod tests {
                 disable_system: Ok(()),
                 result: Ok(()),
                 log: Mutex::default(),
+                order: None,
             }
         }
 
@@ -281,10 +428,11 @@ mod tests {
             let rel = path
                 .strip_prefix(&self.base)
                 .expect("path under the fixture");
-            self.log
-                .lock()
-                .unwrap()
-                .push(format!("{call}({}{arg})", rel.display()));
+            let entry = format!("{call}({}{arg})", rel.display());
+            if let Some(order) = &self.order {
+                order.lock().unwrap().push(entry.clone());
+            }
+            self.log.lock().unwrap().push(entry);
         }
 
         fn log(&self) -> Vec<String> {
@@ -332,13 +480,56 @@ mod tests {
             self.push("script_set_enabled", script, roots, &format!(", {enabled}"));
             self.result.clone()
         }
+
+        fn startup_delete_file(&self, path: &Path, roots: &StartupRoots) -> tl_ops::OpsResult {
+            self.push("delete_file", path, roots, "");
+            self.result.clone()
+        }
+    }
+
+    /// Openers whose `launch` records the spec and returns the scripted outcome.
+    struct FakeOpeners {
+        outcome: Result<LaunchOutcome, ActionError>,
+        launched: Mutex<Vec<LaunchSpec>>,
+    }
+
+    impl FakeOpeners {
+        fn new(outcome: Result<LaunchOutcome, ActionError>) -> Arc<Self> {
+            Arc::new(Self {
+                outcome,
+                launched: Mutex::default(),
+            })
+        }
+    }
+
+    type OpenerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, ActionError>> + Send + 'a>>;
+
+    impl Openers for FakeOpeners {
+        fn open_uri(&self, _cx: &Cx, _target: &str) -> OpenerFuture<'_, ()> {
+            Box::pin(async { Err(ActionError::Unsupported) })
+        }
+
+        fn show_in_file_manager(
+            &self,
+            _cx: &Cx,
+            _path: &str,
+            _properties: bool,
+        ) -> OpenerFuture<'_, ()> {
+            Box::pin(async { Err(ActionError::Unsupported) })
+        }
+
+        fn launch(&self, _cx: &Cx, spec: &LaunchSpec) -> OpenerFuture<'_, LaunchOutcome> {
+            self.launched.lock().unwrap().push(spec.clone());
+            let outcome = self.outcome.clone();
+            Box::pin(async move { outcome })
+        }
     }
 
     /// A user manager that answers `GetUnitFileState` with `disabled` and every other call with
     /// an empty reply.
     #[derive(Default)]
     struct FakeUnitBus {
-        calls: Mutex<Vec<String>>,
+        calls: Arc<Mutex<Vec<String>>>,
     }
 
     fn show(v: &Value<'_>) -> String {
@@ -407,6 +598,15 @@ mod tests {
     }
 
     fn actx(base: &Path, ops: Arc<FakeOps>, bus: Option<Arc<FakeUnitBus>>) -> Arc<ActionCtx> {
+        actx_with(base, ops, bus, None)
+    }
+
+    fn actx_with(
+        base: &Path,
+        ops: Arc<FakeOps>,
+        bus: Option<Arc<FakeUnitBus>>,
+        openers: Option<Arc<FakeOpeners>>,
+    ) -> Arc<ActionCtx> {
         let (events, _events_rx) = async_channel::bounded(16);
         let (msgs, _msgs_rx) = asupersync::channel::mpsc::channel(16);
         let pick: UnitBusOverride =
@@ -423,7 +623,7 @@ mod tests {
             )),
             systemd_system: ManagerConnSlot::new(),
             systemd_user: ManagerConnSlot::new(),
-            openers: None,
+            openers: openers.map(|o| o as Arc<dyn Openers>),
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: Some(pick),
@@ -766,10 +966,230 @@ mod tests {
         let r = entry(StartupSource::AutostartUser, "foo.desktop");
         let state = run(
             actx(&base, Arc::clone(&ops), None),
-            ActionKind::StartupRunNow,
+            ActionKind::UnitStart,
             r,
         );
         assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(ops.log().is_empty());
+    }
+
+    #[test]
+    fn launch_spec_table() {
+        let p = paths(Path::new("/f"));
+        let home = std::env::var("HOME")
+            .ok()
+            .filter(|h| h.starts_with('/'))
+            .map(Arc::<str>::from);
+        let spec = |source, id| launch_spec(&p, &entry(source, id));
+        let ok = |what, cwd| {
+            Ok(LaunchSpec {
+                what,
+                as_admin: false,
+                cwd,
+            })
+        };
+        assert_eq!(
+            spec(StartupSource::AutostartUser, "foo.desktop"),
+            ok(LaunchWhat::DesktopEntry("foo".into()), None)
+        );
+        assert_eq!(
+            spec(StartupSource::AutostartSystem, "org.kde.a.desktop"),
+            ok(LaunchWhat::DesktopEntry("org.kde.a".into()), None)
+        );
+        assert_eq!(
+            spec(StartupSource::UserUnit, "bar.service"),
+            ok(
+                LaunchWhat::Unit(UnitRef {
+                    manager: Manager::User,
+                    name: "bar.service".into(),
+                }),
+                None
+            )
+        );
+        assert_eq!(
+            spec(StartupSource::PlasmaEnv, "it's.sh"),
+            ok(
+                LaunchWhat::Command("/bin/sh '/f/config/plasma-workspace/env/it'\\''s.sh'".into()),
+                home.clone()
+            )
+        );
+        assert_eq!(
+            spec(StartupSource::PlasmaShutdown, "a b;rm.sh"),
+            ok(
+                LaunchWhat::Command(
+                    "/bin/sh '/f/config/plasma-workspace/shutdown/a b;rm.sh'".into()
+                ),
+                home
+            )
+        );
+        for (source, id) in [
+            (StartupSource::AutostartUser, "../x.desktop"),
+            (StartupSource::UserUnit, "bar.desktop"),
+            (StartupSource::PlasmaEnv, ".."),
+        ] {
+            assert_eq!(
+                spec(source, id),
+                Err(ActionState::Rejected(RejectReason::Unsupported)),
+                "{source:?} {id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_run_now_desktop_entry() {
+        let base = fixture("run-desktop");
+        let openers = FakeOpeners::new(Ok(LaunchOutcome::Launched));
+        let ctx = actx_with(
+            &base,
+            Arc::new(FakeOps::new(&base)),
+            None,
+            Some(Arc::clone(&openers)),
+        );
+        let state = run(
+            ctx,
+            ActionKind::StartupRunNow,
+            entry(StartupSource::AutostartUser, "foo.desktop"),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        let launched = openers.launched.lock().unwrap();
+        assert_eq!(launched.len(), 1);
+        assert_eq!(launched[0].what, LaunchWhat::DesktopEntry("foo".into()));
+    }
+
+    #[test]
+    fn startup_run_now_unit_and_outcomes() {
+        let base = fixture("run-unit");
+        let r = entry(StartupSource::UserUnit, "bar.service");
+        for (outcome, want) in [
+            (Ok(LaunchOutcome::Launched), ActionState::Succeeded),
+            (
+                Ok(LaunchOutcome::AlreadyRunning),
+                ActionState::Rejected(RejectReason::AlreadyRunning),
+            ),
+            (
+                Err(ActionError::NotAuthorized),
+                ActionState::Failed(ActionError::NotAuthorized),
+            ),
+        ] {
+            let openers = FakeOpeners::new(outcome);
+            let ctx = actx_with(
+                &base,
+                Arc::new(FakeOps::new(&base)),
+                None,
+                Some(Arc::clone(&openers)),
+            );
+            assert_eq!(run(ctx, ActionKind::StartupRunNow, r.clone()), want);
+            assert_eq!(
+                openers.launched.lock().unwrap()[0].what,
+                LaunchWhat::Unit(UnitRef {
+                    manager: Manager::User,
+                    name: "bar.service".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn startup_run_now_without_openers() {
+        let base = fixture("run-none");
+        let state = run(
+            actx(&base, Arc::new(FakeOps::new(&base)), None),
+            ActionKind::StartupRunNow,
+            entry(StartupSource::AutostartUser, "foo.desktop"),
+        );
+        assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
+    }
+
+    #[test]
+    fn startup_delete_user_file() {
+        let base = fixture("delete-user");
+        let ops = Arc::new(FakeOps::new(&base));
+        let ctx = actx(&base, Arc::clone(&ops), None);
+        let state = run(
+            Arc::clone(&ctx),
+            ActionKind::StartupDelete,
+            entry(StartupSource::AutostartUser, "foo.desktop"),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        let state = run(
+            ctx,
+            ActionKind::StartupDelete,
+            entry(StartupSource::PlasmaShutdown, "y.sh"),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            ops.log(),
+            [
+                "delete_file(config/autostart/foo.desktop)",
+                "delete_file(config/plasma-workspace/shutdown/y.sh)",
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_delete_errors() {
+        let base = fixture("delete-errors");
+        let r = entry(StartupSource::AutostartUser, "foo.desktop");
+        for (result, want) in [
+            // Already gone.
+            (Err(OpsError::Os(libc::ENOENT)), ActionState::Succeeded),
+            (
+                Err(OpsError::Os(libc::EACCES)),
+                ActionState::Failed(ActionError::PermissionDenied),
+            ),
+            (
+                Err(OpsError::NotOwner),
+                ActionState::Rejected(RejectReason::NotOwner),
+            ),
+        ] {
+            let ops = Arc::new(FakeOps {
+                result,
+                ..FakeOps::new(&base)
+            });
+            let state = run(actx(&base, ops, None), ActionKind::StartupDelete, r.clone());
+            assert_eq!(state, want);
+        }
+    }
+
+    #[test]
+    fn startup_delete_unit_order() {
+        let base = fixture("delete-unit");
+        let bus = Arc::new(FakeUnitBus::default());
+        let ops = Arc::new(FakeOps {
+            order: Some(Arc::clone(&bus.calls)),
+            ..FakeOps::new(&base)
+        });
+        let state = run(
+            actx(&base, Arc::clone(&ops), Some(Arc::clone(&bus))),
+            ActionKind::StartupDelete,
+            entry(StartupSource::UserUnit, "bar.service"),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            *bus.calls.lock().unwrap(),
+            [
+                "GetUnitFileState(bar.service)",
+                "DisableUnitFiles([bar.service], false)",
+                "delete_file(config/systemd/user/bar.service)",
+                "Reload()",
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_delete_system_unsupported() {
+        let base = fixture("delete-system");
+        std::fs::write(base.join("etc/xdg/autostart/bar.desktop"), "").unwrap();
+        let ops = Arc::new(FakeOps::new(&base));
+        let bus = Arc::new(FakeUnitBus::default());
+        let state = run(
+            actx(&base, Arc::clone(&ops), Some(Arc::clone(&bus))),
+            ActionKind::StartupDelete,
+            entry(StartupSource::AutostartSystem, "bar.desktop"),
+        );
+        assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
+        assert!(ops.log().is_empty());
+        assert!(bus.calls.lock().unwrap().is_empty());
+        assert!(base.join("etc/xdg/autostart/bar.desktop").exists());
     }
 }

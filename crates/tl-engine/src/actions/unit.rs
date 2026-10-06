@@ -369,7 +369,7 @@ pub async fn run_target(
         let Some(bus) = bus_for(actx, unit.manager) else {
             return not_connected();
         };
-        return set_unit_file_state(cx, &*bus, unit, kind).await;
+        return set_unit_file_state(cx, &*bus, unit, kind, true).await;
     }
     let method = match kind {
         ActionKind::UnitStart => "StartUnit",
@@ -456,14 +456,16 @@ async fn freeze_thaw_kill(
     }
 }
 
-/// Enable, Disable, Mask or Unmask `unit`, then `reload`. Enable and Disable on a masked unit
-/// unmask it first, inside the same action (R-170 item 10). A failed reload after a successful
-/// change is `OutcomeUnknown`: the unit file changed, but the manager may not have seen it.
+/// Enable, Disable, Mask or Unmask `unit`, then `reload` when `reload` is set. Enable and Disable
+/// on a masked unit unmask it first, inside the same action (R-170 item 10). A failed reload
+/// after a successful change is `OutcomeUnknown`: the unit file changed, but the manager may not
+/// have seen it. Startup Delete passes `false` and reloads after it removed the file (E11-015).
 pub async fn set_unit_file_state(
     cx: &Cx,
     bus: &dyn UnitBus,
     unit: &UnitRef,
     kind: &ActionKind,
+    reload: bool,
 ) -> ActionState {
     let names = || Value::from(vec![unit.name.to_string()]);
     let timeout = call_timeout(unit.manager);
@@ -505,7 +507,15 @@ pub async fn set_unit_file_state(
     {
         tracing::debug!(target: "tasklens::action", unit = &*unit.name, "no install info");
     }
-    match reload(cx, bus, unit.manager).await {
+    if !reload {
+        return ActionState::Succeeded;
+    }
+    reload_after_change(cx, bus, unit.manager).await
+}
+
+/// `reload` after a unit file changed: `Succeeded`, or `OutcomeUnknown` when the reload failed.
+pub async fn reload_after_change(cx: &Cx, bus: &dyn UnitBus, manager: Manager) -> ActionState {
+    match reload(cx, bus, manager).await {
         Ok(()) => ActionState::Succeeded,
         Err(e) => {
             // Only the error name: the message can hold a unit name.

@@ -454,6 +454,15 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> tl_ops::OpsResult {
         Err(OpsError::Unsupported("startup ops not wired"))
     }
+    /// `tl_ops::fs::delete_startup_file`: unlinks a user startup file. A missing file is
+    /// `Err(Os(ENOENT))`. The default refuses.
+    fn startup_delete_file(
+        &self,
+        _path: &std::path::Path,
+        _roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("startup ops not wired"))
+    }
     /// `tl_ops::write_atomic` of `text` with exactly `mode`. The parent must exist. The default
     /// refuses.
     fn write_atomic(&self, _path: &std::path::Path, _text: &str, _mode: u32) -> tl_ops::OpsResult {
@@ -602,6 +611,14 @@ impl ActionOps for RealOps {
         roots: &tl_ops::fs::StartupRoots,
     ) -> tl_ops::OpsResult {
         tl_ops::fs::script_set_enabled(script, enabled, roots)
+    }
+
+    fn startup_delete_file(
+        &self,
+        path: &std::path::Path,
+        roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        tl_ops::fs::delete_startup_file(path, roots)
     }
 
     fn write_atomic(&self, path: &std::path::Path, text: &str, mode: u32) -> tl_ops::OpsResult {
