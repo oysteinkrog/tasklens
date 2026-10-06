@@ -1,5 +1,6 @@
 //! Table building blocks shared by every tasklens table (ADR-009).
 
+pub mod actions;
 pub mod cells;
 pub mod columns;
 pub mod header;

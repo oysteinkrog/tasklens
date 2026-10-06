@@ -18,9 +18,9 @@ use gpui_kit::base::{
 
 use gpui_kit::{
     AnyElement, AnyView, App, Context, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, ListHorizontalSizingBehavior, MouseMoveEvent, ParentElement, Pixels, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, TextRun, UniformListScrollHandle,
-    Window, div, font, px, uniform_list,
+    IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, TextRun,
+    UniformListScrollHandle, Window, div, font, px, uniform_list,
 };
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
@@ -28,13 +28,18 @@ use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
+use crate::i18n::tr;
+use crate::table::actions::{
+    CollapseOrParent, ExpandOrChild, MoveFocus, MoveFocusEdge, MoveFocusPage, OpenProperties,
+    SelectAll, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
+};
 use crate::table::cells::{
     CellCtx, CellOut, attach_cell_tooltip, cell_background, cell_text_color, glyph_cell,
-    numeric_cell, paint_group_header_cell, paint_name_cell, path_cell, text_cell,
+    name_indent, numeric_cell, paint_group_header_cell, paint_name_cell, path_cell, text_cell,
 };
 use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::header::{HeaderState, TlTreeTableHeader};
-use crate::table::selection::Selection;
+use crate::table::selection::{Selection, SelectionView};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::t_base;
@@ -379,6 +384,14 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let offsets = &f.offsets;
         let name_col = f.name_col;
 
+        let id = self.delegate.row_id(ix);
+        row = row.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                this.row_mouse_down(id, ev, window, cx);
+            }),
+        );
+
         if kind == RowKind::GroupHeader {
             row = row.debug_selector(|| "TlTreeTable-group-row".into());
             if ix > 0 {
@@ -408,7 +421,6 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             return row.into_any_element();
         }
 
-        let id = self.delegate.row_id(ix);
         let selected = self.selection.contains(&id);
         let hovered = self.hover_row == Some(ix);
         // Cell backgrounds show only under the zebra; hover and selection cover them.
@@ -434,10 +446,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             };
             if Some(col) == name_col {
                 let name = self.delegate.name_cell(ix);
+                let depth = self.delegate.row_depth(ix);
+                let expandable = self.delegate.row_expandable(ix);
                 let mut cell = paint_name_cell(
                     name,
-                    self.delegate.row_depth(ix),
-                    self.delegate.row_expandable(ix),
+                    depth,
+                    expandable,
                     flags,
                     f.guide_lines,
                     &ctx,
@@ -459,6 +473,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     );
                 }
                 row = row.child(cell.absolute().top_0().left(x));
+                if let Some(expanded) = expandable {
+                    let left = x + name_indent(depth, m.ui_scale);
+                    row = row.child(
+                        self.chevron_hit(id, expanded, left, hovered, row_key, m, window, cx),
+                    );
+                }
                 continue;
             }
 
@@ -477,7 +497,72 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             }
             row = row.child(cell.absolute().top_0().left(x));
         }
+        if !selected && self.selection.focus() == Some(id) {
+            // The keyboard caret on a row that is not selected (UI-PRC-008).
+            row = row.child(
+                div()
+                    .debug_selector(|| "TlTreeTable-focus-row".into())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .border(px(m.ui_scale))
+                    .border_color(theme.accent)
+                    .rounded(m.radius_small),
+            );
+        }
         row.into_any_element()
+    }
+
+    /// The chevron's 20 px hit area over the Name cell. `left` is the chevron box's left edge in
+    /// the row. A press toggles the row without changing the selection (UI-PRC-002). The
+    /// Expand or Collapse tooltip is attached on the hovered row only.
+    #[allow(clippy::too_many_arguments)]
+    fn chevron_hit(
+        &self,
+        id: D::RowId,
+        expanded: bool,
+        left: Pixels,
+        hovered: bool,
+        row_key: u64,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let s = m.ui_scale;
+        let hit = div()
+            .debug_selector(|| "TlTreeTable-chevron".into())
+            .absolute()
+            .top_0()
+            .left(left - px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s))
+            .w(px(CHEVRON_HIT_W * s))
+            .h(m.row_height)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    window.focus(&this.focus, cx);
+                    this.delegate.on_toggle_expand(id, cx);
+                }),
+            );
+        if !hovered {
+            return hit;
+        }
+        let key = ElementId::NamedInteger(SharedString::new_static("tl-chevron-tip"), row_key);
+        let label = if expanded {
+            "fnd-table-collapse"
+        } else {
+            "fnd-table-expand"
+        };
+        let state = HoverTooltip::state(key, window, cx);
+        HoverTooltip::attach(
+            &state,
+            hit,
+            DELAY_CONTROL,
+            move |_, cx| TlTooltip::text(tr(cx, label)).view(cx),
+            window,
+            cx,
+        )
     }
 
     /// One metric cell and the text it shows. Leaves the delegate's output in `self.out` for the
@@ -586,6 +671,211 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         }
         attach_cell_tooltip(cell, key, text, &self.hover_clips[pos], window, cx)
     }
+
+    /// Left press on the row `id` (UI-PRC-008, UI-PRC-002). A press on a group header toggles
+    /// it and never touches the selection: the plain `Selection` gestures cannot tell a header
+    /// from a row.
+    fn row_mouse_down(
+        &mut self,
+        id: D::RowId,
+        ev: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.focus(&self.focus, cx);
+        let Some(ix) = self.delegate.row_index(id) else {
+            return;
+        };
+        let double = ev.click_count == 2;
+        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
+            // The first press of a double-click has toggled already; the second does nothing, so
+            // a double-click toggles once.
+            if !double {
+                self.delegate.on_toggle_expand(id, cx);
+            }
+            return;
+        }
+        if double {
+            if !self.delegate.double_click_expands() {
+                self.delegate.on_activate(id, cx);
+            } else if self.delegate.row_expandable(ix).is_some() {
+                self.delegate.on_toggle_expand(id, cx);
+            }
+            return;
+        }
+        if !self.delegate.selectable(ix) {
+            return;
+        }
+        let v = DelegateView(&self.delegate);
+        match (ev.modifiers.control, ev.modifiers.shift) {
+            (true, true) => self.selection.ctrl_shift_click(id, &v),
+            (true, false) => self.selection.ctrl_click(id),
+            (false, true) => self.selection.shift_click(id, &v),
+            (false, false) => self.selection.click(id),
+        }
+        cx.notify();
+    }
+
+    /// Left press on the body below the last row: nothing selected.
+    fn empty_mouse_down(
+        &mut self,
+        _: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        if !self.selection.is_empty() || self.selection.focus().is_some() {
+            self.selection.clear();
+            cx.notify();
+        }
+    }
+
+    /// Display index of the focus row, when it is in the view.
+    fn focus_index(&self) -> Option<usize> {
+        self.selection
+            .focus()
+            .and_then(|id| self.delegate.row_index(id))
+    }
+
+    fn on_move_focus(&mut self, a: &MoveFocus, _: &mut Window, cx: &mut Context<Self>) {
+        let v = DelegateView(&self.delegate);
+        self.selection.move_focus(a.delta, a.extend, &v);
+        cx.notify();
+    }
+
+    /// PgUp or PgDn: by the whole rows that fit the body, minus one, at least one.
+    fn on_move_focus_page(&mut self, a: &MoveFocusPage, _: &mut Window, cx: &mut Context<Self>) {
+        let viewport = ScrollbarHandle::viewport_bounds(&self.scroll).size.height;
+        let row_h = metrics(cx).row_height;
+        let fit = if row_h > Pixels::ZERO {
+            (viewport / row_h).floor().max(0.0) as usize
+        } else {
+            0
+        };
+        let v = DelegateView(&self.delegate);
+        self.selection
+            .move_page(fit.saturating_sub(1).max(1), a.down, a.extend, &v);
+        cx.notify();
+    }
+
+    fn on_move_focus_edge(&mut self, a: &MoveFocusEdge, _: &mut Window, cx: &mut Context<Self>) {
+        let v = DelegateView(&self.delegate);
+        self.selection.move_edge(a.end, a.extend, &v);
+        cx.notify();
+    }
+
+    fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        let v = DelegateView(&self.delegate);
+        self.selection.select_all(&v);
+        cx.notify();
+    }
+
+    fn on_toggle_select_focus(
+        &mut self,
+        _: &ToggleSelectFocus,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selection.toggle_focus();
+        cx.notify();
+    }
+
+    /// Right: a collapsed row with children expands; an expanded row hands focus and selection
+    /// to its first child; a leaf does nothing.
+    fn on_expand_or_child(&mut self, _: &ExpandOrChild, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.focus_index() else {
+            return;
+        };
+        match self.delegate.row_expandable(ix) {
+            Some(false) => self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx),
+            Some(true) => {
+                let child = ix + 1;
+                if child < self.delegate.row_count()
+                    && self.delegate.row_depth(child)
+                        == self.delegate.row_depth(ix).saturating_add(1)
+                    && self.delegate.selectable(child)
+                {
+                    self.selection.click(self.delegate.row_id(child));
+                    cx.notify();
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Left: an expanded row collapses; else focus and selection go to the parent. When the
+    /// parent is a group header (a depth-1 row in Grouped mode), the group collapses and the
+    /// selection stays (UI-PRC-009).
+    fn on_collapse_or_parent(
+        &mut self,
+        _: &CollapseOrParent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.focus_index() else {
+            return;
+        };
+        if self.delegate.row_expandable(ix) == Some(true) {
+            self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx);
+            return;
+        }
+        let depth = self.delegate.row_depth(ix);
+        if depth == 0 {
+            return;
+        }
+        let Some(parent) = (0..ix).rev().find(|&p| self.delegate.row_depth(p) < depth) else {
+            return;
+        };
+        let parent_id = self.delegate.row_id(parent);
+        if self.delegate.row_kind(parent) == RowKind::GroupHeader {
+            self.delegate.on_toggle_expand(parent_id, cx);
+        } else if self.delegate.selectable(parent) {
+            self.selection.click(parent_id);
+            cx.notify();
+        }
+    }
+
+    /// Space: toggles the focus row; nothing on a leaf.
+    fn on_toggle_expand(&mut self, _: &ToggleExpand, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.focus_index() else {
+            return;
+        };
+        if self.delegate.row_expandable(ix).is_some() {
+            self.delegate.on_toggle_expand(self.delegate.row_id(ix), cx);
+        }
+    }
+
+    /// Enter, Alt+Enter, Ctrl+I: a group header toggles, any other row is activated (D-008).
+    fn on_open_properties(&mut self, _: &OpenProperties, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(ix) = self.focus_index() else {
+            return;
+        };
+        let id = self.delegate.row_id(ix);
+        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
+            self.delegate.on_toggle_expand(id, cx);
+        } else {
+            self.delegate.on_activate(id, cx);
+        }
+    }
+}
+
+/// The delegate's rows in display order, for the `Selection` gestures.
+struct DelegateView<'a, D>(&'a D);
+
+impl<D: TreeTableDelegate> SelectionView<D::RowId> for DelegateView<'_, D> {
+    fn len(&self) -> usize {
+        self.0.row_count()
+    }
+    fn id(&self, ix: usize) -> D::RowId {
+        self.0.row_id(ix)
+    }
+    fn index_of(&self, id: D::RowId) -> Option<usize> {
+        self.0.row_index(id)
+    }
+    fn selectable(&self, ix: usize) -> bool {
+        self.0.selectable(ix)
+    }
 }
 
 /// Opacity of a metric cell (every cell but the Name cell): [`STALE_OPACITY`] on a `STALE` row,
@@ -686,6 +976,8 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
                     this.set_hover(None, cx);
                 }
             }))
+            // Rows stop the press, so only a press below the last row gets here.
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::empty_mouse_down))
             .child(list)
             .child(scrollbar);
         if let Some(text) = empty {
@@ -722,10 +1014,21 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .debug_selector(|| "TlTreeTable".into())
             .size_full()
             .bg(theme.list_bg)
-            .key_context("Table")
+            .key_context(TABLE_CONTEXT)
             .track_focus(&self.focus)
             .tab_index(0)
             .tab_stop(true)
+            // CopyRow, CopyCell, CollapseAll and the header Actions have no handler here, so they
+            // bubble to the owner page (open item 16).
+            .on_action(cx.listener(Self::on_move_focus))
+            .on_action(cx.listener(Self::on_move_focus_page))
+            .on_action(cx.listener(Self::on_move_focus_edge))
+            .on_action(cx.listener(Self::on_select_all))
+            .on_action(cx.listener(Self::on_toggle_select_focus))
+            .on_action(cx.listener(Self::on_expand_or_child))
+            .on_action(cx.listener(Self::on_collapse_or_parent))
+            .on_action(cx.listener(Self::on_toggle_expand))
+            .on_action(cx.listener(Self::on_open_properties))
             .child(header)
             .child(body)
     }

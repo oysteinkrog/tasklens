@@ -31,6 +31,8 @@ fnd-props-open-failed = Could not open properties.
 fnd-shield-unlock = Unlock privileged actions
 fnd-shield-waiting = Waiting for authentication…
 fnd-shield-unlocked = Privileged actions unlocked (click to lock)
+fnd-table-expand = Expand
+fnd-table-collapse = Collapse
 
 ## Process windows (E23)
 
