@@ -31,3 +31,11 @@ fnd-props-open-failed = Could not open properties.
 fnd-shield-unlock = Unlock privileged actions
 fnd-shield-waiting = Waiting for authentication…
 fnd-shield-unlocked = Privileged actions unlocked (click to lock)
+
+## Process windows (E23)
+
+pwn-props-filter-placeholder = Filter
+pwn-props-filter-icon-tooltip = Filter
+pwn-props-filter-name = Filter { $tab }
+pwn-props-filter-no-match = No properties match the current filter.
+pwn-props-filter-no-match-threads = No threads match the current filter.
