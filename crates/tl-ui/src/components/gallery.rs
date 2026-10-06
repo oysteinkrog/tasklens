@@ -376,7 +376,7 @@ impl Render for GalleryView {
                 .flex()
                 .flex_col()
                 .gap(m.sp[5])
-                .p(m.sp[6])
+                .p(m.sp[5])
                 .bg(half.theme.window_bg)
                 .text_color(half.theme.text_primary)
                 .font_family(UI_FAMILY)
@@ -458,7 +458,7 @@ impl PageCx<'_> {
             .flex()
             .flex_row()
             .items_center()
-            .gap(self.m.sp[4])
+            .gap(self.m.sp[3])
             .child(
                 caption(&self.m, self.t.text_secondary, label)
                     .w(self.label_w())
@@ -853,11 +853,12 @@ fn page_input(p: &mut PageCx) -> Vec<AnyElement> {
         .map(|(name, el)| p.row(name, [el]))
         .collect();
     out.push(p.row(
-        "Filter box",
-        [
-            TlFilterBox::new("filter-empty", &f[0]).into_any_element(),
-            TlFilterBox::new("filter-text", &f[1]).into_any_element(),
-        ],
+        "Filter box, empty",
+        [TlFilterBox::new("filter-empty", &f[0]).into_any_element()],
+    ));
+    out.push(p.row(
+        "Filter box, text",
+        [TlFilterBox::new("filter-text", &f[1]).into_any_element()],
     ));
     out
 }
