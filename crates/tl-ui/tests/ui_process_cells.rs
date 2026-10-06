@@ -267,6 +267,7 @@ mod values {
             app_id: Some(a("firefox")),
             icon: None,
             description: Some(a("Web browser")),
+            desktop_path: None,
             search_lower: a("firefox"),
         }
     }

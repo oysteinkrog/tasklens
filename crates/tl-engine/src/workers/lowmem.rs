@@ -505,6 +505,7 @@ fn sweep_one(
                 app_id: app_id.cloned(),
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: Arc::from(s.search.as_str()),
             })
         }

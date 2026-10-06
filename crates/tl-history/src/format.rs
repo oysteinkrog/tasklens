@@ -442,6 +442,7 @@ mod tests {
                 app_id: None,
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: text,
             }),
             group: GroupKey(0),

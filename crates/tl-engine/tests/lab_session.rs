@@ -632,6 +632,7 @@ fn sweep_record(pid: u32) -> ProcessRecord {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: "x user".into(),
         }),
         group: group.key(),

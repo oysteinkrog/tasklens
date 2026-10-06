@@ -68,6 +68,7 @@ fn rec(pid: u32, ppid: u32, name: &str, cpu: f32) -> ProcessRecord {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: format!("{name} user").to_lowercase().into(),
         }),
         group: GroupKind::Background.key(),
@@ -633,6 +634,38 @@ fn app_row_aggregates_once() {
             row("System processes", 0),
         ]
     );
+}
+
+/// An app row takes the desktop path of its first member and shares its `Arc`; an app with no
+/// desktop entry gets `None`.
+#[test]
+fn app_row_desktop_path_from_first_member() {
+    let path: Arc<str> = Arc::from("/usr/share/applications/firefox.desktop");
+    let mut records = app_pc();
+    for r in &mut records {
+        Arc::make_mut(&mut r.meta).desktop_path = Some(Arc::clone(&path));
+    }
+    records.push(in_app(rec(200, 1, "tool", 1.0), "tool"));
+    let view = build(
+        &records,
+        &query(TableMode::Grouped, "pid", true, "", &[]),
+        &settings(),
+    );
+
+    let group = |key| {
+        view.groups
+            .iter()
+            .find(|g| g.key == key)
+            .expect("app row built")
+    };
+    let firefox = group(app_key("firefox"));
+    assert!(
+        firefox
+            .desktop_path
+            .as_ref()
+            .is_some_and(|p| Arc::ptr_eq(p, &path))
+    );
+    assert_eq!(group(app_key("tool")).desktop_path, None);
 }
 
 #[test]

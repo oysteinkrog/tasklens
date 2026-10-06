@@ -1059,6 +1059,7 @@ fn bwrap_record(
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: comm.into(),
         }),
         group: GroupKind::Background.key(),

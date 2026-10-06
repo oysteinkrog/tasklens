@@ -39,6 +39,8 @@ pub struct ProcessMeta {
     pub icon: Option<Arc<str>>,
     /// Desktop entry Comment or GenericName.
     pub description: Option<Arc<str>>,
+    /// Path of the matched desktop file. Shares the `Arc` of the collector's desktop entry.
+    pub desktop_path: Option<Arc<str>>,
     /// Lowercase filter text: display name, image name, cmdline, user, description, app name,
     /// unit name (R-043).
     pub search_lower: Arc<str>,
@@ -231,7 +233,7 @@ pub struct GroupRow {
     pub major_faults: u64,
     /// `None` when any member's fd count was not read (Restricted).
     pub handles: Option<u32>,
-    /// App rows: path of the matched desktop file. Not yet in the model, so always `None`.
+    /// App rows: path of the matched desktop file, from the first member's `ProcessMeta`.
     pub desktop_path: Option<Arc<str>>,
     /// Unit rows: the unit's `Description=`, when systemd reported a non-empty one.
     pub description: Option<Arc<str>>,
@@ -467,6 +469,7 @@ mod tests {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: "bash bash -l user".into(),
         });
         let a = ProcessRecord {

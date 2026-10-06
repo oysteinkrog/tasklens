@@ -1052,6 +1052,7 @@ mod tests {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: "x".into(),
         });
         (1..=n).map(|pid| record(pid, &meta)).collect()

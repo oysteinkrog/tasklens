@@ -1352,6 +1352,7 @@ fn build_meta(
         app_id: app.app_id.clone(),
         icon: app.icon_process.clone(),
         description: app.description.clone(),
+        desktop_path: app.desktop_path.clone(),
         search_lower: Arc::from(search.as_str()),
     });
     MetaSlot {

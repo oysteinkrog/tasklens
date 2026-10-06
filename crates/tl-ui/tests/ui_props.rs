@@ -132,6 +132,7 @@ fn record(cpu_pct: f32) -> ProcessRecord {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: name,
         }),
         group: GroupKey(0),

@@ -639,6 +639,7 @@ mod tests {
                 app_id: None,
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: "x".into(),
             }),
             group: GroupKey(0),

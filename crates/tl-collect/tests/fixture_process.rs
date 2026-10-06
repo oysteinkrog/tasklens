@@ -447,6 +447,7 @@ fn rollup_apply_and_coverage() {
         app_id: None,
         icon: None,
         description: None,
+        desktop_path: None,
         search_lower: "t".into(),
     });
     let mut records: Vec<ProcessRecord> = (1..=5u32)
@@ -2128,6 +2129,11 @@ fn sweep_app_member_grouped() {
     assert!(out.side[i].is_app_primary);
     assert_eq!(&*out.records[i].meta.name, "Firefox");
     assert_eq!(out.records[i].meta.app_id.as_deref(), Some("firefox"));
+    let desktop = out.records[i].meta.desktop_path.as_deref();
+    assert!(
+        desktop.is_some_and(|p| p.ends_with("/applications/firefox.desktop")),
+        "firefox desktop path: {desktop:?}"
+    );
 
     let unit = out
         .apps
@@ -2156,6 +2162,7 @@ fn sweep_kernel_thread_record() {
     let out = sweep_n(&mut s, kernel_thread_clock::set, 1);
     let r = &out.records[index_of(&out, 57)];
     assert_eq!(&*r.meta.name, "[kworker/0:1]");
+    assert_eq!(r.meta.desktop_path, None);
     assert!(r.flags.contains(ProcFlags::KERNEL_THREAD));
     assert_eq!(r.validity.get(ProcessField::RssAnon), Validity::Unsupported);
     assert_eq!(out.side[index_of(&out, 57)].class, ProcClass::KernelThread);

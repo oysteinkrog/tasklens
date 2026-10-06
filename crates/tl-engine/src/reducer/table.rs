@@ -1106,7 +1106,11 @@ pub fn aggregate(
         page_faults_delta: 0,
         major_faults: 0,
         handles: None,
-        desktop_path: None,
+        desktop_path: if unit.is_none() {
+            first.and_then(|r| r.meta.desktop_path.clone())
+        } else {
+            None
+        },
         description: None,
         user: None,
         validity,
@@ -2146,6 +2150,7 @@ mod tests {
                 app_id: None,
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: name.to_lowercase().into(),
             }),
             group: GroupKey(0),

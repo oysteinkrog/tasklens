@@ -328,6 +328,7 @@ mod tests {
                 app_id: None,
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: name.to_lowercase().into(),
             }),
             group: GroupKey(0),

@@ -167,6 +167,7 @@ fn new_record(id: u32, rng: &mut Rng) -> ProcessRecord {
             app_id: None,
             icon: None,
             description: None,
+            desktop_path: None,
             search_lower: text,
         }),
         group: GroupKey(0),

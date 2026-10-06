@@ -948,6 +948,7 @@ mod tests {
                 app_id: None,
                 icon: None,
                 description: None,
+                desktop_path: None,
                 search_lower: "p".into(),
             }),
             group: GroupKey(0),
