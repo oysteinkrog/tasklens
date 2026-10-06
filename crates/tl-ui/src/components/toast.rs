@@ -715,6 +715,7 @@ impl Render for ToastQueue {
                 div()
                     .id(ElementId::Name(format!("TlToast-{slot}-frame").into()))
                     .debug_selector(move || format!("TlToast-{slot}-frame"))
+                    .occlude()
                     .w_full()
                     .on_hover(move |hovered, _, cx| {
                         hover_queue
@@ -932,7 +933,6 @@ fn toast_card(
 
     let mut card = div()
         .relative()
-        .occlude()
         .w_full()
         .min_h(px(MIN_HEIGHT * m.ui_scale))
         .p(m.sp[4])
