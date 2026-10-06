@@ -497,3 +497,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.14: header_menu generic over C, using a ColumnId round trip for now; a follow-up bead makes the action key a string.
 - 8q0.38: GroupRow.desktop_path added and left None; ProcessMeta.desktop_path is a follow-up bead. TableInput.unit_users added.
 - 8q0.38 (c90aedc): closed by the leader; desktop_path source is 8q0.39. Extra files reducer/apply.rs, mod.rs and lab_table.rs accepted.
+- rsf.14 (d4a699b, 003bd42, f3fa67d): header menu, ResetColumns and HideColumn, ToastQueue::of_window (accepted). TlMenu cannot show a tooltip on an enabled item, so "Hide <label>" never shows (low priority; left as is). System columns: rsf.22.
+- pdu.9 (7271c9b, 4ed2132, 098f3ea): name_cell.rs with R-190 geometry; the EXITED branch approval was resent because the messages crossed.
