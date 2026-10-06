@@ -2,9 +2,9 @@
 //! each `CpuReading` into a `SourceUpdate::Cpu(CpuSample)`.
 //!
 //! It samples at 10 Hz while a visible CPU chart animates, at 1 Hz while CPU is otherwise
-//! demanded or history recording is on, and not at all otherwise. Clock, temperature and live stats
-//! are read at most once per second; fast ticks repeat the last values (PERF-028, PERF-033,
-//! PERF-039, PERF-040).
+//! demanded or history recording is on, and not at all otherwise. Clock, temperature, live stats
+//! and RAPL power are read at most once per second; fast ticks repeat the last values (PERF-028,
+//! PERF-033, PERF-038, PERF-039, PERF-040).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +15,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::{Cx, Outcome};
 use tl_collect::counters::{Clock, Measured};
 use tl_collect::parse::cpufreq::{FreqReading, read_base_mhz};
+use tl_collect::parse::rapl::RaplReading;
 use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler, LiveStats};
 use tl_collect::{CollectError, SysRoot};
 use tl_model::demand::{CpuDemand, Demand};
@@ -33,7 +34,7 @@ use crate::workers::WorkerSpec;
 /// `cpu_fast`: a visible CPU chart animates.
 pub const FAST_PERIOD: Duration = Duration::from_millis(100);
 pub const SLOW_PERIOD: Duration = Duration::from_secs(1);
-/// Clock, temperature and live stats are read at most this often.
+/// Clock, temperature, live stats and power are read at most this often.
 pub const SLOW_EVERY_NS: u64 = 1_000_000_000;
 
 /// The CPU rate table (ADR-008). `tests/lab_demand.rs` holds a copy of this function.
@@ -53,6 +54,7 @@ struct SlowFields {
     freq: FreqReading,
     temp_c: Measured<f32>,
     live: LiveStats,
+    power: RaplReading,
 }
 
 pub struct CpuSource {
@@ -61,7 +63,7 @@ pub struct CpuSource {
     reading: CpuReading,
     /// Written by `period()`, read by `sample()`.
     per_cpu_wanted: Arc<AtomicBool>,
-    /// Boot ns of the last sample that read clock, temperature and live stats.
+    /// Boot ns of the last sample that read clock, temperature, live stats and power.
     last_slow_ns: Option<TimeNs>,
     last: SlowFields,
     /// Read once in `new`.
@@ -100,7 +102,7 @@ impl CpuSource {
             freq: slow,
             temp: slow,
             live_stats: slow,
-            ..CpuOpts::default()
+            power: slow,
         };
         self.sampler.sample_at(clock, opts, &mut self.reading);
         let r = &self.reading;
@@ -112,6 +114,7 @@ impl CpuSource {
             freq.per_cpu_mhz.clone_from(&r.freq.per_cpu_mhz);
             self.last.temp_c = r.temp_c;
             self.last.live = r.live;
+            self.last.power = r.power;
             self.last_slow_ns = Some(clock.boot_ns);
         }
         if r.topology_changed {
@@ -128,8 +131,8 @@ impl CpuSource {
             freq_fastest_mhz: metric(last.freq.max_mhz),
             base_mhz: metric(self.base_mhz),
             temp_c: metric(last.temp_c),
-            package_power_w: Metric::with(Validity::Unsupported),
-            core_power_w: Metric::with(Validity::Unsupported),
+            package_power_w: metric(last.power.package_w),
+            core_power_w: metric(last.power.core_w),
             processes: metric(last.live.process_count),
             // The reducer fills Threads from `ProcessSweep.system_threads` (PERF-033).
             threads: Metric::with(Validity::WarmingUp),

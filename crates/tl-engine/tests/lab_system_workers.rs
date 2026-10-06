@@ -1605,3 +1605,92 @@ fn p1_sources_real_host() {
         sensors.readings.len()
     );
 }
+
+/// `cpu-math` step 0 plus a package zone `intel-rapl:0` without the core subzone.
+fn cpu_with_rapl(energy_uj: u64) -> PathBuf {
+    let dir = fixture_copy("cpu-math", Some(0));
+    let zone = dir.join("sys/class/powercap/intel-rapl:0");
+    fs::create_dir_all(&zone).expect("create rapl zone");
+    fs::write(zone.join("max_energy_range_uj"), "262143328850\n").expect("write max range");
+    set_energy_uj(&dir, energy_uj);
+    dir
+}
+
+/// Rewrites the package zone's counter in place.
+fn set_energy_uj(dir: &Path, energy_uj: u64) {
+    let file = dir.join("sys/class/powercap/intel-rapl:0/energy_uj");
+    fs::write(file, format!("{energy_uj}\n")).expect("write energy_uj");
+}
+
+#[test]
+fn cpu_power_watts() {
+    let dir = cpu_with_rapl(1_000_000);
+    let (src, first) = cpu_sample(cpu_source(&dir), SEC);
+    assert_eq!(first.totals.package_power_w.validity, Validity::WarmingUp);
+
+    set_energy_uj(&dir, 6_000_000);
+    let (_, s) = cpu_sample(src, 2 * SEC);
+    assert_eq!(s.totals.package_power_w, Metric::valid(5.0));
+    assert_eq!(s.totals.core_power_w.validity, Validity::Unsupported);
+}
+
+#[test]
+fn cpu_power_restricted() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = cpu_with_rapl(1_000_000);
+    let file = dir.join("sys/class/powercap/intel-rapl:0/energy_uj");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).expect("chmod energy_uj");
+    if fs::read(&file).is_ok() {
+        eprintln!("skipped: running as root, mode 000 does not block reads");
+        return;
+    }
+    let (src, first) = cpu_sample(cpu_source(&dir), SEC);
+    assert_eq!(first.totals.package_power_w.validity, Validity::Restricted);
+    let (_, s) = cpu_sample(src, 2 * SEC);
+    assert_eq!(s.totals.package_power_w.validity, Validity::Restricted);
+}
+
+#[test]
+fn cpu_power_no_zone() {
+    let dir = fixture_copy("cpu-math", Some(0));
+    assert!(!dir.join("sys/class/powercap").exists());
+    let (src, _) = cpu_sample(cpu_source(&dir), SEC);
+    let (_, s) = cpu_sample(src, 2 * SEC);
+    assert_eq!(s.totals.package_power_w.validity, Validity::Unsupported);
+    assert_eq!(s.totals.core_power_w.validity, Validity::Unsupported);
+}
+
+#[test]
+fn cpu_power_only_on_slow_ticks() {
+    let dir = cpu_with_rapl(1_000_000);
+    let src = cpu_source(&dir);
+    let fast = Demand {
+        cpu: CpuDemand::Total,
+        cpu_fast: true,
+        ..Demand::default()
+    };
+    assert_eq!(
+        src.period(&fast, &EngineSettings::default()),
+        Some(Duration::from_millis(100))
+    );
+    let (src, _) = cpu_sample(src, SEC);
+    set_energy_uj(&dir, 6_000_000);
+    let (mut src, second) = cpu_sample(src, 2 * SEC);
+    assert_eq!(second.totals.package_power_w, Metric::valid(5.0));
+
+    // Fast ticks between slow ticks repeat the last value, even though the counter moves.
+    set_energy_uj(&dir, 16_000_000);
+    for n in 1..10 {
+        let (next, s) = cpu_sample(src, 2 * SEC + n * 100 * MS);
+        src = next;
+        assert_eq!(
+            s.totals.package_power_w, second.totals.package_power_w,
+            "sample at +{n}00 ms"
+        );
+    }
+
+    // The next slow tick, 1 s after the last one, reads 10 J over 1 s.
+    let (_, s) = cpu_sample(src, 3 * SEC);
+    assert_eq!(s.totals.package_power_w, Metric::valid(10.0));
+}
