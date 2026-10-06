@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use asupersync::Cx;
 use rustc_hash::{FxHashMap, FxHashSet};
-use tl_model::actions::{ActionEvent, ActionState, Proto, RejectReason};
+use tl_model::actions::{ActionEvent, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
@@ -21,10 +21,9 @@ use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ComponentMask, ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot,
-    DeviceDetailsSnapshot, DiskDetails, DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot,
-    NetDetails, ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
-    WindowsSnapshot,
+    ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
+    DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
+    ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
 use tl_model::system::{Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
@@ -242,24 +241,6 @@ fn manager_index(manager: Manager) -> usize {
         Manager::System => 0,
         Manager::User => 1,
     }
-}
-
-/// The Connections status counts over all records (SYS-028).
-fn conn_counts(records: &[ConnRecord]) -> ConnCounts {
-    let mut c = ConnCounts::default();
-    for r in records {
-        c.total += 1;
-        match r.proto {
-            Proto::Tcp => c.tcp += 1,
-            Proto::Udp => c.udp += 1,
-        }
-        match r.state {
-            ConnState::Established => c.established += 1,
-            ConnState::Listening => c.listening += 1,
-            _ => {}
-        }
-    }
-    c
 }
 
 /// A PCI address `domain:bus:device.function` as hex numbers, so the NVML form
@@ -1505,8 +1486,8 @@ impl Reducer {
         self.mark(ComponentMask::SERVICES);
     }
 
-    /// Replaces `connections` with the update's records and counts. `destroy_supported` stays
-    /// (E09-027). The attribution goes to the process records.
+    /// Replaces `connections` with the update's records, then rebuilds the rows and the counts
+    /// of the filtered table. `destroy_supported` stays (E09-027). The attribution goes to the process records.
     fn apply_connections(&mut self, mut u: ConnectionsUpdate, settings: &EngineSettings) {
         // Attributed TCP rates fill the process Network columns (PROC-032).
         self.processes
@@ -1522,7 +1503,7 @@ impl Reducer {
             },
             rows: Arc::clone(&old.rows),
             query_generation: old.query_generation,
-            counts: conn_counts(&u.records),
+            counts: old.counts,
             records: u.records.into(),
             destroy_supported: old.destroy_supported,
         });
@@ -1662,7 +1643,7 @@ impl Reducer {
     }
 
     /// Rebuilds the rows of one system table from its component and stored query, and echoes
-    /// the query generation. Services and Startup also store their counts. Always marks the
+    /// the query generation and stores the table's counts. Always marks the
     /// component, so the generation is echoed even when the rows are equal (E09-027).
     fn rebuild_sys(&mut self, table: SysTable, settings: &EngineSettings) {
         let query = self.sys_query(table);
@@ -1692,10 +1673,11 @@ impl Reducer {
                 self.mark(ComponentMask::STARTUP);
             }
             SysTable::Connections => {
-                let out = sys_table::build(&input, &query);
+                let (out, counts) = sys_table::build_connections(&input, &query);
                 let next = Arc::make_mut(&mut self.components.connections);
                 next.rows = out.rows;
                 next.query_generation = out.query_generation;
+                next.counts = counts;
                 self.mark(ComponentMask::CONNECTIONS);
             }
         }

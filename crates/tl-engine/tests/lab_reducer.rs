@@ -2110,6 +2110,39 @@ fn connections_counts() {
 }
 
 #[test]
+fn connections_counts_follow_text_filter() {
+    let mut rig = Rig::new();
+    rig.run(vec![
+        EngineMsg::Command(Command::SetSysTableQuery(SysTableQuery {
+            table: SysTable::Connections,
+            generation: 1,
+            sort: SysSortSpec {
+                column: SysColumnId::all(SysTable::Connections)[0],
+                ascending: true,
+            },
+            filter: Arc::from("listen"),
+            expanded: Arc::from([]),
+            services: None,
+        })),
+        connections_msg(vec![
+            conn(1, Proto::Tcp, ConnState::Established),
+            conn(2, Proto::Tcp, ConnState::Established),
+            conn(3, Proto::Tcp, ConnState::Listening),
+        ]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.connections.records.len(), 3);
+    assert_eq!(snap.connections.rows.len(), 1);
+    let c = snap.connections.counts;
+    assert_eq!(
+        (c.total, c.tcp, c.udp, c.established, c.listening),
+        (1, 1, 0, 0, 1)
+    );
+    rig.passed();
+}
+
+#[test]
 fn set_sys_table_query_echoes_generation() {
     let mut rig = Rig::new();
     let before = rig.latest().services.header.version;
