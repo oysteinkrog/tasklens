@@ -2549,3 +2549,69 @@ fn sys_table_header_menu_sorts_and_hides() {
     let visible = vcx.update(|_, cx| table.read(cx).delegate.layout.visible_columns().to_vec());
     assert_eq!(visible, vec![SYS_NAME], "Display Name is hidden");
 }
+
+// ---------------------------------------------------------------------------------------------
+// E18-017: first visible row across a UI scale change (UI-SHL-130 step 5)
+// ---------------------------------------------------------------------------------------------
+
+fn first_row(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> Option<(u32, usize)> {
+    vcx.update(|_, cx| table.read(cx).first_visible_row())
+}
+
+#[test]
+fn scale_keeps_first_row() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    scroll_to(vcx, &table, 300. * ROW_H);
+    let anchor = first_row(vcx, &table).expect("rows");
+    assert_eq!(anchor, (300, 300));
+
+    vcx.update(|_, cx| {
+        let appearance = AppearanceSettings {
+            ui_scale_pct: 150,
+            ..AppearanceSettings::default()
+        };
+        tl_ui::theme::store::apply_metrics(&appearance, cx);
+        assert_eq!(metrics(cx).row_height, px(42.));
+        table.update(cx, |t, cx| t.restore_first_visible_row(anchor, cx));
+    });
+    redraw(vcx);
+    assert_eq!(first_row(vcx, &table), Some((300, 300)));
+    assert_eq!(scroll_top(vcx, &table), 300. * 42.);
+}
+
+#[test]
+fn restore_first_row_falls_back_to_index() {
+    let mut cx = cosmic_cx();
+    // One row tall, so the last row can be the first visible row.
+    let (table, vcx) = open_rows(&mut cx, 2000, 1.);
+    scroll_to(vcx, &table, 300. * ROW_H);
+    let anchor = first_row(vcx, &table).expect("rows");
+    assert_eq!(anchor, (300, 300));
+
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.delegate.rows.truncate(120);
+            t.on_new_version(cx);
+        })
+    });
+    // From the top, so only the restore can bring the view down to the end.
+    scroll_to(vcx, &table, 0.);
+    vcx.update(|_, cx| table.update(cx, |t, cx| t.restore_first_visible_row(anchor, cx)));
+    redraw(vcx);
+    assert_eq!(first_row(vcx, &table), Some((119, 119)));
+    assert_eq!(scroll_top(vcx, &table), 119. * ROW_H);
+}
+
+#[test]
+fn first_visible_row_empty_table() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, TDelegate::new(Vec::new()), 600., 300.);
+    assert_eq!(first_row(vcx, &table), None);
+    vcx.update(|_, cx| table.update(cx, |t, cx| t.restore_first_visible_row((5, 300), cx)));
+    redraw(vcx);
+    assert_eq!(scroll_top(vcx, &table), 0.);
+}

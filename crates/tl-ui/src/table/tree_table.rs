@@ -410,6 +410,35 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         true
     }
 
+    /// The row at the top of the viewport: its id and its view index at capture time. Reads the
+    /// range the last frame recorded, so it costs nothing per frame (UI-SHL-130 step 5). `None`
+    /// when the table has no rows.
+    pub fn first_visible_row(&self) -> Option<(D::RowId, usize)> {
+        let last = self.delegate.row_count().checked_sub(1)?;
+        let ix = self.visible_range.start.min(last);
+        Some((self.delegate.row_id(ix), ix))
+    }
+
+    /// Scrolls so the captured row is the first visible row again. When its id left the view,
+    /// the captured index is used, clamped to the last row. Strict, because after a row height
+    /// change the row may still be visible without being at the top.
+    pub fn restore_first_visible_row(
+        &mut self,
+        (id, captured): (D::RowId, usize),
+        cx: &mut Context<Self>,
+    ) {
+        let Some(last) = self.delegate.row_count().checked_sub(1) else {
+            return;
+        };
+        let ix = self
+            .delegate
+            .row_index(id)
+            .unwrap_or_else(|| captured.min(last));
+        self.scroll
+            .scroll_to_item_strict_with_offset(ix, ScrollStrategy::Top, 0);
+        cx.notify();
+    }
+
     /// The body rows the last frame built.
     pub fn visible_range(&self) -> Range<usize> {
         self.visible_range.clone()
