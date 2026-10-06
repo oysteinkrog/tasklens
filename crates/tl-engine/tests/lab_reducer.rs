@@ -1833,3 +1833,374 @@ fn details_handle_search_state() {
     assert!(rig.latest().details.handle_search.is_none());
     rig.passed();
 }
+
+// ---- P2 system components and sys table queries (E09-027) ----
+
+use std::net::{Ipv4Addr, SocketAddr};
+
+use tl_model::actions::{Family, FourTuple, Proto};
+use tl_model::gpu_proto::GpuApiVersions;
+use tl_model::snapshot::{
+    ConnRecord, ConnState, GraphicsAdapter, InventorySnapshot, RecoverySettings, ServiceStatus,
+    StartupType, UnitDetails, UnitRecord,
+};
+use tl_model::table::{UnitRef, UnitType};
+
+fn conn(cookie: u64, proto: Proto, state: ConnState) -> ConnRecord {
+    let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    ConnRecord {
+        cookie,
+        proto,
+        family: Family::Inet,
+        four_tuple: FourTuple {
+            local: addr,
+            remote: addr,
+        },
+        local: Arc::from("127.0.0.1:0"),
+        foreign: Arc::from("*:*"),
+        state,
+        owners: SmallVec::new(),
+        owner_validity: Validity::Valid,
+        uid: 0,
+        inode: cookie,
+        ifindex: 0,
+        recv_q: 0,
+        send_q: 0,
+        unit: None,
+        tcp: None,
+        remote_host: None,
+    }
+}
+
+fn connections_msg(records: Vec<ConnRecord>) -> EngineMsg {
+    src(SourceUpdate::Connections(ConnectionsUpdate {
+        t_ns: SEC,
+        records,
+        validity: Validity::Valid,
+        attribution: Default::default(),
+    }))
+}
+
+fn unit_ref(manager: Manager, name: &str) -> UnitRef {
+    UnitRef {
+        manager,
+        name: Arc::from(name),
+    }
+}
+
+fn unit_rec(unit: UnitRef) -> UnitRecord {
+    let missing = || Total {
+        value: Default::default(),
+        validity: Validity::Missing,
+    };
+    UnitRecord {
+        unit,
+        kind: UnitType::Service,
+        description: Arc::from(""),
+        status: ServiceStatus::Running,
+        sub_state: Arc::from("running"),
+        load_state: Arc::from("loaded"),
+        startup: StartupType::Enabled,
+        main_pid: 0,
+        user: Arc::from("root"),
+        path: Arc::from(""),
+        unit_file: None,
+        active_since_us: None,
+        triggered_by: Arc::from([]),
+        control_group: None,
+        can_reload: false,
+        has_cgroup_procs: false,
+        cgroup_pids: Arc::from([]),
+        cpu_pct: missing(),
+        memory_bytes: missing(),
+        disk_bps: missing(),
+        tasks: missing(),
+        deps: Arc::from([]),
+    }
+}
+
+fn unit_details(unit: &UnitRef) -> Arc<UnitDetails> {
+    Arc::new(UnitDetails {
+        id: Arc::clone(&unit.name),
+        description: Arc::from(""),
+        documentation: Arc::from([]),
+        exec_start_argv: Arc::from([]),
+        fragment_path: None,
+        drop_in_paths: Arc::from([]),
+        startup: StartupType::Enabled,
+        active_state: Arc::from("active"),
+        sub_state: Arc::from("running"),
+        active_enter_timestamp_us: None,
+        main_pid: 0,
+        memory_current: None,
+        tasks_current: None,
+        cpu_usage_nsec: None,
+        manager: unit.manager,
+        user: None,
+        group: None,
+        dynamic_user: false,
+        supplementary_groups: Arc::from([]),
+        pam_name: None,
+        main_pid_ids: None,
+        graphical_session: false,
+        recovery: RecoverySettings::default(),
+        recovery_dropin_exists: false,
+        deps: Arc::from([]),
+    })
+}
+
+fn services_msg(
+    manager: Manager,
+    names: &[&str],
+    details: Vec<(UnitRef, Arc<UnitDetails>)>,
+) -> EngineMsg {
+    src(SourceUpdate::Services(ServicesUpdate {
+        manager,
+        state: ManagerState::Connected,
+        units: names
+            .iter()
+            .map(|n| unit_rec(unit_ref(manager, n)))
+            .collect(),
+        details,
+        backend: ServiceBackend::Systemd,
+        validity: Validity::Valid,
+    }))
+}
+
+#[test]
+fn connections_counts() {
+    let mut rig = Rig::new();
+    rig.run(vec![connections_msg(vec![
+        conn(1, Proto::Tcp, ConnState::Established),
+        conn(2, Proto::Tcp, ConnState::Established),
+        conn(3, Proto::Tcp, ConnState::Listening),
+        conn(4, Proto::Udp, ConnState::Unconnected),
+    ])])
+    .expect("no invariant violation");
+    let c = rig.latest().connections.counts;
+    assert_eq!(
+        (c.total, c.tcp, c.udp, c.established, c.listening),
+        (4, 3, 1, 2, 1)
+    );
+    assert_eq!(rig.latest().connections.records.len(), 4);
+    rig.passed();
+}
+
+#[test]
+fn set_sys_table_query_echoes_generation() {
+    let mut rig = Rig::new();
+    let before = rig.latest().services.header.version;
+    rig.run(vec![EngineMsg::Command(Command::SetSysTableQuery(
+        SysTableQuery {
+            table: SysTable::Services,
+            generation: 5,
+            sort: SysSortSpec {
+                column: SysColumnId::all(SysTable::Services)[0],
+                ascending: true,
+            },
+            filter: Arc::from(""),
+            expanded: Arc::from([]),
+            services: None,
+        },
+    ))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.services.query_generation, 5);
+    assert!(
+        snap.services.header.version > before,
+        "SERVICES was marked even with no rows"
+    );
+    rig.passed();
+}
+
+#[test]
+fn services_merge_two_managers() {
+    let mut rig = Rig::new();
+    rig.run(vec![services_msg(
+        Manager::User,
+        &["a.service"],
+        Vec::new(),
+    )])
+    .expect("no invariant violation");
+    rig.run(vec![services_msg(
+        Manager::System,
+        &["b.service", "c.service"],
+        Vec::new(),
+    )])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let units: Vec<_> = snap.services.units.iter().map(|u| u.unit.clone()).collect();
+    assert_eq!(
+        units,
+        vec![
+            unit_ref(Manager::System, "b.service"),
+            unit_ref(Manager::System, "c.service"),
+            unit_ref(Manager::User, "a.service"),
+        ]
+    );
+    assert_eq!(
+        snap.services.managers,
+        [ManagerState::Connected, ManagerState::Connected]
+    );
+
+    // A new User update replaces only the User units.
+    rig.run(vec![services_msg(
+        Manager::User,
+        &["d.service"],
+        Vec::new(),
+    )])
+    .expect("no invariant violation");
+    let names: Vec<_> = rig
+        .latest()
+        .services
+        .units
+        .iter()
+        .map(|u| u.unit.name.to_string())
+        .collect();
+    assert_eq!(names, ["b.service", "c.service", "d.service"]);
+    rig.passed();
+}
+
+#[test]
+fn services_details_copied_and_retained() {
+    let mut rig = Rig::new();
+    let a = unit_ref(Manager::System, "a.service");
+    let b = unit_ref(Manager::System, "b.service");
+    let (demand_tx, demand_rx) = watch::channel(Demand {
+        unit_details: Arc::from([a.clone(), b.clone()]),
+        ..Demand::default()
+    });
+    rig.reducer().demand_rx = Some(demand_rx);
+    let (da, db) = (unit_details(&a), unit_details(&b));
+    let user = unit_ref(Manager::User, "u.service");
+    let du = unit_details(&user);
+    rig.run(vec![
+        services_msg(
+            Manager::System,
+            &["a.service", "b.service"],
+            vec![(a.clone(), Arc::clone(&da)), (b.clone(), Arc::clone(&db))],
+        ),
+        // Not demanded: dropped.
+        services_msg(Manager::User, &["u.service"], vec![(user.clone(), du)]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.services.details.len(), 2);
+    assert!(Arc::ptr_eq(&snap.services.details[&a], &da));
+    assert!(!snap.services.details.contains_key(&user));
+
+    demand_tx
+        .send(Demand {
+            unit_details: Arc::from([a.clone()]),
+            ..Demand::default()
+        })
+        .expect("the reducer holds the receiver");
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert!(Arc::ptr_eq(&snap.services.details[&a], &da));
+    assert!(!snap.services.details.contains_key(&b));
+    rig.passed();
+}
+
+#[test]
+fn destroy_supported_persists() {
+    let mut rig = Rig::new();
+    rig.run(vec![src(SourceUpdate::ConnectionsDestroySupport(false))])
+        .expect("no invariant violation");
+    assert_eq!(rig.latest().connections.destroy_supported, Some(false));
+    rig.run(vec![connections_msg(vec![conn(
+        1,
+        Proto::Tcp,
+        ConnState::Established,
+    )])])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.connections.destroy_supported, Some(false));
+    assert_eq!(snap.connections.records.len(), 1);
+    rig.passed();
+}
+
+const BUS: &str = "0000:01:00.0";
+
+fn gpu_info_msg() -> EngineMsg {
+    src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+        devices: vec![GpuStaticInfo {
+            identity: DeviceIdentity::Gpu {
+                uuid: [1; 16],
+                pci_bus_id: Arc::from(BUS),
+            },
+            name: Arc::from("Card"),
+            mem_total: 0,
+            power_limit_mw: None,
+            driver: Arc::from(""),
+            nvml: Arc::from(""),
+            supports_process_util: false,
+            persistent_key: Arc::from("gpu:card"),
+        }],
+    }))
+}
+
+fn api_versions_msg() -> EngineMsg {
+    src(SourceUpdate::GpuApiVersions(ApiVersions {
+        devices: vec![GpuApiVersions {
+            pci_bus_id: BUS.to_string(),
+            vulkan_api: Some("1.4.312".to_string()),
+            vulkan_driver: None,
+            opengl: Some("4.6".to_string()),
+        }],
+    }))
+}
+
+fn inventory_msg(device: DeviceIdx) -> EngineMsg {
+    src(SourceUpdate::Inventory(Box::new(InventorySnapshot {
+        graphics: Arc::from([GraphicsAdapter {
+            device: Some(device),
+            ..GraphicsAdapter::default()
+        }]),
+        ..InventorySnapshot::default()
+    })))
+}
+
+fn gpu_idx(rig: &Rig) -> DeviceIdx {
+    rig.latest()
+        .devices
+        .find(&DeviceIdentity::Gpu {
+            uuid: [1; 16],
+            pci_bus_id: Arc::from(BUS),
+        })
+        .expect("GpuInfo added the device")
+        .idx
+}
+
+fn assert_versions(rig: &Rig) {
+    let snap = rig.latest();
+    let g = &snap.inventory.graphics[0];
+    assert_eq!(&*g.vulkan_version.value, "1.4.312");
+    assert_eq!(g.vulkan_version.validity, Validity::Valid);
+    assert_eq!(&*g.opengl_version.value, "4.6");
+    assert_eq!(g.opengl_version.validity, Validity::Valid);
+}
+
+#[test]
+fn gpu_api_versions_merge_order_independent() {
+    // Inventory first, then the versions.
+    let mut rig = Rig::new();
+    rig.run(vec![gpu_info_msg()])
+        .expect("no invariant violation");
+    let idx = gpu_idx(&rig);
+    rig.run(vec![inventory_msg(idx), api_versions_msg()])
+        .expect("no invariant violation");
+    assert_versions(&rig);
+    rig.passed();
+
+    // The versions first: kept and merged when Inventory arrives.
+    let mut rig = Rig::new();
+    rig.run(vec![gpu_info_msg(), api_versions_msg()])
+        .expect("no invariant violation");
+    let idx = gpu_idx(&rig);
+    rig.run(vec![inventory_msg(idx)])
+        .expect("no invariant violation");
+    assert_versions(&rig);
+    rig.passed();
+}
