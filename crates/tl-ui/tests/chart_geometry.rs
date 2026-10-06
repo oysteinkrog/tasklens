@@ -417,3 +417,225 @@ fn y_of_maps_and_clamps() {
     // An empty scale puts the value on the baseline.
     assert_eq!(y_of(5.0, 1.0, 1.0, 100.0), 100.0);
 }
+
+/// Y scale rules and axis text (tasklens-yrf.6, UI-PRF-006).
+mod scale {
+    use tl_model::settings::NetworkUnit;
+    use tl_ui::chart::scale::{ScaleResult, ScaleState, compute};
+    use tl_ui::chart::{ValueFormat, YScale};
+
+    const SEC: u64 = 1_000_000_000;
+    const MIB: f32 = 1024.0 * 1024.0;
+
+    fn run(y: YScale, vmin: f32, vmax: f32, now: u64, state: &mut ScaleState) -> ScaleResult {
+        let mut text = String::new();
+        compute(
+            &y,
+            vmin,
+            vmax,
+            now,
+            state,
+            ValueFormat::Watts,
+            NetworkUnit::Bits,
+            &mut text,
+        )
+    }
+
+    fn text(r: &ScaleResult) -> Option<&str> {
+        r.axis_text.as_ref().map(|t| t.as_str())
+    }
+
+    fn rate_state(ceiling: f32) -> ScaleState {
+        ScaleState {
+            ceiling,
+            initialised: true,
+            ..ScaleState::default()
+        }
+    }
+
+    const BITS: YScale = YScale::AutoRate { iec: false };
+
+    #[test]
+    fn autorate_rises_immediately() {
+        let mut s = ScaleState::default();
+        let r = run(BITS, 0.0, 3.2e6, 0, &mut s);
+        assert_eq!(r.y_min, 0.0);
+        assert_eq!(r.y_max, 5e6);
+        assert_eq!(text(&r), Some("5 Mbps"));
+
+        let mut s = rate_state(5e6);
+        let r = run(BITS, 0.0, 7e6, SEC, &mut s);
+        assert_eq!(r.y_max, 1e7);
+        assert_eq!(text(&r), Some("10 Mbps"));
+    }
+
+    #[test]
+    fn autorate_falls_after_10s_below_half() {
+        let mut s = rate_state(1e7);
+        assert_eq!(run(BITS, 0.0, 2e6, 0, &mut s).y_max, 1e7);
+        assert_eq!(s.below_half_since, Some(0));
+        assert_eq!(run(BITS, 0.0, 2e6, 9 * SEC, &mut s).y_max, 1e7);
+        assert_eq!(s.below_half_since, Some(0));
+        let r = run(BITS, 0.0, 2e6, 10 * SEC, &mut s);
+        assert_eq!(r.y_max, 2e6);
+        assert_eq!(text(&r), Some("2 Mbps"));
+        assert_eq!(s.below_half_since, None);
+    }
+
+    #[test]
+    fn autorate_fall_timer_resets_above_half() {
+        let mut s = rate_state(1e7);
+        run(BITS, 0.0, 2e6, 0, &mut s);
+        assert_eq!(s.below_half_since, Some(0));
+        let r = run(BITS, 0.0, 6e6, 5 * SEC, &mut s);
+        assert_eq!(s.below_half_since, None);
+        assert_eq!(r.y_max, 1e7);
+        // The timer starts again from the next low sample.
+        run(BITS, 0.0, 2e6, 6 * SEC, &mut s);
+        assert_eq!(run(BITS, 0.0, 2e6, 15 * SEC, &mut s).y_max, 1e7);
+        assert_eq!(run(BITS, 0.0, 2e6, 16 * SEC, &mut s).y_max, 2e6);
+    }
+
+    #[test]
+    fn autorate_iec_pow2_text() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::AutoRate { iec: true }, 0.0, 3.0 * MIB, 0, &mut s);
+        assert_eq!(r.y_max, 4.0 * MIB);
+        assert_eq!(text(&r), Some("4 MiB/s"));
+
+        // No samples: the minimum ceiling, 1 KiB/s.
+        let mut s = ScaleState::default();
+        let r = run(YScale::AutoRate { iec: true }, 0.0, 0.0, 0, &mut s);
+        assert_eq!(r.y_max, 1024.0);
+        assert_eq!(text(&r), Some("1 KiB/s"));
+        let mut s = ScaleState::default();
+        assert_eq!(run(BITS, 0.0, f32::NAN, 0, &mut s).y_max, 1000.0);
+    }
+
+    #[test]
+    fn autorate_text_reused_while_unchanged() {
+        let mut s = ScaleState::default();
+        let mut buf = String::new();
+        let mut go = |vmax: f32, s: &mut ScaleState| {
+            compute(
+                &BITS,
+                0.0,
+                vmax,
+                0,
+                s,
+                ValueFormat::RateNetwork,
+                NetworkUnit::Bits,
+                &mut buf,
+            )
+            .axis_text
+            .unwrap()
+        };
+        let a = go(3.2e6, &mut s);
+        let b = go(4.1e6, &mut s);
+        assert_eq!(a, b);
+        assert_eq!(a.as_ptr(), b.as_ptr());
+    }
+
+    #[test]
+    fn sticky_temp_initial_range() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::StickyTemp, 0.0, 0.0, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (35.0, 45.0));
+        assert_eq!(text(&r), Some("45 °C"));
+        // Values inside the start range keep it.
+        let r = run(YScale::StickyTemp, 38.0, 42.0, SEC, &mut s);
+        assert_eq!((r.y_min, r.y_max), (35.0, 45.0));
+    }
+
+    #[test]
+    fn sticky_temp_rounds_to_5() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::StickyTemp, 40.0, 71.0, 0, &mut s);
+        assert_eq!(r.y_max, 75.0);
+        assert_eq!(text(&r), Some("75 °C"));
+        let r = run(YScale::StickyTemp, 27.0, 50.0, SEC, &mut s);
+        assert_eq!((r.y_min, r.y_max), (25.0, 75.0));
+        // 48 is below half of 25..75; the max falls to 50 after 10 s.
+        assert_eq!(
+            run(YScale::StickyTemp, 30.0, 48.0, 2 * SEC, &mut s).y_max,
+            75.0
+        );
+        let r = run(YScale::StickyTemp, 30.0, 48.0, 12 * SEC, &mut s);
+        assert_eq!((r.y_min, r.y_max), (25.0, 50.0));
+    }
+
+    #[test]
+    fn commit_axis_text_only_above_limit() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::Commit(100.0), 0.0, 120.0, 0, &mut s);
+        assert_eq!(r.y_max, 120.0);
+        assert_eq!(text(&r), Some("120%"));
+        let r = run(YScale::Commit(100.0), 0.0, 80.0, 0, &mut s);
+        assert_eq!(r.y_max, 100.0);
+        assert_eq!(text(&r), None);
+    }
+
+    #[test]
+    fn symmetric_label() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::Symmetric, -12.4, 3.0, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (-20.0, 20.0));
+        assert_eq!(text(&r), Some("±20 W"));
+        let r = run(YScale::Symmetric, 0.0, 0.0, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn stacked_label() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::Stacked(16), 0.0, 0.0, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (0.0, 1600.0));
+        assert_eq!(text(&r), Some("1600%"));
+    }
+
+    #[test]
+    fn link_speed_text() {
+        let mut s = ScaleState::default();
+        let r = run(YScale::LinkSpeed(1e9), 0.0, 5e8, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (0.0, 1e9));
+        assert_eq!(text(&r), Some("1 Gbps"));
+        let r = run(YScale::LinkSpeed(2.5e9), 0.0, 0.0, 0, &mut s);
+        assert_eq!(text(&r), Some("2.5 Gbps"));
+    }
+
+    #[test]
+    fn fixed_and_sticky_up() {
+        let mut s = ScaleState::default();
+        let r = run(
+            YScale::Fixed {
+                min: 0.0,
+                max: 100.0,
+            },
+            0.0,
+            50.0,
+            0,
+            &mut s,
+        );
+        assert_eq!((r.y_min, r.y_max, text(&r)), (0.0, 100.0, None));
+        let r = run(YScale::FixedTotal(0.0), 0.0, 50.0, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (0.0, 1.0));
+
+        let r = run(
+            YScale::StickyUp {
+                hw_max: Some(300.0),
+            },
+            0.0,
+            50.0,
+            0,
+            &mut s,
+        );
+        assert_eq!((r.y_max, text(&r)), (300.0, Some("300 W")));
+
+        let mut s = ScaleState::default();
+        let up = YScale::StickyUp { hw_max: None };
+        assert_eq!(run(up, 0.0, 1234.0, 0, &mut s).y_max, 2000.0);
+        // Never falls.
+        let r = run(up, 0.0, 10.0, 60 * SEC, &mut s);
+        assert_eq!((r.y_max, text(&r)), (2000.0, Some("2000 W")));
+    }
+}

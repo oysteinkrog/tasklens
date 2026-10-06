@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::SeriesView;
 
-use super::{ChartCache, ChartLabels, ChartSpec, ChartState, labels};
+use super::{ChartCache, ChartLabels, ChartSpec, ChartState, labels, scale};
 
 pub struct ChartView {
     pub spec: ChartSpec,
@@ -17,7 +17,9 @@ pub struct ChartView {
     pub state: ChartState,
     #[allow(dead_code, reason = "read by the test hooks now and by E19-009 on")]
     pub(crate) cache: Rc<RefCell<ChartCache>>,
-    // E19-004: scale_state: scale::ScaleState (added by yrf.6 as a chain edit, R-262)
+    /// Y scale memory across rebuilds (E19-004, R-262).
+    #[allow(dead_code, reason = "read from E19-007 on")]
+    pub(crate) scale_state: scale::ScaleState,
     /// Filled by E19-009; empty struct until then.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) text: labels::LabelCache,
@@ -38,6 +40,7 @@ impl ChartView {
             labels,
             state: ChartState::WarmingUp,
             cache: Rc::default(),
+            scale_state: scale::ScaleState::default(),
             text: labels::LabelCache::default(),
             series: SmallVec::new(),
             last_value_text: String::new(),
