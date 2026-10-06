@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
-    Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, WindowDecorations,
-    WindowHandle, WindowKind, div, px, size,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, TestAppContext,
+    TestDispatcher, VisualTestContext, Window, WindowDecorations, WindowHandle, WindowKind, div,
+    px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::settings::{Decorations, Settings, UiState};
