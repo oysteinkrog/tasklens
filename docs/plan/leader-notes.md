@@ -363,3 +363,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.21: closed with GraphicsAdapter.pci_slot and map_gpu_devices. Gaps: NVML 8-digit domain never matches sysfs form; mapping only on Inventory arrival; no DiskDrive.name. Follow-up P1 bug bead.
 - 8fx.37: fake probe crash sets PR_SET_DUMPABLE 0 (rustix, no unsafe); 200 of 200 passes, no new core dumps (438 old ones remain). OWNER: clear old tl-gpu-probe dumps with coredumpctl if wanted.
 - gma.12: approval resent; ClearPropsFilter note on gma.1.
+- hjn.33: battery history 24 h at 288 points (R-166 over PERF-078's week); comment on o55.33.
+- fut.16: TlMenu rebuilt on base parts; build returns Entity<TlMenuPopup> (comment on bj6.1). No visible scrollbar for tall menus. Highlighted theme rows get a 1 px accent outline (leader accepts).
+- hjn.23: UDisks2 worker read-only (GetManagedObjects only). U-25 answered: udisks2 reports NVMe SMART for nvme0n1 and nvme1n1, sda is ATA.
+- i3o.15: unit file actions; fixed call_raw for zero-argument calls (Reload never worked before). Unmask-then-enable failure leaves the unit unmasked without reload.
+- hjn.21: closed again with DiskDrive.name and map_inventory_devices; NVML form and late catalog left to 8q0.36.
+- jqk.5: approved TlButton::icon_muted.
