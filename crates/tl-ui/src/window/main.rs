@@ -943,6 +943,7 @@ impl MainWindow {
         // step 11: first_frame_ms, once per process (ADR-014)
         if !cx.has_global::<FirstFrameLogged>() {
             cx.set_global(FirstFrameLogged);
+            crate::app::perf_step("first_frame");
             let ms = std::fs::read_to_string("/proc/self/stat")
                 .ok()
                 .zip(std::fs::read_to_string("/proc/uptime").ok())

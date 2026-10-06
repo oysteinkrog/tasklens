@@ -12,14 +12,14 @@ use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{App, AppContext, AsyncApp, Global, QuitMode, SharedString};
 use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
 use tl_model::settings::{Settings, StartTab, UiState};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::components::icons::TlAssets;
 use crate::components::{kv_grid, toast};
@@ -216,9 +216,11 @@ impl TasklensUi {
         if !fonts.ui_ok {
             warn!(target: "tasklens::ui", family = text::fonts::effective_ui_family(&fonts), "using fallback UI font");
         }
+        perf_step("fonts");
 
         // 2. Kit.
         gpui_kit::init(cx);
+        perf_step("kit");
 
         // 3. Asset source: `App` has no setter in gpui-pre 0.3.7, so `tl_ui::run` passes
         // `TlAssets` to `Application::with_assets` (E16-012).
@@ -305,7 +307,29 @@ impl TasklensUi {
         crate::window::main::init(cx);
         crate::window::share_theme::init(cx);
         crate::window::collector_health::init(cx);
+        perf_step("ui_init");
     }
+}
+
+/// The `main` start and the end of the last step, for [`perf_step`].
+static PERF_CLOCK: Mutex<Option<(Instant, Instant)>> = Mutex::new(None);
+
+/// Starts the `tasklens::perf` start-up clock. tl-app calls it first in `main`.
+pub fn perf_origin(origin: Instant) {
+    *PERF_CLOCK.lock().unwrap_or_else(PoisonError::into_inner) = Some((origin, origin));
+}
+
+/// Logs one start-up step under `tasklens::perf` (ADR-014): `ms` is the time since the previous
+/// step ended, `at_ms` the time since `main` began. Does nothing before [`perf_origin`].
+pub fn perf_step(step: &'static str) {
+    let now = Instant::now();
+    let mut clock = PERF_CLOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some((origin, last)) = clock.as_mut() else {
+        return;
+    };
+    let ms = |d: std::time::Duration| (d.as_secs_f64() * 10_000.).round() / 10.;
+    info!(target: "tasklens::perf", step, ms = ms(now - *last), at_ms = ms(now - *origin), "startup step");
+    *last = now;
 }
 
 /// Everything `run` needs from tl-app (UI-SHL-110 step 8).
@@ -399,7 +423,9 @@ pub fn run(launch: UiLaunch) -> UiExit {
             let app = gpui_kit::application()
                 .with_assets(TlAssets)
                 .with_quit_mode(QuitMode::Explicit);
+            perf_step("platform");
             app.run(move |cx| {
+                perf_step("app_run");
                 start(cx, launch, exit);
                 opened.set(true);
             });
@@ -436,6 +462,7 @@ fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
     // E32-013: low-memory init
     TasklensUi::init(cx, client, init);
     open_first(cx, open);
+    perf_step("window_open");
 }
 
 /// Calls the hook for `mode`. A missing hook logs an error and quits.

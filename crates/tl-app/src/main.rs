@@ -23,6 +23,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
@@ -37,6 +38,8 @@ const NVIDIA_VERSION_FILE: &str = "/proc/driver/nvidia/version";
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
 
 fn main() -> ExitCode {
+    tl_ui::app::perf_origin(Instant::now());
+    let exec_to_main = exec_to_main_ms();
     // Step 1: paths, panic hook, logging.
     let paths = match paths::Paths::from_env() {
         Ok(paths) => paths,
@@ -58,6 +61,10 @@ fn main() -> ExitCode {
             None
         }
     };
+    if let Some(ms) = exec_to_main {
+        info!(target: "tasklens::perf", exec_to_main_ms = ms, "process start");
+    }
+    tl_ui::app::perf_step("logging");
 
     // Step 2: arguments. clap exits 2 on an unknown argument.
     let args = args::parse();
@@ -80,6 +87,7 @@ fn main() -> ExitCode {
     // Step 5: E33-A2 inserts settings, state and themes loading here.
     let settings = Settings::default();
     let state = UiState::default();
+    tl_ui::app::perf_step("args_settings");
 
     // E01: --bench and --gallery arms go here (before step 7)
 
@@ -99,6 +107,7 @@ fn main() -> ExitCode {
     };
     engine.set_settings(EngineSettings::from(&settings));
     info!(target: "tasklens::engine", "engine started");
+    tl_ui::app::perf_step("engine_start");
 
     // Steps 8 to 10: tl-ui runs the GPUI application and opens the first window.
     // Kept alive until the UI stops; E33-A2 hands it to the single-instance handler.
@@ -147,6 +156,15 @@ fn main() -> ExitCode {
     // E33-011 adds the 1500 ms engine shutdown here.
     info!(target: "tasklens::engine", ?exit, "ui stopped");
     ExitCode::SUCCESS
+}
+
+/// The time from `exec` to `main` (the dynamic loader and static initialisers), at the 10 ms
+/// resolution of `/proc/uptime`.
+fn exec_to_main_ms() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/stat")
+        .ok()
+        .zip(std::fs::read_to_string("/proc/uptime").ok())
+        .and_then(|(stat, uptime)| tl_ui::window::main::first_frame_ms_from(&stat, &uptime))
 }
 
 /// The panic hook's main-thread callback. E33-011 fills it.
