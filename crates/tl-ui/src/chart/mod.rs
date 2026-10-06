@@ -239,6 +239,11 @@ pub struct ChartCache {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueFormat {
     Percent,
+    /// The value as a percent of `total`, one decimal: "50.0%" for 8 GiB of 16 GiB. The format
+    /// is not part of the geometry key, so a new `total` only repaints the labels.
+    PercentOf {
+        total: u64,
+    },
     Bytes,
     RateIec,
     RateNetwork,

@@ -252,6 +252,10 @@ fn write_value(out: &mut String, v: f32, fmt: ValueFormat, network_unit: Network
             write_number(out, v);
             out.push('%');
         }
+        ValueFormat::PercentOf { total } => {
+            write_number(out, super::labels::percent_of(v, total));
+            out.push('%');
+        }
         ValueFormat::Bytes => {
             const IEC: [&str; 5] = [" B", " KiB", " MiB", " GiB", " TiB"];
             write_scaled(out, f64::from(v), 1024.0, &IEC);

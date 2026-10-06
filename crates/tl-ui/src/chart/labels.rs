@@ -534,6 +534,7 @@ pub fn format_value(fmt: ValueFormat, value: f32, unit: NetworkUnit, out: &mut S
     let whole = |v: f32| v.max(0.0).round() as u64;
     match fmt {
         ValueFormat::Percent => units::percent(out, value),
+        ValueFormat::PercentOf { total } => units::percent(out, percent_of(value, total)),
         ValueFormat::Bytes => units::bytes(out, whole(value)),
         ValueFormat::RateIec => units::rate_iec_auto(out, f64::from(value)),
         ValueFormat::RateNetwork => {
@@ -550,5 +551,38 @@ pub fn format_value(fmt: ValueFormat, value: f32, unit: NetworkUnit, out: &mut S
             let _ = write!(out, "{} RPM", whole(value));
         }
         ValueFormat::Count => units::count(out, whole(value)),
+    }
+}
+
+/// `value` as a percent of `total`; 0 when `total` is 0.
+pub(crate) fn percent_of(value: f32, total: u64) -> f32 {
+    if total == 0 {
+        return 0.0;
+    }
+    (f64::from(value) / total as f64 * 100.0) as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: f32 = 1024.0 * 1024.0 * 1024.0;
+
+    #[test]
+    fn percent_of_total() {
+        let f = |v: f32, total: u64| {
+            let mut out = String::new();
+            format_value(
+                ValueFormat::PercentOf { total },
+                v,
+                NetworkUnit::Bits,
+                &mut out,
+            );
+            out
+        };
+        assert_eq!(f(8.0 * GIB, 16 << 30), "50.0%");
+        assert_eq!(f(34.68 * GIB, (63.16 * GIB) as u64), "54.9%");
+        assert_eq!(f(0.0, 16 << 30), "0%");
+        assert_eq!(f(8.0 * GIB, 0), "0%", "no total yet");
     }
 }

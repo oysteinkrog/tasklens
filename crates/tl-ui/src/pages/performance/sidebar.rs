@@ -7,7 +7,8 @@
 //! charts are cached views that re-render for their own series. Card text is read from the
 //! snapshot on `SYSTEM`, `INVENTORY`, `DEVICE_DETAILS` and `DEVICES` changes and kept when its
 //! text is unchanged ([`update_card_lines`]). The card text reads no series, so `SERIES` alone
-//! formats nothing. Hotplug animations (E24-010) and edit mode (E24-013) are later beads.
+//! formats nothing. The card words are translated once per strings version ([`card_words`]).
+//! Hotplug animations (E24-010) and edit mode (E24-013) are later beads.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -35,8 +36,8 @@ use super::actions::{
     PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
 };
 use super::card::{
-    CARD_CHART_BG, CardLines, CardTextInput, DeviceCard, card_chart_grid, card_chart_labels,
-    update_card_lines,
+    CARD_CHART_BG, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
+    card_chart_labels, card_words, update_card_lines,
 };
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, initial_selection,
@@ -45,6 +46,7 @@ use super::{
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::i18n::Strings;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::derived::blend_over;
 use crate::theme::palette::accent_color;
@@ -177,8 +179,9 @@ fn section_versions(cx: &App) -> [u64; 4] {
     ]
 }
 
-/// The snapshot value a card's Y scale depends on: the memory total, the known link speed when
-/// the network scale follows it, whether a battery powers the system. 0 for every other kind.
+/// The snapshot value a card's Y scale and value format depend on: the memory total, the known
+/// link speed when the network scale follows it, whether a battery powers the system. 0 for every
+/// other kind.
 fn scale_input(row: &DeviceRow, snap: &Snapshot, s: &SidebarSettings) -> u64 {
     match row.kind {
         DeviceKind::Memory => snap.system.memory.total,
@@ -247,7 +250,7 @@ fn card_spec(
                 },
             ],
             YScale::FixedTotal(scale as f32),
-            ValueFormat::Bytes,
+            ValueFormat::PercentOf { total: scale },
         ),
         DeviceKind::Gpu => (
             smallvec![filled(MetricId::GPU_UTIL, g.gpu_line, g.gpu_fill)],
@@ -360,7 +363,9 @@ pub struct DeviceSidebar {
     card_width: Rc<Cell<Pixels>>,
     /// Reused by [`update_card_lines`].
     scratch: String,
-    _subs: SmallVec<[Subscription; 3]>,
+    /// The card words for the current strings version.
+    words: Rc<CardWords>,
+    _subs: SmallVec<[Subscription; 4]>,
     /// Focus in and out of the list redraw the focus ring. Set on the first render.
     focus_subs: Option<[Subscription; 2]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -382,6 +387,7 @@ impl DeviceSidebar {
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
         subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
+        subs.push(cx.observe_global::<Strings>(Self::sync_words));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -408,6 +414,7 @@ impl DeviceSidebar {
             catalog_version: snap.devices.version,
             card_width: Rc::new(Cell::new(card_width)),
             scratch: String::new(),
+            words: card_words(cx),
             _subs: subs,
             focus_subs: None,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -583,6 +590,7 @@ impl DeviceSidebar {
                 continue;
             };
             let input = CardTextInput {
+                words: &self.words,
                 kind: card.row.kind,
                 number: card.number,
                 entry,
@@ -669,6 +677,19 @@ impl DeviceSidebar {
         let snap = Arc::clone(self.hub.read(cx).current());
         self.sync_charts(&snap, true, cx);
         cx.notify();
+    }
+
+    /// New strings: the cards take the new words.
+    fn sync_words(&mut self, cx: &mut Context<Self>) {
+        let words = card_words(cx);
+        if Rc::ptr_eq(&words, &self.words) {
+            return;
+        }
+        self.words = words;
+        let snap = Arc::clone(self.hub.read(cx).current());
+        if self.refresh_lines(&snap) {
+            cx.notify();
+        }
     }
 
     fn selected_index(&self) -> Option<usize> {

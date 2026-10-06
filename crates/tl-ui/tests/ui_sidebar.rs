@@ -24,8 +24,8 @@ use tl_ui::chart::{ChartSpec, ValueFormat};
 use tl_ui::hub::SnapshotHub;
 use tl_ui::pages::performance::actions::PerfSelectDevice;
 use tl_ui::pages::performance::card::{
-    CARD_CHART_BG, CardLines, CardTextInput, DeviceCard, card_chart_grid, card_chart_labels,
-    card_lines,
+    CARD_CHART_BG, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
+    card_chart_labels, card_lines,
 };
 use tl_ui::pages::performance::{DeviceKey, DeviceKind};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -142,6 +142,7 @@ fn snap(system: SystemSnapshot, details: DeviceDetailsSnapshot) -> Snapshot {
 
 fn lines_for(kind: DeviceKind, entry: &DeviceEntry, snap: &Snapshot) -> CardLines {
     let input = CardTextInput {
+        words: CardWords::en(),
         kind,
         number: 0,
         entry,
@@ -367,10 +368,16 @@ mod sidebar {
     use gpui_kit::{Focusable as _, StyleRefinement};
     use tl_model::demand::{CpuDemand, Demand};
     use tl_model::devices::DeviceCatalog;
+    use tl_model::ids::{MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{Settings, UiState};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::chart::ChartState;
+    use tl_ui::chart::labels::format_value;
     use tl_ui::demand::DemandAggregator;
-    use tl_ui::i18n::{init_strings, tr_calls};
+    use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
     use tl_ui::pages::performance::actions::{PerfSelectPrevDevice, PerfSelectVisibleDevice};
     use tl_ui::pages::performance::sidebar::{DeviceSidebar, SidebarEvent};
     use tl_ui::settings_global::TlSettings;
@@ -751,5 +758,137 @@ mod sidebar {
                 SidebarEvent::Selected(DeviceKey(Arc::from("disk:sdc"))),
             ]
         );
+    }
+
+    fn chart_of(r: &mut Rig, key: &str) -> Entity<ChartView> {
+        let sidebar = r.sidebar.clone();
+        let key = DeviceKey(Arc::from(key));
+        r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .card(&key)
+                .expect("card exists")
+                .chart
+                .clone()
+        })
+    }
+
+    /// 60 one-second MEM_USED samples of `bytes` ending now.
+    fn mem_used(bytes: f32) -> Arc<SeriesView> {
+        const PERIOD: u64 = 1_000_000_000;
+        let newest = now_boot_ns();
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(1),
+                metric: MetricId::MEM_USED,
+            },
+            version: 1,
+            period_ns: PERIOD,
+            samples: (0..60u64)
+                .map(|k| Sample::valid(newest - (59 - k) * PERIOD, bytes))
+                .collect::<Vec<_>>()
+                .into(),
+        })
+    }
+
+    #[gpui_kit::test]
+    fn memory_card_value_is_percent_of_total(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        // A live chart asks the window's driver for its next frame.
+        let _driver = r.vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
+        r.engine.publish_with(|s| {
+            let mut sys = system(8);
+            sys.memory.total = 16 << 30;
+            sys.memory.available = 8 << 30;
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        let chart = chart_of(&mut r, "memory");
+        chart.update(r.vcx, |v, cx| {
+            v.set_series_for_test([Some(mem_used(8.0 * (1u64 << 30) as f32)), None].into(), cx);
+            v.set_state(ChartState::Live, cx);
+        });
+        draw(r.vcx);
+        let (fmt, value) = r
+            .vcx
+            .read_entity(&chart, |v, _| (v.labels.value_fmt, v.value_now()));
+        assert_eq!(fmt, ValueFormat::PercentOf { total: 16 << 30 });
+        let (value, validity) = value.expect("newest value");
+        assert_eq!(validity, Validity::Valid);
+        let mut text = String::new();
+        format_value(fmt, value, NetworkUnit::Bits, &mut text);
+        assert_eq!(text, "50.0%", "8 GiB of 16 GiB");
+
+        // A new format alone repaints the value but keeps the geometry.
+        let (builds, renders) = r
+            .vcx
+            .read_entity(&chart, |v, _| (v.build_count.get(), v.render_count.get()));
+        assert!(builds >= 1, "the chart has geometry");
+        chart.update(r.vcx, |v, cx| {
+            v.set_labels(
+                card_chart_labels(ValueFormat::PercentOf { total: 32 << 30 }),
+                cx,
+            )
+        });
+        draw(r.vcx);
+        let (builds2, renders2) = r
+            .vcx
+            .read_entity(&chart, |v, _| (v.build_count.get(), v.render_count.get()));
+        assert!(renders2 > renders, "the chart repainted");
+        assert_eq!(builds2, builds, "a label format change builds no geometry");
+
+        // A new total reaches the format.
+        r.engine.publish_with(|s| {
+            let mut sys = system(8);
+            sys.header.version = 99;
+            sys.memory.total = 24 << 30;
+            sys.memory.available = 16 << 30;
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        let fmt = r.vcx.read_entity(&chart, |v, _| v.labels.value_fmt);
+        assert_eq!(fmt, ValueFormat::PercentOf { total: 24 << 30 });
+    }
+
+    #[gpui_kit::test]
+    fn marker_catalogue_changes_card_words(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        assert_eq!(lines(&mut r, "memory").heading, "Memory");
+        r.vcx.update(|_, cx| {
+            set_test_catalogue(
+                cx,
+                "perf-card-heading-memory = [Memory]\n\
+                 perf-card-heading-disk = [Disk {$n}]\n\
+                 perf-card-commit = [Commit {$pct}]\n\
+                 perf-net-type-ethernet = [Ethernet]\n",
+            )
+        });
+        draw(r.vcx);
+        let memory = lines(&mut r, "memory");
+        assert_eq!(memory.heading, "[Memory]");
+        assert_eq!(memory.line2, "[Commit 25.0%]");
+        assert_eq!(lines(&mut r, "disk:sdc").heading, "[Disk 2]");
+        assert_eq!(lines(&mut r, "net:eth0").line1, "[Ethernet]");
+        assert_eq!(
+            lines(&mut r, "cpu").heading,
+            "CPU",
+            "a missing key falls back"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn sixty_frames_make_no_tr_calls(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let calls = tr_calls();
+        for i in 0..60 {
+            r.engine
+                .publish_with(|s| s.system = Arc::new(system(10 + i % 7)));
+            draw(r.vcx);
+        }
+        assert_eq!(tr_calls(), calls, "60 frames: 0 tr calls");
     }
 }

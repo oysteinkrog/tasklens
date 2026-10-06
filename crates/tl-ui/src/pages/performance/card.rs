@@ -2,16 +2,18 @@
 //! (docs/ui/performance.md UI-PRF-011; PERF-001, PERF-005, PERF-008, PERF-013, PERF-053,
 //! PERF-054, R-050, R-055). The sidebar (E24-004) and the mini window (E26) own the cards.
 //!
-//! The words are English constants that match `perf-card-*`, `perf-unknown-*` and
-//! `perf-net-state-*` in `en-US.ftl`, like the header words in `page.rs`.
+//! The words come from `perf-card-*`, `perf-unknown-*`, `perf-net-state-*` and `perf-net-type-*`
+//! in `en-US.ftl`, translated once per strings version into [`CardWords`] ([`card_words`]).
 
 use std::fmt::Write as _;
+use std::rc::Rc;
+use std::sync::LazyLock;
 
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ElementId, Entity, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled as _, Window, div, px,
+    AnyElement, App, ElementId, Entity, FontWeight, Global, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -23,11 +25,13 @@ use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
 use super::actions::PerfSelectDevice;
+use super::details::Template;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{ChartBg, ChartLabels, ChartView, GridStyle, ValueAlign, ValueFormat};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
+use crate::i18n::{Strings, tr, tr_en};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -48,20 +52,6 @@ const DIM_OPACITY: f32 = 0.6;
 const PRESSED_ALPHA: f32 = 0.6;
 const FOCUS_RING_ALPHA: f32 = 0.5;
 
-const HEADING_CPU: &str = "CPU";
-const HEADING_MEMORY: &str = "Memory";
-const HEADING_GPU: &str = "GPU ";
-const HEADING_DISK: &str = "Disk ";
-const HEADING_FAN: &str = "Fan ";
-const HEADING_BATTERY: &str = "Battery";
-const AGGREGATE_STORAGE: &str = "Aggregate storage";
-const AGGREGATE_GRAPHICS: &str = "Aggregate graphics";
-const SUFFIX_DISKS: &str = " disks";
-const SUFFIX_ADAPTERS: &str = " adapters";
-const MULTIPLE: &str = "Multiple";
-const COMMIT: &str = "Commit ";
-const UNKNOWN_PROCESSOR: &str = "Unknown processor";
-const UNKNOWN_GPU: &str = "Unknown GPU";
 /// Between two values on one line.
 const SEP: &str = " · ";
 /// Between the disk kind and its mount.
@@ -69,12 +59,126 @@ const KIND_SEP: &str = " - ";
 const DOWN: &str = "↓ ";
 const UP: &str = " ↑ ";
 
-const STATE_DISCONNECTED: &str = "Disconnected";
-const STATE_TESTING: &str = "Testing";
-const STATE_DORMANT: &str = "Dormant";
-const STATE_NOT_PRESENT: &str = "Not present";
-const STATE_LOWER_LAYER_DOWN: &str = "Lower layer down";
-const STATE_UNKNOWN: &str = "Unknown";
+/// The card words, translated once per strings version by [`card_words`]. [`CardWords::en`] is
+/// in en-US.
+#[derive(Clone, Debug)]
+pub struct CardWords {
+    pub cpu: SharedString,
+    pub memory: SharedString,
+    /// "GPU {$n}".
+    pub gpu: Template,
+    /// "Disk {$n}".
+    pub disk: Template,
+    /// "Fan {$n}".
+    pub fan: Template,
+    pub battery: SharedString,
+    pub aggregate_storage: SharedString,
+    pub aggregate_graphics: SharedString,
+    /// "{$k} disks".
+    pub disks_count: Template,
+    /// "{$k} adapters".
+    pub adapters_count: Template,
+    pub multiple: SharedString,
+    /// "Commit {$pct}".
+    pub commit: Template,
+    pub unknown_processor: SharedString,
+    pub unknown_gpu: SharedString,
+    /// PERF-054 state words.
+    pub disconnected: SharedString,
+    pub testing: SharedString,
+    pub dormant: SharedString,
+    pub not_present: SharedString,
+    pub lower_layer_down: SharedString,
+    pub unknown: SharedString,
+    /// PERF-054 type words by catalog class.
+    pub ethernet: SharedString,
+    pub wifi: SharedString,
+    pub vpn: SharedString,
+    pub virtual_net: SharedString,
+    pub other_net: SharedString,
+}
+
+impl CardWords {
+    /// Translates every word with the current strings.
+    pub fn new(cx: &App) -> Self {
+        Self::build(|key| tr(cx, key), |key, args| Template::new(cx, key, args))
+    }
+
+    /// The en-US words, built once.
+    pub fn en() -> &'static Self {
+        static EN: LazyLock<CardWords> =
+            LazyLock::new(|| CardWords::build(|key| tr_en(key, &[]), Template::en));
+        &EN
+    }
+
+    fn build(
+        t: impl Fn(&str) -> SharedString,
+        template: impl Fn(&str, &[&str]) -> Template,
+    ) -> Self {
+        Self {
+            cpu: t("perf-card-heading-cpu"),
+            memory: t("perf-card-heading-memory"),
+            gpu: template("perf-card-heading-gpu", &["n"]),
+            disk: template("perf-card-heading-disk", &["n"]),
+            fan: template("perf-card-heading-fan", &["n"]),
+            battery: t("perf-card-heading-battery"),
+            aggregate_storage: t("perf-card-aggregate-storage"),
+            aggregate_graphics: t("perf-card-aggregate-graphics"),
+            disks_count: template("perf-card-disks-count", &["k"]),
+            adapters_count: template("perf-card-adapters-count", &["k"]),
+            multiple: t("perf-card-multiple"),
+            commit: template("perf-card-commit", &["pct"]),
+            unknown_processor: t("perf-unknown-processor"),
+            unknown_gpu: t("perf-unknown-gpu"),
+            disconnected: t("perf-net-state-disconnected"),
+            testing: t("perf-net-state-testing"),
+            dormant: t("perf-net-state-dormant"),
+            not_present: t("perf-net-state-not-present"),
+            lower_layer_down: t("perf-net-state-lower-layer-down"),
+            unknown: t("perf-net-state-unknown"),
+            ethernet: t("perf-net-type-ethernet"),
+            wifi: t("perf-net-type-wifi"),
+            vpn: t("perf-net-type-vpn"),
+            virtual_net: t("perf-net-type-virtual"),
+            other_net: t("perf-net-type-other"),
+        }
+    }
+}
+
+/// The words for one strings version, shared by every card owner.
+struct CardWordsCache {
+    version: u64,
+    words: Rc<CardWords>,
+}
+
+impl Global for CardWordsCache {}
+
+/// The card words for the current strings. They are translated only when the strings version
+/// changed since the last call, so a frame makes no `tr` call. Without strings they are in en-US.
+pub fn card_words(cx: &mut App) -> Rc<CardWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return en_words();
+    };
+    match cx.try_global::<CardWordsCache>() {
+        Some(cache) if cache.version == version => cache.words.clone(),
+        _ => {
+            let words = Rc::new(CardWords::new(cx));
+            cx.set_global(CardWordsCache {
+                version,
+                words: words.clone(),
+            });
+            words
+        }
+    }
+}
+
+/// [`CardWords::en`] behind an `Rc`, built once per thread.
+fn en_words() -> Rc<CardWords> {
+    thread_local! {
+        static EN: Rc<CardWords> = Rc::new(CardWords::en().clone());
+    }
+    EN.with(Rc::clone)
+}
 
 /// Byte offsets into a line where a Restricted value's lock icon goes (UI-FND-026).
 pub type LockOffsets = SmallVec<[u16; 1]>;
@@ -99,6 +203,7 @@ pub struct CardLines {
 /// What [`card_lines`] reads. `number` is the device's index among the visible devices of its
 /// kind ([`super::type_number`]).
 pub struct CardTextInput<'a> {
+    pub words: &'a CardWords,
     pub kind: DeviceKind,
     pub number: u16,
     pub entry: &'a DeviceEntry,
@@ -234,40 +339,43 @@ fn shown(text: &str, validity: Validity) -> Option<&str> {
     ok.then(|| text.trim())
 }
 
+/// Writes `template` with `n` in its one hole.
+fn write_n(out: &mut String, template: &Template, n: impl std::fmt::Display) {
+    template.write_each(out, |_, o| {
+        let _ = write!(o, "{n}");
+    });
+}
+
 fn write_heading(input: &CardTextInput, out: &mut String) {
     let n = input.number;
+    let w = input.words;
     match input.kind {
-        DeviceKind::Cpu => out.push_str(HEADING_CPU),
-        DeviceKind::Memory => out.push_str(HEADING_MEMORY),
-        DeviceKind::Gpu => {
-            let _ = write!(out, "{HEADING_GPU}{n}");
-        }
-        DeviceKind::Disk => {
-            let _ = write!(out, "{HEADING_DISK}{n}");
-        }
+        DeviceKind::Cpu => out.push_str(&w.cpu),
+        DeviceKind::Memory => out.push_str(&w.memory),
+        DeviceKind::Gpu => write_n(out, &w.gpu, n),
+        DeviceKind::Disk => write_n(out, &w.disk, n),
         DeviceKind::Net => out.push_str(ifname(input.entry)),
         DeviceKind::Fan => match input.fan_label.and_then(|l| shown(l, Validity::Valid)) {
             Some(label) => out.push_str(label),
-            None => {
-                let _ = write!(out, "{HEADING_FAN}{n}");
-            }
+            None => write_n(out, &w.fan, n),
         },
         DeviceKind::Battery => {
             let kind = battery(input).and_then(|b| shown(&b.kind, Validity::Valid));
-            out.push_str(kind.unwrap_or(HEADING_BATTERY));
+            out.push_str(kind.unwrap_or(&*w.battery));
         }
-        DeviceKind::AggregateDisk => out.push_str(AGGREGATE_STORAGE),
-        DeviceKind::AggregateGpu => out.push_str(AGGREGATE_GRAPHICS),
+        DeviceKind::AggregateDisk => out.push_str(&w.aggregate_storage),
+        DeviceKind::AggregateGpu => out.push_str(&w.aggregate_graphics),
     }
 }
 
 fn write_line1(input: &CardTextInput, out: &mut String, locks: &mut LockOffsets) {
     let snap = input.snap;
     let entry = input.entry;
+    let w = input.words;
     match input.kind {
         DeviceKind::Cpu => {
             let p = &snap.inventory.processor.name;
-            out.push_str(shown(&p.value, p.validity).unwrap_or(UNKNOWN_PROCESSOR));
+            out.push_str(shown(&p.value, p.validity).unwrap_or(&*w.unknown_processor));
         }
         DeviceKind::Memory => {
             let mem = &snap.system.memory;
@@ -276,7 +384,7 @@ fn write_line1(input: &CardTextInput, out: &mut String, locks: &mut LockOffsets)
             });
         }
         DeviceKind::Gpu => {
-            out.push_str(shown(&entry.display_name, Validity::Valid).unwrap_or(UNKNOWN_GPU));
+            out.push_str(shown(&entry.display_name, Validity::Valid).unwrap_or(&*w.unknown_gpu));
         }
         DeviceKind::Disk => {
             let (details, drive) = (disk_details(input), disk_drive(input));
@@ -318,14 +426,8 @@ fn write_line1(input: &CardTextInput, out: &mut String, locks: &mut LockOffsets)
                 out.push_str(&entry.display_name);
             }
         }
-        DeviceKind::AggregateDisk => {
-            let k = present_disks(snap).count();
-            let _ = write!(out, "{k}{SUFFIX_DISKS}");
-        }
-        DeviceKind::AggregateGpu => {
-            let k = present_gpus(snap).count();
-            let _ = write!(out, "{k}{SUFFIX_ADAPTERS}");
-        }
+        DeviceKind::AggregateDisk => write_n(out, &w.disks_count, present_disks(snap).count()),
+        DeviceKind::AggregateGpu => write_n(out, &w.adapters_count, present_gpus(snap).count()),
     }
 }
 
@@ -338,6 +440,7 @@ fn write_line2(
     let snap = input.snap;
     let sys = &snap.system;
     let idx = input.entry.idx;
+    let w = input.words;
     match input.kind {
         DeviceKind::Cpu => {
             let freq = sys.cpu.freq_mhz;
@@ -348,17 +451,18 @@ fn write_line2(
         }
         DeviceKind::Memory => {
             let mem = &sys.memory;
-            out.push_str(COMMIT);
             let validity = if mem.validity.is_valid() && mem.commit_limit == 0 {
                 Validity::Unsupported
             } else {
                 mem.validity
             };
-            value(out, locks, validity, |o| {
-                units::percent(
-                    o,
-                    (mem.committed as f64 / mem.commit_limit as f64 * 100.0) as f32,
-                );
+            w.commit.write_each(out, |_, out| {
+                value(out, locks, validity, |o| {
+                    units::percent(
+                        o,
+                        (mem.committed as f64 / mem.commit_limit as f64 * 100.0) as f32,
+                    );
+                });
             });
         }
         DeviceKind::Gpu => {
@@ -383,7 +487,7 @@ fn write_line2(
             optional_part(out, locks, temp, units::celsius);
         }
         DeviceKind::Net => match net {
-            Some(NetState::Down(state)) => out.push_str(state_word(state)),
+            Some(NetState::Down(state)) => out.push_str(state_word(w, state)),
             Some(NetState::Connected) => {
                 if let Some((_, t)) = sys.nets.iter().find(|(i, _)| *i == idx) {
                     write_rates(input, t.rx_bps, t.tx_bps, out, locks);
@@ -424,26 +528,26 @@ fn write_line2(
                     .find(|(i, _)| *i == e.idx)
                     .and_then(|(_, d)| shown(&d.kind, Validity::Valid))
             });
-            write_common(out, kinds);
+            write_common(out, kinds, &w.multiple);
         }
         DeviceKind::AggregateGpu => {
             // The vendor is the first word of the adapter name ("AMD", "NVIDIA", "Intel").
             let vendors =
                 present_gpus(snap).filter_map(|e| e.display_name.split_whitespace().next());
-            write_common(out, vendors);
+            write_common(out, vendors, &w.multiple);
         }
     }
 }
 
-/// The common word of `words`, "Multiple" when they differ, nothing when there is none.
-fn write_common<'a>(out: &mut String, mut words: impl Iterator<Item = &'a str>) {
+/// The common word of `words`, `multiple` when they differ, nothing when there is none.
+fn write_common<'a>(out: &mut String, mut words: impl Iterator<Item = &'a str>, multiple: &str) {
     let Some(first) = words.next() else {
         return;
     };
     out.push_str(if words.all(|w| w == first) {
         first
     } else {
-        MULTIPLE
+        multiple
     });
 }
 
@@ -494,14 +598,14 @@ fn net_state(input: &CardTextInput) -> NetState {
 }
 
 /// PERF-054 state words.
-fn state_word(state: LinkState) -> &'static str {
+fn state_word(w: &CardWords, state: LinkState) -> &str {
     match state {
-        LinkState::Up | LinkState::Down => STATE_DISCONNECTED,
-        LinkState::Testing => STATE_TESTING,
-        LinkState::Dormant => STATE_DORMANT,
-        LinkState::NotPresent => STATE_NOT_PRESENT,
-        LinkState::LowerLayerDown => STATE_LOWER_LAYER_DOWN,
-        LinkState::Unknown => STATE_UNKNOWN,
+        LinkState::Up | LinkState::Down => &w.disconnected,
+        LinkState::Testing => &w.testing,
+        LinkState::Dormant => &w.dormant,
+        LinkState::NotPresent => &w.not_present,
+        LinkState::LowerLayerDown => &w.lower_layer_down,
+        LinkState::Unknown => &w.unknown,
     }
 }
 
@@ -515,12 +619,13 @@ fn net_type_word<'a>(input: &CardTextInput<'a>) -> &'a str {
         .iter()
         .find(|(i, _)| *i == idx)
         .and_then(|(_, n)| shown(&n.type_label, Validity::Valid));
+    let w = input.words;
     label.unwrap_or(match input.entry.net_kind {
-        Some(NetKind::Wired) => "Ethernet",
-        Some(NetKind::Wireless) => "Wi-Fi",
-        Some(NetKind::VpnTunnel) => "VPN",
-        Some(NetKind::Virtual) => "Virtual",
-        Some(NetKind::Other) | None => "Other",
+        Some(NetKind::Wired) => &*w.ethernet,
+        Some(NetKind::Wireless) => &*w.wifi,
+        Some(NetKind::VpnTunnel) => &*w.vpn,
+        Some(NetKind::Virtual) => &*w.virtual_net,
+        Some(NetKind::Other) | None => &*w.other_net,
     })
 }
 
@@ -928,6 +1033,7 @@ mod tests {
         snap: &'a Snapshot,
     ) -> CardTextInput<'a> {
         CardTextInput {
+            words: CardWords::en(),
             kind,
             number: 0,
             entry,
