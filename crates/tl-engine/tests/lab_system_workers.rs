@@ -2967,11 +2967,12 @@ fn inventory_disk_drives() {
     assert_eq!(sda.model, inv_text("WDC WD10EZEX-08W"));
     let volumes: Vec<&str> = sda.volumes.iter().map(|v| &**v).collect();
     assert_eq!(volumes, ["/", "/boot", "/mnt/boot copy"]);
-    // A fixture root never calls `statvfs`.
-    assert_eq!(sda.free_bytes.validity, Validity::Unsupported);
+    // A fixture root never calls `statvfs`: its answer is `NotFound`.
+    assert_eq!(sda.free_bytes.validity, Validity::Missing);
     assert_eq!(sda.serial.validity, Validity::Unsupported);
     let nvme = &snap.disks[1];
     assert!(nvme.volumes.is_empty());
+    assert_eq!(nvme.free_bytes.validity, Validity::Unsupported);
     assert_eq!(nvme.interface, inv_text("NVMe"));
     let sdb = &snap.disks[3];
     assert_eq!(sdb.interface, inv_text("USB"));
