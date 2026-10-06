@@ -539,14 +539,13 @@ mod delegate {
             ]
         );
 
-        for ix in 0..d.row_count() {
-            let size = d.name_cell(ix).icon_size;
-            let want = if kinds[ix] == RowKind::App {
+        for (ix, kind) in kinds.iter().enumerate() {
+            let want = if *kind == RowKind::App {
                 IconSlot::Large
             } else {
                 IconSlot::Small
             };
-            assert_eq!(size, want, "row {ix}");
+            assert_eq!(d.name_cell(ix).icon_size, want, "row {ix}");
         }
 
         let app = d.name_cell(1);
@@ -744,14 +743,14 @@ mod delegate {
         vcx.update(|window, cx| window.draw(cx).clear(cx));
     }
 
-    fn open_host(
-        cx: &mut TestAppContext,
-    ) -> (
+    type Opened<'a> = (
         Entity<TlTreeTable<ProcessDelegate>>,
         Rc<Cell<u32>>,
         Arc<FakeEngine>,
-        &mut VisualTestContext,
-    ) {
+        &'a mut VisualTestContext,
+    );
+
+    fn open_host(cx: &mut TestAppContext) -> Opened<'_> {
         setup(cx);
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
