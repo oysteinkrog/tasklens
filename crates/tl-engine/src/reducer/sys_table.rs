@@ -2,16 +2,27 @@
 //!
 //! The engine sorts, filters and flattens the three system tables from one `SysTableQuery`. The
 //! reducer calls `build` whenever the matching component or its query changes (E09-027). E09
-//! owns this file and its signatures; E14-A1 fills the body of `build`.
+//! owns this file and its signatures; E14-A1 fills the Services body and the shared helpers,
+//! E14-005 and E14-006 add Startup and Connections.
+//!
+//! Reducer code: never await, never do I/O here.
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
+use tl_model::health::ManagerState;
+use tl_model::ids::ProcessKey;
 use tl_model::settings::EngineSettings;
-use tl_model::snapshot::{ConnectionsSnapshot, ProcessSnapshot, ServicesSnapshot, StartupSnapshot};
-use tl_model::table::{
-    ConnColumn, ServiceColumn, StartupColumn, SysColumnId, SysRow, SysSortSpec, SysTable,
-    SysTableQuery,
+use tl_model::snapshot::{
+    ConnectionsSnapshot, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
+    StartupSnapshot, StartupType, UnitRecord,
 };
+use tl_model::table::{
+    ConnColumn, Manager, ServiceColumn, ServiceFilter, ServiceStateFilter, StartupColumn,
+    SysColumnId, SysNodeId, SysRow, SysSortSpec, SysTable, SysTableQuery, Total, UnitRef, UnitType,
+};
+use tl_model::validity::Validity;
 
 /// Everything `build` reads. Borrowed from the reducer's current state.
 pub struct SysTableInput<'a> {
@@ -33,12 +44,11 @@ pub struct SysTableOutput {
     pub query_generation: u64,
 }
 
-/// Filled by E14-A1. Until then returns empty rows with the query's generation.
+/// The rows of `query.table`. Startup and Connections return no rows until E14-005 and E14-006.
 pub fn build(input: &SysTableInput<'_>, query: &SysTableQuery) -> SysTableOutput {
-    let _ = input;
-    SysTableOutput {
-        rows: Arc::from([]),
-        query_generation: query.generation,
+    match query.table {
+        SysTable::Services => build_services(input, query).0,
+        SysTable::Startup | SysTable::Connections => finish(Vec::new(), query),
     }
 }
 
@@ -60,9 +70,537 @@ pub fn default_sort(table: SysTable) -> SysSortSpec {
     }
 }
 
+// ---- Shared helpers (all three tables) ----
+
+/// The output rows, stamped with the query's generation.
+fn finish(rows: Vec<SysRow>, query: &SysTableQuery) -> SysTableOutput {
+    SysTableOutput {
+        rows: rows.into(),
+        query_generation: query.generation,
+    }
+}
+
+/// Stable sort of record indexes by `primary`, with a final tie-break on the node id order
+/// `node`, so rows with equal sort values keep one order across rebuilds.
+fn sort_indices(
+    idx: &mut [u32],
+    primary: impl Fn(usize, usize) -> Ordering,
+    node: impl Fn(usize, usize) -> Ordering,
+) {
+    idx.sort_by(|&a, &b| {
+        let (a, b) = (a as usize, b as usize);
+        primary(a, b).then_with(|| node(a, b))
+    });
+}
+
+/// `ord` in the chosen direction.
+fn directed(ord: Ordering, ascending: bool) -> Ordering {
+    if ascending { ord } else { ord.reverse() }
+}
+
+/// Order of two optional sort values in the chosen direction. `None` sorts last in both
+/// directions.
+fn absent_last<T>(
+    a: Option<T>,
+    b: Option<T>,
+    ascending: bool,
+    cmp: impl FnOnce(T, T) -> Ordering,
+) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => directed(cmp(a, b), ascending),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// The value when its validity is `Valid`, else `None`, so it sorts last.
+fn valid<T: Copy>(t: &Total<T>) -> Option<T> {
+    (t.validity == Validity::Valid).then_some(t.value)
+}
+
+/// Case-insensitive text order, without allocating. Ties break by byte order, so the order
+/// stays total.
+fn cmp_text(a: &str, b: &str) -> Ordering {
+    a.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase))
+        .then_with(|| a.cmp(b))
+}
+
+/// True when `needle`, already lowercase, occurs in `hay` ignoring case. ASCII text, the common
+/// case, is matched without allocating. An empty needle matches everything.
+fn contains_lower(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if hay.is_ascii() {
+        let needle = needle.as_bytes();
+        hay.as_bytes().windows(needle.len()).any(|w| {
+            w.iter()
+                .zip(needle)
+                .all(|(h, n)| h.to_ascii_lowercase() == *n)
+        })
+    } else {
+        hay.to_lowercase().contains(needle)
+    }
+}
+
+/// `n` in decimal, written into `buf`.
+fn decimal(mut n: u32, buf: &mut [u8; 10]) -> &str {
+    let mut i = buf.len();
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    std::str::from_utf8(&buf[i..]).unwrap_or_default()
+}
+
+// ---- Services ----
+
+/// The Services rows plus the `ServicesSnapshot.counts` for the same query, from one pass.
+/// `build` keeps only the rows; the reducer calls this to store both.
+///
+/// Counts cover unit rows after all filters, including units of collapsed groups (UI-SYS-022).
+pub fn build_services(
+    input: &SysTableInput<'_>,
+    query: &SysTableQuery,
+) -> (SysTableOutput, ServiceCounts) {
+    let default_filter;
+    let filter = match &query.services {
+        Some(f) => f,
+        None => {
+            default_filter = ServiceFilter::default();
+            &default_filter
+        }
+    };
+    let text: &str = &query.filter;
+    let (column, ascending) = match query.sort.column {
+        SysColumnId::Services(c) => (c, query.sort.ascending),
+        _ => (ServiceColumn::Name, true),
+    };
+
+    let mut group_open = [false; 2];
+    let mut unit_open: FxHashSet<&UnitRef> = FxHashSet::default();
+    for node in query.expanded.iter() {
+        match node {
+            SysNodeId::ServiceGroup(m) => group_open[manager_slot(*m)] = true,
+            SysNodeId::Unit(u) => {
+                unit_open.insert(u);
+            }
+            _ => {}
+        }
+    }
+
+    let units = &input.services.units;
+    let mut rows = Vec::new();
+    let mut counts = ServiceCounts::default();
+    let mut members: Vec<u32> = Vec::new();
+    let mut children: Vec<(ProcessKey, u32)> = Vec::new();
+
+    for manager in [Manager::System, Manager::User] {
+        let slot = manager_slot(manager);
+        let shown = match manager {
+            Manager::System => filter.system,
+            Manager::User => filter.user,
+        };
+        if !shown {
+            continue;
+        }
+        let group = SysNodeId::ServiceGroup(manager);
+        if input.services.managers[slot] == ManagerState::Unavailable {
+            rows.push(SysRow {
+                node: group,
+                depth: 0,
+                expanded: group_open[slot],
+                has_children: false,
+                record: None,
+            });
+            continue;
+        }
+
+        members.clear();
+        for (i, u) in units.iter().enumerate() {
+            if u.unit.manager == manager && unit_passes(u, filter, text) {
+                count_unit(&mut counts, u.status);
+                members.push(i as u32);
+            }
+        }
+        // UI-SYS-014: a group the filters empty is hidden.
+        if members.is_empty() {
+            continue;
+        }
+        rows.push(SysRow {
+            node: group,
+            depth: 0,
+            expanded: group_open[slot],
+            has_children: true,
+            record: None,
+        });
+        if !group_open[slot] {
+            continue;
+        }
+
+        sort_indices(
+            &mut members,
+            |a, b| cmp_units(&units[a], &units[b], column, ascending),
+            |a, b| units[a].unit.cmp(&units[b].unit),
+        );
+        for &i in &members {
+            let u = &units[i as usize];
+            let open = unit_open.contains(&u.unit);
+            rows.push(SysRow {
+                node: SysNodeId::Unit(u.unit.clone()),
+                depth: 1,
+                expanded: open,
+                has_children: u.has_cgroup_procs,
+                record: Some(i),
+            });
+            if open {
+                push_children(&mut rows, &mut children, u, input.processes);
+            }
+        }
+    }
+
+    (finish(rows, query), counts)
+}
+
+/// Index of `manager` in `ServicesSnapshot.managers`: 0 System, 1 User.
+fn manager_slot(manager: Manager) -> usize {
+    match manager {
+        Manager::System => 0,
+        Manager::User => 1,
+    }
+}
+
+/// Child process rows of an expanded unit: each `cgroup_pids` key found in the process
+/// snapshot, by PID ascending whatever the query sort (UI-SYS-013).
+fn push_children(
+    rows: &mut Vec<SysRow>,
+    scratch: &mut Vec<(ProcessKey, u32)>,
+    unit: &UnitRecord,
+    processes: &ProcessSnapshot,
+) {
+    scratch.clear();
+    for &key in unit.cgroup_pids.iter() {
+        if let Ok(r) = processes.records.binary_search_by(|p| p.key.cmp(&key)) {
+            scratch.push((key, r as u32));
+        }
+    }
+    scratch.sort_unstable_by_key(|&(key, _)| (key.pid, key));
+    for &(key, r) in scratch.iter() {
+        rows.push(SysRow {
+            node: SysNodeId::UnitProcess(unit.unit.clone(), key),
+            depth: 2,
+            expanded: false,
+            has_children: false,
+            record: Some(r),
+        });
+    }
+}
+
+/// Unit type AND state AND text filter. The manager toggle is applied by the caller.
+fn unit_passes(u: &UnitRecord, filter: &ServiceFilter, text: &str) -> bool {
+    filter.unit_types.contains(&u.kind)
+        && (filter.states.is_empty() || filter.states.contains(&state_class(u)))
+        && (text.is_empty() || unit_text_matches(u, text))
+}
+
+/// SYS-004 classes, in Mission Center order: running (ActiveState `active` or `reloading`),
+/// failed, stopped (enabled and not running), otherwise disabled.
+fn state_class(u: &UnitRecord) -> ServiceStateFilter {
+    match u.status {
+        ServiceStatus::Running | ServiceStatus::Active | ServiceStatus::Reloading => {
+            ServiceStateFilter::Running
+        }
+        ServiceStatus::Failed => ServiceStateFilter::Failed,
+        _ if matches!(
+            u.startup,
+            StartupType::Enabled | StartupType::EnabledRuntime
+        ) =>
+        {
+            ServiceStateFilter::Stopped
+        }
+        _ => ServiceStateFilter::Disabled,
+    }
+}
+
+/// UI-SYS-022: running counts ActiveState `active` and `reloading`, stopped counts `inactive`
+/// and `failed`; every other state counts in the total only.
+fn count_unit(counts: &mut ServiceCounts, status: ServiceStatus) {
+    counts.total += 1;
+    match status {
+        ServiceStatus::Running | ServiceStatus::Active | ServiceStatus::Reloading => {
+            counts.running += 1;
+        }
+        ServiceStatus::Stopped | ServiceStatus::Failed => counts.stopped += 1,
+        ServiceStatus::Starting | ServiceStatus::Stopping | ServiceStatus::Maintenance => {}
+    }
+}
+
+/// True when the lowercase `text` occurs in any text column of the unit (APP-028, R-167).
+///
+/// Active since is not matched: the column shows local time, and this reducer code has no
+/// time zone to format it with.
+fn unit_text_matches(u: &UnitRecord, text: &str) -> bool {
+    let mut pid = [0u8; 10];
+    contains_lower(&u.unit.name, text)
+        || contains_lower(&u.description, text)
+        || contains_lower(status_word(u.status), text)
+        || contains_lower(startup_word(u.startup), text)
+        || (u.main_pid != 0 && contains_lower(decimal(u.main_pid, &mut pid), text))
+        || contains_lower(&u.user, text)
+        || contains_lower(&u.path, text)
+        || contains_lower(manager_word(u.unit.manager), text)
+        || contains_lower(unit_type_word(u.kind), text)
+        || contains_lower(&u.sub_state, text)
+        || contains_lower(&u.load_state, text)
+        || u.unit_file
+            .as_deref()
+            .is_some_and(|f| contains_lower(f, text))
+        || u.triggered_by.iter().any(|t| contains_lower(t, text))
+}
+
+/// The Status column word (SYS-003).
+fn status_word(s: ServiceStatus) -> &'static str {
+    match s {
+        ServiceStatus::Running => "Running",
+        ServiceStatus::Active => "Active",
+        ServiceStatus::Starting => "Starting",
+        ServiceStatus::Stopping => "Stopping",
+        ServiceStatus::Reloading => "Reloading",
+        ServiceStatus::Stopped => "Stopped",
+        ServiceStatus::Failed => "Failed",
+        ServiceStatus::Maintenance => "Maintenance",
+    }
+}
+
+/// The Startup type column word (SYS-003).
+fn startup_word(s: StartupType) -> &'static str {
+    match s {
+        StartupType::Enabled => "Enabled",
+        StartupType::EnabledRuntime => "Enabled (runtime)",
+        StartupType::Disabled => "Disabled",
+        StartupType::Static => "Static",
+        StartupType::Indirect => "Indirect",
+        StartupType::Masked => "Masked",
+        StartupType::Generated => "Generated",
+        StartupType::Transient => "Transient",
+        StartupType::Alias => "Alias",
+        StartupType::Linked => "Linked",
+        StartupType::NoUnitFile => "-",
+    }
+}
+
+/// The Manager column word (UI-SYS-013).
+fn manager_word(m: Manager) -> &'static str {
+    match m {
+        Manager::System => "System",
+        Manager::User => "User",
+    }
+}
+
+/// The Unit type column word (UI-SYS-013).
+fn unit_type_word(t: UnitType) -> &'static str {
+    match t {
+        UnitType::Service => "Service",
+        UnitType::Socket => "Socket",
+        UnitType::Timer => "Timer",
+        UnitType::Mount => "Mount",
+        UnitType::Automount => "Automount",
+        UnitType::Path => "Path",
+        UnitType::Target => "Target",
+        UnitType::Swap => "Swap",
+        UnitType::Slice => "Slice",
+        UnitType::Scope => "Scope",
+    }
+}
+
+/// Order of two units in `column`. Text columns compare case-insensitively; numbers
+/// numerically with non-`Valid` values last; Status and Startup type in the order of their
+/// SYS-003 mapping tables, which is the enum order.
+fn cmp_units(a: &UnitRecord, b: &UnitRecord, column: ServiceColumn, ascending: bool) -> Ordering {
+    use ServiceColumn as C;
+    let text = |x: &str, y: &str| directed(cmp_text(x, y), ascending);
+    match column {
+        C::Name => text(&a.unit.name, &b.unit.name),
+        C::DisplayName | C::Description => text(&a.description, &b.description),
+        C::Status => directed((a.status as u8).cmp(&(b.status as u8)), ascending),
+        C::StartupType => directed((a.startup as u8).cmp(&(b.startup as u8)), ascending),
+        C::Pid => directed(a.main_pid.cmp(&b.main_pid), ascending),
+        C::User => text(&a.user, &b.user),
+        C::Path => text(&a.path, &b.path),
+        C::Manager => text(manager_word(a.unit.manager), manager_word(b.unit.manager)),
+        C::UnitType => text(unit_type_word(a.kind), unit_type_word(b.kind)),
+        C::SubState => text(&a.sub_state, &b.sub_state),
+        C::LoadState => text(&a.load_state, &b.load_state),
+        C::Cpu => absent_last(
+            valid(&a.cpu_pct).filter(|v| !v.is_nan()),
+            valid(&b.cpu_pct).filter(|v| !v.is_nan()),
+            ascending,
+            |x: f32, y: f32| x.total_cmp(&y),
+        ),
+        C::Memory => absent_last(
+            valid(&a.memory_bytes),
+            valid(&b.memory_bytes),
+            ascending,
+            |x: u64, y: u64| x.cmp(&y),
+        ),
+        C::Disk => absent_last(
+            valid(&a.disk_bps).filter(|v| !v.is_nan()),
+            valid(&b.disk_bps).filter(|v| !v.is_nan()),
+            ascending,
+            |x: f64, y: f64| x.total_cmp(&y),
+        ),
+        C::Tasks => absent_last(
+            valid(&a.tasks),
+            valid(&b.tasks),
+            ascending,
+            |x: u64, y: u64| x.cmp(&y),
+        ),
+        C::ActiveSince => absent_last(
+            a.active_since_us,
+            b.active_since_us,
+            ascending,
+            |x: u64, y: u64| x.cmp(&y),
+        ),
+        C::UnitFile => absent_last(
+            a.unit_file.as_deref(),
+            b.unit_file.as_deref(),
+            ascending,
+            cmp_text,
+        ),
+        C::TriggeredBy => directed(cmp_lists(&a.triggered_by, &b.triggered_by), ascending),
+    }
+}
+
+/// Element-wise `cmp_text` order of two id lists; a shorter prefix sorts first.
+fn cmp_lists(a: &[Arc<str>], b: &[Arc<str>]) -> Ordering {
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| cmp_text(x, y))
+        .find(|o| o.is_ne())
+        .unwrap_or_else(|| a.len().cmp(&b.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Instant;
+
+    use smallvec::SmallVec;
+    use tl_model::ids::GroupKey;
+    use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::time::BootId;
+    use tl_model::validity::FieldValidity;
+
+    fn unit(manager: Manager, name: &str, status: ServiceStatus) -> UnitRecord {
+        UnitRecord {
+            unit: UnitRef {
+                manager,
+                name: name.into(),
+            },
+            kind: UnitType::from_unit_name(name).unwrap_or(UnitType::Service),
+            description: "".into(),
+            status,
+            sub_state: "".into(),
+            load_state: "loaded".into(),
+            startup: StartupType::Static,
+            main_pid: 0,
+            user: "root".into(),
+            path: "".into(),
+            unit_file: None,
+            active_since_us: None,
+            triggered_by: Arc::from([]),
+            control_group: None,
+            can_reload: false,
+            has_cgroup_procs: false,
+            cgroup_pids: Arc::from([]),
+            cpu_pct: Total {
+                value: 0.0,
+                validity: Validity::Missing,
+            },
+            memory_bytes: Total {
+                value: 0,
+                validity: Validity::Missing,
+            },
+            disk_bps: Total {
+                value: 0.0,
+                validity: Validity::Missing,
+            },
+            tasks: Total {
+                value: 0,
+                validity: Validity::Missing,
+            },
+        }
+    }
+
+    fn sys(name: &str) -> UnitRecord {
+        unit(Manager::System, name, ServiceStatus::Running)
+    }
+
+    fn usr(name: &str) -> UnitRecord {
+        unit(Manager::User, name, ServiceStatus::Running)
+    }
+
+    fn key(pid: u32, start_ticks: u64) -> ProcessKey {
+        ProcessKey {
+            start_ticks,
+            boot_id: BootId(1),
+            pid,
+        }
+    }
+
+    fn proc_rec(key: ProcessKey) -> ProcessRecord {
+        ProcessRecord {
+            key,
+            ppid: 1,
+            uid: 0,
+            meta: Arc::new(ProcessMeta {
+                comm: "p".into(),
+                name: "p".into(),
+                exe: None,
+                cmdline: None,
+                user: "root".into(),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                search_lower: "p".into(),
+            }),
+            group: GroupKey(0),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn snapshot(units: Vec<UnitRecord>) -> ServicesSnapshot {
+        ServicesSnapshot {
+            units: units.into(),
+            managers: [ManagerState::Connected; 2],
+            ..ServicesSnapshot::default()
+        }
+    }
 
     fn query(table: SysTable, generation: u64) -> SysTableQuery {
         SysTableQuery {
@@ -75,9 +613,381 @@ mod tests {
         }
     }
 
+    /// A Services query with both groups expanded.
+    fn open_query() -> SysTableQuery {
+        SysTableQuery {
+            expanded: Arc::from([
+                SysNodeId::ServiceGroup(Manager::System),
+                SysNodeId::ServiceGroup(Manager::User),
+            ]),
+            ..query(SysTable::Services, 1)
+        }
+    }
+
+    fn with_states(states: &[ServiceStateFilter]) -> SysTableQuery {
+        SysTableQuery {
+            services: Some(ServiceFilter {
+                states: SmallVec::from_slice(states),
+                ..ServiceFilter::default()
+            }),
+            ..open_query()
+        }
+    }
+
+    fn run_with(
+        services: &ServicesSnapshot,
+        processes: &ProcessSnapshot,
+        q: &SysTableQuery,
+    ) -> (SysTableOutput, ServiceCounts) {
+        let startup = StartupSnapshot::default();
+        let connections = ConnectionsSnapshot::default();
+        let settings = EngineSettings::default();
+        let input = SysTableInput {
+            services,
+            startup: &startup,
+            connections: &connections,
+            processes,
+            settings: &settings,
+        };
+        build_services(&input, q)
+    }
+
+    fn run(services: &ServicesSnapshot, q: &SysTableQuery) -> (SysTableOutput, ServiceCounts) {
+        run_with(services, &ProcessSnapshot::default(), q)
+    }
+
+    /// Unit names of the unit rows, in order.
+    fn unit_names(out: &SysTableOutput) -> Vec<&str> {
+        out.rows
+            .iter()
+            .filter_map(|r| match &r.node {
+                SysNodeId::Unit(u) => Some(&*u.name),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
-    fn stub_echoes_generation() {
-        let services = ServicesSnapshot::default();
+    fn services_rows_order_and_depth() {
+        let s = snapshot(vec![
+            usr("b.service"),
+            sys("c.service"),
+            sys("a.service"),
+            usr("a.service"),
+            sys("b.service"),
+        ]);
+        let (out, _) = run(&s, &open_query());
+        let depths: Vec<u8> = out.rows.iter().map(|r| r.depth).collect();
+        assert_eq!(depths, [0, 1, 1, 1, 0, 1, 1]);
+        assert_eq!(out.rows[0].node, SysNodeId::ServiceGroup(Manager::System));
+        assert_eq!(out.rows[4].node, SysNodeId::ServiceGroup(Manager::User));
+        assert!(out.rows[0].expanded && out.rows[0].has_children);
+        assert_eq!(
+            unit_names(&out),
+            [
+                "a.service",
+                "b.service",
+                "c.service",
+                "a.service",
+                "b.service"
+            ]
+        );
+        // `record` indexes the published unit array.
+        assert_eq!(out.rows[1].record, Some(2));
+        assert_eq!(out.rows[5].record, Some(3));
+    }
+
+    #[test]
+    fn services_collapsed_group_counts() {
+        let s = snapshot(vec![
+            sys("a.service"),
+            sys("b.service"),
+            sys("c.service"),
+            usr("d.service"),
+            usr("e.service"),
+        ]);
+        let q = SysTableQuery {
+            expanded: Arc::from([SysNodeId::ServiceGroup(Manager::User)]),
+            ..query(SysTable::Services, 1)
+        };
+        let (out, counts) = run(&s, &q);
+        assert_eq!(out.rows[0].node, SysNodeId::ServiceGroup(Manager::System));
+        assert!(!out.rows[0].expanded);
+        assert!(out.rows[0].has_children);
+        assert_eq!(unit_names(&out), ["d.service", "e.service"]);
+        assert_eq!(counts.total, 5);
+        assert_eq!(counts.running, 5);
+    }
+
+    #[test]
+    fn services_state_filter_or() {
+        let mut enabled = unit(Manager::System, "c.service", ServiceStatus::Stopped);
+        enabled.startup = StartupType::Enabled;
+        let s = snapshot(vec![
+            unit(Manager::System, "a.service", ServiceStatus::Running),
+            unit(Manager::System, "b.service", ServiceStatus::Failed),
+            enabled,
+            unit(Manager::System, "d.service", ServiceStatus::Stopped),
+            unit(Manager::User, "e.service", ServiceStatus::Failed),
+        ]);
+        let (out, _) = run(&s, &with_states(&[ServiceStateFilter::Failed]));
+        assert_eq!(unit_names(&out), ["b.service", "e.service"]);
+
+        let (out, _) = run(
+            &s,
+            &with_states(&[ServiceStateFilter::Running, ServiceStateFilter::Stopped]),
+        );
+        assert_eq!(unit_names(&out), ["a.service", "c.service"]);
+
+        let (out, _) = run(&s, &with_states(&[ServiceStateFilter::Disabled]));
+        assert_eq!(unit_names(&out), ["d.service"]);
+
+        // No state selected means all states.
+        let (out, _) = run(&s, &with_states(&[]));
+        assert_eq!(unit_names(&out).len(), 5);
+    }
+
+    #[test]
+    fn services_state_and_text_filter() {
+        let mut agent = unit(Manager::User, "agent.socket", ServiceStatus::Failed);
+        agent.description = "SSH key agent".into();
+        let s = snapshot(vec![
+            unit(Manager::System, "sshd.service", ServiceStatus::Running),
+            unit(Manager::System, "sshfs.service", ServiceStatus::Stopped),
+            unit(Manager::System, "cups.service", ServiceStatus::Running),
+            agent,
+        ]);
+        let q = SysTableQuery {
+            filter: Arc::from("ssh"),
+            ..with_states(&[ServiceStateFilter::Running, ServiceStateFilter::Failed])
+        };
+        let (out, counts) = run(&s, &q);
+        assert_eq!(unit_names(&out), ["sshd.service", "agent.socket"]);
+        assert_eq!(counts.total, 2);
+    }
+
+    #[test]
+    fn services_text_filter_columns() {
+        let mut u = sys("a.service");
+        u.main_pid = 4321;
+        u.unit_file = Some("/usr/lib/systemd/system/a.service".into());
+        u.triggered_by = Arc::from([Arc::from("a.timer")]);
+        u.startup = StartupType::EnabledRuntime;
+        let s = snapshot(vec![u]);
+        for text in [
+            "432",
+            "/usr/lib",
+            "a.timer",
+            "(runtime)",
+            "running",
+            "system",
+            "service",
+        ] {
+            let q = SysTableQuery {
+                filter: Arc::from(text),
+                ..open_query()
+            };
+            assert_eq!(unit_names(&run(&s, &q).0).len(), 1, "filter {text:?}");
+        }
+        let q = SysTableQuery {
+            filter: Arc::from("nomatch"),
+            ..open_query()
+        };
+        assert!(unit_names(&run(&s, &q).0).is_empty());
+    }
+
+    #[test]
+    fn services_unit_type_filter() {
+        let s = snapshot(vec![sys("a.service"), sys("b.timer"), sys("c.socket")]);
+        let q = SysTableQuery {
+            services: Some(ServiceFilter {
+                unit_types: SmallVec::from_slice(&[UnitType::Timer]),
+                ..ServiceFilter::default()
+            }),
+            ..open_query()
+        };
+        let (out, _) = run(&s, &q);
+        assert_eq!(unit_names(&out), ["b.timer"]);
+
+        // Default types: service, socket, timer, mount.
+        let s = snapshot(vec![sys("a.service"), sys("b.target")]);
+        assert_eq!(unit_names(&run(&s, &open_query()).0), ["a.service"]);
+    }
+
+    #[test]
+    fn services_manager_toggle_off() {
+        let s = snapshot(vec![sys("a.service"), usr("b.service")]);
+        let q = SysTableQuery {
+            services: Some(ServiceFilter {
+                system: false,
+                ..ServiceFilter::default()
+            }),
+            ..open_query()
+        };
+        let (out, counts) = run(&s, &q);
+        assert_eq!(out.rows[0].node, SysNodeId::ServiceGroup(Manager::User));
+        assert_eq!(unit_names(&out), ["b.service"]);
+        assert_eq!(counts.total, 1);
+    }
+
+    #[test]
+    fn services_unavailable_group_row() {
+        let mut s = snapshot(vec![sys("a.service"), usr("b.service")]);
+        s.managers[1] = ManagerState::Unavailable;
+        let (out, counts) = run(&s, &open_query());
+        let user = out
+            .rows
+            .iter()
+            .find(|r| r.node == SysNodeId::ServiceGroup(Manager::User))
+            .expect("user group row");
+        assert!(!user.has_children);
+        assert_eq!(unit_names(&out), ["a.service"]);
+        assert_eq!(counts.total, 1);
+    }
+
+    #[test]
+    fn services_empty_group_hidden() {
+        let s = snapshot(vec![sys("sshd.service"), usr("cups.service")]);
+        let q = SysTableQuery {
+            filter: Arc::from("sshd"),
+            ..open_query()
+        };
+        let (out, _) = run(&s, &q);
+        assert!(
+            !out.rows
+                .iter()
+                .any(|r| r.node == SysNodeId::ServiceGroup(Manager::User))
+        );
+        assert_eq!(out.rows.len(), 2);
+    }
+
+    #[test]
+    fn services_child_rows_by_pid() {
+        // Key order (start_ticks first) differs from PID order.
+        let (k300, k100, k200, gone) = (key(300, 1), key(100, 2), key(200, 3), key(50, 4));
+        let mut u = sys("a.service");
+        u.has_cgroup_procs = true;
+        u.cgroup_pids = Arc::from([k300, k100, k200, gone]);
+        let s = snapshot(vec![u, sys("b.service")]);
+        let processes = ProcessSnapshot {
+            records: Arc::from([proc_rec(k300), proc_rec(k100), proc_rec(k200)]),
+            ..ProcessSnapshot::default()
+        };
+        let a = UnitRef {
+            manager: Manager::System,
+            name: "a.service".into(),
+        };
+        let q = SysTableQuery {
+            sort: SysSortSpec {
+                column: SysColumnId::Services(ServiceColumn::Name),
+                ascending: false,
+            },
+            expanded: Arc::from([
+                SysNodeId::ServiceGroup(Manager::System),
+                SysNodeId::Unit(a.clone()),
+            ]),
+            ..query(SysTable::Services, 1)
+        };
+        let (out, counts) = run_with(&s, &processes, &q);
+        assert_eq!(unit_names(&out), ["b.service", "a.service"]);
+        let unit_row = &out.rows[2];
+        assert!(unit_row.expanded && unit_row.has_children);
+        let children: Vec<(u32, Option<u32>)> = out
+            .rows
+            .iter()
+            .filter_map(|r| match &r.node {
+                SysNodeId::UnitProcess(u, k) if *u == a => Some((k.pid, r.record)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(children, [(100, Some(1)), (200, Some(2)), (300, Some(0))]);
+        assert!(out.rows[3..].iter().all(|r| r.depth == 2));
+        assert_eq!(counts.total, 2, "child rows are not counted");
+    }
+
+    #[test]
+    fn services_numeric_sort() {
+        let mut units = Vec::new();
+        for (name, pid) in [
+            ("a.service", 1000),
+            ("b.service", 0),
+            ("c.service", 99),
+            ("d.service", 5),
+        ] {
+            let mut u = sys(name);
+            u.main_pid = pid;
+            units.push(u);
+        }
+        let s = snapshot(units);
+        let q = SysTableQuery {
+            sort: SysSortSpec {
+                column: SysColumnId::Services(ServiceColumn::Pid),
+                ascending: true,
+            },
+            ..open_query()
+        };
+        let (out, _) = run(&s, &q);
+        assert_eq!(
+            unit_names(&out),
+            ["b.service", "d.service", "c.service", "a.service"]
+        );
+    }
+
+    #[test]
+    fn services_invalid_values_sort_last() {
+        let mut units = Vec::new();
+        for (name, mem, validity) in [
+            ("a.service", 10, Validity::Missing),
+            ("b.service", 300, Validity::Valid),
+            ("c.service", 20, Validity::WarmingUp),
+            ("d.service", 100, Validity::Valid),
+        ] {
+            let mut u = sys(name);
+            u.memory_bytes = Total {
+                value: mem,
+                validity,
+            };
+            units.push(u);
+        }
+        let s = snapshot(units);
+        for (ascending, want) in [
+            (true, ["d.service", "b.service", "a.service", "c.service"]),
+            (false, ["b.service", "d.service", "a.service", "c.service"]),
+        ] {
+            let q = SysTableQuery {
+                sort: SysSortSpec {
+                    column: SysColumnId::Services(ServiceColumn::Memory),
+                    ascending,
+                },
+                ..open_query()
+            };
+            assert_eq!(unit_names(&run(&s, &q).0), want);
+        }
+    }
+
+    #[test]
+    fn services_counts_rules() {
+        let s = snapshot(vec![
+            unit(Manager::System, "a.service", ServiceStatus::Running),
+            unit(Manager::System, "b.service", ServiceStatus::Reloading),
+            unit(Manager::System, "c.service", ServiceStatus::Starting),
+            unit(Manager::User, "d.service", ServiceStatus::Stopped),
+            unit(Manager::User, "e.service", ServiceStatus::Failed),
+        ]);
+        let (_, counts) = run(&s, &query(SysTable::Services, 1));
+        assert_eq!(
+            counts,
+            ServiceCounts {
+                total: 5,
+                running: 2,
+                stopped: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn sys_query_generation_stamped() {
+        let services = snapshot(vec![sys("a.service")]);
         let startup = StartupSnapshot::default();
         let connections = ConnectionsSnapshot::default();
         let processes = ProcessSnapshot::default();
@@ -90,9 +1000,48 @@ mod tests {
             settings: &settings,
         };
         for table in [SysTable::Services, SysTable::Startup, SysTable::Connections] {
-            let out = build(&input, &query(table, 9));
-            assert!(out.rows.is_empty());
-            assert_eq!(out.query_generation, 9);
+            assert_eq!(build(&input, &query(table, 7)).query_generation, 7);
+        }
+        assert_eq!(build(&input, &query(SysTable::Services, 7)).rows.len(), 1);
+        assert!(build(&input, &query(SysTable::Startup, 7)).rows.is_empty());
+    }
+
+    #[test]
+    fn services_projection_10k_units_under_5ms() {
+        let mut units = Vec::with_capacity(10_000);
+        for i in 0..10_000u32 {
+            let manager = if i % 2 == 0 {
+                Manager::System
+            } else {
+                Manager::User
+            };
+            let mut u = unit(
+                manager,
+                &format!("unit-{:05}.service", (i * 7919) % 10_000),
+                ServiceStatus::Running,
+            );
+            u.description = format!("Synthetic Unit {i}").into();
+            u.main_pid = i;
+            units.push(u);
+        }
+        let s = snapshot(units);
+        let q = open_query();
+        let filtered = SysTableQuery {
+            filter: Arc::from("unit 9"),
+            ..open_query()
+        };
+        let _ = run(&s, &q);
+        let start = Instant::now();
+        let (out, _) = run(&s, &q);
+        let plain = start.elapsed();
+        let start = Instant::now();
+        let _ = run(&s, &filtered);
+        let with_text = start.elapsed();
+        assert_eq!(out.rows.len(), 10_002);
+        println!("10k units: {plain:?} sorted by name, {with_text:?} with a text filter");
+        if !cfg!(debug_assertions) {
+            assert!(plain.as_millis() < 5, "{plain:?}");
+            assert!(with_text.as_millis() < 5, "{with_text:?}");
         }
     }
 
