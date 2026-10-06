@@ -86,6 +86,7 @@ tl-history = { path = "crates/tl-history" }
 
 [profile.dev]
 opt-level = 1
+debug = "line-tables-only"   # keeps target/ small; backtraces keep file and line
 [profile.dev.package."*"]
 opt-level = 2                 # GPUI and wgpu are too slow at opt-level 0 for UI work
 
