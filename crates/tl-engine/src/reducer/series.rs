@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
+use tl_model::health::SourceId;
 use tl_model::ids::SeriesId;
 use tl_model::series::{Sample, SampleFlags, SeriesRing, SeriesView};
 use tl_model::snapshot::{ComponentHeader, SeriesSet};
@@ -30,6 +31,9 @@ pub struct SeriesStore {
     /// Set by `mark_gap_all`; a series created before the next `publish` also starts with
     /// `GAP_BEFORE`.
     pending_gap: bool,
+    /// The source whose update is being applied. Appends tag their series with it, for
+    /// `mark_gap_source` (R-289).
+    source: Option<SourceId>,
     /// The last published set, returned again when nothing changed.
     current: Option<Arc<SeriesSet>>,
 }
@@ -37,6 +41,8 @@ pub struct SeriesStore {
 struct Entry {
     ring: SeriesRing,
     period_ns: u64,
+    /// The source of the newest append (R-272).
+    source: Option<SourceId>,
     /// Cached until the next append or stale change. `None` means the series changed.
     view: Option<Arc<SeriesView>>,
     /// The next appended sample gets `GAP_BEFORE`.
@@ -61,10 +67,11 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(period_ns: u64, gap_next: bool) -> Entry {
+    fn new(period_ns: u64, gap_next: bool, source: Option<SourceId>) -> Entry {
         Entry {
             ring: SeriesRing::with_capacity(SeriesStore::fast_capacity(period_ns)),
             period_ns,
+            source,
             view: None,
             gap_next,
             stale: false,
@@ -159,6 +166,7 @@ impl SeriesStore {
         SeriesStore {
             rings: FxHashMap::default(),
             pending_gap: false,
+            source: None,
             current: None,
         }
     }
@@ -179,10 +187,12 @@ impl SeriesStore {
         flags: SampleFlags,
     ) {
         let pending_gap = self.pending_gap;
+        let source = self.source;
         let entry = self
             .rings
             .entry(id)
-            .or_insert_with(|| Entry::new(period_ns, pending_gap));
+            .or_insert_with(|| Entry::new(period_ns, pending_gap, source));
+        entry.source = source;
         if entry.period_ns != period_ns {
             entry.period_ns = period_ns;
             entry.gap_next = true;
@@ -219,6 +229,22 @@ impl SeriesStore {
         self.pending_gap = true;
         for entry in self.rings.values_mut() {
             entry.gap_next = true;
+        }
+    }
+
+    /// Sets the source that the next appends come from: `source_of()` of the update being
+    /// applied.
+    pub fn set_source(&mut self, source: Option<SourceId>) {
+        self.source = source;
+    }
+
+    /// The next sample of every series that `source` last appended to gets `GAP_BEFORE` (a
+    /// worker restart, R-289).
+    pub fn mark_gap_source(&mut self, source: SourceId) {
+        for entry in self.rings.values_mut() {
+            if entry.source == Some(source) {
+                entry.gap_next = true;
+            }
         }
     }
 
@@ -434,6 +460,33 @@ mod tests {
         assert!(!last.is_valid());
         assert_eq!(last.value, 0.0);
         assert!(!last.flags.contains(SampleFlags::GAP_BEFORE));
+    }
+
+    #[test]
+    fn gap_source_marks_only_that_source() {
+        let cpu = sid(0, MetricId::CPU_TOTAL);
+        let mem = sid(1, MetricId::MEM_USED);
+        let mut store = SeriesStore::new();
+        store.set_source(Some(SourceId::Cpu));
+        store.append(cpu, 0, 1.0, 100 * MS, SampleFlags::VALID);
+        store.set_source(Some(SourceId::Memory));
+        store.append(mem, 0, 1.0, SEC, SampleFlags::VALID);
+        store.mark_gap_source(SourceId::Cpu);
+        store.set_source(Some(SourceId::Cpu));
+        store.append(cpu, SEC, 2.0, 100 * MS, SampleFlags::VALID);
+        store.set_source(Some(SourceId::Memory));
+        store.append(mem, SEC, 2.0, SEC, SampleFlags::VALID);
+        let set = store.publish();
+        assert!(
+            view(&set, cpu).samples[1]
+                .flags
+                .contains(SampleFlags::GAP_BEFORE)
+        );
+        assert!(
+            !view(&set, mem).samples[1]
+                .flags
+                .contains(SampleFlags::GAP_BEFORE)
+        );
     }
 
     #[test]

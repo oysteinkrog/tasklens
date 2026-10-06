@@ -1587,3 +1587,84 @@ fn pss_cleared_when_column_hidden() {
     }
     rig.passed();
 }
+
+fn cpu_health(state: SourceState, t_ns: TimeNs) -> EngineMsg {
+    src(SourceUpdate::Health {
+        id: SourceId::Cpu,
+        state,
+        last_error: None,
+        t_ns,
+    })
+}
+
+fn memory_msg(t_ns: TimeNs) -> EngineMsg {
+    src(SourceUpdate::Memory(MemorySample {
+        t_ns,
+        totals: MemoryTotals {
+            validity: Validity::Valid,
+            used: 1 << 30,
+            ..MemoryTotals::default()
+        },
+        zram: Vec::new(),
+        validity: Validity::Valid,
+    }))
+}
+
+fn has_gap(s: Sample) -> bool {
+    s.flags.contains(SampleFlags::GAP_BEFORE)
+}
+
+/// R-289: a Cpu worker restart gaps the CPU series and leaves the memory series alone.
+#[test]
+fn restart_marks_gap_for_source_only() {
+    let mut rig = Rig::new();
+    rig.run(vec![
+        cpu_health(SourceState::Running, 0),
+        cpu_msg(SEC, 10.0, true),
+        memory_msg(SEC),
+        cpu_health(SourceState::Failed, SEC + 100 * MS),
+        cpu_health(SourceState::Running, SEC + 600 * MS),
+        cpu_msg(SEC + 700 * MS, 20.0, false),
+        memory_msg(2 * SEC),
+    ])
+    .expect("no invariant violation");
+    let mem = SeriesId {
+        device: rig.idx(&DeviceIdentity::Memory),
+        metric: MetricId::MEM_USED,
+    };
+    let snap = rig.latest();
+    let cpu = &snap
+        .series
+        .get(CPU_TOTAL)
+        .expect("CPU_TOTAL exists")
+        .samples;
+    assert_eq!(cpu.len(), 2);
+    assert!(!has_gap(cpu[0]));
+    assert!(has_gap(cpu[1]));
+    let mem = &snap.series.get(mem).expect("MEM_USED exists").samples;
+    assert_eq!(mem.len(), 2);
+    assert!(mem.iter().all(|&s| !has_gap(s)));
+}
+
+/// R-289: the first Running of a session adds no gap; Starting before it does not count as a
+/// restart.
+#[test]
+fn first_running_no_extra_gap() {
+    let mut rig = Rig::new();
+    rig.run(vec![
+        cpu_health(SourceState::Starting, 0),
+        cpu_health(SourceState::Running, 100 * MS),
+        cpu_msg(SEC, 10.0, true),
+        cpu_health(SourceState::Running, SEC + 50 * MS),
+        cpu_msg(SEC + 100 * MS, 20.0, false),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let cpu = &snap
+        .series
+        .get(CPU_TOTAL)
+        .expect("CPU_TOTAL exists")
+        .samples;
+    assert_eq!(cpu.len(), 2);
+    assert!(cpu.iter().all(|&s| !has_gap(s)));
+}
