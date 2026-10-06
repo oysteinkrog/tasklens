@@ -612,3 +612,435 @@ mod toolbar {
         );
     }
 }
+
+/// Title bar tests (E20-004, UI-SHL-003, UI-SHL-004, UI-SHL-005, U-44).
+mod titlebar {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AnyElement, AnyView, App, AppContext as _, Background, Bounds, Context, Entity,
+        IntoElement, Modifiers, MouseButton, MouseDownEvent, Pixels, Render, Styled,
+        TestAppContext, VisualTestContext, Window, WindowControls, div, point, px, size,
+    };
+    use smallvec::SmallVec;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::health::HelperState;
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::table::TableMode;
+    use tl_model::validity::Validity;
+    use tl_ui::actions::CloseWindow;
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::current;
+    use tl_ui::window::titlebar::{
+        MenuBarFactory, TitleBarProbe, TitleBarView, keep_above_supported,
+    };
+    use tl_ui::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_toggle};
+
+    gpui_kit::actions!(tl_titlebar_test, [Go]);
+
+    struct Menu;
+
+    impl Render for Menu {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(120.)).h(px(24.))
+        }
+    }
+
+    fn menu_bar(_: &mut Window, cx: &mut App) -> AnyView {
+        cx.new(|_| Menu).into()
+    }
+
+    struct TwoButtons;
+
+    impl ToolbarContent for TwoButtons {
+        fn buttons(
+            &self,
+            model: &ToolbarModel,
+            _: &mut Window,
+            _: &mut App,
+        ) -> SmallVec<[AnyElement; 2]> {
+            SmallVec::from_iter([
+                toolbar_toggle("a", TlIcon::Pin, true, "Pin".into(), Box::new(Go), model)
+                    .into_any_element(),
+                toolbar_toggle("b", TlIcon::Eye, false, "Eye".into(), Box::new(Go), model)
+                    .into_any_element(),
+            ])
+        }
+    }
+
+    fn model() -> ToolbarModel {
+        ToolbarModel {
+            tab: Tab::Processes,
+            history_mode: false,
+            hide_system: false,
+            mode: TableMode::Grouped,
+            helper: HelperState::Missing,
+            helper_installed: false,
+            picker_available: false,
+            picking: false,
+            window_active: true,
+        }
+    }
+
+    struct Opts {
+        ui_scale_pct: u16,
+        menu: bool,
+        probe: TitleBarProbe,
+    }
+
+    impl Default for Opts {
+        fn default() -> Self {
+            Self {
+                ui_scale_pct: 100,
+                menu: true,
+                probe: TitleBarProbe {
+                    client: Some(true),
+                    ..TitleBarProbe::default()
+                },
+            }
+        }
+    }
+
+    struct Rig<'a> {
+        cx: &'a mut VisualTestContext,
+        view: Entity<TitleBarView>,
+        closes: Rc<Cell<u32>>,
+    }
+
+    fn rig(cx: &mut TestAppContext, opts: Opts) -> Rig<'_> {
+        let closes = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings {
+                    ui_scale_pct: opts.ui_scale_pct,
+                    ..AppearanceSettings::default()
+                },
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_global(opts.probe);
+            if opts.menu {
+                cx.set_global(MenuBarFactory(menu_bar));
+            }
+            let count = Rc::clone(&closes);
+            cx.on_action(move |_: &CloseWindow, _| count.set(count.get() + 1));
+        });
+        let (view, cx) = cx.add_window_view(|window, cx| {
+            let mut bar = TitleBarView::new(window, cx);
+            bar.set_toolbar(model(), Box::new(TwoButtons), cx);
+            bar
+        });
+        cx.simulate_resize(size(px(1360.), px(200.)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw(cx);
+        Rig { cx, view, closes }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn probe<R>(cx: &mut VisualTestContext, f: impl FnOnce(&TitleBarProbe) -> R) -> R {
+        cx.update(|_, cx| f(cx.global::<TitleBarProbe>()))
+    }
+
+    fn drag_point(cx: &mut VisualTestContext) -> gpui_kit::Point<Pixels> {
+        bounds(cx, "TitleBarDrag").center()
+    }
+
+    fn down(
+        cx: &mut VisualTestContext,
+        at: gpui_kit::Point<Pixels>,
+        button: MouseButton,
+        n: usize,
+    ) {
+        cx.simulate_event(MouseDownEvent {
+            position: at,
+            button,
+            modifiers: Modifiers::none(),
+            click_count: n,
+            first_mouse: false,
+        });
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_parts_order(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        let parts = [
+            "TitleBarIcon",
+            "TitleBarMenu",
+            "Toolbar",
+            "TitleBarDrag",
+            "TitleBarCaption-minimize",
+            "TitleBarCaption-maximize",
+            "TitleBarCaption-close",
+        ];
+        let xs: Vec<Pixels> = parts.iter().map(|p| bounds(r.cx, p).origin.x).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "left to right: {xs:?}");
+        let bar = bounds(r.cx, "TitleBar");
+        assert_eq!(bar.size.height, px(34.));
+        assert_eq!(bar.size.width, px(1360.));
+        let close = bounds(r.cx, "TitleBarCaption-close");
+        assert_eq!(close.right(), bar.right(), "flush right");
+        assert_eq!(bounds(r.cx, "TitleBarIcon").origin.x, px(12.));
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_parts_order_without_menu(cx: &mut TestAppContext) {
+        let r = rig(
+            cx,
+            Opts {
+                menu: false,
+                ..Opts::default()
+            },
+        );
+        assert!(r.cx.debug_bounds("TitleBarMenu").is_none());
+        assert!(bounds(r.cx, "Toolbar").origin.x > bounds(r.cx, "TitleBarIcon").origin.x);
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_drag_starts_move(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        let at = drag_point(r.cx);
+        r.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(
+            at + point(px(10.), px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        r.cx.simulate_mouse_move(
+            at + point(px(20.), px(4.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(probe(r.cx, |p| p.moves), 1);
+
+        // A move after the button is up starts nothing.
+        r.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(at, None, Modifiers::none());
+        assert_eq!(probe(r.cx, |p| p.moves), 1);
+
+        // The app icon is a drag part too.
+        let icon = bounds(r.cx, "TitleBarIcon").center();
+        r.cx.simulate_mouse_down(icon, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(
+            icon + point(px(5.), px(0.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(probe(r.cx, |p| p.moves), 2);
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_double_click_zooms(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        let at = drag_point(r.cx);
+        down(r.cx, at, MouseButton::Left, 1);
+        r.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        down(r.cx, at, MouseButton::Left, 2);
+        r.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        assert_eq!(probe(r.cx, |p| p.zooms), 1);
+        assert_eq!(probe(r.cx, |p| p.moves), 0);
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_right_click_window_menu(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        let at = drag_point(r.cx);
+        down(r.cx, at, MouseButton::Right, 1);
+        assert_eq!(probe(r.cx, |p| p.window_menus.clone()), vec![at]);
+
+        let close = bounds(r.cx, "TitleBarCaption-close").center();
+        down(r.cx, close, MouseButton::Right, 1);
+        down(r.cx, close, MouseButton::Middle, 1);
+        assert_eq!(probe(r.cx, |p| p.window_menus.len()), 1);
+        assert_eq!(probe(r.cx, |p| (p.moves, p.zooms)), (0, 0));
+        assert_eq!(r.closes.get(), 0);
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_button_no_drag(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        for part in ["TitleBarCaption-close", "TlButton-a", "TitleBarMenu"] {
+            let at = bounds(r.cx, part).center();
+            r.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+            r.cx.simulate_mouse_move(
+                at + point(px(3.), px(2.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            r.cx.simulate_mouse_up(
+                at + point(px(3.), px(2.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            assert_eq!(probe(r.cx, |p| p.moves), 0, "{part} never drags");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_close_dispatches(cx: &mut TestAppContext) {
+        let r = rig(cx, Opts::default());
+        let close = bounds(r.cx, "TitleBarCaption-close").center();
+        r.cx.simulate_click(close, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(r.closes.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn caption_hides_unsupported(cx: &mut TestAppContext) {
+        let r = rig(
+            cx,
+            Opts {
+                probe: TitleBarProbe {
+                    client: Some(true),
+                    controls: Some(WindowControls {
+                        maximize: false,
+                        ..WindowControls::default()
+                    }),
+                    ..TitleBarProbe::default()
+                },
+                ..Opts::default()
+            },
+        );
+        assert!(r.cx.debug_bounds("TitleBarCaption-maximize").is_none());
+        let ids: Vec<&str> = r.cx.update(|_, cx| {
+            r.view
+                .read(cx)
+                .drawn_captions()
+                .iter()
+                .map(|c| c.id)
+                .collect()
+        });
+        assert_eq!(ids, ["minimize", "close"]);
+        let min = bounds(r.cx, "TitleBarCaption-minimize");
+        let close = bounds(r.cx, "TitleBarCaption-close");
+        assert_eq!(min.right(), close.origin.x, "no gap");
+        assert_eq!(
+            close.right(),
+            bounds(r.cx, "TitleBar").right(),
+            "flush right"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn caption_restore_when_maximized(cx: &mut TestAppContext) {
+        let r = rig(
+            cx,
+            Opts {
+                probe: TitleBarProbe {
+                    client: Some(true),
+                    maximized: Some(true),
+                    ..TitleBarProbe::default()
+                },
+                ..Opts::default()
+            },
+        );
+        let max =
+            r.cx.update(|_, cx| r.view.read(cx).drawn_captions()[1].clone());
+        assert_eq!(max.id, "maximize");
+        assert_eq!(max.icon, TlIcon::Copy);
+        assert_eq!(max.tooltip.as_ref(), "Restore");
+
+        r.cx.update(|_, cx| cx.global_mut::<TitleBarProbe>().maximized = Some(false));
+        r.view.update(r.cx, |_, cx| cx.notify());
+        draw(r.cx);
+        let max =
+            r.cx.update(|_, cx| r.view.read(cx).drawn_captions()[1].clone());
+        assert_eq!(max.icon, TlIcon::Square);
+        assert_eq!(max.tooltip.as_ref(), "Maximize");
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_inactive_look(cx: &mut TestAppContext) {
+        let mut r = rig(cx, Opts::default());
+        let (primary, secondary, titlebar) = r.cx.update(|_, cx| {
+            let t = current(cx);
+            (t.text_primary, t.text_secondary, t.titlebar)
+        });
+        assert_eq!(colors_of(&mut r), vec![primary; 3]);
+
+        r.cx.deactivate_window();
+        r.cx.run_until_parked();
+        draw(r.cx);
+        assert_eq!(colors_of(&mut r), vec![secondary; 3]);
+        let bar = bounds(r.cx, "TitleBar");
+        let fill = r.cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window
+                .painted_quads()
+                .iter()
+                .any(|q| q.background == Background::from(titlebar) && q.bounds == bar)
+        });
+        assert!(fill, "the bar keeps the titlebar background");
+    }
+
+    /// The caption icon colours as last drawn.
+    fn colors_of(r: &mut Rig) -> Vec<gpui_kit::Hsla> {
+        let view = r.view.clone();
+        r.cx.update(|_, cx| {
+            view.read(cx)
+                .drawn_captions()
+                .iter()
+                .map(|c| c.color)
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn keep_above_supported_by_validity(cx: &mut TestAppContext) {
+        assert!(!cx.read(keep_above_supported), "no hub");
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+        cx.update(|cx| cx.set_global(GlobalHub(hub)));
+        for (validity, supported) in [
+            (Validity::Unsupported, false),
+            (Validity::Valid, true),
+            (Validity::WarmingUp, false),
+            (Validity::Stale, true),
+        ] {
+            engine.publish_with(|s| {
+                let w = Arc::make_mut(&mut s.windows);
+                w.header.validity = validity;
+                w.header.version += 1;
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.read(keep_above_supported), supported, "{validity:?}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn titlebar_scales(cx: &mut TestAppContext) {
+        let r = rig(
+            cx,
+            Opts {
+                ui_scale_pct: 150,
+                ..Opts::default()
+            },
+        );
+        assert_eq!(bounds(r.cx, "TitleBar").size.height, px(51.));
+        for id in ["minimize", "maximize", "close"] {
+            let b = match id {
+                "minimize" => bounds(r.cx, "TitleBarCaption-minimize"),
+                "maximize" => bounds(r.cx, "TitleBarCaption-maximize"),
+                _ => bounds(r.cx, "TitleBarCaption-close"),
+            };
+            assert_eq!((b.size.width, b.size.height), (px(54.), px(51.)), "{id}");
+        }
+    }
+}
