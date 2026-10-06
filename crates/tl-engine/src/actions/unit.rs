@@ -1,5 +1,6 @@
 //! Unit actions on the systemd manager that owns the unit (ADR-005, ADR-006, SYS-005, SYS-006,
-//! PROC-072). Part 1: Start, Stop, Restart, Reload and Reset failed.
+//! PROC-072). Part 1: Start, Stop, Restart, Reload and Reset failed. Part 2: Freeze, Thaw and
+//! Kill for units outside `app.slice` (R-092).
 //!
 //! Every call goes over the connection the `SystemdSystem` or `SystemdUser` worker holds, with
 //! `ALLOW_INTERACTIVE_AUTHORIZATION` so polkit can prompt for system units. tasklens never
@@ -34,6 +35,13 @@ pub const JOB_MODE: &str = "replace";
 pub const CALL_TIMEOUT_USER: Duration = Duration::from_secs(10);
 /// The method call deadline on the system manager. It may show a polkit prompt.
 pub const CALL_TIMEOUT_SYSTEM: Duration = Duration::from_secs(120);
+/// How often a freeze reads `FreezerState`.
+pub const FREEZE_POLL: Duration = Duration::from_millis(50);
+/// How long a freeze waits for `FreezerState` to read `frozen`.
+pub const FREEZE_WAIT: Duration = Duration::from_secs(2);
+pub const UNIT_IFACE: &str = "org.freedesktop.systemd1.Unit";
+/// The `KillUnit` signal for Kill App.
+const SIGKILL: i32 = 9;
 
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 const ACCESS_DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
@@ -44,6 +52,8 @@ const UNIT_MASKED: &str = "org.freedesktop.systemd1.UnitMasked";
 const JOB_TYPE_NOT_APPLICABLE: &str = "org.freedesktop.systemd1.JobTypeNotApplicable";
 const NOT_CONNECTED: &str = "manager not connected";
 const CONNECTION_LOST: &str = "connection lost before the job ended";
+const FREEZE_IN_PROGRESS: &str = "freeze still in progress";
+const UNIT_PATH_PREFIX: &str = "/org/freedesktop/systemd1/unit/";
 
 /// A boxed future of a `UnitBus` call.
 pub type BusFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, UnitBusError>> + Send + 'a>>;
@@ -326,14 +336,23 @@ pub fn bus_for(actx: &ActionCtx, manager: Manager) -> Option<Arc<dyn UnitBus>> {
         .map(|conn| Arc::new(ZbusUnitBus::new(conn)) as Arc<dyn UnitBus>)
 }
 
-/// Runs one unit target. This bead handles the five job kinds; the other unit kinds are added by
-/// E11-012 and E11-013.
+/// Runs one unit target: the five job kinds and Freeze, Thaw and Kill. The unit file kinds are
+/// added by E11-013.
 pub async fn run_target(
     cx: &Cx,
     actx: &ActionCtx,
     kind: &ActionKind,
     unit: &UnitRef,
 ) -> ActionState {
+    if matches!(
+        kind,
+        ActionKind::FreezeGroup | ActionKind::ThawGroup | ActionKind::KillGroup
+    ) {
+        let Some(bus) = bus_for(actx, unit.manager) else {
+            return not_connected();
+        };
+        return freeze_thaw_kill(cx, &*bus, kind, unit).await;
+    }
     let method = match kind {
         ActionKind::UnitStart => "StartUnit",
         ActionKind::UnitStop => "StopUnit",
@@ -364,6 +383,77 @@ fn call_timeout(manager: Manager) -> Duration {
         Manager::System => CALL_TIMEOUT_SYSTEM,
         Manager::User => CALL_TIMEOUT_USER,
     }
+}
+
+/// `FreezeUnit`, `ThawUnit` or `KillUnit(name, "all", SIGKILL)` on the owning manager. A freeze
+/// then reads `FreezerState` every 50 ms, at most 40 times, until it reads `frozen`.
+async fn freeze_thaw_kill(
+    cx: &Cx,
+    bus: &dyn UnitBus,
+    kind: &ActionKind,
+    unit: &UnitRef,
+) -> ActionState {
+    let name = Value::from(unit.name.to_string());
+    let (method, args) = match kind {
+        ActionKind::FreezeGroup => ("FreezeUnit", vec![name]),
+        ActionKind::ThawGroup => ("ThawUnit", vec![name]),
+        ActionKind::KillGroup => (
+            "KillUnit",
+            vec![name, Value::from("all".to_owned()), Value::from(SIGKILL)],
+        ),
+        _ => return ActionState::Rejected(RejectReason::Unsupported),
+    };
+    tracing::debug!(target: "tasklens::action", unit = &*unit.name, method, "unit call");
+    if let Err(e) = bus
+        .call(cx, method, &args, call_timeout(unit.manager))
+        .await
+    {
+        return map_bus_error(&e, method);
+    }
+    if method != "FreezeUnit" {
+        return ActionState::Succeeded;
+    }
+    let path = unit_object_path(&unit.name);
+    let start = cx.now();
+    loop {
+        match bus
+            .get_property(cx, &path, UNIT_IFACE, "FreezerState")
+            .await
+        {
+            Ok(state) if matches!(&*state, Value::Str(s) if s.as_str() == "frozen") => {
+                return ActionState::Succeeded;
+            }
+            // "running", "freezing" or any other word: read again.
+            Ok(_) => {}
+            Err(e) => return map_bus_error(&e, "FreezerState"),
+        }
+        let waited = Duration::from_nanos(cx.now().duration_since(start));
+        if waited + FREEZE_POLL >= FREEZE_WAIT {
+            return ActionState::OutcomeUnknown(Arc::from(FREEZE_IN_PROGRESS));
+        }
+        time::sleep(cx.now(), FREEZE_POLL).await;
+        if cx.checkpoint().is_err() {
+            return ActionState::OutcomeUnknown(Arc::from(FREEZE_IN_PROGRESS));
+        }
+    }
+}
+
+/// The manager's object path for unit `name`, escaped the way systemd's `bus_label_escape` does:
+/// each byte outside `[A-Za-z0-9]`, and a leading digit, becomes `_` and two lowercase hex digits.
+pub fn unit_object_path(name: &str) -> String {
+    let mut path = String::from(UNIT_PATH_PREFIX);
+    if name.is_empty() {
+        path.push('_');
+        return path;
+    }
+    for (i, b) in name.bytes().enumerate() {
+        if b.is_ascii_alphabetic() || (b.is_ascii_digit() && i > 0) {
+            path.push(char::from(b));
+        } else {
+            path.push_str(&format!("_{b:02x}"));
+        }
+    }
+    path
 }
 
 /// `method(name, "replace")` with the `JobRemoved` match added first, then waits for the job.
@@ -487,6 +577,11 @@ mod tests {
             args: Vec<String>,
             timeout: Duration,
         },
+        GetProperty {
+            path: String,
+            iface: String,
+            name: String,
+        },
     }
 
     /// What the fake stream does after its queued signals.
@@ -501,6 +596,8 @@ mod tests {
         replies: Mutex<VecDeque<Result<OwnedValue, UnitBusError>>>,
         signals: Vec<JobRemovedSignal>,
         tail: Tail,
+        /// `FreezerState` readings in order; the last one repeats.
+        freezer: Mutex<VecDeque<&'static str>>,
     }
 
     impl FakeUnitBus {
@@ -523,7 +620,18 @@ mod tests {
                     })
                     .collect(),
                 tail,
+                freezer: Mutex::default(),
             })
+        }
+
+        /// A bus that answers one call with `reply`, then reads `states` as `FreezerState`.
+        fn freezer(
+            reply: Result<OwnedValue, UnitBusError>,
+            states: Vec<&'static str>,
+        ) -> Arc<Self> {
+            let bus = Self::new(vec![reply], vec![], Tail::Pending);
+            *bus.freezer.lock().unwrap() = states.into();
+            bus
         }
 
         fn calls(&self) -> Vec<FakeCall> {
@@ -579,11 +687,26 @@ mod tests {
         fn get_property<'a>(
             &'a self,
             _cx: &'a Cx,
-            _unit_path: &'a str,
-            _iface: &'a str,
-            _name: &'a str,
+            unit_path: &'a str,
+            iface: &'a str,
+            name: &'a str,
         ) -> BusFuture<'a, OwnedValue> {
-            Box::pin(async { Err(UnitBusError::NoConnection) })
+            self.calls.lock().unwrap().push(FakeCall::GetProperty {
+                path: unit_path.into(),
+                iface: iface.into(),
+                name: name.into(),
+            });
+            let mut states = self.freezer.lock().unwrap();
+            let state = if states.len() > 1 {
+                states.pop_front()
+            } else {
+                states.front().copied()
+            };
+            let reply = match state {
+                Some(state) => Ok(OwnedValue::try_from(Value::from(state)).unwrap()),
+                None => Err(UnitBusError::NoConnection),
+            };
+            Box::pin(async move { reply })
         }
     }
 
@@ -896,6 +1019,162 @@ mod tests {
         assert!(bus.calls().is_empty());
     }
 
+    fn ok() -> Result<OwnedValue, UnitBusError> {
+        Ok(OwnedValue::from(true))
+    }
+
+    fn name_call(method: &str, timeout: Duration) -> FakeCall {
+        FakeCall::Call {
+            method: method.into(),
+            args: vec!["app.service".into()],
+            timeout,
+        }
+    }
+
+    fn freezer_read() -> FakeCall {
+        FakeCall::GetProperty {
+            path: "/org/freedesktop/systemd1/unit/app_2eservice".into(),
+            iface: UNIT_IFACE.into(),
+            name: "FreezerState".into(),
+        }
+    }
+
+    /// Runs `run_target` and advances virtual time 10 ms at a time until it ends. Returns the
+    /// state and the virtual time it took.
+    fn run_timed(actx: Arc<ActionCtx>, kind: ActionKind, unit: UnitRef) -> (ActionState, Duration) {
+        let (mut lab, out, _handle) = start(actx, kind, unit);
+        let step = Duration::from_millis(10);
+        let mut elapsed = Duration::ZERO;
+        while out.lock().unwrap().is_none() {
+            assert!(elapsed < Duration::from_secs(10), "run_target never ended");
+            advance(&mut lab, step);
+            elapsed += step;
+        }
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+        let state = out.lock().unwrap().take().expect("run_target finished");
+        (state, elapsed)
+    }
+
+    #[test]
+    fn unit_freeze_polls_frozen() {
+        let bus = FakeUnitBus::freezer(ok(), vec!["freezing", "freezing", "frozen"]);
+        let (state, elapsed) = run_timed(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::FreezeGroup,
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls(),
+            [
+                name_call("FreezeUnit", CALL_TIMEOUT_USER),
+                freezer_read(),
+                freezer_read(),
+                freezer_read(),
+            ]
+        );
+        assert!(
+            (Duration::from_millis(100)..=Duration::from_millis(110)).contains(&elapsed),
+            "{elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn unit_freeze_not_frozen_unknown() {
+        let bus = FakeUnitBus::freezer(ok(), vec!["freezing"]);
+        let (state, elapsed) = run_timed(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::FreezeGroup,
+            unit(Manager::System),
+        );
+        assert_eq!(
+            state,
+            ActionState::OutcomeUnknown("freeze still in progress".into())
+        );
+        let reads = bus
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, FakeCall::GetProperty { .. }))
+            .count();
+        assert_eq!(reads, 40);
+        assert!(elapsed <= FREEZE_WAIT, "{elapsed:?}");
+    }
+
+    #[test]
+    fn unit_thaw_no_property_read() {
+        let bus = FakeUnitBus::freezer(ok(), vec!["frozen"]);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::ThawGroup,
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(bus.calls(), [name_call("ThawUnit", CALL_TIMEOUT_USER)]);
+    }
+
+    #[test]
+    fn unit_kill_all_sigkill() {
+        let bus = FakeUnitBus::freezer(ok(), vec![]);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::KillGroup,
+            unit(Manager::System),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls(),
+            [FakeCall::Call {
+                method: "KillUnit".into(),
+                args: vec!["app.service".into(), "all".into(), "I32(9)".into()],
+                timeout: CALL_TIMEOUT_SYSTEM,
+            }]
+        );
+    }
+
+    /// systemd's `AccessDenied` maps to `NotAuthorized`, as on every manager call (ADR-015,
+    /// R-117).
+    #[test]
+    fn unit_freeze_access_denied() {
+        let bus = FakeUnitBus::freezer(Err(call_error(ACCESS_DENIED)), vec!["frozen"]);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::FreezeGroup,
+            unit(Manager::System),
+        );
+        assert_eq!(state, ActionState::Failed(ActionError::NotAuthorized));
+        assert_eq!(bus.calls(), [name_call("FreezeUnit", CALL_TIMEOUT_SYSTEM)]);
+    }
+
+    #[test]
+    fn unit_wrong_kind_unsupported() {
+        let bus = FakeUnitBus::freezer(ok(), vec![]);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::Signal(tl_model::actions::Signal::Term),
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
+        assert!(bus.calls().is_empty());
+    }
+
+    #[test]
+    fn unit_object_path_escaping() {
+        assert_eq!(
+            unit_object_path("plasma-plasmashell.service"),
+            "/org/freedesktop/systemd1/unit/plasma_2dplasmashell_2eservice"
+        );
+        assert_eq!(
+            unit_object_path("1foo.service"),
+            "/org/freedesktop/systemd1/unit/_31foo_2eservice"
+        );
+        assert_eq!(
+            unit_object_path("a1@x_y.slice"),
+            "/org/freedesktop/systemd1/unit/a1_40x_5fy_2eslice"
+        );
+        assert_eq!(unit_object_path(""), "/org/freedesktop/systemd1/unit/_");
+    }
+
     // The real `ZbusUnitBus` against a fake manager over a peer-to-peer pair.
 
     type Log = Arc<Mutex<Vec<String>>>;
@@ -935,6 +1214,23 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("ResetFailedUnit {name}"));
+            Ok(())
+        }
+
+        fn kill_unit(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            name: &str,
+            whom: &str,
+            signal: i32,
+        ) -> zbus::fdo::Result<()> {
+            let interactive = header
+                .primary()
+                .flags()
+                .contains(Flags::AllowInteractiveAuth);
+            self.log.lock().unwrap().push(format!(
+                "KillUnit {name} {whom} {signal} interactive={interactive}"
+            ));
             Ok(())
         }
 
@@ -1050,6 +1346,11 @@ mod tests {
         assert_eq!(
             real(&fake, ActionKind::UnitStop),
             ActionState::Failed(ActionError::NotAuthorized)
+        );
+        assert_eq!(real(&fake, ActionKind::KillGroup), ActionState::Succeeded);
+        assert_eq!(
+            fake.log.lock().unwrap()[1],
+            "KillUnit app.service all 9 interactive=true"
         );
         // Unknown methods come back as their D-Bus error name.
         assert_eq!(
