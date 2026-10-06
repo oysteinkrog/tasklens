@@ -2654,6 +2654,8 @@ mod hover {
             }
         });
         vcx.simulate_scale_factor_change(1.0);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
         let chart = vcx.read_entity(&root, |r, _| r.chart.clone());
         if data {
             chart.update(vcx, |v, cx| {
@@ -2763,6 +2765,8 @@ mod hover {
         hover(vcx, 581., 100.);
         vcx.read_entity(&chart, |v, _| {
             let h = v.hover_state();
+            assert!(h.hitbox_inserted, "hitbox");
+            assert!(h.pinned_t_ns.is_some(), "pinned");
             let b = h.last_box.expect("box painted");
             let x = h.last_marker_x.expect("marker painted");
             assert_eq!(x, px(581.));
@@ -2828,6 +2832,16 @@ mod hover {
             vcx.read_entity(&chart, |v, _| v.hover_state().last_box),
             None
         );
+
+        // So does window deactivation, on the next paint.
+        hover(vcx, 300., 100.);
+        assert!(vcx.read_entity(&chart, |v, _| v.hover_state().last_box.is_some()));
+        vcx.deactivate_window();
+        draw(vcx);
+        vcx.read_entity(&chart, |v, _| {
+            assert_eq!(v.hover_state().pinned_t_ns, None);
+            assert_eq!(v.hover_state().last_box, None);
+        });
     }
 
     #[gpui_kit::test]
