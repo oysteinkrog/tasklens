@@ -11,12 +11,11 @@
 //! `tr` at construction and on a locale change only.
 
 use std::fmt::Write as _;
-use std::hash::BuildHasher;
 use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::{AnyView, AnyWindowHandle, App, Context, Div, Pixels, SharedString, Window, px};
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, DeviceKind};
@@ -24,7 +23,7 @@ use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
 use tl_model::settings::{NetworkUnit, Settings, UiState};
 use tl_model::snapshot::Snapshot;
-use tl_model::table::{SortSpec, TableRow};
+use tl_model::table::{SortSpec, TableRow, UnitRef};
 use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::{
@@ -70,24 +69,59 @@ const MEASURED_MIN_WIDTH: f32 = 60.0;
 const LABEL_PAD: f32 = 16.0;
 
 /// The process table's row identity. `NodeId` is not `Copy` (a unit holds an `Arc<str>`), so a
-/// unit is named by the FxHash of its `UnitRef`. Every other node keeps its full key.
+/// unit is named by a number from [`UnitIds`]. Every other node keeps its full key.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ProcRowId {
     Group(GroupKey),
     Process(ProcessKey),
     KernelThreads,
     Pseudo(PseudoKind),
-    Unit(u64),
+    Unit(u32),
 }
 
-impl From<&NodeId> for ProcRowId {
-    fn from(node: &NodeId) -> Self {
+impl ProcRowId {
+    /// The id of every node but a unit, which needs [`UnitIds`].
+    pub fn fixed(node: &NodeId) -> Option<Self> {
         match node {
-            NodeId::Group(key) => ProcRowId::Group(*key),
-            NodeId::Process(key) => ProcRowId::Process(*key),
-            NodeId::KernelThreads => ProcRowId::KernelThreads,
-            NodeId::Pseudo(kind) => ProcRowId::Pseudo(*kind),
-            NodeId::Unit(unit) => ProcRowId::Unit(FxBuildHasher.hash_one(unit)),
+            NodeId::Group(key) => Some(ProcRowId::Group(*key)),
+            NodeId::Process(key) => Some(ProcRowId::Process(*key)),
+            NodeId::KernelThreads => Some(ProcRowId::KernelThreads),
+            NodeId::Pseudo(kind) => Some(ProcRowId::Pseudo(*kind)),
+            NodeId::Unit(_) => None,
+        }
+    }
+}
+
+/// Unit numbers for [`ProcRowId::Unit`]. Each new unit gets the next number, and a number is
+/// never reused, so two units never share an id. Distinct units are a few hundred at most.
+/// Keyed by the whole `UnitRef`: `foo.service` may exist in both managers.
+#[derive(Default)]
+pub struct UnitIds {
+    ids: FxHashMap<UnitRef, u32>,
+    next: u32,
+}
+
+impl UnitIds {
+    /// The id of `node`, numbering a unit seen for the first time.
+    pub fn intern(&mut self, node: &NodeId) -> ProcRowId {
+        match node {
+            NodeId::Unit(unit) => {
+                let next = &mut self.next;
+                let n = *self.ids.entry(unit.clone()).or_insert_with(|| {
+                    *next += 1;
+                    *next - 1
+                });
+                ProcRowId::Unit(n)
+            }
+            _ => ProcRowId::fixed(node).unwrap_or(ProcRowId::KernelThreads),
+        }
+    }
+
+    /// The id of `node`, or `None` for a unit never seen.
+    pub fn get(&self, node: &NodeId) -> Option<ProcRowId> {
+        match node {
+            NodeId::Unit(unit) => self.ids.get(unit).map(|&n| ProcRowId::Unit(n)),
+            _ => ProcRowId::fixed(node),
         }
     }
 }
@@ -198,6 +232,9 @@ pub struct ProcessDelegate {
     /// Bumps on every rebuild.
     version: u64,
     row_index: FxHashMap<ProcRowId, u32>,
+    /// The id of each row, by index.
+    ids: Vec<ProcRowId>,
+    units: UnitIds,
     /// Per row: last sibling, ancestor-continues bits (E22-006).
     sibling: Vec<(bool, u64)>,
     layout: ColumnLayout,
@@ -233,13 +270,17 @@ impl ProcessDelegate {
         cx: &App,
     ) -> Self {
         let specs = build_specs(settings, window, cx);
-        let headers = GroupHeader::ALL.map(|h| ProcRowId::from(&h.node()));
+        // `GroupHeader::node` is always a `NodeId::Group`.
+        let headers = GroupHeader::ALL
+            .map(|h| ProcRowId::fixed(&h.node()).unwrap_or(ProcRowId::KernelThreads));
         let mut this = Self {
             query: ProcessQuery::new(settings, state),
             snapshot: Arc::clone(&snapshot),
             built_for: None,
             version: 0,
             row_index: FxHashMap::default(),
+            ids: Vec::new(),
+            units: UnitIds::default(),
             sibling: Vec::new(),
             layout: ColumnLayout::defaults(TableId::Processes, &[], &[], &[]),
             specs,
@@ -365,8 +406,11 @@ impl ProcessDelegate {
 
         self.row_index.clear();
         self.row_index.reserve(rows.len());
+        self.ids.clear();
         for (ix, row) in rows.iter().enumerate() {
-            self.row_index.insert(ProcRowId::from(&row.node), ix as u32);
+            let id = self.units.intern(&row.node);
+            self.ids.push(id);
+            self.row_index.insert(id, ix as u32);
         }
 
         self.sibling.clear();
@@ -390,7 +434,7 @@ impl ProcessDelegate {
         for (ix, row) in rows.iter().enumerate() {
             let (name, count) = match (row.group, self.kind_of(row)) {
                 (_, RowKind::GroupHeader) => {
-                    let Some(h) = self.header_slot(row) else {
+                    let Some(h) = self.header_slot(ix) else {
                         continue;
                     };
                     (&self.header_words[h], row.descendants)
@@ -401,7 +445,7 @@ impl ProcessDelegate {
                 }
                 _ => continue,
             };
-            let id = ProcRowId::from(&rows[ix].node);
+            let id = self.ids[ix];
             let fresh = self
                 .name_cache
                 .get(&id)
@@ -487,10 +531,15 @@ impl ProcessDelegate {
             .and_then(|g| self.snapshot.table.groups.get(g as usize))
     }
 
-    /// Which of the three group headers `row` is.
-    fn header_slot(&self, row: &TableRow) -> Option<usize> {
-        let id = ProcRowId::from(&row.node);
+    /// Which of the three group headers row `ix` is.
+    fn header_slot(&self, ix: usize) -> Option<usize> {
+        let id = self.ids[ix];
         self.headers.iter().position(|h| *h == id)
+    }
+
+    /// The row id of `node`, or `None` for a unit this delegate never showed.
+    pub fn id_of(&self, node: &NodeId) -> Option<ProcRowId> {
+        self.units.get(node)
     }
 
     fn kind_of(&self, row: &TableRow) -> RowKind {
@@ -641,7 +690,7 @@ impl TreeTableDelegate for ProcessDelegate {
     }
 
     fn row_id(&self, ix: usize) -> ProcRowId {
-        ProcRowId::from(&self.row(ix).node)
+        self.ids[ix]
     }
 
     fn row_index(&self, id: ProcRowId) -> Option<usize> {
@@ -745,7 +794,7 @@ impl TreeTableDelegate for ProcessDelegate {
     fn name_cell(&self, ix: usize) -> NameCell {
         let row = self.row(ix);
         let kind = self.kind_of(row);
-        let cached = self.name_cache.get(&ProcRowId::from(&row.node));
+        let cached = self.name_cache.get(&self.ids[ix]);
         let mut d = NameCellData {
             kind,
             depth: row.depth,
