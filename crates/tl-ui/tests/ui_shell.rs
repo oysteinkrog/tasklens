@@ -31,7 +31,6 @@ fn install(cx: &mut TestAppContext, settings: Settings) -> (Arc<FakeEngine>, Rc<
             settings,
             state: UiState::default(),
             persist: Some(Box::new(move |_, _| count.set(count.get() + 1))),
-            persist_themes: None,
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);

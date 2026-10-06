@@ -13,7 +13,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{App, AppContext, AsyncApp, Global, QuitMode, SharedString};
 use tl_model::client::EngineClient;
@@ -25,18 +25,10 @@ use crate::components::icons::TlAssets;
 use crate::components::{checkbox, kv_grid};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
-use crate::theme::ThemeDef;
+use crate::theme::user_store::ThemePersist;
 use crate::{i18n, settings_global, text, theme};
 
-/// What the theme store asks tl-app to write (UI-FND-042). E17-008 moves this enum to
-/// `theme/user_store.rs` and leaves a `pub use` here.
-#[derive(Clone, Debug)]
-pub enum PersistTheme {
-    /// Write these user themes to themes.json.
-    Save(Vec<ThemeDef>),
-    /// Rename a themes.json that does not parse, with this suffix time.
-    RenameCorrupt { unix_seconds: u64 },
-}
+pub use crate::theme::user_store::PersistTheme;
 
 /// The ADR-011 persist callback.
 pub type PersistFn = Box<dyn Fn(&Settings, &UiState)>;
@@ -186,8 +178,6 @@ pub struct BootSettings {
     pub settings: Settings,
     pub state: UiState,
     pub persist: Option<PersistFn>,
-    /// Held here until E17-008 defines `ThemePersist`.
-    pub persist_themes: Option<Box<dyn Fn(PersistTheme)>>,
     /// Shown by the shell after the first frame (UI-SHL-110 step 11).
     pub startup_toasts: Vec<(ToastKindTag, SharedString)>,
 }
@@ -217,7 +207,7 @@ impl TasklensUi {
             persist,
             persist_themes,
             app_requests,
-            startup_toasts,
+            mut startup_toasts,
             env,
         } = init;
 
@@ -233,14 +223,21 @@ impl TasklensUi {
         // 3. Asset source: `App` has no setter in gpui-pre 0.3.7, so `tl_ui::run` passes
         // `TlAssets` to `Application::with_assets` (E16-012).
 
-        // 4. Theme. E17-008 replaces `user` with the themes parsed from `themes_json`.
-        if let Some(json) = &themes_json
-            && let Err(err) = serde_json::from_str::<serde_json::Value>(json)
-        {
-            warn!(target: "tasklens::ui", error = %err, "themes.json does not parse, ignored");
+        // 4. Theme. A themes.json that does not parse is renamed by tl-app and reported in a
+        // Warning toast after the first frame.
+        cx.set_global(ThemePersist(persist_themes));
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Some(text) = theme::store::init_with_file(
+            cx,
+            &settings.theme,
+            &settings.appearance,
+            themes_json.as_deref(),
+            now,
+        ) {
+            startup_toasts.push((ToastKindTag::Warning, text));
         }
-        let user: Vec<ThemeDef> = Vec::new();
-        theme::store::init(cx, &settings.theme, &settings.appearance, user);
 
         // 5. Strings.
         i18n::init_strings(cx, &settings.general.language);
@@ -259,7 +256,6 @@ impl TasklensUi {
             settings,
             state,
             persist: Some(persist),
-            persist_themes: Some(persist_themes),
             startup_toasts,
         });
         settings_global::TlSettings::init(cx);
