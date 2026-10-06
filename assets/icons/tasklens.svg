@@ -1,4 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <rect width="256" height="256" rx="48" fill="#0277A6"/>
-  <text x="128" y="128" text-anchor="middle" dominant-baseline="central" font-family="monospace" font-size="144" font-weight="600" fill="#FFFFFF">tl</text>
+  <!-- "tl" in Noto Sans Mono Regular at 144 px, as outlines: SVG text makes gpui scan every system font -->
+  <path fill="#FFFFFF" d="M99.48 183.44Q91.28 183.44 84.80 181.28Q78.32 179.12 74.50 173.64Q70.68 168.17 70.68 158.52V115.61H49.66V106.68L70.68 104.38L73.28 84.22H83.64V104.81H113.74V115.61H83.64V156.08Q83.64 164.86 87.53 168.89Q91.42 172.92 100.35 172.92Q104.09 172.92 108.41 172.20Q112.73 171.48 115.90 170.76V181.13Q112.44 182.0 108.27 182.72Q104.09 183.44 99.48 183.44ZM139.52 182.0V173.36L167.74 171.2V83.36L140.38 81.48V72.56H180.70V171.2L205.76 173.36V182.0Z"/>
 </svg>
