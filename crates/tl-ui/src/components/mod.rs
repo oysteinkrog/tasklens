@@ -4,6 +4,7 @@ pub mod badge;
 pub mod checkbox;
 pub mod focus;
 pub mod icons;
+pub mod link;
 pub mod progress;
 pub mod radio;
 pub mod skeleton;
