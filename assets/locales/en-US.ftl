@@ -433,3 +433,9 @@ shell-health-state-disabled = Disabled
 shell-health-state-unsupported = Unsupported
 # Follows a short age: "3s ago".
 shell-health-ago = ago
+
+## tl-app (E33)
+
+app-114-tasklens-stopped-after-an-unrecoverable = tasklens stopped after an unrecoverable error.
+app-114-tasklens-could-not-start-the = tasklens could not start the renderer
+app-114-tasklens-lost-the-graphics-device = tasklens lost the graphics device and must restart
