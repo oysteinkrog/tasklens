@@ -196,7 +196,7 @@ fn route(kind: &ActionKind, target: &ActionTarget) -> Option<Route> {
         (K::SetAffinity(set), T::Process(_) | T::Thread { .. }) => {
             Some(call(HelperRequest::SetAffinity {
                 target: helper_target(target)?,
-                set: set.clone(),
+                set: *set,
             }))
         }
         (K::SetIoPriority(prio), T::Process(key)) => Some(call(HelperRequest::SetIoPriority {
