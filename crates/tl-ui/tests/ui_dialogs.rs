@@ -7,17 +7,16 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::base::Root;
-use gpui_kit::component::WindowExt as _;
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, WindowDecorations, WindowHandle,
-    WindowKind, div, px, size,
+    Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, WindowDecorations,
+    WindowHandle, WindowKind, div, px, size,
 };
 use tl_model::client::EngineClient;
 use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
-use tl_ui::components::toast::ToastKind;
+use tl_ui::components::toast::{self, ToastKind};
 use tl_ui::components::window_frame::{
     APP_ID, PIN_TOOLTIP_OFF, PIN_TOOLTIP_ON, PIN_TOOLTIP_UNSUPPORTED, PinLook, TlSecondaryWindow,
     TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, window_options,
@@ -52,6 +51,8 @@ fn setup(cx: &mut TestAppContext, settings: Settings) -> Arc<FakeEngine> {
     };
     cx.update(|cx| {
         TasklensUi::init(cx, client, init);
+        // Until the shell calls it from init.
+        toast::init(cx);
         cx.set_reduce_motion(true);
     });
     cx.run_until_parked();
@@ -269,18 +270,24 @@ fn secondary_window_has_own_toasts(cx: &mut TestAppContext) {
     });
     a.run_until_parked();
     b.run_until_parked();
+    draw(&mut a);
+    draw(&mut b);
 
-    assert_eq!(a.update(|window, cx| window.notifications(cx).len()), 1);
-    assert_eq!(b.update(|window, cx| window.notifications(cx).len()), 0);
+    assert!(a.debug_bounds("TlToast-a1-frame").is_some());
+    assert!(b.debug_bounds("TlToast-a1-frame").is_none());
 }
 
-#[gpui_kit::test]
-fn narrow_title_ends_with_ellipsis(cx: &mut TestAppContext) {
+#[test]
+fn narrow_title_ends_with_ellipsis() {
+    // The default `TestAppContext` text system gives every glyph zero width, so use the real one.
+    let text_system = gpui_kit::platform::current_platform(true).text_system();
+    let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text_system);
+    let cx = &mut cx;
     setup(cx, Settings::default());
     let long = "tasklens Properties of a process with a very long name that cannot fit into \
                 the title bar of a narrow window at all";
     let spec = TlWindowSpec::new(TlWindowKind::Properties, long, size(px(320.), px(400.)));
-    let (_, mut vcx, frame) = open(cx, spec);
+    let (_, vcx, frame) = open(cx, spec);
     let drawn = vcx
         .read(|cx| frame.read(cx).drawn_title())
         .expect("title drawn");
