@@ -4,6 +4,7 @@ pub mod badge;
 pub mod banner;
 pub mod button;
 pub mod checkbox;
+pub mod dialog;
 pub mod empty;
 pub mod focus;
 #[cfg(feature = "bench")]
