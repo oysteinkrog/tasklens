@@ -8,9 +8,16 @@
 //! Memory modules, BIOS/Firmware and Motherboard (PERF-095 to PERF-099, PERF-101, PERF-102).
 //! Memory module serials are never read (D-007). The machine ID and the board serial are shown
 //! on screen only and never logged.
+//!
+//! The System section (PERF-097) adds two system bus reads per scan (hostnamed, and logind when
+//! `XDG_VTNR` is missing), the environment, and one run of the desktop shell's `--version` per
+//! worker generation. Hostnames and the user name are shown on screen only and never logged.
 
+use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
@@ -19,22 +26,25 @@ use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
 use tl_collect::SysRoot;
 use tl_collect::inventory::{
-    self, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, ModulesInfo, Virtualization,
-    read_inventory,
+    self, CpuFlags, DmiInfo, Field, InventoryPaths, InventoryRaw, KernelInfo, ModulesInfo,
+    Virtualization, read_inventory,
 };
 use tl_collect::parse::cpufreq::read_base_mhz;
 use tl_collect::parse::meminfo::{MemInfo, parse_meminfo};
 use tl_collect::parse::topology::read_topology;
+use tl_collect::proc::meta::{PasswdUserNames, UserNames};
+use tl_collect::sanitize::sanitize_text;
 use tl_collect::sysroot::{read_file, read_u64};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::snapshot::{
     BoardInfo, FirmwareInfo, FirmwareType, InvField, InventorySnapshot, MemoryInfo, MemoryModule,
-    OsInfo, ProcessorInfo,
+    OsInfo, ProcessorInfo, SystemInfo,
 };
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
+use crate::dbus::{self, Bus, DbusConn, DbusError};
 use crate::source::{IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
@@ -42,6 +52,21 @@ use crate::workers::WorkerSpec;
 
 /// Read limit for `/proc/meminfo`, in bytes.
 const MEMINFO_MAX: usize = 64 * 1024;
+/// Longest hostname or bus text kept, in bytes.
+const TEXT_MAX: usize = 256;
+/// Longest wait for the desktop shell's `--version`.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Poll period while waiting for it.
+const SHELL_POLL: Duration = Duration::from_millis(10);
+/// Read limit for its output, in bytes.
+const SHELL_OUTPUT_MAX: u64 = 4096;
+
+const HOSTNAME_NAME: &str = "org.freedesktop.hostname1";
+const HOSTNAME_PATH: &str = "/org/freedesktop/hostname1";
+const LOGIN1_NAME: &str = "org.freedesktop.login1";
+const LOGIN1_PATH: &str = "/org/freedesktop/login1";
+const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
+const LOGIN1_SESSION: &str = "org.freedesktop.login1.Session";
 
 pub fn spec() -> WorkerSpec {
     WorkerSpec {
@@ -53,10 +78,11 @@ pub fn spec() -> WorkerSpec {
 }
 
 /// Each generation runs [`run`] on the host paths, or on the fixture below `cfg.sys_root`. A
-/// fixture root never reads host files.
+/// fixture root never reads host files, the system bus, the environment or a program.
 pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let host = cfg.sys_root == SysRoot::host();
     let paths = paths_for(&cfg.sys_root);
-    Arc::new(move |cx: Cx, _generation: ManagedGeneration| run(cx, io.clone(), paths.clone()))
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| run(cx, io.clone(), paths.clone(), host))
 }
 
 /// `InventoryPaths::system()` for the host root, else every path under the fixture base (the
@@ -78,9 +104,25 @@ fn sys_root(paths: &InventoryPaths) -> SysRoot {
     }
 }
 
-async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths) -> Outcome<(), WorkerError> {
+async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome<(), WorkerError> {
     let root = sys_root(&paths);
-    run_with(cx, io, move || scan_files(&paths, &root)).await
+    let env = Arc::new(if host {
+        SystemEnv::from_process()
+    } else {
+        SystemEnv::default()
+    });
+    // The shell version, read at most once per generation.
+    let shell: Arc<OnceLock<Option<Arc<str>>>> = Arc::new(OnceLock::new());
+    let bus_env = host.then(|| Arc::clone(&env));
+    let scan = move |bus: SystemBus| {
+        let raw = read_inventory(&paths);
+        let mut snap = from_raw(&raw, &root);
+        let version = shell.get_or_init(|| desktop_shell_version(&env)).clone();
+        let user = user_name(&paths.etc.join("passwd"));
+        snap.system = build_system(&env, &bus, &raw.kernel, user, version);
+        snap
+    };
+    run_loop(cx, io, bus_env, scan).await
 }
 
 /// The event loop with the blocking scan injected. Returns `Outcome::Ok(())` on cancel and
@@ -89,6 +131,20 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths) -> Outcome<(), WorkerE
 pub async fn run_with<F>(cx: Cx, io: WorkerIo, scan: F) -> Outcome<(), WorkerError>
 where
     F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
+{
+    run_loop(cx, io, None, move |_| scan()).await
+}
+
+/// The event loop. Each scan reads the system bus first when `bus_env` is `Some` (else the bus
+/// fields are `Failed`), then runs `scan` with the result as a blocking job.
+async fn run_loop<F>(
+    cx: Cx,
+    io: WorkerIo,
+    bus_env: Option<Arc<SystemEnv>>,
+    scan: F,
+) -> Outcome<(), WorkerError>
+where
+    F: Fn(SystemBus) -> InventorySnapshot + Clone + Send + Sync + 'static,
 {
     let running = SourceUpdate::Health {
         id: SourceId::Inventory,
@@ -143,8 +199,15 @@ where
             continue;
         }
 
+        let bus = match &bus_env {
+            Some(env) => read_system_bus(&cx, env).await,
+            None => SystemBus::failed(),
+        };
+        if cx.checkpoint().is_err() {
+            return Outcome::Ok(());
+        }
         let job_scan = scan.clone();
-        let mut job = match cx.spawn_blocking(move |_| job_scan()) {
+        let mut job = match cx.spawn_blocking(move |_| job_scan(bus)) {
             Ok(job) => job,
             Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
         };
@@ -402,6 +465,315 @@ fn module(m: &inventory::MemoryModule) -> MemoryModule {
         manufacturer: opt(m.manufacturer.clone()),
         part_number: opt(m.part_number.clone()),
     }
+}
+
+/// The environment the System section reads (PERF-097). Empty variables count as missing.
+#[derive(Clone, Debug, Default)]
+pub struct SystemEnv {
+    pub xdg_current_desktop: Option<String>,
+    pub xdg_session_type: Option<String>,
+    pub xdg_vtnr: Option<String>,
+    pub xdg_session_id: Option<String>,
+    /// `$PATH` split on ':', absolute entries only.
+    pub path_dirs: Vec<PathBuf>,
+}
+
+impl SystemEnv {
+    pub fn from_process() -> Self {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let path_dirs = std::env::var_os("PATH")
+            .map(|p| {
+                std::env::split_paths(&p)
+                    .filter(|d| d.is_absolute())
+                    .collect()
+            })
+            .unwrap_or_default();
+        SystemEnv {
+            xdg_current_desktop: var("XDG_CURRENT_DESKTOP"),
+            xdg_session_type: var("XDG_SESSION_TYPE"),
+            xdg_vtnr: var("XDG_VTNR"),
+            xdg_session_id: var("XDG_SESSION_ID"),
+            path_dirs,
+        }
+    }
+}
+
+/// The System section's system bus values.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SystemBus {
+    /// hostnamed `PrettyHostname`. Empty is `Unsupported`.
+    pub pretty: InvField<Arc<str>>,
+    /// hostnamed `StaticHostname`. Empty is `Unsupported`.
+    pub static_name: InvField<Arc<str>>,
+    /// logind's session `VTNr`. `None` when not read or 0.
+    pub vtnr: Option<u32>,
+}
+
+impl SystemBus {
+    /// Both hostnames `Failed`, no VT.
+    pub fn failed() -> Self {
+        SystemBus {
+            pretty: with(Validity::Failed),
+            static_name: with(Validity::Failed),
+            vtnr: None,
+        }
+    }
+}
+
+/// Reads the hostnames from hostnamed and, only when `XDG_VTNR` is missing and
+/// `XDG_SESSION_ID` is set, the session's VT from logind. Each read waits at most
+/// `READ_TIMEOUT`. A connect or hostname read failure makes both hostnames `Failed`. Never fails
+/// the worker. The connection is dropped before this returns.
+pub async fn read_system_bus(cx: &Cx, env: &SystemEnv) -> SystemBus {
+    let Ok(conn) = dbus::connect(cx, Bus::System).await else {
+        return SystemBus::failed();
+    };
+    let mut bus = match read_hostnames(cx, &conn).await {
+        Ok((pretty, static_name)) => SystemBus {
+            pretty: bus_text(&pretty),
+            static_name: bus_text(&static_name),
+            vtnr: None,
+        },
+        Err(_) => SystemBus::failed(),
+    };
+    if env.xdg_vtnr.is_none()
+        && let Some(id) = &env.xdg_session_id
+    {
+        bus.vtnr = read_vtnr(cx, &conn, id).await.ok().filter(|&vt| vt != 0);
+    }
+    drop(conn);
+    bus
+}
+
+async fn read_hostnames(cx: &Cx, conn: &DbusConn) -> Result<(String, String), DbusError> {
+    let pretty = read_property::<String>(
+        cx,
+        conn,
+        HOSTNAME_NAME,
+        HOSTNAME_PATH,
+        HOSTNAME_NAME,
+        "PrettyHostname",
+    )
+    .await?;
+    let static_name = read_property::<String>(
+        cx,
+        conn,
+        HOSTNAME_NAME,
+        HOSTNAME_PATH,
+        HOSTNAME_NAME,
+        "StaticHostname",
+    )
+    .await?;
+    Ok((pretty, static_name))
+}
+
+/// `Manager.GetSession(id)`, then that session's `VTNr`. Both only read state.
+async fn read_vtnr(cx: &Cx, conn: &DbusConn, id: &str) -> Result<u32, DbusError> {
+    let session: zbus::zvariant::OwnedObjectPath = conn
+        .read(cx, async {
+            let proxy = uncached_proxy(conn, LOGIN1_NAME, LOGIN1_PATH, LOGIN1_MANAGER).await?;
+            proxy.call("GetSession", &(id,)).await
+        })
+        .await?;
+    read_property::<u32>(
+        cx,
+        conn,
+        LOGIN1_NAME,
+        session.as_str(),
+        LOGIN1_SESSION,
+        "VTNr",
+    )
+    .await
+}
+
+/// One `Properties.Get` through an uncached proxy, in one `read`.
+async fn read_property<T>(
+    cx: &Cx,
+    conn: &DbusConn,
+    name: &str,
+    path: &str,
+    interface: &str,
+    property: &str,
+) -> Result<T, DbusError>
+where
+    T: TryFrom<zbus::zvariant::OwnedValue>,
+    T::Error: Into<zbus::Error>,
+{
+    conn.read(cx, async {
+        let proxy = uncached_proxy(conn, name, path, interface).await?;
+        proxy.get_property::<T>(property).await
+    })
+    .await
+}
+
+async fn uncached_proxy<'a>(
+    conn: &'a DbusConn,
+    name: &'a str,
+    path: &'a str,
+    interface: &'a str,
+) -> zbus::Result<zbus::Proxy<'a>> {
+    zbus::proxy::Builder::new(conn.raw())
+        .destination(name)?
+        .path(path)?
+        .interface(interface)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+}
+
+/// Sanitized bus or kernel text. Empty is `Unsupported`.
+fn bus_text(raw: &str) -> InvField<Arc<str>> {
+    let mut clean = String::new();
+    sanitize_text(raw.as_bytes(), TEXT_MAX, &mut clean);
+    opt((!clean.is_empty()).then(|| Arc::from(clean)))
+}
+
+/// The current user's name from `passwd`, or the uid as text when it is not there.
+fn user_name(passwd: &Path) -> InvField<Arc<str>> {
+    let uid = rustix::process::getuid().as_raw();
+    valid(PasswdUserNames::load(passwd).name(uid))
+}
+
+/// PERF-097, from the bus values, the environment, `kernel`, `user` and the shell version.
+pub fn build_system(
+    env: &SystemEnv,
+    bus: &SystemBus,
+    kernel: &KernelInfo,
+    user: InvField<Arc<str>>,
+    shell_version: Option<Arc<str>>,
+) -> SystemInfo {
+    let static_hostname = if bus.static_name.validity == Validity::Failed {
+        bus_text(&String::from_utf8_lossy(
+            rustix::system::uname().nodename().to_bytes(),
+        ))
+    } else {
+        bus.static_name.clone()
+    };
+    let domain = kernel.nis_domain.clone().or_else(|| {
+        if static_hostname.validity != Validity::Valid {
+            return None;
+        }
+        let (_, rest) = static_hostname.value.split_once('.')?;
+        (!rest.is_empty()).then(|| Arc::from(rest))
+    });
+    let env_text = |v: &Option<String>| v.as_deref().map(Arc::<str>::from);
+    let desktop = opt(shell_version.or_else(|| env_text(&env.xdg_current_desktop)));
+    let windowing_system = opt(env.xdg_session_type.as_deref().map(|t| match t {
+        "wayland" => Arc::from("Wayland"),
+        "x11" => Arc::from("X11"),
+        "tty" => Arc::from("None (text console)"),
+        other => Arc::from(other),
+    }));
+    let virtual_terminal =
+        opt(env_text(&env.xdg_vtnr).or_else(|| bus.vtnr.map(|vt| Arc::from(vt.to_string()))));
+    SystemInfo {
+        pretty_hostname: bus.pretty.clone(),
+        static_hostname,
+        user_name: user,
+        domain,
+        boot_time_s: valid(boot_time_s()),
+        desktop,
+        windowing_system,
+        session_type: opt(env_text(&env.xdg_session_type)),
+        virtual_terminal,
+    }
+}
+
+/// Unix seconds at boot: `CLOCK_REALTIME` minus `CLOCK_BOOTTIME`.
+fn boot_time_s() -> i64 {
+    use rustix::time::{ClockId, clock_gettime};
+    let ns = |id| {
+        let t = clock_gettime(id);
+        i128::from(t.tv_sec) * 1_000_000_000 + i128::from(t.tv_nsec)
+    };
+    let boot = ns(ClockId::Realtime) - ns(ClockId::Boottime);
+    i64::try_from(boot.div_euclid(1_000_000_000)).unwrap_or(0)
+}
+
+/// "KDE Plasma 6.4.5" or "GNOME 47.1" from `plasmashell --version` or `gnome-shell --version`,
+/// chosen by `XDG_CURRENT_DESKTOP`. Blocks for up to 2 s. `None` for other desktops, when the
+/// program is not in `env.path_dirs`, or on a timeout or unknown output.
+pub fn desktop_shell_version(env: &SystemEnv) -> Option<Arc<str>> {
+    let desktops = env.xdg_current_desktop.as_deref()?;
+    let has = |name: &str| desktops.split(':').any(|d| d == name);
+    let program = if has("KDE") {
+        "plasmashell"
+    } else if has("GNOME") {
+        "gnome-shell"
+    } else {
+        return None;
+    };
+    let exe = env
+        .path_dirs
+        .iter()
+        .map(|d| d.join(program))
+        .find(|p| p.is_file())?;
+    parse_shell_version(&run_version(&exe)?)
+}
+
+/// `"plasmashell 6.4.5"` gives `"KDE Plasma 6.4.5"`, `"GNOME Shell 47.1"` gives
+/// `"GNOME 47.1"`, anything else `None`.
+#[doc(hidden)]
+pub fn parse_shell_version(output: &[u8]) -> Option<Arc<str>> {
+    let line = std::str::from_utf8(output).ok()?.lines().next()?.trim();
+    let (label, rest) = if let Some(rest) = line.strip_prefix("plasmashell ") {
+        ("KDE Plasma", rest)
+    } else if let Some(rest) = line.strip_prefix("GNOME Shell ") {
+        ("GNOME", rest)
+    } else {
+        return None;
+    };
+    let version = rest.split_whitespace().next()?;
+    let ok = version
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b".-_+~".contains(&b));
+    ok.then(|| Arc::from(format!("{label} {version}")))
+}
+
+/// Runs `exe --version` with stdin and stderr null, polling every 10 ms for at most 2 s, then
+/// kills it. `None` on a spawn error, a timeout or a failed read.
+fn run_version(exe: &Path) -> Option<Vec<u8>> {
+    let mut child = spawn_version(exe)?;
+    let deadline = Instant::now() + SHELL_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(SHELL_POLL),
+            // Timed out or failed. Do not read stdout here: a grandchild may still hold it open.
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    child
+        .stdout
+        .take()?
+        .take(SHELL_OUTPUT_MAX)
+        .read_to_end(&mut out)
+        .ok()?;
+    Some(out)
+}
+
+/// Spawns `exe --version`, retrying briefly on `ETXTBSY`.
+fn spawn_version(exe: &Path) -> Option<Child> {
+    for _ in 0..3 {
+        let spawned = Command::new(exe)
+            .arg("--version")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => return Some(child),
+            Err(e) if e.kind() == ErrorKind::ExecutableFileBusy => std::thread::sleep(SHELL_POLL),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// PERF-101.

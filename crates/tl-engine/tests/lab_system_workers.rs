@@ -2775,3 +2775,163 @@ fn inventory_no_module_serials() {
     let text = format!("{:?}", snap.modules);
     assert!(!text.contains("SERIAL-MUST-NOT-APPEAR"), "{text}");
 }
+
+// ---- Inventory System section (E12-017) ----
+
+use tl_collect::inventory::KernelInfo;
+use tl_engine::workers::inventory::{SystemBus, SystemEnv, build_system, parse_shell_version};
+
+fn kernel(nis_domain: Option<&str>) -> KernelInfo {
+    KernelInfo {
+        release: Arc::from("6.17.0"),
+        version: Arc::from("#1 SMP"),
+        machine: Arc::from("x86_64"),
+        nis_domain: nis_domain.map(Arc::from),
+    }
+}
+
+fn kde_env() -> SystemEnv {
+    SystemEnv {
+        xdg_current_desktop: Some("KDE".into()),
+        xdg_session_type: Some("wayland".into()),
+        xdg_vtnr: Some("2".into()),
+        ..SystemEnv::default()
+    }
+}
+
+fn bus(static_name: &str) -> SystemBus {
+    SystemBus {
+        pretty: inv_text("Oystein's desktop"),
+        static_name: inv_text(static_name),
+        vtnr: None,
+    }
+}
+
+#[test]
+fn inventory_system_section() {
+    let sys = build_system(
+        &kde_env(),
+        &bus("hawk.example.lan"),
+        &kernel(None),
+        inv_text("oystein"),
+        Some(Arc::from("KDE Plasma 6.4.5")),
+    );
+    assert_eq!(sys.desktop, inv_text("KDE Plasma 6.4.5"));
+    assert_eq!(sys.windowing_system, inv_text("Wayland"));
+    assert_eq!(sys.session_type, inv_text("wayland"));
+    assert_eq!(sys.virtual_terminal, inv_text("2"));
+    assert_eq!(sys.domain.as_deref(), Some("example.lan"));
+    assert_eq!(sys.pretty_hostname, inv_text("Oystein's desktop"));
+    assert_eq!(sys.static_hostname, inv_text("hawk.example.lan"));
+    assert_eq!(sys.user_name, inv_text("oystein"));
+
+    // Without a shell version the desktop is the variable as is; the VT can come from the bus.
+    let env = SystemEnv {
+        xdg_current_desktop: Some("ubuntu:GNOME".into()),
+        xdg_session_type: Some("x11".into()),
+        ..SystemEnv::default()
+    };
+    let mut from_bus = bus("hawk");
+    from_bus.vtnr = Some(3);
+    let sys = build_system(&env, &from_bus, &kernel(None), inv_text("1000"), None);
+    assert_eq!(sys.desktop, inv_text("ubuntu:GNOME"));
+    assert_eq!(sys.windowing_system, inv_text("X11"));
+    assert_eq!(sys.virtual_terminal, inv_text("3"));
+
+    let env = SystemEnv {
+        xdg_session_type: Some("tty".into()),
+        ..SystemEnv::default()
+    };
+    let sys = build_system(&env, &bus("hawk"), &kernel(None), inv_text("1000"), None);
+    assert_eq!(sys.desktop.validity, Validity::Unsupported);
+    assert_eq!(sys.windowing_system, inv_text("None (text console)"));
+    assert_eq!(sys.virtual_terminal.validity, Validity::Unsupported);
+
+    let sys = build_system(
+        &SystemEnv::default(),
+        &bus("hawk"),
+        &kernel(None),
+        inv_text("1000"),
+        None,
+    );
+    assert_eq!(sys.windowing_system.validity, Validity::Unsupported);
+    assert_eq!(sys.session_type.validity, Validity::Unsupported);
+}
+
+#[test]
+fn inventory_domain_rules() {
+    let user = || inv_text("oystein");
+    let env = kde_env();
+    // No dot and no NIS domain hides the row.
+    let sys = build_system(&env, &bus("hawk"), &kernel(None), user(), None);
+    assert_eq!(sys.domain, None);
+    // A NIS domain wins over the hostname.
+    let sys = build_system(
+        &env,
+        &bus("hawk.example.lan"),
+        &kernel(Some("nis.example")),
+        user(),
+        None,
+    );
+    assert_eq!(sys.domain.as_deref(), Some("nis.example"));
+    // E06-017 maps "(none)" to `None`, so the hostname rule applies.
+    let sys = build_system(&env, &bus("hawk.lan"), &kernel(None), user(), None);
+    assert_eq!(sys.domain.as_deref(), Some("lan"));
+    // A trailing dot gives no domain.
+    let sys = build_system(&env, &bus("hawk."), &kernel(None), user(), None);
+    assert_eq!(sys.domain, None);
+}
+
+#[test]
+fn inventory_bus_failure_falls_back() {
+    let sys = build_system(
+        &kde_env(),
+        &SystemBus::failed(),
+        &kernel(None),
+        inv_text("oystein"),
+        None,
+    );
+    let uts = rustix::system::uname();
+    let nodename = uts.nodename().to_string_lossy();
+    assert_eq!(sys.static_hostname, inv_text(&nodename));
+    assert_eq!(sys.pretty_hostname.validity, Validity::Failed);
+}
+
+#[test]
+fn inventory_shell_version_parse() {
+    assert_eq!(
+        parse_shell_version(b"plasmashell 6.4.5\n").as_deref(),
+        Some("KDE Plasma 6.4.5")
+    );
+    assert_eq!(
+        parse_shell_version(b"GNOME Shell 47.1\n").as_deref(),
+        Some("GNOME 47.1")
+    );
+    assert_eq!(parse_shell_version(b"weird"), None);
+    assert_eq!(parse_shell_version(b"plasmashell \n"), None);
+}
+
+#[test]
+fn inventory_boot_time_close_to_uptime() {
+    let sys = build_system(
+        &SystemEnv::default(),
+        &bus("hawk"),
+        &kernel(None),
+        inv_text("oystein"),
+        None,
+    );
+    assert_eq!(sys.boot_time_s.validity, Validity::Valid);
+    let uptime = fs::read_to_string("/proc/uptime").expect("read /proc/uptime");
+    let uptime_s: f64 = uptime
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("parse /proc/uptime");
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_secs_f64();
+    let expected = now_s - uptime_s;
+    let diff = (sys.boot_time_s.value as f64 - expected).abs();
+    assert!(diff <= 2.0, "boot time differs by {diff} s");
+}
