@@ -532,7 +532,9 @@ mod tests {
     }
 
     fn job_reply() -> Result<OwnedValue, UnitBusError> {
-        Ok(OwnedValue::from(OwnedObjectPath::try_from(JOB).unwrap()))
+        Ok(Value::from(ObjectPath::try_from(JOB).unwrap())
+            .try_into_owned()
+            .unwrap())
     }
 
     fn show(v: &Value<'_>) -> String {
