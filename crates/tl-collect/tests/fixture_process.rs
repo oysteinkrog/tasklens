@@ -3794,6 +3794,23 @@ mod strings_utf16_alphabet {
     }
 
     #[test]
+    fn strings_utf16le_spaces_and_digits_stay_in_run() {
+        assert_eq!(
+            utf16_hits("Привет мир 2024"),
+            [StringHitInfo {
+                address: 0x4002,
+                encoding: Encoding::Utf16Le,
+                length: 15,
+                value: "Привет мир 2024".into(),
+            }]
+        );
+        // An ASCII letter still ends the Cyrillic run.
+        let hits = utf16_hits("Привет, Wine");
+        let values: Vec<&str> = hits.iter().map(|h| &*h.value).collect();
+        assert_eq!(values, ["Привет,", "Wine"]);
+    }
+
+    #[test]
     fn strings_utf16le_high_byte_change_splits_run() {
         // "Wine" has high byte 0 and "привет" has 0x04, so each part is its own run.
         let hits = utf16_hits("Wineпривет");

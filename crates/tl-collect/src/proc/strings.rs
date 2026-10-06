@@ -475,8 +475,19 @@ impl StringScanner {
             st.low = Some(b);
             return;
         }
-        match st.low.take().and_then(|low| utf16_char(low, b)) {
+        let Some(low) = st.low.take() else {
+            if st.run.chars > 0 {
+                self.sink.end(&mut st.run, Encoding::Utf16Le, out);
+            }
+            return;
+        };
+        match utf16_char(low, b) {
             Some(c) => {
+                if st.run.chars > 0 && st.high != 0 && b == 0 && is_neutral(low) {
+                    // A space, digit or punctuation inside another alphabet's text.
+                    st.run.push(addr - 1, c);
+                    return;
+                }
                 if st.run.chars > 0 && st.high != b {
                     // Another alphabet: end this run and start a new one with this unit.
                     self.sink.end(&mut st.run, Encoding::Utf16Le, out);
@@ -491,6 +502,12 @@ impl StringScanner {
             }
         }
     }
+}
+
+/// The low byte of a high-byte-0 UTF-16 unit that may sit inside another alphabet's text: a
+/// space, an ASCII digit or ASCII punctuation.
+fn is_neutral(low: u8) -> bool {
+    low == b' ' || low.is_ascii_digit() || low.is_ascii_punctuation()
 }
 
 /// ASCII string bytes: 0x20..=0x7E and tab.
@@ -510,12 +527,13 @@ fn is_printable(c: char) -> bool {
 /// A run also keeps one high byte for its whole length: a unit with another high byte than the
 /// first unit ends the run and starts a new one (see `utf16_byte`). Text in one alphabet keeps
 /// one high byte (0 is Latin-1; Greek, Cyrillic, Hebrew and Arabic each have their own), but
-/// in random data each extra unit matches with odds of about 1 in 256.
+/// in random data each extra unit matches with odds of about 1 in 256. One exception: inside a
+/// run whose high byte is not 0, a space, ASCII digit or ASCII punctuation unit (high byte 0)
+/// stays in the run and does not change its high byte, so "Привет мир 2024" is one run. Such a
+/// run still starts with a unit of its own alphabet, and an ASCII letter still ends it.
 ///
-/// Known costs: CJK and Hangul text changes high byte almost every char, so it is mostly not
-/// found. A space or ASCII digit (high byte 0) inside Greek, Cyrillic, Hebrew or Arabic text
-/// splits the run, so each word is a separate run and a word shorter than the minimum length is
-/// not found.
+/// Known cost: CJK and Hangul text changes high byte almost every char, so it is mostly not
+/// found.
 fn utf16_char(low: u8, high: u8) -> Option<char> {
     if is_ascii_text(low) && is_ascii_text(high) {
         return None;
