@@ -1,4 +1,5 @@
 //! Sockets: sock_diag dump, socket to process map, TCP attribution, connection records.
+pub mod addrs;
 pub mod attribution;
 pub mod connections;
 pub mod netns;
