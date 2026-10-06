@@ -10,13 +10,15 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use tl_model::actions::Proto;
 use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ConnectionsSnapshot, Impact, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
-    StartupCounts, StartupEntry, StartupSnapshot, StartupStatus, StartupType, UnitRecord,
+    ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot, Impact, ProcessSnapshot, ServiceCounts,
+    ServiceStatus, ServicesSnapshot, StartupCounts, StartupEntry, StartupSnapshot, StartupStatus,
+    StartupType, UnitRecord,
 };
 use tl_model::table::{
     ConnColumn, Manager, ServiceColumn, ServiceFilter, ServiceStateFilter, StartupColumn,
@@ -44,12 +46,12 @@ pub struct SysTableOutput {
     pub query_generation: u64,
 }
 
-/// The rows of `query.table`. Connections returns no rows until E14-006.
+/// The rows of `query.table`.
 pub fn build(input: &SysTableInput<'_>, query: &SysTableQuery) -> SysTableOutput {
     match query.table {
         SysTable::Services => build_services(input, query).0,
         SysTable::Startup => build_startup(input, query).0,
-        SysTable::Connections => finish(Vec::new(), query),
+        SysTable::Connections => build_connections(input, query).0,
     }
 }
 
@@ -612,6 +614,251 @@ fn cmp_startup(
         C::Type => text(a.kind.label(), b.kind.label()),
         C::Location => text(&a.location, &b.location),
         C::Command => text(&a.command, &b.command),
+    }
+}
+
+// ---- Connections ----
+
+/// The Connections rows plus the `ConnectionsSnapshot.counts` for the same query, from one pass.
+/// `build` keeps only the rows; the reducer calls this to store both.
+///
+/// Counts cover the rows left after the text filter; EST and LISTEN count TCP only (SYS-036).
+pub fn build_connections(
+    input: &SysTableInput<'_>,
+    query: &SysTableQuery,
+) -> (SysTableOutput, ConnCounts) {
+    let text: &str = &query.filter;
+    let (column, ascending) = match query.sort.column {
+        SysColumnId::Connections(c) => (c, query.sort.ascending),
+        _ => (ConnColumn::Proto, true),
+    };
+    let records = &input.connections.records;
+    let view = ConnView::new(
+        input.processes,
+        !text.is_empty() || column == ConnColumn::User,
+    );
+
+    let mut idx: Vec<u32> = Vec::with_capacity(records.len());
+    let mut counts = ConnCounts::default();
+    for (i, r) in records.iter().enumerate() {
+        if text.is_empty() || view.text_matches(r, text) {
+            counts.total += 1;
+            match r.proto {
+                Proto::Tcp => {
+                    counts.tcp += 1;
+                    match r.state {
+                        ConnState::Established => counts.established += 1,
+                        ConnState::Listening => counts.listening += 1,
+                        _ => {}
+                    }
+                }
+                Proto::Udp => counts.udp += 1,
+            }
+            idx.push(i as u32);
+        }
+    }
+
+    // R-011: local port ascending is the fixed secondary sort, then the cookie.
+    sort_indices(
+        &mut idx,
+        |a, b| {
+            let (a, b) = (&records[a], &records[b]);
+            view.cmp(a, b, column, ascending)
+                .then_with(|| a.four_tuple.local.port().cmp(&b.four_tuple.local.port()))
+        },
+        |a, b| records[a].cookie.cmp(&records[b].cookie),
+    );
+    let rows = idx
+        .into_iter()
+        .map(|i| SysRow {
+            node: SysNodeId::Conn(records[i as usize].cookie),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(i),
+        })
+        .collect();
+    (finish(rows, query), counts)
+}
+
+/// The PID cell of a socket (UI-SYS-062).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ConnPid {
+    /// Lowest owner PID and how many other owners share the socket: "812" or "812 +2".
+    Owned(u32, usize),
+    /// Another user's socket the engine cannot attribute: "?".
+    Unknown,
+    /// Kernel-owned (TIME-WAIT, inode 0) or the owner is gone: "-".
+    None,
+}
+
+impl ConnPid {
+    fn of(r: &ConnRecord) -> ConnPid {
+        match r.owners.iter().map(|k| k.pid).min() {
+            Some(pid) => ConnPid::Owned(pid, r.owners.len() - 1),
+            None if r.owner_validity == Validity::Restricted => ConnPid::Unknown,
+            None => ConnPid::None,
+        }
+    }
+
+    fn pid(self) -> Option<u32> {
+        match self {
+            ConnPid::Owned(pid, _) => Some(pid),
+            ConnPid::Unknown | ConnPid::None => None,
+        }
+    }
+
+    /// The text as shown, written into `buf`.
+    fn text(self, buf: &mut [u8; 24]) -> &str {
+        use std::io::Write;
+        match self {
+            ConnPid::Owned(pid, more) => {
+                let mut cur = std::io::Cursor::new(&mut buf[..]);
+                let _ = if more == 0 {
+                    write!(cur, "{pid}")
+                } else {
+                    write!(cur, "{pid} +{more}")
+                };
+                let n = cur.position() as usize;
+                std::str::from_utf8(&buf[..n]).unwrap_or_default()
+            }
+            ConnPid::Unknown => "?",
+            ConnPid::None => "-",
+        }
+    }
+}
+
+/// Process and user lookups for the Connections columns the record does not carry.
+struct ConnView<'a> {
+    processes: &'a ProcessSnapshot,
+    /// User name per uid, from the process snapshot. Filled only when the filter or the sort
+    /// needs the User column.
+    users: FxHashMap<u32, &'a str>,
+}
+
+impl<'a> ConnView<'a> {
+    fn new(processes: &'a ProcessSnapshot, need_users: bool) -> Self {
+        let mut users = FxHashMap::default();
+        if need_users {
+            for p in processes.records.iter() {
+                users.entry(p.uid).or_insert(&*p.meta.user);
+            }
+        }
+        Self { processes, users }
+    }
+
+    /// Display name of the owner with the lowest PID, when it is in the process snapshot.
+    fn process(&self, r: &ConnRecord) -> Option<&'a str> {
+        let owner = r.owners.iter().min_by_key(|k| (k.pid, **k))?;
+        self.processes.get(*owner).map(|p| &*p.meta.name)
+    }
+
+    /// The user name for the diag uid, else the uid in decimal.
+    fn user<'b>(&self, uid: u32, buf: &'b mut [u8; 10]) -> &'b str
+    where
+        'a: 'b,
+    {
+        match self.users.get(&uid) {
+            Some(name) => name,
+            None => decimal(uid, buf),
+        }
+    }
+
+    /// True when the lowercase `text` occurs in Proto, either address, State, PID, Process or
+    /// User as shown (SYS-036).
+    fn text_matches(&self, r: &ConnRecord, text: &str) -> bool {
+        let mut pid = [0u8; 24];
+        let mut uid = [0u8; 10];
+        contains_lower(proto_word(r.proto), text)
+            || contains_lower(&r.local, text)
+            || contains_lower(&r.foreign, text)
+            || contains_lower(r.state.label(), text)
+            || contains_lower(ConnPid::of(r).text(&mut pid), text)
+            || self.process(r).is_some_and(|p| contains_lower(p, text))
+            || contains_lower(self.user(r.uid, &mut uid), text)
+    }
+
+    /// Order of two sockets in `column` (UI-SYS-061). Addresses by family, address bytes, then
+    /// port; State in the SYS-029 order, which is the enum order; PID numeric with "?" and "-"
+    /// after all numbers; text columns case-insensitive, blank values last.
+    fn cmp(&self, a: &ConnRecord, b: &ConnRecord, column: ConnColumn, ascending: bool) -> Ordering {
+        use ConnColumn as C;
+        let num = |x: u64, y: u64| directed(x.cmp(&y), ascending);
+        match column {
+            C::Proto => directed(proto_rank(a.proto).cmp(&proto_rank(b.proto)), ascending),
+            // `SocketAddr` orders V4 before V6, then address bytes, then port.
+            C::Local => directed(a.four_tuple.local.cmp(&b.four_tuple.local), ascending),
+            C::Foreign => directed(a.four_tuple.remote.cmp(&b.four_tuple.remote), ascending),
+            C::State => directed((a.state as u8).cmp(&(b.state as u8)), ascending),
+            C::Pid => {
+                let (x, y) = (ConnPid::of(a), ConnPid::of(b));
+                absent_last(x.pid(), y.pid(), ascending, |x: u32, y: u32| x.cmp(&y))
+                    .then_with(|| x.cmp(&y))
+            }
+            C::Process => absent_last(self.process(a), self.process(b), ascending, cmp_text),
+            C::User => {
+                let (mut x, mut y) = ([0u8; 10], [0u8; 10]);
+                directed(
+                    cmp_text(self.user(a.uid, &mut x), self.user(b.uid, &mut y)),
+                    ascending,
+                )
+            }
+            C::Family => directed(
+                a.four_tuple
+                    .local
+                    .is_ipv6()
+                    .cmp(&b.four_tuple.local.is_ipv6()),
+                ascending,
+            ),
+            C::LocalPort => num(
+                a.four_tuple.local.port().into(),
+                b.four_tuple.local.port().into(),
+            ),
+            C::ForeignPort => num(
+                a.four_tuple.remote.port().into(),
+                b.four_tuple.remote.port().into(),
+            ),
+            C::RecvQ => num(a.recv_q.into(), b.recv_q.into()),
+            C::SendQ => num(a.send_q.into(), b.send_q.into()),
+            C::Inode => num(a.inode, b.inode),
+            // The reducer has no interface names; index 0 shows empty and sorts last.
+            C::Interface => absent_last(
+                (a.ifindex != 0).then_some(a.ifindex),
+                (b.ifindex != 0).then_some(b.ifindex),
+                ascending,
+                |x: u32, y: u32| x.cmp(&y),
+            ),
+            C::Service => absent_last(
+                a.unit.as_ref().map(|u| &*u.name),
+                b.unit.as_ref().map(|u| &*u.name),
+                ascending,
+                cmp_text,
+            ),
+            C::RemoteHost => absent_last(
+                a.remote_host.as_deref(),
+                b.remote_host.as_deref(),
+                ascending,
+                cmp_text,
+            ),
+            // P4: no namespace field yet, so every row ties.
+            C::Netns => Ordering::Equal,
+        }
+    }
+}
+
+/// The Proto column word.
+fn proto_word(p: Proto) -> &'static str {
+    match p {
+        Proto::Tcp => "TCP",
+        Proto::Udp => "UDP",
+    }
+}
+
+/// TCP before UDP.
+fn proto_rank(p: Proto) -> u8 {
+    match p {
+        Proto::Tcp => 0,
+        Proto::Udp => 1,
     }
 }
 
@@ -1409,6 +1656,218 @@ mod tests {
             let entries = vec![a.clone(), b.clone(), c.clone()];
             assert_eq!(run_startup(entries, &q).0, want);
         }
+    }
+
+    // ---- Connections ----
+
+    fn conn(cookie: u64, proto: Proto, local: &str, foreign: &str, state: ConnState) -> ConnRecord {
+        let local_addr: std::net::SocketAddr = local.parse().expect("local address");
+        let remote: std::net::SocketAddr = foreign.parse().unwrap_or(std::net::SocketAddr::new(
+            std::net::Ipv4Addr::UNSPECIFIED.into(),
+            0,
+        ));
+        ConnRecord {
+            cookie,
+            proto,
+            family: if local_addr.is_ipv6() {
+                tl_model::actions::Family::Inet6
+            } else {
+                tl_model::actions::Family::Inet
+            },
+            four_tuple: tl_model::actions::FourTuple {
+                local: local_addr,
+                remote,
+            },
+            local: local.into(),
+            foreign: foreign.into(),
+            state,
+            owners: SmallVec::new(),
+            owner_validity: Validity::Valid,
+            uid: 1000,
+            inode: cookie,
+            ifindex: 0,
+            recv_q: 0,
+            send_q: 0,
+            unit: None,
+            tcp: None,
+            remote_host: None,
+        }
+    }
+
+    fn tcp(cookie: u64, local: &str) -> ConnRecord {
+        conn(cookie, Proto::Tcp, local, "*:*", ConnState::Listening)
+    }
+
+    /// The rows' local address strings in order, plus the counts.
+    fn run_conn(records: Vec<ConnRecord>, q: &SysTableQuery) -> (Vec<String>, ConnCounts) {
+        let services = ServicesSnapshot::default();
+        let startup = StartupSnapshot::default();
+        let connections = ConnectionsSnapshot {
+            records: records.into(),
+            ..ConnectionsSnapshot::default()
+        };
+        let processes = ProcessSnapshot::default();
+        let settings = EngineSettings::default();
+        let input = SysTableInput {
+            services: &services,
+            startup: &startup,
+            connections: &connections,
+            processes: &processes,
+            settings: &settings,
+        };
+        let (out, counts) = build_connections(&input, q);
+        let locals = out
+            .rows
+            .iter()
+            .map(|r| {
+                let rec = &connections.records[r.record.expect("record") as usize];
+                assert_eq!(r.node, SysNodeId::Conn(rec.cookie));
+                assert_eq!((r.depth, r.has_children, r.expanded), (0, false, false));
+                rec.local.to_string()
+            })
+            .collect();
+        (locals, counts)
+    }
+
+    fn conn_sorted(column: ConnColumn, ascending: bool) -> SysTableQuery {
+        SysTableQuery {
+            sort: SysSortSpec {
+                column: SysColumnId::Connections(column),
+                ascending,
+            },
+            ..query(SysTable::Connections, 1)
+        }
+    }
+
+    #[test]
+    fn connections_default_sort() {
+        let records = vec![
+            conn(1, Proto::Udp, "0.0.0.0:53", "*:*", ConnState::Unconnected),
+            tcp(2, "0.0.0.0:443"),
+            tcp(3, "0.0.0.0:22"),
+        ];
+        let (locals, _) = run_conn(records, &query(SysTable::Connections, 1));
+        assert_eq!(locals, ["0.0.0.0:22", "0.0.0.0:443", "0.0.0.0:53"]);
+    }
+
+    #[test]
+    fn connections_address_sort_numeric() {
+        let records = vec![
+            tcp(1, "[::1]:80"),
+            tcp(2, "10.0.0.2:80"),
+            tcp(3, "9.0.0.1:80"),
+            tcp(4, "9.0.0.1:8080"),
+        ];
+        let (locals, _) = run_conn(records, &conn_sorted(ConnColumn::Local, true));
+        assert_eq!(
+            locals,
+            ["9.0.0.1:80", "9.0.0.1:8080", "10.0.0.2:80", "[::1]:80"]
+        );
+    }
+
+    #[test]
+    fn connections_pid_unknown_last() {
+        let mut p900 = tcp(1, "127.0.0.1:1");
+        p900.owners = SmallVec::from_slice(&[key(900, 1)]);
+        let mut restricted = tcp(2, "127.0.0.1:2");
+        restricted.owner_validity = Validity::Restricted;
+        let mut p12 = tcp(3, "127.0.0.1:3");
+        p12.owners = SmallVec::from_slice(&[key(40, 1), key(12, 2)]);
+        let kernel = tcp(4, "127.0.0.1:4");
+        let records = vec![p900, restricted, p12, kernel];
+        for (ascending, want) in [
+            (
+                true,
+                ["127.0.0.1:3", "127.0.0.1:1", "127.0.0.1:2", "127.0.0.1:4"],
+            ),
+            (
+                false,
+                ["127.0.0.1:1", "127.0.0.1:3", "127.0.0.1:2", "127.0.0.1:4"],
+            ),
+        ] {
+            let (locals, _) = run_conn(records.clone(), &conn_sorted(ConnColumn::Pid, ascending));
+            assert_eq!(locals, want);
+        }
+        // The PID text as shown is what the filter matches.
+        let q = |f: &str| SysTableQuery {
+            filter: Arc::from(f),
+            ..query(SysTable::Connections, 1)
+        };
+        assert_eq!(run_conn(records.clone(), &q("12 +1")).0, ["127.0.0.1:3"]);
+        assert_eq!(run_conn(records.clone(), &q("?")).0, ["127.0.0.1:2"]);
+        assert_eq!(run_conn(records, &q("-")).0, ["127.0.0.1:4"]);
+    }
+
+    #[test]
+    fn connections_filter_matches_port() {
+        let records = vec![
+            conn(1, Proto::Tcp, "10.0.0.1:443", "*:*", ConnState::Listening),
+            conn(
+                2,
+                Proto::Tcp,
+                "10.0.0.1:50000",
+                "1.2.3.4:443",
+                ConnState::Established,
+            ),
+            conn(3, Proto::Tcp, "10.0.0.1:22", "*:*", ConnState::Listening),
+            conn(
+                4,
+                Proto::Udp,
+                "10.0.0.1:4430",
+                "*:*",
+                ConnState::Unconnected,
+            ),
+        ];
+        let q = SysTableQuery {
+            filter: Arc::from(":443"),
+            ..query(SysTable::Connections, 1)
+        };
+        let (locals, counts) = run_conn(records.clone(), &q);
+        // ":4430" holds ":443" as a substring, as the spec's substring match asks.
+        assert_eq!(locals, ["10.0.0.1:443", "10.0.0.1:50000", "10.0.0.1:4430"]);
+        assert_eq!(counts.total, 3);
+
+        // Proto, State and User match lowercase.
+        for (text, n) in [("udp", 1), ("listening", 2), ("1000", 4)] {
+            let q = SysTableQuery {
+                filter: Arc::from(text),
+                ..query(SysTable::Connections, 1)
+            };
+            assert_eq!(run_conn(records.clone(), &q).0.len(), n, "filter {text:?}");
+        }
+    }
+
+    #[test]
+    fn connections_counts() {
+        let records = vec![
+            conn(
+                1,
+                Proto::Tcp,
+                "10.0.0.1:5000",
+                "1.1.1.1:443",
+                ConnState::Established,
+            ),
+            conn(
+                2,
+                Proto::Tcp,
+                "10.0.0.1:5001",
+                "1.1.1.1:443",
+                ConnState::Established,
+            ),
+            tcp(3, "0.0.0.0:22"),
+            conn(4, Proto::Udp, "0.0.0.0:53", "*:*", ConnState::Unconnected),
+        ];
+        let (_, counts) = run_conn(records, &query(SysTable::Connections, 1));
+        assert_eq!(
+            counts,
+            ConnCounts {
+                total: 4,
+                tcp: 3,
+                udp: 1,
+                established: 2,
+                listening: 1,
+            }
+        );
     }
 
     #[test]
