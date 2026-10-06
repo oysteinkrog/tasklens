@@ -535,3 +535,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.6 (6e6b29a, 0280e89): device sidebar. Two follow-up crw beads: the memory card shows a percent with words through tr, and the sidebar drops its demand on other tabs. Fan scale has no maximum (accepted).
 - rsf.16 (519bdbf): column separators, one canvas per row, painted after the cells (accepted).
 - jqk.16 (75f1071): server-decorations menu row and MenuRowHeight global; the bar height follows the reported decorations.
+- m1f.18 (16d8f29): the frame pin and close sit in tab group index 1 after the content; close is a focusable kit Button; the rescue title follows strings_version. The ui_columns expectation was updated (accepted).
+- pdu.12 (9a16718, 75b5172, 0558014): ProcessDelegate. Leader fix requested: Unit row id from an interner, not FxHash. Accepted: clk_tck is fixed at 100 (USER_HZ); gpu_N is offered per adapter; persist through TlSettings::update. API noted on pdu.1.
