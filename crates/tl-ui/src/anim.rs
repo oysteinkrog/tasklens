@@ -262,7 +262,7 @@ impl AnimationDriver {
         }
         self.last_frame = Some(now);
         for id in self.requests.drain() {
-            cx.notify(id);
+            App::notify(cx, id);
         }
         mem::take(&mut self.callbacks)
     }
