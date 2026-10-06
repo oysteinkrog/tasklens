@@ -2,7 +2,10 @@
 //!
 //! No test runs pkexec or anything as root: every test uses `FakeLink` through `LinkEnv`.
 //!
-//! The last four tests run a whole engine session with the fake as `EngineHooks.helper`
+//! The `privileged_*` tests run `run_action` with the real `HelperHandle` over the fake
+//! (E29-014): the action pipeline, the `PrivilegedOps` impl and the helper task together.
+//!
+//! The four `EngineRig` tests run a whole engine session with the fake as `EngineHooks.helper`
 //! (E29-020): commands go through the reducer and the helper state comes back in
 //! `Snapshot.health`.
 
@@ -12,7 +15,8 @@ mod fake_sources;
 use std::collections::VecDeque;
 use std::io;
 use std::os::fd::BorrowedFd;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -22,22 +26,29 @@ use asupersync::runtime::TaskHandle;
 use asupersync::time;
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
+use tl_engine::actions::startup::StartupPaths;
+use tl_engine::actions::{ActionCtx, ActionOps, PrivilegedOps, dump, run_action};
 use tl_engine::bridge::EngineHooks;
 use tl_engine::config::{EngineConfig, EngineMode};
+use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::helper::{
     HelperCallError, HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError,
     helper_queue, helper_task_with,
 };
 use tl_engine::session::engine_root;
 use tl_engine::update::{CpuCoreSample, CpuSample, EngineMsg, HelperUpdate, SourceUpdate};
-use tl_model::actions::Signal;
+use tl_model::actions::{
+    ActionError, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget, CgroupRef,
+    DumpMode, IoPriority, RejectReason, Signal,
+};
 use tl_model::command::{
     Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
 };
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{
-    HELPER_PROTO_VERSION, HelperFrame, HelperReply, HelperReplyBody, HelperRequest, HelperTarget,
+    HELPER_PROTO_VERSION, HelperError, HelperFrame, HelperReply, HelperReplyBody, HelperRequest,
+    HelperTarget,
 };
 use tl_model::history::RecordSink;
 use tl_model::ids::ProcessKey;
@@ -46,6 +57,7 @@ use tl_model::process::ProcessRecord;
 use tl_model::series::Sample;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, CpuTotals, Metric};
+use tl_model::table::{Manager, UnitRef};
 use tl_model::time::{BootId, TimeNs};
 use tl_model::validity::Validity;
 
@@ -58,6 +70,8 @@ enum Answer {
     Replies(u32),
     /// No reply: the call runs into its deadline.
     Never,
+    /// One final `Err` reply.
+    Err(HelperError),
 }
 
 /// What the fake helper does and saw. Shared by every link the factory makes.
@@ -73,6 +87,8 @@ struct FakeState {
     closed: bool,
     /// `send <seq>` and `reply <seq> last` in order.
     log: Vec<String>,
+    /// Every request after the `Hello`, and whether a descriptor came with it.
+    requests: Vec<(HelperRequest, bool)>,
 }
 
 type Shared = Arc<Mutex<FakeState>>;
@@ -84,7 +100,7 @@ fn lock(state: &Shared) -> std::sync::MutexGuard<'_, FakeState> {
 struct FakeLink(Shared);
 
 impl HelperLink for FakeLink {
-    fn send(&mut self, frame: &HelperFrame, _fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
+    fn send(&mut self, frame: &HelperFrame, fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
         let mut s = lock(&self.0);
         if s.exit.is_some() || s.killed {
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -103,14 +119,23 @@ impl HelperLink for FakeLink {
             }
             return Ok(());
         }
-        if let Some(Answer::Replies(n)) = s.answers.pop_front() {
-            for i in 1..=n {
-                s.pending.push_back(HelperReply {
-                    seq: frame.seq,
-                    last: i == n,
-                    body: HelperReplyBody::Ok,
-                });
+        s.requests.push((frame.request.clone(), fd.is_some()));
+        match s.answers.pop_front() {
+            Some(Answer::Replies(n)) => {
+                for i in 1..=n {
+                    s.pending.push_back(HelperReply {
+                        seq: frame.seq,
+                        last: i == n,
+                        body: HelperReplyBody::Ok,
+                    });
+                }
             }
+            Some(Answer::Err(e)) => s.pending.push_back(HelperReply {
+                seq: frame.seq,
+                last: true,
+                body: HelperReplyBody::Err(e),
+            }),
+            Some(Answer::Never) | None => {}
         }
         Ok(())
     }
@@ -760,4 +785,348 @@ fn health_arc_reused_when_unchanged() {
     rig.send(cpu_msg(300 * 1_000_000));
     assert!(Arc::ptr_eq(&after.health, &rig.latest().health));
     rig.finish();
+}
+
+/// Every `ActionEvent` of one request as `(target, state)`, in order.
+type Events = Vec<(Option<u16>, ActionState)>;
+
+/// `ActionOps` that refuses everything. `dump` makes `dump_available` true.
+struct TestOps {
+    dump: bool,
+}
+
+impl ActionOps for TestOps {
+    fn dump_available(&self) -> bool {
+        self.dump
+    }
+}
+
+fn pkey(pid: u32) -> ProcessKey {
+    ProcessKey {
+        start_ticks: 100 + u64::from(pid),
+        boot_id: BootId(7),
+        pid,
+    }
+}
+
+fn procs(pids: &[u32]) -> Vec<ActionTarget> {
+    pids.iter()
+        .map(|p| ActionTarget::Process(pkey(*p)))
+        .collect()
+}
+
+fn action(kind: ActionKind, targets: Vec<ActionTarget>, privileged: bool) -> ActionRequest {
+    ActionRequest {
+        id: ActionId(1),
+        kind,
+        targets: targets.into_iter().collect(),
+        privileged,
+    }
+}
+
+/// Runs `req` through `run_action` with every target admitted and the real `HelperHandle` over
+/// `env` as `ActionCtx.helper`. The action starts once the helper task has published its first
+/// state, as in an engine session.
+fn run_request(
+    lab: LabRuntime,
+    env: LinkEnv,
+    state_dir: PathBuf,
+    dump: bool,
+    req: ActionRequest,
+) -> Events {
+    let out: Arc<Mutex<Events>> = Arc::default();
+    let sink = Arc::clone(&out);
+    run(lab, env, move |cx, handle, _helper| async move {
+        time::sleep(cx.now(), Duration::from_millis(10)).await;
+        let (events_tx, events) = async_channel::bounded(256);
+        let (msgs_tx, _msgs) = mpsc::channel::<EngineMsg>(16);
+        let actx = Arc::new(ActionCtx {
+            events: events_tx,
+            msgs: msgs_tx,
+            ops: Arc::new(TestOps { dump }),
+            boot_id: BootId(7),
+            uid: 1000,
+            config: Arc::new(EngineConfig::new(EngineMode::Full, state_dir)),
+            systemd_system: ManagerConnSlot::new(),
+            systemd_user: ManagerConnSlot::new(),
+            openers: None,
+            helper: Some(Arc::new(handle) as Arc<dyn PrivilegedOps>),
+            destroy_support_sent: AtomicBool::new(false),
+            unit_bus_override: None,
+            startup_paths: StartupPaths::from_env(),
+        });
+        let per_target = vec![None; req.targets.len()];
+        run_action(cx.clone(), actx, req, per_target).await;
+        let got = std::iter::from_fn(|| events.try_recv().ok()).map(|ev| (ev.target, ev.state));
+        out_lock(&sink).extend(got);
+    });
+    out_lock(&out).clone()
+}
+
+fn out_lock(events: &Mutex<Events>) -> std::sync::MutexGuard<'_, Events> {
+    events.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `run_request` with a state directory nothing writes to.
+fn run_plain(lab: LabRuntime, env: LinkEnv, req: ActionRequest) -> Events {
+    let state_dir = PathBuf::from("/var/tmp/claude/qfx.17-state");
+    run_request(lab, env, state_dir, false, req)
+}
+
+fn requests(fake: &Fake) -> Vec<HelperRequest> {
+    lock(&fake.state)
+        .requests
+        .iter()
+        .map(|(req, _)| req.clone())
+        .collect()
+}
+
+fn signal_to(pid: u32, signal: Signal) -> HelperRequest {
+    HelperRequest::Signal {
+        target: HelperTarget::Process(pkey(pid)),
+        signal,
+    }
+}
+
+const STARTED: (Option<u16>, ActionState) = (None, ActionState::Started);
+
+#[test]
+fn privileged_signal_two_targets() {
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).answers = [Answer::Replies(1), Answer::Replies(1)].into();
+    let req = action(ActionKind::Signal(Signal::Term), procs(&[11, 12]), true);
+    let events = run_plain(lab(20), env, req);
+    assert_eq!(
+        events,
+        [
+            STARTED,
+            (Some(0), ActionState::Succeeded),
+            (Some(1), ActionState::Succeeded),
+            (None, ActionState::Succeeded),
+        ]
+    );
+    assert_eq!(
+        requests(&fake),
+        [signal_to(11, Signal::Term), signal_to(12, Signal::Term)]
+    );
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 1, "one prompt");
+}
+
+/// The summary follows `actions::summarize` like the unprivileged pipeline: with more than one
+/// target a failure is `Partial { done, total }` (E03-053).
+#[test]
+fn privileged_partial_failure_summary() {
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).answers = [
+        Answer::Replies(1),
+        Answer::Err(HelperError::PermissionDenied),
+    ]
+    .into();
+    let req = action(ActionKind::Signal(Signal::Kill), procs(&[11, 12]), true);
+    let events = run_plain(lab(21), env, req);
+    assert_eq!(
+        events,
+        [
+            STARTED,
+            (Some(0), ActionState::Succeeded),
+            (Some(1), ActionState::Failed(ActionError::PermissionDenied)),
+            (
+                None,
+                ActionState::Failed(ActionError::Partial { done: 1, total: 2 })
+            ),
+        ]
+    );
+}
+
+#[test]
+fn privileged_kill_tree_stops_first() {
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).answers = vec![Answer::Replies(1); 6].into();
+    let req = action(ActionKind::KillTree, procs(&[11, 12, 13]), true);
+    let events = run_plain(lab(22), env, req);
+    assert_eq!(events.len(), 5, "{events:?}");
+    assert_eq!(events[4], (None, ActionState::Succeeded));
+    let stops = [11, 12, 13].map(|p| signal_to(p, Signal::Stop));
+    let kills = [11, 12, 13].map(|p| signal_to(p, Signal::Kill));
+    assert_eq!(requests(&fake), [stops, kills].concat());
+}
+
+/// The prompt is dismissed once; no target is sent and no second prompt shows.
+fn auth_failure_all_targets(exit: i32, want: ActionError) {
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).start_exit = Some(exit);
+    let req = action(ActionKind::SetNice(5), procs(&[11, 12]), true);
+    let events = run_plain(lab(23), env, req);
+    let failed = ActionState::Failed(want);
+    assert_eq!(events[0], STARTED);
+    assert_eq!(events[1], (Some(0), failed.clone()));
+    assert_eq!(events[2], (Some(1), failed));
+    assert_eq!(events.len(), 4, "{events:?}");
+    assert!(requests(&fake).is_empty(), "no SetNice frame");
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 1, "one prompt");
+}
+
+#[test]
+fn privileged_auth_cancelled_all_targets() {
+    auth_failure_all_targets(126, ActionError::AuthCancelled);
+}
+
+#[test]
+fn privileged_not_authorized_all_targets() {
+    auth_failure_all_targets(127, ActionError::NotAuthorized);
+}
+
+/// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]` like `shutdown_ends_session`.
+#[test]
+fn privileged_timeout_outcome_unknown() {
+    for seed in 0..16 {
+        let chaos = ChaosConfig::default()
+            .with_delay_probability(0.05)
+            .with_delay_range(Duration::ZERO..Duration::from_millis(10))
+            .with_wakeup_storm_probability(0.01);
+        let lab = LabRuntime::new(
+            LabConfig::new(seed)
+                .worker_count(2)
+                .max_steps(1_000_000)
+                .with_chaos(chaos),
+        );
+        let (fake, env) = Fake::new(true);
+        lock(&fake.state).answers = [Answer::Never].into();
+        let req = action(ActionKind::Signal(Signal::Term), procs(&[11]), true);
+        let events = run_plain(lab, env, req);
+        let unknown =
+            ActionState::OutcomeUnknown(Arc::from("no answer from the administrator helper"));
+        assert_eq!(
+            events,
+            [STARTED, (Some(0), unknown.clone()), (None, unknown)],
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn privileged_unit_kind_unsupported() {
+    let unit = ActionTarget::Unit(UnitRef {
+        manager: Manager::System,
+        name: Arc::from("a.service"),
+    });
+    let thread = ActionTarget::Thread {
+        process: pkey(11),
+        tid: 12,
+    };
+    let cases = [
+        (ActionKind::UnitStart, vec![unit]),
+        // R-097: no I/O priority for one thread.
+        (ActionKind::SetIoPriority(IoPriority::Idle), vec![thread]),
+    ];
+    for (kind, targets) in cases {
+        let (fake, env) = Fake::new(true);
+        let events = run_plain(lab(24), env, action(kind.clone(), targets, true));
+        assert_eq!(
+            events,
+            [
+                STARTED,
+                (None, ActionState::Rejected(RejectReason::Unsupported))
+            ],
+            "{kind:?}"
+        );
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 0, "{kind:?}");
+    }
+}
+
+/// Security regression: an unprivileged request never escalates by itself.
+#[test]
+fn unprivileged_never_touches_helper() {
+    let (fake, _env) = Fake::new(true);
+    let cgroup = ActionTarget::Cgroup(CgroupRef {
+        rel_path: Arc::from("user.slice/app.slice/app-a.scope"),
+        cgroup_id: 42,
+    });
+    let dump_path = Arc::from("/var/tmp/claude/qfx.17-state/dumps/a.core");
+    let cases = [
+        (ActionKind::Signal(Signal::Term), procs(&[11, 12])),
+        (ActionKind::Suspend, procs(&[11])),
+        (ActionKind::SetNice(5), procs(&[11])),
+        (ActionKind::KillTree, procs(&[11, 12])),
+        (ActionKind::FreezeGroup, vec![cgroup]),
+        (
+            ActionKind::Dump {
+                mode: DumpMode::Mini,
+                path: dump_path,
+            },
+            procs(&[11]),
+        ),
+    ];
+    for (kind, targets) in cases {
+        let events = run_plain(
+            lab(25),
+            fake.env(true),
+            action(kind.clone(), targets, false),
+        );
+        assert!(
+            events
+                .last()
+                .is_some_and(|(t, s)| t.is_none() && s.is_final()),
+            "{kind:?}: {events:?}"
+        );
+    }
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 0);
+    assert!(lock(&fake.state).log.is_empty());
+}
+
+#[test]
+fn privileged_missing_helper_rejected() {
+    let (fake, env) = Fake::new(false);
+    let req = action(ActionKind::Signal(Signal::Term), procs(&[11]), true);
+    let events = run_plain(lab(26), env, req);
+    assert_eq!(
+        events,
+        [
+            STARTED,
+            (None, ActionState::Rejected(RejectReason::Unsupported))
+        ]
+    );
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 0, "no spawn");
+}
+
+/// A privileged `Dump` reaches `dump::run_target(.., true)`: the helper gets the request with a
+/// descriptor, never a path (R-145).
+#[test]
+fn privileged_dump_through_helper() {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+    std::fs::create_dir_all(&base).expect("create target/tmp");
+    let tmp = tempfile::Builder::new()
+        .prefix("tasklens-qfx17-")
+        .tempdir_in(base)
+        .expect("tempdir");
+    let state_dir = tmp.path().join("state");
+    let config = EngineConfig::new(EngineMode::Full, state_dir.clone());
+    let file = dump::dumps_dir(&config).join("a.core");
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).answers = [Answer::Replies(1)].into();
+    let kind = ActionKind::Dump {
+        mode: DumpMode::Mini,
+        path: Arc::from(file.to_str().expect("utf-8 path")),
+    };
+    let events = run_request(
+        lab(27),
+        env,
+        state_dir,
+        true,
+        action(kind, procs(&[11]), true),
+    );
+    assert_eq!(
+        events,
+        [
+            STARTED,
+            (Some(0), ActionState::Succeeded),
+            (None, ActionState::Succeeded)
+        ]
+    );
+    let want = HelperRequest::Dump {
+        key: pkey(11),
+        mode: DumpMode::Mini,
+    };
+    assert_eq!(lock(&fake.state).requests, [(want, true)]);
+    assert!(file.is_file(), "the engine created the file");
 }
