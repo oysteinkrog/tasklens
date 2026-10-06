@@ -3,6 +3,7 @@
 pub mod badge;
 pub mod button;
 pub mod checkbox;
+pub mod empty;
 pub mod focus;
 pub mod icons;
 pub mod link;
