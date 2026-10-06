@@ -375,7 +375,7 @@ pub(crate) async fn handle_run_setup(
         return;
     }
     let seq = state.run.as_ref().map_or(1, |run| run.seq + 1);
-    let running = |output: Arc<str>| SetupRun {
+    let running = move |output: Arc<str>| SetupRun {
         seq,
         step,
         phase: SetupPhase::Running,
