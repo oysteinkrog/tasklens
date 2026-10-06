@@ -1347,7 +1347,7 @@ mod name_cell {
     }
 
     fn words() -> NameWords {
-        NameWords::from_fn(|key| SharedString::new_static(key))
+        NameWords::from_fn(SharedString::new_static)
     }
 
     enum Cell {
