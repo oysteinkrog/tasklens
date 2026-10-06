@@ -23,14 +23,14 @@ use std::sync::Arc;
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement as _, Styled, div,
+    AnyElement, App, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
+    SharedString, Styled, Window, div,
 };
 use tl_model::units::short_age;
 use tl_model::validity::Validity;
 
 use super::icons::{TlIcon, icon};
-use super::tooltip::{DELAY_CONTROL, TlTooltip};
+use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::text::style::numeric_style;
 use crate::theme::{TlTheme, UiMetrics};
 
@@ -156,8 +156,9 @@ pub fn glyph(
     base(validity, value_text, selected, m, theme).into_any_element()
 }
 
-/// [`glyph`] with the validity tooltip after [`DELAY_CONTROL`]. `id` must be unique among the
-/// cell's siblings. Valid cells get no tooltip.
+/// [`glyph`] with the validity tooltip after [`DELAY_CONTROL`], through [`HoverTooltip`]. `id`
+/// must be unique among the cell's siblings. Valid cells get no tooltip.
+#[allow(clippy::too_many_arguments)]
 pub fn glyph_with_tooltip(
     id: impl Into<ElementId>,
     validity: Validity,
@@ -166,18 +167,27 @@ pub fn glyph_with_tooltip(
     ctx: &GlyphCtx,
     m: &UiMetrics,
     theme: &TlTheme,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    let cell = base(validity, value_text, selected, m, theme).id(id);
+    let id = id.into();
+    let cell = base(validity, value_text, selected, m, theme)
+        .relative()
+        .id(id.clone());
     if validity.is_valid() {
         return cell.into_any_element();
     }
     let ctx = ctx.clone();
-    cell.tooltip(move |_, cx| {
+    let build = move |_: &mut Window, cx: &mut App| {
         let text = tooltip_text(validity, &ctx).unwrap_or_default();
         TlTooltip::text(text).view(cx)
-    })
-    .tooltip_show_delay(DELAY_CONTROL)
-    .into_any_element()
+    };
+    let state = HoverTooltip::state(
+        ElementId::NamedChild(Arc::new(id), "tooltip".into()),
+        window,
+        cx,
+    );
+    HoverTooltip::attach(&state, cell, DELAY_CONTROL, build, window, cx).into_any_element()
 }
 
 fn base(
@@ -266,21 +276,24 @@ mod tests {
     }
 
     impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let m = *metrics(cx);
             let theme = current(cx).clone();
             let value: SharedString = "100.0%".into();
+            let cell = glyph_with_tooltip(
+                "cell",
+                self.validity,
+                &value,
+                false,
+                &self.ctx,
+                &m,
+                &theme,
+                window,
+                cx,
+            );
             div()
                 .size(px(400.))
-                .child(div().w(px(120.)).child(glyph_with_tooltip(
-                    "cell",
-                    self.validity,
-                    &value,
-                    false,
-                    &self.ctx,
-                    &m,
-                    &theme,
-                )))
+                .child(div().w(px(120.)).child(cell))
         }
     }
 
