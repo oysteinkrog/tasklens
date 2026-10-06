@@ -21,6 +21,7 @@ use tl_engine::helper::{
 };
 use tl_engine::update::{EngineMsg, HelperUpdate, SourceUpdate};
 use tl_model::actions::Signal;
+use tl_model::command::{RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep};
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{
     HELPER_PROTO_VERSION, HelperFrame, HelperReply, HelperReplyBody, HelperRequest, HelperTarget,
@@ -140,10 +141,24 @@ impl Fake {
                 let link: Box<dyn HelperLink> = Box::new(FakeLink(Arc::clone(&link_state)));
                 Ok::<_, StartError>(link)
             }),
+            setup_probe: Arc::new(|| PROBED),
+            setup_runner: Arc::new(|_, _| SetupPhase::Succeeded),
         };
         (Fake { state, spawns }, env)
     }
 }
+
+/// What the fake setup probe answers.
+const PROBED: SetupStatus = SetupStatus {
+    rapl: RaplStatus::Readable {
+        tasklens_rule: true,
+    },
+    journal_group: true,
+    helper_installed: true,
+    lm_sensors: false,
+    hwmon_fan: true,
+    sensors_conf: false,
+};
 
 /// Every `HelperUpdate` with the virtual time it arrived, in ms.
 type Seen = Arc<Mutex<Vec<(u64, HelperUpdate)>>>;
@@ -456,4 +471,82 @@ fn shutdown_ends_session() {
         assert!(s.closed, "seed {seed}: end() ran");
         assert!(!s.killed, "seed {seed}: the helper exited on EOF");
     }
+}
+
+/// `RunSetup` publishes `Running` with empty output, then the outcome with the output, then
+/// the new status (R-149 item 4, R-247). The fake runner prints two lines.
+#[test]
+fn run_setup_publishes_running_then_outcome() {
+    let (_fake, mut env) = Fake::new(true);
+    env.setup_runner = Arc::new(|step, out| {
+        assert_eq!(step, SetupStep::RaplEnable);
+        out("one");
+        out("two");
+        SetupPhase::Succeeded
+    });
+    let seen = Arc::new(Mutex::new(Vec::<SetupState>::new()));
+    let sink = Arc::clone(&seen);
+    let mut lab = lab(7);
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    let (task, _handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let (handle, queue) = helper_queue();
+            let (updates, mut rx) = mpsc::channel::<EngineMsg>(64);
+            let mut collector = cx
+                .spawn(move |cx| async move {
+                    while let Ok(msg) = rx.recv(&cx).await {
+                        if let EngineMsg::Source(SourceUpdate::Setup(state)) = msg {
+                            sink.lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .push((*state).clone());
+                        }
+                    }
+                })
+                .expect("collector spawns");
+            let _helper = cx
+                .spawn(move |cx| helper_task_with(cx, queue, updates, env))
+                .expect("helper task spawns");
+            let step = SetupStep::RaplEnable;
+            handle
+                .send(&cx, HelperMsg::RunSetup(step))
+                .await
+                .expect("queued");
+            // Closing the queue ends the helper task once the run is done.
+            drop(handle);
+            let _ = collector.join(&cx).await;
+        })
+        .expect("task is created");
+    lab.scheduler.lock().schedule(task, 0);
+    lab.run_with_auto_advance();
+    let report = lab.run_until_quiescent_with_report();
+    assert!(report.lab_test_passed(), "{report:?}");
+
+    let run = |phase, output: &str| {
+        Some(SetupRun {
+            seq: 1,
+            step: SetupStep::RaplEnable,
+            phase,
+            output: output.into(),
+        })
+    };
+    let seen = seen.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(
+        seen,
+        [
+            SetupState {
+                status: None,
+                run: run(SetupPhase::Running, ""),
+            },
+            SetupState {
+                status: None,
+                run: run(SetupPhase::Succeeded, "one\ntwo\n"),
+            },
+            SetupState {
+                status: Some(PROBED),
+                run: run(SetupPhase::Succeeded, "one\ntwo\n"),
+            },
+        ]
+    );
 }

@@ -12,6 +12,7 @@
 //! target `tasklens::action`.
 
 mod session;
+mod setup;
 
 use std::ops::ControlFlow;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -24,7 +25,7 @@ use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::JoinError;
 use asupersync::time;
-use tl_model::command::SetupStep;
+use tl_model::command::{SetupState, SetupStep};
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{HelperFrame, HelperReply, HelperRequest};
 
@@ -32,6 +33,7 @@ pub use crate::actions::HelperCallError;
 use crate::update::{EngineMsg, HelperUpdate, SourceUpdate};
 use session::{CallError, HELPER_PATH, HelperSession, PKEXEC_PATH, ProcLink, START_DEADLINE};
 pub use session::{HelperLink, LinkError, StartError};
+pub use setup::{SetupProbe, SetupRunner};
 
 /// Capacity of the helper queue.
 const QUEUE: usize = 64;
@@ -50,9 +52,9 @@ pub enum HelperMsg {
     Start,
     /// `Command::EndHelperSession`.
     End,
-    /// `Command::SetupStatus` (R-247). E29-019's probe handles it.
+    /// `Command::SetupStatus` (R-247), answered by `setup::handle_setup_status`.
     SetupStatus,
-    /// `Command::RunSetup { step }` (R-247). E29-019's runner handles it.
+    /// `Command::RunSetup { step }` (R-247), run by `setup::handle_run_setup`.
     RunSetup(SetupStep),
     /// One privileged request. Each reply goes to `replies`, then `done` gets the result.
     Call {
@@ -169,6 +171,10 @@ pub struct LinkEnv {
     pub installed: Arc<dyn Fn() -> bool + Send + Sync>,
     /// Starts the helper process.
     pub spawn: Arc<dyn Fn() -> Result<Box<dyn HelperLink>, StartError> + Send + Sync>,
+    /// Answers `SetupStatus` (E29-019).
+    pub setup_probe: SetupProbe,
+    /// Runs one `tasklens-setup` step (E29-019).
+    pub setup_runner: SetupRunner,
 }
 
 impl LinkEnv {
@@ -178,6 +184,8 @@ impl LinkEnv {
                 is_regular_file(Path::new(PKEXEC_PATH)) && is_regular_file(Path::new(HELPER_PATH))
             }),
             spawn: Arc::new(|| ProcLink::spawn().map(|l| Box::new(l) as Box<dyn HelperLink>)),
+            setup_probe: setup::real_probe(),
+            setup_runner: setup::real_runner(),
         }
     }
 }
@@ -226,6 +234,7 @@ pub async fn helper_task_with(
         state: HelperState::Missing,
         live: Live(None),
         start_seq: 0,
+        setup: SetupState::default(),
     };
     let first = if (task.env.installed)() {
         HelperState::Locked
@@ -253,9 +262,14 @@ pub async fn helper_task_with(
         match msg {
             HelperMsg::Start => task.start_requested(&cx).await,
             HelperMsg::End => task.end(&cx).await,
-            HelperMsg::SetupStatus | HelperMsg::RunSetup(_) => {
-                // E29-019 (qfx.22) fills these in.
-                tracing::debug!(target: "tasklens::action", "setup message ignored");
+            HelperMsg::SetupStatus => {
+                let probe = &task.env.setup_probe;
+                setup::handle_setup_status(&cx, probe, &mut task.setup, &task.updates).await;
+            }
+            HelperMsg::RunSetup(step) => {
+                let (runner, probe) = (&task.env.setup_runner, &task.env.setup_probe);
+                setup::handle_run_setup(&cx, step, runner, probe, &mut task.setup, &task.updates)
+                    .await;
             }
             HelperMsg::Call {
                 req,
@@ -303,6 +317,8 @@ struct Task {
     live: Live,
     /// The `seq` of the last published start outcome.
     start_seq: u64,
+    /// The Additional Setup state, published as `SourceUpdate::Setup` on every change.
+    setup: SetupState,
 }
 
 impl Task {
