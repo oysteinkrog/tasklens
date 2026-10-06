@@ -1663,7 +1663,7 @@ is corrected to match. The names this file assumes are listed in "Names used fro
   ┌ tab strip (shell) ──────────────────────────────────────────── Filter: [        ] ┐
   ├ Proto ↑ ─ Address local ───────── Address foreign ─────── State ──────── PID ──── Process ┤ 28
   │ TCP      0.0.0.0:22                *:*                     LISTENING        812   ⚙ sshd      │
-  │ TCP      192.168.1.10:51234        140.82.112.4:443        ESTABLISHED     4321   ◉ firefox   │
+  │ TCP      192.168.1.10:51234        203.0.113.4:443         ESTABLISHED     4321   ◉ firefox   │
   │ TCP      [::1]:631                 *:*                     LISTENING        690   ⚙ cupsd     │
   │ TCP      192.168.1.10:40012        34.107.221.82:443       TIME-WAIT          -   No owner (kernel) │
   │ UDP      0.0.0.0:5353              *:*                     UNCONNECTED      790   ⚙ avahi-daemon │
