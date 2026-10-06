@@ -512,8 +512,11 @@ pub fn name_primary_text(
     let count_start = count_run
         .filter(|r| r.start > 0 && r.start < r.end && r.end <= primary.len())
         .map(|r| r.start);
-    let (Some(start), Some(mut runs)) = (count_start, runs) else {
+    let Some(start) = count_start else {
         return (primary.clone(), runs);
+    };
+    let Some(mut runs) = runs else {
+        return (primary.clone(), None);
     };
     // `primary_runs` cuts at the count's start, so one run ends exactly there.
     let mut end = 0;
