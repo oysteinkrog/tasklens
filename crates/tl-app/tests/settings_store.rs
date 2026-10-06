@@ -22,7 +22,7 @@ struct Captured(Arc<Mutex<Vec<u8>>>);
 
 impl io::Write for Captured {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
         Ok(buf.len())
     }
 
@@ -41,20 +41,25 @@ fn capture_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
         .without_time()
         .finish();
     let result = tracing::subscriber::with_default(subscriber, f);
-    let logs = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+    let logs = String::from_utf8(out.0.lock().expect("log buffer").clone()).expect("utf-8 logs");
     (result, logs)
 }
 
 fn write(dir: &TempDir, name: &str, text: &str) -> PathBuf {
     let path = dir.path().join(name);
-    std::fs::write(&path, text).unwrap();
+    std::fs::write(&path, text).expect("write test file");
     path
 }
 
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .expect("read_dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     names.sort();
     names
@@ -97,7 +102,7 @@ fn corrupt_file_renamed() {
         });
 
         assert!(!read_only);
-        assert_eq!(names(dir.path()), [kept_as.clone()]);
+        assert_eq!(names(dir.path()), std::slice::from_ref(&kept_as));
         assert_eq!(
             notices,
             [LoadNotice::Corrupt {
