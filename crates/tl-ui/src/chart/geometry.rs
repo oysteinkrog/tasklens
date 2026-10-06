@@ -59,7 +59,12 @@ pub fn right_edge_ns(now_boot_ns: u64, newest_ns: u64, period_ns: u64, smooth: b
 /// Index of the first sample with `t_ns ≥ right_edge_ns − range_ns − 2 × period_ns` (two periods
 /// of overscan). Walks back from the newest sample, so the cost is the visible window only.
 /// Returns 0 when every sample is inside.
-pub fn window_start(samples: &[Sample], right_edge_ns: u64, range_ns: u64, period_ns: u64) -> usize {
+pub fn window_start(
+    samples: &[Sample],
+    right_edge_ns: u64,
+    range_ns: u64,
+    period_ns: u64,
+) -> usize {
     let start = right_edge_ns
         .saturating_sub(range_ns)
         .saturating_sub(period_ns.saturating_mul(2));
