@@ -262,7 +262,27 @@ fn conn_counts(records: &[ConnRecord]) -> ConnCounts {
     c
 }
 
-/// A probe value: `Valid` when the probe reported it, else `Unsupported` ("Not reported").
+/// A PCI address `domain:bus:device.function` as hex numbers, so the NVML form
+/// "00000000:01:00.0" and the sysfs form "0000:01:00.0" compare equal, in any case. `None` for
+/// text that is not such an address.
+fn normalise_pci(s: &str) -> Option<(u32, u8, u8, u8)> {
+    let (domain, rest) = s.trim().split_once(':')?;
+    let (bus, rest) = rest.split_once(':')?;
+    let (device, function) = rest.split_once('.')?;
+    let hex = |part: &str| {
+        let digits = !part.is_empty() && part.bytes().all(|b| b.is_ascii_hexdigit());
+        digits.then(|| u32::from_str_radix(part, 16).ok())?
+    };
+    let byte = |part: &str| hex(part).and_then(|v| u8::try_from(v).ok());
+    Some((hex(domain)?, byte(bus)?, byte(device)?, byte(function)?))
+}
+
+/// Whether two PCI bus ids name the same address. Text that does not parse matches nothing.
+fn same_pci(a: &str, b: &str) -> bool {
+    normalise_pci(a).is_some_and(|a| Some(a) == normalise_pci(b))
+}
+
+/// A probe value:`Valid` when the probe reported it, else `Unsupported` ("Not reported").
 fn probe_field(value: Option<&str>) -> Total<Arc<str>> {
     match value {
         Some(v) => Total {
@@ -445,6 +465,7 @@ impl Reducer {
                     )?;
                 }
                 self.mark(ComponentMask::DEVICES);
+                self.remap_inventory();
             }
             SourceUpdate::GpuApiVersions(ApiVersions { devices }) => {
                 self.api_versions = devices;
@@ -750,7 +771,7 @@ impl Reducer {
     }
 
     /// The index of a sampled device and whether it is present. An identity not in the
-    /// catalog is added.
+    /// catalog is added; a new GPU or disk entry maps the inventory rows again.
     fn sample_device(
         &mut self,
         id: &DeviceIdentity,
@@ -764,6 +785,9 @@ impl Reducer {
         let (name, key) = fallback_name_key(id);
         let (idx, _) = self.devices.ensure(id, &name, None, &key, None)?;
         self.mark(ComponentMask::DEVICES);
+        if matches!(id, DeviceIdentity::Gpu { .. } | DeviceIdentity::Disk { .. }) {
+            self.remap_inventory();
+        }
         Ok((idx, true))
     }
 
@@ -1545,16 +1569,17 @@ impl Reducer {
         self.mark(ComponentMask::INVENTORY);
     }
 
-    /// Sets `device` of each graphics adapter to the GPU catalog entry whose PCI bus id matches
-    /// its `pci_slot`, ignoring case, and of each disk drive to the disk entry with its `name`
-    /// (R-166). A row with no match keeps its `device`.
-    fn map_inventory_devices(&self, inventory: &mut InventorySnapshot) {
+    /// Sets `device` of each graphics adapter to the GPU catalog entry whose PCI bus id names
+    /// the same address as its `pci_slot`, and of each disk drive to the disk entry with its
+    /// `name` (R-166). A row with no match keeps its `device`. Returns true when a row changed.
+    fn map_inventory_devices(&self, inventory: &mut InventorySnapshot) -> bool {
         let find = |matches: &dyn Fn(&DeviceIdentity) -> bool| {
             (0..=u16::MAX)
                 .map_while(|i| self.devices.entry(DeviceIdx(i)))
                 .find(|e| matches(&e.identity))
                 .map(|e| e.idx)
         };
+        let mut changed = false;
         if inventory.graphics.iter().any(|a| a.pci_slot.is_some()) {
             let mut graphics: Vec<GraphicsAdapter> = inventory.graphics.to_vec();
             for adapter in &mut graphics {
@@ -1563,10 +1588,11 @@ impl Reducer {
                 };
                 let found = find(&|id| {
                     matches!(id, DeviceIdentity::Gpu { pci_bus_id, .. }
-                        if pci_bus_id.eq_ignore_ascii_case(slot))
+                        if same_pci(pci_bus_id, slot))
                 });
-                if found.is_some() {
+                if found.is_some() && found != adapter.device {
                     adapter.device = found;
+                    changed = true;
                 }
             }
             inventory.graphics = graphics.into();
@@ -1579,11 +1605,25 @@ impl Reducer {
                 };
                 let found =
                     find(&|id| matches!(id, DeviceIdentity::Disk { name, .. } if &**name == want));
-                if found.is_some() {
+                if found.is_some() && found != disk.device {
                     disk.device = found;
+                    changed = true;
                 }
             }
             inventory.disks = disks.into();
+        }
+        changed
+    }
+
+    /// Maps the stored inventory rows to catalog devices again and merges the API versions,
+    /// for a GPU or disk entry that reached the catalog after the inventory (R-166).
+    fn remap_inventory(&mut self) {
+        let mut next = (*self.components.inventory).clone();
+        let mapped = self.map_inventory_devices(&mut next);
+        let merged = self.merge_api_versions(&mut next);
+        if mapped || merged {
+            self.components.inventory = Arc::new(next);
+            self.mark(ComponentMask::INVENTORY);
         }
     }
 
@@ -1607,7 +1647,7 @@ impl Reducer {
             let Some(v) = self
                 .api_versions
                 .iter()
-                .find(|v| v.pci_bus_id.eq_ignore_ascii_case(pci_bus_id))
+                .find(|v| same_pci(&v.pci_bus_id, pci_bus_id))
             else {
                 continue;
             };
@@ -1659,5 +1699,35 @@ impl Reducer {
                 self.mark(ComponentMask::CONNECTIONS);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalise_pci, same_pci};
+
+    #[test]
+    fn normalise_pci_domain_width_and_case() {
+        assert_eq!(normalise_pci("0000:01:00.0"), Some((0, 1, 0, 0)));
+        assert!(same_pci("00000000:01:00.0", "0000:01:00.0"));
+        assert!(same_pci("0000:0A:1f.3", "00000000:0a:1F.3"));
+        assert!(!same_pci("0000:01:00.0", "0000:02:00.0"));
+        assert!(!same_pci("0000:01:00.0", "0000:01:00.1"));
+    }
+
+    #[test]
+    fn normalise_pci_garbage_matches_nothing() {
+        for bad in [
+            "",
+            "garbage",
+            "0000:01:00",
+            "0000:01.00.0",
+            "0000:1g:00.0",
+            "0000:100:00.0",
+        ] {
+            assert_eq!(normalise_pci(bad), None, "{bad}");
+        }
+        assert!(!same_pci("garbage", "garbage"));
+        assert!(!same_pci("", ""));
     }
 }

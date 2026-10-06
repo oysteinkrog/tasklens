@@ -2500,3 +2500,55 @@ fn inventory_devices_from_pci_slot_and_disk_name() {
     assert_eq!(snap.inventory.disks[1].device, None);
     rig.passed();
 }
+
+#[test]
+fn inventory_devices_remapped_when_catalog_gains_nvidia_gpu_or_disk() {
+    // Inventory first: no catalog entry matches yet.
+    let mut rig = Rig::new();
+    rig.run(vec![
+        api_versions_msg(),
+        src(SourceUpdate::Inventory(Box::new(InventorySnapshot {
+            graphics: Arc::from([GraphicsAdapter {
+                pci_slot: Some(Arc::from(BUS)),
+                ..GraphicsAdapter::default()
+            }]),
+            disks: Arc::from([DiskDrive {
+                name: Some(Arc::from("nvme0n1")),
+                ..DiskDrive::default()
+            }]),
+            ..InventorySnapshot::default()
+        }))),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.inventory.graphics[0].device, None);
+    assert_eq!(snap.inventory.disks[0].device, None);
+
+    // NVML names the bus with an 8-digit domain; the adapter and the versions use 4 digits.
+    let nvml = DeviceIdentity::Gpu {
+        uuid: [2; 16],
+        pci_bus_id: Arc::from("00000000:01:00.0"),
+    };
+    let disk = disk_id("nvme0n1", 0);
+    rig.run(vec![
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![GpuStaticInfo {
+                identity: nvml.clone(),
+                name: Arc::from("NVIDIA Card"),
+                mem_total: 0,
+                power_limit_mw: None,
+                driver: Arc::from(""),
+                nvml: Arc::from(""),
+                supports_process_util: true,
+                persistent_key: Arc::from("gpu:nvidia"),
+            }],
+        })),
+        disks_msg(SEC, vec![(disk.clone(), disk_totals(1.0, 1.0))]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.inventory.graphics[0].device, Some(rig.idx(&nvml)));
+    assert_versions(&rig);
+    assert_eq!(snap.inventory.disks[0].device, Some(rig.idx(&disk)));
+    rig.passed();
+}
