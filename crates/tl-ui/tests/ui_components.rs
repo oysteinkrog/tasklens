@@ -576,3 +576,187 @@ mod display {
         );
     }
 }
+
+/// The key/value grid state words and the CPU Details cache and boot time words come from the
+/// catalogue, translated once per strings version (R-132).
+#[cfg(feature = "test-hooks")]
+mod words {
+    use gpui_kit::SharedString;
+    use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
+    use tl_model::validity::Validity;
+    use tl_ui::components::kv_grid::{
+        KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+        kv_words, shown_text_in,
+    };
+    use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
+    use tl_ui::pages::performance::cpu_details::{
+        CpuLiveInputs, ROW_L1, ROW_L3, ROW_UP_TIME, cpu_details_model, update_live, update_static,
+    };
+    use tl_ui::pages::performance::details::KeyValueModel;
+
+    use super::*;
+
+    const MARKERS: &str = "
+fnd-kv-collecting = <collecting>
+fnd-kv-restricted = <restricted>
+fnd-kv-unavailable = <unavailable>
+fnd-kv-not-supported = <not-supported>
+fnd-kv-not-reported = <not-reported>
+fnd-kv-needs-setup = <needs-setup>
+perf-cpu-tip-boot = <boot {$time}>
+perf-cpu-tip-l1-data = <data {$size}>
+perf-cpu-tip-l1-instruction = <instruction {$size}>
+perf-cpu-tip-l4 = <l4 {$size}>
+perf-cpu-time-unknown = <unknown>
+";
+
+    /// One value per non-valid state, in this order.
+    fn state_values() -> Vec<TlValue> {
+        let state = |validity, word| TlValue {
+            validity,
+            word,
+            ..TlValue::new("0")
+        };
+        vec![
+            state(Validity::WarmingUp, None),
+            state(Validity::Restricted, None),
+            state(Validity::Failed, None),
+            state(Validity::Unsupported, None),
+            state(Validity::Unsupported, Some(UnsupportedWord::NotReported)),
+            state(Validity::Unsupported, Some(UnsupportedWord::NeedsSetup)),
+        ]
+    }
+
+    const SHOWN: [&str; 6] = [
+        "<collecting>",
+        "<restricted>",
+        "<unavailable>",
+        "<not-supported>",
+        "<not-reported>",
+        "<needs-setup>",
+    ];
+
+    struct Grid;
+
+    impl Render for Grid {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let rows = state_values()
+                .into_iter()
+                .enumerate()
+                .map(|(i, value)| TlKvRow {
+                    label: format!("Row {i}:").into(),
+                    value,
+                })
+                .collect();
+            let section = TlKvSection {
+                title: None,
+                blocks: vec![TlKvBlock {
+                    heading: None,
+                    rows,
+                }],
+            };
+            div().size(px(800.)).child(
+                TlKeyValueGrid::new("grid", KvLayout::Inline)
+                    .copy_on_click(true)
+                    .sections(&[section]),
+            )
+        }
+    }
+
+    #[gpui_kit::test]
+    fn kv_grid_words_follow_test_locale(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+            assert_eq!(kv_words(cx).restricted, "Restricted");
+            set_test_catalogue(cx, MARKERS);
+            let before = tr_calls();
+            let words = kv_words(cx);
+            assert!(tr_calls() > before, "a new strings version translates");
+            let shown: Vec<SharedString> = state_values()
+                .iter()
+                .filter_map(|v| shown_text_in(v, &words))
+                .collect();
+            assert_eq!(shown, SHOWN);
+        });
+
+        let (_, cx) = cx.add_window_view(|_, _| Grid);
+        draw(cx);
+        let restricted = cx.debug_bounds("TlKv-value-1").expect("value drawn");
+        cx.simulate_click(restricted.center(), Modifiers::none());
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("<restricted>"),
+            "the grid draws the translated word"
+        );
+
+        let before = tr_calls();
+        for _ in 0..60 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        assert_eq!(tr_calls(), before, "60 frames make no tr call");
+    }
+
+    fn level(instances: u16, instance_kib: u64) -> Option<CacheLevelInfo> {
+        Some(CacheLevelInfo {
+            instances,
+            instance_kib,
+            total_kib: u64::from(instances) * instance_kib,
+        })
+    }
+
+    fn tip(model: &KeyValueModel, label: &str) -> Option<String> {
+        let row = model.rows.iter().find(|r| r.label == label)?;
+        row.tooltip.as_ref().map(|t| t.to_string())
+    }
+
+    #[gpui_kit::test]
+    fn cpu_cache_and_boot_words_follow_test_locale(cx: &mut TestAppContext) {
+        let mut model = cpu_details_model();
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            set_test_catalogue(cx, MARKERS);
+            assert!(model.refresh_strings(cx));
+        });
+        let info = CpuStaticInfo {
+            cores: 8,
+            logical: 16,
+            caches: CacheInfo {
+                l1d: level(16, 32),
+                l1i: level(16, 32),
+                l3: level(1, 98_304),
+                l4: level(1, 131_072),
+                ..CacheInfo::default()
+            },
+            ..CpuStaticInfo::default()
+        };
+        let before = tr_calls();
+        assert!(update_static(&mut model, &info));
+        assert_eq!(
+            tip(&model, ROW_L1).as_deref(),
+            Some("<data 16 × 32 KiB> + <instruction 16 × 32 KiB>")
+        );
+        assert_eq!(
+            tip(&model, ROW_L3).as_deref(),
+            Some("98\u{2009}304 KiB · 1 × 96 MiB · <l4 128 MiB>")
+        );
+
+        // A boot time past what a date holds.
+        let mut sys = SystemSnapshot::default();
+        sys.boot_time_s = i64::MAX;
+        update_live(&mut model, &sys, &CpuLiveInputs::default());
+        assert_eq!(
+            tip(&model, ROW_UP_TIME).as_deref(),
+            Some("<boot <unknown>>")
+        );
+
+        for _ in 0..60 {
+            update_static(&mut model, &info);
+            update_live(&mut model, &sys, &CpuLiveInputs::default());
+        }
+        assert_eq!(tr_calls(), before, "updates make no tr call");
+    }
+}
