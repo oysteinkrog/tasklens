@@ -42,6 +42,7 @@ const GROUP: &str = "tl-checkbox";
 /// Later component beads add their bindings here.
 pub fn bind_keys_components(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("space", ToggleCheckbox, Some("TlCheckbox"))]);
+    super::menu::bind_keys(cx);
     super::radio::bind_keys_radio(cx);
     super::select::bind_keys(cx);
     super::slider::bind_keys(cx);
