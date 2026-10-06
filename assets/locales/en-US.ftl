@@ -417,3 +417,19 @@ shell-share-theme-text = Copy this code and send it to someone who uses tasklens
 shell-share-theme-copy = Copy
 shell-share-theme-close = Close
 shell-toast-theme-code-copied = Theme code copied
+
+# Collector Health window (UI-SHL-099)
+shell-health-title = tasklens Collector Health
+shell-health-col-source = Source
+shell-health-col-state = State
+shell-health-col-last-data = Last data
+shell-health-col-restarts = Restarts
+shell-health-col-last-error = Last error
+shell-health-state-running = Running
+shell-health-state-late = Late
+shell-health-state-stale = Stale
+shell-health-state-failed = Failed
+shell-health-state-disabled = Disabled
+shell-health-state-unsupported = Unsupported
+# Follows a short age: "3s ago".
+shell-health-ago = ago
