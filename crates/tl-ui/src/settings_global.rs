@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use gpui_kit::{App, Global, SharedString};
+use gpui_kit::{App, BorrowAppContext, Global, SharedString};
 use serde::Deserialize;
 use serde::de::IntoDeserializer;
 use tl_model::settings::{EngineSettings, Settings, UiState};
