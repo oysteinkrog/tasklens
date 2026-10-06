@@ -7,24 +7,35 @@
 //! also when it fails: direct children through `Child::kill`, grandchildren through a pidfd
 //! opened while they were known to be ours, so a reused PID is never hit.
 //!
+//! The `real_unit_*` and `real_recovery_*` tests act on the user manager only, through
+//! `unit::run_target` and `recovery::run_target` with a real `ZbusUnitBus` on the session bus
+//! (E11-013, E11-015, E11-020). Each writes its own unit `tasklens-test-<pid>-<tag>.service` in
+//! the real `~/.config/systemd/user` with `create_new`, so it never replaces a file of the
+//! owner's. A `Drop` guard stops and resets the unit, removes the wants link and drop-in it may
+//! have made, removes the file and reloads the user manager, also when a test fails.
+//!
 //! `thread_nice_only_that_tid` comes with thread targets (E11-006).
 
 use std::fs;
+use std::io::Write;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use rustix::process::{Pid, PidfdFlags, Signal as RxSignal};
-use tl_engine::actions::{ActionCtx, ActionOps, RealOps, process};
+use tl_engine::actions::{ActionCtx, ActionOps, RealOps, process, recovery, unit};
 use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::{EngineConfig, EngineMode};
-use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason, Signal};
+use tl_model::actions::{
+    ActionError, ActionKind, ActionState, ActionTarget, RecoveryEdit, RejectReason, Signal,
+};
 use tl_model::ids::ProcessKey;
+use tl_model::table::{Manager, UnitRef};
 use tl_model::time::BootId;
 use tl_ops::OpsError;
 
@@ -407,4 +418,254 @@ fn kill_tree_real_parent_two_children() {
         let saw = watcher.join().expect("watcher ran");
         assert!(saw, "pid {} was never seen stopped", key.pid);
     }
+}
+
+/// The unit tests share the user manager and reload it, so they run one at a time.
+static UNIT_SERIAL: Mutex<()> = Mutex::new(());
+
+fn unit_serial() -> MutexGuard<'static, ()> {
+    UNIT_SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// `systemctl --user <args>`, stdout trimmed.
+fn systemctl(args: &[&str]) -> String {
+    let out = Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .expect("systemctl runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// One unit property, as `systemctl --user show -P` prints it.
+fn unit_property(name: &str, property: &str) -> String {
+    systemctl(&["show", "-P", property, name])
+}
+
+/// A session bus connection with zbus's own executor thread, so no tick task is needed.
+fn session_bus() -> Arc<zbus::Connection> {
+    let conn = zbus::blocking::Connection::session().expect("session bus");
+    Arc::new(conn.into_inner())
+}
+
+/// `Manager.Reload()` on the user manager over `conn`. It returns once the reload is done.
+fn manager_reload(conn: &zbus::Connection) {
+    zbus::blocking::Connection::from(conn.clone())
+        .call_method(
+            Some(unit::MANAGER_BUS),
+            unit::MANAGER_PATH,
+            Some(unit::MANAGER_IFACE),
+            "Reload",
+            &(),
+        )
+        .expect("Manager.Reload");
+}
+
+/// `tasklens-test-<pid>-<tag>.service` in the user unit directory, written with `create_new`.
+/// Drop stops it, resets a failed state, disables it, removes the wants link, the drop-in and
+/// the file when they are still there, and reloads the user manager.
+struct UserTestUnit {
+    name: String,
+    dir: PathBuf,
+    conn: Arc<zbus::Connection>,
+    file_written: bool,
+}
+
+impl UserTestUnit {
+    fn install(tag: &str, text: &str) -> Self {
+        let dir = tl_engine::actions::startup::StartupPaths::from_env()
+            .roots
+            .systemd_user;
+        let name = format!("tasklens-test-{}-{tag}.service", std::process::id());
+        let conn = session_bus();
+        let mut unit = UserTestUnit {
+            name,
+            dir,
+            conn,
+            file_written: false,
+        };
+        assert_eq!(
+            unit_property(&unit.name, "LoadState"),
+            "not-found",
+            "{} already exists; not touched",
+            unit.name
+        );
+        fs::create_dir_all(&unit.dir).expect("user unit directory");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(unit.file())
+            .unwrap_or_else(|e| panic!("{} not created: {e}", unit.file().display()));
+        // From here Drop removes the file, also when the write or a check below fails.
+        unit.file_written = true;
+        file.write_all(text.as_bytes())
+            .expect("write the unit file");
+        drop(file);
+        manager_reload(&unit.conn);
+        assert_eq!(
+            unit_property(&unit.name, "LoadState"),
+            "loaded",
+            "the user manager does not see {}; its XDG_CONFIG_HOME may differ",
+            unit.name
+        );
+        unit
+    }
+
+    fn file(&self) -> PathBuf {
+        self.dir.join(&self.name)
+    }
+
+    fn wants_link(&self) -> PathBuf {
+        self.dir.join("default.target.wants").join(&self.name)
+    }
+
+    fn drop_in(&self) -> PathBuf {
+        recovery::user_drop_in_path(
+            self.dir
+                .parent()
+                .and_then(|p| p.parent())
+                .expect("config home"),
+            &self.name,
+        )
+    }
+
+    fn unit_ref(&self) -> UnitRef {
+        UnitRef {
+            manager: Manager::User,
+            name: Arc::from(self.name.as_str()),
+        }
+    }
+
+    /// Runs one unit or recovery action against this unit with a real `ZbusUnitBus`.
+    fn act(&self, kind: ActionKind) -> ActionState {
+        let rt = runtime();
+        let actx = actx(Arc::new(RealOps));
+        actx.systemd_user.set(Arc::clone(&self.conn));
+        let target = self.unit_ref();
+        let (tx, rx) = std::sync::mpsc::channel();
+        rt.handle()
+            .try_spawn_with_cx(move |cx| async move {
+                let state = match kind {
+                    ActionKind::UnitWriteRecovery(_) | ActionKind::UnitRemoveRecovery => {
+                        recovery::run_target(&cx, &actx, &kind, &target).await
+                    }
+                    _ => unit::run_target(&cx, &actx, &kind, &target).await,
+                };
+                let _ = tx.send(state);
+            })
+            .expect("task spawns");
+        rx.recv_timeout(WAIT).expect("run_target finished")
+    }
+
+    fn property(&self, property: &str) -> String {
+        unit_property(&self.name, property)
+    }
+}
+
+impl Drop for UserTestUnit {
+    fn drop(&mut self) {
+        if !self.file_written {
+            return;
+        }
+        systemctl(&["stop", &self.name]);
+        systemctl(&["reset-failed", &self.name]);
+        systemctl(&["disable", &self.name]);
+        // Only a link that points at this test's own file.
+        if fs::read_link(self.wants_link()).is_ok_and(|to| to == self.file()) {
+            let _ = fs::remove_file(self.wants_link());
+        }
+        let drop_in = self.drop_in();
+        let _ = fs::remove_file(&drop_in);
+        if let Some(dir) = drop_in.parent() {
+            let _ = fs::remove_dir(dir);
+        }
+        let _ = fs::remove_file(self.file());
+        systemctl(&["daemon-reload"]);
+    }
+}
+
+const SLEEP_UNIT: &str = "[Service]\nExecStart=/usr/bin/sleep 300\n";
+
+#[test]
+#[ignore = "owner machine: starts a test unit on the user manager"]
+fn real_unit_start_stop_restart_user_service() {
+    let _serial = unit_serial();
+    let unit = UserTestUnit::install("run", SLEEP_UNIT);
+    assert_eq!(unit.act(ActionKind::UnitStart), ActionState::Succeeded);
+    assert_eq!(unit.property("ActiveState"), "active");
+    assert_eq!(unit.act(ActionKind::UnitRestart), ActionState::Succeeded);
+    assert_eq!(unit.property("ActiveState"), "active");
+    assert_eq!(unit.act(ActionKind::UnitStop), ActionState::Succeeded);
+    assert_eq!(unit.property("ActiveState"), "inactive");
+}
+
+#[test]
+#[ignore = "owner machine: starts a failing test unit on the user manager"]
+fn real_unit_failed_job_word() {
+    let _serial = unit_serial();
+    // `oneshot`, so the start job waits for `false` to exit and ends `failed`. A `simple`
+    // service's job is done once the process is forked.
+    let unit = UserTestUnit::install("fail", "[Service]\nType=oneshot\nExecStart=/bin/false\n");
+    assert_eq!(
+        unit.act(ActionKind::UnitStart),
+        ActionState::Failed(ActionError::UnitJob {
+            result: Arc::from("failed"),
+            error_name: None,
+        })
+    );
+}
+
+#[test]
+#[ignore = "owner machine: enables a test unit on the user manager"]
+fn real_unit_enable_disable() {
+    let _serial = unit_serial();
+    let unit = UserTestUnit::install(
+        "enable",
+        "[Service]\nExecStart=/usr/bin/sleep 300\n[Install]\nWantedBy=default.target\n",
+    );
+    let link = unit.wants_link();
+    assert!(
+        fs::symlink_metadata(&link).is_err(),
+        "{link:?} exists before"
+    );
+    assert_eq!(unit.act(ActionKind::UnitEnable), ActionState::Succeeded);
+    assert!(
+        fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+        "{link:?} is not a link"
+    );
+    assert_eq!(unit.act(ActionKind::UnitDisable), ActionState::Succeeded);
+    assert!(fs::symlink_metadata(&link).is_err(), "{link:?} still there");
+}
+
+#[test]
+#[ignore = "owner machine: writes a recovery drop-in for a test unit on the user manager"]
+fn real_recovery_drop_in_roundtrip() {
+    let _serial = unit_serial();
+    let unit = UserTestUnit::install("recovery", SLEEP_UNIT);
+    let drop_in = unit.drop_in();
+    assert!(!drop_in.exists(), "{drop_in:?} exists before");
+    let edit = RecoveryEdit {
+        restart: Some(Arc::from("on-failure")),
+        ..RecoveryEdit::default()
+    };
+    assert_eq!(
+        unit.act(ActionKind::UnitWriteRecovery(edit)),
+        ActionState::Succeeded
+    );
+    assert!(drop_in.is_file(), "{drop_in:?} not written");
+    assert_eq!(
+        systemctl(&["show", &unit.name, "-p", "Restart"]),
+        "Restart=on-failure"
+    );
+    assert_eq!(
+        unit.act(ActionKind::UnitRemoveRecovery),
+        ActionState::Succeeded
+    );
+    assert!(!drop_in.exists(), "{drop_in:?} still there");
+    assert_eq!(
+        systemctl(&["show", &unit.name, "-p", "Restart"]),
+        "Restart=no"
+    );
 }
