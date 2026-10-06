@@ -24,6 +24,7 @@ use tl_model::time::now_boot_ns;
 
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
+use super::labels::{self, LabelPaint};
 use super::view::ChartView;
 use super::{ChartGeometryKey, ChartSeries, ChartState, PathSet, scale};
 use crate::anim::AnimationDriver;
@@ -119,7 +120,7 @@ impl Element for ChartElement {
         let view_id = self.view.entity_id();
         let out = self
             .view
-            .update(cx, |view, _| paint_view(view, bounds, &env, window));
+            .update(cx, |view, cx| paint_view(view, bounds, &env, window, cx));
 
         if out.moving {
             AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
@@ -165,6 +166,7 @@ fn paint_view(
     bounds: Bounds<Pixels>,
     env: &PaintEnv,
     window: &mut Window,
+    cx: &mut App,
 ) -> PaintOut {
     let sf = env.scale_factor;
     let now = env.now;
@@ -173,6 +175,7 @@ fn paint_view(
     let ph = (f32::from(plot.size.height) * sf).round().max(0.0) as u32;
 
     let state = view.derived_state(now);
+    let value = view.value_at(now);
     let ChartView {
         spec,
         labels,
@@ -182,6 +185,8 @@ fn paint_view(
         scale_state,
         axis_text,
         series,
+        text,
+        last_value_text,
         ..
     } = view;
 
@@ -297,6 +302,19 @@ fn paint_view(
         radius,
     };
 
+    let label_paint = LabelPaint {
+        box_bounds: bounds,
+        plot,
+        labels,
+        spec,
+        state: &state,
+        value,
+        axis_text: (has_data && !axis_text.is_empty()).then_some(axis_text.as_str()),
+        metrics: &env.metrics,
+        theme: &env.theme,
+        network_unit: env.network_unit,
+    };
+
     grid::paint_background(window, bounds, env.theme.graph.chart_bg, radius);
 
     #[cfg(any(test, feature = "test-hooks"))]
@@ -313,6 +331,7 @@ fn paint_view(
         let whole = [0.0..pw as f32];
         grid::paint_gaps(window, &gp, &whole);
         grid::paint_outline(window, &gp);
+        labels::paint(window, cx, text, &label_paint, last_value_text);
         #[cfg(any(test, feature = "test-hooks"))]
         view_hook_quads(&view.last_grid_quads, &view.last_gap_spans, 0, &whole);
         #[cfg(any(test, feature = "test-hooks"))]
@@ -363,7 +382,7 @@ fn paint_view(
 
     grid::paint_baseline(window, &gp);
     grid::paint_outline(window, &gp);
-    // Labels: E19-009 adds `labels::paint` here.
+    labels::paint(window, cx, text, &label_paint, last_value_text);
 
     let one_px_ns = range_ns / u64::from(pw.max(1));
     let moving = has_data

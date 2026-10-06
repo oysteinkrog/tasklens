@@ -1162,3 +1162,396 @@ mod anchor {
         });
     }
 }
+
+// Chart labels: cached shaped lines, visibility rules, value glyphs and formats (E19,
+// tasklens-yrf.11).
+
+mod labels {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        Bounds, Context, Hsla, IntoElement, Quad, Render, TestAppContext, Window, canvas, point,
+        px, size,
+    };
+    use smallvec::{SmallVec, smallvec};
+    use tl_model::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
+    use tl_model::validity::Validity;
+    use tl_ui::chart::labels::{
+        LabelCache, LabelKind, LabelPaint, format_value, paint, range_label,
+    };
+    use tl_ui::chart::{
+        ChartLabels, ChartSeries, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat,
+    };
+    use tl_ui::theme::{TlTheme, UiMetrics, current};
+
+    const S: u64 = 1_000_000_000;
+
+    /// What one paint draws; the box sits at the window origin.
+    #[derive(Clone)]
+    struct Input {
+        w: f32,
+        h: f32,
+        labels: ChartLabels,
+        spec: ChartSpec,
+        state: ChartState,
+        value: Option<(f32, Validity)>,
+        axis_text: Option<&'static str>,
+    }
+
+    fn input(w: f32, h: f32) -> Input {
+        Input {
+            w,
+            h,
+            labels: ChartLabels {
+                heading: None,
+                value_fmt: ValueFormat::Percent,
+                value_align: ValueAlign::Right,
+                range_word: "Utilization",
+                legend: smallvec![],
+                show_axis_max: false,
+            },
+            spec: ChartSpec::default(),
+            state: ChartState::Live,
+            value: None,
+            axis_text: None,
+        }
+    }
+
+    fn legend() -> SmallVec<[(gpui_kit::SharedString, LegendStyle); 2]> {
+        smallvec![
+            ("Total".into(), LegendStyle::Solid),
+            ("Kernel".into(), LegendStyle::Dashed),
+        ]
+    }
+
+    struct Painter {
+        cache: Rc<RefCell<LabelCache>>,
+        input: Rc<RefCell<Input>>,
+    }
+
+    impl Render for Painter {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let cache = self.cache.clone();
+            let input = self.input.clone();
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, cx| {
+                    let i = input.borrow().clone();
+                    let metrics = *cx.global::<UiMetrics>();
+                    let theme: Arc<TlTheme> = current(cx).clone();
+                    let box_bounds = Bounds::new(point(px(0.), px(0.)), size(px(i.w), px(i.h)));
+                    let p = LabelPaint {
+                        box_bounds,
+                        plot: box_bounds.inset(px(1.)),
+                        labels: &i.labels,
+                        spec: &i.spec,
+                        state: &i.state,
+                        value: i.value,
+                        axis_text: i.axis_text,
+                        metrics: &metrics,
+                        theme: &theme,
+                        network_unit: NetworkUnit::Bits,
+                    };
+                    let mut scratch = String::new();
+                    paint(window, cx, &mut cache.borrow_mut(), &p, &mut scratch);
+                },
+            )
+            .size_full()
+        }
+    }
+
+    struct Rig<'a> {
+        cache: Rc<RefCell<LabelCache>>,
+        input: Rc<RefCell<Input>>,
+        vcx: &'a mut gpui_kit::VisualTestContext,
+        theme: Arc<TlTheme>,
+    }
+
+    impl Rig<'_> {
+        /// Paints the current input and returns the frame's quads and scale factor.
+        fn draw(&mut self) -> (Vec<Quad>, f32) {
+            self.vcx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+                (window.painted_quads(), window.scale_factor())
+            })
+        }
+
+        fn set(&self, f: impl FnOnce(&mut Input)) {
+            f(&mut self.input.borrow_mut());
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext, i: Input) -> Rig<'_> {
+        let theme = cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            current(cx).clone()
+        });
+        let cache = Rc::new(RefCell::new(LabelCache::default()));
+        let input = Rc::new(RefCell::new(i));
+        let (c, inp) = (cache.clone(), input.clone());
+        let (_, vcx) = cx.add_window_view(move |_, _| Painter {
+            cache: c,
+            input: inp,
+        });
+        Rig {
+            cache,
+            input,
+            vcx,
+            theme,
+        }
+    }
+
+    /// Quads of `w × h` logical px.
+    fn quads_of(quads: &[Quad], sf: f32, w: f32, h: f32) -> Vec<Quad> {
+        quads
+            .iter()
+            .filter(|q| {
+                (q.bounds.size.width.0 / sf - w).abs() < 0.01
+                    && (q.bounds.size.height.0 / sf - h).abs() < 0.01
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn chart_value_label_reshapes_only_on_text_change(cx: &mut TestAppContext) {
+        // Small box: no range label; no heading, legend or axis max.
+        let mut i = input(116., 56.);
+        i.value = Some((12.04, Validity::Valid));
+        let mut r = rig(cx, i);
+        r.draw();
+        assert_eq!(r.cache.borrow().shape_count, 1);
+        assert_eq!(r.cache.borrow().text(LabelKind::Value), Some("12.0%"));
+
+        r.set(|i| i.value = Some((11.96, Validity::Valid)));
+        r.draw();
+        assert_eq!(r.cache.borrow().shape_count, 1, "same text, no re-shape");
+
+        r.set(|i| i.value = Some((13.0, Validity::Valid)));
+        r.draw();
+        assert_eq!(r.cache.borrow().shape_count, 2);
+        assert_eq!(r.cache.borrow().text(LabelKind::Value), Some("13.0%"));
+
+        // Same text, other colour: re-shaped.
+        r.set(|i| i.value = Some((13.0, Validity::Stale)));
+        r.draw();
+        assert_eq!(r.cache.borrow().shape_count, 3);
+    }
+
+    #[test]
+    fn range_label_text() {
+        for (word, ns, want) in [
+            ("Utilization", 60 * S, "Utilization over 60 seconds"),
+            ("Throughput", 300 * S, "Throughput over 5 minutes"),
+            ("Memory usage", 30 * S, "Memory usage over 30 seconds"),
+            ("Power draw", 600 * S, "Power draw over 10 minutes"),
+        ] {
+            let mut out = String::new();
+            range_label(word, ns, &mut out);
+            assert_eq!(out, want);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn small_box_hides_range_and_legend(cx: &mut TestAppContext) {
+        let mut i = input(116., 56.);
+        i.labels.legend = legend();
+        i.labels.heading = Some("CPU".into());
+        let mut r = rig(cx, i);
+        let (quads, _) = r.draw();
+        let c = r.cache.borrow();
+        assert_eq!(c.shape_count, 1, "only the heading");
+        assert!(c.text(LabelKind::Range).is_none());
+        assert!(c.text(LabelKind::Legend(0)).is_none());
+        assert!(c.painted(LabelKind::Range).is_none());
+        assert!(quads.is_empty(), "no swatches");
+
+        // The same chart large shows both.
+        drop(c);
+        r.set(|i| {
+            i.w = 600.;
+            i.h = 300.;
+        });
+        r.draw();
+        let c = r.cache.borrow();
+        assert_eq!(
+            c.text(LabelKind::Range),
+            Some("Utilization over 60 seconds")
+        );
+        assert_eq!(c.text(LabelKind::Legend(1)), Some("Kernel"));
+    }
+
+    fn two_series() -> ChartSpec {
+        let line = |h: f32| Hsla {
+            h,
+            s: 0.5,
+            l: 0.5,
+            a: 1.0,
+        };
+        ChartSpec {
+            series: smallvec![
+                ChartSeries {
+                    line: line(0.1),
+                    ..ChartSeries::default()
+                },
+                ChartSeries {
+                    line: line(0.6),
+                    dashed: true,
+                    ..ChartSeries::default()
+                },
+            ],
+            ..ChartSpec::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn legend_horizontal_wide_vertical_narrow(cx: &mut TestAppContext) {
+        let mut i = input(600., 300.);
+        i.labels.legend = legend();
+        i.spec = two_series();
+        let mut r = rig(cx, i);
+        let (quads, sf) = r.draw();
+        {
+            let c = r.cache.borrow();
+            assert_eq!(c.text(LabelKind::Legend(0)), Some("Total"));
+            assert_eq!(c.text(LabelKind::Legend(1)), Some("Kernel"));
+            let a = c.painted(LabelKind::Legend(0)).expect("first item");
+            let b = c.painted(LabelKind::Legend(1)).expect("second item");
+            assert!(b.origin.x > a.origin.x, "side by side");
+            assert_eq!(a.origin.y, b.origin.y);
+        }
+        let solid = quads_of(&quads, sf, 12., 2.);
+        assert_eq!(solid.len(), 1, "one solid 12 × 2 swatch");
+        let dashes = quads_of(&quads, sf, 3., 2.);
+        let tail = quads_of(&quads, sf, 2., 2.);
+        assert_eq!(
+            dashes.len() + tail.len(),
+            3,
+            "the dashed swatch is three dashes"
+        );
+        let x0 = dashes[0].bounds.origin.x.0 / sf;
+        let last = tail.first().or(dashes.last()).expect("dash");
+        let x_end = (last.bounds.origin.x.0 + last.bounds.size.width.0) / sf;
+        assert!((x_end - x0 - 12.).abs() < 0.01, "dashed swatch spans 12 px");
+        assert!(x0 > solid[0].bounds.origin.x.0 / sf);
+        let line1 = two_series().series[1].line;
+        let line0 = two_series().series[0].line;
+        assert_eq!(solid[0].background, line0.into());
+        assert!(
+            dashes
+                .iter()
+                .chain(&tail)
+                .all(|q| q.background == line1.into())
+        );
+
+        r.set(|i| {
+            i.w = 180.;
+            i.h = 150.;
+        });
+        r.draw();
+        let c = r.cache.borrow();
+        let a = c.painted(LabelKind::Legend(0)).expect("first item");
+        let b = c.painted(LabelKind::Legend(1)).expect("second item");
+        assert!(b.origin.y > a.origin.y, "stacked");
+        assert_eq!(a.origin.x, b.origin.x);
+    }
+
+    #[gpui_kit::test]
+    fn axis_max_visibility_rule(cx: &mut TestAppContext) {
+        // Plot height = box height − 2.
+        let mut i = input(600., 92.);
+        i.labels.show_axis_max = true;
+        i.axis_text = Some("100 Mbps");
+        let mut r = rig(cx, i);
+        r.draw();
+        assert!(r.cache.borrow().text(LabelKind::AxisMax).is_none());
+        assert_eq!(r.cache.borrow().shape_count, 0);
+
+        r.set(|i| i.h = 152.);
+        r.draw();
+        let c = r.cache.borrow();
+        assert_eq!(c.text(LabelKind::AxisMax), Some("100 Mbps"));
+        let a = c.painted(LabelKind::AxisMax).expect("axis max");
+        let pad = 6.0;
+        let right = f32::from(a.origin.x + a.width);
+        assert!(
+            (right - (600. - pad)).abs() < 0.01,
+            "right-aligned at {right}"
+        );
+        assert!(f32::from(a.origin.x) > 300.);
+        drop(c);
+
+        // No axis text, or the flag off: hidden.
+        r.set(|i| i.labels.show_axis_max = false);
+        r.draw();
+        assert!(r.cache.borrow().painted(LabelKind::AxisMax).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn value_glyph_per_validity(cx: &mut TestAppContext) {
+        let mut r = rig(cx, input(300., 100.));
+        let t = r.theme.clone();
+        for (validity, text, color) in [
+            (Validity::Valid, Some("42.0%"), t.text_primary),
+            (Validity::Stale, Some("42.0%"), t.text_secondary),
+            (Validity::WarmingUp, Some("…"), t.text_secondary),
+            (Validity::Unsupported, Some("n/a"), t.text_secondary),
+            (Validity::Missing, Some("-"), t.text_secondary),
+            (Validity::Failed, Some("!"), t.status.warning),
+        ] {
+            r.set(|i| i.value = Some((42.0, validity)));
+            r.draw();
+            let c = r.cache.borrow();
+            assert_eq!(c.text(LabelKind::Value), text, "{validity:?}");
+            let painted = c.painted(LabelKind::Value).expect("value painted");
+            assert_eq!(painted.color, color, "{validity:?}");
+            assert!(c.painted(LabelKind::Lock).is_none());
+        }
+
+        r.set(|i| i.value = Some((42.0, Validity::Restricted)));
+        r.draw();
+        let c = r.cache.borrow();
+        let lock = c.painted(LabelKind::Lock).expect("lock icon");
+        assert_eq!(lock.width, px(12.));
+        assert_eq!(lock.color, t.text_secondary);
+        assert!(c.painted(LabelKind::Value).is_none());
+        drop(c);
+
+        r.set(|i| i.labels.value_align = ValueAlign::Hidden);
+        r.draw();
+        assert!(r.cache.borrow().painted.is_empty());
+    }
+
+    #[test]
+    fn format_value_table_d() {
+        let f = |fmt, v: f32, unit| {
+            let mut out = String::new();
+            format_value(fmt, v, unit, &mut out);
+            out
+        };
+        use NetworkUnit::{Bits, Bytes};
+        use ValueFormat as F;
+        // Network series are bytes per second: 150 000 B/s is 1.2 Mbps.
+        assert_eq!(f(F::RateNetwork, 150_000.0, Bits), "1.2 Mbps");
+        assert_eq!(f(F::RateNetwork, 1.5 * 1024.0 * 1024.0, Bytes), "1.5 MiB/s");
+        assert_eq!(f(F::Percent, 0.0, Bits), "0%");
+        assert_eq!(f(F::Percent, 12.0, Bits), "12.0%");
+        assert_eq!(f(F::Mhz, 4631.4, Bits), "4631 MHz");
+        assert_eq!(f(F::Celsius, 52.4, Bits), "52 °C");
+        assert_eq!(f(F::Watts, 31.94, Bits), "31.9 W");
+        assert_eq!(f(F::Count, 12345.0, Bits), "12\u{2009}345");
+        assert_eq!(f(F::Bytes, 1536.0, Bits), "1.50 KiB");
+        assert_eq!(f(F::RateIec, 1.5 * 1024.0 * 1024.0, Bits), "1.5 MiB/s");
+        assert_eq!(f(F::Rpm, 1199.6, Bits), "1200 RPM");
+    }
+}
