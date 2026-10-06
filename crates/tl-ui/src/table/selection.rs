@@ -130,7 +130,8 @@ impl<R: Copy + Eq + Hash> Selection<R> {
                     let next = if delta > 0 {
                         next_selectable(v, ix + 1)
                     } else {
-                        ix.checked_sub(1).and_then(|start| prev_selectable(v, start))
+                        ix.checked_sub(1)
+                            .and_then(|start| prev_selectable(v, start))
                     };
                     match next {
                         Some(n) => ix = n,
@@ -167,7 +168,9 @@ impl<R: Copy + Eq + Hash> Selection<R> {
     /// same rules as [`Self::move_focus`].
     pub fn move_edge(&mut self, end: bool, extend: bool, v: &impl SelectionView<R>) {
         let target = if end {
-            v.len().checked_sub(1).and_then(|last| prev_selectable(v, last))
+            v.len()
+                .checked_sub(1)
+                .and_then(|last| prev_selectable(v, last))
         } else {
             first_selectable(v)
         };
