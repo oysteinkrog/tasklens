@@ -23,6 +23,7 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::actions::PerfShowMiniWindow;
+use super::cpu::CpuPage;
 use super::details::{KeyValueModel, render_details};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::components::menu::TlMenu;
@@ -414,13 +415,11 @@ pub fn build_page(
     demand: &Entity<DemandAggregator>,
     cx: &mut App,
 ) -> AnyView {
-    let _ = (hub, demand);
-    #[allow(
-        clippy::match_single_binding,
-        reason = "E24-009 and E25 add one arm per kind"
-    )]
+    // E25 adds one arm per kind.
     match row.kind {
-        // E24-009: Cpu arm
+        DeviceKind::Cpu => cx
+            .new(|cx| CpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
         _ => cx.new(|cx| PlaceholderPage::new(key.clone(), cx)).into(),
     }
 }
