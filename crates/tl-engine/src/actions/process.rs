@@ -68,7 +68,7 @@ mod tests {
     use std::time::Duration;
 
     use asupersync::channel::mpsc;
-    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use asupersync::time::{TimeSource, TimerDriverHandle, VirtualClock};
     use asupersync::types::{Budget, Time};
     use asupersync::{LabConfig, LabRuntime};
     use rustix::io::Errno;
