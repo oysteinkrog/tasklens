@@ -388,3 +388,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 
 - yrf.6 (1fe5854, 1f7c800): chart/scale.rs compute covers nine YScale kinds; private formatters drop a trailing ".0"; empty temperature window keeps 35 to 45 C; byte-mode link speed label is speed/8.
 - hjn.22 (9083bf2, 95b899a, 80c7325, ec84c48): public IP via ureq =3.4.0 on FetchPublicIp only, never at start; fixture sys_root never fetches. 95b899a alone does not build. OWNER REVIEW: ureq 3.4.2 exists; pin kept at the checked 3.4.0.
+- gma.13 (ea3aa6a, 4f61232, 399a316): General tab. Deleted-exe colour moved to a kv_grid follow-up bead; command line block is a child view, not .cached(), because its height varies; copy text waits for E23-011.
+- i3o.16 (e3e7c7d): startup enable and disable; suffix rule in private valid_for(source, id); lab tests wait for i3o.19.
+- hjn.29 (dce5917, 2d73c38, eecdbc6, d6c4fd2): AMD gpu_drm worker. No AMD card gives Health Off, never an empty sample. Mixed AMD and NVIDIA hosts break in the reducer: follow-up bead under 8q0. OWNER REVIEW: this machine has only an NVIDIA card, so gpu_drm_real_host (ignored) cannot pass here.
