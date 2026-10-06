@@ -11,7 +11,7 @@
 //! never run the unit twice at once.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,6 +45,7 @@ impl Fixture {
         stop_unit();
         let _ = Command::new("systemctl")
             .args(["--user", "reset-failed", UNIT])
+            .stderr(Stdio::null())
             .status();
         let start_us = now_us();
         let script = format!(
@@ -87,6 +88,7 @@ impl Drop for Fixture {
 fn stop_unit() {
     let _ = Command::new("systemctl")
         .args(["--user", "stop", UNIT])
+        .stderr(Stdio::null())
         .status();
 }
 
@@ -230,12 +232,21 @@ fn follow_resume_no_gap_no_duplicate() {
 fn load_older_pages_back() {
     let fixture = Fixture::start();
     let engine = start_engine("real_journal-older");
-    let handle = engine.journal(query(Manager::User, &format!("{UNIT}.service"), true));
-
-    let (events, found) = collect(&handle, Instant::now() + WAIT, |e| {
+    let unit = format!("{UNIT}.service");
+    let follower = engine.journal(query(Manager::User, &unit, true));
+    let (_, found) = collect(&follower, Instant::now() + WAIT, |e| {
         has_last_line(&fixture, e)
     });
     assert!(found, "line-{} did not arrive within {WAIT:?}", LINES - 1);
+    drop(follower);
+
+    // A new handle opened now loads line-800 to line-999 first, so the walk back crosses
+    // several full pages.
+    let handle = engine.journal(query(Manager::User, &unit, false));
+    let (events, got) = collect(&handle, Instant::now() + WAIT, |e| {
+        matches!(e, JournalEvent::Batch { older: false, .. })
+    });
+    assert!(got, "no initial batch within {WAIT:?}");
     let newer = newer_lines(&fixture, &events);
 
     // Each page is older than the one before, so pages are stacked in front.
