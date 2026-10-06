@@ -275,3 +275,13 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - m1f.9: LowMemory arm in processes::factory runs LowMemSource. The compositor pid helper is still copied in lowmem.rs and processes.rs; share it in a later cleanup.
 - 8fx.18: the 10-minute Frame on 2,000 processes took 75 ms against 50 ms (load 55). Release test ignored; follow-up bead for read::stack. Rolling window loses the device catalog after 10 minutes; P1 follow-up bead. Also: a delete while the store is loading or failed is not saved.
 - ug9.21: TlBanner tooltip shows on every hover, not only when cut. Button ids "TlBanner-<label>" clash if two banners share a parent and a label.
+
+## 2026-10-06 y6k.3, y6k.8, 8q0.25, i3o.8, i3o.9, qfx.34, y6k.19
+
+- y6k.3 (launcher): accepted all ten choices. System-manager units and non-Command as_admin are Unsupported. Tab in a command ends as Unsupported because tl-ops shell_argv rejects it. pkexec is /usr/bin/pkexec. launcher::LaunchOutcome is a second enum; E11-016 turns the actions/mod.rs one into a re-export.
+- y6k.8: details go out as a Vec in ServicesUpdate; the reducer copy is on 8q0.29 (comment added). None in UnitDetails means Unsupported. A demanded unit with no record waits for a listing (no LoadUnit).
+- 8q0.25: Interrupts row goes n/a after 10 valid samples at exactly 0 irq; before the first sample it shows the note. GroupRow has no user field, so the UI shows "root" for pseudo rows itself. Check in the processes UI beads.
+- 8q0.25 saw 2 journal follow lib tests fail (journal.rs:1438, :1465). Seen flaky before. Recheck in the full-suite pass.
+- i3o.8: one ActionOps::apply_thread_op instead of three methods. i3o.9 lab_actions has a stand-in gate until i3o.1.
+- qfx.34: shellcheck is not installed, so script_shellcheck_clean skips. Owner decision: install shellcheck (pacman) to make it real.
+- y6k.19 blocked; leader chose reverse_lookup signature, ConnRecord.remote_host, and a resolver task in connections.rs beside source::run (bead comment).
