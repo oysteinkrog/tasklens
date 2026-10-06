@@ -147,6 +147,7 @@ fn run(rt: &Runtime, kind: ActionKind, cg: &CgroupRef) -> ActionState {
         systemd_user: ManagerConnSlot::new(),
         openers: None,
         helper: None,
+        destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
     });
     let cg = cg.clone();
     let (tx, rx) = std::sync::mpsc::channel();
