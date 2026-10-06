@@ -865,3 +865,680 @@ fn line(
     }
     row.into_any_element()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tl_model::snapshot::{
+        BatteryDetails, DeviceDetailsSnapshot, InventorySnapshot, NetDetails, PartitionRow,
+        PartitionTable, SystemSnapshot,
+    };
+    use tl_model::system::{DiskTotals, GpuTotals, NetTotals};
+    use tl_model::table::Total;
+    use tl_model::time::BootId;
+
+    use super::*;
+
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    fn text(t: &str) -> Total<Arc<str>> {
+        Total {
+            value: Arc::from(t),
+            validity: Validity::Valid,
+        }
+    }
+
+    fn entry(idx: u16, identity: DeviceIdentity, display_name: &str) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from(display_name),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        }
+    }
+
+    fn snap(
+        system: SystemSnapshot,
+        inventory: InventorySnapshot,
+        details: DeviceDetailsSnapshot,
+    ) -> Snapshot {
+        let mut s = Snapshot::empty(BootId(1), 1);
+        s.system = Arc::new(system);
+        s.inventory = Arc::new(inventory);
+        s.device_details = Arc::new(details);
+        s
+    }
+
+    fn input<'a>(
+        kind: DeviceKind,
+        entry: &'a DeviceEntry,
+        snap: &'a Snapshot,
+    ) -> CardTextInput<'a> {
+        CardTextInput {
+            kind,
+            number: 0,
+            entry,
+            snap,
+            network_unit: NetworkUnit::Bits,
+            auto_scale: false,
+            fan_label: None,
+            fan_temp: None,
+        }
+    }
+
+    fn lines(input: &CardTextInput) -> CardLines {
+        card_lines(input, &mut String::new())
+    }
+
+    fn strs(l: &CardLines) -> (&str, &str, &str) {
+        (&l.heading, &l.line1, &l.line2)
+    }
+
+    fn cpu_system(freq: Metric<u32>, temp: Metric<f32>) -> SystemSnapshot {
+        let mut sys = SystemSnapshot::default();
+        sys.cpu.freq_mhz = freq;
+        sys.cpu.temp_c = temp;
+        sys
+    }
+
+    #[test]
+    fn card_lines_cpu() {
+        let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let mut inv = InventorySnapshot::default();
+        inv.processor.name = text("AMD Ryzen 7 7800X3D 8-Core Processor");
+        let s = snap(
+            cpu_system(Metric::valid(4631), Metric::valid(52.0)),
+            inv.clone(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
+        assert_eq!(
+            strs(&l),
+            (
+                "CPU",
+                "AMD Ryzen 7 7800X3D 8-Core Processor",
+                "4631 MHz · 52 °C"
+            )
+        );
+        assert!(!l.line2_accent && !l.disconnected);
+        assert_eq!(
+            l.tooltip.as_deref(),
+            Some("AMD Ryzen 7 7800X3D 8-Core Processor")
+        );
+        assert!(l.line1_locks.is_empty() && l.line2_locks.is_empty());
+
+        // No CPU hwmon: the temperature part is left out.
+        let s = snap(
+            cpu_system(Metric::valid(4631), Metric::with(Validity::Unsupported)),
+            inv.clone(),
+            DeviceDetailsSnapshot::default(),
+        );
+        assert_eq!(lines(&input(DeviceKind::Cpu, &cpu, &s)).line2, "4631 MHz");
+
+        // A failed temperature shows its glyph word in place of the value only.
+        let s = snap(
+            cpu_system(Metric::valid(4631), Metric::with(Validity::Failed)),
+            inv,
+            DeviceDetailsSnapshot::default(),
+        );
+        assert_eq!(
+            lines(&input(DeviceKind::Cpu, &cpu, &s)).line2,
+            "4631 MHz · !"
+        );
+
+        // Nothing reported yet.
+        let s = snap(
+            SystemSnapshot::default(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
+        assert_eq!(strs(&l), ("CPU", "Unknown processor", "…"));
+    }
+
+    #[test]
+    fn card_lines_memory() {
+        let mem = entry(1, DeviceIdentity::Memory, "Memory");
+        let mut sys = SystemSnapshot::default();
+        sys.memory.validity = Validity::Valid;
+        sys.memory.used = (34.68 * GIB) as u64;
+        sys.memory.total = (63.16 * GIB) as u64;
+        sys.memory.committed = 69;
+        sys.memory.commit_limit = 100;
+        let s = snap(
+            sys,
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Memory, &mem, &s));
+        assert_eq!(
+            strs(&l),
+            ("Memory", "34.68 GiB / 63.16 GiB", "Commit 69.0%")
+        );
+
+        let s = snap(
+            SystemSnapshot::default(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Memory, &mem, &s));
+        assert_eq!(strs(&l), ("Memory", "…", "Commit …"));
+    }
+
+    fn net_entry(kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            net_kind: kind,
+            ..entry(
+                2,
+                DeviceIdentity::Net {
+                    netns_ino: 1,
+                    ifindex: 2,
+                    name: Arc::from("enp38s0"),
+                },
+                "enp38s0",
+            )
+        }
+    }
+
+    fn net_system(rx: f64, tx: f64, state: LinkState) -> SystemSnapshot {
+        let sys = SystemSnapshot {
+            nets: Arc::from(vec![(
+                DeviceIdx(2),
+                NetTotals {
+                    device: DeviceIdx(2),
+                    rx_bps: Metric::valid(rx),
+                    tx_bps: Metric::valid(tx),
+                    rx_total: 0,
+                    tx_total: 0,
+                    link_speed_mbps: Metric::valid(1000),
+                    state,
+                },
+            )]),
+            ..SystemSnapshot::default()
+        };
+        sys
+    }
+
+    fn net_details(type_label: &str, connection: Option<&str>) -> DeviceDetailsSnapshot {
+        DeviceDetailsSnapshot {
+            nets: Arc::from(vec![(
+                DeviceIdx(2),
+                NetDetails {
+                    type_label: Arc::from(type_label),
+                    connection: connection.map(Arc::from),
+                    adapter_name: text("Intel I225-V"),
+                    driver: text("igc"),
+                    mac: text("00:11:22:33:44:55"),
+                    ifindex: 2,
+                    link_speed_mbps: Total::default(),
+                    state: LinkState::Up,
+                    addresses: Arc::from(vec![]),
+                    kind: NetKind::Wired,
+                    wifi: None,
+                },
+            )]),
+            ..DeviceDetailsSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn card_lines_network_both_directions() {
+        let net = net_entry(Some(NetKind::Wired));
+        // 1.2 Mbps down, 0.3 Mbps up, in bytes per second.
+        let s = snap(
+            net_system(150_000.0, 37_500.0, LinkState::Up),
+            InventorySnapshot::default(),
+            net_details("Ethernet", Some("Wired connection 1")),
+        );
+        let l = lines(&input(DeviceKind::Net, &net, &s));
+        assert_eq!(strs(&l), ("enp38s0", "Ethernet", "↓ 1.2 Mbps ↑ 0.3 Mbps"));
+        assert!(l.line2_accent);
+        assert!(!l.disconnected);
+        assert_eq!(l.tooltip.as_deref(), Some("Ethernet\nWired connection 1"));
+    }
+
+    #[test]
+    fn card_lines_network_one_direction() {
+        let net = net_entry(Some(NetKind::Wireless));
+        let s = snap(
+            net_system(150_000.0, 0.0, LinkState::Up),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Net, &net, &s));
+        // No details yet: the type word comes from the catalog class.
+        assert_eq!(strs(&l), ("enp38s0", "Wi-Fi", "1.2 Mbps"));
+        assert!(l.line2_accent);
+        assert_eq!(l.tooltip.as_deref(), Some("Wi-Fi"));
+
+        // Bytes with auto-scale.
+        let i = CardTextInput {
+            network_unit: NetworkUnit::Bytes,
+            auto_scale: true,
+            ..input(DeviceKind::Net, &net, &s)
+        };
+        assert_eq!(lines(&i).line2, "146.5 KiB/s");
+
+        // Down: the state word, not the accent, and the card dims.
+        let s = snap(
+            net_system(0.0, 0.0, LinkState::Down),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Net, &net, &s));
+        assert_eq!(l.line2, "Disconnected");
+        assert!(!l.line2_accent);
+        assert!(l.disconnected);
+        for (state, word) in [
+            (LinkState::Testing, "Testing"),
+            (LinkState::Dormant, "Dormant"),
+            (LinkState::NotPresent, "Not present"),
+            (LinkState::LowerLayerDown, "Lower layer down"),
+            (LinkState::Unknown, "Unknown"),
+        ] {
+            let s = snap(
+                net_system(0.0, 0.0, state),
+                InventorySnapshot::default(),
+                DeviceDetailsSnapshot::default(),
+            );
+            assert_eq!(lines(&input(DeviceKind::Net, &net, &s)).line2, word);
+        }
+    }
+
+    fn disk_entry() -> DeviceEntry {
+        entry(
+            3,
+            DeviceIdentity::Disk {
+                major: 259,
+                minor: 0,
+                name: Arc::from("nvme0n1"),
+                wwn_or_serial: None,
+            },
+            "nvme0n1",
+        )
+    }
+
+    fn partition(name: &str, mount: Option<&str>) -> PartitionRow {
+        PartitionRow {
+            name: Arc::from(name),
+            start_bytes: 0,
+            size_bytes: 0,
+            holder: None,
+            mount: mount.map(Arc::from),
+            extra_mounts: Arc::from(vec![]),
+            label: None,
+            fs_type: None,
+            usage_pct: Total::default(),
+            flags: Arc::from(vec![]),
+            type_name: Arc::from(""),
+            read_only: false,
+            unallocated: false,
+        }
+    }
+
+    fn disk_snap(mounts: &[Option<&str>], temp: Metric<f32>) -> Snapshot {
+        let partitions = (!mounts.is_empty()).then(|| {
+            Arc::new(PartitionTable {
+                kind: Arc::from("GPT"),
+                rows: mounts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| partition(&format!("nvme0n1p{}", i + 1), *m))
+                    .collect(),
+            })
+        });
+        let details = DiskDetails {
+            kind: Arc::from("NVMe"),
+            model: text("Samsung SSD 990 PRO 2TB"),
+            partitions,
+            ..DiskDetails::default()
+        };
+        let sys = SystemSnapshot {
+            disks: Arc::from(vec![(
+                DeviceIdx(3),
+                DiskTotals {
+                    device: DeviceIdx(3),
+                    active_pct: Metric::valid(0.1),
+                    read_bps: Metric::valid(0.0),
+                    write_bps: Metric::valid(0.0),
+                    response_ms: Metric::valid(0.0),
+                    read_total: 0,
+                    written_total: 0,
+                    capacity: 0,
+                    temp_c: temp,
+                },
+            )]),
+            ..SystemSnapshot::default()
+        };
+        snap(
+            sys,
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot {
+                disks: Arc::from(vec![(DeviceIdx(3), details)]),
+                ..DeviceDetailsSnapshot::default()
+            },
+        )
+    }
+
+    #[test]
+    fn card_lines_disk_with_and_without_mount() {
+        let disk = disk_entry();
+        let s = disk_snap(&[Some("/boot"), Some("/")], Metric::valid(41.0));
+        let l = lines(&CardTextInput {
+            number: 1,
+            ..input(DeviceKind::Disk, &disk, &s)
+        });
+        assert_eq!(
+            strs(&l),
+            ("Disk 1", "NVMe - /", "Samsung SSD 990 PRO 2TB · 41 °C")
+        );
+
+        // No "/": the first mount.
+        let s = disk_snap(&[None, Some("/data")], Metric::with(Validity::Unsupported));
+        let l = lines(&input(DeviceKind::Disk, &disk, &s));
+        assert_eq!(
+            strs(&l),
+            ("Disk 0", "NVMe - /data", "Samsung SSD 990 PRO 2TB")
+        );
+
+        // No mount: the kind only.
+        let s = disk_snap(&[], Metric::with(Validity::Unsupported));
+        assert_eq!(lines(&input(DeviceKind::Disk, &disk, &s)).line1, "NVMe");
+
+        // Restricted temperature: the model, the separator, then a lock at the line end.
+        let s = disk_snap(&[], Metric::with(Validity::Restricted));
+        let l = lines(&input(DeviceKind::Disk, &disk, &s));
+        assert_eq!(l.line2, "Samsung SSD 990 PRO 2TB · ");
+        assert_eq!(&l.line2_locks[..], &[l.line2.len() as u16]);
+    }
+
+    fn sensor_reading(idx: u16, kind: SensorKind, value: f32) -> (DeviceIdx, SensorReading) {
+        (
+            DeviceIdx(idx),
+            SensorReading {
+                device: DeviceIdx(idx),
+                kind,
+                value: Metric::valid(value),
+                pwm_pct: Metric::with(Validity::Unsupported),
+                fan_control: None,
+                fan_connected: true,
+            },
+        )
+    }
+
+    fn battery_details(kind: &str) -> BatteryDetails {
+        BatteryDetails {
+            kind: Arc::from(kind),
+            vendor: text("Logitech"),
+            model: text("MX Master 3"),
+            serial: Total::default(),
+            native_path: Arc::from("hidpp_battery_0"),
+            percentage: Total {
+                value: 85.0,
+                validity: Validity::Valid,
+            },
+            energy_wh: Total::default(),
+            energy_rate_w: Total::default(),
+            voltage_v: Total::default(),
+            state: Arc::from("Discharging"),
+            time_to_full_s: Total::default(),
+            time_to_empty_s: Total::default(),
+            charge_cycles: Total::default(),
+            technology: Arc::from(""),
+            capacity_pct: Total::default(),
+            energy_empty_wh: Total::default(),
+            energy_full_wh: Total::default(),
+            energy_full_design_wh: Total::default(),
+            voltage_min_design_v: Total::default(),
+            voltage_max_design_v: Total::default(),
+            power_supply: false,
+            charge_threshold: None,
+            temperature_c: Total::default(),
+            history: None,
+        }
+    }
+
+    fn gpu_entry(idx: u16, name: &str) -> DeviceEntry {
+        entry(
+            idx,
+            DeviceIdentity::Gpu {
+                uuid: [0; 16],
+                pci_bus_id: Arc::from(format!("0000:0{idx}:00.0")),
+            },
+            name,
+        )
+    }
+
+    #[test]
+    fn card_lines_fan_battery_aggregate() {
+        // Fan: number and chip, RPM and the paired sensor.
+        let fan = entry(
+            4,
+            DeviceIdentity::Fan {
+                chip: Arc::from("nct6799"),
+                index: 2,
+            },
+            "nct6799 fan2",
+        );
+        let sys = SystemSnapshot {
+            sensors: Arc::from(vec![
+                sensor_reading(4, SensorKind::Fan, 1200.4),
+                sensor_reading(5, SensorKind::Temperature, 45.0),
+            ]),
+            ..SystemSnapshot::default()
+        };
+        let s = snap(
+            sys,
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&CardTextInput {
+            number: 2,
+            ..input(DeviceKind::Fan, &fan, &s)
+        });
+        assert_eq!(strs(&l), ("Fan 2", "nct6799", "1200 RPM"));
+        let l = lines(&CardTextInput {
+            fan_label: Some("CPU fan"),
+            fan_temp: Some(DeviceIdx(5)),
+            ..input(DeviceKind::Fan, &fan, &s)
+        });
+        assert_eq!(strs(&l), ("CPU fan", "CPU fan", "1200 RPM · 45 °C"));
+
+        // Battery: kind word, vendor and model, percentage and state.
+        let mouse = entry(
+            6,
+            DeviceIdentity::Battery {
+                native_path: Arc::from("hidpp_battery_0"),
+            },
+            "MX Master 3",
+        );
+        let s = snap(
+            SystemSnapshot::default(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot {
+                batteries: Arc::from(vec![(DeviceIdx(6), battery_details("Mouse"))]),
+                ..DeviceDetailsSnapshot::default()
+            },
+        );
+        let l = lines(&input(DeviceKind::Battery, &mouse, &s));
+        assert_eq!(
+            strs(&l),
+            ("Mouse", "Logitech MX Master 3", "85.0% · Discharging")
+        );
+        let s = snap(
+            SystemSnapshot::default(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Battery, &mouse, &s));
+        assert_eq!(strs(&l), ("Battery", "MX Master 3", "…"));
+
+        // Aggregates: counts and the common kind or vendor.
+        let disk = disk_entry();
+        let mut s = disk_snap(&[], Metric::with(Validity::Unsupported));
+        let usb = entry(
+            7,
+            DeviceIdentity::Disk {
+                major: 8,
+                minor: 0,
+                name: Arc::from("sda"),
+                wwn_or_serial: None,
+            },
+            "sda",
+        );
+        let part = DeviceEntry {
+            parent: Some(DeviceIdx(3)),
+            ..entry(
+                8,
+                DeviceIdentity::Disk {
+                    major: 259,
+                    minor: 1,
+                    name: Arc::from("nvme0n1p1"),
+                    wwn_or_serial: None,
+                },
+                "nvme0n1p1",
+            )
+        };
+        let (a, b) = (
+            gpu_entry(9, "AMD Radeon RX 7900 XTX"),
+            gpu_entry(10, "AMD Radeon 780M"),
+        );
+        s.devices = Arc::new(tl_model::devices::DeviceCatalog {
+            version: 1,
+            entries: Arc::from(vec![disk.clone(), part, a.clone(), b.clone()]),
+        });
+        let agg = entry(
+            11,
+            DeviceIdentity::Aggregate(tl_model::devices::AggregateKind::Disks),
+            "",
+        );
+        let l = lines(&input(DeviceKind::AggregateDisk, &agg, &s));
+        assert_eq!(strs(&l), ("Aggregate storage", "1 disks", "NVMe"));
+        let l = lines(&input(DeviceKind::AggregateGpu, &agg, &s));
+        assert_eq!(strs(&l), ("Aggregate graphics", "2 adapters", "AMD"));
+
+        let mut details = (*s.device_details).clone();
+        let mut disks = details.disks.to_vec();
+        disks.push((
+            DeviceIdx(7),
+            DiskDetails {
+                kind: Arc::from("USB"),
+                ..DiskDetails::default()
+            },
+        ));
+        details.disks = Arc::from(disks);
+        s.device_details = Arc::new(details);
+        s.devices = Arc::new(tl_model::devices::DeviceCatalog {
+            version: 2,
+            entries: Arc::from(vec![disk, usb, a, gpu_entry(12, "NVIDIA GeForce RTX 4080")]),
+        });
+        let l = lines(&input(DeviceKind::AggregateDisk, &agg, &s));
+        assert_eq!(strs(&l), ("Aggregate storage", "2 disks", "Multiple"));
+        let l = lines(&input(DeviceKind::AggregateGpu, &agg, &s));
+        assert_eq!(l.line2, "Multiple");
+    }
+
+    #[test]
+    fn card_lines_gpu() {
+        let gpu = gpu_entry(9, "AMD Radeon RX 7900 XTX");
+        let mut sys = SystemSnapshot::default();
+        let mut totals = GpuTotals {
+            device: DeviceIdx(9),
+            util_pct: Metric::valid(10.9),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::default(),
+            mem_total: Metric::default(),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            enc_pct: Metric::default(),
+            dec_pct: Metric::default(),
+            temp_c: Metric::valid(52.0),
+            power_w: Metric::default(),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+        };
+        sys.gpus = Arc::from(vec![(DeviceIdx(9), totals)]);
+        let s = snap(
+            sys.clone(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Gpu, &gpu, &s));
+        assert_eq!(strs(&l), ("GPU 0", "AMD Radeon RX 7900 XTX", "52 °C"));
+
+        totals.temp_c = Metric::with(Validity::Unsupported);
+        sys.gpus = Arc::from(vec![(DeviceIdx(9), totals)]);
+        let s = snap(
+            sys,
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let nameless = gpu_entry(9, " ");
+        let l = lines(&input(DeviceKind::Gpu, &nameless, &s));
+        assert_eq!(strs(&l), ("GPU 0", "Unknown GPU", "n/a"));
+    }
+
+    #[test]
+    fn card_lines_unchanged_keeps_allocation() {
+        let net = net_entry(Some(NetKind::Wired));
+        let s = snap(
+            net_system(150_000.0, 37_500.0, LinkState::Up),
+            InventorySnapshot::default(),
+            net_details("Ethernet", Some("Wired connection 1")),
+        );
+        let i = input(DeviceKind::Net, &net, &s);
+        let mut scratch = String::new();
+        let first = card_lines(&i, &mut scratch);
+        assert_eq!(
+            card_lines(&i, &mut scratch),
+            first,
+            "same inputs, equal lines"
+        );
+
+        // The owner's compare-and-keep step.
+        let mut kept = first.clone();
+        assert!(!update_card_lines(&mut kept, &i, &mut scratch));
+        let same = |a: &SharedString, b: &SharedString| std::ptr::eq(a.as_ptr(), b.as_ptr());
+        assert!(same(&kept.heading, &first.heading));
+        assert!(same(&kept.line1, &first.line1));
+        assert!(same(&kept.line2, &first.line2));
+        assert!(same(
+            kept.tooltip.as_ref().expect("tooltip"),
+            first.tooltip.as_ref().expect("tooltip")
+        ));
+
+        // A new rate replaces line 2 only.
+        let s2 = snap(
+            net_system(300_000.0, 37_500.0, LinkState::Up),
+            InventorySnapshot::default(),
+            net_details("Ethernet", Some("Wired connection 1")),
+        );
+        assert!(update_card_lines(
+            &mut kept,
+            &input(DeviceKind::Net, &net, &s2),
+            &mut scratch
+        ));
+        assert_eq!(kept.line2, "↓ 2.4 Mbps ↑ 0.3 Mbps");
+        assert!(same(&kept.line1, &first.line1));
+        assert!(!same(&kept.line2, &first.line2));
+
+        // Without a connection the tooltip shares line 1's allocation.
+        let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let s = snap(
+            SystemSnapshot::default(),
+            InventorySnapshot::default(),
+            DeviceDetailsSnapshot::default(),
+        );
+        let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
+        assert!(same(l.tooltip.as_ref().expect("tooltip"), &l.line1));
+    }
+}
