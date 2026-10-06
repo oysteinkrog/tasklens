@@ -30,7 +30,8 @@
 //! knows the age and the last error. A value wider than its space ends with "…" (paths: middle
 //! ellipsis) and its tooltip holds the full text.
 //!
-//! Hovering a value that has a tooltip or a link draws a dotted underline in the value colour.
+//! Hovering a value that has a tooltip draws a dotted underline in `text_secondary`. A link value
+//! gets none: `TlLink` draws its own hover underline.
 //!
 //! Values are selectable text. A click on a value with `copy_on_click` copies it and flashes the
 //! row. The context menu on a value has "Copy value", "Copy row" and "Copy section". Ctrl+C with a
@@ -245,7 +246,7 @@ pub struct ValueLook {
     pub color: Hsla,
     /// Drawn as a `TlLink`.
     pub link: bool,
-    /// Gets the dotted underline on hover: the value has a tooltip or a link.
+    /// Gets the dotted underline on hover: the value has a tooltip and is not a link.
     pub underline: bool,
 }
 
@@ -264,7 +265,7 @@ pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
     } else {
         theme.text_secondary
     };
-    let underline = value.tooltip.is_some() || link;
+    let underline = value.tooltip.is_some() && !link;
     Some(ValueLook {
         text,
         color,
@@ -662,7 +663,7 @@ impl TlKeyValueGrid {
                 state.update(cx, |s, cx| s.set_hovered(n, *hovered, cx));
             });
             if f.hovered == Some(n) {
-                cell = cell.child(dotted_underline(n, look.color, m));
+                cell = cell.child(dotted_underline(n, f.theme.text_secondary, m));
             }
         }
 
@@ -1237,7 +1238,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn hover_underlines_values_with_tooltip_or_link(cx: &mut TestAppContext) {
+    fn hover_underlines_values_with_tooltip(cx: &mut TestAppContext) {
         let theme = cx.update(|cx| {
             setup(cx);
             current(cx).clone()
@@ -1249,15 +1250,20 @@ mod tests {
         let linked = TlValue {
             word: Some(UnsupportedWord::NeedsSetup),
             link: Some(Box::new(OpenSetup)),
+            tooltip: Some("Needs setup. Open Additional Setup…".into()),
             ..value("", Validity::Unsupported)
         };
         let plain = TlValue::new("1234");
         let underline = |v: &TlValue| value_look(v, &theme).map(|l| l.underline);
         assert_eq!(underline(&tipped), Some(true));
-        assert_eq!(underline(&linked), Some(true));
+        assert_eq!(underline(&linked), Some(false), "TlLink draws its own");
         assert_eq!(underline(&plain), Some(false));
 
-        let sections = [section(vec![row("Tipped:", tipped), row("PID:", plain)])];
+        let sections = [section(vec![
+            row("Tipped:", tipped),
+            row("PID:", plain),
+            row("CPU power:", linked),
+        ])];
         let (cx, _, _) = host(cx, move || {
             TlKeyValueGrid::new("grid", KvLayout::Inline).sections(&sections)
         });
@@ -1281,7 +1287,14 @@ mod tests {
         assert!(bounds(cx, "TlKv-underline-0").is_none(), "leaving drops it");
         assert!(
             bounds(cx, "TlKv-underline-1").is_none(),
-            "a value without tooltip or link has none"
+            "a value without a tooltip has none"
+        );
+
+        let link = bounds(cx, "TlKv-value-2").expect("value drawn");
+        cx.simulate_mouse_move(link.center(), None, Modifiers::none());
+        assert!(
+            bounds(cx, "TlKv-underline-2").is_none(),
+            "a link value has none"
         );
     }
 
