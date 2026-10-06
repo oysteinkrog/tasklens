@@ -223,3 +223,92 @@ fn udisks_real_drives() {
         );
     }
 }
+
+/// A SMART read of `sda` on the owner machine. Read-only: `update` is false, so no
+/// `SmartUpdate` runs and a sleeping disk stays asleep. Failures show validity and texts the
+/// worker made, never serials or WWNs.
+#[test]
+#[ignore = "needs the owner machine's system bus with UDisks2 and a SATA sda"]
+fn udisks_smart_real() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::{Cx, time};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::source::{QueuedCommand, WorkerCommand, WorkerControl, WorkerIo};
+    use tl_engine::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate};
+    use tl_engine::workers::dbus_udisks;
+    use tl_model::command::DeviceCommand;
+    use tl_model::demand::Demand;
+    use tl_model::devices::DeviceIdentity;
+    use tl_model::health::SourceId;
+    use tl_model::settings::EngineSettings;
+
+    let rt = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("runtime builds");
+    let join = rt.handle().spawn_checked(async {
+        let cx = Cx::current().expect("task has a Cx");
+        let (updates, mut rx) = mpsc::channel::<EngineMsg>(64);
+        let (_demand_tx, demand) = watch::channel(Demand::default());
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let control = WorkerControl {
+            commands: Arc::from([QueuedCommand {
+                seq: 1,
+                target: SourceId::Udisks,
+                command: WorkerCommand::Device(DeviceCommand::SmartRead {
+                    disk: "sda".into(),
+                    update: false,
+                }),
+            }]),
+            ..WorkerControl::default()
+        };
+        let (_control_tx, control) = watch::channel(control);
+        let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
+        let mut worker = cx
+            .spawn(move |cx| async move {
+                let _ = dbus_udisks::run(cx, io).await;
+            })
+            .expect("worker spawns");
+        let smart = loop {
+            let msg = time::timeout(cx.now(), Duration::from_secs(15), rx.recv(&cx))
+                .await
+                .expect("a message within 15 s")
+                .expect("channel open");
+            let EngineMsg::Source(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks {
+                from: SourceId::Udisks,
+                entries,
+            })) = msg
+            else {
+                continue;
+            };
+            let sda = entries.iter().find_map(|(identity, d)| match identity {
+                DeviceIdentity::Disk { name, .. } if &**name == "sda" => d.smart_data.clone(),
+                _ => None,
+            });
+            match sda {
+                Some(s) if s.validity != tl_model::validity::Validity::WarmingUp => break s,
+                _ => {}
+            }
+        };
+        worker.abort();
+        let _ = worker.join(&cx).await;
+        smart
+    });
+    let smart = rt.block_on(join).expect("task completes");
+    assert_eq!(
+        smart.validity,
+        Validity::Valid,
+        "{}",
+        smart.value.health.value
+    );
+    assert!(
+        smart.value.ata.iter().any(|a| a.id == 9),
+        "no power-on hours among {} attributes",
+        smart.value.ata.len()
+    );
+}
