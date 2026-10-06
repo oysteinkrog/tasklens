@@ -248,7 +248,7 @@ fn genl_attrs(msg: &[u8]) -> Option<&[u8]> {
 
 /// Calls `f` with the type (flags masked off) and value of each attribute. `None` when an
 /// attribute header or value runs past the end.
-fn for_each_attr(mut b: &[u8], mut f: impl FnMut(u16, &[u8])) -> Option<()> {
+fn for_each_attr<'a>(mut b: &'a [u8], mut f: impl FnMut(u16, &'a [u8])) -> Option<()> {
     while !b.is_empty() {
         let len = read_u16(b, 0)? as usize;
         let nla_type = read_u16(b, 2)?;
