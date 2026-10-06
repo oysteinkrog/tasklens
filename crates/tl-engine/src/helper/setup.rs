@@ -721,14 +721,108 @@ mod tests {
     #[test]
     fn script_usage_exit_2() {
         let fake = rules_root();
-        let usage =
-            "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off\n";
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off\n";
         for args in [&["bogus"][..], &[]] {
             let (code, out, err) = script(Some(fake.dir.path()), args);
             assert_eq!(code, 2, "{args:?}");
             assert_eq!(out, "");
             assert_eq!(err, usage);
         }
+    }
+
+    /// A fake root with `usr/bin/sensors-detect`, `etc/modules-load.d/` and `sensors-detect.out`
+    /// holding `output`, for test mode.
+    fn sensors_root(output: &str) -> Fake {
+        let fake = Fake::new();
+        fake.write(SENSORS_DETECT, b"");
+        fs::create_dir_all(fake.path("etc/modules-load.d")).expect("mkdir");
+        fake.write("sensors-detect.out", output.as_bytes());
+        fake
+    }
+
+    #[test]
+    fn script_sensors_detect_writes_modules() {
+        let fake = sensors_root("Some text\nMODULE_0=nct6775\nMODULE_1=\"coretemp\"\n");
+        let (code, out, err) = script(Some(fake.dir.path()), &["sensors-detect"]);
+        assert_eq!(code, 0, "{out}{err}");
+        let conf = fake.path(SENSORS_CONF);
+        assert_eq!(
+            fs::read_to_string(&conf).expect("conf"),
+            "nct6775\ncoretemp\n"
+        );
+        let mode = fs::metadata(&conf).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644);
+        assert!(
+            !fake
+                .path("etc/modules-load.d/tasklens-sensors.conf.tmp")
+                .exists()
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "would run: sensors-detect --auto");
+        assert!(lines.contains(&"MODULE_0=nct6775"), "{out}");
+        assert!(lines.contains(&"would run: modprobe nct6775"), "{out}");
+        assert!(lines.contains(&"would run: modprobe coretemp"), "{out}");
+        assert_eq!(lines.last(), Some(&"Enabled"));
+    }
+
+    /// Security regression: only names of letters, digits, `_` and `-` reach modprobe.
+    #[test]
+    fn script_sensors_bad_module_name_skipped() {
+        let fake = sensors_root(
+            "MODULE_0=nct6775\nMODULE_2=evil;rm\nMODULE_3=\"a b\"\nMODULE_4=$(id)\nMODULE_5=\n",
+        );
+        let (code, out, err) = script(Some(fake.dir.path()), &["sensors-detect"]);
+        assert_eq!(code, 0, "{out}{err}");
+        for name in ["evil;rm", "a b", "$(id)", ""] {
+            let skipped = format!("skipped module name: {name}");
+            assert!(out.lines().any(|l| l == skipped), "{name}: {out}");
+        }
+        assert_eq!(
+            fs::read_to_string(fake.path(SENSORS_CONF)).expect("conf"),
+            "nct6775\n"
+        );
+        let modprobe: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with("would run: modprobe"))
+            .collect();
+        assert_eq!(modprobe, ["would run: modprobe nct6775"]);
+    }
+
+    #[test]
+    fn script_sensors_none_found() {
+        let fake = sensors_root("No sensors were detected.\nMODULE_x=foo\n");
+        let (code, out, err) = script(Some(fake.dir.path()), &["sensors-detect"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert_eq!(out.lines().last(), Some("No sensor modules found"));
+        assert!(!out.contains("would run: modprobe"));
+        assert!(!fake.path(SENSORS_CONF).exists());
+        assert!(
+            !fake
+                .path("etc/modules-load.d/tasklens-sensors.conf.tmp")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn script_sensors_missing_lm_sensors() {
+        let fake = rules_root();
+        let (code, out, err) = script(Some(fake.dir.path()), &["sensors-detect"]);
+        assert_eq!(code, 3, "{out}{err}");
+        assert_eq!(out, "Install lm_sensors to detect fan sensors\n");
+        assert!(!fake.path(SENSORS_CONF).exists());
+    }
+
+    #[test]
+    fn script_sensors_revert() {
+        let fake = sensors_root("");
+        fake.write(SENSORS_CONF, b"nct6775\n");
+        let (code, out, err) = script(Some(fake.dir.path()), &["sensors-revert"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(!fake.path(SENSORS_CONF).exists());
+        assert_eq!(
+            out,
+            "Reverted. The modules stay loaded until the next reboot.\n"
+        );
     }
 
     #[test]
