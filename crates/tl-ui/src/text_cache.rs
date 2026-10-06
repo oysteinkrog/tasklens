@@ -213,6 +213,11 @@ impl<R: Eq + Hash, C: TableColumn> CellTextCache<R, C> {
         }
     }
 
+    /// `(hits, misses)` since the cache was created.
+    pub fn stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
+
     /// Number of cell entries (path entries are not counted).
     pub fn len(&self) -> usize {
         self.cells.len()

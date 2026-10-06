@@ -4,23 +4,24 @@
 //!
 //! The cells are measured, so the window uses the real text system with the bundled fonts.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::ScrollbarHandle;
+use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
     Action, AnyView, App, AppContext as _, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, KeyContext, Modifiers, MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta,
-    ScrollStrategy, ScrollWheelEvent, SharedString, Styled, TestAppContext, TestDispatcher,
-    TouchPhase, VisualTestContext, Window, div, point, px,
+    IntoElement, KeyContext, Modifiers, MouseButton, MouseMoveEvent, ParentElement, Pixels, Render,
+    Role, ScrollDelta, ScrollStrategy, ScrollWheelEvent, SharedString, Styled, Subscription,
+    TestAppContext, TestDispatcher, TouchPhase, VisualTestContext, Window, div, point, px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
-use tl_ui::components::menu::TlMenu;
+use tl_ui::components::menu::{TlMenu, context_menu_layer};
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::validity::{GlyphContent, glyph_parts};
 use tl_ui::table::actions::{
@@ -37,7 +38,7 @@ use tl_ui::table::columns::{
 };
 use tl_ui::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
-    metric_cell_opacity,
+    TreeTableEvent, metric_cell_opacity,
 };
 use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::theme::{current, metrics};
@@ -398,6 +399,10 @@ struct TDelegate {
     /// When not empty, a row with an icon gets the file icon `icon_paths[ix % len]`.
     icon_paths: Vec<std::sync::Arc<str>>,
     version: u64,
+    /// Cell overrides: (row id, column, text, validity). Other cells show "{ix}.0%".
+    cells: Vec<(u32, ColumnId, &'static str, Validity)>,
+    /// Every `context_menu` call: the targets and the clicked column.
+    menu_calls: Vec<(Vec<u32>, ColumnId)>,
 }
 
 impl TDelegate {
@@ -425,7 +430,26 @@ impl TDelegate {
             visible_calls: 0,
             icon_paths: Vec::new(),
             version: 1,
+            cells: Vec::new(),
+            menu_calls: Vec::new(),
         }
+    }
+
+    /// Columns Name, PID and CPU, labelled as in the process table.
+    fn name_pid_cpu(rows: Vec<TRow>) -> Self {
+        let mut d = Self::new(rows);
+        let labelled = |id, kind, w, label: &'static str| ColumnSpec {
+            label: label.into(),
+            ..spec(id, kind, w)
+        };
+        d.specs = vec![
+            labelled(ColumnId::Name, ColumnKind::Text, 248., "Name"),
+            labelled(ColumnId::Pid, ColumnKind::Numeric, 80., "PID"),
+            labelled(ColumnId::Cpu, ColumnKind::Numeric, 80., "CPU"),
+        ];
+        let order = [ColumnId::Name, ColumnId::Pid, ColumnId::Cpu];
+        d.layout = ColumnLayout::defaults(TableId::Processes, &d.specs, &order, &order);
+        d
     }
 }
 
@@ -467,7 +491,17 @@ impl TreeTableDelegate for TDelegate {
             .find(|s| s.id == id)
             .expect("spec for every column")
     }
-    fn cell(&self, ix: usize, _: ColumnId, out: &mut CellOut) {
+    fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut) {
+        let id = self.rows[ix].id;
+        if let Some(k) = self.cells.iter().position(|c| c.0 == id && c.1 == col) {
+            let (_, _, text, validity) = self.cells[k];
+            out.bits = k as u64;
+            out.validity = validity;
+            if out.want_text {
+                out.text.push_str(text);
+            }
+            return;
+        }
         out.bits = ix as u64;
         out.validity = Validity::Valid;
         if out.want_text {
@@ -508,13 +542,19 @@ impl TreeTableDelegate for TDelegate {
     }
     fn context_menu(
         &mut self,
-        _: &[u32],
-        _: ColumnId,
+        targets: &[u32],
+        col: ColumnId,
         menu: TlMenu,
         _: &mut Window,
         _: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu {
-        menu
+        self.menu_calls.push((targets.to_vec(), col));
+        menu.item(
+            "End task",
+            Box::new(EndRows {
+                ids: targets.to_vec(),
+            }),
+        )
     }
     fn on_toggle_expand(&mut self, id: u32, _: &mut Context<TlTreeTable<Self>>) {
         self.toggled.push(id);
@@ -604,7 +644,7 @@ fn tree_table_renders_visible_range_only() {
 
     // Half a row down: one more row is partly visible.
     vcx.update(|_, cx| {
-        let handle = table.read(cx).scroll_handle().clone();
+        let handle = table.read(cx).scroll_handle();
         ScrollbarHandle::set_offset(&handle, point(px(0.), px(-14.)));
     });
     vcx.update(|window, _| window.refresh());
@@ -804,7 +844,7 @@ fn horizontal_scrollbar_only_on_overflow() {
     assert_eq!(label.left(), cell.left());
 
     vcx.update(|_, cx| {
-        let handle = table.read(cx).scroll_handle().clone();
+        let handle = table.read(cx).scroll_handle();
         ScrollbarHandle::set_offset(&handle, point(px(-200.), px(0.)));
     });
     vcx.update(|window, _| window.refresh());
@@ -1360,7 +1400,7 @@ fn open_rows(
 /// How far the body is scrolled down, in px.
 fn scroll_top(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) -> f32 {
     vcx.update(|_, cx| {
-        let offset = ScrollbarHandle::offset(table.read(cx).scroll_handle());
+        let offset = ScrollbarHandle::offset(&table.read(cx).scroll_handle());
         -offset.y / px(1.)
     })
 }
@@ -1368,7 +1408,7 @@ fn scroll_top(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>
 /// Scrolls the body to `top` px and draws a frame.
 fn scroll_to(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>, top: f32) {
     vcx.update(|window, cx| {
-        ScrollbarHandle::set_offset(table.read(cx).scroll_handle(), point(px(0.), px(-top)));
+        ScrollbarHandle::set_offset(&table.read(cx).scroll_handle(), point(px(0.), px(-top)));
         window.refresh();
     });
     redraw(vcx);
@@ -1690,4 +1730,414 @@ mod icon_cache {
         bump(vcx, None);
         assert_eq!(icon_sources(vcx, &table), (25, 5), "used icons kept");
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// E18-A1: context menu, Shift+F10, Copy rows as table, text cache, render counter and the
+// scroll handle (ADR-009, UI-PRC-008, UI-PRC-009, ADR-015, R-186).
+// ---------------------------------------------------------------------------------------------
+
+/// The data action of the test menu item: the targets captured when the menu opened.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(namespace = tl_tree_table_test, no_json)]
+struct EndRows {
+    ids: Vec<u32>,
+}
+
+/// A page with the table, the window's context menu layer and an `EndRows` handler.
+struct MenuHost {
+    table: Entity<TlTreeTable<TDelegate>>,
+    ended: Rc<RefCell<Vec<Vec<u32>>>>,
+}
+
+impl Render for MenuHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let ended = self.ended.clone();
+        div()
+            .w(px(600.))
+            .h(px(HEADER_H + 10. * ROW_H))
+            .flex()
+            .flex_col()
+            .on_action(move |a: &EndRows, _, _| ended.borrow_mut().push(a.ids.clone()))
+            .child(self.table.clone())
+            .children(context_menu_layer(window, cx))
+    }
+}
+
+type Ended = Rc<RefCell<Vec<Vec<u32>>>>;
+
+fn open_menu_host(
+    cx: &mut TestAppContext,
+    delegate: TDelegate,
+) -> (
+    Entity<TlTreeTable<TDelegate>>,
+    Ended,
+    &mut VisualTestContext,
+) {
+    cx.update(|cx| tl_ui::i18n::init_strings(cx, "en-US"));
+    let ended: Ended = Rc::default();
+    let slot = Rc::new(RefCell::new(None));
+    let (out, page_ended) = (slot.clone(), ended.clone());
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let table = cx.new(|cx| TlTreeTable::new(delegate, window, cx));
+        *out.borrow_mut() = Some(table.clone());
+        MenuHost {
+            table,
+            ended: page_ended,
+        }
+    });
+    vcx.update(|window, _| window.activate_window());
+    redraw(vcx);
+    let table = slot.borrow_mut().take().expect("table created");
+    (table, ended, vcx)
+}
+
+fn named(id: u32, name: &'static str) -> TRow {
+    TRow { name, ..plain(id) }
+}
+
+fn right_click(vcx: &mut VisualTestContext, at: gpui_kit::Point<Pixels>) {
+    vcx.simulate_event(gpui_kit::MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+        first_mouse: false,
+    });
+    vcx.simulate_event(gpui_kit::MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Right,
+        click_count: 1,
+    });
+    redraw(vcx);
+}
+
+fn menu_calls(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> Vec<(Vec<u32>, ColumnId)> {
+    vcx.update(|_, cx| table.read(cx).delegate.menu_calls.clone())
+}
+
+/// The bounds of the open menu, if one is open.
+fn menu_bounds(vcx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<Pixels>> {
+    vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::Menu))
+            .map(|s| s.bounds())
+    })
+}
+
+fn ctrl_select(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>, id: u32) {
+    vcx.update(|_, cx| table.update(cx, |t, _| t.selection.ctrl_click(id)));
+    redraw(vcx);
+}
+
+fn abc() -> Vec<TRow> {
+    vec![named(1, "A"), named(2, "B"), named(3, "C")]
+}
+
+#[test]
+fn right_click_selects_unselected_and_captures_targets() {
+    let mut cx = cosmic_cx();
+    let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
+    select(vcx, &table, 1);
+    // x 300 is in the CPU column (Name is 248 wide).
+    let at = row_at(2, 300.);
+    right_click(vcx, at);
+    assert_eq!(sel(vcx, &table), (vec![3], Some(3)));
+    assert_eq!(menu_calls(vcx, &table), vec![(vec![3], ColumnId::Cpu)]);
+    let menu = menu_bounds(vcx).expect("menu open");
+    assert_eq!(menu.origin, at, "the menu opens at the pointer");
+}
+
+#[test]
+fn right_click_keeps_multi_selection() {
+    let mut cx = cosmic_cx();
+    let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
+    select(vcx, &table, 3);
+    ctrl_select(vcx, &table, 1);
+    right_click(vcx, row_at(2, 50.));
+    assert_eq!(sel(vcx, &table).0, vec![1, 3]);
+    assert_eq!(
+        menu_calls(vcx, &table),
+        vec![(vec![1, 3], ColumnId::Name)],
+        "targets in view order"
+    );
+}
+
+#[test]
+fn right_click_targets_survive_resort() {
+    let mut cx = cosmic_cx();
+    let (table, ended, vcx) = open_menu_host(&mut cx, TDelegate::new(abc()));
+    right_click(vcx, row_at(2, 50.));
+    assert_eq!(menu_calls(vcx, &table), vec![(vec![3], ColumnId::Name)]);
+
+    // A new version reverses the rows while the menu is open: C is now first, A last.
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.delegate.rows.reverse();
+            t.delegate.version += 1;
+            t.on_new_version(cx);
+        })
+    });
+    redraw(vcx);
+    let item = vcx.update(|window, _| {
+        snapshots(window)
+            .into_iter()
+            .find(|s| s.role() == Some(Role::MenuItem))
+            .expect("menu item")
+            .bounds()
+    });
+    click(vcx, item.center(), Modifiers::none());
+    assert_eq!(*ended.borrow(), vec![vec![3]], "the action still carries C");
+    assert!(
+        menu_bounds(vcx).is_none(),
+        "running an item closes the menu"
+    );
+}
+
+#[test]
+fn group_header_right_click_no_selection_change() {
+    let mut cx = cosmic_cx();
+    let rows = vec![group(10), named(1, "A"), named(2, "B")];
+    let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(rows));
+    select(vcx, &table, 2);
+    right_click(vcx, row_at(0, 50.));
+    assert_eq!(sel(vcx, &table), (vec![2], Some(2)), "selection unchanged");
+    assert_eq!(menu_calls(vcx, &table), vec![(vec![10], ColumnId::Name)]);
+    assert_eq!(gestures(vcx, &table), (vec![], vec![]), "no toggle");
+}
+
+#[test]
+fn shift_f10_opens_at_focus_row() {
+    let mut cx = cosmic_cx();
+    let mut rows = abc();
+    rows[1].icon = Some(IconSlot::Small);
+    let (table, _, vcx) = open_menu_host(&mut cx, TDelegate::new(rows));
+    focus_table(vcx, &table);
+    // No focus row: nothing.
+    keys(vcx, "shift-f10");
+    assert!(menu_calls(vcx, &table).is_empty());
+    assert!(menu_bounds(vcx).is_none());
+
+    select(vcx, &table, 2);
+    keys(vcx, "shift-f10");
+    assert_eq!(menu_calls(vcx, &table), vec![(vec![2], ColumnId::Name)]);
+    let menu = menu_bounds(vcx).expect("menu open");
+    // Name text start: pad 20, chevron slot 16 after the 6 px gap, then a 16 px icon and the
+    // text, each after a 6 px gap.
+    let text_x = 20. + 6. + 16. + 6. + 16. + 6.;
+    let b_bottom = HEADER_H + 2. * ROW_H;
+    assert_eq!(menu.origin, point(px(text_x), px(b_bottom)));
+}
+
+/// Subscribes to the table's events.
+fn events(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> (Rc<RefCell<Vec<TreeTableEvent>>>, Subscription) {
+    let seen: Rc<RefCell<Vec<TreeTableEvent>>> = Rc::default();
+    let log = seen.clone();
+    let sub = vcx.update(|_, cx| {
+        cx.subscribe(table, move |_, ev: &TreeTableEvent, _| {
+            log.borrow_mut().push(*ev)
+        })
+    });
+    (seen, sub)
+}
+
+fn clipboard(vcx: &mut VisualTestContext) -> Option<String> {
+    vcx.read_from_clipboard().and_then(|c| c.text())
+}
+
+#[test]
+fn copy_rows_as_table_tsv_with_header() {
+    let mut cx = cosmic_cx();
+    let mut d = TDelegate::name_pid_cpu(abc());
+    d.cells = vec![
+        (2, ColumnId::Pid, "12", Validity::Valid),
+        (2, ColumnId::Cpu, "3.4%", Validity::Valid),
+        (3, ColumnId::Pid, "13", Validity::Valid),
+        (3, ColumnId::Cpu, "", Validity::WarmingUp),
+    ];
+    let (table, _, vcx) = open_menu_host(&mut cx, d);
+    let (seen, _sub) = events(vcx, &table);
+    focus_table(vcx, &table);
+
+    // No selection: nothing copied, nothing emitted.
+    keys(vcx, "ctrl-shift-c");
+    assert_eq!(clipboard(vcx), None);
+    assert!(seen.borrow().is_empty());
+
+    select(vcx, &table, 3);
+    ctrl_select(vcx, &table, 2);
+    keys(vcx, "ctrl-shift-c");
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some("Name\tPID\tCPU\nB\t12\t3.4%\nC\t13\t\u{2026}")
+    );
+    assert_eq!(*seen.borrow(), vec![TreeTableEvent::CopiedRows { rows: 2 }]);
+}
+
+#[test]
+fn copy_rows_glyph_texts() {
+    let mut cx = cosmic_cx();
+    let rows = vec![
+        group(10),
+        named(1, "A"),
+        named(2, "B"),
+        named(3, "C"),
+        named(4, "D"),
+        named(5, "E"),
+        named(6, "F"),
+    ];
+    let mut d = TDelegate::name_pid_cpu(rows);
+    // PID hidden: only visible columns are copied.
+    let order = [ColumnId::Name, ColumnId::Pid, ColumnId::Cpu];
+    d.layout = ColumnLayout::defaults(
+        TableId::Processes,
+        &d.specs,
+        &order,
+        &[ColumnId::Name, ColumnId::Cpu],
+    );
+    d.cells = vec![
+        (1, ColumnId::Cpu, "", Validity::Restricted),
+        (2, ColumnId::Cpu, "", Validity::Unsupported),
+        (3, ColumnId::Cpu, "", Validity::Missing),
+        (4, ColumnId::Cpu, "", Validity::Failed),
+        (5, ColumnId::Cpu, "", Validity::WarmingUp),
+        (6, ColumnId::Cpu, "7.0%", Validity::Stale),
+    ];
+    let (table, _, vcx) = open_menu_host(&mut cx, d);
+    focus_table(vcx, &table);
+    keys(vcx, "ctrl-a ctrl-shift-c");
+    assert_eq!(
+        clipboard(vcx).as_deref(),
+        Some("Name\tCPU\nA\tRestricted\nB\tn/a\nC\t-\nD\t!\nE\t\u{2026}\nF\t7.0%"),
+        "the group header is never copied"
+    );
+}
+
+#[test]
+fn selection_survives_resort_in_entity() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 5, 5.);
+    click(vcx, row_at(2, 50.), Modifiers::none());
+    assert_eq!(sel(vcx, &table), (vec![2], Some(2)));
+    move_row(vcx, &table, 2, 4);
+    assert_eq!(
+        sel(vcx, &table),
+        (vec![2], Some(2)),
+        "selection by identity"
+    );
+    let (bg, selected) = vcx.update(|_, cx| {
+        let theme = current(cx).clone();
+        (table.read(cx).row_background(4, &theme), theme.row_selected)
+    });
+    assert_eq!(
+        bg, selected,
+        "the moved row draws selected at its new index"
+    );
+}
+
+#[test]
+fn scroll_handle_clone_scrolls_table() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    let handle = vcx.update(|_, cx| table.read(cx).scroll_handle());
+    handle.scroll_to_item_with_offset(1000, ScrollStrategy::Top, 0);
+    vcx.update(|window, _| window.refresh());
+    redraw(vcx);
+    let first = vcx.update(|_, cx| table.read(cx).visible_range().start);
+    assert_eq!(first, 1000);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn tree_table_text_cache_hit_rate() {
+    let mut cx = cosmic_cx();
+    let rows = (0..200).map(plain).collect();
+    let (table, vcx) = open_table(&mut cx, TDelegate::name_pid_cpu(rows), 600., 30. * ROW_H);
+    // The first version fills the cache; measure the next 10.
+    let stats = |vcx: &mut VisualTestContext| vcx.update(|_, cx| table.read(cx).text_cache_stats());
+    let (h0, m0) = stats(vcx);
+    assert!(m0 > 0, "the first frame formats");
+    for _ in 0..10 {
+        vcx.update(|_, cx| {
+            table.update(cx, |t, cx| {
+                t.delegate.version += 1;
+                t.on_new_version(cx);
+            })
+        });
+        redraw(vcx);
+    }
+    let (h1, m1) = stats(vcx);
+    let (hits, misses) = (h1 - h0, m1 - m0);
+    assert!(hits > 0);
+    let rate = hits as f64 / (hits + misses) as f64;
+    assert!(
+        rate > 0.95,
+        "hit rate {rate} ({hits} hits, {misses} misses)"
+    );
+}
+
+/// A page that gets snapshots but never installs them into its table.
+struct SnapshotHost {
+    table: Entity<TlTreeTable<TDelegate>>,
+    _sub: Subscription,
+}
+
+impl Render for SnapshotHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(600.))
+            .h(px(300.))
+            .flex()
+            .flex_col()
+            .child(self.table.clone())
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn render_counter_unchanged_without_new_version() {
+    use std::sync::Arc;
+
+    use tl_model::client::EngineClient;
+    use tl_ui::hub::{SnapshotChanged, SnapshotHub};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    let mut cx = cosmic_cx();
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+    let slot = Rc::new(RefCell::new(None));
+    let out = slot.clone();
+    let page_hub = hub.clone();
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let rows = (0..10).map(plain).collect();
+        let table = cx.new(|cx| TlTreeTable::new(TDelegate::new(rows), window, cx));
+        *out.borrow_mut() = Some(table.clone());
+        let sub = cx.subscribe(&page_hub, |_, _, _: &SnapshotChanged, _| {});
+        SnapshotHost { table, _sub: sub }
+    });
+    vcx.update(|window, _| window.activate_window());
+    redraw(vcx);
+    let table = slot.borrow_mut().take().expect("table created");
+    let renders =
+        |vcx: &mut VisualTestContext| vcx.update(|_, cx| table.read(cx).render_count.get());
+    let before = renders(vcx);
+
+    engine.publish_with(|_| {});
+    vcx.run_until_parked();
+    let seq = vcx.update(|_, cx| hub.read(cx).current().sequence);
+    assert_eq!(seq, 1, "the hub installed the snapshot");
+    assert_eq!(renders(vcx), before, "no render without on_new_version");
+
+    vcx.update(|_, cx| table.update(cx, |t, cx| t.on_new_version(cx)));
+    vcx.run_until_parked();
+    assert!(renders(vcx) > before, "on_new_version renders");
 }
