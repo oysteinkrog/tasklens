@@ -2060,8 +2060,8 @@ fn disk_usage_no_mount_table_failed() {
     let sda = details_of(&entries, "sda");
     assert_eq!(sda.system_disk.validity, Validity::Failed);
     assert_eq!(sda.formatted_bytes.validity, Validity::Missing);
-    // No `proc/swaps` in the fixture either.
-    assert_eq!(sda.swap.validity, Validity::Failed);
+    // No `proc/swaps` in the fixture: a kernel without swap, so no disk holds swap.
+    assert_eq!(sda.swap, valid(false));
 }
 
 #[test]

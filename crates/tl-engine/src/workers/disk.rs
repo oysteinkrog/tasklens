@@ -238,6 +238,8 @@ impl DiskSource {
         if swaps.is_err() {
             self.swaps.clear();
         }
+        // A kernel built without swap has no `/proc/swaps`: no disk holds swap.
+        let swaps_ok = matches!(swaps, Ok(()) | Err(CollectError::NotFound));
 
         let usage = if self.root == SysRoot::host() {
             disk_usage(
@@ -263,7 +265,7 @@ impl DiskSource {
             .iter()
             .zip(usage)
             .map(|(disk, u)| {
-                let details = disk_details(disk, &u, mounts.as_ref().err(), swaps.is_ok());
+                let details = disk_details(disk, &u, mounts.as_ref().err(), swaps_ok);
                 (enumerate::disk_identity(disk), details)
             })
             .collect()
