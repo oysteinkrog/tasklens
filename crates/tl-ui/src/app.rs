@@ -24,7 +24,7 @@ use tracing::{debug, error, warn};
 use crate::components::icons::TlAssets;
 use crate::components::{kv_grid, toast};
 use crate::demand::{DemandAggregator, GlobalDemand};
-use crate::hub::{GlobalHub, SnapshotHub};
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::theme::user_store::ThemePersist;
 use crate::{actions, i18n, settings_global, text, theme};
 
@@ -260,6 +260,23 @@ impl TasklensUi {
         });
         settings_global::TlSettings::init(cx);
         cx.set_global(env);
+
+        // Follow system light and dark (E17-007). Follow-system switches show no toast.
+        let hub = cx.global::<GlobalHub>().0.clone();
+        cx.subscribe(&hub, |hub, ev: &SnapshotChanged, cx| {
+            if !ev.mask.contains(ComponentMask::SYSTEM) {
+                return;
+            }
+            let scheme = hub.read(cx).current().system.color_scheme;
+            if scheme == cx.global::<theme::ThemeStore>().system_scheme {
+                return;
+            }
+            let theme = settings_global::TlSettings::settings(cx).theme.clone();
+            if let Some(Err(e)) = theme::store::on_system_scheme(scheme, &theme, cx) {
+                warn!(target: "tasklens::ui", ?e, "follow-system theme not applied");
+            }
+        })
+        .detach();
 
         // 9. AppRequest loop. E20 replaces the handler Global.
         cx.set_global(AppRequestHandler(Box::new(|req, _| {

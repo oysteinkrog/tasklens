@@ -301,6 +301,51 @@ pub fn activate(
     Ok(ThemeEvent::Activated { name: def.name })
 }
 
+/// The preferred theme for a portal color-scheme value: `theme.light` for 2 (prefer light),
+/// `theme.dark` for 0 (no preference), 1 (prefer dark) and any unknown value (UI-FND-040).
+pub fn scheme_target(theme: &ThemeSettings, scheme: u8) -> &str {
+    match scheme {
+        2 => &theme.light,
+        _ => &theme.dark,
+    }
+}
+
+/// Records the portal color-scheme from the snapshot. With `theme.follow_system` on and a
+/// changed scheme, activates the matching preferred theme with `FollowSystem`, which writes no
+/// settings (UI-SHL-080). Returns `None` when nothing was activated.
+pub fn on_system_scheme(
+    scheme: u8,
+    theme: &ThemeSettings,
+    cx: &mut App,
+) -> Option<Result<ThemeEvent, ThemeError>> {
+    let store = cx.global_mut::<ThemeStore>();
+    let changed = store.system_scheme != scheme;
+    store.system_scheme = scheme;
+    if !theme.follow_system || !changed {
+        return None;
+    }
+    Some(activate(
+        scheme_target(theme, scheme),
+        ActivateSource::FollowSystem,
+        cx,
+    ))
+}
+
+/// Turning sync on applies the matching preferred theme at once (UI-SHL-080). Returns `None`
+/// when that theme is already active. Turning sync off needs no call: the shell writes
+/// `current()` to `theme.active` (UI-FND-040).
+pub fn on_follow_system_enabled(
+    theme: &ThemeSettings,
+    cx: &mut App,
+) -> Option<Result<ThemeEvent, ThemeError>> {
+    let store = cx.global::<ThemeStore>();
+    let target = scheme_target(theme, store.system_scheme);
+    if &*store.active.name == target {
+        return None;
+    }
+    Some(activate(target, ActivateSource::FollowSystem, cx))
+}
+
 /// Applies `[appearance]` changes. A metrics change (scale, row height, rounded corners)
 /// installs new `UiMetrics`; a `shadow_intensity_pct` change rebuilds the derived tints of the
 /// active theme. Either one bumps `style_version` once, maps the current theme onto the kit and
@@ -473,6 +518,92 @@ mod tests {
                 Err(ThemeError::PreviewActive)
             );
             assert!(Arc::ptr_eq(&cx.global::<ThemeStore>().active, &before));
+            assert_eq!(style_version(cx), n);
+        });
+    }
+
+    fn follow(on: bool) -> ThemeSettings {
+        ThemeSettings {
+            follow_system: on,
+            ..ThemeSettings::default()
+        }
+    }
+
+    fn activated(name: &str) -> Option<Result<ThemeEvent, ThemeError>> {
+        Some(Ok(ThemeEvent::Activated { name: name.into() }))
+    }
+
+    #[gpui_kit::test]
+    fn follow_system_picks_light_for_2_dark_otherwise(cx: &mut TestAppContext) {
+        let theme = follow(true);
+        assert_eq!(scheme_target(&theme, 0), DEFAULT_DARK);
+        assert_eq!(scheme_target(&theme, 1), DEFAULT_DARK);
+        assert_eq!(scheme_target(&theme, 2), DEFAULT_LIGHT);
+        assert_eq!(scheme_target(&theme, 7), DEFAULT_DARK);
+        cx.update(|cx| {
+            setup(cx, Vec::new());
+            assert_eq!(&*current(cx).name, DEFAULT_DARK);
+
+            assert_eq!(on_system_scheme(2, &theme, cx), activated(DEFAULT_LIGHT));
+            assert_eq!(&*current(cx).name, DEFAULT_LIGHT);
+            assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+            let n = style_version(cx);
+            // The same scheme again does not activate.
+            assert_eq!(on_system_scheme(2, &theme, cx), None);
+            assert_eq!(style_version(cx), n);
+
+            assert_eq!(on_system_scheme(1, &theme, cx), activated(DEFAULT_DARK));
+            assert_eq!(&*current(cx).name, DEFAULT_DARK);
+            // The mapped colours survive the light to dark switch (R-274).
+            assert_eq!(Theme::global(cx).colors.background, hex(0x191B1D));
+
+            on_system_scheme(2, &theme, cx);
+            assert_eq!(on_system_scheme(0, &theme, cx), activated(DEFAULT_DARK));
+            on_system_scheme(2, &theme, cx);
+            assert_eq!(on_system_scheme(7, &theme, cx), activated(DEFAULT_DARK));
+            assert_eq!(cx.global::<ThemeStore>().system_scheme, 7);
+
+            // A preferred theme that no longer exists keeps the current one.
+            let missing = ThemeSettings {
+                light: "Gone".to_owned(),
+                ..theme.clone()
+            };
+            assert_eq!(
+                on_system_scheme(2, &missing, cx),
+                Some(Err(ThemeError::UnknownTheme("Gone".into())))
+            );
+            assert_eq!(&*current(cx).name, DEFAULT_DARK);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn follow_off_ignores_scheme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx, Vec::new());
+            let before = current(cx).clone();
+            let n = style_version(cx);
+            assert_eq!(on_system_scheme(2, &follow(false), cx), None);
+            assert_eq!(cx.global::<ThemeStore>().system_scheme, 2);
+            assert!(Arc::ptr_eq(current(cx), &before));
+            assert_eq!(style_version(cx), n);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn enabling_sync_applies_at_once(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx, Vec::new());
+            on_system_scheme(2, &follow(false), cx);
+            assert_eq!(&*current(cx).name, DEFAULT_DARK);
+
+            let theme = follow(true);
+            assert_eq!(
+                on_follow_system_enabled(&theme, cx),
+                activated(DEFAULT_LIGHT)
+            );
+            assert_eq!(&*current(cx).name, DEFAULT_LIGHT);
+            let n = style_version(cx);
+            assert_eq!(on_follow_system_enabled(&theme, cx), None);
             assert_eq!(style_version(cx), n);
         });
     }

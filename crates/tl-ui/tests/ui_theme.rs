@@ -140,3 +140,69 @@ fn delete_active_falls_back_by_mode(cx: &mut TestAppContext) {
         assert!(rec.borrow().is_empty());
     });
 }
+
+/// E17-007: `TasklensUi::init` follows the portal color-scheme from the snapshot.
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn scheme_change_from_snapshot_switches_theme(cx: &mut TestAppContext) {
+    use std::sync::Arc;
+
+    use tl_model::client::EngineClient;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::metrics;
+    use tl_ui::{AppEnv, TasklensUi, UiInit};
+
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let mut settings = Settings::default();
+    settings.theme.follow_system = true;
+    let (_tx, rx) = async_channel::bounded(4);
+    let writes = Rc::new(RefCell::new(0u32));
+    let w = writes.clone();
+    let init = UiInit {
+        settings,
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(move |_, _| *w.borrow_mut() += 1),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(&*current(cx).name, "Default Dark"));
+
+    let publish_scheme = |scheme: u8| {
+        engine.publish_with(|s| {
+            let system = Arc::make_mut(&mut s.system);
+            system.header.version += 1;
+            system.color_scheme = scheme;
+        });
+    };
+
+    publish_scheme(1);
+    cx.run_until_parked();
+    let n = cx.update(|cx| {
+        assert_eq!(&*current(cx).name, "Default Dark");
+        assert_eq!(cx.global::<ThemeStore>().system_scheme, 1);
+        metrics(cx).style_version
+    });
+
+    publish_scheme(2);
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert_eq!(&*current(cx).name, "Default Light");
+        assert_eq!(Theme::global(cx).colors.background, hex(0xF3F4F6));
+        assert_eq!(metrics(cx).style_version, n + 1);
+    });
+
+    // A SYSTEM change with the same scheme does not activate again.
+    publish_scheme(2);
+    cx.run_until_parked();
+    cx.update(|cx| assert_eq!(metrics(cx).style_version, n + 1));
+
+    // FollowSystem writes no settings.
+    assert_eq!(*writes.borrow(), 0);
+}
