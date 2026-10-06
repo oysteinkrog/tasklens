@@ -549,3 +549,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - bj6.48 closed: bj6.9 did it in f6c6f82. Cargo.lock proptest line committed (m1f.3 left it).
 - 8hz.12 (a664d0f): RestartCounts. Counts reset when a session restarts; the doc now says per session (accepted). bj6.9 closed by the leader.
 - crw.33 (fe1466c): DeviceSidebar::set_active and PerformancePage::set_active; crw.1 must call them on tab activation.
+- cr0.9 (ef0e8f0, 1d57223, f7c0eb1): settings store. A corrupt file is renamed to .corrupt-<unix>; a newer file opens read-only. Clamp logs name the key only, with no values (leader privacy rule overrides the bead text).
