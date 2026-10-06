@@ -35,6 +35,9 @@ impl Render for Host {
 fn setup(cx: &mut TestAppContext, appearance: &AppearanceSettings) {
     cx.update(|cx| {
         gpui_kit::init(cx);
+        // Kit enter animations run on the real clock, not the test clock. Reduced motion draws
+        // each toast at its final place at once.
+        cx.set_reduce_motion(true);
         tl_ui::theme::store::init(cx, &ThemeSettings::default(), appearance, Vec::new());
     });
 }
@@ -388,7 +391,11 @@ fn hidden_window_drops_or_routes_to_system(cx: &mut TestAppContext) {
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine.clone();
     let hub = cx.new(|cx| SnapshotHub::new(client, cx));
-    cx.update(|cx| cx.set_global(GlobalHub(hub.clone())));
+    cx.update(|cx| {
+        cx.set_global(GlobalHub(hub.clone()));
+        // The test platform posts system notifications only for an app with an identity.
+        cx.set_app_identity("io.tasklens.test", "tasklens");
+    });
     let app = cx.clone();
     let (mut cx, queue) = open(cx);
 
@@ -451,7 +458,8 @@ fn toast_top_follows_scale(cx: &mut TestAppContext) {
         "UI scale changed to 150%",
         None,
     );
-    advance(&mut cx, Duration::from_millis(500));
+    // The kit stack measures each toast in the first frame and places it in the second.
+    draw(&mut cx);
     draw(&mut cx);
     let toast = cx.debug_bounds("TlToast-a1").expect("toast drawn");
     // The content sits inside the toast's 1 px border and 12 px padding.
