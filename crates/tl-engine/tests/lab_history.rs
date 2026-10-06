@@ -704,3 +704,376 @@ fn gap_across_segment_boundary_resets_meta_ids() {
         "every keyframe meta is listed in new_meta"
     );
 }
+
+// End to end through the engine session (E30-A2) ---------------------------------------------
+
+#[path = "fake_sources.rs"]
+mod fake_sources;
+
+/// `engine_root` with the real history worker, a scripted Processes source and a lab clock.
+/// The session tests in `lab_session.rs` use the same rig shape; `Engine::start` cannot move a
+/// virtual clock or panic the reducer on cue.
+mod engine {
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use asupersync::Cx;
+    use asupersync::runtime::TaskHandle;
+    use asupersync::time::TimeSource;
+    use smallvec::SmallVec;
+    use tl_engine::bridge::{EngineHooks, HookCtx};
+    use tl_engine::config::{EngineConfig, EngineMode};
+    use tl_engine::reducer::{ActionGate, AdmissionView};
+    use tl_engine::session::{RESTART_DELAY, engine_root};
+    use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
+    use tl_history::format::boot_dir_name;
+    use tl_history::segment::SegmentReader;
+    use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
+    use tl_model::command::{Command, HistoryWhat};
+    use tl_model::demand::Demand;
+    use tl_model::health::SourceId;
+    use tl_model::history::{HistoryMetric, HistoryRange, HistorySource, HistoryView};
+    use tl_model::ids::ProcessKey;
+    use tl_model::process::{
+        GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
+    };
+    use tl_model::settings::EngineSettings;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::system::CpuSet;
+    use tl_model::validity::{FieldValidity, Validity};
+
+    use super::TempRoot;
+    use super::fake_sources::{self, FAKE_BOOT, FakeLab, UiSide};
+
+    /// The reducer panics on any `Command::Action`, which ends the session (`lab_session.rs`).
+    struct PanicGate;
+
+    impl ActionGate for PanicGate {
+        fn submit(&mut self, _cx: &Cx, _req: ActionRequest, _view: &AdmissionView<'_>) {
+            panic!("scripted reducer panic");
+        }
+
+        fn finished(&mut self, _id: ActionId) -> Option<SourceId> {
+            None
+        }
+    }
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid) * 10,
+            boot_id: FAKE_BOOT,
+            pid,
+        }
+    }
+
+    fn record(pid: u32) -> ProcessRecord {
+        ProcessRecord {
+            key: key(pid),
+            ppid: 0,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: "x".into(),
+                name: "x".into(),
+                exe: None,
+                cmdline: None,
+                user: "user".into(),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                search_lower: "x user".into(),
+            }),
+            group: GroupKind::Background.key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 1,
+            cpu_pct: 5.0,
+            rss_anon_bytes: 1 << 20,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn extras() -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: "x".into(),
+            exe_path: "/usr/bin/x".into(),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    /// What the Processes worker sends: PIDs 1 to `n`.
+    fn sweep_msg(t_ns: u64, n: u32) -> EngineMsg {
+        EngineMsg::Source(SourceUpdate::Processes(ProcessSweep {
+            observed_start: t_ns,
+            observed_end: t_ns,
+            records: (1..=n).map(record).collect(),
+            extras: (1..=n).map(|_| extras()).collect(),
+            extras_p2: Vec::new(),
+            app_stats: Vec::new(),
+            unit_stats: Vec::new(),
+            system_threads: 0,
+            file_nr: None,
+            online_cpus: 1,
+            low_memory: None,
+        }))
+    }
+
+    fn frame_query(id: u64) -> EngineMsg {
+        EngineMsg::Command(Command::HistoryQuery {
+            id,
+            range: HistoryRange::Live,
+            what: HistoryWhat::Frame {
+                metric: HistoryMetric::Cpu,
+                view: (0, u64::MAX),
+                keys: Arc::from([]),
+                overview: false,
+            },
+        })
+    }
+
+    struct EngineRig {
+        fake: FakeLab,
+        root: Option<TaskHandle<()>>,
+        ui: UiSide,
+    }
+
+    impl EngineRig {
+        /// Starts `engine_root`. `history_dir` is the store root; settings and demand are set
+        /// before the first session.
+        fn start(history_dir: Option<&Path>, settings: EngineSettings, demand: Demand) -> Self {
+            let mut config = EngineConfig::new(
+                EngineMode::Full,
+                Path::new(env!("CARGO_TARGET_TMPDIR")).join("tl-lab-history-state"),
+            );
+            if let Some(dir) = history_dir {
+                config = config.with_history_dir(dir.to_path_buf());
+            }
+            let (mut ep, ui) = fake_sources::root_endpoints(Arc::new(config), Vec::new());
+            ep.hooks = EngineHooks {
+                action_gate: Some(Arc::new(|_ctx: HookCtx| {
+                    Box::new(PanicGate) as Box<dyn ActionGate>
+                })),
+                ..EngineHooks::default()
+            };
+            ui.settings_tx.send(settings).expect("settings watch open");
+            ui.demand_tx.send(demand).expect("demand watch open");
+            let mut fake = FakeLab::new();
+            let root = fake.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                engine_root(cx, ep).await;
+            });
+            // The history worker's first turn picks its mode.
+            fake.advance(Duration::from_secs(1));
+            EngineRig {
+                fake,
+                root: Some(root),
+                ui,
+            }
+        }
+
+        fn send(&mut self, msg: EngineMsg) {
+            self.ui
+                .msgs_tx
+                .try_send(msg)
+                .expect("the queue has room for the message");
+            self.fake.lab.run_until_idle();
+        }
+
+        /// One sweep of `n` processes per second for `secs` seconds.
+        fn sweeps(&mut self, secs: u64, n: u32) {
+            for _ in 0..secs {
+                let t = self.fake.clock.now().as_nanos();
+                self.send(sweep_msg(t, n));
+                self.fake.advance(Duration::from_secs(1));
+            }
+        }
+
+        fn latest(&self) -> Arc<Snapshot> {
+            self.ui.latest.load_full()
+        }
+
+        fn history(&self) -> Arc<HistoryView> {
+            Arc::clone(&self.latest().history)
+        }
+
+        fn history_error(&self) -> Option<Arc<str>> {
+            self.latest().health.sources[SourceId::HistoryRecorder.index()]
+                .last_error
+                .clone()
+        }
+
+        /// Cancels the root, which closes the store, then checks the lab's oracles.
+        fn finish(mut self) {
+            let root = self.root.take().expect("root started");
+            root.abort();
+            self.fake.advance(Duration::from_millis(10));
+            assert!(root.is_finished(), "engine_root returned after cancel");
+            self.fake.finish();
+        }
+    }
+
+    fn rolling() -> Demand {
+        Demand {
+            process_table: true,
+            ..Demand::default()
+        }
+    }
+
+    #[test]
+    fn query_answer_reaches_snapshot() {
+        let mut rig = EngineRig::start(None, EngineSettings::default(), rolling());
+        let before = rig.history();
+        assert_eq!(before.header.validity, Validity::WarmingUp);
+        rig.sweeps(3, 5);
+        rig.send(frame_query(7));
+
+        let view = rig.history();
+        assert_eq!(view.query_id, 7);
+        assert_eq!(view.source, HistorySource::RollingWindow);
+        assert_eq!(view.header.validity, Validity::Valid);
+        assert!(view.span.is_some(), "the window holds the sweeps");
+        assert_eq!(rig.history_error(), None, "nothing was dropped");
+        rig.finish();
+    }
+
+    #[test]
+    fn history_component_version_bumps() {
+        let mut rig = EngineRig::start(None, EngineSettings::default(), rolling());
+        rig.sweeps(2, 3);
+        rig.send(frame_query(1));
+        let first = rig.history();
+        assert_eq!(first.query_id, 1);
+
+        rig.send(frame_query(2));
+        let second = rig.history();
+        assert_eq!(second.query_id, 2);
+        assert!(!Arc::ptr_eq(&first, &second), "a new Arc per answer");
+        assert!(
+            second.header.version > first.header.version,
+            "version {} after {}",
+            second.header.version,
+            first.header.version
+        );
+        rig.finish();
+    }
+
+    #[test]
+    fn session_restart_sends_gap() {
+        let root = TempRoot::new("engine-restart");
+        let mut settings = EngineSettings::default();
+        settings.history.enabled = true;
+        let mut rig = EngineRig::start(Some(&root.0), settings, Demand::default());
+        rig.sweeps(3, 4);
+        assert_eq!(rig.latest().epoch, 1);
+
+        rig.send(EngineMsg::Command(Command::Action(ActionRequest {
+            id: ActionId(1),
+            kind: ActionKind::Signal(Signal::Term),
+            targets: SmallVec::new(),
+            privileged: false,
+        })));
+        rig.fake.advance(RESTART_DELAY + Duration::from_secs(1));
+        rig.sweeps(3, 4);
+        assert_eq!(rig.latest().epoch, 2, "the session restarted");
+        rig.finish();
+
+        // Both generations closed their store; collect every block in time order.
+        let dir = root.0.join(boot_dir_name(FAKE_BOOT));
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .expect("boot dir")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "tlh"))
+            .collect();
+        names.sort();
+        let mut blocks: Vec<(u64, bool)> = Vec::new();
+        for path in &names {
+            let reader = SegmentReader::open(path).expect("segment opens");
+            for entry in &reader.index {
+                let block = reader.read_block(path, entry).expect("block decodes");
+                blocks.push((block.start_t_ns, block.gap_before));
+            }
+        }
+        blocks.sort_unstable();
+        assert_eq!(blocks.len(), 2, "one block per session: {blocks:?}");
+        // Each session starts with SessionStart. Epoch 1 follows an earlier run of the app in the
+        // same boot; epoch 2 follows the panic.
+        assert!(blocks[1].1, "the block after the restart has gap_before");
+        assert!(blocks[0].1, "the first session's block has gap_before");
+    }
+
+    #[test]
+    fn idle_when_off_and_tab_closed() {
+        let mut rig = EngineRig::start(None, EngineSettings::default(), Demand::default());
+        rig.sweeps(60, 10);
+        assert_eq!(rig.history().header.version, 0, "no view was sent");
+        assert_eq!(rig.history_error(), None, "the sink dropped nothing");
+
+        rig.send(frame_query(3));
+        let view = rig.history();
+        assert_eq!(view.query_id, 3);
+        assert_eq!(
+            view.source,
+            HistorySource::None,
+            "the worker holds no window"
+        );
+        assert_eq!(view.span, None);
+        assert_eq!(view.process_count, 0);
+        rig.finish();
+    }
+
+    #[test]
+    fn delete_reaches_snapshot() {
+        let mut rig = EngineRig::start(None, EngineSettings::default(), rolling());
+        rig.sweeps(3, 5);
+        rig.send(frame_query(4));
+        let keys = |v: &HistoryView| v.rows.iter().map(|r| r.key).collect::<Vec<_>>();
+        let before = rig.history();
+        assert!(keys(&before).contains(&key(3)), "rows {:?}", keys(&before));
+
+        rig.send(EngineMsg::Command(Command::HistoryDelete {
+            keys: Arc::from([key(3)]),
+        }));
+        let after = rig.history();
+        assert!(after.header.version > before.header.version);
+        assert!(!keys(&after).contains(&key(3)), "rows {:?}", keys(&after));
+        assert!(keys(&after).contains(&key(2)));
+        rig.finish();
+    }
+}
