@@ -280,7 +280,7 @@ mod delegate {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::{init_strings, tr_calls};
     use tl_ui::pages::processes::cells::process_column;
-    use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate, SHIPPED_PHASE};
+    use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate, SHIPPED_PHASE, UnitIds};
     use tl_ui::pages::processes::table::GroupHeader;
     use tl_ui::table::actions::OpenProperties;
     use tl_ui::table::cells::CellOut;
@@ -606,7 +606,7 @@ mod delegate {
             snapshot(1, rows.clone(), groups.clone(), records.clone()),
         );
         let bash = ProcRowId::Process(key(10));
-        let unit_id = ProcRowId::from(&unit());
+        let unit_id = d.id_of(&unit()).expect("unit numbered");
         assert_eq!(d.row_index(bash), Some(3));
         assert_eq!(d.row_index(unit_id), Some(2));
         let v1 = d.table_version();
@@ -624,6 +624,30 @@ mod delegate {
         assert_eq!(d.row_index(unit_id), Some(3));
         assert_eq!(d.row_id(2), bash);
         assert_eq!(d.row_index(ProcRowId::Process(key(99))), None);
+    }
+
+    #[test]
+    fn unit_ids_interned_never_reused() {
+        let unit_in = |manager, name: &str| {
+            NodeId::Unit(UnitRef {
+                manager,
+                name: Arc::from(name),
+            })
+        };
+        let mut ids = UnitIds::default();
+        let system = ids.intern(&unit_in(Manager::System, "foo.service"));
+        let user = ids.intern(&unit_in(Manager::User, "foo.service"));
+        let bar = ids.intern(&unit_in(Manager::System, "bar.service"));
+        assert_eq!(system, ProcRowId::Unit(0));
+        assert_eq!(user, ProcRowId::Unit(1));
+        assert_eq!(bar, ProcRowId::Unit(2));
+        assert_eq!(ids.intern(&unit_in(Manager::System, "foo.service")), system);
+        assert_eq!(ids.get(&unit_in(Manager::User, "foo.service")), Some(user));
+        assert_eq!(ids.get(&unit_in(Manager::User, "new.service")), None);
+        assert_eq!(
+            ids.intern(&NodeId::Process(key(7))),
+            ProcRowId::Process(key(7))
+        );
     }
 
     #[gpui_kit::test]
@@ -800,7 +824,7 @@ mod delegate {
         assert_eq!(queries(&engine), 0);
 
         // Enter on a group header toggles it and opens nothing.
-        let header = ProcRowId::from(&GroupHeader::Apps.node());
+        let header = ProcRowId::fixed(&GroupHeader::Apps.node()).expect("header id");
         vcx.update(|_, cx| table.update(cx, |t, _| t.selection.set_focus_only(header)));
         vcx.simulate_keystrokes("enter");
         redraw(vcx);
