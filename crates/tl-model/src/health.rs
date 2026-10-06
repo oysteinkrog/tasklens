@@ -97,6 +97,8 @@ pub struct SourceHealth {
     /// characters, no control characters, never a command line, environment value or file
     /// content (ADR-015). The engine sanitizes it before it is stored.
     pub last_error: Option<Arc<str>>,
+    /// Worker restarts since the engine started, for the Collector Health window (ADR-004).
+    pub restarts: u32,
 }
 
 /// Privileged helper state for the shield (UI-FND-028, ADR-006). P3; Missing before then.
@@ -230,6 +232,7 @@ mod tests {
             state: SourceState::Stale,
             last_ok_ns: Some(12),
             last_error: None,
+            restarts: 0,
         };
         let got = s.get(SourceId::GpuNvidia);
         assert_eq!(got.state, SourceState::Stale);

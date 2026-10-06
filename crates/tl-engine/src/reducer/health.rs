@@ -74,6 +74,8 @@ impl Entry {
             state,
             last_ok_ns: self.last_ok_ns,
             last_error: self.last_error.clone(),
+            // Filled from the supervisor by tasklens-8hz.12.
+            restarts: 0,
         }
     }
 }
@@ -210,6 +212,7 @@ impl HealthState {
                 state: SourceState::Failed,
                 last_ok_ns: None,
                 last_error: Some(reason.clone()),
+                restarts: 0,
             }),
             ..empty_snapshot()
         })
