@@ -299,3 +299,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.25: real launcher tests pass (3, ignored by default); nothing left behind. They create a user unit tasklens-test.service and refuse if it exists.
 - 8q0.27: Reducer.unit_names never removes names (an empty listing while systemd is down would blank rows). Accepted.
 - y6k.19: `tl_ops::sys` is now `pub mod`. Negative rDNS TTL 1 min.
+- hjn.16: no udev file gives Unsupported interface/WWN/serial even for nvme*/vd*; a udev file without ID_BUS uses the name fallback. A failed udev read gives Restricted. Accepted.
