@@ -36,8 +36,9 @@ use crate::table::actions::{
     SelectAll, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
 };
 use crate::table::cells::{
-    CellCtx, CellOut, attach_cell_tooltip, cell_background, cell_text_color, glyph_cell,
-    name_indent, numeric_cell, paint_group_header_cell, paint_name_cell, path_cell, text_cell,
+    CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
+    glyph_cell, name_indent, numeric_cell, paint_group_header_cell, paint_name_cell, path_cell,
+    text_cell,
 };
 use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
 use crate::table::header::{HeaderState, TlTreeTableHeader};
@@ -179,6 +180,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     /// Created in `new`, never in render.
     focus: FocusHandle,
     text_cache: CellTextCache<D::RowId, D::Column>,
+    /// Image sources of the Name cells' file icons, reused across frames.
+    icons: IconSourceCache,
     /// Drag and resize, filled by E18-009 to E18-011.
     #[allow(dead_code)]
     header_state: HeaderState,
@@ -241,6 +244,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             x_offset: Pixels::ZERO,
             focus: cx.focus_handle(),
             text_cache: CellTextCache::new(),
+            icons: IconSourceCache::new(),
             header_state: HeaderState::default(),
             hover_row: None,
             paused: false,
@@ -323,6 +327,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         self.visible_range.clone()
     }
 
+    /// The file icon image sources built so far, and how many the cache holds now.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn icon_sources(&self) -> (u32, usize) {
+        (self.icons.built, self.icons.len())
+    }
+
     /// After a keyboard focus move: scrolls the least amount that keeps one row of margin
     /// between the focus row and the header or the bottom edge. gpui's `Nearest` with an offset
     /// keeps the margin at the top only, so the bottom case targets the row below.
@@ -390,6 +400,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let version = self.delegate.table_version();
         if version != self.last_version || style_version != self.last_style_version {
             self.text_cache.begin_version(version, style_version);
+            self.icons.begin_version(version);
             self.last_version = version;
             self.last_style_version = style_version;
         }
@@ -580,6 +591,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     f.guide_lines,
                     &ctx,
                     tips.then_some(row_key),
+                    &mut self.icons,
                     window,
                     cx,
                 );

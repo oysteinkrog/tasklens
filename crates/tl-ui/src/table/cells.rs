@@ -27,16 +27,18 @@
 
 use std::cell::Cell;
 use std::ops::Range;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Point,
-    SharedString, Style, Styled, StyledImage, StyledText, TextRun, TextStyleRefinement, Window,
-    canvas, div, fill, font, img, point, px, relative, size, svg,
+    ImageSource, InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement,
+    Pixels, Point, SharedString, Style, Styled, StyledImage, StyledText, TextRun,
+    TextStyleRefinement, Window, canvas, div, fill, font, img, point, px, relative, size, svg,
 };
+use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::validity::Validity;
 
@@ -544,6 +546,62 @@ fn primary_runs(
     Some(runs)
 }
 
+/// The image sources of one table's file icons, by icon path. `img()` takes its source by value,
+/// so without this cache every app row would build a new `Arc<Path>` each frame. A source is
+/// built on first use and cloned (one `Arc` count) after that.
+///
+/// Each entry remembers the last table version that used it. When the version changes, entries
+/// the ending version did not use are dropped, so icons of rows that are gone do not pile up.
+#[derive(Default)]
+pub struct IconSourceCache {
+    map: FxHashMap<Arc<str>, (ImageSource, u64)>,
+    version: u64,
+    /// Image sources built since the table was created.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub built: u32,
+}
+
+impl IconSourceCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Starts table version `version`. Drops every entry the previous version did not use.
+    pub fn begin_version(&mut self, version: u64) {
+        if version == self.version {
+            return;
+        }
+        let ending = self.version;
+        self.map.retain(|_, (_, used)| *used == ending);
+        self.version = version;
+    }
+
+    /// The image source for the icon at `path`, built once and reused.
+    pub fn get(&mut self, path: &Arc<str>) -> ImageSource {
+        let version = self.version;
+        if let Some((source, used)) = self.map.get_mut(&**path) {
+            *used = version;
+            return source.clone();
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.built += 1;
+        }
+        let source = ImageSource::from(Arc::<Path>::from(Path::new(&**path)));
+        self.map.insert(path.clone(), (source.clone(), version));
+        source
+    }
+
+    /// Icon paths held now.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+}
+
 /// The Name cell (UI-PRC-003, R-190): the 16 px chevron box (always reserved) at
 /// `20 + depth × 20 + 6`, gap 6, the icon (16 or 24) and gap 6 when there is one, then the
 /// primary text, the secondary text, the state glyphs and the trailing element. The connector
@@ -551,6 +609,7 @@ fn primary_runs(
 ///
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
+/// File icons take their image source from `icons`.
 #[allow(clippy::too_many_arguments)]
 pub fn paint_name_cell(
     cell: NameCell,
@@ -560,6 +619,7 @@ pub fn paint_name_cell(
     guide_lines: bool,
     ctx: &CellCtx,
     tips: Option<u64>,
+    icons: &mut IconSourceCache,
     window: &mut Window,
     cx: &mut App,
 ) -> Div {
@@ -655,7 +715,7 @@ pub fn paint_name_cell(
         NameIcon::File(path) => {
             let fallback_color = ctx.theme.text_secondary;
             content = content.child(
-                img(std::path::Path::new(&*path))
+                img(icons.get(&path))
                     .flex_none()
                     .ml(gap)
                     .size(icon_w)

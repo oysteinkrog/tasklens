@@ -395,6 +395,9 @@ struct TDelegate {
     /// The last ids `on_visible_range` received, and how often it was called.
     visible: Vec<u32>,
     visible_calls: usize,
+    /// When not empty, a row with an icon gets the file icon `icon_paths[ix % len]`.
+    icon_paths: Vec<std::sync::Arc<str>>,
+    version: u64,
 }
 
 impl TDelegate {
@@ -420,6 +423,8 @@ impl TDelegate {
             activated: Vec::new(),
             visible: Vec::new(),
             visible_calls: 0,
+            icon_paths: Vec::new(),
+            version: 1,
         }
     }
 }
@@ -451,7 +456,7 @@ impl TreeTableDelegate for TDelegate {
         self.rows[ix].flags
     }
     fn table_version(&self) -> u64 {
-        1
+        self.version
     }
     fn columns(&self) -> &ColumnLayout {
         &self.layout
@@ -474,6 +479,9 @@ impl TreeTableDelegate for TDelegate {
         let row = &self.rows[ix];
         NameCell {
             icon: match row.icon {
+                Some(_) if !self.icon_paths.is_empty() => {
+                    NameIcon::File(self.icon_paths[ix % self.icon_paths.len()].clone())
+                }
                 Some(_) => NameIcon::Lucide(IconName::Binary),
                 None => NameIcon::None,
             },
@@ -1604,4 +1612,82 @@ fn demand_resent_after_resort_with_same_range() {
         .chain((1940..2000).rev().take(59))
         .collect();
     assert_eq!(ids, expected);
+}
+
+// ---------------------------------------------------------------------------------------------
+// rsf.20: file icon image sources are cached per table.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(feature = "test-hooks")]
+mod icon_cache {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// `n` app rows with 24 px icons, `distinct` icon paths between them.
+    fn app_rows(n: u32, distinct: u32, tag: &str) -> TDelegate {
+        let rows = (0..n)
+            .map(|id| TRow {
+                icon: Some(IconSlot::Large),
+                ..plain(id)
+            })
+            .collect();
+        let mut d = TDelegate::new(rows);
+        d.icon_paths = (0..distinct)
+            .map(|i| Arc::from(format!("/nonexistent/tasklens-rsf20/{tag}-{i}.png")))
+            .collect();
+        d
+    }
+
+    fn icon_sources(
+        vcx: &mut VisualTestContext,
+        table: &Entity<TlTreeTable<TDelegate>>,
+    ) -> (u32, usize) {
+        vcx.update(|_, cx| table.read(cx).icon_sources())
+    }
+
+    #[test]
+    fn icon_sources_built_once_over_60_frames() {
+        let mut cx = cosmic_cx();
+        // 26 visible app rows; 20 distinct icons, so some rows share one.
+        let (table, vcx) = open_table(&mut cx, app_rows(26, 20, "a"), 600., 26. * ROW_H);
+        assert_eq!(vcx.update(|_, cx| table.read(cx).visible_range()), 0..26);
+        for _ in 0..60 {
+            vcx.update(|window, _| window.refresh());
+            redraw(vcx);
+        }
+        assert_eq!(
+            vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get()),
+            26
+        );
+        assert_eq!(icon_sources(vcx, &table), (20, 20));
+    }
+
+    #[test]
+    fn unused_icon_sources_evicted_on_new_version() {
+        let mut cx = cosmic_cx();
+        let (table, vcx) = open_table(&mut cx, app_rows(26, 20, "a"), 600., 26. * ROW_H);
+        assert_eq!(icon_sources(vcx, &table), (20, 20));
+
+        // A new row set with other icons: the old ones stay one version, then go.
+        let fresh = app_rows(26, 5, "b").icon_paths;
+        let bump = |vcx: &mut VisualTestContext, paths: Option<Vec<Arc<str>>>| {
+            vcx.update(|_, cx| {
+                table.update(cx, |t, cx| {
+                    if let Some(p) = paths {
+                        t.delegate.icon_paths = p;
+                    }
+                    t.delegate.version += 1;
+                    t.on_new_version(cx);
+                })
+            });
+            redraw(vcx);
+        };
+        bump(vcx, Some(fresh));
+        assert_eq!(icon_sources(vcx, &table), (25, 25));
+        bump(vcx, None);
+        assert_eq!(icon_sources(vcx, &table), (25, 5), "unused icons evicted");
+        bump(vcx, None);
+        assert_eq!(icon_sources(vcx, &table), (25, 5), "used icons kept");
+    }
 }
