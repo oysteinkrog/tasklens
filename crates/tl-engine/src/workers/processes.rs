@@ -688,11 +688,7 @@ impl HelperReads {
                         values.io = Some(io_rates(prev, now, io));
                     }
                 }
-                ProcFiles::FD_LIST => {
-                    values.handles = postcard::from_bytes::<Vec<(u32, &[u8])>>(&data)
-                        .ok()
-                        .map(|fds| u32::try_from(fds.len()).unwrap_or(u32::MAX));
-                }
+                ProcFiles::FD_LIST => values.handles = fd_list_count(&data),
                 ProcFiles::EXE => values.exe = link_text(&data),
                 ProcFiles::CWD => values.cwd = link_text(&data),
                 _ => {}
@@ -736,6 +732,12 @@ fn reply_files(files: ProcFiles, replies: &[HelperReply]) -> Vec<(ProcFiles, Vec
         }
     }
     out
+}
+
+/// The number of entries of an `FD_LIST` body: postcard `Vec<(u32, Vec<u8>)>` (E29-004).
+fn fd_list_count(data: &[u8]) -> Option<u32> {
+    let fds = postcard::from_bytes::<Vec<(u32, &[u8])>>(data).ok()?;
+    Some(u32::try_from(fds.len()).unwrap_or(u32::MAX))
 }
 
 /// Sanitized link text, `None` when empty.
@@ -856,5 +858,99 @@ mod tests {
             processes_period(&d, &settings(1000)),
             Some(Duration::from_secs(1))
         );
+    }
+
+    fn reply(body: HelperReplyBody) -> HelperReply {
+        HelperReply {
+            seq: 1,
+            last: false,
+            body,
+        }
+    }
+
+    fn file(file: ProcFiles, data: &[u8]) -> HelperReply {
+        reply(HelperReplyBody::File {
+            file,
+            data: data.to_vec(),
+        })
+    }
+
+    #[test]
+    fn reply_files_follow_bit_order() {
+        let files = ProcFiles::IO | ProcFiles::FD_LIST | ProcFiles::EXE;
+        let replies = [
+            file(ProcFiles::IO, b"ab"),
+            file(ProcFiles::IO, b"cd"),
+            reply(HelperReplyBody::Err(HelperError::Os(13))),
+            file(ProcFiles::EXE, b"/usr/bin/x"),
+        ];
+        assert_eq!(
+            reply_files(files, &replies),
+            [
+                (ProcFiles::IO, b"abcd".to_vec()),
+                (ProcFiles::EXE, b"/usr/bin/x".to_vec())
+            ]
+        );
+        // An `Err` before any `File` is the first file's.
+        let replies = [
+            reply(HelperReplyBody::Err(HelperError::Os(13))),
+            file(ProcFiles::FD_LIST, b"z"),
+        ];
+        let files = ProcFiles::IO | ProcFiles::FD_LIST;
+        assert_eq!(
+            reply_files(files, &replies),
+            [(ProcFiles::FD_LIST, b"z".to_vec())]
+        );
+        // The process exited during the read: nothing is used.
+        let gone = [reply(HelperReplyBody::Err(HelperError::NoSuchProcess))];
+        assert!(reply_files(ProcFiles::IO, &gone).is_empty());
+    }
+
+    #[test]
+    fn fd_list_counts_entries() {
+        let list: Vec<(u32, Vec<u8>)> = vec![(0, b"/dev/null".to_vec()), (3, b"pipe:[7]".to_vec())];
+        let data = postcard::to_allocvec(&list).expect("encode");
+        assert_eq!(fd_list_count(&data), Some(2));
+        assert_eq!(fd_list_count(&[0xff]), None);
+    }
+
+    #[test]
+    fn helper_io_rates_follow_counter_rules() {
+        let at = |s: u64| Clock {
+            boot_ns: s * 1_000_000_000,
+            mono_ns: s * 1_000_000_000,
+        };
+        let io = |read: u64| PidIo {
+            read_bytes: read,
+            write_bytes: read,
+            ..PidIo::default()
+        };
+        assert_eq!(io_rates(None, at(1), io(10)).validity, Validity::WarmingUp);
+        let rate = io_rates(Some((at(1), io(10))), at(3), io(4_010));
+        assert_eq!(rate.validity, Validity::Valid);
+        assert_eq!(rate.read_bps, 2_000.0);
+        // A counter went down: no rate.
+        let reset = io_rates(Some((at(1), io(10))), at(2), io(5));
+        assert_eq!(reset.validity, Validity::WarmingUp);
+        // The machine slept in between.
+        let slept = Clock {
+            boot_ns: 60_000_000_000,
+            mono_ns: 2_000_000_000,
+        };
+        let suspend = io_rates(Some((at(1), io(10))), slept, io(20));
+        assert_eq!(suspend.validity, Validity::WarmingUp);
+    }
+
+    #[test]
+    fn helper_files_from_columns() {
+        let mut columns = ColumnSet::EMPTY;
+        assert!(helper_files(&columns).is_empty());
+        columns.insert(ColumnId::Disk);
+        columns.insert(ColumnId::Handles);
+        columns.insert(ColumnId::ImagePath);
+        columns.insert(ColumnId::Cwd);
+        columns.insert(ColumnId::Cpu);
+        let want = ProcFiles::IO | ProcFiles::FD_LIST | ProcFiles::EXE | ProcFiles::CWD;
+        assert_eq!(helper_files(&columns), want);
     }
 }
