@@ -3088,3 +3088,198 @@ fn inventory_network_adapters_visibility() {
             .any(|a| a.connection == inv_text("docker0 (Virtual)"))
     );
 }
+
+// ---- GpuDrm for AMD cards (E12-026) ----
+
+use tl_engine::update::{GpuInfoUpdate, GpuSample};
+use tl_engine::workers::gpu_drm::GpuDrmSource;
+
+impl SampleAt for GpuDrmSource {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        GpuDrmSource::sample_at(self, clock)
+    }
+}
+
+/// Every update `take_extra` holds, in order.
+fn gpu_extras(src: &mut GpuDrmSource) -> Vec<SourceUpdate> {
+    std::iter::from_fn(|| src.take_extra()).collect()
+}
+
+/// The `Devices` list and the `GpuInfo` of one enumeration.
+fn gpu_lists(extras: &[SourceUpdate]) -> (&DeviceList, &GpuInfoUpdate) {
+    match extras {
+        [SourceUpdate::Devices(list), SourceUpdate::GpuInfo(info)] => (list, info),
+        other => panic!("expected Devices then GpuInfo, got {other:?}"),
+    }
+}
+
+fn gpu_sample(src: GpuDrmSource, t: u64) -> (GpuDrmSource, GpuSample) {
+    match src.sample_at(at(t)) {
+        (src, SourceUpdate::Gpu(sample)) => (src, sample),
+        (_, other) => panic!("expected SourceUpdate::Gpu, got {other:?}"),
+    }
+}
+
+#[test]
+fn gpu_drm_fixture_sample() {
+    let dir = fixture_copy("drm-amd", None);
+    let (mut src, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let extras = gpu_extras(&mut src);
+    let (list, info) = gpu_lists(&extras);
+    assert_eq!(list.kinds, DeviceKinds::GPUS);
+    assert_eq!(list.entries.len(), 1);
+    let identity = DeviceIdentity::Gpu {
+        uuid: [0; 16],
+        pci_bus_id: Arc::from("0000:03:00.0"),
+    };
+    assert_eq!(list.entries[0].identity, identity);
+    assert_eq!(&*list.entries[0].persistent_key, "gpu:0000:03:00.0");
+    // No udev database in the fixture.
+    assert_eq!(&*list.entries[0].display_name, "AMD GPU 744c");
+    assert_eq!(info.devices.len(), 1);
+    let gpu = &info.devices[0];
+    assert_eq!(gpu.mem_total, 17_095_983_104);
+    assert_eq!(gpu.power_limit_mw, Some(300_000));
+    assert_eq!(&*gpu.driver, "amdgpu");
+    assert!(!gpu.supports_process_util);
+
+    assert_eq!(s.t_ns, SEC);
+    assert!(s.processes.is_none());
+    assert_eq!(s.devices.len(), 1);
+    let (id, t) = &s.devices[0];
+    assert_eq!(*id, identity);
+    assert_eq!(t.util_pct, Metric::valid(37.0));
+    assert_eq!(t.clock_gfx_mhz, Metric::valid(1905));
+    assert_eq!(t.temp_c, Metric::valid(61.0));
+    assert_eq!(t.power_w.validity, Validity::Valid);
+    assert!((t.power_w.value - 31.9).abs() < 1e-3, "{:?}", t.power_w);
+    assert_eq!(t.power_limit_w, Metric::valid(300.0));
+    assert_eq!(t.mem_total, Metric::valid(17_095_983_104));
+    // No gtt or fan files, and the first fdinfo scan has no baseline.
+    assert_eq!(t.shared_total.validity, Validity::Unsupported);
+    assert_eq!(t.fan_pct.validity, Validity::Unsupported);
+    assert_eq!(t.enc_pct.validity, Validity::WarmingUp);
+
+    // The set did not change: no new lists, and fdinfo is warm.
+    let (mut src, s) = gpu_sample(src, 2 * SEC);
+    assert!(gpu_extras(&mut src).is_empty());
+    assert_eq!(s.devices[0].1.enc_pct, Metric::valid(0.0));
+}
+
+#[test]
+fn gpu_drm_skips_nvidia() {
+    let dir = fixture_copy("drm-basic", None);
+    let mut src = GpuDrmSource::new(SysRoot::at(&dir));
+    for k in 1..=6 {
+        let (next, update) = src.sample_at(at(k * SEC));
+        src = next;
+        assert!(
+            !matches!(update, SourceUpdate::Gpu(_)),
+            "Gpu sample without an AMD card: {update:?}"
+        );
+        assert!(gpu_extras(&mut src).is_empty());
+    }
+}
+
+/// Writes a second AMD card, `card1` at `0000:0b:00.0`, into the fixture copy.
+fn add_amd_card1(dir: &Path) {
+    let device = dir.join("sys/class/drm/card1/device");
+    fs::create_dir_all(&device).expect("create card dir");
+    fs::write(device.join("vendor"), "0x1002\n").expect("write vendor");
+    fs::write(device.join("device"), "0x73bf\n").expect("write device");
+    fs::write(
+        device.join("uevent"),
+        "DRIVER=amdgpu\nPCI_SLOT_NAME=0000:0b:00.0\n",
+    )
+    .expect("write uevent");
+    fs::write(device.join("gpu_busy_percent"), "12\n").expect("write busy");
+    std::os::unix::fs::symlink("../../bus/pci/drivers/amdgpu", device.join("driver"))
+        .expect("create driver link");
+}
+
+#[test]
+fn gpu_drm_card_added() {
+    let dir = fixture_copy("drm-amd", None);
+    let (mut src, _) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    assert_eq!(gpu_extras(&mut src).len(), 2);
+
+    add_amd_card1(&dir);
+    // Before the next 5 s rescan the new card is not seen.
+    let (mut src, s) = gpu_sample(src, 2 * SEC);
+    assert!(gpu_extras(&mut src).is_empty());
+    assert_eq!(s.devices.len(), 1);
+
+    let (mut src, s) = gpu_sample(src, 6 * SEC);
+    let extras = gpu_extras(&mut src);
+    let (list, info) = gpu_lists(&extras);
+    let slots: Vec<&str> = list.entries.iter().map(|e| &*e.persistent_key).collect();
+    assert_eq!(slots, ["gpu:0000:03:00.0", "gpu:0000:0b:00.0"]);
+    assert_eq!(&*list.entries[1].display_name, "AMD GPU 73bf");
+    assert_eq!(info.devices.len(), 2);
+    // No VRAM file on card1.
+    assert_eq!(info.devices[1].mem_total, 0);
+    assert_eq!(s.devices.len(), 2);
+    assert_eq!(s.devices[1].1.util_pct, Metric::valid(12.0));
+
+    let (mut src, s) = gpu_sample(src, 7 * SEC);
+    assert!(gpu_extras(&mut src).is_empty());
+    assert_eq!(s.devices.len(), 2);
+}
+
+#[test]
+fn gpu_drm_demand_and_hidden() {
+    let dir = fixture_copy("drm-amd", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    demand
+        .send(Demand {
+            gpus: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let worker_io = io(&updates, &demand, &settings, &control);
+    let handle = spawn_on_lab(&mut fl, worker_io, GpuDrmSource::new(SysRoot::at(&dir)));
+
+    // Receive times in ms of the `Gpu` messages, read after every 10 ms step.
+    let mut times = Vec::new();
+    let mut run = |fl: &mut FakeLab, total: Duration, times: &mut Vec<u64>| {
+        let end = fl.now_ms() + total.as_millis() as u64;
+        while fl.now_ms() < end {
+            fl.advance(Duration::from_millis(10));
+            for msg in drain(&mut rx) {
+                if matches!(msg, EngineMsg::Source(SourceUpdate::Gpu(_))) {
+                    times.push(fl.now_ms());
+                }
+            }
+        }
+    };
+
+    run(&mut fl, Duration::from_millis(9_990), &mut times);
+    assert_eq!(times.len(), 10, "{times:?}");
+    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
+
+    demand.send(Demand::default()).expect("watch has receivers");
+    times.clear();
+    run(&mut fl, Duration::from_secs(60), &mut times);
+    assert!(times.is_empty(), "sampled while hidden: {times:?}");
+
+    handle.abort();
+    fl.finish();
+}
+
+/// Reads the live host: run on the owner machine with `--ignored`. Prints counts only.
+#[test]
+#[ignore]
+fn gpu_drm_real_host() {
+    let (mut src, s) = gpu_sample(
+        GpuDrmSource::new(SysRoot::host()),
+        tl_model::time::now_boot_ns(),
+    );
+    let extras = gpu_extras(&mut src);
+    let (_, info) = gpu_lists(&extras);
+    println!("amd cards: {}", info.devices.len());
+    let (_, t) = s.devices.first().expect("an AMD card");
+    assert_eq!(t.util_pct.validity, Validity::Valid);
+    assert_eq!(t.mem_total.validity, Validity::Valid);
+    assert!(t.mem_total.value > 8 << 30, "VRAM {}", t.mem_total.value);
+}
