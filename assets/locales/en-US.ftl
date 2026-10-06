@@ -46,6 +46,7 @@ pwn-props-filter-no-match-threads = No threads match the current filter.
 
 perf-fallback-collecting = Collecting…
 perf-fallback-restricted = Restricted
+perf-fallback-restricted-tooltip = Needs administrator access.
 perf-fallback-needs-setup = Needs setup
 perf-fallback-needs-setup-tooltip = Needs setup. Open Additional Setup…
 perf-fallback-not-supported = Not supported
@@ -61,6 +62,7 @@ perf-header-memory = Memory
 perf-header-gpu = Graphics adapter
 perf-header-disk = Disk {$n}
 perf-header-fan = Fan {$n}
+perf-header-battery = Battery
 perf-header-disks-count = {$k} disks
 perf-header-adapters-count = {$k} adapters
 perf-cpu-row-utilization = Utilization
