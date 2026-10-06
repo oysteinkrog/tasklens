@@ -1191,7 +1191,8 @@ pub enum NsState {
     SameAsTasklens,
     /// A different inode, shown as "Isolated (inode)".
     Isolated(u64),
-    /// The process's own link could not be read or parsed.
+    /// The process's own link could not be read or parsed, or neither PID 1's nor tasklens's
+    /// link could be read to compare against.
     Restricted,
 }
 
@@ -1510,10 +1511,11 @@ fn read_namespaces(root: &SysRoot, pid_dir: BorrowedFd<'_>) -> [NsState; 8] {
         let self_ns =
             own_self.get_or_insert_with(|| proc.as_ref().and_then(|p| open_self_ns(p.as_fd())));
         let self_ino = self_ns.as_ref().and_then(|d| ns_inode(d.as_fd(), name));
-        *state = if self_ino == Some(ino) {
-            NsState::SameAsTasklens
-        } else {
-            NsState::Isolated(ino)
+        // With neither reference readable there is nothing to compare against.
+        *state = match self_ino {
+            Some(s) if s == ino => NsState::SameAsTasklens,
+            Some(_) => NsState::Isolated(ino),
+            None => NsState::Restricted,
         };
     }
     out

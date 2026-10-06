@@ -3164,11 +3164,11 @@ fn security_symlinks_not_followed() {
     let s = security(&root, 4212);
     assert_eq!(s.namespaces[1], NsState::SameAsTasklens);
 
-    // `self` pointing out of the root is not followed.
+    // `self` pointing out of the root is not followed, so there is no reference.
     let proc = tmp.path().join("proc");
     replace_with_symlink(outside.path(), &proc.join("self"));
     let s = security(&root, 4212);
-    assert_eq!(s.namespaces[1], NsState::Isolated(4_026_532_300));
+    assert_eq!(s.namespaces[1], NsState::Restricted);
 
     // A symlinked `status` is an error, never a read of the target.
     replace_with_symlink(&outside.path().join("status"), &pid_dir.join("status"));
@@ -3298,4 +3298,24 @@ fn security_live_self() {
     if uid != 0 {
         assert_eq!(out.dumpable, None);
     }
+}
+
+#[test]
+fn security_ns_no_reference_restricted() {
+    let (tmp, root) = security_root();
+    let proc = tmp.path().join("proc");
+    fs::remove_dir_all(proc.join("1")).unwrap();
+    // `self` has a pid link only, so the other namespaces have no reference.
+    for name in ["user", "net", "mnt", "ipc", "uts", "cgroup", "time"] {
+        fs::remove_file(proc.join("self/ns").join(name)).unwrap();
+    }
+    let s = security(&root, 4212);
+    assert_eq!(s.namespaces[1], NsState::SameAsTasklens, "pid");
+    for i in [0, 2, 3, 4, 5, 6, 7] {
+        assert_eq!(s.namespaces[i], NsState::Restricted, "namespace {i}");
+    }
+
+    // No `self` at all: every namespace is Restricted.
+    fs::remove_dir_all(proc.join("self")).unwrap();
+    assert_eq!(security(&root, 4212).namespaces, [NsState::Restricted; 8]);
 }
