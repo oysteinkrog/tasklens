@@ -6,6 +6,8 @@ pub mod button;
 pub mod checkbox;
 pub mod empty;
 pub mod focus;
+#[cfg(feature = "bench")]
+pub mod gallery;
 pub mod icons;
 pub mod input;
 pub mod kv_grid;
