@@ -88,6 +88,11 @@ pub async fn connect(cx: &Cx, bus: Bus) -> Result<DbusConn, DbusError> {
     if cx.checkpoint().is_err() {
         return Err(DbusError::Closed);
     }
+    drive(cx, conn)
+}
+
+/// Spawns the executor tick task of `conn` in the caller's region.
+fn drive(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
     let driven = conn.clone();
     let tick = cx
         .spawn(move |cx| async move {
@@ -103,6 +108,13 @@ pub async fn connect(cx: &Cx, bus: Bus) -> Result<DbusConn, DbusError> {
 }
 
 impl DbusConn {
+    /// A connection over a peer-to-peer `conn`, so worker tests can talk to a fake service.
+    /// Build `conn` with `internal_executor(false)`: the tick task spawned here drives it.
+    #[cfg(test)]
+    pub(crate) fn p2p(cx: &Cx, conn: zbus::Connection) -> Result<DbusConn, DbusError> {
+        drive(cx, conn)
+    }
+
     pub fn raw(&self) -> &zbus::Connection {
         &self.conn
     }

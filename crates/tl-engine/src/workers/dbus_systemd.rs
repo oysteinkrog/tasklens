@@ -14,9 +14,10 @@
 //! `PropertiesChanged` or the next full listing. Details go out in the same update as the
 //! records.
 //!
-//! Cgroup data (E14-003): each listing walks every unit cgroup for `has_cgroup_procs`. While
-//! `Demand.services` and `Demand.process_table` are both true, a 1 Hz tick lists each unit's
-//! processes as `cgroup_pids`; while `Demand.service_cgroup_stats` is true, the same tick reads the
+//! Cgroup data (E14-003): each listing walks the unit cgroup trees once for `has_cgroup_procs`.
+//! While `Demand.services` and `Demand.process_table` are both true, a 1 Hz tick lists each
+//! unit's processes as `cgroup_pids`, from one walk that reads each `cgroup.procs` once. The root
+//! slice `-.slice` gets no pids; while `Demand.service_cgroup_stats` is true, the same tick reads the
 //! unit resource columns. All reads of one tick run in one blocking job. With neither demand set,
 //! no tick runs and no cgroup file is read.
 //!
@@ -2471,8 +2472,10 @@ trait CgroupFs: Clone + Send + 'static {
 /// The reads of one pass. Cgroup paths are `ControlGroup` values, relative to
 /// `/sys/fs/cgroup`.
 trait CgroupPass {
-    /// Appends the pids of cgroup `rel` and of every descendant cgroup to `out`.
+    /// Appends the pids in `cgroup.procs` of cgroup `rel` to `out`, without its descendants.
     fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity>;
+    /// Appends the names of the child cgroups of `rel` to `out`.
+    fn children(&mut self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), Validity>;
     /// `memory.stat`, `cpu.stat`, `io.stat` and `pids.current` of cgroup `rel`.
     fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity>;
     /// `/proc/<pid>/stat` field 22. `None` when the process is gone or unreadable.
@@ -2523,8 +2526,13 @@ struct HostPass {
 impl CgroupPass for HostPass {
     fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity> {
         let cg = self.cg.as_ref().map_err(|v| *v)?;
-        cg.read_procs(rel, true, &mut self.buf, out)
+        cg.read_procs(rel, false, &mut self.buf, out)
             .map_err(|e| error_validity(&e))
+    }
+
+    fn children(&mut self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), Validity> {
+        let cg = self.cg.as_ref().map_err(|v| *v)?;
+        cg.child_dirs(rel, out).map_err(|e| error_validity(&e))
     }
 
     fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity> {
@@ -2598,9 +2606,63 @@ struct TickRead {
     units: Vec<UnitRead>,
 }
 
+/// The parent of cgroup path `rel`. `None` for a top-level cgroup: the root is never a parent.
+fn cgroup_parent(rel: &str) -> Option<&str> {
+    match rel.rfind('/') {
+        Some(0) | None => None,
+        Some(i) => Some(&rel[..i]),
+    }
+}
+
+/// One walk over the cgroup trees of `units` (`(name, ControlGroup)`): for each unit, in
+/// `units` order, the pids of its cgroup and of every descendant. Each `cgroup.procs` is read
+/// once, and its pids go to the unit that owns that cgroup and to every unit that owns an
+/// ancestor. The root cgroup `/` (`-.slice`) is never read and gets no pid, so no walk covers
+/// the whole system. A cgroup that cannot be read is skipped with its subtree.
+fn walk_pids<P: CgroupPass>(pass: &mut P, units: &[(Arc<str>, Arc<str>)]) -> Vec<Vec<u32>> {
+    let mut owners: HashMap<&str, SmallVec<[usize; 1]>> = HashMap::with_capacity(units.len());
+    for (i, (_, rel)) in units.iter().enumerate() {
+        let rel = rel.trim_end_matches('/');
+        if !rel.is_empty() {
+            owners.entry(rel).or_default().push(i);
+        }
+    }
+    // The walk starts at each unit cgroup that has no unit cgroup above it.
+    let mut stack: Vec<String> = owners
+        .keys()
+        .filter(|rel| {
+            !std::iter::successors(cgroup_parent(rel), |p| cgroup_parent(p))
+                .any(|p| owners.contains_key(p))
+        })
+        .map(|rel| (*rel).to_owned())
+        .collect();
+    let mut out = vec![Vec::new(); units.len()];
+    let mut pids = Vec::new();
+    let mut children = Vec::new();
+    while let Some(rel) = stack.pop() {
+        pids.clear();
+        if pass.procs(&rel, &mut pids).is_err() {
+            continue;
+        }
+        if !pids.is_empty() {
+            for owner in std::iter::successors(Some(rel.as_str()), |p| cgroup_parent(p)) {
+                for &i in owners.get(owner).into_iter().flatten() {
+                    out[i].extend_from_slice(&pids);
+                }
+            }
+        }
+        children.clear();
+        if pass.children(&rel, &mut children).is_ok() {
+            stack.extend(children.drain(..).map(|name| format!("{rel}/{name}")));
+        }
+    }
+    out
+}
+
 /// One tick's reads for `units` (`(name, ControlGroup)`). The pids walk runs when `want.pids`:
-/// every pid of the cgroup tree, flat, becomes a `ProcessKey`; a pid whose stat cannot be read
-/// is skipped. Without a boot id no keys are made and `cgroup_pids` keeps its value.
+/// every pid of a unit's cgroup tree, flat, becomes a `ProcessKey`; a pid whose stat cannot be
+/// read is skipped. Each pid's stat is read once, however many units hold it. Without a boot id
+/// no keys are made and `cgroup_pids` keeps its value.
 fn read_tick<P: CgroupPass>(
     pass: &mut P,
     units: &[(Arc<str>, Arc<str>)],
@@ -2615,8 +2677,13 @@ fn read_tick<P: CgroupPass>(
     if want.stats {
         read.cpus = pass.online_cpus();
     }
-    let mut pids = Vec::new();
-    for (name, rel) in units {
+    let walked = if want.pids {
+        walk_pids(pass, units)
+    } else {
+        Vec::new()
+    };
+    let mut starts: HashMap<u32, Option<u64>> = HashMap::new();
+    for (i, (name, rel)) in units.iter().enumerate() {
         let mut unit = UnitRead {
             name: Arc::clone(name),
             rel: Arc::clone(rel),
@@ -2624,17 +2691,14 @@ fn read_tick<P: CgroupPass>(
             pids: None,
             stats: None,
         };
-        if want.pids {
-            pids.clear();
-            if pass.procs(rel, &mut pids).is_err() {
-                pids.clear();
-            }
+        if let Some(pids) = walked.get(i) {
             unit.has_procs = Some(!pids.is_empty());
             unit.pids = boot.map(|boot_id| {
                 let mut keys: Vec<ProcessKey> = pids
                     .iter()
                     .filter_map(|&pid| {
-                        pass.start_ticks(pid).map(|start_ticks| ProcessKey {
+                        let start = *starts.entry(pid).or_insert_with(|| pass.start_ticks(pid));
+                        start.map(|start_ticks| ProcessKey {
                             start_ticks,
                             boot_id,
                             pid,
@@ -2655,21 +2719,19 @@ fn read_tick<P: CgroupPass>(
     read
 }
 
-/// `has_cgroup_procs` for `units`: true when the cgroup tree holds any pid.
+/// `has_cgroup_procs` for `units`: true when the cgroup tree holds any pid. One walk, as in
+/// `walk_pids`.
 fn read_presence<P: CgroupPass>(pass: &mut P, units: &[(Arc<str>, Arc<str>)]) -> TickRead {
-    let mut pids = Vec::new();
+    let walked = walk_pids(pass, units);
     let units = units
         .iter()
-        .map(|(name, rel)| {
-            pids.clear();
-            let found = pass.procs(rel, &mut pids).is_ok() && !pids.is_empty();
-            UnitRead {
-                name: Arc::clone(name),
-                rel: Arc::clone(rel),
-                has_procs: Some(found),
-                pids: None,
-                stats: None,
-            }
+        .zip(walked)
+        .map(|((name, rel), pids)| UnitRead {
+            name: Arc::clone(name),
+            rel: Arc::clone(rel),
+            has_procs: Some(!pids.is_empty()),
+            pids: None,
+            stats: None,
         })
         .collect();
     TickRead {
@@ -3826,8 +3888,8 @@ mod tests {
         let fs = HostFs {
             root: SysRoot::at(&base),
         };
-        let mut pids = Vec::new();
-        fs.open().procs(FOO_CG, &mut pids).expect("walk");
+        let walked = walk_pids(&mut fs.open(), &cg_units(&[("foo.service", FOO_CG)]));
+        let mut pids = walked[0].clone();
         pids.sort_unstable();
         assert_eq!(pids, [100, 200, 300], "nested pids, flat");
 
@@ -3864,6 +3926,10 @@ mod tests {
 
     impl CgroupPass for FakePass {
         fn procs(&mut self, _rel: &str, _out: &mut Vec<u32>) -> Result<(), Validity> {
+            Ok(())
+        }
+
+        fn children(&mut self, _rel: &str, _out: &mut Vec<Arc<str>>) -> Result<(), Validity> {
             Ok(())
         }
 
@@ -3998,22 +4064,142 @@ mod tests {
         assert!(Arc::ptr_eq(&bar, state.record("bar.service").expect("bar")));
     }
 
-    const SCOPE_CG: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-foo.scope";
-    const SLICE_CG: &str = "/user.slice/user-1000.slice/user@1000.service/app.slice";
+    /// The units of the fake bus and their `ControlGroup`, with the pids each cgroup holds itself.
+    const TREE: [(&str, &str, &str); 7] = [
+        ("-.slice", "/", ""),
+        ("system.slice", "/system.slice", ""),
+        ("a.service", "/system.slice/a.service", "10\n11\n"),
+        ("user.slice", "/user.slice", ""),
+        ("user-1000.slice", "/user.slice/user-1000.slice", ""),
+        ("app.slice", "/user.slice/user-1000.slice/app.slice", ""),
+        (
+            "app-foo.scope",
+            "/user.slice/user-1000.slice/app.slice/app-foo.scope",
+            "20\n21\n22\n",
+        ),
+    ];
 
-    /// `app-foo.scope` holds pids 100 and 200; `app.slice` holds no pid itself.
-    fn scope_fixture(name: &str) -> std::path::PathBuf {
+    /// The `TREE` cgroups. The root and `init.scope`, which no unit owns, hold pid 1.
+    fn tree_fixture(name: &str) -> std::path::PathBuf {
         let base = fixture_root(name);
-        put(&base, &format!("sys/fs/cgroup{SLICE_CG}/cgroup.procs"), "");
-        put(
-            &base,
-            &format!("sys/fs/cgroup{SCOPE_CG}/cgroup.procs"),
-            "100\n200\n",
-        );
-        put(&base, "proc/100/stat", &stat_line(100, 5000));
-        put(&base, "proc/200/stat", &stat_line(200, 6000));
+        put(&base, "sys/fs/cgroup/cgroup.procs", "1\n");
+        put(&base, "sys/fs/cgroup/init.scope/cgroup.procs", "1\n");
+        for (_, cg, pids) in TREE.iter().skip(1) {
+            put(&base, &format!("sys/fs/cgroup{cg}/cgroup.procs"), pids);
+        }
+        for pid in [1, 10, 11, 20, 21, 22] {
+            put(
+                &base,
+                &format!("proc/{pid}/stat"),
+                &stat_line(pid, 1000 + u64::from(pid)),
+            );
+        }
         put(&base, "proc/sys/kernel/random/boot_id", BOOT_TEXT);
         base
+    }
+
+    /// The fake manager: `ListUnitsByPatterns` answers `TREE`, and there is no unit file.
+    struct FakeListing;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Manager")]
+    impl FakeListing {
+        fn list_units_by_patterns(
+            &self,
+            _states: Vec<String>,
+            _patterns: Vec<String>,
+        ) -> Vec<ListedUnit> {
+            let none = OwnedObjectPath::try_from("/").expect("path");
+            TREE.iter()
+                .map(|(name, ..)| {
+                    let (load, active, sub) = ("loaded", "active", "running");
+                    (
+                        (*name).to_owned(),
+                        String::new(),
+                        load.to_owned(),
+                        active.to_owned(),
+                        sub.to_owned(),
+                        String::new(),
+                        unit_path(name),
+                        0,
+                        String::new(),
+                        none.clone(),
+                    )
+                })
+                .collect()
+        }
+
+        fn list_unit_files_by_patterns(
+            &self,
+            _states: Vec<String>,
+            _patterns: Vec<String>,
+        ) -> Vec<(String, String)> {
+            Vec::new()
+        }
+    }
+
+    struct FakeUnitIface;
+
+    #[zbus::interface(name = "org.freedesktop.systemd1.Unit")]
+    impl FakeUnitIface {
+        #[zbus(property)]
+        fn load_state(&self) -> String {
+            "loaded".to_owned()
+        }
+
+        #[zbus(property)]
+        fn active_state(&self) -> String {
+            "active".to_owned()
+        }
+    }
+
+    /// The type interfaces: each carries only `ControlGroup`.
+    macro_rules! fake_typed {
+        ($ty:ident, $iface:literal) => {
+            struct $ty(&'static str);
+
+            #[zbus::interface(name = $iface)]
+            impl $ty {
+                #[zbus(property)]
+                fn control_group(&self) -> String {
+                    self.0.to_owned()
+                }
+            }
+        };
+    }
+    fake_typed!(FakeSliceIface, "org.freedesktop.systemd1.Slice");
+    fake_typed!(FakeScopeIface, "org.freedesktop.systemd1.Scope");
+    fake_typed!(FakeServiceIface, "org.freedesktop.systemd1.Service");
+
+    /// A peer-to-peer pair: the server side plays the system manager with the `TREE` units. The
+    /// client has no internal executor, for `DbusConn::p2p`.
+    fn fake_tree_bus() -> (zbus::Connection, zbus::Connection) {
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let mut server = zbus::connection::Builder::async_io_unix_stream(a)
+            .server(zbus::Guid::generate())
+            .expect("server builder")
+            .p2p()
+            .serve_at(PATH, FakeListing)
+            .expect("manager");
+        for (name, cg, _) in TREE {
+            let path = unit_path(name);
+            server = server.serve_at(&path, FakeUnitIface).expect("unit");
+            server = match unit_kind(name) {
+                Some(UnitType::Slice) => server.serve_at(&path, FakeSliceIface(cg)),
+                Some(UnitType::Scope) => server.serve_at(&path, FakeScopeIface(cg)),
+                _ => server.serve_at(&path, FakeServiceIface(cg)),
+            }
+            .expect("type interface");
+        }
+        let client = zbus::connection::Builder::async_io_unix_stream(b)
+            .p2p()
+            .internal_executor(false)
+            .build();
+        let (server, client) =
+            futures_lite::future::block_on(futures_lite::future::zip(server.build(), client));
+        (
+            server.expect("server connects"),
+            client.expect("client connects"),
+        )
     }
 
     #[test]
@@ -4026,53 +4212,75 @@ mod tests {
             type_iface(UnitType::Slice),
             Some("org.freedesktop.systemd1.Slice")
         );
-        let mut state = ServicesState::new(Manager::User);
-        assert!(state.replace(
-            vec![
-                unit("app-foo.scope", "active", "running", ""),
-                unit("app.slice", "active", "active", ""),
-            ],
-            UnitFiles::new(),
-        ));
-        assert!(state.cgroup_units().is_empty());
-
-        // The ControlGroup comes on the type interface, as systemd sends it.
-        let mut fx = Effects::default();
-        for (name, iface, cg) in [
-            ("app-foo.scope", "org.freedesktop.systemd1.Scope", SCOPE_CG),
-            ("app.slice", "org.freedesktop.systemd1.Slice", SLICE_CG),
-        ] {
-            let signal = Signal::Properties {
-                path: unit_path(name),
-                iface: iface.to_owned(),
-                changed: props(vec![("ControlGroup", Value::from(cg))]),
-                invalidated: Vec::new(),
+        let base = tree_fixture("dbus_systemd_tree_pids");
+        let counts = Arc::new(Counts::default());
+        let fs = Counting {
+            inner: HostFs {
+                root: SysRoot::at(&base),
+            },
+            counts: Arc::clone(&counts),
+        };
+        let (server, client) = fake_tree_bus();
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let shared = Arc::clone(&counts);
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+            let sys_root = SysRoot::at(&base);
+            let mut state = ServicesState::new(Manager::System);
+            resync(&cx, &conn, Manager::System, &sys_root, &fs, &mut state)
+                .await
+                .expect("listing over the fake bus");
+            let after_listing = std::mem::take(&mut *shared.procs_read.lock().expect("lock"));
+            let want = TickWant {
+                pids: true,
+                stats: false,
+                fresh: false,
             };
-            state.apply(&signal, &mut fx);
-        }
-        assert!(fx.changed);
-        let mut units = state.cgroup_units();
-        units.sort();
-        assert_eq!(
-            units,
-            cg_units(&[("app-foo.scope", SCOPE_CG), ("app.slice", SLICE_CG)])
-        );
+            assert!(cgroup_tick(&cx, &fs, &mut state, want).await);
+            drop(conn);
+            drop(server);
+            let rows: Vec<(String, bool, Vec<u32>)> = TREE
+                .iter()
+                .map(|(name, ..)| {
+                    let rec = state.record(name).expect("listed");
+                    let pids = rec.cgroup_pids.iter().map(|k| k.pid).collect();
+                    ((*name).to_owned(), rec.has_cgroup_procs, pids)
+                })
+                .collect();
+            (after_listing, rows)
+        });
+        let (after_listing, rows) = rt.block_on(join).expect("task completes");
 
-        let fs = HostFs {
-            root: SysRoot::at(&scope_fixture("dbus_systemd_scope_pids")),
-        };
-        let want = TickWant {
-            pids: true,
-            stats: false,
-            fresh: false,
-        };
-        let read = read_tick(&mut fs.open(), &units, want, None);
-        assert!(state.apply_tick(read, 1_000_000_000, false));
-        for name in ["app-foo.scope", "app.slice"] {
-            let rec = state.record(name).expect("listed");
-            assert!(rec.has_cgroup_procs, "{name}");
-            assert_eq!(&rec.cgroup_pids[..], &fixture_keys()[..], "{name}");
+        let expected = [
+            ("-.slice", vec![]),
+            ("system.slice", vec![10, 11]),
+            ("a.service", vec![10, 11]),
+            ("user.slice", vec![20, 21, 22]),
+            ("user-1000.slice", vec![20, 21, 22]),
+            ("app.slice", vec![20, 21, 22]),
+            ("app-foo.scope", vec![20, 21, 22]),
+        ];
+        for ((name, has_procs, pids), (want_name, want_pids)) in rows.iter().zip(expected) {
+            assert_eq!(name, want_name);
+            assert_eq!(pids, &want_pids, "{name}");
+            assert_eq!(*has_procs, !want_pids.is_empty(), "{name}");
         }
+
+        // Each walk reads every unit cgroup once, and never the root or a cgroup no unit owns.
+        let mut once: Vec<String> = TREE
+            .iter()
+            .skip(1)
+            .map(|(_, cg, _)| (*cg).to_owned())
+            .collect();
+        once.sort();
+        let tick = counts.procs_read.lock().expect("lock").clone();
+        for (walk, mut read) in [("listing", after_listing), ("tick", tick)] {
+            read.sort();
+            assert_eq!(read, once, "{walk}");
+        }
+        // Each pid's stat is read once, though up to four units hold it.
+        assert_eq!(counts.get().2, 5);
     }
 
     #[test]
@@ -4128,6 +4336,8 @@ mod tests {
         procs: std::sync::atomic::AtomicUsize,
         stats: std::sync::atomic::AtomicUsize,
         pid_stat: std::sync::atomic::AtomicUsize,
+        /// The cgroup of each `cgroup.procs` read, in order.
+        procs_read: Mutex<Vec<String>>,
     }
 
     impl Counts {
@@ -4169,7 +4379,16 @@ mod tests {
             self.counts
                 .procs
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.counts
+                .procs_read
+                .lock()
+                .expect("counts lock")
+                .push(rel.to_owned());
             self.inner.procs(rel, out)
+        }
+
+        fn children(&mut self, rel: &str, out: &mut Vec<Arc<str>>) -> Result<(), Validity> {
+            self.inner.children(rel, out)
         }
 
         fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity> {
