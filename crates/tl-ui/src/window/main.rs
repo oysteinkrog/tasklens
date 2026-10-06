@@ -142,6 +142,8 @@ impl PageSlot {
 pub type PageFactory = fn(&mut Window, &mut Context<MainWindow>) -> PageSlot;
 
 /// The page match. A tab with no arm is not built and not shown (ADR-009, R-023).
+// The match stays so page epics can add their arms; the lint goes with the first arm.
+#[allow(clippy::match_single_binding)]
 fn page_factory(tab: Tab) -> Option<PageFactory> {
     match tab {
         // page arms (chain edits, one per page epic): Processes E22, Performance E24, Services E27,
@@ -152,6 +154,8 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
 }
 
 /// Toolbar registration: one arm per page epic with page buttons (E22 for Processes).
+// The match stays so page epics can add their arms; the lint goes with the first arm.
+#[allow(clippy::match_single_binding)]
 fn toolbar_for(tab: Tab) -> Box<dyn ToolbarContent> {
     match tab {
         // toolbar registrations (chain edits)

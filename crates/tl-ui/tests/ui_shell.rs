@@ -1847,8 +1847,10 @@ mod main_window {
             };
             tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
             tl_ui::i18n::init_strings(cx, "en-US");
-            let mut settings = Settings::default();
-            settings.appearance = appearance;
+            let mut settings = Settings {
+                appearance,
+                ..Settings::default()
+            };
             settings.general.start_tab = opts.start_tab;
             let mut state = UiState::default();
             state.tabs.last_tab = opts.last_tab;
@@ -2127,7 +2129,10 @@ mod main_window {
         // The cached chip keeps its content width and sits at the page's bottom-left.
         let chip = bounds(&mut vcx, "StatusChip");
         let page = bounds(&mut vcx, "MainWindowPage");
-        assert!(chip.size.width > px(0.) && chip.size.width < px(200.), "{chip:?}");
+        assert!(
+            chip.size.width > px(0.) && chip.size.width < px(200.),
+            "{chip:?}"
+        );
         assert_eq!(chip.size.height, px(26.));
         assert_eq!(chip.bottom_left(), page.bottom_left());
         emit_status(&mut vcx, Tab::Services, "99 Items");
