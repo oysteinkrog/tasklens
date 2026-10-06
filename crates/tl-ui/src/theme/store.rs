@@ -94,9 +94,19 @@ pub enum ActivateSource {
 /// What a theme store call did. Returned, not emitted, because the store is a Global.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ThemeEvent {
-    Activated { name: Arc<str> },
-    Deleted { name: Arc<str> },
-    Copied { name: Arc<str> },
+    Activated {
+        name: Arc<str>,
+    },
+    Deleted {
+        name: Arc<str>,
+    },
+    Copied {
+        name: Arc<str>,
+    },
+    /// `count` themes were added to the user themes (E17-009).
+    Imported {
+        count: usize,
+    },
     ImportFailed,
 }
 

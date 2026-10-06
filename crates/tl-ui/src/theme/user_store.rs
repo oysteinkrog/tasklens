@@ -109,6 +109,81 @@ fn raw_mode(obj: &BTreeMap<String, Value>) -> ThemeMode {
     }
 }
 
+/// The `name` of a raw theme object, or "Custom theme N" when it has none. `unnamed` counts the
+/// names given so far. Logs nothing, since the object may be clipboard text.
+pub(crate) fn theme_name(
+    obj: &BTreeMap<String, Value>,
+    index: usize,
+    unnamed: &mut usize,
+    repairs: &mut Vec<Repair>,
+) -> Arc<str> {
+    match obj.get("name").and_then(Value::as_str) {
+        Some(n) if !n.trim().is_empty() => n.into(),
+        _ => {
+            *unnamed += 1;
+            let given: Arc<str> = format!("Custom theme {unnamed}").into();
+            repairs.push(Repair::Unnamed {
+                index,
+                given: given.clone(),
+            });
+            given
+        }
+    }
+}
+
+/// `name` with the first free " (N)" suffix, N from 2.
+fn free_name(name: &str, taken: impl Fn(&Arc<str>) -> bool) -> Arc<str> {
+    (2..)
+        .map(|n| Arc::<str>::from(format!("{name} ({n})")))
+        .find(|n| !taken(n))
+        .expect("a free suffix exists")
+}
+
+/// Parses one raw theme object leniently (UI-FND-042 step 3): a missing or bad slot or `accent`
+/// takes the value of the built-in theme of the same mode. The def is named `name`. `None` only
+/// when there is no built-in theme to repair from. Logs nothing, since the object may be
+/// clipboard text; the file loader logs the repairs.
+pub(crate) fn repair_theme(
+    mut obj: BTreeMap<String, Value>,
+    name: Arc<str>,
+    builtins: &[ThemeDef],
+    repairs: &mut Vec<Repair>,
+) -> Option<ThemeDef> {
+    obj.insert("name".into(), Value::String(name.to_string()));
+
+    let fallback = fallback_def(builtins, raw_mode(&obj))?;
+
+    // Replace each missing or bad colour with a placeholder so the strict parse passes,
+    // then copy the built-in colour in exactly.
+    let mut repaired: Vec<ThemeSlot> = Vec::new();
+    for slot in ThemeSlot::ALL {
+        let key = slot.json_key();
+        let repair = match obj.get(key) {
+            None => Repair::MissingSlot {
+                theme: name.clone(),
+                key,
+            },
+            Some(v) if v.as_str().is_some_and(|s| parse_hex(s).is_ok()) => continue,
+            Some(_) => Repair::BadColor {
+                theme: name.clone(),
+                key: key.to_string(),
+            },
+        };
+        repairs.push(repair);
+        obj.insert(key.to_string(), Value::String("#000000".into()));
+        repaired.push(slot);
+    }
+
+    let mut def = parse_theme_object(&obj, false).ok()?;
+    for slot in repaired {
+        match slot {
+            ThemeSlot::Accent => def.accent = fallback.accent,
+            s => def.slots[s as usize] = fallback.slots[s as usize],
+        }
+    }
+    Some(def)
+}
+
 /// Parses the themes file text. Never fails: a file that does not parse sets `corrupt`, and a
 /// broken theme is repaired from the built-in of the same mode (UI-FND-042).
 pub fn load_user_themes(text: Option<&str>, builtins: &[ThemeDef], now_unix: u64) -> LoadOutcome {
@@ -142,27 +217,13 @@ pub fn load_user_themes(text: Option<&str>, builtins: &[ThemeDef], now_unix: u64
             warn!(target: "tasklens::ui", index, "user theme is not an object, skipped");
             continue;
         };
-        let mut obj: BTreeMap<String, Value> =
+        let obj: BTreeMap<String, Value> =
             map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
 
-        let mut name: Arc<str> = match obj.get("name").and_then(Value::as_str) {
-            Some(n) if !n.trim().is_empty() => n.into(),
-            _ => {
-                unnamed += 1;
-                let given: Arc<str> = format!("Custom theme {unnamed}").into();
-                warn!(target: "tasklens::ui", index, theme = %given, "user theme has no name");
-                out.repairs.push(Repair::Unnamed {
-                    index,
-                    given: given.clone(),
-                });
-                given
-            }
-        };
+        let first_repair = out.repairs.len();
+        let mut name = theme_name(&obj, index, &mut unnamed, &mut out.repairs);
         if seen.contains(&name) {
-            let to: Arc<str> = (2..)
-                .map(|n| Arc::<str>::from(format!("{name} ({n})")))
-                .find(|n| !seen.contains(n))
-                .expect("a free suffix exists");
+            let to = free_name(&name, |n| seen.contains(n));
             warn!(target: "tasklens::ui", from = %name, to = %to, "duplicate user theme name");
             out.repairs.push(Repair::Renamed {
                 from: name,
@@ -171,49 +232,25 @@ pub fn load_user_themes(text: Option<&str>, builtins: &[ThemeDef], now_unix: u64
             name = to;
         }
         seen.insert(name.clone());
-        obj.insert("name".into(), Value::String(name.to_string()));
-
-        let Some(fallback) = fallback_def(builtins, raw_mode(&obj)) else {
-            warn!(target: "tasklens::ui", theme = %name, "no built-in theme to repair from, skipped");
-            continue;
-        };
-
-        // Replace each missing or bad colour with a placeholder so the strict parse passes,
-        // then copy the built-in colour in exactly.
-        let mut repaired: Vec<ThemeSlot> = Vec::new();
-        for slot in ThemeSlot::ALL {
-            let key = slot.json_key();
-            let repair = match obj.get(key) {
-                None => Repair::MissingSlot {
-                    theme: name.clone(),
-                    key,
-                },
-                Some(v) if v.as_str().is_some_and(|s| parse_hex(s).is_ok()) => continue,
-                Some(_) => Repair::BadColor {
-                    theme: name.clone(),
-                    key: key.to_string(),
-                },
-            };
-            warn!(target: "tasklens::ui", theme = %name, slot = key, "user theme colour repaired from built-in");
-            out.repairs.push(repair);
-            obj.insert(key.to_string(), Value::String("#000000".into()));
-            repaired.push(slot);
-        }
-
-        let mut def = match parse_theme_object(&obj, false) {
-            Ok(def) => def,
-            Err(e) => {
-                warn!(target: "tasklens::ui", theme = %name, error = %e, "user theme skipped");
-                continue;
-            }
-        };
-        for slot in repaired {
-            match slot {
-                ThemeSlot::Accent => def.accent = fallback.accent,
-                s => def.slots[s as usize] = fallback.slots[s as usize],
+        let def = repair_theme(obj, name.clone(), builtins, &mut out.repairs);
+        for r in &out.repairs[first_repair..] {
+            match r {
+                Repair::Unnamed { given, .. } => {
+                    warn!(target: "tasklens::ui", index, theme = %given, "user theme has no name");
+                }
+                Repair::MissingSlot { key, .. } => {
+                    warn!(target: "tasklens::ui", theme = %name, slot = key, "user theme colour repaired from built-in");
+                }
+                Repair::BadColor { key, .. } => {
+                    warn!(target: "tasklens::ui", theme = %name, slot = %key, "user theme colour repaired from built-in");
+                }
+                Repair::Renamed { .. } | Repair::Truncated { .. } => {}
             }
         }
-        out.themes.push(def);
+        match def {
+            Some(def) => out.themes.push(def),
+            None => warn!(target: "tasklens::ui", theme = %name, "user theme skipped"),
+        }
     }
     out
 }
@@ -390,6 +427,35 @@ impl ThemeStore {
         Ok(ThemeEvent::Deleted {
             name: removed.name.clone(),
         })
+    }
+
+    /// Adds imported themes to the end of `user` (APP-038, UI-FND-042). A name already used by a
+    /// user theme gets " (2)", " (3)" and so on. Themes past `MAX_USER_THEMES` are dropped and
+    /// counted in the log. Saves once and does not activate. No themes added gives
+    /// `ImportFailed`.
+    pub fn import_themes(defs: Vec<ThemeDef>, cx: &mut App) -> Result<ThemeEvent, ThemeError> {
+        let total = defs.len();
+        let store = cx.global_mut::<ThemeStore>();
+        let room = MAX_USER_THEMES.saturating_sub(store.user.len());
+        let mut seen: BTreeSet<Arc<str>> = store.user.iter().map(|d| d.name.clone()).collect();
+        let mut count = 0usize;
+        for mut def in defs.into_iter().take(room) {
+            if seen.contains(&def.name) {
+                def.name = free_name(&def.name, |n| seen.contains(n));
+            }
+            seen.insert(def.name.clone());
+            store.user.push(def);
+            count += 1;
+        }
+        if count < total {
+            warn!(target: "tasklens::ui", dropped = total - count, kept = count, "user theme cap reached, imported themes dropped");
+        }
+        if count == 0 {
+            return Ok(ThemeEvent::ImportFailed);
+        }
+        let saved = store.user.clone();
+        persist(PersistTheme::Save(saved), cx);
+        Ok(ThemeEvent::Imported { count })
     }
 }
 
@@ -683,6 +749,66 @@ mod tests {
             assert_eq!(
                 ThemeStore::copy_theme("Missing", cx),
                 Err(ThemeError::UnknownTheme("Missing".into()))
+            );
+            assert_eq!(rec.borrow().len(), 2);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn import_renames_duplicates_and_saves_once(cx: &mut TestAppContext) {
+        let text = file(vec![theme_json("Default Dark", "Mine")]);
+        cx.update(|cx| {
+            let (rec, _) = setup(cx, Some(&text), 1);
+            let active = current(cx).name.clone();
+            let mine = cx.global::<ThemeStore>().user[0].clone();
+            let mut other = mine.clone();
+            other.slots[ThemeSlot::WindowBg as usize] = hex(0x102030);
+
+            let r = ThemeStore::import_themes(vec![other, mine.clone()], cx);
+            assert_eq!(r, Ok(ThemeEvent::Imported { count: 2 }));
+            let names: Vec<&str> = cx
+                .global::<ThemeStore>()
+                .user
+                .iter()
+                .map(|t| &*t.name)
+                .collect();
+            assert_eq!(names, ["Mine", "Mine (2)", "Mine (3)"]);
+            assert_eq!(
+                cx.global::<ThemeStore>().user[1].slots[ThemeSlot::WindowBg as usize],
+                hex(0x102030)
+            );
+            assert_eq!(current(cx).name, active);
+            {
+                let rec = rec.borrow();
+                assert_eq!(rec.len(), 1);
+                let PersistTheme::Save(saved) = &rec[0] else {
+                    panic!("expected Save, got {:?}", rec[0]);
+                };
+                assert_eq!(saved.len(), 3);
+            }
+
+            assert_eq!(
+                ThemeStore::import_themes(Vec::new(), cx),
+                Ok(ThemeEvent::ImportFailed)
+            );
+            assert_eq!(rec.borrow().len(), 1);
+
+            // The cap keeps 64 user themes and drops the rest.
+            let many: Vec<ThemeDef> = (0..70)
+                .map(|i| {
+                    let mut d = mine.clone();
+                    d.name = format!("T{i}").into();
+                    d
+                })
+                .collect();
+            assert_eq!(
+                ThemeStore::import_themes(many.clone(), cx),
+                Ok(ThemeEvent::Imported { count: 61 })
+            );
+            assert_eq!(cx.global::<ThemeStore>().user.len(), MAX_USER_THEMES);
+            assert_eq!(
+                ThemeStore::import_themes(many, cx),
+                Ok(ThemeEvent::ImportFailed)
             );
             assert_eq!(rec.borrow().len(), 2);
         });

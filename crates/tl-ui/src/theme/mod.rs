@@ -7,6 +7,7 @@ pub mod map;
 pub mod metrics;
 pub mod palette;
 pub mod preview;
+pub mod share_code;
 pub mod store;
 pub mod user_store;
 
