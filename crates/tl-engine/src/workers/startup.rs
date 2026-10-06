@@ -955,6 +955,19 @@ mod tests {
         }
     }
 
+    /// The next Startup update, or `None` when none comes within `d`.
+    async fn recv_startup(
+        cx: &Cx,
+        rx: &mut mpsc::Receiver<EngineMsg>,
+        d: Duration,
+    ) -> Option<StartupUpdate> {
+        match asupersync::time::timeout(cx.now(), d, rx.recv(cx)).await {
+            Ok(Ok(EngineMsg::Source(SourceUpdate::Startup(update)))) => Some(update),
+            Ok(other) => panic!("unexpected {other:?}"),
+            Err(_) => None,
+        }
+    }
+
     /// Real temp directory, real inotify, real runtime and wall-clock time.
     #[test]
     fn inotify_rescan_on_new_file() {
@@ -998,17 +1011,7 @@ mod tests {
                     let _ = run(cx, io, scanner, host).await;
                 })
                 .expect("worker spawns");
-            let recv = |rx: &mut mpsc::Receiver<EngineMsg>, d: Duration| {
-                let cx = cx.clone();
-                async move {
-                    match asupersync::time::timeout(cx.now(), d, rx.recv(&cx)).await {
-                        Ok(Ok(EngineMsg::Source(SourceUpdate::Startup(update)))) => Some(update),
-                        Ok(other) => panic!("unexpected {other:?}"),
-                        Err(_) => None,
-                    }
-                }
-            };
-            let first = recv(&mut rx, Duration::from_secs(5))
+            let first = recv_startup(&cx, &mut rx, Duration::from_secs(5))
                 .await
                 .expect("scan on open");
             assert!(first.entries.is_empty(), "{:?}", first.entries);
@@ -1018,7 +1021,7 @@ mod tests {
                 "[Desktop Entry]\nType=Application\nName=New\nExec=/bin/true\n",
             )
             .expect("write desktop file");
-            let second = recv(&mut rx, Duration::from_secs(1)).await;
+            let second = recv_startup(&cx, &mut rx, Duration::from_secs(1)).await;
 
             worker.abort();
             let _ = worker.join(&cx).await;
