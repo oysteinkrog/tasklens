@@ -24,7 +24,7 @@ use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
     AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, EventEmitter,
     FocusHandle, Global, InteractiveElement, IntoElement, ModifiersChangedEvent, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
+    Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
     point, px, size,
 };
@@ -38,7 +38,7 @@ use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChi
 use super::tabstrip::TabStrip;
 #[cfg(any(test, feature = "test-hooks"))]
 use super::titlebar::TitleBarProbe;
-use super::titlebar::{TitleBarView, minimize_main, zoom};
+use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoom};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CloseWindow, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
@@ -66,6 +66,13 @@ pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 pub const WINDOW_TITLE: &str = "tasklens";
 /// Gap between the tab strip and the toast stack's top edge, × ui_scale (UI-SHL-100).
 const TOAST_GAP: f32 = 8.0;
+/// The toast stack's top edge (UI-SHL-100): the bar height for the decoration kind, the tab
+/// strip and an 8 px gap, × ui_scale. 72 under client decorations and 66 under server ones, at
+/// 100 %.
+fn toast_top(client: bool, s: f32) -> Pixels {
+    bar_height_of(client, s) + px((TAB_STRIP_H + TOAST_GAP) * s)
+}
+
 /// Quiet time after the last bounds change before the size is written (UI-SHL-002).
 const SIZE_SAVE_DELAY: Duration = Duration::from_millis(500);
 
@@ -565,6 +572,9 @@ pub struct MainWindow {
     /// `(state_version, processes version)` the toolbar model was built from.
     settings_versions: (u64, u64),
     style_version: u64,
+    /// The decoration kind the window reported at the last render: true for client. The title
+    /// bar's height and the toast top follow it.
+    client: bool,
     /// The latest window bounds, written to `UiState.window` after the debounce or on close.
     bounds: WindowBounds,
     /// The pending size write. A new bounds change replaces it.
@@ -590,7 +600,8 @@ impl MainWindow {
         let titlebar = cx.new(|cx| TitleBarView::new(window, cx));
         let tabstrip = cx.new(|cx| TabStrip::new(built, start, window, cx));
         let status = cx.new(StatusChip::new);
-        let top = px((TITLEBAR_H + TAB_STRIP_H + TOAST_GAP) * s);
+        let client = is_client(window, cx);
+        let top = toast_top(client, s);
         let toasts = cx.new(|cx| ToastQueue::new(window, cx, top));
         let anim = cx.new(AnimationDriver::new);
         AnimationDriver::register(&anim, window, cx);
@@ -619,7 +630,7 @@ impl MainWindow {
                 return;
             }
             this.style_version = m.style_version;
-            let top = px((TITLEBAR_H + TAB_STRIP_H + TOAST_GAP) * m.ui_scale);
+            let top = toast_top(this.client, m.ui_scale);
             this.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
             cx.notify();
         }));
@@ -667,6 +678,7 @@ impl MainWindow {
             status_buf: String::new(),
             settings_versions: settings_versions(cx),
             style_version: metrics(cx).style_version,
+            client,
             bounds: window_bounds_of(window, cx),
             save_task: None,
             _subs: subs,
@@ -956,6 +968,20 @@ impl Render for MainWindow {
         }
         let bg = current(cx).window_bg;
         let s = metrics(cx).ui_scale;
+        // A configure event can switch the decoration kind (the compositor refused or granted
+        // server decorations). The kind is part of the title bar's cache key: its height
+        // changes, the bar view is marked dirty and the toast top moves.
+        // `appearance.decorations` itself is read once at open (UI-SHL-006).
+        let client = is_client(window, cx);
+        if client != self.client {
+            self.client = client;
+            self.titlebar.update(cx, |_, cx| cx.notify());
+            // Deferred: the toast layer may already be drawn in this frame.
+            cx.defer_in(window, move |this, _, cx| {
+                let top = toast_top(client, metrics(cx).ui_scale);
+                this.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
+            });
+        }
         let chip_w = (window.viewport_size().width - px(CHIP_RESERVE * s)).max(px(0.));
 
         let page = self.pages[self.active as usize].as_ref().map(|slot| {
@@ -986,8 +1012,11 @@ impl Render for MainWindow {
             .on_modifiers_changed(cx.listener(Self::on_modifiers))
             // window-level on_action handlers (chain edits)
             .child(
-                AnyView::from(self.titlebar.clone())
-                    .cached(StyleRefinement::default().w_full().h(px(TITLEBAR_H * s))),
+                AnyView::from(self.titlebar.clone()).cached(
+                    StyleRefinement::default()
+                        .w_full()
+                        .h(bar_height_of(client, s)),
+                ),
             )
             .child(
                 AnyView::from(self.tabstrip.clone())

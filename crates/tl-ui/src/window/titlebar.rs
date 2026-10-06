@@ -6,6 +6,12 @@
 //! `TitleBar`: gpui-kit 0.7.0's `TitleBar` always appends its own window controls and has no
 //! switch to hide them (U-44).
 //!
+//! Under server decorations ("Use system title bar", UI-SHL-006) KWin draws the title bar, and
+//! the bar becomes a 28 px menu row: the same parts up to the toolbar, then a spacer and the pin,
+//! with no drag code and no minimize, maximize or close. The layout follows what GPUI reports
+//! (`window.window_decorations()`), not the setting, because a compositor may refuse server
+//! decorations.
+//!
 //! The bar has no Tab stops (R-108). Every caption command also has a key (Ctrl+W) or a
 //! compositor shortcut. Each caption button's tooltip text is its accessible name.
 
@@ -34,6 +40,8 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Title bar height, × ui_scale.
 pub const TITLEBAR_H: f32 = 34.0;
+/// Menu row height under server decorations, × ui_scale (UI-SHL-006).
+pub const MENU_ROW_H: f32 = 28.0;
 /// Main window caption button width, × ui_scale. Secondary windows keep the kit's 34.
 pub const CAPTION_W: f32 = 36.0;
 
@@ -47,6 +55,8 @@ const GAP_ICON: f32 = 8.0;
 const GAP_MENU: f32 = 4.0;
 /// Minimum width of the drag area, × ui_scale.
 const DRAG_MIN_W: f32 = 24.0;
+/// Menu button height in the menu row, × ui_scale.
+const MENU_ROW_BUTTON_H: f32 = 24.0;
 /// A pressed caption button shows its hover fill at this opacity.
 const PRESSED_OPACITY: f32 = 0.8;
 
@@ -54,6 +64,29 @@ const PRESSED_OPACITY: f32 = 0.8;
 pub struct MenuBarFactory(pub fn(&mut Window, &mut App) -> AnyView);
 
 impl Global for MenuBarFactory {}
+
+/// The height of the menu bar's buttons, in px with ui_scale applied. Contract for E21-A1: the
+/// menu bar reads this Global when it renders and uses 26 × ui_scale when it is absent. The title
+/// bar sets it to 24 × ui_scale before the slot renders in the menu row, and removes it in the
+/// client bar. It changes only when the decoration kind or the scale changes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuRowHeight(pub Pixels);
+
+impl Global for MenuRowHeight {}
+
+/// Sets or removes `MenuRowHeight`. Nothing happens when it already holds `height`, so the
+/// Global's observers do not run on every frame.
+fn set_menu_row_height(height: Option<Pixels>, cx: &mut App) {
+    if cx.try_global::<MenuRowHeight>().map(|h| h.0) == height {
+        return;
+    }
+    match height {
+        Some(h) => cx.set_global(MenuRowHeight(h)),
+        None => {
+            cx.remove_global::<MenuRowHeight>();
+        }
+    }
+}
 
 /// The left button went down on a drag part; the next mouse move starts a window move.
 #[derive(Default)]
@@ -117,7 +150,9 @@ fn probe_installed(cx: &App) -> bool {
     }
 }
 
-fn is_client(window: &Window, cx: &App) -> bool {
+/// True when the window reports client decorations (the client bar), false for server
+/// decorations (the menu row).
+pub(crate) fn is_client(window: &Window, cx: &App) -> bool {
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(client) = cx.try_global::<TitleBarProbe>().and_then(|p| p.client) {
         return client;
@@ -127,6 +162,17 @@ fn is_client(window: &Window, cx: &App) -> bool {
         window.window_decorations(),
         gpui_kit::Decorations::Client { .. }
     )
+}
+
+/// The bar height for a decoration kind at ui_scale `s`: 34 × s for client, 28 × s for server.
+pub(crate) fn bar_height_of(client: bool, s: f32) -> Pixels {
+    px(if client { TITLEBAR_H } else { MENU_ROW_H } * s)
+}
+
+/// The bar height the window's reported decorations give: 34 × ui_scale for client, 28 ×
+/// ui_scale for server.
+pub fn bar_height(window: &Window, cx: &App) -> Pixels {
+    bar_height_of(is_client(window, cx), metrics(cx).ui_scale)
 }
 
 fn is_maximized(window: &Window, cx: &App) -> bool {
@@ -496,24 +542,23 @@ impl TitleBarView {
     }
 }
 
-impl Render for TitleBarView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = current(cx).clone();
-        let m = *metrics(cx);
-        let s = m.ui_scale;
-        let client = is_client(window, cx);
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.drawn.clear();
-
+impl TitleBarView {
+    /// The parts both bars share, at height `h`: padding, app icon, menu bar slot and toolbar.
+    fn leading(
+        &mut self,
+        h: Pixels,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Stateful<Div> {
+        let s = metrics(cx).ui_scale;
         let page = self.content.buttons(&self.model, window, cx);
         let toolbar = no_drag(
             div()
                 .flex_none()
                 .child(Toolbar::new(self.model.clone(), page)),
         );
-        let captions = client.then(|| self.captions(&theme, window, cx));
-
-        let bar = div()
+        div()
             .id("TitleBar")
             .debug_selector(|| "TitleBar".into())
             .flex()
@@ -521,7 +566,7 @@ impl Render for TitleBarView {
             .flex_none()
             .items_center()
             .w_full()
-            .h(px(TITLEBAR_H * s))
+            .h(h)
             .pl(px(LEFT_PAD * s))
             .bg(theme.titlebar)
             .cursor_default()
@@ -544,6 +589,36 @@ impl Render for TitleBarView {
                 ))
             })
             .child(toolbar)
+    }
+
+    /// The menu row under server decorations (UI-SHL-006): the shared parts, a spacer, then the
+    /// pin cell (36 × 28) once E20-022 adds it. KWin draws the caption buttons and handles drag,
+    /// so the row has no drag, double-click or window-menu handlers.
+    fn menu_row(&mut self, theme: &TlTheme, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        let s = metrics(cx).ui_scale;
+        set_menu_row_height(Some(px(MENU_ROW_BUTTON_H * s)), cx);
+        self.leading(bar_height_of(false, s), theme, window, cx)
+            .child(
+                div()
+                    .debug_selector(|| "TitleBarSpacer".into())
+                    .flex_1()
+                    .h_full(),
+            )
+        // menu row pin cell (E20-022 chain edit)
+    }
+
+    /// The client bar (E20-004): the shared parts, the drag area and the caption buttons.
+    fn client_bar(
+        &mut self,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let s = metrics(cx).ui_scale;
+        set_menu_row_height(None, cx);
+        let bar = self.leading(bar_height_of(true, s), theme, window, cx);
+        let captions = self.captions(theme, window, cx);
+        let bar = bar
             .child(
                 div()
                     .debug_selector(|| "TitleBarDrag".into())
@@ -551,7 +626,20 @@ impl Render for TitleBarView {
                     .min_w(px(DRAG_MIN_W * s))
                     .h_full(),
             )
-            .children(captions);
-        if client { drag_handlers(bar, cx) } else { bar }
+            .child(captions);
+        drag_handlers(bar, cx)
+    }
+}
+
+impl Render for TitleBarView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = current(cx).clone();
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.drawn.clear();
+        if is_client(window, cx) {
+            self.client_bar(&theme, window, cx)
+        } else {
+            self.menu_row(&theme, window, cx)
+        }
     }
 }

@@ -637,7 +637,7 @@ mod titlebar {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
     use tl_ui::window::titlebar::{
-        MenuBarFactory, TitleBarProbe, TitleBarView, keep_above_supported,
+        MenuBarFactory, MenuRowHeight, TitleBarProbe, TitleBarView, keep_above_supported,
     };
     use tl_ui::window::toolbar::{ToolbarContent, ToolbarModel, toolbar_toggle};
 
@@ -1043,6 +1043,85 @@ mod titlebar {
             };
             assert_eq!((b.size.width, b.size.height), (px(54.), px(51.)), "{id}");
         }
+    }
+
+    fn server(ui_scale_pct: u16) -> Opts {
+        Opts {
+            ui_scale_pct,
+            probe: TitleBarProbe {
+                client: Some(false),
+                ..TitleBarProbe::default()
+            },
+            ..Opts::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn server_mode_menu_row(cx: &mut TestAppContext) {
+        let r = rig(cx, server(100));
+        let bar = bounds(r.cx, "TitleBar");
+        assert_eq!(bar.size.height, px(28.));
+        assert_eq!(bar.size.width, px(1360.));
+        let parts = ["TitleBarIcon", "TitleBarMenu", "Toolbar", "TitleBarSpacer"];
+        let xs: Vec<Pixels> = parts.iter().map(|p| bounds(r.cx, p).origin.x).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "left to right: {xs:?}");
+        assert_eq!(bounds(r.cx, "TitleBarIcon").origin.x, px(12.));
+        assert_eq!(bounds(r.cx, "TitleBarSpacer").right(), bar.right());
+        for id in ["minimize", "maximize", "close"] {
+            let selector = match id {
+                "minimize" => "TitleBarCaption-minimize",
+                "maximize" => "TitleBarCaption-maximize",
+                _ => "TitleBarCaption-close",
+            };
+            assert!(r.cx.debug_bounds(selector).is_none(), "no {id} button");
+        }
+        assert!(r.cx.debug_bounds("TitleBarDrag").is_none());
+        let captions = r.cx.update(|_, cx| r.view.read(cx).drawn_captions().len());
+        assert_eq!(captions, 0);
+        let height =
+            r.cx.update(|_, cx| cx.try_global::<MenuRowHeight>().map(|h| h.0));
+        assert_eq!(height, Some(px(24.)), "menu buttons are 24 tall");
+    }
+
+    #[gpui_kit::test]
+    fn server_mode_no_drag(cx: &mut TestAppContext) {
+        let r = rig(cx, server(100));
+        let at = bounds(r.cx, "TitleBarSpacer").center();
+        r.cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(
+            at + point(px(10.), px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        r.cx.simulate_mouse_up(
+            at + point(px(10.), px(2.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        down(r.cx, at, MouseButton::Left, 2);
+        r.cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+        down(r.cx, at, MouseButton::Right, 1);
+        assert_eq!(probe(r.cx, |p| (p.moves, p.zooms)), (0, 0));
+        assert!(probe(r.cx, |p| p.window_menus.is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn server_mode_scales(cx: &mut TestAppContext) {
+        let r = rig(cx, server(150));
+        assert_eq!(bounds(r.cx, "TitleBar").size.height, px(42.));
+        let height =
+            r.cx.update(|_, cx| cx.try_global::<MenuRowHeight>().map(|h| h.0));
+        assert_eq!(height, Some(px(36.)));
+    }
+
+    #[gpui_kit::test]
+    fn client_bar_clears_menu_row_height(cx: &mut TestAppContext) {
+        let r = rig(cx, server(100));
+        r.cx.update(|_, cx| cx.global_mut::<TitleBarProbe>().client = Some(true));
+        r.view.update(r.cx, |_, cx| cx.notify());
+        draw(r.cx);
+        assert_eq!(bounds(r.cx, "TitleBar").size.height, px(34.));
+        assert!(r.cx.update(|_, cx| !cx.has_global::<MenuRowHeight>()));
     }
 }
 
@@ -1745,7 +1824,7 @@ mod main_window {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::settings::{
-        AppearanceSettings, Settings, StartTab, ThemeSettings, UiState, WindowState,
+        AppearanceSettings, Decorations, Settings, StartTab, ThemeSettings, UiState, WindowState,
     };
     use tl_ui::actions::{
         CloseWindow, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab,
@@ -1831,6 +1910,11 @@ mod main_window {
         arg: Option<StartTab>,
         last_tab: Tab,
         engine: bool,
+        /// `appearance.decorations`.
+        decorations: Decorations,
+        /// The decorations the window reports (`TitleBarProbe.client`). The GPUI test window
+        /// reports server decorations, so the default installs the probe with client ones.
+        client: Option<bool>,
     }
 
     impl Default for Opts {
@@ -1842,6 +1926,8 @@ mod main_window {
                 arg: None,
                 last_tab: Tab::Processes,
                 engine: false,
+                decorations: AppearanceSettings::default().decorations,
+                client: Some(true),
             }
         }
     }
@@ -1852,6 +1938,7 @@ mod main_window {
             gpui_kit::init(cx);
             let appearance = AppearanceSettings {
                 ui_scale_pct: opts.ui_scale_pct,
+                decorations: opts.decorations,
                 ..AppearanceSettings::default()
             };
             tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
@@ -1889,6 +1976,12 @@ mod main_window {
                 set_test_page(cx, *tab, FAKES[*tab as usize]);
             }
             cx.set_global(Log::default());
+            if opts.client.is_some() {
+                cx.set_global(TitleBarProbe {
+                    client: opts.client,
+                    ..TitleBarProbe::default()
+                });
+            }
             shell::init(cx);
         });
     }
@@ -1987,6 +2080,61 @@ mod main_window {
             assert_eq!(heights, expect.map(px), "at {scale} %");
             assert_eq!(bounds(&mut vcx, "MainWindowPage").size.width, px(1280.));
         }
+    }
+
+    fn toast_top(vcx: &mut VisualTestContext) -> Pixels {
+        let main = main(vcx);
+        let toasts = vcx.read_entity(&main, |m, _| m.toasts().clone());
+        vcx.read_entity(&toasts, |q, _| q.top())
+    }
+
+    #[gpui_kit::test]
+    fn server_mode_layout_and_toast_top(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                pages: &[Tab::Processes],
+                decorations: Decorations::Server,
+                client: Some(false),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(
+            vcx.update(|window, _| window.viewport_size()),
+            size(px(1280.), px(800.))
+        );
+        assert_eq!(bounds(&mut vcx, "TitleBar").size.height, px(28.));
+        assert_eq!(bounds(&mut vcx, "TabStrip").origin.y, px(28.));
+        assert_eq!(toast_top(&mut vcx), px(66.));
+    }
+
+    #[gpui_kit::test]
+    fn layout_follows_reported_decorations(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                pages: &[Tab::Processes],
+                decorations: Decorations::Server,
+                client: Some(true),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(bounds(&mut vcx, "TitleBar").size.height, px(34.));
+        assert!(vcx.debug_bounds("TitleBarCaption-close").is_some());
+        assert!(vcx.debug_bounds("TitleBarDrag").is_some());
+        assert_eq!(bounds(&mut vcx, "TabStrip").origin.y, px(34.));
+        assert_eq!(toast_top(&mut vcx), px(72.));
+
+        // A configure event that switches the kind re-renders the cached bar and moves the toasts.
+        vcx.update(|_, cx| cx.global_mut::<TitleBarProbe>().client = Some(false));
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        vcx.run_until_parked();
+        assert_eq!(bounds(&mut vcx, "TitleBar").size.height, px(28.));
+        assert!(vcx.debug_bounds("TitleBarCaption-close").is_none());
+        assert_eq!(bounds(&mut vcx, "TabStrip").origin.y, px(28.));
+        assert_eq!(toast_top(&mut vcx), px(66.));
     }
 
     #[gpui_kit::test]
