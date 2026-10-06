@@ -17,6 +17,7 @@ pub mod motion;
 pub mod progress;
 pub mod radio;
 pub mod select;
+pub mod shield;
 pub mod skeleton;
 pub mod slider;
 pub mod stepper;
