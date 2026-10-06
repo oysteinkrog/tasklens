@@ -521,3 +521,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - m1f.11 (76ae642, 59ce714, 8190f31): rescue window; set_pinned committed before my reply (approved anyway); follow-up in progress. The frame Tab order and the title on a language change are in a new m1f bead.
 - jqk.14 (3f8f99c): Ctrl pause. observe_window_activation added. The case of a window removed while paused is noted on jqk.15.
 - yms.35: UTF-16LE rule approved (even addresses; reject surrogates, controls and FFFD to FFFF, and units made of two ASCII bytes).
+- bj6.32 (68e85fc..104185e): Share Theme window, Confirmation kind, kit Textarea for the code. Enter may fire twice (also in TlDialog), so a new ug9 bug bead was filed and also covers the title on a language change.
