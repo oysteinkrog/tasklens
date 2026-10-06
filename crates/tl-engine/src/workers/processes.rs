@@ -5,31 +5,47 @@
 //! a process detail, a process graph or recording needs it, and not at all otherwise
 //! (PROC-002, PROC-004, PROC-093). Records hold command lines and paths: this module logs only
 //! the record count (ADR-015).
+//!
+//! While the helper is `Unlocked`, `HelperReads` fills the Restricted cells of visible rows
+//! through `ReadProcessFiles` at 1 Hz, after the sweep and outside it (PROC-076). The next sweep
+//! applies the values. Exe and cwd paths from the helper are never logged.
 
 use std::cell::Cell;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use asupersync::channel::watch;
 use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
+use asupersync::time::sleep_until;
+use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::{SmallVec, smallvec};
 use tl_collect::CollectError;
 use tl_collect::apps::AppPaths;
 use tl_collect::apps::classify::{ProtectInputs, wayland_compositor_pid};
+use tl_collect::apps::naming::exe_basename;
+use tl_collect::counters::{Clock, resumed_between};
 use tl_collect::parse::filenr::parse_file_nr;
 use tl_collect::parse::topology::parse_cpu_list;
+use tl_collect::proc::io::{PidIo, parse_io};
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
 use tl_collect::proc::sweep::{ProcessSampler, SweepCtx, SweepInputs, SweepOutput};
-use tl_model::demand::Demand;
-use tl_model::health::{SourceId, SourceState};
-use tl_model::ids::ColumnId;
+use tl_collect::sanitize::sanitize_link;
+use tl_model::demand::{ColumnSet, Demand};
+use tl_model::health::{HelperState, SourceId, SourceState};
+use tl_model::helper_proto::{HelperError, HelperReply, HelperReplyBody, HelperRequest, ProcFiles};
+use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::process::{ProcFlags, ProcessExtras, ProcessExtrasP2, ProcessMeta, ProcessRecord};
 use tl_model::settings::EngineSettings;
-use tl_model::time::{BootId, now_boot_ns};
+use tl_model::time::{BootId, TimeNs, now_boot_ns};
+use tl_model::validity::{ProcessField, Validity};
 
 use crate::config::{EngineConfig, EngineMode};
+use crate::helper::{HelperCallError, HelperHandle};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{ProcessSweep, SourceUpdate, WorkerError};
@@ -99,6 +115,10 @@ pub struct ProcessesSource {
     cfg: Arc<EngineConfig>,
     /// Set by `period`: the optional reads run only while something shows them.
     wants: Cell<SweepWants>,
+    /// The sampler's clock, also used for the helper's I/O rates.
+    clock: fn() -> (TimeNs, u64),
+    /// Set by `helper_reads`.
+    helper: Option<HelperSide>,
 }
 
 impl ProcessesSource {
@@ -154,13 +174,37 @@ impl ProcessesSource {
             protect,
             cfg,
             wants: Cell::new(SweepWants::default()),
+            clock: real_clock,
+            helper: None,
         })
     }
 
     /// The sampler with a test clock (CLOCK_BOOTTIME ns, CLOCK_MONOTONIC ns).
-    pub fn with_clock(mut self, clock: fn() -> (tl_model::time::TimeNs, u64)) -> Self {
+    pub fn with_clock(mut self, clock: fn() -> (TimeNs, u64)) -> Self {
         self.sampler = self.sampler.with_clock(clock);
+        self.clock = clock;
         self
+    }
+
+    /// Connects the sweep to `handle`. Run the returned `HelperReads` next to `source::run`, as
+    /// `run` does.
+    pub fn helper_reads(&mut self, handle: HelperHandle) -> HelperReads {
+        let store = Arc::new(Mutex::new(HelperStore::default()));
+        let (wanted_tx, wanted) = watch::channel(Wanted::from([]));
+        self.helper = Some(HelperSide {
+            handle: handle.clone(),
+            wanted: wanted_tx,
+            wanted_sent: false,
+            store: Arc::clone(&store),
+            metas: FxHashMap::default(),
+        });
+        HelperReads {
+            handle,
+            wanted,
+            store,
+            clock: self.clock,
+            cursor: None,
+        }
     }
 
     /// `<sys>/devices/system/cpu/online`, or the last value when it cannot be read.
@@ -221,6 +265,10 @@ impl Source for ProcessesSource {
         }
 
         let file_nr = self.read_file_nr();
+        let mut extras_p2 = Vec::new();
+        if let Some(helper) = &mut self.helper {
+            helper.after_sweep(&mut self.out, &mut extras_p2);
+        }
         let out = &mut self.out;
         let records = std::mem::take(&mut out.records);
         tracing::debug!(count = records.len(), "process sweep");
@@ -232,8 +280,9 @@ impl Source for ProcessesSource {
             observed_end: out.observed_end,
             records,
             extras: std::mem::take(&mut out.extras),
-            // Filled for detail keys by the P2 readers (R-163 item 2).
-            extras_p2: Vec::new(),
+            // Filled for detail keys by the P2 readers (R-163 item 2); for now only the
+            // helper's cwd values.
+            extras_p2,
             app_stats: out.apps.iter().map(|a| a.to_model()).collect(),
             // Unit resource columns are P2.
             unit_stats: Vec::new(),
@@ -297,9 +346,26 @@ fn full_factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
                     return Outcome::Err(WorkerError::Other("job polled after completion".into()));
                 }
             };
-            source::run(cx, io, src).await
+            run(cx, io, src).await
         }
     })
+}
+
+/// `source::run` for the sweep, with `HelperReads` beside it when the session has a helper.
+pub async fn run(cx: Cx, io: WorkerIo, mut src: ProcessesSource) -> Outcome<(), WorkerError> {
+    let Some(handle) = io.shared.helper.clone() else {
+        return source::run(cx, io, src).await;
+    };
+    let reads = src.helper_reads(handle);
+    let demand = io.demand.clone();
+    let helper_cx = cx.clone();
+    let sweeps = source::run(cx, io, src);
+    let helper = async move {
+        reads.run(&helper_cx, demand).await;
+        // Only a cancel ends the reads; the sweep loop returns for it.
+        std::future::pending().await
+    };
+    futures_lite::future::or(sweeps, helper).await
 }
 
 /// The app lookup paths of the user tasklens runs as. The icon cache is
@@ -316,6 +382,11 @@ pub fn host_app_paths() -> AppPaths {
     }
 }
 
+fn real_clock() -> (TimeNs, u64) {
+    let c = Clock::now();
+    (c.boot_ns, c.mono_ns)
+}
+
 /// The value as a path when it is set, not empty and absolute.
 fn absolute(value: Option<OsString>) -> Option<PathBuf> {
     let path = PathBuf::from(value?);
@@ -327,6 +398,375 @@ fn host_compositor_pid() -> Option<u32> {
     let runtime = absolute(std::env::var_os("XDG_RUNTIME_DIR"))?;
     let display = std::env::var_os("WAYLAND_DISPLAY").unwrap_or_default();
     wayland_compositor_pid(&runtime, &display)
+}
+
+// ---- Helper reads (E29-017, PROC-076) ----
+
+/// The helper reads run at most this often (PROC-076).
+const HELPER_PERIOD: Duration = Duration::from_secs(1);
+/// The deadline of one `ReadProcessFiles` call.
+const HELPER_DEADLINE: Duration = Duration::from_secs(2);
+/// The most `ReadProcessFiles` calls per period.
+pub const HELPER_READS_MAX: usize = 64;
+/// A helper value older than this is not applied: the stale threshold at 1 Hz (ADR-008).
+const HELPER_MAX_AGE_NS: u64 = 3_000_000_000;
+
+/// The rows of the last sweep with a Restricted cell the helper can fill, with the files that
+/// fill them, sorted by key.
+type Wanted = Arc<[(ProcessKey, ProcFiles)]>;
+
+/// The helper files the shown columns need: I/O and Disk columns need `IO`, Handles `FD_LIST`,
+/// Image name and Image path `EXE`, Working directory `CWD`.
+pub fn helper_files(columns: &ColumnSet) -> ProcFiles {
+    let mut files = ProcFiles::empty();
+    for c in columns.iter() {
+        files |= match c {
+            c if (ColumnId::Disk..=ColumnId::IoWriteOps).contains(&c) => ProcFiles::IO,
+            ColumnId::Handles => ProcFiles::FD_LIST,
+            ColumnId::ImageName | ColumnId::ImagePath => ProcFiles::EXE,
+            ColumnId::Cwd => ProcFiles::CWD,
+            _ => ProcFiles::empty(),
+        };
+    }
+    files
+}
+
+/// The files that would fill the Restricted cells of one swept row.
+fn restricted_files(r: &ProcessRecord, x: &ProcessExtras) -> ProcFiles {
+    let mut files = ProcFiles::empty();
+    if r.validity.get(ProcessField::IoRead) == Validity::Restricted {
+        files |= ProcFiles::IO;
+    }
+    // `fd/`, `exe` and `cwd` are readable only for processes the user may ptrace.
+    if r.flags.contains(ProcFlags::OTHER_USER) {
+        if x.handles.is_none() {
+            files |= ProcFiles::FD_LIST;
+        }
+        if !r.flags.contains(ProcFlags::KERNEL_THREAD) {
+            if r.meta.exe.is_none() {
+                files |= ProcFiles::EXE;
+            }
+            files |= ProcFiles::CWD;
+        }
+    }
+    files
+}
+
+/// I/O rates from two helper reads.
+#[derive(Clone, Copy, Debug, Default)]
+struct HelperIo {
+    read_bps: f32,
+    write_bps: f32,
+    write_raw_bps: f32,
+    /// `Valid`, or `WarmingUp` on the first read and after a reset or a suspend.
+    validity: Validity,
+}
+
+/// The values of one helper reply. A file that failed is `None`.
+#[derive(Clone, Debug, Default)]
+struct HelperValues {
+    /// Sampler clock when the reply arrived.
+    t_ns: TimeNs,
+    io: Option<HelperIo>,
+    handles: Option<u32>,
+    exe: Option<Arc<str>>,
+    cwd: Option<Arc<str>>,
+}
+
+/// Written by `HelperReads`, read by the sweep.
+#[derive(Default)]
+struct HelperStore {
+    values: FxHashMap<ProcessKey, HelperValues>,
+    /// The last helper `io` counters per key, for the rates.
+    io_prev: FxHashMap<ProcessKey, (Clock, PidIo)>,
+}
+
+fn lock(store: &Mutex<HelperStore>) -> std::sync::MutexGuard<'_, HelperStore> {
+    store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The sweep's side of the helper reads.
+struct HelperSide {
+    handle: HelperHandle,
+    wanted: watch::Sender<Wanted>,
+    /// The last value sent on `wanted` was not empty.
+    wanted_sent: bool,
+    store: Arc<Mutex<HelperStore>>,
+    /// Per key, the swept meta and the copy with the helper's exe, so an unchanged row keeps
+    /// one `Arc`.
+    metas: FxHashMap<ProcessKey, (Arc<ProcessMeta>, Arc<ProcessMeta>)>,
+}
+
+impl HelperSide {
+    /// Sends the Restricted rows of this sweep to `HelperReads`, then applies the helper values
+    /// to `out`. `extras_p2` gets an entry per record when a cwd value is applied. While the
+    /// helper is not `Unlocked`, nothing is sent or applied and the values are dropped.
+    fn after_sweep(&mut self, out: &mut SweepOutput, extras_p2: &mut Vec<ProcessExtrasP2>) {
+        if self.handle.state() != HelperState::Unlocked {
+            if self.wanted_sent {
+                let _ = self.wanted.send(Wanted::from([]));
+                self.wanted_sent = false;
+                let mut store = lock(&self.store);
+                store.values.clear();
+                store.io_prev.clear();
+                self.metas.clear();
+            }
+            return;
+        }
+        let wanted: Wanted = out
+            .records
+            .iter()
+            .zip(&out.extras)
+            .filter_map(|(r, x)| {
+                let files = restricted_files(r, x);
+                (!files.is_empty()).then_some((r.key, files))
+            })
+            .collect();
+        self.wanted_sent = !wanted.is_empty();
+        // `send` fails only when `HelperReads` is gone.
+        let _ = self.wanted.send(wanted);
+
+        let mut store = lock(&self.store);
+        let records = &out.records;
+        let live = |k: &ProcessKey| records.binary_search_by_key(k, |r| r.key).is_ok();
+        store.values.retain(|k, _| live(k));
+        store.io_prev.retain(|k, _| live(k));
+        self.metas.retain(|k, _| live(k));
+        if store.values.is_empty() {
+            return;
+        }
+        let (now, count) = (out.observed_end, out.records.len());
+        for (i, (r, x)) in out.records.iter_mut().zip(&mut out.extras).enumerate() {
+            let Some(v) = store.values.get(&r.key) else {
+                continue;
+            };
+            if now.saturating_sub(v.t_ns) > HELPER_MAX_AGE_NS {
+                continue;
+            }
+            if let Some(io) = v.io
+                && r.validity.get(ProcessField::IoRead) == Validity::Restricted
+            {
+                r.io_read_bps = io.read_bps;
+                r.io_write_bps = io.write_bps;
+                x.disk_read_bps = io.read_bps;
+                x.disk_write_raw_bps = io.write_raw_bps;
+                r.validity.set(ProcessField::IoRead, io.validity);
+                r.validity.set(ProcessField::IoWrite, io.validity);
+            }
+            if x.handles.is_none() {
+                x.handles = v.handles;
+            }
+            if let Some(exe) = &v.exe
+                && r.meta.exe.is_none()
+            {
+                r.meta = patched_meta(&mut self.metas, r, exe);
+                let path = exe.strip_suffix(" (deleted)");
+                x.exe_deleted = path.is_some();
+                x.exe_name = Arc::from(exe_basename(path.unwrap_or(exe)));
+                x.exe_path = Arc::clone(exe);
+            }
+            if let Some(cwd) = &v.cwd {
+                if extras_p2.is_empty() {
+                    extras_p2.resize(count, ProcessExtrasP2::default());
+                }
+                let p2 = &mut extras_p2[i];
+                p2.key = Some(r.key);
+                p2.cwd = Some(Arc::clone(cwd));
+            }
+        }
+    }
+}
+
+/// `r.meta` with `exe` set, reusing the last copy while the swept meta is the same `Arc`.
+fn patched_meta(
+    metas: &mut FxHashMap<ProcessKey, (Arc<ProcessMeta>, Arc<ProcessMeta>)>,
+    r: &ProcessRecord,
+    exe: &Arc<str>,
+) -> Arc<ProcessMeta> {
+    if let Some((swept, patched)) = metas.get(&r.key)
+        && Arc::ptr_eq(swept, &r.meta)
+        && patched.exe.as_ref() == Some(exe)
+    {
+        return Arc::clone(patched);
+    }
+    let patched = Arc::new(ProcessMeta {
+        exe: Some(Arc::clone(exe)),
+        ..ProcessMeta::clone(&r.meta)
+    });
+    metas.insert(r.key, (Arc::clone(&r.meta), Arc::clone(&patched)));
+    patched
+}
+
+/// The helper side of the reads: at most once per second, after a sweep, one
+/// `ReadProcessFiles` per visible Restricted row, at most `HELPER_READS_MAX` (PROC-076).
+pub struct HelperReads {
+    handle: HelperHandle,
+    wanted: watch::Receiver<Wanted>,
+    store: Arc<Mutex<HelperStore>>,
+    clock: fn() -> (TimeNs, u64),
+    /// The last key read: the next period starts after it, so rows past the cap wait their
+    /// turn in key order.
+    cursor: Option<ProcessKey>,
+}
+
+impl HelperReads {
+    /// Runs until `cx` is cancelled or the sweep side is dropped.
+    pub async fn run(mut self, cx: &Cx, demand: watch::Receiver<Demand>) {
+        let mut last: Option<Time> = None;
+        while self.wanted.changed(cx).await.is_ok() {
+            if let Some(at) = last {
+                let next = at + HELPER_PERIOD;
+                if cx.now() < next {
+                    sleep_until(next).await;
+                }
+            }
+            if cx.checkpoint().is_err() {
+                return;
+            }
+            if self.handle.state() != HelperState::Unlocked {
+                continue;
+            }
+            let batch = self.pick(&demand.borrow_and_clone());
+            if batch.is_empty() {
+                continue;
+            }
+            last = Some(cx.now());
+            for (key, files) in batch {
+                // `call` would start a session when Locked: reads run only after the user
+                // unlocked.
+                if self.handle.state() != HelperState::Unlocked {
+                    break;
+                }
+                let req = HelperRequest::ReadProcessFiles { key, files };
+                match self.handle.call(cx, req, None, HELPER_DEADLINE).await {
+                    Ok(replies) => self.store(key, files, &replies),
+                    Err(HelperCallError::Cancelled) => return,
+                    // The cell stays Restricted.
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    /// The visible rows of the last sweep with a Restricted shown cell, starting after
+    /// `cursor` in key order, at most `HELPER_READS_MAX`.
+    fn pick(&mut self, demand: &Demand) -> Vec<(ProcessKey, ProcFiles)> {
+        let mask = helper_files(&demand.process_columns);
+        if mask.is_empty() || demand.detail_keys.is_empty() {
+            return Vec::new();
+        }
+        let visible: FxHashSet<ProcessKey> = demand.detail_keys.iter().copied().collect();
+        let wanted = self.wanted.borrow_and_clone();
+        let rows = wanted.iter().filter_map(|&(key, files)| {
+            let files = files & mask;
+            (visible.contains(&key) && !files.is_empty()).then_some((key, files))
+        });
+        let cursor = self.cursor;
+        let after = |(key, _): &(ProcessKey, ProcFiles)| cursor.is_none_or(|c| *key > c);
+        let mut batch: Vec<_> = rows.clone().filter(after).collect();
+        batch.extend(rows.filter(|row| !after(row)));
+        batch.truncate(HELPER_READS_MAX);
+        self.cursor = batch.last().map(|(key, _)| *key);
+        batch
+    }
+
+    /// Keeps the values of one reply for the next sweep.
+    fn store(&self, key: ProcessKey, files: ProcFiles, replies: &[HelperReply]) {
+        let (boot_ns, mono_ns) = (self.clock)();
+        let now = Clock { boot_ns, mono_ns };
+        let mut values = HelperValues {
+            t_ns: boot_ns,
+            ..HelperValues::default()
+        };
+        let mut store = lock(&self.store);
+        for (file, data) in reply_files(files, replies) {
+            match file {
+                ProcFiles::IO => {
+                    let mut io = PidIo::default();
+                    if parse_io(&data, &mut io).is_ok() {
+                        let prev = store.io_prev.insert(key, (now, io));
+                        values.io = Some(io_rates(prev, now, io));
+                    }
+                }
+                ProcFiles::FD_LIST => {
+                    values.handles = postcard::from_bytes::<Vec<(u32, &[u8])>>(&data)
+                        .ok()
+                        .map(|fds| u32::try_from(fds.len()).unwrap_or(u32::MAX));
+                }
+                ProcFiles::EXE => values.exe = link_text(&data),
+                ProcFiles::CWD => values.cwd = link_text(&data),
+                _ => {}
+            }
+        }
+        store.values.insert(key, values);
+    }
+}
+
+/// The data of each file of a `ReadProcessFiles` reply that was read. The helper sends each
+/// requested file in ascending bit order as one or more `File` bodies or one `Err(Os(_))` body
+/// (E29-004); any other `Err` fails the whole reply.
+fn reply_files(files: ProcFiles, replies: &[HelperReply]) -> Vec<(ProcFiles, Vec<u8>)> {
+    let order: SmallVec<[ProcFiles; 4]> = files.iter().collect();
+    let mut next = 0;
+    let mut out: Vec<(ProcFiles, Vec<u8>)> = Vec::new();
+    // The file of the last `File` body, which a following chunk continues.
+    let mut current = None;
+    for reply in replies {
+        match &reply.body {
+            HelperReplyBody::File { file, data } if current == Some(*file) => {
+                if let Some((_, buf)) = out.last_mut() {
+                    buf.extend_from_slice(data);
+                }
+            }
+            HelperReplyBody::File { file, data } => {
+                let rest = order.get(next..).unwrap_or_default();
+                let Some(at) = rest.iter().position(|f| f == file) else {
+                    return Vec::new();
+                };
+                next += at + 1;
+                current = Some(*file);
+                out.push((*file, data.clone()));
+            }
+            HelperReplyBody::Err(HelperError::Os(_)) => {
+                next += 1;
+                current = None;
+            }
+            HelperReplyBody::Err(_) => return Vec::new(),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Sanitized link text, `None` when empty.
+fn link_text(data: &[u8]) -> Option<Arc<str>> {
+    let mut text = String::new();
+    sanitize_link(data, &mut text);
+    (!text.is_empty()).then(|| Arc::from(text))
+}
+
+/// The ADR-008 counter rules for helper `io` reads: no rate on the first read, when time did
+/// not move forward, across a suspend or after a counter went down.
+fn io_rates(prev: Option<(Clock, PidIo)>, now: Clock, cur: PidIo) -> HelperIo {
+    let Some((then, old)) = prev else {
+        return HelperIo::default();
+    };
+    let reset = cur.read_bytes < old.read_bytes
+        || cur.write_bytes < old.write_bytes
+        || cur.cancelled_write_bytes < old.cancelled_write_bytes;
+    if now.boot_ns <= then.boot_ns || resumed_between(then, now) || reset {
+        return HelperIo::default();
+    }
+    let dt_s = (now.boot_ns - then.boot_ns) as f64 / 1e9;
+    let d_read = cur.read_bytes - old.read_bytes;
+    let d_write = cur.write_bytes - old.write_bytes;
+    let d_cancel = cur.cancelled_write_bytes - old.cancelled_write_bytes;
+    HelperIo {
+        read_bps: (d_read as f64 / dt_s) as f32,
+        write_bps: (d_write.saturating_sub(d_cancel) as f64 / dt_s) as f32,
+        write_raw_bps: (d_write as f64 / dt_s) as f32,
+        validity: Validity::Valid,
+    }
 }
 
 #[cfg(test)]
