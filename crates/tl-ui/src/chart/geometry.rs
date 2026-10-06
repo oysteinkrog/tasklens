@@ -233,7 +233,7 @@ pub struct BuildInput<'a> {
     pub y_min: f32,
     pub y_max: f32,
     pub now_boot_ns: u64,
-    /// P2 stacked bands (E19-012); not read yet.
+    /// P2 stacked bands (PERF-030): band `k` draws the sum of series `0..=k`.
     pub stack: bool,
 }
 
@@ -243,6 +243,105 @@ pub struct Scratch {
     runs: SmallVec<[Run; 8]>,
     pts: Vec<Pt>,
     stale_pts: Vec<Pt>,
+    /// Stacked mode: the current series' window with cumulative values, the band floor under
+    /// each of those samples, the floor under each decimated point, and the running sum per
+    /// period slot.
+    stacked: Vec<Sample>,
+    floors: Vec<f32>,
+    pt_floors: Vec<f32>,
+    acc: Vec<f32>,
+    live: Builders,
+    stale: Builders,
+}
+
+/// Period slots that align stacked series by bucket index, so ±period/2 jitter still lands in one
+/// slot (ADR-008: per-core series come from one `/proc/stat` read).
+struct StackGrid {
+    period_ns: u64,
+    first_slot: u64,
+}
+
+impl StackGrid {
+    /// Slots from the window's left overscan edge to the newest sample of any series. The period
+    /// is the first present series' period.
+    fn new(input: &BuildInput, acc: &mut Vec<f32>) -> Self {
+        let period_ns = input
+            .series
+            .iter()
+            .find_map(|(_, v)| v.map(|v| v.period_ns))
+            .unwrap_or(1)
+            .max(1);
+        let map = &input.map;
+        let left = map
+            .right_edge_ns
+            .saturating_sub(map.range_ns)
+            .saturating_sub(period_ns.saturating_mul(2));
+        let grid = Self {
+            period_ns,
+            first_slot: left / period_ns,
+        };
+        let newest = input
+            .series
+            .iter()
+            .filter_map(|(_, v)| v.and_then(|v| v.samples.last()).map(|s| s.t_ns))
+            .max()
+            .unwrap_or(0);
+        let len = grid.slot(newest).map_or(0, |i| i + 1);
+        acc.clear();
+        acc.resize(len, 0.0);
+        grid
+    }
+
+    fn slot(&self, t_ns: u64) -> Option<usize> {
+        let k = t_ns.saturating_add(self.period_ns / 2) / self.period_ns;
+        usize::try_from(k.checked_sub(self.first_slot)?).ok()
+    }
+
+    /// Copies `samples` into `out` with each valid value raised by the sum of the lower series in
+    /// its slot, and that sum into `floors`. A slot that a lower series missed counts it as 0.
+    fn stack(&self, samples: &[Sample], acc: &[f32], out: &mut Vec<Sample>, floors: &mut Vec<f32>) {
+        out.clear();
+        floors.clear();
+        for s in samples {
+            let floor = if s.flags.contains(SampleFlags::VALID) {
+                self.slot(s.t_ns)
+                    .and_then(|i| acc.get(i))
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            out.push(Sample {
+                value: s.value + floor,
+                ..*s
+            });
+            floors.push(floor);
+        }
+    }
+
+    /// Adds the valid values of `samples` to their slots.
+    fn add(&self, samples: &[Sample], acc: &mut [f32]) {
+        for s in samples {
+            if s.flags.contains(SampleFlags::VALID)
+                && let Some(a) = self.slot(s.t_ns).and_then(|i| acc.get_mut(i))
+            {
+                *a += s.value;
+            }
+        }
+    }
+}
+
+/// The floor under each point of `pts`, which were decimated from `samples[span]` (sorted by
+/// time, each point one of those samples).
+fn floors_of(samples: &[Sample], floors: &[f32], span: Run, pts: &[Pt], out: &mut Vec<f32>) {
+    out.clear();
+    let mut i = span.start;
+    for p in pts {
+        while i + 1 < span.end && samples[i].t_ns < p.t_ns {
+            i += 1;
+        }
+        out.push(floors.get(i).copied().unwrap_or(0.0));
+    }
 }
 
 /// `plot_height − (value − y_min) / (y_max − y_min) × plot_height`, clamped to `0..=plot_height`.
@@ -259,7 +358,8 @@ pub fn y_of(value: f32, y_min: f32, y_max: f32, plot_height: f32) -> f32 {
 const DASH: [gpui_kit::Pixels; 2] = [px(5.0), px(5.0)];
 
 /// Builders keyed by colour (and dash for strokes) in insertion order (rule 7). Created on first
-/// use, so a colour with no points adds no set.
+/// use, so a colour with no points adds no set. Kept in `Scratch` so the lists do not reallocate
+/// per build when a stacked chart has more colours than the inline size.
 #[derive(Default)]
 struct Builders {
     fills: SmallVec<[(Hsla, PathBuilder); 2]>,
@@ -299,8 +399,9 @@ impl Builders {
         &mut self.strokes[i].2
     }
 
-    /// One fill polygon (when the series has a fill) and one stroke for `pts`.
-    fn emit(&mut self, s: &ChartSeries, pts: &[Pt], input: &BuildInput) {
+    /// One fill polygon (when the series has a fill) and one stroke for `pts`. The polygon goes
+    /// down to the baseline, or with `floors` (one per point, stacked bands) back along the floor.
+    fn emit(&mut self, s: &ChartSeries, pts: &[Pt], floors: Option<&[f32]>, input: &BuildInput) {
         let Some((first, rest)) = pts.split_first() else {
             return;
         };
@@ -316,14 +417,30 @@ impl Builders {
             && !rest.is_empty()
         {
             let b = self.fill(fill);
-            b.move_to(point(p0.x, px(h)));
-            b.line_to(p0);
-            let mut last = p0;
-            for p in rest {
-                last = xy(p);
-                b.line_to(last);
+            match floors {
+                Some(floors) => {
+                    b.move_to(p0);
+                    for p in rest {
+                        b.line_to(xy(p));
+                    }
+                    for (p, f) in pts.iter().zip(floors).rev() {
+                        b.line_to(xy(&Pt {
+                            t_ns: p.t_ns,
+                            value: *f,
+                        }));
+                    }
+                }
+                None => {
+                    b.move_to(point(p0.x, px(h)));
+                    b.line_to(p0);
+                    let mut last = p0;
+                    for p in rest {
+                        last = xy(p);
+                        b.line_to(last);
+                    }
+                    b.line_to(point(last.x, px(h)));
+                }
             }
-            b.line_to(point(last.x, px(h)));
             b.close();
         }
         let b = self.stroke(s);
@@ -337,18 +454,19 @@ impl Builders {
         }
     }
 
-    /// Tessellates every builder into `fills` and `strokes`. A failed or empty path adds no set.
-    fn finish(self, fills: &mut SmallVec<[PathSet; 2]>, strokes: &mut SmallVec<[PathSet; 3]>) {
+    /// Tessellates every builder into `fills` and `strokes` and leaves the builder lists empty. A
+    /// failed or empty path adds no set.
+    fn finish(&mut self, fills: &mut SmallVec<[PathSet; 2]>, strokes: &mut SmallVec<[PathSet; 3]>) {
         fills.clear();
         strokes.clear();
         fills.extend(
             self.fills
-                .into_iter()
+                .drain(..)
                 .filter_map(|(color, b)| set(color, false, b)),
         );
         strokes.extend(
             self.strokes
-                .into_iter()
+                .drain(..)
                 .filter_map(|(color, dashed, b)| set(color, dashed, b)),
         );
     }
@@ -364,34 +482,56 @@ fn set(color: Hsla, dashed: bool, b: PathBuilder) -> Option<PathSet> {
 }
 
 /// Builds fill and stroke paths, their stale sets and the dotted-gap spans into `cache`
-/// (ADR-009 rules 2, 4, 6, 7; UI-PRF-001; UI-PRF-007). Paths are chart-local physical pixels at
-/// a zero origin; the element translates them at paint time and owns the scale factor.
+/// (ADR-009 rules 2, 4, 6, 7; UI-PRF-001; UI-PRF-007; PERF-030). Paths are chart-local physical
+/// pixels at a zero origin; the element translates them at paint time and owns the scale factor.
 ///
 /// Fresh samples go to the live paths. `STALE` samples go to the stale paths, joined to their
 /// fresh neighbours so the line does not break. When the series is stale (R-051), a flat tail
 /// from the newest sample to `map.right_edge_ns` at the newest value goes to the stale paths too.
 /// Gaps come from the first series only.
+///
+/// With `input.stack`, series are stacked in order: each valid sample of series `k` is raised by
+/// the values of series `0..k` in the same period slot, and its fill goes down to that floor
+/// instead of the baseline. Runs, gaps and decimation stay per series.
 pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) {
     let map = &input.map;
-    let mut live = Builders::default();
-    let mut stale = Builders::default();
+    let Scratch {
+        runs,
+        pts,
+        stale_pts,
+        stacked,
+        floors,
+        pt_floors,
+        acc,
+        live,
+        stale,
+    } = scratch;
     cache.gaps.clear();
     let bucket = bucket_ns(map.range_ns, map.plot_width.max(1.0).round() as u32);
+    let grid = input.stack.then(|| StackGrid::new(input, acc));
 
     for (si, (spec, view)) in input.series.iter().enumerate() {
         let Some(view) = view else {
             continue;
         };
-        let samples = &view.samples[..];
         let period = view.period_ns;
-        let from = window_start(samples, map.right_edge_ns, map.range_ns, period);
-        split_runs(samples, from, &mut scratch.runs);
+        let from = window_start(&view.samples, map.right_edge_ns, map.range_ns, period);
+        let (samples, from, band_floors): (&[Sample], usize, Option<&[f32]>) = match &grid {
+            Some(g) => {
+                let window = &view.samples[from..];
+                g.stack(window, acc, stacked, floors);
+                g.add(window, acc);
+                (&stacked[..], 0, Some(&floors[..]))
+            }
+            None => (&view.samples[..], from, None),
+        };
+        split_runs(samples, from, runs);
 
         if si == 0 {
-            push_gaps(samples, &scratch.runs, map, period, &mut cache.gaps);
+            push_gaps(samples, runs, map, period, &mut cache.gaps);
         }
 
-        for run in &scratch.runs {
+        for run in runs.iter() {
             // Alternating stretches of fresh and `STALE` samples within the run.
             let mut i = run.start;
             while i < run.end {
@@ -401,35 +541,43 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                 {
                     j += 1;
                 }
-                if is_stale_flag {
+                let (span, out, builders) = if is_stale_flag {
                     let span = Run {
                         start: i.saturating_sub(1).max(run.start),
                         end: (j + 1).min(run.end),
                     };
-                    decimate(samples, span, bucket, &mut scratch.stale_pts);
-                    stale.emit(spec, &scratch.stale_pts, input);
+                    (span, &mut *stale_pts, &mut *stale)
                 } else {
-                    decimate(samples, Run { start: i, end: j }, bucket, &mut scratch.pts);
-                    live.emit(spec, &scratch.pts, input);
+                    (Run { start: i, end: j }, &mut *pts, &mut *live)
+                };
+                decimate(samples, span, bucket, out);
+                if let Some(f) = band_floors {
+                    floors_of(samples, f, span, out, pt_floors);
                 }
+                builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input);
                 i = j;
             }
         }
 
         // Flat continuation of a stale series to the right edge (UI-PRF-007).
-        if let Some(last_run) = scratch.runs.last() {
+        if let Some(last_run) = runs.last() {
             let newest = samples[last_run.end - 1];
             if is_stale(newest.t_ns, input.now_boot_ns, period) && map.right_edge_ns > newest.t_ns {
-                scratch.stale_pts.clear();
-                scratch.stale_pts.push(Pt {
+                stale_pts.clear();
+                stale_pts.push(Pt {
                     t_ns: newest.t_ns,
                     value: newest.value,
                 });
-                scratch.stale_pts.push(Pt {
+                stale_pts.push(Pt {
                     t_ns: map.right_edge_ns,
                     value: newest.value,
                 });
-                stale.emit(spec, &scratch.stale_pts, input);
+                if let Some(f) = band_floors {
+                    let floor = f[last_run.end - 1];
+                    pt_floors.clear();
+                    pt_floors.extend([floor, floor]);
+                }
+                stale.emit(spec, stale_pts, band_floors.map(|_| &pt_floors[..]), input);
             }
         }
     }

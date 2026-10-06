@@ -1,4 +1,4 @@
-//! Chart geometry unit tests (tasklens-yrf.4 and yrf.5, ADR-009 rules 2 to 7; UI-PRF-007;
+//! Chart geometry unit tests (tasklens-yrf.4, yrf.5 and yrf.14, ADR-009 rules 2 to 7; UI-PRF-007;
 //! R-051).
 
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use tl_ui::chart::geometry::{
     BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, decimate, is_stale, right_edge_ns,
     split_runs, stale_age_ns, window_start, y_of,
 };
-use tl_ui::chart::{ChartCache, ChartSeries, PathSet};
+use tl_ui::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
 const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000_000_000;
@@ -416,6 +416,187 @@ fn y_of_maps_and_clamps() {
     assert_eq!(y_of(25.0, 0.0, 100.0, 200.0), 150.0);
     // An empty scale puts the value on the baseline.
     assert_eq!(y_of(5.0, 1.0, 1.0, 100.0), 100.0);
+}
+
+fn stack_build(
+    series: &[(ChartSeries, Option<&SeriesView>)],
+    map: TimeMap,
+    now: u64,
+    y_max: f32,
+    cache: &mut ChartCache,
+    scratch: &mut Scratch,
+) {
+    let input = BuildInput {
+        series,
+        map,
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max,
+        now_boot_ns: now,
+        stack: true,
+    };
+    build(&input, cache, scratch);
+}
+
+fn ys(set: &PathSet) -> impl Iterator<Item = f32> + '_ {
+    set.path.vertices.iter().map(|v| v.xy_position.y.as_f32())
+}
+
+fn y_span(set: &PathSet) -> (f32, f32) {
+    ys(set).fold((f32::MAX, f32::MIN), |(lo, hi), y| (lo.min(y), hi.max(y)))
+}
+
+fn has_vertex(set: &PathSet, x: f32, y: f32) -> bool {
+    set.path.vertices.iter().any(|v| {
+        (v.xy_position.x.as_f32() - x).abs() < 0.01 && (v.xy_position.y.as_f32() - y).abs() < 0.01
+    })
+}
+
+fn colour(i: usize) -> Hsla {
+    hsla(i as f32 / 40.0, 1.0, 0.5, 1.0)
+}
+
+/// Stacked bands (tasklens-yrf.14, PERF-030).
+#[test]
+fn stacked_bands_cumulative() {
+    let vals = [10.0, 20.0, 30.0];
+    let data: Vec<Vec<Sample>> = vals
+        .iter()
+        .map(|&v| series(50, 100 * MS, 10 * SEC, move |_| v))
+        .collect();
+    let map = exact_map(&data[0]);
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+        .collect();
+    let mut cache = ChartCache::default();
+    // `Stacked(3)`: 0..300.
+    stack_build(
+        &spec,
+        map,
+        data[0][49].t_ns,
+        300.0,
+        &mut cache,
+        &mut Scratch::default(),
+    );
+    let y = |v: f32| y_of(v, 0.0, 300.0, 100.0);
+
+    assert_eq!(cache.fills.len(), 3);
+    assert_eq!(cache.strokes.len(), 3);
+    // Each band goes from its top line down to the band below it.
+    let close =
+        |(a, b): (f32, f32), (c, d): (f32, f32)| (a - c).abs() < 0.01 && (b - d).abs() < 0.01;
+    assert!(close(y_span(&cache.fills[2]), (y(60.0), y(30.0))));
+    assert!(close(y_span(&cache.fills[1]), (y(30.0), y(10.0))));
+    assert!(close(y_span(&cache.fills[0]), (y(10.0), y(0.0))));
+    // Strokes are 1 px wide around each band's top line.
+    for (k, top) in [10.0, 30.0, 60.0].into_iter().enumerate() {
+        let (lo, hi) = y_span(&cache.strokes[k]);
+        assert!(((lo + hi) / 2.0 - y(top)).abs() < 0.01, "band {k}");
+    }
+}
+
+#[test]
+fn overlaid_merges_to_one_stroke() {
+    let line_colour = hsla(0.55, 0.8, 0.5, 1.0 / 16.0);
+    let data: Vec<Vec<Sample>> = (0..16)
+        .map(|k| series(50, 100 * MS, 10 * SEC, move |i| noise(i + k * 7)))
+        .collect();
+    let map = exact_map(&data[0]);
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .map(|v| (line(None, line_colour, false), Some(v)))
+        .collect();
+    let cache = run_build(&spec, map, data[0][49].t_ns);
+    assert_eq!(cache.strokes.len(), 1);
+    assert!(cache.fills.is_empty());
+}
+
+#[test]
+fn stacked_gap_in_middle_series() {
+    let vals = [10.0, 20.0, 30.0];
+    let mut data: Vec<Vec<Sample>> = vals
+        .iter()
+        .map(|&v| series(200, 100 * MS, 10 * SEC, move |_| v))
+        .collect();
+    data[1][100] = Sample::gap(data[1][100].t_ns);
+    // The other series jitter by up to half a period and still stack by bucket.
+    for s in &mut data[2] {
+        s.t_ns += 40 * MS;
+    }
+    let map = exact_map(&data[0]);
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec: Vec<(ChartSeries, Option<&SeriesView>)> = views
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (line(Some(colour(i)), colour(i), false), Some(v)))
+        .collect();
+    let mut cache = ChartCache::default();
+    stack_build(
+        &spec,
+        map,
+        data[0][199].t_ns,
+        300.0,
+        &mut cache,
+        &mut Scratch::default(),
+    );
+    let y = |v: f32| y_of(v, 0.0, 300.0, 100.0);
+    let x = |s: &Sample| map.x_local(s.t_ns);
+
+    // Band 2 at bucket 100 is s0 + s2 over a floor of s0, and its neighbours are full sums.
+    let band2 = &cache.fills[2];
+    assert!(has_vertex(band2, x(&data[2][100]), y(40.0)));
+    assert!(has_vertex(band2, x(&data[2][100]), y(10.0)));
+    assert!(has_vertex(band2, x(&data[2][99]), y(60.0)));
+    assert!(has_vertex(band2, x(&data[2][101]), y(60.0)));
+    // Band 1 has its own gap there: no vertex at bucket 100.
+    let x100 = x(&data[1][100]);
+    assert!(xs(&cache.fills[1]).all(|v| (v - x100).abs() > 0.01));
+    assert!(xs(&cache.fills[1]).any(|v| v < x100) && xs(&cache.fills[1]).any(|v| v > x100));
+    // Dotted gaps come from series 0, which has none.
+    assert!(cache.gaps.is_empty());
+}
+
+#[test]
+fn many_series_no_per_rebuild_allocation() {
+    let data: Vec<Vec<Sample>> = (0..32)
+        .map(|k| series(600, 100 * MS, 10 * SEC, move |i| noise(i + k) / 32.0))
+        .collect();
+    let views: Vec<SeriesView> = data.iter().map(|s| view(s.clone(), 100 * MS)).collect();
+    let spec = ChartSpec {
+        series: (0..32)
+            .map(|i| line(Some(colour(i)), colour(i), false))
+            .collect(),
+        y: YScale::Stacked(32),
+        stack: true,
+        ..ChartSpec::default()
+    };
+    assert!(spec.series.spilled());
+    let series_ptr = spec.series.as_ptr();
+
+    let map = exact_map(&data[0]);
+    let now = data[0][599].t_ns;
+    let mut cache = ChartCache::default();
+    let mut scratch = Scratch::default();
+    let mut pairs: Vec<(ChartSeries, Option<&SeriesView>)> = Vec::with_capacity(32);
+    let mut fills_ptr = None;
+    for _ in 0..100 {
+        pairs.clear();
+        pairs.extend(spec.series.iter().cloned().zip(views.iter().map(Some)));
+        stack_build(&pairs, map, now, 3200.0, &mut cache, &mut scratch);
+        assert_eq!(cache.fills.len(), 32);
+        assert!(cache.fills.spilled());
+        // The fill list keeps its first heap buffer.
+        assert_eq!(
+            *fills_ptr.get_or_insert(cache.fills.as_ptr()),
+            cache.fills.as_ptr()
+        );
+        assert!(spec.series.spilled());
+        assert_eq!(spec.series.as_ptr(), series_ptr);
+    }
 }
 
 /// Y scale rules and axis text (tasklens-yrf.6, UI-PRF-006).

@@ -36,7 +36,7 @@ pub const DEFAULT_RANGE_NS: u64 = 60_000_000_000;
 /// What one chart draws and how.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChartSpec {
-    pub series: SmallVec<[ChartSeries; 2]>,
+    pub series: SmallVec<[ChartSeries; 4]>,
     pub y: YScale,
     /// 30 s, 60 s (default), 300 s, 600 s (R-016; 300 and 600 from P2).
     pub range_ns: u64,
