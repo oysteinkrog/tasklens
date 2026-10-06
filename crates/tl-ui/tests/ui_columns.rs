@@ -6,7 +6,6 @@
 
 use std::rc::Rc;
 
-use gpui_kit::Role;
 use gpui_kit::base::Root;
 use gpui_kit::base::test_support::snapshots;
 use gpui_kit::{
@@ -15,6 +14,7 @@ use gpui_kit::{
     SharedString, Styled, TestAppContext, TestDispatcher, VisualTestContext, Window, div, point,
     px,
 };
+use gpui_kit::{InteractiveElement as _, Role};
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
@@ -1024,6 +1024,8 @@ impl Render for MenuHost {
 struct MenuRig {
     table: Entity<TlTreeTable<HDelegate>>,
     host: Entity<MenuHost>,
+    /// Read by the toast checks, which need `test-hooks`.
+    #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
     toasts: Entity<ToastQueue>,
     vcx: VisualTestContext,
 }
@@ -1082,14 +1084,16 @@ fn open_menu(vcx: &mut VisualTestContext) -> Option<gpui_kit::Bounds<Pixels>> {
     })
 }
 
-/// The labels of the open top menu's items, in order. Submenus are closed.
+/// The labels of the menu items on screen, top to bottom. Submenus are closed.
 fn menu_labels(vcx: &mut VisualTestContext) -> Vec<String> {
     vcx.update(|window, _| {
-        snapshots(window)
+        let mut items: Vec<_> = snapshots(window)
             .into_iter()
             .filter(|s| s.role() == Some(Role::MenuItem))
-            .filter_map(|s| s.label().map(str::to_owned))
-            .collect()
+            .filter_map(|s| Some((s.bounds().origin.y, s.label()?.to_owned())))
+            .collect();
+        items.sort_by(|a, b| a.0.as_f32().total_cmp(&b.0.as_f32()));
+        items.into_iter().map(|(_, label)| label).collect()
     })
 }
 
@@ -1117,6 +1121,7 @@ fn rows_for(
     })
 }
 
+#[cfg(feature = "test-hooks")]
 fn toast_texts(vcx: &mut VisualTestContext, toasts: &Entity<ToastQueue>) -> Vec<SharedString> {
     vcx.update(|_, cx| toasts.read(cx).visible_texts())
 }
@@ -1243,6 +1248,7 @@ fn hide_column_persists() {
         [ColumnId::Name, ColumnId::Pid, ColumnId::Cpu, ColumnId::Pss]
     );
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
+    #[cfg(feature = "test-hooks")]
     assert!(
         toast_texts(&mut rig.vcx, &rig.toasts).is_empty(),
         "no toast"
@@ -1308,6 +1314,7 @@ fn reset_columns_restores_defaults_and_toasts() {
         .update(|_, cx| rig.table.read(cx).delegate.layout.clone());
     assert_eq!(layout, defaults);
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
+    #[cfg(feature = "test-hooks")]
     assert_eq!(
         toast_texts(&mut rig.vcx, &rig.toasts),
         [SharedString::new_static("Columns reset to default")]
@@ -1334,5 +1341,6 @@ fn reset_columns_without_defaults_propagates() {
         }]
     );
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
+    #[cfg(feature = "test-hooks")]
     assert!(toast_texts(&mut rig.vcx, &rig.toasts).is_empty());
 }
