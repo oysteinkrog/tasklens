@@ -1,6 +1,8 @@
-//! LabRuntime tests for the action pipeline (ADR-013, E11-007): admission limits, deadlines,
-//! event order and summaries, and every P1 process kind, through `run_action` with a scripted
-//! `FakeOps`.
+//! LabRuntime tests for the action pipeline (ADR-013, E11-007, E11-017): admission limits,
+//! deadlines, event order and summaries, and every P1 process kind, through `run_action` with a
+//! scripted `FakeOps`. Part 2 adds the targetless kinds and unit jobs through the real `Gate`
+//! with a `FakeUnitBus` per manager. The per-module cases for sched, I/O priority, thread
+//! targets, cgroups, units and startup entries are unit tests in their own `actions/*.rs`.
 //!
 //! `Cx::spawn_blocking` runs the job inline in the lab and `ActionOps` gets no `Cx`, so a fake
 //! job cannot await a sleep. The harness installs its own `VirtualClock` as the timer driver and
@@ -30,12 +32,16 @@ use asupersync::types::{Budget, RegionId, Time};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::io::Errno;
 use tl_engine::actions::process::PidOp;
+use tl_engine::actions::unit::{
+    BusFuture, JobRemovedSignal, JobStream, UnitBus, UnitBusError, UnitBusOverride,
+};
 use tl_engine::actions::{
-    ActionCtx, ActionOps, Admission, LaunchOutcome, Openers, admit, deadline, run_action, summarize,
+    ActionCtx, ActionOps, Admission, Gate, LaunchOutcome, Openers, admit, deadline, run_action,
+    summarize,
 };
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::dbus::ManagerConnSlot;
-use tl_engine::reducer::AdmissionView;
+use tl_engine::reducer::{ActionGate, AdmissionView};
 use tl_engine::update::EngineMsg;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
@@ -47,6 +53,7 @@ use tl_model::system::CpuSet;
 use tl_model::table::{Manager, StartupRef, StartupSource, UnitRef};
 use tl_model::time::BootId;
 use tl_ops::OpsError;
+use zbus::zvariant::{ObjectPath, OwnedValue, Value};
 
 const BOOT: BootId = BootId(1);
 const EXITED_DURING: &str = "process exited during the change";
@@ -165,6 +172,8 @@ struct Harness {
     seen: Vec<ActionEvent>,
     in_flight: FxHashSet<ActionId>,
     live: FxHashMap<ProcessKey, ProcFlags>,
+    /// The real `Gate` over `actx`, when set. `submit` and `finished` then go through it.
+    gate: Option<Arc<Mutex<Gate>>>,
 }
 
 fn harness() -> Harness {
@@ -172,10 +181,14 @@ fn harness() -> Harness {
 }
 
 fn harness_with(config: LabConfig) -> Harness {
-    harness_full(config, None)
+    harness_full(config, None, None)
 }
 
-fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness {
+fn harness_full(
+    config: LabConfig,
+    openers: Option<Arc<dyn Openers>>,
+    unit_bus: Option<UnitBusOverride>,
+) -> Harness {
     let mut lab = LabRuntime::new(config);
     let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
     // Before any task exists: each `Cx` keeps the driver it was made with.
@@ -200,7 +213,7 @@ fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness
         openers,
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
-        unit_bus_override: None,
+        unit_bus_override: unit_bus,
         startup_paths: tl_engine::actions::startup::StartupPaths::from_env(),
     });
     Harness {
@@ -214,6 +227,7 @@ fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness
         seen: Vec::new(),
         in_flight: FxHashSet::default(),
         live: FxHashMap::default(),
+        gate: None,
     }
 }
 
@@ -225,6 +239,10 @@ impl Harness {
             if let ActionTarget::Process(key) = target {
                 self.live.entry(*key).or_insert(ProcFlags::empty());
             }
+        }
+        if let Some(gate) = &self.gate {
+            self.submit_gate(Arc::clone(gate), req);
+            return;
         }
         let exited = FxHashSet::default();
         let view = AdmissionView {
@@ -255,6 +273,29 @@ impl Harness {
                 self.lab.scheduler.lock().schedule(task, 0);
             }
         }
+    }
+
+    /// Hands `req` to the real gate inside a task, since `ActionGate::submit` needs a `Cx`.
+    /// The tests that use the gate never fill its 16 slots, so every request counts as in
+    /// flight.
+    fn submit_gate(&mut self, gate: Arc<Mutex<Gate>>, req: ActionRequest) {
+        self.in_flight.insert(req.id);
+        let live = self.live.clone();
+        let (task, _handle) = self
+            .lab
+            .state
+            .create_task(self.root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let exited = FxHashSet::default();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &live,
+                    exited_within_linger: &exited,
+                };
+                lock(&gate).submit(&cx, req, &view);
+            })
+            .expect("task is created");
+        self.lab.scheduler.lock().schedule(task, 0);
     }
 
     fn run(&mut self) {
@@ -289,6 +330,9 @@ impl Harness {
             match msg {
                 EngineMsg::ActionFinished { id } => {
                     assert!(self.in_flight.remove(&id), "{id:?} finished twice");
+                    if let Some(gate) = &self.gate {
+                        lock(gate).finished(id);
+                    }
                     out.push(id);
                 }
                 other => panic!("unexpected message {other:?}"),
@@ -1120,7 +1164,7 @@ impl Openers for FakeOpeners {
 
 fn openers_harness(fake: &Arc<FakeOpeners>) -> Harness {
     let openers: Arc<dyn Openers> = fake.clone();
-    harness_full(LabConfig::new(7).max_steps(1_000_000), Some(openers))
+    harness_full(LabConfig::new(7).max_steps(1_000_000), Some(openers), None)
 }
 
 fn launch_kind(as_admin: bool) -> ActionKind {
@@ -1252,6 +1296,292 @@ fn targetless_without_openers() {
     }
 }
 
+// Unit jobs through the real Gate (E11-011, E11-A1) -----------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum FakeBusCall {
+    JobRemoved,
+    /// A manager method on `unit`, answered with job number `job`.
+    Call {
+        method: String,
+        unit: String,
+        job: u32,
+    },
+}
+
+/// One manager. Every job call answers with a fresh job path `JOB_PREFIX<n>`, n counting from
+/// 1. Each `job_removed` stream gets every signal `finish` sends after it opened, and stays open.
+struct FakeUnitBus {
+    calls: Mutex<Vec<FakeBusCall>>,
+    next_job: Mutex<u32>,
+    streams: Mutex<Vec<async_channel::Sender<JobRemovedSignal>>>,
+}
+
+const JOB_PREFIX: &str = "/org/freedesktop/systemd1/job/";
+
+impl FakeUnitBus {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: Mutex::new(Vec::new()),
+            next_job: Mutex::new(0),
+            streams: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn calls(&self) -> Vec<FakeBusCall> {
+        lock(&self.calls).clone()
+    }
+
+    /// The job number of the latest call on `unit`, if any.
+    fn job_of(&self, unit: &str) -> Option<u32> {
+        lock(&self.calls).iter().rev().find_map(|c| match c {
+            FakeBusCall::Call { unit: u, job, .. } if u == unit => Some(*job),
+            _ => None,
+        })
+    }
+
+    /// Sends `JobRemoved` for job `job` with `result` to every open stream.
+    fn finish(&self, job: u32, unit: &str, result: &str) {
+        let signal = JobRemovedSignal {
+            id: job,
+            job: Arc::from(format!("{JOB_PREFIX}{job}")),
+            unit: Arc::from(unit),
+            result: Arc::from(result),
+        };
+        // A stream dropped by a finished job closes its receiver.
+        lock(&self.streams).retain(|tx| tx.try_send(signal.clone()).is_ok());
+    }
+}
+
+impl UnitBus for FakeUnitBus {
+    fn call<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        method: &'a str,
+        args: &'a [Value<'static>],
+        _timeout: Duration,
+    ) -> BusFuture<'a, OwnedValue> {
+        let job = {
+            let mut next = lock(&self.next_job);
+            *next += 1;
+            *next
+        };
+        let unit = match args.first() {
+            Some(Value::Str(s)) => s.to_string(),
+            other => panic!("unit name expected, got {other:?}"),
+        };
+        lock(&self.calls).push(FakeBusCall::Call {
+            method: method.to_owned(),
+            unit,
+            job,
+        });
+        let path = format!("{JOB_PREFIX}{job}");
+        let reply = Value::from(ObjectPath::try_from(path).expect("a valid path"))
+            .try_into_owned()
+            .map_err(|_| UnitBusError::Closed);
+        Box::pin(async move { reply })
+    }
+
+    fn job_removed<'a>(&'a self, _cx: &'a Cx) -> BusFuture<'a, JobStream> {
+        lock(&self.calls).push(FakeBusCall::JobRemoved);
+        let (tx, rx) = async_channel::unbounded();
+        lock(&self.streams).push(tx);
+        Box::pin(async move { Ok(JobStream::new(rx)) })
+    }
+
+    fn get_property<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _unit_path: &'a str,
+        _iface: &'a str,
+        _name: &'a str,
+    ) -> BusFuture<'a, OwnedValue> {
+        Box::pin(async { Err(UnitBusError::NoConnection) })
+    }
+}
+
+/// A harness whose unit targets go to `system` or `user` by manager, with the real `Gate`.
+fn unit_harness(config: LabConfig) -> (Harness, Arc<FakeUnitBus>, Arc<FakeUnitBus>) {
+    let (system, user) = (FakeUnitBus::new(), FakeUnitBus::new());
+    let (s, u) = (Arc::clone(&system), Arc::clone(&user));
+    let pick: UnitBusOverride = Arc::new(move |manager| {
+        let bus = match manager {
+            Manager::System => Arc::clone(&s),
+            Manager::User => Arc::clone(&u),
+        };
+        Some(bus as Arc<dyn UnitBus>)
+    });
+    let mut h = harness_full(config, None, Some(pick));
+    h.gate = Some(Arc::new(Mutex::new(Gate::new(Arc::clone(&h.actx)))));
+    (h, system, user)
+}
+
+fn unit_target(manager: Manager, name: &str) -> ActionTarget {
+    ActionTarget::Unit(UnitRef {
+        manager,
+        name: Arc::from(name),
+    })
+}
+
+fn job_failed(result: &str) -> ActionState {
+    failed(ActionError::UnitJob {
+        result: Arc::from(result),
+        error_name: None,
+    })
+}
+
+#[test]
+fn busy_unit_second_action_rejected() {
+    let (mut h, _system, user) = unit_harness(LabConfig::new(7).max_steps(1_000_000));
+    let app = unit_target(Manager::User, "app.service");
+    h.submit(req(1, ActionKind::UnitStart, std::slice::from_ref(&app)));
+    h.run();
+    assert_eq!(h.events_for(ActionId(1)), [(None, ActionState::Started)]);
+
+    // Action 1 holds the unit while it waits for `JobRemoved`.
+    h.submit(req(2, ActionKind::UnitStart, std::slice::from_ref(&app)));
+    h.run();
+    let busy = ActionState::Rejected(RejectReason::Busy);
+    // The gate rejects the one target, and the one-target summary repeats its state.
+    assert_eq!(
+        h.events_for(ActionId(2)),
+        expected(std::slice::from_ref(&busy), busy.clone())
+    );
+    assert_eq!(h.finished(), [ActionId(2)]);
+    assert_eq!(
+        user.calls(),
+        [
+            FakeBusCall::JobRemoved,
+            FakeBusCall::Call {
+                method: "StartUnit".to_owned(),
+                unit: "app.service".to_owned(),
+                job: 1,
+            },
+        ]
+    );
+
+    // A whole tick with no signal: the wait has no client timeout.
+    h.advance(Duration::from_secs(1));
+    assert!(h.events_for(ActionId(1)).is_empty());
+    user.finish(1, "app.service", "done");
+    h.run();
+    assert_eq!(
+        h.events_for(ActionId(1)),
+        [
+            (Some(0), ActionState::Succeeded),
+            (None, ActionState::Succeeded)
+        ]
+    );
+    assert_eq!(h.finished(), [ActionId(1)]);
+
+    // `ActionFinished` freed the unit.
+    h.submit(req(3, ActionKind::UnitStart, std::slice::from_ref(&app)));
+    h.run();
+    assert_eq!(user.job_of("app.service"), Some(2));
+    user.finish(2, "app.service", "done");
+    h.run();
+    assert_eq!(
+        h.events_for(ActionId(3)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(h.finished(), [ActionId(3)]);
+    h.passed();
+}
+
+/// Moves the clock 100 ms at a time, at most 50 times, until `bus` has a call on `unit` other
+/// than job `not`. Chaos delays can hold a task back past one `run`.
+fn wait_for_job(h: &mut Harness, bus: &FakeUnitBus, unit: &str, not: Option<u32>) -> u32 {
+    for _ in 0..50 {
+        match bus.job_of(unit) {
+            Some(job) if Some(job) != not => return job,
+            _ => h.advance(Duration::from_millis(100)),
+        }
+    }
+    panic!("no job call on {unit}");
+}
+
+/// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]` the way
+/// `explore_signal_pipeline` does, with no cancel injection. Two units on two managers, job
+/// signals out of order, and signals for other jobs in between.
+#[test]
+fn explore_unit_jobs() {
+    for seed in 0..16 {
+        let chaos = ChaosConfig::default()
+            .with_cancel_probability(0.0)
+            .with_delay_probability(0.05)
+            .with_delay_range(Duration::ZERO..Duration::from_millis(10))
+            .with_wakeup_storm_probability(0.01);
+        let (mut h, system, user) = unit_harness(
+            LabConfig::new(seed)
+                .worker_count(2)
+                .max_steps(1_000_000)
+                .with_chaos(chaos),
+        );
+        let a = unit_target(Manager::User, "a.service");
+        let b = unit_target(Manager::System, "b.service");
+        h.submit(req(1, ActionKind::UnitStart, std::slice::from_ref(&a)));
+        h.submit(req(2, ActionKind::UnitRestart, std::slice::from_ref(&b)));
+        h.run();
+        let job_a = wait_for_job(&mut h, &user, "a.service", None);
+        let job_b = wait_for_job(&mut h, &system, "b.service", None);
+        // Other jobs first, then b before a.
+        user.finish(job_a + 100, "other.service", "failed");
+        system.finish(job_b + 100, "other.service", "done");
+        system.finish(job_b, "b.service", "failed");
+        h.advance(Duration::from_millis(600));
+        user.finish(job_a, "a.service", "done");
+        h.advance(Duration::from_secs(1));
+        let mut done = h.finished();
+        done.sort_by_key(|id| id.0);
+        assert_eq!(done, [ActionId(1), ActionId(2)], "seed {seed}");
+
+        // One action on both units, then a start on a while action 3 holds it.
+        h.submit(req(3, ActionKind::UnitStop, &[a.clone(), b.clone()]));
+        h.run();
+        let stop_a = wait_for_job(&mut h, &user, "a.service", Some(job_a));
+        h.submit(req(4, ActionKind::UnitStart, std::slice::from_ref(&a)));
+        h.run();
+        // A repeat of a finished job's signal is skipped.
+        user.finish(job_a, "a.service", "done");
+        user.finish(stop_a, "a.service", "done");
+        h.advance(Duration::from_millis(100));
+        let stop_b = wait_for_job(&mut h, &system, "b.service", Some(job_b));
+        system.finish(stop_b, "b.service", "done");
+        h.advance(Duration::from_secs(1));
+
+        let busy = ActionState::Rejected(RejectReason::Busy);
+        let want = [
+            (1, vec![ActionState::Succeeded], ActionState::Succeeded),
+            (2, vec![job_failed("failed")], job_failed("failed")),
+            (
+                3,
+                vec![ActionState::Succeeded, ActionState::Succeeded],
+                ActionState::Succeeded,
+            ),
+            (4, vec![busy.clone()], busy),
+        ];
+        for (id, states, summary) in want {
+            assert_eq!(
+                h.events_for(ActionId(id)),
+                expected(&states, summary),
+                "seed {seed} action {id}"
+            );
+        }
+        let mut done = h.finished();
+        done.sort_by_key(|id| id.0);
+        assert_eq!(done, [ActionId(3), ActionId(4)], "seed {seed}");
+        assert_eq!(
+            user.calls()
+                .iter()
+                .filter(|c| **c == FakeBusCall::JobRemoved)
+                .count(),
+            2,
+            "seed {seed}: action 4 never reached the bus"
+        );
+        h.passed();
+    }
+}
+
 // Engine level (E11-A1) ----------------------------------------------------------------------
 //
 // `engine_root` runs in a `FakeLab` with no workers. The real `Gate` comes from `gate_with_ops`
@@ -1267,7 +1597,6 @@ use asupersync::channel::watch;
 use asupersync::runtime::TaskHandle;
 use tl_engine::actions::gate_with_ops;
 use tl_engine::bridge::{EngineHooks, HookCtx};
-use tl_engine::reducer::ActionGate;
 use tl_engine::session::{RESTART_DELAY, engine_root};
 use tl_engine::source::{QueuedCommand, WorkerCommand, WorkerControl};
 use tl_engine::update::{ProcessSweep, SourceUpdate};
