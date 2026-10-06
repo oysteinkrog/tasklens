@@ -22,7 +22,7 @@ expression: rows
         proto: Tcp,
         state: "ESTABLISHED",
         local: "192.168.1.10:51000",
-        foreign: "140.82.112.3:443",
+        foreign: "203.0.113.3:443",
         owner: Some(
             [
                 100,

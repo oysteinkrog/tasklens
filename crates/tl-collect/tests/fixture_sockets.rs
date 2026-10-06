@@ -259,7 +259,7 @@ fn write_dump_fixtures() {
             state: 1,
             src: v4(192, 168, 1, 10),
             sport: 51000,
-            dst: v4(140, 82, 112, 3),
+            dst: v4(203, 0, 113, 3),
             dport: 443,
             ifindex: 0,
             inode: 5002,
