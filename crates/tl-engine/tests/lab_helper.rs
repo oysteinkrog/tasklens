@@ -224,12 +224,17 @@ fn signal_req() -> HelperRequest {
     }
 }
 
-fn update(state: HelperState, start: Option<(u64, HelperStartOutcome)>) -> HelperUpdate {
-    HelperUpdate { state, start }
+/// `HelperUpdate` as a comparable tuple.
+type Pub = (HelperState, Option<(u64, HelperStartOutcome)>);
+
+fn update(state: HelperState, start: Option<(u64, HelperStartOutcome)>) -> Pub {
+    (state, start)
 }
 
-fn updates_only(seen: &[(u64, HelperUpdate)]) -> Vec<HelperUpdate> {
-    seen.iter().map(|(_, u)| u.clone()).collect()
+fn updates_only(seen: &[(u64, HelperUpdate)]) -> Vec<Pub> {
+    seen.iter()
+        .map(|(_, u)| (u.state, u.start.clone()))
+        .collect()
 }
 
 #[test]
@@ -330,7 +335,7 @@ fn end_closes_and_locks_without_toast() {
         assert!(lock(&state).closed, "the fake saw close");
     });
     assert_eq!(
-        seen.last().map(|(_, u)| u.clone()),
+        updates_only(&seen).last().cloned(),
         Some(update(HelperState::Locked, None))
     );
     assert_eq!(seen.len(), 4, "{seen:?}");
@@ -352,7 +357,7 @@ fn idle_exit_detected_within_1s() {
     });
     let exited = *exited_at.lock().unwrap_or_else(PoisonError::into_inner);
     let (t, last) = seen.last().cloned().expect("an update");
-    assert_eq!(last, update(HelperState::Locked, None));
+    assert_eq!((last.state, last.start), update(HelperState::Locked, None));
     assert!(t - exited <= 1000, "locked {t} ms, exit {exited} ms");
     assert!(
         !lock(&fake.state).closed,
@@ -372,7 +377,7 @@ fn call_timeout_drops_session() {
         assert_eq!(handle.state(), HelperState::Locked);
     });
     assert_eq!(
-        seen.last().map(|(_, u)| u.clone()),
+        updates_only(&seen).last().cloned(),
         Some(update(HelperState::Locked, None))
     );
     assert!(lock(&fake.state).killed, "the timed-out helper was killed");
@@ -406,7 +411,14 @@ fn calls_are_serial() {
     let log = lock(&fake.state).log.clone();
     assert_eq!(
         log,
-        ["send 0", "send 1", "reply 1 last", "send 2", "reply 2 last"]
+        [
+            "send 0",
+            "reply 0 last",
+            "send 1",
+            "reply 1 last",
+            "send 2",
+            "reply 2 last"
+        ]
     );
 }
 
