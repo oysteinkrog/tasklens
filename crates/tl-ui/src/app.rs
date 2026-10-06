@@ -22,11 +22,11 @@ use tl_model::settings::{Settings, StartTab, UiState};
 use tracing::{debug, error, warn};
 
 use crate::components::icons::TlAssets;
-use crate::components::{checkbox, kv_grid};
+use crate::components::kv_grid;
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
 use crate::theme::user_store::ThemePersist;
-use crate::{i18n, settings_global, text, theme};
+use crate::{actions, i18n, settings_global, text, theme};
 
 pub use crate::theme::user_store::PersistTheme;
 
@@ -273,7 +273,8 @@ impl TasklensUi {
         .detach();
 
         // bind_keys_*
-        checkbox::bind_keys_components(cx);
+        actions::bind_keys_global(cx);
+        actions::register_global_handlers(cx);
         kv_grid::init(cx);
 
         // ActionTracker
