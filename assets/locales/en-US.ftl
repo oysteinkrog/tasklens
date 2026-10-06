@@ -23,3 +23,6 @@ fnd-kv-copy-value = Copy value
 fnd-shield-start-failed = Could not start the privileged helper
 fnd-shield-auth-cancelled = Authentication cancelled
 fnd-props-open-failed = Could not open properties.
+fnd-shield-unlock = Unlock privileged actions
+fnd-shield-waiting = Waiting for authentication…
+fnd-shield-unlocked = Privileged actions unlocked (click to lock)
