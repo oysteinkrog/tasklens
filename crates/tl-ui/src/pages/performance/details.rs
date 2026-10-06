@@ -156,6 +156,7 @@ impl KvRow {
                 None
             },
             path: false,
+            tone: None,
         }
     }
 }
