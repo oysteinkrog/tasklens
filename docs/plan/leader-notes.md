@@ -230,3 +230,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.5: line height exactly 1.3 x size (16.9 px at 13 px; bead said 17). template_width allocates per call: never call per cell. UI validation item.
 - i3o.11: CgroupInvalid in the bead maps to Rejected(NotOwner) or Rejected(IdentityChanged), own cgroup to Rejected(Protected), freeze timeout to OutcomeUnknown (tl-ops has no CgroupInvalid). Accepted.
 - ug9.20: badge scales dot (6 px) and max width (120 px) by ui_scale too; dot-text gap sp2 4 px; dot colour for Neutral/Count is text_primary (spec silent).
+- ndy.16: probe child uses close_range(4, MAX, CLOSE_RANGE_CLOEXEC) so std exec-error pipe survives (R-290). Not proven that the new test fails without the fix: check during review by reverting in a worktree.
+- y6k.14: U-49 verified (follow resume, no gap, no duplicate). real_journal writes ~1000 lines to the user journal via transient unit tasklens-journal-test (ignored test).
