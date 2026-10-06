@@ -262,3 +262,10 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.17: Clear filter button has a fixed ID TlEmptyState-clear-filter (collides if two empty states share a window; polish: derive from owner id). TlButton actions go to the focused view, so the owner table must hold focus for ClearFilter: UI validation item.
 - ug9.14: TlTabs on kit base Tabs (styled TabBar cannot meet spec). Overflow » tooltip text passed by owner via overflow_tooltip(); polish: add fnd-tabs-more to en-US.ftl. » is not a tab stop (arrow keys reach every tab).
 - qfx.22: pkexec timeout path unverified: SIGKILL on the root script fails with EPERM; code closes the pipe and waits, so a script that hangs without writing blocks past 120 s. Security/robustness review item. A RunSetup queued during a run still runs after it (spec says ignore while running). LinkEnv gained setup_probe and setup_runner pub fields.
+
+## 2026-10-06 hjn.15, ug9.29, y6k.17
+
+- hjn.15 (disk worker): `DiskSource::with_statvfs` is `#[doc(hidden)] pub` so tests/ can reach it (same as lowmem.rs). Under a fixture root, statvfs reads Missing and swap paths match /dev/<name>. A missing /proc/swaps means Valid(false). Review: accepted.
+- hjn.15 saw `lab_session::end_to_end_engine_in_lab` fail ("Flat mode" 51 rows vs 50) while workers/processes.rs had another agent's uncommitted edits. Recheck after the in-flight processes.rs bead lands. Flaky once: gpu::spawn::tests::child_env_is_minimal, workers::journal::tests::follow_every_line_once.
+- ug9.29: `glyph_with_tooltip` now takes window and cx. `button.rs:539` `TlButton::tooltip(..)` is the builder, not raw GPUI, and is fine.
+- y6k.17: leader chose `StartupEntry.state_code: Option<Arc<str>>` in tl-model ("active (running)", None when no unit). Closes B8-E28-12 for this field. 9o0.12 reads it.
