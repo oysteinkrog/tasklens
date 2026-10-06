@@ -14,10 +14,12 @@ use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{App, Pixels, SharedString, Window, gpui, px};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
+use smallvec::{SmallVec, smallvec};
 use tl_model::ids::ColumnId;
 use tl_model::settings::ColumnState;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec, SysTable};
 
+use crate::table::tree_table::ColumnResizeMode;
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::metrics::UiMetrics;
 
@@ -425,6 +427,11 @@ impl<C: TableColumn> ColumnLayout<C> {
         self.version
     }
 
+    /// The scale of the last `rebuild`.
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
     /// The visible column under `x` (scaled, from the left edge of the first column).
     pub fn column_at_x(&self, x: Pixels) -> Option<C> {
         if x < Pixels::ZERO || x >= self.total_width {
@@ -487,6 +494,114 @@ pub fn min_width<C: TableColumn>(
         }
         _ => px(60.0 * m.ui_scale),
     }
+}
+
+/// Drag of the right boundary of `col` to `new_width` (UI-PRC-005, R-075). `new_width`,
+/// `viewport` and `mins` are logical px at 100%, as `widths` stores them; a column missing from
+/// `mins` has no minimum. Offsets are rebuilt once at the layout's current scale.
+///
+/// The dragged width is clamped to its minimum. `Proportional`: the visible columns right of
+/// `col` share `viewport` minus the widths up to and including `col`, in proportion to their
+/// current widths, each at least its minimum; when the minimums do not fit, they sit at their
+/// minimums and the table overflows. `LastColumn`: the last visible column takes the difference,
+/// clamped to its minimum. When `col` is the last visible column, only it changes.
+pub fn resize<C: TableColumn>(
+    layout: &mut ColumnLayout<C>,
+    col: C,
+    new_width: Pixels,
+    mode: ColumnResizeMode,
+    viewport: Pixels,
+    mins: &FxHashMap<C, Pixels>,
+) {
+    let visible = layout.visible_order.clone();
+    let Some(pos) = visible.iter().position(|c| *c == col) else {
+        return;
+    };
+    let min_of = |c: &C| mins.get(c).copied().unwrap_or(Pixels::ZERO);
+    let width_of =
+        |layout: &ColumnLayout<C>, c: &C| layout.widths.get(c).copied().unwrap_or(Pixels::ZERO);
+    let old = width_of(layout, &col);
+    let new = new_width.max(min_of(&col));
+    layout.widths.insert(col, new);
+    let right = &visible[pos + 1..];
+    if let Some(last) = right.last() {
+        match mode {
+            ColumnResizeMode::Proportional => {
+                let left = visible[..=pos]
+                    .iter()
+                    .fold(Pixels::ZERO, |sum, c| sum + width_of(layout, c));
+                share_proportionally(layout, right, viewport - left, &min_of);
+            }
+            ColumnResizeMode::LastColumn => {
+                let w = (width_of(layout, last) + old - new).max(min_of(last));
+                layout.widths.insert(*last, w);
+            }
+        }
+    }
+    layout.rebuild(layout.ui_scale);
+}
+
+/// Gives `cols` the width `room` in proportion to their current widths. A column whose share
+/// is below its minimum is fixed at the minimum and the rest is shared again among the others.
+fn share_proportionally<C: TableColumn>(
+    layout: &mut ColumnLayout<C>,
+    cols: &[C],
+    room: Pixels,
+    min_of: &impl Fn(&C) -> Pixels,
+) {
+    let current: SmallVec<[(C, f32); 24]> = cols
+        .iter()
+        .map(|c| (*c, layout.widths.get(c).map_or(0.0, |w| w.as_f32())))
+        .collect();
+    let mut fixed: SmallVec<[bool; 24]> = smallvec![false; current.len()];
+    let mut room = room.as_f32();
+    loop {
+        let free: f32 = current
+            .iter()
+            .zip(&fixed)
+            .filter(|(_, f)| !**f)
+            .map(|((_, w), _)| *w)
+            .sum();
+        let n_free = fixed.iter().filter(|f| !**f).count();
+        if n_free == 0 {
+            return;
+        }
+        let shares: SmallVec<[f32; 24]> = current
+            .iter()
+            .map(|(_, w)| {
+                if free > 0.0 {
+                    room * w / free
+                } else {
+                    room / n_free as f32
+                }
+            })
+            .collect();
+        let mut clamped = false;
+        for (i, (c, _)) in current.iter().enumerate() {
+            let min = min_of(c).as_f32();
+            if !fixed[i] && shares[i] < min {
+                fixed[i] = true;
+                clamped = true;
+                room -= min;
+                layout.widths.insert(*c, px(min));
+            }
+        }
+        if !clamped {
+            for (i, (c, _)) in current.iter().enumerate() {
+                if !fixed[i] {
+                    layout.widths.insert(*c, px(shares[i]));
+                }
+            }
+            return;
+        }
+    }
+}
+
+/// The fitted width of one column, scaled (UI-PRC-006): the largest of its minimum, the widest
+/// measured text + 16 and the header label + 16 + 12 (room for the sort arrow).
+pub fn fit_width(min: Pixels, widest_text: Pixels, label: Pixels, m: &UiMetrics) -> Pixels {
+    min.max(widest_text + m.sp[6])
+        .max(label + m.sp[6] + m.sp[5])
 }
 
 /// The sort after a header click (UI-PRC-005, PROC-047). Same column: flip direction. New
@@ -792,6 +907,162 @@ mod tests {
                 px(90.0)
             );
         });
+    }
+
+    /// Name, User, PID visible at the given widths, PID last.
+    fn three(name: u32, user: u32, pid: u32) -> ColumnLayout {
+        let all = ["name", "user", "pid"];
+        ColumnLayout::from_state(
+            TableId::Processes,
+            &state(&all, &all, &[("name", name), ("user", user), ("pid", pid)]),
+            &specs(),
+        )
+    }
+
+    fn mins(entries: &[(ColumnId, f32)]) -> FxHashMap<ColumnId, Pixels> {
+        entries.iter().map(|&(c, w)| (c, px(w))).collect()
+    }
+
+    #[test]
+    fn resize_clamps_to_template_minimum() {
+        let mins = mins(&[
+            (ColumnId::Name, 60.0),
+            (ColumnId::User, 60.0),
+            (ColumnId::Pid, 63.0),
+        ]);
+        for mode in [ColumnResizeMode::Proportional, ColumnResizeMode::LastColumn] {
+            let mut layout = three(200, 100, 100);
+            resize(&mut layout, ColumnId::Pid, px(20.0), mode, px(400.0), &mins);
+            assert_eq!(layout.widths[&ColumnId::Pid], px(63.0), "{mode:?}");
+
+            let mut layout = three(200, 100, 100);
+            resize(
+                &mut layout,
+                ColumnId::User,
+                px(30.0),
+                mode,
+                px(400.0),
+                &mins,
+            );
+            assert_eq!(layout.widths[&ColumnId::User], px(60.0), "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn resize_proportional_vs_last_column() {
+        let none = FxHashMap::default();
+        let mut layout = three(200, 100, 100);
+        let v = layout.version();
+        resize(
+            &mut layout,
+            ColumnId::Name,
+            px(240.0),
+            ColumnResizeMode::Proportional,
+            px(400.0),
+            &none,
+        );
+        assert_eq!(layout.widths[&ColumnId::Name], px(240.0));
+        assert_eq!(layout.widths[&ColumnId::User], px(80.0));
+        assert_eq!(layout.widths[&ColumnId::Pid], px(80.0));
+        assert_eq!(layout.version(), v + 1, "one rebuild per resize");
+        assert_eq!(layout.offsets()[2], px(320.0));
+
+        let mut layout = three(200, 100, 100);
+        resize(
+            &mut layout,
+            ColumnId::Name,
+            px(240.0),
+            ColumnResizeMode::LastColumn,
+            px(400.0),
+            &none,
+        );
+        assert_eq!(layout.widths[&ColumnId::User], px(100.0));
+        assert_eq!(layout.widths[&ColumnId::Pid], px(60.0));
+
+        // Proportional shares keep the ratio of the current widths and respect minimums.
+        let mut layout = three(200, 150, 50);
+        let m = mins(&[(ColumnId::Pid, 63.0)]);
+        resize(
+            &mut layout,
+            ColumnId::Name,
+            px(240.0),
+            ColumnResizeMode::Proportional,
+            px(400.0),
+            &m,
+        );
+        assert_eq!(layout.widths[&ColumnId::Pid], px(63.0));
+        assert_eq!(layout.widths[&ColumnId::User], px(97.0));
+
+        // Minimums that do not fit: the columns sit at their minimums and the table overflows.
+        let mut layout = three(200, 100, 100);
+        let m = mins(&[(ColumnId::User, 60.0), (ColumnId::Pid, 63.0)]);
+        resize(
+            &mut layout,
+            ColumnId::Name,
+            px(380.0),
+            ColumnResizeMode::Proportional,
+            px(400.0),
+            &m,
+        );
+        assert_eq!(layout.widths[&ColumnId::User], px(60.0));
+        assert_eq!(layout.widths[&ColumnId::Pid], px(63.0));
+        assert_eq!(layout.total_width(), px(503.0));
+
+        // LastColumn clamps the last column to its minimum.
+        let mut layout = three(200, 100, 100);
+        resize(
+            &mut layout,
+            ColumnId::Name,
+            px(300.0),
+            ColumnResizeMode::LastColumn,
+            px(400.0),
+            &m,
+        );
+        assert_eq!(layout.widths[&ColumnId::Pid], px(63.0));
+        assert_eq!(layout.widths[&ColumnId::User], px(100.0));
+    }
+
+    #[test]
+    fn resize_last_visible_column_only_changes_itself() {
+        let none = FxHashMap::default();
+        for mode in [ColumnResizeMode::Proportional, ColumnResizeMode::LastColumn] {
+            let mut layout = three(200, 100, 100);
+            resize(
+                &mut layout,
+                ColumnId::Pid,
+                px(150.0),
+                mode,
+                px(400.0),
+                &none,
+            );
+            assert_eq!(layout.widths[&ColumnId::Name], px(200.0), "{mode:?}");
+            assert_eq!(layout.widths[&ColumnId::User], px(100.0), "{mode:?}");
+            assert_eq!(layout.widths[&ColumnId::Pid], px(150.0), "{mode:?}");
+            assert_eq!(layout.total_width(), px(450.0), "{mode:?}");
+        }
+        // A hidden column after the last visible one does not count.
+        let mut layout = default_layout();
+        layout.set_visible(ColumnId::Memory, false).unwrap();
+        let before = layout.widths[&ColumnId::Memory];
+        resize(
+            &mut layout,
+            ColumnId::Cpu,
+            px(100.0),
+            ColumnResizeMode::LastColumn,
+            px(800.0),
+            &none,
+        );
+        assert_eq!(layout.widths[&ColumnId::Cpu], px(100.0));
+        assert_eq!(layout.widths[&ColumnId::Memory], before);
+        assert_eq!(layout.widths[&ColumnId::Pid], px(96.0));
+    }
+
+    #[test]
+    fn fit_width_rule() {
+        let m = compute(&AppearanceSettings::default(), 0);
+        assert_eq!(fit_width(px(60.0), px(150.0), px(40.0), &m), px(166.0));
+        assert_eq!(fit_width(px(60.0), px(10.0), px(40.0), &m), px(68.0));
+        assert_eq!(fit_width(px(90.0), px(10.0), px(10.0), &m), px(90.0));
     }
 
     #[test]

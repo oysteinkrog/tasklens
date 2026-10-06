@@ -18,13 +18,14 @@ use gpui_kit::base::{
 };
 
 use gpui_kit::{
-    AnyElement, AnyView, App, Bounds, ClipboardItem, Context, Div, ElementId, EventEmitter,
-    FocusHandle, Hsla, InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
-    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled, TextRun,
-    UniformListScrollHandle, Window, div, font, point, px, size, uniform_list,
+    AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, Context, Div,
+    ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
+    Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement as _, Styled, TextRun, UniformListScrollHandle, Window, div, font,
+    point, px, size, uniform_list,
 };
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
 use tl_model::ids::ColumnId;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
@@ -36,22 +37,25 @@ use crate::components::validity::copy_text;
 use crate::i18n::tr;
 use crate::table::actions::{
     CollapseOrParent, CopyRowsAsTable, ExpandOrChild, MoveFocus, MoveFocusEdge, MoveFocusPage,
-    OpenContextMenu, OpenProperties, SelectAll, SortByColumn, TABLE_CONTEXT, ToggleExpand,
-    ToggleSelectFocus,
+    OpenContextMenu, OpenProperties, ResizeColumnsToFit, SelectAll, SortByColumn, TABLE_CONTEXT,
+    ToggleExpand, ToggleSelectFocus,
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
     glyph_cell, icon_px, name_indent, numeric_cell, paint_group_header_cell, paint_name_cell,
     path_cell, text_cell,
 };
-use crate::table::columns::{ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
+use crate::table::columns::{
+    ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, fit_width, min_width,
+};
 use crate::table::header::{
-    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, SORT_ARROW,
-    TlTreeTableHeader, beyond_slop, header_tooltip, sort_arrow_x,
+    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ResizeDrag,
+    SORT_ARROW, TlTreeTableHeader, beyond_slop, header_tooltip, sort_arrow_x,
 };
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::UI_FAMILY;
+use crate::text::metrics::TextMetricsCache;
 use crate::text::style::t_base;
 use crate::text_cache::CellTextCache;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -230,6 +234,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     header_state: HeaderState<D::Column>,
     /// Routes the header's pointer events to [`Self::header_event`]. Created once in `new`.
     header_listener: HeaderListener,
+    /// `tables.column_resize`, passed in by the owner.
+    resize_mode: ColumnResizeMode,
     hover_row: Option<usize>,
     /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
@@ -297,6 +303,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     let _ = this.update(cx, |t, cx| t.header_event(ev, window, cx));
                 })
             },
+            resize_mode: ColumnResizeMode::default(),
             hover_row: None,
             paused: false,
             visible_range: 0..0,
@@ -326,6 +333,19 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     pub fn delegate_mut(&mut self) -> &mut D {
         &mut self.delegate
+    }
+
+    /// The layout the table draws: the live copy during a boundary drag, else the delegate's.
+    pub fn columns(&self) -> &ColumnLayout<D::Column> {
+        match &self.header_state.resize {
+            Some(drag) => &drag.layout,
+            None => self.delegate.columns(),
+        }
+    }
+
+    /// The owner passes the current `tables.column_resize` value; the table reads no settings.
+    pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
+        self.resize_mode = mode;
     }
 
     /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
@@ -451,7 +471,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// the body bounds of the last frame.
     pub fn horizontal_overflow(&self) -> bool {
         let viewport = ScrollbarHandle::viewport_bounds(&self.scroll).size.width;
-        viewport > Pixels::ZERO && self.delegate.columns().total_width() > viewport
+        viewport > Pixels::ZERO && self.columns().total_width() > viewport
     }
 
     fn sync_versions(&mut self, style_version: u64) {
@@ -517,7 +537,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let call = self.list_calls;
         self.list_calls = self.list_calls.saturating_add(1);
         let m = *metrics(cx);
-        let total_width = self.delegate.columns().total_width();
+        let total_width = self.columns().total_width();
         if call < 2 && range.len() == 1 {
             return vec![div().w(total_width).h(m.row_height).into_any_element()];
         }
@@ -525,7 +545,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         self.rows_built_last_frame.set(range.len() as u32);
         self.record_frame(range.clone(), m.row_height);
 
-        let layout = self.delegate.columns();
+        let layout = self.columns();
         let frame = FrameCtx {
             m,
             theme: current(cx).clone(),
@@ -1078,7 +1098,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn column_at_x(&self, x: Pixels) -> Option<D::Column> {
         let body = ScrollbarHandle::viewport_bounds(&self.scroll);
         let content_x = x - body.origin.x - ScrollbarHandle::offset(&self.scroll).x;
-        let layout = self.delegate.columns();
+        let layout = self.columns();
         let pos = layout
             .offsets()
             .partition_point(|&o| o <= content_x)
@@ -1149,7 +1169,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let s = m.ui_scale;
         let body = ScrollbarHandle::viewport_bounds(&self.scroll);
         let scroll = ScrollbarHandle::offset(&self.scroll);
-        let layout = self.delegate.columns();
+        let layout = self.columns();
         let x = match layout.visible_columns().iter().position(|c| *c == name_col) {
             Some(pos) => {
                 let cell = self.delegate.name_cell(ix);
@@ -1213,7 +1233,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// each visible column's text. Cells copy the cached display text, the Name column its
     /// primary text and glyph cells their copy text (UI-FND-026). Group headers are left out.
     pub fn rows_as_tsv(&mut self, ids: &[D::RowId]) -> String {
-        let visible = self.delegate.columns().visible_columns().clone();
+        let visible = self.columns().visible_columns().clone();
         let name_col = name_column(&self.delegate);
         let mut text = String::new();
         for (pos, &col) in visible.iter().enumerate() {
@@ -1295,7 +1315,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         theme: &TlTheme,
         window: &Window,
     ) {
-        let layout = self.delegate.columns();
+        let layout = self.columns();
         let visible = layout.visible_columns().clone();
         let offsets = layout.offsets().clone();
         let total_width = layout.total_width();
@@ -1342,16 +1362,31 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 
     /// Pointer events from the header's hitboxes (UI-PRC-005). A left press and release on the
-    /// same sortable cell, without moving more than 4 px, sorts by that column.
-    fn header_event(&mut self, ev: HeaderEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// same sortable cell, without moving more than 4 px, sorts by that column. A press on a
+    /// resize band starts a boundary drag; a double-click on one fits that column.
+    fn header_event(&mut self, ev: HeaderEvent, window: &mut Window, cx: &mut Context<Self>) {
         let scale = metrics(cx).ui_scale;
         let col_at = |this: &Self, pos: Option<usize>| {
-            pos.and_then(|p| this.delegate.columns().visible_columns().get(p).copied())
+            pos.and_then(|p| this.columns().visible_columns().get(p).copied())
         };
         match ev {
-            HeaderEvent::Move { hovered, at } => {
+            HeaderEvent::Move {
+                hovered,
+                boundary,
+                at,
+            } => {
+                if let Some(drag) = &mut self.header_state.resize {
+                    drag.drag_to(at.x);
+                    cx.notify();
+                    return;
+                }
                 let col = col_at(self, hovered);
+                let band = col_at(self, boundary);
                 let mut changed = self.header_state.set_hover(col);
+                if self.header_state.boundary_hover != band {
+                    self.header_state.boundary_hover = band;
+                    changed = true;
+                }
                 if let Some(p) = &mut self.header_state.press
                     && !p.dragged
                     && beyond_slop(p.at, at, scale)
@@ -1373,7 +1408,29 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     cx.notify();
                 }
             }
+            HeaderEvent::BoundaryDown {
+                pos,
+                at,
+                click_count,
+            } => {
+                let Some(col) = col_at(self, Some(pos)) else {
+                    return;
+                };
+                self.header_state.press = None;
+                if click_count >= 2 {
+                    self.fit_columns(Some(col), window, cx);
+                } else {
+                    self.start_resize(col, at, window, cx);
+                }
+            }
             HeaderEvent::Up { hovered, at } => {
+                if let Some(drag) = self.header_state.resize.take() {
+                    if drag.changed() {
+                        self.delegate.on_columns_changed(&drag.layout, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 let Some(p) = self.header_state.press.take() else {
                     return;
                 };
@@ -1385,6 +1442,192 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 self.sort_by_column(p.col, cx);
             }
         }
+    }
+
+    /// Starts a boundary drag of `col` at window point `at`, on a copy of the delegate's layout.
+    fn start_resize(
+        &mut self,
+        col: D::Column,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mins = self.column_mins(window, cx);
+        let layout = self.delegate.columns().clone();
+        let scale = layout.ui_scale();
+        let body = ScrollbarHandle::viewport_bounds(&self.scroll).size.width;
+        // Before the first layout of the body the table's own width stands in.
+        let viewport = if body > Pixels::ZERO {
+            body
+        } else {
+            layout.total_width()
+        } / scale;
+        let start_widths = layout.widths.clone();
+        self.header_state.resize = Some(ResizeDrag {
+            col,
+            start_x: at.x,
+            start_width: start_widths.get(&col).copied().unwrap_or(Pixels::ZERO),
+            start_widths,
+            mins,
+            viewport,
+            mode: self.resize_mode,
+            layout,
+        });
+        self.header_state.set_hover(None);
+        cx.notify();
+    }
+
+    /// The minimum width of every visible column at 100% (PROC-023), with the sort arrow's room
+    /// on the sort column. Measured through the global `TextMetricsCache`.
+    fn column_mins(&self, window: &Window, cx: &mut App) -> FxHashMap<D::Column, Pixels> {
+        let m = *metrics(cx);
+        let sort_col = self.delegate.sort().column();
+        let layout = self.delegate.columns();
+        let scale = layout.ui_scale();
+        if !cx.has_global::<TextMetricsCache>() {
+            cx.set_global(TextMetricsCache::default());
+        }
+        cx.update_global::<TextMetricsCache, _>(|cache, cx| {
+            cache.clear_if_stale(m.style_version);
+            layout
+                .visible_columns()
+                .iter()
+                .map(|&col| {
+                    let spec = self.delegate.column_spec(col);
+                    let sorted = spec.sortable && col == sort_col;
+                    let min = min_width(spec, sorted, cache, &m, window, cx);
+                    (col, min / scale)
+                })
+                .collect()
+        })
+    }
+
+    /// Fits `only`, or every visible column on `None`, to its content (UI-PRC-006): the largest
+    /// of the minimum, the widest text + 16 and the header label + 16 + 12. Texts come from the
+    /// rows the last frame built and the cell texts still cached from the last 3 table versions,
+    /// never from a pass over all rows. Then calls `on_columns_changed` once.
+    fn fit_columns(
+        &mut self,
+        only: Option<D::Column>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let m = *metrics(cx);
+        let mins = self.column_mins(window, cx);
+        let mut layout = self.delegate.columns().clone();
+        let scale = layout.ui_scale();
+        let targets: SmallVec<[D::Column; 24]> = match only {
+            Some(col) => smallvec![col],
+            None => layout.visible_columns().iter().copied().collect(),
+        };
+        let widest = self.widest_texts(&targets, &m, window, cx);
+        for (i, &col) in targets.iter().enumerate() {
+            let label = self.delegate.column_spec(col).label.clone();
+            let label_w = self
+                .header_state
+                .label_width(col, &label, m.style_version, &m, window);
+            let min = mins.get(&col).copied().unwrap_or(Pixels::ZERO) * scale;
+            let w = fit_width(min, widest[i], label_w, &m);
+            layout.widths.insert(col, w / scale);
+        }
+        layout.rebuild(scale);
+        self.delegate.on_columns_changed(&layout, cx);
+        cx.notify();
+    }
+
+    /// The widest content of each column in `targets`, scaled, in `targets` order. The Name
+    /// column counts its indent, chevron and icon before the text. Numeric columns measure
+    /// digits at their `tnum` width.
+    fn widest_texts(
+        &mut self,
+        targets: &[D::Column],
+        m: &UiMetrics,
+        window: &Window,
+        cx: &mut App,
+    ) -> SmallVec<[Pixels; 24]> {
+        let s = m.ui_scale;
+        let name_col = name_column(&self.delegate);
+        let count = self.delegate.row_count();
+        let rows = self.visible_range.start.min(count)..self.visible_range.end.min(count);
+        // Texts of the visible rows: (target position, text, width before the text).
+        let mut texts: Vec<(usize, SharedString, Pixels)> =
+            Vec::with_capacity(rows.len() * targets.len());
+        for ix in rows {
+            if self.delegate.row_kind(ix) == RowKind::GroupHeader {
+                continue;
+            }
+            let id = self.delegate.row_id(ix);
+            for (i, &col) in targets.iter().enumerate() {
+                if Some(col) == name_col {
+                    let cell = self.delegate.name_cell(ix);
+                    let icon = match cell.icon {
+                        NameIcon::None => 0.0,
+                        _ => ICON_GAP + icon_px(cell.icon_size),
+                    };
+                    let prefix = name_indent(self.delegate.row_depth(ix), s)
+                        + px((CHEVRON + icon + ICON_GAP) * s);
+                    texts.push((i, cell.primary, prefix));
+                    continue;
+                }
+                self.out.reset();
+                self.delegate.cell(ix, col, &mut self.out);
+                let text = match self.out.arc.clone() {
+                    Some(arc) => SharedString::from(arc),
+                    None => self.formatted_text(ix, id, col),
+                };
+                texts.push((i, text, Pixels::ZERO));
+            }
+        }
+        let numeric: SmallVec<[bool; 24]> = targets
+            .iter()
+            .map(|&c| self.delegate.column_spec(c).kind == ColumnKind::Numeric)
+            .collect();
+        let size = m.text.base;
+        let text_cache = &self.text_cache;
+        if !cx.has_global::<TextMetricsCache>() {
+            cx.set_global(TextMetricsCache::default());
+        }
+        cx.update_global::<TextMetricsCache, _>(|cache, cx| {
+            cache.clear_if_stale(m.style_version);
+            let digit = cache.template_width("0", size, window, cx);
+            let mut widest: SmallVec<[Pixels; 24]> = smallvec![Pixels::ZERO; targets.len()];
+            let mut measure = |i: usize, text: &str, before: Pixels| {
+                let w = text.chars().fold(before, |sum, ch| {
+                    sum + if numeric[i] && ch.is_ascii_digit() {
+                        digit
+                    } else {
+                        cache.char_advance(ch, size, window, cx)
+                    }
+                });
+                widest[i] = widest[i].max(w);
+            };
+            for (i, text, before) in &texts {
+                measure(*i, text, *before);
+            }
+            for (col, text) in text_cache.cell_texts() {
+                if Some(col) != name_col
+                    && let Some(i) = targets.iter().position(|c| *c == col)
+                {
+                    measure(i, text, Pixels::ZERO);
+                }
+            }
+            widest
+        })
+    }
+
+    /// `ResizeColumnsToFit` from the header menu: fits every visible column. An action for
+    /// another table goes on to the next handler.
+    fn on_resize_columns_to_fit(
+        &mut self,
+        a: &ResizeColumnsToFit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.table != self.delegate.columns().table {
+            cx.propagate();
+            return;
+        }
+        self.fit_columns(None, window, cx);
     }
 
     /// Asks the delegate to sort by `col` (header click and `SortByColumn`). The delegate picks
@@ -1399,7 +1642,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
     /// `SortByColumn` from the header menu. An id outside this table's column set is ignored.
     fn on_sort_by_column(&mut self, a: &SortByColumn, _: &mut Window, cx: &mut Context<Self>) {
-        let table = self.delegate.columns().table;
+        let table = self.columns().table;
         if let Some(col) = D::Column::parse(table, a.id.as_str()) {
             self.sort_by_column(col, cx);
         }
@@ -1515,7 +1758,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .hover
             .and_then(|c| header_tooltip(self.delegate.column_spec(c)));
         let header = TlTreeTableHeader {
-            layout: self.delegate.columns(),
+            layout: self.columns(),
             lines,
             x_offset: self.x_offset,
             m: &m,
@@ -1651,6 +1894,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .on_action(cx.listener(Self::on_open_context_menu))
             .on_action(cx.listener(Self::on_copy_rows_as_table))
             .on_action(cx.listener(Self::on_sort_by_column))
+            .on_action(cx.listener(Self::on_resize_columns_to_fit))
             .child(header)
             .child(body)
     }

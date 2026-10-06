@@ -11,7 +11,10 @@
 //! [`HeaderState`] and fills its per-frame cells before each render, so the header itself formats
 //! nothing: totals come from a `CellTextCache` and re-format only when their value changes.
 //!
-//! Resize and reorder (E18-010, E18-011) extend [`HeaderState`].
+//! Resize (E18-010): an 8 px hit band centred on each column's right edge sets the column-resize
+//! cursor. Dragging it changes the width live in a copy of the layout that [`HeaderState`] holds
+//! until the release; double-clicking it fits the column. Reorder (E18-011) extends
+//! [`HeaderState`] too.
 
 use std::cell::Cell;
 use std::hash::BuildHasher as _;
@@ -19,10 +22,10 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconNamed as _;
 use gpui_kit::{
-    App, Bounds, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla, InteractiveElement,
-    MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
-    Pixels, Point, SharedString, Styled, TextRun, TransformationMatrix, Window, canvas, div, fill,
-    font, point, prelude::FluentBuilder, px, size,
+    App, Bounds, CursorStyle, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
+    InteractiveElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, SharedString, Styled, TextRun, TransformationMatrix, Window,
+    canvas, div, fill, font, point, prelude::FluentBuilder, px, size,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
@@ -32,6 +35,7 @@ use crate::components::icons::TlIcon;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::table::cells::{CellCtx, glyph_cell, numeric_cell};
 use crate::table::columns::{ColumnAlign, ColumnLayout, ColumnSpec, TableColumn};
+use crate::table::tree_table::ColumnResizeMode;
 use crate::table::tree_table::{HEADER_H_ONE, HEADER_H_TWO, HeaderLines};
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::label_style;
@@ -52,19 +56,29 @@ pub const SORT_ARROW_GAP: f32 = 2.0;
 pub const SORT_ARROW_SHIFT: f32 = SORT_ARROW + SORT_ARROW_GAP;
 /// A press that moves more than this is a drag, not a click (reorder is E18-011).
 pub const DRAG_SLOP: f32 = 4.0;
+/// Half the width of the resize hit band on each column boundary (UI-PRC-005).
+pub const RESIZE_HALF_BAND: f32 = 4.0;
 /// Header tooltip of every unsortable column (UI-PRC-005).
 pub const UNSORTABLE_TOOLTIP: &str = "Only measured for visible rows";
 
 /// What the header's hitboxes report to the table. `pos` is a visible column position.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum HeaderEvent {
-    /// The pointer moved; `hovered` is the header cell under it, if any.
+    /// The pointer moved; `hovered` is the header cell under it and `boundary` the resize band
+    /// under it, if any. A band wins over the cell: `hovered` is `None` over a band.
     Move {
         hovered: Option<usize>,
+        boundary: Option<usize>,
         at: Point<Pixels>,
     },
-    /// Left press on a header cell.
+    /// Left press on a header cell, outside the resize bands.
     Down { pos: usize, at: Point<Pixels> },
+    /// Left press on the resize band at the right edge of the cell at `pos`.
+    BoundaryDown {
+        pos: usize,
+        at: Point<Pixels>,
+        click_count: usize,
+    },
     /// Left release anywhere in the window; `hovered` as for `Move`.
     Up {
         hovered: Option<usize>,
@@ -82,6 +96,47 @@ pub struct HeaderPress<C> {
     pub at: Point<Pixels>,
     /// True once the pointer moved more than [`DRAG_SLOP`] from `at`.
     pub dragged: bool,
+}
+
+/// A boundary drag in progress (UI-PRC-005). Widths and minimums are logical px at 100%.
+#[derive(Clone, Debug)]
+pub struct ResizeDrag<C: TableColumn> {
+    pub col: C,
+    /// Window x of the press.
+    pub start_x: Pixels,
+    /// Width of `col` at the press, at 100%.
+    pub start_width: Pixels,
+    /// Every width at the press. Each move starts again from these.
+    pub start_widths: FxHashMap<C, Pixels>,
+    pub mins: FxHashMap<C, Pixels>,
+    /// Body width at the press, at 100%.
+    pub viewport: Pixels,
+    pub mode: ColumnResizeMode,
+    /// The layout the table draws until the release.
+    pub layout: ColumnLayout<C>,
+}
+
+impl<C: TableColumn> ResizeDrag<C> {
+    /// Applies a pointer at window x `x`: restores the press widths, resizes once and rebuilds
+    /// the offsets once.
+    pub fn drag_to(&mut self, x: Pixels) {
+        let scale = self.layout.ui_scale();
+        let w = self.start_width + (x - self.start_x) / scale;
+        self.layout.widths.clone_from(&self.start_widths);
+        crate::table::columns::resize(
+            &mut self.layout,
+            self.col,
+            w,
+            self.mode,
+            self.viewport,
+            &self.mins,
+        );
+    }
+
+    /// True when a width differs from the press.
+    pub fn changed(&self) -> bool {
+        self.layout.widths != self.start_widths
+    }
 }
 
 /// One visible header cell as the table prepared it for this frame.
@@ -106,6 +161,10 @@ pub struct HeaderState<C: TableColumn> {
     /// The header cell under the pointer.
     pub hover: Option<C>,
     pub press: Option<HeaderPress<C>>,
+    /// The column whose resize band is under the pointer.
+    pub boundary_hover: Option<C>,
+    /// The boundary drag in progress.
+    pub resize: Option<ResizeDrag<C>>,
     /// Formatted totals, keyed by the header row `()` and the column.
     pub totals: CellTextCache<(), C>,
     /// This frame's visible cells. The `Vec` is reused across frames.
@@ -127,6 +186,8 @@ impl<C: TableColumn> Default for HeaderState<C> {
         Self {
             hover: None,
             press: None,
+            boundary_hover: None,
+            resize: None,
             totals: CellTextCache::new(),
             cells: Vec::new(),
             arrow: None,
@@ -143,6 +204,17 @@ impl<C: TableColumn> HeaderState<C> {
         let changed = self.hover != col;
         self.hover = col;
         changed
+    }
+
+    /// The pointer cursor over the header: column-resize over a resize band and during a
+    /// boundary drag, else the arrow (UI-FND-003). The paint sets the same cursor through the
+    /// band hitboxes.
+    pub fn cursor(&self) -> CursorStyle {
+        if self.boundary_hover.is_some() || self.resize.is_some() {
+            CursorStyle::ResizeColumn
+        } else {
+            CursorStyle::Arrow
+        }
     }
 
     /// The fill of header cell `col`: pressed wins over hover; unsortable columns get none.
@@ -375,7 +447,11 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
         let x_offset = self.x_offset;
         let hairline = self.hairline;
         let divider = self.theme.divider;
+        let accent = self.theme.accent;
         let arrow_color = self.theme.text_primary;
+        let half_band = px(RESIZE_HALF_BAND * self.m.ui_scale);
+        let resizing = self.state.resize.as_ref().map(|r| r.col);
+        let resizing = resizing.and_then(|col| self.state.cells.iter().position(|c| c.id == col));
         // Copied out so the closures own them; inline for up to 24 columns.
         let cells: SmallVec<[(Pixels, Pixels, Option<Hsla>); 24]> = self
             .state
@@ -390,22 +466,37 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             {
                 let cells = cells.clone();
                 move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
-                    let hitboxes: SmallVec<[Hitbox; 24]> = cells
+                    let left = bounds.left() - x_offset;
+                    let cell_boxes: SmallVec<[Hitbox; 24]> = cells
                         .iter()
                         .map(|&(x, w, _)| {
                             let b = Bounds::new(
-                                point(bounds.left() + x - x_offset, bounds.top()),
+                                point(left + x, bounds.top()),
                                 size(w, bounds.size.height),
                             );
                             window.insert_hitbox(b, HitboxBehavior::Normal)
                         })
                         .collect();
-                    Rc::new(hitboxes)
+                    // Inserted after the cells, so a band is on top of the cells it overlaps.
+                    let bands: SmallVec<[Hitbox; 24]> = cells
+                        .iter()
+                        .map(|&(x, w, _)| {
+                            let b = Bounds::new(
+                                point(left + x + w - half_band, bounds.top()),
+                                size(half_band * 2.0, bounds.size.height),
+                            );
+                            window.insert_hitbox(b, HitboxBehavior::Normal)
+                        })
+                        .collect();
+                    Rc::new(HeaderHitboxes {
+                        cells: cell_boxes,
+                        bands,
+                    })
                 }
             },
             move |bounds, hitboxes, window, cx| {
                 let left = bounds.left() - x_offset;
-                for &(x, w, fill_color) in &cells {
+                for (i, &(x, w, fill_color)) in cells.iter().enumerate() {
                     if let Some(color) = fill_color {
                         let b =
                             Bounds::new(point(left + x, bounds.top()), size(w, bounds.size.height));
@@ -416,7 +507,15 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
                         point(left + x + w - hairline, bounds.top()),
                         size(hairline, bounds.size.height),
                     );
-                    window.paint_quad(fill(line, divider));
+                    let color = if resizing == Some(i) { accent } else { divider };
+                    window.paint_quad(fill(line, color));
+                }
+                for band in &hitboxes.bands {
+                    window.set_cursor_style(CursorStyle::ResizeColumn, band);
+                }
+                if resizing.is_some() {
+                    // The pointer leaves the band during a drag; the cursor stays.
+                    window.set_window_cursor_style(CursorStyle::ResizeColumn);
                 }
                 let bottom = Bounds::new(
                     point(bounds.left(), bounds.bottom() - hairline),
@@ -449,22 +548,37 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
     }
 }
 
-/// Reports pointer moves, left presses on a cell and left releases to `listener`.
-fn register_listeners(
-    hitboxes: Rc<SmallVec<[Hitbox; 24]>>,
-    listener: HeaderListener,
-    window: &mut Window,
-) {
-    let hovered =
-        |hitboxes: &[Hitbox], window: &Window| hitboxes.iter().position(|h| h.is_hovered(window));
+/// The header's hitboxes of one frame: one per cell and one resize band per cell's right edge.
+struct HeaderHitboxes {
+    cells: SmallVec<[Hitbox; 24]>,
+    bands: SmallVec<[Hitbox; 24]>,
+}
+
+impl HeaderHitboxes {
+    /// The band under the pointer, else `None`.
+    fn band(&self, window: &Window) -> Option<usize> {
+        self.bands.iter().position(|h| h.is_hovered(window))
+    }
+
+    /// The cell under the pointer, unless a band is.
+    fn cell(&self, window: &Window) -> Option<usize> {
+        if self.band(window).is_some() {
+            return None;
+        }
+        self.cells.iter().position(|h| h.is_hovered(window))
+    }
+}
+
+/// Reports pointer moves, left presses on a cell or a band and left releases to `listener`.
+fn register_listeners(hitboxes: Rc<HeaderHitboxes>, listener: HeaderListener, window: &mut Window) {
     {
         let (hitboxes, listener) = (hitboxes.clone(), listener.clone());
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if phase.bubble() {
-                let hovered = hovered(&hitboxes, window);
                 listener(
                     HeaderEvent::Move {
-                        hovered,
+                        hovered: hitboxes.cell(window),
+                        boundary: hitboxes.band(window),
                         at: e.position,
                     },
                     window,
@@ -480,6 +594,7 @@ fn register_listeners(
                 listener(
                     HeaderEvent::Move {
                         hovered: None,
+                        boundary: None,
                         at: e.position,
                     },
                     window,
@@ -491,27 +606,31 @@ fn register_listeners(
     {
         let (hitboxes, listener) = (hitboxes.clone(), listener.clone());
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if phase.bubble()
-                && e.button == MouseButton::Left
-                && let Some(pos) = hovered(&hitboxes, window)
-            {
-                listener(
-                    HeaderEvent::Down {
-                        pos,
-                        at: e.position,
-                    },
-                    window,
-                    cx,
-                );
+            if !phase.bubble() || e.button != MouseButton::Left {
+                return;
             }
+            let ev = if let Some(pos) = hitboxes.band(window) {
+                HeaderEvent::BoundaryDown {
+                    pos,
+                    at: e.position,
+                    click_count: e.click_count,
+                }
+            } else if let Some(pos) = hitboxes.cell(window) {
+                HeaderEvent::Down {
+                    pos,
+                    at: e.position,
+                }
+            } else {
+                return;
+            };
+            listener(ev, window, cx);
         });
     }
     window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
         if phase.bubble() && e.button == MouseButton::Left {
-            let hovered = hovered(&hitboxes, window);
             listener(
                 HeaderEvent::Up {
-                    hovered,
+                    hovered: hitboxes.cell(window),
                     at: e.position,
                 },
                 window,

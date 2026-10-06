@@ -197,6 +197,12 @@ impl<R: Eq + Hash, C: TableColumn> CellTextCache<R, C> {
         text
     }
 
+    /// Every cached cell text with its column. Entries not seen in the last `KEEP_VERSIONS`
+    /// table versions are already gone. Path texts are not included: they are cut to a width.
+    pub fn cell_texts(&self) -> impl Iterator<Item = (C, &SharedString)> {
+        self.cells.iter().map(|((_, c), e)| (*c, &e.text))
+    }
+
     /// Drops all cell and path entries. Counters are kept.
     pub fn clear(&mut self) {
         self.cells.clear();
