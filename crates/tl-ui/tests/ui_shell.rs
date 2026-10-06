@@ -1045,3 +1045,335 @@ mod titlebar {
         }
     }
 }
+
+mod tabstrip {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        App, AppContext as _, Bounds, Context, Entity, InteractiveElement, IntoElement, Modifiers,
+        MouseButton, ParentElement, Pixels, Point, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, point, px, size,
+    };
+    use smallvec::SmallVec;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::actions::SelectTab;
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::current;
+    use tl_ui::window::tabstrip::{AccentRuleProbe, TabStrip};
+
+    const W: f32 = 1280.;
+
+    /// Holds the strip at the window's top and counts left presses that reach it.
+    struct Host {
+        strip: Entity<TabStrip>,
+        downs: Rc<Cell<u32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let downs = self.downs.clone();
+            div()
+                .size_full()
+                .on_mouse_down(MouseButton::Left, move |_, _, _| downs.set(downs.get() + 1))
+                .child(self.strip.clone())
+        }
+    }
+
+    /// A stand-in for the filter box: 220 wide.
+    struct Filter;
+
+    impl Render for Filter {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(220.)).h_full()
+        }
+    }
+
+    struct Rig<'a> {
+        cx: &'a mut VisualTestContext,
+        strip: Entity<TabStrip>,
+        downs: Rc<Cell<u32>>,
+        selects: Rc<RefCell<Vec<usize>>>,
+    }
+
+    fn all() -> SmallVec<[Tab; 6]> {
+        SmallVec::from_slice(&Tab::ALL)
+    }
+
+    fn rig(
+        cx: &mut TestAppContext,
+        ui_scale_pct: u16,
+        tabs: SmallVec<[Tab; 6]>,
+        active: Tab,
+        filter: bool,
+    ) -> Rig<'_> {
+        let selects = Rc::new(RefCell::new(Vec::new()));
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings {
+                    ui_scale_pct,
+                    ..AppearanceSettings::default()
+                },
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+            let engine = FakeEngine::new();
+            let client: Arc<dyn EngineClient> = engine;
+            cx.set_global(EngineGlobal(client));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            let seen = Rc::clone(&selects);
+            cx.on_action(move |a: &SelectTab, _| seen.borrow_mut().push(a.0));
+        });
+        let downs = Rc::new(Cell::new(0));
+        let mut strip = None;
+        let (_, cx) = cx.add_window_view(|window, cx| {
+            let s = cx.new(|cx| {
+                let mut s = TabStrip::new(tabs, active, window, cx);
+                if filter {
+                    s.set_filter_slot(Some(cx.new(|_| Filter).into()), cx);
+                }
+                s
+            });
+            strip = Some(s.clone());
+            Host {
+                strip: s,
+                downs: downs.clone(),
+            }
+        });
+        cx.simulate_resize(size(px(W), px(200.)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw(cx);
+        Rig {
+            cx,
+            strip: strip.expect("strip built"),
+            downs,
+            selects,
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &str) -> Bounds<Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn labels(r: &mut Rig) -> Vec<String> {
+        let strip = r.strip.clone();
+        r.cx.update(|_, cx| {
+            strip
+                .read(cx)
+                .drawn_labels()
+                .iter()
+                .map(|l| l.to_string())
+                .collect()
+        })
+    }
+
+    fn rule(r: &mut Rig) -> AccentRuleProbe {
+        let strip = r.strip.clone();
+        r.cx.update(|_, cx| strip.read(cx).accent_rule())
+            .expect("rule built")
+    }
+
+    fn builds(r: &mut Rig) -> u32 {
+        let strip = r.strip.clone();
+        r.cx.update(|_, cx| strip.read(cx).rule_builds())
+    }
+
+    fn has_vertex(rule: &AccentRuleProbe, at: Point<Pixels>) -> bool {
+        rule.vertices
+            .iter()
+            .any(|v| (v.x - at.x).abs() < px(0.01) && (v.y - at.y).abs() < px(0.01))
+    }
+
+    #[gpui_kit::test]
+    fn tabstrip_order_and_labels(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        assert_eq!(
+            labels(&mut r),
+            [
+                "Processes",
+                "Performance",
+                "Services",
+                "Startup Apps",
+                "Connections",
+                "Information"
+            ]
+        );
+        let xs: Vec<Pixels> = Tab::ALL
+            .iter()
+            .map(|t| bounds(r.cx, &format!("TabStrip-{}", t.as_str())).origin.x)
+            .collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "left to right: {xs:?}");
+        assert_eq!(xs[0], px(0.));
+        let strip = bounds(r.cx, "TabStrip");
+        assert_eq!(strip.size.height, px(30.));
+        let tab = bounds(r.cx, "TabStrip-services");
+        assert_eq!(tab.size.height, px(30.));
+    }
+
+    #[gpui_kit::test]
+    fn tabstrip_only_built_tabs(cx: &mut TestAppContext) {
+        let tabs = SmallVec::from_slice(&[Tab::Processes, Tab::Performance]);
+        let mut r = rig(cx, 100, tabs, Tab::Processes, false);
+        assert_eq!(labels(&mut r), ["Processes", "Performance"]);
+        for t in &Tab::ALL[2..] {
+            assert!(
+                r.cx.debug_bounds(&format!("TabStrip-{}", t.as_str()))
+                    .is_none(),
+                "{t:?} absent"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn tabstrip_history_label(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        assert_eq!(labels(&mut r)[0], "Processes");
+        r.cx.update(|_, cx| TlSettings::update(cx, |d| d.state.processes.history_mode = true));
+        r.cx.run_until_parked();
+        draw(r.cx);
+        assert_eq!(labels(&mut r)[0], "History");
+        assert_eq!(labels(&mut r)[1], "Performance");
+    }
+
+    #[gpui_kit::test]
+    fn accent_rule_bounds(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, true);
+        let filter = bounds(r.cx, "TabStripFilter");
+        assert_eq!((filter.left(), filter.right()), (px(1060.), px(W)));
+        let active = bounds(r.cx, "TabStrip-processes");
+        let rule = rule(&mut r);
+        assert_eq!(rule.active, active);
+        assert_eq!(rule.end_x, px(1060.));
+        // Processes sits at x = 0, so the left part of the line is empty.
+        assert_eq!(rule.path_bounds.left(), active.left());
+        assert_eq!(rule.path_bounds.right(), px(1060.), "nothing right of 1060");
+        assert!(rule.vertices.iter().all(|v| v.x <= px(1060.)));
+        let bottom = rule.strip.bottom();
+        assert!(has_vertex(
+            &rule,
+            point(active.right() + px(6.), bottom - px(2.))
+        ));
+        assert!(has_vertex(&rule, point(px(1060.), bottom)));
+
+        // With Performance active the line runs from x = 0 to its left edge.
+        r.strip
+            .update(r.cx, |s, cx| s.set_active(Tab::Performance, cx));
+        draw(r.cx);
+        let active = bounds(r.cx, "TabStrip-performance");
+        let rule = self::rule(&mut r);
+        assert_eq!(rule.active, active);
+        assert_eq!(rule.path_bounds.left(), px(0.));
+        assert!(has_vertex(&rule, point(px(0.), bottom - px(2.))));
+        assert!(has_vertex(
+            &rule,
+            point(active.left() - px(6.), bottom - px(2.))
+        ));
+        assert!(has_vertex(
+            &rule,
+            point(active.right() + px(6.), bottom - px(2.))
+        ));
+        assert_eq!(rule.path_bounds.right(), px(1060.));
+    }
+
+    #[gpui_kit::test]
+    fn accent_rule_to_edge_without_filter(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Services, false);
+        assert!(r.cx.debug_bounds("TabStripFilter").is_none());
+        let rule = rule(&mut r);
+        assert_eq!(rule.end_x, px(W));
+        assert_eq!(rule.path_bounds.right(), px(W));
+        assert!(has_vertex(&rule, point(px(W), rule.strip.bottom())));
+    }
+
+    #[gpui_kit::test]
+    fn inactive_window_uses_divider_outline(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        let (accent, divider) = r.cx.update(|_, cx| {
+            let t = current(cx);
+            (t.accent, t.divider)
+        });
+        assert_ne!(accent, divider);
+        assert_eq!(rule(&mut r).color, accent);
+
+        r.cx.deactivate_window();
+        r.cx.run_until_parked();
+        draw(r.cx);
+        assert_eq!(rule(&mut r).color, divider);
+    }
+
+    #[gpui_kit::test]
+    fn tab_click_selects(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, all(), Tab::Processes, false);
+        let at = bounds(r.cx, "TabStrip-services").center();
+        r.cx.simulate_click(at, Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(*r.selects.borrow(), [2]);
+        assert_eq!(r.downs.get(), 0, "the press stops at the tab");
+
+        // Right and middle presses select nothing.
+        for button in [MouseButton::Right, MouseButton::Middle] {
+            r.cx.simulate_mouse_down(at, button, Modifiers::none());
+            r.cx.simulate_mouse_up(at, button, Modifiers::none());
+        }
+        r.cx.run_until_parked();
+        assert_eq!(*r.selects.borrow(), [2]);
+    }
+
+    #[gpui_kit::test]
+    fn accent_rule_cached(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, true);
+        let first = builds(&mut r);
+        assert_eq!(first, 1);
+        r.strip.update(r.cx, |_, cx| cx.notify());
+        draw(r.cx);
+        r.strip
+            .update(r.cx, |s, cx| s.set_active(Tab::Processes, cx));
+        draw(r.cx);
+        assert_eq!(builds(&mut r), 1, "same key, no rebuild");
+
+        r.strip
+            .update(r.cx, |s, cx| s.set_active(Tab::Services, cx));
+        draw(r.cx);
+        assert_eq!(builds(&mut r), 2);
+    }
+
+    #[gpui_kit::test]
+    fn tabstrip_scales(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 150, all(), Tab::Processes, false);
+        assert_eq!(bounds(r.cx, "TabStrip").size.height, px(45.));
+        assert_eq!(bounds(r.cx, "TabStrip-processes").size.height, px(45.));
+        let rule = rule(&mut r);
+        assert_eq!(rule.width, px(3.));
+        // The outline's inner edge is 3 px in from the tab's left edge.
+        let bottom = rule.strip.bottom();
+        assert!(has_vertex(
+            &rule,
+            point(rule.active.left() + px(3.), bottom)
+        ));
+        assert!(has_vertex(
+            &rule,
+            point(rule.active.right() - px(3.), bottom)
+        ));
+        assert!(has_vertex(&rule, point(px(W), bottom - px(3.))));
+    }
+}
