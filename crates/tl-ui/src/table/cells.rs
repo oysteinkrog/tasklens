@@ -492,6 +492,42 @@ pub fn guide_quads(
     quads
 }
 
+/// First strong isolate and pop directional isolate (UAX #9).
+const FSI: char = '\u{2068}';
+const PDI: char = '\u{2069}';
+
+/// The text and runs a Name cell shapes for `primary` (UI-FND-053 rule 3). With a count run
+/// after a non-empty name, the name is wrapped in FSI and PDI (from `cache`, built once) and the
+/// runs grow to cover the two marks: FSI joins the first run, PDI the run that ends where the
+/// count starts. Without one, `primary` and [`primary_runs`] as they are.
+pub fn name_primary_text(
+    primary: &SharedString,
+    highlight_fffd: bool,
+    count_run: Option<&Range<usize>>,
+    normal: Hsla,
+    warning: Hsla,
+    cache: &mut IconSourceCache,
+) -> (SharedString, Option<SmallVec<[TextRun; 4]>>) {
+    let runs = primary_runs(primary, highlight_fffd, count_run, normal, warning);
+    let count_start = count_run
+        .filter(|r| r.start > 0 && r.start < r.end && r.end <= primary.len())
+        .map(|r| r.start);
+    let (Some(start), Some(mut runs)) = (count_start, runs) else {
+        return (primary.clone(), runs);
+    };
+    // `primary_runs` cuts at the count's start, so one run ends exactly there.
+    let mut end = 0;
+    let Some(before) = runs.iter().position(|r| {
+        end += r.len;
+        end == start
+    }) else {
+        return (primary.clone(), Some(runs));
+    };
+    runs[0].len += FSI.len_utf8();
+    runs[before].len += PDI.len_utf8();
+    (cache.isolated_name(primary, start), Some(runs))
+}
+
 /// Text runs of a Name cell's primary text: U+FFFD runs in `warning` when `highlight_fffd`, the
 /// live count run with `tnum`. `None` when one plain run does (the common case).
 fn primary_runs(
@@ -546,19 +582,25 @@ fn primary_runs(
     Some(runs)
 }
 
-/// The image sources of one table's file icons, by icon path. `img()` takes its source by value,
-/// so without this cache every app row would build a new `Arc<Path>` each frame. A source is
-/// built on first use and cloned (one `Arc` count) after that.
+/// The image sources of one table's file icons, by icon path, and the bidi-isolated texts of its
+/// Name cells, by primary text. `img()` takes its source by value, so without this cache every
+/// app row would build a new `Arc<Path>` each frame; the same holds for the isolated name
+/// string. An entry is built on first use and cloned (one `Arc` count) after that.
 ///
 /// Each entry remembers the last table version that used it. When the version changes, entries
-/// the ending version did not use are dropped, so icons of rows that are gone do not pile up.
+/// the ending version did not use are dropped, so entries of rows that are gone do not pile up.
 #[derive(Default)]
 pub struct IconSourceCache {
     map: FxHashMap<Arc<str>, (ImageSource, u64)>,
+    /// Primary text to (isolated text, count start, last version).
+    names: FxHashMap<SharedString, (SharedString, usize, u64)>,
     version: u64,
     /// Image sources built since the table was created.
     #[cfg(any(test, feature = "test-hooks"))]
     pub built: u32,
+    /// Isolated name texts built since the table was created.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub names_built: u32,
 }
 
 impl IconSourceCache {
@@ -573,6 +615,7 @@ impl IconSourceCache {
         }
         let ending = self.version;
         self.map.retain(|_, (_, used)| *used == ending);
+        self.names.retain(|_, (_, _, used)| *used == ending);
         self.version = version;
     }
 
@@ -592,6 +635,33 @@ impl IconSourceCache {
         source
     }
 
+    /// `text` with its name part `..count_start` wrapped in FSI (U+2068) and PDI (U+2069), built
+    /// once and reused (UI-FND-053 rule 3). Inside the isolate the name keeps its own direction;
+    /// outside it the cell has no strong character before the count, so the paragraph is LTR and
+    /// the count stays on the right of an RTL name.
+    pub fn isolated_name(&mut self, text: &SharedString, count_start: usize) -> SharedString {
+        let version = self.version;
+        if let Some((isolated, start, used)) = self.names.get_mut(text)
+            && *start == count_start
+        {
+            *used = version;
+            return isolated.clone();
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.names_built += 1;
+        }
+        let mut isolated = String::with_capacity(text.len() + 2 * FSI.len_utf8());
+        isolated.push(FSI);
+        isolated.push_str(&text[..count_start]);
+        isolated.push(PDI);
+        isolated.push_str(&text[count_start..]);
+        let isolated = SharedString::from(isolated);
+        self.names
+            .insert(text.clone(), (isolated.clone(), count_start, version));
+        isolated
+    }
+
     /// Icon paths held now.
     pub fn len(&self) -> usize {
         self.map.len()
@@ -609,7 +679,8 @@ impl IconSourceCache {
 ///
 /// `window` measures the primary text, and only when there is a secondary text. `tips` is
 /// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
-/// File icons take their image source from `icons`.
+/// File icons take their image source from `icons`, and a name with a count its bidi-isolated
+/// text ([`name_primary_text`]).
 #[allow(clippy::too_many_arguments)]
 pub fn paint_name_cell(
     cell: NameCell,
@@ -742,15 +813,17 @@ pub fn paint_name_cell(
     }
 
     let primary_color = ctx.primary();
-    let text = match primary_runs(
+    let (shaped, runs) = name_primary_text(
         &cell.primary,
         cell.highlight_fffd,
         cell.count_run.as_ref(),
         primary_color,
         ctx.theme.status.warning,
-    ) {
-        Some(runs) => StyledText::new(cell.primary.clone()).with_runs(runs.into_vec()),
-        None => StyledText::new(cell.primary.clone()),
+        icons,
+    );
+    let text = match runs {
+        Some(runs) => StyledText::new(shaped).with_runs(runs.into_vec()),
+        None => StyledText::new(shaped),
     };
     content = content.child(
         div()
