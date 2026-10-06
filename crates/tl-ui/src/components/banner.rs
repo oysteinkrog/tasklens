@@ -94,11 +94,13 @@ impl RenderOnce for TlBanner {
             Arc::new(ElementId::Name(self.text.clone())),
             "TlBanner-tooltip".into(),
         );
-        let text = text_box(&m)
-            .relative()
-            .flex_1()
-            .text_color(theme.text_primary)
-            .child(self.text.clone());
+        // The tooltip hangs off a plain outer box: inside the truncating box it would inherit
+        // `nowrap` and the ellipsis, and show one cut line.
+        let text = div().relative().flex().flex_1().min_w_0().child(
+            text_box(&m)
+                .text_color(theme.text_primary)
+                .child(self.text.clone()),
+        );
         let state = HoverTooltip::state(tooltip_id, window, cx);
         let text = HoverTooltip::attach(
             &state,
@@ -326,7 +328,12 @@ mod tests {
         });
         assert!(full > text.size.width, "the text is wider than its box");
         let line_height = px(f32::from(m.text.sm) * m.line_height);
-        assert_eq!(text.size.height, line_height, "one line");
+        // Layout snaps to whole device pixels.
+        assert!(
+            (text.size.height - line_height).abs() <= px(0.5),
+            "one line: {:?}",
+            text.size.height
+        );
 
         // The text box truncates at the end with U+2026.
         let mut style_box = text_box(&m);
