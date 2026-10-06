@@ -170,7 +170,7 @@ impl<V: Render> Render for Root<V> {
 
 /// The 400 × 200 utilization chart: filled total, dashed kernel, gap and spike.
 fn chart_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
-    let graph = current(cx).graph.clone();
+    let graph = current(cx).graph;
     let spec = ChartSpec {
         series: smallvec![
             ChartSeries {
@@ -223,7 +223,7 @@ fn chart_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
 fn grid_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartGridView>> {
     tl_ui::i18n::init_strings(cx, "en-US");
     let m = *metrics(cx);
-    let graph = current(cx).graph.clone();
+    let graph = current(cx).graph;
     let spec = ChartGridSpec {
         cells: (0..CELLS)
             .map(|i| GridCellSpec {
