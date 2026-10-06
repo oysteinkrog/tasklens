@@ -610,7 +610,6 @@ fn host_compositor_pid() -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
-    use std::fmt::Write as _;
     use std::fs;
     use std::path::PathBuf;
 
