@@ -1,0 +1,20 @@
+---
+source: crates/tl-collect/tests/fixture_startup.rs
+expression: render(&scan())
+---
+AutostartUser a.desktop name="Alpha Tray" status=Enabled overrides=Some("etc/xdg/autostart/a.desktop") overridden_by_user=false generated_unit=Some("app-a@autostart.service") can_toggle=true can_delete=true
+AutostartUser gnome-off.desktop name="Quiet Agent" status=Disabled overrides=None overridden_by_user=false generated_unit=Some("app-gnome\\x2doff@autostart.service") can_toggle=true can_delete=true
+AutostartUser gnomeonly.desktop name="Gnome Only Tray" status=NotInThisDesktop overrides=None overridden_by_user=false generated_unit=Some("app-gnomeonly@autostart.service") can_toggle=false can_delete=true
+AutostartUser hidden.desktop name="Hidden Helper" status=Disabled overrides=None overridden_by_user=false generated_unit=Some("app-hidden@autostart.service") can_toggle=true can_delete=true
+AutostartUser mytool.desktop name="My Tool" status=Enabled overrides=None overridden_by_user=false generated_unit=Some("app-mytool@autostart.service") can_toggle=true can_delete=true
+AutostartUser org.kde.yakuake.desktop name="Yakuake" status=Disabled overrides=Some("etc/xdg/autostart/org.kde.yakuake.desktop") overridden_by_user=false generated_unit=Some("app-org.kde.yakuake@autostart.service") can_toggle=true can_delete=true
+AutostartSystemOverridden a.desktop name="Alpha" status=Enabled overrides=None overridden_by_user=true generated_unit=Some("app-a@autostart.service") can_toggle=false can_delete=false
+AutostartSystem b.desktop name="Bravo One" status=Enabled overrides=None overridden_by_user=false generated_unit=Some("app-b@autostart.service") can_toggle=true can_delete=false
+AutostartSystem delta.desktop name="delta" status=Enabled overrides=None overridden_by_user=false generated_unit=Some("app-delta@autostart.service") can_toggle=true can_delete=false
+AutostartSystem gnome-only.desktop name="Gnome Only Panel" status=NotInThisDesktop overrides=None overridden_by_user=false generated_unit=Some("app-gnome\\x2donly@autostart.service") can_toggle=false can_delete=false
+AutostartSystem missing-tryexec.desktop name="Missing Program" status=MissingProgram overrides=None overridden_by_user=false generated_unit=Some("app-missing\\x2dtryexec@autostart.service") can_toggle=false can_delete=false
+AutostartSystem missing.desktop name="Missing Helper" status=MissingProgram overrides=None overridden_by_user=false generated_unit=Some("app-missing@autostart.service") can_toggle=false can_delete=false
+AutostartSystem org.kde.kalendarac.desktop name="Reminder Daemon" status=Enabled overrides=None overridden_by_user=false generated_unit=Some("app-org.kde.kalendarac@autostart.service") can_toggle=true can_delete=false
+AutostartSystemOverridden org.kde.yakuake.desktop name="Yakuake" status=Enabled overrides=None overridden_by_user=true generated_unit=Some("app-org.kde.yakuake@autostart.service") can_toggle=false can_delete=false
+UserUnit sync.service name="sync.service" status=Enabled overrides=None overridden_by_user=false generated_unit=None can_toggle=true can_delete=true
+UserUnit pkg.service name="pkg.service" status=Disabled overrides=None overridden_by_user=false generated_unit=None can_toggle=true can_delete=false
