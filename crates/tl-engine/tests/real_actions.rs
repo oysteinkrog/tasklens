@@ -164,6 +164,7 @@ fn actx(ops: Arc<dyn ActionOps>) -> Arc<ActionCtx> {
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
         unit_bus_override: None,
+        startup_paths: tl_engine::actions::startup::StartupPaths::from_env(),
     })
 }
 

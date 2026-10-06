@@ -201,6 +201,7 @@ fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
         unit_bus_override: None,
+        startup_paths: tl_engine::actions::startup::StartupPaths::from_env(),
     });
     Harness {
         lab,

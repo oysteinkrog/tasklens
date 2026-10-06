@@ -9,6 +9,7 @@ pub mod cgroup;
 pub mod dump;
 pub mod process;
 pub mod socket;
+pub mod startup;
 pub mod targetless;
 pub mod unit;
 
@@ -417,6 +418,41 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("process ops not wired"))
     }
+    /// `tl_ops::fs::autostart_disable_system`: writes the user override of `system_file` and
+    /// returns its path. The default refuses.
+    fn startup_disable_system(
+        &self,
+        _system_file: &std::path::Path,
+        _roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult<std::path::PathBuf> {
+        Err(OpsError::Unsupported("startup ops not wired"))
+    }
+    /// `tl_ops::fs::autostart_enable_override`. The default refuses.
+    fn startup_enable_override(
+        &self,
+        _user_file: &std::path::Path,
+        _roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult<tl_ops::fs::EnableOutcome> {
+        Err(OpsError::Unsupported("startup ops not wired"))
+    }
+    /// `tl_ops::fs::autostart_set_hidden`. The default refuses.
+    fn startup_set_hidden(
+        &self,
+        _user_file: &std::path::Path,
+        _hidden: bool,
+        _roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("startup ops not wired"))
+    }
+    /// `tl_ops::fs::script_set_enabled`. The default refuses.
+    fn startup_script_set_enabled(
+        &self,
+        _script: &std::path::Path,
+        _enabled: bool,
+        _roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("startup ops not wired"))
+    }
 }
 
 /// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
@@ -518,6 +554,40 @@ impl ActionOps for RealOps {
             }
         }
     }
+
+    fn startup_disable_system(
+        &self,
+        system_file: &std::path::Path,
+        roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult<std::path::PathBuf> {
+        tl_ops::fs::autostart_disable_system(system_file, roots)
+    }
+
+    fn startup_enable_override(
+        &self,
+        user_file: &std::path::Path,
+        roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult<tl_ops::fs::EnableOutcome> {
+        tl_ops::fs::autostart_enable_override(user_file, roots)
+    }
+
+    fn startup_set_hidden(
+        &self,
+        user_file: &std::path::Path,
+        hidden: bool,
+        roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        tl_ops::fs::autostart_set_hidden(user_file, hidden, roots)
+    }
+
+    fn startup_script_set_enabled(
+        &self,
+        script: &std::path::Path,
+        enabled: bool,
+        roots: &tl_ops::fs::StartupRoots,
+    ) -> tl_ops::OpsResult {
+        tl_ops::fs::script_set_enabled(script, enabled, roots)
+    }
 }
 
 /// Everything an action task needs. Shared by every action of one session.
@@ -539,6 +609,8 @@ pub struct ActionCtx {
     pub destroy_support_sent: AtomicBool,
     /// Picks the unit bus in place of the manager slots. `None` in production; tests set it.
     pub unit_bus_override: Option<unit::UnitBusOverride>,
+    /// The startup entry directories, from the environment in production.
+    pub startup_paths: startup::StartupPaths,
 }
 
 /// The `ActionGate` the reducer calls (E11-A1). The only entry to `run_action`: every request
@@ -696,6 +768,7 @@ pub fn gate_with_ops(hook: HookCtx, ops: Arc<dyn ActionOps>) -> Box<dyn ActionGa
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
         unit_bus_override: None,
+        startup_paths: startup::StartupPaths::from_env(),
     })))
 }
 
@@ -877,7 +950,7 @@ async fn dispatch(
             four_tuple,
         } => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
         ActionTarget::Unit(unit) => unit::run_target(cx, actx, kind, unit).await,
-        ActionTarget::Startup(_) => ActionState::Rejected(RejectReason::Unsupported),
+        ActionTarget::Startup(entry) => startup::run_target(cx, actx, kind, entry).await,
     }
 }
 
@@ -1221,6 +1294,7 @@ mod tests {
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: None,
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
         (Gate::new(ctx), events, msgs)
     }
@@ -1368,6 +1442,7 @@ mod run_tests {
                 helper: None,
                 destroy_support_sent: AtomicBool::new(false),
                 unit_bus_override: None,
+                startup_paths: crate::actions::startup::StartupPaths::from_env(),
             });
             Self {
                 lab: LabRuntime::new(LabConfig::new(7).max_steps(1_000_000)),

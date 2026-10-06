@@ -839,6 +839,7 @@ mod tests {
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: Some(pick),
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         })
     }
 
@@ -1669,6 +1670,7 @@ mod tests {
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: None,
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         };
         run_real(async move {
             let cx = Cx::current().expect("task has a Cx");

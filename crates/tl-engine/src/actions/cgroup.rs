@@ -190,6 +190,7 @@ mod tests {
             helper: None,
             destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
             unit_bus_override: None,
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
         let cg = CgroupRef {
             rel_path: Arc::from(APP_SCOPE),

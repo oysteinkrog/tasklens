@@ -404,6 +404,7 @@ mod tests {
             helper: helper.map(|h| h as Arc<dyn PrivilegedOps>),
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: None,
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
         let out = Arc::new(Mutex::new(None));
         let out_task = Arc::clone(&out);
@@ -734,6 +735,7 @@ mod tests {
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
             unit_bus_override: None,
+            startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
         let kind = ActionKind::Dump {
             mode: DumpMode::Mini,
