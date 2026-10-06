@@ -172,10 +172,10 @@ fn paint_view(
     let pw = (f32::from(plot.size.width) * sf).round().max(0.0) as u32;
     let ph = (f32::from(plot.size.height) * sf).round().max(0.0) as u32;
 
+    let state = view.derived_state(now);
     let ChartView {
         spec,
         labels,
-        state,
         cache,
         scratch,
         built_right_edge_ns,
@@ -336,10 +336,7 @@ fn paint_view(
             > now;
 
     #[cfg(any(test, feature = "test-hooks"))]
-    {
-        view.render_count.set(view.render_count.get() + 1);
-        view.last_right_edge_ns.set(right_edge);
-    }
+    view.last_right_edge_ns.set(right_edge);
 
     PaintOut { moving, newest_ns }
 }

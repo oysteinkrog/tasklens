@@ -1,21 +1,28 @@
 //! `ChartView`: the entity behind one chart (ADR-009, UI-PRF-001).
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{Context, IntoElement, Render, Window};
+use gpui_kit::{Context, Entity, IntoElement, Render, Subscription, Window};
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::SeriesView;
+use tl_model::snapshot::{ComponentMask, SeriesSet, Snapshot};
 
 use super::element::ChartElement;
 use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, labels, scale};
+use crate::hub::{SnapshotChanged, SnapshotHub};
 
 pub struct ChartView {
     pub spec: ChartSpec,
     pub labels: ChartLabels,
+    /// Owner-set validity. `derived_state` returns it when it is Failed, Restricted or
+    /// Unsupported and derives the rest from the data.
     pub state: ChartState,
+    hub: Entity<SnapshotHub>,
+    _hub_sub: Subscription,
     pub(crate) cache: Rc<RefCell<ChartCache>>,
     /// Buffers reused by every geometry rebuild.
     pub(crate) scratch: geometry::Scratch,
@@ -51,11 +58,20 @@ pub struct ChartView {
 }
 
 impl ChartView {
-    pub fn new(spec: ChartSpec, labels: ChartLabels, _cx: &mut Context<Self>) -> Self {
-        Self {
+    /// Subscribes to `hub` and resolves the spec against its current snapshot.
+    pub fn new(
+        spec: ChartSpec,
+        labels: ChartLabels,
+        hub: &Entity<SnapshotHub>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let _hub_sub = cx.subscribe(hub, Self::on_snapshot);
+        let mut this = Self {
             spec,
             labels,
             state: ChartState::WarmingUp,
+            hub: hub.clone(),
+            _hub_sub,
             cache: Rc::default(),
             scratch: geometry::Scratch::default(),
             built_right_edge_ns: 0,
@@ -74,13 +90,83 @@ impl ChartView {
             path_colors: RefCell::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             last_right_edge_ns: std::cell::Cell::new(0),
+        };
+        this.resolve(hub.read(cx).current());
+        this
+    }
+
+    /// Notifies only when one of this chart's series changed, or when a device change may have
+    /// brought an absent series in (ADR-009: views notify only for what they draw).
+    fn on_snapshot(
+        &mut self,
+        hub: Entity<SnapshotHub>,
+        ev: &SnapshotChanged,
+        cx: &mut Context<Self>,
+    ) {
+        let own_changed = ev.mask.contains(ComponentMask::SERIES)
+            && self
+                .spec
+                .series
+                .iter()
+                .any(|s| ev.changed_series.binary_search(&s.id).is_ok());
+        let device_appeared = ev.mask.contains(ComponentMask::DEVICES)
+            && (self.series.len() != self.spec.series.len()
+                || self.series.iter().any(Option::is_none));
+        if own_changed || device_appeared {
+            self.resolve(hub.read(cx).current());
+            cx.notify();
         }
     }
 
-    /// Replaces the spec. Notifies only when it changed.
+    /// Looks up every spec series in `snap` by binary search and keeps an `Arc` clone of each,
+    /// `None` when absent. Reuses the inline buffer, so it does not allocate for up to 2 series.
+    pub fn resolve(&mut self, snap: &Snapshot) {
+        let set = &*snap.series;
+        self.series.clear();
+        self.series.extend(
+            self.spec
+                .series
+                .iter()
+                .map(|s| find_series(set, s.id).cloned()),
+        );
+    }
+
+    /// Validity for this paint (UI-PRF-001). Owner-set Failed, Restricted and Unsupported win.
+    /// Otherwise WarmingUp without samples, Stale when the newest sample is too old, else Live.
+    pub fn derived_state(&self, now_boot_ns: u64) -> ChartState {
+        if matches!(
+            self.state,
+            ChartState::Failed(_) | ChartState::Restricted | ChartState::Unsupported
+        ) {
+            return self.state.clone();
+        }
+        let mut newest_ns = None;
+        let mut period_ns = u64::MAX;
+        for s in self.series.iter().flatten() {
+            period_ns = period_ns.min(s.period_ns);
+            if let Some(last) = s.samples.last() {
+                newest_ns = Some(newest_ns.unwrap_or(0).max(last.t_ns));
+            }
+        }
+        let Some(newest_ns) = newest_ns else {
+            return ChartState::WarmingUp;
+        };
+        if geometry::is_stale(newest_ns, now_boot_ns, period_ns) {
+            ChartState::Stale {
+                age_ns: geometry::stale_age_ns(newest_ns, now_boot_ns),
+            }
+        } else {
+            ChartState::Live
+        }
+    }
+
+    /// Replaces the spec. When it changed, resolves it against the hub's current snapshot and
+    /// notifies.
     pub fn set_spec(&mut self, spec: ChartSpec, cx: &mut Context<Self>) {
         if self.spec != spec {
             self.spec = spec;
+            let hub = self.hub.clone();
+            self.resolve(hub.read(cx).current());
             cx.notify();
         }
     }
@@ -105,8 +191,7 @@ impl ChartView {
         self.spec.series.iter().map(|s| s.id)
     }
 
-    /// Sets the resolved series directly, one per `spec.series` entry. E19-008 binds them from the
-    /// hub snapshot.
+    /// Sets the resolved series directly, one per `spec.series` entry, bypassing the hub.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn set_series_for_test(
         &mut self,
@@ -115,6 +200,12 @@ impl ChartView {
     ) {
         self.series = series;
         cx.notify();
+    }
+
+    /// The resolved series, one per `spec.series` entry.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn resolved(&self) -> &[Option<Arc<SeriesView>>] {
+        &self.series
     }
 
     /// Number of built paths in the geometry cache (fills, strokes and their stale sets).
@@ -133,6 +224,27 @@ impl ChartView {
 
 impl Render for ChartView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
         ChartElement::new(cx.entity())
     }
+}
+
+/// `id` in `set`: the 1 Hz tier list when the id carries the tier bit, else the fast list.
+fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
+    let views = if id.metric.is_tier_1hz() {
+        &set.slow
+    } else {
+        &set.series
+    };
+    search_series(views, |v| v.id.cmp(&id))
+}
+
+/// Binary search over `views`, which is sorted by `SeriesId`. `cmp` orders a view against the
+/// target. Public so a test can count the comparisons.
+pub fn search_series(
+    views: &[Arc<SeriesView>],
+    cmp: impl FnMut(&Arc<SeriesView>) -> Ordering,
+) -> Option<&Arc<SeriesView>> {
+    views.binary_search_by(cmp).ok().map(|i| &views[i])
 }

@@ -2,10 +2,21 @@
 //! `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
-use gpui_kit::{AppContext, TestAppContext};
+use std::sync::Arc;
+
+use gpui_kit::{App, AppContext, Entity, TestAppContext};
 use smallvec::smallvec;
+use tl_model::client::EngineClient;
 use tl_ui::chart::view::ChartView;
 use tl_ui::chart::{ChartLabels, ChartSeries, ChartSpec, ValueAlign, ValueFormat};
+use tl_ui::hub::SnapshotHub;
+use tl_ui::testing::fake_engine::FakeEngine;
+
+/// A hub over `engine`; installs the engine's latest snapshot.
+fn hub_for(engine: &Arc<FakeEngine>, cx: &mut App) -> Entity<SnapshotHub> {
+    let client: Arc<dyn EngineClient> = engine.clone();
+    cx.new(|cx| SnapshotHub::new(client, cx))
+}
 
 fn labels() -> ChartLabels {
     ChartLabels {
@@ -24,7 +35,8 @@ fn chart_view_constructs(cx: &mut TestAppContext) {
         series: smallvec![ChartSeries::default()],
         ..Default::default()
     };
-    let view = cx.new(|cx| ChartView::new(spec, labels(), cx));
+    let hub = cx.update(|cx| hub_for(&FakeEngine::new(), cx));
+    let view = cx.new(|cx| ChartView::new(spec, labels(), &hub, cx));
     view.read_with(cx, |v, _| {
         assert_eq!(v.render_count.get(), 0);
         assert_eq!(v.cached_path_count(), 0);
@@ -233,6 +245,7 @@ mod element {
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui::testing::fake_engine::FakeEngine;
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
@@ -306,7 +319,8 @@ mod element {
         let (root, vcx) = cx.add_window_view(|window, cx| {
             let driver = cx.new(AnimationDriver::new);
             AnimationDriver::register(&driver, window, cx);
-            let chart = cx.new(|cx| ChartView::new(spec, labels, cx));
+            let hub = super::hub_for(&FakeEngine::new(), cx);
+            let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
             Root {
                 driver,
                 chart,
@@ -496,5 +510,310 @@ mod element {
         assert_eq!(rec.view, id);
         assert_eq!(rec.newest_ns, 1_000);
         assert!(rec.painted_at_ns >= 1_000);
+    }
+}
+
+// ChartView data binding: hub subscription, series lookup, re-render rules (E19, tasklens-yrf.10).
+
+mod binding {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, px,
+    };
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::snapshot::{SeriesSet, Snapshot};
+    use tl_ui::chart::view::{ChartView, search_series};
+    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+    const S: u64 = 1_000_000_000;
+
+    /// Counts heap allocations made on the current thread.
+    struct CountingAlloc;
+
+    thread_local! {
+        static ALLOCS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    // SAFETY: forwards every call to `System` unchanged.
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
+            // SAFETY: same contract as the caller's.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: same contract as the caller's.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
+            // SAFETY: same contract as the caller's.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAlloc = CountingAlloc;
+
+    fn allocs() -> u64 {
+        ALLOCS.with(Cell::get)
+    }
+
+    fn sid(device: u16, metric: MetricId) -> SeriesId {
+        SeriesId {
+            device: DeviceIdx(device),
+            metric,
+        }
+    }
+
+    const A: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::CPU_TOTAL,
+    };
+    const B: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::MEM_USED,
+    };
+
+    /// `n` samples 100 ms apart, the newest at `newest`.
+    fn series(id: SeriesId, version: u64, n: u64, newest: u64) -> Arc<SeriesView> {
+        let samples: Vec<Sample> = (0..n)
+            .map(|i| Sample::valid(newest - (n - 1 - i) * 100 * MS, 50.0))
+            .collect();
+        Arc::new(SeriesView {
+            id,
+            version,
+            period_ns: 100 * MS,
+            samples: samples.into(),
+        })
+    }
+
+    fn set_series(snap: &mut Snapshot, views: Vec<Arc<SeriesView>>) {
+        snap.series = Arc::new(SeriesSet {
+            header: snap.series.header,
+            series: Arc::from(views),
+            slow: Arc::from([]),
+        });
+    }
+
+    fn spec_for(ids: &[SeriesId]) -> ChartSpec {
+        ChartSpec {
+            series: ids
+                .iter()
+                .map(|&id| ChartSeries {
+                    id,
+                    ..ChartSeries::default()
+                })
+                .collect(),
+            ..ChartSpec::default()
+        }
+    }
+
+    struct Root {
+        chart: Entity<ChartView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(302.)).h(px(102.)).child(self.chart.clone())
+        }
+    }
+
+    /// A window holding one chart for `ids`, bound to a hub over `engine`.
+    fn chart_in_window<'a>(
+        cx: &'a mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        ids: &[SeriesId],
+    ) -> (Entity<ChartView>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let spec = spec_for(ids);
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(engine, cx);
+            let chart = cx.new(|cx| ChartView::new(spec, super::labels(), &hub, cx));
+            Root { chart }
+        });
+        vcx.run_until_parked();
+        let chart = vcx.read_entity(&root, |r, _| r.chart.clone());
+        (chart, vcx)
+    }
+
+    fn render_count(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> u32 {
+        vcx.read_entity(chart, |v, _| v.render_count.get())
+    }
+
+    fn resolved(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> Arc<SeriesView> {
+        vcx.read_entity(chart, |v, _| {
+            v.resolved()[0].clone().expect("series resolved")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn chart_not_rerendered_on_unrelated_series(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let now = 10 * S;
+        engine.publish_with(|s| set_series(s, vec![series(A, 1, 5, now), series(B, 1, 5, now)]));
+        let (chart, vcx) = chart_in_window(cx, &engine, &[B]);
+        assert_eq!(render_count(&chart, vcx), 1);
+        let before = resolved(&chart, vcx);
+
+        engine.publish_with(|s| {
+            let b = s.series.series[1].clone();
+            set_series(s, vec![series(A, 2, 5, now + 100 * MS), b]);
+        });
+        vcx.run_until_parked();
+        assert_eq!(render_count(&chart, vcx), 1, "series A changed, not B");
+        assert!(Arc::ptr_eq(&before, &resolved(&chart, vcx)));
+    }
+
+    #[gpui_kit::test]
+    fn chart_rerendered_on_own_series(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let now = 10 * S;
+        engine.publish_with(|s| set_series(s, vec![series(A, 1, 5, now), series(B, 1, 5, now)]));
+        let (chart, vcx) = chart_in_window(cx, &engine, &[B]);
+        assert_eq!(render_count(&chart, vcx), 1);
+        let before = resolved(&chart, vcx);
+
+        let next = series(B, 2, 5, now + 100 * MS);
+        engine.publish_with(|s| {
+            let a = s.series.series[0].clone();
+            set_series(s, vec![a, next.clone()]);
+        });
+        vcx.run_until_parked();
+        assert_eq!(render_count(&chart, vcx), 2);
+        let after = resolved(&chart, vcx);
+        assert!(!Arc::ptr_eq(&before, &after), "a new Arc was stored");
+        assert!(Arc::ptr_eq(&after, &next), "the snapshot's Arc, not a copy");
+    }
+
+    #[gpui_kit::test]
+    fn chart_rerendered_when_device_appears(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let gpu = sid(1, MetricId::GPU_UTIL);
+        let (chart, vcx) = chart_in_window(cx, &engine, &[gpu]);
+        assert_eq!(render_count(&chart, vcx), 1);
+
+        engine.publish_with(|s| Arc::make_mut(&mut s.devices).version += 1);
+        vcx.run_until_parked();
+        assert_eq!(render_count(&chart, vcx), 2, "the series was absent");
+
+        engine.publish_with(|s| set_series(s, vec![series(gpu, 1, 5, 10 * S)]));
+        vcx.run_until_parked();
+        assert_eq!(render_count(&chart, vcx), 3);
+
+        engine.publish_with(|s| Arc::make_mut(&mut s.devices).version += 1);
+        vcx.run_until_parked();
+        assert_eq!(render_count(&chart, vcx), 3, "every series present");
+    }
+
+    #[gpui_kit::test]
+    fn chart_resolves_by_binary_search(cx: &mut TestAppContext) {
+        let ids: Vec<SeriesId> = (0..80u16)
+            .map(|i| sid(i / 4, MetricId(i % 4 * 10)))
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(sorted, ids, "built in SeriesId order");
+        let views: Vec<Arc<SeriesView>> = ids.iter().map(|&id| series(id, 1, 1, S)).collect();
+        let first = ids[3];
+        let last = ids[77];
+
+        // 2 lookups, at most ⌈log₂ 80⌉ = 7 comparisons each.
+        let mut comparisons = 0u32;
+        for target in [first, last] {
+            let found = search_series(&views, |v| {
+                comparisons += 1;
+                v.id.cmp(&target)
+            });
+            assert_eq!(found.map(|v| v.id), Some(target));
+        }
+        assert!(comparisons <= 2 * 7, "{comparisons} comparisons");
+
+        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        set_series(&mut snap, views);
+        let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
+        let chart =
+            cx.new(|cx| ChartView::new(spec_for(&[first, last]), super::labels(), &hub, cx));
+        let (allocated, resolved) = chart.update(cx, |v, _| {
+            let before = allocs();
+            v.resolve(&snap);
+            (allocs() - before, v.resolved().to_vec())
+        });
+        assert_eq!(allocated, 0, "resolve only clones Arcs");
+        assert!(Arc::ptr_eq(
+            resolved[0].as_ref().unwrap(),
+            &snap.series.series[3]
+        ));
+        assert!(Arc::ptr_eq(
+            resolved[1].as_ref().unwrap(),
+            &snap.series.series[77]
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn chart_state_warming_up_then_live_then_stale(cx: &mut TestAppContext) {
+        let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
+        let chart = cx.new(|cx| ChartView::new(spec_for(&[B]), super::labels(), &hub, cx));
+        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        let newest = 100 * S;
+
+        chart.update(cx, |v, _| {
+            assert_eq!(v.derived_state(newest), ChartState::WarmingUp, "absent");
+
+            set_series(&mut snap, vec![series(B, 1, 0, newest)]);
+            v.resolve(&snap);
+            assert_eq!(v.derived_state(newest), ChartState::WarmingUp, "no samples");
+
+            set_series(&mut snap, vec![series(B, 2, 10, newest)]);
+            v.resolve(&snap);
+            assert_eq!(v.derived_state(newest + 50 * MS), ChartState::Live);
+            assert_eq!(
+                v.derived_state(newest + 2 * S),
+                ChartState::Stale { age_ns: 2 * S }
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn owner_state_wins(cx: &mut TestAppContext) {
+        let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
+        let chart = cx.new(|cx| ChartView::new(spec_for(&[B]), super::labels(), &hub, cx));
+        let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
+        let newest = 100 * S;
+        chart.update(cx, |v, cx| {
+            v.set_state(ChartState::Restricted, cx);
+            assert_eq!(v.derived_state(newest), ChartState::Restricted, "absent");
+            set_series(&mut snap, vec![series(B, 1, 10, newest)]);
+            v.resolve(&snap);
+            assert_eq!(v.derived_state(newest), ChartState::Restricted, "live data");
+            assert_eq!(v.derived_state(newest + 5 * S), ChartState::Restricted);
+
+            v.set_state(ChartState::Failed("permission denied".into()), cx);
+            assert_eq!(
+                v.derived_state(newest),
+                ChartState::Failed("permission denied".into())
+            );
+            v.set_state(ChartState::Live, cx);
+            assert_eq!(v.derived_state(newest), ChartState::Live, "derived again");
+        });
     }
 }
