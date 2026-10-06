@@ -6,6 +6,7 @@ pub mod app;
 pub mod chart;
 pub mod components;
 pub mod demand;
+pub mod focus;
 pub mod hub;
 pub mod i18n;
 pub mod pages;
