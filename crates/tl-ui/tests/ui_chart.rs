@@ -2276,3 +2276,238 @@ mod grid_offline_and_gaps {
         });
     }
 }
+
+// 5 and 10 minute ranges read the 1 Hz tier (E19, tasklens-yrf.15).
+
+mod tier_1hz {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, px,
+    };
+    use smallvec::smallvec;
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::snapshot::{SeriesSet, Snapshot};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui::chart::view::ChartView;
+    use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+    const S: u64 = 1_000_000_000;
+
+    const A: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::CPU_TOTAL,
+    };
+
+    fn slow(id: SeriesId) -> SeriesId {
+        SeriesId {
+            metric: id.metric.with_tier_1hz(),
+            ..id
+        }
+    }
+
+    /// `n` samples `period` apart, the newest now.
+    fn view(id: SeriesId, n: u64, period: u64) -> Arc<SeriesView> {
+        let newest = now_boot_ns();
+        let samples: Vec<Sample> = (0..n)
+            .map(|i| Sample::valid(newest - (n - 1 - i) * period, (i % 100) as f32))
+            .collect();
+        Arc::new(SeriesView {
+            id,
+            version: 1,
+            period_ns: period,
+            samples: samples.into(),
+        })
+    }
+
+    /// Publishes `A`'s fast view (600 samples at 100 ms) and, when `with_1hz`, its 1 Hz view
+    /// (600 samples at 1 s).
+    fn publish(engine: &Arc<FakeEngine>, with_1hz: bool) {
+        let fast = view(A, 600, 100 * MS);
+        let slow_views: Vec<Arc<SeriesView>> = if with_1hz {
+            vec![view(slow(A), 600, S)]
+        } else {
+            Vec::new()
+        };
+        engine.publish_with(|s: &mut Snapshot| {
+            s.series = Arc::new(SeriesSet {
+                header: s.series.header,
+                series: Arc::from([fast]),
+                slow: Arc::from(slow_views),
+            });
+        });
+    }
+
+    fn spec(range_ns: u64) -> ChartSpec {
+        ChartSpec {
+            series: smallvec![ChartSeries {
+                id: A,
+                ..ChartSeries::default()
+            }],
+            range_ns,
+            ..ChartSpec::default()
+        }
+    }
+
+    struct Root {
+        chart: Entity<ChartView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(602.)).h(px(202.)).child(self.chart.clone())
+        }
+    }
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+    }
+
+    fn chart_in_window<'a>(
+        cx: &'a mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        range_ns: u64,
+    ) -> (Entity<ChartView>, &'a mut VisualTestContext) {
+        init(cx);
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(engine, cx);
+            let chart = cx.new(|cx| ChartView::new(spec(range_ns), super::labels(), &hub, cx));
+            Root { chart }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
+        let chart = vcx.read_entity(&root, |r, _| r.chart.clone());
+        (chart, vcx)
+    }
+
+    /// (period_ns, sample count, tier_fallback) of the resolved series.
+    fn resolved(chart: &Entity<ChartView>, vcx: &mut VisualTestContext) -> (u64, usize, bool) {
+        vcx.read_entity(chart, |v, _| {
+            let s = v.resolved()[0].clone().expect("series resolved");
+            (s.period_ns, s.samples.len(), v.tier_fallback)
+        })
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn range_300s_reads_1hz_tier(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, true);
+        let (chart, vcx) = chart_in_window(cx, &engine, 300 * S);
+        assert_eq!(resolved(&chart, vcx), (S, 600, false));
+        vcx.read_entity(&chart, |v, _| {
+            assert_eq!(v.resolved()[0].as_ref().unwrap().id, slow(A));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn range_60s_reads_fast_tier(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, true);
+        let (chart, vcx) = chart_in_window(cx, &engine, 60 * S);
+        assert_eq!(resolved(&chart, vcx), (100 * MS, 600, false));
+    }
+
+    #[gpui_kit::test]
+    fn missing_1hz_tier_falls_back(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, false);
+        let (chart, vcx) = chart_in_window(cx, &engine, 600 * S);
+        assert_eq!(resolved(&chart, vcx), (100 * MS, 600, true));
+
+        // The 1 Hz view arriving later is picked up and clears the fallback.
+        publish(&engine, true);
+        vcx.run_until_parked();
+        assert_eq!(resolved(&chart, vcx), (S, 600, false));
+    }
+
+    #[gpui_kit::test]
+    fn range_change_rebuilds_once(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, true);
+        let (chart, vcx) = chart_in_window(cx, &engine, 60 * S);
+        draw(vcx);
+        let builds =
+            |vcx: &mut VisualTestContext| vcx.read_entity(&chart, |v, _| v.build_count.get());
+        let before = builds(vcx);
+        assert!(before >= 1, "the 60 s chart was built");
+        for _ in 0..10 {
+            draw(vcx);
+        }
+        assert_eq!(
+            builds(vcx),
+            before,
+            "an unchanged 60 s chart builds nothing"
+        );
+
+        chart.update(vcx, |v, cx| v.set_spec(spec(300 * S), cx));
+        for _ in 0..10 {
+            draw(vcx);
+        }
+        assert_eq!(
+            builds(vcx),
+            before + 1,
+            "60 s to 300 s: exactly 1 geometry build"
+        );
+        assert_eq!(resolved(&chart, vcx).0, S);
+    }
+
+    fn grid_spec(range_ns: u64) -> ChartGridSpec {
+        ChartGridSpec {
+            cells: vec![GridCellSpec {
+                heading: "CPU 0".into(),
+                fill_series: A,
+                overlay_series: None,
+                offline: false,
+                mark: None,
+                tooltip: None,
+            }],
+            range_ns,
+            ..ChartGridSpec::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn grid_follows_the_tier_rule(cx: &mut TestAppContext) {
+        init(cx);
+        let engine = FakeEngine::new();
+        publish(&engine, false);
+        let hub = cx.update(|cx| super::hub_for(&engine, cx));
+        let grid = cx.new(|cx| ChartGridView::new(grid_spec(600 * S), &hub, cx));
+        grid.read_with(cx, |v, _| {
+            assert!(v.tier_fallback, "no 1 Hz view: fallback")
+        });
+
+        grid.update(cx, |v, cx| v.set_spec(grid_spec(60 * S), cx));
+        grid.read_with(cx, |v, _| {
+            assert!(!v.tier_fallback, "60 s reads the fast tier")
+        });
+
+        publish(&engine, true);
+        cx.run_until_parked();
+        grid.update(cx, |v, cx| v.set_spec(grid_spec(300 * S), cx));
+        grid.read_with(cx, |v, _| {
+            assert!(!v.tier_fallback, "300 s finds the 1 Hz view")
+        });
+    }
+}

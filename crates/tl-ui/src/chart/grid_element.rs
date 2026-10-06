@@ -40,7 +40,7 @@ use tl_model::validity::Validity;
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::labels::{self, CachedLine, LabelCache, LineStyle};
-use super::view::find_series;
+use super::view::{find_tiered, tier_changed};
 use super::{
     ChartCache, ChartSeries, DEFAULT_RANGE_NS, GeometryScalars, GridStyle, LegendStyle, PathSet,
     ValueFormat, YScale, scale,
@@ -189,6 +189,9 @@ pub struct ChartGridView {
     built_layout: Option<(GridLayout, f32)>,
     /// Resolved (fill, overlay) per cell.
     series: Vec<CellSeries>,
+    /// True when a cell series read its fast view in place of the 1 Hz view the range wants
+    /// (see `ChartView::tier_fallback`).
+    pub tier_fallback: bool,
     headings: Vec<CachedLine>,
     values: Vec<CachedLine>,
     offline: CachedLine,
@@ -247,6 +250,7 @@ impl ChartGridView {
             built_right_edge_ns: 0,
             built_layout: None,
             series: Vec::new(),
+            tier_fallback: false,
             headings: Vec::new(),
             values: Vec::new(),
             offline: CachedLine::default(),
@@ -289,7 +293,8 @@ impl ChartGridView {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
-        let changed = |id: SeriesId| ev.changed_series.binary_search(&id).is_ok();
+        let range_ns = self.spec.range_ns;
+        let changed = |id: SeriesId| tier_changed(&ev.changed_series, id, range_ns);
         let own_changed = ev.mask.contains(ComponentMask::SERIES)
             && self
                 .spec
@@ -308,18 +313,25 @@ impl ChartGridView {
         }
     }
 
-    /// Looks up every cell's series in `snap` by binary search. Reuses the list's capacity.
+    /// Looks up every cell's series in `snap` by binary search. Ranges over 60 s read the 1 Hz
+    /// tier, as `ChartView::resolve`. Reuses the list's capacity.
     pub fn resolve(&mut self, snap: &Snapshot) {
         let set = &*snap.series;
+        let range_ns = self.spec.range_ns;
+        let mut fallback = false;
+        let mut find = |id: SeriesId| {
+            let (view, fell_back) = find_tiered(set, id, range_ns);
+            fallback |= fell_back;
+            view.cloned()
+        };
         self.series.clear();
-        self.series.extend(self.spec.cells.iter().map(|c| {
-            (
-                find_series(set, c.fill_series).cloned(),
-                c.overlay_series
-                    .and_then(|id| find_series(set, id))
-                    .cloned(),
-            )
-        }));
+        self.series.extend(
+            self.spec
+                .cells
+                .iter()
+                .map(|c| (find(c.fill_series), c.overlay_series.and_then(&mut find))),
+        );
+        self.tier_fallback = fallback;
     }
 
     /// Replaces the spec. When it changed, resolves it against the hub's current snapshot and

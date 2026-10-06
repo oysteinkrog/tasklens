@@ -40,6 +40,9 @@ pub struct ChartView {
     pub(crate) text: labels::LabelCache,
     /// Resolved from the newest snapshot, one per `spec.series` entry.
     pub(crate) series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
+    /// True when the range wants the 1 Hz tier but a series resolved to its fast view because
+    /// the snapshot has no 1 Hz view for it (P1 engine). The chart then draws the last 60 s.
+    pub tier_fallback: bool,
     /// Reused formatter buffer.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
@@ -87,6 +90,7 @@ impl ChartView {
             axis_text: String::new(),
             text: labels::LabelCache::default(),
             series: SmallVec::new(),
+            tier_fallback: false,
             last_value_text: String::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -115,12 +119,13 @@ impl ChartView {
         ev: &SnapshotChanged,
         cx: &mut Context<Self>,
     ) {
+        let range_ns = self.spec.range_ns;
         let own_changed = ev.mask.contains(ComponentMask::SERIES)
             && self
                 .spec
                 .series
                 .iter()
-                .any(|s| ev.changed_series.binary_search(&s.id).is_ok());
+                .any(|s| tier_changed(&ev.changed_series, s.id, range_ns));
         let device_appeared = ev.mask.contains(ComponentMask::DEVICES)
             && (self.series.len() != self.spec.series.len()
                 || self.series.iter().any(Option::is_none));
@@ -131,16 +136,19 @@ impl ChartView {
     }
 
     /// Looks up every spec series in `snap` by binary search and keeps an `Arc` clone of each,
-    /// `None` when absent. Reuses the inline buffer, so it does not allocate for up to 2 series.
+    /// `None` when absent. Ranges over 60 s read the 1 Hz tier (`find_tiered`). Reuses the
+    /// inline buffer, so it does not allocate for up to 2 series.
     pub fn resolve(&mut self, snap: &Snapshot) {
         let set = &*snap.series;
+        let range_ns = self.spec.range_ns;
+        let mut fallback = false;
         self.series.clear();
-        self.series.extend(
-            self.spec
-                .series
-                .iter()
-                .map(|s| find_series(set, s.id).cloned()),
-        );
+        self.series.extend(self.spec.series.iter().map(|s| {
+            let (view, fell_back) = find_tiered(set, s.id, range_ns);
+            fallback |= fell_back;
+            view.cloned()
+        }));
+        self.tier_fallback = fallback;
     }
 
     /// Validity for this paint (UI-PRF-001). Owner-set Failed, Restricted and Unsupported win.
@@ -299,6 +307,44 @@ impl Render for ChartView {
         self.render_count.set(self.render_count.get() + 1);
         ChartElement::new(cx.entity())
     }
+}
+
+/// Ranges longer than this read the 1 Hz tier (PERF-017, R-016).
+pub const TIER_1HZ_MIN_RANGE_NS: u64 = 60_000_000_000;
+
+/// `id` in `set` for a chart of `range_ns`. Over 60 s it looks up the 1 Hz view first and falls
+/// back to the fast view when the snapshot has none; the bool is true when that fallback found
+/// the fast view.
+pub(crate) fn find_tiered(
+    set: &SeriesSet,
+    id: SeriesId,
+    range_ns: u64,
+) -> (Option<&Arc<SeriesView>>, bool) {
+    if range_ns <= TIER_1HZ_MIN_RANGE_NS || id.metric.is_tier_1hz() {
+        return (find_series(set, id), false);
+    }
+    let slow = SeriesId {
+        metric: id.metric.with_tier_1hz(),
+        ..id
+    };
+    match find_series(set, slow) {
+        Some(v) => (Some(v), false),
+        None => {
+            let fast = find_series(set, id);
+            (fast, fast.is_some())
+        }
+    }
+}
+
+/// True when `changed` holds `id`, or its 1 Hz view when `range_ns` reads that tier. A linear
+/// scan: `Snapshot::changed_since` lists fast ids then 1 Hz ids, so the whole list is not sorted.
+pub(crate) fn tier_changed(changed: &[SeriesId], id: SeriesId, range_ns: u64) -> bool {
+    changed.contains(&id)
+        || (range_ns > TIER_1HZ_MIN_RANGE_NS
+            && changed.contains(&SeriesId {
+                metric: id.metric.with_tier_1hz(),
+                ..id
+            }))
 }
 
 /// `id` in `set`: the 1 Hz tier list when the id carries the tier bit, else the fast list.
