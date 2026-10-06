@@ -981,10 +981,11 @@ mod titlebar {
         let bar = bounds(r.cx, "TitleBar");
         let fill = r.cx.update(|window, cx| {
             window.draw(cx).clear(cx);
+            let scale = window.scale_factor();
             window
                 .painted_quads()
                 .iter()
-                .any(|q| q.background == Background::from(titlebar) && q.bounds == bar)
+                .any(|q| q.background == Background::from(titlebar) && q.bounds == bar.scale(scale))
         });
         assert!(fill, "the bar keeps the titlebar background");
     }
