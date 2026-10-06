@@ -604,4 +604,147 @@ mod tests {
         );
         assert!(matches!(ran.phase, SetupPhase::Failed(_)));
     }
+
+    fn packaging(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packaging")
+            .join(name)
+    }
+
+    /// Runs `packaging/tasklens-setup` with `args`, in test mode under `root` when given.
+    /// Returns the exit code, stdout and stderr.
+    fn script(root: Option<&Path>, args: &[&str]) -> (i32, String, String) {
+        let mut command = Command::new(SH);
+        command
+            .arg(packaging("tasklens-setup"))
+            .args(args)
+            .env_remove("TASKLENS_SETUP_ROOT");
+        if let Some(root) = root {
+            command.env("TASKLENS_SETUP_ROOT", root);
+        }
+        let out = command.output().expect("run tasklens-setup");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8(out.stdout).expect("utf-8"),
+            String::from_utf8(out.stderr).expect("utf-8"),
+        )
+    }
+
+    /// A fake root with `etc/udev/rules.d/`, for test mode.
+    fn rules_root() -> Fake {
+        let fake = Fake::new();
+        fs::create_dir_all(fake.path("etc/udev/rules.d")).expect("mkdir");
+        fake
+    }
+
+    const UDEV_LINES: [&str; 2] = [
+        "would run: udevadm control --reload",
+        "would run: udevadm trigger --subsystem-match=powercap --action=add",
+    ];
+
+    #[test]
+    fn script_rapl_enable_writes_rule() {
+        let fake = rules_root();
+        let (code, out, _) = script(Some(fake.dir.path()), &["rapl-enable"]);
+        assert_eq!(code, 0, "{out}");
+        let rule = fake.path(RULE_FILE);
+        assert_eq!(
+            fs::read(&rule).expect("rule"),
+            fs::read(packaging("99-tasklens-powercap.rules")).expect("reference rule")
+        );
+        let mode = fs::metadata(&rule).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644);
+        assert!(
+            !fake
+                .path("etc/udev/rules.d/99-tasklens-powercap.rules.tmp")
+                .exists()
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines, [UDEV_LINES[0], UDEV_LINES[1], "Enabled"]);
+    }
+
+    #[test]
+    fn script_never_touches_99_powercap() {
+        let fake = rules_root();
+        let other = fake.path("etc/udev/rules.d/99-powercap.rules");
+        fs::write(&other, b"# not ours\n").expect("write");
+        let before = fs::metadata(&other)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        for step in ["rapl-enable", "rapl-revert"] {
+            let (code, out, err) = script(Some(fake.dir.path()), &[step]);
+            assert_eq!(code, 0, "{step}: {out}{err}");
+        }
+        assert_eq!(fs::read(&other).expect("read"), b"# not ours\n");
+        let after = fs::metadata(&other)
+            .expect("stat")
+            .modified()
+            .expect("mtime");
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn script_rapl_revert_removes_rule() {
+        let fake = rules_root();
+        let (code, _, _) = script(Some(fake.dir.path()), &["rapl-enable"]);
+        assert_eq!(code, 0);
+        assert!(fake.path(RULE_FILE).exists());
+        let (code, out, _) = script(Some(fake.dir.path()), &["rapl-revert"]);
+        assert_eq!(code, 0, "{out}");
+        assert!(!fake.path(RULE_FILE).exists());
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                UDEV_LINES[0],
+                UDEV_LINES[1],
+                "Reverted. A reboot may be needed before the files return to mode 0400.",
+            ]
+        );
+    }
+
+    #[test]
+    fn script_requires_root_or_test_root() {
+        if rustix::process::geteuid().is_root() {
+            // As root the script runs for real; never do that in a test.
+            return;
+        }
+        for step in ["rapl-enable", "rapl-revert", "bogus"] {
+            let (code, out, err) = script(None, &[step]);
+            assert_eq!(code, 1, "{step}");
+            assert_eq!(out, "");
+            assert_eq!(err, "tasklens-setup: must run as root (use pkexec)\n");
+        }
+    }
+
+    #[test]
+    fn script_usage_exit_2() {
+        let fake = rules_root();
+        let usage =
+            "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off\n";
+        for args in [&["bogus"][..], &[]] {
+            let (code, out, err) = script(Some(fake.dir.path()), args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "");
+            assert_eq!(err, usage);
+        }
+    }
+
+    #[test]
+    fn script_shellcheck_clean() {
+        let Ok(out) = Command::new("shellcheck")
+            .args(["-s", "sh"])
+            .arg(packaging("tasklens-setup"))
+            .output()
+        else {
+            eprintln!("shellcheck not installed, skipped");
+            return;
+        };
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }
