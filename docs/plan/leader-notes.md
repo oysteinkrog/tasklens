@@ -524,3 +524,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - bj6.32 (68e85fc..104185e): Share Theme window, Confirmation kind, kit Textarea for the code. Enter may fire twice (also in TlDialog), so a new ug9 bug bead was filed and also covers the title on a language change.
 - pdu.12: the Copy row id uses Unit(u32) from an interner on the delegate (leader: no hash, because a clash could hit the wrong unit). Static validity tooltips are cached; want_tooltip is a new rsf bead.
 - m1f.11 follow-up (c35351b, 862e636): set_pinned now shares its code path with toggle_pin.
+- ug9.34 follow-up (081a45b): no_match text cached in FilterWords.
