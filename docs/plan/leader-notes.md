@@ -429,3 +429,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - Disk: target/ reached 247 GB. fd4e3dc sets debug = "line-tables-only" in profile.dev (owner approved). Hold new dispatch at the next lull, then cargo clean --profile dev and tell manager-machine.
 - i3o.23 (2b171b0, 1d8b50d, ba1736a): FakePrivilegedOps, harness_p3, end-to-end dump, socket destroy and recovery tests. ConnectionsDestroySupport(false) is sent on every EOPNOTSUPP (accepted; the reducer stores a bool). Privileged dumps bypass run_action until E29-014.
 - hjn.28 (24bc575, f2391ce, ccfb23b, fbafc7e): nl80211 Wi-Fi signal and rates merged into dbus_nm. Real read test found wlan0 (not connected). Parser test vectors assume little-endian. Values cleared when Demand.nets turns off.
+- hjn.32 security fix dff2f16 verified: fixed SMARTCTL_DIRS, pkexec by absolute path, child PATH fixed, regression test locate_ignores_path.
+- fut.19 (12d8762): Run window size and min size scale with ui_scale (600 x 310 at 125%).
+- rsf.8 decision: zebra on the flattened index (processes.md:214, :285).
