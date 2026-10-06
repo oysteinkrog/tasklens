@@ -532,3 +532,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - bj6.9: SourceHealth.restarts added (an 8hz bead fills it); 7 state words; names for the open item 6 sources; all 21 rows shown.
 - yms.35 (3e572d3, 283062e): a UTF-16LE run keeps one high byte; space, digits and punctuation stay inside a run of another alphabet. Random data gives 0 UTF-16LE hits.
 - cr0.1 (cb51c7b, d25c86a): the binary starts and the window opens on Wayland. first_frame_ms=900 (about 450 ms in the wgpu adapter probe), over the ADR-014 gates; a cr0 startup bead was filed. MANUAL DESKTOP CHECK: closing the window quits with exit 0; the crash report on a panic (no injection hook in production).
+- crw.6 (6e6b29a, 0280e89): device sidebar. Two follow-up crw beads: the memory card shows a percent with words through tr, and the sidebar drops its demand on other tabs. Fan scale has no maximum (accepted).
+- rsf.16 (519bdbf): column separators, one canvas per row, painted after the cells (accepted).
+- jqk.16 (75f1071): server-decorations menu row and MenuRowHeight global; the bar height follows the reported decorations.
