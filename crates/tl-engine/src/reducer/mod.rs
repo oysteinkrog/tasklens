@@ -50,6 +50,7 @@ use tl_model::validity::Validity;
 
 use crate::source::WorkerControl;
 use crate::update::EngineMsg;
+use crate::workers::history::HistorySink;
 
 pub use devices::InvariantViolation;
 
@@ -139,6 +140,9 @@ pub struct Reducer {
     pub control: watch::Sender<WorkerControl>,
     /// `None` in P1 and P2 (ADR-012).
     pub record_sink: Option<Box<dyn RecordSink>>,
+    /// Takes `HistoryQuery` and `HistoryDelete` to the history worker (E30-A2). `None` when the
+    /// session runs no history worker.
+    pub history_cmd: Option<HistorySink>,
     /// `None` until E11-A1 installs one.
     pub action_gate: Option<Box<dyn ActionGate>>,
     pub events_tx: async_channel::Sender<ActionEvent>,
@@ -228,6 +232,7 @@ impl Reducer {
             },
             control,
             record_sink: None,
+            history_cmd: None,
             action_gate: None,
             events_tx,
             helper_tx: None,

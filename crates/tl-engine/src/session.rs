@@ -15,32 +15,42 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
-use asupersync::runtime::TaskHandle;
+use asupersync::runtime::{TaskHandle, yield_now};
+use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use futures_lite::FutureExt;
 use tl_model::actions::ActionEvent;
 use tl_model::demand::Demand;
+use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::time::{BootId, now_boot_ns};
 
 use crate::bridge::{EngineHooks, HookCtx};
-use crate::config::EngineConfig;
+use crate::config::{EngineConfig, EngineMode};
 use crate::controller::SourceController;
 use crate::dbus::SharedHandles;
 use crate::reducer::health::HealthState;
 use crate::reducer::{Publisher, Reducer};
 use crate::source::{WorkerControl, WorkerIo};
+use crate::supervise::WorkerFactory;
 use crate::update::EngineMsg;
 use crate::workers::WorkerSpec;
+use crate::workers::history::{
+    HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, run_history,
+};
 
 /// Wait between a failed session and the next one.
 pub const RESTART_DELAY: Duration = Duration::from_secs(1);
 /// Restarts allowed within `RESTART_WINDOW`. One more failure stops the engine.
 pub const MAX_RESTARTS: u32 = 3;
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
+/// How long a session waits for the history worker's channel before it starts the reducer.
+const HISTORY_WAIT: Duration = Duration::from_millis(100);
+const HISTORY_WAIT_YIELDS: u32 = 1_000;
 /// Period of the housekeeping `Tick` message.
 pub const TICK: Duration = Duration::from_secs(1);
 
@@ -177,7 +187,11 @@ async fn run_session(
         })
     });
     reducer.record_sink = ep.hooks.record_sink.as_ref().map(|make| make(&ep.config));
-    // E30-A2: history sink and worker
+    // E30-A2: history sink and worker. A test sink from the hooks replaces both. The low-memory
+    // engine runs no history (R-152).
+    let history_slot: Option<HistorySlot> = (reducer.record_sink.is_none()
+        && ep.config.mode == EngineMode::Full)
+        .then(|| Arc::new(ArcSwapOption::empty()));
 
     let mut children = Children(Vec::with_capacity(ep.workers.len() + 1));
     for spec in &ep.workers {
@@ -195,6 +209,29 @@ async fn run_session(
         );
         children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
     }
+    if let Some(slot) = history_slot {
+        let io = WorkerIo::new(
+            ep.msgs_tx.clone(),
+            ep.demand.clone(),
+            ep.settings.clone(),
+            reducer.control.subscribe(),
+            shared.clone(),
+        );
+        let ctl = SourceController::new(
+            SourceId::HistoryRecorder,
+            history_factory(&ep.config, ep.boot_id, io, slot.clone()),
+            ep.msgs_tx.clone(),
+        );
+        children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
+        wait_for_history(cx, &slot).await;
+        let mut sink = HistorySink::new(slot.clone());
+        sink.command(HistoryMsg::SessionStart {
+            epoch,
+            t_ns: now_boot_ns(),
+        });
+        reducer.record_sink = Some(Box::new(sink));
+        reducer.history_cmd = Some(HistorySink::new(slot));
+    }
     let tick_tx = ep.msgs_tx.clone();
     children.0.push(spawn(cx, move |cx| tick(cx, tick_tx))?);
 
@@ -206,6 +243,38 @@ async fn run_session(
         Ok(Ok(())) => Ok(()),
         Ok(Err(violation)) => Err(SessionEnd::Invariant(violation.0)),
         Err(_payload) => Err(SessionEnd::Panic),
+    }
+}
+
+/// The `HistoryRecorder` worker. Each generation makes its own channel and stores the sender
+/// in `slot` (ADR-004 factory contract).
+fn history_factory(
+    config: &EngineConfig,
+    boot: BootId,
+    io: WorkerIo,
+    slot: HistorySlot,
+) -> WorkerFactory {
+    let history_dir = config.history_dir.clone();
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        let cfg = HistoryWorkerConfig {
+            boot,
+            history_dir: history_dir.clone(),
+            load_delay: None,
+        };
+        run_history(cx, io.clone(), slot.clone(), cfg)
+    })
+}
+
+/// Waits until the first worker generation has stored its sender, so `SessionStart` and the
+/// first sweeps are not dropped. Gives up after `HISTORY_WAIT` or `HISTORY_WAIT_YIELDS` turns;
+/// what the sink sends before then is dropped and counted.
+async fn wait_for_history(cx: &Cx, slot: &HistorySlot) {
+    let deadline = cx.now().as_nanos() + HISTORY_WAIT.as_nanos() as u64;
+    for _ in 0..HISTORY_WAIT_YIELDS {
+        if slot.load().is_some() || cx.now().as_nanos() >= deadline || cx.checkpoint().is_err() {
+            return;
+        }
+        yield_now().await;
     }
 }
 

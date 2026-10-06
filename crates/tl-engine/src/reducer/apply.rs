@@ -17,6 +17,7 @@ use tl_model::demand::Demand;
 use tl_model::devices::{AggregateKind, DeviceIdentity, DeviceKind, NetKind};
 use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
+use tl_model::history::HistoryView;
 use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
 use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
@@ -42,6 +43,7 @@ use crate::update::{
     GpuSample, MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate,
     source_of,
 };
+use crate::workers::history::HistoryMsg;
 
 /// Valid CPU samples whose irq share stays 0 before the Interrupts row shows `n/a` (U-21).
 const IRQ_ZERO_SAMPLES: u32 = 10;
@@ -515,8 +517,13 @@ impl Reducer {
                 self.components.windows = Arc::new(next);
                 self.mark(ComponentMask::WINDOWS);
             }
-            SourceUpdate::History(_) => {
-                tracing::debug!(target: "tasklens::engine", "history view: E09-028");
+            SourceUpdate::History(view) => {
+                // A new `Arc` each answer; the reducer owns the version (ADR-003).
+                let mut next = HistoryView::clone(&view);
+                next.header.version = 0;
+                next.header.validity = Validity::Valid;
+                self.components.history = Arc::new(next);
+                self.mark(ComponentMask::HISTORY);
             }
             SourceUpdate::Helper(_) | SourceUpdate::Setup(_) => {
                 tracing::debug!(target: "tasklens::engine", "helper or setup update: E29-020");
@@ -603,14 +610,10 @@ impl Reducer {
                 SourceId::ProcessDetail,
                 WorkerCommand::CancelHandleSearch(search),
             ),
-            Command::HistoryQuery { id, range, what } => self.forward(
-                SourceId::HistoryRecorder,
-                WorkerCommand::HistoryQuery { id, range, what },
-            ),
-            Command::HistoryDelete { keys } => self.forward(
-                SourceId::HistoryRecorder,
-                WorkerCommand::HistoryDelete { keys },
-            ),
+            Command::HistoryQuery { id, range, what } => {
+                self.send_history(HistoryMsg::Query { id, range, what });
+            }
+            Command::HistoryDelete { keys } => self.send_history(HistoryMsg::Delete { keys }),
             Command::SetupStatus => self.send_helper(HelperCommand::SetupStatus),
             Command::RunSetup { step } => self.send_helper(HelperCommand::RunSetup(step)),
             Command::Device(cmd) => {
@@ -647,6 +650,15 @@ impl Reducer {
         });
         if sent.is_err() {
             tracing::debug!(target: "tasklens::engine", ?target, kind, "control watch closed: command dropped");
+        }
+    }
+
+    /// `try_send` into the history worker's channel (E30-A2). Without a sink the command is
+    /// dropped: history is not wired in this engine.
+    fn send_history(&mut self, msg: HistoryMsg) {
+        match self.history_cmd.as_mut() {
+            Some(sink) => sink.command(msg),
+            None => tracing::debug!(target: "tasklens::engine", "no history sink: command dropped"),
         }
     }
 
