@@ -18,10 +18,13 @@ pub struct ChartView {
     pub(crate) cache: Rc<RefCell<ChartCache>>,
     // E19-004: scale_state: scale::ScaleState (added by yrf.6 as a chain edit, R-262)
     /// Filled by E19-009; empty struct until then.
+    #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) text: labels::LabelCache,
     /// Resolved from the newest snapshot.
+    #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
     /// Reused formatter buffer.
+    #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
