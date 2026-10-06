@@ -2336,7 +2336,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-22 | Process history store estimate (about 100 active processes × 18 B × 21,600 s) | r2 PROC-074 [now PROC-086] |
 | U-23 | (settled by R-287) socket inode map rebuild under 20 ms on this machine | SYS-032 [now SYS-030] |
 | U-24 | `OOMScoreAdjust=-900` is accepted for a user unit | r2 PROC-081 [now PROC-097] |
-| U-25 | udisks2 2.10 NVMe module is present for NVMe SMART | PERF-046 [now PERF-051] |
+| U-25 | udisks2 2.10 NVMe module is present for NVMe SMART. Verified by tasklens-hjn.23 (2026-10-06, read-only GetManagedObjects on the owner machine): nvme0n1 and nvme1n1 report NVMe SMART and sda reports ATA SMART, so the NVMe fallback path is not needed there | PERF-046 [now PERF-051] |
 | U-26 | The sysfs DRM connector `enabled` file is wrong on NVIDIA 615 (withdrawn claim; KScreen agreed with sysfs during the check; confirm whether all three monitors were on) | PERF-065 [now PERF-072], PERF addendum |
 | U-27 | Readability of `/sys/kernel/security/lockdown`, efivars SecureBoot and `/sys/class/iommu` without root | PERF addendum, Security features |
 | U-28 | `cpuinfo_avg_freq` and `amd_pstate_prefcore_ranking` exist per policy (reported present; recheck in the fixture) | PERF-025 [now PERF-028], PERF-028 [now PERF-031], PERF-035 [now PERF-040] |
