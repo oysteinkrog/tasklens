@@ -26,3 +26,4 @@ pub mod tabs;
 pub mod toast;
 pub mod tooltip;
 pub mod validity;
+pub mod window_frame;
