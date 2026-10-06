@@ -337,3 +337,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.32: power estimate wired. GPU term only when supports_process_util; share uses max(SM, enc, dec) to match the GPU column (PROC-034 says SM). GPU power keyed by UUID; AMD GPUs share a zero UUID, so two AMD GPUs would collide once AMD sends per-process rows.
 - yrf.7: AnimationDriver registry per window (register, global panics if none, try_global). thread_cpu_ns is 0 until E03 adds tl_model::time::thread_cpu_ns.
 - hjn.26: fake bus returns Closed on cancel (1d01e51).
+- rsf.5: ColumnLayout over ColumnId only; follow-up rsf.18 makes it generic for SysColumnId (blocks hk6.1). min_width takes window and cx; set_width takes scaled px.
