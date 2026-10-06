@@ -7,16 +7,24 @@
 //!
 //! Address strings are formatted once per socket cookie by `ConnectionTable`. Addresses and
 //! ports are never logged above debug level.
+//!
+//! Reverse DNS for the Remote host column (SYS-035) runs in a second task of the same
+//! generation: the source sends it the foreign addresses of the visible cells, and it sends the
+//! names back, which the source caches by address. Looked-up names are never logged.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
 
+use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
+use asupersync::time;
 use asupersync::{Cx, Outcome};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tl_collect::counters::{Clock, resumed_between};
 use tl_collect::net::sock_diag::{self, SockDiag, SockRecord};
 use tl_collect::net::{
@@ -50,6 +58,27 @@ const NET_COLUMNS: [ColumnId; 3] = [
 /// UDP socket state 7 (CLOSE) means unconnected, 1 (ESTABLISHED) connected.
 const UDP_CONNECTED: u8 = 1;
 const UDP_UNCONNECTED: u8 = 7;
+
+/// Reverse DNS lookups that run at once (SYS-035). The blocking pool also has 4 threads
+/// (ADR-004), so while 4 lookups run the 2 s sample waits for a thread.
+const MAX_LOOKUPS: usize = 4;
+/// A lookup that takes longer counts as a negative answer. The blocking call itself keeps
+/// running until the resolver gives up.
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a name is kept (SYS-035).
+const POSITIVE_TTL: Duration = Duration::from_secs(600);
+/// How long "no name" is kept (SYS-035).
+const NEGATIVE_TTL: Duration = Duration::from_secs(60);
+/// Cached addresses, and also the most addresses waiting for an answer.
+const CACHE_MAX: usize = 4096;
+/// An address with no answer after this long is asked for again, in case its answer was
+/// dropped. The resolver ignores an address it already has.
+const PENDING_STALE: Duration = Duration::from_secs(60);
+/// Messages to the resolver task. Requests that do not fit are dropped and sent again on the
+/// next sample.
+const REQUEST_CAPACITY: usize = 256;
+/// Answers to the source. An answer that does not fit is dropped; see `PENDING_STALE`.
+const ANSWER_CAPACITY: usize = 256;
 
 /// The ADR-008 row "Connections and socket attribution": on for the tab or a network column.
 pub fn connections_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
@@ -141,6 +170,10 @@ pub struct ConnectionsSource<R: SocketReader> {
     /// The last sample failed, so the next good one reports `Running` again.
     failed: bool,
     pending: Option<SourceUpdate>,
+    /// Set by `period()` from the latest demand: the cookies of the visible Remote host cells.
+    host_cookies: RefCell<Arc<[u64]>>,
+    /// The link to the resolver task. `None` leaves every `remote_host` empty.
+    rdns: Option<Rdns>,
 }
 
 impl<R: SocketReader> ConnectionsSource<R> {
@@ -155,7 +188,15 @@ impl<R: SocketReader> ConnectionsSource<R> {
             last_clock: None,
             failed: false,
             pending: None,
+            host_cookies: RefCell::new(Arc::from([])),
+            rdns: None,
         }
+    }
+
+    /// Fills `remote_host` through the resolver task behind `rdns`.
+    pub fn with_rdns(mut self, rdns: Rdns) -> Self {
+        self.rdns = Some(rdns);
+        self
     }
 
     /// `sample()` is `self.sample_at(Clock::now())`; tests call this with an injected clock.
@@ -185,13 +226,14 @@ impl<R: SocketReader> ConnectionsSource<R> {
             .update(&self.socks, &self.map, clock.boot_ns);
         let attribution = self.attribution_map();
 
-        let records = if tab_shown {
+        let mut records = if tab_shown {
             let ifnames = self.reader.if_names();
             self.table.update(&self.socks, &self.map, &ifnames);
             self.table.records.iter().map(to_model).collect()
         } else {
             Vec::new()
         };
+        self.fill_hosts(&mut records, clock.boot_ns);
 
         if std::mem::take(&mut self.failed) {
             self.pending = Some(health(SourceState::Running, None, clock));
@@ -203,6 +245,31 @@ impl<R: SocketReader> ConnectionsSource<R> {
             attribution,
         };
         (self, SourceUpdate::Connections(update))
+    }
+
+    /// Takes the resolver's answers, then sets `remote_host` on the visible Remote host cells
+    /// from the cache and asks for the addresses it lacks. Without visible cells it asks for
+    /// nothing and forgets what it asked for, as the resolver drops its queue then too.
+    fn fill_hosts(&mut self, records: &mut [ConnRecord], now_ns: u64) {
+        let Some(rdns) = &mut self.rdns else {
+            return;
+        };
+        rdns.take_answers(now_ns);
+        let cookies = self.host_cookies.borrow();
+        if cookies.is_empty() {
+            rdns.pending.clear();
+            return;
+        }
+        for cookie in cookies.iter() {
+            // `ConnectionTable` keeps the records sorted by cookie.
+            let Ok(i) = records.binary_search_by_key(cookie, |r| r.cookie) else {
+                continue;
+            };
+            let ip = records[i].four_tuple.remote.ip();
+            if !ip.is_unspecified() {
+                records[i].remote_host = rdns.host(ip, now_ns);
+            }
+        }
     }
 
     fn read(&mut self, tab_shown: bool) -> Result<(), CollectError> {
@@ -267,6 +334,9 @@ impl<R: SocketReader> Source for ConnectionsSource<R> {
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
         self.tab_shown.set(d.connections);
+        if !Arc::ptr_eq(&self.host_cookies.borrow(), &d.remote_host_cookies) {
+            *self.host_cookies.borrow_mut() = Arc::clone(&d.remote_host_cookies);
+        }
         connections_period(d, s)
     }
 
@@ -281,6 +351,186 @@ impl<R: SocketReader> Source for ConnectionsSource<R> {
 
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         self.pending.take()
+    }
+}
+
+/// A message to the resolver task.
+pub enum RdnsMsg {
+    /// From the source: look up this address unless it is queued or running already.
+    Lookup(IpAddr),
+    /// From a finished lookup task.
+    Done(IpAddr),
+}
+
+/// An address and its name; `None` for no name, an error or a timeout.
+pub type RdnsAnswer = (IpAddr, Option<Arc<str>>);
+
+/// The source's half of reverse DNS: the cache and the channels to the resolver task.
+pub struct Rdns {
+    requests: mpsc::Sender<RdnsMsg>,
+    answers: mpsc::Receiver<RdnsAnswer>,
+    /// Answers by address (not by cookie), with the boot time in ns when each one expires.
+    cache: FxHashMap<IpAddr, (Option<Arc<str>>, u64)>,
+    /// Addresses sent to the resolver and not answered yet, with the boot time in ns sent.
+    pending: FxHashMap<IpAddr, u64>,
+}
+
+impl Rdns {
+    pub fn new(requests: mpsc::Sender<RdnsMsg>, answers: mpsc::Receiver<RdnsAnswer>) -> Self {
+        Self {
+            requests,
+            answers,
+            cache: FxHashMap::default(),
+            pending: FxHashMap::default(),
+        }
+    }
+
+    /// Caches every answer that has arrived, also those for cells no longer shown.
+    fn take_answers(&mut self, now_ns: u64) {
+        while let Ok((ip, name)) = self.answers.try_recv() {
+            self.pending.remove(&ip);
+            let ttl = if name.is_some() {
+                POSITIVE_TTL
+            } else {
+                NEGATIVE_TTL
+            };
+            self.insert(ip, name, now_ns, ttl);
+        }
+    }
+
+    /// When the cache is full, the expired entries go first, then the one that expires first.
+    fn insert(&mut self, ip: IpAddr, name: Option<Arc<str>>, now_ns: u64, ttl: Duration) {
+        if self.cache.len() >= CACHE_MAX && !self.cache.contains_key(&ip) {
+            self.cache.retain(|_, (_, expires)| *expires > now_ns);
+            if self.cache.len() >= CACHE_MAX
+                && let Some(first) = self
+                    .cache
+                    .iter()
+                    .min_by_key(|(_, (_, expires))| *expires)
+                    .map(|(ip, _)| *ip)
+            {
+                self.cache.remove(&first);
+            }
+        }
+        let expires = now_ns.saturating_add(duration_ns(ttl));
+        self.cache.insert(ip, (name, expires));
+    }
+
+    /// The cached name of `ip`. `None` while the lookup is pending and after a negative
+    /// answer. An address that is not cached, or whose entry expired, is sent to the resolver.
+    fn host(&mut self, ip: IpAddr, now_ns: u64) -> Option<Arc<str>> {
+        match self.cache.get(&ip) {
+            Some((name, expires)) if *expires > now_ns => return name.clone(),
+            Some(_) => {
+                self.cache.remove(&ip);
+            }
+            None => {}
+        }
+        let ask = match self.pending.get(&ip) {
+            Some(&sent) => now_ns.saturating_sub(sent) >= duration_ns(PENDING_STALE),
+            None => self.pending.len() < CACHE_MAX,
+        };
+        if ask && self.requests.try_send(RdnsMsg::Lookup(ip)).is_ok() {
+            self.pending.insert(ip, now_ns);
+        }
+        None
+    }
+}
+
+fn duration_ns(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Reverse DNS for one address. The real engine runs `tl_ops::sys::reverse_lookup` on the
+/// blocking pool; tests answer from a script after a delay in virtual time.
+pub trait Resolve: Send + Sync + 'static {
+    /// The name of `ip`; `None` for no name and for any error (errors count as negative
+    /// answers).
+    fn lookup(&self, cx: &Cx, ip: IpAddr) -> impl Future<Output = Option<Arc<str>>> + Send;
+}
+
+/// `getnameinfo` through `tl_ops::sys::reverse_lookup`, one blocking job per lookup.
+pub struct HostResolver;
+
+impl Resolve for HostResolver {
+    fn lookup(&self, cx: &Cx, ip: IpAddr) -> impl Future<Output = Option<Arc<str>>> + Send {
+        let job = cx.spawn_blocking(move |_| tl_ops::sys::reverse_lookup(ip));
+        async move {
+            let mut job = job.ok()?;
+            match job.join(cx).await {
+                Ok(Ok(name)) => name.map(Arc::from),
+                Ok(Err(errno)) => {
+                    tracing::debug!(errno = errno.raw_os_error(), "reverse lookup failed");
+                    None
+                }
+                Err(_) => None,
+            }
+        }
+    }
+}
+
+/// The resolver task: a FIFO queue of addresses and at most `MAX_LOOKUPS` lookup tasks at
+/// once, each with `LOOKUP_TIMEOUT`. It wakes on a request or a finished lookup. While no
+/// Remote host cell is visible it drops its queue and starts nothing; running lookups still
+/// send their answers. Runs until its region is cancelled.
+pub async fn run_resolver<R: Resolve>(
+    cx: Cx,
+    resolver: Arc<R>,
+    mut inbox: mpsc::Receiver<RdnsMsg>,
+    done: mpsc::Sender<RdnsMsg>,
+    answers: mpsc::Sender<RdnsAnswer>,
+    demand: watch::Receiver<Demand>,
+) {
+    let mut queue = VecDeque::new();
+    // Queued or running, so an address is never looked up twice at once.
+    let mut known = FxHashSet::default();
+    let mut running = 0usize;
+    loop {
+        let Ok(first) = inbox.recv(&cx).await else {
+            return;
+        };
+        let mut next = Some(first);
+        while let Some(msg) = next {
+            match msg {
+                RdnsMsg::Lookup(ip) => {
+                    if known.insert(ip) {
+                        queue.push_back(ip);
+                    }
+                }
+                RdnsMsg::Done(ip) => {
+                    running -= 1;
+                    known.remove(&ip);
+                }
+            }
+            next = inbox.try_recv().ok();
+        }
+        if demand.borrow().remote_host_cookies.is_empty() {
+            for ip in queue.drain(..) {
+                known.remove(&ip);
+            }
+            continue;
+        }
+        while running < MAX_LOOKUPS
+            && let Some(ip) = queue.pop_front()
+        {
+            let resolver = Arc::clone(&resolver);
+            let task_answers = answers.clone();
+            let task_done = done.clone();
+            let spawned = cx.spawn(move |cx| async move {
+                let found = time::timeout(cx.now(), LOOKUP_TIMEOUT, resolver.lookup(&cx, ip)).await;
+                if cx.checkpoint().is_err() {
+                    return;
+                }
+                let _ = task_answers.try_send((ip, found.ok().flatten()));
+                let _ = task_done.send(&cx, RdnsMsg::Done(ip)).await;
+            });
+            if spawned.is_ok() {
+                running += 1;
+            } else {
+                known.remove(&ip);
+                let _ = answers.try_send((ip, None));
+            }
+        }
     }
 }
 
@@ -395,8 +645,21 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
                     return Outcome::Err(WorkerError::Other("job polled after completion".into()));
                 }
             };
-            let src = ConnectionsSource::new(HostReader::new(root, boot));
-            source::run(cx, io, src).await
+            let (requests, inbox) = mpsc::channel(REQUEST_CAPACITY);
+            let (answer_tx, answers) = mpsc::channel(ANSWER_CAPACITY);
+            let done = requests.clone();
+            let demand = io.demand.clone();
+            let resolver = match cx.spawn(move |cx| {
+                run_resolver(cx, Arc::new(HostResolver), inbox, done, answer_tx, demand)
+            }) {
+                Ok(task) => task,
+                Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
+            };
+            let src = ConnectionsSource::new(HostReader::new(root, boot))
+                .with_rdns(Rdns::new(requests, answers));
+            let outcome = source::run(cx, io, src).await;
+            resolver.abort();
+            outcome
         }
     })
 }
@@ -826,5 +1089,238 @@ mod tests {
 
         handle.abort();
         lab.run_until_idle();
+    }
+
+    /// Answers from `names` after `delay` of virtual time, and counts the lookups.
+    #[derive(Default)]
+    struct FakeResolver {
+        delay: Duration,
+        names: FxHashMap<IpAddr, &'static str>,
+        calls: AtomicU32,
+        running: AtomicU32,
+        max_running: AtomicU32,
+    }
+
+    impl Resolve for FakeResolver {
+        fn lookup(&self, cx: &Cx, ip: IpAddr) -> impl Future<Output = Option<Arc<str>>> + Send {
+            async move {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+                self.max_running.fetch_max(now, Ordering::SeqCst);
+                if !self.delay.is_zero() {
+                    asupersync::time::sleep(cx.now(), self.delay).await;
+                }
+                self.running.fetch_sub(1, Ordering::SeqCst);
+                self.names.get(&ip).map(|&name| Arc::from(name))
+            }
+        }
+    }
+
+    /// The resolver task in a lab, fed by `requests`; `rdns` is the source's half.
+    struct RdnsRig {
+        lab: LabRuntime,
+        fake: Arc<FakeResolver>,
+        demand_tx: watch::Sender<Demand>,
+        requests: mpsc::Sender<RdnsMsg>,
+        rdns: Option<Rdns>,
+    }
+
+    impl RdnsRig {
+        fn new(fake: FakeResolver, demand: Demand) -> Self {
+            let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(10_000_000));
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let fake = Arc::new(fake);
+            let (demand_tx, demand_rx) = watch::channel(demand);
+            let (requests, inbox) = mpsc::channel(REQUEST_CAPACITY);
+            let (answer_tx, answers) = mpsc::channel(ANSWER_CAPACITY);
+            let done = requests.clone();
+            let resolver = Arc::clone(&fake);
+            let (task, _handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    run_resolver(cx, resolver, inbox, done, answer_tx, demand_rx).await;
+                })
+                .expect("task is created");
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_idle();
+            let rdns = Some(Rdns::new(requests.clone(), answers));
+            Self {
+                lab,
+                fake,
+                demand_tx,
+                requests,
+                rdns,
+            }
+        }
+
+        fn advance(&mut self, d: Duration) {
+            self.lab.advance_time(duration_ns(d));
+            // `run_until_idle` stops when no task is ready; one step fires the due timers.
+            self.lab.step_for_test();
+            self.lab.run_until_idle();
+        }
+
+        fn calls(&self) -> u32 {
+            self.fake.calls.load(Ordering::SeqCst)
+        }
+
+        fn lookup(&mut self, ip: IpAddr) {
+            assert!(self.requests.try_send(RdnsMsg::Lookup(ip)).is_ok());
+        }
+
+        fn answers(&mut self) -> usize {
+            let rdns = self.rdns.as_mut().expect("rdns");
+            std::iter::from_fn(|| rdns.answers.try_recv().ok()).count()
+        }
+    }
+
+    fn addr(i: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, i))
+    }
+
+    fn host_demand(cookies: &[u64]) -> Demand {
+        Demand {
+            connections: true,
+            remote_host_cookies: Arc::from(cookies),
+            ..Demand::default()
+        }
+    }
+
+    #[test]
+    fn rdns_max_four_in_flight() {
+        let fake = FakeResolver {
+            delay: Duration::from_secs(1),
+            ..FakeResolver::default()
+        };
+        let mut rig = RdnsRig::new(fake, host_demand(&[1]));
+        for i in 1..=10 {
+            rig.lookup(addr(i));
+        }
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 4);
+        assert_eq!(rig.fake.running.load(Ordering::SeqCst), 4);
+
+        rig.advance(Duration::from_secs(1));
+        assert_eq!(rig.calls(), 8);
+        rig.advance(Duration::from_secs(1));
+        assert_eq!(rig.calls(), 10);
+        rig.advance(Duration::from_secs(1));
+        assert_eq!(rig.fake.max_running.load(Ordering::SeqCst), 4);
+        assert_eq!(rig.answers(), 10);
+    }
+
+    /// A source with one TCP record (cookie 7, foreign 10.0.0.9) and the rig's `rdns`.
+    fn host_source(rig: &mut RdnsRig) -> ConnectionsSource<Fake> {
+        let fake = Fake {
+            tcp: vec![tcp(7, 55, 0, 0)],
+            owners: vec![(55, vec![key(100)])],
+            ..Fake::default()
+        };
+        ConnectionsSource::new(fake).with_rdns(rig.rdns.take().expect("rdns"))
+    }
+
+    const FOREIGN: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+
+    #[test]
+    fn rdns_positive_ttl_10_min() {
+        let fake = FakeResolver {
+            names: [(FOREIGN, "host.example")].into_iter().collect(),
+            ..FakeResolver::default()
+        };
+        let d = host_demand(&[7]);
+        let mut rig = RdnsRig::new(fake, d.clone());
+        let src = host_source(&mut rig);
+
+        // Pending: the cell shows the address.
+        let (src, update) = sample(src, &d, at(100, 100));
+        assert_eq!(update.records[0].remote_host, None);
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 1);
+
+        // Answered and cached at t=100 s.
+        let (src, update) = sample(src, &d, at(100, 100));
+        assert_eq!(
+            update.records[0].remote_host.as_deref(),
+            Some("host.example")
+        );
+
+        let (src, update) = sample(src, &d, at(100 + 9 * 60, 100 + 9 * 60));
+        assert_eq!(
+            update.records[0].remote_host.as_deref(),
+            Some("host.example")
+        );
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 1, "no new lookup at 9 min");
+
+        let (_, update) = sample(src, &d, at(100 + 11 * 60, 100 + 11 * 60));
+        assert_eq!(update.records[0].remote_host, None);
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 2, "a new lookup at 11 min");
+    }
+
+    #[test]
+    fn rdns_negative_ttl_1_min() {
+        let d = host_demand(&[7]);
+        let mut rig = RdnsRig::new(FakeResolver::default(), d.clone());
+        let src = host_source(&mut rig);
+
+        let (src, _) = sample(src, &d, at(100, 100));
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 1);
+        // The negative answer is cached at t=100 s.
+        let (src, update) = sample(src, &d, at(100, 100));
+        assert_eq!(update.records[0].remote_host, None);
+
+        let (src, _) = sample(src, &d, at(130, 130));
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 1, "no new lookup at 30 s");
+
+        let (_, _) = sample(src, &d, at(161, 161));
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 2, "a new lookup at 61 s");
+    }
+
+    #[test]
+    fn rdns_queue_cleared_without_demand() {
+        let fake = FakeResolver {
+            delay: Duration::from_secs(1),
+            ..FakeResolver::default()
+        };
+        let mut rig = RdnsRig::new(fake, host_demand(&[1]));
+        for i in 1..=10 {
+            rig.lookup(addr(i));
+        }
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 4);
+
+        // The column is hidden while 4 lookups run and 6 wait.
+        rig.demand_tx
+            .send(host_demand(&[]))
+            .expect("watch has receivers");
+        rig.advance(Duration::from_secs(1));
+        for _ in 0..10 {
+            rig.advance(Duration::from_secs(1));
+        }
+        assert_eq!(
+            rig.calls(),
+            4,
+            "no lookup starts after the queue is dropped"
+        );
+        // The finished lookups still answer, so the source can cache them.
+        assert_eq!(rig.answers(), 4);
+
+        // The source asks for nothing without visible cells.
+        let fake = Fake {
+            tcp: vec![tcp(7, 55, 0, 0)],
+            ..Fake::default()
+        };
+        let mut rdns = rig.rdns.take().expect("rdns");
+        rdns.pending.insert(FOREIGN, 0);
+        let src = ConnectionsSource::new(fake).with_rdns(rdns);
+        let (src, _) = sample(src, &tab(), at(100, 100));
+        assert!(src.rdns.as_ref().expect("rdns").pending.is_empty());
+        rig.lab.run_until_idle();
+        assert_eq!(rig.calls(), 4);
     }
 }
