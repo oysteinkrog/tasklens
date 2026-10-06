@@ -417,3 +417,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.25 (ccf951a): disk eject plan and /proc blocker scan; repeat Eject ignored while one runs; scan failure gives Blocked with others_may_hold.
 - pdu.18 decision: TlDialog gets second_action; footer Cancel, Terminate (danger), Select (primary default).
 - crw.10 final shape: update_static(model, &CpuStaticInfo), no CpuDetails struct; crw.11 keeps the sensor Vec.
+- hjn.27 (c00c1e5, 74eb97c, 6c05324, 0ebcbc1): NetworkManager worker. NameHasOwner check first so D-Bus activation never starts NM. No Degraded SourceState exists: missing NM reports Running plus last_error, as UPower does. Accepted.
+- crw.8 decision: PerfShowMiniWindow declared in pages/performance/actions.rs now; crw.4 extends it.
