@@ -51,6 +51,7 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::focus_initial;
 use crate::hub::GlobalHub;
+use crate::pages::processes::ProcessesPage;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{UiMetrics, current, metrics};
 
@@ -170,13 +171,15 @@ impl PageSlot {
 pub type PageFactory = fn(&mut Window, &mut Context<MainWindow>) -> PageSlot;
 
 /// The page match. A tab with no arm is not built and not shown (ADR-009, R-023).
-// The match stays so page epics can add their arms; the lint goes with the first arm.
-#[allow(clippy::match_single_binding)]
 fn page_factory(tab: Tab) -> Option<PageFactory> {
     match tab {
         // page arms (chain edits, one per page epic): Processes E22, Performance E24, Services E27,
         // Startup, Connections, Information E28. Form:
         // Tab::Services => Some(|window, cx| { let page = cx.new(|cx| ServicesPage::new(window, cx)); PageSlot::new(page, cx) }),
+        Tab::Processes => Some(|window, cx| {
+            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            PageSlot::new(page, cx)
+        }),
         _ => None,
     }
 }

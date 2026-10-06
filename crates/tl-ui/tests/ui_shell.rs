@@ -2213,12 +2213,12 @@ mod main_window {
         let mut vcx = rig(
             cx,
             Opts {
-                pages: &[Tab::Performance, Tab::Services],
-                start_tab: StartTab::Processes,
+                pages: &[Tab::Processes, Tab::Services],
+                start_tab: StartTab::Performance,
                 ..Opts::default()
             },
         );
-        assert_eq!(active(&mut vcx), Tab::Performance);
+        assert_eq!(active(&mut vcx), Tab::Processes);
     }
 
     #[gpui_kit::test]
