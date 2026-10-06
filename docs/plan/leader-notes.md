@@ -353,3 +353,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.10: Connections projection. User names come from the process snapshot (uid to meta.user), else the number. PID "?" restricted, "-" kernel or exited. Interface sorts by ifindex. Follow-up bead wires build_connections counts in apply.rs after hjn.21.
 - yrf.4: geometry part 1; split_runs and decimate clear their out buffers.
 - Leader allowed dead_code on ChartView.cache (read only by test hooks until E19-009).
+- crw.3: NetClass is tl_model NetKind (VpnTunnel). No DeviceKind for aggregate:net yet (comment on crw.26). JsonSchema through gpui_kit::private::schemars.
+- rsf.4: CellTextCache hit 8.4 ns, miss 90 ns per cell (release, loaded machine). Bound R: Eq + Hash (NodeId is not Copy). Path cache clears at 8192 entries.
+- gma.12: approved aria_label and prefix_tooltip builders on TlTextInput.
