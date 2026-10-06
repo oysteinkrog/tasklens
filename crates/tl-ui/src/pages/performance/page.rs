@@ -415,6 +415,10 @@ pub fn build_page(
     cx: &mut App,
 ) -> AnyView {
     let _ = (hub, demand);
+    #[allow(
+        clippy::match_single_binding,
+        reason = "E24-009 and E25 add one arm per kind"
+    )]
     match row.kind {
         // E24-009: Cpu arm
         _ => cx.new(|cx| PlaceholderPage::new(key.clone(), cx)).into(),

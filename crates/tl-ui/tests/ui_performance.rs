@@ -225,10 +225,10 @@ mod page_frame {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AnyElement, App, AppContext as _, Context, FocusHandle, Focusable, InteractiveElement as _,
-        IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _,
-        Render, SharedString, Styled as _, TestAppContext, TestDispatcher, VisualTestContext,
-        Window, div, px,
+        AnyElement, App, Context, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render,
+        SharedString, Styled as _, TestAppContext, TestDispatcher, VisualTestContext, Window, div,
+        px,
     };
     use smallvec::SmallVec;
     use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
@@ -662,7 +662,7 @@ mod page_frame {
     #[cfg(feature = "test-hooks")]
     #[gpui_kit::test]
     fn build_page_placeholder_for_unknown_kind(cx: &mut TestAppContext) {
-        use gpui_kit::AnyView;
+        use gpui_kit::{AnyView, AppContext as _};
         use tl_model::client::EngineClient;
         use tl_ui::demand::DemandAggregator;
         use tl_ui::hub::SnapshotHub;
