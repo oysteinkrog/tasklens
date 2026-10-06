@@ -48,15 +48,16 @@ use tl_model::demand::Demand;
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::history::{
-    HistoryLoadProblem, HistoryRange, HistorySource, HistoryStoreState, HistoryView, RecordSink,
+    HistoryLoadProblem, HistoryMetric, HistoryRange, HistorySource, HistoryStoreState, HistoryTop,
+    HistoryView, RecordSink,
 };
 use tl_model::ids::{ProcessKey, SeriesId};
 use tl_model::process::ProcessRecord;
 use tl_model::series::Sample;
 use tl_model::settings::{EngineSettings, HistorySettings};
-use tl_model::snapshot::ComponentHeader;
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 
+use crate::history_query::{self, QueryCtx, QuerySource};
 use crate::source::WorkerIo;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
@@ -341,7 +342,7 @@ impl RecordingState {
                 self.scope.close();
                 self.recorder.mark_gap(t_ns);
             }
-            // Deleting keys from the store is the query side's job (E30-015).
+            // `State::apply` handles queries and deletes (E30-015).
             HistoryMsg::Delete { .. }
             | HistoryMsg::Query { .. }
             | HistoryMsg::Dropped { .. }
@@ -581,12 +582,19 @@ fn wanted(demand: &Demand, settings: &EngineSettings) -> Wanted {
 /// The worker's state. Each blocking job locks it.
 struct State {
     mode: Mode,
+    boot: BootId,
     /// CLOCK_REALTIME minus CLOCK_BOOTTIME, read once per minute.
     realtime_offset_ns: i64,
     /// `header.version` of the last answer.
     version: u64,
     /// The highest drop total the sink sent.
     dropped: u64,
+    /// The last Frame query, answered again after a delete (UI-PRC-037).
+    last_frame: Option<(u64, HistoryRange, HistoryWhat)>,
+    /// The last TopAt query `(id, t, metric, n)` and its answer, merged into every view.
+    last_top: Option<((u64, TimeNs, HistoryMetric, u8), Arc<HistoryTop>)>,
+    /// The last view sent. A TopAt answer goes out as this view with the new top list.
+    last_view: Option<HistoryView>,
 }
 
 impl State {
@@ -643,8 +651,13 @@ impl State {
                 HistoryMsg::Dropped { total } => self.dropped = self.dropped.max(total),
                 HistoryMsg::Inspect(f) => f(&self.mode),
                 HistoryMsg::Query { id, range, what } => {
-                    let view = self.answer(id, range, &what);
+                    let view = self.answer(id, range, what);
                     out.push(SourceUpdate::History(Arc::new(view)));
+                }
+                HistoryMsg::Delete { keys } => {
+                    if let Some(view) = self.delete(&keys) {
+                        out.push(SourceUpdate::History(Arc::new(view)));
+                    }
                 }
                 msg => match &mut self.mode {
                     Mode::Off => {}
@@ -655,38 +668,97 @@ impl State {
         }
     }
 
-    /// Answers a query with the source and span of the active history. E30-015 replaces this
-    /// with `history_query::answer_frame` and `answer_top`, which fill rows, series and top.
-    fn answer(&mut self, id: u64, range: HistoryRange, _what: &HistoryWhat) -> HistoryView {
-        self.version += 1;
-        let (source, store_state, span) = match &self.mode {
-            Mode::Off => (HistorySource::None, HistoryStoreState::Off, None),
-            Mode::Rolling(window) => (
-                HistorySource::RollingWindow,
-                HistoryStoreState::Off,
-                window.span(),
-            ),
-            Mode::Recording(rec) => (
-                HistorySource::Store,
-                rec.store_state,
-                rec.store.as_ref().and_then(Store::span),
-            ),
+    /// Answers a query (E30-015). A Frame query builds a new view; a TopAt query answers the
+    /// top list and sends it merged into the last view.
+    fn answer(&mut self, id: u64, range: HistoryRange, what: HistoryWhat) -> HistoryView {
+        let view = match what {
+            HistoryWhat::TopAt { t, metric, n } => {
+                let top = history_query::answer_top(self.source(), &self.ctx(), id, t, metric, n);
+                self.last_top = Some(((id, t, metric, n), Arc::new(top)));
+                match &self.last_view {
+                    Some(view) => view.clone(),
+                    None => self.frame(id, range, &what),
+                }
+            }
+            what => {
+                let view = self.frame(id, range, &what);
+                self.last_frame = Some((id, range, what));
+                view
+            }
         };
-        let (observed_start, observed_end) = span.unwrap_or_default();
-        HistoryView {
-            header: ComponentHeader {
-                version: self.version,
-                observed_start,
-                observed_end,
-                ..ComponentHeader::default()
+        self.publish(view)
+    }
+
+    /// "Delete from history" (R-103), then the last Frame and TopAt queries again, so the keys
+    /// leave the next view (UI-PRC-037). `None` when no view was sent yet. While the store is
+    /// not open, the keys are not saved.
+    fn delete(&mut self, keys: &[ProcessKey]) -> Option<HistoryView> {
+        match &mut self.mode {
+            Mode::Off => {}
+            Mode::Rolling(window) => window.delete_keys(keys),
+            Mode::Recording(rec) => {
+                if let Some(store) = &mut rec.store
+                    && let Err(e) = store.delete_keys(keys)
+                {
+                    // The error text holds a user path: debug level only.
+                    tracing::debug!("history delete failed: {e}");
+                }
+            }
+        }
+        if let Some(((id, t, metric, n), _)) = self.last_top {
+            let top = history_query::answer_top(self.source(), &self.ctx(), id, t, metric, n);
+            self.last_top = Some(((id, t, metric, n), Arc::new(top)));
+        }
+        let view = match &self.last_frame {
+            Some((id, range, what)) => self.frame(*id, *range, what),
+            None => self.last_view.clone()?,
+        };
+        Some(self.publish(view))
+    }
+
+    /// Bumps the version, merges the last top list and keeps the view as the last one sent.
+    fn publish(&mut self, mut view: HistoryView) -> HistoryView {
+        self.version += 1;
+        view.header.version = self.version;
+        view.top = self.last_top.as_ref().map(|(_, top)| Arc::clone(top));
+        self.last_view = Some(view.clone());
+        view
+    }
+
+    fn frame(&self, id: u64, range: HistoryRange, what: &HistoryWhat) -> HistoryView {
+        let mut view = history_query::answer_frame(self.source(), &self.ctx(), id, &range, what);
+        if matches!(self.mode, Mode::Recording(_)) {
+            // While the store loads or after a failed open, there is no data yet.
+            view.source = HistorySource::Store;
+        }
+        view
+    }
+
+    fn source(&self) -> QuerySource<'_> {
+        match &self.mode {
+            Mode::Off => QuerySource::None,
+            Mode::Rolling(window) => QuerySource::Rolling(window),
+            Mode::Recording(rec) => match &rec.store {
+                Some(store) => QuerySource::Store {
+                    store,
+                    open: rec.recorder.open_snapshot(),
+                },
+                None => QuerySource::None,
             },
-            query_id: id,
-            source,
+        }
+    }
+
+    fn ctx(&self) -> QueryCtx {
+        let store_state = match &self.mode {
+            Mode::Recording(rec) => rec.store_state,
+            Mode::Off | Mode::Rolling(_) => HistoryStoreState::Off,
+        };
+        QueryCtx {
+            boot: self.boot,
+            now_t_ns: now_boot_ns(),
             store_state,
-            span,
-            range,
             realtime_offset_ns: self.realtime_offset_ns,
-            ..HistoryView::default()
+            version: self.version,
         }
     }
 }
@@ -697,9 +769,8 @@ fn record(window: &mut RollingWindow, msg: HistoryMsg) {
         HistoryMsg::Sweep { t_ns, records } => window.on_process_sweep(t_ns, &records),
         HistoryMsg::Catalog(catalog) => window.on_device_catalog(&catalog),
         HistoryMsg::SessionStart { t_ns, .. } => window.mark_gap(t_ns),
-        // E30-015 re-answers the last Frame query after a delete.
-        HistoryMsg::Delete { keys } => window.delete_keys(&keys),
-        HistoryMsg::Query { .. } | HistoryMsg::Dropped { .. } => {}
+        // `State::apply` handles queries and deletes (E30-015).
+        HistoryMsg::Delete { .. } | HistoryMsg::Query { .. } | HistoryMsg::Dropped { .. } => {}
         HistoryMsg::Inspect(_) => {}
     }
 }
@@ -763,9 +834,13 @@ pub async fn run_history(
 
     let state = Arc::new(Mutex::new(State {
         mode: Mode::Off,
+        boot: cfg.boot,
         realtime_offset_ns: 0,
         version: 0,
         dropped: 0,
+        last_frame: None,
+        last_top: None,
+        last_view: None,
     }));
     let mut msgs: Vec<HistoryMsg> = Vec::with_capacity(BATCH_MAX);
     // Runtime time in ns of the next MemTotal and clock offset read.

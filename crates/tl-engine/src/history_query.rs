@@ -116,7 +116,7 @@ struct Data<'a> {
 }
 
 impl Data<'_> {
-    fn iter(&self) -> impl Iterator<Item = &Block> + Clone {
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &Block> + Clone {
         self.blocks.iter().map(|b| &**b)
     }
 
