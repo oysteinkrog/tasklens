@@ -442,8 +442,12 @@ mod tests {
         let (ready3, out3) = start(&f, cx, many_rows(3_000));
         assert!(!ready3, "generation 3 runs in the background");
 
-        type_text(&view, cx, " 1");
-        advance(cx, 100);
+        // Generation 4 fires before the executor runs generation 3.
+        cx.update(|window, cx| {
+            let input = f.read(cx).input.clone();
+            input.update(cx, |s, cx| s.set_value("row 1", window, cx));
+            f.update(cx, |f, cx| f.fire(cx));
+        });
         let (ready4, out4) = start(&f, cx, rows(&["row 1", "row 2"]));
         assert!(ready4);
         cx.run_until_parked();
