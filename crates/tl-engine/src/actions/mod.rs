@@ -344,6 +344,36 @@ impl ActionOps for RealOps {
     fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
         tl_ops::process::send_signal_fd(pidfd.as_fd(), sig)
     }
+
+    fn cgroup_open_validated(
+        &self,
+        cg: &tl_model::actions::CgroupRef,
+        uid: u32,
+    ) -> Result<tl_ops::cgroup::CgroupDir, OpsError> {
+        tl_ops::cgroup::open_validated(cg, uid)
+    }
+
+    fn cgroup_write(
+        &self,
+        dir: &tl_ops::cgroup::CgroupDir,
+        file: &str,
+        value: &str,
+    ) -> Result<(), OpsError> {
+        match (file, value) {
+            ("cgroup.freeze", "1") => tl_ops::cgroup::freeze(dir),
+            ("cgroup.freeze", "0") => tl_ops::cgroup::thaw(dir),
+            ("cgroup.kill", "1") => tl_ops::cgroup::kill(dir),
+            _ => Err(OpsError::InvalidInput("unknown cgroup control write")),
+        }
+    }
+
+    fn cgroup_wait_frozen(
+        &self,
+        dir: &tl_ops::cgroup::CgroupDir,
+        wait: Duration,
+    ) -> Result<(), OpsError> {
+        tl_ops::cgroup::wait_frozen(dir, wait, tl_ops::cgroup::FREEZE_POLL)
+    }
 }
 
 /// Everything an action task needs. Shared by every action of one session.
