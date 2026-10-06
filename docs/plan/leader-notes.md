@@ -358,3 +358,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - gma.12: approved aria_label and prefix_tooltip builders on TlTextInput.
 - rsf.18: ColumnLayout generic (TableColumn trait). System tables pin no column first; docs silent. OWNER REVIEW if Services or Startup Name should stay first.
 - 8fx.36: probe flakes were test races (fd 5 is the probe's own copy of fd 3; /proc environ empty right after spawn). Fixed by waiting for Hello. Found 438 tl-gpu-probe core dumps from fake crashes today; follow-up bug bead. OWNER: existing core dumps can be cleared with coredumpctl when convenient (not done by agents).
+- hjn.21: sections built; interface and kind mappings copied from disk.rs (share later). Resent pci_slot and DiskDrive.name decision with reducer matching. hk6.4: services and sys_* page modules.
