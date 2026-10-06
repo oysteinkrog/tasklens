@@ -1063,10 +1063,11 @@ mod tests {
     /// Env var that turns `threads_child_helper` into the multi-threaded child.
     const THREADS_CHILD: &str = "TL_I3O7_THREADS_CHILD";
 
-    /// Not a test: `set_nice_real_child_all_tids` runs this test binary again with
-    /// `THREADS_CHILD` set, so this starts three extra threads and sleeps until killed.
+    /// Not a test: `set_nice_real_child_all_tids` and `thread_nice_only_that_tid` run this test
+    /// binary again with `THREADS_CHILD` set, so this starts three extra threads and sleeps until
+    /// killed.
     #[test]
-    #[ignore = "child process for set_nice_real_child_all_tids"]
+    #[ignore = "child process for the real nice tests"]
     fn threads_child_helper() {
         if std::env::var_os(THREADS_CHILD).is_none() {
             return;
