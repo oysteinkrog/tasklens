@@ -119,6 +119,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "async-channel",
             "jiff",
             "unicode-segmentation",
+            "image",
         ],
     ),
     (

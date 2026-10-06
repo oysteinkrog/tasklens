@@ -1887,6 +1887,23 @@ for this file only.
 - Edits: ARCHITECTURE tl-engine row adds libc; `xtask/src/check_deps.rs` allows libc for tl-engine; patching
   zbus upstream is a separate follow-up for the owner.
 
+### R-291 Render goldens are captured at device scale 2.0; 1.0 and 1.1 are ui_scale
+
+GPUI's `HeadlessAppContext` opens every window at device scale 2.0, and gpui-pre 0.3.7 has no public way to
+change it (the scale setters exist only on `TestAppContext` and `VisualTestContext`, which cannot capture).
+Leader decision: goldens are captured at device scale 2.0. The scales 1.0 and 1.1 in ADR-013 are tasklens'
+`ui_scale` (`appearance.ui_scale_pct`, `UiMetrics`), not the device scale. `RenderHarness::set_scale(s)` sets
+`ui_scale`, and `render(size, ..)` opens a window of `size × ui_scale` logical px, so a 100 × 40 view captures
+as 200 × 80 at 1.0 and 220 × 88 at 1.1 device pixels. tl-ui gets `image = { version = "0.25",
+default-features = false, features = ["png"] }` as an optional dependency behind `render-tests`, because gpui
+does not re-export `image` and the harness must name `RgbaImage`. The `painted_quads` fallback is dropped,
+because screenshots work on lavapipe (U-4). Lavapipe tests run through `run_on_lavapipe`, which re-runs the
+test in a child process with `VK_ICD_FILENAMES` set, or skips with a printed reason when no lavapipe ICD exists.
+- Basis: bead fut.8; `headless_app_context.rs` and `platform/test/window.rs` (default `scale_factor: 2.0`) in
+  gpui-pre 0.3.7 [verified in code]; the U-4 capture [measured].
+- Edits: ARCHITECTURE tl-ui row and ADR-013 headless screenshot text; `xtask/src/check_deps.rs` allows image
+  for tl-ui.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.
@@ -2295,7 +2312,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-1 | Nothing in the gpui-kit 0.7.0 Linux dependency graph pulls in Tokio (only `gpui-pre-reqwest-client` does, and it is not in the graph) | ADR-002 |
 | U-2 | `Application::run` returns on Linux after `cx.quit()` | ADR-010, open question 7 |
 | U-3 | KWin causes a render when a minimized GPUI window is restored, without a `window.refresh()` | ADR-010, open question 9 |
-| U-4 | Headless wgpu screenshots work with gpui-kit's `HeadlessAppContext` on Mesa lavapipe | ADR-013, open question 8 |
+| U-4 | Headless wgpu screenshots work with gpui-kit's `HeadlessAppContext` on Mesa lavapipe | ADR-013, open question 8. Verified by tasklens-fut.8: on Mesa lavapipe (`lvp_icd.json`), a 100 × 40 view filled with `#191B1D` captured as 200 × 80 (device scale 2.0, R-291) and every pixel was exactly (25, 27, 29, 255). |
 | U-5 | GPUI has no screen reader support on Linux | ADR-009 |
 | U-6 | Wayland focus-stealing prevention only flashes the taskbar entry on second-instance activation | ADR-010 |
 | U-7 | Bundled Noto Sans static faces contain `tnum` and load under zed#61660; Inter is the alternative | ADR-009, open question 5. Verified by tasklens-ug9.4: NotoSans-Regular, Medium and SemiBold (hinted static TTFs, notofonts release NotoSans-v2.015) load under cosmic-text and resolve to their bundled face at 400, 500 and 600; with `tnum` all ten digit advances are equal. Inter is not needed. |
