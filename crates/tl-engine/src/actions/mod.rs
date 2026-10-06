@@ -303,6 +303,11 @@ pub trait ActionOps: Send + Sync + 'static {
     fn send_signal(&self, _pidfd: &OwnedFd, _sig: Signal) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("process ops not wired"))
     }
+    /// Closes a pidfd from `open_verified`. Only `process::kill_tree` calls it, so a fake can log
+    /// the close pass.
+    fn close_pidfd(&self, pidfd: OwnedFd) {
+        drop(pidfd);
+    }
     /// `tl_ops::cgroup::open_validated`. The default refuses, so an ops type without cgroup
     /// support never writes.
     fn cgroup_open_validated(
@@ -455,12 +460,17 @@ async fn run_body(
         // `targetless::run` (E11-016) replaces this arm.
         ActionState::Rejected(RejectReason::Unsupported)
     } else {
-        // `KillTree` calls `process::kill_tree` once here (E11-004).
+        // `KillTree` runs the admitted targets in one `process::kill_tree` call (E11-004).
+        let mut tree = match req.kind {
+            ActionKind::KillTree => Some(run_tree(cx, actx, req, per_target).await.into_iter()),
+            _ => None,
+        };
         let mut states = Vec::with_capacity(req.targets.len());
         for (i, target) in req.targets.iter().enumerate() {
-            let state = match per_target.get(i).copied().flatten() {
-                Some(reason) => ActionState::Rejected(reason),
-                None => run_target(cx, actx, &req.kind, target, dispatch).await,
+            let state = match (per_target.get(i).copied().flatten(), tree.as_mut()) {
+                (Some(reason), _) => ActionState::Rejected(reason),
+                (None, Some(tree)) => tree.next().unwrap_or_else(internal_error),
+                (None, None) => run_target(cx, actx, &req.kind, target, dispatch).await,
             };
             tracing::info!(
                 target: "tasklens::action",
@@ -474,6 +484,27 @@ async fn run_body(
         summarize(&states)
     };
     emit(actx, cx, event(req.id, None, summary)).await;
+}
+
+/// Calls `process::kill_tree` once with the targets admission passed. A panic gives each of them
+/// `Failed(Internal)`.
+async fn run_tree(
+    cx: &Cx,
+    actx: &ActionCtx,
+    req: &ActionRequest,
+    per_target: &[Option<RejectReason>],
+) -> Vec<ActionState> {
+    let admitted: Vec<ActionTarget> = req
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| per_target.get(*i).copied().flatten().is_none())
+        .map(|(_, target)| target.clone())
+        .collect();
+    AssertUnwindSafe(process::kill_tree(cx, actx, &admitted))
+        .catch_unwind()
+        .await
+        .unwrap_or_else(|_| vec![internal_error(); admitted.len()])
 }
 
 /// A panic in one target gives that target `Failed(Internal)`; the other targets still run.

@@ -3,12 +3,16 @@
 //! hit a reused PID.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use asupersync::Cx;
 use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason, Signal};
 use tl_model::ids::ProcessKey;
+use tl_model::time::BootId;
 
-use super::{ActionCtx, TIMED_OUT, deadline, internal_error, map_ops_error, with_deadline};
+use super::{
+    ActionCtx, ActionOps, TIMED_OUT, deadline, internal_error, map_ops_error, with_deadline,
+};
 
 /// Runs one `Process` or `Thread` target. A kind this module does not handle yet is
 /// `Rejected(Unsupported)`. App rows arrive here already expanded to their primary processes.
@@ -58,6 +62,78 @@ async fn signal(
     };
     tracing::debug!(target: "tasklens::action", pid = key.pid, signal = sig.number(), result = ?state);
     state
+}
+
+/// The most time End Process Tree waits for its one blocking job, whatever the target count.
+const TREE_DEADLINE_CAP: Duration = Duration::from_secs(30);
+
+/// End Process Tree (ADR-006, PROC-062, E11-004). One blocking job opens a verified pidfd for
+/// every target, sends SIGSTOP through all of them, then SIGKILL through all of them, then closes
+/// them. Stopping first means no process in the tree can fork between the passes. Returns one
+/// state per target, in order. The deadline is 2 s per target, capped at 30 s.
+pub async fn kill_tree(cx: &Cx, actx: &ActionCtx, targets: &[ActionTarget]) -> Vec<ActionState> {
+    let n = targets.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    let keys: Vec<Option<ProcessKey>> = targets
+        .iter()
+        .map(|target| match target {
+            ActionTarget::Process(key) => Some(*key),
+            _ => None,
+        })
+        .collect();
+    let ops = Arc::clone(&actx.ops);
+    let boot = actx.boot_id;
+    let Ok(mut job) = cx.spawn_blocking(move |_| tree_passes(ops.as_ref(), &keys, boot)) else {
+        return vec![internal_error(); n];
+    };
+    let per_target = deadline(&ActionKind::KillTree, None, false);
+    let d = per_target.map(|d| {
+        d.saturating_mul(u32::try_from(n).unwrap_or(u32::MAX))
+            .min(TREE_DEADLINE_CAP)
+    });
+    match with_deadline(cx, d, job.join(cx)).await {
+        Err(_) => vec![ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)); n],
+        Ok(Err(_)) => vec![internal_error(); n],
+        Ok(Ok(states)) => states,
+    }
+}
+
+/// The three passes of `kill_tree`. A `None` key is a non-process target: `Rejected(Unsupported)`.
+/// A failed open skips the target; a failed stop or kill marks it failed and the passes go on.
+fn tree_passes(ops: &dyn ActionOps, keys: &[Option<ProcessKey>], boot: BootId) -> Vec<ActionState> {
+    let mut states = Vec::with_capacity(keys.len());
+    let mut fds = Vec::with_capacity(keys.len());
+    for key in keys {
+        let (state, fd) = match key {
+            None => (ActionState::Rejected(RejectReason::Unsupported), None),
+            Some(key) => match ops.open_verified(*key, boot) {
+                Ok(fd) => (ActionState::Succeeded, Some(fd)),
+                // `IdentityChanged` becomes `Rejected(IdentityChanged)`.
+                Err(e) => (map_ops_error(&e), None),
+            },
+        };
+        states.push(state);
+        fds.push(fd);
+    }
+    for sig in [Signal::Stop, Signal::Kill] {
+        for (state, fd) in states.iter_mut().zip(&fds) {
+            let Some(fd) = fd else { continue };
+            if let Err(e) = ops.send_signal(fd, sig)
+                && *state == ActionState::Succeeded
+            {
+                *state = map_ops_error(&e);
+            }
+        }
+    }
+    for fd in fds.into_iter().flatten() {
+        ops.close_pidfd(fd);
+    }
+    for (key, state) in keys.iter().zip(&states) {
+        tracing::debug!(target: "tasklens::action", pid = key.map(|k| k.pid), kind = "KillTree", result = ?state);
+    }
+    states
 }
 
 #[cfg(test)]
