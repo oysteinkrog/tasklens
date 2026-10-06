@@ -113,8 +113,9 @@ pub struct CardTextInput<'a> {
     pub fan_temp: Option<DeviceIdx>,
 }
 
-/// The card text for `input`. Formats through `scratch`; every string is a new allocation, so
-/// owners that refresh a card use [`update_card_lines`], which keeps unchanged strings.
+/// The card text for `input`. Formats through `scratch`. Every string over 23 bytes (the
+/// `SharedString` inline size) is a new allocation, so owners that refresh a card use
+/// [`update_card_lines`], which keeps unchanged strings.
 pub fn card_lines(input: &CardTextInput, scratch: &mut String) -> CardLines {
     let mut lines = CardLines::default();
     update_card_lines(&mut lines, input, scratch);
@@ -1504,17 +1505,15 @@ mod tests {
             "same inputs, equal lines"
         );
 
-        // The owner's compare-and-keep step.
+        // The owner's compare-and-keep step. `SharedString` keeps up to 23 bytes inline, so only
+        // longer strings own an allocation: line 2 and the tooltip here.
         let mut kept = first.clone();
         assert!(!update_card_lines(&mut kept, &i, &mut scratch));
+        assert_eq!(kept, first);
         let same = |a: &SharedString, b: &SharedString| std::ptr::eq(a.as_ptr(), b.as_ptr());
-        assert!(same(&kept.heading, &first.heading));
-        assert!(same(&kept.line1, &first.line1));
-        assert!(same(&kept.line2, &first.line2));
-        assert!(same(
-            kept.tooltip.as_ref().expect("tooltip"),
-            first.tooltip.as_ref().expect("tooltip")
-        ));
+        assert!(kept.line2.len() > 23 && same(&kept.line2, &first.line2));
+        let tip = |l: &CardLines| l.tooltip.clone().expect("tooltip");
+        assert!(tip(&kept).len() > 23 && same(&tip(&kept), &tip(&first)));
 
         // A new rate replaces line 2 only.
         let s2 = snap(
@@ -1528,17 +1527,19 @@ mod tests {
             &mut scratch
         ));
         assert_eq!(kept.line2, "↓ 2.4 Mbps ↑ 0.3 Mbps");
-        assert!(same(&kept.line1, &first.line1));
         assert!(!same(&kept.line2, &first.line2));
+        assert!(same(&tip(&kept), &tip(&first)));
 
         // Without a connection the tooltip shares line 1's allocation.
         let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+        let mut inv = InventorySnapshot::default();
+        inv.processor.name = text("AMD Ryzen 7 7800X3D 8-Core Processor");
         let s = snap(
             SystemSnapshot::default(),
-            InventorySnapshot::default(),
+            inv,
             DeviceDetailsSnapshot::default(),
         );
         let l = lines(&input(DeviceKind::Cpu, &cpu, &s));
-        assert!(same(l.tooltip.as_ref().expect("tooltip"), &l.line1));
+        assert!(same(&tip(&l), &l.line1));
     }
 }
