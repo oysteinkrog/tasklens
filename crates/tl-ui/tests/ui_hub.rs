@@ -564,9 +564,8 @@ fn explicit_quit_mode_survives_last_window(cx: &mut TestAppContext) {
 fn run_asset_source_resolves_icons() {
     // `run` passes `TlAssets` to `Application::with_assets`; the kit and tasklens icons must
     // resolve through it.
-    for path in ["icons/chevron-down.svg"] {
-        assert!(TlAssets.load(path).unwrap().is_some(), "{path}");
-    }
+    let kit_icon = "icons/chevron-down.svg";
+    assert!(TlAssets.load(kit_icon).unwrap().is_some(), "{kit_icon}");
     let tl = TlAssets.list("icons/tl/").unwrap();
     assert!(!tl.is_empty());
     assert!(TlAssets.load(&tl[0]).unwrap().is_some());
