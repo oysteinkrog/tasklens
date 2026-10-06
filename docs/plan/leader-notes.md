@@ -307,3 +307,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.1: Gate installed; `impl Drop for Gate` aborts in-flight actions and run_action checks cancel before each target and event. Spawn failure still `expect`s (panics the reducer during shutdown); revisit. Old Harness::submit stand-in kept.
 - 8q0.28: DetailsState in the reducer. No DetailsUpdate clears the handle search; `clear_handle_search()` has no caller yet. Decide with E10/dwy.3. Component header stays WarmingUp; tabs carry their own validity.
 - Leader fixed lab_session end_to_end_engine_in_lab: Flat mode now has SWEEP_SIZE + 1 rows (Interrupts pseudo row).
+- qfx.26: polkit-rule on/off. The script does not create /etc/polkit-1/rules.d (the polkit package ships it). Accepted.
