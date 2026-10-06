@@ -486,3 +486,8 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.49 closed as covered by 5713b4c.
 - rsf.15 (b3b7dde, b4418a6): 3 table goldens pass; RTL blocked. Decisions in a new P1 rsf bead: FSI/PDI isolate before the count, TlIcon::Binary, Name column minimum 120 px. OWNER REVIEW: the Name minimum of 120 px is a leader call; PROC-023 gives 60 px for all columns.
 - jqk.8 (daceda8, 95deff0, 11700bc): status chip; truncation keeps actions and paused tag whole; tab order and cached sizing noted on jqk.10.
+- rsf.13 (a8631ab): column reorder; Esc via intercept_keystrokes while dragging (accepted); columns_fixed gating added to rsf.14.
+- crw.30 (321f84c, c8546a7, d68b188): CpuTotals.per_cpu_mhz Arc (CpuTotals no longer Copy); grid tooltips show clocks; unchanged values keep the Arc.
+- rsf.21 (5dc681d, 5265e51, 456205b, 03180c0, 3650424, 0e27d6a, 33ab37e): FSI/PDI isolate cached in IconSourceCache, TlIcon::Binary, Name min 120 px.
+- pdu.8 (2248f10): process cell painting; tooltips, heat background and stale double-dim rule noted on pdu.12.
+- crw.29 (f7c0916, d8b3a69, b40b1d4, dfae5b2): Performance words through tr tables; range_word is SharedString; tr_en accepted; tr_calls and set_test_catalogue test hooks. Leftover English moved to a new ug9 bead.
