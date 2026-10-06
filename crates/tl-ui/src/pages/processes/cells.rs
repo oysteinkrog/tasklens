@@ -523,7 +523,7 @@ enum Value<'a> {
     Bytes(u64, Validity),
     DiskRate(f32, Validity),
     NetRate(f32, Validity),
-    Count(u64),
+    Count(u64, Validity),
     Id(i64),
     Pid {
         pid: u32,
@@ -590,8 +590,8 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
         Value::Percent(p, v) | Value::DiskRate(p, v) | Value::NetRate(p, v) => {
             (u64::from(p.to_bits()), *v)
         }
-        Value::Bytes(n, v) => (*n, *v),
-        Value::Count(n) | Value::Duration(n) => (*n, Validity::Valid),
+        Value::Bytes(n, v) | Value::Count(n, v) => (*n, *v),
+        Value::Duration(n) => (*n, Validity::Valid),
         Value::Id(n) | Value::Time(n) => (*n as u64, Validity::Valid),
         Value::Pid { pid, plus } => (u64::from(*pid) | u64::from(*plus) << 32, Validity::Valid),
         Value::Priority(policy, rt, nice) => (
@@ -641,7 +641,7 @@ fn write_value(value: Value, ctx: &CellCtx, out: &mut CellOut) {
                 ctx.settings.units.network_auto_scale,
             );
         }
-        Value::Count(n) => units::count(s, n),
+        Value::Count(n, _) => units::count(s, n),
         Value::Id(n) => {
             let _ = write!(s, "{n}");
         }
@@ -845,9 +845,9 @@ fn record_value<'a>(
         C::Commit => extra(&|x| Value::Bytes(x.commit_bytes, Validity::Valid)),
         C::Vsize => extra(&|x| Value::Bytes(x.vsize_bytes, Validity::Valid)),
         C::VsizePeak => extra(&|x| Value::Bytes(x.vsize_peak_bytes, Validity::Valid)),
-        C::PageFaults => extra(&|x| Value::Count(x.page_faults)),
-        C::PageFaultsDelta => extra(&|x| Value::Count(x.page_faults_delta)),
-        C::MajorFaults => extra(&|x| Value::Count(x.major_faults)),
+        C::PageFaults => extra(&|x| Value::Count(x.page_faults, Validity::Valid)),
+        C::PageFaultsDelta => extra(&|x| Value::Count(x.page_faults_delta, Validity::Valid)),
+        C::MajorFaults => extra(&|x| Value::Count(x.major_faults, Validity::Valid)),
         C::Swap => Value::Bytes(r.swap_bytes, v(F::Swap)),
         C::Pss => Value::Bytes(r.pss_bytes, v(F::Pss)),
         C::Uss => Value::Bytes(r.uss_bytes, v(F::Uss)),
@@ -871,11 +871,10 @@ fn record_value<'a>(
         // PROC-035 object counts
         C::Handles => extra(&|x| {
             x.handles.map_or(Value::Glyph(Validity::Restricted), |h| {
-                Value::Count(h.into())
+                Value::Count(h.into(), Validity::Valid)
             })
         }),
-        C::Threads if shows_value(v(F::Threads)) => Value::Count(r.threads.into()),
-        C::Threads => Value::Glyph(v(F::Threads)),
+        C::Threads => Value::Count(r.threads.into(), v(F::Threads)),
         // PROC-036 Linux extras
         C::State => Value::Arc(state_word(r, x, ctx.words)),
         C::Nice => Value::Id(r.nice.into()),
@@ -953,8 +952,7 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         C::NetRecvRate => Value::NetRate(g.net_rx_bps, v(F::NetRx)),
         C::Gpu => Value::Percent(g.gpu_pct, v(F::GpuUtil)),
         C::GpuMemDedicated => Value::Bytes(g.gpu_mem_bytes, v(F::GpuMem)),
-        C::Threads if shows_value(v(F::Threads)) => Value::Count(g.threads.into()),
-        C::Threads => Value::Glyph(v(F::Threads)),
+        C::Threads => Value::Count(g.threads.into(), v(F::Threads)),
         C::Unit => match &g.node {
             NodeId::Unit(u) => Value::Arc(&u.name),
             _ => Value::Blank,
