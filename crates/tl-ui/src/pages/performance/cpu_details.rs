@@ -67,13 +67,25 @@ const TIP_HANDLES: &str = "perf-cpu-tip-handles";
 /// `{$time}`: the boot time.
 const TIP_BOOT: &str = "perf-cpu-tip-boot";
 const TIP_LOADAVG: &str = "perf-cpu-tip-loadavg";
+/// `{$size}`: the L1 data caches, for example "16 × 32 KiB".
+const TIP_L1_DATA: &str = "perf-cpu-tip-l1-data";
+/// `{$size}`: the L1 instruction caches.
+const TIP_L1_INSTRUCTION: &str = "perf-cpu-tip-l1-instruction";
+/// `{$size}`: the L4 total.
+const TIP_L4: &str = "perf-cpu-tip-l4";
+/// A boot time that does not convert to a date.
+const TIME_UNKNOWN: &str = "perf-cpu-time-unknown";
 /// The tooltip texts and their arguments.
-const TEXTS: [(&str, &[&str]); 5] = [
+const TEXTS: [(&str, &[&str]); 9] = [
     (TIP_FASTEST, &["mhz"]),
     (TIP_BOGOMIPS, &[]),
     (TIP_HANDLES, &[]),
     (TIP_BOOT, &["time"]),
     (TIP_LOADAVG, &[]),
+    (TIP_L1_DATA, &["size"]),
+    (TIP_L1_INSTRUCTION, &["size"]),
+    (TIP_L4, &["size"]),
+    (TIME_UNKNOWN, &[]),
 ];
 /// Marks a clock read from BogoMIPS.
 const BOGOMIPS_MARK: &str = " (?)";
@@ -186,7 +198,8 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
     // btime does not change within a boot, so the tooltip changes only with the language.
     if sys.boot_time_s > 0 {
         let tip = model.text(TIP_BOOT);
-        let boot = LocalTime(sys.boot_time_s);
+        let unknown = model.text(TIME_UNKNOWN);
+        let boot = LocalTime(sys.boot_time_s, unknown.text());
         changed |= set_tip(model, ROW_UP_TIME, |o| tip.write(o, &[&boot]));
     }
 
@@ -229,19 +242,22 @@ pub fn update_static(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
     }
 
     let c = &info.caches;
+    let (data_tip, instruction_tip, l4_tip) = (
+        model.text(TIP_L1_DATA),
+        model.text(TIP_L1_INSTRUCTION),
+        model.text(TIP_L4),
+    );
     // L1 is data plus instruction.
     let l1_kib = c.l1d.map_or(0, |l| l.total_kib) + c.l1i.map_or(0, |l| l.total_kib);
     changed |= cache_row(model, ROW_L1, l1_kib, |o| {
         let mut sep = "";
         if let Some(d) = c.l1d {
-            write_instances(o, d)?;
-            o.write_str(" data")?;
+            data_tip.write(o, &[&Instances(d)])?;
             sep = " + ";
         }
         if let Some(i) = c.l1i {
             o.write_str(sep)?;
-            write_instances(o, i)?;
-            o.write_str(" instruction")?;
+            instruction_tip.write(o, &[&Instances(i)])?;
         }
         Ok(())
     });
@@ -259,8 +275,8 @@ pub fn update_static(model: &mut KeyValueModel, info: &CpuStaticInfo) -> bool {
             if c.l3.is_some() {
                 o.write_str(DOT)?;
             }
-            o.write_str("L4 ")?;
-            write_with(o, |s| units::cache_size(s, l4.total_kib))?;
+            let size = Formatted(|s: &mut String| units::cache_size(s, l4.total_kib));
+            l4_tip.write(o, &[&size])?;
         }
         Ok(())
     });
@@ -381,6 +397,24 @@ fn write_instances(o: &mut dyn fmt::Write, l: CacheLevelInfo) -> fmt::Result {
     write_with(o, |s| units::cache_size(s, l.instance_kib))
 }
 
+/// [`write_instances`] as a template argument.
+struct Instances(CacheLevelInfo);
+
+impl fmt::Display for Instances {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_instances(f, self.0)
+    }
+}
+
+/// A `units` formatter as a template argument.
+struct Formatted<F>(F);
+
+impl<F: Fn(&mut String)> fmt::Display for Formatted<F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_with(f, &self.0)
+    }
+}
+
 /// Runs a `units` formatter into `o` through a reused per-thread buffer, so the compare path in
 /// [`set_tip`] does not allocate.
 fn write_with(o: &mut dyn fmt::Write, f: impl FnOnce(&mut String)) -> fmt::Result {
@@ -437,17 +471,17 @@ fn write_load(o: &mut String, bits: u64) {
     }
 }
 
-/// A Unix time shown by [`write_local`].
-struct LocalTime(i64);
+/// A Unix time shown by [`write_local`], with the word for a time that does not convert.
+struct LocalTime<'a>(i64, &'a str);
 
-impl fmt::Display for LocalTime {
+impl fmt::Display for LocalTime<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write_with(f, |s| write_local(s, self.0))
+        write_with(f, |s| write_local(s, self.0, self.1))
     }
 }
 
-/// "YYYY-MM-DD HH:MM:SS" in the system time zone.
-fn write_local(out: &mut String, unix_s: i64) {
+/// "YYYY-MM-DD HH:MM:SS" in the system time zone, or `unknown`.
+fn write_local(out: &mut String, unix_s: i64, unknown: &str) {
     match jiff::Timestamp::from_second(unix_s) {
         Ok(ts) => {
             let z = ts.to_zoned(jiff::tz::TimeZone::system());
@@ -463,7 +497,7 @@ fn write_local(out: &mut String, unix_s: i64) {
                 },
             );
         }
-        Err(_) => out.push_str("Unknown"),
+        Err(_) => out.push_str(unknown),
     }
 }
 

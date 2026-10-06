@@ -14,7 +14,8 @@
 //! block with a heading ("Module 1") indents its rows by `block_indent`; blocks are `block_gap`
 //! apart.
 //!
-//! Value words per validity (PERF-013), every non-valid word in `text_secondary`:
+//! Value words per validity (PERF-013), every non-valid word in `text_secondary`. The words are
+//! the `fnd-kv-*` keys in `en-US.ftl`, translated once per strings version ([`kv_words`]):
 //!
 //! | Validity | Shows | Tooltip |
 //! |---|---|---|
@@ -51,9 +52,10 @@ use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     Action, Animation, AnimationExt as _, AnyElement, App, BorrowAppContext as _, ClipboardItem,
-    Context, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding,
-    MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled, Task, Window, canvas, div, fill, point, prelude::FluentBuilder as _, px, size,
+    Context, ElementId, FocusHandle, FontWeight, Global, Hsla, InteractiveElement, IntoElement,
+    KeyBinding, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, fill, point,
+    prelude::FluentBuilder as _, px, size,
 };
 use tl_model::validity::Validity;
 
@@ -63,6 +65,7 @@ use super::link::TlLink;
 use super::motion::{M_FAST, ease_out_cubic};
 use super::skeleton::TlSkeletonBlock;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::i18n::{Strings, tr, tr_en};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, numeric_style, t_base, t_md, t_sm};
@@ -76,9 +79,12 @@ pub const EMPTY_TEXT: &str = "No properties match the current filter.";
 /// Tooltip and accessible name of the section copy button.
 pub const COPY_SECTION_TOOLTIP: &str = "Copy section";
 
-const WARMING_WORD: &str = "Collecting…";
-const RESTRICTED_WORD: &str = "Restricted";
-const FAILED_WORD: &str = "Unavailable";
+const KEY_COLLECTING: &str = "fnd-kv-collecting";
+const KEY_RESTRICTED: &str = "fnd-kv-restricted";
+const KEY_UNAVAILABLE: &str = "fnd-kv-unavailable";
+const KEY_NOT_SUPPORTED: &str = "fnd-kv-not-supported";
+const KEY_NOT_REPORTED: &str = "fnd-kv-not-reported";
+const KEY_NEEDS_SETUP: &str = "fnd-kv-needs-setup";
 
 /// Default row height, × ui_scale.
 const ROW_HEIGHT: f32 = 28.;
@@ -124,6 +130,7 @@ pub enum UnsupportedWord {
 }
 
 impl UnsupportedWord {
+    /// The en-US word, for owners that compare against it. The grid draws [`KvWords`].
     pub fn text(self) -> &'static str {
         match self {
             Self::NotSupported => "Not supported",
@@ -131,6 +138,85 @@ impl UnsupportedWord {
             Self::NeedsSetup => "Needs setup",
         }
     }
+}
+
+/// The state words, translated once per strings version by [`kv_words`]. A new table is in
+/// en-US.
+#[derive(Clone, Debug)]
+pub struct KvWords {
+    pub collecting: SharedString,
+    pub restricted: SharedString,
+    pub unavailable: SharedString,
+    pub not_supported: SharedString,
+    pub not_reported: SharedString,
+    pub needs_setup: SharedString,
+}
+
+impl Default for KvWords {
+    fn default() -> Self {
+        Self::with(|key| tr_en(key, &[]))
+    }
+}
+
+impl KvWords {
+    /// Translates every word with the current strings.
+    pub fn new(cx: &App) -> Self {
+        Self::with(|key| tr(cx, key))
+    }
+
+    fn with(t: impl Fn(&str) -> SharedString) -> Self {
+        Self {
+            collecting: t(KEY_COLLECTING),
+            restricted: t(KEY_RESTRICTED),
+            unavailable: t(KEY_UNAVAILABLE),
+            not_supported: t(KEY_NOT_SUPPORTED),
+            not_reported: t(KEY_NOT_REPORTED),
+            needs_setup: t(KEY_NEEDS_SETUP),
+        }
+    }
+
+    pub fn unsupported(&self, word: UnsupportedWord) -> &SharedString {
+        match word {
+            UnsupportedWord::NotSupported => &self.not_supported,
+            UnsupportedWord::NotReported => &self.not_reported,
+            UnsupportedWord::NeedsSetup => &self.needs_setup,
+        }
+    }
+}
+
+/// The words for one strings version, shared by every grid.
+struct KvWordsCache {
+    version: u64,
+    words: Rc<KvWords>,
+}
+
+impl Global for KvWordsCache {}
+
+/// The state words for the current strings. They are translated only when the strings version
+/// changed since the last call, so a frame makes no `tr` call. Without strings they are in en-US.
+pub fn kv_words(cx: &mut App) -> Rc<KvWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return en_words();
+    };
+    match cx.try_global::<KvWordsCache>() {
+        Some(cache) if cache.version == version => cache.words.clone(),
+        _ => {
+            let words = Rc::new(KvWords::new(cx));
+            cx.set_global(KvWordsCache {
+                version,
+                words: words.clone(),
+            });
+            words
+        }
+    }
+}
+
+/// The en-US words, built once per thread.
+fn en_words() -> Rc<KvWords> {
+    thread_local! {
+        static EN: Rc<KvWords> = Rc::new(KvWords::default());
+    }
+    EN.with(Rc::clone)
 }
 
 /// A theme status colour for a Valid value that needs attention, such as a deleted executable.
@@ -226,17 +312,22 @@ pub enum KvLayout {
     Inline,
 }
 
-/// What a value draws, or `None` for a Missing value, whose row is not drawn.
-pub fn shown_text(value: &TlValue) -> Option<SharedString> {
+/// What a value draws with `words`, or `None` for a Missing value, whose row is not drawn.
+pub fn shown_text_in(value: &TlValue, words: &KvWords) -> Option<SharedString> {
     let text = match value.validity {
-        Validity::Valid | Validity::Stale => value.text.clone(),
-        Validity::WarmingUp => WARMING_WORD.into(),
-        Validity::Restricted => RESTRICTED_WORD.into(),
-        Validity::Unsupported => value.word.unwrap_or_default().text().into(),
+        Validity::Valid | Validity::Stale => &value.text,
+        Validity::WarmingUp => &words.collecting,
+        Validity::Restricted => &words.restricted,
+        Validity::Unsupported => words.unsupported(value.word.unwrap_or_default()),
         Validity::Missing => return None,
-        Validity::Failed => FAILED_WORD.into(),
+        Validity::Failed => &words.unavailable,
     };
-    Some(text)
+    Some(text.clone())
+}
+
+/// [`shown_text_in`] with the en-US words.
+pub fn shown_text(value: &TlValue) -> Option<SharedString> {
+    shown_text_in(value, &en_words())
 }
 
 /// Text, colour and link flag of a value.
@@ -250,9 +341,14 @@ pub struct ValueLook {
     pub underline: bool,
 }
 
-/// How `value` draws in `theme`, or `None` when its row is not drawn.
+/// [`value_look_in`] with the en-US words.
 pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
-    let text = shown_text(value)?;
+    value_look_in(value, &en_words(), theme)
+}
+
+/// How `value` draws with `words` in `theme`, or `None` when its row is not drawn.
+pub fn value_look_in(value: &TlValue, words: &KvWords, theme: &TlTheme) -> Option<ValueLook> {
+    let text = shown_text_in(value, words)?;
     let valid = value.validity.is_valid();
     let link = value.link.is_some()
         && (valid
@@ -275,8 +371,8 @@ pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
 }
 
 /// "Label: value" for a row. A trailing ":" in the label is not doubled.
-pub fn row_copy_text(row: &TlKvRow) -> Option<String> {
-    let value = shown_text(&row.value)?;
+pub fn row_copy_text(row: &TlKvRow, words: &KvWords) -> Option<String> {
+    let value = shown_text_in(&row.value, words)?;
     let label = row.label.trim_end();
     let label = label.strip_suffix(':').unwrap_or(label);
     Some(format!("{label}: {value}"))
@@ -284,7 +380,7 @@ pub fn row_copy_text(row: &TlKvRow) -> Option<String> {
 
 /// The section as plain text: the title, then each heading and `    Label: value` line
 /// (PERF-011). Rows under a heading get one more indent. Missing rows are left out.
-pub fn section_copy_text(section: &TlKvSection) -> String {
+pub fn section_copy_text(section: &TlKvSection, words: &KvWords) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(title) = &section.title {
         lines.push(title.to_string());
@@ -300,7 +396,7 @@ pub fn section_copy_text(section: &TlKvSection) -> String {
             block
                 .rows
                 .iter()
-                .filter_map(row_copy_text)
+                .filter_map(|row| row_copy_text(row, words))
                 .map(|row| format!("{indent}{row}")),
         );
     }
@@ -420,6 +516,7 @@ struct Frame {
     flash_count: u64,
     reduced_motion: bool,
     row_height: Pixels,
+    words: Rc<KvWords>,
 }
 
 /// The key/value grid. Build it with [`TlKeyValueGrid::new`] and [`TlKeyValueGrid::sections`].
@@ -555,6 +652,7 @@ impl TlKeyValueGrid {
         let on_copy_section = self.on_copy_section.clone();
         let on_copied = self.on_copied.clone();
         let sections = self.sections.clone();
+        let words = f.words.clone();
         let button = TlButton::new(self.child_id("copy-section", si), TlButtonKind::Icon)
             .icon(TlIcon::Copy)
             .size(TlButtonSize::Sm)
@@ -562,7 +660,7 @@ impl TlKeyValueGrid {
             .on_click(move |_, window, cx| match &on_copy_section {
                 Some(handler) => handler(si, window, cx),
                 None => copy_and_report(
-                    section_copy_text(&sections[si]).into(),
+                    section_copy_text(&sections[si], &words).into(),
                     on_copied.as_ref(),
                     window,
                     cx,
@@ -602,7 +700,7 @@ impl TlKeyValueGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let look = value_look(&row.value, &f.theme)?;
+        let look = value_look_in(&row.value, &f.words, &f.theme)?;
         let m = &f.m;
         let id = self.child_id("value", n);
         let mut cell = div()
@@ -683,7 +781,8 @@ impl TlKeyValueGrid {
         let on_copied = self.on_copied.clone();
         let sections = self.sections.clone();
         let value_text = look.text;
-        let row_text: SharedString = row_copy_text(row).unwrap_or_default().into();
+        let row_text: SharedString = row_copy_text(row, &f.words).unwrap_or_default().into();
+        let words = f.words.clone();
         let menu_min = px(MENU_MIN_WIDTH * m.ui_scale);
         let menu_max = px(MENU_MAX_WIDTH * m.ui_scale);
         Some(
@@ -697,13 +796,14 @@ impl TlKeyValueGrid {
                 let value_text = value_text.clone();
                 let row_text = row_text.clone();
                 let sections = sections.clone();
+                let words = words.clone();
                 menu.min_w(menu_min)
                     .max_w(menu_max)
                     .item(item("Copy value", Rc::new(move || value_text.clone())))
                     .item(item("Copy row", Rc::new(move || row_text.clone())))
                     .item(item(
                         "Copy section",
-                        Rc::new(move || section_copy_text(&sections[si]).into()),
+                        Rc::new(move || section_copy_text(&sections[si], &words).into()),
                     ))
             })
             .into_any_element(),
@@ -933,6 +1033,7 @@ impl RenderOnce for TlKeyValueGrid {
             flash_count,
             reduced_motion: cx.reduce_motion(),
             row_height: self.row_height.unwrap_or(px(ROW_HEIGHT * m.ui_scale)),
+            words: kv_words(cx),
         };
         let indent = self.block_indent.unwrap_or(m.sp[6]);
         let block_gap = self.block_gap.unwrap_or(m.sp[4]);
@@ -1394,12 +1495,13 @@ mod tests {
 
     #[test]
     fn copy_texts() {
+        let words = KvWords::default();
         assert_eq!(
-            row_copy_text(&row("PID:", TlValue::new("1234"))).as_deref(),
+            row_copy_text(&row("PID:", TlValue::new("1234")), &words).as_deref(),
             Some("PID: 1234")
         );
         assert_eq!(
-            row_copy_text(&row("Speed", TlValue::new("4631 MHz"))).as_deref(),
+            row_copy_text(&row("Speed", TlValue::new("4631 MHz")), &words).as_deref(),
             Some("Speed: 4631 MHz")
         );
         let card = TlKvSection {
@@ -1419,7 +1521,7 @@ mod tests {
             ],
         };
         assert_eq!(
-            section_copy_text(&card),
+            section_copy_text(&card, &words),
             "Memory\n    Total: 32 GiB\n    Module 1\n        Speed: 4800 MT/s"
         );
         assert_eq!(column_width(px(600.), 3, px(24.), px(160.)), px(184.));
