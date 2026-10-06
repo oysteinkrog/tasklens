@@ -343,3 +343,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - fut.13: TlMenu over kit PopupMenu misses several spec points (keys, sizes, scale). Follow-up bead rebuilds it on base parts with the same API. context_menu_layer must be rendered by the window root (comment on jqk.10).
 - gma.31: run history store with in-memory fake store in tests.
 - 8q0.34: Startup counts follow the filter.
+- fut.9: ToastQueue done; kit stack look differs from UI-FND-020; follow-up bead draws the stack in tasklens code, adds TlButton::icon_size, moves kind words to i18n. hjn.21: leader chose GraphicsAdapter.pci_slot plus reducer matching in apply_inventory (R-166). Leader fixed clippy single_element_loop in ui_hub.rs.
