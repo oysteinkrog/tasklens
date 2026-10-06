@@ -1774,8 +1774,8 @@ fn ring_on(rig: &mut PickerRig, selector: &'static str) -> bool {
     })
 }
 
-/// What holds focus in the picker window: "filter", "list", "reset", "close", "pin", "other" or
-/// "none". The buttons are told apart by their keyboard focus ring.
+/// What holds focus in the picker window: "filter", "list", "reset", "close", "pin",
+/// "frame-close" (the title-bar close button), "other" or "none". The buttons are told apart by their keyboard focus ring.
 fn picker_focus(rig: &mut PickerRig) -> &'static str {
     use gpui_kit::Focusable as _;
     redraw(&mut rig.pcx);
@@ -1797,6 +1797,7 @@ fn picker_focus(rig: &mut PickerRig) -> &'static str {
         ("reset", "TlButton-column-picker-reset"),
         ("close", "TlButton-column-picker-close"),
         ("pin", "TlWindowPin"),
+        ("frame-close", "TlWindowCaption-close"),
     ]
     .into_iter()
     .find(|(_, selector)| ring_on(rig, selector))
@@ -1818,11 +1819,15 @@ fn picker_tab_order_filter_list_reset_close() {
     );
 
     let mut order = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..6 {
         press(&mut rig, "tab");
         order.push(picker_focus(&mut rig));
     }
-    assert_eq!(order, ["list", "reset", "close", "filter", "list"]);
+    // The frame's pin is disabled here (no keep-above), so it is not a tab stop.
+    assert_eq!(
+        order,
+        ["list", "reset", "close", "frame-close", "filter", "list"]
+    );
 
     // The list keeps focus and its keys.
     press(&mut rig, "down");

@@ -472,3 +472,153 @@ fn lowmem_minimal_init_hook_and_faces() {
     assert!(added.iter().any(|f| f.as_slice() == SEMIBOLD));
     assert!(!added.iter().any(|f| f.as_slice() == MEDIUM));
 }
+
+/// A key down and up: a focused button activates on the key up.
+fn press(vcx: &mut VisualTestContext, key: &str) {
+    let keystroke = gpui_kit::Keystroke::parse(key).expect("keystroke");
+    vcx.simulate_event(gpui_kit::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    vcx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+    vcx.run_until_parked();
+}
+
+/// Whether a 2 px `accent` focus ring is painted over the centre of `selector`.
+fn ring_on(vcx: &mut VisualTestContext, selector: &'static str) -> bool {
+    let Some(bounds) = vcx.debug_bounds(selector) else {
+        return false;
+    };
+    vcx.update(|window, cx| {
+        let accent = current(cx).accent;
+        let s = window.scale_factor();
+        let center = bounds.center().scale(s);
+        window.painted_quads().iter().any(|q| {
+            q.border_color == accent
+                && q.border_widths.top.0 == 2. * s
+                && q.bounds.contains(&center)
+        })
+    })
+}
+
+/// Where focus is: "filter", "list", "open-full", "pin", "close", "other" or "none". The
+/// buttons are told apart by their keyboard focus ring.
+fn focus_at(vcx: &mut VisualTestContext, view: &gpui_kit::Entity<LowMemoryWindow>) -> &'static str {
+    draw(vcx);
+    let focused = vcx.update(|window, cx| {
+        let view = view.read(cx);
+        if view.filter().read(cx).focus_handle(cx).is_focused(window) {
+            Some("filter")
+        } else if view.list_focus().is_focused(window) {
+            Some("list")
+        } else if window.focused(cx).is_none() {
+            Some("none")
+        } else {
+            None
+        }
+    });
+    if let Some(name) = focused {
+        return name;
+    }
+    [
+        ("open-full", "LowMemOpenFull"),
+        ("pin", "TlWindowPin"),
+        ("close", "TlWindowCaption-close"),
+    ]
+    .into_iter()
+    .find(|(_, selector)| ring_on(vcx, selector))
+    .map_or("other", |(name, _)| name)
+}
+
+fn launches(engine: &FakeEngine) -> usize {
+    engine
+        .commands()
+        .into_iter()
+        .filter(|c| matches!(c, Command::Action(_)))
+        .count()
+}
+
+#[gpui_kit::test]
+fn lowmem_tab_visits_pin_and_close(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    sample(cx, &engine, 0, true);
+    let (handle, mut vcx, view) = open(cx, &engine);
+    let frame = cx
+        .update(|cx| TlSecondaryWindow::<LowMemoryWindow>::find(handle, cx))
+        .expect("frame");
+    assert_eq!(focus_at(&mut vcx, &view), "filter");
+
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(focus_at(&mut vcx, &view), "list");
+
+    // Open Full tasklens: Enter activates it.
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(focus_at(&mut vcx, &view), "open-full");
+    press(&mut vcx, "enter");
+    assert_eq!(launches(&engine), 1, "Enter on Open Full tasklens");
+
+    // The pin: Space flips it.
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(focus_at(&mut vcx, &view), "pin");
+    assert!(vcx.read(|cx| frame.read(cx).pinned()));
+    press(&mut vcx, "space");
+    assert!(!vcx.read(|cx| frame.read(cx).pinned()), "Space unpins");
+    press(&mut vcx, "enter");
+    assert!(vcx.read(|cx| frame.read(cx).pinned()), "Enter pins again");
+    assert_eq!(launches(&engine), 1);
+
+    // Close, then Tab wraps to the filter.
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(focus_at(&mut vcx, &view), "close");
+    assert!(vcx.read(|cx| frame.read(cx).pinned()), "Tab left the pin");
+    vcx.simulate_keystrokes("tab");
+    assert_eq!(focus_at(&mut vcx, &view), "filter", "Tab wraps");
+
+    // Shift+Tab from the filter reaches close; Enter closes the window.
+    vcx.simulate_keystrokes("shift-tab");
+    assert_eq!(focus_at(&mut vcx, &view), "close");
+    press(&mut vcx, "enter");
+    assert!(!is_open(cx, handle), "Enter on close closes the window");
+}
+
+#[gpui_kit::test]
+fn lowmem_title_follows_language(cx: &mut TestAppContext) {
+    let engine = setup(cx);
+    let (handle, mut vcx, _) = open(cx, &engine);
+    let frame = cx
+        .update(|cx| TlSecondaryWindow::<LowMemoryWindow>::find(handle, cx))
+        .expect("frame");
+    assert_eq!(
+        vcx.read(|cx| frame.read(cx).title().to_string()),
+        "tasklens - Low memory"
+    );
+
+    vcx.update(|_, cx| {
+        tl_ui::i18n::set_test_catalogue(cx, "lowmem-window-title = [Low memory]\n");
+    });
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(
+        vcx.read(|cx| frame.read(cx).title().to_string()),
+        "[Low memory]"
+    );
+    assert_eq!(
+        vcx.read(|cx| frame.read(cx).drawn_title()).as_deref(),
+        Some("[Low memory]")
+    );
+
+    // Back to English.
+    vcx.update(|_, cx| tl_ui::i18n::set_language(cx, "en-US"));
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read(|cx| frame.read(cx).title().to_string()),
+        "tasklens - Low memory"
+    );
+
+    // A second frame makes no `tr` call.
+    draw(&mut vcx);
+    let before = tl_ui::i18n::tr_calls();
+    draw(&mut vcx);
+    assert_eq!(tl_ui::i18n::tr_calls(), before);
+}

@@ -6,6 +6,8 @@
 //! the process list (E32-A2) and "Open Full tasklens". When the pressure has stayed below the
 //! threshold for 10 s, the two lines become one "eased" line; a critical sample brings them back.
 //!
+//! The title follows the language: it changes when the strings version changes.
+//!
 //! The window has no `WindowKey`, so the frame dispatches no `ToggleAlwaysOnTop` for it. The
 //! window starts pinned and sends `KWinCommand::KeepAbove` itself whenever the frame's pin flips
 //! (R-073, R-152 OI-9). Closing the window ends the process.
@@ -367,7 +369,18 @@ impl LowMemoryWindow {
             })
             .detach();
             handle.update(cx, |_, window, cx| {
-                frame.update(cx, |frame, cx| frame.set_pinned(true, window, cx));
+                frame.update(cx, |frame, cx| {
+                    frame.set_pinned(true, window, cx);
+                    // The title follows a language change. The words are translated once per
+                    // strings version (R-132).
+                    cx.observe_global_in::<Strings>(window, |frame, window, cx| {
+                        let title = low_mem_words(cx).title.clone();
+                        if title != *frame.title() {
+                            frame.set_title(title, window, cx);
+                        }
+                    })
+                    .detach();
+                });
             })?;
         }
         Ok(handle)

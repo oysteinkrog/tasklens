@@ -11,6 +11,9 @@
 //! `Button` with the `TlButton::Toggle` look, because `TlButton::Toggle` is always 24 px and the
 //! title-bar pin is 34 × 34.
 //!
+//! The pin and the close button come after the content in the Tab order: they sit in a tab group
+//! at index 1, and content is at the default index 0. Enter and Space activate them.
+//!
 //! Esc and Ctrl+W dispatch `CloseSecondaryWindow` in the `TlWindow` context. The frame closes the
 //! window. A Run or Confirmation owner that must run its Cancel first handles
 //! `CloseSecondaryWindow` on its own content element; the frame then never sees it.
@@ -57,6 +60,9 @@ const TITLE_LEFT_PAD: f32 = 12.;
 const SERVER_PIN: f32 = 24.;
 /// Fill alpha of the pin when on, as `TlButton::Toggle`.
 const PIN_ON_ALPHA: f32 = 0.25;
+/// Tab index of the frame controls' tab group: after the content, which is at 0 (or -1 in a
+/// `TlDialog`).
+const CONTROLS_TAB_INDEX: isize = 1;
 /// Toast stack top in P1: the main-window value, × ui_scale (R-195). 34 + 30 + `sp4`.
 const TOAST_TOP: f32 = 72.;
 /// The same under server decorations, × ui_scale.
@@ -617,7 +623,6 @@ impl<V: 'static> TlSecondaryWindow<V> {
             .text_color(theme.text_primary)
             .child(text);
 
-        let white: Hsla = rgb(0xFFFFFF).into();
         let caption = |id: &'static str, name: IconName, hover: Hsla, hover_fg: Hsla| {
             div()
                 .id(id)
@@ -637,6 +642,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
                 .child(Icon::new(name).size(m.icon.sm))
         };
         let pin = self.pin(bar_h, theme, window, cx);
+        let close = self.close_button(bar_h, theme, window, cx);
 
         div()
             .id("TlWindowTitleBar")
@@ -684,7 +690,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
             )
             .child(title)
             .child(
-                div()
+                controls_group()
                     .flex()
                     .flex_row()
                     .flex_none()
@@ -719,16 +725,69 @@ impl<V: 'static> TlSecondaryWindow<V> {
                                 }),
                         )
                     })
-                    .child(
-                        caption("close", IconName::WindowClose, theme.status.danger, white)
-                            .on_click(|_, window, cx| {
-                                cx.stop_propagation();
-                                window.remove_window();
-                            }),
-                    ),
+                    .child(close),
             )
             .into_any_element()
     }
+
+    /// The close caption button: a tab stop, activated by a click, Enter or Space. Its focus ring
+    /// is drawn inset, because it sits in the window's top-right corner, where an outside ring
+    /// would be cut off.
+    fn close_button(
+        &self,
+        side: Pixels,
+        theme: &TlTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let m = *metrics(cx);
+        let id = "close";
+        let focus: FocusHandle = window
+            .use_keyed_state(id, cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone();
+        let show_ring = TlFocusRing::show(focus.is_focused(window), window);
+        let hover = theme.status.danger;
+        let white: Hsla = rgb(0xFFFFFF).into();
+        BaseButton::new(id)
+            .track_focus(&focus)
+            .debug_selector(|| "TlWindowCaption-close".into())
+            .relative()
+            .flex_none()
+            .w(side)
+            .h_full()
+            .text_color(theme.text_primary)
+            .accessibility_label("Close")
+            .hover(move |st| st.bg(hover).text_color(white))
+            .on_mouse_down(MouseButton::Left, |_, window, cx| {
+                window.prevent_default();
+                cx.stop_propagation();
+            })
+            .on_click(|_, window, cx| {
+                cx.stop_propagation();
+                window.remove_window();
+            })
+            .child(Icon::new(IconName::WindowClose).size(m.icon.sm))
+            .when(show_ring, |b| {
+                b.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(theme.accent),
+                )
+            })
+            .into_any_element()
+    }
+}
+
+/// The container of the pin and the close button: a tab group after the content. The group
+/// itself is not a tab stop.
+fn controls_group() -> gpui_kit::Div {
+    div()
+        .tab_group()
+        .tab_index(CONTROLS_TAB_INDEX)
+        .tab_stop(false)
 }
 
 impl<V: Render> Render for TlSecondaryWindow<V> {
@@ -760,7 +819,13 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
                     .min_h_0()
                     .child(self.content.clone())
                     .when_some(server_pin, |d, pin| {
-                        d.child(div().absolute().top(m.sp[4]).right(m.sp[4]).child(pin))
+                        d.child(
+                            controls_group()
+                                .absolute()
+                                .top(m.sp[4])
+                                .right(m.sp[4])
+                                .child(pin),
+                        )
                     })
                     .when(blocked, |d| {
                         d.child(

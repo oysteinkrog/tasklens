@@ -959,3 +959,95 @@ perf-cpu-time-unknown = <unknown>
         assert_eq!(tr_calls(), before, "updates make no tr call");
     }
 }
+
+/// `TlSecondaryWindow` controls in the Tab order (UI-FND-021).
+mod frame {
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Context, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowHandle, div, px, size,
+    };
+    use tl_ui::components::button::{TlButton, TlButtonKind};
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+
+    use super::{draw, probe, rings, setup};
+
+    /// One button in a probe.
+    struct OneButton;
+
+    impl Render for OneButton {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().p(px(16.)).child(probe(
+                "probe-button",
+                TlButton::new("button", TlButtonKind::Secondary).label("Run"),
+            ))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, VisualTestContext) {
+        cx.update(setup);
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "tasklens Settings",
+            size(px(600.), px(400.)),
+        );
+        let handle = cx
+            .update(|cx| TlSecondaryWindow::open(cx, spec, |_, cx| cx.new(|_| OneButton)))
+            .expect("window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        (handle, vcx)
+    }
+
+    fn on_button(vcx: &mut VisualTestContext) -> bool {
+        draw(vcx);
+        vcx.update(|window, _| {
+            window
+                .context_stack()
+                .iter()
+                .any(|c| c.contains("probe-button"))
+        })
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+        let id = handle.window_id();
+        cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+    }
+
+    /// Without keep-above the pin is disabled and not a tab stop; close still is, after the
+    /// content.
+    #[gpui_kit::test]
+    fn close_after_content_in_tab_order(cx: &mut TestAppContext) {
+        let (handle, mut vcx) = open(cx);
+        vcx.simulate_keystrokes("tab");
+        assert!(on_button(&mut vcx), "Tab starts in the content");
+        assert!(rings(&mut vcx) > 0, "the button's ring");
+
+        vcx.simulate_keystrokes("tab");
+        assert!(!on_button(&mut vcx), "Tab moves to close");
+        assert!(
+            vcx.update(|window, cx| window.focused(cx).is_some()),
+            "close holds focus"
+        );
+        assert!(rings(&mut vcx) > 0, "the close button's ring");
+
+        vcx.simulate_keystrokes("tab");
+        assert!(on_button(&mut vcx), "Tab wraps to the content");
+
+        vcx.simulate_keystrokes("shift-tab");
+        assert!(!on_button(&mut vcx), "Shift+Tab moves back to close");
+        // A focused button activates on the key up.
+        let keystroke = Keystroke::parse("space").expect("keystroke");
+        vcx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        vcx.simulate_event(KeyUpEvent { keystroke });
+        vcx.run_until_parked();
+        assert!(!is_open(cx, handle), "Space on close closes the window");
+    }
+}
