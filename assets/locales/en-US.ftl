@@ -383,3 +383,18 @@ sys-sys003-missing-program = Missing program
 
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
+
+# Column picker window (UI-PRC-007, R-106)
+table-picker-title = tasklens Columns
+table-picker-filter-placeholder = Filter columns…
+table-picker-always-on = always on
+table-picker-na = n/a on this system
+table-picker-no-match = No columns match
+table-picker-count = { $shown } of { $total } columns shown
+table-picker-reset = Reset to default
+table-picker-close = Close
+table-picker-name-processes = Processes table
+table-picker-name-history = History table
+table-picker-name-services = Services table
+table-picker-name-startup = Startup Apps table
+table-picker-name-connections = Connections table

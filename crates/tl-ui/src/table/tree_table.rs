@@ -19,7 +19,7 @@ use gpui_kit::base::{
 
 use gpui_kit::{
     AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, Context, Div,
-    ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    ElementId, EventEmitter, WeakEntity, FocusHandle, Hsla, InteractiveElement, IntoElement,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
@@ -37,9 +37,9 @@ use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, Tl
 use crate::components::validity::copy_text;
 use crate::i18n::tr;
 use crate::table::actions::{
-    CollapseOrParent, CopyRowsAsTable, ExpandOrChild, HideColumn, MoveFocus, MoveFocusEdge,
-    MoveFocusPage, OpenContextMenu, OpenProperties, ResetColumns, ResizeColumnsToFit, SelectAll,
-    SortByColumn, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
+    CollapseOrParent, CopyRowsAsTable, EnableAllColumns, ExpandOrChild, HideColumn, MoveFocus,
+    MoveFocusEdge, MoveFocusPage, OpenColumnPicker, OpenContextMenu, OpenProperties, ResetColumns,
+    ResizeColumnsToFit, SelectAll, SortByColumn, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
@@ -47,9 +47,10 @@ use crate::table::cells::{
     path_cell, text_cell,
 };
 use crate::table::columns::{
-    ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, fit_width,
-    min_width,
+    Availability, ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn,
+    fit_width, min_width,
 };
+use crate::table::columns_window::{self, ColumnHost, ColumnPicker, PickerColumn};
 use crate::table::header::{
     self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ReorderDrag,
     ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_menu, header_tooltip,
@@ -1539,21 +1540,94 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// calls `on_columns_changed` once and shows "Columns reset to default". Without defaults,
     /// or for another table, the action goes on to the owner.
     fn on_reset_columns(&mut self, a: &ResetColumns, window: &mut Window, cx: &mut Context<Self>) {
-        let scale = self.delegate.columns().ui_scale();
-        let Some(defaults) = &self.default_layout else {
-            cx.propagate();
-            return;
-        };
-        if a.table != defaults.table {
+        let has_defaults = self
+            .default_layout
+            .as_ref()
+            .is_some_and(|d| d.table == a.table);
+        if !has_defaults {
             cx.propagate();
             return;
         }
+        self.reset_columns(window, cx);
+    }
+
+    /// Replaces the layout with the owner's defaults, calls `on_columns_changed` once and shows
+    /// "Columns reset to default" in `window`. False and no change without defaults.
+    fn reset_columns(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let scale = self.delegate.columns().ui_scale();
+        let Some(defaults) = &self.default_layout else {
+            return false;
+        };
         let mut layout = defaults.clone();
         layout.rebuild(scale);
         self.delegate.on_columns_changed(&layout, cx);
         cx.notify();
         let text = tr(cx, "table-toast-columns-reset");
         push_toast(ToastKind::Info, text, window, cx);
+        true
+    }
+
+    /// `EnableAllColumns` (R-180): shows every column that exists on this system, each in its
+    /// remembered slot and width, and calls `on_columns_changed` once. Another table's id goes
+    /// on to the next handler.
+    fn on_enable_all_columns(
+        &mut self,
+        a: &EnableAllColumns,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let layout = self.delegate.columns();
+        if a.table != layout.table {
+            cx.propagate();
+            return;
+        }
+        let mut layout = layout.clone();
+        let ids = layout.order.clone();
+        for id in ids {
+            if self.delegate.column_spec(id).availability != Availability::NotOnThisSystem {
+                let _ = layout.set_visible(id, true);
+            }
+        }
+        layout.rebuild(layout.ui_scale());
+        self.delegate.on_columns_changed(&layout, cx);
+        cx.notify();
+    }
+
+    /// `OpenColumnPicker` for this table: opens the picker bound to it, or focuses the open one
+    /// and binds it here. A table with fixed columns or another id passes the action on.
+    fn on_open_column_picker(
+        &mut self,
+        a: &OpenColumnPicker,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if a.table != self.delegate.columns().table || self.delegate.columns_fixed() {
+            cx.propagate();
+            return;
+        }
+        let host: Rc<dyn ColumnHost> = Rc::new(cx.weak_entity());
+        // The picker reads this table while it opens, so it opens after this update.
+        cx.defer(move |cx| columns_window::open_column_picker(host, cx));
+    }
+
+    /// Shows or hides the column `key` for the picker and calls `on_columns_changed` once.
+    fn set_column_visible(
+        &mut self,
+        key: &str,
+        on: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), ColumnError> {
+        let layout = self.delegate.columns();
+        let col = D::Column::parse(layout.table, key).ok_or(ColumnError::Unknown)?;
+        let mut layout = layout.clone();
+        if layout.visible.contains(&col) == on {
+            return Ok(());
+        }
+        layout.set_visible(col, on)?;
+        layout.rebuild(layout.ui_scale());
+        self.delegate.on_columns_changed(&layout, cx);
+        cx.notify();
+        Ok(())
     }
 
     /// Turns `press`, which just moved past the slop to window point `at`, into a reorder drag.
@@ -1847,6 +1921,63 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 }
 
+/// The column picker's view of a table (R-181). Every call on a dropped table does nothing.
+impl<D: TreeTableDelegate> ColumnHost for WeakEntity<TlTreeTable<D>> {
+    fn table_name(&self, cx: &App) -> SharedString {
+        match self.upgrade() {
+            Some(t) => columns_window::table_name(t.read(cx).delegate.columns().table, cx),
+            None => SharedString::default(),
+        }
+    }
+
+    fn columns(&self, cx: &App) -> Vec<PickerColumn> {
+        let Some(table) = self.upgrade() else {
+            return Vec::new();
+        };
+        let delegate = &table.read(cx).delegate;
+        let layout = delegate.columns();
+        layout
+            .order
+            .iter()
+            .map(|&id| {
+                let spec = delegate.column_spec(id);
+                PickerColumn {
+                    key: id.key(),
+                    label: spec.label.clone(),
+                    full_name: spec.full_name.clone(),
+                    group: spec.group.clone(),
+                    availability: spec.availability,
+                    hideable: spec.hideable,
+                    visible: layout.visible.contains(&id),
+                }
+            })
+            .collect()
+    }
+
+    fn set_visible(
+        &self,
+        key: &str,
+        on: bool,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), ColumnError> {
+        self.update(cx, |t, cx| t.set_column_visible(key, on, cx))
+            .unwrap_or(Err(ColumnError::Unknown))
+    }
+
+    fn reset(&self, window: &mut Window, cx: &mut App) {
+        let reset = self.update(cx, |t, cx| t.reset_columns(window, cx));
+        if !matches!(reset, Ok(true)) {
+            tracing::debug!(target: "tasklens::ui", "picker reset: the table has no defaults");
+        }
+    }
+
+    fn observe(&self, picker: &mut Context<ColumnPicker>) -> Option<Subscription> {
+        let table = self.upgrade()?;
+        Some(picker.observe(&table, |_, _, cx| cx.notify()))
+    }
+}
+
 /// Pushes a toast to the window's `ToastQueue`. A window without a queue shows nothing.
 fn push_toast(kind: ToastKind, text: SharedString, window: &mut Window, cx: &mut App) {
     let Some(queue) = ToastQueue::of_window(window, cx) else {
@@ -2110,6 +2241,8 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .on_action(cx.listener(Self::on_resize_columns_to_fit))
             .on_action(cx.listener(Self::on_hide_column))
             .on_action(cx.listener(Self::on_reset_columns))
+            .on_action(cx.listener(Self::on_enable_all_columns))
+            .on_action(cx.listener(Self::on_open_column_picker))
             .child(header)
             .child(body)
     }

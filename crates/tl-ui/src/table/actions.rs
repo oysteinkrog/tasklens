@@ -121,6 +121,15 @@ pub struct ResetColumns {
     pub table: TableId,
 }
 
+/// Shows every column of `table` that exists on this system (R-180). The Debug menu dispatches
+/// it with the active tab's table; a table with another id ignores it.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct EnableAllColumns {
+    pub table: TableId,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]
@@ -165,4 +174,5 @@ pub fn bind_keys_table(cx: &mut App) {
         KeyBinding::new("shift-f10", OpenContextMenu, table),
         KeyBinding::new("menu", OpenContextMenu, table),
     ]);
+    crate::table::columns_window::bind_keys_column_picker(cx);
 }

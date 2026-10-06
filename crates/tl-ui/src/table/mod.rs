@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod cells;
 pub mod columns;
+pub mod columns_window;
 pub mod header;
 pub mod selection;
 #[cfg(any(test, feature = "test-hooks"))]
