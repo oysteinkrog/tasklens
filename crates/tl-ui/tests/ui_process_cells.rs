@@ -228,3 +228,566 @@ fn registry_heat_refs() {
         }
     }
 }
+
+// ---- Cell values and table (d) formatting (E22-004) ----
+
+mod values {
+    use std::sync::Arc;
+
+    use gpui_kit::TestAppContext;
+    use proptest::prelude::*;
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey};
+    use tl_model::process::{
+        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta,
+        ProcessRecord,
+    };
+    use tl_model::settings::Settings;
+    use tl_model::system::CpuSet;
+    use tl_model::table::{ProcessTableView, TableRow};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, ProcessField, Validity};
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::processes::cells::{
+        CellCtx, CellWords, RowRef, fill_cell, process_column, split_pid_text,
+    };
+    use tl_ui::table::cells::CellOut;
+    use tl_ui::table::tree_table::RowKind;
+    use tl_ui::text_cache::CellTextCache;
+
+    fn meta() -> ProcessMeta {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessMeta {
+            comm: a("firefox"),
+            name: a("Firefox"),
+            exe: Some(a("/usr/lib/firefox/firefox")),
+            cmdline: Some(a("/usr/lib/firefox/firefox --new-window")),
+            user: a("oystein"),
+            cgroup: None,
+            app_id: Some(a("firefox")),
+            icon: None,
+            description: Some(a("Web browser")),
+            search_lower: a("firefox"),
+        }
+    }
+
+    fn record() -> ProcessRecord {
+        ProcessRecord {
+            key: ProcessKey {
+                start_ticks: 100,
+                boot_id: BootId(1),
+                pid: 11528,
+            },
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(meta()),
+            group: GroupKind::App {
+                app_id: Arc::from("firefox"),
+            }
+            .key(),
+            state: ProcState::Sleeping,
+            flags: ProcFlags::empty(),
+            nice: 0,
+            threads: 12,
+            cpu_pct: 3.27,
+            rss_anon_bytes: 1_310_720_000,
+            rss_bytes: 2_000_000_000,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn extras() -> ProcessExtras {
+        let mut affinity = CpuSet::empty();
+        for cpu in (0..8).chain(16..24) {
+            affinity.insert(cpu);
+        }
+        ProcessExtras {
+            cpu_kernel_pct: 1.0,
+            cpu_user_pct: 2.27,
+            cpu_relative_pct: 104.6,
+            utime_ticks: 4_000,
+            stime_ticks: 340_400,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity,
+            handles: Some(1_234),
+            exe_name: Arc::from("firefox"),
+            exe_path: Arc::from("/usr/lib/firefox/firefox"),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    fn group(kind: GroupRowKind) -> GroupRow {
+        GroupRow {
+            node: NodeId::Group(GroupKey(7)),
+            key: GroupKind::App {
+                app_id: Arc::from("firefox"),
+            }
+            .key(),
+            kind,
+            class: GroupKind::App {
+                app_id: Arc::from("firefox"),
+            },
+            name: Arc::from("Firefox"),
+            icon: None,
+            members: 3,
+            pids: 3,
+            note: None,
+            memory_bytes: 4096,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 12.5,
+            rss_anon_bytes: 4096,
+            rss_bytes: 8192,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 40,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn table_row(has_children: bool, expanded: bool, descendants: u32) -> TableRow {
+        TableRow {
+            node: NodeId::Process(record().key),
+            depth: 0,
+            expanded,
+            has_children,
+            record: Some(0),
+            group: None,
+            descendants,
+            subtree: None,
+        }
+    }
+
+    /// Words equal to their Fluent keys, for tests that do not read word text.
+    fn key_words() -> CellWords {
+        CellWords::from_fn(Arc::from)
+    }
+
+    struct Fixture {
+        view: ProcessTableView,
+        records: Vec<ProcessRecord>,
+        extras: Vec<ProcessExtras>,
+        settings: Settings,
+        words: CellWords,
+        online: CpuSet,
+    }
+
+    impl Fixture {
+        fn new(r: ProcessRecord, words: CellWords) -> Self {
+            Self {
+                view: ProcessTableView::default(),
+                records: vec![r],
+                extras: vec![extras()],
+                settings: Settings::default(),
+                words,
+                online: CpuSet::empty(),
+            }
+        }
+
+        fn ctx(&self) -> CellCtx<'_> {
+            CellCtx {
+                view: &self.view,
+                records: &self.records,
+                extras: &self.extras,
+                settings: &self.settings,
+                words: &self.words,
+                ncpu: 32,
+                online: &self.online,
+                mem_total: 64 << 30,
+                vram_total: 0,
+                boot_time_s: 1_700_000_000,
+                clk_tck: 100,
+            }
+        }
+
+        /// Fills a process-row cell with `want_text` set.
+        fn record_cell(&self, row: &TableRow, id: ColumnId) -> CellOut {
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            let rec = RowRef::Record(&self.records[0], row, RowKind::Process);
+            fill_cell(rec, process_column(id), &self.ctx(), &mut out);
+            out
+        }
+
+        fn group_cell(&self, g: &GroupRow, kind: RowKind, id: ColumnId) -> CellOut {
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            fill_cell(
+                RowRef::Group(g, kind),
+                process_column(id),
+                &self.ctx(),
+                &mut out,
+            );
+            out
+        }
+
+        fn text(&self, id: ColumnId) -> String {
+            shown(&self.record_cell(&table_row(false, false, 0), id))
+        }
+    }
+
+    /// The text the cell shows: the Arc text, else the formatted text.
+    fn shown(out: &CellOut) -> String {
+        out.arc
+            .as_deref()
+            .map_or_else(|| out.text.clone(), str::to_owned)
+    }
+
+    fn with(edit: impl FnOnce(&mut ProcessRecord)) -> Fixture {
+        let mut r = record();
+        edit(&mut r);
+        Fixture::new(r, key_words())
+    }
+
+    #[test]
+    fn cell_formats_match_table_d() {
+        let f = Fixture::new(record(), key_words());
+        // Percent
+        assert_eq!(f.text(ColumnId::Cpu), "3.3%");
+        assert_eq!(with(|r| r.cpu_pct = 0.04).text(ColumnId::Cpu), "0%");
+        assert_eq!(with(|r| r.cpu_pct = 0.0).text(ColumnId::Cpu), "0%");
+        // MemorySize
+        assert_eq!(f.text(ColumnId::Memory), "1.22 GiB");
+        assert_eq!(
+            with(|r| r.rss_anon_bytes = 512).text(ColumnId::Memory),
+            "512 B"
+        );
+        assert_eq!(
+            with(|r| r.rss_anon_bytes = 16_384).text(ColumnId::Memory),
+            "16.00 KiB"
+        );
+        assert_eq!(with(|r| r.rss_anon_bytes = 0).text(ColumnId::Memory), "0 B");
+        // DiskRate
+        let disk = with(|r| {
+            r.io_read_bps = 300_000.0;
+            r.io_write_bps = 119_430.0;
+        });
+        assert_eq!(disk.text(ColumnId::Disk), "0.4 MiB/s");
+        assert_eq!(f.text(ColumnId::Disk), "0 MiB/s");
+        // NetRate, bits fixed (the default), bits auto, bytes fixed and auto.
+        let net = with(|r| r.net_rx_bps = 287_500.0);
+        assert_eq!(net.text(ColumnId::Network), "2.3 Mbps");
+        assert_eq!(f.text(ColumnId::Network), "0 Mbps");
+        let mut auto = with(|r| r.net_rx_bps = 50.0);
+        auto.settings.units.network_auto_scale = true;
+        assert_eq!(auto.text(ColumnId::Network), "0.4 Kbps");
+        let mut bytes = with(|r| r.net_tx_bps = 1_572_864.0);
+        bytes.settings.units.network = tl_model::settings::NetworkUnit::Bytes;
+        assert_eq!(bytes.text(ColumnId::NetSendRate), "1.5 MiB/s");
+        bytes.settings.units.network_auto_scale = true;
+        assert_eq!(bytes.text(ColumnId::NetSendRate), "1.5 MiB/s");
+        assert_eq!(bytes.text(ColumnId::NetRecvRate), "0 MiB/s");
+        // Count
+        assert_eq!(
+            with(|r| r.threads = 12_345).text(ColumnId::Threads),
+            "12\u{2009}345"
+        );
+        assert_eq!(with(|r| r.threads = 0).text(ColumnId::Threads), "0");
+        assert_eq!(f.text(ColumnId::Handles), "1\u{2009}234");
+        // Duration: (4_000 + 340_400) ticks at 100 Hz = 3_444 s.
+        assert_eq!(f.text(ColumnId::CpuTime), "0:57:24");
+        assert_eq!(f.text(ColumnId::CpuTimeUser), "0:00:40");
+        // IntegerId
+        assert_eq!(f.text(ColumnId::Ppid), "1");
+        assert_eq!(with(|r| r.nice = -5).text(ColumnId::Nice), "-5");
+        // Text
+        assert_eq!(f.text(ColumnId::ImageName), "firefox");
+        assert_eq!(f.text(ColumnId::ImagePath), "/usr/lib/firefox/firefox");
+        assert_eq!(f.text(ColumnId::User), "oystein");
+        let deleted = with(|r| {
+            let mut m = meta();
+            m.exe = Some(Arc::from("/usr/bin/foo (deleted)"));
+            r.meta = Arc::new(m);
+        });
+        assert_eq!(deleted.text(ColumnId::ImageName), "foo (deleted)");
+        assert_eq!(f.text(ColumnId::Affinity), "0-7,16-23");
+        // Time: Start time is a date and time, or a time of day for today.
+        let start = f.text(ColumnId::StartTime);
+        assert!(
+            start.len() == "2023-11-14 22:13".len() || start.len() == "22:13:20".len(),
+            "{start}"
+        );
+    }
+
+    #[test]
+    fn cmdline_cell_keeps_512_chars() {
+        let long: String = "é".repeat(600);
+        let f = with(|r| {
+            let mut m = meta();
+            m.cmdline = Some(Arc::from(long.as_str()));
+            r.meta = Arc::new(m);
+        });
+        assert_eq!(f.text(ColumnId::Cmdline).chars().count(), 512);
+        let none = with(|r| {
+            let mut m = meta();
+            m.cmdline = None;
+            r.meta = Arc::new(m);
+        });
+        let out = none.record_cell(&table_row(false, false, 0), ColumnId::Cmdline);
+        assert_eq!(out.validity, Validity::Restricted);
+    }
+
+    #[test]
+    fn image_path_restricted_without_exe() {
+        let f = with(|r| {
+            let mut m = meta();
+            m.exe = None;
+            r.meta = Arc::new(m);
+        });
+        for id in [ColumnId::ImagePath, ColumnId::ImageName] {
+            let out = f.record_cell(&table_row(false, false, 0), id);
+            assert_eq!(out.validity, Validity::Restricted);
+            assert!(out.text.is_empty() && out.arc.is_none());
+        }
+    }
+
+    #[test]
+    fn validity_glyphs_never_show_zero() {
+        let numeric = [
+            (ColumnId::Cpu, ProcessField::Cpu),
+            (ColumnId::CpuKernel, ProcessField::Cpu),
+            (ColumnId::Memory, ProcessField::RssAnon),
+            (ColumnId::WsTotal, ProcessField::Rss),
+            (ColumnId::Pss, ProcessField::Pss),
+            (ColumnId::Uss, ProcessField::Uss),
+            (ColumnId::Swap, ProcessField::Swap),
+            (ColumnId::Disk, ProcessField::IoRead),
+            (ColumnId::DiskWriteRate, ProcessField::IoWrite),
+            (ColumnId::Network, ProcessField::NetTx),
+            (ColumnId::NetRecvRate, ProcessField::NetRx),
+            (ColumnId::Gpu, ProcessField::GpuUtil),
+            (ColumnId::GpuMemDedicated, ProcessField::GpuMem),
+            (ColumnId::Threads, ProcessField::Threads),
+        ];
+        let glyph_states = [
+            Validity::WarmingUp,
+            Validity::Restricted,
+            Validity::Unsupported,
+            Validity::Missing,
+            Validity::Failed,
+        ];
+        for (col, field) in numeric {
+            for state in glyph_states {
+                let f = with(|r| r.validity.set(field, state));
+                let out = f.record_cell(&table_row(false, false, 0), col);
+                assert_eq!(out.validity, state, "{}", col.as_str());
+                assert!(out.text.is_empty(), "{} wrote {:?}", col.as_str(), out.text);
+                assert!(out.arc.is_none());
+            }
+            // Stale keeps the value and its text (drawn at 60% opacity by E22-004).
+            let f = with(|r| r.validity.set(field, Validity::Stale));
+            let out = f.record_cell(&table_row(false, false, 0), col);
+            assert_eq!(out.validity, Validity::Stale);
+            assert!(!out.text.is_empty(), "{}", col.as_str());
+        }
+        let g = {
+            let mut g = group(GroupRowKind::App);
+            g.validity.set(ProcessField::RssAnon, Validity::WarmingUp);
+            g
+        };
+        let f = Fixture::new(record(), key_words());
+        let out = f.group_cell(&g, RowKind::App, ColumnId::Memory);
+        assert_eq!(out.validity, Validity::WarmingUp);
+        assert!(out.text.is_empty());
+        // Extras columns before the extras arrive.
+        let mut f = Fixture::new(record(), key_words());
+        f.extras.clear();
+        let out = f.record_cell(&table_row(false, false, 0), ColumnId::WsPeak);
+        assert_eq!(out.validity, Validity::WarmingUp);
+        assert!(out.text.is_empty());
+    }
+
+    #[test]
+    fn pid_plus_n_only_on_collapsed_parent() {
+        let f = Fixture::new(record(), key_words());
+        let collapsed = f.record_cell(&table_row(true, false, 18), ColumnId::Pid);
+        assert_eq!(collapsed.text, "11528 +18");
+        assert_eq!(split_pid_text(&collapsed.text), ("11528", " +18"));
+        let expanded = f.record_cell(&table_row(true, true, 18), ColumnId::Pid);
+        assert_eq!(split_pid_text(&expanded.text), ("11528", ""));
+        let leaf = f.record_cell(&table_row(false, false, 0), ColumnId::Pid);
+        assert_eq!(split_pid_text(&leaf.text), ("11528", ""));
+        assert_ne!(collapsed.bits, expanded.bits);
+    }
+
+    #[gpui_kit::test]
+    fn app_and_unit_rows_blank_pid_and_type_text(cx: &mut TestAppContext) {
+        let words = cx.update(|cx| {
+            init_strings(cx, "en-US");
+            CellWords::new(cx)
+        });
+        let f = Fixture::new(record(), words);
+        let blank = |out: &CellOut| {
+            out.validity == Validity::Valid && out.text.is_empty() && out.arc.is_none()
+        };
+        for (kind, row_kind, type_text) in [
+            (GroupRowKind::App, RowKind::App, "App"),
+            (GroupRowKind::Unit, RowKind::Unit, "Unit"),
+        ] {
+            let g = group(kind);
+            for id in [ColumnId::Pid, ColumnId::Ppid, ColumnId::ImageName] {
+                assert!(blank(&f.group_cell(&g, row_kind, id)), "{}", id.as_str());
+            }
+            assert_eq!(
+                shown(&f.group_cell(&g, row_kind, ColumnId::Type)),
+                type_text
+            );
+            assert_eq!(shown(&f.group_cell(&g, row_kind, ColumnId::Cpu)), "12.5%");
+            assert_eq!(
+                shown(&f.group_cell(&g, row_kind, ColumnId::Memory)),
+                "4.00 KiB"
+            );
+        }
+        // The app row reads User from its member process.
+        let app = group(GroupRowKind::App);
+        assert_eq!(
+            shown(&f.group_cell(&app, RowKind::App, ColumnId::User)),
+            "oystein"
+        );
+        // Pseudo rows: PID blank, Type "Pseudo".
+        let pseudo = group(GroupRowKind::Pseudo);
+        assert!(blank(&f.group_cell(
+            &pseudo,
+            RowKind::Pseudo,
+            ColumnId::Pid
+        )));
+        assert_eq!(
+            shown(&f.group_cell(&pseudo, RowKind::Pseudo, ColumnId::Type)),
+            "Pseudo"
+        );
+        // Group header rows are blank in every column.
+        for col in [
+            ColumnId::Name,
+            ColumnId::Cpu,
+            ColumnId::Type,
+            ColumnId::Memory,
+        ] {
+            assert!(blank(&f.group_cell(&app, RowKind::GroupHeader, col)));
+        }
+        // Process rows take the PROC-004 class.
+        assert_eq!(f.text(ColumnId::Type), "App");
+        let bg = Fixture::new(
+            {
+                let mut r = record();
+                r.group = GroupKind::Background.key();
+                r
+            },
+            f.words.clone(),
+        );
+        assert_eq!(bg.text(ColumnId::Type), "Background process");
+        let kt = Fixture::new(
+            {
+                let mut r = record();
+                r.flags = ProcFlags::KERNEL_THREAD;
+                r.group = GroupKind::System.key();
+                r
+            },
+            f.words.clone(),
+        );
+        assert_eq!(kt.text(ColumnId::Type), "Kernel thread");
+        assert_eq!(f.text(ColumnId::State), "Sleeping");
+        assert_eq!(f.text(ColumnId::Priority), "Normal");
+    }
+
+    #[test]
+    fn cell_text_written_only_on_change() {
+        let mut f = Fixture::new(record(), key_words());
+        let row = table_row(false, false, 0);
+        let mut cache: CellTextCache<u32> = CellTextCache::new();
+        let mut formats = 0;
+        // The table protocol: fill without text, look up the cache, fill with text on a miss.
+        let mut lookup = |f: &Fixture, formats: &mut u32| {
+            let mut out = CellOut::default();
+            let rec = RowRef::Record(&f.records[0], &row, RowKind::Process);
+            let col = process_column(ColumnId::Cpu);
+            fill_cell(rec, col, &f.ctx(), &mut out);
+            assert!(out.text.is_empty(), "text written without want_text");
+            cache.get_or_format(0, ColumnId::Cpu, out.bits, out.validity, |s| {
+                *formats += 1;
+                out.want_text = true;
+                fill_cell(rec, col, &f.ctx(), &mut out);
+                s.push_str(&out.text);
+            })
+        };
+        assert_eq!(lookup(&f, &mut formats).as_ref(), "3.3%");
+        assert_eq!(lookup(&f, &mut formats).as_ref(), "3.3%");
+        assert_eq!(formats, 1, "unchanged value formatted again");
+        f.records[0].cpu_pct = 7.0;
+        assert_eq!(lookup(&f, &mut formats).as_ref(), "7.0%");
+        assert_eq!(formats, 2);
+        f.records[0]
+            .validity
+            .set(ProcessField::Cpu, Validity::Stale);
+        lookup(&f, &mut formats);
+        assert_eq!(formats, 3, "a validity change re-formats");
+    }
+
+    #[test]
+    fn text_cells_key_on_the_arc() {
+        let f = Fixture::new(record(), key_words());
+        let row = table_row(false, false, 0);
+        let a = f.record_cell(&row, ColumnId::ImagePath);
+        let b = f.record_cell(&row, ColumnId::ImagePath);
+        assert_eq!(a.bits, b.bits);
+        let g = with(|r| {
+            let mut m = meta();
+            m.exe = Some(Arc::from("/usr/lib/firefox/firefox"));
+            r.meta = Arc::new(m);
+        });
+        assert_ne!(g.record_cell(&row, ColumnId::ImagePath).bits, a.bits);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_percent_one_decimal(pct in 0.0f32..=100.0) {
+            let f = with(|r| r.cpu_pct = pct);
+            let text = f.text(ColumnId::Cpu);
+            let body = text.strip_suffix('%').expect("ends in %");
+            let ok = body == "0"
+                || body.split_once('.').is_some_and(|(int, dec)| {
+                    !int.is_empty()
+                        && int.bytes().all(|b| b.is_ascii_digit())
+                        && dec.len() == 1
+                        && dec.bytes().all(|b| b.is_ascii_digit())
+                });
+            prop_assert!(ok, "{}", text);
+        }
+    }
+}
