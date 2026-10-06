@@ -16,15 +16,15 @@
 //! it and reaches nothing below.
 
 use gpui_kit::base::POPUP_PRIORITY;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::actions::Confirm;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::{Icon, Side};
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, DismissEvent, ElementId, Entity, FocusHandle,
-    Focusable as _, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, TextOverflow, TextRun, Window, WindowId, anchored, deferred, div, font, point,
-    px,
+    Action, AnyElement, App, DismissEvent, ElementId, Entity, FocusHandle, Focusable as _, Global,
+    Hsla, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Point,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, TextOverflow, TextRun,
+    Window, WindowId, anchored, deferred, div, font, point, px,
 };
 
 use super::icons::{TlIcon, icon};
@@ -137,7 +137,7 @@ impl TlMenu {
 
     /// An item with a check mark in the mark column when `checked`.
     pub fn check_item(
-        mut self,
+        self,
         label: impl Into<SharedString>,
         checked: bool,
         action: Box<dyn Action>,
@@ -148,7 +148,7 @@ impl TlMenu {
 
     /// An item with a radio dot in the mark column when `selected`.
     pub fn radio_item(
-        mut self,
+        self,
         label: impl Into<SharedString>,
         selected: bool,
         action: Box<dyn Action>,
@@ -254,6 +254,7 @@ fn disabled_row(
     let m = *metrics(cx);
     let row = div()
         .id("tl-menu-disabled")
+        .test_support()
         .aria_label(label.clone())
         .flex_1()
         .min_w_0()
@@ -303,6 +304,7 @@ fn painted_row(
     *text.text_style() = t_base(&m);
     let mut row = div()
         .id("tl-menu-painted")
+        .test_support()
         .aria_label(label.clone())
         .flex()
         .flex_1()
@@ -440,4 +442,340 @@ pub fn context_menu_layer(window: &mut Window, cx: &mut App) -> Option<AnyElemen
             .with_priority(POPUP_PRIORITY)
             .into_any_element(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
+    use gpui_kit::{Bounds, Context, Modifiers, Render, Role, TestAppContext, VisualTestContext};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+
+    use super::*;
+
+    gpui_kit::actions!(tl_menu_test, [RunA, RunB, RunC, RunX, RunY]);
+
+    fn setup(cx: &mut App) {
+        gpui_kit::init(cx);
+        crate::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        crate::i18n::init_strings(cx, "en-US");
+        bind_keys(cx);
+    }
+
+    /// A window with a table-like row at the top and the context menu layer.
+    struct Host {
+        focus: FocusHandle,
+        row_pressed: Rc<Cell<bool>>,
+        ran: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(13.));
+            let pressed = self.row_pressed.clone();
+            let ran = self.ran.clone();
+            let ran_c = self.ran.clone();
+            div()
+                .size(px(800.))
+                .key_context("MenuHost")
+                .track_focus(&self.focus)
+                .on_action(move |_: &RunA, _, _| ran.borrow_mut().push("A"))
+                .on_action(move |_: &RunC, _, _| ran_c.borrow_mut().push("C"))
+                .child(
+                    div()
+                        .id("row")
+                        .h(px(28.))
+                        .w_full()
+                        .on_mouse_down(MouseButton::Left, move |_, _, _| pressed.set(true)),
+                )
+                .children(context_menu_layer(window, cx))
+        }
+    }
+
+    fn host(cx: &mut TestAppContext) -> (Entity<Host>, &mut VisualTestContext) {
+        cx.update(setup);
+        let (view, cx) = cx.add_window_view(|_, cx| Host {
+            focus: cx.focus_handle(),
+            row_pressed: Rc::default(),
+            ran: Rc::default(),
+        });
+        draw(cx);
+        (view, cx)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn keys(cx: &mut VisualTestContext, keys: &str) {
+        for key in keys.split(' ') {
+            cx.simulate_keystrokes(key);
+            draw(cx);
+        }
+    }
+
+    fn open(
+        view: &Entity<Host>,
+        cx: &mut VisualTestContext,
+        at: Point<Pixels>,
+        f: impl FnOnce(TlMenu, &mut Window, &mut App) -> TlMenu + 'static,
+    ) -> Entity<PopupMenu> {
+        let focus = cx.update(|_, cx| view.read(cx).focus.clone());
+        let menu = cx.update(|window, cx| {
+            focus.focus(window, cx);
+            let menu = TlMenu::build(window, cx, focus, f);
+            open_context_menu_at(at, window, cx, menu.clone());
+            menu
+        });
+        draw(cx);
+        menu
+    }
+
+    fn all(cx: &mut VisualTestContext) -> Vec<ElementSnapshot> {
+        cx.update(|window, _| snapshots(window))
+    }
+
+    fn in_submenu(s: &ElementSnapshot) -> bool {
+        s.path()
+            .iter()
+            .any(|id| *id == ElementId::Name("submenu".into()))
+    }
+
+    fn index(s: &ElementSnapshot) -> usize {
+        match s.path().last() {
+            Some(ElementId::Integer(ix)) => *ix as usize,
+            other => panic!("menu item id {other:?}"),
+        }
+    }
+
+    fn items(cx: &mut VisualTestContext) -> Vec<ElementSnapshot> {
+        all(cx)
+            .into_iter()
+            .filter(|s| s.role() == Some(Role::MenuItem))
+            .collect()
+    }
+
+    /// The highlighted items as (in a submenu, index).
+    fn highlighted(cx: &mut VisualTestContext) -> Vec<(bool, usize)> {
+        let mut out: Vec<_> = items(cx)
+            .iter()
+            .filter(|s| s.selected() == Some(true))
+            .map(|s| (in_submenu(s), index(s)))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Bounds of the top-level menus, sorted by x.
+    fn menus(cx: &mut VisualTestContext) -> Vec<Bounds<Pixels>> {
+        let mut out: Vec<_> = all(cx)
+            .into_iter()
+            .filter(|s| s.role() == Some(Role::Menu) && !in_submenu(s))
+            .map(|s| s.bounds())
+            .collect();
+        out.sort_by(|a, b| a.origin.x.partial_cmp(&b.origin.x).unwrap());
+        out
+    }
+
+    fn a_sep_b_c(menu: TlMenu, _: &mut Window, _: &mut App) -> TlMenu {
+        menu.item("A", Box::new(RunA))
+            .separator()
+            .item_disabled("B", Some("Not now".into()))
+            .item("C", Box::new(RunC))
+    }
+
+    #[gpui_kit::test]
+    fn arrow_keys_skip_separators_and_disabled(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(100.), px(100.)), a_sep_b_c);
+
+        keys(cx, "down");
+        assert_eq!(highlighted(cx), vec![(false, 0)], "A");
+        keys(cx, "down");
+        assert_eq!(
+            highlighted(cx),
+            vec![(false, 3)],
+            "skips the separator and B"
+        );
+        keys(cx, "down");
+        assert_eq!(highlighted(cx), vec![(false, 0)], "wraps to A");
+        keys(cx, "up");
+        assert_eq!(highlighted(cx), vec![(false, 3)], "wraps back to C");
+
+        keys(cx, "space");
+        assert_eq!(*view.read_with(cx, |h, _| h.ran.clone()).borrow(), ["C"]);
+        assert!(
+            !cx.update(|window, cx| context_menu_open(window, cx)),
+            "closed"
+        );
+        let focus = view.read_with(cx, |h, _| h.focus.clone());
+        assert!(
+            cx.update(|window, _| focus.is_focused(window)),
+            "focus is back on the opener"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn right_opens_submenu_left_closes(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let menu = open(&view, cx, point(px(100.), px(100.)), |menu, window, cx| {
+            menu.item("A", Box::new(RunA))
+                .submenu("More", window, cx, |menu, _, _| {
+                    menu.item("X", Box::new(RunX)).item("Y", Box::new(RunY))
+                })
+        });
+
+        keys(cx, "down down");
+        assert_eq!(highlighted(cx), vec![(false, 1)]);
+        keys(cx, "right");
+        assert_eq!(
+            highlighted(cx),
+            vec![(false, 1), (true, 0)],
+            "the parent stays highlighted and X is highlighted"
+        );
+        let parent_focused = cx.update(|window, cx| menu.focus_handle(cx).is_focused(window));
+        assert!(!parent_focused, "the submenu has the keys");
+
+        keys(cx, "left");
+        assert_eq!(highlighted(cx), vec![(false, 1)], "back on the parent item");
+        let parent_focused = cx.update(|window, cx| menu.focus_handle(cx).is_focused(window));
+        assert!(parent_focused, "the parent has the keys");
+    }
+
+    #[gpui_kit::test]
+    fn shift_f10_opens_at_row(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        // The caller computes the point: the focused row's left edge plus sp4, the row bottom.
+        let m = cx.update(|_, cx| *metrics(cx));
+        let at = point(px(0.) + m.sp[4], px(28.));
+        open(&view, cx, at, a_sep_b_c);
+        let menus = menus(cx);
+        assert_eq!(menus.len(), 1);
+        assert_eq!(menus[0].origin, at);
+    }
+
+    #[gpui_kit::test]
+    fn item_height_is_26_at_100pct(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(100.), px(100.)), |menu, window, cx| {
+            menu.item("A", Box::new(RunA))
+                .check_item("Checked", true, Box::new(RunB))
+                .radio_item("Radio", true, Box::new(RunC))
+                .item_disabled("Disabled", None)
+                .painted_item(
+                    "Theme",
+                    gpui_kit::black(),
+                    gpui_kit::white(),
+                    Some(TlIcon::Copy),
+                    Box::new(RunX),
+                )
+                .submenu("More", window, cx, |menu, _, _| {
+                    menu.item("X", Box::new(RunX))
+                })
+        });
+        let rows = items(cx);
+        assert_eq!(rows.len(), 6);
+        for row in rows {
+            assert_eq!(row.bounds().size.height, px(MENU_ITEM_H), "{row:?}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn outside_click_consumed(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(300.), px(300.)), a_sep_b_c);
+        assert!(cx.update(|window, cx| context_menu_open(window, cx)));
+
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+        draw(cx);
+        assert!(
+            !cx.update(|window, cx| context_menu_open(window, cx)),
+            "closed"
+        );
+        assert!(menus(cx).is_empty());
+        assert!(
+            !view.read_with(cx, |h, _| h.row_pressed.get()),
+            "the row under the pointer got no click"
+        );
+        assert!(view.read_with(cx, |h, _| h.ran.borrow().is_empty()));
+
+        cx.simulate_click(point(px(10.), px(10.)), Modifiers::none());
+        assert!(
+            view.read_with(cx, |h, _| h.row_pressed.get()),
+            "the next click reaches the row"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn mark_column_collapses(cx: &mut TestAppContext) {
+        const LONG: &str = "Show processes from every user and every session";
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            let menu = menu.item(LONG, Box::new(RunA));
+            assert!(!menu.has_mark_column);
+            menu
+        });
+        let plain = menus(cx)[0];
+        cx.update(|window, cx| close_context_menu(window, cx));
+        draw(cx);
+
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            let menu = menu.check_item(LONG, false, Box::new(RunA));
+            assert!(menu.has_mark_column, "reserved with nothing checked");
+            menu
+        });
+        let marked = menus(cx)[0];
+        assert!(
+            plain.size.width > px(MENU_MIN_W),
+            "the label sets the width"
+        );
+        assert!(
+            marked.size.width > plain.size.width,
+            "{marked:?} has the column, {plain:?} has none"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn min_width_is_raised(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            menu.item("A", Box::new(RunA))
+        });
+        let width = menus(cx)[0].size.width;
+        assert!(width >= px(MENU_MIN_W) && width < px(240.), "{width:?}");
+        cx.update(|window, cx| close_context_menu(window, cx));
+        draw(cx);
+
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            menu.min_w(px(240.)).item("A", Box::new(RunA))
+        });
+        assert!(menus(cx)[0].size.width >= px(240.));
+    }
+
+    #[gpui_kit::test]
+    fn empty_menu_shows_no_items(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
+            menu.header("Columns")
+        });
+        let labels: Vec<_> = all(cx)
+            .iter()
+            .filter_map(|s| s.label().map(str::to_owned))
+            .collect();
+        assert!(labels.iter().any(|l| l == "No items"), "{labels:?}");
+
+        keys(cx, "down down");
+        assert!(
+            highlighted(cx).iter().all(|&(_, ix)| ix != 1),
+            "the row cannot be highlighted"
+        );
+    }
 }
