@@ -19,6 +19,7 @@ pub mod memory;
 pub mod net;
 pub mod processes;
 pub mod sensors;
+mod startup;
 
 use std::sync::Arc;
 
@@ -51,6 +52,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         dbus_systemd::spec_user(),
         dbus_kwin::spec(),
         connections::spec(),
+        startup::spec(),
     ]
 }
 
