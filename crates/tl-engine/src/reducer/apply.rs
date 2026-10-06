@@ -1539,9 +1539,38 @@ impl Reducer {
                 validity: Validity::Valid,
             };
         }
+        self.map_gpu_devices(&mut next);
         self.merge_api_versions(&mut next);
         self.components.inventory = Arc::new(next);
         self.mark(ComponentMask::INVENTORY);
+    }
+
+    /// Sets `device` of each graphics adapter to the GPU catalog entry whose PCI bus id matches
+    /// its `pci_slot`, ignoring case (R-166). An adapter with no match keeps its `device`.
+    fn map_gpu_devices(&self, inventory: &mut InventorySnapshot) {
+        if inventory.graphics.iter().all(|a| a.pci_slot.is_none()) {
+            return;
+        }
+        let mut graphics: Vec<GraphicsAdapter> = inventory.graphics.to_vec();
+        for adapter in &mut graphics {
+            let Some(slot) = adapter.pci_slot.as_deref() else {
+                continue;
+            };
+            let found = (0..=u16::MAX)
+                .map_while(|i| self.devices.entry(DeviceIdx(i)))
+                .find_map(|e| match &e.identity {
+                    DeviceIdentity::Gpu { pci_bus_id, .. }
+                        if pci_bus_id.eq_ignore_ascii_case(slot) =>
+                    {
+                        Some(e.idx)
+                    }
+                    _ => None,
+                });
+            if found.is_some() {
+                adapter.device = found;
+            }
+        }
+        inventory.graphics = graphics.into();
     }
 
     /// Sets the Vulkan and OpenGL versions of each graphics adapter from the stored
