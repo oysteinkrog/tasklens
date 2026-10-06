@@ -2224,3 +2224,43 @@ fn connections_failed_health_after_update() {
     assert_eq!(rig.latest().connections.header.validity, Validity::Failed);
     rig.passed();
 }
+
+#[test]
+fn connection_attribution_fills_process_network() {
+    let mut rig = Rig::new();
+    rig.run(vec![sweep_of(SEC, &[1, 2])])
+        .expect("no invariant violation");
+    let mut attribution = rustc_hash::FxHashMap::default();
+    attribution.insert(
+        proc_key(1),
+        tl_collect::net::NetRate {
+            rx_bps: 1000.0,
+            tx_bps: 250.0,
+            shared: false,
+            validity: Validity::Valid,
+        },
+    );
+    rig.run(vec![src(SourceUpdate::Connections(ConnectionsUpdate {
+        t_ns: SEC,
+        records: Vec::new(),
+        validity: Validity::Valid,
+        attribution,
+    }))])
+    .expect("no invariant violation");
+
+    let check = |snap: &Snapshot| {
+        let r = snap.processes.get(proc_key(1)).expect("pid 1 is live");
+        assert_eq!((r.net_rx_bps, r.net_tx_bps), (1000.0, 250.0));
+        assert_eq!(r.validity.get(ProcessField::NetRx), Validity::Valid);
+        let other = snap.processes.get(proc_key(2)).expect("pid 2 is live");
+        assert_eq!((other.net_rx_bps, other.net_tx_bps), (0.0, 0.0));
+        assert_eq!(other.validity.get(ProcessField::NetTx), Validity::Valid);
+    };
+    check(&rig.latest());
+
+    // A new sweep keeps the rates until the next ConnectionsUpdate.
+    rig.run(vec![sweep_of(2 * SEC, &[1, 2])])
+        .expect("no invariant violation");
+    check(&rig.latest());
+    rig.passed();
+}
