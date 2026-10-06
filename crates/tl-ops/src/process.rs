@@ -107,6 +107,16 @@ pub fn send_signal(key: ProcessKey, boot: BootId, sig: Signal) -> OpsResult {
     result
 }
 
+/// Sends `sig` through a pidfd the caller already verified with `open_verified`. For callers that
+/// keep the pidfd between the check and the signal, such as the engine's `ActionOps`. `Other(n)`
+/// must be 1..=64.
+pub fn send_signal_fd(pidfd: BorrowedFd<'_>, sig: Signal) -> OpsResult {
+    let number = signal_number(sig)?;
+    let result = sys::pidfd_send_signal_raw(pidfd, number).map_err(OpsError::from);
+    tracing::debug!(signal = number, ok = result.is_ok(), error = ?result.as_ref().err(), "send_signal_fd");
+    result
+}
+
 /// Stops the process with SIGSTOP.
 pub fn suspend(key: ProcessKey, boot: BootId) -> OpsResult {
     send_signal(key, boot, Signal::Stop)
@@ -627,6 +637,22 @@ mod tests {
             open_verified(ProcessKey { pid: 0, ..key }, BootId(1)).err(),
             Some(OpsError::IdentityChanged)
         );
+    }
+
+    #[test]
+    fn send_signal_fd_stops_child_and_checks_range() {
+        let child = ChildGuard::sleep();
+        let pidfd = open_verified(child.key(), BOOT).expect("open_verified");
+        assert_eq!(
+            send_signal_fd(pidfd.as_fd(), Signal::Other(0)),
+            Err(OpsError::InvalidInput("signal number out of range"))
+        );
+        assert_eq!(
+            send_signal_fd(pidfd.as_fd(), Signal::Other(65)),
+            Err(OpsError::InvalidInput("signal number out of range"))
+        );
+        assert_eq!(send_signal_fd(pidfd.as_fd(), Signal::Stop), Ok(()));
+        assert!(wait_for(|| child.state() == b'T'), "child not stopped");
     }
 
     #[test]
