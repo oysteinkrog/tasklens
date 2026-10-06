@@ -16,6 +16,8 @@ mod migrations;
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
+#[allow(dead_code, reason = "E33-A2 calls acquire")]
+mod single_instance;
 
 use std::ffi::OsString;
 use std::path::Path;
