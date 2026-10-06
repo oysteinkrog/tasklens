@@ -10,15 +10,15 @@ use std::hash::BuildHasher;
 use std::sync::{Arc, OnceLock};
 
 use gpui_kit::App;
-use rustc_hash::FxBuildHasher;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::SchedPolicy;
-use tl_model::ids::{ColumnId, NodeId};
+use tl_model::ids::{ColumnId, GroupKey, NodeId};
 use tl_model::process::{
     GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessRecord,
 };
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::system::CpuSet;
-use tl_model::table::{ProcessTableView, TableRow};
+use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 
@@ -475,6 +475,75 @@ impl CellWords {
     }
 }
 
+/// The earliest started member record of each app group and each unit, so app and unit rows
+/// read their text columns with one lookup. Rebuilt only when the view or the records change.
+#[derive(Default)]
+pub struct GroupMembers {
+    /// `view.header.version`, `records` and `extras` address and length of the last build.
+    built_for: Option<(u64, usize, usize, usize, usize)>,
+    apps: FxHashMap<GroupKey, u32>,
+    units: FxHashMap<UnitRef, u32>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    builds: u64,
+}
+
+impl GroupMembers {
+    /// Rebuilds the index when `view` or `records` changed since the last call; otherwise does
+    /// nothing. Call once per frame before filling cells.
+    pub fn refresh(
+        &mut self,
+        view: &ProcessTableView,
+        records: &[ProcessRecord],
+        extras: &[ProcessExtras],
+    ) {
+        let key = (
+            view.header.version,
+            records.as_ptr() as usize,
+            records.len(),
+            extras.as_ptr() as usize,
+            extras.len(),
+        );
+        if self.built_for == Some(key) {
+            return;
+        }
+        self.built_for = Some(key);
+        self.apps.clear();
+        self.units.clear();
+        // `records` is sorted by `ProcessKey`, which orders by start time first, so the first
+        // record seen per group is the earliest started. That is the app's primary process in
+        // practice.
+        for (i, r) in records.iter().enumerate() {
+            let i = i as u32;
+            self.apps.entry(r.group).or_insert(i);
+            if let Some(unit) = extras.get(i as usize).and_then(|x| x.unit.as_ref())
+                && !self.units.contains_key(unit)
+            {
+                self.units.insert(unit.clone(), i);
+            }
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.builds += 1;
+        }
+    }
+
+    /// How many times `refresh` rebuilt the index.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn builds(&self) -> u64 {
+        self.builds
+    }
+
+    /// Record index of the earliest member of an app or unit row.
+    fn first(&self, g: &GroupRow) -> Option<usize> {
+        let i = match (&g.kind, &g.node) {
+            (GroupRowKind::App, _) => self.apps.get(&g.key),
+            (GroupRowKind::Unit, NodeId::Unit(unit)) => self.units.get(unit),
+            _ => None,
+        };
+        i.map(|&i| i as usize)
+    }
+}
+
 /// What `fill_cell` reads besides the row.
 pub struct CellCtx<'a> {
     pub view: &'a ProcessTableView,
@@ -485,6 +554,8 @@ pub struct CellCtx<'a> {
     /// `units.network`, `units.network_auto_scale`.
     pub settings: &'a Settings,
     pub words: &'a CellWords,
+    /// Refreshed by the caller for this `view` and `records`.
+    pub members: &'a GroupMembers,
     /// Online CPUs, for heat (E22-004).
     pub ncpu: u16,
     /// The online CPU set, for the Affinity "All" form. Empty never reads as All.
@@ -890,14 +961,10 @@ fn record_value<'a>(
     }
 }
 
-/// The member record App rows read their text columns from: the earliest started member,
-/// which is the app's primary process in practice. `records` is sorted by `ProcessKey`, which
-/// orders by start time first.
+/// The earliest started member of an app or unit row, from `ctx.members`.
 fn first_member<'a>(g: &GroupRow, ctx: &CellCtx<'a>) -> Option<(usize, &'a ProcessRecord)> {
-    ctx.records
-        .iter()
-        .enumerate()
-        .find(|(_, r)| r.group == g.key)
+    let i = ctx.members.first(g)?;
+    ctx.records.get(i).map(|r| (i, r))
 }
 
 fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a> {
@@ -910,16 +977,9 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
     let w = ctx.words;
 
     match col {
-        // No GroupRow or model source yet: the desktop file path of an app, and the member
-        // text of a unit (follow-up model bead).
-        C::ImagePath if g.kind == GroupRowKind::App => Value::Glyph(Validity::Unsupported),
-        C::ImagePath | C::User | C::Description | C::Cmdline | C::StartTime
-            if g.kind == GroupRowKind::Unit =>
-        {
+        // No model source yet for the image path of app and unit rows (bead 8q0.38).
+        C::ImagePath if matches!(g.kind, GroupRowKind::App | GroupRowKind::Unit) => {
             Value::Glyph(Validity::Unsupported)
-        }
-        C::User | C::Description | C::Cmdline | C::StartTime if g.kind != GroupRowKind::App => {
-            Value::Blank
         }
         C::Name | C::NameDisplay => Value::Arc(&g.name),
         C::Type => Value::Arc(match g.kind {

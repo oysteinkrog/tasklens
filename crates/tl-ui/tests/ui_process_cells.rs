@@ -244,12 +244,12 @@ mod values {
     };
     use tl_model::settings::Settings;
     use tl_model::system::CpuSet;
-    use tl_model::table::{ProcessTableView, TableRow};
+    use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, ProcessField, Validity};
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::cells::{
-        CellCtx, CellWords, RowRef, fill_cell, process_column, split_pid_text,
+        CellCtx, CellWords, GroupMembers, RowRef, fill_cell, process_column, split_pid_text,
     };
     use tl_ui::table::cells::CellOut;
     use tl_ui::table::tree_table::RowKind;
@@ -403,6 +403,7 @@ mod values {
         settings: Settings,
         words: CellWords,
         online: CpuSet,
+        members: GroupMembers,
     }
 
     impl Fixture {
@@ -414,7 +415,15 @@ mod values {
                 settings: Settings::default(),
                 words,
                 online: CpuSet::empty(),
+                members: GroupMembers::default(),
             }
+            .refreshed()
+        }
+
+        fn refreshed(mut self) -> Self {
+            self.members
+                .refresh(&self.view, &self.records, &self.extras);
+            self
         }
 
         fn ctx(&self) -> CellCtx<'_> {
@@ -424,6 +433,7 @@ mod values {
                 extras: &self.extras,
                 settings: &self.settings,
                 words: &self.words,
+                members: &self.members,
                 ncpu: 32,
                 online: &self.online,
                 mem_total: 64 << 30,
@@ -683,18 +693,29 @@ mod values {
         );
         let image_path = f.group_cell(&app, RowKind::App, ColumnId::ImagePath);
         assert_eq!(image_path.validity, Validity::Unsupported);
-        // Unit rows have no member text source yet.
-        let unit = group(GroupRowKind::Unit);
-        for id in [
-            ColumnId::User,
-            ColumnId::Cmdline,
-            ColumnId::StartTime,
-            ColumnId::ImagePath,
-        ] {
-            let out = f.group_cell(&unit, RowKind::Unit, id);
-            assert_eq!(out.validity, Validity::Unsupported, "{}", id.as_str());
-            assert!(out.text.is_empty() && out.arc.is_none());
-        }
+        // Unit rows read their member text through the index; Image path has no source yet.
+        let unit_ref = UnitRef {
+            manager: Manager::User,
+            name: Arc::from("pipewire.service"),
+        };
+        let mut uf = Fixture::new(record(), f.words.clone());
+        uf.extras[0].unit = Some(unit_ref.clone());
+        // A new snapshot comes with a new view version.
+        uf.view.header.version += 1;
+        let uf = uf.refreshed();
+        let unit = GroupRow {
+            node: NodeId::Unit(unit_ref),
+            ..group(GroupRowKind::Unit)
+        };
+        assert_eq!(
+            shown(&uf.group_cell(&unit, RowKind::Unit, ColumnId::User)),
+            "oystein"
+        );
+        assert_eq!(
+            uf.group_cell(&unit, RowKind::Unit, ColumnId::ImagePath)
+                .validity,
+            Validity::Unsupported
+        );
         // Pseudo rows: PID blank, Type "Pseudo".
         let pseudo = group(GroupRowKind::Pseudo);
         assert!(blank(&f.group_cell(
@@ -786,6 +807,35 @@ mod values {
             r.meta = Arc::new(m);
         });
         assert_ne!(g.record_cell(&row, ColumnId::ImagePath).bits, a.bits);
+    }
+
+    #[test]
+    fn group_member_index_built_once_per_view() {
+        let f = Fixture::new(record(), key_words());
+        let mut members = GroupMembers::default();
+        let app = group(GroupRowKind::App);
+        for _ in 0..60 {
+            members.refresh(&f.view, &f.records, &f.extras);
+            let ctx = CellCtx {
+                members: &members,
+                ..f.ctx()
+            };
+            let mut out = CellOut::default();
+            fill_cell(
+                RowRef::Group(&app, RowKind::App),
+                process_column(ColumnId::User),
+                &ctx,
+                &mut out,
+            );
+            assert_eq!(out.arc.as_deref(), Some("oystein"));
+        }
+        #[cfg(feature = "test-hooks")]
+        assert_eq!(members.builds(), 1);
+        let mut view = f.view.clone();
+        view.header.version += 1;
+        members.refresh(&view, &f.records, &f.extras);
+        #[cfg(feature = "test-hooks")]
+        assert_eq!(members.builds(), 2);
     }
 
     proptest! {
