@@ -303,6 +303,7 @@ impl TasklensUi {
 
         // open hooks
         crate::window::main::init(cx);
+        crate::window::share_theme::init(cx);
     }
 }
 
