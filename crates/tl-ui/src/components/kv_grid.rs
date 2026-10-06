@@ -876,3 +876,325 @@ impl RenderOnce for TlKeyValueGrid {
             .into_any_element()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use gpui_kit::base::TextSelectionLayer;
+    use gpui_kit::{Bounds, Context, Modifiers, Render, TestAppContext, VisualTestContext, point};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+
+    use super::*;
+
+    gpui_kit::actions!(tl_kv_grid_test, [OpenSetup]);
+
+    type Copied = Rc<RefCell<Vec<SharedString>>>;
+
+    fn setup(cx: &mut App) {
+        gpui_kit::init(cx);
+        crate::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        init(cx);
+    }
+
+    /// Renders the grid 600 px wide and records `on_copied` texts and `OpenSetup` dispatches.
+    struct Host {
+        build: Box<dyn Fn() -> TlKeyValueGrid>,
+        copied: Copied,
+        setups: Rc<Cell<usize>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let setups = self.setups.clone();
+            let copied = self.copied.clone();
+            div()
+                .id("root")
+                .w(px(600.))
+                .h(px(400.))
+                .on_action(move |_: &OpenSetup, _, _| setups.set(setups.get() + 1))
+                .child(TextSelectionLayer)
+                .child((self.build)().on_copied(move |text, _, _| copied.borrow_mut().push(text)))
+        }
+    }
+
+    fn host(
+        cx: &mut TestAppContext,
+        build: impl Fn() -> TlKeyValueGrid + 'static,
+    ) -> (&mut VisualTestContext, Copied, Rc<Cell<usize>>) {
+        cx.update(setup);
+        let copied = Copied::default();
+        let setups = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let copied = copied.clone();
+            let setups = setups.clone();
+            move |_, _| Host {
+                build: Box::new(build),
+                copied,
+                setups,
+            }
+        });
+        draw(cx);
+        (cx, copied, setups)
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &str) -> Option<Bounds<Pixels>> {
+        draw(cx);
+        cx.debug_bounds(Box::leak(selector.to_owned().into_boxed_str()))
+    }
+
+    fn value(text: &str, validity: Validity) -> TlValue {
+        TlValue {
+            validity,
+            ..TlValue::new(text.to_owned())
+        }
+    }
+
+    fn row(label: &str, value: TlValue) -> TlKvRow {
+        TlKvRow {
+            label: label.to_owned().into(),
+            value,
+        }
+    }
+
+    fn section(rows: Vec<TlKvRow>) -> TlKvSection {
+        TlKvSection {
+            title: None,
+            blocks: vec![TlKvBlock {
+                heading: None,
+                rows,
+            }],
+        }
+    }
+
+    fn pid_grid() -> TlKeyValueGrid {
+        TlKeyValueGrid::new("grid", KvLayout::Inline)
+            .sections(&[section(vec![row("PID:", TlValue::new("1234"))])])
+    }
+
+    fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+        cx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    #[gpui_kit::test]
+    fn validity_words(cx: &mut TestAppContext) {
+        let unsupported = |word| TlValue {
+            word,
+            ..value("", Validity::Unsupported)
+        };
+        let rows = vec![
+            row("Valid", value("12.5%", Validity::Valid)),
+            row("Warming", value("0", Validity::WarmingUp)),
+            row("Stale", value("3.1 GHz", Validity::Stale)),
+            row("Restricted", value("0", Validity::Restricted)),
+            row("Unsupported", unsupported(None)),
+            row("Missing", value("0", Validity::Missing)),
+            row("Failed", value("0", Validity::Failed)),
+            row(
+                "Not reported",
+                unsupported(Some(UnsupportedWord::NotReported)),
+            ),
+            row(
+                "Needs setup",
+                unsupported(Some(UnsupportedWord::NeedsSetup)),
+            ),
+        ];
+        let theme = cx.update(|cx| {
+            setup(cx);
+            current(cx).clone()
+        });
+        let secondary = theme.text_secondary;
+        let expected = [
+            Some(("12.5%", theme.text_primary)),
+            Some(("Collecting…", secondary)),
+            Some(("3.1 GHz", secondary)),
+            Some(("Restricted", secondary)),
+            Some(("Not supported", secondary)),
+            None,
+            Some(("Unavailable", secondary)),
+            Some(("Not reported", secondary)),
+            Some(("Needs setup", secondary)),
+        ];
+        for (row, expected) in rows.iter().zip(expected) {
+            let look = value_look(&row.value, &theme);
+            assert_eq!(
+                look.as_ref().map(|l| (l.text.as_ref(), l.color)),
+                expected,
+                "{}",
+                row.label
+            );
+            assert!(!look.is_some_and(|l| l.link), "{}: no link", row.label);
+        }
+
+        let sections = [section(rows)];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline).sections(&sections)
+        });
+        for n in 0..9 {
+            let drawn = bounds(cx, &format!("TlKv-row-{n}")).is_some();
+            assert_eq!(drawn, n != 5, "row {n}: only the Missing row is absent");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn stacked_three_columns(cx: &mut TestAppContext) {
+        let rows: Vec<TlKvRow> = (0..6)
+            .map(|i| row(&format!("Label {i}"), TlValue::new(format!("{i}"))))
+            .collect();
+        let sections = [section(rows)];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Stacked).sections(&sections)
+        });
+        // (600 - 2 × 24) / 3 = 184.
+        for n in 0..6 {
+            let b = bounds(cx, &format!("TlKv-row-{n}")).expect("pair drawn");
+            let (line, column) = (n / 3, n % 3);
+            assert_eq!(b.size.width, px(184.), "pair {n} width");
+            assert_eq!(b.size.height, px(56.), "pair {n} height");
+            assert_eq!(b.origin.x, px(208. * column as f32), "pair {n} x");
+            assert_eq!(b.origin.y, px(56. * line as f32), "pair {n} y");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn click_copies_and_calls_on_copied(cx: &mut TestAppContext) {
+        let (cx, copied, _) = host(cx, || pid_grid().copy_on_click(true));
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        cx.simulate_click(value.center(), Modifiers::none());
+        assert_eq!(clipboard(cx).as_deref(), Some("1234"));
+        assert_eq!(copied.borrow().as_slice(), &[SharedString::from("1234")]);
+
+        assert!(bounds(cx, "TlKv-flash-0").is_some(), "the row flashes");
+        cx.executor().advance_clock(M_FAST * 2);
+        assert!(bounds(cx, "TlKv-flash-0").is_none(), "the flash ends");
+    }
+
+    #[gpui_kit::test]
+    fn context_menu_copy_row(cx: &mut TestAppContext) {
+        let (cx, copied, _) = host(cx, pid_grid);
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        cx.simulate_mouse_down(value.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(value.center(), MouseButton::Right, Modifiers::none());
+        draw(cx);
+        // Items: Copy value, Copy row, Copy section.
+        cx.simulate_keystrokes("down down enter");
+        cx.run_until_parked();
+        assert_eq!(clipboard(cx).as_deref(), Some("PID: 1234"));
+        assert_eq!(
+            copied.borrow().as_slice(),
+            &[SharedString::from("PID: 1234")]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn inline_label_width_override(cx: &mut TestAppContext) {
+        let scale = cx.update(|cx| {
+            setup(cx);
+            metrics(cx).ui_scale
+        });
+        let rows: Vec<TlKvRow> = ["OS Name:", "Version:", "Build:"]
+            .iter()
+            .map(|label| row(label, TlValue::new("Linux")))
+            .collect();
+        let sections = [section(rows)];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .label_width(px(232. * scale))
+                .sections(&sections)
+        });
+        for n in 0..3 {
+            let b = bounds(cx, &format!("TlKv-value-{n}")).expect("value drawn");
+            assert_eq!(b.origin.x, px(232. * scale), "value {n} x");
+            let r = bounds(cx, &format!("TlKv-row-{n}")).expect("row drawn");
+            assert_eq!(r.size.height, px(28. * scale), "row {n} height");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn filtered_empty_text(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || pid_grid().filtered_empty(true));
+        assert_eq!(EMPTY_TEXT, "No properties match the current filter.");
+        assert!(bounds(cx, "TlKv-empty").is_some(), "the empty text shows");
+        assert!(bounds(cx, "TlKv-row-0").is_none(), "no rows");
+    }
+
+    #[gpui_kit::test]
+    fn needs_setup_link_dispatches(cx: &mut TestAppContext) {
+        let needs_setup = TlValue {
+            word: Some(UnsupportedWord::NeedsSetup),
+            link: Some(Box::new(OpenSetup)),
+            ..value("", Validity::Unsupported)
+        };
+        let theme = cx.update(|cx| {
+            setup(cx);
+            current(cx).clone()
+        });
+        let look = value_look(&needs_setup, &theme).expect("drawn");
+        assert_eq!(look.text.as_ref(), "Needs setup");
+        assert!(look.link);
+        let not_reported = TlValue {
+            word: Some(UnsupportedWord::NotReported),
+            ..needs_setup.clone()
+        };
+        assert!(!value_look(&not_reported, &theme).unwrap().link);
+
+        let sections = [section(vec![row("CPU power:", needs_setup)])];
+        let (cx, _, setups) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline).sections(&sections)
+        });
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        cx.simulate_click(
+            point(value.left() + px(4.), value.center().y),
+            Modifiers::none(),
+        );
+        assert_eq!(setups.get(), 1);
+    }
+
+    #[test]
+    fn copy_texts() {
+        assert_eq!(
+            row_copy_text(&row("PID:", TlValue::new("1234"))).as_deref(),
+            Some("PID: 1234")
+        );
+        assert_eq!(
+            row_copy_text(&row("Speed", TlValue::new("4631 MHz"))).as_deref(),
+            Some("Speed: 4631 MHz")
+        );
+        let card = TlKvSection {
+            title: Some("Memory".into()),
+            blocks: vec![
+                TlKvBlock {
+                    heading: None,
+                    rows: vec![row("Total:", TlValue::new("32 GiB"))],
+                },
+                TlKvBlock {
+                    heading: Some("Module 1".into()),
+                    rows: vec![
+                        row("Speed:", TlValue::new("4800 MT/s")),
+                        row("Serial:", value("x", Validity::Missing)),
+                    ],
+                },
+            ],
+        };
+        assert_eq!(
+            section_copy_text(&card),
+            "Memory\n    Total: 32 GiB\n    Module 1\n        Speed: 4800 MT/s"
+        );
+        assert_eq!(column_width(px(600.), px(24.), px(160.)), px(184.));
+        assert_eq!(column_width(px(601.), px(24.), px(160.)), px(184.));
+        assert_eq!(column_width(px(300.), px(24.), px(160.)), px(160.));
+    }
+}
