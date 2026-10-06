@@ -38,10 +38,11 @@ pub enum TlIcon {
     ArrowUp,
     ArrowDown,
     Square,
+    Binary,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronDown,
@@ -67,6 +68,7 @@ impl TlIcon {
         Self::ArrowUp,
         Self::ArrowDown,
         Self::Square,
+        Self::Binary,
     ];
 
     /// The kit name for this icon.
@@ -97,6 +99,7 @@ impl TlIcon {
             Self::ArrowUp => IconName::ArrowUp,
             Self::ArrowDown => IconName::ArrowDown,
             Self::Square => IconName::Square,
+            Self::Binary => IconName::Binary,
         }
     }
 }
@@ -147,10 +150,10 @@ impl IconNamed for AppIcon {
 }
 
 // The icons not in the kit's default component bundle (`default-icons.txt`), plus the sort
-// arrows (R-185).
+// arrows (R-185). `Binary` is the Name cell's file icon fallback.
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
-    [X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square]
+    [X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square, Binary]
 );
 
 /// The app's asset source: tasklens SVGs first, then `TlExtraIcons`, then the kit bundle.
