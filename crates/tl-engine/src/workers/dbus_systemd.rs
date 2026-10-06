@@ -27,11 +27,20 @@
 //! generation with `Err` so the supervisor restarts it. Once connected, a lost bus publishes
 //! the manager as `Reconnecting` with the last records, then ends with `Err`.
 //!
+//! OpenRC (E14-008, SYS-018): at worker start, a host without `/run/systemd/system` but with
+//! `rc-status` runs the OpenRC path. The `SystemdSystem` worker lists services with
+//! `rc-status --all --format ini` on `RefreshNow` and every 5 s while `Demand.services` is true,
+//! and publishes them with `backend = OpenRc`. The `SystemdUser` worker publishes its manager as
+//! `Unavailable`. A host with neither runs the systemd path, which publishes `Unavailable`.
+//!
 //! Unit descriptions and paths are logged at `debug` level only.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use asupersync::channel::mpsc;
 use asupersync::runtime::{JoinError, TaskHandle};
@@ -221,15 +230,30 @@ async fn run<O: Opener>(
     let id = source_id(manager);
     // Commands queued before this generation started belong to an earlier one.
     let mut last_seq = newest_seq(&io.control.borrow_and_clone());
+    let mut backend = ServiceBackend::Systemd;
+    if let Init::OpenRc(bin) = detect_init(host_base(&cfg.sys_root)) {
+        if manager == Manager::System {
+            let lister = Arc::new(RcStatus { bin });
+            return run_openrc(&cx, &io, lister, last_seq).await;
+        }
+        backend = ServiceBackend::OpenRc;
+    }
     loop {
-        match opener.open(&cx, manager).await {
+        let opened = match backend {
+            ServiceBackend::Systemd => opener.open(&cx, manager).await,
+            ServiceBackend::OpenRc => Err(OpenError::Unavailable(DbusError::Connect(
+                "OpenRC has no user manager".into(),
+            ))),
+        };
+        match opened {
             Ok(conn) => return connected(&cx, &io, &cfg, manager, conn, last_seq).await,
             Err(OpenError::Unavailable(reason)) => {
                 if cx.checkpoint().is_err() {
                     return Outcome::Ok(());
                 }
                 tracing::debug!(?manager, %reason, "systemd: manager not available");
-                let update = services(manager, ManagerState::Unavailable, Vec::new(), Vec::new());
+                let state = ManagerState::Unavailable;
+                let update = services(manager, state, Vec::new(), Vec::new(), backend);
                 if let Some(stop) = send(&cx, &io, update).await {
                     return stop;
                 }
@@ -545,6 +569,7 @@ fn services(
     state: ManagerState,
     units: Vec<UnitRecord>,
     details: Vec<(UnitRef, Arc<UnitDetails>)>,
+    backend: ServiceBackend,
 ) -> SourceUpdate {
     // UI-SYS-014: during `Reconnecting` the records are the last good data, drawn as stale.
     let validity = match state {
@@ -557,7 +582,7 @@ fn services(
         state,
         units,
         details,
-        backend: ServiceBackend::Systemd,
+        backend,
         validity,
     })
 }
@@ -569,6 +594,288 @@ async fn send(cx: &Cx, io: &WorkerIo, update: SourceUpdate) -> Option<Outcome<()
         Ok(()) => None,
         Err(mpsc::SendError::Cancelled(_)) => Some(Outcome::Ok(())),
         Err(_) => Some(Outcome::Err(WorkerError::Closed)),
+    }
+}
+
+// OpenRC
+
+/// Exists only when systemd is the init system (`sd_booted`).
+const SYSTEMD_MARKER: &str = "run/systemd/system";
+/// Where `rc-status` lives on an OpenRC host, relative to the host root.
+const RC_STATUS_PATHS: [&str; 2] = ["sbin/rc-status", "usr/bin/rc-status"];
+/// SYS-018: an `rc-status` run that takes longer is killed.
+pub const RC_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+/// R-167 item 16: the OpenRC listing runs every 5 s while `Demand.services` is true.
+pub const OPENRC_PERIOD: Duration = Duration::from_secs(5);
+/// Services in these runlevels start at boot, so their Startup type is Enabled.
+const BOOT_RUNLEVELS: [&str; 3] = ["sysinit", "boot", "default"];
+/// The most `rc-status` output kept. The rest is read and dropped.
+const RC_STATUS_MAX: u64 = 1 << 20;
+/// How often a running `rc-status` is checked for exit.
+const RC_STATUS_POLL: Duration = Duration::from_millis(20);
+
+/// The init system found at worker start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Init {
+    /// systemd, or no known init system: the bus path runs, and publishes `Unavailable` when
+    /// systemd is not on the bus.
+    Systemd,
+    /// OpenRC, with the `rc-status` binary found.
+    OpenRc(PathBuf),
+}
+
+/// The host root above `sys_root.proc`: `/` on the host, the fixture base in tests.
+fn host_base(sys_root: &SysRoot) -> &Path {
+    sys_root.proc.parent().unwrap_or(Path::new("/"))
+}
+
+/// systemd when `<root>/run/systemd/system` is a directory. Else OpenRC when
+/// `<root>/sbin/rc-status` or `<root>/usr/bin/rc-status` is a file. Else systemd.
+fn detect_init(root: &Path) -> Init {
+    if root.join(SYSTEMD_MARKER).is_dir() {
+        return Init::Systemd;
+    }
+    RC_STATUS_PATHS
+        .iter()
+        .map(|rel| root.join(rel))
+        .find(|path| path.is_file())
+        .map_or(Init::Systemd, Init::OpenRc)
+}
+
+/// One service from `rc-status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RcService {
+    name: Arc<str>,
+    /// The state word, for example `started`.
+    state: Arc<str>,
+    /// Listed under `sysinit`, `boot` or `default`.
+    enabled: bool,
+}
+
+/// Parses `rc-status --all --format ini`: `[<runlevel>]` headers, then `<service> = <state>`
+/// lines. A service listed under more than one runlevel keeps its first state word and is
+/// enabled when any of its runlevels starts at boot. Sorted by name.
+fn parse_rc_status(text: &str) -> Vec<RcService> {
+    let mut found: BTreeMap<&str, RcService> = BTreeMap::new();
+    let mut runlevel = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(section) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            runlevel = Some(section.trim());
+            continue;
+        }
+        let Some(runlevel) = runlevel else {
+            continue;
+        };
+        let Some((name, state)) = line.split_once('=') else {
+            continue;
+        };
+        let (name, state) = (name.trim(), state.trim());
+        if name.is_empty() {
+            continue;
+        }
+        let boot = BOOT_RUNLEVELS.contains(&runlevel);
+        found
+            .entry(name)
+            .and_modify(|svc| svc.enabled |= boot)
+            .or_insert_with(|| RcService {
+                name: Arc::from(name),
+                state: Arc::from(state),
+                enabled: boot,
+            });
+    }
+    found.into_values().collect()
+}
+
+/// R-167 item 16: the Status column from an OpenRC state word.
+fn openrc_status(word: &str) -> ServiceStatus {
+    match word {
+        "started" => ServiceStatus::Running,
+        "stopped" | "inactive" | "hotplugged" => ServiceStatus::Stopped,
+        "crashed" => ServiceStatus::Failed,
+        "starting" => ServiceStatus::Starting,
+        "stopping" => ServiceStatus::Stopping,
+        _ => ServiceStatus::Active,
+    }
+}
+
+fn unsupported<T: Default>() -> Total<T> {
+    Total {
+        value: T::default(),
+        validity: Validity::Unsupported,
+    }
+}
+
+/// An OpenRC service as a record. OpenRC has no cgroup data here, so the resource fields are
+/// `Unsupported`. The User column follows the SYS-003 fallback for the system manager.
+fn openrc_record(svc: &RcService) -> UnitRecord {
+    UnitRecord {
+        unit: UnitRef {
+            manager: Manager::System,
+            name: Arc::clone(&svc.name),
+        },
+        kind: UnitType::Service,
+        description: Arc::from(""),
+        status: openrc_status(&svc.state),
+        sub_state: Arc::clone(&svc.state),
+        load_state: Arc::from(""),
+        startup: if svc.enabled {
+            StartupType::Enabled
+        } else {
+            StartupType::Disabled
+        },
+        main_pid: 0,
+        user: Arc::from("root"),
+        path: Arc::from(""),
+        unit_file: None,
+        active_since_us: None,
+        triggered_by: Arc::from([]),
+        control_group: None,
+        can_reload: false,
+        has_cgroup_procs: false,
+        cgroup_pids: Arc::from([]),
+        cpu_pct: unsupported(),
+        memory_bytes: unsupported(),
+        disk_bps: unsupported(),
+        tasks: unsupported(),
+    }
+}
+
+fn openrc_update(list: &[RcService]) -> SourceUpdate {
+    let units = list.iter().map(openrc_record).collect();
+    let state = ManagerState::Connected;
+    services(
+        Manager::System,
+        state,
+        units,
+        Vec::new(),
+        ServiceBackend::OpenRc,
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RcError {
+    #[error("rc-status did not finish in {0:?} and was killed")]
+    Timeout(Duration),
+    #[error("rc-status exited with {0}")]
+    Exit(std::process::ExitStatus),
+    #[error("rc-status: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Lists OpenRC services. Blocking. Tests replace it with a fake.
+trait RcLister: Send + Sync + 'static {
+    fn list(&self) -> Result<Vec<RcService>, RcError>;
+}
+
+/// The real `rc-status`.
+struct RcStatus {
+    bin: PathBuf,
+}
+
+impl RcLister for RcStatus {
+    fn list(&self) -> Result<Vec<RcService>, RcError> {
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["--all", "--format", "ini"]);
+        let out = run_capped(cmd, RC_STATUS_TIMEOUT)?;
+        Ok(parse_rc_status(&String::from_utf8_lossy(&out)))
+    }
+}
+
+/// Runs `cmd` with `LC_ALL=C`, stdin and stderr null, and returns at most [`RC_STATUS_MAX`]
+/// bytes of stdout. After `timeout` the child is killed and waited for. Blocking.
+fn run_capped(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, RcError> {
+    cmd.env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = cmd.spawn()?;
+    // A reader thread drains the pipe, so the child never blocks on a full pipe.
+    let reader = child.stdout.take().map(|mut out| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = (&mut out).take(RC_STATUS_MAX).read_to_end(&mut buf);
+            let _ = std::io::copy(&mut out, &mut std::io::sink());
+            buf
+        })
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() >= deadline => break Err(RcError::Timeout(timeout)),
+            Ok(None) => std::thread::sleep(RC_STATUS_POLL),
+            Err(e) => break Err(RcError::Io(e)),
+        }
+    };
+    if status.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    // The child is gone, so its pipe closes and the reader ends.
+    let out = reader.and_then(|r| r.join().ok()).unwrap_or_default();
+    match status? {
+        status if status.success() => Ok(out),
+        status => Err(RcError::Exit(status)),
+    }
+}
+
+/// The OpenRC path of the `SystemdSystem` worker: a listing on `RefreshNow` and every
+/// [`OPENRC_PERIOD`] while `Demand.services` is true, none while it is false. A changed list is
+/// published. A failed listing logs a warning and keeps the last records.
+async fn run_openrc<L: RcLister>(
+    cx: &Cx,
+    io: &WorkerIo,
+    lister: Arc<L>,
+    mut last_seq: u64,
+) -> Outcome<(), WorkerError> {
+    let id = SourceId::SystemdSystem;
+    let mut listed_at: Option<Time> = None;
+    let mut shown: Option<Vec<RcService>> = None;
+    loop {
+        let refresh = take_refresh(&io.control.borrow_and_clone(), id, &mut last_seq);
+        let due = io.demand.borrow_and_clone().services
+            && listed_at.is_none_or(|at| {
+                Duration::from_nanos(cx.now().duration_since(at)) >= OPENRC_PERIOD
+            });
+        if refresh || due {
+            listed_at = Some(cx.now());
+            let lister = Arc::clone(&lister);
+            let mut job = match cx.spawn_blocking(move |_| lister.list()) {
+                Ok(job) => job,
+                Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
+            };
+            let listed = match job.join(cx).await {
+                Ok(listed) => listed,
+                Err(JoinError::Cancelled(reason)) => {
+                    if cx.checkpoint().is_err() {
+                        return Outcome::Ok(());
+                    }
+                    return Outcome::Cancelled(reason);
+                }
+                Err(JoinError::Panicked(payload)) => return Outcome::Panicked(payload),
+                Err(JoinError::PolledAfterCompletion) => {
+                    return Outcome::Err(WorkerError::Other("job polled after completion".into()));
+                }
+            };
+            match listed {
+                Ok(list) if shown.as_ref() != Some(&list) => {
+                    tracing::debug!(services = list.len(), "openrc: listing changed");
+                    if let Some(stop) = send(cx, io, openrc_update(&list)).await {
+                        return stop;
+                    }
+                    shown = Some(list);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "openrc: listing failed, keeping the last records");
+                }
+            }
+        }
+        time::sleep(cx.now(), IDLE_RECHECK).await;
+        if cx.checkpoint().is_err() {
+            return Outcome::Ok(());
+        }
     }
 }
 
@@ -1437,7 +1744,7 @@ impl ServicesState {
                 Some((unit, Arc::clone(built)))
             })
             .collect();
-        services(self.manager, state, units, details)
+        services(self.manager, state, units, details, ServiceBackend::Systemd)
     }
 
     fn raw(&self, name: &str) -> Option<&RawUnit> {
@@ -4889,5 +5196,373 @@ mod tests {
         // A failed read leaves the unit out until a signal or a full listing retries it.
         assert!(!state.set_detail_raw("bar.service", None));
         assert_eq!(state.details_to_fetch(false).len(), 1);
+    }
+
+    // OpenRC (E14-008)
+
+    fn rc_temp() -> tempfile::TempDir {
+        let tmp_base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&tmp_base).expect("tmp base");
+        tempfile::TempDir::new_in(&tmp_base).expect("temp dir")
+    }
+
+    const RC_INI: &str = "[default]\nsshd = started\n[manual]\nfoo = stopped\n";
+
+    #[test]
+    fn openrc_ini_parse_runlevels() {
+        let list = parse_rc_status(RC_INI);
+        assert_eq!(list.len(), 2);
+        let records: Vec<UnitRecord> = list.iter().map(openrc_record).collect();
+        let foo = &records[0];
+        assert_eq!(&*foo.unit.name, "foo");
+        assert_eq!(foo.unit.manager, Manager::System);
+        assert_eq!(foo.kind, UnitType::Service);
+        assert_eq!(foo.startup, StartupType::Disabled);
+        assert_eq!(foo.status, ServiceStatus::Stopped);
+        let sshd = &records[1];
+        assert_eq!(&*sshd.unit.name, "sshd");
+        assert_eq!(sshd.startup, StartupType::Enabled);
+        assert_eq!(sshd.status, ServiceStatus::Running);
+        assert!(sshd.description.is_empty());
+        assert_eq!(sshd.main_pid, 0);
+        assert!(!sshd.has_cgroup_procs);
+        assert_eq!(sshd.cpu_pct.validity, Validity::Unsupported);
+        assert_eq!(sshd.memory_bytes.validity, Validity::Unsupported);
+        assert_eq!(sshd.disk_bps.validity, Validity::Unsupported);
+        assert_eq!(sshd.tasks.validity, Validity::Unsupported);
+
+        // Lines before the first header, blank lines and lines without `=` are skipped.
+        let noisy = "sshd = started\n\n[default]\n  cron =  started  \njunk\n = stopped\n";
+        let list = parse_rc_status(noisy);
+        assert_eq!(list.len(), 1);
+        assert_eq!(&*list[0].name, "cron");
+        assert_eq!(&*list[0].state, "started");
+        assert!(parse_rc_status("").is_empty());
+    }
+
+    #[test]
+    fn openrc_startup_from_runlevel() {
+        let ini = "[sysinit]\nudev = started\n[boot]\nhostname = started\n\
+                   [default]\nsshd = started\n[nonetwork]\nlocal = started\n\
+                   [hotplugged]\nnet.eth0 = started\n[manual]\nfoo = stopped\n\
+                   [needed/wanted]\nsshd = started\nnet.lo = started\n";
+        let startup: Vec<(String, StartupType)> = parse_rc_status(ini)
+            .iter()
+            .map(|svc| (svc.name.to_string(), openrc_record(svc).startup))
+            .collect();
+        let want = |name: &str| {
+            startup
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, s)| *s)
+                .expect("service listed")
+        };
+        assert_eq!(want("udev"), StartupType::Enabled);
+        assert_eq!(want("hostname"), StartupType::Enabled);
+        assert_eq!(
+            want("sshd"),
+            StartupType::Enabled,
+            "listed twice, once in default"
+        );
+        assert_eq!(want("local"), StartupType::Disabled);
+        assert_eq!(want("net.eth0"), StartupType::Disabled);
+        assert_eq!(want("foo"), StartupType::Disabled);
+        assert_eq!(want("net.lo"), StartupType::Disabled);
+        assert_eq!(startup.len(), 7, "sshd is one record");
+    }
+
+    #[test]
+    fn openrc_detection_paths() {
+        let tmp = rc_temp();
+        let root = tmp.path();
+        assert_eq!(detect_init(root), Init::Systemd, "neither: the bus path");
+
+        put(root, "usr/bin/rc-status", "");
+        assert_eq!(
+            detect_init(root),
+            Init::OpenRc(root.join("usr/bin/rc-status"))
+        );
+        put(root, "sbin/rc-status", "");
+        assert_eq!(
+            detect_init(root),
+            Init::OpenRc(root.join("sbin/rc-status")),
+            "/sbin first"
+        );
+
+        std::fs::create_dir_all(root.join("run/systemd/system")).expect("marker dir");
+        assert_eq!(detect_init(root), Init::Systemd, "systemd wins");
+
+        let sys_root = SysRoot::at(root);
+        assert_eq!(host_base(&sys_root), root);
+        assert_eq!(host_base(&SysRoot::host()), Path::new("/"));
+    }
+
+    #[test]
+    fn openrc_state_word_mapping() {
+        let table = [
+            ("started", ServiceStatus::Running),
+            ("stopped", ServiceStatus::Stopped),
+            ("starting", ServiceStatus::Starting),
+            ("stopping", ServiceStatus::Stopping),
+            ("crashed", ServiceStatus::Failed),
+            ("inactive", ServiceStatus::Stopped),
+            ("hotplugged", ServiceStatus::Stopped),
+            ("foo", ServiceStatus::Active),
+        ];
+        for (word, want) in table {
+            assert_eq!(openrc_status(word), want, "{word}");
+        }
+    }
+
+    /// Counts listings. Pops a queued result first, else lists [`RC_INI`].
+    #[derive(Default)]
+    struct FakeRc {
+        calls: Mutex<usize>,
+        queued: Mutex<std::collections::VecDeque<Result<Vec<RcService>, RcError>>>,
+    }
+
+    impl FakeRc {
+        fn calls(&self) -> usize {
+            *self.calls.lock().expect("calls lock")
+        }
+    }
+
+    impl RcLister for FakeRc {
+        fn list(&self) -> Result<Vec<RcService>, RcError> {
+            *self.calls.lock().expect("calls lock") += 1;
+            let next = self.queued.lock().expect("queue lock").pop_front();
+            next.unwrap_or_else(|| Ok(parse_rc_status(RC_INI)))
+        }
+    }
+
+    type Ended = Arc<Mutex<Option<Outcome<(), WorkerError>>>>;
+
+    fn openrc_loop(lab: &mut LabRuntime, io: WorkerIo, rc: Arc<FakeRc>) -> (TaskHandle<()>, Ended) {
+        let out = Ended::default();
+        let sink = Arc::clone(&out);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let outcome = run_openrc(&cx, &io, rc, 0).await;
+                *sink.lock().expect("slot lock") = Some(outcome);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        (handle, out)
+    }
+
+    /// The OpenRC updates in `rx`, each checked for the system manager and the OpenRC backend.
+    fn openrc_updates(rx: &mut mpsc::Receiver<EngineMsg>) -> Vec<ServicesUpdate> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                EngineMsg::Source(SourceUpdate::Services(up)) => {
+                    assert_eq!(up.manager, Manager::System);
+                    assert_eq!(up.backend, ServiceBackend::OpenRc);
+                    assert_eq!(up.state, ManagerState::Connected);
+                    out.push(up);
+                }
+                other => panic!("unexpected message {other:?}"),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn openrc_refresh_every_5s_while_visible() {
+        let mut lab = LabRuntime::new(LabConfig::new(81).max_steps(1_000_000));
+        let (io, mut rx, control_tx, demand_tx) = worker_io();
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        let rc = Arc::new(FakeRc::default());
+        let (handle, out) = openrc_loop(&mut lab, io, Arc::clone(&rc));
+
+        // Visible: one listing at 0 s and one at 5 s, none more before 10 s.
+        assert_eq!(rc.calls(), 1, "listed at start");
+        for _ in 0..19 {
+            advance(&mut lab, IDLE_RECHECK);
+        }
+        assert_eq!(rc.calls(), 2, "two listings in the first 10 s");
+        let ups = openrc_updates(&mut rx);
+        assert_eq!(ups.len(), 1, "an unchanged list is not published again");
+        assert_eq!(ups[0].units.len(), 2);
+        assert_eq!(ups[0].validity, Validity::Valid);
+
+        // Hidden for 10 s: no listing.
+        demand_tx.send(Demand::default()).expect("demand send");
+        for _ in 0..20 {
+            advance(&mut lab, IDLE_RECHECK);
+        }
+        assert_eq!(rc.calls(), 2, "no listing while hidden");
+
+        // RefreshNow lists once while hidden.
+        control_tx
+            .send(WorkerControl {
+                commands: Arc::from([QueuedCommand {
+                    seq: 1,
+                    target: SourceId::SystemdSystem,
+                    command: WorkerCommand::RefreshNow,
+                }]),
+                ..WorkerControl::default()
+            })
+            .expect("control send");
+        advance(&mut lab, IDLE_RECHECK);
+        assert_eq!(rc.calls(), 3, "listed on RefreshNow");
+        for _ in 0..20 {
+            advance(&mut lab, IDLE_RECHECK);
+        }
+        assert_eq!(rc.calls(), 3, "seen once only");
+        assert!(out.lock().expect("slot lock").is_none(), "worker runs");
+
+        handle.abort();
+        advance(&mut lab, IDLE_RECHECK);
+        let outcome = out.lock().expect("slot lock").take().expect("worker ended");
+        assert!(matches!(outcome, Outcome::Ok(())), "{outcome:?}");
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn openrc_failed_listing_keeps_records() {
+        let mut lab = LabRuntime::new(LabConfig::new(82).max_steps(1_000_000));
+        let (io, mut rx, _control_tx, demand_tx) = worker_io();
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        let rc = Arc::new(FakeRc::default());
+        {
+            let mut queued = rc.queued.lock().expect("queue lock");
+            queued.push_back(Ok(parse_rc_status(RC_INI)));
+            queued.push_back(Err(RcError::Timeout(RC_STATUS_TIMEOUT)));
+            queued.push_back(Ok(parse_rc_status("[default]\nsshd = crashed\n")));
+        }
+        let (handle, out) = openrc_loop(&mut lab, io, Arc::clone(&rc));
+        assert_eq!(openrc_updates(&mut rx).len(), 1);
+
+        // The timeout publishes nothing and the worker keeps running.
+        for _ in 0..10 {
+            advance(&mut lab, IDLE_RECHECK);
+        }
+        assert_eq!(rc.calls(), 2);
+        assert!(openrc_updates(&mut rx).is_empty(), "last records kept");
+        assert!(out.lock().expect("slot lock").is_none(), "worker runs");
+
+        // The next listing publishes the new list.
+        for _ in 0..10 {
+            advance(&mut lab, IDLE_RECHECK);
+        }
+        assert_eq!(rc.calls(), 3);
+        let ups = openrc_updates(&mut rx);
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0].units.len(), 1);
+        assert_eq!(ups[0].units[0].status, ServiceStatus::Failed);
+
+        handle.abort();
+        advance(&mut lab, IDLE_RECHECK);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn openrc_hung_child_is_killed() {
+        assert_eq!(RC_STATUS_TIMEOUT, Duration::from_secs(5));
+        let tmp = rc_temp();
+        let pid_file = tmp.path().join("pid");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("echo $$ > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&pid_file);
+        let started = Instant::now();
+        let res = run_capped(cmd, Duration::from_millis(300));
+        assert!(matches!(res, Err(RcError::Timeout(_))), "{res:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "killed at the limit"
+        );
+        let pid = std::fs::read_to_string(&pid_file).expect("pid file");
+        let proc_dir = format!("/proc/{}", pid.trim());
+        assert!(!Path::new(&proc_dir).exists(), "child killed and reaped");
+
+        let mut ok = Command::new("/bin/sh");
+        ok.arg("-c").arg("printf '[default]\\nsshd = started\\n'");
+        let text = run_capped(ok, Duration::from_secs(5)).expect("listing");
+        assert_eq!(parse_rc_status(&String::from_utf8_lossy(&text)).len(), 1);
+
+        let mut fails = Command::new("/bin/sh");
+        fails.arg("-c").arg("exit 3");
+        let res = run_capped(fails, Duration::from_secs(5));
+        assert!(matches!(res, Err(RcError::Exit(_))), "{res:?}");
+    }
+
+    /// Fails the test if the bus is opened.
+    struct NeverBus;
+
+    impl Opener for NeverBus {
+        async fn open(&self, _cx: &Cx, _manager: Manager) -> Result<DbusConn, OpenError> {
+            panic!("the user manager on OpenRC must not open a bus");
+        }
+    }
+
+    fn first_update(lab: &mut LabRuntime, root: &Path, manager: Manager) -> ServicesUpdate {
+        let (io, mut rx, _control_tx, _demand_tx) = worker_io();
+        let cfg = Arc::new(
+            EngineConfig::new(EngineMode::Full, root.join("state"))
+                .with_sys_root(SysRoot::at(root)),
+        );
+        let lab_root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(lab_root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = match manager {
+                    Manager::System => run(cx, io, cfg, manager, &NoBus).await,
+                    Manager::User => run(cx, io, cfg, manager, &NeverBus).await,
+                };
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let msg = rx.try_recv().expect("one update");
+        handle.abort();
+        advance(lab, IDLE_RECHECK);
+        match msg {
+            EngineMsg::Source(SourceUpdate::Services(up)) => up,
+            other => panic!("unexpected message {other:?}"),
+        }
+    }
+
+    #[test]
+    fn openrc_start_without_init_or_user_manager() {
+        let mut lab = LabRuntime::new(LabConfig::new(83).max_steps(1_000_000));
+        let tmp = rc_temp();
+
+        // No systemd marker and no rc-status: the bus path publishes Unavailable.
+        let up = first_update(&mut lab, tmp.path(), Manager::System);
+        assert_eq!(up.state, ManagerState::Unavailable);
+        assert_eq!(up.backend, ServiceBackend::Systemd);
+        assert!(up.units.is_empty());
+
+        // OpenRC: the user manager is Unavailable without a bus.
+        put(tmp.path(), "sbin/rc-status", "");
+        let up = first_update(&mut lab, tmp.path(), Manager::User);
+        assert_eq!(up.manager, Manager::User);
+        assert_eq!(up.state, ManagerState::Unavailable);
+        assert_eq!(up.backend, ServiceBackend::OpenRc);
+        assert_eq!(up.validity, Validity::Missing);
+
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
