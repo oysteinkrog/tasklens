@@ -69,8 +69,16 @@ pub struct VecDelegate<R: Copy + Eq + Hash + 'static, C: VecColumn = ColumnId> {
     pub visible: Vec<R>,
 }
 
-impl<R: Copy + Eq + Hash + 'static, C: VecColumn> VecDelegate<R, C> {
+impl<R: Copy + Eq + Hash + 'static> VecDelegate<R> {
+    /// A process-table delegate over `ColumnId`.
     pub fn new(rows: &[(R, &'static str)]) -> Self {
+        Self::with_columns(rows)
+    }
+}
+
+impl<R: Copy + Eq + Hash + 'static, C: VecColumn> VecDelegate<R, C> {
+    /// A delegate over the id set `C`, e.g. `VecDelegate::<u32, SysColumnId>::with_columns`.
+    pub fn with_columns(rows: &[(R, &'static str)]) -> Self {
         let label = SharedString::new_static("Name");
         let spec = ColumnSpec {
             id: C::NAME,

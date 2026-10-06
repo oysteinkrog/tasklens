@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn sys_column_delegate_compiles() {
-        let mut d = VecDelegate::<u32, SysColumnId>::new(&[(1, "a"), (2, "b")]);
+        let mut d = VecDelegate::<u32, SysColumnId>::with_columns(&[(1, "a"), (2, "b")]);
         let name = SysColumnId::Services(ServiceColumn::Name);
         let sort: SysSortSpec = delegate_sort(&d);
         assert_eq!(
