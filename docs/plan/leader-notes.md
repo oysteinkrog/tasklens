@@ -464,3 +464,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.7 (7cc4537, 83f0b56, e54821e): tab strip with accent outline rebuilt in prepaint only when bounds change; 4 subscriptions; tabs stop mouse-down.
 - yrf.20 (a4e5257, 6cac597): chart-grid-offline Fluent key; per-cell gap spans drawn as quads (UI-PRF-001 says the dotted baseline is quads; UI-PRF-002 keeps 3 paths), accepted over the bead text.
 - rsf.1 (6838a6e, f0911f9): tree table roll-up done: TreeTableEvent, right-press targets, context menu through TlMenu (deferred build), CopyRowsAsTable TSV, CellTextCache::stats. CopyFailed never emitted (gpui clipboard write has no error).
+- qfx.36 (5be2bb2): HelperHandle::read never starts a session; state check and refusal inside the helper task (verified in helper/mod.rs read()). HelperReadError { NotRunning, Call } kept separate so existing exhaustive matches stay valid; accepted. Five regression tests in lab_helper.
