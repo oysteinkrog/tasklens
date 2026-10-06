@@ -419,3 +419,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.10 final shape: update_static(model, &CpuStaticInfo), no CpuDetails struct; crw.11 keeps the sensor Vec.
 - hjn.27 (c00c1e5, 74eb97c, 6c05324, 0ebcbc1): NetworkManager worker. NameHasOwner check first so D-Bus activation never starts NM. No Degraded SourceState exists: missing NM reports Running plus last_error, as UPower does. Accepted.
 - crw.8 decision: PerfShowMiniWindow declared in pages/performance/actions.rs now; crw.4 extends it.
+- yrf.10 (fdeeae4, c3521d7, 428b435): ChartView hub binding; own three-way search_series to meet the comparison bound; no allocation counter (unsafe_code is denied), tests use Arc counts.
+- gma.5 (82a7dd2, 1ba712d): process window specs; pwn_window_spec helper for keyed windows; Set Priority and Signal open at 120 and grow to content; Affinity 640 x 360. Run window scale gap is a new fut bead.
+- rsf.8 decisions: R-190 name cell geometry (pad 20, indent 20, chevron at indent + 6, guides at 20 + 20k + 14); delegate name_column() defaulting to pinned_first, else first visible column.
+- crw.8 decision: header_text takes &Snapshot and reads inventory and device_details.
