@@ -86,6 +86,9 @@ pub struct ProcessState {
     low_memory: Option<Arc<LowMemoryInfo>>,
     /// GPU values of the keys in the last GPU sample.
     gpu: FxHashMap<ProcessKey, GpuValue>,
+    /// Per GPU UUID: each key's utilisation on that GPU in the last GPU sample, for the power
+    /// estimate (E09-030).
+    gpu_by_dev: FxHashMap<[u8; 16], FxHashMap<ProcessKey, f32>>,
     /// GPU validity of live keys without a sample; `None` before the first GPU sample.
     gpu_default: Option<Validity>,
     /// True when the last GPU sample had process rows.
@@ -124,6 +127,7 @@ impl ProcessState {
             unit_stats: Vec::new(),
             low_memory: None,
             gpu: FxHashMap::default(),
+            gpu_by_dev: FxHashMap::default(),
             gpu_default: None,
             gpu_process: false,
             pss: FxHashMap::default(),
@@ -289,6 +293,7 @@ impl ProcessState {
         };
 
         self.gpu.clear();
+        self.gpu_by_dev.clear();
         for s in samples {
             let Some(&key) = self.live_pids.get(&s.pid) else {
                 continue;
@@ -300,6 +305,13 @@ impl ProcessState {
                 .max()
                 .unwrap_or(0) as f32;
             let mem = s.mem_used.ok().unwrap_or(0);
+            let on_dev = self
+                .gpu_by_dev
+                .entry(s.uuid)
+                .or_default()
+                .entry(key)
+                .or_insert(0.0);
+            *on_dev = on_dev.max(util);
             let entry = self.gpu.entry(key).or_insert(GpuValue {
                 util_pct: 0.0,
                 mem_bytes: 0,
@@ -367,6 +379,11 @@ impl ProcessState {
         Coverage {
             pss_uss: keys.into(),
         }
+    }
+
+    /// Per GPU UUID: each key's utilisation on that GPU in the last GPU sample (E09-030).
+    pub fn gpu_by_dev(&self) -> &FxHashMap<[u8; 16], FxHashMap<ProcessKey, f32>> {
+        &self.gpu_by_dev
     }
 
     /// True when the last GPU sample had process rows. `Coverage` has no field for it yet.
@@ -991,6 +1008,9 @@ mod tests {
         let r = live_record(&state, a);
         assert_eq!(r.gpu_util_pct, 60.0);
         assert_eq!(r.gpu_mem_bytes, 3 * GIB);
+        // The power estimate needs the value per GPU, not only the maximum.
+        assert_eq!(state.gpu_by_dev()[&DEV_A][&a], 30.0);
+        assert_eq!(state.gpu_by_dev()[&DEV_B][&a], 60.0);
         assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
         assert_eq!(r.validity.get(ProcessField::GpuMem), Validity::Valid);
         // A live key without a sample shows a valid 0 because a device supports process util.
