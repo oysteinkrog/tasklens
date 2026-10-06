@@ -436,3 +436,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 17:45 to 17:52: API 503s stopped rsf.8 and pdu.18 mid-work; both resumed by message.
 - rsf.8 (c8cd65d, 1672e6e, 780323c, e22e48e): TlTreeTable body and header. c8cd65d alone does not compile. Chevron click moved to rsf.9. Icon PathBuf per frame: new rsf bead.
 - pdu.18 final: 551f2f4 enter_result; Enter on open goes to Select.
+- Disk clean 18:05: cargo clean --profile dev removed 258.6 GiB; target 6.3 GB, /home 343 GB free; manager-machine told.
+- yrf.11 decision: network series are bytes per second (NetTotals contract), formatted through units::net_rate.
+- qfx.23 decision: approved health setters, EngineHooks.helper, SharedHandles.helper; noted on qfx.17 to qfx.21.
+- hjn.3 (1787759): P2 worker roll-up. D-Bus worker idle proofs stay as in-crate tests (Connector seams are private); accepted. Real run here: Inventory, Udisks, UPower, NetworkManager Running; GpuDrm Off. MANUAL CHECK for owner: run p2_real_host_once on an AMD machine to see GpuDrm Running.
