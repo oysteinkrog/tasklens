@@ -122,6 +122,25 @@ fn valid<T: Copy>(t: &Total<T>) -> Option<T> {
 /// Case-insensitive text order, without allocating. Ties break by byte order, so the order
 /// stays total.
 fn cmp_text(a: &str, b: &str) -> Ordering {
+    // ASCII fast path. At the first non-ASCII byte the whole pair goes to the Unicode path,
+    // which orders ASCII text the same way.
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    // Equal bytes are equal ignoring case. A first difference at ASCII bytes sits on a char
+    // boundary; at any other byte the loop below hands over to the Unicode path.
+    let same = x.iter().zip(y).take_while(|(p, q)| p == q).count();
+    for (&p, &q) in x[same..].iter().zip(&y[same..]) {
+        if !p.is_ascii() || !q.is_ascii() {
+            return cmp_text_unicode(a, b);
+        }
+        let o = p.to_ascii_lowercase().cmp(&q.to_ascii_lowercase());
+        if o.is_ne() {
+            return o;
+        }
+    }
+    x.len().cmp(&y.len()).then_with(|| a.cmp(b))
+}
+
+fn cmp_text_unicode(a: &str, b: &str) -> Ordering {
     a.chars()
         .flat_map(char::to_lowercase)
         .cmp(b.chars().flat_map(char::to_lowercase))
@@ -135,11 +154,16 @@ fn contains_lower(hay: &str, needle: &str) -> bool {
         return true;
     }
     if hay.is_ascii() {
-        let needle = needle.as_bytes();
-        hay.as_bytes().windows(needle.len()).any(|w| {
-            w.iter()
-                .zip(needle)
-                .all(|(h, n)| h.to_ascii_lowercase() == *n)
+        let (h, n) = (hay.as_bytes(), needle.as_bytes());
+        let Some(last) = h.len().checked_sub(n.len()) else {
+            return false;
+        };
+        (0..=last).any(|i| {
+            h[i].to_ascii_lowercase() == n[0]
+                && h[i + 1..i + n.len()]
+                    .iter()
+                    .zip(&n[1..])
+                    .all(|(h, n)| h.to_ascii_lowercase() == *n)
         })
     } else {
         hay.to_lowercase().contains(needle)
@@ -197,7 +221,7 @@ pub fn build_services(
     }
 
     let units = &input.services.units;
-    let mut rows = Vec::new();
+    let mut rows = Vec::with_capacity(units.len() + 2);
     let mut counts = ServiceCounts::default();
     let mut members: Vec<u32> = Vec::new();
     let mut children: Vec<(ProcessKey, u32)> = Vec::new();
@@ -252,7 +276,7 @@ pub fn build_services(
         );
         for &i in &members {
             let u = &units[i as usize];
-            let open = unit_open.contains(&u.unit);
+            let open = !unit_open.is_empty() && unit_open.contains(&u.unit);
             rows.push(SysRow {
                 node: SysNodeId::Unit(u.unit.clone()),
                 depth: 1,
@@ -1030,15 +1054,21 @@ mod tests {
             filter: Arc::from("unit 9"),
             ..open_query()
         };
-        let _ = run(&s, &q);
-        let start = Instant::now();
-        let (out, _) = run(&s, &q);
-        let plain = start.elapsed();
-        let start = Instant::now();
-        let _ = run(&s, &filtered);
-        let with_text = start.elapsed();
-        assert_eq!(out.rows.len(), 10_002);
-        println!("10k units: {plain:?} sorted by name, {with_text:?} with a text filter");
+        // Best of 5, so a busy build machine does not fail the check.
+        let best = |q: &SysTableQuery| {
+            (0..5)
+                .map(|_| {
+                    let start = Instant::now();
+                    let out = run(&s, q);
+                    (start.elapsed(), out.0.rows.len())
+                })
+                .min()
+                .expect("5 runs")
+        };
+        let (plain, len) = best(&q);
+        let (with_text, _) = best(&filtered);
+        assert_eq!(len, 10_002);
+        eprintln!("10k units: {plain:?} sorted by name, {with_text:?} with a text filter");
         if !cfg!(debug_assertions) {
             assert!(plain.as_millis() < 5, "{plain:?}");
             assert!(with_text.as_millis() < 5, "{with_text:?}");
