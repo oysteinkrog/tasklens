@@ -304,3 +304,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.24: TlStepper closed; TlTextInput gained align_right, suffix_text, square_corners.
 - y6k.28: one walk per tick; DbusConn::p2p is cfg(test) only (no test-hooks feature in tl-engine). The user manager's -.slice keeps all of that manager's pids (its ControlGroup is not "/"); accepted. An unreadable child cgroup is skipped with its subtree.
 - 8fx.34: Frame budget test 12 to 17 ms at load 31 to 50 (budget 50 ms), un-ignored; accepted despite the AC's quiet-machine clause because the margin is wide. The single-sweep path assumes a process key appears once per sweep; one timing run exited 101 with the cause unseen. Recheck both in the full-suite pass.
+- i3o.1: Gate installed; `impl Drop for Gate` aborts in-flight actions and run_action checks cancel before each target and event. Spawn failure still `expect`s (panics the reducer during shutdown); revisit. Old Harness::submit stand-in kept.
+- 8q0.28: DetailsState in the reducer. No DetailsUpdate clears the handle search; `clear_handle_search()` has no caller yet. Decide with E10/dwy.3. Component header stays WarmingUp; tabs carry their own validity.
+- Leader fixed lab_session end_to_end_engine_in_lab: Flat mode now has SWEEP_SIZE + 1 rows (Interrupts pseudo row).
