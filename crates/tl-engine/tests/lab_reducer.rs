@@ -2586,3 +2586,150 @@ fn inventory_devices_remapped_when_catalog_gains_nvidia_gpu_or_disk() {
     assert_eq!(snap.inventory.disks[0].device, Some(rig.idx(&disk)));
     rig.passed();
 }
+
+// ---- Mixed-vendor GPUs (tasklens-8q0.37) ----
+
+fn gpu_id(uuid: [u8; 16], bus: &str) -> DeviceIdentity {
+    DeviceIdentity::Gpu {
+        uuid,
+        pci_bus_id: Arc::from(bus),
+    }
+}
+
+fn gpu_static(identity: &DeviceIdentity, supports_process_util: bool) -> GpuStaticInfo {
+    GpuStaticInfo {
+        identity: identity.clone(),
+        name: Arc::from("Card"),
+        mem_total: 0,
+        power_limit_mw: None,
+        driver: Arc::from(""),
+        nvml: Arc::from(""),
+        supports_process_util,
+        persistent_key: Arc::from("gpu:card"),
+    }
+}
+
+/// The `Devices` list the DRM worker sends for `cards`.
+fn drm_list(cards: &[&DeviceIdentity]) -> EngineMsg {
+    src(SourceUpdate::Devices(DeviceList {
+        t_ns: now_boot_ns(),
+        kinds: DeviceKinds::GPUS,
+        entries: cards
+            .iter()
+            .map(|&id| DeviceDesc {
+                identity: id.clone(),
+                display_name: Arc::from("AMD Card"),
+                parent: None,
+                persistent_key: Arc::from("gpu:amd"),
+                net_kind: None,
+            })
+            .collect(),
+    }))
+}
+
+/// A GPU sample with measured power per card and no process rows.
+fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
+    src(SourceUpdate::Gpu(GpuSample {
+        t_ns: now_boot_ns(),
+        devices: cards
+            .iter()
+            .map(|&(id, watts)| {
+                (
+                    id.clone(),
+                    GpuTotals {
+                        device: DeviceIdx(0),
+                        util_pct: Metric::valid(10.0),
+                        mem_util_pct: Metric::default(),
+                        mem_used: Metric::valid(1024),
+                        mem_total: Metric::valid(4096),
+                        shared_used: Metric::default(),
+                        shared_total: Metric::default(),
+                        enc_pct: Metric::default(),
+                        dec_pct: Metric::default(),
+                        temp_c: Metric::default(),
+                        power_w: Metric::valid(watts),
+                        power_limit_w: Metric::default(),
+                        clock_gfx_mhz: Metric::default(),
+                        clock_mem_mhz: Metric::default(),
+                        fan_pct: Metric::default(),
+                        pcie_rx_bps: Metric::default(),
+                        pcie_tx_bps: Metric::default(),
+                    },
+                )
+            })
+            .collect(),
+        processes: None,
+    }))
+}
+
+#[test]
+fn nvidia_and_amd_gpus_coexist() {
+    let mut rig = Rig::new();
+    let nvidia = gpu_id([9; 16], "00000000:01:00.0");
+    let amd_a = gpu_id([0; 16], "0000:03:00.0");
+    let amd_b = gpu_id([0; 16], "0000:04:00.0");
+    rig.run(vec![
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&nvidia, true)],
+        })),
+        drm_list(&[&amd_a, &amd_b]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd_a, false), gpu_static(&amd_b, false)],
+        })),
+        gpu_sample(&[(&nvidia, 100.0)]),
+        gpu_sample(&[(&amd_a, 30.0), (&amd_b, 40.0)]),
+        gpu_sample(&[(&nvidia, 90.0)]),
+        drm_list(&[&amd_a, &amd_b]),
+    ])
+    .expect("no invariant violation");
+
+    let snap = rig.latest();
+    let ids = [rig.idx(&nvidia), rig.idx(&amd_a), rig.idx(&amd_b)];
+    for id in [&nvidia, &amd_a, &amd_b] {
+        let entry = snap.devices.find(id).expect("device in the catalog");
+        assert!(entry.present, "{id:?} stays present");
+    }
+    let mut rows: Vec<DeviceIdx> = snap.system.gpus.iter().map(|(idx, _)| *idx).collect();
+    rows.sort_unstable();
+    let mut want = ids.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        rows, want,
+        "a sample from one worker keeps the other worker's rows"
+    );
+
+    let state = &rig.reducer().apply_state;
+    assert_eq!(state.gpu_cap(&[9; 16]), Some(true), "NVIDIA caps stay");
+    assert_eq!(state.gpu_cap(&[0; 16]), Some(false), "AMD caps stay");
+    assert_eq!(state.gpu_power_w(ids[0]), Some(90.0));
+    assert_eq!(
+        state.gpu_power_w(ids[1]),
+        Some(30.0),
+        "one entry per AMD card"
+    );
+    assert_eq!(
+        state.gpu_power_w(ids[2]),
+        Some(40.0),
+        "one entry per AMD card"
+    );
+
+    // The DRM worker loses one card: only that card leaves.
+    rig.run(vec![
+        drm_list(&[&amd_a]),
+        src(SourceUpdate::GpuInfo(GpuInfoUpdate {
+            devices: vec![gpu_static(&amd_a, false)],
+        })),
+        gpu_sample(&[(&amd_a, 35.0)]),
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let present = |id: &DeviceIdentity| snap.devices.find(id).is_some_and(|e| e.present);
+    assert!(present(&nvidia));
+    assert!(present(&amd_a));
+    assert!(!present(&amd_b));
+    let rows: Vec<DeviceIdx> = snap.system.gpus.iter().map(|(idx, _)| *idx).collect();
+    assert!(rows.contains(&ids[0]) && rows.contains(&ids[1]));
+    assert!(!rows.contains(&ids[2]));
+    assert_eq!(rig.reducer().apply_state.gpu_cap(&[9; 16]), Some(true));
+    rig.passed();
+}
