@@ -479,3 +479,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.11 (b32090f, 17e2aa2): two-line header; totals from CellTextCache keyed by header row; TableSort<C> trait bound on TreeTableDelegate::Sort; header click calls sort_by_column directly.
 - pdu.7 (ea5e0b2, 5079cca, ae79d64): cell values. Sent back to index group members once per view generation instead of scanning per cell per frame. Sum columns on group rows and the desktop path folded into 8q0.38. split_pid_text noted on pdu.8.
 - pdu.7 closed (53f0ad6, 85cfd81) before the index fix arrived; first_member still scans records per cell. New P1 pdu bead to index once per view generation.
+- pdu.7 final 5713b4c: GroupMembers index (apps and units), rebuilt only on view version or slice change. Unit rows read text columns from the earliest member until 8q0.38 adds the unit's own fields. pdu.49 closes as covered.
