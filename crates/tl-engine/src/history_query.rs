@@ -976,10 +976,9 @@ mod tests {
     }
 
     /// A Frame answer for a 10-minute view of 2,000 processes stays within 50 ms (PROC-090).
-    /// Measured at 75 ms on a loaded machine, most of it in `read::stack`.
+    /// Measured at 12 to 17 ms at load average 31 to 50 on 32 cores.
     #[cfg(not(debug_assertions))]
     #[test]
-    #[ignore = "75 ms against the 50 ms budget; read::stack needs a faster path"]
     fn frame_answer_within_budget() {
         let w = window(600, |i| {
             (0..2000u32)
