@@ -681,6 +681,20 @@ mod values {
             shown(&f.group_cell(&app, RowKind::App, ColumnId::User)),
             "oystein"
         );
+        let image_path = f.group_cell(&app, RowKind::App, ColumnId::ImagePath);
+        assert_eq!(image_path.validity, Validity::Unsupported);
+        // Unit rows have no member text source yet.
+        let unit = group(GroupRowKind::Unit);
+        for id in [
+            ColumnId::User,
+            ColumnId::Cmdline,
+            ColumnId::StartTime,
+            ColumnId::ImagePath,
+        ] {
+            let out = f.group_cell(&unit, RowKind::Unit, id);
+            assert_eq!(out.validity, Validity::Unsupported, "{}", id.as_str());
+            assert!(out.text.is_empty() && out.arc.is_none());
+        }
         // Pseudo rows: PID blank, Type "Pseudo".
         let pseudo = group(GroupRowKind::Pseudo);
         assert!(blank(&f.group_cell(
