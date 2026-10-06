@@ -4,7 +4,7 @@
 
 pub mod error;
 
-mod sys;
+pub mod sys;
 
 pub mod process;
 
