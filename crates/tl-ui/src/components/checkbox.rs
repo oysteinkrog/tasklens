@@ -43,8 +43,10 @@ const GROUP: &str = "tl-checkbox";
 pub fn bind_keys_components(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("space", ToggleCheckbox, Some("TlCheckbox"))]);
     super::radio::bind_keys_radio(cx);
+    super::select::bind_keys(cx);
     super::slider::bind_keys(cx);
     super::tabs::bind_keys(cx);
+    super::select::bind_keys(cx);
 }
 
 type ChangeHandler = Rc<dyn Fn(bool, &mut Window, &mut App)>;
