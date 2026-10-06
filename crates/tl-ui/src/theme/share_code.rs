@@ -331,29 +331,38 @@ mod tests {
 
     #[test]
     fn bad_codes_rejected() {
-        assert_eq!(decode_tl1("TL1.!!!"), Err(ShareCodeError::BadBase64));
-        assert_eq!(decode_tl1("TL1.Z"), Err(ShareCodeError::BadBase64));
-        assert_eq!(decode_tl1("hello"), Err(ShareCodeError::NotAThemeCode));
-        assert_eq!(decode_tl1("tl1.Zm9v"), Err(ShareCodeError::NotAThemeCode));
+        assert_eq!(decode_tl1("TL1.!!!").err(), Some(ShareCodeError::BadBase64));
+        assert_eq!(decode_tl1("TL1.Z").err(), Some(ShareCodeError::BadBase64));
+        assert_eq!(
+            decode_tl1("hello").err(),
+            Some(ShareCodeError::NotAThemeCode)
+        );
+        assert_eq!(
+            decode_tl1("tl1.Zm9v").err(),
+            Some(ShareCodeError::NotAThemeCode)
+        );
         let code = |v: Value| format!("TL1.{}", encode_b64(v.to_string().as_bytes()));
         assert_eq!(
-            decode_tl1(&code(json!({"v": 2, "name": "X"}))),
-            Err(ShareCodeError::UnsupportedVersion(2))
+            decode_tl1(&code(json!({"v": 2, "name": "X"}))).err(),
+            Some(ShareCodeError::UnsupportedVersion(2))
         );
         assert_eq!(
-            decode_tl1(&code(json!({"name": "X"}))),
-            Err(ShareCodeError::BadJson)
+            decode_tl1(&code(json!({"name": "X"}))).err(),
+            Some(ShareCodeError::BadJson)
         );
         assert_eq!(
-            decode_tl1(&code(json!({"v": "1"}))),
-            Err(ShareCodeError::BadJson)
+            decode_tl1(&code(json!({"v": "1"}))).err(),
+            Some(ShareCodeError::BadJson)
         );
-        assert_eq!(decode_tl1(&code(json!([1]))), Err(ShareCodeError::BadJson));
         assert_eq!(
-            decode_tl1(&format!("TL1.{}", encode_b64(&[0xFF, 0xFE, b'{']))),
-            Err(ShareCodeError::BadJson)
+            decode_tl1(&code(json!([1]))).err(),
+            Some(ShareCodeError::BadJson)
         );
-        assert_eq!(decode_tl1("TL1."), Err(ShareCodeError::BadJson));
+        assert_eq!(
+            decode_tl1(&format!("TL1.{}", encode_b64(&[0xFF, 0xFE, b'{']))).err(),
+            Some(ShareCodeError::BadJson)
+        );
+        assert_eq!(decode_tl1("TL1.").err(), Some(ShareCodeError::BadJson));
 
         // A code with only v and a light window background repairs from Default Light.
         let def = decode_tl1(&code(json!({"v": 1, "WINDOW_BG": "#FAFAFA"}))).unwrap();
@@ -368,8 +377,11 @@ mod tests {
 
         // Over 1 MiB is refused before decoding.
         let long = format!("TL1.{}", "A".repeat(MAX_IMPORT_BYTES));
-        assert_eq!(decode_tl1(&long), Err(ShareCodeError::NotAThemeCode));
-        assert_eq!(import_text(&long), Err(ShareCodeError::NotAThemeCode));
+        assert_eq!(decode_tl1(&long).err(), Some(ShareCodeError::NotAThemeCode));
+        assert_eq!(
+            import_text(&long).err(),
+            Some(ShareCodeError::NotAThemeCode)
+        );
     }
 
     #[test]
@@ -407,8 +419,8 @@ mod tests {
             "42",
         ] {
             assert_eq!(
-                import_text(bad),
-                Err(ShareCodeError::NotAThemeCode),
+                import_text(bad).err(),
+                Some(ShareCodeError::NotAThemeCode),
                 "{bad}"
             );
         }
