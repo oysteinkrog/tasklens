@@ -544,3 +544,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.32 (d371e74, ba948ac, c4b3f0b): ValueFormat::PercentOf; CardWords table; chart/mod.rs and scale.rs touched (accepted).
 - cr0.10: logged above. cr0.23: logo SVG text becomes paths (an SVG <text> makes gpui scan all system fonts); warm first frame 290 to 500 ms at load 37; GPU adapter probe 230 to 270 ms. Note added on ug9.26.
 - wlf.15 (b5eb1b4): gallery_main.rs; needs a tl-ui gallery hook behind bench (approved in app.rs).
+- pdu.12 fix (9eae47a, 59a7a1e): UnitIds counter keyed by the full UnitRef (manager plus name; accepted); ids are built once per view.
