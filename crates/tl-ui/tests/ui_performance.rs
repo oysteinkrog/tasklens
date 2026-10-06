@@ -1125,4 +1125,77 @@ mod perf_keys {
             assert!(built.partial_eq(&action), "got {built:?}");
         });
     }
+
+    /// Every mirror variant converts to the model enum and back unchanged.
+    #[test]
+    fn graph_mirrors_round_trip() {
+        for m in [
+            CpuGraphMode::Overall,
+            CpuGraphMode::PerCore,
+            CpuGraphMode::AllCoresOverlaid,
+            CpuGraphMode::AllCoresStacked,
+        ] {
+            assert_eq!(CpuGraphMode::from(CpuGraphModeJson::from(m)), m);
+        }
+        for m in [
+            CpuSecondaryGraph::None,
+            CpuSecondaryGraph::Power,
+            CpuSecondaryGraph::Clock,
+            CpuSecondaryGraph::Temperature,
+        ] {
+            assert_eq!(CpuSecondaryGraph::from(CpuSecondaryGraphJson::from(m)), m);
+        }
+        for m in [GpuOptionalGraph::Power, GpuOptionalGraph::Clocks] {
+            assert_eq!(GpuOptionalGraph::from(GpuOptionalGraphJson::from(m)), m);
+        }
+    }
+
+    /// Builds the Action of `want` from `json`, as a keymap entry does, and checks it equals
+    /// `want`.
+    fn assert_builds(cx: &mut TestAppContext, json: serde_json::Value, want: &dyn Action) {
+        cx.read(|cx| {
+            let built = cx
+                .build_action(want.name(), Some(json))
+                .unwrap_or_else(|e| panic!("build {}: {e}", want.name()));
+            assert!(built.partial_eq(want), "got {built:?}");
+        });
+    }
+
+    /// The three graph Actions with a `tl_model::settings` field load from JSON (crw.31).
+    #[gpui_kit::test]
+    fn graph_actions_load_from_keymap_json(cx: &mut TestAppContext) {
+        let key = DeviceKey(Arc::from("gpu:GPU-0"));
+        assert_builds(
+            cx,
+            serde_json::json!({ "mode": "per_core" }),
+            &PerfSetCpuGraphMode {
+                mode: CpuGraphMode::PerCore,
+            },
+        );
+        assert_builds(
+            cx,
+            serde_json::json!({ "choice": "none" }),
+            &PerfSetCpuSecondaryGraph {
+                choice: CpuSecondaryGraph::None,
+            },
+        );
+        assert_builds(
+            cx,
+            serde_json::json!({ "key": "gpu:GPU-0", "which": "clocks" }),
+            &PerfToggleGpuOptionalGraph {
+                key,
+                which: GpuOptionalGraph::Clocks,
+            },
+        );
+        cx.read(|cx| {
+            assert!(
+                cx.build_action(
+                    "tasklens::PerfSetCpuGraphMode",
+                    Some(serde_json::json!({ "mode": "PerCore" })),
+                )
+                .is_err(),
+                "the JSON spelling follows the settings file"
+            );
+        });
+    }
 }

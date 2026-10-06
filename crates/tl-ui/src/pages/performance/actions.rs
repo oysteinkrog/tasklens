@@ -5,14 +5,15 @@
 //! one Action declared here, all in the `tasklens` namespace with a `Perf` prefix. Later beads
 //! add handlers, not Actions.
 //!
-//! Actions that carry a `tl_model::settings` enum are `no_json`: tl-model has no JSON schema
-//! derive.
+//! Actions that carry a `tl_model::settings` enum keep the model type as the field, and read
+//! and describe their JSON through a mirror enum declared here: tl-model has no JSON schema
+//! derive (ADR-001).
 
 use std::sync::Arc;
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{Action, App, KeyBinding, gpui};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 pub use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph};
 
 use super::{DeviceKey, DeviceKind};
@@ -117,16 +118,22 @@ pub struct PerfAddTrayGraph {
 }
 
 /// Sets `performance.cpu_graph_mode`.
-#[derive(Clone, Debug, PartialEq, Action)]
-#[action(namespace = tasklens, no_json)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
 pub struct PerfSetCpuGraphMode {
+    #[serde(deserialize_with = "via::<_, CpuGraphModeJson, _>")]
+    #[schemars(with = "CpuGraphModeJson")]
     pub mode: CpuGraphMode,
 }
 
 /// Sets `performance.cpu_secondary_graph`.
-#[derive(Clone, Debug, PartialEq, Action)]
-#[action(namespace = tasklens, no_json)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
 pub struct PerfSetCpuSecondaryGraph {
+    #[serde(deserialize_with = "via::<_, CpuSecondaryGraphJson, _>")]
+    #[schemars(with = "CpuSecondaryGraphJson")]
     pub choice: CpuSecondaryGraph,
 }
 
@@ -172,10 +179,13 @@ pub struct PerfToggleGpuEngine {
 }
 
 /// Shows or hides an optional graph on the GPU page of `key`.
-#[derive(Clone, Debug, PartialEq, Action)]
-#[action(namespace = tasklens, no_json)]
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
 pub struct PerfToggleGpuOptionalGraph {
     pub key: DeviceKey,
+    #[serde(deserialize_with = "via::<_, GpuOptionalGraphJson, _>")]
+    #[schemars(with = "GpuOptionalGraphJson")]
     pub which: GpuOptionalGraph,
 }
 
@@ -203,6 +213,60 @@ pub struct PerfSetFanTempSensor {
 pub struct PerfFetchPublicIp {
     pub key: DeviceKey,
 }
+
+/// Reads a model enum through its JSON mirror `M`.
+fn via<'de, D: Deserializer<'de>, M: Deserialize<'de> + Into<T>, T>(d: D) -> Result<T, D::Error> {
+    M::deserialize(d).map(Into::into)
+}
+
+/// Declares a JSON mirror of a `tl_model::settings` enum with `From` both ways. The serde
+/// renaming must match the model enum, so the keymap and settings spell values the same way.
+macro_rules! json_mirror {
+    ($(#[$meta:meta])* $mirror:ident <-> $model:ident, $case:literal, [$($v:ident),+ $(,)?]) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, JsonSchema)]
+        #[serde(rename_all = $case)]
+        #[schemars(crate = "gpui::private::schemars")]
+        pub enum $mirror {
+            $($v),+
+        }
+
+        impl From<$mirror> for $model {
+            fn from(m: $mirror) -> Self {
+                match m {
+                    $($mirror::$v => Self::$v),+
+                }
+            }
+        }
+
+        impl From<$model> for $mirror {
+            fn from(m: $model) -> Self {
+                match m {
+                    $($model::$v => Self::$v),+
+                }
+            }
+        }
+    };
+}
+
+json_mirror!(
+    /// JSON form of [`CpuGraphMode`].
+    CpuGraphModeJson <-> CpuGraphMode,
+    "snake_case",
+    [Overall, PerCore, AllCoresOverlaid, AllCoresStacked]
+);
+json_mirror!(
+    /// JSON form of [`CpuSecondaryGraph`].
+    CpuSecondaryGraphJson <-> CpuSecondaryGraph,
+    "lowercase",
+    [None, Power, Clock, Temperature]
+);
+json_mirror!(
+    /// JSON form of [`GpuOptionalGraph`].
+    GpuOptionalGraphJson <-> GpuOptionalGraph,
+    "lowercase",
+    [Power, Clocks]
+);
 
 /// Binds the Performance rows of canonical table (b).
 pub fn bind_keys_performance(cx: &mut App) {
