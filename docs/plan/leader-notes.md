@@ -485,3 +485,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.17 (ef22ee7): grid cell hover reusing hover.rs; widened plot hack and CPU grid hover off -> new yrf bead.
 - pdu.49 closed as covered by 5713b4c.
 - rsf.15 (b3b7dde, b4418a6): 3 table goldens pass; RTL blocked. Decisions in a new P1 rsf bead: FSI/PDI isolate before the count, TlIcon::Binary, Name column minimum 120 px. OWNER REVIEW: the Name minimum of 120 px is a leader call; PROC-023 gives 60 px for all columns.
+- jqk.8 (daceda8, 95deff0, 11700bc): status chip; truncation keeps actions and paused tag whole; tab order and cached sizing noted on jqk.10.
