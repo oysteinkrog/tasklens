@@ -13,8 +13,10 @@
 //! until the test drains its `ActionFinished`, as in the reducer.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -28,7 +30,9 @@ use asupersync::types::{Budget, RegionId, Time};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::io::Errno;
 use tl_engine::actions::process::PidOp;
-use tl_engine::actions::{ActionCtx, ActionOps, Admission, admit, deadline, run_action, summarize};
+use tl_engine::actions::{
+    ActionCtx, ActionOps, Admission, LaunchOutcome, Openers, admit, deadline, run_action, summarize,
+};
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::reducer::AdmissionView;
@@ -168,6 +172,10 @@ fn harness() -> Harness {
 }
 
 fn harness_with(config: LabConfig) -> Harness {
+    harness_full(config, None)
+}
+
+fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness {
     let mut lab = LabRuntime::new(config);
     let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
     // Before any task exists: each `Cx` keeps the driver it was made with.
@@ -189,7 +197,7 @@ fn harness_with(config: LabConfig) -> Harness {
         )),
         systemd_system: ManagerConnSlot::new(),
         systemd_user: ManagerConnSlot::new(),
-        openers: None,
+        openers,
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
     });
@@ -1023,6 +1031,221 @@ fn explore_signal_pipeline() {
             (1..=4).map(ActionId).collect::<Vec<_>>(),
             "seed {seed}"
         );
+        h.passed();
+    }
+}
+
+// Targetless kinds (E11-016) -----------------------------------------------------------------
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum OpenerCall {
+    OpenUri(String),
+    ShowInFileManager(String, bool),
+    Launch(LaunchSpec),
+}
+
+/// Records each call and answers with `result` (open and show) or `launch`, after sleeping
+/// `block` on the lab clock. Never opens, shows or starts anything.
+struct FakeOpeners {
+    log: Mutex<Vec<OpenerCall>>,
+    block: Duration,
+    result: Result<(), ActionError>,
+    launch: Result<LaunchOutcome, ActionError>,
+}
+
+impl FakeOpeners {
+    fn new() -> Self {
+        Self {
+            log: Mutex::new(Vec::new()),
+            block: Duration::ZERO,
+            result: Ok(()),
+            launch: Ok(LaunchOutcome::Launched),
+        }
+    }
+
+    fn calls(&self) -> Vec<OpenerCall> {
+        lock(&self.log).clone()
+    }
+
+    async fn wait(&self, cx: &Cx) {
+        if !self.block.is_zero() {
+            asupersync::time::sleep(cx.now(), self.block).await;
+        }
+    }
+}
+
+impl Openers for FakeOpeners {
+    fn open_uri(
+        &self,
+        cx: &Cx,
+        target: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        lock(&self.log).push(OpenerCall::OpenUri(target.to_owned()));
+        let cx = cx.clone();
+        Box::pin(async move {
+            self.wait(&cx).await;
+            self.result.clone()
+        })
+    }
+
+    fn show_in_file_manager(
+        &self,
+        cx: &Cx,
+        path: &str,
+        properties: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        lock(&self.log).push(OpenerCall::ShowInFileManager(path.to_owned(), properties));
+        let cx = cx.clone();
+        Box::pin(async move {
+            self.wait(&cx).await;
+            self.result.clone()
+        })
+    }
+
+    fn launch(
+        &self,
+        cx: &Cx,
+        spec: &LaunchSpec,
+    ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>> {
+        lock(&self.log).push(OpenerCall::Launch(spec.clone()));
+        let cx = cx.clone();
+        Box::pin(async move {
+            self.wait(&cx).await;
+            self.launch.clone()
+        })
+    }
+}
+
+fn openers_harness(fake: &Arc<FakeOpeners>) -> Harness {
+    let openers: Arc<dyn Openers> = fake.clone();
+    harness_full(LabConfig::new(7).max_steps(1_000_000), Some(openers))
+}
+
+fn launch_kind(as_admin: bool) -> ActionKind {
+    ActionKind::Launch(LaunchSpec {
+        what: LaunchWhat::Command(Arc::from("kate")),
+        as_admin,
+        cwd: None,
+    })
+}
+
+/// `Started` then the one summary, with no per-target event.
+fn summary_only(state: ActionState) -> Vec<(Option<u16>, ActionState)> {
+    expected(&[], state)
+}
+
+/// Runs targetless `kind` with `fake` and no clock movement. Returns the events.
+fn targetless_events(fake: &Arc<FakeOpeners>, kind: ActionKind) -> Vec<(Option<u16>, ActionState)> {
+    let mut h = openers_harness(fake);
+    h.submit(req(1, kind, &[]));
+    h.run();
+    let events = h.events_for(ActionId(1));
+    assert_eq!(h.finished(), [ActionId(1)]);
+    h.passed();
+    events
+}
+
+#[test]
+fn targetless_open_uri() {
+    let fake = Arc::new(FakeOpeners::new());
+    let events = targetless_events(&fake, ActionKind::OpenUri(Arc::from("https://example.org")));
+    assert_eq!(events, summary_only(ActionState::Succeeded));
+    assert_eq!(
+        fake.calls(),
+        [OpenerCall::OpenUri("https://example.org".to_owned())]
+    );
+}
+
+#[test]
+fn targetless_show_in_file_manager() {
+    let fake = Arc::new(FakeOpeners::new());
+    let kind = ActionKind::ShowInFileManager {
+        path: Arc::from("/usr/bin/foo"),
+        properties: true,
+    };
+    let events = targetless_events(&fake, kind);
+    assert_eq!(events, summary_only(ActionState::Succeeded));
+    assert_eq!(
+        fake.calls(),
+        [OpenerCall::ShowInFileManager(
+            "/usr/bin/foo".to_owned(),
+            true
+        )]
+    );
+}
+
+#[test]
+fn targetless_launch_deadline_and_admin() {
+    for as_admin in [false, true] {
+        let fake = Arc::new(FakeOpeners {
+            block: Duration::from_secs(3),
+            ..FakeOpeners::new()
+        });
+        let mut h = openers_harness(&fake);
+        h.submit(req(1, launch_kind(as_admin), &[]));
+        h.run();
+        assert_eq!(h.events_for(ActionId(1)), [(None, ActionState::Started)]);
+        h.advance(Duration::from_secs(2));
+        if as_admin {
+            // The 120 s deadline has not passed: the launch finishes at 3 s.
+            assert!(h.events_for(ActionId(1)).is_empty());
+            h.advance(Duration::from_secs(1));
+            assert_eq!(h.events_for(ActionId(1)), [(None, ActionState::Succeeded)]);
+        } else {
+            assert_eq!(h.events_for(ActionId(1)), [(None, timed_out())]);
+        }
+        assert_eq!(h.finished(), [ActionId(1)]);
+        assert_eq!(fake.calls().len(), 1, "as_admin {as_admin}");
+        h.passed();
+    }
+}
+
+#[test]
+fn targetless_error_passthrough() {
+    let err = ActionError::Internal(Arc::from("not an absolute path"));
+    let fake = Arc::new(FakeOpeners {
+        result: Err(err.clone()),
+        launch: Err(ActionError::AuthCancelled),
+        ..FakeOpeners::new()
+    });
+    let events = targetless_events(&fake, ActionKind::OpenUri(Arc::from("relative/path")));
+    assert_eq!(events, summary_only(failed(err)));
+    let events = targetless_events(&fake, launch_kind(true));
+    assert_eq!(events, summary_only(failed(ActionError::AuthCancelled)));
+}
+
+#[test]
+fn targetless_already_running() {
+    let fake = Arc::new(FakeOpeners {
+        launch: Ok(LaunchOutcome::AlreadyRunning),
+        ..FakeOpeners::new()
+    });
+    let events = targetless_events(&fake, launch_kind(false));
+    assert_eq!(
+        events,
+        summary_only(ActionState::Rejected(RejectReason::AlreadyRunning))
+    );
+}
+
+#[test]
+fn targetless_without_openers() {
+    let kinds = [
+        ActionKind::OpenUri(Arc::from("https://example.org")),
+        ActionKind::ShowInFileManager {
+            path: Arc::from("/usr/bin/foo"),
+            properties: false,
+        },
+        launch_kind(false),
+    ];
+    for kind in kinds {
+        let mut h = harness();
+        h.submit(req(1, kind, &[]));
+        h.run();
+        assert_eq!(
+            h.events_for(ActionId(1)),
+            summary_only(ActionState::Rejected(RejectReason::Unsupported))
+        );
+        assert_eq!(h.finished(), [ActionId(1)]);
         h.passed();
     }
 }
