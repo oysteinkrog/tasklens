@@ -86,7 +86,7 @@ pub struct ApplyState {
     /// Keys whose PSS the last demand asked for: `detail_keys` while a PSS or USS column is
     /// shown, else none (E09-006).
     pss_keys: Arc<[ProcessKey]>,
-    /// The last health state per source was `Running`.
+    /// The last health state per source was `Running` or `Late`.
     running: [bool; SourceId::COUNT],
     /// The source has been `Running` before in this session (R-289).
     ran: [bool; SourceId::COUNT],
@@ -309,13 +309,14 @@ impl Reducer {
                 self.health.apply(id, state, last_error, t_ns);
                 self.mark(ComponentMask::HEALTH);
                 // A worker restart gaps that source's series; the first Running does not
-                // (R-289).
+                // (R-289). `Late` is a live worker with slow jobs, not a restart.
                 let i = id.index();
                 let running = state == SourceState::Running;
                 if running && !self.apply_state.running[i] && self.apply_state.ran[i] {
                     self.series.mark_gap_source(id);
                 }
-                self.apply_state.running[i] = running;
+                self.apply_state.running[i] =
+                    matches!(state, SourceState::Running | SourceState::Late);
                 self.apply_state.ran[i] |= running;
                 match state {
                     SourceState::Failed | SourceState::Disabled { .. } => {

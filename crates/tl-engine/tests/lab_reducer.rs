@@ -1647,13 +1647,12 @@ fn restart_marks_gap_for_source_only() {
     assert!(mem.iter().all(|&s| !has_gap(s)));
 }
 
-/// R-289: the first Running of a session adds no gap; Starting before it does not count as a
-/// restart.
+/// R-289: the first Running of a session adds no gap, even after Off.
 #[test]
 fn first_running_no_extra_gap() {
     let mut rig = Rig::new();
     rig.run(vec![
-        cpu_health(SourceState::Starting, 0),
+        cpu_health(SourceState::Off, 0),
         cpu_health(SourceState::Running, 100 * MS),
         cpu_msg(SEC, 10.0, true),
         cpu_health(SourceState::Running, SEC + 50 * MS),
