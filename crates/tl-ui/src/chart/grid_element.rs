@@ -7,6 +7,9 @@
 //! build time, so one content mask covers the element. Labels are cached shaped lines and
 //! re-shape only when their text changes.
 //!
+//! Dotted gaps (PERF-022): the build keeps each cell's gap spans, and paint draws them as quads
+//! along the cell's plot bottom, as a single chart does, so they add no path paint.
+//!
 //! Heading tooltips: while the pointer is inside the element, prepaint inserts one hitbox per
 //! heading; idle frames insert none (UI-PRF-002). The kit has no tooltip paint call for custom
 //! elements, so the view records the hovered cell (`hovered_cell`, `hovered_tooltip`) and
@@ -14,6 +17,7 @@
 
 use std::cell::RefCell;
 use std::mem;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -43,6 +47,7 @@ use super::{
 };
 use crate::anim::AnimationDriver;
 use crate::hub::{SnapshotChanged, SnapshotHub};
+use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
 use crate::theme::{TlTheme, UiMetrics};
 
@@ -52,8 +57,8 @@ const DEFAULT_PERIOD_NS: u64 = 1_000_000_000;
 /// Alpha factor of the stale sets.
 const STALE_ALPHA: f32 = 0.5;
 
-/// Text of an offline cell. Not yet a Fluent key.
-const OFFLINE: &str = "Offline";
+/// Fluent key of an offline cell's text (R-132).
+const OFFLINE_KEY: &str = "chart-grid-offline";
 
 /// Every cell draws grid lines, baseline and outline.
 const CELL_GRID: GridStyle = GridStyle {
@@ -72,7 +77,7 @@ pub struct GridCellSpec {
     pub heading: SharedString,
     pub fill_series: SeriesId,
     pub overlay_series: Option<SeriesId>,
-    /// No plot; "Offline" in the middle and a `divider` outline. Owners set it for a cell whose
+    /// No plot; the `chart-grid-offline` text in the middle and a `divider` outline. Owners set it for a cell whose
     /// series is Missing (CPU offline).
     pub offline: bool,
     /// P2 core marks.
@@ -187,6 +192,11 @@ pub struct ChartGridView {
     headings: Vec<CachedLine>,
     values: Vec<CachedLine>,
     offline: CachedLine,
+    /// The offline text and the strings version it was read for (`None` without strings).
+    offline_text: Option<(Option<u64>, SharedString)>,
+    /// Dotted-gap spans of the cached geometry, (cell, chart-local physical px span), in cell
+    /// order.
+    gaps: Vec<(usize, Range<f32>)>,
     legend: LabelCache,
     scale_state: scale::ScaleState,
     axis_text: String,
@@ -215,6 +225,13 @@ pub struct ChartGridView {
     pub value_shapes: std::cell::Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub offline_shapes: std::cell::Cell<u32>,
+    /// Reads of the offline text from the strings.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub offline_reads: std::cell::Cell<u32>,
+    /// Dotted-gap spans the last paint drew, (cell, chart-local physical px before the paint
+    /// shift), as `ChartView::last_gap_spans`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_gap_spans: RefCell<Vec<(usize, Range<f32>)>>,
 }
 
 impl ChartGridView {
@@ -233,6 +250,8 @@ impl ChartGridView {
             headings: Vec::new(),
             values: Vec::new(),
             offline: CachedLine::default(),
+            offline_text: None,
+            gaps: Vec::new(),
             legend: LabelCache::default(),
             scale_state: scale::ScaleState::default(),
             axis_text: String::new(),
@@ -253,6 +272,10 @@ impl ChartGridView {
             value_shapes: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             offline_shapes: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            offline_reads: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_gap_spans: RefCell::default(),
         };
         this.resolve(hub.read(cx).current());
         this
@@ -331,6 +354,12 @@ impl ChartGridView {
     pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {
         let c = self.cache.borrow();
         (c.fills.len(), c.strokes.len())
+    }
+
+    /// The offline text as last read from the strings.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn offline_text(&self) -> Option<&SharedString> {
+        self.offline_text.as_ref().map(|(_, text)| text)
     }
 
     /// Layout of the last geometry build.
@@ -575,6 +604,8 @@ fn paint_grid_view(
         headings,
         values,
         offline,
+        offline_text,
+        gaps,
         legend,
         scale_state,
         axis_text,
@@ -662,7 +693,7 @@ fn paint_grid_view(
             };
             build_cells(
                 spec, series, &layout, map, ph as f32, y.y_min, y.y_max, now, sf, &mut cache,
-                scratch,
+                scratch, gaps,
             );
             *built_right_edge_ns = right_edge;
             *built_layout = Some((layout, sf));
@@ -684,8 +715,11 @@ fn paint_grid_view(
     let dx = map.dx(pw as f32);
     let theme = &*env.theme;
     let hairline = px(1.0 / sf);
+    #[cfg(any(test, feature = "test-hooks"))]
+    view.last_gap_spans.borrow_mut().clear();
 
-    // Background, grid, baseline and outline per cell.
+    // Background, grid, dotted gaps, baseline and outline per cell. `gaps` is in cell order.
+    let mut gap_at = 0;
     for (i, cell) in spec.cells.iter().enumerate() {
         let b = cell_bounds(bounds, &layout, i, cell_h, gap);
         grid::paint_background(window, b, theme.graph.chart_bg, px(0.));
@@ -712,6 +746,16 @@ fn paint_grid_view(
             radius: px(0.),
         };
         grid::paint_grid(window, &gp);
+        while has_data && gap_at < gaps.len() && gaps[gap_at].0 <= i {
+            let (cell_i, span) = &gaps[gap_at];
+            gap_at += 1;
+            if *cell_i == i {
+                // `paint_gaps` clips to the plot width, so no content mask is needed.
+                grid::paint_gaps(window, &gp, std::slice::from_ref(span));
+                #[cfg(any(test, feature = "test-hooks"))]
+                view.last_gap_spans.borrow_mut().push((i, span.clone()));
+            }
+        }
         grid::paint_baseline(window, &gp);
         grid::paint_outline(window, &gp);
     }
@@ -739,7 +783,8 @@ fn paint_grid_view(
         });
     }
 
-    // Labels: heading left and value right in row 1, "Offline" in the middle, legend in cell 0.
+    // Labels: heading left and value right in row 1, the offline text in the middle, legend in
+    // cell 0.
     let m = &env.metrics;
     let pad = m.sp[3];
     let row = px(labels::LABEL_ROW * m.ui_scale);
@@ -772,7 +817,18 @@ fn paint_grid_view(
                 color: theme.text_secondary,
                 tnum: false,
             };
-            let _shaped = offline.sync(window, OFFLINE, style);
+            let version = cx.try_global::<Strings>().map(|s| s.strings_version);
+            if offline_text.as_ref().is_none_or(|(v, _)| *v != version) {
+                let text = match version {
+                    Some(_) => tr(cx, OFFLINE_KEY),
+                    None => SharedString::new_static(OFFLINE_KEY),
+                };
+                *offline_text = Some((version, text));
+                #[cfg(any(test, feature = "test-hooks"))]
+                view.offline_reads.set(view.offline_reads.get() + 1);
+            }
+            let text = offline_text.as_ref().map_or("", |(_, t)| t.as_ref());
+            let _shaped = offline.sync(window, text, style);
             #[cfg(any(test, feature = "test-hooks"))]
             if _shaped {
                 view.offline_shapes.set(view.offline_shapes.get() + 1);
@@ -862,7 +918,7 @@ fn cell_bounds(
 }
 
 /// One geometry build for every non-offline cell into one fill, one total-line and one
-/// overlay-line builder.
+/// overlay-line builder. Replaces `gaps` with each cell's dotted-gap spans.
 #[allow(
     clippy::too_many_arguments,
     reason = "one build call, every input is distinct"
@@ -879,7 +935,9 @@ fn build_cells(
     sf: f32,
     cache: &mut ChartCache,
     scratch: &mut geometry::Scratch,
+    gaps: &mut Vec<(usize, Range<f32>)>,
 ) {
+    gaps.clear();
     let mut fill = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero()));
     let mut stroke = PathBuilder::stroke(px(1.0));
     let mut overlay = spec
@@ -929,6 +987,7 @@ fn build_cells(
             overlay.as_mut(),
             scratch,
         );
+        gaps.extend(scratch.cell_gaps().iter().map(|g| (i, g.clone())));
     }
     geometry::finish_grid(
         &base,

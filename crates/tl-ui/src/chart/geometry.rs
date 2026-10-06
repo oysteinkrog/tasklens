@@ -255,10 +255,20 @@ pub struct Scratch {
     acc: Vec<f32>,
     /// Grid cells: the decimated points after clipping to the cell, physical px.
     clipped: Vec<Point<Pixels>>,
+    /// Grid cells: the last built cell's dotted-gap spans, chart-local physical px.
+    cell_gaps: SmallVec<[std::ops::Range<f32>; 4]>,
     /// One run's line and band floor as emitted, physical px, and the curve tangents.
     line: Line,
     live: Builders,
     stale: Builders,
+}
+
+impl Scratch {
+    /// Dotted-gap spans of the cell `build_cell` built last, chart-local physical px as
+    /// `ChartCache::gaps` holds them.
+    pub fn cell_gaps(&self) -> &[std::ops::Range<f32>] {
+        &self.cell_gaps
+    }
 }
 
 /// Period slots that align stacked series by bucket index, so ±period/2 jitter still lands in one
@@ -741,7 +751,10 @@ fn for_each_stretch(samples: &[Sample], run: Run, mut f: impl FnMut(Run, bool)) 
 ///
 /// One content mask covers the whole grid, so x is clipped at build time to the `clip_w` wide
 /// window that `map` puts on screen (chart-local `−map.dx(clip_w) ..` that plus `clip_w`):
-/// points outside are dropped and the boundary point is interpolated. No stacking, no gaps.
+/// points outside are dropped and the boundary point is interpolated. No stacking.
+///
+/// Series 0's dotted-gap spans replace `scratch.cell_gaps()`, chart-local and unclipped as
+/// `build` makes them. The caller paints them as quads per cell (PERF-022).
 pub fn build_cell(
     input: &BuildInput,
     origin: (f32, f32),
@@ -757,9 +770,11 @@ pub fn build_cell(
         pts,
         stale_pts,
         clipped,
+        cell_gaps,
         stale,
         ..
     } = scratch;
+    cell_gaps.clear();
     let bucket = bucket_ns(map.range_ns, clip_w.max(1.0).round() as u32);
     let place = CellPlace {
         origin,
@@ -775,6 +790,10 @@ pub fn build_cell(
         let samples = &view.samples[..];
         let from = window_start(samples, map.right_edge_ns, map.range_ns, period);
         split_runs(samples, from, runs);
+
+        if si == 0 {
+            push_gaps(samples, runs, map, period, cell_gaps);
+        }
 
         for run in runs.iter() {
             for_each_stretch(samples, *run, |span, is_stale_flag| {

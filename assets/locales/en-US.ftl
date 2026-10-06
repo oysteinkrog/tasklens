@@ -147,3 +147,7 @@ shell-tab-services = Services
 shell-tab-startup = Startup Apps
 shell-tab-connections = Connections
 shell-tab-information = Information
+
+## Charts (E19)
+
+chart-grid-offline = Offline

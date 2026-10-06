@@ -2047,3 +2047,231 @@ mod grid_element {
         assert_eq!(vcx.read_entity(&grid, |v, _| v.legend_shapes()), 2);
     }
 }
+
+/// tasklens-yrf.20: the offline text is a Fluent key read once per strings version, and every
+/// cell draws the dotted baseline across its own data gaps.
+mod grid_offline_and_gaps {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Render, StyleRefinement,
+        Styled, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SampleFlags, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::snapshot::{SeriesSet, Snapshot};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+
+    fn core(i: u16) -> SeriesId {
+        SeriesId {
+            device: DeviceIdx(i),
+            metric: MetricId::CPU_TOTAL,
+        }
+    }
+
+    /// 20 samples 100 ms apart, the newest now. With `gap`, samples 8 to 11 are not valid, so
+    /// the series has two runs with 500 ms between them.
+    fn series(id: SeriesId, version: u64, gap: bool) -> Arc<SeriesView> {
+        let newest = now_boot_ns();
+        let samples: Vec<Sample> = (0..20u64)
+            .map(|i| {
+                let s = Sample::valid(newest - (19 - i) * 100 * MS, 30.0);
+                if gap && (8..12).contains(&i) {
+                    Sample {
+                        flags: SampleFlags::empty(),
+                        ..s
+                    }
+                } else {
+                    s
+                }
+            })
+            .collect();
+        Arc::new(SeriesView {
+            id,
+            version,
+            period_ns: 100 * MS,
+            samples: samples.into(),
+        })
+    }
+
+    /// Publishes `n` cores; core `gap_cell` has the gap.
+    fn publish(engine: &Arc<FakeEngine>, n: u16, version: u64, gap_cell: Option<u16>) {
+        let views: Vec<_> = (0..n)
+            .map(|i| series(core(i), version, gap_cell == Some(i)))
+            .collect();
+        engine.publish_with(|s: &mut Snapshot| {
+            s.series = Arc::new(SeriesSet {
+                header: s.series.header,
+                series: Arc::from(views),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    fn spec(n: u16) -> ChartGridSpec {
+        let color = |a: f32| Hsla {
+            h: 0.5,
+            s: 0.6,
+            l: 0.5,
+            a,
+        };
+        ChartGridSpec {
+            cells: (0..n)
+                .map(|i| GridCellSpec {
+                    heading: format!("CPU {i}").into(),
+                    fill_series: core(i),
+                    overlay_series: None,
+                    offline: false,
+                    mark: None,
+                    tooltip: None,
+                })
+                .collect(),
+            fill: color(0.2),
+            line: color(1.0),
+            overlay_line: color(1.0),
+            ..ChartGridSpec::default()
+        }
+    }
+
+    struct Root {
+        grid: Entity<ChartGridView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1300.)).child(
+                self.grid
+                    .clone()
+                    .cached(StyleRefinement::default().w_full()),
+            )
+        }
+    }
+
+    /// A 1300 px window at scale 1 with English strings, holding one grid for `spec`.
+    fn grid_in_window<'a>(
+        cx: &'a mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        spec: ChartGridSpec,
+    ) -> (Entity<ChartGridView>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(engine, cx);
+            let grid = cx.new(|cx| ChartGridView::new(spec, &hub, cx));
+            Root { grid }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
+        let grid = vcx.read_entity(&root, |r, _| r.grid.clone());
+        (grid, vcx)
+    }
+
+    /// Notifies the grid (a cached view replays its last paint otherwise) and draws a frame.
+    fn frame(vcx: &mut VisualTestContext, grid: &Entity<ChartGridView>) {
+        vcx.update(|_, cx| grid.update(cx, |_, cx| cx.notify()));
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_offline_text_from_fluent_key(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 4, 1, None);
+        let mut s = spec(4);
+        s.cells[2].offline = true;
+        let (grid, vcx) = grid_in_window(cx, &engine, s);
+        for _ in 0..5 {
+            frame(vcx, &grid);
+        }
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.offline_text().map(|t| t.as_ref()), Some("Offline"));
+            assert_eq!(v.offline_reads.get(), 1, "read once per strings version");
+            assert_eq!(v.offline_shapes.get(), 1);
+        });
+
+        // A language change bumps the strings version: one more read, same English text.
+        vcx.update(|_, cx| tl_ui::i18n::set_language(cx, "en-US"));
+        frame(vcx, &grid);
+        frame(vcx, &grid);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.offline_reads.get(), 2);
+            assert_eq!(v.offline_text().map(|t| t.as_ref()), Some("Offline"));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_cell_gap_paints_dotted_span(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 4, 1, Some(1));
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(4));
+        frame(vcx, &grid);
+        let paints0 = vcx.read_entity(&grid, |v, _| v.path_paints.get());
+        frame(vcx, &grid);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(
+                v.path_paints.get() - paints0,
+                1,
+                "one fill path: gaps add no path"
+            );
+            let spans = v.last_gap_spans.borrow();
+            let of = |cell: usize| -> Vec<std::ops::Range<f32>> {
+                spans
+                    .iter()
+                    .filter(|(c, _)| *c == cell)
+                    .map(|(_, r)| r.clone())
+                    .collect()
+            };
+            // 20 samples cover 1.9 s of a 60 s window, so every cell has the left-edge span.
+            for cell in [0, 2, 3] {
+                assert_eq!(of(cell).len(), 1, "cell {cell}: left-edge span only");
+            }
+            let gap_cell = of(1);
+            assert_eq!(gap_cell.len(), 2, "left-edge span and the middle gap");
+            // The middle gap runs from sample 7 (1.2 s before the anchor) to sample 12 (0.7 s
+            // before it): chart-local x is negative and the span is 5/7 of its end's distance.
+            let mid = &gap_cell[1];
+            assert!(mid.start < mid.end && mid.end < 0.0, "{mid:?}");
+            let ratio = (mid.end - mid.start) / -mid.end;
+            assert!((ratio - 5.0 / 7.0).abs() < 0.01, "ratio {ratio}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_unchanged_frames_build_nothing(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 8, 1, Some(3));
+        let mut s = spec(8);
+        s.cells[5].offline = true;
+        let (grid, vcx) = grid_in_window(cx, &engine, s);
+        frame(vcx, &grid);
+        let (builds0, reads0) =
+            vcx.read_entity(&grid, |v, _| (v.build_count.get(), v.offline_reads.get()));
+        for _ in 0..120 {
+            frame(vcx, &grid);
+        }
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(
+                v.build_count.get(),
+                builds0,
+                "120 unchanged frames build nothing"
+            );
+            assert_eq!(v.offline_reads.get(), reads0, "no string reads either");
+            assert!(v.last_gap_spans.borrow().iter().any(|(c, _)| *c == 3));
+        });
+    }
+}
