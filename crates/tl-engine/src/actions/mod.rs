@@ -353,6 +353,17 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("dump ops not wired"))
     }
+    /// The tl-ops TID loop for a PID-based change (ADR-006): opens and verifies the pidfd, runs
+    /// `op` on every thread, then polls the pidfd. Some threads failed is `Err(Partial)`; a
+    /// process that exited during the loop is `Err(OutcomeUnknown)`. The default refuses.
+    fn apply_pid_op(
+        &self,
+        _key: ProcessKey,
+        _boot: BootId,
+        _op: &process::PidOp,
+    ) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("process ops not wired"))
+    }
 }
 
 /// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
@@ -410,6 +421,23 @@ impl ActionOps for RealOps {
         out: &std::path::Path,
     ) -> Result<(), OpsError> {
         tl_ops::dump::dump_to_path(key, boot, mode, out)
+    }
+
+    fn apply_pid_op(
+        &self,
+        key: ProcessKey,
+        boot: BootId,
+        op: &process::PidOp,
+    ) -> Result<(), OpsError> {
+        use process::PidOp;
+        match op {
+            PidOp::Nice(n) => tl_ops::process::set_nice(key, boot, *n),
+            PidOp::Affinity(set) => tl_ops::process::set_affinity(key, boot, set),
+            PidOp::Sched { policy, rt_prio } => {
+                tl_ops::process::set_sched(key, boot, *policy, *rt_prio)
+            }
+            PidOp::IoPriority(prio) => tl_ops::process::set_io_priority(key, boot, *prio),
+        }
     }
 }
 

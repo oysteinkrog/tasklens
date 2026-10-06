@@ -6,8 +6,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::Cx;
-use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason, Signal};
+use tl_model::actions::{
+    ActionKind, ActionState, ActionTarget, IoPriority, RejectReason, SchedPolicy, Signal,
+};
 use tl_model::ids::ProcessKey;
+use tl_model::system::CpuSet;
 use tl_model::time::BootId;
 
 use super::{
@@ -30,9 +33,60 @@ pub async fn run_target(
         ActionKind::Signal(sig) => *sig,
         ActionKind::Suspend => Signal::Stop,
         ActionKind::Resume => Signal::Cont,
+        ActionKind::SetNice(n) => return pid_based(cx, actx, kind, *key, PidOp::Nice(*n)).await,
+        ActionKind::SetAffinity(set) => {
+            return pid_based(cx, actx, kind, *key, PidOp::Affinity(*set)).await;
+        }
         _ => return ActionState::Rejected(RejectReason::Unsupported),
     };
     signal(cx, actx, kind, target, *key, sig).await
+}
+
+/// A change that takes a PID, not a pidfd, so it runs under the ADR-006 TID loop.
+/// `Sched` and `IoPriority` are E11-006.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PidOp {
+    Nice(i8),
+    Affinity(CpuSet),
+    Sched { policy: SchedPolicy, rt_prio: u8 },
+    IoPriority(IoPriority),
+}
+
+/// Runs `op` on every thread of `key` in one blocking job under the 2 s deadline. tl-ops opens
+/// and verifies the pidfd, changes each TID and polls the pidfd after the loop, so its errors
+/// carry the outcome: `Partial` is `Failed(Partial)`, an exit during the loop is
+/// `OutcomeUnknown("process exited during the change")`, `IdentityChanged` is
+/// `Rejected(IdentityChanged)` and EPERM is `Failed(PermissionDenied)`. A nice value outside
+/// -20..=19 or an empty CPU set is `Rejected(Unsupported)` before any syscall.
+async fn pid_based(
+    cx: &Cx,
+    actx: &ActionCtx,
+    kind: &ActionKind,
+    key: ProcessKey,
+    op: PidOp,
+) -> ActionState {
+    let valid = match op {
+        PidOp::Nice(n) => (-20..=19).contains(&n),
+        PidOp::Affinity(set) => set != CpuSet::empty(),
+        PidOp::Sched { .. } | PidOp::IoPriority(_) => true,
+    };
+    if !valid {
+        return ActionState::Rejected(RejectReason::Unsupported);
+    }
+    let ops = Arc::clone(&actx.ops);
+    let boot = actx.boot_id;
+    let Ok(mut job) = cx.spawn_blocking(move |_| ops.apply_pid_op(key, boot, &op)) else {
+        return internal_error();
+    };
+    let target = ActionTarget::Process(key);
+    let state = match with_deadline(cx, deadline(kind, Some(&target), false), job.join(cx)).await {
+        Err(_) => ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)),
+        Ok(Err(_)) => internal_error(),
+        Ok(Ok(Ok(()))) => ActionState::Succeeded,
+        Ok(Ok(Err(e))) => map_ops_error(&e),
+    };
+    tracing::debug!(target: "tasklens::action", pid = key.pid, op = ?op, result = ?state);
+    state
 }
 
 /// Opens the verified pidfd for `key` and sends `sig` through it, in one blocking job under the
