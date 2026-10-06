@@ -368,8 +368,8 @@ fn count_unit(counts: &mut ServiceCounts, status: ServiceStatus) {
 
 /// True when the lowercase `text` occurs in any text column of the unit (APP-028, R-167).
 ///
-/// Active since is not matched: the column shows local time, and this reducer code has no
-/// time zone to format it with.
+/// Active since is not matched: the reducer has no time zone, and the column shows local time
+/// (logged for the owner).
 fn unit_text_matches(u: &UnitRecord, text: &str) -> bool {
     let mut pid = [0u8; 10];
     contains_lower(&u.unit.name, text)
@@ -818,6 +818,21 @@ mod tests {
             ..open_query()
         };
         assert!(unit_names(&run(&s, &q).0).is_empty());
+    }
+
+    #[test]
+    fn services_text_filter_skips_active_since() {
+        let mut u = sys("a.service");
+        // 2024-01-15 12:00:00 UTC.
+        u.active_since_us = Some(1_705_320_000_000_000);
+        let s = snapshot(vec![u]);
+        for text in ["2024-01-15", "12:00:00", "2024-01-15 12:00:00"] {
+            let q = SysTableQuery {
+                filter: Arc::from(text),
+                ..open_query()
+            };
+            assert!(unit_names(&run(&s, &q).0).is_empty(), "filter {text:?}");
+        }
     }
 
     #[test]
