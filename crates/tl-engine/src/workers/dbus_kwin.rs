@@ -12,7 +12,8 @@
 //! Window commands (`KWinCommand`, E14-018) run one at a time, in arrival order, as one-shot
 //! scripts `tasklens-cmd-<n>`. A command must name a window in the current list, and every value
 //! enters the script only through `serde_json`. Commands have no result event (R-170); a failed
-//! one is logged at `warn` and dropped.
+//! one is logged at `warn` and dropped. KWin may still read a script file after `start()` returns,
+//! so the file is kept until the next command, the next `Update` or worker exit (`CmdFiles`).
 
 use std::fs::{DirBuilder, Permissions};
 use std::future::Future;
@@ -139,11 +140,16 @@ async fn run(
         let e = WorkerError::Other("XDG_RUNTIME_DIR is not set".into());
         return failed(&cx, &io, e).await;
     };
-    let result = serve(&cx, &io, &conn, &path, &commands, &mut queue).await;
+    if let Some(dir) = path.parent() {
+        remove_stale(&cx, dir).await;
+    }
+    let mut files = CmdFiles::default();
+    let result = serve(&cx, &io, &conn, &path, &commands, &mut queue, &mut files).await;
     unload_on_exit(&cx, &conn).await;
-    // One unlink on the runtime tmpfs. It runs inline because the blocking pool refuses new
-    // jobs once the region is cancelled.
+    // One unlink each on the runtime tmpfs. They run inline because the blocking pool refuses
+    // new jobs once the region is cancelled.
     let _ = std::fs::remove_file(&path);
+    drop(files);
     match result {
         Ok(()) => Outcome::Ok(()),
         Err(_) if cx.is_cancel_requested() => Outcome::Ok(()),
@@ -219,6 +225,7 @@ async fn serve(
     path: &Path,
     commands: &Commands,
     queue: &mut Queue,
+    files: &mut CmdFiles,
 ) -> Result<(), WorkerError> {
     let raw = conn.raw();
     let unique = raw
@@ -276,6 +283,8 @@ async fn serve(
         match conn.next_signal(cx, &mut events, READ_TIMEOUT).await {
             Ok(None | Some(Event::Control)) => {}
             Ok(Some(Event::Windows(windows))) => {
+                // The first `Update` read after a command: KWin has run its script.
+                files.clear(cx).await;
                 let snap = snapshot(windows, Validity::Valid);
                 current = Some(Arc::clone(&snap.windows));
                 let update = SourceUpdate::Windows(Box::new(snap));
@@ -305,7 +314,7 @@ async fn serve(
             Err(e) => return Err(e.into()),
         }
         if let Some(windows) = &current {
-            run_commands(cx, io, &host, dir, commands, queue, windows).await;
+            run_commands(cx, io, &host, dir, commands, queue, windows, files).await;
         }
     }
 }
@@ -369,6 +378,37 @@ async fn remove_script(cx: &Cx, path: &Path) {
     if result.is_err() {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// Deletes `tasklens-cmd-<n>.js` files left in `dir` by an earlier run. A missing directory is
+/// fine; other errors are logged at `debug`.
+async fn remove_stale(cx: &Cx, dir: &Path) {
+    let dir = dir.to_owned();
+    let result = blocking(cx, move || {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(WorkerError::Other(format!("read script dir: {e}").into())),
+        };
+        for entry in entries.flatten() {
+            let stale = entry.file_name().to_str().is_some_and(cmd_file_name);
+            if stale && entry.file_type().is_ok_and(|t| !t.is_dir()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::debug!(target: "tasklens::engine", error = %e, "stale command scripts not removed");
+    }
+}
+
+/// True for `tasklens-cmd-<digits>.js`.
+fn cmd_file_name(name: &str) -> bool {
+    name.strip_prefix("tasklens-cmd-")
+        .and_then(|rest| rest.strip_suffix(".js"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Runs `job` on the blocking pool and waits for it.
@@ -708,7 +748,34 @@ impl ScriptHost for KWinScripting<'_> {
     }
 }
 
+/// The last command's script file. KWin may read it after `start()` returns (unverified), so it
+/// is deleted only when the next command runs, the next `Update` arrives or the worker exits.
+/// At most 2 command files exist at once: this one and the one being run.
+#[derive(Default)]
+struct CmdFiles {
+    last: Option<PathBuf>,
+}
+
+impl CmdFiles {
+    /// Deletes the kept file, if any.
+    async fn clear(&mut self, cx: &Cx) {
+        if let Some(path) = self.last.take() {
+            remove_script(cx, &path).await;
+        }
+    }
+}
+
+impl Drop for CmdFiles {
+    /// Worker exit: one unlink on the runtime tmpfs, inline.
+    fn drop(&mut self) {
+        if let Some(path) = self.last.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Runs the newly queued commands one at a time, in arrival order.
+#[allow(clippy::too_many_arguments)]
 async fn run_commands(
     cx: &Cx,
     io: &WorkerIo,
@@ -717,6 +784,7 @@ async fn run_commands(
     commands: &Commands,
     queue: &mut Queue,
     windows: &[WindowEntry],
+    files: &mut CmdFiles,
 ) {
     let new = queue.take(&io.control.borrow_and_clone());
     for (seq, cmd) in new {
@@ -725,21 +793,30 @@ async fn run_commands(
         }
         queue.progress.set_started(SourceId::KWin, seq);
         if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
-            run_script(cx, host, dir, &plugin, script).await;
+            run_script(cx, host, dir, &plugin, script, files).await;
         }
         queue.progress.set_done(SourceId::KWin, seq);
     }
 }
 
-/// Writes `<dir>/<plugin>.js` (mode 0600), runs it, then deletes the file. A failure is logged
-/// at `warn` and the command is dropped (R-170).
-async fn run_script(cx: &Cx, host: &impl ScriptHost, dir: &Path, plugin: &str, script: String) {
+/// Deletes the previous command's file, writes `<dir>/<plugin>.js` (mode 0600) and runs it. The
+/// new file is kept in `files`, also after a failure: `loadScript` may have taken it before
+/// `start` failed. A failure is logged at `warn` and the command is dropped (R-170).
+async fn run_script(
+    cx: &Cx,
+    host: &impl ScriptHost,
+    dir: &Path,
+    plugin: &str,
+    script: String,
+    files: &mut CmdFiles,
+) {
+    files.clear(cx).await;
     let path = dir.join(format!("{plugin}.js"));
     let result = match write_script(cx, &path, script).await {
         Ok(()) => host.run(cx, &path, plugin).await,
         Err(e) => Err(e),
     };
-    remove_script(cx, &path).await;
+    files.last = Some(path);
     if let Err(e) = result
         && !cx.is_cancel_requested()
     {
@@ -1427,8 +1504,32 @@ mod tests {
         dir
     }
 
+    /// The file names in `dir`, sorted.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Runs `body` as one lab task and checks the lab report.
+    fn in_lab(body: impl Future<Output = ()> + Send + 'static) {
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, body)
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     #[test]
-    fn cmd_file_written_then_deleted() {
+    fn cmd_file_kept_until_next_command() {
         let dir = scratch("cmd-file").join("tasklens");
         let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
         let cmds = commands(EngineMode::Full);
@@ -1440,37 +1541,91 @@ mod tests {
             seen: Mutex::new(Vec::new()),
             fail: true,
         });
+        // The directory listing after each step.
+        let steps = Arc::new(Mutex::new(Vec::new()));
 
-        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
-        let root = lab.state.create_root_region(Budget::INFINITE);
-        let (task, _handle) = {
+        {
             let (dir, host, failing) = (dir.clone(), Arc::clone(&host), Arc::clone(&failing));
-            lab.state
-                .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::current().expect("task has a Cx");
-                    let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
-                    run_script(&cx, &*host, &dir, &plugin, script).await;
-                    let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
-                    run_script(&cx, &*failing, &dir, &plugin, script).await;
-                })
-                .expect("task is created")
-        };
-        lab.scheduler.lock().schedule(task, 0);
-        lab.run_until_idle();
+            let steps = Arc::clone(&steps);
+            in_lab(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let step = || steps.lock().expect("lock").push(names(&dir));
+                let mut files = CmdFiles::default();
+                let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
+                run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                step();
+                let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
+                run_script(&cx, &*failing, &dir, &plugin, script, &mut files).await;
+                step();
+                // The next `Update`.
+                files.clear(&cx).await;
+                step();
+                let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
+                run_script(&cx, &*host, &dir, &plugin, script, &mut files).await;
+                step();
+                // Worker exit.
+                drop(files);
+                step();
+            });
+        }
 
         let seen = host.seen.lock().expect("lock");
-        assert_eq!(seen.len(), 1);
+        assert_eq!(seen.len(), 2);
         let (plugin, text, mode) = &seen[0];
         assert_eq!(plugin, "tasklens-cmd-1");
         assert!(text.contains("\"op\":\"activate\""), "{text}");
         assert!(text.contains(&format!("\"{ID_A}\"")), "{text}");
         assert_eq!(*mode, 0o600);
         assert_eq!(failing.seen.lock().expect("lock")[0].0, "tasklens-cmd-2");
-        // Both files are gone, the failed one too.
-        let left: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
-        assert!(left.is_empty(), "{left:?}");
-        let report = lab.run_until_quiescent_with_report();
-        assert!(report.lab_test_passed(), "{report:?}");
+        let none: Vec<String> = Vec::new();
+        assert_eq!(
+            *steps.lock().expect("lock"),
+            [
+                vec!["tasklens-cmd-1.js".to_owned()],
+                // The second command deleted the first file. A failed command keeps its file.
+                vec!["tasklens-cmd-2.js".to_owned()],
+                none.clone(),
+                vec!["tasklens-cmd-3.js".to_owned()],
+                none,
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir.parent().expect("scratch"));
+    }
+
+    #[test]
+    fn stale_cmd_files_removed_at_start() {
+        let dir = scratch("stale").join("tasklens");
+        std::fs::create_dir_all(&dir).expect("dir");
+        for name in [
+            "tasklens-cmd-7.js",
+            "tasklens-cmd-12.js",
+            "kwin-bridge.js",
+            "tasklens-cmd-.js",
+            "tasklens-cmd-x.js",
+            "tasklens-cmd-7.js.tmp",
+        ] {
+            std::fs::write(dir.join(name), "").expect("write");
+        }
+        std::fs::create_dir(dir.join("tasklens-cmd-8.js")).expect("subdir");
+        {
+            let dir = dir.clone();
+            in_lab(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                remove_stale(&cx, &dir).await;
+                // A missing directory is fine.
+                remove_stale(&cx, &dir.join("missing")).await;
+            });
+        }
+        assert_eq!(
+            names(&dir),
+            [
+                "kwin-bridge.js",
+                "tasklens-cmd-.js",
+                "tasklens-cmd-7.js.tmp",
+                "tasklens-cmd-8.js",
+                "tasklens-cmd-x.js",
+            ]
+        );
         let _ = std::fs::remove_dir_all(dir.parent().expect("scratch"));
     }
 }
