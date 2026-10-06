@@ -237,3 +237,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.18: restricted pids left out of attribution (no ProcessKey); first pass and after gaps every owner gets WarmingUp 0; hidden tab sends empty records.
 - 8fx.17: Recording ignores HistoryMsg::Delete (8fx.18 or E30-A2 must cover store delete); HistoryWorkerConfig.load_delay test seam; state in Arc<Mutex<State>>.
 - ug9.7: name_runs takes &Font. Sanitizer gaps (ZWJ removed, U+2028/2029 kept): follow-up bead.
+- ug9.6: UI-FND-052a example is wrong (expected string is 35 chars at max_px 30). Fix foundation.md example to max_px 35 or the 30 px result /home/oystein/.lo…/game.x86_64.
+- ug9.10: hover tooltips use GPUI .tooltip (pointer placement, no close on key/deactivate); follow-up HoverTooltip bead. FocusTooltip for keyboard.
+- lgw.14: render tests need --features render-tests,test-hooks; goldens 960x1520 and 1056x1672 checked by eye; R-291 scale decision.
+- lban: restart reaches reducer as Failed then Running via source.rs runner (option b, leader decision); Late counts as running.
+- i3o.12: own_cgroup_protected skips under heavy-build (builds.slice); passed when run inside an app.slice scope.
+- Possible flaky: probe_integration spawn_fd3_env_and_fds failed once in a full run (lban).
