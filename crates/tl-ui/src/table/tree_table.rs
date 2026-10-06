@@ -19,11 +19,11 @@ use gpui_kit::base::{
 
 use gpui_kit::{
     AnyElement, AnyView, App, BorrowAppContext as _, Bounds, ClipboardItem, Context, Div,
-    ElementId, EventEmitter, WeakEntity, FocusHandle, Hsla, InteractiveElement, IntoElement,
+    ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
-    Window, div, font, point, px, size, uniform_list,
+    WeakEntity, Window, div, font, point, px, size, uniform_list,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};

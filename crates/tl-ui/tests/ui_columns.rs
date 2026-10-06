@@ -28,10 +28,10 @@ use tl_ui::components::validity::{GlyphContent, glyph_parts};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::table::actions::{EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use tl_ui::table::cells::CellOut;
-use tl_ui::table::columns_window::{ColumnPicker, PickerColumn, PickerItem};
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
+use tl_ui::table::columns_window::{ColumnPicker, PickerColumn, PickerItem};
 use tl_ui::table::header::{
     GHOST_OPACITY, HeaderMenuItem, HeaderMenuRow, UNSORTABLE_TOOLTIP, ghost_fill, header_menu_rows,
     header_tooltip, resize_behavior_rows,
@@ -1430,16 +1430,17 @@ fn open_picker(cx: &mut TestAppContext, delegate: HDelegate) -> PickerRig {
     let handle = *picker_windows(&mut vcx)
         .first()
         .expect("a picker window opened");
-    let mut pcx = VisualTestContext::from_window(handle.into(), &vcx);
-    pcx.update(|window, _| window.activate_window());
-    redraw(&mut pcx);
-    let picker = pcx.update(|_, cx| {
+    // Read from the table window: inside its own update a window's root view is taken out.
+    let picker = vcx.update(|_, cx| {
         TlSecondaryWindow::<ColumnPicker>::find(handle, cx)
             .expect("frame")
             .read(cx)
             .content()
             .clone()
     });
+    let mut pcx = VisualTestContext::from_window(handle.into(), &vcx);
+    pcx.update(|window, _| window.activate_window());
+    redraw(&mut pcx);
     PickerRig {
         table,
         vcx,
@@ -1469,12 +1470,14 @@ fn row_bounds(rig: &mut PickerRig, id: ColumnId) -> Option<gpui_kit::Bounds<Pixe
         .debug_bounds(leak(format!("ColumnPicker-row-{}", id.as_str())))
 }
 
-/// Types `text` into the focused filter and lets `ms` pass.
+/// Replaces the filter text with `text`, typed into the focused field, and lets `ms` pass.
+/// `set_value` emits no `Change`; typing does.
 fn type_filter(rig: &mut PickerRig, text: &str, ms: u64) {
     let filter = rig.picker.read_with(&rig.pcx, |p, _| p.filter().clone());
     rig.pcx.update(|window, cx| {
-        filter.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+        filter.update(cx, |s, cx| s.set_value("", window, cx));
     });
+    rig.pcx.simulate_input(text);
     rig.pcx
         .executor()
         .advance_clock(std::time::Duration::from_millis(ms));
@@ -1542,7 +1545,9 @@ fn picker_name_always_on() {
     assert_eq!(text.as_ref(), "always on");
 
     // A click on the Name row changes nothing.
-    let at = row_bounds(&mut rig, ColumnId::Name).expect("Name row").center();
+    let at = row_bounds(&mut rig, ColumnId::Name)
+        .expect("Name row")
+        .center();
     click(&mut rig.pcx, at);
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
 }
@@ -1618,11 +1623,15 @@ fn picker_toggle_persists_and_restores_width() {
     let order = [ColumnId::Name, ColumnId::User, ColumnId::Cpu, ColumnId::Pid];
     let mut d = registry_delegate(specs, &order);
     d.layout.set_width(ColumnId::Cpu, px(70.));
-    d.layout.set_visible(ColumnId::Cpu, false).expect("hide CPU");
+    d.layout
+        .set_visible(ColumnId::Cpu, false)
+        .expect("hide CPU");
     let mut rig = open_picker(&mut cx, d);
     assert!(!picker_column(&mut rig, ColumnId::Cpu).expect("CPU").visible);
 
-    let at = row_bounds(&mut rig, ColumnId::Cpu).expect("CPU row").center();
+    let at = row_bounds(&mut rig, ColumnId::Cpu)
+        .expect("CPU row")
+        .center();
     click(&mut rig.pcx, at);
     redraw(&mut rig.vcx);
     assert_eq!(visible_order(&mut rig.vcx, &rig.table), order);
@@ -1705,7 +1714,9 @@ fn picker_na_column_enabled_with_note() {
     assert!(pid.hideable, "enabled");
     assert_eq!(pid.note_key(), Some("table-picker-na"));
     assert!(rig.pcx.debug_bounds("ColumnPicker-note-pid").is_some());
-    let at = row_bounds(&mut rig, ColumnId::Pid).expect("PID row").center();
+    let at = row_bounds(&mut rig, ColumnId::Pid)
+        .expect("PID row")
+        .center();
     click(&mut rig.pcx, at);
     assert!(picker_column(&mut rig, ColumnId::Pid).expect("PID").visible);
 }
@@ -1715,7 +1726,9 @@ fn picker_keys_move_and_toggle() {
     let mut cx = cosmic_cx();
     let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
     let mut rig = open_picker(&mut cx, d);
-    let focus = rig.picker.read_with(&rig.pcx, |p, _| p.list_focus().clone());
+    let focus = rig
+        .picker
+        .read_with(&rig.pcx, |p, _| p.list_focus().clone());
     rig.pcx.update(|window, cx| focus.focus(window, cx));
     rig.pcx.simulate_keystrokes("down");
     let cursor = |rig: &mut PickerRig| rig.picker.read_with(&rig.pcx, |p, _| p.cursor());
@@ -1724,7 +1737,11 @@ fn picker_keys_move_and_toggle() {
     assert_eq!(cursor(&mut rig), Some("user"), "headings are skipped");
     rig.pcx.simulate_keystrokes("space");
     redraw(&mut rig.pcx);
-    assert!(picker_column(&mut rig, ColumnId::User).expect("User").visible);
+    assert!(
+        picker_column(&mut rig, ColumnId::User)
+            .expect("User")
+            .visible
+    );
     rig.pcx.simulate_keystrokes("end");
     assert_eq!(cursor(&mut rig), Some("ws_peak"));
     rig.pcx.simulate_keystrokes("home");
