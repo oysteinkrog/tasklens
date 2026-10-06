@@ -5515,7 +5515,9 @@ mod tests {
         }
     }
 
-    fn first_update(lab: &mut LabRuntime, root: &Path, manager: Manager) -> ServicesUpdate {
+    /// The first update of a worker started on `root`, in its own lab runtime.
+    fn first_update(seed: u64, root: &Path, manager: Manager) -> ServicesUpdate {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).max_steps(1_000_000));
         let (io, mut rx, _control_tx, _demand_tx) = worker_io();
         let cfg = Arc::new(
             EngineConfig::new(EngineMode::Full, root.join("state"))
@@ -5536,7 +5538,9 @@ mod tests {
         lab.run_until_idle();
         let msg = rx.try_recv().expect("one update");
         handle.abort();
-        advance(lab, IDLE_RECHECK);
+        advance(&mut lab, IDLE_RECHECK);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
         match msg {
             EngineMsg::Source(SourceUpdate::Services(up)) => up,
             other => panic!("unexpected message {other:?}"),
@@ -5545,24 +5549,20 @@ mod tests {
 
     #[test]
     fn openrc_start_without_init_or_user_manager() {
-        let mut lab = LabRuntime::new(LabConfig::new(83).max_steps(1_000_000));
         let tmp = rc_temp();
 
         // No systemd marker and no rc-status: the bus path publishes Unavailable.
-        let up = first_update(&mut lab, tmp.path(), Manager::System);
+        let up = first_update(83, tmp.path(), Manager::System);
         assert_eq!(up.state, ManagerState::Unavailable);
         assert_eq!(up.backend, ServiceBackend::Systemd);
         assert!(up.units.is_empty());
 
         // OpenRC: the user manager is Unavailable without a bus.
         put(tmp.path(), "sbin/rc-status", "");
-        let up = first_update(&mut lab, tmp.path(), Manager::User);
+        let up = first_update(84, tmp.path(), Manager::User);
         assert_eq!(up.manager, Manager::User);
         assert_eq!(up.state, ManagerState::Unavailable);
         assert_eq!(up.backend, ServiceBackend::OpenRc);
         assert_eq!(up.validity, Validity::Missing);
-
-        let report = lab.run_until_quiescent_with_report();
-        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
