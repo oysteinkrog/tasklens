@@ -4,8 +4,9 @@
 //! `SIGKILL` as its parent-death signal, so a crashed engine never leaves a probe behind.
 //! `asupersync::process` is never used here (zombie bug `bi2462.114`).
 //!
-//! This is the only file in `tl-engine` allowed to contain `unsafe` (ADR-001 rule 4). The one
-//! `unsafe` API is `CommandExt::pre_exec`.
+//! This is the only file in `tl-engine` allowed to contain `unsafe` (ADR-001 rule 4). The
+//! `unsafe` APIs are `CommandExt::pre_exec` and the `libc` calls that mark fds above 3
+//! close-on-exec in the child (R-290).
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -107,15 +108,17 @@ fn spawn_error(e: &io::Error) -> ProbeError {
 fn set_child_setup(cmd: &mut Command, child_raw: RawFd, parent_pid: i32) {
     // SAFETY: the hook runs in the forked child before exec, where only async-signal-safe calls
     // are allowed. `child_setup` makes only raw system calls through rustix (`dup2`, `fcntl`,
-    // `prctl`, `getppid`), allocates nothing (errors are `from_raw_os_error`) and touches no
-    // locks. The closure captures two integers.
+    // `prctl`, `getppid`) and libc (`close_range`, `fcntl`), allocates nothing (errors are
+    // `from_raw_os_error` or `last_os_error`, both plain integers) and touches no locks. The
+    // closure captures two integers.
     unsafe {
         cmd.pre_exec(move || child_setup(child_raw, parent_pid));
     }
 }
 
-/// Runs in the child between fork and exec: moves `child_raw` to fd 3 without `CLOEXEC`, sets
-/// the parent-death signal to `SIGKILL`, and fails if the parent `parent_pid` is already gone.
+/// Runs in the child between fork and exec: moves `child_raw` to fd 3 without `CLOEXEC`, marks
+/// every fd above 3 `CLOEXEC`, sets the parent-death signal to `SIGKILL`, and fails if the
+/// parent `parent_pid` is already gone.
 #[allow(unsafe_code)]
 fn child_setup(child_raw: RawFd, parent_pid: i32) -> io::Result<()> {
     if child_raw == CHILD_FD {
@@ -133,12 +136,41 @@ fn child_setup(child_raw: RawFd, parent_pid: i32) -> io::Result<()> {
         let mut target = ManuallyDrop::new(unsafe { OwnedFd::from_raw_fd(CHILD_FD) });
         dup2(source, &mut target)?;
     }
+    cloexec_above_fd3();
     set_parent_process_death_signal(Some(Signal::KILL))?;
     // The parent may have died between fork and prctl, and then the signal never comes.
     if getppid().map(|p| p.as_raw_nonzero().get()) != Some(parent_pid) {
         return Err(Errno::SRCH.into());
     }
     Ok(())
+}
+
+/// Highest fd the fallback in [`cloexec_above_fd3`] reaches.
+const FALLBACK_MAX_FD: libc::c_int = 1024;
+
+/// Marks every fd above 3 `CLOEXEC`, so exec closes them all and the probe starts with 0 to 3
+/// only. An fd that another thread of this process opened without `CLOEXEC` (zbus receives
+/// D-Bus fds that way, R-290) would otherwise leak into the probe.
+///
+/// The flag is `CLOSE_RANGE_CLOEXEC`, not a plain close: std reports an exec failure to the
+/// parent over a `CLOEXEC` pipe above fd 3, and closing it would turn a missing binary into a
+/// spawn that looks successful. Kernels before 5.11 reject the flag (`EINVAL`) or the call
+/// (`ENOSYS`); then each fd from 4 to [`FALLBACK_MAX_FD`] gets `FD_CLOEXEC` one by one, and
+/// `EBADF` for a closed fd is ignored.
+#[allow(unsafe_code)]
+fn cloexec_above_fd3() {
+    let first = (CHILD_FD + 1).cast_unsigned();
+    // SAFETY: close_range only changes fd flags in this process and is async-signal-safe. It
+    // reads no memory of ours.
+    let r = unsafe { libc::close_range(first, u32::MAX, libc::CLOSE_RANGE_CLOEXEC as libc::c_int) };
+    if r == 0 {
+        return;
+    }
+    for fd in CHILD_FD + 1..=FALLBACK_MAX_FD {
+        // SAFETY: fcntl(F_SETFD) on a raw number is async-signal-safe and changes only that
+        // fd's flags; a number that is not open fails with EBADF and changes nothing.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    }
 }
 
 #[cfg(test)]
@@ -243,7 +275,23 @@ mod tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
+        assert_only_own_fds(&child);
+    }
 
+    #[test]
+    fn inheritable_fd_does_not_reach_probe() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(probe) = test_probe() else { return };
+        // An fd with CLOEXEC cleared, as zbus holds a received D-Bus fd for a moment (R-290).
+        let file = std::fs::File::open("/dev/null").expect("open /dev/null");
+        fcntl_setfd(&file, FdFlags::empty()).expect("clear CLOEXEC");
+        let child = spawn(&probe);
+        assert_only_own_fds(&child);
+        drop(file);
+    }
+
+    /// Asserts that the probe holds fds 0 to 3 and nothing else of the test process.
+    fn assert_only_own_fds(child: &ProbeChild) {
         // `spawn` returns after execve, so any fd the test process held without CLOEXEC is in
         // the child now, and the probe never closes it. The probe also opens fds of its own:
         // ld.so opens each shared library and closes it again, and `open_fd` in tl-gpu-probe

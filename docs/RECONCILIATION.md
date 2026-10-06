@@ -1871,6 +1871,22 @@ a 1 Hz sample leaves a gap shorter than the stale threshold. The first Running o
 - Edits: new bead for `reducer/apply.rs` and `reducer/series.rs`; ndy.2 drops its gap assertion and the new
   bead's test covers it.
 
+### R-290 The GPU probe child marks every fd above 3 close-on-exec
+
+zbus 5.19.0 receives fds with `recvmsg` and `RecvFlags::empty()` (`zbus-5.19.0/src/connection/socket/unix.rs:284`),
+so a received D-Bus fd is open without `O_CLOEXEC` until zvariant dups it. A probe spawned in that window
+inherited it (`gpu::spawn::tests::no_leaked_fds` failed with a `/usr` fd). Leader decision (b), defence in depth
+in the child: the `pre_exec` hook in `gpu/spawn.rs` calls `close_range(4, u32::MAX, CLOSE_RANGE_CLOEXEC)` after
+the fd 3 `dup2`. If that fails (`ENOSYS`, or `EINVAL` on kernels before 5.11), it sets `FD_CLOEXEC` on 4 to 1024
+one by one. The bead asked for a plain close (flags 0). That would also close std's `CLOEXEC` exec-error pipe,
+so a failed exec would look like a successful spawn; marking close-on-exec gives the same result at exec and
+keeps the error report. rustix 1.1.5 has no `close_range`, so `tl-engine` gets `libc` as a direct dependency,
+for this file only.
+- Basis: bead ndy.16; std reports exec failure over a `CLOEXEC` pipe and treats EOF as success [inferred from
+  std's unix `spawn`, not re-read here].
+- Edits: ARCHITECTURE tl-engine row adds libc; `xtask/src/check_deps.rs` allows libc for tl-engine; patching
+  zbus upstream is a separate follow-up for the owner.
+
 ## Owner questions
 
 Answered on 2026-10-03. Q-1, Q-3, Q-4 and Q-6 are decisions D-007 to D-010 in `docs/DECISIONS.md`. Q-6 went against the recommendation: History mode shows a rolling 10-minute window while recording is off, so R-025's sentence about showing no data is replaced by D-010. Q-2 and Q-5 were not put to Oystein; their recommended answers (IEC units only, app-row Memory is cgroup `anon`) stand.

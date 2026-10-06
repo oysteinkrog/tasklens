@@ -80,6 +80,7 @@ pub const ALLOWED: &[(&str, &[&str])] = &[
             "zbus",
             "futures-lite",
             "rustix",
+            "libc",
             "postcard",
             "serde",
             "thiserror",
