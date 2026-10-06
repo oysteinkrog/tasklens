@@ -15,6 +15,7 @@ pub mod progress;
 pub mod radio;
 pub mod skeleton;
 pub mod slider;
+pub mod stepper;
 pub mod switch;
 pub mod tabs;
 pub mod tooltip;
