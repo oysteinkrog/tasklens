@@ -927,3 +927,202 @@ perf-legend-kernel = <kernel>
         assert_eq!(label.as_deref(), Some("<speed>"));
     }
 }
+
+/// The Performance Actions and key bindings (E24-002, canonical table (b), PERF-010, R-128).
+mod perf_keys {
+    use std::sync::Arc;
+
+    use gpui_kit::{Action, App, KeyContext, Keystroke, TestAppContext};
+    use tl_ui::actions::{SelectTab, bind_keys_global};
+    use tl_ui::pages::performance::actions::*;
+    use tl_ui::pages::performance::{DeviceKey, DeviceKind};
+
+    /// The Action the keymap resolves `keys` to with `contexts` as the stack (outermost first).
+    fn resolve(cx: &App, keys: &str, contexts: &[&str]) -> Option<Box<dyn Action>> {
+        let input: Vec<Keystroke> = keys
+            .split(' ')
+            .map(|k| Keystroke::parse(k).unwrap_or_else(|e| panic!("keystroke {k}: {e:?}")))
+            .collect();
+        let stack: Vec<KeyContext> = contexts
+            .iter()
+            .map(|c| KeyContext::parse(c).expect("key context"))
+            .collect();
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let (bindings, _) = keymap.bindings_for_input(&input, &stack);
+        bindings.first().map(|b| b.action().boxed_clone())
+    }
+
+    fn assert_resolves(cx: &App, keys: &str, contexts: &[&str], expected: &dyn Action) {
+        let got = resolve(cx, keys, contexts);
+        assert!(
+            got.as_ref().is_some_and(|a| a.partial_eq(expected)),
+            "{keys} in {contexts:?}: expected {expected:?}, got {got:?}"
+        );
+    }
+
+    /// Bound the way `TasklensUi::init` binds them: Global, Table, then Performance.
+    fn bound(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            bind_keys_global(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
+            bind_keys_performance(cx);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn performance_keys_match_table_b(cx: &mut TestAppContext) {
+        bound(cx);
+        let stack = &["Global", "Performance"];
+        let mut rows: Vec<(String, Box<dyn Action>)> = (0..8u8)
+            .map(|i| {
+                let action: Box<dyn Action> = Box::new(PerfSelectVisibleDevice { index: i });
+                (format!("f{}", i + 1), action)
+            })
+            .collect();
+        let fixed: Vec<(&str, Box<dyn Action>)> = vec![
+            ("up", Box::new(PerfSelectPrevDevice)),
+            ("down", Box::new(PerfSelectNextDevice)),
+            ("home", Box::new(PerfSelectFirstDevice)),
+            ("end", Box::new(PerfSelectLastDevice)),
+            ("f9", Box::new(PerfToggleSidebar)),
+            ("ctrl-t", Box::new(PerfToggleSidebar)),
+            ("ctrl-m", Box::new(PerfToggleSummaryMode)),
+            ("ctrl-c", Box::new(PerfCopyDeviceInfo)),
+            ("alt-up", Box::new(PerfMoveFocusedDevice { delta: -1 })),
+            ("alt-down", Box::new(PerfMoveFocusedDevice { delta: 1 })),
+        ];
+        rows.extend(fixed.into_iter().map(|(k, a)| (k.to_string(), a)));
+
+        cx.read(|cx| {
+            for (keys, action) in &rows {
+                assert_resolves(cx, keys, stack, action.as_ref());
+            }
+            // The Table copy is bound too, but not in this context.
+            assert_resolves(cx, "ctrl-c", stack, &PerfCopyDeviceInfo);
+
+            let keymap = cx.key_bindings();
+            let keymap = keymap.borrow();
+            let f3 = keymap
+                .bindings_for_action(&PerfSelectVisibleDevice { index: 2 })
+                .any(|b| {
+                    b.keystrokes().len() == 1
+                        && b.keystrokes()[0].unparse() == "f3"
+                        && b.predicate()
+                            .is_some_and(|p| p.to_string() == "Performance")
+                });
+            assert!(f3, "f3 in Performance selects visible device 2");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn summary_context_swallows_tab_keys(cx: &mut TestAppContext) {
+        bound(cx);
+        let summary = &["Global", "Performance", "PerformanceSummary"];
+        cx.read(|cx| {
+            for i in 1..=6 {
+                assert_resolves(cx, &format!("ctrl-{i}"), summary, &NoOp);
+                assert_resolves(cx, &format!("alt-{i}"), summary, &NoOp);
+            }
+            assert_resolves(cx, "ctrl-tab", summary, &NoOp);
+            assert_resolves(cx, "ctrl-shift-tab", summary, &NoOp);
+            assert_resolves(cx, "escape", summary, &PerfToggleSummaryMode);
+            assert_resolves(cx, "ctrl-m", summary, &PerfToggleSummaryMode);
+
+            assert_resolves(cx, "ctrl-2", &["Global"], &SelectTab(1));
+            assert_resolves(cx, "ctrl-2", &["Global", "Performance"], &SelectTab(1));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn perf_actions_in_tasklens_namespace(cx: &mut TestAppContext) {
+        let key = DeviceKey(Arc::from("disk:wwn-1"));
+        let all: Vec<Box<dyn Action>> = vec![
+            Box::new(PerfSelectPrevDevice),
+            Box::new(PerfSelectNextDevice),
+            Box::new(PerfSelectFirstDevice),
+            Box::new(PerfSelectLastDevice),
+            Box::new(PerfToggleSidebar),
+            Box::new(PerfToggleSummaryMode),
+            Box::new(PerfCopyDeviceInfo),
+            Box::new(PerfCopyValue),
+            Box::new(PerfEnterEditMode),
+            Box::new(PerfExitEditMode),
+            Box::new(PerfEnableAllPages),
+            Box::new(PerfDisableAllPages),
+            Box::new(PerfResetPagesToDefault),
+            Box::new(PerfShowMiniWindow),
+            Box::new(PerfToggleCpuKernel),
+            Box::new(PerfToggleMemoryComposition),
+            Box::new(PerfToggleMemorySwapGraph),
+            Box::new(PerfOpenNetworkSettings),
+            Box::new(PerfSelectDevice { key: key.clone() }),
+            Box::new(PerfSelectVisibleDevice { index: 0 }),
+            Box::new(PerfSetGraphRange { secs: 60 }),
+            Box::new(PerfJumpToType {
+                kind: DeviceKind::Disk,
+            }),
+            Box::new(PerfSetPageVisible {
+                key: key.clone(),
+                visible: true,
+            }),
+            Box::new(PerfMoveDevice {
+                key: key.clone(),
+                before: None,
+            }),
+            Box::new(PerfMoveFocusedDevice { delta: 1 }),
+            Box::new(PerfAddTrayGraph {
+                source: key.clone(),
+            }),
+            Box::new(PerfSetCpuGraphMode {
+                mode: CpuGraphMode::PerCore,
+            }),
+            Box::new(PerfSetCpuSecondaryGraph {
+                choice: CpuSecondaryGraph::Clock,
+            }),
+            Box::new(PerfShowSmart { key: key.clone() }),
+            Box::new(PerfSmartRefresh { key: key.clone() }),
+            Box::new(PerfSmartReadSmartctl { key: key.clone() }),
+            Box::new(PerfEject { key: key.clone() }),
+            Box::new(PerfToggleGpuEngine {
+                key: key.clone(),
+                engine: Arc::from("render"),
+            }),
+            Box::new(PerfToggleGpuOptionalGraph {
+                key: key.clone(),
+                which: GpuOptionalGraph::Clocks,
+            }),
+            Box::new(PerfRenameFan { key: key.clone() }),
+            Box::new(PerfSetFanTempSensor {
+                key: key.clone(),
+                sensor: None,
+            }),
+            Box::new(PerfFetchPublicIp { key }),
+            Box::new(NoOp),
+        ];
+        assert_eq!(all.len(), 38);
+        cx.read(|cx| {
+            let names = cx.all_action_names();
+            for action in &all {
+                let name = action.name();
+                assert!(
+                    name.starts_with("tasklens::Perf") || name == "tasklens::NoOp",
+                    "{name}"
+                );
+                assert!(names.contains(&name), "{name} is registered");
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn graph_range_round_trips(cx: &mut TestAppContext) {
+        let action = PerfSetGraphRange { secs: 300 };
+        let json = serde_json::json!({ "secs": 300 });
+        cx.read(|cx| {
+            let built = cx
+                .build_action(action.name(), Some(json))
+                .expect("build PerfSetGraphRange");
+            assert!(built.partial_eq(&action), "got {built:?}");
+        });
+    }
+}
