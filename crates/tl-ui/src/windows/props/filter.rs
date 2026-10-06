@@ -69,6 +69,9 @@ struct FilterWords {
     icon_tooltip: SharedString,
     /// The accessible name of the field, "Filter {tab label}".
     name: SharedString,
+    /// The empty-state texts for [`NO_MATCH`] and [`NO_MATCH_THREADS`].
+    no_match: SharedString,
+    no_match_threads: SharedString,
 }
 
 impl FilterWords {
@@ -77,6 +80,17 @@ impl FilterWords {
             placeholder: tr(cx, PLACEHOLDER),
             icon_tooltip: tr(cx, ICON_TOOLTIP),
             name: tr_args(cx, NAME, &[("tab", tab_label.to_string().into())]),
+            no_match: tr(cx, NO_MATCH),
+            no_match_threads: tr(cx, NO_MATCH_THREADS),
+        }
+    }
+
+    /// The empty-state text for the key `text`.
+    fn no_match(&self, text: &'static str) -> &SharedString {
+        if text == NO_MATCH_THREADS {
+            &self.no_match_threads
+        } else {
+            &self.no_match
         }
     }
 }
@@ -321,10 +335,11 @@ pub fn on_clear(
 }
 
 /// The block shown when no row matches. `text` is a Fluent key: [`NO_MATCH`], or
-/// [`NO_MATCH_THREADS`] for the Threads tab. Its "Clear filter" button dispatches
-/// [`ClearPropsFilter`].
-pub fn no_match(text: &'static str, cx: &App) -> impl IntoElement {
-    TlEmptyState::new(tr(cx, text)).clear_filter(Box::new(ClearPropsFilter))
+/// [`NO_MATCH_THREADS`] for the Threads tab. The text comes from `filter`'s words, so drawing it
+/// makes no `tr` call. Its "Clear filter" button dispatches [`ClearPropsFilter`].
+pub fn no_match(filter: &Entity<PropsFilter>, text: &'static str, cx: &App) -> impl IntoElement {
+    let text = filter.read(cx).words.no_match(text).clone();
+    TlEmptyState::new(text).clear_filter(Box::new(ClearPropsFilter))
 }
 
 #[cfg(test)]
@@ -372,7 +387,9 @@ mod tests {
                 .flex()
                 .flex_col()
                 .child(filter_bar(&self.filter, None, cx))
-                .when(self.empty, |d| d.child(no_match(NO_MATCH, cx)))
+                .when(self.empty, |d| {
+                    d.child(no_match(&self.filter, NO_MATCH, cx))
+                })
         }
     }
 
@@ -554,6 +571,28 @@ mod tests {
             cx.update(|_, cx| f.read(cx).accessible_name()),
             "Filter Threads"
         );
+    }
+
+    #[gpui_kit::test]
+    fn empty_state_frames_make_no_tr_call(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx, true);
+        type_text(&view, cx, "zzz");
+        advance(cx, 100);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(cx.debug_bounds("TlEmptyState-text").is_some());
+
+        let before = crate::i18n::tr_calls();
+        for _ in 0..60 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        assert_eq!(crate::i18n::tr_calls(), before, "60 frames make no tr call");
+
+        let f = filter(&view, cx);
+        let threads = cx.update(|_, cx| f.read(cx).words.no_match(NO_MATCH_THREADS).clone());
+        assert_eq!(threads, "No threads match the current filter.");
     }
 
     #[gpui_kit::test]
