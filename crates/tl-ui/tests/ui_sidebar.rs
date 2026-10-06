@@ -360,3 +360,396 @@ fn card_selected_and_focus_outlines(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("perf-card-selected").is_none());
     assert!(cx.debug_bounds("perf-card-focus-ring").is_none());
 }
+
+/// The `DeviceSidebar` entity: cards, selection, keys, change-only text and demand (E24-004,
+/// UI-PRF-011, UI-PRF-012).
+mod sidebar {
+    use gpui_kit::{Focusable as _, StyleRefinement};
+    use tl_model::demand::{CpuDemand, Demand};
+    use tl_model::devices::DeviceCatalog;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::i18n::{init_strings, tr_calls};
+    use tl_ui::pages::performance::actions::{PerfSelectPrevDevice, PerfSelectVisibleDevice};
+    use tl_ui::pages::performance::sidebar::{DeviceSidebar, SidebarEvent};
+    use tl_ui::settings_global::TlSettings;
+
+    use super::*;
+
+    const GPU: &str = "gpu:pci:0000:2d:00.0";
+    const CPU_MODEL: &str = "AMD Ryzen 7 7800X3D 8-Core Processor";
+
+    struct SidebarHost(Entity<DeviceSidebar>);
+
+    impl Render for SidebarHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(260.)).h(px(900.)).child(
+                self.0
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            )
+        }
+    }
+
+    struct Rig<'a> {
+        sidebar: Entity<DeviceSidebar>,
+        demand: Entity<DemandAggregator>,
+        engine: Arc<FakeEngine>,
+        events: Rc<RefCell<Vec<SidebarEvent>>>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn disk(idx: u16, name: &str) -> DeviceEntry {
+        entry(
+            idx,
+            DeviceIdentity::Disk {
+                major: 8,
+                minor: idx.into(),
+                name: Arc::from(name),
+                wwn_or_serial: None,
+            },
+            None,
+        )
+    }
+
+    fn net(idx: u16, name: &str) -> DeviceEntry {
+        entry(
+            idx,
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex: idx.into(),
+                name: Arc::from(name),
+            },
+            Some(NetKind::Wired),
+        )
+    }
+
+    /// CPU, Memory, a GPU, four disks and two wired interfaces, in a scrambled catalog order.
+    fn nine() -> Vec<DeviceEntry> {
+        vec![
+            net(7, "eth0"),
+            disk(3, "sda"),
+            entry(0, DeviceIdentity::CpuPackage, None),
+            disk(4, "sdb"),
+            entry(
+                2,
+                DeviceIdentity::Gpu {
+                    uuid: [0; 16],
+                    pci_bus_id: Arc::from("0000:2d:00.0"),
+                },
+                None,
+            ),
+            entry(1, DeviceIdentity::Memory, None),
+            disk(5, "sdc"),
+            net(8, "eth1"),
+            disk(6, "sdd"),
+        ]
+    }
+
+    /// A system snapshot with valid memory totals; `used` in GiB.
+    fn system(used_gib: u64) -> SystemSnapshot {
+        let mut sys = SystemSnapshot::default();
+        sys.header.validity = Validity::Valid;
+        sys.header.version = used_gib;
+        sys.memory.validity = Validity::Valid;
+        sys.memory.total = 64 << 30;
+        sys.memory.used = used_gib << 30;
+        sys.memory.available = sys.memory.total - sys.memory.used;
+        sys.memory.committed = 20 << 30;
+        sys.memory.commit_limit = 80 << 30;
+        sys
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        devices: Vec<DeviceEntry>,
+        settings: Settings,
+        state: UiState,
+    ) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: Arc::from(devices),
+            });
+            s.system = Arc::new(system(10));
+            let name = &mut Arc::make_mut(&mut s.inventory).processor.name;
+            name.value = Arc::from(CPU_MODEL);
+            name.validity = Validity::Valid;
+        });
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings,
+                state,
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let d = demand.clone();
+        let sidebar = cx.new(|cx| DeviceSidebar::new(hub, d, cx));
+        let events: Rc<RefCell<Vec<SidebarEvent>>> = Rc::default();
+        let seen = Rc::clone(&events);
+        cx.update(|cx| {
+            cx.subscribe(&sidebar, move |_, ev: &SidebarEvent, _| {
+                seen.borrow_mut().push(ev.clone())
+            })
+            .detach();
+        });
+        let host = sidebar.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost(host));
+        vcx.simulate_scale_factor_change(1.0);
+        let focus = vcx.update(|_, cx| sidebar.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| focus.focus(window, cx));
+        draw(vcx);
+        Rig {
+            sidebar,
+            demand,
+            engine,
+            events,
+            vcx,
+        }
+    }
+
+    fn keys(r: &mut Rig) -> Vec<String> {
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .visible_keys()
+                .map(|k| k.0.to_string())
+                .collect()
+        })
+    }
+
+    fn selected(r: &mut Rig) -> Option<String> {
+        let sidebar = r.sidebar.clone();
+        r.vcx
+            .update(|_, cx| sidebar.read(cx).selected().map(|k| k.0.to_string()))
+    }
+
+    fn renders(r: &mut Rig) -> u32 {
+        let sidebar = r.sidebar.clone();
+        r.vcx.update(|_, cx| sidebar.read(cx).render_count.get())
+    }
+
+    fn lines(r: &mut Rig, key: &str) -> CardLines {
+        let sidebar = r.sidebar.clone();
+        let key = DeviceKey(Arc::from(key));
+        r.vcx.update(|_, cx| {
+            sidebar
+                .read(cx)
+                .heading_for(&key)
+                .expect("card exists")
+                .clone()
+        })
+    }
+
+    fn no_disks() -> Settings {
+        let mut s = Settings::default();
+        s.performance.show_disks = false;
+        s
+    }
+
+    fn saved(key: &str) -> UiState {
+        let mut state = UiState::default();
+        state.performance.selected_device = key.to_owned();
+        state
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_nine_cards_in_type_order(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        assert_eq!(
+            keys(&mut r),
+            [
+                "cpu", "memory", GPU, "disk:sda", "disk:sdb", "disk:sdc", "disk:sdd", "net:eth0",
+                "net:eth1"
+            ]
+        );
+        let sidebar = r.sidebar.clone();
+        let (cards, rows) = r.vcx.update(|_, cx| {
+            (
+                sidebar.read(cx).cards().len(),
+                sidebar.read(cx).rows().len(),
+            )
+        });
+        assert_eq!((cards, rows), (9, 9));
+        assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 2");
+        // 260 px less sp4 padding on each side.
+        let card = r.vcx.debug_bounds("perf-card").expect("card");
+        assert_eq!(card.size.width, px(244.));
+        assert_eq!(card.left(), px(8.));
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+    }
+
+    #[gpui_kit::test]
+    fn saved_selection_or_first_visible(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdb"));
+        assert!(r.events.borrow().is_empty(), "construction emits nothing");
+    }
+
+    #[gpui_kit::test]
+    fn saved_selection_hidden_selects_first(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), no_disks(), saved("disk:sdb"));
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+    }
+
+    #[gpui_kit::test]
+    fn f3_selects_third_visible_card_skipping_hidden(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), no_disks(), UiState::default());
+        assert_eq!(keys(&mut r), ["cpu", "memory", GPU, "net:eth0", "net:eth1"]);
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 2 });
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some(GPU));
+        assert_eq!(
+            *r.events.borrow(),
+            [SidebarEvent::Selected(DeviceKey(Arc::from(GPU)))]
+        );
+        // Past the last visible card: nothing.
+        r.vcx.dispatch_action(PerfSelectVisibleDevice { index: 7 });
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some(GPU));
+    }
+
+    #[gpui_kit::test]
+    fn prev_at_first_is_noop(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        r.vcx.dispatch_action(PerfSelectPrevDevice);
+        r.vcx.run_until_parked();
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        assert!(r.events.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn only_changed_card_reformats(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let (cpu, memory) = (lines(&mut r, "cpu"), lines(&mut r, "memory"));
+        let before = renders(&mut r);
+        let calls = tr_calls();
+
+        r.engine.publish_with(|s| s.system = Arc::new(system(20)));
+        draw(r.vcx);
+
+        let (cpu2, memory2) = (lines(&mut r, "cpu"), lines(&mut r, "memory"));
+        assert_ne!(memory2.line1, memory.line1, "memory re-formats");
+        for (a, b) in [
+            (&cpu.heading, &cpu2.heading),
+            (&cpu.line1, &cpu2.line1),
+            (&cpu.line2, &cpu2.line2),
+        ] {
+            assert_eq!(a, b);
+            // Strings up to 23 bytes are stored inline and have no allocation to keep.
+            if a.len() > 23 {
+                assert_eq!(a.as_ptr(), b.as_ptr(), "CPU text keeps its strings");
+            }
+        }
+        assert_eq!(cpu2.line1, CPU_MODEL);
+        assert_eq!(renders(&mut r), before + 1);
+        assert_eq!(
+            tr_calls(),
+            calls,
+            "the sidebar translates nothing per frame"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn unrelated_snapshot_does_not_rerender(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let before = renders(&mut r);
+        r.engine
+            .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+        draw(r.vcx);
+        // A tick whose values format to the same text redraws nothing either.
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version = 99;
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        assert_eq!(renders(&mut r), before);
+    }
+
+    #[gpui_kit::test]
+    fn demand_follows_visible_kinds(cx: &mut TestAppContext) {
+        let devices = vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            disk(3, "sda"),
+        ];
+        let r = open(cx, devices, Settings::default(), UiState::default());
+        r.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        r.vcx.run_until_parked();
+        let demand = r.demand.clone();
+        let merged = r.vcx.update(|_, cx| demand.read(cx).merged());
+        assert_eq!(
+            merged,
+            Demand {
+                any_surface_visible: true,
+                cpu: CpuDemand::Total,
+                memory: true,
+                disks: true,
+                ..Demand::default()
+            }
+        );
+        assert!(!merged.nets && !merged.gpus && !merged.sensors && !merged.cpu_fast);
+    }
+
+    #[gpui_kit::test]
+    fn select_persists_and_emits(cx: &mut TestAppContext) {
+        let r = open(cx, nine(), Settings::default(), UiState::default());
+        let sidebar = r.sidebar.clone();
+        let key = DeviceKey(Arc::from("net:eth1"));
+        let k = key.clone();
+        r.vcx
+            .update(|_, cx| sidebar.update(cx, |s, cx| s.select(k, cx)));
+        r.vcx.run_until_parked();
+        let saved = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).performance.selected_device.clone());
+        assert_eq!(saved, "net:eth1");
+        assert_eq!(*r.events.borrow(), [SidebarEvent::Selected(key)]);
+        draw(r.vcx);
+        assert!(r.vcx.debug_bounds("perf-card-selected").is_some());
+        assert!(
+            r.vcx.debug_bounds("perf-card-focus-ring").is_some(),
+            "the list has focus"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn removed_selection_moves_to_next_below(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        r.engine.publish_with(|s| {
+            let entries: Vec<DeviceEntry> = nine()
+                .into_iter()
+                .filter(|e| e.idx != DeviceIdx(4))
+                .collect();
+            s.devices = Arc::new(DeviceCatalog {
+                version: 2,
+                entries: Arc::from(entries),
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some("disk:sdc"));
+        assert_eq!(lines(&mut r, "disk:sdc").heading, "Disk 1", "renumbered");
+        assert_eq!(
+            *r.events.borrow(),
+            [
+                SidebarEvent::Removed(DeviceKey(Arc::from("disk:sdb"))),
+                SidebarEvent::Selected(DeviceKey(Arc::from("disk:sdc"))),
+            ]
+        );
+    }
+}
