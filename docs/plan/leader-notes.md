@@ -509,3 +509,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.2 (87a2657, ebebe40, 3e6c685): column picker. ColumnHost uses string keys (follows rsf.22, accepted). Group order comes from the layout. Five table-name keys added. Tab order and window centring moved to a follow-up bead. Unscaled minimum size matches the other windows (accepted).
 - yms.31 (e887376, a4305ca): security reader with O_NOFOLLOW and a read cap on each path part. Snapshot rows for pids 1 and 4212 accepted. Leader fix requested: no readable ns reference gives Restricted, not Isolated.
 - yms.31 fix (a6f50c2): no ns reference gives Restricted.
+- ug9.33 (82678f8, a814452, 4f3af54): KvWords covers the empty text and copy labels; props fields store the UnsupportedWord variant. Follow-up bead filed for tr calls per frame in props filter.rs.
