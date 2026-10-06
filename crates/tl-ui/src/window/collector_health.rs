@@ -157,12 +157,6 @@ pub fn open_collector_health(cx: &mut App) {
     }
 }
 
-/// The restart count of a source. `SourceHealth` has no such field yet (ADR-004 keeps the count
-/// inside the engine's supervisor), so the column stays empty until the model carries it.
-fn restart_count(_: &SourceHealth) -> Option<u32> {
-    None
-}
-
 /// The window's own text, translated once per strings version (R-132).
 struct HealthWords {
     headings: [SharedString; 5],
@@ -198,8 +192,7 @@ pub struct HealthRow {
     age_secs: Option<u64>,
     /// "3s ago", or the WarmingUp glyph.
     pub age: SharedString,
-    restarts: Option<u32>,
-    /// Empty while the engine does not report a count.
+    restarts: u32,
     pub restarts_text: SharedString,
     pub error: Option<SharedString>,
     error_src: Option<Arc<str>>,
@@ -213,8 +206,8 @@ impl HealthRow {
             last_ok_ns: None,
             age_secs: None,
             age: WARMING_UP.into(),
-            restarts: None,
-            restarts_text: SharedString::default(),
+            restarts: 0,
+            restarts_text: "0".into(),
             error: None,
             error_src: None,
         }
@@ -228,17 +221,11 @@ impl HealthRow {
             self.state = state;
             changed = true;
         }
-        let restarts = restart_count(h);
-        if restarts != self.restarts {
-            self.restarts = restarts;
-            self.restarts_text = match restarts {
-                Some(n) => {
-                    buf.clear();
-                    count(buf, u64::from(n));
-                    SharedString::from(buf.clone())
-                }
-                None => SharedString::default(),
-            };
+        if h.restarts != self.restarts {
+            self.restarts = h.restarts;
+            buf.clear();
+            count(buf, u64::from(h.restarts));
+            self.restarts_text = SharedString::from(buf.clone());
             changed = true;
         }
         let same_error = match (&h.last_error, &self.error_src) {

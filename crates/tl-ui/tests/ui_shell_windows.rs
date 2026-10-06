@@ -281,6 +281,7 @@ fn source(state: SourceState, age_s: Option<u64>, error: Option<&str>) -> Source
         state,
         last_ok_ns: age_s.map(|a| now_boot_ns() - a * SEC),
         last_error: error.map(Arc::from),
+        restarts: 0,
     }
 }
 
@@ -375,7 +376,10 @@ fn collector_health_rows_and_colours(cx: &mut TestAppContext) {
             (SourceId::Cpu, source(SourceState::Running, Some(1), None)),
             (
                 SourceId::Memory,
-                source(SourceState::Disabled { until: 0 }, Some(2), None),
+                SourceHealth {
+                    restarts: 5,
+                    ..source(SourceState::Disabled { until: 0 }, Some(2), None)
+                },
             ),
         ],
     );
@@ -395,8 +399,8 @@ fn collector_health_rows_and_colours(cx: &mut TestAppContext) {
     );
     let words: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
     assert_eq!(words, ["Running", "Disabled", "Stale", "Failed"]);
-    // `SourceHealth` carries no restart count yet, so the column is empty.
-    assert!(rows.iter().all(|r| r.3.is_empty()), "{rows:?}");
+    assert_eq!(rows[1].3, "5", "restart count");
+    assert_eq!(rows[0].3, "0");
     assert_eq!(rows[3].2, "\u{2026}", "no data yet: the WarmingUp glyph");
     assert_eq!(
         rows[3].4.as_deref(),
