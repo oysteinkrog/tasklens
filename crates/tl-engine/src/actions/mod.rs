@@ -5,6 +5,8 @@
 //! Module lines for `process`, `cgroup`, `unit`, `startup`, `dump`, `socket` and `recovery` are
 //! added by their beads.
 
+pub mod cgroup;
+
 use std::future::Future;
 use std::os::fd::OwnedFd;
 use std::panic::AssertUnwindSafe;
@@ -290,7 +292,35 @@ pub trait Openers: Send + Sync + 'static {
 
 /// One method per tl-ops entry point used by actions/{process,cgroup,startup,dump}.rs. Each
 /// module bead adds its methods. `RealOps` forwards to tl-ops; `FakeOps` (tests) scripts results.
-pub trait ActionOps: Send + Sync + 'static {}
+pub trait ActionOps: Send + Sync + 'static {
+    /// `tl_ops::cgroup::open_validated`. The default refuses, so an ops type without cgroup
+    /// support never writes.
+    fn cgroup_open_validated(
+        &self,
+        _cg: &tl_model::actions::CgroupRef,
+        _uid: u32,
+    ) -> Result<tl_ops::cgroup::CgroupDir, OpsError> {
+        Err(OpsError::Unsupported("cgroup ops not wired"))
+    }
+    /// Writes `value` to the control file `file`: `cgroup.freeze` or `cgroup.kill`.
+    fn cgroup_write(
+        &self,
+        _dir: &tl_ops::cgroup::CgroupDir,
+        _file: &str,
+        _value: &str,
+    ) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("cgroup ops not wired"))
+    }
+    /// `tl_ops::cgroup::wait_frozen` with `FREEZE_POLL`. Not frozen within `wait` is
+    /// `OutcomeUnknown("freeze still in progress")`.
+    fn cgroup_wait_frozen(
+        &self,
+        _dir: &tl_ops::cgroup::CgroupDir,
+        _wait: Duration,
+    ) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("cgroup ops not wired"))
+    }
+}
 
 /// Everything an action task needs. Shared by every action of one session.
 pub struct ActionCtx {
@@ -420,15 +450,15 @@ fn dispatch_boxed<'a>(
 /// `Socket` → `socket::run_target`. Each module bead adds its arm; a pair with no module is
 /// `Rejected(Unsupported)`.
 async fn dispatch(
-    _cx: &Cx,
-    _actx: &ActionCtx,
-    _kind: &ActionKind,
+    cx: &Cx,
+    actx: &ActionCtx,
+    kind: &ActionKind,
     target: &ActionTarget,
 ) -> ActionState {
     match target {
+        ActionTarget::Cgroup(cg) => cgroup::run_target(cx, actx, kind, cg).await,
         ActionTarget::Process(_)
         | ActionTarget::Thread { .. }
-        | ActionTarget::Cgroup(_)
         | ActionTarget::Unit(_)
         | ActionTarget::Startup(_)
         | ActionTarget::Socket { .. } => ActionState::Rejected(RejectReason::Unsupported),
