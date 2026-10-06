@@ -457,3 +457,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.6 (2b36602, 0dfa547, c64a45b): title bar as a plain flex row (kit TitleBar always adds its own controls, U-44 note in RECONCILIATION). TlIcon::Square in 2b36602. TitleBarProbe test global records move, zoom and window-menu calls and overrides decorations.
 - rsf.20 (ff2b0e2): IconSourceCache in TlTreeTable; 20 distinct icons over 60 frames build 20 sources; unused icons evicted one version later.
 - yrf.18 (27649d4): monotone cubic curves in Scratch buffers. Performance settings do not bump style_version, so GeometryScalars gained curved; toggling rebuilds once. Grid cells stay straight.
+- lgw.12 BLOCKED on owner: one TS1 code from TaskSlinger 0.9.2 under Wine plus the matching themes.json export (U-17). Same owner export as lgw.7.
