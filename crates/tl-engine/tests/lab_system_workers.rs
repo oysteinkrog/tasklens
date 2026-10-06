@@ -2935,3 +2935,148 @@ fn inventory_boot_time_close_to_uptime() {
     let diff = (sys.boot_time_s.value as f64 - expected).abs();
     assert!(diff <= 2.0, "boot time differs by {diff} s");
 }
+
+// ---- Inventory devices (E12-018) ----
+
+use tl_collect::gpu_drm::{self, AmdSample, amdgpu};
+use tl_model::snapshot::DisplayMode;
+
+#[test]
+fn inventory_disk_drives() {
+    let dir = fixture_copy("disk-partitions-dm", None);
+    copy_tree(&fixtures().join("dmi-desktop"), &dir);
+    let snap = inventory_scan(&dir);
+    // mmcblk0, nvme0n1, sda, sdb, sr0, vda: rows carry no name, so kind and size show the order.
+    let kinds: Vec<&str> = snap.disks.iter().map(|d| &*d.kind.value).collect();
+    assert_eq!(kinds, ["SD", "NVMe", "HDD", "USB", "Optical", "Virtual"]);
+    let sizes: Vec<u64> = snap.disks.iter().map(|d| d.capacity_bytes.value).collect();
+    assert_eq!(
+        sizes,
+        [
+            62_521_344 * 512,
+            1_000_215_216 * 512,
+            1_953_525_168 * 512,
+            62_521_344 * 512,
+            0,
+            41_943_040 * 512,
+        ]
+    );
+    assert!(snap.disks.iter().all(|d| d.device.is_none()));
+    let sda = &snap.disks[2];
+    assert_eq!(sda.kind, inv_text("HDD"));
+    assert_eq!(sda.model, inv_text("WDC WD10EZEX-08W"));
+    let volumes: Vec<&str> = sda.volumes.iter().map(|v| &**v).collect();
+    assert_eq!(volumes, ["/", "/boot", "/mnt/boot copy"]);
+    // A fixture root never calls `statvfs`.
+    assert_eq!(sda.free_bytes.validity, Validity::Unsupported);
+    assert_eq!(sda.serial.validity, Validity::Unsupported);
+    let nvme = &snap.disks[1];
+    assert!(nvme.volumes.is_empty());
+    assert_eq!(nvme.interface, inv_text("NVMe"));
+    let sdb = &snap.disks[3];
+    assert_eq!(sdb.interface, inv_text("USB"));
+    assert_eq!(sdb.model, inv_text("Flash Disk"));
+    assert_eq!(snap.disks[5].interface, inv_text("virtio"));
+}
+
+#[test]
+fn inventory_graphics_amd() {
+    let dir = fixture_copy("drm-amd", None);
+    let udev = dir.join("run/udev/data");
+    fs::create_dir_all(&udev).expect("create udev dir");
+    fs::write(
+        udev.join("+pci:0000:03:00.0"),
+        "E:ID_MODEL_FROM_DATABASE=Navi 31 [Radeon RX 7900 XT]\n",
+    )
+    .expect("write udev file");
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.graphics.len(), 1);
+    let gpu = &snap.graphics[0];
+    assert_eq!(gpu.name, inv_text("Navi 31 [Radeon RX 7900 XT]"));
+    let sys = dir.join("sys");
+    let card = &gpu_drm::discover_cards(&sys)[0];
+    let mut amd = AmdSample::default();
+    gpu_drm::read_amd(card, &sys, &mut amd);
+    let (temp, _) = gpu_drm::main_temp(&amd).expect("fixture has a main temperature");
+    assert_eq!(
+        gpu.temperature_source,
+        inv_text(amdgpu::temp_source_text(temp))
+    );
+    assert_eq!(gpu.dedicated_bytes.value, 17_095_983_104);
+    assert_eq!(gpu.dedicated_bytes.validity, Validity::Valid);
+    // No gtt total in the fixture.
+    assert_eq!(gpu.shared_bytes.validity, Validity::Unsupported);
+    assert_eq!(gpu.vulkan_version.validity, Validity::WarmingUp);
+    assert_eq!(gpu.opengl_version.validity, Validity::WarmingUp);
+    // No `module/amdgpu/version`: the module is the driver alone.
+    assert_eq!(gpu.kernel_module, inv_text("amdgpu"));
+    assert_eq!(gpu.driver_version.validity, Validity::Unsupported);
+    assert!(gpu.displays.is_empty());
+}
+
+#[test]
+fn inventory_displays_connected_only() {
+    let dir = fixture_copy("dmi-desktop", None);
+    let device = dir.join("sys/class/drm/card1/device");
+    fs::create_dir_all(&device).expect("create card dir");
+    fs::write(device.join("vendor"), "0x1002\n").expect("write vendor");
+    fs::write(device.join("device"), "0x744c\n").expect("write device");
+    fs::write(device.join("uevent"), "PCI_SLOT_NAME=0000:03:00.0\n").expect("write uevent");
+    let snap = inventory_scan(&dir);
+    assert_eq!(snap.graphics.len(), 1);
+    let gpu = &snap.graphics[0];
+    assert_eq!(
+        &*gpu.displays,
+        [DisplayMode {
+            width: 3840,
+            height: 2160,
+            refresh_mhz: 0,
+            primary: false,
+        }]
+    );
+    // No udev file for the card.
+    assert_eq!(gpu.name.validity, Validity::Unsupported);
+    assert_eq!(gpu.temperature_source, inv_text("Not reported"));
+}
+
+#[test]
+fn inventory_network_adapters_visibility() {
+    let dir = fixture_copy("netif-kinds", None);
+    let snap = inventory_scan(&dir);
+    let names: Vec<&str> = snap
+        .network
+        .iter()
+        .map(|a| a.connection.value.split(' ').next().unwrap_or(""))
+        .collect();
+    for hidden in ["docker0", "veth12ab", "virbr0", "br0", "lo"] {
+        assert!(!names.contains(&hidden), "{hidden} listed: {names:?}");
+    }
+    assert!(names.contains(&"wlan0"), "{names:?}");
+    let eth0 = snap
+        .network
+        .iter()
+        .find(|a| a.connection.value.starts_with("eth0 "))
+        .expect("eth0 listed");
+    assert_eq!(eth0.connection, inv_text("eth0 (Ethernet)"));
+    assert_eq!(eth0.link_speed_mbps.value, 1000);
+    assert_eq!(eth0.link_speed_mbps.validity, Validity::Valid);
+    assert_eq!(eth0.adapter_name.validity, Validity::Unsupported);
+    // A fixture root runs no address dump.
+    assert!(eth0.ip_addresses.is_empty());
+    assert!(snap.network.iter().all(|a| a.device.is_none()));
+
+    let all = EngineSettings {
+        show_network_virtual: true,
+        ..EngineSettings::default()
+    };
+    let snap = tl_engine::workers::inventory::scan_with(
+        &InventoryPaths::under(&dir),
+        &SysRoot::at(&dir),
+        &all,
+    );
+    assert!(
+        snap.network
+            .iter()
+            .any(|a| a.connection == inv_text("docker0 (Virtual)"))
+    );
+}
