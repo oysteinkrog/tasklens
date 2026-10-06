@@ -350,3 +350,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - fut.14: TlShield on the kit base Button (TlButton cannot show the app SVG or a 16 px spinner). "Waiting for authentication…" tooltip still unconfirmed by the owner. OWNER REVIEW.
 - wlf.6: StatsSynth::sample_1hz takes the CpuFrame; samples use Sample::valid (empty flags mean a gap in tl-model).
 - yrf.7 closed.
+- y6k.10: Connections projection. User names come from the process snapshot (uid to meta.user), else the number. PID "?" restricted, "-" kernel or exited. Interface sorts by ifindex. Follow-up bead wires build_connections counts in apply.rs after hjn.21.
+- yrf.4: geometry part 1; split_runs and decimate clear their out buffers.
+- Leader allowed dead_code on ChartView.cache (read only by test hooks until E19-009).
