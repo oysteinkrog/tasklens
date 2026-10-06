@@ -522,3 +522,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.14 (3f8f99c): Ctrl pause. observe_window_activation added. The case of a window removed while paused is noted on jqk.15.
 - yms.35: UTF-16LE rule approved (even addresses; reject surrogates, controls and FFFD to FFFF, and units made of two ASCII bytes).
 - bj6.32 (68e85fc..104185e): Share Theme window, Confirmation kind, kit Textarea for the code. Enter may fire twice (also in TlDialog), so a new ug9 bug bead was filed and also covers the title on a language change.
+- pdu.12: the Copy row id uses Unit(u32) from an interner on the delegate (leader: no hash, because a clash could hit the wrong unit). Static validity tooltips are cached; want_tooltip is a new rsf bead.
