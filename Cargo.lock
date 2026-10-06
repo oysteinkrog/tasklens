@@ -7975,6 +7975,7 @@ dependencies = [
  "anyhow",
  "async-channel",
  "clap",
+ "proptest",
  "rustix",
  "serde",
  "tempfile",
