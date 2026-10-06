@@ -537,6 +537,8 @@ mod page_frame {
             }
         });
         vcx.simulate_resize(gpui_kit::size(px(width), px(800.)));
+        // Hover tooltips show only in the active window.
+        vcx.update(|window, _| window.activate_window());
         draw(vcx);
         (vcx, mini)
     }
