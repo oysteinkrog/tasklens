@@ -10,9 +10,14 @@
 //! run only on a `DeviceCommand::SmartRead` (E12-021), and `SmartUpdate`, the one call that can
 //! wake a disk, only when the request asks for it (the SMART window's Refresh). Serials and WWNs
 //! are shown on screen only. Never log them.
+//!
+//! A `DeviceCommand::Eject` (E12-022) unmounts, locks and ejects through UDisks2 and its polkit
+//! rules, and reports progress in `DiskDetails.eject`. A busy filesystem gets a `/proc` scan for
+//! the processes that hold it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,11 +25,12 @@ use asupersync::channel::mpsc;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
+use tl_collect::SysRoot;
 use tl_collect::sanitize::sanitize_text;
 use tl_model::command::DeviceCommand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::snapshot::{DiskDetails, InvField, SmartAttr, SmartData, SmartKind};
+use tl_model::snapshot::{DiskDetails, EjectState, InvField, SmartAttr, SmartData, SmartKind};
 use tl_model::time::now_boot_ns;
 use tl_model::units;
 use tl_model::validity::Validity;
@@ -36,15 +42,16 @@ use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerControl,
 use crate::supervise::WorkerFactory;
 use crate::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
+use crate::workers::eject;
 
 pub const BUS: &str = "org.freedesktop.UDisks2";
 pub const ROOT: &str = "/org/freedesktop/UDisks2";
 
 const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
-const BLOCK_IFACE: &str = "org.freedesktop.UDisks2.Block";
+pub(crate) const BLOCK_IFACE: &str = "org.freedesktop.UDisks2.Block";
 const PARTITION_IFACE: &str = "org.freedesktop.UDisks2.Partition";
-const DRIVE_IFACE: &str = "org.freedesktop.UDisks2.Drive";
+pub(crate) const DRIVE_IFACE: &str = "org.freedesktop.UDisks2.Drive";
 const ATA_IFACE: &str = "org.freedesktop.UDisks2.Drive.Ata";
 const NVME_CONTROLLER_IFACE: &str = "org.freedesktop.UDisks2.NVMe.Controller";
 /// The full resync period with UDisks2, and the retry period without it.
@@ -65,6 +72,18 @@ const SMART_NOT_FOUND: &str = "Disk not found";
 const SMART_NONE: &str = "SMART is not available through UDisks2 for this disk";
 const SMART_DENIED: &str = "Permission denied";
 const SMART_NO_ANSWER: &str = "The disk did not answer within 10 s";
+/// How long each unmount, lock, eject or power-off call may take.
+const EJECT_TIMEOUT: Duration = Duration::from_secs(30);
+const EJECT_CANNOT: &str = "This disk cannot be ejected";
+const EJECT_DENIED: &str = "Permission denied";
+const EJECT_NO_ANSWER: &str = "The disk did not answer within 30 s";
+/// Longest UDisks2 error text shown, in bytes.
+const EJECT_ERROR_MAX: usize = 200;
+/// Paths listed per blocking process.
+const BLOCKER_PATHS: usize = 8;
+const DEVICE_BUSY: &str = "org.freedesktop.UDisks2.Error.DeviceBusy";
+const NOT_AUTHORIZED: &str = "org.freedesktop.UDisks2.Error.NotAuthorized";
+const NOT_AUTHORIZED_DISMISSED: &str = "org.freedesktop.UDisks2.Error.NotAuthorizedDismissed";
 
 /// The properties of one interface, by name.
 pub type Props = BTreeMap<String, OwnedValue>;
@@ -85,14 +104,17 @@ pub fn spec() -> WorkerSpec {
     }
 }
 
-pub fn factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
-    Arc::new(move |cx: Cx, _generation: ManagedGeneration| run(cx, io.clone()))
+pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    let proc = cfg.sys_root.proc.clone();
+    Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+        run_with(cx, io.clone(), SystemConnector, proc.clone())
+    })
 }
 
-/// The worker on the system bus.
+/// The worker on the system bus, with the host `/proc`.
 #[doc(hidden)]
 pub async fn run(cx: Cx, io: WorkerIo) -> Outcome<(), WorkerError> {
-    run_with(cx, io, SystemConnector).await
+    run_with(cx, io, SystemConnector, SysRoot::host().proc).await
 }
 
 /// Where a bus session ends.
@@ -104,10 +126,18 @@ enum Next {
 
 /// Idle, then UDisks2 or the missing-service wait. Returns `Outcome::Ok(())` on cancel and
 /// `Err` when the bus fails or the reducer's queue is closed, so the supervisor restarts it.
-async fn run_with<C: Connector>(cx: Cx, io: WorkerIo, connector: C) -> Outcome<(), WorkerError> {
+async fn run_with<C: Connector>(
+    cx: Cx,
+    io: WorkerIo,
+    connector: C,
+    proc: PathBuf,
+) -> Outcome<(), WorkerError> {
     let mut st = State {
         last: None,
         smart: BTreeMap::new(),
+        eject: BTreeMap::new(),
+        skip: BTreeSet::new(),
+        proc,
         queue: Queue::resume(&io),
     };
     loop {
@@ -137,6 +167,12 @@ struct State {
     last: Option<Vec<(DeviceIdentity, DiskDetails)>>,
     /// SMART results by kernel disk name, set on every list this generation sends.
     smart: BTreeMap<Arc<str>, InvField<Arc<SmartData>>>,
+    /// Eject states by kernel disk name, set on every list this generation sends.
+    eject: BTreeMap<Arc<str>, (u64, EjectState)>,
+    /// Queue seqs of `Eject` commands to drop: repeats queued while an eject of the same disk ran.
+    skip: BTreeSet<u64>,
+    /// The `/proc` the busy scan reads.
+    proc: PathBuf,
     queue: Queue,
 }
 
@@ -333,6 +369,7 @@ async fn publish(
     for (identity, details) in &mut entries {
         if let DeviceIdentity::Disk { name, .. } = identity {
             details.smart_data = st.smart.get(name).cloned();
+            details.eject = st.eject.get(name).cloned();
         }
     }
     if st
@@ -360,6 +397,7 @@ fn same_list(a: &[(DeviceIdentity, DiskDetails)], b: &[(DeviceIdentity, DiskDeta
                 && da.ejectable == db.ejectable
                 && da.can_power_off == db.can_power_off
                 && same_smart(da.smart_data.as_ref(), db.smart_data.as_ref())
+                && da.eject == db.eject
         })
 }
 
@@ -439,17 +477,29 @@ async fn run_commands<B: UdisksBus>(
     st: &mut State,
 ) -> Option<Outcome<(), WorkerError>> {
     let control = io.control.borrow_and_clone();
-    for (seq, command) in st.queue.take(&control) {
+    let batch = st.queue.take(&control);
+    for (i, (seq, command)) in batch.iter().enumerate() {
         if cx.checkpoint().is_err() {
             return Some(Outcome::Ok(()));
         }
-        st.queue.progress.set_started(SourceId::Udisks, seq);
-        if let WorkerCommand::Device(DeviceCommand::SmartRead { disk, update }) = command
-            && let Some(stop) = smart_read(cx, io, bus, objs, st, disk, update).await
-        {
-            return Some(stop);
+        st.queue.progress.set_started(SourceId::Udisks, *seq);
+        let stop = match command {
+            WorkerCommand::Device(DeviceCommand::SmartRead { disk, update }) => {
+                smart_read(cx, io, bus, objs, st, Arc::clone(disk), *update).await
+            }
+            WorkerCommand::Device(DeviceCommand::Eject { seq: ui_seq, disk })
+                if !st.skip.remove(seq) =>
+            {
+                let stop = run_eject(cx, io, bus, objs, st, *ui_seq, Arc::clone(disk)).await;
+                skip_repeats(io, st, &batch[i + 1..], disk);
+                stop
+            }
+            _ => None,
+        };
+        if stop.is_some() {
+            return stop;
         }
-        st.queue.progress.set_done(SourceId::Udisks, seq);
+        st.queue.progress.set_done(SourceId::Udisks, *seq);
     }
     None
 }
@@ -606,6 +656,139 @@ fn smart_failed(reason: &str) -> InvField<Arc<SmartData>> {
         value: empty_smart(health),
         validity: Validity::Failed,
     }
+}
+
+// ---- Eject (E12-022) ----
+
+/// One `Eject`: `Running`, then `Done`, `Blocked` or `Failed`, sending the list after each
+/// change. A `seq` at or below the last one seen for the disk is ignored.
+async fn run_eject<B: UdisksBus>(
+    cx: &Cx,
+    io: &WorkerIo,
+    bus: &mut B,
+    objs: &ManagedObjects,
+    st: &mut State,
+    seq: u64,
+    disk: Arc<str>,
+) -> Option<Outcome<(), WorkerError>> {
+    if st.eject.get(&disk).is_some_and(|(last, _)| seq <= *last) {
+        return None;
+    }
+    let drive = disk_records(objs)
+        .into_iter()
+        .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
+        .filter(|(_, _, d)| d.ejectable || d.can_power_off)
+        .and_then(|(path, _, _)| OwnedObjectPath::try_from(path).ok());
+    let Some(drive) = drive else {
+        st.eject
+            .insert(disk, (seq, EjectState::Failed(Arc::from(EJECT_CANNOT))));
+        return publish(cx, io, objs, st).await;
+    };
+    st.eject
+        .insert(Arc::clone(&disk), (seq, EjectState::Running));
+    if let Some(stop) = publish(cx, io, objs, st).await {
+        return Some(stop);
+    }
+    let plan = eject::plan(objs, &drive);
+    let state = match eject_calls(cx, bus, &plan).await {
+        Ok(()) => EjectState::Done,
+        Err(DbusError::Call { name, .. }) if &*name == DEVICE_BUSY => {
+            match blockers(cx, objs, &drive, st.proc.clone()).await {
+                Some(state) => state,
+                None => return Some(Outcome::Ok(())),
+            }
+        }
+        Err(e) => {
+            if cx.checkpoint().is_err() {
+                return Some(Outcome::Ok(()));
+            }
+            EjectState::Failed(Arc::from(eject_error(&e)))
+        }
+    };
+    st.eject.insert(disk, (seq, state));
+    publish(cx, io, objs, st).await
+}
+
+/// The plan's calls in order. Stops at the first error.
+async fn eject_calls<B: UdisksBus>(
+    cx: &Cx,
+    bus: &mut B,
+    plan: &eject::EjectPlan,
+) -> Result<(), DbusError> {
+    for path in &plan.unmount {
+        bus.eject_step(cx, path.as_str(), EjectStep::Unmount)
+            .await?;
+    }
+    for path in &plan.lock {
+        bus.eject_step(cx, path.as_str(), EjectStep::Lock).await?;
+    }
+    let last = if plan.power_off {
+        EjectStep::PowerOff
+    } else {
+        EjectStep::Eject
+    };
+    bus.eject_step(cx, plan.drive.as_str(), last).await
+}
+
+/// `Blocked` from a `/proc` scan on the blocking pool. `None` on cancel.
+async fn blockers(
+    cx: &Cx,
+    objs: &ManagedObjects,
+    drive: &OwnedObjectPath,
+    proc: PathBuf,
+) -> Option<EjectState> {
+    let mounts = eject::mount_points(objs, drive);
+    let scan = move |_| eject::find_blockers(&proc, &mounts, BLOCKER_PATHS);
+    let joined = match cx.spawn_blocking(scan) {
+        Ok(mut job) => job.join(cx).await.ok(),
+        Err(_) => None,
+    };
+    if cx.checkpoint().is_err() {
+        return None;
+    }
+    // A scan that could not run checked nothing, so anyone may hold the disk.
+    let (blockers, others_may_hold) = joined.unwrap_or((Vec::new(), true));
+    Some(EjectState::Blocked {
+        blockers: blockers.into(),
+        others_may_hold,
+    })
+}
+
+/// The text the disk page shows for a failed call: the first line of UDisks2's message, cut at
+/// 200 bytes.
+fn eject_error(e: &DbusError) -> String {
+    match e {
+        DbusError::Timeout(_) => EJECT_NO_ANSWER.to_owned(),
+        DbusError::Call { name, .. }
+            if &**name == NOT_AUTHORIZED || &**name == NOT_AUTHORIZED_DISMISSED =>
+        {
+            EJECT_DENIED.to_owned()
+        }
+        DbusError::Call { message, .. } if !message.trim().is_empty() => {
+            let line = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+            let mut out = String::new();
+            sanitize_text(line.as_bytes(), EJECT_ERROR_MAX, &mut out);
+            out
+        }
+        other => dbus_name(other).to_owned(),
+    }
+}
+
+/// Marks the `Eject` commands for `disk` that were queued while it ran, in the rest of this
+/// batch or after it, so they are dropped.
+fn skip_repeats(io: &WorkerIo, st: &mut State, rest: &[(u64, WorkerCommand)], disk: &str) {
+    let same = |command: &WorkerCommand| matches!(command, WorkerCommand::Device(DeviceCommand::Eject { disk: d, .. }) if &**d == disk);
+    st.skip
+        .extend(rest.iter().filter(|(_, c)| same(c)).map(|(seq, _)| *seq));
+    let control = io.control.borrow_and_clone();
+    st.skip.extend(
+        control
+            .commands
+            .iter()
+            .filter(|c| c.seq > st.queue.last_seq && c.target == SourceId::Udisks)
+            .filter(|c| same(&c.command))
+            .map(|c| c.seq),
+    );
 }
 
 // ---- SMART parsers ----
@@ -852,7 +1035,7 @@ fn opt<T: Default>(value: Option<T>) -> InvField<T> {
     value.map_or_else(unsupported, valid)
 }
 
-fn flag(p: Option<&Props>, key: &str) -> Option<bool> {
+pub(crate) fn flag(p: Option<&Props>, key: &str) -> Option<bool> {
     match &**p?.get(key)? {
         Value::Bool(v) => Some(*v),
         _ => None,
@@ -869,7 +1052,7 @@ fn text(p: Option<&Props>, key: &str) -> InvField<Arc<str>> {
     opt((!clean.is_empty()).then(|| Arc::from(clean)))
 }
 
-fn object_path<'a>(p: &'a Props, key: &str) -> Option<&'a str> {
+pub(crate) fn object_path<'a>(p: &'a Props, key: &str) -> Option<&'a str> {
     match &**p.get(key)? {
         Value::ObjectPath(path) => Some(path.as_str()),
         _ => None,
@@ -998,6 +1181,31 @@ enum Event {
     Lost,
 }
 
+/// One call of an eject.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EjectStep {
+    /// `Filesystem.Unmount` on a block.
+    Unmount,
+    /// `Encrypted.Lock` on a block.
+    Lock,
+    /// `Drive.Eject` on the drive.
+    Eject,
+    /// `Drive.PowerOff` on the drive.
+    PowerOff,
+}
+
+impl EjectStep {
+    /// The interface and method.
+    fn call(self) -> (&'static str, &'static str) {
+        match self {
+            EjectStep::Unmount => (eject::FILESYSTEM_IFACE, "Unmount"),
+            EjectStep::Lock => (eject::ENCRYPTED_IFACE, "Lock"),
+            EjectStep::Eject => (DRIVE_IFACE, "Eject"),
+            EjectStep::PowerOff => (DRIVE_IFACE, "PowerOff"),
+        }
+    }
+}
+
 /// Opens a UDisks2 session. Tests replace the system bus with a fake.
 trait Connector: Send + Sync + 'static {
     type Bus: UdisksBus + Send;
@@ -1044,6 +1252,13 @@ trait UdisksBus {
         path: &str,
         iface: &'static str,
     ) -> impl Future<Output = Result<Props, DbusError>> + Send;
+    /// One eject call with an empty options dictionary, at most `EJECT_TIMEOUT`.
+    fn eject_step(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+        step: EjectStep,
+    ) -> impl Future<Output = Result<(), DbusError>> + Send;
 }
 
 struct SystemConnector;
@@ -1239,6 +1454,17 @@ impl UdisksBus for SystemUdisks {
         let msg = self.conn.read(cx, call).await?;
         let raw: RawProps = msg.body().deserialize().map_err(|e| call_error(&e))?;
         Ok(raw.into_iter().collect())
+    }
+
+    async fn eject_step(&mut self, cx: &Cx, path: &str, step: EjectStep) -> Result<(), DbusError> {
+        let (iface, method) = step.call();
+        let body = (RawProps::new(),);
+        let call = self
+            .conn
+            .raw()
+            .call_method(Some(BUS), path, Some(iface), method, &body);
+        self.conn.call(cx, EJECT_TIMEOUT, call).await?;
+        Ok(())
     }
 }
 
@@ -1467,6 +1693,10 @@ mod tests {
         update_error: Option<&'static str>,
         ata_attrs: Vec<AtaAttrRaw>,
         ata_props: Props,
+        /// Eject calls in order, with their object paths.
+        eject_calls: Vec<(EjectStep, String)>,
+        /// The step that fails, and the D-Bus error name it answers with.
+        eject_error: Option<(EjectStep, &'static str)>,
     }
 
     #[derive(Clone, Default)]
@@ -1555,6 +1785,23 @@ mod tests {
             state.calls.push("GetAll");
             Ok(state.ata_props.clone())
         }
+
+        async fn eject_step(
+            &mut self,
+            _cx: &Cx,
+            path: &str,
+            step: EjectStep,
+        ) -> Result<(), DbusError> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.eject_calls.push((step, path.to_owned()));
+            match state.eject_error {
+                Some((failing, name)) if failing == step => Err(DbusError::Call {
+                    name: name.into(),
+                    message: "Error unmounting: target is busy\ndetail".into(),
+                }),
+                _ => Ok(()),
+            }
+        }
     }
 
     struct Rig {
@@ -1569,6 +1816,14 @@ mod tests {
 
     impl Rig {
         fn start(connector: FakeConnector, disks: bool) -> Self {
+            Self::start_at(
+                connector,
+                disks,
+                PathBuf::from("/nonexistent/tasklens-proc"),
+            )
+        }
+
+        fn start_at(connector: FakeConnector, disks: bool, proc: PathBuf) -> Self {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
             let demand = Demand {
@@ -1591,7 +1846,7 @@ mod tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let _ = run_with(cx, io, connector).await;
+                    let _ = run_with(cx, io, connector, proc).await;
                 })
                 .expect("task is created");
             lab.scheduler.lock().schedule(task, 0);
@@ -1616,13 +1871,31 @@ mod tests {
 
         /// Queues one `SmartRead` as the reducer forwards it.
         fn smart_read(&mut self, seq: u64, disk: &str, update: bool) {
+            self.device(
+                seq,
+                DeviceCommand::SmartRead {
+                    disk: disk.into(),
+                    update,
+                },
+            );
+        }
+
+        /// Queues one `Eject`. `seq` is the queue seq, `ui_seq` the page's.
+        fn eject(&mut self, seq: u64, ui_seq: u64, disk: &str) {
+            self.device(
+                seq,
+                DeviceCommand::Eject {
+                    seq: ui_seq,
+                    disk: disk.into(),
+                },
+            );
+        }
+
+        fn device(&mut self, seq: u64, command: DeviceCommand) {
             let command = QueuedCommand {
                 seq,
                 target: SourceId::Udisks,
-                command: WorkerCommand::Device(DeviceCommand::SmartRead {
-                    disk: disk.into(),
-                    update,
-                }),
+                command: WorkerCommand::Device(command),
             };
             let control = WorkerControl {
                 reset_generation: 0,
@@ -2112,6 +2385,195 @@ mod tests {
         );
     }
 
+    // ---- Eject ----
+
+    const STICK_DM3: &str = "/org/freedesktop/UDisks2/block_devices/dm_2d3";
+    const STICK_SDB1: &str = "/org/freedesktop/UDisks2/block_devices/sdb1";
+    const STICK_SDB2: &str = "/org/freedesktop/UDisks2/block_devices/sdb2";
+
+    /// The stick of `stick_objects` with `sdb1` mounted and LUKS `sdb2` open as `dm-3`.
+    fn stick_eject_objects() -> ManagedObjects {
+        let mut objs = crate::workers::eject::tests::stick_with_luks(true);
+        objs.0.extend(stick_objects().0);
+        objs
+    }
+
+    fn eject_of(update: &SourceUpdate, disk: &str) -> Option<(u64, EjectState)> {
+        entries(update)?
+            .iter()
+            .find_map(|(identity, d)| match identity {
+                DeviceIdentity::Disk { name, .. } if &**name == disk => d.eject.clone(),
+                _ => None,
+            })
+    }
+
+    fn eject_calls(fake: &Arc<Mutex<FakeState>>) -> Vec<(EjectStep, String)> {
+        fake.lock().expect("fake lock").eject_calls.clone()
+    }
+
+    #[test]
+    fn eject_busy_reports_blockers() {
+        let proc = crate::workers::eject::tests::FakeProc::new();
+        proc.process(100, "gwenview");
+        proc.link(100, "cwd", "/run/media/u/STICK/photos");
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.objects = Some(stick_eject_objects());
+            state.eject_error = Some((EjectStep::Unmount, DEVICE_BUSY));
+        }
+        let mut rig = Rig::start_at(connector, true, proc.path().to_owned());
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.eject(1, 7, "sdb");
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(eject_of(&got[0], "sdb"), Some((7, EjectState::Running)));
+        let Some((
+            7,
+            EjectState::Blocked {
+                blockers,
+                others_may_hold,
+            },
+        )) = eject_of(&got[1], "sdb")
+        else {
+            panic!("{:?}", got[1]);
+        };
+        assert!(!others_may_hold);
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].key.pid, 100);
+        assert_eq!(&*blockers[0].name, "gwenview");
+        assert_eq!(
+            &blockers[0].paths[..],
+            [Arc::from("/run/media/u/STICK/photos")]
+        );
+        assert_eq!(
+            eject_calls(&fake),
+            [(EjectStep::Unmount, STICK_DM3.to_owned())],
+            "no lock, no eject"
+        );
+        assert_eq!(rig.progress.done(SourceId::Udisks), 1);
+        rig.finish();
+    }
+
+    #[test]
+    fn eject_success_call_order() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(stick_eject_objects());
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.eject(1, 7, "sdb");
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(eject_of(&got[0], "sdb"), Some((7, EjectState::Running)));
+        assert_eq!(eject_of(&got[1], "sdb"), Some((7, EjectState::Done)));
+        assert_eq!(
+            eject_calls(&fake),
+            [
+                (EjectStep::Unmount, STICK_DM3.to_owned()),
+                (EjectStep::Unmount, STICK_SDB1.to_owned()),
+                (EjectStep::Lock, STICK_SDB2.to_owned()),
+                (EjectStep::Eject, STICK_DRIVE.to_owned()),
+            ]
+        );
+
+        // The same page seq again does nothing.
+        rig.eject(2, 7, "sdb");
+        rig.advance(SIGNAL_WAIT);
+        assert!(rig.drain().is_empty());
+        assert_eq!(eject_calls(&fake).len(), 4);
+        assert_eq!(rig.progress.done(SourceId::Udisks), 2);
+        rig.finish();
+    }
+
+    #[test]
+    fn eject_not_ejectable() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(sata_objects());
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.eject(1, 3, "sda");
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(
+            eject_of(&got[0], "sda"),
+            Some((3, EjectState::Failed(Arc::from(EJECT_CANNOT))))
+        );
+        assert!(eject_calls(&fake).is_empty(), "no call");
+        rig.finish();
+    }
+
+    #[test]
+    fn eject_denied_and_power_off() {
+        let mut objs = stick_eject_objects();
+        let drive = objs
+            .0
+            .get_mut(STICK_DRIVE)
+            .and_then(|o| o.get_mut(DRIVE_IFACE))
+            .expect("drive");
+        drive.insert(
+            "Ejectable".into(),
+            OwnedValue::try_from(Value::Bool(false)).expect("owned"),
+        );
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.objects = Some(objs);
+            state.eject_error = Some((EjectStep::PowerOff, NOT_AUTHORIZED_DISMISSED));
+        }
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+        rig.eject(1, 9, "sdb");
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(
+            eject_of(&got[1], "sdb"),
+            Some((9, EjectState::Failed(Arc::from(EJECT_DENIED))))
+        );
+        assert_eq!(
+            eject_calls(&fake).last(),
+            Some(&(EjectStep::PowerOff, STICK_DRIVE.to_owned()))
+        );
+        rig.finish();
+    }
+
+    #[test]
+    fn eject_error_texts() {
+        let call = |name: &str, message: &str| DbusError::Call {
+            name: name.into(),
+            message: message.into(),
+        };
+        assert_eq!(eject_error(&call(NOT_AUTHORIZED, "x")), EJECT_DENIED);
+        assert_eq!(
+            eject_error(&DbusError::Timeout(EJECT_TIMEOUT)),
+            EJECT_NO_ANSWER
+        );
+        assert_eq!(
+            eject_error(&call(
+                "org.freedesktop.UDisks2.Error.Failed",
+                "Error ejecting /dev/sdb:\u{1b}[31m more\nsecond line"
+            )),
+            "Error ejecting /dev/sdb:\u{FFFD}[31m more"
+        );
+        let long = "a".repeat(300);
+        let text = eject_error(&call("org.freedesktop.UDisks2.Error.Failed", &long));
+        assert!(text.len() <= EJECT_ERROR_MAX + 3, "{}", text.len());
+        assert_eq!(
+            eject_error(&call("org.freedesktop.UDisks2.Error.Failed", "")),
+            "org.freedesktop.UDisks2.Error.Failed"
+        );
+    }
+
     #[test]
     fn spec_is_full_mode_only() {
         let s = spec();
@@ -2329,5 +2791,64 @@ mod tests {
         assert_eq!(data.selftest, valid(Arc::from("In progress")));
         let err = update.expect_err("SmartUpdate fails");
         assert_eq!(smart_error(&err), "org.freedesktop.DBus.Error.AccessDenied");
+    }
+
+    #[derive(Debug, zbus::DBusError)]
+    #[zbus(prefix = "org.freedesktop.UDisks2.Error")]
+    enum FakeUdisksError {
+        #[zbus(error)]
+        ZBus(zbus::Error),
+        DeviceBusy(String),
+    }
+
+    struct FakeFilesystem;
+
+    #[zbus::interface(name = "org.freedesktop.UDisks2.Filesystem")]
+    impl FakeFilesystem {
+        fn unmount(&self, _options: HashMap<String, OwnedValue>) -> Result<(), FakeUdisksError> {
+            Err(FakeUdisksError::DeviceBusy(
+                "Error unmounting /dev/sdb1: target is busy".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn eject_calls_over_p2p() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let server = zbus::connection::Builder::async_io_unix_stream(a)
+            .server(zbus::Guid::generate())
+            .expect("server builder")
+            .p2p()
+            .serve_at(STICK_SDB1, FakeFilesystem)
+            .expect("filesystem")
+            .build();
+        let client = zbus::connection::Builder::async_io_unix_stream(b)
+            .p2p()
+            .internal_executor(false)
+            .build();
+        let (server, client) =
+            futures_lite::future::block_on(futures_lite::future::zip(server, client));
+        let server = server.expect("server connects");
+        let client = client.expect("client connects");
+
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+            let mut bus = SystemUdisks::on(&cx, conn).await.expect("subscribed");
+            let result = bus.eject_step(&cx, STICK_SDB1, EjectStep::Unmount).await;
+            drop(bus);
+            drop(server);
+            result
+        });
+        let err = rt
+            .block_on(join)
+            .expect("task completes")
+            .expect_err("Unmount fails");
+        assert!(
+            matches!(&err, DbusError::Call { name, message }
+                if &**name == DEVICE_BUSY && message.contains("target is busy")),
+            "{err:?}"
+        );
     }
 }

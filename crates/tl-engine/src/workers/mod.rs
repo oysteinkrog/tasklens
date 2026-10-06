@@ -10,6 +10,7 @@ mod dbus_systemd;
 pub mod dbus_udisks;
 pub mod dbus_upower;
 pub mod disk;
+pub mod eject;
 pub mod enumerate;
 pub mod gpu_drm;
 pub mod gpu_nvidia;
