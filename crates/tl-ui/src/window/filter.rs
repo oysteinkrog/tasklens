@@ -390,7 +390,6 @@ impl Render for FilterBox {
 
         let width = self.width.clone();
         div()
-            .id("FilterBox")
             .debug_selector(|| "FilterBox".into())
             .flex()
             .flex_none()
