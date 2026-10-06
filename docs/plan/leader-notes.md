@@ -454,3 +454,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.12 (ad829bd, 566449a, 3a0338e, 58e9bef, 34c262b, 37e2f07): ChartGridElement, one element for n cells, request_measured_layout for first-frame height. Offline text and per-cell dotted gaps moved to a new yrf bead. Cell mark and tooltip are P2 work still to come.
 - jqk.6 decision: TlIcon::Square added for the maximize caption.
 - lgw.11 (420f444, 6ba8ccd, de739e8): TL1 share codes and import. Input capped at MAX_IMPORT_BYTES (1 MiB) and MAX_USER_THEMES; proptests over random strings and payloads; clipboard text never logged. Checked the bounds in share_code.rs.
+- jqk.6 (2b36602, 0dfa547, c64a45b): title bar as a plain flex row (kit TitleBar always adds its own controls, U-44 note in RECONCILIATION). TlIcon::Square in 2b36602. TitleBarProbe test global records move, zoom and window-menu calls and overrides decorations.
+- rsf.20 (ff2b0e2): IconSourceCache in TlTreeTable; 20 distinct icons over 60 frames build 20 sources; unused icons evicted one version later.
+- yrf.18 (27649d4): monotone cubic curves in Scratch buffers. Performance settings do not bump style_version, so GeometryScalars gained curved; toggling rebuilds once. Grid cells stay straight.
