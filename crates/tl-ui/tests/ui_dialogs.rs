@@ -16,6 +16,7 @@ use tl_model::client::EngineClient;
 use tl_model::settings::{Decorations, Settings, UiState};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
 use tl_ui::components::toast::{self, ToastKind};
 use tl_ui::components::window_frame::{
     APP_ID, PIN_TOOLTIP_OFF, PIN_TOOLTIP_ON, PIN_TOOLTIP_UNSUPPORTED, PinLook, TlSecondaryWindow,
@@ -311,4 +312,286 @@ fn init_binds_frame_keys_before_any_open(cx: &mut TestAppContext) {
     vcx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!is_open(cx, handle), "escape did not close the window");
+}
+
+// TlDialog (E16-007, R-104).
+
+type DialogFrame = TlSecondaryWindow<TlDialogView>;
+type Results = Rc<RefCell<Vec<DialogResult>>>;
+
+/// A parent window whose content counts left clicks.
+struct ClickBody {
+    clicks: Rc<RefCell<u32>>,
+}
+
+impl Render for ClickBody {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let clicks = self.clicks.clone();
+        div()
+            .id("click-body")
+            .debug_selector(|| "ClickBody".into())
+            .size_full()
+            .on_click(move |_, _, _| *clicks.borrow_mut() += 1)
+    }
+}
+
+struct Opened {
+    parent: VisualTestContext,
+    parent_handle: WindowHandle<Root>,
+    handle: WindowHandle<Root>,
+    vcx: VisualTestContext,
+    view: Entity<TlDialogView>,
+    results: Results,
+    clicks: Rc<RefCell<u32>>,
+}
+
+/// Opens a tool window as the parent, then `dialog` modal to it.
+fn open_dialog(cx: &mut TestAppContext, dialog: TlDialog) -> Opened {
+    let clicks = Rc::new(RefCell::new(0));
+    let parent_handle = cx
+        .update(|cx| {
+            let clicks = clicks.clone();
+            TlSecondaryWindow::open(cx, tool("tasklens Settings"), move |_, cx| {
+                cx.new(|_| ClickBody { clicks })
+            })
+        })
+        .expect("parent opens");
+    let mut parent = VisualTestContext::from_window(parent_handle.into(), cx);
+    parent.run_until_parked();
+    draw(&mut parent);
+
+    let before: Vec<_> = cx.update(|cx| cx.windows().iter().map(|w| w.window_id()).collect());
+    let results: Results = Rc::default();
+    let sink = results.clone();
+    parent
+        .update(|window, cx| {
+            dialog.open(window, cx, move |result, _, _| {
+                sink.borrow_mut().push(result)
+            })
+        })
+        .expect("dialog opens");
+    let any = cx
+        .update(|cx| cx.windows())
+        .into_iter()
+        .find(|w| !before.contains(&w.window_id()))
+        .expect("dialog window");
+    let handle = WindowHandle::<Root>::new(any.window_id());
+    let frame = cx
+        .update(|cx| DialogFrame::find(handle, cx))
+        .expect("dialog frame");
+    let view = cx.update(|cx| frame.read(cx).content().clone());
+    let mut vcx = VisualTestContext::from_window(any, cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    Opened {
+        parent,
+        parent_handle,
+        handle,
+        vcx,
+        view,
+        results,
+        clicks,
+    }
+}
+
+fn focused(o: &mut Opened) -> Option<DialogButton> {
+    let view = o.view.clone();
+    o.vcx
+        .update(|window, cx| view.read(cx).focused_button(window))
+}
+
+fn reset_confirm() -> TlDialog {
+    TlDialog::confirm(
+        "Reset all settings to their defaults? Themes and history are kept.",
+        "Reset",
+    )
+    .destructive()
+}
+
+fn skip_confirm() -> TlDialog {
+    TlDialog::confirm(
+        "tasklens actions that change other users' processes, system services and network \
+         connections will run without asking for a password. Continue?",
+        "Skip prompts",
+    )
+}
+
+#[gpui_kit::test]
+fn destructive_focuses_cancel(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, reset_confirm());
+    assert_eq!(focused(&mut o), Some(DialogButton::Cancel));
+    let title = o.vcx.read(|cx| {
+        DialogFrame::find(o.handle, cx)
+            .map(|f| f.read(cx).title().to_string())
+            .unwrap_or_default()
+    });
+    assert_eq!(title, "tasklens");
+    assert!(o.vcx.debug_bounds("TlDialogCancel").is_some());
+    let cancel = o.vcx.debug_bounds("TlDialogCancel").expect("cancel");
+    let action = o.vcx.debug_bounds("TlDialogAction").expect("action");
+    assert!(
+        cancel.right() <= action.left(),
+        "Cancel sits left of the action"
+    );
+    assert_eq!(cancel.size.height, px(28.));
+    assert!(cancel.size.width >= px(72.));
+
+    let mut o = open_dialog(cx, skip_confirm());
+    assert_eq!(focused(&mut o), Some(DialogButton::Action));
+}
+
+#[gpui_kit::test]
+fn confirm_enter_runs_focused_button_escape_cancels(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    for (dialog, expected) in [
+        (reset_confirm(), DialogResult::Cancelled),
+        (skip_confirm(), DialogResult::Confirmed { checkbox: false }),
+    ] {
+        let mut o = open_dialog(cx, dialog);
+        o.vcx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        assert_eq!(*o.results.borrow(), [expected]);
+        assert!(!is_open(cx, o.handle));
+    }
+    for dialog in [reset_confirm(), skip_confirm()] {
+        let mut o = open_dialog(cx, dialog);
+        o.vcx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert_eq!(*o.results.borrow(), [DialogResult::Cancelled]);
+        assert!(!is_open(cx, o.handle), "Esc closes the window");
+    }
+}
+
+#[gpui_kit::test]
+fn tab_then_enter_confirms_destructive(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, reset_confirm());
+    o.vcx.simulate_keystrokes("tab");
+    o.vcx.run_until_parked();
+    draw(&mut o.vcx);
+    assert_eq!(focused(&mut o), Some(DialogButton::Action));
+    o.vcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        *o.results.borrow(),
+        [DialogResult::Confirmed { checkbox: false }]
+    );
+    assert!(!is_open(cx, o.handle));
+}
+
+#[gpui_kit::test]
+fn checkbox_comes_first_and_reports_its_value(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, skip_confirm().checkbox("Do not ask again", true));
+    // Tab order: checkbox, Cancel, action, then the pin.
+    o.vcx.simulate_keystrokes("shift-tab shift-tab");
+    o.vcx.run_until_parked();
+    assert_eq!(focused(&mut o), None, "the checkbox has focus");
+    o.vcx.simulate_keystrokes("tab");
+    assert_eq!(focused(&mut o), Some(DialogButton::Cancel));
+    o.vcx.simulate_keystrokes("tab");
+    assert_eq!(focused(&mut o), Some(DialogButton::Action));
+    o.vcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        *o.results.borrow(),
+        [DialogResult::Confirmed { checkbox: true }]
+    );
+}
+
+#[gpui_kit::test]
+fn result_called_once_on_window_close(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, skip_confirm());
+    let close = o
+        .vcx
+        .debug_bounds("TlWindowCaption-close")
+        .expect("close button");
+    o.vcx.simulate_click(close.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!is_open(cx, o.handle));
+    assert_eq!(*o.results.borrow(), [DialogResult::Cancelled]);
+
+    // A click on a footer button closes the window too; the release must not report again.
+    let mut o = open_dialog(cx, skip_confirm());
+    let action = o.vcx.debug_bounds("TlDialogAction").expect("action");
+    o.vcx.simulate_click(action.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(!is_open(cx, o.handle));
+    assert_eq!(
+        *o.results.borrow(),
+        [DialogResult::Confirmed { checkbox: false }]
+    );
+}
+
+#[gpui_kit::test]
+fn parent_blocked_while_open(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(cx, reset_confirm());
+    draw(&mut o.parent);
+    assert!(o.parent.debug_bounds("TlWindowModalOverlay").is_some());
+    let body = o.parent.debug_bounds("ClickBody").expect("parent content");
+    o.parent.simulate_click(body.center(), Modifiers::none());
+    o.parent.run_until_parked();
+    assert_eq!(*o.clicks.borrow(), 0, "the parent ignores the click");
+
+    o.vcx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(is_open(cx, o.parent_handle));
+    draw(&mut o.parent);
+    assert!(o.parent.debug_bounds("TlWindowModalOverlay").is_none());
+    o.parent.simulate_click(body.center(), Modifiers::none());
+    o.parent.run_until_parked();
+    assert_eq!(*o.clicks.borrow(), 1);
+}
+
+#[test]
+fn heading_and_long_text_fit() {
+    // The default `TestAppContext` text system gives every glyph zero width, so use the real one.
+    let text_system = gpui_kit::platform::current_platform(true).text_system();
+    let mut cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text_system);
+    let cx = &mut cx;
+    setup(cx, Settings::default());
+    let long = "Ending this process will end every process under it as well. ".repeat(20);
+    let mut o = open_dialog(
+        cx,
+        TlDialog::confirm(long, "End tree").heading("End process tree?"),
+    );
+    o.vcx.run_until_parked();
+    draw(&mut o.vcx);
+
+    let heading = o.vcx.debug_bounds("TlDialogHeading").expect("heading");
+    let text = o.vcx.debug_bounds("TlDialogText").expect("text");
+    // t_md: 14 px at line height 1.3, one line.
+    assert!(
+        (f32::from(heading.size.height) - 18.2).abs() < 0.5,
+        "{heading:?}"
+    );
+    assert!(heading.bottom() <= text.top());
+    // t_base: 13 px at line height 1.3; at most 6 lines.
+    let lines = f32::from(text.size.height) / (13. * 1.3);
+    assert!(lines > 5.5 && lines < 6.5, "{lines} lines");
+    let height = o.vcx.update(|window, _| window.bounds().size.height);
+    assert!(height >= px(140.) && height <= px(320.), "{height:?}");
+    assert_eq!(
+        o.vcx.update(|window, _| window.bounds().size.width),
+        px(420.)
+    );
+}
+
+#[gpui_kit::test]
+fn short_dialog_keeps_min_height(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let mut o = open_dialog(
+        cx,
+        TlDialog::confirm("Delete this custom theme?", "Delete").destructive(),
+    );
+    o.vcx.run_until_parked();
+    draw(&mut o.vcx);
+    let height = o.vcx.update(|window, _| window.bounds().size.height);
+    assert!(height >= px(140.) && height <= px(320.), "{height:?}");
+    assert!(o.vcx.debug_bounds("TlDialogIcon").is_some());
+    assert!(o.vcx.debug_bounds("TlDialogHeading").is_none());
 }
