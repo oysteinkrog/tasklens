@@ -6,6 +6,7 @@ pub mod derived;
 pub mod map;
 pub mod metrics;
 pub mod palette;
+pub mod preview;
 pub mod store;
 pub mod user_store;
 

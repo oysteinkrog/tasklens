@@ -58,20 +58,21 @@ pub struct ThemeStore {
     fallback_dark: TlTheme,
     fallback_light: TlTheme,
     /// The `[appearance]` values the derived tints were built with.
-    appearance: AppearanceSettings,
+    pub(super) appearance: AppearanceSettings,
     /// The running crossfade. `None` when idle.
     crossfade: Option<Crossfade>,
-    /// Its id is the theme's requester id on the `AnimationDriver` (R-209).
-    anim: Entity<ThemeAnim>,
+    /// Its id is the theme's requester id on the `AnimationDriver` (R-209). The theme editor
+    /// preview uses it too.
+    pub(super) anim: Entity<ThemeAnim>,
     /// The window whose `AnimationDriver` runs the crossfade. Set by `set_anim_window`. While
     /// `None` every switch is instant.
-    anim_window: Option<AnyWindowHandle>,
+    pub(super) anim_window: Option<AnyWindowHandle>,
 }
 
 impl Global for ThemeStore {}
 
 /// Zero-sized entity that reserves the theme's requester id on the `AnimationDriver` (R-209).
-struct ThemeAnim;
+pub(super) struct ThemeAnim;
 
 /// A theme crossfade from `from` to `to` (UI-FND-040 step 3).
 struct Crossfade {
@@ -107,6 +108,10 @@ pub enum ThemeError {
     PreviewActive,
     /// "Built-in themes cannot be deleted" (UI-FND-042).
     BuiltinCannotBeDeleted,
+    /// "Built-in themes cannot be edited. Copy it first." (R-209, UI-FND-043).
+    BuiltinCannotBeEdited,
+    /// The preview token was replaced by a newer `begin_preview`. No toast.
+    PreviewEnded,
 }
 
 /// Switches to the named theme. Handled by the shell (E21-012).
@@ -141,7 +146,7 @@ impl ThemeStore {
     }
 
     /// Builds a `TlTheme` from `def` with the next version number.
-    fn build(&mut self, def: &ThemeDef, builtin: bool) -> TlTheme {
+    pub(super) fn build(&mut self, def: &ThemeDef, builtin: bool) -> TlTheme {
         self.version_counter += 1;
         let fallback = self.fallback(def.effective_mode());
         TlTheme::from_def(
@@ -207,7 +212,7 @@ fn default_theme(builtin: &[ThemeDef], name: &str, appearance: &AppearanceSettin
 
 /// Copies `tl` and the installed metrics onto the kit `Theme`. A mode change gets its own
 /// `Theme::update` first (R-274), so `map::apply` runs exactly once with the final theme.
-fn apply_kit(tl: &TlTheme, cx: &mut App) {
+pub(super) fn apply_kit(tl: &TlTheme, cx: &mut App) {
     let m = *metrics::metrics(cx);
     let mode = match tl.mode {
         ThemeMode::Dark => KitMode::Dark,
@@ -412,7 +417,7 @@ pub fn tick_crossfade(cx: &mut App) -> bool {
 
 /// Ends a running crossfade: `active = to`, the second `style_version` bump and the one
 /// `map::apply`. Does nothing when no crossfade runs.
-fn finish_crossfade(cx: &mut App) {
+pub(super) fn finish_crossfade(cx: &mut App) {
     let store = cx.global_mut::<ThemeStore>();
     let Some(fade) = store.crossfade.take() else {
         return;
