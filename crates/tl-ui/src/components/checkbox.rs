@@ -12,7 +12,7 @@ use gpui_kit::component::Colorize;
 use gpui_kit::{
     Animation, AnimationExt, App, ClickEvent, ElementId, FocusHandle, Hsla, InteractiveElement,
     IntoElement, KeyBinding, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement,
-    Styled, Window, div, px, relative,
+    Styled, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 
 use crate::components::focus::TlFocusRing;
@@ -59,6 +59,7 @@ pub struct TlCheckbox {
     label: Option<SharedString>,
     inline: bool,
     disabled: bool,
+    tab_stop: bool,
     on_change: Option<ChangeHandler>,
 }
 
@@ -70,6 +71,7 @@ impl TlCheckbox {
             label: None,
             inline: false,
             disabled: false,
+            tab_stop: true,
             on_change: None,
         }
     }
@@ -93,6 +95,13 @@ impl TlCheckbox {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// False leaves the checkbox out of the Tab order, and a click does not focus it. For rows
+    /// of a list that keeps focus itself, such as the column picker.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 
@@ -175,7 +184,10 @@ impl RenderOnce for TlCheckbox {
                 }
                 s.glyph = look.glyph;
             }
-            (s.focus.clone().tab_stop(!self.disabled), s.epoch)
+            (
+                s.focus.clone().tab_stop(self.tab_stop && !self.disabled),
+                s.epoch,
+            )
         });
 
         let scale = |v: f32| px(v * m.ui_scale);
@@ -234,7 +246,9 @@ impl RenderOnce for TlCheckbox {
             .items_center()
             .gap(m.sp[3])
             .h(row_height)
-            .track_focus(&focus)
+            // A tracked element takes focus on mouse down, so a checkbox that is no tab stop
+            // does not track its handle.
+            .when(self.tab_stop, |row| row.track_focus(&focus))
             .key_context("TlCheckbox")
             .child(check_box)
             .children(self.label.map(|label| {
@@ -251,7 +265,7 @@ impl RenderOnce for TlCheckbox {
             let checked = self.checked;
             let on_action = self.on_change.clone();
             let on_click = self.on_change;
-            let click_focus = focus.clone();
+            let click_focus = self.tab_stop.then(|| focus.clone());
             row = row
                 .on_action(move |_: &ToggleCheckbox, window, cx| {
                     if let Some(f) = &on_action {
@@ -264,7 +278,9 @@ impl RenderOnce for TlCheckbox {
                     if matches!(event, ClickEvent::Keyboard(_)) {
                         return;
                     }
-                    click_focus.focus(window, cx);
+                    if let Some(focus) = &click_focus {
+                        focus.focus(window, cx);
+                    }
                     if let Some(f) = &on_click {
                         f(toggled(checked), window, cx);
                     }

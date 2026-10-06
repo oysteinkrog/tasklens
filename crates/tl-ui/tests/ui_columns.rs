@@ -1748,6 +1748,132 @@ fn picker_keys_move_and_toggle() {
     assert_eq!(cursor(&mut rig), Some("name"));
 }
 
+/// Presses `key` in the picker window, with the key up that activates a focused button.
+fn press(rig: &mut PickerRig, key: &str) {
+    rig.pcx.simulate_keystrokes(key);
+    rig.pcx.simulate_event(gpui_kit::KeyUpEvent {
+        keystroke: gpui_kit::Keystroke::parse(key).expect("keystroke"),
+    });
+    redraw(&mut rig.pcx);
+}
+
+/// Whether a 2 px `accent` focus ring is painted around the element `selector`.
+fn ring_on(rig: &mut PickerRig, selector: &'static str) -> bool {
+    let Some(bounds) = rig.pcx.debug_bounds(selector) else {
+        return false;
+    };
+    rig.pcx.update(|window, cx| {
+        let accent = current(cx).accent;
+        let s = window.scale_factor();
+        let center = bounds.center().scale(s);
+        window.painted_quads().iter().any(|q| {
+            q.border_color == accent
+                && q.border_widths.top.0 == 2. * s
+                && q.bounds.contains(&center)
+        })
+    })
+}
+
+/// What holds focus in the picker window: "filter", "list", "reset", "close", "pin", "other" or
+/// "none". The buttons are told apart by their keyboard focus ring.
+fn picker_focus(rig: &mut PickerRig) -> &'static str {
+    use gpui_kit::Focusable as _;
+    redraw(&mut rig.pcx);
+    let picker = rig.picker.clone();
+    let focused = rig.pcx.update(|window, cx| {
+        let p = picker.read(cx);
+        let filter = p.filter().read(cx).focus_handle(cx);
+        match window.focused(cx) {
+            Some(f) if f == filter => Some("filter"),
+            Some(f) if &f == p.list_focus() => Some("list"),
+            Some(_) => None,
+            None => Some("none"),
+        }
+    });
+    if let Some(name) = focused {
+        return name;
+    }
+    [
+        ("reset", "TlButton-column-picker-reset"),
+        ("close", "TlButton-column-picker-close"),
+        ("pin", "TlWindowPin"),
+    ]
+    .into_iter()
+    .find(|(_, selector)| ring_on(rig, selector))
+    .map_or("other", |(name, _)| name)
+}
+
+#[test]
+fn picker_tab_order_filter_list_reset_close() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name, ColumnId::User]);
+    let defaults = d.layout.clone();
+    let mut rig = open_picker(&mut cx, d);
+    rig.vcx
+        .update(|_, cx| rig.table.update(cx, |t, _| t.set_default_layout(defaults)));
+    assert_eq!(
+        picker_focus(&mut rig),
+        "filter",
+        "the filter has focus at open"
+    );
+
+    let mut order = Vec::new();
+    for _ in 0..5 {
+        press(&mut rig, "tab");
+        order.push(picker_focus(&mut rig));
+    }
+    assert_eq!(order, ["list", "reset", "close", "filter", "list"]);
+
+    // The list keeps focus and its keys.
+    press(&mut rig, "down");
+    assert_eq!(picker_focus(&mut rig), "list");
+    assert_eq!(
+        rig.picker.read_with(&rig.pcx, |p, _| p.cursor()),
+        Some("name")
+    );
+
+    press(&mut rig, "tab");
+    assert_eq!(picker_focus(&mut rig), "reset");
+    let before = changed_count(&mut rig.vcx, &rig.table);
+    press(&mut rig, "enter");
+    assert_eq!(
+        changed_count(&mut rig.vcx, &rig.table),
+        before + 1,
+        "Enter on Reset resets"
+    );
+    press(&mut rig, "tab");
+    assert_eq!(picker_focus(&mut rig), "close");
+    // No `press`: its redraw needs the window that Close removes.
+    rig.pcx.simulate_keystrokes("enter");
+    rig.pcx.simulate_event(gpui_kit::KeyUpEvent {
+        keystroke: gpui_kit::Keystroke::parse("enter").expect("keystroke"),
+    });
+    rig.vcx.run_until_parked();
+    assert!(!picker_open(&mut rig), "Enter on Close closes");
+}
+
+#[test]
+fn picker_centres_on_the_table_window() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let (table, vcx) = open(&mut cx, d);
+    let mut vcx = vcx.clone();
+    // A test window opens maximized; a smaller one is off the screen centre.
+    vcx.simulate_resize(gpui_kit::size(px(800.), px(600.)));
+    vcx.run_until_parked();
+    dispatch_open_picker(&mut vcx, &table);
+    let handle = *picker_windows(&mut vcx)
+        .first()
+        .expect("a picker window opened");
+    let table_bounds = vcx.update(|window, _| window.bounds());
+    let picker_bounds = handle
+        .update(&mut vcx, |_, window, _| window.bounds())
+        .expect("picker window");
+    let on_screen = vcx.update(|_, cx| gpui_kit::Bounds::centered(None, picker_bounds.size, cx));
+    assert_ne!(on_screen.center(), table_bounds.center());
+    assert_eq!(picker_bounds.center(), table_bounds.center());
+}
+
 #[test]
 fn enable_all_columns_shows_every_column() {
     let mut cx = cosmic_cx();

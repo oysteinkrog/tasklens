@@ -1627,7 +1627,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn on_open_column_picker(
         &mut self,
         a: &OpenColumnPicker,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if a.table != self.delegate.columns().table || self.delegate.columns_fixed() {
@@ -1635,8 +1635,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             return;
         }
         let host: Rc<dyn ColumnHost> = Rc::new(cx.weak_entity());
+        let parent = Some(window.window_handle());
         // The picker reads this table while it opens, so it opens after this update.
-        cx.defer(move |cx| columns_window::open_column_picker(host, cx));
+        cx.defer(move |cx| columns_window::open_column_picker(host, parent, cx));
     }
 
     /// Shows or hides the column `key` for the picker and calls `on_columns_changed` once.

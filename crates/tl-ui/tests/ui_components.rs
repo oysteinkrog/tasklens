@@ -261,6 +261,71 @@ fn ring_after_keyboard_not_after_click(cx: &mut TestAppContext) {
     assert!(rings(cx) > 0, "a ring after Tab");
 }
 
+/// A button, a checkbox with `tab_stop(false)` and a switch. Counts the checkbox changes.
+struct NoTabStop {
+    root: FocusHandle,
+    changes: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl Render for NoTabStop {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let changes = self.changes.clone();
+        div()
+            .id("root")
+            .key_context(ROOT_CONTEXT)
+            .track_focus(&self.root)
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+            .size(px(600.))
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .items_start()
+            .gap(px(12.))
+            .child(probe(
+                "probe-button",
+                TlButton::new("button", TlButtonKind::Secondary).label("Run"),
+            ))
+            .child(probe(
+                "probe-checkbox",
+                TlCheckbox::new("checkbox")
+                    .label("Show kernel times")
+                    .tab_stop(false)
+                    .on_change(move |_, _, _| changes.set(changes.get() + 1)),
+            ))
+            .child(probe("probe-switch", TlSwitch::new("switch").label("On")))
+    }
+}
+
+#[gpui_kit::test]
+fn checkbox_tab_stop_false_skipped_and_click_not_focused(cx: &mut TestAppContext) {
+    cx.update(setup);
+    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let c = changes.clone();
+    let (view, cx) = cx.add_window_view(move |window, cx| {
+        let root = cx.focus_handle();
+        window.focus(&root, cx);
+        NoTabStop { root, changes: c }
+    });
+    draw(cx);
+
+    cx.simulate_keystrokes("tab");
+    assert_eq!(focused_probe(cx), Some("probe-button"));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        focused_probe(cx),
+        Some("probe-switch"),
+        "Tab skips the checkbox"
+    );
+
+    let checkbox = cx
+        .debug_bounds("probe-checkbox")
+        .expect("the checkbox is drawn");
+    cx.simulate_click(checkbox.center(), Modifiers::none());
+    assert_eq!(changes.get(), 1, "the click still toggles");
+    let root = cx.update(|window, cx| view.read(cx).root.is_focused(window));
+    assert!(root, "the click focuses the container, not the checkbox");
+}
+
 #[gpui_kit::test]
 fn heights_at_rem_13(cx: &mut TestAppContext) {
     let cx = open(cx, true);

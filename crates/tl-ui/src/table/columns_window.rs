@@ -14,8 +14,8 @@ use std::time::Duration;
 use gpui_kit::base::Root;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollStrategy,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Context, ElementId, Entity, FocusHandle,
+    FontWeight, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render, ScrollStrategy,
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
     UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, size, uniform_list,
 };
@@ -217,7 +217,7 @@ impl ColumnPicker {
             filter,
             needle: String::new(),
             debounce: None,
-            list_focus: cx.focus_handle(),
+            list_focus: cx.focus_handle().tab_stop(true),
             cursor: None,
             scroll: UniformListScrollHandle::new(),
             items: Rc::from([]),
@@ -480,7 +480,8 @@ impl ColumnPicker {
                     .child(
                         TlCheckbox::new(check_id)
                             .checked(Some(col.visible || !col.hideable))
-                            .disabled(!col.hideable),
+                            .disabled(!col.hideable)
+                            .tab_stop(false),
                     ),
             )
             .child(label.child(col.display_name()))
@@ -615,8 +616,9 @@ pub fn table_name(table: TableId, cx: &App) -> SharedString {
 }
 
 /// Opens the picker bound to `host`, or focuses the open one and binds it to `host` (R-106).
-/// Without a window registry (tests) it always opens a window.
-pub fn open_column_picker(host: Rc<dyn ColumnHost>, cx: &mut App) {
+/// A new picker centres on `parent`, the table's window, or on the screen without one. Without a
+/// window registry (tests) it always opens a window.
+pub fn open_column_picker(host: Rc<dyn ColumnHost>, parent: Option<AnyWindowHandle>, cx: &mut App) {
     let ui_scale = metrics(cx).ui_scale;
     let (w, h) = PICKER_SIZE;
     let spec = TlWindowSpec::new(
@@ -626,6 +628,10 @@ pub fn open_column_picker(host: Rc<dyn ColumnHost>, cx: &mut App) {
     )
     .min_size(size(px(PICKER_MIN_SIZE.0), px(PICKER_MIN_SIZE.1)))
     .key(WindowKey::Columns);
+    let spec = match parent {
+        Some(parent) => spec.parent(parent),
+        None => spec,
+    };
     let open_host = host.clone();
     let open = move |cx: &mut App| {
         TlSecondaryWindow::open(cx, spec, move |window, cx| {
