@@ -366,3 +366,17 @@ perf-cpu-tip-l1-data = {$size} data
 perf-cpu-tip-l1-instruction = {$size} instruction
 perf-cpu-tip-l4 = L4 {$size}
 perf-cpu-time-unknown = Unknown
+# System table status labels (SYS-003, SYS-020)
+sys-sys003-running = Running
+sys-sys003-active = Active
+sys-sys003-starting = Starting
+sys-sys003-stopping = Stopping
+sys-sys003-reloading = Reloading
+sys-sys003-stopped = Stopped
+sys-sys003-failed = Failed
+sys-sys003-maintenance = Maintenance
+sys-sys003-enabled = Enabled
+sys-sys003-disabled = Disabled
+sys-sys003-masked = Masked
+sys-sys003-not-in-this-desktop = Not in this desktop
+sys-sys003-missing-program = Missing program
