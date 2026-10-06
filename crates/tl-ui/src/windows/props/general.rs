@@ -45,7 +45,7 @@ use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, ValueTone,
 };
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
@@ -1715,10 +1715,13 @@ impl GeneralTab {
 
 /// Grid row for `field`. Restricted values get the R-050 tooltip; a placeholder word that is not
 /// the grid's own word (`Computing…`) and exited links draw as Stale, which keeps the text and
-/// uses `text_secondary`.
+/// uses `text_secondary`. A deleted executable draws in `status.warning`.
 fn to_row(field: &KvField, exited: bool) -> TlKvRow {
     let mut value = TlValue::new(field.value.clone());
     value.path = field.id.is_path();
+    if field.id == FieldId::Executable && field.value.ends_with(" (deleted)") {
+        value.tone = Some(ValueTone::Warning);
+    }
     value.validity = match field.validity {
         Validity::Valid if exited && matches!(field.kind, KvKind::Link(_)) => Validity::Stale,
         Validity::WarmingUp if field.value.as_ref() != COLLECTING => Validity::Stale,

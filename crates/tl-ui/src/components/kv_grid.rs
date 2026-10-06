@@ -17,7 +17,7 @@
 //!
 //! | Validity | Shows | Tooltip |
 //! |---|---|---|
-//! | Valid | the text, `text_primary` | the owner's, if any |
+//! | Valid | the text, `text_primary` or the owner's `ValueTone` | the owner's, if any |
 //! | WarmingUp | "Collecting…" | the owner's, if any |
 //! | Stale | the last value | the owner's "Last updated {age} ago" |
 //! | Restricted | "Restricted" | the owner's, if any |
@@ -125,6 +125,26 @@ impl UnsupportedWord {
     }
 }
 
+/// A theme status colour for a Valid value that needs attention, such as a deleted executable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueTone {
+    Success,
+    Warning,
+    Danger,
+    Info,
+}
+
+impl ValueTone {
+    pub fn color(self, theme: &TlTheme) -> Hsla {
+        match self {
+            Self::Success => theme.status.success,
+            Self::Warning => theme.status.warning,
+            Self::Danger => theme.status.danger,
+            Self::Info => theme.status.info,
+        }
+    }
+}
+
 /// One value. `text` is the owner's formatted value, shown when Valid or Stale.
 pub struct TlValue {
     pub text: SharedString,
@@ -136,6 +156,8 @@ pub struct TlValue {
     pub link: Option<Box<dyn Action>>,
     /// A file path: cut in the middle instead of at the end.
     pub path: bool,
+    /// Paints a Valid value in this status colour instead of `text_primary`.
+    pub tone: Option<ValueTone>,
 }
 
 impl TlValue {
@@ -148,6 +170,7 @@ impl TlValue {
             tooltip: None,
             link: None,
             path: false,
+            tone: None,
         }
     }
 }
@@ -161,6 +184,7 @@ impl Clone for TlValue {
             tooltip: self.tooltip.clone(),
             link: self.link.as_ref().map(|action| action.boxed_clone()),
             path: self.path,
+            tone: self.tone,
         }
     }
 }
@@ -225,7 +249,9 @@ pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
             || (value.validity == Validity::Unsupported
                 && value.word == Some(UnsupportedWord::NeedsSetup)));
     let color = if valid {
-        theme.text_primary
+        value
+            .tone
+            .map_or(theme.text_primary, |tone| tone.color(theme))
     } else {
         theme.text_secondary
     };
@@ -1048,6 +1074,25 @@ mod tests {
             let drawn = bounds(cx, &format!("TlKv-row-{n}")).is_some();
             assert_eq!(drawn, n != 5, "row {n}: only the Missing row is absent");
         }
+    }
+
+    #[gpui_kit::test]
+    fn tone_colours_only_valid_values(cx: &mut TestAppContext) {
+        let theme = cx.update(|cx| {
+            setup(cx);
+            current(cx).clone()
+        });
+        let warn = |validity| TlValue {
+            tone: Some(ValueTone::Warning),
+            ..value("/usr/bin/foo (deleted)", validity)
+        };
+        let color = |v: &TlValue| value_look(v, &theme).map(|l| l.color);
+        assert_eq!(color(&warn(Validity::Valid)), Some(theme.status.warning));
+        assert_eq!(color(&warn(Validity::Stale)), Some(theme.text_secondary));
+        assert_eq!(
+            color(&value("/usr/bin/foo", Validity::Valid)),
+            Some(theme.text_primary)
+        );
     }
 
     #[gpui_kit::test]

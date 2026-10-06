@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels,
+    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::actions::SchedPolicy;
 use tl_model::details::{
@@ -19,7 +19,7 @@ use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::components::kv_grid::value_look;
+use tl_ui::components::kv_grid::{ValueLook, value_look};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
 use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
 
@@ -347,6 +347,49 @@ fn general_restricted_word_and_tooltip(cx: &mut TestAppContext) {
     assert_eq!(look.color, secondary);
     assert_eq!(tooltip.as_deref(), Some(RESTRICTED_TOOLTIP));
     assert_eq!(RESTRICTED_TOOLTIP, "Needs administrator access.");
+}
+
+fn exe_and_pid_looks(
+    t: &Entity<GeneralTab>,
+    cx: &mut VisualTestContext,
+) -> (ValueLook, ValueLook, Hsla, Hsla) {
+    cx.update(|_, cx| {
+        let rows: Vec<_> = (0..3).flat_map(|i| t.read(cx).rows(i)).collect();
+        let theme = tl_ui::theme::current(cx);
+        let look = |label: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.label.as_ref() == label)
+                .expect("row");
+            value_look(&row.value, theme).expect("drawn")
+        };
+        (
+            look("Executable:"),
+            look("PID:"),
+            theme.status.warning,
+            theme.text_primary,
+        )
+    })
+}
+
+#[gpui_kit::test]
+fn general_deleted_exe_in_warning_colour(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    let mut d = detail("firefox");
+    d.exe = valid(text("/usr/lib/firefox/firefox (deleted)"));
+    d.exe_deleted = true;
+    feed(&t, cx, Some(&payload(d)), 1.);
+    draw(cx);
+    let (exe, pid, warning, primary) = exe_and_pid_looks(&t, cx);
+    assert_eq!(exe.text.as_ref(), "/usr/lib/firefox/firefox (deleted)");
+    assert_eq!(exe.color, warning);
+    assert_eq!(pid.color, primary);
+
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    draw(cx);
+    let (exe, _, _, primary) = exe_and_pid_looks(&t, cx);
+    assert_eq!(exe.color, primary);
 }
 
 #[gpui_kit::test]
