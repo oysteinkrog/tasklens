@@ -3,6 +3,7 @@
 //! Each worker bead adds one `pub mod <worker>;` line and one `WorkerSpec` in `all_workers`
 //! (chain edit). The logind worker (E08-A2) is the first entry.
 
+mod connections;
 pub mod cpu;
 mod dbus_kwin;
 mod dbus_systemd;
@@ -49,6 +50,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         dbus_systemd::spec_system(),
         dbus_systemd::spec_user(),
         dbus_kwin::spec(),
+        connections::spec(),
     ]
 }
 
