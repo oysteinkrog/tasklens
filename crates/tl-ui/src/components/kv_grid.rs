@@ -74,17 +74,16 @@ use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Key context of the grid, where [`init`] binds Ctrl+C.
 pub const KEY_CONTEXT: &str = "TlKeyValueGrid";
-/// Shown when a filter leaves no rows.
-pub const EMPTY_TEXT: &str = "No properties match the current filter.";
-/// Tooltip and accessible name of the section copy button.
-pub const COPY_SECTION_TOOLTIP: &str = "Copy section";
-
 const KEY_COLLECTING: &str = "fnd-kv-collecting";
 const KEY_RESTRICTED: &str = "fnd-kv-restricted";
 const KEY_UNAVAILABLE: &str = "fnd-kv-unavailable";
 const KEY_NOT_SUPPORTED: &str = "fnd-kv-not-supported";
 const KEY_NOT_REPORTED: &str = "fnd-kv-not-reported";
 const KEY_NEEDS_SETUP: &str = "fnd-kv-needs-setup";
+const KEY_NO_MATCH: &str = "fnd-kv-no-match";
+const KEY_COPY_VALUE: &str = "fnd-kv-copy-value";
+const KEY_COPY_ROW: &str = "fnd-kv-copy-row";
+const KEY_COPY_SECTION: &str = "fnd-kv-copy-section";
 
 /// Default row height, × ui_scale.
 const ROW_HEIGHT: f32 = 28.;
@@ -129,19 +128,8 @@ pub enum UnsupportedWord {
     NeedsSetup,
 }
 
-impl UnsupportedWord {
-    /// The en-US word, for owners that compare against it. The grid draws [`KvWords`].
-    pub fn text(self) -> &'static str {
-        match self {
-            Self::NotSupported => "Not supported",
-            Self::NotReported => "Not reported",
-            Self::NeedsSetup => "Needs setup",
-        }
-    }
-}
-
-/// The state words, translated once per strings version by [`kv_words`]. A new table is in
-/// en-US.
+/// The state words and the grid's own text, translated once per strings version by
+/// [`kv_words`]. A new table is in en-US.
 #[derive(Clone, Debug)]
 pub struct KvWords {
     pub collecting: SharedString,
@@ -150,6 +138,13 @@ pub struct KvWords {
     pub not_supported: SharedString,
     pub not_reported: SharedString,
     pub needs_setup: SharedString,
+    /// Shown when a filter leaves no rows.
+    pub no_match: SharedString,
+    /// Context menu items.
+    pub copy_value: SharedString,
+    pub copy_row: SharedString,
+    /// Context menu item, and tooltip and accessible name of the section copy button.
+    pub copy_section: SharedString,
 }
 
 impl Default for KvWords {
@@ -172,6 +167,10 @@ impl KvWords {
             not_supported: t(KEY_NOT_SUPPORTED),
             not_reported: t(KEY_NOT_REPORTED),
             needs_setup: t(KEY_NEEDS_SETUP),
+            no_match: t(KEY_NO_MATCH),
+            copy_value: t(KEY_COPY_VALUE),
+            copy_row: t(KEY_COPY_ROW),
+            copy_section: t(KEY_COPY_SECTION),
         }
     }
 
@@ -325,11 +324,6 @@ pub fn shown_text_in(value: &TlValue, words: &KvWords) -> Option<SharedString> {
     Some(text.clone())
 }
 
-/// [`shown_text_in`] with the en-US words.
-pub fn shown_text(value: &TlValue) -> Option<SharedString> {
-    shown_text_in(value, &en_words())
-}
-
 /// Text, colour and link flag of a value.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ValueLook {
@@ -339,11 +333,6 @@ pub struct ValueLook {
     pub link: bool,
     /// Gets the dotted underline on hover: the value has a tooltip and is not a link.
     pub underline: bool,
-}
-
-/// [`value_look_in`] with the en-US words.
-pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
-    value_look_in(value, &en_words(), theme)
 }
 
 /// How `value` draws with `words` in `theme`, or `None` when its row is not drawn.
@@ -624,7 +613,7 @@ impl TlKeyValueGrid {
         self
     }
 
-    /// Draws [`EMPTY_TEXT`] instead of the rows.
+    /// Draws [`KvWords::no_match`] instead of the rows.
     pub fn filtered_empty(mut self, empty: bool) -> Self {
         self.filtered_empty = empty;
         self
@@ -656,7 +645,7 @@ impl TlKeyValueGrid {
         let button = TlButton::new(self.child_id("copy-section", si), TlButtonKind::Icon)
             .icon(TlIcon::Copy)
             .size(TlButtonSize::Sm)
-            .tooltip(COPY_SECTION_TOOLTIP)
+            .tooltip(f.words.copy_section.clone())
             .on_click(move |_, window, cx| match &on_copy_section {
                 Some(handler) => handler(si, window, cx),
                 None => copy_and_report(
@@ -787,9 +776,9 @@ impl TlKeyValueGrid {
         let menu_max = px(MENU_MAX_WIDTH * m.ui_scale);
         Some(
             cell.context_menu(move |menu: PopupMenu, _, _| {
-                let item = |label: &'static str, text: Rc<dyn Fn() -> SharedString>| {
+                let item = |label: &SharedString, text: Rc<dyn Fn() -> SharedString>| {
                     let on_copied = on_copied.clone();
-                    PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                    PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
                         copy_and_report(text(), on_copied.as_ref(), window, cx)
                     })
                 };
@@ -799,11 +788,14 @@ impl TlKeyValueGrid {
                 let words = words.clone();
                 menu.min_w(menu_min)
                     .max_w(menu_max)
-                    .item(item("Copy value", Rc::new(move || value_text.clone())))
-                    .item(item("Copy row", Rc::new(move || row_text.clone())))
+                    .item(item(&words.copy_value, Rc::new(move || value_text.clone())))
+                    .item(item(&words.copy_row, Rc::new(move || row_text.clone())))
                     .item(item(
-                        "Copy section",
-                        Rc::new(move || section_copy_text(&sections[si], &words).into()),
+                        &words.copy_section,
+                        Rc::new({
+                            let words = words.clone();
+                            move || section_copy_text(&sections[si], &words).into()
+                        }),
                     ))
             })
             .into_any_element(),
@@ -998,6 +990,7 @@ impl RenderOnce for TlKeyValueGrid {
         if self.loading {
             return root.child(TlSkeletonBlock::new()).into_any_element();
         }
+        let words = kv_words(cx);
         if self.filtered_empty {
             let mut text = div().debug_selector(|| "TlKv-empty".into());
             *text.text_style() = t_base(&m);
@@ -1006,7 +999,10 @@ impl RenderOnce for TlKeyValueGrid {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(text.text_color(theme.text_secondary).child(EMPTY_TEXT))
+                .child(
+                    text.text_color(theme.text_secondary)
+                        .child(words.no_match.clone()),
+                )
                 .into_any_element();
         }
 
@@ -1033,7 +1029,7 @@ impl RenderOnce for TlKeyValueGrid {
             flash_count,
             reduced_motion: cx.reduce_motion(),
             row_height: self.row_height.unwrap_or(px(ROW_HEIGHT * m.ui_scale)),
-            words: kv_words(cx),
+            words,
         };
         let indent = self.block_indent.unwrap_or(m.sp[6]);
         let block_gap = self.block_gap.unwrap_or(m.sp[4]);
@@ -1118,6 +1114,10 @@ mod tests {
     gpui_kit::actions!(tl_kv_grid_test, [OpenSetup]);
 
     type Copied = Rc<RefCell<Vec<SharedString>>>;
+
+    fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
+        value_look_in(value, &KvWords::default(), theme)
+    }
 
     fn setup(cx: &mut App) {
         gpui_kit::init(cx);
@@ -1456,7 +1456,10 @@ mod tests {
     #[gpui_kit::test]
     fn filtered_empty_text(cx: &mut TestAppContext) {
         let (cx, _, _) = host(cx, || pid_grid().filtered_empty(true));
-        assert_eq!(EMPTY_TEXT, "No properties match the current filter.");
+        assert_eq!(
+            KvWords::default().no_match.as_ref(),
+            "No properties match the current filter."
+        );
         assert!(bounds(cx, "TlKv-empty").is_some(), "the empty text shows");
         assert!(bounds(cx, "TlKv-row-0").is_none(), "no rows");
     }

@@ -45,7 +45,8 @@ use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord, ValueTone,
+    KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    ValueTone, kv_words,
 };
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
@@ -64,8 +65,6 @@ pub const COMPUTING: &str = "Computing…";
 pub const NOT_VERIFIED: &str = "Not verified";
 
 const COLLECTING: &str = "Collecting…";
-const RESTRICTED: &str = "Restricted";
-const UNAVAILABLE: &str = "Unavailable";
 
 /// Body width from which the three panels sit side by side, × ui_scale.
 pub const THREE_COLUMN_MIN: f32 = 840.;
@@ -317,6 +316,8 @@ pub struct KvField {
     pub validity: Validity,
     /// The untruncated text where the value shows a shortened form (hashes, E23-012).
     pub full: Option<SharedString>,
+    /// Why an Unsupported value has none.
+    pub word: Option<UnsupportedWord>,
 }
 
 // ---- Formatters (pure) ----
@@ -607,6 +608,7 @@ impl ValueCache {
 /// Builds one column's fields.
 struct Builder<'a> {
     cache: &'a mut ValueCache,
+    words: &'a KvWords,
     out: Vec<KvField>,
 }
 
@@ -626,9 +628,9 @@ impl Builder<'_> {
         let value: SharedString = match validity {
             Validity::Valid | Validity::Stale => self.cache.get(id, bits, validity, format),
             Validity::WarmingUp => COLLECTING.into(),
-            Validity::Restricted => RESTRICTED.into(),
-            Validity::Unsupported => unsupported.text().into(),
-            Validity::Failed => UNAVAILABLE.into(),
+            Validity::Restricted => self.words.restricted.clone(),
+            Validity::Unsupported => self.words.unsupported(unsupported).clone(),
+            Validity::Failed => self.words.unavailable.clone(),
             Validity::Missing => return,
         };
         self.out.push(KvField {
@@ -638,6 +640,7 @@ impl Builder<'_> {
             kind,
             validity,
             full: None,
+            word: (validity == Validity::Unsupported).then_some(unsupported),
         });
     }
 
@@ -650,6 +653,20 @@ impl Builder<'_> {
             kind,
             validity,
             full: None,
+            word: None,
+        });
+    }
+
+    /// An Unsupported field with no payload value, showing `word`.
+    fn unsupported(&mut self, id: FieldId, kind: KvKind, word: UnsupportedWord) {
+        self.out.push(KvField {
+            id,
+            label: id.label().into(),
+            value: self.words.unsupported(word).clone(),
+            kind,
+            validity: Validity::Unsupported,
+            full: None,
+            word: Some(word),
         });
     }
 
@@ -766,22 +783,25 @@ fn net_unit(units: &UnitsSettings) -> NetUnit {
 pub struct CmdLineBlock {
     source: Option<Arc<str>>,
     validity: Validity,
+    words: Rc<KvWords>,
     text: SharedString,
     shape_count: u64,
 }
 
 impl CmdLineBlock {
-    fn new() -> Self {
+    fn new(words: Rc<KvWords>) -> Self {
         Self {
             source: None,
             validity: Validity::WarmingUp,
-            text: COLLECTING.into(),
+            text: words.collecting.clone(),
+            words,
             shape_count: 0,
         }
     }
 
-    /// Takes the payload's command line. Returns true when the shown text changed.
-    fn set(&mut self, cmdline: Option<&Total<Arc<str>>>) -> bool {
+    /// Takes the payload's command line and the state words. Returns true when the shown text
+    /// changed.
+    fn set(&mut self, cmdline: Option<&Total<Arc<str>>>, words: Rc<KvWords>) -> bool {
         let (source, validity) = match cmdline {
             Some(t) => (Some(&t.value), t.validity),
             None => (None, Validity::WarmingUp),
@@ -791,21 +811,23 @@ impl CmdLineBlock {
             (None, None) => true,
             _ => false,
         };
-        if same_source && validity == self.validity {
+        if same_source && validity == self.validity && Rc::ptr_eq(&words, &self.words) {
             return false;
         }
         self.source = source.cloned();
         self.validity = validity;
+        self.words = words;
+        let words = &self.words;
         self.text = match (validity, source) {
             (Validity::Valid | Validity::Stale, Some(text)) => {
                 let mut out = String::with_capacity(text.len());
                 escape_controls(&mut out, text);
                 out.into()
             }
-            (Validity::Restricted, _) => RESTRICTED.into(),
-            (Validity::Unsupported, _) => UnsupportedWord::NotReported.text().into(),
-            (Validity::Failed, _) => UNAVAILABLE.into(),
-            _ => COLLECTING.into(),
+            (Validity::Restricted, _) => words.restricted.clone(),
+            (Validity::Unsupported, _) => words.not_reported.clone(),
+            (Validity::Failed, _) => words.unavailable.clone(),
+            _ => words.collecting.clone(),
         };
         self.shape_count += 1;
         true
@@ -881,6 +903,8 @@ pub struct GeneralTab {
     exited: bool,
     needle: SharedString,
     cache: ValueCache,
+    /// The state words the fields were built with.
+    words: Rc<KvWords>,
     columns: [Arc<[KvField]>; 3],
     /// Grid sections per column, after the filter.
     sections: [Rc<[TlKvSection]>; 3],
@@ -917,15 +941,16 @@ impl GeneralTab {
             exited: false,
             needle: SharedString::default(),
             cache: ValueCache::default(),
+            words: kv_words(cx),
             columns: [Arc::from([]), Arc::from([]), Arc::from([])],
             sections: [Rc::from([]), Rc::from([]), Rc::from([])],
             label_widths: None,
             width: Rc::default(),
-            cmdline: cx.new(|_| CmdLineBlock::new()),
+            cmdline: cx.new(|cx| CmdLineBlock::new(kv_words(cx))),
             filter,
             _subs: vec![sub],
         };
-        tab.rebuild();
+        tab.rebuild(cx);
         tab
     }
 
@@ -953,12 +978,13 @@ impl GeneralTab {
         }
         self.payload = detail;
         let cmdline = self.payload.as_ref().map(|d| &d.cmdline);
+        let words = kv_words(cx);
         self.cmdline.update(cx, |c, cx| {
-            if c.set(cmdline) {
+            if c.set(cmdline, words) {
                 cx.notify();
             }
         });
-        self.rebuild();
+        self.rebuild(cx);
         cx.notify();
     }
 
@@ -979,7 +1005,7 @@ impl GeneralTab {
         }
         self.live = live;
         self.mem_total_bytes = mem_total_bytes;
-        self.rebuild();
+        self.rebuild(cx);
         cx.notify();
     }
 
@@ -987,7 +1013,7 @@ impl GeneralTab {
     pub fn set_online_cpus(&mut self, online: CpuSet, cx: &mut Context<Self>) {
         if online != self.online {
             self.online = online;
-            self.rebuild();
+            self.rebuild(cx);
             cx.notify();
         }
     }
@@ -996,7 +1022,7 @@ impl GeneralTab {
     pub fn set_units(&mut self, units: UnitsSettings, cx: &mut Context<Self>) {
         if units != self.units {
             self.units = units;
-            self.rebuild();
+            self.rebuild(cx);
             cx.notify();
         }
     }
@@ -1086,7 +1112,8 @@ impl GeneralTab {
         }
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, cx: &mut App) {
+        self.words = kv_words(cx);
         let d = self.payload.clone();
         let d = d.as_deref();
         let live = self.live.clone();
@@ -1096,6 +1123,7 @@ impl GeneralTab {
         // Column 1.
         let mut b = Builder {
             cache: &mut self.cache,
+            words: &self.words,
             out: Vec::with_capacity(COLUMNS[0].len()),
         };
         match live {
@@ -1393,12 +1421,7 @@ impl GeneralTab {
                         s.push_str(path);
                     },
                 ),
-                None => b.word(
-                    FieldId::Cgroup,
-                    KvKind::Text,
-                    Validity::Unsupported,
-                    UnsupportedWord::NotReported.text(),
-                ),
+                None => b.unsupported(FieldId::Cgroup, KvKind::Text, UnsupportedWord::NotReported),
             },
             None => b.word(FieldId::Cgroup, KvKind::Text, none(), COLLECTING),
         }
@@ -1427,6 +1450,7 @@ impl GeneralTab {
         // Column 2.
         let mut b = Builder {
             cache: &mut self.cache,
+            words: &self.words,
             out: Vec::with_capacity(COLUMNS[1].len()),
         };
         let (hash_validity, hash_text) = match d {
@@ -1457,11 +1481,10 @@ impl GeneralTab {
                             ptr_bits(packager),
                             |s| s.push_str(packager),
                         ),
-                        None => b.word(
+                        None => b.unsupported(
                             FieldId::Packager,
                             KvKind::Text,
-                            Validity::Unsupported,
-                            UnsupportedWord::NotReported.text(),
+                            UnsupportedWord::NotReported,
                         ),
                     }
                 }
@@ -1590,6 +1613,7 @@ impl GeneralTab {
         // Column 3.
         let mut b = Builder {
             cache: &mut self.cache,
+            words: &self.words,
             out: Vec::with_capacity(COLUMNS[2].len()),
         };
         b.size(FieldId::DiskReadBytes, d.map(|d| &d.disk_read_bytes));
@@ -1730,13 +1754,7 @@ fn to_row(field: &KvField, exited: bool) -> TlKvRow {
             Validity::Restricted
         }
         Validity::Unsupported => {
-            value.word = Some(
-                if field.value.as_ref() == UnsupportedWord::NotReported.text() {
-                    UnsupportedWord::NotReported
-                } else {
-                    UnsupportedWord::NotSupported
-                },
-            );
+            value.word = Some(field.word.unwrap_or_default());
             Validity::Unsupported
         }
         v => v,
