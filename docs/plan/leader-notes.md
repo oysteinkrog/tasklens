@@ -312,3 +312,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.12: OpenRC backend in dbus_systemd.rs. sub_state is the raw OpenRC word, load_state and path empty, User "root". Closed while clippy was blocked by sys_table.rs:1041 println (y6k.1); recheck.
 - 8q0.29: chain edit approved in reducer/processes.rs for net attribution.
 - ug9.2: leader decision, TlStepper is one Tab stop; minus/plus get tab_stop(false) (spec silent; GTK SpinButton pattern).
+- hjn.18: rtnetlink RTM_GETADDR dump (read-only). Demand gating goes through a Cell<bool> set in period(), because sample() does not see Demand; consider a Source hook later. IPv6 Host and Other scope addresses are dropped (so ::1 is not shown). Fixture roots get no addresses.
