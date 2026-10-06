@@ -18,9 +18,10 @@ pub const ELLIPSIS: char = '\u{2026}';
 /// Sanitizes `raw` into `out`, which is cleared first.
 ///
 /// Uses at most `max` bytes of `raw` and appends [`ELLIPSIS`] when it cut. Invalid UTF-8 becomes
-/// U+FFFD exactly as `String::from_utf8_lossy` does. `\n`, `\r` and NUL become a space. Other C0
-/// controls, DEL and C1 controls become U+FFFD. Bidirectional controls and zero-width characters
-/// are removed. Trailing spaces are trimmed.
+/// U+FFFD exactly as `String::from_utf8_lossy` does. `\n`, `\r`, NUL, U+2028 (line separator) and
+/// U+2029 (paragraph separator) become a space. Other C0 controls, DEL and C1 controls become
+/// U+FFFD. Bidirectional controls and zero-width characters are removed, except U+200D (zero-width
+/// joiner), which is kept so emoji sequences stay whole (UI-FND-053). Trailing spaces are trimmed.
 pub fn sanitize_text(raw: &[u8], max: usize, out: &mut String) {
     out.clear();
     let truncated = raw.len() > max;
@@ -63,9 +64,14 @@ pub fn sanitize_link(raw: &[u8], out: &mut String) {
 
 fn push_clean(c: char, out: &mut String) {
     match c {
-        '\n' | '\r' | '\0' => out.push(' '),
+        '\n' | '\r' | '\0' | '\u{2028}' | '\u{2029}' => out.push(' '),
         '\u{0001}'..='\u{001F}' | '\u{007F}'..='\u{009F}' => out.push(char::REPLACEMENT_CHARACTER),
-        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => {}
+        '\u{200B}'
+        | '\u{200C}'
+        | '\u{200E}'
+        | '\u{200F}'
+        | '\u{202A}'..='\u{202E}'
+        | '\u{2066}'..='\u{2069}' => {}
         _ => out.push(c),
     }
 }

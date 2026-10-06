@@ -6,7 +6,28 @@ use tl_collect::sanitize::{
 };
 
 fn is_removed(c: char) -> bool {
-    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    matches!(
+        c,
+        '\u{200B}' | '\u{200C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// Copy of `is_forbidden` in `crates/tl-ui/src/text/untrusted.rs`, which `debug_assert_clean`
+/// uses. tl-collect must not depend on tl-ui, so keep the two in step by hand.
+fn ui_forbidden(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0000}'..='\u{001F}'
+            | '\u{007F}'..='\u{009F}'
+            | '\u{200B}'
+            | '\u{200C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{2028}'
+            | '\u{2029}'
+    )
 }
 
 fn is_control(c: char) -> bool {
@@ -52,7 +73,7 @@ fn control_chars_replaced() {
 fn bidi_and_zero_width_removed() {
     let removed = ('\u{202A}'..='\u{202E}')
         .chain('\u{2066}'..='\u{2069}')
-        .chain('\u{200B}'..='\u{200F}');
+        .chain(['\u{200B}', '\u{200C}', '\u{200E}', '\u{200F}']);
     for c in removed {
         let raw = format!("a{c}b");
         let out = text(raw.as_bytes(), 64);
@@ -62,6 +83,24 @@ fn bidi_and_zero_width_removed() {
     assert!(!out.contains('\u{202E}'));
     assert!(!out.contains('\u{200B}'));
     assert_eq!(out, "xyz");
+}
+
+#[test]
+fn zwj_kept() {
+    assert_eq!(text("a\u{200D}b".as_bytes(), 64), "a\u{200D}b");
+    // Family emoji: three people joined by U+200D stays one sequence.
+    let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+    assert_eq!(text(family.as_bytes(), 64), family);
+}
+
+#[test]
+fn line_and_paragraph_separators_removed() {
+    let out = text("a\u{2028}b\u{2029}c".as_bytes(), 64);
+    assert!(!out.contains('\u{2028}'));
+    assert!(!out.contains('\u{2029}'));
+    // They are line breaks, so they become a space like `\n`.
+    assert_eq!(out, "a b c");
+    assert_eq!(text("name\u{2029}".as_bytes(), 64), "name");
 }
 
 #[test]
@@ -135,5 +174,37 @@ proptest! {
         prop_assert_eq!(out.ends_with(ELLIPSIS) || !truncated, true);
         let body = if truncated { out.strip_suffix(ELLIPSIS).unwrap_or(&out) } else { &out };
         prop_assert!(!body.ends_with(' '));
+    }
+
+    /// Output passes the tl-ui display check. Random bytes rarely form the characters near the
+    /// edges of the rule, so this draws from a mix of plain text and those characters.
+    #[test]
+    fn proptest_output_passes_ui_check(
+        chars in proptest::collection::vec(
+            prop_oneof![
+                any::<char>(),
+                prop::sample::select(vec![
+                    '\0', '\t', '\n', '\r', '\u{1B}', '\u{7F}', '\u{85}', '\u{9F}',
+                    '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}',
+                    '\u{2028}', '\u{2029}', '\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}',
+                    '\u{FFFD}', '\u{1F468}', 'a',
+                ]),
+            ],
+            0..=200,
+        ),
+        max in prop_oneof![Just(16usize), Just(64), Just(4096)],
+    ) {
+        let raw: String = chars.into_iter().collect();
+        let mut out = String::new();
+        sanitize_text(raw.as_bytes(), max, &mut out);
+        for c in out.chars() {
+            prop_assert!(!ui_forbidden(c), "forbidden char U+{:04X} in output", c as u32);
+        }
+        // U+200D is the one zero-width character that survives.
+        if raw.len() <= max {
+            let joiners_in = raw.chars().filter(|&c| c == '\u{200D}').count();
+            let joiners_out = out.chars().filter(|&c| c == '\u{200D}').count();
+            prop_assert_eq!(joiners_in, joiners_out);
+        }
     }
 }
