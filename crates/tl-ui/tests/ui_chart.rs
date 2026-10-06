@@ -1859,6 +1859,8 @@ mod grid_element {
         let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
         draw(vcx);
         let before = vcx.read_entity(&grid, |v, _| v.path_paints.get());
+        // A cached view replays its last paint unless notified.
+        vcx.update(|_, cx| grid.update(cx, |_, cx| cx.notify()));
         draw(vcx);
         vcx.read_entity(&grid, |v, _| {
             assert_eq!(v.built_layout().map(|l| (l.cols, l.rows)), Some((8, 4)));
