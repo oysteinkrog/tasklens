@@ -141,7 +141,7 @@ fn upower_real_no_battery() {
 }
 
 /// UDisks2 on the owner machine: two NVMe drives and one SATA drive. Read-only: it calls
-/// `GetManagedObjects` only. Prints names and SMART kinds, never serials or WWNs.
+/// `GetManagedObjects` only. Failures show names and SMART kinds, never serials or WWNs.
 #[test]
 #[ignore = "needs the owner machine's system bus with UDisks2"]
 fn udisks_real_drives() {
@@ -205,20 +205,21 @@ fn udisks_real_drives() {
             _ => None,
         })
     };
-    for (identity, d) in &entries {
-        if let DeviceIdentity::Disk { name, .. } = identity {
-            println!("{name}: {:?}", d.smart);
-        }
-    }
-    assert_eq!(smart("sda"), Some(SmartKind::Ata));
+    let kinds: Vec<(String, SmartKind)> = entries
+        .iter()
+        .filter_map(|(identity, d)| match identity {
+            DeviceIdentity::Disk { name, .. } => Some((name.to_string(), d.smart)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(smart("sda"), Some(SmartKind::Ata), "{kinds:?}");
     for nvme in ["nvme0n1", "nvme1n1"] {
         assert!(
             matches!(
                 smart(nvme),
                 Some(SmartKind::Nvme | SmartKind::NeedsFallback)
             ),
-            "{nvme}: {:?}",
-            smart(nvme)
+            "{nvme}: {kinds:?}"
         );
     }
 }
