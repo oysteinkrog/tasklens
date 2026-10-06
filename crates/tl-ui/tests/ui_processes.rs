@@ -287,7 +287,7 @@ mod delegate {
     use tl_ui::table::tree_table::{IconSlot, RowKind, TlTreeTable, TreeTableDelegate};
     use tl_ui::testing::fake_engine::FakeEngine;
 
-    fn setup(cx: &mut TestAppContext) {
+    pub(super) fn setup(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             tl_ui::table::actions::bind_keys_table(cx);
@@ -301,7 +301,7 @@ mod delegate {
         });
     }
 
-    fn key(pid: u32) -> ProcessKey {
+    pub(super) fn key(pid: u32) -> ProcessKey {
         ProcessKey {
             start_ticks: u64::from(pid),
             boot_id: BootId(0),
@@ -309,7 +309,7 @@ mod delegate {
         }
     }
 
-    fn record(pid: u32, name: &str, flags: ProcFlags) -> ProcessRecord {
+    pub(super) fn record(pid: u32, name: &str, flags: ProcFlags) -> ProcessRecord {
         let a = |s: &str| Arc::<str>::from(s);
         ProcessRecord {
             key: key(pid),
@@ -394,7 +394,12 @@ mod delegate {
         }
     }
 
-    fn row(node: NodeId, depth: u8, record: Option<u32>, group: Option<u32>) -> TableRow {
+    pub(super) fn row(
+        node: NodeId,
+        depth: u8,
+        record: Option<u32>,
+        group: Option<u32>,
+    ) -> TableRow {
         TableRow {
             node,
             depth,
@@ -407,7 +412,7 @@ mod delegate {
         }
     }
 
-    fn firefox() -> NodeId {
+    pub(super) fn firefox() -> NodeId {
         NodeId::Group(
             GroupKind::App {
                 app_id: Arc::from("firefox"),
@@ -425,7 +430,7 @@ mod delegate {
 
     /// One row of every kind, in the order the acceptance test names them, then the Kernel
     /// threads (N) row and an expanded parent.
-    fn every_kind() -> (Vec<TableRow>, Vec<GroupRow>, Vec<ProcessRecord>) {
+    pub(super) fn every_kind() -> (Vec<TableRow>, Vec<GroupRow>, Vec<ProcessRecord>) {
         let records = vec![
             record(10, "bash", ProcFlags::empty()),
             record(20, "kworker/0:1", ProcFlags::KERNEL_THREAD),
@@ -477,7 +482,7 @@ mod delegate {
         (rows, groups, records)
     }
 
-    fn snapshot(
+    pub(super) fn snapshot(
         version: u64,
         rows: Vec<TableRow>,
         groups: Vec<GroupRow>,
@@ -762,7 +767,7 @@ mod delegate {
         }
     }
 
-    fn redraw(vcx: &mut VisualTestContext) {
+    pub(super) fn redraw(vcx: &mut VisualTestContext) {
         vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
     }
@@ -867,5 +872,339 @@ mod delegate {
             redraw(vcx);
         }
         assert_eq!(tr_calls(), before, "a frame called tr");
+    }
+}
+
+/// `ProcessesPage` (tasklens-pdu.1).
+mod page {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, Modifiers,
+        MouseButton, MouseDownEvent, MouseUpEvent, ParentElement, Point, Render, ScrollStrategy,
+        Styled, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::ids::ColumnId;
+    use tl_model::ids::NodeId;
+    use tl_model::process::{ProcFlags, ProcessRecord};
+    use tl_model::snapshot::Snapshot;
+    use tl_model::table::{TableMode, TableQuery, TableRow};
+    use tl_model::validity::Validity;
+    use tl_ui::app::EngineGlobal;
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::table::GroupHeader;
+    use tl_ui::table::actions::{CollapseAll, OpenProperties};
+    use tl_ui::table::tree_table::HEADER_H_TWO;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    use super::delegate::{every_kind, firefox, key, record, redraw, row, setup, snapshot};
+
+    /// Rows a 720 px viewport may build: 676 px of body over 28 px rows, plus the partial rows
+    /// at both edges and the measuring row.
+    const MAX_ROWS_720: u32 = 27;
+
+    struct Host {
+        page: Entity<ProcessesPage>,
+        opened: Rc<Cell<u32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let opened = self.opened.clone();
+            div()
+                .w(px(1000.))
+                .h(px(720.))
+                .flex()
+                .flex_col()
+                .on_action(move |_: &OpenProperties, _, _| opened.set(opened.get() + 1))
+                .child(self.page.clone())
+        }
+    }
+
+    struct Opened<'a> {
+        page: Entity<ProcessesPage>,
+        opened: Rc<Cell<u32>>,
+        engine: Arc<FakeEngine>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn open(cx: &mut TestAppContext) -> Opened<'_> {
+        setup(cx);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+            cx.set_global(GlobalHub(hub));
+        });
+        let opened = Rc::new(Cell::new(0));
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let (out, hits) = (slot.clone(), opened.clone());
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            *out.borrow_mut() = Some(page.clone());
+            Host { page, opened: hits }
+        });
+        vcx.update(|window, _| window.activate_window());
+        redraw(vcx);
+        let page = slot.borrow_mut().take().expect("page created");
+        vcx.update(|window, cx| page.read(cx).focus_table(window, cx));
+        redraw(vcx);
+        Opened {
+            page,
+            opened,
+            engine,
+            vcx,
+        }
+    }
+
+    fn sent(engine: &FakeEngine) -> Vec<TableQuery> {
+        engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SetTableQuery(q) => Some(q),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Publishes `snap` with the hub's next sequence and the given view generation.
+    fn publish(engine: &FakeEngine, snap: Arc<Snapshot>, generation: u64) {
+        let mut s = Snapshot::clone(&snap);
+        s.sequence = engine.latest().sequence + 1;
+        Arc::make_mut(&mut s.table).query_generation = generation;
+        engine.publish(s);
+    }
+
+    /// 2,000 flat process rows with names and CPU values from a seed-42 LCG.
+    fn rows_2000(version: u64) -> Arc<Snapshot> {
+        let mut state: u64 = 42;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u32
+        };
+        let mut records: Vec<ProcessRecord> = Vec::with_capacity(2000);
+        let mut rows: Vec<TableRow> = Vec::with_capacity(2000);
+        for i in 0..2000u32 {
+            let pid = 100 + i;
+            let mut r = record(
+                pid,
+                &format!("proc-{}", next() % 10_000),
+                ProcFlags::empty(),
+            );
+            r.cpu_pct = (next() % 1000) as f32 / 10.0;
+            records.push(r);
+            rows.push(row(NodeId::Process(key(pid)), 0, Some(i), None));
+        }
+        snapshot(version, rows, Vec::new(), records)
+    }
+
+    fn render_count(o: &mut Opened<'_>) -> u32 {
+        let page = o.page.clone();
+        o.vcx
+            .update(|_, cx| page.read(cx).table().read(cx).render_count.get())
+    }
+
+    fn rows_built(o: &mut Opened<'_>) -> u32 {
+        let page = o.page.clone();
+        o.vcx
+            .update(|_, cx| page.read(cx).table().read(cx).rows_built_last_frame.get())
+    }
+
+    #[gpui_kit::test]
+    fn first_query_sent_on_create(cx: &mut TestAppContext) {
+        let o = open(cx);
+        let queries = sent(&o.engine);
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].generation, 1);
+        assert_eq!(queries[0].mode, TableMode::Grouped);
+    }
+
+    #[gpui_kit::test]
+    fn tree_table_renders_visible_range_only_2000(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        publish(&o.engine, rows_2000(2), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let count = o.vcx.update(|_, cx| {
+            page.read(cx)
+                .table()
+                .read(cx)
+                .delegate
+                .query()
+                .shown()
+                .map(|v| v.rows.len())
+        });
+        assert_eq!(count, Some(2000));
+        let built = rows_built(&mut o);
+        assert!(built > 0 && built <= MAX_ROWS_720, "{built} rows built");
+    }
+
+    #[gpui_kit::test]
+    fn notifies_only_on_drawn_components(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        let (rows, groups, records) = every_kind();
+        publish(
+            &o.engine,
+            snapshot(2, rows.clone(), groups.clone(), records.clone()),
+            1,
+        );
+        redraw(o.vcx);
+        let before = render_count(&mut o);
+
+        o.engine
+            .publish_with(|s| Arc::make_mut(&mut s.series).header.version += 1);
+        redraw(o.vcx);
+        assert_eq!(
+            render_count(&mut o),
+            before,
+            "a SERIES change notified the table"
+        );
+
+        // A view for an older generation is ignored too.
+        publish(
+            &o.engine,
+            snapshot(3, rows.clone(), groups.clone(), records.clone()),
+            0,
+        );
+        redraw(o.vcx);
+        assert_eq!(
+            render_count(&mut o),
+            before,
+            "a stale view notified the table"
+        );
+
+        publish(&o.engine, snapshot(4, rows, groups, records), 1);
+        redraw(o.vcx);
+        assert_eq!(render_count(&mut o), before + 1);
+    }
+
+    #[gpui_kit::test]
+    fn no_skeleton_on_processes_tab(cx: &mut TestAppContext) {
+        let mut o = open(cx);
+        assert_eq!(rows_built(&mut o), 0);
+        let page = o.page.clone();
+        let cpu = o.vcx.update(|_, cx| {
+            let table = page.read(cx).table().read(cx);
+            table
+                .header_state()
+                .cells
+                .iter()
+                .find(|c| c.id == ColumnId::Cpu)
+                .and_then(|c| c.total.clone())
+        });
+        let (_, validity) = cpu.expect("CPU has a line 2 total");
+        assert_eq!(validity, Validity::WarmingUp);
+        assert!(o.vcx.debug_bounds("TlTreeTableHeader-total-cpu").is_some());
+        assert!(
+            o.vcx.debug_bounds("TlValidityGlyph-text").is_some(),
+            "… drawn"
+        );
+        assert!(o.vcx.debug_bounds("TlTreeTable-empty").is_none());
+        assert!(o.vcx.debug_bounds("TlNameCell").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn collapse_all_action_sends_query(cx: &mut TestAppContext) {
+        let o = open(cx);
+        let page = o.page.clone();
+        o.vcx.update(|_, cx| {
+            page.read(cx).table().clone().update(cx, |t, _| {
+                let q = t.delegate.query_mut();
+                q.toggle(firefox());
+                q.toggle(NodeId::Process(key(10)));
+            })
+        });
+        let before = sent(&o.engine).len();
+        o.vcx.dispatch_action(CollapseAll);
+        redraw(o.vcx);
+        let queries = sent(&o.engine);
+        assert_eq!(queries.len(), before + 1);
+        let last = queries.last().expect("query");
+        let mut expanded: Vec<NodeId> = last.expanded.to_vec();
+        expanded.sort_by_key(|n| format!("{n:?}"));
+        let mut headers: Vec<NodeId> = GroupHeader::ALL.iter().map(|h| h.node()).collect();
+        headers.sort_by_key(|n| format!("{n:?}"));
+        assert_eq!(expanded, headers);
+    }
+
+    #[gpui_kit::test]
+    fn scroll_handle_drives_table(cx: &mut TestAppContext) {
+        let o = open(cx);
+        publish(&o.engine, rows_2000(2), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let handle = o.vcx.update(|_, cx| page.read(cx).scroll_handle(cx));
+        handle.scroll_to_item_strict(1000, ScrollStrategy::Top);
+        o.vcx.update(|window, _| window.refresh());
+        redraw(o.vcx);
+        let first = o
+            .vcx
+            .update(|_, cx| page.read(cx).table().read(cx).first_visible_row())
+            .expect("rows");
+        assert!(
+            first.1.abs_diff(1000) <= MAX_ROWS_720 as usize,
+            "first row {}",
+            first.1
+        );
+    }
+
+    fn row_at(ix: usize) -> Point<gpui_kit::Pixels> {
+        point(px(400.), px(HEADER_H_TWO + ix as f32 * 28. + 14.))
+    }
+
+    fn double_click(vcx: &mut VisualTestContext, at: Point<gpui_kit::Pixels>) {
+        vcx.simulate_click(at, Modifiers::none());
+        vcx.simulate_event(MouseDownEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+            first_mouse: false,
+        });
+        vcx.simulate_event(MouseUpEvent {
+            position: at,
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 2,
+        });
+        redraw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn double_click_toggles_expand_not_properties(cx: &mut TestAppContext) {
+        let o = open(cx);
+        let (rows, groups, records) = every_kind();
+        publish(&o.engine, snapshot(2, rows, groups, records), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+
+        // Row 1 is the Firefox app row, which has children.
+        let before = sent(&o.engine).len();
+        double_click(o.vcx, row_at(1));
+        assert_eq!(sent(&o.engine).len(), before + 1);
+        let open = o.vcx.update(|_, cx| {
+            page.read(cx)
+                .table()
+                .read(cx)
+                .delegate
+                .query()
+                .is_expanded(&firefox())
+        });
+        assert!(open, "the app row expanded");
+        assert_eq!(o.opened.get(), 0, "OpenProperties dispatched");
+
+        // Row 4 is a kernel thread leaf.
+        double_click(o.vcx, row_at(4));
+        assert_eq!(sent(&o.engine).len(), before + 1);
+        assert_eq!(o.opened.get(), 0);
     }
 }
