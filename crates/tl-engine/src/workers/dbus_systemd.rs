@@ -1,18 +1,22 @@
-//! The `SystemdSystem` and `SystemdUser` workers (ADR-004, SYS-001 to SYS-003).
+//! The `SystemdSystem` and `SystemdUser` workers (ADR-004, SYS-001 to SYS-005, SYS-016).
 //!
 //! One body serves both managers: `Manager::System` on the system bus, `Manager::User` on the
 //! session bus. On connect it lists every loaded unit and every installed unit file, reads
-//! their properties and sends one `SourceUpdate::Services` with the unit records. It lists
-//! again on `RefreshNow`. Signals, cgroup data and unit details come in E14-002 to E14-004.
+//! their properties and sends one `SourceUpdate::Services` with the unit records. Then it
+//! subscribes to the manager and keeps the records live from unit signals (`ServicesState`),
+//! with one publish per signal batch. A full listing runs again on `RefreshNow`, on
+//! `Reloading(false)` and every 60 s while the Services page wants data (ADR-008). Cgroup data
+//! and unit details come in E14-003 and E14-004.
 //!
 //! A bus that cannot be opened, or a bus without `org.freedesktop.systemd1`, is an expected
 //! condition: the worker publishes the manager as `Unavailable` and tries again on `RefreshNow`
-//! or after 60 s. A call timeout or a connection error during a listing ends the generation
-//! with `Err` so the supervisor restarts it.
+//! or after 60 s. A call timeout or a connection error during the first listing ends the
+//! generation with `Err` so the supervisor restarts it. Once connected, a lost bus publishes
+//! the manager as `Reconnecting` with the last records, then ends with `Err`.
 //!
 //! Unit descriptions and paths are logged at `debug` level only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +24,10 @@ use asupersync::channel::mpsc;
 use asupersync::runtime::{JoinError, TaskHandle};
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
+use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
+use futures_lite::StreamExt;
+use futures_lite::stream::Boxed;
 use tl_collect::SysRoot;
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
 use tl_collect::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
@@ -43,9 +50,26 @@ pub const PATH: &str = "/org/freedesktop/systemd1";
 pub const MANAGER_IFACE: &str = "org.freedesktop.systemd1.Manager";
 const UNIT_IFACE: &str = "org.freedesktop.systemd1.Unit";
 const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
+/// Every unit object lives under this path.
+const UNIT_PATH_NAMESPACE: &str = "/org/freedesktop/systemd1/unit";
+/// The error `Subscribe` returns when this connection is already subscribed (E11 may subscribe
+/// on the same connection).
+const ALREADY_SUBSCRIBED: &str = "org.freedesktop.systemd1.AlreadySubscribed";
 
 /// How long an unavailable manager waits before the next try when no `RefreshNow` comes.
 pub const RETRY_UNAVAILABLE: Duration = Duration::from_secs(60);
+/// ADR-008: a full listing every 60 s while `Demand.services` is true.
+pub const RESYNC_PERIOD: Duration = Duration::from_secs(60);
+/// The longest wait on the signal stream. Cancellation, `RefreshNow` and the resync schedule
+/// are checked after each wait.
+const SIGNAL_WAIT: Duration = Duration::from_millis(500);
+/// Signals each match rule may queue. zbus stops reading the socket when a queue is full, which
+/// would also hold back method replies; one listing loads hundreds of unit files with
+/// `LoadUnit`, and each load sends `UnitNew`.
+const SIGNAL_QUEUE: usize = 8192;
+/// The most signals applied as one batch, so a signal storm still publishes and checks
+/// cancellation.
+const MAX_BATCH: usize = 4096;
 
 /// `ListUnitsByPatterns` row: name, description, load state, active state, sub state,
 /// following, object path, job id, job type, job path.
@@ -195,8 +219,8 @@ async fn run<O: Opener>(
     }
 }
 
-/// One connected generation: fill the slot, start the colour scheme watch, list, then list
-/// again on each `RefreshNow`.
+/// One connected generation: fill the slot, start the colour scheme watch, list, subscribe,
+/// then apply signals and resync on schedule until cancelled or the bus is lost.
 async fn connected(
     cx: &Cx,
     io: &WorkerIo,
@@ -211,31 +235,151 @@ async fn connected(
     // Locals drop in reverse order, so both guards go before `conn` stops its tick task.
     let _clear = ClearOnDrop(slot.clone());
     let _scheme = start_color_scheme(cx, cfg.mode, manager, conn.raw(), &io.updates);
-    loop {
-        let started = cx.now();
-        let units = match list_units(cx, &conn, manager, &cfg.sys_root).await {
-            Ok(units) => units,
-            Err(e) => {
-                if cx.checkpoint().is_err() {
-                    return Outcome::Ok(());
-                }
-                return Outcome::Err(e.into());
-            }
-        };
-        let took = Duration::from_nanos(cx.now().duration_since(started));
-        tracing::debug!(
-            ?manager,
-            units = units.len(),
-            ?took,
-            "systemd: listing done"
-        );
-        if let Some(stop) = send(cx, io, services(manager, ManagerState::Connected, units)).await {
-            return stop;
-        }
-        if !wait_refresh(cx, io, id, None, &mut last_seq).await {
+    let mut state = ServicesState::new(manager);
+    if let Err(e) = resync(cx, &conn, manager, &cfg.sys_root, &mut state).await {
+        // Nothing was published by this generation, so there is nothing to keep.
+        if cx.checkpoint().is_err() {
             return Outcome::Ok(());
         }
+        return Outcome::Err(e.into());
     }
+    if let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
+        return stop;
+    }
+    let mut signals = match SystemdSignals::open(cx, &conn).await {
+        Ok(signals) => signals,
+        Err(e) => return lost(cx, io, &state, e).await,
+    };
+    let mut schedule = Schedule::new(cx.now());
+    loop {
+        let (batch, mut full) =
+            match wait_next(cx, io, id, &mut signals, &mut schedule, &mut last_seq).await {
+                Wake::Stop => return Outcome::Ok(()),
+                Wake::Lost(e) => return lost(cx, io, &state, e).await,
+                Wake::Batch { signals, resync } => (signals, resync),
+            };
+        let mut changed = false;
+        if !full {
+            match apply_batch(cx, &conn, manager, &cfg.sys_root, &mut state, &batch).await {
+                Ok(BatchResult::Applied(c)) => changed = c,
+                Ok(BatchResult::Resync) => full = true,
+                Err(e) => return lost(cx, io, &state, e).await,
+            }
+        }
+        if full {
+            match resync(cx, &conn, manager, &cfg.sys_root, &mut state).await {
+                Ok(c) => changed = c,
+                Err(e) => return lost(cx, io, &state, e).await,
+            }
+            schedule.done(cx.now());
+        }
+        if changed {
+            if let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
+                return stop;
+            }
+        }
+    }
+}
+
+/// The bus is gone after a successful connect: publish the manager as `Reconnecting` with the
+/// last records and end the generation with `Err`, so the supervisor restarts it with backoff.
+/// A cancelled `cx` ends with `Ok` and publishes nothing.
+async fn lost(
+    cx: &Cx,
+    io: &WorkerIo,
+    state: &ServicesState,
+    e: DbusError,
+) -> Outcome<(), WorkerError> {
+    if cx.is_cancel_requested() {
+        return Outcome::Ok(());
+    }
+    tracing::debug!(manager = ?state.manager, error = %e, "systemd: bus lost");
+    if let Some(stop) = send(cx, io, state.update(ManagerState::Reconnecting)).await {
+        return stop;
+    }
+    Outcome::Err(e.into())
+}
+
+/// A full listing into `state`. True when the record list changed.
+async fn resync(
+    cx: &Cx,
+    conn: &DbusConn,
+    manager: Manager,
+    sys_root: &SysRoot,
+    state: &mut ServicesState,
+) -> Result<bool, DbusError> {
+    let started = cx.now();
+    let listing = list_units(cx, conn).await?;
+    let users = resolve_users(cx, manager, sys_root, listing.units.iter().map(|f| &f.raw)).await?;
+    let took = Duration::from_nanos(cx.now().duration_since(started));
+    tracing::debug!(
+        ?manager,
+        units = listing.units.len(),
+        ?took,
+        "systemd: listing done"
+    );
+    Ok(state.replace(
+        listing.units.into_iter().zip(users).collect(),
+        listing.files,
+    ))
+}
+
+enum BatchResult {
+    /// The batch was applied; true when the record list changed.
+    Applied(bool),
+    /// The batch asked for a full listing.
+    Resync,
+}
+
+/// Applies one signal batch: the state changes first, then the bus reads they ask for.
+async fn apply_batch(
+    cx: &Cx,
+    conn: &DbusConn,
+    manager: Manager,
+    sys_root: &SysRoot,
+    state: &mut ServicesState,
+    batch: &[Signal],
+) -> Result<BatchResult, DbusError> {
+    let mut fx = Effects::default();
+    for signal in batch {
+        state.apply(signal, &mut fx);
+    }
+    if fx.resync {
+        return Ok(BatchResult::Resync);
+    }
+    let mut changed = fx.changed;
+    if fx.list_files {
+        changed |= state.set_files(list_files(cx, conn).await?);
+    }
+    let mut fetched = Vec::with_capacity(fx.fetch.len());
+    for (name, path) in &fx.fetch {
+        if let Some(unit) = fetch_unit(cx, conn, name, path).await? {
+            fetched.push(unit);
+        }
+    }
+    let rewho: Vec<(Arc<str>, RawUnit)> = fx
+        .users
+        .iter()
+        .filter(|name| !fetched.iter().any(|f| f.raw.name == **name))
+        .filter_map(|name| state.raw(name).map(|raw| (Arc::clone(name), raw.clone())))
+        .collect();
+    if fetched.is_empty() && rewho.is_empty() {
+        return Ok(BatchResult::Applied(changed));
+    }
+    let raws = fetched
+        .iter()
+        .map(|f| &f.raw)
+        .chain(rewho.iter().map(|(_, raw)| raw));
+    let mut users = resolve_users(cx, manager, sys_root, raws)
+        .await?
+        .into_iter();
+    for (unit, user) in fetched.into_iter().zip(users.by_ref()) {
+        changed |= state.upsert(unit, user);
+    }
+    for ((name, _), user) in rewho.iter().zip(users) {
+        changed |= state.set_user(name, user);
+    }
+    Ok(BatchResult::Applied(changed))
 }
 
 /// Clears the manager slot when the generation ends, however it ends.
@@ -326,9 +470,11 @@ async fn wait_refresh(
 }
 
 fn services(manager: Manager, state: ManagerState, units: Vec<UnitRecord>) -> SourceUpdate {
+    // UI-SYS-014: during `Reconnecting` the records are the last good data, drawn as stale.
     let validity = match state {
         ManagerState::Connected => Validity::Valid,
-        _ => Validity::Missing,
+        ManagerState::Reconnecting => Validity::Stale,
+        ManagerState::Unavailable => Validity::Missing,
     };
     SourceUpdate::Services(ServicesUpdate {
         manager,
@@ -414,42 +560,108 @@ struct RawUnit {
 
 impl RawUnit {
     fn from_props(name: &str, unit: &Props, typed: &Props) -> Self {
-        let first_field = |key: &str, index: usize| -> Arc<str> {
-            let Some(Value::Array(rows)) = typed.get(key).map(|v| unwrap(v)) else {
-                return Arc::from("");
-            };
-            match rows.inner().first().map(unwrap) {
-                Some(Value::Structure(row)) => row.fields().get(index).map_or_else(
-                    || Arc::from(""),
-                    |v| Arc::from(str_of(v).unwrap_or_default()),
-                ),
-                _ => Arc::from(""),
-            }
-        };
-        let kind = unit_kind(name);
-        RawUnit {
+        let mut raw = RawUnit {
             name: Arc::from(name),
-            description: prop_str(unit, "Description"),
-            load_state: prop_str(unit, "LoadState"),
-            active_state: prop_str(unit, "ActiveState"),
-            sub_state: prop_str(unit, "SubState"),
-            unit_file_state: prop_str(unit, "UnitFileState"),
-            fragment_path: prop_str(unit, "FragmentPath"),
-            active_enter_us: prop_u64(unit, "ActiveEnterTimestamp"),
-            triggered_by: prop_strv(unit, "TriggeredBy"),
-            main_pid: if kind == Some(UnitType::Service) {
-                prop_u32(typed, "MainPID")
-            } else {
-                0
-            },
-            user: prop_str(typed, "User"),
-            exec_start: first_field("ExecStart", 0),
-            listen: first_field("Listen", 1),
-            what: prop_str(typed, "What"),
-            timer_unit: prop_str(typed, "Unit"),
-            control_group: prop_str(typed, "ControlGroup"),
-            can_reload: prop_bool(unit, "CanReload"),
+            ..RawUnit::default()
+        };
+        raw.apply(unit, false);
+        raw.apply(typed, true);
+        raw
+    }
+
+    /// Sets the fields whose properties are in `props`: a `Unit` map, or a type interface map
+    /// when `typed` is true. Other properties are ignored.
+    fn apply(&mut self, props: &Props, typed: bool) {
+        let has = |key: &str| props.contains_key(key);
+        if typed {
+            if has("MainPID") && unit_kind(&self.name) == Some(UnitType::Service) {
+                self.main_pid = prop_u32(props, "MainPID");
+            }
+            if has("User") {
+                self.user = prop_str(props, "User");
+            }
+            if has("ExecStart") {
+                self.exec_start = first_field(props, "ExecStart", 0);
+            }
+            if has("Listen") {
+                self.listen = first_field(props, "Listen", 1);
+            }
+            if has("What") {
+                self.what = prop_str(props, "What");
+            }
+            if has("Unit") {
+                self.timer_unit = prop_str(props, "Unit");
+            }
+            if has("ControlGroup") {
+                self.control_group = prop_str(props, "ControlGroup");
+            }
+            return;
         }
+        if has("Description") {
+            self.description = prop_str(props, "Description");
+        }
+        if has("LoadState") {
+            self.load_state = prop_str(props, "LoadState");
+        }
+        if has("ActiveState") {
+            self.active_state = prop_str(props, "ActiveState");
+        }
+        if has("SubState") {
+            self.sub_state = prop_str(props, "SubState");
+        }
+        if has("UnitFileState") {
+            self.unit_file_state = prop_str(props, "UnitFileState");
+        }
+        if has("FragmentPath") {
+            self.fragment_path = prop_str(props, "FragmentPath");
+        }
+        if has("ActiveEnterTimestamp") {
+            self.active_enter_us = prop_u64(props, "ActiveEnterTimestamp");
+        }
+        if has("TriggeredBy") {
+            self.triggered_by = prop_strv(props, "TriggeredBy");
+        }
+        if has("CanReload") {
+            self.can_reload = prop_bool(props, "CanReload");
+        }
+    }
+}
+
+/// The properties a record keeps, per interface: a `PropertiesChanged` that names one of them
+/// in `invalidated` asks for a `GetAll`.
+fn is_tracked(name: &str, typed: bool) -> bool {
+    if typed {
+        matches!(
+            name,
+            "MainPID" | "User" | "ExecStart" | "Listen" | "What" | "Unit" | "ControlGroup"
+        )
+    } else {
+        matches!(
+            name,
+            "Description"
+                | "LoadState"
+                | "ActiveState"
+                | "SubState"
+                | "UnitFileState"
+                | "FragmentPath"
+                | "ActiveEnterTimestamp"
+                | "TriggeredBy"
+                | "CanReload"
+        )
+    }
+}
+
+/// Field `index` of the first row of the array property `key`, or empty.
+fn first_field(props: &Props, key: &str, index: usize) -> Arc<str> {
+    let Some(Value::Array(rows)) = props.get(key).map(|v| unwrap(v)) else {
+        return Arc::from("");
+    };
+    match rows.inner().first().map(unwrap) {
+        Some(Value::Structure(row)) => row.fields().get(index).map_or_else(
+            || Arc::from(""),
+            |v| Arc::from(str_of(v).unwrap_or_default()),
+        ),
+        _ => Arc::from(""),
     }
 }
 
@@ -643,23 +855,77 @@ async fn get_all(
     reply.body().deserialize::<Props>().map_err(decode_error)
 }
 
-/// Lists loaded units and installed unit files, loads the files that are not loaded, reads
-/// every unit's properties and builds the records, sorted by name.
-async fn list_units(
-    cx: &Cx,
-    conn: &DbusConn,
-    manager: Manager,
-    sys_root: &SysRoot,
-) -> Result<Vec<UnitRecord>, DbusError> {
+/// One unit as a listing or a `GetAll` read it.
+#[derive(Clone, Debug)]
+struct Fetched {
+    kind: UnitType,
+    raw: RawUnit,
+    path: OwnedObjectPath,
+}
+
+/// A full listing: the shown units sorted by name, and the installed unit files.
+struct Listing {
+    units: Vec<Fetched>,
+    files: UnitFiles,
+}
+
+/// `ListUnitFilesByPatterns`: unit file name to its enablement state.
+type UnitFiles = HashMap<String, String>;
+
+async fn list_files(cx: &Cx, conn: &DbusConn) -> Result<UnitFiles, DbusError> {
     let patterns = (Vec::<&str>::new(), Vec::<&str>::new());
-    let loaded: Vec<ListedUnit> = manager_call(cx, conn, "ListUnitsByPatterns", &patterns).await?;
     let files: Vec<(String, String)> =
         manager_call(cx, conn, "ListUnitFilesByPatterns", &patterns).await?;
+    Ok(files
+        .into_iter()
+        .filter_map(|(path, state)| path.rsplit('/').next().map(|name| (name.to_owned(), state)))
+        .collect())
+}
 
-    let file_names: HashSet<String> = files
-        .iter()
-        .filter_map(|(path, _)| path.rsplit('/').next().map(str::to_owned))
-        .collect();
+/// Reads one unit's `Unit` map and, for the kinds that need it, its type interface map.
+/// `None` when the kind is not shown or the unit is gone; a bus failure is `Err`.
+async fn fetch_unit(
+    cx: &Cx,
+    conn: &DbusConn,
+    name: &str,
+    path: &OwnedObjectPath,
+) -> Result<Option<Fetched>, DbusError> {
+    let Some(kind) = unit_kind(name) else {
+        return Ok(None);
+    };
+    let unit = match get_all(cx, conn, path, UNIT_IFACE).await {
+        Ok(props) => props,
+        Err(e) if is_unit_error(&e) => {
+            tracing::debug!(unit = %name, error = %e, "systemd: GetAll failed");
+            return Ok(None);
+        }
+        Err(e) => return Err(e),
+    };
+    let typed = match type_iface(kind) {
+        Some(iface) => match get_all(cx, conn, path, iface).await {
+            Ok(props) => props,
+            Err(e) if is_unit_error(&e) => {
+                tracing::debug!(unit = %name, error = %e, "systemd: GetAll failed");
+                Props::new()
+            }
+            Err(e) => return Err(e),
+        },
+        None => Props::new(),
+    };
+    Ok(Some(Fetched {
+        kind,
+        raw: RawUnit::from_props(name, &unit, &typed),
+        path: path.clone(),
+    }))
+}
+
+/// Lists loaded units and installed unit files, loads the files that are not loaded and reads
+/// every unit's properties. Hidden units are left out.
+async fn list_units(cx: &Cx, conn: &DbusConn) -> Result<Listing, DbusError> {
+    let patterns = (Vec::<&str>::new(), Vec::<&str>::new());
+    let loaded: Vec<ListedUnit> = manager_call(cx, conn, "ListUnitsByPatterns", &patterns).await?;
+    let files = list_files(cx, conn).await?;
+
     let mut targets: Vec<(String, OwnedObjectPath)> = Vec::with_capacity(loaded.len());
     let mut seen = HashSet::with_capacity(loaded.len());
     for (name, _, _, _, _, _, path, ..) in loaded {
@@ -667,8 +933,8 @@ async fn list_units(
             targets.push((name, path));
         }
     }
-    let mut unloaded: Vec<&String> = file_names
-        .iter()
+    let mut unloaded: Vec<&String> = files
+        .keys()
         .filter(|name| name_shown(name) && !seen.contains(*name))
         .collect();
     unloaded.sort();
@@ -683,58 +949,29 @@ async fn list_units(
         }
     }
 
-    let empty = Props::new();
-    let mut raws: Vec<(UnitType, RawUnit)> = Vec::with_capacity(targets.len());
+    let mut units: Vec<Fetched> = Vec::with_capacity(targets.len());
     for (name, path) in &targets {
-        let Some(kind) = unit_kind(name) else {
-            continue;
-        };
-        let unit = match get_all(cx, conn, path, UNIT_IFACE).await {
-            Ok(props) => props,
-            Err(e) if is_unit_error(&e) => {
-                tracing::debug!(unit = %name, error = %e, "systemd: GetAll failed");
-                continue;
+        if let Some(unit) = fetch_unit(cx, conn, name, path).await? {
+            let has_file = files.contains_key(name.as_str()) || !unit.raw.fragment_path.is_empty();
+            if !is_hidden(name, &unit.raw.load_state, has_file) {
+                units.push(unit);
             }
-            Err(e) => return Err(e),
-        };
-        let typed = match type_iface(kind) {
-            Some(iface) => match get_all(cx, conn, path, iface).await {
-                Ok(props) => Some(props),
-                Err(e) if is_unit_error(&e) => {
-                    tracing::debug!(unit = %name, error = %e, "systemd: GetAll failed");
-                    None
-                }
-                Err(e) => return Err(e),
-            },
-            None => None,
-        };
-        let raw = RawUnit::from_props(name, &unit, typed.as_ref().unwrap_or(&empty));
-        let has_file = file_names.contains(name.as_str()) || !raw.fragment_path.is_empty();
-        if !is_hidden(name, &raw.load_state, has_file) {
-            raws.push((kind, raw));
         }
     }
-    raws.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-
-    let users = resolve_users(cx, manager, sys_root, &raws).await?;
-    Ok(raws
-        .iter()
-        .zip(users)
-        .map(|((kind, raw), user)| record(manager, *kind, raw, user))
-        .collect())
+    units.sort_by(|a, b| a.raw.name.cmp(&b.raw.name));
+    Ok(Listing { units, files })
 }
 
 /// The User column for each unit in `raws`, in order. The /proc and passwd reads run in one
 /// blocking job.
-async fn resolve_users(
+async fn resolve_users<'a>(
     cx: &Cx,
     manager: Manager,
     sys_root: &SysRoot,
-    raws: &[(UnitType, RawUnit)],
+    raws: impl Iterator<Item = &'a RawUnit>,
 ) -> Result<Vec<Arc<str>>, DbusError> {
     let inputs: Vec<(u32, Arc<str>)> = raws
-        .iter()
-        .map(|(_, raw)| (raw.main_pid, Arc::clone(&raw.user)))
+        .map(|raw| (raw.main_pid, Arc::clone(&raw.user)))
         .collect();
     let sys_root = sys_root.clone();
     let job = cx.spawn_blocking(move |_| {
@@ -761,6 +998,490 @@ async fn resolve_users(
     }
 }
 
+// Signals
+
+/// One manager or unit signal, decoded.
+#[derive(Clone, Debug)]
+enum Signal {
+    UnitNew {
+        name: Arc<str>,
+        path: OwnedObjectPath,
+    },
+    UnitRemoved {
+        name: Arc<str>,
+    },
+    UnitFilesChanged,
+    Reloading(bool),
+    /// `PropertiesChanged` on a unit object.
+    Properties {
+        path: OwnedObjectPath,
+        iface: String,
+        changed: Props,
+        invalidated: Vec<String>,
+    },
+    /// `JobNew`, `JobRemoved` (E11 tracks jobs) and anything that did not decode.
+    Other,
+}
+
+impl Signal {
+    fn parse(msg: &zbus::Message) -> Signal {
+        let header = msg.header();
+        let iface = header.interface().map(|i| i.as_str()).unwrap_or_default();
+        let member = header.member().map(|m| m.as_str()).unwrap_or_default();
+        let body = msg.body();
+        let parsed = match (iface, member) {
+            (MANAGER_IFACE, "UnitNew") => {
+                body.deserialize::<(String, OwnedObjectPath)>()
+                    .ok()
+                    .map(|(name, path)| Signal::UnitNew {
+                        name: name.into(),
+                        path,
+                    })
+            }
+            (MANAGER_IFACE, "UnitRemoved") => body
+                .deserialize::<(String, OwnedObjectPath)>()
+                .ok()
+                .map(|(name, _)| Signal::UnitRemoved { name: name.into() }),
+            (MANAGER_IFACE, "UnitFilesChanged") => Some(Signal::UnitFilesChanged),
+            (MANAGER_IFACE, "Reloading") => body.deserialize::<bool>().ok().map(Signal::Reloading),
+            (PROPERTIES_IFACE, "PropertiesChanged") => {
+                let path = header.path().map(|p| OwnedObjectPath::from(p.to_owned()));
+                let args = body.deserialize::<(String, Props, Vec<String>)>().ok();
+                path.zip(args)
+                    .map(|(path, (iface, changed, invalidated))| Signal::Properties {
+                        path,
+                        iface,
+                        changed,
+                        invalidated,
+                    })
+            }
+            _ => None,
+        };
+        parsed.unwrap_or(Signal::Other)
+    }
+}
+
+/// The signal stream. Tests replace the bus with a fake.
+trait UnitSignals {
+    /// The next signal, waiting at most `d`. `Ok(None)` on timeout; `Err` when the stream ends
+    /// or `cx` is cancelled.
+    async fn next(&mut self, cx: &Cx, d: Duration) -> Result<Option<Signal>, DbusError>;
+    /// A signal that is already queued, without waiting. `Ok(None)` when none is.
+    async fn ready(&mut self) -> Result<Option<Signal>, DbusError>;
+}
+
+/// The real subscription: manager signals on `/org/freedesktop/systemd1` and
+/// `PropertiesChanged` on every unit object. The streams hold their own connection handle.
+struct SystemdSignals<'a> {
+    conn: &'a DbusConn,
+    stream: Boxed<zbus::Result<zbus::Message>>,
+}
+
+impl<'a> SystemdSignals<'a> {
+    /// Adds the match rules, then calls `Manager.Subscribe` so systemd sends unit signals.
+    async fn open(cx: &Cx, conn: &'a DbusConn) -> Result<Self, DbusError> {
+        let rules = || -> zbus::Result<_> {
+            let manager = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender(BUS_NAME)?
+                .path(PATH)?
+                .interface(MANAGER_IFACE)?
+                .build();
+            let units = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender(BUS_NAME)?
+                .path_namespace(UNIT_PATH_NAMESPACE)?
+                .interface(PROPERTIES_IFACE)?
+                .member("PropertiesChanged")?
+                .build();
+            Ok((manager.to_owned(), units.to_owned()))
+        };
+        let (manager_rule, unit_rule) = rules().map_err(decode_error)?;
+        let raw = conn.raw();
+        let queue = Some(SIGNAL_QUEUE);
+        let manager = conn
+            .read(
+                cx,
+                zbus::MessageStream::for_match_rule(manager_rule, raw, queue),
+            )
+            .await?;
+        let units = conn
+            .read(
+                cx,
+                zbus::MessageStream::for_match_rule(unit_rule, raw, queue),
+            )
+            .await?;
+        let subscribe =
+            raw.call_method(Some(BUS_NAME), PATH, Some(MANAGER_IFACE), "Subscribe", &());
+        match conn.read(cx, subscribe).await {
+            Ok(_) => {}
+            Err(DbusError::Call { name, .. }) if &*name == ALREADY_SUBSCRIBED => {}
+            Err(e) => return Err(e),
+        }
+        Ok(Self {
+            conn,
+            stream: manager.or(units).boxed(),
+        })
+    }
+}
+
+/// A stream item: a message, or a read error that only skips that message.
+fn decode(item: zbus::Result<zbus::Message>) -> Signal {
+    match item {
+        Ok(msg) => Signal::parse(&msg),
+        Err(e) => {
+            tracing::debug!(error = %e, "systemd: bad signal message");
+            Signal::Other
+        }
+    }
+}
+
+impl UnitSignals for SystemdSignals<'_> {
+    async fn next(&mut self, cx: &Cx, d: Duration) -> Result<Option<Signal>, DbusError> {
+        Ok(self
+            .conn
+            .next_signal(cx, &mut self.stream, d)
+            .await?
+            .map(decode))
+    }
+
+    async fn ready(&mut self) -> Result<Option<Signal>, DbusError> {
+        match futures_lite::future::poll_once(self.stream.next()).await {
+            None => Ok(None),
+            Some(Some(item)) => Ok(Some(decode(item))),
+            Some(None) => Err(DbusError::Closed),
+        }
+    }
+}
+
+/// ADR-008 schedule: a full listing once `Demand.services` has been true for a full
+/// `RESYNC_PERIOD` since the last listing. While it is false the period starts over, so no
+/// listing runs.
+struct Schedule {
+    since: Time,
+}
+
+impl Schedule {
+    fn new(now: Time) -> Self {
+        Self { since: now }
+    }
+
+    fn due(&mut self, now: Time, wanted: bool) -> bool {
+        if !wanted {
+            self.since = now;
+            return false;
+        }
+        Duration::from_nanos(now.duration_since(self.since)) >= RESYNC_PERIOD
+    }
+
+    /// A full listing just ran.
+    fn done(&mut self, now: Time) {
+        self.since = now;
+    }
+}
+
+/// What the signal loop does next.
+enum Wake {
+    /// `cx` was cancelled.
+    Stop,
+    /// The stream ended or failed.
+    Lost(DbusError),
+    /// Signals to apply, and whether a full listing is due (`RefreshNow` or the schedule).
+    Batch { signals: Vec<Signal>, resync: bool },
+}
+
+/// Waits for signals, `RefreshNow` or the resync schedule. Each wait on the stream is at most
+/// `SIGNAL_WAIT`; after it `cx` is checked. A batch is every signal already queued after the
+/// first one, up to `MAX_BATCH`.
+async fn wait_next<S: UnitSignals>(
+    cx: &Cx,
+    io: &WorkerIo,
+    id: SourceId,
+    signals: &mut S,
+    schedule: &mut Schedule,
+    last_seq: &mut u64,
+) -> Wake {
+    loop {
+        let first = match signals.next(cx, SIGNAL_WAIT).await {
+            Ok(first) => first,
+            Err(_) if cx.is_cancel_requested() => return Wake::Stop,
+            Err(e) => return Wake::Lost(e),
+        };
+        if cx.checkpoint().is_err() {
+            return Wake::Stop;
+        }
+        let mut batch = Vec::new();
+        if let Some(signal) = first {
+            batch.push(signal);
+            while batch.len() < MAX_BATCH {
+                match signals.ready().await {
+                    Ok(Some(signal)) => batch.push(signal),
+                    Ok(None) => break,
+                    Err(e) => return Wake::Lost(e),
+                }
+            }
+        }
+        let refresh = take_refresh(&io.control.borrow_and_clone(), id, last_seq);
+        let wanted = io.demand.borrow_and_clone().services;
+        let resync = schedule.due(cx.now(), wanted) || refresh;
+        if resync || !batch.is_empty() {
+            return Wake::Batch {
+                signals: batch,
+                resync,
+            };
+        }
+    }
+}
+
+// State
+
+/// The bus work a signal batch needs, which `ServicesState` cannot do itself.
+#[derive(Debug, Default)]
+struct Effects {
+    /// Units to read with `GetAll`, each once.
+    fetch: Vec<(Arc<str>, OwnedObjectPath)>,
+    /// Run `ListUnitFilesByPatterns` again.
+    list_files: bool,
+    /// Run a full listing; the rest of the batch is then moot.
+    resync: bool,
+    /// Units whose `MainPID` or `User` changed, so the User column is resolved again.
+    users: Vec<Arc<str>>,
+    /// The record list changed.
+    changed: bool,
+}
+
+impl Effects {
+    fn fetch(&mut self, name: &Arc<str>, path: &OwnedObjectPath) {
+        if !self.fetch.iter().any(|(n, _)| n == name) {
+            self.fetch.push((Arc::clone(name), path.clone()));
+        }
+    }
+}
+
+/// One shown unit and the record built from it.
+struct Entry {
+    kind: UnitType,
+    raw: RawUnit,
+    path: OwnedObjectPath,
+    user: Arc<str>,
+    record: Arc<UnitRecord>,
+}
+
+/// The unit records of one manager, and the signal logic that keeps them current. Pure: the
+/// bus reads a signal needs come back as `Effects`. A record whose data did not change keeps
+/// its `Arc`.
+struct ServicesState {
+    manager: Manager,
+    units: BTreeMap<Arc<str>, Entry>,
+    paths: HashMap<OwnedObjectPath, Arc<str>>,
+    /// The last `ListUnitFilesByPatterns` result.
+    files: UnitFiles,
+}
+
+impl ServicesState {
+    fn new(manager: Manager) -> Self {
+        Self {
+            manager,
+            units: BTreeMap::new(),
+            paths: HashMap::new(),
+            files: UnitFiles::new(),
+        }
+    }
+
+    /// The `Services` update with every record, sorted by name.
+    fn update(&self, state: ManagerState) -> SourceUpdate {
+        let units = self.units.values().map(|e| (*e.record).clone()).collect();
+        services(self.manager, state, units)
+    }
+
+    fn raw(&self, name: &str) -> Option<&RawUnit> {
+        self.units.get(name).map(|e| &e.raw)
+    }
+
+    fn entry(&self, unit: Fetched, user: Arc<str>) -> Entry {
+        let record = Arc::new(record(
+            self.manager,
+            unit.kind,
+            &unit.raw,
+            Arc::clone(&user),
+        ));
+        Entry {
+            kind: unit.kind,
+            raw: unit.raw,
+            path: unit.path,
+            user,
+            record,
+        }
+    }
+
+    /// Replaces every record with a full listing. Units whose data did not change keep their
+    /// `Arc`. True when anything changed.
+    fn replace(&mut self, units: Vec<(Fetched, Arc<str>)>, files: UnitFiles) -> bool {
+        let mut old = std::mem::take(&mut self.units);
+        self.paths.clear();
+        self.files = files;
+        let mut changed = false;
+        for (unit, user) in units {
+            let name = Arc::clone(&unit.raw.name);
+            let entry = match old.remove(&name) {
+                Some(e) if e.kind == unit.kind && e.raw == unit.raw && e.user == user => e,
+                _ => {
+                    changed = true;
+                    self.entry(unit, user)
+                }
+            };
+            self.paths.insert(entry.path.clone(), Arc::clone(&name));
+            self.units.insert(name, entry);
+        }
+        changed || !old.is_empty()
+    }
+
+    /// Adds or replaces one unit after a `GetAll`, unless it is hidden. True when the record
+    /// list changed.
+    fn upsert(&mut self, unit: Fetched, user: Arc<str>) -> bool {
+        let name = Arc::clone(&unit.raw.name);
+        let has_file = self.files.contains_key(&*name) || !unit.raw.fragment_path.is_empty();
+        if is_hidden(&name, &unit.raw.load_state, has_file) {
+            return self.remove(&name);
+        }
+        if let Some(e) = self.units.get(&name)
+            && e.kind == unit.kind
+            && e.raw == unit.raw
+            && e.user == user
+        {
+            return false;
+        }
+        let entry = self.entry(unit, user);
+        self.paths.insert(entry.path.clone(), Arc::clone(&name));
+        self.units.insert(name, entry);
+        true
+    }
+
+    fn remove(&mut self, name: &str) -> bool {
+        match self.units.remove(name) {
+            Some(e) => {
+                self.paths.remove(&e.path);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Replaces the raw data of `name` and rebuilds its record when it changed.
+    fn set_raw(&mut self, name: &str, raw: RawUnit) -> bool {
+        let manager = self.manager;
+        let Some(e) = self.units.get_mut(name) else {
+            return false;
+        };
+        if e.raw == raw {
+            return false;
+        }
+        e.raw = raw;
+        e.record = Arc::new(record(manager, e.kind, &e.raw, Arc::clone(&e.user)));
+        true
+    }
+
+    fn set_user(&mut self, name: &str, user: Arc<str>) -> bool {
+        let manager = self.manager;
+        let Some(e) = self.units.get_mut(name) else {
+            return false;
+        };
+        if e.user == user {
+            return false;
+        }
+        e.user = user;
+        e.record = Arc::new(record(manager, e.kind, &e.raw, Arc::clone(&e.user)));
+        true
+    }
+
+    /// `UnitFilesChanged`: the new unit file list, and the startup type of every record that
+    /// has a file in it.
+    fn set_files(&mut self, files: UnitFiles) -> bool {
+        let mut changed = false;
+        let updates: Vec<(Arc<str>, RawUnit)> = self
+            .units
+            .iter()
+            .filter_map(|(name, e)| {
+                let state = files.get(&**name)?;
+                (*e.raw.unit_file_state != **state).then(|| {
+                    let mut raw = e.raw.clone();
+                    raw.unit_file_state = Arc::from(state.as_str());
+                    (Arc::clone(name), raw)
+                })
+            })
+            .collect();
+        for (name, raw) in updates {
+            changed |= self.set_raw(&name, raw);
+        }
+        self.files = files;
+        changed
+    }
+
+    /// Applies one signal. Bus reads it needs are added to `fx`.
+    fn apply(&mut self, signal: &Signal, fx: &mut Effects) {
+        match signal {
+            Signal::UnitNew { name, path } => {
+                if name_shown(name) {
+                    fx.fetch(name, path);
+                }
+            }
+            Signal::UnitRemoved { name } => {
+                fx.fetch.retain(|(n, _)| n != name);
+                if self.files.contains_key(&**name) {
+                    let Some(mut raw) = self.raw(name).cloned() else {
+                        return;
+                    };
+                    raw.active_state = Arc::from("inactive");
+                    raw.sub_state = Arc::from("dead");
+                    fx.changed |= self.set_raw(name, raw);
+                } else {
+                    fx.changed |= self.remove(name);
+                }
+            }
+            Signal::UnitFilesChanged => fx.list_files = true,
+            Signal::Reloading(active) => fx.resync |= !active,
+            Signal::Properties {
+                path,
+                iface,
+                changed,
+                invalidated,
+            } => {
+                let Some(name) = self.paths.get(path).cloned() else {
+                    return;
+                };
+                let Some(e) = self.units.get(&name) else {
+                    return;
+                };
+                let typed = if iface == UNIT_IFACE {
+                    false
+                } else if type_iface(e.kind) == Some(iface.as_str()) {
+                    true
+                } else {
+                    return;
+                };
+                if invalidated.iter().any(|p| is_tracked(p, typed)) {
+                    fx.fetch(&name, &e.path);
+                }
+                let mut raw = e.raw.clone();
+                raw.apply(changed, typed);
+                let rewho = raw.main_pid != e.raw.main_pid || raw.user != e.raw.user;
+                if self.set_raw(&name, raw) {
+                    fx.changed = true;
+                    if rewho && !fx.users.contains(&name) {
+                        fx.users.push(name);
+                    }
+                }
+            }
+            Signal::Other => {}
+        }
+    }
+
+    #[cfg(test)]
+    fn record(&self, name: &str) -> Option<&Arc<UnitRecord>> {
+        self.units.get(name).map(|e| &e.record)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,9 +1501,10 @@ mod tests {
         WorkerIo,
         mpsc::Receiver<EngineMsg>,
         watch::Sender<WorkerControl>,
+        watch::Sender<Demand>,
     ) {
         let (updates, rx) = mpsc::channel::<EngineMsg>(256);
-        let (_demand_tx, demand) = watch::channel(Demand::default());
+        let (demand_tx, demand) = watch::channel(Demand::default());
         let (_settings_tx, settings) = watch::channel(EngineSettings::default());
         let (control_tx, control) = watch::channel(WorkerControl::default());
         let io = WorkerIo::new(
@@ -792,7 +1514,7 @@ mod tests {
             control,
             crate::dbus::SharedHandles::default(),
         );
-        (io, rx, control_tx)
+        (io, rx, control_tx, demand_tx)
     }
 
     fn props(entries: Vec<(&str, Value<'static>)>) -> Props {
@@ -1090,7 +1812,7 @@ mod tests {
     #[test]
     fn no_session_bus_publishes_unavailable() {
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
-        let (io, mut rx, control_tx) = worker_io();
+        let (io, mut rx, control_tx, _demand_tx) = worker_io();
         let cfg = Arc::new(EngineConfig::new(
             EngineMode::Full,
             std::path::PathBuf::from("/nonexistent"),
@@ -1237,13 +1959,490 @@ mod tests {
                 .open(&cx, Manager::System)
                 .await
                 .expect("system manager");
-            list_units(&cx, &conn, Manager::System, &SysRoot::host())
-                .await
-                .expect("listing")
+            list_units(&cx, &conn).await.expect("listing").units
         });
         let units = rt.block_on(join).expect("task completes");
-        assert!(units.iter().any(|u| &*u.unit.name == "multi-user.target"));
-        assert!(!units.iter().any(|u| u.unit.name.ends_with(".device")));
-        assert!(!units.iter().any(|u| u.unit.name.contains("@.")));
+        assert!(units.iter().any(|u| &*u.raw.name == "multi-user.target"));
+        assert!(!units.iter().any(|u| u.raw.name.ends_with(".device")));
+        assert!(!units.iter().any(|u| u.raw.name.contains("@.")));
+    }
+
+    /// Needs the real session bus with a systemd user manager. Read-only: it adds the match
+    /// rules, calls `Subscribe` and waits for signals; it changes no unit.
+    #[test]
+    #[ignore = "needs a session bus with systemd (owner machine)"]
+    fn real_user_subscribe() {
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = BusOpener
+                .open(&cx, Manager::User)
+                .await
+                .expect("user manager");
+            let mut signals = SystemdSignals::open(&cx, &conn).await.expect("subscribe");
+            // A quiet manager sends nothing; the wait must time out cleanly, not fail.
+            signals
+                .next(&cx, Duration::from_secs(1))
+                .await
+                .expect("stream stays open");
+        });
+        rt.block_on(join).expect("task completes");
+    }
+
+    // Signal state
+
+    fn unit(name: &str, active: &str, sub: &str, file: &str) -> (Fetched, Arc<str>) {
+        let fragment = if file.is_empty() {
+            String::new()
+        } else {
+            format!("/usr/lib/systemd/user/{name}")
+        };
+        let props = props(vec![
+            ("LoadState", Value::from("loaded")),
+            ("ActiveState", Value::from(active.to_owned())),
+            ("SubState", Value::from(sub.to_owned())),
+            ("UnitFileState", Value::from(file.to_owned())),
+            ("FragmentPath", Value::from(fragment)),
+        ]);
+        let raw = RawUnit::from_props(name, &props, &Props::new());
+        let fetched = Fetched {
+            kind: unit_kind(name).expect("shown kind"),
+            raw,
+            path: unit_path(name),
+        };
+        (fetched, Arc::from("alice"))
+    }
+
+    /// The object path systemd uses, with `.`, `-` and `@` escaped.
+    fn unit_path(name: &str) -> OwnedObjectPath {
+        let mut path = String::from(UNIT_PATH_NAMESPACE);
+        path.push('/');
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() {
+                path.push(c);
+            } else {
+                path.push_str(&format!("_{:02x}", c as u32));
+            }
+        }
+        OwnedObjectPath::try_from(path).expect("valid path")
+    }
+
+    fn sample_state() -> ServicesState {
+        let mut state = ServicesState::new(Manager::User);
+        let files: UnitFiles = [("foo.service", "enabled"), ("bar.service", "disabled")]
+            .into_iter()
+            .map(|(n, s)| (n.to_owned(), s.to_owned()))
+            .collect();
+        let changed = state.replace(
+            vec![
+                unit("bar.service", "inactive", "dead", "disabled"),
+                unit("foo.service", "active", "running", "enabled"),
+                unit("run-u5.scope", "active", "running", ""),
+            ],
+            files,
+        );
+        assert!(changed);
+        state
+    }
+
+    fn properties(name: &str, changed: Props, invalidated: &[&str]) -> Signal {
+        Signal::Properties {
+            path: unit_path(name),
+            iface: UNIT_IFACE.to_owned(),
+            changed,
+            invalidated: invalidated.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    fn arcs(state: &ServicesState) -> Vec<Arc<UnitRecord>> {
+        state
+            .units
+            .values()
+            .map(|e| Arc::clone(&e.record))
+            .collect()
+    }
+
+    #[test]
+    fn apply_properties_changed_keeps_other_arcs() {
+        let mut state = sample_state();
+        let before = arcs(&state);
+        let mut fx = Effects::default();
+        let changed = props(vec![
+            ("ActiveState", Value::from("inactive")),
+            ("SubState", Value::from("dead")),
+        ]);
+        state.apply(&properties("foo.service", changed, &[]), &mut fx);
+        assert!(fx.changed);
+        assert!(fx.fetch.is_empty() && fx.users.is_empty() && !fx.resync);
+        let foo = state.record("foo.service").expect("foo stays");
+        assert_eq!(foo.status, ServiceStatus::Stopped);
+        assert_eq!(&*foo.sub_state, "dead");
+        for name in ["bar.service", "run-u5.scope"] {
+            let old = before
+                .iter()
+                .find(|r| &*r.unit.name == name)
+                .expect("was there");
+            assert!(
+                Arc::ptr_eq(old, state.record(name).expect("still there")),
+                "{name}"
+            );
+        }
+
+        // The same values again change nothing, and the record keeps its new Arc.
+        let foo = Arc::clone(state.record("foo.service").expect("foo"));
+        let mut fx = Effects::default();
+        let same = props(vec![("SubState", Value::from("dead"))]);
+        state.apply(&properties("foo.service", same, &[]), &mut fx);
+        assert!(!fx.changed);
+        assert!(Arc::ptr_eq(&foo, state.record("foo.service").expect("foo")));
+
+        // A full listing with unchanged data keeps every Arc.
+        let before = arcs(&state);
+        let mut relisted = vec![
+            unit("bar.service", "inactive", "dead", "disabled"),
+            unit("foo.service", "inactive", "dead", "enabled"),
+            unit("run-u5.scope", "active", "running", ""),
+        ];
+        relisted.sort_by(|a, b| a.0.raw.name.cmp(&b.0.raw.name));
+        let files = state.files.clone();
+        assert!(!state.replace(relisted, files));
+        for (a, b) in before.iter().zip(arcs(&state)) {
+            assert!(Arc::ptr_eq(a, &b));
+        }
+    }
+
+    #[test]
+    fn unit_removed_with_and_without_file() {
+        let mut state = sample_state();
+        let mut fx = Effects::default();
+        state.apply(
+            &Signal::UnitRemoved {
+                name: "foo.service".into(),
+            },
+            &mut fx,
+        );
+        let foo = state
+            .record("foo.service")
+            .expect("a unit with a file stays");
+        assert_eq!(foo.status, ServiceStatus::Stopped);
+        assert_eq!(&*foo.sub_state, "dead");
+        assert!(fx.changed);
+
+        let mut fx = Effects::default();
+        state.apply(
+            &Signal::UnitRemoved {
+                name: "run-u5.scope".into(),
+            },
+            &mut fx,
+        );
+        assert!(
+            state.record("run-u5.scope").is_none(),
+            "a transient scope goes"
+        );
+        assert!(fx.changed);
+        // Its path is forgotten, so later signals for it are ignored.
+        let mut fx = Effects::default();
+        let late = props(vec![("ActiveState", Value::from("active"))]);
+        state.apply(&properties("run-u5.scope", late, &["SubState"]), &mut fx);
+        assert!(!fx.changed && fx.fetch.is_empty());
+        assert_eq!(state.units.len(), 2);
+
+        // UnitNew asks for a GetAll, UnitRemoved in the same batch cancels it.
+        let mut fx = Effects::default();
+        let path = unit_path("run-u6.scope");
+        state.apply(
+            &Signal::UnitNew {
+                name: "run-u6.scope".into(),
+                path,
+            },
+            &mut fx,
+        );
+        assert_eq!(fx.fetch.len(), 1);
+        state.apply(
+            &Signal::UnitRemoved {
+                name: "run-u6.scope".into(),
+            },
+            &mut fx,
+        );
+        assert!(fx.fetch.is_empty());
+        // A device never gets a GetAll.
+        let path = unit_path("dev-sda.device");
+        state.apply(
+            &Signal::UnitNew {
+                name: "dev-sda.device".into(),
+                path,
+            },
+            &mut fx,
+        );
+        assert!(fx.fetch.is_empty());
+
+        // The GetAll result is added, unless it is hidden.
+        let (fetched, user) = unit("run-u7.scope", "active", "running", "");
+        assert!(state.upsert(fetched.clone(), Arc::clone(&user)));
+        assert!(!state.upsert(fetched, user), "same data, no change");
+        let (mut gone, user) = unit("gone.service", "inactive", "dead", "");
+        gone.raw.load_state = "not-found".into();
+        assert!(!state.upsert(gone, user));
+        assert!(state.record("gone.service").is_none());
+    }
+
+    #[test]
+    fn invalidated_requests_getall() {
+        let mut state = sample_state();
+        let mut fx = Effects::default();
+        state.apply(
+            &properties("foo.service", Props::new(), &["SubState"]),
+            &mut fx,
+        );
+        assert_eq!(fx.fetch.len(), 1);
+        assert_eq!(&*fx.fetch[0].0, "foo.service");
+        assert_eq!(fx.fetch[0].1, unit_path("foo.service"));
+        // A second invalidation in the same batch asks for no second GetAll.
+        state.apply(
+            &properties("foo.service", Props::new(), &["ActiveState"]),
+            &mut fx,
+        );
+        assert_eq!(fx.fetch.len(), 1);
+        // A property the record does not keep asks for none.
+        let mut fx = Effects::default();
+        state.apply(
+            &properties("bar.service", Props::new(), &["Conditions"]),
+            &mut fx,
+        );
+        assert!(fx.fetch.is_empty());
+        // Another interface on the unit object is ignored.
+        state.apply(
+            &Signal::Properties {
+                path: unit_path("bar.service"),
+                iface: "org.freedesktop.systemd1.Socket".to_owned(),
+                changed: Props::new(),
+                invalidated: vec!["Listen".to_owned()],
+            },
+            &mut fx,
+        );
+        assert!(fx.fetch.is_empty());
+        // The service interface: MainPID changes ask for the User column again.
+        state.apply(
+            &Signal::Properties {
+                path: unit_path("foo.service"),
+                iface: "org.freedesktop.systemd1.Service".to_owned(),
+                changed: props(vec![("MainPID", Value::U32(4242))]),
+                invalidated: vec!["ExecStart".to_owned()],
+            },
+            &mut fx,
+        );
+        assert_eq!(fx.fetch.len(), 1);
+        assert_eq!(fx.users.len(), 1);
+        assert_eq!(state.record("foo.service").expect("foo").main_pid, 4242);
+        assert!(state.set_user("foo.service", "svc".into()));
+        assert_eq!(&*state.record("foo.service").expect("foo").user, "svc");
+    }
+
+    #[test]
+    fn manager_signals_set_effects() {
+        let mut state = sample_state();
+        let mut fx = Effects::default();
+        state.apply(&Signal::Reloading(true), &mut fx);
+        assert!(!fx.resync);
+        state.apply(&Signal::Reloading(false), &mut fx);
+        assert!(fx.resync);
+        let mut fx = Effects::default();
+        state.apply(&Signal::Other, &mut fx);
+        state.apply(&Signal::UnitFilesChanged, &mut fx);
+        assert!(fx.list_files && !fx.changed);
+
+        let bar = Arc::clone(state.record("bar.service").expect("bar"));
+        let files: UnitFiles = [("foo.service", "masked"), ("bar.service", "disabled")]
+            .into_iter()
+            .map(|(n, s)| (n.to_owned(), s.to_owned()))
+            .collect();
+        assert!(state.set_files(files));
+        assert_eq!(
+            state.record("foo.service").expect("foo").startup,
+            StartupType::Masked
+        );
+        assert!(Arc::ptr_eq(&bar, state.record("bar.service").expect("bar")));
+        // The scope has no unit file; its startup type stays.
+        assert_eq!(
+            state.record("run-u5.scope").expect("scope").startup,
+            StartupType::NoUnitFile
+        );
+    }
+
+    /// Never yields a signal: each `next` waits `d`, or ends the stream when `end` is set.
+    struct QuietSignals {
+        end: bool,
+    }
+
+    impl UnitSignals for QuietSignals {
+        async fn next(&mut self, cx: &Cx, d: Duration) -> Result<Option<Signal>, DbusError> {
+            if self.end {
+                return Err(DbusError::Closed);
+            }
+            let _ = time::timeout(cx.now(), d, std::future::pending::<()>()).await;
+            if cx.checkpoint().is_err() {
+                return Err(DbusError::Closed);
+            }
+            Ok(None)
+        }
+
+        async fn ready(&mut self) -> Result<Option<Signal>, DbusError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn resync_schedule_follows_demand() {
+        let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(1_000_000));
+        let (io, _rx, _control_tx, demand_tx) = worker_io();
+        let resyncs = Arc::new(Mutex::new(0usize));
+        let count = Arc::clone(&resyncs);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut signals = QuietSignals { end: false };
+                let mut schedule = Schedule::new(cx.now());
+                let mut last_seq = 0;
+                let id = SourceId::SystemdUser;
+                loop {
+                    let wake =
+                        wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await;
+                    match wake {
+                        Wake::Stop => break,
+                        Wake::Lost(e) => panic!("stream lost: {e}"),
+                        Wake::Batch { signals, resync } => {
+                            assert!(signals.is_empty());
+                            assert!(resync);
+                            *count.lock().expect("count lock") += 1;
+                            schedule.done(cx.now());
+                        }
+                    }
+                }
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let resyncs_now = || *resyncs.lock().expect("count lock");
+
+        // Demand off: no resync in 180 virtual seconds.
+        for _ in 0..360 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(resyncs_now(), 0);
+
+        // Demand on: exactly one resync once 60 s have passed.
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        for _ in 0..119 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(resyncs_now(), 0, "not before 60 s");
+        advance(&mut lab, SIGNAL_WAIT);
+        assert_eq!(resyncs_now(), 1, "one at 60 s");
+        for _ in 0..119 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(resyncs_now(), 1, "still one at 119.5 s");
+        advance(&mut lab, SIGNAL_WAIT);
+        assert_eq!(resyncs_now(), 2, "the next one at 120 s");
+
+        handle.abort();
+        advance(&mut lab, SIGNAL_WAIT);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn refresh_now_resyncs_at_once() {
+        let mut lab = LabRuntime::new(LabConfig::new(43).max_steps(1_000_000));
+        let (io, _rx, control_tx, _demand_tx) = worker_io();
+        let woke = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&woke);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut signals = QuietSignals { end: false };
+                let mut schedule = Schedule::new(cx.now());
+                let mut last_seq = 0;
+                let id = SourceId::SystemdSystem;
+                let wake =
+                    wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await;
+                let resync = matches!(wake, Wake::Batch { resync: true, .. });
+                *sink.lock().expect("slot lock") = Some((resync, cx.now().as_nanos()));
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        advance(&mut lab, Duration::from_secs(5));
+        assert!(woke.lock().expect("slot lock").is_none());
+        control_tx
+            .send(WorkerControl {
+                commands: Arc::from([QueuedCommand {
+                    seq: 1,
+                    target: SourceId::SystemdSystem,
+                    command: WorkerCommand::RefreshNow,
+                }]),
+                ..WorkerControl::default()
+            })
+            .expect("control send");
+        advance(&mut lab, SIGNAL_WAIT);
+        let (resync, at) = woke.lock().expect("slot lock").take().expect("woke");
+        assert!(resync);
+        assert!(at <= 5_500_000_000, "within one wait, at {at} ns");
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn stream_end_publishes_reconnecting() {
+        let mut lab = LabRuntime::new(LabConfig::new(44).max_steps(1_000_000));
+        let (io, mut rx, _control_tx, _demand_tx) = worker_io();
+        type Ended = Arc<Mutex<Option<Outcome<(), WorkerError>>>>;
+        let out = Ended::default();
+        let sink = Arc::clone(&out);
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let state = sample_state();
+                let mut signals = QuietSignals { end: true };
+                let mut schedule = Schedule::new(cx.now());
+                let mut last_seq = 0;
+                let id = SourceId::SystemdUser;
+                let outcome =
+                    match wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await
+                    {
+                        Wake::Lost(e) => lost(&cx, &io, &state, e).await,
+                        _ => panic!("the stream ended"),
+                    };
+                *sink.lock().expect("slot lock") = Some(outcome);
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        let outcome = out.lock().expect("slot lock").take().expect("ended");
+        assert!(
+            matches!(outcome, Outcome::Err(WorkerError::Dbus(_))),
+            "{outcome:?}"
+        );
+        match rx.try_recv() {
+            Ok(EngineMsg::Source(SourceUpdate::Services(up))) => {
+                assert_eq!(up.state, ManagerState::Reconnecting);
+                assert_eq!(up.validity, Validity::Stale);
+                assert_eq!(up.units.len(), 3, "the last records are kept");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
     }
 }
