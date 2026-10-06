@@ -3,7 +3,8 @@
 //!
 //! `TlDialog::open` opens a `TlSecondaryWindow` of kind Confirmation, modal to the parent. The
 //! body shows an icon, an optional heading, the text, the owner's extra lines and an optional
-//! checkbox; the footer shows Cancel left of the action button.
+//! checkbox; the footer shows Cancel left of the action button, with an optional second action
+//! between them.
 //!
 //! One focus and Enter rule for every confirmation (R-104): focus starts on Cancel in a
 //! destructive confirmation and on the action button otherwise. Enter activates the focused
@@ -185,8 +186,9 @@ impl TlDialog {
         self
     }
 
-    /// A second action button right of the action button, Danger when `danger` is set. It ends
-    /// the dialog with [`DialogResult::Second`] (UI-PRC-014, the window picker's "Terminate").
+    /// A second action button between Cancel and the action button, Danger when `danger` is
+    /// set. It ends the dialog with [`DialogResult::Second`] (UI-PRC-014, the window picker's
+    /// "Terminate"). It never has focus on open, so Enter never runs it by default.
     pub fn second_action(mut self, label: impl Into<SharedString>, danger: bool) -> Self {
         self.second = Some((label.into(), danger));
         self
@@ -405,8 +407,8 @@ impl TlDialog {
                     .justify_end()
                     .gap(m.sp[4])
                     .child(cancel)
-                    .child(action)
-                    .children(second),
+                    .children(second)
+                    .child(action),
             )
             .into_any_element()
     }
@@ -669,9 +671,65 @@ impl Render for TlDialogView {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
+    use gpui_kit::{Modifiers, TestAppContext};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+
     use super::*;
     use crate::theme::ThemeMode;
     use crate::theme::tests::test_theme;
+
+    /// Draws a dialog body with Cancel, a second action and the action button.
+    struct ThreeButtons {
+        dialog: TlDialog,
+        focus: DialogFocus,
+        results: Rc<RefCell<Vec<DialogResult>>>,
+    }
+
+    impl Render for ThreeButtons {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let results = self.results.clone();
+            div().size_full().child(self.dialog.render_body(
+                &self.focus,
+                false,
+                |_, _, _| {},
+                move |result, _, _| results.borrow_mut().push(result),
+                window,
+                cx,
+            ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn second_action_sits_between_cancel_and_action(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+        });
+        let results = Rc::new(RefCell::new(Vec::new()));
+        let sink = results.clone();
+        let (_, cx) = cx.add_window_view(move |_, cx| ThreeButtons {
+            dialog: TlDialog::confirm("What do you want to do with this process?", "Select")
+                .second_action("Terminate", true),
+            focus: DialogFocus::new(cx),
+            results: sink,
+        });
+        cx.run_until_parked();
+        let cancel = cx.debug_bounds("TlDialogCancel").expect("cancel");
+        let second = cx.debug_bounds("TlDialogSecond").expect("second");
+        let action = cx.debug_bounds("TlDialogAction").expect("action");
+        assert!(cancel.right() <= second.left(), "Cancel left of Terminate");
+        assert!(second.right() <= action.left(), "Select is rightmost");
+
+        cx.simulate_click(second.center(), Modifiers::none());
+        assert_eq!(*results.borrow(), [DialogResult::Second]);
+    }
 
     #[test]
     fn confirm_defaults() {

@@ -405,10 +405,14 @@ fn picked_second_button_terminate(cx: &mut TestAppContext) {
             pid: 4242,
         },
     );
+    // Select is the default; Terminate never has focus on open.
+    assert_eq!(focused(&mut o), Some(DialogButton::Action));
     let terminate = o
         .vcx
         .debug_bounds("TlDialogSecond")
         .expect("Terminate button");
+    let select = o.vcx.debug_bounds("TlDialogAction").expect("Select button");
+    assert!(terminate.right() <= select.left(), "Select is rightmost");
     o.vcx.simulate_click(terminate.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*o.results.borrow(), [ConfirmResult::Second]);
