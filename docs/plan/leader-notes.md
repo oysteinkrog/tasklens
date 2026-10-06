@@ -496,3 +496,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.9: EXITED branch in paint_name_cell approved (icon at STALE_OPACITY, text secondary).
 - rsf.14: header_menu generic over C, using a ColumnId round trip for now; a follow-up bead makes the action key a string.
 - 8q0.38: GroupRow.desktop_path added and left None; ProcessMeta.desktop_path is a follow-up bead. TableInput.unit_users added.
+- 8q0.38 (c90aedc): closed by the leader; desktop_path source is 8q0.39. Extra files reducer/apply.rs, mod.rs and lab_table.rs accepted.
