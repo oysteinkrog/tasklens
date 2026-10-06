@@ -288,3 +288,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.10: real_actions.rs kill-tree test wraps RealOps in StopSettles (waits for state T after SIGSTOP, then 5 ms), because the STOP and KILL passes are microseconds apart. Order is unchanged. thread_nice_only_that_tid is covered by i3o.8 in process.rs.
 - y6k.17: StartupEntry.state_code landed (e5c2405).
 - y6k.19: negative rDNS cache is 1 min (SYS-035), not the 2 min in my bead comment.
+- 8fx.33: rolling window keeps dropped catalogs in RAM and injects the right one into the first returned block's decoded copy. Accepted over the bead's "mark due again" example (that would put the catalog in every block). Test feeds 12 min because the first drop is at 660 s. The new test was not run against the old code.
+- ug9.1: TlTextInput wraps the kit Input (own border, own clear button with HoverTooltip, Esc handled in capture phase). "Clear filter" and "Filter:" are hard-coded, not i18n keys; sweep with the other component strings in the i18n pass.
