@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    Styled as _, TestAppContext, VisualTestContext, Window, WindowHandle, div,
+    AnyWindowHandle, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, WindowHandle, div,
 };
 use tl_model::client::EngineClient;
 use tl_model::settings::{Settings, UiState};
