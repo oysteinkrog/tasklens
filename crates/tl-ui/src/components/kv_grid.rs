@@ -687,6 +687,7 @@ impl TlKeyValueGrid {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn rows(
         &self,
         si: usize,
