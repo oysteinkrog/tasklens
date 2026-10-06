@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use gpui_kit::{
     App, Bounds, ContentMask, Div, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled, StyledText,
-    TextStyleRefinement, Window, div, point, relative, size,
+    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled,
+    StyledText, TextStyleRefinement, Window, div, point, relative, size,
 };
 use tl_model::validity::Validity;
 
