@@ -505,7 +505,27 @@ fn open_first_calls_main_hook(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn open_first_missing_hook_quits(cx: &mut TestAppContext) {
     run_init(cx, Settings::default());
+    cx.update(|cx| {
+        // A `bench` build registers the gallery hook; take it out.
+        cx.default_global::<OpenHooks>().gallery = None;
+        open_first_for_test(cx, OpenMode::Gallery);
+    });
+    assert_eq!(exit_slot(cx), Some(UiExit::Quit));
+}
+
+#[cfg(feature = "bench")]
+#[gpui_kit::test]
+fn gallery_mode_opens_window_and_close_quits(cx: &mut TestAppContext) {
+    run_init(cx, Settings::default());
     cx.update(|cx| open_first_for_test(cx, OpenMode::Gallery));
+    cx.run_until_parked();
+    let windows = cx.windows();
+    assert_eq!(windows.len(), 1);
+    assert_eq!(exit_slot(cx), None);
+    windows[0]
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("window is open");
+    cx.run_until_parked();
     assert_eq!(exit_slot(cx), Some(UiExit::Quit));
 }
 
@@ -533,9 +553,11 @@ fn start_options_global_installed(cx: &mut TestAppContext) {
     };
     let exit = cx.update(|cx| start_for_test(cx, launch));
     cx.update(|cx| assert_eq!(cx.global::<StartOptions>().select_pid, Some(42)));
-    // No gallery hook is registered, so the launch quits; the cell `run` reads agrees.
-    assert_eq!(exit_slot(cx), Some(UiExit::Quit));
-    assert_eq!(exit.take(), Some(UiExit::Quit));
+    // Without `bench` no gallery hook is registered, so the launch quits; the cell `run` reads
+    // agrees. With `bench` the gallery window opens and nothing quits.
+    let expected = (!cfg!(feature = "bench")).then_some(UiExit::Quit);
+    assert_eq!(exit_slot(cx), expected);
+    assert_eq!(exit.take(), expected);
 }
 
 struct Empty;
