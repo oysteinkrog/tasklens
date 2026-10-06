@@ -364,6 +364,18 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("process ops not wired"))
     }
+    /// One thread of the verified process (ADR-006, R-097): tl-ops opens and verifies the pidfd,
+    /// checks `/proc/<pid>/task/<tid>` exists (else `IdentityChanged`), runs `op` on that TID
+    /// (signals through `tgkill`) and polls the pidfd after it. The default refuses.
+    fn apply_thread_op(
+        &self,
+        _process: ProcessKey,
+        _boot: BootId,
+        _tid: u32,
+        _op: &process::ThreadOp,
+    ) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("process ops not wired"))
+    }
 }
 
 /// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
@@ -437,6 +449,32 @@ impl ActionOps for RealOps {
                 tl_ops::process::set_sched(key, boot, *policy, *rt_prio)
             }
             PidOp::IoPriority(prio) => tl_ops::process::set_io_priority(key, boot, *prio),
+        }
+    }
+
+    fn apply_thread_op(
+        &self,
+        process: ProcessKey,
+        boot: BootId,
+        tid: u32,
+        op: &process::ThreadOp,
+    ) -> Result<(), OpsError> {
+        use process::{PidOp, ThreadOp};
+        match op {
+            ThreadOp::Signal(sig) => tl_ops::process::thread_send_signal(process, boot, tid, *sig),
+            ThreadOp::Pid(PidOp::Nice(n)) => {
+                tl_ops::process::thread_set_nice(process, boot, tid, *n)
+            }
+            ThreadOp::Pid(PidOp::Affinity(set)) => {
+                tl_ops::process::thread_set_affinity(process, boot, tid, set)
+            }
+            ThreadOp::Pid(PidOp::Sched { policy, rt_prio }) => {
+                tl_ops::process::thread_set_sched(process, boot, tid, *policy, *rt_prio)
+            }
+            // `process::run_thread` never sends this (R-097 allows no I/O priority per thread).
+            ThreadOp::Pid(PidOp::IoPriority(_)) => {
+                Err(OpsError::Unsupported("no I/O priority for one thread"))
+            }
         }
     }
 }

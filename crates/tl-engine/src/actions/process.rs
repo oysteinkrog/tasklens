@@ -12,6 +12,7 @@ use tl_model::actions::{
 use tl_model::ids::ProcessKey;
 use tl_model::system::CpuSet;
 use tl_model::time::BootId;
+use tl_ops::OpsError;
 
 use super::{
     ActionCtx, ActionOps, TIMED_OUT, deadline, internal_error, map_ops_error, with_deadline,
@@ -19,31 +20,40 @@ use super::{
 
 /// Runs one `Process` or `Thread` target. A kind this module does not handle yet is
 /// `Rejected(Unsupported)`. App rows arrive here already expanded to their primary processes.
+///
+/// This path is unprivileged: `run_body` refuses privileged requests until E29-014 routes them
+/// through the helper. So `SetIoPriority(Realtime(_))`, which needs root, is refused here as well
+/// as in the UI.
 pub async fn run_target(
     cx: &Cx,
     actx: &ActionCtx,
     kind: &ActionKind,
     target: &ActionTarget,
 ) -> ActionState {
-    let ActionTarget::Process(key) = target else {
-        // Thread targets are E11-006.
-        return ActionState::Rejected(RejectReason::Unsupported);
-    };
-    let sig = match kind {
-        ActionKind::Signal(sig) => *sig,
-        ActionKind::Suspend => Signal::Stop,
-        ActionKind::Resume => Signal::Cont,
-        ActionKind::SetNice(n) => return pid_based(cx, actx, kind, *key, PidOp::Nice(*n)).await,
-        ActionKind::SetAffinity(set) => {
-            return pid_based(cx, actx, kind, *key, PidOp::Affinity(*set)).await;
+    let key = match target {
+        ActionTarget::Process(key) => *key,
+        ActionTarget::Thread { process, tid } => {
+            return run_thread(cx, actx, kind, *process, *tid).await;
         }
         _ => return ActionState::Rejected(RejectReason::Unsupported),
     };
-    signal(cx, actx, kind, target, *key, sig).await
+    let op = match kind {
+        ActionKind::Signal(sig) => return signal(cx, actx, kind, target, key, *sig).await,
+        ActionKind::Suspend => return signal(cx, actx, kind, target, key, Signal::Stop).await,
+        ActionKind::Resume => return signal(cx, actx, kind, target, key, Signal::Cont).await,
+        ActionKind::SetNice(n) => PidOp::Nice(*n),
+        ActionKind::SetAffinity(set) => PidOp::Affinity(*set),
+        ActionKind::SetSched { policy, rt_prio } => PidOp::Sched {
+            policy: *policy,
+            rt_prio: *rt_prio,
+        },
+        ActionKind::SetIoPriority(prio) => PidOp::IoPriority(*prio),
+        _ => return ActionState::Rejected(RejectReason::Unsupported),
+    };
+    pid_based(cx, actx, kind, key, op).await
 }
 
 /// A change that takes a PID, not a pidfd, so it runs under the ADR-006 TID loop.
-/// `Sched` and `IoPriority` are E11-006.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PidOp {
     Nice(i8),
@@ -52,12 +62,30 @@ pub enum PidOp {
     IoPriority(IoPriority),
 }
 
+/// The checks before any syscall: nice -20..=19, a non-empty CPU set, `rt_prio` 1..=99 for
+/// `Fifo` and `Rr` and 0 for the other policies, I/O levels 0..=7, and no `IoPriority::Realtime`
+/// on this unprivileged path.
+fn valid(op: PidOp) -> bool {
+    match op {
+        PidOp::Nice(n) => (-20..=19).contains(&n),
+        PidOp::Affinity(set) => set != CpuSet::empty(),
+        PidOp::Sched {
+            policy: SchedPolicy::Fifo | SchedPolicy::Rr,
+            rt_prio,
+        } => (1..=99).contains(&rt_prio),
+        PidOp::Sched { rt_prio, .. } => rt_prio == 0,
+        PidOp::IoPriority(IoPriority::Realtime(_)) => false,
+        PidOp::IoPriority(IoPriority::BestEffort(level)) => level <= 7,
+        PidOp::IoPriority(IoPriority::None | IoPriority::Idle) => true,
+    }
+}
+
 /// Runs `op` on every thread of `key` in one blocking job under the 2 s deadline. tl-ops opens
 /// and verifies the pidfd, changes each TID and polls the pidfd after the loop, so its errors
 /// carry the outcome: `Partial` is `Failed(Partial)`, an exit during the loop is
 /// `OutcomeUnknown("process exited during the change")`, `IdentityChanged` is
-/// `Rejected(IdentityChanged)` and EPERM is `Failed(PermissionDenied)`. A nice value outside
-/// -20..=19 or an empty CPU set is `Rejected(Unsupported)` before any syscall.
+/// `Rejected(IdentityChanged)` and EPERM is `Failed(PermissionDenied)`. An `op` that fails
+/// `valid` is `Rejected(Unsupported)` before any syscall.
 async fn pid_based(
     cx: &Cx,
     actx: &ActionCtx,
@@ -65,27 +93,59 @@ async fn pid_based(
     key: ProcessKey,
     op: PidOp,
 ) -> ActionState {
-    let valid = match op {
-        PidOp::Nice(n) => (-20..=19).contains(&n),
-        PidOp::Affinity(set) => set != CpuSet::empty(),
-        PidOp::Sched { .. } | PidOp::IoPriority(_) => true,
-    };
-    if !valid {
+    if !valid(op) {
         return ActionState::Rejected(RejectReason::Unsupported);
     }
     let ops = Arc::clone(&actx.ops);
     let boot = actx.boot_id;
-    let Ok(mut job) = cx.spawn_blocking(move |_| ops.apply_pid_op(key, boot, &op)) else {
-        return internal_error();
-    };
     let target = ActionTarget::Process(key);
-    let state = match with_deadline(cx, deadline(kind, Some(&target), false), job.join(cx)).await {
-        Err(_) => ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)),
-        Ok(Err(_)) => internal_error(),
-        Ok(Ok(Ok(()))) => ActionState::Succeeded,
-        Ok(Ok(Err(e))) => map_ops_error(&e),
-    };
+    let state = blocking(cx, kind, &target, move || ops.apply_pid_op(key, boot, &op)).await;
     tracing::debug!(target: "tasklens::action", pid = key.pid, op = ?op, result = ?state);
+    state
+}
+
+/// What one `Thread` target does: a signal through `tgkill`, or a PID-based change on that TID.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThreadOp {
+    Signal(Signal),
+    Pid(PidOp),
+}
+
+/// Runs `kind` on thread `tid` of `process` (ADR-006, R-097) in one blocking job under the 2 s
+/// deadline. tl-ops opens and verifies the process pidfd, checks `/proc/<pid>/task/<tid>`
+/// exists (else `IdentityChanged`), acts on that TID only and polls the pidfd after the call.
+/// Allowed kinds are `Signal`, `SetNice`, `SetSched` and `SetAffinity`. The others, and an op
+/// that fails `valid`, are `Rejected(Unsupported)` before any syscall.
+async fn run_thread(
+    cx: &Cx,
+    actx: &ActionCtx,
+    kind: &ActionKind,
+    process: ProcessKey,
+    tid: u32,
+) -> ActionState {
+    let op = match kind {
+        ActionKind::Signal(sig) => ThreadOp::Signal(*sig),
+        ActionKind::SetNice(n) => ThreadOp::Pid(PidOp::Nice(*n)),
+        ActionKind::SetSched { policy, rt_prio } => ThreadOp::Pid(PidOp::Sched {
+            policy: *policy,
+            rt_prio: *rt_prio,
+        }),
+        ActionKind::SetAffinity(set) => ThreadOp::Pid(PidOp::Affinity(*set)),
+        _ => return ActionState::Rejected(RejectReason::Unsupported),
+    };
+    if let ThreadOp::Pid(pid_op) = op
+        && !valid(pid_op)
+    {
+        return ActionState::Rejected(RejectReason::Unsupported);
+    }
+    let ops = Arc::clone(&actx.ops);
+    let boot = actx.boot_id;
+    let target = ActionTarget::Thread { process, tid };
+    let state = blocking(cx, kind, &target, move || {
+        ops.apply_thread_op(process, boot, tid, &op)
+    })
+    .await;
+    tracing::debug!(target: "tasklens::action", pid = process.pid, tid, op = ?op, result = ?state);
     state
 }
 
@@ -101,21 +161,31 @@ async fn signal(
 ) -> ActionState {
     let ops = Arc::clone(&actx.ops);
     let boot = actx.boot_id;
-    let Ok(mut job) = cx.spawn_blocking(move |_| {
+    let state = blocking(cx, kind, target, move || {
         let pidfd = ops.open_verified(key, boot)?;
         ops.send_signal(&pidfd, sig)
-    }) else {
+    })
+    .await;
+    tracing::debug!(target: "tasklens::action", pid = key.pid, signal = sig.number(), result = ?state);
+    state
+}
+
+/// Runs `job` on the blocking pool under the deadline for `kind`. Past the deadline is
+/// `OutcomeUnknown("timed out")`, a panic is `Failed(Internal)`, and an error goes through
+/// `map_ops_error`, so `IdentityChanged` becomes `Rejected(IdentityChanged)`.
+async fn blocking<F>(cx: &Cx, kind: &ActionKind, target: &ActionTarget, job: F) -> ActionState
+where
+    F: FnOnce() -> Result<(), OpsError> + Send + 'static,
+{
+    let Ok(mut job) = cx.spawn_blocking(move |_| job()) else {
         return internal_error();
     };
-    let state = match with_deadline(cx, deadline(kind, Some(target), false), job.join(cx)).await {
+    match with_deadline(cx, deadline(kind, Some(target), false), job.join(cx)).await {
         Err(_) => ActionState::OutcomeUnknown(Arc::from(TIMED_OUT)),
         Ok(Err(_)) => internal_error(),
         Ok(Ok(Ok(()))) => ActionState::Succeeded,
-        // `IdentityChanged` becomes `Rejected(IdentityChanged)`.
         Ok(Ok(Err(e))) => map_ops_error(&e),
-    };
-    tracing::debug!(target: "tasklens::action", pid = key.pid, signal = sig.number(), result = ?state);
-    state
+    }
 }
 
 /// The most time End Process Tree waits for its one blocking job, whatever the target count.
@@ -207,7 +277,6 @@ mod tests {
     use rustix::io::Errno;
     use tl_model::actions::{ActionError, ActionId, ActionRequest};
     use tl_model::time::BootId;
-    use tl_ops::OpsError;
 
     use super::*;
     use crate::actions::{ActionOps, Admission, RealOps, admit, summarize};
@@ -231,6 +300,7 @@ mod tests {
         Send(Signal),
         Close(u32),
         Pid(u32, PidOp),
+        Thread(u32, u32, ThreadOp),
     }
 
     struct FakeOps {
@@ -238,6 +308,8 @@ mod tests {
         send: Step,
         /// What `apply_pid_op` returns.
         pid_op: Result<(), OpsError>,
+        /// TIDs `apply_thread_op` treats as gone (`/proc/<pid>/task/<tid>` missing).
+        missing_tids: Vec<u32>,
         /// Per-PID errors: `(pid, None)` fails the open, `(pid, Some(sig))` fails that signal.
         fail: Vec<(u32, Option<Signal>, OpsError)>,
         clock: Arc<VirtualClock>,
@@ -252,6 +324,7 @@ mod tests {
                 open,
                 send,
                 pid_op: Ok(()),
+                missing_tids: Vec::new(),
                 fail: Vec::new(),
                 clock: Arc::clone(clock),
                 log: Mutex::new(Vec::new()),
@@ -310,6 +383,23 @@ mod tests {
         fn apply_pid_op(&self, key: ProcessKey, _boot: BootId, op: &PidOp) -> Result<(), OpsError> {
             self.log.lock().unwrap().push(Call::Pid(key.pid, *op));
             self.pid_op.clone()
+        }
+
+        fn apply_thread_op(
+            &self,
+            process: ProcessKey,
+            _boot: BootId,
+            tid: u32,
+            op: &ThreadOp,
+        ) -> Result<(), OpsError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(Call::Thread(process.pid, tid, *op));
+            if self.missing_tids.contains(&tid) {
+                return Err(OpsError::IdentityChanged);
+            }
+            Ok(())
         }
     }
 
@@ -389,6 +479,27 @@ mod tests {
         let ops = Arc::new(fake);
         let state = in_lab(ops.clone(), clock, move |cx, actx| async move {
             run_target(&cx, &actx, &kind, &ActionTarget::Process(key(7))).await
+        });
+        let log = ops.log.lock().unwrap().clone();
+        (state, log)
+    }
+
+    /// Runs `kind` on thread `tid` of process 7 with a fake that treats `missing_tids` as gone.
+    fn run_thread_target(
+        kind: ActionKind,
+        tid: u32,
+        missing_tids: Vec<u32>,
+    ) -> (ActionState, Vec<Call>) {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let mut fake = FakeOps::new(Step::Ok, Step::Ok, &clock);
+        fake.missing_tids = missing_tids;
+        let ops = Arc::new(fake);
+        let state = in_lab(ops.clone(), clock, move |cx, actx| async move {
+            let target = ActionTarget::Thread {
+                process: key(7),
+                tid,
+            };
+            run_target(&cx, &actx, &kind, &target).await
         });
         let log = ops.log.lock().unwrap().clone();
         (state, log)
@@ -554,6 +665,161 @@ mod tests {
         let (state, log) = run_pid(ActionKind::SetAffinity(set), Ok(()));
         assert_eq!(state, ActionState::Succeeded);
         assert_eq!(log, [Call::Pid(7, PidOp::Affinity(set))]);
+    }
+
+    #[test]
+    fn sched_validation_and_call() {
+        let rr = PidOp::Sched {
+            policy: SchedPolicy::Rr,
+            rt_prio: 1,
+        };
+        let (state, log) = run_pid(
+            ActionKind::SetSched {
+                policy: SchedPolicy::Rr,
+                rt_prio: 1,
+            },
+            Ok(()),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Pid(7, rr)]);
+        let idle = PidOp::Sched {
+            policy: SchedPolicy::Idle,
+            rt_prio: 0,
+        };
+        let (state, log) = run_pid(
+            ActionKind::SetSched {
+                policy: SchedPolicy::Idle,
+                rt_prio: 0,
+            },
+            Ok(()),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Pid(7, idle)]);
+        for (policy, rt_prio) in [
+            (SchedPolicy::Other, 5),
+            (SchedPolicy::Batch, 1),
+            (SchedPolicy::Idle, 99),
+            (SchedPolicy::Fifo, 100),
+            (SchedPolicy::Fifo, 0),
+            (SchedPolicy::Rr, 0),
+            (SchedPolicy::Rr, u8::MAX),
+        ] {
+            let (state, log) = run_pid(ActionKind::SetSched { policy, rt_prio }, Ok(()));
+            assert_eq!(
+                state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{policy:?} {rt_prio}"
+            );
+            assert!(log.is_empty(), "the fake saw a call: {log:?}");
+        }
+    }
+
+    #[test]
+    fn ioprio_classes_and_realtime_guard() {
+        for prio in [
+            IoPriority::BestEffort(4),
+            IoPriority::BestEffort(0),
+            IoPriority::BestEffort(7),
+            IoPriority::Idle,
+            // "Default (follows nice)": the fake sees class none.
+            IoPriority::None,
+        ] {
+            let (state, log) = run_pid(ActionKind::SetIoPriority(prio), Ok(()));
+            assert_eq!(state, ActionState::Succeeded, "{prio:?}");
+            assert_eq!(log, [Call::Pid(7, PidOp::IoPriority(prio))]);
+        }
+        // Realtime needs root, and this path is never privileged. Levels stop at 7.
+        for prio in [
+            IoPriority::Realtime(0),
+            IoPriority::Realtime(7),
+            IoPriority::BestEffort(8),
+        ] {
+            let (state, log) = run_pid(ActionKind::SetIoPriority(prio), Ok(()));
+            assert_eq!(
+                state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{prio:?}"
+            );
+            assert!(log.is_empty(), "the fake saw a call: {log:?}");
+        }
+    }
+
+    #[test]
+    fn signal_other_number() {
+        let (state, log, _) = run(ActionKind::Signal(Signal::Other(34)), Step::Ok, Step::Ok);
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Open(7), Call::Send(Signal::Other(34))]);
+        assert_eq!(Signal::Other(34).number(), 34);
+    }
+
+    #[test]
+    fn thread_target_tgkill_and_missing_tid() {
+        let (state, log) = run_thread_target(ActionKind::Signal(Signal::Term), 9, Vec::new());
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Thread(7, 9, ThreadOp::Signal(Signal::Term))]);
+        assert_eq!(Signal::Term.number(), 15);
+        let (state, _) = run_thread_target(ActionKind::Signal(Signal::Term), 9, vec![9]);
+        assert_eq!(state, ActionState::Rejected(RejectReason::IdentityChanged));
+    }
+
+    #[test]
+    fn thread_target_pid_ops() {
+        let mut set = CpuSet::empty();
+        set.insert(1);
+        let cases = [
+            (ActionKind::SetNice(3), PidOp::Nice(3)),
+            (ActionKind::SetAffinity(set), PidOp::Affinity(set)),
+            (
+                ActionKind::SetSched {
+                    policy: SchedPolicy::Batch,
+                    rt_prio: 0,
+                },
+                PidOp::Sched {
+                    policy: SchedPolicy::Batch,
+                    rt_prio: 0,
+                },
+            ),
+        ];
+        for (kind, op) in cases {
+            let (state, log) = run_thread_target(kind, 9, Vec::new());
+            assert_eq!(state, ActionState::Succeeded, "{op:?}");
+            assert_eq!(log, [Call::Thread(7, 9, ThreadOp::Pid(op))]);
+        }
+        // The same input checks as a process target.
+        for kind in [
+            ActionKind::SetNice(20),
+            ActionKind::SetAffinity(CpuSet::empty()),
+            ActionKind::SetSched {
+                policy: SchedPolicy::Fifo,
+                rt_prio: 0,
+            },
+        ] {
+            let (state, log) = run_thread_target(kind.clone(), 9, Vec::new());
+            assert_eq!(
+                state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{kind:?}"
+            );
+            assert!(log.is_empty(), "the fake saw a call: {log:?}");
+        }
+    }
+
+    #[test]
+    fn thread_target_unsupported_kinds() {
+        for kind in [
+            ActionKind::Suspend,
+            ActionKind::Resume,
+            ActionKind::KillTree,
+            ActionKind::SetIoPriority(IoPriority::BestEffort(4)),
+        ] {
+            let (state, log) = run_thread_target(kind.clone(), 9, Vec::new());
+            assert_eq!(
+                state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{kind:?}"
+            );
+            assert!(log.is_empty(), "the fake saw a call: {log:?}");
+        }
     }
 
     #[test]
@@ -875,6 +1141,94 @@ mod tests {
         let nices = task_nices(pid);
         assert!(nices.len() >= 4, "{nices:?}");
         assert!(nices.iter().all(|&n| n == i64::from(target)), "{nices:?}");
+    }
+
+    #[test]
+    fn thread_nice_only_that_tid() {
+        // Only one thread of the child this test spawns has its nice value changed.
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "actions::process::tests::threads_child_helper",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(THREADS_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("child starts");
+        let child = ChildGuard(child);
+        let pid = child.0.id();
+        let start = Instant::now();
+        while std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, |d| d.count()) < 4 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "threads did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let before = task_nice_map(pid);
+        let tid = *before
+            .keys()
+            .filter(|&&t| t != pid)
+            .max()
+            .expect("an extra thread");
+        // Raise the nice value above every thread's current one, so no privilege is needed.
+        let current = *before.values().max().expect("a task");
+        let target: i8 = if current < 3 { 3 } else { 19 };
+        assert!(i64::from(target) > current || target == 19, "{before:?}");
+        let state = run_real_target(
+            ActionKind::SetNice(target),
+            ActionTarget::Thread {
+                process: real_key(pid),
+                tid,
+            },
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        let after = task_nice_map(pid);
+        for (t, nice) in &after {
+            if *t == tid {
+                assert_eq!(*nice, i64::from(target), "{after:?}");
+            } else {
+                assert_eq!(Some(nice), before.get(t), "{before:?} {after:?}");
+            }
+        }
+        // A TID that is not in this process is never touched.
+        let state = run_real_target(
+            ActionKind::SetNice(19),
+            ActionTarget::Thread {
+                process: real_key(pid),
+                tid: std::process::id(),
+            },
+        );
+        assert_eq!(state, ActionState::Rejected(RejectReason::IdentityChanged));
+    }
+
+    /// Runs `kind` on `target` through `RealOps`.
+    fn run_real_target(kind: ActionKind, target: ActionTarget) -> ActionState {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        in_lab(Arc::new(RealOps), clock, move |cx, actx| async move {
+            run_target(&cx, &actx, &kind, &target).await
+        })
+    }
+
+    /// TID to field 19 (`nice`) of `/proc/<pid>/task/<tid>/stat`.
+    fn task_nice_map(pid: u32) -> FxHashMap<u32, i64> {
+        let mut out = FxHashMap::default();
+        for entry in std::fs::read_dir(format!("/proc/{pid}/task")).expect("task dir") {
+            let entry = entry.expect("task entry");
+            let tid = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse().ok())
+                .expect("tid");
+            let stat = std::fs::read_to_string(entry.path().join("stat")).expect("task stat");
+            let rest = &stat[stat.rfind(')').expect("comm end") + 2..];
+            // `rest` starts at field 3, so field 19 is index 16.
+            let nice = rest.split(' ').nth(16).expect("field 19");
+            out.insert(tid, nice.parse().expect("nice parses"));
+        }
+        out
     }
 
     #[test]
