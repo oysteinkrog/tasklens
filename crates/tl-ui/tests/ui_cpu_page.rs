@@ -637,3 +637,292 @@ mod grid {
         assert!(vcx.debug_bounds(TRIGGER_ID).is_none());
     }
 }
+
+// CPU page entity (E24, UI-PRF-023, UI-PRF-053; ADR-008, R-126).
+
+#[cfg(feature = "test-hooks")]
+mod page {
+    use gpui_kit::{
+        AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::demand::{CpuDemand, Demand};
+    use tl_model::settings::{AppearanceSettings, CpuGraphMode, Settings, ThemeSettings, UiState};
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::chart::grid_element::grid_layout;
+    use tl_ui::components::kv_grid;
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::performance::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
+    use tl_ui::pages::performance::cpu::{
+        CPU_EXTRA_MODES_ENABLED, CpuPage, OVERALL_ID, kernel_label, mode_items, mode_label,
+    };
+    use tl_ui::pages::performance::cpu_grid::GRID_ID;
+    use tl_ui::pages::performance::page::DevicePage as _;
+    use tl_ui::pages::performance::{DeviceKey, DeviceKind, DeviceRow};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    use super::*;
+
+    struct Host(Entity<CpuPage>);
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1000.)).h(px(2000.)).child(self.0.clone())
+        }
+    }
+
+    fn cpu_entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("cpu"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        }
+    }
+
+    struct Rig<'a> {
+        page: Entity<CpuPage>,
+        demand: Entity<DemandAggregator>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    /// A CPU page over 16 logical CPUs (package `DeviceIdx(0)`, CPU `id` at `100 + id`) in a
+    /// 1000 px wide window, with `settings`.
+    fn open(cx: &mut TestAppContext, settings: Settings) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            let mut entries = vec![cpu_entry(0, DeviceIdentity::CpuPackage)];
+            entries
+                .extend((0..16).map(|id| cpu_entry(100 + id, DeviceIdentity::CpuLogical { id })));
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: Arc::from(entries),
+            });
+            Arc::make_mut(&mut s.system).cpu_topology = Arc::new(topology(16));
+        });
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            kv_grid::init(cx);
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings,
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let key = DeviceKey(Arc::from(DeviceKey::CPU));
+        let row = DeviceRow {
+            key: key.clone(),
+            kind: DeviceKind::Cpu,
+            idx: DeviceIdx(0),
+            generation: 0,
+            net_class: None,
+        };
+        let (h, d) = (hub.clone(), demand.clone());
+        let page = cx.new(|cx| CpuPage::new(key, row, h, d, cx));
+        let host = page.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
+        vcx.simulate_scale_factor_change(1.0);
+        let focus = vcx.update(|_, cx| page.read(cx).focus_handle(cx));
+        vcx.update(|window, cx| focus.focus(window, cx));
+        draw(vcx);
+        Rig { page, demand, vcx }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    fn set_active(r: &mut Rig, active: bool) {
+        let page = r.page.clone();
+        r.vcx
+            .update(|_, cx| page.update(cx, |p, cx| p.set_active(active, cx)));
+    }
+
+    fn merged(r: &mut Rig) -> Demand {
+        let demand = r.demand.clone();
+        r.vcx.update(|_, cx| demand.read(cx).merged())
+    }
+
+    #[gpui_kit::test]
+    fn cpu_mode_button_labels(cx: &mut TestAppContext) {
+        let mut s = Settings::default();
+        s.performance.cpu_graph_mode = CpuGraphMode::PerCore;
+        let r = open(cx, s);
+        let page = r.page.clone();
+        let mode = r.vcx.update(|_, cx| page.read(cx).mode());
+        assert_eq!(mode_label(mode), "Per core");
+        assert!(r.vcx.debug_bounds("TlButton-perf-cpu-mode").is_some());
+        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
+
+        // 1000 px less 16 px padding on each side: 6 columns, 3 rows of 112 px, 8 px gaps.
+        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid shown");
+        assert_eq!(grid.size.width, px(968.));
+        assert_eq!(grid_layout(16, grid.size.width, px(120.), px(8.)).cols, 6);
+        assert_eq!(grid.size.height, px(352.));
+
+        let labels: Vec<&str> = mode_items().iter().map(|i| i.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Overall",
+                "Per core",
+                "All cores overlaid",
+                "All cores stacked"
+            ]
+        );
+        assert_eq!(kernel_label(true), "Kernel on");
+        assert_eq!(kernel_label(false), "Kernel off");
+    }
+
+    #[gpui_kit::test]
+    fn cpu_demand_percore_only_when_needed(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        set_active(&mut r, true);
+        assert_eq!(merged(&mut r).cpu, CpuDemand::PerCore);
+
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::Overall,
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let (mode, setting) = r.vcx.update(|_, cx| {
+            (
+                page.read(cx).mode(),
+                TlSettings::settings(cx).performance.cpu_graph_mode,
+            )
+        });
+        assert_eq!(mode, CpuGraphMode::Overall);
+        assert_eq!(setting, CpuGraphMode::Overall);
+        assert!(r.vcx.debug_bounds(OVERALL_ID).is_some(), "overall chart");
+        assert!(r.vcx.debug_bounds(GRID_ID).is_none(), "no grid");
+        assert_eq!(merged(&mut r).cpu, CpuDemand::Total);
+
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::PerCore,
+        });
+        assert_eq!(merged(&mut r).cpu, CpuDemand::PerCore);
+    }
+
+    #[gpui_kit::test]
+    fn cpu_kernel_toggle_updates_specs(cx: &mut TestAppContext) {
+        let r = open(cx, Settings::default());
+        let page = r.page.clone();
+        let read = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                let p = page.read(cx);
+                (
+                    p.kernel(),
+                    p.overall().read(cx).spec.series.len(),
+                    p.overall().read(cx).labels.legend.len(),
+                    p.grid()
+                        .view
+                        .read(cx)
+                        .spec
+                        .cells
+                        .iter()
+                        .all(|c| c.overlay_series.is_none()),
+                )
+            })
+        };
+        assert_eq!(read(r.vcx), (true, 2, 2, false));
+
+        r.vcx.dispatch_action(PerfToggleCpuKernel);
+        let (kernel, series, legend, no_overlays) = read(r.vcx);
+        assert_eq!(kernel_label(kernel), "Kernel off");
+        assert_eq!((series, legend), (1, 1));
+        assert!(no_overlays);
+        let setting = r
+            .vcx
+            .update(|_, cx| TlSettings::settings(cx).performance.cpu_kernel);
+        assert!(!setting);
+
+        r.vcx.dispatch_action(PerfToggleCpuKernel);
+        assert_eq!(read(r.vcx), (true, 2, 2, false));
+    }
+
+    #[gpui_kit::test]
+    fn cpu_fast_on_with_smooth_off(cx: &mut TestAppContext) {
+        let mut s = Settings::default();
+        s.motion.smooth_graphs = false;
+        let mut r = open(cx, s);
+        set_active(&mut r, true);
+        let d = merged(&mut r);
+        assert!(d.cpu_fast);
+        assert!(d.any_surface_visible);
+        assert!(!d.memory);
+    }
+
+    #[gpui_kit::test]
+    fn cpu_page_inactive_contributes_no_demand(cx: &mut TestAppContext) {
+        let mut r = open(cx, Settings::default());
+        assert_eq!(merged(&mut r), Demand::default(), "never active");
+        set_active(&mut r, true);
+        assert_ne!(merged(&mut r), Demand::default());
+        set_active(&mut r, false);
+        assert_eq!(merged(&mut r), Demand::default());
+    }
+
+    #[gpui_kit::test]
+    fn bench_show_both_layout(cx: &mut TestAppContext) {
+        let r = open(cx, Settings::default());
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.update(cx, |p, cx| {
+                p.bench_show_both = true;
+                cx.notify();
+            })
+        });
+        draw(r.vcx);
+        let overall = r.vcx.debug_bounds(OVERALL_ID).expect("overall chart");
+        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid");
+        assert_eq!(overall.size.height, px(300.));
+        assert!(grid.top() > overall.bottom(), "grid below the chart");
+    }
+
+    #[gpui_kit::test]
+    fn cpu_extra_modes_disabled_before_p2(cx: &mut TestAppContext) {
+        const { assert!(!CPU_EXTRA_MODES_ENABLED) };
+        let items = mode_items();
+        for item in &items[2..] {
+            assert!(!item.enabled, "{:?}", item.mode);
+            assert_eq!(item.tooltip, Some("Available in a later version"));
+        }
+        assert!(items[..2].iter().all(|i| i.enabled && i.tooltip.is_none()));
+
+        // The action is ignored for a disabled mode.
+        let r = open(cx, Settings::default());
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::AllCoresOverlaid,
+        });
+        let page = r.page.clone();
+        let mode = r.vcx.update(|_, cx| page.read(cx).mode());
+        assert_eq!(mode, CpuGraphMode::PerCore);
+    }
+}

@@ -286,6 +286,10 @@ pub struct CpuPage {
     kernel_button_focus: FocusHandle,
     /// The page root; actions from the toggles and the mode menu are dispatched here.
     focus: FocusHandle,
+    #[allow(
+        dead_code,
+        reason = "E24-018 creates the overlaid and stacked charts on it"
+    )]
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
