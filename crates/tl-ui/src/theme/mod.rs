@@ -7,6 +7,7 @@ pub mod map;
 pub mod metrics;
 pub mod palette;
 pub mod store;
+pub mod user_store;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

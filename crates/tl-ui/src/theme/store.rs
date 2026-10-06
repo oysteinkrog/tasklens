@@ -19,19 +19,20 @@ use tracing::warn;
 
 use super::builtin::{self, TS_THEME_ORDER};
 use super::metrics;
+use super::user_store::{self, LoadOutcome, PersistTheme};
 use super::{
     Derived, GraphPalette, StatusColors, ThemeDef, ThemeMode, TlTheme, map, rebuild_derived,
 };
 
 /// The theme used when no other name resolves.
-const DEFAULT_DARK: &str = "Default Dark";
-const DEFAULT_LIGHT: &str = "Default Light";
+pub(crate) const DEFAULT_DARK: &str = "Default Dark";
+pub(crate) const DEFAULT_LIGHT: &str = "Default Light";
 
 /// Every theme definition and the theme that renders. Installed by `init`.
 pub struct ThemeStore {
     /// From `builtin::load()`: 2 in P1, 12 in P2, in TaskSlinger order.
     pub builtin: Arc<[ThemeDef]>,
-    /// From themes.json (E17-008). Empty until then.
+    /// From themes.json (E17-008), in file order.
     pub user: Vec<ThemeDef>,
     pub active: Arc<TlTheme>,
     /// Set only by the theme editor (E17-A2). When `Some`, it is what renders.
@@ -72,6 +73,8 @@ pub enum ThemeError {
     UnknownTheme(Arc<str>),
     /// The theme editor is open: "Finish or cancel the theme editor first" (UI-FND-043).
     PreviewActive,
+    /// "Built-in themes cannot be deleted" (UI-FND-042).
+    BuiltinCannotBeDeleted,
 }
 
 /// Switches to the named theme. Handled by the shell (E21-012).
@@ -193,12 +196,45 @@ pub fn init(
     appearance: &AppearanceSettings,
     user: Vec<ThemeDef>,
 ) {
+    let outcome = LoadOutcome {
+        themes: user,
+        ..LoadOutcome::default()
+    };
+    init_store(cx, theme, appearance, builtin::load(), outcome);
+}
+
+/// `init` with the user themes parsed from the themes.json text (`None` when the file is
+/// missing). A file that does not parse is reset: this sends `PersistTheme::RenameCorrupt`
+/// through `ThemePersist` and returns the Warning toast text for the shell to queue.
+pub fn init_with_file(
+    cx: &mut App,
+    theme: &ThemeSettings,
+    appearance: &AppearanceSettings,
+    themes_json: Option<&str>,
+    now_unix: u64,
+) -> Option<SharedString> {
     let builtin = builtin::load();
+    let outcome = user_store::load_user_themes(themes_json, &builtin, now_unix);
+    let corrupt = outcome.corrupt;
+    if let Some(t) = corrupt {
+        user_store::persist(PersistTheme::RenameCorrupt { unix_seconds: t }, cx);
+    }
+    init_store(cx, theme, appearance, builtin, outcome);
+    corrupt.map(user_store::corrupt_toast_text)
+}
+
+fn init_store(
+    cx: &mut App,
+    theme: &ThemeSettings,
+    appearance: &AppearanceSettings,
+    builtin: Arc<[ThemeDef]>,
+    outcome: LoadOutcome,
+) {
     let fallback_dark = default_theme(&builtin, DEFAULT_DARK, appearance);
     let fallback_light = default_theme(&builtin, DEFAULT_LIGHT, appearance);
     let mut store = ThemeStore {
         builtin,
-        user,
+        user: Vec::new(),
         active: Arc::new(fallback_dark.clone()),
         preview: None,
         system_scheme: 0,
@@ -207,6 +243,7 @@ pub fn init(
         fallback_light,
         appearance: appearance.clone(),
     };
+    store.install_user(outcome);
 
     let mut name = theme.active.as_str();
     if store.resolve(name).is_none() {
