@@ -372,7 +372,13 @@ fn cpu_grid_offline_cell() {
     let mut topo = topology(16);
     topo.online.remove(5);
     let mut cells = Vec::new();
-    cell_specs(&GridWords::default(), &topo, &logical_devices(16), false, &mut cells);
+    cell_specs(
+        &GridWords::default(),
+        &topo,
+        &logical_devices(16),
+        false,
+        &mut cells,
+    );
     assert_eq!(cells.len(), 16);
     assert!(cells[5].offline);
     assert_eq!(cells.iter().filter(|c| c.offline).count(), 1);
@@ -396,7 +402,13 @@ fn cpu_grid_heading_tooltip_text() {
 
     // Core 3 holds CPUs [3, 11]: CPU 11 is its thread 1.
     let mut cells = Vec::new();
-    cell_specs(&GridWords::default(), &topology(16), &logical_devices(16), false, &mut cells);
+    cell_specs(
+        &GridWords::default(),
+        &topology(16),
+        &logical_devices(16),
+        false,
+        &mut cells,
+    );
     assert_eq!(cells[11].tooltip.as_deref(), Some("Core 3, thread 1"));
     assert_eq!(cells[3].tooltip.as_deref(), Some("Core 3, thread 0"));
 }
@@ -453,7 +465,13 @@ mod grid {
     #[gpui_kit::test]
     fn cpu_grid_16_cores_6_cols(cx: &mut TestAppContext) {
         let mut cells = Vec::new();
-        cell_specs(&GridWords::default(), &topology(16), &logical_devices(16), true, &mut cells);
+        cell_specs(
+            &GridWords::default(),
+            &topology(16),
+            &logical_devices(16),
+            true,
+            &mut cells,
+        );
         assert_eq!(cells.len(), 16);
         let headings: Vec<&str> = cells.iter().map(|c| c.heading.as_ref()).collect();
         let want: Vec<String> = (0..16).map(|i| format!("CPU {i}")).collect();
@@ -501,7 +519,13 @@ mod grid {
         });
 
         let mut cells = Vec::new();
-        cell_specs(&GridWords::default(), &topology(16), &logical_devices(16), false, &mut cells);
+        cell_specs(
+            &GridWords::default(),
+            &topology(16),
+            &logical_devices(16),
+            false,
+            &mut cells,
+        );
         assert!(cells.iter().all(|c| c.overlay_series.is_none()));
     }
 
