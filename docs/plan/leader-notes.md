@@ -344,3 +344,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - gma.31: run history store with in-memory fake store in tests.
 - 8q0.34: Startup counts follow the filter.
 - fut.9: ToastQueue done; kit stack look differs from UI-FND-020; follow-up bead draws the stack in tasklens code, adds TlButton::icon_size, moves kind words to i18n. hjn.21: leader chose GraphicsAdapter.pci_slot plus reducer matching in apply_inventory (R-166). Leader fixed clippy single_element_loop in ui_hub.rs.
+- Leader fixed ui_hub::init_installs_globals after jqk.3 (persist moves into TlSettings).
+- jqk.3: TlSettings sets cx.set_reduce_motion(true) when motion.animations is off and only clears what it set. 85 SettingKeys, 55 Bool.
+- i3o.14: FreezeUnit AccessDenied gives Failed(NotAuthorized) per map_bus_error and ADR-015, not the bead's PermissionDenied. Accepted (ADR wins over bead text).
+- fut.14: TlShield on the kit base Button (TlButton cannot show the app SVG or a 16 px spinner). "Waiting for authentication…" tooltip still unconfirmed by the owner. OWNER REVIEW.
+- wlf.6: StatsSynth::sample_1hz takes the CpuFrame; samples use Sample::valid (empty flags mean a gap in tl-model).
+- yrf.7 closed.
