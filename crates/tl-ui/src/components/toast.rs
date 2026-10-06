@@ -29,8 +29,8 @@ use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::component::theme::Theme as KitTheme;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, Anchor, AnyElement, AnyWindowHandle, App, AppContext as _, Context, ElementId,
-    FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, SharedString,
+    Action, Anchor, AnyElement, AnyWindowHandle, App, Context, ElementId, FocusHandle,
+    InteractiveElement, IntoElement, ParentElement, Pixels, SharedString,
     StatefulInteractiveElement as _, Styled, StyledText, Task, TextRun, WeakEntity, Window, div,
     font, px,
 };
