@@ -579,6 +579,9 @@ fn wanted(demand: &Demand, settings: &EngineSettings) -> Wanted {
     }
 }
 
+/// A TopAt query: `(id, t, metric, n)`.
+type TopQuery = (u64, TimeNs, HistoryMetric, u8);
+
 /// The worker's state. Each blocking job locks it.
 struct State {
     mode: Mode,
@@ -591,8 +594,8 @@ struct State {
     dropped: u64,
     /// The last Frame query, answered again after a delete (UI-PRC-037).
     last_frame: Option<(u64, HistoryRange, HistoryWhat)>,
-    /// The last TopAt query `(id, t, metric, n)` and its answer, merged into every view.
-    last_top: Option<((u64, TimeNs, HistoryMetric, u8), Arc<HistoryTop>)>,
+    /// The last TopAt query and its answer, merged into every view.
+    last_top: Option<(TopQuery, Arc<HistoryTop>)>,
     /// The last view sent. A TopAt answer goes out as this view with the new top list.
     last_view: Option<HistoryView>,
 }
