@@ -459,3 +459,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.18 (27649d4): monotone cubic curves in Scratch buffers. Performance settings do not bump style_version, so GeometryScalars gained curved; toggling rebuilds once. Grid cells stay straight.
 - lgw.12 BLOCKED on owner: one TS1 code from TaskSlinger 0.9.2 under Wine plus the matching themes.json export (U-17). Same owner export as lgw.7.
 - yrf.2 (a114d42): grid heading hitboxes only while the pointer is inside; hover never rebuilds geometry; owner reads hovered_tooltip (noted on crw.9). Partial flag left for yrf.16.
+- lgw.13 (30915f8): TaskSlinger themes.json import from the documented format (22 slots, no accent); 1 MiB cap; unchanged built-ins skipped; proptests. Built from docs, not a real export: re-check against the owner's export when lgw.7 unblocks. import_taskslinger maps any import_themes error to Ok(0); fine while import_themes cannot return Err.
