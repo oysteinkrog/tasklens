@@ -141,7 +141,7 @@ impl BenchEngine {
         let (ev_tx, ev_rx) = async_channel::bounded(256);
         let (signal_tx, signal_rx) = mpsc::channel();
 
-        let (publisher, real) = match feed {
+        let (mut publisher, real) = match feed {
             BenchFeed::Synthetic => (Publisher::new(seed, t0, None), None),
             BenchFeed::Bridge(client) => {
                 let wake = client.wake();
