@@ -374,3 +374,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - gma.12: closed; PropsFilter::new takes the tab label. GPUI test window has no a11y tree, so aria names are only checked at the builder.
 - hjn.24: SMART failure reason goes in health with Failed; new tl_model::units::bytes_si_1dp.
 - 8q0.36: normalise_pci (strict hex parse) and remap on GpuInfo or new catalog entry. 8q0.35: Connections counts follow the filter; established and listening count TCP only (as build_connections).
+- tl-ui clippy --all-targets -D warnings is clean as of fut.17 136058c and yrf.5 e52853e. ui_shell.rs:498 fmt diff is jqk.5's in-progress work.
+- lgw.10: user themes store; BootSettings.persist_themes moved to ThemePersist Global. Non-object theme entries skipped with warn.
+- jqk.9: focus rules and esc_outcome table.
+- yrf.5: merged fills use non-zero rule (even-odd cancelled equal polygons). Stale tail decision moved to yrf.9 (comment).
+- yrf.8: grid paints through a QuadSink trait; baseline is 1 physical px at ui_scale 1.1.
+- m1f.10: low_memory window module.
