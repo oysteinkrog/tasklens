@@ -1130,3 +1130,550 @@ fn privileged_dump_through_helper() {
     assert_eq!(lock(&fake.state).requests, [(want, true)]);
     assert!(file.is_file(), "the engine created the file");
 }
+
+// Helper reads in the processes sweep (E29-017) -------------------------------------------------
+
+/// The `Processes` worker on a copy of the `owner-desktop` fixture, with the helper task on a
+/// fake link that answers `ReadProcessFiles`. No test runs the real helper or pkexec.
+mod sweep_helper {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::fs;
+    use std::io;
+    use std::os::fd::BorrowedFd;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use asupersync::Cx;
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::TaskHandle;
+    use asupersync::time::{TimeSource, VirtualClock};
+    use tl_collect::SysRoot;
+    use tl_collect::apps::AppPaths;
+    use tl_engine::config::{EngineConfig, EngineMode};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::helper::{
+        HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError, helper_queue,
+        helper_task_with,
+    };
+    use tl_engine::source::{WorkerControl, WorkerIo};
+    use tl_engine::update::{EngineMsg, ProcessSweep, SourceUpdate};
+    use tl_engine::workers::processes::{self, HELPER_READS_MAX, ProcessesSource};
+    use tl_model::demand::Demand;
+    use tl_model::health::HelperState;
+    use tl_model::helper_proto::{
+        HELPER_PROTO_VERSION, HelperError, HelperFrame, HelperReply, HelperReplyBody,
+        HelperRequest, ProcFiles,
+    };
+    use tl_model::ids::{ColumnId, ProcessKey};
+    use tl_model::process::ProcessRecord;
+    use tl_model::settings::EngineSettings;
+    use tl_model::time::TimeNs;
+    use tl_model::validity::{ProcessField, Validity};
+
+    use super::PROBED;
+    use super::fake_sources::{FakeLab, drain};
+
+    /// A real `io` file; the fixture's own pids have none.
+    const IO_TEXT: &str = "rchar: 1\nwchar: 1\nsyscr: 1\nsyscw: 1\nread_bytes: 0\nwrite_bytes: 0\n\
+                           cancelled_write_bytes: 0\n";
+
+    thread_local! {
+        /// The clock of the current test's lab. The lab runs every task on the test thread.
+        static CLOCK: RefCell<Option<Arc<VirtualClock>>> = const { RefCell::new(None) };
+    }
+
+    fn now_ms() -> u64 {
+        lab_clock().0 / 1_000_000
+    }
+
+    /// The sampler clock: lab virtual time for both CLOCK_BOOTTIME and CLOCK_MONOTONIC.
+    fn lab_clock() -> (TimeNs, u64) {
+        let t = CLOCK.with(|c| {
+            c.borrow()
+                .as_ref()
+                .expect("the rig set the clock")
+                .now()
+                .as_nanos()
+        });
+        (t, t)
+    }
+
+    /// Copies `src` over `dst`, keeping symlinks as links. Later copies replace earlier files.
+    fn copy_tree(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("create fixture dir");
+        for entry in fs::read_dir(src).expect("list fixture dir") {
+            let entry = entry.expect("fixture dir entry");
+            let to = dst.join(entry.file_name());
+            let file_type = entry.file_type().expect("fixture file type");
+            if file_type.is_symlink() {
+                let target = fs::read_link(entry.path()).expect("read fixture symlink");
+                let _ = fs::remove_file(&to);
+                std::os::unix::fs::symlink(target, &to).expect("create fixture symlink");
+            } else if file_type.is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                fs::copy(entry.path(), &to).expect("copy fixture file");
+            }
+        }
+    }
+
+    fn fixtures() -> PathBuf {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../tl-collect/tests/fixtures/"
+        ))
+    }
+
+    /// A writable copy of `owner-desktop` with `process-edge` over it under the target tmpdir,
+    /// removed on drop.
+    struct Root {
+        dir: PathBuf,
+    }
+
+    impl Root {
+        fn new() -> Root {
+            static COUNTER: AtomicU32 = AtomicU32::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("lab-helper-sweep-{}-{n}", std::process::id()));
+            if dir.exists() {
+                remove(&dir);
+            }
+            // `process-edge` adds the cgroup tree the sampler opens.
+            for name in ["owner-desktop", "process-edge"] {
+                copy_tree(&fixtures().join(name), &dir.join("root"));
+            }
+            Root { dir }
+        }
+
+        fn pid_dir(&self, pid: u32) -> PathBuf {
+            self.dir.join(format!("root/proc/{pid}"))
+        }
+
+        /// Gives `pid` an `io` file the user cannot read: Restricted, as for another user.
+        fn restrict_io(&self, pid: u32) {
+            let io = self.pid_dir(pid).join("io");
+            fs::write(&io, IO_TEXT).expect("write io");
+            fs::set_permissions(&io, fs::Permissions::from_mode(0o000)).expect("chmod io");
+        }
+
+        /// A copy of pid 42 as `pid`, with a Restricted `io`.
+        fn add_restricted(&self, pid: u32) {
+            let to = self.pid_dir(pid);
+            fs::create_dir_all(&to).expect("create pid dir");
+            for name in ["cgroup", "cmdline", "comm", "statm", "status"] {
+                fs::copy(self.pid_dir(42).join(name), to.join(name)).expect("copy pid file");
+            }
+            let stat = fs::read_to_string(self.pid_dir(42).join("stat")).expect("read stat");
+            let rest = stat.strip_prefix("42 ").expect("stat starts with the pid");
+            fs::write(to.join("stat"), format!("{pid} {rest}")).expect("write stat");
+            self.restrict_io(pid);
+        }
+
+        fn config(&self) -> Arc<EngineConfig> {
+            let paths = AppPaths {
+                home: self.dir.join("home"),
+                xdg_data_home: None,
+                xdg_data_dirs: Some(self.dir.join("share").into()),
+                xdg_config_home: None,
+                icon_cache: self.dir.join("cache/icons.toml"),
+            };
+            Arc::new(
+                EngineConfig::new(EngineMode::Full, self.dir.join("state"))
+                    .with_sys_root(SysRoot::at(&self.dir.join("root")))
+                    .with_app_paths(paths),
+            )
+        }
+    }
+
+    /// Makes the copy writable again so it can be removed.
+    fn remove(dir: &Path) {
+        if let Ok(entries) = fs::read_dir(dir.join("root/proc")) {
+            for entry in entries.flatten() {
+                let io = entry.path().join("io");
+                let _ = fs::set_permissions(&io, fs::Permissions::from_mode(0o600));
+            }
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            remove(&self.dir);
+        }
+    }
+
+    /// What the fake helper saw.
+    #[derive(Default)]
+    struct ReadState {
+        /// Every `ReadProcessFiles` with the lab time in ms.
+        reads: Vec<(u64, ProcessKey, ProcFiles)>,
+        pending: VecDeque<HelperReply>,
+        spawns: u32,
+        closed: bool,
+    }
+
+    type Shared = Arc<Mutex<ReadState>>;
+
+    fn lock(state: &Shared) -> std::sync::MutexGuard<'_, ReadState> {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Answers `ReadProcessFiles` like E29-004: one `File` per requested file in bit order. The
+    /// n-th `io` read of a key reports n MB read and n/2 MB written; other files fail with
+    /// `EACCES`.
+    struct ReadLink(Shared);
+
+    impl HelperLink for ReadLink {
+        fn send(&mut self, frame: &HelperFrame, _fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
+            let mut s = lock(&self.0);
+            let mut bodies = Vec::new();
+            match frame.request {
+                HelperRequest::Hello { .. } => bodies.push(HelperReplyBody::Hello {
+                    proto: HELPER_PROTO_VERSION,
+                }),
+                HelperRequest::ReadProcessFiles { key, files } => {
+                    let n = s.reads.iter().filter(|r| r.1 == key).count() as u64 + 1;
+                    s.reads.push((now_ms(), key, files));
+                    for file in files.iter() {
+                        bodies.push(if file == ProcFiles::IO {
+                            let data = format!(
+                                "rchar: 0\nwchar: 0\nsyscr: 0\nsyscw: 0\nread_bytes: {}\n\
+                                 write_bytes: {}\ncancelled_write_bytes: 0\n",
+                                n * 1_000_000,
+                                n * 500_000
+                            );
+                            HelperReplyBody::File {
+                                file,
+                                data: data.into_bytes(),
+                            }
+                        } else {
+                            HelperReplyBody::Err(HelperError::Os(13))
+                        });
+                    }
+                }
+                _ => bodies.push(HelperReplyBody::Err(HelperError::NotAllowed)),
+            }
+            let count = bodies.len();
+            for (i, body) in bodies.into_iter().enumerate() {
+                s.pending.push_back(HelperReply {
+                    seq: frame.seq,
+                    last: i + 1 == count,
+                    body,
+                });
+            }
+            Ok(())
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> Result<HelperReply, LinkError> {
+            lock(&self.0).pending.pop_front().ok_or(LinkError::Timeout)
+        }
+
+        fn exit_status(&mut self, _wait: Duration) -> Option<i32> {
+            lock(&self.0).closed.then_some(0)
+        }
+
+        fn kill(&mut self) {
+            lock(&self.0).closed = true;
+        }
+
+        fn close(&mut self) {
+            lock(&self.0).closed = true;
+        }
+    }
+
+    fn env(state: &Shared) -> LinkEnv {
+        let state = Arc::clone(state);
+        LinkEnv {
+            installed: Arc::new(|| true),
+            spawn: Arc::new(move || {
+                lock(&state).spawns += 1;
+                let link: Box<dyn HelperLink> = Box::new(ReadLink(Arc::clone(&state)));
+                Ok::<_, StartError>(link)
+            }),
+            setup_probe: Arc::new(|| PROBED),
+            setup_runner: Arc::new(|_, _| tl_model::command::SetupPhase::Succeeded),
+        }
+    }
+
+    /// The helper task and the `Processes` worker in one lab, sweeping every second.
+    struct Rig {
+        fl: FakeLab,
+        rx: mpsc::Receiver<EngineMsg>,
+        demand: watch::Sender<Demand>,
+        _settings: watch::Sender<EngineSettings>,
+        _control: watch::Sender<WorkerControl>,
+        helper: HelperHandle,
+        tasks: Vec<TaskHandle<()>>,
+        fake: Shared,
+        sweeps: Vec<(u64, ProcessSweep)>,
+    }
+
+    impl Rig {
+        /// With `unlock`, the helper session starts before the first sweep.
+        fn start(root: &Root, demand: Demand, unlock: bool) -> Rig {
+            let mut fl = FakeLab::new();
+            CLOCK.with(|c| *c.borrow_mut() = Some(Arc::clone(&fl.clock)));
+            let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
+            let (demand_tx, _) = watch::channel(demand);
+            let (settings_tx, _) = watch::channel(EngineSettings {
+                interval_ms: 1000,
+                ..EngineSettings::default()
+            });
+            let (control, _) = watch::channel(WorkerControl::default());
+            let fake = Shared::default();
+            let (helper, queue) = helper_queue();
+            let mut tasks = Vec::new();
+            let (helper_updates, link_env) = (updates.clone(), env(&fake));
+            tasks.push(fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                helper_task_with(cx, queue, helper_updates, link_env).await;
+            }));
+            if unlock {
+                let handle = helper.clone();
+                tasks.push(fl.spawn(async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    handle.send(&cx, HelperMsg::Start).await.expect("queued");
+                }));
+                assert_eq!(helper.state(), HelperState::Unlocked);
+            }
+            let io = WorkerIo::new(
+                updates,
+                demand_tx.subscribe(),
+                settings_tx.subscribe(),
+                control.subscribe(),
+                SharedHandles {
+                    helper: Some(helper.clone()),
+                    ..SharedHandles::default()
+                },
+            );
+            let src = ProcessesSource::new(root.config())
+                .expect("fixture source opens")
+                .with_clock(lab_clock);
+            tasks.push(fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = processes::run(cx, io, src).await;
+            }));
+            let mut rig = Rig {
+                fl,
+                rx,
+                demand: demand_tx,
+                _settings: settings_tx,
+                _control: control,
+                helper,
+                tasks,
+                fake,
+                sweeps: Vec::new(),
+            };
+            rig.collect();
+            rig
+        }
+
+        fn collect(&mut self) {
+            for msg in drain(&mut self.rx) {
+                if let EngineMsg::Source(SourceUpdate::Processes(sweep)) = msg {
+                    self.sweeps.push((self.fl.now_ms(), sweep));
+                }
+            }
+        }
+
+        fn run(&mut self, total: Duration) {
+            let end = self.fl.now_ms() + total.as_millis() as u64;
+            while self.fl.now_ms() < end {
+                self.fl.advance(Duration::from_millis(100));
+                self.collect();
+            }
+        }
+
+        /// Shows `pids` as the visible rows, with their keys from the first sweep.
+        fn show(&mut self, pids: &[u32]) {
+            let first = &self.sweeps.first().expect("a sweep at 0 ms").1;
+            let keys: Vec<ProcessKey> = pids.iter().map(|&p| record(first, p).key).collect();
+            let mut demand = Demand::clone(&self.demand.borrow());
+            demand.detail_keys = Arc::from(keys);
+            self.demand.send(demand).expect("watch has receivers");
+        }
+
+        fn reads(&self) -> Vec<(u64, ProcessKey, ProcFiles)> {
+            lock(&self.fake).reads.clone()
+        }
+
+        fn finish(mut self) {
+            for task in &self.tasks {
+                task.abort();
+            }
+            self.fl.advance(Duration::from_millis(10));
+            drop((self.demand, self._settings, self._control, self.helper));
+            drop(self.rx);
+            self.fl.finish();
+        }
+    }
+
+    /// The table with the I/O read rate column shown, no visible rows yet.
+    fn io_demand() -> Demand {
+        let mut demand = Demand {
+            any_surface_visible: true,
+            process_table: true,
+            ..Demand::default()
+        };
+        demand.process_columns.insert(ColumnId::IoReadRate);
+        demand
+    }
+
+    fn record(sweep: &ProcessSweep, pid: u32) -> &ProcessRecord {
+        sweep
+            .records
+            .iter()
+            .find(|r| r.key.pid == pid)
+            .unwrap_or_else(|| panic!("pid {pid} not swept"))
+    }
+
+    fn is_root() -> bool {
+        let root = rustix::process::geteuid().is_root();
+        if root {
+            eprintln!("skipped: running as root, so no io file is Restricted");
+        }
+        root
+    }
+
+    #[test]
+    fn sweep_fills_restricted_io() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict_io(42);
+        let mut rig = Rig::start(&root, io_demand(), true);
+        rig.show(&[42]);
+        rig.run(Duration::from_millis(3_050));
+
+        let seen: Vec<(u64, Validity, f32, f32)> = rig
+            .sweeps
+            .iter()
+            .map(|(t, s)| {
+                let r = record(s, 42);
+                let v = r.validity.get(ProcessField::IoRead);
+                assert_eq!(v, r.validity.get(ProcessField::IoWrite), "at {t} ms");
+                (*t, v, r.io_read_bps, r.io_write_bps)
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                // Not visible yet at 0 ms; the first read is at 1000 ms, after that sweep.
+                (0, Validity::Restricted, 0.0, 0.0),
+                (1_000, Validity::Restricted, 0.0, 0.0),
+                // The first helper value has no rate.
+                (2_000, Validity::WarmingUp, 0.0, 0.0),
+                // 1 MB read and 0.5 MB written in the second between the reads.
+                (3_000, Validity::Valid, 1_000_000.0, 500_000.0),
+            ]
+        );
+        let reads = rig.reads();
+        assert!(
+            reads.iter().all(|r| r.1.pid == 42 && r.2 == ProcFiles::IO),
+            "only the io of pid 42: {reads:?}"
+        );
+        assert_eq!(
+            reads.iter().map(|r| r.0).collect::<Vec<_>>(),
+            [1_000, 2_000, 3_000]
+        );
+        rig.finish();
+    }
+
+    /// Security regression: without an unlocked session, the sweep never calls the helper and
+    /// never starts a session (no polkit prompt).
+    #[test]
+    fn sweep_locked_no_helper() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict_io(42);
+        let mut rig = Rig::start(&root, io_demand(), false);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        rig.show(&[42]);
+        rig.run(Duration::from_millis(3_050));
+
+        assert_eq!(rig.sweeps.len(), 4);
+        for (t, sweep) in &rig.sweeps {
+            let r = record(sweep, 42);
+            assert_eq!(
+                r.validity.get(ProcessField::IoRead),
+                Validity::Restricted,
+                "at {t} ms"
+            );
+            assert_eq!(r.io_read_bps, 0.0);
+        }
+        let fake = lock(&rig.fake);
+        assert!(fake.reads.is_empty(), "{:?}", fake.reads);
+        assert_eq!(fake.spawns, 0, "no session was started");
+        drop(fake);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        rig.finish();
+    }
+
+    #[test]
+    fn sweep_helper_cap_64_per_second() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        let pids: Vec<u32> = (6_000..6_100).collect();
+        for &pid in &pids {
+            root.add_restricted(pid);
+        }
+        let mut rig = Rig::start(&root, io_demand(), true);
+        rig.show(&pids);
+        rig.run(Duration::from_millis(3_050));
+
+        let reads = rig.reads();
+        for second in 0..4 {
+            let window = second * 1_000..(second + 1) * 1_000;
+            let n = reads.iter().filter(|r| window.contains(&r.0)).count();
+            assert!(n <= HELPER_READS_MAX, "{n} reads in second {second}");
+        }
+        let first = reads.iter().filter(|r| r.0 == 1_000).count();
+        assert_eq!(first, HELPER_READS_MAX, "the first second reads the cap");
+        // The rows past the cap get their turn in the next second.
+        let mut read_pids: Vec<u32> = reads.iter().map(|r| r.1.pid).collect();
+        read_pids.sort_unstable();
+        read_pids.dedup();
+        assert_eq!(read_pids, pids);
+        rig.finish();
+    }
+
+    #[test]
+    fn sweep_only_visible_rows() {
+        if is_root() {
+            return;
+        }
+        let root = Root::new();
+        root.restrict_io(42);
+        root.restrict_io(43);
+        let mut rig = Rig::start(&root, io_demand(), true);
+        rig.show(&[43]);
+        rig.run(Duration::from_millis(3_050));
+
+        let reads = rig.reads();
+        assert!(!reads.is_empty(), "the visible row is read");
+        assert!(
+            reads.iter().all(|r| r.1.pid == 43),
+            "pid 42 is not visible: {reads:?}"
+        );
+        for (t, sweep) in &rig.sweeps {
+            assert_eq!(
+                record(sweep, 42).validity.get(ProcessField::IoRead),
+                Validity::Restricted,
+                "at {t} ms"
+            );
+        }
+        rig.finish();
+    }
+}
