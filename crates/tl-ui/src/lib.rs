@@ -6,6 +6,7 @@ pub mod demand;
 pub mod hub;
 pub mod i18n;
 pub mod pages;
+pub mod table;
 pub mod text;
 pub mod theme;
 pub mod window;
