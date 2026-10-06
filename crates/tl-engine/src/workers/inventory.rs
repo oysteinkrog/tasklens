@@ -149,6 +149,7 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
     let shell: Arc<OnceLock<Option<Arc<str>>>> = Arc::new(OnceLock::new());
     let bus_env = host.then(|| Arc::clone(&env));
     let settings = io.settings.clone();
+    let proc_root = root.proc.clone();
     let scan = move |bus: SystemBus| {
         let raw = read_inventory(&paths);
         let mut snap = from_raw(&raw, &root);
@@ -162,7 +163,7 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
         if !host {
             return PublicIpState::Failed("Could not reach api.ipify.org".into());
         }
-        let v6 = public_ip::has_global_v6_route(&root.proc);
+        let v6 = public_ip::has_global_v6_route(&proc_root);
         public_ip::fetch(&UreqFetcher::new(), v6, unix_now_s())
     };
     run_loop(cx, io, bus_env, scan, fetch_ip).await
@@ -1294,6 +1295,7 @@ mod tests {
         scans: Arc<AtomicU32>,
         fetches: Arc<AtomicU32>,
         io: WorkerIo,
+        root: asupersync::types::RegionId,
         out: Ended,
         handle: asupersync::runtime::TaskHandle<()>,
     }
@@ -1326,7 +1328,8 @@ mod tests {
             let scans = Arc::new(AtomicU32::new(0));
             let fetches = Arc::new(AtomicU32::new(0));
             let out = Ended::default();
-            let handle = Self::spawn(&mut lab, &io, &scans, &fetches, &out);
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let handle = Self::spawn(&mut lab, root, &io, &scans, &fetches, &out);
             Rig {
                 lab,
                 rx,
@@ -1335,6 +1338,7 @@ mod tests {
                 scans,
                 fetches,
                 io,
+                root,
                 out,
                 handle,
             }
@@ -1343,6 +1347,7 @@ mod tests {
         /// Starts one worker generation with a counting scan and a fake public IP fetch.
         fn spawn(
             lab: &mut LabRuntime,
+            root: asupersync::types::RegionId,
             io: &WorkerIo,
             scans: &Arc<AtomicU32>,
             fetches: &Arc<AtomicU32>,
@@ -1360,7 +1365,6 @@ mod tests {
             };
             let io = io.clone();
             let sink = Arc::clone(out);
-            let root = lab.state.create_root_region(Budget::INFINITE);
             let (task, handle) = lab
                 .state
                 .create_task(root, Budget::INFINITE, async move {
@@ -1388,6 +1392,7 @@ mod tests {
             assert!(matches!(outcome, Some(Outcome::Ok(()))), "{outcome:?}");
             self.handle = Self::spawn(
                 &mut self.lab,
+                self.root,
                 &self.io,
                 &self.scans,
                 &self.fetches,
