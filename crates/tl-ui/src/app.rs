@@ -31,6 +31,15 @@ pub enum PersistTheme {
     RenameCorrupt { unix_seconds: u64 },
 }
 
+/// The ADR-011 persist callback.
+pub type PersistFn = Box<dyn Fn(&Settings, &UiState)>;
+/// Writes settings.toml at once. The error is shown to the user.
+pub type WriteSettingsFn = Arc<dyn Fn(&Settings) -> Result<(), String>>;
+/// Sets or clears the global shortcut. The error is shown to the user.
+pub type SetShortcutFn = Arc<dyn Fn(Option<&str>) -> Result<(), String>>;
+/// Handles one `AppRequest` on the main thread.
+pub type AppRequestFn = Box<dyn Fn(AppRequest, &mut App)>;
+
 /// Everything tl-app hands to the UI at start-up.
 pub struct UiInit {
     /// Parsed settings.toml.
@@ -40,7 +49,7 @@ pub struct UiInit {
     /// Raw `$XDG_CONFIG_HOME/tasklens/themes.json` text, `None` when the file is missing.
     pub themes_json: Option<Arc<str>>,
     /// ADR-011 persist callback. tl-app debounces it by 500 ms.
-    pub persist: Box<dyn Fn(&Settings, &UiState)>,
+    pub persist: PersistFn,
     /// UI-FND-042 theme file writes.
     pub persist_themes: Box<dyn Fn(PersistTheme)>,
     /// From tl-app's single-instance handler, `bounded(4)` (UI-SHL-112).
@@ -105,7 +114,7 @@ pub trait RunHistoryStore {
 /// The KDE global shortcut for showing the main window.
 pub struct GlobalShortcutApi {
     pub get: Arc<dyn Fn() -> Option<String>>,
-    pub set: Arc<dyn Fn(Option<&str>) -> Result<(), String>>,
+    pub set: SetShortcutFn,
 }
 
 /// Everything only tl-app has (R-171). Every closure runs on the main thread; none is `Send`.
@@ -120,7 +129,7 @@ pub struct AppEnv {
     pub pending_crash: Option<CrashReport>,
     pub mark_crash_seen: Arc<dyn Fn()>,
     /// Synchronous, for Reset settings.
-    pub write_settings_now: Arc<dyn Fn(&Settings) -> Result<(), String>>,
+    pub write_settings_now: WriteSettingsFn,
     /// `(enabled, minimized)` (R-236).
     pub set_autostart: Arc<dyn Fn(bool, bool) -> Result<(), String>>,
     /// `None` outside KDE.
@@ -169,7 +178,7 @@ pub enum ToastKindTag {
 pub struct BootSettings {
     pub settings: Settings,
     pub state: UiState,
-    pub persist: Option<Box<dyn Fn(&Settings, &UiState)>>,
+    pub persist: Option<PersistFn>,
     /// Held here until E17-008 defines `ThemePersist`.
     pub persist_themes: Option<Box<dyn Fn(PersistTheme)>>,
     /// Shown by the shell after the first frame (UI-SHL-110 step 11).
@@ -179,7 +188,7 @@ pub struct BootSettings {
 impl Global for BootSettings {}
 
 /// Handles each `AppRequest` on the main thread. E20 replaces the default (UI-SHL-112).
-pub struct AppRequestHandler(pub Box<dyn Fn(AppRequest, &mut App)>);
+pub struct AppRequestHandler(pub AppRequestFn);
 
 impl Global for AppRequestHandler {}
 
