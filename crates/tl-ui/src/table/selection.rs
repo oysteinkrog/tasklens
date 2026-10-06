@@ -23,6 +23,9 @@ pub struct Selection<R: Copy + Eq + Hash> {
 pub trait SelectionView<R> {
     /// Number of rows in the view.
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     /// Row id at display index `ix`.
     fn id(&self, ix: usize) -> R;
     /// Display index of `id`, or `None` when it is not in the view (filtered or collapsed).
