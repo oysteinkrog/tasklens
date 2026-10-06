@@ -446,3 +446,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.9 (019e4e3): table actions and keymap (context "Table"), chevron 20 px hit area in tree_table.rs, group header double-click toggles once, PgUp/PgDn by visible rows minus 1. Known: chevron and row tooltip can show together.
 - lgw.8 (4e1036b): 200 ms theme crossfade; R-209 requester id; set_anim_window must be called by MainWindow::new (noted on jqk.10).
 - yrf.11 (586ee3d, 1fcbe3b, 4765021, 11831de): chart labels cached and reshaped only on change; legend hidden under the range label size rule; a chart with a 2-item legend paints 6 lines (spec says 5); accepted.
+- yrf.19 (96b0ce6): ChartGeometryKey::sync compares in place; 120 unchanged paints of a 16-series chart do 0 key rebuilds and 0 geometry builds. tl-ui clippy all-targets clean at that point.
