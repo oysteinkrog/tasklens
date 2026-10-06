@@ -2881,3 +2881,421 @@ fn extras_p2_only_detail_keys() {
     assert_eq!(out.records.len(), 3);
     assert!(out.extras_p2.is_empty());
 }
+
+// ---- E05-028: security tab ----
+
+use std::os::unix::fs::symlink;
+
+use tl_collect::proc::detail::{
+    ADMIN_GROUPS, CAPS, Elevated, LsmLabel, NsState, RISKY_CAPS, SecurityInfo, group_name,
+    read_security,
+};
+
+/// A copy of process-edge with a `stat` for 4204 and 4212 (4201's, pid replaced). The committed
+/// fixture has no `stat` for them, so the sweep tests do not see them.
+fn security_root() -> (tempfile::TempDir, SysRoot) {
+    let tmp = common::fixture_copy("process-edge", None);
+    let stat = String::from_utf8(fixture_bytes("process-edge", "proc/4201/stat")).expect("utf-8");
+    for pid in [4204, 4212] {
+        let path = tmp.path().join(format!("proc/{pid}/stat"));
+        fs::write(path, stat.replacen("4201", &pid.to_string(), 1)).expect("write stat");
+    }
+    let root = SysRoot::at(tmp.path());
+    (tmp, root)
+}
+
+fn security(root: &SysRoot, pid: u32) -> SecurityInfo {
+    let mut out = SecurityInfo::default();
+    let r = read_security(
+        root,
+        rollup_key(pid, FAKE_START_TICKS),
+        &[],
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.expect("read security"), DetailRead::Ok);
+    out
+}
+
+fn replace_with_symlink(target: &Path, link: &Path) {
+    if link.is_dir() && !link.is_symlink() {
+        fs::remove_dir_all(link).expect("remove dir");
+    } else {
+        let _ = fs::remove_file(link);
+    }
+    symlink(target, link).expect("create symlink");
+}
+
+#[test]
+fn security_elevated_root() {
+    let (_tmp, root) = security_root();
+    let s = security(&root, 4204);
+    assert_eq!(s.uid, [1000, 0, 0, 0]);
+    assert_ne!(s.cap_eff, 0);
+    assert_eq!(s.elevated, Elevated::Root);
+    assert_eq!(s.groups.as_slice(), [1000]);
+    assert_eq!(s.no_new_privs, Some(false));
+    assert_eq!(s.seccomp, Some(0));
+    assert_eq!(&*s.speculation_store_bypass, "thread vulnerable");
+    assert_eq!(&*s.speculation_indirect_branch, "conditional enabled");
+    // 4204 has no `ns/` directory.
+    assert_eq!(s.namespaces, [NsState::Restricted; 8]);
+}
+
+#[test]
+fn security_capabilities_risky() {
+    let (_tmp, root) = security_root();
+    let s = security(&root, 4212);
+    assert_eq!(s.uid, [1000; 4]);
+    assert_eq!(s.cap_eff, 0x3000);
+    assert_eq!(s.elevated, Elevated::Capabilities);
+    let held = s.cap_eff | s.cap_amb;
+    let risky: Vec<&str> = RISKY_CAPS
+        .iter()
+        .filter(|&&bit| held >> bit & 1 == 1)
+        .map(|&bit| CAPS[usize::from(bit)].0)
+        .collect();
+    assert_eq!(risky, ["NET_ADMIN"]);
+    let effective: Vec<&str> = (0..CAPS.len())
+        .filter(|&bit| s.cap_eff >> bit & 1 == 1)
+        .map(|bit| CAPS[bit].0)
+        .collect();
+    assert_eq!(effective, ["NET_ADMIN", "NET_RAW"]);
+}
+
+#[test]
+fn security_elevated_setuid_and_no() {
+    let (tmp, root) = security_root();
+    let status = tmp.path().join("proc/4212/status");
+    let text = fs::read_to_string(&status).unwrap();
+    let no_caps = text.replace("CapEff:\t0000000000003000", "CapEff:\t0000000000000000");
+    fs::write(&status, &no_caps).unwrap();
+    assert_eq!(security(&root, 4212).elevated, Elevated::No);
+    fs::write(
+        &status,
+        no_caps.replace("Uid:\t1000\t1000", "Uid:\t1000\t1001"),
+    )
+    .unwrap();
+    assert_eq!(security(&root, 4212).elevated, Elevated::Setuid);
+}
+
+#[test]
+fn security_loginuid_unset() {
+    let (_tmp, root) = security_root();
+    let s = security(&root, 4204);
+    assert_eq!(s.loginuid, None);
+    assert_eq!(s.sessionid, None);
+    let s = security(&root, 4212);
+    assert_eq!(s.loginuid, Some(1000));
+    assert_eq!(s.sessionid, Some(3));
+}
+
+#[test]
+fn security_ns_shared_and_isolated() {
+    let (_tmp, root) = security_root();
+    let s = security(&root, 4212);
+    assert_eq!(s.namespaces[2], NsState::SharedWithInit, "net");
+    assert_eq!(s.namespaces[1], NsState::Isolated(4_026_532_300), "pid");
+    for i in [0, 3, 4, 5, 6, 7] {
+        assert_eq!(s.namespaces[i], NsState::SharedWithInit, "namespace {i}");
+    }
+}
+
+#[test]
+fn security_ns_same_as_tasklens() {
+    let (tmp, root) = security_root();
+    fs::remove_dir_all(tmp.path().join("proc/1")).unwrap();
+    let s = security(&root, 4212);
+    assert_eq!(s.namespaces[1], NsState::SameAsTasklens, "pid");
+    assert_eq!(s.namespaces[0], NsState::SameAsTasklens, "user");
+    // tasklens's own net namespace differs in the fixture.
+    assert_eq!(s.namespaces[2], NsState::Isolated(4_026_531_840), "net");
+
+    // `self` as a symlink to a numeric sibling, as on the host.
+    let proc = tmp.path().join("proc");
+    fs::rename(proc.join("self"), proc.join("9999")).unwrap();
+    symlink("9999", proc.join("self")).unwrap();
+    let s = security(&root, 4212);
+    assert_eq!(
+        s.namespaces[1],
+        NsState::SameAsTasklens,
+        "pid via self link"
+    );
+}
+
+#[test]
+fn security_lsm_not_applicable() {
+    let (tmp, root) = security_root();
+    assert_eq!(security(&root, 4212).lsm_label, LsmLabel::NotApplicable);
+
+    let lsm = tmp.path().join("sys/kernel/security/lsm");
+    fs::write(&lsm, "capability,landlock,lockdown,yama,apparmor,bpf\n").unwrap();
+    assert_eq!(
+        security(&root, 4212).lsm_label,
+        LsmLabel::Label(Arc::from("unconfined"))
+    );
+    // An active LSM and no `attr/current` reads as Restricted.
+    assert_eq!(security(&root, 4204).lsm_label, LsmLabel::Restricted);
+
+    fs::remove_file(&lsm).unwrap();
+    assert_eq!(security(&root, 4212).lsm_label, LsmLabel::NotApplicable);
+}
+
+#[test]
+fn security_group_name() {
+    let group = fixture_bytes("process-edge", "etc/group");
+    assert_eq!(group_name(968, &group).as_deref(), Some("docker"));
+    assert_eq!(group_name(998, &group).as_deref(), Some("wheel"));
+    assert_eq!(group_name(0, &group).as_deref(), Some("root"));
+    assert_eq!(group_name(4242, &group), None);
+    assert_eq!(group_name(5, b"bad line\n:x:5:\nx:5\n"), None);
+    assert_eq!(
+        group_name(7, b"ev\x1b[31mil\n:x:7:\nev\x1bil:x:7:\n").as_deref(),
+        Some("ev\u{FFFD}il")
+    );
+}
+
+#[test]
+fn caps_table_complete() {
+    assert_eq!(CAPS.len(), 41);
+    assert_eq!(CAPS[21], ("SYS_ADMIN", "Broad system administration"));
+    assert_eq!(CAPS[0].0, "CHOWN");
+    assert_eq!(CAPS[40].0, "CHECKPOINT_RESTORE");
+    let names: std::collections::HashSet<&str> = CAPS.iter().map(|c| c.0).collect();
+    assert_eq!(names.len(), CAPS.len(), "names are unique");
+    assert!(
+        CAPS.iter()
+            .all(|(n, d)| !n.starts_with("CAP_") && !d.is_empty())
+    );
+    let risky: Vec<&str> = RISKY_CAPS.iter().map(|&b| CAPS[usize::from(b)].0).collect();
+    assert_eq!(
+        risky,
+        [
+            "SYS_ADMIN",
+            "SYS_PTRACE",
+            "DAC_OVERRIDE",
+            "DAC_READ_SEARCH",
+            "SYS_MODULE",
+            "SYS_RAWIO",
+            "SETUID",
+            "SETGID",
+            "NET_ADMIN",
+            "BPF",
+            "PERFMON",
+            "SYS_BOOT",
+            "CHOWN",
+            "FOWNER"
+        ]
+    );
+    let root_equivalent: Vec<&str> = ADMIN_GROUPS.iter().filter(|g| g.1).map(|g| g.0).collect();
+    assert_eq!(root_equivalent, ["docker", "libvirt", "lxd", "disk"]);
+}
+
+/// A proc root with only `<pid>/stat` and `<pid>/status` (`Uid: 1000 1000 1000 1000`).
+fn dumpable_root() -> (tempfile::TempDir, SysRoot, PathBuf) {
+    let (tmp, root) = security_root();
+    let dir = tmp.path().join("proc/4212");
+    (tmp, root, dir)
+}
+
+#[test]
+fn security_dumpable_rule() {
+    let (_tmp, root, dir) = dumpable_root();
+    let owner = std::os::unix::fs::MetadataExt::uid(&fs::metadata(&dir).unwrap());
+    if owner == 0 {
+        // Running as root: the tempdir is root-owned, so the rule fires.
+        assert_eq!(security(&root, 4212).dumpable, Some(false));
+    } else {
+        assert_eq!(security(&root, 4212).dumpable, None);
+    }
+}
+
+#[test]
+#[ignore = "needs root to chown the fixture directory to uid 0"]
+fn security_dumpable_rule_root_owned() {
+    let (tmp, root, dir) = dumpable_root();
+    std::os::unix::fs::chown(&dir, Some(0), None).expect("chown needs root");
+    assert_eq!(security(&root, 4212).dumpable, Some(false));
+    // A real uid of 0 is never reported.
+    let status = dir.join("status");
+    let text = fs::read_to_string(&status).unwrap();
+    fs::write(&status, text.replace("Uid:\t1000\t1000", "Uid:\t0\t1000")).unwrap();
+    assert_eq!(security(&root, 4212).dumpable, None);
+    drop(tmp);
+}
+
+#[test]
+fn security_symlinks_not_followed() {
+    let (tmp, root) = security_root();
+    let outside = tempfile::tempdir().expect("tempdir");
+    fs::write(outside.path().join("label"), "stolen\n").unwrap();
+    fs::write(outside.path().join("id"), "0\n").unwrap();
+    fs::write(
+        outside.path().join("status"),
+        fixture_bytes("process-edge", "proc/4204/status"),
+    )
+    .unwrap();
+    fs::create_dir(outside.path().join("ns")).unwrap();
+    symlink("pid:[4026532300]", outside.path().join("ns/pid")).unwrap();
+    fs::write(
+        tmp.path().join("sys/kernel/security/lsm"),
+        "capability,selinux\n",
+    )
+    .unwrap();
+
+    let pid_dir = tmp.path().join("proc/4212");
+    replace_with_symlink(&outside.path().join("label"), &pid_dir.join("attr/current"));
+    replace_with_symlink(&outside.path().join("id"), &pid_dir.join("loginuid"));
+    replace_with_symlink(&outside.path().join("ns"), &pid_dir.join("ns"));
+    let s = security(&root, 4212);
+    assert_eq!(s.lsm_label, LsmLabel::Restricted);
+    assert_eq!(s.loginuid, None);
+    assert_eq!(s.namespaces, [NsState::Restricted; 8]);
+
+    // `attr` itself as a symlink.
+    replace_with_symlink(outside.path(), &pid_dir.join("attr"));
+    assert_eq!(security(&root, 4212).lsm_label, LsmLabel::Restricted);
+
+    // A symlinked PID 1 is not read, so the comparison falls back to tasklens.
+    fs::remove_file(pid_dir.join("ns")).unwrap();
+    fs::create_dir(pid_dir.join("ns")).unwrap();
+    symlink("pid:[4026532300]", pid_dir.join("ns/pid")).unwrap();
+    replace_with_symlink(outside.path(), &tmp.path().join("proc/1"));
+    let s = security(&root, 4212);
+    assert_eq!(s.namespaces[1], NsState::SameAsTasklens);
+
+    // `self` pointing out of the root is not followed.
+    let proc = tmp.path().join("proc");
+    replace_with_symlink(outside.path(), &proc.join("self"));
+    let s = security(&root, 4212);
+    assert_eq!(s.namespaces[1], NsState::Isolated(4_026_532_300));
+
+    // A symlinked `status` is an error, never a read of the target.
+    replace_with_symlink(&outside.path().join("status"), &pid_dir.join("status"));
+    let mut out = SecurityInfo::default();
+    let r = read_security(
+        &root,
+        rollup_key(4212, FAKE_START_TICKS),
+        &[],
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert!(r.is_err(), "{r:?}");
+}
+
+#[test]
+fn security_large_and_bad_files() {
+    let (tmp, root) = security_root();
+    let pid_dir = tmp.path().join("proc/4212");
+    fs::write(pid_dir.join("loginuid"), "1".repeat(1 << 20)).unwrap();
+    fs::write(pid_dir.join("sessionid"), "12x").unwrap();
+    fs::write(pid_dir.join("attr/current"), "a".repeat(1 << 20)).unwrap();
+    fs::write(tmp.path().join("sys/kernel/security/lsm"), "smack").unwrap();
+    for (i, name) in ["user", "pid", "net"].iter().enumerate() {
+        let link = pid_dir.join("ns").join(name);
+        fs::remove_file(&link).unwrap();
+        let target = match i {
+            0 => "pid:[4026531837]".to_string(),
+            1 => format!("pid:[{}]", "9".repeat(200)),
+            _ => "net:[]".to_string(),
+        };
+        symlink(target, &link).unwrap();
+    }
+    let s = security(&root, 4212);
+    assert_eq!(s.loginuid, None);
+    assert_eq!(s.sessionid, None);
+    match &s.lsm_label {
+        LsmLabel::Label(l) => {
+            assert!(l.ends_with('\u{2026}'));
+            assert!(l.len() <= 4096 + 3);
+        }
+        other => panic!("label {other:?}"),
+    }
+    assert_eq!(s.namespaces[..3], [NsState::Restricted; 3]);
+    assert_eq!(s.namespaces[3], NsState::SharedWithInit);
+
+    // A FIFO does not block the read.
+    fs::remove_file(pid_dir.join("loginuid")).unwrap();
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        pid_dir.join("loginuid"),
+        rustix::fs::FileType::Fifo,
+        Mode::from_raw_mode(0o644),
+        0,
+    )
+    .unwrap();
+    assert_eq!(security(&root, 4212).loginuid, None);
+}
+
+#[test]
+fn security_gone_and_bad_status() {
+    let (tmp, root) = security_root();
+    let mut out = SecurityInfo::default();
+    let mut bufs = ReadBufs::default();
+    let r = read_security(
+        &root,
+        rollup_key(4212, FAKE_START_TICKS + 1),
+        &[],
+        &mut bufs,
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+    assert_eq!(out, SecurityInfo::default());
+    let r = read_security(&root, rollup_key(7777, 1), &[], &mut bufs, &mut out);
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+
+    fs::remove_file(tmp.path().join("proc/4212/status")).unwrap();
+    let r = read_security(
+        &root,
+        rollup_key(4212, FAKE_START_TICKS),
+        &[],
+        &mut bufs,
+        &mut out,
+    );
+    assert_eq!(r.unwrap(), DetailRead::Gone);
+
+    fs::write(tmp.path().join("proc/4212/status"), b"\xff\xfe junk").unwrap();
+    let r = read_security(
+        &root,
+        rollup_key(4212, FAKE_START_TICKS),
+        &[],
+        &mut bufs,
+        &mut out,
+    );
+    assert!(matches!(
+        r,
+        Err(CollectError::ProcParse {
+            pid: 4212,
+            file: "status"
+        })
+    ));
+}
+
+#[test]
+fn security_live_self() {
+    let mut out = SecurityInfo::default();
+    let r = read_security(
+        &SysRoot::host(),
+        own_key(),
+        &[],
+        &mut ReadBufs::default(),
+        &mut out,
+    );
+    assert_eq!(r.expect("read own security"), DetailRead::Ok);
+    let uid = rustix::process::getuid().as_raw();
+    assert_eq!(out.uid[0], uid);
+    // user, pid and net exist on every supported kernel and are readable for tasklens itself.
+    for i in 0..3 {
+        assert!(
+            matches!(
+                out.namespaces[i],
+                NsState::SharedWithInit | NsState::SameAsTasklens | NsState::Isolated(_)
+            ),
+            "namespace {i}: {:?}",
+            out.namespaces[i]
+        );
+    }
+    if uid != 0 {
+        assert_eq!(out.dumpable, None);
+    }
+}

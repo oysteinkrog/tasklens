@@ -1441,7 +1441,8 @@ fn read_label(root: &SysRoot, pid_dir: BorrowedFd<'_>, bufs: &mut ReadBufs) -> L
         return LsmLabel::NotApplicable;
     }
     let read = open_beneath(pid_dir, &["attr", "current"], READ_FLAGS)
-        .and_then(|fd| read_bounded(fd.as_fd(), &mut bufs.small, LABEL_MAX));
+        // One byte past the limit, so `sanitize_text` sees the cut and adds `…`.
+        .and_then(|fd| read_bounded(fd.as_fd(), &mut bufs.small, LABEL_MAX + 1));
     if read.is_err() {
         return LsmLabel::Restricted;
     }

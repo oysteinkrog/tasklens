@@ -4,6 +4,13 @@ expression: rows
 ---
 [
     (
+        1,
+        Background,
+        None,
+        None,
+        None,
+    ),
+    (
         2,
         KernelThread,
         None,
@@ -90,6 +97,13 @@ expression: rows
     ),
     (
         4209,
+        Background,
+        None,
+        None,
+        None,
+    ),
+    (
+        4212,
         Background,
         None,
         None,

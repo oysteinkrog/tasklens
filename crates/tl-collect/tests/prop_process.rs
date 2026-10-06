@@ -6,6 +6,7 @@ use common::{fixture_bytes, mutated};
 use proptest::prelude::*;
 use tl_collect::apps::desktop::{exec_binary_in, parse_entry};
 use tl_collect::apps::icons::{kde_icon_theme, parse_icon_cache, parse_index_theme};
+use tl_collect::proc::detail::group_name;
 use tl_collect::proc::pid_stat::{PidStat, parse_pid_stat};
 use tl_collect::proc::status::{PidStatus, parse_status};
 
@@ -355,5 +356,26 @@ proptest! {
             &mut ReadBufs::default(),
         );
         prop_assert!(p.key.is_some());
+    }
+}
+
+proptest! {
+    #[test]
+    fn etc_group_arbitrary_bytes_never_panic(
+        gid in any::<u32>(),
+        bytes in prop::collection::vec(any::<u8>(), 0..=4096)
+    ) {
+        if let Some(name) = group_name(gid, &bytes) {
+            prop_assert!(!name.is_empty());
+            prop_assert!(!name.contains('\n'));
+        }
+    }
+
+    #[test]
+    fn etc_group_mutated_fixture_never_panics(
+        gid in prop_oneof![Just(968u32), Just(998u32), any::<u32>()],
+        bytes in mutated(fixture_bytes("process-edge", "etc/group"))
+    ) {
+        let _ = group_name(gid, &bytes);
     }
 }
