@@ -97,11 +97,13 @@ impl RenderOnce for TlLink {
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
             .read(cx)
             .clone()
-            .tab_stop(!disabled);
+            .tab_stop(true);
 
         let size = self.text_size.unwrap_or(m.text.base);
-        let mut text = div().min_w_0().truncate().child(self.text.clone());
+        // The label style first: `truncate` adds to the same text style.
+        let mut text = div();
         *text.text_style() = label_style(&m, size, FontWeight::NORMAL);
+        let text = text.min_w_0().truncate().child(self.text.clone());
 
         // The outer box carries the ring and does not clip; the inner text truncates.
         let mut link = div()
@@ -112,11 +114,11 @@ impl RenderOnce for TlLink {
             .max_w_full()
             .role(Role::Link)
             .aria_label(self.text)
-            .track_focus(&focus)
             .key_context("TlLink")
             .text_color(look.color)
             .child(text);
 
+        // A disabled link tracks no focus, so it is neither a Tab stop nor focusable.
         if !disabled && TlFocusRing::show(focus.is_focused(window), window) {
             link = TlFocusRing::ring(link, m.radius_small, &theme);
         }
@@ -125,7 +127,8 @@ impl RenderOnce for TlLink {
             link.tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
         } else {
             let action = self.action;
-            link.cursor_pointer()
+            link.track_focus(&focus)
+                .cursor_pointer()
                 .hover(|s| s.underline())
                 .active(move |s| s.text_color(look.pressed))
                 .on_click(move |_, window, cx| {
