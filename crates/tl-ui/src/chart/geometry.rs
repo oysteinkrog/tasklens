@@ -133,7 +133,7 @@ pub struct Pt {
 ///
 /// A bucket with more than one sample keeps its min and max in time order; a bucket with one
 /// sample keeps it. The run's first and last samples are always kept. No sample is emitted twice,
-/// so the output has at most `2 × buckets + 2` points.
+/// so the output has at most `2 × buckets + 2` points, counting the buckets the run touches.
 pub fn decimate(samples: &[Sample], run: Run, bucket_ns: u64, out: &mut Vec<Pt>) {
     out.clear();
     let Some(run_samples) = samples.get(run.start..run.end) else {

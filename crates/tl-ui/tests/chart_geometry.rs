@@ -146,7 +146,8 @@ fn stale_threshold_matches_r051() {
 
 #[test]
 fn decimation_point_count_bound() {
-    let s = series(10_000, 10 * MS, 5 * SEC, noise);
+    // 100 s starting on a bucket boundary (2 s) touches exactly 50 buckets.
+    let s = series(10_000, 10 * MS, 4 * SEC, noise);
     let range = 100 * SEC;
     let b = bucket_ns(range, 50);
     let mut out = Vec::new();
