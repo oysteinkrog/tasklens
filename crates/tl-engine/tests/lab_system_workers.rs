@@ -19,11 +19,12 @@ use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
 use tl_collect::parse::{block, hwmon, netif};
+use tl_collect::sample::disk::FsStat;
 use tl_engine::config::EngineMode;
 use tl_engine::source::{self, Source, WorkerCommand};
 use tl_engine::update::{
-    CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, NetSample,
-    SensorSample, SourceUpdate,
+    CpuSample, DeviceDetailsUpdate, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample,
+    NetSample, SensorSample, SourceUpdate,
 };
 use tl_engine::workers::cpu::CpuSource;
 use tl_engine::workers::disk::DiskSource;
@@ -36,6 +37,7 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
+use tl_model::snapshot::DiskDetails;
 use tl_model::system::{FanControlMode, Metric, SensorKind, SensorReading, ZramTotals};
 use tl_model::validity::Validity;
 
@@ -1890,4 +1892,257 @@ fn memory_details_off_when_recording_only() {
         assert!(memory_details(&mut src).is_none());
     }
     assert_eq!(src.details_reads(), 0);
+}
+
+/// `disk-partitions-dm` plus a `proc/diskstats` line for each of its disks and their children.
+fn disk_partitions_fixture() -> PathBuf {
+    let dir = fixture_copy("disk-partitions-dm", None);
+    let mut stats = String::new();
+    for (major, minor, name) in [
+        (179, 0, "mmcblk0"),
+        (259, 0, "nvme0n1"),
+        (8, 0, "sda"),
+        (8, 1, "sda1"),
+        (8, 2, "sda2"),
+        (254, 0, "dm-0"),
+        (8, 16, "sdb"),
+        (11, 0, "sr0"),
+        (253, 0, "vda"),
+    ] {
+        stats.push_str(&format!(
+            "{major:4} {minor:7} {name} 1000 10 100000 2000 500 20 200000 1000 0 10000 3000 0 0 0 0 0 0\n"
+        ));
+    }
+    fs::write(dir.join("proc/diskstats"), stats).expect("write fixture diskstats");
+    dir
+}
+
+fn disk_named(name: &str, major: u32, minor: u32) -> DeviceIdentity {
+    DeviceIdentity::Disk {
+        major,
+        minor,
+        name: name.into(),
+        wwn_or_serial: None,
+    }
+}
+
+/// Every `statvfs` call answers 1000 blocks of 4096 bytes, 400 free, 300 available.
+fn fake_statvfs_source(dir: &Path) -> DiskSource {
+    DiskSource::with_statvfs(
+        SysRoot::at(dir),
+        Box::new(|_: &str| {
+            Ok(FsStat {
+                blocks: 1000,
+                bfree: 400,
+                bavail: 300,
+                frsize: 4096,
+            })
+        }),
+    )
+}
+
+/// The `Devices` list, then the disk details, from the last enumeration.
+fn disk_details(src: &mut DiskSource) -> Vec<(DeviceIdentity, DiskDetails)> {
+    disk_devices(src);
+    match src.take_extra() {
+        Some(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks { from, entries })) => {
+            assert_eq!(from, SourceId::Disk);
+            entries
+        }
+        other => panic!("expected DeviceDetails::Disks, got {other:?}"),
+    }
+}
+
+fn details_of<'a>(entries: &'a [(DeviceIdentity, DiskDetails)], name: &str) -> &'a DiskDetails {
+    entries
+        .iter()
+        .find(|(id, _)| matches!(id, DeviceIdentity::Disk { name: n, .. } if &**n == name))
+        .map(|(_, d)| d)
+        .unwrap_or_else(|| panic!("no details for {name}"))
+}
+
+#[test]
+fn disk_temperatures() {
+    let dir = disk_partitions_fixture();
+    let (_, s) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    let temp = |id: DeviceIdentity| {
+        s.disks
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, t)| t.temp_c)
+            .unwrap_or_else(|| panic!("no sample for {id:?}"))
+    };
+    assert_eq!(temp(nvme0n1()), Metric::valid(41.85));
+    assert_eq!(temp(disk_named("sda", 8, 0)), Metric::valid(35.0));
+    assert_eq!(
+        temp(disk_named("vda", 253, 0)).validity,
+        Validity::Unsupported
+    );
+    // Children never get a temperature input.
+    assert_eq!(
+        temp(disk_named("sda1", 8, 1)).validity,
+        Validity::Unsupported
+    );
+}
+
+/// Disk temperatures may be unreadable without root: that is `Restricted`, never 0.
+#[test]
+fn disk_temperature_unreadable_restricted() {
+    let dir = disk_partitions_fixture();
+    let input = block::disk_temp_input(&SysRoot::at(&dir), "sda").expect("sda has a temp input");
+    fs::set_permissions(&input, std::os::unix::fs::PermissionsExt::from_mode(0))
+        .expect("chmod sda temp input");
+    if fs::read(&input).is_ok() {
+        eprintln!("running as root: the unreadable case cannot be checked");
+        return;
+    }
+    let (_, s) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    let (_, sda) = s
+        .disks
+        .iter()
+        .find(|(i, _)| *i == disk_named("sda", 8, 0))
+        .expect("sda sample");
+    assert_eq!(sda.temp_c.validity, Validity::Restricted);
+}
+
+#[test]
+fn disk_usage_details() {
+    let dir = disk_partitions_fixture();
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+
+    let sda = details_of(&entries, "sda");
+    // `/` on dm-0 and `/boot` on sda1, each 1000 blocks of 4096 bytes. The second sda1 mount
+    // is counted once.
+    assert_eq!(sda.formatted_bytes, valid(8_192_000));
+    assert_eq!(sda.used_bytes, valid(4_915_200));
+    assert_eq!(sda.free_bytes, valid(2_457_600));
+    assert_eq!(sda.system_disk, valid(true));
+    assert_eq!(sda.swap, valid(false));
+
+    let nvme = details_of(&entries, "nvme0n1");
+    assert_eq!(&*nvme.kind, "NVMe");
+    assert_eq!(nvme.formatted_bytes.validity, Validity::Unsupported);
+    assert_eq!(nvme.used_bytes.validity, Validity::Unsupported);
+    assert_eq!(nvme.free_bytes.validity, Validity::Unsupported);
+    assert_eq!(nvme.system_disk, valid(false));
+    assert_eq!(&*details_of(&entries, "vda").kind, "Virtual");
+    // Whole disks only.
+    assert!(
+        entries
+            .iter()
+            .all(|(id, _)| !matches!(id, DeviceIdentity::Disk { name, .. } if &**name == "sda1"))
+    );
+}
+
+#[test]
+fn disk_usage_statvfs_error() {
+    let dir = disk_partitions_fixture();
+    let src = DiskSource::with_statvfs(
+        SysRoot::at(&dir),
+        Box::new(|_: &str| Err(tl_collect::CollectError::PermissionDenied)),
+    );
+    let (mut src, _) = disk_sample(src, SEC);
+    let entries = disk_details(&mut src);
+    let sda = details_of(&entries, "sda");
+    assert_eq!(sda.formatted_bytes.validity, Validity::Restricted);
+    assert_eq!(sda.used_bytes.validity, Validity::Restricted);
+    assert_eq!(sda.free_bytes.validity, Validity::Restricted);
+    assert_eq!(sda.system_disk, valid(true));
+}
+
+#[test]
+fn disk_usage_no_mount_table_failed() {
+    let dir = disk_partitions_fixture();
+    fs::remove_file(dir.join("proc/self/mountinfo")).expect("remove fixture mountinfo");
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+    let sda = details_of(&entries, "sda");
+    assert_eq!(sda.system_disk.validity, Validity::Failed);
+    assert_eq!(sda.formatted_bytes.validity, Validity::Missing);
+    // No `proc/swaps` in the fixture either.
+    assert_eq!(sda.swap.validity, Validity::Failed);
+}
+
+#[test]
+fn disk_swap_flag() {
+    let dir = disk_partitions_fixture();
+    fs::write(
+        dir.join("proc/swaps"),
+        "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n\
+         /dev/sda2                               partition\t8388604\t\t0\t\t-2\n",
+    )
+    .expect("write fixture swaps");
+    let (mut src, _) = disk_sample(fake_statvfs_source(&dir), SEC);
+    let entries = disk_details(&mut src);
+    assert_eq!(details_of(&entries, "sda").swap, valid(true));
+    assert_eq!(details_of(&entries, "nvme0n1").swap, valid(false));
+}
+
+#[test]
+fn disk_update_order() {
+    let dir = disk_partitions_fixture();
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx
+        .send(Demand {
+            disks: true,
+            ..Demand::default()
+        })
+        .expect("watch has receivers");
+    let handle = spawn_on_lab(
+        &mut fl,
+        io(&updates, &demand_tx, &settings, &control),
+        fake_statvfs_source(&dir),
+    );
+
+    let mut kinds: Vec<&str> = Vec::new();
+    for _ in 0..50 {
+        for msg in drain(&mut rx) {
+            let EngineMsg::Source(update) = msg else {
+                continue;
+            };
+            kinds.push(match update {
+                SourceUpdate::Devices(_) => "devices",
+                SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks { .. }) => "details",
+                SourceUpdate::Disks(_) => "sample",
+                _ => "other",
+            });
+        }
+        if kinds.len() >= 3 {
+            break;
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+    handle.abort();
+    fl.finish();
+    assert_eq!(kinds[..3], ["devices", "details", "sample"], "{kinds:?}");
+}
+
+/// Reads the live host: run on the owner machine with `--ignored`. Prints counts only, never
+/// mount points.
+#[test]
+#[ignore]
+fn disk_usage_real_host() {
+    let (mut src, _) = disk_sample(DiskSource::new(SysRoot::host()), SEC);
+    let entries = disk_details(&mut src);
+    let system: Vec<&DiskDetails> = entries
+        .iter()
+        .map(|(_, d)| d)
+        .filter(|d| d.system_disk == valid(true))
+        .collect();
+    eprintln!("disks {} system disks {}", entries.len(), system.len());
+    assert!(!system.is_empty());
+    assert!(
+        system
+            .iter()
+            .any(|d| d.formatted_bytes.validity == Validity::Valid)
+    );
+}
+
+fn valid<T>(value: T) -> tl_model::snapshot::InvField<T> {
+    tl_model::snapshot::InvField {
+        value,
+        validity: Validity::Valid,
+    }
 }
