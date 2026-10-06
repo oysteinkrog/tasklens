@@ -743,7 +743,16 @@ fn end_to_end_engine_in_lab() {
     assert_eq!(cpu_total.samples.len(), 50);
     assert_eq!(snap.processes.records.len(), SWEEP_SIZE as usize);
     assert_eq!(snap.table.query_generation, 1);
-    assert_eq!(snap.table.rows.len(), SWEEP_SIZE as usize, "Flat mode");
+    // Flat mode: one row per process plus the Interrupts pseudo row (PROC-012). The fake
+    // sweep has no zram device, so there is no Memory compression row.
+    let process_rows = snap
+        .table
+        .rows
+        .iter()
+        .filter(|row| row.record.is_some())
+        .count();
+    assert_eq!(process_rows, SWEEP_SIZE as usize, "Flat mode process rows");
+    assert_eq!(snap.table.rows.len(), SWEEP_SIZE as usize + 1, "Flat mode");
     assert_eq!(snap.health.get(SourceId::Cpu).state, SourceState::Running);
 
     let before = snap.sequence;
