@@ -949,7 +949,8 @@ fn net_first_sample_and_device_list() {
     assert_eq!(totals.tx_bps.validity, Validity::WarmingUp);
     assert_eq!(totals.rx_total, 1_000_000);
     assert_eq!(totals.tx_total, 500_000);
-    assert_eq!(totals.link_speed_mbps.validity, Validity::WarmingUp);
+    // The fixture has no `speed` file (E12-014).
+    assert_eq!(totals.link_speed_mbps.validity, Validity::Missing);
 }
 
 #[test]
