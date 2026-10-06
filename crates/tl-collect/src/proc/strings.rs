@@ -493,10 +493,14 @@ fn is_printable(c: char) -> bool {
     !c.is_control() && c != char::REPLACEMENT_CHARACTER
 }
 
-/// The char of one UTF-16LE unit, when it counts as string text. Surrogates, controls,
-/// U+FFFD, U+FFFE and U+FFFF do not. Nor does a unit whose two bytes are both ASCII text: that
-/// is two ASCII chars, and taking it as one wide char would turn every ASCII string into
-/// UTF-16 noise.
+/// The char of one UTF-16LE unit, when it counts as string text. Units are read at even
+/// addresses only. Surrogates, controls, U+FFFD, U+FFFE and U+FFFF do not count. Nor does a
+/// unit whose two bytes are both printable ASCII or tab: that is two ASCII chars, and taking it
+/// as one wide char would turn every ASCII string into UTF-16 noise.
+///
+/// Known cost: a CJK or kana char whose two bytes both fall in 0x20..=0x7E is dropped. That is
+/// about a third of the CJK Unified Ideographs block (U+4E00..=U+9FFF). Latin-1, Greek,
+/// Cyrillic, Hangul and most other scripts are kept.
 fn utf16_char(low: u8, high: u8) -> Option<char> {
     if is_ascii_text(low) && is_ascii_text(high) {
         return None;

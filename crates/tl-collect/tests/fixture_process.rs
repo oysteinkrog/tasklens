@@ -3720,3 +3720,44 @@ mod strings_scan {
         assert_eq!(&buf, probe);
     }
 }
+
+mod strings_random {
+    use tl_collect::proc::strings::{
+        Encoding, MAX_STRINGS, ScanEnd, ScanOpts, StringScanner, VecMem,
+    };
+
+    /// 4 MiB of xorshift bytes with all encodings on. Measured: about 51,000 ASCII, 22,000
+    /// UTF-8 and 170,000 UTF-16LE hits, so about 60,000 per MiB. The test fails above 80,000
+    /// per MiB, which keeps 4 MiB of random data under a quarter of the string cap.
+    #[test]
+    fn strings_random_bytes_under_cap() {
+        const SIZE: usize = 4 * 1024 * 1024;
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let bytes: Vec<u8> = (0..SIZE)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (state >> 24) as u8
+            })
+            .collect();
+        let base = 0x10_0000;
+        let mut scanner = StringScanner::new(ScanOpts::default(), vec![(base, base + SIZE as u64)]);
+        let mut mem = VecMem(base, bytes);
+        let (mut buf, mut out) = (Vec::new(), Vec::new());
+        let mut end = None;
+        while end.is_none() {
+            end = scanner.step(&mut mem, &mut buf, &mut out);
+        }
+        let count = |e| out.iter().filter(|h| h.encoding == e).count();
+        eprintln!(
+            "random 4 MiB: ascii {} utf8 {} utf16le {}",
+            count(Encoding::Ascii),
+            count(Encoding::Utf8),
+            count(Encoding::Utf16Le)
+        );
+        assert_eq!(end, Some(ScanEnd::Finished));
+        assert!(out.len() < 4 * 80_000, "{} hits", out.len());
+        assert!(out.len() < MAX_STRINGS as usize / 3);
+    }
+}
