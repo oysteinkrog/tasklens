@@ -473,19 +473,6 @@ impl RenderOnce for TlSelect {
                     });
                 })
             })
-            .child(
-                canvas(
-                    {
-                        let state = state.clone();
-                        move |bounds, _, cx| {
-                            state.update(cx, |st, _| st.trigger_bounds = bounds);
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
             .child(text)
             .child(
                 div()
@@ -494,7 +481,7 @@ impl RenderOnce for TlSelect {
                     .child(chevron),
             );
 
-        let popup = open.then(|| popup(&self.id, &state, filterable, &on_change, window, cx));
+        let popup = open.then(|| popup(&self.id, &state, filterable, &on_change, cx));
 
         let on_open_change = {
             let state = state.clone();
@@ -508,6 +495,21 @@ impl RenderOnce for TlSelect {
                 });
             }
         };
+        // The trigger's outer box, for the popup position and width. A canvas inside the
+        // trigger would measure inside its border.
+        let trigger = div().relative().flex_none().child(trigger).child(
+            canvas(
+                {
+                    let state = state.clone();
+                    move |bounds, _, cx| {
+                        state.update(cx, |st, _| st.trigger_bounds = bounds);
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        );
         let children = [
             Some(trigger.into_any_element()),
             popup.map(IntoElement::into_any_element),
@@ -556,7 +558,6 @@ fn popup(
     state: &Entity<TlSelectState>,
     filterable: bool,
     on_change: &Option<ChangeHandler>,
-    window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
     let theme = current(cx).clone();
@@ -809,12 +810,12 @@ mod tests {
         }
     }
 
-    fn host(
-        cx: &mut TestAppContext,
+    fn host<'a>(
+        cx: &'a mut TestAppContext,
         items: Vec<TlSelectItem>,
         selected: Option<&'static str>,
         combo: bool,
-    ) -> (Entity<Host>, &mut VisualTestContext) {
+    ) -> (Entity<Host>, &'a mut VisualTestContext) {
         cx.update(setup);
         let (view, cx) = cx.add_window_view(move |_, cx| Host {
             state: cx.new(|cx| TlSelectState::new(items, selected, cx)),
