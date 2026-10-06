@@ -245,3 +245,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - Possible flaky: probe_integration spawn_fd3_env_and_fds failed once in a full run (lban).
 - i3o.21: socket.rs has a private copy of the HelperCallError mapping that dump.rs (i3o.20) also needs. Polish: share one mapping fn in actions/mod.rs. Helper NotAllowed -> Failed(PermissionDenied).
 - y6k.26: KWin cmd file kept until next command, next Update, or exit. Risk: if a Full and a LowMemory engine run at once in one session, stale cleanup and plugin names clash. Check in review whether that can happen (low-memory rescue).
+- i3o.6: ActionOps::close_pidfd added (default closes); real kill_tree test waits 50 ms between STOP and KILL to observe T.
+- i3o.20: privileged Dump never routed (qfx.17 comment). TooLarge maps to Internal(refused by the administrator helper). ROOT-RUN: actions::dump::tests::real_ops_dump_writes_core.
+- hx1.3: inventory snapshot pins install_date; path_dirs under root are root/usr/bin and root/bin; connectors for every DRM card; cpuinfo cap 1 MiB.
+- y6k.7: missing stat file (not denied) gives Unsupported; pid tick walks every unit with a cgroup. Slices and scopes lack ControlGroup: follow-up bead.
+- m1f.8: tempfile added as tl-engine dev-dependency (check ARCHITECTURE and check-deps). One LowMemGroup per unit cgroup.
+- wox.1: U-31 verified (ksni 0.3.6, 105 crates, no tokio). zbus dev-dep in tl-tray for the private-daemon test.
