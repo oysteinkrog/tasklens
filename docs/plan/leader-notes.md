@@ -385,3 +385,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.7: cell painters with no per-cell div (custom CellText element); numbers right-aligned, clipped not ellipsized. API notes passed to rsf.6 and rsf.8. Dim text on selected rows uses text_selected_secondary (leader accepts).
 - lgw.9: follow-system theme on SnapshotChanged scheme changes (2 light, else dark). No start-up sync when the portal stays at 0. tests/ui_performance.rs untracked WIP from crw.7.
 - yrf.6: Y scale rules; private axis formatters in scale.rs drop a trailing .0 ("5 Mbps"). StickyTemp keeps its range with no samples; floor only moves down. compute does not allocate.
+
+- yrf.6 (1fe5854, 1f7c800): chart/scale.rs compute covers nine YScale kinds; private formatters drop a trailing ".0"; empty temperature window keeps 35 to 45 C; byte-mode link speed label is speed/8.
+- hjn.22 (9083bf2, 95b899a, 80c7325, ec84c48): public IP via ureq =3.4.0 on FetchPublicIp only, never at start; fixture sys_root never fetches. 95b899a alone does not build. OWNER REVIEW: ureq 3.4.2 exists; pin kept at the checked 3.4.0.
