@@ -12,6 +12,7 @@ pub mod icons;
 pub mod input;
 pub mod kv_grid;
 pub mod link;
+pub mod menu;
 pub mod motion;
 pub mod progress;
 pub mod radio;
