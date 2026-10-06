@@ -11,7 +11,7 @@
 use std::mem;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext as _, Global, Hsla, Rgba, Window};
+use gpui_kit::{App, Global, Hsla, Rgba, Window};
 use tracing::debug;
 
 use super::store::{ThemeError, ThemeStore, apply_kit, finish_crossfade};
@@ -398,7 +398,8 @@ mod tests {
 
     use gpui_kit::component::theme::Theme;
     use gpui_kit::{
-        Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext, div, rgb,
+        AppContext as _, Context, Entity, IntoElement, Render, TestAppContext, VisualTestContext,
+        div, rgb,
     };
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 
