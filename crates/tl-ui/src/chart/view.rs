@@ -4,33 +4,50 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{Context, IntoElement, Render, Window, div};
+use gpui_kit::{Context, IntoElement, Render, Window};
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::SeriesView;
 
-use super::{ChartCache, ChartLabels, ChartSpec, ChartState, labels, scale};
+use super::element::ChartElement;
+use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, labels, scale};
 
 pub struct ChartView {
     pub spec: ChartSpec,
     pub labels: ChartLabels,
     pub state: ChartState,
-    #[allow(dead_code, reason = "read by the test hooks now and by E19-009 on")]
     pub(crate) cache: Rc<RefCell<ChartCache>>,
+    /// Buffers reused by every geometry rebuild.
+    pub(crate) scratch: geometry::Scratch,
+    /// Right edge the cached geometry was built for. A stale series draws its tail up to it, so
+    /// the element rebuilds when it moves while a series is stale.
+    pub(crate) built_right_edge_ns: u64,
     /// Y scale memory across rebuilds (E19-004, R-262).
-    #[allow(dead_code, reason = "read from E19-007 on")]
     pub(crate) scale_state: scale::ScaleState,
+    /// Reused axis max text buffer for `scale::compute`.
+    pub(crate) axis_text: String,
     /// Filled by E19-009; empty struct until then.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) text: labels::LabelCache,
-    /// Resolved from the newest snapshot.
-    #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
+    /// Resolved from the newest snapshot, one per `spec.series` entry.
     pub(crate) series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
     /// Reused formatter buffer.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
+    /// `geometry::build` calls.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub build_count: std::cell::Cell<u32>,
+    /// `paint_path` calls, over every paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub path_paints: std::cell::Cell<u32>,
+    /// Colours handed to `paint_path` by the last paint, in paint order.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub path_colors: RefCell<SmallVec<[gpui_kit::Hsla; 8]>>,
+    /// Right edge of the last paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_right_edge_ns: std::cell::Cell<u64>,
 }
 
 impl ChartView {
@@ -40,12 +57,23 @@ impl ChartView {
             labels,
             state: ChartState::WarmingUp,
             cache: Rc::default(),
+            scratch: geometry::Scratch::default(),
+            built_right_edge_ns: 0,
             scale_state: scale::ScaleState::default(),
+            axis_text: String::new(),
             text: labels::LabelCache::default(),
             series: SmallVec::new(),
             last_value_text: String::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            build_count: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            path_paints: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            path_colors: RefCell::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_right_edge_ns: std::cell::Cell::new(0),
         }
     }
 
@@ -77,6 +105,18 @@ impl ChartView {
         self.spec.series.iter().map(|s| s.id)
     }
 
+    /// Sets the resolved series directly, one per `spec.series` entry. E19-008 binds them from the
+    /// hub snapshot.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_series_for_test(
+        &mut self,
+        series: SmallVec<[Option<Arc<SeriesView>>; 2]>,
+        cx: &mut Context<Self>,
+    ) {
+        self.series = series;
+        cx.notify();
+    }
+
     /// Number of built paths in the geometry cache (fills, strokes and their stale sets).
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn cached_path_count(&self) -> usize {
@@ -92,10 +132,7 @@ impl ChartView {
 }
 
 impl Render for ChartView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(any(test, feature = "test-hooks"))]
-        self.render_count.set(self.render_count.get() + 1);
-        // E19-007: element::ChartElement::new(cx.entity().clone())
-        div()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        ChartElement::new(cx.entity())
     }
 }
