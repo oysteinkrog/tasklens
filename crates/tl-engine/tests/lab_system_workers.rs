@@ -3168,17 +3168,109 @@ fn gpu_drm_fixture_sample() {
 
 #[test]
 fn gpu_drm_skips_nvidia() {
+    // card0 is i915 at 0000:00:02.0, card1 is NVIDIA at 0000:2d:00.0.
     let dir = fixture_copy("drm-basic", None);
-    let mut src = GpuDrmSource::new(SysRoot::at(&dir));
-    for k in 1..=6 {
+    let (mut src, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let extras = gpu_extras(&mut src);
+    let (list, _) = gpu_lists(&extras);
+    let keys: Vec<&str> = list.entries.iter().map(|e| &*e.persistent_key).collect();
+    assert_eq!(keys, ["gpu:0000:00:02.0"]);
+    assert_eq!(s.devices.len(), 1);
+    // The fixture's fdinfo client on 0000:00:02.0 holds 8 MiB of system memory.
+    assert_eq!(s.devices[0].1.shared_used, Metric::valid(8 << 20));
+
+    // With the Intel card gone, nothing but NVIDIA is left: no `Gpu` sample at all.
+    fs::remove_file(dir.join("sys/class/drm/card0/device/vendor")).expect("remove vendor");
+    for k in 2..=7 {
         let (next, update) = src.sample_at(at(k * SEC));
         src = next;
+        if k < 6 {
+            continue;
+        }
         assert!(
             !matches!(update, SourceUpdate::Gpu(_)),
-            "Gpu sample without an AMD card: {update:?}"
+            "Gpu sample without an AMD or Intel card: {update:?}"
         );
-        assert!(gpu_extras(&mut src).is_empty());
     }
+}
+
+// ---- GpuDrm for Intel cards (E12-027) ----
+
+/// The fixture's Intel cards: card0 is i915 at 0000:00:02.0 (an iGPU), card1 is xe at
+/// 0000:03:00.0 (a dGPU with `tile0`).
+const INTEL_I915: &str = "0000:00:02.0";
+const INTEL_XE: &str = "0000:03:00.0";
+
+fn gpu_by_slot<'a>(s: &'a GpuSample, slot: &str) -> &'a tl_model::system::GpuTotals {
+    s.devices
+        .iter()
+        .find(
+            |(id, _)| matches!(id, DeviceIdentity::Gpu { pci_bus_id, .. } if &**pci_bus_id == slot),
+        )
+        .map(|(_, t)| t)
+        .unwrap_or_else(|| panic!("no GPU at {slot}: {s:?}"))
+}
+
+#[test]
+fn gpu_drm_intel_i915_fixture() {
+    let dir = fixture_copy("drm-intel", None);
+    let (mut src, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let extras = gpu_extras(&mut src);
+    let (list, info) = gpu_lists(&extras);
+    let keys: Vec<&str> = list.entries.iter().map(|e| &*e.persistent_key).collect();
+    assert_eq!(
+        keys,
+        [format!("gpu:{INTEL_I915}"), format!("gpu:{INTEL_XE}")]
+    );
+    // No udev database in the fixture.
+    assert_eq!(&*list.entries[0].display_name, "Intel GPU 46a6");
+    assert_eq!(&*info.devices[0].driver, "i915");
+    assert_eq!(info.devices[0].power_limit_mw, Some(28_000));
+
+    let t = gpu_by_slot(&s, INTEL_I915);
+    assert_eq!(t.clock_gfx_mhz, Metric::valid(1300));
+    assert_eq!(t.power_w.validity, Validity::WarmingUp);
+    assert_eq!(t.temp_c.validity, Validity::Unsupported);
+    assert_eq!(t.util_pct.validity, Validity::WarmingUp);
+    assert_eq!(t.power_limit_w, Metric::valid(28.0));
+    // An iGPU has no dedicated memory.
+    assert_eq!(t.mem_total.validity, Validity::Unsupported);
+
+    // 12 J in 1 s.
+    fs::write(
+        dir.join("sys/class/drm/card0/device/hwmon/hwmon4/energy1_input"),
+        format!("{}\n", 123_456_789 + 12_000_000),
+    )
+    .expect("write energy");
+    let (_, s) = gpu_sample(src, 2 * SEC);
+    let t = gpu_by_slot(&s, INTEL_I915);
+    assert_eq!(t.power_w.validity, Validity::Valid);
+    assert!((t.power_w.value - 12.0).abs() < 1e-4, "{:?}", t.power_w);
+    // Warm, and no fdinfo client on the card.
+    assert_eq!(t.util_pct, Metric::valid(0.0));
+}
+
+#[test]
+fn gpu_drm_intel_xe_fixture() {
+    let dir = fixture_copy("drm-intel", None);
+    let (mut src, s) = gpu_sample(GpuDrmSource::new(SysRoot::at(&dir)), SEC);
+    let extras = gpu_extras(&mut src);
+    let (list, info) = gpu_lists(&extras);
+    assert_eq!(&*list.entries[1].display_name, "Intel GPU e20b");
+    assert!(
+        info.devices[1].driver.starts_with("xe"),
+        "{:?}",
+        info.devices[1]
+    );
+    assert_eq!(info.devices[1].power_limit_mw, Some(190_000));
+
+    let t = gpu_by_slot(&s, INTEL_XE);
+    assert_eq!(t.clock_gfx_mhz, Metric::valid(900));
+    assert_eq!(t.clock_mem_mhz.validity, Validity::Unsupported);
+    // A dGPU shows its temperature.
+    assert_eq!(t.temp_c, Metric::valid(48.0));
+    assert_eq!(t.power_w.validity, Validity::WarmingUp);
+    assert_eq!(t.power_limit_w, Metric::valid(190.0));
 }
 
 /// Writes a second AMD card, `card1` at `0000:0b:00.0`, into the fixture copy.

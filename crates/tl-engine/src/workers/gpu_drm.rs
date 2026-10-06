@@ -1,13 +1,16 @@
-//! The `GpuDrm` worker for AMD cards (ADR-004, ADR-008, ADR-016, PERF-063 to PERF-069).
+//! The `GpuDrm` worker for AMD and Intel cards (ADR-004, ADR-008, ADR-016, PERF-063 to
+//! PERF-069, PERF-075).
 //!
 //! It reads the tl-collect DRM readers at 1 Hz while a GPU page is shown or history records,
-//! and not at all otherwise. Cards are enumerated again every 5 s; only `amdgpu` cards are kept
-//! (NVIDIA belongs to `GpuNvidia`, Intel to E12-027). When the card set changes, a `Devices`
-//! list and a `GpuInfo` go out through `take_extra` before the sample.
+//! and not at all otherwise. Cards are enumerated again every 5 s; `amdgpu`, `i915` and `xe`
+//! cards are kept (NVIDIA belongs to `GpuNvidia`). When the card set changes, a `Devices` list
+//! and a `GpuInfo` go out through `take_extra` before the sample.
 //!
-//! Encode and decode come from the `gpu_metrics` VCN activity when the blob has it, else from
-//! two DRM fdinfo scans. AMD cards have no UUID, so their identity is `uuid: [0; 16]` plus the
-//! PCI slot (R-166). Everything here is read-only.
+//! AMD encode and decode come from the `gpu_metrics` VCN activity when the blob has it, else
+//! from two DRM fdinfo scans. Intel engines, memory, encode and decode always come from fdinfo,
+//! and Intel power from the hwmon energy counter. One fdinfo walk per tick serves every card.
+//! AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
+//! (R-166). Everything here is read-only.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -19,8 +22,12 @@ use asupersync::{Cx, Outcome};
 use smallvec::SmallVec;
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
+use tl_collect::gpu_drm::intel::{
+    IntelDriver, IntelSample, fdinfo_memory, i915_engine_name, read_intel,
+};
 use tl_collect::gpu_drm::{
-    AmdSample, DrmCard, FdinfoScan, discover_cards, engine_busy, main_temp, read_amd, scan,
+    AmdSample, DrmCard, FdinfoScan, discover_cards, engine_busy, engine_busy_cycles, main_temp,
+    read_amd, scan,
 };
 use tl_collect::parse::udev::{UdevProps, pci_entry, read_udev_props};
 use tl_collect::sanitize::sanitize_text;
@@ -31,6 +38,7 @@ use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::EngineSettings;
 use tl_model::system::{GpuTotals, Metric};
+use tl_model::time::TimeNs;
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
@@ -45,7 +53,7 @@ use crate::workers::enumerate::EnumClock;
 
 pub const PERIOD: Duration = Duration::from_secs(1);
 
-const DRIVER: &str = "amdgpu";
+const AMD_DRIVER: &str = "amdgpu";
 const NAME_MAX: usize = 256;
 const GPU_UDEV_KEYS: [&str; 1] = ["ID_MODEL_FROM_DATABASE"];
 
@@ -58,14 +66,61 @@ pub fn gpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
     }
 }
 
+/// The reader state of one card, reused every sample.
+#[derive(Clone, Debug)]
+enum CardState {
+    Amd(AmdSample),
+    Intel {
+        drv: IntelDriver,
+        sample: IntelSample,
+        /// The card has `device/tile0` or `device/mem_info_vram_total`.
+        discrete: bool,
+        /// `energy_uj` and the time of the last sample; `None` makes the next power `WarmingUp`.
+        prev_energy: Option<(u64, TimeNs)>,
+    },
+}
+
+impl CardState {
+    /// `None` for a card this worker does not read.
+    fn new(root: &SysRoot, card: &DrmCard) -> Option<Self> {
+        if card.driver.as_deref() == Some(AMD_DRIVER) {
+            return Some(Self::Amd(AmdSample::default()));
+        }
+        let drv = IntelDriver::from_card(card)?;
+        let device = root.sys.join(format!("class/drm/card{}/device", card.card));
+        let discrete = device.join("tile0").exists() || device.join("mem_info_vram_total").exists();
+        Some(Self::Intel {
+            drv,
+            sample: IntelSample::default(),
+            discrete,
+            prev_energy: None,
+        })
+    }
+
+    fn read(&mut self, card: &DrmCard, root: &SysRoot) {
+        match self {
+            Self::Amd(amd) => read_amd(card, &root.sys, amd),
+            Self::Intel { drv, sample, .. } => read_intel(card, &root.sys, *drv, sample),
+        }
+    }
+
+    /// An AMD card with VCN activity in `gpu_metrics` needs no fdinfo; every Intel card does.
+    fn needs_fdinfo(&self) -> bool {
+        match self {
+            Self::Amd(amd) => !has_vcn(amd),
+            Self::Intel { .. } => true,
+        }
+    }
+}
+
 pub struct GpuDrmSource {
     root: SysRoot,
-    /// The `amdgpu` cards of the last enumeration, sorted by card number.
+    /// The `amdgpu`, `i915` and `xe` cards of the last enumeration, sorted by card number.
     cards: Vec<DrmCard>,
     /// When the cards are enumerated again.
     enum_clock: EnumClock,
-    /// One per card, reused every sample.
-    amd: Vec<AmdSample>,
+    /// One per card.
+    state: Vec<CardState>,
     /// The last fdinfo scan; `None` until the first scan and after `reset_baselines`.
     prev_scan: Option<FdinfoScan>,
     /// Reused for the next fdinfo scan.
@@ -80,7 +135,7 @@ impl GpuDrmSource {
             root,
             cards: Vec::new(),
             enum_clock: EnumClock::default(),
-            amd: Vec::new(),
+            state: Vec::new(),
             prev_scan: None,
             cur_scan: FdinfoScan::default(),
             pending_extra: VecDeque::new(),
@@ -94,7 +149,8 @@ impl GpuDrmSource {
             self.enumerate(t_ns);
         }
         if self.cards.is_empty() {
-            // No AMD card: an empty `Gpu` sample would clear the NVIDIA rows in the reducer.
+            // No AMD or Intel card: an empty `Gpu` sample would clear the NVIDIA rows in the
+            // reducer.
             let idle = SourceUpdate::Health {
                 id: SourceId::GpuDrm,
                 state: SourceState::Off,
@@ -104,27 +160,53 @@ impl GpuDrmSource {
             return (self, idle);
         }
 
-        for (card, amd) in self.cards.iter().zip(&mut self.amd) {
-            read_amd(card, &self.root.sys, amd);
+        for (card, state) in self.cards.iter().zip(&mut self.state) {
+            state.read(card, &self.root);
         }
 
-        // One fdinfo walk serves every card without VCN activity.
-        let need_fdinfo = self.amd.iter().any(|s| !has_vcn(s));
+        // One fdinfo walk serves every card that needs it.
+        let need_fdinfo = self.state.iter().any(CardState::needs_fdinfo);
         if need_fdinfo {
             scan(&self.root, &mut self.cur_scan);
         }
 
+        let mut raw = SmallVec::<[(Arc<str>, f32); 8]>::new();
         let mut busy = SmallVec::<[(Arc<str>, f32); 8]>::new();
         let mut devices = Vec::with_capacity(self.cards.len());
-        for (card, amd) in self.cards.iter().zip(&self.amd) {
-            let fdinfo = match (&self.prev_scan, has_vcn(amd)) {
-                (Some(prev), false) => {
-                    engine_busy(prev, &self.cur_scan, &card.pci_slot, &mut busy);
-                    Some(&busy[..])
+        for (card, state) in self.cards.iter().zip(&mut self.state) {
+            let pdev = &*card.pci_slot;
+            let t = match state {
+                CardState::Amd(amd) => {
+                    let fdinfo = match (&self.prev_scan, has_vcn(amd)) {
+                        (Some(prev), false) => {
+                            engine_busy(prev, &self.cur_scan, pdev, &mut busy);
+                            Some(&busy[..])
+                        }
+                        _ => None,
+                    };
+                    totals(amd, fdinfo)
                 }
-                _ => None,
+                CardState::Intel {
+                    drv,
+                    sample,
+                    discrete,
+                    prev_energy,
+                } => {
+                    let fdinfo = match &self.prev_scan {
+                        Some(prev) => {
+                            intel_busy(*drv, prev, &self.cur_scan, pdev, &mut raw, &mut busy);
+                            Some(&busy[..])
+                        }
+                        None => None,
+                    };
+                    let mem = fdinfo_memory(&self.cur_scan, pdev);
+                    let discrete = *discrete || mem.1.is_some();
+                    let t = intel(sample, *prev_energy, t_ns, fdinfo, mem, discrete);
+                    *prev_energy = sample.energy_uj.map(|e| (e, t_ns));
+                    t
+                }
             };
-            devices.push((identity(card), totals(amd, fdinfo)));
+            devices.push((identity(card), t));
         }
         if need_fdinfo {
             let cur = std::mem::take(&mut self.cur_scan);
@@ -139,25 +221,33 @@ impl GpuDrmSource {
         (self, SourceUpdate::Gpu(sample))
     }
 
-    /// Re-reads the card list. When the `amdgpu` set changed, queues `Devices` and `GpuInfo`.
+    /// Re-reads the card list. When the `amdgpu`, `i915` and `xe` set changed, queues `Devices`
+    /// and `GpuInfo`.
     fn enumerate(&mut self, t_ns: u64) {
-        let cards: Vec<DrmCard> = discover_cards(&self.root.sys)
+        let (cards, state): (Vec<DrmCard>, Vec<CardState>) = discover_cards(&self.root.sys)
             .into_iter()
-            .filter(|c| c.driver.as_deref() == Some(DRIVER))
-            .collect();
+            .filter_map(|c| {
+                let state = CardState::new(&self.root, &c)?;
+                Some((c, state))
+            })
+            .unzip();
         if cards == self.cards {
             return;
         }
         self.cards = cards;
-        self.amd = vec![AmdSample::default(); self.cards.len()];
+        self.state = state;
 
-        let driver = driver_text(&self.root);
         let mut props = UdevProps::default();
         let mut entries = Vec::with_capacity(self.cards.len());
         let mut infos = Vec::with_capacity(self.cards.len());
-        for (card, amd) in self.cards.iter().zip(&mut self.amd) {
-            read_amd(card, &self.root.sys, amd);
-            let name = display_name(&self.root, card, &mut props);
+        for (card, state) in self.cards.iter().zip(&mut self.state) {
+            state.read(card, &self.root);
+            let (vendor, mem_total, power_limit_uw) = match state {
+                CardState::Amd(amd) => ("AMD", amd.vram_total.unwrap_or(0), amd.power_cap_uw),
+                // No sysfs file gives the Intel VRAM total (R-164); the samples carry fdinfo's.
+                CardState::Intel { sample, .. } => ("Intel", 0, sample.power_max_uw),
+            };
+            let name = display_name(&self.root, card, vendor, &mut props);
             let key: Arc<str> = Arc::from(format!("gpu:{}", card.pci_slot));
             entries.push(DeviceDesc {
                 identity: identity(card),
@@ -169,11 +259,9 @@ impl GpuDrmSource {
             infos.push(GpuStaticInfo {
                 identity: identity(card),
                 name,
-                mem_total: amd.vram_total.unwrap_or(0),
-                power_limit_mw: amd
-                    .power_cap_uw
-                    .and_then(|uw| u32::try_from(uw / 1000).ok()),
-                driver: Arc::clone(&driver),
+                mem_total,
+                power_limit_mw: power_limit_uw.and_then(|uw| u32::try_from(uw / 1000).ok()),
+                driver: driver_text(&self.root, card.driver.as_deref().unwrap_or_default()),
                 nvml: Arc::from(""),
                 supports_process_util: false,
                 persistent_key: key,
@@ -203,9 +291,14 @@ impl Source for GpuDrmSource {
         self.sample_at(Clock::now())
     }
 
-    /// The next fdinfo-based encode and decode values are `WarmingUp`.
+    /// The next fdinfo-based values and the next Intel power are `WarmingUp`.
     fn reset_baselines(&mut self) {
         self.prev_scan = None;
+        for state in &mut self.state {
+            if let CardState::Intel { prev_energy, .. } = state {
+                *prev_energy = None;
+            }
+        }
     }
 
     fn take_extra(&mut self) -> Option<SourceUpdate> {
@@ -251,7 +344,7 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     })
 }
 
-/// AMD cards have no UUID (R-166): the PCI slot in sysfs form names the card.
+/// AMD and Intel cards have no UUID (R-166): the PCI slot in sysfs form names the card.
 pub fn identity(card: &DrmCard) -> DeviceIdentity {
     DeviceIdentity::Gpu {
         uuid: [0; 16],
@@ -303,6 +396,129 @@ fn totals(s: &AmdSample, busy: Option<&[(Arc<str>, f32)]>) -> GpuTotals {
     }
 }
 
+/// Device totals for one Intel card. `prev_energy` is the energy counter and time of the last
+/// sample. `busy` holds the busy percent per engine under the i915 names (render, copy, video,
+/// video-enhance, compute) and is empty before the second fdinfo scan. `mem` is
+/// `fdinfo_memory`: (local resident, local total, system resident).
+pub fn intel_totals(
+    s: &IntelSample,
+    prev_energy: Option<(u64, TimeNs)>,
+    now: TimeNs,
+    busy: &[(Arc<str>, f32)],
+    mem: (Option<u64>, Option<u64>, Option<u64>),
+    discrete: bool,
+) -> GpuTotals {
+    intel(
+        s,
+        prev_energy,
+        now,
+        (!busy.is_empty()).then_some(busy),
+        mem,
+        discrete,
+    )
+}
+
+/// `busy` is `None` before the second fdinfo scan. Once warm, an engine with no clients is 0.
+fn intel(
+    s: &IntelSample,
+    prev_energy: Option<(u64, TimeNs)>,
+    now: TimeNs,
+    busy: Option<&[(Arc<str>, f32)]>,
+    (local_used, local_total, system_used): (Option<u64>, Option<u64>, Option<u64>),
+    discrete: bool,
+) -> GpuTotals {
+    let (util_pct, video) = match busy {
+        // Utilization is the busiest engine (PERF-063).
+        Some(busy) => (
+            Metric::valid(busy.iter().map(|&(_, p)| p).fold(0.0, f32::max)),
+            engine(busy, "video"),
+        ),
+        None => (
+            Metric::with(Validity::WarmingUp),
+            Metric::with(Validity::WarmingUp),
+        ),
+    };
+    let power_w = match (s.energy_uj, prev_energy) {
+        (None, _) => Metric::with(Validity::Unsupported),
+        // µJ over µs is watts. A counter that went backwards waits one more sample.
+        (Some(e), Some((prev, t))) if e >= prev && now > t => {
+            Metric::valid(((e - prev) as f64 / ((now - t) as f64 / 1000.0)) as f32)
+        }
+        (Some(_), _) => Metric::with(Validity::WarmingUp),
+    };
+    let (mem_used, mem_total, temp_c) = if discrete {
+        (
+            opt(local_used),
+            opt(local_total),
+            opt(s.temp_mc.map(|mc| mc as f32 / 1000.0)),
+        )
+    } else {
+        (
+            Metric::with(Validity::Unsupported),
+            Metric::with(Validity::Unsupported),
+            Metric::with(Validity::Unsupported),
+        )
+    };
+    GpuTotals {
+        device: DeviceIdx(0),
+        util_pct,
+        mem_util_pct: Metric::with(Validity::Unsupported),
+        mem_used,
+        mem_total,
+        shared_used: opt(system_used),
+        shared_total: Metric::with(Validity::Unsupported),
+        // Intel video engines both encode and decode (PERF-065).
+        enc_pct: video,
+        dec_pct: video,
+        temp_c,
+        power_w,
+        power_limit_w: opt(s.power_max_uw.map(|uw| uw as f32 / 1e6)),
+        clock_gfx_mhz: opt(s.act_freq_mhz),
+        clock_mem_mhz: Metric::with(Validity::Unsupported),
+        fan_pct: Metric::with(Validity::Unsupported),
+        pcie_rx_bps: Metric::with(Validity::Unsupported),
+        pcie_tx_bps: Metric::with(Validity::Unsupported),
+    }
+}
+
+/// Busy percent per engine of one Intel card under the i915 engine names: `drm-engine-*` time
+/// for i915, `drm-cycles-*` for xe (PERF-075). Other engine keys are dropped.
+fn intel_busy(
+    drv: IntelDriver,
+    prev: &FdinfoScan,
+    cur: &FdinfoScan,
+    pdev: &str,
+    raw: &mut SmallVec<[(Arc<str>, f32); 8]>,
+    out: &mut SmallVec<[(Arc<str>, f32); 8]>,
+) {
+    out.clear();
+    match drv {
+        IntelDriver::I915 => {
+            engine_busy(prev, cur, pdev, raw);
+            out.extend(raw.drain(..).filter(|(k, _)| i915_engine_name(k).is_some()));
+        }
+        IntelDriver::Xe => {
+            engine_busy_cycles(prev, cur, pdev, raw);
+            out.extend(
+                raw.drain(..)
+                    .filter_map(|(k, p)| Some((Arc::from(xe_engine_name(&k)?), p))),
+            );
+        }
+    }
+}
+
+/// The i915 engine name of an xe engine class.
+fn xe_engine_name(class: &str) -> Option<&'static str> {
+    match class {
+        "rcs" => Some("render"),
+        "bcs" => Some("copy"),
+        "vcs" => Some("video"),
+        "vecs" => Some("video-enhance"),
+        "ccs" => Some("compute"),
+        _ => None,
+    }
+}
+
 fn engine(busy: &[(Arc<str>, f32)], name: &str) -> Metric<f32> {
     let pct = busy
         .iter()
@@ -321,8 +537,8 @@ fn opt<T: Copy + Default>(v: Option<T>) -> Metric<T> {
     v.map_or(Metric::with(Validity::Unsupported), Metric::valid)
 }
 
-/// `ID_MODEL_FROM_DATABASE` of the card's PCI udev entry, else "AMD GPU <device id>".
-fn display_name(root: &SysRoot, card: &DrmCard, props: &mut UdevProps) -> Arc<str> {
+/// `ID_MODEL_FROM_DATABASE` of the card's PCI udev entry, else "<vendor> GPU <device id>".
+fn display_name(root: &SysRoot, card: &DrmCard, vendor: &str, props: &mut UdevProps) -> Arc<str> {
     let path = root.run_path(&format!("udev/data/{}", pci_entry(&card.pci_slot)));
     let mut clean = String::new();
     if read_udev_props(&path, &GPU_UDEV_KEYS, props).is_ok()
@@ -331,30 +547,30 @@ fn display_name(root: &SysRoot, card: &DrmCard, props: &mut UdevProps) -> Arc<st
         sanitize_text(model.as_bytes(), NAME_MAX, &mut clean);
     }
     if clean.is_empty() {
-        return Arc::from(format!("AMD GPU {:04x}", card.device_id));
+        return Arc::from(format!("{vendor} GPU {:04x}", card.device_id));
     }
     Arc::from(clean)
 }
 
-/// "amdgpu <module version>", or "amdgpu" when the module has no version file.
-fn driver_text(root: &SysRoot) -> Arc<str> {
+/// "<driver> <module version>", or the driver alone when the module has no version file.
+fn driver_text(root: &SysRoot, driver: &str) -> Arc<str> {
     let mut buf = Vec::new();
-    let file = root.sys.join(format!("module/{DRIVER}/version"));
+    let file = root.sys.join(format!("module/{driver}/version"));
     let mut clean = String::new();
     if let Ok(text) = read_trimmed(&file, &mut buf) {
         sanitize_text(text, NAME_MAX, &mut clean);
     }
     if clean.is_empty() {
-        Arc::from(DRIVER)
+        Arc::from(driver)
     } else {
-        Arc::from(format!("{DRIVER} {clean}"))
+        Arc::from(format!("{driver} {clean}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tl_collect::gpu_drm::GpuMetrics;
+    use tl_collect::gpu_drm::{DrmClient, GpuMetrics};
 
     #[test]
     fn period_rules() {
@@ -405,5 +621,133 @@ mod tests {
         let t = totals(&s, Some(&[]));
         assert_eq!(t.enc_pct, Metric::valid(0.0));
         assert_eq!(t.dec_pct, Metric::valid(0.0));
+    }
+
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    const SEC: TimeNs = 1_000_000_000;
+
+    fn busy(list: &[(&str, f32)]) -> Vec<(Arc<str>, f32)> {
+        list.iter().map(|&(n, p)| (Arc::from(n), p)).collect()
+    }
+
+    #[test]
+    fn intel_util_is_max_engine() {
+        let s = IntelSample::default();
+        let b = busy(&[("render", 40.0), ("video", 10.0), ("copy", 5.0)]);
+        let t = intel_totals(&s, None, SEC, &b, (None, None, None), false);
+        assert_eq!(t.util_pct, Metric::valid(40.0));
+        assert_eq!(t.enc_pct, Metric::valid(10.0));
+        assert_eq!(t.dec_pct, Metric::valid(10.0));
+        assert_eq!(t.mem_util_pct.validity, Validity::Unsupported);
+        assert_eq!(t.fan_pct.validity, Validity::Unsupported);
+        assert_eq!(t.clock_mem_mhz.validity, Validity::Unsupported);
+
+        // No engine values yet.
+        let t = intel_totals(&s, None, SEC, &[], (None, None, None), false);
+        assert_eq!(t.util_pct.validity, Validity::WarmingUp);
+        assert_eq!(t.enc_pct.validity, Validity::WarmingUp);
+
+        // Warm, but no client on the card.
+        let t = intel(&s, None, SEC, Some(&[]), (None, None, None), false);
+        assert_eq!(t.util_pct, Metric::valid(0.0));
+        assert_eq!(t.dec_pct, Metric::valid(0.0));
+    }
+
+    #[test]
+    fn intel_xe_engine_names() {
+        let client = |id: u64, cycles: u64, total: u64| DrmClient {
+            driver: Arc::from("xe"),
+            pdev: Arc::from("0000:03:00.0"),
+            client_id: id,
+            cycles: [("rcs", cycles), ("vcs", cycles / 2), ("xyz", cycles)]
+                .iter()
+                .map(|&(n, v)| (Arc::from(n), v))
+                .collect(),
+            total_cycles: [("rcs", total), ("vcs", total), ("xyz", total)]
+                .iter()
+                .map(|&(n, v)| (Arc::from(n), v))
+                .collect(),
+            ..DrmClient::default()
+        };
+        let scan = |cycles, total| FdinfoScan {
+            clients: vec![client(1, cycles, total)],
+            partial: false,
+            t_ns: 0,
+        };
+        let (mut raw, mut out) = (SmallVec::new(), SmallVec::new());
+        intel_busy(
+            IntelDriver::Xe,
+            &scan(0, 0),
+            &scan(600, 1000),
+            "0000:03:00.0",
+            &mut raw,
+            &mut out,
+        );
+        assert_eq!(&out[..], &busy(&[("render", 60.0), ("video", 30.0)])[..]);
+    }
+
+    #[test]
+    fn intel_power_from_energy() {
+        let s = |uj| IntelSample {
+            energy_uj: Some(uj),
+            power_max_uw: Some(28_000_000),
+            ..IntelSample::default()
+        };
+        let mem = (None, None, None);
+        // First sample.
+        let t = intel_totals(&s(5_000_000), None, SEC, &[], mem, false);
+        assert_eq!(t.power_w.validity, Validity::WarmingUp);
+        assert_eq!(t.power_limit_w, Metric::valid(28.0));
+
+        let prev = Some((5_000_000, SEC));
+        let t = intel_totals(&s(17_000_000), prev, 2 * SEC, &[], mem, false);
+        assert_eq!(t.power_w.validity, Validity::Valid);
+        assert!((t.power_w.value - 12.0).abs() < 1e-4, "{:?}", t.power_w);
+
+        // Half a second at 12 W is 6 J.
+        let t = intel_totals(&s(11_000_000), prev, SEC + SEC / 2, &[], mem, false);
+        assert!((t.power_w.value - 12.0).abs() < 1e-4, "{:?}", t.power_w);
+
+        // Counter wrap.
+        let t = intel_totals(&s(1_000), prev, 2 * SEC, &[], mem, false);
+        assert_eq!(t.power_w.validity, Validity::WarmingUp);
+
+        // No counter.
+        let t = intel_totals(&IntelSample::default(), prev, 2 * SEC, &[], mem, false);
+        assert_eq!(t.power_w.validity, Validity::Unsupported);
+        assert_eq!(t.power_limit_w.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn intel_discrete_memory() {
+        let s = IntelSample {
+            temp_mc: Some(48_000),
+            ..IntelSample::default()
+        };
+        let mem = (Some(3_145_728), Some(8 * GIB), None);
+        let t = intel_totals(&s, None, SEC, &[], mem, true);
+        assert_eq!(t.mem_used, Metric::valid(3_145_728));
+        assert_eq!(t.mem_total, Metric::valid(8 * GIB));
+        assert_eq!(t.temp_c, Metric::valid(48.0));
+        assert_eq!(t.shared_used.validity, Validity::Unsupported);
+        assert_eq!(t.shared_total.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn intel_igpu_shared() {
+        // An iGPU hwmon has no temperature, and one that had would still not be shown.
+        let s = IntelSample {
+            temp_mc: Some(48_000),
+            act_freq_mhz: Some(1300),
+            ..IntelSample::default()
+        };
+        let t = intel_totals(&s, None, SEC, &[], (None, None, Some(512 * MIB)), false);
+        assert_eq!(t.shared_used, Metric::valid(512 * MIB));
+        assert_eq!(t.shared_total.validity, Validity::Unsupported);
+        assert_eq!(t.mem_used.validity, Validity::Unsupported);
+        assert_eq!(t.mem_total.validity, Validity::Unsupported);
+        assert_eq!(t.temp_c.validity, Validity::Unsupported);
+        assert_eq!(t.clock_gfx_mhz, Metric::valid(1300));
     }
 }
