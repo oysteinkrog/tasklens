@@ -471,3 +471,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.9 (170add9, cbf6b7e, 9e2bff2): CPU grid wrapper; specs only on topology change; clock tooltips edited in place without notify; heading HoverTooltip trigger per cell. English constants in performance pages collected into a new crw bead (tr tables per strings version). crw.11 told to rebuild the grid on style_version change.
 - qfx.21 (6028214): socket owners for other users' sockets through HelperHandle::read, 4096 inodes per 2 s rebuild, wraps; owners appear one rebuild later. Accepted. workers::connections is now pub.
 - pdu.5 (ff8e850): Processes page actions and captured targets; 256-row cap in CapturedTargets::new (noted on pdu.20); RestartUnit is no_json.
+- pdu.7 decisions: clk_tck in CellCtx; app rows borrow user, command line and start time from the first member; desktop path and unit row fields are a new 8q0 bead; RowRef::Record carries &TableRow.
+- crw.11 decisions: TlButton gains focus_handle(FocusHandle) and trailing_icon(TlIcon) (button.rs chain edit); PerfSetCpuGraphMode and PerfToggleCpuKernel declared early.
