@@ -104,6 +104,18 @@ impl PickerColumn {
         }
     }
 
+    /// The string key of the right-aligned note: "always on" for Name, "n/a on this system" for
+    /// a column this system lacks.
+    pub fn note_key(&self) -> Option<&'static str> {
+        if !self.hideable {
+            Some("table-picker-always-on")
+        } else if self.availability == Availability::NotOnThisSystem {
+            Some("table-picker-na")
+        } else {
+            None
+        }
+    }
+
     /// Case-insensitive substring match over label, full name and group. `needle` is lowercase;
     /// an empty needle matches every column.
     fn matches(&self, needle: &str) -> bool {
@@ -412,13 +424,7 @@ impl ColumnPicker {
     ) -> AnyElement {
         let scale = |v: f32| px(v * m.ui_scale);
         let key = col.key;
-        let note = if !col.hideable {
-            Some(tr(cx, "table-picker-always-on"))
-        } else if col.availability == Availability::NotOnThisSystem {
-            Some(tr(cx, "table-picker-na"))
-        } else {
-            None
-        };
+        let note = col.note_key().map(|k| tr(cx, k));
         let check_id = ElementId::Name(format!("column-picker-check-{key}").into());
         let mut label = div()
             .absolute()
@@ -434,6 +440,7 @@ impl ColumnPicker {
         *label.text_style() = t_base(m);
         let note = note.map(|note| {
             let mut el = div()
+                .debug_selector(move || format!("ColumnPicker-note-{key}"))
                 .absolute()
                 .right(scale(CHECK_X))
                 .top_0()

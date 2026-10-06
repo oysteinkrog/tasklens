@@ -1,6 +1,7 @@
 //! Column header tests in a real window (UI-PRC-005, ADR-013): the two-line header with totals,
 //! the sort arrow and the sort click (E18-009); column resize and fit (E18-010); column reorder
-//! drag (E18-011); the header menu (E18-012). Later column beads append their own sections.
+//! drag (E18-011); the header menu (E18-012); the column picker window and `EnableAllColumns`
+//! (E18-A2). Later column beads append their own sections.
 //!
 //! The header texts are measured, so the window uses the real text system with the bundled fonts.
 
@@ -24,8 +25,10 @@ use tl_ui::components::menu::{TlMenu, context_menu_layer};
 use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::validity::{GlyphContent, glyph_parts};
-use tl_ui::table::actions::{ResetColumns, ResizeColumnsToFit};
+use tl_ui::components::window_frame::TlSecondaryWindow;
+use tl_ui::table::actions::{EnableAllColumns, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use tl_ui::table::cells::CellOut;
+use tl_ui::table::columns_window::{ColumnPicker, PickerColumn, PickerItem};
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
@@ -40,6 +43,7 @@ use tl_ui::table::tree_table::{
 use tl_ui::text::fonts::load_bundled_fonts;
 use tl_ui::text::metrics::TextMetricsCache;
 use tl_ui::theme::{current, metrics};
+use tl_ui::window::registry::GlobalRegistry;
 
 fn cosmic_cx() -> TestAppContext {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
@@ -1343,4 +1347,412 @@ fn reset_columns_without_defaults_propagates() {
     assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
     #[cfg(feature = "test-hooks")]
     assert!(toast_texts(&mut rig.vcx, &rig.toasts).is_empty());
+}
+
+// Column picker window and EnableAllColumns (E18-A2, UI-PRC-007, R-106, R-180).
+
+/// A text column in `group`. `full_name` is the picker name; `label` the header alias.
+fn grouped(
+    id: ColumnId,
+    label: &'static str,
+    full_name: &'static str,
+    group: &'static str,
+) -> ColumnSpec {
+    let mut s = spec(id, ColumnKind::Text, 80., label);
+    s.full_name = full_name.into();
+    s.group = group.into();
+    s
+}
+
+/// An `HDelegate` with `specs` in registry order, `visible` shown, sorted by Name.
+fn registry_delegate(specs: Vec<ColumnSpec>, visible: &[ColumnId]) -> HDelegate {
+    let mut d = HDelegate::new();
+    let order: Vec<ColumnId> = specs.iter().map(|s| s.id).collect();
+    d.layout = ColumnLayout::defaults(TableId::Processes, &specs, &order, visible);
+    d.specs = specs;
+    d.totals.clear();
+    d.sort = SortSpec {
+        column: ColumnId::Name,
+        ascending: true,
+    };
+    d
+}
+
+/// Image: Name, Image path. Identity: User, PID. Memory: Memory ("Working set private"),
+/// WS peak.
+fn image_identity_memory() -> Vec<ColumnSpec> {
+    vec![
+        grouped(ColumnId::Name, "Name", "Name", "Image"),
+        grouped(ColumnId::ImagePath, "Image path", "Image path", "Image"),
+        grouped(ColumnId::User, "User", "User", "Identity"),
+        grouped(ColumnId::Pid, "PID", "PID", "Identity"),
+        grouped(ColumnId::Memory, "Memory", "Working set private", "Memory"),
+        grouped(ColumnId::WsPeak, "WS peak", "Peak working set", "Memory"),
+    ]
+}
+
+struct PickerRig {
+    table: Entity<TlTreeTable<HDelegate>>,
+    /// The table's window.
+    vcx: VisualTestContext,
+    /// The picker's window.
+    pcx: VisualTestContext,
+    picker: Entity<ColumnPicker>,
+}
+
+/// Focuses the table and dispatches `OpenColumnPicker` for the Processes table.
+fn dispatch_open_picker(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<HDelegate>>) {
+    vcx.update(|window, cx| {
+        window.activate_window();
+        table.read(cx).focus_handle().clone().focus(window, cx);
+    });
+    vcx.dispatch_action(OpenColumnPicker {
+        table: TableId::Processes,
+    });
+    vcx.run_until_parked();
+}
+
+/// Every open picker window.
+fn picker_windows(cx: &mut TestAppContext) -> Vec<gpui_kit::WindowHandle<Root>> {
+    cx.update(|cx| {
+        cx.windows()
+            .into_iter()
+            .filter_map(|w| w.downcast::<Root>())
+            .filter(|h| TlSecondaryWindow::<ColumnPicker>::find(*h, cx).is_some())
+            .collect()
+    })
+}
+
+fn open_picker(cx: &mut TestAppContext, delegate: HDelegate) -> PickerRig {
+    let (table, vcx) = open(cx, delegate);
+    let mut vcx = vcx.clone();
+    dispatch_open_picker(&mut vcx, &table);
+    let handle = *picker_windows(&mut vcx)
+        .first()
+        .expect("a picker window opened");
+    let mut pcx = VisualTestContext::from_window(handle.into(), &vcx);
+    pcx.update(|window, _| window.activate_window());
+    redraw(&mut pcx);
+    let picker = pcx.update(|_, cx| {
+        TlSecondaryWindow::<ColumnPicker>::find(handle, cx)
+            .expect("frame")
+            .read(cx)
+            .content()
+            .clone()
+    });
+    PickerRig {
+        table,
+        vcx,
+        pcx,
+        picker,
+    }
+}
+
+fn picker_items(rig: &mut PickerRig) -> Vec<PickerItem> {
+    let picker = rig.picker.clone();
+    rig.pcx.update(|_, cx| picker.read(cx).items(cx))
+}
+
+fn picker_column(rig: &mut PickerRig, id: ColumnId) -> Option<PickerColumn> {
+    picker_items(rig).into_iter().find_map(|i| match i {
+        PickerItem::Column(c) if c.key == id.as_str() => Some(c),
+        _ => None,
+    })
+}
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn row_bounds(rig: &mut PickerRig, id: ColumnId) -> Option<gpui_kit::Bounds<Pixels>> {
+    rig.pcx
+        .debug_bounds(leak(format!("ColumnPicker-row-{}", id.as_str())))
+}
+
+/// Types `text` into the focused filter and lets `ms` pass.
+fn type_filter(rig: &mut PickerRig, text: &str, ms: u64) {
+    let filter = rig.picker.read_with(&rig.pcx, |p, _| p.filter().clone());
+    rig.pcx.update(|window, cx| {
+        filter.update(cx, |s, cx| s.set_value(text.to_owned(), window, cx));
+    });
+    rig.pcx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(ms));
+    redraw(&mut rig.pcx);
+}
+
+fn picker_open(rig: &mut PickerRig) -> bool {
+    !picker_windows(&mut rig.pcx).is_empty()
+}
+
+#[test]
+fn picker_lists_groups_in_order() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(
+        image_identity_memory(),
+        &[ColumnId::Name, ColumnId::User, ColumnId::Memory],
+    );
+    let mut rig = open_picker(&mut cx, d);
+    let items = picker_items(&mut rig);
+    let shape: Vec<String> = items
+        .iter()
+        .map(|i| match i {
+            PickerItem::TableName(t) => format!("table:{t}"),
+            PickerItem::Heading(h) => format!("heading:{h}"),
+            PickerItem::Column(c) => format!("column:{}", c.key),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            "table:Processes table",
+            "heading:IMAGE",
+            "column:name",
+            "column:image_path",
+            "heading:IDENTITY",
+            "column:user",
+            "column:pid",
+            "heading:MEMORY",
+            "column:memory",
+            "column:ws_peak",
+        ]
+        .map(String::from)
+    );
+    let name_line = rig
+        .pcx
+        .debug_bounds("ColumnPicker-table-name")
+        .expect("table name line drawn");
+    let first = row_bounds(&mut rig, ColumnId::Name).expect("Name row drawn");
+    assert!(name_line.origin.y < first.origin.y);
+    assert_eq!(first.size.height, px(28.));
+}
+
+#[test]
+fn picker_name_always_on() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name, ColumnId::User]);
+    let mut rig = open_picker(&mut cx, d);
+    let name = picker_column(&mut rig, ColumnId::Name).expect("Name row");
+    assert!(name.visible && !name.hideable);
+    assert_eq!(name.note_key(), Some("table-picker-always-on"));
+    assert!(rig.pcx.debug_bounds("ColumnPicker-note-name").is_some());
+    let text = rig
+        .pcx
+        .update(|_, cx| tl_ui::i18n::tr(cx, "table-picker-always-on"));
+    assert_eq!(text.as_ref(), "always on");
+
+    // A click on the Name row changes nothing.
+    let at = row_bounds(&mut rig, ColumnId::Name).expect("Name row").center();
+    click(&mut rig.pcx, at);
+    assert_eq!(changed_count(&mut rig.vcx, &rig.table), 0);
+}
+
+#[test]
+fn picker_alias_filter_matches_both_parts() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let mut rig = open_picker(&mut cx, d);
+    let memory = picker_column(&mut rig, ColumnId::Memory).expect("Memory row");
+    assert_eq!(
+        memory.display_name().as_ref(),
+        "Working set private - \"Memory\""
+    );
+
+    // Not applied before 100 ms.
+    type_filter(&mut rig, "working set", 50);
+    assert!(picker_column(&mut rig, ColumnId::User).is_some());
+    rig.pcx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    redraw(&mut rig.pcx);
+    assert!(picker_column(&mut rig, ColumnId::Memory).is_some());
+    assert!(picker_column(&mut rig, ColumnId::User).is_none());
+    assert!(row_bounds(&mut rig, ColumnId::Memory).is_some());
+
+    type_filter(&mut rig, "memory", 100);
+    assert!(picker_column(&mut rig, ColumnId::Memory).is_some());
+    let headings: Vec<_> = picker_items(&mut rig)
+        .into_iter()
+        .filter_map(|i| match i {
+            PickerItem::Heading(h) => Some(h.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headings, ["MEMORY"], "empty groups are hidden");
+
+    type_filter(&mut rig, "xyz", 100);
+    assert!(rig.pcx.debug_bounds("ColumnPicker-no-match").is_some());
+    assert!(row_bounds(&mut rig, ColumnId::Memory).is_none());
+}
+
+#[test]
+fn picker_gpu_slots_only_for_present_adapters() {
+    let mut cx = cosmic_cx();
+    let specs = vec![
+        grouped(ColumnId::Name, "Name", "Name", "Image"),
+        grouped(ColumnId::Gpu, "GPU", "GPU", "GPU"),
+        grouped(ColumnId::Gpu0, "GPU 0", "GPU 0", "GPU"),
+    ];
+    let mut rig = open_picker(&mut cx, registry_delegate(specs, &[ColumnId::Name]));
+    let labels: Vec<_> = picker_items(&mut rig)
+        .into_iter()
+        .filter_map(|i| match i {
+            PickerItem::Column(c) => Some(c.label.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, ["Name", "GPU", "GPU 0"]);
+    assert!(row_bounds(&mut rig, ColumnId::Gpu0).is_some());
+    assert!(row_bounds(&mut rig, ColumnId::Gpu1).is_none());
+}
+
+#[test]
+fn picker_toggle_persists_and_restores_width() {
+    let mut cx = cosmic_cx();
+    let specs = vec![
+        grouped(ColumnId::Name, "Name", "Name", "Image"),
+        grouped(ColumnId::User, "User", "User", "Identity"),
+        grouped(ColumnId::Cpu, "CPU", "CPU", "CPU"),
+        grouped(ColumnId::Pid, "PID", "PID", "Identity"),
+    ];
+    let order = [ColumnId::Name, ColumnId::User, ColumnId::Cpu, ColumnId::Pid];
+    let mut d = registry_delegate(specs, &order);
+    d.layout.set_width(ColumnId::Cpu, px(70.));
+    d.layout.set_visible(ColumnId::Cpu, false).expect("hide CPU");
+    let mut rig = open_picker(&mut cx, d);
+    assert!(!picker_column(&mut rig, ColumnId::Cpu).expect("CPU").visible);
+
+    let at = row_bounds(&mut rig, ColumnId::Cpu).expect("CPU row").center();
+    click(&mut rig.pcx, at);
+    redraw(&mut rig.vcx);
+    assert_eq!(visible_order(&mut rig.vcx, &rig.table), order);
+    let width = rig
+        .vcx
+        .update(|_, cx| rig.table.read(cx).delegate.layout.width(ColumnId::Cpu));
+    assert_eq!(width, px(70.));
+    assert_eq!(changed_count(&mut rig.vcx, &rig.table), 1);
+    assert!(picker_column(&mut rig, ColumnId::Cpu).expect("CPU").visible);
+    let count = rig.picker.read_with(&rig.pcx, |p, cx| p.count_text(cx));
+    assert_eq!(count.as_ref(), "4 of 4 columns shown");
+}
+
+#[test]
+fn picker_single_instance_refocus() {
+    let mut cx = cosmic_cx();
+    cx.update(GlobalRegistry::init);
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let mut rig = open_picker(&mut cx, d);
+    let windows = rig.vcx.update(|_, cx| cx.windows().len());
+    assert_eq!(picker_windows(&mut rig.vcx).len(), 1);
+
+    let table = rig.table.clone();
+    dispatch_open_picker(&mut rig.vcx, &table);
+    assert_eq!(picker_windows(&mut rig.vcx).len(), 1, "one picker window");
+    assert_eq!(rig.vcx.update(|_, cx| cx.windows().len()), windows);
+    assert!(
+        rig.pcx.update(|window, _| window.is_window_active()),
+        "the picker window is focused"
+    );
+}
+
+#[test]
+fn picker_escape_clears_filter_then_closes() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let mut rig = open_picker(&mut cx, d);
+    rig.pcx.simulate_input("xyz");
+    rig.pcx
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    redraw(&mut rig.pcx);
+    let filter = rig.picker.read_with(&rig.pcx, |p, _| p.filter().clone());
+    assert_eq!(
+        filter.read_with(&rig.pcx, |s, _| s.text().to_string()),
+        "xyz"
+    );
+
+    rig.pcx.simulate_keystrokes("escape");
+    redraw(&mut rig.pcx);
+    assert_eq!(filter.read_with(&rig.pcx, |s, _| s.text().to_string()), "");
+    assert!(picker_open(&mut rig), "the first Esc only clears");
+
+    rig.pcx.simulate_keystrokes("escape");
+    rig.pcx.run_until_parked();
+    assert!(!picker_open(&mut rig), "the second Esc closes");
+}
+
+#[test]
+fn picker_count_text() {
+    let mut cx = cosmic_cx();
+    let specs: Vec<ColumnSpec> = ColumnId::ALL[..96]
+        .iter()
+        .map(|&id| grouped(id, id.as_str(), id.as_str(), "All"))
+        .collect();
+    let visible: Vec<ColumnId> = ColumnId::ALL[..9].to_vec();
+    let mut rig = open_picker(&mut cx, registry_delegate(specs, &visible));
+    let count = rig.picker.read_with(&rig.pcx, |p, cx| p.count_text(cx));
+    assert_eq!(count.as_ref(), "9 of 96 columns shown");
+    assert!(rig.pcx.debug_bounds("ColumnPicker-count").is_some());
+}
+
+#[test]
+fn picker_na_column_enabled_with_note() {
+    let mut cx = cosmic_cx();
+    let mut specs = image_identity_memory();
+    specs[3].availability = Availability::NotOnThisSystem;
+    let mut rig = open_picker(&mut cx, registry_delegate(specs, &[ColumnId::Name]));
+    let pid = picker_column(&mut rig, ColumnId::Pid).expect("PID row");
+    assert!(pid.hideable, "enabled");
+    assert_eq!(pid.note_key(), Some("table-picker-na"));
+    assert!(rig.pcx.debug_bounds("ColumnPicker-note-pid").is_some());
+    let at = row_bounds(&mut rig, ColumnId::Pid).expect("PID row").center();
+    click(&mut rig.pcx, at);
+    assert!(picker_column(&mut rig, ColumnId::Pid).expect("PID").visible);
+}
+
+#[test]
+fn picker_keys_move_and_toggle() {
+    let mut cx = cosmic_cx();
+    let d = registry_delegate(image_identity_memory(), &[ColumnId::Name]);
+    let mut rig = open_picker(&mut cx, d);
+    let focus = rig.picker.read_with(&rig.pcx, |p, _| p.list_focus().clone());
+    rig.pcx.update(|window, cx| focus.focus(window, cx));
+    rig.pcx.simulate_keystrokes("down");
+    let cursor = |rig: &mut PickerRig| rig.picker.read_with(&rig.pcx, |p, _| p.cursor());
+    assert_eq!(cursor(&mut rig), Some("name"));
+    rig.pcx.simulate_keystrokes("down down");
+    assert_eq!(cursor(&mut rig), Some("user"), "headings are skipped");
+    rig.pcx.simulate_keystrokes("space");
+    redraw(&mut rig.pcx);
+    assert!(picker_column(&mut rig, ColumnId::User).expect("User").visible);
+    rig.pcx.simulate_keystrokes("end");
+    assert_eq!(cursor(&mut rig), Some("ws_peak"));
+    rig.pcx.simulate_keystrokes("home");
+    assert_eq!(cursor(&mut rig), Some("name"));
+}
+
+#[test]
+fn enable_all_columns_shows_every_column() {
+    let mut cx = cosmic_cx();
+    let specs: Vec<ColumnSpec> = ColumnId::ALL[..10]
+        .iter()
+        .map(|&id| grouped(id, id.as_str(), id.as_str(), "All"))
+        .collect();
+    let visible: Vec<ColumnId> = ColumnId::ALL[..3].to_vec();
+    let (table, vcx) = open(&mut cx, registry_delegate(specs, &visible));
+    vcx.update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
+
+    vcx.dispatch_action(EnableAllColumns {
+        table: TableId::History,
+    });
+    redraw(vcx);
+    assert_eq!(visible_order(vcx, &table).len(), 3, "another table's id");
+    assert_eq!(changed_count(vcx, &table), 0);
+
+    vcx.dispatch_action(EnableAllColumns {
+        table: TableId::Processes,
+    });
+    redraw(vcx);
+    assert_eq!(visible_order(vcx, &table), ColumnId::ALL[..10].to_vec());
+    assert_eq!(changed_count(vcx, &table), 1);
 }
