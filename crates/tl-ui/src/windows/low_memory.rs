@@ -354,9 +354,9 @@ impl LowMemoryWindow {
         })
         .detach();
         if let Some(frame) = TlSecondaryWindow::<Self>::find(handle, cx) {
-            frame.update(cx, |frame, cx| frame.set_pinned(true, cx));
-            send_keep_above(&*engine, &title, true);
-            let mut sent = true;
+            // A keyless window gets no `ToggleAlwaysOnTop`, so this window sends `KeepAbove`
+            // for every pin change itself, the first one included.
+            let mut sent = false;
             cx.observe(&frame, move |frame, cx| {
                 let frame = frame.read(cx);
                 let on = frame.pinned();
@@ -366,6 +366,9 @@ impl LowMemoryWindow {
                 }
             })
             .detach();
+            handle.update(cx, |_, window, cx| {
+                frame.update(cx, |frame, cx| frame.set_pinned(true, window, cx));
+            })?;
         }
         Ok(handle)
     }
