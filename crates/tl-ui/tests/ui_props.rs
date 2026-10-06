@@ -511,6 +511,57 @@ fnd-kv-not-reported = <not-reported>
     assert_eq!(tr_calls(), before, "60 frames make no tr call");
 }
 
+/// The filter bar resolves its words once per strings version: the General tab with the bar makes
+/// no tr call over 60 frames, and a new catalogue reaches the placeholder and tooltip (R-132).
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn props_filter_bar_words_follow_test_locale(cx: &mut TestAppContext) {
+    use tl_ui::i18n::{set_test_catalogue, tr_calls};
+
+    const MARKERS: &str = "
+pwn-props-filter-placeholder = <filter-placeholder>
+pwn-props-filter-icon-tooltip = <filter-tooltip>
+pwn-props-filter-name = <filter { $tab }>
+";
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    draw(cx);
+    let filter = cx.update(|_, cx| view.read(cx).filter.clone());
+    let frames = |cx: &mut VisualTestContext| {
+        let before = tr_calls();
+        for _ in 0..60 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        tr_calls() - before
+    };
+    assert!(cx.debug_bounds("PropsFilter-bar").is_some(), "bar drawn");
+    assert_eq!(frames(cx), 0, "60 frames make no tr call");
+
+    cx.update(|_, cx| set_test_catalogue(cx, MARKERS));
+    draw(cx);
+    let words = cx.update(|_, cx| {
+        let f = filter.read(cx);
+        (
+            f.input.read(cx).presentation().placeholder().to_string(),
+            f.icon_tooltip().to_string(),
+            f.accessible_name().to_string(),
+        )
+    });
+    assert_eq!(
+        words,
+        (
+            "<filter-placeholder>".to_owned(),
+            "<filter-tooltip>".to_owned(),
+            "<filter General>".to_owned()
+        )
+    );
+    assert_eq!(frames(cx), 0, "60 frames after the switch make no tr call");
+}
+
 struct Dummy;
 
 impl Render for Dummy {

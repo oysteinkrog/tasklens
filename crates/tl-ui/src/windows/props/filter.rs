@@ -24,7 +24,7 @@ use gpui_kit::{
 use crate::components::empty::TlEmptyState;
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
-use crate::i18n::{tr, tr_args};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(
@@ -63,6 +63,28 @@ pub struct FilterChanged {
     pub needle: SharedString,
 }
 
+/// The bar's own text, translated once per strings version (R-132), so a frame makes no `tr` call.
+struct FilterWords {
+    placeholder: SharedString,
+    icon_tooltip: SharedString,
+    /// The accessible name of the field, "Filter {tab label}".
+    name: SharedString,
+}
+
+impl FilterWords {
+    fn new(tab_label: &SharedString, cx: &App) -> Self {
+        Self {
+            placeholder: tr(cx, PLACEHOLDER),
+            icon_tooltip: tr(cx, ICON_TOOLTIP),
+            name: tr_args(cx, NAME, &[("tab", tab_label.to_string().into())]),
+        }
+    }
+}
+
+fn strings_version(cx: &App) -> u64 {
+    cx.try_global::<Strings>().map_or(0, |s| s.strings_version)
+}
+
 /// One tab's filter state.
 pub struct PropsFilter {
     pub input: Entity<InputState>,
@@ -74,7 +96,9 @@ pub struct PropsFilter {
     latest: Arc<AtomicU64>,
     /// The tab label, for the accessible name "Filter {tab label}".
     tab_label: SharedString,
-    _sub: Subscription,
+    words: FilterWords,
+    strings_version: u64,
+    _subs: [Subscription; 2],
 }
 
 impl EventEmitter<FilterChanged> for PropsFilter {}
@@ -92,6 +116,15 @@ impl PropsFilter {
                 this.schedule(cx);
             }
         });
+        let strings = cx.observe_global::<Strings>(|this: &mut Self, cx| {
+            let version = strings_version(cx);
+            if version != this.strings_version {
+                this.strings_version = version;
+                this.words = FilterWords::new(&this.tab_label, cx);
+                cx.notify();
+            }
+        });
+        let tab_label = tab_label.into();
         Self {
             input,
             debounce: None,
@@ -99,8 +132,10 @@ impl PropsFilter {
             applied_generation: 0,
             needle_lower: SharedString::default(),
             latest: Arc::new(AtomicU64::new(0)),
-            tab_label: tab_label.into(),
-            _sub: sub,
+            words: FilterWords::new(&tab_label, cx),
+            strings_version: strings_version(cx),
+            tab_label,
+            _subs: [sub, strings],
         }
     }
 
@@ -115,8 +150,18 @@ impl PropsFilter {
     }
 
     /// The accessible name of the field, "Filter {tab label}".
-    pub fn accessible_name(&self, cx: &App) -> SharedString {
-        tr_args(cx, NAME, &[("tab", self.tab_label.to_string().into())])
+    pub fn accessible_name(&self) -> SharedString {
+        self.words.name.clone()
+    }
+
+    /// The placeholder of the field.
+    pub fn placeholder(&self) -> &SharedString {
+        &self.words.placeholder
+    }
+
+    /// The tooltip of the search icon.
+    pub fn icon_tooltip(&self) -> &SharedString {
+        &self.words.icon_tooltip
     }
 
     /// The lowercase filter text the last debounce saw.
@@ -228,7 +273,7 @@ pub fn filter_bar(
     let m = *metrics(cx);
     let f = filter.read(cx);
     let input = f.input.clone();
-    let name = f.accessible_name(cx);
+    let words = &f.words;
 
     div()
         .debug_selector(|| "PropsFilter-bar".into())
@@ -249,9 +294,9 @@ pub fn filter_bar(
                 .size(TlInputSize::Sm)
                 .width(px(FIELD_WIDTH * m.ui_scale))
                 .prefix_icon(TlIcon::Search)
-                .prefix_tooltip(tr(cx, ICON_TOOLTIP))
-                .aria_label(name)
-                .placeholder(tr(cx, PLACEHOLDER))
+                .prefix_tooltip(words.icon_tooltip.clone())
+                .aria_label(words.name.clone())
+                .placeholder(words.placeholder.clone())
                 .clear_button(true)
                 .clean_on_escape(true),
         )
@@ -506,7 +551,7 @@ mod tests {
         let (view, cx) = host(cx, false);
         let f = filter(&view, cx);
         assert_eq!(
-            cx.update(|_, cx| f.read(cx).accessible_name(cx)),
+            cx.update(|_, cx| f.read(cx).accessible_name()),
             "Filter Threads"
         );
     }
