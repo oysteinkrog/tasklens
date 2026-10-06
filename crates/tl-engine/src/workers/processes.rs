@@ -264,9 +264,13 @@ pub fn spec() -> WorkerSpec {
 /// files and icon themes), then `source::run`.
 pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     match cfg.mode {
-        // E32 replaces the LowMemory arm with `workers::lowmem::source(cfg)`. Until then it
-        // runs the full sweep.
-        EngineMode::Full | EngineMode::LowMemory => full_factory(cfg, io),
+        EngineMode::Full => full_factory(cfg, io),
+        // The stripped sweep (E32): no desktop files or icons, so it is built in place.
+        EngineMode::LowMemory => Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
+            let io = io.clone();
+            let root = cfg.sys_root.clone();
+            async move { source::run(cx, io, crate::workers::lowmem::LowMemSource::new(root)).await }
+        }),
     }
 }
 

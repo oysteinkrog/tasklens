@@ -1022,6 +1022,90 @@ mod tests {
         }
     }
 
+    /// E32: the `Processes` factory of a `LowMemory` engine runs `LowMemSource` under its
+    /// supervisor, every 2 s whatever the demand.
+    #[test]
+    fn lab_lowmem_mode_selects_stripped_source() {
+        use asupersync::channel::{oneshot, watch};
+        use asupersync::types::Budget;
+        use asupersync::{Cx, LabConfig, LabRuntime};
+
+        use crate::config::{EngineConfig, EngineMode};
+        use crate::source::{WorkerControl, WorkerIo};
+        use crate::supervise::build_supervisor;
+        use crate::update::EngineMsg;
+        use crate::workers::processes;
+
+        let fake = three();
+        let cfg = Arc::new(
+            EngineConfig::new(EngineMode::LowMemory, fake.path("state")).with_sys_root(fake.root()),
+        );
+        let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(1_000_000));
+        let region = lab.state.create_root_region(Budget::INFINITE);
+        let (updates, mut rx) = asupersync::channel::mpsc::channel::<EngineMsg>(256);
+        let (_demand_tx, demand) = watch::channel(Demand::default());
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control_tx, control) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(
+            updates,
+            demand,
+            settings,
+            control,
+            crate::dbus::SharedHandles::default(),
+        );
+        let factory = processes::factory(cfg, io);
+        let (abort_tx, mut abort_rx) = oneshot::channel::<()>();
+        let (task, _handle) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let supervisor = build_supervisor("processes", factory).expect("supervisor");
+                let mut handle = supervisor.spawn(&cx).expect("supervisor spawns");
+                let _ = abort_rx.recv(&cx).await;
+                handle.abort();
+                let _ = handle.join().await;
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        // 4 s in 100 ms steps; a sweep due at 4 s is past the window.
+        let step = Duration::from_millis(100);
+        let mut sweeps = Vec::new();
+        for n in 0..40u64 {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    EngineMsg::Source(SourceUpdate::Processes(s)) => sweeps.push((n * 100, s)),
+                    other => panic!("unexpected message {other:?}"),
+                }
+            }
+            if n < 39 {
+                lab.advance_time(u64::try_from(step.as_nanos()).expect("fits in u64"));
+                lab.step_for_test();
+                lab.run_until_idle();
+            }
+        }
+        let times: Vec<u64> = sweeps.iter().map(|(t, _)| *t).collect();
+        assert_eq!(times, [0, 2_000], "one sweep every 2 s");
+        for (t, s) in &sweeps {
+            assert!(s.low_memory.is_some(), "full sweep at {t} ms");
+            assert_eq!(s.records.len(), 3);
+            for r in &s.records {
+                assert_eq!(r.validity.get(ProcessField::Cpu), Validity::Unsupported);
+            }
+        }
+
+        abort_tx.send_blocking(()).expect("the root task waits");
+        let virtual_time = lab.run_with_auto_advance();
+        assert_ne!(
+            virtual_time.termination,
+            asupersync::lab::AutoAdvanceTermination::StepLimitReached,
+            "{virtual_time:?}"
+        );
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
     #[test]
     fn psi_full_total_parses_the_full_line() {
         let text = b"some avg10=1.00 avg60=0.00 avg300=0.00 total=99\n\
