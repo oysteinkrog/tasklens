@@ -474,3 +474,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.7 decisions: clk_tck in CellCtx; app rows borrow user, command line and start time from the first member; desktop path and unit row fields are a new 8q0 bead; RowRef::Record carries &TableRow.
 - crw.11 decisions: TlButton gains focus_handle(FocusHandle) and trailing_icon(TlIcon) (button.rs chain edit); PerfSetCpuGraphMode and PerfToggleCpuKernel declared early.
 - yrf.16 (b5efbc0, 402ab9d, 88eebf1): chart hover readout; hitbox only when spec.hover; text reshaped only on index or version change; offset from the newest sample. Known: window deactivation clears the pin only on the next paint (no repaint is forced).
+- pdu.11 (fe4fe77, 9f9f8c0): process query state, generations, expansion, resend when the command queue was full. GroupHeader::node mirrors tl-engine GroupClass::key (noted on pdu.12).
+- crw.11 (e96173a, df61a3a): CPU page; charts cached; demand with window handle. Follow-up commits in flight: TlButton focus_handle and trailing_icon, grid rebuild on style_version, its strings through tr.
