@@ -12,6 +12,8 @@ mod crash;
 mod logging;
 #[allow(dead_code, reason = "E33-006 calls it")]
 mod migrations;
+#[allow(dead_code, reason = "the panic hook and renderer start-up call it later")]
+mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
 
