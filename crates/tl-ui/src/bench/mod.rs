@@ -2,4 +2,5 @@
 //! Built only with `--features bench`.
 
 pub mod engine;
+pub mod stats;
 pub mod synth;
