@@ -6,45 +6,48 @@
 //! repeats, Error priority and the hidden-window rule. Owners choose only the kind, the text, the
 //! key and an optional action button (R-113). Owners never push from `render`.
 //!
-//! The toasts are drawn by the kit notification list in the window's kit Root. Each toast is a kit
-//! `Notification` with `autohide(false)` whose content is built from the queue on every render,
-//! so a replace or a repeat changes the toast in place without moving it. The queue runs every
-//! timer itself: the kit's 5 s autohide cannot restart on a replace without a re-push, and a
-//! re-push moves the toast to the end of the stack and replays its enter animation.
+//! The queue draws the stack itself: it is a view, mounted above the window content by the
+//! `ToastLayer` Root plugin that [`init`] registers. Toasts sit in one column at the queue's top
+//! edge, `sp3` apart, newest at the bottom, with one close button each and the toast shadow
+//! (offset 0 4, blur 16). Each toast is built from the queue on every render, so a replace or a
+//! repeat changes it in place without moving it. The queue runs every timer itself.
 //!
-//! Every kit call is deferred to the end of the current update, so an owner may push from inside
-//! a window event handler of the same window.
+//! Motion: a new toast slides down 8 px and fades in over `m_base`, a closed one fades out over
+//! `m_base` with `ease_in_cubic` and then unmounts. With reduced motion or
+//! `motion.animations = false` neither runs and a closed toast unmounts at once.
 //!
-//! Known kit limits in P1: the kit draws its own small close button on hover in the toast's top
-//! right corner next to ours, keeps its own toast shadow, and animates enter and exit for 400 ms
-//! and 200 ms (R-109). GPUI skips those animations when `cx.reduce_motion()` is set; the kit has
-//! no switch for `motion.animations = false`.
+//! The only kit call left is the desktop notification for an Error while the main window is
+//! hidden. It is deferred to the end of the current update, so an owner may push from inside a
+//! window event handler of the same window.
 
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::base::{Root, RootPlugin};
 use gpui_kit::component::notification::{Notification, NotificationType};
-use gpui_kit::component::theme::Theme as KitTheme;
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, Anchor, AnyElement, AnyWindowHandle, App, Context, ElementId, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledText, Task, TextRun, WeakEntity, Window, div,
-    font, px,
+    Action, Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, BoxShadow, Context,
+    ElementId, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledText, Task, TextRun, WeakEntity,
+    Window, div, font, point, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tracing::{debug, warn};
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
 use super::icons::{TlIcon, icon};
+use super::motion::{M_BASE, ease_out_cubic};
 use super::progress::TlSpinner;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::GlobalHub;
+use crate::i18n::tr_args;
+use crate::settings_global::animations_on;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, t_base};
-use crate::theme::{TlTheme, current, metrics};
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Keys at or above this are fixed keys owned by pages. Tracker keys (`id << 8 | index`, with
 /// `ActionId` below 2^55) never reach it (R-232).
@@ -66,6 +69,8 @@ pub const WIDTH: f32 = 382.0;
 pub const MIN_HEIGHT: f32 = 40.0;
 /// Text lines shown before the cut.
 pub const MAX_LINES: usize = 3;
+/// How far a new toast slides down while it fades in, before the UI scale.
+pub const ENTER_SLIDE: f32 = 8.0;
 
 /// Info, Success and Warning toasts.
 pub const SHORT: Duration = Duration::from_secs(5);
@@ -75,6 +80,26 @@ pub const ERROR: Duration = Duration::from_secs(8);
 pub const WITH_ACTION: Duration = Duration::from_secs(15);
 /// A repeat of a visible toast within this time is counted instead of added.
 pub const COALESCE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Registers the `ToastLayer` Root plugin that draws each window's stack. Call it once, before
+/// the first window opens: a Root only mounts the plugins registered before it was created.
+pub fn init(cx: &mut App) {
+    Root::register_plugin::<ToastLayer>(cx, |_, _| ToastLayer { queue: None });
+}
+
+/// The Root plugin that mounts the window's `ToastQueue` above the content. The queue attaches
+/// itself in [`ToastQueue::new`].
+pub struct ToastLayer {
+    queue: Option<WeakEntity<ToastQueue>>,
+}
+
+impl Render for ToastLayer {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().children(self.queue.as_ref().and_then(WeakEntity::upgrade))
+    }
+}
+
+impl RootPlugin for ToastLayer {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ToastKind {
@@ -87,7 +112,7 @@ pub enum ToastKind {
 }
 
 impl ToastKind {
-    /// The kind spelled out, the accessible prefix of the tooltip ("Error: …").
+    /// The kind spelled out in English, for logs.
     pub fn name(self) -> &'static str {
         match self {
             Self::Info => "Info",
@@ -95,6 +120,17 @@ impl ToastKind {
             Self::Warning => "Warning",
             Self::Error => "Error",
             Self::Progress => "Progress",
+        }
+    }
+
+    /// The string key of the tooltip, which puts the kind before the text ("Error: …").
+    fn tooltip_key(self) -> &'static str {
+        match self {
+            Self::Info => "fnd-toast-tip-info",
+            Self::Success => "fnd-toast-tip-success",
+            Self::Warning => "fnd-toast-tip-warning",
+            Self::Error => "fnd-toast-tip-error",
+            Self::Progress => "fnd-toast-tip-progress",
         }
     }
 
@@ -108,11 +144,9 @@ impl ToastKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ToastKey(pub u64);
 
-/// The kit notification id type for keyed toasts: `Notification::id1::<ToastKeyTag>(key.0)`.
+/// The kit notification id type for a keyed desktop notification:
+/// `Notification::id1::<ToastKeyTag>(key.0)`.
 pub struct ToastKeyTag;
-
-/// The kit notification id type for toasts pushed without a key.
-struct AnonToastTag;
 
 /// An optional button under the text. It dispatches `action`, then closes the toast.
 pub struct ToastAction {
@@ -134,15 +168,6 @@ impl Clone for ToastAction {
 enum Slot {
     Key(u64),
     Anon(u64),
-}
-
-impl Slot {
-    fn kit_note(self) -> Notification {
-        match self {
-            Self::Key(k) => Notification::new().id1::<ToastKeyTag>(k),
-            Self::Anon(n) => Notification::new().id1::<AnonToastTag>(n),
-        }
-    }
 }
 
 impl fmt::Display for Slot {
@@ -168,9 +193,11 @@ struct ToastEntry {
     /// When the running timer started. `None` while paused or not shown.
     since: Option<Instant>,
     timer: Option<Task<()>>,
-    /// Bumped each time the entry is shown, so a late kit close of an older toast is ignored.
+    /// Bumped each time the entry is shown. Keys the enter and exit animations.
     shown: u64,
     focus: Option<FocusHandle>,
+    /// Animations were on when the toast was shown, so it enters with the slide and fade.
+    enter_animated: bool,
 }
 
 impl ToastEntry {
@@ -191,27 +218,54 @@ impl ToastEntry {
             self.text.clone()
         }
     }
+
+    fn view(&self, focused: bool) -> ToastView {
+        ToastView {
+            slot: self.slot,
+            shown: self.shown,
+            kind: self.kind,
+            text: self.text.clone(),
+            count: self.count,
+            action: self.action.clone(),
+            focus: self.focus.clone(),
+            focused,
+        }
+    }
 }
 
 fn count_suffix(count: u32) -> String {
     format!(" (×{count})")
 }
 
-/// What one toast's content needs from the queue, copied out for a render.
+/// What one toast's look needs from the queue, copied out for a render.
+#[derive(Clone)]
 struct ToastView {
+    slot: Slot,
+    shown: u64,
     kind: ToastKind,
     text: SharedString,
     count: u32,
     action: Option<ToastAction>,
+    focus: Option<FocusHandle>,
     focused: bool,
 }
 
+/// A closed toast that fades out before it unmounts.
+struct ExitingToast {
+    view: ToastView,
+    /// Its place in the stack when it closed.
+    index: usize,
+    _timer: Task<()>,
+}
+
 /// The per-window toast stack. Create one per window with [`ToastQueue::new`]; the window must
-/// have a kit Root.
+/// have a Root, created after [`init`].
 pub struct ToastQueue {
     /// Shown toasts in stack order, oldest first. Includes Progress toasts.
     visible: SmallVec<[ToastEntry; 4]>,
     waiting: VecDeque<ToastEntry>,
+    /// Closed toasts still fading out. Empty while animations are off.
+    exiting: SmallVec<[ExitingToast; 2]>,
     top: Pixels,
     window: AnyWindowHandle,
     next_anon: u64,
@@ -224,20 +278,36 @@ pub struct ToastQueue {
 }
 
 impl ToastQueue {
-    /// A queue for `window`, with the stack's top edge at `top`. Writes the kit notification
-    /// settings. In P1 every window passes the main-window top (R-195).
+    /// A queue for `window`, with the stack's top edge at `top`. It attaches itself to the
+    /// window's `ToastLayer` at the end of the current update. In P1 every window passes the
+    /// main-window top (R-195).
     pub fn new(window: &mut Window, cx: &mut Context<Self>, top: Pixels) -> Self {
-        let settings = &mut KitTheme::global_mut(cx).notification;
-        settings.placement = Anchor::TopCenter;
-        settings.margins.top = top;
-        // The queue enforces the cap of 4 itself, so the kit never hides a Progress toast.
-        settings.max_items = MAX_VISIBLE + MAX_WAITING;
-        settings.width = px(WIDTH);
+        let handle = window.window_handle();
+        let queue = cx.weak_entity();
+        cx.defer(move |cx| {
+            let attached = handle.update(cx, |_, window, cx| {
+                let layer = window
+                    .root::<Root>()
+                    .flatten()
+                    .and_then(|root| root.read(cx).plugin::<ToastLayer>());
+                match layer {
+                    Some(layer) => layer.update(cx, |layer, cx| {
+                        layer.queue = Some(queue);
+                        cx.notify();
+                    }),
+                    None => warn!("toast queue: the window has no toast layer, call toast::init"),
+                }
+            });
+            if attached.is_err() {
+                warn!("toast queue: the window is gone");
+            }
+        });
         Self {
             visible: SmallVec::new(),
             waiting: VecDeque::new(),
+            exiting: SmallVec::new(),
             top,
-            window: window.window_handle(),
+            window: handle,
             next_anon: 0,
             next_shown: 0,
             hovered: SmallVec::new(),
@@ -252,11 +322,10 @@ impl ToastQueue {
     }
 
     /// Moves the stack's top edge. The shell calls it again on every UI scale change
-    /// (UI-SHL-130). `Theme::notification` is app-global, so the last call wins in every window.
-    pub fn set_top(&mut self, top: Pixels, cx: &mut App) {
+    /// (UI-SHL-130).
+    pub fn set_top(&mut self, top: Pixels, cx: &mut Context<Self>) {
         self.top = top;
-        KitTheme::global_mut(cx).notification.margins.top = top;
-        cx.refresh_windows();
+        cx.notify();
     }
 
     /// Shows a toast, or queues it when 4 are visible. See UI-FND-020 for the rules.
@@ -302,7 +371,7 @@ impl ToastQueue {
             entry.last_push = now;
             let slot = entry.slot;
             self.restart(slot, now, cx);
-            cx.refresh_windows();
+            cx.notify();
             return;
         }
 
@@ -325,6 +394,7 @@ impl ToastQueue {
             timer: None,
             shown: 0,
             focus: None,
+            enter_animated: false,
         };
 
         if kind == ToastKind::Progress || self.counted() < MAX_VISIBLE {
@@ -333,7 +403,7 @@ impl ToastQueue {
             && let Some(ix) = self.oldest_minor_visible(None)
         {
             let evicted = self.visible[ix].slot;
-            self.take_visible(evicted, true, cx);
+            self.take_visible(evicted, cx);
             self.show(entry, now, cx);
         } else {
             self.wait(entry);
@@ -362,6 +432,28 @@ impl ToastQueue {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn is_paused(&self) -> bool {
         self.paused
+    }
+
+    /// The texts of the visible toasts that entered with the slide and fade.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn enter_animated_texts(&self) -> Vec<SharedString> {
+        self.visible
+            .iter()
+            .filter(|e| e.enter_animated)
+            .map(ToastEntry::display_text)
+            .collect()
+    }
+
+    /// The texts of closed toasts that are still fading out.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn exiting_texts(&self) -> Vec<SharedString> {
+        self.exiting.iter().map(|e| e.view.text.clone()).collect()
+    }
+
+    /// Toasts drawn in the stack: the visible ones and those fading out.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn mounted_len(&self) -> usize {
+        self.visible.len() + self.exiting.len()
     }
 
     /// Visible toasts that hold one of the 4 slots.
@@ -404,9 +496,10 @@ impl ToastQueue {
         entry.shown = self.next_shown;
         entry.remaining = entry.duration();
         entry.focus = Some(cx.focus_handle());
+        entry.enter_animated = animations_on(cx);
         self.arm(&mut entry, now, cx);
-        self.kit_push(&entry, cx);
         self.visible.push(entry);
+        cx.notify();
     }
 
     fn replace_visible(
@@ -434,12 +527,12 @@ impl ToastQueue {
             // oldest other Info or Success makes room when there is one.
             if let Some(evict) = self.oldest_minor_visible(Some(ix)) {
                 let evicted = self.visible[evict].slot;
-                self.take_visible(evicted, true, cx);
+                self.take_visible(evicted, cx);
             }
         } else if !was_progress && is_progress {
             self.promote(now, cx);
         }
-        cx.refresh_windows();
+        cx.notify();
     }
 
     /// Shows waiting toasts while slots are free.
@@ -453,7 +546,7 @@ impl ToastQueue {
     }
 
     fn close(&mut self, slot: Slot, cx: &mut Context<Self>) {
-        if self.take_visible(slot, true, cx) {
+        if self.take_visible(slot, cx) {
             let now = cx.background_executor().now();
             self.promote(now, cx);
         } else if let Some(ix) = self.waiting.iter().position(|e| e.slot == slot) {
@@ -461,36 +554,39 @@ impl ToastQueue {
         }
     }
 
-    /// Takes the visible toast `slot` out of the queue. With `kit`, also closes the kit toast.
-    fn take_visible(&mut self, slot: Slot, kit: bool, cx: &mut Context<Self>) -> bool {
+    /// Takes the visible toast `slot` out of the queue. While animations are on it fades out
+    /// in its place for `m_base` before it unmounts.
+    fn take_visible(&mut self, slot: Slot, cx: &mut Context<Self>) -> bool {
         let Some(ix) = self.visible.iter().position(|e| e.slot == slot) else {
             return false;
         };
-        self.visible.remove(ix);
+        let entry = self.visible.remove(ix);
         self.hovered.retain(|s| *s != slot);
         self.focused.retain(|s| *s != slot);
         self.update_pause(cx);
-        if kit {
-            self.kit_remove(slot, cx);
+        if animations_on(cx) {
+            let shown = entry.shown;
+            let timer = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                cx.background_executor().timer(M_BASE).await;
+                this.update(cx, |queue, cx| {
+                    queue.exiting.retain(|e| e.view.shown != shown);
+                    cx.notify();
+                })
+                .ok();
+            });
+            self.exiting.push(ExitingToast {
+                view: entry.view(false),
+                index: ix,
+                _timer: timer,
+            });
         }
+        cx.notify();
         true
     }
 
     /// A timer ran out.
     fn expire(&mut self, slot: Slot, cx: &mut Context<Self>) {
         self.close(slot, cx);
-    }
-
-    /// The kit closed a toast: its own close button, or the end of an exit we started.
-    fn kit_closed(&mut self, slot: Slot, shown: u64, cx: &mut Context<Self>) {
-        let current = self
-            .visible
-            .iter()
-            .any(|e| e.slot == slot && e.shown == shown);
-        if current && self.take_visible(slot, false, cx) {
-            let now = cx.background_executor().now();
-            self.promote(now, cx);
-        }
     }
 
     /// The close button or the action button was pressed.
@@ -555,73 +651,10 @@ impl ToastQueue {
         }));
     }
 
-    fn view(&self, slot: Slot) -> Option<ToastView> {
-        self.visible
-            .iter()
-            .find(|e| e.slot == slot)
-            .map(|e| ToastView {
-                kind: e.kind,
-                text: e.text.clone(),
-                count: e.count,
-                action: e.action.clone(),
-                focused: self.focused.contains(&slot),
-            })
-    }
-
-    /// Adds the kit toast for `entry` after the current update.
-    fn kit_push(&self, entry: &ToastEntry, cx: &mut Context<Self>) {
-        let m = *metrics(cx);
-        let theme = current(cx).clone();
-        let queue = cx.entity().downgrade();
-        let closed = queue.clone();
-        let slot = entry.slot;
-        let shown = entry.shown;
-        let focus = entry.focus.clone().unwrap_or_else(|| cx.focus_handle());
-        let note = slot
-            .kit_note()
-            .autohide(false)
-            .min_h(px(MIN_HEIGHT * m.ui_scale))
-            .p(m.sp[4])
-            .rounded(m.radius_card)
-            .bg(theme.menu_bg)
-            .border_color(theme.divider)
-            .content(move |_, window, cx| {
-                render_content(&queue, slot, &focus, window, cx)
-                    .unwrap_or_else(|| div().into_any_element())
-            })
-            .on_close(move |_, cx| {
-                if let Some(queue) = closed.upgrade() {
-                    queue.update(cx, |queue, cx| queue.kit_closed(slot, shown, cx));
-                }
-            });
-        let handle = self.window;
-        cx.defer(move |cx| {
-            if handle
-                .update(cx, |_, window, cx| window.push_notification(note, cx))
-                .is_err()
-            {
-                warn!(slot = %slot, "toast window is gone");
-            }
-        });
-    }
-
-    /// Closes the kit toast `slot` after the current update.
-    fn kit_remove(&self, slot: Slot, cx: &mut Context<Self>) {
-        let handle = self.window;
-        cx.defer(move |cx| {
-            handle
-                .update(cx, |_, window, cx| match slot {
-                    Slot::Key(k) => window.remove_notification1::<ToastKeyTag>(k, cx),
-                    Slot::Anon(n) => window.remove_notification1::<AnonToastTag>(n, cx),
-                })
-                .ok();
-        });
-    }
-
     /// Sends an Error to the desktop while the main window is hidden (rule 8).
     fn deliver_system(&self, text: SharedString, key: Option<ToastKey>, cx: &mut Context<Self>) {
         let note = match key {
-            Some(key) => Slot::Key(key.0).kit_note(),
+            Some(key) => Notification::new().id1::<ToastKeyTag>(key.0),
             None => Notification::new(),
         }
         .message(text)
@@ -640,6 +673,83 @@ impl ToastQueue {
             }
         });
     }
+}
+
+impl Render for ToastQueue {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        let animate = animations_on(cx);
+        let queue = cx.weak_entity();
+
+        let mut toasts: Vec<AnyElement> = Vec::with_capacity(self.visible.len() + 2);
+        for entry in &self.visible {
+            let view = entry.view(self.focused.contains(&entry.slot));
+            if let Some(focus) = &view.focus {
+                let focused = focus.contains_focused(window, cx);
+                if focused != view.focused {
+                    let queue = queue.clone();
+                    let slot = view.slot;
+                    cx.defer(move |cx| {
+                        queue
+                            .update(cx, |queue, cx| queue.set_focused(slot, focused, cx))
+                            .ok();
+                    });
+                }
+            }
+            let card = toast_card(&view, Some(&queue), &m, &theme, window, cx);
+            let card = if entry.enter_animated && animate {
+                let slide = ENTER_SLIDE * m.ui_scale;
+                card.with_animation(
+                    ("TlToast-enter", entry.shown as usize),
+                    Animation::new(M_BASE).with_easing(ease_out_cubic),
+                    move |card, t| card.top(px(-slide * (1. - t))).opacity(t),
+                )
+                .into_any_element()
+            } else {
+                card.into_any_element()
+            };
+            let slot = entry.slot;
+            let hover_queue = queue.clone();
+            toasts.push(
+                div()
+                    .id(ElementId::Name(format!("TlToast-{slot}-frame").into()))
+                    .debug_selector(move || format!("TlToast-{slot}-frame"))
+                    .w_full()
+                    .on_hover(move |hovered, _, cx| {
+                        hover_queue
+                            .update(cx, |queue, cx| queue.set_hovered(slot, *hovered, cx))
+                            .ok();
+                    })
+                    .child(card)
+                    .into_any_element(),
+            );
+        }
+        if animate {
+            for exiting in &self.exiting {
+                let card = toast_card(&exiting.view, None, &m, &theme, window, cx).with_animation(
+                    ("TlToast-exit", exiting.view.shown as usize),
+                    Animation::new(M_BASE).with_easing(ease_in_cubic),
+                    |card, t| card.opacity(1. - t),
+                );
+                let ix = exiting.index.min(toasts.len());
+                toasts.insert(ix, div().w_full().child(card).into_any_element());
+            }
+        }
+
+        div()
+            .absolute()
+            .top(self.top)
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(v_flex().w(px(WIDTH)).gap(m.sp[3]).children(toasts))
+    }
+}
+
+fn ease_in_cubic(t: f32) -> f32 {
+    t * t * t
 }
 
 fn set_member(set: &mut SmallVec<[Slot; 2]>, slot: Slot, on: bool) {
@@ -681,27 +791,24 @@ fn kind_icon(kind: ToastKind, theme: &TlTheme, size: Pixels) -> AnyElement {
     icon(name, size, color).into_any_element()
 }
 
-/// One toast's content: icon, text with the optional action button under it, and the close
-/// button. Built on every render of the kit toast from the queue's current entry.
-fn render_content(
-    queue: &WeakEntity<ToastQueue>,
-    slot: Slot,
-    focus: &FocusHandle,
+/// One toast: the card with its icon, the text with the optional action button under it, and
+/// the close button. `queue` is `None` for a toast that is fading out: it is drawn the same but
+/// takes no input, has no tooltip and uses element ids of its own.
+fn toast_card(
+    view: &ToastView,
+    queue: Option<&WeakEntity<ToastQueue>>,
+    m: &UiMetrics,
+    theme: &TlTheme,
     window: &mut Window,
     cx: &mut App,
-) -> Option<AnyElement> {
-    let queue = queue.upgrade()?;
-    let view = queue.read(cx).view(slot)?;
-    let m = *metrics(cx);
-    let theme = current(cx).clone();
-
-    let focused = focus.contains_focused(window, cx);
-    if focused != view.focused {
-        let queue = queue.clone();
-        cx.defer(move |cx| {
-            queue.update(cx, |queue, cx| queue.set_focused(slot, focused, cx));
-        });
-    }
+) -> gpui_kit::Div {
+    let slot = view.slot;
+    let live = queue.is_some();
+    let name = if live {
+        format!("TlToast-{slot}")
+    } else {
+        format!("TlToast-{slot}-x{}", view.shown)
+    };
 
     let text: AnyElement = if view.count >= 2 {
         // The count is a separate run with tabular figures.
@@ -728,92 +835,122 @@ fn render_content(
         view.text.clone().into_any_element()
     };
     let mut text_box = div()
-        .debug_selector(move || format!("TlToast-{slot}-text"))
         .min_w_0()
-        .text_color(theme.text_primary);
-    *text_box.text_style() = t_base(&m);
-    let text_box = text_box.line_clamp(MAX_LINES).text_ellipsis().child(text);
-
-    let full = if view.count >= 2 {
-        format!("{}{}", view.text, count_suffix(view.count))
+        .text_color(theme.text_primary)
+        .when(live, |d| {
+            d.debug_selector(move || format!("TlToast-{slot}-text"))
+        });
+    *text_box.text_style() = t_base(m);
+    let text_box = div()
+        .relative()
+        .flex()
+        .min_w_0()
+        .child(text_box.line_clamp(MAX_LINES).text_ellipsis().child(text));
+    let text_box = if live {
+        let full = if view.count >= 2 {
+            format!("{}{}", view.text, count_suffix(view.count))
+        } else {
+            view.text.to_string()
+        };
+        let tip_text = tr_args(cx, view.kind.tooltip_key(), &[("text", full.into())]);
+        let tip_id = ElementId::NamedChild(
+            Arc::new(ElementId::Name(name.clone().into())),
+            "tooltip".into(),
+        );
+        let tip_state = HoverTooltip::state(tip_id, window, cx);
+        HoverTooltip::attach(
+            &tip_state,
+            text_box,
+            DELAY_CONTROL,
+            TlTooltip::text(tip_text).build(),
+            window,
+            cx,
+        )
     } else {
-        view.text.to_string()
+        text_box
     };
-    let tip_text = format!("{}: {full}", view.kind.name());
-    let tip_id = ElementId::NamedChild(
-        Arc::new(ElementId::Name(format!("TlToast-{slot}").into())),
-        "tooltip".into(),
-    );
-    let tip_state = HoverTooltip::state(tip_id, window, cx);
-    let text_box = HoverTooltip::attach(
-        &tip_state,
-        div().relative().flex().min_w_0().child(text_box),
-        DELAY_CONTROL,
-        TlTooltip::text(tip_text).build(),
-        window,
-        cx,
-    );
 
-    let button = |queue: &gpui_kit::Entity<ToastQueue>| {
-        let queue = queue.downgrade();
+    let dismiss = |queue: Option<&WeakEntity<ToastQueue>>| {
+        let queue = queue.cloned();
         move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut App| {
-            if let Some(queue) = queue.upgrade() {
-                queue.update(cx, |queue, cx| queue.dismiss(slot, cx));
+            if let Some(queue) = &queue {
+                queue.update(cx, |queue, cx| queue.dismiss(slot, cx)).ok();
             }
         }
     };
-    let action = view.action.map(|a| {
-        div().flex().child(
-            TlButton::new(
-                ElementId::Name(format!("TlToast-{slot}-action").into()),
-                TlButtonKind::Secondary,
-            )
-            .size(TlButtonSize::Sm)
-            .label(a.label)
-            .action(a.action)
-            .on_click(button(&queue)),
+    let action = view.action.clone().map(|a| {
+        let button = TlButton::new(
+            ElementId::Name(format!("{name}-action").into()),
+            TlButtonKind::Secondary,
         )
+        .size(TlButtonSize::Sm)
+        .label(a.label);
+        let button = if live {
+            button.action(a.action).on_click(dismiss(queue))
+        } else {
+            button.tab_stop(false)
+        };
+        div().flex().child(button)
     });
     let close = TlButton::new(
-        ElementId::Name(format!("TlToast-{slot}-close").into()),
+        ElementId::Name(format!("{name}-close").into()),
         TlButtonKind::Icon,
     )
     .size(TlButtonSize::Sm)
     .icon(TlIcon::X)
+    .icon_size(m.icon.sm)
     .tooltip("Close")
-    .on_click(button(&queue));
+    .tab_stop(live)
+    .when(live, |b| b.on_click(dismiss(queue)));
 
-    let hover_queue = queue.downgrade();
-    Some(
-        h_flex()
-            .id(ElementId::Name(format!("TlToast-{slot}").into()))
-            .debug_selector(move || format!("TlToast-{slot}"))
-            .track_focus(focus)
-            .w_full()
-            .items_start()
-            .gap(m.sp[4])
-            .on_hover(move |hovered, _, cx| {
-                if let Some(queue) = hover_queue.upgrade() {
-                    queue.update(cx, |queue, cx| queue.set_hovered(slot, *hovered, cx));
-                }
-            })
-            .child(
-                div()
-                    .flex_none()
-                    .pt(m.sp[1])
-                    .child(kind_icon(view.kind, &theme, m.icon.md)),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(m.sp[3])
-                    .child(text_box)
-                    .children(action),
-            )
-            .child(div().flex_none().child(close))
-            .into_any_element(),
-    )
+    let content = h_flex()
+        .id(ElementId::Name(name.into()))
+        .when(live, |c| {
+            c.debug_selector(move || format!("TlToast-{slot}"))
+        })
+        .when_some(view.focus.as_ref().filter(|_| live), |c, focus| {
+            c.track_focus(focus)
+        })
+        .w_full()
+        .items_start()
+        .gap(m.sp[4])
+        .child(
+            div()
+                .flex_none()
+                .pt(m.sp[1])
+                .child(kind_icon(view.kind, theme, m.icon.md)),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(m.sp[3])
+                .child(text_box)
+                .children(action),
+        )
+        .child(div().flex_none().child(close));
+
+    let mut card = div()
+        .relative()
+        .occlude()
+        .w_full()
+        .min_h(px(MIN_HEIGHT * m.ui_scale))
+        .p(m.sp[4])
+        .rounded(m.radius_card)
+        .bg(theme.menu_bg)
+        .border_1()
+        .border_color(theme.divider)
+        .child(content);
+    if theme.derived.shadow.a > 0.0 {
+        card.style().box_shadow = Some(vec![BoxShadow {
+            color: theme.derived.shadow,
+            offset: point(px(0.), px(4.)),
+            blur_radius: px(16.),
+            spread_radius: px(0.),
+            inset: false,
+        }]);
+    }
+    card
 }
 
 #[cfg(test)]
@@ -836,5 +973,12 @@ mod tests {
     #[test]
     fn count_suffix_uses_times_sign() {
         assert_eq!(count_suffix(5), " (×5)");
+    }
+
+    #[test]
+    fn ease_in_cubic_ends() {
+        assert_eq!(ease_in_cubic(0.), 0.);
+        assert_eq!(ease_in_cubic(1.), 1.);
+        assert!((ease_in_cubic(0.5) - 0.125).abs() < 1e-6);
     }
 }
