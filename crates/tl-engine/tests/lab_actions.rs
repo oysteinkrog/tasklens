@@ -12,11 +12,15 @@
 //! `Harness::submit` does what the reducer's `Gate` (E11-A1) does: `admit` with the in-flight
 //! count, one `Rejected` event with `target: None` on a reject, otherwise one `run_action` task.
 //! An action counts as in flight until the test drains its `ActionFinished`, as in the reducer.
-//! The engine-level tests at the end run the real `Gate` inside `engine_root`.
+//! The engine-level tests run the real `Gate` inside `engine_root`.
+//!
+//! Part 3 adds a scripted `FakePrivilegedOps` and the dump, socket and recovery actions through
+//! the whole pipeline. Their per-module cases are unit tests in `actions/{dump,socket,recovery}.rs`.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
@@ -36,8 +40,8 @@ use tl_engine::actions::unit::{
     BusFuture, JobRemovedSignal, JobStream, UnitBus, UnitBusError, UnitBusOverride,
 };
 use tl_engine::actions::{
-    ActionCtx, ActionOps, Admission, Gate, LaunchOutcome, Openers, admit, deadline, run_action,
-    summarize,
+    ActionCtx, ActionOps, Admission, Gate, HelperCallError, LaunchOutcome, Openers, PrivilegedOps,
+    admit, deadline, run_action, summarize,
 };
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::dbus::ManagerConnSlot;
@@ -45,7 +49,7 @@ use tl_engine::reducer::{ActionGate, AdmissionView};
 use tl_engine::update::EngineMsg;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    LaunchSpec, LaunchWhat, RejectReason, Signal,
+    DumpMode, LaunchSpec, LaunchWhat, RejectReason, Signal,
 };
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
@@ -78,6 +82,7 @@ enum FakeCall {
     Send(u32, Signal),
     Close(u32),
     Pid(u32, PidOp),
+    Dump(u32),
 }
 
 struct FakeOps {
@@ -157,6 +162,29 @@ impl ActionOps for FakeOps {
         lock(&self.log).push(FakeCall::Pid(key.pid, *op));
         self.next(key.pid)
     }
+
+    fn dump_available(&self) -> bool {
+        true
+    }
+
+    /// Creates `out` with mode `0600` on success, as tl-ops does. A failed step creates nothing.
+    fn dump_to_path(
+        &self,
+        key: ProcessKey,
+        _boot: BootId,
+        _mode: DumpMode,
+        out: &std::path::Path,
+    ) -> Result<(), OpsError> {
+        lock(&self.log).push(FakeCall::Dump(key.pid));
+        self.next(key.pid)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(out)
+            .map(drop)
+            .map_err(|e| OpsError::Os(e.raw_os_error().unwrap_or(Errno::IO.raw_os_error())))
+    }
 }
 
 /// A lab whose timers read `clock`, an `ActionCtx` over `ops`, and the gate state.
@@ -174,6 +202,8 @@ struct Harness {
     live: FxHashMap<ProcessKey, ProcFlags>,
     /// The real `Gate` over `actx`, when set. `submit` and `finished` then go through it.
     gate: Option<Arc<Mutex<Gate>>>,
+    /// Every `ConnectionsDestroySupport` value read from `msgs`, in order.
+    support: Vec<bool>,
 }
 
 fn harness() -> Harness {
@@ -228,6 +258,7 @@ fn harness_full(
         in_flight: FxHashSet::default(),
         live: FxHashMap::default(),
         gate: None,
+        support: Vec::new(),
     }
 }
 
@@ -324,6 +355,7 @@ impl Harness {
     }
 
     /// The ids of every `ActionFinished` so far, in arrival order. Frees their admission slots.
+    /// Keeps each `ConnectionsDestroySupport` in `support`.
     fn finished(&mut self) -> Vec<ActionId> {
         let mut out = Vec::new();
         while let Ok(msg) = self.msgs.try_recv() {
@@ -335,6 +367,7 @@ impl Harness {
                     }
                     out.push(id);
                 }
+                EngineMsg::Source(SourceUpdate::ConnectionsDestroySupport(v)) => self.support.push(v),
                 other => panic!("unexpected message {other:?}"),
             }
         }
@@ -1366,8 +1399,10 @@ impl UnitBus for FakeUnitBus {
             *next += 1;
             *next
         };
+        // `Reload` has no arguments.
         let unit = match args.first() {
             Some(Value::Str(s)) => s.to_string(),
+            None => String::new(),
             other => panic!("unit name expected, got {other:?}"),
         };
         lock(&self.calls).push(FakeBusCall::Call {
@@ -1980,6 +2015,17 @@ fn test_gate(
     units: Option<UnitBusOverride>,
     startup_paths: StartupPaths,
 ) -> Box<dyn ActionGate> {
+    test_gate_helper(hook, ops, units, startup_paths, None)
+}
+
+/// `test_gate` with a privileged helper.
+fn test_gate_helper(
+    hook: HookCtx,
+    ops: Arc<dyn ActionOps>,
+    units: Option<UnitBusOverride>,
+    startup_paths: StartupPaths,
+    helper: Option<Arc<dyn PrivilegedOps>>,
+) -> Box<dyn ActionGate> {
     Box::new(Gate::new(Arc::new(ActionCtx {
         events: hook.events_tx,
         msgs: hook.msgs_tx,
@@ -1990,7 +2036,7 @@ fn test_gate(
         systemd_system: hook.shared.systemd_system,
         systemd_user: hook.shared.systemd_user,
         openers: None,
-        helper: None,
+        helper,
         destroy_support_sent: AtomicBool::new(false),
         unit_bus_override: units,
         startup_paths,
@@ -2134,4 +2180,578 @@ fn engine_cgroup_action_end_to_end() {
     );
     assert_eq!(rig.process_refreshes(), 1);
     rig.finish();
+}
+
+// Helper actions: dump, socket and recovery (E11-018, E11-019, E11-020, E11-021) -------------
+//
+// The per-module cases (path checks, every helper and call error mapping, the destroy support
+// flag, drop-in rendering) are unit tests in `actions/{dump,socket,recovery}.rs`. These cases
+// cover what only the whole pipeline shows: admission, dispatch, the privileged guard, real
+// files under a scratch directory, and the reducer at the engine level.
+
+use std::collections::BTreeSet;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+
+use tl_engine::actions::{dump, recovery};
+use tl_model::actions::{Family, FourTuple, Proto, RecoveryEdit};
+use tl_model::health::HelperState;
+use tl_model::helper_proto::{HelperError, HelperReply, HelperReplyBody, HelperRequest};
+
+/// One scripted helper answer. An empty script answers `Ok`.
+#[derive(Clone, Debug)]
+enum FakeHelperStep {
+    Ok,
+    Err(HelperError),
+    Call(HelperCallError),
+    /// Sleeps this long on the lab clock, then answers `Ok`.
+    Block(Duration),
+}
+
+/// The privileged helper. Records each request and whether a descriptor came with it, and on
+/// `Ok` writes a few bytes into a passed descriptor. Never runs anything privileged.
+struct FakePrivilegedOps {
+    state: Mutex<HelperState>,
+    calls: Mutex<Vec<(HelperRequest, bool /* fd passed */)>>,
+    script: Mutex<VecDeque<FakeHelperStep>>,
+}
+
+impl FakePrivilegedOps {
+    fn new(script: &[FakeHelperStep]) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(HelperState::Unlocked),
+            calls: Mutex::new(Vec::new()),
+            script: Mutex::new(script.iter().cloned().collect()),
+        })
+    }
+
+    fn calls(&self) -> Vec<(HelperRequest, bool)> {
+        lock(&self.calls).clone()
+    }
+}
+
+impl PrivilegedOps for FakePrivilegedOps {
+    fn call(
+        &self,
+        cx: &Cx,
+        req: HelperRequest,
+        fd: Option<OwnedFd>,
+        _deadline: Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<HelperReply>, HelperCallError>> + Send + '_>> {
+        lock(&self.calls).push((req, fd.is_some()));
+        let step = lock(&self.script)
+            .pop_front()
+            .unwrap_or(FakeHelperStep::Ok);
+        let cx = cx.clone();
+        Box::pin(async move {
+            let body = match step {
+                FakeHelperStep::Ok => HelperReplyBody::Ok,
+                FakeHelperStep::Err(e) => HelperReplyBody::Err(e),
+                FakeHelperStep::Call(e) => return Err(e),
+                FakeHelperStep::Block(d) => {
+                    asupersync::time::sleep(cx.now(), d).await;
+                    HelperReplyBody::Ok
+                }
+            };
+            if let (HelperReplyBody::Ok, Some(fd)) = (&body, fd) {
+                std::fs::File::from(fd)
+                    .write_all(b"core")
+                    .expect("write into the dump fd");
+            }
+            Ok(vec![HelperReply {
+                seq: 1,
+                last: true,
+                body,
+            }])
+        })
+    }
+
+    fn state(&self) -> HelperState {
+        *lock(&self.state)
+    }
+}
+
+/// What `harness_p3` adds to the `Harness`.
+struct P3 {
+    system: Arc<FakeUnitBus>,
+    user: Arc<FakeUnitBus>,
+    /// `<tmp>/state/dumps`, the only directory a dump may write.
+    dumps: PathBuf,
+}
+
+fn harness_p3(tmp: &tempfile::TempDir, helper: Option<Arc<FakePrivilegedOps>>) -> (Harness, P3) {
+    harness_p3_with(LabConfig::new(7).max_steps(1_000_000), tmp, helper)
+}
+
+/// `harness_full` with `helper`, a `FakeUnitBus` per manager, the state directory at
+/// `<tmp>/state` and the startup paths under `tmp`.
+fn harness_p3_with(
+    config: LabConfig,
+    tmp: &tempfile::TempDir,
+    helper: Option<Arc<FakePrivilegedOps>>,
+) -> (Harness, P3) {
+    let (system, user) = (FakeUnitBus::new(), FakeUnitBus::new());
+    let mut h = harness_full(config, None, Some(bus_override(&system, &user)));
+    let engine_config = EngineConfig::new(EngineMode::Full, tmp.path().join("state"));
+    let dumps = dump::dumps_dir(&engine_config);
+    let ops: Arc<dyn ActionOps> = h.ops.clone();
+    h.actx = Arc::new(ActionCtx {
+        events: h.actx.events.clone(),
+        msgs: h.actx.msgs.clone(),
+        ops,
+        boot_id: BOOT,
+        uid: 1000,
+        config: Arc::new(engine_config),
+        systemd_system: ManagerConnSlot::new(),
+        systemd_user: ManagerConnSlot::new(),
+        openers: None,
+        helper: helper.map(|h| h as Arc<dyn PrivilegedOps>),
+        destroy_support_sent: AtomicBool::new(false),
+        unit_bus_override: h.actx.unit_bus_override.clone(),
+        startup_paths: scratch_paths(tmp.path()),
+    });
+    (h, P3 { system, user, dumps })
+}
+
+fn privileged(id: u64, kind: ActionKind, targets: &[ActionTarget]) -> ActionRequest {
+    ActionRequest {
+        privileged: true,
+        ..req(id, kind, targets)
+    }
+}
+
+fn socket(cookie: u64) -> ActionTarget {
+    ActionTarget::Socket {
+        cookie,
+        family: Family::Inet,
+        proto: Proto::Tcp,
+        four_tuple: FourTuple {
+            local: "192.168.1.10:51234".parse().expect("an address"),
+            remote: "93.184.216.34:443".parse().expect("an address"),
+        },
+    }
+}
+
+fn dump_path(dumps: &std::path::Path, name: &str) -> String {
+    dumps
+        .join(name)
+        .to_str()
+        .expect("a UTF-8 path")
+        .to_owned()
+}
+
+fn dump_kind(dumps: &std::path::Path, name: &str) -> ActionKind {
+    ActionKind::Dump {
+        mode: DumpMode::Mini,
+        path: Arc::from(dump_path(dumps, name)),
+    }
+}
+
+fn restart_always() -> RecoveryEdit {
+    RecoveryEdit {
+        restart: Some(Arc::from("always")),
+        ..RecoveryEdit::default()
+    }
+}
+
+/// The names of the files in `dir`. A missing directory is empty.
+fn files_in(dir: &std::path::Path) -> BTreeSet<String> {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .map(|e| {
+                e.expect("a dir entry")
+                    .file_name()
+                    .into_string()
+                    .expect("a UTF-8 name")
+            })
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
+        Err(e) => panic!("read {}: {e}", dir.display()),
+    }
+}
+
+fn mode_of(path: &std::path::Path) -> u32 {
+    std::fs::metadata(path)
+        .expect("stat")
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+/// The E11-002 guard through admission and `run_action`: a privileged request with no helper is
+/// refused as a whole, and nothing is called or written.
+#[test]
+fn privileged_request_without_helper_is_unsupported() {
+    let tmp = scratch();
+    let (mut h, p3) = harness_p3(&tmp, None);
+    let system = unit_target(Manager::System, "foo.service");
+    let user = unit_target(Manager::User, "foo.service");
+    let cases = [
+        (ActionKind::Signal(Signal::Term), procs(&[500])),
+        (dump_kind(&p3.dumps, "a.core"), procs(&[501])),
+        (ActionKind::SockDestroy, vec![socket(7)]),
+        (ActionKind::UnitWriteRecovery(restart_always()), vec![system]),
+        (ActionKind::UnitRemoveRecovery, vec![user]),
+    ];
+    let unsupported = ActionState::Rejected(RejectReason::Unsupported);
+    for (id, (kind, targets)) in (1..).zip(cases) {
+        h.submit(privileged(id, kind, &targets));
+        h.run();
+        assert_eq!(
+            h.events_for(ActionId(id)),
+            summary_only(unsupported.clone()),
+            "action {id}"
+        );
+        assert_eq!(h.finished(), [ActionId(id)]);
+    }
+    assert!(h.ops.calls().is_empty(), "{:?}", h.ops.calls());
+    assert!(p3.system.calls().is_empty() && p3.user.calls().is_empty());
+    assert!(h.support.is_empty());
+    assert!(!tmp.path().join("state").exists(), "no dumps dir");
+    assert!(!tmp.path().join("config").exists(), "no drop-in");
+    h.passed();
+}
+
+#[test]
+fn dump_through_pipeline_has_no_deadline() {
+    let tmp = scratch();
+    let helper = FakePrivilegedOps::new(&[]);
+    let (mut h, p3) = harness_p3(&tmp, Some(Arc::clone(&helper)));
+    // Five minutes in gdb, far past every other deadline.
+    h.ops
+        .script(500, &[FakeStep::Block(Duration::from_secs(300))]);
+    h.submit(req(1, dump_kind(&p3.dumps, "app.core"), &procs(&[500])));
+    h.run();
+    h.advance(Duration::ZERO);
+    assert_eq!(
+        h.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(h.finished(), [ActionId(1)]);
+    assert_eq!(h.ops.calls(), [FakeCall::Dump(500)]);
+    // The unprivileged dump runs in the engine; the helper is not asked.
+    assert!(helper.calls().is_empty());
+    assert_eq!(mode_of(&p3.dumps), 0o700);
+    assert_eq!(mode_of(&p3.dumps.join("app.core")), 0o600);
+    h.passed();
+}
+
+#[test]
+fn dump_failure_through_pipeline_leaves_no_file() {
+    let tmp = scratch();
+    let (mut h, p3) = harness_p3(&tmp, None);
+    h.ops.script(500, &[eperm()]);
+    // A path outside the dumps directory is refused before anything runs.
+    let outside = ActionKind::Dump {
+        mode: DumpMode::Full,
+        path: Arc::from(dump_path(tmp.path(), "x.core")),
+    };
+    h.submit(req(1, dump_kind(&p3.dumps, "app.core"), &procs(&[500])));
+    h.submit(req(2, outside, &procs(&[501])));
+    h.run();
+    let denied = failed(ActionError::PermissionDenied);
+    assert_eq!(
+        h.events_for(ActionId(1)),
+        expected(std::slice::from_ref(&denied), denied.clone())
+    );
+    let unsupported = ActionState::Rejected(RejectReason::Unsupported);
+    assert_eq!(
+        h.events_for(ActionId(2)),
+        expected(std::slice::from_ref(&unsupported), unsupported.clone())
+    );
+    let mut done = h.finished();
+    done.sort_by_key(|id| id.0);
+    assert_eq!(done, [ActionId(1), ActionId(2)]);
+    assert_eq!(h.ops.calls(), [FakeCall::Dump(500)]);
+    assert!(files_in(&p3.dumps).is_empty());
+    assert!(files_in(tmp.path()).iter().all(|f| f != "x.core"));
+    h.passed();
+}
+
+// Engine level: the reducer gets the support flag and refreshes the right source.
+
+/// An engine rig whose gate has `helper`, a `FakeUnitBus` per manager, `ops` and startup paths
+/// under `base`.
+fn engine_rig_p3(
+    helper: &Arc<FakePrivilegedOps>,
+    ops: Option<Arc<dyn ActionOps>>,
+    base: &std::path::Path,
+) -> (EngineRig, Arc<FakeUnitBus>, Arc<FakeUnitBus>) {
+    let (system, user) = (FakeUnitBus::new(), FakeUnitBus::new());
+    let units = bus_override(&system, &user);
+    let paths = scratch_paths(base);
+    let helper: Arc<dyn PrivilegedOps> = helper.clone();
+    let rig = engine_rig_with(move |hook, fake_ops| {
+        test_gate_helper(
+            hook,
+            ops.clone().unwrap_or(fake_ops),
+            Some(Arc::clone(&units)),
+            paths.clone(),
+            Some(Arc::clone(&helper)),
+        )
+    });
+    (rig, system, user)
+}
+
+#[test]
+fn engine_sock_destroy_end_to_end() {
+    let helper = FakePrivilegedOps::new(&[]);
+    let (mut rig, _, _) = engine_rig_p3(&helper, None, std::path::Path::new("/nonexistent"));
+    for id in [1, 2] {
+        rig.action_on(id, ActionKind::SockDestroy, &[socket(id)]);
+        assert_eq!(
+            rig.events_for(ActionId(id)),
+            expected(&[ActionState::Succeeded], ActionState::Succeeded),
+            "action {id}"
+        );
+    }
+    let calls = helper.calls();
+    assert_eq!(calls.len(), 2);
+    for ((req, fd), cookie) in calls.iter().zip([1, 2]) {
+        let ActionTarget::Socket {
+            family,
+            proto,
+            four_tuple,
+            ..
+        } = socket(cookie)
+        else {
+            unreachable!()
+        };
+        let want = HelperRequest::SockDestroy {
+            family,
+            proto,
+            four_tuple,
+            cookie,
+        };
+        assert_eq!((req, *fd), (&want, false));
+    }
+    assert_eq!(rig.refreshes(SourceId::Connections), 2);
+    rig.finish();
+}
+
+#[test]
+fn engine_recovery_system_end_to_end() {
+    let tmp = scratch();
+    let helper = FakePrivilegedOps::new(&[]);
+    let (mut rig, system, user) = engine_rig_p3(&helper, None, tmp.path());
+    let unit = unit_target(Manager::System, "foo.service");
+    rig.action_on(
+        1,
+        ActionKind::UnitWriteRecovery(restart_always()),
+        std::slice::from_ref(&unit),
+    );
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(
+        helper.calls(),
+        [(
+            HelperRequest::WriteServiceDropIn {
+                unit: "foo.service".to_owned(),
+                keys: recovery::keys_of(&restart_always()),
+            },
+            false
+        )]
+    );
+    // The manager reloads after the helper wrote the file.
+    assert_eq!(
+        system.calls(),
+        [FakeBusCall::Call {
+            method: "Reload".to_owned(),
+            unit: String::new(),
+            job: 1,
+        }]
+    );
+    assert!(user.calls().is_empty());
+    assert!(files_in(tmp.path()).is_empty(), "the engine wrote nothing");
+    assert_eq!(rig.refreshes(SourceId::SystemdSystem), 1);
+    rig.finish();
+}
+
+#[test]
+fn engine_recovery_user_end_to_end() {
+    let tmp = scratch();
+    let helper = FakePrivilegedOps::new(&[]);
+    let (mut rig, system, user) = engine_rig_p3(&helper, Some(Arc::new(RealOps)), tmp.path());
+    let unit = unit_target(Manager::User, "foo.service");
+    let dir = tmp.path().join("config/systemd/user/foo.service.d");
+    let file = dir.join(recovery::DROP_IN_NAME);
+
+    rig.action_on(
+        1,
+        ActionKind::UnitWriteRecovery(restart_always()),
+        std::slice::from_ref(&unit),
+    );
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    let text = std::fs::read_to_string(&file).expect("read the drop-in");
+    assert_eq!(text, recovery::render(&recovery::keys_of(&restart_always())));
+    assert_eq!(mode_of(&file), 0o644);
+
+    rig.action_on(2, ActionKind::UnitRemoveRecovery, std::slice::from_ref(&unit));
+    assert_eq!(
+        rig.events_for(ActionId(2)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert!(!dir.exists(), "the empty drop-in dir is gone");
+
+    let reloads = user
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, FakeBusCall::Call { method, .. } if method == "Reload"))
+        .count();
+    assert_eq!(reloads, 2);
+    assert!(system.calls().is_empty());
+    assert!(helper.calls().is_empty(), "a user drop-in needs no helper");
+    assert_eq!(rig.refreshes(SourceId::SystemdUser), 2);
+    rig.finish();
+}
+
+// Chaos over the helper (ADR-013) ------------------------------------------------------------
+
+/// splitmix64, so each seed gets its own helper script without a new dependency.
+fn mix(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// A random answer: success, a helper error, a failed call, or a block shorter or longer than
+/// the 2 s destroy deadline.
+fn random_step(state: &mut u64) -> FakeHelperStep {
+    let eopnotsupp = Errno::OPNOTSUPP.raw_os_error();
+    match mix(state) % 9 {
+        0 | 1 => FakeHelperStep::Ok,
+        2 => FakeHelperStep::Err(HelperError::Os(eopnotsupp)),
+        3 => FakeHelperStep::Err(HelperError::Os(Errno::NOENT.raw_os_error())),
+        4 => FakeHelperStep::Err(HelperError::PermissionDenied),
+        5 => FakeHelperStep::Call(HelperCallError::Timeout),
+        6 => FakeHelperStep::Call(HelperCallError::Exited),
+        7 => FakeHelperStep::Block(Duration::from_millis(500)),
+        _ => FakeHelperStep::Block(Duration::from_secs(3)),
+    }
+}
+
+/// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]` the way
+/// `explore_signal_pipeline` does, with no cancel injection. Destroys and system recovery edits
+/// go through `run_action`. A privileged dump has no route through `run_action` until E29-014,
+/// so the dumps call `dump::run_target` with `privileged = true` in their own tasks.
+///
+/// `ConnectionsDestroySupport(true)` goes out at most once per session. `false` goes out on
+/// every `EOPNOTSUPP` answer (E11-019), so the test counts it against those answers.
+#[test]
+fn explore_helper_calls() {
+    const DESTROYS: u64 = 4;
+    const RECOVERIES: u64 = 2;
+    const DUMPS: u32 = 4;
+    for seed in 0..16u64 {
+        let mut rng = seed;
+        let calls = DESTROYS as usize + RECOVERIES as usize + DUMPS as usize;
+        let script: Vec<FakeHelperStep> = (0..calls).map(|_| random_step(&mut rng)).collect();
+        let helper = FakePrivilegedOps::new(&script);
+        let tmp = scratch();
+        let chaos = ChaosConfig::default()
+            .with_cancel_probability(0.0)
+            .with_delay_probability(0.05)
+            .with_delay_range(Duration::ZERO..Duration::from_millis(10))
+            .with_wakeup_storm_probability(0.01);
+        let (mut h, p3) = harness_p3_with(
+            LabConfig::new(seed)
+                .worker_count(2)
+                .max_steps(1_000_000)
+                .with_chaos(chaos),
+            &tmp,
+            Some(Arc::clone(&helper)),
+        );
+
+        for id in 1..=DESTROYS {
+            h.submit(req(id, ActionKind::SockDestroy, &[socket(id)]));
+        }
+        for id in DESTROYS + 1..=DESTROYS + RECOVERIES {
+            let unit = unit_target(Manager::System, &format!("r{id}.service"));
+            h.submit(req(id, ActionKind::UnitWriteRecovery(restart_always()), &[unit]));
+        }
+        let dumps: Arc<Mutex<Vec<(String, ActionState)>>> = Arc::new(Mutex::new(Vec::new()));
+        for i in 0..DUMPS {
+            let (actx, out) = (Arc::clone(&h.actx), Arc::clone(&dumps));
+            let name = format!("d{i}.core");
+            let path = dump_path(&p3.dumps, &name);
+            let (task, _handle) = h
+                .lab
+                .state
+                .create_task(h.root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    let state =
+                        dump::run_target(&cx, &actx, DumpMode::Mini, &path, key(700 + i), true)
+                            .await;
+                    lock(&out).push((name, state));
+                })
+                .expect("task is created");
+            h.lab.scheduler.lock().schedule(task, 0);
+        }
+        h.run();
+        for _ in 0..5 {
+            h.advance(Duration::from_secs(1));
+        }
+
+        let mut destroy_states = Vec::new();
+        for id in 1..=DESTROYS + RECOVERIES {
+            let events = h.events_for(ActionId(id));
+            assert_eq!(events.len(), 3, "seed {seed} action {id}: {events:?}");
+            assert_eq!(events[0], (None, ActionState::Started), "seed {seed}");
+            assert_eq!(events[1].0, Some(0), "seed {seed} action {id}");
+            assert_eq!(events[2], (None, events[1].1.clone()), "seed {seed}");
+            assert!(events[2].1.is_final(), "seed {seed} action {id}");
+            if id <= DESTROYS {
+                destroy_states.push(events[2].1.clone());
+            }
+        }
+        let mut done = h.finished();
+        done.sort_by_key(|id| id.0);
+        let want: Vec<ActionId> = (1..=DESTROYS + RECOVERIES).map(ActionId).collect();
+        assert_eq!(done, want, "seed {seed}");
+
+        // Exactly one result per dump; only the succeeded ones left a file.
+        let dumps = lock(&dumps).clone();
+        assert_eq!(dumps.len(), DUMPS as usize, "seed {seed}");
+        let kept: BTreeSet<String> = dumps
+            .iter()
+            .filter(|(_, s)| *s == ActionState::Succeeded)
+            .map(|(name, _)| name.clone())
+            .collect();
+        assert_eq!(files_in(&p3.dumps), kept, "seed {seed}: {dumps:?}");
+        for name in &kept {
+            std::fs::remove_file(p3.dumps.join(name)).expect("remove a dump");
+        }
+
+        let succeeded = destroy_states
+            .iter()
+            .any(|s| *s == ActionState::Succeeded);
+        let unsupported = destroy_states
+            .iter()
+            .filter(|s| **s == ActionState::Rejected(RejectReason::Unsupported))
+            .count();
+        let trues = h.support.iter().filter(|v| **v).count();
+        let falses = h.support.len() - trues;
+        assert_eq!(trues, usize::from(succeeded), "seed {seed}: {:?}", h.support);
+        assert_eq!(falses, unsupported, "seed {seed}: {:?}", h.support);
+
+        // Every helper call is one of ours, and only a dump passes a descriptor.
+        let calls = helper.calls();
+        assert_eq!(calls.len(), script.len(), "seed {seed}");
+        for (req, fd) in &calls {
+            assert_eq!(
+                *fd,
+                matches!(req, HelperRequest::Dump { .. }),
+                "seed {seed}: {req:?}"
+            );
+        }
+        h.passed();
+        assert!(files_in(&p3.dumps).is_empty(), "seed {seed}");
+    }
 }
