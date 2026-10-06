@@ -508,3 +508,11 @@ fn pwn_props_size_scales_with_ui_scale(cx: &mut TestAppContext) {
     assert_eq!(opened, size(px(1125.), px(800.)));
     assert_eq!(min, size(px(800.), px(500.)));
 }
+
+#[gpui_kit::test]
+fn run_size_scales_with_ui_scale(cx: &mut TestAppContext) {
+    frame_setup(cx, 125);
+    let (opened, min) = open_sizes(cx, PwnWindow::Run);
+    assert_eq!(opened, size(px(600.), px(310.)));
+    assert_eq!(min, size(px(600.), px(310.)));
+}

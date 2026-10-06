@@ -62,7 +62,7 @@ const TOAST_TOP: f32 = 72.;
 /// The same under server decorations, × ui_scale.
 const TOAST_TOP_SERVER: f32 = 66.;
 
-/// The Run window's fixed size (APP-014).
+/// The Run window's fixed size (APP-014), × ui_scale.
 pub const RUN_SIZE: (f32, f32) = (480., 248.);
 
 /// Pin tooltip when off.
@@ -107,7 +107,7 @@ pub enum TlWindowKind {
     /// Settings, Theme Editor, Shortcuts, Handle Search, About, Additional Setup, Crash Report.
     /// About and Crash Report are not resizable.
     Tool { resizable: bool },
-    /// "tasklens Run", fixed 480 × 248.
+    /// "tasklens Run", fixed 480 × 248 × ui_scale.
     Run,
     /// Process, service, startup and connection Properties.
     Properties,
@@ -198,10 +198,11 @@ impl TlWindowSpec {
         self
     }
 
-    /// The size the window opens at. Run is always 480 × 248.
-    fn open_size(&self) -> gpui_kit::Size<Pixels> {
+    /// The size the window opens at. Run is always `RUN_SIZE` × `ui_scale`; other kinds come
+    /// already scaled from the owner.
+    fn open_size(&self, ui_scale: f32) -> gpui_kit::Size<Pixels> {
         match self.kind {
-            TlWindowKind::Run => size(px(RUN_SIZE.0), px(RUN_SIZE.1)),
+            TlWindowKind::Run => size(px(RUN_SIZE.0 * ui_scale), px(RUN_SIZE.1 * ui_scale)),
             _ => self.size,
         }
     }
@@ -213,7 +214,7 @@ pub fn window_options(
     decorations: Decorations,
     cx: &mut App,
 ) -> WindowOptions {
-    let open_size = spec.open_size();
+    let open_size = spec.open_size(metrics(cx).ui_scale);
     let min_size = match spec.kind {
         TlWindowKind::Run => open_size,
         _ => spec.min_size,
