@@ -8,6 +8,7 @@
 pub mod cgroup;
 pub mod dump;
 pub mod process;
+pub mod recovery;
 pub mod socket;
 pub mod startup;
 pub mod targetless;
@@ -453,6 +454,20 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> tl_ops::OpsResult {
         Err(OpsError::Unsupported("startup ops not wired"))
     }
+    /// `tl_ops::write_atomic` of `text` with exactly `mode`. The parent must exist. The default
+    /// refuses.
+    fn write_atomic(&self, _path: &std::path::Path, _text: &str, _mode: u32) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("file ops not wired"))
+    }
+    /// Unlinks `path`. A missing file is `Err(Os(ENOENT))`. The default refuses.
+    fn remove_file(&self, _path: &std::path::Path) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("file ops not wired"))
+    }
+    /// Removes the directory `path` when it is empty. A directory that is not empty, or is
+    /// missing, is `Ok`. The default refuses.
+    fn remove_dir_if_empty(&self, _path: &std::path::Path) -> tl_ops::OpsResult {
+        Err(OpsError::Unsupported("file ops not wired"))
+    }
 }
 
 /// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
@@ -587,6 +602,21 @@ impl ActionOps for RealOps {
         roots: &tl_ops::fs::StartupRoots,
     ) -> tl_ops::OpsResult {
         tl_ops::fs::script_set_enabled(script, enabled, roots)
+    }
+
+    fn write_atomic(&self, path: &std::path::Path, text: &str, mode: u32) -> tl_ops::OpsResult {
+        tl_ops::write_atomic(path, text.as_bytes(), mode)
+    }
+
+    fn remove_file(&self, path: &std::path::Path) -> tl_ops::OpsResult {
+        Ok(rustix::fs::unlink(path)?)
+    }
+
+    fn remove_dir_if_empty(&self, path: &std::path::Path) -> tl_ops::OpsResult {
+        match rustix::fs::rmdir(path) {
+            Ok(()) | Err(Errno::NOTEMPTY | Errno::EXIST | Errno::NOENT) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
@@ -919,8 +949,8 @@ fn dispatch_boxed<'a>(
 }
 
 /// The `(kind, target)` table. `Process | Thread` → `process::run_target`, `Cgroup` →
-/// `cgroup::run_target`, `Unit` → `unit::run_target`, `Startup` → `startup::run_target`,
-/// `Socket` → `socket::run_target`. Each module bead adds its arm; a pair with no module is
+/// `cgroup::run_target`, `Unit` → `unit::run_target` (the two recovery kinds →
+/// `recovery::run_target`), `Startup` → `startup::run_target`, `Socket` → `socket::run_target`. Each module bead adds its arm; a pair with no module is
 /// `Rejected(Unsupported)`.
 async fn dispatch(
     cx: &Cx,
@@ -949,6 +979,12 @@ async fn dispatch(
             proto,
             four_tuple,
         } => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
+        ActionTarget::Unit(unit) if matches!(kind, ActionKind::UnitWriteRecovery(_)) => {
+            recovery::run_target(cx, actx, kind, unit).await
+        }
+        ActionTarget::Unit(unit) if matches!(kind, ActionKind::UnitRemoveRecovery) => {
+            recovery::run_target(cx, actx, kind, unit).await
+        }
         ActionTarget::Unit(unit) => unit::run_target(cx, actx, kind, unit).await,
         ActionTarget::Startup(entry) => startup::run_target(cx, actx, kind, entry).await,
     }
