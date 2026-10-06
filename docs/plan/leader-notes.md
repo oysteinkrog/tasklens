@@ -473,3 +473,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.5 (ff8e850): Processes page actions and captured targets; 256-row cap in CapturedTargets::new (noted on pdu.20); RestartUnit is no_json.
 - pdu.7 decisions: clk_tck in CellCtx; app rows borrow user, command line and start time from the first member; desktop path and unit row fields are a new 8q0 bead; RowRef::Record carries &TableRow.
 - crw.11 decisions: TlButton gains focus_handle(FocusHandle) and trailing_icon(TlIcon) (button.rs chain edit); PerfSetCpuGraphMode and PerfToggleCpuKernel declared early.
+- yrf.16 (b5efbc0, 402ab9d, 88eebf1): chart hover readout; hitbox only when spec.hover; text reshaped only on index or version change; offset from the newest sample. Known: window deactivation clears the pin only on the next paint (no repaint is forced).
