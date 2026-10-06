@@ -329,3 +329,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.13: unit actions. ActionCtx gained unit_bus_override (one line in each ActionCtx literal across actions and tests). JobRemoved match filters on sender and path. Lost connection gives OutcomeUnknown.
 - 8q0.33 done by the 8q0.31 agent; leader updated ARCHITECTURE.md. 8q0.32 resent full-wiring approval.
 - Flaky tests made into beads: lab_processes shared fixture dir; probe_integration fd 5 and empty env.
+- fut.15: tl_ui::run landed; renderer failure on Linux is an Err from open_window, so the main hook (jqk.10) must call request_exit(RendererFailed); comments on jqk.10 and cr0.15. X11 display panic is caught. Quit-mode test is weaker than the AC (test platform quit does nothing).
