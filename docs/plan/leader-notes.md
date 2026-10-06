@@ -501,3 +501,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.9 (7271c9b, 4ed2132, 098f3ea): name_cell.rs with R-190 geometry; the EXITED branch approval was resent because the messages crossed.
 - pdu.9 (f4299be, e644236): closed; EXITED rows via name_look in table/cells.rs. KernelThread RowKind noted on pdu.12.
 - rsf.22 (eb67e1c): column actions carry a SharedString key; system tables can sort and hide from the header menu.
+- jqk.10 (14f2aeb, 7a3ebc0, 771dfc7, 8a7e2d5): MainWindow. The handle is WindowHandle<Root> plus main_view WeakEntity (accepted, same as TlSecondaryWindow). match_single_binding allow stays until page arms land. Notes on jqk.1 and wlf.19.
