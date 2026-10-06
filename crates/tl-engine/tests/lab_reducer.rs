@@ -1118,7 +1118,8 @@ fn every_variant_applies_without_panic() {
     msgs.push(EngineMsg::Tick);
     rig.run(msgs).expect("no invariant violation");
     let snap = rig.latest();
-    assert_eq!(snap.connections.header.validity, Validity::Failed);
+    // The Connections update after the Failed health carries its own validity (E09-027).
+    assert_eq!(snap.connections.header.validity, Validity::WarmingUp);
     assert_eq!(snap.system.color_scheme, 1);
     assert_eq!(snap.inventory.memory.peak_committed_bytes.value, 5);
     // 13 forwarded variants, plus `RefreshNow` to Disk, Net and Sensors from the resume.
@@ -1888,11 +1889,14 @@ fn unit_ref(manager: Manager, name: &str) -> UnitRef {
     }
 }
 
-fn unit_rec(unit: UnitRef) -> UnitRecord {
-    let missing = || Total {
-        value: Default::default(),
+fn missing<T: Default>() -> Total<T> {
+    Total {
+        value: T::default(),
         validity: Validity::Missing,
-    };
+    }
+}
+
+fn unit_rec(unit: UnitRef) -> UnitRecord {
     UnitRecord {
         unit,
         kind: UnitType::Service,
@@ -1915,7 +1919,6 @@ fn unit_rec(unit: UnitRef) -> UnitRecord {
         memory_bytes: missing(),
         disk_bps: missing(),
         tasks: missing(),
-        deps: Arc::from([]),
     }
 }
 
@@ -2202,5 +2205,22 @@ fn gpu_api_versions_merge_order_independent() {
     rig.run(vec![inventory_msg(idx)])
         .expect("no invariant violation");
     assert_versions(&rig);
+    rig.passed();
+}
+
+#[test]
+fn connections_failed_health_after_update() {
+    let mut rig = Rig::new();
+    rig.run(vec![connections_msg(Vec::new())])
+        .expect("no invariant violation");
+    assert_eq!(rig.latest().connections.header.validity, Validity::Valid);
+    rig.run(vec![src(SourceUpdate::Health {
+        id: SourceId::Connections,
+        state: SourceState::Failed,
+        last_error: None,
+        t_ns: 0,
+    })])
+    .expect("no invariant violation");
+    assert_eq!(rig.latest().connections.header.validity, Validity::Failed);
     rig.passed();
 }
