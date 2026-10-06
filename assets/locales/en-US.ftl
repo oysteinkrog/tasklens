@@ -407,3 +407,10 @@ lowmem-text-eased = Memory pressure has eased. You can open the full tasklens or
 lowmem-filter-placeholder = Filter...
 lowmem-filter-empty = No processes match the filter.
 lowmem-button-open-full = Open Full tasklens
+
+# Share Theme window (UI-SHL-082)
+shell-share-theme-title = tasklens Share Theme
+shell-share-theme-text = Copy this code and send it to someone who uses tasklens.
+shell-share-theme-copy = Copy
+shell-share-theme-close = Close
+shell-toast-theme-code-copied = Theme code copied
