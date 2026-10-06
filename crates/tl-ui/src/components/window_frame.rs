@@ -453,10 +453,23 @@ impl<V: 'static> TlSecondaryWindow<V> {
         self.pinned
     }
 
-    /// Sets the drawn pin without dispatching `ToggleAlwaysOnTop`. For a window that starts
+    /// Sets the pin as a click would: when the state changes it dispatches `ToggleAlwaysOnTop`
+    /// for a keyed window, and observers of the frame see the change. For a window that starts
     /// pinned (UI-PWN-032).
-    pub fn set_pinned(&mut self, pinned: bool, cx: &mut Context<Self>) {
+    pub fn set_pinned(&mut self, pinned: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pinned == pinned {
+            return;
+        }
         self.pinned = pinned;
+        if let Some(key) = self.key.clone() {
+            window.dispatch_action(
+                Box::new(ToggleAlwaysOnTop {
+                    window: key,
+                    caption: self.title.clone(),
+                }),
+                cx,
+            );
+        }
         cx.notify();
     }
 
@@ -480,17 +493,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
 
     /// Flips the drawn pin and dispatches `ToggleAlwaysOnTop` with the current title.
     fn toggle_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.pinned = !self.pinned;
-        if let Some(key) = self.key.clone() {
-            window.dispatch_action(
-                Box::new(ToggleAlwaysOnTop {
-                    window: key,
-                    caption: self.title.clone(),
-                }),
-                cx,
-            );
-        }
-        cx.notify();
+        self.set_pinned(!self.pinned, window, cx);
     }
 
     fn on_close(&mut self, _: &CloseSecondaryWindow, window: &mut Window, _: &mut Context<Self>) {
