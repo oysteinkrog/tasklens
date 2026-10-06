@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    AnyElement, App, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, Window, div,
+    AnyElement, App, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Styled, Window, div,
 };
 use tl_model::units::short_age;
 use tl_model::validity::Validity;
@@ -291,9 +291,7 @@ mod tests {
                 window,
                 cx,
             );
-            div()
-                .size(px(400.))
-                .child(div().w(px(120.)).child(cell))
+            div().size(px(400.)).child(div().w(px(120.)).child(cell))
         }
     }
 
@@ -493,6 +491,8 @@ mod tests {
             validity: Validity::Failed,
             ctx,
         });
+        // HoverTooltip closes in an inactive window.
+        cx.update(|window, _| window.activate_window());
         cx.run_until_parked();
         let hover = |cx: &mut gpui_kit::VisualTestContext, x: f32| {
             cx.simulate_event(MouseMoveEvent {
