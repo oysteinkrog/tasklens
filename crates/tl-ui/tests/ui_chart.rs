@@ -1721,14 +1721,16 @@ mod grid_element {
     use std::sync::Arc;
 
     use gpui_kit::{
-        AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Render, StyleRefinement,
-        Styled, TestAppContext, VisualTestContext, Window, div, px,
+        AppContext, Context, Entity, Hsla, IntoElement, Modifiers, ParentElement, Render,
+        StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
     };
+    use smallvec::smallvec;
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
     use tl_model::series::{Sample, SeriesView};
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
+    use tl_ui::chart::LegendStyle;
     use tl_ui::chart::grid_element::{
         ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
     };
@@ -1967,5 +1969,81 @@ mod grid_element {
         let (v1, h1) = shapes(vcx);
         assert_eq!(v1 - v0, 32 * 10, "one value shape per cell per change");
         assert_eq!(h1, 32, "headings shaped once");
+    }
+
+    /// Moves the pointer to `(x, y)` and draws.
+    fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
+        vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn grid_no_hitboxes_when_pointer_outside(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 16, false, 1, 1, |_| 30.0);
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(16, false));
+        draw(vcx);
+        // 16 cells, 6 columns, 3 rows: the grid ends at y = 352.
+        hover(vcx, 100., 500.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 0, "no hitbox while outside");
+            assert_eq!(v.hovered_cell(), None);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_heading_tooltip_for_hovered_cell(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 16, false, 1, 1, |_| 30.0);
+        let mut s = spec(16, false);
+        for (i, c) in s.cells.iter_mut().enumerate() {
+            c.tooltip = Some(format!("Core {i}, thread 0, 4200 MHz").into());
+        }
+        let (grid, vcx) = grid_in_window(cx, &engine, s);
+        hover(vcx, 100., 500.);
+        let builds = vcx.read_entity(&grid, |v, _| v.build_count.get());
+
+        // 6 columns of (1300 - 5 × 8) / 6 = 210 px: cell 7 is column 1, row 1, at (218, 120).
+        // Its heading starts `sp3` (6 px) in from that corner.
+        hover(vcx, 218. + 12., 120. + 14.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 16, "one hitbox per heading");
+            assert_eq!(v.hovered_cell(), Some(7));
+            assert_eq!(
+                v.hovered_tooltip().map(|t| t.as_ref()),
+                Some("Core 7, thread 0, 4200 MHz")
+            );
+        });
+
+        // Over cell 8's heading, then off every heading, then out of the element.
+        hover(vcx, 436. + 12., 120. + 14.);
+        assert_eq!(vcx.read_entity(&grid, |v, _| v.hovered_cell()), Some(8));
+        hover(vcx, 436. + 100., 120. + 80.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hovered_cell(), None);
+            assert_eq!(v.hitbox_count.get(), 16, "still inside");
+        });
+        hover(vcx, 100., 500.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 0);
+            assert_eq!(v.build_count.get(), builds, "hover never rebuilds geometry");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_legend_in_cell_0_only(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 16, true, 1, 1, |_| 30.0);
+        let mut s = spec(16, true);
+        s.legend = smallvec![
+            ("Total".into(), LegendStyle::Solid),
+            ("Kernel".into(), LegendStyle::Dashed),
+        ];
+        let (grid, vcx) = grid_in_window(cx, &engine, s);
+        draw(vcx);
+        vcx.update(|_, cx| grid.update(cx, |_, cx| cx.notify()));
+        draw(vcx);
+        assert_eq!(vcx.read_entity(&grid, |v, _| v.legend_shapes()), 2);
     }
 }
