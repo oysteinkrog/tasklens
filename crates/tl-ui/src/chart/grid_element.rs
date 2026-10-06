@@ -56,6 +56,9 @@ const CELL_GRID: GridStyle = GridStyle {
     rounded: false,
 };
 
+/// A cell's resolved (fill, overlay) series.
+pub type CellSeries = (Option<Arc<SeriesView>>, Option<Arc<SeriesView>>);
+
 /// One cell of the grid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridCellSpec {
@@ -173,7 +176,7 @@ pub struct ChartGridView {
     /// Layout and scale factor the cached geometry was built for.
     built_layout: Option<(GridLayout, f32)>,
     /// Resolved (fill, overlay) per cell.
-    series: Vec<(Option<Arc<SeriesView>>, Option<Arc<SeriesView>>)>,
+    series: Vec<CellSeries>,
     headings: Vec<CachedLine>,
     values: Vec<CachedLine>,
     offline: CachedLine,
@@ -330,11 +333,7 @@ impl ChartGridView {
 
     /// Sets the resolved series directly, one pair per cell, bypassing the hub.
     #[cfg(any(test, feature = "test-hooks"))]
-    pub fn set_series_for_test(
-        &mut self,
-        series: Vec<(Option<Arc<SeriesView>>, Option<Arc<SeriesView>>)>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_series_for_test(&mut self, series: Vec<CellSeries>, cx: &mut Context<Self>) {
         self.series = series;
         cx.notify();
     }
@@ -779,7 +778,7 @@ fn cell_bounds(
 )]
 fn build_cells(
     spec: &ChartGridSpec,
-    series: &[(Option<Arc<SeriesView>>, Option<Arc<SeriesView>>)],
+    series: &[CellSeries],
     layout: &GridLayout,
     map: TimeMap,
     plot_height: f32,
@@ -872,11 +871,7 @@ fn cell_value(series: Option<&SeriesView>, now: u64) -> (f32, Validity) {
 
 /// Min and max of the valid samples inside `[right_edge − range, right_edge]` over every cell,
 /// `(0, 0)` when there are none.
-fn visible_min_max(
-    series: &[(Option<Arc<SeriesView>>, Option<Arc<SeriesView>>)],
-    right_edge: u64,
-    range_ns: u64,
-) -> (f32, f32) {
+fn visible_min_max(series: &[CellSeries], right_edge: u64, range_ns: u64) -> (f32, f32) {
     let mut lo = f32::INFINITY;
     let mut hi = f32::NEG_INFINITY;
     for s in series.iter().flat_map(|(a, b)| [a, b]).flatten() {
