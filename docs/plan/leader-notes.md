@@ -423,3 +423,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - gma.5 (82a7dd2, 1ba712d): process window specs; pwn_window_spec helper for keyed windows; Set Priority and Signal open at 120 and grow to content; Affinity 640 x 360. Run window scale gap is a new fut bead.
 - rsf.8 decisions: R-190 name cell geometry (pad 20, indent 20, chevron at indent + 6, guides at 20 + 20k + 14); delegate name_column() defaulting to pinned_first, else first visible column.
 - crw.8 decision: header_text takes &Snapshot and reads inventory and device_details.
+- pdu.18 (f35e063, d61eac0): confirm dialogs; TlDialog second_action; footer Cancel, Terminate, Select; focus never on Terminate.
+- crw.28 (06acd11): CpuTotals.freq_is_bogomips set in workers/cpu.rs; tl-ui verification waits on the rsf.8 build fix.
+- hjn.32 (e40b76f): smartctl through pkexec. SECURITY decision: smartctl looked up only in /usr/sbin, /usr/bin, /sbin, /bin, never PATH (a user-writable PATH entry would run as root); pkexec by absolute path. Sent back for that fix plus a regression test.
+- Disk: target/ reached 247 GB. fd4e3dc sets debug = "line-tables-only" in profile.dev (owner approved). Hold new dispatch at the next lull, then cargo clean --profile dev and tell manager-machine.
