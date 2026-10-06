@@ -745,8 +745,10 @@ perf-cpu-time-unknown = <unknown>
         );
 
         // A boot time past what a date holds.
-        let mut sys = SystemSnapshot::default();
-        sys.boot_time_s = i64::MAX;
+        let sys = SystemSnapshot {
+            boot_time_s: i64::MAX,
+            ..SystemSnapshot::default()
+        };
         update_live(&mut model, &sys, &CpuLiveInputs::default());
         assert_eq!(
             tip(&model, ROW_UP_TIME).as_deref(),
