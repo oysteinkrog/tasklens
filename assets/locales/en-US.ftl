@@ -398,3 +398,12 @@ table-picker-name-history = History table
 table-picker-name-services = Services table
 table-picker-name-startup = Startup Apps table
 table-picker-name-connections = Connections table
+
+# Low-memory rescue window (UI-PWN-032, E32-009)
+lowmem-window-title = tasklens - Low memory
+lowmem-text-critical = Your device is running on critically low memory.
+lowmem-text-recommend = We recommend you close some of the processes below.
+lowmem-text-eased = Memory pressure has eased. You can open the full tasklens or close this window.
+lowmem-filter-placeholder = Filter...
+lowmem-filter-empty = No processes match the filter.
+lowmem-button-open-full = Open Full tasklens
