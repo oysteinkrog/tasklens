@@ -7,16 +7,21 @@
 //! The supervisor runs inline with `ManagedSupervisor::run`, not through a spawned handle. Its
 //! controller then watches this task's `Cx`, so cancelling the controller task drains the
 //! running generation. Joining a spawned handle ignores cancellation.
+//!
+//! A restart reaches the reducer as `Failed` then `Running` (R-289): a generation that ends
+//! with an error or a panic sends `Failed`, and the next generation sends `Running` first.
 
+use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
 use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
 use asupersync::runtime::JoinError;
-use asupersync::supervision::ManagedSupervisorReport;
+use asupersync::supervision::{ManagedGeneration, ManagedSupervisorReport};
 use asupersync::time::sleep;
 use asupersync::types::Outcome;
+use futures_lite::FutureExt;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::time::{TimeNs, now_boot_ns};
 
@@ -52,7 +57,8 @@ impl SourceController {
             {
                 return;
             }
-            let report = match build_supervisor(self.name, self.factory.clone()) {
+            let factory = report_restarts(self.id, self.factory.clone(), self.updates.clone());
+            let report = match build_supervisor(self.name, factory) {
                 Ok(supervisor) => supervisor.run(&cx).await,
                 Err(error) => {
                     // A build error repeats on every try, so wait before the next one.
@@ -116,6 +122,60 @@ impl SourceController {
             .await
             .is_ok()
     }
+}
+
+/// Wraps `factory` so each restart is `Failed` then `Running` in the health stream (R-289).
+/// Without this a restarted worker that sends no health of its own, or sends `Running` again,
+/// shows no state change, and the reducer cannot gap its series.
+fn report_restarts(
+    id: SourceId,
+    factory: WorkerFactory,
+    updates: mpsc::Sender<EngineMsg>,
+) -> WorkerFactory {
+    Arc::new(move |cx: Cx, generation: ManagedGeneration| {
+        let run = factory.start(cx.clone(), generation);
+        let updates = updates.clone();
+        async move {
+            if generation.number > 1 {
+                send_health(&cx, &updates, id, SourceState::Running, None).await;
+            }
+            match AssertUnwindSafe(run).catch_unwind().await {
+                Ok(Outcome::Err(WorkerError::Closed)) => Outcome::Err(WorkerError::Closed),
+                Ok(Outcome::Err(error)) => {
+                    let text: Arc<str> = error.to_string().into();
+                    send_health(&cx, &updates, id, SourceState::Failed, Some(text)).await;
+                    Outcome::Err(error)
+                }
+                Ok(Outcome::Panicked(payload)) => {
+                    send_health(&cx, &updates, id, SourceState::Failed, Some("panic".into())).await;
+                    Outcome::Panicked(payload)
+                }
+                Ok(outcome) => outcome,
+                Err(payload) => {
+                    send_health(&cx, &updates, id, SourceState::Failed, Some("panic".into())).await;
+                    resume_unwind(payload)
+                }
+            }
+        }
+    })
+}
+
+/// Sends one health message from a worker generation. A closed queue is ignored: the worker
+/// is ending anyway.
+async fn send_health(
+    cx: &Cx,
+    updates: &mpsc::Sender<EngineMsg>,
+    id: SourceId,
+    state: SourceState,
+    last_error: Option<Arc<str>>,
+) {
+    let update = SourceUpdate::Health {
+        id,
+        state,
+        last_error,
+        t_ns: now_boot_ns(),
+    };
+    let _ = updates.send(cx, EngineMsg::Source(update)).await;
 }
 
 /// The last generation's error text, or "panic".
