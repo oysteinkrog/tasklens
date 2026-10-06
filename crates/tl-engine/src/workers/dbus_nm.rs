@@ -270,10 +270,7 @@ async fn start_bus<C: Connector>(
 }
 
 /// Step 3: every device by object path. A device whose `GetAll` fails is left out.
-async fn resync<B: NmBus>(
-    cx: &Cx,
-    bus: &mut B,
-) -> Result<BTreeMap<String, NmDevice>, DbusError> {
+async fn resync<B: NmBus>(cx: &Cx, bus: &mut B) -> Result<BTreeMap<String, NmDevice>, DbusError> {
     let mut devices = BTreeMap::new();
     for path in bus.devices(cx).await? {
         if let Some(device) = read_device(cx, bus, &path).await? {
@@ -410,7 +407,12 @@ async fn bus_loop<B: NmBus>(
             return Next::Stop(Outcome::Ok(()));
         }
 
+        // Demand may have changed during the wait.
+        if !active(io) {
+            return Next::Idle;
+        }
         // Step 6.
+        let polling = nets_demanded(io) && devices.values().any(|d| d.ap.is_some());
         let now = cx.now().as_nanos();
         if !polling {
             next_wifi = now + period;
@@ -581,10 +583,9 @@ fn records(devices: &BTreeMap<String, NmDevice>, ifaces: &[NetIface]) -> Vec<Rec
         .filter_map(|d| {
             let iface = ifaces.iter().find(|i| i.name == d.name)?;
             let (kind, label) = d.kind.unwrap_or_else(|| net::net_kind(iface.kind));
-            let wifi = d
-                .ap
-                .as_ref()
-                .map(|(_, ap)| wifi_from_ap(ap, d.bitrate_kbps));
+            let wifi =
+                d.ap.as_ref()
+                    .map(|(_, ap)| wifi_from_ap(ap, d.bitrate_kbps));
             Some((
                 enumerate::net_identity(iface),
                 kind,
@@ -862,7 +863,8 @@ impl NmBus for SystemNm {
 
     async fn props(&mut self, cx: &Cx, path: &str, iface: &str) -> Result<Props, DbusError> {
         let raw = self.conn.raw();
-        let call = raw.call_method(Some(BUS), path, Some(PROPS_IFACE), "GetAll", &(iface,));
+        let body = (iface,);
+        let call = raw.call_method(Some(BUS), path, Some(PROPS_IFACE), "GetAll", &body);
         let msg = self.conn.read(cx, call).await?;
         msg.body().deserialize().map_err(|e| call_error(&e))
     }
@@ -875,7 +877,8 @@ impl NmBus for SystemNm {
         name: &str,
     ) -> Result<OwnedValue, DbusError> {
         let raw = self.conn.raw();
-        let call = raw.call_method(Some(BUS), path, Some(PROPS_IFACE), "Get", &(iface, name));
+        let body = (iface, name);
+        let call = raw.call_method(Some(BUS), path, Some(PROPS_IFACE), "Get", &body);
         let msg = self.conn.read(cx, call).await?;
         msg.body().deserialize().map_err(|e| call_error(&e))
     }
@@ -1086,7 +1089,12 @@ mod tests {
     impl NmBus for FakeBus {
         async fn devices(&mut self, _cx: &Cx) -> Result<Vec<String>, DbusError> {
             let state = self.0.lock().expect("fake lock");
-            Ok(state.nm.as_ref().ok_or_else(service_unknown)?.devices.clone())
+            Ok(state
+                .nm
+                .as_ref()
+                .ok_or_else(service_unknown)?
+                .devices
+                .clone())
         }
 
         async fn props(&mut self, _cx: &Cx, path: &str, iface: &str) -> Result<Props, DbusError> {
@@ -1407,10 +1415,7 @@ mod tests {
         rig.advance(IDLE_RECHECK);
         let got = rig.drain();
         assert_eq!(got.len(), 1, "{got:?}");
-        assert_eq!(
-            wifi_strength(nets_of(&got[0]).expect("Nets")),
-            Some(15)
-        );
+        assert_eq!(wifi_strength(nets_of(&got[0]).expect("Nets")), Some(15));
 
         // A removed device changes the list.
         fake.lock()
