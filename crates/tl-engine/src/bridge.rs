@@ -27,6 +27,7 @@ use tl_model::validity::Validity;
 use crate::EngineError;
 use crate::config::EngineConfig;
 use crate::dbus::SharedHandles;
+use crate::helper::LinkEnv;
 use crate::reducer::{ActionGate, Publisher};
 use crate::session::{RootEndpoints, engine_root};
 use crate::source::WorkerControl;
@@ -51,13 +52,18 @@ pub type ActionGateFactory = Arc<dyn Fn(HookCtx) -> Box<dyn ActionGate> + Send +
 /// Builds the record sink from the engine config. Called once per reducer start.
 pub type RecordSinkFactory = Arc<dyn Fn(&EngineConfig) -> Box<dyn RecordSink> + Send + Sync>;
 
-/// Optional parts that later epics install: the action gate (E11-A1), the journal (E14-A4) and
-/// the record sink (E30-A2). `Default` is `crate::default_hooks()`.
+/// Builds the helper task's `LinkEnv`. Called once per session (E29-020).
+pub type HelperEnvFactory = Arc<dyn Fn() -> LinkEnv + Send + Sync>;
+
+/// Optional parts that later epics install: the action gate (E11-A1), the journal (E14-A4),
+/// the record sink (E30-A2) and the helper (E29-020). `Default` is `crate::default_hooks()`.
 #[derive(Clone)]
 pub struct EngineHooks {
     pub action_gate: Option<ActionGateFactory>,
     pub record_sink: Option<RecordSinkFactory>,
     pub journal: Option<JournalSpawner>,
+    /// `None` runs no helper task: the helper and setup commands are dropped.
+    pub helper: Option<HelperEnvFactory>,
 }
 
 impl Default for EngineHooks {

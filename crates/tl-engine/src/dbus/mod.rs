@@ -256,11 +256,14 @@ impl ManagerConnSlot {
     }
 }
 
-/// D-Bus handles shared between workers through `WorkerIo` (R-166, R-262).
+/// Handles shared between workers through `WorkerIo` and with the action gate through
+/// `HookCtx` (R-166, R-262).
 #[derive(Clone, Default)]
 pub struct SharedHandles {
     pub systemd_system: ManagerConnSlot,
     pub systemd_user: ManagerConnSlot,
+    /// The session's helper queue (E29-020). `None` when the session runs no helper task.
+    pub helper: Option<crate::helper::HelperHandle>,
 }
 
 #[cfg(test)]

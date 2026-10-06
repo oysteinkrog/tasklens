@@ -40,8 +40,8 @@ use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
-    DeviceList, DiskSample, EngineMsg, GpuSample, MemorySample, NetSample, SensorSample,
-    ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
+    DeviceList, DiskSample, EngineMsg, GpuSample, HelperUpdate, MemorySample, NetSample,
+    SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
 use crate::workers::history::HistoryMsg;
 
@@ -575,8 +575,16 @@ impl Reducer {
                 self.components.history = Arc::new(next);
                 self.mark(ComponentMask::HISTORY);
             }
-            SourceUpdate::Helper(_) | SourceUpdate::Setup(_) => {
-                tracing::debug!(target: "tasklens::engine", "helper or setup update: E29-020");
+            // E29-020: `HEALTH` only on a change, so `health` keeps its `Arc` otherwise.
+            SourceUpdate::Helper(HelperUpdate { state, start }) => {
+                if self.health.set_helper(state, start) {
+                    self.mark(ComponentMask::HEALTH);
+                }
+            }
+            SourceUpdate::Setup(state) => {
+                if self.health.set_setup(state) {
+                    self.mark(ComponentMask::HEALTH);
+                }
             }
         }
         Ok(())

@@ -30,12 +30,13 @@ pub use bridge::{Engine, EngineHandle, EngineHooks, ShutdownReport};
 pub use config::{EngineConfig, EngineMode};
 
 /// The hooks `EngineHooks::default()` returns. Later beads replace one field each: E11-A1 the
-/// action gate, E14-A4 the journal, E30-A2 the record sink.
+/// action gate, E14-A4 the journal, E30-A2 the record sink, E29-020 the helper.
 pub(crate) fn default_hooks() -> EngineHooks {
     EngineHooks {
         action_gate: Some(Arc::new(actions::gate_factory)),
         record_sink: None,
         journal: None,
+        helper: Some(Arc::new(helper::LinkEnv::real)),
     }
 }
 

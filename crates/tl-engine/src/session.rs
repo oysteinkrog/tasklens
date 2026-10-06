@@ -34,8 +34,9 @@ use crate::bridge::{EngineHooks, HookCtx};
 use crate::config::{EngineConfig, EngineMode};
 use crate::controller::SourceController;
 use crate::dbus::SharedHandles;
+use crate::helper::{HelperHandle, HelperMsg, helper_queue, helper_task_with};
 use crate::reducer::health::HealthState;
-use crate::reducer::{Publisher, Reducer};
+use crate::reducer::{HelperCommand, Publisher, Reducer};
 use crate::source::{WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::EngineMsg;
@@ -51,6 +52,9 @@ pub const MAX_RESTARTS: u32 = 3;
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
 /// Period of the housekeeping `Tick` message.
 pub const TICK: Duration = Duration::from_secs(1);
+
+/// Capacity of the reducer's helper command queue (R-148 item 1).
+const HELPER_COMMANDS: usize = 64;
 
 /// The `last_error` of every source after the restarts stop.
 pub const RESTARTED_TOO_OFTEN: &str = "engine restarted too often";
@@ -174,7 +178,28 @@ async fn run_session(
         reducer.series.mark_gap_all();
     }
     // E29-020: helper spawn
-    let shared = SharedHandles::default();
+    let mut children = Children(Vec::with_capacity(ep.workers.len() + 4));
+    let helper = match ep.hooks.helper.as_ref() {
+        Some(make) => {
+            let (handle, queue) = helper_queue();
+            let (env, updates) = (make(), ep.msgs_tx.clone());
+            children.0.push(spawn(cx, move |cx| {
+                helper_task_with(cx, queue, updates, env)
+            })?);
+            let (tx, rx) = mpsc::channel::<HelperCommand>(HELPER_COMMANDS);
+            reducer.helper_tx = Some(tx);
+            let forward = handle.clone();
+            children
+                .0
+                .push(spawn(cx, move |cx| forward_helper(cx, rx, forward))?);
+            Some(handle)
+        }
+        None => None,
+    };
+    let shared = SharedHandles {
+        helper,
+        ..SharedHandles::default()
+    };
     reducer.action_gate = ep.hooks.action_gate.as_ref().map(|make| {
         make(HookCtx {
             events_tx: ep.events_tx.clone(),
@@ -191,7 +216,6 @@ async fn run_session(
         && ep.config.mode == EngineMode::Full)
         .then(|| Arc::new(ArcSwapOption::empty()));
 
-    let mut children = Children(Vec::with_capacity(ep.workers.len() + 1));
     for spec in &ep.workers {
         let io = WorkerIo::new(
             ep.msgs_tx.clone(),
@@ -288,6 +312,22 @@ where
         tracing::error!(target: "tasklens::engine", %error, "session child did not spawn");
         SessionEnd::Spawn
     })
+}
+
+/// Turns each reducer `HelperCommand` into the same-named `HelperMsg` on the helper queue
+/// (R-247). Ends when either queue closes or on cancel.
+async fn forward_helper(cx: Cx, mut rx: mpsc::Receiver<HelperCommand>, helper: HelperHandle) {
+    while let Ok(cmd) = rx.recv(&cx).await {
+        let msg = match cmd {
+            HelperCommand::Start => HelperMsg::Start,
+            HelperCommand::End => HelperMsg::End,
+            HelperCommand::SetupStatus => HelperMsg::SetupStatus,
+            HelperCommand::RunSetup(step) => HelperMsg::RunSetup(step),
+        };
+        if helper.send(&cx, msg).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Sends `EngineMsg::Tick` every `TICK` until cancelled or the queue closes.

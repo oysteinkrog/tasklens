@@ -7,8 +7,10 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use tl_model::command::SetupState;
 use tl_model::health::{
-    EngineCaps, HealthSnapshot, HelperState, SourceHealth, SourceId, SourceState,
+    EngineCaps, HealthSnapshot, HelperStartOutcome, HelperState, SourceHealth, SourceId,
+    SourceState,
 };
 use tl_model::time::TimeNs;
 
@@ -139,6 +141,34 @@ impl HealthState {
         }
         self.dirty |= changed;
         changed
+    }
+
+    /// Stores the helper state and, when `start` is `Some`, the start outcome. Returns true when
+    /// either changed (E29-020).
+    pub fn set_helper(
+        &mut self,
+        state: HelperState,
+        start: Option<(u64, HelperStartOutcome)>,
+    ) -> bool {
+        let start = start.or_else(|| self.current.helper_start.clone());
+        if state == self.current.helper && start == self.current.helper_start {
+            return false;
+        }
+        let next = Arc::make_mut(&mut self.current);
+        next.helper = state;
+        next.helper_start = start;
+        self.dirty = true;
+        true
+    }
+
+    /// Stores the Additional Setup state. Returns true when it changed (E29-020).
+    pub fn set_setup(&mut self, setup: Arc<SetupState>) -> bool {
+        if Arc::ptr_eq(&setup, &self.current.setup) || *setup == *self.current.setup {
+            return false;
+        }
+        Arc::make_mut(&mut self.current).setup = setup;
+        self.dirty = true;
+        true
     }
 
     /// True when the source is `Failed` or `Disabled`.
