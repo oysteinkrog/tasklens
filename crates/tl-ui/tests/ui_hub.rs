@@ -1,5 +1,5 @@
-//! SnapshotHub integration tests with `FakeEngine` and `TestAppContext` (E16-003, ADR-005,
-//! ADR-010, ADR-013). Run with `--features test-hooks`.
+//! SnapshotHub and `TasklensUi::init` integration tests with `FakeEngine` and `TestAppContext`
+//! (E16-003, E16-A1, ADR-005, ADR-010, ADR-013). Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::cell::{Cell, RefCell};
@@ -8,15 +8,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
-    Window, div,
+    AppContext, Context, Entity, Font, FontWeight, IntoElement, ParentElement, Render, Styled,
+    TestAppContext, TestDispatcher, Window, div, font,
 };
 use tl_model::client::EngineClient;
+use tl_model::command::AppRequest;
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::SeriesView;
+use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{SeriesSet, Snapshot};
+use tl_ui::app::{AppRequestHandler, BootSettings, EngineGlobal};
+use tl_ui::demand::GlobalDemand;
+use tl_ui::hub::GlobalHub;
 use tl_ui::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
+use tl_ui::i18n::Strings;
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::text::fonts::BundledFontStatus;
+use tl_ui::theme::{ThemeStore, UiMetrics};
+use tl_ui::{AppEnv, TasklensUi, UiInit};
 
 fn hub_with_engine(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Entity<SnapshotHub>) {
     let engine = FakeEngine::new();
@@ -333,4 +342,136 @@ fn no_hidden_without_pending_change(cx: &mut TestAppContext) {
     }
     assert!(!hub.read_with(cx, |h, _| h.is_hidden()));
     assert!(hidden.borrow().is_empty());
+}
+
+// TasklensUi::init (E16-A1).
+
+/// A `UiInit` with default settings and state, no-op callbacks and `AppEnv::test()`. Returns
+/// the sender end of the `AppRequest` channel.
+fn ui_init(settings: Settings) -> (UiInit, async_channel::Sender<AppRequest>) {
+    let (tx, rx) = async_channel::bounded(4);
+    let init = UiInit {
+        settings,
+        state: UiState::default(),
+        themes_json: None,
+        persist: Box::new(|_, _| {}),
+        persist_themes: Box::new(|_| {}),
+        app_requests: rx,
+        startup_toasts: Vec::new(),
+        env: AppEnv::test(),
+    };
+    (init, tx)
+}
+
+/// Runs init with `settings` against a new `FakeEngine`.
+fn run_init(
+    cx: &mut TestAppContext,
+    settings: Settings,
+) -> (Arc<FakeEngine>, async_channel::Sender<AppRequest>) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (init, tx) = ui_init(settings);
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+    (engine, tx)
+}
+
+#[gpui_kit::test]
+fn init_installs_globals(cx: &mut TestAppContext) {
+    run_init(cx, Settings::default());
+    cx.update(|cx| {
+        assert!(cx.has_global::<ThemeStore>());
+        assert!(cx.has_global::<UiMetrics>());
+        assert!(cx.has_global::<Strings>());
+        assert!(cx.has_global::<EngineGlobal>());
+        assert!(cx.has_global::<GlobalHub>());
+        assert!(cx.has_global::<GlobalDemand>());
+        assert!(cx.has_global::<BootSettings>());
+        assert!(cx.has_global::<AppEnv>());
+        assert!(cx.has_global::<AppRequestHandler>());
+        let boot = cx.global::<BootSettings>();
+        assert!(boot.persist.is_some());
+        assert!(boot.persist_themes.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn init_installs_app_env(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (mut init, _tx) = ui_init(Settings::default());
+    init.env.debug = true;
+    cx.update(|cx| {
+        TasklensUi::init(cx, client, init);
+        assert!(cx.global::<AppEnv>().debug);
+    });
+}
+
+#[test]
+fn init_loads_three_weights() {
+    // The default `TestAppContext` text system resolves every font, so use the real one.
+    let text_system = gpui_kit::platform::current_platform(true).text_system();
+    let cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text_system);
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (init, _tx) = ui_init(Settings::default());
+    cx.update(|cx| {
+        TasklensUi::init(cx, client, init);
+        assert!(cx.global::<BundledFontStatus>().0.ui_ok);
+        let text_system = cx.text_system().clone();
+        let ids: Vec<_> = [FontWeight::NORMAL, FontWeight::MEDIUM, FontWeight::SEMIBOLD]
+            .into_iter()
+            .map(|weight| {
+                let id = text_system.resolve_font(&Font {
+                    weight,
+                    ..font("Noto Sans")
+                });
+                let resolved = text_system.get_font_for_id(id).expect("font id maps back");
+                assert_eq!(resolved.family.as_ref(), "Noto Sans", "weight {weight:?}");
+                id
+            })
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+    });
+}
+
+#[gpui_kit::test]
+fn app_request_reaches_handler(cx: &mut TestAppContext) {
+    let (_engine, tx) = run_init(cx, Settings::default());
+    let main_thread = std::thread::current().id();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&seen);
+    cx.update(|cx| {
+        cx.set_global(AppRequestHandler(Box::new(move |req, _| {
+            assert_eq!(std::thread::current().id(), main_thread);
+            sink.borrow_mut().push(req);
+        })));
+    });
+    tx.try_send(AppRequest::SelectPid(42))
+        .expect("channel has room");
+    cx.run_until_parked();
+    assert_eq!(*seen.borrow(), vec![AppRequest::SelectPid(42)]);
+}
+
+#[gpui_kit::test]
+fn init_wires_hub_to_engine(cx: &mut TestAppContext) {
+    let (engine, _tx) = run_init(cx, Settings::default());
+    engine.publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+    cx.run_until_parked();
+    let hub = cx.update(|cx| cx.global::<GlobalHub>().0.clone());
+    assert_eq!(hub.read_with(cx, |h, _| h.current().sequence), 1);
+}
+
+#[gpui_kit::test]
+fn init_activates_theme_without_crossfade(cx: &mut TestAppContext) {
+    let mut settings = Settings::default();
+    settings.theme.active = "Default Light".to_owned();
+    run_init(cx, settings);
+    cx.update(|cx| {
+        assert_eq!(&*tl_ui::theme::current(cx).name, "Default Light");
+        // `init_metrics` sets 1; nothing else bumped it.
+        assert_eq!(tl_ui::theme::metrics(cx).style_version, 1);
+    });
 }
