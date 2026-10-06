@@ -269,3 +269,9 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.15 saw `lab_session::end_to_end_engine_in_lab` fail ("Flat mode" 51 rows vs 50) while workers/processes.rs had another agent's uncommitted edits. Recheck after the in-flight processes.rs bead lands. Flaky once: gpu::spawn::tests::child_env_is_minimal, workers::journal::tests::follow_every_line_once.
 - ug9.29: `glyph_with_tooltip` now takes window and cx. `button.rs:539` `TlButton::tooltip(..)` is the builder, not raw GPUI, and is fine.
 - y6k.17: leader chose `StartupEntry.state_code: Option<Arc<str>>` in tl-model ("active (running)", None when no unit). Closes B8-E28-12 for this field. 9o0.12 reads it.
+
+## 2026-10-06 m1f.9, 8fx.18, ug9.21
+
+- m1f.9: LowMemory arm in processes::factory runs LowMemSource. The compositor pid helper is still copied in lowmem.rs and processes.rs; share it in a later cleanup.
+- 8fx.18: the 10-minute Frame on 2,000 processes took 75 ms against 50 ms (load 55). Release test ignored; follow-up bead for read::stack. Rolling window loses the device catalog after 10 minutes; P1 follow-up bead. Also: a delete while the store is loading or failed is not saved.
+- ug9.21: TlBanner tooltip shows on every hover, not only when cut. Button ids "TlBanner-<label>" clash if two banners share a parent and a label.
