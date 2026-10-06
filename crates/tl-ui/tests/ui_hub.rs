@@ -395,7 +395,9 @@ fn init_installs_globals(cx: &mut TestAppContext) {
         assert!(cx.has_global::<AppEnv>());
         assert!(cx.has_global::<AppRequestHandler>());
         let boot = cx.global::<BootSettings>();
-        assert!(boot.persist.is_some());
+        // TlSettings::init takes the persist callback out of BootSettings (jqk.3).
+        assert!(boot.persist.is_none());
+        assert!(cx.has_global::<tl_ui::settings_global::TlSettings>());
         assert!(boot.persist_themes.is_some());
     });
 }
