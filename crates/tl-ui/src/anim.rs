@@ -128,10 +128,7 @@ impl AnimationDriver {
     /// The driver of this window, or `None` when the window registered none.
     pub fn try_global(window: &Window, cx: &App) -> Option<Entity<AnimationDriver>> {
         let id = window.window_handle().window_id();
-        cx.try_global::<AnimationDrivers>()?
-            .0
-            .get(&id)?
-            .upgrade()
+        cx.try_global::<AnimationDrivers>()?.0.get(&id)?.upgrade()
     }
 
     /// The driver of this window.
@@ -296,7 +293,10 @@ impl AnimationDriver {
             self.stall_timer = false;
             return None;
         };
-        let elapsed = cx.background_executor().now().saturating_duration_since(since);
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(since);
         if elapsed < STALL_AFTER {
             return Some(STALL_AFTER - elapsed);
         }
