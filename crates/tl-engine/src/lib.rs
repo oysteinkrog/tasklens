@@ -11,7 +11,8 @@ pub mod config;
 pub mod controller;
 pub mod dbus;
 pub mod gpu;
-mod helper;
+#[doc(hidden)]
+pub mod helper;
 mod history_query;
 mod opener;
 pub mod reducer;

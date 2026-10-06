@@ -50,7 +50,7 @@ const END_WAIT: Duration = Duration::from_millis(500);
 const REAP_STEP: Duration = Duration::from_millis(10);
 
 /// One running helper process, or the test fake.
-pub(crate) trait HelperLink: Send {
+pub trait HelperLink: Send {
     /// Writes one frame. `fd` travels as `SCM_RIGHTS` data on the frame's first byte.
     fn send(&mut self, frame: &HelperFrame, fd: Option<BorrowedFd<'_>>) -> io::Result<()>;
     /// Reads one reply, waiting at most `timeout`.
@@ -64,7 +64,7 @@ pub(crate) trait HelperLink: Send {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinkError {
+pub enum LinkError {
     Timeout,
     Eof,
     Protocol,
@@ -73,7 +73,7 @@ pub(crate) enum LinkError {
 /// `Cancelled`, `NotAuthorized` and `Failed` map one to one to `HelperStartOutcome` (R-148
 /// item 2).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StartError {
+pub enum StartError {
     /// pkexec exit 126: the polkit prompt was dismissed.
     Cancelled,
     /// pkexec exit 127: not authorized.
