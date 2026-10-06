@@ -743,6 +743,17 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn icon_muted_uses_text_secondary(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            setup(cx);
+            let t = current(cx).clone();
+            let on = TlButton::new("pin", TlButtonKind::Toggle { on: true }).icon(TlIcon::Pin);
+            assert_eq!(on.icon_color(&t), t.accent, "default: the kind's colour");
+            assert_eq!(on.icon_muted(true).icon_color(&t), t.text_secondary);
+        });
+    }
+
+    #[gpui_kit::test]
     fn looks_follow_the_table(cx: &mut TestAppContext) {
         cx.update(|cx| {
             setup(cx);
