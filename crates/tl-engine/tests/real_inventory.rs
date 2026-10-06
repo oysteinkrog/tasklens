@@ -57,3 +57,85 @@ fn inventory_hostnamed_real() {
         "static hostname differs"
     );
 }
+
+/// UPower on the owner machine, a desktop with no system battery (a mouse battery is skipped).
+/// Read-only: it lists devices and reads their properties.
+#[test]
+#[ignore = "needs the owner machine's system bus with UPower"]
+fn upower_real_no_battery() {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::{Cx, time};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::source::{WorkerControl, WorkerIo};
+    use tl_engine::update::{DeviceDetailsUpdate, DeviceKinds, EngineMsg, SourceUpdate};
+    use tl_engine::workers::dbus_upower;
+    use tl_model::demand::Demand;
+    use tl_model::health::{SourceId, SourceState};
+    use tl_model::settings::EngineSettings;
+
+    let rt = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("runtime builds");
+    let join = rt.handle().spawn_checked(async {
+        let cx = Cx::current().expect("task has a Cx");
+        let (updates, mut rx) = mpsc::channel::<EngineMsg>(64);
+        let demand = Demand {
+            any_surface_visible: true,
+            ..Demand::default()
+        };
+        let (_demand_tx, demand) = watch::channel(demand);
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control_tx, control) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
+        let mut worker = cx
+            .spawn(move |cx| async move {
+                let _ = dbus_upower::run(cx, io, PathBuf::from("/sys")).await;
+            })
+            .expect("worker spawns");
+        let mut got = Vec::new();
+        while got.len() < 3 {
+            let msg = time::timeout(cx.now(), Duration::from_secs(10), rx.recv(&cx))
+                .await
+                .expect("a message within 10 s")
+                .expect("channel open");
+            if let EngineMsg::Source(update) = msg {
+                got.push(update);
+            }
+        }
+        worker.abort();
+        let _ = worker.join(&cx).await;
+        got
+    });
+    let got = rt.block_on(join).expect("task completes");
+    assert!(
+        matches!(
+            &got[0],
+            SourceUpdate::Health {
+                id: SourceId::UPower,
+                state: SourceState::Running,
+                last_error: None,
+                ..
+            }
+        ),
+        "{:?}",
+        got[0]
+    );
+    assert!(
+        matches!(&got[1], SourceUpdate::Devices(list)
+            if list.kinds == DeviceKinds::BATTERIES && list.entries.is_empty()),
+        "{:?}",
+        got[1]
+    );
+    assert!(
+        matches!(&got[2], SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Batteries(b))
+            if b.is_empty()),
+        "{:?}",
+        got[2]
+    );
+}

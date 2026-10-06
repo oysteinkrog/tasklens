@@ -7,6 +7,7 @@ mod connections;
 pub mod cpu;
 mod dbus_kwin;
 mod dbus_systemd;
+pub mod dbus_upower;
 pub mod disk;
 pub mod enumerate;
 pub mod gpu_nvidia;
@@ -55,6 +56,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         connections::spec(),
         startup::spec(),
         inventory::spec(),
+        dbus_upower::spec(),
     ]
 }
 
