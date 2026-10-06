@@ -305,7 +305,7 @@ mod tests {
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
 
-    const PERIOD: u64 = 1_000_000_000;
+    const PERIOD: u64 = 500_000_000;
     const SEC: u64 = 1_000_000_000;
 
     fn key(pid: u32) -> ProcessKey {
