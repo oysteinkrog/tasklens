@@ -11,16 +11,15 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{AnyElement, AnyView, Context, SharedString, Window, gpui};
-use serde::Deserialize;
+use gpui_kit::{AnyElement, AnyView, Context, SharedString, Window};
 use smallvec::SmallVec;
-use tl_model::ids::ColumnId;
-use tl_model::table::SortSpec;
 
 use crate::components::menu::TlMenu;
 use crate::table::cells::CellOut;
-use crate::table::columns::{ColumnLayout, ColumnSpec};
+use crate::table::columns::{ColumnLayout, ColumnSpec, TableColumn};
+
+/// `tables.column_resize` (R-075). The one enum the settings parse.
+pub use tl_model::settings::ColumnResize as ColumnResizeMode;
 
 /// Indent per tree level.
 pub const INDENT: f32 = 18.0;
@@ -44,6 +43,10 @@ pub const SCROLLBAR_W: f32 = 16.0;
 pub trait TreeTableDelegate: 'static + Sized {
     /// Row identity. Never an index.
     type RowId: Copy + Eq + Hash + 'static;
+    /// Column ids: `ColumnId` for the process tables, `SysColumnId` for the system tables.
+    type Column: TableColumn;
+    /// Sort state: `SortSpec` for the process tables, `SysSortSpec` for the system tables.
+    type Sort: Clone + PartialEq + 'static;
 
     fn row_count(&self) -> usize;
     fn row_id(&self, ix: usize) -> Self::RowId;
@@ -56,27 +59,31 @@ pub trait TreeTableDelegate: 'static + Sized {
     fn row_flags(&self, ix: usize) -> RowFlags;
     /// Bumps when the rows change. Drives `row_index` and `CellTextCache`.
     fn table_version(&self) -> u64;
-    fn columns(&self) -> &ColumnLayout;
-    fn column_spec(&self, id: ColumnId) -> &ColumnSpec;
-    fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut);
+    fn columns(&self) -> &ColumnLayout<Self::Column>;
+    fn column_spec(&self, id: Self::Column) -> &ColumnSpec<Self::Column>;
+    fn cell(&self, ix: usize, col: Self::Column, out: &mut CellOut);
     fn name_cell(&self, ix: usize) -> NameCell;
     /// Fills the header totals line for `col`. False: no line 2 for this column.
-    fn header_total(&self, col: ColumnId, out: &mut CellOut) -> bool;
-    fn sort(&self) -> SortSpec;
+    fn header_total(&self, col: Self::Column, out: &mut CellOut) -> bool;
+    fn sort(&self) -> Self::Sort;
     /// False for group headers.
     fn selectable(&self, ix: usize) -> bool;
     fn context_menu(
         &mut self,
         targets: &[Self::RowId],
-        clicked_col: ColumnId,
+        clicked_col: Self::Column,
         menu: TlMenu,
         window: &mut Window,
         cx: &mut Context<TlTreeTable<Self>>,
     ) -> TlMenu;
     fn on_toggle_expand(&mut self, id: Self::RowId, cx: &mut Context<TlTreeTable<Self>>);
-    fn on_sort(&mut self, col: ColumnId, cx: &mut Context<TlTreeTable<Self>>);
+    fn on_sort(&mut self, col: Self::Column, cx: &mut Context<TlTreeTable<Self>>);
     /// The delegate persists the layout.
-    fn on_columns_changed(&mut self, layout: &ColumnLayout, cx: &mut Context<TlTreeTable<Self>>);
+    fn on_columns_changed(
+        &mut self,
+        layout: &ColumnLayout<Self::Column>,
+        cx: &mut Context<TlTreeTable<Self>>,
+    );
     /// Demand for the visible rows, at most 512 ids.
     fn on_visible_range(&mut self, ids: &[Self::RowId], cx: &mut Context<TlTreeTable<Self>>);
     /// Enter or double-click.
@@ -188,17 +195,11 @@ pub enum HeaderLines {
     Two,
 }
 
-/// `tables.column_resize` (R-075).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-#[schemars(crate = "gpui::private::schemars")]
-pub enum ColumnResizeMode {
-    Proportional,
-    LastColumn,
-}
-
 #[cfg(test)]
 mod tests {
+    use tl_model::ids::ColumnId;
+    use tl_model::table::{ServiceColumn, SortSpec, SysColumnId, SysSortSpec};
+
     use super::*;
     use crate::table::test_delegate::VecDelegate;
 
@@ -247,5 +248,45 @@ mod tests {
         let d = VecDelegate::new(&[((1u32, 7u32), "a"), ((1, 8), "b")]);
         assert_eq!(assert_delegate(&d), (1, 7));
         assert_eq!(d.row_index((1, 8)), Some(1));
+    }
+
+    fn delegate_sort<D: TreeTableDelegate>(d: &D) -> D::Sort {
+        d.sort()
+    }
+
+    #[test]
+    fn process_delegate_sorts_by_sort_spec() {
+        let d = VecDelegate::new(&[(1u32, "one")]);
+        let sort: SortSpec = delegate_sort(&d);
+        assert_eq!(sort.column, ColumnId::Name);
+    }
+
+    #[test]
+    fn sys_column_delegate_compiles() {
+        let mut d = VecDelegate::<u32, SysColumnId>::new(&[(1, "a"), (2, "b")]);
+        let name = SysColumnId::Services(ServiceColumn::Name);
+        let sort: SysSortSpec = delegate_sort(&d);
+        assert_eq!(
+            sort,
+            SysSortSpec {
+                column: name,
+                ascending: true
+            }
+        );
+        assert_eq!(d.columns().order, vec![name]);
+        assert_eq!(d.column_spec(name).id, name);
+        let status = SysColumnId::Services(ServiceColumn::Status);
+        d.sort = SysSortSpec {
+            column: status,
+            ascending: false,
+        };
+        assert_eq!(delegate_sort(&d).column, status);
+        assert!(!delegate_sort(&d).ascending);
+        let mut out = CellOut {
+            want_text: true,
+            ..CellOut::default()
+        };
+        d.cell(1, name, &mut out);
+        assert_eq!(out.text, "b");
     }
 }

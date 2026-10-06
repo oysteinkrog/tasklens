@@ -13,6 +13,8 @@ use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::ids::ColumnId;
 use tl_model::validity::Validity;
 
+use crate::table::columns::TableColumn;
+
 /// Most cell entries kept after `begin_version` evicts.
 pub const MAX_ENTRIES: usize = 8192;
 
@@ -31,12 +33,12 @@ struct CacheEntry {
 }
 
 /// Cache of formatted cell texts for one table. `R` is the table's row identity (`NodeId` for
-/// processes).
-pub struct CellTextCache<R: Eq + Hash> {
-    cells: FxHashMap<(R, ColumnId), CacheEntry>,
+/// processes), `C` its column id (`ColumnId` for processes, `SysColumnId` for the system tables).
+pub struct CellTextCache<R: Eq + Hash, C: TableColumn = ColumnId> {
+    cells: FxHashMap<(R, C), CacheEntry>,
     /// Key: row, column, width bucket `floor(width_px / 8)`. Value: FxHash of the source text and
     /// the truncated text.
-    paths: FxHashMap<(R, ColumnId, u16), (u64, SharedString)>,
+    paths: FxHashMap<(R, C, u16), (u64, SharedString)>,
     table_version: u64,
     style_version: u64,
     hits: u64,
@@ -45,13 +47,13 @@ pub struct CellTextCache<R: Eq + Hash> {
     scratch: String,
 }
 
-impl<R: Eq + Hash> Default for CellTextCache<R> {
+impl<R: Eq + Hash, C: TableColumn> Default for CellTextCache<R, C> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<R: Eq + Hash> CellTextCache<R> {
+impl<R: Eq + Hash, C: TableColumn> CellTextCache<R, C> {
     pub fn new() -> Self {
         Self {
             cells: FxHashMap::default(),
@@ -113,7 +115,7 @@ impl<R: Eq + Hash> CellTextCache<R> {
     pub fn get_or_format(
         &mut self,
         row: R,
-        col: ColumnId,
+        col: C,
         bits: u64,
         validity: Validity,
         format: impl FnOnce(&mut String),
@@ -146,7 +148,7 @@ impl<R: Eq + Hash> CellTextCache<R> {
     /// Names and other `Arc<str>` texts. Stores `SharedString::from(Arc<str>)`, which shares the
     /// `Arc` (texts of 23 bytes or less are stored inline). Hits when the stored text points at the
     /// same `Arc` or has equal contents.
-    pub fn get_or_insert_arc(&mut self, row: R, col: ColumnId, text: &Arc<str>) -> SharedString {
+    pub fn get_or_insert_arc(&mut self, row: R, col: C, text: &Arc<str>) -> SharedString {
         let version = self.table_version;
         let entry = self.cells.entry((row, col));
         if let std::collections::hash_map::Entry::Occupied(o) = &entry {
@@ -175,7 +177,7 @@ impl<R: Eq + Hash> CellTextCache<R> {
     pub fn path(
         &mut self,
         row: R,
-        col: ColumnId,
+        col: C,
         width: Pixels,
         source: &Arc<str>,
         truncate: impl FnOnce(&str, Pixels) -> SharedString,
