@@ -5,8 +5,14 @@
 //! their properties and sends one `SourceUpdate::Services` with the unit records. Then it
 //! subscribes to the manager and keeps the records live from unit signals (`ServicesState`),
 //! with one publish per signal batch. A full listing runs again on `RefreshNow`, on
-//! `Reloading(false)` and every 60 s while the Services page wants data (ADR-008). Cgroup data
-//! and unit details come in E14-003 and E14-004.
+//! `Reloading(false)` and every 60 s while the Services page wants data (ADR-008). Unit details
+//! come in E14-004.
+//!
+//! Cgroup data (E14-003): each listing walks every unit cgroup for `has_cgroup_procs`. While
+//! `Demand.services` and `Demand.process_table` are both true, a 1 Hz tick lists each unit's
+//! processes as `cgroup_pids`; while `Demand.service_cgroup_stats` is true, the same tick reads the
+//! unit resource columns. All reads of one tick run in one blocking job. With neither demand set,
+//! no tick runs and no cgroup file is read.
 //!
 //! A bus that cannot be opened, or a bus without `org.freedesktop.systemd1`, is an expected
 //! condition: the worker publishes the manager as `Unavailable` and tries again on `RefreshNow`
@@ -28,13 +34,24 @@ use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
 use futures_lite::StreamExt;
 use futures_lite::stream::Boxed;
-use tl_collect::SysRoot;
+use rustix::fd::{AsFd, OwnedFd};
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
+use smallvec::SmallVec;
+use tl_collect::counters::{Counter, Delta};
+use tl_collect::parse::topology::parse_cpu_list;
+use tl_collect::proc::cgroup::{CgroupRoot, CgroupStats, CgroupWant};
 use tl_collect::proc::meta::{PasswdUserNames, UserNames};
+use tl_collect::proc::pid_stat::read_start_ticks;
 use tl_collect::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
 use tl_collect::sysroot::read_file;
+use tl_collect::{CollectError, SysRoot};
+use tl_model::demand::Demand;
 use tl_model::health::{ManagerState, SourceId};
+use tl_model::ids::ProcessKey;
 use tl_model::snapshot::{ServiceBackend, ServiceStatus, StartupType, UnitRecord};
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
+use tl_model::time::BootId;
 use tl_model::validity::Validity;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -70,6 +87,8 @@ const SIGNAL_QUEUE: usize = 8192;
 /// The most signals applied as one batch, so a signal storm still publishes and checks
 /// cancellation.
 const MAX_BATCH: usize = 4096;
+/// ADR-008: unit cgroup pids and stats at 1 Hz while demanded.
+pub const CGROUP_PERIOD: Duration = Duration::from_secs(1);
 
 /// `ListUnitsByPatterns` row: name, description, load state, active state, sub state,
 /// following, object path, job id, job type, job path.
@@ -236,7 +255,10 @@ async fn connected(
     let _clear = ClearOnDrop(slot.clone());
     let _scheme = start_color_scheme(cx, cfg.mode, manager, conn.raw(), &io.updates);
     let mut state = ServicesState::new(manager);
-    if let Err(e) = resync(cx, &conn, manager, &cfg.sys_root, &mut state).await {
+    let fs = HostFs {
+        root: cfg.sys_root.clone(),
+    };
+    if let Err(e) = resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
         // Nothing was published by this generation, so there is nothing to keep.
         if cx.checkpoint().is_err() {
             return Outcome::Ok(());
@@ -251,13 +273,27 @@ async fn connected(
         Err(e) => return lost(cx, io, &state, e).await,
     };
     let mut schedule = Schedule::new(cx.now());
+    let mut ticks = CgroupSchedule::default();
     loop {
-        let (batch, mut full) =
-            match wait_next(cx, io, id, &mut signals, &mut schedule, &mut last_seq).await {
-                Wake::Stop => return Outcome::Ok(()),
-                Wake::Lost(e) => return lost(cx, io, &state, e).await,
-                Wake::Batch { signals, resync } => (signals, resync),
-            };
+        let wake = wait_next(
+            cx,
+            io,
+            id,
+            &mut signals,
+            &mut schedule,
+            &mut ticks,
+            &mut last_seq,
+        )
+        .await;
+        let (batch, mut full, tick) = match wake {
+            Wake::Stop => return Outcome::Ok(()),
+            Wake::Lost(e) => return lost(cx, io, &state, e).await,
+            Wake::Batch {
+                signals,
+                resync,
+                tick,
+            } => (signals, resync, tick),
+        };
         let mut changed = false;
         if !full {
             match apply_batch(cx, &conn, manager, &cfg.sys_root, &mut state, &batch).await {
@@ -267,11 +303,14 @@ async fn connected(
             }
         }
         if full {
-            match resync(cx, &conn, manager, &cfg.sys_root, &mut state).await {
+            match resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
                 Ok(c) => changed = c,
                 Err(e) => return lost(cx, io, &state, e).await,
             }
             schedule.done(cx.now());
+        }
+        if let Some(want) = tick {
+            changed |= cgroup_tick(cx, &fs, &mut state, want).await;
         }
         if changed && let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
             return stop;
@@ -298,12 +337,14 @@ async fn lost(
     Outcome::Err(e.into())
 }
 
-/// A full listing into `state`. True when the record list changed.
-async fn resync(
+/// A full listing into `state`, then the `has_cgroup_procs` walk. True when the record list
+/// changed.
+async fn resync<F: CgroupFs>(
     cx: &Cx,
     conn: &DbusConn,
     manager: Manager,
     sys_root: &SysRoot,
+    fs: &F,
     state: &mut ServicesState,
 ) -> Result<bool, DbusError> {
     let started = cx.now();
@@ -316,10 +357,11 @@ async fn resync(
         ?took,
         "systemd: listing done"
     );
-    Ok(state.replace(
+    let changed = state.replace(
         listing.units.into_iter().zip(users).collect(),
         listing.files,
-    ))
+    );
+    Ok(cgroup_presence(cx, fs, state).await | changed)
 }
 
 enum BatchResult {
@@ -1184,23 +1226,35 @@ enum Wake {
     Stop,
     /// The stream ended or failed.
     Lost(DbusError),
-    /// Signals to apply, and whether a full listing is due (`RefreshNow` or the schedule).
-    Batch { signals: Vec<Signal>, resync: bool },
+    /// Signals to apply, whether a full listing is due (`RefreshNow` or the schedule), and the
+    /// cgroup tick when one is due.
+    Batch {
+        signals: Vec<Signal>,
+        resync: bool,
+        tick: Option<TickWant>,
+    },
 }
 
-/// Waits for signals, `RefreshNow` or the resync schedule. Each wait on the stream is at most
-/// `SIGNAL_WAIT`; after it `cx` is checked. A batch is every signal already queued after the
-/// first one, up to `MAX_BATCH`.
+/// Waits for signals, `RefreshNow`, the resync schedule or the cgroup tick. Each wait on the
+/// stream is at most `SIGNAL_WAIT`, and ends early when the tick is due; after it `cx` is
+/// checked. A batch is every signal already queued after the first one, up to `MAX_BATCH`.
 async fn wait_next<S: UnitSignals>(
     cx: &Cx,
     io: &WorkerIo,
     id: SourceId,
     signals: &mut S,
     schedule: &mut Schedule,
+    ticks: &mut CgroupSchedule,
     last_seq: &mut u64,
 ) -> Wake {
     loop {
-        let first = match signals.next(cx, SIGNAL_WAIT).await {
+        let wait = ticks.wait(cx.now(), &io.demand.borrow_and_clone());
+        let next = if wait.is_zero() {
+            signals.ready().await
+        } else {
+            signals.next(cx, wait).await
+        };
+        let first = match next {
             Ok(first) => first,
             Err(_) if cx.is_cancel_requested() => return Wake::Stop,
             Err(e) => return Wake::Lost(e),
@@ -1220,12 +1274,14 @@ async fn wait_next<S: UnitSignals>(
             }
         }
         let refresh = take_refresh(&io.control.borrow_and_clone(), id, last_seq);
-        let wanted = io.demand.borrow_and_clone().services;
-        let resync = schedule.due(cx.now(), wanted) || refresh;
-        if resync || !batch.is_empty() {
+        let demand = io.demand.borrow_and_clone();
+        let resync = schedule.due(cx.now(), demand.services) || refresh;
+        let tick = ticks.due(cx.now(), &demand);
+        if resync || tick.is_some() || !batch.is_empty() {
             return Wake::Batch {
                 signals: batch,
                 resync,
+                tick,
             };
         }
     }
@@ -1262,7 +1318,21 @@ struct Entry {
     raw: RawUnit,
     path: OwnedObjectPath,
     user: Arc<str>,
+    cg: UnitCgroup,
     record: Arc<UnitRecord>,
+}
+
+/// The record of one unit, with its cgroup data.
+fn build(
+    manager: Manager,
+    kind: UnitType,
+    raw: &RawUnit,
+    user: &Arc<str>,
+    cg: &UnitCgroup,
+) -> Arc<UnitRecord> {
+    let mut rec = record(manager, kind, raw, Arc::clone(user));
+    cg.fill(&mut rec);
+    Arc::new(rec)
 }
 
 /// The unit records of one manager, and the signal logic that keeps them current. Pure: the
@@ -1274,6 +1344,10 @@ struct ServicesState {
     paths: HashMap<OwnedObjectPath, Arc<str>>,
     /// The last `ListUnitFilesByPatterns` result.
     files: UnitFiles,
+    /// Read by the first cgroup tick that lists pids.
+    boot: Option<BootId>,
+    /// Online CPUs, the divisor of `cpu_pct`; the last value read, 1 before the first.
+    cpus: u32,
 }
 
 impl ServicesState {
@@ -1283,6 +1357,8 @@ impl ServicesState {
             units: BTreeMap::new(),
             paths: HashMap::new(),
             files: UnitFiles::new(),
+            boot: None,
+            cpus: 1,
         }
     }
 
@@ -1296,18 +1372,18 @@ impl ServicesState {
         self.units.get(name).map(|e| &e.raw)
     }
 
-    fn entry(&self, unit: Fetched, user: Arc<str>) -> Entry {
-        let record = Arc::new(record(
-            self.manager,
-            unit.kind,
-            &unit.raw,
-            Arc::clone(&user),
-        ));
+    /// A new entry. `cg` is the unit's earlier cgroup data, kept when its cgroup is the same.
+    fn entry(&self, unit: Fetched, user: Arc<str>, cg: Option<UnitCgroup>) -> Entry {
+        let cg = cg
+            .filter(|cg| cg.rel == unit.raw.control_group)
+            .unwrap_or_else(|| UnitCgroup::new(Arc::clone(&unit.raw.control_group)));
+        let record = build(self.manager, unit.kind, &unit.raw, &user, &cg);
         Entry {
             kind: unit.kind,
             raw: unit.raw,
             path: unit.path,
             user,
+            cg,
             record,
         }
     }
@@ -1323,9 +1399,9 @@ impl ServicesState {
             let name = Arc::clone(&unit.raw.name);
             let entry = match old.remove(&name) {
                 Some(e) if e.kind == unit.kind && e.raw == unit.raw && e.user == user => e,
-                _ => {
+                prev => {
                     changed = true;
-                    self.entry(unit, user)
+                    self.entry(unit, user, prev.map(|e| e.cg))
                 }
             };
             self.paths.insert(entry.path.clone(), Arc::clone(&name));
@@ -1349,7 +1425,8 @@ impl ServicesState {
         {
             return false;
         }
-        let entry = self.entry(unit, user);
+        let prev = self.units.get(&name).map(|e| e.cg.clone());
+        let entry = self.entry(unit, user, prev);
         self.paths.insert(entry.path.clone(), Arc::clone(&name));
         self.units.insert(name, entry);
         true
@@ -1375,7 +1452,10 @@ impl ServicesState {
             return false;
         }
         e.raw = raw;
-        e.record = Arc::new(record(manager, e.kind, &e.raw, Arc::clone(&e.user)));
+        if e.cg.rel != e.raw.control_group {
+            e.cg = UnitCgroup::new(Arc::clone(&e.raw.control_group));
+        }
+        e.record = build(manager, e.kind, &e.raw, &e.user, &e.cg);
         true
     }
 
@@ -1388,7 +1468,7 @@ impl ServicesState {
             return false;
         }
         e.user = user;
-        e.record = Arc::new(record(manager, e.kind, &e.raw, Arc::clone(&e.user)));
+        e.record = build(manager, e.kind, &e.raw, &e.user, &e.cg);
         true
     }
 
@@ -1474,9 +1554,539 @@ impl ServicesState {
         }
     }
 
+    /// `(name, ControlGroup)` of every unit that has a cgroup.
+    fn cgroup_units(&self) -> Vec<(Arc<str>, Arc<str>)> {
+        self.units
+            .iter()
+            .filter(|(_, e)| !e.raw.control_group.is_empty())
+            .map(|(name, e)| (Arc::clone(name), Arc::clone(&e.raw.control_group)))
+            .collect()
+    }
+
+    /// Applies the reads of one cgroup pass taken at `t_ns`. A read for a cgroup the unit no
+    /// longer has is dropped. True when any record changed.
+    fn apply_tick(&mut self, read: TickRead, t_ns: u64, fresh: bool) -> bool {
+        if read.boot.is_some() {
+            self.boot = read.boot;
+        }
+        if let Some(cpus) = read.cpus {
+            self.cpus = cpus;
+        }
+        let manager = self.manager;
+        let cpus = self.cpus;
+        if fresh {
+            for e in self.units.values_mut() {
+                e.cg.cpu.reset();
+                e.cg.io.reset();
+            }
+        }
+        let mut changed = false;
+        for unit in read.units {
+            let Some(e) = self.units.get_mut(&unit.name) else {
+                continue;
+            };
+            if e.cg.rel != unit.rel {
+                continue;
+            }
+            let before = e.cg.clone();
+            if let Some(has_procs) = unit.has_procs {
+                e.cg.has_procs = has_procs;
+            }
+            if let Some(pids) = unit.pids {
+                e.cg.pids = pids;
+            }
+            if let Some(stats) = unit.stats {
+                e.cg.sample(stats, t_ns, cpus);
+            }
+            if !e.cg.same_shown(&before) {
+                e.record = build(manager, e.kind, &e.raw, &e.user, &e.cg);
+                changed = true;
+            }
+        }
+        changed
+    }
+
     #[cfg(test)]
     fn record(&self, name: &str) -> Option<&Arc<UnitRecord>> {
         self.units.get(name).map(|e| &e.record)
+    }
+}
+
+// Cgroups
+
+/// The cgroup data of one unit. It outlives record rebuilds and starts over when the unit's
+/// `ControlGroup` changes, so the next rate is `WarmingUp`.
+#[derive(Clone, Debug)]
+struct UnitCgroup {
+    /// The `ControlGroup` these values belong to; empty for none.
+    rel: Arc<str>,
+    has_procs: bool,
+    pids: Arc<[ProcessKey]>,
+    cpu_pct: Total<f32>,
+    memory_bytes: Total<u64>,
+    disk_bps: Total<f64>,
+    tasks: Total<u64>,
+    /// `cpu.stat` `usage_usec`.
+    cpu: Counter,
+    /// `io.stat` `rbytes` + `wbytes`.
+    io: Counter,
+}
+
+impl UnitCgroup {
+    fn new(rel: Arc<str>) -> Self {
+        Self {
+            rel,
+            has_procs: false,
+            pids: Arc::from([]),
+            cpu_pct: missing(),
+            memory_bytes: missing(),
+            disk_bps: missing(),
+            tasks: missing(),
+            cpu: Counter::default(),
+            io: Counter::default(),
+        }
+    }
+
+    /// Copies the values into `rec`. A unit without a cgroup keeps the `Missing` fields and no
+    /// pids.
+    fn fill(&self, rec: &mut UnitRecord) {
+        if rec.control_group.is_none() {
+            return;
+        }
+        rec.has_cgroup_procs = self.has_procs;
+        rec.cgroup_pids = Arc::clone(&self.pids);
+        rec.cpu_pct = self.cpu_pct;
+        rec.memory_bytes = self.memory_bytes;
+        rec.disk_bps = self.disk_bps;
+        rec.tasks = self.tasks;
+    }
+
+    /// True when the record fields are equal; the counters are not compared.
+    fn same_shown(&self, other: &Self) -> bool {
+        self.has_procs == other.has_procs
+            && self.pids == other.pids
+            && self.cpu_pct == other.cpu_pct
+            && self.memory_bytes == other.memory_bytes
+            && self.disk_bps == other.disk_bps
+            && self.tasks == other.tasks
+    }
+
+    /// One stat sample taken at `t_ns` (ADR-008 counter rules). A file that was not read gives
+    /// `Restricted` when a file was denied, else `Unsupported`; a failed pass gives every field
+    /// the error's validity.
+    fn sample(&mut self, stats: Result<CgroupStats, Validity>, t_ns: u64, cpus: u32) {
+        let s = match stats {
+            Ok(s) => s,
+            Err(v) => {
+                self.cpu.reset();
+                self.io.reset();
+                self.cpu_pct = invalid(v);
+                self.memory_bytes = invalid(v);
+                self.disk_bps = invalid(v);
+                self.tasks = invalid(v);
+                return;
+            }
+        };
+        let absent = if s.denied {
+            Validity::Restricted
+        } else {
+            Validity::Unsupported
+        };
+        self.memory_bytes = s.anon.map_or_else(|| invalid(absent), valid);
+        self.tasks = s.pids_current.map_or_else(|| invalid(absent), valid);
+        self.cpu_pct = match s.usage_usec {
+            Some(usec) => rate(&mut self.cpu, usec, t_ns, |delta, dt_ns| {
+                cpu_percent(delta, dt_ns, cpus)
+            }),
+            None => {
+                self.cpu.reset();
+                invalid(absent)
+            }
+        };
+        self.disk_bps = if s.io_valid {
+            let bytes = s.rbytes.saturating_add(s.wbytes);
+            rate(&mut self.io, bytes, t_ns, |delta, dt_ns| {
+                delta as f64 * 1e9 / dt_ns as f64
+            })
+        } else {
+            self.io.reset();
+            invalid(absent)
+        };
+    }
+}
+
+fn valid<T>(value: T) -> Total<T> {
+    Total {
+        value,
+        validity: Validity::Valid,
+    }
+}
+
+fn invalid<T: Default>(validity: Validity) -> Total<T> {
+    Total {
+        value: T::default(),
+        validity,
+    }
+}
+
+/// One counter step: the rate from `per_sec`, or `WarmingUp` on the first sample, a reset or a
+/// clock that did not move.
+fn rate<T: Default>(
+    counter: &mut Counter,
+    cur: u64,
+    t_ns: u64,
+    per_sec: impl FnOnce(u64, u64) -> T,
+) -> Total<T> {
+    match counter.step(cur, t_ns, 0) {
+        Delta::Ok { delta, dt_ns } => valid(per_sec(delta, dt_ns)),
+        Delta::WarmingUp { .. } => invalid(Validity::WarmingUp),
+    }
+}
+
+/// `usage_usec` delta as a share of all online CPUs, the scale of the process `cpu` column.
+fn cpu_percent(delta_usec: u64, dt_ns: u64, cpus: u32) -> f32 {
+    let busy_ns = delta_usec as f64 * 1000.0;
+    (busy_ns / dt_ns as f64 / f64::from(cpus.max(1)) * 100.0) as f32
+}
+
+/// What one cgroup tick reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TickWant {
+    /// `cgroup_pids`: `Demand.services` and `Demand.process_table`.
+    pids: bool,
+    /// The resource columns: `Demand.service_cgroup_stats`.
+    stats: bool,
+    /// The stats were not read on the tick before, so every rate starts over.
+    fresh: bool,
+}
+
+impl TickWant {
+    fn from_demand(d: &Demand) -> Self {
+        Self {
+            pids: d.services && d.process_table,
+            stats: d.service_cgroup_stats,
+            fresh: false,
+        }
+    }
+
+    fn any(self) -> bool {
+        self.pids || self.stats
+    }
+}
+
+/// The 1 Hz cgroup tick. It runs only while `TickWant::any`; the first tick after the demand
+/// comes on is due at once.
+#[derive(Debug, Default)]
+struct CgroupSchedule {
+    last: Option<Time>,
+    /// The last tick read the stats.
+    stats_on: bool,
+}
+
+impl CgroupSchedule {
+    /// How long the signal wait may last before the next tick: `SIGNAL_WAIT` while no tick is
+    /// wanted.
+    fn wait(&self, now: Time, d: &Demand) -> Duration {
+        if !TickWant::from_demand(d).any() {
+            return SIGNAL_WAIT;
+        }
+        let Some(last) = self.last else {
+            return Duration::ZERO;
+        };
+        let since = Duration::from_nanos(now.duration_since(last));
+        CGROUP_PERIOD.saturating_sub(since).min(SIGNAL_WAIT)
+    }
+
+    /// The tick to run now, if one is due. Marks it as run.
+    fn due(&mut self, now: Time, d: &Demand) -> Option<TickWant> {
+        let mut want = TickWant::from_demand(d);
+        if !want.stats {
+            self.stats_on = false;
+        }
+        if !want.any() {
+            self.last = None;
+            return None;
+        }
+        if let Some(last) = self.last
+            && Duration::from_nanos(now.duration_since(last)) < CGROUP_PERIOD
+        {
+            return None;
+        }
+        self.last = Some(now);
+        want.fresh = want.stats && !self.stats_on;
+        self.stats_on = want.stats;
+        Some(want)
+    }
+}
+
+/// Where cgroup passes read: the host, a fixture directory, or a test fake.
+trait CgroupFs: Clone + Send + 'static {
+    type Pass: CgroupPass;
+    /// Opens the handles of one pass. They close when the pass is dropped.
+    fn open(&self) -> Self::Pass;
+}
+
+/// The reads of one pass. Cgroup paths are `ControlGroup` values, relative to
+/// `/sys/fs/cgroup`.
+trait CgroupPass {
+    /// Appends the pids of cgroup `rel` and of every descendant cgroup to `out`.
+    fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity>;
+    /// `memory.stat`, `cpu.stat`, `io.stat` and `pids.current` of cgroup `rel`.
+    fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity>;
+    /// `/proc/<pid>/stat` field 22. `None` when the process is gone or unreadable.
+    fn start_ticks(&mut self, pid: u32) -> Option<u64>;
+    fn boot_id(&mut self) -> Option<BootId>;
+    fn online_cpus(&mut self) -> Option<u32>;
+}
+
+/// The stat files of a unit cgroup (R-137: `memory.stat` `anon`, not `memory.current`).
+const UNIT_WANT: CgroupWant = CgroupWant {
+    memory_stat: true,
+    swap: false,
+    memory_current: false,
+    cpu_stat: true,
+    io_stat: true,
+    pids: true,
+    events: false,
+};
+
+/// The host roots in `SysRoot`.
+#[derive(Clone)]
+struct HostFs {
+    root: SysRoot,
+}
+
+impl CgroupFs for HostFs {
+    type Pass = HostPass;
+
+    fn open(&self) -> HostPass {
+        HostPass {
+            cg: CgroupRoot::open(&self.root.sys).map_err(|e| error_validity(&e)),
+            proc: None,
+            root: self.root.clone(),
+            buf: Vec::new(),
+        }
+    }
+}
+
+/// A dirfd on `/sys/fs/cgroup` and, once a pid is read, one on `/proc`; every file is opened
+/// relative to them and closed at once (R-137).
+struct HostPass {
+    cg: Result<CgroupRoot, Validity>,
+    proc: Option<OwnedFd>,
+    root: SysRoot,
+    buf: Vec<u8>,
+}
+
+impl CgroupPass for HostPass {
+    fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity> {
+        let cg = self.cg.as_ref().map_err(|v| *v)?;
+        cg.read_procs(rel, true, &mut self.buf, out)
+            .map_err(|e| error_validity(&e))
+    }
+
+    fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity> {
+        let cg = self.cg.as_ref().map_err(|v| *v)?;
+        cg.read_stats(rel, UNIT_WANT, &mut self.buf, out)
+            .map_err(|e| error_validity(&e))
+    }
+
+    fn start_ticks(&mut self, pid: u32) -> Option<u64> {
+        if self.proc.is_none() {
+            self.proc = open_dir(&self.root.proc).ok();
+        }
+        let proc = self.proc.as_ref()?;
+        let dir = rustix::fs::openat(
+            proc,
+            pid.to_string(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .ok()?;
+        read_start_ticks(dir.as_fd(), &mut self.buf).ok()
+    }
+
+    fn boot_id(&mut self) -> Option<BootId> {
+        let path = self.root.proc_path("sys/kernel/random/boot_id");
+        BootId::from_uuid_text(&std::fs::read_to_string(path).ok()?)
+    }
+
+    fn online_cpus(&mut self) -> Option<u32> {
+        let bytes = std::fs::read(self.root.sys_path("devices/system/cpu/online")).ok()?;
+        let mut cpus: SmallVec<[u16; 64]> = SmallVec::new();
+        parse_cpu_list(&bytes, &mut cpus).ok()?;
+        (!cpus.is_empty()).then(|| u32::try_from(cpus.len()).unwrap_or(u32::MAX))
+    }
+}
+
+fn open_dir(path: &std::path::Path) -> Result<OwnedFd, Errno> {
+    rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+}
+
+/// The validity of a failed cgroup read. The cgroup readers report an errno for the directory
+/// and `cgroup.procs`, so a removed cgroup is `Missing` and a denied one `Restricted`.
+fn error_validity(e: &CollectError) -> Validity {
+    match e {
+        CollectError::ProcRead { errno, .. } => {
+            CollectError::from(Errno::from_raw_os_error(*errno)).validity()
+        }
+        other => other.validity(),
+    }
+}
+
+/// The reads of one tick for one unit. `None` means not read, so the field keeps its value.
+#[derive(Debug)]
+struct UnitRead {
+    name: Arc<str>,
+    rel: Arc<str>,
+    has_procs: Option<bool>,
+    pids: Option<Arc<[ProcessKey]>>,
+    stats: Option<Result<CgroupStats, Validity>>,
+}
+
+/// The reads of one tick.
+#[derive(Debug, Default)]
+struct TickRead {
+    boot: Option<BootId>,
+    cpus: Option<u32>,
+    units: Vec<UnitRead>,
+}
+
+/// One tick's reads for `units` (`(name, ControlGroup)`). The pids walk runs when `want.pids`:
+/// every pid of the cgroup tree, flat, becomes a `ProcessKey`; a pid whose stat cannot be read
+/// is skipped. Without a boot id no keys are made and `cgroup_pids` keeps its value.
+fn read_tick<P: CgroupPass>(
+    pass: &mut P,
+    units: &[(Arc<str>, Arc<str>)],
+    want: TickWant,
+    boot: Option<BootId>,
+) -> TickRead {
+    let mut read = TickRead::default();
+    if want.pids && boot.is_none() {
+        read.boot = pass.boot_id();
+    }
+    let boot = boot.or(read.boot);
+    if want.stats {
+        read.cpus = pass.online_cpus();
+    }
+    let mut pids = Vec::new();
+    for (name, rel) in units {
+        let mut unit = UnitRead {
+            name: Arc::clone(name),
+            rel: Arc::clone(rel),
+            has_procs: None,
+            pids: None,
+            stats: None,
+        };
+        if want.pids {
+            pids.clear();
+            if pass.procs(rel, &mut pids).is_err() {
+                pids.clear();
+            }
+            unit.has_procs = Some(!pids.is_empty());
+            unit.pids = boot.map(|boot_id| {
+                let mut keys: Vec<ProcessKey> = pids
+                    .iter()
+                    .filter_map(|&pid| {
+                        pass.start_ticks(pid).map(|start_ticks| ProcessKey {
+                            start_ticks,
+                            boot_id,
+                            pid,
+                        })
+                    })
+                    .collect();
+                keys.sort_unstable();
+                keys.dedup();
+                Arc::from(keys)
+            });
+        }
+        if want.stats {
+            let mut stats = CgroupStats::default();
+            unit.stats = Some(pass.stats(rel, &mut stats).map(|()| stats));
+        }
+        read.units.push(unit);
+    }
+    read
+}
+
+/// `has_cgroup_procs` for `units`: true when the cgroup tree holds any pid.
+fn read_presence<P: CgroupPass>(pass: &mut P, units: &[(Arc<str>, Arc<str>)]) -> TickRead {
+    let mut pids = Vec::new();
+    let units = units
+        .iter()
+        .map(|(name, rel)| {
+            pids.clear();
+            let found = pass.procs(rel, &mut pids).is_ok() && !pids.is_empty();
+            UnitRead {
+                name: Arc::clone(name),
+                rel: Arc::clone(rel),
+                has_procs: Some(found),
+                pids: None,
+                stats: None,
+            }
+        })
+        .collect();
+    TickRead {
+        units,
+        ..TickRead::default()
+    }
+}
+
+/// Runs `f` as one blocking job. `None` when the job did not start or was cancelled; the
+/// fields then keep their values.
+async fn blocking<R: Send + 'static>(cx: &Cx, f: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+    let mut job = match cx.spawn_blocking(move |_| f()) {
+        Ok(job) => job,
+        Err(e) => {
+            tracing::debug!(error = %e, "systemd: cgroup job did not start");
+            return None;
+        }
+    };
+    match job.join(cx).await {
+        Ok(out) => Some(out),
+        Err(e) => {
+            tracing::debug!(error = ?e, "systemd: cgroup job ended");
+            None
+        }
+    }
+}
+
+/// The `has_cgroup_procs` walk after a listing. True when a record changed.
+async fn cgroup_presence<F: CgroupFs>(cx: &Cx, fs: &F, state: &mut ServicesState) -> bool {
+    let units = state.cgroup_units();
+    if units.is_empty() {
+        return false;
+    }
+    let fs = fs.clone();
+    let t_ns = cx.now().as_nanos();
+    match blocking(cx, move || read_presence(&mut fs.open(), &units)).await {
+        Some(read) => state.apply_tick(read, t_ns, false),
+        None => false,
+    }
+}
+
+/// One cgroup tick: every read in one blocking job, then the records. True when a record
+/// changed.
+async fn cgroup_tick<F: CgroupFs>(
+    cx: &Cx,
+    fs: &F,
+    state: &mut ServicesState,
+    want: TickWant,
+) -> bool {
+    let units = state.cgroup_units();
+    if units.is_empty() {
+        return false;
+    }
+    let boot = state.boot;
+    let fs = fs.clone();
+    let t_ns = cx.now().as_nanos();
+    match blocking(cx, move || read_tick(&mut fs.open(), &units, want, boot)).await {
+        Some(read) => state.apply_tick(read, t_ns, want.fresh),
+        None => false,
     }
 }
 
@@ -2302,15 +2912,26 @@ mod tests {
                 let cx = Cx::current().expect("task has a Cx");
                 let mut signals = QuietSignals { end: false };
                 let mut schedule = Schedule::new(cx.now());
+                let mut ticks = CgroupSchedule::default();
                 let mut last_seq = 0;
                 let id = SourceId::SystemdUser;
                 loop {
-                    let wake =
-                        wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await;
+                    let wake = wait_next(
+                        &cx,
+                        &io,
+                        id,
+                        &mut signals,
+                        &mut schedule,
+                        &mut ticks,
+                        &mut last_seq,
+                    )
+                    .await;
                     match wake {
                         Wake::Stop => break,
                         Wake::Lost(e) => panic!("stream lost: {e}"),
-                        Wake::Batch { signals, resync } => {
+                        Wake::Batch {
+                            signals, resync, ..
+                        } => {
                             assert!(signals.is_empty());
                             assert!(resync);
                             *count.lock().expect("count lock") += 1;
@@ -2369,10 +2990,19 @@ mod tests {
                 let cx = Cx::current().expect("task has a Cx");
                 let mut signals = QuietSignals { end: false };
                 let mut schedule = Schedule::new(cx.now());
+                let mut ticks = CgroupSchedule::default();
                 let mut last_seq = 0;
                 let id = SourceId::SystemdSystem;
-                let wake =
-                    wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await;
+                let wake = wait_next(
+                    &cx,
+                    &io,
+                    id,
+                    &mut signals,
+                    &mut schedule,
+                    &mut ticks,
+                    &mut last_seq,
+                )
+                .await;
                 let resync = matches!(wake, Wake::Batch { resync: true, .. });
                 *sink.lock().expect("slot lock") = Some((resync, cx.now().as_nanos()));
             })
@@ -2414,14 +3044,23 @@ mod tests {
                 let state = sample_state();
                 let mut signals = QuietSignals { end: true };
                 let mut schedule = Schedule::new(cx.now());
+                let mut ticks = CgroupSchedule::default();
                 let mut last_seq = 0;
                 let id = SourceId::SystemdUser;
-                let outcome =
-                    match wait_next(&cx, &io, id, &mut signals, &mut schedule, &mut last_seq).await
-                    {
-                        Wake::Lost(e) => lost(&cx, &io, &state, e).await,
-                        _ => panic!("the stream ended"),
-                    };
+                let outcome = match wait_next(
+                    &cx,
+                    &io,
+                    id,
+                    &mut signals,
+                    &mut schedule,
+                    &mut ticks,
+                    &mut last_seq,
+                )
+                .await
+                {
+                    Wake::Lost(e) => lost(&cx, &io, &state, e).await,
+                    _ => panic!("the stream ended"),
+                };
                 *sink.lock().expect("slot lock") = Some(outcome);
             })
             .expect("task is created");
@@ -2440,6 +3079,562 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    // Cgroups
+
+    const BOOT_TEXT: &str = "0123abcd-4567-89ab-cdef-0123456789ab\n";
+    const FOO_CG: &str = "/system.slice/foo.service";
+
+    /// An empty fixture root under the workspace target dir, never /tmp.
+    fn fixture_root(name: &str) -> std::path::PathBuf {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("fixture dir");
+        base
+    }
+
+    fn put(base: &std::path::Path, rel: &str, text: &str) {
+        let path = base.join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("fixture dir");
+        std::fs::write(path, text).expect("fixture file");
+    }
+
+    /// A `/proc/<pid>/stat` line with `start` in field 22.
+    fn stat_line(pid: u32, start: u64) -> String {
+        let mut fields = vec![pid.to_string(), "(svc)".to_owned(), "S".to_owned()];
+        for n in 4..=52 {
+            fields.push(if n == 22 {
+                start.to_string()
+            } else {
+                "0".to_owned()
+            });
+        }
+        fields.join(" ") + "\n"
+    }
+
+    /// `foo.service` holds no pid itself, pid 100 in child `a` and pids 200 and 300 in `a/b`.
+    /// Pid 300 has no stat file. `empty.service` holds none.
+    fn cgroup_fixture(name: &str) -> std::path::PathBuf {
+        let base = fixture_root(name);
+        let cg = "sys/fs/cgroup/system.slice";
+        put(&base, &format!("{cg}/foo.service/cgroup.procs"), "");
+        put(&base, &format!("{cg}/foo.service/a/cgroup.procs"), "100\n");
+        put(
+            &base,
+            &format!("{cg}/foo.service/a/b/cgroup.procs"),
+            "200\n300\n",
+        );
+        put(
+            &base,
+            &format!("{cg}/foo.service/memory.stat"),
+            "anon 4096\nfile 8192\n",
+        );
+        put(
+            &base,
+            &format!("{cg}/foo.service/cpu.stat"),
+            "usage_usec 1000\n",
+        );
+        put(
+            &base,
+            &format!("{cg}/foo.service/io.stat"),
+            "8:0 rbytes=10 wbytes=20 rios=1 wios=2\n",
+        );
+        put(&base, &format!("{cg}/foo.service/pids.current"), "3\n");
+        put(&base, &format!("{cg}/empty.service/cgroup.procs"), "");
+        put(&base, "proc/100/stat", &stat_line(100, 5000));
+        put(&base, "proc/200/stat", &stat_line(200, 6000));
+        put(&base, "proc/sys/kernel/random/boot_id", BOOT_TEXT);
+        put(&base, "sys/devices/system/cpu/online", "0-7\n");
+        base
+    }
+
+    fn boot() -> BootId {
+        BootId::from_uuid_text(BOOT_TEXT).expect("boot id")
+    }
+
+    fn fixture_keys() -> Vec<ProcessKey> {
+        vec![
+            ProcessKey {
+                start_ticks: 5000,
+                boot_id: boot(),
+                pid: 100,
+            },
+            ProcessKey {
+                start_ticks: 6000,
+                boot_id: boot(),
+                pid: 200,
+            },
+        ]
+    }
+
+    fn cg_units(list: &[(&str, &str)]) -> Vec<(Arc<str>, Arc<str>)> {
+        list.iter()
+            .map(|(name, rel)| (Arc::from(*name), Arc::from(*rel)))
+            .collect()
+    }
+
+    #[test]
+    fn cgroup_walk_nested_pids() {
+        let base = cgroup_fixture("dbus_systemd_cgroup_walk");
+        let fs = HostFs {
+            root: SysRoot::at(&base),
+        };
+        let mut pids = Vec::new();
+        fs.open().procs(FOO_CG, &mut pids).expect("walk");
+        pids.sort_unstable();
+        assert_eq!(pids, [100, 200, 300], "nested pids, flat");
+
+        let units = cg_units(&[
+            ("foo.service", FOO_CG),
+            ("empty.service", "/system.slice/empty.service"),
+            ("gone.service", "/system.slice/gone.service"),
+        ]);
+        let read = read_presence(&mut fs.open(), &units);
+        let found: Vec<_> = read.units.iter().map(|u| u.has_procs).collect();
+        assert_eq!(found, [Some(true), Some(false), Some(false)]);
+        assert!(read.units.iter().all(|u| u.pids.is_none()));
+
+        let want = TickWant {
+            pids: true,
+            stats: false,
+            fresh: false,
+        };
+        let read = read_tick(&mut fs.open(), &units, want, None);
+        assert_eq!(read.boot, Some(boot()));
+        assert_eq!(read.cpus, None, "no stats wanted");
+        let foo = &read.units[0];
+        assert_eq!(foo.has_procs, Some(true));
+        // Pid 300 has no stat file and is skipped.
+        assert_eq!(foo.pids.as_deref(), Some(&fixture_keys()[..]));
+        assert!(foo.stats.is_none());
+        assert_eq!(read.units[2].pids.as_deref(), Some(&[][..]));
+    }
+
+    /// One pass that returns `stats` for every cgroup and has no pids.
+    struct FakePass {
+        stats: Result<CgroupStats, Validity>,
+    }
+
+    impl CgroupPass for FakePass {
+        fn procs(&mut self, _rel: &str, _out: &mut Vec<u32>) -> Result<(), Validity> {
+            Ok(())
+        }
+
+        fn stats(&mut self, _rel: &str, out: &mut CgroupStats) -> Result<(), Validity> {
+            *out = self.stats?;
+            Ok(())
+        }
+
+        fn start_ticks(&mut self, _pid: u32) -> Option<u64> {
+            None
+        }
+
+        fn boot_id(&mut self) -> Option<BootId> {
+            None
+        }
+
+        fn online_cpus(&mut self) -> Option<u32> {
+            Some(8)
+        }
+    }
+
+    fn usage(usec: u64, io: u64) -> Result<CgroupStats, Validity> {
+        Ok(CgroupStats {
+            anon: Some(1 << 20),
+            usage_usec: Some(usec),
+            rbytes: io,
+            io_valid: true,
+            pids_current: Some(4),
+            ..CgroupStats::default()
+        })
+    }
+
+    #[test]
+    fn cgroup_stats_cpu_rate() {
+        let mut cg = UnitCgroup::new(FOO_CG.into());
+        cg.sample(usage(1_000_000, 0), 1_000_000_000, 8);
+        assert_eq!(cg.cpu_pct.validity, Validity::WarmingUp, "first sample");
+        assert_eq!(cg.disk_bps.validity, Validity::WarmingUp);
+        assert_eq!(cg.memory_bytes, valid(1 << 20));
+        assert_eq!(cg.tasks, valid(4));
+
+        cg.sample(usage(1_500_000, 4096), 2_000_000_000, 8);
+        assert_eq!(cg.cpu_pct, valid(6.25));
+        assert_eq!(cg.disk_bps, valid(4096.0));
+
+        // The rate uses the real elapsed time.
+        cg.sample(usage(2_000_000, 4096), 4_000_000_000, 8);
+        assert_eq!(cg.cpu_pct, valid(3.125));
+        assert_eq!(cg.disk_bps, valid(0.0));
+    }
+
+    #[test]
+    fn cgroup_stats_reset_warming_up() {
+        let mut cg = UnitCgroup::new(FOO_CG.into());
+        cg.sample(usage(1_000_000, 100), 1_000_000_000, 8);
+        cg.sample(usage(1_500_000, 200), 2_000_000_000, 8);
+        assert_eq!(cg.cpu_pct.validity, Validity::Valid);
+        cg.sample(usage(400_000, 50), 3_000_000_000, 8);
+        assert_eq!(
+            cg.cpu_pct.validity,
+            Validity::WarmingUp,
+            "usage_usec went back"
+        );
+        assert_eq!(cg.cpu_pct.value, 0.0, "no rate");
+        assert_eq!(cg.disk_bps.validity, Validity::WarmingUp);
+        // The reset is the new baseline.
+        cg.sample(usage(900_000, 50), 4_000_000_000, 8);
+        assert_eq!(cg.cpu_pct, valid(6.25));
+
+        // A demand that comes back on starts every rate over.
+        let mut ticks = CgroupSchedule::default();
+        let on = Demand {
+            service_cgroup_stats: true,
+            ..Demand::default()
+        };
+        let t = |s: u64| Time::from_nanos(s * 1_000_000_000);
+        assert!(ticks.due(t(0), &on).expect("due at once").fresh);
+        assert_eq!(ticks.due(t(0), &on), None, "not before 1 s");
+        assert!(!ticks.due(t(1), &on).expect("due at 1 s").fresh);
+        assert_eq!(ticks.due(t(2), &Demand::default()), None);
+        assert!(ticks.due(t(2), &on).expect("due at once").fresh);
+    }
+
+    /// `foo.service` with a cgroup and `bar.service` without one.
+    fn cgroup_state() -> ServicesState {
+        let mut state = ServicesState::new(Manager::System);
+        let (mut foo, user) = unit("foo.service", "active", "running", "enabled");
+        foo.raw.control_group = FOO_CG.into();
+        let bar = unit("bar.service", "active", "exited", "enabled");
+        assert!(state.replace(vec![bar, (foo, user)], UnitFiles::new()));
+        state
+    }
+
+    fn fake_tick(state: &mut ServicesState, stats: Result<CgroupStats, Validity>) -> bool {
+        let want = TickWant {
+            pids: false,
+            stats: true,
+            fresh: false,
+        };
+        let units = state.cgroup_units();
+        let read = read_tick(&mut FakePass { stats }, &units, want, None);
+        state.apply_tick(read, 1_000_000_000, false)
+    }
+
+    #[test]
+    fn cgroup_stats_missing_without_cgroup() {
+        let mut state = cgroup_state();
+        assert_eq!(state.cgroup_units(), cg_units(&[("foo.service", FOO_CG)]));
+        assert!(fake_tick(&mut state, usage(1, 1)));
+        let foo = state.record("foo.service").expect("foo");
+        assert_eq!(foo.memory_bytes, valid(1 << 20));
+        assert_eq!(foo.tasks, valid(4));
+        let bar = Arc::clone(state.record("bar.service").expect("bar"));
+        assert_eq!(bar.control_group, None);
+        assert_eq!(bar.cpu_pct.validity, Validity::Missing);
+        assert_eq!(bar.memory_bytes.validity, Validity::Missing);
+        assert_eq!(bar.disk_bps.validity, Validity::Missing);
+        assert_eq!(bar.tasks.validity, Validity::Missing);
+        assert!(!bar.has_cgroup_procs && bar.cgroup_pids.is_empty());
+
+        // A record rebuilt from a signal keeps its cgroup values.
+        let mut fx = Effects::default();
+        let changed = props(vec![("SubState", Value::from("reload"))]);
+        state.apply(&properties("foo.service", changed, &[]), &mut fx);
+        let foo = state.record("foo.service").expect("foo");
+        assert_eq!(&*foo.sub_state, "reload");
+        assert_eq!(foo.memory_bytes, valid(1 << 20));
+        // The same values at the same time change no record.
+        let foo = Arc::clone(foo);
+        assert!(!fake_tick(&mut state, usage(1, 1)));
+        assert!(Arc::ptr_eq(&foo, state.record("foo.service").expect("foo")));
+        assert!(Arc::ptr_eq(&bar, state.record("bar.service").expect("bar")));
+    }
+
+    #[test]
+    fn cgroup_stats_restricted_on_eacces() {
+        let mut state = cgroup_state();
+        // memory.stat gave EACCES; the other files were read.
+        let denied = Ok(CgroupStats {
+            anon: None,
+            usage_usec: Some(10),
+            io_valid: true,
+            pids_current: Some(2),
+            denied: true,
+            ..CgroupStats::default()
+        });
+        assert!(fake_tick(&mut state, denied));
+        let foo = state.record("foo.service").expect("foo");
+        assert_eq!(foo.memory_bytes.validity, Validity::Restricted);
+        assert_eq!(foo.tasks, valid(2));
+        assert_eq!(foo.cpu_pct.validity, Validity::WarmingUp);
+
+        // A missing file that was not denied is Unsupported, never 0.
+        let mut cg = UnitCgroup::new(FOO_CG.into());
+        cg.sample(
+            Ok(CgroupStats {
+                pids_current: Some(1),
+                ..CgroupStats::default()
+            }),
+            1,
+            8,
+        );
+        assert_eq!(cg.memory_bytes.validity, Validity::Unsupported);
+        assert_eq!(cg.disk_bps.validity, Validity::Unsupported);
+
+        // The whole cgroup denied, or gone.
+        assert!(fake_tick(&mut state, Err(Validity::Restricted)));
+        let foo = state.record("foo.service").expect("foo");
+        assert_eq!(foo.memory_bytes.validity, Validity::Restricted);
+        assert_eq!(foo.cpu_pct.validity, Validity::Restricted);
+        let eacces = CollectError::ProcRead {
+            file: "cgroup",
+            errno: Errno::ACCESS.raw_os_error(),
+        };
+        assert_eq!(error_validity(&eacces), Validity::Restricted);
+        let enoent = CollectError::ProcRead {
+            file: "cgroup",
+            errno: Errno::NOENT.raw_os_error(),
+        };
+        assert_eq!(error_validity(&enoent), Validity::Missing);
+    }
+
+    #[derive(Default)]
+    struct Counts {
+        procs: std::sync::atomic::AtomicUsize,
+        stats: std::sync::atomic::AtomicUsize,
+        pid_stat: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Counts {
+        fn get(&self) -> (usize, usize, usize) {
+            use std::sync::atomic::Ordering::SeqCst;
+            (
+                self.procs.load(SeqCst),
+                self.stats.load(SeqCst),
+                self.pid_stat.load(SeqCst),
+            )
+        }
+    }
+
+    /// The fixture filesystem, counting every read.
+    #[derive(Clone)]
+    struct Counting {
+        inner: HostFs,
+        counts: Arc<Counts>,
+    }
+
+    struct CountingPass {
+        inner: HostPass,
+        counts: Arc<Counts>,
+    }
+
+    impl CgroupFs for Counting {
+        type Pass = CountingPass;
+
+        fn open(&self) -> CountingPass {
+            CountingPass {
+                inner: self.inner.open(),
+                counts: Arc::clone(&self.counts),
+            }
+        }
+    }
+
+    impl CgroupPass for CountingPass {
+        fn procs(&mut self, rel: &str, out: &mut Vec<u32>) -> Result<(), Validity> {
+            self.counts
+                .procs
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.procs(rel, out)
+        }
+
+        fn stats(&mut self, rel: &str, out: &mut CgroupStats) -> Result<(), Validity> {
+            self.counts
+                .stats
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.stats(rel, out)
+        }
+
+        fn start_ticks(&mut self, pid: u32) -> Option<u64> {
+            self.counts
+                .pid_stat
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.start_ticks(pid)
+        }
+
+        fn boot_id(&mut self) -> Option<BootId> {
+            self.inner.boot_id()
+        }
+
+        fn online_cpus(&mut self) -> Option<u32> {
+            self.inner.online_cpus()
+        }
+    }
+
+    type Seen = Arc<Mutex<Option<Arc<UnitRecord>>>>;
+
+    /// Runs the signal wait and the cgroup tick as `connected` does, without a bus. After each
+    /// wake the `foo.service` record goes to `seen`.
+    fn tick_loop(lab: &mut LabRuntime, io: WorkerIo, fs: Counting, seen: Seen) -> TaskHandle<()> {
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let mut state = cgroup_state();
+                let mut signals = QuietSignals { end: false };
+                let mut schedule = Schedule::new(cx.now());
+                let mut ticks = CgroupSchedule::default();
+                let mut last_seq = 0;
+                let id = SourceId::SystemdSystem;
+                loop {
+                    let wake = wait_next(
+                        &cx,
+                        &io,
+                        id,
+                        &mut signals,
+                        &mut schedule,
+                        &mut ticks,
+                        &mut last_seq,
+                    )
+                    .await;
+                    match wake {
+                        Wake::Stop => break,
+                        Wake::Lost(e) => panic!("stream lost: {e}"),
+                        Wake::Batch { tick, .. } => {
+                            if let Some(want) = tick {
+                                cgroup_tick(&cx, &fs, &mut state, want).await;
+                            }
+                            *seen.lock().expect("seen lock") = state.record("foo.service").cloned();
+                        }
+                    }
+                }
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        handle
+    }
+
+    fn counting_fixture(name: &str) -> (Counting, Arc<Counts>) {
+        let base = cgroup_fixture(name);
+        let counts = Arc::new(Counts::default());
+        let fs = Counting {
+            inner: HostFs {
+                root: SysRoot::at(&base),
+            },
+            counts: Arc::clone(&counts),
+        };
+        (fs, counts)
+    }
+
+    fn seen_record(seen: &Seen) -> Arc<UnitRecord> {
+        seen.lock()
+            .expect("seen lock")
+            .clone()
+            .expect("the loop woke")
+    }
+
+    #[test]
+    fn cgroup_pids_follow_process_table_demand() {
+        let mut lab = LabRuntime::new(LabConfig::new(45).max_steps(1_000_000));
+        let (io, _rx, _control_tx, demand_tx) = worker_io();
+        let (fs, counts) = counting_fixture("dbus_systemd_pids_demand");
+        let seen = Seen::default();
+        let handle = tick_loop(&mut lab, io, fs, Arc::clone(&seen));
+
+        // Services shown, no row expanded, a resource column shown: the stats tick runs, but no
+        // pid is read.
+        let stats_only = Demand {
+            services: true,
+            process_table: false,
+            service_cgroup_stats: true,
+            ..Demand::default()
+        };
+        demand_tx.send(stats_only.clone()).expect("demand send");
+        for _ in 0..20 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        let (procs, stats, pid_stat) = counts.get();
+        assert_eq!((procs, pid_stat), (0, 0));
+        assert!((10..=11).contains(&stats), "1 Hz, got {stats}");
+        let foo = seen_record(&seen);
+        assert!(foo.cgroup_pids.is_empty());
+        assert_eq!(foo.memory_bytes, valid(4096));
+
+        // A row expanded: one tick lists both pids with their start times.
+        let both = Demand {
+            process_table: true,
+            ..stats_only.clone()
+        };
+        demand_tx.send(both).expect("demand send");
+        advance(&mut lab, SIGNAL_WAIT);
+        advance(&mut lab, SIGNAL_WAIT);
+        let foo = seen_record(&seen);
+        assert!(foo.has_cgroup_procs);
+        assert_eq!(&foo.cgroup_pids[..], &fixture_keys()[..]);
+        let (_, _, pid_stat) = counts.get();
+        assert!(pid_stat >= 3, "pids 100, 200 and 300");
+
+        // The row collapsed: 10 s without a pid read, and the pids stay as they were.
+        demand_tx.send(stats_only).expect("demand send");
+        advance(&mut lab, SIGNAL_WAIT);
+        let before = counts.get().2;
+        let pids = Arc::clone(&seen_record(&seen).cgroup_pids);
+        for _ in 0..20 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(counts.get().2, before);
+        assert!(Arc::ptr_eq(&pids, &seen_record(&seen).cgroup_pids));
+
+        handle.abort();
+        advance(&mut lab, SIGNAL_WAIT);
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    #[test]
+    fn cgroup_stats_off_without_demand() {
+        let mut lab = LabRuntime::new(LabConfig::new(46).max_steps(1_000_000));
+        let (io, _rx, _control_tx, demand_tx) = worker_io();
+        let (fs, counts) = counting_fixture("dbus_systemd_stats_off");
+        let seen = Seen::default();
+        let handle = tick_loop(&mut lab, io, fs, Arc::clone(&seen));
+
+        demand_tx
+            .send(Demand {
+                services: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        for _ in 0..120 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        assert_eq!(counts.get(), (0, 0, 0), "no cgroup read in 60 s");
+
+        // Pids wanted, stats not: the tick lists pids and reads no stat file.
+        demand_tx
+            .send(Demand {
+                services: true,
+                process_table: true,
+                ..Demand::default()
+            })
+            .expect("demand send");
+        for _ in 0..4 {
+            advance(&mut lab, SIGNAL_WAIT);
+        }
+        let (procs, stats, _) = counts.get();
+        assert!(procs > 0);
+        assert_eq!(stats, 0);
+        assert_eq!(seen_record(&seen).cpu_pct.validity, Validity::Missing);
+
+        handle.abort();
+        advance(&mut lab, SIGNAL_WAIT);
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
     }
