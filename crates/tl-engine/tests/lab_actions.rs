@@ -367,7 +367,9 @@ impl Harness {
                     }
                     out.push(id);
                 }
-                EngineMsg::Source(SourceUpdate::ConnectionsDestroySupport(v)) => self.support.push(v),
+                EngineMsg::Source(SourceUpdate::ConnectionsDestroySupport(v)) => {
+                    self.support.push(v)
+                }
                 other => panic!("unexpected message {other:?}"),
             }
         }
@@ -2239,9 +2241,7 @@ impl PrivilegedOps for FakePrivilegedOps {
         _deadline: Duration,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<HelperReply>, HelperCallError>> + Send + '_>> {
         lock(&self.calls).push((req, fd.is_some()));
-        let step = lock(&self.script)
-            .pop_front()
-            .unwrap_or(FakeHelperStep::Ok);
+        let step = lock(&self.script).pop_front().unwrap_or(FakeHelperStep::Ok);
         let cx = cx.clone();
         Box::pin(async move {
             let body = match step {
@@ -2310,7 +2310,14 @@ fn harness_p3_with(
         unit_bus_override: h.actx.unit_bus_override.clone(),
         startup_paths: scratch_paths(tmp.path()),
     });
-    (h, P3 { system, user, dumps })
+    (
+        h,
+        P3 {
+            system,
+            user,
+            dumps,
+        },
+    )
 }
 
 fn privileged(id: u64, kind: ActionKind, targets: &[ActionTarget]) -> ActionRequest {
@@ -2333,11 +2340,7 @@ fn socket(cookie: u64) -> ActionTarget {
 }
 
 fn dump_path(dumps: &std::path::Path, name: &str) -> String {
-    dumps
-        .join(name)
-        .to_str()
-        .expect("a UTF-8 path")
-        .to_owned()
+    dumps.join(name).to_str().expect("a UTF-8 path").to_owned()
 }
 
 fn dump_kind(dumps: &std::path::Path, name: &str) -> ActionKind {
@@ -2371,11 +2374,7 @@ fn files_in(dir: &std::path::Path) -> BTreeSet<String> {
 }
 
 fn mode_of(path: &std::path::Path) -> u32 {
-    std::fs::metadata(path)
-        .expect("stat")
-        .permissions()
-        .mode()
-        & 0o777
+    std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
 }
 
 /// The E11-002 guard through admission and `run_action`: a privileged request with no helper is
@@ -2390,7 +2389,10 @@ fn privileged_request_without_helper_is_unsupported() {
         (ActionKind::Signal(Signal::Term), procs(&[500])),
         (dump_kind(&p3.dumps, "a.core"), procs(&[501])),
         (ActionKind::SockDestroy, vec![socket(7)]),
-        (ActionKind::UnitWriteRecovery(restart_always()), vec![system]),
+        (
+            ActionKind::UnitWriteRecovery(restart_always()),
+            vec![system],
+        ),
         (ActionKind::UnitRemoveRecovery, vec![user]),
     ];
     let unsupported = ActionState::Rejected(RejectReason::Unsupported);
@@ -2588,10 +2590,17 @@ fn engine_recovery_user_end_to_end() {
         expected(&[ActionState::Succeeded], ActionState::Succeeded)
     );
     let text = std::fs::read_to_string(&file).expect("read the drop-in");
-    assert_eq!(text, recovery::render(&recovery::keys_of(&restart_always())));
+    assert_eq!(
+        text,
+        recovery::render(&recovery::keys_of(&restart_always()))
+    );
     assert_eq!(mode_of(&file), 0o644);
 
-    rig.action_on(2, ActionKind::UnitRemoveRecovery, std::slice::from_ref(&unit));
+    rig.action_on(
+        2,
+        ActionKind::UnitRemoveRecovery,
+        std::slice::from_ref(&unit),
+    );
     assert_eq!(
         rig.events_for(ActionId(2)),
         expected(&[ActionState::Succeeded], ActionState::Succeeded)
@@ -2674,7 +2683,11 @@ fn explore_helper_calls() {
         }
         for id in DESTROYS + 1..=DESTROYS + RECOVERIES {
             let unit = unit_target(Manager::System, &format!("r{id}.service"));
-            h.submit(req(id, ActionKind::UnitWriteRecovery(restart_always()), &[unit]));
+            h.submit(req(
+                id,
+                ActionKind::UnitWriteRecovery(restart_always()),
+                &[unit],
+            ));
         }
         let dumps: Arc<Mutex<Vec<(String, ActionState)>>> = Arc::new(Mutex::new(Vec::new()));
         for i in 0..DUMPS {
@@ -2729,16 +2742,19 @@ fn explore_helper_calls() {
             std::fs::remove_file(p3.dumps.join(name)).expect("remove a dump");
         }
 
-        let succeeded = destroy_states
-            .iter()
-            .any(|s| *s == ActionState::Succeeded);
+        let succeeded = destroy_states.iter().any(|s| *s == ActionState::Succeeded);
         let unsupported = destroy_states
             .iter()
             .filter(|s| **s == ActionState::Rejected(RejectReason::Unsupported))
             .count();
         let trues = h.support.iter().filter(|v| **v).count();
         let falses = h.support.len() - trues;
-        assert_eq!(trues, usize::from(succeeded), "seed {seed}: {:?}", h.support);
+        assert_eq!(
+            trues,
+            usize::from(succeeded),
+            "seed {seed}: {:?}",
+            h.support
+        );
         assert_eq!(falses, unsupported, "seed {seed}: {:?}", h.support);
 
         // Every helper call is one of ours, and only a dump passes a descriptor.
