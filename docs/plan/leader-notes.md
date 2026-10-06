@@ -483,3 +483,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.12 (963dd4e, 7d8b72a): column resize bands, live drag copy, fit from visible rows plus cached texts; drag does not touch the text cache. CellTextCache::cell_texts added.
 - crw.11 final (fdf45b7, 6c949b1): TlButton focus_handle and trailing_icon; CPU page words via tr cached per strings version; grid rebuilt on style_version. range_word typed &'static str (folded into crw.29); per-CPU MHz missing (new crw bead).
 - yrf.17 (ef22ee7): grid cell hover reusing hover.rs; widened plot hack and CPU grid hover off -> new yrf bead.
+- pdu.49 closed as covered by 5713b4c.
+- rsf.15 (b3b7dde, b4418a6): 3 table goldens pass; RTL blocked. Decisions in a new P1 rsf bead: FSI/PDI isolate before the count, TlIcon::Binary, Name column minimum 120 px. OWNER REVIEW: the Name minimum of 120 px is a leader call; PROC-023 gives 60 px for all columns.
