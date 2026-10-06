@@ -24,8 +24,9 @@ use std::rc::Rc;
 use gpui_kit::base::Button as BaseButton;
 use gpui_kit::{
     Action, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement,
-    Styled, Window, accesskit::Toggled, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window, accesskit::Toggled, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 
 use super::focus::TlFocusRing;
@@ -157,6 +158,7 @@ pub struct TlButton {
     size: TlButtonSize,
     label: Option<SharedString>,
     icon: Option<TlIcon>,
+    icon_size: Option<Pixels>,
     action: Option<Rc<dyn Action>>,
     on_click: Option<ClickHandler>,
     tooltip: Option<SharedString>,
@@ -174,6 +176,7 @@ impl TlButton {
             size: TlButtonSize::Md,
             label: None,
             icon: None,
+            icon_size: None,
             action: None,
             on_click: None,
             tooltip: None,
@@ -193,6 +196,12 @@ impl TlButton {
     /// An `i_md` icon, left of the label when there is one.
     pub fn icon(mut self, icon: TlIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// The icon size, already scaled, such as `m.icon.sm`. Default `i_md`.
+    pub fn icon_size(mut self, size: Pixels) -> Self {
+        self.icon_size = Some(size);
         self
     }
 
@@ -291,7 +300,15 @@ impl RenderOnce for TlButton {
             .items_center()
             .gap(m.sp[3])
             .when(self.loading, |c| c.invisible())
-            .when_some(self.icon, |c, name| c.child(icon(name, m.icon.md, look.fg)));
+            .when_some(self.icon, |c, name| {
+                let id = self.id.clone();
+                c.child(
+                    div()
+                        .debug_selector(move || format!("TlButton-{id}-icon"))
+                        .flex_none()
+                        .child(icon(name, self.icon_size.unwrap_or(m.icon.md), look.fg)),
+                )
+            });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
             let mut text_el = div().debug_selector(|| "TlButton-label".into());
             *text_el.text_style() = text;
