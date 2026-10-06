@@ -33,6 +33,7 @@ use tl_model::command::Tab;
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tracing::{debug, error, info, warn};
 
+use super::filter::{FilterBox, ReturnFocus, shown_on};
 use super::registry::GlobalRegistry;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::TabStrip;
@@ -41,8 +42,8 @@ use super::titlebar::TitleBarProbe;
 use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoom};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
-    CloseWindow, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
-    SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
+    ClearFilter, CloseWindow, FocusFilter, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit,
+    RefreshCurrentTab, SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
@@ -564,6 +565,8 @@ pub struct MainWindow {
     root_focus: FocusHandle,
     titlebar: Entity<TitleBarView>,
     tabstrip: Entity<TabStrip>,
+    /// The shell filter box (E20-009); in the tab strip's slot on every tab but Performance.
+    filter: Entity<FilterBox>,
     status: Entity<StatusChip>,
     toasts: Entity<ToastQueue>,
     /// Kept here so the driver lives as long as the window (anim.rs "Storage").
@@ -602,6 +605,7 @@ impl MainWindow {
             .map_or_else(|| built_tabs(cx), |state| state.built_tabs.clone());
         let titlebar = cx.new(|cx| TitleBarView::new(window, cx));
         let tabstrip = cx.new(|cx| TabStrip::new(built, start, window, cx));
+        let filter = cx.new(|cx| FilterBox::new(start, window, cx));
         let status = cx.new(StatusChip::new);
         let client = is_client(window, cx);
         let top = toast_top(client, s);
@@ -658,6 +662,12 @@ impl MainWindow {
                 ));
             }),
         );
+        // Esc, Enter and `ClearFilter` in the filter box hand focus back to the page.
+        subs.push(cx.subscribe_in(
+            &filter,
+            window,
+            |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
+        ));
         // The compositor's close request follows the same decision; tasklens then removes the
         // window or quits itself, so the platform never closes it.
         let view = cx.weak_entity();
@@ -673,6 +683,7 @@ impl MainWindow {
             root_focus,
             titlebar,
             tabstrip,
+            filter,
             status,
             toasts,
             _anim: anim,
@@ -716,6 +727,30 @@ impl MainWindow {
 
     pub fn toasts(&self) -> &Entity<ToastQueue> {
         &self.toasts
+    }
+
+    /// The shell filter box. E20-A2 routes type-to-filter through it.
+    pub fn filter_box(&self) -> &Entity<FilterBox> {
+        &self.filter
+    }
+
+    /// Focuses the active page's `primary_focus`.
+    fn focus_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(page) = &self.pages[self.active as usize] {
+            page.handle.primary_focus(cx).focus(window, cx);
+        }
+    }
+
+    /// Ctrl+F: nothing on Performance, where the box is not shown.
+    fn on_focus_filter(&mut self, _: &FocusFilter, window: &mut Window, cx: &mut Context<Self>) {
+        if shown_on(self.active) {
+            self.filter
+                .update(cx, |f, cx| f.focus_and_select_all(window, cx));
+        }
+    }
+
+    fn on_clear_filter(&mut self, _: &ClearFilter, window: &mut Window, cx: &mut Context<Self>) {
+        self.filter.update(cx, |f, cx| f.clear(window, cx));
     }
 
     /// The status chip. E20-012 sets its paused tag through it.
@@ -848,6 +883,10 @@ impl MainWindow {
         cx.default_global::<ShellState>().active_tab = tab;
         self.tabstrip
             .update(cx, |strip, cx| strip.set_active(tab, cx));
+        self.filter.update(cx, |f, cx| f.set_tab(tab, window, cx));
+        let slot = shown_on(tab).then(|| AnyView::from(self.filter.clone()));
+        self.tabstrip
+            .update(cx, |strip, cx| strip.set_filter_slot(slot, cx));
         let model = self.toolbar_model(cx);
         self.titlebar
             .update(cx, |bar, cx| bar.set_toolbar(model, toolbar_for(tab), cx));
@@ -1015,6 +1054,8 @@ impl Render for MainWindow {
             // Only the main window pauses; secondary windows have no such listener.
             .on_modifiers_changed(cx.listener(Self::on_modifiers))
             // window-level on_action handlers (chain edits)
+            .on_action(cx.listener(Self::on_focus_filter))
+            .on_action(cx.listener(Self::on_clear_filter))
             .child(
                 AnyView::from(self.titlebar.clone()).cached(
                     StyleRefinement::default()
