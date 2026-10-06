@@ -1239,7 +1239,7 @@ mod tests {
                     live: &f.live,
                     exited_within_linger: &f.exited,
                 };
-                let mut submit = |gate: &mut Gate, id: u64, kind, targets| {
+                let submit = |gate: &mut Gate, id: u64, kind, targets| {
                     let mut req = request(kind, targets);
                     req.id = ActionId(id);
                     gate.submit(&cx, req, &view);
