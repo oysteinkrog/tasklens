@@ -1675,3 +1675,256 @@ mod key_in_place {
         );
     }
 }
+
+// ChartGridElement and ChartGridView: one element for n cells (E19, tasklens-yrf.12).
+
+mod grid_element {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, Hsla, IntoElement, ParentElement, Render, StyleRefinement,
+        Styled, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::snapshot::{SeriesSet, Snapshot};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::chart::grid_element::{
+        ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
+    };
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+
+    fn core(i: u16) -> SeriesId {
+        SeriesId {
+            device: DeviceIdx(i),
+            metric: MetricId::CPU_TOTAL,
+        }
+    }
+
+    fn kernel(i: u16) -> SeriesId {
+        SeriesId {
+            device: DeviceIdx(i),
+            metric: MetricId::CPU_KERNEL,
+        }
+    }
+
+    const MEM: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::MEM_USED,
+    };
+
+    /// 20 samples 100 ms apart at `value`, the newest now.
+    fn series(id: SeriesId, version: u64, value: f32) -> Arc<SeriesView> {
+        let newest = now_boot_ns();
+        let samples: Vec<Sample> = (0..20u64)
+            .map(|i| Sample::valid(newest - (19 - i) * 100 * MS, value))
+            .collect();
+        Arc::new(SeriesView {
+            id,
+            version,
+            period_ns: 100 * MS,
+            samples: samples.into(),
+        })
+    }
+
+    /// Publishes `n` cores (with kernel overlays when `overlay`) and the memory series, every
+    /// core at `value(i)`, versions `core_v` and `mem_v`.
+    fn publish(
+        engine: &Arc<FakeEngine>,
+        n: u16,
+        overlay: bool,
+        core_v: u64,
+        mem_v: u64,
+        value: impl Fn(u16) -> f32,
+    ) {
+        let mut views = vec![series(MEM, mem_v, 40.0)];
+        for i in 0..n {
+            views.push(series(core(i), core_v, value(i)));
+            if overlay {
+                views.push(series(kernel(i), core_v, value(i) / 2.0));
+            }
+        }
+        views.sort_by_key(|v| v.id);
+        engine.publish_with(|s: &mut Snapshot| {
+            s.series = Arc::new(SeriesSet {
+                header: s.series.header,
+                series: Arc::from(views),
+                slow: Arc::from([]),
+            });
+        });
+    }
+
+    fn spec(n: u16, overlay: bool) -> ChartGridSpec {
+        let color = |h: f32, a: f32| Hsla {
+            h,
+            s: 0.6,
+            l: 0.5,
+            a,
+        };
+        ChartGridSpec {
+            cells: (0..n)
+                .map(|i| GridCellSpec {
+                    heading: format!("CPU {i}").into(),
+                    fill_series: core(i),
+                    overlay_series: overlay.then_some(kernel(i)),
+                    offline: false,
+                    mark: None,
+                    tooltip: None,
+                })
+                .collect(),
+            fill: color(0.5, 0.2),
+            line: color(0.5, 1.0),
+            overlay_line: color(0.1, 1.0),
+            ..ChartGridSpec::default()
+        }
+    }
+
+    struct Root {
+        grid: Entity<ChartGridView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1300.)).child(
+                self.grid
+                    .clone()
+                    .cached(StyleRefinement::default().w_full()),
+            )
+        }
+    }
+
+    /// A window, 1300 px wide at scale 1, holding one grid for `spec` bound to a hub over
+    /// `engine`.
+    fn grid_in_window<'a>(
+        cx: &'a mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        spec: ChartGridSpec,
+    ) -> (Entity<ChartGridView>, &'a mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(engine, cx);
+            let grid = cx.new(|cx| ChartGridView::new(spec, &hub, cx));
+            Root { grid }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
+        let grid = vcx.read_entity(&root, |r, _| r.grid.clone());
+        (grid, vcx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    #[test]
+    fn grid_columns_for_16_is_6() {
+        let l = grid_layout(16, px(1000.), px(120.), px(8.));
+        assert_eq!((l.cols, l.rows), (6, 3));
+        assert_eq!(l.cell_w, (px(1000.) - px(40.)) / 6.0);
+    }
+
+    #[test]
+    fn grid_columns_for_32_is_8() {
+        let l = grid_layout(32, px(1300.), px(120.), px(8.));
+        assert_eq!((l.cols, l.rows), (8, 4));
+        assert_eq!(grid_height(&l, px(112.), px(8.)), px(472.));
+    }
+
+    #[test]
+    fn grid_columns_drop_when_narrow() {
+        let l = grid_layout(16, px(500.), px(120.), px(8.));
+        assert_eq!((l.cols, l.rows), (3, 6));
+        let one = grid_layout(4, px(50.), px(120.), px(8.));
+        assert_eq!(one.cols, 1, "at least one column");
+    }
+
+    #[gpui_kit::test]
+    fn grid_one_fill_path_for_all_cells(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 32, true, 1, 1, |i| 10.0 + f32::from(i));
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(32, true));
+        draw(vcx);
+        let before = vcx.read_entity(&grid, |v, _| v.path_paints.get());
+        draw(vcx);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.built_layout().map(|l| (l.cols, l.rows)), Some((8, 4)));
+            assert_eq!(v.cached_fill_stroke_counts(), (1, 2));
+            assert_eq!(v.path_paints.get() - before, 3, "3 path paints per frame");
+            for i in 0..32 {
+                assert!(v.vertices_in_cell(i) > 0, "cell {i} has geometry");
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_offline_cell_draws_no_path(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        // Cell 5's series has data too: the offline flag alone keeps it out.
+        publish(&engine, 16, true, 1, 1, |_| 60.0);
+        let mut s = spec(16, true);
+        s.cells[5].offline = true;
+        let (grid, vcx) = grid_in_window(cx, &engine, s);
+        draw(vcx);
+        draw(vcx);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.vertices_in_cell(5), 0);
+            assert!(v.vertices_in_cell(4) > 0);
+            assert!(v.vertices_in_cell(6) > 0);
+            assert_eq!(v.offline_shapes.get(), 1, "\"Offline\" shaped once");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_rerenders_only_on_own_series(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        publish(&engine, 4, false, 1, 1, |_| 50.0);
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(4, false));
+        let count =
+            |vcx: &mut VisualTestContext| vcx.read_entity(&grid, |v, _| v.render_count.get());
+        let first = count(vcx);
+
+        publish(&engine, 4, false, 1, 2, |_| 50.0);
+        vcx.run_until_parked();
+        assert_eq!(count(vcx), first, "memory changed, no core did");
+
+        publish(&engine, 4, false, 2, 2, |_| 50.0);
+        vcx.run_until_parked();
+        assert_eq!(count(vcx), first + 1, "the core series changed");
+    }
+
+    #[gpui_kit::test]
+    fn grid_values_reshape_per_change(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let (grid, vcx) = grid_in_window(cx, &engine, spec(32, false));
+        let shapes = |vcx: &mut VisualTestContext| {
+            vcx.read_entity(&grid, |v, _| (v.value_shapes.get(), v.heading_shapes.get()))
+        };
+        draw(vcx);
+        let (v0, _) = shapes(vcx);
+        for k in 1..=10u64 {
+            publish(&engine, 32, false, k, 1, |i| {
+                (k * 3) as f32 + f32::from(i) / 100.0
+            });
+            vcx.run_until_parked();
+            draw(vcx);
+            draw(vcx);
+        }
+        let (v1, h1) = shapes(vcx);
+        assert_eq!(v1 - v0, 32 * 10, "one value shape per cell per change");
+        assert_eq!(h1, 32, "headings shaped once");
+    }
+}
