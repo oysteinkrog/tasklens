@@ -43,6 +43,8 @@ pub struct TableInput<'a> {
     pub settings: &'a EngineSettings,
     /// Unit Description by unit (E09-025). Empty in P1.
     pub unit_names: &'a FxHashMap<UnitRef, Arc<str>>,
+    /// `UnitRecord.user` by unit, for the User column of unit rows.
+    pub unit_users: &'a FxHashMap<UnitRef, Arc<str>>,
     /// Values of the pseudo rows (E09-023). `None` builds the table without pseudo rows.
     pub pseudo: Option<&'a PseudoInput>,
 }
@@ -1094,8 +1096,51 @@ pub fn aggregate(
         gpu_util_pct: gpu,
         gpu_mem_bytes: gpu_mem,
         threads,
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        commit_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        handles: None,
+        desktop_path: None,
+        description: None,
+        user: None,
         validity,
     }
+}
+
+/// Adds the `ProcessExtras` sums of `members` into `g` (PROC-029, PROC-030, PROC-035). Leaves
+/// them as they are when `extras` is not index aligned with the `records_len` records yet.
+fn add_extras_sums(
+    g: &mut GroupRow,
+    extras: &[ProcessExtras],
+    records_len: usize,
+    members: &[u32],
+) {
+    if extras.len() != records_len {
+        return;
+    }
+    let mut handles = Some(0u32);
+    for &i in members {
+        let Some(x) = extras.get(i as usize) else {
+            continue;
+        };
+        g.cpu_kernel_pct += x.cpu_kernel_pct;
+        g.cpu_user_pct += x.cpu_user_pct;
+        g.cpu_relative_pct += x.cpu_relative_pct;
+        g.utime_ticks = g.utime_ticks.saturating_add(x.utime_ticks);
+        g.stime_ticks = g.stime_ticks.saturating_add(x.stime_ticks);
+        g.commit_bytes = g.commit_bytes.saturating_add(x.commit_bytes);
+        g.page_faults = g.page_faults.saturating_add(x.page_faults);
+        g.page_faults_delta = g.page_faults_delta.saturating_add(x.page_faults_delta);
+        g.major_faults = g.major_faults.saturating_add(x.major_faults);
+        handles = handles.zip(x.handles).map(|(a, b)| a.saturating_add(b));
+    }
+    g.handles = handles;
 }
 
 /// Adds the sums of `from` into `into`. Each field's validity becomes the worse of the two.
@@ -1119,6 +1164,21 @@ fn add_sums(into: &mut GroupRow, from: &GroupRow) {
     into.gpu_util_pct += from.gpu_util_pct;
     into.gpu_mem_bytes = into.gpu_mem_bytes.saturating_add(from.gpu_mem_bytes);
     into.threads = into.threads.saturating_add(from.threads);
+    into.cpu_kernel_pct += from.cpu_kernel_pct;
+    into.cpu_user_pct += from.cpu_user_pct;
+    into.cpu_relative_pct += from.cpu_relative_pct;
+    into.utime_ticks = into.utime_ticks.saturating_add(from.utime_ticks);
+    into.stime_ticks = into.stime_ticks.saturating_add(from.stime_ticks);
+    into.commit_bytes = into.commit_bytes.saturating_add(from.commit_bytes);
+    into.page_faults = into.page_faults.saturating_add(from.page_faults);
+    into.page_faults_delta = into
+        .page_faults_delta
+        .saturating_add(from.page_faults_delta);
+    into.major_faults = into.major_faults.saturating_add(from.major_faults);
+    into.handles = into
+        .handles
+        .zip(from.handles)
+        .map(|(a, b)| a.saturating_add(b));
     for f in ProcessField::ALL {
         into.validity
             .set(f, worse(into.validity.get(f), from.validity.get(f)));
@@ -1180,7 +1240,7 @@ pub fn subtree_totals(f: &Forest, records: &[ProcessRecord], visible: &[u32]) ->
 }
 
 /// The sort value of a group row in column `col`: the aggregated value it displays. Columns a
-/// group row leaves blank (PID, user and the rest) are `Absent`.
+/// group row leaves blank (PID and the rest) are `Absent`.
 fn group_sort_key(g: &GroupRow, col: ColumnId) -> SortKey {
     use ColumnId as C;
     use ProcessField as F;
@@ -1219,11 +1279,24 @@ fn group_sort_key(g: &GroupRow, col: ColumnId) -> SortKey {
         C::Gpu => checked(F::GpuUtil, SortKey::float(g.gpu_pct)),
         C::GpuMemDedicated => checked(F::GpuMem, int(g.gpu_mem_bytes)),
         C::Threads => checked(F::Threads, int(g.threads.into())),
+        C::CpuKernel => checked(F::Cpu, SortKey::float(g.cpu_kernel_pct)),
+        C::CpuUser => checked(F::Cpu, SortKey::float(g.cpu_user_pct)),
+        C::CpuRelative => checked(F::Cpu, SortKey::float(g.cpu_relative_pct)),
+        C::CpuTime => SortKey::Int(i128::from(g.utime_ticks) + i128::from(g.stime_ticks)),
+        C::CpuTimeKernel => int(g.stime_ticks),
+        C::CpuTimeUser => int(g.utime_ticks),
+        C::Commit => int(g.commit_bytes),
+        C::PageFaults => int(g.page_faults),
+        C::PageFaultsDelta => int(g.page_faults_delta),
+        C::MajorFaults => int(g.major_faults),
+        C::Handles => g.handles.map_or(SortKey::Absent, |h| int(h.into())),
         C::Unit => match &g.node {
             NodeId::Unit(u) => SortKey::Text(u.name.clone()),
             _ => SortKey::Absent,
         },
+        C::Description => SortKey::text(g.description.as_ref()),
         C::User if g.kind == GroupRowKind::Pseudo => SortKey::Text(Arc::from("root")),
+        C::User => SortKey::text(g.user.as_ref()),
         _ => SortKey::Absent,
     }
 }
@@ -1348,6 +1421,19 @@ fn pseudo_base(kind: PseudoKind, name: &str) -> GroupRow {
         gpu_util_pct: 0.0,
         gpu_mem_bytes: 0,
         threads: 0,
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        commit_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        handles: None,
+        desktop_path: None,
+        description: None,
+        user: None,
         validity: FieldValidity::all(Validity::Unsupported),
     }
 }
@@ -1605,6 +1691,7 @@ fn grouped_rows(
     let mut groups: Vec<GroupRow> = Vec::with_capacity(apps.len() + units.len() + 1);
     for (key, members) in &apps {
         let mut g = aggregate(records, members, app_stats.get(key).copied(), None);
+        add_extras_sums(&mut g, input.extras, n, members);
         g.node = NodeId::Group(*key);
         g.key = *key;
         g.kind = GroupRowKind::App;
@@ -1612,6 +1699,7 @@ fn grouped_rows(
     }
     for (c, unit, members) in &units {
         let mut g = aggregate(records, members, None, unit_stat(input.unit_stats, unit));
+        add_extras_sums(&mut g, input.extras, n, members);
         g.node = NodeId::Unit((*unit).clone());
         g.kind = GroupRowKind::Unit;
         g.class = if *c == GroupClass::Background {
@@ -1619,16 +1707,15 @@ fn grouped_rows(
         } else {
             GroupKind::System
         };
-        g.name = input
-            .unit_names
-            .get(*unit)
-            .cloned()
-            .unwrap_or_else(|| unit.name.clone());
+        g.description = input.unit_names.get(*unit).cloned();
+        g.user = input.unit_users.get(*unit).cloned();
+        g.name = g.description.clone().unwrap_or_else(|| unit.name.clone());
         g.icon = None;
         groups.push(g);
     }
     let kernel_group = (!kthreads.is_empty()).then(|| {
         let mut g = aggregate(records, &kthreads, None, None);
+        add_extras_sums(&mut g, input.extras, n, &kthreads);
         g.node = NodeId::KernelThreads;
         g.key = GroupKind::System.key();
         g.kind = GroupRowKind::KernelThreads;
@@ -2138,6 +2225,7 @@ mod tests {
             devices: &devices,
             settings: &settings,
             unit_names: &unit_names,
+            unit_users: &unit_names,
             pseudo: None,
         };
         let expanded: Vec<NodeId> = records
@@ -2382,6 +2470,7 @@ mod tests {
                 devices: &devices,
                 settings: &settings,
                 unit_names: &unit_names,
+                unit_users: &unit_names,
                 pseudo: None,
             };
             let query = TableQuery {

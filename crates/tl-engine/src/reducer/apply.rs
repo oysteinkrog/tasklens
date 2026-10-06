@@ -1513,23 +1513,22 @@ impl Reducer {
         self.rebuild_table(settings);
     }
 
-    /// Stores the non-empty `Description` of each unit for the unit row names (E09-025). An
-    /// empty one keeps the stored name. Returns true when the name of a unit that a process is
-    /// in changed, so the table needs a rebuild.
+    /// Stores the non-empty `Description` and `user` of each unit for the unit row name,
+    /// Description and User (E09-025). An empty value keeps the stored one. Returns true when a
+    /// value of a unit that a process is in changed, so the table needs a rebuild.
     fn apply_unit_names(&mut self, units: &[UnitRecord]) -> bool {
         let mut changed: FxHashSet<&UnitRef> = FxHashSet::default();
         for u in units {
-            if u.description.is_empty()
-                || self
-                    .unit_names
-                    .get(&u.unit)
-                    .is_some_and(|d| *d == u.description)
-            {
-                continue;
+            for (map, value) in [
+                (&mut self.unit_names, &u.description),
+                (&mut self.unit_users, &u.user),
+            ] {
+                if value.is_empty() || map.get(&u.unit).is_some_and(|v| v == value) {
+                    continue;
+                }
+                map.insert(u.unit.clone(), Arc::clone(value));
+                changed.insert(&u.unit);
             }
-            self.unit_names
-                .insert(u.unit.clone(), Arc::clone(&u.description));
-            changed.insert(&u.unit);
         }
         !changed.is_empty()
             && self
@@ -1555,6 +1554,7 @@ impl Reducer {
             devices: &devices,
             settings,
             unit_names: &self.unit_names,
+            unit_users: &self.unit_users,
             pseudo: Some(&self.apply_state.pseudo),
         };
         let mut view = table::build(&input, &self.query);

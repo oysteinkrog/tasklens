@@ -983,12 +983,29 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
     let pair = |a: F, b: F| worse(v(a), v(b));
     let member = || first_member(g, ctx);
     let w = ctx.words;
+    // A sum of `ProcessExtras` columns; WarmingUp until the extras arrive. Pseudo rows have none.
+    let sum = |value: Value<'a>| {
+        if g.kind == GroupRowKind::Pseudo {
+            Value::Blank
+        } else if ctx.extras.is_empty() {
+            Value::Glyph(Validity::WarmingUp)
+        } else {
+            value
+        }
+    };
+    let cpu_time = |ticks: u64| {
+        if ctx.clk_tck == 0 {
+            return Value::Glyph(Validity::Unsupported);
+        }
+        sum(Value::Duration(ticks / u64::from(ctx.clk_tck)))
+    };
 
     match col {
-        // No model source yet for the image path of app and unit rows (bead 8q0.38).
-        C::ImagePath if matches!(g.kind, GroupRowKind::App | GroupRowKind::Unit) => {
-            Value::Glyph(Validity::Unsupported)
-        }
+        // App rows: the desktop file. Unit rows have no image path.
+        C::ImagePath if matches!(g.kind, GroupRowKind::App | GroupRowKind::Unit) => g
+            .desktop_path
+            .as_ref()
+            .map_or(Value::Glyph(Validity::Unsupported), Value::Arc),
         C::Name | C::NameDisplay => Value::Arc(&g.name),
         C::Type => Value::Arc(match g.kind {
             GroupRowKind::App => &w.type_app,
@@ -996,9 +1013,15 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             GroupRowKind::KernelThreads => &w.type_kernel_thread,
             GroupRowKind::Pseudo => &w.type_pseudo,
         }),
-        C::User => member().map_or(Value::Blank, |(_, r)| Value::Arc(&r.meta.user)),
-        C::Description => member()
-            .and_then(|(_, r)| r.meta.description.as_ref())
+        // The unit's own User and Description first, then the earliest member's.
+        C::User => g.user.as_ref().map_or_else(
+            || member().map_or(Value::Blank, |(_, r)| Value::Arc(&r.meta.user)),
+            Value::Arc,
+        ),
+        C::Description => g
+            .description
+            .as_ref()
+            .or_else(|| member().and_then(|(_, r)| r.meta.description.as_ref()))
             .map_or(Value::Blank, Value::Arc),
         C::Cmdline => member()
             .and_then(|(_, r)| r.meta.cmdline.as_ref())
@@ -1023,6 +1046,19 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         C::Gpu => Value::Percent(g.gpu_pct, v(F::GpuUtil)),
         C::GpuMemDedicated => Value::Bytes(g.gpu_mem_bytes, v(F::GpuMem)),
         C::Threads => Value::Count(g.threads.into(), v(F::Threads)),
+        C::CpuKernel => sum(Value::Percent(g.cpu_kernel_pct, v(F::Cpu))),
+        C::CpuUser => sum(Value::Percent(g.cpu_user_pct, v(F::Cpu))),
+        C::CpuRelative => sum(Value::Percent(g.cpu_relative_pct, v(F::Cpu))),
+        C::CpuTime => cpu_time(g.utime_ticks.saturating_add(g.stime_ticks)),
+        C::CpuTimeKernel => cpu_time(g.stime_ticks),
+        C::CpuTimeUser => cpu_time(g.utime_ticks),
+        C::Commit => sum(Value::Bytes(g.commit_bytes, Validity::Valid)),
+        C::PageFaults => sum(Value::Count(g.page_faults, Validity::Valid)),
+        C::PageFaultsDelta => sum(Value::Count(g.page_faults_delta, Validity::Valid)),
+        C::MajorFaults => sum(Value::Count(g.major_faults, Validity::Valid)),
+        C::Handles => sum(g.handles.map_or(Value::Glyph(Validity::Restricted), |h| {
+            Value::Count(h.into(), Validity::Valid)
+        })),
         C::Unit => match &g.node {
             NodeId::Unit(u) => Value::Arc(&u.name),
             _ => Value::Blank,
@@ -1032,7 +1068,7 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             _ => Value::Blank,
         },
         // PID, Parent PID and Image name are blank on group rows (PROC-008,
-        // PROC-018). The GroupRow has no sums for the other columns.
+        // PROC-018). The other columns have no group value.
         _ => Value::Blank,
     }
 }

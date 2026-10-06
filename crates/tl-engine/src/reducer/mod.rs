@@ -159,6 +159,9 @@ pub struct Reducer {
     /// The non-empty `Description` of every unit a `ServicesUpdate` reported, for the unit row
     /// names of the table (E09-025, PROC-009). Kept across updates.
     pub unit_names: FxHashMap<UnitRef, Arc<str>>,
+    /// The non-empty `user` of every unit a `ServicesUpdate` reported, for the User column of
+    /// unit rows. Kept across updates.
+    pub unit_users: FxHashMap<UnitRef, Arc<str>>,
     /// Properties payloads, affinity masks and handle search state (E09-026).
     pub details: DetailsState,
     /// The last `GpuApiVersions`, merged into every later `Inventory` (E09-027).
@@ -240,6 +243,7 @@ impl Reducer {
             demand_rx: None,
             apply_state: apply::ApplyState::default(),
             unit_names: FxHashMap::default(),
+            unit_users: FxHashMap::default(),
             details: DetailsState::default(),
             api_versions: Vec::new(),
             dirty: ComponentMask::NONE,

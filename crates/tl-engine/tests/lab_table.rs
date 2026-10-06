@@ -242,6 +242,7 @@ fn build_full(
         devices: &devices,
         settings,
         unit_names: &unit_names,
+        unit_users: &unit_names,
         pseudo,
     };
     table::build(&input, q)
@@ -1745,4 +1746,116 @@ fn unit_manager_from_cgroup_path() {
     assert_eq!(units.len(), 1);
     assert_eq!(units[0].node, NodeId::Unit(cron));
     assert_eq!(units[0].class, GroupKind::System);
+}
+
+// Group row fields and sums (bead 8q0.38).
+
+/// The unit row of `unit`.
+fn unit_row<'a>(snap: &'a Snapshot, unit: &UnitRef) -> &'a GroupRow {
+    snap.table
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit && g.node == NodeId::Unit(unit.clone()))
+        .expect("the unit has a row")
+}
+
+#[test]
+fn unit_row_carries_description_and_user() {
+    let mut engine = Engine::new();
+    let before = engine.run(vec![grouped_query(), sweep_of(pipewire_records())]);
+    let row = unit_row(&before, &pipewire());
+    assert_eq!(row.description, None);
+    assert_eq!(row.user, None);
+
+    let mut update = services(&[("pipewire.service", "PipeWire Multimedia Service")]);
+    if let EngineMsg::Source(SourceUpdate::Services(u)) = &mut update {
+        u.units[0].user = "oystein".into();
+    }
+    let snap = engine.run(vec![update]);
+    let row = unit_row(&snap, &pipewire());
+    assert_eq!(
+        row.description.as_deref(),
+        Some("PipeWire Multimedia Service")
+    );
+    assert_eq!(row.user.as_deref(), Some("oystein"));
+
+    // A rebuild with the same values reuses the stored Arcs.
+    let again = engine.run(vec![sweep_of(pipewire_records())]);
+    let next = unit_row(&again, &pipewire());
+    assert!(Arc::ptr_eq(
+        row.description.as_ref().expect("set"),
+        next.description.as_ref().expect("set")
+    ));
+    assert!(Arc::ptr_eq(
+        row.user.as_ref().expect("set"),
+        next.user.as_ref().expect("set")
+    ));
+}
+
+#[test]
+fn group_rows_sum_extras_columns() {
+    let records = pipewire_records();
+    let mut extras: Vec<ProcessExtras> = records.iter().map(extras).collect();
+    for (n, x) in (1u64..).zip(extras.iter_mut()) {
+        x.cpu_kernel_pct = 0.5;
+        x.cpu_user_pct = 1.0;
+        x.cpu_relative_pct = 16.0;
+        x.utime_ticks = 100 * n;
+        x.stime_ticks = 10 * n;
+        x.commit_bytes = GIB * n;
+        x.page_faults = 1000 * n;
+        x.page_faults_delta = n;
+        x.major_faults = 2 * n;
+        x.handles = Some(10);
+    }
+    let system = SystemSnapshot::default();
+    let devices = DeviceCatalog::default();
+    let unit_names = FxHashMap::default();
+    let settings = settings();
+    let build = |extras: &[ProcessExtras]| {
+        let input = TableInput {
+            records: &records,
+            extras,
+            app_stats: &[],
+            unit_stats: &[],
+            system: &system,
+            devices: &devices,
+            settings: &settings,
+            unit_names: &unit_names,
+            unit_users: &unit_names,
+            pseudo: None,
+        };
+        table::build(
+            &input,
+            &query(TableMode::Grouped, "pid", true, "", &headers()),
+        )
+    };
+
+    let view = build(&extras);
+    let g = view
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit)
+        .expect("the unit has a row");
+    assert_eq!(g.cpu_kernel_pct, 1.5);
+    assert_eq!(g.cpu_user_pct, 3.0);
+    assert_eq!(g.cpu_relative_pct, 48.0);
+    assert_eq!(g.utime_ticks, 600);
+    assert_eq!(g.stime_ticks, 60);
+    assert_eq!(g.commit_bytes, 6 * GIB);
+    assert_eq!(g.page_faults, 6000);
+    assert_eq!(g.page_faults_delta, 6);
+    assert_eq!(g.major_faults, 12);
+    assert_eq!(g.handles, Some(30));
+
+    // One unread fd count makes the sum unknown.
+    extras[1].handles = None;
+    let view = build(&extras);
+    let g = view
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit)
+        .expect("the unit has a row");
+    assert_eq!(g.handles, None);
+    assert_eq!(g.commit_bytes, 6 * GIB);
 }

@@ -218,6 +218,25 @@ pub struct GroupRow {
     pub gpu_util_pct: f32,
     pub gpu_mem_bytes: u64,
     pub threads: u32,
+    /// Sums of the `ProcessExtras` columns over the members (PROC-029, PROC-030, PROC-035).
+    /// Zero when the extras have not arrived; the UI shows WarmingUp then.
+    pub cpu_kernel_pct: f32,
+    pub cpu_user_pct: f32,
+    pub cpu_relative_pct: f32,
+    pub utime_ticks: u64,
+    pub stime_ticks: u64,
+    pub commit_bytes: u64,
+    pub page_faults: u64,
+    pub page_faults_delta: u64,
+    pub major_faults: u64,
+    /// `None` when any member's fd count was not read (Restricted).
+    pub handles: Option<u32>,
+    /// App rows: path of the matched desktop file. Not yet in the model, so always `None`.
+    pub desktop_path: Option<Arc<str>>,
+    /// Unit rows: the unit's `Description=`, when systemd reported a non-empty one.
+    pub description: Option<Arc<str>>,
+    /// Unit rows: `UnitRecord.user` (owner of MainPID, else `User=`, SYS-003).
+    pub user: Option<Arc<str>>,
     pub validity: FieldValidity,
 }
 

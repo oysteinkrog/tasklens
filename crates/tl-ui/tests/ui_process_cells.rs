@@ -374,6 +374,19 @@ mod values {
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
             threads: 40,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
             validity: FieldValidity::all(Validity::Valid),
         }
     }
@@ -1507,5 +1520,252 @@ mod name_cell {
         let cell = bounds(vcx, "TlGroupHeaderCell");
         let label = bounds(vcx, "TlGroupHeaderCell-label");
         assert_eq!(label.left() - cell.left(), px(30.));
+    }
+}
+
+// ---- Group row fields and sums (bead 8q0.38) ----
+
+mod group_fields {
+    use std::sync::Arc;
+
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::{ColumnId, GroupKey, NodeId};
+    use tl_model::process::{GroupKind, GroupRow, GroupRowKind, ProcessExtras};
+    use tl_model::settings::Settings;
+    use tl_model::system::CpuSet;
+    use tl_model::table::{Manager, ProcessTableView, UnitRef};
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::pages::processes::cells::{
+        CellCtx, CellWords, GroupMembers, RowRef, fill_cell, process_column,
+    };
+    use tl_ui::table::cells::CellOut;
+    use tl_ui::table::tree_table::RowKind;
+
+    fn group(kind: GroupRowKind) -> GroupRow {
+        GroupRow {
+            node: NodeId::Group(GroupKey(7)),
+            key: GroupKey(7),
+            kind,
+            class: GroupKind::Background,
+            name: Arc::from("row"),
+            icon: None,
+            members: 2,
+            pids: 2,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 2,
+            cpu_kernel_pct: 1.5,
+            cpu_user_pct: 2.25,
+            cpu_relative_pct: 60.0,
+            utime_ticks: 100 * 60,
+            stime_ticks: 100 * 3_600,
+            commit_bytes: 2 << 20,
+            page_faults: 1_234,
+            page_faults_delta: 56,
+            major_faults: 7,
+            handles: Some(42),
+            desktop_path: None,
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    /// One entry so `CellCtx.extras` is not empty; group rows never read it by index.
+    fn extras() -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: Arc::from("x"),
+            exe_path: Arc::from("/usr/bin/x"),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    struct Env {
+        view: ProcessTableView,
+        settings: Settings,
+        words: CellWords,
+        members: GroupMembers,
+        online: CpuSet,
+        /// False gives an empty `CellCtx.extras`: the extras have not arrived.
+        extras_arrived: bool,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            Self {
+                view: ProcessTableView::default(),
+                settings: Settings::default(),
+                words: CellWords::from_fn(Arc::from),
+                members: GroupMembers::default(),
+                online: CpuSet::empty(),
+                extras_arrived: true,
+            }
+        }
+
+        fn cell(&self, g: &GroupRow, kind: RowKind, id: ColumnId) -> CellOut {
+            let extras = if self.extras_arrived {
+                vec![extras()]
+            } else {
+                Vec::new()
+            };
+            let ctx = CellCtx {
+                view: &self.view,
+                records: &[],
+                extras: &extras,
+                settings: &self.settings,
+                words: &self.words,
+                members: &self.members,
+                ncpu: 32,
+                online: &self.online,
+                mem_total: 64 << 30,
+                vram_total: 0,
+                boot_time_s: 0,
+                clk_tck: 100,
+            };
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            fill_cell(RowRef::Group(g, kind), process_column(id), &ctx, &mut out);
+            out
+        }
+    }
+
+    fn shown(out: &CellOut) -> String {
+        out.arc
+            .as_deref()
+            .map_or_else(|| out.text.clone(), str::to_owned)
+    }
+
+    #[test]
+    fn unit_row_prefers_its_own_description_and_user() {
+        let env = Env::new();
+        let unit = GroupRow {
+            node: NodeId::Unit(UnitRef {
+                manager: Manager::System,
+                name: Arc::from("sshd.service"),
+            }),
+            description: Some(Arc::from("OpenSSH Daemon")),
+            user: Some(Arc::from("root")),
+            ..group(GroupRowKind::Unit)
+        };
+        let desc = env.cell(&unit, RowKind::Unit, ColumnId::Description);
+        assert_eq!(shown(&desc), "OpenSSH Daemon");
+        assert!(Arc::ptr_eq(
+            desc.arc.as_ref().expect("an Arc cell"),
+            unit.description.as_ref().expect("set above")
+        ));
+        assert_eq!(
+            shown(&env.cell(&unit, RowKind::Unit, ColumnId::User)),
+            "root"
+        );
+    }
+
+    #[test]
+    fn app_row_shows_desktop_path() {
+        let env = Env::new();
+        let app = GroupRow {
+            desktop_path: Some(Arc::from("/usr/share/applications/firefox.desktop")),
+            ..group(GroupRowKind::App)
+        };
+        let out = env.cell(&app, RowKind::App, ColumnId::ImagePath);
+        assert_eq!(out.validity, Validity::Valid);
+        assert_eq!(shown(&out), "/usr/share/applications/firefox.desktop");
+        // Without a desktop path the cell stays Unsupported.
+        let none = env.cell(&group(GroupRowKind::App), RowKind::App, ColumnId::ImagePath);
+        assert_eq!(none.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn group_rows_show_summed_columns() {
+        let env = Env::new();
+        let g = group(GroupRowKind::App);
+        let text = |id| shown(&env.cell(&g, RowKind::App, id));
+        for id in [
+            ColumnId::CpuKernel,
+            ColumnId::CpuUser,
+            ColumnId::CpuRelative,
+            ColumnId::CpuTime,
+            ColumnId::CpuTimeKernel,
+            ColumnId::CpuTimeUser,
+            ColumnId::Commit,
+            ColumnId::PageFaults,
+            ColumnId::PageFaultsDelta,
+            ColumnId::MajorFaults,
+            ColumnId::Handles,
+        ] {
+            let out = env.cell(&g, RowKind::App, id);
+            assert_eq!(out.validity, Validity::Valid, "{}", id.as_str());
+            assert!(!shown(&out).is_empty(), "{} is blank", id.as_str());
+        }
+        assert_eq!(text(ColumnId::CpuTimeUser), "0:01:00");
+        assert_eq!(text(ColumnId::CpuTime), "1:01:00");
+        assert_eq!(text(ColumnId::Handles), "42");
+        assert_eq!(text(ColumnId::MajorFaults), "7");
+    }
+
+    #[test]
+    fn summed_columns_warm_up_and_restrict() {
+        let mut env = Env::new();
+        let g = GroupRow {
+            handles: None,
+            ..group(GroupRowKind::Unit)
+        };
+        assert_eq!(
+            env.cell(&g, RowKind::Unit, ColumnId::Handles).validity,
+            Validity::Restricted
+        );
+        env.extras_arrived = false;
+        for id in [ColumnId::CpuKernel, ColumnId::Commit, ColumnId::Handles] {
+            assert_eq!(
+                env.cell(&g, RowKind::Unit, id).validity,
+                Validity::WarmingUp,
+                "{}",
+                id.as_str()
+            );
+        }
+        // Pseudo rows have no extras sums.
+        let pseudo = group(GroupRowKind::Pseudo);
+        let out = Env::new().cell(&pseudo, RowKind::Pseudo, ColumnId::Commit);
+        assert!(out.validity == Validity::Valid && shown(&out).is_empty());
     }
 }
