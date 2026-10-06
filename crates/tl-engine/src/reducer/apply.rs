@@ -23,14 +23,15 @@ use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot,
     DeviceDetailsSnapshot, DiskDetails, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
-    ServicesSnapshot, StartupCounts, StartupEntry, StartupSnapshot, StartupStatus, SystemSnapshot,
-    UnitRecord, WindowsSnapshot,
+    ProcessSnapshot, ServicesSnapshot, StartupCounts, StartupEntry, StartupSnapshot, StartupStatus,
+    SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
 use tl_model::system::{Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
+use super::power::{GpuShare, PowerEstimator};
 use super::process_series::ProcessSeries;
 use super::suspend::Transition;
 use super::sys_table::{self, SysTableInput};
@@ -105,9 +106,28 @@ pub struct ApplyState {
     ran: [bool; SourceId::COUNT],
     /// Per-process series for `Demand.graph_targets` (E09-029).
     process_series: ProcessSeries,
+    /// Per-process power estimate (E09-030).
+    power: PowerEstimator,
+    /// Measured power per GPU UUID from the last GPU sample, valid values only (E09-030).
+    gpu_power: FxHashMap<[u8; 16], f32>,
 }
 
 impl ApplyState {
+    /// Stores the measured power of a GPU for the power estimate; `None` removes it.
+    fn set_gpu_power(&mut self, identity: &DeviceIdentity, power_w: Option<f32>) {
+        let DeviceIdentity::Gpu { uuid, .. } = identity else {
+            return;
+        };
+        match power_w {
+            Some(p) => {
+                self.gpu_power.insert(*uuid, p);
+            }
+            None => {
+                self.gpu_power.remove(uuid);
+            }
+        }
+    }
+
     /// The series period of a sample from `id` at `t_ns`: the spacing of the last two samples
     /// rounded to 100 ms or 1 s, or `first` for the first sample.
     fn period(&mut self, id: SourceId, t_ns: TimeNs, first: u64) -> u64 {
@@ -459,7 +479,7 @@ impl Reducer {
                     let period = u64::from(settings.interval_ms) * 1_000_000;
                     self.sample_ok(id, observed.1, period);
                 }
-                self.publish_processes(observed);
+                self.publish_processes(observed, Some(observed.1));
                 self.rebuild_table(settings);
                 let period = u64::from(settings.interval_ms) * 1_000_000;
                 let processes = &self.components.processes;
@@ -555,6 +575,7 @@ impl Reducer {
                 self.bump_reset_generation();
                 self.series.mark_gap_all();
                 self.apply_state.process_series.mark_gap_all();
+                self.apply_state.power.reset();
             }
             Command::ReprobeSource(id) => self.forward(id, WorkerCommand::Reprobe),
             Command::KWin(c) => self.forward(SourceId::KWin, WorkerCommand::KWin(c)),
@@ -677,6 +698,7 @@ impl Reducer {
     fn resume(&mut self) {
         self.series.mark_gap_all();
         self.apply_state.process_series.mark_gap_all();
+        self.apply_state.power.reset();
         self.bump_reset_generation();
         for source in [SourceId::Disk, SourceId::Net, SourceId::Sensors] {
             self.forward(source, WorkerCommand::RefreshNow);
@@ -1108,6 +1130,7 @@ impl Reducer {
             g.device = idx;
             if !present {
                 self.gaps(idx, &GPU_METRICS, t);
+                self.apply_state.set_gpu_power(&identity, None);
                 rows.push((idx, g));
                 continue;
             }
@@ -1131,6 +1154,8 @@ impl Reducer {
             for (metric, value, validity) in values {
                 self.push(idx, metric, t, value, validity.is_valid(), period);
             }
+            let power = g.power_w.validity.is_valid().then_some(g.power_w.value);
+            self.apply_state.set_gpu_power(&identity, power);
             if g.util_pct.validity.is_valid() {
                 util = util.max(g.util_pct.value);
                 util_ok = true;
@@ -1254,13 +1279,50 @@ impl Reducer {
         *blockers = filled.into();
     }
 
-    /// Publishes the process cache into `components.processes` when it changed.
-    fn publish_processes(&mut self, observed: (TimeNs, TimeNs)) {
+    /// Publishes the process cache into `components.processes` when it changed. `sweep_t` is
+    /// the time of a new sweep, which gets a new power estimate; a republish without one writes
+    /// the estimates of the last sweep again (E09-030).
+    fn publish_processes(&mut self, observed: (TimeNs, TimeNs), sweep_t: Option<TimeNs>) {
         let coverage = self.processes.coverage();
-        if let Some(next) = self.processes.publish(coverage, observed) {
+        if let Some(mut next) = self.processes.publish(coverage, observed) {
+            self.estimate_power(&mut next, sweep_t);
             self.components.processes = next;
             self.mark(ComponentMask::PROCESSES);
         }
+    }
+
+    /// Writes `power_w` and `power_trend_w` of every row of `next` (E09-030, PROC-034). Only a
+    /// GPU with measured power and per-process utilisation adds a GPU term.
+    fn estimate_power(&mut self, next: &mut Arc<ProcessSnapshot>, sweep_t: Option<TimeNs>) {
+        let snap = Arc::make_mut(next);
+        let mut p2 = snap.extras_p2.to_vec();
+        match sweep_t {
+            Some(t) => {
+                let empty = FxHashMap::default();
+                let by_dev = self.processes.gpu_by_dev();
+                let caps = &self.apply_state.gpu_caps;
+                let gpus: Vec<GpuShare> = self
+                    .apply_state
+                    .gpu_power
+                    .iter()
+                    .filter(|(uuid, _)| caps.get(*uuid).copied().unwrap_or(false))
+                    .map(|(uuid, &p)| GpuShare {
+                        power_w: Some(p),
+                        util_by_key: by_dev.get(uuid).unwrap_or(&empty),
+                    })
+                    .collect();
+                self.apply_state.power.on_sweep(
+                    t,
+                    &snap.records,
+                    &snap.extras,
+                    &self.components.system.cpu,
+                    &gpus,
+                    &mut p2,
+                );
+            }
+            None => self.apply_state.power.fill(&snap.records, &mut p2),
+        }
+        snap.extras_p2 = p2.into();
     }
 
     /// Sets `process_series` and marks `PROCESS_SERIES` when the series changed (E09-029). The
@@ -1303,7 +1365,7 @@ impl Reducer {
     /// the table.
     fn republish_processes(&mut self, settings: &EngineSettings) {
         let header = self.components.processes.header;
-        self.publish_processes((header.observed_start, header.observed_end));
+        self.publish_processes((header.observed_start, header.observed_end), None);
         self.rebuild_table(settings);
     }
 

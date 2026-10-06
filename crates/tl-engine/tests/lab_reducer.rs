@@ -1528,6 +1528,126 @@ fn pss_coverage_published() {
     rig.passed();
 }
 
+// ---- Power estimate (E09-030) ----
+
+/// `sweep_of` with `utime_ticks` set per process.
+fn sweep_ticks(t_ns: TimeNs, rows: &[(u32, u64)]) -> EngineMsg {
+    let pids: Vec<u32> = rows.iter().map(|&(pid, _)| pid).collect();
+    let mut sweep = sweep_of(t_ns, &pids);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        for (e, &(_, ticks)) in s.extras.iter_mut().zip(rows) {
+            e.utime_ticks = ticks;
+        }
+    }
+    sweep
+}
+
+/// A CPU sample with RAPL package power `watts`.
+fn cpu_power_msg(t_ns: TimeNs, watts: f32) -> EngineMsg {
+    let mut msg = cpu_msg(t_ns, 50.0, false);
+    if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut msg {
+        s.totals.package_power_w = Metric::valid(watts);
+    }
+    msg
+}
+
+/// A GPU sample with measured power `watts` and SM use per pid.
+fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
+    src(SourceUpdate::Gpu(GpuSample {
+        t_ns: now_boot_ns(),
+        devices: vec![(
+            DeviceIdentity::Gpu {
+                uuid,
+                pci_bus_id: Arc::from("0000:01:00.0"),
+            },
+            GpuTotals {
+                device: DeviceIdx(0),
+                util_pct: Metric::valid(80.0),
+                mem_util_pct: Metric::default(),
+                mem_used: Metric::valid(1024),
+                mem_total: Metric::valid(4096),
+                shared_used: Metric::default(),
+                shared_total: Metric::default(),
+                enc_pct: Metric::default(),
+                dec_pct: Metric::default(),
+                temp_c: Metric::default(),
+                power_w: Metric::valid(watts),
+                power_limit_w: Metric::default(),
+                clock_gfx_mhz: Metric::default(),
+                clock_mem_mhz: Metric::default(),
+                fan_pct: Metric::default(),
+                pcie_rx_bps: Metric::default(),
+                pcie_tx_bps: Metric::default(),
+            },
+        )],
+        processes: Some(
+            sm.iter()
+                .map(|&(pid, pct)| GpuProcessSample {
+                    uuid,
+                    pid,
+                    sm_pct: Reading::Ok(pct),
+                    mem_pct: Reading::Ok(0),
+                    enc_pct: Reading::Ok(0),
+                    dec_pct: Reading::Unsupported,
+                    mem_used: Reading::Ok(0),
+                })
+                .collect(),
+        ),
+    }))
+}
+
+fn power_of(snap: &Snapshot, pid: u32) -> Option<f32> {
+    let i = snap
+        .processes
+        .records
+        .iter()
+        .position(|r| r.key == proc_key(pid))
+        .expect("the record is published");
+    snap.processes.extras_p2[i].power_w
+}
+
+#[test]
+fn power_estimate_survives_republish() {
+    let mut rig = Rig::new();
+    let uuid = [9; 16];
+    let t = now_boot_ns();
+    rig.run(vec![
+        gpu_info(uuid, true),
+        cpu_power_msg(t, 20.0),
+        sweep_ticks(t, &[(1, 100), (2, 100)]),
+        gpu_power_msg(uuid, 100.0, &[(1, 60), (2, 20)]),
+    ])
+    .expect("no invariant violation");
+    let first = rig.latest();
+    assert_eq!(power_of(&first, 1), None, "first sight has no estimate");
+
+    rig.run(vec![sweep_ticks(t + SEC, &[(1, 130), (2, 110)])])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    // CPU 20 W shared 30:10 plus GPU 100 W shared 60:20.
+    assert_eq!(power_of(&snap, 1), Some(90.0));
+    assert_eq!(power_of(&snap, 2), Some(30.0));
+
+    rig.run(vec![pss_msg(&[proc_key(2)], 8192)])
+        .expect("no invariant violation");
+    let after_pss = rig.latest();
+    assert!(!Arc::ptr_eq(&after_pss.processes, &snap.processes));
+    assert_eq!(power_of(&after_pss, 1), Some(90.0));
+    assert_eq!(power_of(&after_pss, 2), Some(30.0));
+
+    rig.run(vec![gpu_power_msg(uuid, 50.0, &[(1, 10)])])
+        .expect("no invariant violation");
+    let after_gpu = rig.latest();
+    assert!(!Arc::ptr_eq(&after_gpu.processes, &after_pss.processes));
+    assert_eq!(
+        power_of(&after_gpu, 1),
+        Some(90.0),
+        "kept until the next sweep"
+    );
+    assert_eq!(power_of(&after_gpu, 2), Some(30.0));
+    rig.passed();
+}
+
 fn pss_demand(keys: &[ProcessKey], shown: bool) -> Demand {
     let mut d = Demand {
         detail_keys: Arc::from(keys),
