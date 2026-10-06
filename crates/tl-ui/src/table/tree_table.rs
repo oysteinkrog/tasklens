@@ -5,18 +5,41 @@
 //! them by identity (`RowId`), never by index. The table draws them and reports gestures back.
 //! Every geometry constant here is in logical px at 100% and is multiplied by `ui_scale` at use.
 
-use std::hash::Hash;
-use std::marker::PhantomData;
+use std::cell::Cell;
+use std::hash::{BuildHasher, Hash};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::{AnyElement, AnyView, Context, SharedString, Window};
+use gpui_kit::base::{
+    Scrollbar, ScrollbarAxis, ScrollbarHandle, ScrollbarMode, ScrollbarThumbStyle, v_flex,
+};
+
+use gpui_kit::{
+    AnyElement, AnyView, App, AppContext as _, Context, Div, ElementId, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseMoveEvent, ParentElement,
+    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, TextRun,
+    UniformListScrollHandle, Window, div, font, px, uniform_list,
+};
+use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
+use tl_model::validity::Validity;
 
 use crate::components::menu::TlMenu;
-use crate::table::cells::CellOut;
-use crate::table::columns::{ColumnLayout, ColumnSpec, TableColumn};
+use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
+use crate::table::cells::{
+    CellCtx, CellOut, attach_cell_tooltip, cell_background, cell_text_color, glyph_cell,
+    numeric_cell, paint_group_header_cell, paint_name_cell, path_cell, text_cell,
+};
+use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
+use crate::table::header::{HeaderState, TlTreeTableHeader};
+use crate::table::selection::Selection;
+use crate::text::ellipsis::middle_ellipsis;
+use crate::text::fonts::UI_FAMILY;
+use crate::text::style::t_base;
+use crate::text_cache::CellTextCache;
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// `tables.column_resize` (R-075). The one enum the settings parse.
 pub use tl_model::settings::ColumnResize as ColumnResizeMode;
@@ -113,9 +136,574 @@ pub trait TreeTableDelegate: 'static + Sized {
     }
 }
 
-/// Placeholder until E18-006 adds the entity.
+/// Opacity of the metric cells of a `STALE` row (UI-PRC-002).
+pub const STALE_OPACITY: f32 = 0.6;
+
+/// The generic virtualised tree table (UI-PRC-001). One entity per table; the owner installs
+/// rows into `delegate` and calls [`TlTreeTable::on_new_version`].
+///
+/// Rendering cost per frame is bounded by the visible rows: the body is a `uniform_list` that
+/// builds only the requested range, each row is one `div` with absolutely positioned cells at
+/// the layout's precomputed offsets, and every cell text comes from `CellTextCache`.
 pub struct TlTreeTable<D: TreeTableDelegate> {
-    _delegate: PhantomData<D>,
+    pub delegate: D,
+    pub selection: Selection<D::RowId>,
+    scroll: UniformListScrollHandle,
+    /// Shared by header and body: how far the content is scrolled left. Read from `scroll` on
+    /// every render.
+    x_offset: Pixels,
+    /// Created in `new`, never in render.
+    focus: FocusHandle,
+    text_cache: CellTextCache<D::RowId, D::Column>,
+    /// Drag and resize, filled by E18-009 to E18-011.
+    #[allow(dead_code)]
+    header_state: HeaderState,
+    hover_row: Option<usize>,
+    /// Set by the page during Ctrl-pause (UI-PRC-017); E18-008 stops anchoring while true.
+    pub paused: bool,
+    last_version: u64,
+    last_style_version: u64,
+    /// Calls of the body's item builder in the current frame. The `uniform_list` calls it twice
+    /// to measure one row before it asks for the visible range.
+    list_calls: u8,
+    /// Truncation flags of the hovered row's cells, by visible column position. Kept across
+    /// frames so a cut cell gets its tooltip on the next render.
+    hover_clips: Vec<Rc<Cell<bool>>>,
+    /// Shared truncation flag of every cell outside the hovered row. Never read.
+    clip_sink: Rc<Cell<bool>>,
+    /// False until the hovered row has rendered once and set its truncation flags.
+    hover_tips_ready: bool,
+    /// Scratch for `delegate.cell`, reused for every cell.
+    out: CellOut,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub render_count: Cell<u32>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub rows_built_last_frame: Cell<u32>,
+}
+
+/// What every row of one frame shares.
+struct FrameCtx {
+    m: UiMetrics,
+    theme: Arc<TlTheme>,
+    hairline: Pixels,
+    total_width: Pixels,
+    guide_lines: bool,
+}
+
+impl<D: TreeTableDelegate> TlTreeTable<D> {
+    pub fn new(delegate: D, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self {
+            delegate,
+            selection: Selection::new(),
+            scroll: UniformListScrollHandle::new(),
+            x_offset: Pixels::ZERO,
+            focus: cx.focus_handle(),
+            text_cache: CellTextCache::new(),
+            header_state: HeaderState::default(),
+            hover_row: None,
+            paused: false,
+            last_version: 0,
+            last_style_version: 0,
+            list_calls: 0,
+            hover_clips: Vec::new(),
+            clip_sink: Rc::new(Cell::new(false)),
+            hover_tips_ready: false,
+            out: CellOut::default(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            render_count: Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            rows_built_last_frame: Cell::new(0),
+        }
+    }
+
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    pub fn delegate_mut(&mut self) -> &mut D {
+        &mut self.delegate
+    }
+
+    /// The owner calls this after installing new rows: starts a new `CellTextCache` version and
+    /// re-renders.
+    pub fn on_new_version(&mut self, cx: &mut Context<Self>) {
+        let style_version = metrics(cx).style_version;
+        self.sync_versions(style_version);
+        cx.notify();
+    }
+
+    /// The body's scroll handle, shared by both scrollbars.
+    pub fn scroll_handle(&self) -> &UniformListScrollHandle {
+        &self.scroll
+    }
+
+    /// How far header and body are scrolled left.
+    pub fn x_offset(&self) -> Pixels {
+        self.x_offset
+    }
+
+    /// The row under the pointer, by flattened index.
+    pub fn hover_row(&self) -> Option<usize> {
+        self.hover_row
+    }
+
+    /// True when the columns are wider than the body, so the horizontal scrollbar shows. Uses
+    /// the body bounds of the last frame.
+    pub fn horizontal_overflow(&self) -> bool {
+        let viewport = ScrollbarHandle::viewport_bounds(&self.scroll).size.width;
+        viewport > Pixels::ZERO && self.delegate.columns().total_width() > viewport
+    }
+
+    fn sync_versions(&mut self, style_version: u64) {
+        let version = self.delegate.table_version();
+        if version != self.last_version || style_version != self.last_style_version {
+            self.text_cache.begin_version(version, style_version);
+            self.last_version = version;
+            self.last_style_version = style_version;
+        }
+    }
+
+    fn set_hover(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
+        if row != self.hover_row {
+            self.hover_row = row;
+            self.hover_tips_ready = false;
+            for flag in &self.hover_clips {
+                flag.set(false);
+            }
+            cx.notify();
+        } else if row.is_some() && !self.hover_tips_ready {
+            // The hovered row has now set its truncation flags; render once more so cut cells
+            // get their tooltips.
+            self.hover_tips_ready = true;
+            cx.notify();
+        }
+    }
+
+    /// The fill of row `ix` (UI-PRC-002): the group band, else selected, else hover, else the
+    /// zebra on the flattened index with the NEW or EXITED tint over it.
+    pub fn row_background(&self, ix: usize, theme: &TlTheme) -> Hsla {
+        if self.delegate.row_kind(ix) == RowKind::GroupHeader {
+            return theme.header;
+        }
+        if self.selection.contains(&self.delegate.row_id(ix)) {
+            return theme.row_selected;
+        }
+        if self.hover_row == Some(ix) {
+            return theme.row_hover;
+        }
+        let zebra = if ix % 2 == 0 {
+            theme.list_bg
+        } else {
+            theme.row_alt
+        };
+        match row_tint(self.delegate.row_flags(ix), theme) {
+            Some(tint) => zebra.blend(tint),
+            None => zebra,
+        }
+    }
+
+    /// Builds the rows of `range` for the body. The two measuring calls get an empty row of the
+    /// same size.
+    fn build_rows(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let call = self.list_calls;
+        self.list_calls = self.list_calls.saturating_add(1);
+        let m = *metrics(cx);
+        let total_width = self.delegate.columns().total_width();
+        if call < 2 && range.len() == 1 {
+            return vec![div().w(total_width).h(m.row_height).into_any_element()];
+        }
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.rows_built_last_frame.set(range.len() as u32);
+
+        let frame = FrameCtx {
+            m,
+            theme: current(cx).clone(),
+            hairline: UiMetrics::hairline(window),
+            total_width,
+            guide_lines: self.delegate.guide_lines(),
+        };
+        let columns = self.delegate.columns().visible_columns().len();
+        if self.hover_clips.len() < columns {
+            self.hover_clips
+                .resize_with(columns, || Rc::new(Cell::new(false)));
+        }
+        let mut rows = Vec::with_capacity(range.len());
+        for ix in range {
+            rows.push(self.build_row(ix, &frame, window, cx));
+        }
+        rows
+    }
+
+    fn build_row(
+        &mut self,
+        ix: usize,
+        f: &FrameCtx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let m = &f.m;
+        let theme = &*f.theme;
+        let kind = self.delegate.row_kind(ix);
+        let mut row = div()
+            .relative()
+            .w(f.total_width)
+            .h(m.row_height)
+            .bg(self.row_background(ix, theme));
+
+        let layout = self.delegate.columns();
+        let visible = layout.visible_columns().clone();
+        let offsets = layout.offsets().clone();
+        let name_col = name_column(layout);
+
+        if kind == RowKind::GroupHeader {
+            row = row.debug_selector(|| "TlTreeTable-group-row".into());
+            if ix > 0 {
+                row = row.child(
+                    div()
+                        .debug_selector(|| "TlTreeTable-group-line".into())
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w(f.total_width)
+                        .h(f.hairline)
+                        .bg(theme.divider),
+                );
+            }
+            if let Some(pos) = name_col.and_then(|c| visible.iter().position(|v| *v == c)) {
+                let x = offsets[pos];
+                let ctx = CellCtx {
+                    m,
+                    theme,
+                    selected: false,
+                    width: f.total_width - x,
+                };
+                let label = self.delegate.name_cell(ix).primary;
+                let cell = paint_group_header_cell(label, self.delegate.row_expandable(ix), &ctx);
+                row = row.child(cell.absolute().top_0().left(x));
+            }
+            return row.into_any_element();
+        }
+
+        let id = self.delegate.row_id(ix);
+        let selected = self.selection.contains(&id);
+        let hovered = self.hover_row == Some(ix);
+        // Cell backgrounds show only under the zebra; hover and selection cover them.
+        let plain = !selected && !hovered;
+        let flags = self.delegate.row_flags(ix);
+        let tint = row_tint(flags, theme);
+        let stale = flags.has(RowFlags::STALE);
+        let tips = hovered && self.hover_tips_ready;
+        let row_key = FxBuildHasher.hash_one(id);
+
+        row = row.on_mouse_move(cx.listener(move |this, _: &MouseMoveEvent, _, cx| {
+            this.set_hover(Some(ix), cx);
+        }));
+
+        for (pos, &col) in visible.iter().enumerate() {
+            let x = offsets[pos];
+            let width = self.delegate.columns().width(col);
+            let ctx = CellCtx {
+                m,
+                theme,
+                selected,
+                width,
+            };
+            if Some(col) == name_col {
+                let name = self.delegate.name_cell(ix);
+                let mut cell = paint_name_cell(
+                    name,
+                    self.delegate.row_depth(ix),
+                    self.delegate.row_expandable(ix),
+                    flags,
+                    f.guide_lines,
+                    &ctx,
+                    tips.then_some(row_key),
+                    window,
+                    cx,
+                );
+                if tips && let Some(view) = self.delegate.row_tooltip(ix) {
+                    let key =
+                        ElementId::NamedInteger(SharedString::new_static("tl-row-tip"), row_key);
+                    let state = HoverTooltip::state(key, window, cx);
+                    cell = HoverTooltip::attach(
+                        &state,
+                        cell,
+                        DELAY_ROW_NAME,
+                        move |_, _| view.clone(),
+                        window,
+                        cx,
+                    );
+                }
+                row = row.child(cell.absolute().top_0().left(x));
+                continue;
+            }
+
+            let (mut cell, text) = self.build_cell(ix, id, col, pos, hovered, &ctx, window);
+            if let Some(color) = cell_text_color(&self.out, &ctx) {
+                cell = cell.text_color(color);
+            }
+            if plain && let Some(bg) = cell_background(&self.out, &ctx) {
+                cell = cell.bg(tint.map_or(bg, |t| bg.blend(t)));
+            }
+            if stale {
+                cell = cell.opacity(STALE_OPACITY);
+            }
+            if tips {
+                cell = self.attach_cell_tip(cell, col, pos, text, row_key, window, cx);
+            }
+            row = row.child(cell.absolute().top_0().left(x));
+        }
+        row.into_any_element()
+    }
+
+    /// One metric cell and the text it shows. Leaves the delegate's output in `self.out` for the
+    /// caller's overrides.
+    #[allow(clippy::too_many_arguments)]
+    fn build_cell(
+        &mut self,
+        ix: usize,
+        id: D::RowId,
+        col: D::Column,
+        pos: usize,
+        hovered: bool,
+        ctx: &CellCtx,
+        window: &mut Window,
+    ) -> (Div, SharedString) {
+        let out = &mut self.out;
+        out.reset();
+        self.delegate.cell(ix, col, out);
+        let spec = self.delegate.column_spec(col);
+        let kind = spec.kind;
+        let flag = if hovered {
+            self.hover_clips[pos].clone()
+        } else {
+            self.clip_sink.clone()
+        };
+        let text = match out.arc.clone() {
+            Some(arc) if kind == ColumnKind::Path => {
+                let room = (ctx.width - ctx.m.sp[4] * 2.0).max(Pixels::ZERO);
+                let font_size = ctx.m.text.base;
+                self.text_cache.path(id, col, room, &arc, |source, max| {
+                    let mut measure = |s: &str| -> Pixels {
+                        let run = TextRun {
+                            len: s.len(),
+                            font: font(UI_FAMILY),
+                            color: ctx.theme.text_primary,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        window
+                            .text_system()
+                            .shape_line(SharedString::new(s), font_size, &[run], None)
+                            .width
+                    };
+                    middle_ellipsis(source, max, &mut measure)
+                })
+            }
+            Some(arc) => self.text_cache.get_or_insert_arc(id, col, &arc),
+            None => {
+                let delegate = &self.delegate;
+                self.text_cache
+                    .get_or_format(id, col, out.bits, out.validity, |s| {
+                        let mut full = CellOut {
+                            text: std::mem::take(s),
+                            want_text: true,
+                            ..CellOut::default()
+                        };
+                        delegate.cell(ix, col, &mut full);
+                        *s = full.text;
+                    })
+            }
+        };
+        let validity = out.validity;
+        let cell = if !matches!(validity, Validity::Valid | Validity::Stale) {
+            glyph_cell(validity, &text, ctx)
+        } else {
+            match kind {
+                ColumnKind::Text => text_cell(text.clone(), ctx, flag),
+                ColumnKind::Path => path_cell(text.clone(), ctx),
+                ColumnKind::Numeric => numeric_cell(text.clone(), validity, flag, ctx),
+            }
+        };
+        (cell, text)
+    }
+
+    /// The hover tooltip of a metric cell on the hovered row: the delegate's explicit tooltip,
+    /// else the full text when the cell was cut. `text` is the text the cell shows.
+    #[allow(clippy::too_many_arguments)]
+    fn attach_cell_tip(
+        &self,
+        cell: Div,
+        col: D::Column,
+        pos: usize,
+        text: SharedString,
+        row_key: u64,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Div {
+        let key = ElementId::NamedInteger(SharedString::new_static(col.key()), row_key);
+        let path_cut = match &self.out.arc {
+            Some(arc) if self.delegate.column_spec(col).kind == ColumnKind::Path => {
+                (text.as_str() != &**arc).then(|| SharedString::from(arc.clone()))
+            }
+            _ => None,
+        };
+        if let Some(tip) = self.out.tooltip.clone().or(path_cut) {
+            let state = HoverTooltip::state(key, window, cx);
+            return HoverTooltip::attach(
+                &state,
+                cell,
+                DELAY_CONTROL,
+                TlTooltip::text(tip).build(),
+                window,
+                cx,
+            );
+        }
+        attach_cell_tooltip(cell, key, text, &self.hover_clips[pos], window, cx)
+    }
+}
+
+/// The NEW or EXITED tint of a row, if any (UI-PRC-002).
+fn row_tint(flags: RowFlags, theme: &TlTheme) -> Option<Hsla> {
+    if flags.has(RowFlags::NEW) {
+        Some(theme.derived.new_row_tint)
+    } else if flags.has(RowFlags::EXITED) {
+        Some(theme.derived.exited_row_tint)
+    } else {
+        None
+    }
+}
+
+/// The column that shows the Name cell: the pinned first column (Name on the process tables),
+/// else the first visible column.
+pub fn name_column<C: TableColumn>(layout: &ColumnLayout<C>) -> Option<C> {
+    let visible = layout.visible_columns();
+    visible
+        .iter()
+        .copied()
+        .find(|c| c.pinned_first())
+        .or_else(|| visible.first().copied())
+}
+
+impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let m = *metrics(cx);
+        let theme = current(cx).clone();
+        self.sync_versions(m.style_version);
+        self.list_calls = 0;
+        self.x_offset = -ScrollbarHandle::offset(&self.scroll).x;
+        let hairline = UiMetrics::hairline(window);
+
+        let header = TlTreeTableHeader {
+            layout: self.delegate.columns(),
+            lines: self.delegate.header_lines(),
+            x_offset: self.x_offset,
+            m: &m,
+            theme: &theme,
+            hairline,
+        }
+        .render(|id| self.delegate.column_spec(id));
+
+        let count = self.delegate.row_count();
+        let empty = if count == 0 {
+            self.delegate.empty_text()
+        } else {
+            None
+        };
+        let ring = self.focus.is_focused(window)
+            && window.last_input_was_keyboard()
+            && self.selection.is_empty()
+            && self.selection.focus().is_none();
+
+        let list = uniform_list("tl-tree-table-body", count, cx.processor(Self::build_rows))
+            .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+            .track_scroll(&self.scroll)
+            .size_full();
+
+        let bar = |st: ScrollbarThumbStyle, w: f32| {
+            st.bg(theme.scroll_thumb)
+                .width(px(w * m.ui_scale))
+                .inset(px(4.0 * m.ui_scale))
+                .radius(Pixels::ZERO)
+                .min_length(px(48.0 * m.ui_scale))
+        };
+        let scrollbar = Scrollbar::new(&self.scroll)
+            .id("tl-tree-table-scrollbar")
+            .axis(ScrollbarAxis::Both)
+            .mode(ScrollbarMode::Always)
+            .styles(|s| {
+                s.track(|t| t.bg(theme.scroll_track).width(px(SCROLLBAR_W * m.ui_scale)))
+                    .track_hover(|t| t.bg(theme.scroll_track))
+                    .track_active(|t| t.bg(theme.scroll_track))
+                    .thumb(|t| bar(t, 6.0))
+                    .thumb_hover(|t| bar(t, 8.0))
+                    .thumb_active(|t| bar(t, 8.0))
+            });
+
+        let mut body = div()
+            .id("tl-tree-table-body-box")
+            .debug_selector(|| "TlTreeTable-body".into())
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .overflow_hidden()
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.set_hover(None, cx);
+                }
+            }))
+            .child(list)
+            .child(scrollbar);
+        if let Some(text) = empty {
+            let mut label = div();
+            *label.text_style() = t_base(&m);
+            body = body.child(
+                label
+                    .debug_selector(|| "TlTreeTable-empty".into())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_color(theme.text_secondary)
+                    .child(text),
+            );
+        }
+        if ring {
+            body = body.child(
+                div()
+                    .debug_selector(|| "TlTreeTable-focus-ring".into())
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .border(px(m.ui_scale))
+                    .border_color(theme.accent),
+            );
+        }
+
+        v_flex()
+            .debug_selector(|| "TlTreeTable".into())
+            .size_full()
+            .bg(theme.list_bg)
+            .key_context("Table")
+            .track_focus(&self.focus)
+            .tab_index(0)
+            .tab_stop(true)
+            .child(header)
+            .child(body)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

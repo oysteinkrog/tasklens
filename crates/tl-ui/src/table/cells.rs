@@ -16,7 +16,9 @@
 //! | [`numeric_cell`] | `tnum`, right | clips at the right edge, never ellipsized; full text in the tooltip |
 //! | [`glyph_cell`] | `TlValidityGlyph`, right | glyphs are short; never heat-coloured |
 //!
-//! Page-specific painters (the Name cell, heat colouring rules, dim zeros) live in the pages.
+//! [`paint_name_cell`] and [`paint_group_header_cell`] draw the generic Name cell of a tree table
+//! (UI-PRC-003) and the group header band (R-105). Page-specific painters (heat colouring rules,
+//! dim zeros) live in the pages.
 //! Pages pass their colours through [`CellOut::background`] and [`CellOut::text_color`].
 //!
 //! No painter formats text: texts arrive as `SharedString` from `CellTextCache`. No cell has an
@@ -24,20 +26,28 @@
 //! [`attach_cell_tooltip`].
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::{
-    App, Bounds, ContentMask, Div, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, SharedString, Style, Styled,
-    StyledText, TextStyleRefinement, Window, div, point, relative, size,
+    App, Bounds, ContentMask, Div, Element, ElementId, Font, FontWeight, GlobalElementId, Hsla,
+    InspectorElementId, InteractiveElement, IntoElement, LayoutId, ParentElement, Pixels, Point,
+    SharedString, Style, Styled, StyledImage, StyledText, TextRun, TextStyleRefinement, Window,
+    canvas, div, fill, font, img, point, prelude::FluentBuilder, px, relative, size, svg,
 };
+use smallvec::SmallVec;
 use tl_model::validity::Validity;
 
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat};
-use crate::text::style::{numeric_style, t_base};
-use crate::text::untrusted::debug_assert_clean;
+use crate::table::tree_table::{
+    CELL_PAD, CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NameCell, NameIcon, RowFlags,
+};
+use crate::text::fonts::UI_FAMILY;
+use crate::text::style::{TNUM, label_style, numeric_style, t_base};
+use crate::text::untrusted::{debug_assert_clean, split_fffd_runs};
 use crate::theme::{TlTheme, UiMetrics};
 
 /// Filled by `TreeTableDelegate::cell`. The table calls `cell()` with `want_text = false`, looks
@@ -403,6 +413,417 @@ impl Element for CellText {
                 .paint(None, None, bounds, &mut (), &mut (), window, cx);
         });
     }
+}
+
+/// Gap between the primary and the secondary Name text (sp4).
+const NAME_SECONDARY_GAP: f32 = 8.0;
+/// The secondary Name text is hidden when less than this is left for it.
+const NAME_SECONDARY_MIN: f32 = 40.0;
+/// Gap before each state glyph (sp2).
+const NAME_GLYPH_GAP: f32 = 4.0;
+/// Inset of the trailing element from the cell's right edge (sp2).
+const NAME_TRAILING_INSET: f32 = 4.0;
+/// Group header row: chevron x and label x (R-105, UI-PRC-002).
+const GROUP_CHEVRON_X: f32 = 8.0;
+const GROUP_LABEL_X: f32 = 30.0;
+
+/// Icon size of a Name cell slot, unscaled: 24 for `Large`, 16 for `Small`.
+pub fn icon_px(slot: IconSlot) -> f32 {
+    match slot {
+        IconSlot::Large => 24.0,
+        IconSlot::Small => 16.0,
+    }
+}
+
+/// x of the chevron box's left edge at `depth`, × ui_scale: `8 + depth × 18`.
+pub fn name_indent(depth: u8, ui_scale: f32) -> Pixels {
+    px((CELL_PAD + f32::from(depth) * INDENT) * ui_scale)
+}
+
+/// x of the guide line of tree level `k`: the chevron centre of that level, `8 + k × 18 + 8`.
+fn guide_x(k: u8, ui_scale: f32) -> f32 {
+    (CELL_PAD + f32::from(k) * INDENT + CHEVRON / 2.0) * ui_scale
+}
+
+/// The connector quads of one Name cell (PROC-017, UI-PRC-003), in window coordinates for a
+/// cell whose top-left corner is `origin`. Lines are one physical pixel wide and snapped to the
+/// physical pixel grid (`device_scale` = `window.scale_factor()`).
+///
+/// For each ancestor level k below `depth` whose bit is set in `ancestor_continues`, a line over
+/// the full row height at the chevron centre of level k. For the row's own level, at the chevron
+/// centre of the parent level: a line from the row top to the centre (to the bottom unless
+/// `LAST_SIBLING`) and a line from there to the chevron's left edge. Depth-0 rows have no parent
+/// level and draw no elbow.
+pub fn guide_quads(
+    depth: u8,
+    flags: RowFlags,
+    origin: Point<Pixels>,
+    row_h: Pixels,
+    ui_scale: f32,
+    device_scale: f32,
+) -> SmallVec<[Bounds<Pixels>; 8]> {
+    let line = px(1.0 / device_scale);
+    let snap = |v: f32| px((v * device_scale).round() / device_scale);
+    let x_at = |k: u8| snap(f32::from(origin.x) + guide_x(k, ui_scale));
+    let top = origin.y;
+    let mut quads = SmallVec::new();
+    for k in 0..depth {
+        if flags.ancestor_continues_at(k) {
+            quads.push(Bounds::new(point(x_at(k), top), size(line, row_h)));
+        }
+    }
+    if depth == 0 {
+        return quads;
+    }
+    let x = x_at(depth - 1);
+    let centre = snap(f32::from(top + row_h / 2.0));
+    let bottom = if flags.has(RowFlags::LAST_SIBLING) {
+        centre + line
+    } else {
+        top + row_h
+    };
+    quads.push(Bounds::new(point(x, top), size(line, bottom - top)));
+    let chevron_left = snap(f32::from(origin.x + name_indent(depth, ui_scale)));
+    if chevron_left > x {
+        quads.push(Bounds::new(point(x, centre), size(chevron_left - x, line)));
+    }
+    quads
+}
+
+/// Text runs of a Name cell's primary text: U+FFFD runs in `warning` when `highlight_fffd`, the
+/// live count run with `tnum`. `None` when one plain run does (the common case).
+fn primary_runs(
+    text: &str,
+    highlight_fffd: bool,
+    count_run: Option<&Range<usize>>,
+    normal: Hsla,
+    warning: Hsla,
+) -> Option<SmallVec<[TextRun; 4]>> {
+    let fffd = highlight_fffd && text.contains(char::REPLACEMENT_CHARACTER);
+    let count = count_run.filter(|r| r.start < r.end && r.end <= text.len());
+    if !fffd && count.is_none() {
+        return None;
+    }
+    let base = font(UI_FAMILY);
+    let tnum = Font {
+        features: TNUM.clone(),
+        ..base.clone()
+    };
+    let mut runs = SmallVec::new();
+    let pieces = if fffd {
+        split_fffd_runs(text)
+    } else {
+        smallvec::smallvec![(0..text.len(), false)]
+    };
+    for (range, is_fffd) in pieces {
+        let color = if is_fffd { warning } else { normal };
+        // Cut each piece at the count run's edges.
+        let mut start = range.start;
+        let mut cuts: SmallVec<[usize; 3]> = SmallVec::new();
+        if let Some(c) = count {
+            cuts.extend(
+                [c.start, c.end]
+                    .into_iter()
+                    .filter(|&b| b > start && b < range.end),
+            );
+        }
+        cuts.push(range.end);
+        for end in cuts {
+            let in_count = count.is_some_and(|c| start >= c.start && end <= c.end);
+            runs.push(TextRun {
+                len: end - start,
+                font: if in_count { tnum.clone() } else { base.clone() },
+                color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+            start = end;
+        }
+    }
+    Some(runs)
+}
+
+/// The Name cell (UI-PRC-003): indent `8 + depth × 18`, a 16 px chevron box (always reserved),
+/// the connector lines when `guide_lines`, the icon, the primary text, the secondary text, the
+/// state glyphs and the trailing element.
+///
+/// `window` measures the primary text, and only when there is a secondary text. `tips` is
+/// `Some(key)` on the hovered row: the state glyphs then get their tooltips, keyed by `key`.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_name_cell(
+    cell: NameCell,
+    depth: u8,
+    expandable: Option<bool>,
+    flags: RowFlags,
+    guide_lines: bool,
+    ctx: &CellCtx,
+    tips: Option<u64>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let m = ctx.m;
+    let s = m.ui_scale;
+    let indent = name_indent(depth, s);
+    let mut root = div();
+    *root.text_style() = t_base(m);
+    root = root
+        .debug_selector(|| "TlNameCell".into())
+        .relative()
+        .w(ctx.width)
+        .h_full()
+        .overflow_hidden()
+        .whitespace_nowrap();
+
+    if guide_lines && (depth > 0 || flags.ancestor_continues != 0) {
+        let divider = ctx.theme.divider;
+        let row_h = m.row_height;
+        root = root.child(
+            div()
+                .debug_selector(|| "TlNameCell-guides".into())
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, (), window, _| {
+                            let quads = guide_quads(
+                                depth,
+                                flags,
+                                bounds.origin,
+                                row_h,
+                                s,
+                                window.scale_factor(),
+                            );
+                            for q in quads {
+                                window.paint_quad(fill(q, divider));
+                            }
+                        },
+                    )
+                    .size_full(),
+                ),
+        );
+    }
+
+    // The chevron's hover area is 20 wide, centred on its 16 px box.
+    let hit_extra = px((CHEVRON_HIT_W - CHEVRON) / 2.0 * s);
+    let mut chevron_slot = div()
+        .group("tl-name-chevron")
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h_full()
+        .w(px(CHEVRON_HIT_W * s))
+        .ml(-hit_extra)
+        .mr(-hit_extra);
+    if let Some(expanded) = expandable {
+        let name = if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        chevron_slot = chevron_slot.child(
+            svg()
+                .path(name.path())
+                .flex_none()
+                .size(px(CHEVRON * s))
+                .text_color(ctx.secondary())
+                .group_hover("tl-name-chevron", |st| st.text_color(ctx.primary())),
+        );
+    }
+
+    let mut content = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .items_center()
+        .pl(indent)
+        .pr(m.sp[4])
+        .child(chevron_slot);
+
+    let icon_w = px(icon_px(cell.icon_size) * s);
+    let icon_color = ctx.secondary();
+    let has_icon = !matches!(cell.icon, NameIcon::None);
+    match cell.icon {
+        NameIcon::File(path) => {
+            let fallback_color = ctx.theme.text_secondary;
+            content = content.child(
+                img(std::path::Path::new(&*path))
+                    .flex_none()
+                    .size(icon_w)
+                    .with_fallback(move || {
+                        svg()
+                            .path(IconName::Binary.path())
+                            .size(icon_w)
+                            .text_color(fallback_color)
+                            .into_any_element()
+                    }),
+            );
+        }
+        NameIcon::Lucide(name) => {
+            content = content.child(
+                svg()
+                    .path(name.path())
+                    .flex_none()
+                    .size(icon_w)
+                    .text_color(icon_color),
+            );
+        }
+        NameIcon::None => {}
+    }
+
+    let gap = px(ICON_GAP * s);
+    let primary_color = ctx.primary();
+    let text = match primary_runs(
+        &cell.primary,
+        cell.highlight_fffd,
+        cell.count_run.as_ref(),
+        primary_color,
+        ctx.theme.status.warning,
+    ) {
+        Some(runs) => StyledText::new(cell.primary.clone()).with_runs(runs.into_vec()),
+        None => StyledText::new(cell.primary.clone()),
+    };
+    content = content.child(
+        div()
+            .debug_selector(|| "TlNameCell-primary".into())
+            .when(has_icon, |d| d.ml(gap))
+            .min_w_0()
+            .flex_shrink()
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_color(primary_color)
+            .child(text),
+    );
+
+    if let Some(secondary) = cell.secondary {
+        let font_size = m.text.base;
+        let run = TextRun {
+            len: cell.primary.len(),
+            font: font(UI_FAMILY),
+            color: primary_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let primary_w = window
+            .text_system()
+            .shape_line(cell.primary.clone(), font_size, &[run], None)
+            .width;
+        let text_x = indent + px(CHEVRON * s) + if has_icon { icon_w + gap } else { px(0.) };
+        let room = ctx.width - text_x - m.sp[4];
+        if room >= primary_w + px((NAME_SECONDARY_GAP + NAME_SECONDARY_MIN) * s) {
+            content = content.child(
+                div()
+                    .debug_selector(|| "TlNameCell-secondary".into())
+                    .ml(px(NAME_SECONDARY_GAP * s))
+                    .min_w_0()
+                    .flex_shrink()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(ctx.secondary())
+                    .child(secondary),
+            );
+        }
+    }
+
+    for (i, (name, tip)) in cell.glyphs.into_iter().enumerate() {
+        let mut glyph = div().flex_none().ml(px(NAME_GLYPH_GAP * s)).child(
+            svg()
+                .path(name.path())
+                .size(m.icon.xs)
+                .text_color(ctx.secondary()),
+        );
+        if let Some(key) = tips {
+            let id = ElementId::NamedInteger(
+                SharedString::new_static("tl-name-glyph"),
+                key.wrapping_add(i as u64),
+            );
+            let state = HoverTooltip::state(id, window, cx);
+            glyph = HoverTooltip::attach(
+                &state,
+                glyph,
+                DELAY_CONTROL,
+                TlTooltip::text(tip).build(),
+                window,
+                cx,
+            );
+        }
+        content = content.child(glyph);
+    }
+
+    root = root.child(content);
+    if let Some(trailing) = cell.trailing {
+        root = root.child(
+            div()
+                .absolute()
+                .top_0()
+                .right(px(NAME_TRAILING_INSET * s))
+                .h_full()
+                .flex()
+                .items_center()
+                .child(trailing),
+        );
+    }
+    root
+}
+
+/// The Name cell of a group header row (R-105, UI-PRC-002): the chevron at x 8 in
+/// `text_primary` and the label at x 30 in `t_md` 14 weight 600. `ctx.width` is the width the
+/// label may use, normally the rest of the row.
+pub fn paint_group_header_cell(label: SharedString, expanded: Option<bool>, ctx: &CellCtx) -> Div {
+    let m = ctx.m;
+    let s = m.ui_scale;
+    let mut root = div()
+        .debug_selector(|| "TlGroupHeaderCell".into())
+        .relative()
+        .w(ctx.width)
+        .h_full()
+        .overflow_hidden()
+        .whitespace_nowrap();
+    if let Some(expanded) = expanded {
+        let name = if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        };
+        root = root.child(
+            div()
+                .absolute()
+                .top_0()
+                .left(px(GROUP_CHEVRON_X * s))
+                .h_full()
+                .flex()
+                .items_center()
+                .child(
+                    svg()
+                        .path(name.path())
+                        .size(px(CHEVRON * s))
+                        .text_color(ctx.theme.text_primary),
+                ),
+        );
+    }
+    let mut text = div();
+    *text.text_style() = label_style(m, m.text.md, FontWeight::SEMIBOLD);
+    root.child(
+        text.debug_selector(|| "TlGroupHeaderCell-label".into())
+            .absolute()
+            .top_0()
+            .left(px(GROUP_LABEL_X * s))
+            .right(m.sp[4])
+            .h_full()
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_color(ctx.theme.text_primary)
+            .child(label),
+    )
 }
 
 #[cfg(test)]
