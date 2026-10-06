@@ -480,3 +480,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.7 (ea5e0b2, 5079cca, ae79d64): cell values. Sent back to index group members once per view generation instead of scanning per cell per frame. Sum columns on group rows and the desktop path folded into 8q0.38. split_pid_text noted on pdu.8.
 - pdu.7 closed (53f0ad6, 85cfd81) before the index fix arrived; first_member still scans records per cell. New P1 pdu bead to index once per view generation.
 - pdu.7 final 5713b4c: GroupMembers index (apps and units), rebuilt only on view version or slice change. Unit rows read text columns from the earliest member until 8q0.38 adds the unit's own fields. pdu.49 closes as covered.
+- rsf.12 (963dd4e, 7d8b72a): column resize bands, live drag copy, fit from visible rows plus cached texts; drag does not touch the text cache. CellTextCache::cell_texts added.
+- crw.11 final (fdf45b7, 6c949b1): TlButton focus_handle and trailing_icon; CPU page words via tr cached per strings version; grid rebuilt on style_version. range_word typed &'static str (folded into crw.29); per-CPU MHz missing (new crw bead).
+- yrf.17 (ef22ee7): grid cell hover reusing hover.rs; widened plot hack and CPU grid hover off -> new yrf bead.
