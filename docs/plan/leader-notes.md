@@ -308,3 +308,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.28: DetailsState in the reducer. No DetailsUpdate clears the handle search; `clear_handle_search()` has no caller yet. Decide with E10/dwy.3. Component header stays WarmingUp; tabs carry their own validity.
 - Leader fixed lab_session end_to_end_engine_in_lab: Flat mode now has SWEEP_SIZE + 1 rows (Interrupts pseudo row).
 - qfx.26: polkit-rule on/off. The script does not create /etc/polkit-1/rules.d (the polkit package ships it). Accepted.
+- hjn.17: NetDetails has no PartialEq; net.rs compares fields itself. Adapter name via root.run_path, not a udev_data arg. Assertion in net_first_sample_and_device_list changed to Missing (approved, 720c64e).
+- y6k.12: OpenRC backend in dbus_systemd.rs. sub_state is the raw OpenRC word, load_state and path empty, User "root". Closed while clippy was blocked by sys_table.rs:1041 println (y6k.1); recheck.
+- 8q0.29: chain edit approved in reducer/processes.rs for net attribution.
