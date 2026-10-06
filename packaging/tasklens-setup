@@ -110,7 +110,7 @@ sensors_detect() {
         esac
         case $name in
             '' | *[!A-Za-z0-9_-]*)
-                echo "skipped module name: $name"
+                printf 'skipped module name: %s\n' "$name"
                 continue
                 ;;
         esac
@@ -130,6 +130,8 @@ sensors_detect() {
     set -f
     IFS=$nl
     for name in $modules; do
+        # `run` prints its arguments joined by the first IFS character.
+        IFS=$saved_ifs
         run modprobe "$name"
     done
     IFS=$saved_ifs
