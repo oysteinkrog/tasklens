@@ -506,10 +506,11 @@ fn engine_publishes_table_from_fixture() {
 }
 
 #[test]
-fn low_memory_mode_runs_only_processes() {
+fn low_memory_mode_runs_processes_and_kwin() {
+    // KWin runs for keep above only (R-152).
     let ids: Vec<SourceId> = workers_for(EngineMode::LowMemory)
         .iter()
         .map(|spec| spec.id)
         .collect();
-    assert_eq!(ids, [SourceId::Processes]);
+    assert_eq!(ids, [SourceId::Processes, SourceId::KWin]);
 }
