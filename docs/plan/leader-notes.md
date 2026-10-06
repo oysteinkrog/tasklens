@@ -512,3 +512,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.33 (82678f8, a814452, 4f3af54): KvWords covers the empty text and copy labels; props fields store the UnsupportedWord variant. Follow-up bead filed for tr calls per frame in props filter.rs.
 - jqk.1 (2c59d78): close decision, window actions, size saving with a 500 ms debounce. Show and toggle run through cx.defer; Quit saves the last observed bounds. TitleBarProbe.minimizes added (accepted). The test window cannot report maximized, so the test sets the probe flag.
 - hk6.5 (529322c, efdc4e7, a568f66): sys status cell with a StatusWords global (R-132), cell_colors, STALE_DOT_ALPHA 0.5.
+- rsf.17 (6068143): first_visible_row uses visible_range.start (logical_scroll_top_index only exists with test-support); strict scroll on restore; test for criterion 3 uses a one-row viewport. All accepted. Note added on jqk.15.
