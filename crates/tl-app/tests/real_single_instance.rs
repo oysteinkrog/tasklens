@@ -1,8 +1,8 @@
 //! Single instance on a real bus (E33-009, ADR-010 Verification).
 //!
 //! Each test starts its own `dbus-daemon`, so it never touches a running tasklens or anything
-//! else on the user's session bus. The ignored tests need `dbus-daemon`; the forwarding test
-//! also needs a display.
+//! else on the user's session bus. The ignored test needs `dbus-daemon`; the forwarding test
+//! needs `dbus-daemon` and a display and is skipped without them.
 
 #[allow(dead_code, reason = "the tests use only part of the module")]
 #[path = "../src/single_instance.rs"]
@@ -233,9 +233,26 @@ fn log_contains(logs_dir: &Path, needle: &str) -> bool {
         .any(|entry| std::fs::read_to_string(entry.path()).is_ok_and(|text| text.contains(needle)))
 }
 
+/// True when a display and `dbus-daemon` are present, so the end-to-end test can run.
+fn can_run_end_to_end() -> bool {
+    let display = ["WAYLAND_DISPLAY", "DISPLAY"]
+        .iter()
+        .any(|var| std::env::var_os(var).is_some_and(|v| !v.is_empty()));
+    let daemon = Command::new("dbus-daemon")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    display && daemon
+}
+
 #[test]
-#[ignore = "owner machine: needs dbus-daemon and a display"]
 fn second_instance_forwards_and_exits() {
+    if !can_run_end_to_end() {
+        eprintln!("skipped: needs dbus-daemon and a display");
+        return;
+    }
     let bus = PrivateBus::start();
     let home = tempfile::tempdir().expect("tempdir");
     let command = || {

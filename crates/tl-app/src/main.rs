@@ -13,28 +13,31 @@ mod crash;
 mod logging;
 #[allow(dead_code, reason = "E33-006 calls it")]
 mod migrations;
-#[allow(dead_code, reason = "later E33 beads call it")]
+#[allow(dead_code, reason = "E33-012 sends the renderer notices")]
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
-#[allow(dead_code, reason = "E33-A2 calls load_settings and load_state")]
+#[allow(dead_code, reason = "later E33 beads call the rest")]
 mod settings_store;
-#[allow(dead_code, reason = "E33-A2 calls acquire")]
+#[allow(dead_code, reason = "tests call the rest")]
 mod single_instance;
 
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
-use tl_model::settings::{EngineSettings, Settings, StartTab, UiState};
+use tl_model::settings::{EngineSettings, StartTab};
+use tl_ui::app::ToastKindTag;
 use tl_ui::{AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiInit, UiLaunch};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::args::TabArg;
+use crate::settings_store::{LoadNotice, Store};
+use crate::single_instance::{Forward, Outcome};
 
 const NV_X11_VAR: &str = "__NV_FORCE_ENABLE_X11_EGL_PLATFORM";
 const NVIDIA_VERSION_FILE: &str = "/proc/driver/nvidia/version";
@@ -52,7 +55,7 @@ fn main() -> ExitCode {
         }
     };
     let recent_cell = Arc::new(OnceLock::new());
-    crash::install_hook(paths.crash_dir(), recent_cell.clone(), noop);
+    crash::install_hook(paths.crash_dir(), recent_cell.clone(), main_panic_notify);
     // Dropped last, so buffered log lines are flushed.
     let _log_guard = match logging::init(&paths.logs_dir()) {
         Ok((guard, recent)) => {
@@ -86,10 +89,40 @@ fn main() -> ExitCode {
     }
 
     // E32: --low-memory and --watch-memory arms go here (before step 4)
-    // Step 4: E33-A2 inserts single instance here.
-    // Step 5: E33-A2 inserts settings, state and themes loading here.
-    let settings = Settings::default();
-    let state = UiState::default();
+    // Step 4: single instance. A second copy forwards its arguments and exits 0.
+    let forward = Forward {
+        tab: args.tab.map(TabArg::to_model),
+        select_pid: args.select_pid,
+    };
+    let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+    // `_bus` keeps the bus name until `main` returns.
+    let (_bus, app_requests) = match single_instance::acquire(&forward, activation_token) {
+        Outcome::Forwarded => {
+            info!("another tasklens is running; forwarded");
+            return ExitCode::SUCCESS;
+        }
+        Outcome::NoBus => (None, None),
+        Outcome::Primary { conn, requests } => (Some(conn), Some(requests)),
+    };
+    tl_ui::app::perf_step("single_instance");
+
+    // Step 5: settings, state and themes.
+    let now = unix_now();
+    let loaded_settings = settings_store::load_settings(&paths.settings_file(), now);
+    let loaded_state = settings_store::load_state(&paths.state_file(), now);
+    let store = Arc::new(Store::new(
+        &paths,
+        loaded_settings.read_only,
+        loaded_state.read_only,
+        (loaded_settings.value.clone(), loaded_state.value.clone()),
+    ));
+    let startup_toasts = queued_toasts(&loaded_settings.notices, &loaded_state.notices)
+        .into_iter()
+        .map(|text| (ToastKindTag::Warning, text.into()))
+        .collect();
+    let settings = loaded_settings.value;
+    let state = loaded_state.value;
+    let themes_json = read_themes(&paths.themes_file());
     tl_ui::app::perf_step("args_settings");
 
     // E01: --bench and --gallery arms go here (before step 7)
@@ -113,8 +146,9 @@ fn main() -> ExitCode {
     tl_ui::app::perf_step("engine_start");
 
     // Steps 8 to 10: tl-ui runs the GPUI application and opens the first window.
-    // Kept alive until the UI stops; E33-A2 hands it to the single-instance handler.
-    let (_app_requests_tx, app_requests) = async_channel::bounded(4);
+    // Without a bus nothing sends requests; the closed channel ends tl-ui's request loop.
+    let app_requests = app_requests.unwrap_or_else(|| async_channel::bounded(1).1);
+    let write_store = store.clone();
     let env = AppEnv {
         debug,
         config_dir: paths.config_dir.clone(),
@@ -127,7 +161,7 @@ fn main() -> ExitCode {
         },
         pending_crash: None,
         mark_crash_seen: Arc::new(|| {}),
-        write_settings_now: Arc::new(|_| Ok(())),
+        write_settings_now: Arc::new(move |s| write_store.write_settings_now(s)),
         set_autostart: Arc::new(|_, _| Ok(())),
         global_shortcut: None,
         import_taskslinger: Arc::new(|| Ok(ImportSummary::default())),
@@ -139,11 +173,11 @@ fn main() -> ExitCode {
         init: UiInit {
             settings,
             state,
-            themes_json: None,
-            persist: Box::new(|_, _| {}),
-            persist_themes: Box::new(|_| {}),
+            themes_json,
+            persist: store.persist_callback(),
+            persist_themes: store.persist_themes_callback(),
             app_requests,
-            startup_toasts: Vec::new(),
+            startup_toasts,
             env,
         },
         open: OpenMode::Main,
@@ -156,6 +190,8 @@ fn main() -> ExitCode {
         },
     });
 
+    // Pending changes are written before anything else on exit (ADR-011).
+    store.flush();
     // E33-011 adds the 1500 ms engine shutdown here.
     info!(target: "tasklens::engine", ?exit, "ui stopped");
     ExitCode::SUCCESS
@@ -170,8 +206,39 @@ fn exec_to_main_ms() -> Option<u64> {
         .and_then(|(stat, uptime)| tl_ui::window::main::first_frame_ms_from(&stat, &uptime))
 }
 
-/// The panic hook's main-thread callback. E33-011 fills it.
-fn noop() {}
+/// The panic hook's main-thread callback: the desktop notification (APP-055).
+fn main_panic_notify() {
+    notify::send(notify::Fatal::Crashed);
+}
+
+/// Seconds since the Unix epoch, 0 if the clock is before it.
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The load notices as toast texts, settings before state (UI-SHL-110 step 5).
+fn queued_toasts(settings: &[LoadNotice], state: &[LoadNotice]) -> Vec<String> {
+    settings
+        .iter()
+        .chain(state)
+        .map(LoadNotice::toast_text)
+        .collect()
+}
+
+/// The raw `themes.json` text, `None` when missing or unreadable. tl-ui parses it (UI-FND-042).
+/// Bytes that are not UTF-8 are passed on lossily, so the parser reports them.
+fn read_themes(path: &Path) -> Option<Arc<str>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(Arc::from(String::from_utf8_lossy(&bytes))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            warn!(target: "tasklens::settings", "themes.json: could not be read: {e}");
+            None
+        }
+    }
+}
 
 /// True when `--debug` is given or `TASKLENS_DEBUG` is `1`.
 fn debug_enabled(flag: bool, env: Option<OsString>) -> bool {
@@ -242,6 +309,35 @@ mod tests {
         assert!(!debug_enabled(false, os("0")));
         assert!(!debug_enabled(false, None));
         assert!(debug_enabled(true, None));
+    }
+
+    #[test]
+    fn queued_toast_order() {
+        let corrupt = |name: &str| LoadNotice::Corrupt {
+            kept_as: name.to_owned(),
+        };
+        let texts = queued_toasts(
+            &[corrupt("settings.toml.corrupt-1")],
+            &[LoadNotice::Newer, corrupt("state.toml.corrupt-2")],
+        );
+        assert_eq!(
+            texts,
+            vec![
+                corrupt("settings.toml.corrupt-1").toast_text(),
+                LoadNotice::Newer.toast_text(),
+                corrupt("state.toml.corrupt-2").toast_text(),
+            ]
+        );
+        assert!(queued_toasts(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn read_themes_missing_is_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(read_themes(&dir.path().join("themes.json")).is_none());
+        let path = dir.path().join("present.json");
+        std::fs::write(&path, br#"{"themes":[]}"#).expect("write");
+        assert_eq!(read_themes(&path).as_deref(), Some(r#"{"themes":[]}"#));
     }
 
     #[test]
