@@ -27,6 +27,7 @@ async-channel = { workspace = true }   # R-142 item 2
 
 [dev-dependencies]
 tempfile = { workspace = true }
+proptest = { workspace = true }
 
 [features]
 bench = ["tl-ui/bench"]   # ADR-002; release builds do not enable it
