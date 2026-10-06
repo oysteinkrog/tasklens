@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use gpui_kit::{App, AppContext, Entity, HeadlessAppContext, Pixels, Render, Size, Window, size};
+use gpui_kit::{App, Entity, HeadlessAppContext, Pixels, Render, Size, Window, size};
 use image::{Rgba, RgbaImage};
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 
@@ -246,7 +246,7 @@ fn save(img: &RgbaImage, path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use gpui_kit::{Context, IntoElement, Styled, div, px};
+    use gpui_kit::{AppContext, Context, IntoElement, Styled, div, px};
 
     use super::*;
     use crate::theme;
