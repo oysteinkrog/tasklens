@@ -2422,3 +2422,188 @@ fn disk_no_udev_data() {
         Validity::Valid
     );
 }
+
+use tl_collect::parse::netif::IfaceKind;
+use tl_engine::workers::net::net_kind;
+use tl_model::devices::NetKind;
+use tl_model::snapshot::NetDetails;
+use tl_model::system::LinkState;
+
+/// `netif-kinds` with `proc/net/dev` lines for every interface but `lo`.
+fn netif_kinds_fixture() -> PathBuf {
+    let dir = fixture_copy("netif-kinds", None);
+    let mut dev = String::from(
+        "Inter-|   Receive                                                |  Transmit\n \
+         face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n",
+    );
+    for name in [
+        "br0",
+        "docker0",
+        "dummy0",
+        "eth0",
+        "tailscale0",
+        "usb0",
+        "veth12ab",
+        "virbr0",
+        "wlan0",
+        "wwan0",
+    ] {
+        dev.push_str(&format!(
+            "{name:>6}: 1000 10 0 0 0 0 0 0 500 5 0 0 0 0 0 0\n"
+        ));
+    }
+    fs::create_dir_all(dir.join("proc/net")).expect("create fixture proc/net");
+    fs::write(dir.join("proc/net/dev"), dev).expect("write fixture proc/net/dev");
+    dir
+}
+
+fn net_details(src: &mut NetSource) -> Vec<(DeviceIdentity, NetDetails)> {
+    match src.take_extra() {
+        Some(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Nets { from, entries })) => {
+            assert_eq!(from, SourceId::Net);
+            entries
+        }
+        other => panic!("expected net DeviceDetails, got {other:?}"),
+    }
+}
+
+fn net_details_of<'a>(entries: &'a [(DeviceIdentity, NetDetails)], name: &str) -> &'a NetDetails {
+    entries
+        .iter()
+        .find(|(id, _)| matches!(id, DeviceIdentity::Net { name: n, .. } if &**n == name))
+        .map(|(_, d)| d)
+        .unwrap_or_else(|| panic!("no net details for {name}"))
+}
+
+#[test]
+fn net_link_speed_and_state() {
+    let dir = netif_kinds_fixture();
+    let (_, s) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    let totals = |name: &str| {
+        s.nets
+            .iter()
+            .find(|(id, _)| matches!(id, DeviceIdentity::Net { name: n, .. } if &**n == name))
+            .map(|(_, t)| *t)
+            .unwrap_or_else(|| panic!("no totals for {name}"))
+    };
+    let eth0 = totals("eth0");
+    assert_eq!(eth0.link_speed_mbps, Metric::valid(1000));
+    assert_eq!(eth0.state, LinkState::Up);
+    let wlan0 = totals("wlan0");
+    assert_eq!(wlan0.link_speed_mbps.validity, Validity::Unsupported);
+    assert_eq!(wlan0.state, LinkState::Dormant);
+}
+
+#[test]
+fn net_details_kinds_and_mac() {
+    let dir = netif_kinds_fixture();
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    let list = net_devices(&mut src);
+    let entries = net_details(&mut src);
+
+    let eth0 = net_details_of(&entries, "eth0");
+    assert_eq!(eth0.kind, NetKind::Wired);
+    assert_eq!(&*eth0.type_label, "Ethernet");
+    assert_eq!(eth0.mac, valid(Arc::from("aa:bb:cc:dd:ee:01")));
+    assert_eq!(eth0.driver, valid(Arc::from("e1000e")));
+    assert_eq!(eth0.ifindex, 2);
+    assert_eq!(eth0.link_speed_mbps, valid(1000));
+    assert_eq!(eth0.state, LinkState::Up);
+    assert!(eth0.addresses.is_empty());
+    assert!(eth0.wifi.is_none());
+    let desc = list
+        .entries
+        .iter()
+        .find(|e| &*e.display_name == "eth0")
+        .expect("eth0 in the NETS list");
+    assert_eq!(desc.net_kind, Some(NetKind::Wired));
+    assert!(list.entries.iter().all(|e| e.net_kind.is_some()));
+
+    let br0 = net_details_of(&entries, "br0");
+    assert_eq!(br0.kind, NetKind::Virtual);
+    assert_eq!(&*br0.type_label, "Bridge");
+    assert_eq!(br0.mac.validity, Validity::Missing);
+    assert_eq!(br0.driver.validity, Validity::Unsupported);
+    assert_eq!(
+        net_details_of(&entries, "tailscale0").kind,
+        NetKind::VpnTunnel
+    );
+    assert_eq!(
+        net_details_of(&entries, "eth0").adapter_name.validity,
+        Validity::Unsupported,
+        "no udev data in the fixture"
+    );
+}
+
+#[test]
+fn net_adapter_name_from_udev() {
+    let dir = netif_kinds_fixture();
+    let data = dir.join("run/udev/data");
+    fs::create_dir_all(&data).expect("create fixture udev data");
+    fs::write(
+        data.join("n2"),
+        "E:ID_VENDOR_FROM_DATABASE=Intel Corporation\n\
+         E:ID_MODEL_FROM_DATABASE=I350 Gigabit Network Connection\n",
+    )
+    .expect("write udev n2");
+    fs::write(data.join("n3"), "E:ID_MODEL_FROM_DATABASE=Wi-Fi 6 AX201\n").expect("write udev n3");
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    net_devices(&mut src);
+    let entries = net_details(&mut src);
+    assert_eq!(
+        net_details_of(&entries, "eth0").adapter_name,
+        valid(Arc::from(
+            "Intel Corporation I350 Gigabit Network Connection"
+        ))
+    );
+    assert_eq!(
+        net_details_of(&entries, "wlan0").adapter_name,
+        valid(Arc::from("Wi-Fi 6 AX201"))
+    );
+    assert_eq!(
+        net_details_of(&entries, "br0").adapter_name.validity,
+        Validity::Unsupported
+    );
+}
+
+#[test]
+fn net_kind_table() {
+    assert_eq!(
+        net_kind(IfaceKind::Cellular),
+        (NetKind::Wireless, "Cellular")
+    );
+    assert_eq!(net_kind(IfaceKind::Bridge), (NetKind::Virtual, "Bridge"));
+    assert_eq!(
+        net_kind(IfaceKind::UsbNetwork),
+        (NetKind::Wired, "USB network")
+    );
+    assert_eq!(net_kind(IfaceKind::Tunnel), (NetKind::VpnTunnel, "Tunnel"));
+    assert_eq!(net_kind(IfaceKind::Other), (NetKind::Other, "Other"));
+}
+
+#[test]
+fn net_details_only_on_change() {
+    let dir = netif_kinds_fixture();
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    net_devices(&mut src);
+    net_details(&mut src);
+
+    let (mut src, _) = net_sample(src, 6 * SEC);
+    net_devices(&mut src);
+    assert!(src.take_extra().is_none(), "no change, no details");
+
+    fs::write(dir.join("sys/class/net/eth0/speed"), "2500\n").expect("write eth0 speed");
+    let (mut src, s) = net_sample(src, 11 * SEC);
+    net_devices(&mut src);
+    let entries = net_details(&mut src);
+    assert_eq!(
+        net_details_of(&entries, "eth0").link_speed_mbps,
+        valid(2500)
+    );
+    let eth0 = s
+        .nets
+        .iter()
+        .find(|(id, _)| matches!(id, DeviceIdentity::Net { name, .. } if &**name == "eth0"))
+        .expect("eth0 totals");
+    assert_eq!(eth0.1.link_speed_mbps, Metric::valid(2500));
+}
