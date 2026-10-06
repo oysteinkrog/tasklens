@@ -332,14 +332,14 @@ mod tests {
         let data = |v: OwnedValue| HashMap::from([(TOKEN_KEY.to_owned(), v)]);
         let ok = "a".repeat(MAX_TOKEN_BYTES);
         assert_eq!(
-            activation_token(&data(val(ok.as_str()))).as_deref(),
+            activation_token(&data(val(ok.clone()))).as_deref(),
             Some(ok.as_str())
         );
         let long = "a".repeat(300);
-        assert_eq!(activation_token(&data(val(long.as_str()))), None);
+        assert_eq!(activation_token(&data(val(long))), None);
         // 86 three-byte characters are 258 bytes.
         let wide = "\u{20ac}".repeat(86);
-        assert_eq!(activation_token(&data(val(wide.as_str()))), None);
+        assert_eq!(activation_token(&data(val(wide))), None);
         assert_eq!(activation_token(&data(val(7u32))), None);
         assert_eq!(activation_token(&HashMap::new()), None);
     }

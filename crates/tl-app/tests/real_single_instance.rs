@@ -109,7 +109,7 @@ fn interface_methods() {
         .expect("name has an owner");
     assert_eq!(name_owner.to_string(), owner);
 
-    let call = |method: &str, body: &(dyn erased_body::Body)| body.call(&client, method);
+    let call = |method: &str, body: &dyn erased_body::Body| body.call(&client, method);
 
     // Bad parameters are refused and send nothing.
     let zero = ("select-pid", vec![Value::from(0u32)], empty());
@@ -178,10 +178,13 @@ fn interface_methods() {
     };
     let second = acquire_on(Ok(bus.connect()), TEST_NAME, &forward, None);
     assert!(matches!(second, Outcome::Forwarded));
-    assert_eq!(
-        requests.try_recv(),
-        Ok(AppRequest::Activate { token: None })
-    );
+    // One Activate from the Activate call and one from the tab action.
+    for _ in 0..2 {
+        assert_eq!(
+            requests.try_recv(),
+            Ok(AppRequest::Activate { token: None })
+        );
+    }
     assert_eq!(
         requests.try_recv(),
         Ok(AppRequest::SelectTab(Tab::Services))
