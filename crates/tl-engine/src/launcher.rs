@@ -604,12 +604,13 @@ async fn unit_active_state(
     conn: &zbus::Connection,
     name: &str,
 ) -> Result<Option<String>, ActionError> {
+    let body = (name,);
     let call = conn.call_method(
         Some(SYSTEMD_DEST),
         SYSTEMD_PATH,
         Some(MANAGER_IFACE),
         "LoadUnit",
-        &(name,),
+        &body,
     );
     let reply = match timed(cx, call).await {
         Ok(reply) => reply,
@@ -664,12 +665,13 @@ async fn start_unit_and_wait(
         .await
         .map_err(CallError::into_action_error)?;
 
+    let body = (name, "replace");
     let call = conn.call_method(
         Some(SYSTEMD_DEST),
         SYSTEMD_PATH,
         Some(MANAGER_IFACE),
         "StartUnit",
-        &(name, "replace"),
+        &body,
     );
     let reply = match timed(cx, call).await {
         Ok(reply) => reply,
@@ -742,12 +744,13 @@ async fn start_scope(
         ("CollectMode", Value::from("inactive-or-failed")),
     ];
     let aux: Vec<(&str, Vec<(&str, Value<'_>)>)> = Vec::new();
+    let body = (scope, "fail", props, aux);
     let call = conn.call_method(
         Some(SYSTEMD_DEST),
         SYSTEMD_PATH,
         Some(MANAGER_IFACE),
         "StartTransientUnit",
-        &(scope, "fail", props, aux),
+        &body,
     );
     timed(cx, call).await.map(drop)
 }
@@ -1114,6 +1117,15 @@ mod tests {
                 assert!(entries(&host.log).is_empty(), "nothing opened for {text:?}");
             }
         }
+    }
+
+    #[test]
+    fn real_entry_point_rejects_controls() {
+        let result = run(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            launch(&cx, None, &command("echo\u{0}x", false)).await
+        });
+        assert_eq!(result, Err(ActionError::Unsupported));
     }
 
     #[test]
