@@ -275,3 +275,301 @@ fn heights_at_rem_13(cx: &mut TestAppContext) {
         assert_eq!(height(cx, selector), px(expected), "{selector}");
     }
 }
+
+/// Display-component suite (E15-A2): a radio group, slider, stepper, select and link in one
+/// window, validity glyph cells in a row, and Ctrl+C routing out of a stacked key/value grid.
+mod display {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::TextSelectionLayer;
+    use gpui_kit::base::slider::SliderState;
+    use gpui_kit::{Bounds, SharedString};
+    use tl_model::validity::Validity;
+    use tl_ui::components::kv_grid::{
+        self, KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
+    };
+    use tl_ui::components::link::TlLink;
+    use tl_ui::components::radio::TlRadioGroup;
+    use tl_ui::components::select::{self, TlSelect, TlSelectItem, TlSelectState};
+    use tl_ui::components::slider::TlSlider;
+    use tl_ui::components::stepper::TlStepper;
+    use tl_ui::components::validity::glyph;
+    use tl_ui::theme::metrics;
+
+    use super::*;
+
+    gpui_kit::actions!(tl_components_display_test, [OpenLink, PageCopy]);
+
+    /// The probe contexts in tab order.
+    const ORDER: [&str; 5] = [
+        "probe-radio",
+        "probe-slider",
+        "probe-stepper",
+        "probe-select",
+        "probe-link",
+    ];
+
+    fn setup(cx: &mut App) {
+        super::setup(cx);
+        select::bind_keys(cx);
+        kv_grid::init(cx);
+        cx.bind_keys([KeyBinding::new("ctrl-c", PageCopy, Some(ROOT_CONTEXT))]);
+    }
+
+    /// A window whose root takes Tab, Shift+Tab and the page Copy, around `build()`.
+    struct Host {
+        root: FocusHandle,
+        build: Box<dyn Fn(&mut Window, &mut Context<Self>) -> Vec<AnyElement>>,
+        page_copies: Rc<Cell<usize>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            window.set_rem_size(px(13.));
+            let copies = self.page_copies.clone();
+            let children = (self.build)(window, cx);
+            div()
+                .id("root")
+                .key_context(ROOT_CONTEXT)
+                .track_focus(&self.root)
+                .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+                .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
+                .on_action(move |_: &PageCopy, _, _| copies.set(copies.get() + 1))
+                .size(px(800.))
+                .p(px(16.))
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(px(12.))
+                .child(TextSelectionLayer)
+                .children(children)
+        }
+    }
+
+    fn open_host(
+        cx: &mut TestAppContext,
+        build: impl Fn(&mut Window, &mut Context<Host>) -> Vec<AnyElement> + 'static,
+    ) -> (&mut VisualTestContext, Rc<Cell<usize>>) {
+        cx.update(setup);
+        let copies = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let copies = copies.clone();
+            move |window, cx| {
+                let root = cx.focus_handle();
+                window.focus(&root, cx);
+                Host {
+                    root,
+                    build: Box::new(build),
+                    page_copies: copies,
+                }
+            }
+        });
+        draw(cx);
+        (cx, copies)
+    }
+
+    fn controls_host(cx: &mut TestAppContext) -> &mut VisualTestContext {
+        let slider = cx.new(|_| {
+            SliderState::new()
+                .min(75.)
+                .max(200.)
+                .step(5.)
+                .default_value(100.)
+        });
+        let window_state: Rc<Cell<Option<(Entity<InputState>, Entity<TlSelectState>)>>> =
+            Rc::default();
+        open_host(cx, move |window, cx| {
+            let (stepper, select) = match window_state.take() {
+                Some(states) => states,
+                None => (
+                    cx.new(|cx| InputState::new(window, cx)),
+                    cx.new(|cx| {
+                        TlSelectState::new(
+                            vec![
+                                TlSelectItem::new("bits", "Bits"),
+                                TlSelectItem::new("bytes", "Bytes"),
+                            ],
+                            Some("bits"),
+                            cx,
+                        )
+                    }),
+                ),
+            };
+            window_state.set(Some((stepper.clone(), select.clone())));
+            vec![
+                probe(
+                    "probe-radio",
+                    TlRadioGroup::new("radio")
+                        .items(vec!["Off".into(), "On".into(), "Auto".into()])
+                        .selected(1),
+                ),
+                probe("probe-slider", TlSlider::new(&slider).label("UI Scale")),
+                probe(
+                    "probe-stepper",
+                    TlStepper::new("stepper", &stepper)
+                        .range(100, 10_000, 100)
+                        .value(1000),
+                ),
+                probe("probe-select", TlSelect::new("select", &select)),
+                probe(
+                    "probe-link",
+                    TlLink::new("link", "Network settings", Box::new(OpenLink)),
+                ),
+            ]
+        })
+        .0
+    }
+
+    /// The probe that holds focus, if any.
+    fn focused(cx: &mut VisualTestContext) -> Option<&'static str> {
+        draw(cx);
+        cx.update(|window, _| {
+            let stack = window.context_stack();
+            ORDER
+                .into_iter()
+                .find(|probe| stack.iter().any(|c| c.contains(probe)))
+        })
+    }
+
+    #[gpui_kit::test]
+    fn tab_order_display_controls(cx: &mut TestAppContext) {
+        let cx = controls_host(cx);
+        assert_eq!(focused(cx), None, "the root holds focus at the start");
+
+        for expected in ORDER {
+            cx.simulate_keystrokes("tab");
+            assert_eq!(focused(cx), Some(expected), "Tab moves to {expected}");
+        }
+
+        for expected in ORDER.into_iter().rev().skip(1) {
+            cx.simulate_keystrokes("shift-tab");
+            assert_eq!(
+                focused(cx),
+                Some(expected),
+                "Shift+Tab moves back to {expected}"
+            );
+        }
+    }
+
+    const ALL: [Validity; 7] = [
+        Validity::Valid,
+        Validity::WarmingUp,
+        Validity::Stale,
+        Validity::Restricted,
+        Validity::Unsupported,
+        Validity::Missing,
+        Validity::Failed,
+    ];
+    const CELLS: [&str; 7] = [
+        "cell-0", "cell-1", "cell-2", "cell-3", "cell-4", "cell-5", "cell-6",
+    ];
+    const CELL_WIDTH: f32 = 72.;
+
+    #[gpui_kit::test]
+    fn glyph_cells_align(cx: &mut TestAppContext) {
+        let shift = Rc::new(Cell::new(0usize));
+        let (cx, _) = open_host(cx, {
+            let shift = shift.clone();
+            move |_, cx| {
+                let m = *metrics(cx);
+                let theme = tl_ui::theme::current(cx).clone();
+                let value: SharedString = "12.5%".into();
+                let cells = (0..7).map(|i| {
+                    let validity = ALL[(i + shift.get()) % 7];
+                    div()
+                        .debug_selector(move || CELLS[i].into())
+                        .flex_none()
+                        .w(px(CELL_WIDTH))
+                        .child(glyph(validity, &value, false, &m, &theme))
+                });
+                vec![div().flex().flex_row().children(cells).into_any_element()]
+            }
+        });
+
+        // Bounds of a selector drawn more than once are the last one's, so each state in turn
+        // goes into the last cell and is measured there.
+        for (k, &validity) in ALL.iter().enumerate() {
+            shift.set(k + 1);
+            cx.update(|window, _| window.refresh());
+            draw(cx);
+
+            let cells: Vec<Bounds<Pixels>> = CELLS
+                .iter()
+                .map(|c| cx.debug_bounds(c).expect("cell drawn"))
+                .collect();
+            for (i, cell) in cells.iter().enumerate() {
+                assert_eq!(
+                    cell.size.width,
+                    px(CELL_WIDTH),
+                    "{validity:?}: cell {i} width"
+                );
+                assert_eq!(
+                    cell.left(),
+                    cells[0].left() + px(CELL_WIDTH * i as f32),
+                    "{validity:?}: cell {i} position"
+                );
+            }
+
+            let last = cells[6];
+            let glyph = cx.debug_bounds("TlValidityGlyph").expect("glyph drawn");
+            assert_eq!(
+                (glyph.left(), glyph.right()),
+                (last.left(), last.right()),
+                "{validity:?}: the glyph fills its cell"
+            );
+            let inner = if validity == Validity::Restricted {
+                "TlValidityGlyph-lock"
+            } else {
+                "TlValidityGlyph-text"
+            };
+            let inner = cx.debug_bounds(inner).expect("glyph content drawn");
+            assert_eq!(
+                inner.right(),
+                last.right(),
+                "{validity:?}: the content sits at the right edge"
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn stacked_grid_ctrl_c_propagates_without_selection(cx: &mut TestAppContext) {
+        let (cx, page_copies) = open_host(cx, |_, _| {
+            let row = |label: &str, value: &str| TlKvRow {
+                label: label.to_owned().into(),
+                value: TlValue::new(value.to_owned()),
+            };
+            let section = TlKvSection {
+                title: Some("Memory".into()),
+                blocks: vec![TlKvBlock {
+                    heading: None,
+                    rows: vec![row("In use", "4.2 GiB"), row("Available", "11.6 GiB")],
+                }],
+            };
+            vec![probe(
+                "probe-grid",
+                div()
+                    .w(px(600.))
+                    .child(TlKeyValueGrid::new("grid", KvLayout::Stacked).sections(&[section])),
+            )]
+        });
+
+        let grid = cx.debug_bounds("probe-grid").expect("grid drawn");
+        cx.simulate_click(grid.center(), Modifiers::none());
+        draw(cx);
+        let in_grid = cx.update(|window, _| {
+            window
+                .context_stack()
+                .iter()
+                .any(|c| c.contains(kv_grid::KEY_CONTEXT))
+        });
+        assert!(in_grid, "the click focuses the grid");
+
+        cx.simulate_keystrokes("ctrl-c");
+        assert_eq!(page_copies.get(), 1, "Ctrl+C goes on to the page's Copy");
+        assert!(
+            cx.read_from_clipboard().is_none(),
+            "the grid copied nothing"
+        );
+    }
+}
