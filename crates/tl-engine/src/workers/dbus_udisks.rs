@@ -717,8 +717,8 @@ pub fn smart_from_nvme(
         ("avail_spare", "Available spare", percent),
         ("spare_thresh", "Available spare threshold", percent),
         ("percent_used", "Percentage used", percent),
-        ("total_data_read", "Data read", si_bytes),
-        ("total_data_written", "Data written", si_bytes),
+        ("total_data_read", "Data read", units::bytes_si_1dp),
+        ("total_data_written", "Data written", units::bytes_si_1dp),
         ("ctrl_busy_time", "Controller busy time", minutes),
         ("power_cycles", "Power cycles", count),
         ("", "Power-on hours", count),
@@ -768,22 +768,6 @@ fn minutes(n: u64) -> String {
 
 fn count(n: u64) -> String {
     n.to_string()
-}
-
-/// SI sizes with one decimal: "512 B", "12.0 TB".
-fn si_bytes(n: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
-    if n < 1000 {
-        return format!("{n} B");
-    }
-    let mut v = n as f64;
-    let mut i = 0;
-    // {:.1} prints 1000.0 or more exactly when v >= 999.95.
-    while v >= 999.95 && i + 1 < UNITS.len() {
-        v /= 1000.0;
-        i += 1;
-    }
-    format!("{v:.1} {}", UNITS[i])
 }
 
 /// `SmartUpdated`, never later than now. 0 means never read.
@@ -1993,14 +1977,6 @@ mod tests {
         );
         assert_eq!(&*data.nvme[0].1, "spare, temperature");
         assert_eq!(data.health, valid(Arc::from("Warning: spare, temperature")));
-    }
-
-    #[test]
-    fn si_bytes_steps() {
-        assert_eq!(si_bytes(999), "999 B");
-        assert_eq!(si_bytes(1000), "1.0 kB");
-        assert_eq!(si_bytes(999_960), "1.0 MB");
-        assert_eq!(si_bytes(12_000_000_000_000), "12.0 TB");
     }
 
     fn smart_of(update: &SourceUpdate, disk: &str) -> Option<InvField<Arc<SmartData>>> {
