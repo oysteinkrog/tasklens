@@ -410,3 +410,10 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.19 (6da3bb9): lab_actions FakeUnitBus per manager, real Gate in the harness, explore_unit_jobs (16 seeds). Busy second request gives Started, per-target Rejected(Busy), then a Rejected(Busy) summary; the AC's "exactly one" was written against the summary. Accepted.
 - fut.2 (4e6dc4a): window registry (open-or-focus, per-kind caps). Deregisters on App::on_window_closed (deferred) instead of a window_frame.rs call; covers detached graphs too. Accepted.
 - ug9.31 (9536c8d): kv_grid columns(n), column_gap, hover underline. Sent back: underline in text_secondary (performance.md:564 outranks the bead) and none on link values.
+- ug9.31 follow-up c9c1f62: underline text_secondary, tooltip values only (not links).
+- 8q0.30 (ee151da, 616be0e): record_system batches samples per update into one on_system_sample; on_device_catalog on publish; Reducer::set_record_sink; SeriesStore::append returns the stored Sample. set_record_sink is not tied to history.enabled (the 8fx.2 worker already switches modes).
+- rsf.19 (63dbfbd, 6891896): delegate associated types Column and Sort; CellTextCache<R, C>; ColumnResizeMode re-export; VecDelegate::new only for ColumnId, other columns use with_columns.
+- i3o.2 (793b4fd): dispatch is one exhaustive (kind, target) match; table tests and three engine end-to-end action tests added.
+- hjn.25 (ccf951a): disk eject plan and /proc blocker scan; repeat Eject ignored while one runs; scan failure gives Blocked with others_may_hold.
+- pdu.18 decision: TlDialog gets second_action; footer Cancel, Terminate (danger), Select (primary default).
+- crw.10 final shape: update_static(model, &CpuStaticInfo), no CpuDetails struct; crw.11 keeps the sensor Vec.
