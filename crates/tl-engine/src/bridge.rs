@@ -109,8 +109,8 @@ struct Inner {
     last_demand: Mutex<Demand>,
     journal: Option<JournalSpawner>,
     rt: Mutex<Option<Runtime>>,
-    /// Dropped with `Inner`, so a live `EngineHandle` clone keeps the runtime alive.
-    #[allow(dead_code, reason = "held only to keep the runtime alive")]
+    /// Spawns the default journal reader in `EngineClient::journal`. Dropped with `Inner`, so a
+    /// live `EngineHandle` clone keeps the runtime alive.
     rt_handle: Mutex<Option<RuntimeHandle>>,
     stopped: AtomicBool,
 }

@@ -1008,7 +1008,7 @@ TlTextInput sm (24 h) / md (28 h):          TlFilterBox (in the tab strip):
 - **Anatomy**: `TlProgress`: bar height 4 (sm) or 6 (md), track `scroll_track`, fill `accent`,
   radius full, width from the parent; determinate `.value(0..=100)`; indeterminate: a 30% wide
   segment moving left to right over 1.2 s, looping. Optional right-aligned `t_xs` percent label
-  with `tnum`. `TlSpinner`: Lucide `loader-circle` at `i_sm` (16) or `i_md` (20), colour
+  with `tnum`. `TlSpinner`: Lucide `loader-circle` at `i_sm` (14) or `i_md` (16), colour
   `text_secondary` by default, rotating 360° per 0.8 s (kit).
 - **States**: determinate value changes jump (no transition; the kit's transition is turned off
   by giving a new `id` per value bucket of 1%, decided, because an animated bar in a 1 Hz-updated

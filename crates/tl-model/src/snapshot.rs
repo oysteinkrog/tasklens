@@ -209,7 +209,7 @@ pub struct WindowEntry {
 pub struct WindowsSnapshot {
     /// Validity is `Unsupported` when the KWin bridge is not available.
     pub header: ComponentHeader,
-    /// Sorted by `(pid, internal_id)`.
+    /// Stable-sorted by `pid`; windows with the same pid keep KWin's order.
     pub windows: Arc<[WindowEntry]>,
     /// Latest window-pick answer (R-149 item 3).
     pub pick: Option<PickResult>,
