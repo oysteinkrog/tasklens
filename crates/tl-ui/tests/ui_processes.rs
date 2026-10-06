@@ -249,3 +249,600 @@ fn busy_query_is_resent() {
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].generation, 1);
 }
+
+// ---- ProcessDelegate (tasklens-pdu.12) ----
+
+mod delegate {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::InteractiveElement as _;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, EntityId, IntoElement, ParentElement, Render, Styled,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::demand::Demand;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, ProcessKey, PseudoKind};
+    use tl_model::process::{
+        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
+    };
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
+    use tl_model::table::{Manager, ProcessTableView, TableRow, UnitRef};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::app::EngineGlobal;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::{init_strings, tr_calls};
+    use tl_ui::pages::processes::cells::process_column;
+    use tl_ui::pages::processes::delegate::{ProcRowId, ProcessDelegate, SHIPPED_PHASE};
+    use tl_ui::pages::processes::table::GroupHeader;
+    use tl_ui::table::actions::OpenProperties;
+    use tl_ui::table::cells::CellOut;
+    use tl_ui::table::tree_table::{IconSlot, RowKind, TlTreeTable, TreeTableDelegate};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn setup(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            init_strings(cx, "en-US");
+        });
+    }
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid),
+            boot_id: BootId(0),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, name: &str, flags: ProcFlags) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a(name),
+                name: a(name),
+                exe: None,
+                cmdline: None,
+                user: a("oystein"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a(name),
+            }),
+            group: GroupKind::System.key(),
+            state: ProcState::Sleeping,
+            flags,
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn group(node: NodeId, kind: GroupRowKind, name: &str, members: u32) -> GroupRow {
+        GroupRow {
+            node,
+            key: GroupKey(7),
+            kind,
+            class: GroupKind::System,
+            name: Arc::from(name),
+            icon: None,
+            members,
+            pids: members,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 0,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn row(node: NodeId, depth: u8, record: Option<u32>, group: Option<u32>) -> TableRow {
+        TableRow {
+            node,
+            depth,
+            expanded: false,
+            has_children: false,
+            record,
+            group,
+            descendants: 0,
+            subtree: None,
+        }
+    }
+
+    fn firefox() -> NodeId {
+        NodeId::Group(
+            GroupKind::App {
+                app_id: Arc::from("firefox"),
+            }
+            .key(),
+        )
+    }
+
+    fn unit() -> NodeId {
+        NodeId::Unit(UnitRef {
+            manager: Manager::System,
+            name: Arc::from("foo.service"),
+        })
+    }
+
+    /// One row of every kind, in the order the acceptance test names them, then the Kernel
+    /// threads (N) row and an expanded parent.
+    fn every_kind() -> (Vec<TableRow>, Vec<GroupRow>, Vec<ProcessRecord>) {
+        let records = vec![
+            record(10, "bash", ProcFlags::empty()),
+            record(20, "kworker/0:1", ProcFlags::KERNEL_THREAD),
+            record(30, "sshd", ProcFlags::empty()),
+        ];
+        let groups = vec![
+            group(firefox(), GroupRowKind::App, "Firefox", 14),
+            group(unit(), GroupRowKind::Unit, "Foo daemon", 2),
+            group(
+                NodeId::Pseudo(PseudoKind::Interrupts),
+                GroupRowKind::Pseudo,
+                "Interrupts",
+                0,
+            ),
+            group(
+                NodeId::KernelThreads,
+                GroupRowKind::KernelThreads,
+                "Kernel threads",
+                5,
+            ),
+        ];
+        let rows = vec![
+            TableRow {
+                expanded: true,
+                has_children: true,
+                descendants: 20,
+                ..row(GroupHeader::Apps.node(), 0, None, None)
+            },
+            TableRow {
+                has_children: true,
+                ..row(firefox(), 1, None, Some(0))
+            },
+            row(unit(), 1, None, Some(1)),
+            TableRow {
+                has_children: true,
+                descendants: 3,
+                ..row(NodeId::Process(key(10)), 1, Some(0), None)
+            },
+            row(NodeId::Process(key(20)), 1, Some(1), None),
+            row(NodeId::Pseudo(PseudoKind::Interrupts), 1, None, Some(2)),
+            row(NodeId::KernelThreads, 1, None, Some(3)),
+            TableRow {
+                has_children: true,
+                expanded: true,
+                descendants: 3,
+                ..row(NodeId::Process(key(30)), 1, Some(2), None)
+            },
+        ];
+        (rows, groups, records)
+    }
+
+    fn snapshot(
+        version: u64,
+        rows: Vec<TableRow>,
+        groups: Vec<GroupRow>,
+        records: Vec<ProcessRecord>,
+    ) -> Arc<Snapshot> {
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: rows.into(),
+            groups: groups.into(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: records.into(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(s)
+    }
+
+    fn new_delegate(vcx: &mut VisualTestContext, snap: Arc<Snapshot>) -> ProcessDelegate {
+        vcx.update(|window, cx| {
+            ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx)
+        })
+    }
+
+    fn text(d: &ProcessDelegate, ix: usize, col: ColumnId) -> (String, Validity) {
+        let mut out = CellOut {
+            want_text: true,
+            ..CellOut::default()
+        };
+        d.cell(ix, col, &mut out);
+        let text = out.arc.as_deref().map_or(out.text.clone(), str::to_owned);
+        (text, out.validity)
+    }
+
+    #[gpui_kit::test]
+    fn process_rows_render_each_kind(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+
+        let kinds: Vec<RowKind> = (0..d.row_count()).map(|ix| d.row_kind(ix)).collect();
+        assert_eq!(
+            kinds,
+            [
+                RowKind::GroupHeader,
+                RowKind::App,
+                RowKind::Unit,
+                RowKind::Process,
+                RowKind::KernelThread,
+                RowKind::Pseudo,
+                RowKind::KernelThread,
+                RowKind::Process,
+            ]
+        );
+
+        for ix in 0..d.row_count() {
+            let size = d.name_cell(ix).icon_size;
+            let want = if kinds[ix] == RowKind::App {
+                IconSlot::Large
+            } else {
+                IconSlot::Small
+            };
+            assert_eq!(size, want, "row {ix}");
+        }
+
+        let app = d.name_cell(1);
+        assert_eq!(app.primary.as_ref(), "Firefox (14)");
+        assert_eq!(
+            &app.primary[app.count_run.clone().expect("count run")],
+            "(14)"
+        );
+        assert_eq!(d.name_cell(0).primary.as_ref(), "Apps (20)");
+        assert_eq!(d.name_cell(2).primary.as_ref(), "Foo daemon (2)");
+        assert_eq!(d.name_cell(3).primary.as_ref(), "bash");
+        assert_eq!(d.name_cell(5).primary.as_ref(), "Interrupts");
+        assert_eq!(d.name_cell(6).primary.as_ref(), "Kernel threads (5)");
+
+        // PID is blank on header, app, unit and pseudo rows.
+        for ix in [0, 1, 2, 5] {
+            assert_eq!(
+                text(&d, ix, ColumnId::Pid),
+                (String::new(), Validity::Valid),
+                "row {ix}"
+            );
+        }
+        // "+N" only on the collapsed parent.
+        assert_eq!(text(&d, 3, ColumnId::Pid).0, "10 +3");
+        assert_eq!(text(&d, 4, ColumnId::Pid).0, "20");
+        assert_eq!(text(&d, 7, ColumnId::Pid).0, "30");
+
+        // Validity tooltips come with the cell; the table shows them on the hovered row.
+        let mut out = CellOut::default();
+        d.cell(3, ColumnId::StartTime, &mut out);
+        assert_eq!(out.validity, Validity::WarmingUp);
+        assert_eq!(out.tooltip.as_deref(), Some("Collecting first sample"));
+        let mut out = CellOut::default();
+        d.cell(3, ColumnId::Cpu, &mut out);
+        assert_eq!(out.tooltip, None);
+    }
+
+    #[gpui_kit::test]
+    fn group_header_row_not_selectable(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        let selectable: Vec<bool> = (0..d.row_count()).map(|ix| d.selectable(ix)).collect();
+        assert_eq!(
+            selectable,
+            [false, true, true, true, true, true, true, true]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn row_index_rebuilt_per_version(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let mut d = new_delegate(
+            vcx,
+            snapshot(1, rows.clone(), groups.clone(), records.clone()),
+        );
+        let bash = ProcRowId::Process(key(10));
+        let unit_id = ProcRowId::from(&unit());
+        assert_eq!(d.row_index(bash), Some(3));
+        assert_eq!(d.row_index(unit_id), Some(2));
+        let v1 = d.table_version();
+
+        // The same view again changes nothing.
+        let same = Arc::clone(d.snapshot());
+        assert!(!d.install(&same));
+        assert_eq!(d.table_version(), v1);
+
+        let mut reordered = rows;
+        reordered.swap(2, 3);
+        assert!(d.install(&snapshot(2, reordered, groups, records)));
+        assert!(d.table_version() > v1);
+        assert_eq!(d.row_index(bash), Some(2));
+        assert_eq!(d.row_index(unit_id), Some(3));
+        assert_eq!(d.row_id(2), bash);
+        assert_eq!(d.row_index(ProcRowId::Process(key(99))), None);
+    }
+
+    #[gpui_kit::test]
+    fn visible_demand_forwarded_capped_512(cx: &mut TestAppContext) {
+        setup(cx);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine;
+        let agg = cx.update(|cx| {
+            let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+            let agg = cx.new(|cx| DemandAggregator::new(Arc::clone(&client), &hub, cx));
+            cx.set_global(GlobalDemand(agg.clone()));
+            agg
+        });
+        cx.update(|cx| {
+            agg.update(cx, |a, cx| {
+                let page = Demand {
+                    any_surface_visible: true,
+                    ..Demand::default()
+                };
+                a.set(EntityId::from(9_999u64), None, page, cx);
+            });
+        });
+        let (rows, groups, records) = every_kind();
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        let table = vcx.update(|window, cx| cx.new(|cx| TlTreeTable::new(d, window, cx)));
+
+        // A scroll that shows 40 rows reports 120 ids: 100 processes, 20 other rows.
+        let mut ids: Vec<ProcRowId> = (0..100).map(|p| ProcRowId::Process(key(p))).collect();
+        ids.extend((0..20).map(|g| ProcRowId::Group(GroupKey(g))));
+        vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.on_visible_range(&ids, cx)));
+        let keys = vcx.update(|_, cx| agg.read(cx).merged().detail_keys);
+        let want: Vec<ProcessKey> = (0..100).map(key).collect();
+        assert_eq!(&*keys, &want[..]);
+
+        let many: Vec<ProcRowId> = (0..600).map(|p| ProcRowId::Process(key(p))).collect();
+        vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.on_visible_range(&many, cx)));
+        let keys = vcx.update(|_, cx| agg.read(cx).merged().detail_keys);
+        assert_eq!(keys.len(), 512);
+        assert_eq!(keys[511], key(511));
+    }
+
+    fn gpu(n: u16, pci: &str, name: &str, present: bool) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(n),
+            identity: DeviceIdentity::Gpu {
+                uuid: [n as u8; 16],
+                pci_bus_id: Arc::from(pci),
+            },
+            generation: 0,
+            display_name: Arc::from(name),
+            present,
+            parent: None,
+            persistent_key: Arc::from(pci),
+            net_kind: None,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn gpu_slots_only_for_present_adapters(cx: &mut TestAppContext) {
+        setup(cx);
+        let (rows, groups, records) = every_kind();
+        let snap = snapshot(1, rows.clone(), groups.clone(), records.clone());
+        let mut with_gpu = (*snap).clone();
+        with_gpu.devices = Arc::new(DeviceCatalog {
+            version: 1,
+            entries: vec![
+                gpu(0, "0000:01:00.0", "NVIDIA GeForce RTX 4070", true),
+                gpu(1, "0000:02:00.0", "Gone card", false),
+            ]
+            .into(),
+        });
+        let vcx = cx.add_empty_window();
+        let d = new_delegate(vcx, Arc::new(with_gpu));
+        let offered = d.offered_columns();
+        assert!(offered.contains(&ColumnId::Gpu0));
+        assert!(!offered.contains(&ColumnId::Gpu1));
+        assert!(d.columns().order.contains(&ColumnId::Gpu0));
+        assert!(!d.columns().order.contains(&ColumnId::Gpu1));
+        assert_eq!(
+            d.column_spec(ColumnId::Gpu0).tooltip.as_deref(),
+            Some("NVIDIA GeForce RTX 4070 (0000:01:00.0)")
+        );
+
+        // A phase 2 column is not offered while SHIPPED_PHASE is 1.
+        assert_eq!(SHIPPED_PHASE, 1);
+        assert_eq!(process_column(ColumnId::Version).phase, 2);
+        assert!(!offered.contains(&ColumnId::Version));
+        assert!(!d.columns().order.contains(&ColumnId::Version));
+        assert!(offered.contains(&ColumnId::Cpu));
+
+        // No GPU: no slot.
+        let d = new_delegate(vcx, snapshot(1, rows, groups, records));
+        assert!(!d.offered_columns().contains(&ColumnId::Gpu0));
+    }
+
+    struct Host {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+        opened: Rc<Cell<u32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let opened = self.opened.clone();
+            div()
+                .w(px(800.))
+                .h(px(400.))
+                .flex()
+                .flex_col()
+                .on_action(move |_: &OpenProperties, _, _| opened.set(opened.get() + 1))
+                .child(self.table.clone())
+        }
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn open_host(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<TlTreeTable<ProcessDelegate>>,
+        Rc<Cell<u32>>,
+        Arc<FakeEngine>,
+        &mut VisualTestContext,
+    ) {
+        setup(cx);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| cx.set_global(EngineGlobal(client)));
+        let (rows, groups, records) = every_kind();
+        let snap = snapshot(1, rows, groups, records);
+        let opened = Rc::new(Cell::new(0));
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let (out, hits) = (slot.clone(), opened.clone());
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let d =
+                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *out.borrow_mut() = Some(table.clone());
+            Host {
+                table,
+                opened: hits,
+            }
+        });
+        vcx.update(|window, _| window.activate_window());
+        redraw(vcx);
+        let table = slot.borrow_mut().take().expect("table created");
+        let handle = vcx.update(|_, cx| table.read(cx).focus_handle().clone());
+        vcx.update(|window, cx| window.focus(&handle, cx));
+        redraw(vcx);
+        (table, opened, engine, vcx)
+    }
+
+    fn queries(engine: &FakeEngine) -> usize {
+        engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::SetTableQuery(_)))
+            .count()
+    }
+
+    #[gpui_kit::test]
+    fn enter_opens_properties_space_toggles(cx: &mut TestAppContext) {
+        let (table, opened, engine, vcx) = open_host(cx);
+        let bash = ProcRowId::Process(key(10));
+
+        // Enter on a process row goes on to the page's OpenProperties handler.
+        vcx.update(|_, cx| table.update(cx, |t, _| t.selection.click(bash)));
+        vcx.simulate_keystrokes("enter");
+        redraw(vcx);
+        assert_eq!(opened.get(), 1);
+        assert_eq!(queries(&engine), 0);
+
+        // Enter on a group header toggles it and opens nothing.
+        let header = ProcRowId::from(&GroupHeader::Apps.node());
+        vcx.update(|_, cx| table.update(cx, |t, _| t.selection.set_focus_only(header)));
+        vcx.simulate_keystrokes("enter");
+        redraw(vcx);
+        assert_eq!(opened.get(), 1);
+        assert_eq!(queries(&engine), 1);
+        let open = vcx.update(|_, cx| {
+            table
+                .read(cx)
+                .delegate
+                .query()
+                .is_expanded(&GroupHeader::Apps.node())
+        });
+        assert!(!open, "the Apps header collapsed");
+
+        // Space on a process row with children toggles it.
+        vcx.update(|_, cx| table.update(cx, |t, _| t.selection.click(bash)));
+        vcx.simulate_keystrokes("space");
+        redraw(vcx);
+        assert_eq!(queries(&engine), 2);
+        let open = vcx.update(|_, cx| {
+            table
+                .read(cx)
+                .delegate
+                .query()
+                .is_expanded(&NodeId::Process(key(10)))
+        });
+        assert!(open);
+        assert_eq!(opened.get(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn frames_translate_nothing(cx: &mut TestAppContext) {
+        let (table, _, _, vcx) = open_host(cx);
+        redraw(vcx);
+        let built = vcx.update(|_, cx| table.read(cx).rows_built_last_frame.get());
+        assert!(built >= 8, "{built} rows built");
+        let before = tr_calls();
+        for _ in 0..3 {
+            vcx.update(|window, _| window.refresh());
+            redraw(vcx);
+        }
+        assert_eq!(tr_calls(), before, "a frame called tr");
+    }
+}
