@@ -6,6 +6,7 @@
 
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod args;
+mod atomic;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
