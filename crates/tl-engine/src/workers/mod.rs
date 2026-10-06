@@ -11,6 +11,7 @@ pub mod dbus_udisks;
 pub mod dbus_upower;
 pub mod disk;
 pub mod enumerate;
+pub mod gpu_drm;
 pub mod gpu_nvidia;
 #[doc(hidden)]
 pub mod history;
@@ -60,6 +61,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         inventory::spec(),
         dbus_upower::spec(),
         dbus_udisks::spec(),
+        gpu_drm::spec(),
     ]
 }
 
