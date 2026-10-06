@@ -278,7 +278,7 @@ impl UnitBus for ZbusUnitBus {
                 .and_then(|b| b.member("JobRemoved"))
                 .map_err(|e| bus_error(&e))?
                 .build();
-            let subscribe = zbus::MessageStream::for_match_rule(rule, &*self.conn, None);
+            let subscribe = zbus::MessageStream::for_match_rule(rule, &self.conn, None);
             let stream = timed(cx, READ_TIMEOUT, subscribe).await?;
             let signals = stream.filter_map(|msg| {
                 let msg = msg.ok()?;
