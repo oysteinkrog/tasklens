@@ -24,8 +24,12 @@ pub const TIMEOUT: Duration = Duration::from_secs(60);
 pub const MAX_OUTPUT: usize = 1 << 20;
 /// How often the run is checked for an exit.
 const POLL: Duration = Duration::from_millis(50);
-/// Searched after `PATH`, and the whole `PATH` of the child.
-const SYSTEM_DIRS: [&str; 2] = ["/usr/sbin", "/usr/bin"];
+/// The only folders searched for `smartctl`, in order. Never `PATH`: the program runs as root,
+/// and a user-writable `PATH` folder could hold a fake one.
+const SMARTCTL_DIRS: [&str; 4] = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"];
+/// The only folders searched for `pkexec`, in order.
+const PKEXEC_DIRS: [&str; 2] = ["/usr/bin", "/bin"];
+/// The whole `PATH` of the child.
 const CHILD_PATH: &str = "/usr/sbin:/usr/bin";
 /// Longest attribute name or self-test text kept, in bytes.
 const TEXT_MAX: usize = 256;
@@ -51,16 +55,13 @@ pub fn valid_disk_name(disk: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
 }
 
-/// `pkexec` and `smartctl` as absolute paths, from `PATH` plus `/usr/sbin` and `/usr/bin`.
+/// `pkexec` and `smartctl` as absolute paths, from fixed system folders only. `PATH` is never
+/// read.
 pub fn locate() -> Result<(PathBuf, PathBuf), Arc<str>> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
-    dirs.extend(SYSTEM_DIRS.iter().map(PathBuf::from));
-    // A relative entry would resolve against the working directory.
-    dirs.retain(|d| d.is_absolute());
-    let smartctl = find_on_path("smartctl", &dirs).ok_or_else(|| Arc::from(NOT_INSTALLED))?;
-    let pkexec = find_on_path("pkexec", &dirs).ok_or_else(|| Arc::from(NO_PKEXEC))?;
+    let dirs = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+    let smartctl =
+        find_on_path("smartctl", &dirs(&SMARTCTL_DIRS)).ok_or_else(|| Arc::from(NOT_INSTALLED))?;
+    let pkexec = find_on_path("pkexec", &dirs(&PKEXEC_DIRS)).ok_or_else(|| Arc::from(NO_PKEXEC))?;
     Ok((pkexec, smartctl))
 }
 
@@ -552,6 +553,63 @@ mod tests {
         let path = dir.path().join("fake-pkexec.sh");
         fs::write(&path, script).expect("write script");
         run_for(Path::new("/bin/sh"), &path, "sda", timeout)
+    }
+
+    /// Env var that tells `locate_child` the fake folder put first on its `PATH`.
+    const FAKE_DIR_ENV: &str = "TASKLENS_HJN32_FAKE_DIR";
+
+    /// Security regression: a fake `smartctl` and `pkexec` first on `PATH` are never chosen.
+    /// The test binary runs `locate_child` again in a child process with that `PATH`, so this
+    /// process's environment is never changed.
+    #[test]
+    fn locate_ignores_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch();
+        for name in ["smartctl", "pkexec"] {
+            let path = dir.path().join(name);
+            fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write fake");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        let exe = std::env::current_exe().expect("test binary");
+        let out = Command::new(exe)
+            .args([
+                "--exact",
+                "workers::smartctl::tests::locate_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("PATH", dir.path())
+            .env(FAKE_DIR_ENV, dir.path())
+            .output()
+            .expect("run child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{stdout}");
+        assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    #[test]
+    #[ignore = "run by locate_ignores_path with a fake PATH"]
+    fn locate_child() {
+        let fake =
+            PathBuf::from(std::env::var_os(FAKE_DIR_ENV).expect("run by locate_ignores_path"));
+        match locate() {
+            Ok((pkexec, smartctl)) => {
+                assert!(!pkexec.starts_with(&fake), "{}", pkexec.display());
+                assert!(!smartctl.starts_with(&fake), "{}", smartctl.display());
+                let parent = |p: &Path| p.parent().and_then(Path::to_str).map(str::to_owned);
+                assert!(
+                    PKEXEC_DIRS
+                        .iter()
+                        .any(|d| parent(&pkexec).as_deref() == Some(*d))
+                );
+                assert!(
+                    SMARTCTL_DIRS
+                        .iter()
+                        .any(|d| parent(&smartctl).as_deref() == Some(*d))
+                );
+            }
+            Err(e) => assert!(&*e == NOT_INSTALLED || &*e == NO_PKEXEC, "{e}"),
+        }
     }
 
     #[test]
