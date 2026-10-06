@@ -6,8 +6,9 @@
 //! GPUI turns Enter and Space on a focused element into a keyboard click on key up, so `on_click`
 //! covers all three and no key binding is needed. Right-click is left to the owner.
 
+use std::sync::Arc;
+
 use gpui_kit::component::Colorize;
-use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{
     Action, App, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement,
     ParentElement, Pixels, RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled,
@@ -15,6 +16,7 @@ use gpui_kit::{
 };
 
 use crate::components::focus::TlFocusRing;
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, current, metrics};
 
@@ -105,6 +107,8 @@ impl RenderOnce for TlLink {
         *text.text_style() = label_style(&m, size, FontWeight::NORMAL);
         let text = text.min_w_0().truncate().child(self.text.clone());
 
+        let tooltip_id = ElementId::NamedChild(Arc::new(self.id.clone()), "tooltip".into());
+
         // The outer box carries the ring and does not clip; the inner text truncates.
         let mut link = div()
             .id(self.id)
@@ -124,7 +128,9 @@ impl RenderOnce for TlLink {
         }
 
         if let Some(reason) = self.disabled_reason {
-            link.tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
+            let state = HoverTooltip::state(tooltip_id, window, cx);
+            let build = TlTooltip::text(reason).build();
+            HoverTooltip::attach(&state, link, DELAY_CONTROL, build, window, cx)
         } else {
             let action = self.action;
             link.track_focus(&focus)
