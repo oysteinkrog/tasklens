@@ -256,3 +256,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.28: tooltips open only after a pointer move; follow-up bead migrates raw .tooltip call sites.
 - y6k.15: startup worker lists no user units until E14-013 fills ScanInput.units; impact NotMeasured until E14-013.
 - hx1.10: netns: if proc self ns net is unreadable nothing is filtered as host.
+- lban closed: restart reporting lives in controller.rs (SourceController wraps the factory): Err or panic sends Failed, generation above 1 sends Running first. Closed and cancel send nothing.
