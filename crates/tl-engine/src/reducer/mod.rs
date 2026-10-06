@@ -26,7 +26,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionId, ActionRequest};
 use tl_model::command::SetupStep;
 use tl_model::demand::Demand;
-use tl_model::details::DetailsSnapshot;
+use tl_model::details::{
+    AffinityInfo, DetailTab, DetailTarget, DetailsSnapshot, HandleSearchState, TabPayload,
+    TargetDetail,
+};
 use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HealthSnapshot, SourceId};
 use tl_model::history::{HistoryView, RecordSink};
@@ -148,6 +151,8 @@ pub struct Reducer {
     /// The non-empty `Description` of every unit a `ServicesUpdate` reported, for the unit row
     /// names of the table (E09-025, PROC-009). Kept across updates.
     pub unit_names: FxHashMap<UnitRef, Arc<str>>,
+    /// Properties payloads, affinity masks and handle search state (E09-026).
+    pub details: DetailsState,
     dirty: ComponentMask,
     /// Header version of each header component at the last publish, in `HEADER_BITS` order.
     published: [u64; HEADER_BITS.len()],
@@ -224,6 +229,7 @@ impl Reducer {
             demand_rx: None,
             apply_state: apply::ApplyState::default(),
             unit_names: FxHashMap::default(),
+            details: DetailsState::default(),
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
         }
@@ -279,8 +285,15 @@ impl Reducer {
     /// `Arc`. A dirty header component whose `Arc` was not replaced with a higher version gets
     /// `version` one above the last published one; its observed times are the ones apply set.
     fn build_snapshot(&mut self) -> Snapshot {
-        let dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE);
+        let mut dirty = std::mem::replace(&mut self.dirty, ComponentMask::NONE);
         self.sequence += 1;
+
+        if let Some(mut next) = self.details.publish() {
+            // The header keeps the validity `apply` set; `bump` below sets the version.
+            Arc::make_mut(&mut next).header = self.components.details.header;
+            self.components.details = next;
+            dirty |= ComponentMask::DETAILS;
+        }
 
         if dirty.contains(ComponentMask::SERIES) {
             self.components.series = self.series.publish();
@@ -339,6 +352,85 @@ impl Reducer {
             process_series: Arc::clone(&c.process_series),
             device_details: Arc::clone(&c.device_details),
         }
+    }
+}
+
+/// The reducer side of `Snapshot.details` (E09-026, ADR-003). Each tab payload is an `Arc` that
+/// only `apply_tab` replaces, so an unchanged tab is pointer-equal across publishes.
+#[derive(Default)]
+pub struct DetailsState {
+    targets: FxHashMap<DetailTarget, TargetDetail>,
+    affinity: FxHashMap<ProcessKey, AffinityInfo>,
+    handle_search: Option<Arc<HandleSearchState>>,
+    dirty: bool,
+}
+
+impl DetailsState {
+    /// Replaces the `Arc` of one tab and bumps that tab's version.
+    pub fn apply_tab(
+        &mut self,
+        target: DetailTarget,
+        tab: DetailTab,
+        payload: Arc<TabPayload>,
+        validity: Validity,
+    ) {
+        let slot = &mut self.targets.entry(target).or_default().tabs[tab.index()];
+        slot.payload = Some(payload);
+        slot.version += 1;
+        slot.validity = validity;
+        self.dirty = true;
+    }
+
+    pub fn apply_affinity(&mut self, entries: Vec<(ProcessKey, AffinityInfo)>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.affinity.extend(entries);
+        self.dirty = true;
+    }
+
+    pub fn apply_handle_search(&mut self, state: Arc<HandleSearchState>) {
+        self.handle_search = Some(state);
+        self.dirty = true;
+    }
+
+    /// Removes the handle search state once the search has ended and the UI no longer shows it.
+    pub fn clear_handle_search(&mut self) {
+        if self.handle_search.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    /// Drops the targets not in `demand.details` and the affinity keys not in
+    /// `demand.affinity_targets`, so a closed window frees its payloads.
+    pub fn retain(&mut self, demand: &Demand) {
+        let targets = self.targets.len();
+        let affinity = self.affinity.len();
+        self.targets
+            .retain(|target, _| demand.details.iter().any(|d| d.target == *target));
+        self.affinity
+            .retain(|key, _| demand.affinity_targets.contains(key));
+        if self.targets.len() != targets || self.affinity.len() != affinity {
+            self.dirty = true;
+        }
+    }
+
+    /// The next component when something changed since the last publish, else `None`. The
+    /// header is the default; the reducer sets it.
+    pub fn publish(&mut self) -> Option<Arc<DetailsSnapshot>> {
+        if !std::mem::take(&mut self.dirty) {
+            return None;
+        }
+        Some(Arc::new(DetailsSnapshot {
+            header: ComponentHeader::default(),
+            targets: self
+                .targets
+                .iter()
+                .map(|(target, detail)| (*target, Arc::new(detail.clone())))
+                .collect(),
+            affinity: self.affinity.iter().map(|(k, v)| (*k, *v)).collect(),
+            handle_search: self.handle_search.clone(),
+        }))
     }
 }
 

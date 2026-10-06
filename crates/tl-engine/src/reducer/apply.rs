@@ -410,8 +410,17 @@ impl Reducer {
                 self.processes.apply_pss(&entries);
                 self.republish_processes(settings);
             }
-            SourceUpdate::Details(_) => {
-                tracing::debug!(target: "tasklens::engine", "details update: E09-026");
+            SourceUpdate::Details(DetailsUpdate::Tab {
+                target,
+                tab,
+                payload,
+                validity,
+            }) => self.details.apply_tab(target, tab, payload, validity),
+            SourceUpdate::Details(DetailsUpdate::Affinity { entries, .. }) => {
+                self.details.apply_affinity(entries);
+            }
+            SourceUpdate::Details(DetailsUpdate::HandleSearch(state)) => {
+                self.details.apply_handle_search(state);
             }
             SourceUpdate::Services(s) => {
                 if self.apply_unit_names(&s.units) {
@@ -609,6 +618,10 @@ impl Reducer {
         }
         if self.processes.expire(now, settings.interval_ms) {
             self.republish_processes(settings);
+        }
+        // Closed Properties windows and Set Affinity dialogs free their data (E09-026).
+        if let Some(demand) = self.demand_rx.as_ref().map(|rx| rx.borrow_and_clone()) {
+            self.details.retain(&demand);
         }
     }
 

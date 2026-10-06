@@ -24,8 +24,11 @@ use tl_model::actions::{
     Signal,
 };
 use tl_model::command::{Command, DeviceCommand, HistoryWhat, KWinCommand, SetupStep};
-use tl_model::demand::Demand;
-use tl_model::details::{DetailTab, DetailTarget, ScanId, SearchId, StringScanOpts};
+use tl_model::demand::{Demand, DetailDemand};
+use tl_model::details::{
+    AffinityInfo, DetailTab, DetailTarget, EnvDetail, HandlePhase, HandleSearchState, ScanId,
+    SearchId, StringScanOpts, TabPayload,
+};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::gpu_proto::{ApiVersions, GpuProcessSample, Reading};
 use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
@@ -1667,4 +1670,166 @@ fn first_running_no_extra_gap() {
         .samples;
     assert_eq!(cpu.len(), 2);
     assert!(cpu.iter().all(|&s| !has_gap(s)));
+}
+
+// ---- Details (E09-026) ----
+
+fn tab_msg(target: DetailTarget, tab: DetailTab, payload: &Arc<TabPayload>) -> EngineMsg {
+    src(SourceUpdate::Details(DetailsUpdate::Tab {
+        target,
+        tab,
+        payload: Arc::clone(payload),
+        validity: Validity::Valid,
+    }))
+}
+
+fn env_payload() -> Arc<TabPayload> {
+    Arc::new(TabPayload::Environ(Arc::new(EnvDetail::default())))
+}
+
+fn threads_payload() -> Arc<TabPayload> {
+    Arc::new(TabPayload::Threads(Arc::from([])))
+}
+
+fn details_demand(targets: &[DetailTarget], affinity: &[ProcessKey]) -> Demand {
+    Demand {
+        details: targets
+            .iter()
+            .map(|&target| DetailDemand {
+                target,
+                tab: DetailTab::General,
+            })
+            .collect(),
+        affinity_targets: Arc::from(affinity),
+        ..Demand::default()
+    }
+}
+
+fn affinity(n: u16) -> AffinityInfo {
+    AffinityInfo {
+        mask: cpus(n),
+        cpuset_limit: cpus(8),
+    }
+}
+
+fn handle_state(progress_pct: u8) -> Arc<HandleSearchState> {
+    Arc::new(HandleSearchState {
+        search: SearchId(1),
+        phase: HandlePhase::Retrieving,
+        progress_pct,
+        total_handles: 18_234,
+        chunks: Arc::from([]),
+        searched: 3,
+        total: 10,
+        skipped: 0,
+    })
+}
+
+/// The payload `Arc` of one tab, which must be set.
+fn tab_arc(snap: &Snapshot, target: DetailTarget, tab: DetailTab) -> Arc<TabPayload> {
+    let slot = snap.details.targets[&target].tab(tab);
+    Arc::clone(slot.payload.as_ref().expect("the tab has a payload"))
+}
+
+#[test]
+fn details_tab_arc_reuse_and_version() {
+    let mut rig = Rig::new();
+    let a = DetailTarget::Process(proc_key(1));
+    // Environment stands in for General: the reducer does not look inside a payload, and
+    // GeneralDetail has no Default.
+    let p1 = env_payload();
+    rig.run(vec![tab_msg(a, DetailTab::Environment, &p1)])
+        .expect("no invariant violation");
+    let first = rig.latest();
+    rig.run(vec![tab_msg(a, DetailTab::Threads, &threads_payload())])
+        .expect("no invariant violation");
+    let second = rig.latest();
+
+    assert!(Arc::ptr_eq(
+        &tab_arc(&first, a, DetailTab::Environment),
+        &tab_arc(&second, a, DetailTab::Environment)
+    ));
+    assert!(Arc::ptr_eq(
+        &p1,
+        &tab_arc(&second, a, DetailTab::Environment)
+    ));
+    let detail = &second.details.targets[&a];
+    assert_eq!(detail.tab(DetailTab::Threads).version, 1);
+    assert_eq!(detail.tab(DetailTab::Threads).validity, Validity::Valid);
+    assert_eq!(detail.tab(DetailTab::Environment).version, 1);
+    assert!(second.details.header.version > first.details.header.version);
+    rig.passed();
+}
+
+#[test]
+fn details_retain_on_tick() {
+    let mut rig = Rig::new();
+    let a = DetailTarget::Process(proc_key(1));
+    let b = DetailTarget::App(GroupKey(7));
+    let (demand_tx, demand_rx) = watch::channel(details_demand(&[a, b], &[]));
+    rig.reducer().demand_rx = Some(demand_rx);
+    rig.run(vec![
+        tab_msg(a, DetailTab::Threads, &threads_payload()),
+        tab_msg(b, DetailTab::Threads, &threads_payload()),
+    ])
+    .expect("no invariant violation");
+    assert_eq!(rig.latest().details.targets.len(), 2);
+
+    demand_tx
+        .send(details_demand(&[b], &[]))
+        .expect("the reducer holds the receiver");
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert!(!snap.details.targets.contains_key(&a));
+    assert!(snap.details.targets.contains_key(&b));
+    rig.passed();
+}
+
+#[test]
+fn details_affinity_retain() {
+    let mut rig = Rig::new();
+    let (a, b) = (proc_key(1), proc_key(2));
+    let (demand_tx, demand_rx) = watch::channel(details_demand(&[], &[a, b]));
+    rig.reducer().demand_rx = Some(demand_rx);
+    rig.run(vec![src(SourceUpdate::Details(DetailsUpdate::Affinity {
+        t_ns: now_boot_ns(),
+        entries: vec![(a, affinity(2)), (b, affinity(4))],
+    }))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.details.affinity.get(&a), Some(&affinity(2)));
+    assert_eq!(snap.details.affinity.get(&b), Some(&affinity(4)));
+
+    demand_tx
+        .send(details_demand(&[], &[a]))
+        .expect("the reducer holds the receiver");
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert!(snap.details.affinity.contains_key(&a));
+    assert!(!snap.details.affinity.contains_key(&b));
+    rig.passed();
+}
+
+#[test]
+fn details_handle_search_state() {
+    let mut rig = Rig::new();
+    rig.run(vec![src(SourceUpdate::Details(
+        DetailsUpdate::HandleSearch(handle_state(42)),
+    ))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    let state = snap
+        .details
+        .handle_search
+        .as_ref()
+        .expect("the search state is published");
+    assert_eq!(state.progress_pct, 42);
+
+    rig.reducer().details.clear_handle_search();
+    rig.run(vec![EngineMsg::Tick])
+        .expect("no invariant violation");
+    assert!(rig.latest().details.handle_search.is_none());
+    rig.passed();
 }
