@@ -1,26 +1,56 @@
-//! Performance tab actions. E24-002 (tasklens-crw.4) fills this file with every `Perf*` action;
-//! `PerfShowMiniWindow` is declared ahead of it for the page frame (E24-006) and
-//! `PerfSelectDevice` for the sidebar card (E24-003), and `PerfToggleCpuKernel` and
-//! `PerfSetCpuGraphMode` for the CPU page (E24-009).
+//! Performance tab actions and the Performance key bindings (E24-002, UI-PRF-010, UI-PRF-012,
+//! canonical table (b), R-128, UI-SHL-120).
+//!
+//! Every menu item, button and key of the Performance tab and the E25 device pages dispatches
+//! one Action declared here, all in the `tasklens` namespace with a `Perf` prefix. Later beads
+//! add handlers, not Actions.
+//!
+//! Actions that carry a `tl_model::settings` enum are `no_json`: tl-model has no JSON schema
+//! derive.
+
+use std::sync::Arc;
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
-use gpui_kit::{Action, gpui};
+use gpui_kit::{Action, App, KeyBinding, gpui};
 use serde::Deserialize;
-use tl_model::settings::CpuGraphMode;
+pub use tl_model::settings::{CpuGraphMode, CpuSecondaryGraph, GpuOptionalGraph};
 
-use super::DeviceKey;
+use super::{DeviceKey, DeviceKind};
+
+/// Key context of the Performance tab.
+pub const PERFORMANCE_CONTEXT: &str = "Performance";
+/// Key context of the Summary mode view (PERF-010).
+pub const PERFORMANCE_SUMMARY_CONTEXT: &str = "PerformanceSummary";
 
 gpui_kit::actions!(
     tasklens,
     [
+        PerfSelectPrevDevice,
+        PerfSelectNextDevice,
+        PerfSelectFirstDevice,
+        PerfSelectLastDevice,
+        PerfToggleSidebar,
+        PerfToggleSummaryMode,
+        PerfCopyDeviceInfo,
+        PerfCopyValue,
+        PerfEnterEditMode,
+        PerfExitEditMode,
+        PerfEnableAllPages,
+        PerfDisableAllPages,
+        PerfResetPagesToDefault,
         /// Opens the Performance mini window (R-058). No handler until E26.
         PerfShowMiniWindow,
         /// Shows or hides the kernel time line on the CPU page (PERF-029).
         PerfToggleCpuKernel,
+        PerfToggleMemoryComposition,
+        PerfToggleMemorySwapGraph,
+        PerfOpenNetworkSettings,
+        /// Bound to keys that Summary mode swallows (PERF-010). Has no handler.
+        NoOp,
     ]
 );
 
-/// Selects the device page of `key` (a sidebar card click). No handler until E24-004.
+/// Selects the device page of `key` (a sidebar card click).
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = tasklens)]
 #[schemars(crate = "gpui::private::schemars")]
@@ -28,9 +58,184 @@ pub struct PerfSelectDevice {
     pub key: DeviceKey,
 }
 
-/// Sets `performance.cpu_graph_mode`. `no_json` because `CpuGraphMode` has no JSON schema.
+/// Selects the visible sidebar card at `index` (F1 to F8).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSelectVisibleDevice {
+    pub index: u8,
+}
+
+/// Sets the graph time range in seconds.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetGraphRange {
+    pub secs: u16,
+}
+
+/// Selects the first device of `kind`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfJumpToType {
+    pub kind: DeviceKind,
+}
+
+/// Shows or hides the sidebar card and page of `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetPageVisible {
+    pub key: DeviceKey,
+    pub visible: bool,
+}
+
+/// Moves the card of `key` before `before`, or to the end when `before` is `None`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfMoveDevice {
+    pub key: DeviceKey,
+    pub before: Option<DeviceKey>,
+}
+
+/// Moves the focused card by `delta` places (Alt+Up -1, Alt+Down +1).
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfMoveFocusedDevice {
+    pub delta: i8,
+}
+
+/// Adds a tray graph that shows `source`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfAddTrayGraph {
+    pub source: DeviceKey,
+}
+
+/// Sets `performance.cpu_graph_mode`.
 #[derive(Clone, Debug, PartialEq, Action)]
 #[action(namespace = tasklens, no_json)]
 pub struct PerfSetCpuGraphMode {
     pub mode: CpuGraphMode,
+}
+
+/// Sets `performance.cpu_secondary_graph`.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct PerfSetCpuSecondaryGraph {
+    pub choice: CpuSecondaryGraph,
+}
+
+/// Opens the SMART view of the disk `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfShowSmart {
+    pub key: DeviceKey,
+}
+
+/// Reads the SMART data of the disk `key` again.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSmartRefresh {
+    pub key: DeviceKey,
+}
+
+/// Reads the SMART data of the disk `key` through smartctl.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSmartReadSmartctl {
+    pub key: DeviceKey,
+}
+
+/// Ejects the disk `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfEject {
+    pub key: DeviceKey,
+}
+
+/// Shows or hides the graph of `engine` on the GPU page of `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfToggleGpuEngine {
+    pub key: DeviceKey,
+    pub engine: Arc<str>,
+}
+
+/// Shows or hides an optional graph on the GPU page of `key`.
+#[derive(Clone, Debug, PartialEq, Action)]
+#[action(namespace = tasklens, no_json)]
+pub struct PerfToggleGpuOptionalGraph {
+    pub key: DeviceKey,
+    pub which: GpuOptionalGraph,
+}
+
+/// Starts renaming the fan `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfRenameFan {
+    pub key: DeviceKey,
+}
+
+/// Sets the temperature sensor shown with the fan `key`, or none.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfSetFanTempSensor {
+    pub key: DeviceKey,
+    pub sensor: Option<Arc<str>>,
+}
+
+/// Looks up the public IP address of the interface `key`.
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = tasklens)]
+#[schemars(crate = "gpui::private::schemars")]
+pub struct PerfFetchPublicIp {
+    pub key: DeviceKey,
+}
+
+/// Binds the Performance rows of canonical table (b).
+pub fn bind_keys_performance(cx: &mut App) {
+    let perf = Some(PERFORMANCE_CONTEXT);
+    let summary = Some(PERFORMANCE_SUMMARY_CONTEXT);
+    let mut bindings = Vec::new();
+    for i in 0..8u8 {
+        bindings.push(KeyBinding::new(
+            &format!("f{}", i + 1),
+            PerfSelectVisibleDevice { index: i },
+            perf,
+        ));
+    }
+    for i in 1..=6 {
+        bindings.push(KeyBinding::new(&format!("ctrl-{i}"), NoOp, summary));
+        bindings.push(KeyBinding::new(&format!("alt-{i}"), NoOp, summary));
+    }
+    cx.bind_keys(bindings);
+
+    cx.bind_keys([
+        KeyBinding::new("up", PerfSelectPrevDevice, perf),
+        KeyBinding::new("down", PerfSelectNextDevice, perf),
+        KeyBinding::new("home", PerfSelectFirstDevice, perf),
+        KeyBinding::new("end", PerfSelectLastDevice, perf),
+        KeyBinding::new("f9", PerfToggleSidebar, perf),
+        KeyBinding::new("ctrl-t", PerfToggleSidebar, perf),
+        KeyBinding::new("ctrl-m", PerfToggleSummaryMode, perf),
+        KeyBinding::new("ctrl-c", PerfCopyDeviceInfo, perf),
+        KeyBinding::new("alt-up", PerfMoveFocusedDevice { delta: -1 }, perf),
+        KeyBinding::new("alt-down", PerfMoveFocusedDevice { delta: 1 }, perf),
+        KeyBinding::new("escape", PerfToggleSummaryMode, summary),
+        KeyBinding::new("ctrl-m", PerfToggleSummaryMode, summary),
+        KeyBinding::new("ctrl-tab", NoOp, summary),
+        KeyBinding::new("ctrl-shift-tab", NoOp, summary),
+    ]);
 }
