@@ -546,3 +546,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - wlf.15 (b5eb1b4): gallery_main.rs; needs a tl-ui gallery hook behind bench (approved in app.rs).
 - pdu.12 fix (9eae47a, 59a7a1e): UnitIds counter keyed by the full UnitRef (manager plus name; accepted); ids are built once per view.
 - bj6.9 (73d5774, 84ed085, fecabda, d9558a0, bd0cdea, 9a17d2a): Collector Health. Off rows hidden; SourceHealth.restarts added. Source names and the 'ago' word are still English and concatenated, so a follow-up bj6 bead was filed (after ug9.35).
+- bj6.48 closed: bj6.9 did it in f6c6f82. Cargo.lock proptest line committed (m1f.3 left it).
