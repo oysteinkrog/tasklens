@@ -2206,14 +2206,17 @@ mod name_cell_fixes {
             assert_eq!(text.len(), primary.len() + 2 * MARK);
             assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
             assert!(text.starts_with('\u{2068}'));
-            assert_eq!(&text[MARK + start..MARK + start + MARK], "\u{2069}");
+            // PDI comes before the space, which stays between the name and the count.
+            let name_end = start - 1;
+            assert_eq!(&text[MARK + name_end..MARK + name_end + MARK], "\u{2069}");
+            assert_eq!(&text[name_end + 2 * MARK..start + 2 * MARK], " ");
 
             let size = metrics(cx).text.base;
             let isolated = window
                 .text_system()
                 .shape_line(text.clone(), size, &runs, None);
             let (name_max, count_min) =
-                name_max_count_min(&isolated, MARK..MARK + start, start + 2 * MARK..);
+                name_max_count_min(&isolated, MARK..MARK + name_end, start + 2 * MARK..);
             assert!(
                 count_min > name_max,
                 "count at {count_min} must be right of the name ending at {name_max}"
@@ -2249,7 +2252,7 @@ mod name_cell_fixes {
         cache.begin_version(1);
         let a = cache.isolated_name(&primary, 23);
         let b = cache.isolated_name(&SharedString::from(NAME.to_string()), 23);
-        assert_eq!(a.as_ref(), "\u{2068}systemd-journal-upload \u{2069}(12)");
+        assert_eq!(a.as_ref(), "\u{2068}systemd-journal-upload\u{2069} (12)");
         assert!(
             std::ptr::eq(a.as_ref(), b.as_ref()),
             "the second call reuses the text"
