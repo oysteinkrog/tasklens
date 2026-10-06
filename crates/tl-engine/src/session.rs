@@ -18,10 +18,11 @@ use std::time::Duration;
 use arc_swap::ArcSwapOption;
 use asupersync::Cx;
 use asupersync::channel::{mpsc, watch};
-use asupersync::runtime::{TaskHandle, yield_now};
+use asupersync::runtime::TaskHandle;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use futures_lite::FutureExt;
+use futures_lite::future::poll_fn;
 use tl_model::actions::ActionEvent;
 use tl_model::demand::Demand;
 use tl_model::health::SourceId;
@@ -48,9 +49,6 @@ pub const RESTART_DELAY: Duration = Duration::from_secs(1);
 /// Restarts allowed within `RESTART_WINDOW`. One more failure stops the engine.
 pub const MAX_RESTARTS: u32 = 3;
 pub const RESTART_WINDOW: Duration = Duration::from_secs(60);
-/// How long a session waits for the history worker's channel before it starts the reducer.
-const HISTORY_WAIT: Duration = Duration::from_millis(100);
-const HISTORY_WAIT_YIELDS: u32 = 1_000;
 /// Period of the housekeeping `Tick` message.
 pub const TICK: Duration = Duration::from_secs(1);
 
@@ -219,17 +217,11 @@ async fn run_session(
         );
         let ctl = SourceController::new(
             SourceId::HistoryRecorder,
-            history_factory(&ep.config, ep.boot_id, io, slot.clone()),
+            history_factory(&ep.config, ep.boot_id, epoch, io, slot.clone()),
             ep.msgs_tx.clone(),
         );
         children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
-        wait_for_history(cx, &slot).await;
-        let mut sink = HistorySink::new(slot.clone());
-        sink.command(HistoryMsg::SessionStart {
-            epoch,
-            t_ns: now_boot_ns(),
-        });
-        reducer.record_sink = Some(Box::new(sink));
+        reducer.record_sink = Some(Box::new(HistorySink::new(slot.clone())));
         reducer.history_cmd = Some(HistorySink::new(slot));
     }
     let tick_tx = ep.msgs_tx.clone();
@@ -247,10 +239,13 @@ async fn run_session(
 }
 
 /// The `HistoryRecorder` worker. Each generation makes its own channel and stores the sender
-/// in `slot` (ADR-004 factory contract).
+/// in `slot` on its first poll (ADR-004 factory contract). `SessionStart` goes into that
+/// channel right after the first poll, so it is never dropped for want of a sender, and every
+/// generation starts its data with a gap.
 fn history_factory(
     config: &EngineConfig,
     boot: BootId,
+    epoch: u32,
     io: WorkerIo,
     slot: HistorySlot,
 ) -> WorkerFactory {
@@ -261,21 +256,26 @@ fn history_factory(
             history_dir: history_dir.clone(),
             load_delay: None,
         };
-        run_history(cx, io.clone(), slot.clone(), cfg)
+        let mut run = Box::pin(run_history(cx, io.clone(), slot.clone(), cfg));
+        let slot = slot.clone();
+        let mut started = false;
+        poll_fn(move |task| {
+            let poll = run.as_mut().poll(task);
+            if !started {
+                started = true;
+                let start = HistoryMsg::SessionStart {
+                    epoch,
+                    t_ns: now_boot_ns(),
+                };
+                if let Some(tx) = slot.load().as_deref()
+                    && tx.try_send(start).is_ok()
+                {
+                    task.waker().wake_by_ref();
+                }
+            }
+            poll
+        })
     })
-}
-
-/// Waits until the first worker generation has stored its sender, so `SessionStart` and the
-/// first sweeps are not dropped. Gives up after `HISTORY_WAIT` or `HISTORY_WAIT_YIELDS` turns;
-/// what the sink sends before then is dropped and counted.
-async fn wait_for_history(cx: &Cx, slot: &HistorySlot) {
-    let deadline = cx.now().as_nanos() + HISTORY_WAIT.as_nanos() as u64;
-    for _ in 0..HISTORY_WAIT_YIELDS {
-        if slot.load().is_some() || cx.now().as_nanos() >= deadline || cx.checkpoint().is_err() {
-            return;
-        }
-        yield_now().await;
-    }
 }
 
 /// Spawns a child in the root's region. A failed spawn ends the session.
