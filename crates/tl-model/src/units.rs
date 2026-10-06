@@ -86,6 +86,20 @@ pub fn bytes_of(out: &mut String, used: u64, total: u64) {
     bytes(out, total);
 }
 
+/// SI sizes, base 1000, units B kB MB GB TB PB: "512 B", "12.0 TB". Below 1000: integer bytes.
+/// From 1 kB: one decimal; the unit steps up when the value rounded to one decimal is >= 1000.0.
+/// PB is the largest unit. Used for NVMe SMART data totals (E12-021).
+pub fn bytes_si_1dp(n: u64) -> String {
+    const UNITS: [&str; 5] = [" kB", " MB", " GB", " TB", " PB"];
+    if n < 1000 {
+        return format!("{n} B");
+    }
+    let mut out = String::new();
+    // Precision loss in the cast is far below the printed decimal.
+    write_scaled_1dp(&mut out, n as f64 / 1000.0, 1000.0, &UNITS, "0 B");
+    out
+}
+
 /// Whole MiB for copy details lines: round to nearest MiB, "812 MiB"; zero form "0 MiB".
 pub fn mib_whole(out: &mut String, n: u64) {
     const MIB_U: u64 = 1024 * 1024;

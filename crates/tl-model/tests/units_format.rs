@@ -3,10 +3,10 @@
 use proptest::prelude::*;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use tl_model::units::{
-    AddrSide, LocalDateTime, NetUnit, bytes, bytes_of, cache_size, ceil_125, ceil_pow2, celsius,
-    count, cpu_time, date_time, mhz, mhz_pair, mib_whole, net_rate, percent, percent_2dp,
-    rate_iec_auto, rate_mib_fixed, response_ms, short_age, socket_addr, start_time, uptime, watts,
-    watts_pair,
+    AddrSide, LocalDateTime, NetUnit, bytes, bytes_of, bytes_si_1dp, cache_size, ceil_125,
+    ceil_pow2, celsius, count, cpu_time, date_time, mhz, mhz_pair, mib_whole, net_rate, percent,
+    percent_2dp, rate_iec_auto, rate_mib_fixed, response_ms, short_age, socket_addr, start_time,
+    uptime, watts, watts_pair,
 };
 
 fn fmt(f: impl FnOnce(&mut String)) -> String {
@@ -52,6 +52,24 @@ fn bytes_boundaries() {
     ];
     for (n, want) in cases {
         assert_eq!(fmt(|s| bytes(s, n)), want, "bytes({n})");
+    }
+}
+
+#[test]
+fn bytes_si_1dp_boundaries() {
+    let cases = [
+        (0, "0 B"),
+        (999, "999 B"),
+        (1000, "1.0 kB"),
+        (1049, "1.0 kB"),
+        (999_949, "999.9 kB"),
+        (999_950, "1.0 MB"),
+        (12_000_000_000_000, "12.0 TB"),
+        (1_500_000_000_000_000, "1.5 PB"),
+        (u64::MAX, "18446.7 PB"),
+    ];
+    for (n, want) in cases {
+        assert_eq!(bytes_si_1dp(n), want, "bytes_si_1dp({n})");
     }
 }
 
