@@ -537,3 +537,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.16 (75f1071): server-decorations menu row and MenuRowHeight global; the bar height follows the reported decorations.
 - m1f.18 (16d8f29): the frame pin and close sit in tab group index 1 after the content; close is a focusable kit Button; the rescue title follows strings_version. The ui_columns expectation was updated (accepted).
 - pdu.12 (9a16718, 75b5172, 0558014): ProcessDelegate. Leader fix requested: Unit row id from an interner, not FxHash. Accepted: clk_tck is fixed at 100 (USER_HZ); gpu_N is offered per adapter; persist through TlSettings::update. API noted on pdu.1.
+- cr0.12 (51ceea4, e6d3fed, d14a60a): single instance on the session bus, with input validation and bounded(4) try_send; the real-bus test runs on a private dbus-daemon. The forwarding test is ignored until acquire is wired (noted on cr0.2).
