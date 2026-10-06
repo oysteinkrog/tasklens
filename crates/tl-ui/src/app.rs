@@ -307,8 +307,30 @@ impl TasklensUi {
         crate::window::main::init(cx);
         crate::window::share_theme::init(cx);
         crate::window::collector_health::init(cx);
+        #[cfg(feature = "bench")]
+        install_gallery_hook(cx);
         perf_step("ui_init");
     }
+}
+
+/// The `--gallery` window (E01-013): "tasklens Gallery". Closing it ends the process.
+#[cfg(feature = "bench")]
+fn install_gallery_hook(cx: &mut App) {
+    cx.default_global::<OpenHooks>().gallery = Some(Box::new(|cx| {
+        let handle = crate::components::gallery::open_gallery(cx);
+        handle
+            .update(cx, |_, window, _| {
+                window.set_window_title("tasklens Gallery")
+            })
+            .ok();
+        let id = handle.window_id();
+        cx.on_window_closed(move |cx, closed| {
+            if closed == id {
+                request_exit(cx, UiExit::Quit);
+            }
+        })
+        .detach();
+    }));
 }
 
 /// The `main` start and the end of the last step, for [`perf_step`].
