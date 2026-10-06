@@ -862,7 +862,11 @@ pub struct MemoryModule {
 /// One disk drive row (PERF-100).
 #[derive(Clone, Debug, Default)]
 pub struct DiskDrive {
+    /// The worker sends `None`; the reducer sets it from `name` (R-166).
     pub device: Option<DeviceIdx>,
+    /// The kernel name, for example "nvme0n1". The reducer matches it against the catalog's disk
+    /// entries.
+    pub name: Option<Arc<str>>,
     pub model: InvField<Arc<str>>,
     pub kind: InvField<Arc<str>>,
     /// NVMe, SATA, USB, SCSI or virtio.
