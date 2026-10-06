@@ -120,18 +120,34 @@ impl SeriesSet {
 #[derive(Clone, Debug, Default)]
 pub struct ProcessSeriesSet {
     pub header: ComponentHeader,
-    /// Sorted by `ProcessSeriesId`.
+    /// Fast tier views (60 s at the sweep period). Sorted by `ProcessSeriesId`.
     pub series: Arc<[(ProcessSeriesId, Arc<SeriesView>)]>,
+    /// 1 Hz tier views (per-second maximum, 602 samples), one per entry of `series`. Sorted by
+    /// `ProcessSeriesId`. The view ids carry no tier bit, since process series are not keyed by
+    /// `MetricId`.
+    pub slow: Arc<[(ProcessSeriesId, Arc<SeriesView>)]>,
 }
 
 impl ProcessSeriesSet {
-    /// Binary search by id.
+    /// The fast tier view of `id`. Binary search over `series`.
     pub fn get(&self, id: &ProcessSeriesId) -> Option<&Arc<SeriesView>> {
-        self.series
-            .binary_search_by(|(k, _)| k.cmp(id))
-            .ok()
-            .map(|i| &self.series[i].1)
+        find_process_view(&self.series, id)
     }
+
+    /// The 1 Hz tier view of `id`. Binary search over `slow`.
+    pub fn get_slow(&self, id: &ProcessSeriesId) -> Option<&Arc<SeriesView>> {
+        find_process_view(&self.slow, id)
+    }
+}
+
+fn find_process_view<'a>(
+    views: &'a [(ProcessSeriesId, Arc<SeriesView>)],
+    id: &ProcessSeriesId,
+) -> Option<&'a Arc<SeriesView>> {
+    views
+        .binary_search_by(|(k, _)| k.cmp(id))
+        .ok()
+        .map(|i| &views[i].1)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1660,12 +1676,26 @@ mod tests {
         let mut series = vec![(b.clone(), view(sid(1, MetricId::CPU_TOTAL)))];
         series.push((a.clone(), view(sid(0, MetricId::CPU_TOTAL))));
         series.sort_by(|x, y| x.0.cmp(&y.0));
+        let slow = vec![
+            (a.clone(), view(sid(2, MetricId::CPU_TOTAL))),
+            (b.clone(), view(sid(3, MetricId::CPU_TOTAL))),
+        ];
         let set = ProcessSeriesSet {
             header: ComponentHeader::default(),
             series: Arc::from(series),
+            slow: Arc::from(slow),
         };
         assert_eq!(set.get(&b).map(|v| v.id), Some(sid(1, MetricId::CPU_TOTAL)));
+        assert_eq!(
+            set.get_slow(&b).map(|v| v.id),
+            Some(sid(3, MetricId::CPU_TOTAL))
+        );
+        assert_eq!(
+            set.get_slow(&a).map(|v| v.id),
+            Some(sid(2, MetricId::CPU_TOTAL))
+        );
         assert!(set.get(&absent).is_none());
+        assert!(set.get_slow(&absent).is_none());
     }
 
     #[test]
