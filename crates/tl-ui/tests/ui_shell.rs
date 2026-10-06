@@ -294,3 +294,321 @@ fn animations_on_respects_reduce_motion(cx: &mut TestAppContext) {
     cx.update(|cx| TlSettings::toggle(cx, SettingKey::MotionAnimations));
     cx.read(|cx| assert!(cx.reduce_motion()));
 }
+
+/// Toolbar slot tests (E20-003, UI-SHL-010, R-108, UI-SHL-004).
+mod toolbar {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::{
+        AnyElement, App, Background, Context, FocusHandle, InteractiveElement, IntoElement,
+        Modifiers, MouseButton, ParentElement, Pixels, Point, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, point, px,
+    };
+    use smallvec::SmallVec;
+    use tl_model::command::Tab;
+    use tl_model::health::HelperState;
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::table::TableMode;
+    use tl_ui::components::icons::TlIcon;
+    use tl_ui::components::tooltip::DELAY_CONTROL;
+    use tl_ui::theme::current;
+    use tl_ui::window::toolbar::{
+        DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel, toolbar_icon, toolbar_toggle,
+    };
+
+    gpui_kit::actions!(tl_toolbar_test, [Go]);
+
+    fn model() -> ToolbarModel {
+        ToolbarModel {
+            tab: Tab::Processes,
+            history_mode: false,
+            hide_system: false,
+            mode: TableMode::Grouped,
+            helper: HelperState::Missing,
+            helper_installed: false,
+            picker_available: false,
+            picking: false,
+            window_active: true,
+        }
+    }
+
+    /// Two Toggle buttons, "a" (on) and "b" (off).
+    struct TwoButtons;
+
+    impl ToolbarContent for TwoButtons {
+        fn buttons(
+            &self,
+            model: &ToolbarModel,
+            _: &mut Window,
+            _: &mut App,
+        ) -> SmallVec<[AnyElement; 2]> {
+            SmallVec::from_iter([
+                toolbar_toggle("a", TlIcon::Pin, true, "Pin".into(), Box::new(Go), model)
+                    .into_any_element(),
+                toolbar_toggle("b", TlIcon::Eye, false, "Eye".into(), Box::new(Go), model)
+                    .into_any_element(),
+            ])
+        }
+    }
+
+    type Build = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+    /// A stand-in title bar: it counts `Go` actions, and a left mouse-down followed by a move
+    /// counts as a window move, the way the title bar calls `start_window_move`.
+    struct Host {
+        /// The focused root, so a button's action reaches `on_action` as in the real window.
+        focus: FocusHandle,
+        build: Build,
+        hits: Rc<Cell<usize>>,
+        moves: Rc<Cell<usize>>,
+        armed: Rc<Cell<bool>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let hits = self.hits.clone();
+            let (down, up) = (self.armed.clone(), self.armed.clone());
+            let (armed, moves) = (self.armed.clone(), self.moves.clone());
+            div()
+                .id("titlebar")
+                .track_focus(&self.focus)
+                .size(px(600.))
+                .flex()
+                .flex_row()
+                .items_start()
+                .on_action(move |_: &Go, _, _| hits.set(hits.get() + 1))
+                .on_mouse_down(MouseButton::Left, move |_, _, _| down.set(true))
+                .on_mouse_up(MouseButton::Left, move |_, _, _| up.set(false))
+                .on_mouse_move(move |e, _, _| {
+                    if armed.get() && e.pressed_button == Some(MouseButton::Left) {
+                        moves.set(moves.get() + 1);
+                    }
+                })
+                .child((self.build)(window, cx))
+        }
+    }
+
+    struct Rig<'a> {
+        cx: &'a mut VisualTestContext,
+        hits: Rc<Cell<usize>>,
+        moves: Rc<Cell<usize>>,
+    }
+
+    fn rig(
+        cx: &mut TestAppContext,
+        ui_scale_pct: u16,
+        build: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> Rig<'_> {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings {
+                    ui_scale_pct,
+                    ..AppearanceSettings::default()
+                },
+                Vec::new(),
+            );
+        });
+        let hits = Rc::new(Cell::new(0));
+        let moves = Rc::new(Cell::new(0));
+        let (view, cx) = cx.add_window_view({
+            let (hits, moves) = (hits.clone(), moves.clone());
+            move |_, cx| Host {
+                focus: cx.focus_handle(),
+                build: Box::new(build),
+                hits,
+                moves,
+                armed: Rc::new(Cell::new(false)),
+            }
+        });
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.read(cx).focus.clone().focus(window, cx);
+        });
+        // Activation lands on the next park; until then the window ignores mouse moves.
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        Rig { cx, hits, moves }
+    }
+
+    fn page(content: impl ToolbarContent, model: ToolbarModel) -> Build {
+        Box::new(move |window, cx| {
+            let page = content.buttons(&model, window, cx);
+            Toolbar::new(model.clone(), page).into_any_element()
+        })
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> gpui_kit::Bounds<Pixels> {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn away(cx: &mut VisualTestContext) {
+        cx.simulate_mouse_move(point(px(300.), px(200.)), None, Modifiers::none());
+    }
+
+    /// Asserts two square buttons of side `side` whose centres are `pitch` apart on one row.
+    fn assert_pair(cx: &mut VisualTestContext, side: f32, pitch: f32) {
+        let a = bounds(cx, "TlButton-a");
+        let b = bounds(cx, "TlButton-b");
+        for x in [a, b] {
+            assert_eq!((x.size.width, x.size.height), (px(side), px(side)));
+        }
+        let (ca, cb): (Point<Pixels>, Point<Pixels>) = (a.center(), b.center());
+        assert_eq!(ca.y, cb.y, "one row");
+        assert_eq!(f32::from(cb.x - ca.x), pitch, "centre pitch");
+        assert_eq!(bounds(cx, "Toolbar").size.height, px(side));
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_two_page_buttons_pitch(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, page(TwoButtons, model()));
+        assert_pair(r.cx, 24., 31.);
+        assert_eq!(
+            f32::from(bounds(r.cx, "Toolbar").size.width),
+            24. + 7. + 24.
+        );
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_scales(cx: &mut TestAppContext) {
+        let r = rig(cx, 150, page(TwoButtons, model()));
+        assert_pair(r.cx, 36., 46.5);
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_default_is_empty(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, page(DefaultToolbar, model()));
+        let empty =
+            r.cx.update(|window, cx| DefaultToolbar.buttons(&model(), window, cx).is_empty());
+        assert!(empty, "no page buttons");
+        assert_eq!(bounds(r.cx, "Toolbar").size.width, px(0.));
+        assert!(r.cx.debug_bounds("TlButton-a").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_toggle_not_tab_stop(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, page(TwoButtons, model()));
+        away(r.cx);
+        let fills = r.cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let on = Background::from(current(cx).accent.alpha(0.25));
+            window
+                .painted_quads()
+                .iter()
+                .filter(|q| q.background == on)
+                .count()
+        });
+        assert_eq!(fills, 1, "button a has the Toggle on fill, b has none");
+
+        let (before, after) = r.cx.update(|window, cx| {
+            let before = window.focused(cx);
+            window.focus_next(cx);
+            (before, window.focused(cx))
+        });
+        assert!(before.is_some(), "the host root holds focus");
+        assert_eq!(after, before, "Tab finds no stop in the toolbar");
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_disabled_keeps_tooltip(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, |window, cx| {
+            let m = model();
+            let page = SmallVec::from_iter([toolbar_icon(
+                "a",
+                TlIcon::Search,
+                "Find".into(),
+                Box::new(Go),
+                true,
+                &m,
+            )
+            .into_any_element()]);
+            let _ = (window, cx);
+            Toolbar::new(m, page).into_any_element()
+        });
+        let a = bounds(r.cx, "TlButton-a");
+        r.cx.simulate_mouse_move(a.center(), None, Modifiers::none());
+        r.cx.executor().advance_clock(DELAY_CONTROL);
+        r.cx.run_until_parked();
+        assert!(
+            bounds(r.cx, "TlTooltip").size.width > px(0.),
+            "the tooltip shows on a disabled button"
+        );
+
+        r.cx.simulate_click(a.center(), Modifiers::none());
+        r.cx.run_until_parked();
+        assert_eq!(r.hits.get(), 0, "a click dispatches nothing");
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_inactive_icon_colour(cx: &mut TestAppContext) {
+        let inactive = ToolbarModel {
+            window_active: false,
+            ..model()
+        };
+        let r = rig(cx, 100, page(TwoButtons, inactive.clone()));
+        bounds(r.cx, "TlButton-a");
+        r.cx.update(|_, cx| {
+            let theme = current(cx).clone();
+            for m in [&inactive, &model()] {
+                let toggle = toolbar_toggle("t", TlIcon::Pin, true, "Pin".into(), Box::new(Go), m);
+                let plain = toolbar_icon("i", TlIcon::Eye, "Eye".into(), Box::new(Go), false, m);
+                if m.window_active {
+                    assert_eq!(toggle.icon_color(&theme), theme.accent, "on toggle: accent");
+                    assert_eq!(plain.icon_color(&theme), theme.text_primary);
+                } else {
+                    assert_eq!(toggle.icon_color(&theme), theme.text_secondary);
+                    assert_eq!(plain.icon_color(&theme), theme.text_secondary);
+                }
+            }
+        });
+    }
+
+    #[gpui_kit::test]
+    fn toolbar_button_no_drag(cx: &mut TestAppContext) {
+        let r = rig(cx, 100, page(TwoButtons, model()));
+        let a = bounds(r.cx, "TlButton-a").center();
+        r.cx.simulate_mouse_down(a, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(
+            a + point(px(40.), px(5.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        r.cx.simulate_mouse_up(
+            a + point(px(40.), px(5.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(
+            r.moves.get(),
+            0,
+            "a press on a button never moves the window"
+        );
+
+        // The same gesture on the empty title bar does.
+        let empty = point(px(400.), px(10.));
+        r.cx.simulate_mouse_down(empty, MouseButton::Left, Modifiers::none());
+        r.cx.simulate_mouse_move(
+            empty + point(px(40.), px(5.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert_eq!(r.moves.get(), 1);
+
+        r.cx.simulate_mouse_up(
+            empty + point(px(40.), px(5.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        r.cx.simulate_click(a, Modifiers::none());
+        assert_eq!(
+            r.hits.get(),
+            1,
+            "a click still dispatches the button's action"
+        );
+    }
+}
