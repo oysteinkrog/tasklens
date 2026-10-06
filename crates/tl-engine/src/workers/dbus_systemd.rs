@@ -5,8 +5,14 @@
 //! their properties and sends one `SourceUpdate::Services` with the unit records. Then it
 //! subscribes to the manager and keeps the records live from unit signals (`ServicesState`),
 //! with one publish per signal batch. A full listing runs again on `RefreshNow`, on
-//! `Reloading(false)` and every 60 s while the Services page wants data (ADR-008). Unit details
-//! come in E14-004.
+//! `Reloading(false)` and every 60 s while the Services page wants data (ADR-008).
+//!
+//! Unit details (E14-004): for the first 10 units in `Demand.unit_details` that belong to this
+//! manager, the worker reads `GetAll` on `Unit` (and `Service` for services) once when the unit
+//! enters demand, then keeps the details current from `PropertiesChanged`. A unit that leaves
+//! demand loses its details. A failed read leaves the unit out and is tried again on its next
+//! `PropertiesChanged` or the next full listing. Details go out in the same update as the
+//! records.
 //!
 //! Cgroup data (E14-003): each listing walks every unit cgroup for `has_cgroup_procs`. While
 //! `Demand.services` and `Demand.process_table` are both true, a 1 Hz tick lists each unit's
@@ -46,10 +52,13 @@ use tl_collect::proc::pid_stat::read_start_ticks;
 use tl_collect::proc::status::{PidStatus, STATUS_READ_MAX, parse_status};
 use tl_collect::sysroot::read_file;
 use tl_collect::{CollectError, SysRoot};
-use tl_model::demand::Demand;
+use tl_model::demand::{Demand, UNIT_DETAILS_MAX};
 use tl_model::health::{ManagerState, SourceId};
 use tl_model::ids::ProcessKey;
-use tl_model::snapshot::{ServiceBackend, ServiceStatus, StartupType, UnitRecord};
+use tl_model::snapshot::{
+    DepEntry, PidIds, RecoverySettings, Relation, ServiceBackend, ServiceStatus, StartupType,
+    UnitDetails, UnitRecord,
+};
 use tl_model::table::{Manager, Total, UnitRef, UnitType};
 use tl_model::time::BootId;
 use tl_model::validity::Validity;
@@ -219,7 +228,7 @@ async fn run<O: Opener>(
                     return Outcome::Ok(());
                 }
                 tracing::debug!(?manager, %reason, "systemd: manager not available");
-                let update = services(manager, ManagerState::Unavailable, Vec::new());
+                let update = services(manager, ManagerState::Unavailable, Vec::new(), Vec::new());
                 if let Some(stop) = send(&cx, &io, update).await {
                     return stop;
                 }
@@ -258,7 +267,19 @@ async fn connected(
     let fs = HostFs {
         root: cfg.sys_root.clone(),
     };
-    if let Err(e) = resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
+    let dropins = dropin_base(manager, &cfg.sys_root);
+    let first = match resync(cx, &conn, manager, &cfg.sys_root, &fs, &mut state).await {
+        Ok(_) => {
+            let wanted = io.demand.borrow_and_clone().unit_details;
+            let host = DetailsHost {
+                sys_root: &cfg.sys_root,
+                dropins: dropins.as_deref(),
+            };
+            sync_details(cx, &conn, host, &mut state, &wanted, true).await
+        }
+        Err(e) => Err(e),
+    };
+    if let Err(e) = first {
         // Nothing was published by this generation, so there is nothing to keep.
         if cx.checkpoint().is_err() {
             return Outcome::Ok(());
@@ -308,6 +329,15 @@ async fn connected(
                 Err(e) => return lost(cx, io, &state, e).await,
             }
             schedule.done(cx.now());
+        }
+        let wanted = io.demand.borrow_and_clone().unit_details;
+        let host = DetailsHost {
+            sys_root: &cfg.sys_root,
+            dropins: dropins.as_deref(),
+        };
+        match sync_details(cx, &conn, host, &mut state, &wanted, full).await {
+            Ok(c) => changed |= c,
+            Err(e) => return lost(cx, io, &state, e).await,
         }
         if let Some(want) = tick {
             changed |= cgroup_tick(cx, &fs, &mut state, want).await;
@@ -509,7 +539,12 @@ async fn wait_refresh(
     }
 }
 
-fn services(manager: Manager, state: ManagerState, units: Vec<UnitRecord>) -> SourceUpdate {
+fn services(
+    manager: Manager,
+    state: ManagerState,
+    units: Vec<UnitRecord>,
+    details: Vec<(UnitRef, Arc<UnitDetails>)>,
+) -> SourceUpdate {
     // UI-SYS-014: during `Reconnecting` the records are the last good data, drawn as stale.
     let validity = match state {
         ManagerState::Connected => Validity::Valid,
@@ -520,7 +555,7 @@ fn services(manager: Manager, state: ManagerState, units: Vec<UnitRecord>) -> So
         manager,
         state,
         units,
-        details: Vec::new(),
+        details,
         backend: ServiceBackend::Systemd,
         validity,
     })
@@ -1199,11 +1234,25 @@ impl UnitSignals for SystemdSignals<'_> {
 /// listing runs.
 struct Schedule {
     since: Time,
+    /// The last `Demand.unit_details` the loop saw.
+    details: Arc<[UnitRef]>,
 }
 
 impl Schedule {
     fn new(now: Time) -> Self {
-        Self { since: now }
+        Self {
+            since: now,
+            details: Arc::from([]),
+        }
+    }
+
+    /// True when `Demand.unit_details` differs from the last call.
+    fn details_moved(&mut self, wanted: &Arc<[UnitRef]>) -> bool {
+        if *self.details == **wanted {
+            return false;
+        }
+        self.details = Arc::clone(wanted);
+        true
     }
 
     fn due(&mut self, now: Time, wanted: bool) -> bool {
@@ -1235,7 +1284,8 @@ enum Wake {
     },
 }
 
-/// Waits for signals, `RefreshNow`, the resync schedule or the cgroup tick. Each wait on the
+/// Waits for signals, `RefreshNow`, the resync schedule, the cgroup tick or a change of
+/// `Demand.unit_details`. Each wait on the
 /// stream is at most `SIGNAL_WAIT`, and ends early when the tick is due; after it `cx` is
 /// checked. A batch is every signal already queued after the first one, up to `MAX_BATCH`.
 async fn wait_next<S: UnitSignals>(
@@ -1277,7 +1327,8 @@ async fn wait_next<S: UnitSignals>(
         let demand = io.demand.borrow_and_clone();
         let resync = schedule.due(cx.now(), demand.services) || refresh;
         let tick = ticks.due(cx.now(), &demand);
-        if resync || tick.is_some() || !batch.is_empty() {
+        let details = schedule.details_moved(&demand.unit_details);
+        if resync || tick.is_some() || details || !batch.is_empty() {
             return Wake::Batch {
                 signals: batch,
                 resync,
@@ -1348,6 +1399,8 @@ struct ServicesState {
     boot: Option<BootId>,
     /// Online CPUs, the divisor of `cpu_pct`; the last value read, 1 before the first.
     cpus: u32,
+    /// The demanded units of this manager, in demand order, at most `UNIT_DETAILS_MAX`.
+    details: Vec<DetailEntry>,
 }
 
 impl ServicesState {
@@ -1359,13 +1412,27 @@ impl ServicesState {
             files: UnitFiles::new(),
             boot: None,
             cpus: 1,
+            details: Vec::new(),
         }
     }
 
-    /// The `Services` update with every record, sorted by name.
+    /// The `Services` update with every record, sorted by name, and the details of every
+    /// demanded unit that was read.
     fn update(&self, state: ManagerState) -> SourceUpdate {
         let units = self.units.values().map(|e| (*e.record).clone()).collect();
-        services(self.manager, state, units)
+        let details = self
+            .details
+            .iter()
+            .filter_map(|d| {
+                let built = d.built.as_ref()?;
+                let unit = UnitRef {
+                    manager: self.manager,
+                    name: Arc::clone(&d.name),
+                };
+                Some((unit, Arc::clone(built)))
+            })
+            .collect();
+        services(self.manager, state, units, details)
     }
 
     fn raw(&self, name: &str) -> Option<&RawUnit> {
@@ -1537,6 +1604,12 @@ impl ServicesState {
                 } else {
                     return;
                 };
+                if !typed || e.kind == UnitType::Service {
+                    fx.changed |= self.apply_details(&name, changed, invalidated);
+                }
+                let Some(e) = self.units.get(&name) else {
+                    return;
+                };
                 if invalidated.iter().any(|p| is_tracked(p, typed)) {
                     fx.fetch(&name, &e.path);
                 }
@@ -1610,6 +1683,571 @@ impl ServicesState {
     fn record(&self, name: &str) -> Option<&Arc<UnitRecord>> {
         self.units.get(name).map(|e| &e.record)
     }
+}
+
+// Details
+
+/// The drop-in file a P3 recovery edit writes (SYS-013).
+const RECOVERY_DROPIN: &str = "50-tasklens-recovery.conf";
+
+/// The `as` dependency properties, in the order of the Dependencies tab (SYS-014).
+const RELATIONS: [(&str, Relation); 14] = [
+    ("Requires", Relation::Requires),
+    ("Requisite", Relation::Requisite),
+    ("Wants", Relation::Wants),
+    ("BindsTo", Relation::BindsTo),
+    ("PartOf", Relation::PartOf),
+    ("Upholds", Relation::Upholds),
+    ("RequiredBy", Relation::RequiredBy),
+    ("RequisiteOf", Relation::RequisiteOf),
+    ("WantedBy", Relation::WantedBy),
+    ("BoundBy", Relation::BoundBy),
+    ("ConsistsOf", Relation::ConsistsOf),
+    ("UpheldBy", Relation::UpheldBy),
+    ("After", Relation::After),
+    ("Before", Relation::Before),
+];
+
+const GRAPHICAL_SESSION: &str = "graphical-session.target";
+
+/// The properties one `UnitDetails` is built from, read from the `Unit` and `Service` maps. A
+/// property the unit does not have keeps its default: empty, `None`, or `u64::MAX` for the
+/// resource values.
+#[derive(Clone, Debug, PartialEq)]
+struct DetailRaw {
+    id: Arc<str>,
+    description: Arc<str>,
+    documentation: Arc<[Arc<str>]>,
+    /// The argv of `ExecStart[0]`. Never logged (ADR-015).
+    exec_start_argv: Arc<[Arc<str>]>,
+    fragment_path: Arc<str>,
+    drop_in_paths: Arc<[Arc<str>]>,
+    unit_file_state: Arc<str>,
+    active_state: Arc<str>,
+    sub_state: Arc<str>,
+    active_enter_us: u64,
+    main_pid: u32,
+    memory_current: u64,
+    tasks_current: u64,
+    cpu_usage_ns: u64,
+    user: Arc<str>,
+    group: Arc<str>,
+    dynamic_user: bool,
+    supplementary_groups: Arc<[Arc<str>]>,
+    pam_name: Arc<str>,
+    recovery: RecoverySettings,
+    /// One unit list per `RELATIONS` entry.
+    deps: [Arc<[Arc<str>]>; 14],
+}
+
+impl Default for DetailRaw {
+    fn default() -> Self {
+        Self {
+            id: Arc::from(""),
+            description: Arc::from(""),
+            documentation: Arc::from([]),
+            exec_start_argv: Arc::from([]),
+            fragment_path: Arc::from(""),
+            drop_in_paths: Arc::from([]),
+            unit_file_state: Arc::from(""),
+            active_state: Arc::from(""),
+            sub_state: Arc::from(""),
+            active_enter_us: 0,
+            main_pid: 0,
+            memory_current: u64::MAX,
+            tasks_current: u64::MAX,
+            cpu_usage_ns: u64::MAX,
+            user: Arc::from(""),
+            group: Arc::from(""),
+            dynamic_user: false,
+            supplementary_groups: Arc::from([]),
+            pam_name: Arc::from(""),
+            recovery: RecoverySettings::default(),
+            deps: Default::default(),
+        }
+    }
+}
+
+/// Sets `slot` from `key` when `props` has it.
+fn set<T>(props: &Props, key: &str, slot: &mut T, read: fn(&Props, &str) -> T) {
+    if props.contains_key(key) {
+        *slot = read(props, key);
+    }
+}
+
+fn opt_str(props: &Props, key: &str) -> Option<Arc<str>> {
+    props.get(key).and_then(|v| str_of(v)).map(Arc::from)
+}
+
+fn opt_u32(props: &Props, key: &str) -> Option<u32> {
+    match props.get(key).map(|v| unwrap(v)) {
+        Some(Value::U32(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+fn opt_u64(props: &Props, key: &str) -> Option<u64> {
+    match props.get(key).map(|v| unwrap(v)) {
+        Some(Value::U64(n)) => Some(*n),
+        _ => None,
+    }
+}
+
+/// The argv (`as`, field 1) of the first row of the `a(sasbttttuii)` property `key`, or empty.
+fn first_argv(props: &Props, key: &str) -> Arc<[Arc<str>]> {
+    let Some(Value::Array(rows)) = props.get(key).map(|v| unwrap(v)) else {
+        return Arc::from([]);
+    };
+    let Some(Value::Structure(row)) = rows.inner().first().map(unwrap) else {
+        return Arc::from([]);
+    };
+    match row.fields().get(1).map(unwrap) {
+        Some(Value::Array(argv)) => argv
+            .inner()
+            .iter()
+            .filter_map(|v| str_of(v).map(Arc::from))
+            .collect(),
+        _ => Arc::from([]),
+    }
+}
+
+impl DetailRaw {
+    fn from_props(unit: &Props, service: &Props) -> Self {
+        let mut raw = DetailRaw::default();
+        raw.apply(unit);
+        raw.apply(service);
+        raw
+    }
+
+    /// Sets the fields whose properties are in `props`, a `Unit` or a `Service` map.
+    fn apply(&mut self, props: &Props) {
+        set(props, "Id", &mut self.id, prop_str);
+        set(props, "Description", &mut self.description, prop_str);
+        set(props, "Documentation", &mut self.documentation, prop_strv);
+        set(props, "ExecStart", &mut self.exec_start_argv, first_argv);
+        set(props, "FragmentPath", &mut self.fragment_path, prop_str);
+        set(props, "DropInPaths", &mut self.drop_in_paths, prop_strv);
+        set(props, "UnitFileState", &mut self.unit_file_state, prop_str);
+        set(props, "ActiveState", &mut self.active_state, prop_str);
+        set(props, "SubState", &mut self.sub_state, prop_str);
+        set(
+            props,
+            "ActiveEnterTimestamp",
+            &mut self.active_enter_us,
+            prop_u64,
+        );
+        set(props, "MainPID", &mut self.main_pid, prop_u32);
+        set(props, "MemoryCurrent", &mut self.memory_current, prop_u64);
+        set(props, "TasksCurrent", &mut self.tasks_current, prop_u64);
+        set(props, "CPUUsageNSec", &mut self.cpu_usage_ns, prop_u64);
+        set(props, "User", &mut self.user, prop_str);
+        set(props, "Group", &mut self.group, prop_str);
+        set(props, "DynamicUser", &mut self.dynamic_user, prop_bool);
+        set(
+            props,
+            "SupplementaryGroups",
+            &mut self.supplementary_groups,
+            prop_strv,
+        );
+        set(props, "PAMName", &mut self.pam_name, prop_str);
+        let r = &mut self.recovery;
+        set(props, "Restart", &mut r.restart, opt_str);
+        set(props, "RestartUSec", &mut r.restart_usec, opt_u64);
+        set(props, "RestartSteps", &mut r.restart_steps, opt_u32);
+        set(
+            props,
+            "RestartMaxDelayUSec",
+            &mut r.restart_max_delay_usec,
+            opt_u64,
+        );
+        set(props, "StartLimitBurst", &mut r.start_limit_burst, opt_u32);
+        set(
+            props,
+            "StartLimitIntervalUSec",
+            &mut r.start_limit_interval_usec,
+            opt_u64,
+        );
+        set(
+            props,
+            "StartLimitAction",
+            &mut r.start_limit_action,
+            opt_str,
+        );
+        set(props, "FailureAction", &mut r.failure_action, opt_str);
+        set(props, "OnFailure", &mut r.on_failure, prop_strv);
+        set(props, "NRestarts", &mut r.n_restarts, opt_u32);
+        for ((key, _), list) in RELATIONS.iter().zip(self.deps.iter_mut()) {
+            set(props, key, list, prop_strv);
+        }
+    }
+}
+
+/// `u64::MAX` means systemd has no value (accounting off or not running).
+fn known(v: u64) -> Option<u64> {
+    (v != u64::MAX).then_some(v)
+}
+
+fn non_empty(s: &Arc<str>) -> Option<Arc<str>> {
+    (!s.is_empty()).then(|| Arc::clone(s))
+}
+
+/// The details of one unit. `ids` is the real uid and gid of MainPID, `dropin` whether the
+/// recovery drop-in exists.
+fn details_of(manager: Manager, raw: &DetailRaw, ids: Option<PidIds>, dropin: bool) -> UnitDetails {
+    let list = |r: Relation| {
+        let i = RELATIONS.iter().position(|(_, x)| *x == r).unwrap_or(0);
+        &raw.deps[i]
+    };
+    let graphical_session = [Relation::PartOf, Relation::BindsTo]
+        .into_iter()
+        .any(|r| list(r).iter().any(|u| &**u == GRAPHICAL_SESSION));
+    let mut deps: Vec<(Arc<str>, usize)> = raw
+        .deps
+        .iter()
+        .enumerate()
+        .flat_map(|(i, units)| units.iter().map(move |u| (Arc::clone(u), i)))
+        .collect();
+    deps.sort();
+    deps.dedup();
+    let deps = deps
+        .into_iter()
+        .map(|(name, i)| DepEntry {
+            unit: UnitRef { manager, name },
+            relation: RELATIONS[i].1,
+        })
+        .collect();
+    UnitDetails {
+        id: Arc::clone(&raw.id),
+        description: Arc::clone(&raw.description),
+        documentation: Arc::clone(&raw.documentation),
+        exec_start_argv: Arc::clone(&raw.exec_start_argv),
+        fragment_path: non_empty(&raw.fragment_path),
+        drop_in_paths: Arc::clone(&raw.drop_in_paths),
+        startup: StartupType::from_unit_file_state(&raw.unit_file_state),
+        active_state: Arc::clone(&raw.active_state),
+        sub_state: Arc::clone(&raw.sub_state),
+        active_enter_timestamp_us: (raw.active_enter_us != 0).then_some(raw.active_enter_us),
+        main_pid: raw.main_pid,
+        memory_current: known(raw.memory_current),
+        tasks_current: known(raw.tasks_current),
+        cpu_usage_nsec: known(raw.cpu_usage_ns),
+        manager,
+        user: non_empty(&raw.user),
+        group: non_empty(&raw.group),
+        dynamic_user: raw.dynamic_user,
+        supplementary_groups: Arc::clone(&raw.supplementary_groups),
+        pam_name: non_empty(&raw.pam_name),
+        main_pid_ids: if raw.main_pid == 0 { None } else { ids },
+        graphical_session,
+        recovery: raw.recovery.clone(),
+        recovery_dropin_exists: dropin,
+        deps,
+    }
+}
+
+/// One demanded unit.
+#[derive(Debug)]
+struct DetailEntry {
+    name: Arc<str>,
+    /// `None` until the first `GetAll` pair succeeds.
+    raw: Option<DetailRaw>,
+    ids: Option<PidIds>,
+    dropin: bool,
+    /// What the last update published; `None` while `raw` is.
+    built: Option<Arc<UnitDetails>>,
+    /// Read the unit with `GetAll` again: it is new, its last read failed, or a signal
+    /// invalidated properties.
+    refetch: bool,
+    /// Read MainPID's ids and the drop-in again.
+    reread_host: bool,
+}
+
+impl DetailEntry {
+    fn new(name: Arc<str>) -> Self {
+        Self {
+            name,
+            raw: None,
+            ids: None,
+            dropin: false,
+            built: None,
+            refetch: true,
+            reread_host: false,
+        }
+    }
+
+    fn rebuild(&mut self, manager: Manager) {
+        self.built = self
+            .raw
+            .as_ref()
+            .map(|raw| Arc::new(details_of(manager, raw, self.ids, self.dropin)));
+    }
+}
+
+impl ServicesState {
+    /// Sets the demanded units: the first `UNIT_DETAILS_MAX` of `wanted` that belong to this
+    /// manager, in that order. Kept units keep their entry. True when published details were
+    /// dropped.
+    fn want_details(&mut self, wanted: &[UnitRef]) -> bool {
+        let names: Vec<&Arc<str>> = wanted
+            .iter()
+            .take(UNIT_DETAILS_MAX)
+            .filter(|u| u.manager == self.manager)
+            .map(|u| &u.name)
+            .collect();
+        if names.len() == self.details.len()
+            && names.iter().zip(&self.details).all(|(n, d)| **n == d.name)
+        {
+            return false;
+        }
+        let mut old = std::mem::take(&mut self.details);
+        for name in names {
+            if self.details.iter().any(|d| d.name == *name) {
+                continue;
+            }
+            let entry = match old.iter().position(|d| d.name == *name) {
+                Some(i) => old.swap_remove(i),
+                None => DetailEntry::new(Arc::clone(name)),
+            };
+            self.details.push(entry);
+        }
+        old.iter().any(|d| d.built.is_some())
+    }
+
+    /// The demanded units to read with `GetAll`: those marked, or with `full` every one not
+    /// read yet. Units without a record have no object path and wait for one.
+    fn details_to_fetch(&self, full: bool) -> Vec<(Arc<str>, OwnedObjectPath, UnitType)> {
+        self.details
+            .iter()
+            .filter(|d| d.refetch || (full && d.raw.is_none()))
+            .filter_map(|d| {
+                let e = self.units.get(&d.name)?;
+                Some((Arc::clone(&d.name), e.path.clone(), e.kind))
+            })
+            .collect()
+    }
+
+    /// The result of a `GetAll` pair: `None` when it failed, so the unit is tried again later.
+    /// True when published details changed.
+    fn set_detail_raw(&mut self, name: &str, raw: Option<DetailRaw>) -> bool {
+        let manager = self.manager;
+        let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) else {
+            return false;
+        };
+        let Some(raw) = raw else {
+            d.refetch = true;
+            return false;
+        };
+        d.refetch = false;
+        if d.raw.as_ref() == Some(&raw) {
+            return false;
+        }
+        if d.raw
+            .as_ref()
+            .is_none_or(|old| old.main_pid != raw.main_pid)
+        {
+            d.reread_host = true;
+        }
+        d.raw = Some(raw);
+        d.rebuild(manager);
+        true
+    }
+
+    /// `(name, MainPID)` of the read units whose host data is due: marked ones, or every one
+    /// with `full`.
+    fn details_host_due(&self, full: bool) -> Vec<(Arc<str>, u32)> {
+        self.details
+            .iter()
+            .filter(|d| full || d.reread_host)
+            .filter_map(|d| Some((Arc::clone(&d.name), d.raw.as_ref()?.main_pid)))
+            .collect()
+    }
+
+    /// Applies host reads. True when published details changed.
+    fn set_detail_host(&mut self, name: &str, ids: Option<PidIds>, dropin: bool) -> bool {
+        let manager = self.manager;
+        let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) else {
+            return false;
+        };
+        d.reread_host = false;
+        if d.ids == ids && d.dropin == dropin {
+            return false;
+        }
+        d.ids = ids;
+        d.dropin = dropin;
+        d.rebuild(manager);
+        d.built.is_some()
+    }
+
+    /// A `PropertiesChanged` on the `Unit` or `Service` interface of `name`. True when
+    /// published details changed.
+    fn apply_details(&mut self, name: &str, changed: &Props, invalidated: &[String]) -> bool {
+        let manager = self.manager;
+        let Some(d) = self.details.iter_mut().find(|d| *d.name == *name) else {
+            return false;
+        };
+        if !invalidated.is_empty() {
+            d.refetch = true;
+        }
+        let Some(raw) = &d.raw else {
+            // The first read failed: this signal is the cue to try again.
+            d.refetch = true;
+            return false;
+        };
+        let mut next = raw.clone();
+        next.apply(changed);
+        if next == *raw {
+            return false;
+        }
+        if next.main_pid != raw.main_pid {
+            d.reread_host = true;
+        }
+        d.raw = Some(next);
+        d.rebuild(manager);
+        true
+    }
+}
+
+/// Where host reads for details look.
+#[derive(Clone, Copy)]
+struct DetailsHost<'a> {
+    sys_root: &'a SysRoot,
+    /// The directory that holds `<unit>.d/` drop-ins for this manager.
+    dropins: Option<&'a std::path::Path>,
+}
+
+/// `<etc>/systemd/system` for the system manager, the user config dir's `systemd/user` for
+/// the user manager.
+fn dropin_base(manager: Manager, sys_root: &SysRoot) -> Option<std::path::PathBuf> {
+    match manager {
+        Manager::System => {
+            let base = sys_root.proc.parent().unwrap_or(std::path::Path::new("/"));
+            Some(base.join("etc/systemd/system"))
+        }
+        Manager::User => user_dropin_base(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+        ),
+    }
+}
+
+/// `$XDG_CONFIG_HOME/systemd/user`, with `~/.config` when the variable is unset, empty or not
+/// absolute (XDG Base Directory rules). `None` without a home.
+fn user_dropin_base(
+    xdg: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let config = match xdg.map(std::path::PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir,
+        _ => std::path::PathBuf::from(home.filter(|h| !h.is_empty())?).join(".config"),
+    };
+    Some(config.join("systemd/user"))
+}
+
+/// Whether `<base>/<unit>.d/50-tasklens-recovery.conf` exists, checked with `stat`.
+fn dropin_exists(base: Option<&std::path::Path>, unit: &str) -> bool {
+    let Some(base) = base else {
+        return false;
+    };
+    if unit.is_empty() || unit.contains('/') || unit.starts_with('.') {
+        return false;
+    }
+    std::fs::metadata(base.join(format!("{unit}.d")).join(RECOVERY_DROPIN)).is_ok()
+}
+
+/// The real uid and gid in `<proc>/<pid>/status`, or `None` when the process is gone or
+/// unreadable.
+fn pid_ids(sys_root: &SysRoot, pid: u32, buf: &mut Vec<u8>, st: &mut PidStatus) -> Option<PidIds> {
+    let path = sys_root.proc_path(&format!("{pid}/status"));
+    read_file(&path, buf, STATUS_READ_MAX).ok()?;
+    parse_status(buf, st).ok()?;
+    Some(PidIds {
+        uid: st.uid[0],
+        gid: st.gid[0],
+    })
+}
+
+/// The host reads of `units` (`(name, MainPID)`): MainPID's ids, `None` for pid 0, and whether
+/// the recovery drop-in exists.
+fn read_details_host(
+    sys_root: &SysRoot,
+    dropins: Option<&std::path::Path>,
+    units: &[(Arc<str>, u32)],
+) -> Vec<(Option<PidIds>, bool)> {
+    let mut buf = Vec::new();
+    let mut st = PidStatus::default();
+    units
+        .iter()
+        .map(|(name, pid)| {
+            let ids = (*pid != 0)
+                .then(|| pid_ids(sys_root, *pid, &mut buf, &mut st))
+                .flatten();
+            (ids, dropin_exists(dropins, name))
+        })
+        .collect()
+}
+
+/// Reads `Unit` and, for services, `Service` with `GetAll`. A unit error on `Service` leaves
+/// those fields empty.
+async fn fetch_details(
+    cx: &Cx,
+    conn: &DbusConn,
+    path: &OwnedObjectPath,
+    kind: UnitType,
+) -> Result<DetailRaw, DbusError> {
+    let unit = get_all(cx, conn, path, UNIT_IFACE).await?;
+    let service = if kind == UnitType::Service {
+        match get_all(cx, conn, path, "org.freedesktop.systemd1.Service").await {
+            Ok(props) => props,
+            Err(e) if is_unit_error(&e) => Props::new(),
+            Err(e) => return Err(e),
+        }
+    } else {
+        Props::new()
+    };
+    Ok(DetailRaw::from_props(&unit, &service))
+}
+
+/// Brings the details in line with `wanted`: reads new and marked units, then the host data of
+/// those that need it. `full` retries every unit not read yet and checks every drop-in again.
+/// A failed read of one unit is logged and leaves it out; only a closed bus is `Err`. True
+/// when published details changed.
+async fn sync_details(
+    cx: &Cx,
+    conn: &DbusConn,
+    host: DetailsHost<'_>,
+    state: &mut ServicesState,
+    wanted: &[UnitRef],
+    full: bool,
+) -> Result<bool, DbusError> {
+    let mut changed = state.want_details(wanted);
+    for (name, path, kind) in state.details_to_fetch(full) {
+        let raw = match fetch_details(cx, conn, &path, kind).await {
+            Ok(raw) => Some(raw),
+            Err(DbusError::Closed) => return Err(DbusError::Closed),
+            Err(e) => {
+                tracing::debug!(unit = %name, error = %e, "systemd: details GetAll failed");
+                None
+            }
+        };
+        changed |= state.set_detail_raw(&name, raw);
+    }
+    let due = state.details_host_due(full);
+    if due.is_empty() {
+        return Ok(changed);
+    }
+    let sys_root = host.sys_root.clone();
+    let dropins = host.dropins.map(std::path::Path::to_path_buf);
+    let units = due.clone();
+    let reads = blocking(cx, move || {
+        read_details_host(&sys_root, dropins.as_deref(), &units)
+    })
+    .await;
+    if let Some(reads) = reads {
+        for ((name, _), (ids, dropin)) in due.iter().zip(reads) {
+            changed |= state.set_detail_host(name, ids, dropin);
+        }
+    }
+    Ok(changed)
 }
 
 // Cgroups
@@ -3637,5 +4275,319 @@ mod tests {
         advance(&mut lab, SIGNAL_WAIT);
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
+    }
+
+    // Details
+
+    fn unit_ref(manager: Manager, name: &str) -> UnitRef {
+        UnitRef {
+            manager,
+            name: Arc::from(name),
+        }
+    }
+
+    fn published(state: &ServicesState) -> Vec<(UnitRef, Arc<UnitDetails>)> {
+        match state.update(ManagerState::Connected) {
+            SourceUpdate::Services(u) => u.details,
+            other => panic!("not a services update: {other:?}"),
+        }
+    }
+
+    fn detail_raw(entries: Vec<(&str, Value<'static>)>) -> DetailRaw {
+        DetailRaw::from_props(&props(entries), &Props::new())
+    }
+
+    /// Reads every unit `details_to_fetch` names, as `sync_details` does, from `raw`.
+    fn fetch_all(state: &mut ServicesState, raw: &DetailRaw) -> Vec<Arc<str>> {
+        let fetch = state.details_to_fetch(false);
+        for (name, _, _) in &fetch {
+            state.set_detail_raw(name, Some(raw.clone()));
+        }
+        fetch.into_iter().map(|(name, _, _)| name).collect()
+    }
+
+    #[test]
+    fn details_only_for_own_manager() {
+        let wanted = [unit_ref(Manager::System, "sshd.service")];
+        let raw = detail_raw(vec![("Id", Value::from("sshd.service"))]);
+
+        let mut system = ServicesState::new(Manager::System);
+        system.replace(
+            vec![unit("sshd.service", "active", "running", "enabled")],
+            UnitFiles::new(),
+        );
+        system.want_details(&wanted);
+        assert_eq!(
+            fetch_all(&mut system, &raw),
+            vec![Arc::from("sshd.service")]
+        );
+        let details = published(&system);
+        assert_eq!(details.len(), 1);
+        assert_eq!(details[0].0, wanted[0]);
+        assert_eq!(&*details[0].1.id, "sshd.service");
+        assert_eq!(details[0].1.manager, Manager::System);
+
+        let mut user = sample_state();
+        assert!(!user.want_details(&wanted));
+        assert!(fetch_all(&mut user, &raw).is_empty());
+        assert!(published(&user).is_empty());
+    }
+
+    #[test]
+    fn details_dropped_when_undemanded() {
+        let mut state = sample_state();
+        let both = [
+            unit_ref(Manager::User, "foo.service"),
+            unit_ref(Manager::User, "bar.service"),
+        ];
+        state.want_details(&both);
+        fetch_all(&mut state, &DetailRaw::default());
+        assert_eq!(published(&state).len(), 2);
+        let foo = Arc::clone(&published(&state)[0].1);
+
+        assert!(state.want_details(&both[..1]));
+        let details = published(&state);
+        assert_eq!(details.len(), 1);
+        assert_eq!(&*details[0].0.name, "foo.service");
+        assert!(
+            Arc::ptr_eq(&foo, &details[0].1),
+            "a kept unit keeps its Arc"
+        );
+        assert!(state.details_to_fetch(true).is_empty(), "no new read");
+
+        assert!(state.want_details(&[]));
+        assert!(published(&state).is_empty());
+    }
+
+    #[test]
+    fn details_u64_max_unsupported() {
+        let raw = detail_raw(vec![
+            ("MemoryCurrent", Value::U64(u64::MAX)),
+            ("TasksCurrent", Value::U64(5)),
+        ]);
+        let d = details_of(Manager::System, &raw, None, false);
+        assert_eq!(d.memory_current, None, "u64::MAX is not 0");
+        assert_eq!(d.tasks_current, Some(5));
+        assert_eq!(d.cpu_usage_nsec, None, "absent");
+
+        // A timer has no `Service` properties: they stay empty.
+        let timer = detail_raw(vec![("Id", Value::from("fstrim.timer"))]);
+        let d = details_of(Manager::System, &timer, None, false);
+        assert!(d.exec_start_argv.is_empty());
+        assert_eq!(d.recovery.restart, None);
+        assert_eq!(d.recovery.n_restarts, None);
+        assert_eq!(d.user, None);
+        assert_eq!(d.main_pid_ids, None);
+
+        // ExecStart gives the argv of its first row.
+        let exec = Value::from(Array::from(vec![Value::from(Structure::from((
+            "/usr/bin/foo",
+            vec!["foo", "--x"],
+            false,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u32,
+            0i32,
+            0i32,
+        )))]));
+        let raw = DetailRaw::from_props(
+            &Props::new(),
+            &props(vec![
+                ("ExecStart", exec),
+                ("Restart", Value::from("on-failure")),
+            ]),
+        );
+        let d = details_of(Manager::System, &raw, None, false);
+        let argv: Vec<&str> = d.exec_start_argv.iter().map(|a| &**a).collect();
+        assert_eq!(argv, ["foo", "--x"]);
+        assert_eq!(d.recovery.restart.as_deref(), Some("on-failure"));
+    }
+
+    #[test]
+    fn details_graphical_session() {
+        let part_of = detail_raw(vec![
+            ("PartOf", Value::from(vec!["graphical-session.target"])),
+            ("After", Value::from(vec!["b.target", "a.target"])),
+            ("Wants", Value::from(vec!["b.target"])),
+        ]);
+        let d = details_of(Manager::User, &part_of, None, false);
+        assert!(d.graphical_session);
+        let deps: Vec<(&str, Relation)> =
+            d.deps.iter().map(|e| (&*e.unit.name, e.relation)).collect();
+        assert_eq!(
+            deps,
+            [
+                ("a.target", Relation::After),
+                ("b.target", Relation::Wants),
+                ("b.target", Relation::After),
+                ("graphical-session.target", Relation::PartOf),
+            ]
+        );
+        assert!(d.deps.iter().all(|e| e.unit.manager == Manager::User));
+
+        let binds = detail_raw(vec![(
+            "BindsTo",
+            Value::from(vec!["graphical-session.target"]),
+        )]);
+        assert!(details_of(Manager::User, &binds, None, false).graphical_session);
+        let wants = detail_raw(vec![(
+            "Wants",
+            Value::from(vec!["graphical-session.target"]),
+        )]);
+        assert!(!details_of(Manager::User, &wants, None, false).graphical_session);
+    }
+
+    #[test]
+    fn details_dropin_exists_paths() {
+        let tmp_base =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&tmp_base).expect("tmp base");
+        let tmp = tempfile::TempDir::new_in(&tmp_base).expect("temp dir");
+        let os = |s: &str| Some(std::ffi::OsString::from(s));
+        let home = tmp.path().join("home");
+        let home_os = Some(home.clone().into_os_string());
+        let config = tmp.path().join("xdg");
+        let config_os = Some(config.clone().into_os_string());
+
+        assert_eq!(
+            user_dropin_base(config_os.clone(), home_os.clone()),
+            Some(config.join("systemd/user"))
+        );
+        assert_eq!(
+            user_dropin_base(None, home_os.clone()),
+            Some(home.join(".config/systemd/user"))
+        );
+        assert_eq!(
+            user_dropin_base(os("relative"), home_os.clone()),
+            Some(home.join(".config/systemd/user")),
+            "a relative XDG_CONFIG_HOME is ignored"
+        );
+        assert_eq!(user_dropin_base(None, None), None);
+        let root = SysRoot::at(tmp.path());
+        assert_eq!(
+            dropin_base(Manager::System, &root),
+            Some(tmp.path().join("etc/systemd/system"))
+        );
+
+        let base = user_dropin_base(config_os, home_os).expect("base");
+        let dir = base.join("foo.service.d");
+        std::fs::create_dir_all(&dir).expect("drop-in dir");
+        std::fs::write(dir.join(RECOVERY_DROPIN), "[Service]\nRestart=always\n").expect("file");
+        assert!(dropin_exists(Some(&base), "foo.service"));
+        assert!(!dropin_exists(Some(&base), "bar.service"));
+        assert!(!dropin_exists(None, "foo.service"));
+        assert!(!dropin_exists(Some(&base), "../foo.service"));
+
+        // The host read gives the drop-in and MainPID's real uid and gid.
+        let pid_dir = tmp.path().join("proc/42");
+        std::fs::create_dir_all(&pid_dir).expect("pid dir");
+        std::fs::write(
+            pid_dir.join("status"),
+            "Name:\tx\nUid:\t977\t0\t0\t0\nGid:\t978\t0\t0\t0\n",
+        )
+        .expect("status");
+        let units = [
+            (Arc::from("foo.service"), 42),
+            (Arc::from("bar.service"), 0),
+            (Arc::from("baz.service"), 43),
+        ];
+        let reads = read_details_host(&root, Some(&base), &units);
+        assert_eq!(
+            reads,
+            [
+                (Some(PidIds { uid: 977, gid: 978 }), true),
+                (None, false),
+                (None, false),
+            ]
+        );
+
+        // Through the state: the drop-in shows in the published details.
+        let mut state = sample_state();
+        state.want_details(&[unit_ref(Manager::User, "foo.service")]);
+        let raw = detail_raw(vec![("MainPID", Value::U32(42))]);
+        fetch_all(&mut state, &raw);
+        let due = state.details_host_due(false);
+        assert_eq!(due, [(Arc::from("foo.service"), 42)]);
+        let (ids, dropin) = read_details_host(&root, Some(&base), &due)[0];
+        assert!(state.set_detail_host("foo.service", ids, dropin));
+        let d = &published(&state)[0].1;
+        assert!(d.recovery_dropin_exists);
+        assert_eq!(d.main_pid_ids, Some(PidIds { uid: 977, gid: 978 }));
+        assert!(state.details_host_due(false).is_empty());
+    }
+
+    #[test]
+    fn details_cap_10() {
+        let mut state = ServicesState::new(Manager::System);
+        let names: Vec<String> = (0..12).map(|i| format!("u{i:02}.service")).collect();
+        state.replace(
+            names
+                .iter()
+                .map(|n| unit(n, "active", "running", "enabled"))
+                .collect(),
+            UnitFiles::new(),
+        );
+        let wanted: Vec<UnitRef> = names.iter().map(|n| unit_ref(Manager::System, n)).collect();
+        state.want_details(&wanted);
+        let fetched = fetch_all(&mut state, &DetailRaw::default());
+        assert_eq!(fetched.len(), UNIT_DETAILS_MAX);
+        let details = published(&state);
+        let shown: Vec<&str> = details.iter().map(|(u, _)| &*u.name).collect();
+        let first: Vec<&str> = names[..UNIT_DETAILS_MAX]
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(shown, first);
+    }
+
+    #[test]
+    fn details_properties_changed_keeps_other_arcs() {
+        let mut state = sample_state();
+        state.want_details(&[
+            unit_ref(Manager::User, "foo.service"),
+            unit_ref(Manager::User, "bar.service"),
+        ]);
+        fetch_all(&mut state, &detail_raw(vec![("NRestarts", Value::U32(0))]));
+        let before = published(&state);
+
+        let mut fx = Effects::default();
+        let signal = Signal::Properties {
+            path: unit_path("foo.service"),
+            iface: "org.freedesktop.systemd1.Service".to_owned(),
+            changed: props(vec![("NRestarts", Value::U32(3))]),
+            invalidated: Vec::new(),
+        };
+        state.apply(&signal, &mut fx);
+        assert!(fx.changed);
+        let after = published(&state);
+        assert_eq!(after[0].1.recovery.n_restarts, Some(3));
+        assert!(!Arc::ptr_eq(&before[0].1, &after[0].1), "foo is replaced");
+        assert!(Arc::ptr_eq(&before[1].1, &after[1].1), "bar keeps its Arc");
+        assert!(state.details_to_fetch(false).is_empty(), "no GetAll needed");
+
+        // The same value again changes nothing.
+        let mut fx = Effects::default();
+        state.apply(&signal, &mut fx);
+        assert!(!fx.changed);
+        assert!(Arc::ptr_eq(&after[0].1, &published(&state)[0].1));
+
+        // An invalidated property asks for a new GetAll of that unit only.
+        let mut fx = Effects::default();
+        state.apply(
+            &properties("bar.service", Props::new(), &["ExecStart"]),
+            &mut fx,
+        );
+        let fetch: Vec<Arc<str>> = state
+            .details_to_fetch(false)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect();
+        assert_eq!(fetch, vec![Arc::from("bar.service")]);
+
+        // A failed read leaves the unit out until a signal or a full listing retries it.
+        assert!(!state.set_detail_raw("bar.service", None));
+        assert_eq!(state.details_to_fetch(false).len(), 1);
     }
 }
