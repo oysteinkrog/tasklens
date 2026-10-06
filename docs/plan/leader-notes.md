@@ -334,3 +334,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.26: UPower worker with sysfs fallback. No Degraded state in SourceState, so the fallback is Running with last_error set. Only ServiceUnknown and NameHasNoOwner fall back; other bus errors restart the worker. BatteryHistory wake waits for E12-029.
 - 8fx.35: lab_processes fixtures unique per run; 20 overlapping runs passed.
 - wlf.5: `mod bench` in tl-ui lib.rs behind the bench feature.
+- 8q0.32: power estimate wired. GPU term only when supports_process_util; share uses max(SM, enc, dec) to match the GPU column (PROC-034 says SM). GPU power keyed by UUID; AMD GPUs share a zero UUID, so two AMD GPUs would collide once AMD sends per-process rows.
+- yrf.7: AnimationDriver registry per window (register, global panics if none, try_global). thread_cpu_ns is 0 until E03 adds tl_model::time::thread_cpu_ns.
+- hjn.26: fake bus returns Closed on cancel (1d01e51).
