@@ -817,6 +817,7 @@ mod tests {
             };
             let trigger = div()
                 .id("trigger")
+                .debug_selector(|| "trigger".into())
                 .absolute()
                 .left(px(TRIGGER_LEFT))
                 .top(px(top))
@@ -885,10 +886,13 @@ mod tests {
         let (_, cx, trigger) = hover_open(cx, true);
         let sp2 = cx.update(|_, cx| metrics(cx).sp[2]);
         let tip = cx.debug_bounds("TlTooltip").expect("tooltip drawn");
-        assert_eq!(
+        // The text height is fractional and GPUI snaps the origin to whole pixels.
+        let gap = f32::from(trigger.top() - sp2 - tip.bottom());
+        assert!(
+            (0. ..1.).contains(&gap),
+            "above the trigger, sp2 away: bottom {:?}, trigger top {:?}",
             tip.bottom(),
-            trigger.top() - sp2,
-            "above the trigger, sp2 away"
+            trigger.top()
         );
         assert_eq!(tip.left(), trigger.left(), "left-aligned with the trigger");
     }
