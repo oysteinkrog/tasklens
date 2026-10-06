@@ -2283,7 +2283,7 @@ mod name_cell_fixes {
             .expect("svg renders");
         let pixels = image.as_bytes(0).expect("one frame");
         assert!(
-            pixels.chunks_exact(4).any(|p| p[3] > 0),
+            pixels.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
             "the sprite has coverage"
         );
     }
