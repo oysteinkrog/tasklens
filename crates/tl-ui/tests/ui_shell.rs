@@ -1385,3 +1385,348 @@ mod tabstrip {
         assert!(has_vertex(&rule, point(px(W), bottom - px(3.))));
     }
 }
+
+/// The status chip (E20-006, UI-SHL-050).
+mod status {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::{
+        AnyView, AppContext as _, Bounds, Context, Entity, FocusHandle, Hsla, InteractiveElement,
+        IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ParentElement, Pixels, Render,
+        StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div,
+        prelude::FluentBuilder as _, px, size,
+    };
+    use smallvec::{SmallVec, smallvec};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui::components::badge::{TlBadgeKind, badge_colors};
+    use tl_ui::theme::current;
+    use tl_ui::window::status::{StatusAction, StatusActionKind, StatusChip};
+
+    gpui_kit::actions!(tl_status_test, [ShowRestricted, ShowAdmin]);
+
+    /// A page with one Tab stop above the chip. `max_w` caps the chip's slot, as `MainWindow`
+    /// does; `cached` embeds the chip with `.cached(..)`, as `MainWindow` does.
+    struct Host {
+        page: FocusHandle,
+        chip: Entity<StatusChip>,
+        max_w: Option<f32>,
+        cached: bool,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let view = AnyView::from(self.chip.clone());
+            let chip = if self.cached {
+                view.cached(StyleRefinement::default().w(px(400.)).h(px(40.)))
+                    .into_any_element()
+            } else {
+                view.into_any_element()
+            };
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().id("page").track_focus(&self.page).size(px(50.)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .when_some(self.max_w, |slot, w| slot.max_w(px(w)))
+                        .child(chip),
+                )
+        }
+    }
+
+    struct Rig<'a> {
+        cx: &'a mut VisualTestContext,
+        chip: Entity<StatusChip>,
+        page: FocusHandle,
+        restricted: Rc<Cell<u32>>,
+        admin: Rc<Cell<u32>>,
+    }
+
+    fn rig(
+        cx: &mut TestAppContext,
+        ui_scale_pct: u16,
+        max_w: Option<f32>,
+        cached: bool,
+    ) -> Rig<'_> {
+        let restricted = Rc::new(Cell::new(0));
+        let admin = Rc::new(Cell::new(0));
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings {
+                    ui_scale_pct,
+                    ..AppearanceSettings::default()
+                },
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+            let (r, a) = (restricted.clone(), admin.clone());
+            cx.on_action(move |_: &ShowRestricted, _| r.set(r.get() + 1));
+            cx.on_action(move |_: &ShowAdmin, _| a.set(a.get() + 1));
+        });
+        let mut parts = None;
+        let (_, cx) = cx.add_window_view(|_, cx| {
+            let chip = cx.new(StatusChip::new);
+            let page = cx.focus_handle().tab_stop(true);
+            parts = Some((chip.clone(), page.clone()));
+            Host {
+                page,
+                chip,
+                max_w,
+                cached,
+            }
+        });
+        let (chip, page) = parts.expect("host built");
+        cx.simulate_resize(size(px(800.), px(200.)));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw(cx);
+        Rig {
+            cx,
+            chip,
+            page,
+            restricted,
+            admin,
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn set_text(r: &mut Rig, text: &str) {
+        let chip = r.chip.clone();
+        r.cx.update(|_, cx| chip.update(cx, |c, cx| c.set_page_text(text, cx)));
+        draw(r.cx);
+    }
+
+    fn set_paused(r: &mut Rig, paused: bool) {
+        let chip = r.chip.clone();
+        r.cx.update(|_, cx| chip.update(cx, |c, cx| c.set_paused(paused, cx)));
+        draw(r.cx);
+    }
+
+    fn set_actions(r: &mut Rig, actions: SmallVec<[StatusAction; 2]>) {
+        let chip = r.chip.clone();
+        r.cx.update(|_, cx| chip.update(cx, |c, cx| c.set_page_actions(actions, cx)));
+        draw(r.cx);
+    }
+
+    fn read<R>(r: &mut Rig, f: impl FnOnce(&StatusChip) -> R) -> R {
+        let chip = r.chip.clone();
+        r.cx.update(|_, cx| f(chip.read(cx)))
+    }
+
+    fn drawn(r: &mut Rig) -> Vec<(String, Hsla)> {
+        read(r, |c| {
+            c.drawn()
+                .iter()
+                .map(|(s, color)| (s.to_string(), *color))
+                .collect()
+        })
+    }
+
+    fn bounds(cx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} drawn"))
+    }
+
+    fn colors(r: &mut Rig) -> (Hsla, Hsla, Hsla) {
+        r.cx.update(|_, cx| {
+            let t = current(cx);
+            (t.text_primary, t.text_secondary, t.accent)
+        })
+    }
+
+    fn press(cx: &mut VisualTestContext, key: &str) {
+        let keystroke = Keystroke::parse(key).unwrap();
+        cx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(KeyUpEvent { keystroke });
+    }
+
+    fn action(
+        kind: StatusActionKind,
+        label: &'static str,
+        action: Box<dyn gpui_kit::Action>,
+    ) -> StatusAction {
+        StatusAction {
+            kind,
+            label: label.into(),
+            tooltip: "Details".into(),
+            action,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_segments(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        set_text(&mut r, "41 / 296 Processes | 3 processes selected");
+        let (primary, secondary, _) = colors(&mut r);
+        assert_eq!(
+            drawn(&mut r),
+            vec![
+                ("41 / 296 Processes".to_owned(), primary),
+                (" | ".to_owned(), secondary),
+                ("3 processes selected".to_owned(), primary),
+            ]
+        );
+        assert_eq!(
+            read(&mut r, |c| c.laid_out_text()).as_deref(),
+            Some("41 / 296 Processes | 3 processes selected")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_hidden_when_empty(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        assert!(!read(&mut r, |c| c.is_visible()));
+        let b = bounds(r.cx, "StatusChip");
+        assert_eq!((b.size.width, b.size.height), (px(0.), px(0.)));
+        assert!(drawn(&mut r).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_paused_only(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        set_paused(&mut r, true);
+        assert!(read(&mut r, |c| c.is_visible()));
+        let (_, _, accent) = colors(&mut r);
+        assert_eq!(drawn(&mut r), vec![("[PAUSED - Ctrl]".to_owned(), accent)]);
+        assert!(bounds(r.cx, "StatusChip").size.width > px(0.));
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_paused(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        set_text(&mut r, "296 Processes");
+        set_paused(&mut r, true);
+        assert_eq!(
+            read(&mut r, |c| c.drawn_text()),
+            "296 Processes [PAUSED - Ctrl]"
+        );
+        assert_eq!(
+            read(&mut r, |c| c.laid_out_text()).as_deref(),
+            Some("296 Processes [PAUSED - Ctrl]")
+        );
+        let (_, _, accent) = colors(&mut r);
+        assert_eq!(
+            drawn(&mut r).last(),
+            Some(&("[PAUSED - Ctrl]".to_owned(), accent))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_no_notify_on_same_text(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, true);
+        set_text(&mut r, "296 Processes");
+        let before = read(&mut r, |c| c.renders());
+        set_text(&mut r, "296 Processes");
+        assert_eq!(
+            read(&mut r, |c| c.renders()),
+            before,
+            "same text: no render"
+        );
+        set_text(&mut r, "297 Processes");
+        assert_eq!(
+            read(&mut r, |c| c.renders()),
+            before + 1,
+            "new text renders"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_truncates(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, Some(300.), false);
+        let long = "296 Processes | 3 processes selected | ".repeat(3);
+        set_text(&mut r, long.trim_end_matches(" | "));
+        let laid = read(&mut r, |c| c.laid_out_text()).expect("text laid out");
+        assert!(laid.ends_with('…'), "cut at the end: {laid:?}");
+        assert_eq!(bounds(r.cx, "StatusChip").size.width, px(300.));
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_scales(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 150, None, false);
+        set_text(&mut r, "296 Processes");
+        assert_eq!(bounds(r.cx, "StatusChip").size.height, px(39.));
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_link_action(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        set_text(&mut r, "296 Processes");
+        set_actions(
+            &mut r,
+            smallvec![action(
+                StatusActionKind::Link,
+                "42 restricted",
+                Box::new(ShowRestricted)
+            )],
+        );
+        assert_eq!(
+            read(&mut r, |c| c.drawn_text()),
+            "296 Processes | 42 restricted"
+        );
+        let (primary, secondary, _) = colors(&mut r);
+        let parts = drawn(&mut r);
+        assert_eq!(parts[1], (" | ".to_owned(), secondary));
+        assert_eq!(parts[2], ("42 restricted".to_owned(), primary));
+
+        let link = bounds(r.cx, "StatusChip-action-0");
+        r.cx.simulate_click(link.center(), Modifiers::none());
+        assert_eq!(r.restricted.get(), 1, "one dispatch per click");
+
+        let page = r.page.clone();
+        r.cx.update(|window, cx| {
+            page.focus(window, cx);
+            window.focus_next(cx);
+        });
+        assert!(
+            !r.cx.update(|window, _| page.is_focused(window)),
+            "Tab leaves the page"
+        );
+        press(r.cx, "enter");
+        assert_eq!(r.restricted.get(), 2, "Tab from the page reaches the link");
+        press(r.cx, "space");
+        assert_eq!(r.restricted.get(), 3, "Space acts too");
+    }
+
+    #[gpui_kit::test]
+    fn status_chip_badge_action(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, None, false);
+        set_text(&mut r, "296 Processes");
+        set_actions(
+            &mut r,
+            smallvec![action(
+                StatusActionKind::Badge,
+                "Administrator mode",
+                Box::new(ShowAdmin)
+            )],
+        );
+        let info =
+            r.cx.update(|_, cx| badge_colors(TlBadgeKind::Info, current(cx)).text);
+        let parts = drawn(&mut r);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[1].0, " ", "one space before the badge");
+        assert_eq!(parts[2], ("Administrator mode".to_owned(), info));
+
+        let text = bounds(r.cx, "StatusChip-text");
+        let badge = bounds(r.cx, "TlBadge");
+        let part = bounds(r.cx, "StatusChip-action-0");
+        assert!(badge.left() > text.right(), "the badge follows the text");
+        assert!(part.contains(&badge.center()));
+
+        r.cx.simulate_click(badge.center(), Modifiers::none());
+        assert_eq!(r.admin.get(), 1);
+    }
+}

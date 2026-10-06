@@ -410,7 +410,7 @@ impl Render for StatusChip {
             div()
                 .debug_selector(|| "StatusChip-text".into())
                 .min_w_0()
-                .flex_shrink()
+                .flex_shrink(1.)
                 .truncate()
                 .child(text)
         });
