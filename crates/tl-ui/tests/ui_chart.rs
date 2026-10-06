@@ -2074,10 +2074,11 @@ mod grid_offline_and_gaps {
         }
     }
 
-    /// 20 samples 100 ms apart, the newest now. With `gap`, samples 8 to 11 are not valid, so
-    /// the series has two runs with 500 ms between them.
+    /// 20 samples 100 ms apart, the newest 60 s ahead of now so a slow test run never turns the
+    /// series stale. With `gap`, samples 8 to 11 are not valid, so the series has two runs with
+    /// 500 ms between them.
     fn series(id: SeriesId, version: u64, gap: bool) -> Arc<SeriesView> {
-        let newest = now_boot_ns();
+        let newest = now_boot_ns() + 60_000 * MS;
         let samples: Vec<Sample> = (0..20u64)
             .map(|i| {
                 let s = Sample::valid(newest - (19 - i) * 100 * MS, 30.0);
@@ -2225,8 +2226,8 @@ mod grid_offline_and_gaps {
         vcx.read_entity(&grid, |v, _| {
             assert_eq!(
                 v.path_paints.get() - paints0,
-                1,
-                "one fill path: gaps add no path"
+                2,
+                "one fill and one line path: gaps add none"
             );
             let spans = v.last_gap_spans.borrow();
             let of = |cell: usize| -> Vec<std::ops::Range<f32>> {
