@@ -14,5 +14,6 @@ pub mod radio;
 pub mod skeleton;
 pub mod slider;
 pub mod switch;
+pub mod tabs;
 pub mod tooltip;
 pub mod validity;
