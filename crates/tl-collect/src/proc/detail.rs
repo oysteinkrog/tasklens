@@ -364,7 +364,7 @@ fn ticks_to_ms(ticks: u64, ticks_per_sec: u64) -> u64 {
 }
 
 /// A directory name made of ASCII digits only that fits a `u32`.
-fn parse_tid(name: &[u8]) -> Option<u32> {
+pub(crate) fn parse_tid(name: &[u8]) -> Option<u32> {
     if name.is_empty() || !name.iter().all(u8::is_ascii_digit) {
         return None;
     }
@@ -376,7 +376,7 @@ fn parse_tid(name: &[u8]) -> Option<u32> {
 // File descriptors tab (PROC-080).
 
 /// getdents buffer for one `fd/` listing.
-const FD_DIRENT_BUF: usize = 8 * 1024;
+pub(crate) const FD_DIRENT_BUF: usize = 8 * 1024;
 /// Read limit for one `fdinfo/<n>` file. The fields read here come first; epoll and inotify fds
 /// add one line per watch after them.
 const FDINFO_MAX: usize = 4096;
@@ -672,7 +672,7 @@ fn classify_link(raw: &[u8]) -> Option<(FdType, Option<u64>)> {
 }
 
 /// The number in `[<ino>]`.
-fn bracket_inode(rest: &[u8]) -> Option<u64> {
+pub(crate) fn bracket_inode(rest: &[u8]) -> Option<u64> {
     parse_radix(rest.strip_prefix(b"[")?.strip_suffix(b"]")?, 10)
 }
 
@@ -730,7 +730,7 @@ fn parse_radix(digits: &[u8], radix: u32) -> Option<u64> {
 // Memory maps tab (PROC-081).
 
 /// Read limit for `maps`. A large process has tens of thousands of lines of about 100 bytes.
-const MAPS_READ_MAX: usize = 16 * 1024 * 1024;
+pub(crate) const MAPS_READ_MAX: usize = 16 * 1024 * 1024;
 /// Name of the node that holds every region not backed by a loaded file.
 const OUTSIDE_NAME: &str = "Outside loaded modules";
 const DELETED_SUFFIX: &str = " (deleted)";
@@ -812,7 +812,7 @@ pub fn parse_maps(buf: &[u8], out: &mut Vec<MapRegionInfo>) -> Result<(), Collec
 }
 
 /// The fields of one `maps` line, without the path, and the byte index where the path starts.
-fn parse_maps_line(line: &[u8]) -> Option<(MapRegionInfo, usize)> {
+pub(crate) fn parse_maps_line(line: &[u8]) -> Option<(MapRegionInfo, usize)> {
     let mut at = 0;
     let range = next_field(line, &mut at)?;
     let dash = memchr::memchr(b'-', range)?;
@@ -853,7 +853,7 @@ fn next_field<'a>(line: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
 
 /// True for a region backed by a loaded file. Pseudo-paths such as `[heap]` and `[anon:...]`
 /// and memfd regions are not.
-fn is_file_backed(path: &str) -> bool {
+pub(crate) fn is_file_backed(path: &str) -> bool {
     path.starts_with('/') && !path.starts_with("/memfd:")
 }
 
@@ -1354,12 +1354,12 @@ pub fn read_security(
 
 /// Flags for opening a file to read. `O_NONBLOCK` keeps a FIFO in a fixture tree from blocking
 /// the open.
-const READ_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
+pub(crate) const READ_FLAGS: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
 
 /// Opens `parts` below `dir` one part at a time with `O_NOFOLLOW`, so no symlink is followed.
 /// Directories on the way open with `O_PATH`, which needs no read permission. The last part
 /// opens with `flags`. Each part is one plain name without `/`.
-fn open_beneath(
+pub(crate) fn open_beneath(
     dir: BorrowedFd<'_>,
     parts: &[&str],
     flags: OFlags,
@@ -1388,7 +1388,7 @@ fn open_beneath(
 
 /// Reads at most `limit` bytes of `fd` into `buf` (cleared first). Returns true when the file
 /// had more.
-fn read_bounded(
+pub(crate) fn read_bounded(
     fd: BorrowedFd<'_>,
     buf: &mut Vec<u8>,
     limit: usize,
