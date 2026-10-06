@@ -478,3 +478,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.11 (e96173a, df61a3a): CPU page; charts cached; demand with window handle. Follow-up commits in flight: TlButton focus_handle and trailing_icon, grid rebuild on style_version, its strings through tr.
 - rsf.11 (b32090f, 17e2aa2): two-line header; totals from CellTextCache keyed by header row; TableSort<C> trait bound on TreeTableDelegate::Sort; header click calls sort_by_column directly.
 - pdu.7 (ea5e0b2, 5079cca, ae79d64): cell values. Sent back to index group members once per view generation instead of scanning per cell per frame. Sum columns on group rows and the desktop path folded into 8q0.38. split_pid_text noted on pdu.8.
+- pdu.7 closed (53f0ad6, 85cfd81) before the index fix arrived; first_member still scans records per cell. New P1 pdu bead to index once per view generation.
