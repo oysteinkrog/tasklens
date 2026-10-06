@@ -373,3 +373,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - fut.17: toast stack drawn by tasklens (ToastLayer root plugin; toast::init in TasklensUi::init before any window). TlButton::icon_size. Close tooltip still hard-coded "Close" (i18n sweep).
 - gma.12: closed; PropsFilter::new takes the tab label. GPUI test window has no a11y tree, so aria names are only checked at the builder.
 - hjn.24: SMART failure reason goes in health with Failed; new tl_model::units::bytes_si_1dp.
+- 8q0.36: normalise_pci (strict hex parse) and remap on GpuInfo or new catalog entry. 8q0.35: Connections counts follow the filter; established and listening count TCP only (as build_connections).
