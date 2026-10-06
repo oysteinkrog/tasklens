@@ -1072,19 +1072,11 @@ fn paint_grid_view(
             show_axis_max: false,
         };
         let cell_series = [fill_s, overlay_s];
-        // `hover::paint` flips the box left where it would pass `plot.right()`, so the plot
-        // handed in reaches the element's right edge: the box stays inside the element, not
-        // the cell. Only the flip reads the plot width.
-        let reach = Bounds::new(
-            plot.origin,
-            size(
-                (bounds.right() - plot.left()).max(plot.size.width),
-                plot.size.height,
-            ),
-        );
         let hp = HoverPaint {
             box_bounds: bounds,
-            plot: reach,
+            plot,
+            // Flip at the element's edge, so the box stays inside the element, not the cell.
+            flip_right: bounds.right(),
             map,
             dx,
             scale_factor: sf,

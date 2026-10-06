@@ -168,6 +168,9 @@ pub fn window_stats(samples: &[Sample], from: usize) -> Stats {
 pub struct HoverPaint<'a> {
     pub box_bounds: Bounds<Pixels>,
     pub plot: Bounds<Pixels>,
+    /// The box flips to the marker's left where it would pass this x: the plot's right edge on a
+    /// single chart, the element's right edge on a grid.
+    pub flip_right: Pixels,
     /// Paint-time mapping; `dx` is its shift in physical px.
     pub map: TimeMap,
     pub dx: f32,
@@ -247,7 +250,7 @@ pub fn paint(window: &mut Window, cx: &mut App, state: &mut HoverState, p: &Hove
     let box_h = pad * 2.0 + row * (n + 3) as f32;
     let gap = px(BOX_GAP * s);
     let mut left = x + gap;
-    if left + box_w > p.plot.right() {
+    if left + box_w > p.flip_right {
         left = x - gap - box_w;
     }
     let b = p.box_bounds;

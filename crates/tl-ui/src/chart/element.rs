@@ -471,6 +471,7 @@ fn paint_view(
         let hp = HoverPaint {
             box_bounds: bounds,
             plot,
+            flip_right: plot.right(),
             map,
             dx,
             scale_factor: sf,
