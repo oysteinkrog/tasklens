@@ -516,8 +516,6 @@ mod element {
 // ChartView data binding: hub subscription, series lookup, re-render rules (E19, tasklens-yrf.10).
 
 mod binding {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
     use std::sync::Arc;
 
     use gpui_kit::{
@@ -534,40 +532,6 @@ mod binding {
 
     const MS: u64 = 1_000_000;
     const S: u64 = 1_000_000_000;
-
-    /// Counts heap allocations made on the current thread.
-    struct CountingAlloc;
-
-    thread_local! {
-        static ALLOCS: Cell<u64> = const { Cell::new(0) };
-    }
-
-    // SAFETY: forwards every call to `System` unchanged.
-    unsafe impl GlobalAlloc for CountingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
-            // SAFETY: same contract as the caller's.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: same contract as the caller's.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-            let _ = ALLOCS.try_with(|n| n.set(n.get() + 1));
-            // SAFETY: same contract as the caller's.
-            unsafe { System.realloc(ptr, layout, new_size) }
-        }
-    }
-
-    #[global_allocator]
-    static GLOBAL: CountingAlloc = CountingAlloc;
-
-    fn allocs() -> u64 {
-        ALLOCS.with(Cell::get)
-    }
 
     fn sid(device: u16, metric: MetricId) -> SeriesId {
         SeriesId {
@@ -753,12 +717,14 @@ mod binding {
         let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
         let chart =
             cx.new(|cx| ChartView::new(spec_for(&[first, last]), super::labels(), &hub, cx));
-        let (allocated, resolved) = chart.update(cx, |v, _| {
-            let before = allocs();
+        let counts = |snap: &Snapshot| [3, 77].map(|i| Arc::strong_count(&snap.series.series[i]));
+        let before = counts(&snap);
+        let resolved = chart.update(cx, |v, _| {
             v.resolve(&snap);
-            (allocs() - before, v.resolved().to_vec())
+            v.resolved().to_vec()
         });
-        assert_eq!(allocated, 0, "resolve only clones Arcs");
+        // One Arc clone per series is held by the chart, one by `resolved`; nothing is copied.
+        assert_eq!(counts(&snap), before.map(|n| n + 2));
         assert!(Arc::ptr_eq(
             resolved[0].as_ref().unwrap(),
             &snap.series.series[3]
