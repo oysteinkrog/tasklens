@@ -3,6 +3,10 @@
 //! Each sweep shares measured power among the processes: RAPL package power by CPU ticks, and
 //! each GPU's power by the process's utilisation on that GPU. A missing input gives `None`,
 //! never a guess. The trend is the time-weighted mean of the last 2 minutes of estimates.
+//!
+//! Not wired into `apply.rs` yet: the reducer keeps only the per-process GPU total over all
+//! GPUs, not the per-GPU values `GpuShare` needs (tasklens-8q0.32 is open on that question).
+#![allow(dead_code)]
 
 use std::collections::VecDeque;
 
