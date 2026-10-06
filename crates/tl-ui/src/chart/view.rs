@@ -241,10 +241,20 @@ fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesView>> {
 }
 
 /// Binary search over `views`, which is sorted by `SeriesId`. `cmp` orders a view against the
-/// target. Public so a test can count the comparisons.
+/// target. At most ⌊log₂ n⌋ + 1 comparisons (7 for 80 series); `slice::binary_search_by` always
+/// takes one more. Public so a test can count the comparisons.
 pub fn search_series(
     views: &[Arc<SeriesView>],
-    cmp: impl FnMut(&Arc<SeriesView>) -> Ordering,
+    mut cmp: impl FnMut(&Arc<SeriesView>) -> Ordering,
 ) -> Option<&Arc<SeriesView>> {
-    views.binary_search_by(cmp).ok().map(|i| &views[i])
+    let (mut lo, mut hi) = (0, views.len());
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        match cmp(&views[mid]) {
+            Ordering::Less => lo = mid + 1,
+            Ordering::Greater => hi = mid,
+            Ordering::Equal => return Some(&views[mid]),
+        }
+    }
+    None
 }

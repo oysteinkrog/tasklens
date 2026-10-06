@@ -711,6 +711,19 @@ mod binding {
             assert_eq!(found.map(|v| v.id), Some(target));
         }
         assert!(comparisons <= 2 * 7, "{comparisons} comparisons");
+        for &target in &ids {
+            let mut n = 0u32;
+            let found = search_series(&views, |v| {
+                n += 1;
+                v.id.cmp(&target)
+            });
+            assert!(Arc::ptr_eq(
+                found.unwrap(),
+                &views[ids.iter().position(|&i| i == target).unwrap()]
+            ));
+            assert!(n <= 7, "{n} comparisons for {target:?}");
+        }
+        assert!(search_series(&views, |v| v.id.cmp(&sid(50, MetricId::CPU_TOTAL))).is_none());
 
         let mut snap = tl_ui::testing::fake_engine::empty_snapshot();
         set_series(&mut snap, views);
