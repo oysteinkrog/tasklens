@@ -3,10 +3,7 @@
 //! Each sweep shares measured power among the processes: RAPL package power by CPU ticks, and
 //! each GPU's power by the process's utilisation on that GPU. A missing input gives `None`,
 //! never a guess. The trend is the time-weighted mean of the last 2 minutes of estimates.
-//!
-//! Not wired into `apply.rs` yet: the reducer keeps only the per-process GPU total over all
-//! GPUs, not the per-GPU values `GpuShare` needs (tasklens-8q0.32 is open on that question).
-#![allow(dead_code)]
+//! A republish between sweeps writes the values of the last sweep again with `fill`.
 
 use std::collections::VecDeque;
 
@@ -19,11 +16,14 @@ use tl_model::time::TimeNs;
 /// Window of `power_trend_w`.
 pub(crate) const POWER_TREND_WINDOW_NS: u64 = 120_000_000_000; // 2 minutes
 
+#[derive(Default)]
 pub(crate) struct PowerEstimator {
     /// `utime_ticks + stime_ticks` of every key at the previous sweep.
     prev: FxHashMap<ProcessKey, u64>,
     /// `(sweep time, power_w)` of every key, oldest first.
     trend: FxHashMap<ProcessKey, VecDeque<(TimeNs, f32)>>,
+    /// `(power_w, power_trend_w)` of every key at the last sweep, for `fill`.
+    last: FxHashMap<ProcessKey, (Option<f32>, Option<f32>)>,
 }
 
 /// Per GPU: measured power and each process's utilisation on it.
@@ -34,10 +34,7 @@ pub(crate) struct GpuShare<'a> {
 
 impl PowerEstimator {
     pub(crate) fn new() -> Self {
-        Self {
-            prev: FxHashMap::default(),
-            trend: FxHashMap::default(),
-        }
+        Self::default()
     }
 
     /// One estimate per record. `p2` is index-aligned with `records` and is created with defaults
@@ -84,6 +81,7 @@ impl PowerEstimator {
             .filter_map(|g| Some((g.power_w?, g.util_by_key.values().sum(), g.util_by_key)))
             .collect();
         let measured = p_pkg.is_some() || !gpu_sums.is_empty();
+        self.last.clear();
 
         for (i, r) in records.iter().enumerate() {
             let power = match deltas[i] {
@@ -101,8 +99,10 @@ impl PowerEstimator {
                 }
                 _ => None,
             };
+            let trend = self.push_trend(r.key, t_ns, power);
             p2[i].power_w = power;
-            p2[i].power_trend_w = self.push_trend(r.key, t_ns, power);
+            p2[i].power_trend_w = trend;
+            self.last.insert(r.key, (power, trend));
         }
 
         // `prev` now holds this sweep's keys; without ticks it is empty and so are the trends.
@@ -110,10 +110,22 @@ impl PowerEstimator {
         self.trend.retain(|k, _| live.contains_key(k));
     }
 
+    /// Writes the values of the last sweep into `p2`, index-aligned with `records`, for a
+    /// republish between sweeps. A key the last sweep did not see gets `None`.
+    pub(crate) fn fill(&self, records: &[ProcessRecord], p2: &mut Vec<ProcessExtrasP2>) {
+        if p2.len() != records.len() {
+            p2.resize(records.len(), ProcessExtrasP2::default());
+        }
+        for (r, e) in records.iter().zip(p2.iter_mut()) {
+            (e.power_w, e.power_trend_w) = self.last.get(&r.key).copied().unwrap_or_default();
+        }
+    }
+
     /// On resume and on reset_baselines.
     pub(crate) fn reset(&mut self) {
         self.prev.clear();
         self.trend.clear();
+        self.last.clear();
     }
 
     /// Adds `power` to the key's samples and returns the time-weighted mean over the window.
@@ -354,6 +366,22 @@ mod tests {
         est.reset();
         let out = sweep(&mut est, 3 * SEC, &[(1, 30), (2, 30)], &cpu, &[]);
         assert_eq!(out, [(None, None), (None, None)]);
+    }
+
+    #[test]
+    fn fill_repeats_last_sweep() {
+        let mut est = PowerEstimator::new();
+        let cpu = cpu(Metric::valid(20.0));
+        sweep(&mut est, SEC, &[(1, 10), (2, 10)], &cpu, &[]);
+        sweep(&mut est, 2 * SEC, &[(1, 40), (2, 20)], &cpu, &[]);
+        let records = [rec(1), rec(3), rec(2)];
+        let mut p2 = Vec::new();
+        est.fill(&records, &mut p2);
+        let power: Vec<Option<f32>> = p2.iter().map(|e| e.power_w).collect();
+        assert_eq!(power, [Some(15.0), None, Some(5.0)]);
+        est.reset();
+        est.fill(&records, &mut p2);
+        assert!(p2.iter().all(|e| e.power_w.is_none()));
     }
 
     #[test]
