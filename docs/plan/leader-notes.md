@@ -311,3 +311,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.17: NetDetails has no PartialEq; net.rs compares fields itself. Adapter name via root.run_path, not a udev_data arg. Assertion in net_first_sample_and_device_list changed to Missing (approved, 720c64e).
 - y6k.12: OpenRC backend in dbus_systemd.rs. sub_state is the raw OpenRC word, load_state and path empty, User "root". Closed while clippy was blocked by sys_table.rs:1041 println (y6k.1); recheck.
 - 8q0.29: chain edit approved in reducer/processes.rs for net attribution.
+- ug9.2: leader decision, TlStepper is one Tab stop; minus/plus get tab_stop(false) (spec silent; GTK SpinButton pattern).
