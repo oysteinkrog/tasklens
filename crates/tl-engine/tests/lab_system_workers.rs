@@ -3272,7 +3272,7 @@ fn gpu_drm_demand_and_hidden() {
     fl.finish();
 }
 
-/// Reads the live host: run on the owner machine with `--ignored`. Prints counts only.
+/// Reads the live host: run on a machine with an AMD card with `--ignored`.
 #[test]
 #[ignore]
 fn gpu_drm_real_host() {
@@ -3282,7 +3282,7 @@ fn gpu_drm_real_host() {
     );
     let extras = gpu_extras(&mut src);
     let (_, info) = gpu_lists(&extras);
-    println!("amd cards: {}", info.devices.len());
+    assert!(!info.devices.is_empty());
     let (_, t) = s.devices.first().expect("an AMD card");
     assert_eq!(t.util_pct.validity, Validity::Valid);
     assert_eq!(t.mem_total.validity, Validity::Valid);
