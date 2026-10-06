@@ -129,6 +129,8 @@ impl Rig {
             record_sink: Some(Arc::new(|_: &EngineConfig| {
                 Box::new(NoRecord) as Box<dyn RecordSink>
             })),
+            // The helper task's first state update would be one more publish.
+            helper: None,
             ..EngineHooks::default()
         };
         ep.next_sequence = next_sequence;
