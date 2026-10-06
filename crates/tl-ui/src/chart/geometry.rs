@@ -714,10 +714,6 @@ pub fn build_cell(
 /// Tessellates a grid's shared builders into `cache`: `fills[0]` from `fill`, `strokes[0]` from
 /// `stroke` and `strokes[1]` from `overlay`, plus the stale sets from `scratch`. Empty paths add
 /// no set. Also stores the time map and y range the geometry was built for.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "one builder and colour per path set"
-)]
 pub fn finish_grid(
     input: &BuildInput,
     fill: (Hsla, PathBuilder),
