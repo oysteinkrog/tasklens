@@ -6,6 +6,11 @@
 //! A scan is one blocking job over the tl-collect startup scanner. Precedence, overridden rows
 //! and the effectively-disabled rules are the scanner's.
 //!
+//! While the tab is open it also holds an inotify watch on the startup directories and a
+//! session-bus match for the user manager's `UnitFilesChanged` (R-082). Each wake drains both
+//! without waiting; any event gives one rescan. Both are dropped when the tab closes. Without a
+//! session bus only the inotify part runs.
+//!
 //! `command` holds `Exec` lines, which can carry secrets. Never log it or file contents.
 
 use std::path::{Path, PathBuf};
@@ -16,10 +21,12 @@ use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep_until;
 use asupersync::{Cx, Outcome};
+use futures_lite::StreamExt;
 use rustc_hash::FxHashMap;
 use tl_collect::CollectError;
 use tl_collect::startup::{
-    StartupEnv, StartupKindRaw, StartupRaw, StartupStatusRaw, UnitFileListing, scan_startup,
+    StartupEnv, StartupKindRaw, StartupRaw, StartupStatusRaw, StartupWatch, UnitFileListing,
+    scan_startup,
 };
 use tl_model::health::SourceId;
 use tl_model::snapshot::{Impact, StartupEntry, StartupKind, StartupStatus};
@@ -27,10 +34,12 @@ use tl_model::table::{StartupRef, StartupSource};
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
+use crate::dbus::{Bus, DbusConn, DbusError, connect};
 use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, StartupUpdate, WorkerError};
 use crate::workers::WorkerSpec;
+use crate::workers::dbus_systemd::{BUS_NAME, MANAGER_IFACE, PATH};
 
 /// What one scan reads. The environment is read once per scan.
 #[derive(Clone, Debug, Default)]
@@ -83,13 +92,14 @@ pub(crate) fn factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
         let scanner: Scanner = Arc::new(host_scan);
-        async move { run(cx, io, scanner).await }
+        async move { run(cx, io, scanner, System).await }
     })
 }
 
-async fn run(cx: Cx, io: WorkerIo, scanner: Scanner) -> Outcome<(), WorkerError> {
+async fn run<H: Host>(cx: Cx, io: WorkerIo, scanner: Scanner, host: H) -> Outcome<(), WorkerError> {
     let mut queue = Queue::resume(&io);
     let mut open = false;
+    let mut live: Option<Live<H::Files, H::Signals>> = None;
     let mut cache = Cache::default();
     loop {
         sleep_until(cx.now() + IDLE_RECHECK).await;
@@ -100,8 +110,21 @@ async fn run(cx: Cx, io: WorkerIo, scanner: Scanner) -> Outcome<(), WorkerError>
         let now_open = io.demand.borrow_and_clone().startup;
         let opened = now_open && !open;
         open = now_open;
+        if !open {
+            live = None;
+        } else if opened {
+            // Watch before the first scan so a change during the scan is not lost.
+            live = Some(Live::open(&cx, &host).await);
+            if cx.checkpoint().is_err() {
+                return Outcome::Ok(());
+            }
+        }
+        let changed = match live.as_mut() {
+            Some(live) => live.drain().await,
+            None => false,
+        };
         let refresh = queue.take(&io);
-        if !open || !(opened || refresh.is_some()) {
+        if !open || !(opened || refresh.is_some() || changed) {
             // A RefreshNow while the tab is hidden counts as done without a scan.
             if let Some(seq) = refresh {
                 queue.progress.set_done(SourceId::Startup, seq);
@@ -109,7 +132,11 @@ async fn run(cx: Cx, io: WorkerIo, scanner: Scanner) -> Outcome<(), WorkerError>
             continue;
         }
 
-        let input = ScanInput::from_env();
+        // Before the scan, so a directory made since the last scan is watched from now on.
+        if let Some(files) = live.as_mut().and_then(|live| live.files.as_mut()) {
+            files.rewatch();
+        }
+        let input = host.input();
         let scan = Arc::clone(&scanner);
         let mut job = match cx.spawn_blocking(move |_| {
             let result = scan(&input);
@@ -156,6 +183,177 @@ async fn run(cx: Cx, io: WorkerIo, scanner: Scanner) -> Outcome<(), WorkerError>
         if let Some(seq) = refresh {
             queue.progress.set_done(SourceId::Startup, seq);
         }
+    }
+}
+
+/// What the worker reads from the machine besides the scan itself. Tests replace it.
+trait Host {
+    type Files: FileEvents;
+    type Signals: UnitFileSignals;
+    /// The scan input. Read once per scan and once when the tab opens.
+    fn input(&self) -> ScanInput;
+    /// An inotify watch on the startup directories of `env`.
+    fn watch(&self, env: &StartupEnv) -> Result<Self::Files, CollectError>;
+    /// A session-bus subscription to the user manager's `UnitFilesChanged`.
+    async fn subscribe(&self, cx: &Cx) -> Result<Self::Signals, DbusError>;
+}
+
+/// Directory change events.
+trait FileEvents {
+    /// Reads every pending event without blocking. True if any arrived.
+    fn drain(&mut self) -> Result<bool, CollectError>;
+    /// Adds watches for directories that did not exist before.
+    fn rewatch(&mut self);
+}
+
+/// `UnitFilesChanged` signals.
+trait UnitFileSignals {
+    /// Takes every queued signal without waiting. True if any arrived. `Err` when the stream
+    /// ended.
+    async fn drain(&mut self) -> Result<bool, DbusError>;
+}
+
+/// The real machine: the process environment, inotify and the session bus.
+struct System;
+
+impl Host for System {
+    type Files = StartupWatch;
+    type Signals = UnitFilesSignals;
+
+    fn input(&self) -> ScanInput {
+        ScanInput::from_env()
+    }
+
+    fn watch(&self, env: &StartupEnv) -> Result<StartupWatch, CollectError> {
+        StartupWatch::new(env)
+    }
+
+    async fn subscribe(&self, cx: &Cx) -> Result<UnitFilesSignals, DbusError> {
+        UnitFilesSignals::open(cx).await
+    }
+}
+
+impl FileEvents for StartupWatch {
+    fn drain(&mut self) -> Result<bool, CollectError> {
+        StartupWatch::drain(self)
+    }
+
+    fn rewatch(&mut self) {
+        StartupWatch::rewatch(self);
+    }
+}
+
+/// Queued `UnitFilesChanged` signals before the oldest is dropped. The worker drains the queue
+/// every `IDLE_RECHECK`.
+const SIGNAL_QUEUE: usize = 64;
+
+/// The real subscription. Fields drop in order, so the stream (and its match rule) goes before
+/// the connection's tick task stops. No proxy is kept.
+struct UnitFilesSignals {
+    stream: zbus::MessageStream,
+    conn: DbusConn,
+}
+
+impl UnitFilesSignals {
+    /// Connects to the session bus, adds the match rule, then calls `Manager.Subscribe` so the
+    /// user manager sends `UnitFilesChanged`.
+    async fn open(cx: &Cx) -> Result<Self, DbusError> {
+        let conn = connect(cx, Bus::Session).await?;
+        let rule = || -> zbus::Result<_> {
+            Ok(zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender(BUS_NAME)?
+                .path(PATH)?
+                .interface(MANAGER_IFACE)?
+                .member("UnitFilesChanged")?
+                .build()
+                .to_owned())
+        };
+        let rule = rule().map_err(|e| DbusError::Call {
+            name: "zbus".into(),
+            message: e.to_string().into(),
+        })?;
+        let raw = conn.raw();
+        let stream = conn
+            .read(
+                cx,
+                zbus::MessageStream::for_match_rule(rule, raw, Some(SIGNAL_QUEUE)),
+            )
+            .await?;
+        // A fresh connection, so `AlreadySubscribed` cannot happen.
+        let subscribe =
+            raw.call_method(Some(BUS_NAME), PATH, Some(MANAGER_IFACE), "Subscribe", &());
+        conn.read(cx, subscribe).await?;
+        Ok(Self { stream, conn })
+    }
+}
+
+impl UnitFileSignals for UnitFilesSignals {
+    async fn drain(&mut self) -> Result<bool, DbusError> {
+        let mut any = false;
+        loop {
+            match futures_lite::future::poll_once(self.stream.next()).await {
+                None => return Ok(any),
+                Some(Some(Ok(_))) => any = true,
+                Some(Some(Err(e))) => {
+                    tracing::debug!(target: "tasklens::engine", error = %e, "startup: bad signal message")
+                }
+                Some(None) => return Err(DbusError::Closed),
+            }
+        }
+    }
+}
+
+/// The live-refresh sources while the tab is open. A source that failed is `None`. Dropping
+/// this closes the inotify fd and the bus connection.
+struct Live<F, S> {
+    files: Option<F>,
+    signals: Option<S>,
+}
+
+impl<F: FileEvents, S: UnitFileSignals> Live<F, S> {
+    /// Creation failures are logged at debug and that source is skipped.
+    async fn open<H: Host<Files = F, Signals = S>>(cx: &Cx, host: &H) -> Self {
+        let files = match host.watch(&host.input().env) {
+            Ok(files) => Some(files),
+            Err(e) => {
+                tracing::debug!(target: "tasklens::engine", error = %e, "startup watch failed");
+                None
+            }
+        };
+        let signals = match host.subscribe(cx).await {
+            Ok(signals) => Some(signals),
+            Err(e) => {
+                tracing::debug!(target: "tasklens::engine", error = %e, "startup: no UnitFilesChanged");
+                None
+            }
+        };
+        Self { files, signals }
+    }
+
+    /// True if either source had an event since the last call. A source that fails is dropped
+    /// until the tab opens again.
+    async fn drain(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(files) = self.files.as_mut() {
+            match files.drain() {
+                Ok(any) => changed |= any,
+                Err(e) => {
+                    tracing::debug!(target: "tasklens::engine", error = %e, "startup watch lost");
+                    self.files = None;
+                }
+            }
+        }
+        if let Some(signals) = self.signals.as_mut() {
+            match signals.drain().await {
+                Ok(any) => changed |= any,
+                Err(e) => {
+                    tracing::debug!(target: "tasklens::engine", error = %e, "startup: UnitFilesChanged lost");
+                    self.signals = None;
+                }
+            }
+        }
+        changed
     }
 }
 
@@ -345,6 +543,82 @@ mod tests {
         (scanner, calls)
     }
 
+    /// Fake live-refresh sources. Tests push events with `file_events` and `signal_events`;
+    /// `files_open` and `signals_open` count the handles the worker holds.
+    #[derive(Clone, Default)]
+    struct FakeHost {
+        file_events: Arc<AtomicUsize>,
+        signal_events: Arc<AtomicUsize>,
+        files_open: Arc<AtomicUsize>,
+        signals_open: Arc<AtomicUsize>,
+        /// The bus connector fails, as with no session bus.
+        no_bus: bool,
+    }
+
+    struct FakeFiles {
+        events: Arc<AtomicUsize>,
+        open: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeFiles {
+        fn drop(&mut self) {
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl FileEvents for FakeFiles {
+        fn drain(&mut self) -> Result<bool, CollectError> {
+            Ok(self.events.swap(0, Ordering::SeqCst) > 0)
+        }
+
+        fn rewatch(&mut self) {}
+    }
+
+    struct FakeSignals {
+        events: Arc<AtomicUsize>,
+        open: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakeSignals {
+        fn drop(&mut self) {
+            self.open.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl UnitFileSignals for FakeSignals {
+        async fn drain(&mut self) -> Result<bool, DbusError> {
+            Ok(self.events.swap(0, Ordering::SeqCst) > 0)
+        }
+    }
+
+    impl Host for FakeHost {
+        type Files = FakeFiles;
+        type Signals = FakeSignals;
+
+        fn input(&self) -> ScanInput {
+            ScanInput::default()
+        }
+
+        fn watch(&self, _env: &StartupEnv) -> Result<FakeFiles, CollectError> {
+            self.files_open.fetch_add(1, Ordering::SeqCst);
+            Ok(FakeFiles {
+                events: Arc::clone(&self.file_events),
+                open: Arc::clone(&self.files_open),
+            })
+        }
+
+        async fn subscribe(&self, _cx: &Cx) -> Result<FakeSignals, DbusError> {
+            if self.no_bus {
+                return Err(DbusError::Connect("no session bus".into()));
+            }
+            self.signals_open.fetch_add(1, Ordering::SeqCst);
+            Ok(FakeSignals {
+                events: Arc::clone(&self.signal_events),
+                open: Arc::clone(&self.signals_open),
+            })
+        }
+    }
+
     struct Rig {
         lab: LabRuntime,
         root: RegionId,
@@ -390,13 +664,17 @@ mod tests {
         }
 
         fn start(&mut self, scanner: Scanner) {
+            self.start_with(scanner, FakeHost::default());
+        }
+
+        fn start_with(&mut self, scanner: Scanner, host: FakeHost) {
             let io = self.io.clone();
             let (task, handle) = self
                 .lab
                 .state
                 .create_task(self.root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let _ = run(cx, io, scanner).await;
+                    let _ = run(cx, io, scanner, host).await;
                 })
                 .expect("task is created");
             self.lab.scheduler.lock().schedule(task, 0);
@@ -569,6 +847,190 @@ mod tests {
             assert!(Arc::ptr_eq(&a.id.id, &b.id.id), "{:?}", a.id);
         }
         rig.finish();
+    }
+
+    #[test]
+    fn events_coalesce_to_one_rescan() {
+        let mut rig = Rig::new();
+        let (scanner, calls) = fake_scanner();
+        let host = FakeHost::default();
+        rig.start_with(scanner, host.clone());
+        rig.set_open(true);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Three file changes and two UnitFilesChanged within one 500 ms window.
+        host.file_events.fetch_add(3, Ordering::SeqCst);
+        host.signal_events.fetch_add(2, Ordering::SeqCst);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        rig.run_for(Duration::from_secs(5));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // A signal alone also rescans.
+        host.signal_events.fetch_add(1, Ordering::SeqCst);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(rig.updates().len(), 3);
+        rig.finish();
+    }
+
+    #[test]
+    fn watches_closed_when_hidden() {
+        let mut rig = Rig::new();
+        let (scanner, calls) = fake_scanner();
+        let host = FakeHost::default();
+        rig.start_with(scanner, host.clone());
+        rig.run_for(Duration::from_secs(1));
+        assert_eq!(host.files_open.load(Ordering::SeqCst), 0);
+        assert_eq!(host.signals_open.load(Ordering::SeqCst), 0);
+
+        rig.set_open(true);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(host.files_open.load(Ordering::SeqCst), 1);
+        assert_eq!(host.signals_open.load(Ordering::SeqCst), 1);
+
+        // Hidden: both handles are dropped and events give no rescan.
+        rig.set_open(false);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(host.files_open.load(Ordering::SeqCst), 0);
+        assert_eq!(host.signals_open.load(Ordering::SeqCst), 0);
+        host.file_events.fetch_add(1, Ordering::SeqCst);
+        host.signal_events.fetch_add(1, Ordering::SeqCst);
+        rig.run_for(Duration::from_secs(2));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Opening again creates them again.
+        host.file_events.store(0, Ordering::SeqCst);
+        host.signal_events.store(0, Ordering::SeqCst);
+        rig.set_open(true);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(host.files_open.load(Ordering::SeqCst), 1);
+        assert_eq!(host.signals_open.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        rig.finish();
+    }
+
+    #[test]
+    fn no_session_bus_keeps_inotify() {
+        let mut rig = Rig::new();
+        let (scanner, calls) = fake_scanner();
+        let host = FakeHost {
+            no_bus: true,
+            ..FakeHost::default()
+        };
+        rig.start_with(scanner, host.clone());
+        rig.set_open(true);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(host.files_open.load(Ordering::SeqCst), 1);
+        assert_eq!(host.signals_open.load(Ordering::SeqCst), 0);
+
+        host.file_events.fetch_add(1, Ordering::SeqCst);
+        rig.run_for(Duration::from_millis(500));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(rig.updates().len(), 2);
+        rig.finish();
+    }
+
+    /// A temp directory as the whole startup environment: real inotify, no session bus.
+    struct TempHost {
+        input: ScanInput,
+    }
+
+    impl Host for TempHost {
+        type Files = StartupWatch;
+        type Signals = FakeSignals;
+
+        fn input(&self) -> ScanInput {
+            self.input.clone()
+        }
+
+        fn watch(&self, env: &StartupEnv) -> Result<StartupWatch, CollectError> {
+            StartupWatch::new(env)
+        }
+
+        async fn subscribe(&self, _cx: &Cx) -> Result<FakeSignals, DbusError> {
+            Err(DbusError::Connect("no session bus".into()))
+        }
+    }
+
+    /// Real temp directory, real inotify, real runtime and wall-clock time.
+    #[test]
+    fn inotify_rescan_on_new_file() {
+        let tmp = tempfile::TempDir::new().expect("temp dir");
+        let config_home = tmp.path().join("home/.config");
+        let autostart = config_home.join("autostart");
+        std::fs::create_dir_all(&autostart).expect("autostart dir");
+        let host = TempHost {
+            input: ScanInput {
+                env: StartupEnv {
+                    config_home,
+                    config_dirs: vec![tmp.path().join("xdg")],
+                    ..StartupEnv::default()
+                },
+                home: Some(tmp.path().join("home")),
+                units: Vec::new(),
+            },
+        };
+
+        let (updates, mut rx) = mpsc::channel::<EngineMsg>(16);
+        let (_demand_tx, demand) = watch::channel(Demand {
+            startup: true,
+            ..Demand::default()
+        });
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control_tx, control) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(
+            updates,
+            demand,
+            settings,
+            control,
+            crate::dbus::SharedHandles::default(),
+        );
+
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let scanner: Scanner = Arc::new(host_scan);
+            let mut worker = cx
+                .spawn(move |cx| async move {
+                    let _ = run(cx, io, scanner, host).await;
+                })
+                .expect("worker spawns");
+            let recv = |rx: &mut mpsc::Receiver<EngineMsg>, d: Duration| {
+                let cx = cx.clone();
+                async move {
+                    match asupersync::time::timeout(cx.now(), d, rx.recv(&cx)).await {
+                        Ok(Ok(EngineMsg::Source(SourceUpdate::Startup(update)))) => Some(update),
+                        Ok(other) => panic!("unexpected {other:?}"),
+                        Err(_) => None,
+                    }
+                }
+            };
+            let first = recv(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("scan on open");
+            assert!(first.entries.is_empty(), "{:?}", first.entries);
+
+            std::fs::write(
+                autostart.join("new.desktop"),
+                "[Desktop Entry]\nType=Application\nName=New\nExec=/bin/true\n",
+            )
+            .expect("write desktop file");
+            let second = recv(&mut rx, Duration::from_secs(1)).await;
+
+            worker.abort();
+            let _ = worker.join(&cx).await;
+            second
+        });
+        let second = rt
+            .block_on(join)
+            .expect("task completes")
+            .expect("a rescan within 1 s");
+        assert_eq!(second.entries.len(), 1, "{:?}", second.entries);
+        assert_eq!(&*second.entries[0].id.id, "new.desktop");
+        assert_eq!(second.entries[0].kind, StartupKind::AutostartUser);
     }
 
     #[test]
