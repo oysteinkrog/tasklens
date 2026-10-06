@@ -329,6 +329,7 @@ shell-tab-services = Services
 shell-tab-startup = Startup Apps
 shell-tab-connections = Connections
 shell-tab-information = Information
+shell-status-paused = [PAUSED - Ctrl]
 
 ## Charts (E19)
 
