@@ -3,9 +3,8 @@
 //!
 //! The window is a Confirmation-kind `TlSecondaryWindow` (GPUI `WindowKind::Dialog`), modal to
 //! its parent: the main window, or the theme editor, which passes its preview definition. Focus
-//! starts on Copy, so Enter copies; the focused footer button takes Enter through the base
-//! `Button`'s own keyboard click. The code is selected on open, and Ctrl+C copies the whole code
-//! anywhere in the window. Esc and Ctrl+W close it through the frame.
+//! starts on Copy, and Enter activates the focused footer button, so it copies unless Close has
+//! focus. The code is selected on open, and Ctrl+C copies the whole code anywhere in the window. Esc and Ctrl+W close it through the frame.
 //!
 //! The box is the kit `Textarea` with the `TlTextInput` border and fill, because `TlTextInput` is
 //! single-line.
@@ -61,13 +60,19 @@ gpui_kit::actions!(
     [
         /// Writes the window's code to the clipboard and shows "Theme code copied" (Copy, and
         /// Ctrl+C outside the code box).
-        CopyThemeCode
+        CopyThemeCode,
+        /// Enter in the window: activates the focused footer button.
+        ActivateShareButton
     ]
 );
 
-/// Binds Ctrl+C in `TlShareTheme` and handles `ShareTheme`. `TasklensUi::init` calls it.
+/// Binds Enter and Ctrl+C in `TlShareTheme` and handles `ShareTheme`. `TasklensUi::init` calls
+/// it.
 pub fn init(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-c", CopyThemeCode, Some(CONTEXT))]);
+    cx.bind_keys([
+        KeyBinding::new("enter", ActivateShareButton, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", CopyThemeCode, Some(CONTEXT)),
+    ]);
     // Deferred: from a menu in the main window, that window is mid-update and its bounds cannot
     // be read to centre the new window.
     cx.on_action(|a: &ShareTheme, cx| {
@@ -172,6 +177,7 @@ pub struct ShareThemeView {
     code: SharedString,
     input: Entity<TextareaState>,
     copy_focus: FocusHandle,
+    close_focus: FocusHandle,
     words: ShareWords,
     strings_version: u64,
     _strings: Subscription,
@@ -194,6 +200,7 @@ impl ShareThemeView {
             code: SharedString::default(),
             input,
             copy_focus,
+            close_focus: cx.focus_handle(),
             words: ShareWords::new(cx),
             strings_version: strings_version(cx),
             _strings: strings,
@@ -232,6 +239,14 @@ impl ShareThemeView {
         let text = self.words.copied.clone();
         if let Some(queue) = ToastQueue::of_window(window, cx) {
             queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
+        }
+    }
+
+    fn on_enter(&mut self, _: &ActivateShareButton, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_focus.is_focused(window) {
+            window.remove_window();
+        } else {
+            self.on_copy(&CopyThemeCode, window, cx);
         }
     }
 }
@@ -281,6 +296,7 @@ impl Render for ShareThemeView {
             .child(
                 TlButton::new("ShareTheme-close", TlButtonKind::Secondary)
                     .label(self.words.close.clone())
+                    .focus_handle(self.close_focus.clone())
                     .action(Box::new(CloseSecondaryWindow)),
             )
             .child(
@@ -294,6 +310,7 @@ impl Render for ShareThemeView {
             .id("ShareTheme")
             .key_context(CONTEXT)
             .on_action(cx.listener(Self::on_copy))
+            .on_action(cx.listener(Self::on_enter))
             .size_full()
             .flex()
             .flex_col()
