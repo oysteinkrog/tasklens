@@ -502,3 +502,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.9 (f4299be, e644236): closed; EXITED rows via name_look in table/cells.rs. KernelThread RowKind noted on pdu.12.
 - rsf.22 (eb67e1c): column actions carry a SharedString key; system tables can sort and hide from the header menu.
 - jqk.10 (14f2aeb, 7a3ebc0, 771dfc7, 8a7e2d5): MainWindow. The handle is WindowHandle<Root> plus main_view WeakEntity (accepted, same as TlSecondaryWindow). match_single_binding allow stays until page arms land. Notes on jqk.1 and wlf.19.
+- 8q0.39 (117501c): ProcessMeta.desktop_path set in proc/sweep.rs; app rows share the Arc.
+- ug9.32 (71ec3f9, e973fbb, 22a3417, 82efe8f): KvWords global; cpu_details cache and boot words. The leftover English moved to a new ug9 bead. Test committed before build (process slip, fixed in a follow-up commit).
+- rsf.23 (63f119c, 64421ad): isolate ends before the trailing space; RTL golden regenerated.
+- jqk.10: the clippy errors were fixed in 771dfc7 before my message; HEAD is clean.
