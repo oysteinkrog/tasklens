@@ -91,18 +91,13 @@ gpui_kit::actions!(
     ]
 );
 
-/// Binds Esc and Ctrl+W in `TlWindow`. `TlSecondaryWindow::open` calls it once.
+/// Binds Esc and Ctrl+W in `TlWindow`. `actions::bind_keys_global` calls it.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", CloseSecondaryWindow, Some(CONTEXT)),
         KeyBinding::new("ctrl-w", CloseSecondaryWindow, Some(CONTEXT)),
     ]);
 }
-
-/// Set once the frame keys are bound.
-struct FrameKeysBound;
-
-impl Global for FrameKeysBound {}
 
 /// The kinds of secondary window (UI-FND-021 table).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,10 +346,6 @@ impl<V: Render> TlSecondaryWindow<V> {
         spec: TlWindowSpec,
         build: impl FnOnce(&mut Window, &mut App) -> Entity<V>,
     ) -> gpui_kit::Result<WindowHandle<Root>> {
-        if !cx.has_global::<FrameKeysBound>() {
-            bind_keys(cx);
-            cx.set_global(FrameKeysBound);
-        }
         let decorations = decorations(cx);
         let options = window_options(&spec, decorations, cx);
         let modal_parent = spec.parent.filter(|_| spec.kind.modal());

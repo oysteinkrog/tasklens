@@ -294,3 +294,21 @@ fn narrow_title_ends_with_ellipsis() {
     assert!(drawn.ends_with('…'), "drawn title {drawn:?}");
     assert!(drawn.starts_with("tasklens Prop"), "drawn title {drawn:?}");
 }
+
+#[gpui_kit::test]
+fn init_binds_frame_keys_before_any_open(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    // `TasklensUi::init` binds the frame keys; no secondary window has opened yet.
+    let close = tl_ui::components::window_frame::CloseSecondaryWindow;
+    let bound = cx.update(|cx| {
+        cx.key_bindings()
+            .borrow()
+            .bindings_for_action(&close)
+            .count()
+    });
+    assert_eq!(bound, 2, "Esc and Ctrl+W are bound by init");
+    let (handle, mut vcx, _) = open(cx, tool("tasklens Settings").key(WindowKey::Settings));
+    vcx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!is_open(cx, handle), "escape did not close the window");
+}

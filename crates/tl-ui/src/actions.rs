@@ -17,8 +17,8 @@
 use gpui_kit::{Action, App, KeyBinding};
 use tl_model::table::TableMode;
 
-use crate::components::checkbox;
 pub use crate::components::shield::{EndHelperSession, StartHelperSession};
+use crate::components::{checkbox, window_frame};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 
 gpui_kit::actions!(
@@ -108,6 +108,7 @@ pub struct SetSetting {
 /// nothing.
 pub fn bind_keys_global(cx: &mut App) {
     checkbox::bind_keys_components(cx);
+    window_frame::bind_keys(cx);
 
     let global = Some(GLOBAL_CONTEXT);
     let mut bindings = Vec::new();
