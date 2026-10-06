@@ -17,10 +17,10 @@ use gpui_kit::base::{
 };
 
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Context, Div, ElementId, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseMoveEvent, ParentElement,
-    Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, TextRun,
-    UniformListScrollHandle, Window, div, font, px, uniform_list,
+    AnyElement, AnyView, App, Context, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
+    IntoElement, ListHorizontalSizingBehavior, MouseMoveEvent, ParentElement, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, TextRun, UniformListScrollHandle,
+    Window, div, font, px, uniform_list,
 };
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
@@ -182,12 +182,15 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
 }
 
 /// What every row of one frame shares.
-struct FrameCtx {
+struct FrameCtx<C> {
     m: UiMetrics,
     theme: Arc<TlTheme>,
     hairline: Pixels,
     total_width: Pixels,
     guide_lines: bool,
+    visible: Arc<[C]>,
+    offsets: Arc<[Pixels]>,
+    name_col: Option<C>,
 }
 
 impl<D: TreeTableDelegate> TlTreeTable<D> {
@@ -291,7 +294,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         if self.hover_row == Some(ix) {
             return theme.row_hover;
         }
-        let zebra = if ix % 2 == 0 {
+        let zebra = if ix.is_multiple_of(2) {
             theme.list_bg
         } else {
             theme.row_alt
@@ -320,14 +323,18 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         #[cfg(any(test, feature = "test-hooks"))]
         self.rows_built_last_frame.set(range.len() as u32);
 
+        let layout = self.delegate.columns();
         let frame = FrameCtx {
             m,
             theme: current(cx).clone(),
             hairline: UiMetrics::hairline(window),
             total_width,
             guide_lines: self.delegate.guide_lines(),
+            visible: layout.visible_columns().clone(),
+            offsets: layout.offsets().clone(),
+            name_col: name_column(layout),
         };
-        let columns = self.delegate.columns().visible_columns().len();
+        let columns = frame.visible.len();
         if self.hover_clips.len() < columns {
             self.hover_clips
                 .resize_with(columns, || Rc::new(Cell::new(false)));
@@ -342,7 +349,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn build_row(
         &mut self,
         ix: usize,
-        f: &FrameCtx,
+        f: &FrameCtx<D::Column>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -355,10 +362,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             .h(m.row_height)
             .bg(self.row_background(ix, theme));
 
-        let layout = self.delegate.columns();
-        let visible = layout.visible_columns().clone();
-        let offsets = layout.offsets().clone();
-        let name_col = name_column(layout);
+        let visible = &f.visible;
+        let offsets = &f.offsets;
+        let name_col = f.name_col;
 
         if kind == RowKind::GroupHeader {
             row = row.debug_selector(|| "TlTreeTable-group-row".into());
@@ -406,7 +412,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
 
         for (pos, &col) in visible.iter().enumerate() {
             let x = offsets[pos];
-            let width = self.delegate.columns().width(col);
+            let width = offsets.get(pos + 1).copied().unwrap_or(f.total_width) - x;
             let ctx = CellCtx {
                 m,
                 theme,
@@ -451,7 +457,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 cell = cell.bg(tint.map_or(bg, |t| bg.blend(t)));
             }
             if stale {
-                cell = cell.opacity(STALE_OPACITY);
+                cell = cell.opacity(metric_cell_opacity(flags));
             }
             if tips {
                 cell = self.attach_cell_tip(cell, col, pos, text, row_key, window, cx);
@@ -566,6 +572,16 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             );
         }
         attach_cell_tooltip(cell, key, text, &self.hover_clips[pos], window, cx)
+    }
+}
+
+/// Opacity of a metric cell (every cell but the Name cell): [`STALE_OPACITY`] on a `STALE` row,
+/// else 1. The Name cell is always drawn at full opacity.
+pub fn metric_cell_opacity(flags: RowFlags) -> f32 {
+    if flags.has(RowFlags::STALE) {
+        STALE_OPACITY
+    } else {
+        1.0
     }
 }
 
