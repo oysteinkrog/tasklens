@@ -12,6 +12,7 @@
 
 use std::ffi::{CStr, CString};
 use std::mem::MaybeUninit;
+use std::net::IpAddr;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 use rustix::io::Errno;
@@ -155,6 +156,85 @@ pub(crate) fn pidfd_send_signal_raw(pidfd: BorrowedFd<'_>, sig: i32) -> Result<(
         )
     };
     check_syscall(ret)
+}
+
+/// The reverse DNS name of `ip` (SYS-035), through `getnameinfo` with `NI_NAMEREQD`. `Ok(None)`
+/// when the address has no name. Loopback, unspecified and link-local addresses return
+/// `Ok(None)` without a lookup: their names are local or need a scope id. This call blocks for
+/// as long as the resolver takes, so run it on the blocking pool. Never log the name (SYS-035).
+pub fn reverse_lookup(ip: IpAddr) -> Result<Option<String>, Errno> {
+    let local = match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_unicast_link_local(),
+    };
+    if local {
+        return Ok(None);
+    }
+    let mut storage = MaybeUninit::<libc::sockaddr_storage>::zeroed();
+    let len = match ip {
+        IpAddr::V4(v4) => {
+            let sin = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: 0,
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from_ne_bytes(v4.octets()),
+                },
+                sin_zero: [0; 8],
+            };
+            // SAFETY: `sockaddr_storage` is larger than and aligned for `sockaddr_in`.
+            unsafe { storage.as_mut_ptr().cast::<libc::sockaddr_in>().write(sin) };
+            std::mem::size_of::<libc::sockaddr_in>()
+        }
+        IpAddr::V6(v6) => {
+            let sin6 = libc::sockaddr_in6 {
+                sin6_family: libc::AF_INET6 as libc::sa_family_t,
+                sin6_port: 0,
+                sin6_flowinfo: 0,
+                sin6_addr: libc::in6_addr {
+                    s6_addr: v6.octets(),
+                },
+                sin6_scope_id: 0,
+            };
+            // SAFETY: `sockaddr_storage` is larger than and aligned for `sockaddr_in6`.
+            unsafe {
+                storage
+                    .as_mut_ptr()
+                    .cast::<libc::sockaddr_in6>()
+                    .write(sin6)
+            };
+            std::mem::size_of::<libc::sockaddr_in6>()
+        }
+    };
+    let mut host = [0 as libc::c_char; libc::NI_MAXHOST as usize];
+    // SAFETY: `storage` holds an initialised `sockaddr_in` or `sockaddr_in6` of `len` bytes, and
+    // `host` is writable storage of `NI_MAXHOST` bytes. The service buffer is null with length
+    // 0, which getnameinfo accepts. Both buffers live until the call returns.
+    let rc = unsafe {
+        libc::getnameinfo(
+            storage.as_ptr().cast::<libc::sockaddr>(),
+            len as libc::socklen_t,
+            host.as_mut_ptr(),
+            libc::NI_MAXHOST,
+            std::ptr::null_mut(),
+            0,
+            libc::NI_NAMEREQD,
+        )
+    };
+    match rc {
+        0 => {
+            // SAFETY: on success getnameinfo wrote a NUL-terminated string into `host`.
+            let name = unsafe { CStr::from_ptr(host.as_ptr()) };
+            Ok(Some(name.to_string_lossy().into_owned()))
+        }
+        libc::EAI_NONAME => Ok(None),
+        libc::EAI_AGAIN => Err(Errno::AGAIN),
+        libc::EAI_MEMORY => Err(Errno::NOMEM),
+        libc::EAI_SYSTEM => Err(last_errno()),
+        other => {
+            tracing::debug!(rc = other, "getnameinfo failed");
+            Err(Errno::IO)
+        }
+    }
 }
 
 /// Destroys an initialised `posix_spawnattr_t` on drop.
@@ -374,6 +454,22 @@ pub(crate) mod tests {
         );
         for fd in fds {
             assert_eq!(fd.expect("read fd link"), Path::new("/dev/null"));
+        }
+    }
+
+    #[test]
+    fn reverse_lookup_skips_local_addresses() {
+        // None of these reach the resolver, so the test sends no DNS query.
+        for ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.1.2",
+            "::1",
+            "::",
+            "fe80::1",
+        ] {
+            let ip: IpAddr = ip.parse().expect("address parses");
+            assert_eq!(reverse_lookup(ip), Ok(None), "{ip}");
         }
     }
 
