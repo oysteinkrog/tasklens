@@ -26,10 +26,10 @@ use gpui_kit::component::Icon;
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::theme::{Theme, ThemeMode as KitMode};
 use gpui_kit::{
-    Action, AnyElement, AnyView, App, AppContext as _, Bounds, Context, Div, Element, ElementId,
-    Entity, FontWeight, Global, GlobalElementId, InspectorElementId, InteractiveElement,
-    IntoElement, KeyBinding, LayoutId, ParentElement, Pixels, Render, SharedString, Styled, Window,
-    WindowBounds, WindowHandle, WindowOptions, div, px, size,
+    Action, AnyElement, AnyView, App, AppContext as _, BorrowAppContext as _, Bounds, Context, Div,
+    Element, ElementId, Entity, FontWeight, Global, GlobalElementId, InspectorElementId,
+    InteractiveElement, IntoElement, KeyBinding, LayoutId, ParentElement, Pixels, Render,
+    SharedString, Styled, Window, WindowBounds, WindowHandle, WindowOptions, div, px, size,
 };
 use tl_model::settings::AppearanceSettings;
 use tl_model::units;
@@ -934,7 +934,8 @@ fn page_tooltip(p: &mut PageCx) -> Vec<AnyElement> {
 }
 
 fn page_progress(p: &mut PageCx) -> Vec<AnyElement> {
-    let bar = |w: f32, el: TlProgress| div().w(px(w * p.m.ui_scale)).child(el).into_any_element();
+    let scale = p.m.ui_scale;
+    let bar = |w: f32, el: TlProgress| div().w(px(w * scale)).child(el).into_any_element();
     let mut out = vec![
         p.row(
             "md 0, 37, 100%",
