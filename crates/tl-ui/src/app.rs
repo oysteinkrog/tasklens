@@ -4,17 +4,24 @@
 //! `UiInit` carries everything tl-app parsed or built: settings, state, the persist callbacks,
 //! the `AppRequest` receiver, queued toasts and `AppEnv`. `init` installs the fonts, the kit,
 //! the theme, the strings, the engine, hub and demand Globals, then starts the `AppRequest` loop.
+//!
+//! `run` owns the GPUI application loop, because tl-app cannot depend on gpui-kit (ADR-001,
+//! E16-012). tl-app builds a `UiLaunch`, calls `run` and acts on the returned `UiExit`.
 
+use std::cell::Cell;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use gpui_kit::{App, AppContext, AsyncApp, Global, SharedString};
+use gpui_kit::{App, AppContext, AsyncApp, Global, QuitMode, SharedString};
 use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
-use tl_model::settings::{Settings, UiState};
-use tracing::{debug, warn};
+use tl_model::settings::{Settings, StartTab, UiState};
+use tracing::{debug, error, warn};
 
+use crate::components::icons::TlAssets;
 use crate::components::{checkbox, kv_grid};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
@@ -274,6 +281,169 @@ impl TasklensUi {
 
         // ActionTracker
 
-        // open main window
+        // open hooks
     }
+}
+
+/// Everything `run` needs from tl-app (UI-SHL-110 step 8).
+pub struct UiLaunch {
+    pub client: Arc<dyn EngineClient>,
+    pub init: UiInit,
+    pub open: OpenMode,
+    pub start: StartOptions,
+}
+
+/// Which window opens first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    Main,
+    Gallery,
+    LowMemory,
+}
+
+/// Command-line start options parsed by tl-app.
+#[derive(Clone, Debug, Default)]
+pub struct StartOptions {
+    /// `--tab`.
+    pub tab: Option<StartTab>,
+    /// `--select-pid`.
+    pub select_pid: Option<u32>,
+    /// `--start-minimized`.
+    pub start_minimized: bool,
+    /// Shift held at start (UI-SHL-110 step 6). tl-app reads it on X11; always false on Wayland.
+    pub shift_held: bool,
+    /// UI-SHL-093.
+    pub pending_crash_report: Option<PathBuf>,
+}
+
+impl Global for StartOptions {}
+
+/// Why the UI stopped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UiExit {
+    Quit,
+    /// The renderer failed before the first window opened. Holds the panic message.
+    RendererFailed(String),
+    DeviceLost,
+}
+
+/// The exit reason. The first `request_exit` wins.
+#[derive(Debug, Default)]
+pub struct UiExitSlot(pub Option<UiExit>);
+
+impl Global for UiExitSlot {}
+
+/// The cell `run` reads after the App is gone.
+struct ExitCell(Rc<Cell<Option<UiExit>>>);
+
+impl Global for ExitCell {}
+
+/// Stores `exit` unless an earlier exit is stored, then quits the app.
+pub fn request_exit(cx: &mut App, exit: UiExit) {
+    let slot = cx.default_global::<UiExitSlot>();
+    if slot.0.is_none() {
+        slot.0 = Some(exit.clone());
+        if let Some(cell) = cx.try_global::<ExitCell>() {
+            cell.0.set(Some(exit));
+        }
+    }
+    cx.quit();
+}
+
+type OpenHook = Box<dyn Fn(&mut App)>;
+
+/// Opens the first window for each `OpenMode`. Owners install their hook at the
+/// `// open hooks` line in `TasklensUi::init`, through `cx.default_global::<OpenHooks>()`.
+#[derive(Default)]
+pub struct OpenHooks {
+    pub main: Option<OpenHook>,
+    pub gallery: Option<OpenHook>,
+    pub low_memory: Option<OpenHook>,
+}
+
+impl Global for OpenHooks {}
+
+/// Runs the GPUI application on the calling thread (the main thread).
+/// Returns after the application quits.
+pub fn run(launch: UiLaunch) -> UiExit {
+    let exit = Rc::new(Cell::new(None));
+    let opened = Rc::new(Cell::new(false));
+    let result = {
+        let exit = Rc::clone(&exit);
+        let opened = Rc::clone(&opened);
+        // The platform is built inside the guard too: a failed display connection panics there.
+        panic::catch_unwind(AssertUnwindSafe(move || {
+            let app = gpui_kit::application()
+                .with_assets(TlAssets)
+                .with_quit_mode(QuitMode::Explicit);
+            app.run(move |cx| {
+                start(cx, launch, exit);
+                opened.set(true);
+            });
+        }))
+    };
+    if let Err(payload) = result {
+        if opened.get() {
+            panic::resume_unwind(payload);
+        }
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown renderer error".to_owned());
+        return UiExit::RendererFailed(message);
+    }
+    // U-2: if `Application::run` does not return on Linux, `request_exit` and this Quit path
+    // call `std::process::exit` after `UiInit`'s persist callback instead (E33-011).
+    exit.take().unwrap_or(UiExit::Quit)
+}
+
+/// The body of the `Application::run` closure.
+fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
+    let UiLaunch {
+        client,
+        init,
+        open,
+        start,
+    } = launch;
+    cx.set_global(start);
+    cx.set_global(UiExitSlot(None));
+    cx.set_global(ExitCell(exit));
+    cx.set_global(OpenHooks::default());
+    // E32-013: low-memory init
+    TasklensUi::init(cx, client, init);
+    open_first(cx, open);
+}
+
+/// Calls the hook for `mode`. A missing hook logs an error and quits.
+pub(crate) fn open_first(cx: &mut App, mode: OpenMode) {
+    let hook = cx.try_global::<OpenHooks>().is_some().then(|| {
+        let hooks = cx.global_mut::<OpenHooks>();
+        match mode {
+            OpenMode::Main => hooks.main.take(),
+            OpenMode::Gallery => hooks.gallery.take(),
+            OpenMode::LowMemory => hooks.low_memory.take(),
+        }
+    });
+    match hook.flatten() {
+        Some(hook) => hook(cx),
+        None => {
+            error!(target: "tasklens::ui", ?mode, "no window registered");
+            request_exit(cx, UiExit::Quit);
+        }
+    }
+}
+
+/// `open_first` for integration tests; `run` blocks, so tests never call it.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn open_first_for_test(cx: &mut App, mode: OpenMode) {
+    open_first(cx, mode);
+}
+
+/// The `run` closure body for integration tests. Returns the cell `run` would read.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn start_for_test(cx: &mut App, launch: UiLaunch) -> Rc<Cell<Option<UiExit>>> {
+    let exit = Rc::new(Cell::new(None));
+    start(cx, launch, Rc::clone(&exit));
+    exit
 }

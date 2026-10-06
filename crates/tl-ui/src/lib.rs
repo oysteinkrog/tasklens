@@ -19,3 +19,4 @@ pub use app::{
     AdapterInfo, AppEnv, BuildInfo, CrashReport, GlobalShortcutApi, ImportSummary, PersistTheme,
     RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit,
 };
+pub use app::{OpenHooks, OpenMode, StartOptions, UiExit, UiLaunch, request_exit, run};

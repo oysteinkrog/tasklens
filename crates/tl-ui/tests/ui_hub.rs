@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AppContext, Context, Entity, Font, FontWeight, IntoElement, ParentElement, Render, Styled,
-    TestAppContext, TestDispatcher, Window, div, font,
+    AppContext, AssetSource, Context, Entity, Font, FontWeight, IntoElement, ParentElement,
+    QuitMode, Render, Styled, TestAppContext, TestDispatcher, Window, div, font,
 };
 use tl_model::client::EngineClient;
 use tl_model::command::AppRequest;
@@ -17,7 +17,10 @@ use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::SeriesView;
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{SeriesSet, Snapshot};
-use tl_ui::app::{AppRequestHandler, BootSettings, EngineGlobal};
+use tl_ui::app::{
+    AppRequestHandler, BootSettings, EngineGlobal, UiExitSlot, open_first_for_test, start_for_test,
+};
+use tl_ui::components::icons::TlAssets;
 use tl_ui::demand::GlobalDemand;
 use tl_ui::hub::GlobalHub;
 use tl_ui::hub::{ComponentMask, HiddenChanged, SnapshotChanged, SnapshotHub};
@@ -25,7 +28,9 @@ use tl_ui::i18n::Strings;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::BundledFontStatus;
 use tl_ui::theme::{ThemeStore, UiMetrics};
-use tl_ui::{AppEnv, TasklensUi, UiInit};
+use tl_ui::{
+    AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
+};
 
 fn hub_with_engine(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Entity<SnapshotHub>) {
     let engine = FakeEngine::new();
@@ -474,4 +479,95 @@ fn init_activates_theme_without_crossfade(cx: &mut TestAppContext) {
         // `init_metrics` sets 1; nothing else bumped it.
         assert_eq!(tl_ui::theme::metrics(cx).style_version, 1);
     });
+}
+
+// tl_ui::run (E16-012). `run` blocks, so these go through its parts.
+
+fn exit_slot(cx: &mut TestAppContext) -> Option<UiExit> {
+    cx.update(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()))
+}
+
+#[gpui_kit::test]
+fn open_first_calls_main_hook(cx: &mut TestAppContext) {
+    run_init(cx, Settings::default());
+    let calls = Rc::new(Cell::new(0));
+    let sink = Rc::clone(&calls);
+    cx.update(|cx| {
+        cx.default_global::<OpenHooks>().main = Some(Box::new(move |_| sink.set(sink.get() + 1)));
+        open_first_for_test(cx, OpenMode::Main);
+    });
+    assert_eq!(calls.get(), 1);
+    assert_eq!(exit_slot(cx), None);
+}
+
+#[gpui_kit::test]
+fn open_first_missing_hook_quits(cx: &mut TestAppContext) {
+    run_init(cx, Settings::default());
+    cx.update(|cx| open_first_for_test(cx, OpenMode::Gallery));
+    assert_eq!(exit_slot(cx), Some(UiExit::Quit));
+}
+
+#[gpui_kit::test]
+fn request_exit_first_writer_wins(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        request_exit(cx, UiExit::DeviceLost);
+        request_exit(cx, UiExit::Quit);
+    });
+    assert_eq!(exit_slot(cx), Some(UiExit::DeviceLost));
+}
+
+#[gpui_kit::test]
+fn start_options_global_installed(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    let (init, _tx) = ui_init(Settings::default());
+    let launch = UiLaunch {
+        client: engine,
+        init,
+        open: OpenMode::Main,
+        start: StartOptions {
+            select_pid: Some(42),
+            ..StartOptions::default()
+        },
+    };
+    let exit = cx.update(|cx| start_for_test(cx, launch));
+    cx.update(|cx| assert_eq!(cx.global::<StartOptions>().select_pid, Some(42)));
+    // No main hook is registered yet, so the launch quits; the cell `run` reads agrees.
+    assert_eq!(exit_slot(cx), Some(UiExit::Quit));
+    assert_eq!(exit.take(), Some(UiExit::Quit));
+}
+
+struct Empty;
+
+impl Render for Empty {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[gpui_kit::test]
+fn explicit_quit_mode_survives_last_window(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_quit_mode(QuitMode::Explicit));
+    let window = cx.add_window(|_, _| Empty);
+    window
+        .update(cx, |_, window, _| window.remove_window())
+        .expect("window is open");
+    cx.run_until_parked();
+    // The test platform's `quit` does nothing, so check that the app still runs and that
+    // no exit was requested.
+    assert!(cx.windows().is_empty());
+    assert_eq!(exit_slot(cx), None);
+    let again = cx.add_window(|_, _| Empty);
+    assert_eq!(cx.windows(), vec![again.into()]);
+}
+
+#[test]
+fn run_asset_source_resolves_icons() {
+    // `run` passes `TlAssets` to `Application::with_assets`; the kit and tasklens icons must
+    // resolve through it.
+    for path in ["icons/chevron-down.svg"] {
+        assert!(TlAssets.load(path).unwrap().is_some(), "{path}");
+    }
+    let tl = TlAssets.list("icons/tl/").unwrap();
+    assert!(!tl.is_empty());
+    assert!(TlAssets.load(&tl[0]).unwrap().is_some());
 }
