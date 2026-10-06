@@ -296,3 +296,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.13: added `build_static_in(.., dev: &Path)` so the virtualization test can fake /dev, and one `#[allow(unsafe_code)]` test for set_var (edition 2024) behind a static mutex. Live host: running_in_vm Valid(""), ppd_profile "balanced".
 - ug9.24: leader approved chain edit to input.rs: align_right, suffix_text, square_corners builders on TlTextInput.
 - y6k.19 a1f13c8 broke the build (private tl_ops::sys); agent told to fix.
+- y6k.25: real launcher tests pass (3, ignored by default); nothing left behind. They create a user unit tasklens-test.service and refuse if it exists.
+- 8q0.27: Reducer.unit_names never removes names (an empty listing while systemd is down would blank rows). Accepted.
+- y6k.19: `tl_ops::sys` is now `pub mod`. Negative rDNS TTL 1 min.
