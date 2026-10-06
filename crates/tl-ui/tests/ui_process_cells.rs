@@ -1813,3 +1813,204 @@ mod group_fields {
         assert!(out.validity == Validity::Valid && shown(&out).is_empty());
     }
 }
+
+// ---- Header line 2 system totals (E22-010) ----
+
+mod header_totals {
+    use tl_model::ids::ColumnId;
+    use tl_model::settings::{NetworkUnit, Settings};
+    use tl_model::table::{TableTotals, Total};
+    use tl_model::validity::Validity;
+    use tl_ui::pages::processes::cells::process_column;
+    use tl_ui::pages::processes::header_totals::header_total;
+    use tl_ui::table::cells::CellOut;
+
+    fn valid<T>(value: T) -> Total<T> {
+        Total {
+            value,
+            validity: Validity::Valid,
+        }
+    }
+
+    fn unsupported<T: Default>() -> Total<T> {
+        Total {
+            value: T::default(),
+            validity: Validity::Unsupported,
+        }
+    }
+
+    fn sample() -> TableTotals {
+        let mut gpu_adapter_pct = [unsupported(); 16];
+        gpu_adapter_pct[0] = valid(20.0);
+        gpu_adapter_pct[1] = valid(80.0);
+        TableTotals {
+            cpu_pct: valid(11.94),
+            memory_pct: valid(54.9),
+            swap_pct: valid(3.26),
+            disk_pct: valid(7.0),
+            net_bps: valid(287_500.0),
+            net_link_bps: None,
+            gpu_pct: valid(80.0),
+            gpu_adapter_pct,
+            vram_pct: valid(37.5),
+            threads: valid(2_345),
+            handles: valid(41_234),
+        }
+    }
+
+    fn bits_settings() -> Settings {
+        let mut s = Settings::default();
+        s.units.network = NetworkUnit::Bits;
+        s
+    }
+
+    /// Runs `header_total` the way the table does: first for bits, then again for the text.
+    fn total(id: ColumnId, totals: &TableTotals, settings: &Settings) -> Option<CellOut> {
+        let col = process_column(id);
+        let mut probe = CellOut::default();
+        if !header_total(col, totals, settings, &mut probe) {
+            return None;
+        }
+        assert!(probe.text.is_empty(), "text written without want_text");
+        let mut out = CellOut {
+            want_text: true,
+            ..CellOut::default()
+        };
+        assert!(header_total(col, totals, settings, &mut out));
+        assert_eq!((out.bits, out.validity), (probe.bits, probe.validity));
+        Some(out)
+    }
+
+    fn text(id: ColumnId, totals: &TableTotals) -> String {
+        let out = total(id, totals, &bits_settings()).expect("column has a total");
+        assert_eq!(out.validity, Validity::Valid, "{}", id.as_str());
+        out.text
+    }
+
+    #[test]
+    fn header_line2_blank_for_text_columns() {
+        let totals = sample();
+        let s = bits_settings();
+        for id in [
+            ColumnId::Name,
+            ColumnId::User,
+            ColumnId::Pid,
+            ColumnId::Description,
+            ColumnId::Power,
+            ColumnId::Cmdline,
+            ColumnId::State,
+            ColumnId::CpuKernel,
+            ColumnId::WsTotal,
+            ColumnId::GpuMemShared,
+        ] {
+            let mut out = CellOut::default();
+            assert!(
+                !header_total(process_column(id), &totals, &s, &mut out),
+                "{} has no line 2",
+                id.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn header_totals_formats() {
+        let t = sample();
+        assert_eq!(text(ColumnId::Cpu, &t), "11.9%");
+        assert_eq!(text(ColumnId::Memory, &t), "54.9%");
+        assert_eq!(text(ColumnId::Swap, &t), "3.3%");
+        assert_eq!(text(ColumnId::Disk, &t), "7.0%");
+        assert_eq!(text(ColumnId::Network, &t), "2.3 Mbps");
+        assert_eq!(text(ColumnId::Gpu, &t), "80.0%");
+        assert_eq!(text(ColumnId::Gpu0, &t), "20.0%");
+        assert_eq!(text(ColumnId::Gpu1, &t), "80.0%");
+        assert_eq!(text(ColumnId::GpuMemDedicated, &t), "37.5%");
+        assert_eq!(text(ColumnId::Threads, &t), "2\u{2009}345");
+        assert_eq!(text(ColumnId::Handles, &t), "41\u{2009}234");
+
+        // Known link speed: throughput as a percent of the summed link speed.
+        let linked = TableTotals {
+            net_bps: valid(12_500_000.0),
+            net_link_bps: Some(125_000_000),
+            ..sample()
+        };
+        assert_eq!(text(ColumnId::Network, &linked), "10.0%");
+        let s = bits_settings();
+        let pct = total(ColumnId::Network, &linked, &s).unwrap();
+        let rate = total(ColumnId::Network, &sample(), &s).unwrap();
+        assert_ne!(pct.bits, rate.bits);
+
+        // Bytes mode for the rate form.
+        let mut bytes = Settings::default();
+        bytes.units.network = NetworkUnit::Bytes;
+        let out = total(ColumnId::Network, &t, &bytes).unwrap();
+        assert_eq!(out.text, "0.3 MiB/s");
+
+        // Same value, same bits: the table cache formats it once.
+        let a = total(ColumnId::Cpu, &t, &s).unwrap();
+        let b = total(ColumnId::Cpu, &sample(), &s).unwrap();
+        assert_eq!(a.bits, b.bits);
+        let changed = TableTotals {
+            cpu_pct: valid(12.0),
+            ..sample()
+        };
+        assert_ne!(total(ColumnId::Cpu, &changed, &s).unwrap().bits, a.bits);
+    }
+
+    #[test]
+    fn header_totals_no_gpu_is_na() {
+        let totals = TableTotals {
+            gpu_pct: unsupported(),
+            gpu_adapter_pct: [unsupported(); 16],
+            vram_pct: unsupported(),
+            ..sample()
+        };
+        let s = bits_settings();
+        for id in [ColumnId::Gpu, ColumnId::GpuMemDedicated, ColumnId::Gpu0] {
+            let out = total(id, &totals, &s).expect("GPU columns keep line 2");
+            assert_eq!(out.validity, Validity::Unsupported, "{}", id.as_str());
+            assert!(out.text.is_empty());
+        }
+        // An adapter past the last GPU is Unsupported too.
+        let out = total(ColumnId::Gpu2, &sample(), &s).unwrap();
+        assert_eq!(out.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn header_totals_warming_up_before_second_sample() {
+        // `TableTotals::default()` is the state before the second sample: every total WarmingUp.
+        let totals = TableTotals::default();
+        let s = bits_settings();
+        for id in [
+            ColumnId::Cpu,
+            ColumnId::Disk,
+            ColumnId::Network,
+            ColumnId::Gpu,
+            ColumnId::Gpu3,
+        ] {
+            let out = total(id, &totals, &s).expect("column has a total");
+            assert_eq!(out.validity, Validity::WarmingUp, "{}", id.as_str());
+            assert!(out.text.is_empty());
+        }
+        let linked = TableTotals {
+            net_link_bps: Some(125_000_000),
+            ..TableTotals::default()
+        };
+        let out = total(ColumnId::Network, &linked, &s).unwrap();
+        assert_eq!(out.validity, Validity::WarmingUp);
+        assert!(out.text.is_empty());
+
+        // Stale still shows the last value.
+        let stale = TableTotals {
+            cpu_pct: Total {
+                value: 11.94,
+                validity: Validity::Stale,
+            },
+            ..sample()
+        };
+        let out = total(ColumnId::Cpu, &stale, &s).unwrap();
+        assert_eq!(
+            (out.validity, out.text.as_str()),
+            (Validity::Stale, "11.9%")
+        );
+    }
+}
