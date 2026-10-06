@@ -61,7 +61,7 @@ const ACCESS_DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
 /// What a launch did. E11 reports `AlreadyRunning` as `Rejected(RejectReason::AlreadyRunning)`
 /// (SYS-023, R-148 item 4).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum LaunchOutcome {
+pub enum LaunchOutcome {
     Launched,
     AlreadyRunning,
 }

@@ -9,6 +9,7 @@ pub mod cgroup;
 pub mod dump;
 pub mod process;
 pub mod socket;
+pub mod targetless;
 
 use std::future::Future;
 use std::os::fd::{AsFd, OwnedFd};
@@ -266,12 +267,8 @@ pub trait PrivilegedOps: Send + Sync + 'static {
     fn state(&self) -> HelperState;
 }
 
-/// What a launch did (E14-A3). E11-016 switches this to a re-export of E14-A3's enum.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LaunchOutcome {
-    Launched,
-    AlreadyRunning,
-}
+/// What a launch did (E14-A3).
+pub use crate::launcher::LaunchOutcome;
 
 /// The session-bus openers and the shared launcher (E14-020, E14-A3), behind a trait so tests
 /// can fake them. The only place E11 touches E14 code.
@@ -292,6 +289,46 @@ pub trait Openers: Send + Sync + 'static {
         cx: &Cx,
         spec: &LaunchSpec,
     ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>>;
+}
+
+/// The production `Openers`: E14's opener and launcher on the user manager's session connection.
+pub struct RealOpeners {
+    pub session: ManagerConnSlot,
+}
+
+impl Openers for RealOpeners {
+    fn open_uri(
+        &self,
+        cx: &Cx,
+        target: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        let cx = cx.clone();
+        let target = target.to_owned();
+        Box::pin(async move { crate::opener::open_uri(&cx, self.session.get(), &target).await })
+    }
+
+    fn show_in_file_manager(
+        &self,
+        cx: &Cx,
+        path: &str,
+        properties: bool,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ActionError>> + Send + '_>> {
+        let cx = cx.clone();
+        let path = path.to_owned();
+        Box::pin(async move {
+            crate::opener::show_in_file_manager(&cx, self.session.get(), &path, properties).await
+        })
+    }
+
+    fn launch(
+        &self,
+        cx: &Cx,
+        spec: &LaunchSpec,
+    ) -> Pin<Box<dyn Future<Output = Result<LaunchOutcome, ActionError>> + Send + '_>> {
+        let cx = cx.clone();
+        let spec = spec.clone();
+        Box::pin(async move { crate::launcher::launch(&cx, self.session.get(), &spec).await })
+    }
 }
 
 /// One method per tl-ops entry point used by actions/{process,cgroup,startup,dump}.rs. Each
@@ -490,7 +527,7 @@ pub struct ActionCtx {
     /// `get()` is `None` when that manager is not connected (E08-009, B3 open item 8).
     pub systemd_system: ManagerConnSlot,
     pub systemd_user: ManagerConnSlot,
-    /// `None` until E11-016 installs `RealOpeners` (needs E14-A3).
+    /// `RealOpeners` in production. `None` refuses the targetless kinds.
     pub openers: Option<Arc<dyn Openers>>,
     /// `None` until E29-014.
     pub helper: Option<Arc<dyn PrivilegedOps>>,
@@ -552,12 +589,12 @@ async fn run_body(
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
 ) {
-    let summary = if req.privileged {
+    let summary = if req.kind.is_targetless() {
+        // `privileged` only picks the deadline here: these kinds have no helper route.
+        targetless::run(cx, actx, &req.kind, req.privileged).await
+    } else if req.privileged {
         // E29-014 chain-edits the routing arm here. Until then a privileged request is refused:
         // it never falls back to an unprivileged call.
-        ActionState::Rejected(RejectReason::Unsupported)
-    } else if req.kind.is_targetless() {
-        // `targetless::run` (E11-016) replaces this arm.
         ActionState::Rejected(RejectReason::Unsupported)
     } else {
         // `KillTree` runs the admitted targets in one `process::kill_tree` call (E11-004).
