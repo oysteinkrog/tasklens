@@ -26,7 +26,7 @@ use tl_model::snapshot::{
     DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails, ProcessSnapshot,
     ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord, WindowsSnapshot,
 };
-use tl_model::system::{Metric, SensorKind};
+use tl_model::system::{GpuTotals, Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
@@ -39,9 +39,9 @@ use super::table::{self, PseudoInput, SweepTotals, TableInput};
 use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer, sys_table_index};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
-    ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDetailsUpdate, DiskSample, EngineMsg,
-    GpuSample, MemorySample, NetSample, SensorSample, ServicesUpdate, SourceUpdate, StartupUpdate,
-    source_of,
+    ConnectionsUpdate, CpuSample, DetailsUpdate, DeviceDesc, DeviceDetailsUpdate, DeviceKinds,
+    DeviceList, DiskSample, EngineMsg, GpuSample, MemorySample, NetSample, SensorSample,
+    ServicesUpdate, SourceUpdate, StartupUpdate, source_of,
 };
 use crate::workers::history::HistoryMsg;
 
@@ -96,7 +96,8 @@ pub struct ApplyState {
     disk_dbus: FxHashMap<DeviceIdx, DiskDetails>,
     net_sysfs: FxHashMap<DeviceIdx, NetDetails>,
     net_dbus: FxHashMap<DeviceIdx, NetDetails>,
-    /// `supports_process_util` per GPU UUID from the last `GpuInfo` (E09-006).
+    /// `supports_process_util` per GPU UUID from the last `GpuInfo` of each GPU worker
+    /// (E09-006). AMD cards share the key `[0; 16]` and are always `false`.
     gpu_caps: FxHashMap<[u8; 16], bool>,
     /// Keys whose PSS the last demand asked for: `detail_keys` while a PSS or USS column is
     /// shown, else none (E09-006).
@@ -109,24 +110,35 @@ pub struct ApplyState {
     process_series: ProcessSeries,
     /// Per-process power estimate (E09-030).
     power: PowerEstimator,
-    /// Measured power per GPU UUID from the last GPU sample, valid values only (E09-030).
-    gpu_power: FxHashMap<[u8; 16], f32>,
+    /// Measured power and UUID per GPU catalog device from the last GPU sample, valid values
+    /// only (E09-030). Keyed by device, since AMD cards have no UUID (R-166).
+    gpu_power: FxHashMap<DeviceIdx, ([u8; 16], f32)>,
 }
 
 impl ApplyState {
     /// Stores the measured power of a GPU for the power estimate; `None` removes it.
-    fn set_gpu_power(&mut self, identity: &DeviceIdentity, power_w: Option<f32>) {
+    fn set_gpu_power(&mut self, idx: DeviceIdx, identity: &DeviceIdentity, power_w: Option<f32>) {
         let DeviceIdentity::Gpu { uuid, .. } = identity else {
             return;
         };
         match power_w {
             Some(p) => {
-                self.gpu_power.insert(*uuid, p);
+                self.gpu_power.insert(idx, (*uuid, p));
             }
             None => {
-                self.gpu_power.remove(uuid);
+                self.gpu_power.remove(&idx);
             }
         }
+    }
+
+    /// The measured power of GPU `device` from its last sample, if valid.
+    pub fn gpu_power_w(&self, device: DeviceIdx) -> Option<f32> {
+        self.gpu_power.get(&device).map(|&(_, p)| p)
+    }
+
+    /// `supports_process_util` of the GPU with `uuid` from the last `GpuInfo`.
+    pub fn gpu_cap(&self, uuid: &[u8; 16]) -> Option<bool> {
+        self.gpu_caps.get(uuid).copied()
     }
 
     /// The series period of a sample from `id` at `t_ns`: the spacing of the last two samples
@@ -334,6 +346,32 @@ where
         .collect()
 }
 
+/// The GPU worker that owns a device with `uuid`: NVML devices carry their UUID, AMD and Intel
+/// cards use `[0; 16]` (R-166).
+fn uuid_owner(uuid: &[u8; 16]) -> SourceId {
+    if *uuid == [0; 16] {
+        SourceId::GpuDrm
+    } else {
+        SourceId::GpuNvidia
+    }
+}
+
+/// The GPU worker that owns `identity`, or `None` for a device that is not a GPU.
+fn gpu_owner(identity: &DeviceIdentity) -> Option<SourceId> {
+    match identity {
+        DeviceIdentity::Gpu { uuid, .. } => Some(uuid_owner(uuid)),
+        _ => None,
+    }
+}
+
+/// The GPU worker that sent an update about `ids`. Only the DRM worker sends an empty card set,
+/// so an update without a GPU belongs to `GpuDrm`.
+fn gpu_update_owner<'a>(ids: impl IntoIterator<Item = &'a DeviceIdentity>) -> SourceId {
+    ids.into_iter()
+        .find_map(gpu_owner)
+        .unwrap_or(SourceId::GpuDrm)
+}
+
 impl Reducer {
     /// Applies one message. `Err` only on a broken invariant; the session then restarts.
     pub fn apply(
@@ -413,7 +451,10 @@ impl Reducer {
             SourceUpdate::Disks(s) => self.apply_disks(s)?,
             SourceUpdate::Nets(s) => self.apply_nets(s, settings)?,
             SourceUpdate::Sensors(s) => self.apply_sensors(s)?,
-            SourceUpdate::Devices(list) => {
+            SourceUpdate::Devices(mut list) => {
+                if list.kinds.contains(DeviceKinds::GPUS) {
+                    self.keep_other_gpus(&mut list);
+                }
                 let changes = self.devices.apply_list(&list)?;
                 let t = now_boot_ns();
                 for (idx, change) in changes {
@@ -432,7 +473,10 @@ impl Reducer {
             }
             SourceUpdate::Gpu(s) => self.apply_gpu(s, source, settings)?,
             SourceUpdate::GpuInfo(info) => {
-                self.apply_state.gpu_caps.clear();
+                let owner = gpu_update_owner(info.devices.iter().map(|d| &d.identity));
+                self.apply_state
+                    .gpu_caps
+                    .retain(|uuid, _| uuid_owner(uuid) != owner);
                 for gpu in &info.devices {
                     if let DeviceIdentity::Gpu { uuid, .. } = &gpu.identity {
                         self.apply_state
@@ -1123,15 +1167,30 @@ impl Reducer {
             Some(id) => self.apply_state.period(id, t, SLOW_NS),
             None => SLOW_NS,
         };
-        let mut rows = Vec::with_capacity(s.devices.len());
+        let owner = source.unwrap_or_else(|| gpu_update_owner(s.devices.iter().map(|(id, _)| id)));
+        let mut rows = self.other_gpu_rows(owner);
         let (mut util, mut mem) = (0.0f32, 0u64);
         let (mut util_ok, mut mem_ok) = (false, false);
+        for (idx, g) in &rows {
+            if !self.devices.entry(*idx).is_some_and(|e| e.present) {
+                continue;
+            }
+            if g.util_pct.validity.is_valid() {
+                util = util.max(g.util_pct.value);
+                util_ok = true;
+            }
+            if g.mem_used.validity.is_valid() {
+                mem += g.mem_used.value;
+                mem_ok = true;
+            }
+        }
+        rows.reserve(s.devices.len());
         for (identity, mut g) in s.devices {
             let (idx, present) = self.sample_device(&identity)?;
             g.device = idx;
             if !present {
                 self.gaps(idx, &GPU_METRICS, t);
-                self.apply_state.set_gpu_power(&identity, None);
+                self.apply_state.set_gpu_power(idx, &identity, None);
                 rows.push((idx, g));
                 continue;
             }
@@ -1156,7 +1215,7 @@ impl Reducer {
                 self.push(idx, metric, t, value, validity.is_valid(), period);
             }
             let power = g.power_w.validity.is_valid().then_some(g.power_w.value);
-            self.apply_state.set_gpu_power(&identity, power);
+            self.apply_state.set_gpu_power(idx, &identity, power);
             if g.util_pct.validity.is_valid() {
                 util = util.max(g.util_pct.value);
                 util_ok = true;
@@ -1182,6 +1241,45 @@ impl Reducer {
             self.republish_processes(settings);
         }
         Ok(())
+    }
+
+    /// The current GPU rows whose device belongs to another worker than `owner`, so a sample
+    /// from one vendor keeps the other vendor's rows.
+    fn other_gpu_rows(&self, owner: SourceId) -> Vec<(DeviceIdx, GpuTotals)> {
+        self.components
+            .system
+            .gpus
+            .iter()
+            .filter(|(idx, _)| {
+                self.devices
+                    .entry(*idx)
+                    .and_then(|e| gpu_owner(&e.identity))
+                    .is_some_and(|o| o != owner)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Adds the present GPUs of the other GPU worker to a GPU device list, so the list only
+    /// adds and removes the GPUs of the worker that sent it.
+    fn keep_other_gpus(&self, list: &mut DeviceList) {
+        let owner = gpu_update_owner(list.entries.iter().map(|d| &d.identity));
+        let others: Vec<DeviceDesc> = (0..=u16::MAX)
+            .map_while(|i| self.devices.entry(DeviceIdx(i)))
+            .filter(|e| e.present && gpu_owner(&e.identity).is_some_and(|o| o != owner))
+            .filter(|e| !list.entries.iter().any(|d| d.identity == e.identity))
+            .map(|e| DeviceDesc {
+                identity: e.identity.clone(),
+                display_name: Arc::clone(&e.display_name),
+                parent: e
+                    .parent
+                    .and_then(|p| self.devices.entry(p))
+                    .map(|p| p.identity.clone()),
+                persistent_key: Arc::clone(&e.persistent_key),
+                net_kind: e.net_kind,
+            })
+            .collect();
+        list.entries.extend(others);
     }
 
     fn apply_device_details(&mut self, d: DeviceDetailsUpdate) -> Result<(), InvariantViolation> {
@@ -1305,8 +1403,8 @@ impl Reducer {
                 let gpus: Vec<GpuShare> = self
                     .apply_state
                     .gpu_power
-                    .iter()
-                    .filter(|(uuid, _)| caps.get(*uuid).copied().unwrap_or(false))
+                    .values()
+                    .filter(|(uuid, _)| caps.get(uuid).copied().unwrap_or(false))
                     .map(|(uuid, &p)| GpuShare {
                         power_w: Some(p),
                         util_by_key: by_dev.get(uuid).unwrap_or(&empty),
