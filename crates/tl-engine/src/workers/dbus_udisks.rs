@@ -6,8 +6,10 @@
 //! it differs from the last one. The reducer takes `model`, `wwn`, `serial`, `rotation_rpm`,
 //! `smart`, `smart_temp_c`, `ejectable` and `can_power_off` from these records (R-139 item 7).
 //!
-//! Read-only: the worker only calls `GetManagedObjects`. It never calls a drive or SMART method,
-//! so it never wakes a sleeping disk. Serials and WWNs are shown on screen only. Never log them.
+//! The listing only calls `GetManagedObjects`, so it never wakes a sleeping disk. SMART methods
+//! run only on a `DeviceCommand::SmartRead` (E12-021), and `SmartUpdate`, the one call that can
+//! wake a disk, only when the request asks for it (the SMART window's Refresh). Serials and WWNs
+//! are shown on screen only. Never log them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -19,16 +21,18 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
 use tl_collect::sanitize::sanitize_text;
+use tl_model::command::DeviceCommand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::snapshot::{DiskDetails, InvField, SmartKind};
+use tl_model::snapshot::{DiskDetails, InvField, SmartAttr, SmartData, SmartKind};
 use tl_model::time::now_boot_ns;
+use tl_model::units;
 use tl_model::validity::Validity;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect};
-use crate::source::{IDLE_RECHECK, WorkerIo};
+use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
@@ -37,6 +41,7 @@ pub const BUS: &str = "org.freedesktop.UDisks2";
 pub const ROOT: &str = "/org/freedesktop/UDisks2";
 
 const OBJECT_MANAGER_IFACE: &str = "org.freedesktop.DBus.ObjectManager";
+const PROPERTIES_IFACE: &str = "org.freedesktop.DBus.Properties";
 const BLOCK_IFACE: &str = "org.freedesktop.UDisks2.Block";
 const PARTITION_IFACE: &str = "org.freedesktop.UDisks2.Partition";
 const DRIVE_IFACE: &str = "org.freedesktop.UDisks2.Drive";
@@ -52,6 +57,14 @@ const NOT_AVAILABLE: &str = "UDisks2 not available";
 const TEXT_MAX: usize = 256;
 /// 0 °C in Kelvin.
 const KELVIN_ZERO: f64 = 273.15;
+/// How long `SmartUpdate` may take. polkit may ask for a password first.
+const SMART_UPDATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `SmartGetAttributes` may take.
+const SMART_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const SMART_NOT_FOUND: &str = "Disk not found";
+const SMART_NONE: &str = "SMART is not available through UDisks2 for this disk";
+const SMART_DENIED: &str = "Permission denied";
+const SMART_NO_ANSWER: &str = "The disk did not answer within 10 s";
 
 /// The properties of one interface, by name.
 pub type Props = BTreeMap<String, OwnedValue>;
@@ -92,25 +105,72 @@ enum Next {
 /// Idle, then UDisks2 or the missing-service wait. Returns `Outcome::Ok(())` on cancel and
 /// `Err` when the bus fails or the reducer's queue is closed, so the supervisor restarts it.
 async fn run_with<C: Connector>(cx: Cx, io: WorkerIo, connector: C) -> Outcome<(), WorkerError> {
-    let mut last = None;
+    let mut st = State {
+        last: None,
+        smart: BTreeMap::new(),
+        queue: Queue::resume(&io),
+    };
     loop {
         if let Some(stop) = idle(&cx, &io).await {
             return stop;
         }
         let next = match start_bus(&cx, &connector).await {
-            Ok((bus, objs)) => bus_loop(&cx, &io, bus, objs, &mut last).await,
+            Ok((bus, objs)) => bus_loop(&cx, &io, bus, objs, &mut st).await,
             Err(e) if unavailable(&e) => Next::Missing,
             Err(e) => fail(&cx, &e),
         };
         match next {
             Next::Idle => {}
             Next::Missing => {
-                if let Some(stop) = missing(&cx, &io, &mut last).await {
+                if let Some(stop) = missing(&cx, &io, &mut st).await {
                     return stop;
                 }
             }
             Next::Stop(outcome) => return outcome,
         }
+    }
+}
+
+/// What one worker generation keeps across bus sessions.
+struct State {
+    /// The last list sent.
+    last: Option<Vec<(DeviceIdentity, DiskDetails)>>,
+    /// SMART results by kernel disk name, set on every list this generation sends.
+    smart: BTreeMap<Arc<str>, InvField<Arc<SmartData>>>,
+    queue: Queue,
+}
+
+/// Where this generation is in the forwarded command list (R-276).
+struct Queue {
+    last_seq: u64,
+    progress: Arc<CommandProgress>,
+}
+
+impl Queue {
+    /// Starts after the last command an earlier generation started. A command that never
+    /// finished is counted as done and not run again.
+    fn resume(io: &WorkerIo) -> Self {
+        let progress = Arc::clone(&io.control.borrow_and_clone().progress);
+        let last_seq = progress.started(SourceId::Udisks);
+        if last_seq > progress.done(SourceId::Udisks) {
+            progress.set_done(SourceId::Udisks, last_seq);
+        }
+        Queue { last_seq, progress }
+    }
+
+    /// The commands for this worker queued after `last_seq`, oldest first. Moves `last_seq` to
+    /// the newest queued seq.
+    fn take(&mut self, control: &WorkerControl) -> Vec<(u64, WorkerCommand)> {
+        let new = control
+            .commands
+            .iter()
+            .filter(|c| c.seq > self.last_seq && c.target == SourceId::Udisks)
+            .map(|c| (c.seq, c.command.clone()))
+            .collect();
+        if let Some(newest) = control.commands.last() {
+            self.last_seq = self.last_seq.max(newest.seq);
+        }
+        new
     }
 }
 
@@ -153,11 +213,7 @@ async fn start_bus<C: Connector>(
 
 /// Step 2 without UDisks2: `Failed` health and an empty list, then a 60 s wait. `Some` on
 /// cancel or a closed queue. Returns early when demand ends.
-async fn missing(
-    cx: &Cx,
-    io: &WorkerIo,
-    last: &mut Option<Vec<(DeviceIdentity, DiskDetails)>>,
-) -> Option<Outcome<(), WorkerError>> {
+async fn missing(cx: &Cx, io: &WorkerIo, st: &mut State) -> Option<Outcome<(), WorkerError>> {
     let failed = health(SourceState::Failed, Some(NOT_AVAILABLE.into()));
     if let Some(stop) = send(cx, io, failed).await {
         return Some(stop);
@@ -165,7 +221,7 @@ async fn missing(
     if let Some(stop) = send(cx, io, disks(Vec::new())).await {
         return Some(stop);
     }
-    *last = Some(Vec::new());
+    st.last = Some(Vec::new());
     let retry = cx.now().as_nanos() + nanos(RESYNC);
     while cx.now().as_nanos() < retry {
         sleep(cx.now(), IDLE_RECHECK).await;
@@ -185,18 +241,21 @@ async fn bus_loop<B: UdisksBus>(
     io: &WorkerIo,
     mut bus: B,
     mut objs: ManagedObjects,
-    last: &mut Option<Vec<(DeviceIdentity, DiskDetails)>>,
+    st: &mut State,
 ) -> Next {
     if let Some(stop) = send(cx, io, health(SourceState::Running, None)).await {
         return Next::Stop(stop);
     }
     // A new session always sends its first listing.
-    *last = None;
-    if let Some(stop) = publish(cx, io, &objs, last).await {
+    st.last = None;
+    if let Some(stop) = publish(cx, io, &objs, st).await {
         return Next::Stop(stop);
     }
     let mut next_resync = cx.now().as_nanos() + nanos(RESYNC);
     loop {
+        if let Some(stop) = run_commands(cx, io, &mut bus, &objs, st).await {
+            return Next::Stop(stop);
+        }
         if !active(io) {
             return Next::Idle;
         }
@@ -221,7 +280,7 @@ async fn bus_loop<B: UdisksBus>(
                 Err(e) => return fail(cx, &e),
             }
         }
-        if let Some(stop) = publish(cx, io, &objs, last).await {
+        if let Some(stop) = publish(cx, io, &objs, st).await {
             return Next::Stop(stop);
         }
     }
@@ -263,21 +322,27 @@ fn apply_event(objs: &mut ManagedObjects, event: Event) -> bool {
     }
 }
 
-/// Sends the drive list when it differs from `last`.
+/// Sends the drive list, with the SMART results, when it differs from the last one.
 async fn publish(
     cx: &Cx,
     io: &WorkerIo,
     objs: &ManagedObjects,
-    last: &mut Option<Vec<(DeviceIdentity, DiskDetails)>>,
+    st: &mut State,
 ) -> Option<Outcome<(), WorkerError>> {
-    let entries = drives_from_objects(objs);
-    if last
+    let mut entries = drives_from_objects(objs);
+    for (identity, details) in &mut entries {
+        if let DeviceIdentity::Disk { name, .. } = identity {
+            details.smart_data = st.smart.get(name).cloned();
+        }
+    }
+    if st
+        .last
         .as_deref()
         .is_some_and(|prev| same_list(prev, &entries))
     {
         return None;
     }
-    *last = Some(entries.clone());
+    st.last = Some(entries.clone());
     send(cx, io, disks(entries)).await
 }
 
@@ -294,7 +359,17 @@ fn same_list(a: &[(DeviceIdentity, DiskDetails)], b: &[(DeviceIdentity, DiskDeta
                 && da.smart_temp_c == db.smart_temp_c
                 && da.ejectable == db.ejectable
                 && da.can_power_off == db.can_power_off
+                && same_smart(da.smart_data.as_ref(), db.smart_data.as_ref())
         })
+}
+
+/// `SmartData` has no `PartialEq`. Each result is a new `Arc`, so identity is enough.
+fn same_smart(a: Option<&InvField<Arc<SmartData>>>, b: Option<&InvField<Arc<SmartData>>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.validity == b.validity && Arc::ptr_eq(&a.value, &b.value),
+        _ => false,
+    }
 }
 
 fn disks(entries: Vec<(DeviceIdentity, DiskDetails)>) -> SourceUpdate {
@@ -350,6 +425,424 @@ fn dbus_name(e: &DbusError) -> &str {
 
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+// ---- SMART commands (E12-021) ----
+
+/// Runs the commands for this worker queued since the last call. `Some` on cancel or a closed
+/// queue. SMART failures go into the list, never into the worker's result.
+async fn run_commands<B: UdisksBus>(
+    cx: &Cx,
+    io: &WorkerIo,
+    bus: &mut B,
+    objs: &ManagedObjects,
+    st: &mut State,
+) -> Option<Outcome<(), WorkerError>> {
+    let control = io.control.borrow_and_clone();
+    for (seq, command) in st.queue.take(&control) {
+        if cx.checkpoint().is_err() {
+            return Some(Outcome::Ok(()));
+        }
+        st.queue.progress.set_started(SourceId::Udisks, seq);
+        if let WorkerCommand::Device(DeviceCommand::SmartRead { disk, update }) = command
+            && let Some(stop) = smart_read(cx, io, bus, objs, st, disk, update).await
+        {
+            return Some(stop);
+        }
+        st.queue.progress.set_done(SourceId::Udisks, seq);
+    }
+    None
+}
+
+/// One `SmartRead`: `WarmingUp`, then `Valid` or `Failed`, sending the list after each change.
+async fn smart_read<B: UdisksBus>(
+    cx: &Cx,
+    io: &WorkerIo,
+    bus: &mut B,
+    objs: &ManagedObjects,
+    st: &mut State,
+    disk: Arc<str>,
+    update: bool,
+) -> Option<Outcome<(), WorkerError>> {
+    let found = disk_records(objs)
+        .into_iter()
+        .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
+        .map(|(path, _, details)| (path.to_owned(), details.smart));
+    let (path, kind) = match found {
+        None => {
+            st.smart.insert(disk, smart_failed(SMART_NOT_FOUND));
+            return publish(cx, io, objs, st).await;
+        }
+        Some((_, SmartKind::NeedsFallback | SmartKind::None)) => {
+            st.smart.insert(disk, smart_failed(SMART_NONE));
+            return publish(cx, io, objs, st).await;
+        }
+        Some(found) => found,
+    };
+    st.smart.insert(Arc::clone(&disk), smart_warming());
+    if let Some(stop) = publish(cx, io, objs, st).await {
+        return Some(stop);
+    }
+    let result = if kind == SmartKind::Ata {
+        read_ata(cx, bus, &path, update).await
+    } else {
+        read_nvme(cx, bus, &path, update).await
+    };
+    let field = match result {
+        Ok(data) => valid(Arc::new(data)),
+        Err(e) => {
+            if cx.checkpoint().is_err() {
+                return Some(Outcome::Ok(()));
+            }
+            smart_failed(smart_error(&e))
+        }
+    };
+    st.smart.insert(disk, field);
+    publish(cx, io, objs, st).await
+}
+
+async fn read_ata<B: UdisksBus>(
+    cx: &Cx,
+    bus: &mut B,
+    path: &str,
+    update: bool,
+) -> Result<SmartData, DbusError> {
+    if update {
+        bus.smart_update(cx, path, ATA_IFACE).await?;
+    }
+    let attrs = bus.ata_attributes(cx, path).await?;
+    let p = bus.properties(cx, path, ATA_IFACE).await?;
+    let props = AtaSmartProps {
+        updated_s: uint_prop(&p, "SmartUpdated"),
+        failing: flag(Some(&p), "SmartFailing").unwrap_or(false),
+        power_on_s: uint_prop(&p, "SmartPowerOnSeconds"),
+        selftest_status: str_prop(&p, "SmartSelftestStatus"),
+    };
+    Ok(smart_from_ata(&attrs, &props, now_s()))
+}
+
+async fn read_nvme<B: UdisksBus>(
+    cx: &Cx,
+    bus: &mut B,
+    path: &str,
+    update: bool,
+) -> Result<SmartData, DbusError> {
+    if update {
+        bus.smart_update(cx, path, NVME_CONTROLLER_IFACE).await?;
+    }
+    let mut map = bus.nvme_attributes(cx, path).await?;
+    let p = bus.properties(cx, path, NVME_CONTROLLER_IFACE).await?;
+    // The temperature fallback when the map has no `temp_sensors`.
+    if let Some(t) = p.get("SmartTemperature") {
+        map.entry("SmartTemperature".to_owned())
+            .or_insert_with(|| t.clone());
+    }
+    let critical_warning = match p.get("SmartCriticalWarning").map(|v| unwrap_variant(v)) {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|v| match v {
+                Value::Str(s) => Some(clean(s)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let props = NvmeSmartProps {
+        updated_s: uint_prop(&p, "SmartUpdated"),
+        critical_warning,
+        power_on_hours: uint_prop(&p, "SmartPowerOnHours"),
+        selftest_status: str_prop(&p, "SmartSelftestStatus"),
+    };
+    Ok(smart_from_nvme(&map, &props, now_s()))
+}
+
+/// The text the SMART window shows for a failed call.
+fn smart_error(e: &DbusError) -> &str {
+    match e {
+        DbusError::Timeout(_) => SMART_NO_ANSWER,
+        DbusError::Call { name, .. }
+            if &**name == "org.freedesktop.UDisks2.Error.NotAuthorizedDismissed"
+                || &**name == "org.freedesktop.UDisks2.Error.NotAuthorized" =>
+        {
+            SMART_DENIED
+        }
+        other => dbus_name(other),
+    }
+}
+
+/// Wall-clock seconds since the Unix epoch, as UDisks2's `SmartUpdated`.
+fn now_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn empty_smart(health: InvField<Arc<str>>) -> Arc<SmartData> {
+    Arc::new(SmartData {
+        updated_s: 0,
+        health,
+        power_on_s: unsupported(),
+        selftest: unsupported(),
+        ata: Arc::from([]),
+        nvme: Arc::from([]),
+    })
+}
+
+/// "Reading SMART data".
+fn smart_warming() -> InvField<Arc<SmartData>> {
+    InvField {
+        value: empty_smart(unsupported()),
+        validity: Validity::WarmingUp,
+    }
+}
+
+/// A failed read. The reason is the `health` text, also `Failed`.
+fn smart_failed(reason: &str) -> InvField<Arc<SmartData>> {
+    let health = InvField {
+        value: Arc::from(reason),
+        validity: Validity::Failed,
+    };
+    InvField {
+        value: empty_smart(health),
+        validity: Validity::Failed,
+    }
+}
+
+// ---- SMART parsers ----
+
+/// One `Drive.Ata.SmartGetAttributes` entry, without the expansion dictionary.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AtaAttrRaw {
+    pub id: u8,
+    pub name: String,
+    pub flags: u16,
+    pub value: i32,
+    pub worst: i32,
+    pub threshold: i32,
+    pub pretty: i64,
+    pub pretty_unit: i32,
+}
+
+/// The `Drive.Ata` SMART properties.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AtaSmartProps {
+    pub updated_s: u64,
+    pub failing: bool,
+    pub power_on_s: u64,
+    pub selftest_status: String,
+}
+
+/// The `NVMe.Controller` SMART properties.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NvmeSmartProps {
+    pub updated_s: u64,
+    pub critical_warning: Vec<String>,
+    pub power_on_hours: u64,
+    pub selftest_status: String,
+}
+
+/// `SmartData` for an ATA drive.
+pub fn smart_from_ata(attrs: &[AtaAttrRaw], props: &AtaSmartProps, now_s: i64) -> SmartData {
+    let health = if props.failing { "Failing" } else { "OK" };
+    SmartData {
+        updated_s: updated(props.updated_s, now_s),
+        health: valid(Arc::from(health)),
+        power_on_s: opt((props.power_on_s > 0).then_some(props.power_on_s)),
+        selftest: selftest(&props.selftest_status),
+        ata: attrs.iter().map(ata_attr).collect(),
+        nvme: Arc::from([]),
+    }
+}
+
+/// `pretty_unit` follows libblockdev's `BDSmartATAAttributeUnit`: 0 unknown, 1 none,
+/// 2 milliseconds, 3 sectors, 4 millikelvin.
+fn ata_attr(a: &AtaAttrRaw) -> SmartAttr {
+    let value = match a.pretty_unit {
+        2 => a.pretty / 1000,
+        4 => a.pretty / 1000 - 273,
+        _ => a.pretty,
+    };
+    let prefail = a.flags & 0x1 != 0;
+    let at_threshold = a.threshold > 0 && a.value <= a.threshold;
+    let assessment = match (at_threshold, prefail) {
+        (true, true) => "Failing",
+        (true, false) => "Failed in the past",
+        (false, _) => "OK",
+    };
+    SmartAttr {
+        id: a.id,
+        name: Arc::from(clean(&a.name)),
+        value,
+        normalized: a.value,
+        threshold: a.threshold,
+        worst: a.worst,
+        prefail,
+        online: a.flags & 0x2 != 0,
+        assessment: Arc::from(assessment),
+    }
+}
+
+/// `SmartData` for an NVMe controller. `map` is the `SmartGetAttributes` dictionary; it may also
+/// carry the controller's `SmartTemperature` property for the temperature row.
+pub fn smart_from_nvme(
+    map: &BTreeMap<String, OwnedValue>,
+    props: &NvmeSmartProps,
+    now_s: i64,
+) -> SmartData {
+    let get = |key: &str| map.get(key).and_then(|v| uint(v));
+    let mut rows: Vec<(Arc<str>, Arc<str>)> = Vec::new();
+    let mut row = |label: &str, text: String| rows.push((Arc::from(label), Arc::from(text)));
+
+    let warning = props.critical_warning.join(", ");
+    let warning_text = if warning.is_empty() {
+        "None".to_owned()
+    } else {
+        warning.clone()
+    };
+    row("Critical warning", warning_text);
+    let kelvin = map
+        .get("temp_sensors")
+        .and_then(|v| match unwrap_variant(v) {
+            Value::Array(a) => a.iter().next().and_then(uint),
+            _ => None,
+        })
+        .or_else(|| get("SmartTemperature"))
+        .filter(|k| *k > 0);
+    if let Some(k) = kelvin {
+        let mut text = String::new();
+        units::celsius(&mut text, (k as f64 - KELVIN_ZERO) as f32);
+        row("Temperature", text);
+    }
+    let fields: [(&str, &str, fn(u64) -> String); 13] = [
+        ("avail_spare", "Available spare", percent),
+        ("spare_thresh", "Available spare threshold", percent),
+        ("percent_used", "Percentage used", percent),
+        ("total_data_read", "Data read", si_bytes),
+        ("total_data_written", "Data written", si_bytes),
+        ("ctrl_busy_time", "Controller busy time", minutes),
+        ("power_cycles", "Power cycles", count),
+        ("", "Power-on hours", count),
+        ("unsafe_shutdowns", "Unsafe shutdowns", count),
+        ("media_errors", "Media and data integrity errors", count),
+        ("num_err_log_entries", "Error log entries", count),
+        ("warning_temp_time", "Warning temperature time", minutes),
+        ("critical_temp_time", "Critical temperature time", minutes),
+    ];
+    for (key, label, format) in fields {
+        // Power-on hours is a property, not a map key.
+        let n = if key.is_empty() {
+            Some(props.power_on_hours)
+        } else {
+            get(key)
+        };
+        if let Some(n) = n {
+            row(label, format(n));
+        }
+    }
+
+    let health = if warning.is_empty() {
+        "OK".to_owned()
+    } else {
+        format!("Warning: {warning}")
+    };
+    SmartData {
+        updated_s: updated(props.updated_s, now_s),
+        health: valid(Arc::from(health)),
+        power_on_s: valid(props.power_on_hours.saturating_mul(3600)),
+        selftest: selftest(&props.selftest_status),
+        ata: Arc::from([]),
+        nvme: rows.into(),
+    }
+}
+
+fn percent(n: u64) -> String {
+    format!("{n} %")
+}
+
+fn minutes(n: u64) -> String {
+    format!("{n} min")
+}
+
+fn count(n: u64) -> String {
+    n.to_string()
+}
+
+/// SI sizes with one decimal: "512 B", "12.0 TB".
+fn si_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "kB", "MB", "GB", "TB", "PB"];
+    if n < 1000 {
+        return format!("{n} B");
+    }
+    let mut v = n as f64;
+    let mut i = 0;
+    // {:.1} prints 1000.0 or more exactly when v >= 999.95.
+    while v >= 999.95 && i + 1 < UNITS.len() {
+        v /= 1000.0;
+        i += 1;
+    }
+    format!("{v:.1} {}", UNITS[i])
+}
+
+/// `SmartUpdated`, never later than now. 0 means never read.
+fn updated(updated_s: u64, now_s: i64) -> i64 {
+    i64::try_from(updated_s).unwrap_or(i64::MAX).min(now_s)
+}
+
+/// The UDisks2 self-test status word as the SMART window text. Unknown words are shown as is.
+fn selftest(word: &str) -> InvField<Arc<str>> {
+    let text = match word {
+        "" => return unsupported(),
+        "success" => "Completed without error".to_owned(),
+        "inprogress" => "In progress".to_owned(),
+        "aborted" => "Aborted".to_owned(),
+        "fatal" => "Failed (fatal error)".to_owned(),
+        "interrupted" => "Interrupted".to_owned(),
+        other => match other.strip_prefix("error_") {
+            Some(kind) => format!("Failed ({})", clean(kind)),
+            None => clean(other),
+        },
+    };
+    valid(Arc::from(text))
+}
+
+/// A bus string, sanitized and cut at `TEXT_MAX`.
+fn clean(s: &str) -> String {
+    let mut out = String::new();
+    sanitize_text(s.as_bytes(), TEXT_MAX, &mut out);
+    out
+}
+
+/// The value inside any variant wrappers.
+fn unwrap_variant<'a>(v: &'a Value<'a>) -> &'a Value<'a> {
+    match v {
+        Value::Value(inner) => unwrap_variant(inner),
+        other => other,
+    }
+}
+
+/// Any non-negative integer value.
+fn uint(v: &Value) -> Option<u64> {
+    match unwrap_variant(v) {
+        Value::U8(n) => Some(u64::from(*n)),
+        Value::U16(n) => Some(u64::from(*n)),
+        Value::U32(n) => Some(u64::from(*n)),
+        Value::U64(n) => Some(*n),
+        Value::I16(n) => u64::try_from(*n).ok(),
+        Value::I32(n) => u64::try_from(*n).ok(),
+        Value::I64(n) => u64::try_from(*n).ok(),
+        _ => None,
+    }
+}
+
+fn uint_prop(p: &Props, key: &str) -> u64 {
+    p.get(key).and_then(|v| uint(v)).unwrap_or(0)
+}
+
+fn str_prop(p: &Props, key: &str) -> String {
+    match p.get(key).map(|v| unwrap_variant(v)) {
+        Some(Value::Str(s)) => s.as_str().to_owned(),
+        _ => String::new(),
+    }
 }
 
 // ---- Building `DiskDetails` ----
@@ -426,6 +919,14 @@ fn split_dev(dev: u64) -> (u32, u32) {
 /// Every whole-disk block device that has a drive, in object path order. A block is a whole
 /// disk when it has no `Partition` interface. Missing drive properties leave fields `None`.
 pub fn drives_from_objects(objs: &ManagedObjects) -> Vec<(DeviceIdentity, DiskDetails)> {
+    disk_records(objs)
+        .into_iter()
+        .map(|(_, identity, details)| (identity, details))
+        .collect()
+}
+
+/// `drives_from_objects` with each disk's drive object path.
+fn disk_records(objs: &ManagedObjects) -> Vec<(&str, DeviceIdentity, DiskDetails)> {
     let mut out = Vec::new();
     for ifaces in objs.0.values() {
         let Some(block) = ifaces.get(BLOCK_IFACE) else {
@@ -482,7 +983,7 @@ pub fn drives_from_objects(objs: &ManagedObjects) -> Vec<(DeviceIdentity, DiskDe
             can_power_off: flag(drive, "CanPowerOff").unwrap_or(false),
             ..DiskDetails::default()
         };
-        out.push((identity, details));
+        out.push((drive_path, identity, details));
     }
     out
 }
@@ -516,7 +1017,7 @@ trait Connector: Send + Sync + 'static {
     fn open(&self, cx: &Cx) -> impl Future<Output = Result<Self::Bus, DbusError>> + Send;
 }
 
-/// The one call and the signal stream the worker uses.
+/// The calls and the signal stream the worker uses.
 trait UdisksBus {
     /// `GetManagedObjects` on `ROOT`.
     fn managed_objects(
@@ -529,6 +1030,33 @@ trait UdisksBus {
         cx: &Cx,
         d: Duration,
     ) -> impl Future<Output = Result<Option<Event>, DbusError>> + Send;
+    /// `SmartUpdate({})` on `iface` (`Drive.Ata` or `NVMe.Controller`) of the drive at `path`.
+    /// This can wake a sleeping disk.
+    fn smart_update(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+        iface: &'static str,
+    ) -> impl Future<Output = Result<(), DbusError>> + Send;
+    /// `Drive.Ata.SmartGetAttributes({})`.
+    fn ata_attributes(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+    ) -> impl Future<Output = Result<Vec<AtaAttrRaw>, DbusError>> + Send;
+    /// `NVMe.Controller.SmartGetAttributes({})`.
+    fn nvme_attributes(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+    ) -> impl Future<Output = Result<Props, DbusError>> + Send;
+    /// `Properties.GetAll(iface)` on `path`.
+    fn properties(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+        iface: &'static str,
+    ) -> impl Future<Output = Result<Props, DbusError>> + Send;
 }
 
 struct SystemConnector;
@@ -577,6 +1105,8 @@ fn call_error(e: &impl std::fmt::Display) -> DbusError {
 }
 
 type RawProps = HashMap<String, OwnedValue>;
+/// One `SmartGetAttributes` entry, signature `(ysqiiixia{sv})`.
+type RawAtaAttr = (u8, String, u16, i32, i32, i32, i64, i32, RawProps);
 type RawInterfaces = HashMap<String, RawProps>;
 
 fn interfaces(raw: RawInterfaces) -> Interfaces {
@@ -650,6 +1180,81 @@ impl UdisksBus for SystemUdisks {
         };
         Ok(event_from(&msg).unwrap_or(Some(Event::Lost)))
     }
+
+    async fn smart_update(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+        iface: &'static str,
+    ) -> Result<(), DbusError> {
+        let options = RawProps::new();
+        let call =
+            self.conn
+                .raw()
+                .call_method(Some(BUS), path, Some(iface), "SmartUpdate", &(options,));
+        self.conn.call(cx, SMART_UPDATE_TIMEOUT, call).await?;
+        Ok(())
+    }
+
+    async fn ata_attributes(&mut self, cx: &Cx, path: &str) -> Result<Vec<AtaAttrRaw>, DbusError> {
+        let options = RawProps::new();
+        let call = self.conn.raw().call_method(
+            Some(BUS),
+            path,
+            Some(ATA_IFACE),
+            "SmartGetAttributes",
+            &(options,),
+        );
+        let msg = self.conn.call(cx, SMART_READ_TIMEOUT, call).await?;
+        let raw: Vec<RawAtaAttr> = msg.body().deserialize().map_err(|e| call_error(&e))?;
+        Ok(raw
+            .into_iter()
+            .map(
+                |(id, name, flags, value, worst, threshold, pretty, pretty_unit, _)| AtaAttrRaw {
+                    id,
+                    name,
+                    flags,
+                    value,
+                    worst,
+                    threshold,
+                    pretty,
+                    pretty_unit,
+                },
+            )
+            .collect())
+    }
+
+    async fn nvme_attributes(&mut self, cx: &Cx, path: &str) -> Result<Props, DbusError> {
+        let options = RawProps::new();
+        let call = self.conn.raw().call_method(
+            Some(BUS),
+            path,
+            Some(NVME_CONTROLLER_IFACE),
+            "SmartGetAttributes",
+            &(options,),
+        );
+        let msg = self.conn.call(cx, SMART_READ_TIMEOUT, call).await?;
+        let raw: RawProps = msg.body().deserialize().map_err(|e| call_error(&e))?;
+        Ok(raw.into_iter().collect())
+    }
+
+    async fn properties(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+        iface: &'static str,
+    ) -> Result<Props, DbusError> {
+        let call = self.conn.raw().call_method(
+            Some(BUS),
+            path,
+            Some(PROPERTIES_IFACE),
+            "GetAll",
+            &(iface,),
+        );
+        let msg = self.conn.read(cx, call).await?;
+        let raw: RawProps = msg.body().deserialize().map_err(|e| call_error(&e))?;
+        Ok(raw.into_iter().collect())
+    }
 }
 
 #[cfg(test)]
@@ -667,7 +1272,7 @@ mod tests {
     use tl_model::settings::EngineSettings;
     use zbus::zvariant::ObjectPath;
 
-    use crate::source::WorkerControl;
+    use crate::source::QueuedCommand;
 
     const SDA: &str = "/org/freedesktop/UDisks2/block_devices/sda";
     const SDA1: &str = "/org/freedesktop/UDisks2/block_devices/sda1";
@@ -871,6 +1476,12 @@ mod tests {
         objects: Option<ManagedObjects>,
         events: VecDeque<Event>,
         opens: u32,
+        /// Method names in call order, besides `GetManagedObjects`.
+        calls: Vec<&'static str>,
+        /// The D-Bus error name `SmartUpdate` answers with.
+        update_error: Option<&'static str>,
+        ata_attrs: Vec<AtaAttrRaw>,
+        ata_props: Props,
     }
 
     #[derive(Clone, Default)]
@@ -912,6 +1523,53 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn smart_update(
+            &mut self,
+            _cx: &Cx,
+            _path: &str,
+            _iface: &'static str,
+        ) -> Result<(), DbusError> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.calls.push("SmartUpdate");
+            match state.update_error {
+                Some(name) => Err(DbusError::Call {
+                    name: name.into(),
+                    message: "denied".into(),
+                }),
+                None => Ok(()),
+            }
+        }
+
+        async fn ata_attributes(
+            &mut self,
+            _cx: &Cx,
+            _path: &str,
+        ) -> Result<Vec<AtaAttrRaw>, DbusError> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.calls.push("SmartGetAttributes");
+            Ok(state.ata_attrs.clone())
+        }
+
+        async fn nvme_attributes(&mut self, _cx: &Cx, _path: &str) -> Result<Props, DbusError> {
+            self.0
+                .lock()
+                .expect("fake lock")
+                .calls
+                .push("SmartGetAttributes");
+            Ok(Props::new())
+        }
+
+        async fn properties(
+            &mut self,
+            _cx: &Cx,
+            _path: &str,
+            _iface: &'static str,
+        ) -> Result<Props, DbusError> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.calls.push("GetAll");
+            Ok(state.ata_props.clone())
+        }
     }
 
     struct Rig {
@@ -919,7 +1577,8 @@ mod tests {
         rx: mpsc::Receiver<EngineMsg>,
         demand_tx: watch::Sender<Demand>,
         _settings_tx: watch::Sender<EngineSettings>,
-        _control_tx: watch::Sender<WorkerControl>,
+        control_tx: watch::Sender<WorkerControl>,
+        progress: Arc<CommandProgress>,
         handle: asupersync::runtime::TaskHandle<()>,
     }
 
@@ -934,6 +1593,7 @@ mod tests {
             let (demand_tx, demand) = watch::channel(demand);
             let (settings_tx, settings) = watch::channel(EngineSettings::default());
             let (control_tx, control) = watch::channel(WorkerControl::default());
+            let progress = Arc::clone(&control.borrow_and_clone().progress);
             let io = WorkerIo::new(
                 updates,
                 demand,
@@ -956,7 +1616,8 @@ mod tests {
                 rx,
                 demand_tx,
                 _settings_tx: settings_tx,
-                _control_tx: control_tx,
+                control_tx,
+                progress,
                 handle,
             }
         }
@@ -966,6 +1627,24 @@ mod tests {
             // `run_until_idle` stops when no task is ready; one step fires the due timers.
             self.lab.step_for_test();
             self.lab.run_until_idle();
+        }
+
+        /// Queues one `SmartRead` as the reducer forwards it.
+        fn smart_read(&mut self, seq: u64, disk: &str, update: bool) {
+            let command = QueuedCommand {
+                seq,
+                target: SourceId::Udisks,
+                command: WorkerCommand::Device(DeviceCommand::SmartRead {
+                    disk: disk.into(),
+                    update,
+                }),
+            };
+            let control = WorkerControl {
+                reset_generation: 0,
+                commands: Arc::from([command]),
+                progress: Arc::clone(&self.progress),
+            };
+            self.control_tx.send(control).expect("control send");
         }
 
         fn drain(&mut self) -> Vec<SourceUpdate> {
@@ -1157,6 +1836,303 @@ mod tests {
         let list = entries(&got[0]).expect("Disks");
         assert!(matches!(&list[0].0, DeviceIdentity::Disk { name, .. } if &**name == "sdb"));
         rig.finish();
+    }
+
+    // ---- SMART ----
+
+    fn reallocated(value: i32) -> AtaAttrRaw {
+        AtaAttrRaw {
+            id: 5,
+            name: "reallocated-sector-count".into(),
+            flags: 0x33,
+            value,
+            worst: 100,
+            threshold: 10,
+            pretty: 0,
+            pretty_unit: 3,
+        }
+    }
+
+    fn ata_props() -> AtaSmartProps {
+        AtaSmartProps {
+            updated_s: 1_700_000_000,
+            failing: false,
+            power_on_s: 3600,
+            selftest_status: "success".into(),
+        }
+    }
+
+    #[test]
+    fn ata_attr_ok() {
+        let data = smart_from_ata(&[reallocated(100)], &ata_props(), 1_800_000_000);
+        assert_eq!(
+            data.ata[..],
+            [SmartAttr {
+                id: 5,
+                name: "reallocated-sector-count".into(),
+                value: 0,
+                normalized: 100,
+                threshold: 10,
+                worst: 100,
+                prefail: true,
+                online: true,
+                assessment: "OK".into(),
+            }]
+        );
+        assert!(data.nvme.is_empty());
+        assert_eq!(data.updated_s, 1_700_000_000);
+        assert_eq!(data.health, valid(Arc::from("OK")));
+        assert_eq!(data.power_on_s, valid(3600));
+        assert_eq!(data.selftest, valid(Arc::from("Completed without error")));
+    }
+
+    #[test]
+    fn ata_attr_failing() {
+        let data = smart_from_ata(&[reallocated(8)], &ata_props(), 1_800_000_000);
+        assert_eq!(&*data.ata[0].assessment, "Failing");
+
+        // An old-age attribute at its threshold failed in the past.
+        let mut old_age = reallocated(8);
+        old_age.flags = 0x32;
+        let props = AtaSmartProps {
+            failing: true,
+            power_on_s: 0,
+            ..ata_props()
+        };
+        let data = smart_from_ata(&[old_age], &props, 1_800_000_000);
+        assert_eq!(&*data.ata[0].assessment, "Failed in the past");
+        assert!(!data.ata[0].prefail);
+        assert_eq!(data.health, valid(Arc::from("Failing")));
+        assert_eq!(data.power_on_s.validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn ata_temp_unit() {
+        let temp = AtaAttrRaw {
+            id: 194,
+            name: "temperature-celsius-2".into(),
+            flags: 0x22,
+            value: 65,
+            worst: 50,
+            threshold: 0,
+            pretty: 308_150,
+            pretty_unit: 4,
+        };
+        let hours = AtaAttrRaw {
+            id: 9,
+            name: "power-on-hours".into(),
+            pretty: 7_200_000,
+            pretty_unit: 2,
+            ..temp.clone()
+        };
+        let data = smart_from_ata(&[temp, hours], &ata_props(), 1_800_000_000);
+        assert_eq!(data.ata[0].value, 35);
+        assert_eq!(&*data.ata[0].assessment, "OK", "threshold 0 never fails");
+        assert_eq!(data.ata[1].value, 7200, "milliseconds as seconds");
+    }
+
+    #[test]
+    fn selftest_words() {
+        let cases = [
+            ("success", "Completed without error"),
+            ("inprogress", "In progress"),
+            ("aborted", "Aborted"),
+            ("fatal", "Failed (fatal error)"),
+            ("error_unknown", "Failed (unknown)"),
+            ("error_electrical", "Failed (electrical)"),
+            ("error_servo", "Failed (servo)"),
+            ("error_read", "Failed (read)"),
+            ("error_handling", "Failed (handling)"),
+            ("interrupted", "Interrupted"),
+        ];
+        for (word, text) in cases {
+            assert_eq!(selftest(word), valid(Arc::from(text)), "{word}");
+        }
+        assert_eq!(selftest("").validity, Validity::Unsupported);
+    }
+
+    #[test]
+    fn nvme_rows_and_health() {
+        let map = props(vec![
+            ("avail_spare", Value::U8(100)),
+            ("percent_used", Value::U8(3)),
+            ("total_data_written", Value::U64(12_000_000_000_000)),
+        ]);
+        let mut p = NvmeSmartProps {
+            updated_s: 1_700_000_000,
+            critical_warning: Vec::new(),
+            power_on_hours: 10,
+            selftest_status: String::new(),
+        };
+        let data = smart_from_nvme(&map, &p, 1_800_000_000);
+        let rows: Vec<(&str, &str)> = data.nvme.iter().map(|(k, v)| (&**k, &**v)).collect();
+        assert_eq!(
+            rows,
+            [
+                ("Critical warning", "None"),
+                ("Available spare", "100 %"),
+                ("Percentage used", "3 %"),
+                ("Data written", "12.0 TB"),
+                ("Power-on hours", "10"),
+            ]
+        );
+        assert!(data.ata.is_empty());
+        assert_eq!(data.health, valid(Arc::from("OK")));
+        assert_eq!(data.power_on_s, valid(36_000));
+        assert_eq!(data.selftest.validity, Validity::Unsupported);
+
+        // Temperature from the property when the map has no sensors.
+        let mut map = map;
+        map.insert("SmartTemperature".into(), OwnedValue::from(308u16));
+        p.critical_warning = vec!["spare".into(), "temperature".into()];
+        let data = smart_from_nvme(&map, &p, 1_800_000_000);
+        assert_eq!(
+            (&*data.nvme[1].0, &*data.nvme[1].1),
+            ("Temperature", "35 °C")
+        );
+        assert_eq!(&*data.nvme[0].1, "spare, temperature");
+        assert_eq!(data.health, valid(Arc::from("Warning: spare, temperature")));
+    }
+
+    #[test]
+    fn si_bytes_steps() {
+        assert_eq!(si_bytes(999), "999 B");
+        assert_eq!(si_bytes(1000), "1.0 kB");
+        assert_eq!(si_bytes(999_960), "1.0 MB");
+        assert_eq!(si_bytes(12_000_000_000_000), "12.0 TB");
+    }
+
+    fn smart_of(update: &SourceUpdate, disk: &str) -> Option<InvField<Arc<SmartData>>> {
+        entries(update)?
+            .iter()
+            .find_map(|(identity, d)| match identity {
+                DeviceIdentity::Disk { name, .. } if &**name == disk => d.smart_data.clone(),
+                _ => None,
+            })
+    }
+
+    fn calls(fake: &Arc<Mutex<FakeState>>) -> Vec<&'static str> {
+        fake.lock().expect("fake lock").calls.clone()
+    }
+
+    #[test]
+    fn smart_update_denied() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.objects = Some(sata_objects());
+            state.update_error = Some("org.freedesktop.UDisks2.Error.NotAuthorizedDismissed");
+        }
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.smart_read(1, "sda", true);
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let first = smart_of(&got[0], "sda").expect("smart_data");
+        assert_eq!(first.validity, Validity::WarmingUp);
+        let second = smart_of(&got[1], "sda").expect("smart_data");
+        assert_eq!(second.validity, Validity::Failed);
+        assert_eq!(&*second.value.health.value, SMART_DENIED);
+        assert_eq!(calls(&fake), ["SmartUpdate"]);
+        assert_eq!(rig.progress.done(SourceId::Udisks), 1);
+
+        // The result stays on later lists, and the same command does not run again.
+        rig.advance(SIGNAL_WAIT);
+        assert!(rig.drain().is_empty());
+        assert_eq!(calls(&fake), ["SmartUpdate"]);
+        rig.finish();
+    }
+
+    #[test]
+    fn smart_read_without_update() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.objects = Some(sata_objects());
+            state.ata_attrs = vec![reallocated(100)];
+            state.ata_props = props(vec![
+                ("SmartUpdated", Value::U64(1_700_000_000)),
+                ("SmartFailing", Value::Bool(false)),
+                ("SmartPowerOnSeconds", Value::U64(7200)),
+                ("SmartSelftestStatus", Value::from("error_read")),
+            ]);
+        }
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+        rig.smart_read(1, "sda", false);
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let data = smart_of(&got[1], "sda").expect("smart_data");
+        assert_eq!(data.validity, Validity::Valid);
+        assert_eq!(data.value.ata.len(), 1);
+        assert_eq!(data.value.power_on_s, valid(7200));
+        assert_eq!(data.value.selftest, valid(Arc::from("Failed (read)")));
+        assert_eq!(calls(&fake), ["SmartGetAttributes", "GetAll"]);
+        rig.finish();
+    }
+
+    #[test]
+    fn needs_fallback_no_call() {
+        let drive = props(vec![("Model", Value::from("Samsung SSD 980"))]);
+        let objs = ManagedObjects(BTreeMap::from([
+            (
+                NVME.to_owned(),
+                object(vec![(
+                    BLOCK_IFACE,
+                    block(makedev(259, 0), "/dev/nvme0n1", NVME_DRIVE),
+                )]),
+            ),
+            (NVME_DRIVE.to_owned(), object(vec![(DRIVE_IFACE, drive)])),
+        ]));
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(objs);
+        // Disks are not demanded: the command alone opens the bus.
+        let mut rig = Rig::start(connector, false);
+        assert!(rig.drain().is_empty());
+
+        rig.smart_read(1, "nvme0n1", false);
+        rig.advance(IDLE_RECHECK);
+        let got = rig.drain();
+        assert_eq!(opens(&fake), 1);
+        assert_eq!(got.len(), 3, "{got:?}");
+        assert_eq!(smart_of(&got[1], "nvme0n1").map(|s| s.validity), None);
+        let data = smart_of(&got[2], "nvme0n1").expect("smart_data");
+        assert_eq!(data.validity, Validity::Failed);
+        assert_eq!(&*data.value.health.value, SMART_NONE);
+        assert!(calls(&fake).is_empty(), "no D-Bus call");
+
+        // An unknown disk.
+        rig.smart_read(2, "sdz", false);
+        rig.advance(IDLE_RECHECK);
+        assert!(calls(&fake).is_empty());
+        assert_eq!(rig.progress.done(SourceId::Udisks), 2);
+        rig.finish();
+    }
+
+    #[test]
+    fn smart_error_texts() {
+        let call = |name: &str| DbusError::Call {
+            name: name.into(),
+            message: "detail".into(),
+        };
+        assert_eq!(
+            smart_error(&call("org.freedesktop.UDisks2.Error.NotAuthorized")),
+            SMART_DENIED
+        );
+        assert_eq!(
+            smart_error(&DbusError::Timeout(SMART_UPDATE_TIMEOUT)),
+            SMART_NO_ANSWER
+        );
+        assert_eq!(
+            smart_error(&call("org.freedesktop.UDisks2.Error.Failed")),
+            "org.freedesktop.UDisks2.Error.Failed"
+        );
     }
 
     #[test]
