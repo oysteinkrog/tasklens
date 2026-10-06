@@ -2146,3 +2146,202 @@ fn valid<T>(value: T) -> tl_model::snapshot::InvField<T> {
         validity: Validity::Valid,
     }
 }
+
+// E12-010: CPU static info ------------------------------------------------------------------
+
+use std::sync::{Mutex, PoisonError};
+
+use asupersync::runtime::RuntimeBuilder;
+use tl_collect::parse::topology::read_topology;
+use tl_engine::dbus::CONNECT_TIMEOUT;
+use tl_engine::workers::cpu::{CpuBusFacts, build_static, build_static_in, read_bus_facts};
+use tl_model::snapshot::{CpuStaticInfo, InvField, RaplState, VirtState};
+
+/// Held by the tests that connect to the system bus, since one of them changes
+/// `DBUS_SYSTEM_BUS_ADDRESS` for the whole test process.
+static SYSTEM_BUS_ENV: Mutex<()> = Mutex::new(());
+
+fn bare_metal_facts(ppd_profile: InvField<Arc<str>>) -> CpuBusFacts {
+    CpuBusFacts {
+        running_in_vm: valid(Arc::from("")),
+        ppd_profile,
+    }
+}
+
+fn unsupported<T: Default>() -> InvField<T> {
+    InvField {
+        value: T::default(),
+        validity: Validity::Unsupported,
+    }
+}
+
+/// The `CpuStaticInfo` waiting in `take_extra`, if any.
+fn take_static(src: &mut CpuSource) -> Option<Arc<CpuStaticInfo>> {
+    match src.take_extra() {
+        Some(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Cpu(info))) => Some(info),
+        None => None,
+        Some(other) => panic!("expected DeviceDetails::Cpu, got {other:?}"),
+    }
+}
+
+/// `build_static` on `dir` with the topology read from it.
+fn static_at(dir: &Path, facts: &CpuBusFacts) -> CpuStaticInfo {
+    let root = SysRoot::at(dir);
+    let topo = read_topology(&root).expect("fixture topology reads");
+    build_static(&root, &topo, facts)
+}
+
+#[test]
+fn cpu_static_owner_desktop() {
+    let dir = fixture_copy("owner-desktop", None);
+    let topo = read_topology(&SysRoot::at(&dir)).expect("fixture topology reads");
+    let mut src = cpu_source(&dir).with_facts(bare_metal_facts(unsupported()));
+    assert!(
+        take_static(&mut src).is_none(),
+        "nothing before the first sample"
+    );
+    let (mut src, _) = cpu_sample(src, SEC);
+    let info = take_static(&mut src).expect("the first sample sends the static info");
+    assert_eq!(info.driver, valid(Arc::from("amd-pstate-epp")));
+    assert_eq!(info.governor, valid(Arc::from("powersave")));
+    assert_eq!(info.epp, valid(Arc::from("balance_performance")));
+    assert_eq!(info.cores, topo.cores);
+    assert_eq!(info.logical, topo.logical_count);
+    assert!(info.caches.l3.is_some());
+    assert_eq!(info.running_in_vm, valid(Arc::from("")));
+}
+
+#[test]
+fn cpu_static_once_per_topology() {
+    let dir = fixture_copy("owner-desktop", None);
+    let src = cpu_source(&dir).with_facts(bare_metal_facts(unsupported()));
+    let (mut src, _) = cpu_sample(src, SEC);
+    assert!(take_static(&mut src).is_some());
+    let (mut src, _) = cpu_sample(src, 2 * SEC);
+    assert!(take_static(&mut src).is_none(), "no hotplug, no resend");
+}
+
+#[test]
+fn cpu_static_hotplug_resend() {
+    let dir = fixture_copy("cpu-hotplug", Some(0));
+    let (mut src, _) = cpu_sample(cpu_source(&dir), SEC);
+    let before = take_static(&mut src).expect("first sample sends");
+
+    apply_step(&dir, "cpu-hotplug", 1);
+    let (mut src, _) = cpu_sample(src, 2 * SEC);
+    let after = take_static(&mut src).expect("hotplug resends");
+    assert_eq!(after.logical, before.logical - 1);
+
+    let (mut src, _) = cpu_sample(src, 3 * SEC);
+    assert!(take_static(&mut src).is_none());
+}
+
+#[test]
+fn cpu_static_ppd_fallback() {
+    let dir = fixture_copy("owner-desktop", None);
+    let _ = fs::remove_file(dir.join("sys/firmware/acpi/platform_profile"));
+    let info = static_at(&dir, &bare_metal_facts(valid(Arc::from("balanced"))));
+    assert_eq!(info.platform_profile, valid(Arc::from("balanced")));
+}
+
+#[test]
+fn cpu_static_virtualization() {
+    let dir = fixture_copy("owner-desktop", None);
+    fs::write(
+        dir.join("proc/cpuinfo"),
+        "processor\t: 0\nmicrocode\t: 0xa201030\nflags\t\t: fpu svm\n\n",
+    )
+    .expect("write cpuinfo");
+    let dev = dir.join("dev");
+    fs::create_dir_all(&dev).expect("create dev");
+    let root = SysRoot::at(&dir);
+    let topo = read_topology(&root).expect("fixture topology reads");
+    let info = build_static_in(&root, &topo, &bare_metal_facts(unsupported()), &dev);
+    assert_eq!(info.virtualization, valid(VirtState::SupportedNoKvm));
+    assert_eq!(info.microcode, valid(Arc::from("0xa201030")));
+    assert_eq!(info.hypervisor, None);
+}
+
+#[test]
+fn cpu_static_no_rapl_zone() {
+    let dir = fixture_copy("owner-desktop", None);
+    fs::remove_dir_all(dir.join("sys/class/powercap")).expect("remove powercap");
+    let info = static_at(&dir, &bare_metal_facts(unsupported()));
+    assert_eq!(info.rapl, Some(RaplState::NoZone));
+}
+
+#[test]
+fn cpu_bus_facts_no_bus_failed() {
+    let _env = SYSTEM_BUS_ENV
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let socket = Path::new(env!("CARGO_TARGET_TMPDIR")).join("hjn13-no-system-bus");
+    let _ = fs::remove_file(&socket);
+    let old = std::env::var_os("DBUS_SYSTEM_BUS_ADDRESS");
+    // SAFETY: `SYSTEM_BUS_ENV` is held, and no other test in this binary reads the
+    // environment.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var(
+            "DBUS_SYSTEM_BUS_ADDRESS",
+            format!("unix:path={}", socket.display()),
+        );
+    }
+
+    let mut fl = FakeLab::new();
+    let start = fl.now_ms();
+    let mut handle = fl.spawn(async {
+        let cx = Cx::current().expect("task has a Cx");
+        read_bus_facts(&cx).await
+    });
+    let limit = start + CONNECT_TIMEOUT.as_millis() as u64;
+    while !handle.is_finished() && fl.now_ms() < limit {
+        fl.advance(Duration::from_millis(100));
+    }
+    let facts = handle.try_join();
+
+    // SAFETY: as above.
+    #[allow(unsafe_code)]
+    unsafe {
+        match old {
+            Some(old) => std::env::set_var("DBUS_SYSTEM_BUS_ADDRESS", old),
+            None => std::env::remove_var("DBUS_SYSTEM_BUS_ADDRESS"),
+        }
+    }
+
+    let facts = facts
+        .expect("task joins")
+        .expect("read_bus_facts returns within CONNECT_TIMEOUT");
+    assert!(fl.now_ms() - start <= CONNECT_TIMEOUT.as_millis() as u64);
+    assert_eq!(facts.running_in_vm.validity, Validity::Failed);
+    assert_eq!(facts.ppd_profile.validity, Validity::Failed);
+    fl.finish();
+}
+
+/// Reads the live system bus: run on the owner machine with `--ignored`.
+#[test]
+#[ignore]
+fn cpu_bus_facts_real_host() {
+    let _env = SYSTEM_BUS_ENV
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let rt = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("runtime builds");
+    let (tx, rx) = std::sync::mpsc::channel();
+    rt.handle()
+        .try_spawn_with_cx(move |cx| async move {
+            let _ = tx.send(read_bus_facts(&cx).await);
+        })
+        .expect("task spawns");
+    let facts = rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("read_bus_facts finished");
+    eprintln!(
+        "running_in_vm {:?} ppd_profile {:?}",
+        facts.running_in_vm, facts.ppd_profile
+    );
+    assert_eq!(facts.running_in_vm, valid(Arc::from("")));
+}
