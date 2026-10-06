@@ -890,23 +890,14 @@ fn record_value<'a>(
     }
 }
 
-/// The member record App and unit rows read their text columns from: the earliest started
-/// member, which is the app's primary process in practice. `records` is sorted by
-/// `ProcessKey`, which orders by start time first.
+/// The member record App rows read their text columns from: the earliest started member,
+/// which is the app's primary process in practice. `records` is sorted by `ProcessKey`, which
+/// orders by start time first.
 fn first_member<'a>(g: &GroupRow, ctx: &CellCtx<'a>) -> Option<(usize, &'a ProcessRecord)> {
-    match (&g.kind, &g.node) {
-        (GroupRowKind::App, _) => ctx
-            .records
-            .iter()
-            .enumerate()
-            .find(|(_, r)| r.group == g.key),
-        (GroupRowKind::Unit, NodeId::Unit(unit)) => ctx
-            .extras
-            .iter()
-            .position(|x| x.unit.as_ref() == Some(unit))
-            .and_then(|i| ctx.records.get(i).map(|r| (i, r))),
-        _ => None,
-    }
+    ctx.records
+        .iter()
+        .enumerate()
+        .find(|(_, r)| r.group == g.key)
 }
 
 fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a> {
@@ -919,6 +910,17 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
     let w = ctx.words;
 
     match col {
+        // No GroupRow or model source yet: the desktop file path of an app, and the member
+        // text of a unit (follow-up model bead).
+        C::ImagePath if g.kind == GroupRowKind::App => Value::Glyph(Validity::Unsupported),
+        C::ImagePath | C::User | C::Description | C::Cmdline | C::StartTime
+            if g.kind == GroupRowKind::Unit =>
+        {
+            Value::Glyph(Validity::Unsupported)
+        }
+        C::User | C::Description | C::Cmdline | C::StartTime if g.kind != GroupRowKind::App => {
+            Value::Blank
+        }
         C::Name | C::NameDisplay => Value::Arc(&g.name),
         C::Type => Value::Arc(match g.kind {
             GroupRowKind::App => &w.type_app,
@@ -961,7 +963,7 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
             GroupKind::App { app_id } if g.kind == GroupRowKind::App => Value::Arc(app_id),
             _ => Value::Blank,
         },
-        // PID, Parent PID, Image name and Image path are blank on group rows (PROC-008,
+        // PID, Parent PID and Image name are blank on group rows (PROC-008,
         // PROC-018). The GroupRow has no sums for the other columns.
         _ => Value::Blank,
     }
