@@ -525,3 +525,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.12: the Copy row id uses Unit(u32) from an interner on the delegate (leader: no hash, because a clash could hit the wrong unit). Static validity tooltips are cached; want_tooltip is a new rsf bead.
 - m1f.11 follow-up (c35351b, 862e636): set_pinned now shares its code path with toggle_pin.
 - ug9.34 follow-up (081a45b): no_match text cached in FilterWords.
+- yms.35 (e5e9ec9, e3275b6): strings scanner with a 1 MiB step, a 4096-byte value cap, MAX_STRINGS and MAX_TEXT_BYTES. pread from rustix::io. Detectors overlap on mixed text (accepted). Asked to confirm the random-bytes test.
