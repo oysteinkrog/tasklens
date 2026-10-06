@@ -5,15 +5,19 @@
 //! `Tooltip` is not used because it adds a 12 px margin and puts the shortcut on the text row,
 //! while tasklens puts it on its own right-aligned line.
 //!
-//! Two ways to show it:
-//! - Hover: pass [`TlTooltip::build`] to GPUI's `.tooltip(..)` and set `.tooltip_show_delay` to
-//!   [`DELAY_CONTROL`] or [`DELAY_ROW_NAME`]. GPUI owns hover tooltips: it places them at the
-//!   pointer, and closes them when the pointer leaves the trigger, on mouse down and on scroll.
+//! Two ways to show it. Both place the tooltip below the trigger, left-aligned, `sp2` away; it
+//! flips above when there is no room below and stays inside the window.
+//! - Hover: [`HoverTooltip::attach`] on the trigger, with [`DELAY_CONTROL`] or
+//!   [`DELAY_ROW_NAME`]. After the pointer rests on the trigger for the delay, the tooltip shows.
+//!   Pointer leave, mouse down, scroll, any key down and window deactivation close it. After a
+//!   close by input it shows again only after the pointer leaves and comes back.
 //! - Keyboard focus: [`FocusTooltip::attach`] on a focusable trigger. After keyboard focus rests
-//!   on the trigger for the delay, the tooltip shows below the trigger, left-aligned, `sp2` away.
-//!   It flips above when there is no room below and stays inside the window. Any key down
-//!   closes it (Esc is consumed and focus stays), as do mouse down, scroll, focus loss and window
-//!   deactivation. It shows again only after focus leaves and comes back.
+//!   on the trigger for the delay, the tooltip shows. Any key down closes it (Esc is consumed and
+//!   focus stays), as do mouse down, scroll, focus loss and window deactivation. It shows again
+//!   only after focus leaves and comes back.
+//!
+//! Do not use GPUI's raw `.tooltip(..)` for tasklens tooltips: GPUI places those at the pointer
+//! and does not close them on key down or window deactivation.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -23,9 +27,10 @@ use gpui_kit::base::{Align, Placement, Positioner, Tooltip as BaseTooltip};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
     Action, AnyView, App, AppContext as _, AsKeystroke as _, Bounds, BoxShadow, Context, ElementId,
-    Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseDownEvent,
-    ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Styled, Task, Window, canvas,
-    deferred, div, point, prelude::FluentBuilder as _, px,
+    Entity, FocusHandle, HitboxBehavior, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseDownEvent, MouseExitEvent, MouseMoveEvent, ParentElement, Pixels, Render,
+    ScrollWheelEvent, SharedString, Styled, Subscription, Task, Window, canvas, deferred, div,
+    point, prelude::FluentBuilder as _, px,
 };
 
 use crate::text::style::{t_sm, t_xs};
@@ -60,8 +65,8 @@ enum Body {
 }
 
 /// Tooltip content. Build it with [`TlTooltip::text`] or [`TlTooltip::lines`], then hand
-/// [`TlTooltip::build`] to `.tooltip(..)`, or call [`TlTooltip::view`] inside an owner closure
-/// that formats the text when the tooltip opens.
+/// [`TlTooltip::build`] to [`HoverTooltip::attach`] or [`FocusTooltip::attach`], or call
+/// [`TlTooltip::view`] inside an owner closure that formats the text when the tooltip opens.
 #[derive(Clone)]
 pub struct TlTooltip {
     body: Body,
@@ -93,12 +98,12 @@ impl TlTooltip {
         self
     }
 
-    /// The tooltip as a view, for an owner closure passed to `.tooltip(..)`.
+    /// The tooltip as a view, for an owner closure passed to `attach`.
     pub fn view(self, cx: &mut App) -> AnyView {
         cx.new(|_| self).into()
     }
 
-    /// The closure for GPUI's `.tooltip(..)`. It creates the view when the tooltip opens.
+    /// The closure for `attach`. It creates the view when the tooltip opens.
     pub fn build(self) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
         move |_, cx| self.clone().view(cx)
     }
@@ -346,28 +351,197 @@ impl FocusTooltip {
             .size_full(),
         );
 
-        let Some(view) = view else {
-            return trigger;
+        match view {
+            Some(view) => trigger.child(placed(view, bounds.get(), cx)),
+            None => trigger,
+        }
+    }
+}
+
+/// The open tooltip below `trigger`, left-aligned, `sp2` away, flipped above when there is no
+/// room below and kept inside the window.
+fn placed(view: AnyView, trigger: Bounds<Pixels>, cx: &App) -> impl IntoElement {
+    let m = metrics(cx);
+    deferred(
+        Positioner::side(trigger)
+            .placement(Placement::Bottom)
+            .align(Align::Start)
+            .offset(m.sp[2])
+            .child(view),
+    )
+    .with_priority(PRIORITY)
+}
+
+/// Hover tooltip state for one trigger. Get it with [`HoverTooltip::state`] and wire it with
+/// [`HoverTooltip::attach`] in the trigger's render.
+#[derive(Default)]
+pub struct HoverTooltip {
+    /// The open tooltip.
+    view: Option<AnyView>,
+    /// The delay timer while the pointer rests on the trigger.
+    pending: Option<Task<()>>,
+    /// The delay has passed; the next render builds the view.
+    due: bool,
+    /// The pointer is over the trigger.
+    hovered: bool,
+    /// Closed by input; stays closed until the pointer leaves the trigger.
+    dismissed: bool,
+    /// Closes the tooltip on any key down while it is pending or shown.
+    keys: Option<Subscription>,
+    /// The trigger's bounds from the last paint.
+    trigger: Rc<Cell<Bounds<Pixels>>>,
+}
+
+impl HoverTooltip {
+    /// The state kept for the trigger `id` across frames.
+    pub fn state(id: impl Into<ElementId>, window: &mut Window, cx: &mut App) -> Entity<Self> {
+        window.use_keyed_state(id, cx, |_, _| Self::default())
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.view.is_some()
+    }
+
+    fn active(&self) -> bool {
+        self.view.is_some() || self.pending.is_some() || self.due
+    }
+
+    fn close(&mut self, dismissed: bool) {
+        self.view = None;
+        self.pending = None;
+        self.due = false;
+        self.keys = None;
+        self.dismissed = dismissed;
+    }
+
+    /// Closes on input while the pointer stays on the trigger.
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if self.active() {
+            self.close(true);
+            cx.notify();
+        }
+    }
+
+    fn set_hovered(&mut self, hovered: bool, delay: Duration, cx: &mut Context<Self>) {
+        if hovered == self.hovered {
+            return;
+        }
+        self.hovered = hovered;
+        if !hovered {
+            let was_visible = self.is_visible();
+            self.close(false);
+            if was_visible {
+                cx.notify();
+            }
+            return;
+        }
+        if self.dismissed {
+            return;
+        }
+        self.pending = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update(cx, |s, cx| {
+                s.pending = None;
+                s.due = true;
+                cx.notify();
+            });
+        }));
+        let this = cx.weak_entity();
+        self.keys = Some(cx.intercept_keystrokes(move |_, _, cx| {
+            let _ = this.update(cx, |s, cx| s.dismiss(cx));
+        }));
+    }
+
+    /// Wires the hover tooltip into `trigger`. `build` runs once each time the tooltip opens.
+    /// Call this on every render of the trigger.
+    pub fn attach<E>(
+        state: &Entity<Self>,
+        trigger: E,
+        delay: Duration,
+        build: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> E
+    where
+        E: InteractiveElement + ParentElement,
+    {
+        let window_active = window.is_window_active();
+        let open_now = state.update(cx, |s, _| {
+            if !window_active {
+                if s.active() {
+                    s.close(true);
+                }
+                return false;
+            }
+            s.due && s.view.is_none()
+        });
+        if open_now {
+            let view = build(window, cx);
+            state.update(cx, |s, _| {
+                s.due = false;
+                s.view = Some(view);
+            });
+        }
+
+        let (view, bounds) = {
+            let s = state.read(cx);
+            (s.view.clone(), s.trigger.clone())
         };
-        let m = metrics(cx);
-        trigger.child(
-            deferred(
-                Positioner::side(bounds.get())
-                    .placement(Placement::Bottom)
-                    .align(Align::Start)
-                    .offset(m.sp[2])
-                    .child(view),
+
+        let events = state.clone();
+        let bounds_writer = bounds.clone();
+        let trigger = trigger.child(
+            canvas(
+                move |b, window, _| {
+                    bounds_writer.set(b);
+                    window.insert_hitbox(b, HitboxBehavior::Normal)
+                },
+                move |_, hitbox, window, _| {
+                    let moved = events.clone();
+                    window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                        if phase.bubble() {
+                            let hovered = hitbox.is_hovered(window);
+                            moved.update(cx, |s, cx| s.set_hovered(hovered, delay, cx));
+                        }
+                    });
+                    let exited = events.clone();
+                    window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            exited.update(cx, |s, cx| s.set_hovered(false, delay, cx));
+                        }
+                    });
+                    let down = events.clone();
+                    window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            down.update(cx, |s, cx| s.dismiss(cx));
+                        }
+                    });
+                    let scroll = events.clone();
+                    window.on_mouse_event(move |_: &ScrollWheelEvent, phase, _, cx| {
+                        if phase.bubble() {
+                            scroll.update(cx, |s, cx| s.dismiss(cx));
+                        }
+                    });
+                },
             )
-            .with_priority(PRIORITY),
-        )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+
+        match view {
+            Some(view) => trigger.child(placed(view, bounds.get(), cx)),
+            None => trigger,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use gpui_kit::{
-        KeyBinding, Modifiers, MouseMoveEvent, StatefulInteractiveElement as _, TestAppContext,
-        TestDispatcher, VisualTestContext,
+        KeyBinding, Modifiers, StatefulInteractiveElement as _, TestAppContext, TestDispatcher,
+        VisualTestContext,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 
@@ -620,5 +794,157 @@ mod tests {
         cx.executor().advance_clock(DELAY_CONTROL * 2);
         cx.run_until_parked();
         assert!(!visible(cx, &view), "it stays hidden while focus rests");
+    }
+
+    const TRIGGER_LEFT: f32 = 100.;
+    const TRIGGER_SIZE: f32 = 40.;
+
+    /// A trigger with a [`HoverTooltip`], 100 px from the left. It sits 50 px from the top, or
+    /// 10 px above the window bottom when `near_bottom`.
+    struct HoverTipHost {
+        near_bottom: bool,
+        state: Option<Entity<HoverTooltip>>,
+    }
+
+    impl Render for HoverTipHost {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let state = HoverTooltip::state("trigger-tip", window, cx);
+            self.state = Some(state.clone());
+            let top = if self.near_bottom {
+                f32::from(window.viewport_size().height) - TRIGGER_SIZE - 10.
+            } else {
+                50.
+            };
+            let trigger = div()
+                .id("trigger")
+                .absolute()
+                .left(px(TRIGGER_LEFT))
+                .top(px(top))
+                .size(px(TRIGGER_SIZE));
+            let trigger = HoverTooltip::attach(
+                &state,
+                trigger,
+                DELAY_CONTROL,
+                TlTooltip::text("End task").build(),
+                window,
+                cx,
+            );
+            div().size_full().child(trigger)
+        }
+    }
+
+    fn hover_visible(cx: &mut VisualTestContext, view: &Entity<HoverTipHost>) -> bool {
+        cx.update(|_, cx| {
+            let state = view.read(cx).state.clone().expect("rendered");
+            state.read(cx).is_visible()
+        })
+    }
+
+    /// Opens a window with the host, moves the pointer onto the trigger and waits the delay.
+    /// Returns the trigger bounds.
+    fn hover_open(
+        cx: &mut TestAppContext,
+        near_bottom: bool,
+    ) -> (Entity<HoverTipHost>, &mut VisualTestContext, Bounds<Pixels>) {
+        cx.update(setup);
+        let (view, cx) = cx.add_window_view(move |_, _| HoverTipHost {
+            near_bottom,
+            state: None,
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let trigger = cx.debug_bounds("trigger").expect("trigger drawn");
+        cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+        assert!(!hover_visible(cx, &view), "no tooltip before the delay");
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        assert!(
+            hover_visible(cx, &view),
+            "the tooltip shows after the delay"
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        (view, cx, trigger)
+    }
+
+    #[gpui_kit::test]
+    fn hover_shows_below_trigger(cx: &mut TestAppContext) {
+        let (_, cx, trigger) = hover_open(cx, false);
+        let sp2 = cx.update(|_, cx| metrics(cx).sp[2]);
+        let tip = cx.debug_bounds("TlTooltip").expect("tooltip drawn");
+        assert_eq!(
+            tip.top(),
+            trigger.bottom() + sp2,
+            "below the trigger, sp2 away"
+        );
+        assert_eq!(tip.left(), trigger.left(), "left-aligned with the trigger");
+    }
+
+    #[gpui_kit::test]
+    fn hover_flips_above_near_bottom(cx: &mut TestAppContext) {
+        let (_, cx, trigger) = hover_open(cx, true);
+        let sp2 = cx.update(|_, cx| metrics(cx).sp[2]);
+        let tip = cx.debug_bounds("TlTooltip").expect("tooltip drawn");
+        assert_eq!(
+            tip.bottom(),
+            trigger.top() - sp2,
+            "above the trigger, sp2 away"
+        );
+        assert_eq!(tip.left(), trigger.left(), "left-aligned with the trigger");
+    }
+
+    #[gpui_kit::test]
+    fn hover_closes_on_key_down(cx: &mut TestAppContext) {
+        let (view, cx, trigger) = hover_open(cx, false);
+        cx.simulate_keystrokes("a");
+        assert!(!hover_visible(cx, &view), "a key down closes it");
+
+        cx.simulate_mouse_move(
+            trigger.center() + point(px(2.), px(2.)),
+            None,
+            Modifiers::none(),
+        );
+        cx.executor().advance_clock(DELAY_CONTROL * 2);
+        cx.run_until_parked();
+        assert!(
+            !hover_visible(cx, &view),
+            "it stays closed while the pointer rests"
+        );
+
+        cx.simulate_mouse_move(point(px(4.), px(4.)), None, Modifiers::none());
+        cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        assert!(
+            hover_visible(cx, &view),
+            "it shows again after leave and enter"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn hover_closes_on_leave_mouse_down_and_deactivate(cx: &mut TestAppContext) {
+        let (view, cx, trigger) = hover_open(cx, false);
+        cx.simulate_mouse_move(point(px(4.), px(4.)), None, Modifiers::none());
+        assert!(!hover_visible(cx, &view), "pointer leave closes it");
+
+        cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        assert!(hover_visible(cx, &view));
+        cx.simulate_mouse_down(
+            trigger.center(),
+            gpui_kit::MouseButton::Left,
+            Modifiers::none(),
+        );
+        assert!(!hover_visible(cx, &view), "mouse down closes it");
+
+        cx.simulate_mouse_move(point(px(4.), px(4.)), None, Modifiers::none());
+        cx.simulate_mouse_move(trigger.center(), None, Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        assert!(hover_visible(cx, &view));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        assert!(!hover_visible(cx, &view), "window deactivation closes it");
     }
 }
