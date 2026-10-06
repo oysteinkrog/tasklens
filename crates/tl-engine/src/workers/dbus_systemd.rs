@@ -273,10 +273,8 @@ async fn connected(
             }
             schedule.done(cx.now());
         }
-        if changed {
-            if let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
-                return stop;
-            }
+        if changed && let Some(stop) = send(cx, io, state.update(ManagerState::Connected)).await {
+            return stop;
         }
     }
 }
