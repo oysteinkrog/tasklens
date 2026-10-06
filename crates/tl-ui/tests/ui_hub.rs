@@ -525,7 +525,7 @@ fn start_options_global_installed(cx: &mut TestAppContext) {
     let launch = UiLaunch {
         client: engine,
         init,
-        open: OpenMode::Main,
+        open: OpenMode::Gallery,
         start: StartOptions {
             select_pid: Some(42),
             ..StartOptions::default()
@@ -533,7 +533,7 @@ fn start_options_global_installed(cx: &mut TestAppContext) {
     };
     let exit = cx.update(|cx| start_for_test(cx, launch));
     cx.update(|cx| assert_eq!(cx.global::<StartOptions>().select_pid, Some(42)));
-    // No main hook is registered yet, so the launch quits; the cell `run` reads agrees.
+    // No gallery hook is registered, so the launch quits; the cell `run` reads agrees.
     assert_eq!(exit_slot(cx), Some(UiExit::Quit));
     assert_eq!(exit.take(), Some(UiExit::Quit));
 }

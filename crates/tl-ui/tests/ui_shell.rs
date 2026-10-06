@@ -2245,10 +2245,13 @@ mod main_window {
 
     #[gpui_kit::test]
     fn first_frame_logged_once(cx: &mut TestAppContext) {
+        // Other tests hit the same callsite on other threads with no subscriber. With only one
+        // scoped dispatcher alive, tracing-core computes a callsite's interest from the
+        // registering thread's default alone and can cache it as never enabled. A second live
+        // dispatcher makes it ask every registered dispatcher, this test's included.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let logged = Arc::new(Mutex::new(Vec::new()));
         tracing::subscriber::with_default(Capture(logged.clone()), || {
-            // Other tests hit the same callsite on other threads with no subscriber; without a
-            // rebuild the callsite can stay cached as never enabled.
             tracing::callsite::rebuild_interest_cache();
             let mut vcx = rig(cx, Opts::default());
             frame(&mut vcx);
