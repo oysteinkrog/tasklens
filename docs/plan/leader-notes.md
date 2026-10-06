@@ -232,3 +232,8 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.20: badge scales dot (6 px) and max width (120 px) by ui_scale too; dot-text gap sp2 4 px; dot colour for Neutral/Count is text_primary (spec silent).
 - ndy.16: probe child uses close_range(4, MAX, CLOSE_RANGE_CLOEXEC) so std exec-error pipe survives (R-290). Not proven that the new test fails without the fix: check during review by reverting in a worktree.
 - y6k.14: U-49 verified (follow resume, no gap, no duplicate). real_journal writes ~1000 lines to the user journal via transient unit tasklens-journal-test (ignored test).
+- y6k.22: KeepAbove/SetFrameGeometry match pid + resourceClass io.github.oysteinkrog.Tasklens + caption (None = "tasklens", else single window). Accepted. Script-file delete race: follow-up bead. Pick/CancelPick dropped until E14-019.
+- y6k.6: ServicesUpdate.units is Vec<UnitRecord> so publish clones each record (perf pass: Arc in update.rs). Reconnecting publishes Stale. 60 s resync LoadUnit roughly doubles GetAll calls.
+- y6k.18: restricted pids left out of attribution (no ProcessKey); first pass and after gaps every owner gets WarmingUp 0; hidden tab sends empty records.
+- 8fx.17: Recording ignores HistoryMsg::Delete (8fx.18 or E30-A2 must cover store delete); HistoryWorkerConfig.load_delay test seam; state in Arc<Mutex<State>>.
+- ug9.7: name_runs takes &Font. Sanitizer gaps (ZWJ removed, U+2028/2029 kept): follow-up bead.
