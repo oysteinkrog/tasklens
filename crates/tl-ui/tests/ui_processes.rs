@@ -953,7 +953,7 @@ mod page {
         vcx.update(|window, _| window.activate_window());
         redraw(vcx);
         let page = slot.borrow_mut().take().expect("page created");
-        vcx.update(|window, cx| page.read(cx).focus_table(window, cx));
+        vcx.update(|window, cx| page.update(cx, |p, cx| p.focus_table(window, cx)));
         redraw(vcx);
         Opened {
             page,
@@ -1155,6 +1155,23 @@ mod page {
             "first row {}",
             first.1
         );
+    }
+
+    /// Scrolling frames over a 2,000-row view call `tr` zero times (rendering budget).
+    #[gpui_kit::test]
+    fn scroll_frames_translate_nothing(cx: &mut TestAppContext) {
+        let o = open(cx);
+        publish(&o.engine, rows_2000(2), 1);
+        redraw(o.vcx);
+        let page = o.page.clone();
+        let handle = o.vcx.update(|_, cx| page.read(cx).scroll_handle(cx));
+        let before = tl_ui::i18n::tr_calls();
+        for item in [200, 400, 600] {
+            handle.scroll_to_item_strict(item, ScrollStrategy::Top);
+            o.vcx.update(|window, _| window.refresh());
+            redraw(o.vcx);
+        }
+        assert_eq!(tl_ui::i18n::tr_calls(), before, "a frame called tr");
     }
 
     fn row_at(ix: usize) -> Point<gpui_kit::Pixels> {
