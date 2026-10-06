@@ -1102,17 +1102,15 @@ mod tests {
     }
 
     impl Resolve for FakeResolver {
-        fn lookup(&self, cx: &Cx, ip: IpAddr) -> impl Future<Output = Option<Arc<str>>> + Send {
-            async move {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
-                self.max_running.fetch_max(now, Ordering::SeqCst);
-                if !self.delay.is_zero() {
-                    asupersync::time::sleep(cx.now(), self.delay).await;
-                }
-                self.running.fetch_sub(1, Ordering::SeqCst);
-                self.names.get(&ip).map(|&name| Arc::from(name))
+        async fn lookup(&self, cx: &Cx, ip: IpAddr) -> Option<Arc<str>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_running.fetch_max(now, Ordering::SeqCst);
+            if !self.delay.is_zero() {
+                asupersync::time::sleep(cx.now(), self.delay).await;
             }
+            self.running.fetch_sub(1, Ordering::SeqCst);
+            self.names.get(&ip).map(|&name| Arc::from(name))
         }
     }
 
