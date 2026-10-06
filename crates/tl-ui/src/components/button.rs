@@ -159,6 +159,7 @@ pub struct TlButton {
     label: Option<SharedString>,
     icon: Option<TlIcon>,
     icon_size: Option<Pixels>,
+    icon_muted: bool,
     action: Option<Rc<dyn Action>>,
     on_click: Option<ClickHandler>,
     tooltip: Option<SharedString>,
@@ -177,6 +178,7 @@ impl TlButton {
             label: None,
             icon: None,
             icon_size: None,
+            icon_muted: false,
             action: None,
             on_click: None,
             tooltip: None,
@@ -202,6 +204,13 @@ impl TlButton {
     /// The icon size, already scaled, such as `m.icon.sm`. Default `i_md`.
     pub fn icon_size(mut self, size: Pixels) -> Self {
         self.icon_size = Some(size);
+        self
+    }
+
+    /// Draws the icon in `text_secondary`, as toolbar buttons do while their window is
+    /// inactive. Default `false`.
+    pub fn icon_muted(mut self, muted: bool) -> Self {
+        self.icon_muted = muted;
         self
     }
 
@@ -254,6 +263,15 @@ impl TlButton {
         self
     }
 
+    /// The colour the icon is drawn with in `theme`.
+    pub fn icon_color(&self, theme: &TlTheme) -> Hsla {
+        if self.icon_muted {
+            theme.text_secondary
+        } else {
+            look(self.kind, theme).fg
+        }
+    }
+
     /// Whether Tab stops on the button. Default `true`.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
@@ -273,6 +291,7 @@ impl RenderOnce for TlButton {
         let look = look(self.kind, &theme);
         let h = px(height(self.kind, self.size, &m));
         let inert = self.disabled || self.loading;
+        let icon_fg = self.icon_color(&theme);
         let icon_only = self.kind.icon_only() || self.label.is_none();
 
         let focus: FocusHandle = window
@@ -306,7 +325,7 @@ impl RenderOnce for TlButton {
                     div()
                         .debug_selector(move || format!("TlButton-{id}-icon"))
                         .flex_none()
-                        .child(icon(name, self.icon_size.unwrap_or(m.icon.md), look.fg)),
+                        .child(icon(name, self.icon_size.unwrap_or(m.icon.md), icon_fg)),
                 )
             });
         if let Some(label) = self.label.clone().filter(|_| !self.kind.icon_only()) {
