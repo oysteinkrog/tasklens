@@ -381,3 +381,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.8: grid paints through a QuadSink trait; baseline is 1 physical px at ui_scale 1.1.
 - m1f.10: low_memory window module.
 - fut.12: TlSecondaryWindow with own title bar and pin. Title bar follows the appearance.decorations setting only; if the compositor forces server decorations while the setting says client, two title bars show. OWNER REVIEW / desktop check. Non-resizable Tool windows (About, Crash Report) do not maximize though the spec table says Tool windows maximize. has_modal_child(window, cx) for E20. Key binding move is a follow-up bead.
+- 8fx.2: history queries never reached the worker (run_history does not read WorkerControl). Leader chose Reducer.history_cmd: Option<HistorySink> on the same slot as record_sink.
