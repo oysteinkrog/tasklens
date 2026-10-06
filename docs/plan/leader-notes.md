@@ -290,3 +290,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.19: negative rDNS cache is 1 min (SYS-035), not the 2 min in my bead comment.
 - 8fx.33: rolling window keeps dropped catalogs in RAM and injects the right one into the first returned block's decoded copy. Accepted over the bead's "mark due again" example (that would put the catalog in every block). Test feeds 12 min because the first drop is at 660 s. The new test was not run against the old code.
 - ug9.1: TlTextInput wraps the kit Input (own border, own clear button with HoverTooltip, Esc handled in capture phase). "Clear filter" and "Filter:" are hard-coded, not i18n keys; sweep with the other component strings in the i18n pass.
+- i3o.18: closed by leader; the openers line moves to i3o.1. launcher::LaunchOutcome is now `pub`. Targetless kinds skip the privileged arm (privileged only picks the 120 s deadline).
+- qfx.25: built as written, but sensors-detect 3.6 never prints MODULE_<n>=. Leader chose: read HWMON_MODULES or the cut-here block, and make revert undo conf.d and the service. Follow-up bug bead. OWNER REVIEW: this decision changes E29-023 behaviour.
+- y6k.27: -.slice walks every pid once per slice level. Follow-up bead: one walk per tick with ancestor attribution, skip "/", plus a DbusConn test constructor for a fake-bus test.
