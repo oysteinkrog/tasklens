@@ -124,6 +124,12 @@ impl CachedLine {
     pub(crate) fn width(&self) -> Pixels {
         self.line.as_ref().map_or(px(0.), |l| l.width)
     }
+
+    /// The text this line was last shaped from.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub(crate) fn text(&self) -> Option<&str> {
+        self.line.is_some().then_some(self.text.as_str())
+    }
 }
 
 /// Which label a test record is for.
@@ -484,7 +490,7 @@ pub(crate) fn paint_line(
 
 /// A 12 × 2 px line swatch at `origin`: one quad, or three 3 px dashes 2 px apart (the last one
 /// clipped to the swatch width).
-fn paint_swatch(
+pub(crate) fn paint_swatch(
     window: &mut Window,
     origin: gpui_kit::Point<Pixels>,
     s: f32,

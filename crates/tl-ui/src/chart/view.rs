@@ -14,7 +14,7 @@ use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use super::element::ChartElement;
-use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, labels, scale};
+use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, hover, labels, scale};
 use crate::hub::{SnapshotChanged, SnapshotHub};
 
 pub struct ChartView {
@@ -46,6 +46,8 @@ pub struct ChartView {
     /// Reused formatter buffer.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
+    /// Hover pin and the shaped value box lines (E19-016).
+    pub(crate) hover: hover::HoverState,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
@@ -92,6 +94,7 @@ impl ChartView {
             series: SmallVec::new(),
             tier_fallback: false,
             last_value_text: String::new(),
+            hover: hover::HoverState::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]

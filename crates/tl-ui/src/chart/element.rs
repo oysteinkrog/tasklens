@@ -14,9 +14,9 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, Hitbox, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Path, Pixels, Point, Style, Window, point, px,
-    relative, size,
+    App, Bounds, ContentMask, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
+    Hsla, InspectorElementId, IntoElement, LayoutId, MouseDownEvent, MouseMoveEvent, Path, Pixels,
+    Point, Style, Window, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::series::{SampleFlags, SeriesView};
@@ -25,6 +25,7 @@ use tl_model::time::now_boot_ns;
 
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
+use super::hover::{self, HoverPaint};
 use super::labels::{self, LabelPaint};
 use super::view::ChartView;
 use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
@@ -84,16 +85,26 @@ impl Element for ChartElement {
         (window.request_layout(style, [], cx), ())
     }
 
+    /// A hitbox over the plot when `spec.hover`, none otherwise.
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
         _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Window,
-        _: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<Hitbox> {
-        None
+        let hitbox = self
+            .view
+            .read(cx)
+            .spec
+            .hover
+            .then(|| window.insert_hitbox(bounds.inset(px(1.0)), HitboxBehavior::Normal));
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.view
+            .update(cx, |v, _| v.hover.hitbox_inserted = hitbox.is_some());
+        hitbox
     }
 
     fn paint(
@@ -102,7 +113,7 @@ impl Element for ChartElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        _: &mut Option<Hitbox>,
+        hitbox: &mut Option<Hitbox>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -121,9 +132,9 @@ impl Element for ChartElement {
                 && TlSettings::settings(cx).performance.curved_lines,
         };
         let view_id = self.view.entity_id();
-        let out = self
-            .view
-            .update(cx, |view, cx| paint_view(view, bounds, &env, window, cx));
+        let out = self.view.update(cx, |view, cx| {
+            paint_view(view, bounds, hitbox.as_ref(), &env, window, cx)
+        });
 
         if out.moving {
             AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
@@ -141,6 +152,55 @@ impl Element for ChartElement {
                 }
             });
         }
+
+        if let Some(hitbox) = hitbox.clone() {
+            register_hover_events(&self.view, hitbox, bounds, &out, env.scale_factor, window);
+        }
+    }
+}
+
+/// Pointer moves over the plot pin the time under the pointer; leaving the plot drops the pin.
+/// Any mouse button down drops it too. Both notify only when the pin changed.
+fn register_hover_events(
+    view: &Entity<ChartView>,
+    hitbox: Hitbox,
+    bounds: Bounds<Pixels>,
+    out: &PaintOut,
+    sf: f32,
+    window: &mut Window,
+) {
+    let plot = bounds.inset(px(1.0));
+    let map = out.map;
+    let entity = view.clone();
+    window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+        if !phase.bubble() {
+            return;
+        }
+        let t = hitbox.is_hovered(window).then(|| {
+            hover::pointer_time(
+                &map,
+                map.plot_width,
+                f32::from(e.position.x - plot.left()) * sf,
+            )
+        });
+        entity.update(cx, |v, cx| {
+            if v.hover.pinned_t_ns != t {
+                v.hover.pinned_t_ns = t;
+                cx.notify();
+            }
+        });
+    });
+    if out.pinned {
+        let entity = view.clone();
+        window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+            if phase.bubble() {
+                entity.update(cx, |v, cx| {
+                    if v.hover.clear() {
+                        cx.notify();
+                    }
+                });
+            }
+        });
     }
 }
 
@@ -158,6 +218,10 @@ struct PaintEnv {
 
 struct PaintOut {
     moving: bool,
+    /// Paint-time mapping, for the hover listeners.
+    map: TimeMap,
+    /// A hover pin survived this paint.
+    pinned: bool,
     #[cfg_attr(
         not(any(test, feature = "test-hooks")),
         allow(dead_code, reason = "read by the bench paint hook only")
@@ -169,6 +233,7 @@ struct PaintOut {
 fn paint_view(
     view: &mut ChartView,
     bounds: Bounds<Pixels>,
+    hitbox: Option<&Hitbox>,
     env: &PaintEnv,
     window: &mut Window,
     cx: &mut App,
@@ -181,6 +246,10 @@ fn paint_view(
 
     let state = view.derived_state(now);
     let value = view.value_at(now);
+    // The readout shows only while the pointer is over the plot of an active window.
+    if !(hitbox.is_some_and(|h| h.is_hovered(window)) && window.is_window_active()) {
+        view.hover.clear();
+    }
     let ChartView {
         spec,
         labels,
@@ -192,6 +261,7 @@ fn paint_view(
         series,
         text,
         last_value_text,
+        hover: hover_state,
         ..
     } = view;
 
@@ -346,8 +416,11 @@ fn paint_view(
         view_hook_quads(&view.last_grid_quads, &view.last_gap_spans, 0, &whole);
         #[cfg(any(test, feature = "test-hooks"))]
         view.last_right_edge_ns.set(right_edge);
+        hover_state.clear();
         return PaintOut {
             moving: false,
+            map,
+            pinned: false,
             newest_ns,
         };
     }
@@ -394,6 +467,25 @@ fn paint_view(
     grid::paint_outline(window, &gp);
     labels::paint(window, cx, text, &label_paint, last_value_text);
 
+    if spec.hover {
+        let hp = HoverPaint {
+            box_bounds: bounds,
+            plot,
+            map,
+            dx,
+            scale_factor: sf,
+            spec,
+            labels,
+            series,
+            y_min: cache.y_min,
+            y_max: cache.y_max,
+            metrics: &env.metrics,
+            theme: &env.theme,
+            network_unit: env.network_unit,
+        };
+        hover::paint(window, cx, hover_state, &hp);
+    }
+
     let one_px_ns = range_ns / u64::from(pw.max(1));
     let moving = has_data
         && sliding
@@ -405,11 +497,21 @@ fn paint_view(
     #[cfg(any(test, feature = "test-hooks"))]
     view.last_right_edge_ns.set(right_edge);
 
-    PaintOut { moving, newest_ns }
+    PaintOut {
+        moving,
+        map,
+        pinned: hover_state.pinned_t_ns.is_some(),
+        newest_ns,
+    }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
 impl ChartView {
+    /// Hover pin, shaped lines and the last paint's box (E19-016).
+    pub fn hover_state(&self) -> &hover::HoverState {
+        &self.hover
+    }
+
     /// Paints that found the geometry key changed and updated it.
     pub fn key_rebuilds(&self) -> u32 {
         self.cache.borrow().key_rebuilds
