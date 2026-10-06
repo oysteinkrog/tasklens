@@ -1,6 +1,13 @@
 //! LabRuntime tests for the helper session task in `helper/mod.rs` (E29-A2, ADR-013).
 //!
 //! No test runs pkexec or anything as root: every test uses `FakeLink` through `LinkEnv`.
+//!
+//! The last four tests run a whole engine session with the fake as `EngineHooks.helper`
+//! (E29-020): commands go through the reducer and the helper state comes back in
+//! `Snapshot.health`.
+
+#[path = "fake_sources.rs"]
+mod fake_sources;
 
 use std::collections::VecDeque;
 use std::io;
@@ -15,19 +22,34 @@ use asupersync::runtime::TaskHandle;
 use asupersync::time;
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
+use tl_engine::bridge::EngineHooks;
+use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::helper::{
     HelperCallError, HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError,
     helper_queue, helper_task_with,
 };
-use tl_engine::update::{EngineMsg, HelperUpdate, SourceUpdate};
+use tl_engine::session::engine_root;
+use tl_engine::update::{CpuCoreSample, CpuSample, EngineMsg, HelperUpdate, SourceUpdate};
 use tl_model::actions::Signal;
-use tl_model::command::{RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep};
+use tl_model::command::{
+    Command, RaplStatus, SetupPhase, SetupRun, SetupState, SetupStatus, SetupStep,
+};
+use tl_model::devices::DeviceCatalog;
 use tl_model::health::{HelperStartOutcome, HelperState};
 use tl_model::helper_proto::{
     HELPER_PROTO_VERSION, HelperFrame, HelperReply, HelperReplyBody, HelperRequest, HelperTarget,
 };
+use tl_model::history::RecordSink;
 use tl_model::ids::ProcessKey;
-use tl_model::time::BootId;
+use tl_model::ids::SeriesId;
+use tl_model::process::ProcessRecord;
+use tl_model::series::Sample;
+use tl_model::snapshot::Snapshot;
+use tl_model::system::{CpuSet, CpuTopology, CpuTotals, Metric};
+use tl_model::time::{BootId, TimeNs};
+use tl_model::validity::Validity;
+
+use fake_sources::{FakeLab, UiSide};
 
 /// How the fake answers one request after the `Hello`.
 #[derive(Clone, Copy)]
@@ -131,10 +153,18 @@ struct Fake {
 
 impl Fake {
     fn new(installed: bool) -> (Fake, LinkEnv) {
-        let state = Shared::default();
-        let spawns = Arc::new(AtomicUsize::new(0));
-        let (link_state, count) = (Arc::clone(&state), Arc::clone(&spawns));
-        let env = LinkEnv {
+        let fake = Fake {
+            state: Shared::default(),
+            spawns: Arc::new(AtomicUsize::new(0)),
+        };
+        let env = fake.env(installed);
+        (fake, env)
+    }
+
+    /// A new `LinkEnv` on this fake's shared state, one per engine session.
+    fn env(&self, installed: bool) -> LinkEnv {
+        let (link_state, count) = (Arc::clone(&self.state), Arc::clone(&self.spawns));
+        LinkEnv {
             installed: Arc::new(move || installed),
             spawn: Arc::new(move || {
                 count.fetch_add(1, Ordering::SeqCst);
@@ -143,8 +173,7 @@ impl Fake {
             }),
             setup_probe: Arc::new(|| PROBED),
             setup_runner: Arc::new(|_, _| SetupPhase::Succeeded),
-        };
-        (Fake { state, spawns }, env)
+        }
     }
 }
 
@@ -549,4 +578,186 @@ fn run_setup_publishes_running_then_outcome() {
             },
         ]
     );
+}
+
+// Engine routing (E29-020) ----------------------------------------------------------------------
+
+struct NoRecord;
+
+impl RecordSink for NoRecord {
+    fn on_system_sample(&mut self, _t_ns: TimeNs, _series: &[(SeriesId, Sample)]) {}
+    fn on_process_sweep(&mut self, _t_ns: TimeNs, _records: &Arc<[ProcessRecord]>) {}
+    fn on_device_catalog(&mut self, _catalog: &DeviceCatalog) {}
+}
+
+/// `engine_root` with no workers, a test record sink and `fake` as the helper.
+struct EngineRig {
+    fake: FakeLab,
+    root: TaskHandle<()>,
+    ui: UiSide,
+}
+
+impl EngineRig {
+    fn new(fake: &Fake) -> EngineRig {
+        let config = Arc::new(EngineConfig::new(
+            EngineMode::Full,
+            "/var/tmp/claude/qfx.23-state".into(),
+        ));
+        let (mut ep, ui) = fake_sources::root_endpoints(config, Vec::new());
+        let (state, spawns) = (Arc::clone(&fake.state), Arc::clone(&fake.spawns));
+        ep.hooks = EngineHooks {
+            // A test sink keeps the history worker out.
+            record_sink: Some(Arc::new(|_: &EngineConfig| {
+                Box::new(NoRecord) as Box<dyn RecordSink>
+            })),
+            helper: Some(Arc::new(move || {
+                Fake {
+                    state: Arc::clone(&state),
+                    spawns: Arc::clone(&spawns),
+                }
+                .env(true)
+            })),
+            ..EngineHooks::default()
+        };
+        let mut lab = FakeLab::new();
+        let root = lab.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            engine_root(cx, ep).await;
+        });
+        EngineRig {
+            fake: lab,
+            root,
+            ui,
+        }
+    }
+
+    fn send(&mut self, msg: EngineMsg) {
+        self.ui
+            .msgs_tx
+            .try_send(msg)
+            .expect("the queue has room for the message");
+        self.fake.lab.run_until_idle();
+    }
+
+    fn command(&mut self, cmd: Command) {
+        self.send(EngineMsg::Command(cmd));
+    }
+
+    fn latest(&self) -> Arc<Snapshot> {
+        self.ui.latest.load_full()
+    }
+
+    /// Cancels the root, runs to quiescence and checks the lab's oracles.
+    fn finish(mut self) {
+        self.root.abort();
+        self.fake.advance(Duration::from_millis(10));
+        assert!(self.root.is_finished(), "engine_root returned after cancel");
+        self.fake.finish();
+    }
+}
+
+fn cpu_msg(t_ns: TimeNs) -> EngineMsg {
+    let mut online = CpuSet::empty();
+    online.insert(0);
+    EngineMsg::Source(SourceUpdate::Cpu(CpuSample {
+        t_ns,
+        totals: CpuTotals {
+            util_pct: Metric::valid(40.0),
+            ..CpuTotals::default()
+        },
+        irq_pct: 0.0,
+        per_cpu: [CpuCoreSample {
+            cpu: 0,
+            pct: 40.0,
+            kernel_pct: 0.0,
+            freq_mhz: Some(3000),
+            validity: Validity::Valid,
+        }]
+        .into_iter()
+        .collect(),
+        freq_mhz: Some(3000),
+        temp_c: None,
+        temp_validity: Validity::Unsupported,
+        topology: Some(Arc::new(CpuTopology {
+            online,
+            cores: Arc::from([]),
+        })),
+        validity: Validity::Valid,
+    }))
+}
+
+#[test]
+fn command_start_reaches_helper() {
+    let (fake, _env) = Fake::new(true);
+    let mut rig = EngineRig::new(&fake);
+    assert_eq!(rig.latest().health.helper, HelperState::Locked);
+    rig.command(Command::StartHelperSession);
+    let health = rig.latest().health.clone();
+    assert_eq!(health.helper, HelperState::Unlocked);
+    assert_eq!(health.helper_start, None, "a good start has no toast");
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    rig.command(Command::EndHelperSession);
+    assert_eq!(rig.latest().health.helper, HelperState::Locked);
+    assert!(lock(&fake.state).closed, "End closed the helper");
+    rig.finish();
+}
+
+#[test]
+fn start_failure_seq_counts() {
+    let (fake, _env) = Fake::new(true);
+    lock(&fake.state).start_exit = Some(126);
+    let mut rig = EngineRig::new(&fake);
+    rig.command(Command::StartHelperSession);
+    let health = rig.latest().health.clone();
+    assert_eq!(health.helper, HelperState::Locked);
+    assert_eq!(
+        health.helper_start,
+        Some((1, HelperStartOutcome::Cancelled))
+    );
+    rig.command(Command::StartHelperSession);
+    let health = rig.latest().health.clone();
+    assert_eq!(
+        health.helper_start,
+        Some((2, HelperStartOutcome::Cancelled))
+    );
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 2);
+    rig.finish();
+}
+
+#[test]
+fn setup_status_published() {
+    let (fake, _env) = Fake::new(true);
+    let mut rig = EngineRig::new(&fake);
+    assert_eq!(rig.latest().health.setup.status, None);
+    rig.command(Command::SetupStatus);
+    assert_eq!(rig.latest().health.setup.status, Some(PROBED));
+    rig.finish();
+}
+
+#[test]
+fn health_arc_reused_when_unchanged() {
+    let (fake, _env) = Fake::new(true);
+    let mut rig = EngineRig::new(&fake);
+    rig.command(Command::SetupStatus);
+    rig.send(cpu_msg(100 * 1_000_000));
+    let before = rig.latest();
+    rig.send(cpu_msg(200 * 1_000_000));
+    let after = rig.latest();
+    assert!(after.sequence > before.sequence, "the CPU sample published");
+    assert!(
+        Arc::ptr_eq(&before.health, &after.health),
+        "a CPU-only publish keeps the health Arc"
+    );
+    // The same helper state and setup state again change nothing either.
+    let same = HelperUpdate {
+        state: HelperState::Locked,
+        start: None,
+    };
+    rig.send(EngineMsg::Source(SourceUpdate::Helper(same)));
+    rig.send(EngineMsg::Source(SourceUpdate::Setup(Arc::new(
+        (*after.health.setup).clone(),
+    ))));
+    rig.send(cpu_msg(300 * 1_000_000));
+    assert!(Arc::ptr_eq(&after.health, &rig.latest().health));
+    rig.finish();
 }
