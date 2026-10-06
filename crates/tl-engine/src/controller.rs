@@ -10,6 +10,9 @@
 //!
 //! A restart reaches the reducer as `Failed` then `Running` (R-289): a generation that ends
 //! with an error or a panic sends `Failed`, and the next generation sends `Running` first.
+//!
+//! Every restart, inside one supervisor or after `Disabled`, is counted in `RestartCounts`
+//! before its `Running` is sent, so the health snapshot that shows it carries the new count.
 
 use std::panic::{AssertUnwindSafe, resume_unwind};
 use std::sync::Arc;
@@ -25,7 +28,7 @@ use futures_lite::FutureExt;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::time::{TimeNs, now_boot_ns};
 
-use crate::supervise::{WorkerFactory, budget_exhausted, build_supervisor};
+use crate::supervise::{RestartCounts, WorkerFactory, budget_exhausted, build_supervisor};
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 
 /// How long a source stays off after it spent its restart budget.
@@ -36,6 +39,7 @@ pub struct SourceController {
     name: &'static str,
     factory: WorkerFactory,
     updates: mpsc::Sender<EngineMsg>,
+    restarts: RestartCounts,
 }
 
 impl SourceController {
@@ -45,21 +49,42 @@ impl SourceController {
             name: source_name(id),
             factory,
             updates,
+            restarts: RestartCounts::default(),
         }
+    }
+
+    /// Counts this source's restarts in `restarts`, the reducer's
+    /// `HealthState::restart_counts`. Without it the counts go nowhere.
+    pub fn with_restart_counts(mut self, restarts: RestartCounts) -> Self {
+        self.restarts = restarts;
+        self
     }
 
     /// Runs until `cx` is cancelled. Spawn with `cx.spawn(|cx| ctl.run(cx))` from the session.
     pub async fn run(self, cx: Cx) {
+        // True once a supervisor ran: the next pass restarts a worker that stopped.
+        let mut restart = false;
         loop {
+            if restart {
+                self.restarts.bump(self.id);
+            }
             if !self
                 .health(&cx, SourceState::Running, None, now_boot_ns())
                 .await
             {
                 return;
             }
-            let factory = report_restarts(self.id, self.factory.clone(), self.updates.clone());
+            let factory = report_restarts(
+                self.id,
+                self.factory.clone(),
+                self.updates.clone(),
+                self.restarts.clone(),
+            );
             let report = match build_supervisor(self.name, factory) {
-                Ok(supervisor) => supervisor.run(&cx).await,
+                Ok(supervisor) => {
+                    restart = true;
+                    supervisor.run(&cx).await
+                }
                 Err(error) => {
                     // A build error repeats on every try, so wait before the next one.
                     warn_source(self.id, &error.to_string());
@@ -131,12 +156,15 @@ fn report_restarts(
     id: SourceId,
     factory: WorkerFactory,
     updates: mpsc::Sender<EngineMsg>,
+    restarts: RestartCounts,
 ) -> WorkerFactory {
     Arc::new(move |cx: Cx, generation: ManagedGeneration| {
         let run = factory.start(cx.clone(), generation);
         let updates = updates.clone();
+        let restarts = restarts.clone();
         async move {
             if generation.number > 1 {
+                restarts.bump(id);
                 send_health(&cx, &updates, id, SourceState::Running, None).await;
             }
             match AssertUnwindSafe(run).catch_unwind().await {

@@ -228,7 +228,8 @@ async fn run_session(
             spec.id,
             (spec.factory)(ep.config.clone(), io),
             ep.msgs_tx.clone(),
-        );
+        )
+        .with_restart_counts(reducer.health.restart_counts());
         children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
     }
     if let Some(slot) = history_slot {
@@ -243,7 +244,8 @@ async fn run_session(
             SourceId::HistoryRecorder,
             history_factory(&ep.config, ep.boot_id, epoch, io, slot.clone()),
             ep.msgs_tx.clone(),
-        );
+        )
+        .with_restart_counts(reducer.health.restart_counts());
         children.0.push(spawn(cx, move |cx| ctl.run(cx))?);
         reducer.record_sink = Some(Box::new(HistorySink::new(slot.clone())));
         reducer.history_cmd = Some(HistorySink::new(slot));

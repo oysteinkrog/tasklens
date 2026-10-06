@@ -8,6 +8,7 @@
 //! `ChildSpec::depends_on` is never used.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -20,6 +21,7 @@ use asupersync::supervision::{
 };
 use asupersync::types::policy::FailFast;
 use asupersync::types::{Outcome, TaskId};
+use tl_model::health::SourceId;
 
 use crate::update::WorkerError;
 
@@ -31,6 +33,22 @@ pub const BACKOFF_MULTIPLIER: f64 = 2.0;
 
 /// Any `Fn(Cx, ManagedGeneration) -> Fut` with `Fut: Future<Output = Outcome<(), WorkerError>> + Send`.
 pub type WorkerFactory = Arc<dyn ManagedChildFactory<WorkerError>>;
+
+/// Worker restarts per source for one session. The controllers count, and the reducer reads the
+/// counts into `SourceHealth.restarts` when it publishes health. Clones share the counts.
+#[derive(Clone, Debug, Default)]
+pub struct RestartCounts(Arc<[AtomicU32; SourceId::COUNT]>);
+
+impl RestartCounts {
+    /// Counts one restart of `id`.
+    pub fn bump(&self, id: SourceId) {
+        self.0[id.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn get(&self, id: SourceId) -> u32 {
+        self.0[id.index()].load(Ordering::Relaxed)
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SuperviseError {

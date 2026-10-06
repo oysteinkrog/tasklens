@@ -14,6 +14,8 @@ use tl_model::health::{
 };
 use tl_model::time::TimeNs;
 
+use crate::supervise::RestartCounts;
+
 /// A source is stale after max(3 × period, 1.5 s) without data (ADR-008).
 const STALE_MIN_NS: u64 = 1_500_000_000;
 const STALE_PERIODS: u64 = 3;
@@ -27,6 +29,9 @@ pub struct HealthState {
     /// The last published snapshot. `publish` copies the helper, caps and other fields it does
     /// not own from here.
     current: Arc<HealthSnapshot>,
+    /// Filled by the source controllers. Read only in `publish`, so a count change alone never
+    /// publishes; a restart always changes the state as well (R-289).
+    restarts: RestartCounts,
 }
 
 struct Entry {
@@ -64,7 +69,7 @@ impl Entry {
         now_ns.saturating_sub(quiet_since) > threshold
     }
 
-    fn published(&self) -> SourceHealth {
+    fn published(&self, restarts: u32) -> SourceHealth {
         let state = if self.stale && self.state == SourceState::Running {
             SourceState::Stale
         } else {
@@ -74,8 +79,7 @@ impl Entry {
             state,
             last_ok_ns: self.last_ok_ns,
             last_error: self.last_error.clone(),
-            // Filled from the supervisor by tasklens-8hz.12.
-            restarts: 0,
+            restarts,
         }
     }
 }
@@ -92,7 +96,13 @@ impl HealthState {
             by_id: FxHashMap::default(),
             dirty: false,
             current: Arc::new(empty_snapshot()),
+            restarts: RestartCounts::default(),
         }
+    }
+
+    /// The counts the session's source controllers write (`SourceController::with_restart_counts`).
+    pub fn restart_counts(&self) -> RestartCounts {
+        self.restarts.clone()
     }
 
     /// Stores a state update from a worker. A state change clears the stale mark.
@@ -187,10 +197,15 @@ impl HealthState {
         }
         self.dirty = false;
         let sources = std::array::from_fn(|i| {
-            self.by_id
-                .get(&SourceId::ALL[i])
-                .map(Entry::published)
-                .unwrap_or_default()
+            let id = SourceId::ALL[i];
+            let restarts = self.restarts.get(id);
+            self.by_id.get(&id).map_or_else(
+                || SourceHealth {
+                    restarts,
+                    ..SourceHealth::default()
+                },
+                |entry| entry.published(restarts),
+            )
         });
         let next = Arc::new(HealthSnapshot {
             version: self.current.version + 1,

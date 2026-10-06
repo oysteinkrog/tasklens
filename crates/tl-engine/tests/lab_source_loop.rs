@@ -753,3 +753,96 @@ fn restart_gaps_only_that_sources_series() {
     );
     fl.finish();
 }
+
+/// E08 (tasklens-8hz.12): the Cpu worker panics in its first five generations and runs from
+/// the sixth, so the published health shows 5 restarts. The memory worker never fails and
+/// shows 0. Five restarts fit the 5-in-60 s budget, so Cpu is never `Disabled`.
+#[test]
+fn health_counts_restarts_per_source() {
+    use arc_swap::ArcSwap;
+    use fake_sources::{Log, ScriptedSource};
+    use tl_engine::reducer::{Publisher, Reducer};
+    use tl_model::snapshot::Snapshot;
+    use tl_model::time::BootId;
+
+    const SECOND: Duration = Duration::from_secs(1);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    let source = |id: SourceId, script: Vec<Step>| ScriptedSource {
+        id,
+        script,
+        period: SECOND,
+        log: Log::default(),
+        clock: Arc::clone(&fl.clock),
+    };
+    let cpu_failing = source(SourceId::Cpu, vec![Step::Panic]);
+    let cpu_ok = source(SourceId::Cpu, vec![Step::Ok]);
+    let memory = source(SourceId::Memory, vec![Step::Ok]);
+    let cpu_io = io(&updates, &demand, &settings, &control);
+    let cpu_factory: WorkerFactory = Arc::new(move |cx: Cx, generation: ManagedGeneration| {
+        let io = cpu_io.clone();
+        let src = if generation.number <= 5 {
+            cpu_failing.clone()
+        } else {
+            cpu_ok.clone()
+        };
+        async move { source::run(cx, io, src).await }
+    });
+    let memory_io = io(&updates, &demand, &settings, &control);
+    let memory_factory: WorkerFactory = Arc::new(move |cx: Cx, _: ManagedGeneration| {
+        let io = memory_io.clone();
+        let src = memory.clone();
+        async move { source::run(cx, io, src).await }
+    });
+
+    let (events_tx, _events_rx) = async_channel::bounded(16);
+    let (wake_tx, _wake_rx) = async_channel::bounded(1);
+    let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(BootId(1), 1)));
+    let mut publisher = Publisher {
+        latest: Arc::clone(&latest),
+        wake_tx,
+        stop_publishing: false,
+    };
+    let mut reducer = Reducer::new(1, BootId(1), control, events_tx);
+    let restarts = reducer.health.restart_counts();
+    let reducer_task = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        reducer
+            .run(&cx, &mut rx, &mut publisher)
+            .await
+            .expect("no invariant violation");
+    });
+    let mut controllers = Vec::new();
+    for (id, factory) in [
+        (SourceId::Cpu, cpu_factory),
+        (SourceId::Memory, memory_factory),
+    ] {
+        let ctl = SourceController::new(id, factory, updates.clone())
+            .with_restart_counts(restarts.clone());
+        controllers.push(fl.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            ctl.run(cx).await;
+        }));
+    }
+    drop(updates);
+
+    // Backoff 0.5, 1, 2, 4 and 8 s: the sixth generation starts at 15.5 s.
+    fl.run_for(SECOND * 20, TICK);
+    let snap = latest.load_full();
+    let cpu = snap.health.get(SourceId::Cpu);
+    assert_eq!(cpu.state, SourceState::Running);
+    assert_eq!(cpu.restarts, 5);
+    let memory = snap.health.get(SourceId::Memory);
+    assert_eq!(memory.state, SourceState::Running);
+    assert_eq!(memory.restarts, 0);
+
+    for handle in &controllers {
+        handle.abort();
+    }
+    fl.lab.run_until_idle();
+    assert!(
+        reducer_task.is_finished(),
+        "the queue closed with the controllers"
+    );
+    fl.finish();
+}
