@@ -1,0 +1,67 @@
+#!/bin/sh
+# tasklens-setup: the root steps of the Additional Setup window (E29-022, R-138 item 11).
+# The window runs it as `pkexec /usr/lib/tasklens/tasklens-setup <subcommand>`.
+# Fixed paths only. Nothing is written to /tmp. /etc/udev/rules.d/99-powercap.rules is never
+# read, written or removed (R-029).
+#
+# Test mode: when not root and TASKLENS_SETUP_ROOT is set, every path is under that root and
+# external commands are printed as "would run: ..." instead of run. As root the variable is
+# ignored (R-168 E29-OI-13).
+set -eu
+umask 022
+PATH=/usr/bin:/bin
+export PATH
+
+RULE='SUBSYSTEM=="powercap", KERNEL=="intel-rapl:*", ACTION=="add", RUN+="/usr/bin/chmod 0444 /sys%p/energy_uj"'
+USAGE='usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|polkit-rule on|off'
+
+if [ "$(id -u)" -eq 0 ]; then
+    ROOT=""
+    TEST=0
+elif [ -n "${TASKLENS_SETUP_ROOT-}" ]; then
+    ROOT="$TASKLENS_SETUP_ROOT"
+    TEST=1
+else
+    echo 'tasklens-setup: must run as root (use pkexec)' >&2
+    exit 1
+fi
+
+RULES_DIR="$ROOT/etc/udev/rules.d"
+
+# Runs an external system command, or prints it in test mode.
+run() {
+    if [ "$TEST" -eq 1 ]; then
+        echo "would run: $*"
+    else
+        "$@"
+    fi
+}
+
+udev_reload() {
+    run udevadm control --reload
+    run udevadm trigger --subsystem-match=powercap --action=add
+}
+
+rapl_enable() {
+    tmp="$RULES_DIR/99-tasklens-powercap.rules.tmp"
+    printf '%s\n' "$RULE" > "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$RULES_DIR/99-tasklens-powercap.rules"
+    udev_reload
+    echo 'Enabled'
+}
+
+rapl_revert() {
+    rm -f "$RULES_DIR/99-tasklens-powercap.rules"
+    udev_reload
+    echo 'Reverted. A reboot may be needed before the files return to mode 0400.'
+}
+
+case "${1-}" in
+    rapl-enable) rapl_enable ;;
+    rapl-revert) rapl_revert ;;
+    *)
+        echo "$USAGE" >&2
+        exit 2
+        ;;
+esac
