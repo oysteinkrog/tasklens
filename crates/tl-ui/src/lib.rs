@@ -1,11 +1,20 @@
 //! tl-ui: GPUI views, chart element, process table and theme.
 
+pub mod app;
 pub mod components;
 pub mod demand;
 pub mod hub;
 pub mod i18n;
+pub mod pages;
 pub mod text;
 pub mod theme;
+pub mod window;
+pub mod windows;
 
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod testing;
+
+pub use app::{
+    AdapterInfo, AppEnv, BuildInfo, CrashReport, GlobalShortcutApi, ImportSummary, PersistTheme,
+    RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit,
+};
