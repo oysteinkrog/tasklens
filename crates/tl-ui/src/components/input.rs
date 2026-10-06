@@ -90,6 +90,8 @@ pub struct TlTextInput {
     align_right: bool,
     suffix_text: Option<SharedString>,
     square_corners: bool,
+    aria_label: Option<SharedString>,
+    prefix_tooltip: Option<SharedString>,
 }
 
 impl TlTextInput {
@@ -109,6 +111,8 @@ impl TlTextInput {
             align_right: false,
             suffix_text: None,
             square_corners: false,
+            aria_label: None,
+            prefix_tooltip: None,
         }
     }
 
@@ -181,6 +185,18 @@ impl TlTextInput {
     /// Draws all four corners square, for a field joined to other controls (TlStepper).
     pub fn square_corners(mut self, square: bool) -> Self {
         self.square_corners = square;
+        self
+    }
+
+    /// The accessible name. Without it the kit uses the placeholder.
+    pub fn aria_label(mut self, label: impl Into<SharedString>) -> Self {
+        self.aria_label = Some(label.into());
+        self
+    }
+
+    /// A hover tooltip on the prefix icon, so the placeholder is not the only label.
+    pub fn prefix_tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.prefix_tooltip = Some(text.into());
         self
     }
 }
@@ -272,15 +288,40 @@ impl RenderOnce for TlTextInput {
             }
         });
 
+        let prefix = self.prefix_icon.map(|name| {
+            let glyph = icon(name, m.icon.sm, theme.text_secondary);
+            match self.prefix_tooltip {
+                Some(text) => {
+                    let anchor = div()
+                        .id((self.id.clone(), "prefix"))
+                        .debug_selector(|| "TlTextInput-prefix".into())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .child(glyph);
+                    let tip = HoverTooltip::state((self.id.clone(), "prefix-tooltip"), window, cx);
+                    HoverTooltip::attach(
+                        &tip,
+                        anchor,
+                        DELAY_CONTROL,
+                        TlTooltip::text(text).build(),
+                        window,
+                        cx,
+                    )
+                    .into_any_element()
+                }
+                None => glyph.into_any_element(),
+            }
+        });
+
         let mut input = Input::new(&state)
             .appearance(true)
             .bordered(false)
             .focus_bordered(false)
             .disabled(self.disabled)
             .when(self.size == TlInputSize::Sm, |i| i.small())
-            .when_some(self.prefix_icon, |i, name| {
-                i.prefix(icon(name, m.icon.sm, theme.text_secondary))
-            })
+            .when_some(prefix, |i, prefix| i.prefix(prefix))
+            .when_some(self.aria_label, |i, label| i.aria_label(label))
             .when_some(suffix, |i, suffix| i.suffix(suffix));
         *input.text_style() = t_base(&m);
         if self.align_right {
@@ -768,6 +809,44 @@ mod tests {
         square.set(true);
         cx.update(|_, cx| view.update(cx, |_, cx| cx.notify()));
         assert_eq!(max_radius(cx), 0., "square corners");
+    }
+
+    #[gpui_kit::test]
+    fn aria_label_names_the_field(cx: &mut TestAppContext) {
+        let (_, cx) = host(cx, |state| {
+            TlTextInput::new("field", state)
+                .placeholder("Filter")
+                .aria_label("Filter Threads")
+                .width(px(200.))
+                .into_any_element()
+        });
+        draw(cx);
+        let tree = cx
+            .update(|window, _| window.debug_a11y_tree_json())
+            .expect("an accessibility tree");
+        assert!(tree.contains("Filter Threads"), "{tree}");
+    }
+
+    #[gpui_kit::test]
+    fn prefix_tooltip_shows_on_hover(cx: &mut TestAppContext) {
+        let (_, cx) = host(cx, |state| {
+            TlTextInput::new("field", state)
+                .prefix_icon(TlIcon::Search)
+                .prefix_tooltip("Filter")
+                .width(px(200.))
+                .into_any_element()
+        });
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        let prefix = cx.debug_bounds("TlTextInput-prefix").expect("prefix drawn");
+        cx.simulate_mouse_move(prefix.center(), None, gpui_kit::Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        draw(cx);
+        assert!(
+            cx.debug_bounds("TlTooltip").is_some(),
+            "the prefix tooltip shows on hover"
+        );
     }
 
     #[gpui_kit::test]
