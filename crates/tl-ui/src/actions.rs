@@ -53,6 +53,8 @@ gpui_kit::actions!(
         ShowSystemInformation,
         ShowMainWindow,
         ToggleMainWindow,
+        // Unit form until E29 adds `focus_row` (UI-PRF-052); the Additional Setup window handles it.
+        OpenAdditionalSetup,
     ]
 );
 
