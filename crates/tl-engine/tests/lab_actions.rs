@@ -1249,3 +1249,345 @@ fn targetless_without_openers() {
         h.passed();
     }
 }
+
+// Engine level (E11-A1) ----------------------------------------------------------------------
+//
+// `engine_root` runs in a `FakeLab` with no workers. The real `Gate` comes from `gate_with_ops`
+// over `FakeOps`, wrapped so that a request with `PANIC_ID` panics inside the reducer. The test
+// sends the `Processes` sweep itself, so the reducer knows the live keys.
+
+#[path = "fake_sources.rs"]
+mod fake_sources;
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use asupersync::channel::watch;
+use asupersync::runtime::TaskHandle;
+use tl_engine::actions::gate_with_ops;
+use tl_engine::bridge::{EngineHooks, HookCtx};
+use tl_engine::reducer::ActionGate;
+use tl_engine::session::{RESTART_DELAY, engine_root};
+use tl_engine::source::{QueuedCommand, WorkerCommand, WorkerControl};
+use tl_engine::update::{ProcessSweep, SourceUpdate};
+use tl_model::actions::SchedPolicy;
+use tl_model::command::Command;
+use tl_model::health::SourceId;
+use tl_model::process::{GroupKind, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
+use tl_model::validity::{FieldValidity, Validity};
+
+/// A request with this id panics inside the reducer.
+const PANIC_ID: ActionId = ActionId(999);
+
+/// The real gate, with one scripted reducer panic.
+struct PanicOn(Box<dyn ActionGate>);
+
+impl ActionGate for PanicOn {
+    fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>) {
+        assert_ne!(req.id, PANIC_ID, "scripted reducer panic");
+        self.0.submit(cx, req, view);
+    }
+
+    fn finished(&mut self, id: ActionId) -> Option<SourceId> {
+        self.0.finished(id)
+    }
+}
+
+struct EngineRig {
+    fake: fake_sources::FakeLab,
+    ops: Arc<FakeOps>,
+    ui: fake_sources::UiSide,
+    control: watch::Receiver<WorkerControl>,
+    root: TaskHandle<()>,
+    /// Gate factory calls, one per session.
+    sessions: Arc<AtomicU32>,
+    /// Events read from `ui.events_rx` and not yet asked for.
+    seen: Vec<ActionEvent>,
+}
+
+fn engine_rig() -> EngineRig {
+    let mut fake = fake_sources::FakeLab::with_config(LabConfig::new(7).max_steps(1_000_000));
+    let ops = Arc::new(FakeOps::new(&fake.clock));
+    let config = Arc::new(EngineConfig::new(
+        EngineMode::Full,
+        PathBuf::from("/nonexistent"),
+    ));
+    let (mut ep, ui) = fake_sources::root_endpoints(config, Vec::new());
+    let control = ep.control.subscribe();
+    let sessions = Arc::new(AtomicU32::new(0));
+    let (counter, gate_ops) = (Arc::clone(&sessions), Arc::clone(&ops));
+    ep.hooks = EngineHooks {
+        action_gate: Some(Arc::new(move |hook: HookCtx| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            let ops: Arc<dyn ActionOps> = gate_ops.clone();
+            Box::new(PanicOn(gate_with_ops(hook, ops))) as Box<dyn ActionGate>
+        })),
+        ..EngineHooks::default()
+    };
+    let root = fake.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        engine_root(cx, ep).await;
+    });
+    EngineRig {
+        fake,
+        ops,
+        ui,
+        control,
+        root,
+        sessions,
+        seen: Vec::new(),
+    }
+}
+
+impl EngineRig {
+    fn send(&mut self, msg: EngineMsg) {
+        self.ui
+            .msgs_tx
+            .try_send(msg)
+            .expect("the queue has room for the message");
+        self.fake.lab.run_until_idle();
+    }
+
+    fn action(&mut self, id: u64, kind: ActionKind, pids: &[u32]) {
+        let targets: Vec<ActionTarget> = pids
+            .iter()
+            .map(|p| ActionTarget::Process(engine_key(*p)))
+            .collect();
+        self.send(EngineMsg::Command(Command::Action(req(id, kind, &targets))));
+    }
+
+    /// One `Processes` sweep with these PIDs, so admission sees them live.
+    fn sweep(&mut self, pids: &[u32]) {
+        let t_ns = self.fake.clock.now().as_nanos();
+        self.send(EngineMsg::Source(SourceUpdate::Processes(ProcessSweep {
+            observed_start: t_ns,
+            observed_end: t_ns,
+            records: pids.iter().map(|p| sweep_record(*p)).collect(),
+            extras: pids.iter().map(|_| sweep_extras()).collect(),
+            extras_p2: Vec::new(),
+            app_stats: Vec::new(),
+            unit_stats: Vec::new(),
+            system_threads: 0,
+            file_nr: None,
+            online_cpus: 1,
+            low_memory: None,
+        })));
+    }
+
+    /// Every event for `id` so far, as `(target, state)`.
+    fn events_for(&mut self, id: ActionId) -> Vec<(Option<u16>, ActionState)> {
+        while let Ok(ev) = self.ui.events_rx.try_recv() {
+            self.seen.push(ev);
+        }
+        let (mine, rest) = std::mem::take(&mut self.seen)
+            .into_iter()
+            .partition(|ev| ev.id == id);
+        self.seen = rest;
+        mine.into_iter().map(|ev| (ev.target, ev.state)).collect()
+    }
+
+    /// The `RefreshNow` commands forwarded to `Processes` so far.
+    fn process_refreshes(&self) -> usize {
+        let want = |q: &&QueuedCommand| {
+            q.target == SourceId::Processes && q.command == WorkerCommand::RefreshNow
+        };
+        self.control
+            .borrow_and_clone()
+            .commands
+            .iter()
+            .filter(want)
+            .count()
+    }
+
+    fn sessions(&self) -> u32 {
+        self.sessions.load(Ordering::Relaxed)
+    }
+
+    /// Cancels the root, runs to quiescence and checks the lab's oracles.
+    fn finish(mut self) {
+        self.root.abort();
+        self.fake.advance(Duration::from_millis(10));
+        assert!(self.root.is_finished(), "engine_root returned after cancel");
+        self.fake.finish();
+    }
+}
+
+/// `start_ticks = pid × 10`, so ascending PIDs are sorted by key.
+fn engine_key(pid: u32) -> ProcessKey {
+    ProcessKey {
+        start_ticks: u64::from(pid) * 10,
+        boot_id: fake_sources::FAKE_BOOT,
+        pid,
+    }
+}
+
+fn sweep_record(pid: u32) -> ProcessRecord {
+    ProcessRecord {
+        key: engine_key(pid),
+        ppid: 0,
+        uid: 1000,
+        meta: Arc::new(ProcessMeta {
+            comm: "x".into(),
+            name: "x".into(),
+            exe: None,
+            cmdline: None,
+            user: "user".into(),
+            cgroup: None,
+            app_id: None,
+            icon: None,
+            description: None,
+            search_lower: "x user".into(),
+        }),
+        group: GroupKind::Background.key(),
+        state: ProcState::Sleeping,
+        flags: ProcFlags::empty(),
+        nice: 0,
+        threads: 1,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        validity: FieldValidity::all(Validity::Valid),
+    }
+}
+
+fn sweep_extras() -> ProcessExtras {
+    ProcessExtras {
+        cpu_kernel_pct: 0.0,
+        cpu_user_pct: 0.0,
+        cpu_relative_pct: 0.0,
+        utime_ticks: 0,
+        stime_ticks: 0,
+        start_boot_ns: 0,
+        rss_peak_bytes: 0,
+        rss_shared_bytes: 0,
+        commit_bytes: 0,
+        vsize_bytes: 0,
+        vsize_peak_bytes: 0,
+        page_faults: 0,
+        page_faults_delta: 0,
+        major_faults: 0,
+        policy: SchedPolicy::Other,
+        rt_prio: 0,
+        affinity: CpuSet::empty(),
+        handles: None,
+        exe_name: "x".into(),
+        exe_path: "/usr/bin/x".into(),
+        exe_deleted: false,
+        unit: None,
+        state_letter: b'S',
+        frozen: false,
+        disk_read_bps: 0.0,
+        disk_write_raw_bps: 0.0,
+        flag_since_ns: 0,
+    }
+}
+
+#[test]
+fn engine_action_end_to_end() {
+    let mut rig = engine_rig();
+    assert_eq!(rig.sessions(), 1);
+    rig.sweep(&[500]);
+    assert_eq!(rig.process_refreshes(), 0);
+    rig.action(1, ActionKind::Signal(Signal::Term), &[500]);
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(
+        rig.ops.calls(),
+        [FakeCall::Open(500), FakeCall::Send(500, Signal::Term)]
+    );
+    // `ActionFinished` reached the reducer, which asked `Processes` for a fresh sweep.
+    assert_eq!(rig.process_refreshes(), 1);
+    rig.finish();
+}
+
+#[test]
+fn engine_seventeenth_busy() {
+    let mut rig = engine_rig();
+    let pids: Vec<u32> = (1001..=1018).collect();
+    rig.sweep(&pids);
+    for id in 1..=16 {
+        let pid = 1000 + id as u32;
+        rig.ops
+            .script(pid, &[FakeStep::Block(Duration::from_secs(10))]);
+        rig.action(id, ActionKind::Signal(Signal::Term), &[pid]);
+    }
+    for id in 1..=16 {
+        assert_eq!(
+            rig.events_for(ActionId(id)),
+            [(None, ActionState::Started)],
+            "action {id} is in flight"
+        );
+    }
+    rig.action(17, ActionKind::Signal(Signal::Term), &[1017]);
+    assert_eq!(
+        rig.events_for(ActionId(17)),
+        [(None, ActionState::Rejected(RejectReason::Busy))]
+    );
+    assert!(!rig.ops.calls().contains(&FakeCall::Open(1017)));
+
+    // The 2 s deadlines end the 16; their `ActionFinished` frees the slots.
+    rig.fake.advance(Duration::ZERO);
+    for id in 1..=16 {
+        assert_eq!(
+            rig.events_for(ActionId(id)),
+            [(Some(0), timed_out()), (None, timed_out())],
+            "action {id}"
+        );
+    }
+    assert_eq!(rig.process_refreshes(), 16);
+    assert!(rig.events_for(ActionId(17)).is_empty(), "one event only");
+    rig.action(18, ActionKind::Signal(Signal::Term), &[1018]);
+    assert_eq!(
+        rig.events_for(ActionId(18)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    rig.finish();
+}
+
+#[test]
+fn session_restart_drops_in_flight() {
+    let mut rig = engine_rig();
+    rig.sweep(&[500, 501]);
+    rig.ops
+        .script(500, &[FakeStep::Block(Duration::from_secs(10))]);
+    rig.action(1, ActionKind::Signal(Signal::Term), &[500]);
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        [(None, ActionState::Started)]
+    );
+
+    rig.send(EngineMsg::Command(Command::Action(req(
+        PANIC_ID.0,
+        ActionKind::Signal(Signal::Term),
+        &[],
+    ))));
+    rig.fake.advance(RESTART_DELAY);
+    assert_eq!(rig.sessions(), 2, "session 2 starts after 1 s");
+
+    // Far past the old action's 2 s deadline: its task was aborted with session 1's gate.
+    rig.fake
+        .run_for(Duration::from_secs(30), Duration::from_secs(1));
+    assert!(rig.events_for(ActionId(1)).is_empty(), "no event for the old id");
+    assert!(rig.events_for(PANIC_ID).is_empty());
+    assert_eq!(rig.process_refreshes(), 0);
+
+    // The new reducer starts empty, so it needs a sweep before it admits PID 501.
+    rig.sweep(&[501]);
+    rig.action(2, ActionKind::Signal(Signal::Term), &[501]);
+    assert_eq!(
+        rig.events_for(ActionId(2)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(rig.process_refreshes(), 1);
+    rig.finish();
+}
