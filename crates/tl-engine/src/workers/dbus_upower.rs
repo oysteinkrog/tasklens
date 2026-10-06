@@ -1051,6 +1051,10 @@ mod tests {
                 return Ok(event);
             }
             let _ = time::timeout(cx.now(), d, std::future::pending::<()>()).await;
+            // Same as `DbusConn::next_signal`: a cancelled `cx` ends the stream.
+            if cx.checkpoint().is_err() {
+                return Err(DbusError::Closed);
+            }
             Ok(None)
         }
     }
