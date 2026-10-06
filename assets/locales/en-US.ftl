@@ -353,3 +353,16 @@ table-header-menu-reset = Reset to default
 table-toast-last-visible = At least one column must stay visible
 table-tooltip-name-not-hideable = Name cannot be hidden
 table-toast-columns-reset = Columns reset to default
+
+# TlKeyValueGrid state words (PERF-013)
+fnd-kv-collecting = Collecting…
+fnd-kv-restricted = Restricted
+fnd-kv-unavailable = Unavailable
+fnd-kv-not-supported = Not supported
+fnd-kv-not-reported = Not reported
+fnd-kv-needs-setup = Needs setup
+# CPU Details cache and boot time tooltips
+perf-cpu-tip-l1-data = {$size} data
+perf-cpu-tip-l1-instruction = {$size} instruction
+perf-cpu-tip-l4 = L4 {$size}
+perf-cpu-time-unknown = Unknown
