@@ -1054,7 +1054,7 @@ mod tests {
     }
 
     fn net_system(rx: f64, tx: f64, state: LinkState) -> SystemSnapshot {
-        let sys = SystemSnapshot {
+        SystemSnapshot {
             nets: Arc::from(vec![(
                 DeviceIdx(2),
                 NetTotals {
@@ -1068,8 +1068,7 @@ mod tests {
                 },
             )]),
             ..SystemSnapshot::default()
-        };
-        sys
+        }
     }
 
     fn net_details(type_label: &str, connection: Option<&str>) -> DeviceDetailsSnapshot {
