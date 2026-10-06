@@ -33,10 +33,6 @@ pub(crate) struct GpuShare<'a> {
 }
 
 impl PowerEstimator {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// One estimate per record. `p2` is index-aligned with `records` and is created with defaults
     /// when empty.
     pub(crate) fn on_sweep(
@@ -280,7 +276,7 @@ mod tests {
 
     #[test]
     fn cpu_share_by_ticks() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         sweep(&mut est, SEC, &[(1, 100), (2, 50)], &cpu, &[]);
         let out = sweep(&mut est, 2 * SEC, &[(1, 130), (2, 60)], &cpu, &[]);
@@ -289,7 +285,7 @@ mod tests {
 
     #[test]
     fn gpu_share_by_util() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         let util: FxHashMap<ProcessKey, f32> =
             [(key(1), 60.0), (key(2), 20.0)].into_iter().collect();
@@ -304,7 +300,7 @@ mod tests {
 
     #[test]
     fn restricted_rapl_no_estimate() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::with(Validity::Restricted));
         let util: FxHashMap<ProcessKey, f32> = [(key(1), 50.0)].into_iter().collect();
         let gpus = [GpuShare {
@@ -318,7 +314,7 @@ mod tests {
 
     #[test]
     fn first_sight_none() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         sweep(&mut est, SEC, &[(1, 10)], &cpu, &[]);
         let out = sweep(&mut est, 2 * SEC, &[(1, 20), (2, 500)], &cpu, &[]);
@@ -327,7 +323,7 @@ mod tests {
 
     #[test]
     fn trend_two_minute_mean() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let base = 1_000 * SEC;
         // One process takes every tick, so its estimate is the package power.
         sweep(
@@ -359,7 +355,7 @@ mod tests {
 
     #[test]
     fn reset_clears_baselines() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         sweep(&mut est, SEC, &[(1, 10), (2, 10)], &cpu, &[]);
         sweep(&mut est, 2 * SEC, &[(1, 20), (2, 20)], &cpu, &[]);
@@ -370,7 +366,7 @@ mod tests {
 
     #[test]
     fn fill_repeats_last_sweep() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         sweep(&mut est, SEC, &[(1, 10), (2, 10)], &cpu, &[]);
         sweep(&mut est, 2 * SEC, &[(1, 40), (2, 20)], &cpu, &[]);
@@ -386,7 +382,7 @@ mod tests {
 
     #[test]
     fn dead_keys_dropped() {
-        let mut est = PowerEstimator::new();
+        let mut est = PowerEstimator::default();
         let cpu = cpu(Metric::valid(20.0));
         sweep(&mut est, SEC, &[(1, 10), (2, 10)], &cpu, &[]);
         sweep(&mut est, 2 * SEC, &[(1, 20), (2, 20)], &cpu, &[]);
