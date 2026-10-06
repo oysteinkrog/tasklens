@@ -10,7 +10,7 @@
 //! `thread_nice_only_that_tid` comes with thread targets (E11-006).
 
 use std::fs;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -20,12 +20,13 @@ use std::time::{Duration, Instant};
 
 use asupersync::runtime::{Runtime, RuntimeBuilder};
 use rustix::process::{Pid, PidfdFlags, Signal as RxSignal};
-use tl_engine::actions::{ActionCtx, RealOps, process};
+use tl_engine::actions::{ActionCtx, ActionOps, RealOps, process};
 use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::{EngineConfig, EngineMode};
 use tl_model::actions::{ActionKind, ActionState, ActionTarget, RejectReason, Signal};
 use tl_model::ids::ProcessKey;
 use tl_model::time::BootId;
+use tl_ops::OpsError;
 
 /// The boot ID the keys and the `ActionCtx` share. tl-ops only compares the two.
 const BOOT: BootId = BootId(1);
@@ -37,6 +38,10 @@ const GONE_LIMIT: Duration = Duration::from_millis(100);
 const THREAD_HELPER_ENV: &str = "TASKLENS_REAL_ACTIONS_THREAD_HELPER";
 /// Extra threads the helper starts.
 const HELPER_THREADS: usize = 4;
+/// How long `StopSettles` waits for a stopped target to show state `T`.
+const STOP_SETTLE: Duration = Duration::from_millis(100);
+/// How long `StopSettles` then keeps the target stopped, five polls of a 1 ms watcher.
+const STOP_HOLD: Duration = Duration::from_millis(5);
 
 /// The fields of `/proc/<pid>/stat` after the `(comm)` field. Index 0 is field 3 (state).
 fn stat_fields(path: &str) -> Option<Vec<String>> {
@@ -140,13 +145,13 @@ fn runtime() -> Runtime {
         .expect("runtime builds")
 }
 
-fn actx() -> Arc<ActionCtx> {
+fn actx(ops: Arc<dyn ActionOps>) -> Arc<ActionCtx> {
     let (events, _events_rx) = async_channel::bounded(16);
     let (msgs, _msgs_rx) = asupersync::channel::mpsc::channel(16);
     Arc::new(ActionCtx {
         events,
         msgs,
-        ops: Arc::new(RealOps),
+        ops,
         boot_id: BOOT,
         uid: uid(),
         config: Arc::new(EngineConfig::new(
@@ -164,7 +169,7 @@ fn actx() -> Arc<ActionCtx> {
 /// Runs one `process::run_target` with `RealOps` on the real runtime.
 fn run(kind: ActionKind, key: ProcessKey) -> ActionState {
     let rt = runtime();
-    let actx = actx();
+    let actx = actx(Arc::new(RealOps));
     let (tx, rx) = std::sync::mpsc::channel();
     rt.handle()
         .try_spawn_with_cx(move |cx| async move {
@@ -176,10 +181,47 @@ fn run(kind: ActionKind, key: ProcessKey) -> ActionState {
     rx.recv_timeout(WAIT).expect("run_target finished")
 }
 
-/// Runs one `process::kill_tree` with `RealOps` on the real runtime.
+/// `RealOps` that, after each SIGSTOP, waits up to `STOP_SETTLE` for the target to show state
+/// `T`, then `STOP_HOLD` more, before it returns. The STOP and KILL passes of `kill_tree` are microseconds apart, so
+/// without this a watcher polling `/proc` almost never sees the stop. Every call still goes to
+/// `RealOps`; the wait only widens the gap between the passes, it never reorders them.
+struct StopSettles;
+
+impl ActionOps for StopSettles {
+    fn open_verified(&self, key: ProcessKey, boot: BootId) -> Result<OwnedFd, OpsError> {
+        RealOps.open_verified(key, boot)
+    }
+
+    fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
+        RealOps.send_signal(pidfd, sig)?;
+        if matches!(sig, Signal::Stop)
+            && let Some(pid) = pidfd_pid(pidfd)
+        {
+            let path = format!("/proc/{pid}/stat");
+            let begin = Instant::now();
+            while stat_field(&path, 3).as_deref() != Some("T") && begin.elapsed() < STOP_SETTLE {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(STOP_HOLD);
+        }
+        Ok(())
+    }
+}
+
+/// The PID behind a pidfd, from the `Pid:` line of its fdinfo.
+fn pidfd_pid(pidfd: &OwnedFd) -> Option<u32> {
+    let info = fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd())).ok()?;
+    info.lines()
+        .find_map(|l| l.strip_prefix("Pid:"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Runs one `process::kill_tree` through `StopSettles` on the real runtime.
 fn run_tree(keys: &[ProcessKey]) -> Vec<ActionState> {
     let rt = runtime();
-    let actx = actx();
+    let actx = actx(Arc::new(StopSettles));
     let targets: Vec<ActionTarget> = keys.iter().map(|k| ActionTarget::Process(*k)).collect();
     let (tx, rx) = std::sync::mpsc::channel();
     rt.handle()
