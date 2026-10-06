@@ -261,7 +261,7 @@ fn run_build(series: &[(ChartSeries, Option<&SeriesView>)], map: TimeMap, now: u
 }
 
 fn xs(set: &PathSet) -> impl Iterator<Item = f32> + '_ {
-    set.path.vertices.iter().map(|v| v.xy_position.x.0)
+    set.path.vertices.iter().map(|v| v.xy_position.x.as_f32())
 }
 
 #[test]
@@ -356,14 +356,20 @@ fn stale_flat_continuation_present() {
         .path
         .vertices
         .iter()
-        .max_by(|a, b| a.xy_position.x.0.total_cmp(&b.xy_position.x.0))
+        .max_by(|a, b| {
+            a.xy_position
+                .x
+                .as_f32()
+                .total_cmp(&b.xy_position.x.as_f32())
+        })
         .unwrap();
-    assert!((right.xy_position.x.0 - xr).abs() < 0.01);
+    assert!((right.xy_position.x.as_f32() - xr).abs() < 0.01);
     // The stroke is 1 px wide around the line.
-    assert!((right.xy_position.y.0 - y_last).abs() <= 0.51);
+    assert!((right.xy_position.y.as_f32() - y_last).abs() <= 0.51);
     // The fill polygon has the exact corner at the right edge and the last value.
     assert!(cache.stale_fills[0].path.vertices.iter().any(|v| {
-        (v.xy_position.x.0 - xr).abs() < 0.01 && (v.xy_position.y.0 - y_last).abs() < 0.01
+        (v.xy_position.x.as_f32() - xr).abs() < 0.01
+            && (v.xy_position.y.as_f32() - y_last).abs() < 0.01
     }));
     // The fresh samples stay on the live paths.
     assert_eq!(cache.strokes.len(), 1);

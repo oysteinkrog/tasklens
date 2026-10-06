@@ -6,7 +6,7 @@
 //! allocates inside lyon's tessellator. Time math is `u64` and the pixel scale is `f64`: 60 s in
 //! ns against 1,600 px loses precision in `f32`.
 
-use gpui_kit::{Hsla, PathBuilder, point, px};
+use gpui_kit::{FillOptions, Hsla, PathBuilder, PathStyle, point, px};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 
@@ -271,7 +271,9 @@ impl Builders {
         let i = match self.fills.iter().position(|(c, _)| *c == color) {
             Some(i) => i,
             None => {
-                self.fills.push((color, PathBuilder::fill()));
+                // Non-zero: with the default even-odd rule, overlapping merged polygons cancel.
+                let b = PathBuilder::fill().with_style(PathStyle::Fill(FillOptions::non_zero()));
+                self.fills.push((color, b));
                 self.fills.len() - 1
             }
         };
