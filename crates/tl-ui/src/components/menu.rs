@@ -724,7 +724,7 @@ mod tests {
             menu
         });
         let plain = menus(cx)[0];
-        cx.update(|window, cx| close_context_menu(window, cx));
+        cx.update(close_context_menu);
         draw(cx);
 
         open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
@@ -751,7 +751,7 @@ mod tests {
         });
         let width = menus(cx)[0].size.width;
         assert!(width >= px(MENU_MIN_W) && width < px(240.), "{width:?}");
-        cx.update(|window, cx| close_context_menu(window, cx));
+        cx.update(close_context_menu);
         draw(cx);
 
         open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
