@@ -1226,10 +1226,11 @@ x=0, bottom=0
 ### UI-SHL-099 Collector Health window
 
 - **Implements**: APP-026, APP-029, R-071.
-- **Anatomy**: title "tasklens Collector Health" [C, APP-045 pattern], Floating, 720 × 360 [C]. A table with columns Source (140), State (100), Last data (100, age as "3s ago"), Restarts (80, right-aligned), Last error (fills, truncated, full text in tooltip) [C]. Rows sorted by `SourceId` order. State text uses `status.success` (Running), `status.warning` (Stale, Disabled), `status.danger` (Failed) [C].
+- **Anatomy**: title "tasklens Collector Health" [C, APP-045 pattern], Floating, 720 × 360 [C]. A table with columns Source (140), State (100), Last data (100, age as "3s ago"), Restarts (80, right-aligned), Last error (fills, truncated, full text in tooltip) [C]. Rows sorted by `SourceId` order. A source in state Off (not demanded) has no row. State text uses `status.success` (Running), `status.warning` (Late, Stale, Disabled), `status.danger` (Failed), `text_secondary` (Unsupported) [C]. Last data shows "…" in `text_secondary` until the source sends data. Restarts is `SourceHealth.restarts`.
+- **Source names**, in `SourceId` order: CPU, Memory, Disks, Network, GPU (NVIDIA), GPU (DRM), Sensors, Processes, Process details, Connections, Services (system), Services (user), Sessions, Startup, Inventory, KWin, Storage devices, Power, NetworkManager, History, Journal [C, settles B7 E21 open item 6].
 - **Behaviour**: opened from the Debug menu and from health items in the status chip [S]. Re-renders on `ComponentMask::HEALTH` and once per second for the ages [C].
 - **Phase**: P1 (from the status chip), P4 (Debug menu).
-- **Decided here**: title, columns, colours.
+- **Decided here**: title, columns, colours, source names.
 
 ---
 
