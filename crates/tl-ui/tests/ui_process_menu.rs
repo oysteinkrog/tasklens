@@ -417,4 +417,16 @@ fn picked_second_button_terminate(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*o.results.borrow(), [ConfirmResult::Second]);
     assert!(!is_open(cx, o.handle));
+
+    // Enter runs Select, the focused default.
+    let mut o = open_confirm(
+        cx,
+        ConfirmKind::Picked {
+            name: s("kate"),
+            pid: 4242,
+        },
+    );
+    o.vcx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(*o.results.borrow(), [ConfirmResult::Confirmed]);
 }

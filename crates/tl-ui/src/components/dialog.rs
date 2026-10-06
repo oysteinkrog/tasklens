@@ -505,6 +505,15 @@ fn footer_button(
     }
 }
 
+/// What Enter does with `focused` the footer button that has focus; `None` passes it on.
+fn enter_result(focused: Option<DialogButton>, checked: bool) -> Option<DialogResult> {
+    Some(match focused? {
+        DialogButton::Cancel => DialogResult::Cancelled,
+        DialogButton::Action => DialogResult::Confirmed { checkbox: checked },
+        DialogButton::Second => DialogResult::Second,
+    })
+}
+
 /// The content view of a confirmation window.
 pub struct TlDialogView {
     dialog: TlDialog,
@@ -589,16 +598,8 @@ impl TlDialogView {
     }
 
     fn on_enter(&mut self, _: &ActivateFocusedButton, window: &mut Window, cx: &mut Context<Self>) {
-        match self.focus.focused(window) {
-            Some(DialogButton::Cancel) => self.finish(DialogResult::Cancelled, window, cx),
-            Some(DialogButton::Action) => self.finish(
-                DialogResult::Confirmed {
-                    checkbox: self.checked,
-                },
-                window,
-                cx,
-            ),
-            Some(DialogButton::Second) => self.finish(DialogResult::Second, window, cx),
+        match enter_result(self.focus.focused(window), self.checked) {
+            Some(result) => self.finish(result, window, cx),
             None => cx.propagate(),
         }
     }
@@ -702,7 +703,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn second_action_sits_between_cancel_and_action(cx: &mut TestAppContext) {
+    fn second_action_sits_between_cancel_and_select(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             crate::theme::store::init(
@@ -714,13 +715,31 @@ mod tests {
         });
         let results = Rc::new(RefCell::new(Vec::new()));
         let sink = results.clone();
-        let (_, cx) = cx.add_window_view(move |_, cx| ThreeButtons {
-            dialog: TlDialog::confirm("What do you want to do with this process?", "Select")
-                .second_action("Terminate", true),
-            focus: DialogFocus::new(cx),
-            results: sink,
+        let (view, cx) = cx.add_window_view(move |window, cx| {
+            let dialog = TlDialog::confirm("What do you want to do with this process?", "Select")
+                .second_action("Terminate", true);
+            let focus = DialogFocus::new(cx);
+            focus.initial(dialog.is_destructive()).focus(window, cx);
+            ThreeButtons {
+                dialog,
+                focus,
+                results: sink,
+            }
         });
         cx.run_until_parked();
+
+        // Focus starts on Select, so Enter confirms; Terminate is never the default.
+        let focused = cx.update(|window, cx| view.read(cx).focus.focused(window));
+        assert_eq!(focused, Some(DialogButton::Action));
+        assert_eq!(
+            enter_result(focused, false),
+            Some(DialogResult::Confirmed { checkbox: false })
+        );
+        assert_eq!(
+            enter_result(Some(DialogButton::Second), false),
+            Some(DialogResult::Second)
+        );
+
         let cancel = cx.debug_bounds("TlDialogCancel").expect("cancel");
         let second = cx.debug_bounds("TlDialogSecond").expect("second");
         let action = cx.debug_bounds("TlDialogAction").expect("action");
