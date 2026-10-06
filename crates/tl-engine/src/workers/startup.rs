@@ -1661,7 +1661,8 @@ mod tests {
         let row = raws
             .iter()
             .find(|r| r.kind == StartupKindRaw::UserUnit)
-            .expect("the sync.service row");
+            .expect("the sync.service row")
+            .clone();
         assert_eq!(row.status, StartupStatusRaw::Masked);
 
         // Loaded and timed, it still has no impact.
@@ -1678,7 +1679,7 @@ mod tests {
             .expect("the sync.service entry");
         assert_eq!(entry.status, StartupStatus::Masked);
         assert_eq!(entry.impact, Impact::None);
-        assert_eq!(&*systemd.facts(row).state_code, "active/running");
+        assert_eq!(&*systemd.facts(&row).state_code, "active/running");
     }
 
     /// Returns `foo_raw()` and records how many unit files the scan input carried.
