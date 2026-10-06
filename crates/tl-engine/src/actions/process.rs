@@ -284,6 +284,7 @@ mod tests {
             systemd_user: ManagerConnSlot::new(),
             openers: None,
             helper: None,
+            destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
         });
         let out = Arc::new(Mutex::new(None));
         let out_task = Arc::clone(&out);

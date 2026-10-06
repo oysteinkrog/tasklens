@@ -7,12 +7,14 @@
 
 pub mod cgroup;
 pub mod process;
+pub mod socket;
 
 use std::future::Future;
 use std::os::fd::{AsFd, OwnedFd};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -396,6 +398,8 @@ pub struct ActionCtx {
     pub openers: Option<Arc<dyn Openers>>,
     /// `None` until E29-014.
     pub helper: Option<Arc<dyn PrivilegedOps>>,
+    /// Set once `ConnectionsDestroySupport(true)` was sent this session (E11-021).
+    pub destroy_support_sent: AtomicBool,
 }
 
 /// The per-target dispatch `run_action` uses. Tests pass their own.
@@ -545,7 +549,13 @@ async fn dispatch(
         ActionTarget::Process(_) | ActionTarget::Thread { .. } => {
             process::run_target(cx, actx, kind, target).await
         }
-        ActionTarget::Unit(_) | ActionTarget::Startup(_) | ActionTarget::Socket { .. } => {
+        ActionTarget::Socket {
+            cookie,
+            family,
+            proto,
+            four_tuple,
+        } => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
+        ActionTarget::Unit(_) | ActionTarget::Startup(_) => {
             ActionState::Rejected(RejectReason::Unsupported)
         }
     }
@@ -905,6 +915,7 @@ mod run_tests {
                 systemd_user: ManagerConnSlot::new(),
                 openers: None,
                 helper: None,
+                destroy_support_sent: AtomicBool::new(false),
             });
             Self {
                 lab: LabRuntime::new(LabConfig::new(7).max_steps(1_000_000)),

@@ -188,6 +188,7 @@ mod tests {
             systemd_user: ManagerConnSlot::new(),
             openers: None,
             helper: None,
+            destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
         });
         let cg = CgroupRef {
             rel_path: Arc::from(APP_SCOPE),
