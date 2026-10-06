@@ -3,6 +3,7 @@ pub mod addrs;
 pub mod attribution;
 pub mod connections;
 pub mod netns;
+pub mod nl80211;
 pub mod sock_diag;
 pub mod socket_map;
 
