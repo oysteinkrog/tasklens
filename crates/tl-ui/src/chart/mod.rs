@@ -3,7 +3,8 @@
 //! these types.
 //!
 //! Owner contract:
-//! - Create one `ChartView` per chart in a constructor and keep the `Entity`.
+//! - Create one `ChartView` per chart in a constructor and keep the `Entity`. Embed it with
+//!   `.cached(StyleRefinement::default().size_full())` so it re-renders only for its own series.
 //! - Call `ChartView::set_state` for Failed, Restricted and Unsupported. The view derives
 //!   WarmingUp, Live and Stale from its data.
 //! - Pass `ChartSpec.background` for the surface the chart sits on.

@@ -805,8 +805,8 @@ mod anchor {
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext, Context, Entity, IntoElement, ParentElement, Pixels, Render, Styled,
-        TestAppContext, VisualTestContext, Window, div, px,
+        AppContext, Context, Entity, IntoElement, ParentElement, Pixels, Render, StyleRefinement,
+        Styled, TestAppContext, VisualTestContext, Window, div, px,
     };
     use smallvec::{SmallVec, smallvec};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -900,7 +900,8 @@ mod anchor {
         view_from(id, version, period, samples)
     }
 
-    /// Root view that owns the window's driver and stacks `charts`, each `w × h` logical px.
+    /// Root view that owns the window's driver and stacks `charts`, each `w × h` logical px and
+    /// embedded cached, as owners do, so a chart re-renders only when it is notified.
     struct Root {
         driver: Entity<AnimationDriver>,
         charts: Vec<Entity<ChartView>>,
@@ -910,15 +911,21 @@ mod anchor {
 
     impl Render for Root {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().flex().flex_col().children(
-                self.charts
-                    .iter()
-                    .map(|c| div().w(self.w).h(self.h).flex_none().child(c.clone())),
-            )
+            div()
+                .flex()
+                .flex_col()
+                .children(self.charts.iter().map(|c| {
+                    div()
+                        .w(self.w)
+                        .h(self.h)
+                        .flex_none()
+                        .child(c.clone().cached(StyleRefinement::default().size_full()))
+                }))
         }
     }
 
-    /// A window with `specs.len()` charts of `w × h`, bound to a hub over `engine`.
+    /// A window with `specs.len()` charts of `w × h`, bound to a hub over `engine`. The test
+    /// window starts at scale 2; tests that check physical px call `at_scale_one`.
     fn window_with<'a>(
         cx: &'a mut TestAppContext,
         engine: &Arc<FakeEngine>,
@@ -942,9 +949,14 @@ mod anchor {
                 h: px(h),
             }
         });
-        vcx.simulate_scale_factor_change(1.0);
         vcx.run_until_parked();
         (root, vcx)
+    }
+
+    /// Scale 1, so physical px equal logical px. Refreshes the window, rendering every chart.
+    fn at_scale_one(vcx: &mut VisualTestContext) {
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
     }
 
     fn draw(vcx: &mut VisualTestContext) {
@@ -968,6 +980,7 @@ mod anchor {
     #[gpui_kit::test]
     fn warming_up_paints_no_paths(cx: &mut TestAppContext) {
         let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, false)], 602., 202.);
+        at_scale_one(vcx);
         let c = chart(&root, vcx, 0);
         draw(vcx);
         vcx.read_entity(&c, |v, _| {
@@ -984,6 +997,7 @@ mod anchor {
     #[gpui_kit::test]
     fn failed_state_dotted_baseline_only(cx: &mut TestAppContext) {
         let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, true)], 602., 202.);
+        at_scale_one(vcx);
         let c = chart(&root, vcx, 0);
         c.update(vcx, |v, cx| {
             // Live, moving data: the owner state still wins.
@@ -1011,6 +1025,7 @@ mod anchor {
     #[gpui_kit::test]
     fn gap_and_spike_scene_shape(cx: &mut TestAppContext) {
         let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, false)], 400., 200.);
+        at_scale_one(vcx);
         let c = chart(&root, vcx, 0);
         // 70 samples 1 s apart over the 60 s window: value 20, one gap at 40, a spike to 100
         // at 50.

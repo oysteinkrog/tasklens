@@ -198,7 +198,10 @@ fn paint_view(
     }
     let sliding = spec.smooth && !env.reduce_motion;
     let stale = newest_ns > 0 && geometry::is_stale(newest_ns, now, period_ns);
-    let right_edge = if stale {
+    // No data: the grid is placed against the clock, where the first samples will land.
+    let right_edge = if newest_ns == 0 {
+        now
+    } else if stale {
         if sliding {
             now.saturating_sub(period_ns)
         } else {
