@@ -2085,11 +2085,13 @@ fn tree_table_text_cache_hit_rate() {
 }
 
 /// A page that gets snapshots but never installs them into its table.
+#[cfg(feature = "test-hooks")]
 struct SnapshotHost {
     table: Entity<TlTreeTable<TDelegate>>,
     _sub: Subscription,
 }
 
+#[cfg(feature = "test-hooks")]
 impl Render for SnapshotHost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
