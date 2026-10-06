@@ -453,3 +453,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.10 (b8d95f4): scroll anchoring sets the base offset directly; keep-visible bottom case scrolls to ix + 1; demand hash is an order-free sum of FxHash. Accepted.
 - yrf.12 (ad829bd, 566449a, 3a0338e, 58e9bef, 34c262b, 37e2f07): ChartGridElement, one element for n cells, request_measured_layout for first-frame height. Offline text and per-cell dotted gaps moved to a new yrf bead. Cell mark and tooltip are P2 work still to come.
 - jqk.6 decision: TlIcon::Square added for the maximize caption.
+- lgw.11 (420f444, 6ba8ccd, de739e8): TL1 share codes and import. Input capped at MAX_IMPORT_BYTES (1 MiB) and MAX_USER_THEMES; proptests over random strings and payloads; clipboard text never logged. Checked the bounds in share_code.rs.
