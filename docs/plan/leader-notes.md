@@ -398,3 +398,10 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.5 (7ac36f0, 69c0d9d, 49100d7, 50d239d): toolbar. Accepted TlButton::icon_muted and icon_color. Toolbar slots stop mouse-down so the title bar does not start a move.
 - rsf.6 (d1b31eb): TreeTableDelegate. Decision: associated types Column and Sort, CellTextCache generic over the column, ColumnResizeMode re-exports tl_model ColumnResize. New rsf bead blocks rsf.8, hk6.1, hk6.10, 9o0.6, 9o0.14.
 - fut.10 (6147ca3, 358077b, 7b82e88, 35870b4): TlDialog. Accepted: extra takes a closure, footer on base Button, sizes scale with ui_scale. Dialog centres on the display (parent bounds not readable during open); Wayland places it as an xdg_dialog anyway.
+- 8q0.37 (e91d743, 3be9e86, 09ec39b): GPU ownership by uuid ([0;16] is GpuDrm). gpu_power keyed by DeviceIdx. Known: an empty GPU update counts as GpuDrm, so an empty NVIDIA sample keeps old NVIDIA rows (device list removal still clears them). Processes::apply_gpu_processes clears all per-process GPU data; fine while gpu_drm sends processes: None.
+- hjn.24 closed (adds e3aa926: uses units::bytes_si_1dp).
+- 8fx.2 (b92bb92, dc9ddec, 0f7ae3e, eba16b8, 88843e9): history recorder runs in full mode; SessionStart sent after the worker's first poll; Reducer.history_cmd (option A). lab_session rig installs a no-op sink.
+- hjn.31 (803be98): Intel i915 and xe in gpu_drm; xe engine classes mapped to i915 names; Intel mem_total 0 in static info (R-164), samples carry the fdinfo total.
+- i3o.17 (1db91cd): Run now and Delete entry; set_unit_file_state takes reload; reload_after_change shared. Plasma script cwd from HOME.
+- i3o.24 (fc8577c): four #[ignore] real user-manager tests; they write tasklens-test-* units in ~/.config/systemd/user and clean up. Verified empty afterwards.
+- Dispatch note: only tl-ui has the test-hooks feature.
