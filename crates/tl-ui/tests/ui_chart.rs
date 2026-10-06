@@ -419,6 +419,45 @@ mod element {
         assert_eq!(r.builds(), 2);
     }
 
+    /// Toggling `performance.curved_lines` rebuilds the geometry once (tasklens-yrf.18).
+    #[gpui_kit::test]
+    fn curved_toggle_rebuilds_once(cx: &mut TestAppContext) {
+        use tl_model::client::EngineClient;
+        use tl_model::settings::{Settings, UiState};
+        use tl_ui::app::{BootSettings, EngineGlobal};
+        use tl_ui::settings_global::TlSettings;
+
+        cx.update(|cx| {
+            let client: Arc<dyn EngineClient> = FakeEngine::new();
+            cx.set_global(EngineGlobal(client));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let mut r = rig(cx, spec(false, true));
+        r.set(view_of(600, now_boot_ns(), 100 * MS, 1), ChartState::Live);
+        r.draw();
+        assert_eq!(r.builds(), 1);
+
+        let toggle = |r: &mut Rig<'_>, on: bool| {
+            r.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.performance.curved_lines = on);
+            });
+            r.chart.update(r.vcx, |_, cx| cx.notify());
+            r.draw();
+            r.chart.update(r.vcx, |_, cx| cx.notify());
+            r.draw();
+        };
+        toggle(&mut r, true);
+        assert_eq!(r.builds(), 2, "rebuilt once after turning curves on");
+        toggle(&mut r, false);
+        assert_eq!(r.builds(), 3, "rebuilt once after turning curves off");
+    }
+
     #[gpui_kit::test]
     fn moving_chart_requests_frame(cx: &mut TestAppContext) {
         let mut r = rig(cx, spec(true, false));

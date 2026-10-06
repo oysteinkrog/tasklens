@@ -558,6 +558,7 @@ fn paint_grid_view(
             y_min_bits: y.y_min.to_bits(),
             y_max_bits: y.y_max.to_bits(),
             style_version: env.metrics.style_version,
+            curved: false,
         };
         let changed = cache
             .key
@@ -813,6 +814,7 @@ fn build_cells(
         y_max,
         now_boot_ns: now,
         stack: false,
+        curved: false,
     };
     for (i, cell) in spec.cells.iter().enumerate() {
         if cell.offline {

@@ -117,6 +117,8 @@ impl Element for ChartElement {
             } else {
                 NetworkUnit::default()
             },
+            curved: cx.has_global::<TlSettings>()
+                && TlSettings::settings(cx).performance.curved_lines,
         };
         let view_id = self.view.entity_id();
         let out = self
@@ -150,6 +152,8 @@ struct PaintEnv {
     theme: Arc<TlTheme>,
     reduce_motion: bool,
     network_unit: NetworkUnit,
+    /// `performance.curved_lines`.
+    curved: bool,
 }
 
 struct PaintOut {
@@ -243,6 +247,7 @@ fn paint_view(
                 y_min_bits: y.y_min.to_bits(),
                 y_max_bits: y.y_max.to_bits(),
                 style_version: env.metrics.style_version,
+                curved: env.curved,
             },
         );
         #[cfg(any(test, feature = "test-hooks"))]
@@ -269,6 +274,7 @@ fn paint_view(
                 y_max: y.y_max,
                 now_boot_ns: now,
                 stack: spec.stack,
+                curved: env.curved,
             };
             geometry::build(&input, &mut cache, scratch);
             *built_right_edge_ns = right_edge;

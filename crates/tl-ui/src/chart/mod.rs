@@ -177,6 +177,8 @@ pub struct GeometryScalars {
     pub y_min_bits: u32,
     pub y_max_bits: u32,
     pub style_version: u64,
+    /// `performance.curved_lines`, which `style_version` does not track.
+    pub curved: bool,
 }
 
 impl ChartGeometryKey {

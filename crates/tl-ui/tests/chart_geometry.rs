@@ -7,8 +7,8 @@ use gpui_kit::{Hsla, hsla};
 use smallvec::SmallVec;
 use tl_model::series::{Sample, SampleFlags, SeriesView};
 use tl_ui::chart::geometry::{
-    BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, decimate, is_stale, right_edge_ns,
-    split_runs, stale_age_ns, window_start, y_of,
+    BuildInput, Pt, Run, Scratch, TimeMap, bucket_ns, build, decimate, emit_run, is_stale,
+    right_edge_ns, split_runs, stale_age_ns, window_start, y_of,
 };
 use tl_ui::chart::{ChartCache, ChartSeries, ChartSpec, PathSet, YScale};
 
@@ -254,6 +254,7 @@ fn run_build(series: &[(ChartSeries, Option<&SeriesView>)], map: TimeMap, now: u
         y_max: 100.0,
         now_boot_ns: now,
         stack: false,
+        curved: false,
     };
     let mut cache = ChartCache::default();
     build(&input, &mut cache, &mut Scratch::default());
@@ -434,6 +435,7 @@ fn stack_build(
         y_max,
         now_boot_ns: now,
         stack: true,
+        curved: false,
     };
     build(&input, cache, scratch);
 }
@@ -794,5 +796,70 @@ mod scale {
         // Never falls.
         let r = run(up, 0.0, 10.0, 60 * SEC, &mut s);
         assert_eq!((r.y_max, text(&r)), (2000.0, Some("2000 W")));
+    }
+}
+
+/// Curved lines (tasklens-yrf.18, PERF-021): `pts` emitted curved on a 0..100 scale, 100 px high,
+/// 100 px per second.
+fn curved(pts: &[Pt]) -> Vec<(f32, f32)> {
+    let newest = pts[pts.len() - 1].t_ns;
+    let input = BuildInput {
+        series: &[],
+        map: TimeMap {
+            anchor_ns: newest,
+            right_edge_ns: newest,
+            range_ns: newest - pts[0].t_ns,
+            plot_width: ((newest - pts[0].t_ns) / (10 * MS)) as f32,
+        },
+        plot_height: 100.0,
+        y_min: 0.0,
+        y_max: 100.0,
+        now_boot_ns: newest,
+        stack: false,
+        curved: true,
+    };
+    let mut out = Vec::new();
+    emit_run(pts, true, &input, &mut Vec::new(), &mut out);
+    out.iter().map(|p| (p.x.as_f32(), p.y.as_f32())).collect()
+}
+
+#[test]
+fn monotone_curve_never_overshoots() {
+    let pts: Vec<Pt> = [0.0, 100.0, 0.0, 100.0]
+        .iter()
+        .enumerate()
+        .map(|(i, &value)| Pt {
+            t_ns: i as u64 * SEC,
+            value,
+        })
+        .collect();
+    let out = curved(&pts);
+    assert_eq!(out.len(), 1 + 3 * 4, "4 line segments per segment");
+    for (x, y) in out {
+        // y 0 is value 100 and y 100 is value 0.
+        let value = 100.0 - y;
+        assert!((0.0..=100.0).contains(&value), "value {value} at x {x}");
+    }
+}
+
+#[test]
+fn curve_through_collinear_points_is_straight() {
+    let pts: Vec<Pt> = (0..10)
+        .map(|i| Pt {
+            t_ns: i as u64 * SEC,
+            value: 10.0 + 7.5 * i as f32,
+        })
+        .collect();
+    let out = curved(&pts);
+    assert_eq!(out.len(), 1 + 9 * 4);
+    // The line from (−900, 90) to (0, 22.5): x = (t − newest) × 100 px/s, y = 100 − value.
+    let (x0, y0) = out[0];
+    let (x1, y1) = out[out.len() - 1];
+    for (x, y) in out {
+        let on_line = y0 + (y1 - y0) * (x - x0) / (x1 - x0);
+        assert!(
+            (y - on_line).abs() < 0.01,
+            "({x}, {y}) is {on_line} on the line"
+        );
     }
 }

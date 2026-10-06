@@ -235,6 +235,9 @@ pub struct BuildInput<'a> {
     pub now_boot_ns: u64,
     /// P2 stacked bands (PERF-030): band `k` draws the sum of series `0..=k`.
     pub stack: bool,
+    /// `performance.curved_lines` (PERF-021): monotone cubic through the decimated points.
+    /// `build_cell` ignores it.
+    pub curved: bool,
 }
 
 /// Buffers reused across rebuilds so the steady state allocates only inside lyon.
@@ -252,6 +255,8 @@ pub struct Scratch {
     acc: Vec<f32>,
     /// Grid cells: the decimated points after clipping to the cell, physical px.
     clipped: Vec<Point<Pixels>>,
+    /// One run's line and band floor as emitted, physical px, and the curve tangents.
+    line: Line,
     live: Builders,
     stale: Builders,
 }
@@ -356,6 +361,103 @@ pub fn y_of(value: f32, y_min: f32, y_max: f32, plot_height: f32) -> f32 {
     (plot_height - (value - y_min) / span * plot_height).clamp(0.0, plot_height.max(0.0))
 }
 
+/// Line segments per decimated segment of a curved run.
+const CURVE_STEPS: usize = 4;
+
+/// Emits one run of points into `out` as chart-local physical px (PERF-021, UI-PRF-009). Clears
+/// `out` first. Straight: one vertex per point. With `curved`: a monotone cubic (Fritsch-Carlson)
+/// through the points, flattened to `CURVE_STEPS` line segments per segment, so dashes and fills
+/// follow the curve. The curve never goes above or below its two end points on any segment.
+/// `tangents` is a reused buffer.
+pub fn emit_run(
+    pts: &[Pt],
+    curved: bool,
+    input: &BuildInput,
+    tangents: &mut Vec<f32>,
+    out: &mut Vec<Point<Pixels>>,
+) {
+    out.clear();
+    let xy = |p: &Pt| {
+        (
+            input.map.x_local(p.t_ns),
+            y_of(p.value, input.y_min, input.y_max, input.plot_height),
+        )
+    };
+    if !curved || pts.len() < 3 {
+        out.extend(pts.iter().map(|p| {
+            let (x, y) = xy(p);
+            point(px(x), px(y))
+        }));
+        return;
+    }
+
+    // Secant slope of segment `k`; 0 when the two x values coincide.
+    let slope = |k: usize| {
+        let (a, b) = (xy(&pts[k]), xy(&pts[k + 1]));
+        let h = b.0 - a.0;
+        if h > 0.0 { (b.1 - a.1) / h } else { 0.0 }
+    };
+    let n = pts.len();
+    tangents.clear();
+    tangents.push(slope(0));
+    for k in 1..n - 1 {
+        let (d0, d1) = (slope(k - 1), slope(k));
+        tangents.push(if d0 * d1 > 0.0 { (d0 + d1) / 2.0 } else { 0.0 });
+    }
+    tangents.push(slope(n - 2));
+    // Fritsch-Carlson: scale both tangents of a segment down until `α² + β² ≤ 9`.
+    for k in 0..n - 1 {
+        let d = slope(k);
+        if d == 0.0 {
+            tangents[k] = 0.0;
+            tangents[k + 1] = 0.0;
+            continue;
+        }
+        let (a, b) = (tangents[k] / d, tangents[k + 1] / d);
+        let r = a * a + b * b;
+        if r > 9.0 {
+            let tau = 3.0 / r.sqrt();
+            tangents[k] = tau * a * d;
+            tangents[k + 1] = tau * b * d;
+        }
+    }
+
+    let (x0, y0) = xy(&pts[0]);
+    out.push(point(px(x0), px(y0)));
+    for k in 0..n - 1 {
+        let (a, b) = (xy(&pts[k]), xy(&pts[k + 1]));
+        let h3 = (b.0 - a.0) / 3.0;
+        let c1 = (a.0 + h3, a.1 + tangents[k] * h3);
+        let c2 = (b.0 - h3, b.1 - tangents[k + 1] * h3);
+        for i in 1..CURVE_STEPS {
+            let t = i as f32 / CURVE_STEPS as f32;
+            let (x, y) = cubic(a, c1, c2, b, t);
+            out.push(point(px(x), px(y)));
+        }
+        out.push(point(px(b.0), px(b.1)));
+    }
+}
+
+/// The cubic Bézier `p0, c1, c2, p3` at `t`.
+fn cubic(p0: (f32, f32), c1: (f32, f32), c2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+    let u = 1.0 - t;
+    let (w0, w1, w2, w3) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+    (
+        w0 * p0.0 + w1 * c1.0 + w2 * c2.0 + w3 * p3.0,
+        w0 * p0.1 + w1 * c1.1 + w2 * c2.1 + w3 * p3.1,
+    )
+}
+
+/// One run's emitted vertices: the line, the band floor under it (stacked mode) and the tangent
+/// buffer `emit_run` uses for both.
+#[derive(Default)]
+struct Line {
+    tangents: Vec<f32>,
+    line: Vec<Point<Pixels>>,
+    floor: Vec<Point<Pixels>>,
+    floor_pts: Vec<Pt>,
+}
+
 /// Dash pattern for dashed series (PERF-026).
 const DASH: [gpui_kit::Pixels; 2] = [px(5.0), px(5.0)];
 
@@ -401,59 +503,60 @@ impl Builders {
         &mut self.strokes[i].2
     }
 
-    /// One fill polygon (when the series has a fill) and one stroke for `pts`. The polygon goes
-    /// down to the baseline, or with `floors` (one per point, stacked bands) back along the floor.
-    fn emit(&mut self, s: &ChartSeries, pts: &[Pt], floors: Option<&[f32]>, input: &BuildInput) {
-        let Some((first, rest)) = pts.split_first() else {
+    /// One fill polygon (when the series has a fill) and one stroke for `pts`, straight or curved
+    /// per `input.curved`. The polygon goes down to the baseline, or with `floors` (one per point,
+    /// stacked bands) back along the floor, which follows the same kind of curve.
+    fn emit(
+        &mut self,
+        s: &ChartSeries,
+        pts: &[Pt],
+        floors: Option<&[f32]>,
+        input: &BuildInput,
+        buf: &mut Line,
+    ) {
+        let Line {
+            tangents,
+            line,
+            floor,
+            floor_pts,
+        } = buf;
+        emit_run(pts, input.curved, input, tangents, line);
+        let Some((&p0, rest)) = line.split_first() else {
             return;
         };
         let h = input.plot_height;
-        let xy = |p: &Pt| {
-            point(
-                px(input.map.x_local(p.t_ns)),
-                px(y_of(p.value, input.y_min, input.y_max, h)),
-            )
-        };
-        let p0 = xy(first);
         if let Some(fill) = s.fill
-            && !rest.is_empty()
+            && let Some(&last) = rest.last()
         {
             let b = self.fill(fill);
             match floors {
                 Some(floors) => {
+                    floor_pts.clear();
+                    floor_pts.extend(pts.iter().zip(floors).map(|(p, f)| Pt {
+                        t_ns: p.t_ns,
+                        value: *f,
+                    }));
+                    emit_run(floor_pts, input.curved, input, tangents, floor);
                     b.move_to(p0);
-                    for p in rest {
-                        b.line_to(xy(p));
+                    for &p in rest {
+                        b.line_to(p);
                     }
-                    for (p, f) in pts.iter().zip(floors).rev() {
-                        b.line_to(xy(&Pt {
-                            t_ns: p.t_ns,
-                            value: *f,
-                        }));
+                    for &p in floor.iter().rev() {
+                        b.line_to(p);
                     }
                 }
                 None => {
                     b.move_to(point(p0.x, px(h)));
                     b.line_to(p0);
-                    let mut last = p0;
-                    for p in rest {
-                        last = xy(p);
-                        b.line_to(last);
+                    for &p in rest {
+                        b.line_to(p);
                     }
                     b.line_to(point(last.x, px(h)));
                 }
             }
             b.close();
         }
-        let b = self.stroke(s);
-        b.move_to(p0);
-        if rest.is_empty() {
-            b.line_to(point(p0.x + px(1.0), p0.y));
-        } else {
-            for p in rest {
-                b.line_to(xy(p));
-            }
-        }
+        emit_cell_stroke(self.stroke(s), p0, rest);
     }
 
     /// Tessellates every builder into `fills` and `strokes` and leaves the builder lists empty. A
@@ -505,6 +608,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
         floors,
         pt_floors,
         acc,
+        line,
         live,
         stale,
         ..
@@ -545,7 +649,7 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                 if let Some(f) = band_floors {
                     floors_of(samples, f, span, out, pt_floors);
                 }
-                builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input);
+                builders.emit(spec, out, band_floors.map(|_| &pt_floors[..]), input, line);
             });
         }
 
@@ -567,7 +671,8 @@ pub fn build(input: &BuildInput, cache: &mut ChartCache, scratch: &mut Scratch) 
                     pt_floors.clear();
                     pt_floors.extend([floor, floor]);
                 }
-                stale.emit(spec, stale_pts, band_floors.map(|_| &pt_floors[..]), input);
+                let floors = band_floors.map(|_| &pt_floors[..]);
+                stale.emit(spec, stale_pts, floors, input, line);
             }
         }
     }
