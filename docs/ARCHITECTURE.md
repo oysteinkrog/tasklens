@@ -649,7 +649,7 @@ pub struct ProcessSnapshot {
 
 pub struct SeriesSet { /* as above */ pub slow: Arc<[Arc<SeriesView>]> } // 1 Hz tier views with the TIER_1HZ bit set, from P2 (R-141, R-170)
 
-pub struct ProcessSeriesSet { pub header: ComponentHeader, pub series: Arc<[(ProcessSeriesId, Arc<SeriesView>)]> }
+pub struct ProcessSeriesSet { pub header: ComponentHeader, pub series: Arc<[(ProcessSeriesId, Arc<SeriesView>)]>, pub slow: Arc<[(ProcessSeriesId, Arc<SeriesView>)]> } // both sorted by id; slow holds the 1 Hz views (get, get_slow)
 pub struct ProcessSeriesId { pub target: GraphTarget, pub column: ColumnId }
 pub enum GraphTarget { Process(ProcessKey), Name(Arc<str>), App(Arc<str>) }
 
