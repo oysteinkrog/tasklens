@@ -23,7 +23,7 @@ use gpui_kit::{
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
     StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
-    WeakEntity, Window, div, font, point, px, size, uniform_list,
+    WeakEntity, Window, canvas, div, fill, font, point, px, size, uniform_list,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
@@ -240,6 +240,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     header_listener: HeaderListener,
     /// `tables.column_resize`, passed in by the owner.
     resize_mode: ColumnResizeMode,
+    /// `tables.column_separators`, passed in by the owner.
+    column_separators: bool,
     /// The owner's default layout for "Reset to default". `None`: `ResetColumns` goes on to the
     /// owner.
     default_layout: Option<ColumnLayout<D::Column>>,
@@ -281,6 +283,9 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     pub render_count: Cell<u32>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub rows_built_last_frame: Cell<u32>,
+    /// The column separator quads painted since the last render, in window coordinates.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub separator_quads: Rc<std::cell::RefCell<Vec<Bounds<Pixels>>>>,
 }
 
 /// What every row of one frame shares.
@@ -290,6 +295,7 @@ struct FrameCtx<C> {
     hairline: Pixels,
     total_width: Pixels,
     guide_lines: bool,
+    separators: bool,
     visible: Arc<[C]>,
     offsets: Arc<[Pixels]>,
     name_col: Option<C>,
@@ -313,6 +319,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 })
             },
             resize_mode: ColumnResizeMode::default(),
+            column_separators: false,
             default_layout: None,
             reorder_esc: None,
             hover_row: None,
@@ -335,6 +342,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             render_count: Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
             rows_built_last_frame: Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            separator_quads: Rc::default(),
         }
     }
 
@@ -357,6 +366,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// The owner passes the current `tables.column_resize` value; the table reads no settings.
     pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
         self.resize_mode = mode;
+    }
+
+    /// The owner passes the current `tables.column_separators` value: 1 px divider lines
+    /// between the body's columns (UI-PRC-002, R-075).
+    pub fn set_column_separators(&mut self, on: bool) {
+        self.column_separators = on;
     }
 
     /// The owner's default order, visible set and widths. With them the table handles
@@ -598,6 +613,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             hairline: UiMetrics::hairline(window),
             total_width,
             guide_lines: self.delegate.guide_lines(),
+            separators: self.column_separators,
             visible: layout.visible_columns().clone(),
             offsets: layout.offsets().clone(),
             name_col: name_column(&self.delegate),
@@ -760,6 +776,10 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             }
             row = row.child(cell.absolute().top_0().left(x));
         }
+        if f.separators {
+            // Painted after the cells so the cell fills do not cover the lines.
+            row = row.child(self.separator_canvas(f));
+        }
         if !selected && self.selection.focus() == Some(id) {
             // The keyboard caret on a row that is not selected (UI-PRC-008).
             row = row.child(
@@ -775,6 +795,36 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             );
         }
         row.into_any_element()
+    }
+
+    /// The row's column separators: one canvas whose paint draws one quad per boundary.
+    fn separator_canvas(&self, f: &FrameCtx<D::Column>) -> impl IntoElement {
+        let offsets = f.offsets.clone();
+        let total_width = f.total_width;
+        let line = f.hairline;
+        let divider = f.theme.divider;
+        #[cfg(any(test, feature = "test-hooks"))]
+        let log = self.separator_quads.clone();
+        canvas(
+            |_, _, _| (),
+            move |bounds, (), window, _| {
+                for q in separator_quads(
+                    &offsets,
+                    total_width,
+                    bounds.origin,
+                    bounds.size.height,
+                    line,
+                ) {
+                    #[cfg(any(test, feature = "test-hooks"))]
+                    log.borrow_mut().push(q);
+                    window.paint_quad(fill(q, divider));
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
     }
 
     /// The chevron's 20 px hit area over the Name cell. `left` is the chevron box's left edge in
@@ -2017,6 +2067,24 @@ fn push_toast(kind: ToastKind, text: SharedString, window: &mut Window, cx: &mut
     queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
 }
 
+/// The column separators of one body row at `origin`: a `line`-wide quad on the right edge of
+/// every visible column, inside it, where the header draws its boundaries. `offsets` are the
+/// visible columns' left edges.
+pub fn separator_quads(
+    offsets: &[Pixels],
+    total_width: Pixels,
+    origin: Point<Pixels>,
+    row_h: Pixels,
+    line: Pixels,
+) -> impl Iterator<Item = Bounds<Pixels>> {
+    offsets
+        .iter()
+        .skip(1)
+        .copied()
+        .chain((!offsets.is_empty()).then_some(total_width))
+        .map(move |right| Bounds::new(point(origin.x + right - line, origin.y), size(line, row_h)))
+}
+
 /// The rows a demand report covers: `visible` widened by its own length above and below, cut to
 /// [`DEMAND_MAX_IDS`] around the centre of `visible` when longer.
 pub fn demand_window(visible: Range<usize>, count: usize) -> Range<usize> {
@@ -2116,6 +2184,8 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         let theme = current(cx).clone();
         self.sync_versions(m.style_version);
         self.list_calls = 0;
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.separator_quads.borrow_mut().clear();
         self.x_offset = -ScrollbarHandle::offset(&self.scroll).x;
         let hairline = UiMetrics::hairline(window);
 

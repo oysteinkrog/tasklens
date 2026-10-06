@@ -2615,3 +2615,116 @@ fn first_visible_row_empty_table() {
     redraw(vcx);
     assert_eq!(scroll_top(vcx, &table), 0.);
 }
+
+// Column separators (E18-014).
+
+/// Columns Name, PID, CPU, Memory and User: 540 px in all.
+#[cfg(feature = "test-hooks")]
+fn five_columns(rows: Vec<TRow>) -> TDelegate {
+    let mut d = TDelegate::new(rows);
+    d.specs = vec![
+        spec(ColumnId::Name, ColumnKind::Text, 200.),
+        spec(ColumnId::Pid, ColumnKind::Numeric, 80.),
+        spec(ColumnId::Cpu, ColumnKind::Numeric, 80.),
+        spec(ColumnId::Memory, ColumnKind::Numeric, 80.),
+        spec(ColumnId::User, ColumnKind::Text, 100.),
+    ];
+    let order = [
+        ColumnId::Name,
+        ColumnId::Pid,
+        ColumnId::Cpu,
+        ColumnId::Memory,
+        ColumnId::User,
+    ];
+    d.layout = ColumnLayout::defaults(TableId::Processes, &d.specs, &order, &order);
+    d
+}
+
+#[cfg(feature = "test-hooks")]
+fn separators(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> Vec<gpui_kit::Bounds<Pixels>> {
+    vcx.update(|_, cx| table.read(cx).separator_quads.borrow().clone())
+}
+
+#[cfg(feature = "test-hooks")]
+fn separators_on(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) {
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.set_column_separators(true);
+            cx.notify();
+        })
+    });
+    redraw(vcx);
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn separators_off_by_default() {
+    let mut cx = cosmic_cx();
+    let rows = (0..3).map(plain).collect();
+    let (table, vcx) = open_table(&mut cx, five_columns(rows), 600., 200.);
+    assert!(vcx.debug_bounds("TlCell-numeric").is_some(), "rows drawn");
+    assert!(separators(vcx, &table).is_empty());
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn separators_on_one_per_boundary() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, five_columns(vec![plain(0)]), 600., 200.);
+    separators_on(vcx, &table);
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    let line = vcx.update(|window, _| px(1.0 / window.scale_factor()));
+    let quads = separators(vcx, &table);
+    let xs: Vec<Pixels> = quads.iter().map(|q| q.left() - body.left()).collect();
+    let expected: Vec<Pixels> = [200., 280., 360., 440., 540.]
+        .iter()
+        .map(|&b| px(b) - line)
+        .collect();
+    assert_eq!(xs, expected);
+    for q in &quads {
+        assert_eq!(q.size.width, line, "one physical px");
+        assert_eq!(q.size.height, px(ROW_H), "full row height");
+        assert_eq!(q.top(), body.top());
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn separators_skip_group_headers() {
+    let mut cx = cosmic_cx();
+    let rows = vec![group(0), plain(1)];
+    let (table, vcx) = open_table(&mut cx, five_columns(rows), 600., 200.);
+    separators_on(vcx, &table);
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    let quads = separators(vcx, &table);
+    assert_eq!(quads.len(), 5, "only the plain row");
+    assert!(quads.iter().all(|q| q.top() == body.top() + px(ROW_H)));
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn separators_move_with_horizontal_scroll() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_table(&mut cx, five_columns(vec![plain(0)]), 300., 200.);
+    separators_on(vcx, &table);
+    let before = separators(vcx, &table);
+    let cell = vcx.debug_bounds("TlCell-numeric").expect("pid cell");
+    vcx.update(|_, cx| {
+        let handle = table.read(cx).scroll_handle();
+        ScrollbarHandle::set_offset(&handle, point(px(-100.), px(0.)));
+    });
+    vcx.update(|window, _| window.refresh());
+    redraw(vcx);
+    let after = separators(vcx, &table);
+    let cell2 = vcx
+        .debug_bounds("TlCell-numeric")
+        .expect("pid cell after scroll");
+    assert_eq!(cell2.left(), cell.left() - px(100.));
+    assert_eq!(after.len(), before.len());
+    for (a, b) in after.iter().zip(&before) {
+        assert_eq!(a.left(), b.left() - px(100.));
+    }
+}
