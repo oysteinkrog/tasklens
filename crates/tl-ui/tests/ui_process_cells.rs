@@ -1299,3 +1299,213 @@ mod paint {
         assert_eq!(cell.size.width, px(120.));
     }
 }
+
+// E22-005: the process Name cell. The table's chevron hit area, its toggle and the group header
+// row band are tested in ui_tree_table (`mouse_selection_rules`, group header tests).
+mod name_cell {
+    use std::sync::Arc;
+
+    use gpui_kit::assets::IconName;
+    use gpui_kit::{
+        Bounds, Context, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::processes::name_cell::{
+        NameCellData, NameIcon, NameWords, StateGlyph, icon_slot, name_cell, name_flags,
+        render_group_header, render_name_cell, row_icon,
+    };
+    use tl_ui::table::cells::{CellCtx, IconSourceCache};
+    use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind};
+    use tl_ui::theme::{current, metrics};
+
+    fn data(kind: RowKind, depth: u8, expandable: Option<bool>) -> NameCellData {
+        NameCellData {
+            kind,
+            depth,
+            expandable,
+            icon: NameIcon::Lucide(IconName::Binary),
+            primary: "bash".into(),
+            count_run: None,
+            state_glyph: None,
+            exited: false,
+        }
+    }
+
+    fn words() -> NameWords {
+        NameWords::from_fn(|key| SharedString::new_static(key))
+    }
+
+    enum Cell {
+        Name(fn() -> NameCellData),
+        Group(&'static str, bool),
+    }
+
+    struct Host {
+        cell: Cell,
+        icons: IconSourceCache,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = current(cx).clone();
+            let m = *metrics(cx);
+            let ctx = CellCtx {
+                m: &m,
+                theme: &theme,
+                selected: false,
+                width: px(400.),
+            };
+            let cell = match &self.cell {
+                Cell::Name(make) => render_name_cell(
+                    make(),
+                    7,
+                    &ctx,
+                    &words(),
+                    false,
+                    &mut self.icons,
+                    window,
+                    cx,
+                ),
+                Cell::Group(label, expanded) => {
+                    render_group_header(SharedString::new_static(label), *expanded, &ctx)
+                }
+            };
+            div().w(px(400.)).h(m.row_height).child(cell)
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, cell: Cell) -> &mut VisualTestContext {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+        });
+        let (_, vcx) = cx.add_window_view(|_, _| Host {
+            cell,
+            icons: IconSourceCache::new(),
+        });
+        vcx.run_until_parked();
+        vcx
+    }
+
+    fn bounds(vcx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        vcx.debug_bounds(selector).expect(selector)
+    }
+
+    /// Text x relative to the cell.
+    fn text_x(cx: &mut TestAppContext, make: fn() -> NameCellData) -> Pixels {
+        let vcx = open(cx, Cell::Name(make));
+        bounds(vcx, "TlNameCell-primary").left() - bounds(vcx, "TlNameCell").left()
+    }
+
+    #[gpui_kit::test]
+    fn name_cell_indent_by_depth_0(cx: &mut TestAppContext) {
+        // R-190: 20 + depth × 20 + 6 (chevron box), chevron 16, gap 6, icon 16, gap 6.
+        let x = text_x(cx, || data(RowKind::Process, 0, Some(false)));
+        assert_eq!(x, px(20. + 6. + 16. + 6. + 16. + 6.));
+    }
+
+    #[gpui_kit::test]
+    fn name_cell_indent_by_depth_1(cx: &mut TestAppContext) {
+        let x = text_x(cx, || data(RowKind::Process, 1, Some(true)));
+        assert_eq!(x, px(20. + 20. + 6. + 16. + 6. + 16. + 6.));
+    }
+
+    #[gpui_kit::test]
+    fn name_cell_indent_by_depth_2(cx: &mut TestAppContext) {
+        let x = text_x(cx, || data(RowKind::Process, 2, Some(false)));
+        assert_eq!(x, px(20. + 40. + 6. + 16. + 6. + 16. + 6.));
+    }
+
+    #[gpui_kit::test]
+    fn name_cell_app_text_at_78(cx: &mut TestAppContext) {
+        // The 24 px icon moves the text 8 px right of a 16 px icon row (R-190: 78 at depth 0).
+        let x = text_x(cx, || NameCellData {
+            icon: NameIcon::File(Arc::from("/nonexistent/tasklens/app.png")),
+            ..data(RowKind::App, 0, Some(false))
+        });
+        assert_eq!(x, px(78.));
+    }
+
+    #[gpui_kit::test]
+    fn chevron_width_reserved_on_leaf(cx: &mut TestAppContext) {
+        // No chevron is drawn, but the text sits where an expandable sibling's does.
+        let leaf = text_x(cx, || data(RowKind::Process, 1, None));
+        assert_eq!(leaf, px(20. + 20. + 6. + 16. + 6. + 16. + 6.));
+    }
+
+    #[test]
+    fn name_cell_icon_sizes_per_kind() {
+        assert_eq!(icon_slot(RowKind::App), IconSlot::Large);
+        for kind in [RowKind::Unit, RowKind::Process, RowKind::KernelThread] {
+            assert_eq!(icon_slot(kind), IconSlot::Small);
+        }
+        let unit = name_cell(data(RowKind::Unit, 0, None), &words());
+        assert_eq!(unit.icon_size, IconSlot::Small);
+        assert!(matches!(unit.icon, NameIcon::Lucide(IconName::Cog)));
+        let kthread = name_cell(data(RowKind::KernelThread, 1, None), &words());
+        assert!(matches!(kthread.icon, NameIcon::Lucide(IconName::Cpu)));
+        let file = NameIcon::File(Arc::from("/usr/share/icons/a.png"));
+        assert!(matches!(row_icon(RowKind::App, file), NameIcon::File(_)));
+        let app = name_cell(data(RowKind::App, 0, Some(false)), &words());
+        assert_eq!(app.icon_size, IconSlot::Large);
+        assert!(app.highlight_fffd && app.secondary.is_none() && app.trailing.is_none());
+    }
+
+    #[gpui_kit::test]
+    fn state_glyph_pause_with_tooltip(cx: &mut TestAppContext) {
+        let w = cx.update(|cx| {
+            init_strings(cx, "en-US");
+            NameWords::new(cx)
+        });
+        assert_eq!(w.suspended.as_ref(), "Suspended");
+        assert_eq!(w.frozen.as_ref(), "Frozen");
+        let cell = name_cell(
+            NameCellData {
+                state_glyph: Some(StateGlyph::Suspended),
+                ..data(RowKind::Process, 0, None)
+            },
+            &w,
+        );
+        assert_eq!(cell.glyphs.len(), 1);
+        assert_eq!(cell.glyphs[0].0, IconName::Pause);
+        assert_eq!(cell.glyphs[0].1.as_ref(), "Suspended");
+        let frozen = name_cell(
+            NameCellData {
+                state_glyph: Some(StateGlyph::Frozen),
+                ..data(RowKind::Process, 0, None)
+            },
+            &w,
+        );
+        assert_eq!(frozen.glyphs[0].0, IconName::Snowflake);
+        assert!(
+            name_cell(data(RowKind::Process, 0, None), &w)
+                .glyphs
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn exited_sets_the_exited_flag() {
+        let gone = NameCellData {
+            exited: true,
+            ..data(RowKind::Process, 0, None)
+        };
+        assert!(name_flags(&gone).has(RowFlags::EXITED));
+        assert!(!name_flags(&data(RowKind::Process, 0, None)).has(RowFlags::EXITED));
+    }
+
+    #[gpui_kit::test]
+    fn group_header_label_at_30(cx: &mut TestAppContext) {
+        let vcx = open(cx, Cell::Group("Apps (11)", true));
+        let cell = bounds(vcx, "TlGroupHeaderCell");
+        let label = bounds(vcx, "TlGroupHeaderCell-label");
+        assert_eq!(label.left() - cell.left(), px(30.));
+    }
+}
