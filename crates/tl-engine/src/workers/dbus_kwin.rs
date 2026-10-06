@@ -84,6 +84,8 @@ const KWIN_INTERFACE: &str = "org.kde.KWin";
 const PICK_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long the pick script has to call `Picked`.
 const PICK_SCRIPT_WAIT: Duration = Duration::from_secs(2);
+/// The `queryWindowInfo` error for a click on something KWin does not manage (KWin 6.7.5).
+const INVALID_WINDOW: &str = "org.kde.KWin.Error.InvalidWindow";
 /// KWin `WindowType` values of shell windows (KWin 6.7.5 `effect/globals.h`): desktop 1, dock 2,
 /// notification 13, on-screen display 16, critical notification 17.
 const SHELL_TYPES: [i32; 5] = [1, 2, 13, 16, 17];
@@ -1014,6 +1016,10 @@ impl Picker {
         let info = match reply {
             Ok(info) => info,
             Err(QueryError::Timeout) => return self.finish(PickOutcome::NoWindow),
+            // The user clicked something KWin does not manage: a pick, but not a window.
+            Err(QueryError::Failed(name)) if &*name == INVALID_WINDOW => {
+                return self.finish(PickOutcome::NoWindow);
+            }
             Err(QueryError::Failed(name)) => {
                 if &*name == "org.kde.KWin.Error.UserCancel" {
                     tracing::debug!(target: "tasklens::engine", "window pick cancelled by the user");
@@ -2363,6 +2369,17 @@ mod tests {
                 assert_eq!(rig.last(), result(5, PickOutcome::Cancelled));
             });
         }
+    }
+
+    #[test]
+    fn pick_invalid_window_no_window() {
+        let host = FakeHost::answering(Err(QueryError::Failed(INVALID_WINDOW.into())));
+        pick_test("pick-invalid", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            assert!(rig.next(&cx).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::NoWindow));
+            assert!(rig.host.seen.lock().expect("lock").is_empty());
+        });
     }
 
     #[test]
