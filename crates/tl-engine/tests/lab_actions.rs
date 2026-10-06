@@ -2647,9 +2647,8 @@ fn random_step(state: &mut u64) -> FakeHelperStep {
 }
 
 /// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]` the way
-/// `explore_signal_pipeline` does, with no cancel injection. Destroys and system recovery edits
-/// go through `run_action`. A privileged dump has no route through `run_action` until E29-014,
-/// so the dumps call `dump::run_target` with `privileged = true` in their own tasks.
+/// `explore_signal_pipeline` does, with no cancel injection. Destroys, system recovery edits
+/// and privileged dumps all go through `run_action`; the dumps take the E29-014 route.
 ///
 /// `ConnectionsDestroySupport(true)` goes out at most once per session. `false` goes out on
 /// every `EOPNOTSUPP` answer (E11-019), so the test counts it against those answers.
@@ -2689,23 +2688,14 @@ fn explore_helper_calls() {
                 &[unit],
             ));
         }
-        let dumps: Arc<Mutex<Vec<(String, ActionState)>>> = Arc::new(Mutex::new(Vec::new()));
+        let first_dump = DESTROYS + RECOVERIES + 1;
+        let all = DESTROYS + RECOVERIES + u64::from(DUMPS);
         for i in 0..DUMPS {
-            let (actx, out) = (Arc::clone(&h.actx), Arc::clone(&dumps));
-            let name = format!("d{i}.core");
-            let path = dump_path(&p3.dumps, &name);
-            let (task, _handle) = h
-                .lab
-                .state
-                .create_task(h.root, Budget::INFINITE, async move {
-                    let cx = Cx::current().expect("task has a Cx");
-                    let state =
-                        dump::run_target(&cx, &actx, DumpMode::Mini, &path, key(700 + i), true)
-                            .await;
-                    lock(&out).push((name, state));
-                })
-                .expect("task is created");
-            h.lab.scheduler.lock().schedule(task, 0);
+            let id = first_dump + u64::from(i);
+            let kind = dump_kind(&p3.dumps, &format!("d{i}.core"));
+            let mut dump = req(id, kind, &procs(&[700 + i]));
+            dump.privileged = true;
+            h.submit(dump);
         }
         h.run();
         for _ in 0..5 {
@@ -2713,7 +2703,8 @@ fn explore_helper_calls() {
         }
 
         let mut destroy_states = Vec::new();
-        for id in 1..=DESTROYS + RECOVERIES {
+        let mut dumps = Vec::new();
+        for id in 1..=all {
             let events = h.events_for(ActionId(id));
             assert_eq!(events.len(), 3, "seed {seed} action {id}: {events:?}");
             assert_eq!(events[0], (None, ActionState::Started), "seed {seed}");
@@ -2723,14 +2714,17 @@ fn explore_helper_calls() {
             if id <= DESTROYS {
                 destroy_states.push(events[2].1.clone());
             }
+            if id >= first_dump {
+                let name = format!("d{}.core", id - first_dump);
+                dumps.push((name, events[2].1.clone()));
+            }
         }
         let mut done = h.finished();
         done.sort_by_key(|id| id.0);
-        let want: Vec<ActionId> = (1..=DESTROYS + RECOVERIES).map(ActionId).collect();
+        let want: Vec<ActionId> = (1..=all).map(ActionId).collect();
         assert_eq!(done, want, "seed {seed}");
 
         // Exactly one result per dump; only the succeeded ones left a file.
-        let dumps = lock(&dumps).clone();
         assert_eq!(dumps.len(), DUMPS as usize, "seed {seed}");
         let kept: BTreeSet<String> = dumps
             .iter()
