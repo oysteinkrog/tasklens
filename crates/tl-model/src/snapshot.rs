@@ -583,6 +583,10 @@ pub struct StartupEntry {
     pub status: StartupStatus,
     pub impact: Impact,
     pub impact_detail: Option<ImpactDetail>,
+    /// State code (SYS-026): "<ActiveState> (<SubState>)" of the entry's generated or native
+    /// unit, for example "active (running)". `None` when there is no loaded unit; the UI shows
+    /// "-".
+    pub state_code: Option<Arc<str>>,
     pub kind: StartupKind,
     /// Directory path.
     pub location: Arc<str>,

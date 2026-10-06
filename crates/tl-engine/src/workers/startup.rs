@@ -14,10 +14,10 @@
 //! Each scan also asks the user manager on the session bus (SYS-019 to SYS-021, SYS-026): the
 //! unit files with their state, which feed the user unit rows, and the loaded units. An entry's
 //! unit is its generated `app-<escaped id>@autostart.service` or, for a user unit row, the unit
-//! itself. A loaded unit gives the state code (`ActiveState/SubState`). For enabled entries one
+//! itself. A loaded unit gives the state code ("active (running)"). For enabled entries one
 //! `GetAll` on the unit gives the activation timestamps and CPU time behind the impact. Every
 //! call has the 2 s read timeout. Without a session bus the entries keep the scanner's values,
-//! impact Not measured (None when disabled) and state code "-".
+//! impact Not measured (None when disabled) and no state code.
 //!
 //! `command` holds `Exec` lines, which can carry secrets. Never log it or file contents.
 
@@ -557,10 +557,8 @@ impl Systemd {
     /// The state code and impact of `raw` (SYS-021, SYS-026).
     fn facts(&self, raw: &StartupRaw) -> UnitFacts {
         let unit = unit_of(raw).and_then(|name| self.loaded.get(name).map(|unit| (name, unit)));
-        let state_code = match unit {
-            Some((_, unit)) => Arc::from(format!("{}/{}", unit.active_state, unit.sub_state)),
-            None => Arc::from(NO_STATE),
-        };
+        let state_code =
+            unit.map(|(_, unit)| Arc::from(format!("{} ({})", unit.active_state, unit.sub_state)));
         let timing = unit
             .and_then(|(name, _)| self.timings.get(name))
             .map(|t| UnitTiming {
@@ -589,9 +587,6 @@ impl Systemd {
     }
 }
 
-/// The state code of an entry without a loaded unit.
-const NO_STATE: &str = "-";
-
 /// The unit that runs `raw`: a desktop entry's generated unit, or a user unit row's own unit.
 /// A system entry shadowed by a user file has none: the generator reads the user file.
 fn unit_of(raw: &StartupRaw) -> Option<&str> {
@@ -609,8 +604,8 @@ fn unit_of(raw: &StartupRaw) -> Option<&str> {
 /// The systemd facts of one entry.
 #[derive(Clone, Debug, PartialEq)]
 struct UnitFacts {
-    /// `ActiveState/SubState` of the entry's loaded unit, or "-".
-    state_code: Arc<str>,
+    /// "<ActiveState> (<SubState>)" of the entry's loaded unit. `None` without one.
+    state_code: Option<Arc<str>>,
     impact: Impact,
     impact_detail: Option<ImpactDetail>,
 }
@@ -787,6 +782,7 @@ fn to_entry(
         },
         impact: facts.impact,
         impact_detail: facts.impact_detail,
+        state_code: facts.state_code.clone(),
         kind: match raw.kind {
             StartupKindRaw::AutostartUser => StartupKind::AutostartUser,
             StartupKindRaw::AutostartSystem => StartupKind::AutostartSystem,
@@ -1593,13 +1589,13 @@ mod tests {
         systemd.timings.clear();
         let facts = systemd.facts(&foo_raw());
         assert_eq!(facts.impact, Impact::NotMeasured);
-        assert_eq!(&*facts.state_code, "active/running");
+        assert_eq!(facts.state_code.as_deref(), Some("active (running)"));
 
         // A Plasma script has no unit.
         let script = raw(StartupKindRaw::PlasmaPreStartup, "env.sh");
         let facts = systemd_with(timing(8_000_000, 1200)).facts(&script);
         assert_eq!(facts.impact, Impact::NotMeasured);
-        assert_eq!(&*facts.state_code, "-");
+        assert_eq!(facts.state_code, None);
     }
 
     #[test]
@@ -1630,16 +1626,17 @@ mod tests {
         let mut systemd = systemd_with(timing(8_000_000, 120));
         systemd.loaded = listing.loaded;
         let facts = systemd.facts(&raws[0]);
-        assert_eq!(&*facts.state_code, "active/running");
+        assert_eq!(facts.state_code.as_deref(), Some("active (running)"));
         let entries = Cache::default().merge(raws, &systemd, input.home.as_deref());
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].kind, StartupKind::AutostartUser);
         assert_eq!(entries[0].impact, Impact::Low);
+        assert_eq!(entries[0].state_code.as_deref(), Some("active (running)"));
 
         // A user file that shadows a system entry: only the user row is linked.
         let mut shadowed = foo_raw();
         shadowed.kind = StartupKindRaw::AutostartSystemOverridden;
-        assert_eq!(&*systemd.facts(&shadowed).state_code, "-");
+        assert_eq!(systemd.facts(&shadowed).state_code, None);
     }
 
     #[test]
@@ -1679,7 +1676,10 @@ mod tests {
             .expect("the sync.service entry");
         assert_eq!(entry.status, StartupStatus::Masked);
         assert_eq!(entry.impact, Impact::None);
-        assert_eq!(&*systemd.facts(&row).state_code, "active/running");
+        assert_eq!(
+            systemd.facts(&row).state_code.as_deref(),
+            Some("active (running)")
+        );
     }
 
     /// Returns `foo_raw()` and records how many unit files the scan input carried.
@@ -1710,7 +1710,8 @@ mod tests {
         let entry = &updates[0].entries[0];
         assert_eq!(entry.impact, Impact::NotMeasured);
         assert_eq!(entry.impact_detail, None);
-        assert_eq!(&*Systemd::default().facts(&foo_raw()).state_code, "-");
+        assert_eq!(entry.state_code, None);
+        assert_eq!(Systemd::default().facts(&foo_raw()).state_code, None);
         rig.finish();
     }
 
