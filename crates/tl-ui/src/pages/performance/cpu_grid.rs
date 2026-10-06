@@ -117,6 +117,7 @@ impl CpuGrid {
             gap: m.sp[4],
             legend: legend(kernel),
             value_fmt: ValueFormat::Percent,
+            hover: false,
         };
         Self {
             view: cx.new(|cx| ChartGridView::new(spec, hub, cx)),

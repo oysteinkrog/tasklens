@@ -2869,3 +2869,255 @@ mod hover {
         );
     }
 }
+
+/// tasklens-yrf.17: the hover readout per grid cell, with plot hitboxes only while the pointer is
+/// inside the grid.
+mod grid_hover {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, Hsla, IntoElement, Modifiers, ParentElement, Render,
+        StyleRefinement, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+
+    fn core(i: u16) -> SeriesId {
+        SeriesId {
+            device: DeviceIdx(i),
+            metric: MetricId::CPU_TOTAL,
+        }
+    }
+
+    fn spec(n: u16, hover: bool) -> ChartGridSpec {
+        let color = |a: f32| Hsla {
+            h: 0.5,
+            s: 0.6,
+            l: 0.5,
+            a,
+        };
+        ChartGridSpec {
+            cells: (0..n)
+                .map(|i| GridCellSpec {
+                    heading: format!("CPU {i}").into(),
+                    fill_series: core(i),
+                    overlay_series: None,
+                    offline: false,
+                    mark: None,
+                    tooltip: None,
+                })
+                .collect(),
+            fill: color(0.2),
+            line: color(1.0),
+            overlay_line: color(1.0),
+            hover,
+            ..ChartGridSpec::default()
+        }
+    }
+
+    /// 600 valid samples 100 ms apart, the newest at `newest`, at `value`: 60 s of data.
+    fn view_of(i: u16, newest: u64, value: f32) -> Arc<SeriesView> {
+        let samples: Vec<Sample> = (0..600u64)
+            .map(|k| Sample::valid(newest - (599 - k) * 100 * MS, value))
+            .collect();
+        Arc::new(SeriesView {
+            id: core(i),
+            version: 1,
+            period_ns: 100 * MS,
+            samples: samples.into(),
+        })
+    }
+
+    struct Root {
+        grid: Entity<ChartGridView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1300.)).child(
+                self.grid
+                    .clone()
+                    .cached(StyleRefinement::default().w_full()),
+            )
+        }
+    }
+
+    /// A window, 1300 px wide at scale 1, holding one 16-cell grid: 6 columns of 210 px with
+    /// 8 px gaps, rows of 112 px. Cell `i` reads `10 + i`.
+    fn grid_in_window(
+        cx: &mut TestAppContext,
+        spec: ChartGridSpec,
+    ) -> (Entity<ChartGridView>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let n = spec.cells.len() as u16;
+        let (root, vcx) = cx.add_window_view(|_, cx| {
+            let hub = super::hub_for(&FakeEngine::new(), cx);
+            let grid = cx.new(|cx| ChartGridView::new(spec, &hub, cx));
+            Root { grid }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let grid = vcx.read_entity(&root, |r, _| r.grid.clone());
+        let newest = now_boot_ns();
+        grid.update(vcx, |v, cx| {
+            let series = (0..n)
+                .map(|i| (Some(view_of(i, newest, 10.0 + f32::from(i))), None))
+                .collect();
+            v.set_series_for_test(series, cx);
+        });
+        draw(vcx);
+        (grid, vcx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    /// Moves the pointer to `(x, y)` and draws.
+    fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
+        vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    #[gpui_kit::test]
+    fn grid_hover_marker_in_hovered_cell_only(cx: &mut TestAppContext) {
+        let (grid, vcx) = grid_in_window(cx, spec(16, true));
+        let builds = vcx.read_entity(&grid, |v, _| v.build_count.get());
+        // Cell 9 is column 3, row 1, at (654, 120); its plot is 655..863 by 121..231.
+        hover(vcx, 760., 180.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 32, "16 headings and 16 plots");
+            assert_eq!(v.hover_cell(), Some(9));
+            let h = v.hover_state();
+            assert!(h.pinned_t_ns.is_some(), "pinned");
+            let x = h.last_marker_x.expect("marker painted");
+            assert!(
+                x >= px(655.) && x <= px(863.),
+                "marker in cell 9's plot: {x:?}"
+            );
+            assert!(
+                (f32::from(x) - 760.).abs() <= 1.0,
+                "marker under the pointer"
+            );
+            assert!(h.last_box.is_some(), "box painted");
+            assert_eq!(h.line_text(1), Some("CPU 9"), "the cell heading");
+        });
+
+        // Off every plot but inside the grid (a gap), then out of the grid.
+        hover(vcx, 650., 180.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hover_cell(), None);
+            assert_eq!(v.hover_state().last_marker_x, None, "no marker in a gap");
+        });
+        hover(vcx, 100., 500.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 0, "no hitbox while outside");
+            assert_eq!(v.hover_state().last_box, None);
+            assert_eq!(v.build_count.get(), builds, "hover never rebuilds geometry");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_hover_box_clamped_to_element(cx: &mut TestAppContext) {
+        let (grid, vcx) = grid_in_window(cx, spec(16, true));
+        // Cell 5 is the right-most column, 1090..1300.
+        hover(vcx, 1290., 60.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hover_cell(), Some(5));
+            let h = v.hover_state();
+            let b = h.last_box.expect("box painted");
+            assert!(b.right() <= px(1300.), "inside the element: {b:?}");
+            assert!(b.right() < h.last_marker_x.unwrap(), "flipped left");
+        });
+
+        // Cell 4 (872..1082) keeps the box right of the marker past the cell's edge: the clamp
+        // is the element, not the cell.
+        hover(vcx, 1000., 60.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hover_cell(), Some(4));
+            let h = v.hover_state();
+            let b = h.last_box.expect("box painted");
+            assert!(b.left() > h.last_marker_x.unwrap(), "right of the marker");
+            assert!(b.right() > px(1082.) && b.right() <= px(1300.), "{b:?}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_hover_reshapes_on_cell_change(cx: &mut TestAppContext) {
+        let (grid, vcx) = grid_in_window(cx, spec(16, true));
+        let builds = vcx.read_entity(&grid, |v, _| v.build_count.get());
+        // Cell 3 starts at x = 654, cell 4 at x = 872: the same cell-local x, the same time.
+        hover(vcx, 654. + 100., 60.);
+        let (first, index) = vcx.read_entity(&grid, |v, _| {
+            (v.hover_state().shape_count, v.hover_state().index)
+        });
+        assert!(index.is_some());
+        draw(vcx);
+        assert_eq!(
+            vcx.read_entity(&grid, |v, _| v.hover_state().shape_count),
+            first,
+            "same cell, same index: no shaping"
+        );
+
+        hover(vcx, 872. + 100., 60.);
+        let (moved, h) = vcx.read_entity(&grid, |v, _| {
+            let h = v.hover_state();
+            (h.shape_count, (h.index, h.last_index, v.hover_cell()))
+        });
+        assert_eq!(h, (index, index, Some(4)), "same sample in the new cell");
+        assert!(moved > first, "the cell change re-shapes");
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hover_state().line_text(1), Some("CPU 4"));
+            assert_eq!(v.hover_state().line_text(2), Some("14.0%"));
+        });
+        draw(vcx);
+        draw(vcx);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hover_state().shape_count, moved, "shaped once");
+            assert_eq!(v.build_count.get(), builds, "hover never rebuilds geometry");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn grid_hover_disabled_only_heading_hitboxes(cx: &mut TestAppContext) {
+        let (grid, vcx) = grid_in_window(cx, spec(16, false));
+        hover(vcx, 760., 180.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 16, "heading hitboxes only");
+            assert_eq!(v.hover_cell(), None);
+            assert_eq!(v.hover_state().pinned_t_ns, None);
+            assert_eq!(v.hover_state().last_box, None);
+        });
+
+        // With hover on, an offline cell has no plot hitbox.
+        let mut s = spec(16, true);
+        s.cells[9].offline = true;
+        grid.update(vcx, |v, cx| v.set_spec(s, cx));
+        draw(vcx);
+        hover(vcx, 761., 180.);
+        vcx.read_entity(&grid, |v, _| {
+            assert_eq!(v.hitbox_count.get(), 16 + 15);
+            assert_eq!(v.hover_cell(), None, "offline cell 9 has no readout");
+            assert_eq!(v.hover_state().last_box, None);
+        });
+    }
+}

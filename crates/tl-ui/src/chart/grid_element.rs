@@ -14,6 +14,12 @@
 //! heading; idle frames insert none (UI-PRF-002). The kit has no tooltip paint call for custom
 //! elements, so the view records the hovered cell (`hovered_cell`, `hovered_tooltip`) and
 //! notifies when it changes. The owning page shows the cell's tooltip text from there.
+//!
+//! Hover readout (UI-PRF-023): with `spec.hover`, prepaint also inserts one hitbox per cell plot
+//! while the pointer is inside, offline cells excepted, so at most 2n hitboxes exist. The hovered
+//! cell gets the `hover.rs` marker, dots and value box, with its fill series as series 0 and its
+//! overlay as series 1. One `HoverState` serves the grid, since only one cell is hovered at a
+//! time; a cell change resets its `last_index`, so the box lines are formatted again.
 
 use std::cell::RefCell;
 use std::mem;
@@ -25,9 +31,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FillOptions, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
-    InspectorElementId, IntoElement, LayoutId, Length, MouseMoveEvent, Path, PathBuilder,
-    PathStyle, Pixels, Point, Render, SharedString, Size, Style, Subscription, Window, point, px,
-    quad, relative, size, transparent_black,
+    InspectorElementId, IntoElement, LayoutId, Length, MouseDownEvent, MouseMoveEvent, Path,
+    PathBuilder, PathStyle, Pixels, Point, Render, SharedString, Size, Style, Subscription, Window,
+    point, px, quad, relative, size, transparent_black,
 };
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
@@ -39,11 +45,12 @@ use tl_model::validity::Validity;
 
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
+use super::hover::{self, HoverPaint, HoverState};
 use super::labels::{self, CachedLine, LabelCache, LineStyle};
 use super::view::{ChangedRuns, find_tiered};
 use super::{
-    ChartCache, ChartSeries, DEFAULT_RANGE_NS, GeometryScalars, GridStyle, LegendStyle, PathSet,
-    ValueFormat, YScale, scale,
+    ChartCache, ChartLabels, ChartSeries, ChartSpec, DEFAULT_RANGE_NS, GeometryScalars, GridStyle,
+    LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
 };
 use crate::anim::AnimationDriver;
 use crate::hub::{SnapshotChanged, SnapshotHub};
@@ -105,6 +112,8 @@ pub struct ChartGridSpec {
     /// Drawn in cell 0 only.
     pub legend: SmallVec<[(SharedString, LegendStyle); 2]>,
     pub value_fmt: ValueFormat,
+    /// P2: plot hitboxes and the hover readout per cell (UI-PRF-023).
+    pub hover: bool,
 }
 
 impl Default for ChartGridSpec {
@@ -125,6 +134,7 @@ impl Default for ChartGridSpec {
             gap: px(8.),
             legend: SmallVec::new(),
             value_fmt: ValueFormat::Percent,
+            hover: false,
         }
     }
 }
@@ -205,11 +215,15 @@ pub struct ChartGridView {
     axis_text: String,
     /// Reused value formatter buffer.
     value_text: String,
-    /// Heading hitboxes of the last paint, one per cell or none. The buffer moves into the
+    /// Hitboxes of the last paint, none while the pointer is outside. The buffers move into the
     /// prepaint state and back, so hovering allocates nothing after the first time.
-    hitboxes: Vec<Hitbox>,
+    hitboxes: GridHitboxes,
     /// The cell whose heading the pointer is over.
     hovered_cell: Option<usize>,
+    /// Hover readout state of the hovered plot cell.
+    hover: HoverState,
+    /// The cell whose plot the pointer was over at the last paint.
+    hover_cell: Option<usize>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// Hitboxes the last prepaint inserted.
@@ -260,8 +274,10 @@ impl ChartGridView {
             scale_state: scale::ScaleState::default(),
             axis_text: String::new(),
             value_text: String::new(),
-            hitboxes: Vec::new(),
+            hitboxes: GridHitboxes::default(),
             hovered_cell: None,
+            hover: HoverState::default(),
+            hover_cell: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -356,6 +372,18 @@ impl ChartGridView {
         self.spec.cells.get(self.hovered_cell?)?.tooltip.as_ref()
     }
 
+    /// Hover pin, shaped lines and the last paint's box (E19-017).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn hover_state(&self) -> &HoverState {
+        &self.hover
+    }
+
+    /// The cell whose plot the pointer was over at the last paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn hover_cell(&self) -> Option<usize> {
+        self.hover_cell
+    }
+
     /// Legend `shape_line` calls over every paint.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn legend_shapes(&self) -> u32 {
@@ -442,10 +470,17 @@ impl IntoElement for ChartGridElement {
     }
 }
 
+/// Heading hitboxes, one per cell, and plot hitboxes as (cell, hitbox), one per non-offline cell
+/// when `spec.hover`. Both are empty while the pointer is outside the element.
+#[derive(Default)]
+pub struct GridHitboxes {
+    headings: Vec<Hitbox>,
+    plots: Vec<(usize, Hitbox)>,
+}
+
 impl Element for ChartGridElement {
     type RequestLayoutState = ();
-    /// Heading hitboxes, empty while the pointer is outside the element.
-    type PrepaintState = Vec<Hitbox>;
+    type PrepaintState = GridHitboxes;
 
     fn id(&self) -> Option<ElementId> {
         None
@@ -484,7 +519,8 @@ impl Element for ChartGridElement {
         (id, ())
     }
 
-    /// One hitbox per heading while the pointer is inside the element, none otherwise.
+    /// One hitbox per heading while the pointer is inside the element, none otherwise. With
+    /// `spec.hover`, also one per non-offline cell plot under the same rule.
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -493,12 +529,13 @@ impl Element for ChartGridElement {
         _: &mut (),
         window: &mut Window,
         cx: &mut App,
-    ) -> Vec<Hitbox> {
+    ) -> GridHitboxes {
         let inside = bounds.contains(&window.mouse_position());
         let m = *cx.global::<UiMetrics>();
         self.view.update(cx, |view, _| {
             let mut hitboxes = mem::take(&mut view.hitboxes);
-            hitboxes.clear();
+            hitboxes.headings.clear();
+            hitboxes.plots.clear();
             let n = view.spec.cells.len();
             if inside && n > 0 {
                 let spec = &view.spec;
@@ -510,11 +547,24 @@ impl Element for ChartGridElement {
                     let width = view.headings.get(i).map_or(px(0.), CachedLine::width);
                     let heading =
                         Bounds::new(point(b.left() + pad, b.top() + pad), size(width, row));
-                    hitboxes.push(window.insert_hitbox(heading, HitboxBehavior::Normal));
+                    hitboxes
+                        .headings
+                        .push(window.insert_hitbox(heading, HitboxBehavior::Normal));
+                }
+                if spec.hover {
+                    for (i, cell) in spec.cells.iter().enumerate() {
+                        if !cell.offline {
+                            let b = cell_bounds(bounds, &layout, i, spec.cell_h, spec.gap);
+                            let plot =
+                                window.insert_hitbox(b.inset(px(1.)), HitboxBehavior::Normal);
+                            hitboxes.plots.push((i, plot));
+                        }
+                    }
                 }
             }
             #[cfg(any(test, feature = "test-hooks"))]
-            view.hitbox_count.set(hitboxes.len() as u32);
+            view.hitbox_count
+                .set((hitboxes.headings.len() + hitboxes.plots.len()) as u32);
             hitboxes
         })
     }
@@ -525,7 +575,7 @@ impl Element for ChartGridElement {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
-        hitboxes: &mut Vec<Hitbox>,
+        hitboxes: &mut GridHitboxes,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -542,15 +592,26 @@ impl Element for ChartGridElement {
             },
         };
         let view_id = self.view.entity_id();
-        let had_hitboxes = !hitboxes.is_empty();
-        let (moving, hover_changed) = self.view.update(cx, |view, cx| {
-            let moving = paint_grid_view(view, bounds, &env, window, cx);
-            let hovered = hitboxes.iter().position(|h| h.is_hovered(window));
+        let had_hitboxes = !hitboxes.headings.is_empty();
+        // The readout shows only while the pointer is over a cell plot of an active window.
+        let plot_cell = if window.is_window_active() {
+            hitboxes
+                .plots
+                .iter()
+                .find(|(_, h)| h.is_hovered(window))
+                .map(|(i, _)| *i)
+        } else {
+            None
+        };
+        let (out, hover_changed) = self.view.update(cx, |view, cx| {
+            let out = paint_grid_view(view, bounds, plot_cell, &env, window, cx);
+            let hovered = hitboxes.headings.iter().position(|h| h.is_hovered(window));
             let changed = view.hovered_cell != hovered;
             view.hovered_cell = hovered;
             view.hitboxes = mem::take(hitboxes);
-            (moving, changed)
+            (out, changed)
         });
+        let moving = out.moving;
         if moving {
             AnimationDriver::global(window, cx).update(cx, |d, cx| d.request(view_id, window, cx));
         }
@@ -558,9 +619,11 @@ impl Element for ChartGridElement {
         if hover_changed {
             cx.defer(move |cx| cx.notify(view_id));
         }
-        // Pointer moves repaint the grid only when the pointer enters or leaves the element, or
-        // moves to another heading. Neither rebuilds the geometry.
+        // Pointer moves repaint the grid only when the pointer enters or leaves the element,
+        // moves to another heading, or, with hover, changes the pinned time or the plot cell.
+        // None of them rebuilds the geometry.
         let view = self.view.clone();
+        let (map, sf) = (out.map, env.scale_factor);
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if !phase.bubble() {
                 return;
@@ -571,13 +634,51 @@ impl Element for ChartGridElement {
                     cx.notify();
                     return;
                 }
-                let hovered = view.hitboxes.iter().position(|h| h.is_hovered(window));
+                let mut notify = false;
+                let hovered = view
+                    .hitboxes
+                    .headings
+                    .iter()
+                    .position(|h| h.is_hovered(window));
                 if hovered != view.hovered_cell {
                     view.hovered_cell = hovered;
+                    notify = true;
+                }
+                let plot = view
+                    .hitboxes
+                    .plots
+                    .iter()
+                    .find(|(_, h)| h.is_hovered(window));
+                match plot {
+                    // Same cell: move the pin. A new cell is pinned by the next paint.
+                    Some((i, h)) if Some(*i) == view.hover_cell => {
+                        let x = f32::from(e.position.x - h.bounds.left()) * sf;
+                        let t = Some(hover::pointer_time(&map, map.plot_width, x));
+                        if view.hover.pinned_t_ns != t {
+                            view.hover.pinned_t_ns = t;
+                            notify = true;
+                        }
+                    }
+                    Some(_) => notify = true,
+                    None => notify |= view.hover_cell.is_some(),
+                }
+                if notify {
                     cx.notify();
                 }
             });
         });
+        if out.pinned {
+            let view = self.view.clone();
+            window.on_mouse_event(move |_: &MouseDownEvent, phase, _, cx| {
+                if phase.bubble() {
+                    view.update(cx, |v, cx| {
+                        if v.hover.clear() {
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        }
     }
 }
 
@@ -591,20 +692,47 @@ struct PaintEnv {
     network_unit: NetworkUnit,
 }
 
-/// Builds the geometry when its key changed, then paints every cell. Returns whether the grid
-/// wants the next frame.
+struct PaintOut {
+    /// The grid wants the next frame.
+    moving: bool,
+    /// Paint-time mapping, for the hover listener.
+    map: TimeMap,
+    /// A hover pin survived this paint.
+    pinned: bool,
+}
+
+/// Builds the geometry when its key changed, then paints every cell and the readout of
+/// `plot_cell`, the cell whose plot the pointer is over.
 fn paint_grid_view(
     view: &mut ChartGridView,
     bounds: Bounds<Pixels>,
+    plot_cell: Option<usize>,
     env: &PaintEnv,
     window: &mut Window,
     cx: &mut App,
-) -> bool {
+) -> PaintOut {
     let sf = env.scale_factor;
     let now = env.now;
     let n = view.spec.cells.len();
+    let plot_cell = plot_cell.filter(|_| view.spec.hover);
+    // A cell change drops the pin and the formatted lines; the new cell is pinned below.
+    let entered = plot_cell != view.hover_cell;
+    if entered {
+        view.hover_cell = plot_cell;
+        view.hover.last_index = None;
+        view.hover.clear();
+    }
     if n == 0 {
-        return false;
+        return PaintOut {
+            moving: false,
+            map: TimeMap {
+                anchor_ns: now,
+                right_edge_ns: now,
+                range_ns: view.spec.range_ns,
+                plot_width: 0.0,
+            },
+            pinned: false,
+        };
     }
     let layout = grid_layout(n, bounds.size.width, view.spec.cell_min_w, view.spec.gap);
     let ChartGridView {
@@ -623,6 +751,7 @@ fn paint_grid_view(
         scale_state,
         axis_text,
         value_text,
+        hover: hover_state,
         ..
     } = view;
     let (cell_h, gap) = (spec.cell_h, spec.gap);
@@ -906,13 +1035,90 @@ fn paint_grid_view(
         );
     }
 
+    if let Some(i) = plot_cell {
+        let b = cell_bounds(bounds, &layout, i, cell_h, gap);
+        let plot = b.inset(px(1.));
+        // A new cell pins the time under the pointer; later moves are the listener's.
+        if entered {
+            let x = f32::from(window.mouse_position().x - plot.left()) * sf;
+            hover_state.pinned_t_ns = Some(hover::pointer_time(&map, map.plot_width, x));
+        }
+        let (fill_s, overlay_s) = series.get(i).cloned().unwrap_or_default();
+        let has_overlay = spec.cells[i].overlay_series.is_some();
+        let dashed = |k: usize| matches!(spec.legend.get(k), Some((_, LegendStyle::Dashed)));
+        let mut chart = ChartSpec {
+            range_ns,
+            hover: true,
+            ..ChartSpec::default()
+        };
+        chart.series.push(ChartSeries {
+            line: spec.line,
+            dashed: dashed(0),
+            ..ChartSeries::default()
+        });
+        if has_overlay {
+            chart.series.push(ChartSeries {
+                line: spec.overlay_line,
+                dashed: dashed(1),
+                ..ChartSeries::default()
+            });
+        }
+        let chart_labels = ChartLabels {
+            heading: Some(spec.cells[i].heading.clone()),
+            value_fmt: spec.value_fmt,
+            value_align: ValueAlign::Right,
+            range_word: "",
+            legend: spec.legend.clone(),
+            show_axis_max: false,
+        };
+        let cell_series = [fill_s, overlay_s];
+        // `hover::paint` flips the box left where it would pass `plot.right()`, so the plot
+        // handed in reaches the element's right edge: the box stays inside the element, not
+        // the cell. Only the flip reads the plot width.
+        let reach = Bounds::new(
+            plot.origin,
+            size(
+                (bounds.right() - plot.left()).max(plot.size.width),
+                plot.size.height,
+            ),
+        );
+        let hp = HoverPaint {
+            box_bounds: bounds,
+            plot: reach,
+            map,
+            dx,
+            scale_factor: sf,
+            spec: &chart,
+            labels: &chart_labels,
+            series: &cell_series,
+            y_min: cache.y_min,
+            y_max: cache.y_max,
+            metrics: m,
+            theme,
+            network_unit: env.network_unit,
+        };
+        hover::paint(window, cx, hover_state, &hp);
+    } else {
+        hover_state.index = None;
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            hover_state.last_box = None;
+            hover_state.last_marker_x = None;
+        }
+    }
+
     let one_px_ns = range_ns / u64::from(pw.max(1));
-    has_data
+    let moving = has_data
         && sliding
         && newest_ns
             .saturating_add(period_ns.saturating_mul(2))
             .saturating_add(one_px_ns)
-            > now
+            > now;
+    PaintOut {
+        moving,
+        map,
+        pinned: hover_state.pinned_t_ns.is_some(),
+    }
 }
 
 /// Cell `i`'s box in window coordinates, logical px.
