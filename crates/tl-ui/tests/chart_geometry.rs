@@ -513,30 +513,6 @@ mod scale {
     }
 
     #[test]
-    fn autorate_text_reused_while_unchanged() {
-        let mut s = ScaleState::default();
-        let mut buf = String::new();
-        let mut go = |vmax: f32, s: &mut ScaleState| {
-            compute(
-                &BITS,
-                0.0,
-                vmax,
-                0,
-                s,
-                ValueFormat::RateNetwork,
-                NetworkUnit::Bits,
-                &mut buf,
-            )
-            .axis_text
-            .unwrap()
-        };
-        let a = go(3.2e6, &mut s);
-        let b = go(4.1e6, &mut s);
-        assert_eq!(a, b);
-        assert_eq!(a.as_ptr(), b.as_ptr());
-    }
-
-    #[test]
     fn sticky_temp_initial_range() {
         let mut s = ScaleState::default();
         let r = run(YScale::StickyTemp, 0.0, 0.0, 0, &mut s);

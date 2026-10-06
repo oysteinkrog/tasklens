@@ -1,9 +1,9 @@
 //! Y scale rules and axis rounding (UI-PRF-006, ADR-009 rule 9, PERF-018, PERF-019, PERF-030,
 //! canonical table (d)).
 //!
-//! `compute` runs on every chart prepaint, so it never allocates unless the axis text changed:
-//! the text is written into the caller's reused `String` and compared with the last
-//! `SharedString` kept in `ScaleState`.
+//! `compute` runs on every chart prepaint and does not allocate: the text is written into the
+//! caller's reused `String`, and `SharedString` stores texts up to 23 bytes inline (`SmolStr`).
+//! Every axis text is shorter than that.
 
 use core::fmt::Write;
 
@@ -34,8 +34,6 @@ pub struct ScaleState {
     /// Boot ns when the visible max first stayed below half the span.
     pub below_half_since: Option<u64>,
     pub initialised: bool,
-    /// The last axis text, reused while the text does not change.
-    pub axis_text: Option<SharedString>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -171,19 +169,7 @@ pub fn compute(
         }
     };
 
-    let axis_text = if out_text.is_empty() {
-        state.axis_text = None;
-        None
-    } else {
-        match &state.axis_text {
-            Some(last) if last.as_str() == out_text.as_str() => Some(last.clone()),
-            _ => {
-                let text = SharedString::new(out_text.as_str());
-                state.axis_text = Some(text.clone());
-                Some(text)
-            }
-        }
-    };
+    let axis_text = (!out_text.is_empty()).then(|| SharedString::new(out_text.as_str()));
     ScaleResult {
         y_min,
         y_max,
