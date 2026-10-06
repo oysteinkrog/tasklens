@@ -1172,8 +1172,8 @@ mod labels {
     use std::sync::Arc;
 
     use gpui_kit::{
-        Bounds, Context, Hsla, IntoElement, Quad, Render, TestAppContext, Window, canvas, point,
-        px, size,
+        Bounds, Context, Hsla, IntoElement, Quad, Render, Styled, TestAppContext, Window, canvas,
+        point, px, size,
     };
     use smallvec::{SmallVec, smallvec};
     use tl_model::settings::{AppearanceSettings, NetworkUnit, ThemeSettings};
