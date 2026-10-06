@@ -1870,6 +1870,9 @@ a 1 Hz sample leaves a gap shorter than the stale threshold. The first Running o
   time [verified in code].
 - Edits: new bead for `reducer/apply.rs` and `reducer/series.rs`; ndy.2 drops its gap assertion and the new
   bead's test covers it.
+- Note (tasklens-lban): there is no Starting state. A restart reaches the reducer as `Failed` then `Running`:
+  `SourceController` wraps each worker factory, so a generation that ends with an error or a panic sends
+  `Failed`, and the next generation sends `Running` before it starts. `Late` counts as still running.
 
 ### R-290 The GPU probe child marks every fd above 3 close-on-exec
 
