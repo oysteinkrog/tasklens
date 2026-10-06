@@ -1,14 +1,16 @@
 //! Column header tests in a real window (UI-PRC-005, ADR-013): the two-line header with totals,
-//! the sort arrow and the sort click (E18-009). Later column beads append their own sections.
+//! the sort arrow and the sort click (E18-009); column resize and fit (E18-010). Later column
+//! beads append their own sections.
 //!
 //! The header texts are measured, so the window uses the real text system with the bundled fonts.
 
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyView, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, SharedString, Styled,
-    TestAppContext, TestDispatcher, VisualTestContext, Window, div, point, px,
+    AnyView, AppContext as _, Context, CursorStyle, Entity, IntoElement, Modifiers, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render,
+    SharedString, Styled, TestAppContext, TestDispatcher, VisualTestContext, Window, div, point,
+    px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
@@ -18,16 +20,18 @@ use tl_model::validity::Validity;
 use tl_ui::components::menu::TlMenu;
 use tl_ui::components::tooltip::DELAY_CONTROL;
 use tl_ui::components::validity::{GlyphContent, glyph_parts};
+use tl_ui::table::actions::ResizeColumnsToFit;
 use tl_ui::table::cells::CellOut;
 use tl_ui::table::columns::{
-    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, next_sort,
+    Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
 use tl_ui::table::header::{UNSORTABLE_TOOLTIP, header_tooltip};
 use tl_ui::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
 use tl_ui::text::fonts::load_bundled_fonts;
-use tl_ui::theme::current;
+use tl_ui::text::metrics::TextMetricsCache;
+use tl_ui::theme::{current, metrics};
 
 fn cosmic_cx() -> TestAppContext {
     let text_system = gpui_kit::platform::current_platform(true).text_system();
@@ -88,6 +92,10 @@ struct HDelegate {
     totals: Vec<(ColumnId, u64, &'static str, Validity)>,
     /// Every column `on_sort` received, oldest first.
     sorted: Vec<ColumnId>,
+    /// Cell texts by column. Other columns show "1".
+    texts: Vec<(ColumnId, &'static str)>,
+    /// Calls of `on_columns_changed`.
+    columns_changed: usize,
 }
 
 impl HDelegate {
@@ -112,6 +120,8 @@ impl HDelegate {
             lines: HeaderLines::Two,
             totals: vec![(ColumnId::Cpu, 119, "11.9%", Validity::Valid)],
             sorted: Vec::new(),
+            texts: Vec::new(),
+            columns_changed: 0,
         }
     }
 }
@@ -154,10 +164,11 @@ impl TreeTableDelegate for HDelegate {
             .find(|s| s.id == id)
             .expect("spec for every column")
     }
-    fn cell(&self, ix: usize, _: ColumnId, out: &mut CellOut) {
+    fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut) {
         out.bits = ix as u64;
         if out.want_text {
-            out.text.push('1');
+            let text = self.texts.iter().find(|t| t.0 == col).map_or("1", |t| t.1);
+            out.text.push_str(text);
         }
     }
     fn name_cell(&self, _: usize) -> NameCell {
@@ -205,7 +216,10 @@ impl TreeTableDelegate for HDelegate {
         let kind = self.column_spec(col).kind;
         self.sort = next_sort(&self.sort, col, kind);
     }
-    fn on_columns_changed(&mut self, _: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_columns_changed(&mut self, layout: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {
+        self.layout = layout.clone();
+        self.columns_changed += 1;
+    }
     fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
     fn on_activate(&mut self, _: u32, _: &mut Context<TlTreeTable<Self>>) {}
     fn row_tooltip(&self, _: usize) -> Option<AnyView> {
@@ -545,4 +559,216 @@ fn header_one_line_mode_height_28() {
     click(vcx, header_at(420.));
     let sort = vcx.update(|_, cx| table.read(cx).delegate.sort);
     assert_eq!(sort.column, ColumnId::Cpu);
+}
+
+fn mouse_down(vcx: &mut VisualTestContext, at: Point<Pixels>, click_count: usize) {
+    vcx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count,
+        first_mouse: false,
+    });
+    redraw(vcx);
+}
+
+fn mouse_up(vcx: &mut VisualTestContext, at: Point<Pixels>, click_count: usize) {
+    vcx.simulate_event(MouseUpEvent {
+        position: at,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count,
+    });
+    redraw(vcx);
+}
+
+fn drag_move(vcx: &mut VisualTestContext, at: Point<Pixels>) {
+    vcx.simulate_event(MouseMoveEvent {
+        position: at,
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::none(),
+    });
+    redraw(vcx);
+}
+
+/// The width of `col` in the delegate's stored layout (100%).
+fn stored_width(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<HDelegate>>,
+    col: ColumnId,
+) -> Pixels {
+    vcx.update(|_, cx| table.read(cx).delegate.layout.widths[&col])
+}
+
+fn changed_count(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<HDelegate>>) -> usize {
+    vcx.update(|_, cx| table.read(cx).delegate.columns_changed)
+}
+
+#[test]
+fn boundary_band_sets_resize_cursor() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    let cursor =
+        |vcx: &mut VisualTestContext| vcx.update(|_, cx| table.read(cx).header_state().cursor());
+    assert_eq!(cursor(vcx), CursorStyle::Arrow);
+    // 3 px left and right of the Name and User boundary at x 200, and after the last column.
+    for x in [197., 203., 300., 543.] {
+        hover(vcx, header_at(x));
+        assert_eq!(cursor(vcx), CursorStyle::ResizeColumn, "x {x}");
+        let hovered = vcx.update(|_, cx| table.read(cx).header_state().hover);
+        assert_eq!(hovered, None, "a band is not a cell, x {x}");
+    }
+    for x in [195., 250., 420., 545.] {
+        hover(vcx, header_at(x));
+        assert_eq!(cursor(vcx), CursorStyle::Arrow, "x {x}");
+    }
+}
+
+#[test]
+fn drag_persists_once_on_release() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    #[cfg(feature = "test-hooks")]
+    let before = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
+
+    mouse_down(vcx, header_at(200.), 1);
+    for i in 1..=10 {
+        drag_move(vcx, header_at(200. + 4. * i as f32));
+        let live = vcx.update(|_, cx| table.read(cx).columns().width(ColumnId::Name));
+        assert_eq!(live, px(200. + 4. * i as f32), "live width after move {i}");
+    }
+    assert_eq!(
+        changed_count(vcx, &table),
+        0,
+        "nothing persists during the drag"
+    );
+    assert_eq!(stored_width(vcx, &table, ColumnId::Name), px(200.));
+    let cursor = vcx.update(|_, cx| table.read(cx).header_state().cursor());
+    assert_eq!(cursor, CursorStyle::ResizeColumn);
+    #[cfg(feature = "test-hooks")]
+    {
+        let misses = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
+        assert_eq!(misses, before, "a drag re-formats no cell text");
+    }
+
+    mouse_up(vcx, header_at(240.), 1);
+    assert_eq!(changed_count(vcx, &table), 1);
+    assert_eq!(stored_width(vcx, &table, ColumnId::Name), px(240.));
+    // Proportional: the columns to the right share the rest of the 600 px body.
+    let total = vcx.update(|_, cx| table.read(cx).columns().total_width());
+    assert!((total.as_f32() - 600.).abs() < 0.01, "total {total:?}");
+    // The release did not sort.
+    let sorted = vcx.update(|_, cx| table.read(cx).delegate.sorted.clone());
+    assert!(sorted.is_empty());
+}
+
+#[test]
+fn drag_last_column_mode_and_minimum() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    vcx.update(|_, cx| {
+        table.update(cx, |t, _| {
+            t.set_resize_mode(tl_ui::table::ColumnResizeMode::LastColumn)
+        })
+    });
+    // User 200..300 dragged far left: clamped to the text minimum 60; PSS takes the difference.
+    mouse_down(vcx, header_at(300.), 1);
+    drag_move(vcx, header_at(220.));
+    drag_move(vcx, header_at(210.));
+    mouse_up(vcx, header_at(210.), 1);
+    assert_eq!(changed_count(vcx, &table), 1);
+    assert_eq!(stored_width(vcx, &table, ColumnId::User), px(60.));
+    assert_eq!(stored_width(vcx, &table, ColumnId::Pss), px(120.));
+    assert_eq!(stored_width(vcx, &table, ColumnId::Pid), px(80.));
+    assert_eq!(stored_width(vcx, &table, ColumnId::Name), px(200.));
+
+    // A press and release without a move changes nothing and persists nothing.
+    mouse_down(vcx, header_at(260.), 1);
+    mouse_up(vcx, header_at(260.), 1);
+    assert_eq!(changed_count(vcx, &table), 1);
+}
+
+/// Width of `text` as the fit rule measures it: per-character advances of the table font.
+fn advance_width(vcx: &mut VisualTestContext, text: &str) -> Pixels {
+    vcx.update(|window, cx| {
+        let size = metrics(cx).text.base;
+        let mut cache = TextMetricsCache::default();
+        text.chars()
+            .fold(px(0.), |w, ch| w + cache.char_advance(ch, size, window, cx))
+    })
+}
+
+#[test]
+fn double_click_boundary_fits_one_column() {
+    let mut cx = cosmic_cx();
+    let mut d = HDelegate::new();
+    const LONG: &str = "systemd-journal-remote-upload";
+    d.texts.push((ColumnId::User, LONG));
+    let (table, vcx) = open(&mut cx, d);
+    let text = advance_width(vcx, LONG);
+    assert!(
+        text > px(150.),
+        "the text is wider than the column: {text:?}"
+    );
+
+    // User's right boundary is at x 300.
+    mouse_down(vcx, header_at(300.), 1);
+    mouse_up(vcx, header_at(300.), 1);
+    mouse_down(vcx, header_at(300.), 2);
+    mouse_up(vcx, header_at(300.), 2);
+    assert_eq!(changed_count(vcx, &table), 1, "one persist for the fit");
+    // The label "User" + 28 and the minimum 60 are both below the text + 16.
+    assert_eq!(stored_width(vcx, &table, ColumnId::User), text + px(16.));
+    for (col, w) in [
+        (ColumnId::Name, 200.),
+        (ColumnId::Pid, 80.),
+        (ColumnId::Cpu, 80.),
+    ] {
+        assert_eq!(stored_width(vcx, &table, col), px(w), "{col:?} unchanged");
+    }
+}
+
+#[test]
+fn fit_columns_never_below_minimum() {
+    let mut cx = cosmic_cx();
+    let mut d = HDelegate::new();
+    d.specs[3].template = Some("100.0%");
+    d.texts.push((ColumnId::User, "root"));
+    let (table, vcx) = open(&mut cx, d);
+    let handle = vcx.update(|_, cx| table.read(cx).focus_handle().clone());
+    vcx.update(|window, cx| window.focus(&handle, cx));
+    redraw(vcx);
+
+    // An action for another table is not this table's.
+    vcx.dispatch_action(ResizeColumnsToFit {
+        table: TableId::Services,
+    });
+    redraw(vcx);
+    assert_eq!(changed_count(vcx, &table), 0);
+
+    vcx.dispatch_action(ResizeColumnsToFit {
+        table: TableId::Processes,
+    });
+    redraw(vcx);
+    assert_eq!(changed_count(vcx, &table), 1);
+
+    let mins: Vec<(ColumnId, Pixels)> = vcx.update(|window, cx| {
+        let m = *metrics(cx);
+        let mut cache = TextMetricsCache::default();
+        let d = &table.read(cx).delegate;
+        ORDER
+            .iter()
+            .map(|&col| {
+                let spec = d.column_spec(col);
+                let sorted = col == d.sort.column;
+                (col, min_width(spec, sorted, &mut cache, &m, window, cx))
+            })
+            .collect()
+    });
+    for (col, min) in mins {
+        let w = stored_width(vcx, &table, col);
+        assert!(w >= min, "{col:?}: {w:?} below its minimum {min:?}");
+    }
+    // Short texts: Name shrinks from 200 to fit "row" and its label.
+    assert!(stored_width(vcx, &table, ColumnId::Name) < px(200.));
 }
