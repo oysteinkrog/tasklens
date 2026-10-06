@@ -31,8 +31,8 @@ use super::grid::{self, GridPaint};
 use super::labels::{self, CachedLine, LabelCache, LineStyle};
 use super::view::find_series;
 use super::{
-    ChartCache, ChartSeries, DEFAULT_RANGE_NS, GridStyle, LegendStyle, PathSet, ValueFormat,
-    YScale, scale,
+    ChartCache, ChartSeries, DEFAULT_RANGE_NS, GeometryScalars, GridStyle, LegendStyle, PathSet,
+    ValueFormat, YScale, scale,
 };
 use crate::anim::AnimationDriver;
 use crate::hub::{SnapshotChanged, SnapshotHub};
@@ -551,25 +551,19 @@ fn paint_grid_view(
             .fold(versions, |acc, (i, _)| {
                 acc.wrapping_add((i as u64 + 1) << 40)
             });
-        let key = &mut cache.key;
-        let same = key.series_versions.as_slice() == [versions, layout.cols as u64]
-            && key.physical_width == pw
-            && key.physical_height == ph
-            && key.range_ns == range_ns
-            && key.scale_bits == spec.y.scale_bits()
-            && key.y_min_bits == y.y_min.to_bits()
-            && key.y_max_bits == y.y_max.to_bits()
-            && key.style_version == env.metrics.style_version;
-        if !same || (stale && right_edge != *built_right_edge_ns) {
-            key.series_versions.clear();
-            key.series_versions.extend([versions, layout.cols as u64]);
-            key.physical_width = pw;
-            key.physical_height = ph;
-            key.range_ns = range_ns;
-            key.scale_bits = spec.y.scale_bits();
-            key.y_min_bits = y.y_min.to_bits();
-            key.y_max_bits = y.y_max.to_bits();
-            key.style_version = env.metrics.style_version;
+        let scalars = GeometryScalars {
+            physical_width: pw,
+            physical_height: ph,
+            range_ns,
+            scale_bits: spec.y.scale_bits(),
+            y_min_bits: y.y_min.to_bits(),
+            y_max_bits: y.y_max.to_bits(),
+            style_version: env.metrics.style_version,
+        };
+        let changed = cache
+            .key
+            .sync([versions, layout.cols as u64].into_iter(), scalars);
+        if changed || (stale && right_edge != *built_right_edge_ns) {
             let map = TimeMap {
                 anchor_ns: newest_ns,
                 right_edge_ns: right_edge,
@@ -812,8 +806,8 @@ fn build_cells(
         line: spec.overlay_line,
         ..ChartSeries::default()
     };
-    let input_of = |pairs| BuildInput {
-        series: pairs,
+    let base = BuildInput {
+        series: &[],
         map,
         plot_height,
         y_min,
@@ -831,8 +825,12 @@ fn build_cells(
         let pairs = [(total.clone(), a.as_deref()), (over.clone(), b.as_deref())];
         let (ox, oy) = cell_offset(layout, i, spec.cell_h, spec.gap);
         let origin = ((ox + 1.0) * sf, (oy + 1.0) * sf);
+        let input = BuildInput {
+            series: &pairs,
+            ..base
+        };
         geometry::build_cell(
-            &input_of(&pairs),
+            &input,
             origin,
             map.plot_width,
             &mut fill,
@@ -842,7 +840,7 @@ fn build_cells(
         );
     }
     geometry::finish_grid(
-        &input_of(&[]),
+        &base,
         (spec.fill, fill),
         (spec.line, stroke),
         overlay.map(|b| (spec.overlay_line, b)),
