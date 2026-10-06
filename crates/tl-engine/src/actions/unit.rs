@@ -1,6 +1,7 @@
 //! Unit actions on the systemd manager that owns the unit (ADR-005, ADR-006, SYS-005, SYS-006,
 //! PROC-072). Part 1: Start, Stop, Restart, Reload and Reset failed. Part 2: Freeze, Thaw and
-//! Kill for units outside `app.slice` (R-092).
+//! Kill for units outside `app.slice` (R-092). Part 3: Enable, Disable, Mask and Unmask, each
+//! followed by `Manager.Reload()` as systemctl does (ADR-006, SYS-007).
 //!
 //! Every call goes over the connection the `SystemdSystem` or `SystemdUser` worker holds, with
 //! `ALLOW_INTERACTIVE_AUTHORIZATION` so polkit can prompt for system units. tasklens never
@@ -53,6 +54,7 @@ const JOB_TYPE_NOT_APPLICABLE: &str = "org.freedesktop.systemd1.JobTypeNotApplic
 const NOT_CONNECTED: &str = "manager not connected";
 const CONNECTION_LOST: &str = "connection lost before the job ended";
 const FREEZE_IN_PROGRESS: &str = "freeze still in progress";
+const RELOAD_FAILED: &str = "changed, but the manager reload failed";
 const UNIT_PATH_PREFIX: &str = "/org/freedesktop/systemd1/unit/";
 
 /// A boxed future of a `UnitBus` call.
@@ -336,8 +338,8 @@ pub fn bus_for(actx: &ActionCtx, manager: Manager) -> Option<Arc<dyn UnitBus>> {
         .map(|conn| Arc::new(ZbusUnitBus::new(conn)) as Arc<dyn UnitBus>)
 }
 
-/// Runs one unit target: the five job kinds and Freeze, Thaw and Kill. The unit file kinds are
-/// added by E11-013.
+/// Runs one unit target: the five job kinds, Freeze, Thaw and Kill, and the four unit file
+/// kinds.
 pub async fn run_target(
     cx: &Cx,
     actx: &ActionCtx,
@@ -352,6 +354,18 @@ pub async fn run_target(
             return not_connected();
         };
         return freeze_thaw_kill(cx, &*bus, kind, unit).await;
+    }
+    if matches!(
+        kind,
+        ActionKind::UnitEnable
+            | ActionKind::UnitDisable
+            | ActionKind::UnitMask
+            | ActionKind::UnitUnmask
+    ) {
+        let Some(bus) = bus_for(actx, unit.manager) else {
+            return not_connected();
+        };
+        return set_unit_file_state(cx, &*bus, unit, kind).await;
     }
     let method = match kind {
         ActionKind::UnitStart => "StartUnit",
@@ -435,6 +449,94 @@ async fn freeze_thaw_kill(
         if cx.checkpoint().is_err() {
             return ActionState::OutcomeUnknown(Arc::from(FREEZE_IN_PROGRESS));
         }
+    }
+}
+
+/// Enable, Disable, Mask or Unmask `unit`, then `reload`. Enable and Disable on a masked unit
+/// unmask it first, inside the same action (R-170 item 10). A failed reload after a successful
+/// change is `OutcomeUnknown`: the unit file changed, but the manager may not have seen it.
+pub async fn set_unit_file_state(
+    cx: &Cx,
+    bus: &dyn UnitBus,
+    unit: &UnitRef,
+    kind: &ActionKind,
+) -> ActionState {
+    let names = || Value::from(vec![unit.name.to_string()]);
+    let timeout = call_timeout(unit.manager);
+    if matches!(kind, ActionKind::UnitEnable | ActionKind::UnitDisable) {
+        let state = match unit_file_state(cx, bus, &unit.name).await {
+            Ok(state) => state,
+            Err(e) => return map_bus_error(&e, "GetUnitFileState"),
+        };
+        if matches!(&*state, "masked" | "masked-runtime") {
+            tracing::debug!(target: "tasklens::action", unit = &*unit.name, "unmask first");
+            let args = [names(), Value::from(false)];
+            if let Err(e) = bus.call(cx, "UnmaskUnitFiles", &args, timeout).await {
+                return map_bus_error(&e, "UnmaskUnitFiles");
+            }
+        }
+    }
+    let (method, args) = match kind {
+        ActionKind::UnitEnable => (
+            "EnableUnitFiles",
+            vec![names(), Value::from(false), Value::from(true)],
+        ),
+        ActionKind::UnitDisable => ("DisableUnitFiles", vec![names(), Value::from(false)]),
+        ActionKind::UnitMask => (
+            "MaskUnitFiles",
+            vec![names(), Value::from(false), Value::from(true)],
+        ),
+        ActionKind::UnitUnmask => ("UnmaskUnitFiles", vec![names(), Value::from(false)]),
+        _ => return ActionState::Rejected(RejectReason::Unsupported),
+    };
+    tracing::debug!(target: "tasklens::action", unit = &*unit.name, method, "unit call");
+    let reply = match bus.call(cx, method, &args, timeout).await {
+        Ok(reply) => reply,
+        Err(e) => return map_bus_error(&e, method),
+    };
+    // `EnableUnitFiles` replies `(b carries_install_info, a(sss) changes)`. A unit with no
+    // `[Install]` section still succeeds, as in systemctl.
+    if let Value::Structure(reply) = &*reply
+        && let Some(Value::Bool(false)) = reply.fields().first()
+    {
+        tracing::debug!(target: "tasklens::action", unit = &*unit.name, "no install info");
+    }
+    match reload(cx, bus, unit.manager).await {
+        Ok(()) => ActionState::Succeeded,
+        Err(e) => {
+            // Only the error name: the message can hold a unit name.
+            let error = match &e {
+                UnitBusError::Call { name, .. } => &**name,
+                UnitBusError::Timeout => "timed out",
+                UnitBusError::Closed => "closed",
+                UnitBusError::NoConnection => "no connection",
+            };
+            tracing::debug!(target: "tasklens::action", error, "manager reload failed");
+            ActionState::OutcomeUnknown(Arc::from(RELOAD_FAILED))
+        }
+    }
+}
+
+/// `Manager.Reload()`, with the call deadline of `manager`.
+pub async fn reload(cx: &Cx, bus: &dyn UnitBus, manager: Manager) -> Result<(), UnitBusError> {
+    bus.call(cx, "Reload", &[], call_timeout(manager))
+        .await
+        .map(drop)
+}
+
+/// `Manager.GetUnitFileState(name)`: `enabled`, `disabled`, `masked`, `static` and the like.
+async fn unit_file_state(cx: &Cx, bus: &dyn UnitBus, name: &str) -> Result<Arc<str>, UnitBusError> {
+    let args = [Value::from(name.to_owned())];
+    // A read needs no polkit prompt on either manager, so the shorter deadline serves both.
+    let reply = bus
+        .call(cx, "GetUnitFileState", &args, CALL_TIMEOUT_USER)
+        .await?;
+    match &*reply {
+        Value::Str(state) => Ok(state.as_str().into()),
+        _ => Err(UnitBusError::Call {
+            name: "zbus".into(),
+            message: "bad GetUnitFileState reply".into(),
+        }),
     }
 }
 
@@ -648,6 +750,8 @@ mod tests {
     fn show(v: &Value<'_>) -> String {
         match v {
             Value::Str(s) => s.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Array(a) => format!("[{}]", a.iter().map(show).collect::<Vec<_>>().join(", ")),
             other => format!("{other:?}"),
         }
     }
@@ -1158,6 +1262,217 @@ mod tests {
         assert!(bus.calls().is_empty());
     }
 
+    fn files_call(method: &str, args: &[&str], timeout: Duration) -> FakeCall {
+        FakeCall::Call {
+            method: method.into(),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+            timeout,
+        }
+    }
+
+    fn state_read() -> FakeCall {
+        files_call("GetUnitFileState", &["app.service"], CALL_TIMEOUT_USER)
+    }
+
+    fn reload_call(timeout: Duration) -> FakeCall {
+        files_call("Reload", &[], timeout)
+    }
+
+    fn word(s: &str) -> Result<OwnedValue, UnitBusError> {
+        Ok(OwnedValue::try_from(Value::from(s)).unwrap())
+    }
+
+    #[test]
+    fn unit_enable_then_reload() {
+        let bus = FakeUnitBus::new(vec![word("disabled"), ok(), ok()], vec![], Tail::Pending);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitEnable,
+            unit(Manager::System),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls(),
+            [
+                state_read(),
+                files_call(
+                    "EnableUnitFiles",
+                    &["[app.service]", "false", "true"],
+                    CALL_TIMEOUT_SYSTEM
+                ),
+                reload_call(CALL_TIMEOUT_SYSTEM),
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_enable_unmasks_first() {
+        for masked in ["masked", "masked-runtime"] {
+            let bus = FakeUnitBus::new(vec![word(masked), ok(), ok(), ok()], vec![], Tail::Pending);
+            let state = run(
+                actx(Some(Arc::clone(&bus))),
+                ActionKind::UnitEnable,
+                unit(Manager::User),
+            );
+            assert_eq!(state, ActionState::Succeeded);
+            assert_eq!(
+                bus.calls(),
+                [
+                    state_read(),
+                    files_call(
+                        "UnmaskUnitFiles",
+                        &["[app.service]", "false"],
+                        CALL_TIMEOUT_USER
+                    ),
+                    files_call(
+                        "EnableUnitFiles",
+                        &["[app.service]", "false", "true"],
+                        CALL_TIMEOUT_USER
+                    ),
+                    reload_call(CALL_TIMEOUT_USER),
+                ]
+            );
+        }
+        // Disable unmasks first too.
+        let bus = FakeUnitBus::new(
+            vec![word("masked"), ok(), ok(), ok()],
+            vec![],
+            Tail::Pending,
+        );
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitDisable,
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls()[1..3],
+            [
+                files_call(
+                    "UnmaskUnitFiles",
+                    &["[app.service]", "false"],
+                    CALL_TIMEOUT_USER
+                ),
+                files_call(
+                    "DisableUnitFiles",
+                    &["[app.service]", "false"],
+                    CALL_TIMEOUT_USER
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_mask_calls() {
+        let bus = FakeUnitBus::new(vec![ok(), ok()], vec![], Tail::Pending);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitMask,
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls(),
+            [
+                files_call(
+                    "MaskUnitFiles",
+                    &["[app.service]", "false", "true"],
+                    CALL_TIMEOUT_USER
+                ),
+                reload_call(CALL_TIMEOUT_USER),
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_unmask_calls() {
+        let bus = FakeUnitBus::new(vec![ok(), ok()], vec![], Tail::Pending);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitUnmask,
+            unit(Manager::System),
+        );
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(
+            bus.calls(),
+            [
+                files_call(
+                    "UnmaskUnitFiles",
+                    &["[app.service]", "false"],
+                    CALL_TIMEOUT_SYSTEM
+                ),
+                reload_call(CALL_TIMEOUT_SYSTEM),
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_reload_failure_is_unknown() {
+        let bus = FakeUnitBus::new(
+            vec![word("enabled"), ok(), Err(call_error(ACCESS_DENIED))],
+            vec![],
+            Tail::Pending,
+        );
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitDisable,
+            unit(Manager::System),
+        );
+        assert_eq!(
+            state,
+            ActionState::OutcomeUnknown("changed, but the manager reload failed".into())
+        );
+        assert_eq!(
+            bus.calls(),
+            [
+                state_read(),
+                files_call(
+                    "DisableUnitFiles",
+                    &["[app.service]", "false"],
+                    CALL_TIMEOUT_SYSTEM
+                ),
+                reload_call(CALL_TIMEOUT_SYSTEM),
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_enable_denied_no_reload() {
+        let bus = FakeUnitBus::new(
+            vec![word("disabled"), Err(call_error(ACCESS_DENIED))],
+            vec![],
+            Tail::Pending,
+        );
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitEnable,
+            unit(Manager::System),
+        );
+        assert_eq!(state, ActionState::Failed(ActionError::NotAuthorized));
+        assert_eq!(bus.calls().len(), 2, "no Reload: {:?}", bus.calls());
+    }
+
+    #[test]
+    fn unit_file_state_read_error_stops() {
+        let bus = FakeUnitBus::new(vec![Err(call_error(NO_SUCH_UNIT))], vec![], Tail::Pending);
+        let state = run(
+            actx(Some(Arc::clone(&bus))),
+            ActionKind::UnitEnable,
+            unit(Manager::User),
+        );
+        assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
+        assert_eq!(bus.calls(), [state_read()]);
+    }
+
+    #[test]
+    fn unit_file_no_connection() {
+        let state = run(actx(None), ActionKind::UnitMask, unit(Manager::System));
+        assert_eq!(
+            state,
+            ActionState::Failed(ActionError::Internal("manager not connected".into()))
+        );
+    }
+
     #[test]
     fn unit_object_path_escaping() {
         assert_eq!(
@@ -1232,6 +1547,47 @@ mod tests {
                 "KillUnit {name} {whom} {signal} interactive={interactive}"
             ));
             Ok(())
+        }
+
+        fn get_unit_file_state(&self, name: &str) -> String {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("GetUnitFileState {name}"));
+            "masked".into()
+        }
+
+        fn unmask_unit_files(
+            &self,
+            files: Vec<String>,
+            runtime: bool,
+        ) -> Vec<(String, String, String)> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("UnmaskUnitFiles {files:?} {runtime}"));
+            vec![]
+        }
+
+        fn enable_unit_files(
+            &self,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            files: Vec<String>,
+            runtime: bool,
+            force: bool,
+        ) -> (bool, Vec<(String, String, String)>) {
+            let interactive = header
+                .primary()
+                .flags()
+                .contains(Flags::AllowInteractiveAuth);
+            self.log.lock().unwrap().push(format!(
+                "EnableUnitFiles {files:?} {runtime} {force} interactive={interactive}"
+            ));
+            (false, vec![])
+        }
+
+        fn reload(&self) {
+            self.log.lock().unwrap().push("Reload".into());
         }
 
         fn stop_unit(&self, _name: &str, _mode: &str) -> zbus::fdo::Result<OwnedObjectPath> {
@@ -1332,6 +1688,22 @@ mod tests {
                 result: "canceled".into(),
                 error_name: None
             })
+        );
+    }
+
+    /// The real argument and reply signatures: `as`, `b`, `b` in and `(b, a(sss))` out.
+    #[test]
+    fn zbus_bus_enable_masked_unit() {
+        let fake = fake_systemd("done");
+        assert_eq!(real(&fake, ActionKind::UnitEnable), ActionState::Succeeded);
+        assert_eq!(
+            *fake.log.lock().unwrap(),
+            [
+                "GetUnitFileState app.service",
+                "UnmaskUnitFiles [\"app.service\"] false",
+                "EnableUnitFiles [\"app.service\"] false true interactive=true",
+                "Reload",
+            ]
         );
     }
 
