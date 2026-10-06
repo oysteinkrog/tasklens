@@ -22,8 +22,8 @@ use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot,
-    DeviceDetailsSnapshot, DiskDetails, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
-    ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
+    DeviceDetailsSnapshot, DiskDetails, DiskDrive, EjectState, GraphicsAdapter, InventorySnapshot,
+    NetDetails, ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
     WindowsSnapshot,
 };
 use tl_model::system::{Metric, SensorKind};
@@ -1539,38 +1539,52 @@ impl Reducer {
                 validity: Validity::Valid,
             };
         }
-        self.map_gpu_devices(&mut next);
+        self.map_inventory_devices(&mut next);
         self.merge_api_versions(&mut next);
         self.components.inventory = Arc::new(next);
         self.mark(ComponentMask::INVENTORY);
     }
 
     /// Sets `device` of each graphics adapter to the GPU catalog entry whose PCI bus id matches
-    /// its `pci_slot`, ignoring case (R-166). An adapter with no match keeps its `device`.
-    fn map_gpu_devices(&self, inventory: &mut InventorySnapshot) {
-        if inventory.graphics.iter().all(|a| a.pci_slot.is_none()) {
-            return;
-        }
-        let mut graphics: Vec<GraphicsAdapter> = inventory.graphics.to_vec();
-        for adapter in &mut graphics {
-            let Some(slot) = adapter.pci_slot.as_deref() else {
-                continue;
-            };
-            let found = (0..=u16::MAX)
+    /// its `pci_slot`, ignoring case, and of each disk drive to the disk entry with its `name`
+    /// (R-166). A row with no match keeps its `device`.
+    fn map_inventory_devices(&self, inventory: &mut InventorySnapshot) {
+        let find = |matches: &dyn Fn(&DeviceIdentity) -> bool| {
+            (0..=u16::MAX)
                 .map_while(|i| self.devices.entry(DeviceIdx(i)))
-                .find_map(|e| match &e.identity {
-                    DeviceIdentity::Gpu { pci_bus_id, .. }
-                        if pci_bus_id.eq_ignore_ascii_case(slot) =>
-                    {
-                        Some(e.idx)
-                    }
-                    _ => None,
+                .find(|e| matches(&e.identity))
+                .map(|e| e.idx)
+        };
+        if inventory.graphics.iter().any(|a| a.pci_slot.is_some()) {
+            let mut graphics: Vec<GraphicsAdapter> = inventory.graphics.to_vec();
+            for adapter in &mut graphics {
+                let Some(slot) = adapter.pci_slot.as_deref() else {
+                    continue;
+                };
+                let found = find(&|id| {
+                    matches!(id, DeviceIdentity::Gpu { pci_bus_id, .. }
+                        if pci_bus_id.eq_ignore_ascii_case(slot))
                 });
-            if found.is_some() {
-                adapter.device = found;
+                if found.is_some() {
+                    adapter.device = found;
+                }
             }
+            inventory.graphics = graphics.into();
         }
-        inventory.graphics = graphics.into();
+        if inventory.disks.iter().any(|d| d.name.is_some()) {
+            let mut disks: Vec<DiskDrive> = inventory.disks.to_vec();
+            for disk in &mut disks {
+                let Some(want) = disk.name.as_deref() else {
+                    continue;
+                };
+                let found =
+                    find(&|id| matches!(id, DeviceIdentity::Disk { name, .. } if &**name == want));
+                if found.is_some() {
+                    disk.device = found;
+                }
+            }
+            inventory.disks = disks.into();
+        }
     }
 
     /// Sets the Vulkan and OpenGL versions of each graphics adapter from the stored
