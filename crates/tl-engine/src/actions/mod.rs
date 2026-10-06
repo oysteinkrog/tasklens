@@ -965,45 +965,114 @@ fn dispatch_boxed<'a>(
     Box::pin(dispatch(cx, actx, kind, target))
 }
 
-/// The `(kind, target)` table. `Process | Thread` → `process::run_target`, `Cgroup` →
-/// `cgroup::run_target`, `Unit` → `unit::run_target` (the two recovery kinds →
-/// `recovery::run_target`), `Startup` → `startup::run_target`, `Socket` → `socket::run_target`. Each module bead adds its arm; a pair with no module is
-/// `Rejected(Unsupported)`.
+/// The `(kind, target)` table (E11-A2). No arm matches every kind, so a new `ActionKind` does not
+/// compile until it has a row here: this is what keeps a kind from reaching the wrong module.
+///
+/// - `Process | Thread` × the process kinds → `process::run_target`
+/// - `Cgroup` × `FreezeGroup | ThawGroup | KillGroup` → `cgroup::run_target`
+/// - `Unit` × `FreezeGroup | ThawGroup | KillGroup` and the `Unit*` job and file kinds →
+///   `unit::run_target`; `Unit` × `UnitWriteRecovery | UnitRemoveRecovery` →
+///   `recovery::run_target`
+/// - `Startup` × `Startup*` → `startup::run_target`
+/// - `Socket` × `SockDestroy` → `socket::run_target`
+/// - `Process` × `Dump` → `dump::run_target`
+///
+/// Every other pair is `Rejected(Unsupported)`. `KillTree` runs in `run_tree` and the targetless
+/// kinds in `targetless::run`, so they never reach this function.
 async fn dispatch(
     cx: &Cx,
     actx: &ActionCtx,
     kind: &ActionKind,
     target: &ActionTarget,
 ) -> ActionState {
-    if let ActionKind::Dump { mode, path } = kind {
+    use ActionKind as K;
+    use ActionTarget as T;
+    match (kind, target) {
+        (
+            K::Signal(_)
+            | K::Suspend
+            | K::Resume
+            | K::SetNice(_)
+            | K::SetSched { .. }
+            | K::SetAffinity(_)
+            | K::SetIoPriority(_),
+            T::Process(_) | T::Thread { .. },
+        ) => process::run_target(cx, actx, kind, target).await,
+        (K::FreezeGroup | K::ThawGroup | K::KillGroup, T::Cgroup(cg)) => {
+            cgroup::run_target(cx, actx, kind, cg).await
+        }
+        (
+            K::FreezeGroup
+            | K::ThawGroup
+            | K::KillGroup
+            | K::UnitStart
+            | K::UnitStop
+            | K::UnitRestart
+            | K::UnitReload
+            | K::UnitResetFailed
+            | K::UnitEnable
+            | K::UnitDisable
+            | K::UnitMask
+            | K::UnitUnmask,
+            T::Unit(unit),
+        ) => unit::run_target(cx, actx, kind, unit).await,
+        (K::UnitWriteRecovery(_) | K::UnitRemoveRecovery, T::Unit(unit)) => {
+            recovery::run_target(cx, actx, kind, unit).await
+        }
+        (
+            K::StartupEnable | K::StartupDisable | K::StartupRunNow | K::StartupDelete,
+            T::Startup(entry),
+        ) => startup::run_target(cx, actx, kind, entry).await,
+        (
+            K::SockDestroy,
+            T::Socket {
+                cookie,
+                family,
+                proto,
+                four_tuple,
+            },
+        ) => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
         // `run_body` refuses privileged requests until E29-014 routes them, so this call is the
         // unprivileged one.
-        return match target {
-            ActionTarget::Process(key) => {
-                dump::run_target(cx, actx, *mode, path, *key, false).await
-            }
-            _ => ActionState::Rejected(RejectReason::Unsupported),
-        };
-    }
-    match target {
-        ActionTarget::Cgroup(cg) => cgroup::run_target(cx, actx, kind, cg).await,
-        ActionTarget::Process(_) | ActionTarget::Thread { .. } => {
-            process::run_target(cx, actx, kind, target).await
+        (K::Dump { mode, path }, T::Process(key)) => {
+            dump::run_target(cx, actx, *mode, path, *key, false).await
         }
-        ActionTarget::Socket {
-            cookie,
-            family,
-            proto,
-            four_tuple,
-        } => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
-        ActionTarget::Unit(unit) if matches!(kind, ActionKind::UnitWriteRecovery(_)) => {
-            recovery::run_target(cx, actx, kind, unit).await
-        }
-        ActionTarget::Unit(unit) if matches!(kind, ActionKind::UnitRemoveRecovery) => {
-            recovery::run_target(cx, actx, kind, unit).await
-        }
-        ActionTarget::Unit(unit) => unit::run_target(cx, actx, kind, unit).await,
-        ActionTarget::Startup(entry) => startup::run_target(cx, actx, kind, entry).await,
+        // The mismatched pairs, one arm per kind group.
+        (
+            K::Signal(_)
+            | K::Suspend
+            | K::Resume
+            | K::SetNice(_)
+            | K::SetSched { .. }
+            | K::SetAffinity(_)
+            | K::SetIoPriority(_)
+            | K::FreezeGroup
+            | K::ThawGroup
+            | K::KillGroup
+            | K::Dump { .. }
+            | K::UnitStart
+            | K::UnitStop
+            | K::UnitRestart
+            | K::UnitReload
+            | K::UnitResetFailed
+            | K::UnitEnable
+            | K::UnitDisable
+            | K::UnitMask
+            | K::UnitUnmask
+            | K::UnitWriteRecovery(_)
+            | K::UnitRemoveRecovery
+            | K::StartupEnable
+            | K::StartupDisable
+            | K::StartupRunNow
+            | K::StartupDelete
+            | K::SockDestroy,
+            _,
+        )
+        // Handled before the target loop (E11-004, E11-016).
+        | (
+            K::KillTree | K::OpenUri(_) | K::ShowInFileManager { .. } | K::Launch(_),
+            _,
+        ) => ActionState::Rejected(RejectReason::Unsupported),
     }
 }
 
@@ -1323,9 +1392,9 @@ mod tests {
     struct NoOps;
     impl ActionOps for NoOps {}
 
-    /// A gate over `NoOps` whose channels stay open while the returned receivers live.
-    fn gate() -> (
-        Gate,
+    /// An `ActionCtx` over `NoOps` whose channels stay open while the returned receivers live.
+    fn ctx() -> (
+        Arc<ActionCtx>,
         async_channel::Receiver<ActionEvent>,
         mpsc::Receiver<EngineMsg>,
     ) {
@@ -1349,6 +1418,16 @@ mod tests {
             unit_bus_override: None,
             startup_paths: crate::actions::startup::StartupPaths::from_env(),
         });
+        (ctx, events, msgs)
+    }
+
+    /// A gate over `ctx()`.
+    fn gate() -> (
+        Gate,
+        async_channel::Receiver<ActionEvent>,
+        mpsc::Receiver<EngineMsg>,
+    ) {
+        let (ctx, events, msgs) = ctx();
         (Gate::new(ctx), events, msgs)
     }
 
@@ -1446,6 +1525,333 @@ mod tests {
             refresh_source(&ActionKind::FreezeGroup, Some(Manager::User)),
             Some(SourceId::Processes)
         );
+    }
+
+    /// One value of every `ActionKind` variant. `kind_name` has one arm per variant, so the
+    /// distinct-name check in each table test fails when a variant is missing here.
+    fn every_kind() -> Vec<ActionKind> {
+        use tl_model::actions::{DumpMode, LaunchWhat, RecoveryEdit};
+        vec![
+            ActionKind::Signal(Signal::Term),
+            ActionKind::KillTree,
+            ActionKind::Suspend,
+            ActionKind::Resume,
+            ActionKind::SetNice(5),
+            ActionKind::SetSched {
+                policy: tl_model::actions::SchedPolicy::Other,
+                rt_prio: 0,
+            },
+            ActionKind::SetAffinity(tl_model::system::CpuSet::empty()),
+            ActionKind::SetIoPriority(tl_model::actions::IoPriority::Idle),
+            ActionKind::FreezeGroup,
+            ActionKind::ThawGroup,
+            ActionKind::KillGroup,
+            ActionKind::Dump {
+                mode: DumpMode::Mini,
+                path: Arc::from("/tmp/x.core"),
+            },
+            ActionKind::UnitStart,
+            ActionKind::UnitStop,
+            ActionKind::UnitRestart,
+            ActionKind::UnitReload,
+            ActionKind::UnitResetFailed,
+            ActionKind::UnitEnable,
+            ActionKind::UnitDisable,
+            ActionKind::UnitMask,
+            ActionKind::UnitUnmask,
+            ActionKind::UnitWriteRecovery(RecoveryEdit::default()),
+            ActionKind::UnitRemoveRecovery,
+            ActionKind::StartupEnable,
+            ActionKind::StartupDisable,
+            ActionKind::StartupRunNow,
+            ActionKind::StartupDelete,
+            ActionKind::SockDestroy,
+            ActionKind::OpenUri(Arc::from("https://example.org")),
+            ActionKind::ShowInFileManager {
+                path: Arc::from("/home"),
+                properties: false,
+            },
+            ActionKind::Launch(LaunchSpec {
+                what: LaunchWhat::Command(Arc::from("true")),
+                as_admin: false,
+                cwd: None,
+            }),
+        ]
+    }
+
+    #[test]
+    fn every_kind_is_complete() {
+        let kinds = every_kind();
+        let names: FxHashSet<&str> = kinds.iter().map(kind_name).collect();
+        assert_eq!(names.len(), kinds.len(), "a kind is listed twice");
+        assert_eq!(
+            kinds.len(),
+            31,
+            "a new ActionKind needs a row in every_kind"
+        );
+    }
+
+    /// One target of each type the deadline and dispatch tables tell apart.
+    fn every_target() -> Vec<ActionTarget> {
+        use tl_model::actions::{Family, FourTuple, Proto};
+        use tl_model::table::{StartupRef, StartupSource};
+        let unit = |manager| {
+            ActionTarget::Unit(UnitRef {
+                manager,
+                name: Arc::from("foo.service"),
+            })
+        };
+        let startup = |source, id: &str| {
+            ActionTarget::Startup(StartupRef {
+                source,
+                id: Arc::from(id),
+            })
+        };
+        let addr: std::net::SocketAddr = "127.0.0.1:1".parse().expect("address");
+        vec![
+            ActionTarget::Process(key(500)),
+            ActionTarget::Thread {
+                process: key(500),
+                tid: 501,
+            },
+            ActionTarget::Cgroup(CgroupRef {
+                rel_path: Arc::from("user.slice/app.slice/app-foo.scope"),
+                cgroup_id: 7,
+            }),
+            unit(Manager::User),
+            unit(Manager::System),
+            startup(StartupSource::AutostartUser, "foo.desktop"),
+            startup(StartupSource::UserUnit, "foo.service"),
+            ActionTarget::Socket {
+                cookie: 1,
+                family: Family::Inet,
+                proto: Proto::Tcp,
+                four_tuple: FourTuple {
+                    local: addr,
+                    remote: addr,
+                },
+            },
+        ]
+    }
+
+    /// The E11-002 deadline list, written per target type.
+    fn adr006(kind: &ActionKind, target: Option<&ActionTarget>) -> Option<Duration> {
+        use tl_model::table::StartupSource;
+        let s = |n| Some(Duration::from_secs(n));
+        let user = matches!(target, Some(ActionTarget::Unit(u)) if u.manager == Manager::User);
+        let user_or_system = |u, sys| if user { s(u) } else { s(sys) };
+        match kind {
+            ActionKind::Signal(_)
+            | ActionKind::KillTree
+            | ActionKind::Suspend
+            | ActionKind::Resume
+            | ActionKind::SetNice(_)
+            | ActionKind::SetSched { .. }
+            | ActionKind::SetAffinity(_)
+            | ActionKind::SetIoPriority(_) => s(2),
+            ActionKind::FreezeGroup | ActionKind::ThawGroup | ActionKind::KillGroup => match target
+            {
+                Some(ActionTarget::Cgroup(_)) => s(2),
+                _ => user_or_system(2, 120),
+            },
+            ActionKind::UnitStart
+            | ActionKind::UnitStop
+            | ActionKind::UnitRestart
+            | ActionKind::UnitReload
+            | ActionKind::UnitResetFailed => None,
+            ActionKind::UnitEnable
+            | ActionKind::UnitDisable
+            | ActionKind::UnitMask
+            | ActionKind::UnitUnmask => user_or_system(10, 120),
+            ActionKind::StartupEnable | ActionKind::StartupDisable | ActionKind::StartupDelete => {
+                match target {
+                    Some(ActionTarget::Startup(e)) if e.source == StartupSource::UserUnit => s(10),
+                    _ => s(2),
+                }
+            }
+            ActionKind::StartupRunNow | ActionKind::Dump { .. } => None,
+            ActionKind::SockDestroy => s(2),
+            ActionKind::UnitWriteRecovery(_) | ActionKind::UnitRemoveRecovery => {
+                user_or_system(2, 120)
+            }
+            ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } => s(2),
+            ActionKind::Launch(spec) if spec.as_admin => s(120),
+            ActionKind::Launch(_) => s(2),
+        }
+    }
+
+    #[test]
+    fn deadline_table_matches_adr006() {
+        let mut targets: Vec<Option<ActionTarget>> = every_target().into_iter().map(Some).collect();
+        targets.push(None);
+        for kind in every_kind() {
+            for target in &targets {
+                let t = target.as_ref();
+                assert_eq!(
+                    deadline(&kind, t, false),
+                    adr006(&kind, t),
+                    "{kind:?} on {t:?}"
+                );
+                assert_eq!(
+                    deadline(&kind, t, true),
+                    Some(PROMPT_DEADLINE),
+                    "privileged {kind:?} on {t:?}"
+                );
+            }
+        }
+        let admin = ActionKind::Launch(LaunchSpec {
+            what: tl_model::actions::LaunchWhat::Command(Arc::from("true")),
+            as_admin: true,
+            cwd: None,
+        });
+        assert_eq!(deadline(&admin, None, false), Some(PROMPT_DEADLINE));
+    }
+
+    #[test]
+    fn finished_refresh_source_every_kind() {
+        for kind in every_kind() {
+            for manager in [None, Some(Manager::User), Some(Manager::System)] {
+                let systemd = match manager {
+                    Some(Manager::User) => SourceId::SystemdUser,
+                    _ => SourceId::SystemdSystem,
+                };
+                let want = match &kind {
+                    ActionKind::Signal(_)
+                    | ActionKind::KillTree
+                    | ActionKind::Suspend
+                    | ActionKind::Resume
+                    | ActionKind::SetNice(_)
+                    | ActionKind::SetSched { .. }
+                    | ActionKind::SetAffinity(_)
+                    | ActionKind::SetIoPriority(_)
+                    | ActionKind::Dump { .. } => Some(SourceId::Processes),
+                    // Freeze, thaw and kill change process state, also on a unit target.
+                    ActionKind::FreezeGroup | ActionKind::ThawGroup | ActionKind::KillGroup => {
+                        Some(SourceId::Processes)
+                    }
+                    ActionKind::UnitStart
+                    | ActionKind::UnitStop
+                    | ActionKind::UnitRestart
+                    | ActionKind::UnitReload
+                    | ActionKind::UnitResetFailed
+                    | ActionKind::UnitEnable
+                    | ActionKind::UnitDisable
+                    | ActionKind::UnitMask
+                    | ActionKind::UnitUnmask
+                    | ActionKind::UnitWriteRecovery(_)
+                    | ActionKind::UnitRemoveRecovery => Some(systemd),
+                    ActionKind::StartupEnable
+                    | ActionKind::StartupDisable
+                    | ActionKind::StartupRunNow
+                    | ActionKind::StartupDelete => Some(SourceId::Startup),
+                    ActionKind::SockDestroy => Some(SourceId::Connections),
+                    ActionKind::OpenUri(_)
+                    | ActionKind::ShowInFileManager { .. }
+                    | ActionKind::Launch(_) => None,
+                };
+                assert_eq!(refresh_source(&kind, manager), want, "{kind:?} {manager:?}");
+            }
+        }
+    }
+
+    /// True for the pairs the dispatch table sends to a module.
+    fn routed(kind: &ActionKind, target: &ActionTarget) -> bool {
+        use ActionKind as K;
+        use ActionTarget as T;
+        match target {
+            T::Process(_) | T::Thread { .. } => {
+                matches!(
+                    kind,
+                    K::Signal(_)
+                        | K::Suspend
+                        | K::Resume
+                        | K::SetNice(_)
+                        | K::SetSched { .. }
+                        | K::SetAffinity(_)
+                        | K::SetIoPriority(_)
+                ) || (matches!(target, T::Process(_)) && matches!(kind, K::Dump { .. }))
+            }
+            T::Cgroup(_) => matches!(kind, K::FreezeGroup | K::ThawGroup | K::KillGroup),
+            T::Unit(_) => matches!(
+                kind,
+                K::FreezeGroup
+                    | K::ThawGroup
+                    | K::KillGroup
+                    | K::UnitStart
+                    | K::UnitStop
+                    | K::UnitRestart
+                    | K::UnitReload
+                    | K::UnitResetFailed
+                    | K::UnitEnable
+                    | K::UnitDisable
+                    | K::UnitMask
+                    | K::UnitUnmask
+                    | K::UnitWriteRecovery(_)
+                    | K::UnitRemoveRecovery
+            ),
+            T::Startup(_) => matches!(
+                kind,
+                K::StartupEnable | K::StartupDisable | K::StartupRunNow | K::StartupDelete
+            ),
+            T::Socket { .. } => matches!(kind, K::SockDestroy),
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_mismatched_pairs() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+        use tl_model::table::{StartupRef, StartupSource};
+
+        let unsupported = ActionState::Rejected(RejectReason::Unsupported);
+        let named = [
+            (
+                ActionKind::Signal(Signal::Term),
+                ActionTarget::Unit(unit("foo.service")),
+            ),
+            (ActionKind::UnitStart, ActionTarget::Process(key(500))),
+            (
+                ActionKind::StartupEnable,
+                ActionTarget::Cgroup(CgroupRef {
+                    rel_path: Arc::from("user.slice/app.slice/app-foo.scope"),
+                    cgroup_id: 7,
+                }),
+            ),
+            (ActionKind::SockDestroy, ActionTarget::Process(key(500))),
+            (
+                ActionKind::UnitStop,
+                ActionTarget::Startup(StartupRef {
+                    source: StartupSource::AutostartUser,
+                    id: Arc::from("foo.desktop"),
+                }),
+            ),
+        ];
+        let mut pairs: Vec<(ActionKind, ActionTarget)> = named.to_vec();
+        for kind in every_kind() {
+            for target in every_target() {
+                if !routed(&kind, &target) {
+                    pairs.push((kind.clone(), target));
+                }
+            }
+        }
+        assert!(pairs.len() > 150, "the sweep covers the mismatched pairs");
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let (actx, _events, _msgs) = ctx();
+                for (kind, target) in &pairs {
+                    let state = dispatch(&cx, &actx, kind, target).await;
+                    assert_eq!(state, unsupported, "{kind:?} on {target:?}");
+                }
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(handle.is_finished(), "the checks ran");
     }
 }
 

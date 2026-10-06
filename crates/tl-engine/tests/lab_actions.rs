@@ -1403,17 +1403,21 @@ impl UnitBus for FakeUnitBus {
 /// A harness whose unit targets go to `system` or `user` by manager, with the real `Gate`.
 fn unit_harness(config: LabConfig) -> (Harness, Arc<FakeUnitBus>, Arc<FakeUnitBus>) {
     let (system, user) = (FakeUnitBus::new(), FakeUnitBus::new());
-    let (s, u) = (Arc::clone(&system), Arc::clone(&user));
-    let pick: UnitBusOverride = Arc::new(move |manager| {
+    let mut h = harness_full(config, None, Some(bus_override(&system, &user)));
+    h.gate = Some(Arc::new(Mutex::new(Gate::new(Arc::clone(&h.actx)))));
+    (h, system, user)
+}
+
+/// Sends each manager's unit calls to its fake bus.
+fn bus_override(system: &Arc<FakeUnitBus>, user: &Arc<FakeUnitBus>) -> UnitBusOverride {
+    let (s, u) = (Arc::clone(system), Arc::clone(user));
+    Arc::new(move |manager| {
         let bus = match manager {
             Manager::System => Arc::clone(&s),
             Manager::User => Arc::clone(&u),
         };
         Some(bus as Arc<dyn UnitBus>)
-    });
-    let mut h = harness_full(config, None, Some(pick));
-    h.gate = Some(Arc::new(Mutex::new(Gate::new(Arc::clone(&h.actx)))));
-    (h, system, user)
+    })
 }
 
 fn unit_target(manager: Manager, name: &str) -> ActionTarget {
@@ -1638,6 +1642,13 @@ struct EngineRig {
 }
 
 fn engine_rig() -> EngineRig {
+    engine_rig_with(|hook, ops| Box::new(PanicOn(gate_with_ops(hook, ops))))
+}
+
+/// `engine_rig` with `gate` building each session's gate from the hook and the rig's `FakeOps`.
+fn engine_rig_with(
+    gate: impl Fn(HookCtx, Arc<dyn ActionOps>) -> Box<dyn ActionGate> + Send + Sync + 'static,
+) -> EngineRig {
     let mut fake = fake_sources::FakeLab::with_config(LabConfig::new(7).max_steps(1_000_000));
     let ops = Arc::new(FakeOps::new(&fake.clock));
     let config = Arc::new(EngineConfig::new(
@@ -1653,7 +1664,7 @@ fn engine_rig() -> EngineRig {
         action_gate: Some(Arc::new(move |hook: HookCtx| {
             counter.fetch_add(1, Ordering::Relaxed);
             let ops: Arc<dyn ActionOps> = gate_ops.clone();
-            Box::new(PanicOn(gate_with_ops(hook, ops))) as Box<dyn ActionGate>
+            gate(hook, ops)
         })),
         ..EngineHooks::default()
     };
@@ -1699,6 +1710,11 @@ impl EngineRig {
             .expect("the queue has room for the message");
     }
 
+    /// Sends the action on `targets` and runs the lab.
+    fn action_on(&mut self, id: u64, kind: ActionKind, targets: &[ActionTarget]) {
+        self.send(EngineMsg::Command(Command::Action(req(id, kind, targets))));
+    }
+
     /// One `Processes` sweep with these PIDs, so admission sees them live.
     fn sweep(&mut self, pids: &[u32]) {
         let t_ns = self.fake.clock.now().as_nanos();
@@ -1731,9 +1747,13 @@ impl EngineRig {
 
     /// The `RefreshNow` commands forwarded to `Processes` so far.
     fn process_refreshes(&self) -> usize {
-        let want = |q: &&QueuedCommand| {
-            q.target == SourceId::Processes && q.command == WorkerCommand::RefreshNow
-        };
+        self.refreshes(SourceId::Processes)
+    }
+
+    /// The `RefreshNow` commands forwarded to `source` so far.
+    fn refreshes(&self, source: SourceId) -> usize {
+        let want =
+            |q: &&QueuedCommand| q.target == source && q.command == WorkerCommand::RefreshNow;
         self.control
             .borrow_and_clone()
             .commands
@@ -1939,6 +1959,178 @@ fn session_restart_drops_in_flight() {
     assert_eq!(
         rig.events_for(ActionId(2)),
         expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(rig.process_refreshes(), 1);
+    rig.finish();
+}
+
+// Unit, startup and cgroup actions through the engine (E11-A2) -------------------------------
+
+use tl_engine::actions::RealOps;
+use tl_engine::actions::startup::StartupPaths;
+use tl_model::actions::CgroupRef;
+use tl_ops::cgroup::CgroupDir;
+use tl_ops::fs::StartupRoots;
+
+/// A real `Gate` as `gate_with_ops` builds it, with the test's ops, unit buses and startup
+/// paths.
+fn test_gate(
+    hook: HookCtx,
+    ops: Arc<dyn ActionOps>,
+    units: Option<UnitBusOverride>,
+    startup_paths: StartupPaths,
+) -> Box<dyn ActionGate> {
+    Box::new(Gate::new(Arc::new(ActionCtx {
+        events: hook.events_tx,
+        msgs: hook.msgs_tx,
+        ops,
+        boot_id: hook.boot_id,
+        uid: 1000,
+        config: hook.config,
+        systemd_system: hook.shared.systemd_system,
+        systemd_user: hook.shared.systemd_user,
+        openers: None,
+        helper: None,
+        destroy_support_sent: AtomicBool::new(false),
+        unit_bus_override: units,
+        startup_paths,
+    })))
+}
+
+/// A directory under `target/tmp`, removed on drop.
+fn scratch() -> tempfile::TempDir {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+    std::fs::create_dir_all(&base).expect("create target/tmp");
+    tempfile::Builder::new()
+        .prefix("tasklens-i3o2-")
+        .tempdir_in(base)
+        .expect("tempdir")
+}
+
+/// `$XDG_CONFIG_HOME` is `<base>/config`, and `<base>/etc/xdg/autostart` is the only system
+/// directory.
+fn scratch_paths(base: &std::path::Path) -> StartupPaths {
+    StartupPaths {
+        roots: StartupRoots::from_config_home(&base.join("config")),
+        system_autostart_dirs: vec![base.join("etc/xdg/autostart")],
+    }
+}
+
+#[test]
+fn engine_unit_action_end_to_end() {
+    let (system, user) = (FakeUnitBus::new(), FakeUnitBus::new());
+    let units = bus_override(&system, &user);
+    let paths = scratch_paths(std::path::Path::new("/nonexistent"));
+    let mut rig = engine_rig_with(move |hook, ops| {
+        test_gate(hook, ops, Some(Arc::clone(&units)), paths.clone())
+    });
+    let foo = unit_target(Manager::User, "foo.service");
+    rig.action_on(1, ActionKind::UnitStart, std::slice::from_ref(&foo));
+    assert_eq!(rig.events_for(ActionId(1)), [(None, ActionState::Started)]);
+    let job = user.job_of("foo.service").expect("StartUnit was called");
+
+    // Action 1 holds the unit while it waits for `JobRemoved`.
+    rig.action_on(2, ActionKind::UnitStart, std::slice::from_ref(&foo));
+    let busy = ActionState::Rejected(RejectReason::Busy);
+    assert_eq!(
+        rig.events_for(ActionId(2)),
+        expected(std::slice::from_ref(&busy), busy.clone())
+    );
+    assert_eq!(user.job_of("foo.service"), Some(job), "no second job call");
+    let before = rig.refreshes(SourceId::SystemdUser);
+
+    user.finish(job, "foo.service", "done");
+    rig.fake.lab.run_until_idle();
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        [
+            (Some(0), ActionState::Succeeded),
+            (None, ActionState::Succeeded)
+        ]
+    );
+    // `ActionFinished` asked the user manager source for a fresh read.
+    assert_eq!(rig.refreshes(SourceId::SystemdUser), before + 1);
+    assert_eq!(rig.refreshes(SourceId::SystemdSystem), 0);
+    assert!(system.calls().is_empty());
+    rig.finish();
+}
+
+#[test]
+fn engine_startup_action_end_to_end() {
+    let dir = scratch();
+    let paths = scratch_paths(dir.path());
+    let file = paths.roots.autostart.join("foo.desktop");
+    std::fs::create_dir_all(&paths.roots.autostart).expect("create autostart");
+    std::fs::write(
+        &file,
+        "[Desktop Entry]\nType=Application\nName=Foo\nExec=true\n",
+    )
+    .expect("write entry");
+    let gate_paths = paths.clone();
+    let mut rig = engine_rig_with(move |hook, _| {
+        test_gate(hook, Arc::new(RealOps), None, gate_paths.clone())
+    });
+    let entry = ActionTarget::Startup(StartupRef {
+        source: StartupSource::AutostartUser,
+        id: Arc::from("foo.desktop"),
+    });
+    rig.action_on(1, ActionKind::StartupDisable, &[entry]);
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    let text = std::fs::read_to_string(&file).expect("read entry");
+    assert!(text.contains("Hidden=true"), "{text}");
+    assert_eq!(rig.refreshes(SourceId::Startup), 1);
+    rig.finish();
+}
+
+/// Cgroup ops over a scratch directory, so nothing writes to a real cgroup.
+struct CgroupFake {
+    dir: PathBuf,
+    writes: Mutex<Vec<(String, String)>>,
+}
+
+impl ActionOps for CgroupFake {
+    fn cgroup_open_validated(&self, _cg: &CgroupRef, _uid: u32) -> Result<CgroupDir, OpsError> {
+        let dir = std::fs::File::open(&self.dir)
+            .map_err(|e| OpsError::Os(e.raw_os_error().unwrap_or(Errno::IO.raw_os_error())))?;
+        Ok(CgroupDir::from_validated_fd(OwnedFd::from(dir)))
+    }
+
+    fn cgroup_write(&self, _dir: &CgroupDir, file: &str, value: &str) -> Result<(), OpsError> {
+        lock(&self.writes).push((file.to_owned(), value.to_owned()));
+        Ok(())
+    }
+
+    fn cgroup_wait_frozen(&self, _dir: &CgroupDir, _wait: Duration) -> Result<(), OpsError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn engine_cgroup_action_end_to_end() {
+    let dir = scratch();
+    let ops = Arc::new(CgroupFake {
+        dir: dir.path().to_owned(),
+        writes: Mutex::new(Vec::new()),
+    });
+    let gate_ops = Arc::clone(&ops);
+    let paths = scratch_paths(dir.path());
+    let mut rig =
+        engine_rig_with(move |hook, _| test_gate(hook, gate_ops.clone(), None, paths.clone()));
+    let cg = ActionTarget::Cgroup(CgroupRef {
+        rel_path: Arc::from("user.slice/user-1000.slice/user@1000.service/app.slice/app-x.scope"),
+        cgroup_id: 7,
+    });
+    rig.action_on(1, ActionKind::FreezeGroup, &[cg]);
+    assert_eq!(
+        rig.events_for(ActionId(1)),
+        expected(&[ActionState::Succeeded], ActionState::Succeeded)
+    );
+    assert_eq!(
+        *lock(&ops.writes),
+        [("cgroup.freeze".to_owned(), "1".to_owned())]
     );
     assert_eq!(rig.process_refreshes(), 1);
     rig.finish();
