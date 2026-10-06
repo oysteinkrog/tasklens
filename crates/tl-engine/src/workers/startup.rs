@@ -1737,6 +1737,40 @@ mod tests {
         rig.finish();
     }
 
+    /// Read-only calls on the real user manager, to check the reply types. Skipped without a
+    /// session bus.
+    #[test]
+    fn live_user_manager_reads() {
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let Ok(mut m) = System.manager(&cx).await else {
+                return None;
+            };
+            let listing = m.list(&cx).await.expect("listing");
+            let path = listing
+                .loaded
+                .values()
+                .find(|u| u.active_state == "active")
+                .map(|u| u.path.clone());
+            let timing = match path {
+                Some(path) => Some(m.timing(&cx, &path).await.expect("GetAll")),
+                None => None,
+            };
+            Some((listing, timing))
+        });
+        let Some((listing, timing)) = rt.block_on(join).expect("task completes") else {
+            eprintln!("no session bus: skipped");
+            return;
+        };
+        eprintln!("{} loaded units, timing {timing:?}", listing.loaded.len());
+        assert!(listing.userspace_us > 0);
+        assert!(!listing.loaded.is_empty());
+        if let Some(t) = timing {
+            assert!(t.active_enter_us >= t.inactive_exit_us, "{t:?}");
+        }
+    }
+
     #[test]
     fn spec_is_full_mode_only() {
         let s = spec();
