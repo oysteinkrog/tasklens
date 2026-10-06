@@ -340,3 +340,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.5: ColumnLayout over ColumnId only; follow-up rsf.18 makes it generic for SysColumnId (blocks hk6.1). min_width takes window and cx; set_width takes scaled px.
 - yrf.3: chart types and ChartView skeleton; submodules are stubs for later yrf beads; three placeholder fields carry dead_code allows. crw.3 PerformancePage fields unused (in progress).
 - hjn.20: Inventory System section (hostnamed, logind, env). Fixture root skips the bus, env and shell. run-with-timeout is a local copy of tl-collect run_version (private); share it in a cleanup.
+- fut.13: TlMenu over kit PopupMenu misses several spec points (keys, sizes, scale). Follow-up bead rebuilds it on base parts with the same API. context_menu_layer must be rendered by the window root (comment on jqk.10).
+- gma.31: run history store with in-memory fake store in tests.
+- 8q0.34: Startup counts follow the filter.
