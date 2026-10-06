@@ -24,7 +24,7 @@ use tl_ui::components::window_frame::{
     TlWindowKind, TlWindowSpec, ToggleAlwaysOnTop, window_options,
 };
 use tl_ui::testing::fake_engine::FakeEngine;
-use tl_ui::window::registry::WindowKey;
+use tl_ui::window::registry::{CapClass, GlobalRegistry, OpenOutcome, WindowKey, WindowRegistry};
 
 struct Body;
 
@@ -595,4 +595,198 @@ fn short_dialog_keeps_min_height(cx: &mut TestAppContext) {
     assert!(height >= px(140.) && height <= px(320.), "{height:?}");
     assert!(o.vcx.debug_bounds("TlDialogIcon").is_some());
     assert!(o.vcx.debug_bounds("TlDialogHeading").is_none());
+}
+
+// WindowRegistry (E16-A2, UI-FND-021, UI-SHL-090, APP-045, R-218).
+
+fn registry(cx: &mut TestAppContext) -> Entity<WindowRegistry> {
+    cx.update(|cx| cx.global::<GlobalRegistry>().0.clone())
+}
+
+/// `open_or_focus(key)` with a frame window titled after the key. Counts calls to the open
+/// closure in `opens`.
+fn open_key(cx: &mut TestAppContext, key: WindowKey, opens: &Rc<RefCell<u32>>) -> OpenOutcome {
+    let reg = registry(cx);
+    let opens = opens.clone();
+    let spec = tool(&format!("{key:?}")).key(key.clone());
+    let outcome = cx.update(|cx| {
+        reg.update(cx, |r, cx| {
+            r.open_or_focus(key, cx, move |cx| {
+                *opens.borrow_mut() += 1;
+                Frame::open(cx, spec, |_, cx| cx.new(|_| Body)).map(Into::into)
+            })
+        })
+    });
+    cx.run_until_parked();
+    outcome
+}
+
+fn process_key(pid: u32) -> tl_model::ids::ProcessKey {
+    tl_model::ids::ProcessKey {
+        start_ticks: 100,
+        boot_id: tl_model::time::BootId(1),
+        pid,
+    }
+}
+
+fn unit(name: &str) -> tl_model::table::UnitRef {
+    tl_model::table::UnitRef {
+        manager: tl_model::table::Manager::System,
+        name: name.into(),
+    }
+}
+
+fn window_count(cx: &mut TestAppContext) -> usize {
+    cx.update(|cx| cx.windows().len())
+}
+
+#[gpui_kit::test]
+fn secondary_window_refocus(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let opens = Rc::new(RefCell::new(0));
+    assert_eq!(open_key(cx, WindowKey::About, &opens), OpenOutcome::Opened);
+    let windows = window_count(cx);
+    assert_eq!(open_key(cx, WindowKey::About, &opens), OpenOutcome::Focused);
+    assert_eq!(*opens.borrow(), 1, "the open closure ran again");
+    assert_eq!(window_count(cx), windows, "a second About window opened");
+}
+
+#[gpui_kit::test]
+fn ninth_properties_refused(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let opens = Rc::new(RefCell::new(0));
+    for pid in 1..=8 {
+        let key = WindowKey::Properties(process_key(pid));
+        assert_eq!(open_key(cx, key, &opens), OpenOutcome::Opened);
+    }
+    let windows = window_count(cx);
+    let ninth = WindowKey::Properties(process_key(9));
+    assert_eq!(
+        open_key(cx, ninth, &opens),
+        OpenOutcome::CapReached(CapClass::ProcessProps)
+    );
+    assert_eq!(*opens.borrow(), 8);
+    assert_eq!(window_count(cx), windows);
+    let reg = registry(cx);
+    assert_eq!(cx.read(|cx| reg.read(cx).count(CapClass::ProcessProps)), 8);
+}
+
+#[gpui_kit::test]
+fn service_cap_is_10(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let opens = Rc::new(RefCell::new(0));
+    for i in 0..10 {
+        let key = WindowKey::Service(unit(&format!("u{i}.service")));
+        assert_eq!(open_key(cx, key, &opens), OpenOutcome::Opened);
+    }
+    let eleventh = WindowKey::Service(unit("u10.service"));
+    assert_eq!(
+        open_key(cx, eleventh, &opens),
+        OpenOutcome::CapReached(CapClass::ServiceProps)
+    );
+    assert_eq!(*opens.borrow(), 10);
+}
+
+#[gpui_kit::test]
+fn closed_window_deregisters(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let opens = Rc::new(RefCell::new(0));
+    let first = WindowKey::Properties(process_key(1));
+    open_key(cx, first.clone(), &opens);
+    open_key(cx, WindowKey::Properties(process_key(2)), &opens);
+    let reg = registry(cx);
+    assert_eq!(cx.read(|cx| reg.read(cx).count(CapClass::ProcessProps)), 2);
+
+    // The user presses Esc in the first window.
+    let handle = cx.read(|cx| reg.read(cx).get(&first)).expect("registered");
+    let mut vcx = VisualTestContext::from_window(handle, cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert!(cx.read(|cx| reg.read(cx).get(&first)).is_none());
+    assert_eq!(cx.read(|cx| reg.read(cx).count(CapClass::ProcessProps)), 1);
+}
+
+#[gpui_kit::test]
+fn main_close_closes_children(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let reg = registry(cx);
+    let opens = Rc::new(RefCell::new(0));
+    for keep_detached in [true, false] {
+        let props = WindowKey::Properties(process_key(1));
+        let graph = WindowKey::DetachedGraph(0);
+        open_key(cx, WindowKey::Settings, &opens);
+        open_key(cx, props.clone(), &opens);
+        open_key(cx, graph.clone(), &opens);
+        let handles: Vec<_> = [WindowKey::Settings, props.clone(), graph.clone()]
+            .iter()
+            .map(|k| cx.read(|cx| reg.read(cx).get(k)).expect("registered"))
+            .collect();
+        cx.update(|cx| reg.update(cx, |r, cx| r.close_children_of_main(keep_detached, cx)));
+        cx.run_until_parked();
+
+        let open_ids: Vec<_> = cx.update(|cx| cx.windows().iter().map(|w| w.window_id()).collect());
+        assert!(
+            !open_ids.contains(&handles[0].window_id()),
+            "Settings stayed open"
+        );
+        assert!(
+            !open_ids.contains(&handles[1].window_id()),
+            "Properties stayed open"
+        );
+        assert_eq!(
+            open_ids.contains(&handles[2].window_id()),
+            keep_detached,
+            "detached graph with keep_detached = {keep_detached}"
+        );
+        assert_eq!(
+            cx.read(|cx| reg.read(cx).get(&graph).is_some()),
+            keep_detached
+        );
+        assert!(!cx.read(|cx| reg.read(cx).has_key(|k| *k != graph)));
+        if keep_detached {
+            cx.update(|cx| reg.update(cx, |r, cx| r.close(&graph, cx)));
+            cx.run_until_parked();
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn registry_has_key_and_count_where(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let opens = Rc::new(RefCell::new(0));
+    open_key(cx, WindowKey::DetachedGraph(0), &opens);
+    open_key(cx, WindowKey::About, &opens);
+    let reg = registry(cx);
+    cx.read(|cx| {
+        let r = reg.read(cx);
+        assert!(r.has_key(|k| matches!(k, WindowKey::DetachedGraph(_))));
+        assert_eq!(r.count_where(|_| true), 2);
+        assert!(!r.has_key(|k| matches!(k, WindowKey::Settings)));
+    });
+}
+
+#[gpui_kit::test]
+fn registry_notifies_on_insert_and_remove(cx: &mut TestAppContext) {
+    setup(cx, Settings::default());
+    let reg = registry(cx);
+    let notes = Rc::new(RefCell::new(0));
+    let n = notes.clone();
+    let _sub = cx.update(|cx| cx.observe(&reg, move |_, _| *n.borrow_mut() += 1));
+    let opens = Rc::new(RefCell::new(0));
+    open_key(cx, WindowKey::About, &opens);
+    assert_eq!(*notes.borrow(), 1, "after open");
+
+    // Closed by the user, not through the registry.
+    let handle = cx
+        .read(|cx| reg.read(cx).get(&WindowKey::About))
+        .expect("registered");
+    cx.update(|cx| handle.update(cx, |_, window, _| window.remove_window()))
+        .expect("window open");
+    cx.run_until_parked();
+    assert_eq!(*notes.borrow(), 2, "after close");
+    assert!(cx.read(|cx| reg.read(cx).get(&WindowKey::About)).is_none());
 }

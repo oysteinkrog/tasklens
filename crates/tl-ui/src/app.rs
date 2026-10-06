@@ -250,6 +250,7 @@ impl TasklensUi {
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
         cx.set_global(GlobalHub(hub));
         cx.set_global(GlobalDemand(demand));
+        crate::window::registry::GlobalRegistry::init(cx);
 
         // 8. Boot settings and the tl-app environment.
         cx.set_global(BootSettings {
