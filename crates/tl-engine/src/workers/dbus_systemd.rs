@@ -4182,11 +4182,11 @@ mod tests {
             .expect("manager");
         for (name, cg, _) in TREE {
             let path = unit_path(name);
-            server = server.serve_at(&path, FakeUnitIface).expect("unit");
+            server = server.serve_at(path.clone(), FakeUnitIface).expect("unit");
             server = match unit_kind(name) {
-                Some(UnitType::Slice) => server.serve_at(&path, FakeSliceIface(cg)),
-                Some(UnitType::Scope) => server.serve_at(&path, FakeScopeIface(cg)),
-                _ => server.serve_at(&path, FakeServiceIface(cg)),
+                Some(UnitType::Slice) => server.serve_at(path, FakeSliceIface(cg)),
+                Some(UnitType::Scope) => server.serve_at(path, FakeScopeIface(cg)),
+                _ => server.serve_at(path, FakeServiceIface(cg)),
             }
             .expect("type interface");
         }
