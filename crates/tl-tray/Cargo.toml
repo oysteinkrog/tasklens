@@ -11,6 +11,8 @@ async-channel = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# tray_reregisters_on_watcher_restart only: fake StatusNotifierWatcher.
+zbus = { workspace = true }
 
 [lints]
 workspace = true
