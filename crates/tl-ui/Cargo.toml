@@ -21,6 +21,7 @@ unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+fastrand = "2.5"   # seeded noise for render_chart goldens (tasklens-yrf.13)
 proptest = { workspace = true }
 tempfile = { workspace = true }
 

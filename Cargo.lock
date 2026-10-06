@@ -8120,6 +8120,7 @@ name = "tl-ui"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "fastrand",
  "fluent-bundle",
  "gpui-kit",
  "image",
