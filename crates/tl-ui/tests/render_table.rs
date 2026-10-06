@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::ops::Range;
 
 use gpui_kit::{
-    AnyView, App, AppContext as _, Context, Entity, Font, IntoElement, Modifiers, MouseMoveEvent,
+    AnyView, App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseMoveEvent,
     ParentElement, Pixels, Render, SharedString, Styled, TestAppContext, TestDispatcher, TextRun,
     VisualTestContext, Window, div, font, point, px, size,
 };
@@ -25,7 +25,7 @@ use tl_model::table::SortSpec;
 use tl_model::validity::Validity;
 use tl_ui::components::menu::TlMenu;
 use tl_ui::components::tooltip::{DELAY_ROW_NAME, TlTooltip};
-use tl_ui::table::cells::CellOut;
+use tl_ui::table::cells::{CellOut, IconSourceCache, name_primary_text};
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId,
 };
@@ -34,7 +34,7 @@ use tl_ui::table::tree_table::{
 };
 use tl_ui::testing::render::{RenderHarness, assert_golden, run_on_lavapipe};
 use tl_ui::text::fonts::{UI_FAMILY, load_bundled_fonts};
-use tl_ui::text::style::{TNUM, t_sm};
+use tl_ui::text::style::t_sm;
 use tl_ui::theme::{current, metrics};
 
 /// The seven states, in the order the rows cycle them.
@@ -579,11 +579,7 @@ fn glyph_span(xs: &[(Pixels, usize)], width: Pixels, range: &Range<usize>) -> (P
     (left, right)
 }
 
-// Ignored until the Name cell keeps an LTR paragraph: cosmic-text takes the paragraph direction
-// from the first strong character, so a name that starts with Hebrew is laid out right to left
-// and "(3)" lands at the left of the text, against UI-FND-053 rule 3.
 #[test]
-#[ignore = "Name cell lays out a Hebrew-first name as an RTL paragraph (UI-FND-053 rule 3)"]
 fn rtl_name_in_ltr_cell() {
     if !hebrew_font() {
         eprintln!("skipped rtl_name_in_ltr_cell: no font with Hebrew glyphs (fc-list :lang=he)");
@@ -595,30 +591,34 @@ fn rtl_name_in_ltr_cell() {
         check_small("table_rtl_name", RTL_NAME_W, rtl_delegate)
     });
 
-    // TestAppContext half: the line as the Name cell shapes it, with the count run in tnum.
+    // TestAppContext half: the line as the Name cell shapes it, the name wrapped in FSI and PDI
+    // and the count run in tnum. Byte ranges move by the marks: 3 bytes each.
+    let mark = '\u{2068}'.len_utf8();
+    let count = count.start + 2 * mark..count.end + 2 * mark;
+    let hebrew = hebrew.start + mark..hebrew.end + mark;
     let mut cx = cosmic_cx();
     let w = RTL_NAME_W + CPU_W + 40.;
     let vcx = open_table(&mut cx, size(px(w), px(120.)), |_| rtl_delegate(1.0));
     let (xs, width) = vcx.update(|window, cx| {
-        let m = metrics(cx);
-        let size = m.text.base;
-        let color = current(cx).text_primary;
-        let run = |len, font: Font| TextRun {
-            len,
-            font,
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let tnum = Font {
-            features: TNUM.clone(),
-            ..font(UI_FAMILY)
-        };
-        let runs = [run(count.start, font(UI_FAMILY)), run(count.len(), tnum)];
-        let line = window
-            .text_system()
-            .shape_line(RTL_NAME.into(), size, &runs, None);
+        let size = metrics(cx).text.base;
+        let theme = current(cx).clone();
+        let primary = SharedString::new_static(RTL_NAME);
+        let count_run = RTL_NAME.find('(').expect("count run")..RTL_NAME.len();
+        let (text, runs) = name_primary_text(
+            &primary,
+            true,
+            Some(&count_run),
+            theme.text_primary,
+            theme.status.warning,
+            &mut IconSourceCache::new(),
+        );
+        assert_eq!(
+            text.len(),
+            RTL_NAME.len() + 2 * mark,
+            "the name is isolated"
+        );
+        let runs = runs.expect("count run in tnum");
+        let line = window.text_system().shape_line(text, size, &runs, None);
         let mut xs: Vec<(Pixels, usize)> = line
             .runs
             .iter()
