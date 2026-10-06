@@ -1405,8 +1405,8 @@ impl Reducer {
                     .gpu_power
                     .values()
                     .filter(|(uuid, _)| caps.get(uuid).copied().unwrap_or(false))
-                    .map(|(uuid, &p)| GpuShare {
-                        power_w: Some(p),
+                    .map(|(uuid, p)| GpuShare {
+                        power_w: Some(*p),
                         util_by_key: by_dev.get(uuid).unwrap_or(&empty),
                     })
                     .collect();
