@@ -32,13 +32,14 @@ use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
 use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::i18n::tr;
 use crate::table::actions::{
-    CollapseOrParent, CopyRowsAsTable, ExpandOrChild, MoveFocus, MoveFocusEdge, MoveFocusPage,
-    OpenContextMenu, OpenProperties, ResizeColumnsToFit, SelectAll, SortByColumn, TABLE_CONTEXT,
-    ToggleExpand, ToggleSelectFocus,
+    CollapseOrParent, CopyRowsAsTable, ExpandOrChild, HideColumn, MoveFocus, MoveFocusEdge,
+    MoveFocusPage, OpenContextMenu, OpenProperties, ResetColumns, ResizeColumnsToFit, SelectAll,
+    SortByColumn, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
@@ -46,12 +47,13 @@ use crate::table::cells::{
     path_cell, text_cell,
 };
 use crate::table::columns::{
-    ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, fit_width, min_width,
+    ColumnAlign, ColumnError, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, fit_width,
+    min_width,
 };
 use crate::table::header::{
     self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ReorderDrag,
-    ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_tooltip, insert_line,
-    insertion_slot, sort_arrow_x,
+    ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_menu, header_tooltip,
+    insert_line, insertion_slot, sort_arrow_x,
 };
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::ellipsis::middle_ellipsis;
@@ -237,6 +239,9 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     header_listener: HeaderListener,
     /// `tables.column_resize`, passed in by the owner.
     resize_mode: ColumnResizeMode,
+    /// The owner's default layout for "Reset to default". `None`: `ResetColumns` goes on to the
+    /// owner.
+    default_layout: Option<ColumnLayout<D::Column>>,
     /// Catches Esc before any key binding while a column reorder drag is in progress.
     reorder_esc: Option<Subscription>,
     hover_row: Option<usize>,
@@ -307,6 +312,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 })
             },
             resize_mode: ColumnResizeMode::default(),
+            default_layout: None,
             reorder_esc: None,
             hover_row: None,
             paused: false,
@@ -350,6 +356,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     /// The owner passes the current `tables.column_resize` value; the table reads no settings.
     pub fn set_resize_mode(&mut self, mode: ColumnResizeMode) {
         self.resize_mode = mode;
+    }
+
+    /// The owner's default order, visible set and widths. With them the table handles
+    /// `ResetColumns` itself; without them the action goes on to the owner.
+    pub fn set_default_layout(&mut self, layout: ColumnLayout<D::Column>) {
+        self.default_layout = Some(layout);
     }
 
     /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
@@ -1464,7 +1476,84 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 }
                 self.sort_by_column(p.col, cx);
             }
+            HeaderEvent::ContextMenu { at } => {
+                if self.header_state.resize.is_some() || self.header_state.reorder.is_some() {
+                    return;
+                }
+                let x = self.header_state.content_x(at.x, self.x_offset);
+                if let Some(col) = self.columns().column_at_x(x) {
+                    cx.stop_propagation();
+                    self.open_header_menu(col, at, window, cx);
+                }
+            }
         }
+    }
+
+    /// Opens the header menu (UI-PRC-006) for `col` with its top left corner at `at`. Its
+    /// actions run in the table's key context.
+    fn open_header_menu(
+        &mut self,
+        col: D::Column,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let spec = self.delegate.column_spec(col).clone();
+        let layout = self.delegate.columns().clone();
+        let sort = self.delegate.sort();
+        let fixed = self.delegate.columns_fixed();
+        let mode = self.resize_mode;
+        let menu = TlMenu::build(window, cx, self.focus.clone(), move |menu, window, cx| {
+            header_menu(&spec, &layout, &sort, fixed, mode, menu, window, cx)
+        });
+        open_context_menu_at(at, window, cx, menu);
+    }
+
+    /// `HideColumn` from the header menu: hides the column and calls `on_columns_changed` once.
+    /// Hiding the last visible column shows the Warning toast instead. An id outside this
+    /// table's column set goes on to the next handler.
+    fn on_hide_column(&mut self, a: &HideColumn, window: &mut Window, cx: &mut Context<Self>) {
+        let layout = self.delegate.columns();
+        let Some(col) = D::Column::parse(layout.table, a.id.as_str()) else {
+            cx.propagate();
+            return;
+        };
+        let mut layout = layout.clone();
+        match layout.set_visible(col, false) {
+            Ok(()) => {
+                layout.rebuild(layout.ui_scale());
+                self.delegate.on_columns_changed(&layout, cx);
+                cx.notify();
+            }
+            Err(ColumnError::LastVisible) => {
+                let text = tr(cx, "table-toast-last-visible");
+                push_toast(ToastKind::Warning, text, window, cx);
+            }
+            Err(err) => {
+                tracing::debug!(target: "tasklens::ui", ?err, ?col, "hide column refused");
+            }
+        }
+    }
+
+    /// `ResetColumns` (UI-PRC-006): with the owner's defaults, replaces the layout with them,
+    /// calls `on_columns_changed` once and shows "Columns reset to default". Without defaults,
+    /// or for another table, the action goes on to the owner.
+    fn on_reset_columns(&mut self, a: &ResetColumns, window: &mut Window, cx: &mut Context<Self>) {
+        let scale = self.delegate.columns().ui_scale();
+        let Some(defaults) = &self.default_layout else {
+            cx.propagate();
+            return;
+        };
+        if a.table != defaults.table {
+            cx.propagate();
+            return;
+        }
+        let mut layout = defaults.clone();
+        layout.rebuild(scale);
+        self.delegate.on_columns_changed(&layout, cx);
+        cx.notify();
+        let text = tr(cx, "table-toast-columns-reset");
+        push_toast(ToastKind::Info, text, window, cx);
     }
 
     /// Turns `press`, which just moved past the slop to window point `at`, into a reorder drag.
@@ -1758,6 +1847,15 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     }
 }
 
+/// Pushes a toast to the window's `ToastQueue`. A window without a queue shows nothing.
+fn push_toast(kind: ToastKind, text: SharedString, window: &mut Window, cx: &mut App) {
+    let Some(queue) = ToastQueue::of_window(window, cx) else {
+        tracing::debug!(target: "tasklens::ui", %text, "no toast queue in this window");
+        return;
+    };
+    queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
+}
+
 /// The rows a demand report covers: `visible` widened by its own length above and below, cut to
 /// [`DEMAND_MAX_IDS`] around the centre of `visible` when longer.
 pub fn demand_window(visible: Range<usize>, count: usize) -> Range<usize> {
@@ -2010,6 +2108,8 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .on_action(cx.listener(Self::on_copy_rows_as_table))
             .on_action(cx.listener(Self::on_sort_by_column))
             .on_action(cx.listener(Self::on_resize_columns_to_fit))
+            .on_action(cx.listener(Self::on_hide_column))
+            .on_action(cx.listener(Self::on_reset_columns))
             .child(header)
             .child(body)
     }

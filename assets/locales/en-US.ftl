@@ -338,3 +338,18 @@ shell-status-paused = [PAUSED - Ctrl]
 ## Charts (E19)
 
 chart-grid-offline = Offline
+
+## Table header menu (E18)
+
+table-header-menu-sort-by = Sort by { $label }
+table-header-menu-select-columns = Select Columns…
+table-header-menu-hide = Hide This Column
+table-header-menu-hide-tooltip = Hide { $label }
+table-header-menu-fit = Resize columns to fit content
+table-header-menu-resize-behavior = Resize Behavior
+table-header-menu-proportional = Proportional
+table-header-menu-last-column = Last Column
+table-header-menu-reset = Reset to default
+table-toast-last-visible = At least one column must stay visible
+table-tooltip-name-not-hideable = Name cannot be hidden
+table-toast-columns-reset = Columns reset to default

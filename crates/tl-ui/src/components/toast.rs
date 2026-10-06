@@ -30,7 +30,7 @@ use gpui_kit::component::notification::{Notification, NotificationType};
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     Action, Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, BoxShadow, Context,
-    ElementId, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
+    ElementId, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels, Render,
     SharedString, StatefulInteractiveElement as _, Styled, StyledText, Task, TextRun, WeakEntity,
     Window, div, font, point, prelude::FluentBuilder as _, px,
 };
@@ -317,6 +317,17 @@ impl ToastQueue {
             focused: SmallVec::new(),
             paused: false,
         }
+    }
+
+    /// The queue attached to `window`'s toast layer, if the window has one. Lets a view deep in
+    /// the window push a toast without its owner passing the queue down.
+    pub fn of_window(window: &Window, cx: &App) -> Option<Entity<ToastQueue>> {
+        let layer = window
+            .root::<Root>()
+            .flatten()?
+            .read(cx)
+            .plugin::<ToastLayer>()?;
+        layer.read(cx).queue.as_ref()?.upgrade()
     }
 
     /// The stack's top edge.

@@ -18,6 +18,9 @@
 //! Reorder (E18-011): a press on a cell that moves more than 4 px drags the column. A ghost of the
 //! cell follows the pointer and a 2 px `accent` line marks the nearest column boundary, never the
 //! one before a pinned first column (Name). The table applies the move on release.
+//!
+//! Header menu (E18-012, UI-PRC-006): a right-click on a header cell opens [`header_menu`] at the
+//! pointer for the column under it. The header is not focusable, so Shift+F10 never reaches it.
 
 use std::cell::Cell;
 use std::hash::BuildHasher as _;
@@ -25,20 +28,26 @@ use std::rc::Rc;
 
 use gpui_kit::assets::IconNamed as _;
 use gpui_kit::{
-    App, Bounds, CursorStyle, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
+    Action, App, Bounds, CursorStyle, Div, ElementId, FontWeight, Hitbox, HitboxBehavior, Hsla,
     InteractiveElement, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement, Pixels, Point, SharedString, Styled, TextRun, TransformationMatrix, Window,
     canvas, div, fill, font, point, prelude::FluentBuilder, px, size,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::SmallVec;
+use tl_model::ids::ColumnId;
 use tl_model::validity::Validity;
 
 use crate::components::icons::TlIcon;
+use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::i18n::{tr, tr_args};
+use crate::table::actions::{
+    HideColumn, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, SetColumnResize, SortByColumn,
+};
 use crate::table::cells::{CellCtx, glyph_cell, numeric_cell};
 use crate::table::columns::{ColumnAlign, ColumnLayout, ColumnSpec, TableColumn};
-use crate::table::tree_table::ColumnResizeMode;
+use crate::table::tree_table::{ColumnResizeMode, TableSort};
 use crate::table::tree_table::{HEADER_H_ONE, HEADER_H_TWO, HeaderLines};
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::label_style;
@@ -67,6 +76,8 @@ pub const GHOST_OPACITY: f32 = 0.85;
 pub const INSERT_LINE_W: f32 = 2.0;
 /// Header tooltip of every unsortable column (UI-PRC-005).
 pub const UNSORTABLE_TOOLTIP: &str = "Only measured for visible rows";
+/// Minimum width of the header menu at 100% (R-112).
+pub const HEADER_MENU_MIN_W: f32 = 240.0;
 
 /// What the header's hitboxes report to the table. `pos` is a visible column position.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -91,6 +102,8 @@ pub enum HeaderEvent {
         hovered: Option<usize>,
         at: Point<Pixels>,
     },
+    /// Right press on a header cell or a resize band, at window point `at`.
+    ContextMenu { at: Point<Pixels> },
 }
 
 /// The table's handler for [`HeaderEvent`]s. Created once with the table, cloned per frame.
@@ -727,7 +740,16 @@ fn register_listeners(hitboxes: Rc<HeaderHitboxes>, listener: HeaderListener, wi
     {
         let (hitboxes, listener) = (hitboxes.clone(), listener.clone());
         window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
-            if !phase.bubble() || e.button != MouseButton::Left {
+            if !phase.bubble() {
+                return;
+            }
+            if e.button == MouseButton::Right {
+                if hitboxes.band(window).is_some() || hitboxes.cell(window).is_some() {
+                    listener(HeaderEvent::ContextMenu { at: e.position }, window, cx);
+                }
+                return;
+            }
+            if e.button != MouseButton::Left {
                 return;
             }
             let ev = if let Some(pos) = hitboxes.band(window) {
@@ -767,4 +789,175 @@ pub fn beyond_slop(from: Point<Pixels>, to: Point<Pixels>, ui_scale: f32) -> boo
     let dy = (to.y - from.y).as_f32();
     let slop = DRAG_SLOP * ui_scale;
     dx * dx + dy * dy > slop * slop
+}
+
+/// The rows of the header menu (UI-PRC-006).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HeaderMenuItem {
+    SortBy,
+    SelectColumns,
+    Hide,
+    Separator,
+    FitColumns,
+    ResizeBehavior,
+    Reset,
+}
+
+/// One header menu row as [`header_menu`] adds it to the `TlMenu`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct HeaderMenuRow {
+    pub item: HeaderMenuItem,
+    /// Empty on the separator.
+    pub label: SharedString,
+    pub enabled: bool,
+    /// The check mark of "Sort by": `col` is the sort column.
+    pub checked: bool,
+    /// On a disabled row: why. On an enabled "Hide This Column": "Hide <label>", which `TlMenu`
+    /// cannot show yet on an enabled item.
+    pub tooltip: Option<SharedString>,
+}
+
+/// The id the column actions carry. `SortByColumn` and `HideColumn` hold a `ColumnId`, so a
+/// column of the system tables only has one when its key is also a process column key; the
+/// table parses the key back into its own id set.
+fn action_id<C: TableColumn>(id: C) -> Option<ColumnId> {
+    ColumnId::from_str(id.key())
+}
+
+/// The header menu rows for a right-click on `col`, in menu order (UI-PRC-006). `fixed` drops
+/// "Select Columns…", "Hide This Column" and "Reset to default".
+pub fn header_menu_rows<C: TableColumn>(
+    col: &ColumnSpec<C>,
+    layout: &ColumnLayout<C>,
+    sort_col: C,
+    fixed: bool,
+    cx: &App,
+) -> SmallVec<[HeaderMenuRow; 7]> {
+    let label_arg = [("label", col.label.as_ref().into())];
+    let has_id = action_id(col.id).is_some();
+    let row = |item, label: SharedString| HeaderMenuRow {
+        item,
+        label,
+        enabled: true,
+        checked: false,
+        tooltip: None,
+    };
+    let mut rows = SmallVec::new();
+    let sortable = col.sortable && has_id;
+    rows.push(HeaderMenuRow {
+        enabled: sortable,
+        checked: sortable && col.id == sort_col,
+        tooltip: (!col.sortable).then(|| SharedString::new_static(UNSORTABLE_TOOLTIP)),
+        ..row(
+            HeaderMenuItem::SortBy,
+            tr_args(cx, "table-header-menu-sort-by", &label_arg),
+        )
+    });
+    if !fixed {
+        rows.push(row(
+            HeaderMenuItem::SelectColumns,
+            tr(cx, "table-header-menu-select-columns"),
+        ));
+        let why_not = if !col.hideable {
+            Some(tr(cx, "table-tooltip-name-not-hideable"))
+        } else if layout.visible_columns().len() <= 1 {
+            Some(tr(cx, "table-toast-last-visible"))
+        } else {
+            None
+        };
+        rows.push(HeaderMenuRow {
+            enabled: why_not.is_none() && has_id,
+            tooltip: why_not
+                .or_else(|| Some(tr_args(cx, "table-header-menu-hide-tooltip", &label_arg))),
+            ..row(HeaderMenuItem::Hide, tr(cx, "table-header-menu-hide"))
+        });
+    }
+    rows.push(row(HeaderMenuItem::Separator, SharedString::default()));
+    rows.push(row(
+        HeaderMenuItem::FitColumns,
+        tr(cx, "table-header-menu-fit"),
+    ));
+    rows.push(row(
+        HeaderMenuItem::ResizeBehavior,
+        tr(cx, "table-header-menu-resize-behavior"),
+    ));
+    if !fixed {
+        rows.push(row(
+            HeaderMenuItem::Reset,
+            tr(cx, "table-header-menu-reset"),
+        ));
+    }
+    rows
+}
+
+/// The radio items of the "Resize Behavior" submenu: label, mode, and whether it is checked.
+pub fn resize_behavior_rows(
+    mode: ColumnResizeMode,
+    cx: &App,
+) -> [(SharedString, ColumnResizeMode, bool); 2] {
+    [ColumnResizeMode::Proportional, ColumnResizeMode::LastColumn].map(|m| {
+        let key = match m {
+            ColumnResizeMode::Proportional => "table-header-menu-proportional",
+            ColumnResizeMode::LastColumn => "table-header-menu-last-column",
+        };
+        (tr(cx, key), m, m == mode)
+    })
+}
+
+/// The header context menu for `col` (UI-PRC-006): sort by it, pick columns, hide it, fit the
+/// columns, choose the resize behaviour and reset the columns. 240 px wide at least. Built on
+/// open only.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the UI-PRC-006 inputs, plus the window and app the submenu and strings need"
+)]
+pub fn header_menu<C: TableColumn, S: TableSort<C>>(
+    col: &ColumnSpec<C>,
+    layout: &ColumnLayout<C>,
+    sort: &S,
+    fixed: bool,
+    resize_mode: ColumnResizeMode,
+    menu: TlMenu,
+    window: &mut Window,
+    cx: &mut App,
+) -> TlMenu {
+    let id = action_id(col.id);
+    let table = layout.table;
+    let mut menu = menu.min_w(px(HEADER_MENU_MIN_W));
+    for row in header_menu_rows(col, layout, sort.column(), fixed, cx) {
+        if row.item == HeaderMenuItem::Separator {
+            menu = menu.separator();
+            continue;
+        }
+        if !row.enabled {
+            menu = menu.item_disabled(row.label, row.tooltip);
+            continue;
+        }
+        let action: Box<dyn Action> = match (row.item, id) {
+            (HeaderMenuItem::SortBy, Some(id)) => {
+                menu = menu.check_item(row.label, row.checked, Box::new(SortByColumn { id }));
+                continue;
+            }
+            (HeaderMenuItem::ResizeBehavior, _) => {
+                menu = menu.submenu(row.label, window, cx, move |sub, _, cx| {
+                    resize_behavior_rows(resize_mode, cx).into_iter().fold(
+                        sub,
+                        |sub, (label, mode, on)| {
+                            sub.radio_item(label, on, Box::new(SetColumnResize { mode }))
+                        },
+                    )
+                });
+                continue;
+            }
+            (HeaderMenuItem::Hide, Some(id)) => Box::new(HideColumn { id }),
+            (HeaderMenuItem::SelectColumns, _) => Box::new(OpenColumnPicker { table }),
+            (HeaderMenuItem::FitColumns, _) => Box::new(ResizeColumnsToFit { table }),
+            (HeaderMenuItem::Reset, _) => Box::new(ResetColumns { table }),
+            (HeaderMenuItem::SortBy | HeaderMenuItem::Hide | HeaderMenuItem::Separator, _) => {
+                continue;
+            }
+        };
+        menu = menu.item(row.label, action);
+    }
+    menu
 }
