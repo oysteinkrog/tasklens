@@ -24,6 +24,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
+use crate::pages::performance::details::Template;
 use crate::text::style::{numeric_style, t_sm};
 use crate::text::untrusted::debug_assert_clean;
 use crate::theme::{TlTheme, current, metrics};
@@ -59,29 +60,29 @@ const STATE_KEYS: [&str; STATE_COUNT - 1] = [
 ];
 const AGO: &str = "shell-health-ago";
 
-/// Display names in `SourceId` order (UI-SHL-051 and the leader's list for the rest).
-const SOURCE_NAMES: [&str; SourceId::COUNT] = [
-    "CPU",
-    "Memory",
-    "Disks",
-    "Network",
-    "GPU (NVIDIA)",
-    "GPU (DRM)",
-    "Sensors",
-    "Processes",
-    "Process details",
-    "Connections",
-    "Services (system)",
-    "Services (user)",
-    "Sessions",
-    "Startup",
-    "Inventory",
-    "KWin",
-    "Storage devices",
-    "Power",
-    "NetworkManager",
-    "History",
-    "Journal",
+/// Source name keys in `SourceId` order (UI-SHL-051, UI-SHL-099).
+const SOURCE_KEYS: [&str; SourceId::COUNT] = [
+    "shell-health-source-cpu",
+    "shell-health-source-memory",
+    "shell-health-source-disk",
+    "shell-health-source-net",
+    "shell-health-source-gpu-nvidia",
+    "shell-health-source-gpu-drm",
+    "shell-health-source-sensors",
+    "shell-health-source-processes",
+    "shell-health-source-process-detail",
+    "shell-health-source-connections",
+    "shell-health-source-systemd-system",
+    "shell-health-source-systemd-user",
+    "shell-health-source-logind",
+    "shell-health-source-startup",
+    "shell-health-source-inventory",
+    "shell-health-source-kwin",
+    "shell-health-source-udisks",
+    "shell-health-source-upower",
+    "shell-health-source-network-manager",
+    "shell-health-source-history",
+    "shell-health-source-journal",
 ];
 
 const STATE_COUNT: usize = 7;
@@ -161,7 +162,9 @@ pub fn open_collector_health(cx: &mut App) {
 struct HealthWords {
     headings: [SharedString; 5],
     states: [SharedString; STATE_COUNT],
-    ago: SharedString,
+    sources: [SharedString; SourceId::COUNT],
+    /// "{ $age } ago".
+    ago: Template,
 }
 
 impl HealthWords {
@@ -172,7 +175,8 @@ impl HealthWords {
                 0 => SharedString::default(),
                 i => tr(cx, STATE_KEYS[i - 1]),
             }),
-            ago: tr(cx, AGO),
+            sources: SOURCE_KEYS.map(|k| tr(cx, k)),
+            ago: Template::new(cx, AGO, &["age"]),
         }
     }
 }
@@ -214,7 +218,13 @@ impl HealthRow {
     }
 
     /// Takes the source's health. Returns whether anything shown changed.
-    fn set_health(&mut self, h: &SourceHealth, now: TimeNs, ago: &str, buf: &mut String) -> bool {
+    fn set_health(
+        &mut self,
+        h: &SourceHealth,
+        now: TimeNs,
+        ago: &Template,
+        buf: &mut String,
+    ) -> bool {
         let mut changed = false;
         let state = StateLook::of(h.state);
         if state != self.state {
@@ -246,7 +256,7 @@ impl HealthRow {
     }
 
     /// Moves the age to `now`. Returns whether the text changed.
-    fn set_age(&mut self, now: TimeNs, ago: &str, buf: &mut String) -> bool {
+    fn set_age(&mut self, now: TimeNs, ago: &Template, buf: &mut String) -> bool {
         let secs = self
             .last_ok_ns
             .map(|t| now.saturating_sub(t) / 1_000_000_000);
@@ -257,9 +267,7 @@ impl HealthRow {
         self.age = match secs {
             Some(secs) => {
                 buf.clear();
-                short_age(buf, secs);
-                buf.push(' ');
-                buf.push_str(ago);
+                ago.write_each(buf, |_, out| short_age(out, secs));
                 SharedString::from(buf.clone())
             }
             None => WARMING_UP.into(),
@@ -296,7 +304,7 @@ impl CollectorHealthWindow {
             if version != this.strings_version {
                 this.strings_version = version;
                 this.words = HealthWords::new(cx);
-                // The ages carry the "ago" word.
+                // The ages carry the "ago" template.
                 for row in &mut this.rows {
                     row.age_secs = None;
                 }
@@ -386,6 +394,11 @@ impl CollectorHealthWindow {
         self.rows.iter().filter(|r| r.state != StateLook::Off)
     }
 
+    /// The display name of `row`'s source.
+    pub fn source_name(&self, row: &HealthRow) -> &SharedString {
+        &self.words.sources[row.source.index()]
+    }
+
     /// The state word of `row`.
     pub fn state_word(&self, row: &HealthRow) -> &SharedString {
         &self.words.states[row.state.index()]
@@ -472,7 +485,7 @@ impl Render for CollectorHealthWindow {
                 .flex_none()
                 .h(m.row_height)
                 .text_color(theme.text_primary)
-                .child(cell(Some(COL_SOURCE)).child(SOURCE_NAMES[row.source.index()]))
+                .child(cell(Some(COL_SOURCE)).child(self.words.sources[row.source.index()].clone()))
                 .child(
                     cell(Some(COL_STATE))
                         .text_color(row.state.color(&theme))

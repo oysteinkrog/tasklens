@@ -399,6 +399,14 @@ fn collector_health_rows_and_colours(cx: &mut TestAppContext) {
     );
     let words: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
     assert_eq!(words, ["Running", "Disabled", "Stale", "Failed"]);
+    let frame2 = frame.clone();
+    let names: Vec<String> = vcx.read(|cx| {
+        let view = frame2.read(cx).content().read(cx);
+        view.rows()
+            .map(|r| view.source_name(r).to_string())
+            .collect()
+    });
+    assert_eq!(names, ["CPU", "Memory", "Disks", "GPU (NVIDIA)"]);
     assert_eq!(rows[1].3, "5", "restart count");
     assert_eq!(rows[0].3, "0");
     assert_eq!(rows[3].2, "\u{2026}", "no data yet: the WarmingUp glyph");
@@ -476,7 +484,9 @@ fn collector_health_frames_make_no_tr_call(cx: &mut TestAppContext) {
     vcx.update(|_, cx| {
         set_test_catalogue(
             cx,
-            "shell-health-state-running = <running>\nshell-health-ago = <ago>\n",
+            "shell-health-state-running = <running>\n\
+             shell-health-ago = <{ $age }>\n\
+             shell-health-source-cpu = <cpu>\n",
         )
     });
     draw(&mut vcx);
@@ -487,5 +497,11 @@ fn collector_health_frames_make_no_tr_call(cx: &mut TestAppContext) {
     );
     let rows = health_rows(&frame, &mut vcx);
     assert_eq!(rows[0].1, "<running>");
-    assert_eq!(rows[0].2, "3s <ago>");
+    assert_eq!(rows[0].2, "<3s>", "the age goes in the template's place");
+    let frame = frame.clone();
+    let name = vcx.read(|cx| {
+        let view = frame.read(cx).content().read(cx);
+        view.rows().next().map(|r| view.source_name(r).to_string())
+    });
+    assert_eq!(name.as_deref(), Some("<cpu>"));
 }
