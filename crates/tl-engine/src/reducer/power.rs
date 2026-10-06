@@ -275,7 +275,8 @@ mod tests {
     fn gpu_share_by_util() {
         let mut est = PowerEstimator::new();
         let cpu = cpu(Metric::valid(20.0));
-        let util: FxHashMap<ProcessKey, f32> = [(key(1), 60.0), (key(2), 20.0)].into();
+        let util: FxHashMap<ProcessKey, f32> =
+            [(key(1), 60.0), (key(2), 20.0)].into_iter().collect();
         let gpus = [GpuShare {
             power_w: Some(100.0),
             util_by_key: &util,
@@ -289,7 +290,7 @@ mod tests {
     fn restricted_rapl_no_estimate() {
         let mut est = PowerEstimator::new();
         let cpu = cpu(Metric::with(Validity::Restricted));
-        let util: FxHashMap<ProcessKey, f32> = [(key(1), 50.0)].into();
+        let util: FxHashMap<ProcessKey, f32> = [(key(1), 50.0)].into_iter().collect();
         let gpus = [GpuShare {
             power_w: None,
             util_by_key: &util,
@@ -313,7 +314,13 @@ mod tests {
         let mut est = PowerEstimator::new();
         let base = 1_000 * SEC;
         // One process takes every tick, so its estimate is the package power.
-        sweep(&mut est, base - SEC, &[(1, 0)], &cpu(Metric::valid(10.0)), &[]);
+        sweep(
+            &mut est,
+            base - SEC,
+            &[(1, 0)],
+            &cpu(Metric::valid(10.0)),
+            &[],
+        );
         let mut last = (None, None);
         for s in 0..=120u64 {
             let watts = if s < 60 { 10.0 } else { 20.0 };
