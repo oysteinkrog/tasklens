@@ -3,6 +3,7 @@
 
 pub mod builtin;
 pub mod derived;
+pub mod import_ts;
 pub mod map;
 pub mod metrics;
 pub mod palette;
