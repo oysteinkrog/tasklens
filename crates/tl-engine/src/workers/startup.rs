@@ -251,7 +251,8 @@ const SIGNAL_QUEUE: usize = 64;
 /// the connection's tick task stops. No proxy is kept.
 struct UnitFilesSignals {
     stream: zbus::MessageStream,
-    conn: DbusConn,
+    /// Kept so its tick task feeds the stream.
+    _conn: DbusConn,
 }
 
 impl UnitFilesSignals {
@@ -284,7 +285,10 @@ impl UnitFilesSignals {
         let subscribe =
             raw.call_method(Some(BUS_NAME), PATH, Some(MANAGER_IFACE), "Subscribe", &());
         conn.read(cx, subscribe).await?;
-        Ok(Self { stream, conn })
+        Ok(Self {
+            stream,
+            _conn: conn,
+        })
     }
 }
 
