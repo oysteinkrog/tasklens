@@ -17,6 +17,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use tl_collect::net::NetRate;
 use tl_model::gpu_proto::{GpuProcessSample, Reading};
 use tl_model::history::RecordSink;
 use tl_model::ids::ProcessKey;
@@ -91,6 +92,8 @@ pub struct ProcessState {
     gpu_process: bool,
     /// PSS values of the detail keys.
     pss: FxHashMap<ProcessKey, PssValue>,
+    /// Attributed TCP rates of the last `ConnectionsUpdate`; `None` before the first one.
+    net: Option<FxHashMap<ProcessKey, NetRate>>,
     system_threads: u32,
     file_nr: Option<u64>,
     online_cpus: u16,
@@ -124,6 +127,7 @@ impl ProcessState {
             gpu_default: None,
             gpu_process: false,
             pss: FxHashMap::default(),
+            net: None,
             system_threads: 0,
             file_nr: None,
             online_cpus: 0,
@@ -247,6 +251,9 @@ impl ProcessState {
         } else if let Some(v) = self.gpu_default {
             set_gpu(record, 0.0, 0, v);
         }
+        if let Some(net) = &self.net {
+            set_net(record, net.get(&key));
+        }
         if record.validity.get(ProcessField::Pss) == Validity::Valid {
             self.pss.insert(
                 key,
@@ -315,6 +322,17 @@ impl ProcessState {
         self.gpu_process = !samples.is_empty();
         self.dirty = true;
         u32::try_from(self.gpu.len()).unwrap_or(u32::MAX)
+    }
+
+    /// Sets the Network columns of every live record from the attributed TCP rates (PROC-032)
+    /// and keeps them for the next sweeps. A live key with no attributed socket gets 0 with
+    /// validity `Valid`.
+    pub fn apply_net_rates(&mut self, rates: FxHashMap<ProcessKey, NetRate>) {
+        for live in self.live.values_mut() {
+            set_net(&mut live.record, rates.get(&live.record.key));
+        }
+        self.net = Some(rates);
+        self.dirty = true;
     }
 
     /// For each entry: set pss_bytes, uss_bytes, swap_bytes and the Pss/Uss validity; keys not
@@ -531,6 +549,19 @@ fn set_gpu(record: &mut ProcessRecord, util_pct: f32, mem_bytes: u64, validity: 
     set_fields(
         &mut record.validity,
         &[ProcessField::GpuUtil, ProcessField::GpuMem],
+        validity,
+    );
+}
+
+fn set_net(record: &mut ProcessRecord, rate: Option<&NetRate>) {
+    let (rx, tx, validity) = rate.map_or((0.0, 0.0, Validity::Valid), |r| {
+        (r.rx_bps, r.tx_bps, r.validity)
+    });
+    record.net_rx_bps = rx;
+    record.net_tx_bps = tx;
+    set_fields(
+        &mut record.validity,
+        &[ProcessField::NetRx, ProcessField::NetTx],
         validity,
     );
 }

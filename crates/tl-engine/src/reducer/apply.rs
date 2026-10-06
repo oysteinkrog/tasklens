@@ -1405,8 +1405,12 @@ impl Reducer {
     }
 
     /// Replaces `connections` with the update's records and counts. `destroy_supported` stays
-    /// (E09-027).
-    fn apply_connections(&mut self, u: ConnectionsUpdate, settings: &EngineSettings) {
+    /// (E09-027). The attribution goes to the process records.
+    fn apply_connections(&mut self, mut u: ConnectionsUpdate, settings: &EngineSettings) {
+        // Attributed TCP rates fill the process Network columns (PROC-032).
+        self.processes
+            .apply_net_rates(std::mem::take(&mut u.attribution));
+        self.republish_processes(settings);
         let old = &self.components.connections;
         self.components.connections = Arc::new(ConnectionsSnapshot {
             header: ComponentHeader {
