@@ -491,3 +491,8 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.21 (5dc681d, 5265e51, 456205b, 03180c0, 3650424, 0e27d6a, 33ab37e): FSI/PDI isolate cached in IconSourceCache, TlIcon::Binary, Name min 120 px.
 - pdu.8 (2248f10): process cell painting; tooltips, heat background and stale double-dim rule noted on pdu.12.
 - crw.29 (f7c0916, d8b3a69, b40b1d4, dfae5b2): Performance words through tr tables; range_word is SharedString; tr_en accepted; tr_calls and set_test_catalogue test hooks. Leftover English moved to a new ug9 bead.
+- rsf.15 (34e57c5): RTL golden committed; the 60 px golden is unchanged. The isolate swallows the space before the count, so a follow-up bead was filed.
+- yrf.21 (dc9e308): HoverPaint.flip_right; CPU grid hover on; element.rs got one line outside the file list (accepted).
+- pdu.9: EXITED branch in paint_name_cell approved (icon at STALE_OPACITY, text secondary).
+- rsf.14: header_menu generic over C, using a ColumnId round trip for now; a follow-up bead makes the action key a string.
+- 8q0.38: GroupRow.desktop_path added and left None; ProcessMeta.desktop_path is a follow-up bead. TableInput.unit_users added.
