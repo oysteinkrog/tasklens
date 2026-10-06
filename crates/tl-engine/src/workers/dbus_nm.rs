@@ -8,10 +8,15 @@
 //! device's `Bitrate` every `WIFI_PERIOD`. It runs while `Demand.nets` or `Demand.inventory` is
 //! set. Without NetworkManager the `Net` worker's sysfs data stands alone.
 //!
+//! On the same `WIFI_PERIOD` tick it reads nl80211 (E12-025) for the signal in dBm and the RX and
+//! TX bit rates, which NM does not give. Without NetworkManager the Wi-Fi rows come from nl80211
+//! alone.
+//!
 //! SSIDs and connection names are shown on screen only. Never log them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +26,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
 use tl_collect::SysRoot;
+use tl_collect::net::nl80211::{Nl80211, WifiLink};
 use tl_collect::parse::netif::{self, NetIface};
 use tl_collect::sanitize::sanitize_text;
 use tl_model::devices::{DeviceIdentity, NetKind};
@@ -62,6 +68,8 @@ const NO_PATH: &str = "/";
 const SSID_MAX: usize = 32;
 /// Shown for an access point with an empty SSID.
 const HIDDEN_SSID: &str = "Hidden network";
+/// nl80211 gives no security flags.
+const UNKNOWN_SECURITY: &str = "Unknown";
 /// The D-Bus error name for a missing service.
 const SERVICE_UNKNOWN: &str = "org.freedesktop.DBus.Error.ServiceUnknown";
 
@@ -103,7 +111,7 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
 /// The worker on the system bus. `root` gives the current interfaces and their identities.
 #[doc(hidden)]
 pub async fn run(cx: Cx, io: WorkerIo, root: SysRoot) -> Outcome<(), WorkerError> {
-    run_with(cx, io, root, SystemConnector).await
+    run_with(cx, io, root, SystemConnector, SystemWifi).await
 }
 
 /// NM `NMDeviceType` to the row kind and the PERF-054 "Type" text. `None` for loopback and the
@@ -147,6 +155,50 @@ pub fn wifi_from_ap(ap: &ApProps, bitrate_kbps: u32) -> WifiInfo {
         channel: channel_from_mhz(ap.frequency),
         security: security_text(ap.flags, ap.wpa_flags, ap.rsn_flags).into(),
     }
+}
+
+/// Adds what nl80211 knows to NM's Wi-Fi rows: the signal in dBm and the RX rate always, the TX
+/// rate when NM has none. NM's `Strength` stays the percent.
+pub fn merge_link(wifi: &mut WifiInfo, link: &WifiLink) {
+    wifi.signal_dbm = link.signal_dbm;
+    wifi.rx_mbps = link.rx_kbps.map(mbps);
+    if wifi.tx_mbps.is_none() {
+        wifi.tx_mbps = link.tx_kbps.map(mbps);
+    }
+}
+
+/// The Wi-Fi rows from nl80211 alone, when NetworkManager is missing. `None` for an interface
+/// that is not connected (no SSID).
+pub fn wifi_from_link(link: &WifiLink) -> Option<WifiInfo> {
+    let raw = link.ssid.as_ref()?;
+    let mut ssid = String::new();
+    sanitize_text(raw, SSID_MAX, &mut ssid);
+    let ssid: Arc<str> = if ssid.is_empty() {
+        HIDDEN_SSID.into()
+    } else {
+        ssid.into()
+    };
+    let freq_mhz = link.freq_mhz.unwrap_or(0);
+    Some(WifiInfo {
+        ssid,
+        signal_dbm: link.signal_dbm,
+        signal_pct: link.signal_dbm.map_or(0, signal_pct),
+        rx_mbps: link.rx_kbps.map(mbps),
+        tx_mbps: link.tx_kbps.map(mbps),
+        freq_mhz,
+        channel: channel_from_mhz(freq_mhz),
+        security: UNKNOWN_SECURITY.into(),
+    })
+}
+
+/// NetworkManager's own dBm to percent formula: `clamp(2 × (dBm + 100), 0, 100)`.
+pub fn signal_pct(dbm: i32) -> u8 {
+    let pct = dbm.saturating_add(100).saturating_mul(2).clamp(0, 100);
+    u8::try_from(pct).unwrap_or(0)
+}
+
+fn mbps(kbps: u32) -> f32 {
+    kbps as f32 / 1000.0
 }
 
 /// The 802.11 channel number of a 2.4, 5 or 6 GHz frequency.
@@ -213,12 +265,14 @@ enum Next<B> {
 
 /// The state machine: idle, NetworkManager or missing. Returns `Outcome::Ok(())` on cancel and
 /// `Err` when the bus fails or the reducer's queue is closed, so the supervisor restarts it.
-async fn run_with<C: Connector>(
+async fn run_with<C: Connector, W: WifiOpener>(
     cx: Cx,
     io: WorkerIo,
     root: SysRoot,
     connector: C,
+    opener: W,
 ) -> Outcome<(), WorkerError> {
+    let mut wifi = Wifi::new(opener);
     let mut next = Next::Idle;
     loop {
         next = match next {
@@ -232,8 +286,8 @@ async fn run_with<C: Connector>(
                     Err(e) => fail(&cx, &e),
                 }
             }
-            Next::Bus(bus, devices) => bus_loop(&cx, &io, &root, bus, devices).await,
-            Next::Missing => missing_loop(&cx, &io, &connector).await,
+            Next::Bus(bus, devices) => bus_loop(&cx, &io, &root, bus, devices, &mut wifi).await,
+            Next::Missing => missing_loop(&cx, &io, &root, &connector, &mut wifi).await,
             Next::Stop(outcome) => return outcome,
         };
     }
@@ -355,22 +409,29 @@ fn ap_from_props(p: &Props) -> ApProps {
 }
 
 /// Steps 4 to 7 with NetworkManager.
-async fn bus_loop<B: NmBus>(
+async fn bus_loop<B: NmBus, W: WifiOpener>(
     cx: &Cx,
     io: &WorkerIo,
     root: &SysRoot,
     mut bus: B,
     mut devices: BTreeMap<String, NmDevice>,
+    wifi: &mut Wifi<W>,
 ) -> Next<B> {
-    if let Some(stop) = send(cx, io, health(None)).await {
+    if let Some(stop) = send(cx, io, health(wifi.error.clone())).await {
         return Next::Stop(stop);
     }
     let mut ifaces = match interfaces(cx, root).await {
         Ok(ifaces) => ifaces,
         Err(stop) => return Next::Stop(stop),
     };
+    if nets_demanded(io)
+        && devices.values().any(|d| d.ap.is_some())
+        && let Err(stop) = wifi.poll(cx, io).await
+    {
+        return Next::Stop(stop);
+    }
     let mut sent = None;
-    if let Some(stop) = publish(cx, io, &devices, &ifaces, &mut sent).await {
+    if let Some(stop) = publish(cx, io, &devices, &ifaces, &wifi.links, &mut sent).await {
         return Next::Stop(stop);
     }
     let period = nanos(WIFI_PERIOD);
@@ -416,6 +477,7 @@ async fn bus_loop<B: NmBus>(
         let now = cx.now().as_nanos();
         if !polling {
             next_wifi = now + period;
+            changed |= wifi.clear();
         } else if now >= next_wifi {
             next_wifi += period;
             if next_wifi <= now {
@@ -424,6 +486,10 @@ async fn bus_loop<B: NmBus>(
             match poll_wifi(cx, &mut bus, &mut devices).await {
                 Ok(c) => changed |= c,
                 Err(e) => return fail(cx, &e),
+            }
+            match wifi.poll(cx, io).await {
+                Ok(c) => changed |= c,
+                Err(stop) => return Next::Stop(stop),
             }
         }
 
@@ -446,7 +512,9 @@ async fn bus_loop<B: NmBus>(
             };
             changed = true;
         }
-        if changed && let Some(stop) = publish(cx, io, &devices, &ifaces, &mut sent).await {
+        if changed
+            && let Some(stop) = publish(cx, io, &devices, &ifaces, &wifi.links, &mut sent).await
+        {
             return Next::Stop(stop);
         }
     }
@@ -513,15 +581,30 @@ async fn poll_wifi<B: NmBus>(
     Ok(changed)
 }
 
-/// Step 2 without NetworkManager: the health text, an empty list, and a bus retry every 60 s.
-async fn missing_loop<C: Connector>(cx: &Cx, io: &WorkerIo, connector: &C) -> Next<C::Bus> {
+/// Step 2 without NetworkManager: the health text, the Wi-Fi rows from nl80211 alone (read every
+/// `WIFI_PERIOD` while the network pages are shown), and a bus retry every 60 s.
+async fn missing_loop<C: Connector, W: WifiOpener>(
+    cx: &Cx,
+    io: &WorkerIo,
+    root: &SysRoot,
+    connector: &C,
+    wifi: &mut Wifi<W>,
+) -> Next<C::Bus> {
     if let Some(stop) = send(cx, io, health(Some(NOT_RUNNING.into()))).await {
         return Next::Stop(stop);
     }
-    if let Some(stop) = send(cx, io, nets(Vec::new())).await {
+    if nets_demanded(io)
+        && let Err(stop) = wifi.poll(cx, io).await
+    {
         return Next::Stop(stop);
     }
+    let mut sent = None;
+    if let Some(stop) = publish_links(cx, io, root, &wifi.links, &mut sent).await {
+        return Next::Stop(stop);
+    }
+    let period = nanos(WIFI_PERIOD);
     let mut next_retry = cx.now().as_nanos() + nanos(RESYNC);
+    let mut next_wifi = cx.now().as_nanos() + period;
     loop {
         if !active(io) {
             return Next::Idle;
@@ -536,7 +619,31 @@ async fn missing_loop<C: Connector>(cx: &Cx, io: &WorkerIo, connector: &C) -> Ne
                 Err(e) => tracing::debug!(error = dbus_name(&e), "NetworkManager still missing"),
             }
         }
-        sleep(cx.now(), IDLE_RECHECK).await;
+        let polling = nets_demanded(io);
+        let now = cx.now().as_nanos();
+        let mut changed = false;
+        if !polling {
+            next_wifi = now + period;
+            changed = wifi.clear();
+        } else if now >= next_wifi {
+            next_wifi += period;
+            if next_wifi <= now {
+                next_wifi = now + period;
+            }
+            match wifi.poll(cx, io).await {
+                Ok(c) => changed = c,
+                Err(stop) => return Next::Stop(stop),
+            }
+        }
+        if changed && let Some(stop) = publish_links(cx, io, root, &wifi.links, &mut sent).await {
+            return Next::Stop(stop);
+        }
+        let wait = if polling {
+            Duration::from_nanos(next_wifi.saturating_sub(now)).min(IDLE_RECHECK)
+        } else {
+            IDLE_RECHECK
+        };
+        sleep(cx.now(), wait).await;
         if cx.checkpoint().is_err() {
             return Next::Stop(Outcome::Ok(()));
         }
@@ -546,13 +653,22 @@ async fn missing_loop<C: Connector>(cx: &Cx, io: &WorkerIo, connector: &C) -> Ne
 /// The current interfaces, listed in a blocking job. A failed listing gives none.
 async fn interfaces(cx: &Cx, root: &SysRoot) -> Result<Vec<NetIface>, Outcome<(), WorkerError>> {
     let root = root.clone();
-    let mut job = match cx.spawn_blocking(move |_| {
+    blocking(cx, move || {
         let mut out = Vec::new();
         if netif::enumerate(&root, &mut out).is_err() {
             out.clear();
         }
         out
-    }) {
+    })
+    .await
+}
+
+/// Runs `f` on the blocking pool and joins it. `Err` holds the worker's result when it must stop.
+async fn blocking<T: Send + 'static>(
+    cx: &Cx,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Outcome<(), WorkerError>> {
+    let mut job = match cx.spawn_blocking(move |_| f()) {
         Ok(job) => job,
         Err(e) => {
             return Err(Outcome::Err(WorkerError::Other(
@@ -561,7 +677,7 @@ async fn interfaces(cx: &Cx, root: &SysRoot) -> Result<Vec<NetIface>, Outcome<()
         }
     };
     match job.join(cx).await {
-        Ok(ifaces) => Ok(ifaces),
+        Ok(value) => Ok(value),
         Err(JoinError::Cancelled(reason)) => {
             if cx.checkpoint().is_err() {
                 return Err(Outcome::Ok(()));
@@ -577,15 +693,25 @@ async fn interfaces(cx: &Cx, root: &SysRoot) -> Result<Vec<NetIface>, Outcome<()
 
 /// Step 4: one record per device whose interface name is a current interface. A device NM
 /// gives no kind for keeps the sysfs kind, so the merge leaves it as it is.
-fn records(devices: &BTreeMap<String, NmDevice>, ifaces: &[NetIface]) -> Vec<Record> {
+/// nl80211 values are merged into the Wi-Fi rows by ifindex.
+fn records(
+    devices: &BTreeMap<String, NmDevice>,
+    ifaces: &[NetIface],
+    links: &[WifiLink],
+) -> Vec<Record> {
     devices
         .values()
         .filter_map(|d| {
             let iface = ifaces.iter().find(|i| i.name == d.name)?;
             let (kind, label) = d.kind.unwrap_or_else(|| net::net_kind(iface.kind));
-            let wifi =
+            let mut wifi =
                 d.ap.as_ref()
                     .map(|(_, ap)| wifi_from_ap(ap, d.bitrate_kbps));
+            if let Some(wifi) = &mut wifi
+                && let Some(link) = links.iter().find(|l| l.ifindex == iface.ifindex)
+            {
+                merge_link(wifi, link);
+            }
             Some((
                 enumerate::net_identity(iface),
                 kind,
@@ -603,9 +729,51 @@ async fn publish(
     io: &WorkerIo,
     devices: &BTreeMap<String, NmDevice>,
     ifaces: &[NetIface],
+    links: &[WifiLink],
     sent: &mut Option<Vec<Record>>,
 ) -> Option<Outcome<(), WorkerError>> {
-    let fresh = records(devices, ifaces);
+    send_records(cx, io, records(devices, ifaces, links), sent).await
+}
+
+/// Without NetworkManager: one Wi-Fi record per nl80211 interface that is a current interface.
+async fn publish_links(
+    cx: &Cx,
+    io: &WorkerIo,
+    root: &SysRoot,
+    links: &[WifiLink],
+    sent: &mut Option<Vec<Record>>,
+) -> Option<Outcome<(), WorkerError>> {
+    let ifaces = if links.is_empty() {
+        Vec::new()
+    } else {
+        match interfaces(cx, root).await {
+            Ok(ifaces) => ifaces,
+            Err(stop) => return Some(stop),
+        }
+    };
+    let fresh = links
+        .iter()
+        .filter_map(|link| {
+            let iface = ifaces.iter().find(|i| i.ifindex == link.ifindex)?;
+            Some((
+                enumerate::net_identity(iface),
+                NetKind::Wireless,
+                "Wi-Fi",
+                None,
+                wifi_from_link(link),
+            ))
+        })
+        .collect();
+    send_records(cx, io, fresh, sent).await
+}
+
+/// Sends `fresh` when it differs from the records sent last.
+async fn send_records(
+    cx: &Cx,
+    io: &WorkerIo,
+    fresh: Vec<Record>,
+    sent: &mut Option<Vec<Record>>,
+) -> Option<Outcome<(), WorkerError>> {
     if sent.as_ref() == Some(&fresh) {
         return None;
     }
@@ -745,6 +913,117 @@ fn bytes(p: &Props, key: &str) -> Option<Vec<u8>> {
             })
             .collect(),
         _ => None,
+    }
+}
+
+// ---- nl80211 ----
+
+/// The nl80211 reader of one worker generation: opened once, at the first Wi-Fi tick.
+struct Wifi<W: WifiOpener> {
+    opener: W,
+    state: WifiState<W::Links>,
+    /// The last read, empty when nl80211 is off or not read.
+    links: Vec<WifiLink>,
+    /// "nl80211: <error>" after a failure, kept in the health text for this generation.
+    error: Option<Arc<str>>,
+}
+
+enum WifiState<L> {
+    Unopened,
+    Open(L),
+    /// No Wi-Fi driver, or nl80211 failed in this generation.
+    Off,
+}
+
+impl<W: WifiOpener> Wifi<W> {
+    fn new(opener: W) -> Self {
+        Self {
+            opener,
+            state: WifiState::Unopened,
+            links: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// One read on the blocking pool, opening first if needed. `Ok(true)` when the links changed.
+    /// An `io::Error` turns nl80211 off and sends the health text once.
+    async fn poll(&mut self, cx: &Cx, io: &WorkerIo) -> Result<bool, Outcome<(), WorkerError>> {
+        let result = match std::mem::replace(&mut self.state, WifiState::Off) {
+            WifiState::Off => return Ok(false),
+            WifiState::Unopened => {
+                let opener = self.opener.clone();
+                let read = blocking(cx, move || -> io::Result<_> {
+                    let mut source = opener.open()?;
+                    let links = match &mut source {
+                        Some(s) => s.links()?,
+                        None => Vec::new(),
+                    };
+                    Ok((source, links))
+                });
+                read.await?
+            }
+            WifiState::Open(mut source) => {
+                let read = blocking(cx, move || -> io::Result<_> {
+                    let links = source.links()?;
+                    Ok((Some(source), links))
+                });
+                read.await?
+            }
+        };
+        match result {
+            Ok((Some(source), links)) => {
+                self.state = WifiState::Open(source);
+                let changed = links != self.links;
+                self.links = links;
+                Ok(changed)
+            }
+            Ok((None, _)) => Ok(self.clear()),
+            Err(e) => {
+                tracing::debug!(error = %e, "nl80211 off for this generation");
+                let text: Arc<str> = format!("nl80211: {e}").into();
+                self.error = Some(Arc::clone(&text));
+                if let Some(stop) = send(cx, io, health(Some(text))).await {
+                    return Err(stop);
+                }
+                Ok(self.clear())
+            }
+        }
+    }
+
+    /// Drops the last read. `true` when there was one.
+    fn clear(&mut self) -> bool {
+        let had = !self.links.is_empty();
+        self.links.clear();
+        had
+    }
+}
+
+/// Opens the nl80211 reader. Blocking; runs on the blocking pool. Tests replace the kernel.
+trait WifiOpener: Clone + Send + Sync + 'static {
+    type Links: WifiLinks;
+    /// `Ok(None)` when there is no Wi-Fi driver.
+    fn open(&self) -> io::Result<Option<Self::Links>>;
+}
+
+trait WifiLinks: Send + 'static {
+    /// Blocking.
+    fn links(&mut self) -> io::Result<Vec<WifiLink>>;
+}
+
+#[derive(Clone, Copy)]
+struct SystemWifi;
+
+impl WifiOpener for SystemWifi {
+    type Links = Nl80211;
+
+    fn open(&self) -> io::Result<Option<Nl80211>> {
+        Nl80211::open()
+    }
+}
+
+impl WifiLinks for Nl80211 {
+    fn links(&mut self) -> io::Result<Vec<WifiLink>> {
+        Nl80211::links(self)
     }
 }
 
@@ -1141,6 +1420,52 @@ mod tests {
         }
     }
 
+    /// The fake nl80211. `links: None` is a machine without a Wi-Fi driver.
+    #[derive(Default)]
+    struct FakeWifiState {
+        links: Option<Vec<WifiLink>>,
+        fail: bool,
+        opens: u32,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeWifi(Arc<Mutex<FakeWifiState>>);
+
+    impl WifiOpener for FakeWifi {
+        type Links = FakeWifi;
+
+        fn open(&self) -> io::Result<Option<FakeWifi>> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.opens += 1;
+            Ok(state.links.is_some().then(|| self.clone()))
+        }
+    }
+
+    impl WifiLinks for FakeWifi {
+        fn links(&mut self) -> io::Result<Vec<WifiLink>> {
+            let state = self.0.lock().expect("fake lock");
+            if state.fail {
+                return Err(io::Error::other("dump failed"));
+            }
+            Ok(state.links.clone().unwrap_or_default())
+        }
+    }
+
+    fn wlan0_link(signal_dbm: i32) -> WifiLink {
+        WifiLink {
+            ifindex: 3,
+            ssid: Some(b"Home".to_vec()),
+            freq_mhz: Some(2437),
+            signal_dbm: Some(signal_dbm),
+            rx_kbps: Some(400_000),
+            tx_kbps: Some(100_000),
+        }
+    }
+
+    fn set_links(wifi: &FakeWifi, links: Vec<WifiLink>) {
+        wifi.0.lock().expect("fake lock").links = Some(links);
+    }
+
     fn props(entries: Vec<(&str, Value<'static>)>) -> Props {
         entries
             .into_iter()
@@ -1246,6 +1571,10 @@ mod tests {
 
     impl Rig {
         fn start(connector: FakeConnector, demand: Demand) -> Self {
+            Self::start_with(connector, FakeWifi::default(), demand)
+        }
+
+        fn start_with(connector: FakeConnector, wifi: FakeWifi, demand: Demand) -> Self {
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
             let (updates, rx) = mpsc::channel::<EngineMsg>(256);
             let (demand_tx, demand) = watch::channel(demand);
@@ -1263,7 +1592,7 @@ mod tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let _ = run_with(cx, io, fixture_root(), connector).await;
+                    let _ = run_with(cx, io, fixture_root(), connector, wifi).await;
                 })
                 .expect("task is created");
             lab.scheduler.lock().schedule(task, 0);
@@ -1487,6 +1816,157 @@ mod tests {
             got[0]
         );
         assert_eq!(nets_of(&got[1]).map(<[_]>::len), Some(2));
+        rig.finish();
+    }
+
+    fn wlan0_wifi(entries: &[(DeviceIdentity, NetDetails)]) -> Option<&WifiInfo> {
+        entries
+            .iter()
+            .find(|(id, _)| name_of(id) == "wlan0")
+            .and_then(|(_, d)| d.wifi.as_ref())
+    }
+
+    #[test]
+    fn signal_percent_formula() {
+        assert_eq!(signal_pct(-55), 90);
+        assert_eq!(signal_pct(-100), 0);
+        assert_eq!(signal_pct(-120), 0);
+        assert_eq!(signal_pct(-50), 100);
+        assert_eq!(signal_pct(-20), 100);
+        assert_eq!(signal_pct(i32::MIN), 0);
+        let mut link = wlan0_link(-55);
+        link.ssid = Some(Vec::new());
+        assert_eq!(
+            wifi_from_link(&link).map(|w| w.ssid),
+            Some("Hidden network".into())
+        );
+        link.ssid = None;
+        assert_eq!(wifi_from_link(&link), None);
+    }
+
+    #[test]
+    fn nl80211_only_wifi() {
+        let wifi = FakeWifi::default();
+        set_links(&wifi, vec![wlan0_link(-55)]);
+        let mut rig = Rig::start_with(
+            FakeConnector::default(),
+            wifi.clone(),
+            Demand {
+                nets: true,
+                ..Demand::default()
+            },
+        );
+        let first = rig.drain();
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(
+            matches!(&first[0], SourceUpdate::Health {
+                state: SourceState::Running,
+                last_error: Some(text),
+                ..
+            } if &**text == "NetworkManager not running"),
+            "{:?}",
+            first[0]
+        );
+        let entries = nets_of(&first[1]).expect("Nets");
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let (id, details) = &entries[0];
+        assert_eq!(name_of(id), "wlan0");
+        assert_eq!(details.ifindex, 3);
+        assert_eq!(details.kind, NetKind::Wireless);
+        assert_eq!(&*details.type_label, "Wi-Fi");
+        let w = details.wifi.as_ref().expect("wifi");
+        assert_eq!(&*w.ssid, "Home");
+        assert_eq!(w.signal_pct, 90);
+        assert_eq!(w.signal_dbm, Some(-55));
+        assert_eq!(w.channel, Some(6));
+        assert_eq!(w.freq_mhz, 2437);
+        assert_eq!(&*w.security, "Unknown");
+        assert_eq!(w.rx_mbps, Some(400.0));
+        assert_eq!(w.tx_mbps, Some(100.0));
+
+        // Each tick reads again; a change goes out.
+        set_links(&wifi, vec![wlan0_link(-60)]);
+        rig.advance(WIFI_PERIOD);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let w = wlan0_wifi(nets_of(&got[0]).expect("Nets")).expect("wifi");
+        assert_eq!(w.signal_pct, 80);
+        rig.advance(WIFI_PERIOD);
+        assert!(rig.drain().is_empty());
+        assert_eq!(wifi.0.lock().expect("fake lock").opens, 1);
+
+        // A failed read: the health text once, then nl80211 stays off with no more reads.
+        wifi.0.lock().expect("fake lock").fail = true;
+        rig.advance(WIFI_PERIOD);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(
+            matches!(&got[0], SourceUpdate::Health {
+                state: SourceState::Running,
+                last_error: Some(text),
+                ..
+            } if &**text == "nl80211: dump failed"),
+            "{:?}",
+            got[0]
+        );
+        assert_eq!(nets_of(&got[1]).map(<[_]>::len), Some(0));
+        for _ in 0..5 {
+            rig.advance(WIFI_PERIOD);
+        }
+        assert!(rig.drain().is_empty());
+        assert_eq!(wifi.0.lock().expect("fake lock").opens, 1);
+        rig.finish();
+    }
+
+    #[test]
+    fn nm_strength_wins_dbm_added() {
+        let connector = FakeConnector::default();
+        connector.0.lock().expect("fake lock").nm = Some(eth_and_wifi(72));
+        let wifi = FakeWifi::default();
+        set_links(&wifi, vec![wlan0_link(-64)]);
+        let mut rig = Rig::start_with(
+            connector,
+            wifi.clone(),
+            Demand {
+                nets: true,
+                ..Demand::default()
+            },
+        );
+        let first = rig.drain();
+        assert_eq!(first.len(), 2, "{first:?}");
+        let w = wlan0_wifi(nets_of(&first[1]).expect("Nets")).expect("wifi");
+        assert_eq!(w.signal_pct, 72);
+        assert_eq!(w.signal_dbm, Some(-64));
+        assert_eq!(w.rx_mbps, Some(400.0));
+        // NM has a TX rate, so it stays.
+        assert_eq!(w.tx_mbps, Some(866.0));
+        // NM's SSID, channel and security stay.
+        assert_eq!(w.channel, Some(36));
+        assert_eq!(&*w.security, "WPA2 Personal");
+
+        // A new dBm on the next tick goes out alone.
+        set_links(&wifi, vec![wlan0_link(-70)]);
+        rig.advance(WIFI_PERIOD);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let w = wlan0_wifi(nets_of(&got[0]).expect("Nets")).expect("wifi");
+        assert_eq!(w.signal_pct, 72);
+        assert_eq!(w.signal_dbm, Some(-70));
+
+        // Information tab only: no nl80211 reads, and the dBm is dropped.
+        rig.demand_tx
+            .send_modify(|d| {
+                d.nets = false;
+                d.inventory = true;
+            })
+            .expect("demand send");
+        rig.advance(WIFI_PERIOD);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let w = wlan0_wifi(nets_of(&got[0]).expect("Nets")).expect("wifi");
+        assert_eq!(w.signal_dbm, None);
+        assert_eq!(w.rx_mbps, None);
+        assert_eq!(wifi.0.lock().expect("fake lock").opens, 1);
         rig.finish();
     }
 
