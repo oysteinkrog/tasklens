@@ -574,12 +574,20 @@ mod tests {
     #[test]
     fn merge_replaces_changed_entries_only() {
         let mut cache = Cache::default();
-        let a = raw(StartupKindRaw::AutostartUser, "a.desktop");
-        let b = raw(StartupKindRaw::AutostartUser, "b.desktop");
-        let first = cache.merge(vec![a.clone(), b.clone()], None);
-        let mut b2 = b;
-        b2.status = StartupStatusRaw::Disabled;
-        let second = cache.merge(vec![a, b2], None);
+        let first = cache.merge(
+            vec![
+                raw(StartupKindRaw::AutostartUser, "a.desktop"),
+                raw(StartupKindRaw::AutostartUser, "b.desktop"),
+            ],
+            None,
+        );
+        // A new scan builds new strings; only the changed row gets a new entry.
+        let mut b = raw(StartupKindRaw::AutostartUser, "b.desktop");
+        b.status = StartupStatusRaw::Disabled;
+        let second = cache.merge(
+            vec![raw(StartupKindRaw::AutostartUser, "a.desktop"), b],
+            None,
+        );
         assert!(Arc::ptr_eq(&first[0].name, &second[0].name));
         assert!(!Arc::ptr_eq(&first[1].name, &second[1].name));
         assert_eq!(second[1].status, StartupStatus::Disabled);
