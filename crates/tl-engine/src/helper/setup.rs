@@ -730,6 +730,75 @@ mod tests {
         }
     }
 
+    const POLKIT_RULE: &str = "etc/polkit-1/rules.d/49-tasklens.rules";
+
+    /// The rule `polkit-rule on` writes (APP-049).
+    const POLKIT_RULE_TEXT: &str = "\
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf(\"io.github.oysteinkrog.tasklens.\") == 0 &&
+        subject.local && subject.active && subject.isInGroup(\"wheel\")) {
+        return polkit.Result.YES;
+    }
+});
+";
+
+    /// A fake root with `etc/polkit-1/rules.d/`, for test mode.
+    fn polkit_root() -> Fake {
+        let fake = Fake::new();
+        fs::create_dir_all(fake.path("etc/polkit-1/rules.d")).expect("mkdir");
+        fake
+    }
+
+    #[test]
+    fn script_polkit_rule_on_exact_text() {
+        let fake = polkit_root();
+        let (code, out, err) = script(Some(fake.dir.path()), &["polkit-rule", "on"]);
+        assert_eq!(code, 0, "{out}{err}");
+        let rule = fake.path(POLKIT_RULE);
+        assert_eq!(fs::read(&rule).expect("rule"), POLKIT_RULE_TEXT.as_bytes());
+        let mode = fs::metadata(&rule).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o644);
+        assert!(!fake.path(&format!("{POLKIT_RULE}.tmp")).exists());
+        assert_eq!(out.lines().last(), Some("Enabled"));
+    }
+
+    #[test]
+    fn script_polkit_rule_off() {
+        let fake = polkit_root();
+        let (code, _, _) = script(Some(fake.dir.path()), &["polkit-rule", "on"]);
+        assert_eq!(code, 0);
+        assert!(fake.path(POLKIT_RULE).exists());
+        let (code, out, err) = script(Some(fake.dir.path()), &["polkit-rule", "off"]);
+        assert_eq!(code, 0, "{out}{err}");
+        assert!(!fake.path(POLKIT_RULE).exists());
+        assert_eq!(out, "Reverted\n");
+    }
+
+    #[test]
+    fn script_polkit_rule_bad_arg() {
+        let fake = polkit_root();
+        let usage = "usage: tasklens-setup rapl-enable|rapl-revert|sensors-detect|sensors-revert|polkit-rule on|off\n";
+        for args in [&["polkit-rule", "maybe"][..], &["polkit-rule"]] {
+            let (code, out, err) = script(Some(fake.dir.path()), args);
+            assert_eq!(code, 2, "{args:?}");
+            assert_eq!(out, "");
+            assert_eq!(err, usage);
+        }
+        assert!(!fake.path(POLKIT_RULE).exists());
+    }
+
+    /// Security regression: the rule covers only tasklens's own actions, never a third-party one.
+    #[test]
+    fn script_polkit_rule_scope() {
+        let fake = polkit_root();
+        let (code, _, _) = script(Some(fake.dir.path()), &["polkit-rule", "on"]);
+        assert_eq!(code, 0);
+        let rule = fs::read_to_string(fake.path(POLKIT_RULE)).expect("rule");
+        assert!(rule.contains("action.id.indexOf(\"io.github.oysteinkrog.tasklens.\") == 0"));
+        assert!(!rule.contains("org.freedesktop."));
+        assert!(rule.contains("subject.local && subject.active && subject.isInGroup(\"wheel\")"));
+    }
+
     const LM_CONF: &str = "etc/conf.d/lm_sensors";
     const SAVED: &str = "var/lib/tasklens/sensors-saved";
     const IS_ENABLED: &str = "would run: systemctl is-enabled --quiet lm_sensors.service";

@@ -38,6 +38,7 @@ STATE_DIR="$ROOT/var/lib/tasklens"
 SAVED="$STATE_DIR/sensors-saved"
 SAVED_CONF="$STATE_DIR/lm_sensors.before"
 SAVED_ENABLED="$STATE_DIR/lm_sensors-service.enabled"
+POLKIT_RULE="$ROOT/etc/polkit-1/rules.d/49-tasklens.rules"
 
 # Runs an external system command, or prints it in test mode.
 run() {
@@ -227,13 +228,44 @@ sensors_revert() {
     echo 'Reverted. The modules stay loaded until the next reboot.'
 }
 
+# APP-049: lets wheel members in the active local session run tasklens's own polkit actions
+# without a password. The prefix covers no systemd or org.freedesktop.* action.
+polkit_rule_on() {
+    tmp="$POLKIT_RULE.tmp"
+    cat > "$tmp" <<'EOF'
+polkit.addRule(function(action, subject) {
+    if (action.id.indexOf("io.github.oysteinkrog.tasklens.") == 0 &&
+        subject.local && subject.active && subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});
+EOF
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$POLKIT_RULE"
+    echo 'Enabled'
+}
+
+polkit_rule_off() {
+    rm -f "$POLKIT_RULE"
+    echo 'Reverted'
+}
+
+usage() {
+    echo "$USAGE" >&2
+    exit 2
+}
+
 case "${1-}" in
     rapl-enable) rapl_enable ;;
     rapl-revert) rapl_revert ;;
     sensors-detect) sensors_detect ;;
     sensors-revert) sensors_revert ;;
-    *)
-        echo "$USAGE" >&2
-        exit 2
+    polkit-rule)
+        case "${2-}" in
+            on) polkit_rule_on ;;
+            off) polkit_rule_off ;;
+            *) usage ;;
+        esac
         ;;
+    *) usage ;;
 esac
