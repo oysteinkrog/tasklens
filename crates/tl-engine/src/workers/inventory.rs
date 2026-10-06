@@ -718,10 +718,8 @@ pub fn parse_shell_version(output: &[u8]) -> Option<Arc<str>> {
     let line = std::str::from_utf8(output).ok()?.lines().next()?.trim();
     let (label, rest) = if let Some(rest) = line.strip_prefix("plasmashell ") {
         ("KDE Plasma", rest)
-    } else if let Some(rest) = line.strip_prefix("GNOME Shell ") {
-        ("GNOME", rest)
     } else {
-        return None;
+        ("GNOME", line.strip_prefix("GNOME Shell ")?)
     };
     let version = rest.split_whitespace().next()?;
     let ok = version
