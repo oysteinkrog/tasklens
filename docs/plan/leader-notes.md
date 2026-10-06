@@ -244,3 +244,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.12: own_cgroup_protected skips under heavy-build (builds.slice); passed when run inside an app.slice scope.
 - Possible flaky: probe_integration spawn_fd3_env_and_fds failed once in a full run (lban).
 - i3o.21: socket.rs has a private copy of the HelperCallError mapping that dump.rs (i3o.20) also needs. Polish: share one mapping fn in actions/mod.rs. Helper NotAllowed -> Failed(PermissionDenied).
+- y6k.26: KWin cmd file kept until next command, next Update, or exit. Risk: if a Full and a LowMemory engine run at once in one session, stale cleanup and plugin names clash. Check in review whether that can happen (low-memory rescue).
