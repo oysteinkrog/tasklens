@@ -2608,3 +2608,55 @@ fn net_details_only_on_change() {
         .expect("eth0 totals");
     assert_eq!(eth0.1.link_speed_mbps, Metric::valid(2500));
 }
+
+use tl_collect::net::addrs::{AddrFamily, AddrScope, IfAddr};
+
+fn if_addr(ifindex: u32, addr: &str, prefix_len: u8, scope: AddrScope) -> IfAddr {
+    let addr: std::net::IpAddr = addr.parse().expect("test address parses");
+    IfAddr {
+        ifindex,
+        family: if addr.is_ipv4() {
+            AddrFamily::V4
+        } else {
+            AddrFamily::V6
+        },
+        addr,
+        prefix_len,
+        scope,
+    }
+}
+
+#[test]
+fn net_addresses_into_details() {
+    let dir = netif_kinds_fixture();
+    // Dump order puts link-local first; the details list it last.
+    let addrs = vec![
+        if_addr(2, "fe80::1", 64, AddrScope::Link),
+        if_addr(2, "2001:db8::5", 64, AddrScope::Global),
+        if_addr(2, "192.168.1.10", 24, AddrScope::Global),
+        if_addr(99, "10.9.9.9", 8, AddrScope::Global),
+    ];
+    let src = NetSource::with_addrs(SysRoot::at(&dir), addrs);
+
+    // Network not demanded: no dump, no addresses.
+    let (mut src, _) = net_sample(src, SEC);
+    net_devices(&mut src);
+    let entries = net_details(&mut src);
+    assert!(net_details_of(&entries, "eth0").addresses.is_empty());
+
+    let nets = Demand {
+        nets: true,
+        ..Demand::default()
+    };
+    assert!(src.period(&nets, &EngineSettings::default()).is_some());
+    let (mut src, _) = net_sample(src, 6 * SEC);
+    net_devices(&mut src);
+    let entries = net_details(&mut src);
+    let eth0: Vec<&str> = net_details_of(&entries, "eth0")
+        .addresses
+        .iter()
+        .map(|a| &**a)
+        .collect();
+    assert_eq!(eth0, ["192.168.1.10/24", "2001:db8::5/64", "fe80::1/64"]);
+    assert!(net_details_of(&entries, "wlan0").addresses.is_empty());
+}

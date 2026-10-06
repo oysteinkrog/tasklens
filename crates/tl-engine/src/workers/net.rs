@@ -6,7 +6,11 @@
 //! sends a full `DeviceList` for `NETS` through `take_extra`, then the sysfs and udev
 //! `NetDetails` when they differ from the last sent set. Loopback never appears (ADR-016, R-052,
 //! PERF-054 to PERF-056). MAC addresses are never logged.
+//!
+//! While network is demanded, each enumeration also runs one rtnetlink `RTM_GETADDR` dump for
+//! the IP addresses in `NetDetails.addresses` (PERF-059, PERF-104). Addresses are never logged.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +20,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::{Cx, Outcome};
 use tl_collect::SysRoot;
 use tl_collect::counters::{Clock, Measured};
+use tl_collect::net::addrs::{AddrDump, AddrFamily, AddrScope, IfAddr, format_cidr};
 use tl_collect::parse::netif::{self, IfaceDetails, IfaceKind, NetIface, OperState};
 use tl_collect::parse::udev::{UdevProps, net_entry, read_udev_props};
 use tl_collect::sample::net::{IfaceId, NetReading, NetSampler};
@@ -72,10 +77,41 @@ pub struct NetSource {
     buf: Vec<u8>,
     /// Reused for every udev database file.
     udev: UdevProps,
+    addr_source: AddrSource,
+    /// `Demand.nets` as last seen by `period`. Addresses are dumped only while it is true.
+    nets_demanded: Cell<bool>,
+    /// The last address dump, reused on each enumeration. Empty after a failed dump.
+    addrs: Vec<IfAddr>,
+}
+
+/// Where the IP addresses come from.
+enum AddrSource {
+    /// Under a fixture root the host's addresses do not belong to the interfaces.
+    None,
+    /// The rtnetlink dump, opened on first use. A failed open is tried again next time.
+    Netlink(Option<AddrDump>),
+    /// Test hook: a fixed list in place of the dump.
+    Fixed(Vec<IfAddr>),
 }
 
 impl NetSource {
+    /// On the host, addresses come from the rtnetlink dump. Under any other root there are none.
     pub fn new(root: SysRoot) -> Self {
+        let addr_source = if root == SysRoot::host() {
+            AddrSource::Netlink(None)
+        } else {
+            AddrSource::None
+        };
+        Self::with_addr_source(root, addr_source)
+    }
+
+    /// Test hook: `addrs` answers in place of the rtnetlink dump.
+    #[doc(hidden)]
+    pub fn with_addrs(root: SysRoot, addrs: Vec<IfAddr>) -> Self {
+        Self::with_addr_source(root, AddrSource::Fixed(addrs))
+    }
+
+    fn with_addr_source(root: SysRoot, addr_source: AddrSource) -> Self {
         Self {
             sampler: NetSampler::new(root.clone()),
             root,
@@ -89,6 +125,9 @@ impl NetSource {
             sent: Vec::new(),
             buf: Vec::new(),
             udev: UdevProps::default(),
+            addr_source,
+            nets_demanded: Cell::new(false),
+            addrs: Vec::new(),
         }
     }
 
@@ -162,6 +201,9 @@ impl NetSource {
             .collect();
         let sampler_ids: Vec<IfaceId> = self.ids.iter().map(|(_, id)| id.clone()).collect();
         self.sampler.set_interfaces(&sampler_ids);
+        if self.nets_demanded.get() {
+            self.read_addrs();
+        }
 
         let mut list = enumerate::net_list(t_ns, &self.ifaces, &self.root.sys);
         for (desc, iface) in list.entries.iter_mut().zip(&self.ifaces) {
@@ -179,10 +221,17 @@ impl NetSource {
                 .run_path(&format!("udev/data/{}", net_entry(iface.ifindex)));
             let props = read_udev_props(&path, &NET_UDEV_KEYS, &mut self.udev);
             let adapter_name = adapter_name(props.map(|()| &self.udev));
+            let addresses = iface_addresses(&self.addrs, iface.ifindex);
             speeds.push(details.speed_mbps);
             entries.push((
                 identity.clone(),
-                net_details(iface.kind, details, link_state(state), adapter_name),
+                net_details(
+                    iface.kind,
+                    details,
+                    link_state(state),
+                    adapter_name,
+                    addresses,
+                ),
             ));
         }
         self.speeds = speeds;
@@ -200,6 +249,32 @@ impl NetSource {
                 }));
         }
     }
+
+    /// One address dump into `addrs`. A failed open or dump leaves `addrs` empty.
+    fn read_addrs(&mut self) {
+        match &mut self.addr_source {
+            AddrSource::None => self.addrs.clear(),
+            AddrSource::Fixed(fixed) => self.addrs.clone_from(fixed),
+            AddrSource::Netlink(dump) => {
+                if dump.is_none() {
+                    match AddrDump::open() {
+                        Ok(opened) => *dump = Some(opened),
+                        Err(err) => tracing::debug!(%err, "net: rtnetlink open failed"),
+                    }
+                }
+                let Some(open) = dump else {
+                    self.addrs.clear();
+                    return;
+                };
+                if let Err(err) = open.dump(&mut self.addrs) {
+                    tracing::debug!(%err, "net: rtnetlink address dump failed");
+                    self.addrs.clear();
+                    // Open a new socket next time, so a half-read reply cannot linger.
+                    *dump = None;
+                }
+            }
+        }
+    }
 }
 
 impl Source for NetSource {
@@ -208,6 +283,7 @@ impl Source for NetSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
+        self.nets_demanded.set(d.nets);
         net_period(d, s)
     }
 
@@ -332,6 +408,7 @@ fn net_details(
     details: IfaceDetails,
     state: LinkState,
     adapter_name: InvField<Arc<str>>,
+    addresses: Arc<[Arc<str>]>,
 ) -> NetDetails {
     let (kind, type_label) = net_kind(kind);
     let mac = match details.mac.validity {
@@ -350,11 +427,30 @@ fn net_details(
             validity: details.speed_mbps.validity,
         },
         state,
-        // E12-015 fills the addresses.
-        addresses: Arc::from([]),
+        addresses,
         kind,
         wifi: None,
     }
+}
+
+/// The CIDR text of every address of `ifindex`: IPv4 scope Global or Site, other IPv4, IPv6
+/// scope Global or Site, then IPv6 scope Link, each group in dump order (PERF-059). IPv6 host
+/// and other scopes are left out.
+fn iface_addresses(all: &[IfAddr], ifindex: u32) -> Arc<[Arc<str>]> {
+    let group = |a: &IfAddr| match (a.family, a.scope) {
+        (AddrFamily::V4, AddrScope::Global | AddrScope::Site) => Some(0),
+        (AddrFamily::V4, _) => Some(1),
+        (AddrFamily::V6, AddrScope::Global | AddrScope::Site) => Some(2),
+        (AddrFamily::V6, AddrScope::Link) => Some(3),
+        (AddrFamily::V6, _) => None,
+    };
+    (0..4)
+        .flat_map(|g| {
+            all.iter()
+                .filter(move |a| a.ifindex == ifindex && group(a) == Some(g))
+        })
+        .map(|a| Arc::from(format_cidr(a)))
+        .collect()
 }
 
 /// `NetDetails` has no `PartialEq`; this compares every field the worker sets.
