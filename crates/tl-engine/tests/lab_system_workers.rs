@@ -8,17 +8,19 @@ mod fake_sources;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
+use asupersync::time::{TimeSource, VirtualClock};
 use fake_sources::{FakeLab, channels, drain, io};
 use tl_collect::SysRoot;
 use tl_collect::counters::Clock;
 use tl_collect::parse::{block, hwmon, netif};
 use tl_engine::config::EngineMode;
-use tl_engine::source::{self, Source};
+use tl_engine::source::{self, Source, WorkerCommand};
 use tl_engine::update::{
     CpuSample, DeviceKinds, DeviceList, DiskSample, EngineMsg, MemorySample, NetSample,
     SensorSample, SourceUpdate,
@@ -1227,5 +1229,379 @@ fn sensors_fan_control_changes() {
     assert_eq!(
         reading(&s, &fan1).fan_control,
         Some(FanControlMode::FullSpeed)
+    );
+}
+
+/// The injected-clock entry point the four P1 sources share.
+trait SampleAt: Source + Sized {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate);
+}
+
+impl SampleAt for MemorySource {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        MemorySource::sample_at(self, clock)
+    }
+}
+
+impl SampleAt for DiskSource {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        DiskSource::sample_at(self, clock)
+    }
+}
+
+impl SampleAt for NetSource {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        NetSource::sample_at(self, clock)
+    }
+}
+
+impl SampleAt for SensorsSource {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        SensorsSource::sample_at(self, clock)
+    }
+}
+
+/// A real source whose `sample` reads the lab's virtual clock instead of the host clock, so the
+/// 5 s enumeration follows virtual time. Everything else is the source's own.
+struct OnLabClock<S> {
+    inner: S,
+    clock: Arc<VirtualClock>,
+}
+
+impl<S: SampleAt> Source for OnLabClock<S> {
+    fn id(&self) -> SourceId {
+        self.inner.id()
+    }
+
+    fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration> {
+        self.inner.period(demand, settings)
+    }
+
+    fn sample(self) -> (Self, SourceUpdate) {
+        let t = self.clock.now().as_nanos();
+        let (inner, update) = self.inner.sample_at(at(t));
+        let clock = self.clock;
+        (OnLabClock { inner, clock }, update)
+    }
+
+    fn reset_baselines(&mut self) {
+        self.inner.reset_baselines();
+    }
+
+    fn command(&mut self, cmd: &WorkerCommand) -> bool {
+        self.inner.command(cmd)
+    }
+
+    fn take_extra(&mut self) -> Option<SourceUpdate> {
+        self.inner.take_extra()
+    }
+}
+
+/// Starts `src` under `source::run` in `fl`, on the lab clock.
+fn spawn_on_lab<S: SampleAt>(
+    fl: &mut FakeLab,
+    worker_io: tl_engine::source::WorkerIo,
+    src: S,
+) -> asupersync::runtime::TaskHandle<()> {
+    let src = OnLabClock {
+        inner: src,
+        clock: Arc::clone(&fl.clock),
+    };
+    fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = source::run(cx, worker_io, src).await;
+    })
+}
+
+/// The message kinds the P1 tests count. Device lists are named after the source that sends
+/// them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum P1 {
+    Memory,
+    Disks,
+    Nets,
+    Sensors,
+    DiskList,
+    NetList,
+    SensorList,
+    OtherList,
+}
+
+impl P1 {
+    /// The sample a list is sent before.
+    fn sample_of(self) -> Option<P1> {
+        match self {
+            P1::DiskList => Some(P1::Disks),
+            P1::NetList => Some(P1::Nets),
+            P1::SensorList => Some(P1::Sensors),
+            _ => None,
+        }
+    }
+}
+
+/// Receive time in ms, kind and list time in ns (lists only).
+type P1Msg = (u64, P1, Option<u64>);
+
+fn p1_kind(msg: &EngineMsg) -> Option<(P1, Option<u64>)> {
+    let EngineMsg::Source(update) = msg else {
+        return None;
+    };
+    match update {
+        SourceUpdate::Memory(_) => Some((P1::Memory, None)),
+        SourceUpdate::Disks(_) => Some((P1::Disks, None)),
+        SourceUpdate::Nets(_) => Some((P1::Nets, None)),
+        SourceUpdate::Sensors(_) => Some((P1::Sensors, None)),
+        SourceUpdate::Devices(list) => {
+            let kind = if list.kinds == DeviceKinds::DISKS {
+                P1::DiskList
+            } else if list.kinds == DeviceKinds::NETS {
+                P1::NetList
+            } else if list.kinds == DeviceKinds::SENSORS | DeviceKinds::FANS {
+                P1::SensorList
+            } else {
+                P1::OtherList
+            };
+            Some((kind, Some(list.t_ns)))
+        }
+        _ => None,
+    }
+}
+
+/// Runs `Memory`, `Disk`, `Net` and `Sensors` on one `owner-desktop` copy under `demand` for
+/// `total` in 10 ms steps, then checks the lab's oracles. Returns the P1 messages in arrival
+/// order, including those sent at t = 0.
+fn run_p1(demand: Demand, total: Duration) -> Vec<P1Msg> {
+    let dir = fixture_copy("owner-desktop", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx.send(demand).expect("watch has receivers");
+    let new_io = || io(&updates, &demand_tx, &settings, &control);
+    let handles = [
+        spawn_on_lab(&mut fl, new_io(), MemorySource::new(SysRoot::at(&dir))),
+        spawn_on_lab(&mut fl, new_io(), DiskSource::new(SysRoot::at(&dir))),
+        spawn_on_lab(&mut fl, new_io(), NetSource::new(SysRoot::at(&dir))),
+        spawn_on_lab(&mut fl, new_io(), SensorsSource::new(SysRoot::at(&dir))),
+    ];
+
+    let end = fl.now_ms() + total.as_millis() as u64;
+    let mut out = Vec::new();
+    loop {
+        for msg in drain(&mut rx) {
+            if let Some((kind, list_ns)) = p1_kind(&msg) {
+                out.push((fl.now_ms(), kind, list_ns));
+            }
+        }
+        if fl.now_ms() >= end {
+            break;
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+
+    for handle in &handles {
+        handle.abort();
+    }
+    fl.finish();
+    out
+}
+
+fn p1_times(msgs: &[P1Msg], kind: P1) -> Vec<u64> {
+    msgs.iter().filter(|m| m.1 == kind).map(|m| m.0).collect()
+}
+
+/// ADR-008: hidden with recording off produces zero `sample()` calls over 60 virtual s.
+#[test]
+fn p1_sources_hidden_zero_samples() {
+    let msgs = run_p1(Demand::default(), Duration::from_secs(60));
+    assert!(msgs.is_empty(), "{msgs:?}");
+}
+
+#[test]
+fn p1_sources_recording_policy() {
+    let recording = Demand {
+        recording: true,
+        ..Demand::default()
+    };
+    let msgs = run_p1(recording, Duration::from_millis(9_990));
+    let every_second: Vec<u64> = (0..10).map(|k| k * 1_000).collect();
+    for kind in [P1::Memory, P1::Disks, P1::Nets] {
+        assert_eq!(p1_times(&msgs, kind), every_second, "{kind:?}");
+    }
+    assert!(p1_times(&msgs, P1::Sensors).is_empty());
+    assert!(p1_times(&msgs, P1::SensorList).is_empty());
+}
+
+#[test]
+fn p1_sources_visible_rates_and_enumeration() {
+    let visible = Demand {
+        memory: true,
+        disks: true,
+        nets: true,
+        sensors: true,
+        ..Demand::default()
+    };
+    let msgs = run_p1(visible, Duration::from_millis(10_990));
+    let every_second: Vec<u64> = (0..11).map(|k| k * 1_000).collect();
+    for kind in [P1::Memory, P1::Disks, P1::Nets, P1::Sensors] {
+        assert_eq!(p1_times(&msgs, kind), every_second, "{kind:?}");
+    }
+    assert!(p1_times(&msgs, P1::OtherList).is_empty());
+
+    for list in [P1::DiskList, P1::NetList, P1::SensorList] {
+        assert_eq!(p1_times(&msgs, list), [0, 5_000, 10_000], "{list:?}");
+        let sample = list.sample_of().expect("a list kind");
+        for (i, &(t, kind, list_ns)) in msgs.iter().enumerate() {
+            if kind != list {
+                continue;
+            }
+            assert_eq!(list_ns, Some(t * MS), "{list:?} t_ns");
+            // The same tick's sample comes after the list, not before it.
+            let same_tick = msgs
+                .iter()
+                .position(|m| m.0 == t && m.1 == sample)
+                .unwrap_or_else(|| panic!("no {sample:?} at {t} ms"));
+            assert!(i < same_tick, "{list:?} at {t} ms after its sample");
+        }
+    }
+}
+
+/// `fixture/sys/block` disks and their partitions, as the kernel names them.
+fn fixture_disk_names(dir: &Path) -> Vec<String> {
+    let block_dir = dir.join("sys/block");
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&block_dir).expect("list fixture sys/block") {
+        let name = entry
+            .expect("fixture sys/block entry")
+            .file_name()
+            .into_string()
+            .expect("UTF-8 disk name");
+        if block::EXCLUDED_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            continue;
+        }
+        for child in fs::read_dir(block_dir.join(&name)).expect("list fixture disk dir") {
+            let child = child
+                .expect("fixture disk dir entry")
+                .file_name()
+                .into_string()
+                .expect("UTF-8 child name");
+            if child.starts_with(&name) {
+                names.push(child);
+            }
+        }
+        names.push(name);
+    }
+    names.sort();
+    names
+}
+
+#[test]
+fn p1_devices_lists_are_complete() {
+    let dir = fixture_copy("owner-desktop", None);
+
+    let (mut src, _) = disk_sample(DiskSource::new(SysRoot::at(&dir)), SEC);
+    let list = disk_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::DISKS);
+    let mut listed: Vec<String> = names(&list).iter().map(|n| n.to_string()).collect();
+    listed.sort();
+    let expected = fixture_disk_names(&dir);
+    assert!(expected.contains(&"nvme0n1p4".to_string()), "{expected:?}");
+    assert_eq!(listed, expected);
+    for entry in &list.entries {
+        let is_child = !matches!(&*entry.display_name, "nvme0n1" | "nvme1n1" | "sda");
+        assert_eq!(entry.parent.is_some(), is_child, "{}", entry.display_name);
+    }
+
+    let (mut src, _) = net_sample(NetSource::new(SysRoot::at(&dir)), SEC);
+    let list = net_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::NETS);
+    let listed = names(&list);
+    assert!(!listed.contains(&"lo"), "{listed:?}");
+    assert!(listed.contains(&"enp38s0"), "{listed:?}");
+    assert!(listed.contains(&"wlan0"), "{listed:?}");
+
+    let (mut src, _) = sensors_sample(SensorsSource::new(SysRoot::at(&dir)), SEC);
+    let list = sensors_devices(&mut src);
+    assert_eq!(list.kinds, DeviceKinds::SENSORS | DeviceKinds::FANS);
+    let chips: Vec<&str> = list.entries.iter().map(|e| chip_of(&e.identity)).collect();
+    assert!(chips.contains(&"k10temp"), "{chips:?}");
+    assert!(chips.contains(&"nct6797"), "{chips:?}");
+    assert!(
+        chips.iter().all(|c| !hwmon::GPU_HWMON_NAMES.contains(c)),
+        "{chips:?}"
+    );
+}
+
+#[test]
+fn p1_sources_listed_once_in_full_mode() {
+    let full: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    let low: Vec<SourceId> = workers_for(EngineMode::LowMemory)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    for id in [
+        SourceId::Cpu,
+        SourceId::Memory,
+        SourceId::Disk,
+        SourceId::Net,
+        SourceId::Sensors,
+        SourceId::Logind,
+    ] {
+        assert_eq!(full.iter().filter(|f| **f == id).count(), 1, "{id:?}");
+        assert!(!low.contains(&id), "{id:?}");
+    }
+}
+
+/// Reads the live host: run on the owner machine with `--ignored`. Prints counts only.
+#[test]
+#[ignore]
+fn p1_sources_real_host() {
+    fn twice<S: Source>(src: S) -> SourceUpdate {
+        let (src, _) = src.sample();
+        std::thread::sleep(Duration::from_secs(1));
+        src.sample().1
+    }
+
+    let SourceUpdate::Memory(memory) = twice(MemorySource::new(SysRoot::host())) else {
+        panic!("expected SourceUpdate::Memory");
+    };
+    assert!(memory.totals.total > 0);
+
+    let SourceUpdate::Disks(disks) = twice(DiskSource::new(SysRoot::host())) else {
+        panic!("expected SourceUpdate::Disks");
+    };
+    assert!(disks.disks.iter().any(|(_, d)| d.read_total > 0));
+
+    let SourceUpdate::Nets(nets) = twice(NetSource::new(SysRoot::host())) else {
+        panic!("expected SourceUpdate::Nets");
+    };
+    let not_lo = nets
+        .nets
+        .iter()
+        .filter(|(id, _)| !matches!(id, DeviceIdentity::Net { name, .. } if &**name == "lo"))
+        .count();
+    assert!(not_lo > 0);
+
+    let SourceUpdate::Sensors(sensors) = twice(SensorsSource::new(SysRoot::host())) else {
+        panic!("expected SourceUpdate::Sensors");
+    };
+    let valid_temps = sensors
+        .readings
+        .iter()
+        .filter(|(_, r)| r.kind == SensorKind::Temperature && r.value.validity == Validity::Valid)
+        .count();
+    let has_k10temp = fs::read_dir("/sys/class/hwmon")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| fs::read_to_string(e.path().join("name")).is_ok_and(|n| n.trim() == "k10temp"));
+    if has_k10temp {
+        assert!(valid_temps > 0);
+    }
+    eprintln!(
+        "disks {} interfaces {not_lo} readings {} valid temperatures {valid_temps}",
+        disks.disks.len(),
+        sensors.readings.len()
     );
 }
