@@ -3,7 +3,7 @@
 //! Each worker bead adds one `pub mod <worker>;` line and one `WorkerSpec` in `all_workers`
 //! (chain edit). The logind worker (E08-A2) is the first entry.
 
-mod connections;
+pub mod connections;
 pub mod cpu;
 mod dbus_kwin;
 pub mod dbus_nm;

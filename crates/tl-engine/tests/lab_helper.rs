@@ -1817,3 +1817,411 @@ mod sweep_helper {
         rig.finish();
     }
 }
+
+/// The `Connections` worker on scripted socket dumps, with the helper task on a fake link that
+/// answers `ResolveSocketInodes` (E29-018). No test runs the real helper or pkexec.
+mod connections_helper {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::os::fd::BorrowedFd;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use asupersync::Cx;
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::TaskHandle;
+    use rustc_hash::FxHashMap;
+    use tl_collect::CollectError;
+    use tl_collect::net::sock_diag::{self, SockRecord, TcpInfoLite};
+    use tl_collect::net::{IfNames, SocketMap};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::helper::{
+        HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError, helper_queue,
+        helper_task_with,
+    };
+    use tl_engine::source::{WorkerControl, WorkerIo};
+    use tl_engine::update::{ConnectionsUpdate, EngineMsg, SourceUpdate};
+    use tl_engine::workers::connections::{self, ConnectionsSource, RESOLVE_MAX, SocketReader};
+    use tl_model::demand::Demand;
+    use tl_model::health::HelperState;
+    use tl_model::helper_proto::{
+        HELPER_PROTO_VERSION, HelperError, HelperFrame, HelperReply, HelperReplyBody, HelperRequest,
+    };
+    use tl_model::ids::ProcessKey;
+    use tl_model::settings::EngineSettings;
+    use tl_model::snapshot::ConnRecord;
+    use tl_model::time::BootId;
+    use tl_model::validity::Validity;
+
+    use super::PROBED;
+    use super::fake_sources::{FakeLab, drain};
+
+    /// The uid of the other user whose process holds the unattributed sockets.
+    const OTHER_UID: u32 = 0;
+    /// That user's process, whose fd directory cannot be read.
+    const OTHER_PID: u32 = 900;
+    /// A socket of our own process 100.
+    const OWN_INODE: u64 = 55;
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid) * 10,
+            boot_id: BootId(7),
+            pid,
+        }
+    }
+
+    fn tcp(cookie: u64, inode: u64, uid: u32, state: u8) -> SockRecord {
+        SockRecord {
+            family: sock_diag::Family::V4,
+            proto: sock_diag::Proto::Tcp,
+            state,
+            src: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            dst: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)),
+            sport: 40000,
+            dport: 443,
+            ifindex: 0,
+            cookie,
+            rqueue: 0,
+            wqueue: 0,
+            uid,
+            inode,
+            tcp_info: Some(TcpInfoLite::default()),
+        }
+    }
+
+    /// One own socket, one TIME-WAIT socket of the other user (inode 0), and an ESTABLISHED
+    /// socket of the other user per inode of `other`.
+    fn dump(other: impl IntoIterator<Item = u64>) -> Vec<SockRecord> {
+        let mut socks = vec![tcp(1, OWN_INODE, 1000, 1), tcp(2, 0, OTHER_UID, 6)];
+        socks.extend(
+            other
+                .into_iter()
+                .enumerate()
+                .map(|(i, inode)| tcp(10 + i as u64, inode, OTHER_UID, 1)),
+        );
+        socks
+    }
+
+    /// Scripted dumps; the map has our own socket and `OTHER_PID` as restricted.
+    struct Reader {
+        tcp: Vec<SockRecord>,
+    }
+
+    impl SocketReader for Reader {
+        fn dump_tcp(&mut self, out: &mut Vec<SockRecord>) -> Result<(), CollectError> {
+            out.clear();
+            out.extend(self.tcp.iter().cloned());
+            Ok(())
+        }
+
+        fn dump_udp(&mut self, _out: &mut Vec<SockRecord>) -> Result<(), CollectError> {
+            Ok(())
+        }
+
+        fn rebuild_map(&mut self, map: &mut SocketMap) -> Result<(), CollectError> {
+            map.owners.clear();
+            map.restricted.clear();
+            map.owners
+                .insert(OWN_INODE, std::iter::once(key(100)).collect());
+            map.restricted.insert(OTHER_PID, OTHER_UID);
+            Ok(())
+        }
+
+        fn if_names(&mut self) -> IfNames {
+            IfNames::default()
+        }
+    }
+
+    /// What the fake helper saw, and the owners it knows.
+    #[derive(Default)]
+    struct ResolveState {
+        /// The inodes of every `ResolveSocketInodes`.
+        requests: Vec<Vec<u64>>,
+        owners: FxHashMap<u64, Vec<ProcessKey>>,
+        pending: VecDeque<HelperReply>,
+        spawns: u32,
+        closed: bool,
+    }
+
+    type Shared = Arc<Mutex<ResolveState>>;
+
+    fn lock(state: &Shared) -> std::sync::MutexGuard<'_, ResolveState> {
+        state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Answers `ResolveSocketInodes` like tl-helper `sockets.rs`: one `SocketOwners` with a
+    /// pair per known holder of an asked inode.
+    struct ResolveLink(Shared);
+
+    impl HelperLink for ResolveLink {
+        fn send(&mut self, frame: &HelperFrame, _fd: Option<BorrowedFd<'_>>) -> io::Result<()> {
+            let mut s = lock(&self.0);
+            let body = match &frame.request {
+                HelperRequest::Hello { .. } => HelperReplyBody::Hello {
+                    proto: HELPER_PROTO_VERSION,
+                },
+                HelperRequest::ResolveSocketInodes { inodes } => {
+                    s.requests.push(inodes.clone());
+                    let pairs = inodes
+                        .iter()
+                        .flat_map(|inode| {
+                            s.owners
+                                .get(inode)
+                                .into_iter()
+                                .flatten()
+                                .map(move |&k| (*inode, k))
+                        })
+                        .collect();
+                    HelperReplyBody::SocketOwners(pairs)
+                }
+                _ => HelperReplyBody::Err(HelperError::NotAllowed),
+            };
+            s.pending.push_back(HelperReply {
+                seq: frame.seq,
+                last: true,
+                body,
+            });
+            Ok(())
+        }
+
+        fn recv(&mut self, _timeout: Duration) -> Result<HelperReply, LinkError> {
+            lock(&self.0).pending.pop_front().ok_or(LinkError::Timeout)
+        }
+
+        fn exit_status(&mut self, _wait: Duration) -> Option<i32> {
+            lock(&self.0).closed.then_some(0)
+        }
+
+        fn kill(&mut self) {
+            lock(&self.0).closed = true;
+        }
+
+        fn close(&mut self) {
+            lock(&self.0).closed = true;
+        }
+    }
+
+    fn env(state: &Shared) -> LinkEnv {
+        let state = Arc::clone(state);
+        LinkEnv {
+            installed: Arc::new(|| true),
+            spawn: Arc::new(move || {
+                lock(&state).spawns += 1;
+                let link: Box<dyn HelperLink> = Box::new(ResolveLink(Arc::clone(&state)));
+                Ok::<_, StartError>(link)
+            }),
+            setup_probe: Arc::new(|| PROBED),
+            setup_runner: Arc::new(|_, _| tl_model::command::SetupPhase::Succeeded),
+        }
+    }
+
+    /// The helper task and the `Connections` worker in one lab, with the Connections tab shown.
+    struct Rig {
+        fl: FakeLab,
+        rx: mpsc::Receiver<EngineMsg>,
+        demand: watch::Sender<Demand>,
+        _settings: watch::Sender<EngineSettings>,
+        _control: watch::Sender<WorkerControl>,
+        helper: HelperHandle,
+        tasks: Vec<TaskHandle<()>>,
+        fake: Shared,
+        updates: Vec<ConnectionsUpdate>,
+    }
+
+    impl Rig {
+        /// With `unlock`, the helper session starts before the first rebuild.
+        fn start(tcp: Vec<SockRecord>, owners: &[(u64, &[u32])], unlock: bool) -> Rig {
+            let mut fl = FakeLab::new();
+            let (updates, rx) = mpsc::channel::<EngineMsg>(4096);
+            let (demand_tx, _) = watch::channel(Demand {
+                connections: true,
+                ..Demand::default()
+            });
+            let (settings_tx, _) = watch::channel(EngineSettings::default());
+            let (control, _) = watch::channel(WorkerControl::default());
+            let fake = Shared::default();
+            lock(&fake).owners = owners
+                .iter()
+                .map(|&(inode, pids)| (inode, pids.iter().map(|&p| key(p)).collect()))
+                .collect();
+            let (helper, queue) = helper_queue();
+            let mut tasks = Vec::new();
+            let (helper_updates, link_env) = (updates.clone(), env(&fake));
+            tasks.push(fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                helper_task_with(cx, queue, helper_updates, link_env).await;
+            }));
+            if unlock {
+                let handle = helper.clone();
+                tasks.push(fl.spawn(async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    handle.send(&cx, HelperMsg::Start).await.expect("queued");
+                }));
+                assert_eq!(helper.state(), HelperState::Unlocked);
+            }
+            let io = WorkerIo::new(
+                updates,
+                demand_tx.subscribe(),
+                settings_tx.subscribe(),
+                control.subscribe(),
+                SharedHandles {
+                    helper: Some(helper.clone()),
+                    ..SharedHandles::default()
+                },
+            );
+            let src = ConnectionsSource::new(Reader { tcp });
+            tasks.push(fl.spawn(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let _ = connections::run(cx, io, src).await;
+            }));
+            let mut rig = Rig {
+                fl,
+                rx,
+                demand: demand_tx,
+                _settings: settings_tx,
+                _control: control,
+                helper,
+                tasks,
+                fake,
+                updates: Vec::new(),
+            };
+            rig.collect();
+            rig
+        }
+
+        fn collect(&mut self) {
+            for msg in drain(&mut self.rx) {
+                if let EngineMsg::Source(SourceUpdate::Connections(update)) = msg {
+                    self.updates.push(update);
+                }
+            }
+        }
+
+        fn run(&mut self, total: Duration) {
+            let end = self.fl.now_ms() + total.as_millis() as u64;
+            while self.fl.now_ms() < end {
+                self.fl.advance(Duration::from_millis(100));
+                self.collect();
+            }
+        }
+
+        fn requests(&self) -> Vec<Vec<u64>> {
+            lock(&self.fake).requests.clone()
+        }
+
+        fn last(&self) -> &ConnectionsUpdate {
+            self.updates.last().expect("a rebuild ran")
+        }
+
+        fn finish(mut self) {
+            for task in &self.tasks {
+                task.abort();
+            }
+            self.fl.advance(Duration::from_millis(10));
+            drop((self.demand, self._settings, self._control, self.helper));
+            drop(self.rx);
+            self.fl.finish();
+        }
+    }
+
+    fn row(update: &ConnectionsUpdate, inode: u64) -> &ConnRecord {
+        update
+            .records
+            .iter()
+            .find(|r| r.inode == inode)
+            .unwrap_or_else(|| panic!("no row for inode {inode}"))
+    }
+
+    fn owner_pids(r: &ConnRecord) -> Vec<u32> {
+        r.owners.iter().map(|k| k.pid).collect()
+    }
+
+    #[test]
+    fn connections_resolve_other_users() {
+        let mut rig = Rig::start(dump([101, 102, 103]), &[(101, &[500]), (102, &[501])], true);
+        rig.run(Duration::from_millis(4_050));
+
+        let requests = rig.requests();
+        assert!(!requests.is_empty());
+        assert!(
+            requests.iter().all(|r| r == &[101, 102, 103]),
+            "only the unattributed inodes, never our own or TIME-WAIT: {requests:?}"
+        );
+        let last = rig.last();
+        assert_eq!(owner_pids(row(last, 101)), [500]);
+        assert_eq!(row(last, 101).owner_validity, Validity::Valid);
+        assert_eq!(owner_pids(row(last, 102)), [501]);
+        // The one the helper did not resolve keeps "?" with the restricted glyph.
+        assert!(row(last, 103).owners.is_empty());
+        assert_eq!(row(last, 103).owner_validity, Validity::Restricted);
+        // TIME-WAIT stays "No owner (kernel)".
+        assert!(row(last, 0).owners.is_empty());
+        assert_eq!(row(last, 0).owner_validity, Validity::Valid);
+        // The process TCP Network column gets the same owners.
+        assert!(last.attribution.contains_key(&key(500)));
+        assert!(last.attribution.contains_key(&key(501)));
+        rig.finish();
+    }
+
+    /// Security regression: without an unlocked session, the rebuild never calls the helper
+    /// and never starts a session (no polkit prompt).
+    #[test]
+    fn connections_locked_no_helper() {
+        let mut rig = Rig::start(dump([101, 102, 103]), &[(101, &[500])], false);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        rig.run(Duration::from_millis(6_050));
+
+        assert!(rig.updates.len() >= 3, "{} rebuilds", rig.updates.len());
+        for update in &rig.updates {
+            for inode in [101, 102, 103] {
+                assert_eq!(row(update, inode).owner_validity, Validity::Restricted);
+            }
+        }
+        let fake = lock(&rig.fake);
+        assert!(fake.requests.is_empty(), "{:?}", fake.requests);
+        assert_eq!(fake.spawns, 0, "no session was started");
+        drop(fake);
+        assert_eq!(rig.helper.state(), HelperState::Locked);
+        rig.finish();
+    }
+
+    #[test]
+    fn connections_shared_inode_two_keys() {
+        let mut rig = Rig::start(dump([101]), &[(101, &[501, 500])], true);
+        rig.run(Duration::from_millis(4_050));
+
+        // Both owners, sorted, so the row shows "pid +1".
+        let r = row(rig.last(), 101);
+        assert_eq!(owner_pids(r), [500, 501]);
+        assert_eq!(r.owner_validity, Validity::Valid);
+        rig.finish();
+    }
+
+    #[test]
+    fn connections_inode_batch_cap() {
+        let inodes: Vec<u64> = (10_000..15_000).collect();
+        let mut rig = Rig::start(dump(inodes.iter().copied()), &[], true);
+        rig.run(Duration::from_millis(1_050));
+
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 1, "one request per rebuild");
+        assert_eq!(requests[0].len(), RESOLVE_MAX);
+        assert_eq!(requests[0], inodes[..RESOLVE_MAX]);
+
+        // The rest go first in the next rebuild's request, which wraps round to the cap.
+        rig.run(Duration::from_millis(2_000));
+        let requests = rig.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].len(), RESOLVE_MAX);
+        assert!(
+            inodes[RESOLVE_MAX..]
+                .iter()
+                .all(|i| requests[1].binary_search(i).is_ok())
+        );
+        rig.finish();
+    }
+}

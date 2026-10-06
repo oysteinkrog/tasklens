@@ -11,12 +11,17 @@
 //! Reverse DNS for the Remote host column (SYS-035) runs in a second task of the same
 //! generation: the source sends it the foreign addresses of the visible cells, and it sends the
 //! names back, which the source caches by address. Looked-up names are never logged.
+//!
+//! While the helper is `Unlocked`, `SocketResolve` asks it for the owners of the sockets whose
+//! process could not be read (`ResolveSocketInodes`, SYS-030, PROC-032), at most one request
+//! per rebuild and outside it. The next rebuild merges the owners into the socket map, so the
+//! Connections rows and the process network columns show them.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr, SocketAddrV6};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use asupersync::channel::{mpsc, watch};
@@ -25,6 +30,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
 use asupersync::{Cx, Outcome};
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use tl_collect::counters::{Clock, resumed_between};
 use tl_collect::net::sock_diag::{self, SockDiag, SockRecord};
 use tl_collect::net::{
@@ -33,7 +39,8 @@ use tl_collect::net::{
 use tl_collect::{CollectError, SysRoot};
 use tl_model::actions::{Family, FourTuple, Proto};
 use tl_model::demand::Demand;
-use tl_model::health::{SourceId, SourceState};
+use tl_model::health::{HelperState, SourceId, SourceState};
+use tl_model::helper_proto::{HelperReply, HelperReplyBody, HelperRequest};
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{ConnRecord, ConnState, TcpInfoView};
@@ -41,6 +48,7 @@ use tl_model::time::BootId;
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
+use crate::helper::{HelperCallError, HelperHandle, HelperReadError};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{ConnectionsUpdate, SourceUpdate, WorkerError};
@@ -58,6 +66,8 @@ const NET_COLUMNS: [ColumnId; 3] = [
 /// UDP socket state 7 (CLOSE) means unconnected, 1 (ESTABLISHED) connected.
 const UDP_CONNECTED: u8 = 1;
 const UDP_UNCONNECTED: u8 = 7;
+/// A TCP socket in TIME-WAIT has no owner process: "No owner (kernel)".
+const TCP_TIME_WAIT: u8 = 6;
 
 /// Reverse DNS lookups that run at once (SYS-035). The blocking pool also has 4 threads
 /// (ADR-004), so while 4 lookups run the 2 s sample waits for a thread.
@@ -174,6 +184,8 @@ pub struct ConnectionsSource<R: SocketReader> {
     host_cookies: RefCell<Arc<[u64]>>,
     /// The link to the resolver task. `None` leaves every `remote_host` empty.
     rdns: Option<Rdns>,
+    /// Set by `helper_owners`.
+    helper: Option<HelperOwners>,
 }
 
 impl<R: SocketReader> ConnectionsSource<R> {
@@ -190,6 +202,28 @@ impl<R: SocketReader> ConnectionsSource<R> {
             pending: None,
             host_cookies: RefCell::new(Arc::from([])),
             rdns: None,
+            helper: None,
+        }
+    }
+
+    /// Connects the rebuild to `handle`. Run the returned `SocketResolve` next to
+    /// `source::run`, as `run` does.
+    pub fn helper_owners(&mut self, handle: HelperHandle) -> SocketResolve {
+        let store = Arc::new(Mutex::new(FxHashMap::default()));
+        let (wanted_tx, wanted) = watch::channel(Arc::from([]));
+        self.helper = Some(HelperOwners {
+            handle: handle.clone(),
+            wanted: wanted_tx,
+            wanted_sent: false,
+            store: Arc::clone(&store),
+            uids: FxHashSet::default(),
+            inodes: Vec::new(),
+        });
+        SocketResolve {
+            handle,
+            wanted,
+            store,
+            cursor: None,
         }
     }
 
@@ -211,6 +245,9 @@ impl<R: SocketReader> ConnectionsSource<R> {
             restricted = self.map.restricted.len(),
             "socket map rebuilt"
         );
+        if let Some(helper) = &mut self.helper {
+            helper.after_rebuild(&self.socks, &mut self.map);
+        }
 
         // A boottime jump over the monotonic one means the machine slept: no rates this time.
         if self
@@ -351,6 +388,189 @@ impl<R: SocketReader> Source for ConnectionsSource<R> {
 
     fn take_extra(&mut self) -> Option<SourceUpdate> {
         self.pending.take()
+    }
+}
+
+/// `source::run` for the rebuilds, with `SocketResolve` beside it when the session has a helper.
+pub async fn run<R: SocketReader>(
+    cx: Cx,
+    io: WorkerIo,
+    mut src: ConnectionsSource<R>,
+) -> Outcome<(), WorkerError> {
+    let Some(handle) = io.shared.helper.clone() else {
+        return source::run(cx, io, src).await;
+    };
+    let resolve = src.helper_owners(handle);
+    let helper_cx = cx.clone();
+    let rebuilds = source::run(cx, io, src);
+    let helper = async move {
+        resolve.run(&helper_cx).await;
+        // Only a cancel ends the requests; the rebuild loop returns for it.
+        std::future::pending().await
+    };
+    futures_lite::future::or(rebuilds, helper).await
+}
+
+// ---- Helper socket owners (E29-018, SYS-030, PROC-032) ----
+
+/// The most inodes in one `ResolveSocketInodes` request. The rest wait for the next rebuild.
+pub const RESOLVE_MAX: usize = 4096;
+/// The deadline of one `ResolveSocketInodes` call.
+const RESOLVE_DEADLINE: Duration = Duration::from_secs(2);
+
+/// The owners the helper found, by socket inode.
+type OwnerStore = Arc<Mutex<FxHashMap<u64, SmallVec<[ProcessKey; 1]>>>>;
+
+fn lock_store(
+    store: &OwnerStore,
+) -> std::sync::MutexGuard<'_, FxHashMap<u64, SmallVec<[ProcessKey; 1]>>> {
+    store.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The rebuild's side of the helper requests.
+struct HelperOwners {
+    handle: HelperHandle,
+    /// The sorted inodes of the last rebuild whose owner is Restricted.
+    wanted: watch::Sender<Arc<[u64]>>,
+    /// The last value sent on `wanted` was not empty.
+    wanted_sent: bool,
+    store: OwnerStore,
+    /// Scratch: the uids of the restricted pids.
+    uids: FxHashSet<u32>,
+    /// Scratch: the inodes to send.
+    inodes: Vec<u64>,
+}
+
+impl HelperOwners {
+    /// Sends the inodes `map` has no owner for to `SocketResolve`, then merges the owners the
+    /// helper found for them into `map`. While the helper is not `Unlocked`, nothing is sent or
+    /// merged and the found owners are dropped.
+    fn after_rebuild(&mut self, socks: &[SockRecord], map: &mut SocketMap) {
+        if self.handle.state() != HelperState::Unlocked {
+            if self.wanted_sent {
+                let _ = self.wanted.send(Arc::from([]));
+                self.wanted_sent = false;
+                lock_store(&self.store).clear();
+            }
+            return;
+        }
+        // The same test as the Restricted owner in `ConnectionTable`: no owner in the map and
+        // the uid of a pid whose fd directory could not be read. Inode 0 and TIME-WAIT stay
+        // "No owner (kernel)".
+        self.uids.clear();
+        self.uids.extend(map.restricted.values().copied());
+        self.inodes.clear();
+        if !self.uids.is_empty() {
+            self.inodes.extend(
+                socks
+                    .iter()
+                    .filter(|s| {
+                        s.inode != 0
+                            && !(s.proto == sock_diag::Proto::Tcp && s.state == TCP_TIME_WAIT)
+                            && self.uids.contains(&s.uid)
+                            && map.owners_of(s.inode).is_empty()
+                    })
+                    .map(|s| s.inode),
+            );
+            self.inodes.sort_unstable();
+            self.inodes.dedup();
+        }
+        self.wanted_sent = !self.inodes.is_empty();
+        // `send` fails only when `SocketResolve` is gone.
+        let _ = self.wanted.send(Arc::from(&self.inodes[..]));
+
+        let mut store = lock_store(&self.store);
+        let inodes = &self.inodes;
+        store.retain(|inode, _| inodes.binary_search(inode).is_ok());
+        for (&inode, keys) in store.iter() {
+            map.owners.insert(inode, keys.clone());
+        }
+    }
+}
+
+/// The helper side: after a rebuild, one `ResolveSocketInodes` with at most `RESOLVE_MAX` of
+/// its inodes. A request still running when the next rebuild ends delays it, so only one is
+/// ever outstanding (SYS-030).
+pub struct SocketResolve {
+    handle: HelperHandle,
+    wanted: watch::Receiver<Arc<[u64]>>,
+    store: OwnerStore,
+    /// The last inode sent: the next request starts after it, so inodes past the cap wait
+    /// their turn in inode order.
+    cursor: Option<u64>,
+}
+
+impl SocketResolve {
+    /// Runs until `cx` is cancelled or the rebuild side is dropped.
+    pub async fn run(mut self, cx: &Cx) {
+        while self.wanted.changed(cx).await.is_ok() {
+            if cx.checkpoint().is_err() {
+                return;
+            }
+            if self.handle.state() != HelperState::Unlocked {
+                continue;
+            }
+            let batch = self.pick();
+            if batch.is_empty() {
+                continue;
+            }
+            let req = HelperRequest::ResolveSocketInodes {
+                inodes: batch.clone(),
+            };
+            // `read` never starts a session: requests run only after the user unlocked, and a
+            // helper that exits meanwhile gives `NotRunning`, never a polkit prompt.
+            match self.handle.read(cx, req, RESOLVE_DEADLINE).await {
+                Ok(replies) => self.store(&batch, &replies),
+                Err(HelperReadError::Call(HelperCallError::Cancelled)) => return,
+                // The owners stay "?".
+                Err(_) => {}
+            }
+        }
+    }
+
+    /// The wanted inodes after `cursor`, wrapping round, at most `RESOLVE_MAX`, sorted.
+    fn pick(&mut self) -> Vec<u64> {
+        let wanted = self.wanted.borrow_and_clone();
+        let start = self
+            .cursor
+            .map_or(0, |c| wanted.partition_point(|&inode| inode <= c));
+        let mut batch: Vec<u64> = wanted[start..]
+            .iter()
+            .chain(&wanted[..start])
+            .take(RESOLVE_MAX)
+            .copied()
+            .collect();
+        self.cursor = (wanted.len() > RESOLVE_MAX)
+            .then(|| batch.last().copied())
+            .flatten();
+        batch.sort_unstable();
+        batch
+    }
+
+    /// Keeps the owners of one reply for the next rebuild. An inode of `batch` the helper did
+    /// not resolve loses its old owners; an error reply changes nothing.
+    fn store(&self, batch: &[u64], replies: &[HelperReply]) {
+        let mut found: Vec<(u64, ProcessKey)> = Vec::new();
+        for reply in replies {
+            match &reply.body {
+                HelperReplyBody::SocketOwners(pairs) => found.extend(pairs),
+                _ => return,
+            }
+        }
+        let mut store = lock_store(&self.store);
+        for inode in batch {
+            store.remove(inode);
+        }
+        for (inode, key) in found {
+            // Only inodes that were asked for.
+            if batch.binary_search(&inode).is_ok() {
+                store.entry(inode).or_default().push(key);
+            }
+        }
+        for keys in store.values_mut() {
+            keys.sort_unstable();
+            keys.dedup();
+        }
     }
 }
 
@@ -657,7 +877,7 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
             };
             let src = ConnectionsSource::new(HostReader::new(root, boot))
                 .with_rdns(Rdns::new(requests, answers));
-            let outcome = source::run(cx, io, src).await;
+            let outcome = run(cx, io, src).await;
             resolver.abort();
             outcome
         }
