@@ -325,3 +325,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.3: gallery with 40 goldens (about 12 MB in git). ThemeScope swaps ThemeStore.preview per half while drawing. Not captured: hover, open select popup, stepper invalid state. render-tests now enables bench in tl-ui Cargo.toml. Leader to view goldens in the UI validation phase. Consider git LFS or smaller goldens if the repo grows.
 - y6k.9: build_startup in sys_table.rs; null publisher sorts last both ways. Follow-up bead for apply.rs startup counts (wait for 8q0.32 to leave apply.rs).
 - rsf.3: Selection by identity. click/ctrl_click/right_click take no view, so the E18-007 wiring must never pass a group header id. select_all drops hidden rows.
+- y6k.11: real systemd tests pass (user unit start and stop, 460 system units listed). Engine shutdown report printed, not failed.
+- i3o.13: unit actions. ActionCtx gained unit_bus_override (one line in each ActionCtx literal across actions and tests). JobRemoved match filters on sender and path. Lost connection gives OutcomeUnknown.
+- 8q0.33 done by the 8q0.31 agent; leader updated ARCHITECTURE.md. 8q0.32 resent full-wiring approval.
+- Flaky tests made into beads: lab_processes shared fixture dir; probe_integration fd 5 and empty env.
