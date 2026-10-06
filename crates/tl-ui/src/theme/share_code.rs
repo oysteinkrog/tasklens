@@ -186,7 +186,7 @@ fn base64url_decode(text: &str) -> Option<Vec<u8>> {
     let data = match bytes {
         [rest @ .., b'=', b'='] | [rest @ .., b'='] => {
             // Padding fills the last group to 4 characters, no more.
-            if bytes.len() % 4 != 0 {
+            if !bytes.len().is_multiple_of(4) {
                 return None;
             }
             rest
