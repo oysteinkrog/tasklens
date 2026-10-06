@@ -226,7 +226,13 @@ mod tests {
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
         assert!(child.child.id() > 0);
+        hello(&child);
+    }
 
+    /// Sends `Hello` and checks the reply. The real probe answers `InitFailed` on a machine
+    /// without a usable NVIDIA driver. Any reply proves the child reads and writes the socket on
+    /// fd 3, and that its exec has finished.
+    fn hello(child: &ProbeChild) {
         let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
         sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let hello = ProbeRequest::Hello {
@@ -234,8 +240,6 @@ mod tests {
         };
         write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
         let resp: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read reply");
-        // The real probe answers InitFailed on a machine without a usable NVIDIA driver. Any
-        // reply proves the child reads and writes the socket on fd 3.
         match resp {
             ProbeResponse::Hello { proto, .. } => assert_eq!(proto, GPU_PROTO_VERSION),
             ProbeResponse::InitFailed { .. } => {}
@@ -260,6 +264,9 @@ mod tests {
         }
         let Some(probe) = test_probe() else { return };
         let child = spawn(&probe);
+        // `spawn` returns when exec closes the CLOEXEC fds, before the kernel has loaded the
+        // new image, and until then `environ` reads empty. The reply comes after.
+        hello(&child);
 
         let environ = std::fs::read(format!("/proc/{}/environ", child.child.id())).unwrap();
         let got: BTreeSet<Vec<u8>> = environ

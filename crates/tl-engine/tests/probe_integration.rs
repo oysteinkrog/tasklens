@@ -453,8 +453,8 @@ fn pdeathsig_kills_orphan() {
     assert_clean(&[]);
 }
 
-/// E13-008: the socket on fd 3, only fds 0 to 3 open, the minimal environment, and a drop that
-/// kills and reaps.
+/// E13-008: the socket on fd 3, no other fd of the test process, the minimal environment, and a
+/// drop that kills and reaps.
 #[test]
 fn spawn_fd3_env_and_fds() {
     let _g = real();
@@ -462,32 +462,44 @@ fn spawn_fd3_env_and_fds() {
     let child = spawn_probe(&probe, &[OsStr::new("--fake"), OsStr::new("normal")]).expect("spawn");
     let pid = child.child.id();
 
-    // Before `Hello`: once the probe answers, it opens a second fd on its socket. Its start-up
-    // may hold short-lived fds of its own, so the set is polled for 500 ms; a leaked fd stays.
-    let fd_set = || -> Vec<i32> {
-        let mut fds: Vec<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .expect("read fd dir")
-            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
-            .collect();
-        fds.sort_unstable();
-        fds
+    // `/proc` is read only after the `Hello` reply. `spawn` returns when exec closes the
+    // CLOEXEC fds, which is before the kernel has loaded the new image, so `environ` may still
+    // be empty then (`env_end` is 0). By the reply, ld.so has closed its fds and `open_fd` has
+    // closed its pidfd and keeps a copy of fd 3.
+    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
+    sock.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let hello = ProbeRequest::Hello {
+        proto: GPU_PROTO_VERSION,
     };
-    let end = Instant::now() + Duration::from_millis(500);
-    let mut fds = fd_set();
-    while fds != [0, 1, 2, 3] && Instant::now() < end {
-        std::thread::sleep(Duration::from_millis(5));
-        fds = fd_set();
-    }
+    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
+    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
+    assert!(
+        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
+        "{reply:?}"
+    );
+
+    let target = |fd: i32| std::fs::read_link(format!("/proc/{pid}/fd/{fd}"));
+    let mut fds: Vec<i32> = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .expect("read fd dir")
+        .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        .collect();
+    fds.sort_unstable();
     let targets: Vec<String> = fds
         .iter()
-        .map(|fd| {
-            let target = std::fs::read_link(format!("/proc/{pid}/fd/{fd}"));
-            format!("{fd}: {target:?}")
-        })
+        .map(|&fd| format!("{fd}: {:?}", target(fd)))
         .collect();
-    assert_eq!(fds, vec![0, 1, 2, 3], "{targets:?}");
-    let fd3 = std::fs::read_link(format!("/proc/{pid}/fd/3")).expect("readlink fd 3");
+    let fd3 = target(3).expect("readlink fd 3");
     assert!(fd3.to_string_lossy().starts_with("socket:["), "{fd3:?}");
+    // fds 0 to 3, plus the probe's own copy of the fd 3 socket and nothing else.
+    let (low, high): (Vec<i32>, Vec<i32>) = fds.iter().partition(|&&fd| fd <= 3);
+    assert_eq!(low, vec![0, 1, 2, 3], "{targets:?}");
+    assert_eq!(high.len(), 1, "{targets:?}");
+    assert!(
+        high.iter()
+            .all(|&fd| target(fd).ok().as_ref() == Some(&fd3)),
+        "{targets:?}"
+    );
 
     let environ = std::fs::read(format!("/proc/{pid}/environ")).expect("read environ");
     let mut got: Vec<Vec<u8>> = environ
@@ -507,19 +519,6 @@ fn spawn_fd3_env_and_fds() {
     got.sort();
     want.sort();
     assert_eq!(got, want);
-
-    let mut sock = UnixStream::from(child.sock.try_clone().expect("clone sock"));
-    sock.set_read_timeout(Some(Duration::from_secs(5)))
-        .expect("read timeout");
-    let hello = ProbeRequest::Hello {
-        proto: GPU_PROTO_VERSION,
-    };
-    write_frame(&mut sock, &hello, MAX_PROBE_FRAME).expect("write hello");
-    let reply: ProbeResponse = read_frame(&mut sock, MAX_PROBE_FRAME).expect("read hello");
-    assert!(
-        matches!(reply, ProbeResponse::Hello { proto, .. } if proto == GPU_PROTO_VERSION),
-        "{reply:?}"
-    );
 
     drop(child);
     assert_eq!(stat(pid), None, "drop kills and reaps");
