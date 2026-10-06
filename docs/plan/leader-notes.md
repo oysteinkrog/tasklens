@@ -370,3 +370,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.21: closed again with DiskDrive.name and map_inventory_devices; NVML form and late catalog left to 8q0.36.
 - jqk.5: approved TlButton::icon_muted.
 - wlf.7: BenchEngine. Up time goes through SystemSnapshot.boot_time_s; NET_RX equals NET_TX in the synth. A tl-bench-bridge thread outlives stop() until the real client sends or closes.
+- fut.17: toast stack drawn by tasklens (ToastLayer root plugin; toast::init in TasklensUi::init before any window). TlButton::icon_size. Close tooltip still hard-coded "Close" (i18n sweep).
+- gma.12: closed; PropsFilter::new takes the tab label. GPUI test window has no a11y tree, so aria names are only checked at the builder.
+- hjn.24: SMART failure reason goes in health with Failed; new tl_model::units::bytes_si_1dp.
