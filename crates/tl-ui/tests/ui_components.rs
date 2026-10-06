@@ -317,10 +317,14 @@ mod display {
         cx.bind_keys([KeyBinding::new("ctrl-c", PageCopy, Some(ROOT_CONTEXT))]);
     }
 
+    type Build = Box<dyn Fn(&mut Window, &mut Context<Host>) -> Vec<AnyElement>>;
+    /// The stepper and select states, created on the first render.
+    type States = Rc<Cell<Option<(Entity<InputState>, Entity<TlSelectState>)>>>;
+
     /// A window whose root takes Tab, Shift+Tab and the page Copy, around `build()`.
     struct Host {
         root: FocusHandle,
-        build: Box<dyn Fn(&mut Window, &mut Context<Self>) -> Vec<AnyElement>>,
+        build: Build,
         page_copies: Rc<Cell<usize>>,
     }
 
@@ -377,8 +381,7 @@ mod display {
                 .step(5.)
                 .default_value(100.)
         });
-        let window_state: Rc<Cell<Option<(Entity<InputState>, Entity<TlSelectState>)>>> =
-            Rc::default();
+        let window_state: States = Rc::default();
         open_host(cx, move |window, cx| {
             let (stepper, select) = match window_state.take() {
                 Some(states) => states,
