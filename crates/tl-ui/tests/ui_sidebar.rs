@@ -882,7 +882,7 @@ mod sidebar {
 
     #[gpui_kit::test]
     fn sixty_frames_make_no_tr_calls(cx: &mut TestAppContext) {
-        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let r = open(cx, nine(), Settings::default(), UiState::default());
         let calls = tr_calls();
         for i in 0..60 {
             r.engine
