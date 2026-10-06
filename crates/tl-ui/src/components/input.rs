@@ -617,6 +617,12 @@ mod tests {
             draw(cx);
         };
 
+        // Keep the pointer off the field, so it shows no hover border.
+        cx.simulate_mouse_move(
+            gpui_kit::point(px(500.), px(500.)),
+            None,
+            gpui_kit::Modifiers::none(),
+        );
         assert_eq!(border_quads(cx, |t| t.status.danger), 0);
         assert!(
             border_quads(cx, |t| t.divider) > 0,
