@@ -2567,3 +2567,291 @@ mod tier_1hz {
         }));
     }
 }
+
+/// tasklens-yrf.16: hover readout. A hitbox only when `spec.hover`, the nearest valid sample,
+/// the offset text, the box flip at the right edge, and no re-shaping while the index holds.
+mod hover {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, Modifiers, MouseButton, ParentElement, Render,
+        Styled, TestAppContext, VisualTestContext, Window, div, point, px,
+    };
+    use smallvec::smallvec;
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SampleFlags, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::chart::geometry::TimeMap;
+    use tl_ui::chart::hover::{nearest_index, offset_text, pointer_time, window_stats};
+    use tl_ui::chart::view::ChartView;
+    use tl_ui::chart::{ChartSeries, ChartSpec};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+    const S: u64 = 1_000_000_000;
+
+    /// Lays the chart out at 602 × 202, so the plot is 1..601 by 1..201.
+    struct Root {
+        _driver: Entity<AnimationDriver>,
+        chart: Entity<ChartView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(602.)).h(px(202.)).child(self.chart.clone())
+        }
+    }
+
+    fn spec(hover: bool) -> ChartSpec {
+        ChartSpec {
+            series: smallvec![ChartSeries::default()],
+            hover,
+            ..ChartSpec::default()
+        }
+    }
+
+    /// 600 valid samples 100 ms apart, the newest at `newest`, value `i % 100`.
+    fn view_of(newest: u64) -> Arc<SeriesView> {
+        let samples: Vec<Sample> = (0..600u64)
+            .map(|i| Sample::valid(newest - (599 - i) * 100 * MS, (i % 100) as f32))
+            .collect();
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(0),
+                metric: MetricId::CPU_TOTAL,
+            },
+            version: 1,
+            period_ns: 100 * MS,
+            samples: samples.into(),
+        })
+    }
+
+    fn chart_in_window(
+        cx: &mut TestAppContext,
+        spec: ChartSpec,
+        data: bool,
+    ) -> (Entity<ChartView>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            let hub = super::hub_for(&FakeEngine::new(), cx);
+            let chart = cx.new(|cx| ChartView::new(spec, super::labels(), &hub, cx));
+            Root {
+                _driver: driver,
+                chart,
+            }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        let chart = vcx.read_entity(&root, |r, _| r.chart.clone());
+        if data {
+            chart.update(vcx, |v, cx| {
+                v.set_series_for_test(smallvec![Some(view_of(now_boot_ns()))], cx)
+            });
+        }
+        draw(vcx);
+        (chart, vcx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    /// Moves the pointer to `(x, y)` and draws.
+    fn hover(vcx: &mut VisualTestContext, x: f32, y: f32) {
+        vcx.simulate_mouse_move(point(px(x), px(y)), None, Modifiers::none());
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    fn sample(t_ms: u64, valid: bool) -> Sample {
+        Sample {
+            t_ns: t_ms * MS,
+            value: 1.0,
+            flags: if valid {
+                SampleFlags::VALID
+            } else {
+                SampleFlags::empty()
+            },
+        }
+    }
+
+    #[gpui_kit::test]
+    fn hover_no_hitbox_when_disabled(cx: &mut TestAppContext) {
+        let (chart, vcx) = chart_in_window(cx, spec(false), true);
+        hover(vcx, 300., 100.);
+        vcx.read_entity(&chart, |v, _| {
+            let h = v.hover_state();
+            assert!(!h.hitbox_inserted, "no hitbox without spec.hover");
+            assert_eq!(h.pinned_t_ns, None);
+            assert_eq!(h.last_box, None);
+        });
+
+        chart.update(vcx, |v, cx| v.set_spec(spec(true), cx));
+        chart.update(vcx, |v, cx| {
+            v.set_series_for_test(smallvec![Some(view_of(now_boot_ns()))], cx)
+        });
+        draw(vcx);
+        hover(vcx, 300., 101.);
+        vcx.read_entity(&chart, |v, _| {
+            assert!(v.hover_state().hitbox_inserted);
+            assert!(v.hover_state().last_box.is_some());
+        });
+    }
+
+    #[test]
+    fn hover_picks_nearest_sample() {
+        let s = [sample(0, true), sample(100, true), sample(200, true)];
+        assert_eq!(nearest_index(&s, 140 * MS), Some(1));
+        assert_eq!(nearest_index(&s, 160 * MS), Some(2));
+        assert_eq!(nearest_index(&s, 500 * MS), Some(2), "past the newest");
+        let gap = [sample(0, true), sample(100, true), sample(200, false)];
+        assert_eq!(
+            nearest_index(&gap, 160 * MS),
+            Some(1),
+            "invalid sample skipped"
+        );
+        assert_eq!(nearest_index(&[sample(0, false)], 0), None);
+
+        let map = TimeMap {
+            anchor_ns: 60 * S,
+            right_edge_ns: 60 * S,
+            range_ns: 60 * S,
+            plot_width: 600.0,
+        };
+        assert_eq!(pointer_time(&map, 600.0, 600.0), 60 * S);
+        assert_eq!(pointer_time(&map, 600.0, 580.0), 58 * S);
+        assert_eq!(pointer_time(&map, 600.0, -10.0), 0, "clamped to the plot");
+
+        let stats = window_stats(&gap, 1);
+        assert_eq!(stats.samples, 1, "valid samples only");
+    }
+
+    #[test]
+    fn hover_offset_text() {
+        let mut out = String::new();
+        offset_text(12_400 * MS, 60 * S, &mut out);
+        assert_eq!(out, "-12 s");
+        out.clear();
+        offset_text(252 * S, 300 * S, &mut out);
+        assert_eq!(out, "-4 m 12 s");
+        out.clear();
+        offset_text(252 * S, 600 * S, &mut out);
+        assert_eq!(out, "-4 m 12 s");
+        out.clear();
+        offset_text(0, 60 * S, &mut out);
+        assert_eq!(out, "0 s");
+    }
+
+    #[gpui_kit::test]
+    fn hover_box_flips_at_right_edge(cx: &mut TestAppContext) {
+        let (chart, vcx) = chart_in_window(cx, spec(true), true);
+        // 10 px per second: x = 581 is 2 s before the newest sample, 20 px from the right edge.
+        hover(vcx, 581., 100.);
+        vcx.read_entity(&chart, |v, _| {
+            let h = v.hover_state();
+            let b = h.last_box.expect("box painted");
+            let x = h.last_marker_x.expect("marker painted");
+            assert_eq!(x, px(581.));
+            assert!(
+                b.right() <= px(601.),
+                "flipped left of the plot's right edge"
+            );
+            assert!(b.right() < x, "box left of the marker");
+            assert_eq!(h.index, Some(579));
+            assert_eq!(h.line_text(0), Some("-2 s"));
+            assert_eq!(h.line_text(1), Some("CPU"), "heading when no legend");
+            assert_eq!(h.line_text(4), Some("600 samples"));
+        });
+
+        hover(vcx, 100., 100.);
+        vcx.read_entity(&chart, |v, _| {
+            let h = v.hover_state();
+            let b = h.last_box.expect("box painted");
+            assert!(
+                b.left() > h.last_marker_x.unwrap(),
+                "box right of the marker"
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn hover_hidden_without_valid_samples(cx: &mut TestAppContext) {
+        let (chart, vcx) = chart_in_window(cx, spec(true), false);
+        hover(vcx, 300., 100.);
+        vcx.read_entity(&chart, |v, _| {
+            assert!(v.hover_state().hitbox_inserted);
+            assert_eq!(
+                v.hover_state().last_box,
+                None,
+                "WarmingUp paints no readout"
+            );
+            assert_eq!(v.hover_state().last_marker_x, None);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn hover_cleared_on_mouse_down(cx: &mut TestAppContext) {
+        let (chart, vcx) = chart_in_window(cx, spec(true), true);
+        hover(vcx, 300., 100.);
+        assert!(vcx.read_entity(&chart, |v, _| v.hover_state().last_box.is_some()));
+        vcx.simulate_mouse_down(
+            point(px(300.), px(100.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        draw(vcx);
+        vcx.read_entity(&chart, |v, _| {
+            assert_eq!(v.hover_state().pinned_t_ns, None);
+            assert_eq!(v.hover_state().last_box, None, "marker gone");
+        });
+
+        // Leaving the plot hides it as well.
+        hover(vcx, 300., 100.);
+        assert!(vcx.read_entity(&chart, |v, _| v.hover_state().last_box.is_some()));
+        hover(vcx, 300., 400.);
+        assert_eq!(
+            vcx.read_entity(&chart, |v, _| v.hover_state().last_box),
+            None
+        );
+    }
+
+    #[gpui_kit::test]
+    fn hover_reshapes_only_on_index_change(cx: &mut TestAppContext) {
+        let (chart, vcx) = chart_in_window(cx, spec(true), true);
+        let builds = vcx.read_entity(&chart, |v, _| v.build_count.get());
+        hover(vcx, 300., 100.);
+        let first = vcx.read_entity(&chart, |v, _| v.hover_state().shape_count);
+        assert!(first > 0);
+        draw(vcx);
+        draw(vcx);
+        let (same, index) = vcx.read_entity(&chart, |v, _| {
+            (v.hover_state().shape_count, v.hover_state().index)
+        });
+        assert_eq!(same, first, "same index: no shaping");
+        assert!(index.is_some());
+
+        hover(vcx, 200., 100.);
+        let moved = vcx.read_entity(&chart, |v, _| v.hover_state().shape_count);
+        assert!(moved > first, "new index re-shapes");
+        assert_eq!(
+            vcx.read_entity(&chart, |v, _| v.build_count.get()),
+            builds,
+            "hover never rebuilds geometry"
+        );
+    }
+}
