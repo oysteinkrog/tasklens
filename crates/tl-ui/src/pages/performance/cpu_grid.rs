@@ -89,9 +89,14 @@ impl Default for GridWords {
 }
 
 impl GridWords {
+    /// The words in the current strings; en-US without strings (tests).
     pub fn new(cx: &App) -> Self {
+        let version = strings_version(cx);
+        if version.is_none() {
+            return Self::default();
+        }
         Self {
-            version: strings_version(cx),
+            version,
             cell: Template::new(cx, KEY_CELL, &["n"]),
             tip: Template::new(cx, KEY_TIP, &["core", "thread", "mhz"]),
             tip_no_clock: Template::new(cx, KEY_TIP_NO_CLOCK, &["core", "thread"]),

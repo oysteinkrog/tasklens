@@ -94,9 +94,14 @@ impl Default for PageWords {
 }
 
 impl PageWords {
+    /// The words in the current strings; en-US without strings (tests).
     fn new(cx: &App) -> Self {
+        let version = strings_version(cx);
+        if version.is_none() {
+            return Self::default();
+        }
         Self::build(
-            strings_version(cx),
+            version,
             |key| tr(cx, key),
             |key, args| Template::new(cx, key, args),
         )

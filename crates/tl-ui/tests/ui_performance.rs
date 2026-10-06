@@ -714,4 +714,213 @@ mod page_frame {
         assert!(vcx.debug_bounds("perf-page-header").is_some());
         assert!(vcx.debug_bounds("perf-graph-area").is_some());
     }
+
+    // ---- Words through tr, cached per strings version (R-132) ----
+
+    /// Every Performance key the details, the grid and the header read, mapped to a marker.
+    #[cfg(feature = "test-hooks")]
+    const MARKERS: &str = "
+perf-fallback-collecting = <collecting>
+perf-fallback-restricted = <restricted>
+perf-fallback-restricted-tooltip = <restricted-tip>
+perf-fallback-needs-setup = <needs-setup>
+perf-fallback-needs-setup-tooltip = <needs-setup-tip>
+perf-fallback-not-supported = <not-supported>
+perf-fallback-not-supported-tooltip = <not-supported-tip>
+perf-fallback-not-reported = <not-reported>
+perf-fallback-unavailable = <unavailable>
+perf-fallback-could-not-read = <could-not-read {$reason}>
+perf-fallback-unknown = <unknown>
+perf-last-updated = <last-updated {$age}>
+perf-details-heading = <details>
+perf-header-processor = <processor>
+perf-header-disk = <disk {$n}>
+perf-header-disks-count = <{$k} disks>
+perf-card-aggregate-storage = <aggregate-storage>
+perf-unknown-processor = <unknown-processor>
+perf-cpu-row-speed = <speed>
+perf-cpu-row-sockets = <sockets>
+perf-cpu-row-l1 = <l1>
+perf-cpu-cell = <cpu {$n}>
+perf-cpu-cell-tooltip = <core {$core} thread {$thread} {$mhz} mhz>
+perf-cpu-cell-tooltip-noclock = <core {$core} thread {$thread}>
+perf-legend-total = <total>
+perf-legend-kernel = <kernel>
+";
+
+    #[cfg(feature = "test-hooks")]
+    #[gpui_kit::test]
+    fn performance_words_follow_test_locale(cx: &mut TestAppContext) {
+        use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
+        use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
+        use tl_ui::pages::performance::cpu_grid::{GridWords, cell_specs, heading_tooltip};
+        use tl_ui::pages::performance::details::Fallback;
+        use tl_ui::pages::performance::page::page_words;
+
+        const SPEED: &str = "perf-cpu-row-speed";
+        const SOCKETS: &str = "perf-cpu-row-sockets";
+        const L1: &str = "perf-cpu-row-l1";
+        let mut model = KeyValueModel::new(&[SPEED, SOCKETS, L1]);
+        model.set_fallback(SPEED, Validity::Failed, Fallback::Unavailable, Some("EIO"));
+        model.set_fallback(SOCKETS, Validity::Unsupported, Fallback::NeedsSetup, None);
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            assert!(model.refresh_strings(cx));
+        });
+        assert_eq!(model.rows[0].value, "Unavailable");
+        assert_eq!(
+            model.rows[0].tooltip.as_deref(),
+            Some("Could not read: EIO")
+        );
+
+        cx.update(|cx| {
+            set_test_catalogue(cx, MARKERS);
+            let before = tr_calls();
+            assert!(model.refresh_strings(cx), "a new strings version");
+            let rebuilt = tr_calls();
+            assert!(rebuilt > before);
+            assert!(!model.refresh_strings(cx), "translated once");
+            assert_eq!(tr_calls(), rebuilt, "no tr calls the second time");
+        });
+        let shown = |model: &KeyValueModel, i: usize| {
+            let r = &model.rows[i];
+            (
+                r.value.to_string(),
+                r.tooltip.as_ref().map(|t| t.to_string()),
+            )
+        };
+        assert_eq!(
+            shown(&model, 0),
+            ("<unavailable>".into(), Some("<could-not-read EIO>".into()))
+        );
+        assert_eq!(
+            shown(&model, 1),
+            ("<needs-setup>".into(), Some("<needs-setup-tip>".into()))
+        );
+        assert_eq!(shown(&model, 2), ("<collecting>".into(), None));
+        let labels: Vec<String> = model.to_kv_rows().map(|r| r.label.to_string()).collect();
+        assert_eq!(labels, ["<speed>", "<sockets>", "<l1>"]);
+
+        model.set_text(L1, "1 MiB");
+        model.set_stale(L1, 5_000_000_000);
+        assert_eq!(model.rows[2].tooltip.as_deref(), Some("<last-updated 5s>"));
+        model.set_fallback(L1, Validity::Restricted, Fallback::NotSupported, None);
+        assert_eq!(
+            shown(&model, 2),
+            ("<restricted>".into(), Some("<restricted-tip>".into()))
+        );
+
+        // CPU grid: headings, tooltips and legend words.
+        let words = cx.update(|cx| GridWords::new(cx));
+        let topology = CpuTopology {
+            online: {
+                let mut set = CpuSet::empty();
+                (0..4).for_each(|id| set.insert(id));
+                set
+            },
+            cores: (0..2)
+                .map(|c| CoreInfo {
+                    id: c,
+                    logical: smallvec::smallvec![c, c + 2],
+                    l3_group: 0,
+                    kind: CoreKind::Standard,
+                })
+                .collect(),
+        };
+        let devices: Vec<DeviceIdx> = (0..4).map(|id| DeviceIdx(100 + id)).collect();
+        let mut cells = Vec::new();
+        cell_specs(&words, &topology, &devices, false, &mut cells);
+        assert_eq!(cells[3].heading.as_ref(), "<cpu 3>");
+        assert_eq!(cells[3].tooltip.as_deref(), Some("<core 1 thread 1>"));
+        let mut tip = String::new();
+        heading_tooltip(&words, 1, 0, Some(4200), &mut tip);
+        assert_eq!(tip, "<core 1 thread 0 4200 mhz>");
+        assert_eq!(
+            (words.total.as_ref(), words.kernel.as_ref()),
+            ("<total>", "<kernel>")
+        );
+
+        // Page header words and the Details heading.
+        let disk = entry(
+            1,
+            DeviceIdentity::Disk {
+                major: 259,
+                minor: 0,
+                name: Arc::from("nvme0n1"),
+                wwn_or_serial: None,
+            },
+            "nvme0n1",
+        );
+        let mut snap = Snapshot::empty(BootId(1), 1);
+        snap.devices = Arc::new(DeviceCatalog {
+            version: 1,
+            entries: Arc::from(vec![disk.clone()]),
+        });
+        cx.update(|cx| {
+            let cpu = entry(0, DeviceIdentity::CpuPackage, "CPU");
+            let w = page_words(cx).clone();
+            assert_eq!(w.details.as_ref(), "<details>");
+            assert_eq!(
+                strings(header_text(&w, DeviceKind::Cpu, 0, &cpu, &snap)),
+                ("<processor>".into(), "<unknown-processor>".into())
+            );
+            assert_eq!(
+                strings(header_text(&w, DeviceKind::Disk, 1, &disk, &snap)),
+                ("<disk 1>".into(), "nvme0n1".into())
+            );
+            assert_eq!(
+                strings(header_text(&w, DeviceKind::AggregateDisk, 0, &disk, &snap)),
+                ("<aggregate-storage>".into(), "<1 disks>".into())
+            );
+        });
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[gpui_kit::test]
+    fn performance_frames_do_no_tr_calls(cx: &mut TestAppContext) {
+        use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
+
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+        });
+        let (page, vcx) = cx.add_window_view(|_, cx| TestPage {
+            key: DeviceKey(Arc::from("cpu")),
+            model: "AMD Ryzen 7 7800X3D 8-Core Processor".into(),
+            toggles: 1,
+            details: KeyValueModel::new(&["perf-cpu-row-speed"]),
+            focus: cx.focus_handle(),
+            mini: Rc::default(),
+        });
+        let frame = |vcx: &mut VisualTestContext| {
+            vcx.update(|window, cx| {
+                window.refresh();
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        };
+        let frames = |vcx: &mut VisualTestContext| {
+            let before = tr_calls();
+            for _ in 0..60 {
+                frame(vcx);
+            }
+            tr_calls() - before
+        };
+        draw(vcx);
+        assert_eq!(frames(vcx), 0, "60 unchanged frames");
+
+        let before = tr_calls();
+        vcx.update(|_, cx| set_test_catalogue(cx, MARKERS));
+        frame(vcx);
+        assert!(tr_calls() > before, "the new strings are read");
+        assert_eq!(frames(vcx), 0, "60 frames after the switch");
+        let label = vcx.update(|_, cx| {
+            page.read(cx)
+                .details
+                .to_kv_rows()
+                .next()
+                .map(|r| r.label.to_string())
+        });
+        assert_eq!(label.as_deref(), Some("<speed>"));
+    }
 }
