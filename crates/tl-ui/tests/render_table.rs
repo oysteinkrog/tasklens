@@ -628,11 +628,22 @@ fn rtl_name_in_ltr_cell() {
         (xs, line.width)
     });
     let (count_left, count_right) = glyph_span(&xs, width, &count);
-    let (_, hebrew_right) = glyph_span(&xs, width, &hebrew);
+    let (hebrew_left, hebrew_right) = glyph_span(&xs, width, &hebrew);
     assert!(
         count_left >= hebrew_right,
         "the count run starts right of the RTL run: count {count_left:?}, RTL ends at \
          {hebrew_right:?}, glyphs {xs:?}"
+    );
+    // The space stays outside the isolate: it draws between the name and the count, not at
+    // the name's left edge, so the text starts at x 0 like the LTR rows.
+    assert!(
+        count_left - hebrew_right > px(1.),
+        "a gap between the name and the count: count {count_left:?}, RTL ends at \
+         {hebrew_right:?}, glyphs {xs:?}"
+    );
+    assert!(
+        hebrew_left < px(0.5),
+        "the RTL run starts the text: {hebrew_left:?}, glyphs {xs:?}"
     );
     assert!(
         (count_right - width).abs() < px(0.5),

@@ -500,7 +500,7 @@ const PDI: char = '\u{2069}';
 /// The text and runs a Name cell shapes for `primary` (UI-FND-053 rule 3). With a count run
 /// after a non-empty name, the name is wrapped in FSI and PDI (from `cache`, built once) and the
 /// runs grow to cover the two marks: FSI joins the first run, PDI the run that ends where the
-/// count starts. Without one, `primary` and [`primary_runs`] as they are.
+/// count starts (PDI sits before the name's trailing whitespace, which that run holds). Without one, `primary` and [`primary_runs`] as they are.
 pub fn name_primary_text(
     primary: &SharedString,
     highlight_fffd: bool,
@@ -642,7 +642,8 @@ impl IconSourceCache {
     /// `text` with its name part `..count_start` wrapped in FSI (U+2068) and PDI (U+2069), built
     /// once and reused (UI-FND-053 rule 3). Inside the isolate the name keeps its own direction;
     /// outside it the cell has no strong character before the count, so the paragraph is LTR and
-    /// the count stays on the right of an RTL name.
+    /// the count stays on the right of an RTL name. The isolate ends before the name's trailing
+    /// whitespace: inside an RTL isolate that space would draw at the name's left edge.
     pub fn isolated_name(&mut self, text: &SharedString, count_start: usize) -> SharedString {
         let version = self.version;
         if let Some((isolated, start, used)) = self.names.get_mut(text)
@@ -657,9 +658,10 @@ impl IconSourceCache {
         }
         let mut isolated = String::with_capacity(text.len() + 2 * FSI.len_utf8());
         isolated.push(FSI);
-        isolated.push_str(&text[..count_start]);
+        let name_end = text[..count_start].trim_end().len();
+        isolated.push_str(&text[..name_end]);
         isolated.push(PDI);
-        isolated.push_str(&text[count_start..]);
+        isolated.push_str(&text[name_end..]);
         let isolated = SharedString::from(isolated);
         self.names
             .insert(text.clone(), (isolated.clone(), count_start, version));
