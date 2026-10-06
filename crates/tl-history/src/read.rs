@@ -537,19 +537,38 @@ pub fn system_series<'a>(
 }
 
 /// Running per-process sums of one stack bucket.
+///
+/// The first sweep of a bucket goes into `first` as a plain list. Only a second sweep in the same
+/// bucket moves it into `sums`. Short ranges have one sweep per bucket, so they never hash.
 struct StackBucket {
     t_ns: TimeNs,
     sweeps: u32,
+    first: Vec<(ProcessKey, f64)>,
     sums: HashMap<ProcessKey, f64>,
 }
 
 impl StackBucket {
+    /// Adds one sweep's live, non-deleted values.
+    fn add(&mut self, values: impl Iterator<Item = (ProcessKey, f64)>) {
+        self.sweeps += 1;
+        if self.sweeps == 1 {
+            self.first.extend(values);
+            return;
+        }
+        if self.sweeps == 2 {
+            self.sums.extend(self.first.drain(..));
+        }
+        for (k, v) in values {
+            *self.sums.entry(k).or_insert(0.0) += v;
+        }
+    }
+
     /// The three largest per-process means, largest first, and the sum of the rest.
     fn finish(&mut self) -> (TimeNs, [f32; 3], f32) {
         let n = f64::from(self.sweeps.max(1));
         let mut top = [0.0f64; 3];
         let mut other = 0.0f64;
-        for v in self.sums.drain().map(|(_, s)| s / n) {
+        let mut rank = |v: f64| {
             if v > top[2] {
                 other += top[2];
                 top[2] = v;
@@ -557,7 +576,14 @@ impl StackBucket {
             } else {
                 other += v;
             }
+        };
+        for (_, s) in self.first.drain(..) {
+            rank(s / n);
         }
+        for (_, s) in self.sums.drain() {
+            rank(s / n);
+        }
+        self.sweeps = 0;
         (self.t_ns, top.map(|v| v as f32), other as f32)
     }
 }
@@ -578,19 +604,20 @@ pub fn stack<'a>(
     let mut cur = StackBucket {
         t_ns: 0,
         sweeps: 0,
+        first: Vec::new(),
         sums: HashMap::new(),
     };
     for_each_sweep(blocks, from, to, |t, r| {
         let start = t / width * width;
         if cur.sweeps > 0 && cur.t_ns != start {
             out.push(cur.finish());
-            cur.sweeps = 0;
         }
         cur.t_ns = start;
-        cur.sweeps += 1;
-        for p in r.live().filter(|p| !deleted.contains(&p.key)) {
-            *cur.sums.entry(p.key).or_insert(0.0) += f64::from(m.of(p));
-        }
+        cur.add(
+            r.live()
+                .filter(|p| !deleted.contains(&p.key))
+                .map(|p| (p.key, f64::from(m.of(p)))),
+        );
     });
     if cur.sweeps > 0 {
         out.push(cur.finish());
@@ -1084,6 +1111,72 @@ mod tests {
                 (got - sum / f64::from(n)).abs() < 1e-3,
                 "{t}: {got} vs {sum}/{n}"
             );
+        }
+    }
+
+    /// The old `stack`: one `HashMap` per bucket for every sweep.
+    fn stack_by_map<'a>(
+        blocks: impl Iterator<Item = &'a Block>,
+        m: Metric,
+        from: TimeNs,
+        to: TimeNs,
+        deleted: &DeletedKeys,
+    ) -> Vec<(TimeNs, [f32; 3], f32)> {
+        let width = bucket_width_ns(from, to);
+        let mut buckets: Vec<(TimeNs, u32, HashMap<ProcessKey, f64>)> = Vec::new();
+        for_each_sweep(blocks, from, to, |t, r| {
+            let start = t / width * width;
+            if buckets.last().is_none_or(|b| b.0 != start) {
+                buckets.push((start, 0, HashMap::new()));
+            }
+            let b = buckets.last_mut().unwrap();
+            b.1 += 1;
+            for p in r.live().filter(|p| !deleted.contains(&p.key)) {
+                *b.2.entry(p.key).or_insert(0.0) += f64::from(m.of(p));
+            }
+        });
+        buckets
+            .into_iter()
+            .map(|(t, n, sums)| {
+                let mut v: Vec<f64> = sums.into_values().map(|s| s / f64::from(n)).collect();
+                v.sort_unstable_by(|a, b| b.total_cmp(a));
+                v.resize(v.len().max(3), 0.0);
+                let other: f64 = v[3..].iter().sum();
+                (t, [v[0] as f32, v[1] as f32, v[2] as f32], other as f32)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn stack_matches_map_ranking_for_single_and_multi_sweep_buckets() {
+        let mut b = BlockBuilder::new(BootId(7));
+        let mut blocks = Vec::new();
+        for i in 0..1800u64 {
+            let mut sweep: Vec<_> = (0..40u32)
+                .map(|k| record(k, ((i * 3 + u64::from(k) * 11) % 50) as f32))
+                .collect();
+            if i % 7 < 3 {
+                sweep.push(record(40, 60.0));
+            }
+            if let Some(block) = b.on_process_sweep(i * SEC, &sweep) {
+                blocks.push(block);
+            }
+        }
+        blocks.extend(b.flush());
+        let mut deleted = DeletedKeys::default();
+        deleted.insert_all(&[key(3)]);
+        // 600 s gives 1 s buckets (one sweep each); 1,800 s gives 2 s buckets (two sweeps each).
+        for (to, sweeps_per_bucket) in [(599 * SEC, 1), (1799 * SEC, 2)] {
+            assert_eq!(bucket_width_ns(0, to) / SEC, sweeps_per_bucket);
+            for d in [DeletedKeys::default(), deleted.clone()] {
+                let got = stack(blocks.iter(), Metric::Cpu, 0, to, &d);
+                let want = stack_by_map(blocks.iter(), Metric::Cpu, 0, to, &d);
+                assert_eq!(got.len(), want.len());
+                for (g, w) in got.iter().zip(&want) {
+                    assert_eq!((g.0, g.1), (w.0, w.1));
+                    assert!((g.2 - w.2).abs() < 1e-3, "{}: {} vs {}", g.0, g.2, w.2);
+                }
+            }
         }
     }
 }
