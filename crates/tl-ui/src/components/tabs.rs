@@ -26,9 +26,9 @@ use gpui_kit::base::{Tab as BaseTab, Tabs as BaseTabs};
 use gpui_kit::component::Selectable;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenuItem};
 use gpui_kit::{
-    Anchor, Animation, AnimationExt as _, App, Bounds, Div, ElementId, Entity, FocusHandle,
-    FontWeight, InteractiveElement, Interactivity, IntoElement, KeyBinding, KeyDownEvent,
-    ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString, Stateful,
+    Anchor, Animation, AnimationExt as _, App, AppContext as _, Bounds, Div, ElementId, Entity,
+    FocusHandle, FontWeight, InteractiveElement, Interactivity, IntoElement, KeyBinding,
+    KeyDownEvent, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString, Stateful,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div, prelude::FluentBuilder as _,
     px,
 };
