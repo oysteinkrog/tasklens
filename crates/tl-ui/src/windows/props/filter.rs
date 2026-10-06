@@ -24,7 +24,7 @@ use gpui_kit::{
 use crate::components::empty::TlEmptyState;
 use crate::components::icons::TlIcon;
 use crate::components::input::{TlInputSize, TlTextInput};
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(
@@ -53,6 +53,8 @@ pub const NO_MATCH: &str = "pwn-props-filter-no-match";
 /// Fluent key of the Threads tab empty-state text.
 pub const NO_MATCH_THREADS: &str = "pwn-props-filter-no-match-threads";
 const PLACEHOLDER: &str = "pwn-props-filter-placeholder";
+const ICON_TOOLTIP: &str = "pwn-props-filter-icon-tooltip";
+const NAME: &str = "pwn-props-filter-name";
 
 /// Emitted when the debounce fires. `needle` is the lowercase filter text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,13 +72,20 @@ pub struct PropsFilter {
     needle_lower: SharedString,
     /// The latest generation, read by background filters between chunks.
     latest: Arc<AtomicU64>,
+    /// The tab label, for the accessible name "Filter {tab label}".
+    tab_label: SharedString,
     _sub: Subscription,
 }
 
 impl EventEmitter<FilterChanged> for PropsFilter {}
 
 impl PropsFilter {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `tab_label` is the tab's label without its count, such as "Threads".
+    pub fn new(
+        tab_label: impl Into<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
         let sub = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -90,6 +99,7 @@ impl PropsFilter {
             applied_generation: 0,
             needle_lower: SharedString::default(),
             latest: Arc::new(AtomicU64::new(0)),
+            tab_label: tab_label.into(),
             _sub: sub,
         }
     }
@@ -211,7 +221,9 @@ pub fn filter_bar(
 ) -> impl IntoElement {
     let theme = current(cx);
     let m = *metrics(cx);
-    let input = filter.read(cx).input.clone();
+    let f = filter.read(cx);
+    let input = f.input.clone();
+    let name = tr_args(cx, NAME, &[("tab", f.tab_label.to_string().into())]);
 
     div()
         .debug_selector(|| "PropsFilter-bar".into())
@@ -232,6 +244,8 @@ pub fn filter_bar(
                 .size(TlInputSize::Sm)
                 .width(px(FIELD_WIDTH * m.ui_scale))
                 .prefix_icon(TlIcon::Search)
+                .prefix_tooltip(tr(cx, ICON_TOOLTIP))
+                .aria_label(name)
                 .placeholder(tr(cx, PLACEHOLDER))
                 .clear_button(true)
                 .clean_on_escape(true),
@@ -315,7 +329,7 @@ mod tests {
     fn host(cx: &mut TestAppContext, empty: bool) -> (Entity<Host>, &mut VisualTestContext) {
         cx.update(setup);
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let filter = cx.new(|cx| PropsFilter::new(window, cx));
+            let filter = cx.new(|cx| PropsFilter::new("Threads", window, cx));
             let fired = Rc::new(RefCell::new(Vec::new()));
             let sub = cx.subscribe(&filter, {
                 let fired = fired.clone();
@@ -480,6 +494,15 @@ mod tests {
         // "row 1", "row 10".."row 19", "row 100".."row 199", "row 1000".."row 1999".
         assert_eq!(idx.len(), 1 + 10 + 100 + 1_000);
         assert_eq!(idx[0], 1);
+    }
+
+    #[gpui_kit::test]
+    fn accessible_name_names_the_tab(cx: &mut TestAppContext) {
+        let (_, cx) = host(cx, false);
+        let tree = cx
+            .update(|window, _| window.debug_a11y_tree_json())
+            .expect("an accessibility tree");
+        assert!(tree.contains("Filter Threads"), "{tree}");
     }
 
     #[gpui_kit::test]
