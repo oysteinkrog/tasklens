@@ -8,6 +8,7 @@ pub mod demand;
 pub mod hub;
 pub mod i18n;
 pub mod pages;
+pub mod settings_global;
 pub mod table;
 pub mod text;
 pub mod text_cache;

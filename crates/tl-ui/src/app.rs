@@ -26,7 +26,7 @@ use crate::components::{checkbox, kv_grid};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
 use crate::theme::ThemeDef;
-use crate::{i18n, text, theme};
+use crate::{i18n, settings_global, text, theme};
 
 /// What the theme store asks tl-app to write (UI-FND-042). E17-008 moves this enum to
 /// `theme/user_store.rs` and leaves a `pub use` here.
@@ -262,6 +262,7 @@ impl TasklensUi {
             persist_themes: Some(persist_themes),
             startup_toasts,
         });
+        settings_global::TlSettings::init(cx);
         cx.set_global(env);
 
         // 9. AppRequest loop. E20 replaces the handler Global.
