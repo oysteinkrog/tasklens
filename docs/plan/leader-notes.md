@@ -476,3 +476,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.16 (b5efbc0, 402ab9d, 88eebf1): chart hover readout; hitbox only when spec.hover; text reshaped only on index or version change; offset from the newest sample. Known: window deactivation clears the pin only on the next paint (no repaint is forced).
 - pdu.11 (fe4fe77, 9f9f8c0): process query state, generations, expansion, resend when the command queue was full. GroupHeader::node mirrors tl-engine GroupClass::key (noted on pdu.12).
 - crw.11 (e96173a, df61a3a): CPU page; charts cached; demand with window handle. Follow-up commits in flight: TlButton focus_handle and trailing_icon, grid rebuild on style_version, its strings through tr.
+- rsf.11 (b32090f, 17e2aa2): two-line header; totals from CellTextCache keyed by header row; TableSort<C> trait bound on TreeTableDelegate::Sort; header click calls sort_by_column directly.
+- pdu.7 (ea5e0b2, 5079cca, ae79d64): cell values. Sent back to index group members once per view generation instead of scanning per cell per frame. Sum columns on group rows and the desktop path folded into 8q0.38. split_pid_text noted on pdu.8.
