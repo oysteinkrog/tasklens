@@ -448,3 +448,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.11 (586ee3d, 1fcbe3b, 4765021, 11831de): chart labels cached and reshaped only on change; legend hidden under the range label size rule; a chart with a 2-item legend paints 6 lines (spec says 5); accepted.
 - yrf.19 (96b0ce6): ChartGeometryKey::sync compares in place; 120 unchanged paints of a 16-series chart do 0 key rebuilds and 0 geometry builds. tl-ui clippy all-targets clean at that point.
 - crw.5 (1228ab9, d652182, 4405d12, f9c0e75, 0b6b6ba, f2dfc93, 9d29fd5): DeviceCard. Approved: CardTextInput takes &Snapshot, fan_label and fan_temp, lock offsets, PerfSelectDevice declared early. Notes on crw.4 and crw.6.
+- lgw.2 (bfb6cca, 1728f01, ebd1eb1): theme preview module; the only real gap in E17-A2. Duplicate-name check on rename belongs to the editor (noted on bj6.34).
