@@ -1,6 +1,6 @@
 //! Column header tests in a real window (UI-PRC-005, ADR-013): the two-line header with totals,
-//! the sort arrow and the sort click (E18-009); column resize and fit (E18-010). Later column
-//! beads append their own sections.
+//! the sort arrow and the sort click (E18-009); column resize and fit (E18-010); column reorder
+//! drag (E18-011). Later column beads append their own sections.
 //!
 //! The header texts are measured, so the window uses the real text system with the bundled fonts.
 
@@ -25,7 +25,7 @@ use tl_ui::table::cells::CellOut;
 use tl_ui::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableId, min_width, next_sort,
 };
-use tl_ui::table::header::{UNSORTABLE_TOOLTIP, header_tooltip};
+use tl_ui::table::header::{GHOST_OPACITY, UNSORTABLE_TOOLTIP, ghost_fill, header_tooltip};
 use tl_ui::table::tree_table::{
     HeaderLines, IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
 };
@@ -771,4 +771,210 @@ fn fit_columns_never_below_minimum() {
     }
     // Short texts: Name shrinks from 200 to fit "row" and its label.
     assert!(stored_width(vcx, &table, ColumnId::Name) < px(200.));
+}
+
+// Column reorder drag (E18-011).
+
+fn visible_order(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<HDelegate>>,
+) -> Vec<ColumnId> {
+    vcx.update(|_, cx| table.read(cx).columns().visible_columns().to_vec())
+}
+
+fn reorder_slot(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<HDelegate>>,
+) -> Option<usize> {
+    vcx.update(|_, cx| table.read(cx).header_state().reorder.map(|d| d.slot))
+}
+
+fn sorted_cols(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<HDelegate>>,
+) -> Vec<ColumnId> {
+    vcx.update(|_, cx| table.read(cx).delegate.sorted.clone())
+}
+
+#[test]
+fn reorder_moves_column_and_persists_once() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    #[cfg(feature = "test-hooks")]
+    let before = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
+
+    // Grab CPU (380..460) 40 px from its left edge and drag it onto the Name and User boundary.
+    mouse_down(vcx, header_at(420.), 1);
+    drag_move(vcx, header_at(300.));
+    drag_move(vcx, header_at(210.));
+    assert_eq!(reorder_slot(vcx, &table), Some(1));
+    assert_eq!(
+        changed_count(vcx, &table),
+        0,
+        "nothing persists during the drag"
+    );
+
+    // The ghost follows the pointer where it was grabbed and keeps the cell's width.
+    let ghost = vcx
+        .debug_bounds("TlTreeTableHeader-ghost")
+        .expect("ghost while dragging");
+    assert_eq!(ghost.origin.x, px(170.));
+    assert_eq!(ghost.size.width, px(80.));
+    assert_eq!(ghost.size.height, px(44.));
+    let theme = vcx.update(|_, cx| current(cx).clone());
+    assert_eq!(ghost_fill(&theme), theme.header.opacity(GHOST_OPACITY));
+    assert_eq!(GHOST_OPACITY, 0.85);
+
+    // A 2 px line on x 200 over the header and the body.
+    let head_line = vcx
+        .debug_bounds("TlTreeTableHeader-insert")
+        .expect("insertion line in the header");
+    let body_line = vcx
+        .debug_bounds("TlTreeTable-insert")
+        .expect("insertion line over the body");
+    let body = vcx.debug_bounds("TlTreeTable-body").expect("body");
+    for line in [head_line, body_line] {
+        assert_eq!(line.origin.x, px(199.));
+        assert_eq!(line.size.width, px(2.));
+    }
+    assert_eq!(head_line.origin.y, px(0.));
+    assert_eq!(head_line.size.height, px(44.));
+    assert_eq!(body_line.origin.y, body.origin.y);
+    assert_eq!(body_line.size.height, body.size.height);
+    #[cfg(feature = "test-hooks")]
+    {
+        let misses = vcx.update(|_, cx| table.read(cx).text_cache_stats().1);
+        assert_eq!(misses, before, "a drag re-formats no cell text");
+    }
+
+    mouse_up(vcx, header_at(210.), 1);
+    assert_eq!(
+        visible_order(vcx, &table),
+        [
+            ColumnId::Name,
+            ColumnId::Cpu,
+            ColumnId::User,
+            ColumnId::Pid,
+            ColumnId::Pss
+        ]
+    );
+    assert_eq!(changed_count(vcx, &table), 1);
+    assert!(sorted_cols(vcx, &table).is_empty(), "a drop does not sort");
+    assert!(vcx.debug_bounds("TlTreeTableHeader-ghost").is_none());
+    assert!(vcx.debug_bounds("TlTreeTable-insert").is_none());
+}
+
+#[test]
+fn reorder_cannot_move_name() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    mouse_down(vcx, header_at(100.), 1);
+    drag_move(vcx, header_at(150.));
+    assert_eq!(reorder_slot(vcx, &table), None, "Name never drags");
+    assert!(vcx.debug_bounds("TlTreeTableHeader-ghost").is_none());
+    assert!(vcx.debug_bounds("TlTreeTableHeader-insert").is_none());
+    mouse_up(vcx, header_at(150.), 1);
+    assert_eq!(visible_order(vcx, &table), ORDER);
+    assert_eq!(changed_count(vcx, &table), 0);
+    assert!(
+        sorted_cols(vcx, &table).is_empty(),
+        "a 50 px move is not a click"
+    );
+}
+
+#[test]
+fn reorder_never_before_name() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    // User to the left edge: the line stays on the Name and User boundary.
+    mouse_down(vcx, header_at(250.), 1);
+    for x in [150., 60., 2., 0.] {
+        drag_move(vcx, header_at(x));
+        assert_eq!(reorder_slot(vcx, &table), Some(1), "x {x}");
+        let line = vcx
+            .debug_bounds("TlTreeTableHeader-insert")
+            .expect("insertion line");
+        assert_eq!(line.origin.x, px(199.), "never before Name, x {x}");
+    }
+    mouse_up(vcx, header_at(0.), 1);
+    assert_eq!(
+        visible_order(vcx, &table),
+        ORDER,
+        "User stays right after Name"
+    );
+    assert_eq!(
+        changed_count(vcx, &table),
+        0,
+        "no change, nothing to persist"
+    );
+
+    // PID to the left edge lands right after Name.
+    mouse_down(vcx, header_at(340.), 1);
+    drag_move(vcx, header_at(0.));
+    mouse_up(vcx, header_at(0.), 1);
+    assert_eq!(
+        visible_order(vcx, &table),
+        [
+            ColumnId::Name,
+            ColumnId::Pid,
+            ColumnId::User,
+            ColumnId::Cpu,
+            ColumnId::Pss
+        ]
+    );
+    assert_eq!(changed_count(vcx, &table), 1);
+}
+
+#[test]
+fn reorder_threshold_4px() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    // 3 px: a click, so PID sorts.
+    mouse_down(vcx, header_at(340.), 1);
+    drag_move(vcx, header_at(343.));
+    assert_eq!(reorder_slot(vcx, &table), None);
+    assert!(vcx.debug_bounds("TlTreeTableHeader-ghost").is_none());
+    mouse_up(vcx, header_at(343.), 1);
+    assert_eq!(sorted_cols(vcx, &table), [ColumnId::Pid]);
+    assert_eq!(changed_count(vcx, &table), 0);
+
+    // 5 px: a drag, no sort.
+    mouse_down(vcx, header_at(340.), 1);
+    drag_move(vcx, header_at(345.));
+    assert_eq!(
+        reorder_slot(vcx, &table),
+        Some(3),
+        "nearest boundary is PID's right edge"
+    );
+    assert!(vcx.debug_bounds("TlTreeTableHeader-ghost").is_some());
+    mouse_up(vcx, header_at(345.), 1);
+    assert_eq!(
+        sorted_cols(vcx, &table),
+        [ColumnId::Pid],
+        "a drag does not sort"
+    );
+    assert_eq!(visible_order(vcx, &table), ORDER);
+    assert_eq!(changed_count(vcx, &table), 0);
+}
+
+#[test]
+fn escape_cancels_reorder() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open(&mut cx, HDelegate::new());
+    mouse_down(vcx, header_at(420.), 1);
+    drag_move(vcx, header_at(210.));
+    assert_eq!(reorder_slot(vcx, &table), Some(1));
+
+    vcx.simulate_keystrokes("escape");
+    redraw(vcx);
+    assert_eq!(reorder_slot(vcx, &table), None);
+    assert!(vcx.debug_bounds("TlTreeTableHeader-ghost").is_none());
+    assert!(vcx.debug_bounds("TlTreeTable-insert").is_none());
+
+    // The release after Esc neither moves nor sorts.
+    drag_move(vcx, header_at(215.));
+    mouse_up(vcx, header_at(215.), 1);
+    assert_eq!(visible_order(vcx, &table), ORDER);
+    assert_eq!(changed_count(vcx, &table), 0);
+    assert!(sorted_cols(vcx, &table).is_empty());
 }

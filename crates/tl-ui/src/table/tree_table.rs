@@ -22,8 +22,8 @@ use gpui_kit::{
     ElementId, EventEmitter, FocusHandle, Hsla, InteractiveElement, IntoElement,
     ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent, SharedString, Size,
-    StatefulInteractiveElement as _, Styled, TextRun, UniformListScrollHandle, Window, div, font,
-    point, px, size, uniform_list,
+    StatefulInteractiveElement as _, Styled, Subscription, TextRun, UniformListScrollHandle,
+    Window, div, font, point, px, size, uniform_list,
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use smallvec::{SmallVec, smallvec};
@@ -49,8 +49,9 @@ use crate::table::columns::{
     ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, fit_width, min_width,
 };
 use crate::table::header::{
-    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ResizeDrag,
-    SORT_ARROW, TlTreeTableHeader, beyond_slop, header_tooltip, sort_arrow_x,
+    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, ReorderDrag,
+    ResizeDrag, SORT_ARROW, TlTreeTableHeader, beyond_slop, header_tooltip, insert_line,
+    insertion_slot, sort_arrow_x,
 };
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::ellipsis::middle_ellipsis;
@@ -236,6 +237,8 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     header_listener: HeaderListener,
     /// `tables.column_resize`, passed in by the owner.
     resize_mode: ColumnResizeMode,
+    /// Catches Esc before any key binding while a column reorder drag is in progress.
+    reorder_esc: Option<Subscription>,
     hover_row: Option<usize>,
     /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
@@ -304,6 +307,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 })
             },
             resize_mode: ColumnResizeMode::default(),
+            reorder_esc: None,
             hover_row: None,
             paused: false,
             visible_range: 0..0,
@@ -1359,11 +1363,16 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             });
         }
         self.header_state.cells = cells;
+        self.header_state.insert_x = self
+            .header_state
+            .reorder
+            .map(|d| offsets.get(d.slot).copied().unwrap_or(total_width));
     }
 
     /// Pointer events from the header's hitboxes (UI-PRC-005). A left press and release on the
-    /// same sortable cell, without moving more than 4 px, sorts by that column. A press on a
-    /// resize band starts a boundary drag; a double-click on one fits that column.
+    /// same sortable cell, without moving more than 4 px, sorts by that column. Moving more than
+    /// 4 px drags the column to a new place, except Name. A press on a resize band starts a
+    /// boundary drag; a double-click on one fits that column.
     fn header_event(&mut self, ev: HeaderEvent, window: &mut Window, cx: &mut Context<Self>) {
         let scale = metrics(cx).ui_scale;
         let col_at = |this: &Self, pos: Option<usize>| {
@@ -1380,6 +1389,11 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     cx.notify();
                     return;
                 }
+                if self.header_state.reorder.is_some() {
+                    self.reorder_to(at.x);
+                    cx.notify();
+                    return;
+                }
                 let col = col_at(self, hovered);
                 let band = col_at(self, boundary);
                 let mut changed = self.header_state.set_hover(col);
@@ -1393,6 +1407,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 {
                     p.dragged = true;
                     changed = true;
+                    let p = *p;
+                    self.start_reorder(p, at, window, cx);
                 }
                 if changed {
                     cx.notify();
@@ -1431,6 +1447,13 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     cx.notify();
                     return;
                 }
+                if let Some(drag) = self.header_state.reorder.take() {
+                    self.header_state.press = None;
+                    self.reorder_esc = None;
+                    self.drop_column(drag, cx);
+                    cx.notify();
+                    return;
+                }
                 let Some(p) = self.header_state.press.take() else {
                     return;
                 };
@@ -1442,6 +1465,92 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                 self.sort_by_column(p.col, cx);
             }
         }
+    }
+
+    /// Turns `press`, which just moved past the slop to window point `at`, into a reorder drag.
+    /// Name (`hideable == false`) never drags. Esc cancels the drag through a keystroke
+    /// interceptor, which runs before every key binding, so the global Esc chain never sees it.
+    fn start_reorder(
+        &mut self,
+        press: HeaderPress<D::Column>,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.delegate.column_spec(press.col).hideable {
+            return;
+        }
+        let layout = self.columns();
+        let Some(pos) = layout
+            .visible_columns()
+            .iter()
+            .position(|c| *c == press.col)
+        else {
+            return;
+        };
+        let x_offset = self.x_offset;
+        let grab = self.header_state.content_x(press.at.x, x_offset) - layout.offsets()[pos];
+        self.header_state.reorder = Some(ReorderDrag {
+            col: press.col,
+            grab,
+            x: Pixels::ZERO,
+            slot: pos,
+        });
+        self.reorder_to(at.x);
+        self.header_state.set_hover(None);
+        let this = cx.weak_entity();
+        let handle = window.window_handle();
+        self.reorder_esc = Some(cx.intercept_keystrokes(move |ev, window, cx| {
+            if ev.keystroke.key == "escape" && window.window_handle() == handle {
+                let _ = this.update(cx, |t, cx| t.cancel_reorder(cx));
+                cx.stop_propagation();
+            }
+        }));
+    }
+
+    /// Moves the reorder ghost to window x `x` and picks the nearest allowed boundary.
+    fn reorder_to(&mut self, x: Pixels) {
+        let x = self.header_state.content_x(x, self.x_offset);
+        let layout = self.columns();
+        let slot = insertion_slot(
+            layout.visible_columns(),
+            layout.offsets(),
+            layout.total_width(),
+            x,
+        );
+        if let Some(drag) = &mut self.header_state.reorder {
+            drag.x = x;
+            drag.slot = slot;
+        }
+    }
+
+    /// Esc during a reorder drag: ends it with no change. The release that follows does nothing.
+    fn cancel_reorder(&mut self, cx: &mut Context<Self>) {
+        self.header_state.reorder = None;
+        self.header_state.press = None;
+        self.reorder_esc = None;
+        cx.notify();
+    }
+
+    /// Applies a finished reorder drag: moves the column before the column at the drop slot, or
+    /// to the end, and calls `on_columns_changed` once. A drop on either edge of the column
+    /// itself changes nothing.
+    fn drop_column(&mut self, drag: ReorderDrag<D::Column>, cx: &mut Context<Self>) {
+        let layout = self.delegate.columns();
+        let visible = layout.visible_columns();
+        let Some(pos) = visible.iter().position(|c| *c == drag.col) else {
+            return;
+        };
+        if drag.slot == pos || drag.slot == pos + 1 {
+            return;
+        }
+        let before = visible.get(drag.slot).copied();
+        let mut layout = layout.clone();
+        if layout.move_column(drag.col, before).is_err() {
+            return;
+        }
+        layout.rebuild(layout.ui_scale());
+        self.delegate.on_columns_changed(&layout, cx);
     }
 
     /// Starts a boundary drag of `col` at window point `at`, on a copy of the delegate's layout.
@@ -1857,6 +1966,12 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
                     .justify_center()
                     .text_color(theme.text_secondary)
                     .child(text),
+            );
+        }
+        if let Some(x) = self.header_state.insert_x {
+            body = body.child(
+                insert_line(x - self.x_offset, &theme, &m)
+                    .debug_selector(|| "TlTreeTable-insert".into()),
             );
         }
         if ring {

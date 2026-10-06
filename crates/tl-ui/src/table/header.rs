@@ -13,8 +13,11 @@
 //!
 //! Resize (E18-010): an 8 px hit band centred on each column's right edge sets the column-resize
 //! cursor. Dragging it changes the width live in a copy of the layout that [`HeaderState`] holds
-//! until the release; double-clicking it fits the column. Reorder (E18-011) extends
-//! [`HeaderState`] too.
+//! until the release; double-clicking it fits the column.
+//!
+//! Reorder (E18-011): a press on a cell that moves more than 4 px drags the column. A ghost of the
+//! cell follows the pointer and a 2 px `accent` line marks the nearest column boundary, never the
+//! one before a pinned first column (Name). The table applies the move on release.
 
 use std::cell::Cell;
 use std::hash::BuildHasher as _;
@@ -54,10 +57,14 @@ pub const SORT_ARROW: f32 = 12.0;
 pub const SORT_ARROW_GAP: f32 = 2.0;
 /// How far the label moves left on the sort column: the arrow and its gap.
 pub const SORT_ARROW_SHIFT: f32 = SORT_ARROW + SORT_ARROW_GAP;
-/// A press that moves more than this is a drag, not a click (reorder is E18-011).
+/// A press that moves more than this is a drag (reorder), not a click (sort).
 pub const DRAG_SLOP: f32 = 4.0;
 /// Half the width of the resize hit band on each column boundary (UI-PRC-005).
 pub const RESIZE_HALF_BAND: f32 = 4.0;
+/// Opacity of the reorder ghost's `header` fill (UI-PRC-005).
+pub const GHOST_OPACITY: f32 = 0.85;
+/// Width of the reorder insertion line.
+pub const INSERT_LINE_W: f32 = 2.0;
 /// Header tooltip of every unsortable column (UI-PRC-005).
 pub const UNSORTABLE_TOOLTIP: &str = "Only measured for visible rows";
 
@@ -139,6 +146,45 @@ impl<C: TableColumn> ResizeDrag<C> {
     }
 }
 
+/// A header cell drag in progress (UI-PRC-005). x values are header content coordinates (before
+/// `x_offset`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ReorderDrag<C> {
+    pub col: C,
+    /// Pointer x minus the cell's left edge at the press. Keeps the ghost under the pointer
+    /// where it was grabbed.
+    pub grab: Pixels,
+    /// Pointer x now.
+    pub x: Pixels,
+    /// The boundary the column lands on: slot k is the left edge of visible column k, slot
+    /// `visible.len()` the right edge of the last column.
+    pub slot: usize,
+}
+
+/// The insertion slot nearest to content x `x` (see [`ReorderDrag::slot`]). Never slot 0 when
+/// the first visible column is pinned first: nothing goes before Name.
+pub fn insertion_slot<C: TableColumn>(
+    visible: &[C],
+    offsets: &[Pixels],
+    total: Pixels,
+    x: Pixels,
+) -> usize {
+    let first = usize::from(visible.first().is_some_and(|c| c.pinned_first()));
+    let dist = |k: usize| {
+        (offsets.get(k).copied().unwrap_or(total) - x)
+            .as_f32()
+            .abs()
+    };
+    (first..=visible.len())
+        .min_by(|&a, &b| dist(a).total_cmp(&dist(b)))
+        .unwrap_or(first)
+}
+
+/// The fill of the reorder ghost: `header` at 85%.
+pub fn ghost_fill(theme: &TlTheme) -> Hsla {
+    theme.header.opacity(GHOST_OPACITY)
+}
+
 /// One visible header cell as the table prepared it for this frame.
 #[derive(Clone, Debug)]
 pub struct HeaderCell<C> {
@@ -165,6 +211,12 @@ pub struct HeaderState<C: TableColumn> {
     pub boundary_hover: Option<C>,
     /// The boundary drag in progress.
     pub resize: Option<ResizeDrag<C>>,
+    /// The cell drag in progress.
+    pub reorder: Option<ReorderDrag<C>>,
+    /// Content x of the reorder insertion line this frame: the boundary of `reorder.slot`.
+    pub insert_x: Option<Pixels>,
+    /// Window x of the header's left edge in the last frame. Set by the paint.
+    origin: Rc<Cell<Pixels>>,
     /// Formatted totals, keyed by the header row `()` and the column.
     pub totals: CellTextCache<(), C>,
     /// This frame's visible cells. The `Vec` is reused across frames.
@@ -188,6 +240,9 @@ impl<C: TableColumn> Default for HeaderState<C> {
             press: None,
             boundary_hover: None,
             resize: None,
+            reorder: None,
+            insert_x: None,
+            origin: Rc::new(Cell::new(Pixels::ZERO)),
             totals: CellTextCache::new(),
             cells: Vec::new(),
             arrow: None,
@@ -204,6 +259,11 @@ impl<C: TableColumn> HeaderState<C> {
         let changed = self.hover != col;
         self.hover = col;
         changed
+    }
+
+    /// Header content x of window x `x`, from the header bounds of the last frame.
+    pub fn content_x(&self, x: Pixels, x_offset: Pixels) -> Pixels {
+        x - self.origin.get() + x_offset
     }
 
     /// The pointer cursor over the header: column-resize over a resize band and during a
@@ -406,6 +466,17 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             content = content.child(trigger);
         }
 
+        if let Some(drag) = &self.state.reorder
+            && let Some(cell) = cells.iter().find(|c| c.id == drag.col)
+        {
+            content = content.child(self.ghost(cell, drag.x - drag.grab, line1_top, line1_h));
+        }
+        if let Some(x) = self.state.insert_x {
+            content = content.child(
+                insert_line(x, theme, m).debug_selector(|| "TlTreeTableHeader-insert".into()),
+            );
+        }
+
         div()
             .debug_selector(|| "TlTreeTableHeader".into())
             .relative()
@@ -416,6 +487,41 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             .bg(theme.header)
             .child(self.canvas())
             .child(content)
+    }
+
+    /// The reorder ghost of `cell` with its left edge at content x `x`: `header` at 85%, the
+    /// label, a 1 px `divider` border and `r_sm` corners.
+    fn ghost(&self, cell: &HeaderCell<C>, x: Pixels, line1_top: Pixels, line1_h: Pixels) -> Div {
+        let m = self.m;
+        let mut label = div();
+        *label.text_style() = label_style(m, m.text.base, FontWeight::MEDIUM);
+        let label = label
+            .absolute()
+            .top(line1_top)
+            .left_0()
+            .w_full()
+            .h(line1_h)
+            .px(m.sp[4])
+            .flex()
+            .items_center()
+            .when(cell.align == ColumnAlign::Right, |d| d.justify_end())
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(self.theme.text_primary)
+            .child(cell.label.clone());
+        div()
+            .debug_selector(|| "TlTreeTableHeader-ghost".into())
+            .absolute()
+            .top_0()
+            .left(x)
+            .w(cell.w)
+            .h_full()
+            .bg(ghost_fill(self.theme))
+            .border(px(m.ui_scale))
+            .border_color(self.theme.divider)
+            .rounded(m.radius_small)
+            .child(label)
     }
 
     /// Line 2 of `cell`: the total, right-aligned, numbers clipped and never cut.
@@ -461,11 +567,13 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
             .collect();
         let arrow = self.state.arrow.map(|(_, asc, b)| (asc, b));
         let listener = self.listener.clone();
+        let origin = self.state.origin.clone();
 
         canvas(
             {
                 let cells = cells.clone();
                 move |bounds: Bounds<Pixels>, window: &mut Window, _: &mut App| {
+                    origin.set(bounds.left());
                     let left = bounds.left() - x_offset;
                     let cell_boxes: SmallVec<[Hitbox; 24]> = cells
                         .iter()
@@ -546,6 +654,19 @@ impl<C: TableColumn> TlTreeTableHeader<'_, C> {
         .left_0()
         .size_full()
     }
+}
+
+/// The 2 px `accent` reorder insertion line centred on content x `x`, full height of its parent.
+/// The table draws it over the header and over the body.
+pub fn insert_line(x: Pixels, theme: &TlTheme, m: &UiMetrics) -> Div {
+    let w = px(INSERT_LINE_W * m.ui_scale);
+    div()
+        .absolute()
+        .top_0()
+        .left(x - w / 2.0)
+        .w(w)
+        .h_full()
+        .bg(theme.accent)
 }
 
 /// The header's hitboxes of one frame: one per cell and one resize band per cell's right edge.
