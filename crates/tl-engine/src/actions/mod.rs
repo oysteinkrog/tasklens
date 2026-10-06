@@ -6,6 +6,7 @@
 //! added by their beads.
 
 pub mod cgroup;
+pub mod dump;
 pub mod process;
 pub mod socket;
 
@@ -337,6 +338,21 @@ pub trait ActionOps: Send + Sync + 'static {
     ) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("cgroup ops not wired"))
     }
+    /// `tl_ops::dump::dump_available`: gdb and gcore exist. The default is false.
+    fn dump_available(&self) -> bool {
+        false
+    }
+    /// `tl_ops::dump::dump_to_path`: creates `out` with mode `0600` and dumps `key` into it,
+    /// blocking until gdb exits. The default refuses.
+    fn dump_to_path(
+        &self,
+        _key: ProcessKey,
+        _boot: BootId,
+        _mode: tl_model::actions::DumpMode,
+        _out: &std::path::Path,
+    ) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("dump ops not wired"))
+    }
 }
 
 /// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
@@ -380,6 +396,20 @@ impl ActionOps for RealOps {
         wait: Duration,
     ) -> Result<(), OpsError> {
         tl_ops::cgroup::wait_frozen(dir, wait, tl_ops::cgroup::FREEZE_POLL)
+    }
+
+    fn dump_available(&self) -> bool {
+        tl_ops::dump::dump_available()
+    }
+
+    fn dump_to_path(
+        &self,
+        key: ProcessKey,
+        boot: BootId,
+        mode: tl_model::actions::DumpMode,
+        out: &std::path::Path,
+    ) -> Result<(), OpsError> {
+        tl_ops::dump::dump_to_path(key, boot, mode, out)
     }
 }
 
@@ -544,6 +574,16 @@ async fn dispatch(
     kind: &ActionKind,
     target: &ActionTarget,
 ) -> ActionState {
+    if let ActionKind::Dump { mode, path } = kind {
+        // `run_body` refuses privileged requests until E29-014 routes them, so this call is the
+        // unprivileged one.
+        return match target {
+            ActionTarget::Process(key) => {
+                dump::run_target(cx, actx, *mode, path, *key, false).await
+            }
+            _ => ActionState::Rejected(RejectReason::Unsupported),
+        };
+    }
     match target {
         ActionTarget::Cgroup(cg) => cgroup::run_target(cx, actx, kind, cg).await,
         ActionTarget::Process(_) | ActionTarget::Thread { .. } => {
