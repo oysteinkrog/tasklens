@@ -1,7 +1,7 @@
 //! Main window focus rules (E20-007, UI-SHL-121, UI-SHL-122): the initial-focus helper and the
 //! Esc chain decision table.
 
-use gpui_kit::{AppContext as _, TestAppContext};
+use gpui_kit::TestAppContext;
 use tl_ui::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 
 #[gpui_kit::test]
