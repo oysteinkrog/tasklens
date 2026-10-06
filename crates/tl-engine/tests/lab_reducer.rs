@@ -769,6 +769,40 @@ fn cpu_freq_source_bogomips_reaches_snapshot() {
 }
 
 #[test]
+fn cpu_per_cpu_clocks_reach_snapshot() {
+    // policy0 (CPUs 0-1) reads cpuinfo_avg_freq 4200000 kHz, policy2 (CPUs 2-3)
+    // scaling_cur_freq 2800000 kHz.
+    let dir = cpu_fixture("per-cpu-clocks", &["cpu-math/step0", "cpufreq-mixed"]);
+    let worker = CpuSource::new(SysRoot::at(&dir)).expect("fixture topology reads");
+    let mut rig = Rig::new();
+    // One slow tick per step, one second apart.
+    fn sample(worker: CpuSource, rig: &mut Rig, step: u64) -> (CpuSource, Arc<[Metric<u32>]>) {
+        let t = (100 + step * 1000) * MS;
+        let (worker, update) = worker.sample_at(Clock {
+            boot_ns: t,
+            mono_ns: t,
+        });
+        rig.run(vec![src(update)]).expect("no invariant violation");
+        (worker, Arc::clone(&rig.latest().system.cpu.per_cpu_mhz))
+    }
+
+    let (worker, first) = sample(worker, &mut rig, 0);
+    assert_eq!(first.to_vec(), [4200, 4200, 2800, 2800].map(Metric::valid));
+
+    // The same clocks one second later: the same Arc.
+    let (worker, second) = sample(worker, &mut rig, 1);
+    assert!(Arc::ptr_eq(&first, &second));
+
+    // policy2 changes: a new Arc with CPUs 2 and 3 changed.
+    let cur = dir.join("sys/devices/system/cpu/cpufreq/policy2/scaling_cur_freq");
+    fs::write(&cur, "3100000\n").expect("write fixture copy");
+    let (_, third) = sample(worker, &mut rig, 2);
+    assert!(!Arc::ptr_eq(&second, &third));
+    assert_eq!(third.to_vec(), [4200, 4200, 3100, 3100].map(Metric::valid));
+    rig.passed();
+}
+
+#[test]
 fn unknown_disk_identity_is_added() {
     let mut rig = Rig::new();
     let id = disk_id("nvme0n1", 0);
