@@ -469,8 +469,12 @@ impl<C: TableColumn> ColumnLayout<C> {
     }
 }
 
+/// The Name column's minimum width, logical px at 100% (R-190).
+pub const NAME_MIN_WIDTH: f32 = 120.0;
+
 /// Minimum width of a column, scaled (PROC-023, UI-PRC-005). Numeric: template width + 16
-/// padding, + 12 more on the sort column for the arrow. Text and Path: 60.
+/// padding, + 12 more on the sort column for the arrow. Name (the pinned first column): 120,
+/// the R-190 depth-0 app text start 78 plus 42 of text. Other Text and Path columns: 60.
 ///
 /// The template is measured in the table font at `t_base` with `tnum`, so it follows scale
 /// changes. `TextMetricsCache` measures through the window's text system, hence `window`.
@@ -492,6 +496,7 @@ pub fn min_width<C: TableColumn>(
             };
             text + m.sp[6] + arrow
         }
+        _ if spec.id.pinned_first() => px(NAME_MIN_WIDTH * m.ui_scale),
         _ => px(60.0 * m.ui_scale),
     }
 }
