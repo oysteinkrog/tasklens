@@ -3,8 +3,9 @@
 //!
 //! Two layouts:
 //! - Stacked (Performance stats): label `t_sm` `text_secondary` over value `t_base`
-//!   `text_primary` with `tnum`, three equal columns of at least 160 × ui_scale, column gap `sp7`,
-//!   row gap 0, pair height 2 × row height.
+//!   `text_primary` with `tnum`, equal columns of at least 160 × ui_scale (3 unless the owner sets
+//!   `columns`), column gap `sp7` unless the owner sets `column_gap`, row gap 0, pair height
+//!   2 × row height.
 //! - Inline (Information, Properties General): one row per pair, the label column at a fixed
 //!   width, the value after it. The owner writes the ":" into the label.
 //!
@@ -29,6 +30,8 @@
 //! knows the age and the last error. A value wider than its space ends with "…" (paths: middle
 //! ellipsis) and its tooltip holds the full text.
 //!
+//! Hovering a value that has a tooltip or a link draws a dotted underline in the value colour.
+//!
 //! Values are selectable text. A click on a value with `copy_on_click` copies it and flashes the
 //! row. The context menu on a value has "Copy value", "Copy row" and "Copy section". Ctrl+C with a
 //! text selection copies the selection; without one the key goes on to the page's Copy action.
@@ -49,7 +52,7 @@ use gpui_kit::{
     Action, Animation, AnimationExt as _, AnyElement, App, BorrowAppContext as _, ClipboardItem,
     Context, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding,
     MouseButton, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    Styled, Task, Window, canvas, div, prelude::FluentBuilder as _, px,
+    Styled, Task, Window, canvas, div, fill, point, prelude::FluentBuilder as _, px, size,
 };
 use tl_model::validity::Validity;
 
@@ -82,8 +85,12 @@ const ROW_HEIGHT: f32 = 28.;
 const LABEL_WIDTH: f32 = 180.;
 /// Minimum stacked column width, × ui_scale.
 const MIN_COLUMN_WIDTH: f32 = 160.;
-/// Stacked columns.
+/// Default stacked columns.
 const COLUMNS: usize = 3;
+/// Dot length and thickness of the hover underline, × ui_scale.
+const DOT: f32 = 1.;
+/// Dot pitch of the hover underline, × ui_scale.
+const DOT_STEP: f32 = 3.;
 /// Width of the accent bar at the left edge of a section band, × ui_scale.
 const BAR_WIDTH: f32 = 3.;
 /// Alpha of the `accent` row flash after a click copy.
@@ -211,7 +218,7 @@ pub struct TlKvSection {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum KvLayout {
-    /// Label over value, three columns.
+    /// Label over value, three columns unless the owner sets `columns`.
     #[default]
     Stacked,
     /// Label then value on one row.
@@ -238,6 +245,8 @@ pub struct ValueLook {
     pub color: Hsla,
     /// Drawn as a `TlLink`.
     pub link: bool,
+    /// Gets the dotted underline on hover: the value has a tooltip or a link.
+    pub underline: bool,
 }
 
 /// How `value` draws in `theme`, or `None` when its row is not drawn.
@@ -255,7 +264,13 @@ pub fn value_look(value: &TlValue, theme: &TlTheme) -> Option<ValueLook> {
     } else {
         theme.text_secondary
     };
-    Some(ValueLook { text, color, link })
+    let underline = value.tooltip.is_some() || link;
+    Some(ValueLook {
+        text,
+        color,
+        link,
+        underline,
+    })
 }
 
 /// "Label: value" for a row. A trailing ":" in the label is not doubled.
@@ -291,10 +306,42 @@ pub fn section_copy_text(section: &TlKvSection) -> String {
     lines.join("\n")
 }
 
-/// Stacked column width: `floor((w - 2 × gap) / 3)`, at least `min`.
-fn column_width(width: Pixels, gap: Pixels, min: Pixels) -> Pixels {
-    let gaps = gap * (COLUMNS - 1) as f32;
-    px((f32::from(width - gaps) / COLUMNS as f32).floor()).max(min)
+/// Stacked column width: `floor((w - (columns - 1) × gap) / columns)`, at least `min`.
+fn column_width(width: Pixels, columns: usize, gap: Pixels, min: Pixels) -> Pixels {
+    let gaps = gap * (columns - 1) as f32;
+    px((f32::from(width - gaps) / columns as f32).floor()).max(min)
+}
+
+/// The dotted hover underline of value `n`, along the bottom of its cell.
+fn dotted_underline(n: usize, color: Hsla, m: &UiMetrics) -> AnyElement {
+    let dot = px(DOT * m.ui_scale);
+    let step = px(DOT_STEP * m.ui_scale);
+    div()
+        .debug_selector(move || format!("TlKv-underline-{n}"))
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .h(dot)
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let mut x = bounds.left();
+                    while x < bounds.right() {
+                        let width = dot.min(bounds.right() - x);
+                        let at = point(x, bounds.top());
+                        window.paint_quad(fill(
+                            gpui_kit::Bounds::new(at, size(width, bounds.size.height)),
+                            color,
+                        ));
+                        x += step;
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .into_any_element()
 }
 
 fn copy_and_report(
@@ -316,6 +363,8 @@ struct GridState {
     width: Rc<Cell<Pixels>>,
     /// The flat row index that is flashing.
     flash: Option<usize>,
+    /// The flat row index whose underlined value the mouse is over.
+    hovered: Option<usize>,
     /// Bumps on each flash, so a new flash restarts its animation.
     flash_count: u64,
     flash_timer: Option<Task<()>>,
@@ -327,8 +376,21 @@ impl GridState {
             focus: cx.focus_handle(),
             width: Rc::default(),
             flash: None,
+            hovered: None,
             flash_count: 0,
             flash_timer: None,
+        }
+    }
+
+    fn set_hovered(&mut self, row: usize, hovered: bool, cx: &mut Context<Self>) {
+        let next = match (hovered, self.hovered) {
+            (true, _) => Some(row),
+            (false, Some(current)) if current == row => None,
+            (false, current) => current,
+        };
+        if next != self.hovered {
+            self.hovered = next;
+            cx.notify();
         }
     }
 
@@ -353,6 +415,7 @@ struct Frame {
     theme: Arc<TlTheme>,
     state: gpui_kit::Entity<GridState>,
     flash: Option<usize>,
+    hovered: Option<usize>,
     flash_count: u64,
     reduced_motion: bool,
     row_height: Pixels,
@@ -368,6 +431,8 @@ pub struct TlKeyValueGrid {
     label_width: Option<Pixels>,
     block_indent: Option<Pixels>,
     block_gap: Option<Pixels>,
+    columns: usize,
+    column_gap: Option<Pixels>,
     copy_on_click: bool,
     on_copied: Option<CopiedHandler>,
     on_copy_section: Option<SectionHandler>,
@@ -385,6 +450,8 @@ impl TlKeyValueGrid {
             label_width: None,
             block_indent: None,
             block_gap: None,
+            columns: COLUMNS,
+            column_gap: None,
             copy_on_click: false,
             on_copied: None,
             on_copy_section: None,
@@ -419,6 +486,18 @@ impl TlKeyValueGrid {
     /// Space between blocks, already scaled. Default `sp4`.
     pub fn block_gap(mut self, gap: Pixels) -> Self {
         self.block_gap = Some(gap);
+        self
+    }
+
+    /// Stacked columns, at least 1. Default 3.
+    pub fn columns(mut self, columns: usize) -> Self {
+        self.columns = columns.max(1);
+        self
+    }
+
+    /// Space between stacked columns, a spacing token already scaled. Default `sp7`.
+    pub fn column_gap(mut self, gap: Pixels) -> Self {
+        self.column_gap = Some(gap);
         self
     }
 
@@ -528,6 +607,8 @@ impl TlKeyValueGrid {
         let mut cell = div()
             .id(id.clone())
             .debug_selector(move || format!("TlKv-value-{n}"))
+            .relative()
+            .self_start()
             .flex()
             .items_center()
             .min_w_0()
@@ -572,6 +653,16 @@ impl TlKeyValueGrid {
                     copy_and_report(text.clone(), on_copied.as_ref(), window, cx);
                     state.update(cx, |s, cx| s.start_flash(n, cx));
                 });
+            }
+        }
+
+        if look.underline {
+            let state = f.state.clone();
+            cell = cell.on_hover(move |hovered, _, cx| {
+                state.update(cx, |s, cx| s.set_hovered(n, *hovered, cx));
+            });
+            if f.hovered == Some(n) {
+                cell = cell.child(dotted_underline(n, look.color, m));
             }
         }
 
@@ -736,9 +827,10 @@ impl TlKeyValueGrid {
                     .into_any_element()
             }
             KvLayout::Stacked => {
-                let gap = m.sp[7];
+                let columns = self.columns;
+                let gap = self.column_gap.unwrap_or(m.sp[7]);
                 let min_width = px(MIN_COLUMN_WIDTH * m.ui_scale);
-                let available = width.map(|w| column_width(w, gap, min_width));
+                let available = width.map(|w| column_width(w, columns, gap, min_width));
                 let pairs: Vec<AnyElement> = block
                     .rows
                     .iter()
@@ -747,11 +839,11 @@ impl TlKeyValueGrid {
                         self.stacked_pair(first + i, si, row, min_width, available, f, window, cx)
                     })
                     .collect();
-                let mut lines = Vec::with_capacity(pairs.len().div_ceil(COLUMNS));
+                let mut lines = Vec::with_capacity(pairs.len().div_ceil(columns));
                 let mut pairs = pairs.into_iter().peekable();
                 while pairs.peek().is_some() {
                     let mut line = h_flex().w_full().gap(gap);
-                    for _ in 0..COLUMNS {
+                    for _ in 0..columns {
                         line = match pairs.next() {
                             Some(pair) => line.child(pair),
                             // Empty cells keep the last line's columns equal.
@@ -820,9 +912,15 @@ impl RenderOnce for TlKeyValueGrid {
         let state = window.use_keyed_state((self.id.clone(), "kv-state"), cx, |_, cx| {
             GridState::new(cx)
         });
-        let (focus, width_cell, flash, flash_count) = {
+        let (focus, width_cell, flash, hovered, flash_count) = {
             let s = state.read(cx);
-            (s.focus.clone(), s.width.clone(), s.flash, s.flash_count)
+            (
+                s.focus.clone(),
+                s.width.clone(),
+                s.flash,
+                s.hovered,
+                s.flash_count,
+            )
         };
         let width = Some(width_cell.get()).filter(|w| *w > px(0.));
         let f = Frame {
@@ -830,6 +928,7 @@ impl RenderOnce for TlKeyValueGrid {
             theme,
             state,
             flash,
+            hovered,
             flash_count,
             reduced_motion: cx.reduce_motion(),
             row_height: self.row_height.unwrap_or(px(ROW_HEIGHT * m.ui_scale)),
@@ -1116,6 +1215,77 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn stacked_two_columns_custom_gap(cx: &mut TestAppContext) {
+        let rows: Vec<TlKvRow> = (0..4)
+            .map(|i| row(&format!("Label {i}"), TlValue::new(format!("{i}"))))
+            .collect();
+        let sections = [section(rows)];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Stacked)
+                .columns(2)
+                .column_gap(px(16.))
+                .sections(&sections)
+        });
+        // (600 - 16) / 2 = 292.
+        for n in 0..4 {
+            let b = bounds(cx, &format!("TlKv-row-{n}")).expect("pair drawn");
+            let (line, column) = (n / 2, n % 2);
+            assert_eq!(b.size.width, px(292.), "pair {n} width");
+            assert_eq!(b.origin.x, px(308. * column as f32), "pair {n} x");
+            assert_eq!(b.origin.y, px(56. * line as f32), "pair {n} y");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn hover_underlines_values_with_tooltip_or_link(cx: &mut TestAppContext) {
+        let theme = cx.update(|cx| {
+            setup(cx);
+            current(cx).clone()
+        });
+        let tipped = TlValue {
+            tooltip: Some("Needs administrator access.".into()),
+            ..value("0", Validity::Restricted)
+        };
+        let linked = TlValue {
+            word: Some(UnsupportedWord::NeedsSetup),
+            link: Some(Box::new(OpenSetup)),
+            ..value("", Validity::Unsupported)
+        };
+        let plain = TlValue::new("1234");
+        let underline = |v: &TlValue| value_look(v, &theme).map(|l| l.underline);
+        assert_eq!(underline(&tipped), Some(true));
+        assert_eq!(underline(&linked), Some(true));
+        assert_eq!(underline(&plain), Some(false));
+
+        let sections = [section(vec![row("Tipped:", tipped), row("PID:", plain)])];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline).sections(&sections)
+        });
+        assert!(
+            bounds(cx, "TlKv-underline-0").is_none(),
+            "no underline before hover"
+        );
+
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        cx.simulate_mouse_move(value.center(), None, Modifiers::none());
+        let line = bounds(cx, "TlKv-underline-0").expect("hover underlines the value");
+        assert_eq!(
+            line.bottom(),
+            value.bottom(),
+            "along the bottom of the value"
+        );
+        assert_eq!(line.size.width, value.size.width, "as wide as the value");
+
+        let plain = bounds(cx, "TlKv-value-1").expect("value drawn");
+        cx.simulate_mouse_move(plain.center(), None, Modifiers::none());
+        assert!(bounds(cx, "TlKv-underline-0").is_none(), "leaving drops it");
+        assert!(
+            bounds(cx, "TlKv-underline-1").is_none(),
+            "a value without tooltip or link has none"
+        );
+    }
+
+    #[gpui_kit::test]
     fn click_copies_and_calls_on_copied(cx: &mut TestAppContext) {
         let (cx, copied, _) = host(cx, || pid_grid().copy_on_click(true));
         let value = bounds(cx, "TlKv-value-0").expect("value drawn");
@@ -1239,8 +1409,9 @@ mod tests {
             section_copy_text(&card),
             "Memory\n    Total: 32 GiB\n    Module 1\n        Speed: 4800 MT/s"
         );
-        assert_eq!(column_width(px(600.), px(24.), px(160.)), px(184.));
-        assert_eq!(column_width(px(601.), px(24.), px(160.)), px(184.));
-        assert_eq!(column_width(px(300.), px(24.), px(160.)), px(160.));
+        assert_eq!(column_width(px(600.), 3, px(24.), px(160.)), px(184.));
+        assert_eq!(column_width(px(601.), 3, px(24.), px(160.)), px(184.));
+        assert_eq!(column_width(px(300.), 3, px(24.), px(160.)), px(160.));
+        assert_eq!(column_width(px(600.), 2, px(16.), px(160.)), px(292.));
     }
 }

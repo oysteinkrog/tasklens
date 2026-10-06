@@ -376,8 +376,9 @@ impl KeyValueModel {
     }
 }
 
-/// The Details grid: stacked label over value, three columns, pairs `kv_row_h` apart, filled
-/// left to right and top to bottom in model order. Translates the labels first if needed.
+/// The Details grid: stacked label over value, three columns `sp6` apart, pairs `kv_row_h`
+/// apart, filled left to right and top to bottom in model order. Translates the labels first if
+/// needed.
 pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyValueGrid {
     model.refresh_labels(cx);
     let section = TlKvSection {
@@ -390,6 +391,8 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
     // The grid's row height is half a stacked pair.
     TlKeyValueGrid::new(GRID_ID, KvLayout::Stacked)
         .sections(&[section])
+        .columns(3)
+        .column_gap(m.sp[6])
         .row_height(px(KV_ROW_H / 2. * m.ui_scale))
 }
 

@@ -192,6 +192,7 @@ fn details_grid_three_columns_46px(cx: &mut TestAppContext) {
     }
 
     let mut xs = Vec::new();
+    let mut first_line = Vec::new();
     for n in 0..14 {
         let selector: &'static str = Box::leak(format!("TlKv-row-{n}").into_boxed_str());
         let b = cx.debug_bounds(selector).expect("pair drawn");
@@ -200,12 +201,18 @@ fn details_grid_three_columns_46px(cx: &mut TestAppContext) {
         assert_eq!(b.origin.y, px(46. * line as f32), "pair {n} y");
         if line == 0 {
             xs.push(b.origin.x);
+            first_line.push(b);
         } else {
             assert_eq!(b.origin.x, xs[column], "pair {n} column");
         }
     }
     assert_eq!(xs.len(), 3);
     assert!(xs[0] < xs[1] && xs[1] < xs[2], "three columns: {xs:?}");
+    // The column gap is sp6, 16 px at 100%.
+    for pair in first_line.windows(2) {
+        let gap = f32::from(pair[1].left() - pair[0].right());
+        assert!((gap - 16.).abs() < 0.01, "column gap {gap}");
+    }
     // 14 pairs fill 5 lines: the last line holds pairs 12 and 13.
     assert!(cx.debug_bounds("TlKv-row-14").is_none());
 }
