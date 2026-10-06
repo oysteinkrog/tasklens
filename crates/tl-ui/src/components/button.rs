@@ -31,7 +31,7 @@ use gpui_kit::{
 use super::focus::TlFocusRing;
 use super::icons::{TlIcon, icon};
 use super::progress::TlSpinner;
-use super::tooltip::{DELAY_CONTROL, FocusTooltip, TlTooltip};
+use super::tooltip::{DELAY_CONTROL, FocusTooltip, HoverTooltip, TlTooltip};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -376,9 +376,15 @@ impl RenderOnce for TlButton {
             if let Some(action) = &self.action {
                 tip = tip.action(action.as_ref(), None);
             }
-            button = button
-                .tooltip(tip.clone().build())
-                .tooltip_show_delay(DELAY_CONTROL);
+            let hover = HoverTooltip::state((self.id.clone(), "hover-tooltip"), window, cx);
+            button = HoverTooltip::attach(
+                &hover,
+                button,
+                DELAY_CONTROL,
+                tip.clone().build(),
+                window,
+                cx,
+            );
             let state = FocusTooltip::state((self.id.clone(), "focus-tooltip"), window, cx);
             button = FocusTooltip::attach(
                 &state,
@@ -536,32 +542,34 @@ mod tests {
             .into_any_element()
     }
 
-    /// The quads with a 1 px `accent` border over an `accent` at 0.25 fill.
-    fn accent_quads(cx: &mut VisualTestContext) -> usize {
+    /// Counts painted quads: the `accent` at 0.25 fills, and the 1 px `accent` borders. GPUI
+    /// paints a border as one quad per edge.
+    fn accent_quads(cx: &mut VisualTestContext) -> (usize, usize) {
         cx.update(|window, cx| {
             window.draw(cx).clear(cx);
             let theme = current(cx).clone();
             let one = window.scale_factor();
-            window
-                .painted_quads()
+            let quads = window.painted_quads();
+            let fills = quads
                 .iter()
-                .filter(|q| {
-                    q.border_color == theme.accent
-                        && q.border_widths.top.0 == one
-                        && q.background == Background::from(theme.accent.alpha(ON_ALPHA))
-                })
-                .count()
+                .filter(|q| q.background == Background::from(theme.accent.alpha(ON_ALPHA)))
+                .count();
+            let borders = quads
+                .iter()
+                .filter(|q| q.border_color == theme.accent && q.border_widths.top.0 == one)
+                .count();
+            (fills, borders)
         })
     }
 
     #[gpui_kit::test]
     fn toggle_look(cx: &mut TestAppContext) {
         let (view, cx, _) = host(cx, None, || toggle(true));
-        assert_eq!(
-            accent_quads(cx),
-            1,
-            "on: accent fill and 1 px accent border"
-        );
+        // Keep the pointer off the button, so it shows no hover fill.
+        cx.simulate_mouse_move(point(px(300.), px(300.)), None, Modifiers::none());
+        let (fills, borders) = accent_quads(cx);
+        assert_eq!(fills, 1, "on: accent fill at 0.25");
+        assert!(borders > 0, "on: 1 px accent border");
         let b = bounds(cx, "TlButton-pin");
         assert_eq!((b.size.width, b.size.height), (px(24.), px(24.)));
 
@@ -571,7 +579,7 @@ mod tests {
                 cx.notify();
             })
         });
-        assert_eq!(accent_quads(cx), 0, "off: no accent fill or border");
+        assert_eq!(accent_quads(cx), (0, 0), "off: no accent fill or border");
     }
 
     #[gpui_kit::test]
@@ -690,10 +698,12 @@ mod tests {
         });
         assert_eq!(bounds(cx, "TlButton-sm").size.height, px(24.));
         assert_eq!(bounds(cx, "TlButton-md").size.height, px(28.));
-        // No kit size reaches 24 or 28 px at rem 13, so TlButton sets its own heights.
-        assert_eq!(bounds(cx, "kit-xs").size.height, px(16.25));
-        assert_eq!(bounds(cx, "kit-sm").size.height, px(19.5));
-        assert_eq!(bounds(cx, "kit-md").size.height, px(26.));
+        // No kit size reaches 24 or 28 px at rem 13 (16.25, 19.5 and 26 before pixel snapping),
+        // so TlButton sets its own heights.
+        for (selector, rem_height) in [("kit-xs", 16.25), ("kit-sm", 19.5), ("kit-md", 26.)] {
+            let h = f32::from(bounds(cx, selector).size.height);
+            assert!((h - rem_height).abs() <= 0.5, "{selector}: {h}");
+        }
     }
 
     #[gpui_kit::test]
