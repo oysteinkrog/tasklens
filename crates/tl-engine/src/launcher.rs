@@ -1657,3 +1657,343 @@ mod tests {
         assert_eq!(probe.exit, Some(ExitKind::Exited(0)));
     }
 }
+
+/// Real-system tests on the owner machine (ADR-013), with a real session bus and runtime. Run with
+/// `heavy-build cargo test -p tl-engine launcher::real_tests -- --ignored`. Each test starts only
+/// a `sleep` or `tasklens-test.service`, and on drop stops its own scope or unit and removes its
+/// own file, also when it fails. Without a session bus each test returns early.
+#[cfg(test)]
+mod real_tests {
+    use super::*;
+
+    use std::fs;
+    use std::io::Write;
+    use std::process::{Command as Proc, Stdio};
+    use std::sync::{Mutex, MutexGuard, PoisonError, mpsc};
+    use std::time::Instant;
+
+    use asupersync::runtime::Runtime;
+    use tl_model::table::UnitRef;
+
+    /// The bead's bound for the program to show up in its scope.
+    const SCOPE_WAIT: Duration = Duration::from_secs(2);
+    /// The bound for `launch` to answer: the 30 s job wait plus the calls around it.
+    const LAUNCH_WAIT: Duration = Duration::from_secs(35);
+    const TEST_UNIT: &str = "tasklens-test.service";
+    const ENTRY_ID: &str = "tasklens-test-entry";
+    /// `systemd-escape tasklens-test-entry` prints `tasklens\x2dtest\x2dentry`.
+    const ENTRY_SCOPE_PREFIX: &str = "app-tasklens-tasklens\\x2dtest\\x2dentry-";
+
+    /// The tests share this process's children and the user manager, so they run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn run<T: Send + 'static>(f: impl Future<Output = T> + Send + 'static) -> T {
+        let rt: Runtime = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(f);
+        rt.block_on(join).expect("task completes")
+    }
+
+    fn have_session() -> bool {
+        let ok = run(async { zbus::Connection::session().await.is_ok() });
+        if !ok {
+            eprintln!("no session bus: skipped");
+        }
+        ok
+    }
+
+    /// Runs `spec` through `launch` on its own thread and runtime with a new session connection.
+    /// The outcome is sent as soon as `launch` returns, so the test does not wait for the
+    /// background reaper of the launched program.
+    fn launch_in_background(
+        spec: LaunchSpec,
+    ) -> mpsc::Receiver<Result<LaunchOutcome, ActionError>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            run(async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let result = match zbus::Connection::session().await {
+                    Ok(conn) => launch(&cx, Some(Arc::new(conn)), &spec).await,
+                    Err(_) => Err(internal("no session bus")),
+                };
+                let _ = tx.send(result);
+            });
+        });
+        rx
+    }
+
+    fn systemctl(args: &[&str]) -> String {
+        let out = Proc::new("systemctl")
+            .arg("--user")
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .expect("systemctl runs");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// `ActiveState` of a user unit; `inactive` for a unit that does not exist.
+    fn active_state(unit: &str) -> String {
+        systemctl(&["show", "-P", "ActiveState", unit])
+    }
+
+    fn parent_of(pid: u32) -> Option<u32> {
+        let stat = fs::read(format!("/proc/{pid}/stat")).ok()?;
+        let close = stat.iter().rposition(|&b| b == b')')?;
+        let rest = std::str::from_utf8(stat.get(close + 2..)?).ok()?;
+        rest.split(' ').nth(1)?.parse().ok()
+    }
+
+    /// The direct children of this test process.
+    fn children() -> Vec<u32> {
+        let me = std::process::id();
+        let Ok(dir) = fs::read_dir("/proc") else {
+            return Vec::new();
+        };
+        dir.filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u32>().ok())
+            .filter(|&pid| parent_of(pid) == Some(me))
+            .collect()
+    }
+
+    /// The last component of the pid's cgroup v2 path.
+    fn cgroup_leaf(pid: u32) -> Option<String> {
+        let text = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+        let path = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+        Some(path.rsplit('/').next()?.to_owned())
+    }
+
+    fn cmdline(pid: u32) -> Vec<String> {
+        let bytes = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        bytes
+            .split(|&b| b == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect()
+    }
+
+    /// A program a test launched. On drop its scope is stopped and the child killed.
+    struct Launched {
+        before: Vec<u32>,
+        pids: Vec<u32>,
+        scope: Option<String>,
+    }
+
+    impl Launched {
+        /// Call right before the launch, so only children started after it count.
+        fn expect() -> Self {
+            Launched {
+                before: children(),
+                pids: Vec::new(),
+                scope: None,
+            }
+        }
+
+        /// Waits up to 2 s for a new child of this process inside a scope named
+        /// `<prefix><8 hex>.scope`, and returns its pid.
+        fn wait_in_scope(&mut self, prefix: &str) -> u32 {
+            let begin = Instant::now();
+            loop {
+                for pid in children() {
+                    if self.before.contains(&pid) {
+                        continue;
+                    }
+                    if !self.pids.contains(&pid) {
+                        self.pids.push(pid);
+                    }
+                    if let Some(leaf) = cgroup_leaf(pid)
+                        && leaf.starts_with(prefix)
+                        && leaf.ends_with(".scope")
+                    {
+                        self.scope = Some(leaf);
+                        return pid;
+                    }
+                }
+                let seen: Vec<_> = self.pids.iter().map(|&p| cgroup_leaf(p)).collect();
+                assert!(
+                    begin.elapsed() < SCOPE_WAIT,
+                    "no child in a {prefix}*.scope after {SCOPE_WAIT:?}: {seen:?}"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn cleanup(&mut self) {
+            if let Some(scope) = self.scope.take() {
+                systemctl(&["stop", &scope]);
+            }
+            let me = std::process::id();
+            for pid in self.pids.drain(..) {
+                // Only while it is still this process's child, so a reused pid is never hit.
+                if parent_of(pid) == Some(me)
+                    && let Some(pid) = rustix::process::Pid::from_raw(pid as i32)
+                {
+                    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
+
+    impl Drop for Launched {
+        fn drop(&mut self) {
+            self.cleanup();
+        }
+    }
+
+    /// A file this test created with `create_new`, so it never replaces one of the owner's. On drop
+    /// it is removed, and so is its directory when the test made that too.
+    struct OwnFile {
+        path: PathBuf,
+        made_dir: Option<PathBuf>,
+    }
+
+    impl OwnFile {
+        fn create(path: PathBuf, text: &str) -> Self {
+            let dir = path.parent().expect("has a parent").to_owned();
+            let made_dir = (!dir.exists()).then(|| dir.clone());
+            fs::create_dir_all(&dir).expect("create the directory");
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap_or_else(|e| panic!("{} not created: {e}", path.display()));
+            let own = OwnFile { path, made_dir };
+            file.write_all(text.as_bytes()).expect("write");
+            own
+        }
+    }
+
+    impl Drop for OwnFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            if let Some(dir) = &self.made_dir {
+                let _ = fs::remove_dir(dir);
+            }
+        }
+    }
+
+    /// `tasklens-test.service` from E14-007 in `$XDG_CONFIG_HOME/systemd/user`. On drop the unit
+    /// is stopped, the file removed and the user manager reloaded.
+    struct TestUnit {
+        file: Option<OwnFile>,
+    }
+
+    impl TestUnit {
+        fn install() -> Self {
+            let load = systemctl(&["show", "-P", "LoadState", TEST_UNIT]);
+            assert_eq!(load, "not-found", "{TEST_UNIT} already exists; not touched");
+            let path = StartupEnv::from_env()
+                .config_home
+                .join("systemd/user")
+                .join(TEST_UNIT);
+            let file = OwnFile::create(
+                path,
+                "[Unit]\nDescription=tasklens integration test unit\n\
+                 [Service]\nExecStart=/usr/bin/sleep 600\n",
+            );
+            let unit = TestUnit { file: Some(file) };
+            systemctl(&["daemon-reload"]);
+            unit
+        }
+    }
+
+    impl Drop for TestUnit {
+        fn drop(&mut self) {
+            systemctl(&["stop", TEST_UNIT]);
+            drop(self.file.take());
+            systemctl(&["daemon-reload"]);
+        }
+    }
+
+    #[test]
+    #[ignore = "starts a transient user scope (owner machine)"]
+    fn real_command_lands_in_transient_scope() {
+        let _serial = serial();
+        if !have_session() {
+            return;
+        }
+        let mut launched = Launched::expect();
+        let outcome = launch_in_background(LaunchSpec {
+            what: LaunchWhat::Command("sleep 30".into()),
+            as_admin: false,
+            cwd: None,
+        });
+        let pid = launched.wait_in_scope("app-tasklens-run-");
+        let scope = launched.scope.clone().expect("scope found");
+        eprintln!("pid {pid} in {scope}");
+        assert_eq!(
+            outcome.recv_timeout(LAUNCH_WAIT),
+            Ok(Ok(LaunchOutcome::Launched))
+        );
+        assert_eq!(active_state(&scope), "active");
+
+        launched.cleanup();
+        assert_eq!(active_state(&scope), "inactive", "{scope} is gone");
+    }
+
+    #[test]
+    #[ignore = "writes an autostart entry and starts a transient user scope (owner machine)"]
+    fn real_desktop_entry_run_now() {
+        let _serial = serial();
+        if !have_session() {
+            return;
+        }
+        let path = StartupEnv::from_env()
+            .config_home
+            .join("autostart")
+            .join(format!("{ENTRY_ID}.desktop"));
+        let entry = OwnFile::create(
+            path.clone(),
+            "[Desktop Entry]\nType=Application\nName=tasklens test entry\nExec=sleep 30\n",
+        );
+        let mut launched = Launched::expect();
+        let outcome = launch_in_background(LaunchSpec {
+            what: LaunchWhat::DesktopEntry(ENTRY_ID.into()),
+            as_admin: false,
+            cwd: None,
+        });
+        let pid = launched.wait_in_scope(ENTRY_SCOPE_PREFIX);
+        let scope = launched.scope.clone().expect("scope found");
+        eprintln!("pid {pid} in {scope}");
+        assert_eq!(cmdline(pid), ["sleep", "30"]);
+        assert_eq!(
+            outcome.recv_timeout(LAUNCH_WAIT),
+            Ok(Ok(LaunchOutcome::Launched))
+        );
+
+        launched.cleanup();
+        drop(entry);
+        assert_eq!(active_state(&scope), "inactive", "{scope} is gone");
+        assert!(!path.exists(), "{} is removed", path.display());
+    }
+
+    #[test]
+    #[ignore = "installs and starts tasklens-test.service (owner machine)"]
+    fn real_unit_start() {
+        let _serial = serial();
+        if !have_session() {
+            return;
+        }
+        let unit = TestUnit::install();
+        let outcome = launch_in_background(LaunchSpec {
+            what: LaunchWhat::Unit(UnitRef {
+                manager: Manager::User,
+                name: TEST_UNIT.into(),
+            }),
+            as_admin: false,
+            cwd: None,
+        });
+        assert_eq!(
+            outcome.recv_timeout(LAUNCH_WAIT),
+            Ok(Ok(LaunchOutcome::Launched))
+        );
+        assert_eq!(active_state(TEST_UNIT), "active");
+
+        drop(unit);
+        let load = systemctl(&["show", "-P", "LoadState", TEST_UNIT]);
+        assert_eq!(load, "not-found", "{TEST_UNIT} is gone");
+    }
+}
