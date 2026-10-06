@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels,
-    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    Render, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
 };
 use tl_model::actions::SchedPolicy;
 use tl_model::details::{
@@ -14,12 +14,14 @@ use tl_model::details::{
 };
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
+use tl_model::settings::{AppearanceSettings, Decorations, ThemeSettings};
 use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
 use tl_ui::components::kv_grid::{ValueLook, value_look};
+use tl_ui::components::window_frame::window_options;
+use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
 use tl_ui::windows::props::general::{FieldId, GeneralTab, RESTRICTED_TOOLTIP};
 
@@ -434,4 +436,75 @@ fn props_filter_hides_general_fields(cx: &mut TestAppContext) {
     assert_eq!(visible, vec![FieldId::Pid, FieldId::Ppid]);
     // The panels stay, even when empty.
     assert_eq!(panels(cx).len(), 3);
+}
+
+struct Dummy;
+
+impl Render for Dummy {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().size_full()
+    }
+}
+
+fn frame_setup(cx: &mut TestAppContext, ui_scale_pct: u16) {
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings {
+                ui_scale_pct,
+                ..AppearanceSettings::default()
+            },
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+    });
+}
+
+/// The opened window's size, and the minimum `open_pwn` asks for.
+fn open_sizes(
+    cx: &mut TestAppContext,
+    w: PwnWindow,
+) -> (gpui_kit::Size<Pixels>, gpui_kit::Size<Pixels>) {
+    let title: gpui_kit::SharedString = format!("{w:?}").into();
+    let min = cx.update(|cx| {
+        let spec = pwn_window_spec(cx, w, title.clone(), None);
+        window_options(&spec, Decorations::Client, cx).window_min_size
+    });
+    let handle = cx
+        .update(|cx| open_pwn(cx, w, title, None, |_, cx| cx.new(|_| Dummy)))
+        .expect("window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.run_until_parked();
+    let opened = vcx.update(|window, _| window.bounds().size);
+    (opened, min.expect("minimum size set"))
+}
+
+#[gpui_kit::test]
+fn pwn_window_sizes_match_table(cx: &mut TestAppContext) {
+    frame_setup(cx, 100);
+    let table = [
+        (PwnWindow::ProcessProperties, (900., 640.), (640., 400.)),
+        (PwnWindow::AppProperties, (720., 560.), (640., 400.)),
+        (PwnWindow::SetAffinity, (640., 360.), (640., 360.)),
+        (PwnWindow::SetPriority, (440., 120.), (440., 120.)),
+        (PwnWindow::RealtimeSignal, (360., 120.), (360., 120.)),
+        (PwnWindow::Run, (480., 248.), (480., 248.)),
+        (PwnWindow::HandleSearch, (860., 560.), (560., 360.)),
+    ];
+    for (w, default, min) in table {
+        let (opened, min_asked) = open_sizes(cx, w);
+        assert_eq!(opened, size(px(default.0), px(default.1)), "{w:?} default");
+        assert_eq!(min_asked, size(px(min.0), px(min.1)), "{w:?} minimum");
+        assert_eq!(spec(w).default_size, opened, "{w:?} spec");
+    }
+}
+
+#[gpui_kit::test]
+fn pwn_props_size_scales_with_ui_scale(cx: &mut TestAppContext) {
+    frame_setup(cx, 125);
+    let (opened, min) = open_sizes(cx, PwnWindow::ProcessProperties);
+    assert_eq!(opened, size(px(1125.), px(800.)));
+    assert_eq!(min, size(px(800.), px(500.)));
 }
