@@ -1545,7 +1545,7 @@ mod status {
     }
 
     fn press(cx: &mut VisualTestContext, key: &str) {
-        let keystroke = Keystroke::parse(key).unwrap();
+        let keystroke = Keystroke::parse(key).expect("valid keystroke");
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: false,
