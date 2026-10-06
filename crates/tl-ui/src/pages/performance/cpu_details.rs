@@ -106,15 +106,18 @@ pub fn cpu_details_model() -> KeyValueModel {
 pub fn cpu_temp_sensors(catalog: &DeviceCatalog, out: &mut Vec<CpuSensor>) {
     out.clear();
     let sensor = |want: &str| {
-        catalog.entries.iter().filter_map(move |e| match &e.identity {
-            DeviceIdentity::Sensor { chip, label } if e.present && &**chip == want => {
-                Some(CpuSensor {
-                    idx: e.idx,
-                    label: label.clone(),
-                })
-            }
-            _ => None,
-        })
+        catalog
+            .entries
+            .iter()
+            .filter_map(move |e| match &e.identity {
+                DeviceIdentity::Sensor { chip, label } if e.present && &**chip == want => {
+                    Some(CpuSensor {
+                        idx: e.idx,
+                        label: label.clone(),
+                    })
+                }
+                _ => None,
+            })
     };
     if let Some(chip) = CPU_CHIPS.iter().find(|c| sensor(c).next().is_some()) {
         out.extend(sensor(chip));
@@ -294,12 +297,9 @@ impl Live<'_> {
         match v {
             Validity::Unsupported => model.set_fallback(label, v, Fallback::NotSupported, None),
             // The CPU never goes away; a Missing CPU value reads as Unavailable.
-            Validity::Missing => model.set_fallback(
-                label,
-                Validity::Unsupported,
-                Fallback::Unavailable,
-                None,
-            ),
+            Validity::Missing => {
+                model.set_fallback(label, Validity::Unsupported, Fallback::Unavailable, None)
+            }
             _ => model.set_fallback(label, v, Fallback::Unavailable, self.error),
         }
     }
