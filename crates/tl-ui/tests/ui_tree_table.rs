@@ -2151,7 +2151,6 @@ fn render_counter_unchanged_without_new_version() {
 mod name_cell_fixes {
     use std::sync::Arc;
 
-    use gpui_kit::assets::IconNamed as _;
     use gpui_kit::{AssetSource as _, MouseDownEvent, MouseUpEvent, SvgRenderer, TextRun};
     use tl_ui::components::icons::TlAssets;
     use tl_ui::table::cells::{IconSourceCache, name_primary_text};
@@ -2242,12 +2241,14 @@ mod name_cell_fixes {
 
     #[test]
     fn isolated_name_built_once() {
-        let primary: SharedString = "bash (2)".into();
+        // Longer than `SharedString`'s 23 inline bytes, so clones share one heap text.
+        const NAME: &str = "systemd-journal-upload (12)";
+        let primary: SharedString = NAME.into();
         let mut cache = IconSourceCache::new();
         cache.begin_version(1);
-        let a = cache.isolated_name(&primary, 5);
-        let b = cache.isolated_name(&SharedString::from("bash (2)".to_string()), 5);
-        assert_eq!(a.as_ref(), "\u{2068}bash \u{2069}(2)");
+        let a = cache.isolated_name(&primary, 23);
+        let b = cache.isolated_name(&SharedString::from(NAME.to_string()), 23);
+        assert_eq!(a.as_ref(), "\u{2068}systemd-journal-upload \u{2069}(12)");
         assert!(
             std::ptr::eq(a.as_ref(), b.as_ref()),
             "the second call reuses the text"
@@ -2265,7 +2266,7 @@ mod name_cell_fixes {
             &mut cache,
         );
         assert!(runs.is_none());
-        assert!(std::ptr::eq(text.as_ref(), primary.as_ref()));
+        assert_eq!(text, primary);
     }
 
     #[test]
