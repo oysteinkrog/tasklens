@@ -1,6 +1,7 @@
 //! Inventory readers against fixtures and the real machine (E06-015; E06-A3 adds fixture tests).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use tl_collect::inventory::cpuinfo::{CpuInfo, SecurityPaths, parse_cpuinfo, read_security};
 
@@ -65,4 +66,85 @@ fn real_connectors_listed() {
             eprintln!("{c:?}");
         }
     }
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+/// The fixture read with the host-dependent fields fixed: `kernel` comes from `uname`, and the
+/// birth time of the fixture directory is the checkout time.
+fn dmi_desktop() -> tl_collect::inventory::InventoryRaw {
+    use tl_collect::inventory::{InstallDateSource, InventoryPaths, KernelInfo, read_inventory};
+    let mut raw = read_inventory(&InventoryPaths::under(&fixture("dmi-desktop")));
+    raw.kernel = KernelInfo {
+        release: Arc::from("6.17.1-2-cachyos"),
+        version: Arc::from("#1 SMP PREEMPT_DYNAMIC"),
+        machine: Arc::from("x86_64"),
+        nis_domain: None,
+    };
+    if let Some((_, InstallDateSource::RootBirthTime)) = raw.install_date {
+        raw.install_date = Some((0, InstallDateSource::RootBirthTime));
+    }
+    raw
+}
+
+#[test]
+fn fixture_dmi_desktop_snapshot() {
+    insta::assert_debug_snapshot!("dmi_desktop", dmi_desktop());
+}
+
+/// D-007 regression test: no serial reaches the result.
+#[test]
+fn no_serial_anywhere() {
+    let root = fixture("dmi-desktop");
+    let product_serial = std::fs::read_to_string(root.join("sys/class/dmi/id/product_serial"))
+        .expect("fixture product_serial");
+    assert!(product_serial.contains("SERIAL-MUST-NOT-APPEAR"));
+    let udev = std::fs::read_to_string(root.join("run/udev/data/+dmi:id")).expect("fixture udev");
+    assert!(udev.contains("MEMORY_DEVICE_0_SERIAL_NUMBER=SERIAL-MUST-NOT-APPEAR"));
+
+    let text = format!("{:?}", dmi_desktop());
+    assert!(!text.contains("SERIAL-MUST-NOT-APPEAR"));
+}
+
+#[test]
+fn empty_root_no_panic() {
+    use tl_collect::inventory::{Field, InventoryPaths, ModulesInfo, read_inventory};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let raw = read_inventory(&InventoryPaths::under(dir.path()));
+    assert_eq!(raw.os, None);
+    assert_eq!(raw.modules, ModulesInfo::NotReported);
+    let d = &raw.dmi;
+    for field in [
+        &d.bios_vendor,
+        &d.bios_version,
+        &d.bios_date,
+        &d.bios_release,
+        &d.board_vendor,
+        &d.board_name,
+        &d.board_version,
+        &d.board_serial,
+        &d.sys_vendor,
+        &d.product_name,
+    ] {
+        assert_eq!(field, &Field::Missing);
+    }
+    assert!(raw.connectors.is_empty());
+    assert_eq!(raw.machine_id, None);
+    assert_eq!(raw.package_manager, None);
+}
+
+#[test]
+fn amd_through_reexports() {
+    use tl_collect::gpu_drm::{AmdSample, VENDOR_AMD, discover_cards, read_amd};
+    let sys = fixture("drm-amd").join("sys");
+    let cards = discover_cards(&sys);
+    let amd: Vec<_> = cards.iter().filter(|c| c.vendor == VENDOR_AMD).collect();
+    assert_eq!(amd.len(), 1, "{cards:?}");
+    let mut sample = AmdSample::default();
+    read_amd(amd[0], &sys, &mut sample);
+    assert_eq!(sample.gpu_busy_pct, Some(37));
 }

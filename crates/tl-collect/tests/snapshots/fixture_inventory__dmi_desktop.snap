@@ -1,0 +1,236 @@
+---
+source: crates/tl-collect/tests/fixture_inventory.rs
+expression: dmi_desktop()
+---
+InventoryRaw {
+    cpu: CpuInfo {
+        model_name: Some(
+            "AMD Ryzen 9 7950X 16-Core Processor",
+        ),
+        vendor_id: Some(
+            "AuthenticAMD",
+        ),
+        family: Some(
+            25,
+        ),
+        model: Some(
+            97,
+        ),
+        stepping: Some(
+            2,
+        ),
+        microcode: Some(
+            "0xa601206",
+        ),
+        mhz: Some(
+            4500.0,
+        ),
+        bogomips_only: false,
+        logical_count: 2,
+        flags: CpuFlags(
+            SVM | AVX512F,
+        ),
+    },
+    security: SecurityInfo {
+        virtualization: EnabledKvm,
+        hypervisor: None,
+        secure_boot: Some(
+            true,
+        ),
+        lockdown: Some(
+            Integrity,
+        ),
+        memory_encryption: None,
+        user_shadow_stack: false,
+        iommu: Some(
+            true,
+        ),
+        vulns: Some(
+            VulnCounts {
+                mitigated: 1,
+                vulnerable: 1,
+                not_affected: 1,
+                unknown: 1,
+            },
+        ),
+        unreadable: [],
+    },
+    dmi: DmiInfo {
+        firmware: Uefi,
+        bios_vendor: Value(
+            "American Megatrends International, LLC.",
+        ),
+        bios_version: Value(
+            "4602",
+        ),
+        bios_date: Value(
+            "02/23/2023",
+        ),
+        bios_release: Missing,
+        board_vendor: Value(
+            "ASUSTeK COMPUTER INC.",
+        ),
+        board_name: Value(
+            "ROG STRIX X570-E GAMING",
+        ),
+        board_version: Value(
+            "Default string",
+        ),
+        board_serial: Missing,
+        sys_vendor: Value(
+            "System manufacturer",
+        ),
+        product_name: Value(
+            "System Product Name",
+        ),
+        chassis_type: Some(
+            3,
+        ),
+    },
+    os: Some(
+        OsRelease {
+            pretty_name: Some(
+                "CachyOS Linux",
+            ),
+            name: Some(
+                "CachyOS Linux",
+            ),
+            id: Some(
+                "cachyos",
+            ),
+            version_id: None,
+            build_id: Some(
+                "rolling",
+            ),
+            logo: Some(
+                "cachyos",
+            ),
+        },
+    ),
+    kernel: KernelInfo {
+        release: "6.17.1-2-cachyos",
+        version: "#1 SMP PREEMPT_DYNAMIC",
+        machine: "x86_64",
+        nis_domain: None,
+    },
+    machine_id: Some(
+        "0123456789abcdef0123456789abcdef",
+    ),
+    install_date: Some(
+        (
+            0,
+            RootBirthTime,
+        ),
+    ),
+    package_manager: None,
+    modules: Modules {
+        slots_total: Some(
+            4,
+        ),
+        modules: [
+            MemoryModule {
+                index: 0,
+                size_bytes: 17179869184,
+                locator: Some(
+                    "DIMM 0",
+                ),
+                bank_locator: Some(
+                    "P0 CHANNEL A",
+                ),
+                speed_mts: Some(
+                    3200,
+                ),
+                configured_speed_mts: Some(
+                    3200,
+                ),
+                mem_type: Some(
+                    "DDR4",
+                ),
+                form_factor: Some(
+                    "DIMM",
+                ),
+                manufacturer: Some(
+                    "Kingston",
+                ),
+                part_number: Some(
+                    "KHX3200C18D4/16G",
+                ),
+                rank: Some(
+                    2,
+                ),
+                configured_voltage_mv: Some(
+                    1350,
+                ),
+            },
+            MemoryModule {
+                index: 2,
+                size_bytes: 17179869184,
+                locator: Some(
+                    "DIMM 0",
+                ),
+                bank_locator: Some(
+                    "P0 CHANNEL B",
+                ),
+                speed_mts: Some(
+                    3200,
+                ),
+                configured_speed_mts: Some(
+                    3200,
+                ),
+                mem_type: Some(
+                    "DDR4",
+                ),
+                form_factor: Some(
+                    "DIMM",
+                ),
+                manufacturer: Some(
+                    "Kingston",
+                ),
+                part_number: Some(
+                    "KHX3200C18D4/16G",
+                ),
+                rank: Some(
+                    2,
+                ),
+                configured_voltage_mv: Some(
+                    1350,
+                ),
+            },
+        ],
+    },
+    connectors: [
+        ConnectorInfo {
+            card: 1,
+            sysfs_name: "card1-DP-2",
+            connector_type: DisplayPort,
+            connected: true,
+            enabled: Some(
+                true,
+            ),
+            monitor_name: Some(
+                "LG ULTRAGEAR",
+            ),
+            modes: [
+                (
+                    3840,
+                    2160,
+                ),
+                (
+                    1920,
+                    1080,
+                ),
+            ],
+        },
+        ConnectorInfo {
+            card: 1,
+            sysfs_name: "card1-HDMI-A-1",
+            connector_type: Hdmi,
+            connected: false,
+            enabled: Some(
+                false,
+            ),
+            monitor_name: None,
+            modes: [],
+        },
+    ],
+}

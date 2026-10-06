@@ -8,6 +8,9 @@ pub mod amdgpu;
 pub mod fdinfo;
 pub mod intel;
 
+pub use amdgpu::{AmdSample, AmdTemp, GpuMetrics, main_temp, parse_gpu_metrics, read_amd};
+pub use fdinfo::{DrmClient, FdinfoScan, engine_busy, engine_busy_cycles, parse_fdinfo, scan};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
