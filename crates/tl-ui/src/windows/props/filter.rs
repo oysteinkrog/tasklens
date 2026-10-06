@@ -114,6 +114,11 @@ impl PropsFilter {
         self.applied_generation
     }
 
+    /// The accessible name of the field, "Filter {tab label}".
+    pub fn accessible_name(&self, cx: &App) -> SharedString {
+        tr_args(cx, NAME, &[("tab", self.tab_label.to_string().into())])
+    }
+
     /// The lowercase filter text the last debounce saw.
     pub fn needle(&self) -> &SharedString {
         &self.needle_lower
@@ -223,7 +228,7 @@ pub fn filter_bar(
     let m = *metrics(cx);
     let f = filter.read(cx);
     let input = f.input.clone();
-    let name = tr_args(cx, NAME, &[("tab", f.tab_label.to_string().into())]);
+    let name = f.accessible_name(cx);
 
     div()
         .debug_selector(|| "PropsFilter-bar".into())
@@ -498,11 +503,12 @@ mod tests {
 
     #[gpui_kit::test]
     fn accessible_name_names_the_tab(cx: &mut TestAppContext) {
-        let (_, cx) = host(cx, false);
-        let tree = cx
-            .update(|window, _| window.debug_a11y_tree_json())
-            .expect("an accessibility tree");
-        assert!(tree.contains("Filter Threads"), "{tree}");
+        let (view, cx) = host(cx, false);
+        let f = filter(&view, cx);
+        assert_eq!(
+            cx.update(|_, cx| f.read(cx).accessible_name(cx)),
+            "Filter Threads"
+        );
     }
 
     #[gpui_kit::test]

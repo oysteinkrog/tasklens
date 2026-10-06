@@ -811,20 +811,20 @@ mod tests {
         assert_eq!(max_radius(cx), 0., "square corners");
     }
 
+    /// The test window has no accessibility adapter, so the tree is never built. This checks
+    /// that the builder keeps the label for the kit `Input::aria_label` call.
     #[gpui_kit::test]
     fn aria_label_names_the_field(cx: &mut TestAppContext) {
-        let (_, cx) = host(cx, |state| {
-            TlTextInput::new("field", state)
-                .placeholder("Filter")
-                .aria_label("Filter Threads")
-                .width(px(200.))
-                .into_any_element()
+        let (view, cx) = host(cx, filter_box);
+        let field = cx.update(|_, cx| {
+            let state = view.read(cx).state.clone();
+            TlTextInput::new("field", &state)
         });
-        draw(cx);
-        let tree = cx
-            .update(|window, _| window.debug_a11y_tree_json())
-            .expect("an accessibility tree");
-        assert!(tree.contains("Filter Threads"), "{tree}");
+        assert_eq!(field.aria_label, None, "off by default");
+        assert_eq!(
+            field.aria_label("Filter Threads").aria_label.as_deref(),
+            Some("Filter Threads")
+        );
     }
 
     #[gpui_kit::test]
@@ -836,9 +836,16 @@ mod tests {
                 .width(px(200.))
                 .into_any_element()
         });
+        // HoverTooltip needs an active window.
         cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
         draw(cx);
         let prefix = cx.debug_bounds("TlTextInput-prefix").expect("prefix drawn");
+        cx.simulate_mouse_move(
+            gpui_kit::point(px(500.), px(500.)),
+            None,
+            gpui_kit::Modifiers::none(),
+        );
         cx.simulate_mouse_move(prefix.center(), None, gpui_kit::Modifiers::none());
         cx.executor().advance_clock(DELAY_CONTROL);
         cx.run_until_parked();
