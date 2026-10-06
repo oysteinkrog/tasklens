@@ -181,7 +181,12 @@ async fn bus_loop<B: UpowerBus>(
                 Ok(changed) => changed,
                 Err(e) => return fail(cx, &e),
             },
-            Ok(None) => false,
+            Ok(None) => {
+                if cx.checkpoint().is_err() {
+                    return Next::Stop(Outcome::Ok(()));
+                }
+                false
+            }
             Err(e) => return fail(cx, &e),
         };
         let mut resynced = false;
@@ -805,7 +810,6 @@ mod tests {
 
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use asupersync::channel::watch;
     use asupersync::time;
@@ -1273,7 +1277,7 @@ mod tests {
             .expect("task is created");
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_idle();
-        let mut advance = |lab: &mut LabRuntime| {
+        let advance = |lab: &mut LabRuntime| {
             lab.advance_time(nanos(IDLE_RECHECK));
             lab.step_for_test();
             lab.run_until_idle();
