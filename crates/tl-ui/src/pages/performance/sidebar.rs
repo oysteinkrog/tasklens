@@ -354,6 +354,8 @@ pub struct DeviceSidebar {
     id: EntityId,
     /// The window of the last render, for the demand part.
     window: Option<AnyWindowHandle>,
+    /// The Performance tab is the active tab. While false the demand part is withdrawn.
+    active: bool,
     settings: SidebarSettings,
     settings_versions: [u64; 4],
     /// `UiMetrics.style_version` the chart colours were built for.
@@ -408,6 +410,7 @@ impl DeviceSidebar {
             demand,
             id,
             window: None,
+            active: true,
             settings: SidebarSettings::read(cx),
             settings_versions: section_versions(cx),
             style_version: m.style_version,
@@ -497,7 +500,30 @@ impl DeviceSidebar {
         }
     }
 
+    /// Called by the page on tab activation. Inactive withdraws the demand part, active sends
+    /// it again. An unchanged value does nothing, so staying on the tab sends nothing.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            self.send_demand(cx);
+        } else {
+            let id = self.id;
+            self.demand.update(cx, |d, cx| d.remove(id, cx));
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Sends the demand part while the tab is active.
     fn send_demand(&self, cx: &mut App) {
+        if !self.active {
+            return;
+        }
         let (id, window, part) = (self.id, self.window, self.demand_part());
         self.demand.update(cx, |d, cx| d.set(id, window, part, cx));
     }

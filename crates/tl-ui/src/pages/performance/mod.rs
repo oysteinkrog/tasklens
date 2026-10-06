@@ -276,6 +276,12 @@ impl PerformancePage {
             render_count: Cell::new(0),
         }
     }
+
+    /// Tab activation: the sidebar withdraws its demand part while another tab is shown and
+    /// sends it again when this tab comes back. Called by the tab host (E24-A1).
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
+    }
 }
 
 impl Focusable for PerformancePage {

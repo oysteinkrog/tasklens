@@ -713,6 +713,62 @@ mod sidebar {
         assert!(!merged.nets && !merged.gpus && !merged.sensors && !merged.cpu_fast);
     }
 
+    /// Advances past the demand coalesce delay and returns the merge and every `set_demand`.
+    fn settle_demand(r: &mut Rig) -> (Demand, Vec<Demand>) {
+        r.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        r.vcx.run_until_parked();
+        let demand = r.demand.clone();
+        let merged = r.vcx.update(|_, cx| demand.read(cx).merged());
+        (merged, r.engine.demands())
+    }
+
+    fn set_active(r: &mut Rig, active: bool) {
+        let sidebar = r.sidebar.clone();
+        r.vcx
+            .update(|_, cx| sidebar.update(cx, |s, cx| s.set_active(active, cx)));
+    }
+
+    #[gpui_kit::test]
+    fn demand_withdrawn_while_another_tab_is_shown(cx: &mut TestAppContext) {
+        let devices = vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+            disk(3, "sda"),
+        ];
+        let mut r = open(cx, devices, Settings::default(), UiState::default());
+        let (merged, sent) = settle_demand(&mut r);
+        assert!(merged.memory && merged.disks);
+
+        // Staying on the tab: no new demand.
+        set_active(&mut r, true);
+        draw(r.vcx);
+        set_active(&mut r, true);
+        let (_, after) = settle_demand(&mut r);
+        assert_eq!(after.len(), sent.len());
+
+        // Another tab: the part goes and the engine hears it once.
+        set_active(&mut r, false);
+        let (merged, away) = settle_demand(&mut r);
+        assert!(!merged.any_surface_visible && !merged.memory && !merged.disks);
+        assert_eq!(away.len(), sent.len() + 1);
+        assert_eq!(away.last(), Some(&merged));
+
+        // A snapshot or a render while away sends nothing.
+        r.engine.publish_with(|s| s.system = Arc::new(system(12)));
+        draw(r.vcx);
+        let (_, still) = settle_demand(&mut r);
+        assert_eq!(still.len(), away.len());
+
+        // Back on the tab: the part returns.
+        set_active(&mut r, true);
+        let (merged, back) = settle_demand(&mut r);
+        assert!(merged.any_surface_visible && merged.memory && merged.disks);
+        assert_eq!(back.len(), away.len() + 1);
+        assert_eq!(back.last(), sent.last());
+    }
+
     #[gpui_kit::test]
     fn select_persists_and_emits(cx: &mut TestAppContext) {
         let r = open(cx, nine(), Settings::default(), UiState::default());
