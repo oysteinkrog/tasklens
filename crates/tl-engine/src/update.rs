@@ -331,6 +331,9 @@ pub struct ConnectionsUpdate {
     pub t_ns: TimeNs,
     pub records: Vec<ConnRecord>,
     pub validity: Validity,
+    /// Per-process TCP send and receive rates (PROC-032). A socket held by several processes
+    /// counts in full for each, with `shared` set.
+    pub attribution: rustc_hash::FxHashMap<ProcessKey, tl_collect::net::NetRate>,
 }
 
 #[derive(Debug, Clone)]
@@ -622,6 +625,7 @@ mod tests {
                     t_ns: 0,
                     records: Vec::new(),
                     validity: Validity::default(),
+                    attribution: Default::default(),
                 }),
                 Some(SourceId::Connections),
             ),

@@ -1008,6 +1008,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
             t_ns: 0,
             records: Vec::new(),
             validity: Validity::default(),
+            attribution: Default::default(),
         }),
         SourceUpdate::ConnectionsDestroySupport(true),
         SourceUpdate::Services(ServicesUpdate {
