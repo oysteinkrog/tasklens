@@ -9,7 +9,7 @@ pub mod cgroup;
 pub mod process;
 
 use std::future::Future;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -329,6 +329,20 @@ pub trait ActionOps: Send + Sync + 'static {
         _wait: Duration,
     ) -> Result<(), OpsError> {
         Err(OpsError::Unsupported("cgroup ops not wired"))
+    }
+}
+
+/// The production `ActionOps`: each method forwards to tl-ops. Module beads add their methods
+/// here next to the trait.
+pub struct RealOps;
+
+impl ActionOps for RealOps {
+    fn open_verified(&self, key: ProcessKey, boot: BootId) -> Result<OwnedFd, OpsError> {
+        tl_ops::process::open_verified(key, boot)
+    }
+
+    fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
+        tl_ops::process::send_signal_fd(pidfd.as_fd(), sig)
     }
 }
 
