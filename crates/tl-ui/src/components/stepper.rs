@@ -239,6 +239,8 @@ impl RenderOnce for TlStepper {
             TlButton::new((self.id.clone(), name), TlButtonKind::Icon)
                 .icon(icon)
                 .tooltip(tip)
+                // The field is the one Tab stop; Up and Down step from the keyboard.
+                .tab_stop(false)
                 .disabled(
                     self.disabled
                         || (steps < 0 && value <= self.min)
