@@ -14,6 +14,9 @@
 //! A `DeviceCommand::Eject` (E12-022) unmounts, locks and ejects through UDisks2 and its polkit
 //! rules, and reports progress in `DiskDetails.eject`. A busy filesystem gets a `/proc` scan for
 //! the processes that hold it.
+//!
+//! A `DeviceCommand::SmartReadAdmin` (E12-028) reads SMART with `pkexec smartctl` for a disk
+//! UDisks2 cannot read, on the blocking pool. See `workers::smartctl`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
@@ -42,7 +45,7 @@ use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerControl,
 use crate::supervise::WorkerFactory;
 use crate::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
-use crate::workers::eject;
+use crate::workers::{eject, smartctl};
 
 pub const BUS: &str = "org.freedesktop.UDisks2";
 pub const ROOT: &str = "/org/freedesktop/UDisks2";
@@ -72,6 +75,7 @@ const SMART_NOT_FOUND: &str = "Disk not found";
 const SMART_NONE: &str = "SMART is not available through UDisks2 for this disk";
 const SMART_DENIED: &str = "Permission denied";
 const SMART_NO_ANSWER: &str = "The disk did not answer within 10 s";
+const SMART_ADMIN_NOT_NEEDED: &str = "Use the normal SMART read for this disk";
 /// How long each unmount, lock, eject or power-off call may take.
 const EJECT_TIMEOUT: Duration = Duration::from_secs(30);
 const EJECT_CANNOT: &str = "This disk cannot be ejected";
@@ -107,14 +111,27 @@ pub fn spec() -> WorkerSpec {
 pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     let proc = cfg.sys_root.proc.clone();
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
-        run_with(cx, io.clone(), SystemConnector, proc.clone())
+        run_with(
+            cx,
+            io.clone(),
+            SystemConnector,
+            proc.clone(),
+            smartctl::read_raw,
+        )
     })
 }
 
 /// The worker on the system bus, with the host `/proc`.
 #[doc(hidden)]
 pub async fn run(cx: Cx, io: WorkerIo) -> Outcome<(), WorkerError> {
-    run_with(cx, io, SystemConnector, SysRoot::host().proc).await
+    run_with(
+        cx,
+        io,
+        SystemConnector,
+        SysRoot::host().proc,
+        smartctl::read_raw,
+    )
+    .await
 }
 
 /// Where a bus session ends.
@@ -131,6 +148,7 @@ async fn run_with<C: Connector>(
     io: WorkerIo,
     connector: C,
     proc: PathBuf,
+    admin_read: AdminRead,
 ) -> Outcome<(), WorkerError> {
     let mut st = State {
         last: None,
@@ -138,6 +156,7 @@ async fn run_with<C: Connector>(
         eject: BTreeMap::new(),
         skip: BTreeSet::new(),
         proc,
+        admin_read,
         queue: Queue::resume(&io),
     };
     loop {
@@ -173,8 +192,13 @@ struct State {
     skip: BTreeSet<u64>,
     /// The `/proc` the busy scan reads.
     proc: PathBuf,
+    /// Runs `pkexec smartctl` for a disk: `smartctl::read_raw`, a fake in tests.
+    admin_read: AdminRead,
     queue: Queue,
 }
+
+/// Blocking. The raw `smartctl --json=c -a` output for a kernel disk name.
+type AdminRead = fn(&str) -> Result<Vec<u8>, Arc<str>>;
 
 /// Where this generation is in the forwarded command list (R-276).
 struct Queue {
@@ -487,6 +511,9 @@ async fn run_commands<B: UdisksBus>(
             WorkerCommand::Device(DeviceCommand::SmartRead { disk, update }) => {
                 smart_read(cx, io, bus, objs, st, Arc::clone(disk), *update).await
             }
+            WorkerCommand::Device(DeviceCommand::SmartReadAdmin { disk }) => {
+                smart_read_admin(cx, io, objs, st, Arc::clone(disk)).await
+            }
             WorkerCommand::Device(DeviceCommand::Eject { seq: ui_seq, disk })
                 if !st.skip.remove(seq) =>
             {
@@ -604,6 +631,56 @@ async fn read_nvme<B: UdisksBus>(
         selftest_status: str_prop(&p, "SmartSelftestStatus"),
     };
     Ok(smart_from_nvme(&map, &props, now_s()))
+}
+
+/// One `SmartReadAdmin`: `pkexec smartctl` on the blocking pool, only for a disk UDisks2 cannot
+/// read. `WarmingUp`, then `Valid` or `Failed`, sending the list after each change.
+async fn smart_read_admin(
+    cx: &Cx,
+    io: &WorkerIo,
+    objs: &ManagedObjects,
+    st: &mut State,
+    disk: Arc<str>,
+) -> Option<Outcome<(), WorkerError>> {
+    let refused = if smartctl::valid_disk_name(&disk) {
+        let kind = disk_records(objs)
+            .into_iter()
+            .find(|(_, identity, _)| matches!(identity, DeviceIdentity::Disk { name, .. } if *name == disk))
+            .map(|(_, _, details)| details.smart);
+        match kind {
+            None => Some(SMART_NOT_FOUND),
+            Some(SmartKind::NeedsFallback | SmartKind::None) => None,
+            Some(SmartKind::Ata | SmartKind::Nvme) => Some(SMART_ADMIN_NOT_NEEDED),
+        }
+    } else {
+        Some(smartctl::INVALID_DISK)
+    };
+    if let Some(reason) = refused {
+        st.smart.insert(disk, smart_failed(reason));
+        return publish(cx, io, objs, st).await;
+    }
+    st.smart.insert(Arc::clone(&disk), smart_warming());
+    if let Some(stop) = publish(cx, io, objs, st).await {
+        return Some(stop);
+    }
+    let read = st.admin_read;
+    let job_disk = Arc::clone(&disk);
+    let job =
+        move |_| read(&job_disk).and_then(|bytes| smartctl::parse_smartctl_json(&bytes, now_s()));
+    let joined = match cx.spawn_blocking(job) {
+        Ok(mut job) => job.join(cx).await.ok(),
+        Err(_) => None,
+    };
+    if cx.checkpoint().is_err() {
+        return Some(Outcome::Ok(()));
+    }
+    let field = match joined {
+        Some(Ok(data)) => valid(Arc::new(data)),
+        Some(Err(reason)) => smart_failed(&reason),
+        None => smart_failed(smartctl::NOT_RUN),
+    };
+    st.smart.insert(disk, field);
+    publish(cx, io, objs, st).await
 }
 
 /// The text the SMART window shows for a failed call.
@@ -1846,7 +1923,7 @@ mod tests {
                 .state
                 .create_task(root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
-                    let _ = run_with(cx, io, connector, proc).await;
+                    let _ = run_with(cx, io, connector, proc, fake_admin_read).await;
                 })
                 .expect("task is created");
             lab.scheduler.lock().schedule(task, 0);
@@ -2362,6 +2439,96 @@ mod tests {
         rig.advance(IDLE_RECHECK);
         assert!(calls(&fake).is_empty());
         assert_eq!(rig.progress.done(SourceId::Udisks), 2);
+        rig.finish();
+    }
+
+    /// Disk names the fake `pkexec smartctl` ran for, across all tests.
+    static ADMIN_DISKS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    /// Records the disk and answers with the NVMe vector. No program runs.
+    fn fake_admin_read(disk: &str) -> Result<Vec<u8>, Arc<str>> {
+        ADMIN_DISKS
+            .lock()
+            .expect("admin lock")
+            .push(disk.to_owned());
+        Ok(smartctl::NVME_JSON.as_bytes().to_vec())
+    }
+
+    fn admin_ran(disk: &str) -> bool {
+        ADMIN_DISKS
+            .lock()
+            .expect("admin lock")
+            .iter()
+            .any(|d| d == disk)
+    }
+
+    #[test]
+    fn admin_read_refused_for_ata() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(sata_objects());
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.device(1, DeviceCommand::SmartReadAdmin { disk: "sda".into() });
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let data = smart_of(&got[0], "sda").expect("smart_data");
+        assert_eq!(data.validity, Validity::Failed);
+        assert_eq!(&*data.value.health.value, SMART_ADMIN_NOT_NEEDED);
+        assert!(!admin_ran("sda"), "no program runs");
+        assert!(calls(&fake).is_empty(), "no D-Bus call");
+
+        // A name that is not a kernel disk name never reaches the runner.
+        rig.device(
+            2,
+            DeviceCommand::SmartReadAdmin {
+                disk: "sda;id".into(),
+            },
+        );
+        rig.advance(SIGNAL_WAIT);
+        assert!(!admin_ran("sda;id"));
+        assert_eq!(rig.progress.done(SourceId::Udisks), 2);
+        rig.finish();
+    }
+
+    #[test]
+    fn admin_read_for_needs_fallback() {
+        let drive = props(vec![("Model", Value::from("Samsung SSD 980"))]);
+        let objs = ManagedObjects(BTreeMap::from([
+            (
+                NVME.to_owned(),
+                object(vec![(
+                    BLOCK_IFACE,
+                    block(makedev(259, 0), "/dev/nvme0n1", NVME_DRIVE),
+                )]),
+            ),
+            (NVME_DRIVE.to_owned(), object(vec![(DRIVE_IFACE, drive)])),
+        ]));
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").objects = Some(objs);
+        let mut rig = Rig::start(connector, true);
+        assert_eq!(rig.drain().len(), 2);
+
+        rig.device(
+            1,
+            DeviceCommand::SmartReadAdmin {
+                disk: "nvme0n1".into(),
+            },
+        );
+        rig.advance(SIGNAL_WAIT);
+        let got = rig.drain();
+        assert_eq!(got.len(), 2, "{got:?}");
+        let first = smart_of(&got[0], "nvme0n1").expect("smart_data");
+        assert_eq!(first.validity, Validity::WarmingUp);
+        let data = smart_of(&got[1], "nvme0n1").expect("smart_data");
+        assert_eq!(data.validity, Validity::Valid);
+        assert_eq!(data.value.health, valid(Arc::from("OK")));
+        assert_eq!(data.value.power_on_s, valid(4_442_400));
+        assert!(admin_ran("nvme0n1"));
+        assert!(calls(&fake).is_empty(), "no D-Bus call");
         rig.finish();
     }
 

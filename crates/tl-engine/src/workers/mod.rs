@@ -26,6 +26,7 @@ pub mod net;
 pub mod processes;
 pub mod public_ip;
 pub mod sensors;
+pub mod smartctl;
 mod startup;
 
 use std::sync::Arc;
