@@ -38,7 +38,7 @@ use tl_model::snapshot::{
     ProcessSeriesSet, ProcessSnapshot, SeriesSet, ServicesSnapshot, Snapshot, StartupSnapshot,
     SystemSnapshot, WindowsSnapshot,
 };
-use tl_model::table::{ProcessTableView, SysTableQuery, TableQuery};
+use tl_model::table::{ProcessTableView, SysTableQuery, TableQuery, UnitRef};
 use tl_model::time::{BootId, now_boot_ns};
 use tl_model::validity::Validity;
 
@@ -145,6 +145,9 @@ pub struct Reducer {
     pub demand_rx: Option<watch::Receiver<Demand>>,
     /// State only `apply` reads and writes (E09-007).
     pub apply_state: apply::ApplyState,
+    /// The non-empty `Description` of every unit a `ServicesUpdate` reported, for the unit row
+    /// names of the table (E09-025, PROC-009). Kept across updates.
+    pub unit_names: FxHashMap<UnitRef, Arc<str>>,
     dirty: ComponentMask,
     /// Header version of each header component at the last publish, in `HEADER_BITS` order.
     published: [u64; HEADER_BITS.len()],
@@ -220,6 +223,7 @@ impl Reducer {
             settings_rx: None,
             demand_rx: None,
             apply_state: apply::ApplyState::default(),
+            unit_names: FxHashMap::default(),
             dirty: ComponentMask::NONE,
             published: [0; HEADER_BITS.len()],
         }

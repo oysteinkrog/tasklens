@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use asupersync::Cx;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tl_model::actions::{ActionEvent, ActionState, RejectReason};
 use tl_model::command::{Command, DeviceCommand};
 use tl_model::demand::Demand;
@@ -21,10 +21,10 @@ use tl_model::series::SampleFlags;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, DeviceDetailsSnapshot, DiskDetails, EjectState, NetDetails,
-    SystemSnapshot,
+    SystemSnapshot, UnitRecord,
 };
 use tl_model::system::{Metric, SensorKind};
-use tl_model::table::{SysTable, Total};
+use tl_model::table::{SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
@@ -413,9 +413,14 @@ impl Reducer {
             SourceUpdate::Details(_) => {
                 tracing::debug!(target: "tasklens::engine", "details update: E09-026");
             }
+            SourceUpdate::Services(s) => {
+                if self.apply_unit_names(&s.units) {
+                    self.rebuild_table(settings);
+                }
+                tracing::debug!(target: "tasklens::engine", ?source, "system update: E09-027");
+            }
             SourceUpdate::Connections(_)
             | SourceUpdate::ConnectionsDestroySupport(_)
-            | SourceUpdate::Services(_)
             | SourceUpdate::Startup(_)
             | SourceUpdate::Inventory(_)
             | SourceUpdate::Windows(_) => {
@@ -1195,13 +1200,39 @@ impl Reducer {
         self.rebuild_table(settings);
     }
 
+    /// Stores the non-empty `Description` of each unit for the unit row names (E09-025). An
+    /// empty one keeps the stored name. Returns true when the name of a unit that a process is
+    /// in changed, so the table needs a rebuild.
+    fn apply_unit_names(&mut self, units: &[UnitRecord]) -> bool {
+        let mut changed: FxHashSet<&UnitRef> = FxHashSet::default();
+        for u in units {
+            if u.description.is_empty()
+                || self
+                    .unit_names
+                    .get(&u.unit)
+                    .is_some_and(|d| *d == u.description)
+            {
+                continue;
+            }
+            self.unit_names
+                .insert(u.unit.clone(), Arc::clone(&u.description));
+            changed.insert(&u.unit);
+        }
+        !changed.is_empty()
+            && self
+                .components
+                .processes
+                .extras
+                .iter()
+                .any(|x| x.unit.as_ref().is_some_and(|u| changed.contains(u)))
+    }
+
     /// Rebuilds the process table and its header totals from the current state. Always marks
     /// `TABLE`, so `query_generation` is echoed even when the rows are equal.
     fn rebuild_table(&mut self, settings: &EngineSettings) {
         let processes = Arc::clone(&self.components.processes);
         let system = Arc::clone(&self.components.system);
         let devices = Arc::clone(&self.components.devices);
-        let unit_names = FxHashMap::default();
         let input = TableInput {
             records: &processes.records,
             extras: &processes.extras,
@@ -1210,7 +1241,7 @@ impl Reducer {
             system: &system,
             devices: &devices,
             settings,
-            unit_names: &unit_names,
+            unit_names: &self.unit_names,
             pseudo: Some(&self.apply_state.pseudo),
         };
         let mut view = table::build(&input, &self.query);

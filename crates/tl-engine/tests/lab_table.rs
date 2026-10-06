@@ -1,29 +1,45 @@
 //! Table builder tests (E09-014, ADR-013): flat mode (E09-009), tree mode (E09-010), grouped
-//! mode (E09-011), hide system processes (E09-012), pseudo rows (E09-023), plus a 2,000-row
-//! timing smoke check and a determinism check.
+//! mode (E09-011), hide system processes (E09-012), pseudo rows (E09-023), unit row names
+//! (E09-025), plus a 2,000-row timing smoke check and a determinism check.
 //!
 //! The builder is pure (records in, rows out), so these tests need no runtime. Each test builds
 //! its records with `rec` and the `in_app`, `in_unit` and `kthread` helpers, then calls `build`.
 //! Records passed to `build` must be sorted by `ProcessKey`, as the reducer keeps them;
 //! `rec` sets `start_ticks = pid × 10`, so ascending PIDs are sorted.
+//!
+//! The unit row name tests run the reducer in a `LabRuntime`, because the names come from
+//! `ServicesUpdate` messages and the table version is set at publish.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
+use asupersync::channel::{mpsc, watch};
+use asupersync::types::Budget;
+use asupersync::{Cx, LabConfig, LabRuntime};
 use rustc_hash::FxHashMap;
+use tl_collect::proc::cgroup::{UserPlacement, parse_cgroup_file, placement};
 use tl_engine::reducer::table::{self, GROUP_ORDER, IRQ_NOT_ACCOUNTED, PseudoInput, TableInput};
-use tl_engine::update::ZramStat;
+use tl_engine::reducer::{Publisher, Reducer};
+use tl_engine::source::WorkerControl;
+use tl_engine::update::{EngineMsg, ProcessSweep, ServicesUpdate, SourceUpdate, ZramStat};
 use tl_model::actions::{CgroupRef, SchedPolicy};
+use tl_model::command::Command;
 use tl_model::devices::DeviceCatalog;
+use tl_model::health::ManagerState;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras,
     ProcessMeta, ProcessRecord,
 };
 use tl_model::settings::EngineSettings;
-use tl_model::snapshot::SystemSnapshot;
+use tl_model::snapshot::{
+    ServiceBackend, ServiceStatus, Snapshot, StartupType, SystemSnapshot, UnitRecord,
+};
 use tl_model::system::CpuSet;
-use tl_model::table::{Manager, ProcessTableView, SortSpec, TableMode, TableQuery, UnitRef};
+use tl_model::table::{
+    Manager, ProcessTableView, SortSpec, TableMode, TableQuery, Total, UnitRef, UnitType,
+};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
@@ -1441,4 +1457,289 @@ fn pseudo_zram_filter_by_name() {
     );
     assert_eq!(header_counts(&view), [0, 0, 0]);
     assert!(view.rows[2].has_children);
+}
+
+// Unit row names (E09-025).
+
+const NAMES_BOOT: BootId = BootId(1);
+
+/// A reducer and its publisher, run in a `LabRuntime` one batch of messages at a time.
+struct Engine {
+    lab: LabRuntime,
+    root: asupersync::types::RegionId,
+    reducer: Option<Reducer>,
+    publisher: Option<Publisher>,
+}
+
+type RunOutput = Arc<Mutex<Option<(Reducer, Publisher)>>>;
+
+impl Engine {
+    fn new() -> Self {
+        let (control_tx, _control_rx) = watch::channel(WorkerControl::default());
+        let (events_tx, _events_rx) = async_channel::bounded(64);
+        let (wake_tx, _wake_rx) = async_channel::bounded(1);
+        let publisher = Publisher {
+            latest: Arc::new(ArcSwap::from_pointee(Snapshot::empty(NAMES_BOOT, 1))),
+            wake_tx,
+            stop_publishing: false,
+        };
+        let mut lab = LabRuntime::new(LabConfig::new(42).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        Engine {
+            lab,
+            root,
+            reducer: Some(Reducer::new(1, NAMES_BOOT, control_tx, events_tx)),
+            publisher: Some(publisher),
+        }
+    }
+
+    /// Queues `msgs` as one batch, runs the loop until the channel closes and returns the
+    /// last published snapshot.
+    fn run(&mut self, msgs: Vec<EngineMsg>) -> Arc<Snapshot> {
+        let (tx, mut rx) = mpsc::channel::<EngineMsg>(msgs.len().max(1));
+        for msg in msgs {
+            tx.try_send(msg)
+                .expect("the channel has room for every message");
+        }
+        drop(tx);
+        let mut reducer = self.reducer.take().expect("one run at a time");
+        let mut publisher = self.publisher.take().expect("one run at a time");
+        let out: RunOutput = Arc::default();
+        let slot = Arc::clone(&out);
+        let (task, _handle) = self
+            .lab
+            .state
+            .create_task(self.root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                reducer
+                    .run(&cx, &mut rx, &mut publisher)
+                    .await
+                    .expect("no invariant violation");
+                *slot.lock().unwrap_or_else(PoisonError::into_inner) = Some((reducer, publisher));
+            })
+            .expect("task is created");
+        self.lab.scheduler.lock().schedule(task, 0);
+        self.lab.run_until_idle();
+        let (reducer, publisher) = out
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .expect("run returned");
+        let latest = publisher.latest.load_full();
+        self.reducer = Some(reducer);
+        self.publisher = Some(publisher);
+        latest
+    }
+}
+
+fn pipewire() -> UnitRef {
+    UnitRef {
+        manager: Manager::User,
+        name: "pipewire.service".into(),
+    }
+}
+
+/// Three processes in the user unit `pipewire.service`.
+fn pipewire_records() -> Vec<ProcessRecord> {
+    [
+        (10, "pipewire"),
+        (11, "wireplumber"),
+        (12, "pipewire-pulse"),
+    ]
+    .into_iter()
+    .map(|(pid, name)| in_unit(rec(pid, 1, name, 1.0), "session.slice", "pipewire.service"))
+    .collect()
+}
+
+/// The grouped query with every header expanded.
+fn grouped_query() -> EngineMsg {
+    EngineMsg::Command(Command::SetTableQuery(query(
+        TableMode::Grouped,
+        "pid",
+        true,
+        "",
+        &headers(),
+    )))
+}
+
+fn sweep_of(records: Vec<ProcessRecord>) -> EngineMsg {
+    let extras = records.iter().map(extras).collect();
+    EngineMsg::Source(SourceUpdate::Processes(ProcessSweep {
+        observed_start: 1,
+        observed_end: 1,
+        records,
+        extras,
+        extras_p2: Vec::new(),
+        app_stats: Vec::new(),
+        unit_stats: Vec::new(),
+        system_threads: 0,
+        file_nr: None,
+        online_cpus: 1,
+        low_memory: None,
+    }))
+}
+
+fn missing<T: Default>() -> Total<T> {
+    Total {
+        value: T::default(),
+        validity: Validity::Missing,
+    }
+}
+
+fn unit_record(unit: UnitRef, description: &str) -> UnitRecord {
+    UnitRecord {
+        unit,
+        kind: UnitType::Service,
+        description: description.into(),
+        status: ServiceStatus::Running,
+        sub_state: "running".into(),
+        load_state: "loaded".into(),
+        startup: StartupType::Enabled,
+        main_pid: 0,
+        user: "user".into(),
+        path: "".into(),
+        unit_file: None,
+        active_since_us: None,
+        triggered_by: Arc::from([]),
+        control_group: None,
+        can_reload: false,
+        has_cgroup_procs: false,
+        cgroup_pids: Arc::from([]),
+        cpu_pct: missing(),
+        memory_bytes: missing(),
+        disk_bps: missing(),
+        tasks: missing(),
+    }
+}
+
+/// A user manager `ServicesUpdate` with one unit per `(name, description)`.
+fn services(units: &[(&str, &str)]) -> EngineMsg {
+    EngineMsg::Source(SourceUpdate::Services(ServicesUpdate {
+        manager: Manager::User,
+        state: ManagerState::Connected,
+        units: units
+            .iter()
+            .map(|&(name, description)| {
+                let unit = UnitRef {
+                    manager: Manager::User,
+                    name: name.into(),
+                };
+                unit_record(unit, description)
+            })
+            .collect(),
+        details: Vec::new(),
+        backend: ServiceBackend::Systemd,
+        validity: Validity::Valid,
+    }))
+}
+
+/// The name of the unit row of `unit`.
+fn unit_row_name(snap: &Snapshot, unit: &UnitRef) -> String {
+    snap.table
+        .groups
+        .iter()
+        .find(|g| g.kind == GroupRowKind::Unit && g.node == NodeId::Unit(unit.clone()))
+        .map(|g| g.name.to_string())
+        .expect("the unit has a row")
+}
+
+#[test]
+fn unit_row_name_falls_back_to_unit() {
+    let mut engine = Engine::new();
+    let snap = engine.run(vec![grouped_query(), sweep_of(pipewire_records())]);
+    assert_eq!(unit_row_name(&snap, &pipewire()), "pipewire.service");
+}
+
+#[test]
+fn unit_row_name_from_description() {
+    let mut engine = Engine::new();
+    let before = engine.run(vec![grouped_query(), sweep_of(pipewire_records())]);
+    let after = engine.run(vec![services(&[(
+        "pipewire.service",
+        "PipeWire Multimedia Service",
+    )])]);
+    assert_eq!(
+        unit_row_name(&after, &pipewire()),
+        "PipeWire Multimedia Service"
+    );
+    assert!(after.table.header.version > before.table.header.version);
+    assert_eq!(
+        after.processes.header.version, before.processes.header.version,
+        "no new sweep"
+    );
+
+    // An empty Description keeps the stored name.
+    let snap = engine.run(vec![services(&[("pipewire.service", "")])]);
+    assert_eq!(
+        unit_row_name(&snap, &pipewire()),
+        "PipeWire Multimedia Service"
+    );
+}
+
+#[test]
+fn description_change_rebuilds_once() {
+    let mut engine = Engine::new();
+    engine.run(vec![grouped_query(), sweep_of(pipewire_records())]);
+    let first = engine.run(vec![services(&[("pipewire.service", "PipeWire")])]);
+
+    let changed = engine.run(vec![services(&[(
+        "pipewire.service",
+        "PipeWire Multimedia Service",
+    )])]);
+    assert_eq!(
+        unit_row_name(&changed, &pipewire()),
+        "PipeWire Multimedia Service"
+    );
+    assert_eq!(changed.table.header.version, first.table.header.version + 1);
+
+    // The same names again, and a new name for a unit no process is in: no rebuild.
+    let same = engine.run(vec![services(&[
+        ("pipewire.service", "PipeWire Multimedia Service"),
+        ("cups.service", "CUPS Scheduler"),
+    ])]);
+    assert_eq!(same.table.header.version, changed.table.header.version);
+    assert!(Arc::ptr_eq(&same.table, &changed.table));
+}
+
+#[test]
+fn unit_manager_from_cgroup_path() {
+    // The sweep picks the manager from the placement of the cgroup path (E08-003).
+    let manager_of = |path: &str| {
+        let cg = parse_cgroup_file(format!("0::/{path}\n").as_bytes()).expect("a v2 path");
+        let manager = match placement(&cg) {
+            UserPlacement::InUserManager { .. } => Manager::User,
+            _ => Manager::System,
+        };
+        (manager, cg.unit.expect("a unit").to_string())
+    };
+    assert_eq!(
+        manager_of("system.slice/cron.service"),
+        (Manager::System, "cron.service".to_string())
+    );
+    assert_eq!(
+        manager_of(&format!("{USER_MANAGER}/session.slice/pipewire.service")),
+        (Manager::User, "pipewire.service".to_string())
+    );
+
+    let records = vec![
+        in_unit(rec(10, 1, "cron", 0.0), "system.slice", "cron.service"),
+        in_unit(rec(11, 10, "cron", 0.0), "system.slice", "cron.service"),
+    ];
+    let cron = UnitRef {
+        manager: Manager::System,
+        name: "cron.service".into(),
+    };
+    let view = build(
+        &records,
+        &query(TableMode::Grouped, "pid", true, "", &headers()),
+        &settings(),
+    );
+    let units: Vec<&GroupRow> = view
+        .groups
+        .iter()
+        .filter(|g| g.kind == GroupRowKind::Unit)
+        .collect();
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0].node, NodeId::Unit(cron));
+    assert_eq!(units[0].class, GroupKind::System);
 }
