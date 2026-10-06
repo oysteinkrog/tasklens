@@ -14,6 +14,7 @@ pub mod gpu;
 #[doc(hidden)]
 pub mod helper;
 mod history_query;
+mod launcher;
 mod opener;
 pub mod reducer;
 pub mod runtime;
