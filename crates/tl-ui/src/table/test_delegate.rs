@@ -18,12 +18,12 @@ use crate::table::columns::{
     Availability, ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn, TableId,
 };
 use crate::table::tree_table::{
-    IconSlot, NameCell, NameIcon, RowFlags, RowKind, TlTreeTable, TreeTableDelegate,
+    IconSlot, NameCell, NameIcon, RowFlags, RowKind, TableSort, TlTreeTable, TreeTableDelegate,
 };
 
 /// A column id set `VecDelegate` can run on, with its sort type.
 pub trait VecColumn: TableColumn {
-    type Sort: Copy + PartialEq + 'static;
+    type Sort: Copy + PartialEq + TableSort<Self> + 'static;
     /// The table the layout is built for.
     const TABLE: TableId;
     /// The Name column of this id set.

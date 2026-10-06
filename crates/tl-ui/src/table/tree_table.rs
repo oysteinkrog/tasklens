@@ -22,10 +22,12 @@ use gpui_kit::{
     FocusHandle, Hsla, InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseButton,
     MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollStrategy,
     ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _, Styled, TextRun,
-    UniformListScrollHandle, Window, div, font, point, px, uniform_list,
+    UniformListScrollHandle, Window, div, font, point, px, size, uniform_list,
 };
 use rustc_hash::FxBuildHasher;
 use smallvec::{SmallVec, smallvec};
+use tl_model::ids::ColumnId;
+use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
 use crate::components::menu::{TlMenu, open_context_menu_at};
@@ -34,15 +36,19 @@ use crate::components::validity::copy_text;
 use crate::i18n::tr;
 use crate::table::actions::{
     CollapseOrParent, CopyRowsAsTable, ExpandOrChild, MoveFocus, MoveFocusEdge, MoveFocusPage,
-    OpenContextMenu, OpenProperties, SelectAll, TABLE_CONTEXT, ToggleExpand, ToggleSelectFocus,
+    OpenContextMenu, OpenProperties, SelectAll, SortByColumn, TABLE_CONTEXT, ToggleExpand,
+    ToggleSelectFocus,
 };
 use crate::table::cells::{
     CellCtx, CellOut, IconSourceCache, attach_cell_tooltip, cell_background, cell_text_color,
     glyph_cell, icon_px, name_indent, numeric_cell, paint_group_header_cell, paint_name_cell,
     path_cell, text_cell,
 };
-use crate::table::columns::{ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
-use crate::table::header::{HeaderState, TlTreeTableHeader};
+use crate::table::columns::{ColumnAlign, ColumnKind, ColumnLayout, ColumnSpec, TableColumn};
+use crate::table::header::{
+    self, HeaderCell, HeaderEvent, HeaderListener, HeaderPress, HeaderState, SORT_ARROW,
+    TlTreeTableHeader, beyond_slop, header_tooltip, sort_arrow_x,
+};
 use crate::table::selection::{Selection, SelectionView};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::UI_FAMILY;
@@ -84,7 +90,7 @@ pub trait TreeTableDelegate: 'static + Sized {
     /// Column ids: `ColumnId` for the process tables, `SysColumnId` for the system tables.
     type Column: TableColumn;
     /// Sort state: `SortSpec` for the process tables, `SysSortSpec` for the system tables.
-    type Sort: Clone + PartialEq + 'static;
+    type Sort: Clone + PartialEq + TableSort<Self::Column> + 'static;
 
     fn row_count(&self) -> usize;
     fn row_id(&self, ix: usize) -> Self::RowId;
@@ -162,6 +168,30 @@ pub trait TreeTableDelegate: 'static + Sized {
     }
 }
 
+/// The column and direction of a sort state, for the header's sort arrow.
+pub trait TableSort<C> {
+    fn column(&self) -> C;
+    fn ascending(&self) -> bool;
+}
+
+impl TableSort<ColumnId> for SortSpec {
+    fn column(&self) -> ColumnId {
+        self.column
+    }
+    fn ascending(&self) -> bool {
+        self.ascending
+    }
+}
+
+impl TableSort<SysColumnId> for SysSortSpec {
+    fn column(&self) -> SysColumnId {
+        self.column
+    }
+    fn ascending(&self) -> bool {
+        self.ascending
+    }
+}
+
 /// Opacity of the metric cells of a `STALE` row (UI-PRC-002).
 pub const STALE_OPACITY: f32 = 0.6;
 
@@ -196,9 +226,10 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     text_cache: CellTextCache<D::RowId, D::Column>,
     /// Image sources of the Name cells' file icons, reused across frames.
     icons: IconSourceCache,
-    /// Drag and resize, filled by E18-009 to E18-011.
-    #[allow(dead_code)]
-    header_state: HeaderState,
+    /// Header hover, press, totals and this frame's header cells.
+    header_state: HeaderState<D::Column>,
+    /// Routes the header's pointer events to [`Self::header_event`]. Created once in `new`.
+    header_listener: HeaderListener,
     hover_row: Option<usize>,
     /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
@@ -260,6 +291,12 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             text_cache: CellTextCache::new(),
             icons: IconSourceCache::new(),
             header_state: HeaderState::default(),
+            header_listener: {
+                let this = cx.weak_entity();
+                Rc::new(move |ev, window, cx| {
+                    let _ = this.update(cx, |t, cx| t.header_event(ev, window, cx));
+                })
+            },
             hover_row: None,
             paused: false,
             visible_range: 0..0,
@@ -421,6 +458,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let version = self.delegate.table_version();
         if version != self.last_version || style_version != self.last_style_version {
             self.text_cache.begin_version(version, style_version);
+            self.header_state
+                .totals
+                .begin_version(version, style_version);
             self.icons.begin_version(version);
             self.last_version = version;
             self.last_style_version = style_version;
@@ -1215,6 +1255,155 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         };
         copy_text(self.out.validity, &text)
     }
+
+    /// Header hover, press, totals and the cells of the last frame.
+    pub fn header_state(&self) -> &HeaderState<D::Column> {
+        &self.header_state
+    }
+
+    /// The header total of `col` as line 2 shows it: the cached text and its validity. `None`
+    /// when the delegate has no total for `col`. Formats only when the value or validity changed.
+    pub fn header_total_text(&mut self, col: D::Column) -> Option<(SharedString, Validity)> {
+        self.out.reset();
+        if !self.delegate.header_total(col, &mut self.out) {
+            return None;
+        }
+        let validity = self.out.validity;
+        let delegate = &self.delegate;
+        let totals = &mut self.header_state.totals;
+        let text = match self.out.arc.clone() {
+            Some(arc) => totals.get_or_insert_arc((), col, &arc),
+            None => totals.get_or_format((), col, self.out.bits, validity, |s| {
+                let mut full = CellOut {
+                    text: std::mem::take(s),
+                    want_text: true,
+                    ..CellOut::default()
+                };
+                delegate.header_total(col, &mut full);
+                *s = full.text;
+            }),
+        };
+        Some((text, validity))
+    }
+
+    /// Fills `header_state.cells` and the sort arrow for this frame. The `Vec` keeps its
+    /// capacity; texts are `SharedString` clones and cached totals.
+    fn prepare_header(
+        &mut self,
+        lines: HeaderLines,
+        m: &UiMetrics,
+        theme: &TlTheme,
+        window: &Window,
+    ) {
+        let layout = self.delegate.columns();
+        let visible = layout.visible_columns().clone();
+        let offsets = layout.offsets().clone();
+        let total_width = layout.total_width();
+        let sort = self.delegate.sort();
+        let (sort_col, ascending) = (sort.column(), sort.ascending());
+        let mut cells = std::mem::take(&mut self.header_state.cells);
+        cells.clear();
+        self.header_state.arrow = None;
+        for (pos, &id) in visible.iter().enumerate() {
+            let x = offsets[pos];
+            let w = offsets.get(pos + 1).copied().unwrap_or(total_width) - x;
+            let spec = self.delegate.column_spec(id);
+            let (label, align, sortable) = (spec.label.clone(), spec.align, spec.sortable);
+            let sorted = sortable && id == sort_col;
+            if sorted {
+                let label_w = if align == ColumnAlign::Left {
+                    self.header_state
+                        .label_width(id, &label, m.style_version, m, window)
+                } else {
+                    Pixels::ZERO
+                };
+                let (top, h) = header::line1(lines, m);
+                let a = px(SORT_ARROW * m.ui_scale);
+                let origin = point(x + sort_arrow_x(align, w, label_w, m), top + (h - a) / 2.0);
+                self.header_state.arrow = Some((id, ascending, Bounds::new(origin, size(a, a))));
+            }
+            let total = match lines {
+                HeaderLines::Two => self.header_total_text(id),
+                HeaderLines::One => None,
+            };
+            let fill = self.header_state.fill(id, sortable, theme);
+            cells.push(HeaderCell {
+                id,
+                label,
+                align,
+                x,
+                w,
+                sort: sorted.then_some(ascending),
+                total,
+                fill,
+            });
+        }
+        self.header_state.cells = cells;
+    }
+
+    /// Pointer events from the header's hitboxes (UI-PRC-005). A left press and release on the
+    /// same sortable cell, without moving more than 4 px, sorts by that column.
+    fn header_event(&mut self, ev: HeaderEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let scale = metrics(cx).ui_scale;
+        let col_at = |this: &Self, pos: Option<usize>| {
+            pos.and_then(|p| this.delegate.columns().visible_columns().get(p).copied())
+        };
+        match ev {
+            HeaderEvent::Move { hovered, at } => {
+                let col = col_at(self, hovered);
+                let mut changed = self.header_state.set_hover(col);
+                if let Some(p) = &mut self.header_state.press
+                    && !p.dragged
+                    && beyond_slop(p.at, at, scale)
+                {
+                    p.dragged = true;
+                    changed = true;
+                }
+                if changed {
+                    cx.notify();
+                }
+            }
+            HeaderEvent::Down { pos, at } => {
+                if let Some(col) = col_at(self, Some(pos)) {
+                    self.header_state.press = Some(HeaderPress {
+                        col,
+                        at,
+                        dragged: false,
+                    });
+                    cx.notify();
+                }
+            }
+            HeaderEvent::Up { hovered, at } => {
+                let Some(p) = self.header_state.press.take() else {
+                    return;
+                };
+                cx.notify();
+                if p.dragged || beyond_slop(p.at, at, scale) || col_at(self, hovered) != Some(p.col)
+                {
+                    return;
+                }
+                self.sort_by_column(p.col, cx);
+            }
+        }
+    }
+
+    /// Asks the delegate to sort by `col` (header click and `SortByColumn`). The delegate picks
+    /// the direction with `next_sort`. Nothing on an unsortable column.
+    pub fn sort_by_column(&mut self, col: D::Column, cx: &mut Context<Self>) {
+        if !self.delegate.column_spec(col).sortable {
+            return;
+        }
+        self.delegate.on_sort(col, cx);
+        cx.notify();
+    }
+
+    /// `SortByColumn` from the header menu. An id outside this table's column set is ignored.
+    fn on_sort_by_column(&mut self, a: &SortByColumn, _: &mut Window, cx: &mut Context<Self>) {
+        let table = self.delegate.columns().table;
+        if let Some(col) = D::Column::parse(table, a.id.as_str()) {
+            self.sort_by_column(col, cx);
+        }
+    }
 }
 
 /// The rows a demand report covers: `visible` widened by its own length above and below, cut to
@@ -1319,15 +1508,23 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         self.x_offset = -ScrollbarHandle::offset(&self.scroll).x;
         let hairline = UiMetrics::hairline(window);
 
+        let lines = self.delegate.header_lines();
+        self.prepare_header(lines, &m, &theme, window);
+        let tooltip = self
+            .header_state
+            .hover
+            .and_then(|c| header_tooltip(self.delegate.column_spec(c)));
         let header = TlTreeTableHeader {
             layout: self.delegate.columns(),
-            lines: self.delegate.header_lines(),
+            lines,
             x_offset: self.x_offset,
             m: &m,
             theme: &theme,
             hairline,
+            state: &self.header_state,
+            listener: self.header_listener.clone(),
         }
-        .render(|id| self.delegate.column_spec(id));
+        .render(tooltip, window, cx);
 
         let count = self.delegate.row_count();
         if count == 0 {
@@ -1453,6 +1650,7 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .on_action(cx.listener(Self::on_open_properties))
             .on_action(cx.listener(Self::on_open_context_menu))
             .on_action(cx.listener(Self::on_copy_rows_as_table))
+            .on_action(cx.listener(Self::on_sort_by_column))
             .child(header)
             .child(body)
     }
