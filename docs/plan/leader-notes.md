@@ -443,3 +443,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - wlf.8 (ed5ab44): bench/stats.rs FrameProbe and report stats; process_cpu_pct and accessors for E01-007.
 - yrf.14 (34f4465): stacked bands by period slot, overlaid merge, buffers in Scratch. Geometry key allocates per paint beyond 2 series: new P1 yrf bead after yrf.11. Partial-point flag noted on yrf.2.
 - qfx.23 (99dddb6, fde67ea, 6d63ef0): helper task runs in each session; helper and setup commands routed; HealthState set_helper and set_setup; EngineHooks.helper (None in lab_session rig); SharedHandles.helper. One extra publish per session start for the helper's first state.
+- rsf.9 (019e4e3): table actions and keymap (context "Table"), chevron 20 px hit area in tree_table.rs, group header double-click toggles once, PgUp/PgDn by visible rows minus 1. Known: chevron and row tooltip can show together.
+- lgw.8 (4e1036b): 200 ms theme crossfade; R-209 requester id; set_anim_window must be called by MainWindow::new (noted on jqk.10).
+- yrf.11 (586ee3d, 1fcbe3b, 4765021, 11831de): chart labels cached and reshaped only on change; legend hidden under the range label size rule; a chart with a 2-item legend paints 6 lines (spec says 5); accepted.
