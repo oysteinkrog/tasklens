@@ -25,6 +25,8 @@ smallvec      = { workspace = true }
 bitflags      = { workspace = true }
 thiserror     = { workspace = true }
 tracing       = { workspace = true }
+# The public IP fetch only (`workers/public_ip.rs`, R-131).
+ureq          = { workspace = true }
 
 [dev-dependencies]
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }

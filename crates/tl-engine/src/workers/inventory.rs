@@ -18,6 +18,9 @@
 //! connectors, `/sys/class/net` and one rtnetlink address dump. Rows carry `device: None`; the
 //! reducer merges the catalog device and the API versions (R-166). Disk serials, MACs and IP
 //! addresses are shown on screen only and never logged.
+//!
+//! The Public IP row (PERF-060) is fetched only on `DeviceCommand::FetchPublicIp`, whatever the
+//! demand, never at start (R-139 item 5). The worker keeps the result across scans.
 
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -51,12 +54,14 @@ use tl_collect::sample::disk::{FsStat, disk_usage, host_statvfs};
 use tl_collect::sanitize::sanitize_text;
 use tl_collect::sysroot::{read_file, read_trimmed, read_u64};
 use tl_collect::{CollectError, SysRoot};
+use tl_model::command::DeviceCommand;
 use tl_model::devices::NetKind;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     BoardInfo, DiskDrive, DisplayMode, FirmwareInfo, FirmwareType, GraphicsAdapter, InvField,
-    InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo, ProcessorInfo, SystemInfo,
+    InventorySnapshot, MemoryInfo, MemoryModule, NetworkAdapter, OsInfo, ProcessorInfo,
+    PublicIpState, SystemInfo,
 };
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
@@ -68,6 +73,7 @@ use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
 use crate::workers::net::net_kind;
+use crate::workers::public_ip::{self, UreqFetcher};
 
 /// Read limit for `/proc/meminfo`, in bytes.
 const MEMINFO_MAX: usize = 64 * 1024;
@@ -105,7 +111,8 @@ pub fn spec() -> WorkerSpec {
 }
 
 /// Each generation runs [`run`] on the host paths, or on the fixture below `cfg.sys_root`. A
-/// fixture root never reads host files, the system bus, the environment or a program.
+/// fixture root never reads host files, the system bus, the environment or a program, and never
+/// makes the public IP request.
 pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
     let host = cfg.sys_root == SysRoot::host();
     let paths = paths_for(&cfg.sys_root);
@@ -151,29 +158,47 @@ async fn run(cx: Cx, io: WorkerIo, paths: InventoryPaths, host: bool) -> Outcome
         snap.system = build_system(&env, &bus, &raw.kernel, user, version);
         snap
     };
-    run_loop(cx, io, bus_env, scan).await
+    let fetch_ip = move || {
+        if !host {
+            return PublicIpState::Failed("Could not reach api.ipify.org".into());
+        }
+        let v6 = public_ip::has_global_v6_route(&root.proc);
+        public_ip::fetch(&UreqFetcher::new(), v6, unix_now_s())
+    };
+    run_loop(cx, io, bus_env, scan, fetch_ip).await
 }
 
-/// The event loop with the blocking scan injected. Returns `Outcome::Ok(())` on cancel and
-/// `Err` when a scan job fails or the reducer's queue is closed, so the supervisor restarts it.
+fn unix_now_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// The event loop with the blocking scan and public IP fetch injected. Returns `Outcome::Ok(())`
+/// on cancel and `Err` when a job fails or the reducer's queue is closed, so the supervisor
+/// restarts it.
 #[doc(hidden)]
-pub async fn run_with<F>(cx: Cx, io: WorkerIo, scan: F) -> Outcome<(), WorkerError>
+pub async fn run_with<F, G>(cx: Cx, io: WorkerIo, scan: F, fetch_ip: G) -> Outcome<(), WorkerError>
 where
     F: Fn() -> InventorySnapshot + Clone + Send + Sync + 'static,
+    G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
-    run_loop(cx, io, None, move |_| scan()).await
+    run_loop(cx, io, None, move |_| scan(), fetch_ip).await
 }
 
 /// The event loop. Each scan reads the system bus first when `bus_env` is `Some` (else the bus
-/// fields are `Failed`), then runs `scan` with the result as a blocking job.
-async fn run_loop<F>(
+/// fields are `Failed`), then runs `scan` with the result as a blocking job. A `FetchPublicIp`
+/// command runs `fetch_ip` as a blocking job after this turn's scan.
+async fn run_loop<F, G>(
     cx: Cx,
     io: WorkerIo,
     bus_env: Option<Arc<SystemEnv>>,
     scan: F,
+    fetch_ip: G,
 ) -> Outcome<(), WorkerError>
 where
     F: Fn(SystemBus) -> InventorySnapshot + Clone + Send + Sync + 'static,
+    G: Fn() -> PublicIpState + Clone + Send + Sync + 'static,
 {
     let running = SourceUpdate::Health {
         id: SourceId::Inventory,
@@ -193,6 +218,9 @@ where
         progress.set_done(SourceId::Inventory, last_seq);
     }
     let mut was_visible = false;
+    // Kept across scans and copied into every snapshot.
+    let mut public_ip = PublicIpState::NotFetched;
+    let mut last_snap: Option<InventorySnapshot> = None;
 
     loop {
         sleep(cx.now(), IDLE_RECHECK).await;
@@ -205,16 +233,22 @@ where
         was_visible = visible;
 
         let control = io.control.borrow_and_clone();
-        // The newest `RefreshNow` seen while visible, done once this turn's scan is sent. A
-        // hidden tab's `RefreshNow` and every other command are done at once.
+        // The newest `RefreshNow` seen while visible or `FetchPublicIp`, done once this turn's
+        // scan or fetch is sent, with every command after it. A hidden tab's `RefreshNow` and
+        // every other command before it are done at once.
         let mut pending_done = None;
+        let mut refresh = false;
+        let mut fetch = false;
         for queued in control.commands.iter().filter(|c| c.seq > last_seq) {
             if queued.target != SourceId::Inventory {
                 continue;
             }
             progress.set_started(SourceId::Inventory, queued.seq);
-            let refresh = visible && queued.command == WorkerCommand::RefreshNow;
-            if refresh || pending_done.is_some() {
+            let this_refresh = visible && queued.command == WorkerCommand::RefreshNow;
+            let this_fetch = queued.command == WorkerCommand::Device(DeviceCommand::FetchPublicIp);
+            refresh |= this_refresh;
+            fetch |= this_fetch;
+            if this_refresh || this_fetch || pending_done.is_some() {
                 pending_done = Some(queued.seq);
             } else {
                 progress.set_done(SourceId::Inventory, queued.seq);
@@ -224,42 +258,88 @@ where
             last_seq = last_seq.max(newest.seq);
         }
         drop(control);
-        if !opened && pending_done.is_none() {
-            continue;
+
+        if opened || refresh {
+            let bus = match &bus_env {
+                Some(env) => read_system_bus(&cx, env).await,
+                None => SystemBus::failed(),
+            };
+            if cx.checkpoint().is_err() {
+                return Outcome::Ok(());
+            }
+            let job_scan = scan.clone();
+            let mut snap = match blocking(&cx, move || job_scan(bus)).await {
+                Ok(snap) => snap,
+                Err(stop) => return stop,
+            };
+            snap.public_ip = public_ip.clone();
+            last_snap = Some(snap.clone());
+            if let Some(stop) = send(&cx, &io, SourceUpdate::Inventory(Box::new(snap))).await {
+                return stop;
+            }
         }
 
-        let bus = match &bus_env {
-            Some(env) => read_system_bus(&cx, env).await,
-            None => SystemBus::failed(),
-        };
-        if cx.checkpoint().is_err() {
-            return Outcome::Ok(());
-        }
-        let job_scan = scan.clone();
-        let mut job = match cx.spawn_blocking(move |_| job_scan(bus)) {
-            Ok(job) => job,
-            Err(e) => return Outcome::Err(WorkerError::Other(format!("spawn: {e}").into())),
-        };
-        let snap = match job.join(&cx).await {
-            Ok(snap) => snap,
-            Err(JoinError::Cancelled(reason)) => {
-                if cx.checkpoint().is_err() {
-                    return Outcome::Ok(());
-                }
-                return Outcome::Cancelled(reason);
+        if fetch {
+            public_ip = PublicIpState::Fetching;
+            if let Some(stop) = send_ip(&cx, &io, &mut last_snap, &public_ip).await {
+                return stop;
             }
-            Err(JoinError::Panicked(payload)) => return Outcome::Panicked(payload),
-            Err(JoinError::PolledAfterCompletion) => {
-                return Outcome::Err(WorkerError::Other("job polled after completion".into()));
+            public_ip = match blocking(&cx, fetch_ip.clone()).await {
+                Ok(state) => state,
+                Err(stop) => return stop,
+            };
+            if let Some(stop) = send_ip(&cx, &io, &mut last_snap, &public_ip).await {
+                return stop;
             }
-        };
-        if let Some(stop) = send(&cx, &io, SourceUpdate::Inventory(Box::new(snap))).await {
-            return stop;
         }
+
         if let Some(seq) = pending_done {
             progress.set_done(SourceId::Inventory, seq);
         }
     }
+}
+
+/// Runs `f` as a blocking job and joins it. `Err` holds the loop's result when it must stop:
+/// `Ok(())` on cancel.
+async fn blocking<T, F>(cx: &Cx, f: F) -> Result<T, Outcome<(), WorkerError>>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let mut job = match cx.spawn_blocking(move |_| f()) {
+        Ok(job) => job,
+        Err(e) => {
+            return Err(Outcome::Err(WorkerError::Other(
+                format!("spawn: {e}").into(),
+            )));
+        }
+    };
+    match job.join(cx).await {
+        Ok(value) => Ok(value),
+        Err(JoinError::Cancelled(reason)) => {
+            if cx.checkpoint().is_err() {
+                return Err(Outcome::Ok(()));
+            }
+            Err(Outcome::Cancelled(reason))
+        }
+        Err(JoinError::Panicked(payload)) => Err(Outcome::Panicked(payload)),
+        Err(JoinError::PolledAfterCompletion) => Err(Outcome::Err(WorkerError::Other(
+            "job polled after completion".into(),
+        ))),
+    }
+}
+
+/// Sends the last snapshot (a default one if none was sent) with `public_ip` replaced.
+async fn send_ip(
+    cx: &Cx,
+    io: &WorkerIo,
+    last_snap: &mut Option<InventorySnapshot>,
+    public_ip: &PublicIpState,
+) -> Option<Outcome<(), WorkerError>> {
+    let snap = last_snap.get_or_insert_with(InventorySnapshot::default);
+    snap.public_ip = public_ip.clone();
+    let update = SourceUpdate::Inventory(Box::new(snap.clone()));
+    send(cx, io, update).await
 }
 
 /// Sends one update. `Some` holds the loop's result when it must stop.
@@ -1212,8 +1292,18 @@ mod tests {
         demand: watch::Sender<Demand>,
         control: watch::Sender<WorkerControl>,
         scans: Arc<AtomicU32>,
+        fetches: Arc<AtomicU32>,
+        io: WorkerIo,
         out: Ended,
         handle: asupersync::runtime::TaskHandle<()>,
+    }
+
+    fn fetched() -> PublicIpState {
+        PublicIpState::Fetched {
+            v4: Some("203.0.113.4".into()),
+            v6: None,
+            fetched_at_s: 1_759_500_000,
+        }
     }
 
     impl Rig {
@@ -1234,33 +1324,75 @@ mod tests {
                 crate::dbus::SharedHandles::default(),
             );
             let scans = Arc::new(AtomicU32::new(0));
-            let counter = Arc::clone(&scans);
-            let scan = move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-                InventorySnapshot::default()
-            };
+            let fetches = Arc::new(AtomicU32::new(0));
             let out = Ended::default();
-            let sink = Arc::clone(&out);
-            let root = lab.state.create_root_region(Budget::INFINITE);
-            let (task, handle) = lab
-                .state
-                .create_task(root, Budget::INFINITE, async move {
-                    let cx = Cx::current().expect("task has a Cx");
-                    let outcome = run_with(cx, io, scan).await;
-                    *sink.lock().expect("slot lock") = Some(outcome);
-                })
-                .expect("task is created");
-            lab.scheduler.lock().schedule(task, 0);
-            lab.run_until_idle();
+            let handle = Self::spawn(&mut lab, &io, &scans, &fetches, &out);
             Rig {
                 lab,
                 rx,
                 demand,
                 control,
                 scans,
+                fetches,
+                io,
                 out,
                 handle,
             }
+        }
+
+        /// Starts one worker generation with a counting scan and a fake public IP fetch.
+        fn spawn(
+            lab: &mut LabRuntime,
+            io: &WorkerIo,
+            scans: &Arc<AtomicU32>,
+            fetches: &Arc<AtomicU32>,
+            out: &Ended,
+        ) -> asupersync::runtime::TaskHandle<()> {
+            let counter = Arc::clone(scans);
+            let scan = move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                InventorySnapshot::default()
+            };
+            let counter = Arc::clone(fetches);
+            let fetch_ip = move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                fetched()
+            };
+            let io = io.clone();
+            let sink = Arc::clone(out);
+            let root = lab.state.create_root_region(Budget::INFINITE);
+            let (task, handle) = lab
+                .state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    let outcome = run_with(cx, io, scan, fetch_ip).await;
+                    *sink.lock().expect("slot lock") = Some(outcome);
+                })
+                .expect("task is created");
+            lab.scheduler.lock().schedule(task, 0);
+            lab.run_until_idle();
+            handle
+        }
+
+        /// Ends the running generation and starts a new one, as the supervisor does.
+        fn restart(&mut self) {
+            self.handle.abort();
+            self.lab.run_until_idle();
+            for _ in 0..5 {
+                if self.out.lock().expect("slot lock").is_some() {
+                    break;
+                }
+                self.advance(IDLE_RECHECK);
+            }
+            let outcome = self.out.lock().expect("slot lock").take();
+            assert!(matches!(outcome, Some(Outcome::Ok(()))), "{outcome:?}");
+            self.handle = Self::spawn(
+                &mut self.lab,
+                &self.io,
+                &self.scans,
+                &self.fetches,
+                &self.out,
+            );
         }
 
         fn advance(&mut self, d: Duration) {
@@ -1299,16 +1431,37 @@ mod tests {
         }
 
         fn refresh(&mut self, seq: u64) {
+            self.command(seq, WorkerCommand::RefreshNow);
+        }
+
+        fn command(&mut self, seq: u64, command: WorkerCommand) {
+            let progress = Arc::clone(&self.control.borrow().progress);
             self.control
                 .send(WorkerControl {
                     commands: Arc::from([QueuedCommand {
                         seq,
                         target: SourceId::Inventory,
-                        command: WorkerCommand::RefreshNow,
+                        command,
                     }]),
+                    progress,
                     ..WorkerControl::default()
                 })
                 .expect("control sends");
+        }
+
+        /// The `public_ip` of each `Inventory` message since the last call.
+        fn public_ips(&mut self) -> Vec<PublicIpState> {
+            let mut out = Vec::new();
+            while let Ok(msg) = self.rx.try_recv() {
+                if let EngineMsg::Source(SourceUpdate::Inventory(snap)) = msg {
+                    out.push(snap.public_ip);
+                }
+            }
+            out
+        }
+
+        fn fetches(&self) -> u32 {
+            self.fetches.load(Ordering::SeqCst)
         }
 
         fn scans(&self) -> u32 {
@@ -1390,6 +1543,52 @@ mod tests {
         rig.run_for(10);
         assert_eq!(rig.scans(), 0);
         assert_eq!(rig.inventory_msgs(), 0);
+        rig.finish();
+    }
+
+    #[test]
+    fn fetch_command_sends_fetching_then_result() {
+        let mut rig = Rig::start(false);
+        rig.run_for(1);
+        rig.command(1, WorkerCommand::Device(DeviceCommand::FetchPublicIp));
+        rig.advance(IDLE_RECHECK);
+        assert_eq!(rig.fetches(), 1);
+        assert_eq!(rig.scans(), 0);
+        assert_eq!(rig.public_ips(), [PublicIpState::Fetching, fetched()]);
+        let progress = Arc::clone(&rig.control.borrow().progress);
+        assert_eq!(progress.done(SourceId::Inventory), 1);
+        // The same command is not served twice, and a later scan keeps the result.
+        rig.run_for(10);
+        assert_eq!(rig.fetches(), 1);
+        rig.set_inventory(true);
+        rig.advance(IDLE_RECHECK);
+        assert_eq!(rig.scans(), 1);
+        assert_eq!(rig.public_ips(), [fetched()]);
+        rig.finish();
+    }
+
+    #[test]
+    fn no_fetch_without_command() {
+        let mut rig = Rig::start(true);
+        rig.run_for(10);
+        rig.restart();
+        rig.run_for(10);
+        rig.restart();
+        rig.run_for(10);
+        assert_eq!(rig.fetches(), 0);
+        assert!(rig.scans() >= 1);
+        assert!(
+            rig.public_ips()
+                .iter()
+                .all(|ip| *ip == PublicIpState::NotFetched)
+        );
+        // A fetch served by one generation is not run again by the next.
+        rig.command(1, WorkerCommand::Device(DeviceCommand::FetchPublicIp));
+        rig.advance(IDLE_RECHECK);
+        assert_eq!(rig.fetches(), 1);
+        rig.restart();
+        rig.run_for(10);
+        assert_eq!(rig.fetches(), 1);
         rig.finish();
     }
 

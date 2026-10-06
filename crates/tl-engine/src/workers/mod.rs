@@ -21,6 +21,7 @@ pub mod lowmem;
 pub mod memory;
 pub mod net;
 pub mod processes;
+pub mod public_ip;
 pub mod sensors;
 mod startup;
 
