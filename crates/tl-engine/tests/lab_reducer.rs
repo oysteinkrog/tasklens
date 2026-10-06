@@ -1122,10 +1122,11 @@ fn every_variant_applies_without_panic() {
     assert_eq!(snap.connections.header.validity, Validity::WarmingUp);
     assert_eq!(snap.system.color_scheme, 1);
     assert_eq!(snap.inventory.memory.peak_committed_bytes.value, 5);
-    // 13 forwarded variants, plus `RefreshNow` to Disk, Net and Sensors from the resume.
+    // 11 forwarded variants, plus `RefreshNow` to Disk, Net and Sensors from the resume. The
+    // two history commands go to the history sink instead, which this rig does not install.
     assert_eq!(
         rig.commands().len(),
-        16,
+        14,
         "one queued command per forwarded variant"
     );
 }
