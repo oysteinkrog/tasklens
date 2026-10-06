@@ -451,3 +451,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - lgw.2 (bfb6cca, 1728f01, ebd1eb1): theme preview module; the only real gap in E17-A2. Duplicate-name check on rename belongs to the editor (noted on bj6.34).
 - qfx.17 (6536b4e, 97083ef, 9c72984, fa09a3a): privileged route through the helper. Accepted: summary uses actions::summarize (Partial), same as unprivileged; cancel or not-authorized ends the request with no second prompt; 120 s prompt deadline whenever the helper is Locked at call time. explore_helper_calls now uses run_action.
 - rsf.10 (b8d95f4): scroll anchoring sets the base offset directly; keep-visible bottom case scrolls to ix + 1; demand hash is an order-free sum of FxHash. Accepted.
+- yrf.12 (ad829bd, 566449a, 3a0338e, 58e9bef, 34c262b, 37e2f07): ChartGridElement, one element for n cells, request_measured_layout for first-frame height. Offline text and per-cell dotted gaps moved to a new yrf bead. Cell mark and tooltip are P2 work still to come.
+- jqk.6 decision: TlIcon::Square added for the maximize caption.
