@@ -105,7 +105,7 @@ pub fn cpu_details_model() -> KeyValueModel {
 /// order. Run on catalog changes only.
 pub fn cpu_temp_sensors(catalog: &DeviceCatalog, out: &mut Vec<CpuSensor>) {
     out.clear();
-    let sensor = |want: &str| {
+    let sensor = |want: &'static str| {
         catalog
             .entries
             .iter()

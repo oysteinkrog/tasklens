@@ -18,7 +18,11 @@ use tl_ui::pages::performance::details::{KeyValueModel, KvRow};
 const S: u64 = 1_000_000_000;
 
 fn row<'a>(model: &'a KeyValueModel, label: &str) -> &'a KvRow {
-    model.rows.iter().find(|r| r.label == label).unwrap()
+    model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .expect("row exists")
 }
 
 fn value(model: &KeyValueModel, label: &str) -> String {
@@ -161,7 +165,7 @@ fn cpu_uptime_and_loadavg_formats() {
     };
     assert!(update_live(&mut model, &sys, &inp(180_095 * S)));
     assert_eq!(value(&model, ROW_UP_TIME), "2 days, 2h 1m 35s");
-    let boot = tip(&model, ROW_UP_TIME).unwrap();
+    let boot = tip(&model, ROW_UP_TIME).expect("boot time tooltip");
     assert!(boot.starts_with("Boot time "), "{boot}");
     assert_eq!(boot.len(), "Boot time 2026-09-21 13:46:40".len(), "{boot}");
     update_live(&mut model, &sys, &inp(2_295 * S));
