@@ -43,6 +43,7 @@ use crate::theme::{TlTheme, UiMetrics};
 /// Filled by `TreeTableDelegate::cell`. The table calls `cell()` with `want_text = false`, looks
 /// up `CellTextCache` with (row, col, bits, validity); only on a miss it calls `cell()` again
 /// with `want_text = true` and the delegate writes `text`.
+#[derive(Default)]
 pub struct CellOut {
     /// Value bits: `f32::to_bits as u64`, or the raw integer.
     pub bits: u64,
@@ -58,21 +59,6 @@ pub struct CellOut {
     pub text_color: Option<Hsla>,
     /// Optional explicit cell tooltip.
     pub tooltip: Option<SharedString>,
-}
-
-impl Default for CellOut {
-    fn default() -> Self {
-        Self {
-            bits: 0,
-            validity: Validity::default(),
-            arc: None,
-            text: String::new(),
-            want_text: false,
-            background: None,
-            text_color: None,
-            tooltip: None,
-        }
-    }
 }
 
 impl CellOut {
