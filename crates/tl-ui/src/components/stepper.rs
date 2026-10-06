@@ -113,7 +113,7 @@ impl StepperBridge {
 
     fn write_text(&self, value: i64, window: &mut Window, cx: &mut App) {
         let text = value.to_string();
-        if self.state.read(cx).text().to_string() != text {
+        if *self.state.read(cx).text() != text {
             self.state.update(cx, |s, cx| s.set_value(text, window, cx));
         }
     }
