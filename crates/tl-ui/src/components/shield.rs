@@ -56,7 +56,7 @@ enum Glyph {
 }
 
 /// The rendered form of one helper state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 struct Face {
     glyph: Glyph,
     /// The Toggle `on` look.
@@ -261,6 +261,9 @@ mod tests {
     /// Renders the shield for `state` and counts the helper actions that reach the root.
     struct Host {
         state: HelperState,
+        /// The focused view, as in the app: a click dispatches on it.
+        root: FocusHandle,
+        /// The shield's handle, for keyboard focus.
         focus: FocusHandle,
         starts: Rc<Cell<usize>>,
         ends: Rc<Cell<usize>>,
@@ -272,6 +275,7 @@ mod tests {
             let ends = self.ends.clone();
             div()
                 .id("root")
+                .track_focus(&self.root)
                 .size(px(200.))
                 .flex()
                 .items_start()
@@ -361,6 +365,7 @@ mod tests {
             let ends = ends.clone();
             move |_, cx| Host {
                 state,
+                root: cx.focus_handle(),
                 focus: cx.focus_handle(),
                 starts,
                 ends,
@@ -375,13 +380,15 @@ mod tests {
         // Keep the pointer off the button, so it shows no hover fill.
         rig.cx
             .simulate_mouse_move(point(px(150.), px(150.)), None, Modifiers::none());
+        let root = rig.cx.update(|_, cx| rig.view.read(cx).root.clone());
+        rig.cx.update(|window, cx| window.focus(&root, cx));
         rig.draw();
         rig
     }
 
     #[gpui_kit::test]
     fn hidden_without_helper(cx: &mut TestAppContext) {
-        assert_eq!(face(HelperState::Missing), None);
+        assert!(face(HelperState::Missing).is_none());
         let mut rig = rig(cx, HelperState::Missing);
         assert!(!rig.has("TlShield"), "no element for Missing");
         rig.click_at_origin();
