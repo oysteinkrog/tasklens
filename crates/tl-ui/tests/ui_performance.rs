@@ -9,7 +9,9 @@ use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::validity::Validity;
 use tl_ui::actions::OpenAdditionalSetup;
 use tl_ui::components::kv_grid::{self, shown_text};
-use tl_ui::pages::performance::details::{Fallback, KeyValueModel, fallback_word, render_details};
+use tl_ui::pages::performance::details::{
+    DetailWords, Fallback, KeyValueModel, fallback_word, render_details,
+};
 use tl_ui::theme::metrics;
 
 const ROW: &str = "Speed";
@@ -83,7 +85,8 @@ fn kv_grid_fallback_words_per_validity() {
     ];
     for (validity, fallback, reason, word, tooltip, link) in cases {
         let what = format!("{validity:?} {fallback:?}");
-        assert_eq!(fallback_word(validity, fallback).0, word, "{what}");
+        let words = DetailWords::default();
+        assert_eq!(fallback_word(&words, validity, fallback).0, word, "{what}");
 
         let mut model = KeyValueModel::new(&[ROW]);
         assert!(
@@ -111,7 +114,9 @@ fn kv_grid_fallback_words_per_validity() {
     }
 
     // Stale keeps the value (its own test below); Valid has no word.
-    assert_eq!(fallback_word(Valid, NotReported), ("", None));
+    let words = DetailWords::default();
+    let (word, tip) = fallback_word(&words, Valid, NotReported);
+    assert_eq!((word.as_ref(), tip), ("", None));
 }
 
 #[test]
@@ -247,7 +252,7 @@ mod page_frame {
     use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::pages::performance::actions::PerfShowMiniWindow;
     use tl_ui::pages::performance::details::KeyValueModel;
-    use tl_ui::pages::performance::page::{DevicePage, DevicePageFrame, header_text};
+    use tl_ui::pages::performance::page::{DevicePage, DevicePageFrame, PageWords, header_text};
     use tl_ui::pages::performance::{DeviceKey, DeviceKind};
     use tl_ui::theme::{current, metrics};
 
@@ -318,15 +323,28 @@ mod page_frame {
         let mut snap = Snapshot::empty(BootId(1), 1);
         // Nothing reported yet: the PERF-013 fallbacks.
         assert_eq!(
-            strings(header_text(DeviceKind::Cpu, 0, &cpu, &snap)),
+            strings(header_text(
+                &PageWords::default(),
+                DeviceKind::Cpu,
+                0,
+                &cpu,
+                &snap
+            )),
             ("Processor".into(), "Unknown processor".into())
         );
         assert_eq!(
-            strings(header_text(DeviceKind::Net, 0, &net, &snap)),
+            strings(header_text(
+                &PageWords::default(),
+                DeviceKind::Net,
+                0,
+                &net,
+                &snap
+            )),
             ("enp38s0".into(), "Unknown adapter".into())
         );
         assert_eq!(
             strings(header_text(
+                &PageWords::default(),
                 DeviceKind::Gpu,
                 0,
                 &entry(3, gpu.identity.clone(), ""),
@@ -411,7 +429,7 @@ mod page_frame {
         ];
         for (kind, n, e, (word, model)) in cases {
             assert_eq!(
-                strings(header_text(kind, n, e, &snap)),
+                strings(header_text(&PageWords::default(), kind, n, e, &snap)),
                 (word.to_owned(), model.to_owned()),
                 "{kind:?}"
             );

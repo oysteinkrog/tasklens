@@ -6,8 +6,8 @@
 //! tooltips are compared in place before they are rebuilt, so a tick where nothing changed does
 //! not allocate.
 //!
-//! The tooltip texts match `perf-cpu-tip-*` in `en-US.ftl`. They are English constants until the
-//! model gets a strings context, like the fallback words in `details.rs`.
+//! The tooltip texts are `perf-cpu-tip-*` in `en-US.ftl`, translated by the model with its
+//! fallback words ([`KeyValueModel::with_texts`]).
 
 use std::cell::RefCell;
 use std::fmt::{self, Write as _};
@@ -60,13 +60,21 @@ pub const P1_ROWS: [&str; 16] = [
     ROW_L3,
 ];
 
-/// Followed by the fastest core's MHz.
-const TIP_FASTEST: &str = "Fastest core: ";
-const TIP_BOGOMIPS: &str = "Reported by the kernel at boot; the current clock is not available";
-const TIP_HANDLES: &str = "Open file descriptors, system-wide";
-/// Followed by the boot time.
-const TIP_BOOT: &str = "Boot time ";
-const TIP_LOADAVG: &str = "1, 5 and 15 minutes";
+/// `{$mhz}`: the fastest core's MHz.
+const TIP_FASTEST: &str = "perf-cpu-tip-fastest";
+const TIP_BOGOMIPS: &str = "perf-cpu-tip-bogomips";
+const TIP_HANDLES: &str = "perf-cpu-tip-handles";
+/// `{$time}`: the boot time.
+const TIP_BOOT: &str = "perf-cpu-tip-boot";
+const TIP_LOADAVG: &str = "perf-cpu-tip-loadavg";
+/// The tooltip texts and their arguments.
+const TEXTS: [(&str, &[&str]); 5] = [
+    (TIP_FASTEST, &["mhz"]),
+    (TIP_BOGOMIPS, &[]),
+    (TIP_HANDLES, &[]),
+    (TIP_BOOT, &["time"]),
+    (TIP_LOADAVG, &[]),
+];
 /// Marks a clock read from BogoMIPS.
 const BOGOMIPS_MARK: &str = " (?)";
 /// Separates the parts of a tooltip.
@@ -94,9 +102,9 @@ pub struct CpuLiveInputs<'a> {
     pub temp_sensors: &'a [CpuSensor],
 }
 
-/// A Details model with the 16 P1 rows, collecting.
+/// A Details model with the 16 P1 rows, collecting, and the tooltip texts.
 pub fn cpu_details_model() -> KeyValueModel {
-    KeyValueModel::new(&P1_ROWS)
+    KeyValueModel::new(&P1_ROWS).with_texts(&TEXTS)
 }
 
 /// Fills `out` with the temperature sensors of the first CPU hwmon chip present, in catalog
@@ -150,12 +158,11 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
     if shows_value(cpu.freq_mhz.validity) {
         let fastest = cpu.freq_fastest_mhz;
         changed |= if bogomips {
-            set_tip(model, ROW_SPEED, |o| o.write_str(TIP_BOGOMIPS))
+            let tip = model.text(TIP_BOGOMIPS);
+            set_tip(model, ROW_SPEED, |o| tip.write(o, &[]))
         } else if shows_value(fastest.validity) {
-            set_tip(model, ROW_SPEED, |o| {
-                o.write_str(TIP_FASTEST)?;
-                write!(o, "{} MHz", fastest.value)
-            })
+            let tip = model.text(TIP_FASTEST);
+            set_tip(model, ROW_SPEED, |o| tip.write(o, &[&fastest.value]))
         } else {
             clear_tip(model, ROW_SPEED)
         };
@@ -169,18 +176,18 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
     });
     changed |= live.row(model, ROW_HANDLES, cpu.handles, |v| v, units::count);
     if shows_value(cpu.handles.validity) {
-        changed |= set_tip(model, ROW_HANDLES, |o| o.write_str(TIP_HANDLES));
+        let tip = model.text(TIP_HANDLES);
+        changed |= set_tip(model, ROW_HANDLES, |o| tip.write(o, &[]));
     }
 
     // CLOCK_BOOTTIME is the up time, so this row is always Valid.
     let up_s = inp.now_boot_ns / 1_000_000_000;
     changed |= model.set_valid(ROW_UP_TIME, up_s, |o| units::uptime(o, up_s));
-    // btime does not change within a boot, so the tooltip is formatted once.
-    if sys.boot_time_s > 0 && row(model, ROW_UP_TIME).tooltip.is_none() {
-        let mut text = String::from(TIP_BOOT);
-        write_local(&mut text, sys.boot_time_s);
-        model.set_tooltip(ROW_UP_TIME, Some(SharedString::from(text)));
-        changed = true;
+    // btime does not change within a boot, so the tooltip changes only with the language.
+    if sys.boot_time_s > 0 {
+        let tip = model.text(TIP_BOOT);
+        let boot = LocalTime(sys.boot_time_s);
+        changed |= set_tip(model, ROW_UP_TIME, |o| tip.write(o, &[&boot]));
     }
 
     changed |= live.row(model, ROW_BASE_SPEED, cpu.base_mhz, u64::from, |o, v| {
@@ -197,7 +204,8 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
         write_load(o, load_bits(cpu.load_avg.value));
     });
     if shows_value(cpu.load_avg.validity) {
-        changed |= set_tip(model, ROW_LOAD_AVERAGE, |o| o.write_str(TIP_LOADAVG));
+        let tip = model.text(TIP_LOADAVG);
+        changed |= set_tip(model, ROW_LOAD_AVERAGE, |o| tip.write(o, &[]));
     }
     changed
 }
@@ -426,6 +434,15 @@ fn write_load(o: &mut String, bits: u64) {
             o.push(' ');
         }
         let _ = write!(o, "{}.{:02}", h / 100, h % 100);
+    }
+}
+
+/// A Unix time shown by [`write_local`].
+struct LocalTime(i64);
+
+impl fmt::Display for LocalTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_with(f, |s| write_local(s, self.0))
     }
 }
 

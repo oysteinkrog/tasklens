@@ -3,18 +3,17 @@
 //! page blocks, inside a scrolling column (docs/ui/performance.md UI-PRF-010, UI-PRF-020;
 //! PERF-008, PERF-012, PERF-014, R-058).
 //!
-//! The header words are English constants that match `perf-header-*` in `en-US.ftl`, like the
-//! fallback words in `details.rs`.
+//! The header words and the "Details" heading are `en-US.ftl` keys, translated once per strings
+//! version into the [`PageWords`] global that every page shares.
 
 use std::cell::Cell;
-use std::fmt::Write as _;
 use std::rc::Rc;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 use smallvec::SmallVec;
@@ -24,12 +23,13 @@ use tl_model::validity::Validity;
 
 use super::actions::PerfShowMiniWindow;
 use super::cpu::CpuPage;
-use super::details::{KeyValueModel, render_details};
+use super::details::{KeyValueModel, Template, render_details};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
+use crate::i18n::{Strings, tr, tr_en};
 use crate::text::style::label_style;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
@@ -58,20 +58,91 @@ const DETAILS_HEADING_H: f32 = 24.;
 /// Element id of the graph area.
 pub const GRAPH_AREA_ID: &str = "perf-graph-area";
 
-const WORD_PROCESSOR: &str = "Processor";
-const WORD_MEMORY: &str = "Memory";
-const WORD_GPU: &str = "Graphics adapter";
-const WORD_DISK: &str = "Disk ";
-const WORD_FAN: &str = "Fan ";
-const WORD_BATTERY: &str = "Battery";
-const WORD_AGGREGATE_DISK: &str = "Aggregate storage";
-const WORD_AGGREGATE_GPU: &str = "Aggregate graphics";
-const SUFFIX_DISKS: &str = " disks";
-const SUFFIX_ADAPTERS: &str = " adapters";
-const UNKNOWN_PROCESSOR: &str = "Unknown processor";
-const UNKNOWN_GPU: &str = "Unknown GPU";
-const UNKNOWN_ADAPTER: &str = "Unknown adapter";
-const DETAILS_HEADING: &str = "Details";
+/// The header words and the "Details" heading, translated once per strings version. Shared by
+/// every page as a global; read it with [`page_words`].
+#[derive(Clone, Debug)]
+pub struct PageWords {
+    /// The strings version, `None` without strings.
+    version: Option<u64>,
+    pub processor: SharedString,
+    pub memory: SharedString,
+    pub gpu: SharedString,
+    /// "Disk {$n}".
+    pub disk: Template,
+    /// "Fan {$n}".
+    pub fan: Template,
+    pub battery: SharedString,
+    pub aggregate_disk: SharedString,
+    pub aggregate_gpu: SharedString,
+    /// "{$k} disks".
+    pub disks_count: Template,
+    /// "{$k} adapters".
+    pub adapters_count: Template,
+    pub unknown_processor: SharedString,
+    pub unknown_gpu: SharedString,
+    pub unknown_adapter: SharedString,
+    pub details: SharedString,
+}
+
+impl Global for PageWords {}
+
+impl Default for PageWords {
+    /// The en-US words.
+    fn default() -> Self {
+        Self::build(None, |key| tr_en(key, &[]), Template::en)
+    }
+}
+
+impl PageWords {
+    fn new(cx: &App) -> Self {
+        Self::build(
+            strings_version(cx),
+            |key| tr(cx, key),
+            |key, args| Template::new(cx, key, args),
+        )
+    }
+
+    fn build(
+        version: Option<u64>,
+        t: impl Fn(&str) -> SharedString,
+        template: impl Fn(&str, &[&str]) -> Template,
+    ) -> Self {
+        Self {
+            version,
+            processor: t("perf-header-processor"),
+            memory: t("perf-header-memory"),
+            gpu: t("perf-header-gpu"),
+            disk: template("perf-header-disk", &["n"]),
+            fan: template("perf-header-fan", &["n"]),
+            battery: t("perf-header-battery"),
+            aggregate_disk: t("perf-card-aggregate-storage"),
+            aggregate_gpu: t("perf-card-aggregate-graphics"),
+            disks_count: template("perf-header-disks-count", &["k"]),
+            adapters_count: template("perf-header-adapters-count", &["k"]),
+            unknown_processor: t("perf-unknown-processor"),
+            unknown_gpu: t("perf-unknown-gpu"),
+            unknown_adapter: t("perf-unknown-adapter"),
+            details: t("perf-details-heading"),
+        }
+    }
+}
+
+fn strings_version(cx: &App) -> Option<u64> {
+    cx.try_global::<Strings>().map(|s| s.strings_version)
+}
+
+/// The page words, translated again first when the strings changed.
+pub fn page_words(cx: &mut App) -> &PageWords {
+    let version = strings_version(cx);
+    if cx
+        .try_global::<PageWords>()
+        .is_none_or(|w| w.version != version)
+    {
+        let words = PageWords::new(cx);
+        cx.set_global(words);
+    }
+    cx.global::<PageWords>()
+}
 
 /// One device page. The page entity owns its charts, Details model and blocks; the frame lays
 /// them out. Every method runs inside the page's own render.
@@ -104,27 +175,30 @@ fn shown(text: &str, validity: Validity) -> Option<&str> {
     ok.then_some(text)
 }
 
-/// The header strings for a device page (PERF-008, UI-PRF-020). `number` is the device's index
-/// among the visible devices of its kind ([`super::type_number`]). The model text falls back to
-/// "Unknown processor", "Unknown GPU" or "Unknown adapter" (PERF-013).
+/// The header strings for a device page (PERF-008, UI-PRF-020) in `words` ([`page_words`]).
+/// `number` is the device's index among the visible devices of its kind
+/// ([`super::type_number`]). The model text falls back to "Unknown processor", "Unknown GPU" or
+/// "Unknown adapter" (PERF-013).
 pub fn header_text(
+    words: &PageWords,
     kind: DeviceKind,
     number: u16,
     entry: &DeviceEntry,
     snap: &Snapshot,
 ) -> (SharedString, SharedString) {
     let idx = entry.idx;
-    let fixed = SharedString::new_static;
+    let w = words;
     match kind {
         DeviceKind::Cpu => {
             let p = &snap.inventory.processor.name;
-            let model = shown(&p.value, p.validity).unwrap_or(UNKNOWN_PROCESSOR);
-            (fixed(WORD_PROCESSOR), model.trim().to_owned().into())
+            let model = shown(&p.value, p.validity).unwrap_or(w.unknown_processor.as_ref());
+            (w.processor.clone(), model.trim().to_owned().into())
         }
-        DeviceKind::Memory => (fixed(WORD_MEMORY), SharedString::default()),
+        DeviceKind::Memory => (w.memory.clone(), SharedString::default()),
         DeviceKind::Gpu => {
-            let name = shown(&entry.display_name, Validity::Valid).unwrap_or(UNKNOWN_GPU);
-            (fixed(WORD_GPU), name.to_owned().into())
+            let name =
+                shown(&entry.display_name, Validity::Valid).unwrap_or(w.unknown_gpu.as_ref());
+            (w.gpu.clone(), name.to_owned().into())
         }
         DeviceKind::Disk => {
             let kernel = match &entry.identity {
@@ -149,7 +223,7 @@ pub fn header_text(
                 Some(model) => format!("{} ({kernel})", model.trim()),
                 None => kernel.to_owned(),
             };
-            (format!("{WORD_DISK}{number}").into(), text.into())
+            (numbered(&w.disk, number), text.into())
         }
         DeviceKind::Net => {
             let ifname = match &entry.identity {
@@ -170,7 +244,7 @@ pub fn header_text(
                         .find(|n| n.device == Some(idx))
                         .and_then(|n| shown(&n.adapter_name.value, n.adapter_name.validity))
                 })
-                .unwrap_or(UNKNOWN_ADAPTER);
+                .unwrap_or(w.unknown_adapter.as_ref());
             (ifname.to_owned().into(), adapter.trim().to_owned().into())
         }
         DeviceKind::Fan => {
@@ -178,7 +252,7 @@ pub fn header_text(
                 DeviceIdentity::Fan { chip, .. } => &**chip,
                 _ => &*entry.display_name,
             };
-            (format!("{WORD_FAN}{number}").into(), chip.to_owned().into())
+            (numbered(&w.fan, number), chip.to_owned().into())
         }
         DeviceKind::Battery => {
             let details = snap
@@ -189,7 +263,7 @@ pub fn header_text(
                 .map(|(_, b)| b);
             let word = details
                 .and_then(|b| shown(&b.kind, Validity::Valid))
-                .unwrap_or(WORD_BATTERY);
+                .unwrap_or(w.battery.as_ref());
             let mut text = String::new();
             if let Some(b) = details {
                 for part in [&b.vendor, &b.model] {
@@ -208,11 +282,11 @@ pub fn header_text(
         }
         DeviceKind::AggregateDisk => {
             let k = present_count(snap, |id| matches!(id, DeviceIdentity::Disk { .. }));
-            (fixed(WORD_AGGREGATE_DISK), count_text(k, SUFFIX_DISKS))
+            (w.aggregate_disk.clone(), numbered(&w.disks_count, k))
         }
         DeviceKind::AggregateGpu => {
             let k = present_count(snap, |id| matches!(id, DeviceIdentity::Gpu { .. }));
-            (fixed(WORD_AGGREGATE_GPU), count_text(k, SUFFIX_ADAPTERS))
+            (w.aggregate_gpu.clone(), numbered(&w.adapters_count, k))
         }
     }
 }
@@ -226,9 +300,10 @@ fn present_count(snap: &Snapshot, f: impl Fn(&DeviceIdentity) -> bool) -> usize 
         .count()
 }
 
-fn count_text(k: usize, suffix: &str) -> SharedString {
-    let mut s = String::with_capacity(4 + suffix.len());
-    let _ = write!(s, "{k}{suffix}");
+/// `template` with `n` as its one argument.
+fn numbered(template: &Template, n: impl std::fmt::Display) -> SharedString {
+    let mut s = String::new();
+    let _ = template.write(&mut s, &[&n]);
     s.into()
 }
 
@@ -248,6 +323,7 @@ impl DevicePageFrame<'_> {
         let s = m.ui_scale;
         let key = page.key();
         let (word, model) = page.header();
+        let details_heading = page_words(cx).details.clone();
 
         let header = h_flex()
             .debug_selector(|| "perf-page-header".into())
@@ -299,7 +375,7 @@ impl DevicePageFrame<'_> {
             .h(px(DETAILS_HEADING_H * s))
             .text_color(theme.text_primary)
             .map_text(label_style(m, m.text.md, FontWeight::MEDIUM))
-            .child(DETAILS_HEADING);
+            .child(details_heading);
 
         // E24-012: `.context_menu` with the page menu (UI-PRF-015) goes on this column.
         v_flex()

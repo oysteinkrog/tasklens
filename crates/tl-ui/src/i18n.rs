@@ -50,6 +50,8 @@ impl Strings {
     }
 
     fn format(&self, key: &str, args: Option<&FluentArgs>) -> SharedString {
+        #[cfg(any(test, feature = "test-hooks"))]
+        TR_CALLS.with(|n| n.set(n.get() + 1));
         format_in(&self.bundle, key, args)
             .or_else(|| format_in(&self.fallback, key, args))
             .unwrap_or_else(|| missing(key))
@@ -70,6 +72,34 @@ pub fn set_language(cx: &mut App, setting: &str) {
     cx.refresh_windows();
 }
 
+#[cfg(any(test, feature = "test-hooks"))]
+thread_local! {
+    static TR_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Test hook: how many strings `tr` and `tr_args` formatted on this thread.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn tr_calls() -> u64 {
+    TR_CALLS.with(std::cell::Cell::get)
+}
+
+/// Test hook: like [`set_language`], with `ftl` as the catalogue. Keys it lacks fall back to
+/// English.
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn set_test_catalogue(cx: &mut App, ftl: &str) {
+    let version = cx
+        .try_global::<Strings>()
+        .map_or(0, |s| s.strings_version + 1);
+    let locale: LanguageIdentifier = "en-XA".parse().unwrap_or_else(|_| en_us());
+    cx.set_global(Strings {
+        bundle: build_bundle(locale.clone(), ftl),
+        fallback: build_bundle(en_us(), EN_US_FTL),
+        locale,
+        strings_version: version,
+    });
+    cx.refresh_windows();
+}
+
 /// The text for `key`. Formats on every call, so it is not for per-cell, per-frame use.
 pub fn tr(cx: &App, key: &str) -> SharedString {
     cx.global::<Strings>().format(key, None)
@@ -82,6 +112,19 @@ pub fn tr_args(cx: &App, key: &str, args: &[(&str, FluentValue<'_>)]) -> SharedS
         fluent_args.set(*name, value.clone());
     }
     cx.global::<Strings>().format(key, Some(&fluent_args))
+}
+
+/// The en-US text for `key` with Fluent arguments substituted, without an `App`. For tables a
+/// view builds before it can read the strings; it translates them with [`tr`] once it can.
+pub fn tr_en(key: &str, args: &[(&str, FluentValue<'_>)]) -> SharedString {
+    thread_local! {
+        static EN_US: FluentBundle<FluentResource> = build_bundle(en_us(), EN_US_FTL);
+    }
+    let mut fluent_args = FluentArgs::with_capacity(args.len());
+    for (name, value) in args {
+        fluent_args.set(*name, value.clone());
+    }
+    EN_US.with(|bundle| format_in(bundle, key, Some(&fluent_args)).unwrap_or_else(|| missing(key)))
 }
 
 /// The locale from LC_ALL, then LC_MESSAGES, then LANG. Read once at startup. "C", "POSIX" and

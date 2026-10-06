@@ -9,8 +9,8 @@
 //! wraps the cached grid view in a box and places a [`HoverTooltip`] trigger over that heading,
 //! so the tooltip opens below the heading after [`DELAY_CONTROL`].
 //!
-//! The words below match `perf-cpu-*` and `perf-legend-*` in `en-US.ftl`, like the fallback
-//! words in `details.rs`.
+//! The headings, tooltips and legend words are `perf-cpu-*` and `perf-legend-*` keys in
+//! `en-US.ftl`, translated once per strings version into [`GridWords`].
 
 use std::cell::Cell;
 use std::fmt::Write as _;
@@ -34,7 +34,10 @@ use crate::chart::labels::LABEL_ROW;
 use crate::chart::{LegendStyle, ValueFormat, YScale};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::SnapshotHub;
+use crate::i18n::{Strings, tr, tr_en};
 use crate::theme::{TlTheme, metrics};
+
+use super::details::Template;
 
 /// Debug selector of the box around the grid.
 pub const GRID_ID: &str = "perf-cpu-grid";
@@ -46,16 +49,61 @@ const CELL_MIN_W: f32 = 120.;
 /// `grid_cell_h`, × ui_scale.
 const CELL_H: f32 = 112.;
 
-const WORD_CPU: &str = "CPU ";
-const WORD_CORE: &str = "Core ";
-const WORD_THREAD: &str = ", thread ";
-const WORD_MHZ: &str = " MHz";
-const WORD_TOTAL: &str = "Total";
-const WORD_KERNEL: &str = "Kernel";
+const KEY_CELL: &str = "perf-cpu-cell";
+const KEY_TIP: &str = "perf-cpu-cell-tooltip";
+const KEY_TIP_NO_CLOCK: &str = "perf-cpu-cell-tooltip-noclock";
+const KEY_TOTAL: &str = "perf-legend-total";
+const KEY_KERNEL: &str = "perf-legend-kernel";
 
 /// Width used for the height before the first paint has measured the box: wide enough for the
 /// full column count, which is the usual case.
 const UNMEASURED_W: f32 = 1.0e6;
+
+/// The grid's words, translated once per strings version.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridWords {
+    /// The strings version, `None` without strings.
+    version: Option<u64>,
+    /// "CPU {$n}".
+    pub cell: Template,
+    /// "Core {$core}, thread {$thread}, {$mhz} MHz".
+    pub tip: Template,
+    /// "Core {$core}, thread {$thread}".
+    pub tip_no_clock: Template,
+    pub total: SharedString,
+    pub kernel: SharedString,
+}
+
+impl Default for GridWords {
+    /// The en-US words, for a grid built before the strings can be read.
+    fn default() -> Self {
+        Self {
+            version: None,
+            cell: Template::en(KEY_CELL, &["n"]),
+            tip: Template::en(KEY_TIP, &["core", "thread", "mhz"]),
+            tip_no_clock: Template::en(KEY_TIP_NO_CLOCK, &["core", "thread"]),
+            total: tr_en(KEY_TOTAL, &[]),
+            kernel: tr_en(KEY_KERNEL, &[]),
+        }
+    }
+}
+
+impl GridWords {
+    pub fn new(cx: &App) -> Self {
+        Self {
+            version: strings_version(cx),
+            cell: Template::new(cx, KEY_CELL, &["n"]),
+            tip: Template::new(cx, KEY_TIP, &["core", "thread", "mhz"]),
+            tip_no_clock: Template::new(cx, KEY_TIP_NO_CLOCK, &["core", "thread"]),
+            total: tr(cx, KEY_TOTAL),
+            kernel: tr(cx, KEY_KERNEL),
+        }
+    }
+}
+
+fn strings_version(cx: &App) -> Option<u64> {
+    cx.try_global::<Strings>().map(|s| s.strings_version)
+}
 
 /// The per-core grid of the CPU page. The page owns it and calls [`CpuGrid::element`] in its
 /// render.
@@ -73,6 +121,7 @@ pub struct CpuGrid {
     clocks: Vec<Option<u32>>,
     /// The box width of the last paint; 0 before the first.
     width: Rc<Cell<Pixels>>,
+    words: GridWords,
 }
 
 impl CpuGrid {
@@ -88,11 +137,13 @@ impl CpuGrid {
         theme: &TlTheme,
         cx: &mut App,
     ) -> Self {
+        let words = GridWords::new(cx);
         let m = metrics(cx);
         let devices = logical_devices.to_vec();
         let clocks = vec![None; devices.len()];
         let (mut places, mut scratch, mut cells) = (Vec::new(), String::new(), Vec::new());
         build_cells(
+            &words,
             &topology,
             &devices,
             kernel,
@@ -115,7 +166,7 @@ impl CpuGrid {
             cell_min_w: px(CELL_MIN_W * m.ui_scale),
             cell_h: px(CELL_H * m.ui_scale),
             gap: m.sp[4],
-            legend: legend(kernel),
+            legend: legend(kernel, &words),
             value_fmt: ValueFormat::Percent,
             hover: false,
         };
@@ -128,7 +179,35 @@ impl CpuGrid {
             places,
             clocks,
             width: Rc::new(Cell::new(px(0.))),
+            words,
         }
+    }
+
+    pub fn words(&self) -> &GridWords {
+        &self.words
+    }
+
+    /// Translates the words when the strings changed since they were last read, and rebuilds
+    /// the headings, tooltips and legend with them. True when it did.
+    pub fn refresh_strings(&mut self, cx: &mut App) -> bool {
+        if self.words.version == strings_version(cx) {
+            return false;
+        }
+        self.words = GridWords::new(cx);
+        let mut spec = self.view.read(cx).spec.clone();
+        build_cells(
+            &self.words,
+            &self.cores,
+            &self.devices,
+            self.kernel,
+            &self.clocks,
+            &mut self.places,
+            &mut self.scratch,
+            &mut spec.cells,
+        );
+        spec.legend = legend(self.kernel, &self.words);
+        self.view.update(cx, |v, cx| v.set_spec(spec, cx));
+        true
     }
 
     /// Adds or drops the kernel overlay series of every cell and the "Kernel" legend entry.
@@ -144,7 +223,7 @@ impl CpuGrid {
                 metric: MetricId::CPU_KERNEL,
             });
         }
-        spec.legend = legend(on);
+        spec.legend = legend(on, &self.words);
         self.view.update(cx, |v, cx| v.set_spec(spec, cx));
     }
 
@@ -165,6 +244,7 @@ impl CpuGrid {
         self.clocks.resize(logical_devices.len(), None);
         let mut spec = self.view.read(cx).spec.clone();
         build_cells(
+            &self.words,
             &self.cores,
             &self.devices,
             self.kernel,
@@ -185,6 +265,7 @@ impl CpuGrid {
             places,
             clocks,
             scratch,
+            words,
             ..
         } = self;
         let changed = |&(cpu, mhz, validity): &(u16, f32, Validity)| {
@@ -208,7 +289,7 @@ impl CpuGrid {
                     continue;
                 }
                 *slot = now;
-                heading_tooltip(*core, *thread, now, scratch);
+                heading_tooltip(words, *core, *thread, now, scratch);
                 cell.tooltip = Some(SharedString::from(scratch.as_str()));
             }
         });
@@ -331,6 +412,7 @@ impl Dims {
 /// overlay when `kernel`, offline when the CPU is not online, and the heading tooltip without a
 /// clock. `logical_devices[id]` is the `DeviceIdx` of logical CPU `id`.
 pub fn cell_specs(
+    words: &GridWords,
     topology: &CpuTopology,
     logical_devices: &[DeviceIdx],
     kernel: bool,
@@ -338,6 +420,7 @@ pub fn cell_specs(
 ) {
     let (mut places, mut scratch) = (Vec::new(), String::new());
     build_cells(
+        words,
         topology,
         logical_devices,
         kernel,
@@ -349,7 +432,9 @@ pub fn cell_specs(
 }
 
 /// [`cell_specs`] with the clock per logical CPU id (missing ids have none). Refills `places`.
+#[allow(clippy::too_many_arguments)]
 fn build_cells(
+    words: &GridWords,
     topology: &CpuTopology,
     devices: &[DeviceIdx],
     kernel: bool,
@@ -362,20 +447,45 @@ fn build_cells(
     out.clear();
     for (id, &device) in devices.iter().enumerate() {
         let tooltip = places_out[id].map(|(core, thread)| {
-            heading_tooltip(core, thread, clocks.get(id).copied().flatten(), scratch);
+            heading_tooltip(
+                words,
+                core,
+                thread,
+                clocks.get(id).copied().flatten(),
+                scratch,
+            );
             SharedString::from(scratch.as_str())
         });
-        out.push(cell(topology, id, device, kernel, tooltip));
+        scratch.clear();
+        words.cell.write_each(scratch, |_, o| {
+            let _ = write!(o, "{id}");
+        });
+        let heading = SharedString::from(scratch.as_str());
+        out.push(cell(topology, id, device, kernel, heading, tooltip));
     }
 }
 
 /// "Core 3, thread 1, 4200 MHz"; without a clock "Core 3, thread 1". Replaces `out`.
-pub fn heading_tooltip(core: u16, thread: u16, mhz: Option<u32>, out: &mut String) {
+pub fn heading_tooltip(
+    words: &GridWords,
+    core: u16,
+    thread: u16,
+    mhz: Option<u32>,
+    out: &mut String,
+) {
     out.clear();
-    let _ = write!(out, "{WORD_CORE}{core}{WORD_THREAD}{thread}");
-    if let Some(mhz) = mhz {
-        let _ = write!(out, ", {mhz}{WORD_MHZ}");
-    }
+    let template = if mhz.is_some() {
+        &words.tip
+    } else {
+        &words.tip_no_clock
+    };
+    template.write_each(out, |i, o| {
+        let _ = match i {
+            0 => write!(o, "{core}"),
+            1 => write!(o, "{thread}"),
+            _ => write!(o, "{}", mhz.unwrap_or_default()),
+        };
+    });
 }
 
 fn cell(
@@ -383,11 +493,12 @@ fn cell(
     id: usize,
     device: DeviceIdx,
     kernel: bool,
+    heading: SharedString,
     tooltip: Option<SharedString>,
 ) -> GridCellSpec {
     let online = u16::try_from(id).is_ok_and(|id| topology.online.contains(id));
     GridCellSpec {
-        heading: format!("{WORD_CPU}{id}").into(),
+        heading,
         fill_series: SeriesId {
             device,
             metric: MetricId::CPU_TOTAL,
@@ -422,10 +533,10 @@ fn clock(mhz: f32, validity: Validity) -> Option<u32> {
 }
 
 /// "Total" solid, and "Kernel" dashed when the overlay is on. Drawn in cell 0.
-fn legend(kernel: bool) -> SmallVec<[(SharedString, LegendStyle); 2]> {
-    let mut legend = smallvec![(SharedString::from(WORD_TOTAL), LegendStyle::Solid)];
+fn legend(kernel: bool, words: &GridWords) -> SmallVec<[(SharedString, LegendStyle); 2]> {
+    let mut legend = smallvec![(words.total.clone(), LegendStyle::Solid)];
     if kernel {
-        legend.push((SharedString::from(WORD_KERNEL), LegendStyle::Dashed));
+        legend.push((words.kernel.clone(), LegendStyle::Dashed));
     }
     legend
 }

@@ -204,7 +204,7 @@ fn chart_root(_: &mut Window, cx: &mut App) -> Entity<Root<ChartView>> {
         heading: Some("Utilization".into()),
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Right,
-        range_word: "Utilization",
+        range_word: "Utilization".into(),
         legend: legend(),
         show_axis_max: true,
     };

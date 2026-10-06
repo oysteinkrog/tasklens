@@ -406,7 +406,7 @@ pub fn paint(
     // Range label: bottom-left.
     if tall && wide {
         scratch.clear();
-        range_label(p.labels.range_word, p.spec.range_ns, scratch);
+        range_label(&p.labels.range_word, p.spec.range_ns, scratch);
         let shaped = cache.range.sync(window, scratch, secondary);
         cache.shaped(shaped);
         let origin = point(b.left() + pad, b.bottom() - pad - row);

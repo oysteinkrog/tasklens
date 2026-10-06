@@ -627,7 +627,7 @@ pub fn card_chart_labels(value_fmt: ValueFormat) -> ChartLabels {
         heading: None,
         value_fmt,
         value_align: ValueAlign::Left,
-        range_word: "",
+        range_word: SharedString::default(),
         legend: SmallVec::new(),
         show_axis_max: false,
     }

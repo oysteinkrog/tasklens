@@ -1067,7 +1067,7 @@ fn paint_grid_view(
             heading: Some(spec.cells[i].heading.clone()),
             value_fmt: spec.value_fmt,
             value_align: ValueAlign::Right,
-            range_word: "",
+            range_word: SharedString::default(),
             legend: spec.legend.clone(),
             show_axis_max: false,
         };

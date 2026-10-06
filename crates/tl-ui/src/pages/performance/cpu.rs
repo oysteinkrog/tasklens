@@ -35,7 +35,7 @@ use super::cpu_details::{
 };
 use super::cpu_grid::CpuGrid;
 use super::details::KeyValueModel;
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_OVERALL, header_text};
+use super::page::{DevicePage, DevicePageFrame, GRAPH_H_OVERALL, header_text, page_words};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
@@ -74,9 +74,6 @@ const KEY_MENU_KERNEL_TIMES: &str = "perf-cpu-menu-kernel-times";
 const KEY_UTILIZATION: &str = "perf-cpu-heading-utilization";
 const KEY_TOTAL: &str = "perf-legend-total";
 const KEY_KERNEL: &str = "perf-legend-kernel";
-/// `ChartLabels.range_word` is a `&'static str` the chart contract fixes; the chart owns its
-/// translation.
-const RANGE_WORD: &str = "Utilization";
 
 const NS_PER_S: u64 = 1_000_000_000;
 
@@ -289,7 +286,7 @@ fn overall_labels(kernel: bool, words: &Words) -> ChartLabels {
         heading: Some(words.utilization.clone()),
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Right,
-        range_word: RANGE_WORD,
+        range_word: words.utilization.clone(),
         legend,
         show_axis_max: false,
     }
@@ -556,7 +553,7 @@ impl CpuPage {
         if (devices || mask.contains(ComponentMask::INVENTORY))
             && let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx)
         {
-            let header = header_text(DeviceKind::Cpu, 0, entry, snap);
+            let header = header_text(page_words(cx), DeviceKind::Cpu, 0, entry, snap);
             if header != self.header {
                 self.header = header;
                 changed = true;
@@ -832,9 +829,13 @@ impl Render for CpuPage {
             self.window = Some(handle);
             self.send_demand(cx);
         }
+        self.details.refresh_strings(cx);
+        self.grid.refresh_strings(cx);
         if self.words.refresh(cx) {
             let labels = overall_labels(self.kernel, &self.words);
             self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
+            let snap = Arc::clone(self.hub.read(cx).current());
+            self.apply_snapshot(&snap, ComponentMask::INVENTORY, cx);
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();

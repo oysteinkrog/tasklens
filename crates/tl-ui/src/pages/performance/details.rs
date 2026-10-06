@@ -6,21 +6,23 @@
 //! A row's `value` always holds the text the grid shows: the formatted value when Valid or
 //! Stale, otherwise the fallback word. So a copy reads exactly what is on screen.
 //!
-//! The words below match `perf-fallback-*` in `en-US.ftl`. They are English constants until the
-//! model gets a strings context, like the kv_grid words.
+//! The words come from `en-US.ftl` through [`DetailWords`], translated once per strings version
+//! by [`KeyValueModel::refresh_strings`]. Before the first refresh the words are in en-US.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{Action, App, SharedString, px};
+use smallvec::SmallVec;
 use tl_model::units::short_age;
 use tl_model::validity::Validity;
 
 use crate::actions::OpenAdditionalSetup;
 use crate::components::kv_grid::{
-    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
+    KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue,
 };
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args, tr_en};
 use crate::theme::UiMetrics;
 
 /// Row pitch of the stats grid (label, value and gap), × ui_scale. `kv_row_h`.
@@ -28,20 +30,157 @@ pub const KV_ROW_H: f32 = 46.;
 /// Element id of the grid.
 pub const GRID_ID: &str = "perf-details";
 
-const WORD_COLLECTING: &str = "Collecting…";
-const WORD_RESTRICTED: &str = "Restricted";
-const WORD_NEEDS_SETUP: &str = "Needs setup";
-const WORD_NOT_SUPPORTED: &str = "Not supported";
-const WORD_NOT_REPORTED: &str = "Not reported";
-const WORD_UNAVAILABLE: &str = "Unavailable";
-const WORD_UNKNOWN: &str = "Unknown";
-const TIP_RESTRICTED: &str = "Needs administrator access.";
-const TIP_NEEDS_SETUP: &str = "Needs setup. Open Additional Setup…";
-const TIP_NOT_SUPPORTED: &str = "Not available on this device";
-/// Followed by the source's last error.
-const TIP_COULD_NOT_READ: &str = "Could not read: ";
+const KEY_COLLECTING: &str = "perf-fallback-collecting";
+const KEY_RESTRICTED: &str = "perf-fallback-restricted";
+const KEY_RESTRICTED_TIP: &str = "perf-fallback-restricted-tooltip";
+const KEY_NEEDS_SETUP: &str = "perf-fallback-needs-setup";
+const KEY_NEEDS_SETUP_TIP: &str = "perf-fallback-needs-setup-tooltip";
+const KEY_NOT_SUPPORTED: &str = "perf-fallback-not-supported";
+const KEY_NOT_SUPPORTED_TIP: &str = "perf-fallback-not-supported-tooltip";
+const KEY_NOT_REPORTED: &str = "perf-fallback-not-reported";
+const KEY_UNAVAILABLE: &str = "perf-fallback-unavailable";
+const KEY_UNKNOWN: &str = "perf-fallback-unknown";
+const KEY_COULD_NOT_READ: &str = "perf-fallback-could-not-read";
+const KEY_LAST_UPDATED: &str = "perf-last-updated";
 /// Indent of each copied line (PERF-011).
 const COPY_INDENT: &str = "    ";
+
+/// Stand-ins for the arguments of a [`Template`]: private-use characters no translation has.
+const HOLES: [&str; 4] = ["\u{E000}", "\u{E001}", "\u{E002}", "\u{E003}"];
+
+/// A translated message whose arguments are left as holes, so a new value is spliced in
+/// without going through Fluent. Numbers never pass through Fluent anyway (R-081).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Template(SharedString);
+
+impl Template {
+    /// Translates `key` with the arguments `args` (at most four) as holes.
+    pub fn new(cx: &App, key: &str, args: &[&str]) -> Self {
+        Self(tr_args(cx, key, &holes(args)))
+    }
+
+    /// [`Template::new`] in en-US, for a table built before the strings can be read.
+    pub fn en(key: &str, args: &[&str]) -> Self {
+        Self(tr_en(key, &holes(args)))
+    }
+
+    /// Writes the text with `values[i]` in the place of argument `i`.
+    pub fn write(&self, out: &mut dyn fmt::Write, values: &[&dyn fmt::Display]) -> fmt::Result {
+        let mut rest = self.0.as_ref();
+        while let Some((at, i)) = next_hole(rest) {
+            out.write_str(&rest[..at])?;
+            if let Some(value) = values.get(i) {
+                write!(out, "{value}")?;
+            }
+            rest = &rest[at + HOLES[i].len()..];
+        }
+        out.write_str(rest)
+    }
+
+    /// Writes the text, with `arg(i, out)` writing argument `i` in its place.
+    pub fn write_each(&self, out: &mut String, mut arg: impl FnMut(usize, &mut String)) {
+        let mut rest = self.0.as_ref();
+        while let Some((at, i)) = next_hole(rest) {
+            out.push_str(&rest[..at]);
+            arg(i, out);
+            rest = &rest[at + HOLES[i].len()..];
+        }
+        out.push_str(rest);
+    }
+
+    /// The text with no arguments.
+    pub fn text(&self) -> &SharedString {
+        &self.0
+    }
+}
+
+/// The Fluent arguments that put a hole in the place of each of `names`.
+fn holes<'a>(names: &[&'a str]) -> SmallVec<[(&'a str, FluentValue<'static>); 4]> {
+    names
+        .iter()
+        .zip(HOLES)
+        .map(|(name, hole)| (*name, hole.into()))
+        .collect()
+}
+
+/// The byte offset and index of the first hole in `s`.
+fn next_hole(s: &str) -> Option<(usize, usize)> {
+    s.char_indices().find_map(|(at, c)| {
+        let i = (c as u32).checked_sub(0xE000)? as usize;
+        (i < HOLES.len()).then_some((at, i))
+    })
+}
+
+/// The Details words, translated once per strings version. A new table is in en-US.
+#[derive(Clone, Debug)]
+pub struct DetailWords {
+    /// `None` before the first refresh; then the strings version, `None` without strings.
+    version: Option<Option<u64>>,
+    pub collecting: SharedString,
+    pub restricted: SharedString,
+    pub restricted_tip: SharedString,
+    pub needs_setup: SharedString,
+    pub needs_setup_tip: SharedString,
+    pub not_supported: SharedString,
+    pub not_supported_tip: SharedString,
+    pub not_reported: SharedString,
+    pub unavailable: SharedString,
+    pub unknown: SharedString,
+    /// `{$reason}`: the source's last error.
+    pub could_not_read: Template,
+    /// `{$age}`: the short age form.
+    pub last_updated: Template,
+}
+
+impl Default for DetailWords {
+    fn default() -> Self {
+        let en = |key| tr_en(key, &[]);
+        Self {
+            version: None,
+            collecting: en(KEY_COLLECTING),
+            restricted: en(KEY_RESTRICTED),
+            restricted_tip: en(KEY_RESTRICTED_TIP),
+            needs_setup: en(KEY_NEEDS_SETUP),
+            needs_setup_tip: en(KEY_NEEDS_SETUP_TIP),
+            not_supported: en(KEY_NOT_SUPPORTED),
+            not_supported_tip: en(KEY_NOT_SUPPORTED_TIP),
+            not_reported: en(KEY_NOT_REPORTED),
+            unavailable: en(KEY_UNAVAILABLE),
+            unknown: en(KEY_UNKNOWN),
+            could_not_read: Template::en(KEY_COULD_NOT_READ, &["reason"]),
+            last_updated: Template::en(KEY_LAST_UPDATED, &["age"]),
+        }
+    }
+}
+
+impl DetailWords {
+    /// Translates every word when the strings changed since the last call. True when it did.
+    /// Without strings (tests) the words stay as they are.
+    pub fn refresh(&mut self, cx: &App) -> bool {
+        let version = Some(cx.try_global::<Strings>().map(|s| s.strings_version));
+        if self.version == version {
+            return false;
+        }
+        self.version = version;
+        if version == Some(None) {
+            return false;
+        }
+        let t = |key| tr(cx, key);
+        self.collecting = t(KEY_COLLECTING);
+        self.restricted = t(KEY_RESTRICTED);
+        self.restricted_tip = t(KEY_RESTRICTED_TIP);
+        self.needs_setup = t(KEY_NEEDS_SETUP);
+        self.needs_setup_tip = t(KEY_NEEDS_SETUP_TIP);
+        self.not_supported = t(KEY_NOT_SUPPORTED);
+        self.not_supported_tip = t(KEY_NOT_SUPPORTED_TIP);
+        self.not_reported = t(KEY_NOT_REPORTED);
+        self.unavailable = t(KEY_UNAVAILABLE);
+        self.unknown = t(KEY_UNKNOWN);
+        self.could_not_read = Template::new(cx, KEY_COULD_NOT_READ, &["reason"]);
+        self.last_updated = Template::new(cx, KEY_LAST_UPDATED, &["age"]);
+        true
+    }
+}
 
 /// Why a row has no value. Picks the word within a validity (PERF-013).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,22 +199,28 @@ pub enum Fallback {
 
 /// The word and tooltip for a row with `v` and `f` (PERF-013). Valid, Stale and Missing have
 /// no word: use `set_valid`, `set_stale`, or let the grid skip the row. For Failed the tooltip
-/// is the prefix the last error follows.
-pub fn fallback_word(v: Validity, f: Fallback) -> (&'static str, Option<&'static str>) {
+/// is `words.could_not_read` with the last error, which the caller fills in.
+pub fn fallback_word(
+    words: &DetailWords,
+    v: Validity,
+    f: Fallback,
+) -> (&SharedString, Option<&SharedString>) {
+    const NONE: &SharedString = &SharedString::new_static("");
+    let w = words;
     if f == Fallback::Unknown {
-        return (WORD_UNKNOWN, None);
+        return (&w.unknown, None);
     }
     match v {
-        Validity::Valid | Validity::Stale | Validity::Missing => ("", None),
-        Validity::WarmingUp => (WORD_COLLECTING, None),
-        Validity::Restricted => (WORD_RESTRICTED, Some(TIP_RESTRICTED)),
+        Validity::Valid | Validity::Stale | Validity::Missing => (NONE, None),
+        Validity::WarmingUp => (&w.collecting, None),
+        Validity::Restricted => (&w.restricted, Some(&w.restricted_tip)),
         Validity::Unsupported => match f {
-            Fallback::NeedsSetup => (WORD_NEEDS_SETUP, Some(TIP_NEEDS_SETUP)),
-            Fallback::NotSupported => (WORD_NOT_SUPPORTED, Some(TIP_NOT_SUPPORTED)),
-            Fallback::NotReported => (WORD_NOT_REPORTED, None),
-            Fallback::Unavailable | Fallback::Unknown => (WORD_UNAVAILABLE, None),
+            Fallback::NeedsSetup => (&w.needs_setup, Some(&w.needs_setup_tip)),
+            Fallback::NotSupported => (&w.not_supported, Some(&w.not_supported_tip)),
+            Fallback::NotReported => (&w.not_reported, None),
+            Fallback::Unavailable | Fallback::Unknown => (&w.unavailable, None),
         },
-        Validity::Failed => (WORD_UNAVAILABLE, Some(TIP_COULD_NOT_READ)),
+        Validity::Failed => (&w.unavailable, None),
     }
 }
 
@@ -102,11 +247,11 @@ pub struct KvRow {
 }
 
 impl KvRow {
-    /// A row that is collecting its first value.
-    pub fn new(label: &'static str) -> Self {
+    /// A row that is collecting its first value; `collecting` is the word it shows.
+    fn new(label: &'static str, collecting: SharedString) -> Self {
         Self {
             label,
-            value: SharedString::new_static(WORD_COLLECTING),
+            value: collecting,
             validity: Validity::WarmingUp,
             tooltip: None,
             action: None,
@@ -133,22 +278,18 @@ impl KvRow {
 
     /// The value as the grid draws it.
     fn tl_value(&self) -> TlValue {
-        // Unknown shows its word in `text_secondary`; Stale is the grid state that does that.
-        let (validity, word) = match (self.validity, self.fallback) {
-            (_, Some(Fallback::Unknown)) => (Validity::Stale, None),
-            (Validity::Unsupported, Some(Fallback::NeedsSetup)) => {
-                (Validity::Unsupported, Some(UnsupportedWord::NeedsSetup))
-            }
-            (Validity::Unsupported, Some(Fallback::NotReported)) => {
-                (Validity::Unsupported, Some(UnsupportedWord::NotReported))
-            }
-            (Validity::Unsupported, Some(Fallback::Unavailable)) => (Validity::Failed, None),
-            (v, _) => (v, None),
+        // The grid has its own English word for each non-valid state, so a fallback word goes
+        // in as a Stale value: the same `text_secondary`, with the translated text. Needs setup
+        // goes in as a Valid link.
+        let validity = match self.validity {
+            Validity::Valid | Validity::Stale | Validity::Missing => self.validity,
+            _ if self.link => Validity::Valid,
+            _ => Validity::Stale,
         };
         TlValue {
             text: self.value.clone(),
             validity,
-            word,
+            word: None,
             tooltip: self.tooltip.clone(),
             link: if self.link {
                 self.action.as_ref().map(|a| a.boxed_clone())
@@ -168,22 +309,101 @@ struct Labels {
     text: Vec<SharedString>,
 }
 
+/// A text the owner puts in tooltips: its key, its argument names and the translation.
+struct OwnerText {
+    key: &'static str,
+    args: &'static [&'static str],
+    text: Template,
+}
+
 /// The rows of one Details grid, in grid order. The page keeps it and calls the setters on each
-/// snapshot; they return true when the grid needs a redraw.
+/// snapshot; they return true when the grid needs a redraw. The page calls
+/// [`KeyValueModel::refresh_strings`] in its render.
 #[derive(Default)]
 pub struct KeyValueModel {
     pub rows: Vec<KvRow>,
     scratch: String,
     labels: RefCell<Labels>,
+    words: DetailWords,
+    texts: Vec<OwnerText>,
 }
 
 impl KeyValueModel {
     /// One collecting row per label, in this order.
     pub fn new(labels: &[&'static str]) -> Self {
+        let words = DetailWords::default();
         Self {
-            rows: labels.iter().map(|l| KvRow::new(l)).collect(),
+            rows: labels
+                .iter()
+                .map(|l| KvRow::new(l, words.collecting.clone()))
+                .collect(),
+            words,
             ..Self::default()
         }
+    }
+
+    /// Adds texts the owner reads with [`KeyValueModel::text`], translated with the words.
+    /// Each is a key and the names of its arguments.
+    pub fn with_texts(mut self, texts: &[(&'static str, &'static [&'static str])]) -> Self {
+        self.texts
+            .extend(texts.iter().map(|&(key, args)| OwnerText {
+                key,
+                args,
+                text: Template::en(key, args),
+            }));
+        self
+    }
+
+    /// The translation of a text from [`KeyValueModel::with_texts`]; an unknown key reads as
+    /// empty.
+    pub fn text(&self, key: &'static str) -> Template {
+        self.texts
+            .iter()
+            .find(|t| t.key == key)
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn words(&self) -> &DetailWords {
+        &self.words
+    }
+
+    /// Translates the words and texts when the strings changed since the last call, and puts
+    /// the new words in the rows that show one. A row's Stale tooltip and the owner's
+    /// tooltips change on the next update. True when the strings changed.
+    pub fn refresh_strings(&mut self, cx: &App) -> bool {
+        let old = self.words.clone();
+        if !self.words.refresh(cx) {
+            return false;
+        }
+        for t in &mut self.texts {
+            t.text = Template::new(cx, t.key, t.args);
+        }
+        for row in &mut self.rows {
+            let Some(fallback) = row.fallback else {
+                if row.validity == Validity::WarmingUp && !row.formatted {
+                    row.value = self.words.collecting.clone();
+                }
+                continue;
+            };
+            let (word, tip) = fallback_word(&self.words, row.validity, fallback);
+            row.value = word.clone();
+            row.tooltip = match (row.validity, &row.tooltip) {
+                (Validity::Failed, Some(text)) => {
+                    let reason = strip_template(&old.could_not_read, text);
+                    self.scratch.clear();
+                    let _ = self
+                        .words
+                        .could_not_read
+                        .write(&mut self.scratch, &[&reason]);
+                    Some(SharedString::from(self.scratch.as_str()))
+                }
+                (Validity::Failed, None) => None,
+                _ => tip.cloned(),
+            };
+        }
+        self.refresh_labels(cx);
+        true
     }
 
     /// The row with `label`. A new label adds a row at the end.
@@ -191,7 +411,8 @@ impl KeyValueModel {
         if let Some(i) = self.rows.iter().position(|r| r.label == label) {
             return i;
         }
-        self.rows.push(KvRow::new(label));
+        self.rows
+            .push(KvRow::new(label, self.words.collecting.clone()));
         self.rows.len() - 1
     }
 
@@ -247,24 +468,26 @@ impl KeyValueModel {
         fallback: Fallback,
         reason: Option<&str>,
     ) -> bool {
-        let (word, tip) = fallback_word(validity, fallback);
         let link = validity == Validity::Unsupported && fallback == Fallback::NeedsSetup;
         let i = self.index(label);
         let row = &mut self.rows[i];
+        let (word, tip) = fallback_word(&self.words, validity, fallback);
 
         // The Failed tooltip is built in the scratch buffer, so it allocates only on change.
         self.scratch.clear();
-        let tooltip: Option<&str> = match (validity, tip) {
-            (Validity::Failed, Some(prefix)) => reason.map(|reason| {
-                self.scratch.push_str(prefix);
-                self.scratch.push_str(reason);
+        let tooltip: Option<&str> = match validity {
+            Validity::Failed => reason.map(|reason| {
+                let _ = self
+                    .words
+                    .could_not_read
+                    .write(&mut self.scratch, &[&reason]);
                 self.scratch.as_str()
             }),
-            (_, tip) => tip,
+            _ => tip.map(|t| t.as_ref()),
         };
         let same = row.validity == validity
             && row.fallback == Some(fallback)
-            && row.value == word
+            && row.value == *word
             && row.link == link
             && row.tooltip.as_deref() == tooltip;
         if same {
@@ -273,10 +496,10 @@ impl KeyValueModel {
         row.validity = validity;
         row.fallback = Some(fallback);
         row.formatted = false;
-        row.value = SharedString::new_static(word);
+        row.value = word.clone();
         row.tooltip = match tooltip {
             None => None,
-            Some(_) if validity != Validity::Failed => tip.map(SharedString::new_static),
+            Some(_) if validity != Validity::Failed => tip.cloned(),
             Some(text) => Some(SharedString::from(text)),
         };
         row.link = link;
@@ -290,9 +513,11 @@ impl KeyValueModel {
         let i = self.index(label);
         let row = &mut self.rows[i];
         self.scratch.clear();
-        self.scratch.push_str("Last updated ");
-        short_age(&mut self.scratch, age_ns / 1_000_000_000);
-        self.scratch.push_str(" ago");
+        self.words
+            .last_updated
+            .write_each(&mut self.scratch, |_, out| {
+                short_age(out, age_ns / 1_000_000_000)
+            });
         let state_changed = row.validity != Validity::Stale;
         row.validity = Validity::Stale;
         if row.tooltip.as_deref() == Some(self.scratch.as_str()) {
@@ -374,6 +599,19 @@ impl KeyValueModel {
             let _ = write!(out, "{COPY_INDENT}{}: {}", self.label_text(i), row.value);
         }
     }
+}
+
+/// The argument of a one-argument `template` in `text`, the text it wrote. `text` itself when it
+/// does not match.
+fn strip_template<'a>(template: &Template, text: &'a str) -> &'a str {
+    let t = template.text().as_ref();
+    let Some((at, _)) = next_hole(t) else {
+        return text;
+    };
+    let (before, after) = (&t[..at], &t[at + HOLES[0].len()..]);
+    text.strip_prefix(before)
+        .and_then(|rest| rest.strip_suffix(after))
+        .unwrap_or(text)
 }
 
 /// The Details grid: stacked label over value, three columns `sp6` apart, pairs `kv_row_h`

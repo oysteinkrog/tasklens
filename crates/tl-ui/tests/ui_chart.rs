@@ -23,7 +23,7 @@ fn labels() -> ChartLabels {
         heading: Some("CPU".into()),
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Right,
-        range_word: "Utilization",
+        range_word: "Utilization".into(),
         legend: smallvec![],
         show_axis_max: true,
     }
@@ -1247,7 +1247,7 @@ mod labels {
                 heading: None,
                 value_fmt: ValueFormat::Percent,
                 value_align: ValueAlign::Right,
-                range_word: "Utilization",
+                range_word: "Utilization".into(),
                 legend: smallvec![],
                 show_axis_max: false,
             },

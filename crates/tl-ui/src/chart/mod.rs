@@ -270,8 +270,8 @@ pub struct ChartLabels {
     pub value_fmt: ValueFormat,
     pub value_align: ValueAlign,
     /// "Utilization", "Throughput", "Memory usage", "Power draw", "Clock speed", "Temperature",
-    /// "Fan speed", "Percentage", "Commit", "Swap usage", "Active time".
-    pub range_word: &'static str,
+    /// "Fan speed", "Percentage", "Commit", "Swap usage", "Active time". The owner translates it.
+    pub range_word: SharedString,
     pub legend: SmallVec<[(SharedString, LegendStyle); 2]>,
     pub show_axis_max: bool,
 }
