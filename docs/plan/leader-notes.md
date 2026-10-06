@@ -360,3 +360,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8fx.36: probe flakes were test races (fd 5 is the probe's own copy of fd 3; /proc environ empty right after spawn). Fixed by waiting for Hello. Found 438 tl-gpu-probe core dumps from fake crashes today; follow-up bug bead. OWNER: existing core dumps can be cleared with coredumpctl when convenient (not done by agents).
 - hjn.21: sections built; interface and kind mappings copied from disk.rs (share later). Resent pci_slot and DiskDrive.name decision with reducer matching. hk6.4: services and sys_* page modules.
 - jqk.4: 29 window Actions and bind_keys_global (calls bind_keys_components). Kit Input binds escape/enter/down; jqk.11 must give ShellFilter precedence (comment added). rsf.7 cells.rs debug_selector breaks non-test build; agent told.
+- hjn.21: closed with GraphicsAdapter.pci_slot and map_gpu_devices. Gaps: NVML 8-digit domain never matches sysfs form; mapping only on Inventory arrival; no DiskDrive.name. Follow-up P1 bug bead.
+- 8fx.37: fake probe crash sets PR_SET_DUMPABLE 0 (rustix, no unsafe); 200 of 200 passes, no new core dumps (438 old ones remain). OWNER: clear old tl-gpu-probe dumps with coredumpctl if wanted.
+- gma.12: approval resent; ClearPropsFilter note on gma.1.
