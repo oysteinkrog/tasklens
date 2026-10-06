@@ -1757,3 +1757,137 @@ fn pseudo_rows_keep_cpu_and_memory_at_1hz() {
     }
     fl.finish();
 }
+
+// E12-011: memory details.
+
+fn memory_demand() -> Demand {
+    Demand {
+        memory: true,
+        ..Demand::default()
+    }
+}
+
+/// The `DeviceDetails::Memory` update queued by the last sample, if any.
+fn memory_details(src: &mut MemorySource) -> Option<Arc<tl_model::snapshot::MemoryDetails>> {
+    use tl_engine::update::DeviceDetailsUpdate;
+    let extra = src.take_extra()?;
+    assert!(src.take_extra().is_none(), "one details update per sample");
+    match extra {
+        SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Memory(d)) => Some(d),
+        other => panic!("expected DeviceDetails::Memory, got {other:?}"),
+    }
+}
+
+fn owner_desktop_swap0() -> tl_model::snapshot::SwapDevice {
+    tl_model::snapshot::SwapDevice {
+        name: Arc::from("/dev/zram0"),
+        kind: tl_model::snapshot::SwapKindModel::Zram,
+        size_bytes: 67_331_158_016,
+        used_bytes: 31_138_131_968,
+        priority: 100,
+    }
+}
+
+#[test]
+fn memory_details_first_sample() {
+    use tl_model::snapshot::{ZramDetail, ZswapInfo};
+    let dir = fixture_copy("owner-desktop", None);
+    let src = MemorySource::new(SysRoot::at(&dir));
+    src.period(&memory_demand(), &EngineSettings::default());
+    let (mut src, _) = memory_sample(src, 0);
+    let d = memory_details(&mut src).expect("details on the first sample");
+
+    assert_eq!(d.swaps.validity, Validity::Valid);
+    assert_eq!(&*d.swaps.value, [owner_desktop_swap0()]);
+    assert_eq!(d.zswap.validity, Validity::Valid);
+    assert_eq!(
+        d.zswap.value,
+        Some(ZswapInfo {
+            enabled: false,
+            compressor: Some(Arc::from("zstd")),
+            max_pool_percent: Some(20),
+        })
+    );
+    assert_eq!(
+        &*d.zram,
+        [ZramDetail {
+            name: Arc::from("zram0"),
+            disksize: 67_331_162_112,
+            algorithm: Some(Arc::from("zstd")),
+        }]
+    );
+    assert_eq!(src.details_reads(), 1);
+}
+
+#[test]
+fn memory_details_only_on_change() {
+    let dir = fixture_copy("owner-desktop", None);
+    let src = MemorySource::new(SysRoot::at(&dir));
+    src.period(&memory_demand(), &EngineSettings::default());
+    let (mut src, _) = memory_sample(src, 0);
+    assert!(memory_details(&mut src).is_some());
+
+    for t in 1..=4 {
+        let (next, _) = memory_sample(src, t * SEC);
+        src = next;
+        assert!(memory_details(&mut src).is_none(), "not due at {t} s");
+    }
+    assert_eq!(src.details_reads(), 1);
+
+    let (mut src, _) = memory_sample(src, 5 * SEC);
+    assert_eq!(src.details_reads(), 2, "due at 5 s");
+    assert!(memory_details(&mut src).is_none(), "unchanged at 5 s");
+}
+
+#[test]
+fn memory_details_swap_added() {
+    let dir = fixture_copy("owner-desktop", None);
+    let src = MemorySource::new(SysRoot::at(&dir));
+    src.period(&memory_demand(), &EngineSettings::default());
+    let (mut src, _) = memory_sample(src, 0);
+    assert!(memory_details(&mut src).is_some());
+
+    let swaps = dir.join("proc/swaps");
+    let mut text = fs::read_to_string(&swaps).expect("read fixture swaps");
+    text.push_str("/swapfile                               file\t\t1048576\t\t0\t\t-2\n");
+    fs::write(&swaps, text).expect("write fixture swaps");
+
+    let (mut src, _) = memory_sample(src, 5 * SEC);
+    let d = memory_details(&mut src).expect("details after the swap change");
+    assert_eq!(d.swaps.validity, Validity::Valid);
+    assert_eq!(
+        &*d.swaps.value,
+        [
+            owner_desktop_swap0(),
+            tl_model::snapshot::SwapDevice {
+                name: Arc::from("/swapfile"),
+                kind: tl_model::snapshot::SwapKindModel::File,
+                size_bytes: 1_073_741_824,
+                used_bytes: 0,
+                priority: -2,
+            },
+        ]
+    );
+}
+
+#[test]
+fn memory_details_off_when_recording_only() {
+    let dir = fixture_copy("owner-desktop", None);
+    let settings = EngineSettings::default();
+    let recording = Demand {
+        memory: false,
+        recording: true,
+        ..Demand::default()
+    };
+    let mut src = MemorySource::new(SysRoot::at(&dir));
+    for t in 0..10 {
+        assert_eq!(
+            src.period(&recording, &settings),
+            Some(Duration::from_secs(1))
+        );
+        let (next, _) = memory_sample(src, t * SEC);
+        src = next;
+        assert!(memory_details(&mut src).is_none());
+    }
+    assert_eq!(src.details_reads(), 0);
+}

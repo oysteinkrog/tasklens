@@ -3,8 +3,11 @@
 //!
 //! It samples at 1 Hz while memory is demanded or history recording is on, and not at all
 //! otherwise. zram devices are enumerated again every 5 s (PERF-041 to PERF-043, PROC-012).
+//! While memory is demanded, the swap list and zswap parameters are read every 5 s and sent as
+//! `DeviceDetails::Memory` when they change (PERF-044, PERF-045).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use asupersync::runtime::JoinError;
@@ -12,17 +15,22 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::{Cx, Outcome};
 use tl_collect::SysRoot;
 use tl_collect::counters::{Clock, Rate};
+use tl_collect::parse::swaps::{SwapEntry, SwapKind};
+use tl_collect::parse::zswap::ZswapParams;
 use tl_collect::sample::memory::{MemOpts, MemoryReading, MemorySampler, ZramReading};
 use tl_model::demand::Demand;
 use tl_model::health::SourceId;
 use tl_model::settings::EngineSettings;
+use tl_model::snapshot::{
+    InvField, MemoryDetails, SwapDevice, SwapKindModel, ZramDetail, ZswapInfo,
+};
 use tl_model::system::{MemoryTotals, Metric, ZramTotals};
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
-use crate::update::{MemorySample, SourceUpdate, WorkerError, ZramStat};
+use crate::update::{DeviceDetailsUpdate, MemorySample, SourceUpdate, WorkerError, ZramStat};
 use crate::workers::WorkerSpec;
 use crate::workers::enumerate::EnumClock;
 
@@ -44,6 +52,16 @@ pub struct MemorySource {
     reading: MemoryReading,
     /// When the zram devices are enumerated again.
     zram_clock: EnumClock,
+    /// `Demand.memory`. Written by `period()`, read by `sample()`.
+    details_wanted: AtomicBool,
+    /// When the swap list and zswap parameters are read again.
+    details_clock: EnumClock,
+    /// The last details sent.
+    last_details: Option<Arc<MemoryDetails>>,
+    /// Details not yet taken by `take_extra()`.
+    pending_details: Option<Arc<MemoryDetails>>,
+    /// Number of samples that read details. For tests.
+    details_reads: u32,
 }
 
 impl MemorySource {
@@ -52,7 +70,17 @@ impl MemorySource {
             sampler: MemorySampler::new(root),
             reading: MemoryReading::default(),
             zram_clock: EnumClock::default(),
+            details_wanted: AtomicBool::new(false),
+            details_clock: EnumClock::default(),
+            last_details: None,
+            pending_details: None,
+            details_reads: 0,
         }
+    }
+
+    /// How many samples read the swap list and zswap parameters.
+    pub fn details_reads(&self) -> u32 {
+        self.details_reads
     }
 
     /// `sample()` is `self.sample_at(Clock::now())`; tests call this with an injected clock.
@@ -60,8 +88,14 @@ impl MemorySource {
         if self.zram_clock.due(clock.boot_ns) {
             self.sampler.rescan_zram();
         }
+        let details =
+            self.details_wanted.load(Ordering::Relaxed) && self.details_clock.due(clock.boot_ns);
         self.sampler
-            .sample_at(clock, MemOpts { details: false }, &mut self.reading);
+            .sample_at(clock, MemOpts { details }, &mut self.reading);
+        if details {
+            self.details_reads = self.details_reads.saturating_add(1);
+            self.update_details();
+        }
         let r = &self.reading;
         let info = &r.info;
 
@@ -114,6 +148,31 @@ impl MemorySource {
         };
         (self, SourceUpdate::Memory(sample))
     }
+
+    /// Builds `MemoryDetails` from the last detailed reading. Queues it for `take_extra()` when
+    /// it differs from the last one sent.
+    fn update_details(&mut self) {
+        let r = &self.reading;
+        let next = MemoryDetails {
+            zram: r.zram.iter().map(zram_detail).collect(),
+            zswap: InvField {
+                value: r.zswap.value.as_ref().map(zswap_info),
+                validity: r.zswap.validity,
+            },
+            swaps: InvField {
+                value: r.swaps.value.iter().map(swap_device).collect(),
+                validity: r.swaps.validity,
+            },
+        };
+        let changed = self.last_details.as_ref().is_none_or(|last| {
+            last.zram != next.zram || last.zswap != next.zswap || last.swaps != next.swaps
+        });
+        if changed {
+            let next = Arc::new(next);
+            self.last_details = Some(Arc::clone(&next));
+            self.pending_details = Some(next);
+        }
+    }
 }
 
 impl Source for MemorySource {
@@ -122,6 +181,7 @@ impl Source for MemorySource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
+        self.details_wanted.store(d.memory, Ordering::Relaxed);
         memory_period(d, s)
     }
 
@@ -132,6 +192,13 @@ impl Source for MemorySource {
     fn reset_baselines(&mut self) {
         self.sampler.reset_baselines();
         self.zram_clock.force();
+        self.details_clock.force();
+    }
+
+    fn take_extra(&mut self) -> Option<SourceUpdate> {
+        self.pending_details
+            .take()
+            .map(|d| SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Memory(d)))
     }
 }
 
@@ -172,6 +239,37 @@ pub fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
             source::run(cx, io, src).await
         }
     })
+}
+
+fn zram_detail(z: &ZramReading) -> ZramDetail {
+    ZramDetail {
+        name: Arc::clone(&z.name),
+        disksize: z.disksize_bytes,
+        algorithm: z.algorithm.clone(),
+    }
+}
+
+fn zswap_info(p: &ZswapParams) -> ZswapInfo {
+    ZswapInfo {
+        enabled: p.enabled,
+        compressor: p.compressor.clone(),
+        max_pool_percent: p.max_pool_percent,
+    }
+}
+
+fn swap_device(e: &SwapEntry) -> SwapDevice {
+    SwapDevice {
+        name: Arc::clone(&e.name),
+        kind: match e.kind {
+            SwapKind::Partition => SwapKindModel::Partition,
+            SwapKind::File => SwapKindModel::File,
+            SwapKind::Zram => SwapKindModel::Zram,
+            SwapKind::Other => SwapKindModel::Other,
+        },
+        size_bytes: e.size_bytes,
+        used_bytes: e.used_bytes,
+        priority: e.priority,
+    }
 }
 
 /// The rates are 0 unless `Valid`.
