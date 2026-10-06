@@ -15,8 +15,8 @@ use tl_model::health::ManagerState;
 use tl_model::ids::ProcessKey;
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ConnectionsSnapshot, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
-    StartupSnapshot, StartupType, UnitRecord,
+    ConnectionsSnapshot, Impact, ProcessSnapshot, ServiceCounts, ServiceStatus, ServicesSnapshot,
+    StartupCounts, StartupEntry, StartupSnapshot, StartupStatus, StartupType, UnitRecord,
 };
 use tl_model::table::{
     ConnColumn, Manager, ServiceColumn, ServiceFilter, ServiceStateFilter, StartupColumn,
@@ -44,11 +44,12 @@ pub struct SysTableOutput {
     pub query_generation: u64,
 }
 
-/// The rows of `query.table`. Startup and Connections return no rows until E14-005 and E14-006.
+/// The rows of `query.table`. Connections returns no rows until E14-006.
 pub fn build(input: &SysTableInput<'_>, query: &SysTableQuery) -> SysTableOutput {
     match query.table {
         SysTable::Services => build_services(input, query).0,
-        SysTable::Startup | SysTable::Connections => finish(Vec::new(), query),
+        SysTable::Startup => build_startup(input, query).0,
+        SysTable::Connections => finish(Vec::new(), query),
     }
 }
 
@@ -511,6 +512,109 @@ fn cmp_lists(a: &[Arc<str>], b: &[Arc<str>]) -> Ordering {
         .unwrap_or_else(|| a.len().cmp(&b.len()))
 }
 
+// ---- Startup Apps ----
+
+/// The Startup rows plus the `StartupSnapshot.counts` for the same query, from one pass.
+/// `build` keeps only the rows; the reducer calls this to store both.
+///
+/// Counts cover the rows left after the text filter (UI-SYS-049).
+pub fn build_startup(
+    input: &SysTableInput<'_>,
+    query: &SysTableQuery,
+) -> (SysTableOutput, StartupCounts) {
+    let text: &str = &query.filter;
+    let (column, ascending) = match query.sort.column {
+        SysColumnId::Startup(c) => (c, query.sort.ascending),
+        _ => (StartupColumn::Status, true),
+    };
+    let entries = &input.startup.entries;
+
+    let mut idx: Vec<u32> = Vec::with_capacity(entries.len());
+    let mut counts = StartupCounts::default();
+    for (i, e) in entries.iter().enumerate() {
+        if text.is_empty() || startup_text_matches(e, text) {
+            counts.total += 1;
+            if e.status == StartupStatus::Enabled {
+                counts.enabled += 1;
+            }
+            idx.push(i as u32);
+        }
+    }
+    counts.disabled = counts.total - counts.enabled;
+
+    // R-011: Name ascending is the fixed secondary sort, then the `StartupRef`.
+    sort_indices(
+        &mut idx,
+        |a, b| {
+            cmp_startup(&entries[a], &entries[b], column, ascending)
+                .then_with(|| cmp_text(&entries[a].name, &entries[b].name))
+        },
+        |a, b| entries[a].id.cmp(&entries[b].id),
+    );
+    let rows = idx
+        .into_iter()
+        .map(|i| SysRow {
+            node: SysNodeId::Startup(entries[i as usize].id.clone()),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(i),
+        })
+        .collect();
+    (finish(rows, query), counts)
+}
+
+/// True when the lowercase `text` occurs in any of the seven Startup columns (APP-028).
+/// Location is matched on the raw path, not the `~` form the UI shows.
+fn startup_text_matches(e: &StartupEntry, text: &str) -> bool {
+    contains_lower(&e.name, text)
+        || e.publisher
+            .as_deref()
+            .is_some_and(|p| contains_lower(p, text))
+        || contains_lower(e.status.label(), text)
+        || contains_lower(impact_word(e.impact), text)
+        || contains_lower(e.kind.label(), text)
+        || contains_lower(&e.location, text)
+        || contains_lower(&e.command, text)
+}
+
+/// The Impact column word (SYS-021).
+fn impact_word(i: Impact) -> &'static str {
+    match i {
+        Impact::High => "High",
+        Impact::Medium => "Medium",
+        Impact::Low => "Low",
+        Impact::None => "None",
+        Impact::NotMeasured => "Not measured",
+    }
+}
+
+/// Order of two entries in `column`. Text columns compare case-insensitively, a blank
+/// publisher last; Status and Impact in their enum order (UI-SYS-041).
+fn cmp_startup(
+    a: &StartupEntry,
+    b: &StartupEntry,
+    column: StartupColumn,
+    ascending: bool,
+) -> Ordering {
+    use StartupColumn as C;
+    let text = |x: &str, y: &str| directed(cmp_text(x, y), ascending);
+    match column {
+        C::Name => text(&a.name, &b.name),
+        C::Publisher => absent_last(
+            a.publisher.as_deref(),
+            b.publisher.as_deref(),
+            ascending,
+            cmp_text,
+        ),
+        C::Status => directed((a.status as u8).cmp(&(b.status as u8)), ascending),
+        C::Impact => directed(a.impact.cmp(&b.impact), ascending),
+        C::Type => text(a.kind.label(), b.kind.label()),
+        C::Location => text(&a.location, &b.location),
+        C::Command => text(&a.command, &b.command),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +624,8 @@ mod tests {
     use smallvec::SmallVec;
     use tl_model::ids::GroupKey;
     use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
+    use tl_model::snapshot::StartupKind;
+    use tl_model::table::{StartupRef, StartupSource};
     use tl_model::time::BootId;
     use tl_model::validity::FieldValidity;
 
@@ -1087,6 +1193,221 @@ mod tests {
         if !cfg!(debug_assertions) {
             assert!(plain.as_millis() < 5, "{plain:?}");
             assert!(with_text.as_millis() < 5, "{with_text:?}");
+        }
+    }
+
+    // ---- Startup Apps ----
+
+    fn entry(name: &str, status: StartupStatus) -> StartupEntry {
+        StartupEntry {
+            id: StartupRef {
+                source: StartupSource::AutostartUser,
+                id: format!("{name}.desktop").into(),
+            },
+            name: name.into(),
+            icon_path: None,
+            publisher: None,
+            status,
+            impact: Impact::NotMeasured,
+            impact_detail: None,
+            state_code: None,
+            kind: StartupKind::AutostartUser,
+            location: "/home/u/.config/autostart".into(),
+            command: name.into(),
+            source_path: format!("/home/u/.config/autostart/{name}.desktop").into(),
+            can_toggle: true,
+            can_delete: true,
+            can_run: true,
+            overridden_by_user: false,
+        }
+    }
+
+    fn run_startup(entries: Vec<StartupEntry>, q: &SysTableQuery) -> (Vec<String>, StartupCounts) {
+        let services = ServicesSnapshot::default();
+        let startup = StartupSnapshot {
+            entries: entries.into(),
+            ..StartupSnapshot::default()
+        };
+        let connections = ConnectionsSnapshot::default();
+        let processes = ProcessSnapshot::default();
+        let settings = EngineSettings::default();
+        let input = SysTableInput {
+            services: &services,
+            startup: &startup,
+            connections: &connections,
+            processes: &processes,
+            settings: &settings,
+        };
+        let (out, counts) = build_startup(&input, q);
+        for r in out.rows.iter() {
+            assert_eq!((r.depth, r.has_children, r.expanded), (0, false, false));
+            let SysNodeId::Startup(id) = &r.node else {
+                panic!("not a startup row: {:?}", r.node);
+            };
+            assert_eq!(startup.entries[r.record.expect("record") as usize].id, *id);
+        }
+        let names = out
+            .rows
+            .iter()
+            .map(|r| {
+                startup.entries[r.record.expect("record") as usize]
+                    .name
+                    .to_string()
+            })
+            .collect();
+        (names, counts)
+    }
+
+    fn startup_sorted(column: StartupColumn) -> SysTableQuery {
+        SysTableQuery {
+            sort: SysSortSpec {
+                column: SysColumnId::Startup(column),
+                ascending: true,
+            },
+            ..query(SysTable::Startup, 1)
+        }
+    }
+
+    #[test]
+    fn startup_status_sort_order() {
+        let entries = vec![
+            entry("a", StartupStatus::MissingProgram),
+            entry("b", StartupStatus::Enabled),
+            entry("c", StartupStatus::Disabled),
+            entry("d", StartupStatus::NotInThisDesktop),
+            entry("e", StartupStatus::Masked),
+        ];
+        // The default sort is Status ascending (R-011).
+        let (names, _) = run_startup(entries, &query(SysTable::Startup, 1));
+        assert_eq!(names, ["b", "c", "e", "d", "a"]);
+    }
+
+    #[test]
+    fn startup_status_tie_break_name() {
+        let entries = vec![
+            entry("beta", StartupStatus::Enabled),
+            entry("Disabled one", StartupStatus::Disabled),
+            entry("Alpha", StartupStatus::Enabled),
+        ];
+        let (names, _) = run_startup(entries, &startup_sorted(StartupColumn::Status));
+        assert_eq!(names, ["Alpha", "beta", "Disabled one"]);
+    }
+
+    #[test]
+    fn startup_impact_sort_order() {
+        let mut entries = Vec::new();
+        for (name, impact) in [
+            ("a", Impact::NotMeasured),
+            ("b", Impact::Low),
+            ("c", Impact::High),
+            ("d", Impact::None),
+            ("e", Impact::Medium),
+        ] {
+            let mut e = entry(name, StartupStatus::Enabled);
+            e.impact = impact;
+            entries.push(e);
+        }
+        let (names, _) = run_startup(entries, &startup_sorted(StartupColumn::Impact));
+        assert_eq!(names, ["c", "e", "b", "d", "a"]);
+    }
+
+    #[test]
+    fn startup_filter_location_and_counts() {
+        let mut sys_a = entry("a", StartupStatus::Enabled);
+        sys_a.location = "/etc/xdg/autostart".into();
+        let mut sys_b = entry("b", StartupStatus::Disabled);
+        sys_b.location = "/etc/xdg/autostart".into();
+        let entries = vec![
+            sys_a,
+            entry("c", StartupStatus::Enabled),
+            sys_b,
+            entry("d", StartupStatus::Enabled),
+        ];
+        let q = SysTableQuery {
+            filter: Arc::from("/etc/xdg"),
+            ..query(SysTable::Startup, 1)
+        };
+        let (names, counts) = run_startup(entries, &q);
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(
+            counts,
+            StartupCounts {
+                total: 2,
+                enabled: 1,
+                disabled: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_text_filter_columns() {
+        let mut e = entry("app", StartupStatus::NotInThisDesktop);
+        e.publisher = Some("Vendor 1.2".into());
+        e.impact = Impact::Medium;
+        e.kind = StartupKind::PlasmaLogout;
+        e.command = "/usr/bin/run --flag".into();
+        for text in [
+            "vendor",
+            "not in this",
+            "medium",
+            "logout script",
+            "--flag",
+            "/.config/auto",
+        ] {
+            let q = SysTableQuery {
+                filter: Arc::from(text),
+                ..query(SysTable::Startup, 1)
+            };
+            assert_eq!(
+                run_startup(vec![e.clone()], &q).0.len(),
+                1,
+                "filter {text:?}"
+            );
+        }
+        let q = SysTableQuery {
+            filter: Arc::from("nomatch"),
+            ..query(SysTable::Startup, 1)
+        };
+        assert!(run_startup(vec![e], &q).0.is_empty());
+    }
+
+    #[test]
+    fn startup_counts_disabled_is_not_enabled() {
+        let entries = vec![
+            entry("a", StartupStatus::Enabled),
+            entry("b", StartupStatus::Enabled),
+            entry("c", StartupStatus::Enabled),
+            entry("d", StartupStatus::Masked),
+            entry("e", StartupStatus::NotInThisDesktop),
+        ];
+        let (_, counts) = run_startup(entries, &query(SysTable::Startup, 1));
+        assert_eq!(
+            counts,
+            StartupCounts {
+                total: 5,
+                enabled: 3,
+                disabled: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn startup_publisher_blank_last() {
+        let mut a = entry("a", StartupStatus::Enabled);
+        a.publisher = Some("zeta".into());
+        let b = entry("b", StartupStatus::Enabled);
+        let mut c = entry("c", StartupStatus::Enabled);
+        c.publisher = Some("Alpha".into());
+        for (ascending, want) in [(true, ["c", "a", "b"]), (false, ["a", "c", "b"])] {
+            let q = SysTableQuery {
+                sort: SysSortSpec {
+                    column: SysColumnId::Startup(StartupColumn::Publisher),
+                    ascending,
+                },
+                ..query(SysTable::Startup, 1)
+            };
+            let entries = vec![a.clone(), b.clone(), c.clone()];
+            assert_eq!(run_startup(entries, &q).0, want);
         }
     }
 
