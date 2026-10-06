@@ -440,3 +440,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.11 decision: network series are bytes per second (NetTotals contract), formatted through units::net_rate.
 - qfx.23 decision: approved health setters, EngineHooks.helper, SharedHandles.helper; noted on qfx.17 to qfx.21.
 - hjn.3 (1787759): P2 worker roll-up. D-Bus worker idle proofs stay as in-crate tests (Connector seams are private); accepted. Real run here: Inventory, Udisks, UPower, NetworkManager Running; GpuDrm Off. MANUAL CHECK for owner: run p2_real_host_once on an AMD machine to see GpuDrm Running.
+- wlf.8 (ed5ab44): bench/stats.rs FrameProbe and report stats; process_cpu_pct and accessors for E01-007.
