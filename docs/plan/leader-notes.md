@@ -369,3 +369,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.15: unit file actions; fixed call_raw for zero-argument calls (Reload never worked before). Unmask-then-enable failure leaves the unit unmasked without reload.
 - hjn.21: closed again with DiskDrive.name and map_inventory_devices; NVML form and late catalog left to 8q0.36.
 - jqk.5: approved TlButton::icon_muted.
+- wlf.7: BenchEngine. Up time goes through SystemSnapshot.boot_time_s; NET_RX equals NET_TX in the synth. A tl-bench-bridge thread outlives stop() until the real client sends or closes.
