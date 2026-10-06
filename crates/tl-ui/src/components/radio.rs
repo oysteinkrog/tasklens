@@ -6,7 +6,6 @@
 //! from `on_change` and notifies.
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui_kit::{
     Animation, AnimationExt, App, ElementId, FocusHandle, InteractiveElement, IntoElement,
@@ -15,15 +14,13 @@ use gpui_kit::{
 };
 
 use super::focus::TlFocusRing;
+use super::motion::{M_FAST, ease_out_cubic};
 use crate::theme::{current, metrics};
 
 gpui_kit::actions!(tasklens, [RadioPrev, RadioNext, RadioFirst, RadioLast]);
 
 /// Key context of `TlRadioGroup`.
 pub const RADIO_GROUP_CONTEXT: &str = "TlRadioGroup";
-
-/// `m_fast`: the dot grows over 120 ms.
-const M_FAST: Duration = Duration::from_millis(120);
 
 /// Hover and press group name of one radio row.
 const ROW_GROUP: &str = "tl-radio-row";
@@ -39,10 +36,6 @@ pub fn bind_keys_radio(cx: &mut App) {
         KeyBinding::new("home", RadioFirst, ctx),
         KeyBinding::new("end", RadioLast, ctx),
     ]);
-}
-
-fn ease_out_cubic(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
 }
 
 type ClickHandler = Rc<dyn Fn(&mut Window, &mut App)>;

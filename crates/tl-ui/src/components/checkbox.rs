@@ -7,7 +7,6 @@
 //! notifies.
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui_kit::component::Colorize;
 use gpui_kit::{
@@ -18,6 +17,7 @@ use gpui_kit::{
 
 use crate::components::focus::TlFocusRing;
 use crate::components::icons::{TlIcon, icon};
+use crate::components::motion::{M_FAST, ease_out_cubic};
 use crate::theme::{TlTheme, current, metrics};
 
 gpui_kit::actions!(tasklens, [ToggleCheckbox]);
@@ -29,8 +29,6 @@ const MIN_RADIUS: f32 = 3.;
 /// Row height in menus and settings, and inline (filter strip), at 100% scale.
 const ROW: f32 = 24.;
 const ROW_INLINE: f32 = 20.;
-/// `m_fast` (UI-FND-003).
-const M_FAST: Duration = Duration::from_millis(120);
 /// The check mark grows from this fraction of `i_xs` to full size.
 const MARK_START_SCALE: f32 = 0.6;
 /// Hover lightens and press darkens a checked fill by this fraction.
@@ -154,10 +152,6 @@ struct CheckboxState {
     /// Counts glyph appearances after the first frame. Keys the mark animation, so each new
     /// glyph grows once; 0 means the glyph was there from the first frame and does not animate.
     epoch: u32,
-}
-
-fn ease_out_cubic(t: f32) -> f32 {
-    1. - (1. - t).powi(3)
 }
 
 impl RenderOnce for TlCheckbox {

@@ -11,7 +11,6 @@
 //! ease-out cubic) and moves at once when `App::reduce_motion()` is set.
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui_kit::base::{Switch, SwitchThumb, SwitchTrack, Transition, transition};
 use gpui_kit::{
@@ -20,10 +19,8 @@ use gpui_kit::{
 };
 
 use super::focus::TlFocusRing;
+use super::motion::M_FAST;
 use crate::theme::{TlTheme, current, metrics};
-
-/// `m_fast`: the thumb slide (UI-FND-003 motion).
-const M_FAST: Duration = Duration::from_millis(120);
 
 /// Track hover: lightness up by 0.08.
 const HOVER_STEP: f32 = 0.08;
