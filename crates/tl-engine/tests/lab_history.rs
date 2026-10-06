@@ -1,5 +1,8 @@
-//! LabRuntime tests for the `HistoryRecorder` worker in rolling-window mode (ADR-012, ADR-013).
+//! LabRuntime tests for the `HistoryRecorder` worker in rolling-window and recording mode
+//! (ADR-012, ADR-013). Store files go under a per-test temp directory.
 
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,10 +20,15 @@ use tl_engine::update::{EngineMsg, SourceUpdate, WorkerError};
 use tl_engine::workers::history::{
     HistoryMsg, HistorySink, HistorySlot, HistoryWorkerConfig, Mode, run_history,
 };
+use tl_history::format::{FORMAT_VERSION, SegmentHeader, boot_dir_name};
+use tl_history::segment::SegmentReader;
 use tl_model::command::HistoryWhat;
 use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::history::{HistoryMetric, HistoryRange, HistorySource, HistoryView, RecordSink};
+use tl_model::history::{
+    HistoryLoadProblem, HistoryMetric, HistoryRange, HistorySource, HistoryStoreState, HistoryView,
+    RecordSink,
+};
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::EngineSettings;
@@ -86,7 +94,68 @@ fn config() -> HistoryWorkerConfig {
     HistoryWorkerConfig {
         boot: BOOT,
         history_dir: None,
+        load_delay: None,
     }
+}
+
+/// A fresh store root for one test, removed on drop.
+struct TempRoot(PathBuf);
+
+impl TempRoot {
+    fn new(name: &str) -> Self {
+        let dir =
+            std::env::temp_dir().join(format!("tl-lab-history-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp root");
+        TempRoot(dir)
+    }
+
+    fn boot_dir(&self) -> PathBuf {
+        self.0.join(boot_dir_name(BOOT))
+    }
+
+    /// `seg-*.tlh` file names of this boot, sorted.
+    fn segments(&self) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(self.boot_dir())
+            .map(|rd| {
+                rd.filter_map(Result::ok)
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with("seg-") && n.ends_with(".tlh"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn reader(&self, name: &str) -> (PathBuf, SegmentReader) {
+        let path = self.boot_dir().join(name);
+        let reader = SegmentReader::open(&path).expect("segment opens");
+        (path, reader)
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn recording(edit: impl FnOnce(&mut EngineSettings)) -> EngineSettings {
+    let mut settings = EngineSettings::default();
+    settings.history.enabled = true;
+    edit(&mut settings);
+    settings
+}
+
+fn segment_secs(name: &str) -> u64 {
+    name["seg-".len().."seg-".len() + 10]
+        .parse()
+        .expect("segment name has 10 digits")
+}
+
+fn assert_dir_only(dir: &Path) {
+    assert!(dir.is_dir());
 }
 
 fn root(lab: &mut LabRuntime) -> RegionId {
@@ -100,16 +169,29 @@ struct Rig {
     lab: LabRuntime,
     rx: mpsc::Receiver<EngineMsg>,
     demand_tx: watch::Sender<Demand>,
-    _settings_tx: watch::Sender<EngineSettings>,
+    settings_tx: watch::Sender<EngineSettings>,
     _control_tx: watch::Sender<WorkerControl>,
     io: WorkerIo,
     slot: HistorySlot,
     sink: HistorySink,
     next_id: u64,
+    history_dir: Option<PathBuf>,
+    load_delay: Option<Duration>,
 }
 
 impl Rig {
     fn new(process_table: bool) -> Self {
+        Self::with_settings(process_table, EngineSettings::default())
+    }
+
+    /// Recording on, with the store under `dir`.
+    fn recording(dir: Option<&Path>, settings: EngineSettings) -> Self {
+        let mut rig = Self::with_settings(false, settings);
+        rig.history_dir = dir.map(Path::to_path_buf);
+        rig
+    }
+
+    fn with_settings(process_table: bool, settings: EngineSettings) -> Self {
         let lab = LabRuntime::new(
             LabConfig::new(7)
                 .max_steps(100_000_000)
@@ -121,7 +203,7 @@ impl Rig {
             process_table,
             ..Demand::default()
         });
-        let (settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (settings_tx, settings) = watch::channel(settings);
         let (control_tx, control) = watch::channel(WorkerControl::default());
         let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
         let slot: HistorySlot = Arc::new(ArcSwapOption::empty());
@@ -130,12 +212,22 @@ impl Rig {
             lab,
             rx,
             demand_tx,
-            _settings_tx: settings_tx,
+            settings_tx,
             _control_tx: control_tx,
             io,
             slot,
             sink,
             next_id: 0,
+            history_dir: None,
+            load_delay: None,
+        }
+    }
+
+    fn config(&self) -> HistoryWorkerConfig {
+        HistoryWorkerConfig {
+            history_dir: self.history_dir.clone(),
+            load_delay: self.load_delay,
+            ..config()
         }
     }
 
@@ -143,13 +235,14 @@ impl Rig {
     fn spawn_worker(&mut self) -> TaskHandle<Outcome<(), WorkerError>> {
         let io = self.io.clone();
         let slot = Arc::clone(&self.slot);
+        let cfg = self.config();
         let root = root(&mut self.lab);
         let (task, handle) = self
             .lab
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                run_history(cx, io, slot, config()).await
+                run_history(cx, io, slot, cfg).await
             })
             .expect("task is created");
         self.lab.scheduler.lock().schedule(task, 0);
@@ -421,4 +514,193 @@ fn dropped_events_reported_once_per_minute() {
     rig.advance(Duration::from_secs(60));
     assert_eq!(rig.health_texts(), ["History dropped 176 events"]);
     rig.finish(&handle);
+}
+
+/// Starts the worker and lets its first turn enter Recording.
+fn start_recording(rig: &mut Rig) -> TaskHandle<Outcome<(), WorkerError>> {
+    let handle = rig.spawn_worker();
+    rig.advance(Duration::from_secs(1));
+    handle
+}
+
+#[test]
+fn recording_writes_segments() {
+    let root = TempRoot::new("writes");
+    let mut rig = Rig::recording(Some(&root.0), recording(|_| {}));
+    let handle = start_recording(&mut rig);
+    rig.sweeps(T0, 3 * 60, &sweep(10));
+
+    let view = rig.query_live();
+    assert_eq!(view.source, HistorySource::Store);
+    assert_eq!(view.store_state, HistoryStoreState::Ready);
+    rig.finish(&handle);
+
+    assert_eq!(root.segments(), ["seg-0000001000.tlh"]);
+    let (path, reader) = root.reader("seg-0000001000.tlh");
+    assert!(!reader.recovered, "the footer was written at shutdown");
+    let starts: Vec<u64> = reader.index.iter().map(|e| e.start_t_ns).collect();
+    assert_eq!(starts, [T0, T0 + MIN, T0 + 2 * MIN]);
+    let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&root.boot_dir()), 0o700);
+}
+
+#[test]
+fn version_mismatch_reported_and_recording_continues() {
+    let root = TempRoot::new("version");
+    std::fs::create_dir_all(root.boot_dir()).expect("boot dir");
+    let mut header = SegmentHeader {
+        boot_id: BOOT,
+        realtime_offset_ns: 0,
+        start_t_ns: 500 * SEC,
+    }
+    .encode();
+    header[4..6].copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
+    std::fs::write(root.boot_dir().join("seg-0000000500.tlh"), header).expect("old segment");
+
+    let mut rig = Rig::recording(Some(&root.0), recording(|_| {}));
+    let handle = start_recording(&mut rig);
+    rig.sweeps(T0, 2 * 60 + 5, &sweep(4));
+    assert_eq!(
+        rig.query_live().store_state,
+        HistoryStoreState::Problem(HistoryLoadProblem::VersionMismatch)
+    );
+    rig.finish(&handle);
+
+    assert_eq!(
+        root.segments(),
+        ["seg-0000000500.tlh", "seg-0000001000.tlh"]
+    );
+    let (_, reader) = root.reader("seg-0000001000.tlh");
+    assert_eq!(
+        reader.index.len(),
+        3,
+        "two closed blocks and the flushed one"
+    );
+}
+
+#[test]
+fn load_timeout_starts_fresh() {
+    let root = TempRoot::new("timeout");
+    let mut rig = Rig::recording(Some(&root.0), recording(|_| {}));
+    rig.load_delay = Some(Duration::from_secs(3));
+    let handle = start_recording(&mut rig);
+    // The worker is waiting on the load. The timeout fires 2.5 s after it started.
+    rig.advance(Duration::from_secs(2));
+    rig.sweeps(T0, 65, &sweep(4));
+
+    let view = rig.query_live();
+    assert_eq!(
+        view.store_state,
+        HistoryStoreState::Problem(HistoryLoadProblem::TimedOut)
+    );
+    assert_eq!(view.source, HistorySource::Store);
+    let has_store = rig.inspect(|mode| matches!(mode, Mode::Recording(rec) if rec.has_store()));
+    assert!(has_store, "recording goes on into a fresh store");
+    rig.finish(&handle);
+
+    assert_eq!(root.segments(), ["seg-0000001000.tlh"]);
+    let (_, reader) = root.reader("seg-0000001000.tlh");
+    assert_eq!(reader.index.len(), 2);
+}
+
+#[test]
+fn persist_false_purges_at_shutdown() {
+    let root = TempRoot::new("purge");
+    let settings = recording(|s| s.history.persist = false);
+    let mut rig = Rig::recording(Some(&root.0), settings);
+    let handle = start_recording(&mut rig);
+    rig.sweeps(T0, 70, &sweep(4));
+    assert_eq!(
+        root.segments(),
+        ["seg-0000001000.tlh"],
+        "the closed block was written"
+    );
+    rig.finish(&handle);
+
+    assert_dir_only(&root.boot_dir());
+    assert!(root.segments().is_empty(), "{:?}", root.segments());
+}
+
+#[test]
+fn disk_cap_change_applies() {
+    let root = TempRoot::new("cap");
+    let mut rig = Rig::recording(Some(&root.0), recording(|_| {}));
+    let handle = start_recording(&mut rig);
+    let records = sweep(6);
+    rig.sweeps(T0, 21 * 60, &records);
+    assert_eq!(
+        root.segments(),
+        ["seg-0000001000.tlh", "seg-0000001600.tlh"]
+    );
+
+    // A cap of 0 MiB leaves only the open segment.
+    rig.settings_tx
+        .send(recording(|s| s.history.max_disk_mb = 0))
+        .expect("settings watch open");
+    rig.sweeps(T0 + 21 * MIN, 61, &records);
+    assert_eq!(root.segments(), ["seg-0000002200.tlh"]);
+    rig.finish(&handle);
+}
+
+#[test]
+fn no_dir_no_files() {
+    let mut rig = Rig::recording(None, recording(|_| {}));
+    let handle = start_recording(&mut rig);
+    rig.sweeps(T0, 65, &sweep(4));
+
+    let view = rig.query_live();
+    assert_eq!(view.source, HistorySource::Store);
+    assert_eq!(
+        view.store_state,
+        HistoryStoreState::Problem(HistoryLoadProblem::OpenFailed)
+    );
+    let has_store = rig.inspect(|mode| matches!(mode, Mode::Recording(rec) if rec.has_store()));
+    assert!(!has_store, "RAM only");
+    // No retry without a directory.
+    rig.advance(Duration::from_secs(61));
+    let state = rig.inspect(|mode| match mode {
+        Mode::Recording(rec) => Some((rec.has_store(), rec.store_state())),
+        _ => None,
+    });
+    assert_eq!(
+        state,
+        Some((
+            false,
+            HistoryStoreState::Problem(HistoryLoadProblem::OpenFailed)
+        ))
+    );
+    rig.finish(&handle);
+}
+
+#[test]
+fn gap_across_segment_boundary_resets_meta_ids() {
+    let root = TempRoot::new("gap");
+    let mut rig = Rig::recording(Some(&root.0), recording(|_| {}));
+    let handle = start_recording(&mut rig);
+    let records = sweep(5);
+    // Blocks at 1_000 .. 1_480 s; the block open at 1_480 s would be followed by 1_540 s.
+    rig.sweeps(T0, 510, &records);
+    rig.sink.command(HistoryMsg::SessionStart {
+        epoch: 2,
+        t_ns: T0 + 510 * SEC,
+    });
+    // After the gap the next block starts at 1_650 s, in a new segment.
+    rig.sweeps(T0 + 650 * SEC, 65, &records);
+    rig.finish(&handle);
+
+    let names = root.segments();
+    assert_eq!(names, ["seg-0000001000.tlh", "seg-0000001650.tlh"]);
+    assert_eq!(segment_secs(&names[1]), 1_650);
+    let (path, reader) = root.reader(&names[1]);
+    let first = reader
+        .read_block(&path, &reader.index[0])
+        .expect("first block decodes");
+    assert!(first.gap_before);
+    let ids: Vec<u32> = first.new_meta.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [0, 1, 2, 3, 4], "the new segment's ids start at 0");
+    assert!(
+        first.keyframe.iter().all(|p| ids.contains(&p.meta)),
+        "every keyframe meta is listed in new_meta"
+    );
 }
