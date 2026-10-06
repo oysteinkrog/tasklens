@@ -408,3 +408,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yrf.9 (ab12b5e, d5b2d9e): ChartElement paint plan. Stale tail: right edge follows the clock while all series are stale. First timing (release, headless): about 17 us per draw for one 600-sample chart with cached geometry.
 - crw.10 decisions: update_static takes &CpuStaticInfo; cpu_error from HealthSnapshot last_error; CpuDetails caches sensor indices (k10temp, zenpower, coretemp, cpu_thermal); BogoMIPS flag is a follow-up crw bead.
 - i3o.19 (6da3bb9): lab_actions FakeUnitBus per manager, real Gate in the harness, explore_unit_jobs (16 seeds). Busy second request gives Started, per-target Rejected(Busy), then a Rejected(Busy) summary; the AC's "exactly one" was written against the summary. Accepted.
+- fut.2 (4e6dc4a): window registry (open-or-focus, per-kind caps). Deregisters on App::on_window_closed (deferred) instead of a window_frame.rs call; covers detached graphs too. Accepted.
+- ug9.31 (9536c8d): kv_grid columns(n), column_gap, hover underline. Sent back: underline in text_secondary (performance.md:564 outranks the bead) and none on link values.
