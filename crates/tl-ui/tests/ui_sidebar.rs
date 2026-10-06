@@ -6,9 +6,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton, MouseDownEvent,
-    MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext,
-    Window, div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, ParentElement as _, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::devices::{DeviceEntry, DeviceIdentity, NetKind};
@@ -40,6 +40,7 @@ struct Host {
     focused: bool,
     edit_mode: bool,
     clicked: Rc<RefCell<Vec<DeviceKey>>>,
+    focus: FocusHandle,
 }
 
 impl Host {
@@ -63,6 +64,7 @@ impl Render for Host {
         div()
             .size_full()
             .p(px(20.))
+            .track_focus(&self.focus)
             .on_action(move |a: &PerfSelectDevice, _, _| clicked.borrow_mut().push(a.key.clone()))
             .child(self.card())
     }
@@ -94,7 +96,7 @@ fn open(cx: &mut TestAppContext, lines: CardLines) -> (Entity<Host>, &mut Visual
     let engine = FakeEngine::new();
     let client: Arc<dyn EngineClient> = engine;
     let hub = cx.new(|cx| SnapshotHub::new(client, cx));
-    let (host, vcx) = cx.add_window_view(move |_, cx| {
+    let (host, vcx) = cx.add_window_view(move |window, cx| {
         let spec = ChartSpec {
             grid: card_chart_grid(),
             background: CARD_CHART_BG,
@@ -102,6 +104,8 @@ fn open(cx: &mut TestAppContext, lines: CardLines) -> (Entity<Host>, &mut Visual
         };
         let chart = cx
             .new(|cx| ChartView::new(spec, card_chart_labels(ValueFormat::RateNetwork), &hub, cx));
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         Host {
             chart,
             lines,
@@ -109,6 +113,7 @@ fn open(cx: &mut TestAppContext, lines: CardLines) -> (Entity<Host>, &mut Visual
             focused: false,
             edit_mode: false,
             clicked: Rc::default(),
+            focus,
         }
     });
     draw(vcx);
@@ -309,7 +314,10 @@ fn card_value_glyph_for_restricted(cx: &mut TestAppContext) {
     let (_, cx) = open(cx, lines);
     let line2 = cx.debug_bounds("perf-card-line2").expect("line 2");
     let lock = cx.debug_bounds("perf-card-lock").expect("lock glyph");
-    assert!(line2.contains(&lock.center()), "the lock sits in line 2");
+    assert!(
+        line2.contains(&lock.center()),
+        "the lock sits in line 2: {line2:?} {lock:?}"
+    );
     assert_eq!(lock.size.width, px(12.), "i_xs");
 }
 

@@ -771,7 +771,7 @@ impl RenderOnce for DeviceCard {
             .pl(m.sp[5])
             .gap(m.sp[4])
             .bg(theme.list_bg)
-            .border_1()
+            .border(px(s))
             .border_color(theme.divider)
             .rounded(m.radius_card)
             .cursor_default()
@@ -785,12 +785,14 @@ impl RenderOnce for DeviceCard {
         if opacity < 1.0 {
             card = card.opacity(opacity);
         }
+        let edge = px(s);
         if selected_border {
             card = card.child(
+                // Absolute insets count from inside the card border; this covers it.
                 div()
                     .debug_selector(|| "perf-card-selected".into())
                     .absolute()
-                    .inset_0()
+                    .inset(-edge)
                     .border(px(2.0 * s))
                     .border_color(theme.accent)
                     .rounded(m.radius_card),
@@ -803,7 +805,7 @@ impl RenderOnce for DeviceCard {
                 div()
                     .debug_selector(|| "perf-card-focus-ring".into())
                     .absolute()
-                    .inset(-out)
+                    .inset(-(edge + out))
                     .border(px(s))
                     .border_color(theme.accent.opacity(FOCUS_RING_ALPHA))
                     .rounded(m.radius_card + out),
@@ -846,11 +848,7 @@ fn line(
     for &at in locks {
         let at = usize::from(at).min(text.len());
         if at > start {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .child(SharedString::from(text[start..at].to_owned())),
-            );
+            row = row.child(segment(&text[start..at]));
         }
         row = row.child(
             div()
@@ -861,15 +859,19 @@ fn line(
         start = at;
     }
     if start < text.len() {
-        row = row.child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .child(SharedString::from(text[start..].to_owned())),
-        );
+        row = row.child(segment(&text[start..]));
     }
     row.into_any_element()
+}
+
+/// A text run of a line with locks. It shrinks with an ellipsis, so the locks stay visible.
+fn segment(text: &str) -> gpui_kit::Div {
+    div()
+        .flex_shrink(1.)
+        .min_w_0()
+        .overflow_hidden()
+        .text_ellipsis()
+        .child(SharedString::from(text.to_owned()))
 }
 
 #[cfg(test)]
