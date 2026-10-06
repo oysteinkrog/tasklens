@@ -470,3 +470,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.6 (514ba96, a0d5ef9): process column registry, 121 columns per R-191, labels as Fluent keys, OnceLock index lookup.
 - crw.9 (170add9, cbf6b7e, 9e2bff2): CPU grid wrapper; specs only on topology change; clock tooltips edited in place without notify; heading HoverTooltip trigger per cell. English constants in performance pages collected into a new crw bead (tr tables per strings version). crw.11 told to rebuild the grid on style_version change.
 - qfx.21 (6028214): socket owners for other users' sockets through HelperHandle::read, 4096 inodes per 2 s rebuild, wraps; owners appear one rebuild later. Accepted. workers::connections is now pub.
+- pdu.5 (ff8e850): Processes page actions and captured targets; 256-row cap in CapturedTargets::new (noted on pdu.20); RestartUnit is no_json.
