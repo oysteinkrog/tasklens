@@ -20,12 +20,15 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use gpui_kit::private::schemars::JsonSchema;
-use gpui_kit::{AnyView, App, Context, FocusHandle, Focusable};
+use gpui_kit::{AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
+
+use crate::demand::DemandAggregator;
+use crate::hub::SnapshotHub;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
 pub use tl_model::devices::NetKind as NetClass;
@@ -239,7 +242,9 @@ pub fn type_number(rows: &[DeviceRow], key: &DeviceKey) -> u16 {
 
 /// The Performance tab entity. Later E24 beads add the sidebar and summary fields (R-262).
 pub struct PerformancePage {
-    // E24-004: sidebar: Entity<sidebar::DeviceSidebar> (added by crw.6 as a chain edit, R-262)
+    /// Rendered cached `size_full` by E24-A1 (crw.1).
+    #[allow(dead_code, reason = "rendered from E24-A1 on")]
+    pub(crate) sidebar: Entity<sidebar::DeviceSidebar>,
     /// Device pages, created on first visit and kept (ADR-009).
     #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) pages: FxHashMap<DeviceKey, AnyView>,
@@ -256,8 +261,13 @@ pub struct PerformancePage {
 }
 
 impl PerformancePage {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        hub: Entity<SnapshotHub>,
+        demand: Entity<DemandAggregator>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         Self {
+            sidebar: cx.new(|cx| sidebar::DeviceSidebar::new(hub, demand, cx)),
             pages: FxHashMap::default(),
             selected: None,
             sidebar_visible: true,
