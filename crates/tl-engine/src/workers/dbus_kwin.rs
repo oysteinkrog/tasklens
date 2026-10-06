@@ -8,22 +8,29 @@
 //! Only the current owner of `org.kde.KWin` may call `Update` (R-167 item 5). Window text is
 //! untrusted (ADR-015): captions and class names are sanitized and cut at 4 KiB, and they are
 //! never logged.
+//!
+//! Window commands (`KWinCommand`, E14-018) run one at a time, in arrival order, as one-shot
+//! scripts `tasklens-cmd-<n>`. A command must name a window in the current list, and every value
+//! enters the script only through `serde_json`. Commands have no result event (R-170); a failed
+//! one is logged at `warn` and dropped.
 
 use std::fs::{DirBuilder, Permissions};
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use asupersync::channel::mpsc;
+use asupersync::channel::{mpsc, watch};
 use asupersync::runtime::JoinError;
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
 use asupersync::{Cx, Outcome};
-use futures_lite::StreamExt;
 use futures_lite::stream::Boxed;
+use futures_lite::{Stream, StreamExt};
 use tl_collect::sanitize::sanitize_text;
+use tl_model::command::KWinCommand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::time::now_boot_ns;
@@ -31,7 +38,7 @@ use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect};
-use crate::source::WorkerIo;
+use crate::source::{CommandProgress, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
 use crate::workers::WorkerSpec;
@@ -53,6 +60,13 @@ const SCRIPT: &str = include_str!("../../../../assets/kwin/kwin-bridge.js");
 const PLACEHOLDER: &str = "__TL_BUS_NAME__";
 /// Written to `$XDG_RUNTIME_DIR/tasklens/`.
 const SCRIPT_FILE: &str = "kwin-bridge.js";
+/// The one-shot command script (E14-017). The placeholder becomes the args object as JSON.
+const CMD_TEMPLATE: &str = include_str!("../../../../assets/kwin/cmd-template.js");
+const CMD_PLACEHOLDER: &str = "__TL_ARGS__";
+/// Every tasklens window carries this app ID as its `resourceClass` (R-086, APP-009).
+const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
+/// The main window's title (R-176).
+const MAIN_CAPTION: &str = "tasklens";
 
 /// Longer `Update` payloads are rejected (R-167 item 15).
 pub const MAX_PAYLOAD: usize = 1024 * 1024;
@@ -68,22 +82,28 @@ const UPDATE_QUEUE: usize = 8;
 /// The health text when KDE or KWin is missing (R-155 item 4).
 const NOT_AVAILABLE: &str = "KWin bridge not available";
 
-/// Full engine only. The low-memory `KeepAbove` use comes with the window commands (E14-018).
+/// Both engines. The low-memory engine runs only `KWinCommand::KeepAbove` (R-152).
 pub fn spec() -> WorkerSpec {
     WorkerSpec {
         id: SourceId::KWin,
         name: "kwin",
-        modes: &[EngineMode::Full],
+        modes: &[EngineMode::Full, EngineMode::LowMemory],
         factory,
     }
 }
 
-pub(crate) fn factory(_cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+pub(crate) fn factory(cfg: Arc<EngineConfig>, io: WorkerIo) -> WorkerFactory {
+    // Shared by every generation, so a plugin name is never used twice while the engine runs.
+    let counter = Arc::new(AtomicU64::new(0));
     Arc::new(move |cx: Cx, _generation: ManagedGeneration| {
         let io = io.clone();
+        let commands = Commands {
+            mode: cfg.mode,
+            counter: Arc::clone(&counter),
+        };
         async move {
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").ok();
-            run(cx, io, desktop.as_deref()).await
+            run(cx, io, commands, desktop.as_deref()).await
         }
     })
 }
@@ -93,9 +113,18 @@ fn kde_desktop(desktop: Option<&str>) -> bool {
     desktop.is_some_and(|list| list.split(':').any(|name| name == "KDE"))
 }
 
-async fn run(cx: Cx, io: WorkerIo, desktop: Option<&str>) -> Outcome<(), WorkerError> {
+async fn run(
+    cx: Cx,
+    io: WorkerIo,
+    commands: Commands,
+    desktop: Option<&str>,
+) -> Outcome<(), WorkerError> {
+    let mut queue = match resume(&cx, &io).await {
+        Ok(queue) => queue,
+        Err(stop) => return stop,
+    };
     if !kde_desktop(desktop) {
-        return unsupported(&cx, &io).await;
+        return unsupported(&cx, &io, &mut queue).await;
     }
     let conn = match connect(&cx, Bus::Session).await {
         Ok(conn) => conn,
@@ -103,14 +132,14 @@ async fn run(cx: Cx, io: WorkerIo, desktop: Option<&str>) -> Outcome<(), WorkerE
     };
     match kwin_present(&cx, &conn).await {
         Ok(true) => {}
-        Ok(false) => return unsupported(&cx, &io).await,
+        Ok(false) => return unsupported(&cx, &io, &mut queue).await,
         Err(e) => return failed(&cx, &io, e.into()).await,
     }
     let Some(path) = script_path() else {
         let e = WorkerError::Other("XDG_RUNTIME_DIR is not set".into());
         return failed(&cx, &io, e).await;
     };
-    let result = serve(&cx, &io, &conn, &path).await;
+    let result = serve(&cx, &io, &conn, &path, &commands, &mut queue).await;
     unload_on_exit(&cx, &conn).await;
     // One unlink on the runtime tmpfs. It runs inline because the blocking pool refuses new
     // jobs once the region is cancelled.
@@ -122,8 +151,9 @@ async fn run(cx: Cx, io: WorkerIo, desktop: Option<&str>) -> Outcome<(), WorkerE
     }
 }
 
-/// Publishes the empty `Unsupported` snapshot and the terminal health once, then idles.
-async fn unsupported(cx: &Cx, io: &WorkerIo) -> Outcome<(), WorkerError> {
+/// Publishes the empty `Unsupported` snapshot and the terminal health once, then idles. Queued
+/// commands are dropped.
+async fn unsupported(cx: &Cx, io: &WorkerIo, queue: &mut Queue) -> Outcome<(), WorkerError> {
     let empty = SourceUpdate::Windows(Box::new(snapshot(Vec::new(), Validity::Unsupported)));
     if let Some(stop) = send(cx, io, empty).await {
         return stop;
@@ -133,6 +163,7 @@ async fn unsupported(cx: &Cx, io: &WorkerIo) -> Outcome<(), WorkerError> {
         return stop;
     }
     loop {
+        queue.drop_all(&io.control.borrow_and_clone());
         time::sleep(cx.now(), IDLE_WAKE).await;
         if cx.checkpoint().is_err() {
             return Outcome::Ok(());
@@ -176,10 +207,19 @@ enum Event {
     Windows(Vec<WindowEntry>),
     /// `NameOwnerChanged` for `org.kde.KWin`: the new owner, `None` when KWin is gone.
     Owner(Option<String>),
+    /// The control watch changed: there may be new commands.
+    Control,
 }
 
 /// Serves the bridge until `cx` is cancelled (`Ok`) or the bus fails (`Err`).
-async fn serve(cx: &Cx, io: &WorkerIo, conn: &DbusConn, path: &Path) -> Result<(), WorkerError> {
+async fn serve(
+    cx: &Cx,
+    io: &WorkerIo,
+    conn: &DbusConn,
+    path: &Path,
+    commands: &Commands,
+    queue: &mut Queue,
+) -> Result<(), WorkerError> {
     let raw = conn.raw();
     let unique = raw
         .unique_name()
@@ -223,12 +263,22 @@ async fn serve(cx: &Cx, io: &WorkerIo, conn: &DbusConn, path: &Path) -> Result<(
     }
 
     let owner_events = owner_signals.filter_map(|msg| owner_event(&msg));
-    let mut events: Boxed<Event> = rx.or(owner_events).boxed();
+    let control_events = control_changes(cx, io.control.clone());
+    let mut events: Boxed<Event> = rx.or(owner_events).or(control_events).boxed();
+    let dir = path
+        .parent()
+        .ok_or_else(|| WorkerError::Other("script path has no directory".into()))?;
+    let host = KWinScripting(conn);
+    // The list commands are checked against. `None` until the first `Update`, so commands queued
+    // across a restart wait for it.
+    let mut current: Option<Arc<[WindowEntry]>> = None;
     loop {
         match conn.next_signal(cx, &mut events, READ_TIMEOUT).await {
-            Ok(None) => {}
+            Ok(None | Some(Event::Control)) => {}
             Ok(Some(Event::Windows(windows))) => {
-                let update = SourceUpdate::Windows(Box::new(snapshot(windows, Validity::Valid)));
+                let snap = snapshot(windows, Validity::Valid);
+                current = Some(Arc::clone(&snap.windows));
+                let update = SourceUpdate::Windows(Box::new(snap));
                 if send(cx, io, update).await.is_some() {
                     return closed(cx);
                 }
@@ -238,8 +288,10 @@ async fn serve(cx: &Cx, io: &WorkerIo, conn: &DbusConn, path: &Path) -> Result<(
                 *owner.lock().unwrap_or_else(PoisonError::into_inner) = new;
                 if back {
                     // KWin restarted: the new instance has no script loaded.
+                    current = None;
                     load_script(cx, conn, path).await?;
                 } else {
+                    current = Some(Arc::from([]));
                     let gone = SourceUpdate::Windows(Box::new(snapshot(
                         Vec::new(),
                         Validity::Unsupported,
@@ -252,7 +304,27 @@ async fn serve(cx: &Cx, io: &WorkerIo, conn: &DbusConn, path: &Path) -> Result<(
             Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
             Err(e) => return Err(e.into()),
         }
+        if let Some(windows) = &current {
+            run_commands(cx, io, &host, dir, commands, queue, windows).await;
+        }
     }
+}
+
+/// One `Event::Control` per change of the control watch. The stream never ends, so a dropped
+/// sender does not end the event stream.
+fn control_changes(
+    cx: &Cx,
+    control: watch::Receiver<WorkerControl>,
+) -> impl Stream<Item = Event> + Send + 'static {
+    let cx = cx.clone();
+    futures_lite::stream::unfold(control, move |mut control| {
+        let cx = cx.clone();
+        async move {
+            control.changed(&cx).await.ok()?;
+            Some((Event::Control, control))
+        }
+    })
+    .chain(futures_lite::stream::pending())
 }
 
 /// `Ok` on cancel, `Err(Closed)` when the reducer is gone.
@@ -281,13 +353,36 @@ fn bridge_script(unique_name: &str) -> String {
 /// Writes the script on the blocking pool: directory mode 0700, file mode 0600.
 async fn write_script(cx: &Cx, path: &Path, text: String) -> Result<(), WorkerError> {
     let path = path.to_owned();
+    blocking(cx, move || write_private(&path, text.as_bytes())).await
+}
+
+/// Deletes a command script on the blocking pool. When the pool refuses the job (the region is
+/// cancelled), it runs inline: one file removal on the runtime tmpfs.
+async fn remove_script(cx: &Cx, path: &Path) {
+    let owned = path.to_owned();
+    let result = blocking(cx, move || match std::fs::remove_file(&owned) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(WorkerError::Other(format!("remove script: {e}").into())),
+    })
+    .await;
+    if result.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Runs `job` on the blocking pool and waits for it.
+async fn blocking(
+    cx: &Cx,
+    job: impl FnOnce() -> Result<(), WorkerError> + Send + 'static,
+) -> Result<(), WorkerError> {
     let mut job = cx
-        .spawn_blocking(move |_| write_private(&path, text.as_bytes()))
+        .spawn_blocking(move |_| job())
         .map_err(|e| WorkerError::Other(format!("spawn: {e}").into()))?;
     match job.join(cx).await {
         Ok(result) => result,
         Err(JoinError::Cancelled(_)) => Err(WorkerError::Closed),
-        Err(JoinError::Panicked(_)) => Err(WorkerError::Other("script write panicked".into())),
+        Err(JoinError::Panicked(_)) => Err(WorkerError::Other("script file job panicked".into())),
         Err(JoinError::PolledAfterCompletion) => {
             Err(WorkerError::Other("job polled after completion".into()))
         }
@@ -324,12 +419,7 @@ async fn load_script(cx: &Cx, conn: &DbusConn, path: &Path) -> Result<(), Worker
     let file = path
         .to_str()
         .ok_or_else(|| WorkerError::Other("script path is not UTF-8".into()))?;
-    let scripting = conn
-        .read(
-            cx,
-            zbus::Proxy::new(conn.raw(), KWIN_NAME, SCRIPTING_PATH, SCRIPTING_INTERFACE),
-        )
-        .await?;
+    let scripting = scripting(cx, conn).await?;
     let _was_loaded: bool = conn
         .read(cx, scripting.call("unloadScript", &(PLUGIN,)))
         .await?;
@@ -342,6 +432,15 @@ async fn load_script(cx: &Cx, conn: &DbusConn, path: &Path) -> Result<(), Worker
     conn.read(cx, scripting.call::<_, _, ()>("start", &()))
         .await?;
     Ok(())
+}
+
+/// A proxy for `/Scripting` on `org.kde.KWin`.
+async fn scripting<'a>(cx: &Cx, conn: &'a DbusConn) -> Result<zbus::Proxy<'a>, DbusError> {
+    conn.read(
+        cx,
+        zbus::Proxy::new(conn.raw(), KWIN_NAME, SCRIPTING_PATH, SCRIPTING_INTERFACE),
+    )
+    .await
 }
 
 /// `unloadScript` with a 500 ms deadline, sent even when `cx` is cancelled. Cancellation is
@@ -358,6 +457,293 @@ async fn unload_on_exit(cx: &Cx, conn: &DbusConn) {
     let result = std::future::poll_fn(|task| cx.masked(|| call.as_mut().poll(task))).await;
     if !matches!(result, Ok(Ok(()))) {
         tracing::debug!(target: "tasklens::engine", "unloadScript on exit did not complete");
+    }
+}
+
+/// Where this generation is in the forwarded command list (R-276).
+struct Queue {
+    last_seq: u64,
+    progress: Arc<CommandProgress>,
+}
+
+impl Queue {
+    /// The KWin commands queued after `last_seq`, oldest first. Moves `last_seq` to the newest
+    /// queued seq.
+    fn take(&mut self, control: &WorkerControl) -> Vec<(u64, KWinCommand)> {
+        let new = control
+            .commands
+            .iter()
+            .filter(|c| c.seq > self.last_seq && c.target == SourceId::KWin)
+            .filter_map(|c| match &c.command {
+                WorkerCommand::KWin(cmd) => Some((c.seq, cmd.clone())),
+                _ => None,
+            })
+            .collect();
+        if let Some(newest) = control.commands.last() {
+            self.last_seq = self.last_seq.max(newest.seq);
+        }
+        new
+    }
+
+    /// Takes the queued commands and counts them as done without running them.
+    fn drop_all(&mut self, control: &WorkerControl) {
+        if let Some(&(seq, _)) = self.take(control).last() {
+            self.progress.set_started(SourceId::KWin, seq);
+            self.progress.set_done(SourceId::KWin, seq);
+        }
+    }
+}
+
+/// Starts after the last command an earlier generation started (R-276). When that command never
+/// finished, it is skipped and reported once as `Failed`.
+async fn resume(cx: &Cx, io: &WorkerIo) -> Result<Queue, Outcome<(), WorkerError>> {
+    let progress = Arc::clone(&io.control.borrow_and_clone().progress);
+    let last_seq = progress.started(SourceId::KWin);
+    if last_seq > progress.done(SourceId::KWin) {
+        progress.set_done(SourceId::KWin, last_seq);
+        let text = "KWin was not run again after the worker restarted";
+        if let Some(stop) = send(cx, io, health(SourceState::Failed, Some(text.into()))).await {
+            return Err(stop);
+        }
+    }
+    Ok(Queue { last_seq, progress })
+}
+
+/// Turns window commands into one-shot scripts.
+struct Commands {
+    mode: EngineMode,
+    /// The last `n` used in a plugin name. Shared by every generation of the worker.
+    counter: Arc<AtomicU64>,
+}
+
+impl Commands {
+    /// The plugin name and script text for `cmd`, or `None` when the command is dropped.
+    fn prepare(&self, cmd: &KWinCommand, windows: &[WindowEntry]) -> Option<(String, String)> {
+        let target = match resolve(cmd, windows, self.mode) {
+            Ok(target) => target,
+            Err(reason) => {
+                tracing::debug!(target: "tasklens::engine", reason, "kwin command dropped");
+                return None;
+            }
+        };
+        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let plugin = format!("tasklens-cmd-{n}");
+        let script = cmd_script(&plugin, &target);
+        Some((plugin, script))
+    }
+}
+
+/// A checked command: the KWin id of a window in the current list and what to do with it.
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    id: Arc<str>,
+    op: CmdOp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CmdOp {
+    Activate,
+    Close,
+    KeepAbove(bool),
+    Geometry(FrameGeometry),
+}
+
+/// Finds the window `cmd` names in `windows`. `Err` holds the reason the command is dropped;
+/// it never holds the id or a caption.
+fn resolve(
+    cmd: &KWinCommand,
+    windows: &[WindowEntry],
+    mode: EngineMode,
+) -> Result<Target, &'static str> {
+    if mode == EngineMode::LowMemory && !matches!(cmd, KWinCommand::KeepAbove { .. }) {
+        return Err("the low-memory engine runs only keep above");
+    }
+    let (window, op) = match cmd {
+        KWinCommand::Activate { internal_id } => (by_id(windows, internal_id)?, CmdOp::Activate),
+        KWinCommand::Close { internal_id } => (by_id(windows, internal_id)?, CmdOp::Close),
+        KWinCommand::KeepAbove { pid, caption, on } => (
+            own_window(windows, *pid, caption.as_deref())?,
+            CmdOp::KeepAbove(*on),
+        ),
+        KWinCommand::SetFrameGeometry {
+            pid,
+            caption,
+            geometry,
+        } => {
+            let g = FrameGeometry {
+                width: geometry.width.max(1),
+                height: geometry.height.max(1),
+                ..*geometry
+            };
+            (
+                own_window(windows, *pid, Some(caption))?,
+                CmdOp::Geometry(g),
+            )
+        }
+        // The window picker (E14-019).
+        KWinCommand::Pick { .. } | KWinCommand::CancelPick { .. } => {
+            return Err("pick is not a window command");
+        }
+    };
+    // List entries are checked when parsed; this keeps the script safe if that ever changes.
+    if !braced_uuid(&window.internal_id) {
+        return Err("window id is not a braced lowercase UUID");
+    }
+    Ok(Target {
+        id: Arc::clone(&window.internal_id),
+        op,
+    })
+}
+
+/// The window with KWin id `id`.
+fn by_id<'a>(windows: &'a [WindowEntry], id: &str) -> Result<&'a WindowEntry, &'static str> {
+    if !braced_uuid(id) {
+        return Err("window id is not a braced lowercase UUID");
+    }
+    windows
+        .iter()
+        .find(|w| &*w.internal_id == id)
+        .ok_or("window is not in the current list")
+}
+
+/// A tasklens window: `pid` and the tasklens app ID, plus the caption for a secondary window
+/// (APP-009, R-086). `None` is the main window: the one titled "tasklens", or the only tasklens
+/// window of `pid` (the low-memory rescue window).
+fn own_window<'a>(
+    windows: &'a [WindowEntry],
+    pid: u32,
+    caption: Option<&str>,
+) -> Result<&'a WindowEntry, &'static str> {
+    let mut ours = windows
+        .iter()
+        .filter(|w| w.pid == pid && &*w.resource_class == APP_ID);
+    let found = match caption {
+        Some(caption) => ours.find(|w| &*w.caption == caption),
+        None => {
+            let ours: Vec<&WindowEntry> = ours.collect();
+            match ours.iter().find(|w| &*w.caption == MAIN_CAPTION) {
+                Some(main) => Some(*main),
+                None if ours.len() == 1 => Some(ours[0]),
+                None => None,
+            }
+        }
+    };
+    found.ok_or("window is not in the current list")
+}
+
+/// The args object the template reads. Fields an op does not use are left out.
+#[derive(serde::Serialize)]
+struct CmdArgs<'a> {
+    plugin: &'a str,
+    id: &'a str,
+    op: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    on: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<i32>,
+}
+
+/// The command template with the placeholder replaced by the args object, built by
+/// `serde_json`.
+fn cmd_script(plugin: &str, target: &Target) -> String {
+    let mut args = CmdArgs {
+        plugin,
+        id: &target.id,
+        op: "",
+        on: None,
+        x: None,
+        y: None,
+        width: None,
+        height: None,
+    };
+    match target.op {
+        CmdOp::Activate => args.op = "activate",
+        CmdOp::Close => args.op = "close",
+        CmdOp::KeepAbove(on) => {
+            args.op = "keep_above";
+            args.on = Some(on);
+        }
+        CmdOp::Geometry(g) => {
+            args.op = "geometry";
+            args.x = Some(g.x);
+            args.y = Some(g.y);
+            args.width = Some(g.width);
+            args.height = Some(g.height);
+        }
+    }
+    let json = serde_json::to_string(&args).expect("strings and numbers always serialize");
+    CMD_TEMPLATE.replace(CMD_PLACEHOLDER, &json)
+}
+
+/// Loads and starts a written script. The worker uses KWin; tests use a fake.
+trait ScriptHost {
+    async fn run(&self, cx: &Cx, path: &Path, plugin: &str) -> Result<(), WorkerError>;
+}
+
+/// `loadScript` and `start` on KWin's `/Scripting`, 2 s each.
+struct KWinScripting<'a>(&'a DbusConn);
+
+impl ScriptHost for KWinScripting<'_> {
+    async fn run(&self, cx: &Cx, path: &Path, plugin: &str) -> Result<(), WorkerError> {
+        let conn = self.0;
+        let file = path
+            .to_str()
+            .ok_or_else(|| WorkerError::Other("script path is not UTF-8".into()))?;
+        let scripting = scripting(cx, conn).await?;
+        let id: i32 = conn
+            .read(cx, scripting.call("loadScript", &(file, plugin)))
+            .await?;
+        if id < 0 {
+            return Err(WorkerError::Dbus("loadScript returned -1".into()));
+        }
+        conn.read(cx, scripting.call::<_, _, ()>("start", &()))
+            .await?;
+        Ok(())
+    }
+}
+
+/// Runs the newly queued commands one at a time, in arrival order.
+async fn run_commands(
+    cx: &Cx,
+    io: &WorkerIo,
+    host: &impl ScriptHost,
+    dir: &Path,
+    commands: &Commands,
+    queue: &mut Queue,
+    windows: &[WindowEntry],
+) {
+    let new = queue.take(&io.control.borrow_and_clone());
+    for (seq, cmd) in new {
+        if cx.checkpoint().is_err() {
+            return;
+        }
+        queue.progress.set_started(SourceId::KWin, seq);
+        if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
+            run_script(cx, host, dir, &plugin, script).await;
+        }
+        queue.progress.set_done(SourceId::KWin, seq);
+    }
+}
+
+/// Writes `<dir>/<plugin>.js` (mode 0600), runs it, then deletes the file. A failure is logged
+/// at `warn` and the command is dropped (R-170).
+async fn run_script(cx: &Cx, host: &impl ScriptHost, dir: &Path, plugin: &str, script: String) {
+    let path = dir.join(format!("{plugin}.js"));
+    let result = match write_script(cx, &path, script).await {
+        Ok(()) => host.run(cx, &path, plugin).await,
+        Err(e) => Err(e),
+    };
+    remove_script(cx, &path).await;
+    if let Err(e) = result
+        && !cx.is_cancel_requested()
+    {
+        tracing::warn!(target: "tasklens::engine", plugin, error = %e, "kwin command failed");
     }
 }
 
@@ -628,7 +1014,7 @@ mod tests {
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                let _ = run(cx, io, Some("GNOME")).await;
+                let _ = run(cx, io, commands(EngineMode::Full), Some("GNOME")).await;
             })
             .expect("task is created");
         lab.scheduler.lock().schedule(task, 0);
@@ -788,12 +1174,303 @@ mod tests {
     }
 
     #[test]
-    fn spec_is_full_mode_only() {
+    fn spec_runs_in_both_modes() {
         let s = spec();
         assert_eq!(s.id, SourceId::KWin);
         assert_eq!(s.name, "kwin");
-        assert_eq!(s.modes, &[EngineMode::Full]);
-        let full = crate::workers::workers_for(EngineMode::Full);
-        assert_eq!(full.iter().filter(|w| w.id == SourceId::KWin).count(), 1);
+        assert_eq!(s.modes, &[EngineMode::Full, EngineMode::LowMemory]);
+        for mode in [EngineMode::Full, EngineMode::LowMemory] {
+            let set = crate::workers::workers_for(mode);
+            assert_eq!(set.iter().filter(|w| w.id == SourceId::KWin).count(), 1);
+        }
+    }
+
+    const INJECTION: &str = "{00000000-0000-0000-0000-000000000000}\"); workspace.windowList().forEach(w=>w.closeWindow()); (\"";
+
+    fn commands(mode: EngineMode) -> Commands {
+        Commands {
+            mode,
+            counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn entry(id: &str, pid: u32, caption: &str, class: &str) -> WindowEntry {
+        WindowEntry {
+            internal_id: id.into(),
+            pid,
+            caption: caption.into(),
+            resource_class: class.into(),
+            desktop_file_name: class.into(),
+            minimized: false,
+            maximized: false,
+            keep_above: false,
+            frame_geometry: FrameGeometry::default(),
+            window_type: 0,
+        }
+    }
+
+    fn activate(id: &str) -> KWinCommand {
+        KWinCommand::Activate {
+            internal_id: id.into(),
+        }
+    }
+
+    /// The args object as the script holds it.
+    fn args_of(script: &str) -> serde_json::Value {
+        let start = script.find("const args = ").expect("args line") + "const args = ".len();
+        let end = start + script[start..].find(";\n").expect("args line ends");
+        serde_json::from_str(&script[start..end]).expect("args are JSON")
+    }
+
+    #[test]
+    fn cmd_script_activate_args() {
+        let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
+        let (plugin, script) = commands(EngineMode::Full)
+            .prepare(&activate(ID_A), &windows)
+            .expect("known window");
+        assert_eq!(plugin, "tasklens-cmd-1");
+        assert!(!script.contains(CMD_PLACEHOLDER));
+        assert!(script.contains("\"op\":\"activate\""), "{script}");
+        assert!(script.contains(&format!("\"id\":\"{ID_A}\"")), "{script}");
+        assert_eq!(
+            args_of(&script),
+            json!({ "plugin": "tasklens-cmd-1", "id": ID_A, "op": "activate" })
+        );
+
+        let (_, script) = commands(EngineMode::Full)
+            .prepare(
+                &KWinCommand::Close {
+                    internal_id: ID_A.into(),
+                },
+                &windows,
+            )
+            .expect("known window");
+        assert_eq!(args_of(&script)["op"], "close");
+    }
+
+    #[test]
+    fn cmd_rejects_injection_id() {
+        // Even a list entry with this id does not let it through.
+        let windows = [
+            entry(ID_A, 42, "a", "org.kde.konsole"),
+            entry(INJECTION, 42, "b", "org.kde.konsole"),
+        ];
+        let cmds = commands(EngineMode::Full);
+        assert_eq!(cmds.prepare(&activate(INJECTION), &windows), None);
+        let close = KWinCommand::Close {
+            internal_id: INJECTION.into(),
+        };
+        assert_eq!(cmds.prepare(&close, &windows), None);
+        // A secondary window lookup that lands on the bad entry is refused too.
+        let windows = [entry(INJECTION, 7, "tasklens", APP_ID)];
+        let keep = KWinCommand::KeepAbove {
+            pid: 7,
+            caption: None,
+            on: true,
+        };
+        assert_eq!(cmds.prepare(&keep, &windows), None);
+        // Nothing was numbered, so no script was built.
+        assert_eq!(cmds.counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cmd_unknown_id_dropped() {
+        let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
+        let cmds = commands(EngineMode::Full);
+        assert_eq!(cmds.prepare(&activate(ID_B), &windows), None);
+        assert_eq!(cmds.prepare(&activate(ID_A), &[]), None);
+        let geometry = KWinCommand::SetFrameGeometry {
+            pid: 42,
+            caption: "tasklens Graph 1".into(),
+            geometry: FrameGeometry::default(),
+        };
+        assert_eq!(cmds.prepare(&geometry, &windows), None);
+        assert_eq!(cmds.prepare(&KWinCommand::Pick { seq: 1 }, &windows), None);
+        assert_eq!(cmds.counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn cmd_plugin_counter_increments() {
+        let windows = [
+            entry(ID_A, 42, "a", "org.kde.konsole"),
+            entry(ID_B, 42, "b", "org.kde.konsole"),
+        ];
+        let cmds = commands(EngineMode::Full);
+        let names: Vec<String> = [
+            activate(ID_A),
+            activate(ID_B),
+            activate(ID_C),
+            activate(ID_A),
+        ]
+        .iter()
+        .filter_map(|cmd| cmds.prepare(cmd, &windows))
+        .map(|(plugin, script)| {
+            assert_eq!(args_of(&script)["plugin"], plugin.as_str());
+            plugin
+        })
+        .collect();
+        assert_eq!(
+            names,
+            ["tasklens-cmd-1", "tasklens-cmd-2", "tasklens-cmd-3"]
+        );
+    }
+
+    #[test]
+    fn cmd_geometry_clamped() {
+        let windows = [entry(ID_A, 7, "tasklens Graph 1", APP_ID)];
+        let cmd = KWinCommand::SetFrameGeometry {
+            pid: 7,
+            caption: "tasklens Graph 1".into(),
+            geometry: FrameGeometry {
+                x: i32::MIN,
+                y: i32::MAX,
+                width: 0,
+                height: -5,
+            },
+        };
+        let (_, script) = commands(EngineMode::Full)
+            .prepare(&cmd, &windows)
+            .expect("own window");
+        assert_eq!(
+            args_of(&script),
+            json!({
+                "plugin": "tasklens-cmd-1",
+                "id": ID_A,
+                "op": "geometry",
+                "x": i32::MIN,
+                "y": i32::MAX,
+                "width": 1,
+                "height": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn cmd_keep_above_finds_own_window() {
+        let windows = [
+            entry(ID_A, 7, "tasklens Graph 1", APP_ID),
+            entry(ID_B, 7, "tasklens", APP_ID),
+            entry(ID_C, 7, "tasklens Graph 2", "org.kde.konsole"),
+        ];
+        let keep = |caption: Option<&str>, on| KWinCommand::KeepAbove {
+            pid: 7,
+            caption: caption.map(Into::into),
+            on,
+        };
+        let cmds = commands(EngineMode::Full);
+        let (_, script) = cmds.prepare(&keep(None, true), &windows).expect("main");
+        let args = args_of(&script);
+        assert_eq!(
+            (&args["id"], &args["op"], &args["on"]),
+            (&json!(ID_B), &json!("keep_above"), &json!(true))
+        );
+        let (_, script) = cmds
+            .prepare(&keep(Some("tasklens Graph 1"), false), &windows)
+            .expect("secondary");
+        let args = args_of(&script);
+        assert_eq!((&args["id"], &args["on"]), (&json!(ID_A), &json!(false)));
+        // Another app's window with a matching caption is never chosen.
+        assert_eq!(
+            cmds.prepare(&keep(Some("tasklens Graph 2"), true), &windows),
+            None
+        );
+
+        // The rescue window is the process's only tasklens window. The low-memory engine runs
+        // keep above and nothing else.
+        let rescue = [entry(ID_C, 9, "tasklens - Low memory", APP_ID)];
+        let low = commands(EngineMode::LowMemory);
+        let pinned = KWinCommand::KeepAbove {
+            pid: 9,
+            caption: None,
+            on: true,
+        };
+        let (_, script) = low.prepare(&pinned, &rescue).expect("rescue window");
+        assert_eq!(args_of(&script)["id"], ID_C);
+        assert_eq!(low.prepare(&activate(ID_C), &rescue), None);
+        // Two unnamed tasklens windows and no main one: no guess.
+        let two = [
+            entry(ID_A, 9, "tasklens Graph 1", APP_ID),
+            entry(ID_B, 9, "tasklens Graph 2", APP_ID),
+        ];
+        assert_eq!(low.prepare(&pinned, &two), None);
+    }
+
+    /// Records each script as KWin would read it, and fails when told to.
+    struct FakeHost {
+        seen: Mutex<Vec<(String, String, u32)>>,
+        fail: bool,
+    }
+
+    impl ScriptHost for FakeHost {
+        async fn run(&self, _cx: &Cx, path: &Path, plugin: &str) -> Result<(), WorkerError> {
+            let text = std::fs::read_to_string(path).expect("script was written");
+            let mode = std::fs::metadata(path).expect("script metadata").mode() & 0o777;
+            self.seen
+                .lock()
+                .expect("lock")
+                .push((plugin.to_owned(), text, mode));
+            if self.fail {
+                Err(WorkerError::Dbus("loadScript returned -1".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A fresh directory under the target dir for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("kwin-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn cmd_file_written_then_deleted() {
+        let dir = scratch("cmd-file").join("tasklens");
+        let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
+        let cmds = commands(EngineMode::Full);
+        let host = Arc::new(FakeHost {
+            seen: Mutex::new(Vec::new()),
+            fail: false,
+        });
+        let failing = Arc::new(FakeHost {
+            seen: Mutex::new(Vec::new()),
+            fail: true,
+        });
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, _handle) = {
+            let (dir, host, failing) = (dir.clone(), Arc::clone(&host), Arc::clone(&failing));
+            lab.state
+                .create_task(root, Budget::INFINITE, async move {
+                    let cx = Cx::current().expect("task has a Cx");
+                    let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
+                    run_script(&cx, &*host, &dir, &plugin, script).await;
+                    let (plugin, script) = cmds.prepare(&activate(ID_A), &windows).expect("known");
+                    run_script(&cx, &*failing, &dir, &plugin, script).await;
+                })
+                .expect("task is created")
+        };
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+
+        let seen = host.seen.lock().expect("lock");
+        assert_eq!(seen.len(), 1);
+        let (plugin, text, mode) = &seen[0];
+        assert_eq!(plugin, "tasklens-cmd-1");
+        assert!(text.contains("\"op\":\"activate\""), "{text}");
+        assert!(text.contains(&format!("\"{ID_A}\"")), "{text}");
+        assert_eq!(*mode, 0o600);
+        assert_eq!(failing.seen.lock().expect("lock")[0].0, "tasklens-cmd-2");
+        // Both files are gone, the failed one too.
+        let left: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
+        assert!(left.is_empty(), "{left:?}");
+        let report = lab.run_until_quiescent_with_report();
+        assert!(report.lab_test_passed(), "{report:?}");
+        let _ = std::fs::remove_dir_all(dir.parent().expect("scratch"));
     }
 }

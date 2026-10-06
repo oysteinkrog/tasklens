@@ -78,12 +78,12 @@ mod tests {
                 .collect();
             assert_eq!(ids, expected, "{mode:?}");
         }
-        // E32's low-memory arm changes the sweep, not the set.
+        // E32's low-memory arm changes the sweep, not the set. KWin runs for keep above (R-152).
         let low: Vec<SourceId> = workers_for(EngineMode::LowMemory)
             .iter()
             .map(|spec| spec.id)
             .collect();
-        assert_eq!(low, [SourceId::Processes]);
+        assert_eq!(low, [SourceId::Processes, SourceId::KWin]);
         assert_eq!(
             workers_for(EngineMode::Full)
                 .iter()
