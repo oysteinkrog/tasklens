@@ -4,7 +4,7 @@
 //! target: the value the table cell shows for that column, summed over the matching records for
 //! `Name` and `App`. No match, or a matching value that is not `Valid`, appends a gap. Each entry
 //! keeps the 60 s fast ring and the 1 Hz tier (per-second maximum, 602 samples). The published
-//! list holds the fast views sorted by id, then the slow views in the same order.
+//! set holds the fast views in `series` and the 1 Hz views in `slow`, both sorted by id.
 //!
 //! Privacy: process names are never logged from here (ADR-015).
 
@@ -186,23 +186,20 @@ impl ProcessSeries {
         if !std::mem::take(&mut self.changed) {
             return None;
         }
-        let mut ids: Vec<&ProcessSeriesId> = self.entries.keys().collect();
+        let mut ids: Vec<ProcessSeriesId> = self.entries.keys().cloned().collect();
         ids.sort_unstable();
-        let ids: Vec<ProcessSeriesId> = ids.into_iter().cloned().collect();
-        let mut series = Vec::with_capacity(ids.len() * 2);
-        for id in &ids {
-            if let Some(entry) = self.entries.get_mut(id) {
+        let mut series = Vec::with_capacity(ids.len());
+        let mut slow = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(entry) = self.entries.get_mut(&id) {
                 series.push((id.clone(), entry.fast()));
-            }
-        }
-        for id in &ids {
-            if let Some(entry) = self.entries.get_mut(id) {
-                series.push((id.clone(), entry.slow()));
+                slow.push((id, entry.slow()));
             }
         }
         Some(Arc::new(ProcessSeriesSet {
             header,
             series: Arc::from(series),
+            slow: Arc::from(slow),
         }))
     }
 }
@@ -395,12 +392,7 @@ mod tests {
     }
 
     fn fast_samples(set: &ProcessSeriesSet, id: &ProcessSeriesId) -> Vec<Sample> {
-        let (_, view) = set
-            .series
-            .iter()
-            .find(|(k, v)| k == id && v.period_ns == PERIOD)
-            .expect("fast view");
-        view.samples.to_vec()
+        set.get(id).expect("fast view").samples.to_vec()
     }
 
     fn id(target: GraphTarget, column: ColumnId) -> ProcessSeriesId {
@@ -421,9 +413,9 @@ mod tests {
             .map(|s| s.value)
             .collect();
         assert_eq!(values, [10.0, 20.0, 30.0]);
-        // The fast view, then the slow view of the same id.
-        assert_eq!(set.series.len(), 2);
-        assert_eq!(set.series[1].1.period_ns, SLOW_PERIOD_NS);
+        assert_eq!(set.series.len(), 1);
+        assert_eq!(set.slow.len(), 1);
+        assert_eq!(set.slow[0].1.period_ns, SLOW_PERIOD_NS);
     }
 
     #[test]
@@ -496,14 +488,18 @@ mod tests {
         let b = (GraphTarget::Name(Arc::from("b")), ColumnId::Memory);
         ps.set_targets(&[a.clone(), b.clone()]);
         sweep(&mut ps, SEC, &[rec(1, "b", 1.0, 2)]);
-        assert_eq!(
-            ps.publish(ComponentHeader::default()).unwrap().series.len(),
-            4
-        );
+        let set = ps.publish(ComponentHeader::default()).unwrap();
+        assert_eq!((set.series.len(), set.slow.len()), (2, 2));
         ps.set_targets(std::slice::from_ref(&a));
         let set = ps.publish(ComponentHeader::default()).unwrap();
-        assert_eq!(set.series.len(), 2);
-        assert!(set.series.iter().all(|(k, _)| *k == id(a.0.clone(), a.1)));
+        assert_eq!((set.series.len(), set.slow.len()), (1, 1));
+        let a_id = id(a.0, a.1);
+        assert!(
+            set.series
+                .iter()
+                .chain(set.slow.iter())
+                .all(|(k, _)| *k == a_id)
+        );
     }
 
     #[test]
@@ -526,17 +522,52 @@ mod tests {
         assert_eq!(first.series.len(), second.series.len());
         for ((ka, va), (kb, vb)) in first.series.iter().zip(second.series.iter()) {
             assert_eq!(ka, kb);
-            assert_eq!(Arc::ptr_eq(va, vb), va.period_ns == SLOW_PERIOD_NS);
+            assert!(!Arc::ptr_eq(va, vb));
+        }
+        for ((ka, va), (kb, vb)) in first.slow.iter().zip(second.slow.iter()) {
+            assert_eq!(ka, kb);
+            assert!(Arc::ptr_eq(va, vb));
         }
 
         // Removing one target leaves the other one's views pointer-equal.
         ps.set_targets(std::slice::from_ref(&a));
         let third = ps.publish(ComponentHeader::default()).unwrap();
         let a_id = id(a.0, a.1);
-        let kept: Vec<_> = second.series.iter().filter(|(k, _)| *k == a_id).collect();
-        assert_eq!(third.series.len(), kept.len());
-        for ((_, prev), (_, next)) in kept.iter().zip(third.series.iter()) {
-            assert!(Arc::ptr_eq(prev, next));
+        assert!(Arc::ptr_eq(
+            second.get(&a_id).unwrap(),
+            third.get(&a_id).unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            second.get_slow(&a_id).unwrap(),
+            third.get_slow(&a_id).unwrap()
+        ));
+        assert_eq!((third.series.len(), third.slow.len()), (1, 1));
+    }
+
+    #[test]
+    fn get_and_get_slow_two_targets() {
+        let mut ps = ProcessSeries::new();
+        let a = (GraphTarget::Process(key(1)), ColumnId::Cpu);
+        let b = (GraphTarget::Process(key(2)), ColumnId::Cpu);
+        ps.set_targets(&[b.clone(), a.clone()]);
+        // Two seconds, so the 1 Hz tier closes one bucket per target.
+        sweep(&mut ps, SEC, &[rec(1, "a", 10.0, 0), rec(2, "b", 20.0, 0)]);
+        sweep(
+            &mut ps,
+            2 * SEC,
+            &[rec(1, "a", 30.0, 0), rec(2, "b", 40.0, 0)],
+        );
+        let set = ps.publish(ComponentHeader::default()).unwrap();
+        for (target, fast, slow) in [(a, [10.0, 30.0], 10.0), (b, [20.0, 40.0], 20.0)] {
+            let pid = id(target.0, target.1);
+            let fast_view = set.get(&pid).unwrap();
+            assert_eq!(fast_view.period_ns, PERIOD);
+            let values: Vec<f32> = fast_view.samples.iter().map(|s| s.value).collect();
+            assert_eq!(values, fast);
+            let slow_view = set.get_slow(&pid).unwrap();
+            assert_eq!(slow_view.period_ns, SLOW_PERIOD_NS);
+            assert_eq!(slow_view.samples.len(), 1);
+            assert_eq!(slow_view.samples[0].value, slow);
         }
     }
 
