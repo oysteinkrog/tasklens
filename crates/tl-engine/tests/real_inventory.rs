@@ -312,3 +312,84 @@ fn udisks_smart_real() {
         smart.value.ata.len()
     );
 }
+
+/// NetworkManager on the owner machine: a wired interface with an active connection. Read-only:
+/// it lists devices and reads properties, and never changes a connection. Failures show
+/// interface names only, never connection names or SSIDs.
+#[test]
+#[ignore = "needs the owner machine's system bus with NetworkManager"]
+fn nm_real_devices() {
+    use std::time::Duration;
+
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::{Cx, time};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::source::{WorkerControl, WorkerIo};
+    use tl_engine::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate};
+    use tl_engine::workers::dbus_nm;
+    use tl_model::demand::Demand;
+    use tl_model::devices::{DeviceIdentity, NetKind};
+    use tl_model::health::SourceId;
+    use tl_model::settings::EngineSettings;
+
+    let rt = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("runtime builds");
+    let join = rt.handle().spawn_checked(async {
+        let cx = Cx::current().expect("task has a Cx");
+        let (updates, mut rx) = mpsc::channel::<EngineMsg>(64);
+        let demand = Demand {
+            inventory: true,
+            ..Demand::default()
+        };
+        let (_demand_tx, demand) = watch::channel(demand);
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control_tx, control) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
+        let mut worker = cx
+            .spawn(move |cx| async move {
+                let _ = dbus_nm::run(cx, io, SysRoot::host()).await;
+            })
+            .expect("worker spawns");
+        let entries = loop {
+            let msg = time::timeout(cx.now(), Duration::from_secs(10), rx.recv(&cx))
+                .await
+                .expect("a message within 10 s")
+                .expect("channel open");
+            if let EngineMsg::Source(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Nets {
+                from: SourceId::NetworkManager,
+                entries,
+            })) = msg
+            {
+                break entries;
+            }
+        };
+        worker.abort();
+        let _ = worker.join(&cx).await;
+        entries
+    });
+    let entries = rt.block_on(join).expect("task completes");
+    let names: Vec<String> = entries
+        .iter()
+        .map(|(identity, d)| match identity {
+            DeviceIdentity::Net { name, .. } => format!("{name} {:?}", d.kind),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert!(
+        entries
+            .iter()
+            .any(|(_, d)| d.kind == NetKind::Wired && d.connection.is_some()),
+        "no wired interface with a connection among {names:?}"
+    );
+    assert!(
+        entries.iter().all(|(identity, _)| matches!(
+            identity,
+            DeviceIdentity::Net { name, .. } if &**name != "lo"
+        )),
+        "{names:?}"
+    );
+}
