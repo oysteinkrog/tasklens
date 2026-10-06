@@ -230,11 +230,14 @@ mod tests {
         Open(u32),
         Send(Signal),
         Close(u32),
+        Pid(u32, PidOp),
     }
 
     struct FakeOps {
         open: Step,
         send: Step,
+        /// What `apply_pid_op` returns.
+        pid_op: Result<(), OpsError>,
         /// Per-PID errors: `(pid, None)` fails the open, `(pid, Some(sig))` fails that signal.
         fail: Vec<(u32, Option<Signal>, OpsError)>,
         clock: Arc<VirtualClock>,
@@ -248,6 +251,7 @@ mod tests {
             Self {
                 open,
                 send,
+                pid_op: Ok(()),
                 fail: Vec::new(),
                 clock: Arc::clone(clock),
                 log: Mutex::new(Vec::new()),
@@ -301,6 +305,11 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(Call::Close(pid.expect("fd is open")));
+        }
+
+        fn apply_pid_op(&self, key: ProcessKey, _boot: BootId, op: &PidOp) -> Result<(), OpsError> {
+            self.log.lock().unwrap().push(Call::Pid(key.pid, *op));
+            self.pid_op.clone()
         }
     }
 
@@ -370,6 +379,19 @@ mod tests {
         });
         let log = ops.log.lock().unwrap().clone();
         (state, log, ms)
+    }
+
+    /// Runs `kind` on process 7 with a fake whose `apply_pid_op` returns `result`.
+    fn run_pid(kind: ActionKind, result: Result<(), OpsError>) -> (ActionState, Vec<Call>) {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let mut fake = FakeOps::new(Step::Ok, Step::Ok, &clock);
+        fake.pid_op = result;
+        let ops = Arc::new(fake);
+        let state = in_lab(ops.clone(), clock, move |cx, actx| async move {
+            run_target(&cx, &actx, &kind, &ActionTarget::Process(key(7))).await
+        });
+        let log = ops.log.lock().unwrap().clone();
+        (state, log)
     }
 
     /// Runs `kill_tree` on PIDs 1, 2, 3 with the per-PID `fail` list.
@@ -451,9 +473,87 @@ mod tests {
 
     #[test]
     fn other_kinds_unsupported() {
-        let (state, log, _) = run(ActionKind::SetNice(5), Step::Ok, Step::Ok);
+        let (state, log, _) = run(ActionKind::FreezeGroup, Step::Ok, Step::Ok);
         assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn nice_done() {
+        let (state, log) = run_pid(ActionKind::SetNice(5), Ok(()));
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Pid(7, PidOp::Nice(5))]);
+    }
+
+    #[test]
+    fn nice_partial() {
+        let (state, _) = run_pid(
+            ActionKind::SetNice(5),
+            Err(OpsError::Partial { done: 3, total: 4 }),
+        );
+        assert_eq!(
+            state,
+            ActionState::Failed(ActionError::Partial { done: 3, total: 4 })
+        );
+    }
+
+    #[test]
+    fn nice_exited_during() {
+        let (state, _) = run_pid(
+            ActionKind::SetNice(5),
+            Err(OpsError::OutcomeUnknown("process exited during the change")),
+        );
+        assert_eq!(
+            state,
+            ActionState::OutcomeUnknown(Arc::from("process exited during the change"))
+        );
+    }
+
+    #[test]
+    fn nice_eperm() {
+        // tl-ops maps EPERM to `PermissionDenied`; a raw errno maps the same way.
+        for err in [
+            OpsError::PermissionDenied,
+            OpsError::Os(Errno::PERM.raw_os_error()),
+        ] {
+            let (state, _) = run_pid(ActionKind::SetNice(-10), Err(err));
+            assert_eq!(state, ActionState::Failed(ActionError::PermissionDenied));
+        }
+    }
+
+    #[test]
+    fn nice_identity_changed() {
+        let (state, _) = run_pid(ActionKind::SetNice(5), Err(OpsError::IdentityChanged));
+        assert_eq!(state, ActionState::Rejected(RejectReason::IdentityChanged));
+    }
+
+    #[test]
+    fn nice_out_of_range_rejected() {
+        for n in [-21, 20, i8::MIN, i8::MAX] {
+            let (state, log) = run_pid(ActionKind::SetNice(n), Ok(()));
+            assert_eq!(
+                state,
+                ActionState::Rejected(RejectReason::Unsupported),
+                "{n}"
+            );
+            assert!(log.is_empty());
+        }
+    }
+
+    #[test]
+    fn affinity_empty_rejected() {
+        let (state, log) = run_pid(ActionKind::SetAffinity(CpuSet::empty()), Ok(()));
+        assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
+        assert!(log.is_empty(), "the fake saw a call: {log:?}");
+    }
+
+    #[test]
+    fn affinity_done() {
+        let mut set = CpuSet::empty();
+        set.insert(0);
+        let (state, log) = run_pid(ActionKind::SetAffinity(set), Ok(()));
+        assert_eq!(state, ActionState::Succeeded);
+        assert_eq!(log, [Call::Pid(7, PidOp::Affinity(set))]);
     }
 
     #[test]
@@ -692,5 +792,120 @@ mod tests {
             seen_stopped, [true; 3],
             "parent, child, child seen in state T"
         );
+    }
+
+    /// Env var that turns `threads_child_helper` into the multi-threaded child.
+    const THREADS_CHILD: &str = "TL_I3O7_THREADS_CHILD";
+
+    /// Not a test: `set_nice_real_child_all_tids` runs this test binary again with
+    /// `THREADS_CHILD` set, so this starts three extra threads and sleeps until killed.
+    #[test]
+    #[ignore = "child process for set_nice_real_child_all_tids"]
+    fn threads_child_helper() {
+        if std::env::var_os(THREADS_CHILD).is_none() {
+            return;
+        }
+        for _ in 0..3 {
+            std::thread::spawn(|| std::thread::sleep(Duration::from_secs(60)));
+        }
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    /// The key of a process this test spawned.
+    fn real_key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: tl_ops::process::read_start_ticks(pid).expect("start ticks"),
+            boot_id: BOOT,
+            pid,
+        }
+    }
+
+    /// Runs `kind` on `key` through `RealOps`.
+    fn run_real(kind: ActionKind, key: ProcessKey) -> ActionState {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        in_lab(Arc::new(RealOps), clock, move |cx, actx| async move {
+            run_target(&cx, &actx, &kind, &ActionTarget::Process(key)).await
+        })
+    }
+
+    /// Field 19 (`nice`) of every `/proc/<pid>/task/*/stat`.
+    fn task_nices(pid: u32) -> Vec<i64> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(format!("/proc/{pid}/task")).expect("task dir") {
+            let stat = std::fs::read_to_string(entry.expect("task entry").path().join("stat"))
+                .expect("task stat");
+            let rest = &stat[stat.rfind(')').expect("comm end") + 2..];
+            // `rest` starts at field 3, so field 19 is index 16.
+            let nice = rest.split(' ').nth(16).expect("field 19");
+            out.push(nice.parse().expect("nice parses"));
+        }
+        out
+    }
+
+    #[test]
+    fn set_nice_real_child_all_tids() {
+        // Only the child this test spawns has its nice value changed.
+        let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "actions::process::tests::threads_child_helper",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(THREADS_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("child starts");
+        let child = ChildGuard(child);
+        let pid = child.0.id();
+        let start = Instant::now();
+        while std::fs::read_dir(format!("/proc/{pid}/task")).map_or(0, |d| d.count()) < 4 {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "threads did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Lowering priority needs no privilege, but never ask for a value below the child's
+        // current nice, which it inherits from this test (builds may run niced).
+        let current = *task_nices(pid).iter().max().expect("a task");
+        let target: i8 = if current <= 5 { 5 } else { 19 };
+        let state = run_real(ActionKind::SetNice(target), real_key(pid));
+        assert_eq!(state, ActionState::Succeeded);
+        let nices = task_nices(pid);
+        assert!(nices.len() >= 4, "{nices:?}");
+        assert!(nices.iter().all(|&n| n == i64::from(target)), "{nices:?}");
+    }
+
+    #[test]
+    fn exiting_child_never_succeeds() {
+        // Only processes this test spawns are targeted.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("true starts");
+        let pid = child.id();
+        let key = real_key(pid);
+        let start = Instant::now();
+        while proc_state(pid) != Some(b'Z') {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "true did not exit"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // A zombie: the pidfd opens but is readable after the loop.
+        let state = run_real(ActionKind::SetNice(19), key);
+        assert!(
+            matches!(
+                state,
+                ActionState::Rejected(RejectReason::IdentityChanged)
+                    | ActionState::OutcomeUnknown(_)
+            ),
+            "{state:?}"
+        );
+        child.wait().expect("true is reaped");
+        // Reaped: the PID is gone or reused, so the identity check fails.
+        let state = run_real(ActionKind::SetNice(19), key);
+        assert_eq!(state, ActionState::Rejected(RejectReason::IdentityChanged));
     }
 }
