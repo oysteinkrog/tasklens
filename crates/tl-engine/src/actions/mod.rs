@@ -706,6 +706,10 @@ type Dispatch = for<'a> fn(
 /// One admitted request: `Started`, one final state per target, one summary with
 /// `target: None`, then `ActionFinished` to the reducer. A panic reports
 /// `Failed(Internal("internal error"))` and `ActionFinished` is still sent (ADR-015).
+///
+/// A cancelled task (the session's `Gate` was dropped, or shutdown) starts no further target,
+/// emits no further event and sends no `ActionFinished`. Cancellation is cooperative, so a
+/// target operation already running finishes first.
 pub async fn run_action(
     cx: Cx,
     actx: Arc<ActionCtx>,
@@ -729,6 +733,10 @@ async fn run_with(
     if body.is_err() {
         emit(actx, cx, event(req.id, None, internal_error())).await;
     }
+    if cx.is_cancel_requested() {
+        tracing::debug!(target: "tasklens::action", id = req.id.0, "action cancelled, ActionFinished not sent");
+        return;
+    }
     let finished = EngineMsg::ActionFinished { id: req.id };
     match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.msgs.send(cx, finished)).await {
         Ok(Ok(())) => {}
@@ -749,6 +757,9 @@ async fn run_body(
     per_target: &[Option<RejectReason>],
     dispatch: Dispatch,
 ) {
+    if cx.is_cancel_requested() {
+        return;
+    }
     let summary = if req.kind.is_targetless() {
         // `privileged` only picks the deadline here: these kinds have no helper route.
         targetless::run(cx, actx, &req.kind, req.privileged).await
@@ -764,6 +775,9 @@ async fn run_body(
         };
         let mut states = Vec::with_capacity(req.targets.len());
         for (i, target) in req.targets.iter().enumerate() {
+            if cx.is_cancel_requested() {
+                return;
+            }
             let state = match (per_target.get(i).copied().flatten(), tree.as_mut()) {
                 (Some(reason), _) => ActionState::Rejected(reason),
                 (None, Some(tree)) => tree.next().unwrap_or_else(internal_error),
@@ -868,6 +882,10 @@ async fn dispatch(
 /// action continues.
 async fn emit(actx: &ActionCtx, cx: &Cx, ev: ActionEvent) {
     let id = ev.id.0;
+    if cx.is_cancel_requested() {
+        tracing::debug!(target: "tasklens::action", id, "action cancelled, event dropped");
+        return;
+    }
     match time::timeout(cx.now(), EVENT_SEND_TIMEOUT, actx.events.send(ev)).await {
         Ok(Ok(())) => {}
         Ok(Err(_)) => {

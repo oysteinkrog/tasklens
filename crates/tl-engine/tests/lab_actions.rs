@@ -7,10 +7,10 @@
 //! a `Block` step advances that clock while the job runs, as `fake_sources.rs` does. Drive time
 //! only with `Harness::advance`.
 //!
-//! The `ActionGate` that the reducer calls is E11-A1. Until it lands, `Harness::submit` does
-//! what that gate does: `admit` with the in-flight count, one `Rejected` event with
-//! `target: None` on a reject, otherwise one `run_action` task. An action counts as in flight
-//! until the test drains its `ActionFinished`, as in the reducer.
+//! `Harness::submit` does what the reducer's `Gate` (E11-A1) does: `admit` with the in-flight
+//! count, one `Rejected` event with `target: None` on a reject, otherwise one `run_action` task.
+//! An action counts as in flight until the test drains its `ActionFinished`, as in the reducer.
+//! The engine-level tests at the end run the real `Gate` inside `engine_root`.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -1298,6 +1298,8 @@ struct EngineRig {
     ui: fake_sources::UiSide,
     control: watch::Receiver<WorkerControl>,
     root: TaskHandle<()>,
+    /// The engine's own event sender, so a test can fill the queue.
+    events_tx: async_channel::Sender<ActionEvent>,
     /// Gate factory calls, one per session.
     sessions: Arc<AtomicU32>,
     /// Events read from `ui.events_rx` and not yet asked for.
@@ -1313,6 +1315,7 @@ fn engine_rig() -> EngineRig {
     ));
     let (mut ep, ui) = fake_sources::root_endpoints(config, Vec::new());
     let control = ep.control.subscribe();
+    let events_tx = ep.events_tx.clone();
     let sessions = Arc::new(AtomicU32::new(0));
     let (counter, gate_ops) = (Arc::clone(&sessions), Arc::clone(&ops));
     ep.hooks = EngineHooks {
@@ -1333,6 +1336,7 @@ fn engine_rig() -> EngineRig {
         ui,
         control,
         root,
+        events_tx,
         sessions,
         seen: Vec::new(),
     }
@@ -1348,11 +1352,20 @@ impl EngineRig {
     }
 
     fn action(&mut self, id: u64, kind: ActionKind, pids: &[u32]) {
+        self.queue_action(id, kind, pids);
+        self.fake.lab.run_until_idle();
+    }
+
+    /// Queues the action on PIDs from `engine_key` without running the lab.
+    fn queue_action(&mut self, id: u64, kind: ActionKind, pids: &[u32]) {
         let targets: Vec<ActionTarget> = pids
             .iter()
             .map(|p| ActionTarget::Process(engine_key(*p)))
             .collect();
-        self.send(EngineMsg::Command(Command::Action(req(id, kind, &targets))));
+        self.ui
+            .msgs_tx
+            .try_send(EngineMsg::Command(Command::Action(req(id, kind, &targets))))
+            .expect("the queue has room for the message");
     }
 
     /// One `Processes` sweep with these PIDs, so admission sees them live.
@@ -1515,37 +1528,33 @@ fn engine_seventeenth_busy() {
     let mut rig = engine_rig();
     let pids: Vec<u32> = (1001..=1018).collect();
     rig.sweep(&pids);
-    for id in 1..=16 {
+    // All 17 wait in the queue, and the reducer applies them in one drain. Each `ActionFinished`
+    // queues behind the 17th, so the gate still counts 16 in flight when it sees the 17th.
+    for id in 1..=17 {
         let pid = 1000 + id as u32;
         rig.ops
             .script(pid, &[FakeStep::Block(Duration::from_secs(10))]);
-        rig.action(id, ActionKind::Signal(Signal::Term), &[pid]);
+        rig.queue_action(id, ActionKind::Signal(Signal::Term), &[pid]);
     }
-    for id in 1..=16 {
-        assert_eq!(
-            rig.events_for(ActionId(id)),
-            [(None, ActionState::Started)],
-            "action {id} is in flight"
-        );
-    }
-    rig.action(17, ActionKind::Signal(Signal::Term), &[1017]);
+    rig.fake.lab.run_until_idle();
     assert_eq!(
         rig.events_for(ActionId(17)),
         [(None, ActionState::Rejected(RejectReason::Busy))]
     );
     assert!(!rig.ops.calls().contains(&FakeCall::Open(1017)));
 
-    // The 2 s deadlines end the 16; their `ActionFinished` frees the slots.
+    // Each job moved the clock 10 s, past its 2 s deadline.
     rig.fake.advance(Duration::ZERO);
     for id in 1..=16 {
         assert_eq!(
             rig.events_for(ActionId(id)),
-            [(Some(0), timed_out()), (None, timed_out())],
+            expected(&[timed_out()], timed_out()),
             "action {id}"
         );
     }
     assert_eq!(rig.process_refreshes(), 16);
     assert!(rig.events_for(ActionId(17)).is_empty(), "one event only");
+    // The freed slots admit the next one.
     rig.action(18, ActionKind::Signal(Signal::Term), &[1018]);
     assert_eq!(
         rig.events_for(ActionId(18)),
@@ -1558,12 +1567,19 @@ fn engine_seventeenth_busy() {
 fn session_restart_drops_in_flight() {
     let mut rig = engine_rig();
     rig.sweep(&[500, 501]);
-    rig.ops
-        .script(500, &[FakeStep::Block(Duration::from_secs(10))]);
+    // A full event queue blocks the action in its `Started` send for up to 1 s.
+    let fill = ActionEvent {
+        id: ActionId(77),
+        target: None,
+        state: ActionState::Started,
+    };
+    for _ in 0..256 {
+        rig.events_tx.try_send(fill.clone()).expect("room left");
+    }
     rig.action(1, ActionKind::Signal(Signal::Term), &[500]);
-    assert_eq!(
-        rig.events_for(ActionId(1)),
-        [(None, ActionState::Started)]
+    assert!(
+        rig.ops.calls().is_empty(),
+        "the action waits on its first event"
     );
 
     rig.send(EngineMsg::Command(Command::Action(req(
@@ -1574,11 +1590,16 @@ fn session_restart_drops_in_flight() {
     rig.fake.advance(RESTART_DELAY);
     assert_eq!(rig.sessions(), 2, "session 2 starts after 1 s");
 
-    // Far past the old action's 2 s deadline: its task was aborted with session 1's gate.
+    // Long past every 1 s send timeout and the 2 s deadline: session 1's gate aborted the task.
     rig.fake
         .run_for(Duration::from_secs(30), Duration::from_secs(1));
-    assert!(rig.events_for(ActionId(1)).is_empty(), "no event for the old id");
+    assert_eq!(rig.events_for(ActionId(77)).len(), 256);
+    assert!(
+        rig.events_for(ActionId(1)).is_empty(),
+        "no event for the old id"
+    );
     assert!(rig.events_for(PANIC_ID).is_empty());
+    assert!(rig.ops.calls().is_empty(), "the old action never ran");
     assert_eq!(rig.process_refreshes(), 0);
 
     // The new reducer starts empty, so it needs a sweep before it admits PID 501.
