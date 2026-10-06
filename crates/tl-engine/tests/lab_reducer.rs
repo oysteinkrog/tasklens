@@ -32,7 +32,9 @@ use tl_model::details::{
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::gpu_proto::{ApiVersions, GpuProcessSample, Reading};
 use tl_model::health::{HelperState, ManagerState, SourceId, SourceState};
-use tl_model::history::{HistoryMetric, HistoryRange, RecordSink};
+use tl_model::history::{
+    HistoryMetric, HistoryPoint, HistoryRange, HistorySeries, HistoryView, RecordSink,
+};
 use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord};
 use tl_model::series::{Sample, SampleFlags};
@@ -316,6 +318,204 @@ fn record_sink_called_when_installed() {
     assert_eq!(counts[1].load(Ordering::Relaxed), 2, "once per sweep");
     assert_eq!(counts[0].load(Ordering::Relaxed), 0);
     assert_eq!(counts[2].load(Ordering::Relaxed), 0);
+}
+
+/// What a `LogSink` saw: each system batch, the sweep count and each catalog's device count.
+#[derive(Default)]
+struct SinkLog {
+    system: Vec<(TimeNs, Vec<(SeriesId, Sample)>)>,
+    sweeps: u32,
+    catalogs: Vec<usize>,
+}
+
+struct LogSink(Arc<Mutex<SinkLog>>);
+
+impl LogSink {
+    fn install(rig: &mut Rig) -> Arc<Mutex<SinkLog>> {
+        let log: Arc<Mutex<SinkLog>> = Arc::default();
+        rig.reducer()
+            .set_record_sink(Some(Box::new(LogSink(Arc::clone(&log)))));
+        log
+    }
+}
+
+impl RecordSink for LogSink {
+    fn on_system_sample(&mut self, t_ns: TimeNs, series: &[(SeriesId, Sample)]) {
+        let mut log = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        log.system.push((t_ns, series.to_vec()));
+    }
+
+    fn on_process_sweep(&mut self, _t_ns: TimeNs, _records: &Arc<[ProcessRecord]>) {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).sweeps += 1;
+    }
+
+    fn on_device_catalog(&mut self, catalog: &DeviceCatalog) {
+        let mut log = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        log.catalogs.push(catalog.entries.len());
+    }
+}
+
+/// A valid CPU sample with `cores` logical CPUs: 4 package series and 3 per core.
+fn cpu_cores_msg(t_ns: TimeNs, cores: u16) -> EngineMsg {
+    src(SourceUpdate::Cpu(CpuSample {
+        t_ns,
+        totals: CpuTotals {
+            util_pct: Metric::valid(10.0),
+            kernel_pct: Metric::valid(5.0),
+            ..CpuTotals::default()
+        },
+        irq_pct: 0.0,
+        per_cpu: (0..cores)
+            .map(|cpu| CpuCoreSample {
+                cpu,
+                pct: 10.0,
+                kernel_pct: 5.0,
+                freq_mhz: Some(3000),
+                validity: Validity::Valid,
+            })
+            .collect(),
+        freq_mhz: Some(3000),
+        temp_c: None,
+        temp_validity: Validity::Unsupported,
+        topology: None,
+        validity: Validity::Valid,
+    }))
+}
+
+#[test]
+fn sink_system_sample_batches() {
+    let mut rig = Rig::new();
+    let log = LogSink::install(&mut rig);
+    // 4 package series (total, kernel, frequency, temperature) and 3 per core.
+    let cores = 8;
+    let expected = 4 + 3 * usize::from(cores);
+    rig.run(vec![cpu_cores_msg(SEC, cores)])
+        .expect("no invariant violation");
+    {
+        let log = log.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(log.system.len(), 1, "one call per batch");
+        let (t, batch) = &log.system[0];
+        assert_eq!(*t, SEC);
+        assert_eq!(batch.len(), expected);
+        let snap = rig.latest();
+        for (id, sample) in batch {
+            let view = snap.series.get(*id).expect("the series was appended");
+            assert_eq!(view.samples.last(), Some(sample));
+        }
+    }
+
+    // Another batch kind is its own call with only its own samples: 4 disk, 3 aggregate.
+    rig.run(vec![disks_msg(
+        2 * SEC,
+        vec![(disk_id("nvme0n1", 0), disk_totals(10.0, 1e6))],
+    )])
+    .expect("no invariant violation");
+    let log = log.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(log.system.len(), 2);
+    assert_eq!(log.system[1].0, 2 * SEC);
+    assert_eq!(log.system[1].1.len(), 4 + 3);
+}
+
+#[test]
+fn sink_device_catalog() {
+    let mut rig = Rig::new();
+    rig.run(vec![health_msg(0)])
+        .expect("no invariant violation");
+    let log = LogSink::install(&mut rig);
+    let before = rig.latest().devices.entries.len();
+    let disk = disk_id("sda", 1);
+    rig.run(vec![src(SourceUpdate::Devices(DeviceList {
+        t_ns: SEC,
+        kinds: DeviceKinds::DISKS,
+        entries: vec![DeviceDesc {
+            identity: disk.clone(),
+            display_name: Arc::from("sda"),
+            parent: None,
+            persistent_key: Arc::from("disk:sda"),
+            net_kind: None,
+        }],
+    }))])
+    .expect("no invariant violation");
+    assert!(rig.latest().devices.find(&disk).is_some());
+    let log = log.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(
+        log.catalogs,
+        vec![before + 1],
+        "one call with the new catalog"
+    );
+    assert!(log.system.is_empty());
+}
+
+#[test]
+fn history_component_replaced() {
+    let mut rig = Rig::new();
+    rig.run(vec![health_msg(0)])
+        .expect("no invariant violation");
+    let prev = rig.latest();
+    let points: Arc<[HistoryPoint]> = (0..1024u64)
+        .map(|i| HistoryPoint {
+            t_ns: i * SEC,
+            min: 1.0,
+            max: 2.0,
+        })
+        .collect();
+    let series: Arc<[HistorySeries]> = [HistoryMetric::Cpu, HistoryMetric::Memory]
+        .into_iter()
+        .map(|metric| HistorySeries {
+            key: None,
+            metric,
+            points: Arc::clone(&points),
+        })
+        .collect();
+    let view = Arc::new(HistoryView {
+        query_id: 7,
+        series: Arc::clone(&series),
+        ..HistoryView::default()
+    });
+    rig.run(vec![src(SourceUpdate::History(Arc::clone(&view)))])
+        .expect("no invariant violation");
+    let next = rig.latest();
+    // The reducer owns the header version, so the view's payload is published, not its `Arc`.
+    assert!(Arc::ptr_eq(&next.history.series, &series));
+    assert_eq!(next.history.series.len(), 2);
+    assert!(next.history.series.iter().all(|s| s.points.len() == 1024));
+    assert_eq!(next.history.query_id, 7);
+    assert_eq!(next.history.header.validity, Validity::Valid);
+    assert_eq!(next.history.header.version, prev.history.header.version + 1);
+    let mut changed = SmallVec::new();
+    assert_eq!(
+        next.changed_since(&prev, &mut changed),
+        ComponentMask::HISTORY
+    );
+}
+
+#[test]
+fn sink_removed_stops_calls() {
+    let mut rig = Rig::new();
+    let log = LogSink::install(&mut rig);
+    rig.run(vec![sweep_msg(SEC), cpu_cores_msg(SEC, 2)])
+        .expect("no invariant violation");
+    let calls = |log: &Arc<Mutex<SinkLog>>| {
+        let log = log.lock().unwrap_or_else(PoisonError::into_inner);
+        (log.system.len(), log.sweeps, log.catalogs.len())
+    };
+    let (system, sweeps, catalogs) = calls(&log);
+    assert_eq!((system, sweeps), (1, 1));
+    assert!(catalogs >= 1, "the first CPU sample adds its cores");
+
+    rig.reducer().set_record_sink(None);
+    assert!(rig.reducer().record_sink.is_none());
+    rig.run(vec![
+        sweep_msg(2 * SEC),
+        cpu_cores_msg(2 * SEC, 4),
+        disks_msg(
+            2 * SEC,
+            vec![(disk_id("nvme1n1", 2), disk_totals(1.0, 1.0))],
+        ),
+    ])
+    .expect("no invariant violation");
+    assert_eq!(calls(&log), (system, sweeps, catalogs));
+    assert_eq!(rig.latest().processes.header.version, 2);
 }
 
 // ---- apply.rs (E09-007) ----

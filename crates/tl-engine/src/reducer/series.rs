@@ -177,7 +177,8 @@ impl SeriesStore {
     }
 
     /// Appends; creates the ring on first use; a period change sets `gap_next` and keeps the
-    /// ring. Flags without `VALID` append a gap sample (value 0.0).
+    /// ring. Flags without `VALID` append a gap sample (value 0.0). Returns the stored sample,
+    /// `GAP_BEFORE` included, for the record sink.
     pub fn append(
         &mut self,
         id: SeriesId,
@@ -185,7 +186,7 @@ impl SeriesStore {
         value: f32,
         period_ns: u64,
         flags: SampleFlags,
-    ) {
+    ) -> Sample {
         let pending_gap = self.pending_gap;
         let source = self.source;
         let entry = self
@@ -214,14 +215,14 @@ impl SeriesStore {
         entry.ring.push(s);
         entry.view = None;
         entry.fold(s);
+        s
     }
 
     /// Appends a gap sample (`VALID` clear) at the series' current period. Does nothing for a
-    /// series that has no ring yet, since it has no period.
-    pub fn append_gap(&mut self, id: SeriesId, t_ns: TimeNs) {
-        if let Some(period_ns) = self.rings.get(&id).map(|e| e.period_ns) {
-            self.append(id, t_ns, 0.0, period_ns, SampleFlags::empty());
-        }
+    /// series that has no ring yet, since it has no period, and returns `None` then.
+    pub fn append_gap(&mut self, id: SeriesId, t_ns: TimeNs) -> Option<Sample> {
+        let period_ns = self.rings.get(&id).map(|e| e.period_ns)?;
+        Some(self.append(id, t_ns, 0.0, period_ns, SampleFlags::empty()))
     }
 
     /// The next sample of every series gets `GAP_BEFORE` (suspend, resume, session restart).

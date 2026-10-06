@@ -303,6 +303,12 @@ impl Reducer {
             })
     }
 
+    /// Installs or removes the record sink: E30's recording switch. `None` stops every sink call
+    /// from the next applied message on (ADR-012).
+    pub fn set_record_sink(&mut self, sink: Option<Box<dyn RecordSink>>) {
+        self.record_sink = sink;
+    }
+
     /// Marks a component as changed for the next publish. Called by apply.
     pub fn mark(&mut self, bit: ComponentMask) {
         self.dirty |= bit;
@@ -328,6 +334,9 @@ impl Reducer {
         if dirty.contains(ComponentMask::DEVICES)
             && let Some(next) = self.devices.publish()
         {
+            if let Some(sink) = self.record_sink.as_deref_mut() {
+                sink.on_device_catalog(&next);
+            }
             self.components.devices = next;
         }
         if dirty.contains(ComponentMask::HEALTH)

@@ -19,7 +19,7 @@ use tl_model::gpu_proto::ApiVersions;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::history::HistoryView;
 use tl_model::ids::{ColumnId, DeviceIdx, MetricId, ProcessKey, SeriesId};
-use tl_model::series::SampleFlags;
+use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnectionsSnapshot, DeviceDetailsSnapshot, DiskDetails,
@@ -113,6 +113,10 @@ pub struct ApplyState {
     /// Measured power and UUID per GPU catalog device from the last GPU sample, valid values
     /// only (E09-030). Keyed by device, since AMD cards have no UUID (R-166).
     gpu_power: FxHashMap<DeviceIdx, ([u8; 16], f32)>,
+    /// The samples the current system sample batch appended, for `RecordSink::on_system_sample`
+    /// (ADR-012). Filled only while `collect` is set; the buffer keeps its capacity.
+    batch: Vec<(SeriesId, Sample)>,
+    collect: bool,
 }
 
 impl ApplyState {
@@ -446,11 +450,11 @@ impl Reducer {
                     self.resume();
                 }
             }
-            SourceUpdate::Cpu(s) => self.apply_cpu(s)?,
-            SourceUpdate::Memory(s) => self.apply_memory(s)?,
-            SourceUpdate::Disks(s) => self.apply_disks(s)?,
-            SourceUpdate::Nets(s) => self.apply_nets(s, settings)?,
-            SourceUpdate::Sensors(s) => self.apply_sensors(s)?,
+            SourceUpdate::Cpu(s) => self.record_system(s.t_ns, |r| r.apply_cpu(s))?,
+            SourceUpdate::Memory(s) => self.record_system(s.t_ns, |r| r.apply_memory(s))?,
+            SourceUpdate::Disks(s) => self.record_system(s.t_ns, |r| r.apply_disks(s))?,
+            SourceUpdate::Nets(s) => self.record_system(s.t_ns, |r| r.apply_nets(s, settings))?,
+            SourceUpdate::Sensors(s) => self.record_system(s.t_ns, |r| r.apply_sensors(s))?,
             SourceUpdate::Devices(mut list) => {
                 if list.kinds.contains(DeviceKinds::GPUS) {
                     self.keep_other_gpus(&mut list);
@@ -471,7 +475,9 @@ impl Reducer {
                 }
                 self.mark(ComponentMask::DEVICES);
             }
-            SourceUpdate::Gpu(s) => self.apply_gpu(s, source, settings)?,
+            SourceUpdate::Gpu(s) => {
+                self.record_system(s.t_ns, |r| r.apply_gpu(s, source, settings))?;
+            }
             SourceUpdate::GpuInfo(info) => {
                 let owner = gpu_update_owner(info.devices.iter().map(|d| &d.identity));
                 self.apply_state
@@ -834,6 +840,33 @@ impl Reducer {
             .ok_or(InvariantViolation("fixed device missing from the catalog"))
     }
 
+    /// Applies one system sample batch, then hands the samples it appended to the record sink in
+    /// one `on_system_sample` call. Without a sink nothing is collected.
+    fn record_system(
+        &mut self,
+        t_ns: TimeNs,
+        apply: impl FnOnce(&mut Self) -> Result<(), InvariantViolation>,
+    ) -> Result<(), InvariantViolation> {
+        self.apply_state.batch.clear();
+        self.apply_state.collect = self.record_sink.is_some();
+        let result = apply(self);
+        self.apply_state.collect = false;
+        result?;
+        let batch = &self.apply_state.batch;
+        if let Some(sink) = self.record_sink.as_deref_mut()
+            && !batch.is_empty()
+        {
+            sink.on_system_sample(t_ns, batch);
+        }
+        Ok(())
+    }
+
+    fn collect(&mut self, id: SeriesId, sample: Sample) {
+        if self.apply_state.collect {
+            self.apply_state.batch.push((id, sample));
+        }
+    }
+
     fn push(
         &mut self,
         device: DeviceIdx,
@@ -845,13 +878,17 @@ impl Reducer {
     ) {
         // Samples between `PrepareForSleep(true)` and the resume are gaps (ADR-008).
         let valid = valid && !self.suspend.drop_rates();
-        self.series
-            .append(sid(device, metric), t, value, period, flags(valid));
+        let id = sid(device, metric);
+        let sample = self.series.append(id, t, value, period, flags(valid));
+        self.collect(id, sample);
     }
 
     fn gaps(&mut self, device: DeviceIdx, metrics: &[MetricId], t: TimeNs) {
         for &metric in metrics {
-            self.series.append_gap(sid(device, metric), t);
+            let id = sid(device, metric);
+            if let Some(sample) = self.series.append_gap(id, t) {
+                self.collect(id, sample);
+            }
         }
     }
 
@@ -1144,7 +1181,7 @@ impl Reducer {
                     period,
                 );
             } else {
-                self.series.append_gap(sid(idx, metric), t);
+                self.gaps(idx, &[metric], t);
                 r.value = Metric::with(Validity::Missing);
             }
             rows.push((idx, r));
