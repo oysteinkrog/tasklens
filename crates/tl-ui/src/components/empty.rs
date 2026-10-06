@@ -10,8 +10,8 @@
 use std::rc::Rc;
 
 use gpui_kit::{
-    Action, App, IntoElement, ParentElement, RenderOnce, SharedString, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    Action, App, InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
+    Window, div, prelude::FluentBuilder as _,
 };
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -102,7 +102,7 @@ mod tests {
     use std::cell::Cell;
 
     use gpui_kit::{
-        Context, InteractiveElement, Modifiers, Render, TestAppContext, VisualTestContext, px,
+        Context, FocusHandle, Modifiers, Render, TestAppContext, VisualTestContext, px,
     };
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 
@@ -122,10 +122,12 @@ mod tests {
         );
     }
 
-    /// Renders one empty state and counts `TestAction`s that reach the root.
+    /// Renders one empty state and counts `TestAction`s that reach the root. The root holds
+    /// focus, as the owning table view does in the app.
     struct Host {
         filtering: bool,
         hits: Rc<Cell<usize>>,
+        focus: FocusHandle,
     }
 
     impl Render for Host {
@@ -137,6 +139,7 @@ mod tests {
             }
             div()
                 .id("root")
+                .track_focus(&self.focus)
                 .size(px(400.))
                 .on_action(move |_: &TestAction, _, _| hits.set(hits.get() + 1))
                 .child(empty)
@@ -148,7 +151,15 @@ mod tests {
         let hits = Rc::new(Cell::new(0));
         let (_, cx) = cx.add_window_view({
             let hits = hits.clone();
-            move |_, _| Host { filtering, hits }
+            move |window, cx| {
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                Host {
+                    filtering,
+                    hits,
+                    focus,
+                }
+            }
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
         (cx, hits)
