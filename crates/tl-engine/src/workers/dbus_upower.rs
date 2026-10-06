@@ -4,6 +4,8 @@
 //! `PowerSupply == true`, and follows `DeviceAdded`, `DeviceRemoved` and each device's
 //! `PropertiesChanged`. Without UPower it reads `/sys/class/power_supply` every `SYSFS_PERIOD`
 //! and tries the bus again every 60 s. It runs while any surface is visible or recording is on.
+//! A forwarded `BatteryHistory` command also wakes it and fills that battery's `history` from
+//! `GetHistory` (E12-029).
 //!
 //! The battery serial is shown on screen only. Never log it.
 
@@ -19,6 +21,7 @@ use asupersync::supervision::ManagedGeneration;
 use asupersync::time::sleep;
 use asupersync::{Cx, Outcome};
 use tl_collect::sysroot::read_trimmed;
+use tl_model::command::DeviceCommand;
 use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::snapshot::{BatteryDetails, InvField};
@@ -28,7 +31,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 use crate::config::{EngineConfig, EngineMode};
 use crate::dbus::{Bus, DbusConn, DbusError, connect};
-use crate::source::{IDLE_RECHECK, WorkerIo};
+use crate::source::{CommandProgress, IDLE_RECHECK, WorkerCommand, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{
     DeviceDesc, DeviceDetailsUpdate, DeviceKinds, DeviceList, EngineMsg, SourceUpdate, WorkerError,
@@ -38,6 +41,10 @@ use crate::workers::WorkerSpec;
 pub const BUS: &str = "org.freedesktop.UPower";
 pub const PATH: &str = "/org/freedesktop/UPower";
 pub const SYSFS_PERIOD: Duration = Duration::from_secs(30);
+/// `GetHistory` covers the last 24 h (R-166).
+pub const HISTORY_SPAN_S: u32 = 86_400;
+/// `GetHistory` resolution: one point per 5 min over `HISTORY_SPAN_S`.
+pub const HISTORY_POINTS: u32 = 288;
 
 const MANAGER_IFACE: &str = "org.freedesktop.UPower";
 const DEVICE_IFACE: &str = "org.freedesktop.UPower.Device";
@@ -48,6 +55,8 @@ const RESYNC: Duration = Duration::from_secs(60);
 const TYPE_BATTERY: f64 = 2.0;
 /// The health text while the worker reads sysfs.
 const NOT_AVAILABLE: &str = "UPower not available, reading /sys/class/power_supply";
+/// The `GetHistory` timeout.
+const HISTORY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The properties of one `org.freedesktop.UPower.Device`, from `GetAll`.
 pub type Props = HashMap<String, OwnedValue>;
@@ -90,11 +99,12 @@ async fn run_with<C: Connector>(
     connector: C,
 ) -> Outcome<(), WorkerError> {
     let mut sent = Sent::default();
+    let mut commands = Commands::resume(&io);
     let mut next = Next::Idle;
     loop {
         next = match next {
             Next::Idle => {
-                if let Some(stop) = idle(&cx, &io).await {
+                if let Some(stop) = idle(&cx, &io, &commands).await {
                     return stop;
                 }
                 match start_bus(&cx, &connector).await {
@@ -103,17 +113,19 @@ async fn run_with<C: Connector>(
                     Err(e) => fail(&cx, &e),
                 }
             }
-            Next::Bus(bus, batteries) => bus_loop(&cx, &io, bus, batteries, &mut sent).await,
-            Next::Sysfs => sysfs_loop(&cx, &io, &sys, &connector, &mut sent).await,
+            Next::Bus(bus, batteries) => {
+                bus_loop(&cx, &io, bus, batteries, &mut sent, &mut commands).await
+            }
+            Next::Sysfs => sysfs_loop(&cx, &io, &sys, &connector, &mut sent, &mut commands).await,
             Next::Stop(outcome) => return outcome,
         };
     }
 }
 
-/// Step 1: waits until a surface is visible or recording is on. `Some` on cancel.
-// E12-029 adds: a queued `BatteryHistory` command also wakes the worker.
-async fn idle(cx: &Cx, io: &WorkerIo) -> Option<Outcome<(), WorkerError>> {
-    while !active(io) {
+/// Step 1: waits until a surface is visible, recording is on or a command is queued. `Some` on
+/// cancel.
+async fn idle(cx: &Cx, io: &WorkerIo, commands: &Commands) -> Option<Outcome<(), WorkerError>> {
+    while !active(io) && !commands.pending(io) {
         sleep(cx.now(), IDLE_RECHECK).await;
         if cx.checkpoint().is_err() {
             return Some(Outcome::Ok(()));
@@ -164,6 +176,7 @@ async fn bus_loop<B: UpowerBus>(
     mut bus: B,
     mut batteries: BTreeMap<String, BatteryDetails>,
     sent: &mut Sent,
+    commands: &mut Commands,
 ) -> Next<B> {
     if let Some(stop) = send(cx, io, health(None)).await {
         return Next::Stop(stop);
@@ -173,6 +186,19 @@ async fn bus_loop<B: UpowerBus>(
     }
     let mut next_resync = cx.now().as_nanos() + nanos(RESYNC);
     loop {
+        for (seq, command) in commands.take(io) {
+            commands.progress.set_started(SourceId::UPower, seq);
+            let stop = match command {
+                WorkerCommand::Device(DeviceCommand::BatteryHistory { native_path }) => {
+                    history(cx, io, &mut bus, &mut batteries, &native_path, sent).await
+                }
+                _ => None,
+            };
+            commands.progress.set_done(SourceId::UPower, seq);
+            if let Some(stop) = stop {
+                return Next::Stop(stop);
+            }
+        }
         if !active(io) {
             return Next::Idle;
         }
@@ -193,7 +219,10 @@ async fn bus_loop<B: UpowerBus>(
         if cx.now().as_nanos() >= next_resync {
             next_resync = cx.now().as_nanos() + nanos(RESYNC);
             match resync(cx, &mut bus).await {
-                Ok(fresh) => {
+                Ok(mut fresh) => {
+                    for (path, battery) in &mut fresh {
+                        battery.history = batteries.get(path).and_then(|b| b.history.clone());
+                    }
                     batteries = fresh;
                     resynced = true;
                 }
@@ -231,7 +260,9 @@ async fn apply_event<B: UpowerBus>(
                 }
             };
             match battery_from_props(&props) {
-                Some(battery) => {
+                Some(mut battery) => {
+                    // The cached history stays until the next `BatteryHistory`.
+                    battery.history = batteries.get(&path).and_then(|b| b.history.clone());
                     batteries.insert(path, battery);
                     Ok(true)
                 }
@@ -241,6 +272,54 @@ async fn apply_event<B: UpowerBus>(
     }
 }
 
+/// Answers one `BatteryHistory`: `GetHistory` on the device whose `NativePath` matches, then
+/// `Batteries`. An unknown native path sends nothing. An error gives an empty history.
+async fn history<B: UpowerBus>(
+    cx: &Cx,
+    io: &WorkerIo,
+    bus: &mut B,
+    batteries: &mut BTreeMap<String, BatteryDetails>,
+    native_path: &str,
+    sent: &mut Sent,
+) -> Option<Outcome<(), WorkerError>> {
+    let path = batteries
+        .iter()
+        .find(|(_, b)| &*b.native_path == native_path)
+        .map(|(path, _)| path.clone())?;
+    let points = match bus.history(cx, &path).await {
+        Ok(raw) => history_points(&raw),
+        Err(e) => {
+            tracing::debug!(error = dbus_name(&e), "UPower GetHistory failed");
+            Arc::from([])
+        }
+    };
+    if let Some(battery) = batteries.get_mut(&path) {
+        battery.history = Some(points);
+    }
+    publish(cx, io, batteries.values().cloned().collect(), sent).await
+}
+
+/// `GetHistory` points as `(unix time s, percent)`: entries with time 0 or a percent outside
+/// 0 to 100 are dropped, the rest sorted by time. Of equal times the last one wins.
+pub fn history_points(raw: &[(u32, f64, u32)]) -> Arc<[(i64, f32)]> {
+    let mut kept: Vec<(u32, f64)> = raw
+        .iter()
+        .filter(|(time, pct, _)| *time != 0 && (0.0..=100.0).contains(pct))
+        .map(|&(time, pct, _)| (time, pct))
+        .collect();
+    // A stable sort keeps the reply order among equal times.
+    kept.sort_by_key(|&(time, _)| time);
+    let mut points: Vec<(i64, f32)> = Vec::with_capacity(kept.len());
+    for (time, pct) in kept {
+        let time = i64::from(time);
+        match points.last_mut() {
+            Some(last) if last.0 == time => last.1 = pct as f32,
+            _ => points.push((time, pct as f32)),
+        }
+    }
+    points.into()
+}
+
 /// Step 2 without UPower: reads sysfs every `SYSFS_PERIOD` and tries the bus every 60 s.
 async fn sysfs_loop<C: Connector>(
     cx: &Cx,
@@ -248,6 +327,7 @@ async fn sysfs_loop<C: Connector>(
     sys: &Path,
     connector: &C,
     sent: &mut Sent,
+    commands: &mut Commands,
 ) -> Next<C::Bus> {
     if let Some(stop) = send(cx, io, health(Some(NOT_AVAILABLE.into()))).await {
         return Next::Stop(stop);
@@ -255,6 +335,11 @@ async fn sysfs_loop<C: Connector>(
     let mut next_read = cx.now().as_nanos();
     let mut next_retry = next_read + nanos(RESYNC);
     loop {
+        // Sysfs has no history: the page shows "No history".
+        for (seq, _) in commands.take(io) {
+            commands.progress.set_started(SourceId::UPower, seq);
+            commands.progress.set_done(SourceId::UPower, seq);
+        }
         if !active(io) {
             return Next::Idle;
         }
@@ -324,6 +409,51 @@ fn sysfs_batteries(dir: &Path) -> Vec<BatteryDetails> {
         .filter_map(|path| battery_from_sysfs(path))
         .filter(|battery| battery.power_supply)
         .collect()
+}
+
+/// Commands the reducer forwards to this worker (R-276).
+struct Commands {
+    progress: Arc<CommandProgress>,
+    /// The highest `seq` seen.
+    last_seq: u64,
+}
+
+impl Commands {
+    /// Resumes after the last command a generation started. One that was running when the last
+    /// generation died is skipped without a message: the page can ask again.
+    fn resume(io: &WorkerIo) -> Self {
+        let progress = Arc::clone(&io.control.borrow_and_clone().progress);
+        let last_seq = progress.started(SourceId::UPower);
+        if last_seq > progress.done(SourceId::UPower) {
+            progress.set_done(SourceId::UPower, last_seq);
+        }
+        Self { progress, last_seq }
+    }
+
+    /// Whether a command for this worker above `last_seq` is queued.
+    fn pending(&self, io: &WorkerIo) -> bool {
+        let control = io.control.borrow_and_clone();
+        control
+            .commands
+            .iter()
+            .any(|c| c.seq > self.last_seq && c.target == SourceId::UPower)
+    }
+
+    /// The queued commands for this worker above `last_seq`, in `seq` order. The caller marks
+    /// each one started and done.
+    fn take(&mut self, io: &WorkerIo) -> Vec<(u64, WorkerCommand)> {
+        let control = io.control.borrow_and_clone();
+        let taken = control
+            .commands
+            .iter()
+            .filter(|c| c.seq > self.last_seq && c.target == SourceId::UPower)
+            .map(|c| (c.seq, c.command.clone()))
+            .collect();
+        if let Some(newest) = control.commands.last() {
+            self.last_seq = self.last_seq.max(newest.seq);
+        }
+        taken
+    }
 }
 
 /// The last `Devices` list sent, as (native path, display name) pairs.
@@ -685,7 +815,7 @@ trait Connector: Send + Sync + 'static {
     fn open(&self, cx: &Cx) -> impl Future<Output = Result<Self::Bus, DbusError>> + Send;
 }
 
-/// The three UPower calls the worker makes.
+/// The four UPower calls the worker makes.
 trait UpowerBus {
     /// `EnumerateDevices`.
     fn devices(&mut self, cx: &Cx) -> impl Future<Output = Result<Vec<String>, DbusError>> + Send;
@@ -701,6 +831,13 @@ trait UpowerBus {
         cx: &Cx,
         d: Duration,
     ) -> impl Future<Output = Result<Option<Event>, DbusError>> + Send;
+    /// `GetHistory("charge", HISTORY_SPAN_S, HISTORY_POINTS)` on `path`: (unix time s, percent,
+    /// state) entries.
+    fn history(
+        &mut self,
+        cx: &Cx,
+        path: &str,
+    ) -> impl Future<Output = Result<Vec<(u32, f64, u32)>, DbusError>> + Send;
 }
 
 struct SystemConnector;
@@ -776,6 +913,19 @@ impl UpowerBus for SystemUpower {
         msg.body().deserialize().map_err(|e| call_error(&e))
     }
 
+    async fn history(&mut self, cx: &Cx, path: &str) -> Result<Vec<(u32, f64, u32)>, DbusError> {
+        let raw = self.conn.raw();
+        let call = raw.call_method(
+            Some(BUS),
+            path,
+            Some(DEVICE_IFACE),
+            "GetHistory",
+            &("charge", HISTORY_SPAN_S, HISTORY_POINTS),
+        );
+        let msg = self.conn.call(cx, HISTORY_TIMEOUT, call).await?;
+        msg.body().deserialize().map_err(|e| call_error(&e))
+    }
+
     async fn next_event(&mut self, cx: &Cx, d: Duration) -> Result<Option<Event>, DbusError> {
         let Some(item) = self.conn.next_signal(cx, &mut self.stream, d).await? else {
             return Ok(None);
@@ -818,7 +968,7 @@ mod tests {
     use tl_model::demand::Demand;
     use tl_model::settings::EngineSettings;
 
-    use crate::source::WorkerControl;
+    use crate::source::{QueuedCommand, WorkerControl};
 
     const BAT_PATH: &str = "/org/freedesktop/UPower/devices/battery_BAT0";
     const MOUSE_PATH: &str = "/org/freedesktop/UPower/devices/mouse_hidpp_battery_0";
@@ -919,6 +1069,21 @@ mod tests {
     }
 
     #[test]
+    fn history_points_cleanup() {
+        let raw = [
+            (1_759_500_300, 80.0, 2),
+            (1_759_500_000, 81.0, 2),
+            (0, 50.0, 0),
+            (1_759_500_300, 79.5, 2),
+            (1_759_500_600, 140.0, 2),
+        ];
+        let want: &[(i64, f32)] = &[(1_759_500_000, 81.0), (1_759_500_300, 79.5)];
+        assert_eq!(&*history_points(&raw), want);
+        assert!(history_points(&[(5, f64::NAN, 0), (6, -1.0, 0)]).is_empty());
+        assert!(history_points(&[]).is_empty());
+    }
+
+    #[test]
     fn sysfs_energy_files() {
         let dir = fixture_sys().join("class/power_supply");
         let b = battery_from_sysfs(&dir.join("BAT0")).expect("a battery");
@@ -1002,6 +1167,10 @@ mod tests {
         devices: Option<BTreeMap<String, Props>>,
         events: VecDeque<Event>,
         opens: u32,
+        /// The `GetHistory` reply. `None`: the call fails.
+        history: Option<Vec<(u32, f64, u32)>>,
+        /// The device path of each `GetHistory` call.
+        history_calls: Vec<String>,
     }
 
     #[derive(Clone, Default)]
@@ -1057,6 +1226,19 @@ mod tests {
             }
             Ok(None)
         }
+
+        async fn history(
+            &mut self,
+            _cx: &Cx,
+            path: &str,
+        ) -> Result<Vec<(u32, f64, u32)>, DbusError> {
+            let mut state = self.0.lock().expect("fake lock");
+            state.history_calls.push(path.to_owned());
+            state.history.clone().ok_or_else(|| DbusError::Call {
+                name: "org.freedesktop.DBus.Error.Failed".into(),
+                message: "no history".into(),
+            })
+        }
     }
 
     struct Rig {
@@ -1064,7 +1246,7 @@ mod tests {
         rx: mpsc::Receiver<EngineMsg>,
         _demand_tx: watch::Sender<Demand>,
         _settings_tx: watch::Sender<EngineSettings>,
-        _control_tx: watch::Sender<WorkerControl>,
+        control_tx: watch::Sender<WorkerControl>,
         handle: asupersync::runtime::TaskHandle<()>,
     }
 
@@ -1102,7 +1284,7 @@ mod tests {
                 rx,
                 _demand_tx: demand_tx,
                 _settings_tx: settings_tx,
-                _control_tx: control_tx,
+                control_tx,
                 handle,
             }
         }
@@ -1112,6 +1294,30 @@ mod tests {
             // `run_until_idle` stops when no task is ready; one step fires the due timers.
             self.lab.step_for_test();
             self.lab.run_until_idle();
+        }
+
+        /// Queues `BatteryHistory { native_path }` as the reducer does. Returns its `seq`.
+        fn ask_history(&self, native_path: &str) -> u64 {
+            let mut seq = 0;
+            self.control_tx
+                .send_modify(|c| {
+                    seq = c.commands.last().map_or(0, |q| q.seq) + 1;
+                    let mut next = c.commands.to_vec();
+                    next.push(QueuedCommand {
+                        seq,
+                        target: SourceId::UPower,
+                        command: WorkerCommand::Device(DeviceCommand::BatteryHistory {
+                            native_path: native_path.into(),
+                        }),
+                    });
+                    c.commands = next.into();
+                })
+                .expect("control send");
+            seq
+        }
+
+        fn progress_done(&self) -> u64 {
+            self.control_tx.borrow().progress.done(SourceId::UPower)
         }
 
         fn drain(&mut self) -> Vec<SourceUpdate> {
@@ -1255,6 +1461,83 @@ mod tests {
         rig.finish();
     }
 
+    /// A rig over one UPower battery at `BAT_PATH`, with the first updates drained.
+    fn history_rig(history: Option<Vec<(u32, f64, u32)>>) -> (Rig, Arc<Mutex<FakeState>>) {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        {
+            let mut state = fake.lock().expect("fake lock");
+            state.devices = Some(BTreeMap::from([(BAT_PATH.to_owned(), discharging())]));
+            state.history = history;
+        }
+        let mut rig = Rig::start(connector);
+        assert_eq!(rig.drain().len(), 3, "Health, Devices, Batteries");
+        (rig, fake)
+    }
+
+    #[test]
+    fn history_command_fills() {
+        let (mut rig, fake) = history_rig(Some(vec![
+            (1_759_500_000, 81.0, 2),
+            (1_759_500_300, 80.0, 2),
+            (1_759_500_600, 79.0, 2),
+        ]));
+        let seq = rig.ask_history("BAT0");
+        rig.advance(IDLE_RECHECK);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "one Batteries: {got:?}");
+        let got = batteries(&got[0]).expect("Batteries");
+        let history = got[0].1.history.as_deref().expect("history");
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0], (1_759_500_000, 81.0));
+        assert_eq!(
+            fake.lock().expect("fake lock").history_calls,
+            vec![BAT_PATH.to_owned()]
+        );
+        assert_eq!(rig.progress_done(), seq);
+
+        // A property change keeps the cached history.
+        {
+            let mut state = fake.lock().expect("fake lock");
+            let devices = state.devices.as_mut().expect("devices");
+            let bat = devices.get_mut(BAT_PATH).expect("battery");
+            bat.insert("Percentage".into(), OwnedValue::from(78.0f64));
+            state.events.push_back(Event::Changed(BAT_PATH.to_owned()));
+        }
+        rig.advance(IDLE_RECHECK);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "{got:?}");
+        let got = batteries(&got[0]).expect("Batteries");
+        assert_eq!(got[0].1.percentage, valid(78.0));
+        assert_eq!(got[0].1.history.as_ref().map(|h| h.len()), Some(3));
+        assert_eq!(fake.lock().expect("fake lock").history_calls.len(), 1);
+        rig.finish();
+    }
+
+    #[test]
+    fn history_error_empty() {
+        let (mut rig, _fake) = history_rig(None);
+        rig.ask_history("BAT0");
+        rig.advance(IDLE_RECHECK);
+        let got = rig.drain();
+        assert_eq!(got.len(), 1, "one Batteries and no Health: {got:?}");
+        let got = batteries(&got[0]).expect("Batteries");
+        assert_eq!(got[0].1.history.as_deref(), Some(&[][..]));
+        rig.finish();
+    }
+
+    #[test]
+    fn history_unknown_path_ignored() {
+        let (mut rig, fake) = history_rig(Some(vec![(1_759_500_000, 81.0, 2)]));
+        let seq = rig.ask_history("BAT9");
+        rig.advance(IDLE_RECHECK);
+        rig.advance(IDLE_RECHECK);
+        assert!(rig.drain().is_empty(), "no update for an unknown battery");
+        assert!(fake.lock().expect("fake lock").history_calls.is_empty());
+        assert_eq!(rig.progress_done(), seq);
+        rig.finish();
+    }
+
     #[test]
     fn idle_until_demand() {
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
@@ -1351,6 +1634,19 @@ mod tests {
         fn percentage(&self) -> f64 {
             self.pct
         }
+
+        fn get_history(
+            &self,
+            kind: String,
+            timespan: u32,
+            resolution: u32,
+        ) -> Vec<(u32, f64, u32)> {
+            if (kind.as_str(), timespan, resolution) == ("charge", HISTORY_SPAN_S, HISTORY_POINTS) {
+                vec![(1_759_500_000, self.pct, 2)]
+            } else {
+                Vec::new()
+            }
+        }
     }
 
     #[test]
@@ -1401,11 +1697,13 @@ mod tests {
                 }
             }
             let reread = bus.props(&cx, BAT_PATH).await.expect("GetAll");
+            let history = bus.history(&cx, BAT_PATH).await.expect("GetHistory");
             drop(bus);
             drop(server);
-            (found, event, battery_from_props(&reread))
+            (found, event, battery_from_props(&reread), history)
         });
-        let (found, event, reread) = rt.block_on(join).expect("task completes");
+        let (found, event, reread, history) = rt.block_on(join).expect("task completes");
+        assert_eq!(history, vec![(1_759_500_000, 80.0, 2)]);
 
         assert_eq!(found.len(), 1);
         let bat = found.get(BAT_PATH).expect("battery");
