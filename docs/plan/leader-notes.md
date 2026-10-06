@@ -356,3 +356,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.3: NetClass is tl_model NetKind (VpnTunnel). No DeviceKind for aggregate:net yet (comment on crw.26). JsonSchema through gpui_kit::private::schemars.
 - rsf.4: CellTextCache hit 8.4 ns, miss 90 ns per cell (release, loaded machine). Bound R: Eq + Hash (NodeId is not Copy). Path cache clears at 8192 entries.
 - gma.12: approved aria_label and prefix_tooltip builders on TlTextInput.
+- rsf.18: ColumnLayout generic (TableColumn trait). System tables pin no column first; docs silent. OWNER REVIEW if Services or Startup Name should stay first.
+- 8fx.36: probe flakes were test races (fd 5 is the probe's own copy of fd 3; /proc environ empty right after spawn). Fixed by waiting for Hello. Found 438 tl-gpu-probe core dumps from fake crashes today; follow-up bug bead. OWNER: existing core dumps can be cleared with coredumpctl when convenient (not done by agents).
