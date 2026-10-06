@@ -37,10 +37,11 @@ pub enum TlIcon {
     EyeOff,
     ArrowUp,
     ArrowDown,
+    Square,
 }
 
 impl TlIcon {
-    pub const ALL: [Self; 24] = [
+    pub const ALL: [Self; 25] = [
         Self::Check,
         Self::ChevronRight,
         Self::ChevronDown,
@@ -65,6 +66,7 @@ impl TlIcon {
         Self::EyeOff,
         Self::ArrowUp,
         Self::ArrowDown,
+        Self::Square,
     ];
 
     /// The kit name for this icon.
@@ -94,6 +96,7 @@ impl TlIcon {
             Self::EyeOff => IconName::EyeOff,
             Self::ArrowUp => IconName::ArrowUp,
             Self::ArrowDown => IconName::ArrowDown,
+            Self::Square => IconName::Square,
         }
     }
 }
@@ -147,7 +150,7 @@ impl IconNamed for AppIcon {
 // arrows (R-185).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
-    [X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown]
+    [X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square]
 );
 
 /// The app's asset source: tasklens SVGs first, then `TlExtraIcons`, then the kit bundle.

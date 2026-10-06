@@ -1,0 +1,549 @@
+//! The main window's title bar (E20-004, UI-SHL-003, UI-SHL-004, UI-SHL-005, UI-SHL-007,
+//! APP-001, APP-002, APP-008, D-006, R-031, R-108, R-125, U-44).
+//!
+//! Left to right: padding, app icon, the menu bar slot (E21), the toolbar (E20-003), the drag
+//! area and the caption buttons. The bar is a plain flex row with its own drag code, not the kit
+//! `TitleBar`: gpui-kit 0.7.0's `TitleBar` always appends its own window controls and has no
+//! switch to hide them (U-44).
+//!
+//! The bar has no Tab stops (R-108). Every caption command also has a key (Ctrl+W) or a
+//! compositor shortcut. Each caption button's tooltip text is its accessible name.
+
+use gpui_kit::accesskit::Role;
+use gpui_kit::component::Icon;
+use gpui_kit::{
+    Action, AnyElement, AnyView, App, Context, Div, Global, Hsla, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Render, SharedString, Stateful, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    img, prelude::FluentBuilder as _, px, rgb,
+};
+use smallvec::SmallVec;
+use tl_model::command::Tab;
+use tl_model::health::HelperState;
+use tl_model::table::TableMode;
+use tl_model::validity::Validity;
+
+use super::toolbar::{DefaultToolbar, Toolbar, ToolbarContent, ToolbarModel};
+use crate::actions::{CloseWindow, MinimizeWindow, ZoomWindow};
+use crate::components::icons::{AppIcon, TlIcon};
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::i18n::tr;
+use crate::settings_global::{Section, TlSettings};
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
+
+/// Title bar height, × ui_scale.
+pub const TITLEBAR_H: f32 = 34.0;
+/// Main window caption button width, × ui_scale. Secondary windows keep the kit's 34.
+pub const CAPTION_W: f32 = 36.0;
+
+/// Left padding, × ui_scale.
+const LEFT_PAD: f32 = 12.0;
+/// App icon side, × ui_scale.
+const APP_ICON: f32 = 16.0;
+/// Gap between the app icon and the menu bar slot, × ui_scale.
+const GAP_ICON: f32 = 8.0;
+/// Gap between the menu bar slot and the toolbar, × ui_scale.
+const GAP_MENU: f32 = 4.0;
+/// Minimum width of the drag area, × ui_scale.
+const DRAG_MIN_W: f32 = 24.0;
+/// A pressed caption button shows its hover fill at this opacity.
+const PRESSED_OPACITY: f32 = 0.8;
+
+/// Slot for the menu bar. E21-A1 sets it in `menubar::init` before the main window opens.
+pub struct MenuBarFactory(pub fn(&mut Window, &mut App) -> AnyView);
+
+impl Global for MenuBarFactory {}
+
+/// The left button went down on a drag part; the next mouse move starts a window move.
+#[derive(Default)]
+struct DragState {
+    should_move: bool,
+}
+
+/// Caption tooltips, made once in `new`.
+struct CaptionStrings {
+    minimize: SharedString,
+    maximize: SharedString,
+    restore: SharedString,
+    close: SharedString,
+}
+
+/// One caption button as last drawn. Tests read it through `TitleBarView::drawn_captions`.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawnCaption {
+    /// "minimize", "maximize" or "close".
+    pub id: &'static str,
+    pub icon: TlIcon,
+    pub tooltip: SharedString,
+    /// The icon colour when not hovered.
+    pub color: Hsla,
+}
+
+/// Test stand-in for the platform window. The GPUI test window panics on `start_window_move`,
+/// `zoom_window` and `show_window_menu`, always reports server decorations and is never
+/// maximized. When this Global is installed the title bar records those three calls here
+/// instead of making them, and reads the overrides below.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Default)]
+pub struct TitleBarProbe {
+    /// Overrides `window.window_decorations()`: true for client decorations.
+    pub client: Option<bool>,
+    /// Overrides `window.is_maximized()`.
+    pub maximized: Option<bool>,
+    /// Overrides `window.window_controls()`.
+    pub controls: Option<gpui_kit::WindowControls>,
+    /// `start_window_move` calls.
+    pub moves: u32,
+    /// `zoom_window` calls.
+    pub zooms: u32,
+    /// `show_window_menu` positions.
+    pub window_menus: Vec<Point<Pixels>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for TitleBarProbe {}
+
+fn probe_installed(cx: &App) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    return cx.has_global::<TitleBarProbe>();
+    #[cfg(not(any(test, feature = "test-hooks")))]
+    {
+        let _ = cx;
+        false
+    }
+}
+
+fn is_client(window: &Window, cx: &App) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(client) = cx.try_global::<TitleBarProbe>().and_then(|p| p.client) {
+        return client;
+    }
+    let _ = cx;
+    matches!(
+        window.window_decorations(),
+        gpui_kit::Decorations::Client { .. }
+    )
+}
+
+fn is_maximized(window: &Window, cx: &App) -> bool {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(maximized) = cx.try_global::<TitleBarProbe>().and_then(|p| p.maximized) {
+        return maximized;
+    }
+    let _ = cx;
+    window.is_maximized()
+}
+
+fn window_controls(window: &Window, cx: &App) -> gpui_kit::WindowControls {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(controls) = cx.try_global::<TitleBarProbe>().and_then(|p| p.controls) {
+        return controls;
+    }
+    let _ = cx;
+    window.window_controls()
+}
+
+fn start_move(window: &Window, cx: &mut App) {
+    if probe_installed(cx) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            cx.global_mut::<TitleBarProbe>().moves += 1;
+        }
+        return;
+    }
+    window.start_window_move();
+}
+
+fn zoom(window: &Window, cx: &mut App) {
+    if probe_installed(cx) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            cx.global_mut::<TitleBarProbe>().zooms += 1;
+        }
+        return;
+    }
+    window.zoom_window();
+}
+
+fn window_menu(window: &Window, position: Point<Pixels>, cx: &mut App) {
+    if probe_installed(cx) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            cx.global_mut::<TitleBarProbe>().window_menus.push(position);
+        }
+        return;
+    }
+    window.show_window_menu(position);
+}
+
+/// True when the pin can work: `Snapshot.windows.header.validity` is Valid or Stale (KWin bridge
+/// up). False without a hub.
+pub fn keep_above_supported(cx: &App) -> bool {
+    cx.try_global::<GlobalHub>().is_some_and(|hub| {
+        matches!(
+            hub.0.read(cx).current().windows.header.validity,
+            Validity::Valid | Validity::Stale
+        )
+    })
+}
+
+/// The Minimize caption button's behaviour. E20-A1's `MinimizeWindow` handler calls it.
+pub fn minimize_main(window: &mut Window, cx: &mut App) {
+    // minimize rule (E31-009): the minimize-to-tray check goes here, before minimize_window
+    let _ = cx;
+    window.minimize_window();
+}
+
+/// The `window` and `debug` section versions; zero when settings are not loaded.
+fn settings_versions(cx: &App) -> (u64, u64) {
+    cx.try_global::<TlSettings>().map_or((0, 0), |s| {
+        (s.version(Section::Window), s.version(Section::Debug))
+    })
+}
+
+fn stop(_: &MouseDownEvent, window: &mut Window, cx: &mut App) {
+    cx.stop_propagation();
+    window.prevent_default();
+}
+
+/// A mouse-down of any button on `el` stops there: a left press never drags, and right or middle
+/// presses do nothing.
+fn no_drag<E: InteractiveElement>(el: E) -> E {
+    el.on_mouse_down(MouseButton::Left, stop)
+        .on_mouse_down(MouseButton::Right, stop)
+        .on_mouse_down(MouseButton::Middle, stop)
+}
+
+/// The drag behaviour of the bar (UI-SHL-004). Only presses that reach the bar itself count:
+/// the padding, icon, gaps and drag area. Buttons stop their presses with `no_drag`.
+fn drag_handlers(bar: Stateful<Div>, cx: &mut Context<TitleBarView>) -> Stateful<Div> {
+    bar.on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+            if ev.click_count == 2 {
+                this.drag.should_move = false;
+                zoom(window, cx);
+            } else {
+                this.drag.should_move = true;
+            }
+        }),
+    )
+    .on_mouse_up(
+        MouseButton::Left,
+        cx.listener(|this, _: &MouseUpEvent, _, _| this.drag.should_move = false),
+    )
+    .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, _| {
+        this.drag.should_move = false;
+    }))
+    .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, cx| {
+        if this.drag.should_move {
+            this.drag.should_move = false;
+            start_move(window, cx);
+        }
+    }))
+    .on_mouse_down(MouseButton::Right, |ev: &MouseDownEvent, window, cx| {
+        window_menu(window, ev.position, cx);
+    })
+}
+
+/// The main window's title bar view.
+pub struct TitleBarView {
+    /// Created once in `new` from `MenuBarFactory`; `None` when the Global is absent.
+    menu_bar: Option<AnyView>,
+    model: ToolbarModel,
+    /// The active tab's page buttons.
+    content: Box<dyn ToolbarContent>,
+    drag: DragState,
+    strings: CaptionStrings,
+    maximized: bool,
+    keep_above: bool,
+    settings_versions: (u64, u64),
+    _subs: SmallVec<[Subscription; 4]>,
+    #[cfg(any(test, feature = "test-hooks"))]
+    drawn: Vec<DrawnCaption>,
+}
+
+impl TitleBarView {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let menu_bar = cx
+            .try_global::<MenuBarFactory>()
+            .map(|f| f.0)
+            .map(|build| build(window, cx));
+        let model = ToolbarModel {
+            tab: Tab::Processes,
+            history_mode: false,
+            hide_system: false,
+            mode: TableMode::default(),
+            helper: HelperState::Missing,
+            helper_installed: false,
+            picker_available: false,
+            picking: false,
+            window_active: window.is_window_active(),
+        };
+        let strings = CaptionStrings {
+            minimize: tr(cx, "shell-titlebar-minimize"),
+            maximize: tr(cx, "shell-titlebar-maximize"),
+            restore: tr(cx, "shell-titlebar-restore"),
+            close: tr(cx, "shell-titlebar-close"),
+        };
+
+        let mut subs = SmallVec::new();
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            this.model.window_active = window.is_window_active();
+            cx.notify();
+        }));
+        subs.push(cx.observe_window_bounds(window, |this, window, cx| {
+            let maximized = is_maximized(window, cx);
+            if maximized != this.maximized {
+                this.maximized = maximized;
+                cx.notify();
+            }
+        }));
+        subs.push(cx.observe_global::<TlSettings>(|this, cx| {
+            let versions = settings_versions(cx);
+            if versions != this.settings_versions {
+                this.settings_versions = versions;
+                cx.notify();
+            }
+        }));
+        if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
+            subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
+                if !ev.mask.intersects(ComponentMask::WINDOWS) {
+                    return;
+                }
+                let supported = keep_above_supported(cx);
+                if supported != this.keep_above {
+                    this.keep_above = supported;
+                    cx.notify();
+                }
+            }));
+        }
+
+        Self {
+            menu_bar,
+            model,
+            content: Box::new(DefaultToolbar),
+            drag: DragState::default(),
+            strings,
+            maximized: is_maximized(window, cx),
+            keep_above: keep_above_supported(cx),
+            settings_versions: settings_versions(cx),
+            _subs: subs,
+            #[cfg(any(test, feature = "test-hooks"))]
+            drawn: Vec::new(),
+        }
+    }
+
+    /// Sets the toolbar for the active tab. Notifies only when the model (and with it the tab)
+    /// changed. The bar keeps `window_active` itself.
+    pub fn set_toolbar(
+        &mut self,
+        mut model: ToolbarModel,
+        content: Box<dyn ToolbarContent>,
+        cx: &mut Context<Self>,
+    ) {
+        self.content = content;
+        model.window_active = self.model.window_active;
+        if model != self.model {
+            self.model = model;
+            cx.notify();
+        }
+    }
+
+    /// Updates the toolbar model. Notifies only when it changed.
+    pub fn set_model(&mut self, mut model: ToolbarModel, cx: &mut Context<Self>) {
+        model.window_active = self.model.window_active;
+        if model != self.model {
+            self.model = model;
+            cx.notify();
+        }
+    }
+
+    pub fn model(&self) -> &ToolbarModel {
+        &self.model
+    }
+
+    /// The caption buttons as last drawn, left to right.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn drawn_captions(&self) -> &[DrawnCaption] {
+        &self.drawn
+    }
+
+    /// One caption button: `CAPTION_W` × `TITLEBAR_H`, no Tab stop, a hover tooltip.
+    #[allow(clippy::too_many_arguments)]
+    fn caption(
+        &mut self,
+        id: &'static str,
+        icon: TlIcon,
+        tooltip: SharedString,
+        action: fn() -> Box<dyn Action>,
+        hover: Hsla,
+        hover_fg: Hsla,
+        fg: Hsla,
+        m: &UiMetrics,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.drawn.push(DrawnCaption {
+            id,
+            icon,
+            tooltip: tooltip.clone(),
+            color: fg,
+        });
+        let s = m.ui_scale;
+        let button = no_drag(
+            div()
+                .id(id)
+                .debug_selector(move || format!("TitleBarCaption-{id}"))
+                .role(Role::Button)
+                .aria_label(tooltip.clone())
+                .flex()
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .w(px(CAPTION_W * s))
+                .h(px(TITLEBAR_H * s))
+                .text_color(fg)
+                .hover(move |st| st.bg(hover).text_color(hover_fg))
+                .active(move |st| st.bg(hover.opacity(PRESSED_OPACITY)))
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    window.dispatch_action(action(), cx);
+                })
+                .child(Icon::new(icon).size(m.icon.md)),
+        );
+        let tip = HoverTooltip::state(format!("TitleBarCaption-{id}-tooltip"), window, cx);
+        HoverTooltip::attach(
+            &tip,
+            button,
+            DELAY_CONTROL,
+            TlTooltip::text(tooltip).build(),
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn captions(&mut self, theme: &TlTheme, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let m = *metrics(cx);
+        let controls = window_controls(window, cx);
+        let fg = if window.is_window_active() {
+            theme.text_primary
+        } else {
+            theme.text_secondary
+        };
+        let hover = theme.tab_hover;
+        let white: Hsla = rgb(0xFFFFFF).into();
+        let mut row = div().flex().flex_row().flex_none().h_full();
+        if controls.minimize {
+            let tip = self.strings.minimize.clone();
+            row = row.child(self.caption(
+                "minimize",
+                TlIcon::Minus,
+                tip,
+                || Box::new(MinimizeWindow),
+                hover,
+                fg,
+                fg,
+                &m,
+                window,
+                cx,
+            ));
+        }
+        if controls.maximize {
+            let (icon, tip) = if is_maximized(window, cx) {
+                (TlIcon::Copy, self.strings.restore.clone())
+            } else {
+                (TlIcon::Square, self.strings.maximize.clone())
+            };
+            row = row.child(self.caption(
+                "maximize",
+                icon,
+                tip,
+                || Box::new(ZoomWindow),
+                hover,
+                fg,
+                fg,
+                &m,
+                window,
+                cx,
+            ));
+        }
+        let tip = self.strings.close.clone();
+        row.child(self.caption(
+            "close",
+            TlIcon::X,
+            tip,
+            || Box::new(CloseWindow),
+            theme.status.danger,
+            white,
+            fg,
+            &m,
+            window,
+            cx,
+        ))
+    }
+}
+
+impl Render for TitleBarView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let client = is_client(window, cx);
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.drawn.clear();
+
+        let page = self.content.buttons(&self.model, window, cx);
+        let toolbar = no_drag(
+            div()
+                .flex_none()
+                .child(Toolbar::new(self.model.clone(), page)),
+        );
+        let captions = client.then(|| self.captions(&theme, window, cx));
+
+        let bar = div()
+            .id("TitleBar")
+            .debug_selector(|| "TitleBar".into())
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .w_full()
+            .h(px(TITLEBAR_H * s))
+            .pl(px(LEFT_PAD * s))
+            .bg(theme.titlebar)
+            .cursor_default()
+            .child(
+                // Keeps its 16 px when the asset is missing (E15-022).
+                div()
+                    .debug_selector(|| "TitleBarIcon".into())
+                    .flex_none()
+                    .size(px(APP_ICON * s))
+                    .mr(px(GAP_ICON * s))
+                    .child(img(AppIcon::Logo.path_str()).size_full()),
+            )
+            .when_some(self.menu_bar.clone(), |bar, menu| {
+                bar.child(no_drag(
+                    div()
+                        .debug_selector(|| "TitleBarMenu".into())
+                        .flex_none()
+                        .mr(px(GAP_MENU * s))
+                        .child(menu),
+                ))
+            })
+            .child(toolbar)
+            .child(
+                div()
+                    .debug_selector(|| "TitleBarDrag".into())
+                    .flex_1()
+                    .min_w(px(DRAG_MIN_W * s))
+                    .h_full(),
+            )
+            .children(captions);
+        if client { drag_handlers(bar, cx) } else { bar }
+    }
+}

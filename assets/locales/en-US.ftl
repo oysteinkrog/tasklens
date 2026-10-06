@@ -136,3 +136,7 @@ processes-confirm-picked-title = Picked {$name} (PID {$pid})
 processes-confirm-picked-text = What do you want to do with this process?
 processes-confirm-picked-button = Select
 processes-confirm-picked-terminate = Terminate
+shell-titlebar-minimize = Minimize
+shell-titlebar-maximize = Maximize
+shell-titlebar-restore = Restore
+shell-titlebar-close = Close
