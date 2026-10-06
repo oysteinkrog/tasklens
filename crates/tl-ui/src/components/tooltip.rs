@@ -22,8 +22,8 @@ use std::time::Duration;
 use gpui_kit::base::{Align, Placement, Positioner, Tooltip as BaseTooltip};
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
-    Action, AnyView, App, AppContext as _, AsKeystroke as _, BoxShadow, Bounds, Context,
-    ElementId, Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseDownEvent,
+    Action, AnyView, App, AppContext as _, AsKeystroke as _, Bounds, BoxShadow, Context, ElementId,
+    Entity, FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, MouseDownEvent,
     ParentElement, Pixels, Render, ScrollWheelEvent, SharedString, Styled, Task, Window, canvas,
     deferred, div, point, prelude::FluentBuilder as _, px,
 };
@@ -429,7 +429,8 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         (
             cx.debug_bounds("TlTooltip").expect("tooltip shown"),
-            cx.debug_bounds("TlTooltip-text").expect("tooltip text drawn"),
+            cx.debug_bounds("TlTooltip-text")
+                .expect("tooltip text drawn"),
         )
     }
 
@@ -479,17 +480,18 @@ mod tests {
         assert_eq!(cut.len(), 12);
         assert_eq!(cut[11].as_ref(), "Line 12…");
         assert_eq!(cut[10].as_ref(), "Line 11");
-        assert_eq!(cut_lines(&lines[..12]), lines[..12].to_vec(), "12 lines stay");
+        assert_eq!(
+            cut_lines(&lines[..12]),
+            lines[..12].to_vec(),
+            "12 lines stay"
+        );
 
         let mut cx = cosmic_cx();
         let (_, text) = hover(&mut cx, TlTooltip::lines(lines));
         let lh = line_height(&mut cx);
-        assert!(
-            text.size.height <= px(lh * 12. + 1.),
-            "at most 12 rows: {:?}",
-            text.size
-        );
-        assert!(text.size.height >= px(lh * 12. - 1.), "12 rows show");
+        // GPUI snaps the line height to device pixels, so count rows with a rounding margin.
+        let rows = (f32::from(text.size.height) / lh).round();
+        assert_eq!(rows, 12., "12 rows show: {:?}", text.size);
     }
 
     #[gpui_kit::test]
@@ -520,6 +522,7 @@ mod tests {
 
     /// A focusable button with a keyboard tooltip.
     struct FocusHost {
+        root: FocusHandle,
         button: FocusHandle,
         state: Option<Entity<FocusTooltip>>,
         builds: Rc<Cell<usize>>,
@@ -548,7 +551,7 @@ mod tests {
                 cx,
             );
             div()
-                .key_context("TlTooltipTest")
+                .track_focus(&self.root)
                 .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
                 .size(px(400.))
                 .child(button)
@@ -566,24 +569,31 @@ mod tests {
     fn escape_hides_keeps_focus(cx: &mut TestAppContext) {
         cx.update(|cx| {
             setup(cx);
-            cx.bind_keys([KeyBinding::new("tab", FocusNext, Some("TlTooltipTest"))]);
+            cx.bind_keys([KeyBinding::new("tab", FocusNext, None)]);
         });
         let builds = Rc::new(Cell::new(0));
         let (view, cx) = cx.add_window_view({
             let builds = builds.clone();
             move |_, cx| FocusHost {
+                root: cx.focus_handle(),
                 button: cx.focus_handle().tab_stop(true),
                 state: None,
                 builds,
             }
         });
-        cx.update(|window, _| window.activate_window());
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.read(cx).root.clone().focus(window, cx);
+        });
         cx.run_until_parked();
 
         cx.simulate_keystrokes("tab");
         cx.run_until_parked();
         cx.update(|window, cx| {
-            assert!(view.read(cx).button.is_focused(window), "Tab focuses the button");
+            assert!(
+                view.read(cx).button.is_focused(window),
+                "Tab focuses the button"
+            );
         });
         assert!(!visible(cx, &view), "no tooltip before the delay");
 
@@ -591,6 +601,14 @@ mod tests {
         cx.run_until_parked();
         assert!(visible(cx, &view), "the tooltip shows after the delay");
         assert_eq!(builds.get(), 1, "the text is built once, when it opens");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let tip = cx.debug_bounds("TlTooltip").expect("tooltip drawn");
+        assert_eq!(tip.top(), px(64.), "below the 60 px button, sp2 away");
+        assert_eq!(
+            tip.left(),
+            px(4.),
+            "left-aligned, kept 4 px inside the window"
+        );
 
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
