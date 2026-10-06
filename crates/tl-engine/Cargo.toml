@@ -30,6 +30,8 @@ tracing       = { workspace = true }
 asupersync = { workspace = true, features = ["proc-macros", "test-internals"] }
 # `p2p` builds a bus-free connection over a socketpair for the `ManagerConnSlot` test.
 zbus       = { workspace = true, features = ["p2p"] }
+# Fake roots for the low-memory sweep tests (`workers/lowmem.rs`), under `target/tmp`.
+tempfile   = { workspace = true }
 
 [lints]
 workspace = true
