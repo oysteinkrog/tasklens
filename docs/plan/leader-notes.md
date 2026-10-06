@@ -228,3 +228,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.5: tl-ops gains pub send_signal_fd(BorrowedFd, Signal); RealOps lives in actions/mod.rs next to ActionOps.
 - y6k.18: ConnectionsUpdate gains attribution: FxHashMap<ProcessKey, NetRate> (chain edit). New-socket owners get Valid 0 after the first pass (R-162 beats bead text). Reducer use of Connections still needs a bead: check one exists.
 - ug9.5: line height exactly 1.3 x size (16.9 px at 13 px; bead said 17). template_width allocates per call: never call per cell. UI validation item.
+- i3o.11: CgroupInvalid in the bead maps to Rejected(NotOwner) or Rejected(IdentityChanged), own cgroup to Rejected(Protected), freeze timeout to OutcomeUnknown (tl-ops has no CgroupInvalid). Accepted.
