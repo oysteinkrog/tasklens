@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=My Tool
+Exec=mytool --tray

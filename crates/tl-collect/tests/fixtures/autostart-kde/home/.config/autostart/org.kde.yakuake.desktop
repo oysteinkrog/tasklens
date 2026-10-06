@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Yakuake
+Exec=yakuake
+Icon=yakuake
+X-KDE-autostart-phase=2
+Hidden=true
+X-Tasklens-Override=true

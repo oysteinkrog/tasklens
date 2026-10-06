@@ -1,0 +1,8 @@
+[Unit]
+Description=Sample sync agent
+
+[Service]
+ExecStart=mytool --sync
+
+[Install]
+WantedBy=default.target

@@ -9,6 +9,45 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+pub use autostart::{
+    DesktopEntry, MAX_DESKTOP_FILE, StartupEnv, find_on_path, locale_match_list,
+    parse_desktop_entry,
+};
+pub use impact::{ImpactDetailRaw, ImpactRaw, UnitTiming, classify};
+pub use user_units::{
+    UnitFileListing, autostart_unit_name, is_generated_autostart_unit, systemd_escape,
+};
+pub use watch::StartupWatch;
+
+use crate::CollectError;
+
+/// One full scan. `units` comes from ListUnitFilesByPatterns on the user manager (E14).
+/// Clears `out`, then appends XDG autostart rows, user unit rows and Plasma script rows,
+/// in that order, and links desktop entries to their generated units.
+///
+/// The engine reads the generated unit's timing and state; this function does not check that
+/// the unit exists.
+pub fn scan_startup(
+    env: &StartupEnv,
+    units: &[UnitFileListing<'_>],
+    out: &mut Vec<StartupRaw>,
+) -> Result<(), CollectError> {
+    out.clear();
+    autostart::scan_autostart(env, out)?;
+    for row in out.iter_mut().filter(|r| {
+        matches!(
+            r.kind,
+            StartupKindRaw::AutostartUser
+                | StartupKindRaw::AutostartSystem
+                | StartupKindRaw::AutostartSystemOverridden
+        )
+    }) {
+        row.generated_unit = Some(Arc::from(autostart_unit_name(&row.file_name)));
+    }
+    user_units::scan_user_units(units, env, out);
+    plasma_scripts::scan_plasma_scripts(env, out)
+}
+
 /// Where a startup row comes from (SYS-020 Type).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum StartupKindRaw {

@@ -772,12 +772,18 @@ mod tests {
             [
                 (U, "a.desktop"),
                 (U, "gnome-off.desktop"),
+                (U, "gnomeonly.desktop"),
                 (U, "hidden.desktop"),
+                (U, "mytool.desktop"),
+                (U, "org.kde.yakuake.desktop"),
                 (O, "a.desktop"),
                 (S, "b.desktop"),
                 (S, "delta.desktop"),
                 (S, "gnome-only.desktop"),
                 (S, "missing-tryexec.desktop"),
+                (S, "missing.desktop"),
+                (S, "org.kde.kalendarac.desktop"),
+                (O, "org.kde.yakuake.desktop"),
             ]
         );
 

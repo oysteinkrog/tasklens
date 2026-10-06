@@ -1,0 +1,9 @@
+[Unit]
+Description=Sample packaged agent
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/pkg-agent
+
+[Install]
+WantedBy=graphical-session.target

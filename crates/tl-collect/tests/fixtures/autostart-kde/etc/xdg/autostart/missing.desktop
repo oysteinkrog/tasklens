@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Missing Helper
+Exec=does-not-exist --start
+TryExec=does-not-exist

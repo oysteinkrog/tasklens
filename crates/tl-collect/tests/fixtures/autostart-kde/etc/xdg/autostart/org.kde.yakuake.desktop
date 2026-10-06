@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Yakuake
+Exec=yakuake
+Icon=yakuake
+X-KDE-autostart-phase=2

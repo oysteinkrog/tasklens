@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Shadowed Reminder Daemon
+Exec=kalendarac --shadowed
