@@ -1,6 +1,7 @@
 //! Main window and shell windows; E20, E21, E29 add `pub mod` lines.
 
 pub mod collector_health;
+pub mod filter;
 pub mod main;
 pub mod registry;
 pub mod share_theme;
