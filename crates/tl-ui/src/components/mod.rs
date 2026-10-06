@@ -7,6 +7,7 @@ pub mod checkbox;
 pub mod empty;
 pub mod focus;
 pub mod icons;
+pub mod input;
 pub mod kv_grid;
 pub mod link;
 pub mod motion;
