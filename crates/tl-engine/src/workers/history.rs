@@ -407,7 +407,7 @@ impl RecordingState {
         }
         let mut blocks: Vec<_> = std::iter::from_fn(|| recorder.take_closed()).collect();
         blocks.extend(recorder.flush());
-        let mut finish = || {
+        let finish = || {
             for cb in blocks {
                 if let Err(e) = store.append(cb.block, cb.realtime_offset_ns) {
                     tracing::debug!("history append failed: {e}");
