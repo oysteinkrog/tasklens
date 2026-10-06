@@ -91,21 +91,25 @@ pub enum DialogIcon {
 pub enum DialogResult {
     /// The action button ran. `checkbox` is the checkbox value, `false` without one.
     Confirmed { checkbox: bool },
+    /// The second action button ran (see [`TlDialog::second_action`]).
+    Second,
     /// Cancel, Esc, Ctrl+W or the window's close button.
     Cancelled,
 }
 
-/// The two footer buttons.
+/// The footer buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogButton {
     Cancel,
     Action,
+    Second,
 }
 
 /// The focus handles of the footer buttons.
 pub struct DialogFocus {
     pub cancel: FocusHandle,
     pub action: FocusHandle,
+    pub second: FocusHandle,
 }
 
 impl DialogFocus {
@@ -113,6 +117,7 @@ impl DialogFocus {
         Self {
             cancel: cx.focus_handle(),
             action: cx.focus_handle(),
+            second: cx.focus_handle(),
         }
     }
 
@@ -131,6 +136,8 @@ impl DialogFocus {
             Some(DialogButton::Cancel)
         } else if self.action.is_focused(window) {
             Some(DialogButton::Action)
+        } else if self.second.is_focused(window) {
+            Some(DialogButton::Second)
         } else {
             None
         }
@@ -147,6 +154,8 @@ pub struct TlDialog {
     icon: DialogIcon,
     action_label: SharedString,
     destructive: bool,
+    /// A second action button right of the action: label and whether it is Danger.
+    second: Option<(SharedString, bool)>,
     extra: Option<ExtraBuilder>,
     checkbox: Option<(SharedString, bool)>,
     title: SharedString,
@@ -162,6 +171,7 @@ impl TlDialog {
             icon: DialogIcon::Info,
             action_label: action_label.into(),
             destructive: false,
+            second: None,
             extra: None,
             checkbox: None,
             title: DEFAULT_TITLE.into(),
@@ -172,6 +182,13 @@ impl TlDialog {
     pub fn destructive(mut self) -> Self {
         self.destructive = true;
         self.icon = DialogIcon::Warning;
+        self
+    }
+
+    /// A second action button right of the action button, Danger when `danger` is set. It ends
+    /// the dialog with [`DialogResult::Second`] (UI-PRC-014, the window picker's "Terminate").
+    pub fn second_action(mut self, label: impl Into<SharedString>, danger: bool) -> Self {
+        self.second = Some((label.into(), danger));
         self
     }
 
@@ -319,6 +336,23 @@ impl TlDialog {
                 window,
             )
         };
+        let second = self.second.as_ref().map(|(label, danger)| {
+            let on_result = on_result.clone();
+            footer_button(
+                "TlDialogSecond",
+                label.clone(),
+                if *danger {
+                    FooterKind::Danger
+                } else {
+                    FooterKind::Primary
+                },
+                &focus.second,
+                move |_, window, cx| on_result(DialogResult::Second, window, cx),
+                &theme,
+                &m,
+                window,
+            )
+        });
         let action = footer_button(
             "TlDialogAction",
             self.action_label.clone(),
@@ -371,7 +405,8 @@ impl TlDialog {
                     .justify_end()
                     .gap(m.sp[4])
                     .child(cancel)
-                    .child(action),
+                    .child(action)
+                    .children(second),
             )
             .into_any_element()
     }
@@ -561,6 +596,7 @@ impl TlDialogView {
                 window,
                 cx,
             ),
+            Some(DialogButton::Second) => self.finish(DialogResult::Second, window, cx),
             None => cx.propagate(),
         }
     }
