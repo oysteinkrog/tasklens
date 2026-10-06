@@ -33,13 +33,14 @@ use tl_engine::workers::WorkerSpec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, SchedPolicy, Signal};
 use tl_model::command::Command;
 use tl_model::demand::Demand;
-use tl_model::devices::{AggregateKind, DeviceIdentity, NetKind};
+use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity, NetKind};
 use tl_model::health::{SourceId, SourceState};
+use tl_model::history::RecordSink;
 use tl_model::ids::{MetricId, ProcessKey, SeriesId};
 use tl_model::process::{
     GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
 };
-use tl_model::series::SampleFlags;
+use tl_model::series::{Sample, SampleFlags};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::Snapshot;
 use tl_model::system::{CpuSet, CpuTopology, CpuTotals, LinkState, Metric, NetTotals};
@@ -61,6 +62,14 @@ impl ActionGate for PanicGate {
     fn finished(&mut self, _id: ActionId) -> Option<SourceId> {
         None
     }
+}
+
+struct NoRecord;
+
+impl RecordSink for NoRecord {
+    fn on_system_sample(&mut self, _t_ns: TimeNs, _series: &[(SeriesId, Sample)]) {}
+    fn on_process_sweep(&mut self, _t_ns: TimeNs, _records: &Arc<[ProcessRecord]>) {}
+    fn on_device_catalog(&mut self, _catalog: &DeviceCatalog) {}
 }
 
 thread_local! {
@@ -115,6 +124,10 @@ impl Rig {
             action_gate: Some(Arc::new(move |_ctx: HookCtx| {
                 counter.fetch_add(1, Ordering::Relaxed);
                 Box::new(PanicGate) as Box<dyn ActionGate>
+            })),
+            // A test sink keeps the history worker out, so publish counts stay exact.
+            record_sink: Some(Arc::new(|_: &EngineConfig| {
+                Box::new(NoRecord) as Box<dyn RecordSink>
             })),
             ..EngineHooks::default()
         };
