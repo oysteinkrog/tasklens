@@ -693,6 +693,19 @@ expression: rows
         819200,
     ),
     (
+        4214,
+        "cat",
+        "root",
+        System,
+        ProcFlags(
+            OTHER_USER,
+        ),
+        Sleeping,
+        1,
+        Valid,
+        0,
+    ),
+    (
         4203,
         "��",
         "root",

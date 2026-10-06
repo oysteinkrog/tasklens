@@ -379,3 +379,20 @@ proptest! {
         let _ = group_name(gid, &bytes);
     }
 }
+
+proptest! {
+    #[test]
+    fn pattern_arbitrary_never_panics(
+        pattern in "[a-zA-Z*?/. \u{130}\u{df}-]{0,24}",
+        path in "\\PC{0,64}",
+        raw_pattern in "\\PC{0,24}",
+    ) {
+        use tl_collect::proc::handles::Pattern;
+        let mut lower = String::new();
+        let _ = Pattern::new(&pattern).matches(&path, &mut lower);
+        let _ = Pattern::new(&raw_pattern).matches(&path, &mut lower);
+        // A pattern always matches itself.
+        let p = Pattern::new(&path.replace(['*', '?'], ""));
+        prop_assert!(p.matches(&path.replace(['*', '?'], ""), &mut lower));
+    }
+}

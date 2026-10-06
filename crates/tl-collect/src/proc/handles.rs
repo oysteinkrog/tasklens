@@ -388,6 +388,9 @@ fn comm_text(raw: &[u8]) -> Arc<str> {
     Arc::from(text)
 }
 
+/// The processes on the other end of each pipe inode: pid and sanitized `comm`.
+pub type PipePeers = FxHashMap<u64, SmallVec<[(u32, Arc<str>); 2]>>;
+
 /// Records, for every `pipe:[<ino>]` fd link whose inode is in `inodes`, the pid and sanitized
 /// `comm` of each process that holds it, except `skip_pid` (the File descriptors tab names a
 /// pipe by its peer). `out` is cleared first. Processes that cannot be read are left out.
@@ -396,7 +399,7 @@ pub fn find_pipe_peers(
     inodes: &FxHashSet<u64>,
     skip_pid: u32,
     bufs: &mut ReadBufs,
-    out: &mut FxHashMap<u64, SmallVec<[(u32, Arc<str>); 2]>>,
+    out: &mut PipePeers,
 ) {
     out.clear();
     if inodes.is_empty() {
@@ -577,5 +580,49 @@ fn for_each_line(fd: BorrowedFd<'_>, buf: &mut Vec<u8>, mut f: impl FnMut(&[u8])
             buf.copy_within(start..filled, 0);
             filled -= start;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines_of(bytes: &[u8]) -> Vec<Vec<u8>> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("maps");
+        std::fs::write(&path, bytes).expect("write");
+        let fd =
+            rustix::fs::open(&path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty()).expect("open");
+        let mut buf = Vec::new();
+        let mut out = Vec::new();
+        for_each_line(fd.as_fd(), &mut buf, |l| out.push(l.to_vec()));
+        out
+    }
+
+    #[test]
+    fn lines_split_and_last_line_kept() {
+        assert_eq!(lines_of(b"a\nbc\n"), [b"a".to_vec(), b"bc".to_vec()]);
+        assert_eq!(lines_of(b"a\nbc"), [b"a".to_vec(), b"bc".to_vec()]);
+        assert!(lines_of(b"").is_empty());
+    }
+
+    #[test]
+    fn line_longer_than_a_chunk_dropped() {
+        let mut bytes = b"first\n".to_vec();
+        bytes.extend(std::iter::repeat_n(b'x', MAPS_CHUNK * 2 + 10));
+        bytes.extend_from_slice(b"\nlast\n");
+        assert_eq!(lines_of(&bytes), [b"first".to_vec(), b"last".to_vec()]);
+    }
+
+    #[test]
+    fn globs() {
+        let glob = |p: &str, t: &str| glob_match(&p.chars().collect::<Vec<_>>(), t);
+        assert!(glob("*.txt", "/a/b.txt"));
+        assert!(!glob("*.txt", "/a/b.txt2"));
+        assert!(glob("/a/?.txt", "/a/é.txt"));
+        assert!(glob("**", ""));
+        assert!(glob("*a*b*", "xxaxxbxx"));
+        assert!(!glob("*a*b", "xxaxxbxx"));
+        assert!(!glob("?", ""));
     }
 }

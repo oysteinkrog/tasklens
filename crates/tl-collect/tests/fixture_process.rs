@@ -1729,7 +1729,7 @@ fn fd_kinds_classified() {
     assert_eq!(fd_row(&out, 1).inode, Some(99));
     assert_eq!(fd_row(&out, 0).kind.label(), "socket");
     assert_eq!(&*fd_row(&out, 3).target, "/memfd:wayland-shm (deleted)");
-    assert_eq!(&*fd_row(&out, 12).target, "/home/user1/file.txt");
+    assert_eq!(&*fd_row(&out, 12).target, "/home/user1/notes.txt");
     assert_eq!(fd_row(&out, 2).eventfd_count, Some(0x2a));
     let drm = fd_row(&out, 4);
     assert_eq!(drm.drm_driver.as_deref(), Some("amdgpu"));
@@ -2657,7 +2657,7 @@ fn extras_p2_basic_fields() {
     assert_eq!(p.oom_score, Some(667));
     assert_eq!(p.oom_score_adj, Some(200));
     assert_eq!(p.tty.as_deref(), Some("pts/1"));
-    assert_eq!(p.cwd.as_deref(), Some("/home/user"));
+    assert_eq!(p.cwd.as_deref(), Some("/home/user1"));
     assert_eq!(p.sched_policy_text.as_deref(), Some("Normal"));
     // Uid 1000 everywhere and CapEff 0.
     assert_eq!(p.elevated, Some(false));
@@ -3318,4 +3318,217 @@ fn security_ns_no_reference_restricted() {
     // No `self` at all: every namespace is Restricted.
     fs::remove_dir_all(proc.join("self")).unwrap();
     assert_eq!(security(&root, 4212).namespaces, [NsState::Restricted; 8]);
+}
+
+// ---- Handle walk and pipe peers (E05-031) ----
+
+use rustc_hash::{FxHashMap, FxHashSet};
+use tl_collect::proc::handles::{
+    HandleHitInfo, HandleWalk, HitKind, PipePeers, StepResult, find_pipe_peers,
+};
+
+/// Runs a walk over `root` to `Done` and returns its hits, sorted by pid, kind and path.
+fn walk_all(root: &SysRoot, pattern: &str, include_maps: bool) -> (Vec<HandleHitInfo>, HandleWalk) {
+    let mut walk = HandleWalk::start(root, pattern, include_maps);
+    let mut bufs = ReadBufs::default();
+    let mut hits = Vec::new();
+    while walk.step(root, BootId(7), 64, &mut bufs, &mut hits) == StepResult::More {}
+    hits.sort_by(|a, b| (a.pid, a.kind.label(), &a.path).cmp(&(b.pid, b.kind.label(), &b.path)));
+    (hits, walk)
+}
+
+fn hit_summary(hits: &[HandleHitInfo]) -> Vec<(u32, HitKind, Option<u32>, &str)> {
+    hits.iter()
+        .map(|h| (h.pid, h.kind, h.fd, &*h.path))
+        .collect()
+}
+
+#[test]
+fn handles_substring_hit() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let (hits, walk) = walk_all(&root, "notes", true);
+    assert_eq!(
+        hit_summary(&hits),
+        [(4201, HitKind::Fd, Some(12), "/home/user1/notes.txt")]
+    );
+    let hit = &hits[0];
+    assert_eq!(&*hit.comm, "Web Content");
+    assert_eq!(
+        hit.key,
+        ProcessKey {
+            start_ticks: 351_220,
+            boot_id: BootId(7),
+            pid: 4201,
+        }
+    );
+    // The other process-edge pids have no `stat` or no `fd/`, so they count as gone.
+    let p = walk.progress();
+    assert_eq!((p.searched, p.total, p.skipped), (2, 2, 0));
+    // 4201 has 6 fds and 4214 has 2.
+    assert_eq!(p.handles, 8);
+}
+
+#[test]
+fn handles_glob_case_insensitive() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    for include_maps in [false, true] {
+        let (hits, _) = walk_all(&root, "*.TXT", include_maps);
+        assert_eq!(
+            hit_summary(&hits),
+            [(4201, HitKind::Fd, Some(12), "/home/user1/notes.txt")]
+        );
+    }
+    // A glob covers the whole path, so a glob without a leading `*` finds nothing here.
+    let (hits, _) = walk_all(&root, "notes.t?t", true);
+    assert!(hits.is_empty());
+    let (hits, _) = walk_all(&root, "/HOME/*/NOTES.T?T", true);
+    assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn handles_include_maps() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let (hits, _) = walk_all(&root, "user1", true);
+    assert_eq!(
+        hit_summary(&hits),
+        [
+            (4201, HitKind::Cwd, None, "/home/user1"),
+            (4201, HitKind::Fd, Some(12), "/home/user1/notes.txt"),
+        ]
+    );
+
+    // `/usr/bin/cat` is mapped twice but gives one Mmap hit.
+    let (hits, _) = walk_all(&root, "bin/cat", true);
+    assert_eq!(
+        hit_summary(&hits),
+        [
+            (4214, HitKind::Exe, None, "/usr/bin/cat"),
+            (4214, HitKind::Mmap, None, "/usr/bin/cat"),
+        ]
+    );
+
+    let (hits, _) = walk_all(&root, "libexample", true);
+    assert_eq!(
+        hit_summary(&hits),
+        [(4201, HitKind::Mmap, None, "/usr/lib/libexample.so.1")]
+    );
+
+    // `/` matches both root links and every other path.
+    let (hits, _) = walk_all(&root, "/", true);
+    let roots: Vec<u32> = hits
+        .iter()
+        .filter(|h| h.kind == HitKind::Root)
+        .map(|h| h.pid)
+        .collect();
+    assert_eq!(roots, [4201, 4214]);
+    assert_eq!(HitKind::Root.label(), "root");
+    assert_eq!(HitKind::Mmap.label(), "mmap");
+}
+
+#[test]
+fn handles_exclude_maps() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    for pattern in ["user1", "bin/cat", "libexample", "/", ""] {
+        let (hits, _) = walk_all(&root, pattern, false);
+        assert!(
+            hits.iter().all(|h| h.kind == HitKind::Fd),
+            "{pattern}: {hits:?}"
+        );
+    }
+    // An empty pattern matches every fd.
+    let (hits, _) = walk_all(&root, "", false);
+    assert_eq!(hits.len(), 8);
+}
+
+#[test]
+fn handles_step_budget() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let mut walk = HandleWalk::start(&root, "pipe", false);
+    let pids = walk.progress().total;
+    assert!(pids > 2, "{pids}");
+    let mut bufs = ReadBufs::default();
+    let mut hits = Vec::new();
+    let mut calls = 0;
+    loop {
+        let before = walk.progress().searched;
+        let r = walk.step(&root, BootId(7), 1, &mut bufs, &mut hits);
+        calls += 1;
+        assert!(walk.progress().searched - before <= 1);
+        if r == StepResult::Done {
+            break;
+        }
+        assert!(calls < pids, "More after every pid was walked");
+    }
+    // One call per listed pid.
+    assert_eq!(calls, pids);
+    assert_eq!(walk.progress().searched, 2);
+    let mut pipe_pids: Vec<u32> = hits.iter().map(|h| h.pid).collect();
+    pipe_pids.sort_unstable();
+    assert_eq!(pipe_pids, [4201, 4214]);
+    // A finished walk stays done.
+    assert_eq!(
+        walk.step(&root, BootId(7), 1, &mut bufs, &mut hits),
+        StepResult::Done
+    );
+}
+
+#[test]
+fn handles_restricted_skipped() {
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let tmp = common::fixture_copy("process-edge", None);
+    let fd_dir = tmp.path().join("proc/4214/fd");
+    fs::set_permissions(&fd_dir, fs::Permissions::from_mode(0o000)).expect("chmod fd");
+    let root = SysRoot::at(tmp.path());
+    let (hits, walk) = walk_all(&root, "", true);
+    fs::set_permissions(&fd_dir, fs::Permissions::from_mode(0o755)).expect("restore fd");
+
+    let p = walk.progress();
+    assert_eq!((p.searched, p.total, p.skipped), (1, 2, 1));
+    // Nothing of the skipped pid, not even its cwd or exe.
+    assert!(hits.iter().all(|h| h.pid == 4201), "{hits:?}");
+}
+
+#[test]
+fn handles_symlinked_pid_dir_not_followed() {
+    // Security regression: a pid entry that is a symlink is never followed.
+    let tmp = common::fixture_copy("process-edge", None);
+    let proc = tmp.path().join("proc");
+    symlink(proc.join("4201"), proc.join("4300")).expect("link pid");
+    let root = SysRoot::at(tmp.path());
+    let (hits, walk) = walk_all(&root, "notes", true);
+    assert!(hits.iter().all(|h| h.pid == 4201), "{hits:?}");
+    let p = walk.progress();
+    assert_eq!((p.searched, p.skipped), (2, 1));
+}
+
+#[test]
+fn handles_missing_root_is_empty() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = SysRoot::at(tmp.path());
+    let (hits, walk) = walk_all(&root, "x", true);
+    assert!(hits.is_empty());
+    assert_eq!(walk.progress(), Default::default());
+}
+
+#[test]
+fn pipe_peers_found() {
+    let root = SysRoot::at(&fixture_dir("process-edge"));
+    let inodes: FxHashSet<u64> = [99, 12_345].into_iter().collect();
+    let mut bufs = ReadBufs::default();
+    let mut out: PipePeers = FxHashMap::default();
+    find_pipe_peers(&root, &inodes, 4201, &mut bufs, &mut out);
+    assert_eq!(out.len(), 1);
+    let peers: Vec<(u32, &str)> = out[&99].iter().map(|(p, c)| (*p, &**c)).collect();
+    assert_eq!(peers, [(4214, "cat")]);
+
+    // From the other end, 4201 is the peer.
+    find_pipe_peers(&root, &inodes, 4214, &mut bufs, &mut out);
+    let peers: Vec<(u32, &str)> = out[&99].iter().map(|(p, c)| (*p, &**c)).collect();
+    assert_eq!(peers, [(4201, "Web Content")]);
+
+    // No inodes: `out` is cleared and stays empty.
+    find_pipe_peers(&root, &FxHashSet::default(), 4214, &mut bufs, &mut out);
+    assert!(out.is_empty());
 }
