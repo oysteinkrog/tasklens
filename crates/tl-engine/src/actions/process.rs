@@ -138,24 +138,28 @@ fn tree_passes(ops: &dyn ActionOps, keys: &[Option<ProcessKey>], boot: BootId) -
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::OwnedFd;
+    use std::future::Future;
+    use std::os::fd::{AsRawFd, OwnedFd, RawFd};
     use std::path::PathBuf;
     use std::sync::Mutex;
-    use std::time::Duration;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     use asupersync::channel::mpsc;
     use asupersync::time::{TimeSource, TimerDriverHandle, VirtualClock};
     use asupersync::types::{Budget, Time};
     use asupersync::{LabConfig, LabRuntime};
+    use rustc_hash::{FxHashMap, FxHashSet};
     use rustix::io::Errno;
-    use tl_model::actions::ActionError;
+    use tl_model::actions::{ActionError, ActionId, ActionRequest};
     use tl_model::time::BootId;
     use tl_ops::OpsError;
 
     use super::*;
-    use crate::actions::ActionOps;
+    use crate::actions::{ActionOps, Admission, RealOps, admit, summarize};
     use crate::config::{EngineConfig, EngineMode};
     use crate::dbus::ManagerConnSlot;
+    use crate::reducer::AdmissionView;
 
     const BOOT: BootId = BootId(1);
 
@@ -171,16 +175,32 @@ mod tests {
     enum Call {
         Open(u32),
         Send(Signal),
+        Close(u32),
     }
 
     struct FakeOps {
         open: Step,
         send: Step,
+        /// Per-PID errors: `(pid, None)` fails the open, `(pid, Some(sig))` fails that signal.
+        fail: Vec<(u32, Option<Signal>, OpsError)>,
         clock: Arc<VirtualClock>,
         log: Mutex<Vec<Call>>,
+        /// The PID behind each open fake pidfd.
+        fds: Mutex<FxHashMap<RawFd, u32>>,
     }
 
     impl FakeOps {
+        fn new(open: Step, send: Step, clock: &Arc<VirtualClock>) -> Self {
+            Self {
+                open,
+                send,
+                fail: Vec::new(),
+                clock: Arc::clone(clock),
+                log: Mutex::new(Vec::new()),
+                fds: Mutex::new(FxHashMap::default()),
+            }
+        }
+
         fn step(&self, step: Step) -> Result<(), OpsError> {
             match step {
                 Step::Ok => Ok(()),
@@ -191,18 +211,42 @@ mod tests {
                 }
             }
         }
+
+        fn failure(&self, pid: u32, sig: Option<Signal>) -> Option<OpsError> {
+            self.fail
+                .iter()
+                .find(|(p, s, _)| *p == pid && *s == sig)
+                .map(|(_, _, e)| e.clone())
+        }
     }
 
     impl ActionOps for FakeOps {
         fn open_verified(&self, key: ProcessKey, _boot: BootId) -> Result<OwnedFd, OpsError> {
             self.log.lock().unwrap().push(Call::Open(key.pid));
+            if let Some(e) = self.failure(key.pid, None) {
+                return Err(e);
+            }
             self.step(self.open.clone())?;
-            Ok(std::fs::File::open("/dev/null").unwrap().into())
+            let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
+            self.fds.lock().unwrap().insert(fd.as_raw_fd(), key.pid);
+            Ok(fd)
         }
 
-        fn send_signal(&self, _pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
+        fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
             self.log.lock().unwrap().push(Call::Send(sig));
+            let pid = self.fds.lock().unwrap()[&pidfd.as_raw_fd()];
+            if let Some(e) = self.failure(pid, Some(sig)) {
+                return Err(e);
+            }
             self.step(self.send.clone())
+        }
+
+        fn close_pidfd(&self, pidfd: OwnedFd) {
+            let pid = self.fds.lock().unwrap().remove(&pidfd.as_raw_fd());
+            self.log
+                .lock()
+                .unwrap()
+                .push(Call::Close(pid.expect("fd is open")));
         }
     }
 
@@ -214,25 +258,22 @@ mod tests {
         }
     }
 
-    /// Runs `kind` on one process target and returns its state, the fake's call log and the
-    /// virtual time in ms when the state was ready.
-    fn run(kind: ActionKind, open: Step, send: Step) -> (ActionState, Vec<Call>, u64) {
+    /// Runs `body` as one lab task with `ops` and `clock`, and returns what it returned.
+    fn in_lab<T, F, Fut>(ops: Arc<dyn ActionOps>, clock: Arc<VirtualClock>, body: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(Cx, Arc<ActionCtx>) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send,
+    {
         let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
-        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
         lab.state
-            .set_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)));
-        let ops = Arc::new(FakeOps {
-            open,
-            send,
-            clock: Arc::clone(&clock),
-            log: Mutex::new(Vec::new()),
-        });
+            .set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
         let (events, _events_rx) = async_channel::bounded(16);
         let (msgs, _msgs_rx) = mpsc::channel(16);
         let actx = Arc::new(ActionCtx {
             events,
             msgs,
-            ops: Arc::clone(&ops) as Arc<dyn ActionOps>,
+            ops,
             boot_id: BOOT,
             uid: 1000,
             config: Arc::new(EngineConfig::new(
@@ -246,24 +287,48 @@ mod tests {
         });
         let out = Arc::new(Mutex::new(None));
         let out_task = Arc::clone(&out);
-        let task_clock = Arc::clone(&clock);
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task, _handle) = lab
             .state
             .create_task(root, Budget::INFINITE, async move {
                 let cx = Cx::current().expect("task has a Cx");
-                let state = run_target(&cx, &actx, &kind, &ActionTarget::Process(key(7))).await;
-                let ms = task_clock.now().as_nanos() / 1_000_000;
-                *out_task.lock().unwrap() = Some((state, ms));
+                let value = body(cx, actx).await;
+                *out_task.lock().unwrap() = Some(value);
             })
             .expect("task is created");
         lab.scheduler.lock().schedule(task, 0);
         lab.run_until_idle();
         let report = lab.run_until_quiescent_with_report();
         assert!(report.lab_test_passed(), "{report:?}");
-        let (state, ms) = out.lock().unwrap().take().expect("target finished");
+        out.lock().unwrap().take().expect("task finished")
+    }
+
+    /// Runs `kind` on one process target and returns its state, the fake's call log and the
+    /// virtual time in ms when the state was ready.
+    fn run(kind: ActionKind, open: Step, send: Step) -> (ActionState, Vec<Call>, u64) {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let ops = Arc::new(FakeOps::new(open, send, &clock));
+        let task_clock = Arc::clone(&clock);
+        let (state, ms) = in_lab(ops.clone(), clock, move |cx, actx| async move {
+            let state = run_target(&cx, &actx, &kind, &ActionTarget::Process(key(7))).await;
+            (state, task_clock.now().as_nanos() / 1_000_000)
+        });
         let log = ops.log.lock().unwrap().clone();
         (state, log, ms)
+    }
+
+    /// Runs `kill_tree` on PIDs 1, 2, 3 with the per-PID `fail` list.
+    fn tree(fail: Vec<(u32, Option<Signal>, OpsError)>) -> (Vec<ActionState>, Vec<Call>) {
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let mut fake = FakeOps::new(Step::Ok, Step::Ok, &clock);
+        fake.fail = fail;
+        let ops = Arc::new(fake);
+        let states = in_lab(ops.clone(), clock, |cx, actx| async move {
+            let targets: Vec<_> = [1, 2, 3].map(|p| ActionTarget::Process(key(p))).into();
+            kill_tree(&cx, &actx, &targets).await
+        });
+        let log = ops.log.lock().unwrap().clone();
+        (states, log)
     }
 
     fn os(e: Errno) -> Step {
@@ -334,5 +399,243 @@ mod tests {
         let (state, log, _) = run(ActionKind::SetNice(5), Step::Ok, Step::Ok);
         assert_eq!(state, ActionState::Rejected(RejectReason::Unsupported));
         assert!(log.is_empty());
+    }
+
+    #[test]
+    fn kill_tree_stop_all_then_kill_all() {
+        let (states, log) = tree(Vec::new());
+        assert_eq!(states, vec![ActionState::Succeeded; 3]);
+        let stop = Call::Send(Signal::Stop);
+        let kill = Call::Send(Signal::Kill);
+        assert_eq!(
+            log,
+            [
+                Call::Open(1),
+                Call::Open(2),
+                Call::Open(3),
+                stop,
+                stop,
+                stop,
+                kill,
+                kill,
+                kill,
+                Call::Close(1),
+                Call::Close(2),
+                Call::Close(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn kill_tree_skips_identity_changed() {
+        let (states, log) = tree(vec![(2, None, OpsError::IdentityChanged)]);
+        assert_eq!(
+            states,
+            [
+                ActionState::Succeeded,
+                ActionState::Rejected(RejectReason::IdentityChanged),
+                ActionState::Succeeded,
+            ]
+        );
+        let stop = Call::Send(Signal::Stop);
+        let kill = Call::Send(Signal::Kill);
+        assert_eq!(
+            log,
+            [
+                Call::Open(1),
+                Call::Open(2),
+                Call::Open(3),
+                stop,
+                stop,
+                kill,
+                kill,
+                Call::Close(1),
+                Call::Close(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn kill_tree_partial_eperm() {
+        let eperm = OpsError::Os(Errno::PERM.raw_os_error());
+        let (states, log) = tree(vec![(3, Some(Signal::Kill), eperm)]);
+        assert_eq!(
+            states,
+            [
+                ActionState::Succeeded,
+                ActionState::Succeeded,
+                ActionState::Failed(ActionError::PermissionDenied),
+            ]
+        );
+        assert_eq!(
+            summarize(&states),
+            ActionState::Failed(ActionError::Partial { done: 2, total: 3 })
+        );
+        // Every fd is still closed.
+        assert_eq!(log[log.len() - 3..], [1, 2, 3].map(Call::Close));
+    }
+
+    #[test]
+    fn kill_tree_stop_failure_still_kills() {
+        let esrch = OpsError::Os(Errno::SRCH.raw_os_error());
+        let (states, log) = tree(vec![(1, Some(Signal::Stop), esrch)]);
+        assert_eq!(states[0], ActionState::Failed(ActionError::NoSuchProcess));
+        assert_eq!(
+            states[1..],
+            [ActionState::Succeeded, ActionState::Succeeded]
+        );
+        let kills = log
+            .iter()
+            .filter(|c| **c == Call::Send(Signal::Kill))
+            .count();
+        assert_eq!(kills, 3);
+    }
+
+    #[test]
+    fn kill_tree_too_many_targets_is_rejected() {
+        let live = FxHashMap::default();
+        let exited = FxHashSet::default();
+        let view = AdmissionView {
+            boot_id: BOOT,
+            live: &live,
+            exited_within_linger: &exited,
+        };
+        let req = ActionRequest {
+            id: ActionId(1),
+            kind: ActionKind::KillTree,
+            targets: (0..300)
+                .map(|p| ActionTarget::Process(key(1000 + p)))
+                .collect(),
+            privileged: false,
+        };
+        // A rejected request never starts a task, so `kill_tree` is never called.
+        assert_eq!(
+            admit(&req, &view, 0, &FxHashSet::default()),
+            Admission::Reject(RejectReason::TooManyTargets)
+        );
+    }
+
+    /// `RealOps`, plus a 50 ms pause before the first SIGKILL so the watcher thread can see the
+    /// stopped state.
+    struct PauseBeforeKill {
+        paused: AtomicBool,
+    }
+
+    impl ActionOps for PauseBeforeKill {
+        fn open_verified(&self, key: ProcessKey, boot: BootId) -> Result<OwnedFd, OpsError> {
+            RealOps.open_verified(key, boot)
+        }
+
+        fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
+            if sig == Signal::Kill && !self.paused.swap(true, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            RealOps.send_signal(pidfd, sig)
+        }
+    }
+
+    /// The state letter from `/proc/<pid>/stat`, or `None` when the process is gone.
+    fn proc_state(pid: u32) -> Option<u8> {
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
+        let close = stat.iter().rposition(|b| *b == b')')?;
+        stat.get(close + 2).copied()
+    }
+
+    /// Kills the test's own `sh` if an assertion fails before `kill_tree` ran.
+    struct ChildGuard(std::process::Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn kill_tree_real_parent_two_children() {
+        // Only processes this test spawns are signalled: the `sh` and its two `sleep` children.
+        let parent = std::process::Command::new("sh")
+            .args(["-c", "sleep 60 & sleep 60 & wait"])
+            .spawn()
+            .expect("sh starts");
+        let mut parent = ChildGuard(parent);
+        let ppid = parent.0.id();
+        let start = Instant::now();
+        let children: Vec<u32> = loop {
+            let list = std::fs::read_to_string(format!("/proc/{ppid}/task/{ppid}/children"))
+                .unwrap_or_default();
+            let pids: Vec<u32> = list
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect();
+            let execed = pids.iter().all(|p| {
+                std::fs::read_to_string(format!("/proc/{p}/comm"))
+                    .is_ok_and(|c| c.trim() == "sleep")
+            });
+            if pids.len() == 2 && execed {
+                break pids;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "children did not start"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        let pids = [ppid, children[0], children[1]];
+        let targets: Vec<ActionTarget> = pids
+            .iter()
+            .map(|&pid| {
+                ActionTarget::Process(ProcessKey {
+                    start_ticks: tl_ops::process::read_start_ticks(pid).expect("start ticks"),
+                    boot_id: BOOT,
+                    pid,
+                })
+            })
+            .collect();
+
+        let stop_watch = Arc::new(AtomicBool::new(false));
+        let watch_flag = Arc::clone(&stop_watch);
+        let watcher = std::thread::spawn(move || {
+            let mut seen_stopped = [false; 3];
+            while !watch_flag.load(Ordering::SeqCst) {
+                for (seen, pid) in seen_stopped.iter_mut().zip(pids) {
+                    if proc_state(pid) == Some(b'T') {
+                        *seen = true;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            seen_stopped
+        });
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        let ops = Arc::new(PauseBeforeKill {
+            paused: AtomicBool::new(false),
+        });
+        let states = in_lab(ops, clock, move |cx, actx| async move {
+            kill_tree(&cx, &actx, &targets).await
+        });
+        assert_eq!(states, vec![ActionState::Succeeded; 3]);
+
+        let status = parent.0.wait().expect("sh is reaped");
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(9)
+        );
+        // The children are reparented and reaped by the subreaper; a zombie is dead too.
+        let start = Instant::now();
+        while children
+            .iter()
+            .any(|&c| proc_state(c).is_some_and(|s| s != b'Z'))
+        {
+            assert!(start.elapsed() < Duration::from_secs(5), "a child survived");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        stop_watch.store(true, Ordering::SeqCst);
+        let seen_stopped = watcher.join().expect("watcher thread");
+        assert_eq!(
+            seen_stopped, [true; 3],
+            "parent, child, child seen in state T"
+        );
     }
 }
