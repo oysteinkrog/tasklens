@@ -505,7 +505,8 @@ fn footer_button(
     }
 }
 
-/// What Enter does with `focused` the footer button that has focus; `None` passes it on.
+/// The result of Enter when `focused` has focus. `None` means no footer button has it, so the key
+/// passes on.
 fn enter_result(focused: Option<DialogButton>, checked: bool) -> Option<DialogResult> {
     Some(match focused? {
         DialogButton::Cancel => DialogResult::Cancelled,
