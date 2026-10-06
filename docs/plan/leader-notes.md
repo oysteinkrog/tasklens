@@ -541,3 +541,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.13 (11369b6, d2d2b88, 963e4d5, 8872276): notify.rs keeps fixed English text, because the panic path cannot use GPUI; keys are added and checked by tr_en equality (accepted). MANUAL DESKTOP CHECK: one 'tasklens crashed' test notification was sent at about 21:20 on 2026-10-06; did it appear?
 - m1f.3 (9632901): meminfo reader with no allocation, a proptest, and MemInfoReader (fixed 4 KiB pread). Noted on tasklens-m1f.1.
 - cr0.10 (7ccc7e2, f869051): migrations.rs; a bad schema_version is logged without its value.
+- crw.32 (d371e74, ba948ac, c4b3f0b): ValueFormat::PercentOf; CardWords table; chart/mod.rs and scale.rs touched (accepted).
+- cr0.10: logged above. cr0.23: logo SVG text becomes paths (an SVG <text> makes gpui scan all system fonts); warm first frame 290 to 500 ms at load 37; GPU adapter probe 230 to 270 ms. Note added on ug9.26.
+- wlf.15 (b5eb1b4): gallery_main.rs; needs a tl-ui gallery hook behind bench (approved in app.rs).
