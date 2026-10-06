@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -77,6 +77,11 @@ struct FakeOps {
     clock: Arc<VirtualClock>,
 }
 
+/// A poisoned lock still holds the log: a `Panic` step panics while no lock is held.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl FakeOps {
     fn new(clock: &Arc<VirtualClock>) -> Self {
         Self {
@@ -88,21 +93,15 @@ impl FakeOps {
     }
 
     fn script(&self, pid: u32, steps: &[FakeStep]) {
-        self.script
-            .lock()
-            .unwrap()
-            .insert(pid, steps.iter().cloned().collect());
+        lock(&self.script).insert(pid, steps.iter().cloned().collect());
     }
 
     fn calls(&self) -> Vec<FakeCall> {
-        self.log.lock().unwrap().clone()
+        lock(&self.log).clone()
     }
 
     fn next(&self, pid: u32) -> Result<(), OpsError> {
-        let step = self
-            .script
-            .lock()
-            .unwrap()
+        let step = lock(&self.script)
             .get_mut(&pid)
             .and_then(VecDeque::pop_front)
             .unwrap_or(FakeStep::Ok);
@@ -123,29 +122,28 @@ impl FakeOps {
 
 impl ActionOps for FakeOps {
     fn open_verified(&self, key: ProcessKey, _boot: BootId) -> Result<OwnedFd, OpsError> {
-        self.log.lock().unwrap().push(FakeCall::Open(key.pid));
+        lock(&self.log).push(FakeCall::Open(key.pid));
         self.next(key.pid)?;
-        let fd: OwnedFd = std::fs::File::open("/dev/null").unwrap().into();
-        self.fds.lock().unwrap().insert(fd.as_raw_fd(), key.pid);
+        let fd: OwnedFd = std::fs::File::open("/dev/null")
+            .expect("open /dev/null")
+            .into();
+        lock(&self.fds).insert(fd.as_raw_fd(), key.pid);
         Ok(fd)
     }
 
     fn send_signal(&self, pidfd: &OwnedFd, sig: Signal) -> Result<(), OpsError> {
-        let pid = self.fds.lock().unwrap()[&pidfd.as_raw_fd()];
-        self.log.lock().unwrap().push(FakeCall::Send(pid, sig));
+        let pid = lock(&self.fds)[&pidfd.as_raw_fd()];
+        lock(&self.log).push(FakeCall::Send(pid, sig));
         self.next(pid)
     }
 
     fn close_pidfd(&self, pidfd: OwnedFd) {
-        let pid = self.fds.lock().unwrap().remove(&pidfd.as_raw_fd());
-        self.log
-            .lock()
-            .unwrap()
-            .push(FakeCall::Close(pid.expect("fd is open")));
+        let pid = lock(&self.fds).remove(&pidfd.as_raw_fd());
+        lock(&self.log).push(FakeCall::Close(pid.expect("fd is open")));
     }
 
     fn apply_pid_op(&self, key: ProcessKey, _boot: BootId, op: &PidOp) -> Result<(), OpsError> {
-        self.log.lock().unwrap().push(FakeCall::Pid(key.pid, *op));
+        lock(&self.log).push(FakeCall::Pid(key.pid, *op));
         self.next(key.pid)
     }
 }
