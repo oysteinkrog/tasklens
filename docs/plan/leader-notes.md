@@ -251,3 +251,8 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.7: missing stat file (not denied) gives Unsupported; pid tick walks every unit with a cgroup. Slices and scopes lack ControlGroup: follow-up bead.
 - m1f.8: tempfile added as tl-engine dev-dependency (check ARCHITECTURE and check-deps). One LowMemGroup per unit cgroup.
 - wox.1: U-31 verified (ksni 0.3.6, 105 crates, no tokio). zbus dev-dep in tl-tray for the private-daemon test.
+- ug9.11: U-41 answered: no kit Button size gives 24 or 28 px at rem 13 (16.25, 19.5, 26 px). TlButton is built on the base Button; .tooltip() takes text; 72 px min width for every labelled button incl. Segment.
+- ug9.15: glyph() draws no tooltip; glyph_with_tooltip adds it; Failed with no last_error reads "Could not read: " with nothing after (polish).
+- ug9.28: tooltips open only after a pointer move; follow-up bead migrates raw .tooltip call sites.
+- y6k.15: startup worker lists no user units until E14-013 fills ScanInput.units; impact NotMeasured until E14-013.
+- hx1.10: netns: if proc self ns net is unreadable nothing is filtered as host.
