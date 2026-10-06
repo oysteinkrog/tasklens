@@ -8,8 +8,13 @@
 //!
 //! One focus and Enter rule for every confirmation (R-104): focus starts on Cancel in a
 //! destructive confirmation and on the action button otherwise. Enter activates the focused
-//! button, so a stray Enter in a destructive confirmation cancels. Esc, Ctrl+W and the window's
-//! close button cancel. `on_result` runs exactly once, in the parent window.
+//! button, so a stray Enter in a destructive confirmation cancels. With focus off the buttons,
+//! in a text field or on the checkbox, Enter runs the button that has focus on open. Esc, Ctrl+W
+//! and the window's close button cancel. `on_result` runs exactly once, in the parent window.
+//!
+//! Enter runs once. The `TlDialog` binding handles Enter on a footer button and stops it, so the
+//! button's own key-up click never comes. A `TlButton` in the owner's lines gets the key and
+//! clicks itself; the binding does not run the default then.
 //!
 //! The footer buttons are drawn here on the kit's base `Button` with the `TlButton` look, because
 //! `TlButton` keeps its focus handle in element state and the dialog must focus a button on open
@@ -505,14 +510,27 @@ fn footer_button(
     }
 }
 
-/// The result of Enter when `focused` has focus. `None` means no footer button has it, so the key
-/// passes on.
-fn enter_result(focused: Option<DialogButton>, checked: bool) -> Option<DialogResult> {
-    Some(match focused? {
+/// The result of Enter when `focused` has focus. With no footer button focused, Enter runs the
+/// button that has focus on open: Cancel in a destructive confirmation, the action otherwise.
+fn enter_result(focused: Option<DialogButton>, destructive: bool, checked: bool) -> DialogResult {
+    let button = focused.unwrap_or(if destructive {
+        DialogButton::Cancel
+    } else {
+        DialogButton::Action
+    });
+    match button {
         DialogButton::Cancel => DialogResult::Cancelled,
         DialogButton::Action => DialogResult::Confirmed { checkbox: checked },
         DialogButton::Second => DialogResult::Second,
-    })
+    }
+}
+
+/// Whether focus is on a `TlButton`, which activates itself on Enter.
+fn tl_button_focused(window: &Window) -> bool {
+    window
+        .context_stack()
+        .iter()
+        .any(|c| c.contains("TlButton"))
 }
 
 /// The content view of a confirmation window.
@@ -599,10 +617,13 @@ impl TlDialogView {
     }
 
     fn on_enter(&mut self, _: &ActivateFocusedButton, window: &mut Window, cx: &mut Context<Self>) {
-        match enter_result(self.focus.focused(window), self.checked) {
-            Some(result) => self.finish(result, window, cx),
-            None => cx.propagate(),
+        let focused = self.focus.focused(window);
+        if focused.is_none() && tl_button_focused(window) {
+            cx.propagate();
+            return;
         }
+        let result = enter_result(focused, self.dialog.destructive, self.checked);
+        self.finish(result, window, cx);
     }
 
     fn on_close(&mut self, _: &CloseSecondaryWindow, window: &mut Window, cx: &mut Context<Self>) {
@@ -733,12 +754,17 @@ mod tests {
         let focused = cx.update(|window, cx| view.read(cx).focus.focused(window));
         assert_eq!(focused, Some(DialogButton::Action));
         assert_eq!(
-            enter_result(focused, false),
-            Some(DialogResult::Confirmed { checkbox: false })
+            enter_result(focused, false, false),
+            DialogResult::Confirmed { checkbox: false }
         );
         assert_eq!(
-            enter_result(Some(DialogButton::Second), false),
-            Some(DialogResult::Second)
+            enter_result(Some(DialogButton::Second), false, false),
+            DialogResult::Second
+        );
+        assert_eq!(
+            enter_result(None, true, false),
+            DialogResult::Cancelled,
+            "with no button focused a destructive confirmation cancels"
         );
 
         let cancel = cx.debug_bounds("TlDialogCancel").expect("cancel");

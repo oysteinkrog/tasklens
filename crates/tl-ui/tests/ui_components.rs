@@ -1051,3 +1051,216 @@ mod frame {
         assert!(!is_open(cx, handle), "Space on close closes the window");
     }
 }
+
+/// Enter in a `TlDialog` window runs one result (R-104, tasklens-ug9.35). The keys go through the
+/// window's real dispatch as a key down and a key up, because a focused button clicks on the key
+/// up and `simulate_keystrokes` sends only the key down.
+mod dialog_enter {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::component::input::InputState;
+    use gpui_kit::{
+        AnyWindowHandle, Context, Entity, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _,
+        VisualTestContext, Window, WindowHandle, div,
+    };
+    use tl_ui::components::dialog::{DialogButton, DialogResult, TlDialog, TlDialogView};
+    use tl_ui::components::input::TlTextInput;
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+
+    use super::{draw, setup};
+
+    struct Parent;
+
+    impl Render for Parent {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("parent")
+        }
+    }
+
+    type Results = Rc<RefCell<Vec<DialogResult>>>;
+
+    struct Opened {
+        handle: WindowHandle<Root>,
+        view: Entity<TlDialogView>,
+        vcx: VisualTestContext,
+        results: Results,
+    }
+
+    /// Opens `dialog` modal to a new parent window and returns its window.
+    fn open(cx: &mut TestAppContext, dialog: TlDialog) -> Opened {
+        cx.update(setup);
+        cx.update(tl_ui::components::window_frame::bind_keys);
+        let parent: AnyWindowHandle = cx.add_window(|_, _| Parent).into();
+        let results: Results = Rc::default();
+        let sink = results.clone();
+        cx.update(|cx| {
+            parent
+                .update(cx, |_, window, cx| {
+                    dialog.open(window, cx, move |result, _, _| {
+                        sink.borrow_mut().push(result)
+                    })
+                })
+                .expect("parent")
+                .expect("dialog opens")
+        });
+        cx.run_until_parked();
+        let handle = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find(|w| w.window_id() != parent.window_id())
+            })
+            .and_then(|w| w.downcast::<Root>())
+            .expect("dialog window");
+        let view = cx
+            .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+            .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+            .expect("dialog view");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        Opened {
+            handle,
+            view,
+            vcx,
+            results,
+        }
+    }
+
+    /// One Enter press as the platform sends it: key down, then key up.
+    fn press_enter(vcx: &mut VisualTestContext) {
+        let keystroke = Keystroke::parse("enter").expect("keystroke");
+        vcx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        // A key down that closed the window leaves no window for the key up.
+        let id = vcx.window_handle().window_id();
+        if vcx.read(|cx| cx.windows().iter().any(|w| w.window_id() == id)) {
+            vcx.simulate_event(KeyUpEvent { keystroke });
+        }
+        vcx.run_until_parked();
+    }
+
+    fn focused(o: &mut Opened) -> Option<DialogButton> {
+        let view = o.view.clone();
+        o.vcx
+            .update(|window, cx| view.read(cx).focused_button(window))
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+        let id = handle.window_id();
+        cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_focused_cancel_cancels_once(cx: &mut TestAppContext) {
+        let mut o = open(cx, TlDialog::confirm("Delete this custom theme?", "Delete"));
+        assert_eq!(
+            focused(&mut o),
+            Some(DialogButton::Action),
+            "focus starts on Delete"
+        );
+        o.vcx.simulate_keystrokes("shift-tab");
+        draw(&mut o.vcx);
+        assert_eq!(focused(&mut o), Some(DialogButton::Cancel));
+
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::Cancelled],
+            "Cancel once"
+        );
+        assert!(!is_open(cx, o.handle));
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_focused_action_confirms_once(cx: &mut TestAppContext) {
+        let mut o = open(cx, TlDialog::confirm("Delete this custom theme?", "Delete"));
+        assert_eq!(focused(&mut o), Some(DialogButton::Action));
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::Confirmed { checkbox: false }]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_in_text_field_runs_default_once(cx: &mut TestAppContext) {
+        let field: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
+        let slot = field.clone();
+        let dialog = TlDialog::confirm("Rename this theme?", "Rename").extra(move |window, cx| {
+            let state = window
+                .use_keyed_state("dialog-field", cx, |window, cx| InputState::new(window, cx));
+            *slot.borrow_mut() = Some(state.clone());
+            div()
+                .w_full()
+                .child(TlTextInput::new("dialog-field", &state))
+                .into_any_element()
+        });
+        let mut o = open(cx, dialog);
+        let state = field.borrow().clone().expect("field drawn");
+        o.vcx
+            .update(|window, cx| state.update(cx, |s, cx| s.focus(window, cx)));
+        draw(&mut o.vcx);
+        assert_eq!(focused(&mut o), None, "focus in the field");
+
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::Confirmed { checkbox: false }],
+            "the default action once"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_in_text_field_of_destructive_cancels(cx: &mut TestAppContext) {
+        let field: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
+        let slot = field.clone();
+        let dialog = TlDialog::confirm("Reset all settings?", "Reset")
+            .destructive()
+            .extra(move |window, cx| {
+                let state = window
+                    .use_keyed_state("dialog-field", cx, |window, cx| InputState::new(window, cx));
+                *slot.borrow_mut() = Some(state.clone());
+                TlTextInput::new("dialog-field", &state).into_any_element()
+            });
+        let mut o = open(cx, dialog);
+        let state = field.borrow().clone().expect("field drawn");
+        o.vcx
+            .update(|window, cx| state.update(cx, |s, cx| s.focus(window, cx)));
+        draw(&mut o.vcx);
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::Cancelled],
+            "a stray Enter cancels"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn enter_on_frame_close_cancels_once(cx: &mut TestAppContext) {
+        let mut o = open(cx, TlDialog::confirm("Delete this custom theme?", "Delete"));
+        // Delete is the last footer button; close comes after the content in the Tab order.
+        o.vcx.simulate_keystrokes("tab");
+        draw(&mut o.vcx);
+        assert_eq!(focused(&mut o), None, "focus on the frame's close button");
+        assert!(
+            o.vcx.update(|window, cx| window.focused(cx).is_some()),
+            "close holds focus"
+        );
+
+        press_enter(&mut o.vcx);
+        assert_eq!(
+            *o.results.borrow(),
+            [DialogResult::Cancelled],
+            "Cancel once"
+        );
+        assert!(!is_open(cx, o.handle));
+    }
+}

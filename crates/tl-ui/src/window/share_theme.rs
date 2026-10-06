@@ -4,7 +4,10 @@
 //! The window is a Confirmation-kind `TlSecondaryWindow` (GPUI `WindowKind::Dialog`), modal to
 //! its parent: the main window, or the theme editor, which passes its preview definition. Focus
 //! starts on Copy, and Enter activates the focused footer button, so it copies unless Close has
-//! focus. The code is selected on open, and Ctrl+C copies the whole code anywhere in the window. Esc and Ctrl+W close it through the frame.
+//! focus. Enter runs once: the binding handles it and stops it, so the button's own key-up click
+//! never comes. The frame's close button sits outside this window's key context, so Enter there
+//! only closes. The code is selected on open, and Ctrl+C copies the whole code anywhere in the
+//! window. Esc and Ctrl+W close it through the frame. The title follows a language change.
 //!
 //! The box is the kit `Textarea` with the `TlTextInput` border and fill, because `TlTextInput` is
 //! single-line.
@@ -15,7 +18,7 @@ use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{
     Action, AnyWindowHandle, App, AppContext as _, ClipboardItem, Context, Entity, FocusHandle,
     Focusable as _, InteractiveElement, IntoElement, KeyBinding, ParentElement, Render,
-    SharedString, Styled, Subscription, Window, div, gpui, px, size,
+    SharedString, Styled, Subscription, Window, WindowHandle, div, gpui, px, size,
 };
 use serde::Deserialize;
 use tracing::warn;
@@ -125,10 +128,11 @@ pub fn open_share_window(
     let code: SharedString = encode_tl1(def).into();
     let open_code = code.clone();
     let open = move |cx: &mut App| {
-        TlSecondaryWindow::open(cx, spec, move |window, cx| {
+        let handle = TlSecondaryWindow::open(cx, spec, move |window, cx| {
             cx.new(|cx| ShareThemeView::new(open_code, window, cx))
-        })
-        .map(Into::into)
+        })?;
+        follow_title(handle, cx);
+        Ok(handle.into())
     };
     let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) else {
         return open(cx).ok();
@@ -148,8 +152,29 @@ pub fn open_share_window(
     Some(handle)
 }
 
+/// Sets the frame title again when the strings version changes, one `tr` call per version
+/// (R-132).
+fn follow_title(handle: WindowHandle<Root>, cx: &mut App) {
+    let Some(frame) = TlSecondaryWindow::<ShareThemeView>::find(handle, cx) else {
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        frame.update(cx, |_, cx| {
+            let mut version = strings_version(cx);
+            cx.observe_global_in::<Strings>(window, move |frame, window, cx| {
+                let now = strings_version(cx);
+                if now != version {
+                    version = now;
+                    frame.set_title(tr(cx, TITLE), window, cx);
+                }
+            })
+            .detach();
+        });
+    });
+}
+
 /// The window's own text, translated once per strings version (R-132), so a frame makes no `tr`
-/// call. The title is set once, at open.
+/// call. The frame title follows the version through `follow_title`.
 struct ShareWords {
     text: SharedString,
     copy: SharedString,

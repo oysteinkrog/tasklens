@@ -7,8 +7,9 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, WindowHandle, div,
+    AnyWindowHandle, Context, Entity, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+    ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _, VisualTestContext,
+    Window, WindowHandle, div,
 };
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
@@ -504,4 +505,88 @@ fn collector_health_frames_make_no_tr_call(cx: &mut TestAppContext) {
         view.rows().next().map(|r| view.source_name(r).to_string())
     });
     assert_eq!(name.as_deref(), Some("<cpu>"));
+}
+
+// ---- Share Theme: one Enter, one action (tasklens-ug9.35) ----
+
+/// One Enter press as the platform sends it: key down, then key up while the window is open. A
+/// focused button clicks on the key up, which `simulate_keystrokes` never sends.
+fn press_enter(vcx: &mut VisualTestContext) {
+    let keystroke = Keystroke::parse("enter").expect("keystroke");
+    vcx.simulate_event(KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    let id = vcx.window_handle().window_id();
+    if vcx.read(|cx| cx.windows().iter().any(|w| w.window_id() == id)) {
+        vcx.simulate_event(KeyUpEvent { keystroke });
+    }
+    vcx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn share_enter_on_copy_copies_once(cx: &mut TestAppContext) {
+    let mut o = share_mine(cx);
+    press_enter(&mut o.vcx);
+    draw(&mut o.vcx);
+    let frame = o.frame.clone();
+    let toasts = o
+        .vcx
+        .read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    // A second copy would show as "Theme code copied (×2)".
+    assert_eq!(toasts, ["Theme code copied"], "one Enter, one copy");
+
+    press_enter(&mut o.vcx);
+    draw(&mut o.vcx);
+    let toasts = o
+        .vcx
+        .read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    assert_eq!(
+        toasts,
+        ["Theme code copied (\u{d7}2)"],
+        "a second Enter, a second copy"
+    );
+}
+
+#[gpui_kit::test]
+fn share_enter_on_close_closes_without_copy(cx: &mut TestAppContext) {
+    let mut o = share_mine(cx);
+    // Close is left of Copy in the footer.
+    o.vcx.simulate_keystrokes("shift-tab");
+    draw(&mut o.vcx);
+    let frame = o.frame.clone();
+    let copy_focused = o
+        .vcx
+        .update(|window, cx| frame.read(cx).content().read(cx).copy_focused(window));
+    assert!(!copy_focused, "focus left Copy");
+    drop(frame);
+    drop(o.frame);
+    press_enter(&mut o.vcx);
+    let id = o.handle.window_id();
+    assert!(
+        !cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id)),
+        "Enter on Close closes"
+    );
+    assert_eq!(
+        cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text())),
+        None,
+        "no copy"
+    );
+}
+
+#[gpui_kit::test]
+fn share_title_follows_strings_version(cx: &mut TestAppContext) {
+    let mut o = share_mine(cx);
+    o.vcx
+        .update(|_, cx| set_test_catalogue(cx, "shell-share-theme-title = <share-title>\n"));
+    o.vcx.run_until_parked();
+    let frame = o.frame.clone();
+    let title = o.vcx.read(|cx| frame.read(cx).title().to_string());
+    assert_eq!(title, "<share-title>");
+    let before = tr_calls();
+    for _ in 0..10 {
+        draw(&mut o.vcx);
+    }
+    assert_eq!(tr_calls() - before, 0, "frames make no tr call");
 }
