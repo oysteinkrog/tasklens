@@ -23,9 +23,10 @@ use gpui_kit::base::Root;
 use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
     AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
+    FocusHandle, Global, InteractiveElement, IntoElement, ModifiersChangedEvent, ParentElement,
+    Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
+    point, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -622,7 +623,15 @@ impl MainWindow {
             this.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
             cx.notify();
         }));
-        // The title bar keeps the toolbar model's `window_active` itself (E20-004).
+        // The title bar keeps the toolbar model's `window_active` itself (E20-004). Losing
+        // activation ends Ctrl-pause (UI-SHL-007, E20-012).
+        subs.push(
+            cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+                if !window.is_window_active() {
+                    this.set_paused(false, cx);
+                }
+            }),
+        );
         // Size saving (UI-SHL-002): the last bounds change wins, written 500 ms later.
         subs.push(
             cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
@@ -703,6 +712,33 @@ impl MainWindow {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn first_frames(&self) -> u32 {
         self.first_frames
+    }
+
+    /// Ctrl-pause (E20-012, UI-SHL-123): paused while Ctrl is held and the window is active. A
+    /// Ctrl that is part of a shortcut pauses too, for as long as it is held.
+    fn on_modifiers(
+        &mut self,
+        ev: &ModifiersChangedEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let want = ev.modifiers.control && window.is_window_active();
+        self.set_paused(want, cx);
+    }
+
+    /// Sets `ShellState.paused` and the chip's paused tag, and emits `PauseChanged`. Nothing
+    /// happens when the state does not change.
+    fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        let state = cx.default_global::<ShellState>();
+        if state.paused == paused {
+            return;
+        }
+        state.paused = paused;
+        self.status
+            .update(cx, |chip, cx| chip.set_paused(paused, cx));
+        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+            events.update(cx, |_, cx| cx.emit(PauseChanged(paused)));
+        }
     }
 
     /// The close decision (UI-SHL-113). Rows are checked in order; first match wins.
@@ -946,6 +982,8 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_minimize))
             .on_action(cx.listener(Self::on_zoom))
+            // Only the main window pauses; secondary windows have no such listener.
+            .on_modifiers_changed(cx.listener(Self::on_modifiers))
             // window-level on_action handlers (chain edits)
             .child(
                 AnyView::from(self.titlebar.clone())

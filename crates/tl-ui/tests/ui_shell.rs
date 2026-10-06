@@ -1732,12 +1732,14 @@ mod status {
 }
 
 mod main_window {
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use gpui_kit::{
         AnyWindowHandle, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
-        Global, InteractiveElement, IntoElement, Pixels, Render, Styled, TestAppContext,
+        Global, InteractiveElement, IntoElement, Modifiers, Pixels, Render, Styled, TestAppContext,
         VisualTestContext, Window, WindowBounds, WindowOptions, div, px, size,
     };
     use tl_model::client::EngineClient;
@@ -1757,9 +1759,9 @@ mod main_window {
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
-        self as shell, CloseOutcome, MainWindow, PageFactory, PageSlot, ShellPage, ShellState,
-        first_frame_ms_from, main_window_options, main_window_view, open_main_window,
-        push_main_toast, restored_bounds, set_test_page,
+        self as shell, CloseOutcome, GlobalShellEvents, MainWindow, PageFactory, PageSlot,
+        PauseChanged, ShellPage, ShellState, first_frame_ms_from, main_window_options,
+        main_window_view, open_main_window, push_main_toast, restored_bounds, set_test_page,
     };
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
@@ -2578,5 +2580,80 @@ mod main_window {
             );
             assert_eq!(exit(cx), None);
         }
+    }
+
+    /// Records every `PauseChanged` on `GlobalShellEvents`.
+    fn pause_events(vcx: &mut VisualTestContext) -> Rc<RefCell<Vec<bool>>> {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        vcx.update(|_, cx| {
+            let events = cx.global::<GlobalShellEvents>().0.clone();
+            cx.subscribe(&events, move |_, ev: &PauseChanged, _| {
+                sink.borrow_mut().push(ev.0)
+            })
+            .detach();
+        });
+        seen
+    }
+
+    fn modifiers(vcx: &mut VisualTestContext, control: bool, shift: bool) {
+        vcx.simulate_modifiers_change(Modifiers {
+            control,
+            shift,
+            ..Modifiers::default()
+        });
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    fn paused(vcx: &mut VisualTestContext) -> bool {
+        vcx.update(|_, cx| cx.global::<ShellState>().paused)
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_pause_starts_and_ends(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        modifiers(&mut vcx, true, false);
+        assert!(paused(&mut vcx));
+        assert_eq!(*seen.borrow(), [true]);
+        assert_eq!(chip_text(&mut vcx), "[PAUSED - Ctrl]");
+        modifiers(&mut vcx, false, false);
+        assert!(!paused(&mut vcx));
+        assert_eq!(*seen.borrow(), [true, false]);
+        assert!(!chip_text(&mut vcx).contains("PAUSED"));
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_pause_releases_on_deactivate(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        modifiers(&mut vcx, true, false);
+        vcx.deactivate_window();
+        vcx.run_until_parked();
+        assert!(!paused(&mut vcx));
+        assert_eq!(*seen.borrow(), [true, false]);
+        draw(&mut vcx);
+        assert!(!chip_text(&mut vcx).contains("PAUSED"));
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_pause_needs_active_window(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        vcx.deactivate_window();
+        modifiers(&mut vcx, true, false);
+        assert!(!paused(&mut vcx));
+        assert!(seen.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn ctrl_pause_emits_once(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        modifiers(&mut vcx, true, false);
+        modifiers(&mut vcx, true, true);
+        assert!(paused(&mut vcx));
+        assert_eq!(*seen.borrow(), [true]);
     }
 }
