@@ -427,3 +427,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - crw.28 (06acd11): CpuTotals.freq_is_bogomips set in workers/cpu.rs; tl-ui verification waits on the rsf.8 build fix.
 - hjn.32 (e40b76f): smartctl through pkexec. SECURITY decision: smartctl looked up only in /usr/sbin, /usr/bin, /sbin, /bin, never PATH (a user-writable PATH entry would run as root); pkexec by absolute path. Sent back for that fix plus a regression test.
 - Disk: target/ reached 247 GB. fd4e3dc sets debug = "line-tables-only" in profile.dev (owner approved). Hold new dispatch at the next lull, then cargo clean --profile dev and tell manager-machine.
+- i3o.23 (2b171b0, 1d8b50d, ba1736a): FakePrivilegedOps, harness_p3, end-to-end dump, socket destroy and recovery tests. ConnectionsDestroySupport(false) is sent on every EOPNOTSUPP (accepted; the reducer stores a bool). Privileged dumps bypass run_action until E29-014.
