@@ -432,3 +432,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.32 security fix dff2f16 verified: fixed SMARTCTL_DIRS, pkexec by absolute path, child PATH fixed, regression test locate_ignores_path.
 - fut.19 (12d8762): Run window size and min size scale with ui_scale (600 x 310 at 125%).
 - rsf.8 decision: zebra on the flattened index (processes.md:214, :285).
+- yrf.1 (9f3161e, a764cba, bd6d4bc): chart roll-up gaps closed (failed and restricted states, warming-up grid, value_now). Owner contract: embed charts with .cached(size_full) so render_count stays 1. bench feature = test-hooks + gpui-kit/profiler. perf-cpu p50 waits for wlf.9.
+- 17:45 to 17:52: API 503s stopped rsf.8 and pdu.18 mid-work; both resumed by message.
