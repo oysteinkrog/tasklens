@@ -1187,23 +1187,23 @@ impl UdisksBus for SystemUdisks {
         path: &str,
         iface: &'static str,
     ) -> Result<(), DbusError> {
-        let options = RawProps::new();
-        let call =
-            self.conn
-                .raw()
-                .call_method(Some(BUS), path, Some(iface), "SmartUpdate", &(options,));
+        let body = (RawProps::new(),);
+        let call = self
+            .conn
+            .raw()
+            .call_method(Some(BUS), path, Some(iface), "SmartUpdate", &body);
         self.conn.call(cx, SMART_UPDATE_TIMEOUT, call).await?;
         Ok(())
     }
 
     async fn ata_attributes(&mut self, cx: &Cx, path: &str) -> Result<Vec<AtaAttrRaw>, DbusError> {
-        let options = RawProps::new();
+        let body = (RawProps::new(),);
         let call = self.conn.raw().call_method(
             Some(BUS),
             path,
             Some(ATA_IFACE),
             "SmartGetAttributes",
-            &(options,),
+            &body,
         );
         let msg = self.conn.call(cx, SMART_READ_TIMEOUT, call).await?;
         let raw: Vec<RawAtaAttr> = msg.body().deserialize().map_err(|e| call_error(&e))?;
@@ -1225,13 +1225,13 @@ impl UdisksBus for SystemUdisks {
     }
 
     async fn nvme_attributes(&mut self, cx: &Cx, path: &str) -> Result<Props, DbusError> {
-        let options = RawProps::new();
+        let body = (RawProps::new(),);
         let call = self.conn.raw().call_method(
             Some(BUS),
             path,
             Some(NVME_CONTROLLER_IFACE),
             "SmartGetAttributes",
-            &(options,),
+            &body,
         );
         let msg = self.conn.call(cx, SMART_READ_TIMEOUT, call).await?;
         let raw: RawProps = msg.body().deserialize().map_err(|e| call_error(&e))?;
@@ -1244,13 +1244,11 @@ impl UdisksBus for SystemUdisks {
         path: &str,
         iface: &'static str,
     ) -> Result<Props, DbusError> {
-        let call = self.conn.raw().call_method(
-            Some(BUS),
-            path,
-            Some(PROPERTIES_IFACE),
-            "GetAll",
-            &(iface,),
-        );
+        let body = (iface,);
+        let call =
+            self.conn
+                .raw()
+                .call_method(Some(BUS), path, Some(PROPERTIES_IFACE), "GetAll", &body);
         let msg = self.conn.read(cx, call).await?;
         let raw: RawProps = msg.body().deserialize().map_err(|e| call_error(&e))?;
         Ok(raw.into_iter().collect())
@@ -2278,5 +2276,92 @@ mod tests {
         );
         assert!(!resync);
         assert!(!after[0].1.ejectable);
+    }
+
+    struct FakeAta;
+
+    #[zbus::interface(name = "org.freedesktop.UDisks2.Drive.Ata")]
+    impl FakeAta {
+        fn smart_get_attributes(
+            &self,
+            _options: HashMap<String, OwnedValue>,
+        ) -> Vec<(
+            u8,
+            String,
+            u16,
+            i32,
+            i32,
+            i32,
+            i64,
+            i32,
+            HashMap<String, OwnedValue>,
+        )> {
+            vec![(
+                194,
+                "temperature-celsius-2".into(),
+                0x22,
+                65,
+                50,
+                0,
+                308_150,
+                4,
+                HashMap::new(),
+            )]
+        }
+
+        fn smart_update(&self, _options: HashMap<String, OwnedValue>) -> zbus::fdo::Result<()> {
+            Err(zbus::fdo::Error::AccessDenied("no".into()))
+        }
+
+        #[zbus(property)]
+        fn smart_power_on_seconds(&self) -> u64 {
+            7200
+        }
+
+        #[zbus(property)]
+        fn smart_selftest_status(&self) -> String {
+            "inprogress".into()
+        }
+    }
+
+    #[test]
+    fn smart_calls_over_p2p() {
+        let (a, b) = std::os::unix::net::UnixStream::pair().expect("socketpair");
+        let server = zbus::connection::Builder::async_io_unix_stream(a)
+            .server(zbus::Guid::generate())
+            .expect("server builder")
+            .p2p()
+            .serve_at(SDA_DRIVE, FakeAta)
+            .expect("ata")
+            .build();
+        let client = zbus::connection::Builder::async_io_unix_stream(b)
+            .p2p()
+            .internal_executor(false)
+            .build();
+        let (server, client) =
+            futures_lite::future::block_on(futures_lite::future::zip(server, client));
+        let server = server.expect("server connects");
+        let client = client.expect("client connects");
+
+        let rt = crate::runtime::build_runtime().expect("runtime builds");
+        let join = rt.handle().spawn_checked(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            let conn = DbusConn::p2p(&cx, client).expect("p2p connection");
+            let mut bus = SystemUdisks::on(&cx, conn).await.expect("subscribed");
+            let data = read_ata(&cx, &mut bus, SDA_DRIVE, false).await;
+            let update = read_ata(&cx, &mut bus, SDA_DRIVE, true).await;
+            drop(bus);
+            drop(server);
+            (data, update.map(|_| ()))
+        });
+        let (data, update) = rt.block_on(join).expect("task completes");
+        let data = data.expect("SMART read");
+        assert_eq!(data.ata.len(), 1);
+        assert_eq!(data.ata[0].id, 194);
+        assert_eq!(data.ata[0].value, 35);
+        assert_eq!(data.power_on_s, valid(7200));
+        assert_eq!(data.selftest, valid(Arc::from("In progress")));
+        let err = update.expect_err("SmartUpdate fails");
+        assert_eq!(smart_error(&err), "org.freedesktop.DBus.Error.AccessDenied");
     }
 }
