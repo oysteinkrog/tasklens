@@ -6,6 +6,7 @@
 //! added by their beads.
 
 pub mod cgroup;
+pub mod process;
 
 use std::future::Future;
 use std::os::fd::OwnedFd;
@@ -22,7 +23,7 @@ use rustc_hash::FxHashSet;
 use rustix::io::Errno;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
-    LaunchSpec, MAX_ACTION_TARGETS, MAX_ACTIONS_IN_FLIGHT, RejectReason,
+    LaunchSpec, MAX_ACTION_TARGETS, MAX_ACTIONS_IN_FLIGHT, RejectReason, Signal,
 };
 use tl_model::health::HelperState;
 use tl_model::helper_proto::{HelperReply, HelperRequest};
@@ -293,6 +294,15 @@ pub trait Openers: Send + Sync + 'static {
 /// One method per tl-ops entry point used by actions/{process,cgroup,startup,dump}.rs. Each
 /// module bead adds its methods. `RealOps` forwards to tl-ops; `FakeOps` (tests) scripts results.
 pub trait ActionOps: Send + Sync + 'static {
+    /// `tl_ops::process::open_verified`: a pidfd proven to be `key`. The default refuses, so an
+    /// ops type without process support never signals.
+    fn open_verified(&self, _key: ProcessKey, _boot: BootId) -> Result<OwnedFd, OpsError> {
+        Err(OpsError::Unsupported("process ops not wired"))
+    }
+    /// Sends `sig` through `pidfd`. tl-ops checks `Signal::Other(n)` is 1..=64.
+    fn send_signal(&self, _pidfd: &OwnedFd, _sig: Signal) -> Result<(), OpsError> {
+        Err(OpsError::Unsupported("process ops not wired"))
+    }
     /// `tl_ops::cgroup::open_validated`. The default refuses, so an ops type without cgroup
     /// support never writes.
     fn cgroup_open_validated(
@@ -457,11 +467,12 @@ async fn dispatch(
 ) -> ActionState {
     match target {
         ActionTarget::Cgroup(cg) => cgroup::run_target(cx, actx, kind, cg).await,
-        ActionTarget::Process(_)
-        | ActionTarget::Thread { .. }
-        | ActionTarget::Unit(_)
-        | ActionTarget::Startup(_)
-        | ActionTarget::Socket { .. } => ActionState::Rejected(RejectReason::Unsupported),
+        ActionTarget::Process(_) | ActionTarget::Thread { .. } => {
+            process::run_target(cx, actx, kind, target).await
+        }
+        ActionTarget::Unit(_) | ActionTarget::Startup(_) | ActionTarget::Socket { .. } => {
+            ActionState::Rejected(RejectReason::Unsupported)
+        }
     }
 }
 

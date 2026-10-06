@@ -215,21 +215,13 @@ mod tests {
 
     #[test]
     fn signal_eperm() {
-        let (state, _, _) = run(
-            ActionKind::Signal(Signal::Term),
-            Step::Ok,
-            os(Errno::PERM),
-        );
+        let (state, _, _) = run(ActionKind::Signal(Signal::Term), Step::Ok, os(Errno::PERM));
         assert_eq!(state, ActionState::Failed(ActionError::PermissionDenied));
     }
 
     #[test]
     fn signal_esrch() {
-        let (state, _, _) = run(
-            ActionKind::Signal(Signal::Term),
-            Step::Ok,
-            os(Errno::SRCH),
-        );
+        let (state, _, _) = run(ActionKind::Signal(Signal::Term), Step::Ok, os(Errno::SRCH));
         assert_eq!(state, ActionState::Failed(ActionError::NoSuchProcess));
     }
 
