@@ -2448,3 +2448,34 @@ fn startup_counts_follow_text_filter() {
     assert_eq!((c.total, c.enabled, c.disabled), (1, 0, 1));
     rig.passed();
 }
+
+#[test]
+fn inventory_gpu_device_from_pci_slot() {
+    // The worker sends `device: None` and the slot; the reducer finds the catalog GPU.
+    let mut rig = Rig::new();
+    rig.run(vec![gpu_info_msg(), api_versions_msg()])
+        .expect("no invariant violation");
+    let idx = gpu_idx(&rig);
+    rig.run(vec![src(SourceUpdate::Inventory(Box::new(
+        InventorySnapshot {
+            graphics: Arc::from([
+                GraphicsAdapter {
+                    pci_slot: Some(Arc::from(BUS.to_ascii_uppercase())),
+                    ..GraphicsAdapter::default()
+                },
+                GraphicsAdapter {
+                    pci_slot: Some(Arc::from("0000:09:00.0")),
+                    ..GraphicsAdapter::default()
+                },
+            ]),
+            ..InventorySnapshot::default()
+        },
+    )))])
+    .expect("no invariant violation");
+    assert_eq!(rig.latest().inventory.graphics[0].device, Some(idx));
+    assert_versions(&rig);
+    let other = &rig.latest().inventory.graphics[1];
+    assert_eq!(other.device, None);
+    assert_eq!(other.vulkan_version.validity, Validity::WarmingUp);
+    rig.passed();
+}
