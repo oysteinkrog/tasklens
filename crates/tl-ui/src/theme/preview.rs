@@ -629,9 +629,19 @@ mod tests {
         let saves = saves.borrow();
         assert_eq!(saves.len(), 1);
         assert_eq!(saves[0].len(), 1);
-        assert_eq!(saves[0][0].slots[ThemeSlot::WindowBg as usize], hex(0x000000));
-        // Activated without a crossfade: no frame is armed.
+        assert_eq!(
+            saves[0][0].slots[ThemeSlot::WindowBg as usize],
+            hex(0x000000)
+        );
         drop(saves);
+        // Activated without a crossfade: the next frame changes nothing. The frame the edit
+        // scheduled before Done finds no preview and does nothing.
+        let n = vcx.update(|_, cx| style_version(cx));
+        frame(vcx);
+        vcx.update(|_, cx| {
+            assert_eq!(style_version(cx), n);
+            assert_eq!(current(cx).window_bg, hex(0x000000));
+        });
         assert_eq!(frame(vcx), 0);
     }
 
@@ -679,10 +689,7 @@ mod tests {
         let b = begin(vcx, builtin_def(DEFAULT_LIGHT));
         vcx.update(|_, cx| {
             assert_eq!(&*current(cx).name, DEFAULT_LIGHT);
-            assert_eq!(
-                ThemeStore::preview_name(cx).as_deref(),
-                Some(DEFAULT_LIGHT)
-            );
+            assert_eq!(ThemeStore::preview_name(cx).as_deref(), Some(DEFAULT_LIGHT));
             let before = current(cx).clone();
             let n = style_version(cx);
             ThemeStore::set_preview_slot(&a, ThemeSlot::WindowBg, hex(0x000000), cx);
