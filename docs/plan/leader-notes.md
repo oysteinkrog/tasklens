@@ -285,3 +285,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.8: one ActionOps::apply_thread_op instead of three methods. i3o.9 lab_actions has a stand-in gate until i3o.1.
 - qfx.34: shellcheck is not installed, so script_shellcheck_clean skips. Owner decision: install shellcheck (pacman) to make it real.
 - y6k.19 blocked; leader chose reverse_lookup signature, ConnRecord.remote_host, and a resolver task in connections.rs beside source::run (bead comment).
+- i3o.10: real_actions.rs kill-tree test wraps RealOps in StopSettles (waits for state T after SIGSTOP, then 5 ms), because the STOP and KILL passes are microseconds apart. Order is unchanged. thread_nice_only_that_tid is covered by i3o.8 in process.rs.
+- y6k.17: StartupEntry.state_code landed (e5c2405).
+- y6k.19: negative rDNS cache is 1 min (SYS-035), not the 2 min in my bead comment.
