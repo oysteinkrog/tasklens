@@ -7978,6 +7978,7 @@ dependencies = [
  "proptest",
  "rustix",
  "serde",
+ "serde_json",
  "tempfile",
  "tl-engine",
  "tl-model",
