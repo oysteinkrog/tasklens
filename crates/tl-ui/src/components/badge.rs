@@ -16,8 +16,8 @@
 
 use gpui_kit::component::h_flex;
 use gpui_kit::{
-    App, Div, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
-    Window, div, px,
+    App, Div, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, Styled, Window, div, px,
 };
 
 use crate::text::style::{TNUM, label_style};
