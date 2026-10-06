@@ -82,8 +82,8 @@ pub struct DrawnCaption {
 }
 
 /// Test stand-in for the platform window. The GPUI test window panics on `start_window_move`,
-/// `zoom_window` and `show_window_menu`, always reports server decorations and is never
-/// maximized. When this Global is installed the title bar records those three calls here
+/// `zoom_window`, `minimize_window` and `show_window_menu`, always reports server decorations
+/// and is never maximized. When this Global is installed the shell records those four calls here
 /// instead of making them, and reads the overrides below.
 #[cfg(any(test, feature = "test-hooks"))]
 #[derive(Default)]
@@ -98,6 +98,8 @@ pub struct TitleBarProbe {
     pub moves: u32,
     /// `zoom_window` calls.
     pub zooms: u32,
+    /// `minimize_window` calls.
+    pub minimizes: u32,
     /// `show_window_menu` positions.
     pub window_menus: Vec<Point<Pixels>>,
 }
@@ -156,7 +158,7 @@ fn start_move(window: &Window, cx: &mut App) {
     window.start_window_move();
 }
 
-fn zoom(window: &Window, cx: &mut App) {
+pub(crate) fn zoom(window: &Window, cx: &mut App) {
     if probe_installed(cx) {
         #[cfg(any(test, feature = "test-hooks"))]
         {
@@ -192,7 +194,13 @@ pub fn keep_above_supported(cx: &App) -> bool {
 /// The Minimize caption button's behaviour. E20-A1's `MinimizeWindow` handler calls it.
 pub fn minimize_main(window: &mut Window, cx: &mut App) {
     // minimize rule (E31-009): the minimize-to-tray check goes here, before minimize_window
-    let _ = cx;
+    if probe_installed(cx) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            cx.global_mut::<TitleBarProbe>().minimizes += 1;
+        }
+        return;
+    }
     window.minimize_window();
 }
 

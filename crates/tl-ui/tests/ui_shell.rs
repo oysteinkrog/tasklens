@@ -1733,30 +1733,37 @@ mod status {
 
 mod main_window {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle, Global,
-        InteractiveElement, IntoElement, Pixels, Render, Styled, TestAppContext, VisualTestContext,
-        Window, WindowBounds, div, px, size,
+        AnyWindowHandle, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
+        Global, InteractiveElement, IntoElement, Pixels, Render, Styled, TestAppContext,
+        VisualTestContext, Window, WindowBounds, WindowOptions, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::settings::{
         AppearanceSettings, Settings, StartTab, ThemeSettings, UiState, WindowState,
     };
-    use tl_ui::actions::{NextTab, PrevTab, RefreshCurrentTab, SelectTab};
-    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::actions::{
+        CloseWindow, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab,
+        ShowMainWindow, ToggleMainWindow, ZoomWindow,
+    };
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions, UiExit, UiExitSlot};
     use tl_ui::components::toast::{self, ToastKind};
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
-        self as shell, MainWindow, PageFactory, PageSlot, ShellPage, first_frame_ms_from,
-        main_window_options, main_window_view, open_main_window, push_main_toast, restored_bounds,
-        set_test_page,
+        self as shell, CloseOutcome, MainWindow, PageFactory, PageSlot, ShellPage, ShellState,
+        first_frame_ms_from, main_window_options, main_window_view, open_main_window,
+        push_main_toast, restored_bounds, set_test_page,
     };
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
     use tl_ui::window::status::StatusChanged;
+    use tl_ui::window::titlebar::TitleBarProbe;
     use tracing::span::{Attributes, Id, Record};
     use tracing::{Event, Metadata, Subscriber};
 
@@ -2284,5 +2291,292 @@ mod main_window {
             vcx.read_entity(&toasts, |q, _| q.visible_texts()),
             vec!["x".to_owned()]
         );
+    }
+
+    /// Reads through the app, so it works after the main window is removed.
+    fn exit(cx: &TestAppContext) -> Option<UiExit> {
+        cx.read(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()))
+    }
+
+    fn saved(vcx: &mut VisualTestContext) -> WindowState {
+        vcx.update(|_, cx| TlSettings::state(cx).window.clone())
+    }
+
+    fn state_version(vcx: &mut VisualTestContext) -> u64 {
+        vcx.update(|_, cx| TlSettings::get(cx).state_version())
+    }
+
+    fn wait(vcx: &mut VisualTestContext, ms: u64) {
+        vcx.executor().advance_clock(Duration::from_millis(ms));
+        vcx.run_until_parked();
+    }
+
+    fn resize(vcx: &mut VisualTestContext, w: f32, h: f32) {
+        vcx.simulate_resize(size(px(w), px(h)));
+        vcx.run_until_parked();
+    }
+
+    fn probe<R>(vcx: &mut VisualTestContext, f: impl FnOnce(&mut TitleBarProbe) -> R) -> R {
+        vcx.update(|_, cx| f(cx.default_global::<TitleBarProbe>()))
+    }
+
+    /// Removes the main window through `apply_close(RemoveWindow)`.
+    fn remove_main(vcx: &mut VisualTestContext) {
+        let main = main(vcx);
+        vcx.update(|window, cx| {
+            main.update(cx, |m, cx| {
+                m.apply_close_for_test(CloseOutcome::RemoveWindow, window, cx)
+            })
+        });
+        // The removed window stops being the platform's active window, as on a desktop.
+        vcx.deactivate_window();
+        vcx.run_until_parked();
+    }
+
+    fn window_state(w: u32, h: u32, maximized: bool) -> WindowState {
+        WindowState {
+            width: w,
+            height: h,
+            maximized,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn close_quits_by_default(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        assert_eq!(exit(&vcx), None);
+        act(&mut vcx, CloseWindow);
+        assert_eq!(exit(&vcx), Some(UiExit::Quit));
+    }
+
+    #[gpui_kit::test]
+    fn close_to_tray_without_tray_quits(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.tray.close_to_tray = true));
+        act(&mut vcx, CloseWindow);
+        assert_eq!(exit(&vcx), Some(UiExit::Quit));
+    }
+
+    #[gpui_kit::test]
+    fn compositor_close_follows_decision(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        resize(&mut vcx, 900., 600.);
+        assert!(
+            !vcx.simulate_close(),
+            "tasklens decides; the platform never closes the window"
+        );
+        vcx.run_until_parked();
+        assert_eq!(exit(&vcx), Some(UiExit::Quit));
+        assert_eq!(saved(&mut vcx), window_state(900, 600, false));
+    }
+
+    #[gpui_kit::test]
+    fn quit_always_quits(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| {
+                d.settings.tray.close_to_tray = true;
+                d.settings.tray.minimize_to_tray = true;
+            })
+        });
+        resize(&mut vcx, 1000., 700.);
+        act(&mut vcx, Quit);
+        assert_eq!(exit(&vcx), Some(UiExit::Quit));
+        assert_eq!(saved(&mut vcx), window_state(1000, 700, false));
+    }
+
+    #[gpui_kit::test]
+    fn close_saves_size_first(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let before = state_version(&mut vcx);
+        resize(&mut vcx, 1000., 700.);
+        // No clock advance: the close writes at once, not after the debounce.
+        act(&mut vcx, CloseWindow);
+        assert_eq!(saved(&mut vcx), window_state(1000, 700, false));
+        assert_eq!(state_version(&mut vcx), before + 1);
+        assert_eq!(exit(&vcx), Some(UiExit::Quit));
+        wait(&mut vcx, 1000);
+        assert_eq!(
+            state_version(&mut vcx),
+            before + 1,
+            "the pending write was dropped"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn geometry_save_debounced(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let before = state_version(&mut vcx);
+        resize(&mut vcx, 1000., 700.);
+        wait(&mut vcx, 100);
+        resize(&mut vcx, 1100., 720.4);
+        wait(&mut vcx, 100);
+        resize(&mut vcx, 1200., 740.6);
+        wait(&mut vcx, 499);
+        assert_eq!(state_version(&mut vcx), before, "nothing before 500 ms");
+        wait(&mut vcx, 1);
+        assert_eq!(state_version(&mut vcx), before + 1, "written once");
+        assert_eq!(saved(&mut vcx), window_state(1200, 741, false));
+        wait(&mut vcx, 1000);
+        assert_eq!(state_version(&mut vcx), before + 1);
+    }
+
+    #[gpui_kit::test]
+    fn maximized_state_saved(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        probe(&mut vcx, |_| ());
+        act(&mut vcx, ZoomWindow);
+        assert_eq!(probe(&mut vcx, |p| p.zooms), 1);
+        // The compositor maximizes the window and sends the new size.
+        probe(&mut vcx, |p| p.maximized = Some(true));
+        resize(&mut vcx, 1600., 900.);
+        wait(&mut vcx, 500);
+        assert_eq!(saved(&mut vcx), window_state(1600, 900, true));
+    }
+
+    #[gpui_kit::test]
+    fn minimize_button_minimizes(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        probe(&mut vcx, |_| ());
+        act(&mut vcx, MinimizeWindow);
+        assert_eq!(probe(&mut vcx, |p| p.minimizes), 1);
+        assert_eq!(exit(&vcx), None);
+    }
+
+    #[gpui_kit::test]
+    fn show_main_window_reopens(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                start_tab: StartTab::Processes,
+                ..Opts::default()
+            },
+        );
+        act(&mut vcx, SelectTab(2));
+        remove_main(&mut vcx);
+        cx.read(|cx| {
+            let state = cx.global::<ShellState>();
+            assert!(state.main_window.is_none() && state.main_view.is_none());
+            assert!(cx.windows().is_empty());
+        });
+        assert_eq!(exit(&vcx), None, "removing the window does not quit");
+
+        cx.update(|cx| cx.dispatch_action(&ShowMainWindow));
+        cx.run_until_parked();
+        let handle = cx
+            .read(|cx| cx.global::<ShellState>().main_window)
+            .expect("main window reopened");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        draw(&mut vcx);
+        assert_eq!(
+            active(&mut vcx),
+            Tab::Services,
+            "reopens on last_tab, not general.start_tab"
+        );
+        assert!(vcx.update(|window, _| window.is_window_active()));
+    }
+
+    #[gpui_kit::test]
+    fn toggle_main_window_activates_inactive(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        vcx.deactivate_window();
+        assert!(!vcx.update(|window, _| window.is_window_active()));
+        vcx.update(|_, cx| cx.dispatch_action(&ToggleMainWindow));
+        vcx.run_until_parked();
+        assert!(vcx.update(|window, _| window.is_window_active()));
+    }
+
+    #[gpui_kit::test]
+    fn toggle_main_window_minimizes_active(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        probe(&mut vcx, |_| ());
+        assert!(vcx.update(|window, _| window.is_window_active()));
+        act(&mut vcx, ToggleMainWindow);
+        assert_eq!(probe(&mut vcx, |p| p.minimizes), 1);
+        assert!(main_window_view_exists(&mut vcx));
+        assert_eq!(exit(&vcx), None);
+    }
+
+    fn main_window_view_exists(vcx: &mut VisualTestContext) -> bool {
+        vcx.update(|_, cx| main_window_view(cx).is_some())
+    }
+
+    #[gpui_kit::test]
+    fn no_frames_when_idle(cx: &mut TestAppContext) {
+        let mut vcx = rig(
+            cx,
+            Opts {
+                engine: true,
+                ..Opts::default()
+            },
+        );
+        frame(&mut vcx);
+        frame(&mut vcx);
+        wait(&mut vcx, 1000);
+        let driver = vcx.update(|window, cx| AnimationDriver::global(window, cx));
+        let requested = vcx.read_entity(&driver, |d, _| d.stats.requested);
+        for _ in 0..10 {
+            wait(&mut vcx, 100);
+        }
+        assert_eq!(
+            vcx.read_entity(&driver, |d, _| d.stats.requested),
+            requested,
+            "no frame requested while idle"
+        );
+        assert!(!vcx.read_entity(&driver, |d, _| d.is_armed()));
+    }
+
+    struct Blank;
+
+    impl Render for Blank {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    fn open_child(cx: &mut TestAppContext, key: WindowKey) -> AnyWindowHandle {
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.update(cx, |registry, cx| {
+                registry.open_or_focus(key.clone(), cx, |cx| {
+                    cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| Blank))
+                        .map(Into::into)
+                })
+            });
+            registry.read(cx).get(&key).expect("child registered")
+        })
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: AnyWindowHandle) -> bool {
+        cx.read(|cx| {
+            cx.windows()
+                .iter()
+                .any(|w| w.window_id() == handle.window_id())
+        })
+    }
+
+    #[gpui_kit::test]
+    fn remove_window_closes_children(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
+        for (cx, keep_detached) in [(cx_a, false), (cx_b, true)] {
+            setup(cx, &Opts::default());
+            cx.update(|cx| {
+                GlobalRegistry::init(cx);
+                TlSettings::update(cx, |d| {
+                    d.settings.graphs.keep_detached_on_close = keep_detached
+                });
+            });
+            let mut vcx = open(cx);
+            let about = open_child(cx, WindowKey::About);
+            let graph = open_child(cx, WindowKey::DetachedGraph(0));
+            remove_main(&mut vcx);
+            cx.run_until_parked();
+            assert!(!is_open(cx, about), "a child closes with the main window");
+            assert_eq!(
+                is_open(cx, graph),
+                keep_detached,
+                "a detached graph stays only with keep_detached_on_close"
+            );
+            assert_eq!(exit(cx), None);
+        }
     }
 }

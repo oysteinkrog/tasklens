@@ -11,28 +11,38 @@
 //! (ADR-009). A tab whose page has no arm in the match is not shown (R-023). Each page epic adds
 //! its arm, its `impl ShellPage` and, when it has page buttons, its [`toolbar_for`] arm.
 //!
-//! The close decision, the window actions, reopening and size saving are E20-A1.
+//! The close decision, the window actions, reopening and size saving are E20-A1 (UI-SHL-002,
+//! UI-SHL-005, UI-SHL-112, UI-SHL-113, APP-045). Every quit goes through
+//! `request_exit(cx, UiExit::Quit)`; `tl_ui::run` sets `QuitMode::Explicit`, so removing the last
+//! window does not quit (ADR-010).
 
 use std::mem;
+use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
-    AnyView, App, AppContext as _, Bounds, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString, StyleRefinement,
-    Styled, Subscription, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
+    AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, EventEmitter,
+    FocusHandle, Global, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div, point, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::settings::{Decorations, StartTab, WindowState};
 use tracing::{debug, error, info, warn};
 
+use super::registry::GlobalRegistry;
 use super::status::{CHIP_H, CHIP_RESERVE, StatusAction, StatusChanged, StatusChip};
 use super::tabstrip::TabStrip;
-use super::titlebar::TitleBarView;
+#[cfg(any(test, feature = "test-hooks"))]
+use super::titlebar::TitleBarProbe;
+use super::titlebar::{TitleBarView, minimize_main, zoom};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
-use crate::actions::{GLOBAL_CONTEXT, NextTab, PrevTab, RefreshCurrentTab, SelectTab};
+use crate::actions::{
+    CloseWindow, GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
+    SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
+};
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
 use crate::components::menu::context_menu_layer;
@@ -55,6 +65,16 @@ pub const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 pub const WINDOW_TITLE: &str = "tasklens";
 /// Gap between the tab strip and the toast stack's top edge, × ui_scale (UI-SHL-100).
 const TOAST_GAP: f32 = 8.0;
+/// Quiet time after the last bounds change before the size is written (UI-SHL-002).
+const SIZE_SAVE_DELAY: Duration = Duration::from_millis(500);
+
+/// What closing the main window does (UI-SHL-113).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloseOutcome {
+    Quit,
+    /// Remove the window; the app and the engine keep running.
+    RemoveWindow,
+}
 
 /// Implemented by every page entity (E22, E24, E27, E28). Inherent methods of the same name may
 /// exist; the impl forwards to them.
@@ -256,7 +276,8 @@ struct FirstFrameLogged;
 
 impl Global for FirstFrameLogged {}
 
-/// Installs `GlobalShellEvents` and `ShellState` and sets the main open hook.
+/// Installs `GlobalShellEvents` and `ShellState`, the app-level window actions and the main open
+/// hook.
 pub fn init(cx: &mut App) {
     let events = cx.new(|_| ShellEvents);
     cx.set_global(GlobalShellEvents(events));
@@ -274,6 +295,113 @@ pub fn init(cx: &mut App) {
             request_exit(cx, UiExit::RendererFailed(err.to_string()));
         }
     }));
+    cx.on_action(on_quit);
+    // Deferred: from a key in the main window, that window is mid-update and cannot be reached.
+    cx.on_action(|_: &ShowMainWindow, cx| cx.defer(show_main_window));
+    cx.on_action(|_: &ToggleMainWindow, cx| cx.defer(toggle_main_window));
+}
+
+/// `Quit` always quits, whatever the tray settings (UI-SHL-113).
+fn on_quit(_: &Quit, cx: &mut App) {
+    if let Some(view) = main_window_view(cx) {
+        view.update(cx, |this, cx| this.write_size(cx));
+    }
+    request_exit(cx, UiExit::Quit);
+}
+
+/// `ShowMainWindow`: activates the main window, or reopens it when it was removed.
+fn show_main_window(cx: &mut App) {
+    let shown = main_handle(cx).is_some_and(|handle| {
+        handle
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok()
+    });
+    if !shown {
+        reopen_main_window(cx);
+    }
+}
+
+/// `ToggleMainWindow`: an active main window is removed when the close decision says so and
+/// minimized otherwise; an inactive one is activated; a removed one is reopened.
+fn toggle_main_window(cx: &mut App) {
+    let toggled = main_handle(cx).is_some_and(|handle| {
+        handle
+            .update(cx, |_, window, cx| {
+                if !window.is_window_active() {
+                    window.activate_window();
+                    return;
+                }
+                let Some(view) = main_window_view(cx) else {
+                    return;
+                };
+                match view.read(cx).close_decision(cx) {
+                    CloseOutcome::RemoveWindow => view.update(cx, |this, cx| {
+                        this.apply_close(CloseOutcome::RemoveWindow, window, cx)
+                    }),
+                    CloseOutcome::Quit => minimize_main(window, cx),
+                }
+            })
+            .is_ok()
+    });
+    if !toggled {
+        reopen_main_window(cx);
+    }
+}
+
+/// The main window's handle. A handle whose window is gone is cleared.
+fn main_handle(cx: &mut App) -> Option<WindowHandle<Root>> {
+    let handle = cx.try_global::<ShellState>()?.main_window?;
+    if cx
+        .windows()
+        .iter()
+        .any(|w| w.window_id() == handle.window_id())
+    {
+        return Some(handle);
+    }
+    let state = cx.global_mut::<ShellState>();
+    state.main_window = None;
+    state.main_view = None;
+    None
+}
+
+/// Opens a new main window on `UiState.tabs.last_tab` (UI-SHL-112), ignoring `--tab` and
+/// `general.start_tab`, then activates it.
+pub fn reopen_main_window(cx: &mut App) {
+    let tab = TlSettings::state(cx).tabs.last_tab;
+    let handle = match open_main_window_on(tab, cx) {
+        Ok(handle) => handle,
+        Err(err) => {
+            error!(target: "tasklens::ui", %err, "could not reopen the main window");
+            return;
+        }
+    };
+    let _ = handle.update(cx, |_, window, _| window.activate_window());
+    // after reopen (E31-009 chain edit): tell the tray bridge the main window is visible
+}
+
+/// `UiState.window` for `bounds`: logical px rounded to integers. Maximized and fullscreen save
+/// the size they carry with `maximized` set.
+fn size_state(bounds: WindowBounds) -> WindowState {
+    let (b, maximized) = match bounds {
+        WindowBounds::Windowed(b) => (b, false),
+        WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+    };
+    WindowState {
+        width: f32::from(b.size.width).round() as u32,
+        height: f32::from(b.size.height).round() as u32,
+        maximized,
+    }
+}
+
+/// `window.window_bounds()`. The test window is never maximized, so tests set
+/// `TitleBarProbe.maximized` instead.
+fn window_bounds_of(window: &Window, cx: &App) -> WindowBounds {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if cx.try_global::<TitleBarProbe>().and_then(|p| p.maximized) == Some(true) {
+        return WindowBounds::Maximized(window.bounds());
+    }
+    let _ = cx;
+    window.window_bounds()
 }
 
 /// The `MainWindow` view of the open main window.
@@ -436,6 +564,10 @@ pub struct MainWindow {
     /// `(state_version, processes version)` the toolbar model was built from.
     settings_versions: (u64, u64),
     style_version: u64,
+    /// The latest window bounds, written to `UiState.window` after the debounce or on close.
+    bounds: WindowBounds,
+    /// The pending size write. A new bounds change replaces it.
+    save_task: Option<Task<()>>,
     _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, feature = "test-hooks"))]
     first_frames: u32,
@@ -491,6 +623,28 @@ impl MainWindow {
             cx.notify();
         }));
         // The title bar keeps the toolbar model's `window_active` itself (E20-004).
+        // Size saving (UI-SHL-002): the last bounds change wins, written 500 ms later.
+        subs.push(
+            cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.bounds = window_bounds_of(window, cx);
+                this.save_task = Some(cx.spawn(
+                    async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                        cx.background_executor().timer(SIZE_SAVE_DELAY).await;
+                        let _ = this.update(cx, |this, cx| this.write_size(cx));
+                    },
+                ));
+            }),
+        );
+        // The compositor's close request follows the same decision; tasklens then removes the
+        // window or quits itself, so the platform never closes it.
+        let view = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            view.update(cx, |this, cx| {
+                let outcome = this.close_decision(cx);
+                this.apply_close(outcome, window, cx);
+            })
+            .is_err()
+        });
 
         let mut this = Self {
             root_focus,
@@ -504,6 +658,8 @@ impl MainWindow {
             status_buf: String::new(),
             settings_versions: settings_versions(cx),
             style_version: metrics(cx).style_version,
+            bounds: window_bounds_of(window, cx),
+            save_task: None,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
@@ -547,6 +703,73 @@ impl MainWindow {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn first_frames(&self) -> u32 {
         self.first_frames
+    }
+
+    /// The close decision (UI-SHL-113). Rows are checked in order; first match wins.
+    fn close_decision(&self, cx: &App) -> CloseOutcome {
+        let _ = cx;
+        // close decision: row 1, close to tray (E31-009 chain edit)
+        // close decision: row 2, keep detached graphs (E20-028)
+        CloseOutcome::Quit
+    }
+
+    /// Saves the size, then quits or removes the window. Removing closes the registered child
+    /// windows (APP-045); the app and the engine keep running.
+    fn apply_close(&mut self, outcome: CloseOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_size_now(window, cx);
+        match outcome {
+            CloseOutcome::Quit => request_exit(cx, UiExit::Quit),
+            CloseOutcome::RemoveWindow => {
+                let keep_detached = TlSettings::settings(cx).graphs.keep_detached_on_close;
+                if let Some(registry) = cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
+                    registry.update(cx, |registry, cx| {
+                        registry.close_children_of_main(keep_detached, cx)
+                    });
+                }
+                let state = cx.default_global::<ShellState>();
+                state.main_window = None;
+                state.main_view = None;
+                window.remove_window();
+            }
+        }
+    }
+
+    /// `apply_close` for tests that need a removed main window.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn apply_close_for_test(
+        &mut self,
+        outcome: CloseOutcome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.apply_close(outcome, window, cx);
+    }
+
+    /// Drops the pending size write and writes the current bounds at once.
+    fn save_size_now(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.bounds = window_bounds_of(window, cx);
+        self.write_size(cx);
+    }
+
+    /// Writes the recorded bounds to `UiState.window` and drops the pending write. Position is
+    /// never saved.
+    fn write_size(&mut self, cx: &mut Context<Self>) {
+        self.save_task = None;
+        let state = size_state(self.bounds);
+        TlSettings::update(cx, |d| d.state.window = state);
+    }
+
+    fn on_close_window(&mut self, _: &CloseWindow, window: &mut Window, cx: &mut Context<Self>) {
+        let outcome = self.close_decision(cx);
+        self.apply_close(outcome, window, cx);
+    }
+
+    fn on_minimize(&mut self, _: &MinimizeWindow, window: &mut Window, cx: &mut Context<Self>) {
+        minimize_main(window, cx);
+    }
+
+    fn on_zoom(&mut self, _: &ZoomWindow, window: &mut Window, cx: &mut Context<Self>) {
+        zoom(window, cx);
     }
 
     /// The tab switch. `write_last` is false only for the start tab.
@@ -720,6 +943,9 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_close_window))
+            .on_action(cx.listener(Self::on_minimize))
+            .on_action(cx.listener(Self::on_zoom))
             // window-level on_action handlers (chain edits)
             .child(
                 AnyView::from(self.titlebar.clone())
