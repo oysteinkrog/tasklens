@@ -27,7 +27,6 @@ use asupersync::time::{TimeSource, TimerDriverHandle, VirtualClock};
 use asupersync::types::{Budget, RegionId, Time};
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::io::Errno;
-use smallvec::SmallVec;
 use tl_engine::actions::process::PidOp;
 use tl_engine::actions::{ActionCtx, ActionOps, Admission, admit, deadline, run_action, summarize};
 use tl_engine::config::{EngineConfig, EngineMode};
@@ -309,7 +308,7 @@ fn req(id: u64, kind: ActionKind, targets: &[ActionTarget]) -> ActionRequest {
     ActionRequest {
         id: ActionId(id),
         kind,
-        targets: SmallVec::from_slice(targets),
+        targets: targets.iter().cloned().collect(),
         privileged: false,
     }
 }
@@ -774,7 +773,7 @@ fn kill_tree_stop_all_then_kill_all() {
     let (events, calls) = tree(&mut h, &[501, 502, 503]);
     assert_eq!(
         events,
-        expected(&[ActionState::Succeeded; 3], ActionState::Succeeded)
+        expected(&vec![ActionState::Succeeded; 3], ActionState::Succeeded)
     );
     let mut want: Vec<FakeCall> = [501, 502, 503].map(FakeCall::Open).into();
     for sig in [Signal::Stop, Signal::Kill] {
