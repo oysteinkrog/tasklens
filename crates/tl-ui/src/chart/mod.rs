@@ -161,7 +161,14 @@ impl YScale {
 /// Everything that forces a geometry rebuild when it changes (ADR-009).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChartGeometryKey {
-    pub series_versions: SmallVec<[u64; 2]>,
+    /// One per `spec.series` entry, 0 when absent. Inline size matches `ChartSpec.series`.
+    pub series_versions: SmallVec<[u64; 4]>,
+    pub scalars: GeometryScalars,
+}
+
+/// The fixed-size part of a `ChartGeometryKey`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GeometryScalars {
     pub physical_width: u32,
     pub physical_height: u32,
     pub range_ns: u64,
@@ -170,6 +177,26 @@ pub struct ChartGeometryKey {
     pub y_min_bits: u32,
     pub y_max_bits: u32,
     pub style_version: u64,
+}
+
+impl ChartGeometryKey {
+    /// Brings the key up to date with `versions` and `scalars` and returns true when anything
+    /// differed. The versions are compared in place, and on a change the existing buffer is
+    /// cleared and refilled, so a chart past the inline size reuses its heap buffer and an
+    /// unchanged chart allocates nothing.
+    pub fn sync(
+        &mut self,
+        versions: impl Iterator<Item = u64> + Clone,
+        scalars: GeometryScalars,
+    ) -> bool {
+        if self.scalars == scalars && self.series_versions.iter().copied().eq(versions.clone()) {
+            return false;
+        }
+        self.scalars = scalars;
+        self.series_versions.clear();
+        self.series_versions.extend(versions);
+        true
+    }
 }
 
 /// One merged path of a single colour.
@@ -184,6 +211,9 @@ pub struct PathSet {
 #[derive(Clone, Debug, Default)]
 pub struct ChartCache {
     pub key: ChartGeometryKey,
+    /// `ChartGeometryKey::sync` calls that changed the key.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub key_rebuilds: u32,
     /// Newest sample time when built (ADR-009 rule 4).
     pub anchor_ns: u64,
     pub px_per_ns: f64,
@@ -258,15 +288,60 @@ mod tests {
     #[test]
     fn geometry_key_range_matters() {
         let a = ChartGeometryKey {
-            range_ns: 30_000_000_000,
+            scalars: GeometryScalars {
+                range_ns: 30_000_000_000,
+                ..Default::default()
+            },
             ..Default::default()
         };
         let b = ChartGeometryKey {
-            range_ns: DEFAULT_RANGE_NS,
+            scalars: GeometryScalars {
+                range_ns: DEFAULT_RANGE_NS,
+                ..Default::default()
+            },
             ..Default::default()
         };
         assert_ne!(a, b);
         assert_eq!(a, a.clone());
+    }
+
+    #[test]
+    fn geometry_key_sync_in_place() {
+        let scalars = GeometryScalars {
+            physical_width: 600,
+            ..Default::default()
+        };
+        let mut key = ChartGeometryKey::default();
+        let versions = [1u64, 2, 3, 4, 5, 6];
+        assert!(key.sync(versions.iter().copied(), scalars));
+        assert!(key.series_versions.spilled());
+        let buf = key.series_versions.as_ptr();
+
+        assert!(!key.sync(versions.iter().copied(), scalars), "unchanged");
+        assert!(
+            !key.sync(versions.iter().copied(), scalars),
+            "still unchanged"
+        );
+
+        let bumped = [1u64, 2, 3, 9, 5, 6];
+        assert!(key.sync(bumped.iter().copied(), scalars));
+        assert_eq!(&key.series_versions[..], &bumped[..]);
+        assert_eq!(key.series_versions.as_ptr(), buf, "heap buffer reused");
+
+        assert!(
+            key.sync(bumped[..5].iter().copied(), scalars),
+            "fewer series"
+        );
+        assert!(
+            key.sync(
+                bumped[..5].iter().copied(),
+                GeometryScalars {
+                    y_max_bits: 1,
+                    ..scalars
+                }
+            ),
+            "scalar change"
+        );
     }
 
     #[test]

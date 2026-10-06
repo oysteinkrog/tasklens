@@ -1555,3 +1555,123 @@ mod labels {
         assert_eq!(f(F::Rpm, 1199.6, Bits), "1200 RPM");
     }
 }
+
+// Geometry key compared in place: no key rebuild and no geometry build per frame for an
+// unchanged chart, even past the inline series size (tasklens-yrf.19).
+mod key_in_place {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, ParentElement, Render, Styled, TestAppContext,
+        VisualTestContext, Window, div, px,
+    };
+    use smallvec::SmallVec;
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::chart::view::ChartView;
+    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const SERIES: usize = 16;
+    const PERIOD: u64 = 1_000_000_000;
+
+    struct Root {
+        _driver: Entity<AnimationDriver>,
+        chart: Entity<ChartView>,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(602.)).h(px(202.)).child(self.chart.clone())
+        }
+    }
+
+    fn view_of(i: usize, newest: u64, version: u64) -> Arc<SeriesView> {
+        let samples: Vec<Sample> = (0..60u64)
+            .map(|k| Sample::valid(newest - (59 - k) * PERIOD, ((k + i as u64) % 100) as f32))
+            .collect();
+        Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(0),
+                metric: MetricId::CPU_TOTAL,
+            },
+            version,
+            period_ns: PERIOD,
+            samples: samples.into(),
+        })
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn counts(vcx: &mut VisualTestContext, chart: &Entity<ChartView>) -> (u32, u32) {
+        vcx.read_entity(chart, |v, _| (v.key_rebuilds(), v.build_count.get()))
+    }
+
+    #[gpui_kit::test]
+    fn unchanged_16_series_chart_rebuilds_nothing(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+        let spec = ChartSpec {
+            series: (0..SERIES).map(|_| ChartSeries::default()).collect(),
+            ..ChartSpec::default()
+        };
+        let labels = super::labels();
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            let hub = super::hub_for(&FakeEngine::new(), cx);
+            let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+            Root {
+                _driver: driver,
+                chart,
+            }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        let chart = vcx.read_entity(&root, |r, _| r.chart.clone());
+
+        let newest = now_boot_ns();
+        let mut views: SmallVec<[Option<Arc<SeriesView>>; 2]> =
+            (0..SERIES).map(|i| Some(view_of(i, newest, 1))).collect();
+        chart.update(vcx, |v, cx| {
+            v.set_series_for_test(views.clone(), cx);
+            v.set_state(ChartState::Live, cx);
+        });
+        draw(vcx);
+        let first = counts(vcx, &chart);
+        assert_eq!(first, (1, 1), "the first paint builds once");
+
+        for _ in 0..120 {
+            draw(vcx);
+        }
+        assert_eq!(
+            counts(vcx, &chart),
+            first,
+            "120 unchanged paints: 0 key rebuilds, 0 geometry builds"
+        );
+
+        views[7] = Some(view_of(7, newest, 2));
+        chart.update(vcx, |v, cx| v.set_series_for_test(views.clone(), cx));
+        draw(vcx);
+        draw(vcx);
+        assert_eq!(
+            counts(vcx, &chart),
+            (first.0 + 1, first.1 + 1),
+            "one version bump: exactly 1 key rebuild and 1 geometry build"
+        );
+    }
+}

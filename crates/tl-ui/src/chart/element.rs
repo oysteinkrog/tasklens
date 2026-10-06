@@ -1,9 +1,10 @@
 //! `ChartElement`: paints one `ChartView` (ADR-009 rules 1 to 7, UI-PRF-001 "Paint plan per
 //! frame", UI-PRF-005, UI-PRF-007).
 //!
-//! Geometry is rebuilt only when the `ChartGeometryKey` changes. Every other frame clones the
-//! cached paths, moves them into place and paints them, so a moving chart costs 2 to 4 path
-//! clones and 3 to 13 grid quads per frame and allocates nothing else.
+//! Geometry is rebuilt only when the `ChartGeometryKey` changes, checked in place by
+//! `ChartGeometryKey::sync`. Every other frame clones the cached paths, moves them into place
+//! and paints them, so a moving chart costs 2 to 4 path clones and 3 to 13 grid quads per frame
+//! and allocates nothing else.
 //!
 //! Stale tail: while every series is stale (R-051) the right edge keeps moving with the clock,
 //! `now − period` when sliding and `now` otherwise, so the flat half-alpha tail from the newest
@@ -26,7 +27,7 @@ use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::labels::{self, LabelPaint};
 use super::view::ChartView;
-use super::{ChartGeometryKey, ChartSeries, ChartState, PathSet, scale};
+use super::{ChartSeries, ChartState, GeometryScalars, PathSet, scale};
 use crate::anim::AnimationDriver;
 use crate::settings_global::TlSettings;
 use crate::theme::{TlTheme, UiMetrics};
@@ -231,20 +232,24 @@ fn paint_view(
             env.network_unit,
             axis_text,
         );
-        let key = ChartGeometryKey {
-            series_versions: series
-                .iter()
-                .map(|s| s.as_ref().map_or(0, |s| s.version))
-                .collect(),
-            physical_width: pw,
-            physical_height: ph,
-            range_ns,
-            scale_bits: spec.scale_bits(),
-            y_min_bits: y.y_min.to_bits(),
-            y_max_bits: y.y_max.to_bits(),
-            style_version: env.metrics.style_version,
-        };
-        if key != cache.key || (stale && right_edge != *built_right_edge_ns) {
+        // Compared in place, so an unchanged chart allocates nothing here (tasklens-yrf.19).
+        let key_changed = cache.key.sync(
+            series.iter().map(|s| s.as_ref().map_or(0, |s| s.version)),
+            GeometryScalars {
+                physical_width: pw,
+                physical_height: ph,
+                range_ns,
+                scale_bits: spec.scale_bits(),
+                y_min_bits: y.y_min.to_bits(),
+                y_max_bits: y.y_max.to_bits(),
+                style_version: env.metrics.style_version,
+            },
+        );
+        #[cfg(any(test, feature = "test-hooks"))]
+        if key_changed {
+            cache.key_rebuilds += 1;
+        }
+        if key_changed || (stale && right_edge != *built_right_edge_ns) {
             let pairs: SmallVec<[(ChartSeries, Option<&SeriesView>); 2]> = spec
                 .series
                 .iter()
@@ -266,7 +271,6 @@ fn paint_view(
                 stack: spec.stack,
             };
             geometry::build(&input, &mut cache, scratch);
-            cache.key = key;
             *built_right_edge_ns = right_edge;
             #[cfg(any(test, feature = "test-hooks"))]
             view_hook_build(&view.build_count);
@@ -396,6 +400,14 @@ fn paint_view(
     view.last_right_edge_ns.set(right_edge);
 
     PaintOut { moving, newest_ns }
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl ChartView {
+    /// Paints that found the geometry key changed and updated it.
+    pub fn key_rebuilds(&self) -> u32 {
+        self.cache.borrow().key_rebuilds
+    }
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
