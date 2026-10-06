@@ -506,3 +506,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - ug9.32 (71ec3f9, e973fbb, 22a3417, 82efe8f): KvWords global; cpu_details cache and boot words. The leftover English moved to a new ug9 bead. Test committed before build (process slip, fixed in a follow-up commit).
 - rsf.23 (63f119c, 64421ad): isolate ends before the trailing space; RTL golden regenerated.
 - jqk.10: the clippy errors were fixed in 771dfc7 before my message; HEAD is clean.
+- rsf.2 (87a2657, ebebe40, 3e6c685): column picker. ColumnHost uses string keys (follows rsf.22, accepted). Group order comes from the layout. Five table-name keys added. Tab order and window centring moved to a follow-up bead. Unscaled minimum size matches the other windows (accepted).
