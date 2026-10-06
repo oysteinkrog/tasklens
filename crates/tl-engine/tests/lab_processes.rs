@@ -371,17 +371,35 @@ fn comm_change_refreshes_metadata_at_once() {
 }
 
 #[test]
-fn cmdline_change_waits_for_tenth_sweep() {
+fn cmdline_change_waits_for_refresh_sweep() {
     let root = FixtureRoot::merged();
     let mut rig = Rig::start(&root, table_demand(), 1000);
-    // The first sweep reads the metadata; the refresh counter starts there.
+    // The first sweep reads the metadata. The first refresh is staggered by pid: it comes
+    // 10 - (pid % 10) sweeps later, then every 10 sweeps, so no read is older than 10 (R-064,
+    // R-286).
     let old = record(rig.next_sweep(), TOKENPROC).meta.cmdline.clone();
     assert!(old.is_some());
+    let first = 10 - TOKENPROC % 10;
+    assert!((1..=10).contains(&first));
 
+    // A change before the first refresh shows at that sweep and not before.
+    root.write(TOKENPROC, "cmdline", b"first-cmd\0--x\0");
+    for n in 1..first {
+        let seen = record(rig.next_sweep(), TOKENPROC).meta.cmdline.clone();
+        assert_eq!(seen, old, "sweep {n}: read before the staggered refresh");
+    }
+    let seen = record(rig.next_sweep(), TOKENPROC).meta.cmdline.clone();
+    assert_eq!(seen.as_deref(), Some("first-cmd --x"), "sweep {first}");
+
+    // After that the counter restarts: a change shows 10 sweeps later.
     root.write(TOKENPROC, "cmdline", b"changed-cmd\0--y\0");
     for n in 1..10 {
         let seen = record(rig.next_sweep(), TOKENPROC).meta.cmdline.clone();
-        assert_eq!(seen, old, "sweep {n} after the refresh re-read the cmdline");
+        assert_eq!(
+            seen.as_deref(),
+            Some("first-cmd --x"),
+            "sweep {n} after the refresh re-read the cmdline"
+        );
     }
     let tenth = record(rig.next_sweep(), TOKENPROC).meta.cmdline.clone();
     assert_eq!(tenth.as_deref(), Some("changed-cmd --y"));
