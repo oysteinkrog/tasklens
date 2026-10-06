@@ -31,6 +31,7 @@ use tl_model::table::{Manager, SysTable, Total, UnitRef};
 use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
+use super::process_series::ProcessSeries;
 use super::suspend::Transition;
 use super::sys_table::{self, SysTableInput};
 use super::table::{self, PseudoInput, SweepTotals, TableInput};
@@ -102,6 +103,8 @@ pub struct ApplyState {
     running: [bool; SourceId::COUNT],
     /// The source has been `Running` before in this session (R-289).
     ran: [bool; SourceId::COUNT],
+    /// Per-process series for `Demand.graph_targets` (E09-029).
+    process_series: ProcessSeries,
 }
 
 impl ApplyState {
@@ -458,6 +461,15 @@ impl Reducer {
                 }
                 self.publish_processes(observed);
                 self.rebuild_table(settings);
+                let period = u64::from(settings.interval_ms) * 1_000_000;
+                let processes = &self.components.processes;
+                self.apply_state.process_series.on_sweep(
+                    observed.1,
+                    period,
+                    &processes.records,
+                    &processes.extras,
+                );
+                self.publish_process_series();
             }
             SourceUpdate::DeviceDetails(d) => self.apply_device_details(d)?,
             SourceUpdate::ColorScheme(v) => {
@@ -542,6 +554,7 @@ impl Reducer {
             Command::ResetBaselines => {
                 self.bump_reset_generation();
                 self.series.mark_gap_all();
+                self.apply_state.process_series.mark_gap_all();
             }
             Command::ReprobeSource(id) => self.forward(id, WorkerCommand::Reprobe),
             Command::KWin(c) => self.forward(SourceId::KWin, WorkerCommand::KWin(c)),
@@ -663,6 +676,7 @@ impl Reducer {
     /// (ADR-008). The GPU probe gets no command.
     fn resume(&mut self) {
         self.series.mark_gap_all();
+        self.apply_state.process_series.mark_gap_all();
         self.bump_reset_generation();
         for source in [SourceId::Disk, SourceId::Net, SourceId::Sensors] {
             self.forward(source, WorkerCommand::RefreshNow);
@@ -1249,6 +1263,19 @@ impl Reducer {
         }
     }
 
+    /// Sets `process_series` and marks `PROCESS_SERIES` when the series changed (E09-029). The
+    /// header carries the observed times and validity of the last sweep.
+    fn publish_process_series(&mut self) {
+        let header = ComponentHeader {
+            version: 0,
+            ..self.components.processes.header
+        };
+        if let Some(next) = self.apply_state.process_series.publish(header) {
+            self.components.process_series = next;
+            self.mark(ComponentMask::PROCESS_SERIES);
+        }
+    }
+
     /// Applies the demand of this batch: PSS of keys no longer demanded becomes `WarmingUp`
     /// and leaves coverage. A hidden PSS and USS column demands no keys.
     pub fn apply_demand(&mut self, demand: &Demand, settings: &EngineSettings) {
@@ -1260,6 +1287,10 @@ impl Reducer {
             Arc::from([])
         };
         self.retain_unit_details(&demand.unit_details);
+        self.apply_state
+            .process_series
+            .set_targets(&demand.graph_targets);
+        self.publish_process_series();
         if *keys == *self.apply_state.pss_keys {
             return;
         }
