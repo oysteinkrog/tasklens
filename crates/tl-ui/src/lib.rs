@@ -15,6 +15,7 @@ pub mod table;
 pub mod text;
 pub mod text_cache;
 pub mod theme;
+pub mod tray_bridge;
 pub mod window;
 pub mod windows;
 
