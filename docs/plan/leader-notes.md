@@ -300,3 +300,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8q0.27: Reducer.unit_names never removes names (an empty listing while systemd is down would blank rows). Accepted.
 - y6k.19: `tl_ops::sys` is now `pub mod`. Negative rDNS TTL 1 min.
 - hjn.16: no udev file gives Unsupported interface/WWN/serial even for nvme*/vd*; a udev file without ID_BUS uses the name fallback. A failed udev read gives Restricted. Accepted.
+- qfx.35: state in /var/lib/tasklens (lm_sensors.before, enabled marker); reads BUS_MODULES and HWMON_MODULES; revert disables but does not stop the service; /etc/modprobe.d/lm_sensors.conf not reverted. docs/spec/features-perf.md (superseded) still says MODULE_n. OWNER REVIEW with the qfx.25 decision.
+- ug9.24: TlStepper closed; TlTextInput gained align_right, suffix_text, square_corners.
+- y6k.28: one walk per tick; DbusConn::p2p is cfg(test) only (no test-hooks feature in tl-engine). The user manager's -.slice keeps all of that manager's pids (its ControlGroup is not "/"); accepted. An unreadable child cgroup is skipped with its subtree.
