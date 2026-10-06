@@ -200,6 +200,7 @@ fn harness_full(config: LabConfig, openers: Option<Arc<dyn Openers>>) -> Harness
         openers,
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
+        unit_bus_override: None,
     });
     Harness {
         lab,

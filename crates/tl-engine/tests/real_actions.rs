@@ -163,6 +163,7 @@ fn actx(ops: Arc<dyn ActionOps>) -> Arc<ActionCtx> {
         openers: None,
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
+        unit_bus_override: None,
     })
 }
 

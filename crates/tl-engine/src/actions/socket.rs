@@ -265,6 +265,7 @@ mod tests {
                 openers: None,
                 helper,
                 destroy_support_sent: AtomicBool::new(false),
+                unit_bus_override: None,
             });
             let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
             let root = lab.state.create_root_region(Budget::INFINITE);

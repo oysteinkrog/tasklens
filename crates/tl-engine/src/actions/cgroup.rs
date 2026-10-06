@@ -189,6 +189,7 @@ mod tests {
             openers: None,
             helper: None,
             destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
+            unit_bus_override: None,
         });
         let cg = CgroupRef {
             rel_path: Arc::from(APP_SCOPE),

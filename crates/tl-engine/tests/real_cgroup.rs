@@ -148,6 +148,7 @@ fn run(rt: &Runtime, kind: ActionKind, cg: &CgroupRef) -> ActionState {
         openers: None,
         helper: None,
         destroy_support_sent: std::sync::atomic::AtomicBool::new(false),
+        unit_bus_override: None,
     });
     let cg = cg.clone();
     let (tx, rx) = std::sync::mpsc::channel();

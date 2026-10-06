@@ -10,6 +10,7 @@ pub mod dump;
 pub mod process;
 pub mod socket;
 pub mod targetless;
+pub mod unit;
 
 use std::future::Future;
 use std::os::fd::{AsFd, OwnedFd};
@@ -536,6 +537,8 @@ pub struct ActionCtx {
     pub helper: Option<Arc<dyn PrivilegedOps>>,
     /// Set once `ConnectionsDestroySupport(true)` was sent this session (E11-021).
     pub destroy_support_sent: AtomicBool,
+    /// Picks the unit bus in place of the manager slots. `None` in production; tests set it.
+    pub unit_bus_override: Option<unit::UnitBusOverride>,
 }
 
 /// The `ActionGate` the reducer calls (E11-A1). The only entry to `run_action`: every request
@@ -692,6 +695,7 @@ pub fn gate_with_ops(hook: HookCtx, ops: Arc<dyn ActionOps>) -> Box<dyn ActionGa
         // E29-014.
         helper: None,
         destroy_support_sent: AtomicBool::new(false),
+        unit_bus_override: None,
     })))
 }
 
@@ -872,9 +876,8 @@ async fn dispatch(
             proto,
             four_tuple,
         } => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
-        ActionTarget::Unit(_) | ActionTarget::Startup(_) => {
-            ActionState::Rejected(RejectReason::Unsupported)
-        }
+        ActionTarget::Unit(unit) => unit::run_target(cx, actx, kind, unit).await,
+        ActionTarget::Startup(_) => ActionState::Rejected(RejectReason::Unsupported),
     }
 }
 
@@ -1217,6 +1220,7 @@ mod tests {
             openers: None,
             helper: None,
             destroy_support_sent: AtomicBool::new(false),
+            unit_bus_override: None,
         });
         (Gate::new(ctx), events, msgs)
     }
@@ -1363,6 +1367,7 @@ mod run_tests {
                 openers: None,
                 helper: None,
                 destroy_support_sent: AtomicBool::new(false),
+                unit_bus_override: None,
             });
             Self {
                 lab: LabRuntime::new(LabConfig::new(7).max_steps(1_000_000)),
