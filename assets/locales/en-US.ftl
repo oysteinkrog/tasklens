@@ -380,3 +380,6 @@ sys-sys003-disabled = Disabled
 sys-sys003-masked = Masked
 sys-sys003-not-in-this-desktop = Not in this desktop
 sys-sys003-missing-program = Missing program
+
+# TlKeyValueGrid empty filter text
+fnd-kv-no-match = No properties match the current filter.
