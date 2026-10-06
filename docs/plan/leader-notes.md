@@ -257,3 +257,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - y6k.15: startup worker lists no user units until E14-013 fills ScanInput.units; impact NotMeasured until E14-013.
 - hx1.10: netns: if proc self ns net is unreadable nothing is filtered as host.
 - lban closed: restart reporting lives in controller.rs (SourceController wraps the factory): Err or panic sends Failed, generation above 1 sends Running first. Closed and cancel send nothing.
+- ug9.19: kv_grid::init(cx) must run at app startup (noted on jqk.4). TlButton draws icons at i_md only, so Copy section icon is 16 not 14 (polish: icon size option). Kit PopupMenu has no item height, so menu items are not 26 px. Ellipsis and full-text tooltip paths untested.
+- i3o.7: no PidOutcome type; tl-ops returns Partial and OutcomeUnknown errors, engine maps them. PidOp Sched and IoPriority already forwarded in RealOps.
