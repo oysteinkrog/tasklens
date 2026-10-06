@@ -458,3 +458,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.20 (ff2b0e2): IconSourceCache in TlTreeTable; 20 distinct icons over 60 frames build 20 sources; unused icons evicted one version later.
 - yrf.18 (27649d4): monotone cubic curves in Scratch buffers. Performance settings do not bump style_version, so GeometryScalars gained curved; toggling rebuilds once. Grid cells stay straight.
 - lgw.12 BLOCKED on owner: one TS1 code from TaskSlinger 0.9.2 under Wine plus the matching themes.json export (U-17). Same owner export as lgw.7.
+- yrf.2 (a114d42): grid heading hitboxes only while the pointer is inside; hover never rebuilds geometry; owner reads hovered_tooltip (noted on crw.9). Partial flag left for yrf.16.
