@@ -12,6 +12,7 @@ pub mod controller;
 pub mod dbus;
 pub mod gpu;
 mod helper;
+mod history_query;
 mod opener;
 pub mod reducer;
 pub mod runtime;
