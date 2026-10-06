@@ -12,6 +12,7 @@ pub mod enumerate;
 pub mod gpu_nvidia;
 #[doc(hidden)]
 pub mod history;
+pub mod inventory;
 pub mod journal;
 pub mod logind;
 pub mod lowmem;
@@ -53,6 +54,7 @@ pub fn all_workers() -> Vec<WorkerSpec> {
         dbus_kwin::spec(),
         connections::spec(),
         startup::spec(),
+        inventory::spec(),
     ]
 }
 
