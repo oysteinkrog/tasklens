@@ -273,9 +273,12 @@ fn parse_family(msg: &[u8]) -> Option<u16> {
     id
 }
 
+/// (ifindex, iftype, SSID, frequency in MHz) of one interface.
+pub type Interface = (u32, u32, Option<Vec<u8>>, Option<u32>);
+
 /// One `NL80211_CMD_NEW_INTERFACE` message: (ifindex, iftype, SSID, frequency in MHz). `None`
 /// for a bad length, a truncated attribute, or no ifindex or iftype.
-pub fn parse_interface(msg: &[u8]) -> Option<(u32, u32, Option<Vec<u8>>, Option<u32>)> {
+pub fn parse_interface(msg: &[u8]) -> Option<Interface> {
     let (mut ifindex, mut iftype, mut ssid, mut freq) = (None, None, None, None);
     for_each_attr(genl_attrs(msg)?, |t, v| match t {
         NL80211_ATTR_IFINDEX => ifindex = read_u32(v, 0),
