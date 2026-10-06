@@ -329,7 +329,8 @@ impl ProcessState {
     /// validity `Valid`.
     pub fn apply_net_rates(&mut self, rates: FxHashMap<ProcessKey, NetRate>) {
         for live in self.live.values_mut() {
-            set_net(&mut live.record, rates.get(&live.record.key));
+            let rate = rates.get(&live.record.key);
+            set_net(&mut live.record, rate);
         }
         self.net = Some(rates);
         self.dirty = true;
