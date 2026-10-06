@@ -892,6 +892,8 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         window: &mut Window,
     ) -> (Div, SharedString) {
         self.out.reset();
+        // Only the hovered row attaches tooltips, so only it asks for the ones that allocate.
+        self.out.want_tooltip = hovered && self.hover_tips_ready;
         self.delegate.cell(ix, col, &mut self.out);
         let kind = self.delegate.column_spec(col).kind;
         let flag = if hovered {

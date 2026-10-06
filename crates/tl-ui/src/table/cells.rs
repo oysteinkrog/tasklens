@@ -72,6 +72,9 @@ pub struct CellOut {
     pub text_color: Option<Hsla>,
     /// Optional explicit cell tooltip.
     pub tooltip: Option<SharedString>,
+    /// Set by the table only on the hovered row, once its tooltips can show. A delegate
+    /// formats a tooltip that allocates (an age, an error) only when this is set.
+    pub want_tooltip: bool,
 }
 
 impl CellOut {
@@ -85,6 +88,7 @@ impl CellOut {
         self.background = None;
         self.text_color = None;
         self.tooltip = None;
+        self.want_tooltip = false;
     }
 }
 
@@ -1003,13 +1007,14 @@ mod tests {
             background: Some(gpui_kit::red()),
             text_color: Some(gpui_kit::red()),
             tooltip: Some("tip".into()),
+            want_tooltip: true,
         };
         out.text.push_str("12.5%");
         out.reset();
         assert_eq!(out.bits, 0);
         assert_eq!(out.validity, Validity::WarmingUp);
         assert!(out.arc.is_none() && out.background.is_none() && out.text_color.is_none());
-        assert!(out.tooltip.is_none() && !out.want_text);
+        assert!(out.tooltip.is_none() && !out.want_text && !out.want_tooltip);
         assert!(out.text.is_empty());
         assert!(out.text.capacity() >= 64, "the scratch keeps its capacity");
     }

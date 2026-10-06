@@ -19,11 +19,13 @@ use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
 use tl_model::devices::{DeviceIdentity, DeviceKind};
+use tl_model::health::SourceId;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{GroupRow, GroupRowKind, ProcFlags, ProcState};
 use tl_model::settings::{NetworkUnit, Settings, UiState};
 use tl_model::snapshot::Snapshot;
 use tl_model::table::{SortSpec, TableRow, UnitRef};
+use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::{
@@ -127,7 +129,7 @@ impl UnitIds {
 }
 
 /// The validity tooltips that carry no live value, built once. Stale ("Last updated {age} ago")
-/// and Failed ("Could not read: {error}") need per-cell text and get none here.
+/// and Failed ("Could not read: {error}") need per-cell text and come from [`live_tip`].
 #[derive(Clone)]
 pub struct ValidityTips {
     warming: SharedString,
@@ -159,6 +161,24 @@ impl ValidityTips {
             Validity::Valid | Validity::Stale | Validity::Failed => None,
         }
     }
+}
+
+/// The Stale or Failed tooltip of a process cell at `now`: the age of the process sample, or
+/// the Processes source's last error. `None` for every other validity. It allocates, so the
+/// delegate calls it only when the table sets `CellOut::want_tooltip`.
+pub fn live_tip(v: Validity, snapshot: &Snapshot, now: TimeNs) -> Option<SharedString> {
+    let ctx = match v {
+        Validity::Stale => GlyphCtx {
+            age_ns: now.saturating_sub(snapshot.processes.header.observed_end),
+            ..GlyphCtx::default()
+        },
+        Validity::Failed => GlyphCtx {
+            last_error: snapshot.health.get(SourceId::Processes).last_error.clone(),
+            ..GlyphCtx::default()
+        },
+        _ => return None,
+    };
+    tooltip_text(v, &ctx)
 }
 
 /// Process-row cell filling and painting, shared by every table that shows process rows
@@ -789,6 +809,9 @@ impl TreeTableDelegate for ProcessDelegate {
             &self.tips,
             out,
         );
+        if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
+            out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
+        }
     }
 
     fn name_cell(&self, ix: usize) -> NameCell {
@@ -936,5 +959,35 @@ impl TreeTableDelegate for ProcessDelegate {
     /// R-216: double-click toggles a row with children and never opens Properties.
     fn double_click_expands(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tl_model::health::SourceId;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::time::BootId;
+    use tl_model::validity::Validity;
+
+    use super::live_tip;
+
+    const SEC: u64 = 1_000_000_000;
+
+    #[test]
+    fn live_tip_stale_age_and_failed_error() {
+        let mut s = Snapshot::empty(BootId(0), 0);
+        Arc::make_mut(&mut s.processes).header.observed_end = 10 * SEC;
+        Arc::make_mut(&mut s.health).sources[SourceId::Processes.index()].last_error =
+            Some("permission denied".into());
+
+        let stale = live_tip(Validity::Stale, &s, 22 * SEC).expect("Stale has a tooltip");
+        assert_eq!(stale.as_ref(), "Last updated 12s ago");
+        let failed = live_tip(Validity::Failed, &s, 22 * SEC).expect("Failed has a tooltip");
+        assert_eq!(failed.as_ref(), "Could not read: permission denied");
+        for v in [Validity::Valid, Validity::WarmingUp, Validity::Restricted] {
+            assert!(live_tip(v, &s, 22 * SEC).is_none(), "{v:?}");
+        }
     }
 }
