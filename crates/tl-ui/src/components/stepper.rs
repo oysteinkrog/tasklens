@@ -32,7 +32,7 @@ use super::button::{TlButton, TlButtonKind};
 use super::icons::TlIcon;
 use super::input::TlTextInput;
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
-use crate::text::style::{TNUM, t_base};
+use crate::text::style::TNUM;
 use crate::theme::{current, metrics};
 
 /// Group height and button size, × ui_scale.
@@ -289,7 +289,6 @@ impl RenderOnce for TlStepper {
                 let id = self.id.clone();
                 move || format!("TlStepper-field-{id}")
             })
-            .relative()
             .flex_none()
             .when(!self.disabled, |d| {
                 let up = bridge.clone();
@@ -331,21 +330,11 @@ impl RenderOnce for TlStepper {
                 TlTextInput::new((self.id.clone(), "input"), &state)
                     .invalid(invalid)
                     .disabled(self.disabled)
+                    .align_right(true)
+                    .square_corners(true)
+                    .when_some(self.suffix, |i, suffix| i.suffix_text(suffix))
                     .width(px(FIELD_WIDTH * m.ui_scale)),
-            )
-            .when_some(self.suffix, |d, suffix| {
-                let mut unit = div()
-                    .debug_selector(|| "TlStepper-suffix".into())
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right(m.sp[4])
-                    .flex()
-                    .items_center()
-                    .text_color(theme.text_secondary);
-                *unit.text_style() = t_base(&m);
-                d.child(unit.child(suffix))
-            });
+            );
         *field.text_style() = TextStyleRefinement {
             font_features: Some(TNUM.clone()),
             ..Default::default()
@@ -585,12 +574,18 @@ mod tests {
 
     #[gpui_kit::test]
     fn layout_and_suffix(cx: &mut TestAppContext) {
-        let (_, cx) = host(cx, (250, 10000, 250), 1000);
+        let (view, cx) = host(cx, (250, 10000, 250), 1000);
+        let align = cx.update(|_, cx| view.read(cx).state.read(cx).presentation().text_align());
+        assert_eq!(
+            align,
+            gpui_kit::TextAlign::Right,
+            "numbers are right-aligned"
+        );
         let group = bounds(cx, "TlStepper-s");
         assert_eq!(group.size.height, px(28.));
         assert_eq!(group.size.width, px(28. + 72. + 28.));
         let field = bounds(cx, "TlStepper-field-s");
-        let unit = bounds(cx, "TlStepper-suffix");
+        let unit = bounds(cx, "TlTextInput-suffix");
         assert!(
             field.contains(&unit.center()) && unit.right() < field.right(),
             "the unit sits inside the field"
