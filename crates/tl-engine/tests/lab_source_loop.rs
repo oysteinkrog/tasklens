@@ -638,3 +638,118 @@ fn end_to_end_controller_runs_fake_source() {
     assert!(handle.is_finished(), "the controller returns after cancel");
     fl.finish();
 }
+
+/// R-289 end to end: a generic `source::run` worker panics once, its controller restarts it,
+/// and the reducer puts `GAP_BEFORE` on the first CPU sample after the restart. The memory
+/// worker runs on and gets no gap. No `Tick` runs: its stale check reads CLOCK_BOOTTIME.
+#[test]
+fn restart_gaps_only_that_sources_series() {
+    use arc_swap::ArcSwap;
+    use fake_sources::{Log, ScriptedSource};
+    use tl_engine::reducer::{Publisher, Reducer};
+    use tl_model::devices::DeviceIdentity;
+    use tl_model::ids::{MetricId, SeriesId};
+    use tl_model::series::SampleFlags;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::time::BootId;
+
+    const SECOND: Duration = Duration::from_secs(1);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand, settings, control) = channels();
+    let source = |id: SourceId, script: Vec<Step>| ScriptedSource {
+        id,
+        script,
+        period: SECOND,
+        log: Log::default(),
+        clock: Arc::clone(&fl.clock),
+    };
+    // The Cpu worker samples at 0 and 1 s and panics at 2 s; the restart samples from 2.5 s.
+    let cpu_first = source(SourceId::Cpu, vec![Step::Ok, Step::Ok, Step::Panic]);
+    let cpu_rest = source(SourceId::Cpu, vec![Step::Ok]);
+    let memory = source(SourceId::Memory, vec![Step::Ok]);
+    let cpu_io = io(&updates, &demand, &settings, &control);
+    let cpu_factory: WorkerFactory = Arc::new(move |cx: Cx, generation: ManagedGeneration| {
+        let io = cpu_io.clone();
+        let src = if generation.number == 1 {
+            cpu_first.clone()
+        } else {
+            cpu_rest.clone()
+        };
+        async move { source::run(cx, io, src).await }
+    });
+    let memory_io = io(&updates, &demand, &settings, &control);
+    let memory_factory: WorkerFactory = Arc::new(move |cx: Cx, _: ManagedGeneration| {
+        let io = memory_io.clone();
+        let src = memory.clone();
+        async move { source::run(cx, io, src).await }
+    });
+
+    let (events_tx, _events_rx) = async_channel::bounded(16);
+    let (wake_tx, _wake_rx) = async_channel::bounded(1);
+    let latest = Arc::new(ArcSwap::from_pointee(Snapshot::empty(BootId(1), 1)));
+    let mut publisher = Publisher {
+        latest: Arc::clone(&latest),
+        wake_tx,
+        stop_publishing: false,
+    };
+    let mut reducer = Reducer::new(1, BootId(1), control, events_tx);
+    let reducer_task = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        reducer
+            .run(&cx, &mut rx, &mut publisher)
+            .await
+            .expect("no invariant violation");
+    });
+    let mut controllers = Vec::new();
+    for (id, factory) in [
+        (SourceId::Cpu, cpu_factory),
+        (SourceId::Memory, memory_factory),
+    ] {
+        let ctl = SourceController::new(id, factory, updates.clone());
+        controllers.push(fl.spawn(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            ctl.run(cx).await;
+        }));
+    }
+    drop(updates);
+
+    fl.run_for(SECOND * 5 - TICK, TICK);
+    let snap = latest.load_full();
+    let samples = |identity: DeviceIdentity, metric: MetricId| {
+        let device = snap.devices.find(&identity).expect("the device exists").idx;
+        snap.series
+            .get(SeriesId { device, metric })
+            .expect("the series exists")
+            .samples
+            .iter()
+            .map(|s| {
+                (
+                    s.t_ns / 1_000_000,
+                    s.flags.contains(SampleFlags::GAP_BEFORE),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        samples(DeviceIdentity::CpuPackage, MetricId::CPU_TOTAL),
+        [
+            (0, false),
+            (1_000, false),
+            (2_500, true),
+            (3_500, false),
+            (4_500, false)
+        ]
+    );
+    let memory: Vec<(u64, bool)> = (0..5).map(|k| (k * 1_000, false)).collect();
+    assert_eq!(samples(DeviceIdentity::Memory, MetricId::MEM_USED), memory);
+
+    for handle in &controllers {
+        handle.abort();
+    }
+    fl.lab.run_until_idle();
+    assert!(
+        reducer_task.is_finished(),
+        "the queue closed with the controllers"
+    );
+    fl.finish();
+}
