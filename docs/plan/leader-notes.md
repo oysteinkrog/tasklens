@@ -405,3 +405,5 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - i3o.17 (1db91cd): Run now and Delete entry; set_unit_file_state takes reload; reload_after_change shared. Plasma script cwd from HOME.
 - i3o.24 (fc8577c): four #[ignore] real user-manager tests; they write tasklens-test-* units in ~/.config/systemd/user and clean up. Verified empty afterwards.
 - Dispatch note: only tl-ui has the test-hooks feature.
+- yrf.9 (ab12b5e, d5b2d9e): ChartElement paint plan. Stale tail: right edge follows the clock while all series are stale. First timing (release, headless): about 17 us per draw for one 600-sample chart with cached geometry.
+- crw.10 decisions: update_static takes &CpuStaticInfo; cpu_error from HealthSnapshot last_error; CpuDetails caches sensor indices (k10temp, zenpower, coretemp, cpu_thermal); BogoMIPS flag is a follow-up crw bead.
