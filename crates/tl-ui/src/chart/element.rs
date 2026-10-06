@@ -295,10 +295,44 @@ fn paint_view(
     };
 
     grid::paint_background(window, bounds, env.theme.graph.chart_bg, radius);
-    grid::paint_grid(window, &gp);
 
     #[cfg(any(test, feature = "test-hooks"))]
     view.path_colors.borrow_mut().clear();
+
+    // Failed, Restricted, Unsupported: background, outline and a dotted baseline across the
+    // whole plot (UI-PRF-001). No grid, no paths, no frame requests.
+    if matches!(
+        state,
+        ChartState::Failed(_) | ChartState::Restricted | ChartState::Unsupported
+    ) {
+        let gp = GridPaint { dx: px(0.), ..gp };
+        // `paint_gaps` clips to the plot width, so no content mask is needed.
+        let whole = [0.0..pw as f32];
+        grid::paint_gaps(window, &gp, &whole);
+        grid::paint_outline(window, &gp);
+        #[cfg(any(test, feature = "test-hooks"))]
+        view_hook_quads(&view.last_grid_quads, &view.last_gap_spans, 0, &whole);
+        #[cfg(any(test, feature = "test-hooks"))]
+        view.last_right_edge_ns.set(right_edge);
+        return PaintOut {
+            moving: false,
+            newest_ns,
+        };
+    }
+
+    grid::paint_grid(window, &gp);
+    #[cfg(any(test, feature = "test-hooks"))]
+    view_hook_quads(
+        &view.last_grid_quads,
+        &view.last_gap_spans,
+        {
+            let mut n = QuadCount(0);
+            grid::paint_grid(&mut n, &gp);
+            n.0
+        },
+        if has_data { &cache.gaps[..] } else { &[] },
+    );
+
     if has_data {
         let offset = point(plot.left() + px(dx / sf), plot.top());
         let painted = |window: &mut Window, sets: &[PathSet], alpha: f32| {
@@ -329,7 +363,8 @@ fn paint_view(
     // Labels: E19-009 adds `labels::paint` here.
 
     let one_px_ns = range_ns / u64::from(pw.max(1));
-    let moving = sliding
+    let moving = has_data
+        && sliding
         && newest_ns
             .saturating_add(period_ns.saturating_mul(2))
             .saturating_add(one_px_ns)
@@ -344,6 +379,31 @@ fn paint_view(
 #[cfg(any(test, feature = "test-hooks"))]
 fn view_hook_build(count: &std::cell::Cell<u32>) {
     count.set(count.get() + 1);
+}
+
+/// Records the grid quad count and the dotted spans of this paint.
+#[cfg(any(test, feature = "test-hooks"))]
+fn view_hook_quads(
+    quads: &std::cell::Cell<u32>,
+    spans: &std::cell::RefCell<SmallVec<[std::ops::Range<f32>; 4]>>,
+    grid_quads: u32,
+    gaps: &[std::ops::Range<f32>],
+) {
+    quads.set(grid_quads);
+    let mut spans = spans.borrow_mut();
+    spans.clear();
+    spans.extend_from_slice(gaps);
+}
+
+/// Counts quads without painting them (test hook).
+#[cfg(any(test, feature = "test-hooks"))]
+struct QuadCount(u32);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl grid::QuadSink for QuadCount {
+    fn quad(&mut self, _: gpui_kit::PaintQuad) {
+        self.0 += 1;
+    }
 }
 
 /// Min and max of the valid samples inside `[right_edge − range, right_edge]` over every series,

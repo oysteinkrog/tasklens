@@ -796,3 +796,354 @@ mod binding {
         });
     }
 }
+
+// Chart element anchor: state painting, scene shape, render counts, frame requests, value_now
+// (E19-A1, tasklens-yrf.1).
+
+mod anchor {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext, Context, Entity, IntoElement, ParentElement, Pixels, Render, Styled,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use smallvec::{SmallVec, smallvec};
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_model::snapshot::{SeriesSet, Snapshot};
+    use tl_model::time::now_boot_ns;
+    use tl_model::validity::Validity;
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::chart::geometry::y_of;
+    use tl_ui::chart::{ChartSeries, ChartSpec, ChartState, ChartView, GridStyle};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const MS: u64 = 1_000_000;
+    const S: u64 = 1_000_000_000;
+
+    const A: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::CPU_TOTAL,
+    };
+    const B: SeriesId = SeriesId {
+        device: DeviceIdx(0),
+        metric: MetricId::MEM_USED,
+    };
+
+    fn init(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+        });
+    }
+
+    fn full_grid() -> GridStyle {
+        GridStyle {
+            lines: true,
+            baseline: true,
+            outline: true,
+            rounded: false,
+        }
+    }
+
+    fn spec(id: SeriesId, smooth: bool) -> ChartSpec {
+        ChartSpec {
+            series: smallvec![ChartSeries {
+                id,
+                fill: Some(gpui_kit::Hsla {
+                    h: 0.5,
+                    s: 0.6,
+                    l: 0.5,
+                    a: 0.2,
+                }),
+                line: gpui_kit::Hsla {
+                    h: 0.5,
+                    s: 0.6,
+                    l: 0.5,
+                    a: 1.0,
+                },
+                ..ChartSeries::default()
+            }],
+            grid: full_grid(),
+            smooth,
+            ..ChartSpec::default()
+        }
+    }
+
+    fn view_from(
+        id: SeriesId,
+        version: u64,
+        period_ns: u64,
+        samples: Vec<Sample>,
+    ) -> Arc<SeriesView> {
+        Arc::new(SeriesView {
+            id,
+            version,
+            period_ns,
+            samples: samples.into(),
+        })
+    }
+
+    /// `n` valid samples `period` apart at value 50, the newest at `newest`.
+    fn flat(id: SeriesId, version: u64, n: u64, newest: u64, period: u64) -> Arc<SeriesView> {
+        let samples = (0..n)
+            .map(|i| Sample::valid(newest - (n - 1 - i) * period, 50.0))
+            .collect();
+        view_from(id, version, period, samples)
+    }
+
+    /// Root view that owns the window's driver and stacks `charts`, each `w × h` logical px.
+    struct Root {
+        driver: Entity<AnimationDriver>,
+        charts: Vec<Entity<ChartView>>,
+        w: Pixels,
+        h: Pixels,
+    }
+
+    impl Render for Root {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().children(
+                self.charts
+                    .iter()
+                    .map(|c| div().w(self.w).h(self.h).flex_none().child(c.clone())),
+            )
+        }
+    }
+
+    /// A window with `specs.len()` charts of `w × h`, bound to a hub over `engine`.
+    fn window_with<'a>(
+        cx: &'a mut TestAppContext,
+        engine: &Arc<FakeEngine>,
+        specs: Vec<ChartSpec>,
+        w: f32,
+        h: f32,
+    ) -> (Entity<Root>, &'a mut VisualTestContext) {
+        init(cx);
+        let (root, vcx) = cx.add_window_view(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            let hub = super::hub_for(engine, cx);
+            let charts = specs
+                .into_iter()
+                .map(|s| cx.new(|cx| ChartView::new(s, super::labels(), &hub, cx)))
+                .collect();
+            Root {
+                driver,
+                charts,
+                w: px(w),
+                h: px(h),
+            }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.run_until_parked();
+        (root, vcx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+    }
+
+    fn chart(root: &Entity<Root>, vcx: &mut VisualTestContext, i: usize) -> Entity<ChartView> {
+        vcx.read_entity(root, |r, _| r.charts[i].clone())
+    }
+
+    fn set_series(snap: &mut Snapshot, views: Vec<Arc<SeriesView>>) {
+        snap.series = Arc::new(SeriesSet {
+            header: snap.series.header,
+            series: Arc::from(views),
+            slow: Arc::from([]),
+        });
+    }
+
+    #[gpui_kit::test]
+    fn warming_up_paints_no_paths(cx: &mut TestAppContext) {
+        let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, false)], 602., 202.);
+        let c = chart(&root, vcx, 0);
+        draw(vcx);
+        vcx.read_entity(&c, |v, _| {
+            assert_eq!(v.derived_state(now_boot_ns()), ChartState::WarmingUp);
+            assert_eq!(v.path_paints.get(), 0, "no paint_path call");
+            // 10 or 11 vertical hairlines plus 3 horizontal ones.
+            let quads = v.last_grid_quads.get();
+            assert!((13..=14).contains(&quads), "{quads} grid quads");
+            assert!(v.last_gap_spans.borrow().is_empty());
+            assert_eq!(v.value_now(), Some((0.0, Validity::WarmingUp)));
+        });
+    }
+
+    #[gpui_kit::test]
+    fn failed_state_dotted_baseline_only(cx: &mut TestAppContext) {
+        let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, true)], 602., 202.);
+        let c = chart(&root, vcx, 0);
+        c.update(vcx, |v, cx| {
+            // Live, moving data: the owner state still wins.
+            v.set_series_for_test(
+                smallvec![Some(flat(A, 1, 600, now_boot_ns() - 50 * MS, 100 * MS))],
+                cx,
+            );
+            v.set_state(ChartState::Failed("EACCES".into()), cx);
+        });
+        draw(vcx);
+        vcx.read_entity(&c, |v, _| {
+            assert_eq!(v.last_grid_quads.get(), 0, "no grid lines");
+            assert_eq!(v.path_paints.get(), 0, "no paths");
+            assert_eq!(&v.last_gap_spans.borrow()[..], &[0.0..600.0], "whole plot");
+            assert!(matches!(v.value_now(), Some((_, Validity::Failed))));
+        });
+        let (armed, requested) = vcx.read_entity(&root, |r, cx| {
+            let d = r.driver.read(cx);
+            (d.is_armed(), d.stats.requested)
+        });
+        assert!(!armed, "a failed chart does not animate");
+        assert_eq!(requested, 0);
+    }
+
+    #[gpui_kit::test]
+    fn gap_and_spike_scene_shape(cx: &mut TestAppContext) {
+        let (root, vcx) = window_with(cx, &FakeEngine::new(), vec![spec(A, false)], 400., 200.);
+        let c = chart(&root, vcx, 0);
+        // 70 samples 1 s apart over the 60 s window: value 20, one gap at 40, a spike to 100
+        // at 50.
+        let newest = now_boot_ns();
+        let samples = (0..70u64)
+            .map(|i| {
+                let t = newest - (69 - i) * S;
+                match i {
+                    40 => Sample::gap(t),
+                    50 => Sample::valid(t, 100.0),
+                    _ => Sample::valid(t, 20.0),
+                }
+            })
+            .collect();
+        c.update(vcx, |v, cx| {
+            v.set_series_for_test(smallvec![Some(view_from(A, 1, S, samples))], cx);
+        });
+        draw(vcx);
+        vcx.read_entity(&c, |v, _| {
+            assert_eq!(v.derived_state(newest), ChartState::Live);
+            assert_eq!(v.cached_fill_stroke_counts(), (1, 1));
+            assert_eq!(v.cached_path_count(), 2, "no stale sets");
+            assert_eq!(
+                v.path_colors.borrow().len(),
+                2,
+                "1 fill and 1 stroke painted"
+            );
+            assert_eq!(v.last_gap_spans.borrow().len(), 1, "1 dotted span");
+            // The stroke's top vertex sits on the spike row, y_of(100) = 0 (the plot top), within
+            // the 1 px line width.
+            let spike_row = y_of(100.0, 0.0, 100.0, 198.0);
+            assert_eq!(spike_row, 0.0);
+            let top = v.stroke_top_y().expect("stroke vertices");
+            assert!((top - spike_row).abs() <= 1.0, "stroke top at {top}");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn render_counter_ten_snapshots(cx: &mut TestAppContext) {
+        let engine = FakeEngine::new();
+        let t0 = 10 * S;
+        engine.publish_with(|s| {
+            set_series(
+                s,
+                vec![flat(A, 1, 5, t0, 100 * MS), flat(B, 1, 5, t0, 100 * MS)],
+            )
+        });
+        let (root, vcx) = window_with(
+            cx,
+            &engine,
+            vec![spec(A, false), spec(B, false)],
+            302.,
+            102.,
+        );
+        let (a, b) = (chart(&root, vcx, 0), chart(&root, vcx, 1));
+        for i in 1..=10u64 {
+            vcx.executor().advance_clock(Duration::from_millis(100));
+            engine.publish_with(|s| {
+                let b = s.series.series[1].clone();
+                set_series(s, vec![flat(A, 1 + i, 5, t0 + i * 100 * MS, 100 * MS), b]);
+            });
+            vcx.run_until_parked();
+        }
+        let count = |c: &Entity<ChartView>, vcx: &mut VisualTestContext| {
+            vcx.read_entity(c, |v, _| v.render_count.get())
+        };
+        assert_eq!(count(&a, vcx), 11);
+        assert_eq!(count(&b, vcx), 1);
+    }
+
+    #[gpui_kit::test]
+    fn thirty_two_charts_one_frame_request(cx: &mut TestAppContext) {
+        let specs = (0..32).map(|_| spec(A, true)).collect();
+        let (root, vcx) = window_with(cx, &FakeEngine::new(), specs, 202., 12.);
+        let now = now_boot_ns();
+        for i in 0..32 {
+            let c = chart(&root, vcx, i);
+            c.update(vcx, |v, cx| {
+                v.set_series_for_test(
+                    smallvec![Some(flat(A, 1, 600, now - 50 * MS, 100 * MS))],
+                    cx,
+                );
+            });
+        }
+        draw(vcx);
+        let driver = vcx.read_entity(&root, |r, _| r.driver.clone());
+        let requested =
+            |vcx: &mut VisualTestContext| vcx.read_entity(&driver, |d, _| d.stats.requested);
+        assert_eq!(requested(vcx), 1, "32 moving charts, one frame request");
+
+        // The next frame notifies all 32; their paints arm one more request.
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        draw(vcx);
+        assert_eq!(requested(vcx), 2);
+    }
+
+    #[gpui_kit::test]
+    fn value_now_per_state(cx: &mut TestAppContext) {
+        let hub = cx.update(|cx| super::hub_for(&FakeEngine::new(), cx));
+        let chart = cx.new(|cx| ChartView::new(spec(A, false), super::labels(), &hub, cx));
+        let t = 100 * S;
+        let with_gap: SmallVec<[Option<Arc<SeriesView>>; 2]> = smallvec![Some(view_from(
+            A,
+            2,
+            100 * MS,
+            vec![Sample::valid(t - 100 * MS, 42.0), Sample::gap(t)],
+        ))];
+        chart.update(cx, |v, cx| {
+            assert_eq!(v.value_at(t), Some((0.0, Validity::WarmingUp)), "absent");
+
+            v.set_series_for_test(smallvec![Some(flat(A, 1, 10, t, 100 * MS))], cx);
+            assert_eq!(v.derived_state(t + 50 * MS), ChartState::Live);
+            assert_eq!(v.value_at(t + 50 * MS), Some((50.0, Validity::Valid)));
+            assert_eq!(v.value_at(t + 5 * S), Some((50.0, Validity::Stale)));
+
+            for (state, validity) in [
+                (ChartState::Failed("EACCES".into()), Validity::Failed),
+                (ChartState::Restricted, Validity::Restricted),
+                (ChartState::Unsupported, Validity::Unsupported),
+            ] {
+                v.set_state(state, cx);
+                assert_eq!(v.value_at(t), Some((50.0, validity)));
+                assert_eq!(v.value_now().map(|(_, s)| s), Some(validity));
+            }
+            v.set_state(ChartState::Live, cx);
+
+            // Newest sample is a gap: no current value, the last valid one is kept.
+            v.set_series_for_test(with_gap.clone(), cx);
+            assert_eq!(v.value_at(t + 50 * MS), Some((42.0, Validity::WarmingUp)));
+
+            v.set_spec(ChartSpec::default(), cx);
+            assert_eq!(v.value_at(t), None, "no series");
+        });
+    }
+}

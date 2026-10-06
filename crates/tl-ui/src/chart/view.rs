@@ -10,6 +10,8 @@ use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::SeriesView;
 use tl_model::snapshot::{ComponentMask, SeriesSet, Snapshot};
+use tl_model::time::now_boot_ns;
+use tl_model::validity::Validity;
 
 use super::element::ChartElement;
 use super::{ChartCache, ChartLabels, ChartSpec, ChartState, geometry, labels, scale};
@@ -55,6 +57,12 @@ pub struct ChartView {
     /// Right edge of the last paint.
     #[cfg(any(test, feature = "test-hooks"))]
     pub last_right_edge_ns: std::cell::Cell<u64>,
+    /// Grid quads of the last paint (vertical and horizontal hairlines).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_grid_quads: std::cell::Cell<u32>,
+    /// Dotted baseline spans of the last paint, chart-local physical px before the paint shift.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub last_gap_spans: RefCell<SmallVec<[std::ops::Range<f32>; 4]>>,
 }
 
 impl ChartView {
@@ -90,6 +98,10 @@ impl ChartView {
             path_colors: RefCell::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             last_right_edge_ns: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_grid_quads: std::cell::Cell::new(0),
+            #[cfg(any(test, feature = "test-hooks"))]
+            last_gap_spans: RefCell::default(),
         };
         this.resolve(hub.read(cx).current());
         this
@@ -158,6 +170,65 @@ impl ChartView {
         } else {
             ChartState::Live
         }
+    }
+
+    /// The value label's input (E19-009; owners such as the sidebar card read it too): the newest
+    /// valid value of series 0 and its validity at the current boot time. `None` when the spec
+    /// has no series.
+    pub fn value_now(&self) -> Option<(f32, Validity)> {
+        self.value_at(now_boot_ns())
+    }
+
+    /// `value_now` at `now_boot_ns`. Owner-set Failed, Restricted and Unsupported map to the
+    /// same `Validity`. Otherwise `Stale` when the chart is stale, `Valid` when the newest sample
+    /// of series 0 is valid, and `WarmingUp` when series 0 has no valid newest sample yet. The
+    /// value is the newest valid sample of series 0, or 0.0 when there is none; only `Valid` and
+    /// `Stale` values are meant to be shown.
+    pub fn value_at(&self, now_boot_ns: u64) -> Option<(f32, Validity)> {
+        if self.spec.series.is_empty() {
+            return None;
+        }
+        let samples = self
+            .series
+            .first()
+            .and_then(Option::as_deref)
+            .map_or(&[][..], |s| &s.samples[..]);
+        let value = samples
+            .iter()
+            .rev()
+            .find(|s| s.is_valid())
+            .map_or(0.0, |s| s.value);
+        let validity = match self.derived_state(now_boot_ns) {
+            ChartState::Failed(_) => Validity::Failed,
+            ChartState::Restricted => Validity::Restricted,
+            ChartState::Unsupported => Validity::Unsupported,
+            ChartState::Stale { .. } => Validity::Stale,
+            ChartState::WarmingUp => Validity::WarmingUp,
+            ChartState::Live => match samples.last() {
+                Some(s) if s.is_valid() => Validity::Valid,
+                _ => Validity::WarmingUp,
+            },
+        };
+        Some((value, validity))
+    }
+
+    /// The cached stroke paths' smallest vertex y, chart-local physical px (0 is the plot top).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn stroke_top_y(&self) -> Option<f32> {
+        self.cache
+            .borrow()
+            .strokes
+            .iter()
+            .flat_map(|s| s.path.vertices.iter())
+            .map(|v| f32::from(v.xy_position.y))
+            .reduce(f32::min)
+    }
+
+    /// Fill and stroke sets in the geometry cache, stale sets excluded.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn cached_fill_stroke_counts(&self) -> (usize, usize) {
+        let c = self.cache.borrow();
+        (c.fills.len(), c.strokes.len())
     }
 
     /// Replaces the spec. When it changed, resolves it against the hub's current snapshot and

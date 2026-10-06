@@ -25,7 +25,7 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-bench = ["gpui-kit/profiler"]     # frame histograms for --bench (ADR-014)
+bench = ["test-hooks", "gpui-kit/profiler"]     # frame histograms and paint log for --bench (ADR-014, E01-OI-6)
 render-tests = ["bench", "gpui-kit/test-support", "dep:image"]   # headless screenshot tests (ADR-013)
 test-hooks = []
 

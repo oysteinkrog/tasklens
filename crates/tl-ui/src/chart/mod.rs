@@ -1,6 +1,13 @@
 //! Chart data contract shared by every graph surface (ADR-009 "Chart element", UI-PRF-001,
 //! UI-PRF-003, UI-PRF-006). The element, geometry, scale, grid, labels and hover modules build on
 //! these types.
+//!
+//! Owner contract:
+//! - Create one `ChartView` per chart in a constructor and keep the `Entity`.
+//! - Call `ChartView::set_state` for Failed, Restricted and Unsupported. The view derives
+//!   WarmingUp, Live and Stale from its data.
+//! - Pass `ChartSpec.background` for the surface the chart sits on.
+//! - Never create views in `render`.
 
 pub mod element;
 pub mod geometry;
@@ -10,6 +17,11 @@ pub mod hover;
 pub mod labels;
 pub mod scale;
 pub mod view;
+
+pub use element::ChartElement;
+pub use geometry::{TimeMap, is_stale, right_edge_ns};
+pub use scale::{ScaleResult, ScaleState};
+pub use view::ChartView;
 
 use std::ops::Range;
 
