@@ -39,3 +39,18 @@ pwn-props-filter-icon-tooltip = Filter
 pwn-props-filter-name = Filter { $tab }
 pwn-props-filter-no-match = No properties match the current filter.
 pwn-props-filter-no-match-threads = No threads match the current filter.
+
+## Performance (E24)
+
+perf-fallback-collecting = Collecting…
+perf-fallback-restricted = Restricted
+perf-fallback-needs-setup = Needs setup
+perf-fallback-needs-setup-tooltip = Needs setup. Open Additional Setup…
+perf-fallback-not-supported = Not supported
+perf-fallback-not-supported-tooltip = Not available on this device
+perf-fallback-not-reported = Not reported
+perf-fallback-unavailable = Unavailable
+perf-fallback-could-not-read = Could not read: {$reason}
+perf-fallback-unknown = Unknown
+perf-last-updated = Last updated {$age} ago
+perf-details-heading = Details
