@@ -6,18 +6,17 @@
 //! cached views that re-render for their own series. The settings observer reads the page's
 //! settings only when the Performance, Motion or Appearance section version moved.
 //!
-//! The words below match `perf-cpu-*` and `perf-later-version` in `en-US.ftl`, like the fallback
-//! words in `details.rs`.
+//! The page's words are `en-US.ftl` keys, translated once per strings version into [`Words`].
 
-#[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
+    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
@@ -46,8 +45,9 @@ use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
+use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings};
-use crate::theme::{TlTheme, current, metrics};
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// The overlaid and stacked modes. E24-018 sets it to true.
 pub const CPU_EXTRA_MODES_ENABLED: bool = false;
@@ -59,24 +59,27 @@ pub const KERNEL_BUTTON_ID: &str = "perf-cpu-kernel";
 /// Debug selector of the box around the Overall chart.
 pub const OVERALL_ID: &str = "perf-cpu-overall";
 
-const WORD_OVERALL: &str = "Overall";
-const WORD_PER_CORE: &str = "Per core";
-const WORD_OVERLAID: &str = "All cores overlaid";
-const WORD_STACKED: &str = "All cores stacked";
-const WORD_KERNEL_ON: &str = "Kernel on";
-const WORD_KERNEL_OFF: &str = "Kernel off";
-const TIP_MODE: &str = "Graph mode";
-const TIP_KERNEL: &str = "Show kernel time";
-const TIP_LATER: &str = "Available in a later version";
-const MENU_GRAPH: &str = "Graph";
-const MENU_KERNEL_TIMES: &str = "Kernel times";
-const HEADING_UTILIZATION: &str = "Utilization";
-const WORD_TOTAL: &str = "Total";
-const WORD_KERNEL: &str = "Kernel";
+const KEY_OVERALL: &str = "perf-cpu-mode-overall";
+const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";
+const KEY_OVERLAID: &str = "perf-cpu-mode-overlaid";
+const KEY_STACKED: &str = "perf-cpu-mode-stacked";
+const KEY_KERNEL_ON: &str = "perf-cpu-kernel-on";
+const KEY_KERNEL_OFF: &str = "perf-cpu-kernel-off";
+const KEY_TIP_MODE: &str = "perf-cpu-tip-mode";
+const KEY_TIP_KERNEL: &str = "perf-cpu-tip-kernel";
+const KEY_LATER: &str = "perf-later-version";
+const KEY_MENU_GRAPH: &str = "perf-cpu-menu-graph";
+const KEY_MENU_KERNEL_TIMES: &str = "perf-cpu-menu-kernel-times";
+const KEY_UTILIZATION: &str = "perf-cpu-heading-utilization";
+const KEY_TOTAL: &str = "perf-legend-total";
+const KEY_KERNEL: &str = "perf-legend-kernel";
+/// `ChartLabels.range_word` is a `&'static str` the chart contract fixes; the chart owns its
+/// translation.
+const RANGE_WORD: &str = "Utilization";
 
 const NS_PER_S: u64 = 1_000_000_000;
 
-/// One entry of the mode menu.
+/// One entry of the mode menu. `label` and `tooltip` are `en-US.ftl` keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModeItem {
     pub mode: CpuGraphMode,
@@ -93,9 +96,9 @@ pub const fn mode_items() -> [ModeItem; 4] {
         let enabled = !extra || CPU_EXTRA_MODES_ENABLED;
         ModeItem {
             mode,
-            label: mode_label(mode),
+            label: mode_key(mode),
             enabled,
-            tooltip: if enabled { None } else { Some(TIP_LATER) },
+            tooltip: if enabled { None } else { Some(KEY_LATER) },
         }
     }
     [
@@ -106,37 +109,97 @@ pub const fn mode_items() -> [ModeItem; 4] {
     ]
 }
 
-/// The mode button's label for `mode`.
-pub const fn mode_label(mode: CpuGraphMode) -> &'static str {
+/// The `en-US.ftl` key of `mode`'s name.
+pub const fn mode_key(mode: CpuGraphMode) -> &'static str {
     match mode {
-        CpuGraphMode::Overall => WORD_OVERALL,
-        CpuGraphMode::PerCore => WORD_PER_CORE,
-        CpuGraphMode::AllCoresOverlaid => WORD_OVERLAID,
-        CpuGraphMode::AllCoresStacked => WORD_STACKED,
+        CpuGraphMode::Overall => KEY_OVERALL,
+        CpuGraphMode::PerCore => KEY_PER_CORE,
+        CpuGraphMode::AllCoresOverlaid => KEY_OVERLAID,
+        CpuGraphMode::AllCoresStacked => KEY_STACKED,
     }
 }
 
-/// The kernel toggle's label.
-pub const fn kernel_label(kernel: bool) -> &'static str {
-    if kernel {
-        WORD_KERNEL_ON
-    } else {
-        WORD_KERNEL_OFF
+/// The index of `mode` in [`mode_items`].
+const fn mode_index(mode: CpuGraphMode) -> usize {
+    match mode {
+        CpuGraphMode::Overall => 0,
+        CpuGraphMode::PerCore => 1,
+        CpuGraphMode::AllCoresOverlaid => 2,
+        CpuGraphMode::AllCoresStacked => 3,
+    }
+}
+
+/// The page's words, translated once per strings version.
+#[derive(Clone, Debug, Default)]
+pub struct Words {
+    /// `None` before the first refresh; then the strings version, `None` without strings.
+    version: Option<Option<u64>>,
+    /// In [`mode_items`] order.
+    pub modes: [SharedString; 4],
+    pub kernel_on: SharedString,
+    pub kernel_off: SharedString,
+    pub tip_mode: SharedString,
+    pub tip_kernel: SharedString,
+    pub later: SharedString,
+    pub menu_graph: SharedString,
+    pub menu_kernel_times: SharedString,
+    pub utilization: SharedString,
+    pub total: SharedString,
+    pub kernel: SharedString,
+}
+
+impl Words {
+    /// Translates every word when the strings changed since the last call. True when it did.
+    fn refresh(&mut self, cx: &App) -> bool {
+        let version = Some(cx.try_global::<Strings>().map(|s| s.strings_version));
+        if self.version == version {
+            return false;
+        }
+        self.version = version;
+        let t = |key| tr(cx, key);
+        self.modes = mode_items().map(|i| t(i.label));
+        self.kernel_on = t(KEY_KERNEL_ON);
+        self.kernel_off = t(KEY_KERNEL_OFF);
+        self.tip_mode = t(KEY_TIP_MODE);
+        self.tip_kernel = t(KEY_TIP_KERNEL);
+        self.later = t(KEY_LATER);
+        self.menu_graph = t(KEY_MENU_GRAPH);
+        self.menu_kernel_times = t(KEY_MENU_KERNEL_TIMES);
+        self.utilization = t(KEY_UTILIZATION);
+        self.total = t(KEY_TOTAL);
+        self.kernel = t(KEY_KERNEL);
+        true
+    }
+
+    pub fn mode(&self, mode: CpuGraphMode) -> &SharedString {
+        &self.modes[mode_index(mode)]
+    }
+
+    pub fn kernel_toggle(&self, kernel: bool) -> &SharedString {
+        if kernel {
+            &self.kernel_on
+        } else {
+            &self.kernel_off
+        }
     }
 }
 
 /// Adds the four mode radios; a mode not yet available is a disabled item with its tooltip.
-fn mode_menu(mut menu: TlMenu, current: CpuGraphMode) -> TlMenu {
-    for item in mode_items() {
-        let label = SharedString::new_static(item.label);
+fn mode_menu(
+    mut menu: TlMenu,
+    current: CpuGraphMode,
+    labels: &[SharedString; 4],
+    later: &SharedString,
+) -> TlMenu {
+    for (item, label) in mode_items().into_iter().zip(labels) {
         menu = if item.enabled {
             menu.radio_item(
-                label,
+                label.clone(),
                 item.mode == current,
                 Box::new(PerfSetCpuGraphMode { mode: item.mode }),
             )
         } else {
-            menu.item_disabled(label, item.tooltip.map(SharedString::new_static))
+            menu.item_disabled(label.clone(), Some(later.clone()))
         };
     }
     menu
@@ -216,16 +279,16 @@ fn overall_spec(device: DeviceIdx, s: &PageSettings, theme: &TlTheme) -> ChartSp
     }
 }
 
-fn overall_labels(kernel: bool) -> ChartLabels {
-    let mut legend = smallvec![(SharedString::new_static(WORD_TOTAL), LegendStyle::Solid)];
+fn overall_labels(kernel: bool, words: &Words) -> ChartLabels {
+    let mut legend = smallvec![(words.total.clone(), LegendStyle::Solid)];
     if kernel {
-        legend.push((SharedString::new_static(WORD_KERNEL), LegendStyle::Dashed));
+        legend.push((words.kernel.clone(), LegendStyle::Dashed));
     }
     ChartLabels {
-        heading: Some(SharedString::new_static(HEADING_UTILIZATION)),
+        heading: Some(words.utilization.clone()),
         value_fmt: ValueFormat::Percent,
         value_align: ValueAlign::Right,
-        range_word: HEADING_UTILIZATION,
+        range_word: RANGE_WORD,
         legend,
         show_axis_max: false,
     }
@@ -286,10 +349,6 @@ pub struct CpuPage {
     kernel_button_focus: FocusHandle,
     /// The page root; actions from the toggles and the mode menu are dispatched here.
     focus: FocusHandle,
-    #[allow(
-        dead_code,
-        reason = "E24-018 creates the overlaid and stacked charts on it"
-    )]
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
@@ -300,12 +359,17 @@ pub struct CpuPage {
     header: (SharedString, SharedString),
     settings: PageSettings,
     settings_versions: [u64; 3],
+    /// `UiMetrics.style_version` the grid and chart colours were built for.
+    style_version: u64,
+    words: Words,
+    /// The mode button's box of the last paint; the mode menu opens below it.
+    mode_button_bounds: Rc<Cell<Bounds<Pixels>>>,
     catalog_version: u64,
     topology: Arc<CpuTopology>,
     logical: Vec<DeviceIdx>,
     static_info: Arc<CpuStaticInfo>,
     temp_sensors: Vec<CpuSensor>,
-    _subs: SmallVec<[Subscription; 2]>,
+    _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
@@ -335,13 +399,16 @@ impl CpuPage {
             &theme,
             cx,
         );
+        let mut words = Words::default();
+        words.refresh(cx);
         let spec = overall_spec(row.idx, &settings, &theme);
-        let labels = overall_labels(settings.kernel);
+        let labels = overall_labels(settings.kernel, &words);
         let overall = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
 
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, Self::on_snapshot));
         subs.push(cx.observe_global::<TlSettings>(Self::sync_settings));
+        subs.push(cx.observe_global::<UiMetrics>(Self::sync_style));
         let id = cx.entity_id();
         let release_demand = demand.clone();
         cx.on_release(move |_, cx| release_demand.update(cx, |d, cx| d.remove(id, cx)))
@@ -370,6 +437,9 @@ impl CpuPage {
             header: (SharedString::default(), SharedString::default()),
             settings,
             settings_versions: section_versions(cx),
+            style_version: metrics(cx).style_version,
+            words,
+            mode_button_bounds: Rc::default(),
             catalog_version: snap.devices.version,
             topology,
             logical,
@@ -398,6 +468,10 @@ impl CpuPage {
 
     pub fn grid(&self) -> &CpuGrid {
         &self.grid
+    }
+
+    pub fn words(&self) -> &Words {
+        &self.words
     }
 
     /// This page's demand part while it is active: `PerCore` in every mode but Overall, and
@@ -497,7 +571,7 @@ impl CpuPage {
         if new.kernel != old.kernel {
             self.kernel = new.kernel;
             self.grid.set_kernel(new.kernel, cx);
-            let labels = overall_labels(new.kernel);
+            let labels = overall_labels(new.kernel, &self.words);
             self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
         }
         self.grid.set_range(new.range_ns, cx);
@@ -509,6 +583,31 @@ impl CpuPage {
             self.mode = new.mode;
             self.send_demand(cx);
         }
+        cx.notify();
+    }
+
+    /// A new theme or UI scale: the grid reads both when it is built, so it is built again, and
+    /// the Overall chart takes the new colours.
+    fn sync_style(&mut self, cx: &mut Context<Self>) {
+        let version = metrics(cx).style_version;
+        if version == self.style_version {
+            return;
+        }
+        self.style_version = version;
+        let theme = current(cx).clone();
+        let s = self.settings;
+        self.grid = CpuGrid::new(
+            &self.hub,
+            Arc::clone(&self.topology),
+            &self.logical,
+            s.kernel,
+            s.range_ns,
+            s.smooth,
+            &theme,
+            cx,
+        );
+        let spec = overall_spec(self.row.idx, &s, &theme);
+        self.overall.update(cx, |v, cx| v.set_spec(spec, cx));
         cx.notify();
     }
 
@@ -560,28 +659,48 @@ impl DevicePage for CpuPage {
 
     fn toggles(&self, _: &mut Window, cx: &mut App) -> SmallVec<[AnyElement; 2]> {
         let m = *metrics(cx);
+        let w = &self.words;
         let mode = self.mode;
         let menu_focus = self.focus.clone();
-        // A dropdown trigger has no action of its own: the click opens the menu, whose items
-        // dispatch `PerfSetCpuGraphMode` on the page.
+        let (labels, later) = (w.modes.clone(), w.later.clone());
+        let bounds = Rc::clone(&self.mode_button_bounds);
+        // A dropdown trigger has no action of its own: the click opens the menu below the
+        // button, and its items dispatch `PerfSetCpuGraphMode` on the page.
         let mode_button = TlButton::new(MODE_BUTTON_ID, TlButtonKind::Secondary)
             .size(TlButtonSize::Sm)
-            .icon(TlIcon::ChevronDown)
+            .trailing_icon(TlIcon::ChevronDown)
             .icon_size(m.icon.sm)
-            .label(SharedString::new_static(mode_label(mode)))
-            .tooltip(SharedString::new_static(TIP_MODE))
+            .label(w.mode(mode).clone())
+            .tooltip(w.tip_mode.clone())
+            .focus_handle(self.mode_button_focus.clone())
             .on_click(move |ev, window, cx| {
+                let b = bounds.get();
+                let at = if b.size.width > px(0.) {
+                    b.bottom_left()
+                } else {
+                    ev.position()
+                };
+                let (labels, later) = (labels.clone(), later.clone());
                 let menu = TlMenu::build(window, cx, menu_focus.clone(), move |menu, _, _| {
-                    mode_menu(menu, mode)
+                    mode_menu(menu, mode, &labels, &later)
                 });
-                open_context_menu_at(ev.position(), window, cx, menu);
+                open_context_menu_at(at, window, cx, menu);
             });
+        let measure = {
+            let bounds = Rc::clone(&self.mode_button_bounds);
+            canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .inset_0()
+        };
+        // Column direction keeps the button stretched to the frame's toggle width.
+        let mode_button = v_flex().relative().child(mode_button).child(measure);
         // Dispatched on the page, so it works wherever focus is.
         let page_focus = self.focus.clone();
         let kernel_button =
             TlButton::new(KERNEL_BUTTON_ID, TlButtonKind::Segment { on: self.kernel })
-                .label(SharedString::new_static(kernel_label(self.kernel)))
-                .tooltip(SharedString::new_static(TIP_KERNEL))
+                .label(w.kernel_toggle(self.kernel).clone())
+                .tooltip(w.tip_kernel.clone())
+                .focus_handle(self.kernel_button_focus.clone())
                 .on_click(move |_, window, cx| {
                     page_focus.dispatch_action(&PerfToggleCpuKernel, window, cx);
                 });
@@ -617,13 +736,15 @@ impl DevicePage for CpuPage {
     }
 
     fn menu_items(&self, menu: TlMenu, window: &mut Window, cx: &mut App) -> TlMenu {
+        let w = &self.words;
         let mode = self.mode;
+        let (labels, later) = (w.modes.clone(), w.later.clone());
         // E24-021: the "Secondary graph >" submenu.
-        menu.submenu(MENU_GRAPH, window, cx, move |menu, _, _| {
-            mode_menu(menu, mode)
+        menu.submenu(w.menu_graph.clone(), window, cx, move |menu, _, _| {
+            mode_menu(menu, mode, &labels, &later)
         })
         .check_item(
-            MENU_KERNEL_TIMES,
+            w.menu_kernel_times.clone(),
             self.kernel,
             Box::new(PerfToggleCpuKernel),
         )
@@ -677,6 +798,10 @@ impl Render for CpuPage {
         if self.window != Some(handle) {
             self.window = Some(handle);
             self.send_demand(cx);
+        }
+        if self.words.refresh(cx) {
+            let labels = overall_labels(self.kernel, &self.words);
+            self.overall.update(cx, |v, cx| v.set_labels(labels, cx));
         }
         let m = *metrics(cx);
         let theme = current(cx).clone();

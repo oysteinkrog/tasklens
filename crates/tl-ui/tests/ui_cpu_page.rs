@@ -656,7 +656,7 @@ mod page {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::performance::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
     use tl_ui::pages::performance::cpu::{
-        CPU_EXTRA_MODES_ENABLED, CpuPage, OVERALL_ID, kernel_label, mode_items, mode_label,
+        CPU_EXTRA_MODES_ENABLED, CpuPage, OVERALL_ID, mode_items,
     };
     use tl_ui::pages::performance::cpu_grid::GRID_ID;
     use tl_ui::pages::performance::page::DevicePage as _;
@@ -776,10 +776,26 @@ mod page {
         s.performance.cpu_graph_mode = CpuGraphMode::PerCore;
         let r = open(cx, s);
         let page = r.page.clone();
-        let mode = r.vcx.update(|_, cx| page.read(cx).mode());
-        assert_eq!(mode_label(mode), "Per core");
-        assert!(r.vcx.debug_bounds("TlButton-perf-cpu-mode").is_some());
+        let (label, words) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (p.words().mode(p.mode()).to_string(), p.words().clone())
+        });
+        assert_eq!(label, "Per core");
         assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
+
+        // The caret sits right of the label.
+        let button = r
+            .vcx
+            .debug_bounds("TlButton-perf-cpu-mode")
+            .expect("button");
+        let caret = r
+            .vcx
+            .debug_bounds("TlButton-perf-cpu-mode-trailing-icon")
+            .expect("caret");
+        assert!(
+            caret.left() > button.left() + px(20.),
+            "caret after the label"
+        );
 
         // 1000 px less 16 px padding on each side: 6 columns, 3 rows of 112 px, 8 px gaps.
         let grid = r.vcx.debug_bounds(GRID_ID).expect("grid shown");
@@ -787,7 +803,7 @@ mod page {
         assert_eq!(grid_layout(16, grid.size.width, px(120.), px(8.)).cols, 6);
         assert_eq!(grid.size.height, px(352.));
 
-        let labels: Vec<&str> = mode_items().iter().map(|i| i.label).collect();
+        let labels: Vec<&str> = words.modes.iter().map(|w| w.as_ref()).collect();
         assert_eq!(
             labels,
             [
@@ -797,8 +813,57 @@ mod page {
                 "All cores stacked"
             ]
         );
-        assert_eq!(kernel_label(true), "Kernel on");
-        assert_eq!(kernel_label(false), "Kernel off");
+        assert_eq!(words.kernel_toggle(true).as_ref(), "Kernel on");
+        assert_eq!(words.kernel_toggle(false).as_ref(), "Kernel off");
+        assert_eq!(words.tip_mode.as_ref(), "Graph mode");
+        assert_eq!(words.tip_kernel.as_ref(), "Show kernel time");
+    }
+
+    #[gpui_kit::test]
+    fn cpu_focus_order_is_the_buttons(cx: &mut TestAppContext) {
+        let r = open(cx, Settings::default());
+        let page = r.page.clone();
+        let order = r.vcx.update(|_, cx| page.read(cx).focus_order());
+        assert_eq!(order.len(), 2);
+        for (i, handle) in order.iter().enumerate() {
+            r.vcx.update(|window, cx| handle.focus(window, cx));
+            draw(r.vcx);
+            let focused = r.vcx.update(|window, _| handle.is_focused(window));
+            assert!(focused, "handle {i} focuses its button");
+        }
+        // Enter on the kernel button toggles the kernel line.
+        // The base button activates on key up.
+        let enter = gpui_kit::Keystroke::parse("enter").expect("keystroke");
+        r.vcx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: enter.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        r.vcx
+            .simulate_event(gpui_kit::KeyUpEvent { keystroke: enter });
+        r.vcx.run_until_parked();
+        let kernel = r.vcx.update(|_, cx| page.read(cx).kernel());
+        assert!(!kernel);
+    }
+
+    #[gpui_kit::test]
+    fn cpu_grid_rebuilt_on_style_change(cx: &mut TestAppContext) {
+        let r = open(cx, Settings::default());
+        let page = r.page.clone();
+        let before = r.vcx.update(|_, cx| page.read(cx).grid().view.entity_id());
+        r.vcx.update(|_, cx| {
+            let appearance = AppearanceSettings {
+                ui_scale_pct: 125,
+                ..AppearanceSettings::default()
+            };
+            assert!(tl_ui::theme::metrics::recompute(&appearance, cx));
+        });
+        let (after, cell_h) = r.vcx.update(|_, cx| {
+            let grid = &page.read(cx).grid().view;
+            (grid.entity_id(), grid.read(cx).spec.cell_h)
+        });
+        assert_ne!(before, after, "a new grid view");
+        assert_eq!(cell_h, px(140.), "112 px at 125%");
     }
 
     #[gpui_kit::test]
@@ -855,7 +920,10 @@ mod page {
 
         r.vcx.dispatch_action(PerfToggleCpuKernel);
         let (kernel, series, legend, no_overlays) = read(r.vcx);
-        assert_eq!(kernel_label(kernel), "Kernel off");
+        let label = r
+            .vcx
+            .update(|_, cx| page.read(cx).words().kernel_toggle(kernel).to_string());
+        assert_eq!(label, "Kernel off");
         assert_eq!((series, legend), (1, 1));
         assert!(no_overlays);
         let setting = r
@@ -912,7 +980,7 @@ mod page {
         let items = mode_items();
         for item in &items[2..] {
             assert!(!item.enabled, "{:?}", item.mode);
-            assert_eq!(item.tooltip, Some("Available in a later version"));
+            assert_eq!(item.tooltip, Some("perf-later-version"));
         }
         assert!(items[..2].iter().all(|i| i.enabled && i.tooltip.is_none()));
 
@@ -922,7 +990,13 @@ mod page {
             mode: CpuGraphMode::AllCoresOverlaid,
         });
         let page = r.page.clone();
-        let mode = r.vcx.update(|_, cx| page.read(cx).mode());
+        let (mode, later) = r.vcx.update(|_, cx| {
+            (
+                page.read(cx).mode(),
+                page.read(cx).words().later.to_string(),
+            )
+        });
         assert_eq!(mode, CpuGraphMode::PerCore);
+        assert_eq!(later, "Available in a later version");
     }
 }
