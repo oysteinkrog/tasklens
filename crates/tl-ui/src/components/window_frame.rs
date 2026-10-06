@@ -453,6 +453,13 @@ impl<V: 'static> TlSecondaryWindow<V> {
         self.pinned
     }
 
+    /// Sets the drawn pin without dispatching `ToggleAlwaysOnTop`. For a window that starts
+    /// pinned (UI-PWN-032).
+    pub fn set_pinned(&mut self, pinned: bool, cx: &mut Context<Self>) {
+        self.pinned = pinned;
+        cx.notify();
+    }
+
     /// The pin's look now.
     pub fn pin_look(&self, cx: &App) -> PinLook {
         pin_look(self.pinned, pin_supported(cx))
