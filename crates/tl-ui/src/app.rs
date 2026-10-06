@@ -22,7 +22,7 @@ use tl_model::settings::{Settings, StartTab, UiState};
 use tracing::{debug, error, warn};
 
 use crate::components::icons::TlAssets;
-use crate::components::kv_grid;
+use crate::components::{kv_grid, toast};
 use crate::demand::{DemandAggregator, GlobalDemand};
 use crate::hub::{GlobalHub, SnapshotHub};
 use crate::theme::user_store::ThemePersist;
@@ -276,6 +276,8 @@ impl TasklensUi {
         actions::bind_keys_global(cx);
         actions::register_global_handlers(cx);
         kv_grid::init(cx);
+        // Before any window, so every Root mounts the toast layer.
+        toast::init(cx);
 
         // ActionTracker
 
