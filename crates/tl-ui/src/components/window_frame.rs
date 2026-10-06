@@ -601,16 +601,19 @@ impl<V: 'static> TlSecondaryWindow<V> {
         let text = StyledText::new(self.title.clone());
         self.title_layout = text.layout().clone();
         self.title_rendered = true;
-        let mut title = div()
+        // The label style replaces the whole text refinement, so set it before the text
+        // properties below.
+        let mut title = div();
+        *title.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
+        let title = title
             .debug_selector(|| "TlWindowTitle".into())
             .flex_1()
             .min_w_0()
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_color(theme.text_primary);
-        *title.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
-        let title = title.child(text);
+            .text_color(theme.text_primary)
+            .child(text);
 
         let white: Hsla = rgb(0xFFFFFF).into();
         let caption = |id: &'static str, name: IconName, hover: Hsla, hover_fg: Hsla| {
