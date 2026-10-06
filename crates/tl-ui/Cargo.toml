@@ -16,6 +16,8 @@ async-channel = { workspace = true }
 jiff = { workspace = true }
 fluent-bundle = { workspace = true }
 unic-langid = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }   # render-tests only (R-291)
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
@@ -24,7 +26,7 @@ tempfile = { workspace = true }
 [features]
 default = []
 bench = ["gpui-kit/profiler"]     # frame histograms for --bench (ADR-014)
-render-tests = []
+render-tests = ["gpui-kit/test-support", "dep:image"]   # headless screenshot tests (ADR-013)
 test-hooks = []
 
 [lints]
