@@ -24,7 +24,7 @@ use tl_collect::counters::{Clock, Measured};
 use tl_collect::inventory::cpuinfo::{
     CpuInfo, Lockdown, SecurityPaths, SecuritySource, Virtualization, parse_cpuinfo, read_security,
 };
-use tl_collect::parse::cpufreq::{FreqReading, read_base_mhz, read_static};
+use tl_collect::parse::cpufreq::{FreqReading, FreqSource, read_base_mhz, read_static};
 use tl_collect::parse::rapl::{RaplReading, RaplStatus, rapl_status};
 use tl_collect::parse::topology::{CacheLevel, TopologyInfo};
 use tl_collect::sample::cpu::{CpuOpts, CpuReading, CpuSampler, LiveStats};
@@ -426,6 +426,7 @@ impl CpuSource {
             iowait_pct: metric(r.iowait_pct),
             freq_mhz: metric(last.freq.avg_mhz),
             freq_fastest_mhz: metric(last.freq.max_mhz),
+            freq_is_bogomips: last.freq.source == FreqSource::BogoMips,
             base_mhz: metric(self.base_mhz),
             temp_c: metric(last.temp_c),
             package_power_w: metric(last.power.package_w),

@@ -318,11 +318,8 @@ fn cpu_speed_bogomips_marker() {
     let mut model = cpu_details_model();
     let mut sys = snapshot();
     sys.cpu.freq_mhz = Metric::valid(4200);
-    let inp = CpuLiveInputs {
-        bogomips: true,
-        ..CpuLiveInputs::default()
-    };
-    update_live(&mut model, &sys, &inp);
+    sys.cpu.freq_is_bogomips = true;
+    update_live(&mut model, &sys, &CpuLiveInputs::default());
     assert_eq!(value(&model, ROW_SPEED), "4200 MHz (?)");
     assert_eq!(
         tip(&model, ROW_SPEED).as_deref(),
@@ -330,6 +327,7 @@ fn cpu_speed_bogomips_marker() {
     );
 
     // The real clock comes back: the marker and the tooltip go.
+    sys.cpu.freq_is_bogomips = false;
     update_live(&mut model, &sys, &CpuLiveInputs::default());
     assert_eq!(value(&model, ROW_SPEED), "4200 MHz");
     assert_eq!(

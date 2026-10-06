@@ -136,6 +136,8 @@ pub struct CpuTotals {
     pub freq_mhz: Metric<u32>,
     /// Fastest core, for the Speed tooltip (PERF-033).
     pub freq_fastest_mhz: Metric<u32>,
+    /// The clock comes from the BogoMIPS lines of /proc/cpuinfo; the UI marks it "(?)" (PERF-033).
+    pub freq_is_bogomips: bool,
     /// base_frequency, else acpi_cppc nominal_freq, else bios_limit.
     pub base_mhz: Metric<u32>,
     /// Tctl or Package id 0 (PERF-039).

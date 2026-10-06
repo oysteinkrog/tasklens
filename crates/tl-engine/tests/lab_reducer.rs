@@ -3,6 +3,8 @@
 //! Each `run` call gets its own task. The messages are queued before the task starts, and the
 //! sender is dropped unless a test keeps it, so `run` drains the queue and then returns.
 
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -11,6 +13,8 @@ use asupersync::channel::{mpsc, watch};
 use asupersync::types::Budget;
 use asupersync::{Cx, LabConfig, LabRuntime};
 use smallvec::SmallVec;
+use tl_collect::SysRoot;
+use tl_collect::counters::Clock;
 use tl_engine::reducer::{DRAIN_MAX, InvariantViolation, Publisher, Reducer};
 use tl_engine::source::{WorkerCommand, WorkerControl};
 use tl_engine::update::{
@@ -19,6 +23,7 @@ use tl_engine::update::{
     HelperUpdate, MemorySample, NetSample, ProcessSweep, PssEntry, SensorSample, ServicesUpdate,
     SourceUpdate, StartupUpdate,
 };
+use tl_engine::workers::cpu::CpuSource;
 use tl_model::actions::{
     ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, RejectReason, SchedPolicy,
     Signal,
@@ -709,6 +714,58 @@ fn cpu_update_appends_series() {
         50.0
     );
     assert_eq!(rig.latest().system.cpu_topology.online, cpus(2));
+}
+
+/// Copies the fixture trees in `parts` over each other into a fresh dir.
+fn cpu_fixture(name: &str, parts: &[&str]) -> PathBuf {
+    fn copy_tree(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("create fixture dir");
+        for entry in fs::read_dir(src).expect("list fixture dir") {
+            let entry = entry.expect("fixture dir entry");
+            let to = dst.join(entry.file_name());
+            if entry.file_type().expect("fixture file type").is_dir() {
+                copy_tree(&entry.path(), &to);
+            } else {
+                fs::copy(entry.path(), &to).expect("copy fixture file");
+            }
+        }
+    }
+    let fixtures = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tl-collect/tests/fixtures"
+    ));
+    let dst = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("lab-reducer-{name}"));
+    if dst.exists() {
+        fs::remove_dir_all(&dst).expect("remove old fixture copy");
+    }
+    for part in parts {
+        copy_tree(&fixtures.join(part), &dst);
+    }
+    dst
+}
+
+/// The published `freq_is_bogomips` after one CPU worker sample of `dir`.
+fn published_bogomips(dir: &Path) -> bool {
+    let worker = CpuSource::new(SysRoot::at(dir)).expect("fixture topology reads");
+    let clock = Clock {
+        boot_ns: 100 * MS,
+        mono_ns: 100 * MS,
+    };
+    let (_, update) = worker.sample_at(clock);
+    assert!(matches!(update, SourceUpdate::Cpu(_)), "{update:?}");
+    let mut rig = Rig::new();
+    rig.run(vec![src(update)]).expect("no invariant violation");
+    let bogomips = rig.latest().system.cpu.freq_is_bogomips;
+    rig.passed();
+    bogomips
+}
+
+#[test]
+fn cpu_freq_source_bogomips_reaches_snapshot() {
+    let bogo = cpu_fixture("bogomips", &["cpu-math/step0", "bogomips-only"]);
+    assert!(published_bogomips(&bogo));
+    let cpufreq = cpu_fixture("cpufreq", &["cpu-math/step0", "cpufreq-mixed"]);
+    assert!(!published_bogomips(&cpufreq));
 }
 
 #[test]

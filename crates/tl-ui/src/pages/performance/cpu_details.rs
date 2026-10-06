@@ -88,8 +88,6 @@ pub struct CpuSensor {
 pub struct CpuLiveInputs<'a> {
     /// CLOCK_BOOTTIME now: the up time, and the age of a Stale value.
     pub now_boot_ns: u64,
-    /// The clock comes from the BogoMIPS lines of /proc/cpuinfo.
-    pub bogomips: bool,
     /// `SourceHealth.last_error` of the CPU source, shown for Failed values.
     pub cpu_error: Option<&'a str>,
     /// From [`cpu_temp_sensors`].
@@ -141,7 +139,7 @@ pub fn update_live(model: &mut KeyValueModel, sys: &SystemSnapshot, inp: &CpuLiv
         units::percent(o, v)
     });
 
-    let bogomips = inp.bogomips;
+    let bogomips = cpu.freq_is_bogomips;
     let speed_bits = |v: u32| u64::from(v) | u64::from(bogomips) << 32;
     changed |= live.row(model, ROW_SPEED, cpu.freq_mhz, speed_bits, |o, v| {
         units::mhz(o, v as f32);
