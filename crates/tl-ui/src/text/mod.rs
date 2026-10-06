@@ -4,3 +4,4 @@ pub mod ellipsis;
 pub mod fonts;
 pub mod metrics;
 pub mod style;
+pub mod untrusted;
