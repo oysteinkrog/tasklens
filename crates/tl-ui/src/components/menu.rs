@@ -34,11 +34,11 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
     Action, Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, AsKeystroke,
     Bounds, BoxShadow, Context, DismissEvent, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyContext,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role,
-    ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    TextOverflow, TextRun, WeakEntity, Window, WindowId, anchored, canvas, deferred, div, font,
-    point, prelude::FluentBuilder as _, px,
+    Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyContext, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role, ScrollHandle,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, TextOverflow,
+    TextRun, WeakEntity, Window, WindowId, anchored, canvas, deferred, div, font, point,
+    prelude::FluentBuilder as _, px,
 };
 
 use super::icons::{TlIcon, icon};
@@ -411,7 +411,10 @@ impl TlMenuPopup {
         if n == 0 {
             return;
         }
-        let pos = match self.highlight.and_then(|h| sel.iter().position(|&ix| ix == h)) {
+        let pos = match self
+            .highlight
+            .and_then(|h| sel.iter().position(|&ix| ix == h))
+        {
             Some(pos) if forward => (pos + 1) % n,
             Some(pos) => (pos + n - 1) % n,
             None if forward => 0,
@@ -433,7 +436,9 @@ impl TlMenuPopup {
     fn type_ahead(&mut self, ch: char, window: &mut Window, cx: &mut Context<Self>) {
         let sel = self.selectable();
         let n = sel.len();
-        let start = self.highlight.and_then(|h| sel.iter().position(|&ix| ix == h));
+        let start = self
+            .highlight
+            .and_then(|h| sel.iter().position(|&ix| ix == h));
         let ch = ch.to_lowercase().collect::<String>();
         for step in 1..=n {
             let pos = start.map_or(step - 1, |s| (s + step) % n);
@@ -539,12 +544,21 @@ impl TlMenuPopup {
             parent.update(cx, |parent, cx| parent.dismiss(window, cx));
             return;
         }
-        let moved_away =
-            window.focused(cx).is_some() && !self.focus.contains_focused(window, cx);
+        let moved_away = window.focused(cx).is_some() && !self.focus.contains_focused(window, cx);
         if !moved_away {
             self.action_context.focus(window, cx);
         }
         cx.emit(DismissEvent);
+    }
+
+    /// Whether this menu or one of its open submenus has the keys.
+    fn chain_focused(&self, window: &Window, cx: &App) -> bool {
+        if self.focus.is_focused(window) {
+            return true;
+        }
+        self.open_sub
+            .and_then(|ix| self.submenu_at(ix))
+            .is_some_and(|sub| sub.read(cx).chain_focused(window, cx))
     }
 
     /// Whether `position` is inside this menu or one of its open submenus.
@@ -578,7 +592,13 @@ impl TlMenuPopup {
         }));
     }
 
-    fn on_row_hover(&mut self, ix: usize, hovered: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_row_hover(
+        &mut self,
+        ix: usize,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let selectable = self.entries[ix].selectable();
         if !hovered {
             if self.highlight == Some(ix) && self.open_sub != Some(ix) {
@@ -695,7 +715,9 @@ impl TlMenuPopup {
         let mark_column = |mark: Mark| {
             self.has_mark_column.then(|| {
                 let content = match mark {
-                    Mark::Check(true) => Some(icon(TlIcon::Check, m.icon.xs, t.text_primary)),
+                    Mark::Check(true) => {
+                        Some(icon(TlIcon::Check, m.icon.xs, t.text_primary).into_any_element())
+                    }
                     Mark::Radio(true) => Some(
                         div()
                             .size(s(RADIO_DOT))
@@ -751,8 +773,8 @@ impl TlMenuPopup {
                 action,
                 mark,
             } => {
-                let hint = shortcut_hint(action.as_ref(), &self.action_context, window).map(
-                    |hint| {
+                let hint =
+                    shortcut_hint(action.as_ref(), &self.action_context, window).map(|hint| {
                         let color = if highlighted {
                             t.text_primary
                         } else {
@@ -766,16 +788,15 @@ impl TlMenuPopup {
                             .child(hint);
                         *hint.text_style() = t_xs(m);
                         hint
-                    },
-                );
+                    });
                 row(Some(label))
                     .px(m.sp[4])
                     .children(mark_column(*mark))
                     .child(label_text(label))
                     .children(hint)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.on_row_click(ix, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),
+                    )
                     .into_any_element()
             }
             Entry::Disabled { label, tooltip } => row(Some(label))
@@ -799,9 +820,7 @@ impl TlMenuPopup {
                     window,
                     cx,
                 ))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.on_row_click(ix, window, cx)
-                }))
+                .on_click(cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)))
                 .into_any_element(),
             Entry::Submenu { label, menu } => {
                 let open = self.open_sub == Some(ix);
@@ -811,18 +830,15 @@ impl TlMenuPopup {
                     .aria_expanded(open)
                     .children(mark_column(Mark::None))
                     .child(label_text(label))
-                    .child(
-                        div()
-                            .flex_none()
-                            .ml(m.sp[6])
-                            .child(icon(TlIcon::ChevronRight, m.icon.xs, t.text_secondary)),
+                    .child(div().flex_none().ml(m.sp[6]).child(icon(
+                        TlIcon::ChevronRight,
+                        m.icon.xs,
+                        t.text_secondary,
+                    )))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.on_row_click(ix, window, cx)
-                    }))
-                    .when(open, |d| {
-                        d.child(self.render_submenu(menu, m, window, cx))
-                    })
+                    .when(open, |d| d.child(self.render_submenu(menu, m, window, cx)))
                     .into_any_element()
             }
             Entry::Separator => div()
@@ -1205,9 +1221,10 @@ pub fn context_menu_layer(window: &mut Window, cx: &mut App) -> Option<AnyElemen
         .iter()
         .find(|o| o.window == window_id)
         .map(|o| (o.menu.clone(), o.position))?;
-    // Keep the keys on the menu while it is open.
+    // Keep the keys on the menu while it is open. A submenu that just took focus is not in the
+    // last frame yet, so `contains_focused` alone would pull the keys back to the top menu.
     let focus = menu.focus_handle(cx);
-    if !focus.contains_focused(window, cx) {
+    if !focus.contains_focused(window, cx) && !menu.read(cx).chain_focused(window, cx) {
         focus.focus(window, cx);
     }
     let viewport = window.viewport_size();
@@ -1542,7 +1559,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn mark_column_collapses(cx: &mut TestAppContext) {
-        const LONG: &str = "Show processes from every user and every session";
+        const LONG: &str = "Show processes from every user";
         let (view, cx) = host(cx);
         open(&view, cx, point(px(10.), px(40.)), |menu, _, _| {
             let menu = menu.item(LONG, Box::new(RunA));
@@ -1661,10 +1678,17 @@ mod tests {
         });
 
         keys(cx, "down");
-        assert_eq!(highlighted(cx), vec![(false, 2)], "skips the header and Off");
+        assert_eq!(
+            highlighted(cx),
+            vec![(false, 2)],
+            "skips the header and Off"
+        );
         keys(cx, "down");
         assert_eq!(highlighted(cx), vec![(false, 3)]);
-        assert!(menu_bounds(cx, true).is_empty(), "highlight alone opens nothing");
+        assert!(
+            menu_bounds(cx, true).is_empty(),
+            "highlight alone opens nothing"
+        );
         keys(cx, "right");
         assert_eq!(
             highlighted(cx),
@@ -1690,7 +1714,10 @@ mod tests {
             assert_eq!(highlighted(cx), vec![(false, 1), (true, 1)]);
             keys(cx, close);
             assert_eq!(highlighted(cx), vec![(false, 1)], "{close}");
-            assert!(menu_bounds(cx, true).is_empty(), "{close}: submenu not drawn");
+            assert!(
+                menu_bounds(cx, true).is_empty(),
+                "{close}: submenu not drawn"
+            );
             assert!(
                 cx.update(|window, cx| menu.focus_handle(cx).is_focused(window)),
                 "{close}: the parent has the keys"
@@ -1760,11 +1787,17 @@ mod tests {
     #[gpui_kit::test]
     fn submenu_flips_left_at_the_right_edge(cx: &mut TestAppContext) {
         let (view, cx) = host(cx);
-        open(&view, cx, point(px(560.), px(100.)), |menu, window, cx| {
-            menu.submenu("More", window, cx, |menu, _, _| {
-                menu.item("X", Box::new(RunX))
-            })
-        });
+        let width = cx.update(|window, _| window.viewport_size().width);
+        open(
+            &view,
+            cx,
+            point(width - px(200.), px(100.)),
+            |menu, window, cx| {
+                menu.submenu("More", window, cx, |menu, _, _| {
+                    menu.item("X", Box::new(RunX))
+                })
+            },
+        );
         keys(cx, "down right");
         // The first frame may use the submenu's minimum width; the next one its real width.
         draw(cx);
@@ -1781,7 +1814,8 @@ mod tests {
                 .check_item("A", true, Box::new(RunA))
                 .item("B", Box::new(RunB))
         });
-        let close = |a: Pixels, b: f32| (f32::from(a) - b).abs() < 0.01;
+        // Layout snaps to device pixels, half a logical pixel in the test window.
+        let close = |a: Pixels, b: f32| (f32::from(a) - b).abs() <= 0.25;
         let item = row(cx, false, 1).bounds().size.height;
         assert!(close(item, MENU_ITEM_H * 1.1), "{item:?}");
         let header = row(cx, false, 0).bounds().size.height;
