@@ -1324,3 +1324,109 @@ mod run_tests {
         }
     }
 }
+
+/// `RealOps` forwards to tl-ops instead of the refusing defaults. No real process or cgroup is
+/// touched: the process calls fail their checks before any syscall that changes state, and the
+/// cgroup writes go to plain files in a temp directory.
+#[cfg(test)]
+mod real_ops_tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use tl_model::actions::CgroupRef;
+    use tl_ops::cgroup::CgroupDir;
+
+    use super::*;
+
+    const NOT_WIRED: &str = "cgroup ops not wired";
+
+    /// A directory with the three cgroup control files, removed on drop.
+    struct FakeCgroup(PathBuf);
+
+    impl FakeCgroup {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tl-engine-realops-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).expect("create temp dir");
+            for name in ["cgroup.freeze", "cgroup.kill"] {
+                fs::write(dir.join(name), b"").expect("write control file");
+            }
+            fs::write(dir.join("cgroup.events"), b"populated 1\nfrozen 1\n").expect("write events");
+            Self(dir)
+        }
+
+        fn dir(&self) -> CgroupDir {
+            let fd = rustix::fs::open(
+                &self.0,
+                rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+                rustix::fs::Mode::empty(),
+            )
+            .expect("open temp dir");
+            CgroupDir::from_validated_fd(fd)
+        }
+
+        fn read(&self, name: &str) -> String {
+            fs::read_to_string(self.0.join(name)).expect("read control file")
+        }
+    }
+
+    impl Drop for FakeCgroup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn real_ops_process_forwards() {
+        let pid = std::process::id();
+        let key = ProcessKey {
+            start_ticks: 1,
+            boot_id: BootId(1),
+            pid,
+        };
+        // The boot check fails before any pidfd is opened.
+        assert_eq!(
+            RealOps.open_verified(key, BootId(2)).err(),
+            Some(OpsError::IdentityChanged)
+        );
+        // The range check fails before the syscall, so /dev/null is never signalled.
+        let fd: OwnedFd = fs::File::open("/dev/null").expect("open /dev/null").into();
+        assert_eq!(
+            RealOps.send_signal(&fd, Signal::Other(0)),
+            Err(OpsError::InvalidInput("signal number out of range"))
+        );
+    }
+
+    #[test]
+    fn real_ops_cgroup_forwards() {
+        // A path outside app.slice fails validation before any file is opened.
+        let cg = CgroupRef {
+            rel_path: Arc::from("system.slice/x.service"),
+            cgroup_id: 1,
+        };
+        let open = RealOps.cgroup_open_validated(&cg, 1000).err();
+        assert!(open.is_some());
+        assert_ne!(open, Some(OpsError::Unsupported(NOT_WIRED)));
+
+        let fake = FakeCgroup::new();
+        let dir = fake.dir();
+        assert_eq!(RealOps.cgroup_write(&dir, "cgroup.freeze", "1"), Ok(()));
+        assert_eq!(fake.read("cgroup.freeze"), "1");
+        assert_eq!(RealOps.cgroup_write(&dir, "cgroup.freeze", "0"), Ok(()));
+        assert_eq!(fake.read("cgroup.freeze"), "0");
+        assert_eq!(RealOps.cgroup_write(&dir, "cgroup.kill", "1"), Ok(()));
+        assert_eq!(fake.read("cgroup.kill"), "1");
+        assert_eq!(
+            RealOps.cgroup_write(&dir, "cgroup.procs", "1"),
+            Err(OpsError::InvalidInput("unknown cgroup control write"))
+        );
+        assert_eq!(
+            RealOps.cgroup_wait_frozen(&dir, Duration::from_millis(100)),
+            Ok(())
+        );
+    }
+}
