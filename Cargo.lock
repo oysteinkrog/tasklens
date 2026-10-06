@@ -8026,6 +8026,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
+ "tempfile",
  "thiserror 2.0.21",
  "tl-collect",
  "tl-history",
@@ -8109,6 +8110,7 @@ dependencies = [
  "ksni",
  "proptest",
  "tl-model",
+ "zbus",
 ]
 
 [[package]]

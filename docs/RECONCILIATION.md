@@ -2342,7 +2342,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-28 | `cpuinfo_avg_freq` and `amd_pstate_prefcore_ranking` exist per policy (reported present; recheck in the fixture) | PERF-025 [now PERF-028], PERF-028 [now PERF-031], PERF-035 [now PERF-040] |
 | U-29 | `/dev/dri/card1` seat ACL allows the KMS read-only ioctls | PERF-065 [now PERF-072] |
 | U-30 | `ureq` 3 with rustls has no Tokio in its graph. Outcome (2026-10-04): ureq 3.4.0's manifest has no `tokio` dependency (inferred from the manifest; `cargo xtask check-deps` confirms, R-142) | PERF-054 [now PERF-060], APP-056 |
-| U-31 | ksni 0.3.6 with `async-io` and `blocking` features has no Tokio in its graph | ADR-010, PERF-078 [now PERF-088] |
+| U-31 | ksni 0.3.6 with `async-io` and `blocking` features has no Tokio in its graph. Confirmed 2026-10-06: ksni 0.3.6 graph has no banned crate (`cargo tree -p tl-tray -e normal,build --target x86_64-unknown-linux-gnu`, 105 crates, none from the `check-deps` banned list) | ADR-010, PERF-078 [now PERF-088] |
 | U-32 | `x11rb` XRes queries work against XWayland for the "X11 resources" column | r2 PROC-025 [now PROC-035] |
 | U-33 | Wayland `wl_data_device` clipboard writes work from GPUI for all copy actions | v1 PROC-058 [now PROC-070] |
 | U-34 | `fstatat` `st_size` of `/proc/<pid>/fd` gives the fd count on kernel 7.2 | r2 PROC-001 [now PROC-002] |
