@@ -23,8 +23,8 @@ use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
     ComponentHeader, ComponentMask, ConnCounts, ConnRecord, ConnState, ConnectionsSnapshot,
     DeviceDetailsSnapshot, DiskDetails, EjectState, GraphicsAdapter, InventorySnapshot, NetDetails,
-    ProcessSnapshot, ServicesSnapshot, StartupCounts, StartupEntry, StartupSnapshot, StartupStatus,
-    SystemSnapshot, UnitRecord, WindowsSnapshot,
+    ProcessSnapshot, ServicesSnapshot, StartupSnapshot, SystemSnapshot, UnitRecord,
+    WindowsSnapshot,
 };
 use tl_model::system::{Metric, SensorKind};
 use tl_model::table::{Manager, SysTable, Total, UnitRef};
@@ -260,22 +260,6 @@ fn conn_counts(records: &[ConnRecord]) -> ConnCounts {
         }
     }
     c
-}
-
-/// The Startup status counts. Disabled counts every entry that is not Enabled, so Total is
-/// Enabled plus Disabled (UI-SYS-049).
-fn startup_counts(entries: &[StartupEntry]) -> StartupCounts {
-    let total = u32::try_from(entries.len()).unwrap_or(u32::MAX);
-    let enabled = entries
-        .iter()
-        .filter(|e| e.status == StartupStatus::Enabled)
-        .count();
-    let enabled = u32::try_from(enabled).unwrap_or(u32::MAX);
-    StartupCounts {
-        total,
-        enabled,
-        disabled: total - enabled,
-    }
 }
 
 /// A probe value: `Valid` when the probe reported it, else `Unsupported` ("Not reported").
@@ -1533,7 +1517,7 @@ impl Reducer {
             },
             rows: Arc::clone(&old.rows),
             query_generation: old.query_generation,
-            counts: startup_counts(&u.entries),
+            counts: old.counts,
             entries: u.entries.into(),
         });
         self.rebuild_sys(SysTable::Startup, settings);
@@ -1595,8 +1579,8 @@ impl Reducer {
     }
 
     /// Rebuilds the rows of one system table from its component and stored query, and echoes
-    /// the query generation. Services also stores its counts. Always marks the component, so
-    /// the generation is echoed even when the rows are equal (E09-027).
+    /// the query generation. Services and Startup also store their counts. Always marks the
+    /// component, so the generation is echoed even when the rows are equal (E09-027).
     fn rebuild_sys(&mut self, table: SysTable, settings: &EngineSettings) {
         let query = self.sys_query(table);
         let c = &self.components;
@@ -1617,10 +1601,11 @@ impl Reducer {
                 self.mark(ComponentMask::SERVICES);
             }
             SysTable::Startup => {
-                let out = sys_table::build(&input, &query);
+                let (out, counts) = sys_table::build_startup(&input, &query);
                 let next = Arc::make_mut(&mut self.components.startup);
                 next.rows = out.rows;
                 next.query_generation = out.query_generation;
+                next.counts = counts;
                 self.mark(ComponentMask::STARTUP);
             }
             SysTable::Connections => {

@@ -2384,3 +2384,67 @@ fn connection_attribution_fills_process_network() {
     check(&rig.latest());
     rig.passed();
 }
+
+fn startup_entry(
+    name: &str,
+    status: tl_model::snapshot::StartupStatus,
+) -> tl_model::snapshot::StartupEntry {
+    use tl_model::snapshot::{Impact, StartupEntry, StartupKind};
+    use tl_model::table::{StartupRef, StartupSource};
+    StartupEntry {
+        id: StartupRef {
+            source: StartupSource::AutostartUser,
+            id: format!("{name}.desktop").into(),
+        },
+        name: name.into(),
+        icon_path: None,
+        publisher: None,
+        status,
+        impact: Impact::NotMeasured,
+        impact_detail: None,
+        state_code: None,
+        kind: StartupKind::AutostartUser,
+        location: "/home/u/.config/autostart".into(),
+        command: name.into(),
+        source_path: format!("/home/u/.config/autostart/{name}.desktop").into(),
+        can_toggle: true,
+        can_delete: true,
+        can_run: true,
+        overridden_by_user: false,
+    }
+}
+
+#[test]
+fn startup_counts_follow_text_filter() {
+    use tl_model::snapshot::StartupStatus;
+    let mut rig = Rig::new();
+    rig.run(vec![src(SourceUpdate::Startup(StartupUpdate {
+        entries: vec![
+            startup_entry("alpha", StartupStatus::Enabled),
+            startup_entry("beta", StartupStatus::Enabled),
+            startup_entry("zebra", StartupStatus::Disabled),
+        ],
+        validity: Validity::Valid,
+    }))])
+    .expect("no invariant violation");
+    let c = rig.latest().startup.counts;
+    assert_eq!((c.total, c.enabled, c.disabled), (3, 2, 1));
+
+    rig.run(vec![cmd(Command::SetSysTableQuery(SysTableQuery {
+        table: SysTable::Startup,
+        generation: 2,
+        sort: SysSortSpec {
+            column: SysColumnId::all(SysTable::Startup)[0],
+            ascending: true,
+        },
+        filter: Arc::from("zebra"),
+        expanded: Arc::from([]),
+        services: None,
+    }))])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.startup.rows.len(), 1);
+    let c = snap.startup.counts;
+    assert_eq!((c.total, c.enabled, c.disabled), (1, 0, 1));
+    rig.passed();
+}
