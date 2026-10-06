@@ -227,3 +227,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - yms.26 OPEN: stagger landed (2754968, 1922ca2). Criterion 2000_steady 20.33 ms [20.24, 20.43] at load 8-10 (was 22.9); gate test 1 of 3 passed at that load. Rerun bench and gate on an idle machine before deciding more work; about 17 ms of the sweep is stat+statm syscalls.
 - i3o.5: tl-ops gains pub send_signal_fd(BorrowedFd, Signal); RealOps lives in actions/mod.rs next to ActionOps.
 - y6k.18: ConnectionsUpdate gains attribution: FxHashMap<ProcessKey, NetRate> (chain edit). New-socket owners get Valid 0 after the first pass (R-162 beats bead text). Reducer use of Connections still needs a bead: check one exists.
+- ug9.5: line height exactly 1.3 x size (16.9 px at 13 px; bead said 17). template_width allocates per call: never call per cell. UI validation item.
