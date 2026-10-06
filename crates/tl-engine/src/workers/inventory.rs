@@ -365,6 +365,7 @@ fn disk_drives(root: &SysRoot, host: bool) -> Arc<[DiskDrive]> {
             };
             DiskDrive {
                 device: None,
+                name: Some(Arc::clone(&disk.name)),
                 model: opt(disk.model.clone()),
                 kind: valid(Arc::from(kind_name(disk.kind))),
                 interface,

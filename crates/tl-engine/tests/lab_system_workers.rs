@@ -2946,7 +2946,12 @@ fn inventory_disk_drives() {
     let dir = fixture_copy("disk-partitions-dm", None);
     copy_tree(&fixtures().join("dmi-desktop"), &dir);
     let snap = inventory_scan(&dir);
-    // mmcblk0, nvme0n1, sda, sdb, sr0, vda: rows carry no name, so kind and size show the order.
+    let names: Vec<&str> = snap
+        .disks
+        .iter()
+        .map(|d| d.name.as_deref().unwrap_or(""))
+        .collect();
+    assert_eq!(names, ["mmcblk0", "nvme0n1", "sda", "sdb", "sr0", "vda"]);
     let kinds: Vec<&str> = snap.disks.iter().map(|d| &*d.kind.value).collect();
     assert_eq!(kinds, ["SD", "NVMe", "HDD", "USB", "Optical", "Virtual"]);
     let sizes: Vec<u64> = snap.disks.iter().map(|d| d.capacity_bytes.value).collect();
