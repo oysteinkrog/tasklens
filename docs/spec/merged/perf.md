@@ -1540,9 +1540,9 @@ Labels: "verified" means read in a document or checked on the machine. "Inferred
 - Source: MC setup script step 3 (`sensors-detect --auto`)
 - Behaviour:
   - Status "Not needed" when any hwmon fan exists (as here: nct6797 is loaded).
-  - Otherwise "Run sensor detection" runs it and shows the output. The modules it finds are written to `/etc/modules-load.d/tasklens-sensors.conf` and loaded with `modprobe`. "Revert" removes that file.
+  - Otherwise "Run sensor detection" runs it and shows the output. The modules it finds are written to `/etc/modules-load.d/tasklens-sensors.conf` and loaded with `modprobe`. "Revert" removes that file, puts back `/etc/conf.d/lm_sensors` as it was before the first run (or removes it if there was none), and disables `lm_sensors.service` unless it was enabled before. The modules stay loaded until the next reboot.
   - When lm_sensors is not installed, the row reads "Install lm_sensors to detect fan sensors" and has no button.
-- Linux data/mechanism: `tasklens-setup sensors-detect` runs `sensors-detect --auto`, parses its `MODULE_n` output, writes the file and runs `modprobe`.
+- Linux data/mechanism: before the first run, `tasklens-setup sensors-detect` saves `/etc/conf.d/lm_sensors` (if any) and whether `lm_sensors.service` is enabled under `/var/lib/tasklens/`. It then runs `sensors-detect --auto`. lm_sensors 3.6 never prints the module names as `MODULE_n` lines. When `/etc/conf.d` exists it writes `BUS_MODULES` and `HWMON_MODULES` to `/etc/conf.d/lm_sensors` and may enable and start `lm_sensors.service`. Otherwise it prints `modprobe <name>` lines between two `#----cut here----` lines. The step reads the names from the file when this run wrote it, otherwise from the cut-here block, keeps only names of letters, digits, `_` and `-`, writes the module file and runs `modprobe`.
 - Verdict: ADAPT. tasklens always writes the module file, so the result survives a reboot.
 - Phase: P4
 - Privilege: root through pkexec. Without it: no fan pages.

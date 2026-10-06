@@ -32,6 +32,12 @@ fi
 
 RULES_DIR="$ROOT/etc/udev/rules.d"
 MODULES_DIR="$ROOT/etc/modules-load.d"
+LM_CONF="$ROOT/etc/conf.d/lm_sensors"
+# What sensors-detect changed, saved before the first run and used by sensors-revert.
+STATE_DIR="$ROOT/var/lib/tasklens"
+SAVED="$STATE_DIR/sensors-saved"
+SAVED_CONF="$STATE_DIR/lm_sensors.before"
+SAVED_ENABLED="$STATE_DIR/lm_sensors-service.enabled"
 
 # Runs an external system command, or prints it in test mode.
 run() {
@@ -62,60 +68,122 @@ rapl_revert() {
     echo 'Reverted. A reboot may be needed before the files return to mode 0400.'
 }
 
-# Runs `sensors-detect --auto`, or in test mode prints `$ROOT/sensors-detect.out`.
+# Runs `sensors-detect --auto`. In test mode prints `$ROOT/sensors-detect.out` and, when
+# `$ROOT/sensors-detect.conf` exists, copies it to the conf.d file as sensors-detect would.
 sensors_detect_output() {
     if [ "$TEST" -eq 1 ]; then
         echo 'would run: sensors-detect --auto'
         cat "$ROOT/sensors-detect.out"
+        if [ -f "$ROOT/sensors-detect.conf" ]; then
+            cp "$ROOT/sensors-detect.conf" "$LM_CONF"
+        fi
     else
         sensors-detect --auto
     fi
 }
 
+# True when lm_sensors.service is enabled. In test mode, when `$ROOT/lm_sensors.enabled` exists.
+service_enabled() {
+    if [ "$TEST" -eq 1 ]; then
+        echo 'would run: systemctl is-enabled --quiet lm_sensors.service'
+        [ -e "$ROOT/lm_sensors.enabled" ]
+    else
+        systemctl is-enabled --quiet lm_sensors.service
+    fi
+}
+
+# Saves what sensors-detect may change: a copy of the conf.d file if there is one, and whether
+# lm_sensors.service is enabled. A second run before a revert keeps the first saved state.
+save_sensors_state() {
+    [ ! -e "$SAVED" ] || return 0
+    mkdir -p "$STATE_DIR"
+    rm -f "$SAVED_CONF" "$SAVED_ENABLED"
+    if [ -f "$LM_CONF" ]; then
+        cp -p "$LM_CONF" "$SAVED_CONF"
+    fi
+    if service_enabled; then
+        : > "$SAVED_ENABLED"
+    fi
+    : > "$SAVED"
+}
+
+# Adds `$1` to `$modules` when it is a name of letters, digits, `_` and `-`.
+add_module() {
+    case $1 in
+        '' | *[!A-Za-z0-9_-]*) printf 'skipped module name: %s\n' "$1" ;;
+        *) modules="$modules$1$nl" ;;
+    esac
+}
+
+# Adds each space-separated name in `$1`, after removing the quotes around the whole value.
+add_modules_value() {
+    value=$1
+    case $value in
+        \"*\") value=${value#\"}; value=${value%\"} ;;
+        \'*\') value=${value#\'}; value=${value%\'} ;;
+    esac
+    IFS=' '
+    for name in $value; do
+        add_module "$name"
+    done
+    IFS=$nl
+}
+
 # PERF-108: writes the modules sensors-detect finds to modules-load.d and loads them.
+# sensors-detect 3.6 reports them in one of two ways. When /etc/conf.d exists it writes
+# BUS_MODULES and HWMON_MODULES to /etc/conf.d/lm_sensors, and may enable and start
+# lm_sensors.service. Otherwise it prints `modprobe <name>` lines between two
+# "#----cut here----" lines.
 sensors_detect() {
     if [ ! -f "$ROOT/usr/bin/sensors-detect" ]; then
         echo 'Install lm_sensors to detect fan sensors'
         exit 3
     fi
+    save_sensors_state
+    # The conf.d file as it was before this run, to tell whether this run wrote it.
+    run_conf="$STATE_DIR/lm_sensors.run"
+    rm -f "$run_conf"
+    if [ -f "$LM_CONF" ]; then
+        cp "$LM_CONF" "$run_conf"
+    fi
     status=0
     out=$(sensors_detect_output) || status=$?
     printf '%s\n' "$out"
+    written=0
+    if [ -f "$LM_CONF" ] && { [ ! -f "$run_conf" ] || ! cmp -s "$LM_CONF" "$run_conf"; }; then
+        written=1
+    fi
+    rm -f "$run_conf"
     if [ "$status" -ne 0 ]; then
         exit "$status"
     fi
 
-    # Keep the value of every `MODULE_<digits>=` line. Only names of letters, digits, `_` and
-    # `-` reach modprobe.
     modules=''
     nl='
 '
     set -f
     saved_ifs=$IFS
     IFS=$nl
-    for line in $out; do
-        key=${line%%=*}
-        [ "$key" != "$line" ] || continue
-        case $key in
-            MODULE_*) ;;
-            *) continue ;;
-        esac
-        case ${key#MODULE_} in
-            '' | *[!0-9]*) continue ;;
-        esac
-        name=${line#*=}
-        case $name in
-            \"*\") name=${name#\"}; name=${name%\"} ;;
-            \'*\') name=${name#\'}; name=${name%\'} ;;
-        esac
-        case $name in
-            '' | *[!A-Za-z0-9_-]*)
-                printf 'skipped module name: %s\n' "$name"
+    if [ "$written" -eq 1 ]; then
+        # BUS_MODULES comes first in the file, the order lm_sensors.service loads them in.
+        while read -r line; do
+            case $line in
+                BUS_MODULES=* | HWMON_MODULES=*) add_modules_value "${line#*=}" ;;
+            esac
+        done < "$LM_CONF"
+    else
+        cut=0
+        for line in $out; do
+            if [ "$line" = '#----cut here----' ]; then
+                cut=$((1 - cut))
                 continue
-                ;;
-        esac
-        modules="$modules$name$nl"
-    done
+            fi
+            [ "$cut" -eq 1 ] || continue
+            case $line in
+                'modprobe '*) add_modules_value "${line#modprobe }" ;;
+            esac
+        done
+    fi
     IFS=$saved_ifs
     set +f
 
@@ -139,8 +207,23 @@ sensors_detect() {
     echo 'Enabled'
 }
 
+# Removes the module file. When detection saved state, also puts back the conf.d file as it was
+# (or removes it if there was none) and disables lm_sensors.service unless it was enabled
+# before. Without saved state the conf.d file and the service are left alone.
 sensors_revert() {
     rm -f "$MODULES_DIR/tasklens-sensors.conf"
+    if [ -e "$SAVED" ]; then
+        if [ -f "$SAVED_CONF" ]; then
+            cp -p "$SAVED_CONF" "$LM_CONF.tasklens.tmp"
+            mv -f "$LM_CONF.tasklens.tmp" "$LM_CONF"
+        else
+            rm -f "$LM_CONF"
+        fi
+        if [ ! -e "$SAVED_ENABLED" ] && service_enabled; then
+            run systemctl disable lm_sensors.service
+        fi
+        rm -f "$SAVED_CONF" "$SAVED_ENABLED" "$SAVED"
+    fi
     echo 'Reverted. The modules stay loaded until the next reboot.'
 }
 
