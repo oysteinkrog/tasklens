@@ -13,7 +13,9 @@ use std::process::{ExitCode, exit};
 use std::thread::sleep;
 use std::time::Duration;
 
-use rustix::process::{Signal, getpid, getppid, kill_process};
+use rustix::process::{
+    DumpableBehavior, Signal, getpid, getppid, kill_process, set_dumpable_behavior,
+};
 use tl_model::gpu_proto::{
     ApiVersions, GpuApiVersions, GpuDeviceInfo, GpuDeviceSample, GpuProcessSample, InitFailure,
     Reading,
@@ -156,6 +158,11 @@ impl FakeBackend {
 }
 
 fn segv() -> ! {
+    // Not dumpable, so the kernel skips the core dump and does not start systemd-coredump.
+    // RLIMIT_CORE 0 is not enough: the kernel still starts a piped core handler. While the
+    // handler reads the dump the probe's socket stays open, and the engine sees a deadline
+    // instead of the crash (8fx.37).
+    let _ = set_dumpable_behavior(DumpableBehavior::NotDumpable);
     // The std runtime's stack overflow handler catches the first SIGSEGV, sees no guard page
     // fault, restores the default action and returns. The second one ends the process.
     let _ = kill_process(getpid(), Signal::SEGV);
