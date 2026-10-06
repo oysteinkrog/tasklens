@@ -243,7 +243,7 @@ mod tests {
         let mut cache = CellTextCache::<u32>::new();
         cache.begin_version(1, 1);
         let runs = Cell::new(0);
-        let mut get = |cache: &mut CellTextCache<u32>, bits: u64, validity: Validity| {
+        let get = |cache: &mut CellTextCache<u32>, bits: u64, validity: Validity| {
             cache.get_or_format(1, CPU, bits, validity, |s| {
                 runs.set(runs.get() + 1);
                 s.push_str(&bits.to_string());
@@ -342,7 +342,7 @@ mod tests {
         cache.begin_version(1, 1);
         let path: Arc<str> = Arc::from("/usr/lib/systemd/systemd-journald");
         let runs = Cell::new(0);
-        let mut at = |cache: &mut CellTextCache<u32>, width: f32, source: &Arc<str>| {
+        let at = |cache: &mut CellTextCache<u32>, width: f32, source: &Arc<str>| {
             cache.path(1, CPU, px(width), source, |s, _| {
                 runs.set(runs.get() + 1);
                 SharedString::new(s)
