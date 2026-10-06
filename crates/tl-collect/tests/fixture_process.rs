@@ -3722,13 +3722,10 @@ mod strings_scan {
 }
 
 mod strings_random {
-    use tl_collect::proc::strings::{
-        Encoding, MAX_STRINGS, ScanEnd, ScanOpts, StringScanner, VecMem,
-    };
+    use tl_collect::proc::strings::{Encoding, ScanEnd, ScanOpts, StringScanner, VecMem};
 
-    /// 4 MiB of xorshift bytes with all encodings on. Measured: about 51,000 ASCII, 22,000
-    /// UTF-8 and 170,000 UTF-16LE hits, so about 60,000 per MiB. The test fails above 80,000
-    /// per MiB, which keeps 4 MiB of random data under a quarter of the string cap.
+    /// 4 MiB of xorshift bytes with all encodings on. All encodings together must stay under
+    /// 20,000 hits per MiB, so random data does not flood the scan.
     #[test]
     fn strings_random_bytes_under_cap() {
         const SIZE: usize = 4 * 1024 * 1024;
@@ -3757,7 +3754,51 @@ mod strings_random {
             count(Encoding::Utf16Le)
         );
         assert_eq!(end, Some(ScanEnd::Finished));
-        assert!(out.len() < 4 * 80_000, "{} hits", out.len());
-        assert!(out.len() < MAX_STRINGS as usize / 3);
+        assert!(out.len() < 4 * 20_000, "{} hits", out.len());
+    }
+}
+
+mod strings_utf16_alphabet {
+    use tl_collect::proc::strings::{
+        Encoding, ScanEnd, ScanOpts, StringHitInfo, StringScanner, VecMem,
+    };
+
+    fn utf16_hits(text: &str) -> Vec<StringHitInfo> {
+        let mut bytes = vec![0u8; 2];
+        bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend([0, 0]);
+        let base = 0x4000;
+        let end = base + bytes.len() as u64;
+        let mut scanner = StringScanner::new(ScanOpts::default(), vec![(base, end)]);
+        let mut mem = VecMem(base, bytes);
+        let (mut buf, mut out) = (Vec::new(), Vec::new());
+        assert_eq!(
+            scanner.step(&mut mem, &mut buf, &mut out),
+            Some(ScanEnd::Finished)
+        );
+        out.retain(|h| h.encoding == Encoding::Utf16Le);
+        out
+    }
+
+    #[test]
+    fn strings_utf16le_cyrillic_hit() {
+        assert_eq!(
+            utf16_hits("Привет"),
+            [StringHitInfo {
+                address: 0x4002,
+                encoding: Encoding::Utf16Le,
+                length: 6,
+                value: "Привет".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn strings_utf16le_high_byte_change_splits_run() {
+        // "Wine" has high byte 0 and "привет" has 0x04, so each part is its own run.
+        let hits = utf16_hits("Wineпривет");
+        let values: Vec<&str> = hits.iter().map(|h| &*h.value).collect();
+        assert_eq!(values, ["Wine", "привет"]);
+        assert_eq!(hits[1].address, 0x4002 + 8);
     }
 }

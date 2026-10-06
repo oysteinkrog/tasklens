@@ -210,6 +210,8 @@ struct Utf16State {
     run: Run,
     /// The low byte read at the last even address.
     low: Option<u8>,
+    /// The high byte every unit of the open run shares.
+    high: u8,
 }
 
 /// Scans process memory for strings, one chunk per [`step`](Self::step). It holds no thread
@@ -474,7 +476,14 @@ impl StringScanner {
             return;
         }
         match st.low.take().and_then(|low| utf16_char(low, b)) {
-            Some(c) => st.run.push(addr - 1, c),
+            Some(c) => {
+                if st.run.chars > 0 && st.high != b {
+                    // Another alphabet: end this run and start a new one with this unit.
+                    self.sink.end(&mut st.run, Encoding::Utf16Le, out);
+                }
+                st.high = b;
+                st.run.push(addr - 1, c);
+            }
             None => {
                 if st.run.chars > 0 {
                     self.sink.end(&mut st.run, Encoding::Utf16Le, out);
@@ -498,9 +507,15 @@ fn is_printable(c: char) -> bool {
 /// unit whose two bytes are both printable ASCII or tab: that is two ASCII chars, and taking it
 /// as one wide char would turn every ASCII string into UTF-16 noise.
 ///
-/// Known cost: a CJK or kana char whose two bytes both fall in 0x20..=0x7E is dropped. That is
-/// about a third of the CJK Unified Ideographs block (U+4E00..=U+9FFF). Latin-1, Greek,
-/// Cyrillic, Hangul and most other scripts are kept.
+/// A run also keeps one high byte for its whole length: a unit with another high byte than the
+/// first unit ends the run and starts a new one (see `utf16_byte`). Text in one alphabet keeps
+/// one high byte (0 is Latin-1; Greek, Cyrillic, Hebrew and Arabic each have their own), but
+/// in random data each extra unit matches with odds of about 1 in 256.
+///
+/// Known costs: CJK and Hangul text changes high byte almost every char, so it is mostly not
+/// found. A space or ASCII digit (high byte 0) inside Greek, Cyrillic, Hebrew or Arabic text
+/// splits the run, so each word is a separate run and a word shorter than the minimum length is
+/// not found.
 fn utf16_char(low: u8, high: u8) -> Option<char> {
     if is_ascii_text(low) && is_ascii_text(high) {
         return None;
