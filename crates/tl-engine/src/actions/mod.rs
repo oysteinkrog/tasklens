@@ -7,6 +7,7 @@
 
 pub mod cgroup;
 pub mod dump;
+mod helper;
 pub mod process;
 pub mod recovery;
 pub mod socket;
@@ -260,8 +261,8 @@ pub enum HelperCallError {
     Protocol(Arc<str>),
 }
 
-/// The privileged helper link, filled by E29-014 (E29-OI-6). `ActionCtx::helper` is `None`
-/// before P3 and when the helper is not installed.
+/// The privileged helper link (E29-OI-6). `HelperHandle` implements it in `helper.rs`
+/// (E29-014). `ActionCtx::helper` is `None` when the session runs no helper task.
 pub trait PrivilegedOps: Send + Sync + 'static {
     fn call(
         &self,
@@ -650,7 +651,7 @@ pub struct ActionCtx {
     pub systemd_user: ManagerConnSlot,
     /// `RealOpeners` in production. `None` refuses the targetless kinds.
     pub openers: Option<Arc<dyn Openers>>,
-    /// `None` until E29-014.
+    /// The session's `HelperHandle` (E29-014). `None` when the session runs no helper task.
     pub helper: Option<Arc<dyn PrivilegedOps>>,
     /// Set once `ConnectionsDestroySupport(true)` was sent this session (E11-021).
     pub destroy_support_sent: AtomicBool,
@@ -811,8 +812,10 @@ pub fn gate_with_ops(hook: HookCtx, ops: Arc<dyn ActionOps>) -> Box<dyn ActionGa
         systemd_system: hook.shared.systemd_system,
         systemd_user: hook.shared.systemd_user,
         openers: Some(openers),
-        // E29-014.
-        helper: None,
+        helper: hook
+            .shared
+            .helper
+            .map(|h| Arc::new(h) as Arc<dyn PrivilegedOps>),
         destroy_support_sent: AtomicBool::new(false),
         unit_bus_override: None,
         startup_paths: startup::StartupPaths::from_env(),
@@ -888,9 +891,15 @@ async fn run_body(
         // `privileged` only picks the deadline here: these kinds have no helper route.
         targetless::run(cx, actx, &req.kind, req.privileged).await
     } else if req.privileged {
-        // E29-014 chain-edits the routing arm here. Until then a privileged request is refused:
-        // it never falls back to an unprivileged call.
-        ActionState::Rejected(RejectReason::Unsupported)
+        // E29-014: through the helper. Without one the request is refused: it never falls back
+        // to an unprivileged call.
+        match actx.helper.as_deref() {
+            Some(h) => match helper::run_privileged(cx, actx, req, per_target, h).await {
+                Some(summary) => summary,
+                None => return,
+            },
+            None => ActionState::Rejected(RejectReason::Unsupported),
+        }
     } else {
         // `KillTree` runs the admitted targets in one `process::kill_tree` call (E11-004).
         let mut tree = match req.kind {
@@ -1032,7 +1041,7 @@ async fn dispatch(
                 four_tuple,
             },
         ) => socket::run_target(cx, actx, kind, *cookie, *family, *proto, *four_tuple).await,
-        // `run_body` refuses privileged requests until E29-014 routes them, so this call is the
+        // A privileged dump goes through `helper::run_privileged`, so this call is the
         // unprivileged one.
         (K::Dump { mode, path }, T::Process(key)) => {
             dump::run_target(cx, actx, *mode, path, *key, false).await
