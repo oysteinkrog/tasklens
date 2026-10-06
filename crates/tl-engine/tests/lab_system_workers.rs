@@ -2994,6 +2994,8 @@ fn inventory_graphics_amd() {
     assert_eq!(snap.graphics.len(), 1);
     let gpu = &snap.graphics[0];
     assert_eq!(gpu.name, inv_text("Navi 31 [Radeon RX 7900 XT]"));
+    assert_eq!(gpu.device, None);
+    assert_eq!(gpu.pci_slot.as_deref(), Some("0000:03:00.0"));
     let sys = dir.join("sys");
     let card = &gpu_drm::discover_cards(&sys)[0];
     let mut amd = AmdSample::default();

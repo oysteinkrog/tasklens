@@ -464,6 +464,7 @@ fn graphics(raw: &InventoryRaw, root: &SysRoot) -> Arc<[GraphicsAdapter]> {
             };
             GraphicsAdapter {
                 device: None,
+                pci_slot: Some(Arc::from(card.pci_slot.to_ascii_lowercase())),
                 name,
                 driver_version: opt(version),
                 kernel_module,
