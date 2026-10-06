@@ -550,3 +550,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8hz.12 (a664d0f): RestartCounts. Counts reset when a session restarts; the doc now says per session (accepted). bj6.9 closed by the leader.
 - crw.33 (fe1466c): DeviceSidebar::set_active and PerformancePage::set_active; crw.1 must call them on tab activation.
 - cr0.9 (ef0e8f0, 1d57223, f7c0eb1): settings store. A corrupt file is renamed to .corrupt-<unix>; a newer file opens read-only. Clamp logs name the key only, with no values (leader privacy rule overrides the bead text).
+- wlf.15 (b5eb1b4, 8d691f8, de6315c): gallery entry and the tl-ui hook behind bench. The gallery window opened at 1850 ms (bench build, machine under load). MANUAL DESKTOP CHECK after wlf.16: run tasklens --gallery, close the window, and check it exits 0 within 2 s.
