@@ -241,10 +241,13 @@ pub fn type_number(rows: &[DeviceRow], key: &DeviceKey) -> u16 {
 pub struct PerformancePage {
     // E24-004: sidebar: Entity<sidebar::DeviceSidebar> (added by crw.6 as a chain edit, R-262)
     /// Device pages, created on first visit and kept (ADR-009).
+    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) pages: FxHashMap<DeviceKey, AnyView>,
+    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) selected: Option<DeviceKey>,
     // E24-015: summary: Option<Entity<summary::SummaryView>> (added by crw.17 as a chain edit, R-262)
     /// Not persisted (R-090).
+    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) sidebar_visible: bool,
     /// Key context "Performance".
     pub(crate) focus: FocusHandle,
