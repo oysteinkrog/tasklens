@@ -1,10 +1,13 @@
 //! Column model shared by every table: per-column specs and the per-table layout (ADR-009,
 //! ADR-011, PROC-022, PROC-023, UI-PRC-005, UI-PRC-007).
 //!
-//! Column state is kept by `ColumnId`, never by index. Widths are stored in logical px at 100%
-//! and scaled by `UiMetrics.ui_scale` only in `rebuild`, which precomputes the x offsets that
-//! render and hit testing read without allocating.
+//! Column state is kept by column id, never by index. The layout is generic over the id type
+//! (`TableColumn`): `ColumnId` for Processes and History, `SysColumnId` for the system tables.
+//! Widths are stored in logical px at 100% and scaled by `UiMetrics.ui_scale` only in `rebuild`,
+//! which precomputes the x offsets that render and hit testing read without allocating.
 
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use gpui_kit::gpui::private::schemars::JsonSchema;
@@ -13,7 +16,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use tl_model::ids::ColumnId;
 use tl_model::settings::ColumnState;
-use tl_model::table::SortSpec;
+use tl_model::table::{SortSpec, SysColumnId, SysSortSpec, SysTable};
 
 use crate::text::metrics::TextMetricsCache;
 use crate::theme::metrics::UiMetrics;
@@ -43,6 +46,55 @@ impl TableId {
     }
 }
 
+/// A column id a `ColumnLayout` can hold: `ColumnId` or `SysColumnId`.
+pub trait TableColumn: Copy + Eq + Hash + Debug + 'static {
+    /// The `state.toml` string, as `as_str` returns it.
+    fn key(self) -> &'static str;
+    /// The id for `key` in `table`'s id set. `None` for an unknown key or a table of the other
+    /// id type.
+    fn parse(table: TableId, key: &str) -> Option<Self>;
+    /// True for the column that stays first and visible: Name on the process tables. The system
+    /// tables have none.
+    fn pinned_first(self) -> bool;
+}
+
+impl TableColumn for ColumnId {
+    fn key(self) -> &'static str {
+        self.as_str()
+    }
+
+    fn parse(table: TableId, key: &str) -> Option<Self> {
+        match table {
+            TableId::Processes | TableId::History => ColumnId::from_str(key),
+            TableId::Services | TableId::Startup | TableId::Connections => None,
+        }
+    }
+
+    fn pinned_first(self) -> bool {
+        self == ColumnId::Name
+    }
+}
+
+impl TableColumn for SysColumnId {
+    fn key(self) -> &'static str {
+        self.as_str()
+    }
+
+    fn parse(table: TableId, key: &str) -> Option<Self> {
+        let sys = match table {
+            TableId::Services => SysTable::Services,
+            TableId::Startup => SysTable::Startup,
+            TableId::Connections => SysTable::Connections,
+            TableId::Processes | TableId::History => return None,
+        };
+        SysColumnId::from_str(sys, key)
+    }
+
+    fn pinned_first(self) -> bool {
+        false
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ColumnAlign {
     Left,
@@ -65,8 +117,8 @@ pub enum Availability {
 
 /// One column as the header and the picker see it. The owner of each table supplies the specs.
 #[derive(Clone, Debug)]
-pub struct ColumnSpec {
-    pub id: ColumnId,
+pub struct ColumnSpec<C: TableColumn = ColumnId> {
+    pub id: C,
     /// Header line 1, e.g. "Memory".
     pub label: SharedString,
     /// Picker name, e.g. "Working set private". Equals `label` when there is no alias (R-065).
@@ -101,16 +153,16 @@ pub enum ColumnError {
 
 /// Order, visibility and widths of one table's columns, with precomputed x offsets.
 #[derive(Clone, Debug)]
-pub struct ColumnLayout {
+pub struct ColumnLayout<C: TableColumn = ColumnId> {
     pub table: TableId,
     /// Every known column. Hidden ones keep their place (UI-PRC-007).
-    pub order: Vec<ColumnId>,
-    pub visible: FxHashSet<ColumnId>,
+    pub order: Vec<C>,
+    pub visible: FxHashSet<C>,
     /// Logical px at 100%, remembered for hidden columns too.
-    pub widths: FxHashMap<ColumnId, Pixels>,
+    pub widths: FxHashMap<C, Pixels>,
     /// x offset of each visible column in order, scaled.
     offsets: Arc<[Pixels]>,
-    visible_order: Arc<[ColumnId]>,
+    visible_order: Arc<[C]>,
     total_width: Pixels,
     ui_scale: f32,
     /// Bumps on every change; offsets are rebuilt then.
@@ -119,7 +171,7 @@ pub struct ColumnLayout {
 
 /// Equal when the stored state and the scale match. `version` is ignored, and the derived
 /// fields follow from the rest.
-impl PartialEq for ColumnLayout {
+impl<C: TableColumn> PartialEq for ColumnLayout<C> {
     fn eq(&self, other: &Self) -> bool {
         self.table == other.table
             && self.order == other.order
@@ -129,13 +181,18 @@ impl PartialEq for ColumnLayout {
     }
 }
 
-impl ColumnLayout {
+/// The layout of the Processes and History tables.
+pub type ProcessColumnLayout = ColumnLayout<ColumnId>;
+/// The layout of the Services, Startup and Connections tables.
+pub type SysColumnLayout = ColumnLayout<SysColumnId>;
+
+impl<C: TableColumn> ColumnLayout<C> {
     /// Builds the layout from `[columns.<table>]`. Ids not in `specs` are dropped with a log line
     /// (ADR-011). Spec ids missing from `order` are appended hidden, in spec order. Name is forced
     /// first and visible. Offsets are built at scale 1.0; call `rebuild` with the real scale.
-    pub fn from_state(table: TableId, state: &ColumnState, specs: &[ColumnSpec]) -> Self {
-        let known = |s: &str| -> Option<ColumnId> {
-            let id = ColumnId::from_str(s).filter(|id| specs.iter().any(|sp| sp.id == *id));
+    pub fn from_state(table: TableId, state: &ColumnState, specs: &[ColumnSpec<C>]) -> Self {
+        let known = |s: &str| -> Option<C> {
+            let id = C::parse(table, s).filter(|id| specs.iter().any(|sp| sp.id == *id));
             if id.is_none() {
                 tracing::info!(
                     target: "tasklens::ui",
@@ -154,7 +211,7 @@ impl ColumnLayout {
                 order.push(id);
             }
         }
-        let visible: FxHashSet<ColumnId> = state
+        let visible: FxHashSet<C> = state
             .visible
             .iter()
             .filter_map(|s| known(s))
@@ -166,7 +223,7 @@ impl ColumnLayout {
             }
         }
 
-        let mut widths: FxHashMap<ColumnId, Pixels> = specs
+        let mut widths: FxHashMap<C, Pixels> = specs
             .iter()
             .map(|spec| (spec.id, spec.default_width))
             .collect();
@@ -181,25 +238,20 @@ impl ColumnLayout {
 
     /// The `[columns.<table>]` value for this layout. Widths round to whole logical px.
     pub fn to_state(&self) -> ColumnState {
-        let ids = |f: &dyn Fn(&ColumnId) -> bool| -> Vec<String> {
-            self.order
-                .iter()
-                .filter(|id| f(id))
-                .map(|id| id.as_str().to_owned())
-                .collect()
-        };
         ColumnState {
-            order: ids(&|_| true),
-            visible: ids(&|id| self.visible.contains(id)),
+            order: self.order.iter().map(|id| id.key().to_owned()).collect(),
+            visible: self
+                .order
+                .iter()
+                .filter(|id| self.visible.contains(id))
+                .map(|id| id.key().to_owned())
+                .collect(),
             widths: self
                 .order
                 .iter()
                 .filter_map(|id| {
                     let w = self.widths.get(id)?;
-                    Some((
-                        id.as_str().to_owned(),
-                        f32::from(*w).round().max(0.0) as u32,
-                    ))
+                    Some((id.key().to_owned(), f32::from(*w).round().max(0.0) as u32))
                 })
                 .collect(),
         }
@@ -209,11 +261,11 @@ impl ColumnLayout {
     /// `default_order` are appended hidden. Widths come from `ColumnSpec::default_width`.
     pub fn defaults(
         table: TableId,
-        specs: &[ColumnSpec],
-        default_order: &[ColumnId],
-        default_visible: &[ColumnId],
+        specs: &[ColumnSpec<C>],
+        default_order: &[C],
+        default_visible: &[C],
     ) -> Self {
-        let in_specs = |id: &ColumnId| specs.iter().any(|sp| sp.id == *id);
+        let in_specs = |id: &C| specs.iter().any(|sp| sp.id == *id);
         let mut order = Vec::with_capacity(specs.len());
         let mut seen = FxHashSet::default();
         for &id in default_order.iter().filter(|id| in_specs(id)) {
@@ -240,13 +292,13 @@ impl ColumnLayout {
 
     fn build(
         table: TableId,
-        mut order: Vec<ColumnId>,
-        mut visible: FxHashSet<ColumnId>,
-        widths: FxHashMap<ColumnId, Pixels>,
+        mut order: Vec<C>,
+        mut visible: FxHashSet<C>,
+        widths: FxHashMap<C, Pixels>,
     ) -> Self {
-        if let Some(pos) = order.iter().position(|id| *id == ColumnId::Name) {
+        if let Some(pos) = order.iter().position(|id| id.pinned_first()) {
             order[..=pos].rotate_right(1);
-            visible.insert(ColumnId::Name);
+            visible.insert(order[0]);
         }
         let mut layout = Self {
             table,
@@ -264,7 +316,7 @@ impl ColumnLayout {
     }
 
     /// Visible ids in order.
-    pub fn visible_columns(&self) -> &Arc<[ColumnId]> {
+    pub fn visible_columns(&self) -> &Arc<[C]> {
         &self.visible_order
     }
 
@@ -279,14 +331,14 @@ impl ColumnLayout {
     }
 
     /// Width of `id` scaled by the last `rebuild` scale. Zero for an id not in the layout.
-    pub fn width(&self, id: ColumnId) -> Pixels {
+    pub fn width(&self, id: C) -> Pixels {
         self.widths
             .get(&id)
             .map_or(Pixels::ZERO, |w| *w * self.ui_scale)
     }
 
     /// Shows or hides `id`. Showing restores its remembered width and its old slot in `order`.
-    pub fn set_visible(&mut self, id: ColumnId, on: bool) -> Result<(), ColumnError> {
+    pub fn set_visible(&mut self, id: C, on: bool) -> Result<(), ColumnError> {
         if !self.order.contains(&id) {
             return Err(ColumnError::Unknown);
         }
@@ -296,7 +348,7 @@ impl ColumnLayout {
             }
             return Ok(());
         }
-        if id == ColumnId::Name {
+        if id.pinned_first() {
             return Err(ColumnError::NameCannotBeHidden);
         }
         if !self.visible.contains(&id) {
@@ -311,7 +363,7 @@ impl ColumnLayout {
     }
 
     /// Sets the width of `id` from scaled px, as `width` returns them. Stored at 100%.
-    pub fn set_width(&mut self, id: ColumnId, w: Pixels) {
+    pub fn set_width(&mut self, id: C, w: Pixels) {
         if let Some(slot) = self.widths.get_mut(&id) {
             *slot = px(f32::from(w) / self.ui_scale);
             self.rebuild(self.ui_scale);
@@ -319,12 +371,8 @@ impl ColumnLayout {
     }
 
     /// Moves `id` before `before`, or to the end on `None`. Nothing may move Name or go before it.
-    pub fn move_column(
-        &mut self,
-        id: ColumnId,
-        before: Option<ColumnId>,
-    ) -> Result<(), ColumnError> {
-        if id == ColumnId::Name || before == Some(ColumnId::Name) {
+    pub fn move_column(&mut self, id: C, before: Option<C>) -> Result<(), ColumnError> {
+        if id.pinned_first() || before.is_some_and(C::pinned_first) {
             return Err(ColumnError::NameMustStayFirst);
         }
         let from = self
@@ -352,7 +400,7 @@ impl ColumnLayout {
     /// Recomputes offsets, visible order and total width at `ui_scale`, and bumps `version`.
     pub fn rebuild(&mut self, ui_scale: f32) {
         self.ui_scale = ui_scale;
-        let visible_order: Arc<[ColumnId]> = self
+        let visible_order: Arc<[C]> = self
             .order
             .iter()
             .copied()
@@ -378,7 +426,7 @@ impl ColumnLayout {
     }
 
     /// The visible column under `x` (scaled, from the left edge of the first column).
-    pub fn column_at_x(&self, x: Pixels) -> Option<ColumnId> {
+    pub fn column_at_x(&self, x: Pixels) -> Option<C> {
         if x < Pixels::ZERO || x >= self.total_width {
             return None;
         }
@@ -388,7 +436,7 @@ impl ColumnLayout {
 
     /// The visible column whose right edge lies within `half_band` of `x`, nearest first. This
     /// is the resize hit band, 4 px each side (UI-PRC-005).
-    pub fn boundary_near_x(&self, x: Pixels, half_band: Pixels) -> Option<ColumnId> {
+    pub fn boundary_near_x(&self, x: Pixels, half_band: Pixels) -> Option<C> {
         let n = self.visible_order.len();
         let right = |i: usize| -> Pixels {
             if i + 1 < n {
@@ -419,8 +467,8 @@ impl ColumnLayout {
 ///
 /// The template is measured in the table font at `t_base` with `tnum`, so it follows scale
 /// changes. `TextMetricsCache` measures through the window's text system, hence `window`.
-pub fn min_width(
-    spec: &ColumnSpec,
+pub fn min_width<C: TableColumn>(
+    spec: &ColumnSpec<C>,
     is_sort_column: bool,
     metrics: &mut TextMetricsCache,
     m: &UiMetrics,
@@ -445,14 +493,25 @@ pub fn min_width(
 /// column: Numeric starts descending, Text and Path ascending. A free function because
 /// `SortSpec` lives in tl-model.
 pub fn next_sort(current: &SortSpec, col: ColumnId, kind: ColumnKind) -> SortSpec {
-    let ascending = if current.column == col {
-        !current.ascending
-    } else {
-        kind != ColumnKind::Numeric
-    };
     SortSpec {
         column: col,
-        ascending,
+        ascending: next_ascending(current.column, current.ascending, col, kind),
+    }
+}
+
+/// `next_sort` for a system table.
+pub fn next_sys_sort(current: &SysSortSpec, col: SysColumnId, kind: ColumnKind) -> SysSortSpec {
+    SysSortSpec {
+        column: col,
+        ascending: next_ascending(current.column, current.ascending, col, kind),
+    }
+}
+
+fn next_ascending<C: TableColumn>(current: C, ascending: bool, col: C, kind: ColumnKind) -> bool {
+    if current == col {
+        !ascending
+    } else {
+        kind != ColumnKind::Numeric
     }
 }
 
@@ -789,5 +848,58 @@ mod tests {
             layout.move_column(ColumnId::Gpu, None),
             Err(ColumnError::Unknown)
         );
+    }
+
+    #[test]
+    fn services_layout_state_round_trip() {
+        use tl_model::table::ServiceColumn;
+
+        let all = SysColumnId::all(SysTable::Services);
+        assert_eq!(all.len(), 19);
+        let specs: Vec<ColumnSpec<SysColumnId>> = all
+            .iter()
+            .map(|&id| {
+                let label = SharedString::new(id.as_str());
+                ColumnSpec {
+                    id,
+                    label: label.clone(),
+                    full_name: label.clone(),
+                    group: label,
+                    align: ColumnAlign::Left,
+                    kind: ColumnKind::Text,
+                    sortable: true,
+                    template: None,
+                    default_width: px(100.0),
+                    tooltip: None,
+                    availability: Availability::Available,
+                    hideable: true,
+                }
+            })
+            .collect();
+        let name = SysColumnId::Services(ServiceColumn::Name);
+        let status = SysColumnId::Services(ServiceColumn::Status);
+        let pid = SysColumnId::Services(ServiceColumn::Pid);
+        let mut layout: SysColumnLayout =
+            ColumnLayout::defaults(TableId::Services, &specs, all, &[name, status, pid]);
+        layout.set_width(status, px(140.0));
+        layout.set_width(pid, px(70.0));
+        layout.move_column(pid, Some(name)).unwrap();
+        layout.set_visible(status, false).unwrap();
+
+        let state = layout.to_state();
+        assert_eq!(state.order.len(), 19);
+        assert_eq!(state.order[..3], ["pid", "name", "display_name"]);
+        assert_eq!(state.visible, ["pid", "name"]);
+        assert_eq!(state.widths["status"], 140);
+
+        let back = ColumnLayout::from_state(TableId::Services, &state, &specs);
+        assert_eq!(back, layout);
+        assert_eq!(back.width(status), px(140.0));
+        assert_eq!(&*back.visible_columns().clone(), [pid, name]);
+        assert_eq!(back.offsets(), layout.offsets());
+
+        // Process ids do not parse in a system table.
+        let wrong = ColumnLayout::<SysColumnId>::from_state(TableId::Processes, &state, &specs);
+        assert!(wrong.visible.is_empty());
     }
 }
