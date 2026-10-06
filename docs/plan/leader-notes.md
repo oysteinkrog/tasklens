@@ -339,3 +339,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - hjn.26: fake bus returns Closed on cancel (1d01e51).
 - rsf.5: ColumnLayout over ColumnId only; follow-up rsf.18 makes it generic for SysColumnId (blocks hk6.1). min_width takes window and cx; set_width takes scaled px.
 - yrf.3: chart types and ChartView skeleton; submodules are stubs for later yrf beads; three placeholder fields carry dead_code allows. crw.3 PerformancePage fields unused (in progress).
+- hjn.20: Inventory System section (hostnamed, logind, env). Fixture root skips the bus, env and shell. run-with-timeout is a local copy of tl-collect run_version (private); share it in a cleanup.
