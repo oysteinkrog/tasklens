@@ -550,7 +550,8 @@ fn reset_generation_calls_reset_once() {
 /// E08-A1: a fake source runs through `SourceController`, its `ManagedSupervisor` and
 /// `source::run` into the reducer's queue. The script is `[Ok, Err, Ok]` over the source's
 /// life; `Source::sample` has no error path, so the failing step is a panic. The second
-/// generation picks the script up after the failure.
+/// generation picks the script up after the failure. The restart shows as `Failed` then
+/// `Running` (R-289).
 #[test]
 fn end_to_end_controller_runs_fake_source() {
     const SECOND: Duration = Duration::from_secs(1);
@@ -592,20 +593,32 @@ fn end_to_end_controller_runs_fake_source() {
     );
 
     let msgs = drain(&mut rx);
-    let health: Vec<(SourceState, u64)> = msgs
+    let health: Vec<(SourceState, u64, Option<Arc<str>>)> = msgs
         .iter()
         .map(|msg| match msg {
-            EngineMsg::Source(SourceUpdate::Health { state, t_ns, .. }) => (*state, *t_ns),
+            EngineMsg::Source(SourceUpdate::Health {
+                state,
+                t_ns,
+                last_error,
+                ..
+            }) => (*state, *t_ns, last_error.clone()),
             other => panic!("unexpected message {other:?}"),
         })
         .collect();
-    // The controller's `Running`, then one `Running` per successful sample.
-    assert_eq!(health.first().map(|h| h.0), Some(SourceState::Running));
-    assert!(
-        health.iter().all(|h| h.0 == SourceState::Running),
-        "{health:?}"
-    );
-    let sample_ms: Vec<u64> = health[1..].iter().map(|h| h.1 / 1_000_000).collect();
+    // The controller's `Running`, the sample at 0, then the restart as `Failed` and `Running`
+    // (R-289), then one `Running` per sample of the second generation.
+    let states: Vec<SourceState> = health.iter().map(|h| h.0).collect();
+    let mut expected = vec![SourceState::Running; 2];
+    expected.push(SourceState::Failed);
+    expected.extend([SourceState::Running; 10]);
+    assert_eq!(states, expected, "{health:?}");
+    assert_eq!(health[2].2.as_deref(), Some("panic"));
+    // The controller stamps its messages with CLOCK_BOOTTIME; the samples use the lab clock.
+    let sample_ms: Vec<u64> = [&health[1]]
+        .into_iter()
+        .chain(&health[4..])
+        .map(|h| h.1 / 1_000_000)
+        .collect();
     let mut expected = vec![0];
     expected.extend((0..9).map(|k| 1_500 + k * 1_000));
     assert_eq!(sample_ms, expected);
