@@ -392,7 +392,7 @@ fn view_hook_quads(
     quads.set(grid_quads);
     let mut spans = spans.borrow_mut();
     spans.clear();
-    spans.extend_from_slice(gaps);
+    spans.extend(gaps.iter().cloned());
 }
 
 /// Counts quads without painting them (test hook).
