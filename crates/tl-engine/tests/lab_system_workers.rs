@@ -3255,13 +3255,18 @@ fn gpu_drm_demand_and_hidden() {
     };
 
     run(&mut fl, Duration::from_millis(9_990), &mut times);
-    assert_eq!(times.len(), 10, "{times:?}");
-    assert!(times.windows(2).all(|w| w[1] - w[0] == 1_000), "{times:?}");
+    // The t = 0 sample is read after the first 10 ms step.
+    let expected: Vec<u64> = std::iter::once(10)
+        .chain((1..10).map(|k| k * 1_000))
+        .collect();
+    assert_eq!(times, expected);
 
     demand.send(Demand::default()).expect("watch has receivers");
     times.clear();
     run(&mut fl, Duration::from_secs(60), &mut times);
-    assert!(times.is_empty(), "sampled while hidden: {times:?}");
+    // `source::run` reads demand at each deadline, so the tick already due at 10 s still
+    // samples. After it, nothing for the rest of the 60 s.
+    assert_eq!(times, [10_000], "sampled while hidden");
 
     handle.abort();
     fl.finish();
