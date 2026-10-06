@@ -3,16 +3,20 @@
 use std::sync::Arc;
 
 use gpui_kit::TestAppContext;
+use smallvec::smallvec;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
-use tl_model::ids::DeviceIdx;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
-use tl_model::system::{Metric, SensorKind, SensorReading};
+use tl_model::system::{
+    CoreInfo, CoreKind, CpuSet, CpuTopology, Metric, SensorKind, SensorReading,
+};
 use tl_model::validity::Validity;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::cpu_details::{
     CpuLiveInputs, CpuSensor, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE, ROW_SPEED, ROW_TEMPERATURE,
     ROW_UP_TIME, cpu_details_model, cpu_temp_sensors, update_live, update_static,
 };
+use tl_ui::pages::performance::cpu_grid::{cell_specs, heading_tooltip};
 use tl_ui::pages::performance::details::{KeyValueModel, KvRow};
 
 const S: u64 = 1_000_000_000;
@@ -334,4 +338,222 @@ fn cpu_speed_bogomips_marker() {
         tip(&model, ROW_SPEED).as_deref(),
         Some("Fastest core: 5050 MHz")
     );
+}
+
+// Per-core grid (E24, UI-PRF-002, PERF-028).
+
+/// `n` logical CPUs on `n / 2` cores, core `c` holding CPUs `[c, c + n / 2]`, all online.
+fn topology(n: u16) -> CpuTopology {
+    let half = n / 2;
+    let mut online = CpuSet::empty();
+    for id in 0..n {
+        online.insert(id);
+    }
+    CpuTopology {
+        online,
+        cores: (0..half)
+            .map(|c| CoreInfo {
+                id: c,
+                logical: smallvec![c, c + half],
+                l3_group: 0,
+                kind: CoreKind::Standard,
+            })
+            .collect(),
+    }
+}
+
+/// `DeviceIdx(100 + id)` per logical CPU id.
+fn logical_devices(n: u16) -> Vec<DeviceIdx> {
+    (0..n).map(|id| DeviceIdx(100 + id)).collect()
+}
+
+#[test]
+fn cpu_grid_offline_cell() {
+    let mut topo = topology(16);
+    topo.online.remove(5);
+    let mut cells = Vec::new();
+    cell_specs(&topo, &logical_devices(16), false, &mut cells);
+    assert_eq!(cells.len(), 16);
+    assert!(cells[5].offline);
+    assert_eq!(cells.iter().filter(|c| c.offline).count(), 1);
+    assert_eq!(cells[5].heading.as_ref(), "CPU 5");
+    assert_eq!(
+        cells[5].fill_series,
+        SeriesId {
+            device: DeviceIdx(105),
+            metric: MetricId::CPU_TOTAL
+        }
+    );
+}
+
+#[test]
+fn cpu_grid_heading_tooltip_text() {
+    let mut out = String::from("old text");
+    heading_tooltip(3, 1, Some(4200), &mut out);
+    assert_eq!(out, "Core 3, thread 1, 4200 MHz");
+    heading_tooltip(3, 1, None, &mut out);
+    assert_eq!(out, "Core 3, thread 1");
+
+    // Core 3 holds CPUs [3, 11]: CPU 11 is its thread 1.
+    let mut cells = Vec::new();
+    cell_specs(&topology(16), &logical_devices(16), false, &mut cells);
+    assert_eq!(cells[11].tooltip.as_deref(), Some("Core 3, thread 1"));
+    assert_eq!(cells[3].tooltip.as_deref(), Some("Core 3, thread 0"));
+}
+
+#[cfg(feature = "test-hooks")]
+mod grid {
+    use gpui_kit::{App, AppContext as _, Entity, TestAppContext, px};
+    use tl_model::client::EngineClient;
+    use tl_model::settings::{AppearanceSettings, ThemeSettings};
+    use tl_ui::chart::LegendStyle;
+    use tl_ui::chart::grid_element::grid_layout;
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::performance::cpu_grid::CpuGrid;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    use super::*;
+
+    /// A grid over a fake engine for `n` CPUs.
+    fn grid(cx: &mut TestAppContext, n: u16, kernel: bool) -> CpuGrid {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            let client: Arc<dyn EngineClient> = FakeEngine::new();
+            let hub: Entity<SnapshotHub> = cx.new(|cx| SnapshotHub::new(client, cx));
+            let theme = tl_ui::theme::current(cx).clone();
+            CpuGrid::new(
+                &hub,
+                Arc::new(topology(n)),
+                &logical_devices(n),
+                kernel,
+                60 * S,
+                false,
+                &theme,
+                cx,
+            )
+        })
+    }
+
+    fn legend_len(grid: &CpuGrid, cx: &App) -> usize {
+        grid.view.read(cx).spec.legend.len()
+    }
+
+    #[gpui_kit::test]
+    fn cpu_grid_16_cores_6_cols(cx: &mut TestAppContext) {
+        let mut cells = Vec::new();
+        cell_specs(&topology(16), &logical_devices(16), true, &mut cells);
+        assert_eq!(cells.len(), 16);
+        let headings: Vec<&str> = cells.iter().map(|c| c.heading.as_ref()).collect();
+        let want: Vec<String> = (0..16).map(|i| format!("CPU {i}")).collect();
+        assert_eq!(headings, want);
+        assert!(cells.iter().all(|c| c.overlay_series.is_some()));
+        assert!(cells.iter().all(|c| !c.offline));
+        assert_eq!(
+            cells[7].overlay_series,
+            Some(SeriesId {
+                device: DeviceIdx(107),
+                metric: MetricId::CPU_KERNEL
+            })
+        );
+        assert_eq!(grid_layout(16, px(1000.), px(120.), px(8.)).cols, 6);
+
+        let grid = grid(cx, 16, true);
+        cx.read(|cx| {
+            let spec = &grid.view.read(cx).spec;
+            assert_eq!(spec.cells, cells);
+            assert_eq!(spec.legend.len(), 2);
+            assert_eq!(spec.legend[0].0.as_ref(), "Total");
+            assert_eq!(spec.legend[1].0.as_ref(), "Kernel");
+            assert_eq!(spec.legend[1].1, LegendStyle::Dashed);
+            assert_eq!(
+                (spec.cell_min_w, spec.cell_h, spec.gap),
+                (px(120.), px(112.), px(8.))
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn cpu_grid_kernel_toggle_changes_overlays(cx: &mut TestAppContext) {
+        let mut grid = grid(cx, 16, true);
+        cx.update(|cx| grid.set_kernel(false, cx));
+        cx.read(|cx| {
+            let spec = &grid.view.read(cx).spec;
+            assert!(spec.cells.iter().all(|c| c.overlay_series.is_none()));
+            assert_eq!(legend_len(&grid, cx), 1);
+        });
+        cx.update(|cx| grid.set_kernel(true, cx));
+        cx.read(|cx| {
+            let spec = &grid.view.read(cx).spec;
+            assert!(spec.cells.iter().all(|c| c.overlay_series.is_some()));
+            assert_eq!(legend_len(&grid, cx), 2);
+        });
+
+        let mut cells = Vec::new();
+        cell_specs(&topology(16), &logical_devices(16), false, &mut cells);
+        assert!(cells.iter().all(|c| c.overlay_series.is_none()));
+    }
+
+    #[gpui_kit::test]
+    fn cpu_grid_tooltips_reformat_only_on_change(cx: &mut TestAppContext) {
+        let mut grid = grid(cx, 16, false);
+        let ptrs = |grid: &CpuGrid, cx: &mut TestAppContext| -> Vec<usize> {
+            cx.read(|cx| {
+                grid.view
+                    .read(cx)
+                    .spec
+                    .cells
+                    .iter()
+                    .map(|c| c.tooltip.as_ref().map_or(0, |t| t.as_ptr() as usize))
+                    .collect()
+            })
+        };
+        let tip = |grid: &CpuGrid, i: usize, cx: &mut TestAppContext| -> Option<String> {
+            cx.read(|cx| {
+                grid.view.read(cx).spec.cells[i]
+                    .tooltip
+                    .as_ref()
+                    .map(|t| t.to_string())
+            })
+        };
+        let clocks: Vec<(u16, f32, Validity)> = (0..16)
+            .map(|id| (id, 4000.0 + f32::from(id) * 10.0, Validity::Valid))
+            .collect();
+
+        cx.update(|cx| grid.update_clocks(&clocks, cx));
+        assert_eq!(
+            tip(&grid, 11, cx).as_deref(),
+            Some("Core 3, thread 1, 4110 MHz")
+        );
+        let first = ptrs(&grid, cx);
+        assert!(first.iter().all(|&p| p != 0));
+
+        // The same values again: no tooltip is re-formatted.
+        cx.update(|cx| grid.update_clocks(&clocks, cx));
+        assert_eq!(ptrs(&grid, cx), first);
+
+        // One CPU changes: only its tooltip is new.
+        let mut changed = clocks.clone();
+        changed[11].1 = 4200.0;
+        cx.update(|cx| grid.update_clocks(&changed, cx));
+        let second = ptrs(&grid, cx);
+        assert_eq!(
+            tip(&grid, 11, cx).as_deref(),
+            Some("Core 3, thread 1, 4200 MHz")
+        );
+        for i in 0..16 {
+            assert_eq!(second[i] == first[i], i != 11, "cell {i}");
+        }
+
+        // A clock that is not Valid drops the MHz part.
+        changed[11].2 = Validity::Stale;
+        cx.update(|cx| grid.update_clocks(&changed, cx));
+        assert_eq!(tip(&grid, 11, cx).as_deref(), Some("Core 3, thread 1"));
+    }
 }
