@@ -97,7 +97,7 @@ pub struct SourceHealth {
     /// characters, no control characters, never a command line, environment value or file
     /// content (ADR-015). The engine sanitizes it before it is stored.
     pub last_error: Option<Arc<str>>,
-    /// Worker restarts since the engine started, for the Collector Health window (ADR-004).
+    /// Worker restarts since the current engine session started (a session restart resets it), for the Collector Health window (ADR-004).
     pub restarts: u32,
 }
 
