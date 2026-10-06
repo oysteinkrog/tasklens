@@ -29,7 +29,7 @@ use crate::components::icons::{TlIcon, icon};
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::copy_text;
 use crate::text::style::label_style;
-use crate::theme::{UiMetrics, current, metrics};
+use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Card height, × ui_scale.
 pub const CARD_H: f32 = 80.0;
@@ -678,6 +678,15 @@ impl DeviceCard {
     pub fn draws_focus_ring(&self) -> bool {
         self.draws_selected_border() && self.focused
     }
+
+    /// `accent` for a connected interface's rate (R-055), else `text_secondary`.
+    pub fn line2_color(&self, theme: &TlTheme) -> Hsla {
+        if self.lines.line2_accent {
+            theme.accent
+        } else {
+            theme.text_secondary
+        }
+    }
 }
 
 impl RenderOnce for DeviceCard {
@@ -688,11 +697,7 @@ impl RenderOnce for DeviceCard {
         let opacity = self.opacity();
         let (selected_border, focus_ring) = (self.draws_selected_border(), self.draws_focus_ring());
         let id = ElementId::Name(SharedString::from(self.key.0.clone()));
-        let line2_color = if self.lines.line2_accent {
-            theme.accent
-        } else {
-            theme.text_secondary
-        };
+        let line2_color = self.line2_color(&theme);
         let lines = self.lines;
 
         let mut text = v_flex()
