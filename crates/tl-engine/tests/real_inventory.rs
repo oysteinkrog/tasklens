@@ -139,3 +139,86 @@ fn upower_real_no_battery() {
         got[2]
     );
 }
+
+/// UDisks2 on the owner machine: two NVMe drives and one SATA drive. Read-only: it calls
+/// `GetManagedObjects` only. Prints names and SMART kinds, never serials or WWNs.
+#[test]
+#[ignore = "needs the owner machine's system bus with UDisks2"]
+fn udisks_real_drives() {
+    use std::time::Duration;
+
+    use asupersync::channel::{mpsc, watch};
+    use asupersync::runtime::RuntimeBuilder;
+    use asupersync::{Cx, time};
+    use tl_engine::dbus::SharedHandles;
+    use tl_engine::source::{WorkerControl, WorkerIo};
+    use tl_engine::update::{DeviceDetailsUpdate, EngineMsg, SourceUpdate};
+    use tl_engine::workers::dbus_udisks;
+    use tl_model::demand::Demand;
+    use tl_model::devices::DeviceIdentity;
+    use tl_model::health::SourceId;
+    use tl_model::settings::EngineSettings;
+    use tl_model::snapshot::SmartKind;
+
+    let rt = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("runtime builds");
+    let join = rt.handle().spawn_checked(async {
+        let cx = Cx::current().expect("task has a Cx");
+        let (updates, mut rx) = mpsc::channel::<EngineMsg>(64);
+        let demand = Demand {
+            disks: true,
+            ..Demand::default()
+        };
+        let (_demand_tx, demand) = watch::channel(demand);
+        let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+        let (_control_tx, control) = watch::channel(WorkerControl::default());
+        let io = WorkerIo::new(updates, demand, settings, control, SharedHandles::default());
+        let mut worker = cx
+            .spawn(move |cx| async move {
+                let _ = dbus_udisks::run(cx, io).await;
+            })
+            .expect("worker spawns");
+        let entries = loop {
+            let msg = time::timeout(cx.now(), Duration::from_secs(10), rx.recv(&cx))
+                .await
+                .expect("a message within 10 s")
+                .expect("channel open");
+            if let EngineMsg::Source(SourceUpdate::DeviceDetails(DeviceDetailsUpdate::Disks {
+                from: SourceId::Udisks,
+                entries,
+            })) = msg
+            {
+                break entries;
+            }
+        };
+        worker.abort();
+        let _ = worker.join(&cx).await;
+        entries
+    });
+    let entries = rt.block_on(join).expect("task completes");
+    let smart = |want: &str| {
+        entries.iter().find_map(|(identity, d)| match identity {
+            DeviceIdentity::Disk { name, .. } if &**name == want => Some(d.smart),
+            _ => None,
+        })
+    };
+    for (identity, d) in &entries {
+        if let DeviceIdentity::Disk { name, .. } = identity {
+            println!("{name}: {:?}", d.smart);
+        }
+    }
+    assert_eq!(smart("sda"), Some(SmartKind::Ata));
+    for nvme in ["nvme0n1", "nvme1n1"] {
+        assert!(
+            matches!(
+                smart(nvme),
+                Some(SmartKind::Nvme | SmartKind::NeedsFallback)
+            ),
+            "{nvme}: {:?}",
+            smart(nvme)
+        );
+    }
+}
