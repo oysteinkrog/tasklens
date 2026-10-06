@@ -500,3 +500,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - rsf.14 (d4a699b, 003bd42, f3fa67d): header menu, ResetColumns and HideColumn, ToastQueue::of_window (accepted). TlMenu cannot show a tooltip on an enabled item, so "Hide <label>" never shows (low priority; left as is). System columns: rsf.22.
 - pdu.9 (7271c9b, 4ed2132, 098f3ea): name_cell.rs with R-190 geometry; the EXITED branch approval was resent because the messages crossed.
 - pdu.9 (f4299be, e644236): closed; EXITED rows via name_look in table/cells.rs. KernelThread RowKind noted on pdu.12.
+- rsf.22 (eb67e1c): column actions carry a SharedString key; system tables can sort and hide from the header menu.
