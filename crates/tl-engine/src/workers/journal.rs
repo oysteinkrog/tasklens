@@ -694,10 +694,8 @@ impl Batcher {
         cursors.newest = Some(last);
         cursors.oldest.get_or_insert(first);
         drop(cursors);
-        // Not the trace macro: check-deps bans the text of the race macro, which it contains.
-        tracing::event!(
+        tracing::trace!(
             target: "tasklens::journal",
-            tracing::Level::TRACE,
             entries = count,
             "journal follow batch"
         );

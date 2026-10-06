@@ -179,9 +179,12 @@ const UI_CLOSURE_VIA_GPUI_KIT_OK: &[&str] = &["arc-swap", "zbus"];
 /// ADR-004 banned names, matched as whole words.
 const BANNED_WORDS: &[&str] = &["AppSpec", "GenServer", "actor", "race_drained", "ctrl_c"];
 
+/// ADR-004 banned macro calls, matched when no identifier character comes before them, so
+/// `tracing::trace!` is not a `race!` match.
+const BANNED_MACROS: &[&str] = &["race!"];
+
 /// ADR-004 banned names, matched as literal text.
 const BANNED_LITERALS: &[&str] = &[
-    "race!",
     "select!",
     "Cx::race_timeout",
     "asupersync::signal",
@@ -614,6 +617,14 @@ fn scan_banned_apis(source: &str) -> Vec<ApiHit> {
                 });
             }
         }
+        for &name in BANNED_MACROS {
+            if contains_macro(line, name) {
+                hits.push(ApiHit {
+                    pattern: name,
+                    line: line_number,
+                });
+            }
+        }
         for &literal in BANNED_LITERALS {
             if line.contains(literal) {
                 hits.push(ApiHit {
@@ -727,6 +738,12 @@ fn contains_word(line: &str, word: &str) -> bool {
         let after = line[start + word.len()..].chars().next();
         !before.is_some_and(is_ident_char) && !after.is_some_and(is_ident_char)
     })
+}
+
+/// True when `name` occurs in `line` with no identifier character before it.
+fn contains_macro(line: &str, name: &str) -> bool {
+    line.match_indices(name)
+        .any(|(start, _)| !line[..start].chars().next_back().is_some_and(is_ident_char))
 }
 
 /// Replaces every `#[cfg(test)]` module, from the attribute to its closing brace, with spaces.
@@ -1078,6 +1095,26 @@ mod tests {
         );
         assert_eq!(scan_banned_apis("let factory = 1;"), Vec::new());
         assert_eq!(scan_banned_apis("let actors_count = 1;"), Vec::new());
+    }
+
+    #[test]
+    fn api_scan_race_macro_needs_word_start() {
+        assert_eq!(scan_banned_apis("tracing::trace!(\"x\");"), Vec::new());
+        assert_eq!(scan_banned_apis("trace!(\"x\");"), Vec::new());
+        assert_eq!(
+            scan_banned_apis("let x = race!(a, b);"),
+            vec![ApiHit {
+                pattern: "race!",
+                line: 1
+            }]
+        );
+        assert_eq!(
+            scan_banned_apis("asupersync::race!(a, b);"),
+            vec![ApiHit {
+                pattern: "race!",
+                line: 1
+            }]
+        );
     }
 
     #[test]
