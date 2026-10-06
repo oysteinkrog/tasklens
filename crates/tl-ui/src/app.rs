@@ -301,6 +301,7 @@ impl TasklensUi {
         // ActionTracker
 
         // open hooks
+        crate::window::main::init(cx);
     }
 }
 
