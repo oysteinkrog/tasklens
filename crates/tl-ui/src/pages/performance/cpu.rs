@@ -25,8 +25,9 @@ use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::CpuGraphMode;
 use tl_model::snapshot::{CpuStaticInfo, Snapshot};
-use tl_model::system::CpuTopology;
+use tl_model::system::{CpuTopology, Metric};
 use tl_model::time::now_boot_ns;
+use tl_model::validity::Validity;
 
 use super::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
 use super::cpu_details::{
@@ -369,6 +370,10 @@ pub struct CpuPage {
     logical: Vec<DeviceIdx>,
     static_info: Arc<CpuStaticInfo>,
     temp_sensors: Vec<CpuSensor>,
+    /// The per-CPU clocks last handed to the grid.
+    clocks: Arc<[Metric<u32>]>,
+    /// Reused for `CpuGrid::update_clocks`.
+    clock_buf: Vec<(u16, f32, Validity)>,
     _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -445,6 +450,8 @@ impl CpuPage {
             logical,
             static_info: Arc::default(),
             temp_sensors: Vec::new(),
+            clocks: Arc::default(),
+            clock_buf: Vec::new(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -518,10 +525,15 @@ impl CpuPage {
             cpu_temp_sensors(&snap.devices, &mut self.temp_sensors);
             logical_devices(&snap.devices, &mut self.logical);
         }
-        if devices || (system && !Arc::ptr_eq(&self.topology, &snap.system.cpu_topology)) {
+        let new_cells =
+            devices || (system && !Arc::ptr_eq(&self.topology, &snap.system.cpu_topology));
+        if new_cells {
             self.topology = Arc::clone(&snap.system.cpu_topology);
             self.grid
                 .set_topology(Arc::clone(&self.topology), &self.logical, cx);
+        }
+        if system || new_cells {
+            self.sync_clocks(&snap.system.cpu.per_cpu_mhz, new_cells, cx);
         }
         if system {
             let inputs = CpuLiveInputs {
@@ -606,9 +618,30 @@ impl CpuPage {
             &theme,
             cx,
         );
+        let clocks = Arc::clone(&self.clocks);
+        self.sync_clocks(&clocks, true, cx);
         let spec = overall_spec(self.row.idx, &s, &theme);
         self.overall.update(cx, |v, cx| v.set_spec(spec, cx));
         cx.notify();
+    }
+
+    /// Hands the per-CPU clocks to the grid when the snapshot has a new `Arc`, or always with
+    /// `force` (new grid cells). The grid re-formats only the tooltips whose MHz changed.
+    fn sync_clocks(&mut self, clocks: &Arc<[Metric<u32>]>, force: bool, cx: &mut App) {
+        if !force && Arc::ptr_eq(&self.clocks, clocks) {
+            return;
+        }
+        self.clocks = Arc::clone(clocks);
+        self.clock_buf.clear();
+        self.clock_buf
+            .extend(clocks.iter().enumerate().map(|(id, m)| {
+                (
+                    u16::try_from(id).unwrap_or(u16::MAX),
+                    m.value as f32,
+                    m.validity,
+                )
+            }));
+        self.grid.update_clocks(&self.clock_buf, cx);
     }
 
     fn on_set_mode(&mut self, a: &PerfSetCpuGraphMode, _: &mut Window, cx: &mut Context<Self>) {

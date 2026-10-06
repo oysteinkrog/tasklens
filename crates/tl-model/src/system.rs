@@ -124,7 +124,7 @@ pub struct CpuTopology {
     pub cores: Arc<[CoreInfo]>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct CpuTotals {
     /// 100 × Δbusy / Δtotal (ADR-008); also series CPU_TOTAL.
     pub util_pct: Metric<f32>,
@@ -138,6 +138,10 @@ pub struct CpuTotals {
     pub freq_fastest_mhz: Metric<u32>,
     /// The clock comes from the BogoMIPS lines of /proc/cpuinfo; the UI marks it "(?)" (PERF-033).
     pub freq_is_bogomips: bool,
+    /// Current clock per logical CPU, indexed by CPU id, for the CPU grid tooltips: the
+    /// policy's clock file, else the cpuinfo lines (BogoMIPS when `freq_is_bogomips`). The
+    /// worker reuses the `Arc` while the values do not change.
+    pub per_cpu_mhz: Arc<[Metric<u32>]>,
     /// base_frequency, else acpi_cppc nominal_freq, else bios_limit.
     pub base_mhz: Metric<u32>,
     /// Tctl or Package id 0 (PERF-039).

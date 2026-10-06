@@ -330,6 +330,8 @@ struct SlowFields {
     temp_c: Measured<f32>,
     live: LiveStats,
     power: RaplReading,
+    /// `freq.per_cpu_mhz` as sent. A new `Arc` only when a value changed.
+    per_cpu_mhz: Arc<[Metric<u32>]>,
 }
 
 pub struct CpuSource {
@@ -403,6 +405,15 @@ impl CpuSource {
             freq.avg_mhz = r.freq.avg_mhz;
             freq.max_mhz = r.freq.max_mhz;
             freq.per_cpu_mhz.clone_from(&r.freq.per_cpu_mhz);
+            let sent = &self.last.per_cpu_mhz;
+            let same = sent.len() == r.freq.per_cpu_mhz.len()
+                && sent
+                    .iter()
+                    .zip(&r.freq.per_cpu_mhz)
+                    .all(|(a, &b)| *a == metric(b));
+            if !same {
+                self.last.per_cpu_mhz = r.freq.per_cpu_mhz.iter().map(|&m| metric(m)).collect();
+            }
             self.last.temp_c = r.temp_c;
             self.last.live = r.live;
             self.last.power = r.power;
@@ -427,6 +438,7 @@ impl CpuSource {
             freq_mhz: metric(last.freq.avg_mhz),
             freq_fastest_mhz: metric(last.freq.max_mhz),
             freq_is_bogomips: last.freq.source == FreqSource::BogoMips,
+            per_cpu_mhz: Arc::clone(&last.per_cpu_mhz),
             base_mhz: metric(self.base_mhz),
             temp_c: metric(last.temp_c),
             package_power_w: metric(last.power.package_w),
