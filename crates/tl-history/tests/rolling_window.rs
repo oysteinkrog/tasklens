@@ -7,8 +7,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 
 use tl_history::format::Block;
-use tl_history::read::{MetaTable, state_at};
+use tl_history::read::{MetaTable, Metric, state_at, system_series};
 use tl_history::rolling::{ROLLING_CLOSED_BLOCKS, RollingWindow};
+use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::history::RecordSink;
 use tl_model::ids::{DeviceIdx, GroupKey, MetricId, ProcessKey, SeriesId};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
@@ -270,4 +271,53 @@ fn writes_nothing_to_disk() {
     std::env::set_current_dir(prev).unwrap();
     std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(std::fs::read_dir(&ro).unwrap().count(), 0);
+}
+
+fn cpu_catalog() -> DeviceCatalog {
+    DeviceCatalog {
+        version: 1,
+        entries: Arc::from(vec![DeviceEntry {
+            idx: DeviceIdx(0),
+            identity: DeviceIdentity::CpuPackage,
+            generation: 0,
+            display_name: Arc::from("CPU"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from("cpu"),
+            net_kind: None,
+        }]),
+    }
+}
+
+#[test]
+fn catalog_survives_block_drop() {
+    let mut w = RollingWindow::new(BOOT);
+    let records = sweep_of(0..3);
+    let catalog = cpu_catalog();
+    // 12 minutes with an unchanged catalog: the block that carried it (block 0) is dropped.
+    for s in 0..=12 * 60u64 {
+        let t = s * SEC;
+        w.on_device_catalog(&catalog);
+        w.on_system_sample(t, &[(cpu(), Sample::valid(t, 10.0))]);
+        w.on_process_sweep(t, &records);
+    }
+    let (start, end) = w.span().unwrap();
+    assert_eq!(start, 2 * MIN);
+
+    // As the engine reads it: every kept block, then the last 5 minutes.
+    let (blocks, _) = w.blocks(0, end).unwrap();
+    let from = end - 5 * MIN;
+    let points = system_series(blocks.iter().map(|b| &**b), Metric::Cpu, from, end);
+    assert!(!points.is_empty());
+    assert!(points.len() >= 290, "{} points", points.len());
+    assert!(points.iter().all(|p| p.max == 10.0));
+    // Only the first returned block carries the catalog; the stored blocks do not grow.
+    assert!(blocks[0].catalog.is_some());
+    assert!(blocks[1..].iter().all(|b| b.catalog.is_none()));
+
+    // A range that starts after the oldest kept block gets the catalog too.
+    let (blocks, _) = w.blocks(from, end).unwrap();
+    assert!(blocks[0].catalog.is_some());
+    let points = system_series(blocks.iter().map(|b| &**b), Metric::Cpu, from, end);
+    assert!(points.len() >= 290, "{} points", points.len());
 }

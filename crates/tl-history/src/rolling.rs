@@ -7,6 +7,10 @@
 //! kept closed block or the open block references, so the one `MetaTable` that `blocks` returns
 //! resolves every block. A meta stays after the block that introduced it is dropped, and is
 //! pruned when no kept block and not the open block references it.
+//!
+//! `BlockBuilder` writes the device catalog only into a block opened after it changed. When the
+//! window drops the block that carried it, the window keeps that catalog and puts it into the
+//! first block that `blocks` returns, so system series still resolve their devices.
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
@@ -20,7 +24,7 @@ use tl_model::time::{BootId, TimeNs};
 
 use crate::block::{BlockBuilder, EncodedBlock, decode_block, encode_block};
 use crate::error::HistoryError;
-use crate::format::{BLOCK_SECS, Block, HistMeta, MetaId};
+use crate::format::{BLOCK_SECS, Block, HistDevice, HistMeta, MetaId};
 use crate::read::{DeletedKeys, MetaTable};
 
 /// Closed blocks kept: 10 minutes of 60 s blocks.
@@ -28,10 +32,11 @@ pub const ROLLING_CLOSED_BLOCKS: usize = 10;
 
 const BLOCK_NS: u64 = BLOCK_SECS * 1_000_000_000;
 
-/// One closed block and the meta ids it references.
+/// One closed block, the meta ids it references and the catalog it carries.
 struct Closed {
     encoded: EncodedBlock,
     refs: Vec<MetaId>,
+    catalog: Option<Arc<[HistDevice]>>,
 }
 
 /// The last 10 minutes of process history, in RAM only.
@@ -44,6 +49,9 @@ pub struct RollingWindow {
     /// Bytes of meta text in `metas`, for `ram_bytes`.
     metas_bytes: usize,
     deleted: DeletedKeys,
+    /// The catalog in effect at the start of the oldest kept block, from the newest dropped
+    /// block that carried one.
+    dropped_catalog: Option<Arc<[HistDevice]>>,
     /// Start of the open block, `None` when no block is open.
     open_start: Option<TimeNs>,
     /// Time of the newest event.
@@ -61,6 +69,7 @@ impl RollingWindow {
             metas_next: 0,
             metas_bytes: 0,
             deleted: DeletedKeys::default(),
+            dropped_catalog: None,
             open_start: None,
             last_t: None,
             encode_errors: 0,
@@ -94,6 +103,9 @@ impl RollingWindow {
     }
 
     /// Decoded closed blocks overlapping [from, to] plus a snapshot Block of the open block.
+    ///
+    /// The first returned block carries the catalog in effect at its start, even when the block
+    /// that carried it was dropped or lies before `from`.
     pub fn blocks(
         &self,
         from: TimeNs,
@@ -101,13 +113,24 @@ impl RollingWindow {
     ) -> Result<(Vec<Arc<Block>>, &MetaTable), HistoryError> {
         let hit = |start: TimeNs| start <= to && start.saturating_add(BLOCK_NS) > from;
         let mut out = Vec::new();
-        for c in self.closed.iter().filter(|c| hit(c.encoded.start_t_ns)) {
-            let (block, _) = decode_block(&c.encoded.bytes, 0)?;
+        let mut catalog = self.dropped_catalog.as_ref();
+        for c in &self.closed {
+            catalog = c.catalog.as_ref().or(catalog);
+            if !hit(c.encoded.start_t_ns) {
+                continue;
+            }
+            let (mut block, _) = decode_block(&c.encoded.bytes, 0)?;
+            if out.is_empty() && block.catalog.is_none() {
+                block.catalog = catalog.map(|d| d.to_vec());
+            }
             out.push(Arc::new(block));
         }
-        if let Some(open) = self.builder.open_snapshot()
+        if let Some(mut open) = self.builder.open_snapshot()
             && hit(open.start_t_ns)
         {
+            if out.is_empty() && open.catalog.is_none() {
+                open.catalog = catalog.map(|d| d.to_vec());
+            }
             out.push(Arc::new(open));
         }
         Ok((out, &self.metas))
@@ -142,9 +165,11 @@ impl RollingWindow {
                 size_of::<Closed>()
                     + c.encoded.bytes.capacity()
                     + c.refs.capacity() * size_of::<MetaId>()
+                    + c.catalog.as_deref().map_or(0, catalog_bytes)
             })
             .sum();
-        size_of::<Self>() + closed + self.builder.open_bytes_estimate() + self.metas_bytes
+        let dropped = self.dropped_catalog.as_deref().map_or(0, catalog_bytes);
+        size_of::<Self>() + closed + dropped + self.builder.open_bytes_estimate() + self.metas_bytes
     }
 
     /// Notes the event time and, when `closed` is set, the block that this event closed.
@@ -192,13 +217,22 @@ impl RollingWindow {
             .collect();
         self.add_metas(unseen);
         let refs = meta_refs(&block);
+        let catalog = block.catalog.as_deref().map(Arc::from);
         match encode_block(&block) {
-            Ok(encoded) => self.closed.push_back(Closed { encoded, refs }),
+            Ok(encoded) => self.closed.push_back(Closed {
+                encoded,
+                refs,
+                catalog,
+            }),
             Err(_) => self.encode_errors += 1,
         }
         let mut dropped = false;
         while self.closed.len() > ROLLING_CLOSED_BLOCKS {
-            self.closed.pop_front();
+            if let Some(old) = self.closed.pop_front()
+                && old.catalog.is_some()
+            {
+                self.dropped_catalog = old.catalog;
+            }
             dropped = true;
         }
         if dropped {
@@ -267,6 +301,13 @@ fn meta_block(new_meta: Vec<(MetaId, HistMeta)>) -> Block {
         deltas: Vec::new(),
         system: Vec::new(),
     }
+}
+
+/// Rough heap size of a catalog. Arc names shared with the engine count in full.
+fn catalog_bytes(c: &[HistDevice]) -> usize {
+    c.iter()
+        .map(|d| std::mem::size_of::<HistDevice>() + d.name.len())
+        .sum()
 }
 
 /// Rough heap size of one meta entry. Arc text shared with the engine counts in full.
