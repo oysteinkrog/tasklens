@@ -9,7 +9,10 @@ use std::fmt::Write;
 use std::hash::BuildHasher;
 use std::sync::{Arc, OnceLock};
 
-use gpui_kit::App;
+use gpui_kit::{
+    App, Div, Font, Hsla, InteractiveElement, ParentElement, Pixels, SharedString, Styled,
+    StyledText, TextRun, TextStyleRefinement, div, font,
+};
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::SchedPolicy;
 use tl_model::ids::{ColumnId, GroupKey, NodeId};
@@ -22,10 +25,15 @@ use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 
+use crate::components::icons::{TlIcon, icon};
+use crate::components::validity::{GlyphContent, glyph_parts};
 use crate::i18n::tr;
 use crate::table::cells::CellOut;
 use crate::table::columns::ColumnAlign;
-use crate::table::tree_table::RowKind;
+use crate::table::tree_table::{RowKind, STALE_OPACITY};
+use crate::text::fonts::UI_FAMILY;
+use crate::text::style::{TNUM, numeric_style, t_base};
+use crate::theme::{TlTheme, UiMetrics, metrics};
 
 /// What a process cell holds. The cell formatter dispatches on it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -1027,4 +1035,240 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         // PROC-018). The GroupRow has no sums for the other columns.
         _ => Value::Blank,
     }
+}
+
+// ---- Cell painting (E22-004, UI-PRC-004) ----
+
+/// Ending of an Image path whose file was deleted, drawn in `status.danger` (UI-PRC-004).
+pub const DELETED_SUFFIX: &str = " (deleted)";
+
+const MIB: f64 = 1_048_576.0;
+
+/// How a row paints its metric cells.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PaintState {
+    pub selected: bool,
+    pub exited: bool,
+    /// `appearance.heat_coloring`.
+    pub heat_on: bool,
+    /// `appearance.heat_intensity_pct`.
+    pub heat_intensity_pct: u8,
+}
+
+/// True for the kinds that can carry heat: Percent, MemorySize, DiskRate, NetRate, PowerClass.
+pub fn heat_kind(kind: ProcColumnKind) -> bool {
+    matches!(
+        kind,
+        ProcColumnKind::Percent
+            | ProcColumnKind::MemorySize
+            | ProcColumnKind::DiskRate
+            | ProcColumnKind::NetRate
+            | ProcColumnKind::PowerClass
+    )
+}
+
+/// Heat alpha of a cell (PROC-040, R-059): `intensity_pct / 100 × clamp(value / reference, 0, 1)`.
+/// `value` is in the column's own unit: percent, bytes, bytes per second or watts. A reference of
+/// 0 (no MemTotal, no VRAM) gives 0.
+pub fn heat_alpha(col: &ProcColumn, value: f64, ctx: &CellCtx, intensity_pct: u8) -> f32 {
+    let reference = match col.heat {
+        HeatRef::CpuMachine => 400.0 / f64::from(ctx.ncpu.max(1)),
+        HeatRef::CpuOneCore => 400.0,
+        HeatRef::Memory => ctx.mem_total as f64 * 0.10,
+        HeatRef::DiskIo => 100.0 * MIB,
+        HeatRef::Network => match ctx.settings.units.network {
+            NetworkUnit::Bytes => 10.0 * MIB,
+            // 80 Mbps in bytes per second.
+            NetworkUnit::Bits => 80_000_000.0 / 8.0,
+        },
+        HeatRef::GpuPercent => 100.0,
+        HeatRef::Vram => ctx.vram_total as f64 * 0.25,
+        HeatRef::Power => 25.0,
+        HeatRef::None => return 0.0,
+    };
+    if reference <= 0.0 || value.is_nan() || value <= 0.0 {
+        return 0.0;
+    }
+    let ratio = (value / reference).min(1.0);
+    (f64::from(intensity_pct.min(100)) / 100.0 * ratio) as f32
+}
+
+/// The heat fill of a filled cell, for `CellOut::background`: `value_heat` at [`heat_alpha`].
+/// `None` when heat is off, for kinds without heat, for any validity but Valid and for zero.
+/// Call after [`fill_cell`]; it reads the value from `out.bits`.
+pub fn heat_background(
+    out: &CellOut,
+    col: &ProcColumn,
+    ctx: &CellCtx,
+    st: PaintState,
+    theme: &TlTheme,
+) -> Option<Hsla> {
+    if !st.heat_on || out.validity != Validity::Valid {
+        return None;
+    }
+    let value = match col.kind {
+        ProcColumnKind::Percent | ProcColumnKind::DiskRate | ProcColumnKind::NetRate => {
+            f64::from(f32::from_bits(out.bits as u32))
+        }
+        ProcColumnKind::MemorySize => out.bits as f64,
+        // The Power columns have no phase-1 value; their bead defines the bits.
+        _ => return None,
+    };
+    let alpha = heat_alpha(col, value, ctx, st.heat_intensity_pct);
+    (alpha > 0.0).then_some(Hsla {
+        a: alpha,
+        ..theme.value_heat
+    })
+}
+
+/// The colours of a cell's text: `main` for the first `split` bytes, `tail` for the rest
+/// (the PID's " +N" or an Image path's " (deleted)"). `split` is the text length when there is
+/// no tail.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct TextColors {
+    pub split: usize,
+    pub main: Hsla,
+    pub tail: Hsla,
+}
+
+/// The text colours of a Valid or Stale cell (UI-PRC-002, UI-PRC-004): `text_primary` and
+/// `text_secondary`, their selected forms on a selected row, `text_secondary` throughout on an
+/// exited row, " (deleted)" in `status.danger`, everything at 60 % opacity when Stale.
+pub fn text_colors(
+    text: &str,
+    col: &ProcColumn,
+    validity: Validity,
+    st: PaintState,
+    theme: &TlTheme,
+) -> TextColors {
+    let secondary = if st.selected {
+        theme.text_selected_secondary
+    } else {
+        theme.text_secondary
+    };
+    let main = match (st.exited, st.selected) {
+        (true, _) => secondary,
+        (false, true) => theme.text_selected_primary,
+        (false, false) => theme.text_primary,
+    };
+    let (split, tail) = match col.id {
+        ColumnId::Pid => (split_pid_text(text).0.len(), secondary),
+        ColumnId::ImagePath if text.ends_with(DELETED_SUFFIX) => {
+            (text.len() - DELETED_SUFFIX.len(), theme.status.danger)
+        }
+        _ => (text.len(), main),
+    };
+    let dim = |c: Hsla| {
+        if validity == Validity::Stale {
+            c.opacity(STALE_OPACITY)
+        } else {
+            c
+        }
+    };
+    TextColors {
+        split,
+        main: dim(main),
+        tail: dim(tail),
+    }
+}
+
+/// `t_base` 13 regular; numeric kinds (right-aligned) add `tnum`.
+pub fn metric_text_style(col: &ProcColumn, m: &UiMetrics) -> TextStyleRefinement {
+    if col.align() == ColumnAlign::Right {
+        numeric_style(m, m.text.base)
+    } else {
+        t_base(m)
+    }
+}
+
+/// A filled process-table cell other than Name (UI-PRC-004): a `width` × `row_height` box with
+/// 8 px padding, clipped, one line, end ellipsis, aligned like the column. `text` is the cached
+/// display text of `out`.
+///
+/// Valid and Stale cells draw `text` in [`text_colors`]. Every other validity draws its
+/// `TlValidityGlyph` content (`…`, the 12 px lock, `n/a`, `-`, `!`) in place of the text. The
+/// cell carries no tooltip: the owner attaches `components::validity::tooltip_text` on the
+/// hovered row, since that needs the `Window`.
+///
+/// Heat is `out.background` (from [`heat_background`]) as the cell's own fill, one quad over
+/// the whole cell, only when `st.heat_on`, the row is not selected, the kind can carry heat and
+/// the cell is Valid. The row draws zebra and hover tints under the cell and no selection fill
+/// over it, so a selected row draws no heat.
+pub fn render_metric_cell(
+    out: &CellOut,
+    text: SharedString,
+    col: &ProcColumn,
+    width: Pixels,
+    st: PaintState,
+    theme: &TlTheme,
+    cx: &App,
+) -> Div {
+    let m = metrics(cx);
+    let right = col.align() == ColumnAlign::Right;
+    let mut cell = div();
+    *cell.text_style() = metric_text_style(col, m);
+    cell = cell
+        .w(width)
+        .h(m.row_height)
+        .flex()
+        .items_center()
+        .px(m.sp[4])
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis();
+    if right {
+        cell = cell.justify_end().text_right();
+    }
+    if st.heat_on
+        && !st.selected
+        && heat_kind(col.kind)
+        && out.validity == Validity::Valid
+        && let Some(bg) = out.background
+    {
+        cell = cell.bg(bg);
+    }
+
+    if !matches!(out.validity, Validity::Valid | Validity::Stale) {
+        let (content, color) = glyph_parts(out.validity, &text, st.selected, theme);
+        return match content {
+            GlyphContent::Text(glyph) => cell
+                .debug_selector(|| "TlProcCell-glyph".into())
+                .text_color(color)
+                .child(glyph),
+            GlyphContent::Lock => cell.debug_selector(|| "TlProcCell-glyph".into()).child(
+                div()
+                    .debug_selector(|| "TlProcCell-lock".into())
+                    .flex_none()
+                    .child(icon(TlIcon::Lock, m.icon.xs, color)),
+            ),
+        };
+    }
+
+    let colors = text_colors(&text, col, out.validity, st, theme);
+    cell = cell
+        .debug_selector(|| "TlProcCell-text".into())
+        .text_color(colors.main);
+    if colors.split >= text.len() {
+        return cell.child(text);
+    }
+    let mut run_font = font(UI_FAMILY);
+    if right {
+        run_font = Font {
+            features: TNUM.clone(),
+            ..run_font
+        };
+    }
+    let run = |len: usize, color: Hsla| TextRun {
+        len,
+        font: run_font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    let runs = vec![
+        run(colors.split, colors.main),
+        run(text.len() - colors.split, colors.tail),
+    ];
+    cell.child(StyledText::new(text).with_runs(runs))
 }

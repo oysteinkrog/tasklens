@@ -855,3 +855,447 @@ mod values {
         }
     }
 }
+
+// ---- Cell painting (E22-004 painting, UI-PRC-004) ----
+
+mod paint {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        App, Background, Context, Entity, Hsla, IntoElement, ParentElement, Pixels, Render,
+        SharedString, Styled, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::ids::ColumnId;
+    use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings};
+    use tl_model::system::CpuSet;
+    use tl_model::table::ProcessTableView;
+    use tl_model::validity::Validity;
+    use tl_ui::pages::processes::cells::{
+        CellCtx, CellWords, GroupMembers, PaintState, heat_alpha, heat_background,
+        metric_text_style, process_column, render_metric_cell, text_colors,
+    };
+    use tl_ui::table::cells::CellOut;
+    use tl_ui::text::style::TNUM;
+    use tl_ui::theme::{TlTheme, current};
+
+    struct Env {
+        view: ProcessTableView,
+        settings: Settings,
+        words: CellWords,
+        members: GroupMembers,
+        online: CpuSet,
+        vram_total: u64,
+    }
+
+    impl Env {
+        fn new() -> Self {
+            Self {
+                view: ProcessTableView::default(),
+                settings: Settings::default(),
+                words: CellWords::from_fn(Arc::from),
+                members: GroupMembers::default(),
+                online: CpuSet::empty(),
+                vram_total: 0,
+            }
+        }
+
+        fn ctx(&self) -> CellCtx<'_> {
+            CellCtx {
+                view: &self.view,
+                records: &[],
+                extras: &[],
+                settings: &self.settings,
+                words: &self.words,
+                members: &self.members,
+                ncpu: 32,
+                online: &self.online,
+                mem_total: 64 << 30,
+                vram_total: self.vram_total,
+                boot_time_s: 0,
+                clk_tck: 100,
+            }
+        }
+    }
+
+    fn setup(cx: &mut App) {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+    }
+
+    fn theme(cx: &mut TestAppContext) -> Arc<TlTheme> {
+        cx.update(|cx| {
+            setup(cx);
+            current(cx).clone()
+        })
+    }
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    const HEAT_ON: PaintState = PaintState {
+        selected: false,
+        exited: false,
+        heat_on: true,
+        heat_intensity_pct: 50,
+    };
+
+    /// A Valid CPU-style cell holding `value` as f32 bits.
+    fn pct_out(value: f32) -> CellOut {
+        CellOut {
+            bits: u64::from(value.to_bits()),
+            validity: Validity::Valid,
+            ..CellOut::default()
+        }
+    }
+
+    #[test]
+    fn heat_alpha_clamped_and_intensity_scaled() {
+        let env = Env::new();
+        let ctx = env.ctx();
+        let cpu = process_column(ColumnId::Cpu);
+        // ncpu 32: reference 12.5 %.
+        assert!(close(heat_alpha(cpu, 25.0, &ctx, 50), 0.5));
+        assert!(close(heat_alpha(cpu, 6.25, &ctx, 50), 0.25));
+        assert!(
+            close(heat_alpha(cpu, 1000.0, &ctx, 80), 0.8),
+            "clamps to intensity"
+        );
+        assert_eq!(heat_alpha(cpu, 0.0, &ctx, 50), 0.0);
+        assert_eq!(heat_alpha(cpu, f64::NAN, &ctx, 50), 0.0);
+        // One core: 400 %.
+        let rel = process_column(ColumnId::CpuRelative);
+        assert!(close(heat_alpha(rel, 200.0, &ctx, 100), 0.5));
+        // Memory: 10 % of 64 GiB.
+        let mem = process_column(ColumnId::Memory);
+        let tenth = (64u64 << 30) as f64 / 10.0;
+        assert!(close(heat_alpha(mem, tenth / 2.0, &ctx, 100), 0.5));
+        // Disk 100 MiB/s; network 80 Mbps in bits mode, 10 MiB/s in bytes mode.
+        let disk = process_column(ColumnId::Disk);
+        assert!(close(heat_alpha(disk, 50.0 * 1_048_576.0, &ctx, 100), 0.5));
+        let net = process_column(ColumnId::Network);
+        assert!(close(heat_alpha(net, 5_000_000.0, &ctx, 100), 0.5));
+        let mut bytes = Env::new();
+        bytes.settings.units.network = NetworkUnit::Bytes;
+        assert!(close(
+            heat_alpha(net, 5.0 * 1_048_576.0, &bytes.ctx(), 100),
+            0.5
+        ));
+        // GPU 100 %, Power 25 W.
+        let gpu = process_column(ColumnId::Gpu);
+        assert!(close(heat_alpha(gpu, 50.0, &ctx, 100), 0.5));
+        let power = process_column(ColumnId::Power);
+        assert!(close(heat_alpha(power, 12.5, &ctx, 100), 0.5));
+        // VRAM: 25 % of the total; no VRAM gives 0.
+        let vram = process_column(ColumnId::GpuMemDedicated);
+        assert_eq!(heat_alpha(vram, 1e9, &ctx, 100), 0.0);
+        let mut card = Env::new();
+        card.vram_total = 8 << 30;
+        assert!(close(
+            heat_alpha(vram, (1u64 << 30) as f64, &card.ctx(), 100),
+            0.5
+        ));
+        // Counts are never tinted.
+        let threads = process_column(ColumnId::Threads);
+        assert_eq!(heat_alpha(threads, 500.0, &ctx, 100), 0.0);
+    }
+
+    struct Host {
+        out: CellOut,
+        text: SharedString,
+        col: ColumnId,
+        st: PaintState,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = current(cx).clone();
+            let cell = render_metric_cell(
+                &self.out,
+                self.text.clone(),
+                process_column(self.col),
+                px(120.),
+                self.st,
+                &theme,
+                cx,
+            );
+            div().size(px(400.)).child(cell)
+        }
+    }
+
+    fn open(cx: &mut TestAppContext, host: Host) -> (Entity<Host>, &mut VisualTestContext) {
+        cx.update(setup);
+        let (view, vcx) = cx.add_window_view(|_, _| host);
+        vcx.run_until_parked();
+        (view, vcx)
+    }
+
+    /// Painted quads whose fill is `color`.
+    fn quads_of(cx: &mut VisualTestContext, color: Hsla) -> usize {
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window
+                .painted_quads()
+                .iter()
+                .filter(|q| q.background == Background::from(color))
+                .count()
+        })
+    }
+
+    fn heat_count(
+        cx: &mut TestAppContext,
+        col: ColumnId,
+        mut out: CellOut,
+        st: PaintState,
+    ) -> usize {
+        let theme = theme(cx);
+        let env = Env::new();
+        // The fill is built with heat on, so only the painter's own rules can hide it.
+        let fill = heat_background(&out, process_column(col), &env.ctx(), HEAT_ON, &theme)
+            .unwrap_or(Hsla {
+                a: 0.5,
+                ..theme.value_heat
+            });
+        out.background = Some(fill);
+        let (_, vcx) = open(
+            cx,
+            Host {
+                out,
+                text: "25.0%".into(),
+                col,
+                st,
+            },
+        );
+        quads_of(vcx, fill)
+    }
+
+    #[gpui_kit::test]
+    fn heat_drawn_once_on_a_valid_cpu_cell(cx: &mut TestAppContext) {
+        assert_eq!(heat_count(cx, ColumnId::Cpu, pct_out(25.0), HEAT_ON), 1);
+    }
+
+    #[gpui_kit::test]
+    fn heat_hidden_on_selected_and_when_off(cx: &mut TestAppContext) {
+        let selected = PaintState {
+            selected: true,
+            ..HEAT_ON
+        };
+        assert_eq!(heat_count(cx, ColumnId::Cpu, pct_out(25.0), selected), 0);
+    }
+
+    #[gpui_kit::test]
+    fn heat_hidden_when_setting_off(cx: &mut TestAppContext) {
+        let off = PaintState {
+            heat_on: false,
+            ..HEAT_ON
+        };
+        assert_eq!(heat_count(cx, ColumnId::Cpu, pct_out(25.0), off), 0);
+        let theme = theme(cx);
+        let env = Env::new();
+        let cpu = process_column(ColumnId::Cpu);
+        assert!(heat_background(&pct_out(25.0), cpu, &env.ctx(), off, &theme).is_none());
+    }
+
+    #[gpui_kit::test]
+    fn heat_hidden_on_counts_glyphs_and_zero(cx: &mut TestAppContext) {
+        let threads = CellOut {
+            bits: 500,
+            validity: Validity::Valid,
+            ..CellOut::default()
+        };
+        assert_eq!(heat_count(cx, ColumnId::Threads, threads, HEAT_ON), 0);
+
+        let theme = theme(cx);
+        let env = Env::new();
+        let ctx = env.ctx();
+        let cpu = process_column(ColumnId::Cpu);
+        assert!(heat_background(&pct_out(0.0), cpu, &ctx, HEAT_ON, &theme).is_none());
+        let threads = CellOut {
+            bits: 500,
+            validity: Validity::Valid,
+            ..CellOut::default()
+        };
+        let count = process_column(ColumnId::Threads);
+        assert!(heat_background(&threads, count, &ctx, HEAT_ON, &theme).is_none());
+        let stale = CellOut {
+            validity: Validity::Stale,
+            ..pct_out(25.0)
+        };
+        assert!(heat_background(&stale, cpu, &ctx, HEAT_ON, &theme).is_none());
+        let heat = heat_background(&pct_out(25.0), cpu, &ctx, HEAT_ON, &theme).expect("heat");
+        assert!(close(heat.a, 0.5));
+        assert_eq!(
+            Hsla {
+                a: theme.value_heat.a,
+                ..heat
+            },
+            theme.value_heat
+        );
+    }
+
+    #[gpui_kit::test]
+    fn heat_hidden_on_glyph_cells(cx: &mut TestAppContext) {
+        let failed = CellOut {
+            validity: Validity::Failed,
+            ..pct_out(25.0)
+        };
+        assert_eq!(heat_count(cx, ColumnId::Cpu, failed, HEAT_ON), 0);
+    }
+
+    fn bounds(
+        cx: &mut VisualTestContext,
+        selector: &'static str,
+    ) -> Option<gpui_kit::Bounds<Pixels>> {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.debug_bounds(selector)
+    }
+
+    #[gpui_kit::test]
+    fn validity_glyph_per_state(cx: &mut TestAppContext) {
+        let all = [
+            Validity::Valid,
+            Validity::WarmingUp,
+            Validity::Stale,
+            Validity::Restricted,
+            Validity::Unsupported,
+            Validity::Missing,
+            Validity::Failed,
+        ];
+        let (view, vcx) = open(
+            cx,
+            Host {
+                out: pct_out(3.3),
+                text: "3.3%".into(),
+                col: ColumnId::Cpu,
+                st: PaintState::default(),
+            },
+        );
+        for col in [ColumnId::Cpu, ColumnId::ImagePath] {
+            for validity in all {
+                view.update(vcx, |host, cx| {
+                    host.col = col;
+                    host.out.validity = validity;
+                    cx.notify();
+                });
+                vcx.run_until_parked();
+                let shows_text = matches!(validity, Validity::Valid | Validity::Stale);
+                let text = bounds(vcx, "TlProcCell-text");
+                let glyph = bounds(vcx, "TlProcCell-glyph");
+                assert_eq!(text.is_some(), shows_text, "{col:?} {validity:?}");
+                assert_eq!(glyph.is_some(), !shows_text, "{col:?} {validity:?}");
+                let cell = text.or(glyph).expect("cell drawn");
+                assert_eq!(cell.size.width, px(120.));
+                let lock = bounds(vcx, "TlProcCell-lock");
+                assert_eq!(
+                    lock.is_some(),
+                    validity == Validity::Restricted,
+                    "{col:?} {validity:?}"
+                );
+                if let Some(lock) = lock {
+                    assert_eq!(lock.size.width, px(12.), "the lock is 12 px");
+                    if col == ColumnId::Cpu {
+                        assert_eq!(lock.right(), cell.right() - px(8.), "right like CPU");
+                    } else {
+                        assert_eq!(lock.left(), cell.left() + px(8.), "left like Image path");
+                    }
+                }
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn stale_text_dimmed_60(cx: &mut TestAppContext) {
+        let theme = theme(cx);
+        let cpu = process_column(ColumnId::Cpu);
+        let c = text_colors("3.3%", cpu, Validity::Stale, PaintState::default(), &theme);
+        assert_eq!(c.split, 4);
+        assert!(close(c.main.a, theme.text_primary.a * 0.6));
+        assert_eq!(c.main, theme.text_primary.opacity(0.6));
+        let v = text_colors("3.3%", cpu, Validity::Valid, PaintState::default(), &theme);
+        assert_eq!(v.main, theme.text_primary);
+    }
+
+    #[gpui_kit::test]
+    fn deleted_suffix_danger_colour(cx: &mut TestAppContext) {
+        let theme = theme(cx);
+        let path = process_column(ColumnId::ImagePath);
+        let text = "/usr/bin/foo (deleted)";
+        let c = text_colors(text, path, Validity::Valid, PaintState::default(), &theme);
+        assert_eq!(&text[c.split..], " (deleted)");
+        assert_eq!(c.tail, theme.status.danger);
+        assert_eq!(c.main, theme.text_primary);
+        let plain = text_colors(
+            "/usr/bin/foo",
+            path,
+            Validity::Valid,
+            PaintState::default(),
+            &theme,
+        );
+        assert_eq!(plain.split, "/usr/bin/foo".len());
+    }
+
+    #[gpui_kit::test]
+    fn pid_plus_and_row_state_colours(cx: &mut TestAppContext) {
+        let theme = theme(cx);
+        let pid = process_column(ColumnId::Pid);
+        let c = text_colors(
+            "11528 +18",
+            pid,
+            Validity::Valid,
+            PaintState::default(),
+            &theme,
+        );
+        assert_eq!(c.split, 5);
+        assert_eq!((c.main, c.tail), (theme.text_primary, theme.text_secondary));
+        let selected = PaintState {
+            selected: true,
+            ..PaintState::default()
+        };
+        let s = text_colors("11528 +18", pid, Validity::Valid, selected, &theme);
+        assert_eq!(
+            (s.main, s.tail),
+            (theme.text_selected_primary, theme.text_selected_secondary)
+        );
+        let exited = PaintState {
+            exited: true,
+            ..PaintState::default()
+        };
+        let e = text_colors("11528 +18", pid, Validity::Valid, exited, &theme);
+        assert_eq!(
+            (e.main, e.tail),
+            (theme.text_secondary, theme.text_secondary)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn cpu_text_right_aligned_tnum(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let m = cx.update(|cx| *tl_ui::theme::metrics(cx));
+        let cpu = metric_text_style(process_column(ColumnId::Cpu), &m);
+        let features = cpu.font_features.expect("tnum");
+        assert!(Arc::ptr_eq(&features.0, &TNUM.0));
+        assert_eq!(cpu.font_size, Some(px(13.).into()));
+        assert!(
+            metric_text_style(process_column(ColumnId::ImagePath), &m)
+                .font_features
+                .is_none()
+        );
+
+        let (_, vcx) = open(
+            cx,
+            Host {
+                out: pct_out(3.3),
+                text: "3.3%".into(),
+                col: ColumnId::Cpu,
+                st: PaintState::default(),
+            },
+        );
+        let cell = bounds(vcx, "TlProcCell-text").expect("text cell");
+        assert_eq!(cell.size.width, px(120.));
+    }
+}
