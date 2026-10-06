@@ -21,7 +21,7 @@ use gpui_kit::base::{Button as BaseButton, ElementExt as _};
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, AppContext as _, ClickEvent, Context, ElementId, FocusHandle,
     FontWeight, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels,
-    Render, SharedString, StatefulInteractiveElement, Styled, Window, div,
+    Render, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
     prelude::FluentBuilder as _, px, rgb, size,
 };
 
@@ -243,7 +243,9 @@ impl TlDialog {
         TlSecondaryWindow::open(cx, spec, move |window, cx| {
             let focus = DialogFocus::new(cx);
             focus.initial(self.destructive).focus(window, cx);
-            cx.new(|cx| TlDialogView::new(self, focus, parent_handle, Box::new(on_result), cx))
+            cx.new(|cx| {
+                TlDialogView::new(self, focus, parent_handle, Box::new(on_result), window, cx)
+            })
         })?;
         // The frame cannot refresh the parent while the parent is being updated.
         parent.refresh();
@@ -475,6 +477,7 @@ pub struct TlDialogView {
     on_result: Option<ResultHandler>,
     /// The window height last asked for, so the fit runs once per change.
     fitted: Rc<Cell<Option<Pixels>>>,
+    _closed: Subscription,
 }
 
 impl TlDialogView {
@@ -483,9 +486,18 @@ impl TlDialogView {
         focus: DialogFocus,
         parent: AnyWindowHandle,
         on_result: ResultHandler,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Closing the window any other way (the close button, the frame's own Esc) cancels.
+        let id = window.window_handle().window_id();
+        let view = cx.entity().downgrade();
+        let closed = cx.on_window_closed(move |cx, closed| {
+            if closed == id {
+                view.update(cx, |this, cx| this.deliver(DialogResult::Cancelled, cx))
+                    .ok();
+            }
+        });
         cx.on_release(|this, cx| this.deliver(DialogResult::Cancelled, cx))
             .detach();
         let checked = dialog.checkbox.as_ref().is_some_and(|(_, on)| *on);
@@ -496,6 +508,7 @@ impl TlDialogView {
             parent,
             on_result: Some(on_result),
             fitted: Rc::default(),
+            _closed: closed,
         }
     }
 
