@@ -1819,6 +1819,25 @@ mod tests {
         rig.finish();
     }
 
+    /// ADR-008: hidden from the start, the worker sends nothing and opens neither NM nor
+    /// nl80211 in 60 s (E12-A3).
+    #[test]
+    fn nm_hidden_no_connect() {
+        let connector = FakeConnector::default();
+        let fake = Arc::clone(&connector.0);
+        fake.lock().expect("fake lock").nm = Some(eth_and_wifi(50));
+        let wifi = FakeWifi::default();
+        set_links(&wifi, vec![wlan0_link(-55)]);
+        let mut rig = Rig::start_with(connector, wifi.clone(), Demand::default());
+        for _ in 0..120 {
+            rig.advance(IDLE_RECHECK);
+        }
+        assert!(rig.drain().is_empty(), "idle sends nothing");
+        assert_eq!(fake.lock().expect("fake lock").opens, 0);
+        assert_eq!(wifi.0.lock().expect("fake lock").opens, 0);
+        rig.finish();
+    }
+
     fn wlan0_wifi(entries: &[(DeviceIdentity, NetDetails)]) -> Option<&WifiInfo> {
         entries
             .iter()

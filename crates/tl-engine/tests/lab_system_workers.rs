@@ -3380,3 +3380,213 @@ fn gpu_drm_real_host() {
     assert_eq!(t.mem_total.validity, Validity::Valid);
     assert!(t.mem_total.value > 8 << 30, "VRAM {}", t.mem_total.value);
 }
+
+// ---- The P2 workers together (E12-A3) ----
+//
+// The `Inventory` and `GpuDrm` workers run here through their public seams. The `Udisks`,
+// `UPower` and `NetworkManager` fakes (`Connector`) are private to their modules, so their idle
+// and demand cases are the in-crate tests `dbus_udisks::no_connect_when_not_demanded`,
+// `dbus_upower::idle_until_demand` and `dbus_nm::nm_hidden_no_connect`.
+
+use tl_engine::workers::inventory;
+use tl_model::snapshot::PublicIpState;
+
+/// The five P2 sources (ADR-004).
+const P2_SOURCES: [SourceId; 5] = [
+    SourceId::Inventory,
+    SourceId::Udisks,
+    SourceId::UPower,
+    SourceId::NetworkManager,
+    SourceId::GpuDrm,
+];
+
+/// The P0 and P1 sources that run in full mode.
+const P0_P1_SOURCES: [SourceId; 8] = [
+    SourceId::Cpu,
+    SourceId::Memory,
+    SourceId::Disk,
+    SourceId::Net,
+    SourceId::Sensors,
+    SourceId::Processes,
+    SourceId::GpuNvidia,
+    SourceId::Logind,
+];
+
+#[test]
+fn p2_workers_registered() {
+    let full: Vec<SourceId> = workers_for(EngineMode::Full)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    let low: Vec<SourceId> = workers_for(EngineMode::LowMemory)
+        .iter()
+        .map(|spec| spec.id)
+        .collect();
+    for id in P2_SOURCES.iter().chain(&P0_P1_SOURCES) {
+        assert_eq!(full.iter().filter(|f| *f == id).count(), 1, "{id:?}");
+    }
+    for id in P2_SOURCES {
+        assert!(!low.contains(&id), "{id:?}");
+    }
+}
+
+/// A source that counts its `sample` calls. For `GpuDrm` each call is one fdinfo scan.
+struct Counting<S> {
+    inner: S,
+    samples: Arc<AtomicU32>,
+}
+
+impl<S: SampleAt> SampleAt for Counting<S> {
+    fn sample_at(self, clock: Clock) -> (Self, SourceUpdate) {
+        self.samples.fetch_add(1, Ordering::SeqCst);
+        let (inner, update) = self.inner.sample_at(clock);
+        let samples = self.samples;
+        (Counting { inner, samples }, update)
+    }
+}
+
+impl<S: SampleAt> Source for Counting<S> {
+    fn id(&self) -> SourceId {
+        self.inner.id()
+    }
+
+    fn period(&self, demand: &Demand, settings: &EngineSettings) -> Option<Duration> {
+        self.inner.period(demand, settings)
+    }
+
+    fn sample(self) -> (Self, SourceUpdate) {
+        let clock = at(tl_model::time::now_boot_ns());
+        self.sample_at(clock)
+    }
+
+    fn reset_baselines(&mut self) {
+        self.inner.reset_baselines();
+    }
+
+    fn command(&mut self, cmd: &WorkerCommand) -> bool {
+        self.inner.command(cmd)
+    }
+
+    fn take_extra(&mut self) -> Option<SourceUpdate> {
+        self.inner.take_extra()
+    }
+}
+
+/// The message kinds the P2 tests count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum P2 {
+    Inventory,
+    Gpu,
+    Other(SourceId),
+}
+
+fn p2_kind(msg: &EngineMsg) -> Option<P2> {
+    let EngineMsg::Source(update) = msg else {
+        return None;
+    };
+    match update {
+        SourceUpdate::Inventory(_) => Some(P2::Inventory),
+        SourceUpdate::Gpu(_) => Some(P2::Gpu),
+        SourceUpdate::Health { id, .. } => Some(P2::Other(*id)),
+        SourceUpdate::Devices(_) | SourceUpdate::GpuInfo(_) => Some(P2::Other(SourceId::GpuDrm)),
+        _ => None,
+    }
+}
+
+/// What one P2 run saw: the messages, and the inventory scans, public IP fetches and GpuDrm
+/// samples the workers made.
+struct P2Run {
+    msgs: Vec<P2>,
+    scans: u32,
+    fetches: u32,
+    gpu_samples: u32,
+}
+
+/// Runs `Inventory` (on the `dmi-desktop` fixture) and `GpuDrm` (on `drm-amd`) under `demand` for
+/// `total` in 10 ms steps, then checks the lab's oracles.
+fn run_p2(demand: Demand, total: Duration) -> P2Run {
+    let dmi = fixture_copy("dmi-desktop", None);
+    let drm = fixture_copy("drm-amd", None);
+    let mut fl = FakeLab::new();
+    let (updates, mut rx, demand_tx, settings, control) = channels();
+    demand_tx.send(demand).expect("watch has receivers");
+
+    let scans = Arc::new(AtomicU32::new(0));
+    let fetches = Arc::new(AtomicU32::new(0));
+    let gpu_samples = Arc::new(AtomicU32::new(0));
+    let scan = {
+        let scans = Arc::clone(&scans);
+        move || {
+            scans.fetch_add(1, Ordering::SeqCst);
+            inventory_scan(&dmi)
+        }
+    };
+    let fetch_ip = {
+        let fetches = Arc::clone(&fetches);
+        move || {
+            fetches.fetch_add(1, Ordering::SeqCst);
+            PublicIpState::NotFetched
+        }
+    };
+    let inv_io = io(&updates, &demand_tx, &settings, &control);
+    let inv = fl.spawn(async move {
+        let cx = Cx::current().expect("task has a Cx");
+        let _ = inventory::run_with(cx, inv_io, scan, fetch_ip).await;
+    });
+    let gpu = Counting {
+        inner: GpuDrmSource::new(SysRoot::at(&drm)),
+        samples: Arc::clone(&gpu_samples),
+    };
+    let gpu = spawn_on_lab(&mut fl, io(&updates, &demand_tx, &settings, &control), gpu);
+
+    let end = fl.now_ms() + total.as_millis() as u64;
+    let mut msgs = Vec::new();
+    loop {
+        msgs.extend(drain(&mut rx).iter().filter_map(p2_kind));
+        if fl.now_ms() >= end {
+            break;
+        }
+        fl.advance(Duration::from_millis(10));
+    }
+    msgs.extend(drain(&mut rx).iter().filter_map(p2_kind));
+
+    inv.abort();
+    gpu.abort();
+    fl.finish();
+    P2Run {
+        msgs,
+        scans: scans.load(Ordering::SeqCst),
+        fetches: fetches.load(Ordering::SeqCst),
+        gpu_samples: gpu_samples.load(Ordering::SeqCst),
+    }
+}
+
+/// ADR-008 for the P2 workers: hidden with no commands, 60 virtual s of zero work.
+#[test]
+fn p2_workers_idle_when_hidden() {
+    let run = run_p2(Demand::default(), Duration::from_secs(60));
+    // The Inventory worker sends one `Health(Running)` when its generation starts, hidden or
+    // not. Nothing else is sent.
+    assert_eq!(run.msgs, [P2::Other(SourceId::Inventory)]);
+    assert_eq!(run.scans, 0, "inventory scans");
+    assert_eq!(run.fetches, 0, "public IP fetches");
+    assert_eq!(run.gpu_samples, 0, "GpuDrm fdinfo scans");
+}
+
+#[test]
+fn p2_workers_demand_wakeup() {
+    let demand = Demand {
+        disks: true,
+        nets: true,
+        gpus: true,
+        inventory: true,
+        any_surface_visible: true,
+        ..Demand::default()
+    };
+    let run = run_p2(demand, Duration::from_millis(9_990));
+    let count = |kind: P2| run.msgs.iter().filter(|m| **m == kind).count();
+    assert_eq!(count(P2::Inventory), 1, "{:?}", run.msgs);
+    assert_eq!(run.scans, 1);
+    assert_eq!(count(P2::Gpu), 10, "{:?}", run.msgs);
+    assert_eq!(run.gpu_samples, 10);
+}

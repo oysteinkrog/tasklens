@@ -6,13 +6,21 @@
 //!
 //! `inventory_hostnamed_real` reads hostnamed's properties on the system bus. It changes no
 //! state.
+//!
+//! `p2_real_host_once` (E12-A3) starts the whole engine on the host roots with the P2 device
+//! demand and prints the P2 workers' health table only, never names, serials or addresses.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use asupersync::runtime::RuntimeBuilder;
 use tl_collect::SysRoot;
 use tl_collect::inventory::InventoryPaths;
 use tl_engine::workers::inventory::{SystemEnv, read_system_bus, scan_files};
+use tl_engine::{Engine, EngineConfig, EngineHooks, EngineMode};
+use tl_model::client::EngineClient;
+use tl_model::demand::Demand;
+use tl_model::health::{SourceId, SourceState};
 use tl_model::validity::Validity;
 
 #[test]
@@ -392,4 +400,119 @@ fn nm_real_devices() {
         )),
         "{names:?}"
     );
+}
+
+/// The PCI slots of the host's AMD cards, from `/sys/class/drm/card*/device`.
+fn amd_slots() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
+    let mut slots = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let device = entry.path().join("device");
+        let vendor = std::fs::read_to_string(device.join("vendor")).unwrap_or_default();
+        if vendor.trim() != "0x1002" {
+            continue;
+        }
+        let uevent = std::fs::read_to_string(device.join("uevent")).unwrap_or_default();
+        if let Some(slot) = uevent
+            .lines()
+            .find_map(|l| l.strip_prefix("PCI_SLOT_NAME="))
+        {
+            slots.push(slot.to_owned());
+        }
+    }
+    slots
+}
+
+#[test]
+#[ignore = "owner machine: starts the engine on the live system and system bus"]
+fn p2_real_host_once() {
+    let state_dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("real_inventory-state");
+    let config = EngineConfig::new(EngineMode::Full, state_dir);
+    let engine = Engine::start(config, EngineHooks::default()).expect("engine starts");
+    engine.set_demand(Demand {
+        disks: true,
+        nets: true,
+        gpus: true,
+        inventory: true,
+        any_surface_visible: true,
+        ..Demand::default()
+    });
+    std::thread::sleep(Duration::from_secs(5));
+    let snap = engine.latest();
+
+    eprintln!("p2_real_host_once health:");
+    for id in [
+        SourceId::Inventory,
+        SourceId::Udisks,
+        SourceId::UPower,
+        SourceId::NetworkManager,
+        SourceId::GpuDrm,
+    ] {
+        let h = &snap.health.sources[id.index()];
+        eprintln!(
+            "  {id:?}: {:?}{}",
+            h.state,
+            if h.last_error.is_some() {
+                " (error)"
+            } else {
+                ""
+            }
+        );
+    }
+
+    let inv = &snap.inventory;
+    assert_eq!(inv.system.static_hostname.validity, Validity::Valid);
+    assert_eq!(inv.processor.name.validity, Validity::Valid);
+    let details = &snap.device_details;
+    assert!(
+        details
+            .disks
+            .iter()
+            .any(|(_, d)| d.model.validity == Validity::Valid),
+        "no disk with a model among {}",
+        details.disks.len()
+    );
+    assert!(
+        details
+            .nets
+            .iter()
+            .any(|(_, n)| n.mac.validity == Validity::Valid),
+        "no interface with a MAC among {}",
+        details.nets.len()
+    );
+
+    let health = |id: SourceId| snap.health.sources[id.index()].state;
+    for id in [
+        SourceId::Inventory,
+        SourceId::Udisks,
+        SourceId::NetworkManager,
+        SourceId::UPower,
+    ] {
+        assert_eq!(health(id), SourceState::Running, "{id:?}");
+    }
+    let slots = amd_slots();
+    if slots.is_empty() {
+        eprintln!("  no AMD card: GpuDrm util not checked");
+    } else {
+        assert_eq!(health(SourceId::GpuDrm), SourceState::Running);
+        let amd = snap.system.gpus.iter().find(|(idx, _)| {
+            snap.devices.get(*idx).is_some_and(|e| {
+                slots
+                    .iter()
+                    .any(|s| e.persistent_key.strip_prefix("gpu:") == Some(s.as_str()))
+            })
+        });
+        let (_, totals) = amd.expect("the AMD card has GPU totals");
+        assert_eq!(totals.util_pct.validity, Validity::Valid);
+    }
+
+    let report = engine.shutdown(Duration::from_millis(1500));
+    assert!(report.clean(), "{report:?}");
 }
