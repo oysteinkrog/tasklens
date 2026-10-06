@@ -15,6 +15,8 @@ pub mod theme;
 pub mod window;
 pub mod windows;
 
+#[cfg(feature = "bench")]
+pub mod bench;
 #[cfg(any(test, feature = "test-hooks"))]
 pub mod testing;
 
