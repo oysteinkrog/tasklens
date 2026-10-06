@@ -1990,7 +1990,7 @@ fn disk_temperatures() {
 fn disk_temperature_unreadable_restricted() {
     let dir = disk_partitions_fixture();
     let input = block::disk_temp_input(&SysRoot::at(&dir), "sda").expect("sda has a temp input");
-    fs::set_permissions(&input, std::os::unix::fs::PermissionsExt::from_mode(0))
+    fs::set_permissions(&input, std::os::unix::fs::PermissionsExt::from_mode(0o000))
         .expect("chmod sda temp input");
     if fs::read(&input).is_ok() {
         eprintln!("running as root: the unreadable case cannot be checked");
