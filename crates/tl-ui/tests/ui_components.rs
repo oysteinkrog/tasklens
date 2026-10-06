@@ -1195,8 +1195,7 @@ mod dialog_enter {
         let field: Rc<RefCell<Option<Entity<InputState>>>> = Rc::default();
         let slot = field.clone();
         let dialog = TlDialog::confirm("Rename this theme?", "Rename").extra(move |window, cx| {
-            let state = window
-                .use_keyed_state("dialog-field", cx, |window, cx| InputState::new(window, cx));
+            let state = window.use_keyed_state("dialog-field", cx, InputState::new);
             *slot.borrow_mut() = Some(state.clone());
             div()
                 .w_full()
@@ -1225,8 +1224,7 @@ mod dialog_enter {
         let dialog = TlDialog::confirm("Reset all settings?", "Reset")
             .destructive()
             .extra(move |window, cx| {
-                let state = window
-                    .use_keyed_state("dialog-field", cx, |window, cx| InputState::new(window, cx));
+                let state = window.use_keyed_state("dialog-field", cx, InputState::new);
                 *slot.borrow_mut() = Some(state.clone());
                 TlTextInput::new("dialog-field", &state).into_any_element()
             });
