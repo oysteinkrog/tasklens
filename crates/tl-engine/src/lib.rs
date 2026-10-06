@@ -33,7 +33,7 @@ pub use config::{EngineConfig, EngineMode};
 /// action gate, E14-A4 the journal, E30-A2 the record sink.
 pub(crate) fn default_hooks() -> EngineHooks {
     EngineHooks {
-        action_gate: None,
+        action_gate: Some(Arc::new(actions::gate_factory)),
         record_sink: None,
         journal: None,
     }

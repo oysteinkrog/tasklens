@@ -21,15 +21,17 @@ use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::mpsc;
+use asupersync::runtime::TaskHandle;
 use asupersync::time::{self, Elapsed};
 use futures_lite::FutureExt;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustix::io::Errno;
+use smallvec::SmallVec;
 use tl_model::actions::{
     ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
     LaunchSpec, MAX_ACTION_TARGETS, MAX_ACTIONS_IN_FLIGHT, RejectReason, Signal,
 };
-use tl_model::health::HelperState;
+use tl_model::health::{HelperState, SourceId};
 use tl_model::helper_proto::{HelperReply, HelperRequest};
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcFlags;
@@ -37,9 +39,10 @@ use tl_model::table::{Manager, StartupSource, UnitRef};
 use tl_model::time::BootId;
 use tl_ops::OpsError;
 
+use crate::bridge::HookCtx;
 use crate::config::EngineConfig;
 use crate::dbus::ManagerConnSlot;
-use crate::reducer::AdmissionView;
+use crate::reducer::{ActionGate, AdmissionView};
 use crate::update::EngineMsg;
 
 /// Most requests running at once; one more is `Rejected(Busy)`.
@@ -535,6 +538,163 @@ pub struct ActionCtx {
     pub destroy_support_sent: AtomicBool,
 }
 
+/// The `ActionGate` the reducer calls (E11-A1). The only entry to `run_action`: every request
+/// passes `admit` first. It lives in the reducer, so a session restart drops it, and `Drop`
+/// aborts every action still in flight (ADR-004 task tree).
+pub struct Gate {
+    ctx: Arc<ActionCtx>,
+    in_flight: FxHashMap<ActionId, InFlight>,
+    busy_units: FxHashSet<UnitRef>,
+}
+
+struct InFlight {
+    handle: TaskHandle<()>,
+    kind: ActionKind,
+    /// The admitted `Unit` targets, freed in `finished`.
+    units: SmallVec<[UnitRef; 1]>,
+    /// The manager of the first `Unit` target, which picks the systemd source to refresh.
+    manager: Option<Manager>,
+}
+
+impl Gate {
+    pub fn new(ctx: Arc<ActionCtx>) -> Self {
+        Self {
+            ctx,
+            in_flight: FxHashMap::default(),
+            busy_units: FxHashSet::default(),
+        }
+    }
+}
+
+impl ActionGate for Gate {
+    fn submit(&mut self, cx: &Cx, req: ActionRequest, view: &AdmissionView<'_>) {
+        let per_target = match admit(&req, view, self.in_flight.len(), &self.busy_units) {
+            Admission::Reject(reason) => {
+                let ev = event(req.id, None, ActionState::Rejected(reason));
+                if self.ctx.events.try_send(ev).is_err() {
+                    tracing::debug!(target: "tasklens::action", id = req.id.0, "rejected event dropped: queue full or closed");
+                }
+                return;
+            }
+            Admission::Run { per_target } => per_target,
+        };
+        let mut units = SmallVec::new();
+        let mut manager = None;
+        for (i, target) in req.targets.iter().enumerate() {
+            if let ActionTarget::Unit(unit) = target {
+                manager.get_or_insert(unit.manager);
+                // A unit rejected as busy belongs to the action that holds it.
+                if per_target.get(i).copied().flatten().is_none()
+                    && self.busy_units.insert(unit.clone())
+                {
+                    units.push(unit.clone());
+                }
+            }
+        }
+        let id = req.id;
+        let kind = req.kind.clone();
+        let ctx = Arc::clone(&self.ctx);
+        let handle = cx
+            .spawn(move |cx| run_action(cx, ctx, req, per_target))
+            .expect("spawn");
+        self.in_flight.insert(
+            id,
+            InFlight {
+                handle,
+                kind,
+                units,
+                manager,
+            },
+        );
+    }
+
+    fn finished(&mut self, id: ActionId) -> Option<SourceId> {
+        let done = self.in_flight.remove(&id)?;
+        for unit in &done.units {
+            self.busy_units.remove(unit);
+        }
+        refresh_source(&done.kind, done.manager)
+    }
+}
+
+impl Drop for Gate {
+    /// `TaskHandle` does not cancel on drop. No event arrives for an aborted action; the UI's
+    /// `ActionTracker` times it out.
+    fn drop(&mut self) {
+        for flight in self.in_flight.values() {
+            flight.handle.abort();
+        }
+    }
+}
+
+/// The source `ActionFinished` refreshes for `kind` (ADR-005). `manager` is the manager of the
+/// first `Unit` target; a unit kind without one refreshes the system manager.
+fn refresh_source(kind: &ActionKind, manager: Option<Manager>) -> Option<SourceId> {
+    let by_manager = || match manager {
+        Some(Manager::User) => SourceId::SystemdUser,
+        _ => SourceId::SystemdSystem,
+    };
+    match kind {
+        ActionKind::Signal(_)
+        | ActionKind::KillTree
+        | ActionKind::Suspend
+        | ActionKind::Resume
+        | ActionKind::SetNice(_)
+        | ActionKind::SetSched { .. }
+        | ActionKind::SetAffinity(_)
+        | ActionKind::SetIoPriority(_)
+        | ActionKind::FreezeGroup
+        | ActionKind::ThawGroup
+        | ActionKind::KillGroup
+        | ActionKind::Dump { .. } => Some(SourceId::Processes),
+        ActionKind::UnitStart
+        | ActionKind::UnitStop
+        | ActionKind::UnitRestart
+        | ActionKind::UnitReload
+        | ActionKind::UnitResetFailed
+        | ActionKind::UnitEnable
+        | ActionKind::UnitDisable
+        | ActionKind::UnitMask
+        | ActionKind::UnitUnmask
+        | ActionKind::UnitWriteRecovery(_)
+        | ActionKind::UnitRemoveRecovery => Some(by_manager()),
+        ActionKind::StartupEnable
+        | ActionKind::StartupDisable
+        | ActionKind::StartupRunNow
+        | ActionKind::StartupDelete => Some(SourceId::Startup),
+        ActionKind::SockDestroy => Some(SourceId::Connections),
+        ActionKind::OpenUri(_) | ActionKind::ShowInFileManager { .. } | ActionKind::Launch(_) => {
+            None
+        }
+    }
+}
+
+/// The production gate factory that `default_hooks` installs, with `RealOps`.
+pub fn gate_factory(hook: HookCtx) -> Box<dyn ActionGate> {
+    gate_with_ops(hook, Arc::new(RealOps))
+}
+
+/// `gate_factory` with `ops` in place of `RealOps`, for tests.
+pub fn gate_with_ops(hook: HookCtx, ops: Arc<dyn ActionOps>) -> Box<dyn ActionGate> {
+    let openers: Arc<dyn Openers> = Arc::new(RealOpeners {
+        session: hook.shared.systemd_user.clone(),
+    });
+    Box::new(Gate::new(Arc::new(ActionCtx {
+        events: hook.events_tx,
+        msgs: hook.msgs_tx,
+        ops,
+        boot_id: hook.boot_id,
+        uid: rustix::process::getuid().as_raw(),
+        config: hook.config,
+        systemd_system: hook.shared.systemd_system,
+        systemd_user: hook.shared.systemd_user,
+        openers: Some(openers),
+        // E29-014.
+        helper: None,
+        destroy_support_sent: AtomicBool::new(false),
+    })))
+}
+
 /// The per-target dispatch `run_action` uses. Tests pass their own.
 type Dispatch = for<'a> fn(
     &'a Cx,
@@ -1010,6 +1170,132 @@ mod tests {
         assert_eq!(
             f.per_target(&req),
             vec![Some(RejectReason::Busy), None, None]
+        );
+    }
+
+    struct NoOps;
+    impl ActionOps for NoOps {}
+
+    /// A gate over `NoOps` whose channels stay open while the returned receivers live.
+    fn gate() -> (
+        Gate,
+        async_channel::Receiver<ActionEvent>,
+        mpsc::Receiver<EngineMsg>,
+    ) {
+        let (events_tx, events) = async_channel::bounded(256);
+        let (msgs_tx, msgs) = mpsc::channel(256);
+        let ctx = Arc::new(ActionCtx {
+            events: events_tx,
+            msgs: msgs_tx,
+            ops: Arc::new(NoOps),
+            boot_id: BOOT,
+            uid: 1000,
+            config: Arc::new(EngineConfig::new(
+                crate::config::EngineMode::Full,
+                std::path::PathBuf::from("/nonexistent"),
+            )),
+            systemd_system: ManagerConnSlot::new(),
+            systemd_user: ManagerConnSlot::new(),
+            openers: None,
+            helper: None,
+            destroy_support_sent: AtomicBool::new(false),
+        });
+        (Gate::new(ctx), events, msgs)
+    }
+
+    #[test]
+    fn finished_refresh_source() {
+        use asupersync::types::Budget;
+        use asupersync::{LabConfig, LabRuntime};
+
+        let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(100_000));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let (task, handle) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task has a Cx");
+                let (mut gate, _events, _msgs) = gate();
+                let f = Fixture::new();
+                let view = AdmissionView {
+                    boot_id: BOOT,
+                    live: &f.live,
+                    exited_within_linger: &f.exited,
+                };
+                let mut submit = |gate: &mut Gate, id: u64, kind, targets| {
+                    let mut req = request(kind, targets);
+                    req.id = ActionId(id);
+                    gate.submit(&cx, req, &view);
+                };
+
+                let user = unit("app.service");
+                submit(
+                    &mut gate,
+                    1,
+                    ActionKind::UnitStart,
+                    vec![ActionTarget::Unit(user.clone())],
+                );
+                assert!(gate.busy_units.contains(&user));
+                // The busy unit is rejected per target and stays with action 1.
+                submit(
+                    &mut gate,
+                    2,
+                    ActionKind::UnitStop,
+                    vec![ActionTarget::Unit(user.clone())],
+                );
+                assert_eq!(gate.finished(ActionId(2)), Some(SourceId::SystemdUser));
+                assert!(gate.busy_units.contains(&user));
+                assert_eq!(gate.finished(ActionId(1)), Some(SourceId::SystemdUser));
+                assert!(gate.busy_units.is_empty());
+                assert_eq!(gate.finished(ActionId(1)), None, "already finished");
+
+                let system = UnitRef {
+                    manager: Manager::System,
+                    name: Arc::from("sshd.service"),
+                };
+                submit(
+                    &mut gate,
+                    3,
+                    ActionKind::UnitRestart,
+                    vec![ActionTarget::Unit(system)],
+                );
+                assert_eq!(gate.finished(ActionId(3)), Some(SourceId::SystemdSystem));
+                submit(
+                    &mut gate,
+                    4,
+                    ActionKind::OpenUri(Arc::from("https://example.org")),
+                    vec![],
+                );
+                assert_eq!(gate.finished(ActionId(4)), None);
+                assert!(gate.in_flight.is_empty());
+            })
+            .expect("task is created");
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_idle();
+        assert!(handle.is_finished(), "the checks ran");
+
+        for (kind, want) in [
+            (ActionKind::Signal(Signal::Term), Some(SourceId::Processes)),
+            (ActionKind::KillGroup, Some(SourceId::Processes)),
+            (ActionKind::StartupRunNow, Some(SourceId::Startup)),
+            (ActionKind::SockDestroy, Some(SourceId::Connections)),
+            (
+                ActionKind::UnitRemoveRecovery,
+                Some(SourceId::SystemdSystem),
+            ),
+            (
+                ActionKind::ShowInFileManager {
+                    path: Arc::from("/home"),
+                    properties: false,
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(refresh_source(&kind, None), want, "{kind:?}");
+        }
+        // Freeze, thaw and kill on a unit target refresh Processes too.
+        assert_eq!(
+            refresh_source(&ActionKind::FreezeGroup, Some(Manager::User)),
+            Some(SourceId::Processes)
         );
     }
 }
