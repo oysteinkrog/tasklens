@@ -120,12 +120,13 @@ impl ChartView {
         cx: &mut Context<Self>,
     ) {
         let range_ns = self.spec.range_ns;
-        let own_changed = ev.mask.contains(ComponentMask::SERIES)
-            && self
-                .spec
+        let own_changed = ev.mask.contains(ComponentMask::SERIES) && {
+            let changed = ChangedRuns::new(&ev.changed_series);
+            self.spec
                 .series
                 .iter()
-                .any(|s| tier_changed(&ev.changed_series, s.id, range_ns));
+                .any(|s| changed.tier_changed(s.id, range_ns))
+        };
         let device_appeared = ev.mask.contains(ComponentMask::DEVICES)
             && (self.series.len() != self.spec.series.len()
                 || self.series.iter().any(Option::is_none));
@@ -336,15 +337,46 @@ pub(crate) fn find_tiered(
     }
 }
 
-/// True when `changed` holds `id`, or its 1 Hz view when `range_ns` reads that tier. A linear
-/// scan: `Snapshot::changed_since` lists fast ids then 1 Hz ids, so the whole list is not sorted.
-pub(crate) fn tier_changed(changed: &[SeriesId], id: SeriesId, range_ns: u64) -> bool {
-    changed.contains(&id)
-        || (range_ns > TIER_1HZ_MIN_RANGE_NS
-            && changed.contains(&SeriesId {
-                metric: id.metric.with_tier_1hz(),
-                ..id
-            }))
+/// A `SnapshotChanged::changed_series` list split into its two sorted runs.
+/// `Snapshot::changed_since` lists the fast ids, then the 1 Hz ids, so the whole list is not
+/// sorted but each run is.
+#[derive(Clone, Copy, Debug)]
+pub struct ChangedRuns<'a> {
+    pub fast: &'a [SeriesId],
+    pub slow: &'a [SeriesId],
+}
+
+impl<'a> ChangedRuns<'a> {
+    /// Finds the split with one binary search on the tier bit.
+    pub fn new(changed: &'a [SeriesId]) -> Self {
+        let split = changed.partition_point(|id| !id.metric.is_tier_1hz());
+        let (fast, slow) = changed.split_at(split);
+        Self { fast, slow }
+    }
+
+    /// The run that holds ids of `id`'s tier.
+    pub fn run_for(&self, id: SeriesId) -> &'a [SeriesId] {
+        if id.metric.is_tier_1hz() {
+            self.slow
+        } else {
+            self.fast
+        }
+    }
+
+    /// Binary search in `id`'s run: at most ⌊log₂ n⌋ + 1 comparisons.
+    pub fn contains(&self, id: SeriesId) -> bool {
+        search_series(self.run_for(id), |c| c.cmp(&id)).is_some()
+    }
+
+    /// True when `id` changed, or its 1 Hz view when `range_ns` reads that tier.
+    pub fn tier_changed(&self, id: SeriesId, range_ns: u64) -> bool {
+        self.contains(id)
+            || (range_ns > TIER_1HZ_MIN_RANGE_NS
+                && self.contains(SeriesId {
+                    metric: id.metric.with_tier_1hz(),
+                    ..id
+                }))
+    }
 }
 
 /// `id` in `set`: the 1 Hz tier list when the id carries the tier bit, else the fast list.
@@ -357,13 +389,10 @@ pub(crate) fn find_series(set: &SeriesSet, id: SeriesId) -> Option<&Arc<SeriesVi
     search_series(views, |v| v.id.cmp(&id))
 }
 
-/// Binary search over `views`, which is sorted by `SeriesId`. `cmp` orders a view against the
-/// target. At most ⌊log₂ n⌋ + 1 comparisons (7 for 80 series); `slice::binary_search_by` always
+/// Binary search over `views`, which is sorted by `SeriesId` (series views or plain ids). `cmp`
+/// orders an item against the target. At most ⌊log₂ n⌋ + 1 comparisons (7 for 80 series); `slice::binary_search_by` always
 /// takes one more. Public so a test can count the comparisons.
-pub fn search_series(
-    views: &[Arc<SeriesView>],
-    mut cmp: impl FnMut(&Arc<SeriesView>) -> Ordering,
-) -> Option<&Arc<SeriesView>> {
+pub fn search_series<T>(views: &[T], mut cmp: impl FnMut(&T) -> Ordering) -> Option<&T> {
     let (mut lo, mut hi) = (0, views.len());
     while lo < hi {
         let mid = lo + (hi - lo) / 2;

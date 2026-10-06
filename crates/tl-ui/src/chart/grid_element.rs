@@ -40,7 +40,7 @@ use tl_model::validity::Validity;
 use super::geometry::{self, BuildInput, TimeMap};
 use super::grid::{self, GridPaint};
 use super::labels::{self, CachedLine, LabelCache, LineStyle};
-use super::view::{find_tiered, tier_changed};
+use super::view::{ChangedRuns, find_tiered};
 use super::{
     ChartCache, ChartSeries, DEFAULT_RANGE_NS, GeometryScalars, GridStyle, LegendStyle, PathSet,
     ValueFormat, YScale, scale,
@@ -294,7 +294,8 @@ impl ChartGridView {
         cx: &mut Context<Self>,
     ) {
         let range_ns = self.spec.range_ns;
-        let changed = |id: SeriesId| tier_changed(&ev.changed_series, id, range_ns);
+        let runs = ChangedRuns::new(&ev.changed_series);
+        let changed = |id: SeriesId| runs.tier_changed(id, range_ns);
         let own_changed = ev.mask.contains(ComponentMask::SERIES)
             && self
                 .spec

@@ -2293,7 +2293,7 @@ mod tier_1hz {
     use tl_model::snapshot::{SeriesSet, Snapshot};
     use tl_model::time::now_boot_ns;
     use tl_ui::chart::grid_element::{ChartGridSpec, ChartGridView, GridCellSpec};
-    use tl_ui::chart::view::ChartView;
+    use tl_ui::chart::view::{ChangedRuns, ChartView, search_series};
     use tl_ui::chart::{ChartSeries, ChartSpec};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -2509,5 +2509,61 @@ mod tier_1hz {
         grid.read_with(cx, |v, _| {
             assert!(!v.tier_fallback, "300 s finds the 1 Hz view")
         });
+    }
+
+    #[test]
+    fn changed_runs_search_each_tier_in_log_n() {
+        // As `Snapshot::changed_since` lists them: 40 fast ids, then 24 1 Hz ids.
+        let fast: Vec<SeriesId> = (0..40u16)
+            .map(|i| SeriesId {
+                device: DeviceIdx(i / 4),
+                metric: MetricId(i % 4 * 10),
+            })
+            .collect();
+        let slow_ids: Vec<SeriesId> = fast
+            .iter()
+            .step_by(2)
+            .take(24)
+            .map(|&id| slow(id))
+            .collect();
+        let changed: Vec<SeriesId> = fast.iter().chain(&slow_ids).copied().collect();
+        assert!(!changed.is_sorted(), "two runs, not one sorted list");
+        let bound = changed.len().ilog2() + 2;
+
+        let runs = ChangedRuns::new(&changed);
+        assert_eq!((runs.fast, runs.slow), (&fast[..], &slow_ids[..]));
+        for &target in &changed {
+            let mut n = 0u32;
+            let found = search_series(runs.run_for(target), |c| {
+                n += 1;
+                c.cmp(&target)
+            });
+            assert_eq!(found, Some(&target));
+            assert!(n <= bound, "{n} comparisons for {target:?}, bound {bound}");
+            assert!(runs.contains(target));
+        }
+
+        // A 1 Hz id whose fast id is absent, and the reverse.
+        let only_slow = slow_ids[3];
+        let base = SeriesId {
+            metric: only_slow.metric.base(),
+            ..only_slow
+        };
+        let fast_only = ChangedRuns::new(&fast[..1]);
+        assert!(!fast_only.contains(slow(fast[0])));
+        let slow_only = ChangedRuns::new(&slow_ids);
+        assert!(!slow_only.contains(base));
+        assert!(
+            slow_only.tier_changed(base, 300 * S),
+            "300 s reads the 1 Hz id"
+        );
+        assert!(
+            !slow_only.tier_changed(base, 60 * S),
+            "60 s reads only the fast id"
+        );
+        assert!(!runs.contains(SeriesId {
+            device: DeviceIdx(50),
+            metric: MetricId::CPU_TOTAL,
+        }));
     }
 }
