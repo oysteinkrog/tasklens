@@ -46,6 +46,7 @@ use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::components::validity::{glyph, glyph_allows_heat};
 use crate::table::tree_table::{
     CHEVRON, CHEVRON_HIT_W, ICON_GAP, INDENT, IconSlot, NAME_PAD, NameCell, NameIcon, RowFlags,
+    STALE_OPACITY,
 };
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::{TNUM, label_style, numeric_style, t_base};
@@ -675,6 +676,17 @@ impl IconSourceCache {
     }
 }
 
+/// The primary text colour and the icon opacity of a Name cell: `text_secondary` (or
+/// `text_selected_secondary`) and [`STALE_OPACITY`] on an `EXITED` row (UI-PRC-003), else
+/// `text_primary` (or `text_selected_primary`) and 1. The chevron is the same on both.
+pub fn name_look(flags: RowFlags, ctx: &CellCtx) -> (Hsla, f32) {
+    if flags.has(RowFlags::EXITED) {
+        (ctx.secondary(), STALE_OPACITY)
+    } else {
+        (ctx.primary(), 1.0)
+    }
+}
+
 /// The Name cell (UI-PRC-003, R-190): the 16 px chevron box (always reserved) at
 /// `20 + depth × 20 + 6`, gap 6, the icon (16 or 24) and gap 6 when there is one, then the
 /// primary text, the secondary text, the state glyphs and the trailing element. The connector
@@ -784,6 +796,7 @@ pub fn paint_name_cell(
     let gap = px(ICON_GAP * s);
     let icon_w = px(icon_px(cell.icon_size) * s);
     let icon_color = ctx.secondary();
+    let (primary_color, icon_opacity) = name_look(flags, ctx);
     let has_icon = !matches!(cell.icon, NameIcon::None);
     match cell.icon {
         NameIcon::File(path) => {
@@ -793,6 +806,7 @@ pub fn paint_name_cell(
                     .flex_none()
                     .ml(gap)
                     .size(icon_w)
+                    .opacity(icon_opacity)
                     .with_fallback(move || {
                         svg()
                             .path(IconName::Binary.path())
@@ -809,13 +823,13 @@ pub fn paint_name_cell(
                     .flex_none()
                     .ml(gap)
                     .size(icon_w)
+                    .opacity(icon_opacity)
                     .text_color(icon_color),
             );
         }
         NameIcon::None => {}
     }
 
-    let primary_color = ctx.primary();
     let (shaped, runs) = name_primary_text(
         &cell.primary,
         cell.highlight_fffd,
