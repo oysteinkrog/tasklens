@@ -29,13 +29,16 @@ use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
 use super::suspend::Transition;
-use super::table::{self, SweepTotals, TableInput};
+use super::table::{self, PseudoInput, SweepTotals, TableInput};
 use super::{AdmissionView, HelperCommand, InvariantViolation, Reducer};
 use crate::source::{QueuedCommand, WorkerCommand};
 use crate::update::{
     CpuSample, DetailsUpdate, DeviceDetailsUpdate, DiskSample, EngineMsg, GpuSample, MemorySample,
-    NetSample, SensorSample, SourceUpdate, ZramStat, source_of,
+    NetSample, SensorSample, SourceUpdate, source_of,
 };
+
+/// Valid CPU samples whose irq share stays 0 before the Interrupts row shows `n/a` (U-21).
+const IRQ_ZERO_SAMPLES: u32 = 10;
 
 /// Forwarded commands kept in the control watch (E08-004).
 pub const QUEUE_MAX: usize = 64;
@@ -70,10 +73,14 @@ pub struct ApplyState {
     last_t: [TimeNs; SourceId::COUNT],
     /// The last period used per source, kept when two samples carry the same time.
     period: [u64; SourceId::COUNT],
-    /// Δ(irq + softirq) / Δtotal of the last CPU sample, for the Interrupts row (E09-023).
-    pub irq_pct: f32,
-    /// zram devices of the last memory sample (E09-023).
-    pub zram: Vec<ZramStat>,
+    /// The irq share of the last valid CPU sample and the zram devices of the last memory
+    /// sample, for the pseudo rows of the next table build (E09-023).
+    pub pseudo: PseudoInput,
+    /// Valid CPU samples with an irq share of 0 since the engine started, counted until one is
+    /// not 0 (U-21).
+    irq_zero_samples: u32,
+    /// A valid CPU sample had an irq share above 0, so the kernel accounts interrupt time.
+    irq_seen: bool,
     /// The running maximum of `Committed_AS` since engine start (R-166).
     pub peak_committed: u64,
     /// Device details per contributing source (R-139 item 7): sysfs and D-Bus.
@@ -773,7 +780,16 @@ impl Reducer {
                 period,
             );
         }
-        self.apply_state.irq_pct = s.irq_pct;
+        if ok {
+            let st = &mut self.apply_state;
+            st.irq_seen |= s.irq_pct > 0.0;
+            if !st.irq_seen {
+                st.irq_zero_samples = st.irq_zero_samples.saturating_add(1);
+            }
+            // U-21: an irq share that stays 0 means the kernel counts interrupt time in tasks.
+            st.pseudo.irq_pct =
+                (st.irq_seen || st.irq_zero_samples < IRQ_ZERO_SAMPLES).then_some(s.irq_pct);
+        }
         self.system_mut(t).cpu = totals;
         self.sample_ok(SourceId::Cpu, t, period);
         self.mark(ComponentMask::SERIES);
@@ -801,7 +817,7 @@ impl Reducer {
             };
             self.mark(ComponentMask::INVENTORY);
         }
-        self.apply_state.zram = s.zram;
+        self.apply_state.pseudo.zram = s.zram;
         self.system_mut(t).memory = m;
         self.sample_ok(SourceId::Memory, t, period);
         self.mark(ComponentMask::SERIES);
@@ -1195,6 +1211,7 @@ impl Reducer {
             devices: &devices,
             settings,
             unit_names: &unit_names,
+            pseudo: Some(&self.apply_state.pseudo),
         };
         let mut view = table::build(&input, &self.query);
         view.totals = table::totals(

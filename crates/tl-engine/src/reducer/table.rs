@@ -3,15 +3,17 @@
 //! The engine builds the rows; the UI never sorts or filters. `build` turns the current records
 //! and the UI's `TableQuery` into a `ProcessTableView`. This file holds flat mode
 //! (`TableMode::Flat`), tree mode (`TableMode::Tree`, E09-010) and grouped mode
-//! (`TableMode::Grouped`, E09-011).
+//! (`TableMode::Grouped`, E09-011), each with the pseudo rows Interrupts and Memory compression
+//! (zram) (E09-023).
 
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity, DeviceKind, NetKind};
-use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId};
+use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessExtras, ProcessRecord,
 };
@@ -22,9 +24,10 @@ use tl_model::table::{
     Manager, ProcessTableView, SortSpec, TableMode, TableQuery, TableRow, TableTotals, Total,
     UnitRef,
 };
+use tl_model::units;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
 
-use crate::update::CgroupStats;
+use crate::update::{CgroupStats, ZramStat};
 
 /// Everything `build` reads. Borrowed from the reducer's current state.
 pub struct TableInput<'a> {
@@ -40,7 +43,23 @@ pub struct TableInput<'a> {
     pub settings: &'a EngineSettings,
     /// Unit Description by unit (E09-025). Empty in P1.
     pub unit_names: &'a FxHashMap<UnitRef, Arc<str>>,
+    /// Values of the pseudo rows (E09-023). `None` builds the table without pseudo rows.
+    pub pseudo: Option<&'a PseudoInput>,
 }
+
+/// What the pseudo rows show (PROC-012): the latest CPU and memory sample values the reducer
+/// keeps for the next table build.
+#[derive(Clone, Debug, Default)]
+pub struct PseudoInput {
+    /// Δ(irq + softirq) / Δtotal in percent. `None` when the kernel does not account interrupt
+    /// time on its own (U-21).
+    pub irq_pct: Option<f32>,
+    /// zram devices of the last memory sample.
+    pub zram: Vec<ZramStat>,
+}
+
+/// The Interrupts row note when `PseudoInput::irq_pct` is `None` (PROC-012).
+pub const IRQ_NOT_ACCOUNTED: &str = "Interrupt time is included in task time on this kernel";
 
 /// Columns measured for visible rows only (PROC-047). Sorting on one of them falls back to PID
 /// ascending.
@@ -351,6 +370,13 @@ impl Filter {
 
     pub fn is_empty(&self) -> bool {
         self.terms.is_empty()
+    }
+
+    /// True when every term is a substring of a string in `texts`. For rows without a record.
+    pub fn matches_text(&self, texts: &[&str]) -> bool {
+        self.terms
+            .iter()
+            .all(|t| texts.iter().any(|e| contains_lower(e, &t.lower)))
     }
 
     /// True when every term is a substring of `meta.search_lower` or of a string in `extra`
@@ -745,8 +771,9 @@ fn tree_visible(input: &TableInput<'_>, matches: &[u32], include_children: bool)
     visible
 }
 
-/// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`, and the
-/// subtree totals the rows index with `TableRow.subtree`.
+/// Tree mode rows: the forest of the visible records, siblings sorted by `query.sort`, the
+/// group rows (the shown pseudo rows, top level and sorted with the roots) and the subtree
+/// totals the rows index with `TableRow.subtree`.
 ///
 /// With `subtree_totals` on, every row with children gets a subtree total. With it off, only
 /// collapsed parents do (ADR-009: the collapsed parent shows its subtree sum).
@@ -754,7 +781,7 @@ fn tree_rows(
     input: &TableInput<'_>,
     query: &TableQuery,
     filter: &Filter,
-) -> (Vec<TableRow>, Vec<GroupRow>, u32) {
+) -> (Vec<TableRow>, Vec<GroupRow>, Vec<GroupRow>, u32) {
     let matches = filtered(input, filter);
     let visible = tree_visible(input, &matches, query.include_children);
     let shown = visible.iter().filter(|v| **v).count() as u32;
@@ -765,8 +792,30 @@ fn tree_rows(
         sort_indices(input, &mut v, query.sort);
         v
     };
-    let mut rows = Vec::with_capacity(shown as usize);
-    flatten_tree(input.records, &f, &order, &expanded, &mut rows, 0);
+    let pseudo = shown_pseudo_rows(input, filter, "");
+    let mut rows = Vec::with_capacity(shown as usize + pseudo.len());
+    if pseudo.is_empty() {
+        flatten_tree(input.records, &f, &order, &expanded, &mut rows, 0);
+    } else {
+        let descendants = descendant_counts(input.records, &f);
+        let tree = TreeEmit {
+            records: input.records,
+            f: &f,
+            descendants: &descendants,
+            order: &order,
+            expanded: &expanded,
+        };
+        let mut emitted = vec![false; descendants.len()];
+        let mut items: Vec<Item> = f.roots.iter().map(|&i| Item::Record(i)).collect();
+        items.extend((0..pseudo.len()).map(|g| Item::Group(g as u32)));
+        sort_items(input, &pseudo, &mut items, query.sort);
+        for item in items {
+            match item {
+                Item::Record(i) => tree.emit(&[i], 0, &mut emitted, &mut rows),
+                Item::Group(g) => rows.push(pseudo_table_row(&pseudo, g, 0)),
+            }
+        }
+    }
 
     let all = input.settings.subtree_totals;
     let wanted: Vec<usize> = rows
@@ -781,7 +830,7 @@ fn tree_rows(
     for (s, &k) in wanted.iter().enumerate() {
         rows[k].subtree = Some(s as u32);
     }
-    (rows, subtree, shown)
+    (rows, pseudo, subtree, shown)
 }
 
 /// The three fixed groups of grouped mode (PROC-004). Every process sits under exactly one.
@@ -1174,6 +1223,7 @@ fn group_sort_key(g: &GroupRow, col: ColumnId) -> SortKey {
             NodeId::Unit(u) => SortKey::Text(u.name.clone()),
             _ => SortKey::Absent,
         },
+        C::User if g.kind == GroupRowKind::Pseudo => SortKey::Text(Arc::from("root")),
         _ => SortKey::Absent,
     }
 }
@@ -1269,6 +1319,121 @@ fn group_row(groups: &[GroupRow], g: u32, expanded: &FxHashSet<NodeId>) -> Table
     }
 }
 
+/// A pseudo row with every value 0 and every field `Unsupported`.
+fn pseudo_base(kind: PseudoKind, name: &str) -> GroupRow {
+    GroupRow {
+        node: NodeId::Pseudo(kind),
+        key: GroupKind::System.key(),
+        kind: GroupRowKind::Pseudo,
+        class: GroupKind::System,
+        name: Arc::from(name),
+        icon: None,
+        members: 0,
+        pids: 0,
+        note: None,
+        memory_bytes: 0,
+        disk_bps: 0.0,
+        net_bps: 0.0,
+        gpu_pct: 0.0,
+        cpu_pct: 0.0,
+        rss_anon_bytes: 0,
+        rss_bytes: 0,
+        pss_bytes: 0,
+        uss_bytes: 0,
+        swap_bytes: 0,
+        io_read_bps: 0.0,
+        io_write_bps: 0.0,
+        net_rx_bps: 0.0,
+        net_tx_bps: 0.0,
+        gpu_util_pct: 0.0,
+        gpu_mem_bytes: 0,
+        threads: 0,
+        validity: FieldValidity::all(Validity::Unsupported),
+    }
+}
+
+/// The pseudo rows (PROC-012): "Interrupts" always, then "Memory compression (zram)" when a
+/// zram device has `disksize > 0`. Fields a row does not define are `Unsupported`.
+///
+/// Interrupts: CPU is `irq_pct`, or `Unsupported` with the `IRQ_NOT_ACCOUNTED` note when it is
+/// `None`. Memory compression: Memory is Σ `mem_used_total`, disk read and write are Σ of the
+/// zram rates over the set-up devices, and the note gives the original and compressed sizes and
+/// their ratio.
+pub fn pseudo_rows(input: &PseudoInput) -> Vec<GroupRow> {
+    use ProcessField as F;
+
+    let mut out = Vec::with_capacity(2);
+    let mut irq = pseudo_base(PseudoKind::Interrupts, "Interrupts");
+    match input.irq_pct {
+        Some(pct) => {
+            irq.cpu_pct = pct;
+            irq.validity.set(F::Cpu, Validity::Valid);
+        }
+        None => irq.note = Some(Arc::from(IRQ_NOT_ACCOUNTED)),
+    }
+    out.push(irq);
+
+    let mut set_up = input.zram.iter().filter(|z| z.disksize > 0).peekable();
+    if set_up.peek().is_some() {
+        let mut z = pseudo_base(PseudoKind::MemoryCompression, "Memory compression (zram)");
+        let (mut orig, mut compr) = (0u64, 0u64);
+        for d in set_up {
+            z.rss_anon_bytes = z.rss_anon_bytes.saturating_add(d.mem_used_total);
+            z.io_read_bps += d.read_bps;
+            z.io_write_bps += d.write_bps;
+            orig = orig.saturating_add(d.orig_bytes);
+            compr = compr.saturating_add(d.compr_bytes);
+        }
+        z.memory_bytes = z.rss_anon_bytes;
+        z.disk_bps = z.io_read_bps + z.io_write_bps;
+        for f in [F::RssAnon, F::IoRead, F::IoWrite] {
+            z.validity.set(f, Validity::Valid);
+        }
+        let mut note = String::from("Original ");
+        units::bytes(&mut note, orig);
+        note.push_str(" · Compressed ");
+        units::bytes(&mut note, compr);
+        if compr == 0 {
+            note.push_str(" · Ratio n/a");
+        } else {
+            // The casts lose precision only above 2^53 bytes, far below two decimals.
+            let _ = write!(note, " · Ratio {:.2}", orig as f64 / compr as f64);
+        }
+        z.note = Some(Arc::from(note));
+        out.push(z);
+    }
+    out
+}
+
+/// The pseudo rows that pass `hide_system` and `filter`. Pseudo rows sit in System, so
+/// `hide_system` hides both (PROC-046). The filter matches the row name, the user "root" and
+/// `extra`.
+fn shown_pseudo_rows(input: &TableInput<'_>, filter: &Filter, extra: &str) -> Vec<GroupRow> {
+    let Some(pseudo) = input.pseudo else {
+        return Vec::new();
+    };
+    if input.settings.hide_system {
+        return Vec::new();
+    }
+    let mut rows = pseudo_rows(pseudo);
+    rows.retain(|g| filter.is_empty() || filter.matches_text(&[&g.name, "root", extra]));
+    rows
+}
+
+/// The table row of pseudo row `g` (an index into the view's group rows).
+fn pseudo_table_row(groups: &[GroupRow], g: u32, depth: u8) -> TableRow {
+    TableRow {
+        node: groups[g as usize].node.clone(),
+        depth,
+        expanded: false,
+        has_children: false,
+        record: None,
+        group: Some(g),
+        descendants: 0,
+        subtree: None,
+    }
+}
+
 /// Marks a record that belongs to no app or unit row.
 const NO_OWNER: u32 = u32::MAX;
 
@@ -1298,9 +1463,10 @@ fn restrict_to_owners(f: &mut Forest, owner: &[u32]) {
 /// members. Under Background and System: the processes of the class at depth 1, except that the
 /// processes of a systemd unit with more than one process fold under a unit row at depth 1 and
 /// sit at depth 2. Kernel threads fold under one "Kernel threads" row at depth 1, first in
-/// System, with the threads as a flat sorted list at depth 2 (UI-PRC-002). A filter term also
-/// matches a group, app or unit name, which matches every member of it. Each process counts
-/// once.
+/// System, with the threads as a flat sorted list at depth 2 (UI-PRC-002). The pseudo rows are
+/// the last System rows at depth 1, Interrupts first, and the header count leaves them out
+/// (PROC-012). A filter term also matches a group, app or unit name, which matches every member
+/// of it. Each process counts once.
 pub fn build_grouped(
     input: &TableInput<'_>,
     query: &TableQuery,
@@ -1472,6 +1638,13 @@ fn grouped_rows(
         groups.push(g);
         (groups.len() - 1) as u32
     });
+    // Pseudo rows come last in `groups` and close the System header (PROC-012).
+    let pseudo_from = groups.len();
+    groups.extend(shown_pseudo_rows(
+        input,
+        filter,
+        GroupClass::System.name_lower(),
+    ));
 
     // Rows, header by header.
     let expanded: FxHashSet<NodeId> = query.expanded.iter().cloned().collect();
@@ -1496,13 +1669,19 @@ fn grouped_rows(
             continue;
         }
         let node = NodeId::Group(c.key());
+        // Pseudo rows are not processes: they are not in the count (PROC-012).
         let count = counts[c.index()];
+        let pseudo = if c == GroupClass::System {
+            pseudo_from..groups.len()
+        } else {
+            0..0
+        };
         let is_expanded = expanded.contains(&node);
         rows.push(TableRow {
             node,
             depth: 0,
             expanded: is_expanded,
-            has_children: count > 0,
+            has_children: count > 0 || !pseudo.is_empty(),
             record: None,
             group: None,
             descendants: count,
@@ -1551,31 +1730,51 @@ fn grouped_rows(
                 }
             }
         }
+        for g in pseudo {
+            // `groups` never holds more than u32::MAX rows.
+            rows.push(pseudo_table_row(&groups, g as u32, 1));
+        }
     }
     (rows, groups, shown)
 }
 
-/// Flat mode rows: every match at depth 0, sorted by `query.sort`.
-fn flat_rows(input: &TableInput<'_>, query: &TableQuery, filter: &Filter) -> (Vec<TableRow>, u32) {
+/// Flat mode rows: every match and the shown pseudo rows at depth 0, sorted by `query.sort`.
+/// The group rows are the pseudo rows.
+fn flat_rows(
+    input: &TableInput<'_>,
+    query: &TableQuery,
+    filter: &Filter,
+) -> (Vec<TableRow>, Vec<GroupRow>, u32) {
     let mut indexes = filtered(input, filter);
-    sort_indices(input, &mut indexes, query.sort);
+    let shown = indexes.len() as u32;
+    let pseudo = shown_pseudo_rows(input, filter, "");
+    if pseudo.is_empty() {
+        sort_indices(input, &mut indexes, query.sort);
+        let rows = indexes.iter().map(|&i| leaf_row(input, i, 0)).collect();
+        return (rows, pseudo, shown);
+    }
 
-    let rows: Vec<TableRow> = indexes.iter().map(|&i| leaf_row(input, i, 0)).collect();
-    let shown = rows.len() as u32;
-    (rows, shown)
+    let mut items: Vec<Item> = indexes.into_iter().map(Item::Record).collect();
+    items.extend((0..pseudo.len()).map(|g| Item::Group(g as u32)));
+    sort_items(input, &pseudo, &mut items, query.sort);
+    let rows = items
+        .into_iter()
+        .map(|it| match it {
+            Item::Record(i) => leaf_row(input, i, 0),
+            Item::Group(g) => pseudo_table_row(&pseudo, g, 0),
+        })
+        .collect();
+    (rows, pseudo, shown)
 }
 
 /// Builds the process table for `query` (ADR-009).
 pub fn build(input: &TableInput<'_>, query: &TableQuery) -> ProcessTableView {
     let filter = Filter::parse(&query.filter);
     let (rows, groups, subtree, shown) = match query.mode {
-        TableMode::Tree => {
-            let (rows, subtree, shown) = tree_rows(input, query, &filter);
-            (rows, Vec::new(), subtree, shown)
-        }
+        TableMode::Tree => tree_rows(input, query, &filter),
         TableMode::Flat => {
-            let (rows, shown) = flat_rows(input, query, &filter);
-            (rows, Vec::new(), Vec::new(), shown)
+            let (rows, groups, shown) = flat_rows(input, query, &filter);
+            (rows, groups, Vec::new(), shown)
         }
         TableMode::Grouped => {
             let (rows, groups, shown) = grouped_rows(input, query, &filter);
@@ -1939,6 +2138,7 @@ mod tests {
             devices: &devices,
             settings: &settings,
             unit_names: &unit_names,
+            pseudo: None,
         };
         let expanded: Vec<NodeId> = records
             .iter()
@@ -2182,6 +2382,7 @@ mod tests {
                 devices: &devices,
                 settings: &settings,
                 unit_names: &unit_names,
+                pseudo: None,
             };
             let query = TableQuery {
                 mode: self.mode,

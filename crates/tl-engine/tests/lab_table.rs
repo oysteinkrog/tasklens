@@ -1,6 +1,6 @@
 //! Table builder tests (E09-014, ADR-013): flat mode (E09-009), tree mode (E09-010), grouped
-//! mode (E09-011), hide system processes (E09-012), plus a 2,000-row timing smoke check and a
-//! determinism check.
+//! mode (E09-011), hide system processes (E09-012), pseudo rows (E09-023), plus a 2,000-row
+//! timing smoke check and a determinism check.
 //!
 //! The builder is pure (records in, rows out), so these tests need no runtime. Each test builds
 //! its records with `rec` and the `in_app`, `in_unit` and `kthread` helpers, then calls `build`.
@@ -11,10 +11,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustc_hash::FxHashMap;
-use tl_engine::reducer::table::{self, GROUP_ORDER, TableInput};
+use tl_engine::reducer::table::{self, GROUP_ORDER, IRQ_NOT_ACCOUNTED, PseudoInput, TableInput};
+use tl_engine::update::ZramStat;
 use tl_model::actions::{CgroupRef, SchedPolicy};
 use tl_model::devices::DeviceCatalog;
-use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey};
+use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras,
     ProcessMeta, ProcessRecord,
@@ -188,6 +189,26 @@ fn build_with(
     q: &TableQuery,
     settings: &EngineSettings,
 ) -> ProcessTableView {
+    build_full(records, app_stats, None, q, settings)
+}
+
+/// `build` with pseudo rows.
+fn build_pseudo(
+    records: &[ProcessRecord],
+    pseudo: &PseudoInput,
+    q: &TableQuery,
+    settings: &EngineSettings,
+) -> ProcessTableView {
+    build_full(records, &[], Some(pseudo), q, settings)
+}
+
+fn build_full(
+    records: &[ProcessRecord],
+    app_stats: &[AppCgroupSample],
+    pseudo: Option<&PseudoInput>,
+    q: &TableQuery,
+    settings: &EngineSettings,
+) -> ProcessTableView {
     assert!(
         records.is_sorted_by_key(|r| r.key),
         "records must be sorted by ProcessKey"
@@ -205,6 +226,7 @@ fn build_with(
         devices: &devices,
         settings,
         unit_names: &unit_names,
+        pseudo,
     };
     table::build(&input, q)
 }
@@ -1200,4 +1222,223 @@ fn subtree_sums_visible_only() {
     assert_eq!(a.cpu_pct, 5.0);
     assert_eq!(a.members, 2);
     assert!(subtree_of(&view, &records, 3).is_none());
+}
+
+// Pseudo rows (E09-023).
+
+/// A zram device with `disksize`, 3 GiB original, 1 GiB compressed, 1.25 GiB used, reading 100
+/// and writing 200 bytes per second.
+fn zram(name: &str, disksize: u64) -> ZramStat {
+    ZramStat {
+        name: name.into(),
+        disksize,
+        orig_bytes: 3 * GIB,
+        compr_bytes: GIB,
+        mem_used_total: GIB + GIB / 4,
+        read_bps: 100.0,
+        write_bps: 200.0,
+    }
+}
+
+fn pseudo(irq_pct: Option<f32>, zram: Vec<ZramStat>) -> PseudoInput {
+    PseudoInput { irq_pct, zram }
+}
+
+/// The group row of the pseudo row `kind` in `view`.
+fn pseudo_row(view: &ProcessTableView, kind: PseudoKind) -> Option<&GroupRow> {
+    view.rows
+        .iter()
+        .find(|row| row.node == NodeId::Pseudo(kind))
+        .map(|row| &view.groups[row.group.expect("a pseudo row indexes a group row") as usize])
+}
+
+fn has_pseudo(view: &ProcessTableView) -> bool {
+    view.rows
+        .iter()
+        .any(|row| matches!(row.node, NodeId::Pseudo(_)))
+}
+
+#[test]
+fn pseudo_rows_after_kernel_threads() {
+    let mut records = vec![in_unit(
+        rec(1, 0, "systemd", 0.0),
+        "system.slice",
+        "init.scope",
+    )];
+    records.extend((1000..1003).map(kthread));
+    records.push(in_unit(
+        rec(5000, 1, "sshd", 0.0),
+        "system.slice",
+        "sshd.service",
+    ));
+    let input = pseudo(Some(1.5), vec![zram("zram0", 8 * GIB)]);
+
+    let view = build_pseudo(
+        &records,
+        &input,
+        &query(TableMode::Grouped, "pid", true, "", &headers()),
+        &settings(),
+    );
+    assert_eq!(
+        names(&view, &records)[2..],
+        [
+            row("System processes", 0),
+            row("Kernel threads", 1),
+            row("systemd", 1),
+            row("sshd", 1),
+            row("Interrupts", 1),
+            row("Memory compression (zram)", 1),
+        ]
+    );
+    let n = view.rows.len();
+    assert_eq!(
+        view.rows[n - 2].node,
+        NodeId::Pseudo(PseudoKind::Interrupts)
+    );
+    assert_eq!(
+        view.rows[n - 1].node,
+        NodeId::Pseudo(PseudoKind::MemoryCompression)
+    );
+    assert!(view.rows[n - 2..].iter().all(|r| !r.has_children));
+    // The header count and the process counts leave the pseudo rows out.
+    assert_eq!(header_counts(&view), [0, 0, 5]);
+    assert_eq!((view.total, view.shown), (5, 5));
+
+    let irq = pseudo_row(&view, PseudoKind::Interrupts).expect("Interrupts row");
+    assert_eq!(irq.kind, GroupRowKind::Pseudo);
+    assert_eq!(irq.cpu_pct, 1.5);
+    assert_eq!(irq.validity.get(ProcessField::Cpu), Validity::Valid);
+    assert_eq!(
+        irq.validity.get(ProcessField::RssAnon),
+        Validity::Unsupported
+    );
+    assert_eq!(
+        irq.validity.get(ProcessField::IoRead),
+        Validity::Unsupported
+    );
+    assert_eq!((irq.members, irq.pids), (0, 0));
+    assert_eq!(irq.note, None);
+
+    let z = pseudo_row(&view, PseudoKind::MemoryCompression).expect("zram row");
+    assert_eq!(z.rss_anon_bytes, GIB + GIB / 4);
+    assert_eq!(z.memory_bytes, GIB + GIB / 4);
+    assert_eq!(
+        (z.io_read_bps, z.io_write_bps, z.disk_bps),
+        (100.0, 200.0, 300.0)
+    );
+    assert_eq!(z.validity.get(ProcessField::Cpu), Validity::Unsupported);
+    assert_eq!(z.validity.get(ProcessField::RssAnon), Validity::Valid);
+    assert_eq!(z.validity.get(ProcessField::IoWrite), Validity::Valid);
+    assert_eq!(z.validity.get(ProcessField::NetRx), Validity::Unsupported);
+    assert_eq!(
+        z.note.as_deref(),
+        Some("Original 3.00 GiB · Compressed 1.00 GiB · Ratio 3.00")
+    );
+}
+
+#[test]
+fn pseudo_zram_only_with_disksize() {
+    let records = vec![rec(1, 0, "a", 0.0)];
+    let q = query(TableMode::Flat, "pid", true, "", &[]);
+    for zram_devices in [vec![], vec![zram("zram0", 0), zram("zram1", 0)]] {
+        let view = build_pseudo(&records, &pseudo(Some(0.5), zram_devices), &q, &settings());
+        assert!(pseudo_row(&view, PseudoKind::Interrupts).is_some());
+        assert!(pseudo_row(&view, PseudoKind::MemoryCompression).is_none());
+        assert_eq!(view.groups.len(), 1);
+    }
+
+    // Only the set-up device counts toward the sums.
+    let view = build_pseudo(
+        &records,
+        &pseudo(Some(0.5), vec![zram("zram0", 0), zram("zram1", GIB)]),
+        &q,
+        &settings(),
+    );
+    let z = pseudo_row(&view, PseudoKind::MemoryCompression).expect("zram row");
+    assert_eq!(z.rss_anon_bytes, GIB + GIB / 4);
+    assert_eq!(z.io_read_bps, 100.0);
+}
+
+#[test]
+fn pseudo_interrupts_unsupported_without_irq_accounting() {
+    let records = vec![rec(1, 0, "a", 0.0)];
+    let view = build_pseudo(
+        &records,
+        &pseudo(None, vec![]),
+        &query(TableMode::Flat, "cpu", false, "", &[]),
+        &settings(),
+    );
+    let irq = pseudo_row(&view, PseudoKind::Interrupts).expect("Interrupts row");
+    assert_eq!(irq.validity.get(ProcessField::Cpu), Validity::Unsupported);
+    assert_eq!(irq.note.as_deref(), Some(IRQ_NOT_ACCOUNTED));
+    // An unsupported CPU sorts last, after a process at 0%.
+    assert_eq!(view.rows[1].node, NodeId::Pseudo(PseudoKind::Interrupts));
+}
+
+#[test]
+fn pseudo_rows_sort_in_flat() {
+    let records = vec![rec(1, 0, "one", 1.0), rec(2, 0, "two", 2.0)];
+    let input = pseudo(Some(1.5), vec![]);
+    for mode in [TableMode::Flat, TableMode::Tree] {
+        let view = build_pseudo(
+            &records,
+            &input,
+            &query(mode, "cpu", false, "", &[]),
+            &settings(),
+        );
+        assert_eq!(
+            names(&view, &records),
+            [row("two", 0), row("Interrupts", 0), row("one", 0)],
+            "{mode:?}"
+        );
+        assert_eq!(view.shown, 2);
+    }
+}
+
+#[test]
+fn pseudo_rows_hidden_by_hide_system() {
+    let records = desktop();
+    let input = pseudo(Some(1.5), vec![zram("zram0", GIB)]);
+    for mode in [TableMode::Grouped, TableMode::Tree, TableMode::Flat] {
+        let q = query(mode, "pid", true, "", &headers());
+        let view = build_pseudo(&records, &input, &q, &hide_system());
+        assert!(!has_pseudo(&view), "{mode:?}");
+        assert!(view.groups.iter().all(|g| g.kind != GroupRowKind::Pseudo));
+        let view = build_pseudo(&records, &input, &q, &settings());
+        assert!(has_pseudo(&view), "{mode:?}");
+    }
+}
+
+#[test]
+fn pseudo_zram_filter_by_name() {
+    let records = vec![rec(1, 0, "a", 0.0), kthread(1000)];
+    let input = pseudo(Some(1.5), vec![zram("zram0", GIB)]);
+    let view = build_pseudo(
+        &records,
+        &input,
+        &query(TableMode::Flat, "pid", true, "zram", &[]),
+        &settings(),
+    );
+    assert_eq!(
+        names(&view, &records),
+        [row("Memory compression (zram)", 0)]
+    );
+    assert_eq!(view.shown, 0);
+
+    // Grouped: the System header holds the row, with a count of 0 processes.
+    let view = build_pseudo(
+        &records,
+        &input,
+        &query(TableMode::Grouped, "pid", true, "zram", &headers()),
+        &settings(),
+    );
+    assert_eq!(
+        names(&view, &records)[2..],
+        [
+            row("System processes", 0),
+            row("Memory compression (zram)", 1),
+        ]
+    );
+    assert_eq!(header_counts(&view), [0, 0, 0]);
+    assert!(view.rows[2].has_children);
 }
