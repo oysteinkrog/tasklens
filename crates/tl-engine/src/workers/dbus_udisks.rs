@@ -855,7 +855,10 @@ mod tests {
             .get_mut(SDA_DRIVE)
             .and_then(|o| o.get_mut(DRIVE_IFACE))
             .expect("drive");
-        drive.insert("Model".into(), OwnedValue::from("WDC\nWD\u{202e}10"));
+        drive.insert(
+            "Model".into(),
+            OwnedValue::try_from(Value::from("WDC\nWD\u{202e}10")).expect("owned"),
+        );
         let got = drives_from_objects(&objs);
         assert_eq!(got[0].1.model, valid(Arc::from("WDC WD10")));
     }
