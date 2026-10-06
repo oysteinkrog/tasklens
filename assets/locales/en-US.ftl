@@ -469,3 +469,9 @@ shell-health-source-journal = Journal
 app-114-tasklens-stopped-after-an-unrecoverable = tasklens stopped after an unrecoverable error.
 app-114-tasklens-could-not-start-the = tasklens could not start the renderer
 app-114-tasklens-lost-the-graphics-device = tasklens lost the graphics device and must restart
+
+## Shell filter box (E20-009)
+
+shell-filter-label = Filter:
+shell-filter-clear = Clear filter
+shell-filter-name = Filter
