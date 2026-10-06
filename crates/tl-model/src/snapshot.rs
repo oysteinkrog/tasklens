@@ -917,7 +917,11 @@ pub struct DisplayMode {
 /// One graphics adapter, static rows (PERF-103).
 #[derive(Clone, Debug, Default)]
 pub struct GraphicsAdapter {
+    /// The worker sends `None`; the reducer sets it from `pci_slot` (R-166).
     pub device: Option<DeviceIdx>,
+    /// The PCI bus id, lowercase, for example "0000:01:00.0". The reducer matches it against the
+    /// catalog's GPU entries.
+    pub pci_slot: Option<Arc<str>>,
     pub name: InvField<Arc<str>>,
     pub driver_version: InvField<Arc<str>>,
     pub kernel_module: InvField<Arc<str>>,
