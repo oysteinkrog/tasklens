@@ -11,6 +11,7 @@
 pub mod apply;
 pub mod devices;
 pub mod health;
+mod power;
 pub mod process_series;
 pub mod processes;
 pub mod series;
