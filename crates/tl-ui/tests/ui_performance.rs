@@ -29,11 +29,21 @@ fn read(model: &KeyValueModel) -> (String, Option<String>, bool, bool) {
     )
 }
 
+/// Validity, fallback, reason, then the expected word, tooltip and link.
+type Case = (
+    Validity,
+    Fallback,
+    Option<&'static str>,
+    &'static str,
+    Option<&'static str>,
+    bool,
+);
+
 #[test]
 fn kv_grid_fallback_words_per_validity() {
     use Fallback::*;
     use Validity::*;
-    let cases: [(Validity, Fallback, Option<&str>, &str, Option<&str>, bool); 8] = [
+    let cases: [Case; 8] = [
         (WarmingUp, NotReported, None, "Collecting…", None, false),
         (
             Restricted,
