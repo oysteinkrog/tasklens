@@ -14,7 +14,13 @@
 //! enters the script only through `serde_json`. Commands have no result event (R-170); a failed
 //! one is logged at `warn` and dropped. KWin may still read a script file after `start()` returns,
 //! so the file is kept until the next command, the next `Update` or worker exit (`CmdFiles`).
+//!
+//! The window picker (E14-019) runs beside the loop: `queryWindowInfo` waits in a child task for
+//! the user's click, and the answer goes out as `WindowsSnapshot.pick` with the window list. On
+//! KWin 6.7.5 the reply carries `pid` (U-14); the `tasklens-pick` script is the fallback when it
+//! does not.
 
+use std::collections::HashMap;
 use std::fs::{DirBuilder, Permissions};
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -24,21 +30,24 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use asupersync::channel::{mpsc, watch};
-use asupersync::runtime::JoinError;
+use asupersync::runtime::{JoinError, TaskHandle};
 use asupersync::supervision::ManagedGeneration;
 use asupersync::time;
+use asupersync::types::Time;
 use asupersync::{Cx, Outcome};
 use futures_lite::stream::Boxed;
 use futures_lite::{Stream, StreamExt};
 use tl_collect::sanitize::sanitize_text;
 use tl_model::command::KWinCommand;
 use tl_model::health::{SourceId, SourceState};
-use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
+use tl_model::snapshot::{
+    ComponentHeader, FrameGeometry, PickOutcome, PickResult, WindowEntry, WindowsSnapshot,
+};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 
 use crate::config::{EngineConfig, EngineMode};
-use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect};
+use crate::dbus::{Bus, DbusConn, DbusError, READ_TIMEOUT, connect, error_name};
 use crate::source::{CommandProgress, WorkerCommand, WorkerControl, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{EngineMsg, SourceUpdate, WorkerError};
@@ -64,6 +73,20 @@ const SCRIPT_FILE: &str = "kwin-bridge.js";
 /// The one-shot command script (E14-017). The placeholder becomes the args object as JSON.
 const CMD_TEMPLATE: &str = include_str!("../../../../assets/kwin/cmd-template.js");
 const CMD_PLACEHOLDER: &str = "__TL_ARGS__";
+/// The window picker lookup script (E14-017), loaded only when `queryWindowInfo` has no `pid`.
+const PICK_SCRIPT: &str = include_str!("../../../../assets/kwin/pick.js");
+/// The pick script's plugin name (table (c)).
+const PICK_PLUGIN: &str = "tasklens-pick";
+/// `queryWindowInfo` lives here.
+const KWIN_PATH: &str = "/KWin";
+const KWIN_INTERFACE: &str = "org.kde.KWin";
+/// The deadline for `queryWindowInfo`: the user picks interactively.
+const PICK_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long the pick script has to call `Picked`.
+const PICK_SCRIPT_WAIT: Duration = Duration::from_secs(2);
+/// KWin `WindowType` values of shell windows (KWin 6.7.5 `effect/globals.h`): desktop 1, dock 2,
+/// notification 13, on-screen display 16, critical notification 17.
+const SHELL_TYPES: [i32; 5] = [1, 2, 13, 16, 17];
 /// Every tasklens window carries this app ID as its `resourceClass` (R-086, APP-009).
 const APP_ID: &str = "io.github.oysteinkrog.Tasklens";
 /// The main window's title (R-176).
@@ -215,6 +238,13 @@ enum Event {
     Owner(Option<String>),
     /// The control watch changed: there may be new commands.
     Control,
+    /// The answer to the `queryWindowInfo` of pick `seq`.
+    PickReply {
+        seq: u64,
+        reply: Result<PickInfo, QueryError>,
+    },
+    /// An accepted `Picked` call: the window's pid, `None` for `"0"` or text that is not a `u32`.
+    Picked { uuid: String, pid: Option<u32> },
 }
 
 /// Serves the bridge until `cx` is cancelled (`Ok`) or the bus fails (`Err`).
@@ -253,6 +283,7 @@ async fn serve(
 
     let owner = Arc::new(Mutex::new(Some(owner)));
     let (tx, rx) = async_channel::bounded(UPDATE_QUEUE);
+    let mut picker = Picker::new(commands.mode, &unique, tx.clone());
     let bridge = WindowBridge {
         owner: Arc::clone(&owner),
         tx,
@@ -279,14 +310,23 @@ async fn serve(
     // The list commands are checked against. `None` until the first `Update`, so commands queued
     // across a restart wait for it.
     let mut current: Option<Arc<[WindowEntry]>> = None;
+    // The last published list, so a pick result can go out with it.
+    let mut shown: Option<(Arc<[WindowEntry]>, Validity)> = None;
     loop {
-        match conn.next_signal(cx, &mut events, READ_TIMEOUT).await {
+        let wait = picker
+            .wait(cx.now())
+            .map_or(READ_TIMEOUT, |d| d.min(READ_TIMEOUT));
+        // True when `picker.last` changed and must be published.
+        let mut picked = false;
+        match conn.next_signal(cx, &mut events, wait).await {
             Ok(None | Some(Event::Control)) => {}
             Ok(Some(Event::Windows(windows))) => {
                 // The first `Update` read after a command: KWin has run its script.
                 files.clear(cx).await;
-                let snap = snapshot(windows, Validity::Valid);
+                let mut snap = snapshot(windows, Validity::Valid);
+                snap.pick = picker.last;
                 current = Some(Arc::clone(&snap.windows));
+                shown = Some((Arc::clone(&snap.windows), Validity::Valid));
                 let update = SourceUpdate::Windows(Box::new(snap));
                 if send(cx, io, update).await.is_some() {
                     return closed(cx);
@@ -301,20 +341,40 @@ async fn serve(
                     load_script(cx, conn, path).await?;
                 } else {
                     current = Some(Arc::from([]));
-                    let gone = SourceUpdate::Windows(Box::new(snapshot(
-                        Vec::new(),
-                        Validity::Unsupported,
-                    )));
+                    shown = Some((Arc::from([]), Validity::Unsupported));
+                    let gone = windows_update(Arc::from([]), Validity::Unsupported, picker.last);
                     if send(cx, io, gone).await.is_some() {
                         return closed(cx);
                     }
                 }
             }
+            Ok(Some(event @ (Event::PickReply { .. } | Event::Picked { .. }))) => {
+                picked = picker.handle(cx, &host, dir, files, event).await;
+            }
             Err(DbusError::Closed) if cx.is_cancel_requested() => return Ok(()),
             Err(e) => return Err(e.into()),
         }
+        picked |= picker.expire(cx.now());
         if let Some(windows) = &current {
-            run_commands(cx, io, &host, dir, commands, queue, windows, files).await;
+            picked |= run_commands(
+                cx,
+                io,
+                &host,
+                dir,
+                commands,
+                queue,
+                windows,
+                files,
+                &mut picker,
+            )
+            .await;
+        }
+        // Without a published list the result waits for the next `Update`.
+        if picked && let Some((windows, validity)) = &shown {
+            let update = windows_update(Arc::clone(windows), *validity, picker.last);
+            if send(cx, io, update).await.is_some() {
+                return closed(cx);
+            }
         }
     }
 }
@@ -620,7 +680,7 @@ fn resolve(
                 CmdOp::Geometry(g),
             )
         }
-        // The window picker (E14-019).
+        // `run_commands` hands these to the `Picker`.
         KWinCommand::Pick { .. } | KWinCommand::CancelPick { .. } => {
             return Err("pick is not a window command");
         }
@@ -726,6 +786,21 @@ trait ScriptHost {
     async fn run(&self, cx: &Cx, path: &Path, plugin: &str) -> Result<(), WorkerError>;
 }
 
+/// The KWin calls of the window picker. The worker uses KWin; tests use a fake.
+trait PickHost: ScriptHost {
+    /// Starts `queryWindowInfo` in a child task. The answer arrives on `tx` as
+    /// `Event::PickReply { seq, .. }`.
+    fn query(
+        &self,
+        cx: &Cx,
+        seq: u64,
+        tx: async_channel::Sender<Event>,
+    ) -> Result<TaskHandle<()>, WorkerError>;
+
+    /// `unloadScript(plugin)`: clears a pick script that never ran to its end.
+    async fn unload(&self, cx: &Cx, plugin: &str) -> Result<(), WorkerError>;
+}
+
 /// `loadScript` and `start` on KWin's `/Scripting`, 2 s each.
 struct KWinScripting<'a>(&'a DbusConn);
 
@@ -745,6 +820,296 @@ impl ScriptHost for KWinScripting<'_> {
         conn.read(cx, scripting.call::<_, _, ()>("start", &()))
             .await?;
         Ok(())
+    }
+}
+
+impl PickHost for KWinScripting<'_> {
+    fn query(
+        &self,
+        cx: &Cx,
+        seq: u64,
+        tx: async_channel::Sender<Event>,
+    ) -> Result<TaskHandle<()>, WorkerError> {
+        // The task owns a clone of the connection and builds its proxy inside, so neither
+        // outlives the generation: the `Picker` aborts the task when it is dropped.
+        let raw = self.0.raw().clone();
+        cx.spawn(move |cx| async move {
+            let call = async {
+                let kwin = zbus::Proxy::new(&raw, KWIN_NAME, KWIN_PATH, KWIN_INTERFACE).await?;
+                kwin.call::<_, _, HashMap<String, zbus::zvariant::OwnedValue>>(
+                    "queryWindowInfo",
+                    &(),
+                )
+                .await
+            };
+            let result = time::timeout(cx.now(), PICK_TIMEOUT, call).await;
+            if cx.checkpoint().is_err() {
+                return;
+            }
+            let reply = match result {
+                Ok(Ok(map)) => Ok(pick_info(&map)),
+                Ok(Err(e)) => Err(QueryError::Failed(error_name(&e).unwrap_or("zbus").into())),
+                Err(_) => Err(QueryError::Timeout),
+            };
+            let _ = tx.send(Event::PickReply { seq, reply }).await;
+        })
+        .map_err(|e| WorkerError::Other(format!("spawn: {e}").into()))
+    }
+
+    async fn unload(&self, cx: &Cx, plugin: &str) -> Result<(), WorkerError> {
+        let conn = self.0;
+        let scripting = scripting(cx, conn).await?;
+        let _was_loaded: bool = conn
+            .read(cx, scripting.call("unloadScript", &(plugin,)))
+            .await?;
+        Ok(())
+    }
+}
+
+/// What `queryWindowInfo` said about the picked window. A missing or mistyped key is `None`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct PickInfo {
+    uuid: Option<String>,
+    /// `None` also for a pid of 0 or less.
+    pid: Option<u32>,
+    window_type: Option<i32>,
+}
+
+/// Why `queryWindowInfo` gave no map.
+#[derive(Clone, Debug, PartialEq)]
+enum QueryError {
+    /// No answer within `PICK_TIMEOUT`.
+    Timeout,
+    /// A D-Bus error, such as `org.kde.KWin.Error.UserCancel` when the user pressed Esc. Holds
+    /// the error name only.
+    Failed(Arc<str>),
+}
+
+/// Reads `uuid`, `pid` (D-Bus `i`) and `type` (D-Bus `i`) from the `queryWindowInfo` map.
+fn pick_info(map: &HashMap<String, zbus::zvariant::OwnedValue>) -> PickInfo {
+    let int = |key: &str| map.get(key).and_then(|v| i32::try_from(&**v).ok());
+    PickInfo {
+        uuid: map.get("uuid").and_then(|v| String::try_from(&**v).ok()),
+        pid: int("pid")
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|&pid| pid > 0),
+        window_type: int("type"),
+    }
+}
+
+/// The pick script with the bus name and the args object `{ plugin, uuid }` put in as JSON.
+fn pick_script(unique_name: &str, uuid: &str) -> String {
+    let name = serde_json::to_string(unique_name).expect("a str always serializes");
+    let args = serde_json::json!({ "plugin": PICK_PLUGIN, "uuid": uuid }).to_string();
+    PICK_SCRIPT
+        .replace(PLACEHOLDER, &name)
+        .replace(CMD_PLACEHOLDER, &args)
+}
+
+/// The one running window pick and the last result (R-149 items 3 and 4).
+struct Picker {
+    /// False in the low-memory engine, which runs keep above only (R-152).
+    enabled: bool,
+    /// This connection's unique name, for the pick script.
+    unique: String,
+    tx: async_channel::Sender<Event>,
+    pending: Option<Pending>,
+    /// Sent with every window-list publish after it is set.
+    last: Option<PickResult>,
+}
+
+struct Pending {
+    seq: u64,
+    stage: Stage,
+    /// The `queryWindowInfo` task.
+    query: TaskHandle<()>,
+}
+
+enum Stage {
+    /// Waiting for the user's click.
+    Query,
+    /// The pick script runs; `Picked` must come for `uuid` before `deadline`.
+    Script { uuid: String, deadline: Time },
+}
+
+impl Picker {
+    fn new(mode: EngineMode, unique: &str, tx: async_channel::Sender<Event>) -> Self {
+        Picker {
+            enabled: mode == EngineMode::Full,
+            unique: unique.to_owned(),
+            tx,
+            pending: None,
+            last: None,
+        }
+    }
+
+    /// `Pick { seq }`. Ignored while a pick runs. Returns true when there is a new result.
+    fn start(&mut self, cx: &Cx, host: &impl PickHost, seq: u64) -> bool {
+        if !self.enabled || self.pending.is_some() {
+            tracing::debug!(target: "tasklens::engine", seq, "window pick ignored");
+            return false;
+        }
+        match host.query(cx, seq, self.tx.clone()) {
+            Ok(query) => {
+                self.pending = Some(Pending {
+                    seq,
+                    stage: Stage::Query,
+                    query,
+                });
+                false
+            }
+            Err(e) => {
+                tracing::warn!(target: "tasklens::engine", error = %e, "window pick did not start");
+                self.last = Some(PickResult {
+                    seq,
+                    outcome: PickOutcome::Cancelled,
+                });
+                true
+            }
+        }
+    }
+
+    /// `CancelPick { seq }`: ends the running pick when `seq` is its seq.
+    fn cancel(&mut self, seq: u64) -> bool {
+        if self.pending.as_ref().is_some_and(|p| p.seq == seq) {
+            self.finish(PickOutcome::Cancelled)
+        } else {
+            false
+        }
+    }
+
+    /// A `PickReply` or `Picked` event. Returns true when there is a new result.
+    async fn handle(
+        &mut self,
+        cx: &Cx,
+        host: &impl PickHost,
+        dir: &Path,
+        files: &mut CmdFiles,
+        event: Event,
+    ) -> bool {
+        match event {
+            Event::PickReply { seq, reply } => self.reply(cx, host, dir, files, seq, reply).await,
+            Event::Picked { uuid, pid } => self.picked(&uuid, pid),
+            _ => false,
+        }
+    }
+
+    async fn reply(
+        &mut self,
+        cx: &Cx,
+        host: &impl PickHost,
+        dir: &Path,
+        files: &mut CmdFiles,
+        seq: u64,
+        reply: Result<PickInfo, QueryError>,
+    ) -> bool {
+        // A reply for a cancelled or finished pick is ignored.
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.seq == seq && matches!(p.stage, Stage::Query))
+        {
+            return false;
+        }
+        let info = match reply {
+            Ok(info) => info,
+            Err(QueryError::Timeout) => return self.finish(PickOutcome::NoWindow),
+            Err(QueryError::Failed(name)) => {
+                if &*name == "org.kde.KWin.Error.UserCancel" {
+                    tracing::debug!(target: "tasklens::engine", "window pick cancelled by the user");
+                } else {
+                    tracing::warn!(target: "tasklens::engine", error = %name, "window pick failed");
+                }
+                return self.finish(PickOutcome::Cancelled);
+            }
+        };
+        if info.window_type.is_some_and(|t| SHELL_TYPES.contains(&t)) {
+            return self.finish(PickOutcome::NoWindow);
+        }
+        if let Some(pid) = info.pid {
+            return self.finish(PickOutcome::Picked { pid });
+        }
+        // KWin always sends a braced lowercase UUID; anything else never enters a script.
+        let Some(uuid) = info.uuid.filter(|uuid| braced_uuid(uuid)) else {
+            return self.finish(PickOutcome::NoWindow);
+        };
+        files.clear(cx).await;
+        let path = dir.join(format!("{PICK_PLUGIN}.js"));
+        // A copy left by an earlier pick that never called back blocks `loadScript`.
+        if let Err(e) = host.unload(cx, PICK_PLUGIN).await {
+            tracing::debug!(target: "tasklens::engine", error = %e, "pick script unload failed");
+        }
+        let result = match write_script(cx, &path, pick_script(&self.unique, &uuid)).await {
+            Ok(()) => host.run(cx, &path, PICK_PLUGIN).await,
+            Err(e) => Err(e),
+        };
+        files.last = Some(path);
+        if let Err(e) = result {
+            tracing::warn!(target: "tasklens::engine", error = %e, "pick script failed");
+            return self.finish(PickOutcome::Cancelled);
+        }
+        if let Some(pending) = &mut self.pending {
+            pending.stage = Stage::Script {
+                uuid,
+                deadline: cx.now() + PICK_SCRIPT_WAIT,
+            };
+        }
+        false
+    }
+
+    /// An accepted `Picked` call. A uuid that is not the pending pick's is ignored.
+    fn picked(&mut self, uuid: &str, pid: Option<u32>) -> bool {
+        let waiting = matches!(
+            &self.pending,
+            Some(Pending { stage: Stage::Script { uuid: want, .. }, .. }) if want == uuid
+        );
+        if !waiting {
+            return false;
+        }
+        self.finish(pid.map_or(PickOutcome::NoWindow, |pid| PickOutcome::Picked { pid }))
+    }
+
+    /// Ends a pick script wait that passed its deadline with `NoWindow`.
+    fn expire(&mut self, now: Time) -> bool {
+        match &self.pending {
+            Some(Pending {
+                stage: Stage::Script { deadline, .. },
+                ..
+            }) if *deadline <= now => self.finish(PickOutcome::NoWindow),
+            _ => false,
+        }
+    }
+
+    /// The time left until the pick script deadline, if one runs.
+    fn wait(&self, now: Time) -> Option<Duration> {
+        match &self.pending {
+            Some(Pending {
+                stage: Stage::Script { deadline, .. },
+                ..
+            }) => Some(Duration::from_nanos(deadline.duration_since(now))),
+            _ => None,
+        }
+    }
+
+    fn finish(&mut self, outcome: PickOutcome) -> bool {
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        pending.query.abort();
+        self.last = Some(PickResult {
+            seq: pending.seq,
+            outcome,
+        });
+        true
+    }
+}
+
+impl Drop for Picker {
+    /// The query task holds a connection clone; it must not outlive the generation.
+    fn drop(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            pending.query.abort();
+        }
     }
 }
 
@@ -774,29 +1139,39 @@ impl Drop for CmdFiles {
     }
 }
 
-/// Runs the newly queued commands one at a time, in arrival order.
+/// Runs the newly queued commands one at a time, in arrival order. `Pick` and `CancelPick` go to
+/// `picker`. Returns true when the pick result changed.
 #[allow(clippy::too_many_arguments)]
 async fn run_commands(
     cx: &Cx,
     io: &WorkerIo,
-    host: &impl ScriptHost,
+    host: &impl PickHost,
     dir: &Path,
     commands: &Commands,
     queue: &mut Queue,
     windows: &[WindowEntry],
     files: &mut CmdFiles,
-) {
+    picker: &mut Picker,
+) -> bool {
+    let mut picked = false;
     let new = queue.take(&io.control.borrow_and_clone());
     for (seq, cmd) in new {
         if cx.checkpoint().is_err() {
-            return;
+            break;
         }
         queue.progress.set_started(SourceId::KWin, seq);
-        if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
-            run_script(cx, host, dir, &plugin, script, files).await;
+        match cmd {
+            KWinCommand::Pick { seq: pick } => picked |= picker.start(cx, host, pick),
+            KWinCommand::CancelPick { seq: pick } => picked |= picker.cancel(pick),
+            cmd => {
+                if let Some((plugin, script)) = commands.prepare(&cmd, windows) {
+                    run_script(cx, host, dir, &plugin, script, files).await;
+                }
+            }
         }
         queue.progress.set_done(SourceId::KWin, seq);
     }
+    picked
 }
 
 /// Deletes the previous command's file, writes `<dir>/<plugin>.js` (mode 0600) and runs it. The
@@ -857,6 +1232,32 @@ impl WindowBridge {
             }
         }
     }
+
+    /// The pick script's answer (R-149 item 3, R-241): the pid as decimal text.
+    async fn picked(
+        &self,
+        #[zbus(header)] header: zbus::message::Header<'_>,
+        uuid: String,
+        pid: String,
+    ) -> zbus::fdo::Result<()> {
+        let sender = header.sender().map(|name| name.as_str().to_owned());
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match check_picked(sender.as_deref(), owner.as_deref(), uuid, &pid) {
+            Ok(event) => self
+                .tx
+                .send(event)
+                .await
+                .map_err(|_| zbus::fdo::Error::Failed("worker stopped".into())),
+            Err(reject) => {
+                tracing::debug!(target: "tasklens::engine", reason = reject.as_str(), "kwin pick answer rejected");
+                Err(reject.into())
+            }
+        }
+    }
 }
 
 /// Why an `Update` was refused.
@@ -906,6 +1307,22 @@ fn check_update(
     }
     let values: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|_| Reject::Json)?;
     Ok(values.into_iter().filter_map(window_entry).collect())
+}
+
+/// The `Picked` checks: only the owner of `org.kde.KWin` may call (R-167 item 5). The pid text
+/// is parsed as `u32`; `"0"` or text that does not parse gives `None` (R-241).
+fn check_picked(
+    sender: Option<&str>,
+    owner: Option<&str>,
+    uuid: String,
+    pid: &str,
+) -> Result<Event, Reject> {
+    match (sender, owner) {
+        (Some(sender), Some(owner)) if sender == owner => {}
+        _ => return Err(Reject::Sender),
+    }
+    let pid = pid.parse::<u32>().ok().filter(|&pid| pid != 0);
+    Ok(Event::Picked { uuid, pid })
 }
 
 /// One window as the bridge script sends it.
@@ -988,6 +1405,15 @@ fn clean(raw: &str) -> Arc<str> {
 /// the order KWin sent them in (topmost first).
 fn snapshot(mut windows: Vec<WindowEntry>, validity: Validity) -> WindowsSnapshot {
     windows.sort_by_key(|w| w.pid);
+    with_pick(windows.into(), validity, None)
+}
+
+/// A snapshot of an already sorted list with the pick result.
+fn with_pick(
+    windows: Arc<[WindowEntry]>,
+    validity: Validity,
+    pick: Option<PickResult>,
+) -> WindowsSnapshot {
     let t_ns = now_boot_ns();
     WindowsSnapshot {
         header: ComponentHeader {
@@ -996,9 +1422,18 @@ fn snapshot(mut windows: Vec<WindowEntry>, validity: Validity) -> WindowsSnapsho
             observed_end: t_ns,
             validity,
         },
-        windows: windows.into(),
-        pick: None,
+        windows,
+        pick,
     }
+}
+
+/// `SourceUpdate::Windows` for an already sorted list.
+fn windows_update(
+    windows: Arc<[WindowEntry]>,
+    validity: Validity,
+    pick: Option<PickResult>,
+) -> SourceUpdate {
+    SourceUpdate::Windows(Box::new(with_pick(windows, validity, pick)))
 }
 
 fn health(state: SourceState, last_error: Option<Arc<str>>) -> SourceUpdate {
@@ -1031,7 +1466,7 @@ mod tests {
     use tl_model::demand::Demand;
     use tl_model::settings::EngineSettings;
 
-    use crate::source::WorkerControl;
+    use crate::source::{QueuedCommand, WorkerControl};
 
     const KWIN: &str = ":1.7";
     const ID_A: &str = "{0a1b2c3d-0000-4000-8000-00000000000a}";
@@ -1472,10 +1907,56 @@ mod tests {
         assert_eq!(low.prepare(&pinned, &two), None);
     }
 
-    /// Records each script as KWin would read it, and fails when told to.
+    /// Records each script as KWin would read it, and fails when told to. As the pick call layer
+    /// it answers `queryWindowInfo` with `reply` from a child task, or never when that is `None`.
     struct FakeHost {
         seen: Mutex<Vec<(String, String, u32)>>,
         fail: bool,
+        reply: Option<Result<PickInfo, QueryError>>,
+        queries: Mutex<Vec<u64>>,
+        unloads: Mutex<Vec<String>>,
+    }
+
+    impl FakeHost {
+        fn new(fail: bool) -> Self {
+            FakeHost {
+                seen: Mutex::new(Vec::new()),
+                fail,
+                reply: None,
+                queries: Mutex::new(Vec::new()),
+                unloads: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn answering(reply: Result<PickInfo, QueryError>) -> Self {
+            FakeHost {
+                reply: Some(reply),
+                ..FakeHost::new(false)
+            }
+        }
+    }
+
+    impl PickHost for FakeHost {
+        fn query(
+            &self,
+            cx: &Cx,
+            seq: u64,
+            tx: async_channel::Sender<Event>,
+        ) -> Result<TaskHandle<()>, WorkerError> {
+            self.queries.lock().expect("lock").push(seq);
+            let reply = self.reply.clone();
+            cx.spawn(move |_cx| async move {
+                if let Some(reply) = reply {
+                    let _ = tx.send(Event::PickReply { seq, reply }).await;
+                }
+            })
+            .map_err(|e| WorkerError::Other(format!("spawn: {e}").into()))
+        }
+
+        async fn unload(&self, _cx: &Cx, plugin: &str) -> Result<(), WorkerError> {
+            self.unloads.lock().expect("lock").push(plugin.to_owned());
+            Ok(())
+        }
     }
 
     impl ScriptHost for FakeHost {
@@ -1533,14 +2014,8 @@ mod tests {
         let dir = scratch("cmd-file").join("tasklens");
         let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
         let cmds = commands(EngineMode::Full);
-        let host = Arc::new(FakeHost {
-            seen: Mutex::new(Vec::new()),
-            fail: false,
-        });
-        let failing = Arc::new(FakeHost {
-            seen: Mutex::new(Vec::new()),
-            fail: true,
-        });
+        let host = Arc::new(FakeHost::new(false));
+        let failing = Arc::new(FakeHost::new(true));
         // The directory listing after each step.
         let steps = Arc::new(Mutex::new(Vec::new()));
 
@@ -1627,5 +2102,397 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(dir.parent().expect("scratch"));
+    }
+
+    const UNIQUE: &str = ":1.4242";
+
+    /// A `queryWindowInfo` map as KWin 6.7.5 sends it, with only the keys the picker reads.
+    fn reply_map(
+        pid: Option<i32>,
+        window_type: i32,
+    ) -> HashMap<String, zbus::zvariant::OwnedValue> {
+        let owned = |v: zbus::zvariant::Value<'_>| {
+            zbus::zvariant::OwnedValue::try_from(v).expect("owned value")
+        };
+        let mut map = HashMap::new();
+        map.insert("uuid".to_owned(), owned(ID_A.into()));
+        map.insert("type".to_owned(), owned(window_type.into()));
+        map.insert("caption".to_owned(), owned("Konsole".into()));
+        if let Some(pid) = pid {
+            map.insert("pid".to_owned(), owned(pid.into()));
+        }
+        map
+    }
+
+    /// One picker test: the picker, its event channel, a fake KWin and the command plumbing.
+    struct PickRig {
+        picker: Picker,
+        rx: async_channel::Receiver<Event>,
+        host: FakeHost,
+        dir: PathBuf,
+        files: CmdFiles,
+        control: watch::Sender<WorkerControl>,
+        io: WorkerIo,
+        queue: Queue,
+        next_seq: u64,
+    }
+
+    impl PickRig {
+        fn new(name: &str, host: FakeHost) -> Self {
+            let (tx, rx) = async_channel::bounded(UPDATE_QUEUE);
+            let (updates, _rx) = mpsc::channel::<EngineMsg>(16);
+            let (_demand_tx, demand) = watch::channel(Demand::default());
+            let (_settings_tx, settings) = watch::channel(EngineSettings::default());
+            let (control, control_rx) = watch::channel(WorkerControl::default());
+            let progress = Arc::clone(&control_rx.borrow_and_clone().progress);
+            let io = WorkerIo::new(
+                updates,
+                demand,
+                settings,
+                control_rx,
+                crate::dbus::SharedHandles::default(),
+            );
+            PickRig {
+                picker: Picker::new(EngineMode::Full, UNIQUE, tx),
+                rx,
+                host,
+                dir: scratch(name).join("tasklens"),
+                files: CmdFiles::default(),
+                control,
+                io,
+                queue: Queue {
+                    last_seq: 0,
+                    progress,
+                },
+                next_seq: 0,
+            }
+        }
+
+        /// Queues `cmds` as the reducer does and runs them. Returns true when the result changed.
+        async fn command(&mut self, cx: &Cx, cmds: &[KWinCommand]) -> bool {
+            let mut all: Vec<QueuedCommand> = self.io.control.borrow_and_clone().commands.to_vec();
+            for cmd in cmds {
+                self.next_seq += 1;
+                all.push(QueuedCommand {
+                    seq: self.next_seq,
+                    target: SourceId::KWin,
+                    command: WorkerCommand::KWin(cmd.clone()),
+                });
+            }
+            let value = WorkerControl {
+                commands: all.into(),
+                ..self.io.control.borrow_and_clone()
+            };
+            let _ = self.control.send(value);
+            let windows = [entry(ID_A, 42, "a", "org.kde.konsole")];
+            run_commands(
+                cx,
+                &self.io,
+                &self.host,
+                &self.dir,
+                &commands(EngineMode::Full),
+                &mut self.queue,
+                &windows,
+                &mut self.files,
+                &mut self.picker,
+            )
+            .await
+        }
+
+        /// Reads the next event the fake KWin or the bridge sent and hands it to the picker.
+        async fn next(&mut self, cx: &Cx) -> bool {
+            let event = self.rx.recv().await.expect("an event");
+            self.feed(cx, event).await
+        }
+
+        async fn feed(&mut self, cx: &Cx, event: Event) -> bool {
+            self.picker
+                .handle(cx, &self.host, &self.dir, &mut self.files, event)
+                .await
+        }
+
+        fn last(&self) -> Option<PickResult> {
+            self.picker.last
+        }
+    }
+
+    fn result(seq: u64, outcome: PickOutcome) -> Option<PickResult> {
+        Some(PickResult { seq, outcome })
+    }
+
+    /// Runs `body` with a fresh rig in the lab and removes the rig's directory afterwards.
+    fn pick_test<F, Fut>(name: &str, host: FakeHost, body: F)
+    where
+        F: FnOnce(Cx, PickRig) -> Fut + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        let rig = PickRig::new(name, host);
+        let scratch_dir = rig.dir.parent().expect("scratch").to_owned();
+        let done = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&done);
+        in_lab(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            body(cx, rig).await;
+            *flag.lock().expect("lock") = true;
+        });
+        assert!(*done.lock().expect("lock"), "the test body did not finish");
+        let _ = std::fs::remove_dir_all(scratch_dir);
+    }
+
+    #[test]
+    fn pick_uses_reply_pid() {
+        assert_eq!(
+            pick_info(&reply_map(Some(1234), 0)),
+            PickInfo {
+                uuid: Some(ID_A.into()),
+                pid: Some(1234),
+                window_type: Some(0),
+            }
+        );
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(Some(1234), 0))));
+        pick_test("pick-pid", host, |cx, mut rig| async move {
+            assert!(!rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await);
+            assert_eq!(*rig.host.queries.lock().expect("lock"), [5]);
+            assert!(rig.next(&cx).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::Picked { pid: 1234 }));
+            // No script was loaded.
+            assert!(rig.host.seen.lock().expect("lock").is_empty());
+            assert!(rig.host.unloads.lock().expect("lock").is_empty());
+            assert!(rig.files.last.is_none());
+        });
+    }
+
+    #[test]
+    fn pick_script_fallback() {
+        // A pid of 0 counts as missing, like no pid at all.
+        assert_eq!(pick_info(&reply_map(Some(0), 0)).pid, None);
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(None, 0))));
+        pick_test("pick-script", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            assert!(!rig.next(&cx).await, "waits for the script");
+            assert_eq!(rig.last(), None);
+            assert_eq!(*rig.host.unloads.lock().expect("lock"), [PICK_PLUGIN]);
+            {
+                let seen = rig.host.seen.lock().expect("lock");
+                assert_eq!(seen.len(), 1);
+                let (plugin, text, mode) = &seen[0];
+                assert_eq!(plugin, PICK_PLUGIN);
+                assert_eq!(*mode, 0o600);
+                assert!(!text.contains("__TL_"), "placeholder left");
+                assert!(text.contains("const BUS_NAME = \":1.4242\";"), "{text}");
+                let start = text.find("const args = ").expect("args line") + "const args = ".len();
+                let end = start + text[start..].find(";\n").expect("args line ends");
+                let args: serde_json::Value =
+                    serde_json::from_str(&text[start..end]).expect("args are JSON");
+                assert_eq!(args, json!({ "plugin": PICK_PLUGIN, "uuid": ID_A }));
+            }
+            assert_eq!(
+                rig.files.last.as_deref(),
+                Some(rig.dir.join("tasklens-pick.js").as_path())
+            );
+            // The script's call for another window is ignored.
+            let other = check_picked(Some(KWIN), Some(KWIN), ID_B.into(), "99").expect("owner");
+            assert!(!rig.feed(&cx, other).await);
+            let call = check_picked(Some(KWIN), Some(KWIN), ID_A.into(), "1234").expect("owner");
+            assert!(rig.feed(&cx, call).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::Picked { pid: 1234 }));
+            // The script file is kept until the next command, `Update` or exit.
+            assert!(rig.dir.join("tasklens-pick.js").exists());
+        });
+    }
+
+    #[test]
+    fn pick_timeout_no_window() {
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(None, 0))));
+        pick_test("pick-timeout", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            assert!(!rig.next(&cx).await);
+            let now = cx.now();
+            assert_eq!(rig.picker.wait(now), Some(PICK_SCRIPT_WAIT));
+            assert!(!rig.picker.expire(now + Duration::from_millis(1999)));
+            assert!(rig.picker.expire(now + PICK_SCRIPT_WAIT));
+            assert_eq!(rig.last(), result(5, PickOutcome::NoWindow));
+            assert_eq!(rig.picker.wait(now), None);
+            // A callback after the deadline changes nothing.
+            let late = check_picked(Some(KWIN), Some(KWIN), ID_A.into(), "1234").expect("owner");
+            assert!(!rig.feed(&cx, late).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::NoWindow));
+        });
+        // No answer from `queryWindowInfo` within 120 s.
+        pick_test(
+            "pick-timeout-query",
+            FakeHost::answering(Err(QueryError::Timeout)),
+            |cx, mut rig| async move {
+                rig.command(&cx, &[KWinCommand::Pick { seq: 6 }]).await;
+                assert!(rig.next(&cx).await);
+                assert_eq!(rig.last(), result(6, PickOutcome::NoWindow));
+            },
+        );
+    }
+
+    #[test]
+    fn pick_ignores_shell_windows() {
+        for (window_type, outcome) in [
+            (1, PickOutcome::NoWindow),
+            (2, PickOutcome::NoWindow),
+            (13, PickOutcome::NoWindow),
+            (16, PickOutcome::NoWindow),
+            (17, PickOutcome::NoWindow),
+            (0, PickOutcome::Picked { pid: 1234 }),
+            (5, PickOutcome::Picked { pid: 1234 }),
+        ] {
+            let host = FakeHost::answering(Ok(pick_info(&reply_map(Some(1234), window_type))));
+            pick_test("pick-shell", host, move |cx, mut rig| async move {
+                rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+                assert!(rig.next(&cx).await);
+                assert_eq!(rig.last(), result(5, outcome), "type {window_type}");
+            });
+        }
+    }
+
+    #[test]
+    fn pick_esc_cancelled() {
+        for name in [
+            "org.kde.KWin.Error.UserCancel",
+            "org.freedesktop.DBus.Error.NoReply",
+        ] {
+            let host = FakeHost::answering(Err(QueryError::Failed(name.into())));
+            pick_test("pick-esc", host, |cx, mut rig| async move {
+                rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+                assert!(rig.next(&cx).await);
+                assert_eq!(rig.last(), result(5, PickOutcome::Cancelled));
+            });
+        }
+    }
+
+    #[test]
+    fn pick_cancel_command() {
+        // The fake never answers by itself; the late reply is fed by hand.
+        pick_test(
+            "pick-cancel",
+            FakeHost::new(false),
+            |cx, mut rig| async move {
+                rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+                assert!(
+                    rig.command(&cx, &[KWinCommand::CancelPick { seq: 5 }])
+                        .await
+                );
+                assert_eq!(rig.last(), result(5, PickOutcome::Cancelled));
+                let late = Event::PickReply {
+                    seq: 5,
+                    reply: Ok(pick_info(&reply_map(Some(1234), 0))),
+                };
+                assert!(!rig.feed(&cx, late).await);
+                assert_eq!(rig.last(), result(5, PickOutcome::Cancelled));
+                // A new pick can start after the cancel.
+                rig.command(&cx, &[KWinCommand::Pick { seq: 6 }]).await;
+                assert_eq!(*rig.host.queries.lock().expect("lock"), [5, 6]);
+            },
+        );
+    }
+
+    #[test]
+    fn pick_cancel_wrong_seq_ignored() {
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(Some(1234), 0))));
+        pick_test("pick-cancel-seq", host, |cx, mut rig| async move {
+            let cmds = [
+                KWinCommand::Pick { seq: 5 },
+                KWinCommand::CancelPick { seq: 4 },
+                // A second pick while one runs is ignored too.
+                KWinCommand::Pick { seq: 6 },
+            ];
+            assert!(!rig.command(&cx, &cmds).await);
+            assert_eq!(*rig.host.queries.lock().expect("lock"), [5]);
+            assert!(rig.next(&cx).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::Picked { pid: 1234 }));
+        });
+    }
+
+    #[test]
+    fn pick_result_in_windows_snapshot() {
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(Some(1234), 0))));
+        pick_test("pick-snapshot", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            assert!(rig.next(&cx).await);
+            let list = snapshot(
+                vec![entry(ID_A, 42, "a", "org.kde.konsole")],
+                Validity::Valid,
+            );
+            let want = result(5, PickOutcome::Picked { pid: 1234 });
+            match windows_update(Arc::clone(&list.windows), Validity::Valid, rig.last()) {
+                SourceUpdate::Windows(snap) => {
+                    assert_eq!(snap.pick, want);
+                    assert_eq!(snap.windows.len(), 1);
+                    assert_eq!(snap.header.validity, Validity::Valid);
+                }
+                other => panic!("unexpected update {other:?}"),
+            }
+            // A later list publish keeps the result.
+            assert!(!rig.command(&cx, &[activate(ID_A)]).await);
+            let later = with_pick(Arc::from([]), Validity::Unsupported, rig.last());
+            assert_eq!(later.pick, want);
+        });
+    }
+
+    #[test]
+    fn pick_callback_bad_pid_text_no_window() {
+        for text in ["abc", "0", "-1", "", "4294967296"] {
+            match check_picked(Some(KWIN), Some(KWIN), ID_A.into(), text) {
+                Ok(Event::Picked { uuid, pid }) => {
+                    assert_eq!(uuid, ID_A);
+                    assert_eq!(pid, None, "{text:?}");
+                }
+                _ => panic!("owner call refused"),
+            }
+        }
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(None, 0))));
+        pick_test("pick-bad-pid", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            rig.next(&cx).await;
+            let call = check_picked(Some(KWIN), Some(KWIN), ID_A.into(), "abc").expect("owner");
+            assert!(rig.feed(&cx, call).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::NoWindow));
+        });
+    }
+
+    #[test]
+    fn pick_callback_wrong_sender_rejected() {
+        assert!(matches!(
+            check_picked(Some(":1.99"), Some(KWIN), ID_A.into(), "1234"),
+            Err(Reject::Sender)
+        ));
+        assert!(matches!(
+            check_picked(None, Some(KWIN), ID_A.into(), "1234"),
+            Err(Reject::Sender)
+        ));
+        assert!(matches!(
+            check_picked(Some(KWIN), None, ID_A.into(), "1234"),
+            Err(Reject::Sender)
+        ));
+        let host = FakeHost::answering(Ok(pick_info(&reply_map(None, 0))));
+        pick_test("pick-sender", host, |cx, mut rig| async move {
+            rig.command(&cx, &[KWinCommand::Pick { seq: 5 }]).await;
+            rig.next(&cx).await;
+            // The rejected call never reaches the picker, so the pick keeps waiting.
+            assert!(check_picked(Some(":1.99"), Some(KWIN), ID_A.into(), "1234").is_err());
+            assert_eq!(rig.last(), None);
+            assert_eq!(rig.picker.wait(cx.now()), Some(PICK_SCRIPT_WAIT));
+            let call = check_picked(Some(KWIN), Some(KWIN), ID_A.into(), "1234").expect("owner");
+            assert!(rig.feed(&cx, call).await);
+            assert_eq!(rig.last(), result(5, PickOutcome::Picked { pid: 1234 }));
+        });
+    }
+
+    #[test]
+    fn pick_ignored_in_low_memory() {
+        let (tx, _rx) = async_channel::bounded(UPDATE_QUEUE);
+        let mut picker = Picker::new(EngineMode::LowMemory, UNIQUE, tx);
+        let host = FakeHost::new(false);
+        in_lab(async move {
+            let cx = Cx::current().expect("task has a Cx");
+            assert!(!picker.start(&cx, &host, 5));
+            assert!(picker.pending.is_none());
+            assert!(host.queries.lock().expect("lock").is_empty());
+        });
     }
 }
