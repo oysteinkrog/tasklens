@@ -439,8 +439,30 @@ shell-health-state-stale = Stale
 shell-health-state-failed = Failed
 shell-health-state-disabled = Disabled
 shell-health-state-unsupported = Unsupported
-# Follows a short age: "3s ago".
-shell-health-ago = ago
+# $age is a short age such as "3s" or "12m 5s".
+shell-health-ago = { $age } ago
+# Source names, in SourceId order.
+shell-health-source-cpu = CPU
+shell-health-source-memory = Memory
+shell-health-source-disk = Disks
+shell-health-source-net = Network
+shell-health-source-gpu-nvidia = GPU (NVIDIA)
+shell-health-source-gpu-drm = GPU (DRM)
+shell-health-source-sensors = Sensors
+shell-health-source-processes = Processes
+shell-health-source-process-detail = Process details
+shell-health-source-connections = Connections
+shell-health-source-systemd-system = Services (system)
+shell-health-source-systemd-user = Services (user)
+shell-health-source-logind = Sessions
+shell-health-source-startup = Startup
+shell-health-source-inventory = Inventory
+shell-health-source-kwin = KWin
+shell-health-source-udisks = Storage devices
+shell-health-source-upower = Power
+shell-health-source-network-manager = NetworkManager
+shell-health-source-history = History
+shell-health-source-journal = Journal
 
 ## tl-app (E33)
 
