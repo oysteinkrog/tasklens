@@ -384,3 +384,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - 8fx.2: history queries never reached the worker (run_history does not read WorkerControl). Leader chose Reducer.history_cmd: Option<HistorySink> on the same slot as record_sink.
 - rsf.7: cell painters with no per-cell div (custom CellText element); numbers right-aligned, clipped not ellipsized. API notes passed to rsf.6 and rsf.8. Dim text on selected rows uses text_selected_secondary (leader accepts).
 - lgw.9: follow-system theme on SnapshotChanged scheme changes (2 light, else dark). No start-up sync when the portal stays at 0. tests/ui_performance.rs untracked WIP from crw.7.
+- yrf.6: Y scale rules; private axis formatters in scale.rs drop a trailing .0 ("5 Mbps"). StickyTemp keeps its range with no samples; floor only moves down. compute does not allocate.
