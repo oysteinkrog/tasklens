@@ -158,6 +158,7 @@ pub struct TlButton {
     size: TlButtonSize,
     label: Option<SharedString>,
     icon: Option<TlIcon>,
+    trailing_icon: Option<TlIcon>,
     icon_size: Option<Pixels>,
     icon_muted: bool,
     action: Option<Rc<dyn Action>>,
@@ -167,6 +168,7 @@ pub struct TlButton {
     loading: bool,
     pressed: bool,
     tab_stop: bool,
+    focus: Option<FocusHandle>,
 }
 
 impl TlButton {
@@ -177,6 +179,7 @@ impl TlButton {
             size: TlButtonSize::Md,
             label: None,
             icon: None,
+            trailing_icon: None,
             icon_size: None,
             icon_muted: false,
             action: None,
@@ -186,6 +189,7 @@ impl TlButton {
             loading: false,
             pressed: false,
             tab_stop: true,
+            focus: None,
         }
     }
 
@@ -198,6 +202,12 @@ impl TlButton {
     /// An `i_md` icon, left of the label when there is one.
     pub fn icon(mut self, icon: TlIcon) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// An `i_md` icon right of the label, such as the caret of a dropdown trigger.
+    pub fn trailing_icon(mut self, icon: TlIcon) -> Self {
+        self.trailing_icon = Some(icon);
         self
     }
 
@@ -272,6 +282,13 @@ impl TlButton {
         }
     }
 
+    /// A focus handle the owner keeps, for example to list the button in a focus order. Without
+    /// one the button keeps its own handle in element state.
+    pub fn focus_handle(mut self, focus: FocusHandle) -> Self {
+        self.focus = Some(focus);
+        self
+    }
+
     /// Whether Tab stops on the button. Default `true`.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
@@ -294,10 +311,13 @@ impl RenderOnce for TlButton {
         let icon_fg = self.icon_color(&theme);
         let icon_only = self.kind.icon_only() || self.label.is_none();
 
-        let focus: FocusHandle = window
-            .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone();
+        let focus: FocusHandle = match self.focus.clone() {
+            Some(focus) => focus,
+            None => window
+                .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
+                .read(cx)
+                .clone(),
+        };
         let show_ring = !self.disabled && TlFocusRing::show(focus.is_focused(window), window);
 
         let pad = match self.kind {
@@ -332,6 +352,15 @@ impl RenderOnce for TlButton {
             let mut text_el = div().debug_selector(|| "TlButton-label".into());
             *text_el.text_style() = text;
             content = content.child(text_el.whitespace_nowrap().child(label));
+        }
+        if let Some(name) = self.trailing_icon {
+            let id = self.id.clone();
+            content = content.child(
+                div()
+                    .debug_selector(move || format!("TlButton-{id}-trailing-icon"))
+                    .flex_none()
+                    .child(icon(name, self.icon_size.unwrap_or(m.icon.md), icon_fg)),
+            );
         }
 
         let accessible = if icon_only {
@@ -740,6 +769,36 @@ mod tests {
             let h = f32::from(bounds(cx, selector).size.height);
             assert!((h - rem_height).abs() <= 0.5, "{selector}: {h}");
         }
+    }
+
+    #[gpui_kit::test]
+    fn owner_focus_handle_and_trailing_icon(cx: &mut TestAppContext) {
+        let handle = cx.update(|cx| cx.focus_handle());
+        let (_, cx, hits) = host(cx, None, {
+            let handle = handle.clone();
+            move || {
+                TlButton::new("mode", TlButtonKind::Secondary)
+                    .label("Per core")
+                    .trailing_icon(TlIcon::ChevronDown)
+                    .focus_handle(handle.clone())
+                    .action(Box::new(Go))
+                    .into_any_element()
+            }
+        });
+        focus_next(cx);
+        assert!(
+            cx.update(|window, _| handle.is_focused(window)),
+            "Tab focuses the owner's handle"
+        );
+        press(cx, "enter");
+        assert_eq!(hits.get(), 1);
+
+        let label = bounds(cx, "TlButton-label");
+        let caret = bounds(cx, "TlButton-mode-trailing-icon");
+        assert!(
+            caret.left() >= label.right(),
+            "the icon is right of the label"
+        );
     }
 
     #[gpui_kit::test]
