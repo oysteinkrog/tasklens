@@ -1,9 +1,10 @@
 //! The helper session task (E29-A2, ADR-006, R-246, R-247).
 //!
 //! `helper_task` owns at most one running helper. It starts one on `Start` or on the first
-//! privileged call (one polkit prompt), ends it on `End` or at shutdown, notices the helper's
-//! 300 s idle exit, and publishes the shield state as `SourceUpdate::Helper`. Every privileged
-//! engine path calls the helper through `HelperHandle`.
+//! privileged call (one polkit prompt), never on a background `Read`. It ends it on `End` or at
+//! shutdown, notices the helper's 300 s idle exit, and publishes the shield state as
+//! `SourceUpdate::Helper`. Every privileged engine path calls the helper through
+//! `HelperHandle`.
 //!
 //! The module is `pub` and `#[doc(hidden)]` only so `tests/lab_helper.rs` can drive it with a
 //! fake link. Nothing outside tl-engine uses it.
@@ -64,6 +65,24 @@ pub enum HelperMsg {
         replies: async_channel::Sender<HelperReply>,
         done: oneshot::Sender<Result<(), HelperCallError>>,
     },
+    /// One background read. It never starts a session: the task refuses it with `NotRunning`
+    /// unless the helper is `Unlocked` when the task takes it (qfx.36).
+    Read {
+        req: HelperRequest,
+        deadline: Duration,
+        replies: async_channel::Sender<HelperReply>,
+        done: oneshot::Sender<Result<(), HelperReadError>>,
+    },
+}
+
+/// Why a background read (`HelperHandle::read`) did not return replies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HelperReadError {
+    /// The helper was not `Unlocked` when the task took the read. Nothing was started and no
+    /// polkit prompt was shown.
+    NotRunning,
+    /// The read reached the running helper and failed.
+    Call(HelperCallError),
 }
 
 /// The sending side of the helper queue.
@@ -127,6 +146,36 @@ impl HelperHandle {
             Ok(Err(e)) => Err(e),
             Err(oneshot::RecvError::Cancelled) => Err(HelperCallError::Cancelled),
             Err(_) => Err(HelperCallError::Exited),
+        }
+    }
+
+    /// `call` for background readers: never starts a session, so it never shows a polkit
+    /// prompt. The task checks the state when it takes the read, so a helper that exits after
+    /// the caller's own state check gives `NotRunning`, not a start. Only a user action may
+    /// prompt, so every worker read uses this.
+    pub async fn read(
+        &self,
+        cx: &Cx,
+        req: HelperRequest,
+        deadline: Duration,
+    ) -> Result<Vec<HelperReply>, HelperReadError> {
+        let (replies, rx) = async_channel::unbounded();
+        let (done, mut done_rx) = oneshot::channel();
+        let msg = HelperMsg::Read {
+            req,
+            deadline,
+            replies,
+            done,
+        };
+        self.send(cx, msg).await.map_err(HelperReadError::Call)?;
+        // The task sends every reply before `done`.
+        match done_rx.recv(cx).await {
+            Ok(Ok(())) => Ok(std::iter::from_fn(|| rx.try_recv().ok()).collect()),
+            Ok(Err(e)) => Err(e),
+            Err(oneshot::RecvError::Cancelled) => {
+                Err(HelperReadError::Call(HelperCallError::Cancelled))
+            }
+            Err(_) => Err(HelperReadError::Call(HelperCallError::Exited)),
         }
     }
 
@@ -281,6 +330,15 @@ pub async fn helper_task_with(
                 let result = task.call(&cx, req, fd, deadline, replies).await;
                 let _ = done.send(&cx, result);
             }
+            HelperMsg::Read {
+                req,
+                deadline,
+                replies,
+                done,
+            } => {
+                let result = task.read(&cx, req, deadline, replies).await;
+                let _ = done.send(&cx, result);
+            }
         }
         if cx.checkpoint().is_err() {
             break;
@@ -421,6 +479,36 @@ impl Task {
                 return Err(err);
             }
         }
+        self.call_live(cx, req, fd, deadline, replies).await
+    }
+
+    /// `HelperMsg::Read`: the state check and the refusal happen here, in the task, so no
+    /// state change can come between them. A helper that exited unnoticed fails the call with
+    /// `Exited` and locks the shield; it is not started again.
+    async fn read(
+        &mut self,
+        cx: &Cx,
+        req: HelperRequest,
+        deadline: Duration,
+        replies: async_channel::Sender<HelperReply>,
+    ) -> Result<(), HelperReadError> {
+        if self.state != HelperState::Unlocked || self.live.0.is_none() {
+            return Err(HelperReadError::NotRunning);
+        }
+        self.call_live(cx, req, None, deadline, replies)
+            .await
+            .map_err(HelperReadError::Call)
+    }
+
+    /// Runs one request on the live session. Never starts one.
+    async fn call_live(
+        &mut self,
+        cx: &Cx,
+        req: HelperRequest,
+        fd: Option<OwnedFd>,
+        deadline: Duration,
+        replies: async_channel::Sender<HelperReply>,
+    ) -> Result<(), HelperCallError> {
         let Some(mut session) = self.live.0.take() else {
             return Err(HelperCallError::Exited);
         };

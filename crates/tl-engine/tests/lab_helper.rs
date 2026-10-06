@@ -32,8 +32,8 @@ use tl_engine::bridge::EngineHooks;
 use tl_engine::config::{EngineConfig, EngineMode};
 use tl_engine::dbus::ManagerConnSlot;
 use tl_engine::helper::{
-    HelperCallError, HelperHandle, HelperLink, HelperMsg, LinkEnv, LinkError, StartError,
-    helper_queue, helper_task_with,
+    HelperCallError, HelperHandle, HelperLink, HelperMsg, HelperReadError, LinkEnv, LinkError,
+    StartError, helper_queue, helper_task_with,
 };
 use tl_engine::session::engine_root;
 use tl_engine::update::{CpuCoreSample, CpuSample, EngineMsg, HelperUpdate, SourceUpdate};
@@ -489,6 +489,146 @@ fn calls_are_serial() {
             "reply 2 last"
         ]
     );
+}
+
+// Background reads (qfx.36) ---------------------------------------------------------------------
+
+/// Security regression (qfx.36): the helper exits after the reader saw `Unlocked` and before
+/// its read reaches the task. The read gets `NotRunning`; no spawn and no prompt follow.
+#[test]
+fn read_after_exit_never_starts() {
+    let (fake, env) = Fake::new(true);
+    let state = Arc::clone(&fake.state);
+    let spawns = Arc::clone(&fake.spawns);
+    let seen = run(lab(20), env, |cx, handle, _helper| async move {
+        handle.send(&cx, HelperMsg::Start).await.expect("queued");
+        wait_for(&cx, &handle, HelperState::Unlocked).await;
+        // The sweep's state check passes.
+        assert_eq!(handle.state(), HelperState::Unlocked);
+        // The helper's own idle exit; the task notices it within 1 s.
+        lock(&state).exit = Some(0);
+        time::sleep(cx.now(), Duration::from_millis(1_500)).await;
+        // The read sent after the passed check.
+        let got = handle.read(&cx, signal_req(), Duration::from_secs(2)).await;
+        assert_eq!(got, Err(HelperReadError::NotRunning));
+        assert_eq!(handle.state(), HelperState::Locked);
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "only the user's start");
+    });
+    assert_eq!(
+        states(&seen),
+        [
+            HelperState::Locked,
+            HelperState::Starting,
+            HelperState::Unlocked,
+            HelperState::Locked,
+        ]
+    );
+    assert!(seen.iter().all(|(_, u)| u.start.is_none()));
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    assert!(
+        lock(&fake.state).requests.is_empty(),
+        "nothing reached the helper"
+    );
+}
+
+/// Security regression (qfx.36): an `End` queued after the reader's state check and before its
+/// read. The task takes the `End` first, so the read finds no session and is refused.
+#[test]
+fn read_after_end_never_starts() {
+    let (fake, env) = Fake::new(true);
+    let spawns = Arc::clone(&fake.spawns);
+    let seen = run(lab(21), env, |cx, handle, _helper| async move {
+        handle.send(&cx, HelperMsg::Start).await.expect("queued");
+        wait_for(&cx, &handle, HelperState::Unlocked).await;
+        assert_eq!(handle.state(), HelperState::Unlocked);
+        handle.send(&cx, HelperMsg::End).await.expect("queued");
+        let got = handle.read(&cx, signal_req(), Duration::from_secs(2)).await;
+        assert_eq!(got, Err(HelperReadError::NotRunning));
+        assert_eq!(spawns.load(Ordering::SeqCst), 1, "only the user's start");
+    });
+    assert_eq!(
+        states(&seen),
+        [
+            HelperState::Locked,
+            HelperState::Starting,
+            HelperState::Unlocked,
+            HelperState::Locked,
+        ]
+    );
+    assert!(
+        lock(&fake.state).requests.is_empty(),
+        "nothing reached the helper"
+    );
+}
+
+/// A read while `Locked` or `Missing` is refused at once and never spawns.
+#[test]
+fn read_without_session_never_spawns() {
+    for installed in [true, false] {
+        let (fake, env) = Fake::new(installed);
+        let seen = run(lab(22), env, |cx, handle, _helper| async move {
+            let got = handle.read(&cx, signal_req(), Duration::from_secs(2)).await;
+            assert_eq!(got, Err(HelperReadError::NotRunning));
+        });
+        let want = if installed {
+            HelperState::Locked
+        } else {
+            HelperState::Missing
+        };
+        assert_eq!(states(&seen), [want]);
+        assert_eq!(fake.spawns.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// The helper exits before the task notices: the read fails with `Exited`, the shield locks,
+/// and the next read is refused. Neither starts a session.
+#[test]
+fn read_after_unnoticed_exit_fails_without_start() {
+    let (fake, env) = Fake::new(true);
+    let state = Arc::clone(&fake.state);
+    let seen = run(lab(23), env, |cx, handle, _helper| async move {
+        handle.send(&cx, HelperMsg::Start).await.expect("queued");
+        wait_for(&cx, &handle, HelperState::Unlocked).await;
+        lock(&state).exit = Some(0);
+        let got = handle.read(&cx, signal_req(), Duration::from_secs(2)).await;
+        assert_eq!(got, Err(HelperReadError::Call(HelperCallError::Exited)));
+        assert_eq!(handle.state(), HelperState::Locked);
+        let again = handle.read(&cx, signal_req(), Duration::from_secs(2)).await;
+        assert_eq!(again, Err(HelperReadError::NotRunning));
+    });
+    assert_eq!(
+        states(&seen),
+        [
+            HelperState::Locked,
+            HelperState::Starting,
+            HelperState::Unlocked,
+            HelperState::Locked,
+        ]
+    );
+    assert_eq!(
+        fake.spawns.load(Ordering::SeqCst),
+        1,
+        "only the user's start"
+    );
+}
+
+#[test]
+fn read_on_unlocked_session_returns_replies() {
+    let (fake, env) = Fake::new(true);
+    lock(&fake.state).answers = [Answer::Replies(2)].into();
+    run(lab(24), env, |cx, handle, _helper| async move {
+        handle.send(&cx, HelperMsg::Start).await.expect("queued");
+        wait_for(&cx, &handle, HelperState::Unlocked).await;
+        let got = handle
+            .read(&cx, signal_req(), Duration::from_secs(2))
+            .await
+            .expect("read");
+        assert_eq!(got.len(), 2);
+        assert!(got[1].last);
+        assert_eq!(handle.state(), HelperState::Unlocked);
+    });
+    assert_eq!(fake.spawns.load(Ordering::SeqCst), 1);
+    assert_eq!(lock(&fake.state).requests, [(signal_req(), false)]);
 }
 
 /// Mirrors `#[explore_seeds(seeds = 0..16, workers = 2, chaos)]`, which asupersync 0.5.0 does

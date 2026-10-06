@@ -45,7 +45,7 @@ use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::{ProcessField, Validity};
 
 use crate::config::{EngineConfig, EngineMode};
-use crate::helper::{HelperCallError, HelperHandle};
+use crate::helper::{HelperCallError, HelperHandle, HelperReadError};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{ProcessSweep, SourceUpdate, WorkerError};
@@ -632,17 +632,15 @@ impl HelperReads {
             }
             last = Some(cx.now());
             for (key, files) in batch {
-                // `call` would start a session when Locked: reads run only after the user
-                // unlocked.
-                if self.handle.state() != HelperState::Unlocked {
-                    break;
-                }
                 let req = HelperRequest::ReadProcessFiles { key, files };
-                match self.handle.call(cx, req, None, HELPER_DEADLINE).await {
+                // `read` never starts a session: reads run only after the user unlocked, and
+                // a helper that exits meanwhile gives `NotRunning`, never a polkit prompt.
+                match self.handle.read(cx, req, HELPER_DEADLINE).await {
                     Ok(replies) => self.store(key, files, &replies),
-                    Err(HelperCallError::Cancelled) => return,
+                    Err(HelperReadError::NotRunning) => break,
+                    Err(HelperReadError::Call(HelperCallError::Cancelled)) => return,
                     // The cell stays Restricted.
-                    Err(_) => {}
+                    Err(HelperReadError::Call(_)) => {}
                 }
             }
         }
