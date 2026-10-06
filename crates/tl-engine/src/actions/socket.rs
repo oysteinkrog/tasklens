@@ -167,7 +167,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     use asupersync::channel::mpsc;
-    use asupersync::types::Budget;
+    use asupersync::types::{Budget, RegionId};
     use asupersync::{LabConfig, LabRuntime};
     use tl_model::time::BootId;
 
@@ -240,6 +240,7 @@ mod tests {
 
     struct Rig {
         lab: LabRuntime,
+        root: RegionId,
         actx: Arc<ActionCtx>,
         msgs: mpsc::Receiver<EngineMsg>,
         out: Arc<Mutex<Vec<ActionState>>>,
@@ -265,8 +266,11 @@ mod tests {
                 helper,
                 destroy_support_sent: AtomicBool::new(false),
             });
+            let mut lab = LabRuntime::new(LabConfig::new(7).max_steps(1_000_000));
+            let root = lab.state.create_root_region(Budget::INFINITE);
             Self {
-                lab: LabRuntime::new(LabConfig::new(7).max_steps(1_000_000)),
+                lab,
+                root,
                 actx,
                 msgs,
                 out: Arc::new(Mutex::new(Vec::new())),
@@ -277,11 +281,10 @@ mod tests {
         fn start(&mut self, kind: ActionKind, proto: Proto) {
             let actx = Arc::clone(&self.actx);
             let out = Arc::clone(&self.out);
-            let root = self.lab.state.create_root_region(Budget::INFINITE);
             let (task, _handle) = self
                 .lab
                 .state
-                .create_task(root, Budget::INFINITE, async move {
+                .create_task(self.root, Budget::INFINITE, async move {
                     let cx = Cx::current().expect("task has a Cx");
                     let state =
                         run_target(&cx, &actx, &kind, COOKIE, Family::Inet, proto, tuple()).await;
