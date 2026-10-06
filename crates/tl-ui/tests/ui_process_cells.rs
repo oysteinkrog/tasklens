@@ -1329,8 +1329,8 @@ mod name_cell {
         NameCellData, NameIcon, NameWords, StateGlyph, icon_slot, name_cell, name_flags,
         render_group_header, render_name_cell, row_icon,
     };
-    use tl_ui::table::cells::{CellCtx, IconSourceCache};
-    use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind};
+    use tl_ui::table::cells::{CellCtx, IconSourceCache, name_look};
+    use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind, STALE_OPACITY};
     use tl_ui::theme::{current, metrics};
 
     fn data(kind: RowKind, depth: u8, expandable: Option<bool>) -> NameCellData {
@@ -1512,6 +1512,49 @@ mod name_cell {
         };
         assert!(name_flags(&gone).has(RowFlags::EXITED));
         assert!(!name_flags(&data(RowKind::Process, 0, None)).has(RowFlags::EXITED));
+    }
+
+    #[gpui_kit::test]
+    fn exited_icon_60_and_secondary_text(cx: &mut TestAppContext) {
+        let (theme, m) = cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            (current(cx).clone(), *metrics(cx))
+        });
+        let gone = name_flags(&NameCellData {
+            exited: true,
+            ..data(RowKind::Process, 0, None)
+        });
+        let live = name_flags(&data(RowKind::Process, 0, None));
+        for selected in [false, true] {
+            let ctx = CellCtx {
+                m: &m,
+                theme: &theme,
+                selected,
+                width: px(400.),
+            };
+            assert_eq!(name_look(gone, &ctx), (ctx.secondary(), STALE_OPACITY));
+            assert_eq!(name_look(live, &ctx), (ctx.primary(), 1.0));
+        }
+        // The exited cell still renders through the same painter.
+        let vcx = open(
+            cx,
+            Cell::Name(|| NameCellData {
+                exited: true,
+                ..data(RowKind::Process, 1, Some(true))
+            }),
+        );
+        let x = bounds(vcx, "TlNameCell-primary").left() - bounds(vcx, "TlNameCell").left();
+        assert_eq!(
+            x,
+            px(20. + 20. + 6. + 16. + 6. + 16. + 6.),
+            "chevron unchanged"
+        );
     }
 
     #[gpui_kit::test]
