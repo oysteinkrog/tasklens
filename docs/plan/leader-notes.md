@@ -526,3 +526,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - m1f.11 follow-up (c35351b, 862e636): set_pinned now shares its code path with toggle_pin.
 - ug9.34 follow-up (081a45b): no_match text cached in FilterWords.
 - yms.35 (e5e9ec9, e3275b6): strings scanner with a 1 MiB step, a 4096-byte value cap, MAX_STRINGS and MAX_TEXT_BYTES. pread from rustix::io. Detectors overlap on mixed text (accepted). Asked to confirm the random-bytes test.
+- crw.31 (04b15eb): JSON mirror enums. The action fields keep the model types, and JSON goes through deserialize_with and schemars(with) (accepted).
+- rsf.24 (d20a80c): TlCheckbox::tab_stop; the picker takes Option<AnyWindowHandle> through TlWindowSpec::parent (accepted).
+- yms.35 follow-up (660714f): random bytes give about 60k hits per MiB, mostly UTF-16LE. Leader rule: a UTF-16LE run keeps one high byte, and the threshold is under 20k per MiB.
