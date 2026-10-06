@@ -10,6 +10,7 @@ use std::hash::{BuildHasher, Hash};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{
@@ -17,10 +18,11 @@ use gpui_kit::base::{
 };
 
 use gpui_kit::{
-    AnyElement, AnyView, App, Context, Div, ElementId, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, TextRun,
-    UniformListScrollHandle, Window, div, font, px, uniform_list,
+    AnyElement, AnyView, App, Bounds, Context, Div, ElementId, FocusHandle, Hsla,
+    InteractiveElement, IntoElement, ListHorizontalSizingBehavior, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, ScrollWheelEvent,
+    SharedString, Size, StatefulInteractiveElement as _, Styled, TextRun, UniformListScrollHandle,
+    Window, div, font, point, px, uniform_list,
 };
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
@@ -67,6 +69,10 @@ pub const HEADER_H_TWO: f32 = 44.0;
 pub const HEADER_H_ONE: f32 = 28.0;
 /// Scrollbar width (open item 14).
 pub const SCROLLBAR_W: f32 = 16.0;
+/// Most row ids one visible-range demand report carries (ADR-008 `detail_keys`).
+pub const DEMAND_MAX_IDS: usize = 512;
+/// No scroll anchoring for this long after the last wheel event (UI-PRC-010).
+pub const WHEEL_QUIET: Duration = Duration::from_millis(200);
 
 /// What one table owner supplies. Row indices are positions in the current flattened row list
 /// and are only valid for the current `table_version`; anything kept across frames uses `RowId`.
@@ -177,8 +183,23 @@ pub struct TlTreeTable<D: TreeTableDelegate> {
     #[allow(dead_code)]
     header_state: HeaderState,
     hover_row: Option<usize>,
-    /// Set by the page during Ctrl-pause (UI-PRC-017); E18-008 stops anchoring while true.
+    /// Set by the page during Ctrl-pause (UI-PRC-017). No anchoring while true.
     pub paused: bool,
+    /// The body rows the last frame built, by flattened index.
+    visible_range: Range<usize>,
+    /// The top-most visible selectable row of the last frame: its identity, its rows from the
+    /// top visible row and the top row's hidden part. A new version keeps it at the same y.
+    anchor: Option<(D::RowId, usize, Pixels)>,
+    /// Executor time of the last wheel event over the body.
+    last_wheel: Option<Instant>,
+    /// True while the scrollbar thumb is dragged. Shared with the scrollbar's handle.
+    thumb_dragging: Rc<Cell<bool>>,
+    /// Order-free hash of the last id set sent to `on_visible_range`.
+    demand_hash: u64,
+    /// True while a demand check waits for the next frame.
+    demand_scheduled: bool,
+    /// Reused buffer for the demand ids.
+    demand_ids: Vec<D::RowId>,
     last_version: u64,
     last_style_version: u64,
     /// Calls of the body's item builder in the current frame. The `uniform_list` calls it twice
@@ -223,6 +244,13 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             header_state: HeaderState::default(),
             hover_row: None,
             paused: false,
+            visible_range: 0..0,
+            anchor: None,
+            last_wheel: None,
+            thumb_dragging: Rc::new(Cell::new(false)),
+            demand_hash: 0,
+            demand_scheduled: false,
+            demand_ids: Vec::new(),
             last_version: 0,
             last_style_version: 0,
             list_calls: 0,
@@ -245,12 +273,95 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         &mut self.delegate
     }
 
-    /// The owner calls this after installing new rows: starts a new `CellTextCache` version and
-    /// re-renders.
+    /// The owner calls this after installing new rows: starts a new `CellTextCache` version,
+    /// keeps the anchor row at its y and re-renders.
     pub fn on_new_version(&mut self, cx: &mut Context<Self>) {
-        let style_version = metrics(cx).style_version;
-        self.sync_versions(style_version);
+        let m = *metrics(cx);
+        self.sync_versions(m.style_version);
+        self.keep_anchor(m.row_height, cx);
         cx.notify();
+    }
+
+    /// Scroll anchoring (UI-PRC-010): the top-most visible selectable row of the last frame
+    /// keeps its y, sub-row offset included. When it is gone the scroll position stays. Skipped
+    /// during Ctrl-pause, a thumb drag, and for [`WHEEL_QUIET`] after a wheel event.
+    fn keep_anchor(&mut self, row_h: Pixels, cx: &mut Context<Self>) {
+        if self.paused || self.thumb_dragging.get() {
+            return;
+        }
+        if let Some(t) = self.last_wheel
+            && cx.background_executor().now().saturating_duration_since(t) < WHEEL_QUIET
+        {
+            return;
+        }
+        let Some((id, rows_from_top, sub)) = self.anchor else {
+            return;
+        };
+        let Some(ix) = self.delegate.row_index(id) else {
+            return;
+        };
+        let top = (row_h * ix.saturating_sub(rows_from_top) + sub).max(Pixels::ZERO);
+        let x = ScrollbarHandle::offset(&self.scroll).x;
+        ScrollbarHandle::set_offset(&self.scroll, point(x, -top));
+    }
+
+    /// Scrolls row `id` to the viewport centre and selects it (PROC-071). False when `id` is not
+    /// in the view; the delegate expands its path before calling.
+    pub fn jump_to(&mut self, id: D::RowId, cx: &mut Context<Self>) -> bool {
+        let Some(ix) = self.delegate.row_index(id) else {
+            return false;
+        };
+        self.scroll
+            .scroll_to_item_strict(ix, ScrollStrategy::Center);
+        self.selection.click(id);
+        cx.notify();
+        true
+    }
+
+    /// The body rows the last frame built.
+    pub fn visible_range(&self) -> Range<usize> {
+        self.visible_range.clone()
+    }
+
+    /// After a keyboard focus move: scrolls the least amount that keeps one row of margin
+    /// between the focus row and the header or the bottom edge. gpui's `Nearest` with an offset
+    /// keeps the margin at the top only, so the bottom case targets the row below.
+    fn keep_focus_visible(&self, cx: &mut Context<Self>) {
+        let Some(ix) = self.focus_index() else {
+            return;
+        };
+        let row_h = metrics(cx).row_height;
+        let scroll_top = -ScrollbarHandle::offset(&self.scroll).y;
+        if row_h * ix < scroll_top + row_h {
+            self.scroll
+                .scroll_to_item_with_offset(ix, ScrollStrategy::Nearest, 1);
+        } else {
+            let below = (ix + 1).min(self.delegate.row_count().saturating_sub(1));
+            self.scroll.scroll_to_item(below, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// Reports the visible rows plus one viewport above and below, at most
+    /// [`DEMAND_MAX_IDS`], to the delegate when the id set changed (ADR-009 "Visible demand").
+    fn report_demand(&mut self, cx: &mut Context<Self>) {
+        self.demand_scheduled = false;
+        let count = self.delegate.row_count();
+        let range = self.visible_range.start.min(count)..self.visible_range.end.min(count);
+        let ids = demand_window(range, count);
+        self.demand_ids.clear();
+        let mut hash = ids.len() as u64;
+        for ix in ids {
+            let id = self.delegate.row_id(ix);
+            hash = hash.wrapping_add(FxBuildHasher.hash_one(id));
+            self.demand_ids.push(id);
+        }
+        if hash == self.demand_hash {
+            return;
+        }
+        self.demand_hash = hash;
+        let ids = std::mem::take(&mut self.demand_ids);
+        self.delegate.on_visible_range(&ids, cx);
+        self.demand_ids = ids;
     }
 
     /// The body's scroll handle, shared by both scrollbars.
@@ -340,6 +451,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         }
         #[cfg(any(test, feature = "test-hooks"))]
         self.rows_built_last_frame.set(range.len() as u32);
+        self.record_frame(range.clone(), m.row_height);
 
         let layout = self.delegate.columns();
         let frame = FrameCtx {
@@ -362,6 +474,18 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             rows.push(self.build_row(ix, &frame, window, cx));
         }
         rows
+    }
+
+    /// Keeps the frame's row range and anchor row. Runs inside the list's prepaint, after any
+    /// pending scroll was applied.
+    fn record_frame(&mut self, range: Range<usize>, row_h: Pixels) {
+        let scroll_top = -ScrollbarHandle::offset(&self.scroll).y;
+        let sub = (scroll_top - row_h * range.start).max(Pixels::ZERO);
+        self.anchor = range
+            .clone()
+            .find(|&ix| self.delegate.selectable(ix))
+            .map(|ix| (self.delegate.row_id(ix), ix - range.start, sub));
+        self.visible_range = range;
     }
 
     fn build_row(
@@ -741,6 +865,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
     fn on_move_focus(&mut self, a: &MoveFocus, _: &mut Window, cx: &mut Context<Self>) {
         let v = DelegateView(&self.delegate);
         self.selection.move_focus(a.delta, a.extend, &v);
+        self.keep_focus_visible(cx);
         cx.notify();
     }
 
@@ -756,12 +881,14 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         let v = DelegateView(&self.delegate);
         self.selection
             .move_page(fit.saturating_sub(1).max(1), a.down, a.extend, &v);
+        self.keep_focus_visible(cx);
         cx.notify();
     }
 
     fn on_move_focus_edge(&mut self, a: &MoveFocusEdge, _: &mut Window, cx: &mut Context<Self>) {
         let v = DelegateView(&self.delegate);
         self.selection.move_edge(a.end, a.extend, &v);
+        self.keep_focus_visible(cx);
         cx.notify();
     }
 
@@ -797,6 +924,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
                     && self.delegate.selectable(child)
                 {
                     self.selection.click(self.delegate.row_id(child));
+                    self.keep_focus_visible(cx);
                     cx.notify();
                 }
             }
@@ -832,6 +960,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             self.delegate.on_toggle_expand(parent_id, cx);
         } else if self.delegate.selectable(parent) {
             self.selection.click(parent_id);
+            self.keep_focus_visible(cx);
             cx.notify();
         }
     }
@@ -857,6 +986,51 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         } else {
             self.delegate.on_activate(id, cx);
         }
+    }
+}
+
+/// The rows a demand report covers: `visible` widened by its own length above and below, cut to
+/// [`DEMAND_MAX_IDS`] around the centre of `visible` when longer.
+pub fn demand_window(visible: Range<usize>, count: usize) -> Range<usize> {
+    let rows = visible.len();
+    let start = visible.start.saturating_sub(rows);
+    let end = visible.end.saturating_add(rows).min(count);
+    if end.saturating_sub(start) <= DEMAND_MAX_IDS {
+        return start..end;
+    }
+    let centre = visible.start + rows / 2;
+    let first = centre
+        .saturating_sub(DEMAND_MAX_IDS / 2)
+        .clamp(start, end - DEMAND_MAX_IDS);
+    first..first + DEMAND_MAX_IDS
+}
+
+/// The body's scroll handle as the scrollbar sees it. It tells the table when a thumb drag
+/// starts and ends, so anchoring pauses during the drag.
+#[derive(Clone)]
+struct BodyScroll {
+    list: UniformListScrollHandle,
+    dragging: Rc<Cell<bool>>,
+}
+
+impl ScrollbarHandle for BodyScroll {
+    fn viewport_bounds(&self) -> Bounds<Pixels> {
+        ScrollbarHandle::viewport_bounds(&self.list)
+    }
+    fn offset(&self) -> Point<Pixels> {
+        ScrollbarHandle::offset(&self.list)
+    }
+    fn set_offset(&self, offset: Point<Pixels>) {
+        ScrollbarHandle::set_offset(&self.list, offset);
+    }
+    fn content_size(&self) -> Size<Pixels> {
+        ScrollbarHandle::content_size(&self.list)
+    }
+    fn start_drag(&self) {
+        self.dragging.set(true);
+    }
+    fn end_drag(&self) {
+        self.dragging.set(false);
     }
 }
 
@@ -928,6 +1102,17 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
         .render(|id| self.delegate.column_spec(id));
 
         let count = self.delegate.row_count();
+        if count == 0 {
+            // The list builds no rows, so nothing records the frame.
+            self.visible_range = 0..0;
+            self.anchor = None;
+        }
+        // Demand runs after every render, so a new version with the same range still reports
+        // a changed id set (ADR-009).
+        if !self.demand_scheduled {
+            self.demand_scheduled = true;
+            cx.on_next_frame(window, |this, _, cx| this.report_demand(cx));
+        }
         let empty = if count == 0 {
             self.delegate.empty_text()
         } else {
@@ -950,7 +1135,11 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
                 .radius(Pixels::ZERO)
                 .min_length(px(48.0 * m.ui_scale))
         };
-        let scrollbar = Scrollbar::new(&self.scroll)
+        let handle = BodyScroll {
+            list: self.scroll.clone(),
+            dragging: self.thumb_dragging.clone(),
+        };
+        let scrollbar = Scrollbar::new(&handle)
             .id("tl-tree-table-scrollbar")
             .axis(ScrollbarAxis::Both)
             .mode(ScrollbarMode::Always)
@@ -971,6 +1160,9 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .min_h_0()
             .w_full()
             .overflow_hidden()
+            .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+                this.last_wheel = Some(cx.background_executor().now());
+            }))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !*hovered {
                     this.set_hover(None, cx);

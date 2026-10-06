@@ -11,9 +11,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::ScrollbarHandle;
 use gpui_kit::{
     Action, AnyView, App, AppContext as _, Context, Div, Entity, InteractiveElement as _,
-    IntoElement, KeyContext, Modifiers, MouseMoveEvent, ParentElement, Pixels, Render,
-    ScrollStrategy, SharedString, Styled, TestAppContext, TestDispatcher, VisualTestContext,
-    Window, div, point, px,
+    IntoElement, KeyContext, Modifiers, MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta,
+    ScrollStrategy, ScrollWheelEvent, SharedString, Styled, TestAppContext, TestDispatcher,
+    TouchPhase, VisualTestContext, Window, div, point, px,
 };
 use smallvec::SmallVec;
 use tl_model::ids::ColumnId;
@@ -392,6 +392,9 @@ struct TDelegate {
     /// Every gesture the table reported, oldest first.
     toggled: Vec<u32>,
     activated: Vec<u32>,
+    /// The last ids `on_visible_range` received, and how often it was called.
+    visible: Vec<u32>,
+    visible_calls: usize,
 }
 
 impl TDelegate {
@@ -415,6 +418,8 @@ impl TDelegate {
             double_expands: false,
             toggled: Vec::new(),
             activated: Vec::new(),
+            visible: Vec::new(),
+            visible_calls: 0,
         }
     }
 }
@@ -511,7 +516,10 @@ impl TreeTableDelegate for TDelegate {
     }
     fn on_sort(&mut self, _: ColumnId, _: &mut Context<TlTreeTable<Self>>) {}
     fn on_columns_changed(&mut self, _: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {}
-    fn on_visible_range(&mut self, _: &[u32], _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_visible_range(&mut self, ids: &[u32], _: &mut Context<TlTreeTable<Self>>) {
+        self.visible = ids.to_vec();
+        self.visible_calls += 1;
+    }
     fn on_activate(&mut self, id: u32, _: &mut Context<TlTreeTable<Self>>) {
         self.activated.push(id);
     }
@@ -1319,4 +1327,281 @@ fn table_keymap_matches_table_b() {
             assert!(!predicate.eval(&elsewhere), "{keys} is Table only");
         }
     });
+}
+
+// ---------------------------------------------------------------------------------------------
+// E18-008: scroll anchoring, keep-visible, jump and visible-range demand (UI-PRC-010).
+// ---------------------------------------------------------------------------------------------
+
+const ROW_H: f32 = 28.;
+
+/// A table of `n` plain rows with ids 0..n, `rows` rows tall.
+fn open_rows(
+    cx: &mut TestAppContext,
+    n: u32,
+    rows: f32,
+) -> (Entity<TlTreeTable<TDelegate>>, &mut VisualTestContext) {
+    open_table(
+        cx,
+        TDelegate::new((0..n).map(plain).collect()),
+        600.,
+        rows * ROW_H,
+    )
+}
+
+/// How far the body is scrolled down, in px.
+fn scroll_top(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>) -> f32 {
+    vcx.update(|_, cx| {
+        let offset = ScrollbarHandle::offset(table.read(cx).scroll_handle());
+        -offset.y / px(1.)
+    })
+}
+
+/// Scrolls the body to `top` px and draws a frame.
+fn scroll_to(vcx: &mut VisualTestContext, table: &Entity<TlTreeTable<TDelegate>>, top: f32) {
+    vcx.update(|window, cx| {
+        ScrollbarHandle::set_offset(table.read(cx).scroll_handle(), point(px(0.), px(-top)));
+        window.refresh();
+    });
+    redraw(vcx);
+}
+
+/// Moves row `id` to display index `to` and installs the new version.
+fn move_row(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+    id: u32,
+    to: usize,
+) {
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            let rows = &mut t.delegate.rows;
+            let ix = rows.iter().position(|r| r.id == id).expect("row exists");
+            let row = rows.remove(ix);
+            rows.insert(to, row);
+            t.on_new_version(cx);
+        })
+    });
+    redraw(vcx);
+}
+
+/// Delivers the next frame: runs the pending next-frame callbacks, then draws.
+fn next_frame(vcx: &mut VisualTestContext) {
+    vcx.update(|window, cx| {
+        window.simulate_next_frame(cx);
+    });
+    redraw(vcx);
+}
+
+fn demand(
+    vcx: &mut VisualTestContext,
+    table: &Entity<TlTreeTable<TDelegate>>,
+) -> (Vec<u32>, usize) {
+    vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        (d.visible.clone(), d.visible_calls)
+    })
+}
+
+#[test]
+fn scroll_anchor_keeps_top_row_on_resort() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    // Row 100 is the top row, 10 px of it scrolled out.
+    scroll_to(vcx, &table, 100. * ROW_H + 10.);
+    assert_eq!(
+        vcx.update(|_, cx| table.read(cx).visible_range().start),
+        100
+    );
+
+    move_row(vcx, &table, 100, 140);
+    assert_eq!(
+        scroll_top(vcx, &table),
+        140. * ROW_H + 10.,
+        "row 100 keeps its y"
+    );
+    let top = vcx.update(|_, cx| {
+        let t = table.read(cx);
+        t.delegate.row_id(t.visible_range().start)
+    });
+    assert_eq!(top, 100, "row 100 is still the top row");
+
+    // When the anchor row is gone the scroll position stays.
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.delegate.rows.retain(|r| r.id != 100);
+            t.on_new_version(cx);
+        })
+    });
+    redraw(vcx);
+    assert_eq!(scroll_top(vcx, &table), 140. * ROW_H + 10.);
+}
+
+#[test]
+fn scroll_anchor_skipped_during_wheel() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    vcx.simulate_event(ScrollWheelEvent {
+        position: point(px(100.), px(HEADER_H + 100.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-100. * ROW_H))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    redraw(vcx);
+    assert_eq!(scroll_top(vcx, &table), 100. * ROW_H, "the wheel scrolled");
+
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(100));
+    move_row(vcx, &table, 100, 140);
+    assert_eq!(
+        scroll_top(vcx, &table),
+        100. * ROW_H,
+        "no anchoring 100 ms after a wheel"
+    );
+    assert_eq!(
+        vcx.update(|_, cx| table.read(cx).visible_range().start),
+        100
+    );
+
+    // 250 ms after the wheel, anchoring works again.
+    vcx.executor()
+        .advance_clock(std::time::Duration::from_millis(150));
+    let top_id = vcx.update(|_, cx| table.read(cx).delegate.row_id(100));
+    move_row(vcx, &table, top_id, 60);
+    assert_eq!(scroll_top(vcx, &table), 60. * ROW_H);
+}
+
+#[test]
+fn no_scroll_while_paused() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    scroll_to(vcx, &table, 100. * ROW_H);
+    vcx.update(|_, cx| table.update(cx, |t, _| t.paused = true));
+    move_row(vcx, &table, 100, 140);
+    assert_eq!(
+        scroll_top(vcx, &table),
+        100. * ROW_H,
+        "nothing moves during Ctrl-pause"
+    );
+    move_row(vcx, &table, 5, 120);
+    assert_eq!(scroll_top(vcx, &table), 100. * ROW_H);
+}
+
+#[test]
+fn focus_move_scrolls_nearest_with_margin() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    focus_table(vcx, &table);
+    // Rows 0 to 29 fill the body; 29 is the last fully visible line.
+    select(vcx, &table, 29);
+    keys(vcx, "down");
+    assert_eq!(sel(vcx, &table), (vec![30], Some(30)));
+    // Row 31 ends at the bottom edge: one row of margin under the focus row.
+    assert_eq!(scroll_top(vcx, &table), 32. * ROW_H - 30. * ROW_H);
+
+    // At the top edge the margin row is above the focus row.
+    scroll_to(vcx, &table, 10. * ROW_H);
+    select(vcx, &table, 11);
+    keys(vcx, "up");
+    assert_eq!(sel(vcx, &table), (vec![10], Some(10)));
+    assert_eq!(scroll_top(vcx, &table), 9. * ROW_H);
+
+    // Inside the margins a move does not scroll.
+    select(vcx, &table, 15);
+    keys(vcx, "down");
+    assert_eq!(scroll_top(vcx, &table), 9. * ROW_H);
+
+    // A mouse click never scrolls, even on the last fully visible line.
+    click(vcx, row_at(29, 100.), Modifiers::none());
+    assert_eq!(sel(vcx, &table), (vec![38], Some(38)));
+    assert_eq!(scroll_top(vcx, &table), 9. * ROW_H);
+}
+
+#[test]
+fn jump_target_centres_row() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    let found = vcx.update(|_, cx| table.update(cx, |t, cx| t.jump_to(900, cx)));
+    assert!(found);
+    redraw(vcx);
+    assert_eq!(sel(vcx, &table), (vec![900], Some(900)));
+    let centre = 900. * ROW_H + ROW_H / 2. - scroll_top(vcx, &table);
+    let viewport_centre = 30. * ROW_H / 2.;
+    assert!(
+        (centre - viewport_centre).abs() <= ROW_H / 2.,
+        "row centre {centre} vs viewport centre {viewport_centre}"
+    );
+    let missing = vcx.update(|_, cx| table.update(cx, |t, cx| t.jump_to(5000, cx)));
+    assert!(!missing, "an id outside the view is not found");
+}
+
+#[test]
+fn tree_table_reports_visible_demand() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    scroll_to(vcx, &table, 100. * ROW_H);
+    next_frame(vcx);
+    let (ids, calls) = demand(vcx, &table);
+    assert_eq!(ids.len(), 90, "30 visible, 30 above, 30 below");
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, (70..160).collect::<Vec<u32>>());
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn visible_demand_capped_512_and_sent_on_change_only() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 400.);
+    scroll_to(vcx, &table, 800. * ROW_H);
+    next_frame(vcx);
+    let (ids, calls) = demand(vcx, &table);
+    assert_eq!(ids.len(), 512, "a 400-row viewport sends at most 512 ids");
+    let mut sorted = ids.clone();
+    sorted.sort_unstable();
+    assert_eq!(
+        sorted,
+        (744..1256).collect::<Vec<u32>>(),
+        "centred on rows 800..1200"
+    );
+    assert_eq!(calls, 1);
+
+    // A new frame with the same ids sends nothing.
+    vcx.update(|window, _| window.refresh());
+    redraw(vcx);
+    next_frame(vcx);
+    assert_eq!(demand(vcx, &table).1, 1);
+
+    // Nor does a new version with the same visible ids.
+    vcx.update(|_, cx| table.update(cx, |t, cx| t.on_new_version(cx)));
+    redraw(vcx);
+    next_frame(vcx);
+    assert_eq!(demand(vcx, &table).1, 1);
+}
+
+#[test]
+fn demand_resent_after_resort_with_same_range() {
+    let mut cx = cosmic_cx();
+    let (table, vcx) = open_rows(&mut cx, 2000, 30.);
+    next_frame(vcx);
+    let (ids, calls) = demand(vcx, &table);
+    assert_eq!(ids, (0..60).collect::<Vec<u32>>());
+    assert_eq!(calls, 1);
+
+    // Row 0 stays on top, the rest reverses: same range 0..30, other ids.
+    vcx.update(|_, cx| {
+        table.update(cx, |t, cx| {
+            t.delegate.rows[1..].reverse();
+            t.on_new_version(cx);
+        })
+    });
+    redraw(vcx);
+    assert_eq!(vcx.update(|_, cx| table.read(cx).visible_range()), 0..30);
+    next_frame(vcx);
+    let (ids, calls) = demand(vcx, &table);
+    assert_eq!(calls, 2, "a changed id set is sent again");
+    let expected: Vec<u32> = std::iter::once(0)
+        .chain((1940..2000).rev().take(59))
+        .collect();
+    assert_eq!(ids, expected);
 }
