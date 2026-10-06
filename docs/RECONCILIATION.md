@@ -2325,7 +2325,7 @@ Every claim marked assumed, inferred or to be checked. Phase 0 or the first bead
 | U-11 | History budget: about 200 changed processes per second, 15-byte patches, 3:1 zstd, about 30 MB per 6 h | ADR-012 |
 | U-12 | NVML per-process utilization (`nvmlDeviceGetProcessUtilization`) works unprivileged on driver 615 | r2 PROC-023 [now PROC-033], r2 conflicts 9 |
 | U-13 | KWin 6.7.5 scripts cannot receive D-Bus signals, so commands must be one-shot scripts (kdotool pattern) | r2 PROC-059 [now PROC-052], conflicts 8 |
-| U-14 | `org.kde.KWin.queryWindowInfo()` may already return `pid`; the script path is needed only if it does not | APP-006 |
+| U-14 | `org.kde.KWin.queryWindowInfo()` may already return `pid`; the script path is needed only if it does not. Outcome (2026-10-06, y6k.23): KWin 6.7.5 source (dbusinterface.cpp at 250efe954d) returns `pid` and `type` in the map, so the script is a fallback only; not yet checked by a live pick | APP-006 |
 | U-15 | GPUI's `prompt_for_paths` (portal FileChooser) pulls in no Tokio | r2 PROC-079 [now PROC-095], v1 PROC-091 [now PROC-095] |
 | U-16 | `kglobalaccel` `setForeignShortcutKeys` sticks for a `.desktop` launch component | APP-051 |
 | U-17 | TaskSlinger `TS1.` theme share-code encoding (needs one code generated under Wine). Outcome (2026-10-04): still open; TL1 import ships first and TS1 follows when the code exists (D-013, R-211) | APP-038 |
