@@ -346,6 +346,7 @@ fn to_model(r: &RawRecord) -> ConnRecord {
             retransmits: t.total_retrans,
             last_data_recv_ms: t.last_data_recv_ms,
         }),
+        remote_host: None,
     }
 }
 

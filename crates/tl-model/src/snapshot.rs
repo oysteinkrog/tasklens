@@ -722,6 +722,9 @@ pub struct ConnRecord {
     pub send_q: u32,
     pub unit: Option<UnitRef>,
     pub tcp: Option<TcpInfoView>,
+    /// The reverse DNS name of the foreign address (SYS-035). `None` while the lookup is
+    /// pending, after a failed lookup, or when the Remote host column is hidden.
+    pub remote_host: Option<Arc<str>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
