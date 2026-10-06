@@ -19,7 +19,7 @@ use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, Validity};
-use tl_ui::components::kv_grid::{ValueLook, value_look};
+use tl_ui::components::kv_grid::{ValueLook, kv_words, value_look_in};
 use tl_ui::components::window_frame::window_options;
 use tl_ui::windows::frame::{PwnWindow, open_pwn, pwn_window_spec, spec};
 use tl_ui::windows::props::filter::{PropsFilter, filter_bar};
@@ -333,6 +333,7 @@ fn general_restricted_word_and_tooltip(cx: &mut TestAppContext) {
     draw(cx);
     assert_eq!(value(&t, cx, FieldId::Executable), "Restricted");
     let (look, tooltip, secondary) = cx.update(|_, cx| {
+        let words = kv_words(cx);
         let row = t
             .read(cx)
             .rows(0)
@@ -341,7 +342,7 @@ fn general_restricted_word_and_tooltip(cx: &mut TestAppContext) {
             .expect("Executable row");
         let theme = tl_ui::theme::current(cx);
         (
-            value_look(&row.value, theme).expect("drawn"),
+            value_look_in(&row.value, &words, theme).expect("drawn"),
             row.value.tooltip.clone(),
             theme.text_secondary,
         )
@@ -358,13 +359,14 @@ fn exe_and_pid_looks(
 ) -> (ValueLook, ValueLook, Hsla, Hsla) {
     cx.update(|_, cx| {
         let rows: Vec<_> = (0..3).flat_map(|i| t.read(cx).rows(i)).collect();
+        let words = kv_words(cx);
         let theme = tl_ui::theme::current(cx);
         let look = |label: &str| {
             let row = rows
                 .iter()
                 .find(|r| r.label.as_ref() == label)
                 .expect("row");
-            value_look(&row.value, theme).expect("drawn")
+            value_look_in(&row.value, &words, theme).expect("drawn")
         };
         (
             look("Executable:"),
@@ -437,6 +439,76 @@ fn props_filter_hides_general_fields(cx: &mut TestAppContext) {
     assert_eq!(visible, vec![FieldId::Pid, FieldId::Ppid]);
     // The panels stay, even when empty.
     assert_eq!(panels(cx).len(), 3);
+}
+
+/// The Unsupported words come from the catalogue and are kept by variant, not by text (R-132).
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn general_unsupported_words_follow_test_locale(cx: &mut TestAppContext) {
+    use tl_ui::components::kv_grid::UnsupportedWord;
+    use tl_ui::i18n::{set_test_catalogue, tr_calls};
+
+    const MARKERS: &str = "
+fnd-kv-not-supported = <not-supported>
+fnd-kv-not-reported = <not-reported>
+";
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        tl_ui::theme::store::init(
+            cx,
+            &ThemeSettings::default(),
+            &AppearanceSettings::default(),
+            Vec::new(),
+        );
+        tl_ui::i18n::init_strings(cx, "en-US");
+        set_test_catalogue(cx, MARKERS);
+    });
+    // The tab alone: the frame check below is for the tab, not the filter bar.
+    let (t, cx) = cx.add_window_view(|window, cx| {
+        let filter = cx.new(|cx| PropsFilter::new("General", window, cx));
+        GeneralTab::new(KEY, filter, cx)
+    });
+    let mut d = detail("firefox");
+    d.cgroup = None;
+    d.cmdline = Total {
+        value: text(""),
+        validity: Validity::Unsupported,
+    };
+    feed(&t, cx, Some(&payload(d)), 1.);
+    draw(cx);
+
+    assert_eq!(value(&t, cx, FieldId::ShadowStack), "<not-supported>");
+    assert_eq!(value(&t, cx, FieldId::Cgroup), "<not-reported>");
+    let (cgroup, cmdline) = cx.update(|_, cx| {
+        let words = kv_words(cx);
+        let theme = tl_ui::theme::current(cx);
+        let row = (0..3)
+            .flat_map(|i| t.read(cx).rows(i))
+            .find(|r| r.label.as_ref() == "Cgroup:")
+            .expect("Cgroup row");
+        let look = value_look_in(&row.value, &words, theme).expect("drawn");
+        (
+            (row.value.word, look.text.to_string()),
+            t.read(cx).cmdline().read(cx).text().to_string(),
+        )
+    });
+    assert_eq!(
+        cgroup,
+        (
+            Some(UnsupportedWord::NotReported),
+            "<not-reported>".to_owned()
+        )
+    );
+    assert_eq!(cmdline, "<not-reported>");
+
+    let before = tr_calls();
+    for _ in 0..60 {
+        cx.update(|window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        });
+    }
+    assert_eq!(tr_calls(), before, "60 frames make no tr call");
 }
 
 struct Dummy;

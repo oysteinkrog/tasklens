@@ -581,13 +581,14 @@ mod display {
 /// catalogue, translated once per strings version (R-132).
 #[cfg(feature = "test-hooks")]
 mod words {
-    use gpui_kit::SharedString;
+    use gpui_kit::{MouseButton, SharedString, point};
     use tl_model::snapshot::{CacheInfo, CacheLevelInfo, CpuStaticInfo, SystemSnapshot};
     use tl_model::validity::Validity;
     use tl_ui::components::kv_grid::{
         KvLayout, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
         kv_words, shown_text_in,
     };
+    use tl_ui::components::tooltip::DELAY_CONTROL;
     use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
     use tl_ui::pages::performance::cpu_details::{
         CpuLiveInputs, ROW_L1, ROW_L3, ROW_UP_TIME, cpu_details_model, update_live, update_static,
@@ -603,6 +604,10 @@ fnd-kv-unavailable = <unavailable>
 fnd-kv-not-supported = <not-supported>
 fnd-kv-not-reported = <not-reported>
 fnd-kv-needs-setup = <needs-setup>
+fnd-kv-no-match = <no-match>
+fnd-kv-copy-value = <copy-value>
+fnd-kv-copy-row = <copy-row>
+fnd-kv-copy-section = <copy-section-in-a-test-locale>
 perf-cpu-tip-boot = <boot {$time}>
 perf-cpu-tip-l1-data = <data {$size}>
 perf-cpu-tip-l1-instruction = <instruction {$size}>
@@ -698,6 +703,133 @@ perf-cpu-time-unknown = <unknown>
             });
         }
         assert_eq!(tr_calls(), before, "60 frames make no tr call");
+    }
+
+    /// An empty filtered grid over a grid with a titled section.
+    struct OwnText;
+
+    impl Render for OwnText {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let section = TlKvSection {
+                title: Some("Memory".into()),
+                blocks: vec![TlKvBlock {
+                    heading: None,
+                    rows: vec![TlKvRow {
+                        label: "Total:".into(),
+                        value: TlValue::new("32 GiB"),
+                    }],
+                }],
+            };
+            div()
+                .w(px(800.))
+                .child(
+                    div()
+                        .h(px(100.))
+                        .child(TlKeyValueGrid::new("empty", KvLayout::Inline).filtered_empty(true)),
+                )
+                .child(TlKeyValueGrid::new("band", KvLayout::Inline).sections(&[section]))
+        }
+    }
+
+    fn width(cx: &mut VisualTestContext, selector: &'static str) -> f32 {
+        f32::from(cx.debug_bounds(selector).expect(selector).size.width)
+    }
+
+    /// The test text system gives every char the same advance, so a text `width` wide is `text`
+    /// when it is `text`'s length in chars of the en-US text, up to a pixel of rounding.
+    fn assert_drawn(width: f32, en_width: f32, en: &str, text: &str) {
+        let expected = en_width / en.chars().count() as f32 * text.chars().count() as f32;
+        assert!(
+            (width - expected).abs() <= 1.,
+            "{text} drawn: {width} px, expected {expected} px"
+        );
+    }
+
+    fn tooltip_width(cx: &mut VisualTestContext) -> f32 {
+        let icon = cx
+            .debug_bounds("TlButton-band-copy-section0-icon")
+            .expect("copy section button");
+        cx.simulate_mouse_move(point(px(1.), px(1.)), None, Modifiers::none());
+        draw(cx);
+        cx.simulate_mouse_move(icon.center(), None, Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+        width(cx, "TlTooltip-text")
+    }
+
+    #[gpui_kit::test]
+    fn kv_grid_own_text_follows_test_locale(cx: &mut TestAppContext) {
+        const NO_MATCH: &str = "No properties match the current filter.";
+        cx.update(|cx| {
+            setup(cx);
+            init_strings(cx, "en-US");
+            let words = kv_words(cx);
+            assert_eq!(words.no_match, NO_MATCH);
+            assert_eq!(
+                [&words.copy_value, &words.copy_row, &words.copy_section],
+                ["Copy value", "Copy row", "Copy section"]
+            );
+        });
+        let (_, cx) = cx.add_window_view(|_, _| OwnText);
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        draw(cx);
+        let empty_en = width(cx, "TlKv-empty");
+        let tip_en = tooltip_width(cx);
+
+        cx.update(|window, cx| {
+            window.refresh();
+            set_test_catalogue(cx, MARKERS);
+            let words = kv_words(cx);
+            assert_eq!(
+                [
+                    &words.no_match,
+                    &words.copy_value,
+                    &words.copy_row,
+                    &words.copy_section
+                ],
+                [
+                    "<no-match>",
+                    "<copy-value>",
+                    "<copy-row>",
+                    "<copy-section-in-a-test-locale>"
+                ]
+            );
+        });
+        draw(cx);
+        let empty = width(cx, "TlKv-empty");
+        assert_drawn(empty, empty_en, NO_MATCH, "<no-match>");
+        let tip = tooltip_width(cx);
+        assert_drawn(
+            tip,
+            tip_en,
+            "Copy section",
+            "<copy-section-in-a-test-locale>",
+        );
+
+        // Frames with the context menu open read the cached words.
+        let value = cx.debug_bounds("TlKv-value-0").expect("value drawn");
+        cx.simulate_mouse_down(value.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(value.center(), MouseButton::Right, Modifiers::none());
+        draw(cx);
+        let before = tr_calls();
+        for _ in 0..60 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        assert_eq!(tr_calls(), before, "60 frames make no tr call");
+        // Items: copy value, copy row, copy section.
+        cx.simulate_keystrokes("down down down enter");
+        cx.run_until_parked();
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+            Some("Memory\n    Total: 32 GiB"),
+            "the menu's copy section item"
+        );
     }
 
     fn level(instances: u16, instance_kib: u64) -> Option<CacheLevelInfo> {

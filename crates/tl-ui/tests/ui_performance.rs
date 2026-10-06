@@ -8,7 +8,7 @@ use gpui_kit::{
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
 use tl_model::validity::Validity;
 use tl_ui::actions::OpenAdditionalSetup;
-use tl_ui::components::kv_grid::{self, shown_text};
+use tl_ui::components::kv_grid::{self, KvWords, shown_text_in};
 use tl_ui::pages::performance::details::{
     DetailWords, Fallback, KeyValueModel, fallback_word, render_details,
 };
@@ -106,7 +106,7 @@ fn kv_grid_fallback_words_per_validity() {
         // The grid draws the same word, and the link only for Needs setup.
         let row = model.to_kv_rows().next().expect("visible row");
         assert_eq!(
-            shown_text(&row.value).as_deref(),
+            shown_text_in(&row.value, &KvWords::default()).as_deref(),
             Some(word),
             "{what}: grid"
         );
@@ -132,7 +132,10 @@ fn kv_grid_stale_keeps_value() {
     assert!(model.set_stale(ROW, 126_000_000_000), "new age");
 
     let row = model.to_kv_rows().next().expect("visible row");
-    assert_eq!(shown_text(&row.value).as_deref(), Some("4631 MHz"));
+    assert_eq!(
+        shown_text_in(&row.value, &KvWords::default()).as_deref(),
+        Some("4631 MHz")
+    );
 }
 
 #[test]
