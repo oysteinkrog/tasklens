@@ -563,7 +563,9 @@ impl TreeTableDelegate for TDelegate {
         }
     }
     fn on_sort(&mut self, _: ColumnId, _: &mut Context<TlTreeTable<Self>>) {}
-    fn on_columns_changed(&mut self, _: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {}
+    fn on_columns_changed(&mut self, layout: &ColumnLayout, _: &mut Context<TlTreeTable<Self>>) {
+        self.layout = layout.clone();
+    }
     fn on_visible_range(&mut self, ids: &[u32], _: &mut Context<TlTreeTable<Self>>) {
         self.visible = ids.to_vec();
         self.visible_calls += 1;
@@ -2142,4 +2144,183 @@ fn render_counter_unchanged_without_new_version() {
     vcx.update(|_, cx| table.update(cx, |t, cx| t.on_new_version(cx)));
     vcx.run_until_parked();
     assert!(renders(vcx) > before, "on_new_version renders");
+}
+
+// E18 rsf.21: the Name cell keeps its count right of an RTL name, the Binary icon has an asset,
+// and the Name column's minimum is 120.
+mod name_cell_fixes {
+    use std::sync::Arc;
+
+    use gpui_kit::assets::IconNamed as _;
+    use gpui_kit::{AssetSource as _, MouseDownEvent, MouseUpEvent, SvgRenderer, TextRun};
+    use tl_ui::components::icons::TlAssets;
+    use tl_ui::table::cells::{IconSourceCache, name_primary_text};
+
+    use super::*;
+
+    const HEBREW: &str =
+        "\u{05EA}\u{05D4}\u{05DC}\u{05D9}\u{05DA}-\u{05D1}\u{05D3}\u{05D9}\u{05E7}\u{05D4} (3)";
+    /// UTF-8 length of FSI and of PDI.
+    const MARK: usize = 3;
+
+    /// Largest x of a glyph whose byte index is in `name` and smallest x of one in `count`.
+    fn name_max_count_min(
+        line: &gpui_kit::ShapedLine,
+        name: std::ops::Range<usize>,
+        count: std::ops::RangeFrom<usize>,
+    ) -> (f32, f32) {
+        let (mut name_max, mut count_min) = (f32::MIN, f32::MAX);
+        for g in line.runs.iter().flat_map(|r| &r.glyphs) {
+            let x = f32::from(g.position.x);
+            if name.contains(&g.index) {
+                name_max = name_max.max(x);
+            } else if count.contains(&g.index) {
+                count_min = count_min.min(x);
+            }
+        }
+        assert!(
+            name_max > f32::MIN && count_min < f32::MAX,
+            "both parts have glyphs"
+        );
+        (name_max, count_min)
+    }
+
+    #[test]
+    fn hebrew_name_paints_count_on_the_right() {
+        let mut cx = cosmic_cx();
+        let vcx = cx.add_empty_window();
+        vcx.update(|window, cx| {
+            let primary: SharedString = HEBREW.into();
+            let start = HEBREW.find('(').expect("count");
+            let count = start..HEBREW.len();
+            let mut cache = IconSourceCache::new();
+            let (text, runs) = name_primary_text(
+                &primary,
+                true,
+                Some(&count),
+                gpui_kit::white(),
+                gpui_kit::red(),
+                &mut cache,
+            );
+            let runs = runs.expect("a count gives runs");
+            assert_eq!(text.len(), primary.len() + 2 * MARK);
+            assert_eq!(runs.iter().map(|r| r.len).sum::<usize>(), text.len());
+            assert!(text.starts_with('\u{2068}'));
+            assert_eq!(&text[MARK + start..MARK + start + MARK], "\u{2069}");
+
+            let size = metrics(cx).text.base;
+            let isolated = window
+                .text_system()
+                .shape_line(text.clone(), size, &runs, None);
+            let (name_max, count_min) =
+                name_max_count_min(&isolated, MARK..MARK + start, start + 2 * MARK..);
+            assert!(
+                count_min > name_max,
+                "count at {count_min} must be right of the name ending at {name_max}"
+            );
+
+            // Without the isolate the paragraph is RTL and the count lands on the left.
+            let plain_run = TextRun {
+                len: primary.len(),
+                ..runs[0].clone()
+            };
+            let plain = window
+                .text_system()
+                .shape_line(primary.clone(), size, &[plain_run], None);
+            let (name_max, count_min) = name_max_count_min(&plain, 0..start, start..);
+            assert!(count_min < name_max, "the plain text shows the defect");
+
+            // FSI and PDI add no width.
+            assert!(
+                (f32::from(isolated.width) - f32::from(plain.width)).abs() < 0.5,
+                "{:?} vs {:?}",
+                isolated.width,
+                plain.width
+            );
+        });
+    }
+
+    #[test]
+    fn isolated_name_built_once() {
+        let primary: SharedString = "bash (2)".into();
+        let mut cache = IconSourceCache::new();
+        cache.begin_version(1);
+        let a = cache.isolated_name(&primary, 5);
+        let b = cache.isolated_name(&SharedString::from("bash (2)".to_string()), 5);
+        assert_eq!(a.as_ref(), "\u{2068}bash \u{2069}(2)");
+        assert!(
+            std::ptr::eq(a.as_ref(), b.as_ref()),
+            "the second call reuses the text"
+        );
+        #[cfg(feature = "test-hooks")]
+        assert_eq!(cache.names_built, 1);
+
+        // A name without a count is shaped as it is.
+        let (text, runs) = name_primary_text(
+            &primary,
+            false,
+            None,
+            gpui_kit::white(),
+            gpui_kit::red(),
+            &mut cache,
+        );
+        assert!(runs.is_none());
+        assert!(std::ptr::eq(text.as_ref(), primary.as_ref()));
+    }
+
+    #[test]
+    fn binary_icon_renders_a_sprite() {
+        // The Name cell draws `IconName::Binary` for Lucide binary icons and as the file icon
+        // fallback; the app's asset source must have it.
+        let path = IconName::Binary.path();
+        let bytes = TlAssets
+            .load(&path)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{path} not in TlAssets"));
+        let image = SvgRenderer::new(Arc::new(TlAssets))
+            .render_single_frame(&bytes, 1.0)
+            .expect("svg renders");
+        let pixels = image.as_bytes(0).expect("one frame");
+        assert!(
+            pixels.chunks_exact(4).any(|p| p[3] > 0),
+            "the sprite has coverage"
+        );
+    }
+
+    #[test]
+    fn name_resize_clamps_to_120() {
+        let mut cx = cosmic_cx();
+        let (table, vcx) = open_table(
+            &mut cx,
+            TDelegate::new((0..3).map(plain).collect()),
+            600.,
+            200.,
+        );
+        let header = |x: f32| point(px(x), px(12.));
+        vcx.simulate_event(MouseDownEvent {
+            position: header(248.),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        redraw(vcx);
+        for x in [200., 100., 30.] {
+            vcx.simulate_event(MouseMoveEvent {
+                position: header(x),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            });
+            redraw(vcx);
+        }
+        vcx.simulate_event(MouseUpEvent {
+            position: header(30.),
+            modifiers: Modifiers::none(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        redraw(vcx);
+        let name_w = vcx.update(|_, cx| table.read(cx).delegate.layout.widths[&ColumnId::Name]);
+        assert_eq!(name_w, px(120.));
+    }
 }
