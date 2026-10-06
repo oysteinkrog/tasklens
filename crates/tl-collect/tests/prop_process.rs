@@ -396,3 +396,63 @@ proptest! {
         prop_assert!(p.matches(&path.replace(['*', '?'], ""), &mut lower));
     }
 }
+
+mod strings_scan {
+    use proptest::prelude::*;
+    use tl_collect::proc::strings::{CHUNK, ScanOpts, StringScanner, VALUE_MAX, VecMem};
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn strings_arbitrary_memory_never_panics(
+            size in 0..=3 * 1024 * 1024usize,
+            pattern in prop::collection::vec(any::<u8>(), 1..=512),
+            seed in any::<u64>(),
+            base in prop_oneof![Just(0u64), Just(0x1001u64), any::<u32>().prop_map(u64::from)],
+            min_len in any::<u8>(),
+            enc in any::<[bool; 3]>(),
+            cut in any::<u16>(),
+        ) {
+            // Generating 3 MiB byte by byte is slow, so the buffer tiles `pattern` and puts
+            // xorshift noise in about a quarter of the bytes.
+            let mut state = seed | 1;
+            let bytes: Vec<u8> = (0..size)
+                .map(|i| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    if state & 3 == 0 { (state >> 8) as u8 } else { pattern[i % pattern.len()] }
+                })
+                .collect();
+            let opts = ScanOpts {
+                min_len,
+                ascii: enc[0],
+                utf8: enc[1],
+                utf16le: enc[2],
+                include_file_backed: false,
+            };
+            // Two regions with a hole, and one region past the end of memory.
+            let len = bytes.len() as u64;
+            let split = u64::from(cut).min(len);
+            let regions = vec![(base, base + split), (base + split + 1, base + len), (base + len, base + len + 8)];
+            let mut scanner = StringScanner::new(opts, regions);
+            let mut mem = VecMem(base, bytes);
+            let (mut buf, mut out) = (Vec::new(), Vec::new());
+            let mut ended = None;
+            for _ in 0..64 {
+                ended = scanner.step(&mut mem, &mut buf, &mut out);
+                prop_assert!(buf.len() <= CHUNK);
+                prop_assert!(scanner.progress_pct() <= 100);
+                if ended.is_some() {
+                    break;
+                }
+            }
+            prop_assert!(ended.is_some());
+            for hit in &out {
+                prop_assert!(hit.value.chars().count() <= VALUE_MAX + 1);
+                prop_assert!(hit.length >= u32::from(min_len.clamp(4, 64)));
+            }
+        }
+    }
+}

@@ -3532,3 +3532,191 @@ fn pipe_peers_found() {
     find_pipe_peers(&root, &FxHashSet::default(), 4214, &mut bufs, &mut out);
     assert!(out.is_empty());
 }
+
+// ---- E05-032: strings scanner ----
+
+mod strings_scan {
+    use tl_collect::proc::detail::parse_maps;
+    use tl_collect::proc::strings::{
+        CHUNK, Encoding, MAX_TEXT_BYTES, MemSource, ProcMem, ScanEnd, ScanOpts, StringHitInfo,
+        StringScanner, VecMem, select_regions,
+    };
+    use tl_collect::{CollectError, SysRoot};
+
+    /// Runs `scanner` to its end. Every step reads at most one chunk, so the step count is
+    /// bounded by the region bytes.
+    fn run(mut scanner: StringScanner, mem: &mut dyn MemSource) -> (ScanEnd, Vec<StringHitInfo>) {
+        let (mut buf, mut out) = (Vec::new(), Vec::new());
+        for _ in 0..10_000 {
+            if let Some(end) = scanner.step(mem, &mut buf, &mut out) {
+                assert!(buf.len() <= CHUNK);
+                return (end, out);
+            }
+        }
+        panic!("scan did not end");
+    }
+
+    fn scan(opts: ScanOpts, base: u64, bytes: Vec<u8>) -> (ScanEnd, Vec<StringHitInfo>) {
+        let end = base + bytes.len() as u64;
+        run(
+            StringScanner::new(opts, vec![(base, end)]),
+            &mut VecMem(base, bytes),
+        )
+    }
+
+    #[test]
+    fn strings_region_selection() {
+        let maps = b"00400000-00401000 rw-p 00000000 00:00 0 [heap]\n\
+7f0000000000-7f0000001000 rw-p 00000000 00:00 0\n\
+7f0000100000-7f0000200000 r-xp 00000000 103:02 1234 /usr/lib/libc.so.6\n\
+7ffd00000000-7ffd00002000 r--p 00000000 00:00 0 [vvar]\n\
+7f0000300000-7f0000400000 rw-s 00000000 00:05 99 /dev/dri/card1\n";
+        let mut regions = Vec::new();
+        parse_maps(maps, &mut regions).expect("parse maps");
+        let mut out = Vec::new();
+        select_regions(&regions, false, &mut out);
+        assert_eq!(
+            out,
+            [(0x40_0000, 0x40_1000), (0x7f00_0000_0000, 0x7f00_0000_1000)]
+        );
+        select_regions(&regions, true, &mut out);
+        assert_eq!(
+            out,
+            [
+                (0x40_0000, 0x40_1000),
+                (0x7f00_0000_0000, 0x7f00_0000_1000),
+                (0x7f00_0010_0000, 0x7f00_0020_0000),
+            ]
+        );
+    }
+
+    #[test]
+    fn strings_ascii_hit() {
+        let (end, hits) = scan(
+            ScanOpts::default(),
+            0x1000,
+            b"\0\0hello world\0ab\0".to_vec(),
+        );
+        assert_eq!(end, ScanEnd::Finished);
+        assert_eq!(
+            hits,
+            [StringHitInfo {
+                address: 0x1002,
+                encoding: Encoding::Ascii,
+                length: 11,
+                value: "hello world".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn strings_utf16le_hit() {
+        let mut bytes = vec![0u8; 4];
+        bytes.extend("Wine path".encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend([0, 0]);
+        let (end, hits) = scan(ScanOpts::default(), 0x2000, bytes);
+        assert_eq!(end, ScanEnd::Finished);
+        assert_eq!(
+            hits,
+            [StringHitInfo {
+                address: 0x2004,
+                encoding: Encoding::Utf16Le,
+                length: 9,
+                value: "Wine path".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn strings_utf8_hit() {
+        let (end, hits) = scan(ScanOpts::default(), 0x3000, "grüße\0".as_bytes().to_vec());
+        assert_eq!(end, ScanEnd::Finished);
+        assert_eq!(
+            hits,
+            [StringHitInfo {
+                address: 0x3000,
+                encoding: Encoding::Utf8,
+                length: 5,
+                value: "grüße".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn strings_chunk_boundary_once() {
+        let base = 0x10_0000;
+        let mut bytes = vec![0u8; 2 * CHUNK];
+        bytes[CHUNK - 3..CHUNK + 3].copy_from_slice(b"abcdef");
+        let (end, hits) = scan(ScanOpts::default(), base, bytes);
+        assert_eq!(end, ScanEnd::Finished);
+        assert_eq!(
+            hits,
+            [StringHitInfo {
+                address: base + CHUNK as u64 - 3,
+                encoding: Encoding::Ascii,
+                length: 6,
+                value: "abcdef".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn strings_long_value_is_cut() {
+        let mut bytes = vec![b'x'; 5000];
+        bytes.push(0);
+        let (_, hits) = scan(ScanOpts::default(), 0x1000, bytes);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].length, 5000);
+        assert_eq!(hits[0].value.chars().count(), 4097);
+        assert!(hits[0].value.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn strings_stop_limit() {
+        let mut bytes = Vec::new();
+        for i in 0..20 {
+            bytes.extend(format!("str{i:02}\0").bytes());
+        }
+        let scanner = StringScanner::new(ScanOpts::default(), vec![(0x1000, 0x1000 + 120)])
+            .with_limits(10, MAX_TEXT_BYTES);
+        let (end, hits) = run(scanner, &mut VecMem(0x1000, bytes));
+        assert_eq!(end, ScanEnd::Stopped);
+        assert_eq!(hits.len(), 10);
+    }
+
+    struct Unreadable;
+
+    impl MemSource for Unreadable {
+        fn read(&mut self, _: u64, _: &mut [u8]) -> Result<usize, CollectError> {
+            Err(CollectError::PermissionDenied)
+        }
+    }
+
+    #[test]
+    fn strings_unreadable_regions_fail() {
+        let regions = vec![(0x1000, 0x2000), (0x10_0000, 0x10_0000 + 3 * CHUNK as u64)];
+        let scanner = StringScanner::new(ScanOpts::default(), regions.clone());
+        assert_eq!(run(scanner, &mut Unreadable), (ScanEnd::Failed, Vec::new()));
+
+        // One readable region is enough for Finished; the hole is skipped.
+        let scanner = StringScanner::new(ScanOpts::default(), regions);
+        let (end, hits) = run(scanner, &mut VecMem(0x1000, b"\0kept string\0".to_vec()));
+        assert_eq!(end, ScanEnd::Finished);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&*hits[0].value, "kept string");
+    }
+
+    static PROBE: [u8; 32] = *b"tasklens-strings-probe\0\0\0\0\0\0\0\0\0\0";
+
+    #[test]
+    fn strings_proc_mem_reads_self() {
+        let probe = std::hint::black_box(&PROBE);
+        let mut mem = ProcMem::open(&SysRoot::host(), super::own_key()).expect("open own mem");
+        let mut buf = [0u8; 32];
+        let n = mem
+            .read(probe.as_ptr() as u64, &mut buf)
+            .expect("read own mem");
+        assert_eq!(n, 32);
+        assert_eq!(&buf, probe);
+    }
+}

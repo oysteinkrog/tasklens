@@ -234,9 +234,9 @@ pub struct StringScanner {
 impl StringScanner {
     pub fn new(mut opts: ScanOpts, regions: Vec<(u64, u64)>) -> Self {
         opts.min_len = opts.min_len.clamp(MIN_LEN_LOW, MIN_LEN_HIGH);
-        let total = regions
-            .iter()
-            .fold(0u64, |sum, &(start, end)| sum.saturating_add(end.saturating_sub(start)));
+        let total = regions.iter().fold(0u64, |sum, &(start, end)| {
+            sum.saturating_add(end.saturating_sub(start))
+        });
         Self {
             opts,
             regions,
@@ -383,7 +383,10 @@ impl StringScanner {
         while i < data.len() {
             if data[i] == 0 && self.idle() {
                 // Fast path: zero bytes start nothing. Most memory is zeros.
-                let skip = data[i..].iter().position(|&b| b != 0).unwrap_or(data.len() - i);
+                let skip = data[i..]
+                    .iter()
+                    .position(|&b| b != 0)
+                    .unwrap_or(data.len() - i);
                 i += skip;
                 if i == data.len() {
                     self.utf16.low = Some(0);
