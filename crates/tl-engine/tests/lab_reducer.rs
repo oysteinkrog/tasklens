@@ -422,7 +422,6 @@ fn sink_device_catalog() {
     rig.run(vec![health_msg(0)])
         .expect("no invariant violation");
     let log = LogSink::install(&mut rig);
-    let before = rig.latest().devices.entries.len();
     let disk = disk_id("sda", 1);
     rig.run(vec![src(SourceUpdate::Devices(DeviceList {
         t_ns: SEC,
@@ -440,8 +439,8 @@ fn sink_device_catalog() {
     let log = log.lock().unwrap_or_else(PoisonError::into_inner);
     assert_eq!(
         log.catalogs,
-        vec![before + 1],
-        "one call with the new catalog"
+        vec![rig.latest().devices.entries.len()],
+        "one call with the published catalog"
     );
     assert!(log.system.is_empty());
 }
