@@ -3,4 +3,5 @@
 pub mod actions;
 pub mod cells;
 pub mod confirm;
+pub mod name_cell;
 pub mod table;
