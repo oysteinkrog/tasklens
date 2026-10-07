@@ -13,6 +13,8 @@ use gpui_kit::{
 };
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
+use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+use tl_model::ids::DeviceIdx;
 use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
 use tl_model::table::TableMode;
 use tl_ui::actions::OpenSettings;
@@ -505,6 +507,149 @@ fn processes_page_keys(cx: &mut TestAppContext) {
             SettingKey::PropertiesHideUnnamedHandles,
             SettingKey::PropertiesSharedObjectsOnly,
             SettingKey::PropertiesEnvMask
+        ]
+    );
+}
+
+/// Puts one present GPU, "Test GPU", in the device catalog.
+fn publish_gpu(engine: &FakeEngine, cx: &mut TestAppContext) {
+    engine.publish_with(|s| {
+        s.devices = Arc::new(DeviceCatalog {
+            version: s.devices.version + 1,
+            entries: Arc::from(vec![DeviceEntry {
+                idx: DeviceIdx(0),
+                identity: DeviceIdentity::Gpu {
+                    uuid: [1; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                generation: 0,
+                display_name: Arc::from("Test GPU"),
+                present: true,
+                parent: None,
+                persistent_key: Arc::from(""),
+                net_kind: None,
+            }]),
+        });
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn performance_range_dropdown(cx: &mut TestAppContext) {
+    setup(cx);
+    let perf = page(cx, PageId::Performance);
+    assert_eq!(
+        perf.dropdown_labels(SettingKey::PerformanceGraphRangeS),
+        ["30 seconds", "1 minute", "5 minutes", "10 minutes"]
+    );
+    cx.update(|cx| perf.pick(SettingKey::PerformanceGraphRangeS, "5 minutes", cx));
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).performance.graph_range_s),
+        300
+    );
+}
+
+#[gpui_kit::test]
+fn performance_gpu_optional_checkboxes(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::PerformanceGpuOptionalGraphs,
+            SettingValue::StrList(Arc::from([])),
+        )
+    });
+    let perf = page(cx, PageId::Performance);
+    assert_eq!(
+        perf.check_values(SettingKey::PerformanceGpuOptionalGraphs),
+        ["power", "clocks"]
+    );
+    cx.update(|cx| perf.set_check(SettingKey::PerformanceGpuOptionalGraphs, "clocks", true, cx));
+    let graphs = cx.update(|cx| {
+        serde_json::to_value(&TlSettings::settings(cx).performance.gpu_optional_graphs)
+            .expect("serialize")
+    });
+    assert_eq!(graphs, serde_json::json!(["clocks"]));
+}
+
+#[gpui_kit::test]
+fn performance_hidden_engines_checklist(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    publish_gpu(&engine, cx);
+    let perf = page(cx, PageId::Performance);
+    let engines = perf.check_values(SettingKey::PerformanceHiddenGpuEngines);
+    assert_eq!(engines, ["gpu", "enc", "dec"], "the GPU's engines in order");
+    let hidden = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            TlSettings::settings(cx)
+                .performance
+                .hidden_gpu_engines
+                .clone()
+        })
+    };
+    assert!(hidden(cx).is_empty());
+    // Checked = shown: unchecking hides the engine.
+    cx.update(|cx| perf.set_check(SettingKey::PerformanceHiddenGpuEngines, "dec", false, cx));
+    assert_eq!(hidden(cx), ["dec"]);
+    cx.update(|cx| perf.set_check(SettingKey::PerformanceHiddenGpuEngines, "dec", true, cx));
+    assert!(hidden(cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn performance_no_gpu_text(cx: &mut TestAppContext) {
+    setup(cx);
+    let perf = page(cx, PageId::Performance);
+    assert!(
+        perf.check_values(SettingKey::PerformanceHiddenGpuEngines)
+            .is_empty()
+    );
+    assert_eq!(
+        perf.empty_text(SettingKey::PerformanceHiddenGpuEngines)
+            .as_deref(),
+        Some("No GPU found")
+    );
+}
+
+#[gpui_kit::test]
+fn performance_network_switch_engine_settings(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    assert!(!cx.update(|cx| TlSettings::settings(cx).performance.show_network_virtual));
+    let perf = page(cx, PageId::Performance);
+    cx.update(|cx| perf.set_bool(SettingKey::PerformanceShowNetworkVirtual, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).performance.show_network_virtual));
+    assert_eq!(
+        engine.settings().last().map(|s| s.show_network_virtual),
+        Some(true),
+        "the engine gets show_network_virtual"
+    );
+}
+
+#[gpui_kit::test]
+fn performance_page_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Performance).keys(),
+        [
+            SettingKey::PerformanceGraphRangeS,
+            SettingKey::PerformanceCurvedLines,
+            SettingKey::PerformanceNetworkDynamicScale,
+            SettingKey::PerformanceCpuGraphMode,
+            SettingKey::PerformanceCpuKernel,
+            SettingKey::PerformanceCpuSecondaryGraph,
+            SettingKey::PerformanceMemoryComposition,
+            SettingKey::PerformanceMemorySwapGraph,
+            SettingKey::PerformanceGpuOptionalGraphs,
+            SettingKey::PerformanceHiddenGpuEngines,
+            SettingKey::PerformanceShowDisks,
+            SettingKey::PerformanceShowGpus,
+            SettingKey::PerformanceShowFans,
+            SettingKey::PerformanceShowBatteries,
+            SettingKey::PerformanceShowNetworkWired,
+            SettingKey::PerformanceShowNetworkWireless,
+            SettingKey::PerformanceShowNetworkVpn,
+            SettingKey::PerformanceShowNetworkVirtual,
+            SettingKey::PerformanceShowNetworkOther
         ]
     );
 }

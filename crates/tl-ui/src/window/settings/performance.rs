@@ -134,7 +134,10 @@ pub fn page(cx: &mut App) -> PageBuilder {
     );
 
     for (key, label) in [
-        (SettingKey::PerformanceShowDisks, "shell-settings-perf-disks"),
+        (
+            SettingKey::PerformanceShowDisks,
+            "shell-settings-perf-disks",
+        ),
         (SettingKey::PerformanceShowGpus, "shell-settings-perf-gpus"),
         (SettingKey::PerformanceShowFans, "shell-settings-perf-fans"),
         (

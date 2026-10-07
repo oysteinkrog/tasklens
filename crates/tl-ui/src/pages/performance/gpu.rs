@@ -198,6 +198,17 @@ pub fn engine_cells(
         .collect()
 }
 
+/// Every engine `device` reports, (key, name), in the vendor's order, hidden ones included.
+/// The Settings window's hidden engine checklist lists these (E21-023). Names are en-US.
+pub fn device_engines(snap: &Snapshot, device: DeviceIdx) -> Vec<(Arc<str>, SharedString)> {
+    let reported = reported_bits(gpu_totals(snap, device));
+    vendor_engines(GpuVendor::of(snap, device))
+        .iter()
+        .filter(|e| reported & e.bit != 0)
+        .map(|e| (Arc::from(e.key), tr_en(e.name, &[])))
+        .collect()
+}
+
 /// Columns of the engine grid: `ceil(sqrt(2n))` capped by `floor(width / min_cell_w)`, at
 /// least 1.
 pub fn engine_columns(n: usize, width_px: f32, min_cell_w: f32) -> usize {
@@ -1441,5 +1452,41 @@ mod tests {
         t.enc_pct = Metric::valid(0.0);
         assert_eq!(reported_bits(Some(&t)), 7);
         assert_eq!(reported_bits(None), 7);
+    }
+
+    #[test]
+    fn device_engines_follow_reported() {
+        use tl_model::system::Metric;
+        let device = DeviceIdx(1);
+        let mut snap = Snapshot::empty(tl_model::time::BootId(0), 0);
+        let all: Vec<String> = device_engines(&snap, device)
+            .iter()
+            .map(|(k, _)| k.to_string())
+            .collect();
+        assert_eq!(all, ["gpu", "enc", "dec"], "no record yet: every engine");
+        let t = GpuTotals {
+            device,
+            util_pct: Metric::valid(10.0),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::default(),
+            mem_total: Metric::default(),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            enc_pct: Metric::with(Validity::Unsupported),
+            dec_pct: Metric::valid(0.0),
+            temp_c: Metric::default(),
+            power_w: Metric::default(),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+        };
+        Arc::make_mut(&mut snap.system).gpus = Arc::from([(device, t)].as_slice());
+        let engines = device_engines(&snap, device);
+        let keys: Vec<&str> = engines.iter().map(|(k, _)| &**k).collect();
+        assert_eq!(keys, ["gpu", "dec"]);
+        assert_eq!(engines[1].1.as_ref(), "Video Decode");
     }
 }

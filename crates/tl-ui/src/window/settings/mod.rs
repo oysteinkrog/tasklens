@@ -17,11 +17,13 @@
 
 mod general;
 mod motion;
+mod performance;
 mod processes;
 mod units;
 
 use std::ops::RangeInclusive;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::base::slider::SliderState;
@@ -41,13 +43,15 @@ use super::registry::{GlobalRegistry, WindowKey};
 use crate::actions::OpenSettings;
 use crate::components::banner::{TlBanner, TlBannerKind};
 use crate::components::button::{TlButton, TlButtonKind};
+use crate::components::checkbox::TlCheckbox;
 use crate::components::slider::{TlSlider, TlSliderEvent};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::theme::metrics;
+use crate::text::style::t_sm;
+use crate::theme::{current, metrics};
 
 /// Window size and minimum size before the UI scale.
 pub const SIZE: (f32, f32) = (900., 640.);
@@ -172,6 +176,7 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
         motion::page(cx),
         units::page(cx),
         processes::page(cx),
+        performance::page(cx),
     ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
@@ -211,6 +216,8 @@ type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
 /// A dropdown setter taking the index of the picked option.
 type PickSetter = Rc<dyn Fn(usize, &mut App)>;
+/// A checklist section as rendered: its heading and `(label, value, setter)` per checkbox.
+type CheckRow = (SharedString, Vec<(SharedString, SharedString, BoolSetter)>);
 
 /// Builds one page: groups of items, each control bound to one setting. `keys` records every
 /// key a control binds, in order.
@@ -239,6 +246,18 @@ pub struct PageBuilder {
     /// The banner texts, top first.
     #[cfg(any(test, feature = "test-hooks"))]
     banners: Vec<SharedString>,
+    /// The checklist setters by key and value, the same closures the checkboxes call.
+    #[cfg(any(test, feature = "test-hooks"))]
+    checks: Vec<(SettingKey, SharedString, BoolSetter)>,
+    /// The empty texts the checklists show.
+    #[cfg(any(test, feature = "test-hooks"))]
+    empty_texts: Vec<(SettingKey, SharedString)>,
+}
+
+/// One checklist section: a sub-heading (none when empty) and its `(label, value)` checkboxes.
+pub struct CheckSection {
+    pub heading: SharedString,
+    pub options: Vec<(SharedString, SharedString)>,
 }
 
 impl PageBuilder {
@@ -261,6 +280,10 @@ impl PageBuilder {
             disabled: Vec::new(),
             #[cfg(any(test, feature = "test-hooks"))]
             banners: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            checks: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            empty_texts: Vec::new(),
         }
     }
 
@@ -310,6 +333,87 @@ impl PageBuilder {
         let item = SettingItem::render(move |_, _, _| TlBanner::new(kind, text.clone()));
         self.push_item(group, item);
         self
+    }
+
+    /// Checkboxes over the members of the StrList `key`, in `sections`. A checkbox is checked
+    /// while its value is in the list, or while it is not when `inverted` (a hidden list).
+    /// Checking adds the value, unchecking removes it (the other way round when `inverted`).
+    /// With no option at all the item shows `empty`.
+    pub fn checklist(
+        &mut self,
+        group: impl Into<SharedString>,
+        key: SettingKey,
+        label: impl Into<SharedString>,
+        sections: Vec<CheckSection>,
+        inverted: bool,
+        empty: SharedString,
+    ) -> &mut Self {
+        let restart = self.take_restart();
+        let setter = |value: SharedString| -> BoolSetter {
+            Rc::new(move |on, cx| set_member(cx, key, &value, on != inverted))
+        };
+        let sections: Rc<[CheckRow]> = sections
+            .into_iter()
+            .map(|section| {
+                let options = section
+                    .options
+                    .into_iter()
+                    .map(|(label, value)| {
+                        let set = setter(value.clone());
+                        (label, value, set)
+                    })
+                    .collect();
+                (section.heading, options)
+            })
+            .collect();
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            for (_, options) in sections.iter() {
+                for (_, value, set) in options {
+                    self.checks.push((key, value.clone(), set.clone()));
+                }
+            }
+            if sections.iter().all(|(_, options)| options.is_empty()) {
+                self.empty_texts.push((key, empty.clone()));
+            }
+        }
+        let field = SettingField::render(move |_, _, cx| {
+            let theme = current(cx).clone();
+            let m = *metrics(cx);
+            if sections.iter().all(|(_, options)| options.is_empty()) {
+                let mut text = div().text_color(theme.text_secondary).child(empty.clone());
+                *text.text_style() = t_sm(&m);
+                return text.into_any_element();
+            }
+            let members = read_list(cx, key);
+            let mut list = div().flex().flex_col().gap(m.sp[2]);
+            for (i, (heading, options)) in sections.iter().enumerate() {
+                if !heading.is_empty() {
+                    let mut h = div()
+                        .text_color(theme.text_secondary)
+                        .child(heading.clone());
+                    *h.text_style() = t_sm(&m);
+                    list = list.child(h);
+                }
+                let mut row = div().flex().flex_row().flex_wrap().gap(m.sp[4]);
+                for (label, value, set) in options {
+                    let present = members.iter().any(|v| v == value.as_ref());
+                    let set = set.clone();
+                    row = row.child(
+                        TlCheckbox::new(SharedString::from(format!(
+                            "{}-{i}-{value}",
+                            key.as_str()
+                        )))
+                        .label(label.clone())
+                        .checked(Some(present != inverted))
+                        .on_change(move |on, _, cx| set(on, cx)),
+                    );
+                }
+                list = list.child(row);
+            }
+            list.into_any_element()
+        });
+        self.push(group, key, label, None, restart, field)
     }
 
     /// Sets the description of the last item.
@@ -569,6 +673,37 @@ impl PageBuilder {
         }
     }
 
+    /// Runs the checklist setter of `value` in `key`, as a click on its checkbox would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_check(&self, key: SettingKey, value: &str, on: bool, cx: &mut App) {
+        if let Some((_, _, set)) = self
+            .checks
+            .iter()
+            .find(|(k, v, _)| *k == key && v.as_ref() == value)
+        {
+            set(on, cx);
+        }
+    }
+
+    /// The checklist values of `key`, in order.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn check_values(&self, key: SettingKey) -> Vec<SharedString> {
+        self.checks
+            .iter()
+            .filter(|(k, _, _)| *k == key)
+            .map(|(_, v, _)| v.clone())
+            .collect()
+    }
+
+    /// The text the checklist of `key` shows when it has no option.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn empty_text(&self, key: SettingKey) -> Option<SharedString> {
+        self.empty_texts
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, t)| t.clone())
+    }
+
     /// True when the item of `key` is disabled.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn is_disabled(&self, key: SettingKey) -> bool {
@@ -667,6 +802,33 @@ fn read(cx: &App, key: SettingKey) -> serde_json::Value {
     all.pointer(&pointer)
         .cloned()
         .unwrap_or(serde_json::Value::Null)
+}
+
+/// The members of the StrList `key`.
+fn read_list(cx: &App, key: SettingKey) -> Vec<String> {
+    match read(cx, key) {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Adds `value` to the StrList `key` when `present`, else removes it. Writes only on a change.
+fn set_member(cx: &mut App, key: SettingKey, value: &str, present: bool) {
+    let mut members = read_list(cx, key);
+    let has = members.iter().any(|v| v == value);
+    if has == present {
+        return;
+    }
+    if present {
+        members.push(value.to_owned());
+    } else {
+        members.retain(|v| v != value);
+    }
+    let list: Arc<[SharedString]> = members.into_iter().map(SharedString::from).collect();
+    TlSettings::set(cx, key, SettingValue::StrList(list));
 }
 
 fn read_bool(cx: &App, key: SettingKey) -> bool {
