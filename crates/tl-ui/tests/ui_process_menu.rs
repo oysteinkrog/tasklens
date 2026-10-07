@@ -2111,9 +2111,7 @@ mod end {
     #[gpui_kit::test]
     fn copy_toasts_single_and_multi(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
-        let mut records = own(&[300, 301]);
-        records.push(record(4300, 1, "gone", ProcFlags::EXITED));
-        rig.publish(records, &[300, 301, 4300], Vec::new());
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
         let cell = CopyCell { col: ColumnId::Pid };
         assert_eq!(last_toast(&mut rig, &[300], cell), "Copied to clipboard");
         assert_eq!(clipboard(&mut rig), "300");
@@ -2129,11 +2127,18 @@ mod end {
             last_toast(&mut rig, &[300, 301], CopyAllMetrics),
             "Selected process metrics copied."
         );
+    }
 
-        // An exited row copies normally. The same toast text joins the one already shown.
-        rig.select_pids(&[4300]);
-        assert!(rig.dispatch(CopyDetails).is_none());
+    #[gpui_kit::test]
+    fn copy_details_exited_row(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut records = own(&[300]);
+        records.push(record(4300, 1, "gone", ProcFlags::EXITED));
+        rig.publish(records, &[300, 4300], Vec::new());
+        assert_eq!(
+            last_toast(&mut rig, &[4300], CopyDetails),
+            "Process details copied."
+        );
         assert!(clipboard(&mut rig).starts_with("Name: gone\nPID: 4300\n"));
-        assert!(visible(&mut rig.vcx).contains(&"Process details copied.".to_owned()));
     }
 }
