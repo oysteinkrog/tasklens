@@ -1,0 +1,1512 @@
+//! Set Affinity dialog for one process target (UI-PWN-021, PROC-067, R-039, UI-PRC-021, ADR-003,
+//! ADR-008, R-119, E23-002).
+//!
+//! The dialog shows the CPU topology as core tiles grouped by L3 cache (or P-cores and E-cores
+//! on a hybrid CPU), keeps a CPU list field in sync with the checkboxes, and sends one
+//! `SetAffinity` action through the `ActionTracker`. While it is open, its targets are in
+//! `Demand.affinity_targets`, so the engine reads their current mask and cpuset limit into
+//! `DetailsSnapshot.affinity`.
+//!
+//! Several targets, thread targets and mixed marks come in a later bead (E23-005); the state
+//! already has the `MIXED` value they use.
+//!
+//! The grid is one focus stop: the arrow keys move a cursor over the CPUs, Space toggles the
+//! CPU under it and Shift+Space its group. The CPU checkboxes inside are no tab stops.
+
+use std::rc::Rc;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::Root;
+use gpui_kit::component::Icon;
+use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::{
+    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, ElementId, Entity,
+    FocusHandle, FontWeight, Global, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, WeakEntity,
+    Window, WindowHandle, div, px, size,
+};
+use smallvec::SmallVec;
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget};
+use tl_model::demand::Demand;
+use tl_model::details::AffinityInfo;
+use tl_model::ids::ProcessKey;
+use tl_model::snapshot::{ComponentMask, Snapshot};
+use tl_model::system::{CoreKind, CpuSet, CpuTopology};
+use tracing::warn;
+
+use crate::action_tracker::{GlobalActionTracker, ToastTexts};
+use crate::components::button::{TlButton, TlButtonKind};
+use crate::components::checkbox::TlCheckbox;
+use crate::components::focus::TlFocusRing;
+use crate::components::input::{TlInputSize, TlTextInput};
+use crate::components::toast::ToastQueue;
+use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
+use crate::components::window_frame::TlSecondaryWindow;
+use crate::demand::GlobalDemand;
+use crate::hub::{GlobalHub, SnapshotChanged};
+use crate::i18n::Strings;
+use crate::pages::performance::details::Template;
+use crate::text::style::{label_style, numeric_style, t_sm, t_xs};
+use crate::theme::{current, metrics};
+use crate::windows::actions::{
+    AFFINITY_DIALOG_CONTEXT, AffinityApply, AffinityEnd, AffinityHome, AffinityMoveDown,
+    AffinityMoveLeft, AffinityMoveRight, AffinityMoveUp, AffinityToggle, AffinityToggleGroup,
+};
+use crate::windows::frame::{AFFINITY_HEIGHT, PwnWindow, open_pwn};
+
+/// Targets captured when the menu opens (`Demand.affinity_targets` max).
+pub const MAX_TARGETS: usize = 256;
+/// The highest CPU number a list may name.
+pub const MAX_CPU: u16 = CpuSet::MAX_CPUS - 1;
+/// Core tiles per row.
+pub const TILES_PER_ROW: usize = 8;
+
+/// Heights and sizes at 100% scale (UI-PWN-021).
+const SUBTITLE_H: f32 = 24.;
+const ALL_ROW_H: f32 = 32.;
+const GROUP_HEADER_H: f32 = 24.;
+const TILE_W: f32 = 72.;
+const TILE_H: f32 = 52.;
+const TILE_GAP: f32 = 4.;
+const CPU_ROW_H: f32 = 24.;
+const VALIDATION_H: f32 = 20.;
+const HELPER_H: f32 = 16.;
+const FOOTER_H: f32 = 52.;
+const LIST_W: f32 = 200.;
+const ALERT_ICON: f32 = 14.;
+
+const KEY_TITLE: &str = "pwn-affinity-title";
+const KEY_LOADING: &str = "pwn-affinity-subtitle-loading";
+const KEY_ALL: &str = "pwn-affinity-all-processors";
+const KEY_CPU_LIST: &str = "pwn-affinity-cpu-list";
+const KEY_PLACEHOLDER: &str = "pwn-affinity-placeholder";
+const KEY_GROUP_CCD: &str = "pwn-affinity-group-ccd";
+const KEY_GROUP_P: &str = "pwn-affinity-group-pcores";
+const KEY_GROUP_E: &str = "pwn-affinity-group-ecores";
+const KEY_GROUP_CPUS: &str = "pwn-affinity-group-cpus";
+const KEY_CPU: &str = "pwn-affinity-cpu";
+const KEY_CORE_TIP: &str = "pwn-affinity-core-tooltip";
+const KEY_CORE_TIP_ONE: &str = "pwn-affinity-core-tooltip-one";
+const KEY_VALIDATION: &str = "pwn-affinity-validation";
+const KEY_INVALID_LIST: &str = "pwn-affinity-invalid-list";
+const KEY_CPUSET_TIP: &str = "pwn-affinity-cpuset-tooltip";
+const KEY_OFFLINE_TIP: &str = "pwn-affinity-offline-tooltip";
+const KEY_OK: &str = "pwn-affinity-ok";
+const KEY_CANCEL: &str = "pwn-affinity-cancel";
+const KEY_TOAST_OK: &str = "pwn-affinity-toast-success";
+const KEY_TOAST_FAIL: &str = "pwn-affinity-toast-failure";
+
+// ---- CPU lists ----
+
+/// Parses a CPU list such as `0-7,16-23`: comma-separated CPU numbers and `a-b` ranges with
+/// `a <= b`, each at most `max_cpu`. Spaces around an item are allowed. An empty text, an empty
+/// item or anything else is an error.
+#[allow(clippy::result_unit_err)] // The bead fixes this signature; the caller only needs valid or not.
+pub fn parse_cpu_list(text: &str, max_cpu: u16) -> Result<CpuSet, ()> {
+    let max_cpu = max_cpu.min(MAX_CPU);
+    let mut set = CpuSet::empty();
+    for item in text.split(',') {
+        let item = item.trim();
+        let (a, b) = match item.split_once('-') {
+            Some((a, b)) => (cpu_number(a, max_cpu)?, cpu_number(b, max_cpu)?),
+            None => {
+                let n = cpu_number(item, max_cpu)?;
+                (n, n)
+            }
+        };
+        if a > b {
+            return Err(());
+        }
+        for cpu in a..=b {
+            set.insert(cpu);
+        }
+    }
+    Ok(set)
+}
+
+/// One CPU number: ASCII digits only, at most `max_cpu`.
+fn cpu_number(text: &str, max_cpu: u16) -> Result<u16, ()> {
+    let text = text.trim();
+    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(());
+    }
+    text.parse::<u16>().ok().filter(|&n| n <= max_cpu).ok_or(())
+}
+
+/// Writes `set` as the canonical list into `out` (cleared first): ascending, runs of two or more
+/// CPUs merged into `a-b`, such as `0-7,16-23`. An empty set writes nothing.
+pub fn format_cpu_list(set: &CpuSet, out: &mut String) {
+    use std::fmt::Write as _;
+    out.clear();
+    let mut cpus = set.iter().peekable();
+    while let Some(start) = cpus.next() {
+        let mut end = start;
+        while cpus.peek() == Some(&(end + 1)) {
+            end += 1;
+            cpus.next();
+        }
+        if !out.is_empty() {
+            out.push(',');
+        }
+        let _ = if end > start {
+            write!(out, "{start}-{end}")
+        } else {
+            write!(out, "{start}")
+        };
+    }
+}
+
+fn cpu_list(set: &CpuSet) -> String {
+    let mut out = String::new();
+    format_cpu_list(set, &mut out);
+    out
+}
+
+// ---- State ----
+
+/// A CPU is not in the mask (of any target).
+pub const OFF: u8 = 0;
+/// A CPU is in the mask (of every target).
+pub const ON: u8 = 1;
+/// A CPU is in the mask of some targets only (E23-005).
+pub const MIXED: u8 = 2;
+
+/// One mark per CPU: [`OFF`], [`ON`] or [`MIXED`].
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CpuTriState(pub [u8; CpuSet::MAX_CPUS as usize]);
+
+impl Default for CpuTriState {
+    fn default() -> Self {
+        Self([OFF; CpuSet::MAX_CPUS as usize])
+    }
+}
+
+impl CpuTriState {
+    /// `ON` for every CPU in `set`, else `OFF`.
+    pub fn from_set(set: &CpuSet) -> Self {
+        let mut out = Self::default();
+        for cpu in set.iter() {
+            out.0[usize::from(cpu)] = ON;
+        }
+        out
+    }
+
+    pub fn get(&self, cpu: u16) -> u8 {
+        self.0.get(usize::from(cpu)).copied().unwrap_or(OFF)
+    }
+
+    pub fn set(&mut self, cpu: u16, mark: u8) {
+        if let Some(slot) = self.0.get_mut(usize::from(cpu)) {
+            *slot = mark;
+        }
+    }
+
+    /// The CPUs marked `ON`.
+    pub fn on_set(&self) -> CpuSet {
+        let mut set = CpuSet::empty();
+        for (cpu, &mark) in self.0.iter().enumerate() {
+            if mark == ON {
+                set.insert(cpu as u16);
+            }
+        }
+        set
+    }
+}
+
+// ---- Topology groups ----
+
+/// What a group header says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupLabel {
+    /// `CCD {n}: CPU {list}`, one per L3 cache when there are two or more.
+    Ccd(u16),
+    /// `P-cores: CPU {list}` on a hybrid CPU.
+    PCores,
+    /// `E-cores: CPU {list}` on a hybrid CPU.
+    ECores,
+    /// `CPUs: {list}`: one L3 cache, or no L3 data.
+    Cpus,
+}
+
+/// One core tile: the first logical CPU on top, its SMT sibling below.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CpuTile {
+    /// `CoreInfo.id`.
+    pub core: u16,
+    pub top: u16,
+    pub bottom: Option<u16>,
+    pub kind: CoreKind,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CpuGroup {
+    pub label: GroupLabel,
+    /// Every CPU in the group's tiles.
+    pub cpus: CpuSet,
+    /// In core order.
+    pub tiles: Vec<CpuTile>,
+}
+
+/// The groups of `topology`: P-cores and E-cores when any core is hybrid, else one group per
+/// L3 cache when there are two or more, else one `CPUs` group. The collector reports a
+/// missing L3 as group 0 for every core, so one L3 and no L3 data look the same.
+pub fn cpu_groups(topology: &CpuTopology) -> Vec<CpuGroup> {
+    let hybrid = topology
+        .cores
+        .iter()
+        .any(|c| matches!(c.kind, CoreKind::Performance | CoreKind::Efficiency));
+    let mut keys: Vec<(u16, GroupLabel)> = Vec::new();
+    let key_of = |kind: CoreKind, l3: u16| -> (u16, GroupLabel) {
+        if hybrid {
+            match kind {
+                CoreKind::Efficiency => (1, GroupLabel::ECores),
+                _ => (0, GroupLabel::PCores),
+            }
+        } else {
+            (l3, GroupLabel::Ccd(l3))
+        }
+    };
+    for core in topology.cores.iter() {
+        let key = key_of(core.kind, core.l3_group);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.sort_unstable_by_key(|(order, _)| *order);
+    let single_l3 = !hybrid && keys.len() <= 1;
+
+    let mut groups: Vec<CpuGroup> = keys
+        .iter()
+        .enumerate()
+        .map(|(i, (_, label))| CpuGroup {
+            label: match label {
+                _ if single_l3 => GroupLabel::Cpus,
+                GroupLabel::Ccd(_) => GroupLabel::Ccd(i as u16),
+                other => *other,
+            },
+            cpus: CpuSet::empty(),
+            tiles: Vec::new(),
+        })
+        .collect();
+    for core in topology.cores.iter() {
+        let key = key_of(core.kind, core.l3_group);
+        let Some(i) = keys.iter().position(|k| *k == key) else {
+            continue;
+        };
+        let group = &mut groups[i];
+        // A core with more than two threads gets one tile per pair.
+        for pair in core.logical.chunks(2) {
+            let tile = CpuTile {
+                core: core.id,
+                top: pair[0],
+                bottom: pair.get(1).copied(),
+                kind: core.kind,
+            };
+            group.cpus.insert(tile.top);
+            if let Some(b) = tile.bottom {
+                group.cpus.insert(b);
+            }
+            group.tiles.push(tile);
+        }
+    }
+    groups
+}
+
+/// One visual line of CPUs: the top or bottom row of one tile row. `None` is a tile without a
+/// CPU in that row.
+type GridLine = SmallVec<[Option<u16>; TILES_PER_ROW]>;
+
+/// The grid as visual lines, top to bottom, for the arrow keys.
+fn grid_lines(groups: &[CpuGroup]) -> Vec<GridLine> {
+    let mut lines = Vec::new();
+    for group in groups {
+        for row in group.tiles.chunks(TILES_PER_ROW) {
+            lines.push(row.iter().map(|t| Some(t.top)).collect());
+            if row.iter().any(|t| t.bottom.is_some()) {
+                lines.push(row.iter().map(|t| t.bottom).collect());
+            }
+        }
+    }
+    lines
+}
+
+/// A cursor move in the grid.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GridMove {
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+}
+
+/// Where `cursor` goes on `mv`. Left and Right stay in the visual line; Up and Down go to the
+/// nearest CPU in the same column of the next line that has one; Home and End go to the first
+/// and last CPU. A cursor not in the grid goes to the first CPU.
+fn move_cursor(lines: &[GridLine], cursor: Option<u16>, mv: GridMove) -> Option<u16> {
+    let first = lines.iter().flatten().flatten().next().copied();
+    let last = lines
+        .iter()
+        .rev()
+        .flat_map(|l| l.iter().rev())
+        .flatten()
+        .next()
+        .copied();
+    let pos = cursor.and_then(|cpu| {
+        lines.iter().enumerate().find_map(|(li, line)| {
+            line.iter()
+                .position(|c| *c == Some(cpu))
+                .map(|col| (li, col))
+        })
+    });
+    let Some((li, col)) = pos else {
+        return first;
+    };
+    let line = &lines[li];
+    let found = match mv {
+        GridMove::Home => first,
+        GridMove::End => last,
+        GridMove::Left => line[..col].iter().rev().flatten().next().copied(),
+        GridMove::Right => line[col + 1..].iter().flatten().next().copied(),
+        GridMove::Up => lines[..li]
+            .iter()
+            .rev()
+            .find_map(|l| nearest_in_line(l, col)),
+        GridMove::Down => lines[li + 1..].iter().find_map(|l| nearest_in_line(l, col)),
+    };
+    found.or(cursor)
+}
+
+/// The CPU at `col` in `line`, else the nearest one to the left, else to the right.
+fn nearest_in_line(line: &GridLine, col: usize) -> Option<u16> {
+    let col = col.min(line.len().saturating_sub(1));
+    line.get(col)
+        .copied()
+        .flatten()
+        .or_else(|| line[..col].iter().rev().flatten().next().copied())
+        .or_else(|| line.get(col + 1..)?.iter().flatten().next().copied())
+}
+
+// ---- Words (R-132) ----
+
+/// The dialog texts, translated once per strings version by [`affinity_words`].
+pub struct AffinityWords {
+    pub title: SharedString,
+    loading: Template,
+    pub all_processors: SharedString,
+    pub cpu_list: SharedString,
+    pub placeholder: SharedString,
+    group_ccd: Template,
+    group_p: Template,
+    group_e: Template,
+    group_cpus: Template,
+    cpu: Template,
+    core_tip: Template,
+    core_tip_one: Template,
+    pub validation: SharedString,
+    pub invalid_list: SharedString,
+    pub cpuset_tooltip: SharedString,
+    pub offline_tooltip: SharedString,
+    pub ok: SharedString,
+    pub cancel: SharedString,
+    pub toast_success: SharedString,
+    pub toast_failure: SharedString,
+}
+
+impl AffinityWords {
+    fn with(t: impl Fn(&str) -> SharedString, tmpl: impl Fn(&str, &[&str]) -> Template) -> Self {
+        Self {
+            title: t(KEY_TITLE),
+            loading: tmpl(KEY_LOADING, &["subtitle"]),
+            all_processors: t(KEY_ALL),
+            cpu_list: t(KEY_CPU_LIST),
+            placeholder: t(KEY_PLACEHOLDER),
+            group_ccd: tmpl(KEY_GROUP_CCD, &["n", "list"]),
+            group_p: tmpl(KEY_GROUP_P, &["list"]),
+            group_e: tmpl(KEY_GROUP_E, &["list"]),
+            group_cpus: tmpl(KEY_GROUP_CPUS, &["list"]),
+            cpu: tmpl(KEY_CPU, &["n"]),
+            core_tip: tmpl(KEY_CORE_TIP, &["k", "a", "b"]),
+            core_tip_one: tmpl(KEY_CORE_TIP_ONE, &["k", "a"]),
+            validation: t(KEY_VALIDATION),
+            invalid_list: t(KEY_INVALID_LIST),
+            cpuset_tooltip: t(KEY_CPUSET_TIP),
+            offline_tooltip: t(KEY_OFFLINE_TIP),
+            ok: t(KEY_OK),
+            cancel: t(KEY_CANCEL),
+            toast_success: t(KEY_TOAST_OK),
+            toast_failure: t(KEY_TOAST_FAIL),
+        }
+    }
+
+    fn en() -> Self {
+        Self::with(|key| crate::i18n::tr_en(key, &[]), Template::en)
+    }
+
+    fn translated(cx: &App) -> Self {
+        Self::with(
+            |key| crate::i18n::tr(cx, key),
+            |key, args| Template::new(cx, key, args),
+        )
+    }
+
+    /// `{subtitle} - reading current affinity…`.
+    pub fn loading(&self, subtitle: &str) -> SharedString {
+        fill(&self.loading, &[&subtitle])
+    }
+
+    /// The header text of `group`.
+    pub fn group(&self, group: &CpuGroup) -> SharedString {
+        let list = cpu_list(&group.cpus);
+        match group.label {
+            GroupLabel::Ccd(n) => fill(&self.group_ccd, &[&n, &list]),
+            GroupLabel::PCores => fill(&self.group_p, &[&list]),
+            GroupLabel::ECores => fill(&self.group_e, &[&list]),
+            GroupLabel::Cpus => fill(&self.group_cpus, &[&list]),
+        }
+    }
+
+    /// `CPU {n}`.
+    pub fn cpu(&self, n: u16) -> SharedString {
+        fill(&self.cpu, &[&n])
+    }
+
+    /// `Core {k}: CPU {a} and CPU {b}`, or `Core {k}: CPU {a}` without SMT.
+    pub fn core_tooltip(&self, tile: &CpuTile) -> SharedString {
+        match tile.bottom {
+            Some(b) => fill(&self.core_tip, &[&tile.core, &tile.top, &b]),
+            None => fill(&self.core_tip_one, &[&tile.core, &tile.top]),
+        }
+    }
+}
+
+fn fill(template: &Template, values: &[&dyn std::fmt::Display]) -> SharedString {
+    let mut out = String::new();
+    let _ = template.write(&mut out, values);
+    out.into()
+}
+
+struct AffinityWordsCache {
+    version: u64,
+    words: Rc<AffinityWords>,
+}
+
+impl Global for AffinityWordsCache {}
+
+/// The texts for the current strings. Translated only when the strings version changed; without
+/// strings they are in en-US.
+pub fn affinity_words(cx: &mut App) -> Rc<AffinityWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return Rc::new(AffinityWords::en());
+    };
+    if let Some(cache) = cx.try_global::<AffinityWordsCache>()
+        && cache.version == version
+    {
+        return cache.words.clone();
+    }
+    let words = Rc::new(AffinityWords::translated(cx));
+    cx.set_global(AffinityWordsCache {
+        version,
+        words: words.clone(),
+    });
+    words
+}
+
+// ---- The dialog ----
+
+/// What one CPU checkbox shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CpuView {
+    pub checked: bool,
+    pub disabled: bool,
+    pub tooltip: Option<SharedString>,
+}
+
+/// Why a CPU checkbox is disabled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CpuBlock {
+    Loading,
+    Cpuset,
+    Offline,
+}
+
+pub struct AffinityDialog {
+    /// Captured when the menu opened, at most [`MAX_TARGETS`].
+    targets: SmallVec<[ActionTarget; 1]>,
+    /// The mask of each target, once `DetailsSnapshot.affinity` has it.
+    initial: Vec<CpuSet>,
+    state: CpuTriState,
+    list_input: Entity<InputState>,
+    loading: bool,
+    subtitle: SharedString,
+    topology: std::sync::Arc<CpuTopology>,
+    groups: Vec<CpuGroup>,
+    lines: Vec<GridLine>,
+    /// Online CPUs inside every target's cpuset limit.
+    allowed: CpuSet,
+    /// The CPU list field holds text that is not a valid list of allowed CPUs.
+    list_invalid: bool,
+    cursor: Option<u16>,
+    grid_focus: FocusHandle,
+    cancel_focus: FocusHandle,
+    /// The parent window's toast queue; results show there (UI-PRC-015).
+    parent_toasts: Option<WeakEntity<ToastQueue>>,
+    /// The window height last asked for.
+    fitted: Rc<std::cell::Cell<Option<Pixels>>>,
+    _subs: Vec<Subscription>,
+}
+
+/// Opens the Set Affinity dialog for `targets`, modal to `parent`. `subtitle` is
+/// `{name} (PID {pid})`. Returns the open error and opens nothing on failure.
+pub fn open(
+    mut targets: SmallVec<[ActionTarget; 1]>,
+    subtitle: SharedString,
+    parent: AnyWindowHandle,
+    cx: &mut App,
+) -> gpui_kit::Result<WindowHandle<Root>> {
+    targets.truncate(MAX_TARGETS);
+    let title = affinity_words(cx).title.clone();
+    let parent_toasts = parent
+        .update(cx, |_, window, cx| ToastQueue::of_window(window, cx))
+        .ok()
+        .flatten()
+        .map(|q| q.downgrade());
+    open_pwn(
+        cx,
+        PwnWindow::SetAffinity,
+        title,
+        Some(parent),
+        move |window, cx| {
+            cx.new(|cx| AffinityDialog::new(targets, subtitle, parent_toasts, window, cx))
+        },
+    )
+}
+
+impl AffinityDialog {
+    /// The content of a dialog opened by [`open`], while it is open.
+    pub fn find(handle: WindowHandle<Root>, cx: &App) -> Option<Entity<Self>> {
+        TlSecondaryWindow::<Self>::find(handle, cx).map(|frame| frame.read(cx).content().clone())
+    }
+
+    fn new(
+        targets: SmallVec<[ActionTarget; 1]>,
+        subtitle: SharedString,
+        parent_toasts: Option<WeakEntity<ToastQueue>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let list_input = cx.new(|cx| InputState::new(window, cx));
+        let mut subs = Vec::new();
+        subs.push(cx.subscribe_in(
+            &list_input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => this.on_list_changed(cx),
+                InputEvent::PressEnter { .. } => this.apply(window, cx),
+                _ => {}
+            },
+        ));
+        let hub = cx.try_global::<GlobalHub>().map(|hub| hub.0.clone());
+        if let Some(hub) = &hub {
+            subs.push(cx.subscribe_in(
+                hub,
+                window,
+                |this, hub, ev: &SnapshotChanged, window, cx| {
+                    if ev
+                        .mask
+                        .intersects(ComponentMask::SYSTEM | ComponentMask::DETAILS)
+                    {
+                        let snap = hub.read(cx).current().clone();
+                        if this.take_snapshot(&snap, window, cx) {
+                            cx.notify();
+                        }
+                    }
+                },
+            ));
+        }
+
+        // Demand: the engine reads the targets' masks while the dialog is open (ADR-008).
+        if let Some(demand) = cx.try_global::<GlobalDemand>().map(|d| d.0.clone()) {
+            let id = cx.entity_id();
+            let part = Demand {
+                any_surface_visible: true,
+                affinity_targets: target_keys(&targets).collect::<Vec<_>>().into(),
+                ..Demand::default()
+            };
+            let handle = window.window_handle();
+            demand.update(cx, |d, cx| d.set(id, Some(handle), part, cx));
+            cx.on_release(move |_, cx| demand.update(cx, |d, cx| d.remove(id, cx)))
+                .detach();
+        }
+
+        let grid_focus = cx.focus_handle().tab_stop(true);
+        grid_focus.focus(window, cx);
+        let mut this = Self {
+            targets,
+            initial: Vec::new(),
+            state: CpuTriState::default(),
+            list_input,
+            loading: true,
+            subtitle,
+            topology: Default::default(),
+            groups: Vec::new(),
+            lines: Vec::new(),
+            allowed: CpuSet::empty(),
+            list_invalid: false,
+            cursor: None,
+            grid_focus,
+            cancel_focus: cx.focus_handle(),
+            parent_toasts,
+            fitted: Rc::default(),
+            _subs: subs,
+        };
+        if let Some(hub) = hub {
+            let snap = hub.read(cx).current().clone();
+            this.take_snapshot(&snap, window, cx);
+        }
+        this
+    }
+
+    /// Takes the topology and the targets' affinity from `snap`. False when nothing the dialog
+    /// shows changed.
+    fn take_snapshot(
+        &mut self,
+        snap: &Snapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut changed = false;
+        let topology = &snap.system.cpu_topology;
+        if !std::sync::Arc::ptr_eq(topology, &self.topology) {
+            self.topology = topology.clone();
+            self.groups = cpu_groups(topology);
+            self.lines = grid_lines(&self.groups);
+            if self.cursor.is_none_or(|c| !self.has_cpu(c)) {
+                self.cursor = move_cursor(&self.lines, None, GridMove::Home);
+            }
+            changed = true;
+        }
+
+        let infos: Option<Vec<AffinityInfo>> = target_keys(&self.targets)
+            .map(|key| snap.details.affinity.get(&key).copied())
+            .collect();
+        let mut allowed = self.topology.online;
+        if let Some(infos) = &infos {
+            for info in infos {
+                if !info.cpuset_limit.is_empty() {
+                    allowed = allowed.intersection(&info.cpuset_limit);
+                }
+            }
+        }
+        if allowed != self.allowed {
+            self.allowed = allowed;
+            changed = true;
+        }
+        if self.loading
+            && let Some(infos) = infos
+            && !self.targets.is_empty()
+        {
+            self.loading = false;
+            self.initial = infos.iter().map(|i| i.mask).collect();
+            let first = self.initial.first().copied().unwrap_or_default();
+            self.state = CpuTriState::from_set(&first.intersection(&self.allowed));
+            self.write_list(window, cx);
+            changed = true;
+        }
+        changed
+    }
+
+    fn has_cpu(&self, cpu: u16) -> bool {
+        self.groups.iter().any(|g| g.cpus.contains(cpu))
+    }
+
+    fn block(&self, cpu: u16) -> Option<CpuBlock> {
+        if !self.topology.online.contains(cpu) {
+            Some(CpuBlock::Offline)
+        } else if !self.allowed.contains(cpu) {
+            Some(CpuBlock::Cpuset)
+        } else if self.loading {
+            Some(CpuBlock::Loading)
+        } else {
+            None
+        }
+    }
+
+    // ---- Read-outs, also for tests ----
+
+    pub fn targets(&self) -> &[ActionTarget] {
+        &self.targets
+    }
+
+    pub fn initial(&self) -> &[CpuSet] {
+        &self.initial
+    }
+
+    pub fn state(&self) -> &CpuTriState {
+        &self.state
+    }
+
+    pub fn groups(&self) -> &[CpuGroup] {
+        &self.groups
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.loading
+    }
+
+    pub fn list_input(&self) -> &Entity<InputState> {
+        &self.list_input
+    }
+
+    pub fn grid_focus(&self) -> &FocusHandle {
+        &self.grid_focus
+    }
+
+    pub fn cursor(&self) -> Option<u16> {
+        self.cursor
+    }
+
+    /// The CPUs checked now.
+    pub fn checked(&self) -> CpuSet {
+        self.state.on_set()
+    }
+
+    /// The CPU list field text.
+    pub fn list_text(&self, cx: &App) -> String {
+        self.list_input.read(cx).text().to_string()
+    }
+
+    /// The field holds an invalid list; the helper text shows.
+    pub fn list_invalid(&self) -> bool {
+        self.list_invalid
+    }
+
+    /// "All processors": checked when every allowed CPU is, `None` (indeterminate) when some are.
+    pub fn all_state(&self) -> Option<bool> {
+        let on = self.checked().intersection(&self.allowed).count();
+        if on == 0 {
+            Some(false)
+        } else if on == self.allowed.count() {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// A group header checkbox: like [`Self::all_state`] over the group's allowed CPUs.
+    pub fn group_state(&self, group: usize) -> Option<bool> {
+        let Some(group) = self.groups.get(group) else {
+            return Some(false);
+        };
+        let allowed = group.cpus.intersection(&self.allowed);
+        let on = self.checked().intersection(&allowed).count();
+        if on == 0 {
+            Some(false)
+        } else if on == allowed.count() {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// Nothing is checked: the validation line shows.
+    pub fn nothing_checked(&self) -> bool {
+        !self.loading && self.checked().is_empty()
+    }
+
+    pub fn ok_enabled(&self) -> bool {
+        !self.loading && !self.list_invalid && !self.checked().is_empty()
+    }
+
+    /// The OK tooltip while OK is disabled by an empty selection.
+    pub fn ok_tooltip(&self, cx: &mut App) -> Option<SharedString> {
+        self.nothing_checked()
+            .then(|| affinity_words(cx).validation.clone())
+    }
+
+    /// The subtitle line, with the loading suffix while the masks are read.
+    pub fn subtitle(&self, cx: &mut App) -> SharedString {
+        if self.loading {
+            affinity_words(cx).loading(&self.subtitle)
+        } else {
+            self.subtitle.clone()
+        }
+    }
+
+    /// What CPU `cpu`'s checkbox shows.
+    pub fn cpu_view(&self, cpu: u16, cx: &mut App) -> CpuView {
+        let words = affinity_words(cx);
+        self.cpu_view_in(cpu, &words)
+    }
+
+    fn cpu_view_in(&self, cpu: u16, words: &AffinityWords) -> CpuView {
+        let block = self.block(cpu);
+        let tooltip = match block {
+            Some(CpuBlock::Offline) => Some(words.offline_tooltip.clone()),
+            Some(CpuBlock::Cpuset) => Some(words.cpuset_tooltip.clone()),
+            _ => None,
+        };
+        let outside = matches!(block, Some(CpuBlock::Offline | CpuBlock::Cpuset));
+        CpuView {
+            checked: !outside && self.state.get(cpu) == ON,
+            disabled: block.is_some(),
+            tooltip,
+        }
+    }
+
+    // ---- Changes ----
+
+    /// Rewrites the field with the canonical list of the checked CPUs.
+    fn write_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = cpu_list(&self.checked());
+        self.list_invalid = false;
+        // `set_value` emits no Change event, so this does not come back as a field edit.
+        self.list_input
+            .update(cx, |s, cx| s.set_value(text, window, cx));
+    }
+
+    /// A field edit: a valid list of allowed CPUs replaces the grid, anything else marks the
+    /// field invalid and leaves the grid at its last valid state.
+    fn on_list_changed(&mut self, cx: &mut Context<Self>) {
+        let text = self.list_input.read(cx).text().to_string();
+        match parse_cpu_list(&text, MAX_CPU) {
+            Ok(set) if set.intersection(&self.allowed) == set => {
+                self.state = CpuTriState::from_set(&set);
+                self.list_invalid = false;
+            }
+            _ => self.list_invalid = true,
+        }
+        cx.notify();
+    }
+
+    /// Sets CPU `cpu` to `on` when it can be changed.
+    pub fn set_cpu(&mut self, cpu: u16, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block(cpu).is_some() {
+            return;
+        }
+        self.state.set(cpu, if on { ON } else { OFF });
+        self.write_list(window, cx);
+        cx.notify();
+    }
+
+    /// Sets every allowed CPU in `cpus` to `on`.
+    fn set_many(&mut self, cpus: CpuSet, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading {
+            return;
+        }
+        for cpu in cpus.intersection(&self.allowed).iter() {
+            self.state.set(cpu, if on { ON } else { OFF });
+        }
+        self.write_list(window, cx);
+        cx.notify();
+    }
+
+    /// "All processors": checks every allowed CPU, or unchecks them all when all are checked.
+    pub fn toggle_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on = self.all_state() != Some(true);
+        self.set_many(self.allowed, on, window, cx);
+    }
+
+    /// A group checkbox: checks the whole group, or unchecks it when fully checked.
+    pub fn toggle_group(&mut self, group: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cpus) = self.groups.get(group).map(|g| g.cpus) else {
+            return;
+        };
+        let on = self.group_state(group) != Some(true);
+        self.set_many(cpus, on, window, cx);
+    }
+
+    /// Sends one `SetAffinity` request for the checked CPUs and closes the dialog. Does nothing
+    /// while OK is disabled.
+    pub fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ok_enabled() {
+            return;
+        }
+        let mask = self.checked();
+        let words = affinity_words(cx);
+        let texts = ToastTexts::new(words.toast_success.clone(), words.toast_failure.clone());
+        let queue = self
+            .parent_toasts
+            .clone()
+            .or_else(|| ToastQueue::of_window(window, cx).map(|q| q.downgrade()));
+        match (
+            cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()),
+            queue,
+        ) {
+            (Some(tracker), Some(queue)) => {
+                tracker.update(cx, |t, cx| {
+                    let request = ActionRequest {
+                        id: t.next_id(),
+                        kind: ActionKind::SetAffinity(mask),
+                        targets: self.targets.clone(),
+                        privileged: false,
+                    };
+                    t.track_or_toast(request, queue, texts, cx);
+                });
+            }
+            _ => warn!(target: "tasklens::ui", "affinity not sent: no action tracker or toasts"),
+        }
+        window.remove_window();
+    }
+
+    fn cancel(&mut self, window: &mut Window) {
+        window.remove_window();
+    }
+
+    // ---- Keys ----
+
+    /// Runs `f` when the grid has focus, else lets the key go on (to the field or a button).
+    fn in_grid(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        f: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>),
+    ) {
+        if self.grid_focus.is_focused(window) {
+            f(self, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    fn move_to(&mut self, mv: GridMove, window: &mut Window, cx: &mut Context<Self>) {
+        self.in_grid(window, cx, |this, _, cx| {
+            let next = move_cursor(&this.lines, this.cursor, mv);
+            if next != this.cursor {
+                this.cursor = next;
+                cx.notify();
+            }
+        });
+    }
+
+    fn on_left(&mut self, _: &AffinityMoveLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::Left, window, cx);
+    }
+
+    fn on_right(&mut self, _: &AffinityMoveRight, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::Right, window, cx);
+    }
+
+    fn on_up(&mut self, _: &AffinityMoveUp, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::Up, window, cx);
+    }
+
+    fn on_down(&mut self, _: &AffinityMoveDown, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::Down, window, cx);
+    }
+
+    fn on_home(&mut self, _: &AffinityHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::Home, window, cx);
+    }
+
+    fn on_end(&mut self, _: &AffinityEnd, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(GridMove::End, window, cx);
+    }
+
+    fn on_toggle(&mut self, _: &AffinityToggle, window: &mut Window, cx: &mut Context<Self>) {
+        self.in_grid(window, cx, |this, window, cx| {
+            if let Some(cpu) = this.cursor {
+                let on = this.state.get(cpu) != ON;
+                this.set_cpu(cpu, on, window, cx);
+            }
+        });
+    }
+
+    fn on_toggle_group(
+        &mut self,
+        _: &AffinityToggleGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.in_grid(window, cx, |this, window, cx| {
+            let group = this
+                .cursor
+                .and_then(|cpu| this.groups.iter().position(|g| g.cpus.contains(cpu)));
+            if let Some(group) = group {
+                this.toggle_group(group, window, cx);
+            }
+        });
+    }
+
+    /// Enter runs OK, except on Cancel, which Enter activates itself.
+    fn on_apply(&mut self, _: &AffinityApply, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cancel_focus.is_focused(window) {
+            cx.propagate();
+            return;
+        }
+        self.apply(window, cx);
+    }
+
+    // ---- Layout ----
+
+    /// The content height the dialog wants at `scale`, before the 360 to 640 clamp.
+    fn natural_height(&self, scale: f32, gap: f32, pad: f32) -> f32 {
+        let groups: f32 = self
+            .groups
+            .iter()
+            .map(|g| {
+                let rows = g.tiles.len().div_ceil(TILES_PER_ROW) as f32;
+                GROUP_HEADER_H * scale
+                    + gap
+                    + rows * TILE_H * scale
+                    + (rows - 1.).max(0.) * TILE_GAP * scale
+            })
+            .sum::<f32>()
+            + gap * (self.groups.len().saturating_sub(1)) as f32;
+        let mut body = (SUBTITLE_H + ALL_ROW_H) * scale + 1. + groups + 3. * gap;
+        if self.list_invalid {
+            body += HELPER_H * scale + gap;
+        }
+        if self.nothing_checked() {
+            body += VALIDATION_H * scale + gap;
+        }
+        body + 2. * pad + FOOTER_H * scale
+    }
+}
+
+/// The process keys of `targets` (a thread target counts as its process).
+fn target_keys(targets: &[ActionTarget]) -> impl Iterator<Item = ProcessKey> + '_ {
+    targets.iter().filter_map(|t| match t {
+        ActionTarget::Process(key) => Some(*key),
+        ActionTarget::Thread { process, .. } => Some(*process),
+        _ => None,
+    })
+}
+
+impl Render for AffinityDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let words = affinity_words(cx);
+        let theme = current(cx).clone();
+        let m = *metrics(cx);
+        let s = m.ui_scale;
+        let view = cx.entity().downgrade();
+
+        // Subtitle.
+        let mut subtitle = div()
+            .debug_selector(|| "AffinitySubtitle".into())
+            .flex_none()
+            .flex()
+            .items_center()
+            .h(px(SUBTITLE_H * s))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .text_color(theme.text_secondary);
+        *subtitle.text_style() = t_sm(&m);
+        let subtitle = subtitle.child(if self.loading {
+            words.loading(&self.subtitle)
+        } else {
+            self.subtitle.clone()
+        });
+
+        // "All processors" and the CPU list field.
+        let all = {
+            let view = view.clone();
+            TlCheckbox::new("AffinityAll")
+                .checked(self.all_state())
+                .label(words.all_processors.clone())
+                .disabled(self.loading)
+                .on_change(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.toggle_all(window, cx));
+                })
+        };
+        let mut list_label = div().text_color(theme.text_secondary);
+        *list_label.text_style() = t_sm(&m);
+        let list_label = list_label.child(words.cpu_list.clone());
+        let all_row = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .h(px(ALL_ROW_H * s))
+            .child(all)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(m.sp[4])
+                    .child(list_label)
+                    .child(
+                        TlTextInput::new("AffinityCpuList", &self.list_input)
+                            .size(TlInputSize::Sm)
+                            .width(px(LIST_W * s))
+                            .invalid(self.list_invalid)
+                            .aria_label(words.cpu_list.clone())
+                            .placeholder(words.placeholder.clone()),
+                    ),
+            );
+        let helper = self.list_invalid.then(|| {
+            let mut helper = div()
+                .debug_selector(|| "AffinityListHelper".into())
+                .flex_none()
+                .flex()
+                .justify_end()
+                .h(px(HELPER_H * s))
+                .text_color(theme.status.danger);
+            *helper.text_style() = t_xs(&m);
+            helper.child(words.invalid_list.clone())
+        });
+
+        // Groups and tiles.
+        let grid_focused = self.grid_focus.is_focused(window);
+        let mut grid = div()
+            .id("AffinityGrid")
+            .debug_selector(|| "AffinityGrid".into())
+            .track_focus(&self.grid_focus)
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(m.sp[4])
+            .overflow_y_scroll();
+        for (gi, group) in self.groups.iter().enumerate() {
+            let group_check = {
+                let view = view.clone();
+                TlCheckbox::new(("AffinityGroup", gi))
+                    .checked(self.group_state(gi))
+                    .tab_stop(false)
+                    .disabled(self.loading)
+                    .on_change(move |_, window, cx| {
+                        let _ = view.update(cx, |this, cx| this.toggle_group(gi, window, cx));
+                    })
+            };
+            let mut label = div().text_color(theme.text_primary);
+            *label.text_style() = label_style(&m, m.text.base, FontWeight::MEDIUM);
+            let header = div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(m.sp[3])
+                .h(px(GROUP_HEADER_H * s))
+                .child(group_check)
+                .child(label.child(words.group(group)));
+
+            let tiles = group.tiles.iter().enumerate().map(|(ti, tile)| {
+                let rows = [Some(tile.top), tile.bottom].into_iter().map(|cpu| {
+                    let mut row = div().flex_none().flex().items_center().h(px(CPU_ROW_H * s));
+                    let Some(cpu) = cpu else {
+                        return row.into_any_element();
+                    };
+                    let cpu_view = self.cpu_view_in(cpu, &words);
+                    let view = view.clone();
+                    let check = TlCheckbox::new(("AffinityCpu", usize::from(cpu)))
+                        .checked(Some(cpu_view.checked))
+                        .label(words.cpu(cpu))
+                        .tab_stop(false)
+                        .disabled(cpu_view.disabled)
+                        .on_change(move |on, window, cx| {
+                            let _ = view.update(cx, |this, cx| {
+                                this.cursor = Some(cpu);
+                                this.set_cpu(cpu, on, window, cx);
+                            });
+                        });
+                    *row.text_style() = numeric_style(&m, m.text.sm);
+                    let mut row = row.id(("AffinityCpuRow", usize::from(cpu))).child(check);
+                    if grid_focused && self.cursor == Some(cpu) {
+                        row = TlFocusRing::ring(row, m.radius_small, &theme);
+                    }
+                    match cpu_view.tooltip {
+                        Some(tip) => {
+                            let state = HoverTooltip::state(
+                                ("AffinityCpuTip", usize::from(cpu)),
+                                window,
+                                cx,
+                            );
+                            HoverTooltip::attach(
+                                &state,
+                                row,
+                                DELAY_CONTROL,
+                                TlTooltip::text(tip).build(),
+                                window,
+                                cx,
+                            )
+                            .into_any_element()
+                        }
+                        None => row.into_any_element(),
+                    }
+                });
+                let tile_div = div()
+                    .id(ElementId::from(("AffinityTile", gi * 4096 + ti)))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .w(px(TILE_W * s))
+                    .h(px(TILE_H * s))
+                    .px(m.sp[2])
+                    .overflow_hidden()
+                    .rounded(m.radius_small)
+                    .bg(theme.list_bg)
+                    .children(rows);
+                let state = HoverTooltip::state(("AffinityTileTip", gi * 4096 + ti), window, cx);
+                HoverTooltip::attach(
+                    &state,
+                    tile_div,
+                    DELAY_CONTROL,
+                    TlTooltip::text(words.core_tooltip(tile)).build(),
+                    window,
+                    cx,
+                )
+                .into_any_element()
+            });
+            let tiles: Vec<AnyElement> = tiles.collect();
+            grid = grid.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(m.sp[2])
+                    .child(header)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(TILE_GAP * s))
+                            .w(px((TILE_W * TILES_PER_ROW as f32
+                                + TILE_GAP * (TILES_PER_ROW as f32 - 1.))
+                                * s))
+                            .children(tiles),
+                    ),
+            );
+        }
+
+        let validation = self.nothing_checked().then(|| {
+            let mut text = div().text_color(theme.status.danger);
+            *text.text_style() = t_sm(&m);
+            div()
+                .debug_selector(|| "AffinityValidation".into())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(m.sp[3])
+                .h(px(VALIDATION_H * s))
+                .child(
+                    Icon::new(IconName::CircleAlert)
+                        .size(px(ALERT_ICON * s))
+                        .text_color(theme.status.danger),
+                )
+                .child(text.child(words.validation.clone()))
+        });
+
+        // Footer.
+        let cancel = {
+            let view = view.clone();
+            TlButton::new("AffinityCancel", TlButtonKind::Secondary)
+                .label(words.cancel.clone())
+                .focus_handle(self.cancel_focus.clone())
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, _| this.cancel(window));
+                })
+        };
+        let mut ok = {
+            let view = view.clone();
+            TlButton::new("AffinityOk", TlButtonKind::Primary)
+                .label(words.ok.clone())
+                .disabled(!self.ok_enabled())
+                .on_click(move |_, window, cx| {
+                    let _ = view.update(cx, |this, cx| this.apply(window, cx));
+                })
+        };
+        if self.nothing_checked() {
+            ok = ok.tooltip(words.validation.clone());
+        }
+        let footer = div()
+            .debug_selector(|| "AffinityFooter".into())
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(m.sp[4])
+            .h(px(FOOTER_H * s))
+            .px(m.sp[6])
+            .border_t_1()
+            .border_color(theme.divider)
+            .child(cancel)
+            .child(ok);
+
+        // The window height follows the content inside the 360 to 640 range; the group area
+        // scrolls beyond that.
+        let natural = px(self.natural_height(s, f32::from(m.sp[4]), f32::from(m.sp[6])));
+        let fitted = self.fitted.clone();
+        let fit = move |bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App| {
+            let want = (bounds.top() + natural)
+                .clamp(px(AFFINITY_HEIGHT.0 * s), px(AFFINITY_HEIGHT.1 * s));
+            if fitted.get() != Some(want) {
+                fitted.set(Some(want));
+                window.defer(cx, move |window, _| {
+                    let width = window.bounds().size.width;
+                    window.resize(size(width, want));
+                });
+            }
+        };
+
+        div()
+            .id("AffinityDialog")
+            .key_context(AFFINITY_DIALOG_CONTEXT)
+            .on_action(cx.listener(Self::on_left))
+            .on_action(cx.listener(Self::on_right))
+            .on_action(cx.listener(Self::on_up))
+            .on_action(cx.listener(Self::on_down))
+            .on_action(cx.listener(Self::on_home))
+            .on_action(cx.listener(Self::on_end))
+            .on_action(cx.listener(Self::on_toggle))
+            .on_action(cx.listener(Self::on_toggle_group))
+            .on_action(cx.listener(Self::on_apply))
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(theme.window_bg)
+            .on_prepaint(fit)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .gap(m.sp[4])
+                    .p(m.sp[6])
+                    .child(subtitle)
+                    .child(all_row)
+                    .children(helper)
+                    .child(div().flex_none().h(px(1.)).bg(theme.divider))
+                    .child(grid)
+                    .children(validation),
+            )
+            .child(footer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use proptest::prelude::*;
+    use tl_model::system::CoreInfo;
+
+    use super::*;
+
+    fn set(cpus: &[u16]) -> CpuSet {
+        let mut s = CpuSet::empty();
+        for &c in cpus {
+            s.insert(c);
+        }
+        s
+    }
+
+    fn fmt(s: &CpuSet) -> String {
+        cpu_list(s)
+    }
+
+    #[test]
+    fn parse_and_format_cpu_list() {
+        for bad in [
+            "", "a", "3-1", "0,,1", "0-x", "-1", "1-", "0 1", "1024", "+1",
+        ] {
+            assert!(parse_cpu_list(bad, MAX_CPU).is_err(), "{bad:?}");
+        }
+        assert!(parse_cpu_list("8", 7).is_err());
+        let s = parse_cpu_list("0-7, 16-23", MAX_CPU).expect("valid");
+        assert_eq!(fmt(&s), "0-7,16-23");
+        assert_eq!(fmt(&set(&[0, 1, 2, 3, 5])), "0-3,5");
+        assert_eq!(fmt(&set(&[1023])), "1023");
+        assert_eq!(fmt(&CpuSet::empty()), "");
+        assert_eq!(
+            parse_cpu_list("4,0-1", MAX_CPU).map(|s| fmt(&s)),
+            Ok("0-1,4".to_string())
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn format_parse_roundtrip(words in proptest::array::uniform16(any::<u64>()), keep in 0u32..64) {
+            // Thin the bits so runs and gaps both occur.
+            let mut s = CpuSet(words);
+            for (i, w) in s.0.iter_mut().enumerate() {
+                *w &= words[(i + 1) % 16].rotate_left(keep);
+            }
+            let text = fmt(&s);
+            if s.is_empty() {
+                prop_assert!(parse_cpu_list(&text, MAX_CPU).is_err());
+            } else {
+                let back = parse_cpu_list(&text, MAX_CPU).expect("canonical text parses");
+                prop_assert_eq!(fmt(&back), text);
+                prop_assert_eq!(back, s);
+            }
+        }
+    }
+
+    fn core(id: u16, logical: &[u16], l3: u16, kind: CoreKind) -> CoreInfo {
+        CoreInfo {
+            id,
+            logical: SmallVec::from_slice(logical),
+            l3_group: l3,
+            kind,
+        }
+    }
+
+    fn two_ccd() -> CpuTopology {
+        let cores: Vec<CoreInfo> = (0..16)
+            .map(|i| core(i, &[i, i + 16], i / 8, CoreKind::Standard))
+            .collect();
+        CpuTopology {
+            online: set(&(0..32).collect::<Vec<_>>()),
+            cores: Arc::from(cores),
+        }
+    }
+
+    #[test]
+    fn groups_by_l3_and_hybrid() {
+        let groups = cpu_groups(&two_ccd());
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].label, GroupLabel::Ccd(0));
+        assert_eq!(fmt(&groups[0].cpus), "0-7,16-23");
+        assert_eq!(fmt(&groups[1].cpus), "8-15,24-31");
+        assert_eq!(groups[0].tiles.len(), 8);
+        assert_eq!(
+            (groups[0].tiles[0].top, groups[0].tiles[0].bottom),
+            (0, Some(16))
+        );
+
+        let one = CpuTopology {
+            online: set(&[0, 1, 2, 3]),
+            cores: Arc::from(vec![
+                core(0, &[0, 1], 0, CoreKind::Standard),
+                core(1, &[2, 3], 0, CoreKind::Standard),
+            ]),
+        };
+        let groups = cpu_groups(&one);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, GroupLabel::Cpus);
+
+        let hybrid = CpuTopology {
+            online: set(&[0, 1, 2, 3]),
+            cores: Arc::from(vec![
+                core(0, &[0, 1], 0, CoreKind::Performance),
+                core(1, &[2], 0, CoreKind::Efficiency),
+                core(2, &[3], 0, CoreKind::Efficiency),
+            ]),
+        };
+        let groups = cpu_groups(&hybrid);
+        let labels: Vec<GroupLabel> = groups.iter().map(|g| g.label).collect();
+        assert_eq!(labels, [GroupLabel::PCores, GroupLabel::ECores]);
+        assert_eq!(groups[1].tiles[0].bottom, None);
+    }
+
+    #[test]
+    fn cursor_moves() {
+        let lines = grid_lines(&cpu_groups(&two_ccd()));
+        // Group 0: tops 0-7, bottoms 16-23; group 1: tops 8-15, bottoms 24-31.
+        assert_eq!(lines.len(), 4);
+        let mv = |c: u16, m: GridMove| move_cursor(&lines, Some(c), m);
+        assert_eq!(mv(0, GridMove::Right), Some(1));
+        assert_eq!(mv(0, GridMove::Left), Some(0));
+        assert_eq!(mv(0, GridMove::Down), Some(16));
+        assert_eq!(mv(16, GridMove::Down), Some(8));
+        assert_eq!(mv(8, GridMove::Up), Some(16));
+        assert_eq!(mv(5, GridMove::End), Some(31));
+        assert_eq!(mv(31, GridMove::Home), Some(0));
+        assert_eq!(move_cursor(&lines, None, GridMove::Down), Some(0));
+    }
+}
