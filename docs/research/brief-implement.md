@@ -68,3 +68,5 @@ done.
 Never stop a process by name or pattern (`pkill -f`, `killall`). Stop only processes you started, by the PID you recorded when you started them. Other agents' builds can have the same command line.
 
 Keep at most one `heavy-build` job queued at a time, and combine your checks into one job: `heavy-build sh -c 'cargo clippy ... && cargo clippy ... --features test-hooks && cargo test ...'`. The machine queue is shared with other sessions; duplicate or parallel jobs from one agent are not allowed.
+
+The whole tasklens session may have only one `heavy-build` job queued at a time. Always wrap it in the shared lock, so agents take turns: `flock /var/tmp/claude/tasklens-build.lock heavy-build sh -c '...'`. Hold the lock only for one combined job.
