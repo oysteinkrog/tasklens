@@ -27,6 +27,7 @@ use tl_model::snapshot::Snapshot;
 
 use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
 use super::details::KeyValueModel;
+use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
 use crate::chart::{
@@ -296,7 +297,11 @@ pub struct MemoryPage {
     physical: Entity<ChartView>,
     commit: Entity<ChartView>,
     swap: Entity<ChartView>,
-    // E25-002: bar: Option<CompositionBarState> (added by o55.3 as a chain edit, R-262)
+    /// The composition bar view, which keeps the `CompositionBarState`. Created the first time
+    /// the bar is shown; a cached view, so a memory sample repaints only the bar.
+    bar: Option<Entity<CompositionBarView>>,
+    /// The composition of the newest memory sample.
+    composition: Option<Composition>,
     /// E25-003 fills the rows.
     details: KeyValueModel,
     /// `performance.memory_composition`.
@@ -377,12 +382,15 @@ impl MemoryPage {
             .detach();
 
         let header = (page_words(cx).memory.clone(), SharedString::default());
-        let this = Self {
+        let composition = Composition::of(&snap.system.memory);
+        let mut this = Self {
             key,
             row,
             physical,
             commit,
             swap,
+            bar: None,
+            composition,
             details: KeyValueModel::default(),
             show_composition: settings.composition,
             show_swap: settings.swap,
@@ -407,7 +415,26 @@ impl MemoryPage {
         };
         let state = health_state(&snap);
         this.set_chart_state(state, cx);
+        this.sync_bar(cx);
         this
+    }
+
+    /// The composition bar view, once it has been shown.
+    pub fn bar(&self) -> Option<&Entity<CompositionBarView>> {
+        self.bar.as_ref()
+    }
+
+    /// Creates the bar view when the bar is shown for the first time, and hands it the newest
+    /// composition. The bar view notifies itself only when the composition changed.
+    fn sync_bar(&mut self, cx: &mut Context<Self>) {
+        if !self.show_composition {
+            return;
+        }
+        let c = self.composition;
+        match &self.bar {
+            Some(bar) => bar.update(cx, |b, cx| b.set_composition(c, cx)),
+            None => self.bar = Some(cx.new(|cx| CompositionBarView::new(c, cx))),
+        }
     }
 
     pub fn physical(&self) -> &Entity<ChartView> {
@@ -481,6 +508,8 @@ impl MemoryPage {
     ) {
         let snap = Arc::clone(hub.read(cx).current());
         if ev.mask.contains(ComponentMask::SYSTEM) {
+            self.composition = Composition::of(&snap.system.memory);
+            self.sync_bar(cx);
             let totals = Totals::of(&snap);
             if totals != self.totals {
                 let old = self.totals;
@@ -579,6 +608,7 @@ impl MemoryPage {
         }
         if new.composition != old.composition {
             self.show_composition = new.composition;
+            self.sync_bar(cx);
             cx.notify();
         }
         if new.swap != old.swap {
@@ -709,13 +739,24 @@ impl DevicePage for MemoryPage {
             ),
         };
 
-        // E25-002: the composition bar after `sp6` when `show_composition`.
+        // The composition bar after `sp6` when `show_composition`.
+        let bar = self
+            .bar
+            .as_ref()
+            .filter(|_| self.show_composition)
+            .map(|bar| {
+                div()
+                    .w_full()
+                    .pt(m.sp[6] - m.sp[4])
+                    .child(bar.clone().cached(StyleRefinement::default().w_full()))
+            });
         v_flex()
             .w_full()
             .gap(m.sp[4])
             .child(Self::chart_box(PHYSICAL_ID, &self.physical, h))
             .child(commit)
             .children(swap)
+            .children(bar)
             .into_any_element()
     }
 
