@@ -17,7 +17,7 @@ use tl_model::ids::{ColumnId, DeviceIdx, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
     AppCgroupSample, GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcessExtras, ProcessRecord,
 };
-use tl_model::settings::EngineSettings;
+use tl_model::settings::{EngineSettings, NetworkUnit};
 use tl_model::snapshot::SystemSnapshot;
 use tl_model::system::{GpuTotals, Metric};
 use tl_model::table::{
@@ -130,6 +130,78 @@ fn cmp_text(a: &str, b: &str) -> Ordering {
         .flat_map(char::to_lowercase)
         .cmp(b.chars().flat_map(char::to_lowercase))
         .then_with(|| a.cmp(b))
+}
+
+const KIB: f64 = 1024.0;
+const MIB: f64 = 1024.0 * 1024.0;
+
+/// The key the order compares (PROC-047): the step the cell shows, not the raw value, so two
+/// rows whose cells read the same keep their `ProcessKey` order across ticks. Percent columns
+/// step by 0.1, memory columns by the shown IEC unit's 0.01, rate columns by the shown unit's
+/// 0.1 (`units::percent`, `units::bytes`, `units::rate_mib_fixed`, `units::net_rate`). Other
+/// keys pass through. `sort_key` itself stays raw, because the process graphs read it.
+fn shown_key(key: SortKey, col: ColumnId, settings: &EngineSettings) -> SortKey {
+    use ColumnId as C;
+    match (col, key) {
+        (C::Cpu | C::CpuKernel | C::CpuUser | C::CpuRelative | C::Gpu, SortKey::Float(v)) => {
+            SortKey::Int(tenths(f64::from(v)))
+        }
+        (
+            C::Memory
+            | C::WsTotal
+            | C::WsPeak
+            | C::WsShared
+            | C::Commit
+            | C::Vsize
+            | C::VsizePeak
+            | C::Swap
+            | C::GpuMemDedicated,
+            SortKey::Int(n),
+        ) => SortKey::Int(iec_shown(n)),
+        (C::Disk | C::DiskReadRate | C::DiskWriteRate | C::DiskTotalRate, SortKey::Float(v)) => {
+            SortKey::Int(tenths(f64::from(v) / MIB))
+        }
+        (C::Network | C::NetSendRate | C::NetRecvRate, SortKey::Float(v)) => {
+            SortKey::Int(net_shown(f64::from(v), settings))
+        }
+        (_, key) => key,
+    }
+}
+
+/// `v` in tenths, as one decimal prints it. Zero, negative and NaN are 0, like the zero form.
+fn tenths(v: f64) -> i128 {
+    if v.is_nan() || v <= 0.0 {
+        0
+    } else {
+        // Saturates for values far beyond any rate or percent.
+        (v * 10.0).round() as i128
+    }
+}
+
+/// A byte count at the step `units::bytes` prints: exact below 1 KiB, else two decimals of the
+/// chosen unit, scaled back to bytes so the order holds across units.
+fn iec_shown(n: i128) -> i128 {
+    if n < 1024 {
+        return n;
+    }
+    let mut v = n as f64 / KIB;
+    let mut scale: i128 = 1024;
+    // The same unit choice as `units::bytes`, TiB at most.
+    let mut i = 0;
+    while v >= KIB - 0.005 && i < 3 {
+        v /= KIB;
+        scale *= 1024;
+        i += 1;
+    }
+    (v * 100.0).round() as i128 * scale / 100
+}
+
+/// A network rate at the step `units::net_rate` prints with `units.network` and auto scale off.
+fn net_shown(bytes_per_s: f64, settings: &EngineSettings) -> i128 {
+    match settings.network {
+        NetworkUnit::Bits => tenths(bytes_per_s * 8.0 / 1e6),
+        NetworkUnit::Bytes => tenths(bytes_per_s / MIB),
+    }
 }
 
 /// True when the field's validity lets its value take part in the order.
@@ -447,20 +519,13 @@ pub(crate) fn filtered(input: &TableInput<'_>, filter: &Filter) -> Vec<u32> {
     out
 }
 
-/// Sorts record indexes by `sort`: the column's key in the chosen direction, ties by
-/// `ProcessKey` ascending, `Absent` last. A `NOT_SORTABLE` column sorts by PID ascending.
+/// Sorts record indexes by `sort`: the column's key at the shown step in the chosen direction,
+/// ties by `ProcessKey` ascending, `Absent` last. A `NOT_SORTABLE` column sorts by PID ascending.
 pub(crate) fn sort_indices(input: &TableInput<'_>, indexes: &mut [u32], sort: SortSpec) {
     let (column, ascending) = effective_sort(sort);
     let mut keyed: Vec<(SortKey, u32)> = indexes
         .iter()
-        .map(|&i| {
-            let r = &input.records[i as usize];
-            let key = match input.extras.get(i as usize) {
-                Some(x) => sort_key(r, x, column),
-                None => record_only_key(r, column),
-            };
-            (key, i)
-        })
+        .map(|&i| (record_key(input, i, column), i))
         .collect();
     let records = input.records;
     keyed.sort_unstable_by(|(ka, ia), (kb, ib)| {
@@ -1305,13 +1370,14 @@ fn group_sort_key(g: &GroupRow, col: ColumnId) -> SortKey {
     }
 }
 
-/// The sort value of record `i`.
+/// The order key of record `i`: its sort value at the shown step.
 fn record_key(input: &TableInput<'_>, i: u32, column: ColumnId) -> SortKey {
     let r = &input.records[i as usize];
-    match input.extras.get(i as usize) {
+    let key = match input.extras.get(i as usize) {
         Some(x) => sort_key(r, x, column),
         None => record_only_key(r, column),
-    }
+    };
+    shown_key(key, column, input.settings)
 }
 
 /// One row directly under a group header: a process or an index into the group rows.
@@ -1331,7 +1397,11 @@ fn sort_items(input: &TableInput<'_>, groups: &[GroupRow], items: &mut [Item], s
         .map(|&it| {
             let key = match it {
                 Item::Record(i) => record_key(input, i, column),
-                Item::Group(g) => group_sort_key(&groups[g as usize], column),
+                Item::Group(g) => shown_key(
+                    group_sort_key(&groups[g as usize], column),
+                    column,
+                    input.settings,
+                ),
             };
             (key, it)
         })

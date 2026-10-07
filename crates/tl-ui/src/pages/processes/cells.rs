@@ -1655,9 +1655,10 @@ pub fn heat_kind(kind: ProcColumnKind) -> bool {
     )
 }
 
-/// Heat alpha of a cell (PROC-040, R-059): `intensity_pct / 100 × clamp(value / reference, 0, 1)`.
-/// `value` is in the column's own unit: percent, bytes, bytes per second or watts. A reference of
-/// 0 (no MemTotal, no VRAM) gives 0.
+/// Heat alpha of a cell (PROC-040, R-059): `intensity_pct / 100 × clamp(value / reference, 0, 1)`,
+/// rounded to a 2% step (UI-PRC-004) so the tint does not change on differences the cell does not
+/// show. `value` is in the column's own unit: percent, bytes, bytes per second or watts. A
+/// reference of 0 (no MemTotal, no VRAM) gives 0.
 pub fn heat_alpha(col: &ProcColumn, value: f64, ctx: &CellCtx, intensity_pct: u8) -> f32 {
     let reference = match col.heat {
         HeatRef::CpuMachine => 400.0 / f64::from(ctx.ncpu.max(1)),
@@ -1678,8 +1679,12 @@ pub fn heat_alpha(col: &ProcColumn, value: f64, ctx: &CellCtx, intensity_pct: u8
         return 0.0;
     }
     let ratio = (value / reference).min(1.0);
-    (f64::from(intensity_pct.min(100)) / 100.0 * ratio) as f32
+    let alpha = f64::from(intensity_pct.min(100)) / 100.0 * ratio;
+    ((alpha / HEAT_STEP).round() * HEAT_STEP) as f32
 }
+
+/// Heat alpha steps by 2% (UI-PRC-004).
+const HEAT_STEP: f64 = 0.02;
 
 /// The heat fill of a filled cell, for `CellOut::background`: `value_heat` at [`heat_alpha`].
 /// `None` when heat is off, for kinds without heat, for any validity but Valid and for zero.
