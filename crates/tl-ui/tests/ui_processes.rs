@@ -1745,7 +1745,10 @@ mod jump {
             let rows: Vec<TableRow> = shown
                 .iter()
                 .map(|&pid| {
-                    let ix = records.iter().position(|r| r.key.pid == pid).unwrap();
+                    let ix = records
+                        .iter()
+                        .position(|r| r.key.pid == pid)
+                        .expect("shown pid is a record");
                     row(NodeId::Process(key(pid)), 0, Some(ix as u32), None)
                 })
                 .collect();
@@ -1787,8 +1790,12 @@ mod jump {
         }
 
         fn active_tab(&mut self) -> Tab {
-            self.vcx
-                .update(|_, cx| main_window_view(cx).unwrap().read(cx).active_tab())
+            self.vcx.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window open")
+                    .read(cx)
+                    .active_tab()
+            })
         }
 
         fn selected(&mut self) -> Vec<ProcRowId> {
