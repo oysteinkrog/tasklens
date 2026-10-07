@@ -1276,3 +1276,16 @@ shell-crash-open-logs = Open log folder
 shell-crash-copy = Copy report
 shell-crash-close = Close
 shell-toast-copied = Copied to clipboard
+# Set Affinity… row menu item (tasklens-gma.7, UI-PRC-013 item 7)
+processes-menu-set-affinity = Set Affinity…
+processes-affinity-subtitle = { $name } (PID { $pid })
+# Minigraph cards (tasklens-xdh.5, PERF-080, UI-PRF-041).
+minigraph-label-cpu = CPU
+minigraph-label-memory = Memory
+minigraph-label-disk = Disk
+minigraph-label-network = Network
+minigraph-label-gpu = GPU
+minigraph-label-vram = VRAM
+minigraph-label-gpu-temp = GPU temp
+minigraph-tip-total = Total
+minigraph-tip-kernel = Kernel
