@@ -475,9 +475,9 @@ fn hatch_path(x0: f32, w: f32, h: f32, step: f32, sf: f32) -> Option<Path<Pixels
 /// `path` moved by `offset`.
 fn moved(path: &Path<Pixels>, offset: Point<Pixels>) -> Path<Pixels> {
     let mut path = path.clone();
-    path.bounds.origin = path.bounds.origin + offset;
+    path.bounds.origin += offset;
     for v in &mut path.vertices {
-        v.xy_position = v.xy_position + offset;
+        v.xy_position += offset;
     }
     path
 }
