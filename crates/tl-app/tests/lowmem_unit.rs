@@ -216,14 +216,14 @@ impl Fake {
     }
 
     fn release(&self) {
-        *self.hold.lock().unwrap() = false;
+        *self.hold.lock().expect("lock") = false;
         self.released.notify_all();
     }
 
     fn last_saved(&self) -> (Settings, UiState) {
         self.saved
             .lock()
-            .unwrap()
+            .expect("lock")
             .last()
             .cloned()
             .expect("inner was called")
@@ -249,9 +249,9 @@ fn wrap(
     let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
     let ops = UnitOps {
         install: Box::new(move || {
-            let mut hold = f1.hold.lock().unwrap();
+            let mut hold = f1.hold.lock().expect("lock");
             while *hold {
-                hold = f1.released.wait(hold).unwrap();
+                hold = f1.released.wait(hold).expect("lock");
             }
             f1.installs.fetch_add(1, Ordering::SeqCst);
             install()
@@ -268,7 +268,7 @@ fn wrap(
     let inner: PersistFn = Box::new(move |settings, state| {
         f4.saved
             .lock()
-            .unwrap()
+            .expect("lock")
             .push((settings.clone(), state.clone()));
     });
     (fake, lowmem_unit::wrap_persist_with(inner, initial, ops))
@@ -298,7 +298,7 @@ fn with_lowmem(enabled: bool) -> Settings {
 
 /// Waits until the worker has saved again after the install or remove.
 fn wait_idle(fake: &Fake, saves: usize) {
-    fake.wait_for(|f| f.saved.lock().unwrap().len() >= saves);
+    fake.wait_for(|f| f.saved.lock().expect("lock").len() >= saves);
     // Give a wrongly started second run time to show up.
     std::thread::sleep(Duration::from_millis(50));
 }
