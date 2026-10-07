@@ -16,7 +16,7 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::series::{Sample, SeriesView};
 use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSettings, UiState};
-use tl_model::system::SystemSnapshot;
+use tl_model::snapshot::SystemSnapshot;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -255,11 +255,10 @@ fn commit_axis_text_above_100(cx: &mut TestAppContext) {
     let peak = limit as f32 * 1.12;
     chart.update(r.vcx, |v, cx| {
         v.set_series_for_test(
-            [Some(series(
-                MetricId::MEM_COMMIT,
-                peak,
-                limit as f32 * 0.69,
-            ))]
+            [
+                Some(series(MetricId::MEM_COMMIT, peak, limit as f32 * 0.69)),
+                None,
+            ]
             .into(),
             cx,
         );
