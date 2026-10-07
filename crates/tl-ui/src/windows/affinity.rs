@@ -91,6 +91,10 @@ const KEY_GROUP_CPUS: &str = "pwn-affinity-group-cpus";
 const KEY_CPU: &str = "pwn-affinity-cpu";
 const KEY_CORE_TIP: &str = "pwn-affinity-core-tooltip";
 const KEY_CORE_TIP_ONE: &str = "pwn-affinity-core-tooltip-one";
+const KEY_PCORE_TIP: &str = "pwn-affinity-pcore-tooltip";
+const KEY_PCORE_TIP_ONE: &str = "pwn-affinity-pcore-tooltip-one";
+const KEY_ECORE_TIP: &str = "pwn-affinity-ecore-tooltip";
+const KEY_ECORE_TIP_ONE: &str = "pwn-affinity-ecore-tooltip-one";
 const KEY_VALIDATION: &str = "pwn-affinity-validation";
 const KEY_INVALID_LIST: &str = "pwn-affinity-invalid-list";
 const KEY_CPUSET_TIP: &str = "pwn-affinity-cpuset-tooltip";
@@ -415,8 +419,8 @@ pub struct AffinityWords {
     group_e: Template,
     group_cpus: Template,
     cpu: Template,
-    core_tip: Template,
-    core_tip_one: Template,
+    /// Core tooltips with two CPUs and with one: Standard, Performance, Efficiency.
+    core_tip: [(Template, Template); 3],
     pub validation: SharedString,
     pub invalid_list: SharedString,
     pub cpuset_tooltip: SharedString,
@@ -440,8 +444,12 @@ impl AffinityWords {
             group_e: tmpl(KEY_GROUP_E, &["list"]),
             group_cpus: tmpl(KEY_GROUP_CPUS, &["list"]),
             cpu: tmpl(KEY_CPU, &["n"]),
-            core_tip: tmpl(KEY_CORE_TIP, &["k", "a", "b"]),
-            core_tip_one: tmpl(KEY_CORE_TIP_ONE, &["k", "a"]),
+            core_tip: [
+                (KEY_CORE_TIP, KEY_CORE_TIP_ONE),
+                (KEY_PCORE_TIP, KEY_PCORE_TIP_ONE),
+                (KEY_ECORE_TIP, KEY_ECORE_TIP_ONE),
+            ]
+            .map(|(two, one)| (tmpl(two, &["k", "a", "b"]), tmpl(one, &["k", "a"]))),
             validation: t(KEY_VALIDATION),
             invalid_list: t(KEY_INVALID_LIST),
             cpuset_tooltip: t(KEY_CPUSET_TIP),
@@ -485,11 +493,17 @@ impl AffinityWords {
         fill(&self.cpu, &[&n])
     }
 
-    /// `Core {k}: CPU {a} and CPU {b}`, or `Core {k}: CPU {a}` without SMT.
+    /// `Core {k}: CPU {a} and CPU {b}`, or `Core {k}: CPU {a}` without SMT. On a hybrid CPU it
+    /// starts with `P-core` or `E-core` instead of `Core`.
     pub fn core_tooltip(&self, tile: &CpuTile) -> SharedString {
+        let (two, one) = &self.core_tip[match tile.kind {
+            CoreKind::Standard => 0,
+            CoreKind::Performance => 1,
+            CoreKind::Efficiency => 2,
+        }];
         match tile.bottom {
-            Some(b) => fill(&self.core_tip, &[&tile.core, &tile.top, &b]),
-            None => fill(&self.core_tip_one, &[&tile.core, &tile.top]),
+            Some(b) => fill(two, &[&tile.core, &tile.top, &b]),
+            None => fill(one, &[&tile.core, &tile.top]),
         }
     }
 }

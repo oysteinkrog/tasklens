@@ -485,3 +485,38 @@ fn affinity_first_focus_all_processors(cx: &mut TestAppContext) {
         .update(|window, cx| dialog.read(cx).all_focus().is_focused(window));
     assert!(focused, "All processors has focus");
 }
+
+#[gpui_kit::test]
+fn affinity_core_tooltip_names_core_type(cx: &mut TestAppContext) {
+    let mut rig = open_on(cx, hybrid_topology(), Some((set(0..6), set(0..6))));
+    let dialog = rig.dialog.clone();
+    let tips = rig.vcx.update(|_, cx| {
+        let words = affinity_words(cx);
+        let d = dialog.read(cx);
+        d.groups()
+            .iter()
+            .flat_map(|g| g.tiles.iter().map(|t| words.core_tooltip(t).to_string()))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        tips,
+        [
+            "P-core 0: CPU 0 and CPU 1",
+            "P-core 1: CPU 2 and CPU 3",
+            "E-core 2: CPU 4",
+            "E-core 3: CPU 5",
+        ]
+    );
+    // A CPU without hybrid cores keeps "Core".
+    let words = rig.vcx.update(|_, cx| affinity_words(cx));
+    let tile = affinity::CpuTile {
+        core: 0,
+        top: 0,
+        bottom: Some(16),
+        kind: CoreKind::Standard,
+    };
+    assert_eq!(
+        words.core_tooltip(&tile).as_ref(),
+        "Core 0: CPU 0 and CPU 16"
+    );
+}
