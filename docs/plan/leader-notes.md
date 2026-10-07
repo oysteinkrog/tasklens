@@ -678,3 +678,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.4 closed (082e49d7). The same agent takes bj6.3.
 - pdu.22 closed. The same agent takes wlf.9 (P0 bench scenes).
 - pdu.22 closed (6e74730c, 70593a9e, dfbe1a40, 144e385d, d4e22e17, b24f66f2): the table TSV with a CopiedRows toast, copy_text words everywhere. 144e385d swept a 9o0 ftl line; d4e22e17 put it back. 9o0.24 follow-up b84b3a56 adds CPU demand. 9o0.25 closed (1c016211). The thread count needs the process sweep, so new bead 9o0.36 reads it from /proc/loadavg instead. The 9o0 agent takes 9o0.26, 9o0.27, then 9o0.36.
+- 9o0.26: follows R-199 (write_to_clipboard returns () in gpui-pre 0.3.7), success toast only; the failure AC is dropped. CopyInformationAll is declared in pages/information/actions.rs.
