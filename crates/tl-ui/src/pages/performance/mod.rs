@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod cpu_details;
 pub mod cpu_grid;
 pub mod details;
+pub mod disk;
 pub mod gpu;
 pub mod memory;
 pub mod menu;
@@ -567,6 +568,10 @@ fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage,
         Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
         Err(view) => view,
     };
+    let view = match view.downcast::<disk::DiskPage>() {
+        Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
+        Err(view) => view,
+    };
     if let Ok(e) = view.downcast::<page::PlaceholderPage>() {
         e.update(cx, |p, cx| f(p, cx));
     }
@@ -579,6 +584,10 @@ fn page_focus_order(view: &AnyView, cx: &App) -> SmallVec<[FocusHandle; 4]> {
         Err(view) => view,
     };
     let view = match view.downcast::<memory::MemoryPage>() {
+        Ok(e) => return e.read(cx).focus_order(),
+        Err(view) => view,
+    };
+    let view = match view.downcast::<disk::DiskPage>() {
         Ok(e) => return e.read(cx).focus_order(),
         Err(view) => view,
     };
