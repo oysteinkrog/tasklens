@@ -12,6 +12,8 @@ mod autostart;
 mod bench_main;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
+#[cfg(feature = "bench")]
+mod gallery_main;
 mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
@@ -167,6 +169,12 @@ fn main() -> ExitCode {
             warmup_s: args.warmup.unwrap_or(5),
             json: args.json.clone(),
         });
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
+    // E01: the gallery skips single instance too; `--bench` is checked first.
+    #[cfg(feature = "bench")]
+    if args.gallery {
+        let code = gallery_main::run();
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
     // Step 4: single instance. A second copy forwards its arguments and exits 0.
