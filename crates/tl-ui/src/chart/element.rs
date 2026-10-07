@@ -250,6 +250,7 @@ fn paint_view(
     if !(hitbox.is_some_and(|h| h.is_hovered(window)) && window.is_window_active()) {
         view.hover.clear();
     }
+    let compact_scale = view.compact_scale;
     let ChartView {
         spec,
         labels,
@@ -400,6 +401,7 @@ fn paint_view(
         value,
         value_text: value_text.as_deref(),
         axis_text: (has_data && !axis_text.is_empty()).then_some(axis_text.as_str()),
+        compact_scale,
         metrics: &env.metrics,
         theme: &env.theme,
         network_unit: env.network_unit,

@@ -54,6 +54,8 @@ pub struct ChartView {
     pub(crate) last_value_text: String,
     /// Hover pin and the shaped value box lines (E19-016).
     pub(crate) hover: hover::HoverState,
+    /// The scale ceiling shows small in the plot's top-left corner (`set_compact_scale`).
+    pub(crate) compact_scale: bool,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `geometry::build` calls.
@@ -100,6 +102,7 @@ impl ChartView {
             series: SmallVec::new(),
             tier_fallback: false,
             value_sum: false,
+            compact_scale: false,
             value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
@@ -247,6 +250,22 @@ impl ChartView {
             self.value_text = text;
             cx.notify();
         }
+    }
+
+    /// Shows the scale ceiling ("100%", "16.00 GiB", "8 MiB/s") as one small line in the
+    /// plot's top-left corner, on plots from 32 px tall (Overview boxes, TMOG). It takes the
+    /// place of the axis max label.
+    pub fn set_compact_scale(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.compact_scale != on {
+            self.compact_scale = on;
+            cx.notify();
+        }
+    }
+
+    /// The shaped labels of the last paint.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn label_cache(&self) -> &labels::LabelCache {
+        &self.text
     }
 
     /// The value label's text as last painted.

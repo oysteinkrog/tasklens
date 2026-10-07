@@ -18,7 +18,7 @@ use tl_model::settings::NetworkUnit;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
-use super::{ChartLabels, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat};
+use super::{ChartLabels, ChartSpec, ChartState, LegendStyle, ValueAlign, ValueFormat, YScale};
 use crate::components::icons::TlIcon;
 use crate::text::fonts::UI_FAMILY;
 use crate::text::style::TNUM;
@@ -38,6 +38,8 @@ const LEGEND_ITEM_GAP: f32 = 12.0;
 pub(crate) const LEGEND_STACK_BELOW_W: f32 = 200.0;
 /// The axis max, range label and legend need a plot at least this tall.
 const MIN_PLOT_H: f32 = 100.0;
+/// The compact scale label needs a plot at least this tall (TMOG).
+const COMPACT_MIN_PLOT_H: f32 = 32.0;
 /// The range label and legend need a box at least this wide.
 const MIN_BOX_W: f32 = 160.0;
 
@@ -238,6 +240,9 @@ pub struct LabelPaint<'a> {
     pub value_text: Option<&'a str>,
     /// Axis max text from `scale::compute`, `None` when the scale has none.
     pub axis_text: Option<&'a str>,
+    /// Draw the scale ceiling small in the plot's top-left corner in place of the axis max
+    /// (`ChartView::set_compact_scale`).
+    pub compact_scale: bool,
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
     pub network_unit: NetworkUnit,
@@ -400,11 +405,47 @@ pub fn paint(
         );
     }
 
-    // Axis max: row 2, right-aligned. Only with data on a tall plot.
+    // Compact scale: the ceiling in the plot's top-left corner, on plots from 32 px. A fixed
+    // scale has no axis text, so its ceiling is formatted here.
     let has_data = matches!(p.state, ChartState::Live | ChartState::Stale { .. });
+    if p.compact_scale && f32::from(p.plot.size.height) >= COMPACT_MIN_PLOT_H * s {
+        let fixed = match p.spec.y {
+            YScale::Fixed { max, .. } => Some(max),
+            YScale::FixedTotal(total) if total > 0.0 => Some(total),
+            _ => None,
+        };
+        let text = match (p.axis_text.filter(|_| has_data), fixed) {
+            (Some(text), _) => Some(text),
+            (None, Some(max)) => {
+                scratch.clear();
+                format_value(p.labels.value_fmt, max, p.network_unit, scratch);
+                Some(scratch.as_str())
+            }
+            (None, None) => None,
+        };
+        if let Some(text) = text {
+            let style = LineStyle {
+                tnum: true,
+                ..secondary
+            };
+            let shaped = cache.axis_max.sync(window, text, style);
+            cache.shaped(shaped);
+            let origin = point(p.plot.left() + m.sp[2], p.plot.top() + m.sp[1]);
+            paint_line(window, cx, &cache.axis_max, origin, row);
+            #[cfg(any(test, feature = "test-hooks"))]
+            cache.record(
+                LabelKind::AxisMax,
+                origin,
+                cache.axis_max.width(),
+                style.color,
+            );
+        }
+    }
+
+    // Axis max: row 2, right-aligned. Only with data on a tall plot.
     if let Some(text) = p
         .axis_text
-        .filter(|_| p.labels.show_axis_max && tall && has_data)
+        .filter(|_| p.labels.show_axis_max && !p.compact_scale && tall && has_data)
     {
         let shaped = cache.axis_max.sync(window, text, secondary);
         cache.shaped(shaped);
