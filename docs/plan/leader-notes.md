@@ -750,3 +750,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
   - The fixed values go in D-022. The layout editor and its persistence come later. bj6.27 depends on the sidebar entry bead.
 - gma.3 (f17100b3, 65b514cf) closed. The engine computes the hashes and opens the browser (ComputeHashes, OpenUri), so tl-ui has no network code. The m1f agent takes Overview bead 1.
 - crw.21 (024f61a6, cebd603a, 6c967db3) closed. The core marks switch to our own CpuPCore and CpuECore icons, to match the affinity dialog, in a follow-up. The preferred-core star appears only when the ranks differ.
+- Overview beads filed as crw.36 to crw.43 (fd5ef0a0). Owners: m1f takes crw.36 then crw.39, crw takes crw.37 then crw.38.
