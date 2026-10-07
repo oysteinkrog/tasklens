@@ -12,8 +12,8 @@ use std::rc::Rc;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Corners, Div, Element, ElementId, Entity,
     EntityId, FontWeight, GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _,
-    IntoElement, LayoutId, ParentElement as _, Pixels, Position, SharedString, Size, Style,
-    Styled as _, Window, canvas, div, fill, point, px, relative, size,
+    IntoElement, LayoutId, ParentElement as _, Pixels, SharedString, Size, Style, Styled as _,
+    Window, canvas, div, fill, point, px, relative, size,
 };
 use tl_model::settings::Settings;
 

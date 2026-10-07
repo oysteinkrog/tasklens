@@ -6,16 +6,15 @@
 //! the box height with charts of at least 48 px (TMOG); a resize re-renders the box only when
 //! that changes. Pointer movement never notifies.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div,
-    px, size,
+    AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, Size, StyleRefinement, Styled as _, Subscription, Window, div, px, size,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};

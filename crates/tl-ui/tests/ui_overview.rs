@@ -204,6 +204,7 @@ mod boxes {
     use tl_model::system::Metric;
     use tl_model::time::now_boot_ns;
     use tl_model::validity::Validity;
+    use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::chart::ChartView;
     use tl_ui::chart::labels::LabelKind;
@@ -294,6 +295,7 @@ mod boxes {
         host: Entity<Host>,
         vcx: &'a mut VisualTestContext,
         version: u64,
+        _driver: Entity<AnimationDriver>,
     }
 
     fn open(cx: &mut TestAppContext) -> Rig<'_> {
@@ -326,6 +328,11 @@ mod boxes {
             cpu_w: 800.,
         });
         vcx.simulate_scale_factor_change(1.0);
+        let driver = vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
         vcx.simulate_resize(size(px(800.), px(600.)));
         draw(vcx);
         Rig {
@@ -333,6 +340,7 @@ mod boxes {
             host,
             vcx,
             version: 0,
+            _driver: driver,
         }
     }
 
@@ -618,6 +626,7 @@ mod bottom {
     use tl_model::time::now_boot_ns;
     use tl_model::units;
     use tl_model::validity::Validity;
+    use tl_ui::anim::AnimationDriver;
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::hub::SnapshotHub;
     use tl_ui::i18n::init_strings;
@@ -802,6 +811,7 @@ mod bottom {
         host: Entity<Host>,
         vcx: &'a mut VisualTestContext,
         version: u64,
+        _driver: Entity<AnimationDriver>,
     }
 
     fn open(
@@ -841,6 +851,11 @@ mod bottom {
             disk_h: heights.1,
         });
         vcx.simulate_scale_factor_change(1.0);
+        let driver = vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
         vcx.simulate_resize(size(px(500.), px(1600.)));
         draw(vcx);
         Rig {
@@ -848,6 +863,7 @@ mod bottom {
             host,
             vcx,
             version: 0,
+            _driver: driver,
         }
     }
 

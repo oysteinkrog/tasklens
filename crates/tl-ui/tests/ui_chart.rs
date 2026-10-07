@@ -1290,6 +1290,7 @@ mod labels {
                         value: i.value,
                         value_text: None,
                         axis_text: i.axis_text,
+                        compact_scale: false,
                         metrics: &metrics,
                         theme: &theme,
                         network_unit: NetworkUnit::Bits,

@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px, white,
+    AnyElement, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, Window, div, px, white,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};

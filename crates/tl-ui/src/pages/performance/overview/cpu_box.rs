@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use fluent_bundle::FluentValue;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Pixels, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, Context, Entity, IntoElement, ParentElement as _, Pixels, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};

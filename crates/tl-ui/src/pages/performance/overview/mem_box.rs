@@ -5,14 +5,14 @@
 //! touch it. It formats its text only when the memory totals' hash changes. The chart spec is
 //! rebuilt only when the total changes. Pointer movement never notifies.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::Cell;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, Context, Entity, Hsla, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
