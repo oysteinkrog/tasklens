@@ -200,7 +200,7 @@ fn table_synth_sorted_grouped_2000() {
 
     let mut group_cpu: Vec<f32> = Vec::new();
     let mut members: Vec<(f32, ProcessKey)> = Vec::new();
-    let mut check_members = |members: &mut Vec<(f32, ProcessKey)>| {
+    let check_members = |members: &mut Vec<(f32, ProcessKey)>| {
         assert!(members.is_empty() || members.len() == TABLE_GROUP_SIZE);
         for pair in members.windows(2) {
             let ((ca, ka), (cb, kb)) = (pair[0], pair[1]);
