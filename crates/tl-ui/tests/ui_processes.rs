@@ -2621,30 +2621,62 @@ mod keys {
     use gpui_kit::{Action, App, AppContext as _, Entity, KeyContext, Keystroke};
     use gpui_kit::{TestAppContext, VisualTestContext};
     use tl_model::actions::{ActionKind, ActionTarget, Signal};
-    use tl_model::client::EngineClient as _;
+    use tl_model::client::EngineClient;
     use tl_model::command::{Command, Tab};
     use tl_model::ids::NodeId;
     use tl_model::process::ProcFlags;
-    use tl_model::settings::UiState;
+    use tl_model::settings::{Settings, UiState};
     use tl_model::snapshot::Snapshot;
     use tl_ui::actions::FocusFilter;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::i18n::init_strings;
     use tl_ui::pages::processes::actions::{EndProcess, EndTask};
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, bind_keys_processes};
-    use tl_ui::window::main::main_window_view;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
 
     use super::delegate::{key, record, row, snapshot};
-    use super::shell::open_with;
 
     struct Rig {
-        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        engine: Arc<FakeEngine>,
         vcx: VisualTestContext,
         page: Entity<ProcessesPage>,
     }
 
+    /// The real app on the Processes tab, with its action tracker (the End handlers send
+    /// through it).
+    fn open(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Processes, cx))
+            .expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        (engine, vcx)
+    }
+
     /// The main window with PIDs 300 and 301 (own, unprotected) and PID 300 selected.
     fn rig(cx: &mut TestAppContext) -> Rig {
-        let (engine, mut vcx) = open_with(cx, UiState::default());
+        let (engine, mut vcx) = open(cx);
         vcx.update(|_, cx| bind_keys_processes(cx));
         let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
         let page = vcx
