@@ -1,2 +1,5 @@
 # Upstream license text, kept byte-identical to the release (line 21 ends in a space).
 assets/fonts/LICENSE-OFL.txt -whitespace
+# Test goldens hold exact output; a TSV row may end in a tab for an empty last cell.
+crates/tl-ui/tests/golden/*.tsv -whitespace
+crates/tl-ui/tests/golden/*.txt -whitespace
