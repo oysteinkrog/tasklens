@@ -2028,11 +2028,8 @@ mod window {
             .unwrap_or_default()
     }
 
-    /// A menu entry: label, enabled, action.
-    type FdsMenuItem = (String, bool, Option<Box<dyn gpui_kit::Action>>);
-
-    /// The keyboard row menu's entries.
-    fn fds_menu(rig: &mut FdsRig) -> Vec<FdsMenuItem> {
+    /// The keyboard row menu's entries as (label, enabled).
+    fn fds_menu(rig: &mut FdsRig) -> Vec<(String, bool)> {
         rig.vcx.dispatch_action(OpenContextMenu);
         draw(&mut rig.vcx);
         rig.vcx.update(|window, cx| {
@@ -2044,7 +2041,6 @@ mod window {
                     (
                         e.label.map(|l| l.to_string()).unwrap_or_default(),
                         e.kind == MenuEntryKind::Item,
-                        e.action,
                     )
                 })
                 .collect()
@@ -2156,7 +2152,7 @@ mod window {
         let mut rig = fds_rig(cx);
         select_fds(&mut rig, &[4]);
         let items = fds_menu(&mut rig);
-        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e, _)| (&**l, *e)).collect();
+        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
         assert_eq!(
             shown,
             [("Copy", true), ("Open file location", false)],
@@ -2167,16 +2163,14 @@ mod window {
 
         select_fds(&mut rig, &[3]);
         let items = fds_menu(&mut rig);
-        let (_, enabled, action) = items
-            .into_iter()
-            .find(|(l, _, _)| l == "Open file location")
-            .expect("the item");
-        assert!(enabled, "file row");
-        let action = action.expect("an action");
-        rig.vcx.update(|window, cx| {
-            tl_ui::components::menu::close_context_menu(window, cx);
-            window.dispatch_action(action, cx);
-        });
+        let shown: Vec<(&str, bool)> = items.iter().map(|(l, e)| (&**l, *e)).collect();
+        assert_eq!(
+            shown,
+            [("Copy", true), ("Open file location", true)],
+            "file row"
+        );
+        // The first "down" highlights Copy.
+        rig.vcx.simulate_keystrokes("down down enter");
         draw(&mut rig.vcx);
         let sent: Vec<_> = rig
             .engine
@@ -2236,14 +2230,9 @@ mod window {
         // The menu Copy takes the Name cell from the keyboard menu.
         select_fds(&mut rig, &[4]);
         let items = fds_menu(&mut rig);
-        let action = items
-            .into_iter()
-            .find_map(|(l, _, a)| (l == "Copy").then_some(a).flatten())
-            .expect("Copy item");
-        rig.vcx.update(|window, cx| {
-            tl_ui::components::menu::close_context_menu(window, cx);
-            window.dispatch_action(action, cx);
-        });
+        assert_eq!(items[0].0, "Copy");
+        rig.vcx.simulate_keystrokes("down enter");
+        draw(&mut rig.vcx);
         assert_eq!(clip(&mut rig.vcx), "pipe:[90211]");
 
         // The pane copies itself as lines.
@@ -2258,10 +2247,8 @@ mod window {
             "{text}"
         );
         assert!(text.contains("Status flags: Non-blocking"), "{text}");
-        assert_eq!(
-            props_toasts(cx, rig.handle).last().map(String::as_str),
-            Some("Copied to clipboard")
-        );
+        // Four copies, one toast with its repeat count.
+        assert_eq!(props_toasts(cx, rig.handle), ["Copied to clipboard (×4)"]);
     }
 }
 
