@@ -1280,12 +1280,17 @@ impl Reducer {
             self.sample_ok(id, t, period);
         }
         self.mark(ComponentMask::SERIES);
-        if let Some(processes) = &s.processes {
+        if s.processes.is_some() || s.drm_processes.is_some() {
             let columns = table::gpu_columns(&self.components.system, &self.components.devices);
             self.processes
-                .set_gpu_slots(columns.into_iter().map(|(uuid, _)| uuid));
-            self.processes
-                .apply_gpu_processes(processes, &self.apply_state.gpu_caps);
+                .set_gpu_slots(columns.into_iter().map(|(id, _)| id));
+            let caps = &self.apply_state.gpu_caps;
+            if let Some(processes) = &s.processes {
+                self.processes.apply_gpu_processes(processes, caps);
+            }
+            if let Some(rows) = &s.drm_processes {
+                self.processes.apply_drm_vram(rows, caps);
+            }
             self.republish_processes(settings);
         }
         Ok(())

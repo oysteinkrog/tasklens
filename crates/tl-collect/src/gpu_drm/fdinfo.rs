@@ -42,6 +42,9 @@ pub struct DrmClient {
     pub resident_bytes: SmallVec<[(Arc<str>, u64); 4]>,
     /// `drm-total-<region>`, in bytes.
     pub total_bytes: SmallVec<[(Arc<str>, u64); 4]>,
+    /// `drm-memory-<region>`, in bytes: the amdgpu keys from before the common `drm-resident-`
+    /// keys.
+    pub memory_bytes: SmallVec<[(Arc<str>, u64); 4]>,
 }
 
 /// Parses one fdinfo file. None when there is no drm-driver line or no drm-client-id.
@@ -316,6 +319,8 @@ fn parse_counter(key: &str, value: &str, client: &mut DrmClient, interner: &mut 
         );
     } else if let Some(name) = key.strip_prefix("total-") {
         push_value(&mut client.total_bytes, name, parse_bytes(value), interner);
+    } else if let Some(name) = key.strip_prefix("memory-") {
+        push_value(&mut client.memory_bytes, name, parse_bytes(value), interner);
     }
 }
 
@@ -379,7 +384,8 @@ mod tests {
         drm-client-id:\t12\n\
         drm-engine-gfx:\t5000000 ns\n\
         drm-engine-compute:\t1000000 ns\n\
-        drm-resident-vram:\t2048 KiB\n";
+        drm-resident-vram:\t2048 KiB\n\
+        drm-memory-vram:\t1024 KiB\n";
 
     #[test]
     fn parse_amd_client() {
@@ -391,6 +397,7 @@ mod tests {
         assert_eq!(get(&c.engine_ns, "gfx"), Some(5_000_000));
         assert_eq!(get(&c.engine_ns, "compute"), Some(1_000_000));
         assert_eq!(get(&c.resident_bytes, "vram"), Some(2_097_152));
+        assert_eq!(get(&c.memory_bytes, "vram"), Some(1_048_576));
         assert!(c.cycles.is_empty() && c.total_cycles.is_empty() && c.total_bytes.is_empty());
 
         let units = "drm-driver: i915\ndrm-client-id: 1\n\

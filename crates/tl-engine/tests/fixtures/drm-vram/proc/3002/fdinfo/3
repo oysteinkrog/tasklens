@@ -1,0 +1,8 @@
+pos:	0
+drm-driver:	i915
+drm-client-id:	5
+drm-pdev:	0000:00:02.0
+drm-total-local0:	12 MiB
+drm-resident-local0:	8 MiB
+drm-resident-system0:	1 MiB
+drm-engine-render:	700 ns

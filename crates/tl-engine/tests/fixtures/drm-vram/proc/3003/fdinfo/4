@@ -1,0 +1,6 @@
+pos:	0
+drm-driver:	xe
+drm-client-id:	10
+drm-pdev:	0000:04:00.0
+drm-total-system:	4 MiB
+drm-resident-system:	4 MiB

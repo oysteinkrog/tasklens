@@ -8,10 +8,12 @@
 //!
 //! AMD encode and decode come from the `gpu_metrics` VCN activity when the blob has it, else
 //! from two DRM fdinfo scans. Intel engines, memory, encode and decode always come from fdinfo,
-//! and Intel power from the hwmon energy counter. One fdinfo walk per tick serves every card.
-//! AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
+//! and Intel power from the hwmon energy counter. One fdinfo walk per tick serves every card and
+//! the per-process VRAM rows, which go out while the processes page shows a GPU column or history
+//! records. AMD and Intel cards have no UUID, so their identity is `uuid: [0; 16]` plus the PCI slot
 //! (R-166). Everything here is read-only.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,8 +47,8 @@ use crate::config::{EngineConfig, EngineMode};
 use crate::source::{self, Source, WorkerIo};
 use crate::supervise::WorkerFactory;
 use crate::update::{
-    DeviceDesc, DeviceKinds, DeviceList, GpuInfoUpdate, GpuSample, GpuStaticInfo, SourceUpdate,
-    WorkerError,
+    DeviceDesc, DeviceKinds, DeviceList, DrmProcessVram, GpuInfoUpdate, GpuSample, GpuStaticInfo,
+    SourceUpdate, WorkerError,
 };
 use crate::workers::WorkerSpec;
 use crate::workers::enumerate::EnumClock;
@@ -57,14 +59,54 @@ const AMD_DRIVER: &str = "amdgpu";
 const NAME_MAX: usize = 256;
 const GPU_UDEV_KEYS: [&str; 1] = ["ID_MODEL_FROM_DATABASE"];
 
-/// The GPU rate table (ADR-008 row "GPU"): 1 Hz while a GPU page is shown or recording is on.
+/// The GPU rate table (ADR-008 row "GPU"): 1 Hz while a GPU page is shown, per-process GPU
+/// values are shown or recording is on.
 pub fn gpu_period(d: &Demand, _s: &EngineSettings) -> Option<Duration> {
-    if d.gpus || d.recording {
+    if d.gpus || wants_processes(d) {
         Some(PERIOD)
     } else {
         None
     }
 }
+
+/// Per-process VRAM rows are sent while a visible surface shows per-process GPU values or
+/// history records, as for NVIDIA.
+pub fn wants_processes(d: &Demand) -> bool {
+    (d.any_surface_visible && d.gpu_process) || d.recording
+}
+
+/// Dedicated memory of each client in `scan` on one of `cards`, one row per client. The scan is
+/// already de-duplicated by `drm-client-id`, so a client shared by several fds or processes
+/// counts once. A client without a VRAM key is skipped.
+///
+/// The value is `drm-memory-vram` (amdgpu before the common keys), else the resident size of
+/// the dedicated region (`vram`, `vram0` for xe, `local0` for i915), else its total size.
+pub fn process_vram(scan: &FdinfoScan, cards: &[DrmCard], out: &mut Vec<DrmProcessVram>) {
+    out.clear();
+    for c in &scan.clients {
+        let Some(card) = cards.iter().find(|k| k.pci_slot == c.pdev) else {
+            continue;
+        };
+        let region = |list: &[(Arc<str>, u64)]| {
+            list.iter()
+                .find(|(n, _)| VRAM_REGIONS.contains(&&**n))
+                .map(|&(_, v)| v)
+        };
+        let vram = region(&c.memory_bytes)
+            .or_else(|| region(&c.resident_bytes))
+            .or_else(|| region(&c.total_bytes));
+        if let Some(vram_bytes) = vram {
+            out.push(DrmProcessVram {
+                pdev: Arc::clone(&card.pci_slot),
+                pid: c.pid,
+                vram_bytes,
+            });
+        }
+    }
+}
+
+/// Names of the dedicated memory region: amdgpu, xe, i915 (R-275).
+const VRAM_REGIONS: [&str; 3] = ["vram", "vram0", "local0"];
 
 /// The reader state of one card, reused every sample.
 #[derive(Clone, Debug)]
@@ -127,6 +169,10 @@ pub struct GpuDrmSource {
     cur_scan: FdinfoScan,
     /// `Devices` then `GpuInfo`, waiting for `take_extra`.
     pending_extra: VecDeque<SourceUpdate>,
+    /// `wants_processes` of the demand `period` saw last.
+    processes: Cell<bool>,
+    /// Reused for the per-process rows.
+    vram: Vec<DrmProcessVram>,
 }
 
 impl GpuDrmSource {
@@ -139,7 +185,14 @@ impl GpuDrmSource {
             prev_scan: None,
             cur_scan: FdinfoScan::default(),
             pending_extra: VecDeque::new(),
+            processes: Cell::new(false),
+            vram: Vec::new(),
         }
+    }
+
+    /// Sends per-process rows from the next sample on. `period` sets it from the demand.
+    pub fn set_processes(&mut self, on: bool) {
+        self.processes.set(on);
     }
 
     /// `sample()` is `self.sample_at(Clock::now())`; tests call this with an injected clock.
@@ -164,11 +217,16 @@ impl GpuDrmSource {
             state.read(card, &self.root);
         }
 
-        // One fdinfo walk serves every card that needs it.
-        let need_fdinfo = self.state.iter().any(CardState::needs_fdinfo);
+        // One fdinfo walk serves every card that needs it and the process rows.
+        let processes = self.processes.get();
+        let need_fdinfo = processes || self.state.iter().any(CardState::needs_fdinfo);
         if need_fdinfo {
             scan(&self.root, &mut self.cur_scan);
         }
+        let drm_processes = processes.then(|| {
+            process_vram(&self.cur_scan, &self.cards, &mut self.vram);
+            self.vram.clone()
+        });
 
         let mut raw = SmallVec::<[(Arc<str>, f32); 8]>::new();
         let mut busy = SmallVec::<[(Arc<str>, f32); 8]>::new();
@@ -217,6 +275,7 @@ impl GpuDrmSource {
             t_ns,
             devices,
             processes: None,
+            drm_processes,
         };
         (self, SourceUpdate::Gpu(sample))
     }
@@ -284,6 +343,7 @@ impl Source for GpuDrmSource {
     }
 
     fn period(&self, d: &Demand, s: &EngineSettings) -> Option<Duration> {
+        self.processes.set(wants_processes(d));
         gpu_period(d, s)
     }
 
@@ -586,6 +646,126 @@ mod tests {
             ..Demand::default()
         };
         assert_eq!(gpu_period(&recording, &s), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn processes_need_visible_gpu_column() {
+        let s = EngineSettings::default();
+        let hidden = Demand {
+            gpu_process: true,
+            ..Demand::default()
+        };
+        assert!(!wants_processes(&hidden));
+        assert_eq!(gpu_period(&hidden, &s), None);
+        let shown = Demand {
+            any_surface_visible: true,
+            ..hidden
+        };
+        assert!(wants_processes(&shown));
+        assert_eq!(gpu_period(&shown, &s), Some(PERIOD));
+        // A GPU page alone does not send process rows.
+        let gpus = Demand {
+            any_surface_visible: true,
+            gpus: true,
+            ..Demand::default()
+        };
+        assert!(!wants_processes(&gpus));
+    }
+
+    fn card(pci_slot: &str, driver: &str) -> DrmCard {
+        DrmCard {
+            card: 0,
+            vendor: 0,
+            device_id: 0,
+            pci_slot: Arc::from(pci_slot),
+            driver: Some(Arc::from(driver)),
+            hwmon: None,
+        }
+    }
+
+    /// `process_vram` over the `drm-vram` fixture, sorted by (pdev, pid, bytes).
+    fn fixture_vram(cards: &[DrmCard]) -> Vec<(String, u32, u64)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/drm-vram");
+        let mut fd_scan = FdinfoScan::default();
+        scan(&SysRoot::at(&dir), &mut fd_scan);
+        assert!(!fd_scan.partial);
+        let mut out = Vec::new();
+        process_vram(&fd_scan, cards, &mut out);
+        let mut rows: Vec<_> = out
+            .into_iter()
+            .map(|r| (r.pdev.to_string(), r.pid, r.vram_bytes))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    #[test]
+    fn amdgpu_fdinfo_vram() {
+        let rows = fixture_vram(&[card("0000:03:00.0", "amdgpu")]);
+        // Client 40 is open on fds 3 and 4 of pid 3000 and fd 7 of pid 3001: it counts once,
+        // with `drm-memory-vram`. Client 41 has only the common keys: resident wins over total.
+        // pid 3004 is on a card this worker does not read.
+        let shared = rows.iter().filter(|r| r.2 == 64 * MIB).count();
+        assert_eq!(shared, 1, "{rows:?}");
+        assert!(
+            rows.contains(&("0000:03:00.0".into(), 3000, 16 * MIB)),
+            "{rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let total: u64 = rows.iter().map(|r| r.2).sum();
+        assert_eq!(total, 80 * MIB);
+    }
+
+    #[test]
+    fn intel_fdinfo_vram() {
+        let rows = fixture_vram(&[card("0000:00:02.0", "i915"), card("0000:04:00.0", "xe")]);
+        // i915 `local0` and xe `vram0`; the xe client with system memory only has no row.
+        assert_eq!(
+            rows,
+            [
+                ("0000:00:02.0".into(), 3002, 8 * MIB),
+                ("0000:04:00.0".into(), 3003, 20 * MIB),
+            ]
+        );
+    }
+
+    #[test]
+    fn process_rows_follow_demand() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/drm-vram");
+        let mut src = GpuDrmSource::new(SysRoot::at(&dir));
+        let clock = |boot_ns| Clock {
+            boot_ns,
+            ..Clock::now()
+        };
+        src.cards = vec![card("0000:04:00.0", "xe")];
+        src.state = vec![CardState::Intel {
+            drv: IntelDriver::Xe,
+            sample: IntelSample::default(),
+            discrete: true,
+            prev_energy: None,
+        }];
+        // The fixture has no sysfs cards: mark the enumeration done to keep the hand-made list.
+        assert!(src.enum_clock.due(SEC));
+        let shown = Demand {
+            any_surface_visible: true,
+            gpu_process: true,
+            ..Demand::default()
+        };
+        src.period(&shown, &EngineSettings::default());
+        let (mut src, up) = src.sample_at(clock(SEC));
+        let SourceUpdate::Gpu(g) = up else {
+            panic!("{up:?}");
+        };
+        let rows = g.drm_processes.expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].pid, rows[0].vram_bytes), (3003, 20 * MIB));
+
+        src.set_processes(false);
+        let (_, up) = src.sample_at(clock(2 * SEC));
+        let SourceUpdate::Gpu(g) = up else {
+            panic!("{up:?}");
+        };
+        assert!(g.drm_processes.is_none());
     }
 
     #[test]

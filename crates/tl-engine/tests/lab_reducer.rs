@@ -1261,6 +1261,7 @@ fn every_source_update() -> Vec<SourceUpdate> {
                 },
             )],
             processes: Some(Vec::new()),
+            drm_processes: None,
         }),
         SourceUpdate::GpuInfo(GpuInfoUpdate {
             devices: vec![GpuStaticInfo {
@@ -1779,6 +1780,7 @@ fn gpu_rows_reach_records() {
             dec_pct: Reading::Unsupported,
             mem_used: Reading::Ok(4096),
         }]),
+        drm_processes: None,
     }));
     rig.run(vec![
         gpu_info(uuid, true),
@@ -1888,6 +1890,7 @@ fn gpu_power_msg(uuid: [u8; 16], watts: f32, sm: &[(u32, u32)]) -> EngineMsg {
                 })
                 .collect(),
         ),
+        drm_processes: None,
     }))
 }
 
@@ -2953,6 +2956,7 @@ fn gpu_sample(cards: &[(&DeviceIdentity, f32)]) -> EngineMsg {
             })
             .collect(),
         processes: None,
+        drm_processes: None,
     }))
 }
 

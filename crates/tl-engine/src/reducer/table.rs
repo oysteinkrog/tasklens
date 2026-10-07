@@ -1984,27 +1984,28 @@ fn pci_order(bus_id: &str) -> Option<(u32, u8, u8, u8)> {
 }
 
 /// The present GPUs in the order of the `gpu_0` to `gpu_15` columns: by PCI bus id, with
-/// unparsable ids last by text. Each entry is the GPU's UUID and its totals.
+/// unparsable ids last by text. Each entry is the GPU's identity and its totals.
 pub fn gpu_columns<'a>(
     system: &'a SystemSnapshot,
     devices: &'a DeviceCatalog,
-) -> SmallVec<[([u8; 16], &'a GpuTotals); 4]> {
-    let mut gpus: SmallVec<[(&str, [u8; 16], &GpuTotals); 4]> = system
+) -> SmallVec<[(&'a DeviceIdentity, &'a GpuTotals); 4]> {
+    let mut gpus: SmallVec<[(&str, &DeviceIdentity, &GpuTotals); 4]> = system
         .gpus
         .iter()
-        .filter_map(
-            |(idx, g)| match &present(devices, *idx, DeviceKind::Gpu)?.identity {
-                DeviceIdentity::Gpu { uuid, pci_bus_id } => Some((&**pci_bus_id, *uuid, g)),
+        .filter_map(|(idx, g)| {
+            let identity = &present(devices, *idx, DeviceKind::Gpu)?.identity;
+            match identity {
+                DeviceIdentity::Gpu { pci_bus_id, .. } => Some((&**pci_bus_id, identity, g)),
                 _ => None,
-            },
-        )
+            }
+        })
         .collect();
     gpus.sort_by(|a, b| {
         let (ka, kb) = (pci_order(a.0), pci_order(b.0));
         // Unparsable bus ids sort last, by text.
         (ka.is_none(), ka, a.0).cmp(&(kb.is_none(), kb, b.0))
     });
-    gpus.into_iter().map(|(_, uuid, g)| (uuid, g)).collect()
+    gpus.into_iter().map(|(_, id, g)| (id, g)).collect()
 }
 
 /// The two-line header numbers (PROC-038) from the latest system snapshot and sweep.

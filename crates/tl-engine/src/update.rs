@@ -243,7 +243,20 @@ pub struct DeviceDesc {
 pub struct GpuSample {
     pub t_ns: TimeNs,
     pub devices: Vec<(DeviceIdentity, GpuTotals)>,
+    /// NVIDIA rows; `None` when processes were not sampled.
     pub processes: Option<Vec<GpuProcessSample>>,
+    /// AMD and Intel rows from DRM fdinfo; `None` when processes were not sampled.
+    pub drm_processes: Option<Vec<DrmProcessVram>>,
+}
+
+/// Dedicated GPU memory of one DRM client, from `/proc/<pid>/fdinfo`. A process with several
+/// clients has several rows; a client shared by several processes has one row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DrmProcessVram {
+    /// The card's PCI slot in sysfs form, as in its `DeviceIdentity`.
+    pub pdev: Arc<str>,
+    pub pid: u32,
+    pub vram_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +599,7 @@ mod tests {
                     t_ns: 0,
                     devices: Vec::new(),
                     processes: None,
+                    drm_processes: None,
                 }),
                 None,
             ),

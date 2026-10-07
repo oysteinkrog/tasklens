@@ -418,6 +418,7 @@ fn gpu_sample(s: ProbeResponseSample, devices: &[GpuDeviceInfo]) -> GpuSample {
         t_ns: s.t_ns,
         devices: rows,
         processes: s.processes,
+        drm_processes: None,
     }
 }
 

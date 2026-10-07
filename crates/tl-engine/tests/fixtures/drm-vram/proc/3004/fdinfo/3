@@ -1,0 +1,5 @@
+pos:	0
+drm-driver:	amdgpu
+drm-client-id:	2
+drm-pdev:	0000:0a:00.0
+drm-memory-vram:	1 MiB
