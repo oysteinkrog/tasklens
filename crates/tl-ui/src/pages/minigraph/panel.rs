@@ -11,8 +11,9 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    App, AppContext as _, Context, Entity, Global, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, WeakEntity, Window,
+    div, px,
 };
 use tl_model::demand::{CpuDemand, Demand};
 use tl_model::settings::GraphsSettings;
@@ -54,6 +55,12 @@ const SYSTEM: [(MinigraphSource, GraphColumn); 7] = [
     (MinigraphSource::Vram(None), GraphColumn::Vram),
     (MinigraphSource::GpuTemp(None), GraphColumn::Gpu),
 ];
+
+/// The app's panel, set by `MinigraphPanel::new` (ADR-009: one panel per app). The shell menu
+/// and the row menu reach the panel through it without the Processes page.
+pub struct GlobalMinigraphPanel(pub WeakEntity<MinigraphPanel>);
+
+impl Global for GlobalMinigraphPanel {}
 
 pub struct MinigraphPanel {
     /// Attached cards, sorted by slot.
@@ -104,6 +111,8 @@ impl MinigraphPanel {
         let _settings_sub =
             has_settings.then(|| cx.observe_global::<TlSettings>(Self::on_settings));
         register_actions(cx);
+        let weak = cx.weak_entity();
+        cx.set_global(GlobalMinigraphPanel(weak));
         let mut this = Self {
             cards: Vec::new(),
             entries,
@@ -133,6 +142,11 @@ impl MinigraphPanel {
         })
         .detach();
         this
+    }
+
+    /// The app's panel, `None` before the Processes page is built.
+    pub fn global(cx: &App) -> Option<Entity<Self>> {
+        cx.try_global::<GlobalMinigraphPanel>()?.0.upgrade()
     }
 
     pub fn attached(&self) -> impl Iterator<Item = &MinigraphEntry> {

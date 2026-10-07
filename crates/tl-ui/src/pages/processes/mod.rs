@@ -49,8 +49,10 @@ use self::filter::FilterBinding;
 use self::jump::JumpTexts;
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
+use crate::demand::GlobalDemand;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_args};
+use crate::pages::minigraph::panel::MinigraphPanel;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -103,6 +105,8 @@ pub struct ProcessesPage {
     /// Ctrl-pause (UI-PRC-017): the snapshot the table froze on. Hub changes are ignored while
     /// it is set; the hub keeps the latest, so at most one extra snapshot is held (ADR-005).
     paused: Option<Arc<Snapshot>>,
+    /// The minigraph cards over the table (E26-004); `None` without a demand aggregator.
+    minigraphs: Option<Entity<MinigraphPanel>>,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -160,6 +164,10 @@ impl ProcessesPage {
             .try_global::<TlSettings>()
             .map_or([0; 4], |tl| SECTIONS.map(|s| tl.version(s)));
         jump::register_show_hidden(cx);
+        let minigraphs = cx
+            .try_global::<GlobalDemand>()
+            .map(|d| d.0.clone())
+            .map(|demand| cx.new(|cx| MinigraphPanel::new(&hub, &demand, cx)));
         Self {
             table,
             _hub_sub: hub_sub,
@@ -174,6 +182,7 @@ impl ProcessesPage {
             jump: jump::JumpState::default(),
             filter: FilterBinding::new(cx),
             paused: None,
+            minigraphs,
         }
     }
 
@@ -1174,9 +1183,17 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_go_to_parent))
             .on_action(cx.listener(Self::on_open_file_location))
             .child(
-                self.table
-                    .clone()
-                    .cached(StyleRefinement::default().size_full()),
+                div()
+                    .relative()
+                    .size_full()
+                    .child(
+                        self.table
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    )
+                    .children(self.minigraphs.clone().map(|panel| {
+                        panel.cached(StyleRefinement::default().absolute().inset_0())
+                    })),
             )
     }
 }
@@ -1189,5 +1206,8 @@ impl ShellPage for ProcessesPage {
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.table
             .update(cx, |t, cx| t.delegate.set_active(active, cx));
+        if let Some(panel) = &self.minigraphs {
+            panel.update(cx, |p, cx| p.set_active(active, cx));
+        }
     }
 }
