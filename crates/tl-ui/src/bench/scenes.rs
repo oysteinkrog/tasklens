@@ -3,8 +3,8 @@
 //!
 //! A scene opens one window with the production Performance tab, CPU page selected, fed by
 //! [`BenchEngine`]. [`run`] waits out the warm-up, takes its baselines, measures for the
-//! duration, builds the [`BenchReport`], writes the JSON when asked, prints it on one line and
-//! quits. Nothing runs while measuring but the scene's own views: one timer waits out the
+//! duration, builds the [`BenchReport`], writes the JSON when asked and prints it on one line;
+//! [`run_app`] then quits. Nothing runs while measuring but the scene's own views: one timer waits out the
 //! duration, and the frame probe records each frame.
 
 use std::cell::RefCell;
