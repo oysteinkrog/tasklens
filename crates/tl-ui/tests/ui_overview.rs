@@ -218,6 +218,8 @@ mod boxes {
     struct Host {
         cpu: Entity<CpuBox>,
         mem: Entity<MemBox>,
+        /// The CPU box width.
+        cpu_w: f32,
     }
 
     impl Render for Host {
@@ -229,7 +231,7 @@ mod boxes {
                 .size_full()
                 .child(
                     div()
-                        .w(px(800.))
+                        .w(px(self.cpu_w))
                         .h(px(300.))
                         .child(self.cpu.clone().cached(cached())),
                 )
@@ -319,6 +321,7 @@ mod boxes {
         let (host, vcx) = cx.add_window_view(move |_, cx| Host {
             cpu: cx.new(|cx| CpuBox::new(&hub, DeviceIdx(0), cx)),
             mem: cx.new(|cx| MemBox::new(&hub, DeviceIdx(1), cx)),
+            cpu_w: 800.,
         });
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(800.), px(600.)));
@@ -564,5 +567,24 @@ mod boxes {
         r.system(|s| s.memory.total = 32 * GIB);
         draw(r.vcx);
         assert_eq!(shapes(&mut r), (first.0, first.1 + 1));
+    }
+
+    #[gpui_kit::test]
+    fn cpu_box_stacks_below_560(cx: &mut TestAppContext) {
+        let mut r = open(cx);
+        let cpu = r.cpu();
+        let wide = |r: &mut Rig| r.vcx.update(|_, cx| cpu.read(cx).side_by_side());
+        assert!(wide(&mut r), "800 px: bars beside the chart");
+        let host = r.host.clone();
+        for (w, side) in [(500., false), (540., false), (600., true)] {
+            r.vcx.update(|_, cx| {
+                host.update(cx, |h, cx| {
+                    h.cpu_w = w;
+                    cx.notify();
+                })
+            });
+            draw(r.vcx);
+            assert_eq!(wide(&mut r), side, "{w} px");
+        }
     }
 }

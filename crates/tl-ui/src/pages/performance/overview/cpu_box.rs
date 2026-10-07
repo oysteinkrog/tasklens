@@ -225,6 +225,11 @@ impl CpuBox {
         self.scale.borrow()
     }
 
+    /// Whether the last render put the bars beside the chart (box at least 560 px wide).
+    pub fn side_by_side(&self) -> bool {
+        self.wide
+    }
+
     /// "CPU\t12%", the line when there is one, then "C0\t10%" per logical CPU.
     pub fn copy_text(&self, out: &mut String) {
         out.push_str(&self.title);
