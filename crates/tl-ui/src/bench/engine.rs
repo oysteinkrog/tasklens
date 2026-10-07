@@ -52,7 +52,7 @@ const CAP_1HZ: u32 = SeriesRing::fast_capacity(PERIOD_1HZ_NS);
 const BRIDGE_ORIGINS: usize = 1_024;
 
 /// Placeholder memory size for the MEM_USED series, in bytes (64 GiB).
-const MEM_TOTAL_BYTES: u64 = 64 << 30;
+pub(crate) const MEM_TOTAL_BYTES: u64 = 64 << 30;
 /// Network series are bytes per second; the synthetic values are Mbps.
 const BYTES_PER_S_PER_MBPS: f32 = 125_000.0;
 
@@ -60,9 +60,9 @@ const BYTES_PER_S_PER_MBPS: f32 = 125_000.0;
 const PHYS_CORES: usize = CORES / 2;
 
 /// Device indexes of the placeholder catalog.
-const DEV_PACKAGE: u16 = 0;
+pub(crate) const DEV_PACKAGE: u16 = 0;
 const DEV_FIRST_CORE: u16 = 1;
-const DEV_MEMORY: u16 = DEV_FIRST_CORE + CORES as u16;
+pub(crate) const DEV_MEMORY: u16 = DEV_FIRST_CORE + CORES as u16;
 const DEV_GPU: u16 = DEV_MEMORY + 1;
 const DEV_FIRST_DISK: u16 = DEV_GPU + 1;
 const DEV_FIRST_NET: u16 = DEV_FIRST_DISK + 4;

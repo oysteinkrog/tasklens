@@ -3,7 +3,9 @@
 //!
 //! A scene opens one window with the production Performance tab, CPU page selected, fed by
 //! [`BenchEngine`]. `table-2000` opens the production Processes tab instead, over the
-//! [`super::synth::TableSynth`] table, and scrolls it with [`TableScroller`]. [`run`] waits out the warm-up, takes its baselines, measures for the
+//! [`super::synth::TableSynth`] table, and scrolls it with [`TableScroller`]. `soak` (E01-015,
+//! ADR-010 step 2) opens the `perf-cpu` window plus two [`SoakGraphView`] windows, fed once per
+//! second, sends no input and counts the stalls of all three `AnimationDriver`s. [`run`] waits out the warm-up, takes its baselines, measures for the
 //! duration, builds the [`BenchReport`], writes the JSON when asked and prints it on one line;
 //! [`run_app`] then quits. Nothing runs while measuring but the scene's own views: one timer waits out the
 //! duration, and the frame probe records each frame.
@@ -17,16 +19,19 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement,
-    ParentElement as _, QuitMode, Render, Styled as _, Task, UniformListScrollHandle, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div, point, px,
-    size,
+    ParentElement as _, QuitMode, Render, Styled as _, Task, TitlebarOptions,
+    UniformListScrollHandle, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, div, point, px, size,
 };
 use rustc_hash::FxHashSet;
+use smallvec::{SmallVec, smallvec};
 use tl_model::client::EngineClient;
+use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::settings::{Settings, UiState};
 use tl_model::time::now_boot_ns;
+use tracing::info;
 
-use super::engine::{BenchEngine, BenchFeed};
+use super::engine::{BenchEngine, BenchFeed, DEV_MEMORY, DEV_PACKAGE, MEM_TOTAL_BYTES};
 use super::stats::{
     BenchClocks, BenchReport, FrameProbe, LatencyPct, PROBE_CAPACITY, count_missed, percentiles_ms,
     process_cpu_pct, read_rss_pss_mb, write_json,
@@ -34,6 +39,10 @@ use super::stats::{
 use super::synth::SEED;
 use crate::anim::{AnimationDriver, PaintRecord};
 use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::chart::view::ChartView;
+use crate::chart::{
+    ChartLabels, ChartSeries, ChartSpec, GridStyle, ValueAlign, ValueFormat, YScale,
+};
 use crate::components::icons::TlAssets;
 use crate::demand::GlobalDemand;
 use crate::hub::GlobalHub;
@@ -42,6 +51,7 @@ use crate::pages::performance::{DeviceKey, PerformancePage};
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::delegate::ProcessDelegate;
 use crate::table::tree_table::TlTreeTable;
+use crate::theme::current;
 use crate::window::main::APP_ID;
 
 /// Phase-0 fixture window size, logical px.
@@ -49,6 +59,10 @@ pub const WINDOW_W: f32 = 1600.;
 pub const WINDOW_H: f32 = 1000.;
 /// UI-PRF-053: `bridge` needs this many real samples in 30 s.
 pub const BRIDGE_MIN_SAMPLES_30S: u64 = 295;
+/// Soak graph windows (E01-015), logical px.
+pub const SOAK_GRAPH_W: f32 = 600.;
+pub const SOAK_GRAPH_H: f32 = 300.;
+pub const SOAK_TITLES: [&str; 2] = ["tasklens Soak Graph 1", "tasklens Soak Graph 2"];
 /// ADR-014 `table-2000` scroll speed, logical px per second.
 pub const TABLE_SCROLL_PX_PER_S: f32 = 1_200.;
 
@@ -59,12 +73,19 @@ pub enum BenchScene {
     Table2000,
     Bridge,
     Static,
+    Soak,
 }
 
 impl BenchScene {
-    pub const ALL: [BenchScene; 4] = [Self::PerfCpu, Self::Table2000, Self::Bridge, Self::Static];
+    pub const ALL: [BenchScene; 5] = [
+        Self::PerfCpu,
+        Self::Table2000,
+        Self::Bridge,
+        Self::Static,
+        Self::Soak,
+    ];
 
-    /// "perf-cpu", "table-2000", "bridge" or "static".
+    /// "perf-cpu", "table-2000", "bridge", "static" or "soak".
     pub fn from_arg(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|scene| scene.as_str() == s)
     }
@@ -75,6 +96,7 @@ impl BenchScene {
             Self::Table2000 => "table-2000",
             Self::Bridge => "bridge",
             Self::Static => "static",
+            Self::Soak => "soak",
         }
     }
 }
@@ -93,6 +115,21 @@ impl Default for BenchOptions {
             duration_s: 30,
             warmup_s: 5,
             json: None,
+        }
+    }
+}
+
+impl BenchOptions {
+    /// The defaults of `scene`: 600 s with no warm-up for `soak` (R-160 OI-12), else 30 s and
+    /// 5 s (ADR-014).
+    pub fn for_scene(scene: BenchScene) -> Self {
+        match scene {
+            BenchScene::Soak => Self {
+                duration_s: 600,
+                warmup_s: 0,
+                json: None,
+            },
+            _ => Self::default(),
         }
     }
 }
@@ -218,10 +255,106 @@ impl Render for SceneView {
     }
 }
 
-/// An open scene window.
+/// A `soak` graph window: one chart of one 1 Hz series and the window's own driver.
+pub struct SoakGraphView {
+    chart: Entity<ChartView>,
+    driver: Entity<AnimationDriver>,
+}
+
+impl SoakGraphView {
+    /// Graph 0 is the CPU total, graph 1 Memory used.
+    fn new(graph: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let driver = cx.new(AnimationDriver::new);
+        AnimationDriver::register(&driver, window, cx);
+        let hub = cx.global::<GlobalHub>().0.clone();
+        let theme = current(cx).clone();
+        let (device, metric, fill, line, y, value_fmt) = if graph == 0 {
+            (
+                DEV_PACKAGE,
+                MetricId::CPU_TOTAL,
+                theme.graph.cpu_fill,
+                theme.graph.cpu_line,
+                YScale::Fixed {
+                    min: 0.0,
+                    max: 100.0,
+                },
+                ValueFormat::Percent,
+            )
+        } else {
+            (
+                DEV_MEMORY,
+                MetricId::MEM_USED,
+                theme.graph.mem_fill,
+                theme.graph.mem_line,
+                YScale::FixedTotal(MEM_TOTAL_BYTES as f32),
+                ValueFormat::Bytes,
+            )
+        };
+        let spec = ChartSpec {
+            series: smallvec![ChartSeries {
+                id: SeriesId {
+                    device: DeviceIdx(device),
+                    metric,
+                },
+                fill: Some(fill),
+                line,
+                ..ChartSeries::default()
+            }],
+            y,
+            grid: GridStyle {
+                lines: true,
+                outline: true,
+                ..GridStyle::default()
+            },
+            smooth: true,
+            ..ChartSpec::default()
+        };
+        let labels = ChartLabels {
+            heading: None,
+            value_fmt,
+            value_align: ValueAlign::Right,
+            range_word: "".into(),
+            legend: SmallVec::new(),
+            show_axis_max: false,
+        };
+        let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+        Self { chart, driver }
+    }
+
+    pub fn chart(&self) -> &Entity<ChartView> {
+        &self.chart
+    }
+
+    pub fn driver(&self) -> &Entity<AnimationDriver> {
+        &self.driver
+    }
+}
+
+impl Render for SoakGraphView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .p_2()
+            .bg(current(cx).window_bg)
+            .child(self.chart.clone())
+    }
+}
+
+/// An open scene window, and in `soak` its two graph windows.
 pub struct SceneWindow {
     pub handle: AnyWindowHandle,
     pub view: Entity<SceneView>,
+    pub graphs: Vec<(AnyWindowHandle, Entity<SoakGraphView>)>,
+}
+
+impl SceneWindow {
+    /// Every window's driver: the scene window's first, then the graph windows'.
+    pub fn drivers(&self, cx: &App) -> SmallVec<[Entity<AnimationDriver>; 3]> {
+        let mut out = SmallVec::new();
+        out.push(self.view.read(cx).driver.clone());
+        out.extend(self.graphs.iter().map(|(_, g)| g.read(cx).driver.clone()));
+        out
+    }
 }
 
 /// Initialises the UI over `client` with the fixture settings of `scene` and opens the scene
@@ -262,7 +395,35 @@ pub fn open_scene(
         cx.new(|cx| SceneView::new(scene, window, cx))
     })
     .map_err(|e| BenchError(format!("cannot open the bench window: {e}")))?;
-    Ok(SceneWindow { handle, view })
+    let mut graphs = Vec::new();
+    if scene == BenchScene::Soak {
+        for (graph, title) in SOAK_TITLES.into_iter().enumerate() {
+            let bounds = Bounds::centered(None, size(px(SOAK_GRAPH_W), px(SOAK_GRAPH_H)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(title.into()),
+                    ..Default::default()
+                }),
+                window_decorations: Some(WindowDecorations::Client),
+                window_background: WindowBackgroundAppearance::Opaque,
+                app_id: Some(APP_ID.into()),
+                focus: false,
+                show: true,
+                ..Default::default()
+            };
+            let opened = gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| SoakGraphView::new(graph, window, cx))
+            })
+            .map_err(|e| BenchError(format!("cannot open {title}: {e}")))?;
+            graphs.push(opened);
+        }
+    }
+    Ok(SceneWindow {
+        handle,
+        view,
+        graphs,
+    })
 }
 
 /// Runs `scene` and returns its report. Called by tl-app inside `Application::run`. `real` is
@@ -277,6 +438,7 @@ pub fn run(
 ) -> Task<Result<BenchReport, BenchError>> {
     let feed = match (scene, real) {
         (BenchScene::Table2000, _) => BenchFeed::Table,
+        (BenchScene::Soak, _) => BenchFeed::Soak,
         (BenchScene::Bridge, Some(real)) => BenchFeed::Bridge(real),
         (BenchScene::Bridge, None) => {
             return Task::ready(Err(BenchError("bridge: no real engine client".to_owned())));
@@ -351,14 +513,29 @@ async fn measure(
 ) -> Result<BenchReport, BenchError> {
     let closed = |_| BenchError("the bench window closed".to_owned());
     let bridge = scene == BenchScene::Bridge;
+    let soak = scene == BenchScene::Soak;
     let driver = cx.update(|cx| window.view.read(cx).driver.clone());
+    // One driver per window; only `soak` has more than one.
+    let drivers = cx.update(|cx| window.drivers(cx));
+    let counts = |cx: &mut AsyncApp| -> SmallVec<[(u64, u64); 3]> {
+        cx.update(|cx| {
+            drivers
+                .iter()
+                .map(|d| {
+                    let stats = &d.read(cx).stats;
+                    (stats.stalls, stats.frames)
+                })
+                .collect()
+        })
+    };
 
     // Stalls during the warm-up are reported apart from the measured ones, never dropped.
-    let stalls_start = cx.update(|cx| driver.read(cx).stats.stalls);
+    let at_start = counts(cx);
 
-    // The probe arms `on_next_frame` every frame, so `static` runs without it.
+    // The probe arms `on_next_frame` every frame, so `static` runs without it, and `soak` too:
+    // forced frames would hide the zed#64499 stall it looks for.
     let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
-    if scene != BenchScene::Static {
+    if scene != BenchScene::Static && !soak {
         let probe = Rc::clone(&probe);
         window
             .handle
@@ -391,14 +568,10 @@ async fn measure(
 
     // Baselines, taken after the warm-up.
     probe.borrow_mut().reset();
-    let stalls_at = cx.update(|cx| {
-        driver.update(cx, |d, _| {
-            if bridge {
-                d.install_paint_log();
-            }
-            d.stats.stalls
-        })
-    });
+    if bridge {
+        cx.update(|cx| driver.update(cx, |d, _| d.install_paint_log()));
+    }
+    let at_measure = counts(cx);
     let samples_at = engine.bridge_samples();
     let cpu_at = (clocks.process_cpu_ns)();
     let wall_at = Instant::now();
@@ -414,11 +587,27 @@ async fn measure(
         scroller.borrow_mut().stop();
     }
     let samples = engine.bridge_samples().saturating_sub(samples_at);
-    let (requested, stalls, paint_log) = cx.update(|cx| {
-        driver.update(cx, |d, _| {
-            (d.stats.requested, d.stats.stalls, d.take_paint_log())
+    let (requested, paint_log) =
+        cx.update(|cx| driver.update(cx, |d, _| (d.stats.requested, d.take_paint_log())));
+    let at_end = counts(cx);
+    let delta = |to: &[(u64, u64)], from: &[(u64, u64)]| -> (u64, u64) {
+        to.iter().zip(from).fold((0, 0), |(s, f), (t, b)| {
+            (s + t.0.saturating_sub(b.0), f + t.1.saturating_sub(b.1))
         })
-    });
+    };
+    let (stalls, driver_frames) = delta(&at_end, &at_measure);
+    let (warmup_stalls, _) = delta(&at_measure, &at_start);
+    if soak {
+        for (n, (end, from)) in at_end.iter().zip(&at_measure).enumerate() {
+            info!(
+                target: "tasklens::perf",
+                window = n + 1,
+                stalls = end.0.saturating_sub(from.0),
+                frames = end.1.saturating_sub(from.1),
+                "soak window"
+            );
+        }
+    }
 
     if scene == BenchScene::Static && requested != 0 {
         return Err(BenchError(
@@ -436,9 +625,15 @@ async fn measure(
 
     let probe = probe.borrow();
     let intervals = probe.intervals_ns();
+    // The probe's frames, or in `soak` the drivers' frame callbacks.
+    let frames = if soak {
+        driver_frames
+    } else {
+        intervals.len() as u64
+    };
     // A moving scene with no frame callback at all (a locked screen, an occluded window or the
     // zed#64499 stall) must not pass as a report.
-    if scene != BenchScene::Static && intervals.is_empty() {
+    if scene != BenchScene::Static && frames == 0 {
         return Err(BenchError(format!(
             "{}: 0 frames drawn; possible frame-callback stall",
             scene.as_str()
@@ -451,7 +646,7 @@ async fn measure(
         .and_then(|log| bridge_latency(&log.records, engine));
     Ok(BenchReport {
         scene: scene.as_str(),
-        frames: intervals.len() as u64,
+        frames,
         frame_cpu_ms: percentiles_ms(probe.cpu_ns()),
         missed_frames: missed,
         long_missed_frames: long_missed,
@@ -459,8 +654,8 @@ async fn measure(
         probe_cpu_pct: None,
         rss_mb,
         pss_mb,
-        stalls: u32::try_from(stalls.saturating_sub(stalls_at)).unwrap_or(u32::MAX),
-        warmup_stalls: u32::try_from(stalls_at.saturating_sub(stalls_start)).unwrap_or(u32::MAX),
+        stalls: u32::try_from(stalls).unwrap_or(u32::MAX),
+        warmup_stalls: u32::try_from(warmup_stalls).unwrap_or(u32::MAX),
         bridge_latency_ms,
         gpu: None,
     })

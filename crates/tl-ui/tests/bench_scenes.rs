@@ -12,8 +12,9 @@ use tl_model::client::EngineClient;
 use tl_model::ids::{NodeId, ProcessKey};
 use tl_model::table::ProcessTableView;
 use tl_model::time::now_boot_ns;
+use tl_ui::anim::AnimationDriver;
 use tl_ui::bench::engine::{BenchEngine, BenchFeed};
-use tl_ui::bench::scenes::{TABLE_SCROLL_PX_PER_S, TableScroller, open_scene};
+use tl_ui::bench::scenes::{SOAK_TITLES, TABLE_SCROLL_PX_PER_S, TableScroller, open_scene};
 use tl_ui::bench::stats::{BenchReport, OUTPUT_PERIOD_NS};
 use tl_ui::bench::synth::{
     BenchRng, SEED, TABLE_GROUP_SIZE, TABLE_GROUPS, TABLE_PROCESSES, TableSynth,
@@ -75,6 +76,10 @@ fn run_scene(
     let window = cx.update(|cx| cx.windows().last().copied());
     let mut vcx = window.map(|w| VisualTestContext::from_window(w, cx));
     for _ in 0..=duration_s * 10 {
+        // Stop the clock once the scene has its result, so no timer runs after it.
+        if outcome.borrow().is_some() {
+            break;
+        }
         match vcx.as_mut() {
             Some(vcx) => {
                 vcx.run_until_parked();
@@ -108,9 +113,16 @@ fn scene_names_round_trip() {
         BenchScene::from_arg("table-2000"),
         Some(BenchScene::Table2000)
     );
+    assert_eq!(BenchScene::from_arg("soak"), Some(BenchScene::Soak));
     assert_eq!(BenchScene::from_arg("charts"), None);
     let opts = BenchOptions::default();
     assert_eq!((opts.duration_s, opts.warmup_s, opts.json), (30, 5, None));
+    let soak = BenchOptions::for_scene(BenchScene::Soak);
+    assert_eq!((soak.duration_s, soak.warmup_s), (600, 0));
+    assert_eq!(
+        BenchOptions::for_scene(BenchScene::PerfCpu),
+        BenchOptions::default()
+    );
 }
 
 #[gpui_kit::test]
@@ -359,4 +371,69 @@ fn table_scroll_bounces_at_1200_px_per_s(cx: &mut TestAppContext) {
     vcx.update(|_, cx| scroller.borrow_mut().frame(OUTPUT_PERIOD_NS, cx));
     assert!(offset() < bottom, "moves upward after the bottom");
     engine.stop();
+}
+
+#[gpui_kit::test]
+fn soak_scene_opens_three_windows(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let engine = BenchEngine::start(BenchFeed::Soak, SEED, now_boot_ns());
+    let scene = cx
+        .update(|cx| open_scene(cx, BenchScene::Soak, engine.clone()))
+        .expect("the soak windows open");
+    assert_eq!(scene.graphs.len(), SOAK_TITLES.len());
+    assert_eq!(cx.update(|cx| cx.windows().len()), 3);
+    let handles: Vec<_> = std::iter::once(scene.handle)
+        .chain(scene.graphs.iter().map(|(h, _)| *h))
+        .collect();
+    // 10 s of simulated time, one frame per window per 100 ms.
+    for _ in 0..100 {
+        for &h in &handles {
+            let mut vcx = VisualTestContext::from_window(h, cx);
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+        cx.executor().advance_clock(Duration::from_millis(100));
+    }
+    let requested: Vec<u64> = cx.update(|cx| {
+        scene
+            .drivers(cx)
+            .iter()
+            .map(|d| d.read(cx).stats.requested)
+            .collect()
+    });
+    assert_eq!(requested.len(), 3);
+    assert!(
+        requested.iter().all(|&r| r > 0),
+        "every window's charts request frames: {requested:?}"
+    );
+    engine.stop();
+}
+
+#[gpui_kit::test]
+fn soak_sums_stalls(cx: &mut TestAppContext) {
+    // Only the last window gets simulated frames, so the other two stall.
+    let report = run_scene(cx, BenchScene::Soak, 3, None, None, true).expect("soak passes");
+    assert_eq!(report.scene, "soak");
+    let per_window: Vec<u64> = cx.update(|cx| {
+        cx.windows()
+            .into_iter()
+            .map(|h| {
+                h.update(cx, |_, window, cx| {
+                    AnimationDriver::global(window, cx).read(cx).stats.stalls
+                })
+                .expect("window open")
+            })
+            .collect()
+    });
+    assert_eq!(per_window.len(), 3);
+    assert_eq!(
+        u64::from(report.stalls + report.warmup_stalls),
+        per_window.iter().sum::<u64>(),
+        "report {} + {} vs windows {per_window:?}",
+        report.stalls,
+        report.warmup_stalls
+    );
 }
