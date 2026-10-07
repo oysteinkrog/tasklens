@@ -622,3 +622,10 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - m1f.19 closed: tasklens-watch is its own binary (std plus libc), flock single instance, unit runs it directly, tasklens --watch-memory execs it (4b1b8ee, 96c753c). Release VmRSS 3776 kB after 2 s, VmLck 3768 kB, mlockall OK under 8 MiB, 1 thread. Margin about 320 kB, mostly locked libc; recheck under systemd during the OWNER RUN of U-24. No panic = "abort" (Cargo forbids it in a package override); accepted.
 - cr0.29 closed: no WAYLAND_DISPLAY and no DISPLAY prints "tasklens needs a Wayland or X11 display" and exits 1 in 37 ms, also with --start-minimized and --low-memory (8c28614). Bug confirmed on the old binary first.
 - gma.1 closed: PropsWindow and General tab (1055d43, 864a15e, c8f3807). Accepted: CircleOff and ShieldAlert only in TlExtraIcons, notification counts as the render-counter proxy, ninth-window toast to the active window, scan_running false until Strings exists. Follow-ups: TlTabs tooltips on enabled cells; freeze when the key disappears without EXITED. WINDOWS bit is for gma.16.
+
+## Reboot stop point, 2026-10-07 about 09:10
+
+The PC reboots to move the root disk. Agents were told to commit only green work, leave untested work on disk, and write a bead comment with their uncommitted files.
+In progress at the stop: fut.11, jqk.2, 9o0.22 (then 9o0.34, 9o0.23), bj6.10, 8fx.24 (then 8fx.39), pdu.20, m1f.2 (then m1f.20), m1f.6, gma.15 (then gma.41, gma.40), bj6.17.
+Queued next: m1f.21 (after m1f.6), jqk.35, jqk.32, gma.39.
+After the reboot: read each in-progress bead's latest comment, check `git status` against it, then resume each bead with a fresh agent (the old agents do not survive). Run the full tl-ui clippy with and without test-hooks once the tree is quiet.
