@@ -329,12 +329,7 @@ pub fn init(cx: &mut App) {
         // On Linux a renderer failure comes back as an Err from `open_window` (E16-012).
         if let Err(err) = open_first_main(cx) {
             error!(target: "tasklens::ui", %err, "main window did not open");
-            let exit = UiExit::RendererFailed(err);
-            request_exit(cx, exit.clone());
-            // The hook runs before the event loop starts, and the loop clears a stop request
-            // made before it runs, so the quit above is lost. Ask again from inside the loop.
-            cx.spawn(async move |cx| cx.update(|cx| request_exit(cx, exit)))
-                .detach();
+            request_exit(cx, UiExit::RendererFailed(err));
         }
     }));
     cx.on_action(on_quit);

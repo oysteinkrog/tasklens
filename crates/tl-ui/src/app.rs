@@ -430,14 +430,38 @@ struct ExitCell(Rc<Cell<Option<UiExit>>>);
 
 impl Global for ExitCell {}
 
+/// Counts the `cx.quit` calls `request_exit` makes, for the exit tests.
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Debug, Default)]
+pub struct QuitCalls(pub u32);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for QuitCalls {}
+
 /// Stores `exit` unless an earlier exit is stored, then quits the app.
+///
+/// The first request also quits again from a spawned task. A request made before the event
+/// loop starts (an open hook, `open_first`) is otherwise lost, because calloop's
+/// `EventLoop::run` clears the stop flag when it starts. The task runs once the loop runs.
 pub fn request_exit(cx: &mut App, exit: UiExit) {
     let slot = cx.default_global::<UiExitSlot>();
-    if slot.0.is_none() {
+    let first = slot.0.is_none();
+    if first {
         slot.0 = Some(exit.clone());
         if let Some(cell) = cx.try_global::<ExitCell>() {
             cell.0.set(Some(exit));
         }
+    }
+    quit(cx);
+    if first {
+        cx.spawn(async move |cx| cx.update(quit)).detach();
+    }
+}
+
+fn quit(cx: &mut App) {
+    #[cfg(any(test, feature = "test-hooks"))]
+    {
+        cx.default_global::<QuitCalls>().0 += 1;
     }
     cx.quit();
 }

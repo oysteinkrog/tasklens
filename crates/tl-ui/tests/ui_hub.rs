@@ -18,7 +18,8 @@ use tl_model::series::SeriesView;
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{SeriesSet, Snapshot};
 use tl_ui::app::{
-    AppRequestHandler, BootSettings, EngineGlobal, UiExitSlot, open_first_for_test, start_for_test,
+    AppRequestHandler, BootSettings, EngineGlobal, QuitCalls, UiExitSlot, open_first_for_test,
+    start_for_test,
 };
 use tl_ui::components::icons::TlAssets;
 use tl_ui::demand::GlobalDemand;
@@ -29,6 +30,7 @@ use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::BundledFontStatus;
 use tl_ui::theme::{ThemeStore, UiMetrics};
 use tl_ui::window::main::FailMainOpen;
+use tl_ui::windows::low_memory::{FailLowMemoryOpen, init_low_memory};
 use tl_ui::{
     AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
 };
@@ -490,6 +492,20 @@ fn exit_slot(cx: &mut TestAppContext) -> Option<UiExit> {
     cx.update(|cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()))
 }
 
+fn quit_calls(cx: &mut TestAppContext) -> u32 {
+    cx.update(|cx| cx.try_global::<QuitCalls>().map_or(0, |q| q.0))
+}
+
+/// An early quit path quits once at once and once more from inside the event loop, keeping
+/// the first reason (the loop clears a stop request made before it starts).
+fn assert_quits_again_in_loop(cx: &mut TestAppContext, exit: UiExit) {
+    assert_eq!(exit_slot(cx), Some(exit.clone()));
+    assert_eq!(quit_calls(cx), 1);
+    cx.run_until_parked();
+    assert_eq!(exit_slot(cx), Some(exit));
+    assert_eq!(quit_calls(cx), 2);
+}
+
 #[gpui_kit::test]
 fn open_first_calls_main_hook(cx: &mut TestAppContext) {
     run_init(cx, Settings::default());
@@ -510,11 +526,22 @@ fn main_open_failure_requests_renderer_failed_exit(cx: &mut TestAppContext) {
         cx.set_global(FailMainOpen("no adapter".to_owned()));
         open_first_for_test(cx, OpenMode::Main);
     });
-    let failed = Some(UiExit::RendererFailed("no adapter".to_owned()));
-    assert_eq!(exit_slot(cx), failed);
-    // The second request from inside the event loop keeps the first reason.
+    assert_quits_again_in_loop(cx, UiExit::RendererFailed("no adapter".to_owned()));
+    assert!(cx.windows().is_empty());
+}
+
+#[gpui_kit::test]
+fn low_memory_open_failure_quits_again_in_loop(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let (init, _tx) = ui_init(Settings::default());
+    cx.update(|cx| init_low_memory(cx, client, init));
     cx.run_until_parked();
-    assert_eq!(exit_slot(cx), failed);
+    cx.update(|cx| {
+        cx.set_global(FailLowMemoryOpen("no adapter".to_owned()));
+        open_first_for_test(cx, OpenMode::LowMemory);
+    });
+    assert_quits_again_in_loop(cx, UiExit::Quit);
     assert!(cx.windows().is_empty());
 }
 
@@ -526,7 +553,7 @@ fn open_first_missing_hook_quits(cx: &mut TestAppContext) {
         cx.default_global::<OpenHooks>().gallery = None;
         open_first_for_test(cx, OpenMode::Gallery);
     });
-    assert_eq!(exit_slot(cx), Some(UiExit::Quit));
+    assert_quits_again_in_loop(cx, UiExit::Quit);
 }
 
 #[cfg(feature = "bench")]
@@ -552,6 +579,10 @@ fn request_exit_first_writer_wins(cx: &mut TestAppContext) {
         request_exit(cx, UiExit::Quit);
     });
     assert_eq!(exit_slot(cx), Some(UiExit::DeviceLost));
+    // Each request quits; only the first spawns the second quit.
+    assert_eq!(quit_calls(cx), 2);
+    cx.run_until_parked();
+    assert_eq!(quit_calls(cx), 3);
 }
 
 #[gpui_kit::test]

@@ -171,11 +171,30 @@ pub fn init_low_memory(cx: &mut App, client: Arc<dyn EngineClient>, init: UiInit
     // ActionTracker
 
     cx.default_global::<OpenHooks>().low_memory = Some(Box::new(move |cx| {
-        if let Err(err) = LowMemoryWindow::open(cx, client.clone()) {
+        if let Err(err) = open_first_rescue(cx, client.clone()) {
             warn!(target: "tasklens::ui", %err, "rescue window did not open");
             request_exit(cx, UiExit::Quit);
         }
     }));
+}
+
+/// Makes the rescue window open from the low-memory hook fail with this text, for the
+/// open-failure tests.
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct FailLowMemoryOpen(pub String);
+
+#[cfg(any(test, feature = "test-hooks"))]
+impl Global for FailLowMemoryOpen {}
+
+/// Opens the rescue window for the low-memory hook. The error text on failure.
+fn open_first_rescue(cx: &mut App, engine: Arc<dyn EngineClient>) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-hooks"))]
+    if let Some(fail) = cx.try_global::<FailLowMemoryOpen>() {
+        return Err(fail.0.clone());
+    }
+    LowMemoryWindow::open(cx, engine)
+        .map(drop)
+        .map_err(|err| err.to_string())
 }
 
 /// The window texts, translated once per strings version by [`low_mem_words`].
