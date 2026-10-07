@@ -52,7 +52,7 @@ use crate::window::main::push_main_toast;
 use crate::window::registry::{GlobalRegistry, OpenOutcome, WindowKey};
 use crate::windows::actions::{
     PROPS_WINDOW_CONTEXT, PropsCloseWindow, PropsEscape, PropsFocusFilter, PropsNextTab,
-    PropsPrevTab, PropsRefreshNow, PropsSelectTab,
+    PropsPrevTab, PropsRefreshNow, PropsSelectTab, PropsVerifyPackage,
 };
 use crate::windows::frame::{EscStep, PwnWindow, esc_step, open_pwn, props_title};
 
@@ -705,6 +705,20 @@ impl PropsWindow {
         );
     }
 
+    /// The Verify button leaves focus where it was, so its action can arrive here.
+    fn on_verify_package(
+        &mut self,
+        _: &PropsVerifyPackage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active == DetailTab::General
+            && let Some(g) = &self.tabs.general
+        {
+            g.update(cx, |g, cx| g.verify_package(cx));
+        }
+    }
+
     fn on_close(&mut self, _: &PropsCloseWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
     }
@@ -826,6 +840,7 @@ impl gpui_kit::Render for PropsWindow {
             .on_action(cx.listener(Self::on_prev_tab))
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_verify_package))
             .on_action(cx.listener(Self::on_close))
             .on_action(cx.listener(Self::on_escape))
             .on_action(on_clear(filter))

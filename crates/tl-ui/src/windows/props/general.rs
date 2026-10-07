@@ -8,9 +8,10 @@
 //! source changed, and each value string is cached by `(FieldId, value bits, validity)`, so a
 //! sweep that changes only live numbers re-formats at most 25 values.
 //!
-//! Copy, links (E23-011), hashes and Verify (E23-012) and the window block (E23-013) are later
-//! beads on this file. Until then link fields draw as plain text and the hash and package status
-//! fields show placeholders.
+//! Hashes and Verify against package (UI-PWN-008): the hex strings are formatted once per
+//! `HashState`; the Verify button sits in its own row under `Package status:` and sends
+//! `Command::VerifyPackage`. Copy, links (E23-011) and the window block (E23-013) are later
+//! beads on this file. Until then link fields draw as plain text.
 //!
 //! The command line is untrusted text (ADR-015). It is shown with control characters escaped and
 //! is never logged.
@@ -23,15 +24,17 @@ use std::sync::Arc;
 
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Context, Entity, FontWeight, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
     prelude::FluentBuilder as _, px,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use tl_model::actions::SchedPolicy;
+use tl_model::command::Command;
 use tl_model::details::{
-    ElfArch, ExeLocation, GeneralDetail, GpuEngine, IdTriple, Relro, Seccomp, TabPayload,
+    ElfArch, ExeLocation, GeneralDetail, GpuEngine, HashError, HashState, IdTriple, PackageCheck,
+    Relro, Seccomp, TabPayload,
 };
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcessRecord;
@@ -40,18 +43,23 @@ use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
+use tracing::warn;
 
 use super::filter::{FilterChanged, PropsFilter, lowercase, matches};
+use crate::app::EngineGlobal;
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
     KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, UnsupportedWord,
     ValueTone, kv_words,
 };
+use crate::components::toast::{ToastKind, ToastQueue};
+use crate::i18n::Strings;
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
 use crate::theme::{UiMetrics, current, metrics};
+use crate::windows::actions::PropsVerifyPackage;
 
 /// Tooltip of a Restricted value (R-050, P2 text; E23-025 adds the shield sentence in P3).
 pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access.";
@@ -59,11 +67,6 @@ pub const RESTRICTED_TOOLTIP: &str = "Needs administrator access.";
 pub const CMDLINE_TITLE: &str = "Command line";
 /// Label of the command line copy button.
 pub const CMDLINE_COPY: &str = "Copy";
-/// Hash placeholder until E23-012.
-pub const COMPUTING: &str = "Computing…";
-/// Package status placeholder until E23-012.
-pub const NOT_VERIFIED: &str = "Not verified";
-
 const COLLECTING: &str = "Collecting…";
 
 /// Body width from which the three panels sit side by side, × ui_scale.
@@ -77,6 +80,96 @@ const LABEL_MAX: f32 = 150.;
 const CMDLINE_LINE_HEIGHT: f32 = 18.;
 /// Copy icon size, × ui_scale.
 const COPY_ICON: f32 = 12.;
+/// Hex digits a hash value shows before "…".
+const HASH_SHOWN_DIGITS: usize = 16;
+
+const KEY_COMPUTING: &str = "pwn-props-hash-computing";
+const KEY_HASH_FAILED: &str = "pwn-props-hash-failed";
+const KEY_HASH_NO_EXE: &str = "pwn-props-hash-no-exe";
+const KEY_NOT_VERIFIED: &str = "pwn-props-package-not-verified";
+const KEY_VERIFYING: &str = "pwn-props-package-verifying";
+const KEY_MATCHES: &str = "pwn-props-package-matches";
+const KEY_MISMATCH: &str = "pwn-props-package-mismatch";
+const KEY_NOT_PACKAGED: &str = "pwn-props-package-not-packaged";
+const KEY_NO_CHECKSUM: &str = "pwn-props-package-no-checksum";
+const KEY_VERIFY: &str = "pwn-props-verify-button";
+const KEY_TOAST_MATCHES: &str = "pwn-props-verify-toast-matches";
+const KEY_TOAST_MISMATCH: &str = "pwn-props-verify-toast-mismatch";
+const KEY_TOAST_FAILED: &str = "pwn-props-verify-toast-failed";
+const KEY_NOT_RUNNING: &str = "pwn-props-not-running";
+
+// ---- Words (R-132) ----
+
+/// The hash and package texts, translated once per strings version by [`general_words`].
+pub struct GeneralWords {
+    /// Hash value while hashing: "Computing…".
+    pub computing: SharedString,
+    /// Hash tooltip after a read error; the errno text follows on a second line.
+    pub hash_failed: SharedString,
+    /// Hash tooltip when there is no readable executable.
+    pub hash_no_exe: SharedString,
+    pub not_verified: SharedString,
+    pub verifying: SharedString,
+    pub matches: SharedString,
+    pub mismatch: SharedString,
+    pub not_packaged: SharedString,
+    /// Also the tooltip of the disabled Verify button.
+    pub no_checksum: SharedString,
+    /// The Verify button label.
+    pub verify: SharedString,
+    pub toast_matches: SharedString,
+    pub toast_mismatch: SharedString,
+    pub toast_failed: SharedString,
+    /// Tooltip of the Verify button after the process exited.
+    pub not_running: SharedString,
+}
+
+impl GeneralWords {
+    fn with(t: impl Fn(&str) -> SharedString) -> Self {
+        Self {
+            computing: t(KEY_COMPUTING),
+            hash_failed: t(KEY_HASH_FAILED),
+            hash_no_exe: t(KEY_HASH_NO_EXE),
+            not_verified: t(KEY_NOT_VERIFIED),
+            verifying: t(KEY_VERIFYING),
+            matches: t(KEY_MATCHES),
+            mismatch: t(KEY_MISMATCH),
+            not_packaged: t(KEY_NOT_PACKAGED),
+            no_checksum: t(KEY_NO_CHECKSUM),
+            verify: t(KEY_VERIFY),
+            toast_matches: t(KEY_TOAST_MATCHES),
+            toast_mismatch: t(KEY_TOAST_MISMATCH),
+            toast_failed: t(KEY_TOAST_FAILED),
+            not_running: t(KEY_NOT_RUNNING),
+        }
+    }
+}
+
+struct GeneralWordsCache {
+    version: u64,
+    words: Rc<GeneralWords>,
+}
+
+impl Global for GeneralWordsCache {}
+
+/// The texts for the current strings. Translated only when the strings version changed; without
+/// strings they are in en-US.
+pub fn general_words(cx: &mut App) -> Rc<GeneralWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return Rc::new(GeneralWords::with(|key| crate::i18n::tr_en(key, &[])));
+    };
+    if let Some(cache) = cx.try_global::<GeneralWordsCache>()
+        && cache.version == version
+    {
+        return cache.words.clone();
+    }
+    let words = Rc::new(GeneralWords::with(|key| crate::i18n::tr(cx, key)));
+    cx.set_global(GeneralWordsCache {
+        version,
+        words: words.clone(),
+    });
+    words
+}
 
 /// What a link field opens. The click handlers come with E23-011.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -314,10 +407,14 @@ pub struct KvField {
     pub value: SharedString,
     pub kind: KvKind,
     pub validity: Validity,
-    /// The untruncated text where the value shows a shortened form (hashes, E23-012).
+    /// The untruncated text where the value shows a shortened form (hashes).
     pub full: Option<SharedString>,
     /// Why an Unsupported value has none.
     pub word: Option<UnsupportedWord>,
+    /// The value tooltip: the full hash, or why the hashes failed.
+    pub tooltip: Option<SharedString>,
+    /// Status colour of a Valid value; the text always says the same in words.
+    pub tone: Option<ValueTone>,
 }
 
 // ---- Formatters (pure) ----
@@ -557,6 +654,92 @@ fn write_local(out: &mut String, unix_s: i64) {
     }
 }
 
+/// Lowercase hex of `bytes`.
+pub fn hex(out: &mut String, bytes: &[u8]) {
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+}
+
+/// The shown form of a full hex hash: its first 16 digits plus "…".
+pub fn short_hash(full: &str) -> String {
+    let cut = full.len().min(HASH_SHOWN_DIGITS);
+    let mut out = String::with_capacity(cut + '…'.len_utf8());
+    out.push_str(&full[..cut]);
+    out.push('…');
+    out
+}
+
+/// The hash fields' texts for one `HashState`, built once when the state or the words change.
+struct HashView {
+    state: HashState,
+    words: Rc<GeneralWords>,
+    /// SHA-256 then MD5: the shown text and the full hex (Done only).
+    shown: [SharedString; 2],
+    full: [Option<SharedString>; 2],
+    /// Why the hashes failed (Failed only).
+    error: Option<SharedString>,
+}
+
+impl HashView {
+    fn new(state: &HashState, words: Rc<GeneralWords>) -> Self {
+        let mut view = Self {
+            state: state.clone(),
+            shown: [words.computing.clone(), words.computing.clone()],
+            full: [None, None],
+            error: None,
+            words,
+        };
+        match state {
+            HashState::Pending => {}
+            HashState::Done { sha256, md5 } => {
+                for (i, bytes) in [&sha256[..], &md5[..]].into_iter().enumerate() {
+                    let mut full = String::with_capacity(bytes.len() * 2);
+                    hex(&mut full, bytes);
+                    view.shown[i] = short_hash(&full).into();
+                    view.full[i] = Some(full.into());
+                }
+            }
+            HashState::Failed(HashError::ReadFailed { errno }) => {
+                let reason = std::io::Error::from_raw_os_error(*errno);
+                view.error = Some(format!("{}\n{reason}", view.words.hash_failed).into());
+            }
+            HashState::Failed(HashError::ExePathUnavailable) => {
+                view.error = Some(view.words.hash_no_exe.clone());
+            }
+        }
+        view
+    }
+
+    fn is_for(&self, state: &HashState, words: &Rc<GeneralWords>) -> bool {
+        self.state == *state && Rc::ptr_eq(&self.words, words)
+    }
+}
+
+/// What the Verify against package button shows. `None` from [`GeneralTab::verify_button`]
+/// hides it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerifyButton {
+    /// "Verify against package", or "Verifying…" while loading.
+    pub label: SharedString,
+    pub loading: bool,
+    pub disabled: bool,
+    /// Why the button is disabled.
+    pub tooltip: Option<SharedString>,
+}
+
+/// The package check the status shows: a pressed button reads as Verifying until the payload
+/// moves on, and a payload without a package reads as Not packaged.
+fn shown_check(d: &GeneralDetail, requested: bool) -> PackageCheck {
+    if d.package.validity.is_valid() && d.package.value.is_none() {
+        return PackageCheck::NotPackaged;
+    }
+    match d.package_check {
+        PackageCheck::NotVerified if requested => PackageCheck::Verifying,
+        check => check,
+    }
+}
+
 fn hash_of(value: impl Hash) -> u64 {
     let mut h = FxHasher::default();
     value.hash(&mut h);
@@ -641,6 +824,8 @@ impl Builder<'_> {
             validity,
             full: None,
             word: (validity == Validity::Unsupported).then_some(unsupported),
+            tooltip: None,
+            tone: None,
         });
     }
 
@@ -654,6 +839,33 @@ impl Builder<'_> {
             validity,
             full: None,
             word: None,
+            tooltip: None,
+            tone: None,
+        });
+    }
+
+    /// A field with a prepared text, tooltip and tone.
+    #[allow(clippy::too_many_arguments)]
+    fn shown(
+        &mut self,
+        id: FieldId,
+        kind: KvKind,
+        validity: Validity,
+        value: SharedString,
+        full: Option<SharedString>,
+        tooltip: Option<SharedString>,
+        tone: Option<ValueTone>,
+    ) {
+        self.out.push(KvField {
+            id,
+            label: id.label().into(),
+            value,
+            kind,
+            validity,
+            full,
+            word: None,
+            tooltip,
+            tone,
         });
     }
 
@@ -667,6 +879,8 @@ impl Builder<'_> {
             validity: Validity::Unsupported,
             full: None,
             word: Some(word),
+            tooltip: None,
+            tone: None,
         });
     }
 
@@ -905,9 +1119,19 @@ pub struct GeneralTab {
     cache: ValueCache,
     /// The state words the fields were built with.
     words: Rc<KvWords>,
+    general_words: Rc<GeneralWords>,
+    hashes: Option<HashView>,
+    /// Verify was pressed and the payload has not reached a final package check yet.
+    verify_requested: bool,
+    /// The window's toast stack, for the Verify result toasts.
+    toasts: Option<WeakEntity<ToastQueue>>,
     columns: [Arc<[KvField]>; 3],
-    /// Grid sections per column, after the filter.
+    /// Grid sections per column, after the filter. Column 2 ends at `Package status:` while the
+    /// Verify row shows; `col2_tail` holds the rows under it.
     sections: [Rc<[TlKvSection]>; 3],
+    col2_tail: Rc<[TlKvSection]>,
+    /// The Verify button row is drawn under `Package status:`.
+    verify_row: bool,
     /// Label column widths per column, with the `style_version` they were measured for.
     label_widths: Option<(u64, [Pixels; 3])>,
     /// Body width from the last paint (inside the padding), zero before the first.
@@ -942,8 +1166,14 @@ impl GeneralTab {
             needle: SharedString::default(),
             cache: ValueCache::default(),
             words: kv_words(cx),
+            general_words: general_words(cx),
+            hashes: None,
+            verify_requested: false,
+            toasts: None,
             columns: [Arc::from([]), Arc::from([]), Arc::from([])],
             sections: [Rc::from([]), Rc::from([]), Rc::from([])],
+            col2_tail: Rc::from([]),
+            verify_row: false,
             label_widths: None,
             width: Rc::default(),
             cmdline: cx.new(|cx| CmdLineBlock::new(kv_words(cx))),
@@ -976,6 +1206,10 @@ impl GeneralTab {
         if same || self.exited {
             return;
         }
+        let before = self.payload.as_ref().map(|d| d.package_check);
+        if let Some(after) = detail.as_ref().map(|d| d.package_check) {
+            self.verify_finished(before, after, cx);
+        }
         self.payload = detail;
         let cmdline = self.payload.as_ref().map(|d| &d.cmdline);
         let words = kv_words(cx);
@@ -986,6 +1220,93 @@ impl GeneralTab {
         });
         self.rebuild(cx);
         cx.notify();
+    }
+
+    /// Shows the result toast when a verify this tab saw running reached its result.
+    fn verify_finished(
+        &mut self,
+        before: Option<PackageCheck>,
+        after: PackageCheck,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(after, PackageCheck::NotVerified | PackageCheck::Verifying) {
+            return;
+        }
+        let running = self.verify_requested || before == Some(PackageCheck::Verifying);
+        self.verify_requested = false;
+        if !running {
+            return;
+        }
+        let words = &self.general_words;
+        let (kind, text) = match after {
+            PackageCheck::Matches => (ToastKind::Success, words.toast_matches.clone()),
+            PackageCheck::DoesNotMatch => (ToastKind::Warning, words.toast_mismatch.clone()),
+            PackageCheck::Failed => (ToastKind::Error, words.toast_failed.clone()),
+            _ => return,
+        };
+        match self.toasts.as_ref().and_then(WeakEntity::upgrade) {
+            Some(queue) => queue.update(cx, |q, cx| q.push(kind, text, None, None, cx)),
+            None => warn!(target: "tasklens::ui", "no toast stack for the verify result"),
+        }
+    }
+
+    /// The toast stack the Verify result toasts go to. Without one the tab finds its window's
+    /// stack when it first renders.
+    pub fn set_toasts(&mut self, toasts: WeakEntity<ToastQueue>) {
+        self.toasts = Some(toasts);
+    }
+
+    /// The Verify against package button, or `None` while it is hidden: before the payload and
+    /// for an executable that is not packaged.
+    pub fn verify_button(&self) -> Option<VerifyButton> {
+        let d = self.payload.as_deref()?;
+        let words = &self.general_words;
+        let check = shown_check(d, self.verify_requested);
+        let loading = check == PackageCheck::Verifying;
+        let tooltip = match check {
+            PackageCheck::NotPackaged => return None,
+            _ if self.exited => Some(words.not_running.clone()),
+            PackageCheck::NoChecksum => Some(words.no_checksum.clone()),
+            _ => None,
+        };
+        Some(VerifyButton {
+            label: if loading {
+                words.verifying.clone()
+            } else {
+                words.verify.clone()
+            },
+            loading: loading && !self.exited,
+            disabled: tooltip.is_some(),
+            tooltip,
+        })
+    }
+
+    /// Click, Enter or Space on the Verify button: sends `Command::VerifyPackage(key)`. Does
+    /// nothing while the button is hidden, disabled or loading.
+    pub fn verify_package(&mut self, cx: &mut Context<Self>) {
+        let Some(button) = self.verify_button() else {
+            return;
+        };
+        if button.disabled || button.loading {
+            return;
+        }
+        let Some(engine) = cx.try_global::<EngineGlobal>() else {
+            warn!(target: "tasklens::ui", "no engine, verify not sent");
+            return;
+        };
+        if let Err(err) = engine.0.send(Command::VerifyPackage(self.key)) {
+            warn!(target: "tasklens::ui", ?err, "verify against package not sent");
+            return;
+        }
+        self.verify_requested = true;
+        self.rebuild(cx);
+        cx.notify();
+    }
+
+    /// Whether the Verify button row is drawn (`Package status:` passes the filter and the
+    /// button is not hidden).
+    pub fn verify_row_shown(&self) -> bool {
+        self.verify_row
     }
 
     /// Takes this key's record from a sweep and MemTotal for `Memory %`. Re-formats only when a
@@ -1055,8 +1376,10 @@ impl GeneralTab {
 
     /// The grid rows of column `i` after the filter.
     pub fn rows(&self, i: usize) -> Vec<TlKvRow> {
+        let tail: &[TlKvSection] = if i == 1 { &self.col2_tail } else { &[] };
         self.sections[i]
             .iter()
+            .chain(tail)
             .flat_map(|s| s.blocks.iter())
             .flat_map(|b| b.rows.iter().cloned())
             .collect()
@@ -1094,29 +1417,43 @@ impl GeneralTab {
         matches(&haystack, &self.needle)
     }
 
-    /// Converts the built fields into grid rows, dropping the ones the filter hides.
+    /// Converts the built fields into grid rows, dropping the ones the filter hides. Column 2
+    /// is cut under `Package status:` when the Verify row shows.
     fn apply_filter(&mut self) {
+        let button = self.verify_button().is_some();
         for i in 0..3 {
-            let rows: Vec<TlKvRow> = self.columns[i]
-                .iter()
-                .filter(|f| self.passes(f))
-                .map(|f| to_row(f, self.exited))
-                .collect();
-            self.sections[i] = Rc::from(vec![TlKvSection {
-                title: None,
-                blocks: vec![TlKvBlock {
-                    indent: None,
-                    heading: None,
-                    rows,
-                }],
-            }]);
+            let mut rows = Vec::with_capacity(self.columns[i].len());
+            let mut split = None;
+            for f in self.columns[i].iter().filter(|f| self.passes(f)) {
+                rows.push(to_row(f, self.exited));
+                if f.id == FieldId::PackageStatus && button {
+                    split = Some(rows.len());
+                }
+            }
+            if i == 1 {
+                self.verify_row = split.is_some();
+                self.col2_tail = match split {
+                    Some(at) => section(rows.split_off(at)),
+                    None => Rc::from([]),
+                };
+            }
+            self.sections[i] = section(rows);
         }
     }
 
     fn rebuild(&mut self, cx: &mut App) {
         self.words = kv_words(cx);
+        self.general_words = general_words(cx);
         let d = self.payload.clone();
         let d = d.as_deref();
+        if let Some(d) = d
+            && !self
+                .hashes
+                .as_ref()
+                .is_some_and(|h| h.is_for(&d.hashes, &self.general_words))
+        {
+            self.hashes = Some(HashView::new(&d.hashes, self.general_words.clone()));
+        }
         let live = self.live.clone();
         let live = live.as_ref();
         let none = || Validity::WarmingUp;
@@ -1454,20 +1791,59 @@ impl GeneralTab {
             words: &self.words,
             out: Vec::with_capacity(COLUMNS[1].len()),
         };
-        let (hash_validity, hash_text) = match d {
-            // Placeholders in text_secondary until E23-012.
-            Some(_) => (Validity::WarmingUp, COMPUTING),
-            None => (Validity::WarmingUp, COLLECTING),
-        };
-        b.word(FieldId::Sha256, KvKind::Hash, hash_validity, hash_text);
-        b.word(FieldId::Md5, KvKind::Hash, hash_validity, hash_text);
+        match (d, &self.hashes) {
+            (Some(d), Some(view)) => {
+                let validity = match d.hashes {
+                    // `Computing…` draws in text_secondary (see `to_row`).
+                    HashState::Pending => Validity::WarmingUp,
+                    HashState::Done { .. } => Validity::Valid,
+                    HashState::Failed(_) => Validity::Failed,
+                };
+                for (i, id) in [FieldId::Sha256, FieldId::Md5].into_iter().enumerate() {
+                    let value = match validity {
+                        Validity::Failed => self.words.unavailable.clone(),
+                        _ => view.shown[i].clone(),
+                    };
+                    let tooltip = view.full[i].clone().or_else(|| view.error.clone());
+                    b.shown(
+                        id,
+                        KvKind::Hash,
+                        validity,
+                        value,
+                        view.full[i].clone(),
+                        tooltip,
+                        None,
+                    );
+                }
+            }
+            _ => {
+                b.word(FieldId::Sha256, KvKind::Hash, none(), COLLECTING);
+                b.word(FieldId::Md5, KvKind::Hash, none(), COLLECTING);
+            }
+        }
         match d {
-            Some(_) => b.word(
-                FieldId::PackageStatus,
-                KvKind::Status,
-                Validity::Valid,
-                NOT_VERIFIED,
-            ),
+            Some(d) => {
+                let words = &self.general_words;
+                let (text, tone) = match shown_check(d, self.verify_requested) {
+                    PackageCheck::NotVerified | PackageCheck::Failed => {
+                        (words.not_verified.clone(), None)
+                    }
+                    PackageCheck::Verifying => (words.verifying.clone(), None),
+                    PackageCheck::Matches => (words.matches.clone(), Some(ValueTone::Success)),
+                    PackageCheck::DoesNotMatch => (words.mismatch.clone(), Some(ValueTone::Danger)),
+                    PackageCheck::NotPackaged => (words.not_packaged.clone(), None),
+                    PackageCheck::NoChecksum => (words.no_checksum.clone(), None),
+                };
+                b.shown(
+                    FieldId::PackageStatus,
+                    KvKind::Status,
+                    Validity::Valid,
+                    text,
+                    None,
+                    None,
+                    tone,
+                );
+            }
             None => b.word(FieldId::PackageStatus, KvKind::Status, none(), COLLECTING),
         }
         match d.map(|d| &d.package) {
@@ -1738,6 +2114,17 @@ impl GeneralTab {
     }
 }
 
+fn section(rows: Vec<TlKvRow>) -> Rc<[TlKvSection]> {
+    Rc::from(vec![TlKvSection {
+        title: None,
+        blocks: vec![TlKvBlock {
+            indent: None,
+            heading: None,
+            rows,
+        }],
+    }])
+}
+
 /// Grid row for `field`. Restricted values get the R-050 tooltip; a placeholder word that is not
 /// the grid's own word (`Computing…`) and exited links draw as Stale, which keeps the text and
 /// uses `text_secondary`. A deleted executable draws in `status.warning`.
@@ -1747,6 +2134,10 @@ fn to_row(field: &KvField, exited: bool) -> TlKvRow {
     if field.id == FieldId::Executable && field.value.ends_with(" (deleted)") {
         value.tone = Some(ValueTone::Warning);
     }
+    if field.tone.is_some() {
+        value.tone = field.tone;
+    }
+    value.tooltip = field.tooltip.clone();
     value.validity = match field.validity {
         Validity::Valid if exited && matches!(field.kind, KvKind::Link(_)) => Validity::Stale,
         Validity::WarmingUp if field.value.as_ref() != COLLECTING => Validity::Stale,
@@ -1766,10 +2157,32 @@ fn to_row(field: &KvField, exited: bool) -> TlKvRow {
     }
 }
 
+/// The Verify against package button in its own row, aligned with the value column.
+fn verify_row(button: VerifyButton, label_width: Pixels, height: Pixels) -> impl IntoElement {
+    let mut b = TlButton::new("general-verify", TlButtonKind::Secondary)
+        .size(TlButtonSize::Sm)
+        .label(button.label)
+        .action(Box::new(PropsVerifyPackage))
+        .loading(button.loading)
+        .disabled(button.disabled);
+    if let Some(tooltip) = button.tooltip {
+        b = b.tooltip(tooltip);
+    }
+    h_flex()
+        .debug_selector(|| "GeneralTab-verify-row".into())
+        .h(height)
+        .pl(label_width)
+        .items_center()
+        .child(b)
+}
+
 impl Render for GeneralTab {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let m = *metrics(cx);
         let theme = current(cx).clone();
+        if self.toasts.is_none() {
+            self.toasts = ToastQueue::of_window(window, cx).map(|q| q.downgrade());
+        }
         let label_widths = self.label_widths(&m, window, cx);
         let measured = self.width.get();
         let body_width = if measured > px(0.) {
@@ -1786,6 +2199,16 @@ impl Render for GeneralTab {
                     .row_height(row_height)
                     .label_width(label_widths[i])
                     .sections(&self.sections[i]);
+                let verify = (i == 1 && self.verify_row)
+                    .then(|| self.verify_button())
+                    .flatten()
+                    .map(|button| {
+                        let tail = TlKeyValueGrid::new("general-col-tail", KvLayout::Inline)
+                            .row_height(row_height)
+                            .label_width(label_widths[i])
+                            .sections(&self.col2_tail);
+                        (verify_row(button, label_widths[i], row_height), tail)
+                    });
                 div()
                     .debug_selector(move || format!("GeneralTab-panel-{i}"))
                     .min_w_0()
@@ -1796,6 +2219,7 @@ impl Render for GeneralTab {
                     .px(m.sp[4])
                     .py(m.sp[3])
                     .child(grid)
+                    .when_some(verify, |d, (row, tail)| d.child(row).child(tail))
                     .into_any_element()
             })
             .collect();
@@ -1818,6 +2242,9 @@ impl Render for GeneralTab {
         let pad = m.sp[5] * 2.;
         div()
             .debug_selector(|| "GeneralTab".into())
+            .on_action(cx.listener(|this, _: &PropsVerifyPackage, _, cx| {
+                this.verify_package(cx);
+            }))
             .relative()
             .size_full()
             .child(
