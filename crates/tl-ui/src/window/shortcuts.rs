@@ -443,6 +443,12 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Performance,
         "shortcuts-perf-move-device",
     ),
+    doc(
+        &["tasklens::PerfOpenCardMenu"],
+        "Performance",
+        Heading::Performance,
+        "shortcuts-perf-open-card-menu",
+    ),
     // Properties windows
     doc(
         &["tasklens::PropsSelectTab"],

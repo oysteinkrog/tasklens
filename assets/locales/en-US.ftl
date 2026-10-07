@@ -796,6 +796,7 @@ shell-health-chip-gpu = GPU
 shell-health-chip-services = Services
 shortcuts-heading-dialogs-and-windows = Dialogs and windows
 shortcuts-perf-move-device = Move device up / down
+shortcuts-perf-open-card-menu = Open the device card menu
 shortcuts-props-close = Close the Properties window
 shortcuts-props-field-menu = Open the field menu
 shortcuts-affinity-toggle-group = Toggle the CPU group
