@@ -15,7 +15,6 @@ use gpui_kit::{
     ParentElement as _, Render, StyleRefinement, Styled as _, Subscription, Window, div, px,
 };
 use tl_model::demand::{CpuDemand, Demand};
-use tl_model::devices::DeviceKind;
 use tl_model::settings::GraphsSettings;
 
 use super::GraphColor;
@@ -29,7 +28,7 @@ use crate::components::toast::ToastKind;
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
-use crate::pages::performance::DeviceKey;
+use crate::pages::performance::{DeviceKey, DeviceKind};
 use crate::settings_global::{SettingValue, TlSettings};
 use crate::theme::metrics;
 use crate::window::main::push_main_toast;
@@ -289,7 +288,7 @@ impl MinigraphPanel {
 
     /// Keeps the cards of attached entries that still exist and creates the missing ones.
     fn rebuild_cards(&mut self, cx: &mut Context<Self>) {
-        let mut attached: Vec<&MinigraphEntry> = self.attached().collect();
+        let mut attached: Vec<MinigraphEntry> = self.attached().cloned().collect();
         attached.sort_by_key(|e| e.slot);
         let catalog = Arc::clone(&self.hub.read(cx).current().devices);
         let order = gpu_order(cx);
