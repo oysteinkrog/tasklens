@@ -15,6 +15,7 @@ pub mod history;
 pub mod jump;
 pub mod menu;
 pub mod name_cell;
+pub mod status;
 pub mod table;
 pub mod toasts;
 pub mod toolbar;
@@ -61,6 +62,7 @@ use crate::util::clipboard_write;
 use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::status::StatusChanged;
 use crate::windows::actions::SetAffinity;
+use status::{StatusCounts, write_status};
 
 /// Key context of the page div. The table inside it has `Table`.
 pub const PAGE_CONTEXT: &str = "ProcessTable";
@@ -88,8 +90,9 @@ pub struct ProcessesPage {
     /// The table body's focus handle.
     focus: FocusHandle,
     client: Arc<dyn EngineClient>,
-    /// Settings, metrics and strings observers, the table's copy events and Ctrl-pause.
-    _subs: SmallVec<[Subscription; 5]>,
+    /// Settings, metrics and strings observers, the table's copy events, Ctrl-pause and the
+    /// table observer for the status chip.
+    _subs: SmallVec<[Subscription; 6]>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 4],
     style_version: u64,
@@ -107,6 +110,10 @@ pub struct ProcessesPage {
     paused: Option<Arc<Snapshot>>,
     /// The minigraph cards over the table (E26-004); `None` without a demand aggregator.
     minigraphs: Option<Entity<MinigraphPanel>>,
+    /// What the status chip text was last built from (UI-PRC-018).
+    status_counts: StatusCounts,
+    /// The status chip text, rebuilt only when `status_counts` or the strings change.
+    status: String,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -154,6 +161,8 @@ impl ProcessesPage {
                 toast(ToastKind::Success, tr(cx, "processes-toast-copied"), cx);
             }
         }));
+        // Snapshot installs and selection changes both notify the table.
+        subs.push(cx.observe(&table, |this, _, cx| this.refresh_status(false, cx)));
         // The shell owns the Ctrl rule and the chip's paused tag (E20-012).
         if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
             subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
@@ -183,6 +192,47 @@ impl ProcessesPage {
             filter: FilterBinding::new(cx),
             paused: None,
             minigraphs,
+            status_counts: StatusCounts::default(),
+            status: String::new(),
+        }
+    }
+
+    /// The status chip text (UI-PRC-018). Empty until the first view arrives.
+    pub fn status_text(&self, out: &mut String) {
+        out.push_str(&self.status);
+    }
+
+    /// Rebuilds the chip text when a count, the filter state or the selection size changed, or
+    /// always with `force` (new strings), and emits `StatusChanged` when the text changed. Counts
+    /// come from a view built for the current query; until it arrives the previous counts stay.
+    fn refresh_status(&mut self, force: bool, cx: &mut Context<Self>) {
+        let t = self.table.read(cx);
+        let d = &t.delegate;
+        let selected = t
+            .selection
+            .ids()
+            .filter(|&id| d.row_index(id).is_some())
+            .count();
+        let Some(view) = d.query().shown() else {
+            return;
+        };
+        let counts = if view.query_generation == d.query().generation() {
+            StatusCounts::of(view, !d.query().filter().is_empty(), selected)
+        } else {
+            StatusCounts {
+                selected: u32::try_from(selected).unwrap_or(u32::MAX),
+                ..self.status_counts
+            }
+        };
+        if !force && counts == self.status_counts && !self.status.is_empty() {
+            return;
+        }
+        self.status_counts = counts;
+        let mut text = String::with_capacity(self.status.len());
+        write_status(&mut text, counts, cx);
+        if text != self.status {
+            self.status = text;
+            cx.emit(StatusChanged);
         }
     }
 
@@ -300,6 +350,7 @@ impl ProcessesPage {
         }
         self.strings_version = version;
         self.confirm_words = ConfirmWords::new(cx);
+        self.refresh_status(true, cx);
         self.table.update(cx, |t, cx| {
             t.delegate.refresh_strings(cx);
             t.on_new_version(cx);
@@ -1199,6 +1250,10 @@ impl Render for ProcessesPage {
 }
 
 impl ShellPage for ProcessesPage {
+    fn status_text(&self, out: &mut String) {
+        ProcessesPage::status_text(self, out);
+    }
+
     fn primary_focus(&self) -> FocusHandle {
         self.focus.clone()
     }
