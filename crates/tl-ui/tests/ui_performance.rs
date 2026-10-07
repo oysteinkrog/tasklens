@@ -1199,3 +1199,435 @@ mod perf_keys {
         });
     }
 }
+
+// ---- The Performance tab: split, sidebar toggle, page switching (E24-A1) ----
+
+#[cfg(feature = "test-hooks")]
+mod tab {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton, Render,
+        TestAppContext, VisualTestContext, Window, div, point, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
+    use tl_model::ids::DeviceIdx;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology};
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::kv_grid;
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::actions::PerfToggleSidebar;
+    use tl_ui::pages::performance::cpu::CpuPage;
+    use tl_ui::pages::performance::page::DevicePage as _;
+    use tl_ui::pages::performance::{DeviceKey, PAGE_PANEL_ID, PerformancePage, SIDEBAR_PANEL_ID};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn entry(idx: u16, identity: DeviceIdentity) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("device"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind: None,
+        }
+    }
+
+    /// `n` logical CPUs, two per core.
+    fn topology(n: u16) -> CpuTopology {
+        let half = n / 2;
+        let mut online = CpuSet::empty();
+        for id in 0..n {
+            online.insert(id);
+        }
+        CpuTopology {
+            online,
+            cores: (0..half)
+                .map(|c| CoreInfo {
+                    id: c,
+                    logical: smallvec::smallvec![c, c + half],
+                    l3_group: 0,
+                    kind: CoreKind::Standard,
+                })
+                .collect(),
+        }
+    }
+
+    struct Rig<'a> {
+        page: Entity<PerformancePage>,
+        demand: Entity<DemandAggregator>,
+        /// `nav_width` of every persisted state.
+        persisted: Rc<RefCell<Vec<u16>>>,
+        vcx: &'a mut VisualTestContext,
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    /// Every Global the tab needs over a fake catalog with CPU (`cpus` logical CPUs) and Memory.
+    fn install(cx: &mut TestAppContext, state: UiState, cpus: u16) -> Rc<RefCell<Vec<u16>>> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| {
+            let mut entries = vec![
+                entry(0, DeviceIdentity::CpuPackage),
+                entry(1, DeviceIdentity::Memory),
+            ];
+            entries.extend((0..cpus).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id })));
+            s.devices = Arc::new(DeviceCatalog {
+                version: 1,
+                entries: Arc::from(entries),
+            });
+            Arc::make_mut(&mut s.system).cpu_topology = Arc::new(topology(cpus));
+        });
+        let client: Arc<dyn EngineClient> = engine;
+        let persisted: Rc<RefCell<Vec<u16>>> = Rc::default();
+        let seen = Rc::clone(&persisted);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            kv_grid::init(cx);
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state,
+                persist: Some(Box::new(move |_, state| {
+                    seen.borrow_mut().push(state.performance.nav_width)
+                })),
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        persisted
+    }
+
+    /// The tab as the window root, `width` × `height`, the sidebar focused.
+    fn open(
+        cx: &mut TestAppContext,
+        state: UiState,
+        cpus: u16,
+        width: f32,
+        height: f32,
+    ) -> Rig<'_> {
+        let persisted = install(cx, state, cpus);
+        let client = cx.read(|cx| Arc::clone(&cx.global::<EngineGlobal>().0));
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let d = demand.clone();
+        let (page, vcx) = cx.add_window_view(move |_, cx| PerformancePage::new(hub, d, cx));
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(width), px(height)));
+        let focus = vcx.update(|_, cx| page.read(cx).primary_focus());
+        vcx.update(|window, cx| focus.focus(window, cx));
+        draw(vcx);
+        Rig {
+            page,
+            demand,
+            persisted,
+            vcx,
+        }
+    }
+
+    fn key(s: &str) -> DeviceKey {
+        DeviceKey(Arc::from(s))
+    }
+
+    fn cpu_page(r: &mut Rig) -> Entity<CpuPage> {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.read(cx)
+                .page(&key(DeviceKey::CPU))
+                .expect("CPU page built")
+                .clone()
+                .downcast::<CpuPage>()
+                .expect("a CpuPage")
+        })
+    }
+
+    #[gpui_kit::test]
+    fn nav_width_persists_and_clamps(cx: &mut TestAppContext) {
+        let mut state = UiState::default();
+        state.performance.nav_width = 500;
+        let r = open(cx, state, 16, 1280., 800.);
+        let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        assert_eq!(sidebar.size.width, px(400.), "500 is clamped to 400");
+
+        let boundary = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page").left();
+        let y = px(400.);
+        r.vcx.simulate_mouse_down(
+            point(boundary - px(2.), y),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        r.vcx.simulate_mouse_move(
+            point(boundary - px(20.), y),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        r.vcx.simulate_mouse_move(
+            point(px(300.), y),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        draw(r.vcx);
+        r.vcx
+            .simulate_mouse_up(point(px(300.), y), MouseButton::Left, Modifiers::none());
+        // tl-app debounces the write by 500 ms; the persist call itself comes at once.
+        r.vcx.executor().advance_clock(Duration::from_millis(600));
+        draw(r.vcx);
+
+        assert_eq!(r.persisted.borrow().last(), Some(&300));
+        let page = r.page.clone();
+        let (saved, nav) = r.vcx.update(|_, cx| {
+            (
+                TlSettings::state(cx).performance.nav_width,
+                page.read(cx).nav_width(),
+            )
+        });
+        assert_eq!((saved, nav), (300, 300));
+        let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        assert_eq!(sidebar.size.width, px(300.));
+    }
+
+    fn sidebar_visible(r: &mut Rig) -> bool {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).sidebar_visible())
+    }
+
+    /// Dispatches `PerfToggleSidebar` and lets the `m_base` animation finish.
+    fn toggle(r: &mut Rig) {
+        r.vcx.dispatch_action(PerfToggleSidebar);
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+    }
+
+    #[gpui_kit::test]
+    fn toggle_sidebar_not_persisted(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let before = r.persisted.borrow().len();
+        let state = r.vcx.update(|_, cx| TlSettings::state(cx).clone());
+
+        toggle(&mut r);
+        assert!(!sidebar_visible(&mut r), "hidden");
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert_eq!((page.left(), page.size.width), (px(0.), px(1280.)));
+
+        toggle(&mut r);
+        assert!(sidebar_visible(&mut r), "shown again");
+        let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        assert_eq!(sidebar.size.width, px(252.));
+
+        assert_eq!(r.persisted.borrow().len(), before, "nothing persisted");
+        let after = r.vcx.update(|_, cx| TlSettings::state(cx).clone());
+        assert_eq!(after, state);
+    }
+
+    #[gpui_kit::test]
+    fn toggle_sidebar_animates_width(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        r.vcx.dispatch_action(PerfToggleSidebar);
+        draw(r.vcx);
+        r.vcx.executor().advance_clock(Duration::from_millis(100));
+        draw(r.vcx);
+        // Half way through `m_base` the clipping box is between 0 and 252 px wide.
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert!(
+            page.left() > px(0.) && page.left() < px(252.),
+            "mid-animation page left {:?}",
+            page.left()
+        );
+        r.vcx.executor().advance_clock(Duration::from_millis(150));
+        draw(r.vcx);
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert_eq!(page.left(), px(0.));
+    }
+
+    #[gpui_kit::test]
+    fn performance_layout_regions(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let sidebar = r.vcx.debug_bounds(SIDEBAR_PANEL_ID).expect("sidebar panel");
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page panel");
+        assert_eq!(sidebar.left(), px(0.));
+        assert_eq!(sidebar.size.width, px(252.));
+        // The kit's 1 px divider straddles the panel boundary; it takes no width of its own.
+        assert_eq!(page.left(), sidebar.right());
+        assert!(page.size.width >= px(400.), "page {:?}", page.size);
+        assert_eq!(page.right(), px(1280.));
+
+        let cpu = cpu_page(&mut r);
+        let word = r.vcx.update(|_, cx| cpu.read(cx).header().0.to_string());
+        assert_eq!(word, "Processor");
+        let header = r.vcx.debug_bounds("perf-page-header").expect("header");
+        assert!(header.left() >= page.left());
+    }
+
+    #[gpui_kit::test]
+    fn selection_creates_page_once_and_switches_demand(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let page = r.page.clone();
+        let demand = r.demand.clone();
+        let count = |r: &mut Rig| r.vcx.update(|_, cx| page.read(cx).page_count());
+        let cpu_fast = |r: &mut Rig| r.vcx.update(|_, cx| demand.read(cx).merged().cpu_fast);
+        assert_eq!(count(&mut r), 1, "the first selection is built");
+        assert!(cpu_fast(&mut r), "the CPU page's demand part");
+        let cpu = cpu_page(&mut r);
+
+        let sidebar = r.vcx.update(|_, cx| page.read(cx).sidebar().clone());
+        let select = |r: &mut Rig, k: &str| {
+            let k = key(k);
+            r.vcx
+                .update(|_, cx| sidebar.update(cx, |s, cx| s.select(k, cx)));
+            draw(r.vcx);
+        };
+        select(&mut r, DeviceKey::MEMORY);
+        assert_eq!(count(&mut r), 2);
+        let selected = r.vcx.update(|_, cx| page.read(cx).selected().cloned());
+        assert_eq!(selected, Some(key(DeviceKey::MEMORY)));
+        assert!(!cpu_fast(&mut r), "the CPU page withdrew its demand part");
+        assert!(r.vcx.debug_bounds("perf-page-header").is_some());
+
+        select(&mut r, DeviceKey::CPU);
+        assert_eq!(count(&mut r), 2, "no new page");
+        assert_eq!(cpu_page(&mut r), cpu, "the same CPU page entity");
+        assert!(cpu_fast(&mut r), "the CPU page is active again");
+    }
+
+    #[gpui_kit::test]
+    fn focus_order_sidebar_then_page(cx: &mut TestAppContext) {
+        let mut r = open(cx, UiState::default(), 16, 1280., 800.);
+        let page = r.page.clone();
+        let cpu = cpu_page(&mut r);
+        let (order, primary, cpu_order): (Vec<FocusHandle>, FocusHandle, Vec<FocusHandle>) =
+            r.vcx.update(|_, cx| {
+                let p = page.read(cx);
+                (
+                    p.focus_order().into_vec(),
+                    p.primary_focus(),
+                    cpu.read(cx).focus_order().into_vec(),
+                )
+            });
+        assert_eq!(order[0], primary);
+        assert_eq!(&order[1..], &cpu_order[..]);
+        let focused = r.vcx.update(|window, _| primary.is_focused(window));
+        assert!(focused);
+    }
+
+    struct FakeProcesses(FocusHandle);
+
+    impl gpui_kit::EventEmitter<tl_ui::window::status::StatusChanged> for FakeProcesses {}
+
+    impl Render for FakeProcesses {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui_kit::{InteractiveElement as _, Styled as _};
+            div().track_focus(&self.0).size_full()
+        }
+    }
+
+    impl tl_ui::window::main::ShellPage for FakeProcesses {
+        fn primary_focus(&self) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn performance_tab_initial_focus_is_sidebar(cx: &mut TestAppContext) {
+        use tl_model::command::Tab;
+        use tl_ui::actions::SelectTab;
+        use tl_ui::app::StartOptions;
+        use tl_ui::demand::GlobalDemand;
+        use tl_ui::hub::GlobalHub;
+        use tl_ui::window::main::{
+            self as shell, MainWindow, PageSlot, main_window_view, open_main_window, set_test_page,
+        };
+        use tl_ui::window::titlebar::TitleBarProbe;
+
+        install(cx, UiState::default(), 16);
+        cx.update(|cx| {
+            let client = Arc::clone(&cx.global::<EngineGlobal>().0);
+            let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand));
+            tl_ui::components::toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            cx.set_global(StartOptions::default());
+            set_test_page(cx, Tab::Processes, |_, cx: &mut Context<MainWindow>| {
+                let page = cx.new(|cx| FakeProcesses(cx.focus_handle().tab_stop(true)));
+                PageSlot::new(page, cx)
+            });
+            cx.set_global(TitleBarProbe {
+                client: Some(true),
+                ..TitleBarProbe::default()
+            });
+            shell::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let vcx = &mut VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(vcx);
+
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let built = |vcx: &mut VisualTestContext| {
+            vcx.read_entity(&main, |m, _| {
+                m.page_entity::<PerformancePage>(Tab::Performance)
+            })
+        };
+        assert!(built(vcx).is_none(), "built on first visit");
+        vcx.dispatch_action(SelectTab(Tab::Performance as usize));
+        draw(vcx);
+        let page = built(vcx).expect("PerformancePage built");
+        let focus = vcx.update(|_, cx| page.read(cx).primary_focus());
+        assert!(vcx.update(|window, _| focus.is_focused(window)));
+        assert!(vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some());
+    }
+
+    #[cfg(feature = "bench")]
+    #[gpui_kit::test]
+    fn bench_show_both_behind_bench_feature(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::cpu::OVERALL_ID;
+        use tl_ui::pages::performance::cpu_grid::GRID_ID;
+
+        let mut r = open(cx, UiState::default(), 32, 1600., 1000.);
+        let cpu = cpu_page(&mut r);
+        r.vcx.update(|_, cx| {
+            cpu.update(cx, |p, cx| {
+                p.bench_show_both = true;
+                cx.notify();
+            })
+        });
+        draw(r.vcx);
+        let overall = r.vcx.debug_bounds(OVERALL_ID).expect("overall chart");
+        let grid = r.vcx.debug_bounds(GRID_ID).expect("grid");
+        assert_eq!(overall.size.height, px(300.));
+        assert!(grid.top() > overall.bottom(), "grid below the chart");
+        let page = r.vcx.debug_bounds(PAGE_PANEL_ID).expect("page");
+        assert!(overall.left() >= page.left() && grid.right() <= page.right());
+    }
+}
