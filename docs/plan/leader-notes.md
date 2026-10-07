@@ -640,3 +640,4 @@ After the reboot: read each in-progress bead's latest comment, check `git status
   - pdu.51: pages/processes/mod.rs, tests/ui_process_menu.rs.
   - 8fx.24 (last commit 77cc6f16), bj6.17 (5ff1c9ff), m1f.2 (3327378f): check their bead status and comments before resuming.
   Still running: gma.15 agent (then gma.41, gma.40), m1f.6, 9o0.22 agent (9o0.34, then 9o0.23). Resume the stopped beads with fresh agents, one or two at a time, when the machine has build capacity again.
+- 2026-10-07 14:24: the PC rebooted at 13:38 and reboots again at 14:28. No agents ran between the two boots. The on-disk state is unchanged from the 11:45 note (nine modified files and six untracked gallery goldens). Resume plan stays the same: first a build check of HEAD (gma.15's abd5beb and 14be5fe were never compiled), then the open beads with one or two fresh agents at a time.
