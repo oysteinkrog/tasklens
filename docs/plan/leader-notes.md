@@ -590,3 +590,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.34 closed: accent line ends at the filter outline (4f7e01d).
 - cr0.26 closed: import callback takes path, Settings and UiState and returns ImportedSettings; tl-app saves nothing (5dce869, b3c1e46, ff1b7f0, 7bd7e68). The UI half is on bj6.45 (comment added).
 - jqk.33 closed without new bindings: gpui_kit Root already binds Tab and Shift+Tab in every window; real-keystroke tests added (082485e, a2513c8). Leader accepts: a Global binding would bypass the kit focus trap.
+- rsf.27 closed: two render_table goldens regenerated; every changed pixel is in the exited gnome-shell Name cell (842fe30).
