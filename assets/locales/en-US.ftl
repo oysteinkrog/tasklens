@@ -667,3 +667,7 @@ shell-toolbar-hide-system = Hide system processes
 shell-toolbar-show-system = Show system processes
 shell-toolbar-view-mode = Toggle view mode (current: { $name })
 shell-toolbar-view-mode-history = History shows a flat list
+processes-cell-tooltip-euid = euid { $euid }
+processes-cell-tooltip-net-shared = shared
+processes-cell-tooltip-cancelled-writes = cancelled: { $size }
+processes-cell-tooltip-gpu-vram = VRAM on GPU { $n }: { $size }
