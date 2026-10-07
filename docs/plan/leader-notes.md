@@ -730,3 +730,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - wlf.10 closed. The lock check is in aa291812. wlf.17 code is in 536e7d1f and 66855ba2, and the Soak variant is approved in args.rs. wlf.17 AC1 and wlf.1 wait for an unlocked session. The pdu-51 agent takes wlf.16.
 - xdh.5 (7f124e49, 71dbe3e2, 9ad6d01c): AC 5 accepted as restated (no render from other sources; the card re-renders only through gpui ancestor dirtying). The card draws its own value. The net card uses AutoRate. The 9o0 agent does the SHORTCUT_DOCS fix, then jqk.20.
 - pdu.24: TlTreeDelegate gets a defaulted empty_clear_filter() so the no-match state draws TlEmptyState with Clear filter at top 96. Chosen over a page overlay, which would re-render the page.
+- crw.13 (64428080, 786505d2, 8443afd1, b6033ff5) closed. The trailing separator is dropped before P3. The crw agent takes crw.14, and summary tile right-click moves to the page menu, as UI-PRF-016 says.
