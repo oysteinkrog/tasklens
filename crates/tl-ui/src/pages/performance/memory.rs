@@ -10,6 +10,7 @@
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use gpui_kit::component::v_flex;
@@ -24,9 +25,13 @@ use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::Snapshot;
+use tl_model::system::{MemoryTotals, ZramTotals};
+use tl_model::time::now_boot_ns;
+use tl_model::units;
+use tl_model::validity::Validity;
 
 use super::actions::{PerfToggleMemoryComposition, PerfToggleMemorySwapGraph};
-use super::details::KeyValueModel;
+use super::details::{Fallback, KeyValueModel};
 use super::memory_bar::{Composition, CompositionBarView};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, page_words};
 use super::{DeviceKey, DeviceRow};
@@ -281,6 +286,232 @@ fn health_state(snap: &Snapshot) -> ChartState {
     }
 }
 
+// ---- Details grid (UI-PRF-028, PERF-043) ----
+
+pub const ROW_IN_USE: &str = "perf-mem-row-in-use";
+pub const ROW_AVAILABLE: &str = "perf-mem-row-available";
+pub const ROW_COMMITTED: &str = "perf-mem-row-committed";
+pub const ROW_CACHED: &str = "perf-mem-row-cached";
+pub const ROW_SLAB_RECLAIMABLE: &str = "perf-mem-row-slab-reclaimable";
+pub const ROW_SLAB_UNRECLAIMABLE: &str = "perf-mem-row-slab-unreclaimable";
+/// Rows 7 to 11 are E25-011's (memory modules); hidden until it fills them.
+pub const ROW_SPEED: &str = "perf-mem-row-speed";
+pub const ROW_SLOTS: &str = "perf-mem-row-slots";
+pub const ROW_FORM_FACTOR: &str = "perf-mem-row-form-factor";
+pub const ROW_TYPE: &str = "perf-mem-row-type";
+pub const ROW_RESERVED: &str = "perf-mem-row-reserved";
+pub const ROW_SWAP_USED: &str = "perf-mem-row-swap-used";
+pub const ROW_SWAP_AVAILABLE: &str = "perf-mem-row-swap-available";
+pub const ROW_COMPRESSED: &str = "perf-mem-row-compressed";
+pub const ROW_SAVINGS: &str = "perf-mem-row-savings";
+pub const ROW_HUGE_PAGES: &str = "perf-mem-row-huge-pages";
+
+/// The 16 Details rows in grid order (UI-PRF-028).
+pub const MEMORY_DETAIL_ROWS: [&str; 16] = [
+    ROW_IN_USE,
+    ROW_AVAILABLE,
+    ROW_COMMITTED,
+    ROW_CACHED,
+    ROW_SLAB_RECLAIMABLE,
+    ROW_SLAB_UNRECLAIMABLE,
+    ROW_SPEED,
+    ROW_SLOTS,
+    ROW_FORM_FACTOR,
+    ROW_TYPE,
+    ROW_RESERVED,
+    ROW_SWAP_USED,
+    ROW_SWAP_AVAILABLE,
+    ROW_COMPRESSED,
+    ROW_SAVINGS,
+    ROW_HUGE_PAGES,
+];
+
+/// The rows this page fills, in grid order.
+const LIVE_ROWS: [&str; 11] = [
+    ROW_IN_USE,
+    ROW_AVAILABLE,
+    ROW_COMMITTED,
+    ROW_CACHED,
+    ROW_SLAB_RECLAIMABLE,
+    ROW_SLAB_UNRECLAIMABLE,
+    ROW_SWAP_USED,
+    ROW_SWAP_AVAILABLE,
+    ROW_COMPRESSED,
+    ROW_SAVINGS,
+    ROW_HUGE_PAGES,
+];
+
+/// "{$count} × {$size}".
+const KEY_HUGE_PAGES_VALUE: &str = "perf-mem-huge-pages-value";
+
+/// Compressed and Savings show from this many compressed bytes.
+pub const COMPRESSED_MIN: u64 = 1 << 20;
+
+/// The Memory Details model: 16 rows in order, rows 7 to 11 hidden until E25-011.
+pub fn memory_details_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&MEMORY_DETAIL_ROWS)
+        .with_texts(&[(KEY_HUGE_PAGES_VALUE, &["count", "size"])]);
+    for label in [
+        ROW_SPEED,
+        ROW_SLOTS,
+        ROW_FORM_FACTOR,
+        ROW_TYPE,
+        ROW_RESERVED,
+    ] {
+        model.hide(label);
+    }
+    model
+}
+
+/// What the live rows are read from.
+#[derive(Clone, Copy)]
+pub struct MemoryDetailInputs<'a> {
+    pub mem: &'a MemoryTotals,
+    pub now_boot_ns: u64,
+    /// `observed_end` of the system component, for the Stale age.
+    pub observed_end_ns: u64,
+    /// The memory source's last error, for Failed.
+    pub error: Option<&'a str>,
+}
+
+/// zram `mm_stat` totals when zram is present, else zeros.
+fn zram_of(m: &MemoryTotals) -> ZramTotals {
+    match m.zram.validity {
+        Validity::Valid | Validity::Stale => m.zram.value,
+        _ => ZramTotals::default(),
+    }
+}
+
+/// Compressed bytes (zram `mem_used_total` + Zswap) and the bytes saved
+/// ((zram `orig_data_size` + Zswapped) − (zram `compr_data_size` + Zswap)), PERF-043.
+pub fn compression(m: &MemoryTotals) -> (u64, u64) {
+    let z = zram_of(m);
+    let compressed = z.mem_used.saturating_add(m.zswap);
+    let savings = z
+        .orig_data
+        .saturating_add(m.zswapped)
+        .saturating_sub(z.compr_data.saturating_add(m.zswap));
+    (compressed, savings)
+}
+
+/// A huge page size in whole units: "2 MiB", "1 GiB".
+fn page_size(out: &mut String, n: u64) {
+    const GIB: u64 = 1 << 30;
+    if n >= GIB && n % GIB == 0 {
+        let _ = write!(out, "{} GiB", n / GIB);
+    } else {
+        units::mib_whole(out, n);
+    }
+}
+
+/// Hides or shows `label`. True when that changed.
+fn set_hidden(model: &mut KeyValueModel, label: &'static str, hidden: bool) -> bool {
+    let was = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .map(|r| r.hidden);
+    if was == Some(hidden) {
+        return false;
+    }
+    if hidden {
+        model.hide(label);
+    } else {
+        model.show(label);
+    }
+    true
+}
+
+/// Sets `label`'s tooltip to a fixed text unless it already has it.
+fn fixed_tooltip(model: &mut KeyValueModel, label: &'static str, text: &'static str) {
+    let has = model
+        .rows
+        .iter()
+        .find(|r| r.label == label)
+        .is_some_and(|r| r.tooltip.as_deref() == Some(text));
+    if !has {
+        model.set_tooltip(label, Some(SharedString::new_static(text)));
+    }
+}
+
+/// Fills the 11 live rows from `/proc/meminfo` and the zram totals (PERF-043), and applies
+/// the hidden-when-missing rules: Compressed and Savings from 1 MiB compressed, Huge pages
+/// when there are any. Each value formats again only when its raw bytes changed. True when
+/// any row changed.
+pub fn update_memory_details(model: &mut KeyValueModel, inp: &MemoryDetailInputs) -> bool {
+    let m = inp.mem;
+    let mut changed = false;
+    match m.validity {
+        Validity::Valid | Validity::Stale => {}
+        v => {
+            let (v, error) = match v {
+                Validity::Failed => (v, inp.error),
+                Validity::WarmingUp => (v, None),
+                _ => (Validity::Unsupported, None),
+            };
+            for label in LIVE_ROWS {
+                changed |= model.set_fallback(label, v, Fallback::Unavailable, error);
+            }
+            return changed;
+        }
+    }
+    let stale = m.validity == Validity::Stale;
+    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+    let bytes = |model: &mut KeyValueModel, label: &'static str, n: u64| {
+        let c = model.set_valid(label, n, |o| units::bytes(o, n));
+        c | (stale && model.set_stale(label, age_ns))
+    };
+
+    let in_use = if m.available > m.total {
+        m.total.saturating_sub(m.free)
+    } else {
+        m.total - m.available
+    };
+    changed |= bytes(model, ROW_IN_USE, in_use);
+    changed |= bytes(model, ROW_AVAILABLE, m.available);
+    // Both halves in the bits, so either change formats again.
+    let (used, limit) = (m.committed, m.commit_limit);
+    let bits = used.rotate_left(32) ^ limit;
+    changed |= model.set_valid(ROW_COMMITTED, bits, |o| units::bytes_of(o, used, limit));
+    changed |= stale && model.set_stale(ROW_COMMITTED, age_ns);
+    changed |= bytes(model, ROW_CACHED, m.cached);
+    changed |= bytes(model, ROW_SLAB_RECLAIMABLE, m.slab_reclaimable);
+    fixed_tooltip(model, ROW_SLAB_RECLAIMABLE, "SReclaimable");
+    changed |= bytes(model, ROW_SLAB_UNRECLAIMABLE, m.slab_unreclaimable);
+    fixed_tooltip(model, ROW_SLAB_UNRECLAIMABLE, "SUnreclaim");
+    changed |= bytes(
+        model,
+        ROW_SWAP_USED,
+        m.swap_total.saturating_sub(m.swap_free),
+    );
+    changed |= bytes(model, ROW_SWAP_AVAILABLE, m.swap_free);
+
+    let (compressed, savings) = compression(m);
+    let show = compressed >= COMPRESSED_MIN;
+    changed |= set_hidden(model, ROW_COMPRESSED, !show);
+    changed |= set_hidden(model, ROW_SAVINGS, !show);
+    if show {
+        changed |= bytes(model, ROW_COMPRESSED, compressed);
+        changed |= bytes(model, ROW_SAVINGS, savings);
+    }
+
+    let (count, size) = (m.huge_pages_total, m.huge_page_size);
+    let show = count > 0;
+    changed |= set_hidden(model, ROW_HUGE_PAGES, !show);
+    if show {
+        let template = model.text(KEY_HUGE_PAGES_VALUE);
+        let bits = count.rotate_left(32) ^ size;
+        changed |= model.set_valid(ROW_HUGE_PAGES, bits, |o| {
+            template.write_each(o, |i, o| match i {
+                0 => units::count(o, count),
+                _ => page_size(o, size),
+            });
+        });
+        changed |= stale && model.set_stale(ROW_HUGE_PAGES, age_ns);
+    }
+    changed
+}
+
 /// The Swap chart's height animation (UI-PRF-026).
 #[derive(Clone, Copy, Debug)]
 struct SwapAnim {
@@ -391,7 +622,7 @@ impl MemoryPage {
             swap,
             bar: None,
             composition,
-            details: KeyValueModel::default(),
+            details: memory_details_model(),
             show_composition: settings.composition,
             show_swap: settings.swap,
             swap_total: totals.swap,
@@ -416,7 +647,21 @@ impl MemoryPage {
         let state = health_state(&snap);
         this.set_chart_state(state, cx);
         this.sync_bar(cx);
+        this.sync_details(&snap, cx);
         this
+    }
+
+    /// Brings the Details rows up to date; notifies only when one changed.
+    fn sync_details(&mut self, snap: &Snapshot, cx: &mut Context<Self>) {
+        let inputs = MemoryDetailInputs {
+            mem: &snap.system.memory,
+            now_boot_ns: now_boot_ns(),
+            observed_end_ns: snap.system.header.observed_end,
+            error: snap.health.get(SourceId::Memory).last_error.as_deref(),
+        };
+        if update_memory_details(&mut self.details, &inputs) {
+            cx.notify();
+        }
     }
 
     /// The composition bar view, once it has been shown.
@@ -507,6 +752,12 @@ impl MemoryPage {
         cx: &mut Context<Self>,
     ) {
         let snap = Arc::clone(hub.read(cx).current());
+        if ev
+            .mask
+            .intersects(ComponentMask::SYSTEM | ComponentMask::HEALTH)
+        {
+            self.sync_details(&snap, cx);
+        }
         if ev.mask.contains(ComponentMask::SYSTEM) {
             self.composition = Composition::of(&snap.system.memory);
             self.sync_bar(cx);
@@ -839,5 +1090,49 @@ impl Render for MemoryPage {
                 }
                 .render(window, cx),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    fn mem() -> MemoryTotals {
+        MemoryTotals {
+            validity: Validity::Valid,
+            total: 64 * GIB,
+            available: 40 * GIB,
+            free: 20 * GIB,
+            cached: 12 * GIB,
+            committed: 30 * GIB,
+            commit_limit: 80 * GIB,
+            slab_reclaimable: GIB,
+            slab_unreclaimable: GIB / 2,
+            swap_total: 32 * GIB,
+            swap_free: 31 * GIB,
+            ..MemoryTotals::default()
+        }
+    }
+
+    #[test]
+    fn memory_details_no_realloc_when_unchanged() {
+        let mut model = memory_details_model();
+        let m = mem();
+        let inp = MemoryDetailInputs {
+            mem: &m,
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            error: None,
+        };
+        assert!(update_memory_details(&mut model, &inp));
+        let ptrs: Vec<*const u8> = model.rows.iter().map(|r| r.value.as_ptr()).collect();
+        assert!(
+            !update_memory_details(&mut model, &inp),
+            "second call changes nothing"
+        );
+        let again: Vec<*const u8> = model.rows.iter().map(|r| r.value.as_ptr()).collect();
+        assert_eq!(ptrs, again, "no value text was reallocated");
     }
 }
