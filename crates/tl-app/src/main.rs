@@ -18,7 +18,6 @@ mod logging;
 mod lowmem_unit;
 #[allow(dead_code, reason = "E33-006 calls it")]
 mod migrations;
-#[allow(dead_code, reason = "E33-012 sends the renderer notices")]
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
@@ -30,7 +29,7 @@ mod single_instance;
 
 use std::ffi::OsString;
 use std::path::Path;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,7 +37,9 @@ use tl_engine::{Engine, EngineConfig, EngineHandle, EngineHooks, EngineMode};
 use tl_model::client::EngineClient;
 use tl_model::settings::{EngineSettings, StartTab};
 use tl_ui::app::ToastKindTag;
-use tl_ui::{AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiInit, UiLaunch};
+use tl_ui::{
+    AppEnv, BuildInfo, ImportSummary, OpenMode, StartOptions, UiExit, UiInit, UiLaunch,
+};
 use tracing::{error, info, warn};
 
 use crate::args::TabArg;
@@ -48,12 +49,25 @@ use crate::single_instance::{Forward, Outcome};
 const NV_X11_VAR: &str = "__NV_FORCE_ENABLE_X11_EGL_PLATFORM";
 const NVIDIA_VERSION_FILE: &str = "/proc/driver/nvidia/version";
 const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
+/// Set on the one automatic relaunch after device loss (ADR-015, R-153).
+const RELAUNCHED_VAR: &str = "TASKLENS_RELAUNCHED";
 
 fn main() -> ExitCode {
     tl_ui::app::perf_origin(Instant::now());
     let exec_to_main = exec_to_main_ms();
+    // Step 2 runs first: `--app-id` decides the paths. clap exits 2 on an unknown argument.
+    let args = args::parse();
+    if let Some(id) = args
+        .app_id
+        .as_deref()
+        .filter(|id| !single_instance::valid_app_id(id))
+    {
+        eprintln!("Invalid --app-id: {id}");
+        return ExitCode::from(2);
+    }
+
     // Step 1: paths, panic hook, logging.
-    let paths = match paths::Paths::from_env() {
+    let paths = match paths::Paths::from_env_for(args.app_id.as_deref()) {
         Ok(paths) => paths,
         Err(e) => {
             eprintln!("tasklens: {e}");
@@ -78,8 +92,7 @@ fn main() -> ExitCode {
     }
     tl_ui::app::perf_step("logging");
 
-    // Step 2: arguments. clap exits 2 on an unknown argument.
-    let args = args::parse();
+    // Step 2: arguments (parsed above).
     let debug = debug_enabled(args.debug, std::env::var_os("TASKLENS_DEBUG"));
 
     // settings.toml is read before step 3, which needs `rendering.gpu`.
@@ -116,15 +129,16 @@ fn main() -> ExitCode {
         select_pid: args.select_pid,
     };
     let activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
-    // `_bus` keeps the bus name until `main` returns.
-    let (_bus, app_requests) = match single_instance::acquire(&forward, activation_token) {
-        Outcome::Forwarded => {
-            info!("another tasklens is running; forwarded");
-            return ExitCode::SUCCESS;
-        }
-        Outcome::NoBus => (None, None),
-        Outcome::Primary { conn, requests } => (Some(conn), Some(requests)),
-    };
+    // `bus` keeps the bus name until the process exits, or until a relaunch closes it.
+    let (bus, app_requests) =
+        match single_instance::acquire(args.app_id.as_deref(), &forward, activation_token) {
+            Outcome::Forwarded => {
+                info!("another tasklens is running; forwarded");
+                return ExitCode::SUCCESS;
+            }
+            Outcome::NoBus => (None, None),
+            Outcome::Primary { conn, requests } => (Some(conn), Some(requests)),
+        };
     tl_ui::app::perf_step("single_instance");
 
     // Step 5: state and themes (settings were loaded before step 3).
@@ -212,9 +226,28 @@ fn main() -> ExitCode {
     // U-2: `Application::run` returns on Linux after `cx.quit()`, so this is the only path.
     info!(target: "tasklens::engine", ?exit, "shutdown after run returned");
     let once = ExitOnce::new((engine, log_guard));
-    match once.take() {
-        Some((engine, log_guard)) => finish(engine, &store, log_guard),
-        None => ExitCode::SUCCESS,
+    let Some((engine, log_guard)) = once.take() else {
+        return ExitCode::SUCCESS;
+    };
+    match exit {
+        UiExit::Quit => finish(engine, &store, log_guard, 0, || {}),
+        UiExit::RendererFailed(msg) => {
+            error!(target: "tasklens::ui", "renderer start failed: {msg}");
+            eprintln!("tasklens could not start the renderer");
+            notify::send(notify::Fatal::RendererFailed);
+            finish(engine, &store, log_guard, 1, || {})
+        }
+        UiExit::DeviceLost => {
+            notify::send(notify::Fatal::DeviceLost);
+            let again = should_relaunch(std::env::var_os(RELAUNCHED_VAR));
+            finish(engine, &store, log_guard, 0, move || {
+                if again {
+                    relaunch(bus);
+                } else {
+                    warn!(target: "tasklens::ui", "device lost after a relaunch; not relaunching again");
+                }
+            })
+        }
     }
 }
 
@@ -233,9 +266,15 @@ impl<T> ExitOnce<T> {
 }
 
 /// The exit steps after the UI stops (ADR-010 Close behaviour, ADR-004 Shutdown): settings,
-/// then the engine within 1500 ms, then the log file. Exits 0 without running destructors, so a
-/// stuck engine thread cannot hold the process open.
-fn finish(engine: EngineHandle, store: &Store, log: Option<logging::LogGuard>) -> ! {
+/// then the engine within 1500 ms, then `before_exit`, then the log file. Exits with `code`
+/// without running destructors, so a stuck engine thread cannot hold the process open.
+fn finish(
+    engine: EngineHandle,
+    store: &Store,
+    log: Option<logging::LogGuard>,
+    code: i32,
+    before_exit: impl FnOnce(),
+) -> ! {
     // Pending changes are written before anything else on exit (ADR-011).
     store.flush();
     let report = engine.shutdown(Duration::from_millis(1500));
@@ -243,9 +282,56 @@ fn finish(engine: EngineHandle, store: &Store, log: Option<logging::LogGuard>) -
         warn!(target: "tasklens::engine", drained = report.drained, torn_down = report.torn_down,
             "engine shutdown timed out");
     }
+    // Runs while the log writer is still alive, so its lines reach the log file.
+    before_exit();
     // The non-blocking writer loses lines unless its guard is dropped before `exit`.
     drop(log);
-    std::process::exit(0)
+    std::process::exit(code)
+}
+
+/// True unless this process is itself the relaunch: one automatic relaunch (ADR-015).
+fn should_relaunch(relaunched: Option<OsString>) -> bool {
+    relaunched.is_none_or(|v| v != "1")
+}
+
+/// The arguments for the relaunch: `args` without argv[0] and without `--start-minimized`,
+/// so the restarted window is shown.
+fn relaunch_args(args: &[OsString]) -> Vec<OsString> {
+    args.iter()
+        .skip(1)
+        .filter(|a| *a != "--start-minimized")
+        .cloned()
+        .collect()
+}
+
+/// The relaunch command: `exe` itself, never a shell, with `TASKLENS_RELAUNCHED=1`.
+fn relaunch_command(exe: &Path, args: &[OsString]) -> Command {
+    let mut command = Command::new(exe);
+    command.args(relaunch_args(args)).env(RELAUNCHED_VAR, "1");
+    command
+}
+
+/// Starts a new tasklens after device loss and does not wait for it. The bus name is released
+/// first, so the new process becomes the primary instead of forwarding to this one.
+/// Arguments are not logged.
+fn relaunch(bus: Option<zbus::blocking::Connection>) {
+    if let Some(conn) = bus
+        && let Err(e) = conn.close()
+    {
+        warn!(target: "tasklens::ui", "could not close the session bus before relaunch: {e}");
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            error!(target: "tasklens::ui", "relaunch failed: no executable path: {e}");
+            return;
+        }
+    };
+    let args: Vec<OsString> = std::env::args_os().collect();
+    match relaunch_command(&exe, &args).spawn() {
+        Ok(child) => info!(target: "tasklens::ui", pid = child.id(), "relaunched after device loss"),
+        Err(e) => error!(target: "tasklens::ui", "relaunch failed: {e}"),
+    }
 }
 
 /// The time from `exec` to `main` (the dynamic loader and static initialisers), at the 10 ms
@@ -400,6 +486,53 @@ mod tests {
         let there = thread.join().expect("join");
         assert_eq!([here, there].iter().flatten().collect::<Vec<_>>(), vec![&7]);
         assert_eq!(once.take(), None);
+    }
+
+    #[test]
+    fn relaunch_drops_start_minimized() {
+        let args: Vec<OsString> = ["/usr/bin/tasklens", "--start-minimized", "--tab", "services"]
+            .map(OsString::from)
+            .into();
+        assert_eq!(
+            relaunch_args(&args),
+            ["--tab", "services"].map(OsString::from).to_vec()
+        );
+        assert!(relaunch_args(&args[..1]).is_empty());
+        assert!(relaunch_args(&[]).is_empty());
+    }
+
+    #[test]
+    fn relaunch_only_once() {
+        assert!(should_relaunch(None));
+        assert!(!should_relaunch(os("1")));
+        assert!(should_relaunch(os("0")));
+    }
+
+    #[test]
+    fn relaunch_command_sets_marker() {
+        let args: Vec<OsString> = ["tasklens", "--start-minimized", "--debug"]
+            .map(OsString::from)
+            .into();
+        let command = relaunch_command(Path::new("/usr/bin/tasklens"), &args);
+        assert_eq!(command.get_program(), "/usr/bin/tasklens");
+        assert_eq!(command.get_args().collect::<Vec<_>>(), ["--debug"]);
+        let envs: Vec<_> = command.get_envs().collect();
+        assert_eq!(envs, [(RELAUNCHED_VAR.as_ref(), Some("1".as_ref()))]);
+    }
+
+    #[test]
+    fn relaunched_process_sees_marker() {
+        // `env` prints its environment, standing in for the relaunched tasklens.
+        let output = relaunch_command(Path::new("/usr/bin/env"), &[])
+            .env_remove("TASKLENS_DEBUG")
+            .output()
+            .expect("run env");
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let marker = printed
+            .lines()
+            .find_map(|l| l.strip_prefix("TASKLENS_RELAUNCHED="));
+        assert_eq!(marker, Some("1"));
+        assert!(!should_relaunch(marker.map(OsString::from)));
     }
 
     #[test]
