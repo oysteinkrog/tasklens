@@ -666,6 +666,8 @@ mod grid {
 
 #[cfg(feature = "test-hooks")]
 mod page {
+    use std::time::Duration;
+
     use gpui_kit::{
         AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render,
         Styled as _, TestAppContext, VisualTestContext, Window, div, px,
@@ -680,7 +682,8 @@ mod page {
     use tl_ui::hub::SnapshotHub;
     use tl_ui::pages::performance::actions::{PerfSetCpuGraphMode, PerfToggleCpuKernel};
     use tl_ui::pages::performance::cpu::{
-        CPU_EXTRA_MODES_ENABLED, CpuPage, OVERALL_ID, mode_items,
+        CPU_EXTRA_MODES_ENABLED, CpuPage, FADE_NEW_ID, FADE_OLD_ID, OVERALL_ID, OVERLAID_ID,
+        PageSettingsView, STACKED_ID, mode_items, overlaid_spec,
     };
     use tl_ui::pages::performance::cpu_grid::GRID_ID;
     use tl_ui::pages::performance::page::DevicePage as _;
@@ -905,6 +908,8 @@ mod page {
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::Overall,
         });
+        // Past the cross-fade, so only the new area is drawn.
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
         draw(r.vcx);
         let page = r.page.clone();
         let (mode, setting) = r.vcx.update(|_, cx| {
@@ -1006,29 +1011,161 @@ mod page {
     }
 
     #[gpui_kit::test]
-    fn cpu_extra_modes_disabled_before_p2(cx: &mut TestAppContext) {
-        const { assert!(!CPU_EXTRA_MODES_ENABLED) };
-        let items = mode_items();
-        for item in &items[2..] {
-            assert!(!item.enabled, "{:?}", item.mode);
-            assert_eq!(item.tooltip, Some("perf-later-version"));
-        }
-        assert!(items[..2].iter().all(|i| i.enabled && i.tooltip.is_none()));
-
-        // The action is ignored for a disabled mode.
+    fn cpu_extra_modes_enabled(cx: &mut TestAppContext) {
+        const { assert!(CPU_EXTRA_MODES_ENABLED) };
+        assert!(
+            mode_items()
+                .iter()
+                .all(|i| i.enabled && i.tooltip.is_none())
+        );
         let r = open(cx, Settings::default());
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::AllCoresStacked,
+        });
+        let page = r.page.clone();
+        let mode = r.vcx.update(|_, cx| page.read(cx).mode());
+        assert_eq!(mode, CpuGraphMode::AllCoresStacked);
+    }
+
+    fn with_mode(mode: CpuGraphMode) -> Settings {
+        let mut s = Settings::default();
+        s.performance.cpu_graph_mode = mode;
+        s
+    }
+
+    #[gpui_kit::test]
+    fn cpu_overlaid_series_alpha(cx: &mut TestAppContext) {
+        let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            let chart = page.read(cx).overlaid().expect("overlaid chart").read(cx);
+            assert_eq!(chart.spec.series.len(), 16);
+            for s in &chart.spec.series {
+                assert!((s.line.a - 0.08).abs() < 1e-6, "max(1/16, 0.08)");
+                assert!(s.fill.is_none());
+            }
+            assert!(!chart.spec.stack);
+            assert!(chart.labels.legend.is_empty());
+            assert!(!chart.labels.show_axis_max);
+
+            // 4 CPUs: 1/4.
+            let theme = tl_ui::theme::current(cx).clone();
+            let view = PageSettingsView {
+                range_ns: 60 * S,
+                smooth: false,
+                rounded: false,
+            };
+            let four: Vec<DeviceIdx> = (0..4).map(DeviceIdx).collect();
+            let spec = overlaid_spec(&four, &view, &theme);
+            assert_eq!(spec.series.len(), 4);
+            assert!(spec.series.iter().all(|s| (s.line.a - 0.25).abs() < 1e-6));
+        });
+        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn cpu_kernel_disabled_in_overlaid(cx: &mut TestAppContext) {
+        let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
+        let page = r.page.clone();
+        let (enabled, label, demand) = r.vcx.update(|_, cx| {
+            let p = page.read(cx);
+            (
+                p.kernel_enabled(),
+                p.words().kernel_toggle(p.kernel()).to_string(),
+                p.demand_part().cpu,
+            )
+        });
+        assert!(!enabled);
+        assert_eq!(label, "Kernel on", "the label is unchanged");
+        assert_eq!(demand, CpuDemand::PerCore);
+        // The kernel button is drawn at half opacity but stays in place with its tooltip.
+        assert!(r.vcx.debug_bounds("TlButton-perf-cpu-kernel").is_some());
+
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::Overall,
+        });
+        assert!(r.vcx.update(|_, cx| page.read(cx).kernel_enabled()));
+    }
+
+    #[gpui_kit::test]
+    fn cpu_stacked_axis_text(cx: &mut TestAppContext) {
+        use tl_model::settings::NetworkUnit;
+        use tl_model::time::now_boot_ns;
+        use tl_ui::chart::YScale;
+        use tl_ui::chart::scale::{ScaleState, compute};
+
+        let r = open(cx, with_mode(CpuGraphMode::AllCoresStacked));
+        let page = r.page.clone();
+        let (y, stack, axis_max, fmt, n) = r.vcx.update(|_, cx| {
+            let chart = page.read(cx).stacked().expect("stacked chart").read(cx);
+            (
+                chart.spec.y,
+                chart.spec.stack,
+                chart.labels.show_axis_max,
+                chart.labels.value_fmt,
+                chart.spec.series.len(),
+            )
+        });
+        assert_eq!(y, YScale::Stacked(16));
+        assert!(stack && axis_max);
+        assert_eq!(n, 16);
+        let mut axis = String::new();
+        compute(
+            &y,
+            0.0,
+            800.0,
+            now_boot_ns(),
+            &mut ScaleState::default(),
+            fmt,
+            NetworkUnit::Bits,
+            &mut axis,
+        );
+        assert_eq!(axis, "1600%");
+        assert!(r.vcx.debug_bounds(STACKED_ID).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn cpu_mode_change_crossfade(cx: &mut TestAppContext) {
+        let r = open(cx, with_mode(CpuGraphMode::Overall));
+        let page = r.page.clone();
+        assert!(!r.vcx.update(|_, cx| cx.reduce_motion()));
         r.vcx.dispatch_action(PerfSetCpuGraphMode {
             mode: CpuGraphMode::AllCoresOverlaid,
         });
+        // First frame: both areas, the old fading out and the new fading in.
+        r.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            r.vcx.update(|_, cx| page.read(cx).fading_from()),
+            Some(CpuGraphMode::Overall)
+        );
+        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_some());
+        assert!(r.vcx.debug_bounds(FADE_NEW_ID).is_some());
+        assert!(r.vcx.debug_bounds(OVERALL_ID).is_some());
+        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
+        // After m_base only the new area.
+        r.vcx.executor().advance_clock(Duration::from_millis(250));
+        draw(r.vcx);
+        assert_eq!(r.vcx.update(|_, cx| page.read(cx).fading_from()), None);
+        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_none());
+        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
+        assert!(r.vcx.debug_bounds(OVERLAID_ID).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn cpu_mode_change_instant_reduced_motion(cx: &mut TestAppContext) {
+        let mut settings = with_mode(CpuGraphMode::Overall);
+        settings.motion.animations = false;
+        let r = open(cx, settings);
         let page = r.page.clone();
-        let (mode, later) = r.vcx.update(|_, cx| {
-            (
-                page.read(cx).mode(),
-                page.read(cx).words().later.to_string(),
-            )
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::PerCore,
         });
-        assert_eq!(mode, CpuGraphMode::PerCore);
-        assert_eq!(later, "Available in a later version");
+        assert_eq!(r.vcx.update(|_, cx| page.read(cx).fading_from()), None);
+        // One frame, no clock advance: only the new area.
+        r.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(r.vcx.debug_bounds(FADE_OLD_ID).is_none());
+        assert!(r.vcx.debug_bounds(OVERALL_ID).is_none());
+        assert!(r.vcx.debug_bounds(GRID_ID).is_some());
     }
 
     #[gpui_kit::test]
