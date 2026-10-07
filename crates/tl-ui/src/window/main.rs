@@ -15,10 +15,14 @@
 //! UI-SHL-005, UI-SHL-112, UI-SHL-113, APP-045). Every quit goes through
 //! `request_exit(cx, UiExit::Quit)`; `tl_ui::run` sets `QuitMode::Explicit`, so removing the last
 //! window does not quit (ADR-010).
+//!
+//! The process-view Actions `ToggleHideSystem`, `CycleViewMode` and `SetViewMode` are app-level
+//! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
 
 use std::mem;
 use std::time::Duration;
 
+use fluent_bundle::FluentValue;
 use gpui_kit::base::Root;
 use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
@@ -31,6 +35,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 use tl_model::settings::{Decorations, StartTab, WindowState};
+use tl_model::table::TableMode;
 use tl_model::time::now_boot_ns;
 use tracing::{debug, error, info, warn};
 
@@ -43,9 +48,10 @@ use super::titlebar::TitleBarProbe;
 use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoom};
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
-    CancelWindowPick, ClearFilter, CloseWindow, EscapeChain, FocusFilter, GLOBAL_CONTEXT,
-    MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, ScaleDown, ScaleReset, ScaleUp,
-    SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
+    CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
+    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, ScaleDown,
+    ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow, ToggleHideSystem,
+    ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
@@ -54,7 +60,7 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::Strings;
+use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
@@ -86,6 +92,11 @@ pub const UI_SCALE_TOAST: ToastKey = ToastKey(0x7569_7363_616c_6531);
 /// "UI scale changed to { $pct }%".
 const UI_SCALE_TEXT: &str = "shell-toast-ui-scale";
 /// The UI scale keys' step and range, in percent (APP-040).
+const HIDING_SYSTEM_TEXT: &str = "shell-toast-hiding-system";
+const SHOWING_SYSTEM_TEXT: &str = "shell-toast-showing-system";
+const VIEW_MODE_TEXT: &str = "shell-toast-view-mode";
+const VIEW_MODE_TOOLTIP: &str = "shell-toolbar-view-mode";
+
 const SCALE_STEP: u16 = 5;
 const SCALE_MIN: u16 = 75;
 const SCALE_MAX: u16 = 200;
@@ -335,6 +346,83 @@ pub fn init(cx: &mut App) {
         step_ui_scale(cx, |pct| pct.saturating_sub(SCALE_STEP).max(SCALE_MIN))
     });
     cx.on_action(|_: &ScaleReset, cx| step_ui_scale(cx, |_| 100));
+    cx.on_action(on_toggle_hide_system);
+    cx.on_action(|_: &CycleViewMode, cx| {
+        let next = next_view_mode(TlSettings::settings(cx).processes.mode);
+        set_view_mode(cx, next);
+    });
+    cx.on_action(|a: &SetViewMode, cx| set_view_mode(cx, a.0));
+}
+
+/// Hide system processes: flips `processes.hide_system` and says so in a toast. The engine
+/// filters by it, so it also works in History mode.
+fn on_toggle_hide_system(_: &ToggleHideSystem, cx: &mut App) {
+    let hide = !TlSettings::settings(cx).processes.hide_system;
+    TlSettings::update(cx, |d| d.settings.processes.hide_system = hide);
+    let key = if hide {
+        HIDING_SYSTEM_TEXT
+    } else {
+        SHOWING_SYSTEM_TEXT
+    };
+    let text = shell_text(cx, key, &[]);
+    push_main_toast(cx, ToastKind::Info, text, None, None);
+}
+
+/// The view-mode cycler order: Tree View, Task Manager Grouping, List View, then Tree View.
+fn next_view_mode(mode: TableMode) -> TableMode {
+    match mode {
+        TableMode::Tree => TableMode::Grouped,
+        TableMode::Grouped => TableMode::Flat,
+        TableMode::Flat => TableMode::Tree,
+    }
+}
+
+/// Writes `processes.mode` and shows "View mode: <name>". Nothing happens in History mode, which
+/// always shows a flat list, or when `mode` is already the current mode.
+fn set_view_mode(cx: &mut App, mode: TableMode) {
+    if TlSettings::state(cx).processes.history_mode
+        || TlSettings::settings(cx).processes.mode == mode
+    {
+        return;
+    }
+    TlSettings::update(cx, |d| d.settings.processes.mode = mode);
+    let name = shell_text(cx, view_mode_name(mode), &[]);
+    let text = shell_text(
+        cx,
+        VIEW_MODE_TEXT,
+        &[("name", FluentValue::from(name.as_ref()))],
+    );
+    push_main_toast(cx, ToastKind::Info, text, None, None);
+}
+
+/// The Fluent key of a view mode's name. The caller translates it.
+pub fn view_mode_name(mode: TableMode) -> &'static str {
+    match mode {
+        TableMode::Tree => "shell-view-mode-tree",
+        TableMode::Grouped => "shell-view-mode-grouped",
+        TableMode::Flat => "shell-view-mode-flat",
+    }
+}
+
+/// The view-mode cycler tooltip, "Toggle view mode (current: <name>)". In History mode the
+/// cycler shows `shell-toolbar-view-mode-history` instead; the caller picks.
+pub fn view_mode_tooltip(mode: TableMode, cx: &App) -> SharedString {
+    let name = shell_text(cx, view_mode_name(mode), &[]);
+    shell_text(
+        cx,
+        VIEW_MODE_TOOLTIP,
+        &[("name", FluentValue::from(name.as_ref()))],
+    )
+}
+
+/// The text for `key`, translated (R-132). en-US before the strings are installed. For text made
+/// once per action, never per frame.
+fn shell_text(cx: &App, key: &str, args: &[(&str, FluentValue<'_>)]) -> SharedString {
+    if cx.has_global::<Strings>() {
+        tr_args(cx, key, args)
+    } else {
+        tr_en(key, args)
+    }
 }
 
 /// Ctrl+Plus, Ctrl+Minus and Ctrl+0: sets `appearance.ui_scale_pct` to `step(pct)` and shows

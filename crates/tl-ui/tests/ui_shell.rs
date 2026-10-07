@@ -3608,4 +3608,155 @@ mod main_window {
             assert!(r.page_focused(), "the page follows the checkbox");
         }
     }
+
+    /// Hide system processes and the view-mode handlers (E20-017).
+    mod process_view {
+        use std::sync::Arc;
+
+        use gpui_kit::{AppContext as _, TestAppContext, VisualTestContext};
+        use tl_model::client::EngineClient;
+        use tl_model::command::Tab;
+        use tl_model::table::TableMode;
+        use tl_ui::actions::{CycleViewMode, SetViewMode, ToggleHideSystem};
+        use tl_ui::app::EngineGlobal;
+        use tl_ui::settings_global::TlSettings;
+        use tl_ui::testing::fake_engine::FakeEngine;
+        use tl_ui::window::main::view_mode_tooltip;
+
+        use super::{Opts, act, main, open, setup};
+
+        /// The main window with `mode`, `history_mode` and a fake engine that records every
+        /// `set_settings` made after the setup.
+        fn view_rig(
+            cx: &mut TestAppContext,
+            mode: TableMode,
+            history_mode: bool,
+        ) -> (VisualTestContext, Arc<FakeEngine>) {
+            setup(
+                cx,
+                &Opts {
+                    pages: &[Tab::Processes],
+                    ..Opts::default()
+                },
+            );
+            let engine = FakeEngine::new();
+            cx.update(|cx| {
+                TlSettings::update(cx, |d| {
+                    d.settings.processes.mode = mode;
+                    d.state.processes.history_mode = history_mode;
+                });
+                let client: Arc<dyn EngineClient> = engine.clone();
+                cx.set_global(EngineGlobal(client));
+            });
+            (open(cx), engine)
+        }
+
+        fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+            let main = main(vcx);
+            let queue = vcx.read_entity(&main, |m, _| m.toasts().clone());
+            vcx.read_entity(&queue, |q, _| q.visible_texts())
+                .into_iter()
+                .map(|t| t.to_string())
+                .collect()
+        }
+
+        fn mode(vcx: &mut VisualTestContext) -> TableMode {
+            vcx.update(|_, cx| TlSettings::settings(cx).processes.mode)
+        }
+
+        fn hide_system(vcx: &mut VisualTestContext) -> bool {
+            vcx.update(|_, cx| TlSettings::settings(cx).processes.hide_system)
+        }
+
+        #[gpui_kit::test]
+        fn hide_system_toggle_toast(cx: &mut TestAppContext) {
+            let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, false);
+            assert!(!hide_system(&mut vcx));
+
+            act(&mut vcx, ToggleHideSystem);
+            assert!(hide_system(&mut vcx));
+            let sent = engine.settings();
+            assert_eq!(sent.len(), 1);
+            assert!(sent[0].hide_system);
+            assert_eq!(toasts(&mut vcx), ["Hiding system processes"]);
+
+            act(&mut vcx, ToggleHideSystem);
+            assert!(!hide_system(&mut vcx));
+            let sent = engine.settings();
+            assert_eq!(sent.len(), 2);
+            assert!(!sent[1].hide_system);
+            assert_eq!(
+                toasts(&mut vcx),
+                ["Hiding system processes", "Showing system processes"]
+            );
+        }
+
+        #[gpui_kit::test]
+        fn hide_system_works_in_history(cx: &mut TestAppContext) {
+            let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, true);
+            act(&mut vcx, ToggleHideSystem);
+            assert!(hide_system(&mut vcx));
+            assert_eq!(engine.settings().len(), 1);
+            assert_eq!(toasts(&mut vcx), ["Hiding system processes"]);
+        }
+
+        #[gpui_kit::test]
+        fn view_mode_cycle_order(cx: &mut TestAppContext) {
+            let (mut vcx, _) = view_rig(cx, TableMode::Grouped, false);
+            let mut modes = Vec::new();
+            for _ in 0..3 {
+                act(&mut vcx, CycleViewMode);
+                modes.push(mode(&mut vcx));
+            }
+            assert_eq!(
+                modes,
+                [TableMode::Flat, TableMode::Tree, TableMode::Grouped]
+            );
+            assert_eq!(
+                toasts(&mut vcx),
+                [
+                    "View mode: List View",
+                    "View mode: Tree View",
+                    "View mode: Task Manager Grouping",
+                ]
+            );
+        }
+
+        #[gpui_kit::test]
+        fn view_mode_ignored_in_history(cx: &mut TestAppContext) {
+            let (mut vcx, engine) = view_rig(cx, TableMode::Grouped, true);
+            act(&mut vcx, CycleViewMode);
+            act(&mut vcx, SetViewMode(TableMode::Tree));
+            assert_eq!(mode(&mut vcx), TableMode::Grouped);
+            assert!(engine.settings().is_empty());
+            assert!(toasts(&mut vcx).is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn set_view_mode_same_is_noop(cx: &mut TestAppContext) {
+            let (mut vcx, _) = view_rig(cx, TableMode::Tree, false);
+            let version = vcx.update(|_, cx| {
+                TlSettings::get(cx).version(tl_ui::settings_global::Section::Processes)
+            });
+            act(&mut vcx, SetViewMode(TableMode::Tree));
+            assert_eq!(mode(&mut vcx), TableMode::Tree);
+            let after = vcx.update(|_, cx| {
+                TlSettings::get(cx).version(tl_ui::settings_global::Section::Processes)
+            });
+            assert_eq!(after, version, "no settings write");
+            assert!(toasts(&mut vcx).is_empty());
+
+            act(&mut vcx, SetViewMode(TableMode::Flat));
+            assert_eq!(mode(&mut vcx), TableMode::Flat);
+            assert_eq!(toasts(&mut vcx), ["View mode: List View"]);
+        }
+
+        #[gpui_kit::test]
+        fn view_mode_tooltip_text(cx: &mut TestAppContext) {
+            let (mut vcx, _) = view_rig(cx, TableMode::Flat, false);
+            let mode = mode(&mut vcx);
+            let tip = vcx.update(|_, cx| view_mode_tooltip(mode, cx));
+            assert_eq!(tip.as_ref(), "Toggle view mode (current: List View)");
+        }
+    }
 }
