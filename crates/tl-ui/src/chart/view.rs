@@ -43,6 +43,9 @@ pub struct ChartView {
     /// True when the range wants the 1 Hz tier but a series resolved to its fast view because
     /// the snapshot has no 1 Hz view for it (P1 engine). The chart then draws the last 60 s.
     pub tier_fallback: bool,
+    /// The value label shows the sum of every series' newest value (network download plus
+    /// upload), not series 0 alone. `set_value_sum`.
+    value_sum: bool,
     /// Reused formatter buffer.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
@@ -93,6 +96,7 @@ impl ChartView {
             text: labels::LabelCache::default(),
             series: SmallVec::new(),
             tier_fallback: false,
+            value_sum: false,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -196,32 +200,38 @@ impl ChartView {
     /// of series 0 is valid, and `WarmingUp` when series 0 has no valid newest sample yet. The
     /// value is the newest valid sample of series 0, or 0.0 when there is none; only `Valid` and
     /// `Stale` values are meant to be shown.
+    ///
+    /// With `value_sum` the same rules hold for every series, and the value is the sum of their
+    /// newest valid samples: one series without a valid newest sample makes the whole value
+    /// `WarmingUp`, so a partial sum never shows as the total.
     pub fn value_at(&self, now_boot_ns: u64) -> Option<(f32, Validity)> {
         if self.spec.series.is_empty() {
             return None;
         }
-        let samples = self
-            .series
-            .first()
-            .and_then(Option::as_deref)
-            .map_or(&[][..], |s| &s.samples[..]);
-        let value = samples
-            .iter()
-            .rev()
-            .find(|s| s.is_valid())
-            .map_or(0.0, |s| s.value);
+        let summed = if self.value_sum {
+            &self.series[..]
+        } else {
+            &self.series[..self.series.len().min(1)]
+        };
+        let value = newest_valid_sum(summed);
         let validity = match self.derived_state(now_boot_ns) {
             ChartState::Failed(_) => Validity::Failed,
             ChartState::Restricted => Validity::Restricted,
             ChartState::Unsupported => Validity::Unsupported,
-            ChartState::Stale { .. } => Validity::Stale,
-            ChartState::WarmingUp => Validity::WarmingUp,
-            ChartState::Live => match samples.last() {
-                Some(s) if s.is_valid() => Validity::Valid,
-                _ => Validity::WarmingUp,
-            },
+            ChartState::Stale { .. } if value.is_some() || !self.value_sum => Validity::Stale,
+            ChartState::Stale { .. } | ChartState::WarmingUp => Validity::WarmingUp,
+            ChartState::Live if newest_all_valid(summed) => Validity::Valid,
+            ChartState::Live => Validity::WarmingUp,
         };
-        Some((value, validity))
+        Some((value.unwrap_or(0.0), validity))
+    }
+
+    /// Makes the value label the sum of every series' newest value (see `value_at`).
+    pub fn set_value_sum(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.value_sum != on {
+            self.value_sum = on;
+            cx.notify();
+        }
     }
 
     /// The cached stroke paths' smallest vertex y, chart-local physical px (0 is the plot top).
@@ -311,6 +321,28 @@ impl Render for ChartView {
         self.render_count.set(self.render_count.get() + 1);
         ChartElement::new(cx.entity())
     }
+}
+
+/// The sum of each series' newest valid sample. `None` when `series` is empty, or a series is
+/// absent or has no valid sample.
+fn newest_valid_sum(series: &[Option<Arc<SeriesView>>]) -> Option<f32> {
+    if series.is_empty() {
+        return None;
+    }
+    series.iter().try_fold(0.0, |sum, s| {
+        let newest = s.as_deref()?.samples.iter().rev().find(|s| s.is_valid())?;
+        Some(sum + newest.value)
+    })
+}
+
+/// True when `series` is not empty and every series is present with a valid newest sample.
+fn newest_all_valid(series: &[Option<Arc<SeriesView>>]) -> bool {
+    !series.is_empty()
+        && series.iter().all(|s| {
+            s.as_deref()
+                .and_then(|s| s.samples.last())
+                .is_some_and(|s| s.is_valid())
+        })
 }
 
 /// Ranges longer than this read the 1 Hz tier (PERF-017, R-016).
@@ -406,4 +438,63 @@ pub fn search_series<T>(views: &[T], mut cmp: impl FnMut(&T) -> Ordering) -> Opt
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use tl_model::ids::{DeviceIdx, MetricId};
+    use tl_model::series::Sample;
+
+    use super::*;
+
+    fn view(metric: MetricId, samples: Vec<Sample>) -> Option<Arc<SeriesView>> {
+        Some(Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(1),
+                metric,
+            },
+            version: 1,
+            period_ns: 1_000_000_000,
+            samples: samples.into(),
+        }))
+    }
+
+    #[test]
+    fn value_sum_of_newest_valid() {
+        let rx = view(
+            MetricId::NET_RX,
+            vec![Sample::valid(1, 5.0), Sample::valid(2, 1.2)],
+        );
+        let tx = view(
+            MetricId::NET_TX,
+            vec![Sample::valid(1, 9.0), Sample::valid(2, 0.3)],
+        );
+        let both = [rx.clone(), tx];
+        let sum = newest_valid_sum(&both).expect("sum");
+        assert!((sum - 1.5).abs() < 1e-6, "sum {sum}");
+        assert!(newest_all_valid(&both));
+        assert_eq!(newest_valid_sum(&both[..1]), Some(1.2), "series 0 alone");
+    }
+
+    #[test]
+    fn value_sum_missing_series_is_not_partial() {
+        let rx = view(MetricId::NET_RX, vec![Sample::valid(1, 1.2)]);
+        // Absent series: no sum at all.
+        let absent = [rx.clone(), None];
+        assert_eq!(newest_valid_sum(&absent), None);
+        assert!(!newest_all_valid(&absent));
+        // A series whose newest sample is a gap: the sum keeps its last valid value, but the
+        // newest values are not all valid, so a Live chart shows WarmingUp.
+        let tx = view(
+            MetricId::NET_TX,
+            vec![Sample::valid(1, 0.3), Sample::gap(2)],
+        );
+        let gapped = [rx.clone(), tx];
+        assert!(!newest_all_valid(&gapped));
+        // A series with no valid sample at all.
+        let empty = [rx, view(MetricId::NET_TX, vec![Sample::gap(1)])];
+        assert_eq!(newest_valid_sum(&empty), None);
+        assert_eq!(newest_valid_sum(&[]), None);
+        assert!(!newest_all_valid(&[]));
+    }
 }

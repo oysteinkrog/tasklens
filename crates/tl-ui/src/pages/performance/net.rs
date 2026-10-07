@@ -264,7 +264,12 @@ impl NetPage {
                 throughput_spec(row.idx, y, &settings, &theme),
                 throughput_labels(&words),
             );
-            cx.new(|cx| ChartView::new(spec, labels, &hub, cx))
+            cx.new(|cx| {
+                let mut view = ChartView::new(spec, labels, &hub, cx);
+                // The value is download plus upload.
+                view.set_value_sum(true, cx);
+                view
+            })
         };
 
         let mut subs = SmallVec::new();

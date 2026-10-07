@@ -289,6 +289,20 @@ fn net_value_is_sum(cx: &mut TestAppContext) {
     let mut r = open(cx, with_unit(NetworkUnit::Bits), system(1000));
     let chart = feed(&mut r, 1.2 * MBPS, 0.3 * MBPS, 0);
     assert_eq!(value_text(&mut r, &chart, NetworkUnit::Bits), "1.5 Mbps");
+
+    // Without upload samples the value is not the download alone.
+    chart.update(r.vcx, |v, cx| {
+        v.set_series_for_test(
+            [Some(series(MetricId::NET_RX, 1.2 * MBPS, 0)), None].into(),
+            cx,
+        );
+    });
+    draw(r.vcx);
+    let (_, validity) = r
+        .vcx
+        .read_entity(&chart, |v, _| v.value_now())
+        .expect("value");
+    assert_eq!(validity, Validity::WarmingUp);
 }
 
 #[gpui_kit::test]
