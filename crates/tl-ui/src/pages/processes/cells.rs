@@ -1616,6 +1616,31 @@ pub struct PaintState {
     pub heat_on: bool,
     /// `appearance.heat_intensity_pct`.
     pub heat_intensity_pct: u8,
+    /// `tables.dim_zero_values` (R-075).
+    pub dim_zero: bool,
+}
+
+/// Text opacity of a measured zero when `tables.dim_zero_values` is on (PROC-041).
+pub const DIM_ZERO_OPACITY: f32 = 0.3;
+
+/// The kinds whose zero is dimmed: Percent, MemorySize, DiskRate, NetRate, Count and
+/// BytesCumulative. Text, ids, durations, times and power classes never are.
+pub fn dim_zero_kind(kind: ProcColumnKind) -> bool {
+    matches!(
+        kind,
+        ProcColumnKind::Percent
+            | ProcColumnKind::MemorySize
+            | ProcColumnKind::DiskRate
+            | ProcColumnKind::NetRate
+            | ProcColumnKind::Count
+            | ProcColumnKind::BytesCumulative
+    )
+}
+
+/// True when the cell is a measured zero to draw dimmed: the setting is on, the value is Valid
+/// and its bits are the kind's zero (0.0 for floats, 0 for integers, both all-zero bits).
+pub fn dims_zero(out: &CellOut, col: &ProcColumn, st: PaintState) -> bool {
+    st.dim_zero && out.validity == Validity::Valid && out.bits == 0 && dim_zero_kind(col.kind)
 }
 
 /// True for the kinds that can carry heat: Percent, MemorySize, DiskRate, NetRate, PowerClass.
@@ -1692,6 +1717,26 @@ pub struct TextColors {
     pub split: usize,
     pub main: Hsla,
     pub tail: Hsla,
+}
+
+/// [`text_colors`] for `out`, at [`DIM_ZERO_OPACITY`] when the cell [`dims_zero`]. Only the
+/// colours change, so a dimmed cell costs no extra element or allocation.
+pub fn metric_text_colors(
+    out: &CellOut,
+    text: &str,
+    col: &ProcColumn,
+    st: PaintState,
+    theme: &TlTheme,
+) -> TextColors {
+    let colors = text_colors(text, col, out.validity, st, theme);
+    if !dims_zero(out, col, st) {
+        return colors;
+    }
+    TextColors {
+        main: colors.main.opacity(DIM_ZERO_OPACITY),
+        tail: colors.tail.opacity(DIM_ZERO_OPACITY),
+        ..colors
+    }
 }
 
 /// The text colours of a Valid or Stale cell (UI-PRC-002, UI-PRC-004): `text_primary` and
@@ -1807,7 +1852,7 @@ pub fn render_metric_cell(
         };
     }
 
-    let colors = text_colors(&text, col, out.validity, st, theme);
+    let colors = metric_text_colors(out, &text, col, st, theme);
     cell = cell
         .debug_selector(|| "TlProcCell-text".into())
         .text_color(colors.main);

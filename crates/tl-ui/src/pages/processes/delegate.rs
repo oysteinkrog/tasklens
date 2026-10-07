@@ -785,6 +785,7 @@ impl ProcessDelegate {
             exited,
             heat_on: a.heat_coloring,
             heat_intensity_pct: a.heat_intensity_pct,
+            dim_zero: self.settings.tables.dim_zero_values,
         }
     }
 

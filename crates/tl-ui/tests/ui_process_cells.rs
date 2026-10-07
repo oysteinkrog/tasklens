@@ -888,8 +888,9 @@ mod paint {
     use tl_model::table::ProcessTableView;
     use tl_model::validity::Validity;
     use tl_ui::pages::processes::cells::{
-        CellCtx, CellWords, GroupMembers, PaintState, heat_alpha, heat_background,
-        metric_text_style, process_column, render_metric_cell, text_colors,
+        CellCtx, CellWords, DIM_ZERO_OPACITY, GroupMembers, PaintState, dims_zero, heat_alpha,
+        heat_background, metric_text_colors, metric_text_style, process_column, render_metric_cell,
+        text_colors,
     };
     use tl_ui::table::cells::CellOut;
     use tl_ui::text::style::TNUM;
@@ -960,6 +961,7 @@ mod paint {
         exited: false,
         heat_on: true,
         heat_intensity_pct: 50,
+        dim_zero: false,
     };
 
     /// A Valid CPU-style cell holding `value` as f32 bits.
@@ -1314,6 +1316,120 @@ mod paint {
         );
         let cell = bounds(vcx, "TlProcCell-text").expect("text cell");
         assert_eq!(cell.size.width, px(120.));
+    }
+
+    const DIM_ON: PaintState = PaintState {
+        selected: false,
+        exited: false,
+        heat_on: false,
+        heat_intensity_pct: 0,
+        dim_zero: true,
+    };
+
+    /// The main text alpha of `out` in `col`, as a share of `text_primary`'s alpha.
+    fn main_alpha(out: &CellOut, text: &str, col: ColumnId, st: PaintState, t: &TlTheme) -> f32 {
+        let colors = metric_text_colors(out, text, process_column(col), st, t);
+        colors.main.a / t.text_primary.a
+    }
+
+    fn int_out(value: u64) -> CellOut {
+        CellOut {
+            bits: value,
+            validity: Validity::Valid,
+            ..CellOut::default()
+        }
+    }
+
+    #[gpui_kit::test]
+    fn dim_zero_only_for_measured_zero(cx: &mut TestAppContext) {
+        let t = theme(cx);
+        let zero = pct_out(0.0);
+        assert!(close(
+            main_alpha(&zero, "0%", ColumnId::Cpu, DIM_ON, &t),
+            DIM_ZERO_OPACITY
+        ));
+        assert_eq!(DIM_ZERO_OPACITY, 0.3);
+        // Every dimmed kind: Percent, MemorySize, DiskRate, NetRate, Count, BytesCumulative.
+        for col in [
+            ColumnId::Memory,
+            ColumnId::Disk,
+            ColumnId::Network,
+            ColumnId::Threads,
+        ] {
+            assert!(
+                dims_zero(&int_out(0), process_column(col), DIM_ON),
+                "{col:?} zero dims"
+            );
+        }
+        // Not zero, not Valid, or not a measured kind: full opacity.
+        assert!(close(
+            main_alpha(&pct_out(0.1), "0.1%", ColumnId::Cpu, DIM_ON, &t),
+            1.0
+        ));
+        for validity in [Validity::WarmingUp, Validity::Stale, Validity::Restricted] {
+            let out = CellOut {
+                validity,
+                ..pct_out(0.0)
+            };
+            assert!(
+                !dims_zero(&out, process_column(ColumnId::Cpu), DIM_ON),
+                "{validity:?} is not dimmed"
+            );
+        }
+        assert!(
+            !dims_zero(&int_out(0), process_column(ColumnId::Nice), DIM_ON),
+            "Nice 0 is an id-like value"
+        );
+        assert!(!dims_zero(
+            &int_out(0),
+            process_column(ColumnId::Pid),
+            DIM_ON
+        ));
+        assert!(
+            !dims_zero(&int_out(0), process_column(ColumnId::User), DIM_ON),
+            "text columns never dim"
+        );
+        // A selected or exited row dims its own colour.
+        let selected = PaintState {
+            selected: true,
+            ..DIM_ON
+        };
+        let colors = metric_text_colors(&zero, "0%", process_column(ColumnId::Cpu), selected, &t);
+        assert!(close(
+            colors.main.a,
+            t.text_selected_primary.a * DIM_ZERO_OPACITY
+        ));
+    }
+
+    #[gpui_kit::test]
+    fn dim_zero_off_by_default(cx: &mut TestAppContext) {
+        assert!(!Settings::default().tables.dim_zero_values);
+        assert!(!PaintState::default().dim_zero);
+        let t = theme(cx);
+        let off = PaintState {
+            dim_zero: false,
+            ..DIM_ON
+        };
+        assert!(close(
+            main_alpha(&pct_out(0.0), "0%", ColumnId::Cpu, off, &t),
+            1.0
+        ));
+
+        // A WarmingUp cell draws its glyph, never dimmed, with the setting on.
+        let (_, vcx) = open(
+            cx,
+            Host {
+                out: CellOut {
+                    validity: Validity::WarmingUp,
+                    ..pct_out(0.0)
+                },
+                text: "0%".into(),
+                col: ColumnId::Cpu,
+                st: DIM_ON,
+            },
+        );
+        assert!(bounds(vcx, "TlProcCell-glyph").is_some(), "the glyph path");
+        assert!(bounds(vcx, "TlProcCell-text").is_none());
     }
 }
 
