@@ -3211,14 +3211,12 @@ mod main_window {
             );
         }
 
-        /// The main window binds no Tab key yet, so `focus_next` stands in for it: it walks the
-        /// same GPUI tab order.
         #[gpui_kit::test]
         fn include_children_tab_stop(cx: &mut TestAppContext) {
             let mut r = tree_rig(cx);
             r.focus_filter();
             let next = |r: &mut Rig| {
-                r.vcx.update(|window, cx| window.focus_next(cx));
+                r.vcx.simulate_keystrokes("tab");
                 r.vcx.run_until_parked();
                 draw(&mut r.vcx);
             };
