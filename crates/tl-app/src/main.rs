@@ -8,6 +8,8 @@
 mod args;
 mod atomic;
 mod autostart;
+#[cfg(feature = "bench")]
+mod bench_main;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
 mod import_ts;
@@ -153,6 +155,20 @@ fn main() -> ExitCode {
     }
 
     // E32: the --low-memory arm goes here (before step 4)
+    // E01: the bench path skips single instance, so a bench run can start while tasklens is open.
+    #[cfg(feature = "bench")]
+    if let Some(scene) = args.bench {
+        let scene = clap::ValueEnum::to_possible_value(&scene)
+            .map(|v| v.get_name().to_owned())
+            .unwrap_or_default();
+        let code = bench_main::run(bench_main::BenchArgs {
+            scene,
+            duration_s: args.duration.unwrap_or(30),
+            warmup_s: args.warmup.unwrap_or(5),
+            json: args.json.clone(),
+        });
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // Step 4: single instance. A second copy forwards its arguments and exits 0.
     let forward = Forward {
         tab: args.tab.map(TabArg::to_model),
