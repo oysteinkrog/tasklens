@@ -272,8 +272,15 @@ pub fn open_psi_trigger() -> std::io::Result<OwnedFd> {
         OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
         Mode::empty(),
     )?;
-    let written = rustix::io::write(&fd, PSI_TRIGGER.as_bytes())?;
-    if written != PSI_TRIGGER.len() {
+    // The kernel replaces the last byte written with a NUL, so the trailing NUL is required.
+    // Without it the window loses its last digit (200 ms), which an unprivileged write may not
+    // use (EINVAL, checked on kernel 7.2).
+    let mut buf = [0u8; PSI_TRIGGER.len() + 1];
+    if let Some(head) = buf.get_mut(..PSI_TRIGGER.len()) {
+        head.copy_from_slice(PSI_TRIGGER.as_bytes());
+    }
+    let written = rustix::io::write(&fd, &buf)?;
+    if written != buf.len() {
         return Err(std::io::ErrorKind::WriteZero.into());
     }
     Ok(fd)

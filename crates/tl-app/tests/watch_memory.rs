@@ -395,7 +395,10 @@ struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
 impl std::io::Write for LogBuf {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -413,8 +416,15 @@ fn with_logs(f: impl FnOnce()) -> Vec<String> {
         .with_max_level(tracing::Level::TRACE)
         .finish();
     tracing::subscriber::with_default(subscriber, f);
-    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-    text.lines().map(str::to_owned).collect()
+    let bytes = buf
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    String::from_utf8_lossy(&bytes)
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]
