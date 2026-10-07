@@ -15,6 +15,7 @@ use tl_model::details::{
 use tl_model::ids::{GroupKey, ProcessKey};
 use tl_model::process::{ProcFlags, ProcState, ProcessMeta, ProcessRecord};
 use tl_model::settings::{AppearanceSettings, Decorations, ThemeSettings};
+use tl_model::snapshot::{ComponentHeader, FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::time::BootId;
@@ -470,6 +471,153 @@ fn verify_button_hidden_when_not_packaged(cx: &mut TestAppContext) {
         button.tooltip.as_deref(),
         Some("The process is not running.")
     );
+}
+
+fn window_entry(n: u32, caption: &str, g: (i32, i32, i32, i32)) -> WindowEntry {
+    WindowEntry {
+        internal_id: text(&format!("{{0000000{n}-aaaa-bbbb-cccc-dddddddddddd}}")),
+        pid: KEY.pid,
+        caption: text(caption),
+        resource_class: text("firefox"),
+        desktop_file_name: text("firefox"),
+        minimized: false,
+        maximized: n == 1,
+        keep_above: false,
+        frame_geometry: FrameGeometry {
+            x: g.0,
+            y: g.1,
+            width: g.2,
+            height: g.3,
+        },
+        window_type: 0,
+    }
+}
+
+/// `Snapshot.windows` with `entries` for this pid and one window of another pid on each side.
+fn windows_snap(validity: Validity, entries: Vec<WindowEntry>) -> WindowsSnapshot {
+    let other = |pid| WindowEntry {
+        pid,
+        ..window_entry(9, "Other", (0, 0, 10, 10))
+    };
+    let mut all = vec![other(KEY.pid - 1)];
+    all.extend(entries);
+    all.push(other(KEY.pid + 1));
+    WindowsSnapshot {
+        header: ComponentHeader {
+            validity,
+            ..ComponentHeader::default()
+        },
+        windows: Arc::from(all),
+        pick: None,
+    }
+}
+
+fn feed_windows(tab: &Entity<GeneralTab>, cx: &mut VisualTestContext, w: &WindowsSnapshot) {
+    cx.update(|_, cx| tab.update(cx, |t, cx| t.set_windows(w, cx)));
+}
+
+/// The value and tooltip of the column 3 row labelled `label`.
+fn col3_row(
+    tab: &Entity<GeneralTab>,
+    cx: &mut VisualTestContext,
+    label: &str,
+) -> (String, Option<String>) {
+    cx.update(|_, cx| {
+        tab.read(cx)
+            .rows(2)
+            .into_iter()
+            .find(|r| r.label.as_ref() == label)
+            .map(|r| {
+                (
+                    r.value.text.to_string(),
+                    r.value.tooltip.map(|t| t.to_string()),
+                )
+            })
+            .expect("row shown")
+    })
+}
+
+#[gpui_kit::test]
+fn window_block_none_text(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    // Before the first windows component: collecting.
+    assert_eq!(value(&t, cx, FieldId::Window), "Collecting…");
+
+    feed_windows(&t, cx, &windows_snap(Validity::WarmingUp, Vec::new()));
+    assert_eq!(value(&t, cx, FieldId::Window), "Collecting…");
+
+    feed_windows(&t, cx, &windows_snap(Validity::Valid, Vec::new()));
+    draw(cx);
+    assert_eq!(value(&t, cx, FieldId::Window), "No top-level window");
+    assert_eq!(value(&t, cx, FieldId::WindowTitle), "", "no six fields");
+    assert!(cx.debug_bounds("GeneralTab-window-divider").is_some());
+
+    // Frozen once exited.
+    cx.update(|_, cx| t.update(cx, |t, cx| t.set_exited(true, cx)));
+    let one = vec![window_entry(1, "Mozilla Firefox", (0, 32, 1280, 800))];
+    feed_windows(&t, cx, &windows_snap(Validity::Valid, one));
+    assert_eq!(value(&t, cx, FieldId::Window), "No top-level window");
+}
+
+#[gpui_kit::test]
+fn window_block_and_n_more(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    let entries = vec![
+        window_entry(1, "Mozilla Firefox\u{202E}", (0, 32, 1280, 800)),
+        window_entry(2, "Library", (100, 100, 600, 400)),
+        window_entry(3, "Downloads", (200, 200, 500, 300)),
+    ];
+    let snap = windows_snap(Validity::Valid, entries);
+    feed_windows(&t, cx, &snap);
+    let formats = cx.update(|_, cx| t.read(cx).format_count());
+    assert_eq!(
+        value(&t, cx, FieldId::WindowTitle),
+        "Mozilla Firefox\\u{202E}",
+        "escaped"
+    );
+    assert_eq!(
+        value(&t, cx, FieldId::WindowId),
+        "{00000001-aaaa-bbbb-cccc-dddddddddddd}"
+    );
+    assert_eq!(value(&t, cx, FieldId::WindowState), "Maximized");
+    assert_eq!(value(&t, cx, FieldId::WindowClass), "firefox");
+    assert_eq!(value(&t, cx, FieldId::WindowRect), "L:0 T:32 R:1280 B:832");
+    assert_eq!(value(&t, cx, FieldId::WindowSize), "1280 x 800");
+    assert_eq!(value(&t, cx, FieldId::Window), "", "no Window: row");
+    let (more, tip) = col3_row(&t, cx, "");
+    assert_eq!(more, "And 2 more");
+    assert_eq!(tip.as_deref(), Some("Library\nDownloads"));
+
+    // The same entries again and a new sweep re-format no window value.
+    feed_windows(&t, cx, &snap);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 2.);
+    let window_ids = [
+        FieldId::WindowTitle,
+        FieldId::WindowId,
+        FieldId::WindowState,
+        FieldId::WindowClass,
+        FieldId::WindowRect,
+        FieldId::WindowSize,
+    ];
+    let texts: Vec<String> = window_ids.iter().map(|id| value(&t, cx, *id)).collect();
+    let delta = cx.update(|_, cx| t.read(cx).format_count()) - formats;
+    assert!(delta <= 25, "{delta}");
+    assert_eq!(texts[0], "Mozilla Firefox\\u{202E}");
+}
+
+#[gpui_kit::test]
+fn window_block_unsupported_without_bridge(cx: &mut TestAppContext) {
+    let (view, cx) = host(cx, 900.);
+    let t = tab(&view, cx);
+    feed(&t, cx, Some(&payload(detail("firefox"))), 1.);
+    feed_windows(&t, cx, &windows_snap(Validity::Unsupported, Vec::new()));
+    let (text, tip) = col3_row(&t, cx, "Window:");
+    assert_eq!(text, "Not supported");
+    assert_eq!(tip.as_deref(), Some("Needs the KDE window bridge."));
 }
 
 #[gpui_kit::test]

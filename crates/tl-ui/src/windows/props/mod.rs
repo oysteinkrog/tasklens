@@ -595,6 +595,11 @@ impl PropsWindow {
                 g.update(cx, |g, cx| g.set_online_cpus(online, cx));
             }
         }
+        if mask.intersects(ComponentMask::WINDOWS)
+            && let Some(g) = &general
+        {
+            g.update(cx, |g, cx| g.set_windows(&snap.windows, cx));
+        }
         if mask.intersects(ComponentMask::PROCESSES | ComponentMask::SYSTEM) {
             match snap.processes.get(self.key) {
                 Some(record) => {

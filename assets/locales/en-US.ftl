@@ -1013,6 +1013,10 @@ pwn-props-verify-button = Verify against package
 pwn-props-verify-toast-matches = Executable matches the package.
 pwn-props-verify-toast-mismatch = Executable does not match the package.
 pwn-props-verify-toast-failed = Could not verify against the package.
+# Properties General tab window block (UI-PWN-009, E23-013).
+pwn-props-window-none = No top-level window
+pwn-props-window-no-bridge = Needs the KDE window bridge.
+pwn-props-window-more = And { $n } more
 # View menu and View > Columns (tasklens-bj6.4, UI-SHL-033, UI-SHL-034).
 shell-menu-view-columns = Columns
 shell-menu-view-process-view = Process View

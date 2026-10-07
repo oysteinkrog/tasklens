@@ -10,8 +10,12 @@
 //!
 //! Hashes and Verify against package (UI-PWN-008): the hex strings are formatted once per
 //! `HashState`; the Verify button sits in its own row under `Package status:` and sends
-//! `Command::VerifyPackage`. Copy, links (E23-011) and the window block (E23-013) are later
-//! beads on this file. Until then link fields draw as plain text.
+//! `Command::VerifyPackage`. Copy and links (E23-011) are a later bead on this file. Until then
+//! link fields draw as plain text.
+//!
+//! The window block (UI-PWN-009) ends column 3 under a divider: the topmost KWin window of this
+//! pid from `Snapshot.windows`, fed by [`GeneralTab::set_windows`]. Captions and classes are
+//! untrusted text and are shown with control characters escaped.
 //!
 //! The command line is untrusted text (ADR-015). It is shown with control characters escaped and
 //! is never logged.
@@ -39,6 +43,7 @@ use tl_model::details::{
 use tl_model::ids::ProcessKey;
 use tl_model::process::ProcessRecord;
 use tl_model::settings::{NetworkUnit, UnitsSettings};
+use tl_model::snapshot::{FrameGeometry, WindowEntry, WindowsSnapshot};
 use tl_model::system::CpuSet;
 use tl_model::table::Total;
 use tl_model::units::{self, LocalDateTime, NetUnit};
@@ -55,6 +60,7 @@ use crate::components::kv_grid::{
 };
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::Strings;
+use crate::pages::performance::details::Template;
 use crate::settings_global::TlSettings;
 use crate::text::metrics::TextMetricsCache;
 use crate::text::style::{label_style, t_sm};
@@ -80,6 +86,9 @@ const LABEL_MAX: f32 = 150.;
 const CMDLINE_LINE_HEIGHT: f32 = 18.;
 /// Copy icon size, × ui_scale.
 const COPY_ICON: f32 = 12.;
+/// Space above the window block's divider, × ui_scale. The divider sits inside the panel's
+/// `sp4` padding, so it is inset `sp4` on both sides.
+const WINDOW_GAP: f32 = 8.;
 /// Hex digits a hash value shows before "…".
 const HASH_SHOWN_DIGITS: usize = 16;
 
@@ -97,6 +106,11 @@ const KEY_TOAST_MATCHES: &str = "pwn-props-verify-toast-matches";
 const KEY_TOAST_MISMATCH: &str = "pwn-props-verify-toast-mismatch";
 const KEY_TOAST_FAILED: &str = "pwn-props-verify-toast-failed";
 const KEY_NOT_RUNNING: &str = "pwn-props-not-running";
+const KEY_WINDOW_NONE: &str = "pwn-props-window-none";
+const KEY_WINDOW_NO_BRIDGE: &str = "pwn-props-window-no-bridge";
+const KEY_WINDOW_MORE: &str = "pwn-props-window-more";
+/// Captions the "And N more" tooltip lists at most.
+const WINDOW_MORE_LISTED: usize = 10;
 
 // ---- Words (R-132) ----
 
@@ -122,10 +136,16 @@ pub struct GeneralWords {
     pub toast_failed: SharedString,
     /// Tooltip of the Verify button after the process exited.
     pub not_running: SharedString,
+    /// `Window:` value when the process has no top-level window.
+    pub window_none: SharedString,
+    /// `Window:` tooltip without the KWin bridge.
+    pub window_no_bridge: SharedString,
+    /// "And {n} more".
+    window_more: Template,
 }
 
 impl GeneralWords {
-    fn with(t: impl Fn(&str) -> SharedString) -> Self {
+    fn with(t: impl Fn(&str) -> SharedString, tmpl: impl Fn(&str, &[&str]) -> Template) -> Self {
         Self {
             computing: t(KEY_COMPUTING),
             hash_failed: t(KEY_HASH_FAILED),
@@ -141,7 +161,17 @@ impl GeneralWords {
             toast_mismatch: t(KEY_TOAST_MISMATCH),
             toast_failed: t(KEY_TOAST_FAILED),
             not_running: t(KEY_NOT_RUNNING),
+            window_none: t(KEY_WINDOW_NONE),
+            window_no_bridge: t(KEY_WINDOW_NO_BRIDGE),
+            window_more: tmpl(KEY_WINDOW_MORE, &["n"]),
         }
+    }
+
+    /// "And {n} more".
+    pub fn window_more(&self, n: usize) -> SharedString {
+        let mut out = String::new();
+        let _ = self.window_more.write(&mut out, &[&n]);
+        out.into()
     }
 }
 
@@ -156,14 +186,20 @@ impl Global for GeneralWordsCache {}
 /// strings they are in en-US.
 pub fn general_words(cx: &mut App) -> Rc<GeneralWords> {
     let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
-        return Rc::new(GeneralWords::with(|key| crate::i18n::tr_en(key, &[])));
+        return Rc::new(GeneralWords::with(
+            |key| crate::i18n::tr_en(key, &[]),
+            Template::en,
+        ));
     };
     if let Some(cache) = cx.try_global::<GeneralWordsCache>()
         && cache.version == version
     {
         return cache.words.clone();
     }
-    let words = Rc::new(GeneralWords::with(|key| crate::i18n::tr(cx, key)));
+    let words = Rc::new(GeneralWords::with(
+        |key| crate::i18n::tr(cx, key),
+        |key, args| Template::new(cx, key, args),
+    ));
     cx.set_global(GeneralWordsCache {
         version,
         words: words.clone(),
@@ -255,6 +291,17 @@ pub enum FieldId {
     Vram,
     GpuMemShared,
     GpuEngine,
+    // Column 3, the window block (UI-PWN-009).
+    WindowTitle,
+    WindowId,
+    WindowState,
+    WindowClass,
+    WindowRect,
+    WindowSize,
+    /// "And N more": a plain row with no label.
+    WindowMore,
+    /// The one row shown instead of the six fields: no window, no bridge or collecting.
+    Window,
 }
 
 impl FieldId {
@@ -318,7 +365,30 @@ impl FieldId {
             Vram => "VRAM:",
             GpuMemShared => "GPU memory shared:",
             GpuEngine => "GPU engine:",
+            WindowTitle => "Window title:",
+            WindowId => "Window ID:",
+            WindowState => "Window state:",
+            WindowClass => "Window class:",
+            WindowRect => "Window rect:",
+            WindowSize => "Window size:",
+            WindowMore => "",
+            Window => "Window:",
         }
+    }
+
+    /// The fields of the window block, which sits under a divider.
+    pub const fn is_window(self) -> bool {
+        matches!(
+            self,
+            FieldId::WindowTitle
+                | FieldId::WindowId
+                | FieldId::WindowState
+                | FieldId::WindowClass
+                | FieldId::WindowRect
+                | FieldId::WindowSize
+                | FieldId::WindowMore
+                | FieldId::Window
+        )
     }
 
     /// Path values are cut in the middle instead of at the end.
@@ -395,7 +465,14 @@ pub const COLUMNS: [&[FieldId]; 3] = [
         FieldId::Vram,
         FieldId::GpuMemShared,
         FieldId::GpuEngine,
-        // The window block (E23-013) follows here.
+        FieldId::WindowTitle,
+        FieldId::WindowId,
+        FieldId::WindowState,
+        FieldId::WindowClass,
+        FieldId::WindowRect,
+        FieldId::WindowSize,
+        FieldId::WindowMore,
+        FieldId::Window,
     ],
 ];
 
@@ -602,6 +679,28 @@ fn gpu_engine_word(engine: Option<GpuEngine>) -> &'static str {
     }
 }
 
+/// `L:0 T:32 R:1280 B:832`: the frame geometry's edges in logical px.
+pub fn fmt_window_rect(out: &mut String, g: FrameGeometry) {
+    let right = i64::from(g.x) + i64::from(g.width);
+    let bottom = i64::from(g.y) + i64::from(g.height);
+    let _ = write!(out, "L:{} T:{} R:{right} B:{bottom}", g.x, g.y);
+}
+
+/// `1280 x 800`.
+pub fn fmt_window_size(out: &mut String, g: FrameGeometry) {
+    let _ = write!(out, "{} x {}", g.width, g.height);
+}
+
+fn window_state_word(w: &WindowEntry) -> &'static str {
+    if w.minimized {
+        "Minimized"
+    } else if w.maximized {
+        "Maximized"
+    } else {
+        "Normal"
+    }
+}
+
 fn yes_no(yes: bool) -> &'static str {
     if yes { "Yes" } else { "No" }
 }
@@ -753,6 +852,40 @@ fn ptr_bits(text: &Arc<str>) -> u64 {
 /// The first non-valid of two validities, else Valid.
 fn worst(a: Validity, b: Validity) -> Validity {
     if a.is_valid() { b } else { a }
+}
+
+/// This pid's entries of `Snapshot.windows`, topmost first, and the "And N more" texts, built
+/// once per change of the entries or the words.
+struct WindowsView {
+    validity: Validity,
+    entries: Vec<WindowEntry>,
+    words: Rc<GeneralWords>,
+    /// "And N more" and its tooltip, when there is more than one window.
+    more: Option<(SharedString, SharedString)>,
+}
+
+impl WindowsView {
+    fn new(validity: Validity, entries: Vec<WindowEntry>, words: Rc<GeneralWords>) -> Self {
+        let more = entries.split_first().and_then(|(_, rest)| {
+            if rest.is_empty() {
+                return None;
+            }
+            let mut tip = String::new();
+            for (i, w) in rest.iter().take(WINDOW_MORE_LISTED).enumerate() {
+                if i > 0 {
+                    tip.push('\n');
+                }
+                escape_controls(&mut tip, &w.caption);
+            }
+            Some((words.window_more(rest.len()), tip.into()))
+        });
+        Self {
+            validity,
+            entries,
+            words,
+            more,
+        }
+    }
 }
 
 // ---- Value cache ----
@@ -1121,6 +1254,8 @@ pub struct GeneralTab {
     words: Rc<KvWords>,
     general_words: Rc<GeneralWords>,
     hashes: Option<HashView>,
+    /// `None` until the first `Snapshot.windows`.
+    windows: Option<WindowsView>,
     /// Verify was pressed and the payload has not reached a final package check yet.
     verify_requested: bool,
     /// The window's toast stack, for the Verify result toasts.
@@ -1130,6 +1265,8 @@ pub struct GeneralTab {
     /// Verify row shows; `col2_tail` holds the rows under it.
     sections: [Rc<[TlKvSection]>; 3],
     col2_tail: Rc<[TlKvSection]>,
+    /// Column 3's window block, drawn under a divider.
+    col3_tail: Rc<[TlKvSection]>,
     /// The Verify button row is drawn under `Package status:`.
     verify_row: bool,
     /// Label column widths per column, with the `style_version` they were measured for.
@@ -1168,11 +1305,13 @@ impl GeneralTab {
             words: kv_words(cx),
             general_words: general_words(cx),
             hashes: None,
+            windows: None,
             verify_requested: false,
             toasts: None,
             columns: [Arc::from([]), Arc::from([]), Arc::from([])],
             sections: [Rc::from([]), Rc::from([]), Rc::from([])],
             col2_tail: Rc::from([]),
+            col3_tail: Rc::from([]),
             verify_row: false,
             label_widths: None,
             width: Rc::default(),
@@ -1348,6 +1487,28 @@ impl GeneralTab {
         }
     }
 
+    /// Takes `Snapshot.windows` (bit `WINDOWS`). Rebuilds only when this pid's entries or the
+    /// component's validity changed. Frozen once exited.
+    pub fn set_windows(&mut self, windows: &WindowsSnapshot, cx: &mut Context<Self>) {
+        if self.exited {
+            return;
+        }
+        let pid = self.key.pid;
+        let validity = windows.header.validity;
+        let mine = windows.for_pid(pid);
+        if let Some(view) = &self.windows
+            && view.validity == validity
+            && view.entries.len() == mine.len()
+            && view.entries.iter().zip(mine).all(|(a, b)| a == b)
+        {
+            return;
+        }
+        let entries = mine.iter().filter(|w| w.pid == pid).cloned().collect();
+        self.windows = Some(WindowsView::new(validity, entries, general_words(cx)));
+        self.rebuild(cx);
+        cx.notify();
+    }
+
     /// Freezes the values. Link fields then draw as plain `text_secondary` text.
     pub fn set_exited(&mut self, exited: bool, cx: &mut Context<Self>) {
         if exited != self.exited {
@@ -1376,7 +1537,11 @@ impl GeneralTab {
 
     /// The grid rows of column `i` after the filter.
     pub fn rows(&self, i: usize) -> Vec<TlKvRow> {
-        let tail: &[TlKvSection] = if i == 1 { &self.col2_tail } else { &[] };
+        let tail: &[TlKvSection] = match i {
+            1 => &self.col2_tail,
+            2 => &self.col3_tail,
+            _ => &[],
+        };
         self.sections[i]
             .iter()
             .chain(tail)
@@ -1437,6 +1602,19 @@ impl GeneralTab {
                     None => Rc::from([]),
                 };
             }
+            if i == 2 {
+                let shown = self.columns[2].iter().filter(|f| self.passes(f));
+                let at = shown
+                    .clone()
+                    .position(|f| f.id.is_window())
+                    .unwrap_or(rows.len());
+                let tail = rows.split_off(at);
+                self.col3_tail = if tail.is_empty() {
+                    Rc::from([])
+                } else {
+                    section(tail)
+                };
+            }
             self.sections[i] = section(rows);
         }
     }
@@ -1453,6 +1631,16 @@ impl GeneralTab {
                 .is_some_and(|h| h.is_for(&d.hashes, &self.general_words))
         {
             self.hashes = Some(HashView::new(&d.hashes, self.general_words.clone()));
+        }
+        if let Some(view) = &self.windows
+            && !Rc::ptr_eq(&view.words, &self.general_words)
+        {
+            let view = self.windows.take().expect("checked above");
+            self.windows = Some(WindowsView::new(
+                view.validity,
+                view.entries,
+                self.general_words.clone(),
+            ));
         }
         let live = self.live.clone();
         let live = live.as_ref();
@@ -2075,6 +2263,7 @@ impl GeneralTab {
             |v| v.map_or(0, |e| e as u64 + 1),
             |v, s| s.push_str(gpu_engine_word(*v)),
         );
+        window_block(&mut b, self.windows.as_ref(), &self.general_words);
         let col3 = b.finish();
 
         self.columns = [col1, col2, col3];
@@ -2111,6 +2300,110 @@ impl GeneralTab {
         });
         self.label_widths = Some((m.style_version, widths));
         widths
+    }
+}
+
+/// The window block: the topmost window's six fields and "And N more", or one `Window:` row.
+fn window_block(b: &mut Builder, view: Option<&WindowsView>, words: &GeneralWords) {
+    let Some(view) = view else {
+        b.word(
+            FieldId::Window,
+            KvKind::Text,
+            Validity::WarmingUp,
+            COLLECTING,
+        );
+        return;
+    };
+    match view.validity {
+        Validity::Valid | Validity::Stale => {}
+        Validity::Unsupported => {
+            let value = b.words.unsupported(UnsupportedWord::NotSupported).clone();
+            b.shown(
+                FieldId::Window,
+                KvKind::Text,
+                Validity::Unsupported,
+                value,
+                None,
+                Some(words.window_no_bridge.clone()),
+                None,
+            );
+            return;
+        }
+        v => {
+            b.add(
+                FieldId::Window,
+                KvKind::Text,
+                v,
+                UnsupportedWord::NotSupported,
+                0,
+                |_| {},
+            );
+            return;
+        }
+    }
+    let v = view.validity;
+    let Some(w) = view.entries.first() else {
+        b.shown(
+            FieldId::Window,
+            KvKind::Text,
+            v,
+            words.window_none.clone(),
+            None,
+            None,
+            None,
+        );
+        return;
+    };
+    let text = |b: &mut Builder, id, value: &Arc<str>| {
+        b.add(
+            id,
+            KvKind::Text,
+            v,
+            UnsupportedWord::NotSupported,
+            ptr_bits(value),
+            |s| escape_controls(s, value),
+        );
+    };
+    text(b, FieldId::WindowTitle, &w.caption);
+    text(b, FieldId::WindowId, &w.internal_id);
+    b.add(
+        FieldId::WindowState,
+        KvKind::Text,
+        v,
+        UnsupportedWord::NotSupported,
+        u64::from(w.minimized) | (u64::from(w.maximized) << 1),
+        |s| s.push_str(window_state_word(w)),
+    );
+    text(b, FieldId::WindowClass, &w.resource_class);
+    let g = w.frame_geometry;
+    let g_bits = hash_of((g.x, g.y, g.width, g.height));
+    b.add(
+        FieldId::WindowRect,
+        KvKind::Text,
+        v,
+        UnsupportedWord::NotSupported,
+        g_bits,
+        |s| fmt_window_rect(s, g),
+    );
+    b.add(
+        FieldId::WindowSize,
+        KvKind::Text,
+        v,
+        UnsupportedWord::NotSupported,
+        g_bits,
+        |s| fmt_window_size(s, g),
+    );
+    if let Some((more, tip)) = &view.more {
+        // Stale draws the plain text_secondary row.
+        b.shown(
+            FieldId::WindowMore,
+            KvKind::Text,
+            Validity::Stale,
+            more.clone(),
+            None,
+            Some(tip.clone()),
+            None,
+        );
     }
 }
 
@@ -2209,6 +2502,19 @@ impl Render for GeneralTab {
                             .sections(&self.col2_tail);
                         (verify_row(button, label_widths[i], row_height), tail)
                     });
+                let windows = (i == 2 && !self.col3_tail.is_empty()).then(|| {
+                    let tail = TlKeyValueGrid::new("general-col-windows", KvLayout::Inline)
+                        .row_height(row_height)
+                        .label_width(label_widths[i])
+                        .sections(&self.col3_tail);
+                    let divider = div()
+                        .debug_selector(|| "GeneralTab-window-divider".into())
+                        .mt(px(WINDOW_GAP * m.ui_scale))
+                        .h(px(1.))
+                        .w_full()
+                        .bg(theme.divider);
+                    (divider, tail)
+                });
                 div()
                     .debug_selector(move || format!("GeneralTab-panel-{i}"))
                     .min_w_0()
@@ -2220,6 +2526,7 @@ impl Render for GeneralTab {
                     .py(m.sp[3])
                     .child(grid)
                     .when_some(verify, |d, (row, tail)| d.child(row).child(tail))
+                    .when_some(windows, |d, (divider, tail)| d.child(divider).child(tail))
                     .into_any_element()
             })
             .collect();
@@ -2414,6 +2721,25 @@ mod tests {
             run(|s| fmt_net_io(s, 150_000., 37_500., NetUnit::Bits, false)),
             "Receive 1.2 Mbps, send 0.3 Mbps"
         );
+    }
+
+    #[test]
+    fn window_rect_format() {
+        let g = FrameGeometry {
+            x: 0,
+            y: 32,
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(run(|s| fmt_window_rect(s, g)), "L:0 T:32 R:1280 B:832");
+        assert_eq!(run(|s| fmt_window_size(s, g)), "1280 x 800");
+        let off = FrameGeometry {
+            x: -8,
+            y: -4,
+            width: 100,
+            height: 50,
+        };
+        assert_eq!(run(|s| fmt_window_rect(s, off)), "L:-8 T:-4 R:92 B:46");
     }
 
     #[test]
