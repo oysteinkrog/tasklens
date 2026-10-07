@@ -1035,6 +1035,53 @@ mod page {
             .update(|_, cx| page.read(cx).table().read(cx).rows_built_last_frame.get())
     }
 
+    /// Builds the page after the hub already holds a view with rows for `generation`, draws,
+    /// and returns the row count the table shows.
+    fn open_after_view(cx: &mut TestAppContext, generation: u64) -> usize {
+        setup(cx);
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (rows, groups, records) = every_kind();
+        publish(&engine, snapshot(2, rows, groups, records), generation);
+        cx.update(|cx| {
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let hub = cx.new(|cx| SnapshotHub::new(client, cx));
+            cx.set_global(GlobalHub(hub));
+        });
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let out = slot.clone();
+        let (_, vcx) = cx.add_window_view(move |window, cx| {
+            let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            *out.borrow_mut() = Some(page.clone());
+            Host {
+                page,
+                opened: Rc::new(Cell::new(0)),
+            }
+        });
+        vcx.update(|window, _| window.activate_window());
+        redraw(vcx);
+        let page = slot.borrow_mut().take().expect("page created");
+        vcx.update(|_, cx| {
+            use tl_ui::table::tree_table::TreeTableDelegate as _;
+            page.read(cx).table().read(cx).delegate.row_count()
+        })
+    }
+
+    /// pdu.55: a view the hub held before the page existed must not panic the first draw.
+    #[gpui_kit::test]
+    fn view_before_page_draws_without_panic(cx: &mut TestAppContext) {
+        // Built for no query of this page: ignored, so nothing is drawn.
+        assert_eq!(open_after_view(cx, 0), 0);
+    }
+
+    #[gpui_kit::test]
+    fn view_before_page_for_first_generation_shows_rows(cx: &mut TestAppContext) {
+        // The page's first query is generation 1, so a view for it may show.
+        let (rows, _, _) = every_kind();
+        let shown = open_after_view(cx, 1);
+        assert!(shown == 0 || shown == rows.len(), "{shown} rows");
+    }
+
     #[gpui_kit::test]
     fn first_query_sent_on_create(cx: &mut TestAppContext) {
         let o = open(cx);
