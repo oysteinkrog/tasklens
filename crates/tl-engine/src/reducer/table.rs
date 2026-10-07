@@ -2519,8 +2519,10 @@ mod tests {
         assert!(iec_shown(1023 * KIB_U + 1013) < iec_shown(MIB_U));
         assert!(iec_shown(1023) < iec_shown(KIB_U));
 
-        let mut settings = EngineSettings::default();
-        settings.network = NetworkUnit::Bits;
+        let mut settings = EngineSettings {
+            network: NetworkUnit::Bits,
+            ..EngineSettings::default()
+        };
         // 0.1 Mbps is 12 500 bytes per second.
         assert_eq!(
             net_shown(13_000.0, &settings),
