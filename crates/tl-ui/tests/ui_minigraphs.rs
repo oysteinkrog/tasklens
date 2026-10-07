@@ -506,8 +506,9 @@ mod panel {
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
-        Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+        App, AppContext as _, Context, Entity, IntoElement, Modifiers, MouseButton,
+        ParentElement as _, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::demand::CpuDemand;
@@ -515,10 +516,13 @@ mod panel {
     use tl_model::ids::DeviceIdx;
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
     use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::toast::ToastKind;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::minigraph::actions::{MinigraphHide, ResetMinigraphLayout};
+    use tl_ui::pages::minigraph::actions::{
+        MinigraphHide, MinigraphSetRange, ResetMinigraphLayout,
+    };
     use tl_ui::pages::minigraph::panel::{MinigraphPanel, PanelFull, toast_full};
     use tl_ui::pages::minigraph::sources::{
         MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
@@ -844,6 +848,157 @@ mod panel {
             .expect("the new card in [[minigraphs]]");
         assert_eq!(card.slot, 6);
         assert_eq!(saved.minigraphs.len(), 7);
+    }
+
+    type Entry = (MenuEntryKind, Option<String>, Option<String>, bool);
+
+    fn entries(window: &Window, menu: &Entity<TlMenuPopup>, cx: &App) -> Vec<Entry> {
+        menu.read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .map(|e| {
+                (
+                    e.kind,
+                    e.label.map(|l| l.to_string()),
+                    e.tooltip.map(|t| t.to_string()),
+                    e.checked,
+                )
+            })
+            .collect()
+    }
+
+    /// Right-clicks the card in `slot` and returns the open menu and its Time range submenu.
+    fn right_click(r: &mut Rig, slot: u16) -> (Vec<Entry>, Vec<Entry>) {
+        let selector: &'static str = Box::leak(format!("MinigraphSlot-{slot}").into_boxed_str());
+        let card = r.vcx.debug_bounds(selector).expect("card drawn");
+        r.vcx
+            .simulate_mouse_down(card.center(), MouseButton::Right, Modifiers::none());
+        draw(&mut r.vcx);
+        r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx).expect("the card menu is open");
+            let range = menu
+                .read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find_map(|e| e.submenu)
+                .expect("the Time range submenu");
+            (entries(window, &menu, cx), entries(window, &range, cx))
+        })
+    }
+
+    fn item(label: &str) -> Entry {
+        (MenuEntryKind::Item, Some(label.to_owned()), None, false)
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_order_system(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let (menu, range) = right_click(&mut r, 0);
+        assert_eq!(
+            menu,
+            [
+                item("Hide graph"),
+                (
+                    MenuEntryKind::Submenu,
+                    Some("Time range".to_owned()),
+                    None,
+                    false
+                ),
+                (MenuEntryKind::Separator, None, None, false),
+                item("Reset minigraph layout"),
+            ]
+        );
+        let checked: Vec<_> = range
+            .iter()
+            .filter(|e| e.3)
+            .map(|e| e.1.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(checked, ["1 minute"]);
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_long_ranges_disabled_before_p2(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let (_, range) = right_click(&mut r, 0);
+        let later = Some("Available in a later version".to_owned());
+        assert_eq!(
+            range,
+            [
+                (
+                    MenuEntryKind::Item,
+                    Some("30 seconds".to_owned()),
+                    None,
+                    false
+                ),
+                (MenuEntryKind::Item, Some("1 minute".to_owned()), None, true),
+                (
+                    MenuEntryKind::Disabled,
+                    Some("5 minutes".to_owned()),
+                    later.clone(),
+                    false
+                ),
+                (
+                    MenuEntryKind::Disabled,
+                    Some("10 minutes".to_owned()),
+                    later,
+                    false
+                ),
+            ]
+        );
+
+        // A process card has Remove graph in place of Hide graph.
+        let panel = r.panel.clone();
+        let key = tl_model::ids::ProcessKey {
+            start_ticks: 1,
+            boot_id: tl_model::time::BootId(1),
+            pid: 42,
+        };
+        r.vcx.update(|_, cx| {
+            panel
+                .update(cx, |p, cx| {
+                    p.add_system(MinigraphSource::Process { key }, cx)
+                })
+                .expect("slot 6");
+        });
+        draw(&mut r.vcx);
+        let (menu, _) = right_click(&mut r, 6);
+        let labels: Vec<_> = menu.iter().filter_map(|e| e.1.clone()).collect();
+        assert_eq!(
+            labels,
+            ["Remove graph", "Time range", "Reset minigraph layout"]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn card_set_range_persists(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let cpu = r.id_of(&MinigraphSource::Cpu);
+        r.vcx
+            .dispatch_action(MinigraphSetRange { id: cpu, secs: 30 });
+        draw(&mut r.vcx);
+        let panel = r.panel.clone();
+        let (range_ns, state) = r.vcx.update(|_, cx| {
+            let card = panel
+                .read(cx)
+                .cards()
+                .iter()
+                .find(|(id, _)| *id == cpu)
+                .map(|(_, c)| c.clone())
+                .expect("CPU card");
+            let range_ns = card.read(cx).chart().read(cx).spec.range_ns;
+            (range_ns, TlSettings::state(cx).minigraphs.clone())
+        });
+        assert_eq!(range_ns, 30_000_000_000);
+        let entry = state.iter().find(|m| m.source == "cpu").expect("cpu entry");
+        assert_eq!(entry.range_s, 30);
+        let saved = r
+            .saved
+            .lock()
+            .expect("lock")
+            .last()
+            .cloned()
+            .expect("persisted");
+        assert_eq!(saved.minigraphs, state);
     }
 }
 
