@@ -69,6 +69,13 @@ pub fn run(args: BenchArgs) -> i32 {
         process_cpu_ns,
     };
     let code = match tl_ui::bench::run_app(scene, opts, clocks, real) {
+        // A lock during the run stops frame callbacks, so the report is not a measurement. A
+        // lock that also ended before this check is not caught here; the 0-frame rule in tl-ui
+        // catches a run that drew nothing.
+        Ok(_) if session_locked() == Some(true) => {
+            eprintln!("bench failed: {}", locked_mid_run());
+            1
+        }
         Ok(_) => 0,
         Err(e) => {
             eprintln!("bench failed: {e}");
@@ -95,6 +102,11 @@ fn parse_scene(name: &str) -> Result<BenchScene, String> {
 /// every frame figure would be 0. `None` when unlocked or unknown.
 fn lock_refusal(locked: Option<bool>) -> Option<&'static str> {
     (locked == Some(true)).then_some("session is locked; frames will not be delivered")
+}
+
+/// The error line for a session that was locked when the run ended.
+fn locked_mid_run() -> &'static str {
+    "the session locked during the run; the report is not valid"
 }
 
 /// logind's `LockedHint` over this user's graphical sessions (wayland or x11): true when any is
@@ -213,6 +225,10 @@ mod tests {
             lock_refusal(None),
             None,
             "unknown state does not block a run"
+        );
+        assert_eq!(
+            locked_mid_run(),
+            "the session locked during the run; the report is not valid"
         );
     }
 
