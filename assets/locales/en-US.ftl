@@ -1348,6 +1348,11 @@ shell-menu-settings-language = Language:
 shell-menu-settings-system-default = System default
 shell-menu-settings-language-en-us = English (United States)
 shell-menu-settings-reset = Reset Settings to Defaults
+# Settings menu, P2 rows (tasklens-bj6.13, UI-SHL-040).
+shell-menu-settings-tab-switch = Tab Switch
+shell-menu-settings-tab-switch-ms = { $ms } ms
+shell-menu-settings-public-ip = Auto-fetch Public IP on launch
+shell-menu-settings-all = All settings…
 # Process row menu and group header menu (tasklens-pdu.2, UI-PRC-013, UI-PRC-020)
 processes-menu-end-task = End Task
 processes-menu-end-app = End App
