@@ -1656,3 +1656,337 @@ mod toolbar {
         assert_eq!((s.hide.get(), s.cycle.get()), (1, 1));
     }
 }
+
+/// The jump target: `ProcessesPage::select_by_key` and `select_by_pid` (tasklens-pdu.3,
+/// PROC-071, UI-PRC-015).
+mod jump {
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use tl_model::client::EngineClient as _;
+    use tl_model::command::Tab;
+    use tl_model::ids::{NodeId, ProcessKey};
+    use tl_model::process::{GroupKind, ProcFlags, ProcessRecord};
+    use tl_model::settings::UiState;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::table::{TableMode, TableQuery, TableRow};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::actions::ProcessesShowHidden;
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::jump::JumpTexts;
+    use tl_ui::pages::processes::table::GroupHeader;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{ShellPage, main_window_view};
+
+    use super::delegate::{key, record, row, snapshot};
+    use super::shell::{open_with, select};
+
+    /// Fillers before the target, so centring has to scroll.
+    const FILLERS: u32 = 300;
+    const TARGET: u32 = 5000;
+    const PARENT: u32 = 4000;
+    const GRANDPARENT: u32 = 3000;
+
+    fn firefox() -> tl_model::ids::GroupKey {
+        GroupKind::App {
+            app_id: Arc::from("firefox"),
+        }
+        .key()
+    }
+
+    /// Fillers pid 100.., then the Firefox chain grandparent > parent > target.
+    fn records() -> Vec<ProcessRecord> {
+        let mut out: Vec<ProcessRecord> = (0..FILLERS)
+            .map(|i| record(100 + i, "filler", ProcFlags::empty()))
+            .collect();
+        for (pid, ppid) in [(GRANDPARENT, 1), (PARENT, GRANDPARENT), (TARGET, PARENT)] {
+            let mut r = record(pid, "firefox", ProcFlags::empty());
+            r.group = firefox();
+            r.ppid = ppid;
+            out.push(r);
+        }
+        out.sort_by_key(|r| r.key);
+        out
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+        version: u64,
+    }
+
+    fn rig(cx: &mut TestAppContext, state: UiState) -> Rig {
+        let (engine, mut vcx) = open_with(cx, state);
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+            .expect("Processes built");
+        let mut r = Rig {
+            engine,
+            vcx,
+            page,
+            version: 1,
+        };
+        // The records the jump looks up, in a view of an old generation.
+        r.publish(records(), &[], 0);
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// A snapshot holding `records` whose view has `shown` (pids) as rows, for `generation`.
+        fn publish(&mut self, records: Vec<ProcessRecord>, shown: &[u32], generation: u64) {
+            let rows: Vec<TableRow> = shown
+                .iter()
+                .map(|&pid| {
+                    let ix = records.iter().position(|r| r.key.pid == pid).unwrap();
+                    row(NodeId::Process(key(pid)), 0, Some(ix as u32), None)
+                })
+                .collect();
+            self.version += 1;
+            let mut s = Snapshot::clone(&snapshot(self.version, rows, Vec::new(), records));
+            s.sequence = self.engine.latest().sequence + 1;
+            Arc::make_mut(&mut s.table).query_generation = generation;
+            Arc::make_mut(&mut s.processes).header.version = self.version;
+            self.engine.publish(s);
+            self.draw();
+        }
+
+        /// Every filler, then the target, as the view of the last query sent.
+        fn answer_with_target(&mut self) {
+            let mut shown: Vec<u32> = (0..FILLERS).map(|i| 100 + i).collect();
+            shown.push(TARGET);
+            let generation = self.last_query().generation;
+            self.publish(records(), &shown, generation);
+        }
+
+        fn last_query(&self) -> TableQuery {
+            super::sent(&self.engine).pop().expect("a query was sent")
+        }
+
+        fn jump(&mut self, key: ProcessKey, texts: JumpTexts) {
+            let page = self.page.clone();
+            self.vcx.update(|window, cx| {
+                page.update(cx, |p, cx| p.select_by_key(key, texts, window, cx))
+            });
+            self.draw();
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window open");
+                let texts = main.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(|t| t.to_string()).collect()
+            })
+        }
+
+        fn active_tab(&mut self) -> Tab {
+            self.vcx
+                .update(|_, cx| main_window_view(cx).unwrap().read(cx).active_tab())
+        }
+
+        fn selected(&mut self) -> Vec<ProcRowId> {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).table().read(cx).selection.ids().collect())
+        }
+
+        fn target_row_visible_after_scroll(&mut self) -> bool {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                let t = page.read(cx).table().read(cx);
+                let range = t.visible_range();
+                range.start > 0 && range.contains(&(FILLERS as usize))
+            })
+        }
+
+        fn table_focused(&mut self) -> bool {
+            let page = self.page.clone();
+            self.vcx
+                .update(|window, cx| page.read(cx).primary_focus().is_focused(window))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn jump_expands_group_and_ancestors_then_centres(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        select(&mut r.vcx, Tab::Performance);
+        let before = super::sent(&r.engine).len();
+        r.jump(key(TARGET), JumpTexts::default());
+        assert_eq!(r.active_tab(), Tab::Processes);
+        let sent = super::sent(&r.engine);
+        assert_eq!(sent.len(), before + 1, "one query");
+        let expanded = &sent.last().unwrap().expanded;
+        for node in [
+            GroupHeader::Apps.node(),
+            NodeId::Group(firefox()),
+            NodeId::Process(key(PARENT)),
+            NodeId::Process(key(GRANDPARENT)),
+        ] {
+            assert!(expanded.contains(&node), "{node:?} expanded");
+        }
+        assert!(r.toasts().is_empty(), "no toast before the view");
+
+        r.answer_with_target();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(TARGET))]);
+        assert!(r.target_row_visible_after_scroll(), "centred");
+        assert!(r.table_focused());
+        assert_eq!(r.toasts(), ["Switched to Processes tab"]);
+    }
+
+    #[gpui_kit::test]
+    fn jump_tree_mode_expands_ancestors(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.processes.mode = TableMode::Tree);
+        });
+        r.draw();
+        let before = super::sent(&r.engine).len();
+        r.jump(key(TARGET), JumpTexts::default());
+        let sent = super::sent(&r.engine);
+        assert_eq!(sent.len(), before + 1, "one query");
+        let q = sent.last().unwrap();
+        assert_eq!(q.mode, TableMode::Tree);
+        assert!(q.expanded.contains(&NodeId::Process(key(PARENT))));
+        assert!(q.expanded.contains(&NodeId::Process(key(GRANDPARENT))));
+        r.answer_with_target();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(TARGET))]);
+        assert!(r.toasts().is_empty(), "same tab: no toast");
+    }
+
+    #[gpui_kit::test]
+    fn jump_caller_text_replaces_switched_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        select(&mut r.vcx, Tab::Performance);
+        r.jump(
+            key(TARGET),
+            JumpTexts {
+                success: Some("Switched to owning process.".into()),
+                ..JumpTexts::default()
+            },
+        );
+        r.answer_with_target();
+        assert_eq!(r.toasts(), ["Switched to owning process."]);
+    }
+
+    #[gpui_kit::test]
+    fn jump_missing_toasts_not_found(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        let mut recs = records();
+        let ix = recs.iter().position(|x| x.key.pid == TARGET).unwrap();
+        recs[ix].flags = ProcFlags::EXITED;
+        r.publish(recs, &[], 0);
+        let before = super::sent(&r.engine).len();
+        r.jump(key(TARGET), JumpTexts::default());
+        assert_eq!(r.toasts(), ["Process not found in current view"]);
+        assert_eq!(
+            super::sent(&r.engine).len(),
+            before,
+            "no query for an exited record"
+        );
+
+        // A key the snapshot never held.
+        r.jump(key(99_999), JumpTexts::default());
+        assert_eq!(super::sent(&r.engine).len(), before);
+        let toasts = r.toasts();
+        assert!(
+            toasts
+                .last()
+                .is_some_and(|t| t.starts_with("Process not found in current view")),
+            "{toasts:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn jump_hidden_offers_show_button(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| {
+            page.update(cx, |p, cx| {
+                p.table()
+                    .update(cx, |t, _| t.delegate.query_mut().set_filter("foo".into()));
+            });
+        });
+        r.jump(
+            key(TARGET),
+            JumpTexts {
+                hidden: Some("Owning process not visible in the current view.".into()),
+                ..JumpTexts::default()
+            },
+        );
+        // The filtered view lacks the target.
+        let generation = r.last_query().generation;
+        r.publish(records(), &[100, 101], generation);
+        assert_eq!(
+            r.toasts(),
+            ["Owning process not visible in the current view."]
+        );
+        assert!(r.selected().is_empty());
+
+        // The toast's Show button dispatches this; no element handles it, so it reaches the
+        // page's app-level listener as the button's dispatch does.
+        r.vcx.dispatch_action(ProcessesShowHidden);
+        r.draw();
+        let q = r.last_query();
+        assert_eq!(q.filter.as_ref(), "", "the filter is cleared");
+        assert!(q.generation > generation, "Show expands again");
+        let hide = r
+            .vcx
+            .update(|_, cx| TlSettings::settings(cx).processes.hide_system);
+        assert!(!hide);
+        r.answer_with_target();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(TARGET))]);
+    }
+
+    #[gpui_kit::test]
+    fn jump_leaves_history_mode(cx: &mut TestAppContext) {
+        let mut state = UiState::default();
+        state.processes.history_mode = true;
+        let mut r = rig(cx, state);
+        r.jump(key(TARGET), JumpTexts::default());
+        let history = r
+            .vcx
+            .update(|_, cx| TlSettings::state(cx).processes.history_mode);
+        assert!(!history);
+    }
+
+    #[gpui_kit::test]
+    fn select_by_pid_resolves_identity(cx: &mut TestAppContext) {
+        let mut r = rig(cx, UiState::default());
+        // An exited record with the same pid and an older start is never the target.
+        let mut recs = records();
+        let mut old = record(TARGET, "firefox", ProcFlags::EXITED);
+        old.key.start_ticks = 1;
+        recs.push(old);
+        recs.sort_by_key(|x| x.key);
+        r.publish(recs, &[], 0);
+        let page = r.page.clone();
+        r.vcx.update(|window, cx| {
+            page.update(cx, |p, cx| {
+                p.select_by_pid(TARGET, JumpTexts::default(), window, cx)
+            })
+        });
+        r.draw();
+        assert!(
+            r.last_query()
+                .expanded
+                .contains(&NodeId::Process(key(PARENT)))
+        );
+        r.answer_with_target();
+        assert_eq!(r.selected(), [ProcRowId::Process(key(TARGET))]);
+
+        r.vcx.update(|window, cx| {
+            page.update(cx, |p, cx| {
+                p.select_by_pid(4321, JumpTexts::default(), window, cx)
+            })
+        });
+        r.draw();
+        assert_eq!(r.toasts(), ["Process not found in current view"]);
+    }
+}

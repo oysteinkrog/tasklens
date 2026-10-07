@@ -226,7 +226,9 @@ impl ProcessesPage {
 /// toast layer, outside the page's element tree, so the handler is app-level.
 pub(super) fn register_show_hidden(cx: &mut Context<ProcessesPage>) {
     let page = cx.weak_entity();
-    cx.on_action(move |_: &ProcessesShowHidden, cx| {
+    // `App::on_action`: `Context::on_action` is the element-level form.
+    let app: &mut App = cx;
+    app.on_action(move |_: &ProcessesShowHidden, cx| {
         let _ = page.update(cx, |p, cx| p.show_hidden(cx));
     });
 }
