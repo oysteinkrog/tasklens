@@ -19,6 +19,7 @@ use tl_model::settings::{AppearanceSettings, NetworkUnit, Settings, ThemeSetting
 use tl_model::snapshot::SystemSnapshot;
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
+use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::scale::{ScaleState, compute};
 use tl_ui::chart::{ChartState, ValueFormat, YScale, format_value};
@@ -79,6 +80,8 @@ struct Rig<'a> {
     page: Entity<MemoryPage>,
     demand: Entity<DemandAggregator>,
     engine: Arc<FakeEngine>,
+    /// A live chart asks the window's driver for its next frame.
+    _driver: Entity<AnimationDriver>,
     vcx: &'a mut VisualTestContext,
 }
 
@@ -141,6 +144,11 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
     let host = page.clone();
     let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
     vcx.simulate_scale_factor_change(1.0);
+    let driver = vcx.update(|window, cx| {
+        let driver = cx.new(AnimationDriver::new);
+        AnimationDriver::register(&driver, window, cx);
+        driver
+    });
     let focus = vcx.update(|_, cx| page.read(cx).focus_handle(cx));
     vcx.update(|window, cx| focus.focus(window, cx));
     draw(vcx);
@@ -148,6 +156,7 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
         page,
         demand,
         engine,
+        _driver: driver,
         vcx,
     }
 }
