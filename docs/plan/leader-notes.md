@@ -723,3 +723,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.26: GPU engine list for Settings comes from a new pub gpu::device_engines(snap, device), so Settings and the GPU page share one key list; the page has 19 keys (the bead said 21).
 - bbcd999d (gma.7) swept the bj6.26 ftl block, because blocks appended at the end merge into one hunk. The brief now says to add keys next to their area and to check every staged key. pdu.23 (ad375964, 13ef099b): result_toast shows the reason alone when the failure text is empty. gma.7 (bbcd999d) tests are in ui_process_menu.rs. Both wait on the build (minigraph card.rs WIP).
 - gma.19 (905631a8): Threads tab; cell text through CellTextCache; follow-ups gma.42 and rsf.28. settings/mod.rs:351 type_complexity sent to the m1f agent. The gma agent takes gma.32.
+- pdu.23 (ad375964, 13ef099b) and gma.7 (bbcd999d, be128f80) closed: tests pass, clippy clean. The pdu-52 agent takes pdu.24.
