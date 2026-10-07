@@ -17,6 +17,7 @@ use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
 use tl_model::snapshot::{GraphicsAdapter, InvField};
 use tl_model::system::{GpuTotals, Metric};
 use tl_model::validity::Validity;
+use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::{ChartState, LegendStyle};
 use tl_ui::components::kv_grid;
@@ -32,7 +33,8 @@ use tl_ui::testing::fake_engine::FakeEngine;
 const GPU: DeviceIdx = DeviceIdx(7);
 const GIB: u64 = 1 << 30;
 
-struct Host(Entity<GpuPage>);
+/// The page, and the window's animation driver, which a chart with data needs.
+struct Host(Entity<GpuPage>, #[allow(dead_code)] Entity<AnimationDriver>);
 
 impl Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -159,7 +161,11 @@ fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared:
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| GpuPage::new(key, row, h, d, cx));
     let host = page.clone();
-    let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let driver = cx.new(AnimationDriver::new);
+        AnimationDriver::register(&driver, window, cx);
+        Host(host, driver)
+    });
     vcx.simulate_scale_factor_change(1.0);
     draw(vcx);
     Rig {
