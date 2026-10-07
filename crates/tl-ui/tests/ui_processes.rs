@@ -352,7 +352,7 @@ mod delegate {
         }
     }
 
-    fn group(node: NodeId, kind: GroupRowKind, name: &str, members: u32) -> GroupRow {
+    pub(super) fn group(node: NodeId, kind: GroupRowKind, name: &str, members: u32) -> GroupRow {
         GroupRow {
             node,
             key: GroupKey(7),
@@ -2363,5 +2363,206 @@ mod pause {
         }
         assert_eq!(r.renders(), before, "five snapshots, no table render");
         assert!(r.is_paused());
+    }
+}
+
+/// The Processes tab's status chip text (UI-PRC-018).
+mod status {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use tl_model::client::EngineClient as _;
+    use tl_model::command::Tab;
+    use tl_model::ids::{NodeId, PseudoKind};
+    use tl_model::process::{GroupRowKind, ProcFlags};
+    use tl_model::settings::UiState;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::table::TableRow;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+    use tl_ui::window::status::StatusChanged;
+
+    use super::delegate::{group, key, record, row, snapshot};
+    use super::shell::open_with;
+
+    struct Rig {
+        engine: Arc<tl_ui::testing::fake_engine::FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+        version: u64,
+        emitted: Rc<Cell<u32>>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let (engine, mut vcx) = open_with(cx, UiState::default());
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+            .expect("Processes built");
+        let emitted = Rc::new(Cell::new(0));
+        let sink = emitted.clone();
+        vcx.update(|_, cx| {
+            cx.subscribe(&page, move |_, _: &StatusChanged, _| {
+                sink.set(sink.get() + 1)
+            })
+            .detach();
+        });
+        Rig {
+            engine,
+            vcx,
+            page,
+            version: 1,
+            emitted,
+        }
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// A new table version with one process row per PID, `pseudo` pseudo rows, and the
+        /// view's `total`, `shown` and `restricted`.
+        fn publish(
+            &mut self,
+            pids: &[u32],
+            pseudo: usize,
+            total: u32,
+            shown: u32,
+            restricted: u32,
+        ) {
+            self.version += 1;
+            let records = pids
+                .iter()
+                .map(|&p| record(p, &format!("proc-{p}"), ProcFlags::empty()))
+                .collect();
+            let mut rows: Vec<TableRow> = pids
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| row(NodeId::Process(key(p)), 0, Some(i as u32), None))
+                .collect();
+            let kinds = [PseudoKind::Interrupts, PseudoKind::MemoryCompression];
+            let groups: Vec<_> = kinds[..pseudo]
+                .iter()
+                .map(|&k| group(NodeId::Pseudo(k), GroupRowKind::Pseudo, "pseudo", 0))
+                .collect();
+            rows.extend(
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(g, gr)| row(gr.node.clone(), 0, None, Some(g as u32))),
+            );
+            let page = self.page.clone();
+            let generation = self
+                .vcx
+                .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation());
+            let mut s = Snapshot::clone(&snapshot(self.version, rows, groups, records));
+            s.sequence = self.engine.latest().sequence + 1;
+            let t = Arc::make_mut(&mut s.table);
+            t.query_generation = generation;
+            t.total = total;
+            t.shown = shown;
+            t.restricted = restricted;
+            self.engine.publish(s);
+            self.draw();
+        }
+
+        fn filter(&mut self, text: &str) {
+            let text = text.to_owned();
+            self.vcx.update(|_, cx| {
+                let events = cx.global::<GlobalShellEvents>().0.clone();
+                events.update(cx, |_, cx| {
+                    cx.emit(FilterChanged {
+                        tab: Tab::Processes,
+                        text: text.into(),
+                    })
+                });
+            });
+            self.draw();
+        }
+
+        fn select(&mut self, pids: &[u32]) {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                let table = page.read(cx).table().clone();
+                table.update(cx, |t, cx| {
+                    t.selection.clear();
+                    for &p in pids {
+                        t.selection.ctrl_click(ProcRowId::Process(key(p)));
+                    }
+                    cx.notify();
+                });
+            });
+            self.draw();
+        }
+
+        fn text(&mut self) -> String {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                let mut out = String::new();
+                page.read(cx).status_text(&mut out);
+                out
+            })
+        }
+    }
+
+    #[gpui_kit::test]
+    fn status_text_variants(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.publish(&[1, 2, 3, 4], 0, 296, 296, 0);
+        assert_eq!(r.text(), "296 Processes");
+
+        r.select(&[1]);
+        assert_eq!(r.text(), "296 Processes", "one selected row: no segment");
+        r.select(&[1, 2, 3]);
+        assert_eq!(r.text(), "296 Processes | 3 processes selected");
+
+        r.publish(&[1, 2, 3, 4], 0, 296, 296, 42);
+        assert_eq!(
+            r.text(),
+            "296 Processes | 3 processes selected | 42 restricted"
+        );
+
+        // A filter: the old counts stay until the view for it arrives.
+        r.filter("proc");
+        assert_eq!(
+            r.text(),
+            "296 Processes | 3 processes selected | 42 restricted"
+        );
+        // The view keeps PIDs 1 and 4; the hidden selected rows are not counted.
+        r.publish(&[1, 4], 0, 296, 41, 0);
+        assert_eq!(r.text(), "41 / 296 Processes");
+        r.select(&[1, 2, 3, 4]);
+        assert_eq!(r.text(), "41 / 296 Processes | 2 processes selected");
+    }
+
+    #[gpui_kit::test]
+    fn status_count_excludes_pseudo_and_hidden_kthreads(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        // Three process rows and two pseudo rows; the engine left the hidden kernel threads
+        // out of `total` (Hide system processes, R-280).
+        r.publish(&[1, 2, 3], 2, 3, 3, 0);
+        assert_eq!(r.text(), "3 Processes");
+    }
+
+    #[gpui_kit::test]
+    fn status_changed_only_on_change(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.publish(&[1, 2], 0, 2, 2, 0);
+        let after_first = r.emitted.get();
+        assert!(after_first >= 1, "the first view emits");
+        // A new version with the same counts.
+        r.publish(&[2, 1], 0, 2, 2, 0);
+        r.publish(&[1, 2], 0, 2, 2, 0);
+        assert_eq!(r.emitted.get(), after_first, "nothing changed");
+        // One selected row changes no text either.
+        r.select(&[1]);
+        assert_eq!(r.emitted.get(), after_first);
+        r.publish(&[1, 2, 3], 0, 3, 3, 0);
+        assert_eq!(r.emitted.get(), after_first + 1);
     }
 }
