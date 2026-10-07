@@ -331,6 +331,7 @@ impl TasklensUi {
         crate::table::actions::bind_keys_table(cx);
         crate::pages::performance::actions::bind_keys_performance(cx);
         crate::windows::actions::bind_keys_process_windows(cx);
+        crate::pages::information::actions::bind_keys_information(cx);
         actions::register_global_handlers(cx);
         crate::window::menubar::init(cx);
         kv_grid::init(cx);
