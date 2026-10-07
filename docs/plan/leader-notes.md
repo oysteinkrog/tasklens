@@ -735,3 +735,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.14: the summary tile menu shows only the common items (Copy, Graph Summary View, Time range). Page items need the page to be rendered, and summary mode does not render it.
 - bj6.20 (242ac452, 8e8bb580) closed. TlDialog is 420 px wide, not 460. open_or_focus is deferred. The fetch is a closure passed by the caller. The m1f agent takes bj6.11.
 - gma.14: kv_grid gains opt-in TlValue.copy, menu_items() and cursor(), so General keeps using the grid and does not copy its rows. The jump uses ProcessesPage::select_by_key with the Go to parent texts.
+- gma.14 kv_grid hooks (80184733): copy_texts(row, text), not a TlValue field, because details.rs builds it as a struct literal. on_context_menu(row, pos) takes over right-click from the kit menu. cursor(row).
