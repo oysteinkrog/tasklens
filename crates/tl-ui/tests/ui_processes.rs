@@ -1997,3 +1997,176 @@ mod jump {
         assert_eq!(r.toasts(), ["Process not found in current view"]);
     }
 }
+
+/// The filter box's Processes side: one query per `FilterChanged`, the include-children rule
+/// and toasts, and the no-match state (tasklens-pdu.24, UI-PRC-016, UI-PRC-024).
+mod filter {
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use tl_model::client::EngineClient as _;
+    use tl_model::command::Tab;
+    use tl_model::settings::UiState;
+    use tl_model::snapshot::Snapshot;
+    use tl_model::table::TableMode;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::filter::include_children_visible;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
+
+    use super::delegate::snapshot;
+    use super::shell::open_with;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let (engine, mut vcx) = open_with(cx, UiState::default());
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        let page = vcx
+            .read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+            .expect("Processes built");
+        Rig { engine, vcx, page }
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        /// What the shell emits after its 100 ms debounce.
+        fn filter(&mut self, tab: Tab, text: &str) {
+            let text = text.to_owned();
+            self.vcx.update(|_, cx| {
+                let events = cx.global::<GlobalShellEvents>().0.clone();
+                events.update(cx, |_, cx| {
+                    cx.emit(FilterChanged {
+                        tab,
+                        text: text.into(),
+                    })
+                });
+            });
+            self.draw();
+        }
+
+        fn generation(&mut self) -> u64 {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.read(cx).table().read(cx).delegate.query().generation())
+        }
+
+        fn toasts(&mut self) -> Vec<String> {
+            self.vcx.update(|_, cx| {
+                let main = main_window_view(cx).expect("main window open");
+                let texts = main.read(cx).toasts().read(cx).visible_texts();
+                texts.iter().map(|t| t.to_string()).collect()
+            })
+        }
+
+        /// An empty view for the current query.
+        fn publish_empty(&mut self) {
+            let generation = self.generation();
+            let mut s = Snapshot::clone(&snapshot(10, Vec::new(), Vec::new(), Vec::new()));
+            s.sequence = self.engine.latest().sequence + 1;
+            Arc::make_mut(&mut s.table).query_generation = generation;
+            self.engine.publish(s);
+            self.draw();
+        }
+    }
+
+    #[gpui_kit::test]
+    fn filter_changed_sends_new_generation(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let before = super::sent(&r.engine).len();
+        let generation = r.generation();
+        r.filter(Tab::Processes, "FireFox");
+        let sent = super::sent(&r.engine);
+        assert_eq!(sent.len(), before + 1, "exactly one query, at once");
+        let q = sent.last().expect("a query");
+        assert_eq!(q.filter.as_ref(), "firefox");
+        assert!(q.generation > generation, "a new generation");
+
+        // Another tab's filter sends nothing here.
+        r.filter(Tab::Services, "foo");
+        assert_eq!(super::sent(&r.engine).len(), before + 1);
+    }
+
+    #[gpui_kit::test]
+    fn filter_lowercased(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.filter(Tab::Processes, "FiReFox");
+        let q = super::sent(&r.engine).pop().expect("a query");
+        assert_eq!(q.filter.as_ref(), "firefox");
+    }
+
+    #[test]
+    fn include_children_checkbox_visibility_rule() {
+        assert!(include_children_visible(true, TableMode::Grouped));
+        assert!(!include_children_visible(false, TableMode::Flat));
+        assert!(include_children_visible(false, TableMode::Tree));
+        assert!(!include_children_visible(false, TableMode::Grouped));
+        // The shell's checkbox applies the same rule.
+        for (text, mode) in [
+            ("a", TableMode::Grouped),
+            ("", TableMode::Flat),
+            ("", TableMode::Tree),
+        ] {
+            assert_eq!(
+                tl_ui::window::filter::include_children_visible(Tab::Processes, text, mode),
+                include_children_visible(!text.is_empty(), mode),
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn include_children_toasts(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let set = |r: &mut Rig, on: bool| {
+            r.vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.processes.filter_include_children = on)
+            });
+            r.draw();
+        };
+        set(&mut r, true);
+        assert_eq!(r.toasts(), ["Including filtered process children."]);
+        set(&mut r, false);
+        assert_eq!(
+            r.toasts().last().map(String::as_str),
+            Some("Hiding unmatched filtered process children.")
+        );
+        // Another setting changing shows no new toast.
+        let count = r.toasts().len();
+        r.vcx.update(|_, cx| {
+            TlSettings::update(cx, |d| d.settings.processes.mode = TableMode::Tree)
+        });
+        r.draw();
+        assert_eq!(r.toasts().len(), count);
+    }
+
+    #[gpui_kit::test]
+    fn empty_filter_state_shows_text_and_button(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        // An empty view without a filter: no no-match text.
+        r.publish_empty();
+        assert!(r.vcx.debug_bounds("TlTreeTable-empty").is_none());
+
+        r.filter(Tab::Processes, "nothing-matches");
+        r.publish_empty();
+        let page = r.page.clone();
+        let text = r.vcx.update(|_, cx| {
+            use tl_ui::table::tree_table::TreeTableDelegate as _;
+            page.read(cx).table().read(cx).delegate.empty_text()
+        });
+        assert_eq!(text.as_deref(), Some("No processes match the filter"));
+        assert!(r.vcx.debug_bounds("TlTreeTable-empty").is_some(), "drawn");
+        assert!(
+            r.vcx.debug_bounds("TlTreeTable-group-row").is_none(),
+            "no group header row"
+        );
+    }
+}
