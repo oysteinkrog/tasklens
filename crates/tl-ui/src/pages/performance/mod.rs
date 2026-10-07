@@ -19,16 +19,29 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::private::schemars::JsonSchema;
-use gpui_kit::{AnyView, App, AppContext as _, Context, Entity, FocusHandle, Focusable};
+use gpui_kit::{
+    Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, Context, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Pixels, Render, StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
+};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceIdentity};
 use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 
+use self::actions::{PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfToggleSidebar};
+use self::page::DevicePage;
+use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
+use crate::settings_global::{TlSettings, animations_on};
+use crate::theme::metrics;
+use crate::window::main::ShellPage;
+use crate::window::status::StatusChanged;
 
 /// PERF-054 type class of a network interface, as the engine reports it in the catalog.
 pub use tl_model::devices::NetKind as NetClass;
@@ -240,53 +253,405 @@ pub fn type_number(rows: &[DeviceRow], key: &DeviceKey) -> u16 {
         .map_or(0, |n| u16::try_from(n).unwrap_or(u16::MAX))
 }
 
-/// The Performance tab entity. Later E24 beads add the sidebar and summary fields (R-262).
+/// The range of the sidebar width a drag or the state file can give, × ui_scale (UI-PRF-010).
+const NAV_MIN_W: u16 = 180;
+const NAV_MAX_W: u16 = 400;
+
+/// Debug selectors of the two split panels' contents.
+pub const SIDEBAR_PANEL_ID: &str = "perf-sidebar-panel";
+pub const PAGE_PANEL_ID: &str = "perf-page-panel";
+
+/// The sidebar hide or show animation in progress (`PerfToggleSidebar`).
+#[derive(Clone, Copy)]
+struct SidebarAnim {
+    /// True while the sidebar opens, false while it closes.
+    showing: bool,
+    /// Bumped on each toggle, so a new toggle restarts the animation.
+    generation: u32,
+}
+
+/// The Performance tab entity. Later E24 beads add the summary field (R-262).
 pub struct PerformancePage {
-    /// Rendered cached `size_full` by E24-A1 (crw.1).
-    #[allow(dead_code, reason = "rendered from E24-A1 on")]
+    /// Rendered cached `size_full` in the split's first panel.
     pub(crate) sidebar: Entity<sidebar::DeviceSidebar>,
+    /// The sidebar's focus handle: the tab's `primary_focus` (UI-SHL-121).
+    sidebar_focus: FocusHandle,
     /// Device pages, created on first visit and kept (ADR-009).
-    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) pages: FxHashMap<DeviceKey, AnyView>,
-    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) selected: Option<DeviceKey>,
+    /// The selected page's `focus_order`, read once when it is selected.
+    page_focus: SmallVec<[FocusHandle; 4]>,
     // E24-015: summary: Option<Entity<summary::SummaryView>> (added by crw.17 as a chain edit, R-262)
     /// Not persisted (R-090).
-    #[allow(dead_code, reason = "read from E24-004 and E24-006 on")]
     pub(crate) sidebar_visible: bool,
+    anim: Option<SidebarAnim>,
+    anim_generation: u32,
+    /// `state.performance.nav_width`, clamped to 180..=400.
+    nav_width: u16,
+    /// The split's panel sizes. Made new each time the sidebar comes back, so a drag on the
+    /// handle while the sidebar was hidden leaves nothing behind.
+    split: Entity<ResizableState>,
+    /// The tab is the active tab (`set_active`).
+    active: bool,
+    hub: Entity<SnapshotHub>,
+    demand: Entity<DemandAggregator>,
     /// Key context "Performance".
     pub(crate) focus: FocusHandle,
+    _subs: SmallVec<[Subscription; 1]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
 impl PerformancePage {
+    /// Builds the sidebar and the page of the device the sidebar selected first.
     pub fn new(
         hub: Entity<SnapshotHub>,
         demand: Entity<DemandAggregator>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self {
-            sidebar: cx.new(|cx| sidebar::DeviceSidebar::new(hub, demand, cx)),
+        let sidebar = cx.new(|cx| sidebar::DeviceSidebar::new(hub.clone(), demand.clone(), cx));
+        let sidebar_focus = sidebar.read(cx).focus.clone();
+        let mut subs = SmallVec::new();
+        subs.push(cx.subscribe(&sidebar, Self::on_sidebar));
+        let nav_width = TlSettings::state(cx).performance.nav_width;
+        let first = sidebar.read(cx).selected().cloned();
+        let mut this = Self {
+            sidebar,
+            sidebar_focus,
             pages: FxHashMap::default(),
             selected: None,
+            page_focus: SmallVec::new(),
             sidebar_visible: true,
+            anim: None,
+            anim_generation: 0,
+            nav_width: nav_width.clamp(NAV_MIN_W, NAV_MAX_W),
+            split: cx.new(|_| ResizableState::default()),
+            active: true,
+            hub,
+            demand,
             focus: cx.focus_handle(),
+            _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
+        };
+        if let Some(key) = first {
+            this.show(key, cx);
+        }
+        this
+    }
+
+    /// Tab activation: the sidebar and the shown page withdraw their demand parts while another
+    /// tab is shown and send them again when this tab comes back.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.active = active;
+        self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
+        if let Some(view) = self.selected_view() {
+            update_page(&view, cx, |p, cx| p.set_active(active, cx));
         }
     }
 
-    /// Tab activation: the sidebar withdraws its demand part while another tab is shown and
-    /// sends it again when this tab comes back. Called by the tab host (E24-A1).
-    pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
+    /// UI-SHL-121 initial focus: the sidebar list.
+    pub fn primary_focus(&self) -> FocusHandle {
+        self.sidebar_focus.clone()
+    }
+
+    /// The sidebar, then the shown page's header toggles and block controls (UI-SHL-121).
+    pub fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
+        let mut order = SmallVec::new();
+        order.push(self.sidebar_focus.clone());
+        order.extend(self.page_focus.iter().cloned());
+        order
+    }
+
+    pub fn sidebar(&self) -> &Entity<sidebar::DeviceSidebar> {
+        &self.sidebar
+    }
+
+    pub fn selected(&self) -> Option<&DeviceKey> {
+        self.selected.as_ref()
+    }
+
+    /// The page view of `key`, if it was built.
+    pub fn page(&self, key: &DeviceKey) -> Option<&AnyView> {
+        self.pages.get(key)
+    }
+
+    /// The number of pages built so far.
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn sidebar_visible(&self) -> bool {
+        self.sidebar_visible
+    }
+
+    /// The sidebar width in logical pixels before ui_scale.
+    pub fn nav_width(&self) -> u16 {
+        self.nav_width
+    }
+
+    fn selected_view(&self) -> Option<AnyView> {
+        self.selected
+            .as_ref()
+            .and_then(|k| self.pages.get(k))
+            .cloned()
+    }
+
+    fn on_sidebar(
+        &mut self,
+        _: Entity<sidebar::DeviceSidebar>,
+        ev: &sidebar::SidebarEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match ev {
+            sidebar::SidebarEvent::Selected(key) => {
+                if self.show(key.clone(), cx) {
+                    cx.notify();
+                }
+            }
+            // A device that went away or came back with a new generation gets a new page on
+            // its next visit. Dropping the view drops its demand part.
+            sidebar::SidebarEvent::Removed(key) => {
+                if self.pages.remove(key).is_some() && self.selected.as_ref() == Some(key) {
+                    self.selected = None;
+                    self.page_focus.clear();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Shows the page of `key`: builds it on the first visit, deactivates the old page and
+    /// activates the new one. False when nothing changed.
+    fn show(&mut self, key: DeviceKey, cx: &mut App) -> bool {
+        if self.selected.as_ref() == Some(&key) {
+            return false;
+        }
+        let view = match self.pages.get(&key) {
+            Some(view) => view.clone(),
+            None => {
+                let Some(row) = self
+                    .sidebar
+                    .read(cx)
+                    .rows()
+                    .iter()
+                    .find(|r| r.key == key)
+                    .cloned()
+                else {
+                    return false;
+                };
+                let view = page::build_page(&key, &row, &self.hub, &self.demand, cx);
+                self.pages.insert(key.clone(), view.clone());
+                view
+            }
+        };
+        if let Some(old) = self.selected_view() {
+            update_page(&old, cx, |p, cx| p.set_active(false, cx));
+        }
+        if self.active {
+            update_page(&view, cx, |p, cx| p.set_active(true, cx));
+        }
+        self.page_focus = page_focus_order(&view, cx);
+        self.selected = Some(key);
+        true
+    }
+
+    /// `PerfToggleSidebar` (F9, Ctrl+T): hides or shows the sidebar. The width animates over
+    /// `m_base` unless animations are off. Not persisted (R-090).
+    fn on_toggle_sidebar(&mut self, _: &PerfToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar_visible = !self.sidebar_visible;
+        self.anim_generation = self.anim_generation.wrapping_add(1);
+        if !animations_on(cx) {
+            self.finish_toggle(cx);
+            return;
+        }
+        let generation = self.anim_generation;
+        self.anim = Some(SidebarAnim {
+            showing: self.sidebar_visible,
+            generation,
+        });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(M_BASE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.anim_generation == generation {
+                    this.finish_toggle(cx);
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The end state of a toggle: the split panel shows or hides at once.
+    fn finish_toggle(&mut self, cx: &mut Context<Self>) {
+        self.anim = None;
+        if self.sidebar_visible {
+            self.split = cx.new(|_| ResizableState::default());
+        }
+        cx.notify();
+    }
+
+    /// `PerfJumpToType`: selects the first visible card of `kind`.
+    fn on_jump_to_type(&mut self, a: &PerfJumpToType, _: &mut Window, cx: &mut Context<Self>) {
+        let key = self
+            .sidebar
+            .read(cx)
+            .cards()
+            .iter()
+            .find(|c| c.row.kind == a.kind)
+            .map(|c| c.row.key.clone());
+        if let Some(key) = key {
+            self.sidebar.update(cx, |s, cx| s.select(key, cx));
+        }
+    }
+
+    /// `PerfSelectDevice` from outside the sidebar, for example a menu.
+    fn on_select_device(&mut self, a: &PerfSelectDevice, _: &mut Window, cx: &mut Context<Self>) {
+        let key = a.key.clone();
+        self.sidebar.update(cx, |s, cx| s.select(key, cx));
+    }
+
+    /// The split handle was let go: saves the sidebar width (ADR-011; tl-app debounces the
+    /// write by 500 ms).
+    fn on_split_resized(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        if !self.sidebar_visible || self.anim.is_some() {
+            return;
+        }
+        let s = metrics(cx).ui_scale;
+        let w = (f32::from(width) / s)
+            .round()
+            .clamp(f32::from(NAV_MIN_W), f32::from(NAV_MAX_W));
+        // In 180..=400, so the cast is exact.
+        let w = w as u16;
+        if w == self.nav_width {
+            return;
+        }
+        self.nav_width = w;
+        TlSettings::update(cx, |d| d.state.performance.nav_width = w);
+    }
+}
+
+/// Runs `f` on the device page behind `view`. Each page type `page::build_page` creates has a
+/// line here (chain edit with its `build_page` arm, E25-010).
+fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage, &mut App)) {
+    let view = match view.clone().downcast::<cpu::CpuPage>() {
+        Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
+        Err(view) => view,
+    };
+    if let Ok(e) = view.downcast::<page::PlaceholderPage>() {
+        e.update(cx, |p, cx| f(p, cx));
+    }
+}
+
+/// The `focus_order` of the device page behind `view`. Same type list as [`update_page`].
+fn page_focus_order(view: &AnyView, cx: &App) -> SmallVec<[FocusHandle; 4]> {
+    let view = match view.clone().downcast::<cpu::CpuPage>() {
+        Ok(e) => return e.read(cx).focus_order(),
+        Err(view) => view,
+    };
+    match view.downcast::<page::PlaceholderPage>() {
+        Ok(e) => e.read(cx).focus_order(),
+        Err(_) => SmallVec::new(),
     }
 }
 
 impl Focusable for PerformancePage {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+impl EventEmitter<StatusChanged> for PerformancePage {}
+
+impl ShellPage for PerformancePage {
+    fn primary_focus(&self) -> FocusHandle {
+        PerformancePage::primary_focus(self)
+    }
+
+    fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
+        PerformancePage::focus_order(self)
+    }
+
+    fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        PerformancePage::set_active(self, active, cx);
+    }
+}
+
+impl Render for PerformancePage {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.render_count.set(self.render_count.get() + 1);
+        let s = metrics(cx).ui_scale;
+        let nav = px(f32::from(self.nav_width) * s);
+
+        let sidebar = div()
+            .debug_selector(|| SIDEBAR_PANEL_ID.into())
+            .size_full()
+            .child(
+                AnyView::from(self.sidebar.clone()).cached(StyleRefinement::default().size_full()),
+            );
+        let page = div()
+            .debug_selector(|| PAGE_PANEL_ID.into())
+            .size_full()
+            .children(
+                self.selected_view()
+                    .map(|v| v.cached(StyleRefinement::default().size_full())),
+            );
+
+        // While the width animates, the sidebar sits in a clipping box before the split and the
+        // split's own sidebar panel is hidden. The page panel keeps its place in the tree.
+        let (in_split, animated) = match self.anim {
+            None => (self.sidebar_visible.then_some(sidebar), None),
+            Some(SidebarAnim {
+                showing,
+                generation,
+            }) => {
+                let el = div()
+                    .flex_none()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(div().h_full().w(nav).child(sidebar))
+                    .with_animation(
+                        ("perf-sidebar-anim", generation as usize),
+                        Animation::new(M_BASE).with_easing(ease_out_cubic),
+                        move |el, t| el.w(nav * if showing { t } else { 1. - t }),
+                    );
+                (None, Some(el))
+            }
+        };
+
+        let this = cx.weak_entity();
+        let split = h_resizable("perf-split")
+            .with_state(&self.split)
+            .on_resize(move |state, _, cx| {
+                let Some(&width) = state.read(cx).sizes().first() else {
+                    return;
+                };
+                let _ = this.update(cx, |p, cx| p.on_split_resized(width, cx));
+            })
+            .child(
+                resizable_panel()
+                    .flex_none()
+                    .size(nav)
+                    .size_range(px(f32::from(NAV_MIN_W) * s)..px(f32::from(NAV_MAX_W) * s))
+                    .visible(in_split.is_some())
+                    .children(in_split),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(px(page::PAGE_MIN_W * s)..Pixels::MAX)
+                    .child(page),
+            );
+
+        h_flex()
+            .key_context(PERFORMANCE_CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_jump_to_type))
+            .on_action(cx.listener(Self::on_select_device))
+            .size_full()
+            .children(animated)
+            .child(split)
     }
 }
 

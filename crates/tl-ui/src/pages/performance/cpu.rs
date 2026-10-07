@@ -341,7 +341,8 @@ pub struct CpuPage {
     details: KeyValueModel,
     mode: CpuGraphMode,
     kernel: bool,
-    /// Bench only (UI-PRF-053): the Overall chart above the grid.
+    /// Bench only (UI-PRF-053, R-160 OI-5): the Overall chart above the grid.
+    #[cfg(feature = "bench")]
     pub bench_show_both: bool,
     mode_button_focus: FocusHandle,
     kernel_button_focus: FocusHandle,
@@ -427,6 +428,7 @@ impl CpuPage {
             details: cpu_details_model(),
             mode: settings.mode,
             kernel: settings.kernel,
+            #[cfg(feature = "bench")]
             bench_show_both: false,
             mode_button_focus: cx.focus_handle(),
             kernel_button_focus: cx.focus_handle(),
@@ -742,6 +744,7 @@ impl DevicePage for CpuPage {
 
     fn graphs(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         let m = *metrics(cx);
+        #[cfg(feature = "bench")]
         if self.bench_show_both {
             return v_flex()
                 .w_full()

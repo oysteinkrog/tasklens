@@ -987,6 +987,7 @@ mod page {
         assert_eq!(merged(&mut r), Demand::default());
     }
 
+    #[cfg(feature = "bench")]
     #[gpui_kit::test]
     fn bench_show_both_layout(cx: &mut TestAppContext) {
         let r = open(cx, Settings::default());

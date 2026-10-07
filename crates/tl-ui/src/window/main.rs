@@ -63,6 +63,7 @@ use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::performance::details::Template;
+use crate::pages::performance::PerformancePage;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
@@ -226,6 +227,12 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
         // Tab::Services => Some(|window, cx| { let page = cx.new(|cx| ServicesPage::new(window, cx)); PageSlot::new(page, cx) }),
         Tab::Processes => Some(|window, cx| {
             let page = cx.new(|cx| ProcessesPage::new(window, cx));
+            PageSlot::new(page, cx)
+        }),
+        Tab::Performance => Some(|_, cx| {
+            let hub = cx.global::<GlobalHub>().0.clone();
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
             PageSlot::new(page, cx)
         }),
         _ => None,
