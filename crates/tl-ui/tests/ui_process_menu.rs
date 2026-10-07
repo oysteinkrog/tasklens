@@ -478,6 +478,7 @@ mod toasts {
             user: "me".into(),
             flags,
             member_count: 1,
+            stopped: false,
         }
     }
 
@@ -991,11 +992,14 @@ mod end {
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
-    use tl_ui::components::dialog::TlDialogView;
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::TlSecondaryWindow;
-    use tl_ui::pages::processes::ProcessesPage;
-    use tl_ui::pages::processes::actions::{EndProcess, EndProcessTree, EndTask};
+    use tl_ui::pages::processes::actions::{
+        EndProcess, EndProcessTree, EndTask, PriorityClass, ResumeProcess, SetPriority,
+        SuspendProcess,
+    };
     use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
 
@@ -1293,6 +1297,25 @@ mod end {
             self.vcx.simulate_keystrokes("escape");
             self.vcx.run_until_parked();
         }
+
+        /// The action button is Danger.
+        fn is_destructive(&mut self) -> bool {
+            let view = self.view.clone();
+            self.vcx
+                .update(|_, cx| view.read(cx).dialog().is_destructive())
+        }
+
+        fn focused(&mut self) -> Option<DialogButton> {
+            let view = self.view.clone();
+            self.vcx
+                .update(|window, cx| view.read(cx).focused_button(window))
+        }
+
+        /// Enter on the button that has focus.
+        fn enter(mut self) {
+            self.vcx.simulate_keystrokes("enter");
+            self.vcx.run_until_parked();
+        }
     }
 
     fn own(pids: &[u32]) -> Vec<ProcessRecord> {
@@ -1579,5 +1602,235 @@ mod end {
         // The capture is used once; the next action reads the selection.
         assert!(rig.dispatch(EndProcess).is_none());
         assert_eq!(rig.sent()[1], (ActionKind::Signal(Signal::Kill), vec![302]));
+    }
+
+    fn stopped(pid: u32) -> ProcessRecord {
+        ProcessRecord {
+            state: ProcState::Stopped,
+            ..record(pid, 1, "proc", ProcFlags::empty())
+        }
+    }
+
+    fn other_user_sshd(pid: u32) -> ProcessRecord {
+        let mut sshd = record(pid, 1, "sshd", ProcFlags::OTHER_USER);
+        sshd.uid = 0;
+        Arc::make_mut(&mut sshd.meta).user = Arc::from("root");
+        sshd
+    }
+
+    /// Emits `state` for the last request sent and returns the visible toasts.
+    fn result(rig: &mut Rig, state: ActionState) -> Vec<String> {
+        let id = actions_sent(&rig.engine).pop().expect("a request").id;
+        emit(&rig.engine, &mut rig.vcx, id, None, state);
+        visible(&mut rig.vcx)
+    }
+
+    #[gpui_kit::test]
+    fn suspend_resume_requests_and_toasts(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut records = own(&[300, 301]);
+        records.push(other_user_sshd(812));
+        records.push(record(900, 1, "plasmashell", ProcFlags::PROTECTED));
+        rig.publish(records, &[300, 301, 812, 900], Vec::new());
+
+        // A running own process: no dialog, one Suspend request.
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(SuspendProcess).is_none(), "no dialog");
+        assert_eq!(rig.sent(), [(ActionKind::Suspend, vec![300])]);
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded),
+            ["Process suspended."]
+        );
+
+        rig.select_pids(&[300]);
+        assert!(rig.dispatch(ResumeProcess).is_none(), "no dialog");
+        assert_eq!(rig.sent()[1], (ActionKind::Resume, vec![300]));
+        assert!(result(&mut rig, ActionState::Succeeded).contains(&"Process resumed.".into()));
+
+        // Several own processes still do not ask.
+        rig.select_pids(&[300, 301]);
+        assert!(rig.dispatch(SuspendProcess).is_none(), "no dialog");
+        assert_eq!(rig.sent()[2], (ActionKind::Suspend, vec![300, 301]));
+
+        // Another user's process: a non-destructive OtherUser dialog.
+        rig.select_pids(&[812]);
+        let mut dialog = rig.dispatch(ResumeProcess).expect("the OtherUser dialog");
+        assert_eq!(
+            dialog.text(),
+            "Resume on sshd (PID 812), owned by root. Continue?"
+        );
+        assert!(!dialog.is_destructive());
+        dialog.enter();
+        assert_eq!(rig.sent()[3], (ActionKind::Resume, vec![812]));
+
+        // A protected target: Suspend asks, Resume does not.
+        rig.select_pids(&[900]);
+        let dialog = rig.dispatch(SuspendProcess).expect("the Protected dialog");
+        dialog.cancel();
+        assert_eq!(rig.sent().len(), 4, "Cancel sends nothing");
+        rig.select_pids(&[900]);
+        assert!(rig.dispatch(ResumeProcess).is_none(), "no dialog");
+        assert_eq!(rig.sent()[4], (ActionKind::Resume, vec![900]));
+    }
+
+    #[gpui_kit::test]
+    fn suspend_or_resume_label_rule(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let records = vec![
+            stopped(300),
+            stopped(301),
+            record(302, 1, "proc", ProcFlags::empty()),
+        ];
+        rig.publish(records, &[300, 301, 302], Vec::new());
+        let label = |rig: &mut Rig, pids: &[u32]| {
+            rig.select_pids(pids);
+            let page = rig.page.clone();
+            rig.vcx
+                .update(|_, cx| suspend_or_resume(&page.read(cx).capture_targets(None, cx)))
+        };
+        assert_eq!(label(&mut rig, &[300, 301, 302]), SuspendLabel::Suspend);
+        assert_eq!(label(&mut rig, &[300, 301]), SuspendLabel::Resume);
+        assert_eq!(label(&mut rig, &[300]), SuspendLabel::Resume);
+        assert_eq!(label(&mut rig, &[302]), SuspendLabel::Suspend);
+    }
+
+    #[gpui_kit::test]
+    fn priority_classes_map_to_nice(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        let classes = [
+            (PriorityClass::High, -10),
+            (PriorityClass::AboveNormal, -5),
+            (PriorityClass::Normal, 0),
+            (PriorityClass::BelowNormal, 5),
+            (PriorityClass::Low, 19),
+        ];
+        for (class, nice) in classes {
+            rig.select_pids(&[300]);
+            assert!(rig.dispatch(SetPriority { class }).is_none(), "no dialog");
+            assert_eq!(
+                rig.sent().pop(),
+                Some((ActionKind::SetNice(nice), vec![300])),
+                "{class:?}"
+            );
+        }
+        assert_eq!(
+            result(&mut rig, ActionState::Succeeded)
+                .last()
+                .map(String::as_str),
+            Some("Priority updated")
+        );
+
+        // Several targets: one request, the multi texts.
+        rig.select_pids(&[300, 301]);
+        assert!(
+            rig.dispatch(SetPriority {
+                class: PriorityClass::Low
+            })
+            .is_none()
+        );
+        assert_eq!(
+            rig.sent().pop(),
+            Some((ActionKind::SetNice(19), vec![300, 301]))
+        );
+
+        // Realtime and Idle are E22-036: nothing is sent here.
+        let before = rig.sent().len();
+        for class in [PriorityClass::Realtime, PriorityClass::Idle] {
+            rig.select_pids(&[300]);
+            assert!(rig.dispatch(SetPriority { class }).is_none());
+        }
+        assert_eq!(rig.sent().len(), before);
+
+        // Another user's process: OtherUser with the primary "Set priority" button.
+        rig.publish(vec![other_user_sshd(812)], &[812], Vec::new());
+        rig.select_pids(&[812]);
+        let mut dialog = rig
+            .dispatch(SetPriority {
+                class: PriorityClass::Low,
+            })
+            .expect("the OtherUser dialog");
+        assert_eq!(
+            dialog.text(),
+            "Set priority on sshd (PID 812), owned by root. Continue?"
+        );
+        assert!(!dialog.is_destructive(), "primary, not danger");
+        assert_eq!(dialog.focused(), Some(DialogButton::Action));
+        dialog.enter();
+        assert_eq!(rig.sent().pop(), Some((ActionKind::SetNice(19), vec![812])));
+    }
+
+    #[gpui_kit::test]
+    fn priority_app_row_targets_members(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let member = |pid, ppid| ProcessRecord {
+            group: app_key(),
+            ..record(pid, ppid, "firefox", ProcFlags::empty())
+        };
+        let records = vec![member(200, 1), member(201, 200), member(202, 200)];
+        rig.publish(records, &[], vec![app_group(3)]);
+        rig.select(&[ProcRowId::Group(app_key())]);
+        assert!(
+            rig.dispatch(SetPriority {
+                class: PriorityClass::High
+            })
+            .is_none(),
+            "own app: no dialog"
+        );
+        assert_eq!(
+            rig.sent(),
+            [(ActionKind::SetNice(-10), vec![200, 201, 202])],
+            "every current member"
+        );
+
+        // Suspend skips app rows (Freeze App is E22-035).
+        rig.select(&[ProcRowId::Group(app_key())]);
+        assert!(rig.dispatch(SuspendProcess).is_none());
+        assert_eq!(rig.sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn kthread_suspend_refused(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            vec![
+                record(1, 0, "systemd", ProcFlags::PROTECTED),
+                record(3, 2, "kworker/0:1", ProcFlags::KERNEL_THREAD),
+                record(
+                    4242,
+                    1,
+                    "tasklens",
+                    ProcFlags::IS_SELF | ProcFlags::PROTECTED,
+                ),
+            ],
+            &[1, 3, 4242],
+            Vec::new(),
+        );
+        rig.select_pids(&[3]);
+        assert!(rig.dispatch(SuspendProcess).is_none());
+        assert_eq!(
+            visible(&mut rig.vcx),
+            ["Kernel threads cannot be signalled."]
+        );
+        assert!(rig.sent().is_empty(), "nothing is sent");
+
+        // Resume refuses kernel threads too, but not tasklens or PID 1.
+        rig.select_pids(&[3]);
+        assert!(rig.dispatch(ResumeProcess).is_none());
+        assert!(rig.sent().is_empty());
+        rig.select_pids(&[4242]);
+        assert!(rig.dispatch(SuspendProcess).is_none());
+        assert!(visible(&mut rig.vcx).contains(&"Refusing to end tasklens itself.".into()));
+        assert!(rig.sent().is_empty());
+        rig.select_pids(&[1]);
+        assert!(rig.dispatch(SuspendProcess).is_none());
+        assert!(rig.sent().is_empty());
+        rig.select_pids(&[1, 4242]);
+        let dialog = rig.dispatch(ResumeProcess);
+        assert!(
+            dialog.is_none(),
+            "own protected targets resume without a dialog"
+        );
+        assert_eq!(rig.sent(), [(ActionKind::Resume, vec![1, 4242])]);
     }
 }

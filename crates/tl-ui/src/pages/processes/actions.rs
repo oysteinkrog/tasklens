@@ -143,6 +143,9 @@ pub struct CapturedTarget {
     pub flags: ProcFlags,
     /// Processes of an app or unit row, 1 for a process row.
     pub member_count: u32,
+    /// The process was in State T (stopped) when captured. False for app, unit and pseudo
+    /// rows.
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -302,6 +305,7 @@ mod tests {
             user: "u".into(),
             flags,
             member_count: 1,
+            stopped: false,
         }
     }
 

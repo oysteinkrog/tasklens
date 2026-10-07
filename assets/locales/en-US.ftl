@@ -942,6 +942,10 @@ pwn-props-access-strings = Strings unavailable: needs administrator rights
 processes-confirm-action-end = End
 processes-confirm-action-end-task = End task
 processes-confirm-action-end-process = End process
+# tasklens-pdu.21: the action names in the Suspend, Resume and Set Priority confirmations.
+processes-confirm-action-suspend = Suspend
+processes-confirm-action-resume = Resume
+processes-confirm-action-set-priority = Set priority
 # Low-memory rescue window list (UI-PWN-033, E32-A2).
 lowmem-row-memory = Memory { $pct }%
 lowmem-button-end-task = End Task

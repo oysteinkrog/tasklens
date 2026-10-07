@@ -29,13 +29,14 @@ use smallvec::SmallVec;
 use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, Signal};
 use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
-use tl_model::process::{ProcFlags, ProcessRecord};
+use tl_model::process::{ProcFlags, ProcState, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tracing::warn;
 
 use self::actions::{
     CapturedTarget, CapturedTargets, EndProcess, EndProcessTree, EndTask, MAX_TARGETS,
+    ResumeProcess, SetPriority, SuspendProcess,
 };
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
@@ -85,7 +86,7 @@ pub struct ProcessesPage {
     /// The targets the row menu captured when it opened (E22-A2). An End handler takes them,
     /// else it captures the selection itself.
     menu_targets: Option<CapturedTargets>,
-    end_words: EndWords,
+    confirm_words: ConfirmWords,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -139,7 +140,7 @@ impl ProcessesPage {
             style_version: cx.try_global::<UiMetrics>().map_or(0, |m| m.style_version),
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
             menu_targets: None,
-            end_words: EndWords::new(cx),
+            confirm_words: ConfirmWords::new(cx),
         }
     }
 
@@ -227,7 +228,7 @@ impl ProcessesPage {
             return;
         }
         self.strings_version = version;
-        self.end_words = EndWords::new(cx);
+        self.confirm_words = ConfirmWords::new(cx);
         self.table.update(cx, |t, cx| {
             t.delegate.refresh_strings(cx);
             t.on_new_version(cx);
@@ -296,6 +297,130 @@ impl ProcessesPage {
     /// also a subtree that holds tasklens or PID 1), asks for confirmation where UI-PRC-014
     /// says so (R-198, D-009) and sends one request by key.
     fn end(&mut self, end: End, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rows, clicked_col)) = self.prune(refusal_reason, cx) else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let Some(plan) = EndPlan::new(end, rows, &snapshot.processes, &self.confirm_words) else {
+            return;
+        };
+        if let Some(t) = &plan.refused {
+            if let Some(text) = toast_words(cx).refusal_text(RejectReason::Protected, t) {
+                warning_toast(text, cx);
+            }
+            return;
+        }
+        let used = CapturedTargets::new(plan.rows, clicked_col);
+        self.send(end.kind(), plan.keys, used, plan.confirm, window, cx);
+    }
+
+    fn on_suspend(&mut self, _: &SuspendProcess, window: &mut Window, cx: &mut Context<Self>) {
+        self.suspend_or_resume_targets(false, window, cx);
+    }
+
+    fn on_resume(&mut self, _: &ResumeProcess, window: &mut Window, cx: &mut Context<Self>) {
+        self.suspend_or_resume_targets(true, window, cx);
+    }
+
+    /// Suspend Process and Resume Process (UI-PRC-013 item 4, PROC-063): one `Suspend` or
+    /// `Resume` request with one target per process row. Suspend refuses tasklens, PID 1 and
+    /// kernel threads, Resume only kernel threads. Suspend asks first for a protected target,
+    /// both ask for another user's process; own processes never ask, even several. App and
+    /// unit rows are skipped (Freeze App is E22-035).
+    fn suspend_or_resume_targets(
+        &mut self,
+        resume: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let refuse = |t: &CapturedTarget| {
+            refusal_reason(t).filter(|r| !resume || *r == RejectReason::KernelThread)
+        };
+        let Some((rows, clicked_col)) = self.prune(refuse, cx) else {
+            return;
+        };
+        let mut seen = FxHashSet::default();
+        let rows: Vec<CapturedTarget> = rows
+            .into_iter()
+            .filter(|t| {
+                t.kind == RowKind::Process
+                    && matches!(t.node, NodeId::Process(key) if seen.insert(key))
+            })
+            .collect();
+        let keys = process_keys(&rows);
+        if keys.is_empty() {
+            return;
+        }
+        let w = &self.confirm_words;
+        let protected = rows
+            .iter()
+            .find(|t| !resume && t.flags.contains(ProcFlags::PROTECTED));
+        let ask = match protected {
+            Some(t) => Some(ConfirmKind::Protected {
+                action: w.suspend.clone(),
+                name: t.name.clone(),
+                tree_count: None,
+            }),
+            None => other_user(&rows, if resume { &w.resume } else { &w.suspend }),
+        };
+        let kind = if resume {
+            ActionKind::Resume
+        } else {
+            ActionKind::Suspend
+        };
+        let used = CapturedTargets::new(rows, clicked_col);
+        self.send(kind, keys, used, ask, window, cx);
+    }
+
+    /// Set Priority High, Above normal, Normal, Below normal and Low (UI-PRC-013 item 6,
+    /// PROC-066, PROC-069): one `SetNice` request. App and unit rows apply to every current
+    /// member process. Only another user's process asks first. Realtime and Idle are E22-036.
+    fn on_set_priority(&mut self, a: &SetPriority, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(nice) = a.class.nice() else {
+            return;
+        };
+        let Some((rows, clicked_col)) = self.prune(|_| None, cx) else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let p = &snapshot.processes;
+        let mut seen = FxHashSet::default();
+        let mut used: Vec<CapturedTarget> = Vec::new();
+        for t in rows {
+            match (t.kind, &t.node) {
+                (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => {
+                    if seen.insert(*key) {
+                        used.push(t);
+                    }
+                }
+                (RowKind::App | RowKind::Unit, node) => used.extend(
+                    members(p, node)
+                        .into_iter()
+                        .map(|i| &p.records[i])
+                        .filter(|r| seen.insert(r.key))
+                        .map(record_target),
+                ),
+                _ => {}
+            }
+        }
+        used.truncate(MAX_TARGETS);
+        let keys = process_keys(&used);
+        if keys.is_empty() {
+            return;
+        }
+        let ask = other_user(&used, &self.confirm_words.set_priority);
+        let used = CapturedTargets::new(used, clicked_col);
+        self.send(ActionKind::SetNice(nice), keys, used, ask, window, cx);
+    }
+
+    /// Steps 1 and 2 of every process action (E22-017): takes the targets, drops pseudo and
+    /// exited rows ("Process exited" when only exited rows were left) and drops the rows
+    /// `refuse` names, with one Warning toast per distinct text. `None` when no row is left.
+    fn prune(
+        &mut self,
+        refuse: impl Fn(&CapturedTarget) -> Option<RejectReason>,
+        cx: &mut Context<Self>,
+    ) -> Option<(Vec<CapturedTarget>, Option<ColumnId>)> {
         let captured = self.take_targets(cx);
         let clicked_col = captured.clicked_col;
         let mut rows: Vec<CapturedTarget> = captured
@@ -304,17 +429,17 @@ impl ProcessesPage {
             .filter(|t| t.kind != RowKind::Pseudo)
             .collect();
         if rows.is_empty() {
-            return;
+            return None;
         }
         let words = toast_words(cx);
         rows.retain(|t| !t.flags.contains(ProcFlags::EXITED));
         if rows.is_empty() {
             warning_toast(words.exited.clone(), cx);
-            return;
+            return None;
         }
         let mut refused: SmallVec<[SharedString; 3]> = SmallVec::new();
         rows.retain(|t| {
-            let Some(reason) = refusal_reason(t) else {
+            let Some(reason) = refuse(t) else {
                 return true;
             };
             if let Some(text) = words.refusal_text(reason, t)
@@ -327,33 +452,31 @@ impl ProcessesPage {
         for text in refused {
             warning_toast(text, cx);
         }
-        if rows.is_empty() {
-            return;
-        }
+        (!rows.is_empty()).then_some((rows, clicked_col))
+    }
 
-        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
-        let Some(plan) = EndPlan::new(end, rows, &snapshot.processes, &self.end_words) else {
-            return;
-        };
-        if let Some(t) = &plan.refused {
-            if let Some(text) = words.refusal_text(RejectReason::Protected, t) {
-                warning_toast(text, cx);
-            }
-            return;
-        }
-        let kind = end.kind();
-        let used = CapturedTargets::new(plan.rows, clicked_col);
-        let Some(texts) = words.texts_for(&kind, &used) else {
+    /// Sends one `kind` request to `keys` with the toast texts for `used`, after the
+    /// confirmation `ask` when there is one (R-198, D-009).
+    fn send(
+        &mut self,
+        kind: ActionKind,
+        keys: Vec<ProcessKey>,
+        used: CapturedTargets,
+        ask: Option<ConfirmKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(texts) = toast_words(cx).texts_for(&kind, &used) else {
             return;
         };
         let req = ActionRequest {
             // The tracker gives id 0 its next ActionId.
             id: ActionId(0),
             kind,
-            targets: plan.keys.into_iter().map(ActionTarget::Process).collect(),
+            targets: keys.into_iter().map(ActionTarget::Process).collect(),
             privileged: false,
         };
-        let Some(ask) = plan.confirm else {
+        let Some(ask) = ask else {
             submit(self, req, texts, cx);
             return;
         };
@@ -366,29 +489,76 @@ impl ProcessesPage {
                     return;
                 }
                 if page.update(cx, |p, cx| submit(p, req, texts, cx)).is_err() {
-                    warn!(target: "tasklens::ui", "the Processes page closed before the End request");
+                    warn!(target: "tasklens::ui", "the Processes page closed before the request");
                 }
             });
         });
     }
 }
 
+/// The Suspend or Resume item of the row menu (UI-PRC-013 item 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SuspendLabel {
+    Suspend,
+    Resume,
+}
+
+/// `Resume` when every target is stopped (State T), else `Suspend`. With several targets the
+/// menu shows "Resume Selected Tasks" only when every one is stopped.
+pub fn suspend_or_resume(t: &CapturedTargets) -> SuspendLabel {
+    if !t.items.is_empty() && t.items.iter().all(|t| t.stopped) {
+        SuspendLabel::Resume
+    } else {
+        SuspendLabel::Suspend
+    }
+}
+
 /// The confirmation action names, translated once per strings version (R-132).
-struct EndWords {
+struct ConfirmWords {
     /// "End", for the protected confirmation.
     end: SharedString,
     end_task: SharedString,
     end_process: SharedString,
+    suspend: SharedString,
+    resume: SharedString,
+    set_priority: SharedString,
 }
 
-impl EndWords {
+impl ConfirmWords {
     fn new(cx: &App) -> Self {
         Self {
             end: tr(cx, "processes-confirm-action-end"),
             end_task: tr(cx, "processes-confirm-action-end-task"),
             end_process: tr(cx, "processes-confirm-action-end-process"),
+            suspend: tr(cx, "processes-confirm-action-suspend"),
+            resume: tr(cx, "processes-confirm-action-resume"),
+            set_priority: tr(cx, "processes-confirm-action-set-priority"),
         }
     }
+}
+
+/// The process keys of `rows`, in order.
+fn process_keys(rows: &[CapturedTarget]) -> Vec<ProcessKey> {
+    rows.iter()
+        .filter_map(|t| match t.node {
+            NodeId::Process(key) => Some(key),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The non-destructive OtherUser confirmation for the first of `rows` owned by another user.
+fn other_user(rows: &[CapturedTarget], action: &SharedString) -> Option<ConfirmKind> {
+    let t = rows
+        .iter()
+        .find(|t| t.flags.contains(ProcFlags::OTHER_USER))?;
+    Some(ConfirmKind::OtherUser {
+        action: action.clone(),
+        name: t.name.clone(),
+        pid: t.pid.unwrap_or_default(),
+        user: t.user.clone(),
+        destructive: false,
+    })
 }
 
 /// Which End command runs.
@@ -432,7 +602,7 @@ impl EndPlan {
         end: End,
         rows: Vec<CapturedTarget>,
         p: &ProcessSnapshot,
-        words: &EndWords,
+        words: &ConfirmWords,
     ) -> Option<Self> {
         let forest = Forest::new(&p.records);
         // (key, index into `used`).
@@ -484,16 +654,7 @@ impl EndPlan {
             .iter()
             .map(|&i| &p.records[i])
             .find(|r| r.flags.contains(ProcFlags::IS_SELF) || r.key.pid == 1)
-            .map(|r| CapturedTarget {
-                node: NodeId::Process(r.key),
-                kind: RowKind::Process,
-                name: SharedString::from(&r.meta.name),
-                pid: Some(r.key.pid),
-                uid: r.uid,
-                user: SharedString::from(&r.meta.user),
-                flags: r.flags,
-                member_count: 1,
-            });
+            .map(record_target);
 
         let count = keys.len() as u32;
         let protected = used
@@ -563,12 +724,7 @@ fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget>
         return Some(CapturedTarget {
             node: row.node.clone(),
             kind,
-            name: SharedString::from(&r.meta.name),
-            pid: Some(r.key.pid),
-            uid: r.uid,
-            user: SharedString::from(&r.meta.user),
-            flags: r.flags,
-            member_count: 1,
+            ..record_target(r)
         });
     }
     let group = row.group.and_then(|g| s.table.groups.get(g as usize));
@@ -593,22 +749,44 @@ fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget>
         user,
         flags,
         member_count: group.map_or(0, |g| g.members),
+        stopped: false,
     })
 }
 
-/// The live member records of an app or unit row whose parent is not a member, lowest PID
-/// first. Empty for every other node.
-fn primaries(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
+/// The target of one process record, as a process row.
+fn record_target(r: &ProcessRecord) -> CapturedTarget {
+    CapturedTarget {
+        node: NodeId::Process(r.key),
+        kind: RowKind::Process,
+        name: SharedString::from(&r.meta.name),
+        pid: Some(r.key.pid),
+        uid: r.uid,
+        user: SharedString::from(&r.meta.user),
+        flags: r.flags,
+        member_count: 1,
+        stopped: r.state == ProcState::Stopped,
+    }
+}
+
+/// The live member records of an app or unit row, in record order. Empty for every other
+/// node.
+fn members(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
     let live = |i: usize| !p.records[i].flags.contains(ProcFlags::EXITED);
-    let members: Vec<usize> = match node {
+    match node {
         NodeId::Group(key) => (0..p.records.len())
             .filter(|&i| p.records[i].group == *key && live(i))
             .collect(),
         NodeId::Unit(unit) => (0..p.records.len())
             .filter(|&i| p.extras.get(i).and_then(|x| x.unit.as_ref()) == Some(unit) && live(i))
             .collect(),
-        _ => return Vec::new(),
-    };
+        _ => Vec::new(),
+    }
+}
+
+/// The live member records of an app or unit row whose parent is not a member, lowest PID
+/// first. Empty for every other node.
+fn primaries(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
+    let members = members(p, node);
     let pids: FxHashSet<u32> = members.iter().map(|&i| p.records[i].key.pid).collect();
     let mut out: Vec<usize> = members
         .into_iter()
@@ -709,6 +887,9 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_end_task))
             .on_action(cx.listener(Self::on_end_process))
             .on_action(cx.listener(Self::on_end_process_tree))
+            .on_action(cx.listener(Self::on_suspend))
+            .on_action(cx.listener(Self::on_resume))
+            .on_action(cx.listener(Self::on_set_priority))
             .child(
                 self.table
                     .clone()
