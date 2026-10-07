@@ -24,7 +24,7 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::devices::{DeviceCatalog, DeviceIdentity};
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::settings::CpuGraphMode;
+use tl_model::settings::{CpuGraphMode, NetworkUnit};
 use tl_model::snapshot::{CpuStaticInfo, Snapshot};
 use tl_model::system::{CpuTopology, Metric};
 use tl_model::time::now_boot_ns;
@@ -40,7 +40,7 @@ use super::page::{DevicePage, DevicePageFrame, GRAPH_H_OVERALL, header_text, pag
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale, grid_height, grid_layout,
+    ValueAlign, ValueFormat, YScale, format_value, grid_height, grid_layout,
 };
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
@@ -503,6 +503,10 @@ pub struct CpuPage {
     clocks: Arc<[Metric<u32>]>,
     /// Reused for `CpuGrid::update_clocks`.
     clock_buf: Vec<(u16, f32, Validity)>,
+    /// Overall CPU utilization of the newest sample, the value the all-cores charts show.
+    total: Metric<f32>,
+    /// Reused buffer for that value's text.
+    total_text: String,
     _subs: SmallVec<[Subscription; 3]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -585,6 +589,8 @@ impl CpuPage {
             temp_sensors: Vec::new(),
             clocks: Arc::default(),
             clock_buf: Vec::new(),
+            total: Metric::default(),
+            total_text: String::new(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -628,6 +634,7 @@ impl CpuPage {
                 );
                 let hub = self.hub.clone();
                 self.overlaid = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                self.sync_total_text(cx);
             }
             CpuGraphMode::AllCoresStacked if self.stacked.is_none() => {
                 let (spec, labels) = (
@@ -636,8 +643,33 @@ impl CpuPage {
                 );
                 let hub = self.hub.clone();
                 self.stacked = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+                self.sync_total_text(cx);
             }
             _ => {}
+        }
+    }
+
+    /// The overlaid and stacked charts show overall CPU utilization as their value, the number
+    /// the Overall chart shows, not CPU 0's. A chart gets new text only when it differs.
+    fn sync_total_text(&mut self, cx: &mut App) {
+        let text = match self.total.validity {
+            Validity::Valid | Validity::Stale => {
+                self.total_text.clear();
+                format_value(
+                    ValueFormat::Percent,
+                    self.total.value,
+                    NetworkUnit::default(),
+                    &mut self.total_text,
+                );
+                Some(self.total_text.as_str())
+            }
+            _ => None,
+        };
+        for view in self.overlaid.iter().chain(&self.stacked) {
+            if view.read(cx).value_text().map(|t| t.as_ref()) != text {
+                let text = text.map(|t| SharedString::from(t.to_owned()));
+                view.update(cx, |v, cx| v.set_value_text(text, cx));
+            }
         }
     }
 
@@ -799,6 +831,10 @@ impl CpuPage {
                 temp_sensors: &self.temp_sensors,
             };
             changed |= update_live(&mut self.details, &snap.system, &inputs);
+            if snap.system.cpu.util_pct != self.total {
+                self.total = snap.system.cpu.util_pct;
+                self.sync_total_text(cx);
+            }
         }
         if mask.contains(ComponentMask::DEVICE_DETAILS)
             && !Arc::ptr_eq(&self.static_info, &snap.device_details.cpu)
