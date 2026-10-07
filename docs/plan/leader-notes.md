@@ -718,3 +718,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.32 closed (584ce381): dim zero values as a text-colour multiplier only. Queued: pdu agent pdu.23 then gma.7; crw agent crw.35 then crw.13; o55.9 agent crw.20 then o55.4; 9o0 agent j185i then xdh.5; bench agent wlf.1 (P0) then wlf.17.
 - bj6.24 and bj6.25 closed (1b1d8ff8, 731937d9): Motion and Processes settings pages; system_reduce_motion added so the banner does not blame the system when Animations is off. 731937d9 swept the gma.19 pwn-threads strings (lines only added, owner told). The m1f agent takes bj6.8, then bj6.26.
 - j185i closed (d57fde9a): a timing flake, no loop bug; tests wait for lines plus quiet, spacing moved to a synthetic-clock test; 200 of 200 under CPU load.
+- xdh.5: AC 5 restated after crw.34: the card never notifies on equal value bits; a snapshot with no change to its series causes 0 renders; a same-value sample re-renders only through the chart.
