@@ -1,6 +1,7 @@
 //! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19), and the
 //! query controller with one Frame query in flight (tasklens-8fx.20), and the History table
-//! (tasklens-8fx.22). Run with `--features test-hooks`.
+//! (tasklens-8fx.22), and queries on strip window, metric and selection changes
+//! (tasklens-8fx.38). Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
@@ -12,7 +13,8 @@ use tl_model::client::EngineClient;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
 use tl_model::history::{
-    HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryStoreState, HistoryTotals, HistoryView,
+    HistoryMetric, HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryStoreState, HistoryTotals,
+    HistoryView,
 };
 use tl_model::ids::{ColumnId, ProcessKey};
 use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
@@ -735,4 +737,104 @@ fn history_sort_persisted(cx: &mut TestAppContext) {
         let pids: Vec<u32> = (0..d.row_count()).map(|ix| d.row_id(ix).pid).collect();
         assert_eq!(pids, [1, 2, 3]);
     });
+}
+
+/// Answers the query in flight, if any.
+fn answer_last(engine: &FakeEngine, page: &Entity<HistoryPage>, vcx: &mut VisualTestContext) {
+    if let Some(id) = vcx.read_entity(page, |p, _| p.query_in_flight()) {
+        answer(engine, id, vcx);
+    }
+}
+
+#[gpui_kit::test]
+fn scrubbed_frame_inputs_send_one_query_each(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    answer_last(&engine, &page, vcx);
+    scrub(&page, vcx, 100 * S);
+    answer_last(&engine, &page, vcx);
+    let base = queries(&engine).len();
+
+    let changes: [&dyn Fn(&mut HistoryPage, &mut gpui_kit::Context<HistoryPage>); 3] = [
+        &|p, cx| p.set_view_range((50 * S, 150 * S), cx),
+        &|p, cx| p.set_metric(HistoryMetric::Memory, cx),
+        &|p, cx| p.set_selected(vec![key(4), key(2)], cx),
+    ];
+    for (i, change) in changes.iter().enumerate() {
+        page.update(vcx, |p, cx| change(p, cx));
+        vcx.run_until_parked();
+        let sent = queries(&engine);
+        assert_eq!(sent.len(), base + i + 1, "change {i} sends one query");
+        assert_eq!(sent.last().map(|q| q.1), Some(HistoryRange::At(100 * S)));
+        answer_last(&engine, &page, vcx);
+        // The same value again sends nothing.
+        page.update(vcx, |p, cx| change(p, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            queries(&engine).len(),
+            base + i + 1,
+            "repeat {i} sends none"
+        );
+    }
+    let Some((
+        _,
+        _,
+        HistoryWhat::Frame {
+            metric, view, keys, ..
+        },
+    )) = queries(&engine).pop()
+    else {
+        panic!("a Frame query");
+    };
+    assert_eq!(metric, HistoryMetric::Memory);
+    assert_eq!(view, (50 * S, 150 * S));
+    assert_eq!(&keys[..], [key(4), key(2)]);
+
+    // With one in flight, a newer change replaces the pending query.
+    page.update(vcx, |p, cx| p.set_metric(HistoryMetric::Disk, cx));
+    page.update(vcx, |p, cx| p.set_metric(HistoryMetric::Gpu, cx));
+    vcx.run_until_parked();
+    assert_eq!(queries(&engine).len(), base + 4);
+    let pending = vcx.read_entity(&page, |p, _| p.query_pending());
+    assert!(matches!(
+        pending,
+        Some((
+            _,
+            HistoryWhat::Frame {
+                metric: HistoryMetric::Gpu,
+                ..
+            }
+        ))
+    ));
+}
+
+#[gpui_kit::test]
+fn live_frame_inputs_wait_for_tick(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    answer_last(&engine, &page, vcx);
+    let base = queries(&engine).len();
+    page.update(vcx, |p, cx| {
+        p.set_view_range((50 * S, 150 * S), cx);
+        p.set_metric(HistoryMetric::Network, cx);
+        p.set_selected(vec![key(1)], cx);
+    });
+    vcx.run_until_parked();
+    assert_eq!(queries(&engine).len(), base, "nothing before the tick");
+    advance(vcx, Duration::from_secs(1));
+    let sent = queries(&engine);
+    assert_eq!(sent.len(), base + 1, "the tick sends one");
+    assert!(matches!(
+        sent.last(),
+        Some((
+            _,
+            HistoryRange::Live,
+            HistoryWhat::Frame {
+                metric: HistoryMetric::Network,
+                ..
+            }
+        ))
+    ));
 }

@@ -9,7 +9,8 @@
 //!
 //! `QueryController` keeps at most one Frame query in flight (UI-PRC-030). The page asks on mode
 //! entry, on every scrub or range change and once per second while live; a 1,000 ms timeout
-//! resends an unanswered query (R-169 OI-6).
+//! resends an unanswered query (R-169 OI-6). A strip window, metric or selection change asks too
+//! while scrubbed or with a range set, where no tick runs.
 //!
 //! The table (E30-019) is a child `TlTreeTable` over [`table::HistoryTableDelegate`]. The page
 //! hands it each installed view, the global filter text and the settings it follows, and copies
@@ -543,6 +544,50 @@ impl HistoryPage {
         self.on_query_state(cx);
     }
 
+    /// Sets the strip window. While scrubbed or with a range set, asks for its frame.
+    pub fn set_view_range(&mut self, view_range: (TimeNs, TimeNs), cx: &mut Context<Self>) {
+        if self.state.view_range == view_range {
+            return;
+        }
+        self.state.view_range = view_range;
+        self.on_frame_input(true, cx);
+    }
+
+    /// Sets the strip metric. While scrubbed or with a range set, asks for its frame.
+    pub fn set_metric(&mut self, metric: HistoryMetric, cx: &mut Context<Self>) {
+        if self.state.metric == metric {
+            return;
+        }
+        self.state.metric = metric;
+        self.on_frame_input(true, cx);
+    }
+
+    /// Sets the selected keys in selection order and selects them in the table. While scrubbed
+    /// or with a range set, asks for the frame when the first 8, the keys the strip draws series
+    /// for, changed.
+    pub fn set_selected(&mut self, selected: Vec<ProcessKey>, cx: &mut Context<Self>) {
+        if self.state.selected == selected {
+            return;
+        }
+        self.table.update(cx, |t, cx| {
+            t.selection.clear();
+            for &key in &selected {
+                t.selection.ctrl_click(key);
+            }
+            cx.notify();
+        });
+        self.apply_selected(selected, cx);
+    }
+
+    /// `set_selected` without touching the table, for a change that came from the table.
+    fn apply_selected(&mut self, selected: Vec<ProcessKey>, cx: &mut Context<Self>) {
+        let series = |k: &[ProcessKey]| k.len().min(MAX_SERIES);
+        let old = &self.state.selected;
+        let ask = old[..series(old)] != selected[..series(&selected)];
+        self.state.selected = selected;
+        self.on_frame_input(ask, cx);
+    }
+
     /// Id of the Frame query in flight.
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn query_in_flight(&self) -> Option<u64> {
@@ -557,6 +602,15 @@ impl HistoryPage {
 
     fn is_live(&self) -> bool {
         self.state.scrub.is_none() && self.state.range.is_none()
+    }
+
+    /// A Frame input other than scrub and range changed. While live the next tick asks for it,
+    /// so only a scrubbed or ranged page sends a query now.
+    fn on_frame_input(&mut self, ask: bool, cx: &mut Context<Self>) {
+        if ask && !self.is_live() {
+            self.request(cx);
+        }
+        cx.notify();
     }
 
     fn on_query_state(&mut self, cx: &mut Context<Self>) {
@@ -743,21 +797,24 @@ impl HistoryPage {
         });
     }
 
-    /// Copies the table's selection into `state.selected`: ids no longer selected leave, new
-    /// ones are appended in display order, so the list keeps selection order.
+    /// Copies the table's selection into `state.selected` through [`Self::apply_selected`]: ids
+    /// no longer selected leave, new ones are appended in display order, so the list keeps
+    /// selection order.
     fn sync_selection(&mut self, cx: &mut Context<Self>) {
         let table = self.table.read(cx);
         let sel = &table.selection;
-        let selected = &mut self.state.selected;
-        if selected.len() == sel.len() && selected.iter().all(|k| sel.contains(k)) {
+        let old = &self.state.selected;
+        if old.len() == sel.len() && old.iter().all(|k| sel.contains(k)) {
             return;
         }
-        selected.retain(|k| sel.contains(k));
+        let mut selected: Vec<ProcessKey> =
+            old.iter().copied().filter(|k| sel.contains(k)).collect();
         let d = &table.delegate;
         let mut added: SmallVec<[ProcessKey; 8]> =
             sel.ids().filter(|k| !selected.contains(k)).collect();
         added.sort_by_key(|k| d.row_index(*k).unwrap_or(usize::MAX));
         selected.extend(added);
+        self.apply_selected(selected, cx);
     }
 
     fn loading(&self) -> bool {
