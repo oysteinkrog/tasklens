@@ -59,12 +59,15 @@ fn start_engine(dir: &std::path::Path) -> tl_engine::EngineHandle {
     Engine::start(config, hooks).expect("engine starts")
 }
 
-/// One step: fake time for the UI timers, a frame so the hub sees a render, and real time for
-/// the engine threads.
+/// One step: fake time for the UI timers, a drawn frame with its next-frame callbacks (the hub
+/// counts the window as shown from those, ADR-008), and real time for the engine threads.
 fn step(vcx: &mut VisualTestContext) {
     vcx.executor().advance_clock(STEP);
     vcx.run_until_parked();
-    vcx.update(|window, cx| window.draw(cx).clear(cx));
+    vcx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+        window.simulate_next_frame(cx);
+    });
     std::thread::sleep(Duration::from_millis(20));
 }
 

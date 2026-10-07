@@ -60,7 +60,7 @@ use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
-use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
+use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr_args, tr_en};
 use crate::pages::performance::details::Template;
 use crate::pages::performance::PerformancePage;
@@ -785,6 +785,8 @@ pub struct MainWindow {
     bounds: WindowBounds,
     /// The pending size write. A new bounds change replaces it.
     save_task: Option<Task<()>>,
+    /// A next-frame callback that tells the hub this window drew is queued.
+    frame_note_queued: bool,
     /// The `[appearance]` values the metrics were last applied from.
     applied: MetricsKey,
     /// The window's scale factor at the last check.
@@ -895,15 +897,18 @@ impl MainWindow {
             window,
             |this: &mut Self, _, _: &ReturnFocus, window, cx| this.focus_page(window, cx),
         ));
-        // Health items in the status chip (E20-016).
+        // Health items in the status chip (E20-016), and the frame note for hidden detection.
         if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
-            subs.push(
-                cx.subscribe(&hub, |this: &mut Self, _, ev: &SnapshotChanged, cx| {
+            subs.push(cx.subscribe_in(
+                &hub,
+                window,
+                |this: &mut Self, hub, ev: &SnapshotChanged, window, cx| {
                     if ev.mask.contains(ComponentMask::HEALTH) {
                         this.sync_health(cx);
                     }
-                }),
-            );
+                    this.note_next_frame(hub.clone(), window, cx);
+                },
+            ));
         }
         // The compositor's close request follows the same decision; tasklens then removes the
         // window or quits itself, so the platform never closes it.
@@ -933,6 +938,7 @@ impl MainWindow {
             client,
             bounds: window_bounds_of(window, cx),
             save_task: None,
+            frame_note_queued: false,
             applied: metrics_key(cx),
             scale_factor: window.scale_factor(),
             scale_text: scale_text(cx),
@@ -1266,6 +1272,28 @@ impl MainWindow {
             .map(|page| page.handle.primary_focus(cx));
         focus_initial(primary.as_ref(), &self.root_focus, window, cx);
         cx.notify();
+    }
+
+    /// Tells the hub on the next frame of this window that the window drew (ADR-008 hidden
+    /// detection). A snapshot change usually redraws only cached views such as the process
+    /// table, so `render` here does not run, and without this note the hub counts a shown
+    /// window as hidden after 1 s and the demand drops. A suspended Wayland window gets no
+    /// frame, so the note stays pending there. At most one callback is queued.
+    fn note_next_frame(
+        &mut self,
+        hub: Entity<SnapshotHub>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.frame_note_queued {
+            return;
+        }
+        self.frame_note_queued = true;
+        let this = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            let _ = this.update(cx, |this, _| this.frame_note_queued = false);
+            hub.update(cx, |hub, cx| hub.note_render(cx));
+        });
     }
 
     /// The toolbar model for the active tab. Fields other beads own (helper, picker) are kept.
