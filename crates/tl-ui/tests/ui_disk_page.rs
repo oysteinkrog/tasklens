@@ -318,3 +318,157 @@ fn disk_axis_pow2(cx: &mut TestAppContext) {
     );
     assert_eq!(axis, "4 MiB/s");
 }
+
+/// The Details grid's P1 rows (E25-006, UI-PRF-030; PERF-049, PERF-013).
+mod details {
+    use super::*;
+    use tl_model::snapshot::SystemSnapshot;
+    use tl_model::system::{DiskTotals, Metric};
+    use tl_ui::pages::performance::details::KeyValueModel;
+    use tl_ui::pages::performance::disk::{
+        DiskDetailInputs, disk_details_model, update_disk_details_p1,
+    };
+
+    const GIB: u64 = 1 << 30;
+
+    /// A disk record with every P1 field valid.
+    fn record() -> DiskTotals {
+        DiskTotals {
+            device: DISK,
+            active_pct: Metric::valid(12.0),
+            read_bps: Metric::valid(4.2 * f64::from(MIB)),
+            write_bps: Metric::valid(1.5 * f64::from(MIB)),
+            response_ms: Metric::valid(0.4237),
+            read_total: 812 * GIB,
+            written_total: 400 * GIB,
+            // 931.51 GiB
+            capacity: 1_000_204_886_016,
+            temp_c: Metric::valid(41.0),
+        }
+    }
+
+    /// The model updated from `t`, with translated labels.
+    fn model(cx: &mut TestAppContext, t: Option<&DiskTotals>) -> KeyValueModel {
+        let mut model = disk_details_model();
+        let inp = DiskDetailInputs {
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            totals: t,
+            error: None,
+        };
+        update_disk_details_p1(&mut model, &inp);
+        cx.update(|cx| {
+            init_strings(cx, "en-US");
+            model.refresh_strings(cx);
+            model.refresh_labels(cx);
+        });
+        model
+    }
+
+    fn rows(model: &KeyValueModel) -> Vec<(String, String)> {
+        model
+            .to_kv_rows()
+            .map(|r| (r.label.to_string(), r.value.text.to_string()))
+            .collect()
+    }
+
+    fn value(model: &KeyValueModel, label: &str) -> Option<String> {
+        rows(model)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+    }
+
+    #[gpui_kit::test]
+    fn disk_details_order_p1(cx: &mut TestAppContext) {
+        let model = model(cx, Some(&record()));
+        assert_eq!(model.rows.len(), 19);
+        assert_eq!(
+            rows(&model),
+            [
+                ("Active time", "12.0%"),
+                ("Average response time", "0.42 ms"),
+                ("Read speed", "4.2 MiB/s"),
+                ("Write speed", "1.5 MiB/s"),
+                ("Capacity", "931.51 GiB"),
+            ]
+            .map(|(l, v)| (l.to_string(), v.to_string()))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_response_time_two_decimals(cx: &mut TestAppContext) {
+        let model = model(cx, Some(&record()));
+        assert_eq!(
+            value(&model, "Average response time").as_deref(),
+            Some("0.42 ms")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn disk_rate_measured_zero(cx: &mut TestAppContext) {
+        let mut t = record();
+        t.read_bps = Metric::valid(0.0);
+        let model = model(cx, Some(&t));
+        assert_eq!(value(&model, "Read speed").as_deref(), Some("0 KiB/s"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_latency_missing_collecting(cx: &mut TestAppContext) {
+        let mut t = record();
+        t.response_ms = Metric::with(Validity::Missing);
+        let m = model(cx, Some(&t));
+        assert_eq!(
+            value(&m, "Average response time").as_deref(),
+            Some("Collecting…")
+        );
+        assert_eq!(value(&m, "Active time").as_deref(), Some("12.0%"));
+
+        // No record for the disk yet: every P1 row is collecting.
+        let m = model(cx, None);
+        for (label, text) in rows(&m) {
+            assert_eq!(text, "Collecting…", "{label}");
+        }
+    }
+
+    /// The same values update nothing; a new value changes only its row.
+    #[gpui_kit::test]
+    fn disk_details_change_only_on_new_value(cx: &mut TestAppContext) {
+        let t = record();
+        let mut model = model(cx, Some(&t));
+        let inp = |t| DiskDetailInputs {
+            now_boot_ns: 0,
+            observed_end_ns: 0,
+            totals: Some(t),
+            error: None,
+        };
+        assert!(!update_disk_details_p1(&mut model, &inp(&t)));
+        let mut t2 = t;
+        t2.active_pct = Metric::valid(13.5);
+        assert!(update_disk_details_p1(&mut model, &inp(&t2)));
+        assert_eq!(value(&model, "Active time").as_deref(), Some("13.5%"));
+    }
+
+    /// The page fills its grid from the disk's record in the system snapshot.
+    #[gpui_kit::test]
+    fn disk_page_details_from_snapshot(cx: &mut TestAppContext) {
+        let r = open(cx);
+        let mut sys = SystemSnapshot::default();
+        sys.header.validity = Validity::Valid;
+        sys.header.version = 1;
+        sys.disks = Arc::from(vec![(DISK, record())]);
+        r.engine.publish_with(move |s| s.system = Arc::new(sys));
+        draw(r.vcx);
+        let page = r.page.clone();
+        let values: Vec<String> = r
+            .vcx
+            .update(|_, cx| rows(page.read(cx).details()))
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            values,
+            ["12.0%", "0.42 ms", "4.2 MiB/s", "1.5 MiB/s", "931.51 GiB"]
+        );
+    }
+}

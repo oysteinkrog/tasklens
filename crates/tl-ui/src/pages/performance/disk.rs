@@ -24,8 +24,12 @@ use tl_model::demand::Demand;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
 use tl_model::snapshot::{SmartKind, Snapshot};
+use tl_model::system::{DiskTotals, Metric};
+use tl_model::time::now_boot_ns;
+use tl_model::units;
+use tl_model::validity::Validity;
 
-use super::details::KeyValueModel;
+use super::details::{Fallback, KeyValueModel};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{
     DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, sidebar_order, type_number,
@@ -210,6 +214,169 @@ fn health_state(snap: &Snapshot) -> ChartState {
     }
 }
 
+// ---- Details grid (UI-PRF-030, PERF-049) ----
+
+pub const ROW_ACTIVE: &str = "perf-disk-row-active";
+pub const ROW_RESPONSE: &str = "perf-disk-row-response";
+pub const ROW_READ: &str = "perf-disk-row-read";
+pub const ROW_WRITE: &str = "perf-disk-row-write";
+pub const ROW_TOTAL_READ: &str = "perf-disk-row-total-read";
+pub const ROW_TOTAL_WRITTEN: &str = "perf-disk-row-total-written";
+pub const ROW_CAPACITY: &str = "perf-disk-row-capacity";
+pub const ROW_FORMATTED: &str = "perf-disk-row-formatted";
+pub const ROW_USED: &str = "perf-disk-row-used";
+pub const ROW_FREE: &str = "perf-disk-row-free";
+pub const ROW_SYSTEM: &str = "perf-disk-row-system";
+pub const ROW_SWAP: &str = "perf-disk-row-swap";
+pub const ROW_HARDWARE: &str = "perf-disk-row-hardware";
+pub const ROW_TYPE: &str = "perf-disk-row-type";
+pub const ROW_INTERFACE: &str = "perf-disk-row-interface";
+pub const ROW_WWN: &str = "perf-disk-row-wwn";
+pub const ROW_SERIAL: &str = "perf-disk-row-serial";
+pub const ROW_ROTATION: &str = "perf-disk-row-rotation";
+pub const ROW_TEMPERATURE: &str = "perf-disk-row-temperature";
+
+/// The 19 Details rows in grid order (UI-PRF-030).
+pub const DISK_DETAIL_ROWS: [&str; 19] = [
+    ROW_ACTIVE,
+    ROW_RESPONSE,
+    ROW_READ,
+    ROW_WRITE,
+    ROW_TOTAL_READ,
+    ROW_TOTAL_WRITTEN,
+    ROW_CAPACITY,
+    ROW_FORMATTED,
+    ROW_USED,
+    ROW_FREE,
+    ROW_SYSTEM,
+    ROW_SWAP,
+    ROW_HARDWARE,
+    ROW_TYPE,
+    ROW_INTERFACE,
+    ROW_WWN,
+    ROW_SERIAL,
+    ROW_ROTATION,
+    ROW_TEMPERATURE,
+];
+
+/// The P1 rows this page fills, in grid order.
+const P1_ROWS: [&str; 5] = [ROW_ACTIVE, ROW_RESPONSE, ROW_READ, ROW_WRITE, ROW_CAPACITY];
+
+/// The Disk Details model: 19 rows in order, all but the P1 rows hidden until E25-015.
+pub fn disk_details_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&DISK_DETAIL_ROWS);
+    for label in DISK_DETAIL_ROWS {
+        if !P1_ROWS.contains(&label) {
+            model.hide(label);
+        }
+    }
+    model
+}
+
+/// What the P1 rows are read from.
+#[derive(Clone, Copy)]
+pub struct DiskDetailInputs<'a> {
+    pub now_boot_ns: u64,
+    /// `observed_end` of the system component, for the Stale age.
+    pub observed_end_ns: u64,
+    /// The disk's record in `Snapshot.system`; `None` before its first sample.
+    pub totals: Option<&'a DiskTotals>,
+    /// The disk source's last error, for Failed.
+    pub error: Option<&'a str>,
+}
+
+/// One row from a metric: Valid formats on a bits change, Stale keeps the value and marks it,
+/// Missing (no sample yet) reads "Collecting…", the rest show their fallback word.
+fn metric_row<T: Copy + Default>(
+    model: &mut KeyValueModel,
+    label: &'static str,
+    m: Metric<T>,
+    inp: &DiskDetailInputs,
+    bits: impl Fn(T) -> u64,
+    write: impl FnOnce(&mut String, T),
+) -> bool {
+    match m.validity {
+        Validity::Valid => model.set_valid(label, bits(m.value), |o| write(o, m.value)),
+        Validity::Stale => {
+            let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+            model.set_valid(label, bits(m.value), |o| write(o, m.value))
+                | model.set_stale(label, age_ns)
+        }
+        Validity::Missing => {
+            model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None)
+        }
+        Validity::Unsupported => {
+            model.set_fallback(label, m.validity, Fallback::NotSupported, None)
+        }
+        Validity::Failed => model.set_fallback(label, m.validity, Fallback::Unavailable, inp.error),
+        v => model.set_fallback(label, v, Fallback::Unavailable, None),
+    }
+}
+
+/// Fills the five P1 rows from the disk's record (UI-PRF-030): Active time, Average response
+/// time (two decimals), Read and Write speed (auto IEC, one decimal) and Capacity (IEC, two
+/// decimals). Each value formats again only when its raw value changed. True when any row
+/// changed.
+pub fn update_disk_details_p1(model: &mut KeyValueModel, inp: &DiskDetailInputs) -> bool {
+    let Some(t) = inp.totals else {
+        let mut changed = false;
+        for label in P1_ROWS {
+            changed |= model.set_fallback(label, Validity::WarmingUp, Fallback::Unavailable, None);
+        }
+        return changed;
+    };
+    let f32_bits = |v: f32| u64::from(v.to_bits());
+    let mut changed = false;
+    changed |= metric_row(
+        model,
+        ROW_ACTIVE,
+        t.active_pct,
+        inp,
+        f32_bits,
+        units::percent,
+    );
+    changed |= metric_row(model, ROW_RESPONSE, t.response_ms, inp, f32_bits, |o, v| {
+        units::response_ms(o, f64::from(v))
+    });
+    changed |= metric_row(
+        model,
+        ROW_READ,
+        t.read_bps,
+        inp,
+        f64::to_bits,
+        units::rate_iec_auto,
+    );
+    changed |= metric_row(
+        model,
+        ROW_WRITE,
+        t.write_bps,
+        inp,
+        f64::to_bits,
+        units::rate_iec_auto,
+    );
+    changed |= if t.capacity == 0 {
+        model.set_fallback(
+            ROW_CAPACITY,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        )
+    } else {
+        let n = t.capacity;
+        model.set_valid(ROW_CAPACITY, n, |o| units::bytes(o, n))
+    };
+    changed
+}
+
+/// The record of `device` in the snapshot.
+fn disk_totals(snap: &Snapshot, device: DeviceIdx) -> Option<&DiskTotals> {
+    snap.system
+        .disks
+        .iter()
+        .find(|(i, _)| *i == device)
+        .map(|(_, t)| t)
+}
+
 /// "Disk N": the index of `key` among the visible disks in sidebar order, counted as the
 /// sidebar counts it (PERF-008). Runs on catalog and settings changes only.
 fn disk_number(key: &DeviceKey, snap: &Snapshot, cx: &App) -> u16 {
@@ -242,7 +409,7 @@ pub struct DiskPage {
     row: DeviceRow,
     active: Entity<ChartView>,
     transfer: Entity<ChartView>,
-    /// E25-005 fills the rows.
+    /// The P1 rows from `update_disk_details_p1`; E25-015 fills the rest.
     details: KeyValueModel,
     // E25-016: partitions: Option<PartitionsBlock> (added by o55.17 as a chain edit, R-262)
     /// E25-017 renders the SMART button from it.
@@ -316,7 +483,7 @@ impl DiskPage {
             row,
             active,
             transfer,
-            details: KeyValueModel::default(),
+            details: disk_details_model(),
             smart_available: false,
             ejectable: false,
             header: (SharedString::default(), SharedString::default()),
@@ -415,6 +582,15 @@ impl DiskPage {
                 let state = state.clone();
                 chart.update(cx, |v, cx| v.set_state(state, cx));
             }
+        }
+        if mask.intersects(ComponentMask::SYSTEM | ComponentMask::HEALTH) {
+            let inputs = DiskDetailInputs {
+                now_boot_ns: now_boot_ns(),
+                observed_end_ns: snap.system.header.observed_end,
+                totals: disk_totals(snap, self.row.idx),
+                error: snap.health.get(SourceId::Disk).last_error.as_deref(),
+            };
+            changed |= update_disk_details_p1(&mut self.details, &inputs);
         }
         // The model comes from the disk details or the inventory.
         if details || mask.intersects(ComponentMask::DEVICES.union(ComponentMask::INVENTORY)) {
