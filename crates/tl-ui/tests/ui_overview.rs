@@ -1175,3 +1175,454 @@ mod bottom {
         );
     }
 }
+
+// The OverviewPage shell (crw.40).
+
+#[cfg(feature = "test-hooks")]
+mod page {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::demand::{CpuDemand, Demand};
+    use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet};
+    use tl_model::time::now_boot_ns;
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::chart::ChartView;
+    use tl_ui::components::kv_grid;
+    use tl_ui::demand::DemandAggregator;
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::DeviceKey;
+    use tl_ui::pages::performance::overview::layout::{BoxKind, OverviewLayout, place};
+    use tl_ui::pages::performance::overview::{BOX_ID_PREFIX, OVERVIEW_KEY, OverviewPage};
+    use tl_ui::pages::performance::page::DevicePage as _;
+    use tl_ui::pages::performance::sidebar::DeviceSidebar;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const CPUS: u16 = 4;
+
+    struct Host {
+        page: Option<Entity<OverviewPage>>,
+        _sidebar: Entity<DeviceSidebar>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().children(self.page.clone())
+        }
+    }
+
+    fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("dev"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind,
+        }
+    }
+
+    /// CPU package 0 with logical CPUs at 100.., memory 1, a GPU at 2 when `gpu`, disks 3 and 4,
+    /// eth0 at 5, the disk and net aggregates at 50 and 51.
+    fn catalog(gpu: bool) -> DeviceCatalog {
+        let mut entries = vec![
+            entry(0, DeviceIdentity::CpuPackage, None),
+            entry(1, DeviceIdentity::Memory, None),
+        ];
+        if gpu {
+            entries.push(entry(
+                2,
+                DeviceIdentity::Gpu {
+                    uuid: [1; 16],
+                    pci_bus_id: Arc::from("0000:01:00.0"),
+                },
+                None,
+            ));
+        }
+        for (idx, name) in [(3, "sda"), (4, "sdb")] {
+            entries.push(entry(
+                idx,
+                DeviceIdentity::Disk {
+                    major: 8,
+                    minor: u32::from(idx),
+                    name: Arc::from(name),
+                    wwn_or_serial: None,
+                },
+                None,
+            ));
+        }
+        entries.push(entry(
+            5,
+            DeviceIdentity::Net {
+                netns_ino: 1,
+                ifindex: 2,
+                name: Arc::from("eth0"),
+            },
+            Some(NetKind::Wired),
+        ));
+        entries.push(entry(
+            50,
+            DeviceIdentity::Aggregate(AggregateKind::Disks),
+            None,
+        ));
+        entries.push(entry(
+            51,
+            DeviceIdentity::Aggregate(AggregateKind::Nets),
+            None,
+        ));
+        entries
+            .extend((0..CPUS).map(|id| entry(100 + id, DeviceIdentity::CpuLogical { id }, None)));
+        DeviceCatalog {
+            version: 1,
+            entries: Arc::from(entries),
+        }
+    }
+
+    struct Rig<'a> {
+        engine: Arc<FakeEngine>,
+        host: Entity<Host>,
+        page: Entity<OverviewPage>,
+        demand: Entity<DemandAggregator>,
+        hub: Entity<SnapshotHub>,
+        vcx: &'a mut VisualTestContext,
+        version: u64,
+        _driver: Entity<AnimationDriver>,
+    }
+
+    /// One window of `w × h` that is the main window, with a sidebar (not drawn) and the Overview
+    /// page filling the window.
+    fn open(cx: &mut TestAppContext, gpu: bool, w: f32, h: f32) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| s.devices = Arc::new(catalog(gpu)));
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            kv_grid::init(cx);
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        let (h, d) = (hub.clone(), demand.clone());
+        let (host, vcx) = cx.add_window_view(move |_, cx| {
+            let sidebar = cx.new(|cx| DeviceSidebar::new(h.clone(), d.clone(), cx));
+            let page = cx.new(|cx| {
+                OverviewPage::new(DeviceKey(Arc::from(OVERVIEW_KEY)), h, d, &sidebar, cx)
+            });
+            Host {
+                page: Some(page),
+                _sidebar: sidebar,
+            }
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(w), px(h)));
+        let driver = vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            let handle = window.window_handle();
+            demand.update(cx, |d, _| d.set_main_window(handle));
+            driver
+        });
+        draw(vcx);
+        let page = vcx.read_entity(&host, |h, _| h.page.clone().expect("page"));
+        Rig {
+            engine,
+            host,
+            page,
+            demand,
+            hub,
+            vcx,
+            version: 0,
+            _driver: driver,
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    fn box_id(kind: BoxKind) -> &'static str {
+        match kind {
+            BoxKind::Cpu => "perf-overview-box-cpu",
+            BoxKind::Memory => "perf-overview-box-memory",
+            BoxKind::Gpu => "perf-overview-box-gpu",
+            BoxKind::Disk => "perf-overview-box-disk",
+            BoxKind::Net => "perf-overview-box-net",
+        }
+    }
+
+    const KINDS: [BoxKind; 5] = [
+        BoxKind::Cpu,
+        BoxKind::Memory,
+        BoxKind::Gpu,
+        BoxKind::Disk,
+        BoxKind::Net,
+    ];
+
+    impl Rig<'_> {
+        fn set_active(&mut self, active: bool) {
+            let page = self.page.clone();
+            self.vcx
+                .update(|_, cx| page.update(cx, |p, cx| p.set_active(active, cx)));
+        }
+
+        fn merged(&mut self) -> Demand {
+            let demand = self.demand.clone();
+            self.vcx.update(|_, cx| demand.read(cx).merged())
+        }
+
+        /// Page render and notify counts, then each box's render and notify counts, then each
+        /// chart's render and build counts (CPU, memory, GPU, disk, net down, net up).
+        fn counts(&mut self) -> Vec<u32> {
+            let page = self.page.clone();
+            self.vcx.update(|_, cx| {
+                let p = page.read(cx);
+                let (c, m, g, d, n) = (
+                    p.cpu_box().read(cx),
+                    p.mem_box().read(cx),
+                    p.gpu_box().read(cx),
+                    p.disk_box().read(cx),
+                    p.net_box().read(cx),
+                );
+                let mut out = vec![
+                    p.render_count.get(),
+                    p.notify_count.get(),
+                    c.render_count.get(),
+                    c.notify_count.get(),
+                    m.render_count.get(),
+                    m.notify_count.get(),
+                    g.render_count.get(),
+                    g.notify_count.get(),
+                    d.render_count.get(),
+                    d.notify_count.get(),
+                    n.render_count.get(),
+                    n.notify_count.get(),
+                ];
+                let mut charts: Vec<&Entity<ChartView>> = vec![c.total_chart(), m.chart()];
+                charts.extend(g.sections().iter().map(|s| &s.chart));
+                charts.extend([d.io_chart(), n.down_chart(), n.up_chart()]);
+                for chart in charts {
+                    let v = chart.read(cx);
+                    out.push(v.render_count.get());
+                    out.push(v.build_count.get());
+                }
+                out
+            })
+        }
+
+        /// One CPU tick: the package and every logical CPU's `CPU_TOTAL`, a new value each time.
+        fn cpu_tick(&mut self) {
+            self.version += 1;
+            let version = self.version;
+            let newest = now_boot_ns();
+            let value = 10. * version as f32;
+            let mut views: Vec<_> = [0]
+                .into_iter()
+                .chain((0..CPUS).map(|id| 100 + id))
+                .map(|device| {
+                    Arc::new(SeriesView {
+                        id: SeriesId {
+                            device: DeviceIdx(device),
+                            metric: MetricId::CPU_TOTAL,
+                        },
+                        version,
+                        period_ns: 100_000_000,
+                        samples: (0..5u64)
+                            .map(|k| Sample::valid(newest - (4 - k) * 100_000_000, value))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    })
+                })
+                .collect();
+            views.sort_by_key(|v| v.id);
+            self.engine.publish_with(|s| {
+                s.series = Arc::new(SeriesSet {
+                    header: ComponentHeader {
+                        version,
+                        ..ComponentHeader::default()
+                    },
+                    series: views.into(),
+                    slow: Arc::from([]),
+                });
+            });
+            draw(self.vcx);
+        }
+    }
+
+    #[gpui_kit::test]
+    fn overview_places_boxes_btop_default(cx: &mut TestAppContext) {
+        let r = open(cx, true, 1200., 900.);
+        let want = place(
+            &OverviewLayout::btop_default(),
+            |_| true,
+            size(px(1200.), px(900.)),
+            1.,
+        );
+        assert_eq!(want.boxes.len(), 5);
+        for p in &want.boxes {
+            let got = r.vcx.debug_bounds(box_id(p.kind)).expect("box drawn");
+            assert_eq!(got, p.bounds, "{:?}", p.kind);
+        }
+        assert!(box_id(BoxKind::Cpu).starts_with(BOX_ID_PREFIX));
+        let placed = r.vcx.update(|_, cx| r.page.read(cx).placement().clone());
+        assert_eq!(placed, want);
+    }
+
+    #[gpui_kit::test]
+    fn overview_drops_gpu_box_without_gpu(cx: &mut TestAppContext) {
+        let r = open(cx, false, 1200., 900.);
+        assert!(
+            r.vcx.debug_bounds(box_id(BoxKind::Gpu)).is_none(),
+            "no GPU box"
+        );
+        for kind in [BoxKind::Disk, BoxKind::Net] {
+            let b = r.vcx.debug_bounds(box_id(kind)).expect("box drawn");
+            assert_eq!(b.size.width, px(580.), "{kind:?}");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn overview_demand_on_off_and_release(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let off = r.merged();
+        assert!(!off.cpu_fast, "nothing sent while inactive");
+        r.set_active(true);
+        let on = r.merged();
+        assert!(on.any_surface_visible);
+        assert_eq!(on.cpu, CpuDemand::PerCore);
+        assert!(
+            on.cpu_fast && on.memory && on.disks && on.nets && on.gpus,
+            "{on:?}"
+        );
+        r.set_active(false);
+        assert_eq!(r.merged(), off, "inactive: part gone");
+
+        r.set_active(true);
+        assert!(r.merged().cpu_fast);
+        let host = r.host.clone();
+        r.vcx.update(|_, cx| {
+            host.update(cx, |h, cx| {
+                h.page = None;
+                cx.notify();
+            })
+        });
+        drop(r.page);
+        draw(r.vcx);
+        let demand = r.demand.clone();
+        assert_eq!(
+            r.vcx.update(|_, cx| demand.read(cx).merged()),
+            off,
+            "dropped: part gone"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn overview_idle_tick_renders_nothing(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.cpu_tick();
+        draw(r.vcx);
+        let before = r.counts();
+        for _ in 0..3 {
+            r.engine
+                .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+            draw(r.vcx);
+        }
+        assert_eq!(r.counts(), before, "processes only: nothing renders");
+    }
+
+    #[gpui_kit::test]
+    fn overview_cpu_tick_page_never_notifies(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.cpu_tick();
+        draw(r.vcx);
+        let before = r.counts();
+        for _ in 0..3 {
+            r.cpu_tick();
+        }
+        let after = r.counts();
+        assert_eq!(after[1], before[1], "the page never notifies");
+        for (i, name) in [(5, "memory"), (7, "GPU"), (9, "disk"), (11, "net")] {
+            assert_eq!(after[i], before[i], "{name} box notify");
+        }
+        // Chart pairs from index 12: CPU, memory, GPU, disk, net down, net up.
+        assert!(after[12] > before[12], "the CPU chart rendered");
+        for (i, name) in [
+            (15, "memory"),
+            (17, "GPU"),
+            (19, "disk"),
+            (21, "net down"),
+            (23, "net up"),
+        ] {
+            assert_eq!(after[i], before[i], "{name} chart builds");
+        }
+        let renders = after[0] - before[0];
+        assert!(renders <= 3, "page renders {renders}: at most one per tick");
+    }
+
+    #[gpui_kit::test]
+    fn overview_resize_relayouts_once(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        let before = r.counts();
+        r.vcx.simulate_resize(size(px(700.), px(900.)));
+        draw(r.vcx);
+        let page = r.page.clone();
+        assert!(r.vcx.update(|_, cx| page.read(cx).placement().stacked));
+        let after = r.counts();
+        assert_eq!(after[1] - before[1], 1, "one relayout notify");
+        // The resize frame renders the page, and the relayout renders it once more.
+        assert_eq!(after[0] - before[0], 2, "page renders");
+        // Same size again: nothing.
+        r.vcx.simulate_resize(size(px(700.), px(900.)));
+        draw(r.vcx);
+        assert_eq!(r.counts()[1], after[1]);
+    }
+
+    #[gpui_kit::test]
+    fn overview_hidden_window_drops_demand(cx: &mut TestAppContext) {
+        let mut r = open(cx, true, 1200., 900.);
+        r.set_active(true);
+        assert!(r.merged().cpu_fast);
+        r.engine
+            .publish_with(|s| Arc::make_mut(&mut s.processes).header.version += 1);
+        r.vcx.run_until_parked();
+        r.vcx.executor().advance_clock(Duration::from_millis(1600));
+        r.vcx.run_until_parked();
+        let hub = r.hub.clone();
+        assert!(r.vcx.read_entity(&hub, |h, _| h.is_hidden()));
+        assert_eq!(r.merged(), Demand::default());
+    }
+}
