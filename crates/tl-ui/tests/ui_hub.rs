@@ -28,6 +28,7 @@ use tl_ui::i18n::Strings;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::text::fonts::BundledFontStatus;
 use tl_ui::theme::{ThemeStore, UiMetrics};
+use tl_ui::window::main::FailMainOpen;
 use tl_ui::{
     AppEnv, OpenHooks, OpenMode, StartOptions, TasklensUi, UiExit, UiInit, UiLaunch, request_exit,
 };
@@ -500,6 +501,21 @@ fn open_first_calls_main_hook(cx: &mut TestAppContext) {
     });
     assert_eq!(calls.get(), 1);
     assert_eq!(exit_slot(cx), None);
+}
+
+#[gpui_kit::test]
+fn main_open_failure_requests_renderer_failed_exit(cx: &mut TestAppContext) {
+    run_init(cx, Settings::default());
+    cx.update(|cx| {
+        cx.set_global(FailMainOpen("no adapter".to_owned()));
+        open_first_for_test(cx, OpenMode::Main);
+    });
+    let failed = Some(UiExit::RendererFailed("no adapter".to_owned()));
+    assert_eq!(exit_slot(cx), failed);
+    // The second request from inside the event loop keeps the first reason.
+    cx.run_until_parked();
+    assert_eq!(exit_slot(cx), failed);
+    assert!(cx.windows().is_empty());
 }
 
 #[gpui_kit::test]

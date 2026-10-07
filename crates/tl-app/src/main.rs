@@ -227,16 +227,17 @@ fn main() -> ExitCode {
     let Some((engine, log_guard)) = once.take() else {
         return ExitCode::SUCCESS;
     };
+    if let Some(kind) = exit_notice(&exit) {
+        notify::send(kind);
+    }
     match exit {
         UiExit::Quit => finish(engine, &store, log_guard, 0, || {}),
         UiExit::RendererFailed(msg) => {
             error!(target: "tasklens::ui", "renderer start failed: {msg}");
             eprintln!("tasklens could not start the renderer");
-            notify::send(notify::Fatal::RendererFailed);
             finish(engine, &store, log_guard, 1, || {})
         }
         UiExit::DeviceLost => {
-            notify::send(notify::Fatal::DeviceLost);
             let again = should_relaunch(std::env::var_os(RELAUNCHED_VAR));
             finish(engine, &store, log_guard, 0, move || {
                 if again {
@@ -246,6 +247,15 @@ fn main() -> ExitCode {
                 }
             })
         }
+    }
+}
+
+/// The notification `exit` sends, if any. A main window that did not open is `RendererFailed`.
+fn exit_notice(exit: &UiExit) -> Option<notify::Fatal> {
+    match exit {
+        UiExit::Quit => None,
+        UiExit::RendererFailed(_) => Some(notify::Fatal::RendererFailed),
+        UiExit::DeviceLost => Some(notify::Fatal::DeviceLost),
     }
 }
 
@@ -410,6 +420,19 @@ fn start_tab(tab: TabArg) -> StartTab {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_notice_kinds() {
+        assert_eq!(exit_notice(&UiExit::Quit), None);
+        assert_eq!(
+            exit_notice(&UiExit::RendererFailed("no adapter".to_owned())),
+            Some(notify::Fatal::RendererFailed)
+        );
+        assert_eq!(
+            exit_notice(&UiExit::DeviceLost),
+            Some(notify::Fatal::DeviceLost)
+        );
+    }
 
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
