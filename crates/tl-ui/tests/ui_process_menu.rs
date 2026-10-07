@@ -717,7 +717,7 @@ mod toasts {
     }
 
     /// The real main window on the Processes tab, with the app's tracker.
-    fn open(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
+    pub(super) fn open(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
         let (_tx, rx) = async_channel::bounded(4);
@@ -771,7 +771,7 @@ mod toasts {
         id.expect("sent")
     }
 
-    fn emit(
+    pub(super) fn emit(
         engine: &FakeEngine,
         vcx: &mut VisualTestContext,
         id: ActionId,
@@ -792,7 +792,7 @@ mod toasts {
         })
     }
 
-    fn visible(vcx: &mut VisualTestContext) -> Vec<String> {
+    pub(super) fn visible(vcx: &mut VisualTestContext) -> Vec<String> {
         vcx.update(|_, cx| {
             let main = main_window_view(cx).expect("main window");
             let texts = main.read(cx).toasts().read(cx).visible_texts();
@@ -800,7 +800,7 @@ mod toasts {
         })
     }
 
-    fn actions_sent(engine: &FakeEngine) -> Vec<ActionRequest> {
+    pub(super) fn actions_sent(engine: &FakeEngine) -> Vec<ActionRequest> {
         engine
             .commands()
             .into_iter()
@@ -972,5 +972,550 @@ mod toasts {
             "nothing to refuse"
         );
         assert_eq!(actions_sent(&engine).len(), before, "no request was sent");
+    }
+}
+
+/// End Task, End Process and End Process Tree handlers (tasklens-pdu.20, UI-PRC-013, UI-PRC-014,
+/// PROC-059, D-009, R-192, R-198).
+mod end {
+    use std::sync::Arc;
+
+    use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
+    use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
+    use tl_model::command::Tab;
+    use tl_model::ids::{GroupKey, NodeId, ProcessKey};
+    use tl_model::process::{
+        GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
+    };
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::table::{ProcessTableView, TableRow};
+    use tl_model::time::BootId;
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::components::dialog::TlDialogView;
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::pages::processes::actions::{EndProcess, EndProcessTree, EndTask};
+    use tl_ui::pages::processes::delegate::ProcRowId;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::main_window_view;
+
+    use super::toasts::{actions_sent, emit, open, visible};
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: 1_000 + u64::from(pid),
+            boot_id: BootId(1),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, ppid: u32, name: &str, flags: ProcFlags) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: key(pid),
+            ppid,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a(name),
+                name: a(name),
+                exe: Some(a(&format!("/usr/bin/{name}"))),
+                cmdline: None,
+                user: a("me"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a(name),
+            }),
+            group: GroupKind::Background.key(),
+            state: ProcState::Sleeping,
+            flags,
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn app_key() -> GroupKey {
+        GroupKind::App {
+            app_id: Arc::from("firefox"),
+        }
+        .key()
+    }
+
+    fn app_group(members: u32) -> GroupRow {
+        GroupRow {
+            node: NodeId::Group(app_key()),
+            key: app_key(),
+            kind: GroupRowKind::App,
+            class: GroupKind::App {
+                app_id: Arc::from("firefox"),
+            },
+            name: Arc::from("Firefox"),
+            icon: None,
+            members,
+            pids: members,
+            note: None,
+            memory_bytes: 0,
+            disk_bps: 0.0,
+            net_bps: 0.0,
+            gpu_pct: 0.0,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            threads: 0,
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            commit_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            handles: None,
+            desktop_path: None,
+            description: None,
+            user: None,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn row(node: NodeId, record: Option<u32>, group: Option<u32>) -> TableRow {
+        TableRow {
+            node,
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record,
+            group,
+            descendants: 0,
+            subtree: None,
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        page: Entity<ProcessesPage>,
+        version: u64,
+    }
+
+    impl Rig {
+        fn new(cx: &mut TestAppContext) -> Self {
+            let (engine, mut vcx) = open(cx);
+            let page = vcx.update(|_, cx| {
+                main_window_view(cx)
+                    .expect("main window")
+                    .read(cx)
+                    .page_entity::<ProcessesPage>(Tab::Processes)
+                    .expect("the Processes page is built")
+            });
+            Self {
+                engine,
+                vcx,
+                page,
+                version: 1,
+            }
+        }
+
+        /// Publishes `records` (sorted by key) with one process row per record in `order`
+        /// (PIDs) and the given group rows after them.
+        fn publish(&mut self, records: Vec<ProcessRecord>, order: &[u32], groups: Vec<GroupRow>) {
+            let mut rows: Vec<TableRow> = order
+                .iter()
+                .map(|&pid| {
+                    let i = records
+                        .iter()
+                        .position(|r| r.key.pid == pid)
+                        .expect("a record for every row");
+                    row(NodeId::Process(key(pid)), Some(i as u32), None)
+                })
+                .collect();
+            rows.extend(
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(g, group)| row(group.node.clone(), None, Some(g as u32))),
+            );
+            self.version += 1;
+            let version = self.version;
+            let generation = self.vcx.update(|_, cx| {
+                self.page
+                    .read(cx)
+                    .table()
+                    .read(cx)
+                    .delegate
+                    .query()
+                    .generation()
+            });
+            self.engine.publish_with(|s| {
+                s.table = Arc::new(ProcessTableView {
+                    header: ComponentHeader {
+                        version,
+                        validity: Validity::Valid,
+                        ..ComponentHeader::default()
+                    },
+                    query_generation: generation,
+                    rows: rows.into(),
+                    groups: groups.into(),
+                    ..ProcessTableView::default()
+                });
+                s.processes = Arc::new(ProcessSnapshot {
+                    records: records.into(),
+                    ..ProcessSnapshot::default()
+                });
+            });
+            self.vcx.run_until_parked();
+        }
+
+        /// Makes `ids` the selection, the first one clicked and the rest Ctrl+clicked.
+        fn select(&mut self, ids: &[ProcRowId]) {
+            let table = self.vcx.update(|_, cx| self.page.read(cx).table().clone());
+            self.vcx.update(|_, cx| {
+                table.update(cx, |t, cx| {
+                    for (n, id) in ids.iter().enumerate() {
+                        if n == 0 {
+                            t.selection.click(*id);
+                        } else {
+                            t.selection.ctrl_click(*id);
+                        }
+                    }
+                    cx.notify();
+                })
+            });
+            self.vcx.run_until_parked();
+        }
+
+        fn select_pids(&mut self, pids: &[u32]) {
+            let ids: Vec<ProcRowId> = pids.iter().map(|&p| ProcRowId::Process(key(p))).collect();
+            self.select(&ids);
+        }
+
+        fn windows(&mut self) -> Vec<WindowId> {
+            self.vcx
+                .update(|_, cx| cx.windows().iter().map(|w| w.window_id()).collect())
+        }
+
+        /// Focuses the table, dispatches `action` and returns the confirmation it opened.
+        fn dispatch(&mut self, action: impl Action) -> Option<Dialog> {
+            let before = self.windows();
+            let page = self.page.clone();
+            self.vcx
+                .update(|window, cx| page.read(cx).focus_table(window, cx));
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.dispatch_action(action);
+            self.vcx.run_until_parked();
+            let id = self.windows().into_iter().find(|w| !before.contains(w))?;
+            let handle = WindowHandle::<gpui_kit::base::Root>::new(id);
+            let view = self.vcx.update(|_, cx| {
+                TlSecondaryWindow::<TlDialogView>::find(handle, cx)
+                    .map(|f| f.read(cx).content().clone())
+            })?;
+            let any = self
+                .vcx
+                .update(|_, cx| cx.windows())
+                .into_iter()
+                .find(|w| w.window_id() == id)?;
+            let mut vcx = VisualTestContext::from_window(any, &self.vcx.cx);
+            vcx.update(|window, _| window.activate_window());
+            vcx.run_until_parked();
+            vcx.update(|window, cx| window.draw(cx).clear(cx));
+            Some(Dialog { vcx, view })
+        }
+
+        fn sent(&self) -> Vec<(ActionKind, Vec<u32>)> {
+            actions_sent(&self.engine)
+                .into_iter()
+                .map(|r| {
+                    let pids = r
+                        .targets
+                        .iter()
+                        .map(|t| match t {
+                            ActionTarget::Process(k) => k.pid,
+                            other => panic!("not a process target: {other:?}"),
+                        })
+                        .collect();
+                    (r.kind, pids)
+                })
+                .collect()
+        }
+    }
+
+    struct Dialog {
+        vcx: VisualTestContext,
+        view: Entity<TlDialogView>,
+    }
+
+    impl Dialog {
+        fn text(&mut self) -> String {
+            let view = self.view.clone();
+            self.vcx
+                .update(|_, cx| view.read(cx).dialog().text().to_string())
+        }
+
+        /// Tab to the action button, then Enter (focus starts on Cancel).
+        fn confirm(mut self) {
+            self.vcx.simulate_keystrokes("tab");
+            self.vcx.run_until_parked();
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+            self.vcx.simulate_keystrokes("enter");
+            self.vcx.run_until_parked();
+        }
+
+        fn cancel(mut self) {
+            self.vcx.simulate_keystrokes("escape");
+            self.vcx.run_until_parked();
+        }
+    }
+
+    fn own(pids: &[u32]) -> Vec<ProcessRecord> {
+        pids.iter()
+            .map(|&p| record(p, 1, "proc", ProcFlags::empty()))
+            .collect()
+    }
+
+    #[gpui_kit::test]
+    fn single_end_process_own_unprotected_has_no_dialog(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[301]);
+        assert!(rig.dispatch(EndProcess).is_none(), "no dialog (D-009)");
+        assert_eq!(rig.sent(), [(ActionKind::Signal(Signal::Kill), vec![301])]);
+        let id = actions_sent(&rig.engine).pop().expect("a request").id;
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Started);
+        assert_eq!(visible(&mut rig.vcx), ["End process requested."]);
+    }
+
+    #[gpui_kit::test]
+    fn protected_target_confirms(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            vec![record(900, 1, "plasmashell", ProcFlags::PROTECTED)],
+            &[900],
+            Vec::new(),
+        );
+        rig.select_pids(&[900]);
+        let mut dialog = rig.dispatch(EndTask).expect("the Protected dialog");
+        assert_eq!(
+            dialog.text(),
+            "Ending plasmashell will end your desktop session. End it anyway?"
+        );
+        dialog.cancel();
+        assert!(rig.sent().is_empty(), "Cancel sends nothing");
+
+        let dialog = rig.dispatch(EndTask).expect("the Protected dialog");
+        dialog.confirm();
+        assert_eq!(rig.sent(), [(ActionKind::Signal(Signal::Term), vec![900])]);
+    }
+
+    #[gpui_kit::test]
+    fn multi_end_confirms_with_count(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            own(&[300, 301, 302, 303]),
+            &[303, 300, 302, 301],
+            Vec::new(),
+        );
+        rig.select_pids(&[300, 301, 302]);
+        let mut dialog = rig.dispatch(EndTask).expect("the EndMany dialog");
+        assert_eq!(dialog.text(), "End 3 selected processes?");
+        dialog.confirm();
+        assert_eq!(
+            rig.sent(),
+            [(ActionKind::Signal(Signal::Term), vec![300, 302, 301])],
+            "one request, targets in view order"
+        );
+
+        let mut dialog = rig.dispatch(EndProcess).expect("the EndMany dialog");
+        assert_eq!(dialog.text(), "End 3 selected processes immediately?");
+        dialog.cancel();
+        assert_eq!(rig.sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn other_user_target_confirms(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut sshd = record(812, 1, "sshd", ProcFlags::OTHER_USER);
+        sshd.uid = 0;
+        Arc::make_mut(&mut sshd.meta).user = Arc::from("root");
+        rig.publish(vec![sshd], &[812], Vec::new());
+        rig.select_pids(&[812]);
+        let mut dialog = rig.dispatch(EndTask).expect("the OtherUser dialog");
+        assert_eq!(
+            dialog.text(),
+            "End task on sshd (PID 812), owned by root. Continue?"
+        );
+        dialog.confirm();
+        assert_eq!(rig.sent(), [(ActionKind::Signal(Signal::Term), vec![812])]);
+    }
+
+    #[gpui_kit::test]
+    fn refusals_self_pid1_kthread(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(
+            vec![
+                record(1, 0, "systemd", ProcFlags::PROTECTED),
+                record(2, 0, "kthreadd", ProcFlags::KERNEL_THREAD),
+                record(3, 2, "kworker/0:1", ProcFlags::KERNEL_THREAD),
+                record(
+                    4242,
+                    1,
+                    "tasklens",
+                    ProcFlags::IS_SELF | ProcFlags::PROTECTED,
+                ),
+                record(4300, 1, "gone", ProcFlags::EXITED),
+            ],
+            &[4242, 1, 2, 3, 4300],
+            Vec::new(),
+        );
+        rig.select_pids(&[4242]);
+        assert!(rig.dispatch(EndTask).is_none());
+        assert_eq!(visible(&mut rig.vcx), ["Refusing to end tasklens itself."]);
+        assert!(rig.sent().is_empty(), "nothing is sent");
+
+        // One toast per distinct reason; the exited row is dropped first.
+        rig.select_pids(&[1, 2, 3, 4300]);
+        assert!(rig.dispatch(EndProcess).is_none());
+        assert!(rig.sent().is_empty());
+        let shown = visible(&mut rig.vcx);
+        let count = |text: &str| shown.iter().filter(|t| *t == text).count();
+        assert_eq!(count("PID 1 (systemd) cannot be ended."), 1);
+        assert_eq!(count("Kernel threads cannot be signalled."), 1);
+        assert_eq!(count("Process exited"), 0);
+
+        // Only exited targets: "Process exited".
+        rig.select_pids(&[4300]);
+        assert!(rig.dispatch(EndTask).is_none());
+        assert!(visible(&mut rig.vcx).iter().any(|t| t == "Process exited"));
+        assert!(rig.sent().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn end_tree_collects_descendants_capped_256(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        // 100 has 7 descendants over four levels; 150 is an unrelated process and 160 an
+        // exited child that the walk skips.
+        let records = vec![
+            record(100, 1, "root", ProcFlags::empty()),
+            record(101, 100, "a", ProcFlags::empty()),
+            record(102, 100, "b", ProcFlags::empty()),
+            record(103, 101, "c", ProcFlags::empty()),
+            record(104, 101, "d", ProcFlags::empty()),
+            record(105, 102, "e", ProcFlags::empty()),
+            record(106, 105, "f", ProcFlags::empty()),
+            record(107, 106, "g", ProcFlags::empty()),
+            record(150, 1, "other", ProcFlags::empty()),
+            record(160, 100, "gone", ProcFlags::EXITED),
+        ];
+        rig.publish(records, &[150, 100], Vec::new());
+        rig.select_pids(&[100]);
+        let mut dialog = rig.dispatch(EndProcessTree).expect("the EndTree dialog");
+        assert_eq!(dialog.text(), "End 8 processes in this tree?");
+        dialog.confirm();
+        assert_eq!(
+            rig.sent(),
+            [(
+                ActionKind::KillTree,
+                vec![100, 101, 102, 103, 104, 105, 106, 107]
+            )],
+            "breadth first, lowest PID first"
+        );
+
+        // 300 children: the request stops at 256 keys.
+        let mut records = vec![record(1000, 1, "root", ProcFlags::empty())];
+        records.extend((1001..1301).map(|p| record(p, 1000, "child", ProcFlags::empty())));
+        rig.publish(records, &[1000], Vec::new());
+        rig.select_pids(&[1000]);
+        let mut dialog = rig.dispatch(EndProcessTree).expect("the EndTree dialog");
+        assert_eq!(dialog.text(), "End 256 processes in this tree?");
+        dialog.confirm();
+        let (kind, pids) = rig.sent().pop().expect("a request");
+        assert_eq!(kind, ActionKind::KillTree);
+        assert_eq!(pids.len(), 256);
+        assert_eq!(pids[..3], [1000, 1001, 1002]);
+    }
+
+    #[gpui_kit::test]
+    fn end_app_unwraps_bwrap(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let member = |pid, ppid, name| ProcessRecord {
+            group: app_key(),
+            ..record(pid, ppid, name, ProcFlags::empty())
+        };
+        let records = vec![
+            member(200, 1, "bwrap"),
+            member(201, 200, "bwrap"),
+            member(202, 201, "firefox"),
+            member(203, 202, "firefox"),
+        ];
+        rig.publish(records, &[], vec![app_group(4)]);
+        rig.select(&[ProcRowId::Group(app_key())]);
+        assert!(
+            rig.dispatch(EndTask).is_none(),
+            "one own app row: no dialog"
+        );
+        assert_eq!(
+            rig.sent(),
+            [(ActionKind::Signal(Signal::Term), vec![202])],
+            "the request targets firefox, not bwrap"
+        );
+
+        // End Process skips app rows until Kill App.
+        assert!(rig.dispatch(EndProcess).is_none());
+        assert_eq!(rig.sent().len(), 1);
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_targets_captured_on_open(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301, 302]), &[300, 301, 302], Vec::new());
+        rig.select_pids(&[300]);
+        let page = rig.page.clone();
+        rig.vcx.update(|_, cx| {
+            page.update(cx, |p, cx| {
+                let targets = p.capture_targets(None, cx);
+                p.set_menu_targets(targets);
+            })
+        });
+        // The rows move and the selection changes before the item runs.
+        rig.publish(own(&[300, 301, 302]), &[302, 301, 300], Vec::new());
+        rig.select_pids(&[302]);
+        assert!(rig.dispatch(EndProcess).is_none());
+        assert_eq!(
+            rig.sent(),
+            [(ActionKind::Signal(Signal::Kill), vec![300])],
+            "the captured target X"
+        );
+
+        // The capture is used once; the next action reads the selection.
+        assert!(rig.dispatch(EndProcess).is_none());
+        assert_eq!(rig.sent()[1], (ActionKind::Signal(Signal::Kill), vec![302]));
     }
 }
