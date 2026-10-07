@@ -16,7 +16,7 @@
 use std::rc::Rc;
 
 use gpui_kit::assets::IconName;
-use gpui_kit::base::Root;
+use gpui_kit::base::{ElementExt as _, Root};
 use gpui_kit::component::Icon;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::{
@@ -26,7 +26,7 @@ use gpui_kit::{
     Window, WindowHandle, div, px, size,
 };
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget};
+use tl_model::actions::{ActionKind, ActionRequest, ActionTarget};
 use tl_model::demand::Demand;
 use tl_model::details::AffinityInfo;
 use tl_model::ids::ProcessKey;
@@ -513,6 +513,18 @@ pub fn affinity_words(cx: &mut App) -> Rc<AffinityWords> {
     words
 }
 
+/// [`affinity_words`] for read-outs that only have `&App`: the cached texts when current, else
+/// freshly translated ones (not cached).
+fn words_now(cx: &App) -> Rc<AffinityWords> {
+    let Some(version) = cx.try_global::<Strings>().map(|s| s.strings_version) else {
+        return Rc::new(AffinityWords::en());
+    };
+    match cx.try_global::<AffinityWordsCache>() {
+        Some(cache) if cache.version == version => cache.words.clone(),
+        _ => Rc::new(AffinityWords::translated(cx)),
+    }
+}
+
 // ---- The dialog ----
 
 /// What one CPU checkbox shows.
@@ -820,23 +832,23 @@ impl AffinityDialog {
     }
 
     /// The OK tooltip while OK is disabled by an empty selection.
-    pub fn ok_tooltip(&self, cx: &mut App) -> Option<SharedString> {
+    pub fn ok_tooltip(&self, cx: &App) -> Option<SharedString> {
         self.nothing_checked()
-            .then(|| affinity_words(cx).validation.clone())
+            .then(|| words_now(cx).validation.clone())
     }
 
     /// The subtitle line, with the loading suffix while the masks are read.
-    pub fn subtitle(&self, cx: &mut App) -> SharedString {
+    pub fn subtitle(&self, cx: &App) -> SharedString {
         if self.loading {
-            affinity_words(cx).loading(&self.subtitle)
+            words_now(cx).loading(&self.subtitle)
         } else {
             self.subtitle.clone()
         }
     }
 
     /// What CPU `cpu`'s checkbox shows.
-    pub fn cpu_view(&self, cpu: u16, cx: &mut App) -> CpuView {
-        let words = affinity_words(cx);
+    pub fn cpu_view(&self, cpu: u16, cx: &App) -> CpuView {
+        let words = words_now(cx);
         self.cpu_view_in(cpu, &words)
     }
 
@@ -1358,9 +1370,9 @@ impl Render for AffinityDialog {
             .flex_col()
             .overflow_hidden()
             .bg(theme.window_bg)
-            .on_prepaint(fit)
             .child(
                 div()
+                    .on_prepaint(fit)
                     .flex_1()
                     .min_h_0()
                     .flex()
