@@ -1331,11 +1331,17 @@ mod page {
         });
         let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
         let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
-        let (h, d) = (hub.clone(), demand.clone());
+        let (hub2, demand2) = (hub.clone(), demand.clone());
         let (host, vcx) = cx.add_window_view(move |_, cx| {
-            let sidebar = cx.new(|cx| DeviceSidebar::new(h.clone(), d.clone(), cx));
+            let sidebar = cx.new(|cx| DeviceSidebar::new(hub2.clone(), demand2.clone(), cx));
             let page = cx.new(|cx| {
-                OverviewPage::new(DeviceKey(Arc::from(OVERVIEW_KEY)), h, d, &sidebar, cx)
+                OverviewPage::new(
+                    DeviceKey(Arc::from(OVERVIEW_KEY)),
+                    hub2,
+                    demand2,
+                    &sidebar,
+                    cx,
+                )
             });
             Host {
                 page: Some(page),
