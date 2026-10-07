@@ -757,3 +757,4 @@ processes-toast-io-priority-partial = I/O priority updated for { $done } of { $t
 processes-toast-refuse-self = Refusing to end tasklens itself.
 processes-toast-refuse-pid1 = PID 1 (systemd) cannot be ended.
 processes-toast-exited = Process exited
+information-toast-copied = Copied to clipboard
