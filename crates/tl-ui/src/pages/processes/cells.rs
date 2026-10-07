@@ -29,7 +29,7 @@ use tl_model::validity::{ProcessField, Validity};
 
 use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_SLOW, ease_out_cubic};
-use crate::components::validity::{GlyphContent, glyph_parts};
+use crate::components::validity::{GlyphContent, copy_text, glyph_parts};
 use crate::i18n::{tr, tr_en};
 use crate::pages::performance::details::Template;
 use crate::table::cells::CellOut;
@@ -452,9 +452,6 @@ pub struct CellWords {
     /// Copy details labels that are not column labels: "Private bytes", "Working set".
     pub copy_private_bytes: Arc<str>,
     pub copy_working_set: Arc<str>,
-    /// What a copy writes for a Restricted value ("restricted") and an Unsupported one ("n/a").
-    pub copy_restricted: Arc<str>,
-    pub copy_unsupported: Arc<str>,
 }
 
 impl CellWords {
@@ -494,8 +491,6 @@ impl CellWords {
             labels: PROCESS_COLUMNS.iter().map(|c| text(c.label)).collect(),
             copy_private_bytes: text("processes-copy-private-bytes"),
             copy_working_set: text("processes-copy-working-set"),
-            copy_restricted: text("processes-copy-restricted"),
-            copy_unsupported: text("processes-copy-unsupported"),
         }
     }
 
@@ -1101,29 +1096,17 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
 
 // ---- Copy commands (PROC-070, ADR-015) ----
 
-/// The text one cell copies: its displayed text, "restricted" for a Restricted value, "n/a"
-/// for an Unsupported one and empty for any other state without a value. Never a 0 for a
-/// value that was not read.
+/// The text one cell copies: its displayed text, or the ADR-015 copy word of a value that was
+/// not read ("Restricted", "n/a", "…", "-", "!"), never a 0.
 fn copy_value(row: RowRef, col: &ProcColumn, ctx: &CellCtx, out: &mut CellOut) -> String {
     out.reset();
     out.want_text = true;
     fill_cell(row, col, ctx, out);
-    match out.validity {
-        Validity::Valid | Validity::Stale => match out.arc.take() {
-            Some(arc) => arc.to_string(),
-            None => std::mem::take(&mut out.text),
-        },
-        v => copy_state_word(v, ctx.words).to_owned(),
-    }
-}
-
-/// "restricted", "n/a", or empty for the other states without a value.
-fn copy_state_word(v: Validity, w: &CellWords) -> &str {
-    match v {
-        Validity::Restricted => &w.copy_restricted,
-        Validity::Unsupported => &w.copy_unsupported,
-        _ => "",
-    }
+    let text = match out.arc.take() {
+        Some(arc) => arc.to_string(),
+        None => std::mem::take(&mut out.text),
+    };
+    copy_text(out.validity, &text.into()).to_string()
 }
 
 /// Copy on a cell: the displayed value of `col` for each row, one per line, in view order.
@@ -1171,23 +1154,17 @@ pub fn copy_details(rows: &[RowRef], ctx: &CellCtx) -> String {
                 w.label(ColumnId::Ppid),
                 d.ppid.map_or_else(String::new, |p| p.to_string()),
             ),
-            (
-                w.label(ColumnId::Cpu),
-                d.cpu.text(w, |p| format!("{p:.2}%")),
-            ),
-            (w.label(ColumnId::Memory), d.memory.text(w, whole_mib)),
-            (w.copy_private_bytes.as_ref(), d.private.text(w, whole_mib)),
-            (
-                w.copy_working_set.as_ref(),
-                d.working_set.text(w, whole_mib),
-            ),
+            (w.label(ColumnId::Cpu), d.cpu.text(|p| format!("{p:.2}%"))),
+            (w.label(ColumnId::Memory), d.memory.text(whole_mib)),
+            (w.copy_private_bytes.as_ref(), d.private.text(whole_mib)),
+            (w.copy_working_set.as_ref(), d.working_set.text(whole_mib)),
             (
                 w.label(ColumnId::Threads),
-                d.threads.text(w, |n| n.to_string()),
+                d.threads.text(|n| n.to_string()),
             ),
             (
                 w.label(ColumnId::Handles),
-                d.handles.text(w, |n| n.to_string()),
+                d.handles.text(|n| n.to_string()),
             ),
             (w.label(ColumnId::Priority), d.priority),
         ];
@@ -1233,38 +1210,16 @@ pub fn copy_all_metrics(rows: &[RowRef], ctx: &CellCtx) -> String {
             }
         }
         let cmdline = match row {
-            RowRef::Record(r, _, _) => r
-                .meta
-                .cmdline
-                .as_deref()
-                .unwrap_or(w.copy_restricted.as_ref()),
+            RowRef::Record(r, _, _) => r.meta.cmdline.as_deref().map_or_else(
+                || copy_text(Validity::Restricted, &SharedString::default()).to_string(),
+                str::to_owned,
+            ),
             RowRef::Group(g, _) => first_member(g, ctx)
                 .and_then(|(_, r)| r.meta.cmdline.as_deref())
-                .unwrap_or(""),
+                .unwrap_or_default()
+                .to_owned(),
         };
         let _ = write!(text, "{}: {cmdline}", w.label(ColumnId::Cmdline));
-    }
-    text
-}
-
-/// Copy rows as table (Ctrl+Shift+C): a line of the `visible` column labels joined by tabs,
-/// then one line per row of the copied cell texts joined by tabs.
-pub fn copy_rows_as_table(rows: &[RowRef], visible: &[ColumnId], ctx: &CellCtx) -> String {
-    let w = ctx.words;
-    let mut out = CellOut::default();
-    let mut text = visible
-        .iter()
-        .map(|&id| w.label(id))
-        .collect::<Vec<_>>()
-        .join("\t");
-    for &row in rows {
-        text.push('\n');
-        for (pos, &id) in visible.iter().enumerate() {
-            if pos > 0 {
-                text.push('\t');
-            }
-            text.push_str(&copy_value(row, process_column(id), ctx, &mut out));
-        }
     }
     text
 }
@@ -1278,12 +1233,12 @@ fn whole_mib(bytes: u64) -> String {
 struct Field<T>(T, Validity);
 
 impl<T: Copy> Field<T> {
-    /// The value through `fmt` when it was read, else the state word.
-    fn text(&self, w: &CellWords, fmt: impl Fn(T) -> String) -> String {
+    /// The value through `fmt` when it was read, else the ADR-015 copy word.
+    fn text(&self, fmt: impl Fn(T) -> String) -> String {
         if shows_value(self.1) {
             fmt(self.0)
         } else {
-            copy_state_word(self.1, w).to_owned()
+            copy_text(self.1, &SharedString::default()).to_string()
         }
     }
 }

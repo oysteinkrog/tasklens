@@ -1006,11 +1006,11 @@ mod end {
     };
     use tl_ui::pages::processes::cells::{
         CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
-        copy_rows_as_table, process_column,
+        process_column,
     };
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
-    use tl_ui::table::actions::CopyCell;
+    use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
     use tl_ui::table::tree_table::RowKind;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
@@ -1996,16 +1996,16 @@ mod end {
         );
         let f = CopyFixture::new(vec![r], vec![x]);
         let text = copy_details(&f.row_refs(), &f.ctx());
-        assert!(text.contains("\nHandles: restricted\n"), "{text}");
+        assert!(text.contains("\nHandles: Restricted\n"), "{text}");
         assert!(text.contains("\nThreads: n/a\n"), "{text}");
         let handles = process_column(ColumnId::Handles);
-        assert_eq!(copy_cell(&f.row_refs(), handles, &f.ctx()), "restricted");
+        assert_eq!(copy_cell(&f.row_refs(), handles, &f.ctx()), "Restricted");
 
-        // No extras yet: Private bytes and Handles are empty, never 0.
+        // No extras yet: Private bytes and Handles are warming up, never 0.
         let f = CopyFixture::new(vec![firefox(4321)], Vec::new());
         let text = copy_details(&f.row_refs(), &f.ctx());
-        assert!(text.contains("\nPrivate bytes: \n"), "{text}");
-        assert!(text.contains("\nHandles: \n"), "{text}");
+        assert!(text.contains("\nPrivate bytes: …\n"), "{text}");
+        assert!(text.contains("\nHandles: …\n"), "{text}");
     }
 
     #[test]
@@ -2046,35 +2046,24 @@ mod end {
         }
     }
 
-    #[test]
-    fn copy_rows_as_table_matches_golden() {
-        let mut x = firefox_extras();
-        x.handles = None;
-        let f = CopyFixture::new(
-            vec![firefox(4321), firefox(4400)],
-            vec![firefox_extras(), x],
+    #[gpui_kit::test]
+    fn copy_rows_as_table_matches_golden(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut restricted = firefox(4400);
+        restricted.validity.set(
+            tl_model::validity::ProcessField::RssAnon,
+            Validity::Restricted,
         );
-        let visible = [
-            ColumnId::Name,
-            ColumnId::Pid,
-            ColumnId::Cpu,
-            ColumnId::Memory,
-            ColumnId::Handles,
-            ColumnId::Version,
-        ];
-        let text = copy_rows_as_table(&f.row_refs(), &visible, &f.ctx());
-        assert!(
-            text.starts_with("Name\tPID\tCPU\t"),
-            "{}",
-            text.lines().next().unwrap_or_default()
+        rig.publish(vec![firefox(4321), restricted], &[4321, 4400], Vec::new());
+        // The table's own TSV (ADR-015 copy words); the page adds the toast.
+        assert_eq!(
+            last_toast(&mut rig, &[4321, 4400], CopyRowsAsTable),
+            "Copied to clipboard"
         );
+        let text = clipboard(&mut rig);
+        assert!(text.starts_with("Name\tUser\tPID\tCPU\t"), "{text}");
+        assert_eq!(text.lines().count(), 3, "{text}");
         golden("copy_rows.tsv", &text);
-        let names = copy_rows_as_table(
-            &f.row_refs(),
-            &[ColumnId::Name, ColumnId::Pid, ColumnId::Cpu],
-            &f.ctx(),
-        );
-        assert_eq!(names.lines().next(), Some("Name\tPID\tCPU"));
     }
 
     /// Selects `pids`, dispatches `action` and returns the newest visible toast.

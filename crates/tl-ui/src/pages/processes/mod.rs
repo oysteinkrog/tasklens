@@ -47,7 +47,7 @@ use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell};
-use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _};
+use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::window::main::ShellPage;
 use crate::window::status::StatusChanged;
@@ -78,8 +78,8 @@ pub struct ProcessesPage {
     /// The table body's focus handle.
     focus: FocusHandle,
     client: Arc<dyn EngineClient>,
-    /// Settings, metrics and strings observers.
-    _subs: SmallVec<[Subscription; 3]>,
+    /// Settings, metrics and strings observers, and the table's copy events.
+    _subs: SmallVec<[Subscription; 4]>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 4],
     style_version: u64,
@@ -128,6 +128,12 @@ impl ProcessesPage {
         subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
         subs.push(cx.observe_global::<UiMetrics>(|this, cx| this.on_metrics(cx)));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
+        // Ctrl+Shift+C is the table's own TSV copy (ADR-015); the page shows its toast.
+        subs.push(cx.subscribe(&table, |_, _, ev: &TreeTableEvent, cx| {
+            if let TreeTableEvent::CopiedRows { .. } = ev {
+                toast(ToastKind::Success, tr(cx, "processes-toast-copied"), cx);
+            }
+        }));
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 4], |tl| SECTIONS.map(|s| tl.version(s)));

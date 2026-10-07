@@ -945,6 +945,7 @@ information-net-ip-none = None
 information-refreshed = Information refreshed.
 information-error-load = Could not load system information
 information-error-retry = Retry
+information-filter-empty = No information matches the filter.
 
 # Process Properties window (E23-A1)
 pwn-props-tab-general = General
@@ -975,8 +976,6 @@ processes-confirm-action-set-priority = Set priority
 # tasklens-pdu.22: the copy commands (PROC-070, UI-PRC-015).
 processes-copy-private-bytes = Private bytes
 processes-copy-working-set = Working set
-processes-copy-restricted = restricted
-processes-copy-unsupported = n/a
 processes-toast-copied = Copied to clipboard
 processes-toast-values-copied = Selected process values copied.
 processes-toast-details-copied = Process details copied.
