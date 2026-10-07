@@ -139,6 +139,7 @@ impl ProcessesPage {
         delegate.set_window(Some(window.window_handle()));
         delegate.set_page(cx.weak_entity());
         delegate.query_mut().bump_and_send(&*client);
+        delegate.drop_stale_view();
         let defaults = delegate.default_layout();
         let table = cx.new(|cx| {
             let mut t = TlTreeTable::new(delegate, window, cx);

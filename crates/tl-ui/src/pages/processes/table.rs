@@ -188,6 +188,11 @@ impl ProcessQuery {
         true
     }
 
+    /// Forgets the stored view, so `shown` is `None` until a view for this generation arrives.
+    pub fn forget_shown(&mut self) {
+        self.shown = None;
+    }
+
     pub fn set_mode(&mut self, m: TableMode) {
         self.mode = m;
     }

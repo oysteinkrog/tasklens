@@ -547,6 +547,27 @@ impl ProcessDelegate {
         true
     }
 
+    /// Drops the installed view when it was not built for the current query generation: the
+    /// view the hub held before the page sent its first query (pdu.55). The table then shows no
+    /// rows until a view for the query arrives.
+    pub fn drop_stale_view(&mut self) {
+        let generation = self.query.generation();
+        if self
+            .query
+            .shown()
+            .is_none_or(|v| v.query_generation == generation)
+        {
+            return;
+        }
+        self.query.forget_shown();
+        self.row_index.clear();
+        self.ids.clear();
+        self.sibling.clear();
+        self.grouped = false;
+        self.built_for = None;
+        self.version += 1;
+    }
+
     /// `row_index`, the sibling pass and the Name cell texts for the installed view. O(rows).
     fn rebuild_rows(&mut self) {
         let snapshot = Arc::clone(&self.snapshot);
