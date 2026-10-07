@@ -1079,8 +1079,22 @@ mod hardware_builders {
             DeviceIdx(7),
             GpuTotals {
                 device: DeviceIdx(7),
+                util_pct: Metric::default(),
+                mem_util_pct: Metric::default(),
+                mem_used: Metric::default(),
+                mem_total: Metric::default(),
+                shared_used: Metric::default(),
+                shared_total: Metric::default(),
+                enc_pct: Metric::default(),
+                dec_pct: Metric::default(),
                 temp_c: Metric::valid(52.2),
-                ..GpuTotals::default()
+                power_w: Metric::default(),
+                power_limit_w: Metric::default(),
+                clock_gfx_mhz: Metric::default(),
+                clock_mem_mhz: Metric::default(),
+                fan_pct: Metric::default(),
+                pcie_rx_bps: Metric::default(),
+                pcie_tx_bps: Metric::default(),
             },
         )]
         .into();
