@@ -315,8 +315,6 @@ pub struct MemoryPage {
     /// `UiMetrics.style_version` the chart colours were built for.
     style_version: u64,
     words: Words,
-    #[allow(dead_code, reason = "E25-003 reads the Details inputs through it")]
-    hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
     /// The page is the shown page (`set_active`).
@@ -398,7 +396,6 @@ impl MemoryPage {
             settings_versions: section_versions(cx),
             style_version: metrics(cx).style_version,
             words,
-            hub,
             demand,
             id,
             active: false,
