@@ -728,3 +728,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.20 (c958c890, a1fd8e39): in the overlaid and stacked modes the value label shows overall CPU, through set_value_text, in a follow-up commit. The o55 agent then takes o55.4.
 - bj6.26 (1eaeef5d, 95d57919) closed. Network adapters is its own group with no indent. New key shell-settings-perf-no-gpu. The ftl block stays where it is. The m1f agent takes bj6.20.
 - wlf.10 closed. The lock check is in aa291812. wlf.17 code is in 536e7d1f and 66855ba2, and the Soak variant is approved in args.rs. wlf.17 AC1 and wlf.1 wait for an unlocked session. The pdu-51 agent takes wlf.16.
+- xdh.5 (7f124e49, 71dbe3e2, 9ad6d01c): AC 5 accepted as restated (no render from other sources; the card re-renders only through gpui ancestor dirtying). The card draws its own value. The net card uses AutoRate. The 9o0 agent does the SHORTCUT_DOCS fix, then jqk.20.
