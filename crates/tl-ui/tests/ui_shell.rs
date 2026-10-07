@@ -1721,6 +1721,39 @@ mod tabstrip {
         assert_eq!(target, narrow + px(120.));
     }
 
+    /// `FilterBox::target_width` stays at the final width on every animation frame, both when
+    /// the box grows and when it shrinks back, while `width` moves.
+    #[gpui_kit::test]
+    fn filter_target_width_during_animation(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        r.cx.update(|_, cx| cx.set_reduce_motion(false));
+        let filter = with_filter_box(&mut r, 1360.);
+        let narrow = r.cx.update(|_, cx| filter.read(cx).width());
+        assert_eq!(r.cx.update(|_, cx| filter.read(cx).target_width()), narrow);
+
+        let run = |r: &mut Rig, target: Pixels| {
+            let mut moved = false;
+            for _ in 0..16 {
+                r.cx.executor()
+                    .advance_clock(std::time::Duration::from_millis(16));
+                r.cx.run_until_parked();
+                draw(r.cx);
+                let (width, at) =
+                    r.cx.update(|_, cx| (filter.read(cx).width(), filter.read(cx).target_width()));
+                assert_eq!(at, target, "width {width:?}");
+                moved |= width != target && width != narrow && width != narrow + px(120.);
+            }
+            assert!(moved, "the box animated");
+            assert_eq!(r.cx.update(|_, cx| filter.read(cx).width()), target);
+        };
+
+        r.cx.update(|window, cx| filter.update(cx, |f, cx| f.focus_and_select_all(window, cx)));
+        run(&mut r, narrow + px(120.));
+
+        r.cx.update(|window, cx| window.blur(cx));
+        run(&mut r, narrow);
+    }
+
     #[gpui_kit::test]
     fn overflow_reshapes_on_scale(cx: &mut TestAppContext) {
         let mut r = rig(cx, 100, all(), Tab::Processes, true);

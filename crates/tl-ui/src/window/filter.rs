@@ -148,9 +148,11 @@ pub struct FilterBox {
     /// The outline's left edge minus the box's left edge at the last prepaint: the checkbox part
     /// and its gap when shown, else 0. The tab strip ends its accent line there.
     outline_inset: Rc<Cell<Pixels>>,
-    /// The input's target width minus its drawn width at the last render. Not 0 only while
-    /// the width animates.
-    grow: Pixels,
+    /// The input's target width at the last render.
+    input_target: Pixels,
+    /// The input's drawn width at the last prepaint. Differs from `input_target` only while the
+    /// width animates.
+    input_drawn: Rc<Cell<Pixels>>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
@@ -205,7 +207,8 @@ impl FilterBox {
             processes: ProcessesView::read(cx),
             width: Rc::new(Cell::new(px(0.))),
             outline_inset: Rc::new(Cell::new(px(0.))),
-            grow: px(0.),
+            input_target: px(0.),
+            input_drawn: Rc::new(Cell::new(px(0.))),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             outline: gpui_kit::Hsla::default(),
@@ -277,7 +280,7 @@ impl FilterBox {
     /// The drawn width at the last layout with the input at its target width, so it does not
     /// change while the width animates. The tab strip fits its tabs to it (E20-015).
     pub fn target_width(&self) -> Pixels {
-        self.width.get() + self.grow
+        self.width.get() + self.input_target - self.input_drawn.get()
     }
 
     /// The outline's left edge minus the box's left edge at the last layout, for the tab strip.
@@ -379,7 +382,7 @@ impl Render for FilterBox {
             window,
             cx,
         );
-        self.grow = px(target * s) - input_w;
+        self.input_target = px(target * s);
 
         let mut label = div()
             .debug_selector(|| "FilterBox-label".into())
@@ -502,6 +505,7 @@ impl Render for FilterBox {
 
         let width = self.width.clone();
         let outline_inset = self.outline_inset.clone();
+        let input_drawn = self.input_drawn.clone();
         // Reversed so the outline comes first in element order: the checkbox is the Tab stop
         // after the filter input (UI-SHL-121) while it is drawn to the left.
         div()
@@ -544,6 +548,12 @@ impl Render for FilterBox {
                             this.input.update(cx, |s, cx| s.focus(window, cx));
                         }),
                     )
+                    // The input is the second child, after the label.
+                    .on_children_prepainted(move |bounds, _, _| {
+                        if let Some(b) = bounds.get(1) {
+                            input_drawn.set(b.size.width);
+                        }
+                    })
                     .child(label)
                     .child(field),
             )
