@@ -869,7 +869,6 @@ mod names_and_tips {
     use super::*;
     use gpui_kit::point;
     use tl_ui::components::tooltip::DELAY_CONTROL;
-    use tl_ui::i18n::set_test_catalogue;
 
     #[gpui_kit::test]
     fn info_copy_button_accessible_name(cx: &mut TestAppContext) {
@@ -883,7 +882,15 @@ mod names_and_tips {
         if let Some(tree) = cx.update(|window, _| window.debug_a11y_tree_json()) {
             assert!(tree.contains("Copy Processor"), "the a11y tree names it");
         }
+    }
 
+    #[cfg(feature = "test-hooks")]
+    #[gpui_kit::test]
+    fn info_copy_button_name_follows_strings(cx: &mut TestAppContext) {
+        use tl_ui::i18n::set_test_catalogue;
+
+        let (section, _, cx) = host(cx, InfoSectionId::Processor, 100, os_rows());
+        draw(cx);
         cx.update(|window, cx| {
             set_test_catalogue(
                 cx,

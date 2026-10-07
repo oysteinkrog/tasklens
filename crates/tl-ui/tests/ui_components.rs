@@ -1357,11 +1357,11 @@ mod names_and_label_tips {
         );
     }
 
-    struct Copy {
+    struct CopyHost {
         name: Option<&'static str>,
     }
 
-    impl Render for Copy {
+    impl Render for CopyHost {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let mut button = TlButton::new("copy", TlButtonKind::Icon)
                 .icon(TlIcon::Copy)
@@ -1397,7 +1397,7 @@ mod names_and_label_tips {
             Some("Copy Processor")
         );
 
-        let (_, cx) = cx.add_window_view(|_, _| Copy {
+        let (_, cx) = cx.add_window_view(|_, _| CopyHost {
             name: Some("Copy Processor"),
         });
         cx.update(|window, _| window.activate_window());
