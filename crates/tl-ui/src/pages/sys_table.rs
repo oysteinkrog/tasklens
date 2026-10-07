@@ -14,7 +14,8 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::{
     Action, AnyElement, App, Context, Entity, EntityId, EventEmitter, IntoElement,
-    ParentElement as _, Pixels, SharedString, Subscription, WeakEntity, Window, div, px,
+    ParentElement as _, Pixels, SharedString, Styled as _, Subscription, WeakEntity, Window, div,
+    px,
 };
 use rustc_hash::{FxHashMap, FxHasher};
 use smallvec::SmallVec;
