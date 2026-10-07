@@ -116,7 +116,7 @@ fn build_menu(
     match id {
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
         MenuId::View => Some(menus_view::build(window, cx, return_focus, sliders)),
-        MenuId::Settings => Some(menus_settings::build(window, cx, return_focus)),
+        MenuId::Settings => Some(menus_settings::build(window, cx, return_focus, sliders)),
         MenuId::Help | MenuId::Debug => None,
     }
 }
@@ -300,6 +300,7 @@ pub fn menu_bar_for(window: WindowId, cx: &App) -> Option<Entity<MenuBar>> {
 /// before the main window opens.
 pub fn init(cx: &mut App) {
     cx.set_global(MenuBarFactory(|window, cx| new(window, cx).into()));
+    menus_settings::init(cx);
     cx.on_action(|action: &OpenMenu, cx| {
         let id = action.0;
         let Some(handle) = cx.active_window() else {

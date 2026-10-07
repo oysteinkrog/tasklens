@@ -6,16 +6,24 @@
 //! startup (Default tab) and Language, then "Reset Settings to Defaults". Later beads add the
 //! P2 to P4 rows (E21-010, E21-011, E21-033, E21-040, E21-042). A header shows only when a row
 //! under it exists.
+//!
+//! P2 rows (E21-010): the "Tab Switch" slider in Motion & interaction, "Auto-fetch Public IP on
+//! launch" in Window & startup, and "All settings…" above Reset. Turning the auto-fetch on goes
+//! through the public IP notice ([`request_public_ip_fetch`]), so the key is set only once the
+//! user has accepted it; turning it off needs no notice.
 
+use fluent_bundle::FluentValue;
 use gpui_kit::{App, Entity, FocusHandle, SharedString, Window};
 use tl_model::command::Tab;
 use tl_model::settings::{NetworkUnit, PROCESS_INTERVAL_MENU_MS, Settings, StartTab};
 
 use super::confirm::ResetSettings;
 use super::main::ShellState;
-use crate::actions::{SetSetting, ToggleSetting};
+use super::menubar::{MenuSliders, TAB_SWITCH};
+use super::public_ip::request_public_ip_fetch;
+use crate::actions::{OpenSettings, SetSetting, ToggleSetting};
 use crate::components::menu::{TlMenu, TlMenuPopup};
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_args};
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 
 /// The Refresh items: label key and `processes.interval_ms`, in `PROCESS_INTERVAL_MENU_MS` order.
@@ -33,9 +41,39 @@ pub(crate) const REFRESH_KEYS: [&str; 6] = [
 pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
     [("en-US", "shell-menu-settings-language-en-us")];
 
-/// Builds the Settings menu. Item actions go to `return_focus`.
-pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> Entity<TlMenuPopup> {
-    TlMenu::build(window, cx, return_focus.clone(), |menu, window, cx| {
+gpui_kit::actions!(tasklens, [TogglePublicIpAutoFetch]);
+
+/// Registers the "Auto-fetch Public IP on launch" handler. `menubar::init` calls it.
+pub fn init(cx: &mut App) {
+    cx.on_action(|_: &TogglePublicIpAutoFetch, cx| {
+        if settings_now(cx).network.auto_fetch_public_ip {
+            TlSettings::update(cx, |d| d.settings.network.auto_fetch_public_ip = false);
+            return;
+        }
+        let Some(handle) = cx.active_window() else {
+            return;
+        };
+        // The window is busy dispatching this action; the notice needs it.
+        cx.defer(move |cx| {
+            let _ = handle.update(cx, |_, window, cx| {
+                request_public_ip_fetch(window, cx, |_, cx| {
+                    TlSettings::update(cx, |d| d.settings.network.auto_fetch_public_ip = true);
+                });
+            });
+        });
+    });
+}
+
+/// Builds the Settings menu. Item actions go to `return_focus`; the Tab Switch row uses the
+/// bar's `sliders`.
+pub fn build(
+    window: &mut Window,
+    cx: &mut App,
+    return_focus: &FocusHandle,
+    sliders: &MenuSliders,
+) -> Entity<TlMenuPopup> {
+    let tab_switch = sliders.tab_switch.clone();
+    TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let s = settings_now(cx);
         menu.header(tr(cx, "shell-menu-settings-monitoring"))
             .submenu(
@@ -71,6 +109,12 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
                 s.motion.smooth_scroll,
                 toggle(SettingKey::MotionSmoothScroll),
             )
+            .slider_row(
+                tr(cx, "shell-menu-settings-tab-switch"),
+                &tab_switch,
+                TAB_SWITCH.range,
+                ms_text(cx),
+            )
             .check_item(
                 tr(cx, "shell-menu-settings-close-with-esc"),
                 s.window.close_with_esc,
@@ -83,6 +127,11 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
                 cx,
                 default_tab_submenu,
             )
+            .check_item(
+                tr(cx, "shell-menu-settings-public-ip"),
+                s.network.auto_fetch_public_ip,
+                Box::new(TogglePublicIpAutoFetch),
+            )
             .header(tr(cx, "shell-menu-settings-language-group"))
             .submenu(
                 tr(cx, "shell-menu-settings-language"),
@@ -91,6 +140,7 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
                 language_submenu,
             )
             .separator()
+            .item(tr(cx, "shell-menu-settings-all"), Box::new(OpenSettings))
             .item(tr(cx, "shell-menu-settings-reset"), Box::new(ResetSettings))
     })
 }
@@ -98,6 +148,18 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
 fn settings_now(cx: &App) -> Settings {
     cx.try_global::<TlSettings>()
         .map_or_else(Settings::default, |_| TlSettings::settings(cx).clone())
+}
+
+/// The Tab Switch value text, "250 ms". Translated once per menu open; the slider formats each
+/// value into the translated text without `cx`.
+fn ms_text(cx: &App) -> impl Fn(f32) -> SharedString + 'static {
+    const MARK: &str = "\u{1}";
+    let template = tr_args(
+        cx,
+        "shell-menu-settings-tab-switch-ms",
+        &[("ms", FluentValue::from(MARK))],
+    );
+    move |v| template.replace(MARK, &format!("{v:.0}")).into()
 }
 
 fn toggle(key: SettingKey) -> Box<ToggleSetting> {

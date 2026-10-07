@@ -24,7 +24,8 @@ use tl_model::settings::{
 };
 use tl_model::table::TableMode;
 use tl_ui::actions::{
-    MenuId, OpenRunDialog, Quit, SetViewMode, bind_keys_global, register_global_handlers,
+    MenuId, OpenRunDialog, OpenSettings, Quit, SetViewMode, bind_keys_global,
+    register_global_handlers,
 };
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::components::slider::TlSliderEvent;
@@ -804,7 +805,7 @@ fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
         .collect()
 }
 
-const SETTINGS_ROOT: [&str; 14] = [
+const SETTINGS_ROOT: [&str; 17] = [
     "header:Monitoring",
     "item:Refresh",
     "item:Network transfer unit",
@@ -813,12 +814,15 @@ const SETTINGS_ROOT: [&str; 14] = [
     "item:Animations",
     "item:Smooth Graphs",
     "item:Smooth Scroll",
+    "item:Tab Switch 250 ms",
     "item:Close with Esc",
     "header:Window & startup",
     "item:Default tab",
+    "item:Auto-fetch Public IP on launch",
     "header:Language",
     "item:Language:",
     "separator",
+    "item:All settings…",
 ];
 
 /// The labels of an open Settings submenu: every drawn item label not in the root.
@@ -898,8 +902,8 @@ fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
         cx.global_mut::<ShellState>().built_tabs =
             [Tab::Processes, Tab::Performance].into_iter().collect();
     });
-    // Default tab is the eighth item.
-    keys(r.cx, "alt-s down down down down down down down right");
+    // Default tab is the ninth item.
+    keys(r.cx, "alt-s down down down down down down down down right");
     assert_eq!(
         settings_sub(r.cx),
         ["Processes", "Performance", "Last used"]
@@ -911,7 +915,8 @@ fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn language_submenu_p1(cx: &mut TestAppContext) {
     let r = rig(cx);
-    keys(r.cx, "alt-s up up right");
+    // Up from the top wraps to Reset, then All settings, then Language.
+    keys(r.cx, "alt-s up up up right");
     assert_eq!(
         settings_sub(r.cx),
         ["System default", "English (United States)"]
@@ -931,6 +936,149 @@ fn reset_item_dispatches(cx: &mut TestAppContext) {
     let r = rig(cx);
     keys(r.cx, "alt-s up enter");
     assert_eq!(r.resets.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
+}
+
+// Settings menu P2 rows (E21-010).
+
+/// The labels between `header` and the next header or separator.
+fn group(cx: &mut VisualTestContext, header: &str) -> Vec<String> {
+    shapes(cx)
+        .into_iter()
+        .skip_while(|s| *s != format!("header:{header}"))
+        .skip(1)
+        .take_while(|s| s.starts_with("item:"))
+        .map(|s| s["item:".len()..].to_owned())
+        .collect()
+}
+
+/// Clicks the drawn entry labelled `label`.
+fn click_label(cx: &mut VisualTestContext, label: &str) {
+    let at = entries(cx)
+        .into_iter()
+        .find(|e| e.label() == Some(label))
+        .unwrap_or_else(|| panic!("{label} drawn"))
+        .bounds()
+        .center();
+    click(cx, at);
+}
+
+#[gpui_kit::test]
+fn settings_menu_p2_order(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s");
+    assert_eq!(
+        group(r.cx, "Motion & interaction"),
+        [
+            "Animations",
+            "Smooth Graphs",
+            "Smooth Scroll",
+            "Tab Switch 250 ms",
+            "Close with Esc"
+        ]
+    );
+    assert_eq!(
+        group(r.cx, "Window & startup"),
+        ["Default tab", "Auto-fetch Public IP on launch"]
+    );
+    let tail: Vec<String> = shapes(r.cx).into_iter().rev().take(3).collect();
+    assert_eq!(
+        tail,
+        [
+            "item:Reset Settings to Defaults",
+            "item:All settings…",
+            "separator"
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn settings_menu_tab_switch_slider(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    assert_eq!(settings(r.cx).motion.tab_switch_ms, 250);
+    keys(r.cx, "alt-s");
+    assert!(shapes(r.cx).contains(&"item:Tab Switch 250 ms".to_owned()));
+    let state = slider_states(r.cx)[4].clone();
+    let before = r.persists.get();
+    // A drag moves the slider, then the slider emits.
+    r.cx.update(|_, cx| tl_ui::components::slider::set_from_elsewhere(&state, 300., cx));
+    emit(r.cx, &state, TlSliderEvent::Preview(300.));
+    assert_eq!(
+        settings(r.cx).motion.tab_switch_ms,
+        300,
+        "applied in memory"
+    );
+    assert_eq!(r.persists.get(), before, "a Change never persists");
+    emit(r.cx, &state, TlSliderEvent::Commit(300.));
+    assert_eq!(settings(r.cx).motion.tab_switch_ms, 300);
+    assert_eq!(r.persists.get(), before + 1, "the release persists once");
+    assert!(shapes(r.cx).contains(&"item:Tab Switch 300 ms".to_owned()));
+    assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
+
+    // Refresh is highlighted; six Downs reach Tab Switch, Right steps by 10.
+    keys(r.cx, "down down down down down down right");
+    assert_eq!(settings(r.cx).motion.tab_switch_ms, 310);
+    assert_eq!(r.persists.get(), before + 2);
+}
+
+fn set_notice_accepted(cx: &mut VisualTestContext, accepted: bool) {
+    cx.update(|_, cx| {
+        TlSettings::update(cx, |d| {
+            d.settings.network.public_ip_notice_accepted = accepted
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn settings_menu_public_ip_toggle(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    set_notice_accepted(r.cx, true);
+    assert!(!settings(r.cx).network.auto_fetch_public_ip);
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Auto-fetch Public IP on launch");
+    assert!(settings(r.cx).network.auto_fetch_public_ip);
+    assert_eq!(open_menu(r.cx), None);
+
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Auto-fetch Public IP on launch");
+    assert!(!settings(r.cx).network.auto_fetch_public_ip, "off again");
+}
+
+#[gpui_kit::test]
+fn settings_menu_public_ip_asks_first(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    set_notice_accepted(r.cx, false);
+    let windows = r.cx.update(|_, cx| cx.windows().len());
+    keys(r.cx, "alt-s");
+    click_label(r.cx, "Auto-fetch Public IP on launch");
+    assert!(
+        !settings(r.cx).network.auto_fetch_public_ip,
+        "not before the notice is accepted"
+    );
+    assert_eq!(
+        r.cx.update(|_, cx| cx.windows().len()),
+        windows + 1,
+        "the public IP notice opened"
+    );
+}
+
+#[gpui_kit::test]
+fn settings_menu_all_settings_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    let opened = Rc::new(Cell::new(0));
+    let count = opened.clone();
+    r.cx.update(|_, cx| {
+        cx.on_action(move |_: &OpenSettings, _| count.set(count.get() + 1));
+    });
+    assert_eq!(hint_for(&mut r, &OpenSettings).as_deref(), Some("Ctrl+,"));
+    keys(r.cx, "alt-s up up");
+    let row = entries(r.cx)
+        .into_iter()
+        .find(|e| e.selected() == Some(true))
+        .and_then(|e| e.label().map(str::to_owned));
+    assert_eq!(row.as_deref(), Some("All settings…"));
+    keys(r.cx, "enter");
+    assert_eq!(opened.get(), 1, "OpenSettings dispatched");
     assert_eq!(open_menu(r.cx), None);
 }
 
