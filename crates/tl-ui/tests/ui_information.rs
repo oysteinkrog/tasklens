@@ -1888,8 +1888,7 @@ mod page {
         assert_eq!(clipboard(&mut r).as_deref(), Some("6.17.1"));
 
         // No selection: everything, whatever the filter.
-        r.vcx
-            .update(|window, cx| gpui_kit::base::TextSelection::clear(window, cx));
+        r.vcx.update(gpui_kit::base::TextSelection::clear);
         focus_page(&mut r);
         r.vcx.simulate_keystrokes("ctrl-c");
         r.vcx.run_until_parked();

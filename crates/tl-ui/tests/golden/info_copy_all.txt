@@ -1,0 +1,110 @@
+Operating System
+OS name: CachyOS Linux
+Version: Rolling
+Build: Not reported
+Kernel: 6.17.1-2-cachyos
+Kernel version: #1 SMP PREEMPT_DYNAMIC Mon, 06 Oct 2025 10:00:00 +0000
+Architecture: x86_64 (64-bit)
+Install date: Not reported
+Package manager: pacman 7.0.0
+Machine ID: 0123456789abcdef0123456789abcdef
+
+Processor
+Name: AMD Ryzen 9 7950X3D 16-Core Processor
+Vendor: AuthenticAMD
+Architecture: x86_64
+Identifier: Family 25 Model 97 Stepping 2
+Cores: 16
+Logical processors: 32
+Base speed: 4200 MHz
+Max speed: 5759 MHz
+Microcode: 0xa601209
+Flags summary: Virtualization: Yes (AMD-V), AVX-512: Yes
+
+System
+Computer name: Hawk desktop (hawk)
+User name: oystein
+System uptime: 2 days, 2h 58m 15s
+Boot time: Not reported
+Process count: 412
+Thread count: 5 596
+Handle count: 253 248
+Desktop: KDE Plasma 6.4.5
+Windowing system: Wayland
+Session type: wayland
+Virtual terminal: 2
+
+Memory
+Total physical: 62.70 GiB
+Available physical: 28.44 GiB
+Memory usage: 54.6%
+Committed: 46.18 GiB
+Commit limit: 67.16 GiB
+Peak committed (since tasklens started): 48.02 GiB
+Page size: 4096 bytes
+Huge page size: 2.00 MiB
+Swap total: 64.00 GiB
+zram size: 31.35 GiB
+
+Memory modules
+Module: Module 1
+Slot: P0 CHANNEL A (DIMM 1)
+Capacity: 32.00 GiB
+Speed: 6000 MT/s
+Type: DDR5
+Form factor: DIMM
+Manufacturer: Kingston
+Part number: KF560C30-32
+
+Module: Module 2
+Slot: P0 CHANNEL B (DIMM 1)
+Capacity: 32.00 GiB
+Speed: 6000 MT/s
+Type: DDR5
+Form factor: DIMM
+Manufacturer: Kingston
+Part number: KF560C30-32
+
+Disk drives
+Model: Samsung SSD 990 PRO 2TB
+Type: SSD
+Interface: NVMe
+Capacity: 1.82 TiB
+Space: 812.40 GiB free of 1.82 TiB
+Volumes: /, /home
+Serial: S6Z2NF0W123456
+
+BIOS/Firmware
+Firmware type: UEFI
+BIOS vendor: American Megatrends International, LLC.
+BIOS version: 3001
+BIOS date: 2025-02-14
+BIOS release: 5.35
+Secure Boot: Enabled
+
+Motherboard
+Manufacturer: ASUSTeK COMPUTER INC.
+Product: ROG STRIX X670E-E GAMING WIFI
+Version: Rev 1.xx
+System vendor: ASUS
+System product: System Product Name
+Chassis type: Desktop
+Serial number: Restricted
+
+Graphics
+Name: NVIDIA GeForce RTX 4090
+Driver version: Collecting…
+Kernel module: Collecting…
+Vulkan version: Collecting…
+OpenGL version: Collecting…
+Temperature: 52 °C
+Temperature source: NVML (GPU core)
+Dedicated memory: 24.00 GiB
+Shared memory: Collecting…
+Resolution: 2560x1440 @ 60 Hz, 3840x2160 @ 144 Hz (primary)
+
+Network adapters
+Connection: enp6s0 (Ethernet)
+Details: Intel Ethernet Controller I225-V, igc, 2500 Mbps
+IP address: 192.168.1.10/24, fe80::1c2:3ff:fe4a:5b6c/64
+MAC address: a8:a1:59:12:34:56
