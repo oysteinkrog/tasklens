@@ -13,12 +13,13 @@
 
 #[cfg(any(test, feature = "test-hooks"))]
 use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, FocusHandle,
-    Focusable, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StyleRefinement, Styled as _, Subscription, Window, div, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
+    FocusHandle, Focusable, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
+    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, div, point, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
@@ -31,18 +32,22 @@ use tl_model::time::now_boot_ns;
 use tl_model::units::{self, NetUnit};
 use tl_model::validity::Validity;
 
+use super::actions::NoOp;
 use super::details::{Fallback, KeyValueModel};
-use super::page::{DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text, page_words};
+use super::page::{
+    DetailsLinkClick, DevicePage, DevicePageFrame, GRAPH_H_SINGLE, header_text, page_words,
+};
 use super::{DeviceKey, DeviceKind, DeviceRow, NetClass};
+use crate::actions::SetSetting;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
     ValueAlign, ValueFormat, YScale,
 };
-use crate::components::menu::TlMenu;
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, SettingKey, SettingValue, TlSettings};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
 /// Debug selector of the chart box.
@@ -408,8 +413,11 @@ fn sync_display_unit(model: &mut KeyValueModel, unit: NetworkUnit, auto_scale: b
             row.tooltip = Some(tip.text().clone());
             changed = true;
         }
-        if !row.link {
+        if !row.link || row.action.is_none() {
             row.link = true;
+            // The page takes the grid's link clicks (`details_link_click`), so this action is
+            // never dispatched; the grid draws a value as a link only when it has one.
+            row.action = Some(Box::new(NoOp));
             changed = true;
         }
     }
@@ -450,6 +458,8 @@ pub struct NetPage {
     /// The window of the last render, for the demand part.
     window: Option<AnyWindowHandle>,
     focus: FocusHandle,
+    /// Opens the Display unit menu under the value; built once.
+    link_click: DetailsLinkClick,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
@@ -512,6 +522,12 @@ impl NetPage {
             active: false,
             window: None,
             focus: cx.focus_handle(),
+            link_click: {
+                let page = cx.weak_entity();
+                Rc::new(move |n, bounds, window, cx| {
+                    let _ = page.update(cx, |p, cx| p.on_details_link(n, bounds, window, cx));
+                })
+            },
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -598,6 +614,44 @@ impl NetPage {
                 cx.notify();
             }
         }
+    }
+
+    /// A link click on visible Details row `n`: the Display unit value opens its menu under
+    /// `bounds`; any other link dispatches its own action.
+    fn on_details_link(
+        &mut self,
+        n: usize,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.details.rows.iter().filter(|r| !r.hidden).nth(n) else {
+            return;
+        };
+        if row.label == ROW_DISPLAY_UNIT {
+            self.open_unit_menu(bounds, window, cx);
+        } else if let Some(action) = &row.action {
+            window.dispatch_action(action.boxed_clone(), cx);
+        }
+    }
+
+    /// The Display unit menu (PERF-057): Bits per second and Bytes per second, the current one
+    /// checked, each setting `units.network`. Opens with its top left at the value's bottom left.
+    fn open_unit_menu(&self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
+        let unit = self.settings.unit;
+        let (bits, bytes) = (tr(cx, KEY_UNIT_BITS), tr(cx, KEY_UNIT_BYTES));
+        let set = |value: &'static str| {
+            Box::new(SetSetting {
+                key: SettingKey::UnitsNetwork,
+                value: SettingValue::Str(SharedString::new_static(value)),
+            })
+        };
+        let menu = TlMenu::build(window, cx, self.focus.clone(), |menu, _, _| {
+            menu.radio_item(bits, unit == NetworkUnit::Bits, set("bits"))
+                .radio_item(bytes, unit == NetworkUnit::Bytes, set("bytes"))
+        });
+        let at = point(bounds.left(), bounds.bottom());
+        open_context_menu_at(at, window, cx, menu);
     }
 
     /// Brings the P1 Details rows up to date. True when one changed.
@@ -720,6 +774,10 @@ impl DevicePage for NetPage {
 
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]> {
         SmallVec::new()
+    }
+
+    fn details_link_click(&self) -> Option<DetailsLinkClick> {
+        Some(self.link_click.clone())
     }
 
     fn set_active(&mut self, active: bool, cx: &mut App) {

@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
-    TestAppContext, VisualTestContext, Window, div, px,
+    AppContext as _, Context, Entity, IntoElement, Modifiers, ParentElement as _, Render,
+    Styled as _, TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::client::EngineClient;
 use tl_model::demand::Demand;
@@ -23,6 +23,7 @@ use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
 use tl_ui::components::kv_grid;
+use tl_ui::components::menu::{context_menu_layer, open_context_menu};
 use tl_ui::demand::DemandAggregator;
 use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
@@ -46,8 +47,12 @@ struct Host {
 }
 
 impl Render for Host {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1000.)).h(px(2000.)).child(self.page.clone())
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(1000.))
+            .h(px(2000.))
+            .child(self.page.clone())
+            .children(context_menu_layer(window, cx))
     }
 }
 
@@ -147,6 +152,8 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
             startup_toasts: Vec::new(),
         });
         TlSettings::init(cx);
+        tl_ui::actions::register_global_handlers(cx);
+        tl_ui::components::menu::bind_keys(cx);
     });
     let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
     let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
@@ -525,6 +532,50 @@ mod details {
             ]
             .map(|(l, v)| (l.to_string(), v.to_string()))
         );
+    }
+
+    /// A click on the Display unit value opens the unit menu under it; choosing Bytes per
+    /// second sets `units.network` and the row re-reads `MiB/s`.
+    #[gpui_kit::test]
+    fn display_unit_menu_sets_global(cx: &mut TestAppContext) {
+        let mut sys = system(1000);
+        Arc::make_mut(&mut sys.nets)[0].1 = record();
+        let r = open(cx, with_unit(NetworkUnit::Bits), sys);
+        let link = r
+            .vcx
+            .debug_bounds("TlKv-value-4")
+            .expect("Display unit value drawn");
+        r.vcx.simulate_click(link.center(), Modifiers::none());
+        draw(r.vcx);
+        let menu = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("the click opened the menu");
+        let entries = r
+            .vcx
+            .update(|window, cx| menu.read(cx).entries_for_test(window));
+        let items: Vec<(String, bool)> = entries
+            .iter()
+            .map(|e| (e.label.as_deref().unwrap_or("").to_owned(), e.checked))
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("Bits per second".to_owned(), true),
+                ("Bytes per second".to_owned(), false)
+            ]
+        );
+
+        // The first "down" highlights the first item.
+        r.vcx.simulate_keystrokes("down down enter");
+        draw(r.vcx);
+        let unit = r.vcx.update(|_, cx| TlSettings::settings(cx).units.network);
+        assert_eq!(unit, NetworkUnit::Bytes);
+        let page = r.page.clone();
+        let shown = r
+            .vcx
+            .update(|_, cx| value(page.read(cx).details(), "Display unit"));
+        assert_eq!(shown.as_deref(), Some("MiB/s"));
     }
 
     /// The page re-reads the rates and the Display unit when `units.network` changes.

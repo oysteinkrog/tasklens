@@ -12,9 +12,9 @@ use std::rc::Rc;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AnyView, App, AppContext as _, Context, ElementId, Entity, FocusHandle, FontWeight,
-    Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
+    AnyElement, AnyView, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
+    FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::devices::{DeviceEntry, DeviceIdentity};
@@ -171,12 +171,20 @@ pub trait DevicePage: 'static {
     fn copy_text(&self, out: &mut String);
     /// Header toggles, then block controls (UI-SHL-121).
     fn focus_order(&self) -> SmallVec<[FocusHandle; 4]>;
+    /// Takes the link clicks of the Details grid, with the flat row index and the link's bounds
+    /// (`TlKeyValueGrid::on_link_click`). `None` keeps the links dispatching their actions.
+    fn details_link_click(&self) -> Option<DetailsLinkClick> {
+        None
+    }
     /// Called with true when the page becomes the shown page and false when it stops being
     /// shown (R-229; E25-010 wires the calls).
     fn set_active(&mut self, active: bool, cx: &mut App) {
         let _ = (active, cx);
     }
 }
+
+/// A Details link click handler: flat row index and the link's bounds.
+pub type DetailsLinkClick = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
 
 /// The text of a present inventory or details field: Valid or Stale and not empty.
 fn shown(text: &str, validity: Validity) -> Option<&str> {
@@ -396,7 +404,13 @@ impl DevicePageFrame<'_> {
             .child(div().h(px(DETAILS_GAP * s)))
             .child(heading)
             .child(div().h(m.sp[4]))
-            .child(render_details(page.details(), m, cx))
+            .child({
+                let grid = render_details(page.details(), m, cx);
+                match page.details_link_click() {
+                    Some(click) => grid.on_link_click(move |n, b, w, cx| click(n, b, w, cx)),
+                    None => grid,
+                }
+            })
             .children(
                 page.blocks(window, cx)
                     .into_iter()
