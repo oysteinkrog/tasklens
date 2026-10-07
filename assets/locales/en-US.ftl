@@ -625,6 +625,11 @@ sys-sys005-could-not-load-services = Could not load services
 sys-sys005-could-not-load-startup-entries = Could not load startup entries
 sys-sys005-could-not-load-connections = Could not load connections
 
+# System table copy commands (UI-SYS-006, tasklens-hk6.8)
+sys-sys006-copied-value = Copied: { $value }
+sys-sys006-failed-to-copy-to-clipboard = Failed to copy to clipboard
+sys-sys006-copied-to-clipboard = Copied to clipboard
+
 # System table action toasts (UI-SYS-007, tasklens-hk6.9)
 sys-sys007-details = Details
 sys-sys007-close = Close
