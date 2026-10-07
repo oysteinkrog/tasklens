@@ -854,3 +854,386 @@ mod action_texts {
         );
     }
 }
+
+/// `SysActions`: system-table action toasts and the pending map (tasklens-hk6.9).
+#[cfg(feature = "test-hooks")]
+mod sys_actions {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use smallvec::SmallVec;
+    use tl_model::actions::{
+        ActionError, ActionEvent, ActionId, ActionKind, ActionRequest, ActionState, ActionTarget,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::table::{Manager, UnitRef};
+    use tl_ui::action_tracker::{ActionTracker, PushedToast, ToastTexts};
+    use tl_ui::components::toast::{self, ToastKey, ToastKind, ToastQueue};
+    use tl_ui::pages::sys_table::{ActionKindTag, ActionTexts, SysActions, SysActionsEvent};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    struct Host;
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("content")
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        vcx: VisualTestContext,
+        queue: Entity<ToastQueue>,
+        tracker: Entity<ActionTracker>,
+        actions: Entity<SysActions>,
+        events: Rc<RefCell<Vec<SysActionsEvent>>>,
+    }
+
+    impl Rig {
+        fn submit(
+            &mut self,
+            tag: ActionKindTag,
+            kind: ActionKind,
+            targets: impl IntoIterator<Item = ActionTarget>,
+            texts: ActionTexts,
+        ) -> Option<ActionId> {
+            let targets: SmallVec<[ActionTarget; 1]> = targets.into_iter().collect();
+            let actions = self.actions.clone();
+            let id = self.vcx.update(|window, cx| {
+                actions.update(cx, |a, cx| a.submit(kind, tag, targets, texts, window, cx))
+            });
+            self.vcx.run_until_parked();
+            id
+        }
+
+        fn emit(&mut self, id: ActionId, target: Option<u16>, state: ActionState) {
+            self.engine.emit(ActionEvent { id, target, state });
+            self.vcx.run_until_parked();
+        }
+
+        /// `Started`, one state per target, then the summary of those states.
+        fn finish(&mut self, id: ActionId, states: &[ActionState]) {
+            self.emit(id, None, ActionState::Started);
+            for (i, state) in states.iter().enumerate() {
+                self.emit(id, Some(i as u16), state.clone());
+            }
+            self.emit(id, None, ActionState::summarize(states));
+        }
+
+        fn pushed(&mut self) -> Vec<PushedToast> {
+            self.actions
+                .read_with(&self.vcx, |a, _| a.pushed().to_vec())
+        }
+
+        fn visible(&mut self) -> Vec<String> {
+            self.queue.read_with(&self.vcx, |q, _| {
+                q.visible_texts().iter().map(|t| t.to_string()).collect()
+            })
+        }
+
+        fn pending(&mut self, target: &ActionTarget, tag: ActionKindTag) -> bool {
+            self.actions
+                .read_with(&self.vcx, |a, _| a.is_pending(target, tag))
+        }
+
+        fn actions_sent(&self) -> Vec<ActionRequest> {
+            self.engine
+                .commands()
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Action(r) => Some(r),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        cx.update(|cx| {
+            super::setup(cx);
+            toast::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let engine = FakeEngine::new();
+        let window = cx.add_window(|window, cx| {
+            let host = cx.new(|_| Host);
+            Root::new(host, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(64.))));
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let tracker = vcx.update(|_, cx| cx.new(|cx| ActionTracker::new(client, cx)));
+        let actions = vcx.update(|_, cx| cx.new(|cx| SysActions::new(&tracker, cx)));
+        let events: Rc<RefCell<Vec<SysActionsEvent>>> = Rc::default();
+        let sink = events.clone();
+        vcx.update(|_, cx| {
+            cx.subscribe(&actions, move |_, ev: &SysActionsEvent, _| {
+                sink.borrow_mut().push(ev.clone())
+            })
+            .detach();
+        });
+        vcx.run_until_parked();
+        Rig {
+            engine,
+            vcx,
+            queue,
+            tracker,
+            actions,
+            events,
+        }
+    }
+
+    fn unit(name: &str) -> ActionTarget {
+        ActionTarget::Unit(UnitRef {
+            manager: Manager::System,
+            name: name.into(),
+        })
+    }
+
+    fn units(n: usize) -> Vec<ActionTarget> {
+        (0..n).map(|i| unit(&format!("u{i}.service"))).collect()
+    }
+
+    fn start_texts() -> ActionTexts {
+        ActionTexts {
+            pending_one: "Starting service...".into(),
+            pending_many: "Starting { $n } services...".into(),
+            done_one: "Service started".into(),
+            done_many: "{ $n } services started".into(),
+            partial_many: "{ $ok } of { $n } services started. { $failed } failed.".into(),
+            failed_prefix: "Failed to start service".into(),
+            failed_suffix: true,
+            unknown: "Service action finished.".into(),
+            busy: "A service action is already in progress.".into(),
+            failed_button: None,
+        }
+    }
+
+    fn start(r: &mut Rig, targets: Vec<ActionTarget>) -> ActionId {
+        r.submit(
+            ActionKindTag::Start,
+            ActionKind::UnitStart,
+            targets,
+            start_texts(),
+        )
+        .expect("sent")
+    }
+
+    const FAIL: ActionState = ActionState::Failed(ActionError::PermissionDenied);
+
+    #[gpui_kit::test]
+    fn action_toast_replaced_in_place(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let id = start(&mut r, vec![unit("sshd.service")]);
+        assert_eq!(r.visible(), ["Starting service..."]);
+        r.emit(id, None, ActionState::Started);
+        assert_eq!(r.visible(), ["Starting service..."]);
+        r.emit(id, Some(0), ActionState::Succeeded);
+        r.emit(id, None, ActionState::Succeeded);
+
+        assert_eq!(r.visible(), ["Service started"], "one toast throughout");
+        let pushed = r.pushed();
+        assert!(pushed.iter().all(|t| t.key == Some(ToastKey(id.0))));
+        assert_eq!(pushed.last().map(|t| t.kind), Some(ToastKind::Success));
+    }
+
+    #[gpui_kit::test]
+    fn failed_toast_reads_the_dbus_reason(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let id = start(&mut r, vec![unit("sshd.service")]);
+        let err = ActionError::UnitJob {
+            result: "failed".into(),
+            error_name: Some("org.freedesktop.DBus.Error.InteractiveAuthorizationRequired".into()),
+        };
+        r.finish(id, &[ActionState::Failed(err)]);
+        assert_eq!(
+            r.visible(),
+            ["Failed to start service: no authentication agent is running"]
+        );
+        assert_eq!(r.pushed().last().map(|t| t.kind), Some(ToastKind::Error));
+    }
+
+    #[gpui_kit::test]
+    fn multi_target_summary_toast_at_4(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let id = start(&mut r, units(6));
+        let pushed = r.pushed();
+        assert_eq!(pushed.len(), 1, "no per-target toast");
+        assert_eq!(pushed[0].kind, ToastKind::Progress);
+        assert_eq!(&*pushed[0].text, "Starting 6 services...");
+        assert_eq!(pushed[0].key, Some(ToastKey(id.0)));
+
+        let ok = ActionState::Succeeded;
+        r.finish(
+            id,
+            &[ok.clone(), FAIL, ok.clone(), FAIL, ok.clone(), ok.clone()],
+        );
+        let last = r.pushed().pop().expect("summary");
+        assert_eq!(last.kind, ToastKind::Warning);
+        assert_eq!(&*last.text, "4 of 6 services started. 2 failed.");
+        assert_eq!(last.button.as_deref(), Some("Details"));
+        assert_eq!(
+            r.pushed().len(),
+            2,
+            "only the summary replaced the progress toast"
+        );
+        let lines = r
+            .actions
+            .read_with(&r.vcx, |a, _| a.details_lines(id))
+            .expect("details kept");
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("u1.service: "), "{lines:?}");
+        assert!(lines[1].starts_with("u3.service: "), "{lines:?}");
+    }
+
+    #[gpui_kit::test]
+    fn three_targets_three_toasts(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let id = start(&mut r, units(3));
+        let pushed = r.pushed();
+        assert_eq!(pushed.len(), 3);
+        let keys: std::collections::HashSet<_> = pushed.iter().map(|t| t.key).collect();
+        assert_eq!(keys.len(), 3, "distinct keys");
+        assert!(!keys.contains(&Some(ToastKey(id.0))));
+        r.finish(id, &[ActionState::Succeeded, FAIL, ActionState::Succeeded]);
+        let mut visible = r.visible();
+        visible.sort();
+        assert_eq!(
+            visible,
+            [
+                "Failed to start service: not authorized",
+                "Service started",
+                "Service started"
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn pending_target_disables_same_action(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let sshd = unit("sshd.service");
+        start(&mut r, vec![sshd.clone()]);
+        assert!(r.pending(&sshd, ActionKindTag::Start));
+        assert!(!r.pending(&sshd, ActionKindTag::Stop));
+
+        let again = r.submit(
+            ActionKindTag::Start,
+            ActionKind::UnitStart,
+            [sshd.clone()],
+            start_texts(),
+        );
+        assert_eq!(again, None);
+        assert_eq!(r.actions_sent().len(), 1, "no second request");
+        let last = r.pushed().pop().expect("busy toast");
+        assert_eq!(last.kind, ToastKind::Warning);
+        assert_eq!(&*last.text, "A service action is already in progress.");
+    }
+
+    #[gpui_kit::test]
+    fn empty_pending_text_pushes_no_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let texts = ActionTexts {
+            pending_one: "".into(),
+            failed_prefix: "Could not open the link".into(),
+            failed_suffix: false,
+            ..start_texts()
+        };
+        let id = r
+            .submit(
+                ActionKindTag::Other,
+                ActionKind::OpenUri("https://example.org".into()),
+                [],
+                texts,
+            )
+            .expect("sent");
+        assert!(r.pushed().is_empty());
+        r.emit(id, None, ActionState::Started);
+        assert!(r.visible().is_empty(), "nothing until the final event");
+        r.emit(id, None, ActionState::Failed(ActionError::Unsupported));
+        assert_eq!(r.visible(), ["Could not open the link"], "prefix alone");
+    }
+
+    #[gpui_kit::test]
+    fn empty_done_text_no_toast(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let texts = ActionTexts {
+            done_one: "".into(),
+            ..start_texts()
+        };
+        let id = r
+            .submit(
+                ActionKindTag::StartupRunNow,
+                ActionKind::StartupRunNow,
+                [unit("a.service")],
+                texts,
+            )
+            .expect("sent");
+        assert_eq!(r.visible(), ["Starting service..."]);
+        r.finish(id, &[ActionState::Succeeded]);
+        assert!(r.visible().is_empty(), "the toast is removed");
+    }
+
+    #[gpui_kit::test]
+    fn service_job_progress_has_no_cap(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let sshd = unit("sshd.service");
+        let id = start(&mut r, vec![sshd.clone()]);
+        r.emit(id, None, ActionState::Started);
+        r.vcx.executor().advance_clock(Duration::from_secs(130));
+        r.vcx.run_until_parked();
+        assert_eq!(r.visible(), ["Starting service..."]);
+        assert_eq!(r.pushed().len(), 1);
+        assert_eq!(r.pushed()[0].kind, ToastKind::Progress);
+        assert!(r.pending(&sshd, ActionKindTag::Start));
+        assert_eq!(r.tracker.read_with(&r.vcx, |t, _| t.pending_len()), 1);
+    }
+
+    #[gpui_kit::test]
+    fn sys_actions_follow_tracker_events_by_id(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let sshd = unit("sshd.service");
+        let mine = start(&mut r, vec![sshd.clone()]);
+        r.events.borrow_mut().clear();
+
+        // Another owner's request on the same unit, through the tracker directly.
+        let queue = r.queue.downgrade();
+        let tracker = r.tracker.clone();
+        let request = ActionRequest {
+            id: ActionId(0),
+            kind: ActionKind::UnitStop,
+            targets: [sshd.clone()].into_iter().collect(),
+            privileged: false,
+        };
+        let other = r
+            .vcx
+            .update(|_, cx| {
+                tracker.update(cx, |t, cx| {
+                    t.track(request, queue, ToastTexts::new("Stopped", "No."), cx)
+                })
+            })
+            .expect("tracked");
+        r.vcx.run_until_parked();
+        r.finish(other, &[ActionState::Succeeded]);
+        assert!(
+            r.pending(&sshd, ActionKindTag::Start),
+            "other id: no change"
+        );
+        assert!(r.events.borrow().is_empty());
+
+        r.finish(mine, &[ActionState::Succeeded]);
+        assert!(!r.pending(&sshd, ActionKindTag::Start));
+        assert_eq!(
+            *r.events.borrow(),
+            [SysActionsEvent::PendingChanged { target: sshd }]
+        );
+    }
+}
