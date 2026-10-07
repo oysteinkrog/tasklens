@@ -510,7 +510,7 @@ mod row_builders {
 
     fn local(unix_s: i64) -> String {
         let z = jiff::Timestamp::from_second(unix_s)
-            .unwrap()
+            .expect("time in range")
             .to_zoned(jiff::tz::TimeZone::system());
         z.strftime("%Y-%m-%d %H:%M:%S").to_string()
     }

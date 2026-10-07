@@ -10,7 +10,6 @@
 //! the word (UI-SYS-082). Unsupported inventory fields read "Not reported" (R-050), and so does
 //! a Valid field with empty text. Values are local machine data and are never logged.
 
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
