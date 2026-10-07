@@ -444,6 +444,11 @@ impl MemoryPage {
         &self.words
     }
 
+    /// The page is the shown page (`set_active`).
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
     /// This page's demand part while it is active: memory only.
     pub fn demand_part(&self) -> Demand {
         Demand {

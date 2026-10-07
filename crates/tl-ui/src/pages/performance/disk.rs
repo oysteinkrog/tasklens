@@ -358,6 +358,11 @@ impl DiskPage {
         &self.words
     }
 
+    /// The page is the shown page (`set_active`).
+    pub fn is_active(&self) -> bool {
+        self.is_active
+    }
+
     /// This page's demand part while it is active: disks only.
     pub fn demand_part(&self) -> Demand {
         Demand {

@@ -24,6 +24,9 @@ use tl_model::validity::Validity;
 use super::actions::PerfShowMiniWindow;
 use super::cpu::CpuPage;
 use super::details::{KeyValueModel, Template, render_details};
+use super::disk::DiskPage;
+use super::memory::MemoryPage;
+use super::net::NetPage;
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::components::menu::TlMenu;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
@@ -500,6 +503,15 @@ pub fn build_page(
     match row.kind {
         DeviceKind::Cpu => cx
             .new(|cx| CpuPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
+        DeviceKind::Memory => cx
+            .new(|cx| MemoryPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
+        DeviceKind::Disk => cx
+            .new(|cx| DiskPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
+            .into(),
+        DeviceKind::Net => cx
+            .new(|cx| NetPage::new(key.clone(), row.clone(), hub.clone(), demand.clone(), cx))
             .into(),
         _ => cx.new(|cx| PlaceholderPage::new(key.clone(), cx)).into(),
     }
