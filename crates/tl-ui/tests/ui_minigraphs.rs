@@ -501,6 +501,7 @@ mod card {
 }
 
 /// The panel (tasklens-xdh.6, E26-004, UI-PRF-040).
+#[cfg(feature = "test-hooks")]
 mod panel {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -1003,6 +1004,7 @@ mod panel {
 }
 
 /// The panel mounted in the Processes page (tasklens-xdh.8, UI-PRF-040).
+#[cfg(feature = "test-hooks")]
 mod mounted {
     use std::sync::Arc;
 
