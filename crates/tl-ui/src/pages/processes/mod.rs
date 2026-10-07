@@ -56,7 +56,7 @@ use crate::table::actions::{CollapseAll, CopyCell};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
-use crate::window::main::ShellPage;
+use crate::window::main::{GlobalShellEvents, PauseChanged, ShellPage};
 use crate::window::status::StatusChanged;
 use crate::windows::actions::SetAffinity;
 
@@ -86,8 +86,8 @@ pub struct ProcessesPage {
     /// The table body's focus handle.
     focus: FocusHandle,
     client: Arc<dyn EngineClient>,
-    /// Settings, metrics and strings observers, and the table's copy events.
-    _subs: SmallVec<[Subscription; 4]>,
+    /// Settings, metrics and strings observers, the table's copy events and Ctrl-pause.
+    _subs: SmallVec<[Subscription; 5]>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 4],
     style_version: u64,
@@ -100,6 +100,9 @@ pub struct ProcessesPage {
     jump: jump::JumpState,
     /// The shell filter box's events for this tab (UI-PRC-016).
     filter: FilterBinding,
+    /// Ctrl-pause (UI-PRC-017): the snapshot the table froze on. Hub changes are ignored while
+    /// it is set; the hub keeps the latest, so at most one extra snapshot is held (ADR-005).
+    paused: Option<Arc<Snapshot>>,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -147,6 +150,12 @@ impl ProcessesPage {
                 toast(ToastKind::Success, tr(cx, "processes-toast-copied"), cx);
             }
         }));
+        // The shell owns the Ctrl rule and the chip's paused tag (E20-012).
+        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|e| e.0.clone()) {
+            subs.push(cx.subscribe(&events, |this, _, ev: &PauseChanged, cx| {
+                this.set_paused(ev.0, cx);
+            }));
+        }
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 4], |tl| SECTIONS.map(|s| tl.version(s)));
@@ -164,6 +173,29 @@ impl ProcessesPage {
             confirm_words: ConfirmWords::new(cx),
             jump: jump::JumpState::default(),
             filter: FilterBinding::new(cx),
+            paused: None,
+        }
+    }
+
+    /// True while Ctrl-pause holds the table on one snapshot (UI-PRC-017).
+    pub fn is_paused(&self) -> bool {
+        self.paused.is_some()
+    }
+
+    /// Ctrl-pause start: the table keeps drawing the snapshot it shows and skips anchoring.
+    /// End: the latest snapshot and view are installed, the table renders once and anchors once.
+    fn set_paused(&mut self, paused: bool, cx: &mut Context<Self>) {
+        if paused == self.paused.is_some() {
+            return;
+        }
+        if paused {
+            let shown = Arc::clone(self.table.read(cx).delegate.snapshot());
+            self.paused = Some(shown);
+            self.table.update(cx, |t, _| t.paused = true);
+        } else {
+            self.paused = None;
+            self.table.update(cx, |t, _| t.paused = false);
+            self.on_snapshot(DRAWN, cx);
         }
     }
 
@@ -182,15 +214,19 @@ impl ProcessesPage {
     }
 
     /// One hub change. Only a change to a drawn part reaches the delegate, and the table is
-    /// notified only when the view was built for the current query.
+    /// notified only when the view was built for the current query. While paused only an unsent
+    /// query is retried.
     fn on_snapshot(&mut self, mask: ComponentMask, cx: &mut Context<Self>) {
+        let paused = self.paused.is_some();
         let hub = cx.global::<GlobalHub>().0.clone();
         let snapshot = Arc::clone(hub.read(cx).current());
         let client = &*self.client;
         self.table.update(cx, |t, cx| {
             let d = &mut t.delegate;
             d.query_mut().resend_if_unsent(client);
-            if !mask.intersects(DRAWN) || snapshot.table.query_generation != d.query().generation()
+            if paused
+                || !mask.intersects(DRAWN)
+                || snapshot.table.query_generation != d.query().generation()
             {
                 return;
             }
@@ -200,7 +236,9 @@ impl ProcessesPage {
                 cx.notify();
             }
         });
-        self.resolve_jump(cx);
+        if !paused {
+            self.resolve_jump(cx);
+        }
     }
 
     /// `processes.mode` sends a query; `appearance`, `units` and `tables` start a new style
