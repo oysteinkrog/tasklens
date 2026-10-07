@@ -566,17 +566,17 @@ mod panel {
         saved: Arc<Mutex<Vec<UiState>>>,
     }
 
-    /// Hosts the panel cached, as the Processes page does, in a 1000 × 600 window.
+    /// Hosts the panel cached over a 1000 × 600 box, as the Processes page does.
     struct Host {
         panel: Entity<MinigraphPanel>,
     }
 
     impl Render for Host {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().relative().size_full().child(
+            div().relative().w(px(1000.)).h(px(600.)).child(
                 self.panel
                     .clone()
-                    .cached(StyleRefinement::default().size_full()),
+                    .cached(StyleRefinement::default().absolute().inset_0()),
             )
         }
     }

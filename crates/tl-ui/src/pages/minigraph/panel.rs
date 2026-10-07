@@ -451,12 +451,14 @@ impl Render for MinigraphPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(any(test, feature = "test-hooks"))]
         self.render_count.set(self.render_count.get() + 1);
+        // The host mounts the panel cached with an `absolute().inset_0()` style over the
+        // Processes table; a cached view lays out as its own root, so the root fills that box.
         // No handlers on the panel itself, so it is no hitbox: only the cards take the pointer.
         let mut root = div()
             .id("MinigraphPanel")
             .debug_selector(|| "MinigraphPanel".into())
-            .absolute()
-            .inset_0()
+            .relative()
+            .size_full()
             .on_action(cx.listener(|this, _: &ResetMinigraphLayout, _, cx| this.reset(cx)))
             .on_action(cx.listener(|this, a: &MinigraphHide, _, cx| this.hide(a.id, cx)))
             .on_action(cx.listener(|this, a: &MinigraphRemove, _, cx| this.remove(a.id, cx)));
