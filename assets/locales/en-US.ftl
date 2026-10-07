@@ -948,7 +948,6 @@ lowmem-button-end-task = End Task
 lowmem-tooltip-end-task = Ends immediately, unsaved work is lost
 lowmem-tooltip-needs-admin = Needs administrator rights
 lowmem-a11y-end-task = End Task: { $name }
-lowmem-toast-ended = Task ended
 lowmem-toast-end-failed = End Task Failed.
 # About window (tasklens-bj6.17, UI-SHL-092).
 shell-about-title = tasklens About

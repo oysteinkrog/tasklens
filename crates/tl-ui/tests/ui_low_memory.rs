@@ -1051,7 +1051,8 @@ fn lowmem_end_task_no_confirmation(cx: &mut TestAppContext) {
 
     answer(cx, &engine, &sent[0], ActionState::Succeeded);
     assert!(!vcx.read(|cx| view.read(cx).is_ending(RowId::Process(key(30, 300)))));
-    assert_eq!(toasts(&mut vcx), ["Task ended"]);
+    // No success toast: the row leaving is the feedback.
+    assert!(toasts(&mut vcx).is_empty());
     // The row goes with the next sweep.
     sweep(cx, &engine, Vec::new(), Vec::new());
     assert!(names(&mut vcx, &view).is_empty());

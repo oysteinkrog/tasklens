@@ -83,7 +83,7 @@ pub struct ToastTexts {
     /// Shown on `Started`, such as (Info, "End task requested."). `None` shows nothing until a
     /// result, also for many targets (R-197).
     pub started: Option<(ToastKind, SharedString)>,
-    /// One target succeeded, such as "Process terminated".
+    /// One target succeeded, such as "Process terminated". Empty shows no toast.
     pub success: SharedString,
     /// One target failed; `message(err)` follows it, such as "Could not end task.".
     pub failure: SharedString,
@@ -709,6 +709,9 @@ impl ActionTracker {
         button: Option<ToastAction>,
         cx: &mut Context<Self>,
     ) {
+        if text.is_empty() {
+            return;
+        }
         #[cfg(any(test, feature = "test-hooks"))]
         self.pushed.push(PushedToast {
             kind,

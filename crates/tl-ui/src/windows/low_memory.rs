@@ -118,7 +118,6 @@ const KEY_END_TASK: &str = "lowmem-button-end-task";
 const KEY_END_TASK_TOOLTIP: &str = "lowmem-tooltip-end-task";
 const KEY_NEEDS_ADMIN: &str = "lowmem-tooltip-needs-admin";
 const KEY_END_TASK_A11Y: &str = "lowmem-a11y-end-task";
-const KEY_ENDED: &str = "lowmem-toast-ended";
 const KEY_END_FAILED: &str = "lowmem-toast-end-failed";
 
 /// Binds Esc and Ctrl+W in `LowMemory`. The only key binding call in the rescue process.
@@ -239,7 +238,6 @@ pub struct LowMemWords {
     pub needs_admin: SharedString,
     /// "End Task: { $name }".
     pub end_task_a11y: Template,
-    pub ended: SharedString,
     /// The failure prefix; the tracker adds the error text after it.
     pub end_failed: SharedString,
 }
@@ -259,7 +257,6 @@ impl LowMemWords {
             end_task_tooltip: t(KEY_END_TASK_TOOLTIP),
             needs_admin: t(KEY_NEEDS_ADMIN),
             end_task_a11y: tmpl(KEY_END_TASK_A11Y, &["name"]),
-            ended: t(KEY_ENDED),
             end_failed: t(KEY_END_FAILED),
         }
     }
@@ -987,9 +984,11 @@ impl LowMemoryWindow {
         };
         let request = end_task_request(&row.target);
         let words = low_mem_words(cx);
+        // No success toast: the row leaving the list is the feedback, and extra toasts under
+        // memory pressure are noise.
         let texts = ToastTexts {
             retry_as_admin: true,
-            ..ToastTexts::new(words.ended.clone(), words.end_failed.clone())
+            ..ToastTexts::new(SharedString::default(), words.end_failed.clone())
         };
         let sent = tracker.update(cx, |t, cx| {
             t.track_or_toast(request, queue.downgrade(), texts, cx)
