@@ -31,8 +31,8 @@ use gpui_kit::{
     WeakEntity, Window, WindowId, anchored, deferred, div, prelude::FluentBuilder as _, px,
 };
 
-use super::menus_file;
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
+use super::{menus_file, menus_view};
 use crate::actions::{MenuId, OpenMenu};
 use crate::components::menu::TlMenuPopup;
 use crate::i18n::{Strings, tr, tr_en};
@@ -80,14 +80,15 @@ fn label_key(id: MenuId) -> &'static str {
 }
 
 /// Whether `id` has a button. True exactly when [`build_menu`] builds a menu with items for it
-/// (the "no dead items" rule): in P1 only File. Called on every frame, so an arm reads only
+/// (the "no dead items" rule): in P1 File and View. Called on every frame, so an arm reads only
 /// settings or state, never builds anything.
 pub fn has_menu(id: MenuId, cx: &App) -> bool {
     let _ = cx;
     match id {
-        MenuId::File => true,
-        // View: E21-001. Settings: E21-004. Help: E21-014. Debug: E21-038.
-        MenuId::View | MenuId::Settings | MenuId::Help | MenuId::Debug => false,
+        // View always has "Columns", disabled on a tab without a table.
+        MenuId::File | MenuId::View => true,
+        // Settings: E21-004. Help: E21-014. Debug: E21-038.
+        MenuId::Settings | MenuId::Help | MenuId::Debug => false,
     }
 }
 
@@ -101,7 +102,8 @@ fn build_menu(
 ) -> Option<Entity<TlMenuPopup>> {
     match id {
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
-        MenuId::View | MenuId::Settings | MenuId::Help | MenuId::Debug => None,
+        MenuId::View => Some(menus_view::build(window, cx, return_focus)),
+        MenuId::Settings | MenuId::Help | MenuId::Debug => None,
     }
 }
 

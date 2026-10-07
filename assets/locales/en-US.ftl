@@ -996,3 +996,17 @@ pwn-props-verify-button = Verify against package
 pwn-props-verify-toast-matches = Executable matches the package.
 pwn-props-verify-toast-mismatch = Executable does not match the package.
 pwn-props-verify-toast-failed = Could not verify against the package.
+# View menu and View > Columns (tasklens-bj6.4, UI-SHL-033, UI-SHL-034).
+shell-menu-view-columns = Columns
+shell-menu-view-process-view = Process View
+shell-menu-view-window = Window
+shell-menu-view-appearance = Appearance
+shell-menu-view-theme = Theme
+shell-menu-view-graphs = Graphs
+shell-menu-columns-select = Select Columns…
+shell-menu-columns-fit = Resize columns to fit content
+shell-menu-columns-resize-behavior = Resize Behavior
+shell-menu-columns-proportional = Proportional
+shell-menu-columns-last-column = Last Column
+shell-menu-columns-reset = Reset to default
+shell-menu-view-no-table = This tab has no table
