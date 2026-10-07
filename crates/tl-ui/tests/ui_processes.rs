@@ -1225,3 +1225,147 @@ mod page {
         assert_eq!(o.opened.get(), 0);
     }
 }
+
+/// The Processes arm of the main window's page match (tasklens-pdu.13).
+mod shell {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+        Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::actions::SelectTab;
+    use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
+    use tl_ui::components::toast;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::hub::{GlobalHub, SnapshotHub};
+    use tl_ui::pages::processes::ProcessesPage;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::table::tree_table::TreeTableDelegate as _;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{
+        self as shell, MainWindow, PageSlot, ShellPage, main_window_view, open_main_window,
+        set_test_page,
+    };
+    use tl_ui::window::status::StatusChanged;
+
+    use super::delegate::{every_kind, snapshot};
+
+    /// The Performance tab's stand-in, so there is a second tab to switch to.
+    struct OtherPage {
+        focus: FocusHandle,
+    }
+
+    impl gpui_kit::EventEmitter<StatusChanged> for OtherPage {}
+
+    impl Render for OtherPage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().track_focus(&self.focus).size_full()
+        }
+    }
+
+    impl ShellPage for OtherPage {
+        fn primary_focus(&self) -> FocusHandle {
+            self.focus.clone()
+        }
+    }
+
+    fn other(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let page = cx.new(|cx| OtherPage {
+            focus: cx.focus_handle().tab_stop(true),
+        });
+        PageSlot::new(page, cx)
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::i18n::init_strings(cx, "en-US");
+            tl_ui::table::actions::bind_keys_table(cx);
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            cx.set_global(EngineGlobal(client.clone()));
+            let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+            let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+            cx.set_global(GlobalHub(hub));
+            cx.set_global(GlobalDemand(demand));
+            toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            cx.set_global(StartOptions::default());
+            set_test_page(cx, Tab::Performance, other);
+            shell::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        (engine, vcx)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn processes(vcx: &mut VisualTestContext) -> Option<Entity<ProcessesPage>> {
+        let main = vcx.update(|_, cx| main_window_view(cx).expect("main window open"));
+        vcx.read_entity(&main, |m, _| m.page_entity::<ProcessesPage>(Tab::Processes))
+    }
+
+    fn select(vcx: &mut VisualTestContext, tab: Tab) {
+        vcx.dispatch_action(SelectTab(tab as usize));
+        draw(vcx);
+    }
+
+    fn table_renders(vcx: &mut VisualTestContext, page: &Entity<ProcessesPage>) -> u32 {
+        vcx.update(|_, cx| page.read(cx).table().read(cx).render_count.get())
+    }
+
+    #[gpui_kit::test]
+    fn processes_page_created_on_first_visit_and_kept(cx: &mut TestAppContext) {
+        let (_, mut vcx) = open(cx);
+        let page = processes(&mut vcx).expect("Processes built on the first visit");
+        assert!(table_renders(&mut vcx, &page) > 0, "the table is drawn");
+        assert!(vcx.debug_bounds("ProcessesPage").is_some());
+        assert!(vcx.debug_bounds("TlTreeTable").is_some());
+
+        select(&mut vcx, Tab::Performance);
+        assert!(vcx.debug_bounds("ProcessesPage").is_none());
+        select(&mut vcx, Tab::Processes);
+        let again = processes(&mut vcx).expect("still built");
+        assert_eq!(again.entity_id(), page.entity_id());
+        assert!(vcx.debug_bounds("ProcessesPage").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn inactive_page_not_rendered(cx: &mut TestAppContext) {
+        let (engine, mut vcx) = open(cx);
+        let page = processes(&mut vcx).expect("Processes built");
+        select(&mut vcx, Tab::Performance);
+        let before = table_renders(&mut vcx, &page);
+
+        // A view for the current query: the active page would redraw the table.
+        let (rows, groups, records) = every_kind();
+        let mut s = tl_model::snapshot::Snapshot::clone(&snapshot(2, rows, groups, records));
+        s.sequence = engine.latest().sequence + 1;
+        Arc::make_mut(&mut s.table).query_generation = 1;
+        engine.publish(s);
+        draw(&mut vcx);
+        assert_eq!(table_renders(&mut vcx, &page), before);
+        assert!(vcx.debug_bounds("ProcessesPage").is_none());
+        let rows = vcx.update(|_, cx| page.read(cx).table().read(cx).delegate.row_count());
+        assert_eq!(rows, 8, "the view was installed while hidden");
+    }
+}
