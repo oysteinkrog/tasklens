@@ -1261,6 +1261,17 @@ mod window {
     }
 
     #[gpui_kit::test]
+    fn props_tab_tooltip_names_alt_key(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let tips = cx.read(|cx| view.read(cx).words().tab_tips.clone());
+        assert_eq!(tips[0].as_ref(), "General (Alt+1)");
+        assert_eq!(tips[2].as_ref(), "File descriptors (Alt+3)");
+    }
+
+    #[gpui_kit::test]
     fn access_block_texts_per_tab(cx: &mut TestAppContext) {
         let (engine, _main) = setup(cx);
         let words = cx.update(props_words);

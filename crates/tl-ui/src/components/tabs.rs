@@ -79,6 +79,8 @@ pub struct TlTabSpec {
     pub count: Option<SharedString>,
     /// `Some(reason)` disables the tab; the reason is its tooltip.
     pub disabled: Option<SharedString>,
+    /// The tooltip of an enabled tab. A disabled tab shows its reason instead.
+    pub tooltip: Option<SharedString>,
 }
 
 impl TlTabSpec {
@@ -96,6 +98,11 @@ impl TlTabSpec {
 
     pub fn disabled(mut self, reason: impl Into<SharedString>) -> Self {
         self.disabled = Some(reason.into());
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
         self
     }
 
@@ -268,7 +275,7 @@ struct TabsState {
     slide_from: Option<(Pixels, Pixels)>,
     /// Bumps on every selection change; keys the slide animation.
     epoch: usize,
-    /// Disabled-tab tooltips, by index.
+    /// Cell tooltips, by index.
     tips: Vec<Entity<HoverTooltip>>,
 }
 
@@ -407,12 +414,12 @@ impl RenderOnce for TlTabs {
                     );
                 }
             }
-            if let Some(reason) = &tab.disabled {
+            if let Some(text) = tab.disabled.as_ref().or(tab.tooltip.as_ref()) {
                 cell = HoverTooltip::attach(
                     &tips[ix],
                     cell,
                     DELAY_CONTROL,
-                    TlTooltip::text(reason.clone()).build(),
+                    TlTooltip::text(text.clone()).build(),
                     window,
                     cx,
                 );

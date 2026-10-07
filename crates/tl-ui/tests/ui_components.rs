@@ -1415,3 +1415,49 @@ mod names_and_label_tips {
         assert!(cx.debug_bounds("TlButton-copy-icon").is_some());
     }
 }
+
+/// TlTabs tooltips on enabled cells (tasklens-gma.40).
+mod tab_tooltips {
+    use gpui_kit::point;
+    use tl_ui::components::tooltip::DELAY_CONTROL;
+
+    use super::*;
+
+    struct Strip;
+
+    impl Render for Strip {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size(px(600.))
+                .child(TlTabs::new("tips").selected(0).tabs(vec![
+                    TlTabSpec::new("General"),
+                    TlTabSpec::new("Threads").tooltip("Threads (Alt+2)"),
+                ]))
+        }
+    }
+
+    fn hover_shows_tooltip(cx: &mut VisualTestContext, cell: &str) -> bool {
+        cx.simulate_mouse_move(point(px(590.), px(590.)), None, Modifiers::none());
+        draw(cx);
+        let at = cx.debug_bounds(cell).expect("cell drawn").center();
+        cx.simulate_mouse_move(at, None, Modifiers::none());
+        cx.executor().advance_clock(DELAY_CONTROL);
+        cx.run_until_parked();
+        draw(cx);
+        draw(cx);
+        cx.debug_bounds("TlTooltip-text").is_some()
+    }
+
+    #[gpui_kit::test]
+    fn enabled_tab_shows_tooltip_after_delay(cx: &mut TestAppContext) {
+        cx.update(setup);
+        let (_, cx) = cx.add_window_view(|_, _| Strip);
+        cx.update(|window, _| window.activate_window());
+        draw(cx);
+        assert!(
+            !hover_shows_tooltip(cx, "TlTabs-cell-0"),
+            "no tooltip without text"
+        );
+        assert!(hover_shows_tooltip(cx, "TlTabs-cell-1"));
+    }
+}

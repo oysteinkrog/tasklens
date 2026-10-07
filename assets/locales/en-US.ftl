@@ -871,6 +871,8 @@ pwn-props-tab-maps = Memory maps
 pwn-props-tab-security = Security
 pwn-props-tab-environment = Environment
 pwn-props-tab-strings = Strings
+# tasklens-gma.40: the tab tooltip, such as "Threads (Alt+2)".
+pwn-props-tab-tooltip = { $label } (Alt+{ $n })
 pwn-props-too-many-windows = Too many process properties windows are already open
 pwn-props-exited-banner = This process has exited. Values are frozen at the last update.
 pwn-props-not-running = The process is not running.

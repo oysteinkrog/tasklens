@@ -46,6 +46,7 @@ use crate::components::window_frame::TlSecondaryWindow;
 use crate::demand::GlobalDemand;
 use crate::hub::{GlobalHub, SnapshotChanged};
 use crate::i18n::Strings;
+use crate::pages::performance::details::Template;
 use crate::text::style::{t_base, t_sm};
 use crate::theme::{current, metrics};
 use crate::window::main::push_main_toast;
@@ -101,6 +102,7 @@ const KEY_TABS: [&str; 7] = [
     "pwn-props-tab-environment",
     "pwn-props-tab-strings",
 ];
+const KEY_TAB_TIP: &str = "pwn-props-tab-tooltip";
 const KEY_TOO_MANY: &str = "pwn-props-too-many-windows";
 const KEY_OPEN_FAILED: &str = "fnd-props-open-failed";
 const KEY_EXITED: &str = "pwn-props-exited-banner";
@@ -119,6 +121,8 @@ const KEY_ACCESS: [(&str, &str); 5] = [
 pub struct PropsWords {
     /// Tab labels in strip order, without counts.
     pub tabs: [SharedString; 7],
+    /// Tab tooltips in strip order, such as "Threads (Alt+2)".
+    pub tab_tips: [SharedString; 7],
     pub too_many: SharedString,
     pub open_failed: SharedString,
     pub exited_banner: SharedString,
@@ -129,9 +133,16 @@ pub struct PropsWords {
 }
 
 impl PropsWords {
-    fn with(t: impl Fn(&str) -> SharedString) -> Self {
+    fn with(t: impl Fn(&str) -> SharedString, tab_tip: Template) -> Self {
+        let tabs = KEY_TABS.map(&t);
+        let tab_tips = std::array::from_fn(|i| {
+            let mut tip = String::new();
+            let _ = tab_tip.write(&mut tip, &[&tabs[i], &(i + 1)]);
+            tip.into()
+        });
         Self {
-            tabs: KEY_TABS.map(&t),
+            tabs,
+            tab_tips,
             too_many: t(KEY_TOO_MANY),
             open_failed: t(KEY_OPEN_FAILED),
             exited_banner: t(KEY_EXITED),
@@ -141,11 +152,17 @@ impl PropsWords {
     }
 
     fn en() -> Self {
-        Self::with(|key| crate::i18n::tr_en(key, &[]))
+        Self::with(
+            |key| crate::i18n::tr_en(key, &[]),
+            Template::en(KEY_TAB_TIP, &["label", "n"]),
+        )
     }
 
     fn translated(cx: &App) -> Self {
-        Self::with(|key| crate::i18n::tr(cx, key))
+        Self::with(
+            |key| crate::i18n::tr(cx, key),
+            Template::new(cx, KEY_TAB_TIP, &["label", "n"]),
+        )
     }
 
     /// The translated text of an `ACCESS_*` constant; another text is shown as given.
@@ -808,7 +825,8 @@ impl gpui_kit::Render for PropsWindow {
         let active = strip_index(self.active);
         let specs: Vec<TlTabSpec> = (0..TABS.len())
             .map(|i| {
-                let spec = TlTabSpec::new(self.words.tabs[i].clone());
+                let spec = TlTabSpec::new(self.words.tabs[i].clone())
+                    .tooltip(self.words.tab_tips[i].clone());
                 match self.labels[i].0 {
                     Some(_) => spec.count(self.labels[i].1.clone()),
                     None => spec,
