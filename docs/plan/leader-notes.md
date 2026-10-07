@@ -583,3 +583,6 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.13 (18de48b, a6ae01e, 14090d2): Esc chain on MainWindow; filter_esc_rule updated. CancelWindowPick has no handler until E20-027.
 - cr0.26: the import callback returns ImportedSettings (settings, state, summary); tl-ui applies them through TlSettings::update. Leader approved: one write path, so the UI and the store stay in sync.
 - pdu.16 (c40b5b5, e2346c7, f617d58, fd86c72): RowTooltip view, one per table, filled only on hover. Kernel threads get no path line. The build break was fixed in e2346c7. All accepted.
+- cr0.25 closed: rendering.gpu = software now also sets both lavapipe ICD paths, __EGL_VENDOR_LIBRARY_FILENAMES (Mesa) and LIBGL_ALWAYS_SOFTWARE; gpui picks llvmpipe Vulkan (5bde23c, 3503156). Follow-up cr0.27: exit when the main window cannot open.
+- m1f.1 closed: watcher loop and real I/O (afdfa01, a59e519). The PSI trigger needs a trailing NUL. Comment on m1f.5: the --watch-memory arm must run before logging::init.
+- Leader 9856fbf: Fatal::key is test-only (clippy dead_code).
