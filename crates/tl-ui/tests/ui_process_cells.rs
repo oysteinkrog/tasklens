@@ -1002,7 +1002,8 @@ mod paint {
         let cpu = process_column(ColumnId::Cpu);
         // ncpu 32: reference 12.5 %.
         assert!(close(heat_alpha(cpu, 25.0, &ctx, 50), 0.5));
-        assert!(close(heat_alpha(cpu, 6.25, &ctx, 50), 0.25));
+        // 0.25 rounds to the 2% step 0.26.
+        assert!(close(heat_alpha(cpu, 6.25, &ctx, 50), 0.26));
         assert!(
             close(heat_alpha(cpu, 1000.0, &ctx, 80), 0.8),
             "clamps to intensity"
