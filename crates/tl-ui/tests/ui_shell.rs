@@ -2798,13 +2798,21 @@ mod main_window {
         act(&mut vcx, PrevTab);
         assert_eq!(active(&mut vcx), Tab::Information);
 
+        // Information has a real page arm (tasklens-9o0.27), so it needs the engine globals.
         let mut vcx = rig(
             cx_b,
             Opts {
                 pages: &[Tab::Processes, Tab::Performance],
                 start_tab: StartTab::Performance,
+                engine: true,
                 ..Opts::default()
             },
+        );
+        act(&mut vcx, NextTab);
+        assert_eq!(
+            active(&mut vcx),
+            Tab::Information,
+            "Services, Startup and Connections are skipped"
         );
         act(&mut vcx, NextTab);
         assert_eq!(active(&mut vcx), Tab::Processes);
