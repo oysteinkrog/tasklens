@@ -650,3 +650,5 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - gma.15 closed (tests de662d7e). gma.41 closed (b63b1cd7): freeze as exited when the key leaves a snapshot whose PROCESSES component changed; seen_exited removed. gma.40 closed (9e84f3ae, 984f20d2): TlTabSpec::tooltip, new ftl key pwn-props-tab-tooltip.
 - 49105ed7 fixed the 3c23e489 build break (BorrowAppContext import); tl-ui lib check passed.
 - pdu.51 resumed with a fresh agent on the work left on disk.
+- m1f.6 closed (fe82e965). m1f.21 closed (3c23e489): AppRequest::SetLowMemoryEnabled(prev) on a failed install or remove; Outcome::Primary carries the sender and QUEUE is pub (outside the file list, accepted). Same agent now takes m1f.2, then m1f.20.
+- 9o0.34 closed (bf97ed59). 9o0.23: builders in 060859bc and 06a370da. Leader approved label_lines in kv_grid.rs and section.rs for Peak committed (default 1). Accepted choices: NVMe/SSD/eMMC/SD show "SSD", HDD "HDD", other kinds as given; disks by device index; no "@ N Hz" when refresh is 0; no IP shows "None"; GPU memory falls back to live totals; info_no_dimm_serial checks the UI side only.
