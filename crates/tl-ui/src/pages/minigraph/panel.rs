@@ -19,7 +19,7 @@ use tl_model::demand::{CpuDemand, Demand};
 use tl_model::settings::GraphsSettings;
 
 use super::GraphColor;
-use super::actions::{MinigraphHide, MinigraphRemove, ResetMinigraphLayout};
+use super::actions::{MinigraphHide, MinigraphRemove, MinigraphSetRange, ResetMinigraphLayout};
 use super::card::{MINI_CARD_H, MINI_CARD_W, MinigraphCard};
 use super::sources::{
     GraphColumn, MAX_SLOTS, MinigraphEntry, MinigraphId, MinigraphSource, default_entries,
@@ -206,6 +206,21 @@ impl MinigraphPanel {
         if self.entries.len() != before {
             self.changed(cx);
         }
+    }
+
+    /// `MinigraphSetRange` (PERF-081): the card's chart range and its `[[minigraphs]]` entry.
+    pub fn set_range(&mut self, id: MinigraphId, secs: u16, cx: &mut Context<Self>) {
+        let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) else {
+            return;
+        };
+        if entry.range_s == secs {
+            return;
+        }
+        entry.range_s = secs;
+        if let Some((_, card)) = self.cards.iter().find(|(c, _)| *c == id) {
+            card.update(cx, |c, cx| c.set_range(secs, cx));
+        }
+        self.persist(cx);
     }
 
     /// `ResetMinigraphLayout` (UI-PRF-044): the six default cards at slots 0 to 5 with the
@@ -416,8 +431,12 @@ fn register_actions(cx: &mut Context<MinigraphPanel>) {
     app.on_action(move |a: &MinigraphHide, cx| {
         let _ = panel.update(cx, |p, cx| p.hide(a.id, cx));
     });
+    let panel = weak.clone();
     app.on_action(move |a: &MinigraphRemove, cx| {
-        let _ = weak.update(cx, |p, cx| p.remove(a.id, cx));
+        let _ = panel.update(cx, |p, cx| p.remove(a.id, cx));
+    });
+    app.on_action(move |a: &MinigraphSetRange, cx| {
+        let _ = weak.update(cx, |p, cx| p.set_range(a.id, a.secs, cx));
     });
 }
 
@@ -475,7 +494,10 @@ impl Render for MinigraphPanel {
             .size_full()
             .on_action(cx.listener(|this, _: &ResetMinigraphLayout, _, cx| this.reset(cx)))
             .on_action(cx.listener(|this, a: &MinigraphHide, _, cx| this.hide(a.id, cx)))
-            .on_action(cx.listener(|this, a: &MinigraphRemove, _, cx| this.remove(a.id, cx)));
+            .on_action(cx.listener(|this, a: &MinigraphRemove, _, cx| this.remove(a.id, cx)))
+            .on_action(
+                cx.listener(|this, a: &MinigraphSetRange, _, cx| this.set_range(a.id, a.secs, cx)),
+            );
         if self.cards.is_empty() {
             return root;
         }

@@ -8,9 +8,10 @@
 //! even when the value is equal (crw.34); the card itself adds no render for it.
 
 use gpui_kit::{
-    App, AppContext as _, BoxShadow, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, Subscription, Window, div, point, px,
+    App, AppContext as _, BoxShadow, Context, Entity, FocusHandle, Hsla, InteractiveElement as _,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render,
+    SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription,
+    Window, div, point, px,
 };
 use rustc_hash::FxHasher;
 use smallvec::{SmallVec, smallvec};
@@ -22,12 +23,14 @@ use tl_model::settings::NetworkUnit;
 use tl_model::snapshot::{ComponentMask, Snapshot, SystemSnapshot};
 
 use super::GraphColor;
+use super::menu::{CardMenuCtx, card_menu};
 use super::sources::{MinigraphEntry, MinigraphId, MinigraphSource};
 use crate::chart::view::ChangedRuns;
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartView, GridStyle, ValueAlign, ValueFormat,
     YScale, format_value,
 };
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::tooltip::TlTooltip;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::tr;
@@ -77,6 +80,8 @@ pub struct MinigraphCard {
     dragging: bool,
     hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
+    /// Where the menu items go when nothing in the window has focus (cards take no focus).
+    menu_focus: FocusHandle,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
     /// `cx.notify()` calls made by the card itself, not through its chart.
@@ -126,6 +131,7 @@ impl MinigraphCard {
             dragging: false,
             hub: hub.clone(),
             _hub_sub,
+            menu_focus: cx.focus_handle(),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -184,6 +190,28 @@ impl MinigraphCard {
             }
             c.set_spec(spec, cx);
         });
+    }
+
+    /// Opens the card menu at `at` (UI-PRF-042). The items go where focus is, so focus comes
+    /// back there when the menu closes.
+    pub fn open_menu(&self, at: Point<Pixels>, window: &mut Window, cx: &mut App) {
+        let ctx = CardMenuCtx {
+            id: self.id,
+            is_process: !self.entry.source.is_system(),
+            range_s: self.entry.range_s,
+            color: self.entry.color,
+            detached: self.entry.detached,
+            long_ranges: false,
+            colors: false,
+            detach: false,
+        };
+        let context = window
+            .focused(cx)
+            .unwrap_or_else(|| self.menu_focus.clone());
+        let menu = TlMenu::build(window, cx, context, move |menu, window, cx| {
+            card_menu(menu, &ctx, window, cx)
+        });
+        open_context_menu_at(at, window, cx, menu);
     }
 
     /// The chart's series.
@@ -385,6 +413,13 @@ impl Render for MinigraphCard {
             .border_color(border)
             .rounded(m.radius_card)
             .overflow_hidden()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_menu(ev.position, window, cx);
+                }),
+            )
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if this.hover != *hovered {
                     this.hover = *hovered;
