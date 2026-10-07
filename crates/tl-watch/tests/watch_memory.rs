@@ -1,18 +1,10 @@
-//! Tests for the low-memory watcher logic and meminfo reader (E32-001), the
-//! `tasklens-lowmem.service` unit (E32-002) and the watcher loop (E32-A1).
+//! Tests for the low-memory watcher logic and meminfo reader (E32-001), the watcher loop
+//! (E32-A1) and the `tasklens-watch` binary (tasklens-m1f.19). The lowmem unit tests are in
+//! `crates/tl-app/tests/lowmem_unit.rs`.
 
 #[allow(dead_code, reason = "the tests use only part of the module")]
 #[path = "../src/watch_memory.rs"]
 mod watch_memory;
-
-#[path = "../src/atomic.rs"]
-mod atomic;
-#[allow(dead_code, reason = "the tests use only part of the module")]
-#[path = "../src/lowmem_unit.rs"]
-mod lowmem_unit;
-#[allow(dead_code, reason = "the tests use only part of the module")]
-#[path = "../src/paths.rs"]
-mod paths;
 
 use proptest::prelude::*;
 use watch_memory::{
@@ -169,131 +161,6 @@ proptest! {
     }
 }
 
-// E32-002: the lowmem unit. Every automatic test works in a scratch folder and never talks to
-// the user's systemd manager.
-
-/// The environment `unit_path_from` sees: `HOME=/home/u` plus `xdg` as `XDG_CONFIG_HOME`.
-fn env_with(xdg: Option<&str>) -> impl Fn(&str) -> Option<std::ffi::OsString> {
-    move |name| match name {
-        "HOME" => Some("/home/u".into()),
-        "XDG_CONFIG_HOME" => xdg.map(Into::into),
-        _ => None,
-    }
-}
-
-#[test]
-fn render_unit_replaces_placeholders() {
-    let text = lowmem_unit::render_unit(std::path::Path::new("/usr/bin/tasklens"), -900);
-    assert!(
-        text.lines()
-            .any(|l| l == "ExecStart=/usr/bin/tasklens --watch-memory")
-    );
-    assert!(text.lines().any(|l| l == "OOMScoreAdjust=-900"));
-    assert!(!text.contains('@'), "placeholder left in:\n{text}");
-    let fallback = lowmem_unit::render_unit(std::path::Path::new("/usr/bin/tasklens"), 0);
-    assert!(fallback.lines().any(|l| l == "OOMScoreAdjust=0"));
-}
-
-#[test]
-fn render_unit_quotes_spaces() {
-    let text = lowmem_unit::render_unit(std::path::Path::new("/home/u/my builds/tasklens"), -900);
-    assert!(
-        text.lines()
-            .any(|l| l == r#"ExecStart="/home/u/my builds/tasklens" --watch-memory"#),
-        "{text}"
-    );
-    // systemd expands % and $ in ExecStart, so both are doubled.
-    let odd = lowmem_unit::render_unit(std::path::Path::new("/opt/a%b$c/tasklens"), -900);
-    assert!(
-        odd.lines()
-            .any(|l| l == "ExecStart=/opt/a%%b$$c/tasklens --watch-memory")
-    );
-    let quote = lowmem_unit::render_unit(std::path::Path::new("/opt/a \"b/tasklens"), -900);
-    assert!(
-        quote
-            .lines()
-            .any(|l| l == r#"ExecStart="/opt/a \"b/tasklens" --watch-memory"#),
-        "{quote}"
-    );
-}
-
-#[test]
-fn unit_path_xdg_fallback() {
-    let expected = std::path::PathBuf::from("/home/u/.config/systemd/user/tasklens-lowmem.service");
-    for xdg in [None, Some(""), Some("relative/path")] {
-        assert_eq!(
-            lowmem_unit::unit_path_from(env_with(xdg)).unwrap(),
-            expected,
-            "{xdg:?}"
-        );
-    }
-    assert_eq!(
-        lowmem_unit::unit_path_from(env_with(Some("/cfg"))).unwrap(),
-        std::path::PathBuf::from("/cfg/systemd/user/tasklens-lowmem.service")
-    );
-    assert!(lowmem_unit::unit_path_from(|_| None).is_err());
-}
-
-#[test]
-fn unit_file_write_and_remove_in_scratch_dir() {
-    use std::os::unix::fs::PermissionsExt;
-    let scratch = tempfile::tempdir().unwrap();
-    let path = scratch
-        .path()
-        .join("systemd/user")
-        .join(lowmem_unit::UNIT_NAME);
-    let exec = std::path::Path::new("/usr/bin/tasklens");
-    lowmem_unit::write_unit_file(&path, exec, -900).unwrap();
-    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    assert_eq!(mode(&path), 0o644);
-    assert_eq!(mode(path.parent().unwrap()), 0o700);
-    assert_eq!(mode(&scratch.path().join("systemd")), 0o700);
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        lowmem_unit::render_unit(exec, -900)
-    );
-    // The fallback rewrite replaces the file in place.
-    lowmem_unit::write_unit_file(&path, exec, 0).unwrap();
-    assert!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("OOMScoreAdjust=0\n")
-    );
-    lowmem_unit::remove_unit_file(&path).unwrap();
-    assert!(!path.exists());
-    lowmem_unit::remove_unit_file(&path).unwrap();
-}
-
-/// Owner machine only: installs, enables and starts the real unit in the user's own systemd
-/// session, then removes it. Run by hand with `--ignored`; it prints the OOMScoreAdjust value
-/// the user manager accepted (U-24).
-#[test]
-#[ignore = "changes the user's real systemd session"]
-#[allow(clippy::print_stdout, reason = "prints the U-24 result for the owner")]
-fn real_install_enable_remove() {
-    let installed = lowmem_unit::install_and_enable().expect("install_and_enable");
-    println!(
-        "U-24: accepted OOMScoreAdjust={}",
-        installed.oom_score_adjust
-    );
-    let conn = zbus::blocking::Connection::session().unwrap();
-    let reply = conn
-        .call_method(
-            Some("org.freedesktop.systemd1"),
-            "/org/freedesktop/systemd1",
-            Some("org.freedesktop.systemd1.Manager"),
-            "GetUnitFileState",
-            &(lowmem_unit::UNIT_NAME,),
-        )
-        .unwrap();
-    let state: String = reply.body().deserialize().unwrap();
-    assert_eq!(state, "enabled");
-
-    lowmem_unit::disable_and_remove().expect("first disable_and_remove");
-    lowmem_unit::disable_and_remove().expect("second disable_and_remove");
-    assert!(!lowmem_unit::unit_path().unwrap().exists());
-}
-
 // E32-A1: the watcher loop. The loop tests use a fake `WatchIo` with a fake clock; nothing here
 // spawns a process or touches /proc/pressure.
 
@@ -314,6 +181,7 @@ struct FakeIo {
     timeouts: Vec<std::time::Duration>,
     meminfo_reads: u32,
     spawn_attempts: u32,
+    logs: Vec<String>,
 }
 
 impl FakeIo {
@@ -333,6 +201,7 @@ impl FakeIo {
             timeouts: Vec::new(),
             meminfo_reads: 0,
             spawn_attempts: 0,
+            logs: Vec::new(),
         }
     }
 }
@@ -387,44 +256,10 @@ impl WatchIo for FakeIo {
     fn has_display(&mut self) -> bool {
         self.display
     }
-}
 
-/// Collects formatted log lines for one test.
-#[derive(Clone, Default)]
-struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
+    fn warn(&mut self, args: std::fmt::Arguments<'_>) {
+        self.logs.push(args.to_string());
     }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Runs `f` with a subscriber that writes to a buffer, and returns the log lines.
-fn with_logs(f: impl FnOnce()) -> Vec<String> {
-    let buf = LogBuf::default();
-    let writer = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    tracing::subscriber::with_default(subscriber, f);
-    let bytes = buf
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    String::from_utf8_lossy(&bytes)
-        .lines()
-        .map(str::to_owned)
-        .collect()
 }
 
 #[test]
@@ -463,104 +298,114 @@ fn loop_memavailable_path() {
 fn loop_survives_meminfo_error() {
     let mut io = FakeIo::new(WaitResult::Timeout);
     io.meminfo = None;
-    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(5)), 0));
+    assert_eq!(run_loop(&mut io, Some(5)), 0);
     assert_eq!(io.meminfo_reads, 5);
     assert_eq!(io.spawn_attempts, 0);
-    let warns: Vec<_> = logs
-        .iter()
-        .filter(|l| l.contains("WARN") && l.contains("/proc/meminfo"))
-        .collect();
-    assert_eq!(warns.len(), 5, "{logs:?}");
+    let warns = io.logs.iter().filter(|l| l.contains("/proc/meminfo"));
+    assert_eq!(warns.count(), 5, "{:?}", io.logs);
 }
 
 #[test]
 fn loop_retries_after_spawn_failure() {
     let mut io = FakeIo::new(WaitResult::PsiFired);
     io.spawn_failures = 1;
-    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(3)), 1));
+    assert_eq!(run_loop(&mut io, Some(3)), 1);
     // The failed first spawn left the state at "not running", so turn 2 tried again.
     assert_eq!(io.spawn_attempts, 2);
-    assert!(logs.iter().any(|l| l.contains("WARN")), "{logs:?}");
+    assert!(
+        io.logs.iter().any(|l| l.contains("--low-memory failed")),
+        "{:?}",
+        io.logs
+    );
 }
 
 #[test]
 fn no_spawn_without_display() {
     let mut io = FakeIo::new(WaitResult::PsiFired);
     io.display = false;
-    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(3)), 0));
+    assert_eq!(run_loop(&mut io, Some(3)), 0);
     assert_eq!(io.spawn_attempts, 0);
     assert!(
-        logs.iter()
-            .any(|l| l.contains("WARN") && l.contains("WAYLAND_DISPLAY")),
-        "{logs:?}"
+        io.logs.iter().any(|l| l.contains("WAYLAND_DISPLAY")),
+        "{:?}",
+        io.logs
     );
 }
 
-/// Starts the real binary with `--watch-memory` (the arm in main.rs, E32 m1f.5). The thread
-/// count holds; the RSS does not: the debug binary measured 14.5 MiB (3 MiB anonymous, mostly
-/// relocated RELRO pages; 11.5 MiB file pages of the binary itself).
-#[test]
-#[ignore = "fails: VmRSS is about 14.5 MiB, above the 4 MiB target (m1f.5 report)"]
-fn real_rss_under_4mib() {
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tasklens"))
-        .arg("--watch-memory")
+/// Reads `name:` from `/proc/<pid>/status` in kB.
+fn status_kib(status: &str, name: &str) -> u64 {
+    status
+        .lines()
+        .find_map(|l| l.strip_prefix(name))
+        .and_then(|v| v.trim().strip_suffix("kB"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or_else(|| panic!("{name} in /proc/<pid>/status"))
+}
+
+/// Starts `tasklens-watch` with its own `XDG_RUNTIME_DIR`, so a real watcher on this machine does
+/// not hold the lock. stderr is captured.
+fn spawn_watcher(runtime_dir: &std::path::Path) -> std::process::Child {
+    std::process::Command::new(env!("CARGO_BIN_EXE_tasklens-watch"))
+        .env("XDG_RUNTIME_DIR", runtime_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
-        .unwrap();
+        .unwrap()
+}
+
+/// A scratch `XDG_RUNTIME_DIR` under the target folder, one per test.
+fn scratch_runtime_dir(test: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(test);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Starts the real `tasklens-watch` binary. After 2 s it has one thread, VmRSS under 4 MiB, and
+/// its pages are locked (mlockall succeeded under this shell's RLIMIT_MEMLOCK, 8 MiB by default).
+/// Run it on the release build: `cargo test --release -p tl-watch -- --ignored`.
+#[test]
+#[ignore = "starts the real binary; the 4 MiB target holds for the release build"]
+fn real_rss_under_4mib() {
+    let mut child = spawn_watcher(&scratch_runtime_dir("real_rss_under_4mib"));
     std::thread::sleep(std::time::Duration::from_secs(2));
     let pid = child.id();
     let status = std::fs::read_to_string(format!("/proc/{pid}/status"));
     let threads = std::fs::read_dir(format!("/proc/{pid}/task")).map(Iterator::count);
     // Kill only the child this test started, before any assert can fail.
     let _ = child.kill();
-    let _ = child.wait();
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
     let status = status.unwrap();
-    let rss_kib: u64 = status
-        .lines()
-        .find_map(|l| l.strip_prefix("VmRSS:"))
-        .and_then(|v| v.trim().strip_suffix("kB"))
-        .and_then(|v| v.trim().parse().ok())
-        .expect("VmRSS in /proc/<pid>/status");
+    let rss_kib = status_kib(&status, "VmRSS:");
+    let locked_kib = status_kib(&status, "VmLck:");
     assert!(rss_kib < 4096, "VmRSS {rss_kib} kB");
+    assert!(!stderr.contains("mlockall failed"), "{stderr}");
+    assert!(locked_kib > 0, "VmLck {locked_kib} kB");
     // One thread: no GPUI, no engine, no log writer thread.
     assert_eq!(threads.unwrap(), 1);
 }
 
-/// With a fake owner of the bus name, `--watch-memory` does not forward to it and keeps running.
-/// A live tasklens that already owns the name counts as the owner.
+/// A second watcher with the same `XDG_RUNTIME_DIR` sees the lock and exits with status 0.
 #[test]
-#[ignore = "needs a session bus; starts the real binary"]
-fn watch_memory_no_single_instance() {
-    use zbus::fdo::{RequestNameFlags, RequestNameReply};
-    let conn = zbus::blocking::Connection::session().expect("session bus");
-    let reply = conn
-        .request_name_with_flags(
-            "io.github.oysteinkrog.Tasklens",
-            RequestNameFlags::DoNotQueue.into(),
-        )
-        .expect("RequestName");
-    assert!(
-        matches!(
-            reply,
-            RequestNameReply::PrimaryOwner
-                | RequestNameReply::Exists
-                | RequestNameReply::AlreadyOwner
-        ),
-        "{reply:?}"
-    );
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tasklens"))
-        .arg("--watch-memory")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    let exited = child.try_wait();
+#[ignore = "starts the real binary"]
+fn second_watcher_exits() {
+    let dir = scratch_runtime_dir("second_watcher_exits");
+    let mut first = spawn_watcher(&dir);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let second = spawn_watcher(&dir).wait_with_output();
+    let first_exited = first.try_wait();
     // Kill only the child this test started, before any assert can fail.
-    let _ = child.kill();
-    let _ = child.wait();
-    assert_eq!(exited.unwrap(), None, "the watcher exited");
+    let _ = first.kill();
+    let _ = first.wait();
+    assert_eq!(first_exited.unwrap(), None, "the first watcher exited");
+    let second = second.unwrap();
+    assert!(second.status.success(), "{:?}", second.status);
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("another tasklens-watch is running"),
+        "{stderr}"
+    );
 }
 
 /// U-51 (R-151): an unprivileged PSI trigger is accepted on the owner machine (kernel 7.2).

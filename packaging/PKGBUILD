@@ -37,6 +37,7 @@ check() {
 package() {
   cd "$_srcroot"
   install -Dm0755 target/release/tasklens "$pkgdir/usr/bin/tasklens"
+  install -Dm0755 target/release/tasklens-watch "$pkgdir/usr/bin/tasklens-watch"
   install -Dm0755 target/release/tl-gpu-probe "$pkgdir/usr/lib/tasklens/tl-gpu-probe"
   install -Dm0644 "packaging/$_appid.desktop" "$pkgdir/usr/share/applications/$_appid.desktop"
   install -Dm0644 assets/icons/tasklens.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/$_appid.svg"

@@ -3,7 +3,7 @@ Description=tasklens low-memory watcher
 
 [Service]
 Type=simple
-ExecStart=@EXEC@ --watch-memory
+ExecStart=@EXEC@
 OOMScoreAdjust=@OOM_SCORE_ADJUST@
 Restart=on-failure
 RestartSec=5

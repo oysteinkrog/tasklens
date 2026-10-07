@@ -22,6 +22,8 @@ pub const OOM_SCORE_PREFERRED: i32 = -900; // U-24
 pub const OOM_SCORE_FALLBACK: i32 = 0; // PROC-097
 /// systemd exit status EXIT_OOM_ADJUST, set when the manager refuses OOMScoreAdjust.
 pub const EXIT_OOM_ADJUST: i32 = 214;
+/// The watcher binary the unit runs (crate tl-watch, tasklens-m1f.19).
+pub const WATCHER_NAME: &str = "tasklens-watch";
 
 const TEMPLATE: &str = include_str!("../../../packaging/tasklens-lowmem.service.in");
 /// Unit files are read by the user manager, so they are not private (0600) like settings.
@@ -121,6 +123,28 @@ fn quote_exec(exec: &Path) -> String {
     out
 }
 
+/// `tasklens-watch` in the folder of the running tasklens binary, else the first match on `PATH`.
+/// Only absolute, executable regular files count.
+pub fn watcher_exe() -> Option<PathBuf> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(WATCHER_NAME)));
+    let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(WATCHER_NAME))
+            .collect::<Vec<_>>()
+    });
+    sibling
+        .into_iter()
+        .chain(on_path)
+        .find(|p| p.is_absolute() && is_executable(p))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
 /// $XDG_CONFIG_HOME/systemd/user/tasklens-lowmem.service; XDG_CONFIG_HOME unset, empty or not
 /// absolute falls back to $HOME/.config (ADR-011 rule, through paths.rs). Fails when `HOME`
 /// is not an absolute path.
@@ -164,7 +188,7 @@ pub fn remove_unit_file(path: &Path) -> Result<(), LowmemUnitError> {
     }
 }
 
-/// 1. write_atomic(unit_path(), render_unit(current_exe, -900)), file mode 0644, dir created 0700.
+/// 1. write_atomic(unit_path(), render_unit(watcher_exe, -900)), file mode 0644, dir created 0700.
 /// 2. Manager.Reload(); Manager.EnableUnitFiles([UNIT_NAME], false, true);
 ///    Manager.StartUnit(UNIT_NAME, "replace").
 /// 3. Poll the unit's ActiveState every 100 ms for up to 2 s. If the service exited with
@@ -178,7 +202,12 @@ pub fn remove_unit_file(path: &Path) -> Result<(), LowmemUnitError> {
 /// the unit fails first.
 pub fn install_and_enable() -> Result<Installed, LowmemUnitError> {
     let path = unit_path()?;
-    let exec = std::env::current_exe().map_err(LowmemUnitError::Write)?;
+    let exec = watcher_exe().ok_or_else(|| {
+        LowmemUnitError::Write(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "tasklens-watch not found next to tasklens or on PATH",
+        ))
+    })?;
     write_unit_file(&path, &exec, OOM_SCORE_PREFERRED)?;
     info!(path = %path.display(), "wrote the low-memory unit");
 

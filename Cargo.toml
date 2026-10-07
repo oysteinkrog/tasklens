@@ -11,6 +11,7 @@ members = [
   "crates/tl-app",
   "crates/tl-helper",
   "crates/tl-tray",
+  "crates/tl-watch",
   "xtask",
 ]
 
@@ -97,6 +98,13 @@ codegen-units = 1
 panic = "unwind"              # required: supervisors and the engine session catch panics
 debug = "line-tables-only"    # readable crash backtraces
 strip = "none"
+
+# The low-memory watcher must stay under 4 MiB RSS (tasklens-m1f.19). Cargo does not allow
+# `panic` or `lto` in a package override, so it keeps panic = "unwind" and fat LTO.
+[profile.release.package.tl-watch]
+opt-level = "z"
+debug = false
+strip = true
 
 [profile.profiling]
 inherits = "release"

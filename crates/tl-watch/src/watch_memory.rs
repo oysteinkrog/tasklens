@@ -1,15 +1,18 @@
-//! Low-memory watcher for `tasklens --watch-memory` (E32-001, PROC-097, R-062).
+//! Low-memory watcher run as `tasklens-watch` (E32-001, PROC-097, R-062, tasklens-m1f.19).
 //!
 //! This file holds the pure decision logic, the `/proc/meminfo` reader and the run loop (E32-A1).
 //! The watcher runs while the system is short of memory, so the loop allocates nothing per turn
 //! and nothing panics on malformed input. The watcher never kills anything itself; it only decides when to
-//! open the rescue window. ADR-001: tl-app may not depend on tl-collect, so it reads
-//! `/proc/meminfo` itself. Only `std`, `rustix` and `tracing` are used, so an integration test can
-//! include this file by path.
+//! open the rescue window. Only `std` and `libc` are used, so the process stays small and an
+//! integration test can include this file by path. Log lines go to stderr, which the user unit's
+//! journal keeps (R-152 OI-4).
 
-use std::os::fd::OwnedFd;
-
-use rustix::fs::{Mode, OFlags};
+use std::fmt;
+use std::fs::File;
+use std::io::Write;
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
 
 /// PSI trigger written to /proc/pressure/memory: full stall above 10% over a 2 s window (R-062 as changed by R-151).
 pub const PSI_TRIGGER: &str = "full 200000 2000000";
@@ -17,6 +20,16 @@ pub const PSI_TRIGGER: &str = "full 200000 2000000";
 pub const MEMAVAIL_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
 /// MemAvailable below this percent of MemTotal is critical (R-062).
 pub const MEMAVAIL_MIN_PCT: u64 = 3;
+
+/// Name of the lock file in `XDG_RUNTIME_DIR` that keeps a second watcher from running.
+pub const LOCK_FILE_NAME: &str = "tasklens-watch.lock";
+/// The program the rescue launch runs as `tasklens --low-memory`.
+pub const RESCUE_PROGRAM: &str = "tasklens";
+
+/// Writes one `warn` line to stderr. Stderr is unbuffered, so this allocates nothing.
+pub fn warn(args: fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr().lock(), "WARN tasklens-watch: {args}");
+}
 
 /// Size of the fixed read buffer. `/proc/meminfo` is about 1.5 KiB. A read that fills the whole
 /// buffer counts as failed, because the file did not fit.
@@ -80,20 +93,19 @@ pub fn mem_available_critical(m: &MemInfo) -> bool {
 /// Reads `/proc/meminfo` into a fixed buffer. The file is opened once; each read is a `pread`
 /// at offset 0, so a read allocates nothing and opens no new file descriptor.
 pub struct MemInfoReader {
-    fd: OwnedFd,
+    file: File,
     buf: [u8; MEMINFO_BUF_LEN],
 }
 
 impl MemInfoReader {
     pub fn open() -> std::io::Result<Self> {
-        Self::open_path(c"/proc/meminfo")
+        Self::open_path(Path::new("/proc/meminfo"))
     }
 
-    /// Opens another file with the meminfo layout (tests use this).
-    pub fn open_path(path: &std::ffi::CStr) -> std::io::Result<Self> {
-        let fd = rustix::fs::open(path, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+    /// Opens another file with the meminfo layout (tests use this). std opens with O_CLOEXEC.
+    pub fn open_path(path: &Path) -> std::io::Result<Self> {
         Ok(Self {
-            fd,
+            file: File::open(path)?,
             buf: [0; MEMINFO_BUF_LEN],
         })
     }
@@ -103,7 +115,7 @@ impl MemInfoReader {
         match self.try_read() {
             Ok(m) => Some(m),
             Err(err) => {
-                tracing::warn!(%err, "reading /proc/meminfo failed");
+                warn(format_args!("reading /proc/meminfo failed: {err}"));
                 None
             }
         }
@@ -118,11 +130,11 @@ impl MemInfoReader {
                 .buf
                 .get_mut(len..)
                 .ok_or(std::io::ErrorKind::InvalidData)?;
-            match rustix::io::pread(&self.fd, rest, len as u64) {
+            match self.file.read_at(rest, len as u64) {
                 Ok(0) => break,
                 Ok(n) => len += n,
-                Err(rustix::io::Errno::INTR) => {}
-                Err(err) => return Err(err.into()),
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
             }
         }
         if len >= self.buf.len() {
@@ -198,6 +210,8 @@ pub trait WatchIo {
     fn now(&mut self) -> std::time::Instant;
     /// true when `WAYLAND_DISPLAY` or `DISPLAY` is set, so a rescue window can open (R-152 OI-6).
     fn has_display(&mut self) -> bool;
+    /// Logs one `warn` line. The real one writes to stderr; tests collect the lines.
+    fn warn(&mut self, args: fmt::Arguments<'_>);
 }
 
 /// One loop turn per wait. MemCheck runs when MEMAVAIL_CHECK has passed since the last check.
@@ -224,9 +238,7 @@ pub fn run_loop<I: WatchIo>(io: &mut I, max_turns: Option<u64>) -> u64 {
             next_check = later(now, MEMAVAIL_CHECK);
             match io.read_meminfo() {
                 Ok(m) => rescues += handle(io, &mut state, WatchEvent::MemCheck(m)),
-                Err(e) => {
-                    tracing::warn!(target: "tasklens::engine", "reading /proc/meminfo failed: {e}");
-                }
+                Err(e) => io.warn(format_args!("reading /proc/meminfo failed: {e}")),
             }
         }
     }
@@ -245,10 +257,9 @@ fn handle<I: WatchIo>(io: &mut I, state: &mut WatchState, ev: WatchEvent) -> u64
         return 0;
     }
     if !io.has_display() {
-        tracing::warn!(
-            target: "tasklens::engine",
+        io.warn(format_args!(
             "memory is low but neither WAYLAND_DISPLAY nor DISPLAY is set; no rescue window"
-        );
+        ));
         return 0;
     }
     match io.spawn_rescue() {
@@ -257,21 +268,21 @@ fn handle<I: WatchIo>(io: &mut I, state: &mut WatchState, ev: WatchEvent) -> u64
             1
         }
         Err(e) => {
-            tracing::warn!(target: "tasklens::engine", "starting tasklens --low-memory failed: {e}");
+            io.warn(format_args!("starting tasklens --low-memory failed: {e}"));
             0
         }
     }
 }
 
-const PSI_PATH: &std::ffi::CStr = c"/proc/pressure/memory";
+const PSI_PATH: &str = "/proc/pressure/memory";
 
-/// Opens /proc/pressure/memory and writes PSI_TRIGGER. The trigger lives as long as the fd.
-pub fn open_psi_trigger() -> std::io::Result<OwnedFd> {
-    let fd = rustix::fs::open(
-        PSI_PATH,
-        OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )?;
+/// Opens /proc/pressure/memory and writes PSI_TRIGGER. The trigger lives as long as the file.
+pub fn open_psi_trigger() -> std::io::Result<File> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(PSI_PATH)?;
     // The kernel replaces the last byte written with a NUL, so the trailing NUL is required.
     // Without it the window loses its last digit (200 ms), which an unprivileged write may not
     // use (EINVAL, checked on kernel 7.2).
@@ -279,17 +290,112 @@ pub fn open_psi_trigger() -> std::io::Result<OwnedFd> {
     if let Some(head) = buf.get_mut(..PSI_TRIGGER.len()) {
         head.copy_from_slice(PSI_TRIGGER.as_bytes());
     }
-    let written = rustix::io::write(&fd, &buf)?;
+    let written = file.write(&buf)?;
     if written != buf.len() {
         return Err(std::io::ErrorKind::WriteZero.into());
     }
-    Ok(fd)
+    Ok(file)
+}
+
+/// What one `poll` on the PSI file saw.
+enum PollOutcome {
+    Timeout,
+    Fired,
+    Gone,
+}
+
+/// Waits for POLLPRI on `file` for up to `timeout`, rounded up to whole milliseconds so that a
+/// short remainder does not turn into a busy loop.
+#[allow(unsafe_code, reason = "libc::poll; std has no poll")]
+fn poll_pri(file: &File, timeout: std::time::Duration) -> std::io::Result<PollOutcome> {
+    let ms = i32::try_from(timeout.as_nanos().div_ceil(1_000_000)).unwrap_or(i32::MAX);
+    let mut pfd = libc::pollfd {
+        fd: file.as_raw_fd(),
+        events: libc::POLLPRI,
+        revents: 0,
+    };
+    // SAFETY: `pfd` is one valid, initialized pollfd that lives across the call, and nfds is 1.
+    let n = unsafe { libc::poll(&raw mut pfd, 1, ms) };
+    if n < 0 {
+        let err = std::io::Error::last_os_error();
+        return if err.kind() == std::io::ErrorKind::Interrupted {
+            Ok(PollOutcome::Timeout)
+        } else {
+            Err(err)
+        };
+    }
+    if n == 0 {
+        Ok(PollOutcome::Timeout)
+    } else if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        Ok(PollOutcome::Gone)
+    } else if pfd.revents & libc::POLLPRI != 0 {
+        Ok(PollOutcome::Fired)
+    } else {
+        Ok(PollOutcome::Timeout)
+    }
+}
+
+/// Locks all current and future pages in memory, so the watcher is never paged out.
+#[allow(unsafe_code, reason = "libc::mlockall; std has no mlockall")]
+fn mlockall() -> std::io::Result<()> {
+    // SAFETY: mlockall takes only flags and touches no Rust-owned memory.
+    if unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// `name` in the folder of this binary, else the first match on `PATH`. Only absolute, executable
+/// regular files count.
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)));
+    let on_path = std::env::var_os("PATH").into_iter().flat_map(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(name))
+            .collect::<Vec<_>>()
+    });
+    sibling
+        .into_iter()
+        .chain(on_path)
+        .find(|p| p.is_absolute() && is_executable(p))
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// How the single-instance lock ended.
+pub enum InstanceLock {
+    /// This process holds the lock for as long as the file stays open.
+    Held(File),
+    /// Another watcher holds it.
+    Busy,
+}
+
+/// Takes an exclusive `flock` on `dir/LOCK_FILE_NAME` (created with mode 0600).
+pub fn lock_instance(dir: &Path) -> std::io::Result<InstanceLock> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(dir.join(LOCK_FILE_NAME))?;
+    match file.try_lock() {
+        Ok(()) => Ok(InstanceLock::Held(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(InstanceLock::Busy),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// The real `WatchIo`: the PSI fd, `/proc/meminfo` and the rescue child.
 struct RealIo {
     /// None when the trigger is closed or could not be set up.
-    psi: Option<OwnedFd>,
+    psi: Option<File>,
     /// false when the first trigger write failed: the watcher then runs on MemAvailable only.
     psi_enabled: bool,
     /// Last time the trigger was (re)opened, to reopen at most once per MEMAVAIL_CHECK.
@@ -297,8 +403,8 @@ struct RealIo {
     /// Set after a failed reopen was logged, so it is logged once until a reopen succeeds.
     psi_reopen_warned: bool,
     meminfo: Option<MemInfoReader>,
-    /// Resolved once at start, so a later package update does not leave a "(deleted)" path.
-    exe: Option<std::path::PathBuf>,
+    /// `tasklens`, resolved once at start (next to this binary, else on `PATH`).
+    exe: Option<PathBuf>,
     child: Option<std::process::Child>,
 }
 
@@ -307,27 +413,25 @@ impl RealIo {
         let (psi, psi_enabled) = match open_psi_trigger() {
             Ok(fd) => (Some(fd), true),
             Err(e) => {
-                tracing::warn!(
-                    target: "tasklens::engine",
+                warn(format_args!(
                     "PSI trigger not available ({e}); checking MemAvailable every 5 s only"
-                );
+                ));
                 (None, false)
             }
         };
         let meminfo = match MemInfoReader::open() {
             Ok(r) => Some(r),
             Err(e) => {
-                tracing::warn!(target: "tasklens::engine", "opening /proc/meminfo failed: {e}");
+                warn(format_args!("opening /proc/meminfo failed: {e}"));
                 None
             }
         };
-        let exe = match std::env::current_exe() {
-            Ok(p) => Some(p),
-            Err(e) => {
-                tracing::warn!(target: "tasklens::engine", "finding the tasklens binary failed: {e}");
-                None
-            }
-        };
+        let exe = find_program(RESCUE_PROGRAM);
+        if exe.is_none() {
+            warn(format_args!(
+                "{RESCUE_PROGRAM} not found next to tasklens-watch or on PATH"
+            ));
+        }
         Self {
             psi,
             psi_enabled,
@@ -357,7 +461,7 @@ impl RealIo {
             Err(e) => {
                 if !self.psi_reopen_warned {
                     self.psi_reopen_warned = true;
-                    tracing::warn!(target: "tasklens::engine", "reopening the PSI trigger failed: {e}");
+                    warn(format_args!("reopening the PSI trigger failed: {e}"));
                 }
             }
         }
@@ -366,33 +470,24 @@ impl RealIo {
 
 impl WatchIo for RealIo {
     fn wait(&mut self, timeout: std::time::Duration) -> WaitResult {
-        use rustix::event::{PollFd, PollFlags, Timespec};
         self.maybe_reopen_psi();
-        let Some(fd) = &self.psi else {
+        let Some(file) = &self.psi else {
             std::thread::sleep(timeout);
             return WaitResult::Timeout;
         };
         // The loop never asks for more than MEMAVAIL_CHECK.
-        let ts = Timespec::try_from(timeout).unwrap_or(Timespec {
-            tv_sec: 5,
-            tv_nsec: 0,
-        });
-        let mut fds = [PollFd::new(fd, PollFlags::PRI)];
-        let revents = match rustix::event::poll(&mut fds, Some(&ts)) {
-            Ok(0) | Err(rustix::io::Errno::INTR) => return WaitResult::Timeout,
-            Ok(_) => fds.first().map_or(PollFlags::empty(), PollFd::revents),
-            Err(e) => {
-                tracing::warn!(target: "tasklens::engine", "polling the PSI trigger failed: {e}");
-                PollFlags::ERR
+        match poll_pri(file, timeout.min(MEMAVAIL_CHECK)) {
+            Ok(PollOutcome::Timeout) => WaitResult::Timeout,
+            Ok(PollOutcome::Fired) => WaitResult::PsiFired,
+            Ok(PollOutcome::Gone) => {
+                self.psi = None;
+                WaitResult::PsiGone
             }
-        };
-        if revents.intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) {
-            self.psi = None;
-            WaitResult::PsiGone
-        } else if revents.contains(PollFlags::PRI) {
-            WaitResult::PsiFired
-        } else {
-            WaitResult::Timeout
+            Err(e) => {
+                warn(format_args!("polling the PSI trigger failed: {e}"));
+                self.psi = None;
+                WaitResult::PsiGone
+            }
         }
     }
 
@@ -430,7 +525,7 @@ impl WatchIo for RealIo {
                 false
             }
             Err(e) => {
-                tracing::warn!(target: "tasklens::engine", "checking the rescue window failed: {e}");
+                warn(format_args!("checking the rescue window failed: {e}"));
                 self.child = None;
                 false
             }
@@ -447,20 +542,43 @@ impl WatchIo for RealIo {
             .iter()
             .any(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))
     }
+
+    fn warn(&mut self, args: fmt::Arguments<'_>) {
+        warn(args);
+    }
 }
 
-/// Entry for `--watch-memory`. Starts no GPUI, no engine and no file logger; `warn` and above go
-/// to stderr, so the user unit's journal holds them (R-152 OI-4). Runs until SIGTERM.
+/// Entry for `tasklens-watch`. Starts no GPUI, no engine and no file logger; `warn` lines go
+/// to stderr, so the user unit's journal holds them (R-152 OI-4). Exits at once when another
+/// watcher holds the lock in `XDG_RUNTIME_DIR`; otherwise runs until SIGTERM.
 pub fn run_watch_memory() -> std::process::ExitCode {
-    // Fails harmlessly when a subscriber is already set.
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(tracing::Level::WARN)
-        .try_init();
-    if let Err(e) =
-        rustix::mm::mlockall(rustix::mm::MlockAllFlags::CURRENT | rustix::mm::MlockAllFlags::FUTURE)
+    // Held until the process ends.
+    let _lock = match std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
     {
-        tracing::warn!(target: "tasklens::engine", "mlockall failed: {e}");
+        None => {
+            warn(format_args!(
+                "XDG_RUNTIME_DIR is not set; running without the single-instance lock"
+            ));
+            None
+        }
+        Some(dir) => match lock_instance(&dir) {
+            Ok(InstanceLock::Held(file)) => Some(file),
+            Ok(InstanceLock::Busy) => {
+                warn(format_args!("another tasklens-watch is running; exiting"));
+                return std::process::ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                warn(format_args!(
+                    "taking the single-instance lock failed ({e}); running without it"
+                ));
+                None
+            }
+        },
+    };
+    if let Err(e) = mlockall() {
+        warn(format_args!("mlockall failed: {e}"));
     }
     let mut io = RealIo::new();
     run_loop(&mut io, None);

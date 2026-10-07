@@ -1911,7 +1911,7 @@ Mission Center's "connections" request lists network interfaces, not sockets, so
 - Behaviour: Arguments (table c):
   - `--start-minimized` (APP-048)
   - `--low-memory`: low-memory rescue window (process spec, PROC-098); TaskSlinger's `/low-memory` and `--internal-low-memory-recovery`
-  - `--watch-memory`: the low-memory watcher mode run by `tasklens-lowmem.service`; it does not start GPUI (PROC-097)
+  - `--watch-memory`: kept for older unit files; it execs `tasklens-watch`, the small low-memory watcher binary that `tasklens-lowmem.service` runs. It does not start GPUI (PROC-097, tasklens-m1f.19)
   - `--tab <processes|performance|services|startup|connections|information>`: TaskSlinger's page argument, whose syntax is unknown, made explicit
   - `--select-pid <pid>`: opens Processes and selects that pid
   - `--debug`: Debug menu (APP-026)

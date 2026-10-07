@@ -1714,7 +1714,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
 - Source: TS `/low-memory` L35425, [CL 0.8.0], 4.5 | TS inventory section 9 (PSI trigger) | R-062
 - Behaviour:
   - Settings > Window & startup > "Open rescue window on critical memory pressure", default off (`lowmem.enabled = false`).
-  - When turned on, tasklens installs and enables the user unit `tasklens-lowmem.service`, which runs `tasklens --watch-memory`. Turning it off disables and removes the unit.
+  - When turned on, tasklens installs and enables the user unit `tasklens-lowmem.service`, which runs `tasklens-watch`, a separate small watcher binary (`tasklens --watch-memory` execs it too). Turning it off disables and removes the unit.
   - When memory pressure crosses the threshold and no rescue window is open, the watcher starts `tasklens --low-memory`.
   - Threshold: PSI `full` above 10% over a 2 s window, or MemAvailable below 3% of MemTotal (R-151).
 - Linux data/mechanism:

@@ -26,8 +26,6 @@ mod rendering_env;
 mod settings_store;
 #[allow(dead_code, reason = "tests call the rest")]
 mod single_instance;
-#[allow(dead_code, reason = "only tests call `MemInfoReader::read`")]
-mod watch_memory;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -52,6 +50,21 @@ const HELPER_PATH: &str = "/usr/lib/tasklens/tl-helper";
 /// Set on the one automatic relaunch after device loss (ADR-015, R-153).
 const RELAUNCHED_VAR: &str = "TASKLENS_RELAUNCHED";
 
+/// Replaces this process with `tasklens-watch` (tasklens-m1f.19). Returns only on failure.
+fn exec_watcher() -> ExitCode {
+    use std::os::unix::process::CommandExt;
+    let Some(exe) = lowmem_unit::watcher_exe() else {
+        eprintln!(
+            "tasklens: {} not found next to tasklens or on PATH",
+            lowmem_unit::WATCHER_NAME
+        );
+        return ExitCode::from(1);
+    };
+    let err = Command::new(&exe).exec();
+    eprintln!("tasklens: starting {} failed: {err}", exe.display());
+    ExitCode::from(1)
+}
+
 fn main() -> ExitCode {
     tl_ui::app::perf_origin(Instant::now());
     let exec_to_main = exec_to_main_ms();
@@ -65,10 +78,10 @@ fn main() -> ExitCode {
         eprintln!("Invalid --app-id: {id}");
         return ExitCode::from(2);
     }
-    // E32: the watcher runs before paths and logging, so it has no file logger and no writer
-    // thread (R-152 OI-4). It sets up its own stderr subscriber.
+    // E32: `--watch-memory` is kept for old unit files. It execs `tasklens-watch` before paths
+    // and logging, so the watcher starts with no file logger and no writer thread (R-152 OI-4).
     if args.watch_memory {
-        return watch_memory::run_watch_memory();
+        return exec_watcher();
     }
 
     // Step 1: paths, panic hook, logging.
