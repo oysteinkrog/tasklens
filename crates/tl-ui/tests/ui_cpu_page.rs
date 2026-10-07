@@ -1064,6 +1064,35 @@ mod page {
     }
 
     #[gpui_kit::test]
+    fn cpu_all_cores_value_is_overall(cx: &mut TestAppContext) {
+        let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
+        r.engine.publish_with(|s| {
+            let sys = Arc::make_mut(&mut s.system);
+            sys.header.version += 1;
+            sys.cpu.util_pct = Metric::valid(18.6);
+        });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let text = |cx: &mut gpui_kit::App, stacked: bool| {
+            let p = page.read(cx);
+            let v = if stacked { p.stacked() } else { p.overlaid() };
+            v.and_then(|v| v.read(cx).value_text().map(|t| t.to_string()))
+        };
+        assert_eq!(
+            r.vcx.update(|_, cx| text(cx, false)).as_deref(),
+            Some("18.6%")
+        );
+        // A chart created later gets the current value at once.
+        r.vcx.dispatch_action(PerfSetCpuGraphMode {
+            mode: CpuGraphMode::AllCoresStacked,
+        });
+        assert_eq!(
+            r.vcx.update(|_, cx| text(cx, true)).as_deref(),
+            Some("18.6%")
+        );
+    }
+
+    #[gpui_kit::test]
     fn cpu_kernel_disabled_in_overlaid(cx: &mut TestAppContext) {
         let r = open(cx, with_mode(CpuGraphMode::AllCoresOverlaid));
         let page = r.page.clone();
