@@ -29,7 +29,10 @@ Do not pick up any other bead.
    and tell the leader.
    `assets/locales/en-US.ftl` changes under several agents at once. Never name it in a pathspec
    commit, even when `git diff` looked clean a minute ago: always stage your own hunks with
-   `git apply --cached` and commit with no pathspec.
+   `git apply --cached` and commit with no pathspec. Add new keys next to the keys of the same
+   area, never at the end of the file: blocks appended at the end by two agents merge into one
+   hunk. Before committing, list the keys in `git diff --cached -- assets/locales/en-US.ftl` and
+   check that every one is yours.
    A commit to a `src/` file that does not compile breaks HEAD for every agent. Right after such a
    commit, make your first build job a `cargo check -p <crate>` with and without `test-hooks`
    (plus `cargo clippy --lib -- -D warnings`), and fix any error in your files at once, before
