@@ -12,8 +12,8 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
 use gpui_kit::{
-    Action, AnyElement, App, Entity, EntityId, FontWeight, IntoElement, ParentElement, Pixels,
-    SharedString, Styled, div, prelude::FluentBuilder as _, px,
+    Action, AnyElement, App, Entity, EntityId, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement, Pixels, SharedString, Styled, div, prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
