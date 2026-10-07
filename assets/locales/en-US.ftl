@@ -656,3 +656,14 @@ fnd-action-reject-already-running = Already running
 fnd-action-target-pid = PID { $pid }
 fnd-action-target-tid = Thread { $tid }
 fnd-action-target-socket = { $local } to { $remote }
+# Process view handlers (E20-017).
+shell-toast-hiding-system = Hiding system processes
+shell-toast-showing-system = Showing system processes
+shell-toast-view-mode = View mode: { $name }
+shell-view-mode-tree = Tree View
+shell-view-mode-grouped = Task Manager Grouping
+shell-view-mode-flat = List View
+shell-toolbar-hide-system = Hide system processes
+shell-toolbar-show-system = Show system processes
+shell-toolbar-view-mode = Toggle view mode (current: { $name })
+shell-toolbar-view-mode-history = History shows a flat list
