@@ -777,16 +777,19 @@ const GROUP_FLAGS: ProcFlags = ProcFlags::PROTECTED
     .union(ProcFlags::IS_SELF);
 
 /// The target of row `ix`. `None` for a group header.
-fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget> {
+pub(crate) fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget> {
     if kind == RowKind::GroupHeader {
         return None;
     }
     let row = s.table.rows.get(ix)?;
     let p = &s.processes;
-    if let Some(r) = row.record.and_then(|i| p.records.get(i as usize)) {
+    if let Some(i) = row.record.map(|i| i as usize)
+        && let Some(r) = p.records.get(i)
+    {
         return Some(CapturedTarget {
             node: row.node.clone(),
             kind,
+            exe_deleted: p.extras.get(i).is_some_and(|e| e.exe_deleted),
             ..record_target(r)
         });
     }
@@ -813,10 +816,14 @@ fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget>
         flags,
         member_count: group.map_or(0, |g| g.members),
         stopped: false,
+        ppid: 0,
+        nice: None,
+        exe_deleted: false,
     })
 }
 
-/// The target of one process record, as a process row.
+/// The target of one process record, as a process row. `exe_deleted` is false: it is in the
+/// extras, which only the row menu reads.
 fn record_target(r: &ProcessRecord) -> CapturedTarget {
     CapturedTarget {
         node: NodeId::Process(r.key),
@@ -828,6 +835,9 @@ fn record_target(r: &ProcessRecord) -> CapturedTarget {
         flags: r.flags,
         member_count: 1,
         stopped: r.state == ProcState::Stopped,
+        ppid: r.ppid,
+        nice: Some(r.nice),
+        exe_deleted: false,
     }
 }
 

@@ -479,6 +479,9 @@ mod toasts {
             flags,
             member_count: 1,
             stopped: false,
+            ppid: 1,
+            nice: Some(0),
+            exe_deleted: false,
         }
     }
 

@@ -147,6 +147,12 @@ pub struct CapturedTarget {
     /// The process was in State T (stopped) when captured. False for app, unit and pseudo
     /// rows.
     pub stopped: bool,
+    /// Parent PID. 0 for app, unit and pseudo rows (the row menu hides "Go to parent process").
+    pub ppid: u32,
+    /// The nice value, for the Set Priority check mark. `None` for app, unit and pseudo rows.
+    pub nice: Option<i8>,
+    /// The executable was deleted (E22-020). False when the extras are not known.
+    pub exe_deleted: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -308,6 +314,9 @@ mod tests {
             flags,
             member_count: 1,
             stopped: false,
+            ppid: 1,
+            nice: Some(0),
+            exe_deleted: false,
         }
     }
 
