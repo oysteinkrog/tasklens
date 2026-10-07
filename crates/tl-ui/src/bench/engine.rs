@@ -3,7 +3,8 @@
 //!
 //! One publisher thread builds full snapshots from the generators in [`super::synth`] and
 //! publishes them like the real bridge (ADR-005): replace the latest snapshot, then send one wake
-//! token. In the `bridge` scene the CPU total and kernel series come from a real client.
+//! token. In the `bridge` scene the CPU total and kernel series come from a real client. In the
+//! `table-2000` scene only the process table changes, once per second.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,16 +26,17 @@ use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::series::{Sample, SeriesRing, SeriesView};
 use tl_model::settings::EngineSettings;
 use tl_model::snapshot::{
-    ComponentHeader, ConnectionsSnapshot, InventorySnapshot, SeriesSet, ServicesSnapshot, Snapshot,
-    StartupSnapshot, SystemSnapshot, WindowsSnapshot,
+    ComponentHeader, ConnectionsSnapshot, InventorySnapshot, ProcessSnapshot, SeriesSet,
+    ServicesSnapshot, Snapshot, StartupSnapshot, SystemSnapshot, WindowsSnapshot,
 };
 use tl_model::system::{CoreInfo, CoreKind, CpuSet, CpuTopology, CpuTotals, MemoryTotals, Metric};
+use tl_model::table::ProcessTableView;
 use tl_model::time::{BootId, TimeNs, now_boot_ns};
 use tl_model::validity::Validity;
 
 use super::synth::{
     BenchRng, CORES, CpuFrame, CpuSynth, DeviceSynth, PrefilledSeries, StatsFrame, StatsSynth,
-    prefill, seconds,
+    TableSynth, prefill, seconds,
 };
 
 const PERIOD_10HZ_NS: u64 = 100_000_000;
@@ -80,8 +82,11 @@ const TRACKS: usize = TR_FIRST_NET + 4;
 
 /// Where the CPU total comes from.
 pub enum BenchFeed {
-    /// Every series synthetic (perf-cpu, static, table-2000).
+    /// Every series synthetic (perf-cpu, static).
     Synthetic,
+    /// table-2000: the prefilled series never change; once per second a new [`TableSynth`]
+    /// table replaces the PROCESSES and TABLE components, and nothing else is published.
+    Table,
     /// CPU_TOTAL and CPU_KERNEL of the all-CPUs device come from this client; the 32 per-core
     /// series and every other value stay synthetic (bridge scene).
     Bridge(Arc<dyn EngineClient>),
@@ -142,10 +147,11 @@ impl BenchEngine {
         let (signal_tx, signal_rx) = mpsc::channel();
 
         let (mut publisher, real) = match feed {
-            BenchFeed::Synthetic => (Publisher::new(seed, t0, None), None),
+            BenchFeed::Synthetic => (Publisher::new(seed, t0, None, false), None),
+            BenchFeed::Table => (Publisher::new(seed, t0, None, true), None),
             BenchFeed::Bridge(client) => {
                 let wake = client.wake();
-                (Publisher::new(seed, t0, Some(client)), Some(wake))
+                (Publisher::new(seed, t0, Some(client), false), Some(wake))
             }
         };
         let shared = Arc::new(Shared {
@@ -221,7 +227,8 @@ impl BenchEngine {
         lock(&self.shared.settings).clone()
     }
 
-    /// Publishes made on a 10 Hz deadline. Bridge republishes between deadlines are not counted.
+    /// Publishes made on a 10 Hz deadline. Bridge republishes between deadlines are not counted;
+    /// in table-2000 only every 10th deadline publishes.
     pub fn published_10hz(&self) -> u64 {
         self.shared.published_10hz.load(Ordering::Acquire)
     }
@@ -308,9 +315,10 @@ fn run(mut publisher: Publisher, shared: &Shared, signals: &mpsc::Receiver<Signa
             }
         }
         tick += 1;
-        publisher.tick(tick, shared);
-        shared.publish(publisher.snapshot());
-        shared.published_10hz.fetch_add(1, Ordering::AcqRel);
+        if publisher.tick(tick, shared) {
+            shared.publish(publisher.snapshot());
+            shared.published_10hz.fetch_add(1, Ordering::AcqRel);
+        }
     }
 }
 
@@ -381,10 +389,14 @@ struct Publisher {
     sequence: u64,
     bridge: Option<Arc<dyn EngineClient>>,
     cursor: BridgeCursor,
+    /// Some in table-2000 only.
+    table_synth: Option<TableSynth>,
+    processes: Arc<ProcessSnapshot>,
+    table: Arc<ProcessTableView>,
 }
 
 impl Publisher {
-    fn new(seed: u64, t0: TimeNs, bridge: Option<Arc<dyn EngineClient>>) -> Self {
+    fn new(seed: u64, t0: TimeNs, bridge: Option<Arc<dyn EngineClient>>, table: bool) -> Self {
         let mut rng = BenchRng::new(seed);
         let mut cpu = CpuSynth::new(&mut rng);
         let mut devices = DeviceSynth::new();
@@ -395,25 +407,64 @@ impl Publisher {
             cpu_topology: Arc::new(topology()),
             ..SystemSnapshot::default()
         });
-        Self {
+        let template = template();
+        let mut this = Self {
+            processes: Arc::clone(&template.processes),
+            table: Arc::clone(&template.table),
             rng,
             cpu,
             devices,
             stats,
             t0,
             tracks: tracks(&pre),
-            template: template(),
+            template,
             system,
             series_version: 1,
             sequence: 1,
             bridge,
             cursor: BridgeCursor::default(),
+            table_synth: None,
+        };
+        if table {
+            this.table_synth = Some(TableSynth::new(&mut this.rng));
+            this.tick_table(t0, None);
         }
+        this
     }
 
-    /// Appends tick `k`'s samples at `t0 + k * 100 ms`.
-    fn tick(&mut self, k: u64, shared: &Shared) {
+    /// The next table at `t_ns`, built for the last `SetTableQuery` generation sent.
+    fn tick_table(&mut self, t_ns: TimeNs, shared: Option<&Shared>) {
+        let Some(synth) = &mut self.table_synth else {
+            return;
+        };
+        let view = synth.tick_1hz(&mut self.rng, t_ns);
+        let generation = shared.and_then(|sh| {
+            lock(&sh.commands).iter().rev().find_map(|c| match c {
+                Command::SetTableQuery(q) => Some(q.generation),
+                _ => None,
+            })
+        });
+        self.table = match generation {
+            Some(generation) => Arc::new(ProcessTableView {
+                query_generation: generation,
+                ..ProcessTableView::clone(&view)
+            }),
+            None => view,
+        };
+        self.processes = synth.processes();
+    }
+
+    /// Appends tick `k`'s samples at `t0 + k * 100 ms`. Returns true when there is something to
+    /// publish: always, except between the 1 Hz table ticks of table-2000.
+    fn tick(&mut self, k: u64, shared: &Shared) -> bool {
         let t_ns = self.t0 + k * PERIOD_10HZ_NS;
+        if self.table_synth.is_some() {
+            if k.is_multiple_of(TICKS_PER_1HZ) {
+                self.tick_table(t_ns, Some(shared));
+                return true;
+            }
+            return false;
+        }
         let t_s = seconds(t_ns);
         let f = self.cpu.sample(t_s);
         for (c, (&v, &kv)) in f.per_core.iter().zip(&f.per_core_kernel).enumerate() {
@@ -430,6 +481,7 @@ impl Publisher {
             self.tick_1hz(t_ns, &f);
         }
         self.series_version += 1;
+        true
     }
 
     fn tick_1hz(&mut self, t_ns: TimeNs, f: &CpuFrame) {
@@ -528,6 +580,8 @@ impl Publisher {
             published_ns: now_boot_ns(),
             system: Arc::clone(&self.system),
             series,
+            processes: Arc::clone(&self.processes),
+            table: Arc::clone(&self.table),
             ..self.template.clone()
         }
     }
@@ -828,7 +882,7 @@ mod tests {
     fn unchanged_series_reuse_arc() {
         let shared = quiet_shared();
         let t0 = 3_600 * PERIOD_1HZ_NS;
-        let mut p = Publisher::new(42, t0, None);
+        let mut p = Publisher::new(42, t0, None, false);
         let mut prev = p.snapshot();
         for k in 1..=25 {
             p.tick(k, &shared);
