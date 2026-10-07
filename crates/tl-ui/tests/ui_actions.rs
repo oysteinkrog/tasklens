@@ -703,6 +703,120 @@ fn busy_send_shows_warning(cx: &mut TestAppContext) {
     assert!(r.engine.commands().is_empty());
 }
 
+/// Records every tracker event.
+fn events(r: &mut Rig) -> Rc<RefCell<Vec<ActionTrackerEvent>>> {
+    let seen: Rc<RefCell<Vec<ActionTrackerEvent>>> = Rc::default();
+    let sink = seen.clone();
+    let tracker = r.tracker.clone();
+    r.vcx.update(|_, cx| {
+        cx.subscribe(&tracker, move |_, ev: &ActionTrackerEvent, _| {
+            sink.borrow_mut().push(*ev)
+        })
+        .detach();
+    });
+    seen
+}
+
+fn owner_texts() -> ToastTexts {
+    ToastTexts {
+        started: Some((ToastKind::Progress, "Starting service...".into())),
+        summary: Some(service_summary()),
+        owner_toasts: true,
+        ..ToastTexts::new("Service started", "Could not start the service.")
+    }
+}
+
+#[gpui_kit::test]
+fn owner_toasts_push_nothing_and_report_each_target(cx: &mut TestAppContext) {
+    let mut r = rig(cx, None);
+    let seen = events(&mut r);
+    let targets = ["a", "b", "c", "d"].map(|n| unit(&format!("{n}.service")));
+    let id = r.track(request(ActionKind::UnitStart, targets), owner_texts());
+    r.emit(id, None, ActionState::Started);
+    r.emit(id, Some(0), ActionState::Succeeded);
+    let so_far = r
+        .tracker
+        .read_with(&r.vcx, |t, _| t.results(id).map(<[_]>::to_vec));
+    assert_eq!(so_far, Some(vec![(0, ActionState::Succeeded)]));
+    r.emit(id, Some(1), EPERM);
+    // Targets 2 and 3 are reported only by the summary.
+    r.emit(id, None, ActionState::Succeeded);
+
+    assert!(r.pushed().is_empty(), "the owner shows the toasts");
+    assert!(r.visible().is_empty());
+    assert_eq!(
+        *seen.borrow(),
+        [
+            ActionTrackerEvent::Started(id),
+            ActionTrackerEvent::TargetFinished { id, index: 0 },
+            ActionTrackerEvent::TargetFinished { id, index: 1 },
+            ActionTrackerEvent::Finished {
+                id,
+                ok: 3,
+                total: 4,
+                failed: 1,
+            },
+        ]
+    );
+    let finals = r
+        .tracker
+        .read_with(&r.vcx, |t, _| t.results(id).map(<[_]>::to_vec));
+    assert_eq!(
+        finals,
+        Some(vec![
+            (0, ActionState::Succeeded),
+            (1, EPERM),
+            (2, ActionState::Succeeded),
+            (3, ActionState::Succeeded),
+        ]),
+        "readable after Finished, summary-only targets with the summary state"
+    );
+    assert_eq!(r.pending(), 0);
+}
+
+#[gpui_kit::test]
+fn owner_toasts_timeout_keeps_known_results(cx: &mut TestAppContext) {
+    let mut r = rig(cx, None);
+    let seen = events(&mut r);
+    let texts = ToastTexts {
+        owner_toasts: true,
+        ..end_task_texts()
+    };
+    let id = r.track(end_task(2), texts);
+    r.emit(id, Some(0), ActionState::Succeeded);
+    r.advance(Duration::from_secs(60));
+
+    assert!(r.pushed().is_empty(), "no Outcome unknown toast either");
+    assert!(matches!(
+        seen.borrow().last(),
+        Some(ActionTrackerEvent::Finished { id: f, ok: 1, total: 2, failed: 1 }) if *f == id
+    ));
+    let finals = r
+        .tracker
+        .read_with(&r.vcx, |t, _| t.results(id).map(<[_]>::to_vec));
+    assert_eq!(finals, Some(vec![(0, ActionState::Succeeded)]));
+}
+
+#[gpui_kit::test]
+fn owner_results_keep_the_last_16(cx: &mut TestAppContext) {
+    let mut r = rig(cx, None);
+    let texts = || ToastTexts {
+        owner_toasts: true,
+        ..end_task_texts()
+    };
+    let ids: Vec<ActionId> = (0..17)
+        .map(|_| {
+            let id = r.track(end_task(1), texts());
+            r.finish(id, &[ActionState::Succeeded]);
+            id
+        })
+        .collect();
+    let kept = |r: &mut Rig, id| r.tracker.read_with(&r.vcx, |t, _| t.results(id).is_some());
+    assert!(!kept(&mut r, ids[0]), "the oldest is dropped");
+    assert!(kept(&mut r, ids[1]));
+    assert!(kept(&mut r, ids[16]));
+}
+
 /// With the main window open and tl-helper missing, an EPERM reaches the status chip once.
 mod with_shell {
     use gpui_kit::{EventEmitter, FocusHandle, InteractiveElement as _};

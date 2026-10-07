@@ -15,6 +15,10 @@
 //!   owner chose another kind), then one summary toast whose kind and text the owner builds
 //!   from the failures, with a "Details" button when any target failed (R-197).
 //!
+//! An owner that shows its own toasts sets `ToastTexts::owner_toasts` (the system tables'
+//! `SysActions`, UI-SYS-007): the tracker then sends, sweeps and emits events as usual, also
+//! `TargetFinished` per target, but pushes no toast, and `results` gives the final states.
+//!
 //! A request with a deadline that has had no summary `deadline + 5 s` after it was sent becomes
 //! "Outcome unknown" (ADR-005). Nothing is ever retried automatically; "Retry as administrator"
 //! is a button the user clicks (ADR-006, P3).
@@ -95,6 +99,9 @@ pub struct ToastTexts {
     pub retry_as_admin: bool,
     /// Grouped requests share one toast (R-197). `None` is `ToastKey(id.0)`.
     pub toast_key: Option<ToastKey>,
+    /// The owner shows every toast of this request itself: the tracker pushes none, emits
+    /// `TargetFinished` for each target result and keeps the final states for `results`.
+    pub owner_toasts: bool,
 }
 
 impl ToastTexts {
@@ -108,6 +115,7 @@ impl ToastTexts {
             summary_min_targets: SUMMARY_MIN_TARGETS,
             retry_as_admin: false,
             toast_key: None,
+            owner_toasts: false,
         }
     }
 }
@@ -208,6 +216,12 @@ enum Mode {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ActionTrackerEvent {
     Started(ActionId),
+    /// One target's final state arrived; read it with `ActionTracker::results`. Only for
+    /// requests with `owner_toasts`.
+    TargetFinished {
+        id: ActionId,
+        index: u16,
+    },
     /// The summary arrived, or the request timed out or the engine stopped. `failed` counts every
     /// target that did not succeed.
     Finished {
@@ -250,6 +264,9 @@ pub struct ActionTracker {
     next_id: AtomicU64,
     retries: VecDeque<(ActionId, RetryRecord)>,
     details: VecDeque<(ActionId, DetailsRecord)>,
+    /// The final state of every target of the last finished `owner_toasts` requests, for
+    /// `results` after `Finished`.
+    finished: VecDeque<(ActionId, FinalStates)>,
     /// The deadline sweep runs only while requests are pending.
     sweeping: bool,
     _events: Task<()>,
@@ -260,6 +277,9 @@ pub struct ActionTracker {
     #[cfg(any(test, feature = "test-hooks"))]
     opened_details: Vec<DetailsRecord>,
 }
+
+/// Final states by target index.
+type FinalStates = SmallVec<[(u16, ActionState); 4]>;
 
 /// The app's tracker, set by `TasklensUi::init`.
 pub struct GlobalActionTracker(pub Entity<ActionTracker>);
@@ -303,6 +323,7 @@ impl ActionTracker {
             next_id: AtomicU64::new(1),
             retries: VecDeque::new(),
             details: VecDeque::new(),
+            finished: VecDeque::new(),
             sweeping: false,
             _events: task,
             #[cfg(any(test, feature = "test-hooks"))]
@@ -378,6 +399,27 @@ impl ActionTracker {
         self.pending.len()
     }
 
+    /// The target results of `owner_toasts` request `id`, as (target index, final state). While
+    /// it runs: the results so far. After `Finished`: every target, those the engine reported
+    /// only in the summary with the summary state; after a timeout or a closed engine, only the
+    /// targets that had a result. The last 16 finished requests are kept.
+    pub fn results(&self, id: ActionId) -> Option<&[(u16, ActionState)]> {
+        if let Some(entry) = self.pending.get(&id) {
+            return Some(&entry.results);
+        }
+        self.finished
+            .iter()
+            .find(|(f, _)| *f == id)
+            .map(|(_, states)| &states[..])
+    }
+
+    fn keep_finished(&mut self, id: ActionId, states: FinalStates) {
+        if self.finished.len() == KEEP_FINISHED {
+            self.finished.pop_front();
+        }
+        self.finished.push_back((id, states));
+    }
+
     fn on_event(&mut self, ev: ActionEvent, cx: &mut Context<Self>) {
         let Some(entry) = self.pending.get_mut(&ev.id) else {
             debug!(target: "tasklens::ui", id = ?ev.id, "event for an unknown action");
@@ -388,7 +430,9 @@ impl ActionTracker {
             (Some(_), ActionState::Started) => {}
             (Some(index), state) => {
                 entry.results.push((index, state.clone()));
-                if entry.mode() == Mode::PerTarget {
+                if entry.texts.owner_toasts {
+                    cx.emit(ActionTrackerEvent::TargetFinished { id: ev.id, index });
+                } else if entry.mode() == Mode::PerTarget {
                     let helper = helper_state(cx);
                     self.push_target(ev.id, index, &state, helper, cx);
                 }
@@ -402,6 +446,9 @@ impl ActionTracker {
         let Some(entry) = self.pending.get(&id) else {
             return;
         };
+        if entry.texts.owner_toasts {
+            return;
+        }
         let Some((kind, text)) = entry.texts.started.clone() else {
             return;
         };
@@ -446,6 +493,19 @@ impl ActionTracker {
             .filter(|s| matches!(s, ActionState::Succeeded))
             .count() as u16;
         let failed = total - ok;
+        if entry.texts.owner_toasts {
+            let finals = states.iter().enumerate();
+            let finals = finals.map(|(i, s)| (i as u16, (*s).clone())).collect();
+            drop(states);
+            self.keep_finished(id, finals);
+            cx.emit(ActionTrackerEvent::Finished {
+                id,
+                ok,
+                total,
+                failed,
+            });
+            return;
+        }
         cx.emit(ActionTrackerEvent::Finished {
             id,
             ok,
@@ -591,6 +651,16 @@ impl ActionTracker {
             .iter()
             .filter(|(_, s)| matches!(s, ActionState::Succeeded))
             .count() as u16;
+        if entry.texts.owner_toasts {
+            self.keep_finished(id, entry.results);
+            cx.emit(ActionTrackerEvent::Finished {
+                id,
+                ok,
+                total,
+                failed: total - ok.min(total),
+            });
+            return;
+        }
         cx.emit(ActionTrackerEvent::Finished {
             id,
             ok,
