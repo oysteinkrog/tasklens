@@ -3,6 +3,8 @@
 pub mod collector_health;
 pub mod filter;
 pub mod main;
+pub mod menubar;
+pub mod menus_file;
 pub mod registry;
 pub mod share_theme;
 pub mod shortcuts;

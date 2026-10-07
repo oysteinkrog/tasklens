@@ -366,6 +366,11 @@ impl TlMenuPopup {
         self.highlight
     }
 
+    /// Highlights the first enabled item, as a menu opened from the keyboard shows it.
+    pub fn highlight_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.jump(false, window, cx);
+    }
+
     fn submenus(&self) -> Vec<Entity<TlMenuPopup>> {
         self.entries
             .iter()
