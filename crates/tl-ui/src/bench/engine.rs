@@ -4,7 +4,8 @@
 //! One publisher thread builds full snapshots from the generators in [`super::synth`] and
 //! publishes them like the real bridge (ADR-005): replace the latest snapshot, then send one wake
 //! token. In the `bridge` scene the CPU total and kernel series come from a real client. In the
-//! `table-2000` scene only the process table changes, once per second.
+//! `table-2000` scene only the process table changes, once per second. In the `soak` scene the
+//! same synthetic samples as `perf-cpu` are published once per second, ten at a time.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,6 +88,9 @@ pub enum BenchFeed {
     /// table-2000: the prefilled series never change; once per second a new [`TableSynth`]
     /// table replaces the PROCESSES and TABLE components, and nothing else is published.
     Table,
+    /// soak: the `Synthetic` series, published once per second (ADR-010 "1 Hz updates"). Each
+    /// publish carries the ten 100 ms samples of the second, so the 10 Hz series stay whole.
+    Soak,
     /// CPU_TOTAL and CPU_KERNEL of the all-CPUs device come from this client; the 32 per-core
     /// series and every other value stay synthetic (bridge scene).
     Bridge(Arc<dyn EngineClient>),
@@ -146,8 +150,13 @@ impl BenchEngine {
         let (ev_tx, ev_rx) = async_channel::bounded(256);
         let (signal_tx, signal_rx) = mpsc::channel();
 
+        let ticks_per_publish = if matches!(feed, BenchFeed::Soak) {
+            TICKS_PER_1HZ
+        } else {
+            1
+        };
         let (mut publisher, real) = match feed {
-            BenchFeed::Synthetic => (Publisher::new(seed, t0, None, false), None),
+            BenchFeed::Synthetic | BenchFeed::Soak => (Publisher::new(seed, t0, None, false), None),
             BenchFeed::Table => (Publisher::new(seed, t0, None, true), None),
             BenchFeed::Bridge(client) => {
                 let wake = client.wake();
@@ -185,7 +194,7 @@ impl BenchEngine {
         let thread_shared = Arc::clone(&shared);
         let thread = std::thread::Builder::new()
             .name("tl-bench-pub".into())
-            .spawn(move || run(publisher, &thread_shared, &signal_rx, t0))
+            .spawn(move || run(publisher, &thread_shared, &signal_rx, t0, ticks_per_publish))
             .expect("spawn tl-bench-pub");
 
         Arc::new(Self {
@@ -291,11 +300,18 @@ impl EngineClient for BenchEngine {
     }
 }
 
-/// The publisher loop: absolute deadlines every 100 ms from `t0`, no drift.
-fn run(mut publisher: Publisher, shared: &Shared, signals: &mpsc::Receiver<Signal>, t0: TimeNs) {
+/// The publisher loop: absolute deadlines every `ticks_per_publish * 100 ms` from `t0`, no
+/// drift. Each deadline runs that many 100 ms ticks, then publishes once.
+fn run(
+    mut publisher: Publisher,
+    shared: &Shared,
+    signals: &mpsc::Receiver<Signal>,
+    t0: TimeNs,
+    ticks_per_publish: u64,
+) {
     let mut tick: u64 = 0;
     loop {
-        let deadline = t0 + (tick + 1) * PERIOD_10HZ_NS;
+        let deadline = t0 + (tick + ticks_per_publish) * PERIOD_10HZ_NS;
         loop {
             if shared.stopping.load(Ordering::Acquire) {
                 return;
@@ -314,8 +330,12 @@ fn run(mut publisher: Publisher, shared: &Shared, signals: &mpsc::Receiver<Signa
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
-        tick += 1;
-        if publisher.tick(tick, shared) {
+        let mut changed = false;
+        for _ in 0..ticks_per_publish {
+            tick += 1;
+            changed |= publisher.tick(tick, shared);
+        }
+        if changed {
             shared.publish(publisher.snapshot());
             shared.published_10hz.fetch_add(1, Ordering::AcqRel);
         }
@@ -876,6 +896,32 @@ mod tests {
         assert!((9..=11).contains(&n), "published {n}");
         assert!(wake.try_recv().is_ok());
         assert_eq!(engine.latest().sequence, n + 1);
+    }
+
+    #[test]
+    fn soak_publishes_once_per_second_with_ten_samples() {
+        let engine = BenchEngine::start(BenchFeed::Soak, 42, now_boot_ns());
+        let before = engine.latest();
+        std::thread::sleep(Duration::from_millis(2_300));
+        let n = engine.published_10hz();
+        let after = engine.latest();
+        engine.stop();
+        assert!((2..=3).contains(&n), "published {n}");
+        let id = SeriesId {
+            device: DeviceIdx(DEV_PACKAGE),
+            metric: MetricId::CPU_TOTAL,
+        };
+        let newest = |snap: &Snapshot| {
+            snap.series
+                .get(id)
+                .and_then(|v| v.samples.last().map(|s| s.t_ns))
+        };
+        let moved = newest(&after).unwrap() - newest(&before).unwrap();
+        assert_eq!(
+            moved,
+            n * 10 * PERIOD_10HZ_NS,
+            "ten 100 ms samples per publish"
+        );
     }
 
     #[test]
