@@ -972,6 +972,16 @@ processes-confirm-action-end-process = End process
 processes-confirm-action-suspend = Suspend
 processes-confirm-action-resume = Resume
 processes-confirm-action-set-priority = Set priority
+# tasklens-pdu.22: the copy commands (PROC-070, UI-PRC-015).
+processes-copy-private-bytes = Private bytes
+processes-copy-working-set = Working set
+processes-copy-restricted = restricted
+processes-copy-unsupported = n/a
+processes-toast-copied = Copied to clipboard
+processes-toast-values-copied = Selected process values copied.
+processes-toast-details-copied = Process details copied.
+processes-toast-metrics-copied = Copied metrics to clipboard
+processes-toast-many-metrics-copied = Selected process metrics copied.
 # Low-memory rescue window list (UI-PWN-033, E32-A2).
 lowmem-row-memory = Memory { $pct }%
 lowmem-button-end-task = End Task

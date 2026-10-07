@@ -447,6 +447,14 @@ pub struct CellWords {
     pub priority_low: Arc<str>,
     pub priority_batch: Arc<str>,
     pub affinity_all: Arc<str>,
+    /// Column labels, index aligned with [`PROCESS_COLUMNS`], for the copy commands.
+    pub labels: Arc<[Arc<str>]>,
+    /// Copy details labels that are not column labels: "Private bytes", "Working set".
+    pub copy_private_bytes: Arc<str>,
+    pub copy_working_set: Arc<str>,
+    /// What a copy writes for a Restricted value ("restricted") and an Unsupported one ("n/a").
+    pub copy_restricted: Arc<str>,
+    pub copy_unsupported: Arc<str>,
 }
 
 impl CellWords {
@@ -483,7 +491,21 @@ impl CellWords {
             priority_low: text("processes-priority-low"),
             priority_batch: text("processes-priority-batch"),
             affinity_all: text("processes-affinity-all"),
+            labels: PROCESS_COLUMNS.iter().map(|c| text(c.label)).collect(),
+            copy_private_bytes: text("processes-copy-private-bytes"),
+            copy_working_set: text("processes-copy-working-set"),
+            copy_restricted: text("processes-copy-restricted"),
+            copy_unsupported: text("processes-copy-unsupported"),
         }
+    }
+
+    /// The label of column `id`.
+    pub fn label(&self, id: ColumnId) -> &str {
+        PROCESS_COLUMNS
+            .iter()
+            .position(|c| c.id == id)
+            .and_then(|i| self.labels.get(i))
+            .map_or("", |l| l.as_ref())
     }
 }
 
@@ -1074,6 +1096,267 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         // PID, Parent PID and Image name are blank on group rows (PROC-008,
         // PROC-018). The other columns have no group value.
         _ => Value::Blank,
+    }
+}
+
+// ---- Copy commands (PROC-070, ADR-015) ----
+
+/// The text one cell copies: its displayed text, "restricted" for a Restricted value, "n/a"
+/// for an Unsupported one and empty for any other state without a value. Never a 0 for a
+/// value that was not read.
+fn copy_value(row: RowRef, col: &ProcColumn, ctx: &CellCtx, out: &mut CellOut) -> String {
+    out.reset();
+    out.want_text = true;
+    fill_cell(row, col, ctx, out);
+    match out.validity {
+        Validity::Valid | Validity::Stale => match out.arc.take() {
+            Some(arc) => arc.to_string(),
+            None => std::mem::take(&mut out.text),
+        },
+        v => copy_state_word(v, ctx.words).to_owned(),
+    }
+}
+
+/// "restricted", "n/a", or empty for the other states without a value.
+fn copy_state_word(v: Validity, w: &CellWords) -> &str {
+    match v {
+        Validity::Restricted => &w.copy_restricted,
+        Validity::Unsupported => &w.copy_unsupported,
+        _ => "",
+    }
+}
+
+/// Copy on a cell: the displayed value of `col` for each row, one per line, in view order.
+pub fn copy_cell(rows: &[RowRef], col: &ProcColumn, ctx: &CellCtx) -> String {
+    let mut out = CellOut::default();
+    rows.iter()
+        .map(|&row| copy_value(row, col, ctx, &mut out))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Copy details (Ctrl+C): a fixed block per row, blocks separated by one blank line.
+///
+/// ```text
+/// Name: firefox
+/// PID: 4321
+/// Parent PID: 2010
+/// CPU: 3.27%
+/// Memory: 812 MiB
+/// Private bytes: 1490 MiB
+/// Working set: 1104 MiB
+/// Threads: 97
+/// Handles: 412
+/// Priority: Normal (0)
+/// ```
+///
+/// CPU is the share of the whole machine with two decimals (R-094). Memory is RssAnon, Private
+/// bytes VmData + VmStk (Commit size), Working set VmRSS, each in whole MiB. Handles is the fd
+/// count. App and unit rows leave PID, Parent PID and Priority empty.
+pub fn copy_details(rows: &[RowRef], ctx: &CellCtx) -> String {
+    let w = ctx.words;
+    let mut text = String::new();
+    for (n, &row) in rows.iter().enumerate() {
+        if n > 0 {
+            text.push_str("\n\n");
+        }
+        let d = Details::of(row, ctx);
+        let lines: [(&str, String); 10] = [
+            (w.label(ColumnId::Name), d.name.to_string()),
+            (
+                w.label(ColumnId::Pid),
+                d.pid.map_or_else(String::new, |p| p.to_string()),
+            ),
+            (
+                w.label(ColumnId::Ppid),
+                d.ppid.map_or_else(String::new, |p| p.to_string()),
+            ),
+            (
+                w.label(ColumnId::Cpu),
+                d.cpu.text(w, |p| format!("{p:.2}%")),
+            ),
+            (w.label(ColumnId::Memory), d.memory.text(w, whole_mib)),
+            (w.copy_private_bytes.as_ref(), d.private.text(w, whole_mib)),
+            (
+                w.copy_working_set.as_ref(),
+                d.working_set.text(w, whole_mib),
+            ),
+            (
+                w.label(ColumnId::Threads),
+                d.threads.text(w, |n| n.to_string()),
+            ),
+            (
+                w.label(ColumnId::Handles),
+                d.handles.text(w, |n| n.to_string()),
+            ),
+            (w.label(ColumnId::Priority), d.priority),
+        ];
+        for (i, (label, value)) in lines.iter().enumerate() {
+            if i > 0 {
+                text.push('\n');
+            }
+            let _ = write!(text, "{label}: {value}");
+        }
+    }
+    text
+}
+
+/// Copy all metrics: per row one `Label: value` line for every registry column with a Valid
+/// value and non-empty text, in picker order, then `Command line: <full command line>` last.
+/// Rows are separated by one blank line. The environment is never read.
+pub fn copy_all_metrics(rows: &[RowRef], ctx: &CellCtx) -> String {
+    let w = ctx.words;
+    let mut out = CellOut::default();
+    let mut text = String::new();
+    for (n, &row) in rows.iter().enumerate() {
+        if n > 0 {
+            text.push_str("\n\n");
+        }
+        for (col, label) in PROCESS_COLUMNS.iter().zip(w.labels.iter()) {
+            if col.id == ColumnId::Cmdline {
+                continue;
+            }
+            out.reset();
+            out.want_text = true;
+            fill_cell(row, col, ctx, &mut out);
+            if out.validity != Validity::Valid {
+                continue;
+            }
+            let value = match out.arc.take() {
+                Some(arc) => arc.to_string(),
+                // PID without the "+N" of a collapsed parent.
+                None if col.id == ColumnId::Pid => split_pid_text(&out.text).0.to_owned(),
+                None => std::mem::take(&mut out.text),
+            };
+            if !value.is_empty() {
+                let _ = writeln!(text, "{label}: {value}");
+            }
+        }
+        let cmdline = match row {
+            RowRef::Record(r, _, _) => r
+                .meta
+                .cmdline
+                .as_deref()
+                .unwrap_or(w.copy_restricted.as_ref()),
+            RowRef::Group(g, _) => first_member(g, ctx)
+                .and_then(|(_, r)| r.meta.cmdline.as_deref())
+                .unwrap_or(""),
+        };
+        let _ = write!(text, "{}: {cmdline}", w.label(ColumnId::Cmdline));
+    }
+    text
+}
+
+/// Copy rows as table (Ctrl+Shift+C): a line of the `visible` column labels joined by tabs,
+/// then one line per row of the copied cell texts joined by tabs.
+pub fn copy_rows_as_table(rows: &[RowRef], visible: &[ColumnId], ctx: &CellCtx) -> String {
+    let w = ctx.words;
+    let mut out = CellOut::default();
+    let mut text = visible
+        .iter()
+        .map(|&id| w.label(id))
+        .collect::<Vec<_>>()
+        .join("\t");
+    for &row in rows {
+        text.push('\n');
+        for (pos, &id) in visible.iter().enumerate() {
+            if pos > 0 {
+                text.push('\t');
+            }
+            text.push_str(&copy_value(row, process_column(id), ctx, &mut out));
+        }
+    }
+    text
+}
+
+/// Bytes in whole MiB, rounded to the nearest integer: "812 MiB".
+fn whole_mib(bytes: u64) -> String {
+    format!("{} MiB", (bytes as f64 / MIB).round() as u64)
+}
+
+/// A Copy details value and its validity.
+struct Field<T>(T, Validity);
+
+impl<T: Copy> Field<T> {
+    /// The value through `fmt` when it was read, else the state word.
+    fn text(&self, w: &CellWords, fmt: impl Fn(T) -> String) -> String {
+        if shows_value(self.1) {
+            fmt(self.0)
+        } else {
+            copy_state_word(self.1, w).to_owned()
+        }
+    }
+}
+
+/// The Copy details values of one row.
+struct Details<'a> {
+    name: &'a str,
+    pid: Option<u32>,
+    ppid: Option<u32>,
+    cpu: Field<f32>,
+    memory: Field<u64>,
+    private: Field<u64>,
+    working_set: Field<u64>,
+    threads: Field<u64>,
+    handles: Field<u64>,
+    priority: String,
+}
+
+impl<'a> Details<'a> {
+    fn of(row: RowRef<'a>, ctx: &'a CellCtx) -> Self {
+        use ProcessField as F;
+        let warming = Field(0, Validity::WarmingUp);
+        let handles = |h: Option<u32>| {
+            h.map_or(Field(0, Validity::Restricted), |h| {
+                Field(u64::from(h), Validity::Valid)
+            })
+        };
+        match row {
+            RowRef::Record(r, t, _) => {
+                let v = |f: F| r.validity.get(f);
+                let x = t.record.and_then(|i| ctx.extras.get(i as usize));
+                let priority = x.map_or_else(String::new, |x| {
+                    let mut s = String::new();
+                    write_priority(&mut s, ctx.words, x.policy, x.rt_prio, r.nice);
+                    let _ = write!(s, " ({})", r.nice);
+                    s
+                });
+                Self {
+                    name: &r.meta.name,
+                    pid: Some(r.key.pid),
+                    ppid: Some(r.ppid),
+                    cpu: Field(r.cpu_pct, v(F::Cpu)),
+                    memory: Field(r.rss_anon_bytes, v(F::RssAnon)),
+                    private: x.map_or(warming, |x| Field(x.commit_bytes, Validity::Valid)),
+                    working_set: Field(r.rss_bytes, v(F::Rss)),
+                    threads: Field(r.threads.into(), v(F::Threads)),
+                    handles: x.map_or(Field(0, Validity::WarmingUp), |x| handles(x.handles)),
+                    priority,
+                }
+            }
+            RowRef::Group(g, _) => {
+                let v = |f: F| g.validity.get(f);
+                let sum = |field: Field<u64>| {
+                    if ctx.extras.is_empty() {
+                        Field(0, Validity::WarmingUp)
+                    } else {
+                        field
+                    }
+                };
+                Self {
+                    name: &g.name,
+                    pid: None,
+                    ppid: None,
+                    cpu: Field(g.cpu_pct, v(F::Cpu)),
+                    memory: Field(g.memory_bytes, v(F::RssAnon)),
+                    private: sum(Field(g.commit_bytes, Validity::Valid)),
+                    working_set: Field(g.rss_bytes, v(F::Rss)),
+                    threads: Field(g.threads.into(), v(F::Threads)),
+                    handles: sum(handles(g.handles)),
+                    priority: String::new(),
+                }
+            }
+        }
     }
 }
 

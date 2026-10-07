@@ -982,24 +982,36 @@ mod end {
     use std::sync::Arc;
 
     use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
+    use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::Tab;
+    use tl_model::ids::ColumnId;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
+    use tl_model::process::ProcessExtras;
     use tl_model::process::{
         GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord,
     };
+    use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::system::CpuSet;
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
     use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
-        EndProcess, EndProcessTree, EndTask, PriorityClass, ResumeProcess, SetPriority,
-        SuspendProcess,
+        CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree, EndTask, PriorityClass,
+        ResumeProcess, SetPriority, SuspendProcess,
+    };
+    use tl_ui::pages::processes::cells::{
+        CellCtx, CellWords, GroupMembers, RowRef, copy_all_metrics, copy_cell, copy_details,
+        copy_rows_as_table, process_column,
     };
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
+    use tl_ui::table::actions::CopyCell;
+    use tl_ui::table::tree_table::RowKind;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
 
@@ -1832,5 +1844,297 @@ mod end {
             "own protected targets resume without a dialog"
         );
         assert_eq!(rig.sent(), [(ActionKind::Resume, vec![1, 4242])]);
+    }
+
+    const MIB: u64 = 1_048_576;
+
+    /// The Copy details example of PROC-070: firefox, PID 4321.
+    fn firefox(pid: u32) -> ProcessRecord {
+        let mut r = ProcessRecord {
+            cpu_pct: 3.27,
+            rss_anon_bytes: 812 * MIB,
+            rss_bytes: 1104 * MIB,
+            threads: 97,
+            ..record(pid, 2010, "firefox", ProcFlags::empty())
+        };
+        let meta = Arc::make_mut(&mut r.meta);
+        meta.cmdline = Some(Arc::from("/usr/lib/firefox/firefox -P default"));
+        r
+    }
+
+    fn firefox_extras() -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.5,
+            cpu_user_pct: 2.77,
+            cpu_relative_pct: 26.16,
+            utime_ticks: 4_200,
+            stime_ticks: 1_300,
+            start_boot_ns: 3_600_000_000_000,
+            rss_peak_bytes: 1_300 * MIB,
+            rss_shared_bytes: 292 * MIB,
+            commit_bytes: 1490 * MIB,
+            vsize_bytes: 3_000 * MIB,
+            vsize_peak_bytes: 3_200 * MIB,
+            page_faults: 120_000,
+            page_faults_delta: 40,
+            major_faults: 12,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::default(),
+            handles: Some(412),
+            exe_name: Arc::from("firefox"),
+            exe_path: Arc::from("/usr/lib/firefox/firefox"),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns: 0,
+        }
+    }
+
+    /// Records, their extras and one process row each, with the cell context over them.
+    struct CopyFixture {
+        view: ProcessTableView,
+        rows: Vec<TableRow>,
+        records: Vec<ProcessRecord>,
+        extras: Vec<ProcessExtras>,
+        settings: Settings,
+        words: CellWords,
+        online: CpuSet,
+        members: GroupMembers,
+    }
+
+    impl CopyFixture {
+        fn new(records: Vec<ProcessRecord>, extras: Vec<ProcessExtras>) -> Self {
+            let rows = records
+                .iter()
+                .enumerate()
+                .map(|(i, r)| row(NodeId::Process(r.key), Some(i as u32), None))
+                .collect();
+            let mut f = Self {
+                view: ProcessTableView::default(),
+                rows,
+                records,
+                extras,
+                settings: Settings::default(),
+                words: CellWords::from_fn(|key| Arc::from(tr_en(key, &[]).as_ref())),
+                online: CpuSet::default(),
+                members: GroupMembers::default(),
+            };
+            f.members.refresh(&f.view, &f.records, &f.extras);
+            f
+        }
+
+        fn ctx(&self) -> CellCtx<'_> {
+            CellCtx {
+                view: &self.view,
+                records: &self.records,
+                extras: &self.extras,
+                settings: &self.settings,
+                words: &self.words,
+                members: &self.members,
+                ncpu: 8,
+                online: &self.online,
+                mem_total: 64 << 30,
+                vram_total: 0,
+                boot_time_s: 1_700_000_000,
+                clk_tck: 100,
+            }
+        }
+
+        fn row_refs(&self) -> Vec<RowRef<'_>> {
+            self.records
+                .iter()
+                .zip(&self.rows)
+                .map(|(r, t)| RowRef::Record(r, t, RowKind::Process))
+                .collect()
+        }
+    }
+
+    /// Compares `actual` with `tests/golden/<name>`. `TL_UPDATE_GOLDEN=1` rewrites the file.
+    fn golden(name: &str, actual: &str) {
+        let path = format!("{}/tests/golden/{name}", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var("TL_UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, actual).expect("write the golden");
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(actual, expected, "{name}");
+    }
+
+    #[test]
+    fn copy_details_matches_golden() {
+        let f = CopyFixture::new(vec![firefox(4321)], vec![firefox_extras()]);
+        golden("copy_details.txt", &copy_details(&f.row_refs(), &f.ctx()));
+
+        // Two rows: one blank line between the blocks.
+        let f = CopyFixture::new(
+            vec![firefox(4321), firefox(4400)],
+            vec![firefox_extras(), firefox_extras()],
+        );
+        let text = copy_details(&f.row_refs(), &f.ctx());
+        let blocks: Vec<&str> = text.split("\n\n").collect();
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            blocks[1].starts_with("Name: firefox\nPID: 4400\n"),
+            "{text}"
+        );
+        assert!(!text.contains("\n\n\n"), "exactly one blank line");
+        assert!(!text.ends_with('\n'));
+    }
+
+    #[test]
+    fn copy_restricted_prints_word_not_zero() {
+        let mut x = firefox_extras();
+        x.handles = None;
+        let mut r = firefox(4321);
+        r.validity.set(
+            tl_model::validity::ProcessField::Threads,
+            Validity::Unsupported,
+        );
+        let f = CopyFixture::new(vec![r], vec![x]);
+        let text = copy_details(&f.row_refs(), &f.ctx());
+        assert!(text.contains("\nHandles: restricted\n"), "{text}");
+        assert!(text.contains("\nThreads: n/a\n"), "{text}");
+        let handles = process_column(ColumnId::Handles);
+        assert_eq!(copy_cell(&f.row_refs(), handles, &f.ctx()), "restricted");
+
+        // No extras yet: Private bytes and Handles are empty, never 0.
+        let f = CopyFixture::new(vec![firefox(4321)], Vec::new());
+        let text = copy_details(&f.row_refs(), &f.ctx());
+        assert!(text.contains("\nPrivate bytes: \n"), "{text}");
+        assert!(text.contains("\nHandles: \n"), "{text}");
+    }
+
+    #[test]
+    fn copy_all_metrics_matches_golden_and_ends_with_cmdline() {
+        let f = CopyFixture::new(vec![firefox(4321)], vec![firefox_extras()]);
+        let text = copy_all_metrics(&f.row_refs(), &f.ctx());
+        assert_eq!(
+            text.lines().last(),
+            Some("Command line: /usr/lib/firefox/firefox -P default")
+        );
+        // Start time is in the local time zone, so the golden leaves it out.
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("Start time: "))
+                .count(),
+            1
+        );
+        let stable: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.starts_with("Start time: "))
+            .collect();
+        golden("copy_all_metrics.txt", &stable.join("\n"));
+        assert!(
+            !text.to_lowercase().contains("environ"),
+            "no environment data"
+        );
+
+        // Two rows: one blank line between them, each ending with its command line.
+        let f = CopyFixture::new(
+            vec![firefox(4321), firefox(4400)],
+            vec![firefox_extras(), firefox_extras()],
+        );
+        let text = copy_all_metrics(&f.row_refs(), &f.ctx());
+        let blocks: Vec<&str> = text.split("\n\n").collect();
+        assert_eq!(blocks.len(), 2);
+        for b in blocks {
+            assert!(b.lines().last().unwrap().starts_with("Command line: "));
+        }
+    }
+
+    #[test]
+    fn copy_rows_as_table_matches_golden() {
+        let mut x = firefox_extras();
+        x.handles = None;
+        let f = CopyFixture::new(
+            vec![firefox(4321), firefox(4400)],
+            vec![firefox_extras(), x],
+        );
+        let visible = [
+            ColumnId::Name,
+            ColumnId::Pid,
+            ColumnId::Cpu,
+            ColumnId::Memory,
+            ColumnId::Handles,
+            ColumnId::Version,
+        ];
+        let text = copy_rows_as_table(&f.row_refs(), &visible, &f.ctx());
+        assert!(
+            text.starts_with("Name\tPID\tCPU\t"),
+            "{}",
+            text.lines().next().unwrap_or_default()
+        );
+        golden("copy_rows.tsv", &text);
+        let names = copy_rows_as_table(
+            &f.row_refs(),
+            &[ColumnId::Name, ColumnId::Pid, ColumnId::Cpu],
+            &f.ctx(),
+        );
+        assert_eq!(names.lines().next(), Some("Name\tPID\tCPU"));
+    }
+
+    /// Selects `pids`, dispatches `action` and returns the newest visible toast.
+    fn last_toast(rig: &mut Rig, pids: &[u32], action: impl Action) -> String {
+        rig.select_pids(pids);
+        assert!(rig.dispatch(action).is_none());
+        visible(&mut rig.vcx).last().cloned().unwrap_or_default()
+    }
+
+    fn clipboard(rig: &mut Rig) -> String {
+        rig.vcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()))
+            .unwrap_or_default()
+    }
+
+    #[gpui_kit::test]
+    fn copy_cell_multi_rows_one_per_line(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let records = (300..303)
+            .map(|pid| ProcessRecord {
+                cpu_pct: 1.5,
+                ..record(pid, 1, "proc", ProcFlags::empty())
+            })
+            .collect();
+        rig.publish(records, &[300, 301, 302], Vec::new());
+        rig.select_pids(&[300, 301, 302]);
+        assert!(rig.dispatch(CopyCell { col: ColumnId::Cpu }).is_none());
+        let text = clipboard(&mut rig);
+        assert_eq!(text.lines().count(), 3, "{text}");
+        assert_eq!(visible(&mut rig.vcx), ["Selected process values copied."]);
+        assert!(rig.sent().is_empty(), "copying sends nothing");
+    }
+
+    #[gpui_kit::test]
+    fn copy_toasts_single_and_multi(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let mut records = own(&[300, 301]);
+        records.push(record(4300, 1, "gone", ProcFlags::EXITED));
+        rig.publish(records, &[300, 301, 4300], Vec::new());
+        let cell = CopyCell { col: ColumnId::Pid };
+        assert_eq!(last_toast(&mut rig, &[300], cell), "Copied to clipboard");
+        assert_eq!(clipboard(&mut rig), "300");
+        assert_eq!(
+            last_toast(&mut rig, &[300], CopyDetails),
+            "Process details copied."
+        );
+        assert_eq!(
+            last_toast(&mut rig, &[300], CopyAllMetrics),
+            "Copied metrics to clipboard"
+        );
+        assert_eq!(
+            last_toast(&mut rig, &[300, 301], CopyAllMetrics),
+            "Selected process metrics copied."
+        );
+
+        // An exited row copies normally.
+        assert_eq!(
+            last_toast(&mut rig, &[4300], CopyDetails),
+            "Process details copied."
+        );
+        assert!(clipboard(&mut rig).starts_with("Name: gone\nPID: 4300\n"));
     }
 }

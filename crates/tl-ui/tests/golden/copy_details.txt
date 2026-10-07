@@ -1,0 +1,10 @@
+Name: firefox
+PID: 4321
+Parent PID: 2010
+CPU: 3.27%
+Memory: 812 MiB
+Private bytes: 1490 MiB
+Working set: 1104 MiB
+Threads: 97
+Handles: 412
+Priority: Normal (0)

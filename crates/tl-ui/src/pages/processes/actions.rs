@@ -30,6 +30,7 @@ gpui_kit::actions!(
         FreezeApp,
         ThawApp,
         ShowWindow,
+        CopyDetails,
         CopyAllMetrics,
         FileProperties,
         OpenFileLocation,
@@ -241,6 +242,7 @@ mod tests {
             FreezeApp.name(),
             ThawApp.name(),
             ShowWindow.name(),
+            CopyDetails.name(),
             CopyAllMetrics.name(),
             FileProperties.name(),
             OpenFileLocation.name(),
@@ -263,7 +265,7 @@ mod tests {
             assert!(name.starts_with("tasklens::"), "{name}");
             assert!(seen.insert(*name), "declared twice: {name}");
         }
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 21);
 
         // No name here is also declared by the table or the shell.
         use crate::actions as shell;

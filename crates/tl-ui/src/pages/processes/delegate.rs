@@ -715,6 +715,23 @@ impl ProcessDelegate {
         }
     }
 
+    /// Runs `f` on the rows of `nodes` the shown view holds, in the order given, with the cell
+    /// context. Group headers and nodes not in the view are left out. For the copy commands
+    /// (PROC-070).
+    pub fn with_rows<R>(
+        &self,
+        nodes: &[NodeId],
+        f: impl FnOnce(&[RowRef<'_>], &CellCtx<'_>) -> R,
+    ) -> R {
+        let rows: Vec<RowRef<'_>> = nodes
+            .iter()
+            .filter_map(|node| self.id_of(node))
+            .filter_map(|id| self.row_index.get(&id))
+            .filter_map(|&ix| self.row_ref(ix as usize))
+            .collect();
+        f(&rows, &self.cell_ctx())
+    }
+
     /// The UI-PRC-004 tooltip of cell (`ix`, `col`), from the hovered row's cache.
     fn cell_tip(
         &self,

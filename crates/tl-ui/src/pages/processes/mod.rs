@@ -20,9 +20,9 @@ pub mod tooltip;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
-    Subscription, UniformListScrollHandle, Window, div,
+    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StyleRefinement, Styled as _, Subscription, UniformListScrollHandle, Window, div,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -35,9 +35,10 @@ use tl_model::snapshot::{ProcessSnapshot, Snapshot};
 use tracing::warn;
 
 use self::actions::{
-    CapturedTarget, CapturedTargets, EndProcess, EndProcessTree, EndTask, MAX_TARGETS,
-    ResumeProcess, SetPriority, SuspendProcess,
+    CapturedTarget, CapturedTargets, CopyAllMetrics, CopyDetails, EndProcess, EndProcessTree,
+    EndTask, MAX_TARGETS, ResumeProcess, SetPriority, SuspendProcess,
 };
+use self::cells::{copy_all_metrics, copy_cell, copy_details, process_column};
 use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
 use self::toasts::{refusal_reason, submit, toast_words};
@@ -45,7 +46,7 @@ use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings};
-use crate::table::actions::CollapseAll;
+use crate::table::actions::{CollapseAll, CopyCell};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::window::main::ShellPage;
@@ -413,6 +414,50 @@ impl ProcessesPage {
         self.send(ActionKind::SetNice(nice), keys, used, ask, window, cx);
     }
 
+    fn on_copy_cell(&mut self, a: &CopyCell, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::Cell(a.col), cx);
+    }
+
+    fn on_copy_details(&mut self, _: &CopyDetails, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::Details, cx);
+    }
+
+    fn on_copy_all_metrics(&mut self, _: &CopyAllMetrics, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy(CopyKind::AllMetrics, cx);
+    }
+
+    /// Copy, Copy details and Copy all metrics (PROC-070, ADR-015): the captured targets in
+    /// view order, exited rows too, onto the clipboard, then a Success toast (UI-PRC-015).
+    /// Command lines leave only through Copy all metrics and Copy on the Command line cell.
+    fn copy(&mut self, what: CopyKind, cx: &mut Context<Self>) {
+        let nodes: Vec<NodeId> = self
+            .take_targets(cx)
+            .items
+            .into_iter()
+            .map(|t| t.node)
+            .collect();
+        let (text, rows) = self.table.read(cx).delegate.with_rows(&nodes, |rows, ctx| {
+            let text = match what {
+                CopyKind::Cell(col) => copy_cell(rows, process_column(col), ctx),
+                CopyKind::Details => copy_details(rows, ctx),
+                CopyKind::AllMetrics => copy_all_metrics(rows, ctx),
+            };
+            (text, rows.len())
+        });
+        if rows == 0 {
+            return;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let key = match (what, rows > 1) {
+            (CopyKind::Cell(_), false) => "processes-toast-copied",
+            (CopyKind::Cell(_), true) => "processes-toast-values-copied",
+            (CopyKind::Details, _) => "processes-toast-details-copied",
+            (CopyKind::AllMetrics, false) => "processes-toast-metrics-copied",
+            (CopyKind::AllMetrics, true) => "processes-toast-many-metrics-copied",
+        };
+        toast(ToastKind::Success, tr(cx, key), cx);
+    }
+
     /// Steps 1 and 2 of every process action (E22-017): takes the targets, drops pseudo and
     /// exited rows ("Process exited" when only exited rows were left) and drops the rows
     /// `refuse` names, with one Warning toast per distinct text. `None` when no row is left.
@@ -494,6 +539,15 @@ impl ProcessesPage {
             });
         });
     }
+}
+
+/// Which copy command runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CopyKind {
+    /// The column under the pointer.
+    Cell(ColumnId),
+    Details,
+    AllMetrics,
 }
 
 /// The Suspend or Resume item of the row menu (UI-PRC-013 item 4).
@@ -867,12 +921,17 @@ fn is_bwrap(r: &ProcessRecord) -> bool {
 
 /// A Warning toast on the main window.
 fn warning_toast(text: SharedString, cx: &mut App) {
+    toast(ToastKind::Warning, text, cx);
+}
+
+/// A toast of `kind` on the main window.
+fn toast(kind: ToastKind, text: SharedString, cx: &mut App) {
     let Some(main) = crate::window::main::main_window_view(cx) else {
-        warn!(target: "tasklens::ui", "no main window for the End toast");
+        warn!(target: "tasklens::ui", "no main window for the Processes toast");
         return;
     };
     let queue = main.read(cx).toasts().clone();
-    queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
+    queue.update(cx, |q, cx| q.push(kind, text, None, None, cx));
 }
 
 impl Render for ProcessesPage {
@@ -890,6 +949,9 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_suspend))
             .on_action(cx.listener(Self::on_resume))
             .on_action(cx.listener(Self::on_set_priority))
+            .on_action(cx.listener(Self::on_copy_cell))
+            .on_action(cx.listener(Self::on_copy_details))
+            .on_action(cx.listener(Self::on_copy_all_metrics))
             .child(
                 self.table
                     .clone()
