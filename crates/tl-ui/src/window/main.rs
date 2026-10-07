@@ -1248,15 +1248,27 @@ impl MainWindow {
         true
     }
 
-    /// Ctrl-pause (E20-012, UI-SHL-123): paused while Ctrl is held and the window is active. A
-    /// Ctrl that is part of a shortcut pauses too, for as long as it is held.
+    /// Ctrl-pause (E20-012, UI-SHL-123, UI-PRC-017): starts when Ctrl goes down with no other
+    /// modifier while the window is active, and ends when Ctrl goes up. A modifier added during
+    /// the pause keeps it, so Ctrl+Shift+C and Ctrl+click work while paused.
     fn on_modifiers(
         &mut self,
         ev: &ModifiersChangedEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let want = ev.modifiers.control && window.is_window_active();
+        let m = ev.modifiers;
+        let paused = cx.try_global::<ShellState>().is_some_and(|s| s.paused);
+        let want = if paused {
+            m.control
+        } else {
+            m.control
+                && !m.shift
+                && !m.alt
+                && !m.platform
+                && !m.function
+                && window.is_window_active()
+        };
         self.set_paused(want, cx);
     }
 

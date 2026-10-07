@@ -3433,6 +3433,18 @@ mod main_window {
         assert_eq!(*seen.borrow(), [true]);
     }
 
+    /// UI-PRC-017: Ctrl with another modifier already down does not start a pause.
+    #[gpui_kit::test]
+    fn ctrl_with_other_modifier_does_not_pause(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        modifiers(&mut vcx, false, true);
+        modifiers(&mut vcx, true, true);
+        assert!(!paused(&mut vcx), "Shift, then Ctrl");
+        modifiers(&mut vcx, false, false);
+        assert!(seen.borrow().is_empty());
+    }
+
     #[gpui_kit::test]
     fn remove_window_ends_ctrl_pause(cx: &mut TestAppContext) {
         let mut vcx = rig(cx, Opts::default());
