@@ -7,6 +7,7 @@
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod args;
 mod atomic;
+mod autostart;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod crash;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
@@ -17,6 +18,7 @@ mod migrations;
 mod notify;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod paths;
+mod rendering_env;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod settings_store;
 #[allow(dead_code, reason = "tests call the rest")]
@@ -76,6 +78,10 @@ fn main() -> ExitCode {
     let args = args::parse();
     let debug = debug_enabled(args.debug, std::env::var_os("TASKLENS_DEBUG"));
 
+    // settings.toml is read before step 3, which needs `rendering.gpu`.
+    let now = unix_now();
+    let loaded_settings = settings_store::load_settings(&paths.settings_file(), now);
+
     // Step 3: the NVIDIA X11 rule (ADR-010), before any thread starts.
     if nvidia_x11_rule(
         std::env::var_os("WAYLAND_DISPLAY"),
@@ -86,6 +92,17 @@ fn main() -> ExitCode {
         // the environment.
         unsafe { std::env::set_var(NV_X11_VAR, "1") };
         info!(target: "tasklens::engine", "NVIDIA on X11: set __NV_FORCE_ENABLE_X11_EGL_PLATFORM=1");
+    }
+
+    let gpu_env = rendering_env::env_for(
+        &loaded_settings.value.rendering.gpu,
+        std::env::var_os("ZED_DEVICE_ID").as_deref(),
+        rendering_env::pci_device_id,
+    );
+    for (name, value) in gpu_env {
+        // SAFETY: as above, no other thread reads the environment yet.
+        unsafe { std::env::set_var(name, &value) };
+        info!(target: "tasklens::ui", "rendering.gpu: set {name}={value}");
     }
 
     // E32: --low-memory and --watch-memory arms go here (before step 4)
@@ -106,9 +123,7 @@ fn main() -> ExitCode {
     };
     tl_ui::app::perf_step("single_instance");
 
-    // Step 5: settings, state and themes.
-    let now = unix_now();
-    let loaded_settings = settings_store::load_settings(&paths.settings_file(), now);
+    // Step 5: state and themes (settings were loaded before step 3).
     let loaded_state = settings_store::load_state(&paths.state_file(), now);
     let store = Arc::new(Store::new(
         &paths,
