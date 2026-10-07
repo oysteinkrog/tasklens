@@ -1,5 +1,5 @@
-//! Shell secondary windows: Share Theme (E21-030, UI-SHL-082) and Collector Health (E21-007,
-//! UI-SHL-099). Run with `--features test-hooks`.
+//! Shell secondary windows: Share Theme (E21-030, UI-SHL-082), Collector Health (E21-007,
+//! UI-SHL-099) and Keyboard Shortcuts (E21-016, UI-SHL-095). Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use gpui_kit::base::Root;
 use gpui_kit::{
-    AnyWindowHandle, Context, Entity, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
-    ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _, VisualTestContext,
-    Window, WindowHandle, div,
+    AnyWindowHandle, Context, Entity, Focusable as _, IntoElement, KeyDownEvent, KeyUpEvent,
+    Keystroke, ParentElement as _, Render, Styled as _, TestAppContext, VisualContext as _,
+    VisualTestContext, Window, WindowHandle, div,
 };
 use tl_model::client::EngineClient;
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::settings::{Settings, UiState};
 use tl_model::time::{TimeNs, now_boot_ns};
-use tl_ui::actions::OpenCollectorHealth;
+use tl_ui::actions::{OpenCollectorHealth, OpenShortcuts};
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, has_modal_child};
 use tl_ui::i18n::{set_test_catalogue, tr_calls};
@@ -26,6 +26,9 @@ use tl_ui::theme::{ThemeDef, ThemeStore, builtin, current};
 use tl_ui::window::collector_health::{CollectorHealthWindow, StateLook};
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::share_theme::{ShareTheme, ShareThemeView};
+use tl_ui::window::shortcuts::{
+    Heading, LISTED_CONTEXTS, ShortcutsWindow, build_rows, first_context,
+};
 
 struct Parent;
 
@@ -589,4 +592,244 @@ fn share_title_follows_strings_version(cx: &mut TestAppContext) {
         draw(&mut o.vcx);
     }
     assert_eq!(tr_calls() - before, 0, "frames make no tr call");
+}
+
+// ---- Keyboard Shortcuts (E21-016) ----
+
+type ShortcutsFrame = TlSecondaryWindow<ShortcutsWindow>;
+
+/// The registered Keyboard Shortcuts window, if open.
+fn shortcuts_window(cx: &mut TestAppContext) -> Option<WindowHandle<Root>> {
+    cx.update(|cx| {
+        cx.global::<GlobalRegistry>()
+            .0
+            .read(cx)
+            .get(&WindowKey::Shortcuts)
+    })
+    .and_then(|h| h.downcast::<Root>())
+}
+
+/// Dispatches `OpenShortcuts` from a parent window `times` times and returns the window.
+fn open_shortcuts(
+    cx: &mut TestAppContext,
+    times: usize,
+) -> (Entity<ShortcutsFrame>, VisualTestContext) {
+    let parent: AnyWindowHandle = cx.add_window(|_, _| Parent).into();
+    let mut pcx = VisualTestContext::from_window(parent, cx);
+    for _ in 0..times {
+        pcx.update(|window, _| window.activate_window());
+        pcx.dispatch_action(OpenShortcuts);
+        pcx.run_until_parked();
+    }
+    let handle = shortcuts_window(cx).expect("shortcuts window registered");
+    let frame = cx
+        .update(|cx| ShortcutsFrame::find(handle, cx))
+        .expect("shortcuts frame");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    (frame, vcx)
+}
+
+/// (heading, description, key text) of every row that matches the search.
+fn shortcut_rows(
+    frame: &Entity<ShortcutsFrame>,
+    vcx: &mut VisualTestContext,
+) -> Vec<(Heading, String, String)> {
+    let frame = frame.clone();
+    vcx.read(|cx| {
+        frame
+            .read(cx)
+            .content()
+            .read(cx)
+            .visible_rows()
+            .map(|r| (r.heading, r.description.to_string(), r.key_text.to_string()))
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn shortcuts_rows_from_keymap(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    let (title, kind) = vcx.read(|cx| (frame.read(cx).title().to_string(), frame.read(cx).kind()));
+    assert_eq!(title, "tasklens Keyboard Shortcuts");
+    assert_eq!(kind, TlWindowKind::Tool { resizable: true });
+    let rows = shortcut_rows(&frame, &mut vcx);
+    let row = rows
+        .iter()
+        .find(|r| r.1 == "Keyboard Shortcuts")
+        .expect("Keyboard Shortcuts row");
+    assert_eq!(row.0, Heading::Global);
+    assert_eq!(row.2, "Ctrl+? or Ctrl+Shift+/");
+    let next = rows
+        .iter()
+        .find(|r| r.1 == "Next / previous tab" && r.0 == Heading::Global)
+        .expect("tab row");
+    assert_eq!(next.2, "Ctrl+Tab or Ctrl+Shift+Tab");
+    let pause = rows
+        .iter()
+        .find(|r| r.1 == "Pause display")
+        .expect("static row");
+    assert_eq!(pause.2, "Hold Ctrl");
+    let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
+    let mut sorted = headings.clone();
+    sorted.sort_by_key(|h| Heading::ALL.iter().position(|x| x == h));
+    assert_eq!(headings, sorted, "headings in R-220 order");
+    assert_eq!(headings[0], Heading::Global);
+    assert_eq!(headings[1], Heading::Tables);
+}
+
+#[gpui_kit::test]
+fn shortcuts_unbound_rows_absent(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    let bound = cx.update(|cx| {
+        cx.key_bindings()
+            .borrow()
+            .bindings()
+            .any(|b| b.action().name() == "tasklens::EndTask")
+    });
+    assert!(!bound, "End Task has no binding in this phase");
+    let rows = shortcut_rows(&frame, &mut vcx);
+    assert!(rows.iter().all(|r| r.1 != "End Task (SIGTERM)"));
+    assert!(
+        rows.iter().all(|r| r.1 != "Open Debug menu"),
+        "the Debug menu row needs --debug"
+    );
+    let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
+    assert!(
+        !headings.contains(&Heading::Services),
+        "a heading with no bindings is not drawn"
+    );
+}
+
+#[gpui_kit::test]
+fn shortcuts_search_filters(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    let all = shortcut_rows(&frame, &mut vcx).len();
+    vcx.simulate_input("FILTER");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    let rows = shortcut_rows(&frame, &mut vcx);
+    assert!(!rows.is_empty() && rows.len() < all);
+    for r in &rows {
+        assert!(
+            r.1.to_lowercase().contains("filter") || r.2.to_lowercase().contains("filter"),
+            "{r:?} does not match"
+        );
+    }
+    assert!(rows.iter().any(|r| r.1 == "Focus filter"));
+    assert!(rows.iter().any(|r| r.1 == "Start filtering"));
+    let headings = vcx.read(|cx| frame.read(cx).content().read(cx).visible_headings());
+    let mut expected: Vec<Heading> = Vec::new();
+    for r in &rows {
+        if expected.last() != Some(&r.0) {
+            expected.push(r.0);
+        }
+    }
+    assert_eq!(headings, expected, "only headings with matching rows");
+    assert!(!headings.contains(&Heading::Performance));
+
+    // Key text matches too.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(
+        shortcuts_window(cx).is_some(),
+        "the first Esc clears the search"
+    );
+    vcx.simulate_input("shift+/");
+    vcx.run_until_parked();
+    let rows = shortcut_rows(&frame, &mut vcx);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1, "Keyboard Shortcuts");
+}
+
+#[gpui_kit::test]
+fn shortcuts_refocus(cx: &mut TestAppContext) {
+    setup(cx);
+    let before = cx.update(|cx| cx.windows().len());
+    let (_frame, _vcx) = open_shortcuts(cx, 2);
+    assert_eq!(
+        cx.update(|cx| cx.windows().len()),
+        before + 2,
+        "the parent and one shortcuts window"
+    );
+    let id = shortcuts_window(cx).expect("open").window_id();
+    assert_eq!(
+        cx.update(|cx| cx.active_window().map(|w| w.window_id())),
+        Some(id),
+        "the shortcuts window has focus"
+    );
+}
+
+#[gpui_kit::test]
+fn shortcuts_esc_and_ctrl_w_close(cx: &mut TestAppContext) {
+    setup(cx);
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    let focused = vcx.update(|window, cx| {
+        let search = frame.read(cx).content().read(cx).search().clone();
+        search.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(focused, "the search box has focus on open");
+    drop(frame);
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert!(shortcuts_window(cx).is_none(), "Esc closes the window");
+
+    let (frame, mut vcx) = open_shortcuts(cx, 1);
+    drop(frame);
+    vcx.simulate_keystrokes("ctrl-w");
+    vcx.run_until_parked();
+    assert!(shortcuts_window(cx).is_none(), "Ctrl+W closes the window");
+}
+
+/// Bindings in the listed contexts that canonical table (b) has no row for. They have no row
+/// until table (b) gets one.
+const NOT_IN_TABLE_B: &[(&str, &str)] = &[
+    ("Performance", "tasklens::PerfMoveFocusedDevice"),
+    ("PropsWindow", "tasklens::PropsCloseWindow"),
+    ("PropsWindow", "tasklens::PropsEscape"),
+    ("PropsWindow > KvGrid", "tasklens::PropsFieldMenu"),
+    ("AffinityDialog", "tasklens::AffinityToggleGroup"),
+    ("AffinityDialog", "tasklens::AffinityApply"),
+    ("ColumnPicker", "tasklens::ColumnPickerEscape"),
+];
+
+#[gpui_kit::test]
+fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| {
+        let rows = build_rows(cx, true);
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let mut checked = 0;
+        for (ix, b) in keymap.bindings().enumerate() {
+            let Some(predicate) = b.predicate().map(|p| p.to_string()) else {
+                continue;
+            };
+            let ctx = first_context(&predicate);
+            if !LISTED_CONTEXTS.iter().any(|(c, _)| *c == ctx) {
+                continue;
+            }
+            let name = b.action().name();
+            let shown = rows
+                .iter()
+                .filter(|r| r.binding_indices().contains(&ix))
+                .count();
+            let stroke = b.keystrokes()[0].inner().unparse();
+            if NOT_IN_TABLE_B.contains(&(predicate.as_str(), name)) {
+                assert_eq!(shown, 0, "{predicate} {stroke} {name}");
+                continue;
+            }
+            assert_eq!(
+                shown, 1,
+                "{predicate} {stroke} {name}: add a SHORTCUT_DOCS entry"
+            );
+            checked += 1;
+        }
+        assert!(checked > 60, "{checked} bindings checked");
+    });
 }
