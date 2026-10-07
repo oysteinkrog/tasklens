@@ -16,6 +16,7 @@
 //! not re-render the section. Render builds no strings: the grid rows are made in `set_rows`
 //! and the title is translated once per strings version.
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,8 +24,9 @@ use gpui_kit::accesskit::Role;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::gpui::private::schemars::JsonSchema;
 use gpui_kit::{
-    App, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, div, gpui, img, px,
+    App, Context, ElementId, EntityId, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Window, canvas, div, gpui, img,
+    px,
 };
 use serde::Deserialize;
 
@@ -245,6 +247,10 @@ pub struct InfoSection {
     label_lines: Rc<[(usize, u8)]>,
     /// Draws an 8-line skeleton block instead of the rows, until the first data (UI-SYS-085).
     loading: bool,
+    /// The drawn height, measured each paint. A cached view needs its size from its owner, so the
+    /// page reads this and is notified when it changes.
+    height: Rc<Cell<Pixels>>,
+    owner: Option<EntityId>,
     #[cfg(any(test, feature = "test-hooks"))]
     render_count: usize,
 }
@@ -261,6 +267,8 @@ impl InfoSection {
             label_tips: Rc::from(Vec::new()),
             label_lines: Rc::from(Vec::new()),
             loading: false,
+            height: Rc::new(Cell::new(Pixels::ZERO)),
+            owner: None,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: 0,
         }
@@ -321,6 +329,12 @@ impl InfoSection {
 
     pub fn is_loading(&self) -> bool {
         self.loading
+    }
+
+    /// The height drawn at the last paint. `owner` is notified each time it changes.
+    pub fn measured_height(&mut self, owner: EntityId) -> Rc<Cell<Pixels>> {
+        self.owner = Some(owner);
+        Rc::clone(&self.height)
     }
 
     /// The copy button's accessible name, "Copy <section title>".
@@ -430,9 +444,25 @@ impl Render for InfoSection {
                     queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
                 }
             });
+        let (measured, owner) = (Rc::clone(&self.height), self.owner);
+        let measure = canvas(
+            move |bounds, _, cx| {
+                if measured.get() != bounds.size.height {
+                    measured.set(bounds.size.height);
+                    if let Some(owner) = owner {
+                        cx.notify(owner);
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         v_flex()
             .debug_selector(move || format!("InfoSection-{n}"))
+            .relative()
             .w_full()
+            .child(measure)
             .child(self.band(cx))
             .child(div().mt(m.sp[4]).child(grid))
     }

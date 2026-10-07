@@ -1453,10 +1453,12 @@ mod page {
     }
 
     impl Rig {
-        /// Two frames: the first measures the width, the second lays out for it.
+        /// Three frames: the page measures its width and the sections their heights, then it
+        /// lays out for them.
         fn draw(&mut self) {
-            draw(&mut self.vcx);
-            draw(&mut self.vcx);
+            for _ in 0..3 {
+                draw(&mut self.vcx);
+            }
         }
 
         fn bounds(&mut self, selector: &str) -> Option<Bounds<Pixels>> {
@@ -1704,6 +1706,10 @@ mod page {
         r.publish_inventory(1, Validity::Failed);
         assert!(r.bounds("InformationPage-error").is_some());
         assert!(r.bounds("InformationPage-columns").is_none());
+        // The action bubbles from the focused element up to the host.
+        let focus = r.vcx.read_entity(&r.page, |p, _| p.focus_handle().clone());
+        r.vcx.update(|window, cx| window.focus(&focus, cx));
+        r.draw();
         let retry = r.bounds("TlButton-information-retry").expect("Retry drawn");
         r.vcx.simulate_click(retry.center(), Modifiers::none());
         r.vcx.run_until_parked();

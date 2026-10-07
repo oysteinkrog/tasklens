@@ -118,6 +118,9 @@ impl PageWords {
 
 pub struct InformationPage {
     sections: [Entity<InfoSection>; 10],
+    /// Each section's drawn height. The sections are cached views, which take their size from
+    /// the page.
+    heights: [Rc<Cell<Pixels>>; 10],
     scroll: ScrollHandle,
     focus: FocusHandle,
     hub: Entity<SnapshotHub>,
@@ -145,6 +148,7 @@ impl InformationPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let owner = cx.entity_id();
         let sections = InfoSectionId::ALL.map(|id| {
             cx.new(|cx| {
                 let mut s = InfoSection::new(id, cx);
@@ -152,6 +156,8 @@ impl InformationPage {
                 s
             })
         });
+        let heights = InfoSectionId::ALL
+            .map(|id| sections[id as usize].update(cx, |s, _| s.measured_height(owner)));
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(hub, |this, _, ev: &SnapshotChanged, cx| {
             this.on_snapshot(ev.mask, cx);
@@ -161,6 +167,7 @@ impl InformationPage {
         words.refresh(cx);
         let mut page = Self {
             sections,
+            heights,
             scroll: ScrollHandle::new(),
             focus: cx.focus_handle().tab_stop(true),
             hub: hub.clone(),
@@ -375,6 +382,15 @@ impl InformationPage {
         cx.notify();
     }
 
+    /// Section `id` as a cached view, as tall as it drew last time.
+    fn section_view(&self, id: InfoSectionId) -> AnyElement {
+        let height = self.heights[id as usize].get();
+        self.sections[id as usize]
+            .clone()
+            .cached(StyleRefinement::default().w_full().h(height))
+            .into_any_element()
+    }
+
     fn column(&self, ids: &[InfoSectionId], cx: &App) -> AnyElement {
         let m = metrics(cx);
         v_flex()
@@ -382,11 +398,7 @@ impl InformationPage {
             .flex_basis(px(0.))
             .min_w(px(COLUMN_MIN * m.ui_scale))
             .gap(m.sp[8])
-            .children(ids.iter().map(|id| {
-                self.sections[*id as usize]
-                    .clone()
-                    .cached(StyleRefinement::default())
-            }))
+            .children(ids.iter().map(|id| self.section_view(*id)))
             .into_any_element()
     }
 
@@ -476,11 +488,7 @@ impl Render for InformationPage {
                 .debug_selector(|| "InformationPage-column".into())
                 .w_full()
                 .gap(m.sp[8])
-                .children(InfoSectionId::ALL.iter().map(|id| {
-                    self.sections[*id as usize]
-                        .clone()
-                        .cached(StyleRefinement::default())
-                }))
+                .children(InfoSectionId::ALL.iter().map(|id| self.section_view(*id)))
                 .into_any_element()
         };
 
