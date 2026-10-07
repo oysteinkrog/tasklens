@@ -1628,7 +1628,14 @@ impl MainWindow {
         }
         // step 11: --start-minimized without tray (E20-018), once per process
         if first_minimize && options.start_minimized && !start_hidden(cx) {
-            window.minimize_window();
+            // The GPUI test window panics on minimize_window; TitleBarProbe stands in for it.
+            #[cfg(any(test, feature = "test-hooks"))]
+            let probe = cx.has_global::<super::titlebar::TitleBarProbe>();
+            #[cfg(not(any(test, feature = "test-hooks")))]
+            let probe = false;
+            if !probe {
+                window.minimize_window();
+            }
             #[cfg(any(test, feature = "test-hooks"))]
             {
                 self.start_minimizes += 1;

@@ -4394,7 +4394,7 @@ mod startup_items {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{Duration, SystemTime};
 
-    use gpui_kit::{SharedString, TestAppContext};
+    use gpui_kit::{SharedString, TestAppContext, VisualTestContext};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::ids::ProcessKey;
@@ -4407,6 +4407,7 @@ mod startup_items {
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{MainWindow, SELECT_PID_WAIT, main_window_view, open_main_window};
     use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+    use tl_ui::window::titlebar::TitleBarProbe;
 
     const PID: u32 = 4242;
 
@@ -4464,9 +4465,24 @@ mod startup_items {
         }
     }
 
-    fn open(cx: &mut TestAppContext) {
-        cx.update(open_main_window).expect("the main window opens");
-        cx.run_until_parked();
+    /// Opens the main window and draws its first frame, so `after_first_frame` runs.
+    fn open(cx: &mut TestAppContext) -> VisualTestContext {
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.update(|window, cx| window.simulate_next_frame(cx));
+        vcx.run_until_parked();
+        vcx
+    }
+
+    /// Closes the main window and opens it again, as a reopen from the tray does.
+    fn reopen(vcx: VisualTestContext, cx: &mut TestAppContext) -> VisualTestContext {
+        let mut vcx = vcx;
+        vcx.update(|window, _| window.remove_window());
+        vcx.run_until_parked();
+        open(cx)
     }
 
     fn main_window(cx: &mut TestAppContext) -> gpui_kit::Entity<MainWindow> {
@@ -4569,18 +4585,18 @@ mod startup_items {
             (ToastKindTag::Info, SharedString::from("test info")),
         ];
         init(cx, queued, false, StartOptions::default());
-        open(cx);
+        let vcx = open(cx);
         assert_eq!(toasts(cx), ["test warning", "test info"]);
 
         // A reopened window does not show them again.
-        open(cx);
+        let _vcx = reopen(vcx, cx);
         assert!(toasts(cx).is_empty(), "{:?}", toasts(cx));
     }
 
     #[gpui_kit::test]
     fn crash_report_shown_after_first_frame(cx: &mut TestAppContext) {
         let r = init(cx, Vec::new(), true, StartOptions::default());
-        open(cx);
+        let vcx = open(cx);
         let crash = cx.update(|cx| {
             cx.global::<GlobalRegistry>()
                 .0
@@ -4588,7 +4604,7 @@ mod startup_items {
                 .get(&WindowKey::CrashReport)
         });
         assert!(crash.is_some(), "the Crash Report window opened");
-        open(cx);
+        let _vcx = reopen(vcx, cx);
         assert_eq!(
             r.seen.load(Ordering::Relaxed),
             1,
@@ -4599,7 +4615,7 @@ mod startup_items {
     #[gpui_kit::test]
     fn select_pid_waits_for_process(cx: &mut TestAppContext) {
         let mut r = init(cx, Vec::new(), false, select_pid(PID));
-        open(cx);
+        let _vcx = open(cx);
         let main = main_window(cx);
         assert_eq!(cx.update(|cx| main.read(cx).active_tab()), Tab::Processes);
         assert_eq!(jumps(cx), 0, "no record yet");
@@ -4618,7 +4634,7 @@ mod startup_items {
     #[gpui_kit::test]
     fn select_pid_not_found_after_3s(cx: &mut TestAppContext) {
         let mut r = init(cx, Vec::new(), false, select_pid(PID));
-        open(cx);
+        let _vcx = open(cx);
         cx.executor().advance_clock(SELECT_PID_WAIT);
         cx.run_until_parked();
         assert!(
@@ -4637,10 +4653,11 @@ mod startup_items {
             ..StartOptions::default()
         };
         init(cx, Vec::new(), false, start);
-        open(cx);
+        cx.update(|cx| cx.set_global(TitleBarProbe::default()));
+        let vcx = open(cx);
         let first = main_window(cx);
         assert_eq!(cx.update(|cx| first.read(cx).start_minimizes()), 1);
-        open(cx);
+        let _vcx = reopen(vcx, cx);
         let second = main_window(cx);
         assert_eq!(cx.update(|cx| second.read(cx).start_minimizes()), 0);
     }
@@ -4648,7 +4665,7 @@ mod startup_items {
     #[gpui_kit::test]
     fn first_frame_items_noop(cx: &mut TestAppContext) {
         let r = init(cx, Vec::new(), false, StartOptions::default());
-        open(cx);
+        let _vcx = open(cx);
         let main = main_window(cx);
         cx.update(|cx| {
             let m = main.read(cx);
