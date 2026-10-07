@@ -138,7 +138,7 @@ fn history_renders_only_on_history_bit(cx: &mut TestAppContext) {
         let hub = cx.new(|cx| SnapshotHub::new(client, cx));
         cx.set_global(GlobalHub(hub));
     });
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     let count =
         |vcx: &mut gpui_kit::VisualTestContext| vcx.read_entity(&page, |p, _| p.render_count.get());
@@ -248,7 +248,7 @@ fn scrub(page: &Entity<HistoryPage>, vcx: &mut VisualTestContext, t: TimeNs) {
 #[gpui_kit::test]
 fn history_one_query_in_flight(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     let sent = queries(&engine);
     assert_eq!(sent.len(), 1, "mode entry sends one query");
@@ -265,7 +265,7 @@ fn history_one_query_in_flight(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn pending_replaced_by_latest(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     for t in [100, 200, 300] {
         scrub(&page, vcx, t * S);
@@ -286,7 +286,7 @@ fn pending_replaced_by_latest(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn foreign_answer_ignored(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     scrub(&page, vcx, 100 * S);
     answer(&engine, 99, vcx);
@@ -297,7 +297,7 @@ fn foreign_answer_ignored(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn live_queries_each_second(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (_page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (_page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     for _ in 0..5 {
         let last = queries(&engine).last().expect("a query").0;
@@ -312,7 +312,7 @@ fn live_queries_each_second(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn overview_once_per_minute(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (_page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (_page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     for _ in 0..60 {
         let last = queries(&engine).last().expect("a query").0;
@@ -330,7 +330,7 @@ fn overview_once_per_minute(cx: &mut TestAppContext) {
 fn busy_retried_next_tick(cx: &mut TestAppContext) {
     let engine = init(cx);
     engine.set_busy(true);
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     assert!(queries(&engine).is_empty());
     assert!(vcx.read_entity(&page, |p, _| p.query_pending()).is_some());
@@ -357,7 +357,7 @@ fn busy_retried_next_tick(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn unanswered_query_resent_after_timeout(cx: &mut TestAppContext) {
     let engine = init(cx);
-    let (page, vcx) = cx.add_window_view(|_, cx| HistoryPage::new(cx));
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
     vcx.run_until_parked();
     answer(&engine, 1, vcx);
     scrub(&page, vcx, 100 * S);

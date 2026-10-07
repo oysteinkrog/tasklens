@@ -10,27 +10,38 @@
 //! `QueryController` keeps at most one Frame query in flight (UI-PRC-030). The page asks on mode
 //! entry, on every scrub or range change and once per second while live; a 1,000 ms timeout
 //! resends an unanswered query (R-169 OI-6).
+//!
+//! The table (E30-019) is a child `TlTreeTable` over [`table::HistoryTableDelegate`]. The page
+//! hands it each installed view, the global filter text and the settings it follows, and copies
+//! its selection into `HistoryUiState::selected` in selection order.
+
+pub mod table;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{
-    App, AsyncApp, Context, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, px,
+    App, AppContext as _, AsyncApp, Context, Entity, IntoElement, ParentElement as _, Render,
+    SharedString, StyleRefinement, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
-use tl_model::command::{Command, CommandError, HistoryWhat};
+use tl_model::command::{Command, CommandError, HistoryWhat, Tab};
 use tl_model::history::{HistoryMetric, HistoryRange, HistoryStoreState, HistoryView};
 use tl_model::ids::ProcessKey;
+use tl_model::settings::{Settings, UiState};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime};
 
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::pages::performance::details::Template;
-use crate::settings_global::TlSettings;
-use crate::theme::{current, metrics};
+use crate::settings_global::{Section, TlSettings};
+use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
+use crate::theme::{bump_style_version, current, metrics};
+use crate::window::main::{FilterChanged, GlobalShellEvents};
+
+use self::table::HistoryTableDelegate;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
 
@@ -50,6 +61,10 @@ const QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
 const OVERVIEW_EVERY_NS: u64 = 60 * NS_PER_SEC;
 /// The strip draws series for at most this many selected processes.
 const MAX_SERIES: usize = 8;
+
+/// The settings sections the table follows, in this order: `processes` (`hide_system`), `units`,
+/// `tables`.
+const SECTIONS: [Section; 3] = [Section::Processes, Section::Units, Section::Tables];
 
 /// What the strip, minimap, chips and table share. Session only; nothing here persists.
 #[derive(Clone, Debug, PartialEq)]
@@ -394,29 +409,69 @@ pub struct HistoryPage {
     live_timer: Option<Task<()>>,
     /// Timeout and `Busy` retry while not live. The live loop does both while live.
     retry_timer: Option<Task<()>>,
+    table: Entity<TlTreeTable<HistoryTableDelegate>>,
+    /// `TlSettings` versions of [`SECTIONS`] last applied.
+    section_versions: [u64; 3],
     /// Created in `new`, never in render.
-    _subs: SmallVec<[Subscription; 2]>,
+    _subs: SmallVec<[Subscription; 5]>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: std::cell::Cell<u32>,
 }
 
 impl HistoryPage {
-    /// Reads the hub's current history view, subscribes to the hub, sends the mode entry query
-    /// and starts the live loop. Needs `GlobalHub`.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// Reads the hub's current history view, builds the table, subscribes to the hub, sends the
+    /// mode entry query and starts the live loop. Needs `GlobalHub`.
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let hub = cx.global::<GlobalHub>().0.clone();
-        let history = Arc::clone(&hub.read(cx).current().history);
-        let client = Arc::clone(hub.read(cx).client());
+        let (history, processes, client) = {
+            let hub = hub.read(cx);
+            let s = hub.current();
+            (
+                Arc::clone(&s.history),
+                Arc::clone(&s.processes),
+                Arc::clone(hub.client()),
+            )
+        };
+        let (settings, state) = match cx.try_global::<TlSettings>() {
+            Some(_) => (
+                TlSettings::settings(cx).clone(),
+                TlSettings::state(cx).clone(),
+            ),
+            None => (Settings::default(), UiState::default()),
+        };
+        let mut delegate = HistoryTableDelegate::new(&settings, &state, cx);
+        delegate.install(&history, &processes);
+        let defaults = delegate.default_layout();
+        let table = cx.new(|cx| {
+            let mut t = TlTreeTable::new(delegate, window, cx);
+            t.set_default_layout(defaults);
+            t.set_resize_mode(settings.tables.column_resize);
+            t.set_column_separators(settings.tables.column_separators);
+            t
+        });
         let mut subs = SmallVec::new();
         subs.push(cx.subscribe(&hub, |this, _, ev: &SnapshotChanged, cx| {
             if ev.mask.contains(ComponentMask::HISTORY) {
                 let history = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().history);
                 this.install(Arc::clone(&history));
+                this.install_table(cx);
                 this.drive(cx, |q, c| q.on_view(&history, c));
                 cx.notify();
             }
         }));
         subs.push(cx.observe_global::<Strings>(|this, cx| this.on_strings(cx)));
+        subs.push(cx.observe_global::<TlSettings>(|this, cx| this.on_settings(cx)));
+        subs.push(cx.observe(&table, |this, _, cx| this.sync_selection(cx)));
+        if let Some(events) = cx.try_global::<GlobalShellEvents>().map(|g| g.0.clone()) {
+            subs.push(cx.subscribe(&events, |this, _, ev: &FilterChanged, cx| {
+                if ev.tab == Tab::Processes {
+                    this.set_filter(&ev.text, cx);
+                }
+            }));
+        }
+        let section_versions = cx
+            .try_global::<TlSettings>()
+            .map_or([0; 3], |tl| SECTIONS.map(|s| tl.version(s)));
         let (words, strings_version) = match cx.try_global::<Strings>() {
             Some(s) => (HistoryWords::new(cx), s.strings_version),
             None => (HistoryWords::default(), 0),
@@ -434,6 +489,8 @@ impl HistoryPage {
             sent_at: None,
             live_timer: None,
             retry_timer: None,
+            table,
+            section_versions,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -451,6 +508,21 @@ impl HistoryPage {
     /// The header line text as shown.
     pub fn header(&self) -> &SharedString {
         &self.header
+    }
+
+    pub fn table(&self) -> &Entity<TlTreeTable<HistoryTableDelegate>> {
+        &self.table
+    }
+
+    /// Sets the global filter text (PROC-046). The table matches it, lowercased, against name,
+    /// comm, user and executable path.
+    pub fn set_filter(&mut self, text: &str, cx: &mut Context<Self>) {
+        let lower: Arc<str> = Arc::from(text.to_lowercase());
+        self.table.update(cx, |t, cx| {
+            if t.delegate.set_filter(lower) {
+                t.on_new_version(cx);
+            }
+        });
     }
 
     /// Sets the scrub time (`None` is live) and asks for its frame.
@@ -623,7 +695,69 @@ impl HistoryPage {
         self.strings_version = version;
         self.words = HistoryWords::new(cx);
         self.refresh_header();
+        self.table.update(cx, |t, cx| {
+            t.delegate.refresh_strings(cx);
+            t.on_new_version(cx);
+        });
         cx.notify();
+    }
+
+    /// Hands the installed view and the live process list (for app icons) to the table.
+    fn install_table(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.view.clone() else {
+            return;
+        };
+        let processes = Arc::clone(&cx.global::<GlobalHub>().0.read(cx).current().processes);
+        self.table.update(cx, |t, cx| {
+            if t.delegate.install(&view, &processes) {
+                t.on_new_version(cx);
+            }
+        });
+    }
+
+    /// `processes.hide_system` filters the rows; a `units` change restarts the cell text caches;
+    /// `tables` sets resize mode and separators.
+    fn on_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(tl) = cx.try_global::<TlSettings>() else {
+            return;
+        };
+        let versions = SECTIONS.map(|s| tl.version(s));
+        if versions == self.section_versions {
+            return;
+        }
+        let old = std::mem::replace(&mut self.section_versions, versions);
+        let restyle = versions[1] != old[1];
+        let settings = TlSettings::settings(cx).clone();
+        self.table.update(cx, |t, cx| {
+            let rows = t.delegate.set_settings(&settings);
+            t.set_resize_mode(settings.tables.column_resize);
+            t.set_column_separators(settings.tables.column_separators);
+            if restyle {
+                bump_style_version(cx);
+            }
+            if rows {
+                t.on_new_version(cx);
+            } else {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Copies the table's selection into `state.selected`: ids no longer selected leave, new
+    /// ones are appended in display order, so the list keeps selection order.
+    fn sync_selection(&mut self, cx: &mut Context<Self>) {
+        let table = self.table.read(cx);
+        let sel = &table.selection;
+        let selected = &mut self.state.selected;
+        if selected.len() == sel.len() && selected.iter().all(|k| sel.contains(k)) {
+            return;
+        }
+        selected.retain(|k| sel.contains(k));
+        let d = &table.delegate;
+        let mut added: SmallVec<[ProcessKey; 8]> =
+            sel.ids().filter(|k| !selected.contains(k)).collect();
+        added.sort_by_key(|k| d.row_index(*k).unwrap_or(usize::MAX));
+        selected.extend(added);
     }
 
     fn loading(&self) -> bool {
@@ -669,8 +803,15 @@ impl Render for HistoryPage {
             .h(px(MINIMAP_H * scale))
             .mx(margin)
             .mt(m.sp[2]);
-        // The history table (E30-019) fills this slot; it stays empty while the store loads.
-        let table = div().flex_1().min_h_0().mt(m.sp[4]);
+        // The history table fills this slot; it stays empty while the store loads.
+        let mut table = div().flex_1().min_h_0().mt(m.sp[4]);
+        if !self.loading() {
+            table = table.child(
+                self.table
+                    .clone()
+                    .cached(StyleRefinement::default().size_full()),
+            );
+        }
         div()
             .size_full()
             .flex()
