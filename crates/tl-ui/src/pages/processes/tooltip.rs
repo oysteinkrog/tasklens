@@ -15,8 +15,8 @@ use std::rc::Rc;
 
 use gpui_kit::base::Tooltip as BaseTooltip;
 use gpui_kit::{
-    App, BoxShadow, Context, HighlightStyle, Hsla, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, StyledText, Window, div, point, px,
+    App, BoxShadow, Context, HighlightStyle, Hsla, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, StyledText, Window, div, point, px,
 };
 use tl_model::ids::{NodeId, PseudoKind};
 use tl_model::process::{GroupRowKind, ProcessRecord};
