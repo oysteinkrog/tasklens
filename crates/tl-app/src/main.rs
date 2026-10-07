@@ -26,6 +26,7 @@ mod rendering_env;
 mod settings_store;
 #[allow(dead_code, reason = "tests call the rest")]
 mod single_instance;
+mod watch_memory;
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -62,6 +63,11 @@ fn main() -> ExitCode {
     {
         eprintln!("Invalid --app-id: {id}");
         return ExitCode::from(2);
+    }
+    // E32: the watcher runs before paths and logging, so it has no file logger and no writer
+    // thread (R-152 OI-4). It sets up its own stderr subscriber.
+    if args.watch_memory {
+        return watch_memory::run_watch_memory();
     }
 
     // Step 1: paths, panic hook, logging.
@@ -120,7 +126,7 @@ fn main() -> ExitCode {
         info!(target: "tasklens::ui", "rendering.gpu: set {name}={value}");
     }
 
-    // E32: --low-memory and --watch-memory arms go here (before step 4)
+    // E32: the --low-memory arm goes here (before step 4)
     // Step 4: single instance. A second copy forwards its arguments and exits 0.
     let forward = Forward {
         tab: args.tab.map(TabArg::to_model),

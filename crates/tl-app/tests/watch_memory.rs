@@ -496,9 +496,8 @@ fn no_spawn_without_display() {
     );
 }
 
-/// Needs the `--watch-memory` arm in main.rs (E32 m1f.5); without it this starts the full app.
+/// Starts the real binary with `--watch-memory` (the arm in main.rs, E32 m1f.5).
 #[test]
-#[ignore = "starts the real binary; needs the --watch-memory arm in main.rs"]
 fn real_rss_under_4mib() {
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tasklens"))
         .arg("--watch-memory")
@@ -523,6 +522,42 @@ fn real_rss_under_4mib() {
     assert!(rss_kib < 4096, "VmRSS {rss_kib} kB");
     // One thread: no GPUI, no engine, no log writer thread.
     assert_eq!(threads.unwrap(), 1);
+}
+
+/// With a fake owner of the bus name, `--watch-memory` does not forward to it and keeps running.
+/// A live tasklens that already owns the name counts as the owner.
+#[test]
+#[ignore = "needs a session bus; starts the real binary"]
+fn watch_memory_no_single_instance() {
+    use zbus::fdo::{RequestNameFlags, RequestNameReply};
+    let conn = zbus::blocking::Connection::session().expect("session bus");
+    let reply = conn
+        .request_name_with_flags(
+            "io.github.oysteinkrog.Tasklens",
+            RequestNameFlags::DoNotQueue.into(),
+        )
+        .expect("RequestName");
+    assert!(
+        matches!(
+            reply,
+            RequestNameReply::PrimaryOwner
+                | RequestNameReply::Exists
+                | RequestNameReply::AlreadyOwner
+        ),
+        "{reply:?}"
+    );
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tasklens"))
+        .arg("--watch-memory")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let exited = child.try_wait();
+    // Kill only the child this test started, before any assert can fail.
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(exited.unwrap(), None, "the watcher exited");
 }
 
 /// U-51 (R-151): an unprivileged PSI trigger is accepted on the owner machine (kernel 7.2).
