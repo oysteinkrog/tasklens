@@ -13,6 +13,7 @@ pub mod header_totals;
 pub mod history;
 pub mod name_cell;
 pub mod table;
+pub mod toasts;
 pub mod toolbar;
 pub mod tooltip;
 
