@@ -17,6 +17,7 @@
 
 mod general;
 mod motion;
+mod processes;
 mod units;
 
 use std::ops::RangeInclusive;
@@ -166,7 +167,12 @@ pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
     // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
     // Services, Startup and window, Privileges, Advanced.
     #[allow(unused_mut, reason = "test-hooks appends the test pages")]
-    let mut pages: Vec<PageBuilder> = vec![general::page(cx), motion::page(cx), units::page(cx)];
+    let mut pages: Vec<PageBuilder> = vec![
+        general::page(cx),
+        motion::page(cx),
+        units::page(cx),
+        processes::page(cx),
+    ];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
         pages.extend(test(cx));

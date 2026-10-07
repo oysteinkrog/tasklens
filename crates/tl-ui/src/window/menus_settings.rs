@@ -19,7 +19,7 @@ use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
 
 /// The Refresh items: label key and `processes.interval_ms`, in `PROCESS_INTERVAL_MENU_MS` order.
-const REFRESH_KEYS: [&str; 6] = [
+pub(crate) const REFRESH_KEYS: [&str; 6] = [
     "shell-menu-settings-refresh-250",
     "shell-menu-settings-refresh-500",
     "shell-menu-settings-refresh-1000",

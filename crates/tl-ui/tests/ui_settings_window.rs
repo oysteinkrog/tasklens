@@ -14,9 +14,11 @@ use gpui_kit::{
 use tl_model::client::EngineClient;
 use tl_model::command::Tab;
 use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
+use tl_model::table::TableMode;
 use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::slider::TlSliderEvent;
+use tl_ui::components::toast::ToastQueue;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
 use tl_ui::settings_global::{SettingKey, SettingValue, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
@@ -415,6 +417,94 @@ fn motion_keys(cx: &mut TestAppContext) {
             SettingKey::MotionSmoothScroll,
             SettingKey::MotionSmoothScrollAmount,
             SettingKey::MotionTabSwitchMs
+        ]
+    );
+}
+
+#[gpui_kit::test]
+fn processes_refresh_dropdown(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    let processes = page(cx, PageId::Processes);
+    assert_eq!(
+        processes.dropdown_labels(SettingKey::ProcessesIntervalMs),
+        ["0.25s", "0.5s", "1.0s", "2.0s", "5.0s", "10.0s"]
+    );
+    cx.update(|cx| processes.pick(SettingKey::ProcessesIntervalMs, "2.0s", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).processes.interval_ms),
+        2000
+    );
+    assert_eq!(
+        engine.settings().last().map(|s| s.interval_ms),
+        Some(2000),
+        "the engine gets the interval"
+    );
+}
+
+#[gpui_kit::test]
+fn processes_hide_system_engine_settings(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    cx.update(|cx| {
+        TlSettings::set(
+            cx,
+            SettingKey::ProcessesHideSystem,
+            SettingValue::Bool(false),
+        )
+    });
+    let processes = page(cx, PageId::Processes);
+    cx.update(|cx| processes.set_bool(SettingKey::ProcessesHideSystem, true, cx));
+    cx.run_until_parked();
+    assert!(cx.update(|cx| TlSettings::settings(cx).processes.hide_system));
+    assert_eq!(
+        engine.settings().last().map(|s| s.hide_system),
+        Some(true),
+        "the engine gets hide_system"
+    );
+}
+
+#[gpui_kit::test]
+fn processes_mode_no_toast(cx: &mut TestAppContext) {
+    setup(cx);
+    let (_, mut vcx) = open(cx, 1);
+    let processes = page(cx, PageId::Processes);
+    assert_eq!(
+        processes.dropdown_labels(SettingKey::ProcessesMode),
+        ["Tree View", "Task Manager Grouping", "List View"]
+    );
+    vcx.update(|_, cx| processes.pick(SettingKey::ProcessesMode, "List View", cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).processes.mode),
+        TableMode::Flat
+    );
+    let toasts = vcx.update(|window, cx| {
+        let queue =
+            ToastQueue::of_window(window, cx).expect("the Settings window has a toast layer");
+        let q = queue.read(cx);
+        (q.visible_texts(), q.waiting_texts())
+    });
+    assert!(toasts.0.is_empty() && toasts.1.is_empty(), "{toasts:?}");
+}
+
+#[gpui_kit::test]
+fn processes_page_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    assert_eq!(
+        page(cx, PageId::Processes).keys(),
+        [
+            SettingKey::ProcessesIntervalMs,
+            SettingKey::ProcessesMode,
+            SettingKey::ProcessesTreeGuideLines,
+            SettingKey::ProcessesHighlightNewExited,
+            SettingKey::ProcessesFilterIncludeChildren,
+            SettingKey::ProcessesHideSystem,
+            SettingKey::ProcessesSubtreeTotals,
+            SettingKey::TablesColumnResize,
+            SettingKey::TablesDimZeroValues,
+            SettingKey::PropertiesHideUnnamedHandles,
+            SettingKey::PropertiesSharedObjectsOnly,
+            SettingKey::PropertiesEnvMask
         ]
     );
 }
