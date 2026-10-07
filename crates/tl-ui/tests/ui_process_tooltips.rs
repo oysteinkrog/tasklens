@@ -376,14 +376,14 @@ fn disk_write_tooltip_shows_cancelled_bytes() {
     r.cancelled_write_bps = 1_258_291.0;
     assert_eq!(
         Fixture::new(r).tip(ColumnId::DiskWriteRate).as_deref(),
-        Some("cancelled: 1.20 MiB")
+        Some("cancelled: 1.20 MiB/s")
     );
     let mut r = record();
     r.cancelled_write_bps = 1023.0;
     assert_eq!(
         Fixture::new(r).tip(ColumnId::DiskWriteRate),
         None,
-        "nothing below 1 KiB"
+        "nothing below 1 KiB/s"
     );
     assert_eq!(Fixture::new(record()).tip(ColumnId::DiskWriteRate), None);
 }

@@ -1115,7 +1115,7 @@ pub struct CellTipWords {
     /// "euid {$euid}".
     pub euid: Template,
     pub net_shared: SharedString,
-    /// "cancelled: {$size}".
+    /// "cancelled: {$size}/s".
     pub cancelled: Template,
     /// "VRAM on GPU {$n}: {$size}".
     pub gpu_vram: Template,
@@ -1295,7 +1295,7 @@ pub fn cell_tooltip(
                     out.push_str(&w.net_shared);
                     true
                 }
-                // PROC-031: IEC two decimals from 1 KiB; less is not worth a tooltip.
+                // PROC-031: IEC two decimals per second from 1 KiB/s; less is not worth a tooltip.
                 C::DiskWriteRate => {
                     let bytes = f64::from(r.cancelled_write_bps).round() as u64;
                     if bytes < 1024 {
