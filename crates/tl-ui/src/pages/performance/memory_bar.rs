@@ -729,13 +729,20 @@ mod tests {
     fn composition_segments_sum_to_total() {
         let c = comp(20 * GIB, GIB, 120 * MIB, 12 * GIB, 28 * GIB);
         let segs = layout(&c, 600.0);
+        // With no segment under 2 px every width is proportional.
+        let even = comp(20 * GIB, GIB, 2 * GIB, 12 * GIB, 28 * GIB);
+        for s in &layout(&even, 600.0) {
+            let want = even.bytes(s.kind) as f64 / even.total as f64 * 600.0;
+            assert!((f64::from(s.width()) - want).abs() <= 0.5, "{:?}", s.kind);
+        }
         assert_eq!(segs.len(), 5);
         assert_eq!(segs[0].x0, 0.0);
         assert_eq!(segs[4].x1, 600.0);
         for pair in segs.windows(2) {
             assert_eq!(pair[0].x1, pair[1].x0, "contiguous");
         }
-        for s in &segs {
+        // Modified (120 MiB) is under 2 px, so the largest segment, Free, pays for it.
+        for s in segs.iter().filter(|s| s.kind != SegmentKind::Free) {
             let want = c.bytes(s.kind) as f64 / c.total as f64 * 600.0;
             if want >= f64::from(MIN_SEGMENT_W) {
                 assert!(

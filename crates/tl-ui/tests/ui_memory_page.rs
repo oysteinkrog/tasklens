@@ -413,3 +413,169 @@ fn memory_totals_change_rebuilds_specs(cx: &mut TestAppContext) {
         "an unchanged MemTotal keeps the Physical spec"
     );
 }
+
+// Memory composition bar (E25, UI-PRF-027; PERF-042).
+
+mod composition {
+    use gpui_kit::{Modifiers, StyleRefinement, point};
+    use tl_ui::pages::performance::memory_bar::{
+        BAR_ID, Composition, CompositionBarView, SegmentKind,
+    };
+
+    use super::*;
+
+    const MIB: u64 = 1 << 20;
+    /// The bar is 1024 px wide, so 1 MiB of a 1024 MiB total is exactly 1 px.
+    const W: f32 = 1024.;
+
+    struct BarHost(Entity<CompositionBarView>);
+
+    impl Render for BarHost {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w(px(W))
+                .child(self.0.clone().cached(StyleRefinement::default().w_full()))
+        }
+    }
+
+    /// A bar alone in a window, at scale 1.
+    fn bar(
+        cx: &mut TestAppContext,
+        c: Option<Composition>,
+    ) -> (Entity<CompositionBarView>, &mut VisualTestContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+        });
+        let bar = cx.new(|cx| CompositionBarView::new(c, cx));
+        let host = bar.clone();
+        let (_, vcx) = cx.add_window_view(move |_, _| BarHost(host));
+        vcx.simulate_scale_factor_change(1.0);
+        draw(vcx);
+        (bar, vcx)
+    }
+
+    /// In use 600 px, Modified 60 px, Standby 72 px, Free 292 px.
+    fn widths() -> Composition {
+        Composition {
+            in_use: 600 * MIB,
+            compressed: 0,
+            modified: 60 * MIB,
+            standby: 72 * MIB,
+            free: 292 * MIB,
+            total: 1024 * MIB,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn composition_label_min_72px(cx: &mut TestAppContext) {
+        let (bar, vcx) = bar(cx, Some(widths()));
+        vcx.read_entity(&bar, |b, _| {
+            let w = |k| {
+                b.state
+                    .segments
+                    .iter()
+                    .find(|s| s.kind == k)
+                    .map(|s| s.width())
+            };
+            assert_eq!(w(SegmentKind::Modified), Some(60.));
+            assert_eq!(w(SegmentKind::Standby), Some(72.));
+            assert_eq!(
+                b.painted_labels.borrow().as_slice(),
+                [SegmentKind::InUse, SegmentKind::Standby, SegmentKind::Free],
+                "no label on the 60 px segment"
+            );
+            assert_eq!(b.painted_segments.get(), 4);
+            assert_eq!(b.caption().as_ref(), "Memory composition");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn composition_warming_up_outline_only(cx: &mut TestAppContext) {
+        let (bar, vcx) = bar(cx, None);
+        vcx.read_entity(&bar, |b, _| {
+            assert_eq!(b.painted_segments.get(), 0, "outline only");
+            assert!(b.painted_labels.borrow().is_empty());
+            assert_eq!(b.caption().as_ref(), "Collecting…");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn composition_hitboxes_only_when_inside(cx: &mut TestAppContext) {
+        let (bar, vcx) = bar(cx, Some(widths()));
+        let bounds = vcx.debug_bounds(BAR_ID).expect("bar box");
+        // Outside the bar: no hitboxes.
+        let below = bounds.bottom() + px(20.);
+        vcx.simulate_mouse_move(point(px(10.), below), None, Modifiers::none());
+        draw(vcx);
+        assert_eq!(vcx.read_entity(&bar, |b, _| b.hitbox_count.get()), 0);
+        // Over In use: one hitbox per segment, In use hovered with its tooltip.
+        let y = bounds.top() + bounds.size.height / 2.;
+        vcx.simulate_mouse_move(point(bounds.left() + px(100.), y), None, Modifiers::none());
+        draw(vcx);
+        vcx.read_entity(&bar, |b, _| {
+            assert_eq!(b.hitbox_count.get(), 4);
+            assert_eq!(b.state.hover, Some(SegmentKind::InUse));
+            assert_eq!(
+                b.hover_tooltip().as_deref(),
+                Some("In use: 600.00 MiB. Memory used by running programs and the kernel.")
+            );
+        });
+        // Out again: none.
+        vcx.simulate_mouse_move(point(px(10.), below), None, Modifiers::none());
+        draw(vcx);
+        vcx.read_entity(&bar, |b, _| {
+            assert_eq!(b.hitbox_count.get(), 0);
+            assert_eq!(b.state.hover, None);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn composition_hatch_built_once(cx: &mut TestAppContext) {
+        let c = Composition {
+            compressed: 64 * MIB,
+            in_use: 536 * MIB,
+            ..widths()
+        };
+        let (bar, vcx) = bar(cx, Some(c));
+        // The window's first frame can come before the scale factor is set, so count from here.
+        let builds = vcx.read_entity(&bar, |b, _| b.hatch_builds.get());
+        assert!(builds >= 1);
+        // Repaints with the same edges reuse the path.
+        for _ in 0..3 {
+            vcx.update(|_, cx| bar.update(cx, |_, cx| cx.notify()));
+            draw(vcx);
+        }
+        assert_eq!(vcx.read_entity(&bar, |b, _| b.hatch_builds.get()), builds);
+        // A same composition sent again does not repaint the bar.
+        let renders = vcx.read_entity(&bar, |b, _| b.render_count.get());
+        vcx.update(|_, cx| bar.update(cx, |b, cx| b.set_composition(Some(c), cx)));
+        draw(vcx);
+        assert_eq!(vcx.read_entity(&bar, |b, _| b.render_count.get()), renders);
+    }
+
+    #[gpui_kit::test]
+    fn memory_page_shows_composition_bar(cx: &mut TestAppContext) {
+        let mut sys = system(64 * GIB, 80 * GIB, 0);
+        sys.memory.free = 20 * GIB;
+        let r = open(cx, Settings::default(), sys);
+        let bar = r
+            .vcx
+            .update(|_, cx| r.page.read(cx).bar().cloned())
+            .expect("bar shown by default");
+        r.vcx.read_entity(&bar, |b, _| {
+            let c = b.state.composition.expect("valid memory");
+            assert_eq!(c.in_use, 32 * GIB);
+            assert_eq!(c.free, 20 * GIB);
+            assert_eq!(c.standby, 12 * GIB);
+        });
+        assert!(r.vcx.debug_bounds(BAR_ID).is_some(), "bar drawn");
+    }
+}
