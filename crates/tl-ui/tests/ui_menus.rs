@@ -1,11 +1,13 @@
-//! Menu bar and File menu tests (E21-A1, UI-SHL-030, UI-SHL-031, UI-SHL-032, ADR-013).
+//! Menu bar and File menu tests (E21-A1, E21-044, UI-SHL-030, UI-SHL-031, UI-SHL-032, ADR-013).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::cell::Cell;
 use std::rc::Rc;
 
+use gpui_kit::AsKeystroke as _;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
+use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
     AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle, InteractiveElement,
     IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -13,7 +15,7 @@ use gpui_kit::{
     div, px, size,
 };
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
-use tl_ui::actions::{MenuId, Quit, bind_keys_global};
+use tl_ui::actions::{MenuId, OpenRunDialog, Quit, bind_keys_global};
 use tl_ui::theme::current;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
@@ -42,11 +44,14 @@ struct Rig<'a> {
     cx: &'a mut VisualTestContext,
     table: FocusHandle,
     quits: Rc<Cell<u32>>,
+    runs: Rc<Cell<u32>>,
 }
 
 fn rig(cx: &mut TestAppContext) -> Rig<'_> {
     let quits = Rc::new(Cell::new(0));
     let count = Rc::clone(&quits);
+    let runs = Rc::new(Cell::new(0));
+    let run_count = Rc::clone(&runs);
     cx.update(|cx| {
         gpui_kit::init(cx);
         tl_ui::theme::store::init(
@@ -63,6 +68,7 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         bind_keys_global(cx);
         menubar::init(cx);
         cx.on_action(move |_: &Quit, _| count.set(count.get() + 1));
+        cx.on_action(move |_: &OpenRunDialog, _| run_count.set(run_count.get() + 1));
         cx.set_reduce_motion(true);
     });
     let (host, cx) = cx.add_window_view(|window, cx| Host {
@@ -77,7 +83,12 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         table
     });
     draw(cx);
-    Rig { cx, table, quits }
+    Rig {
+        cx,
+        table,
+        quits,
+        runs,
+    }
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -139,12 +150,15 @@ fn in_menu(s: &ElementSnapshot) -> bool {
         .any(|id| *id == ElementId::Name("tl-menu".into()))
 }
 
-/// The popup's entries (items, separators and headers), in order.
+/// The popup's entries (items, separators and headers), top to bottom.
 fn entries(cx: &mut VisualTestContext) -> Vec<ElementSnapshot> {
-    cx.update(|window, _| snapshots(window))
+    let mut entries: Vec<_> = cx
+        .update(|window, _| snapshots(window))
         .into_iter()
         .filter(|s| in_menu(s) && matches!(s.path().last(), Some(ElementId::Integer(_))))
-        .collect()
+        .collect();
+    entries.sort_by_key(|s| s.bounds().origin.y);
+    entries
 }
 
 fn popup_bounds(cx: &mut VisualTestContext) -> Option<Bounds<Pixels>> {
@@ -159,9 +173,20 @@ fn table_focused(r: &mut Rig<'_>) -> bool {
     r.cx.update(|window, _| table.is_focused(window))
 }
 
+/// The shortcut hint the menu draws for `action`: its first binding as seen from the menu's action
+/// context, the focused table.
+fn hint_for(r: &mut Rig<'_>, action: &dyn gpui_kit::Action) -> Option<String> {
+    let table = r.table.clone();
+    r.cx.update(|window, _| {
+        let binding = window.highest_precedence_binding_for_action_in(action, &table)?;
+        let key = binding.keystrokes().first()?;
+        Some(Kbd::format(key.as_keystroke()))
+    })
+}
+
 #[gpui_kit::test]
-fn file_menu_p1_items(cx: &mut TestAppContext) {
-    let r = rig(cx);
+fn file_menu_p2_items(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
     // One button, one separator one physical pixel wide, and nothing for the absent menus.
     let bar_w = bounds(r.cx, "TlMenuBar").size.width;
     let file = bounds(r.cx, FILE_BUTTON);
@@ -181,9 +206,42 @@ fn file_menu_p1_items(cx: &mut TestAppContext) {
 
     click_file(r.cx);
     let entries = entries(r.cx);
-    assert_eq!(entries.len(), 1, "one item, no separator: {entries:?}");
+    assert_eq!(entries.len(), 3, "Run..., separator, Exit: {entries:?}");
     assert_eq!(entries[0].role(), Some(Role::MenuItem));
-    assert_eq!(entries[0].label(), Some("Exit tasklens"));
+    assert_eq!(entries[0].label(), Some("Run..."));
+    assert_eq!(entries[1].role(), None, "a separator");
+    assert_eq!(entries[1].label(), None);
+    assert!(entries[1].bounds().size.height < px(2.), "a one-pixel line");
+    assert_eq!(entries[2].role(), Some(Role::MenuItem));
+    assert_eq!(entries[2].label(), Some("Exit tasklens"));
+    // The hints come from the live bindings.
+    assert_eq!(hint_for(&mut r, &OpenRunDialog).as_deref(), Some("Ctrl+N"));
+    assert_eq!(hint_for(&mut r, &Quit).as_deref(), Some("Ctrl+Q"));
+}
+
+#[gpui_kit::test]
+fn file_menu_run_dispatch(cx: &mut TestAppContext) {
+    let mut r = rig(cx);
+    keys(r.cx, "f10");
+    assert_eq!(
+        entries(r.cx)[0].selected(),
+        Some(true),
+        "Run... highlighted"
+    );
+    keys(r.cx, "enter");
+    assert_eq!(r.runs.get(), 1);
+    assert_eq!(r.quits.get(), 0);
+    assert_eq!(open_menu(r.cx), None);
+    assert!(popup_bounds(r.cx).is_none());
+    assert!(table_focused(&mut r));
+
+    // A click on the item does the same.
+    click_file(r.cx);
+    let item = entries(r.cx)[0].bounds().center();
+    click(r.cx, item);
+    assert_eq!(r.runs.get(), 2);
+    assert_eq!(r.quits.get(), 0);
+    assert_eq!(open_menu(r.cx), None);
 }
 
 #[gpui_kit::test]
@@ -208,11 +266,7 @@ fn menubar_f10_opens_file(cx: &mut TestAppContext) {
     keys(r.cx, "f10");
     assert_eq!(open_menu(r.cx), Some(MenuId::File));
     let entries = entries(r.cx);
-    assert_eq!(
-        entries[0].selected(),
-        Some(true),
-        "Exit tasklens highlighted"
-    );
+    assert_eq!(entries[0].selected(), Some(true), "Run... highlighted");
 }
 
 #[gpui_kit::test]
@@ -243,15 +297,22 @@ fn menubar_wrap_single_menu(cx: &mut TestAppContext) {
 fn exit_dispatches_quit(cx: &mut TestAppContext) {
     let mut r = rig(cx);
     keys(r.cx, "f10");
+    keys(r.cx, "down");
+    assert_eq!(
+        entries(r.cx)[2].selected(),
+        Some(true),
+        "Down skips the separator"
+    );
     keys(r.cx, "enter");
     assert_eq!(r.quits.get(), 1);
+    assert_eq!(r.runs.get(), 0);
     assert_eq!(open_menu(r.cx), None);
     assert!(popup_bounds(r.cx).is_none());
     assert!(table_focused(&mut r));
 
     // A click on the item does the same.
     click_file(r.cx);
-    let item = entries(r.cx)[0].bounds().center();
+    let item = entries(r.cx)[2].bounds().center();
     click(r.cx, item);
     assert_eq!(r.quits.get(), 2);
     assert_eq!(open_menu(r.cx), None);
