@@ -378,7 +378,8 @@ and the shared tokens and components (`docs/ui/foundation.md`).
   - Heat tint (PROC-040): for Percent, Memory size, Rate and Power kinds only, when
     `appearance.heat_coloring` is on and the cell holds a valid non-zero value: a `paint_quad`
     filling the whole cell bounds (no padding inset, no radius) with `value_heat` at
-    `alpha = heat_intensity_pct/100 × clamp(value / reference, 0, 1)` where the reference is the
+    `alpha = heat_intensity_pct/100 × clamp(value / reference, 0, 1)`, rounded to a 2% step so
+    the tint does not change on differences the cell does not show, where the reference is the
     PROC-040 table per column kind (CPU `400/ncpu` %, one-core 400%, memory 10% of MemTotal,
     disk and I/O 100 MiB/s, network 10 MiB/s or 80 Mbps, GPU 100%, VRAM 25% of total, power
     25 W). Drawn above the zebra and highlight tints, below the selection fill (the selected row

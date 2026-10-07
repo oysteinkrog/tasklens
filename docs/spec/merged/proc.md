@@ -835,6 +835,7 @@ Column IDs are the stable strings below (v1 IDs are canonical per R-007; IDs mar
   - Click anywhere on a header cell to sort. The first click is descending for numeric columns and ascending for text; each further click reverses.
   - Default: PID ascending. The History table defaults to CPU descending (PROC-088).
   - Groups keep their fixed order. In Tree View and inside groups, siblings sort under their parent.
+  - Numeric columns compare the value at the step its cell shows, not the raw value: 0.1 for percent columns, 0.01 of the shown IEC unit for memory sizes, and 0.1 of the shown unit for disk and network rates. Two rows whose cells read the same keep their order across refreshes.
   - Ties break by `ProcessKey`.
   - The table re-sorts at every refresh unless paused (PROC-050).
   - Sort always persists in `state.toml` `[sort.processes]` (`column`, `ascending`). MC's "Remember sorting" option is not built.
