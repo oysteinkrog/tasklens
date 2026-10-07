@@ -167,12 +167,13 @@ impl IconNamed for AppIcon {
 // The icons not in the kit's default component bundle (`default-icons.txt`), plus the sort
 // arrows (R-185). `Binary` is the Name cell's file icon fallback. `LayoutGrid` to `List` are
 // the Processes toolbar icons (UI-PRC-019). `ChevronsRight` is the tab overflow button
-// (E20-015).
+// (E20-015). `CircleOff` and `ShieldAlert` are the Properties exited banner and access block
+// (E23-A1).
 gpui_kit::assets::icon_assets!(
     pub TlExtraIcons,
     [
         X, Pin, PinOff, Lock, Shield, ShieldCheck, RotateCcwClock, ArrowUp, ArrowDown, Square,
-        Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight
+        Binary, LayoutGrid, Rows2, ListTree, List, ChevronsRight, CircleOff, ShieldAlert
     ]
 );
 
