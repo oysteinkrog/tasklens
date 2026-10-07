@@ -5,7 +5,8 @@
 //! title, the distro logo (Operating System only) and a copy button at the right end that
 //! dispatches [`CopyInformationSection`]. The button's tooltip is "Copy section" and its
 //! accessible name "Copy <section title>"; its muted icon turns `text_primary` on hover. A row's
-//! `label_tooltip` shows on its label. The rows draw in a `TlKeyValueGrid` inline layout.
+//! `label_tooltip` shows on its label, and a row with `label_lines` 2 wraps its label inside the
+//! label column and is two rows high (Peak committed, UI-SYS-089). The rows draw in a `TlKeyValueGrid` inline layout.
 //! A value with several lines is several rows high. The row menu's "Copy section" dispatches the
 //! same action; "Copy value" and "Copy row" copy and show "Copied to clipboard". A value click
 //! does not copy, so text selection works.
@@ -118,6 +119,8 @@ pub struct InfoRow {
     pub block: u8,
     /// The System section's Handle count label (UI-SYS-088).
     pub label_tooltip: Option<SharedString>,
+    /// Lines the label wraps to; 1 cuts it with "…". Only Peak committed has 2 (UI-SYS-089).
+    pub label_lines: u8,
 }
 
 impl PartialEq for InfoRow {
@@ -132,6 +135,7 @@ impl PartialEq for InfoRow {
             && self.live == other.live
             && self.block == other.block
             && self.label_tooltip == other.label_tooltip
+            && self.label_lines == other.label_lines
             && a.text == b.text
             && a.validity == b.validity
             && a.word == b.word
@@ -236,6 +240,8 @@ pub struct InfoSection {
     grid: Rc<[TlKvSection]>,
     /// The label tooltips by row index, built in `set_rows`.
     label_tips: Rc<[(usize, SharedString)]>,
+    /// The wrapped labels by row index, built in `set_rows`.
+    label_lines: Rc<[(usize, u8)]>,
     #[cfg(any(test, feature = "test-hooks"))]
     render_count: usize,
 }
@@ -250,6 +256,7 @@ impl InfoSection {
             words: SectionWords::new(id),
             grid: Rc::from(Vec::new()),
             label_tips: Rc::from(Vec::new()),
+            label_lines: Rc::from(Vec::new()),
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: 0,
         }
@@ -273,6 +280,12 @@ impl InfoSection {
             .iter()
             .enumerate()
             .filter_map(|(n, row)| row.label_tooltip.clone().map(|tip| (n, tip)))
+            .collect();
+        self.label_lines = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.label_lines > 1)
+            .map(|(n, row)| (n, row.label_lines))
             .collect();
         self.rows = rows;
         cx.notify();
@@ -389,6 +402,7 @@ impl Render for InfoSection {
             .block_gap(m.sp[5])
             .label_inset(m.sp[4])
             .label_tooltips(self.label_tips.clone())
+            .label_lines(self.label_lines.clone())
             .on_copy_section(move |_, window, cx| {
                 window.dispatch_action(Box::new(CopyInformationSection { section: id }), cx);
             })

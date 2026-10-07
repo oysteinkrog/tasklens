@@ -103,6 +103,7 @@ fn row(label: &str, text: &str) -> InfoRow {
         live: false,
         block: 0,
         label_tooltip: None,
+        label_lines: 1,
     }
 }
 
@@ -1334,5 +1335,25 @@ mod hardware_builders {
             got,
             want.map(|(l, v)| (l.to_owned(), v.to_owned())).to_vec()
         );
+    }
+
+    #[gpui_kit::test]
+    fn info_memory_peak_label_wraps(cx: &mut TestAppContext) {
+        let got = rows(&inventory(), &system(), build_memory);
+        let peak = got
+            .iter()
+            .position(|r| r.label.starts_with("Peak committed"))
+            .unwrap();
+        assert!(
+            got.iter()
+                .enumerate()
+                .all(|(n, r)| r.label_lines == if n == peak { 2 } else { 1 })
+        );
+        let (_, _, cx) = host(cx, InfoSectionId::Memory, 100, got.clone());
+        for n in 0..got.len() {
+            let r = bounds(cx, &format!("TlKv-row-{n}")).expect("row drawn");
+            let want = if n == peak { px(56.) } else { px(28.) };
+            assert_eq!(r.size.height, want, "row {n} height");
+        }
     }
 }

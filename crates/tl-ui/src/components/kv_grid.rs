@@ -36,7 +36,8 @@
 //! Hovering a value that has a tooltip draws a dotted underline in `text_secondary`. A link value
 //! gets none: `TlLink` draws its own hover underline. A label can have a tooltip too
 //! ([`TlKeyValueGrid::label_tooltips`]), shown after the control delay; its view is built only
-//! when it opens.
+//! when it opens. An inline label set to n lines ([`TlKeyValueGrid::label_lines`]) wraps inside the
+//! label column, and its row is max(n, value lines) × row height.
 //!
 //! Values are selectable text. A click on a value with `copy_on_click` copies it and flashes the
 //! row. The context menu on a value has "Copy value", "Copy row" and "Copy section". Ctrl+C with a
@@ -594,6 +595,7 @@ pub struct TlKeyValueGrid {
     on_copied: Option<CopiedHandler>,
     on_copy_section: Option<SectionHandler>,
     label_tooltips: Rc<[(usize, SharedString)]>,
+    label_lines: Rc<[(usize, u8)]>,
     filtered_empty: bool,
     loading: bool,
 }
@@ -615,6 +617,7 @@ impl TlKeyValueGrid {
             on_copied: None,
             on_copy_section: None,
             label_tooltips: Rc::from(Vec::new()),
+            label_lines: Rc::from(Vec::new()),
             filtered_empty: false,
             loading: false,
         }
@@ -696,6 +699,13 @@ impl TlKeyValueGrid {
     /// order. The owner builds the list when its rows change, not per frame.
     pub fn label_tooltips(mut self, tips: Rc<[(usize, SharedString)]>) -> Self {
         self.label_tooltips = tips;
+        self
+    }
+
+    /// Inline labels that wrap to n lines, by flat row index as in
+    /// [`TlKeyValueGrid::label_tooltips`]. Every other label is one line, cut with "…".
+    pub fn label_lines(mut self, lines: Rc<[(usize, u8)]>) -> Self {
+        self.label_lines = lines;
         self
     }
 
@@ -994,16 +1004,34 @@ impl TlKeyValueGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let (value, lines) = self.value(n, si, row, available, true, f, window, cx)?;
+        let (value, value_lines) = self.value(n, si, row, available, true, f, window, cx)?;
+        let label_lines = self
+            .label_lines
+            .iter()
+            .find(|(i, _)| *i == n)
+            .map_or(1, |(_, l)| usize::from((*l).max(1)));
+        let lines = value_lines.max(label_lines);
         let mut label = div().flex_none().w(label_width).min_w_0();
         *label.text_style() = t_base(&f.m);
+        let label = if label_lines > 1 {
+            label.whitespace_normal().line_clamp(label_lines)
+        } else {
+            label.truncate()
+        };
         let label = label
-            .truncate()
             .text_color(f.theme.text_secondary)
             .child(row.label.clone());
         let label = self.label_tip(n, label, window, cx);
-        // A multi-line value keeps its label on the first line.
-        let label = if lines > 1 {
+        // A wrapped label is centred in its lines; with a multi-line value, a one-line label
+        // stays on the first line.
+        let label = if label_lines > 1 {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(f.row_height * label_lines as f32)
+                .child(label)
+        } else if lines > 1 {
             div()
                 .flex()
                 .flex_none()
@@ -1822,5 +1850,30 @@ mod tests {
         assert_eq!(column_width(px(601.), 3, px(24.), px(160.)), px(184.));
         assert_eq!(column_width(px(300.), 3, px(24.), px(160.)), px(160.));
         assert_eq!(column_width(px(600.), 2, px(16.), px(160.)), px(292.));
+    }
+
+    #[gpui_kit::test]
+    fn label_lines_wrap_and_size_the_row(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .sections(&[section(vec![
+                    row(
+                        "Peak committed (since tasklens started):",
+                        TlValue::new("48.02 GiB"),
+                    ),
+                    row("Long label over three lines:", TlValue::new("a\nb\nc")),
+                    row("Total:", TlValue::new("62.70 GiB")),
+                ])])
+                .label_lines(Rc::from([(0, 2), (1, 2)]))
+        });
+        let height = |cx: &mut VisualTestContext, n: usize| {
+            bounds(cx, &format!("TlKv-row-{n}"))
+                .expect("row drawn")
+                .size
+                .height
+        };
+        assert_eq!(height(cx, 0), px(56.), "a two-line label makes 2 × row_h");
+        assert_eq!(height(cx, 1), px(84.), "the value's three lines win");
+        assert_eq!(height(cx, 2), px(28.), "other rows stay one line");
     }
 }

@@ -708,12 +708,14 @@ pub fn build_memory(i: &InfoInputs, out: &mut Vec<InfoRow>) {
         live_value(validity, |s| units::bytes(s, live.commit_limit)),
         false,
     );
-    push(
-        out,
+    // The one label wider than the label column at 100% scale (UI-SYS-089).
+    let mut peak = row(
         w.get(W::MemPeak),
         bytes_value(&m.peak_committed_bytes),
         true,
     );
+    peak.label_lines = 2;
+    out.push(peak);
     push(
         out,
         w.get(W::MemPageSize),
@@ -1086,6 +1088,7 @@ fn row(label: &SharedString, value: TlValue, live: bool) -> InfoRow {
         live,
         block: 0,
         label_tooltip: None,
+        label_lines: 1,
     }
 }
 
