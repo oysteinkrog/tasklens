@@ -520,3 +520,405 @@ fn affinity_core_tooltip_names_core_type(cx: &mut TestAppContext) {
         "Core 0: CPU 0 and CPU 16"
     );
 }
+
+// ---- VirusTotal notice and hashing toast (tasklens-gma.3, UI-PWN-036) ----
+
+mod virustotal {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowHandle, div, px, size,
+    };
+    use tl_model::actions::{ActionError, ActionEvent, ActionKind, ActionRequest, ActionState};
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::details::{
+        DetailTab, DetailTarget, ElfArch, ExeLocation, GeneralDetail, HashError, HashState,
+        IdTriple, PackageCheck, Relro, Seccomp, TabPayload, TabSlot, TargetDetail,
+    };
+    use tl_model::ids::ProcessKey;
+    use tl_model::settings::{Settings, UiState};
+    use tl_model::system::CpuSet;
+    use tl_model::table::Total;
+    use tl_model::time::BootId;
+    use tl_model::validity::Validity;
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::windows::notices::{TOAST_DELAY, open_virustotal, vt_url};
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("parent")
+        }
+    }
+
+    type ParentFrame = TlSecondaryWindow<Body>;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        parent: Entity<ParentFrame>,
+        pcx: VisualTestContext,
+        parent_id: gpui_kit::WindowId,
+    }
+
+    fn key() -> ProcessKey {
+        ProcessKey {
+            start_ticks: 4_242,
+            boot_id: BootId(7),
+            pid: 4321,
+        }
+    }
+
+    fn rig(cx: &mut TestAppContext, accepted: bool) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let mut state = UiState::default();
+        state.processes.virustotal_notice_accepted = accepted;
+        let init = UiInit {
+            settings: Settings::default(),
+            state,
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "parent",
+            size(px(600.), px(400.)),
+        );
+        let handle = cx
+            .update(|cx| ParentFrame::open(cx, spec, |_, cx| cx.new(|_| Body)))
+            .expect("parent opens");
+        let parent = cx
+            .update(|cx| ParentFrame::find(handle, cx))
+            .expect("parent frame");
+        let mut pcx = VisualTestContext::from_window(handle.into(), cx);
+        pcx.update(|window, _| window.activate_window());
+        pcx.run_until_parked();
+        Rig {
+            engine,
+            parent,
+            pcx,
+            parent_id: handle.window_id(),
+        }
+    }
+
+    fn open(r: &mut Rig) {
+        r.pcx
+            .update(|window, cx| open_virustotal(key(), window, cx));
+        r.pcx.run_until_parked();
+    }
+
+    fn hash_requests(r: &Rig) -> usize {
+        r.engine
+            .commands()
+            .iter()
+            .filter(|c| matches!(c, Command::ComputeHashes(k) if *k == key()))
+            .count()
+    }
+
+    /// Every action request sent, in order.
+    fn actions(r: &Rig) -> Vec<ActionRequest> {
+        r.engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(req) => Some(req),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn accepted(cx: &mut TestAppContext) -> bool {
+        cx.update(|cx| TlSettings::state(cx).processes.virustotal_notice_accepted)
+    }
+
+    fn toasts(r: &mut Rig) -> Vec<String> {
+        let parent = r.parent.clone();
+        r.pcx.update(|window, cx| window.draw(cx).clear(cx));
+        r.pcx.read(|cx| {
+            parent
+                .read(cx)
+                .toasts()
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    /// The notice window, drawn.
+    fn notice(r: &Rig, cx: &mut TestAppContext) -> Option<(WindowHandle<Root>, VisualTestContext)> {
+        let parent_id = r.parent_id;
+        let handle = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find(|w| w.window_id() != parent_id)
+            })
+            .and_then(|w: AnyWindowHandle| w.downcast::<Root>())?;
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        Some((handle, vcx))
+    }
+
+    fn valid<T>(value: T) -> Total<T> {
+        Total {
+            value,
+            validity: Validity::Valid,
+        }
+    }
+
+    fn text(s: &str) -> Arc<str> {
+        Arc::from(s)
+    }
+
+    fn general(hashes: HashState) -> GeneralDetail {
+        GeneralDetail {
+            started_s: valid(1_760_000_000),
+            uids: valid(IdTriple {
+                real: 1000,
+                effective: 1000,
+                saved: 1000,
+                fs: 1000,
+            }),
+            uid_names: valid((text("u"), text("u"), text("u"))),
+            policy: valid(tl_model::actions::SchedPolicy::Other),
+            rt_prio: 0,
+            kernel_prio: valid(120),
+            autogroup: valid((text("autogroup-1"), 0)),
+            affinity: valid(CpuSet::empty()),
+            affinity_threads_differ: false,
+            pie: valid(true),
+            nx_stack: valid(true),
+            relro: valid(Relro::Full),
+            shadow_stack: valid(false),
+            aslr_system: valid(2),
+            aslr_disabled_for_process: valid(false),
+            no_new_privs: valid(false),
+            seccomp: valid(Seccomp::Disabled),
+            architecture: valid(ElfArch::X86_64),
+            exe: valid(text("/usr/bin/secret-tool")),
+            exe_deleted: false,
+            location: valid(ExeLocation::System),
+            package: valid(None),
+            description: valid(text("")),
+            cwd: valid(text("/home/u")),
+            root: valid(text("/")),
+            cgroup: None,
+            unit: None,
+            app_id: None,
+            cmdline: valid(text("secret-tool --token abc")),
+            hashes,
+            package_check: PackageCheck::NotVerified,
+            handles: valid(1),
+            rss_shared_bytes: valid(0),
+            commit_bytes: valid(0),
+            cpu_time_ms: valid(0),
+            io_rchar: valid(0),
+            io_wchar: valid(0),
+            io_syscr: valid(0),
+            io_syscw: valid(0),
+            disk_read_bytes: valid(0),
+            disk_write_bytes: valid(0),
+            cancelled_write_bytes: valid(0),
+            gpu_mem_shared_bytes: valid(0),
+            gpu_engine: valid(None),
+        }
+    }
+
+    /// Publishes the General payload of `key()` with `hashes`.
+    fn publish_hash(r: &mut Rig, hashes: HashState) {
+        let target = DetailTarget::Process(key());
+        r.engine.publish_with(|s| {
+            let d = Arc::make_mut(&mut s.details);
+            let mut detail = TargetDetail::default();
+            detail.tabs[DetailTab::General.index()] = TabSlot {
+                payload: Some(Arc::new(TabPayload::General(Arc::new(general(hashes))))),
+                version: d.header.version + 1,
+                validity: Validity::Valid,
+            };
+            d.targets.insert(target, Arc::new(detail));
+            d.header.version += 1;
+        });
+        r.pcx.run_until_parked();
+    }
+
+    fn advance(r: &mut Rig, by: Duration) {
+        r.pcx.executor().advance_clock(by);
+        r.pcx.run_until_parked();
+    }
+
+    const SHA: [u8; 32] = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+        0x0f, 0xa0, 0xb1, 0xc2, 0xd3, 0xe4, 0xf5, 0x16, 0x27, 0x38, 0x49, 0x5a, 0x6b, 0x7c, 0x8d,
+        0x9e, 0xff,
+    ];
+
+    #[gpui_kit::test]
+    fn vt_notice_shown_once_then_flag_saved(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        open(&mut r);
+        assert_eq!(
+            hash_requests(&r),
+            0,
+            "no ComputeHashes before the notice is answered"
+        );
+        let (_, mut vcx) = notice(&r, cx).expect("the notice opens");
+        let at = vcx.debug_bounds("TlDialogAction").expect("Open drawn");
+        vcx.simulate_click(at.center(), Modifiers::none());
+        r.pcx.run_until_parked();
+        assert!(accepted(cx), "Open sets the flag");
+        assert_eq!(hash_requests(&r), 1, "then ComputeHashes(key)");
+
+        // Later uses skip the notice.
+        let before = cx.update(|cx| cx.windows().len());
+        open(&mut r);
+        assert_eq!(cx.update(|cx| cx.windows().len()), before, "no notice");
+        assert_eq!(hash_requests(&r), 2);
+    }
+
+    #[gpui_kit::test]
+    fn vt_cancel_keeps_flag_false(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        open(&mut r);
+        let (handle, mut vcx) = notice(&r, cx).expect("the notice opens");
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        let id = handle.window_id();
+        assert!(!cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id)));
+        assert_eq!(hash_requests(&r), 0, "no ComputeHashes");
+        assert!(actions(&r).is_empty(), "nothing is sent");
+        assert!(!accepted(cx), "the flag stays false");
+    }
+
+    #[gpui_kit::test]
+    fn vt_toast_only_after_500ms(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        // The hash arrives after 200 ms: no toast.
+        open(&mut r);
+        assert!(notice(&r, cx).is_none(), "the flag is set: no notice");
+        advance(&mut r, Duration::from_millis(200));
+        assert!(toasts(&mut r).is_empty());
+        publish_hash(
+            &mut r,
+            HashState::Done {
+                sha256: SHA,
+                md5: [0; 16],
+            },
+        );
+        advance(&mut r, TOAST_DELAY);
+        assert!(toasts(&mut r).is_empty(), "no Computing toast was shown");
+
+        // The hash arrives after 800 ms: the toast shows at 500 ms and goes when it arrives.
+        publish_hash(&mut r, HashState::Pending);
+        open(&mut r);
+        advance(&mut r, Duration::from_millis(400));
+        assert!(toasts(&mut r).is_empty(), "nothing at 400 ms");
+        advance(&mut r, Duration::from_millis(100));
+        assert_eq!(toasts(&mut r), ["Computing SHA-256…"]);
+        advance(&mut r, Duration::from_millis(300));
+        publish_hash(
+            &mut r,
+            HashState::Done {
+                sha256: SHA,
+                md5: [0; 16],
+            },
+        );
+        assert!(toasts(&mut r).is_empty(), "removed when the hash arrives");
+    }
+
+    #[gpui_kit::test]
+    fn vt_error_toasts(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        open(&mut r);
+        advance(&mut r, TOAST_DELAY);
+        publish_hash(&mut r, HashState::Failed(HashError::ExePathUnavailable));
+        assert_eq!(
+            toasts(&mut r),
+            ["Process image unavailable"],
+            "replaces the toast"
+        );
+
+        publish_hash(&mut r, HashState::Pending);
+        open(&mut r);
+        publish_hash(
+            &mut r,
+            HashState::Failed(HashError::ReadFailed { errno: 13 }),
+        );
+        assert!(toasts(&mut r).contains(&"SHA-256 unavailable".to_owned()));
+
+        // The browser open fails.
+        publish_hash(&mut r, HashState::Pending);
+        open(&mut r);
+        publish_hash(
+            &mut r,
+            HashState::Done {
+                sha256: SHA,
+                md5: [0; 16],
+            },
+        );
+        let id = actions(&r).last().expect("OpenUri sent").id;
+        r.engine.emit(ActionEvent {
+            id,
+            target: None,
+            state: ActionState::Failed(ActionError::PermissionDenied),
+        });
+        r.pcx.run_until_parked();
+        let shown = toasts(&mut r);
+        assert!(
+            shown
+                .iter()
+                .any(|t| t.starts_with("Could not open the browser.")),
+            "{shown:?}"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn vt_opens_hash_url(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        open(&mut r);
+        assert!(actions(&r).is_empty(), "nothing opens before the hash");
+        publish_hash(
+            &mut r,
+            HashState::Done {
+                sha256: SHA,
+                md5: [0; 16],
+            },
+        );
+        let sent = actions(&r);
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let expected = "https://www.virustotal.com/gui/file/\
+            000102030405060708090a0b0c0d0e0fa0b1c2d3e4f5162738495a6b7c8d9eff";
+        assert_eq!(vt_url(&SHA), expected);
+        match &sent[0].kind {
+            ActionKind::OpenUri(uri) => assert_eq!(uri.as_ref(), expected, "only the hash leaves"),
+            other => panic!("not OpenUri: {other:?}"),
+        }
+        assert!(sent[0].targets.is_empty());
+        assert!(!sent[0].privileged);
+        // Nothing from the process (path, command line) is in any command.
+        let all = format!("{:?}", r.engine.commands());
+        assert!(!all.contains("secret-tool"), "{all}");
+    }
+}

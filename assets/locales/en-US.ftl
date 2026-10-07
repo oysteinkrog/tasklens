@@ -71,6 +71,11 @@ pwn-threads-prio-realtime = Realtime { $prio }
 pwn-threads-affinity-all = All
 pwn-threads-restricted = Needs administrator access.
 pwn-threads-copied = Copied to clipboard
+# VirusTotal notices (tasklens-gma.3, UI-PWN-036).
+pwn-notices-vt-computing = Computing SHA-256…
+pwn-notices-vt-hash-failed = SHA-256 unavailable
+pwn-notices-vt-no-image = Process image unavailable
+pwn-notices-vt-browser-failed = Could not open the browser.
 
 pwn-run-prompt = Type the name of a program, folder, document, or Internet resource.
 pwn-run-open = Open:
