@@ -705,3 +705,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - bj6.7 closed (95d28051): Settings menu. The same agent takes bj6.21.
 - bj6.21 closed (173724be, 8d4597e2): PageBuilder pub; no SettingsInputs; all_pages() empty until the page beads; test-hooks set_bool. The m1f agent takes bj6.22. The o55.9 agent takes o55.3 before crw.20.
 - o55.11 closed (ac770c1d, 524b5356, de37c912, 184b5e0b): all device pages open through the real PerformancePage with demand checked. o55.9 follow-up cb1ec844, 7f5450b8, eec88ef8: ChartView::set_value_text, GPU memory shows used / total.
+- xdh.4 closed (a2f2c0c9): MinigraphSource serialises as its state.toml string with a hand-written JsonSchema, because tl-model has no schema derives (ADR-001). Full tl-ui clippy green at that point. The 9o0 agent takes pdu.3.
