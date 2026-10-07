@@ -641,3 +641,9 @@ After the reboot: read each in-progress bead's latest comment, check `git status
   - 8fx.24 (last commit 77cc6f16), bj6.17 (5ff1c9ff), m1f.2 (3327378f): check their bead status and comments before resuming.
   Still running: gma.15 agent (then gma.41, gma.40), m1f.6, 9o0.22 agent (9o0.34, then 9o0.23). Resume the stopped beads with fresh agents, one or two at a time, when the machine has build capacity again.
 - 2026-10-07 14:24: the PC rebooted at 13:38 and reboots again at 14:28. No agents ran between the two boots. The on-disk state is unchanged from the 11:45 note (nine modified files and six untracked gallery goldens). Resume plan stays the same: first a build check of HEAD (gma.15's abd5beb and 14be5fe were never compiled), then the open beads with one or two fresh agents at a time.
+
+## Owner direction, 2026-10-07 afternoon
+
+Oystein wants the system monitor graphs pushed forward, and one view that shows CPU, memory and GPU load together (TaskSlinger lacks it). That view is the Graph Summary View (PERF-010, crw.17), now P1 and depending only on crw.1 and o55.11.
+Order: pdu.52 (P0, live data missing in the real app) and crw.1 (Performance tab) first; then o55.2 Memory, o55.9 GPU, o55.5 Disk, o55.7 Net pages; then o55.11 build_page arms; then crw.17. The six interrupted beads from the reboot (pdu.51, bj6.10, fut.11, 8fx.24, m1f.2, bj6.17) wait behind this path.
+Do not take desktop screenshots to show Oystein the app; he sees his own screen.
