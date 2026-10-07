@@ -40,11 +40,11 @@ use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
     Action, Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, AsKeystroke,
     Bounds, BoxShadow, Context, DismissEvent, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyContext, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, Role, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, TextOverflow,
-    TextRun, WeakEntity, Window, WindowId, anchored, canvas, deferred, div, font, point,
-    prelude::FluentBuilder as _, px,
+    Focusable, Global, HoverListenerMode, Hsla, InteractiveElement, IntoElement, KeyBinding,
+    KeyContext, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render,
+    Role, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
+    TextOverflow, TextRun, WeakEntity, Window, WindowId, anchored, canvas, deferred, div, font,
+    point, prelude::FluentBuilder as _, px,
 };
 
 use super::icons::{TlIcon, icon};
@@ -987,6 +987,9 @@ impl TlMenuPopup {
                 .rounded(m.radius_small)
                 .text_color(t.text_primary)
                 .when(highlighted, |d| d.bg(t.menu_hover))
+                // The default mode reports a key press as the pointer leaving the row under it,
+                // which cleared the highlight a key had just put there (Home after a click).
+                .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
                 .on_hover(cx.listener(move |this, hovered: &bool, window, cx| {
                     this.on_row_hover(ix, *hovered, window, cx)
                 }))
@@ -2242,6 +2245,31 @@ mod tests {
             !cx.update(|window, cx| context_menu_open(window, cx)),
             "a plain check item still closes the menu"
         );
+    }
+
+    #[gpui_kit::test]
+    fn keys_move_the_highlight_after_a_click(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        open(&view, cx, point(px(100.), px(100.)), |menu, _, _| {
+            menu.item("A", Box::new(RunA))
+                .check_item("C", false, Box::new(RunC))
+                .keep_open()
+                .item("B", Box::new(RunB))
+        });
+        let c = row(cx, false, 1).bounds().center();
+        cx.simulate_click(c, Modifiers::none());
+        draw(cx);
+        assert_eq!(highlighted(cx), vec![(false, 1)], "the clicked row");
+        // A key press ends the pointer hover; the keyboard highlight must survive it.
+        keys(cx, "home");
+        assert_eq!(highlighted(cx), vec![(false, 0)], "Home");
+        keys(cx, "end");
+        assert_eq!(highlighted(cx), vec![(false, 2)], "End");
+        keys(cx, "up");
+        assert_eq!(highlighted(cx), vec![(false, 1)], "Up onto the hovered row");
+        keys(cx, "down");
+        assert_eq!(highlighted(cx), vec![(false, 2)], "Down");
+        assert!(cx.update(|window, cx| context_menu_open(window, cx)));
     }
 
     #[gpui_kit::test]
