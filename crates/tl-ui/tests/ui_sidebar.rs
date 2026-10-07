@@ -376,6 +376,7 @@ mod sidebar {
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::chart::ChartState;
     use tl_ui::chart::labels::format_value;
+    use tl_ui::components::toast::ToastQueue;
     use tl_ui::demand::DemandAggregator;
     use tl_ui::i18n::{init_strings, set_test_catalogue, tr_calls};
     use tl_ui::pages::performance::actions::{
@@ -406,6 +407,8 @@ mod sidebar {
         demand: Entity<DemandAggregator>,
         engine: Arc<FakeEngine>,
         events: Rc<RefCell<Vec<SidebarEvent>>>,
+        /// The window's toast queue, when the rig has a kit `Root`.
+        toasts: Option<Entity<ToastQueue>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -476,6 +479,17 @@ mod sidebar {
         settings: Settings,
         state: UiState,
     ) -> Rig<'_> {
+        open_in(cx, devices, settings, state, false)
+    }
+
+    /// `rooted`: the sidebar sits in a kit `Root` with a toast queue, as in the main window.
+    fn open_in(
+        cx: &mut TestAppContext,
+        devices: Vec<DeviceEntry>,
+        settings: Settings,
+        state: UiState,
+        rooted: bool,
+    ) -> Rig<'_> {
         let engine = FakeEngine::new();
         engine.publish_with(|s| {
             s.devices = Arc::new(DeviceCatalog {
@@ -513,7 +527,19 @@ mod sidebar {
             .detach();
         });
         let host = sidebar.clone();
-        let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost(host));
+        let (vcx, toasts) = if rooted {
+            cx.update(tl_ui::components::toast::init);
+            let window = cx.add_window(move |window, cx| {
+                let host = cx.new(|_| SidebarHost(host));
+                gpui_kit::base::Root::new(host, window, cx)
+            });
+            let vcx = VisualTestContext::from_window(window.into(), cx).into_mut();
+            let queue = vcx.update(|window, cx| cx.new(|cx| ToastQueue::new(window, cx, px(40.))));
+            (vcx, Some(queue))
+        } else {
+            let (_, vcx) = cx.add_window_view(move |_, _| SidebarHost(host));
+            (vcx, None)
+        };
         vcx.simulate_scale_factor_change(1.0);
         let focus = vcx.update(|_, cx| sidebar.read(cx).focus_handle(cx));
         vcx.update(|window, cx| focus.focus(window, cx));
@@ -523,6 +549,7 @@ mod sidebar {
             demand,
             engine,
             events,
+            toasts,
             vcx,
         }
     }
@@ -1188,5 +1215,283 @@ mod sidebar {
             draw(r.vcx);
         }
         assert_eq!(tr_calls(), calls, "60 frames: 0 tr calls");
+    }
+
+    // ---- Card menu and page visibility (E24-011 part 1, UI-PRF-014, PERF-002) ----
+
+    use gpui_kit::{Action, SharedString};
+    use tl_model::settings::DeviceVisibility;
+    use tl_ui::components::menu::{MenuEntryKind, TlMenu, open_context_menu};
+    use tl_ui::pages::performance::actions::{
+        PerfAddTrayGraph, PerfEnterEditMode, PerfSetPageVisible, bind_keys_performance,
+    };
+    use tl_ui::pages::performance::menu::card_menu;
+
+    fn key(s: &str) -> DeviceKey {
+        DeviceKey(Arc::from(s))
+    }
+
+    type Entry = (
+        MenuEntryKind,
+        Option<String>,
+        Option<String>,
+        Option<Box<dyn Action>>,
+    );
+
+    fn entries(
+        window: &Window,
+        menu: &Entity<tl_ui::components::menu::TlMenuPopup>,
+        cx: &App,
+    ) -> Vec<Entry> {
+        menu.read(cx)
+            .entries_for_test(window)
+            .into_iter()
+            .map(|e| {
+                (
+                    e.kind,
+                    e.label.map(|l| l.to_string()),
+                    e.tooltip.map(|t| t.to_string()),
+                    e.action,
+                )
+            })
+            .collect()
+    }
+
+    /// `card_menu` built for `key` with the given state.
+    fn built(
+        r: &mut Rig,
+        k: &str,
+        count: usize,
+        hidden: bool,
+        edit_mode: bool,
+        tray: Option<bool>,
+    ) -> Vec<Entry> {
+        let focus = r.vcx.update(|_, cx| r.sidebar.read(cx).focus_handle(cx));
+        let k = key(k);
+        r.vcx.update(|window, cx| {
+            let menu = TlMenu::build(window, cx, focus, move |menu, _, cx| {
+                card_menu(menu, &k, count, hidden, edit_mode, tray, cx)
+            });
+            entries(window, &menu, cx)
+        })
+    }
+
+    fn labels(list: &[Entry]) -> Vec<(MenuEntryKind, &str)> {
+        list.iter()
+            .map(|(kind, label, _, _)| (*kind, label.as_deref().unwrap_or("")))
+            .collect()
+    }
+
+    fn set_visible(k: &str, visible: bool) -> PerfSetPageVisible {
+        PerfSetPageVisible {
+            key: key(k),
+            visible,
+        }
+    }
+
+    fn overrides(r: &mut Rig) -> Vec<(String, DeviceVisibility)> {
+        r.vcx.update(|_, cx| {
+            TlSettings::settings(cx)
+                .performance
+                .device_overrides
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_items_default(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let sidebar = r.sidebar.clone();
+        let list = r.vcx.update(|window, cx| {
+            let focus = sidebar.read(cx).focus_handle(cx);
+            let menu = sidebar
+                .read(cx)
+                .card_menu_for(&key("cpu"), focus, window, cx);
+            entries(window, &menu, cx)
+        });
+        // The trailing separator before the P3 tray item is dropped by `TlMenu::build`.
+        assert_eq!(
+            labels(&list),
+            [
+                (MenuEntryKind::Item, "Select Pages"),
+                (MenuEntryKind::Item, "Hide This Page"),
+            ]
+        );
+        assert!(list[0].3.as_ref().unwrap().partial_eq(&PerfEnterEditMode));
+        assert!(
+            list[1]
+                .3
+                .as_ref()
+                .unwrap()
+                .partial_eq(&set_visible("cpu", false))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_show_only_in_edit_mode_hidden(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        let show = |list: &[Entry]| {
+            list.iter()
+                .find(|e| e.1.as_deref() == Some("Show This Page"))
+                .map(|e| e.3.as_ref().unwrap().boxed_clone())
+        };
+        let edit_hidden = built(&mut r, "disk:sda", 9, true, true, None);
+        let action = show(&edit_hidden).expect("Show This Page in edit mode");
+        assert!(action.partial_eq(&set_visible("disk:sda", true)));
+        assert!(show(&built(&mut r, "disk:sda", 9, true, false, None)).is_none());
+        assert!(show(&built(&mut r, "disk:sda", 9, false, true, None)).is_none());
+
+        // P3 passes the tray state: a separator, then the tray item.
+        let tray = built(&mut r, "cpu", 9, false, false, Some(true));
+        assert_eq!(
+            labels(&tray)[2..],
+            [
+                (MenuEntryKind::Separator, ""),
+                (MenuEntryKind::Item, "Add tray icon graph"),
+            ]
+        );
+        let add = PerfAddTrayGraph { source: key("cpu") };
+        assert!(tray[3].3.as_ref().unwrap().partial_eq(&add));
+        let no_tray = built(&mut r, "cpu", 9, false, false, Some(false));
+        assert_eq!(no_tray[3].0, MenuEntryKind::Disabled);
+        assert_eq!(no_tray[3].2.as_deref(), Some("No system tray available"));
+    }
+
+    #[gpui_kit::test]
+    fn card_menu_hide_disabled_for_last(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            vec![entry(0, DeviceIdentity::CpuPackage, None)],
+            Settings::default(),
+            UiState::default(),
+        );
+        assert_eq!(keys(&mut r), ["cpu"]);
+        let sidebar = r.sidebar.clone();
+        let list = r.vcx.update(|window, cx| {
+            let focus = sidebar.read(cx).focus_handle(cx);
+            let menu = sidebar
+                .read(cx)
+                .card_menu_for(&key("cpu"), focus, window, cx);
+            entries(window, &menu, cx)
+        });
+        assert_eq!(list[1].0, MenuEntryKind::Disabled);
+        assert_eq!(list[1].1.as_deref(), Some("Hide This Page"));
+        assert_eq!(
+            list[1].2.as_deref(),
+            Some("At least one performance page must stay visible")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn show_override_written_only_when_default_off(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        r.vcx.dispatch_action(set_visible("disk:sda", false));
+        draw(r.vcx);
+        assert_eq!(
+            overrides(&mut r),
+            [("disk:sda".to_owned(), DeviceVisibility::Hide)]
+        );
+        assert!(!keys(&mut r).contains(&"disk:sda".to_owned()));
+        r.vcx.dispatch_action(set_visible("disk:sda", true));
+        draw(r.vcx);
+        assert_eq!(overrides(&mut r), [], "the type default shows disks");
+        assert!(keys(&mut r).contains(&"disk:sda".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn show_override_written_when_type_hidden(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), no_disks(), UiState::default());
+        r.vcx.dispatch_action(set_visible("disk:sdb", true));
+        draw(r.vcx);
+        assert_eq!(
+            overrides(&mut r),
+            [("disk:sdb".to_owned(), DeviceVisibility::Show)]
+        );
+        assert!(keys(&mut r).contains(&"disk:sdb".to_owned()));
+    }
+
+    #[gpui_kit::test]
+    fn last_visible_refused_with_toast(cx: &mut TestAppContext) {
+        let mut r = open_in(
+            cx,
+            vec![entry(0, DeviceIdentity::CpuPackage, None)],
+            Settings::default(),
+            UiState::default(),
+            true,
+        );
+        r.vcx.dispatch_action(set_visible("cpu", false));
+        draw(r.vcx);
+        assert_eq!(overrides(&mut r), [], "the override is unchanged");
+        assert_eq!(keys(&mut r), ["cpu"]);
+        let queue = r.toasts.clone().expect("a toast queue");
+        let shown: Vec<SharedString> = r.vcx.update(|_, cx| queue.read(cx).visible_texts());
+        assert_eq!(shown, ["At least one performance page must stay visible"]);
+    }
+
+    #[gpui_kit::test]
+    fn hide_selected_selects_next(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("memory"));
+        r.vcx.dispatch_action(set_visible("memory", false));
+        draw(r.vcx);
+        assert_eq!(selected(&mut r).as_deref(), Some(GPU));
+    }
+
+    fn right_click(cx: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// The Hide This Page action of the open context menu.
+    fn open_menu_hide(r: &mut Rig) -> Option<Box<dyn Action>> {
+        r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx)?;
+            entries(window, &menu, cx)
+                .into_iter()
+                .find(|e| e.1.as_deref() == Some("Hide This Page"))
+                .and_then(|e| e.3)
+        })
+    }
+
+    #[gpui_kit::test]
+    fn right_click_keeps_selection(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), UiState::default());
+        assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
+        let first = r.vcx.debug_bounds("perf-card").expect("first card");
+        // The second card (memory) starts one card and the sp4 gap below.
+        let at = first.center() + gpui_kit::point(px(0.), first.size.height + px(8.));
+        right_click(r.vcx, at);
+        draw(r.vcx);
+        assert_eq!(
+            selected(&mut r).as_deref(),
+            Some("cpu"),
+            "selection unchanged"
+        );
+        let hide = open_menu_hide(&mut r).expect("the memory card's menu is open");
+        assert!(hide.partial_eq(&set_visible("memory", false)));
+        assert!(r.events.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn shift_f10_opens_menu_for_selected(cx: &mut TestAppContext) {
+        let mut r = open(cx, nine(), Settings::default(), saved("disk:sdb"));
+        r.vcx.update(|_, cx| bind_keys_performance(cx));
+        r.vcx.simulate_keystrokes("shift-f10");
+        draw(r.vcx);
+        let hide = open_menu_hide(&mut r).expect("a menu is open");
+        assert!(hide.partial_eq(&set_visible("disk:sdb", false)));
     }
 }

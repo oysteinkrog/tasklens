@@ -1639,9 +1639,9 @@ mod summary {
     use std::time::Duration;
 
     use gpui_kit::{
-        AppContext as _, Context, Entity, FocusHandle, IntoElement, Modifiers, MouseButton,
-        MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext, Window, div, px,
-        size,
+        AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement, Modifiers,
+        MouseButton, MouseDownEvent, MouseUpEvent, Render, SharedString, TestAppContext,
+        VisualTestContext, Window, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
@@ -2188,6 +2188,70 @@ mod summary {
             "the CPU chart re-rendered: {before:?} {after:?}"
         );
         assert_eq!(after.2, before.2, "the memory chart built no geometry");
+    }
+
+    /// Right-click on a tile opens that device's card menu; its Hide This Page item takes the
+    /// tile out of the grid.
+    #[gpui_kit::test]
+    fn summary_tile_right_click_card_menu(cx: &mut TestAppContext) {
+        use tl_ui::components::menu::{close_context_menu, open_context_menu};
+        use tl_ui::pages::performance::actions::PerfSetPageVisible;
+
+        let mut r = open(cx, 1600., 1000., true);
+        let view = enter(&mut r);
+        let tile = r
+            .vcx
+            .debug_bounds("perf-summary-tile-1")
+            .expect("memory tile");
+        let at = tile.center();
+        r.vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        r.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        draw(r.vcx);
+        assert!(
+            summary(&mut r).is_some(),
+            "right-click does not leave summary mode"
+        );
+        let hide = SharedString::from("Hide This Page");
+        let action = r.vcx.update(|window, cx| {
+            let menu = open_context_menu(window, cx)?;
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .find(|e| e.label.as_ref() == Some(&hide))
+                .and_then(|e| e.action)
+        });
+        let action = action.expect("the card menu is open");
+        let want = PerfSetPageVisible {
+            key: key("memory"),
+            visible: false,
+        };
+        assert!(action.partial_eq(&want));
+
+        // The item runs on the summary view, which hands it to the sidebar.
+        let focus = r.vcx.update(|_, cx| view.read(cx).focus_handle(cx));
+        r.vcx.update(|window, cx| {
+            close_context_menu(window, cx);
+            focus.focus(window, cx);
+        });
+        r.vcx.dispatch_action(want);
+        draw(r.vcx);
+        let tiles: Vec<String> = r.vcx.read_entity(&view, |v, _| {
+            v.tiles.iter().map(|t| t.key.0.to_string()).collect()
+        });
+        assert_eq!(tiles.len(), 8);
+        assert!(!tiles.contains(&"memory".to_owned()));
+        assert!(summary(&mut r).is_some());
     }
 
     /// The summary sends its own part (CPU at the fast rate); the hidden device page withdraws
