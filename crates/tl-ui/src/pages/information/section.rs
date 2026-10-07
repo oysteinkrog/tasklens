@@ -4,6 +4,9 @@
 //! The band is `row_h` high with the `header` fill, a 3 px `accent` bar at its left edge, the
 //! title, the distro logo (Operating System only) and a copy button at the right end that
 //! dispatches [`CopyInformationSection`]. The rows draw in a `TlKeyValueGrid` inline layout.
+//! A value with several lines is several rows high. The row menu's "Copy section" dispatches the
+//! same action; "Copy value" and "Copy row" copy and show "Copied to clipboard". A value click
+//! does not copy, so text selection works.
 //!
 //! The page builds the rows and passes them in as one `Arc`. A new `Arc` with the same rows does
 //! not re-render the section. Render builds no strings: the grid rows are made in `set_rows`
@@ -26,7 +29,9 @@ use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::kv_grid::{
     KvLayout, KvWords, TlKeyValueGrid, TlKvBlock, TlKvRow, TlKvSection, TlValue, shown_text_in,
+    value_copy_form,
 };
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::i18n::{Strings, tr, tr_en};
 use crate::text::style::t_md;
 use crate::theme::{current, metrics};
@@ -38,6 +43,7 @@ const LOGO_SIZE: f32 = 16.;
 /// From the label start to the value start, × ui_scale (measured, UI-SYS-081).
 const LABEL_WIDTH: f32 = 232.;
 const KEY_COPY_SECTION: &str = "information-copy-section";
+const KEY_COPIED: &str = "information-toast-copied";
 
 /// The ten sections.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Deserialize, JsonSchema)]
@@ -142,12 +148,7 @@ pub fn value_copy_text(row: &InfoRow, out: &mut String) {
     let Some(text) = WORDS.with(|words| shown_text_in(&row.value, words)) else {
         return;
     };
-    for (i, line) in text.split('\n').enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(line);
-    }
+    out.push_str(&value_copy_form(&text));
 }
 
 /// The band text, translated once per strings version. A new table is in en-US.
@@ -156,6 +157,8 @@ struct SectionWords {
     version: Option<Option<u64>>,
     title: SharedString,
     copy_section: SharedString,
+    /// The toast after a row menu copy.
+    copied: SharedString,
 }
 
 impl SectionWords {
@@ -164,6 +167,7 @@ impl SectionWords {
             version: None,
             title: id.title(),
             copy_section: tr_en(KEY_COPY_SECTION, &[]),
+            copied: tr_en(KEY_COPIED, &[]),
         }
     }
 
@@ -178,10 +182,12 @@ impl SectionWords {
         }
         self.title = tr(cx, id.key());
         self.copy_section = tr(cx, KEY_COPY_SECTION);
+        self.copied = tr(cx, KEY_COPIED);
     }
 }
 
 /// The grid input for `rows`: labels with ":", one block per run of rows with the same `block`.
+/// Blocks after block 0 are indented.
 fn grid_section(rows: &[InfoRow]) -> TlKvSection {
     let mut blocks: Vec<TlKvBlock> = Vec::new();
     let mut current = None;
@@ -189,7 +195,7 @@ fn grid_section(rows: &[InfoRow]) -> TlKvSection {
         if current != Some(row.block) {
             current = Some(row.block);
             blocks.push(TlKvBlock {
-                indent: None,
+                indent: Some(row.block > 0),
                 heading: None,
                 rows: Vec::new(),
             });
@@ -346,16 +352,29 @@ impl Render for InfoSection {
         self.words.refresh(self.id, cx);
         let m = metrics(cx);
         let n = self.id as usize;
+        let id = self.id;
+        let copied = self.words.copied.clone();
         let grid = TlKeyValueGrid::new(("info-rows", n), KvLayout::Inline)
             .sections(&self.grid)
             .row_height(m.row_height)
             .label_width(px(LABEL_WIDTH * m.ui_scale))
             .block_indent(m.sp[5])
-            .block_gap(m.sp[5]);
+            .block_gap(m.sp[5])
+            .label_inset(m.sp[4])
+            .on_copy_section(move |_, window, cx| {
+                window.dispatch_action(Box::new(CopyInformationSection { section: id }), cx);
+            })
+            .on_copied(move |_, window, cx| {
+                // `write_to_clipboard` reports no failure, so this is the only toast (R-199).
+                if let Some(queue) = ToastQueue::of_window(window, cx) {
+                    let text = copied.clone();
+                    queue.update(cx, |q, cx| q.push(ToastKind::Success, text, None, None, cx));
+                }
+            });
         v_flex()
             .debug_selector(move || format!("InfoSection-{n}"))
             .w_full()
             .child(self.band(cx))
-            .child(div().mt(m.sp[4]).pl(m.sp[4]).child(grid))
+            .child(div().mt(m.sp[4]).child(grid))
     }
 }

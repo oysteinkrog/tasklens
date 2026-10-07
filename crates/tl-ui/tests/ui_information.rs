@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui_kit::{
     App, AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-    Modifiers, ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled,
+    Modifiers, MouseButton, ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled,
     TestAppContext, VisualTestContext, Window, div, px,
 };
 use tl_model::settings::{AppearanceSettings, ThemeSettings};
@@ -256,7 +256,6 @@ fn info_row_validity_words(cx: &mut TestAppContext) {
     }
 }
 
-#[ignore = "TlKeyValueGrid indents only blocks with a heading (tasklens-9o0.21 question)"]
 #[gpui_kit::test]
 fn info_block_indent_12(cx: &mut TestAppContext) {
     let mut sub = row("Slot", "P0 CHANNEL A");
@@ -281,7 +280,6 @@ fn info_block_indent_12(cx: &mut TestAppContext) {
     assert_eq!(indent(cx), px(18.), "indent at 150%");
 }
 
-#[ignore = "TlKeyValueGrid draws one line per value (tasklens-9o0.21 question)"]
 #[gpui_kit::test]
 fn info_multiline_row_height_and_copy_join(cx: &mut TestAppContext) {
     let two = row("Resolution", "a\nb");
@@ -317,6 +315,19 @@ fn info_copy_button_disabled_without_data(cx: &mut TestAppContext) {
         dispatched.borrow().is_empty(),
         "a disabled button dispatches nothing"
     );
+}
+
+#[gpui_kit::test]
+fn info_row_menu_copy_section_dispatches(cx: &mut TestAppContext) {
+    let (_, dispatched, cx) = host(cx, InfoSectionId::Processor, 100, os_rows());
+    let value = bounds(cx, "TlKv-value-1").expect("value drawn");
+    cx.simulate_mouse_down(value.center(), MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(value.center(), MouseButton::Right, Modifiers::none());
+    draw(cx);
+    // Copy value, Copy row, Copy section; the first "down" selects the first item.
+    cx.simulate_keystrokes("down down down enter");
+    cx.run_until_parked();
+    assert_eq!(dispatched.borrow().as_slice(), &[InfoSectionId::Processor]);
 }
 
 #[cfg(feature = "test-hooks")]
