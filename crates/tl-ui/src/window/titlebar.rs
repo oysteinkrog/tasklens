@@ -306,6 +306,8 @@ fn drag_handlers(bar: Stateful<Div>, cx: &mut Context<TitleBarView>) -> Stateful
 pub struct TitleBarView {
     /// Created once in `new` from `MenuBarFactory`; `None` when the Global is absent.
     menu_bar: Option<AnyView>,
+    /// Graph summary mode hides the menus (PERF-010).
+    menus_hidden: bool,
     model: ToolbarModel,
     /// The active tab's page buttons.
     content: Box<dyn ToolbarContent>,
@@ -377,6 +379,7 @@ impl TitleBarView {
 
         Self {
             menu_bar,
+            menus_hidden: false,
             model,
             content: Box::new(DefaultToolbar),
             drag: DragState::default(),
@@ -411,6 +414,14 @@ impl TitleBarView {
         model.window_active = self.model.window_active;
         if model != self.model {
             self.model = model;
+            cx.notify();
+        }
+    }
+
+    /// Hides or shows the menus. Notifies only when it changed.
+    pub fn set_menus_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        if self.menus_hidden != hidden {
+            self.menus_hidden = hidden;
             cx.notify();
         }
     }
@@ -579,15 +590,18 @@ impl TitleBarView {
                     .mr(px(GAP_ICON * s))
                     .child(img(AppIcon::Logo.path_str()).size_full()),
             )
-            .when_some(self.menu_bar.clone(), |bar, menu| {
-                bar.child(no_drag(
-                    div()
-                        .debug_selector(|| "TitleBarMenu".into())
-                        .flex_none()
-                        .mr(px(GAP_MENU * s))
-                        .child(menu),
-                ))
-            })
+            .when_some(
+                self.menu_bar.clone().filter(|_| !self.menus_hidden),
+                |bar, menu| {
+                    bar.child(no_drag(
+                        div()
+                            .debug_selector(|| "TitleBarMenu".into())
+                            .flex_none()
+                            .mr(px(GAP_MENU * s))
+                            .child(menu),
+                    ))
+                },
+            )
             .child(toolbar)
     }
 

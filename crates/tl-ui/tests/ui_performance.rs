@@ -1653,12 +1653,13 @@ mod summary {
     use tl_model::snapshot::SeriesSet;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::kv_grid;
+    use tl_ui::components::motion::{M_BASE, M_FAST};
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
     use tl_ui::i18n::init_strings;
     use tl_ui::pages::performance::memory::MemoryPage;
     use tl_ui::pages::performance::summary::{MARKER_ID, SummaryView, tile_grid};
-    use tl_ui::pages::performance::{DeviceKey, PerformancePage};
+    use tl_ui::pages::performance::{DeviceKey, PerformancePage, SIDEBAR_PANEL_ID};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::{
@@ -1801,6 +1802,7 @@ mod summary {
                 client: Some(true),
                 ..TitleBarProbe::default()
             });
+            tl_ui::window::menubar::init(cx);
             shell::init(cx);
             (hub, demand)
         });
@@ -1837,11 +1839,34 @@ mod summary {
         r.vcx.update(|_, cx| page.read(cx).summary().cloned())
     }
 
-    /// Ctrl+M from the sidebar.
+    /// Ctrl+M from the sidebar, then the `m_fast` fade-out when animations are on.
     fn enter(r: &mut Rig) -> Entity<SummaryView> {
         r.vcx.simulate_keystrokes("ctrl-m");
         draw(r.vcx);
+        if summary(r).is_none() {
+            r.vcx.executor().advance_clock(M_FAST);
+            draw(r.vcx);
+        }
         summary(r).expect("summary mode on")
+    }
+
+    fn pending(r: &mut Rig) -> bool {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).summary_pending())
+    }
+
+    /// Frame callbacks queued per frame, for `n` frames.
+    fn frames(r: &mut Rig, n: usize) -> Vec<usize> {
+        (0..n)
+            .map(|_| {
+                r.vcx.run_until_parked();
+                r.vcx.update(|window, cx| {
+                    let queued = window.simulate_next_frame(cx);
+                    window.draw(cx).clear(cx);
+                    queued
+                })
+            })
+            .collect()
     }
 
     fn select(r: &mut Rig, k: &str) {
@@ -1910,11 +1935,7 @@ mod summary {
             assert!(r.vcx.debug_bounds(Box::leak(id.into_boxed_str())).is_some());
         }
         // The tab strip and the sidebar are not drawn under the summary.
-        assert!(
-            r.vcx
-                .debug_bounds(tl_ui::pages::performance::SIDEBAR_PANEL_ID)
-                .is_none()
-        );
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
     }
 
     #[gpui_kit::test]
@@ -1971,11 +1992,7 @@ mod summary {
         assert_eq!(selected(&mut r).as_deref(), Some("memory"));
         assert_eq!(title(&mut r), "tasklens");
         assert!(r.vcx.debug_bounds("perf-summary-tile-0").is_none());
-        assert!(
-            r.vcx
-                .debug_bounds(tl_ui::pages::performance::SIDEBAR_PANEL_ID)
-                .is_some()
-        );
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some());
     }
 
     #[gpui_kit::test]
@@ -2022,6 +2039,79 @@ mod summary {
             !r.vcx.read_entity(&view, |v, _| v.fades()),
             "reduce motion: instant"
         );
+    }
+
+    /// The sidebar and page fade out over `m_fast` before the tiles show, and the frames stop
+    /// once both fades end.
+    #[gpui_kit::test]
+    fn summary_fades_page_out_then_tiles_in(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        r.vcx.simulate_keystrokes("ctrl-m");
+        draw(r.vcx);
+        assert!(pending(&mut r), "fading out");
+        assert!(summary(&mut r).is_none());
+        assert!(
+            r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_some(),
+            "still drawn"
+        );
+        assert!(frames(&mut r, 1)[0] > 0, "the fade requests frames");
+
+        r.vcx.executor().advance_clock(M_FAST);
+        draw(r.vcx);
+        assert!(!pending(&mut r));
+        let view = summary(&mut r).expect("summary on after m_fast");
+        assert!(r.vcx.read_entity(&view, |v, _| v.fades()));
+        assert!(r.vcx.debug_bounds(SIDEBAR_PANEL_ID).is_none());
+
+        r.vcx.executor().advance_clock(M_BASE * 2);
+        let seen = frames(&mut r, 8);
+        assert_eq!(
+            &seen[5..],
+            &[0, 0, 0],
+            "no frames after the fades: {seen:?}"
+        );
+    }
+
+    /// Ctrl+M again during the fade-out stays on the page.
+    #[gpui_kit::test]
+    fn summary_toggle_during_fade_cancels(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., false);
+        r.vcx.simulate_keystrokes("ctrl-m");
+        draw(r.vcx);
+        assert!(pending(&mut r));
+        r.vcx.simulate_keystrokes("ctrl-m");
+        r.vcx.executor().advance_clock(M_FAST * 2);
+        draw(r.vcx);
+        assert!(!pending(&mut r));
+        assert!(summary(&mut r).is_none());
+        assert_eq!(title(&mut r), "");
+    }
+
+    #[gpui_kit::test]
+    fn summary_opens_at_once_with_animations_off(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        r.vcx.simulate_keystrokes("ctrl-m");
+        draw(r.vcx);
+        assert!(!pending(&mut r));
+        assert!(summary(&mut r).is_some(), "no fade-out wait");
+    }
+
+    #[gpui_kit::test]
+    fn summary_hides_title_bar_menus(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        assert!(r.vcx.debug_bounds("TitleBarMenu").is_some());
+        enter(&mut r);
+        assert!(
+            r.vcx.debug_bounds("TitleBarMenu").is_none(),
+            "hidden in summary mode"
+        );
+        r.vcx.simulate_keystrokes("alt-f");
+        draw(r.vcx);
+        assert!(summary(&mut r).is_some(), "alt-f opens no menu");
+        r.vcx.simulate_keystrokes("escape");
+        draw(r.vcx);
+        assert!(summary(&mut r).is_none());
+        assert!(r.vcx.debug_bounds("TitleBarMenu").is_some(), "shown again");
     }
 
     #[gpui_kit::test]

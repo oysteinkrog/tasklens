@@ -301,5 +301,11 @@ pub fn bind_keys_performance(cx: &mut App) {
         KeyBinding::new("ctrl-m", PerfToggleSummaryMode, summary),
         KeyBinding::new("ctrl-tab", NoOp, summary),
         KeyBinding::new("ctrl-shift-tab", NoOp, summary),
+        // The menus are hidden in summary mode, so their access keys do nothing.
+        KeyBinding::new("alt-f", NoOp, summary),
+        KeyBinding::new("alt-v", NoOp, summary),
+        KeyBinding::new("alt-s", NoOp, summary),
+        KeyBinding::new("alt-h", NoOp, summary),
+        KeyBinding::new("alt-d", NoOp, summary),
     ]);
 }

@@ -236,8 +236,13 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
             let demand = cx.global::<GlobalDemand>().0.clone();
             let page = cx.new(|cx| PerformancePage::new(hub, demand, cx));
             // Graph summary mode replaces the tab strip and the page (UI-PRF-016).
-            cx.subscribe(&page, |_, _, _: &SummaryToggled, cx| cx.notify())
-                .detach();
+            cx.subscribe(&page, |this, page, _: &SummaryToggled, cx| {
+                let hidden = page.read(cx).summary().is_some();
+                this.titlebar
+                    .update(cx, |bar, cx| bar.set_menus_hidden(hidden, cx));
+                cx.notify();
+            })
+            .detach();
             PageSlot::new(page, cx)
         }),
         Tab::Information => Some(|window, cx| {

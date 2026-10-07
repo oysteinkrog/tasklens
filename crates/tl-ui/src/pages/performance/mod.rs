@@ -42,7 +42,7 @@ use self::actions::{
     PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfToggleSidebar, PerfToggleSummaryMode,
 };
 use self::page::DevicePage;
-use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
 use crate::i18n::tr;
@@ -292,6 +292,9 @@ pub struct PerformancePage {
     /// Graph summary mode (E24-015), `Some` while it is on.
     pub(crate) summary: Option<Entity<summary::SummaryView>>,
     summary_sub: Option<Subscription>,
+    /// The sidebar and page fade out before the summary opens; the generation of that fade.
+    leaving: Option<u32>,
+    leave_generation: u32,
     /// Not persisted (R-090).
     pub(crate) sidebar_visible: bool,
     anim: Option<SidebarAnim>,
@@ -350,6 +353,8 @@ impl PerformancePage {
             focus: cx.focus_handle(),
             summary: None,
             summary_sub: None,
+            leaving: None,
+            leave_generation: 0,
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
@@ -366,6 +371,9 @@ impl PerformancePage {
     /// tab is shown and send them again when this tab comes back.
     pub fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         self.active = active;
+        if !active && self.leaving.take().is_some() {
+            cx.notify();
+        }
         self.sidebar.update(cx, |s, cx| s.set_active(active, cx));
         let page_on = self.page_on();
         if let Some(view) = self.selected_view() {
@@ -397,9 +405,32 @@ impl PerformancePage {
     ) {
         if self.summary.is_some() {
             self.exit_summary(None, window, cx);
+        } else if self.leaving.take().is_some() {
+            // Ctrl+M again during the fade: stay on the page.
+            cx.notify();
+        } else if animations_on(cx) {
+            self.leave_generation = self.leave_generation.wrapping_add(1);
+            let generation = self.leave_generation;
+            self.leaving = Some(generation);
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(M_FAST).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    if this.leaving == Some(generation) {
+                        this.leaving = None;
+                        this.enter_summary(window, cx);
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
         } else {
             self.enter_summary(window, cx);
         }
+    }
+
+    /// The sidebar and page are fading out before summary mode opens.
+    pub fn summary_pending(&self) -> bool {
+        self.leaving.is_some()
     }
 
     /// Opens summary mode: one tile per visible card. The shown page withdraws its demand; the
@@ -818,7 +849,7 @@ impl Render for PerformancePage {
                     .child(page),
             );
 
-        h_flex()
+        let root = h_flex()
             .key_context(PERFORMANCE_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle_sidebar))
@@ -827,7 +858,17 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_toggle_summary))
             .size_full()
             .children(animated)
-            .child(split)
+            .child(split);
+        match self.leaving {
+            Some(generation) => root
+                .with_animation(
+                    ("perf-summary-leave", generation as usize),
+                    Animation::new(M_FAST).with_easing(ease_out_cubic),
+                    |el, t| el.opacity(1. - t),
+                )
+                .into_any_element(),
+            None => root.into_any_element(),
+        }
     }
 }
 
