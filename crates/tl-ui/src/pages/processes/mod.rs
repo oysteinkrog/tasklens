@@ -20,9 +20,9 @@ pub mod tooltip;
 use std::sync::Arc;
 
 use gpui_kit::{
-    App, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StyleRefinement, Styled as _, Subscription, UniformListScrollHandle, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
+    Subscription, UniformListScrollHandle, Window, div,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -49,6 +49,7 @@ use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
+use crate::util::clipboard_write;
 use crate::window::main::ShellPage;
 use crate::window::status::StatusChanged;
 
@@ -453,7 +454,9 @@ impl ProcessesPage {
         if rows == 0 {
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if clipboard_write(cx, text).is_err() {
+            return;
+        }
         let key = match (what, rows > 1) {
             (CopyKind::Cell(_), false) => "processes-toast-copied",
             (CopyKind::Cell(_), true) => "processes-toast-values-copied",
