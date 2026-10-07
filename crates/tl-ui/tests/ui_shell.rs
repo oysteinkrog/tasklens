@@ -2804,345 +2804,279 @@ mod main_window {
         assert!(paused(&mut vcx));
         assert_eq!(*seen.borrow(), [true]);
     }
-}
 
-/// The shell filter box (E20-009). The host view copies the main window's wiring: the Global
-/// key context, the `FocusFilter` and `ClearFilter` listeners, the slot hidden on Performance
-/// and `ReturnFocus` focusing the page.
-mod filter {
-    use std::cell::{Cell, RefCell};
-    use std::rc::Rc;
-    use std::time::Duration;
+    /// The shell filter box in the main window (E20-009).
+    mod filter {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+        use std::time::Duration;
 
-    use gpui_kit::{
-        AppContext as _, Context, Entity, FocusHandle, InteractiveElement, IntoElement,
-        ParentElement, Render, Styled, Subscription, TestAppContext, VisualTestContext, Window,
-        div, prelude::FluentBuilder as _, px,
-    };
-    use tl_model::command::Tab;
-    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
-    use tl_ui::actions::{ClearFilter, EscapeChain, FocusFilter, GLOBAL_CONTEXT};
-    use tl_ui::app::BootSettings;
-    use tl_ui::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
-    use tl_ui::settings_global::TlSettings;
-    use tl_ui::theme::current;
-    use tl_ui::window::filter::{FILTER_DEBOUNCE, FilterBox, ReturnFocus, shown_on};
-    use tl_ui::window::main::{self as shell, FilterChanged, GlobalShellEvents};
+        use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext, px};
+        use tl_model::command::Tab;
+        use tl_ui::actions::{ClearFilter, EscapeChain, FocusFilter, SelectTab};
+        use tl_ui::components::input::{FILTER_WIDTH, FILTER_WIDTH_WIDE};
+        use tl_ui::settings_global::TlSettings;
+        use tl_ui::theme::current;
+        use tl_ui::window::filter::{FILTER_DEBOUNCE, FilterBox, shown_on};
+        use tl_ui::window::main::{FilterChanged, GlobalShellEvents};
 
-    type Events = Rc<RefCell<Vec<(Tab, String)>>>;
+        use super::{Opts, act, draw, main, page, rig};
 
-    struct Host {
-        filter: Entity<FilterBox>,
-        page: FocusHandle,
-        active: Tab,
-        escape_chain: Rc<Cell<u32>>,
-        _subs: Vec<Subscription>,
-    }
+        type Events = Rc<RefCell<Vec<(Tab, String)>>>;
 
-    impl Host {
-        fn select(&mut self, tab: Tab, window: &mut Window, cx: &mut Context<Self>) {
-            self.active = tab;
-            self.filter.update(cx, |f, cx| f.set_tab(tab, window, cx));
-            cx.notify();
+        struct Rig {
+            vcx: VisualTestContext,
+            events: Events,
+            escape_chain: Rc<Cell<u32>>,
         }
-    }
 
-    impl Render for Host {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-            let chain = self.escape_chain.clone();
-            div()
-                .id("host")
-                .key_context(GLOBAL_CONTEXT)
-                .size_full()
-                .flex()
-                .flex_row()
-                .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
-                    if shown_on(this.active) {
-                        this.filter
-                            .update(cx, |f, cx| f.focus_and_select_all(window, cx));
-                    }
-                }))
-                .on_action(cx.listener(|this, _: &ClearFilter, window, cx| {
-                    this.filter.update(cx, |f, cx| f.clear(window, cx));
-                }))
-                .on_action(move |_: &EscapeChain, _, _| chain.set(chain.get() + 1))
-                .child(div().id("page").track_focus(&self.page).flex_1().h(px(30.)))
-                .when(shown_on(self.active), |d| d.child(self.filter.clone()))
-        }
-    }
-
-    struct Rig {
-        host: Entity<Host>,
-        events: Events,
-    }
-
-    fn rig(cx: &mut TestAppContext, animations: bool) -> (Rig, &mut VisualTestContext) {
-        cx.update(|cx| {
-            gpui_kit::init(cx);
-            tl_ui::theme::store::init(
-                cx,
-                &ThemeSettings::default(),
-                &AppearanceSettings::default(),
-                Vec::new(),
-            );
-            tl_ui::i18n::init_strings(cx, "en-US");
-            let mut settings = Settings::default();
-            settings.motion.animations = animations;
-            cx.set_global(BootSettings {
-                settings,
-                state: UiState::default(),
-                persist: None,
-                startup_toasts: Vec::new(),
+        /// The main window on Processes with every fake page, recording `FilterChanged` and
+        /// app-level `EscapeChain` (E20-011 adds the window's own handler).
+        fn filter_rig(cx: &mut TestAppContext) -> Rig {
+            let mut vcx = rig(cx, Opts::default());
+            let events: Events = Rc::default();
+            let escape_chain: Rc<Cell<u32>> = Rc::default();
+            let (seen, chain) = (events.clone(), escape_chain.clone());
+            vcx.update(|_, cx| {
+                let bus = cx.global::<GlobalShellEvents>().0.clone();
+                cx.subscribe(&bus, move |_, e: &FilterChanged, _| {
+                    seen.borrow_mut().push((e.tab, e.text.to_string()));
+                })
+                .detach();
+                cx.on_action(move |_: &EscapeChain, _| chain.set(chain.get() + 1));
             });
-            TlSettings::init(cx);
-            tl_ui::actions::bind_keys_global(cx);
-            shell::init(cx);
-        });
-        let events: Events = Rc::default();
-        let (host, vcx) = cx.add_window_view(|window, cx| {
-            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, window, cx));
-            let page = cx.focus_handle();
-            let return_sub = cx.subscribe_in(
-                &filter,
-                window,
-                |this: &mut Host, _, _: &ReturnFocus, window, cx| {
-                    window.focus(&this.page, cx);
-                },
-            );
-            let bus = cx.global::<GlobalShellEvents>().0.clone();
-            let seen = events.clone();
-            let bus_sub = cx.subscribe(&bus, move |_, _, e: &FilterChanged, _| {
-                seen.borrow_mut().push((e.tab, e.text.to_string()));
-            });
-            Host {
-                filter,
-                page,
-                active: Tab::Processes,
-                escape_chain: Rc::default(),
-                _subs: vec![return_sub, bus_sub],
+            Rig {
+                vcx,
+                events,
+                escape_chain,
             }
-        });
-        vcx.update(|window, _| window.activate_window());
-        vcx.run_until_parked();
-        draw(vcx);
-        (Rig { host, events }, vcx)
-    }
-
-    fn draw(vcx: &mut VisualTestContext) {
-        vcx.update(|window, cx| window.draw(cx).clear(cx));
-    }
-
-    fn filter(rig: &Rig, vcx: &mut VisualTestContext) -> Entity<FilterBox> {
-        vcx.read_entity(&rig.host, |h, _| h.filter.clone())
-    }
-
-    fn input_text(rig: &Rig, vcx: &mut VisualTestContext) -> String {
-        let f = filter(rig, vcx);
-        vcx.update(|_, cx| f.read(cx).input().read(cx).text().to_string())
-    }
-
-    fn focus_filter(rig: &Rig, vcx: &mut VisualTestContext) {
-        let f = filter(rig, vcx);
-        vcx.update(|window, cx| {
-            let input = f.read(cx).input().clone();
-            input.update(cx, |s, cx| s.focus(window, cx));
-        });
-        draw(vcx);
-    }
-
-    fn focus_page(rig: &Rig, vcx: &mut VisualTestContext) {
-        let page = vcx.read_entity(&rig.host, |h, _| h.page.clone());
-        vcx.update(|window, cx| window.focus(&page, cx));
-        draw(vcx);
-    }
-
-    fn filter_focused(rig: &Rig, vcx: &mut VisualTestContext) -> bool {
-        let f = filter(rig, vcx);
-        vcx.update(|window, cx| f.read(cx).is_focused(window, cx))
-    }
-
-    fn page_focused(rig: &Rig, vcx: &mut VisualTestContext) -> bool {
-        let page = vcx.read_entity(&rig.host, |h, _| h.page.clone());
-        vcx.update(|window, _| page.is_focused(window))
-    }
-
-    fn wait(vcx: &mut VisualTestContext, ms: u64) {
-        vcx.executor().advance_clock(Duration::from_millis(ms));
-        vcx.run_until_parked();
-    }
-
-    fn events(rig: &Rig) -> Vec<(Tab, String)> {
-        rig.events.borrow().clone()
-    }
-
-    /// Types `text` into the focused filter, lets the debounce fire and forgets the events.
-    fn type_settled(rig: &Rig, vcx: &mut VisualTestContext, text: &str) {
-        focus_filter(rig, vcx);
-        vcx.simulate_input(text);
-        wait(vcx, 200);
-        draw(vcx);
-        rig.events.borrow_mut().clear();
-    }
-
-    fn select(rig: &Rig, vcx: &mut VisualTestContext, tab: Tab) {
-        let host = rig.host.clone();
-        vcx.update(|window, cx| host.update(cx, |h, cx| h.select(tab, window, cx)));
-        vcx.run_until_parked();
-        draw(vcx);
-    }
-
-    #[gpui_kit::test]
-    fn filter_debounce_100ms(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        focus_filter(&rig, vcx);
-        for (i, ch) in ["f", "i", "r"].into_iter().enumerate() {
-            if i > 0 {
-                wait(vcx, 30);
-            }
-            vcx.simulate_input(ch);
         }
-        assert!(events(&rig).is_empty(), "nothing before the quiet time");
-        let debounce = FILTER_DEBOUNCE.as_millis() as u64;
-        wait(vcx, debounce - 1);
-        assert!(events(&rig).is_empty(), "nothing at 99 ms");
-        wait(vcx, 1);
-        assert_eq!(events(&rig), [(Tab::Processes, "fir".to_owned())]);
-        wait(vcx, 500);
-        assert_eq!(events(&rig).len(), 1, "exactly one");
-    }
 
-    #[gpui_kit::test]
-    fn filter_esc_rule(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        type_settled(&rig, vcx, "fire");
-        assert!(filter_focused(&rig, vcx));
+        impl Rig {
+            fn filter(&mut self) -> Entity<FilterBox> {
+                let main = main(&mut self.vcx);
+                self.vcx.read_entity(&main, |m, _| m.filter_box().clone())
+            }
 
-        // Esc with text runs FilterEscape, not the kit's clear (which would debounce).
-        vcx.simulate_keystrokes("escape");
-        assert_eq!(input_text(&rig, vcx), "");
-        assert_eq!(events(&rig), [(Tab::Processes, String::new())], "at once");
-        assert!(page_focused(&rig, vcx));
-        wait(vcx, 200);
-        assert_eq!(events(&rig).len(), 1, "no second empty query");
+            fn input_text(&mut self) -> String {
+                let f = self.filter();
+                self.vcx
+                    .update(|_, cx| f.read(cx).input().read(cx).text().to_string())
+            }
 
-        // Empty filter with focus: Esc only moves focus.
-        rig.events.borrow_mut().clear();
-        focus_filter(&rig, vcx);
-        let chain = vcx.read_entity(&rig.host, |h, _| h.escape_chain.clone());
-        vcx.simulate_keystrokes("escape");
-        assert!(page_focused(&rig, vcx));
-        assert!(events(&rig).is_empty());
-        assert_eq!(chain.get(), 0, "the Esc chain does not run yet");
-        vcx.simulate_keystrokes("escape");
-        assert_eq!(chain.get(), 1, "a further Esc reaches EscapeChain");
-    }
+            fn focus_filter(&mut self) {
+                let f = self.filter();
+                self.vcx.update(|window, cx| {
+                    let input = f.read(cx).input().clone();
+                    input.update(cx, |s, cx| s.focus(window, cx));
+                });
+                draw(&mut self.vcx);
+            }
 
-    #[gpui_kit::test]
-    fn filter_enter_moves_focus(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        type_settled(&rig, vcx, "ssh");
-        vcx.simulate_keystrokes("enter");
-        assert!(page_focused(&rig, vcx));
-        assert_eq!(input_text(&rig, vcx), "ssh");
+            fn page_focus(&mut self) -> gpui_kit::FocusHandle {
+                let tab = super::active(&mut self.vcx);
+                let page = page(&mut self.vcx, tab).expect("page built");
+                self.vcx.read_entity(&page, |p, _| p.focus.clone())
+            }
 
-        focus_filter(&rig, vcx);
-        vcx.simulate_keystrokes("down");
-        assert!(page_focused(&rig, vcx), "Down does the same");
-        assert_eq!(input_text(&rig, vcx), "ssh");
-        wait(vcx, 200);
-        assert!(events(&rig).is_empty());
-    }
+            fn focus_page(&mut self) {
+                let focus = self.page_focus();
+                self.vcx.update(|window, cx| window.focus(&focus, cx));
+                draw(&mut self.vcx);
+            }
 
-    #[gpui_kit::test]
-    fn filter_per_tab_text(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        type_settled(&rig, vcx, "ssh");
-        select(&rig, vcx, Tab::Services);
-        assert_eq!(input_text(&rig, vcx), "");
-        select(&rig, vcx, Tab::Processes);
-        assert_eq!(input_text(&rig, vcx), "ssh");
-        let f = filter(&rig, vcx);
-        vcx.read_entity(&f, |f, _| {
-            assert_eq!(f.text(Tab::Processes).as_ref(), "ssh");
-            assert_eq!(f.text(Tab::Services).as_ref(), "");
-        });
-        wait(vcx, 200);
-        assert!(events(&rig).is_empty(), "the swap emits nothing");
-    }
+            fn filter_focused(&mut self) -> bool {
+                let f = self.filter();
+                self.vcx
+                    .update(|window, cx| f.read(cx).is_focused(window, cx))
+            }
 
-    #[gpui_kit::test]
-    fn filter_hidden_on_performance(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        assert!(vcx.debug_bounds("FilterBox").is_some());
-        assert!(!shown_on(Tab::Performance));
-        assert!(Tab::ALL.iter().filter(|t| !shown_on(**t)).count() == 1);
-        select(&rig, vcx, Tab::Performance);
-        assert!(vcx.debug_bounds("FilterBox").is_none());
-        focus_page(&rig, vcx);
-        vcx.dispatch_action(FocusFilter);
-        vcx.run_until_parked();
-        assert!(!filter_focused(&rig, vcx), "FocusFilter does nothing");
-        assert!(page_focused(&rig, vcx));
-    }
+            fn page_focused(&mut self) -> bool {
+                let focus = self.page_focus();
+                self.vcx.update(|window, _| focus.is_focused(window))
+            }
 
-    #[gpui_kit::test]
-    fn filter_ctrl_f_selects_all(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        type_settled(&rig, vcx, "abc");
-        focus_page(&rig, vcx);
-        vcx.simulate_keystrokes("ctrl-f");
-        draw(vcx);
-        assert!(filter_focused(&rig, vcx));
-        let f = filter(&rig, vcx);
-        let range = vcx.update(|_, cx| f.read(cx).input().read(cx).selected_range());
-        assert_eq!(range, 0..3);
-    }
+            fn wait(&mut self, ms: u64) {
+                self.vcx.executor().advance_clock(Duration::from_millis(ms));
+                self.vcx.run_until_parked();
+            }
 
-    #[gpui_kit::test]
-    fn clear_filter_action(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        type_settled(&rig, vcx, "abc");
-        focus_page(&rig, vcx);
-        vcx.dispatch_action(ClearFilter);
-        vcx.run_until_parked();
-        assert_eq!(input_text(&rig, vcx), "");
-        assert_eq!(events(&rig), [(Tab::Processes, String::new())]);
-        wait(vcx, 200);
-        assert_eq!(events(&rig).len(), 1, "emitted once");
-        assert!(page_focused(&rig, vcx));
-    }
+            fn events(&self) -> Vec<(Tab, String)> {
+                self.events.borrow().clone()
+            }
 
-    #[gpui_kit::test]
-    fn filter_width_on_focus(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, false);
-        let width = |vcx: &mut VisualTestContext| {
-            draw(vcx);
-            vcx.debug_bounds("FilterBox-input")
-                .expect("input drawn")
-                .size
-                .width
-        };
-        assert_eq!(width(vcx), px(FILTER_WIDTH));
-        focus_filter(&rig, vcx);
-        assert_eq!(
-            width(vcx),
-            px(FILTER_WIDTH_WIDE),
-            "instant with animations off"
-        );
-        let f = filter(&rig, vcx);
-        let outlined = vcx.read_entity(&f, |f, _| f.width());
-        assert_eq!(outlined, vcx.debug_bounds("FilterBox").unwrap().size.width);
-    }
+            /// Types `text` into the filter, lets the debounce fire and forgets the events.
+            fn type_settled(&mut self, text: &str) {
+                self.focus_filter();
+                self.vcx.simulate_input(text);
+                self.wait(200);
+                draw(&mut self.vcx);
+                self.events.borrow_mut().clear();
+            }
 
-    #[gpui_kit::test]
-    fn filter_inactive_outline(cx: &mut TestAppContext) {
-        let (rig, vcx) = rig(cx, true);
-        let f = filter(&rig, vcx);
-        let (accent, divider) = vcx.update(|_, cx| (current(cx).accent, current(cx).divider));
-        assert_eq!(vcx.read_entity(&f, |f, _| f.outline_color()), accent);
-        vcx.deactivate_window();
-        vcx.run_until_parked();
-        draw(vcx);
-        assert_eq!(vcx.read_entity(&f, |f, _| f.outline_color()), divider);
+            fn select(&mut self, tab: Tab) {
+                act(&mut self.vcx, SelectTab(tab as usize));
+            }
+        }
+
+        #[gpui_kit::test]
+        fn filter_debounce_100ms(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.focus_filter();
+            for (i, ch) in ["f", "i", "r"].into_iter().enumerate() {
+                if i > 0 {
+                    r.wait(30);
+                }
+                r.vcx.simulate_input(ch);
+            }
+            assert!(r.events().is_empty(), "nothing before the quiet time");
+            r.wait(FILTER_DEBOUNCE.as_millis() as u64 - 1);
+            assert!(r.events().is_empty(), "nothing at 99 ms");
+            r.wait(1);
+            assert_eq!(r.events(), [(Tab::Processes, "fir".to_owned())]);
+            r.wait(500);
+            assert_eq!(r.events().len(), 1, "exactly one");
+        }
+
+        #[gpui_kit::test]
+        fn filter_esc_rule(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.type_settled("fire");
+            assert!(r.filter_focused());
+
+            // Esc with text runs FilterEscape, not the kit's clear (which would debounce).
+            r.vcx.simulate_keystrokes("escape");
+            assert_eq!(r.input_text(), "");
+            assert_eq!(r.events(), [(Tab::Processes, String::new())], "at once");
+            assert!(r.page_focused());
+            r.wait(200);
+            assert_eq!(r.events().len(), 1, "no second empty query");
+
+            // Empty filter with focus: Esc only moves focus.
+            r.events.borrow_mut().clear();
+            r.focus_filter();
+            r.vcx.simulate_keystrokes("escape");
+            assert!(r.page_focused());
+            assert!(r.events().is_empty());
+            assert_eq!(r.escape_chain.get(), 0, "the Esc chain does not run yet");
+            r.vcx.simulate_keystrokes("escape");
+            assert_eq!(r.escape_chain.get(), 1, "a further Esc reaches EscapeChain");
+        }
+
+        #[gpui_kit::test]
+        fn filter_enter_moves_focus(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.type_settled("ssh");
+            r.vcx.simulate_keystrokes("enter");
+            assert!(r.page_focused());
+            assert_eq!(r.input_text(), "ssh");
+
+            r.focus_filter();
+            r.vcx.simulate_keystrokes("down");
+            assert!(r.page_focused(), "Down does the same");
+            assert_eq!(r.input_text(), "ssh");
+            r.wait(200);
+            assert!(r.events().is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn filter_per_tab_text(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.type_settled("ssh");
+            r.select(Tab::Services);
+            assert_eq!(r.input_text(), "");
+            r.select(Tab::Processes);
+            assert_eq!(r.input_text(), "ssh");
+            let f = r.filter();
+            r.vcx.read_entity(&f, |f, _| {
+                assert_eq!(f.text(Tab::Processes).as_ref(), "ssh");
+                assert_eq!(f.text(Tab::Services).as_ref(), "");
+            });
+            r.wait(200);
+            assert!(r.events().is_empty(), "the swap emits nothing");
+        }
+
+        #[gpui_kit::test]
+        fn filter_hidden_on_performance(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            assert!(r.vcx.debug_bounds("FilterBox").is_some());
+            assert_eq!(Tab::ALL.iter().filter(|t| !shown_on(**t)).count(), 1);
+            r.select(Tab::Performance);
+            assert!(r.vcx.debug_bounds("FilterBox").is_none());
+            assert!(r.vcx.debug_bounds("TabStripFilter").is_none());
+            r.focus_page();
+            act(&mut r.vcx, FocusFilter);
+            assert!(!r.filter_focused(), "FocusFilter does nothing");
+            assert!(r.page_focused());
+        }
+
+        #[gpui_kit::test]
+        fn filter_ctrl_f_selects_all(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.type_settled("abc");
+            r.focus_page();
+            r.vcx.simulate_keystrokes("ctrl-f");
+            draw(&mut r.vcx);
+            assert!(r.filter_focused());
+            let f = r.filter();
+            let range = r
+                .vcx
+                .update(|_, cx| f.read(cx).input().read(cx).selected_range());
+            assert_eq!(range, 0..3);
+        }
+
+        #[gpui_kit::test]
+        fn clear_filter_action(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.type_settled("abc");
+            r.focus_page();
+            act(&mut r.vcx, ClearFilter);
+            assert_eq!(r.input_text(), "");
+            assert_eq!(r.events(), [(Tab::Processes, String::new())]);
+            r.wait(200);
+            assert_eq!(r.events().len(), 1, "emitted once");
+            assert!(r.page_focused());
+        }
+
+        #[gpui_kit::test]
+        fn filter_width_on_focus(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            r.vcx
+                .update(|_, cx| TlSettings::update(cx, |d| d.settings.motion.animations = false));
+            r.focus_page();
+            let width = |vcx: &mut VisualTestContext| {
+                draw(vcx);
+                vcx.debug_bounds("FilterBox-input")
+                    .expect("input drawn")
+                    .size
+                    .width
+            };
+            assert_eq!(width(&mut r.vcx), px(FILTER_WIDTH));
+            r.focus_filter();
+            assert_eq!(
+                width(&mut r.vcx),
+                px(FILTER_WIDTH_WIDE),
+                "instant with animations off"
+            );
+            let f = r.filter();
+            let outlined = r.vcx.read_entity(&f, |f, _| f.width());
+            let drawn = r.vcx.debug_bounds("FilterBox").expect("box drawn");
+            assert_eq!(outlined, drawn.size.width);
+            assert_eq!(drawn.right(), px(1280.), "flush with the right edge");
+        }
+
+        #[gpui_kit::test]
+        fn filter_inactive_outline(cx: &mut TestAppContext) {
+            let mut r = filter_rig(cx);
+            let f = r.filter();
+            let (accent, divider) = r
+                .vcx
+                .update(|_, cx| (current(cx).accent, current(cx).divider));
+            assert_eq!(r.vcx.read_entity(&f, |f, _| f.outline_color()), accent);
+            r.vcx.deactivate_window();
+            r.vcx.run_until_parked();
+            draw(&mut r.vcx);
+            assert_eq!(r.vcx.read_entity(&f, |f, _| f.outline_color()), divider);
+        }
     }
 }
