@@ -1426,9 +1426,39 @@ mod tests {
         range.map(|i| format!("{prefix}{i}")).collect()
     }
 
+    /// All `cursors` in one `printf`: one write of under PIPE_BUF bytes, so the reader gets them
+    /// in one read whatever the machine load.
+    fn emit_at_once(cursors: impl IntoIterator<Item = String>) -> String {
+        let lines: String = cursors
+            .into_iter()
+            .map(|c| format!("{{\"__CURSOR\":\"{c}\",\"MESSAGE\":\"m\"}}\\n"))
+            .collect();
+        format!("printf '{lines}'\n")
+    }
+
+    /// Follow events until `want` follow entries arrived or `limit` passed, then `quiet` more, so
+    /// a repeated or extra batch would show.
+    fn follow_until(
+        events: &async_channel::Receiver<JournalEvent>,
+        want: usize,
+        limit: Duration,
+        quiet: Duration,
+    ) -> Vec<Vec<String>> {
+        let begin = Instant::now();
+        let mut got = Vec::new();
+        while got.iter().map(Vec::len).sum::<usize>() < want {
+            let Some(ev) = next_event(events, limit.saturating_sub(begin.elapsed())) else {
+                break;
+            };
+            got.extend(follow_batches(std::slice::from_ref(&ev)));
+        }
+        got.extend(follow_batches(&events_for(events, quiet)));
+        got
+    }
+
     #[test]
     fn follow_batches_at_most_every_100ms() {
-        let burst = emit(numbered("f", 0..50));
+        let burst = emit_at_once(numbered("f", 0..50));
         let dir = modes("burst", "exit 0", &held(&burst), "exit 0");
         let rt = crate::runtime::build_runtime().expect("runtime builds");
         let handle = open_with(&rt.handle(), user_query(true), env_with(&dir, None));
@@ -1460,15 +1490,68 @@ mod tests {
         let handle = open_with(&rt.handle(), user_query(true), env_with(&dir, None));
         let events = handle.events();
         skip_initial(&events);
-        let batches = follow_batches(&events_for(&events, Duration::from_millis(2000)));
-        assert!(batches.len() <= 11, "{} batches", batches.len());
-        assert_eq!(batches.concat(), numbered("f", 0..50));
+        // Waits for the lines, not for a fixed time: under load the child's 50 sleeps take far
+        // longer than 1 s, and the number of batches grows with that time. The batch spacing is
+        // `batcher_spacing_is_batch_interval`'s job, on virtual time.
+        let batches = follow_until(&events, 50, Duration::from_secs(30), BATCH_INTERVAL * 3);
+        assert_eq!(
+            batches.concat(),
+            numbered("f", 0..50),
+            "every line exactly once"
+        );
+        assert!(batches.len() > 1, "lines 20 ms apart span several batches");
         let pid = read_pid(&dir.join("fpid"), Duration::from_secs(1));
         drop(handle);
         assert!(
             reaped_within(pid, Duration::from_secs(2)),
             "child {pid} not reaped"
         );
+    }
+
+    fn entry(cursor: &str) -> Vec<JournalEntry> {
+        let line = format!("{{\"__CURSOR\":\"{cursor}\",\"MESSAGE\":\"m\"}}");
+        parse_lines(line.as_bytes()).0
+    }
+
+    /// `stream`'s batching on virtual time: an entry every 20 ms for 1 s gives batches that each
+    /// cover one `BATCH_INTERVAL` from their first entry, sent at least `BATCH_INTERVAL` apart,
+    /// every entry once and in order.
+    #[test]
+    fn batcher_spacing_is_batch_interval() {
+        let (tx, rx) = async_channel::unbounded();
+        let cursors = Mutex::new(Cursors::default());
+        let start = Instant::now();
+        let mut batcher = Batcher::default();
+        let mut sent_at = Vec::new();
+        let step = Duration::from_millis(20);
+        for i in 0..50u32 {
+            let now = start + step * i;
+            // `stream` checks for a due batch before it reads more output.
+            if batcher.is_due(now) {
+                assert!(batcher.flush(&tx, &cursors));
+                sent_at.push(now);
+            }
+            batcher.push(entry(&format!("f{i}")), now);
+        }
+        let end = start + step * 50 + BATCH_INTERVAL;
+        assert!(batcher.is_due(end));
+        assert!(batcher.flush(&tx, &cursors));
+        sent_at.push(end);
+        drop(tx);
+
+        let mut batches = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            batches.extend(follow_batches(std::slice::from_ref(&ev)));
+        }
+        assert_eq!(batches.concat(), numbered("f", 0..50));
+        // 100 ms / 20 ms: five entries per batch.
+        assert_eq!(batches.len(), 10);
+        assert!(batches.iter().all(|b| b.len() == 5), "{batches:?}");
+        for pair in sent_at.windows(2) {
+            assert!(pair[1] - pair[0] >= BATCH_INTERVAL, "{sent_at:?}");
+        }
+        assert_eq!(lock(&cursors).newest.as_deref(), Some("f49"));
+        assert_eq!(lock(&cursors).oldest.as_deref(), Some("f0"));
     }
 
     #[test]
