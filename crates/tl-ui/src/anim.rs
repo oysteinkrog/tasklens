@@ -36,6 +36,10 @@ pub struct AnimationDriver {
     /// The stall timer loop is running.
     stall_timer: bool,
     hidden: bool,
+    /// The thread CPU clock at the last frame, read only while sampling.
+    last_cpu: Option<u64>,
+    /// `tl_model::time::thread_cpu_ns`; tests swap it to count the calls.
+    cpu_clock: fn() -> u64,
     pub stats: FrameStats,
     /// Bench hook (E01-OI-6): set by the bench before measuring.
     #[cfg(any(test, feature = "test-hooks"))]
@@ -90,6 +94,8 @@ pub struct FrameStats {
 #[derive(Clone, Copy, Debug)]
 pub struct FrameSample {
     pub interval_ns: u64,
+    /// UI thread CPU time between the previous frame callback and this one: the frame's own
+    /// work, as the bench probe measures it. 0 for the first sample after sampling turns on.
     pub thread_cpu_ns: u64,
 }
 
@@ -110,6 +116,8 @@ impl AnimationDriver {
             stall_reported: false,
             stall_timer: false,
             hidden: false,
+            last_cpu: None,
+            cpu_clock: tl_model::time::thread_cpu_ns,
             stats: FrameStats::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             paint_log: None,
@@ -189,6 +197,12 @@ impl AnimationDriver {
         taken
     }
 
+    /// Replaces the thread CPU clock, so a test can count the calls.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_cpu_clock(&mut self, clock: fn() -> u64) {
+        self.cpu_clock = clock;
+    }
+
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn install_paint_log(&mut self) {
         self.paint_log = Some(PaintLog {
@@ -237,6 +251,9 @@ impl AnimationDriver {
         self.pending_since = None;
         self.stats.frames += 1;
         let now = cx.background_executor().now();
+        // The clock is read only while sampling, so it costs nothing otherwise.
+        let cpu = self.stats.sampling.then(|| (self.cpu_clock)());
+        let last_cpu = mem::replace(&mut self.last_cpu, cpu);
         if let Some(last) = self.last_frame {
             let interval_ns =
                 u64::try_from(now.saturating_duration_since(last).as_nanos()).unwrap_or(u64::MAX);
@@ -253,9 +270,9 @@ impl AnimationDriver {
                 if samples.len() < SAMPLE_CAPACITY {
                     samples.push(FrameSample {
                         interval_ns,
-                        // TODO(E03): tl_model::time::thread_cpu_ns() once it exists (R-144). Until
-                        // then the bench reports frame_cpu_ms as null (R-173).
-                        thread_cpu_ns: 0,
+                        thread_cpu_ns: cpu
+                            .zip(last_cpu)
+                            .map_or(0, |(now, last)| now.saturating_sub(last)),
                     });
                 }
             }

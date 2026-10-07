@@ -233,6 +233,76 @@ fn driver_paint_log_install_and_take(cx: &mut TestAppContext) {
     assert!(vcx.read_entity(&driver, |d, _| d.paint_log.is_none()));
 }
 
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    static CPU_CALLS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A thread CPU clock that counts its calls and moves 1 ms per call.
+#[cfg(feature = "test-hooks")]
+fn counting_clock() -> u64 {
+    CPU_CALLS.with(|c| {
+        c.set(c.get() + 1);
+        c.get() * 1_000_000
+    })
+}
+
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn driver_frame_cpu_only_while_sampling(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    driver.update(vcx, |d, _| d.set_cpu_clock(counting_clock));
+    let plain = vcx.new(|_| Plain).entity_id();
+    let run_frames = |vcx: &mut VisualTestContext, n: usize| {
+        for _ in 0..n {
+            request(vcx, plain);
+            frame(vcx);
+        }
+    };
+
+    run_frames(vcx, 3);
+    assert_eq!(
+        CPU_CALLS.with(Cell::get),
+        0,
+        "no clock call while not sampling"
+    );
+
+    driver.update(vcx, |d, _| d.stats.sampling = true);
+    run_frames(vcx, 3);
+    assert_eq!(CPU_CALLS.with(Cell::get), 3);
+    let cpu: Vec<u64> = vcx.read_entity(&driver, |d, _| {
+        d.stats.samples.iter().map(|s| s.thread_cpu_ns).collect()
+    });
+    // The first sampled frame has no previous clock reading.
+    assert_eq!(cpu, [0, 1_000_000, 1_000_000]);
+
+    driver.update(vcx, |d, _| d.stats.sampling = false);
+    run_frames(vcx, 2);
+    assert_eq!(CPU_CALLS.with(Cell::get), 3, "stops with sampling");
+}
+
+#[cfg(feature = "test-hooks")]
+#[gpui_kit::test]
+fn driver_frame_cpu_from_the_real_clock(cx: &mut TestAppContext) {
+    let (driver, vcx) = rig(cx);
+    let plain = vcx.new(|_| Plain).entity_id();
+    driver.update(vcx, |d, _| d.stats.sampling = true);
+    for _ in 0..3 {
+        request(vcx, plain);
+        frame(vcx);
+        // Work between frames, as layout and paint would be.
+        let start = std::time::Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < Duration::from_millis(2) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+    }
+    let last = vcx.read_entity(&driver, |d, _| {
+        d.stats.samples.last().map(|s| s.thread_cpu_ns)
+    });
+    assert!(last.is_some_and(|ns| ns > 0), "{last:?}");
+}
+
 /// Test subscriber that keeps the messages of `tasklens::frame` warnings.
 struct Capture(Arc<Mutex<Vec<String>>>);
 

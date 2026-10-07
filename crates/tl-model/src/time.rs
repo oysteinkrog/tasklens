@@ -16,7 +16,13 @@ pub fn now_mono_ns() -> u64 {
     timespec_ns(clock_gettime(ClockId::Monotonic))
 }
 
-/// Both clocks start at boot, so the fields are never negative.
+/// CPU time the calling thread has used, via
+/// rustix::time::clock_gettime(ClockId::ThreadCPUTime) (R-144). For frame CPU measurements.
+pub fn thread_cpu_ns() -> u64 {
+    timespec_ns(clock_gettime(ClockId::ThreadCPUTime))
+}
+
+/// The clocks never go below zero, so the fields are never negative.
 fn timespec_ns(ts: Timespec) -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
@@ -118,6 +124,19 @@ mod tests {
         let mono = now_mono_ns();
         let boot = now_boot_ns();
         assert!(boot >= mono);
+    }
+
+    #[test]
+    fn thread_cpu_rises_with_work() {
+        let before = thread_cpu_ns();
+        let start = std::time::Instant::now();
+        let mut x = 0u64;
+        while start.elapsed() < std::time::Duration::from_millis(5) {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        let used = thread_cpu_ns().saturating_sub(before);
+        // The thread may be preempted on a busy machine, so less than the 5 ms of wall time.
+        assert!(used >= 1_000_000, "{used} ns of CPU for a 5 ms busy loop");
     }
 
     proptest! {
