@@ -27,6 +27,8 @@ pub struct Paths {
     /// `$XDG_RUNTIME_DIR/tasklens`, `None` when `XDG_RUNTIME_DIR` is unset or relative.
     pub runtime_dir: Option<PathBuf>,
     pub home: PathBuf,
+    /// The `--app-id` value, `None` for the installed instance.
+    pub app_id: Option<String>,
     /// The resolved `$XDG_CONFIG_HOME` root, used for the autostart entry.
     config_root: PathBuf,
 }
@@ -71,6 +73,7 @@ impl Paths {
             cache_dir: cache_root.join(app_dir),
             runtime_dir: absolute(get("XDG_RUNTIME_DIR")).map(|root| root.join(app_dir)),
             home,
+            app_id: app_id.map(str::to_owned),
             config_root,
         })
     }
@@ -111,9 +114,14 @@ impl Paths {
         self.cache_dir.join("icons.toml")
     }
 
-    /// `$XDG_CONFIG_HOME/autostart/io.github.oysteinkrog.Tasklens.desktop`
+    /// `$XDG_CONFIG_HOME/autostart/io.github.oysteinkrog.Tasklens.desktop`, or
+    /// `<app_id>.desktop` with `--app-id`, so a test instance never replaces the real entry.
     pub fn autostart_file(&self) -> PathBuf {
-        self.config_root.join("autostart").join(AUTOSTART_NAME)
+        let dir = self.config_root.join("autostart");
+        match &self.app_id {
+            Some(id) => dir.join(format!("{id}.desktop")),
+            None => dir.join(AUTOSTART_NAME),
+        }
     }
 }
 

@@ -328,6 +328,8 @@ struct Inner {
     state: Target,
     themes_file: PathBuf,
     autostart_file: PathBuf,
+    /// The `--app-id` value, written into the autostart entry's `Exec`.
+    app_id: Option<String>,
     shared: Mutex<Shared>,
     wake: Condvar,
     /// The last bytes loaded or written per file. Held during every write, so the saver thread
@@ -384,6 +386,7 @@ impl Store {
             },
             themes_file: paths.themes_file(),
             autostart_file: paths.autostart_file(),
+            app_id: paths.app_id.clone(),
             shared: Mutex::new(Shared {
                 pending: None,
                 failed: None,
@@ -514,6 +517,7 @@ impl Inner {
             &self.autostart_file,
             startup.start_at_login,
             startup.start_minimized,
+            self.app_id.as_deref(),
         ) {
             Ok(_) => *last = startup.clone(),
             Err(error) => warn!(

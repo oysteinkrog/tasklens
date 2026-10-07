@@ -179,6 +179,10 @@ fn app_id_dirs() {
         Path::new("/k/io.example.Dev/icons.toml")
     );
     assert_eq!(
+        p.autostart_file(),
+        Path::new("/c/autostart/io.example.Dev.desktop")
+    );
+    assert_eq!(
         p.settings_file(),
         Path::new("/c/io.example.Dev/settings.toml")
     );
@@ -187,6 +191,10 @@ fn app_id_dirs() {
     let p = Paths::from_vars_for(None, get).unwrap();
     assert_eq!(p.config_dir, Path::new("/c/tasklens"));
     assert_eq!(p.runtime_dir.as_deref(), Some(Path::new("/r/tasklens")));
+    assert_eq!(
+        p.autostart_file(),
+        Path::new("/c/autostart/io.github.oysteinkrog.Tasklens.desktop")
+    );
     assert_eq!(p, Paths::from_vars(get).unwrap());
 }
 
