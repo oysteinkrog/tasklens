@@ -199,6 +199,14 @@ impl TabStrip {
         cx.notify();
     }
 
+    /// Drops the cached label widths and accent path, so the next render shapes and builds them
+    /// again (UI-SHL-130).
+    pub fn invalidate_layout_cache(&mut self, cx: &mut Context<Self>) {
+        self.label_widths.clear();
+        self.rule = None;
+        cx.notify();
+    }
+
     /// The tab's label. Processes reads "History" in history mode.
     pub fn label(tab: Tab, history_mode: bool, cx: &App) -> SharedString {
         let key = match tab {

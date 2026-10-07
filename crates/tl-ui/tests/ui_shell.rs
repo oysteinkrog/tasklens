@@ -1963,6 +1963,8 @@ mod main_window {
         /// The decorations the window reports (`TitleBarProbe.client`). The GPUI test window
         /// reports server decorations, so the default installs the probe with client ones.
         client: Option<bool>,
+        /// Counts persist calls when set.
+        persisted: Option<Rc<std::cell::Cell<u32>>>,
     }
 
     impl Default for Opts {
@@ -1976,6 +1978,7 @@ mod main_window {
                 engine: false,
                 decorations: AppearanceSettings::default().decorations,
                 client: Some(true),
+                persisted: None,
             }
         }
     }
@@ -1998,10 +2001,14 @@ mod main_window {
             settings.general.start_tab = opts.start_tab;
             let mut state = UiState::default();
             state.tabs.last_tab = opts.last_tab;
+            let persist = opts.persisted.clone().map(|count| {
+                Box::new(move |_: &Settings, _: &UiState| count.set(count.get() + 1))
+                    as tl_ui::app::PersistFn
+            });
             cx.set_global(BootSettings {
                 settings,
                 state,
-                persist: None,
+                persist,
                 startup_toasts: Vec::new(),
             });
             TlSettings::init(cx);
@@ -2851,6 +2858,166 @@ mod main_window {
         modifiers(&mut vcx, true, true);
         assert!(paused(&mut vcx));
         assert_eq!(*seen.borrow(), [true]);
+    }
+
+    #[gpui_kit::test]
+    fn remove_window_ends_ctrl_pause(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        let seen = pause_events(&mut vcx);
+        modifiers(&mut vcx, true, false);
+        assert!(paused(&mut vcx));
+        // No deactivation follows: the removed window's own observer is gone.
+        let main = main(&mut vcx);
+        vcx.update(|window, cx| {
+            main.update(cx, |m, cx| {
+                m.apply_close_for_test(CloseOutcome::RemoveWindow, window, cx)
+            })
+        });
+        vcx.run_until_parked();
+        // The window is gone, so read through the app.
+        assert!(!vcx.cx.read(|cx| cx.global::<ShellState>().paused));
+        assert_eq!(*seen.borrow(), [true, false]);
+    }
+
+    /// UI scale keys and the metrics observer (E20-013).
+    mod scale {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use gpui_kit::{AppContext as _, TestAppContext, VisualTestContext, px};
+        use tl_model::command::Tab;
+        use tl_ui::actions::{ScaleDown, ScaleReset, ScaleUp};
+        use tl_ui::settings_global::TlSettings;
+        use tl_ui::theme::metrics;
+
+        use super::{Opts, act, bounds, draw, main, rig, toast_top};
+
+        fn scale_rig(cx: &mut TestAppContext, ui_scale_pct: u16) -> VisualTestContext {
+            rig(
+                cx,
+                Opts {
+                    ui_scale_pct,
+                    pages: &[Tab::Processes],
+                    ..Opts::default()
+                },
+            )
+        }
+
+        fn pct(vcx: &mut VisualTestContext) -> u16 {
+            vcx.update(|_, cx| TlSettings::settings(cx).appearance.ui_scale_pct)
+        }
+
+        fn toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+            let main = main(vcx);
+            let queue = vcx.read_entity(&main, |m, _| m.toasts().clone());
+            vcx.read_entity(&queue, |q, _| q.visible_texts())
+                .into_iter()
+                .map(|t| t.to_string())
+                .collect()
+        }
+
+        fn style_version(vcx: &mut VisualTestContext) -> u64 {
+            vcx.update(|_, cx| metrics(cx).style_version)
+        }
+
+        #[gpui_kit::test]
+        fn scale_keys_step_and_clamp(cx_a: &mut TestAppContext, cx_b: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx_a, 195);
+            act(&mut vcx, ScaleUp);
+            assert_eq!(pct(&mut vcx), 200);
+            act(&mut vcx, ScaleUp);
+            assert_eq!(pct(&mut vcx), 200);
+            assert_eq!(toasts(&mut vcx), ["UI scale changed to 200%"]);
+
+            let mut vcx = scale_rig(cx_b, 75);
+            act(&mut vcx, ScaleDown);
+            assert_eq!(pct(&mut vcx), 75);
+            assert!(toasts(&mut vcx).is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn scale_reset_toast(cx: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx, 130);
+            act(&mut vcx, ScaleReset);
+            assert_eq!(pct(&mut vcx), 100);
+            assert_eq!(toasts(&mut vcx), ["UI scale changed to 100%"]);
+        }
+
+        #[gpui_kit::test]
+        fn scale_toast_replaced(cx: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx, 100);
+            for _ in 0..3 {
+                act(&mut vcx, ScaleUp);
+            }
+            assert_eq!(pct(&mut vcx), 115);
+            assert_eq!(toasts(&mut vcx), ["UI scale changed to 115%"]);
+        }
+
+        #[gpui_kit::test]
+        fn row_height_metrics(cx: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx, 100);
+            vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| {
+                    d.settings.appearance.row_height_pct = 120;
+                    d.settings.appearance.ui_scale_pct = 150;
+                })
+            });
+            vcx.run_until_parked();
+            let row = vcx.update(|_, cx| f32::from(metrics(cx).row_height));
+            assert!((row - 50.4).abs() < 1e-4, "row height {row}");
+        }
+
+        #[gpui_kit::test]
+        fn toast_top_follows_tab_strip(cx: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx, 100);
+            assert_eq!(toast_top(&mut vcx), px(72.));
+            vcx.update(|_, cx| {
+                TlSettings::update(cx, |d| d.settings.appearance.ui_scale_pct = 150)
+            });
+            vcx.run_until_parked();
+            draw(&mut vcx);
+            assert_eq!(toast_top(&mut vcx), px(108.));
+            assert_eq!(bounds(&mut vcx, "TitleBar").size.height, px(51.));
+        }
+
+        #[gpui_kit::test]
+        fn scale_preview_not_persisted(cx: &mut TestAppContext) {
+            let persisted = Rc::new(Cell::new(0));
+            let mut vcx = rig(
+                cx,
+                Opts {
+                    pages: &[Tab::Processes],
+                    persisted: Some(persisted.clone()),
+                    ..Opts::default()
+                },
+            );
+            let before = persisted.get();
+            vcx.update(|_, cx| {
+                TlSettings::preview(cx, |d| d.settings.appearance.ui_scale_pct = 125)
+            });
+            vcx.run_until_parked();
+            assert_eq!(vcx.update(|_, cx| metrics(cx).ui_scale), 1.25);
+            assert_eq!(persisted.get(), before);
+        }
+
+        #[gpui_kit::test]
+        fn scale_factor_bumps_style_version(cx: &mut TestAppContext) {
+            let mut vcx = scale_rig(cx, 100);
+            let main = main(&mut vcx);
+            let report = |vcx: &mut VisualTestContext, factor: f32| {
+                vcx.update(|_, cx| {
+                    main.update(cx, |m, cx| m.scale_factor_changed_for_test(factor, cx))
+                });
+                vcx.run_until_parked();
+            };
+            report(&mut vcx, 1.1);
+            let before = style_version(&mut vcx);
+            report(&mut vcx, 2.0);
+            assert_eq!(style_version(&mut vcx), before + 1);
+            report(&mut vcx, 2.0);
+            assert_eq!(style_version(&mut vcx), before + 1, "same factor, no bump");
+            assert_eq!(pct(&mut vcx), 100);
+        }
     }
 
     /// The shell filter box in the main window (E20-009).

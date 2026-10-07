@@ -43,8 +43,8 @@ use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoo
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, EscapeChain, FocusFilter, GLOBAL_CONTEXT,
-    MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, SelectTab, ShowMainWindow,
-    ToggleMainWindow, ZoomWindow,
+    MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, ScaleDown, ScaleReset, ScaleUp,
+    SelectTab, ShowMainWindow, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
@@ -53,10 +53,13 @@ use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
 use crate::hub::GlobalHub;
+use crate::i18n::Strings;
+use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
-use crate::theme::{UiMetrics, current, metrics};
+use crate::theme::store::apply_metrics;
+use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
@@ -76,6 +79,15 @@ const TOAST_GAP: f32 = 8.0;
 fn toast_top(client: bool, s: f32) -> Pixels {
     bar_height_of(client, s) + px((TAB_STRIP_H + TOAST_GAP) * s)
 }
+
+/// The UI scale toast's key. Fixed, so repeated presses replace one toast (UI-SHL-130).
+pub const UI_SCALE_TOAST: ToastKey = ToastKey(0x7569_7363_616c_6531);
+/// "UI scale changed to { $pct }%".
+const UI_SCALE_TEXT: &str = "shell-toast-ui-scale";
+/// The UI scale keys' step and range, in percent (APP-040).
+const SCALE_STEP: u16 = 5;
+const SCALE_MIN: u16 = 75;
+const SCALE_MAX: u16 = 200;
 
 /// Quiet time after the last bounds change before the size is written (UI-SHL-002).
 const SIZE_SAVE_DELAY: Duration = Duration::from_millis(500);
@@ -312,6 +324,29 @@ pub fn init(cx: &mut App) {
     // Deferred: from a key in the main window, that window is mid-update and cannot be reached.
     cx.on_action(|_: &ShowMainWindow, cx| cx.defer(show_main_window));
     cx.on_action(|_: &ToggleMainWindow, cx| cx.defer(toggle_main_window));
+    cx.on_action(|_: &ScaleUp, cx| step_ui_scale(cx, |pct| (pct + SCALE_STEP).min(SCALE_MAX)));
+    cx.on_action(|_: &ScaleDown, cx| {
+        step_ui_scale(cx, |pct| pct.saturating_sub(SCALE_STEP).max(SCALE_MIN))
+    });
+    cx.on_action(|_: &ScaleReset, cx| step_ui_scale(cx, |_| 100));
+}
+
+/// Ctrl+Plus, Ctrl+Minus and Ctrl+0: sets `appearance.ui_scale_pct` to `step(pct)` and shows
+/// the new value in one keyed toast. Nothing happens when the value does not change. The main
+/// window's settings observer applies the new metrics.
+fn step_ui_scale(cx: &mut App, step: impl FnOnce(u16) -> u16) {
+    let pct = TlSettings::settings(cx).appearance.ui_scale_pct;
+    let new = step(pct);
+    if new == pct {
+        return;
+    }
+    TlSettings::update(cx, |d| d.settings.appearance.ui_scale_pct = new);
+    let Some(view) = main_window_view(cx) else {
+        return;
+    };
+    let mut text = String::new();
+    let _ = view.read(cx).scale_text.write(&mut text, &[&new]);
+    push_main_toast(cx, ToastKind::Info, text, Some(UI_SCALE_TOAST), None);
 }
 
 /// `Quit` always quits, whatever the tray settings (UI-SHL-113).
@@ -523,6 +558,33 @@ pub fn open_main_window_on(start: Tab, cx: &mut App) -> gpui_kit::Result<WindowH
     Ok(handle)
 }
 
+fn strings_version(cx: &App) -> u64 {
+    cx.try_global::<Strings>().map_or(0, |s| s.strings_version)
+}
+
+/// The UI scale toast text, translated (R-132). en-US before the strings are installed.
+fn scale_text(cx: &App) -> Template {
+    if cx.has_global::<Strings>() {
+        Template::new(cx, UI_SCALE_TEXT, &["pct"])
+    } else {
+        Template::en(UI_SCALE_TEXT, &["pct"])
+    }
+}
+
+/// The `[appearance]` values that change the metrics: scale, row height, rounded corners and
+/// shadow intensity.
+type MetricsKey = (u16, u16, bool, u8);
+
+fn metrics_key(cx: &App) -> MetricsKey {
+    let a = &TlSettings::settings(cx).appearance;
+    (
+        a.ui_scale_pct,
+        a.row_height_pct,
+        a.rounded_corners,
+        a.shadow_intensity_pct,
+    )
+}
+
 /// Pushes a toast to the main window's queue. Without a main window the toast is dropped.
 pub fn push_main_toast(
     cx: &mut App,
@@ -588,6 +650,13 @@ pub struct MainWindow {
     bounds: WindowBounds,
     /// The pending size write. A new bounds change replaces it.
     save_task: Option<Task<()>>,
+    /// The `[appearance]` values the metrics were last applied from.
+    applied: MetricsKey,
+    /// The window's scale factor at the last check.
+    scale_factor: f32,
+    /// "UI scale changed to { $pct }%", per strings version.
+    scale_text: Template,
+    strings_version: u64,
     _subs: SmallVec<[Subscription; 8]>,
     #[cfg(any(test, feature = "test-hooks"))]
     first_frames: u32,
@@ -601,6 +670,12 @@ fn settings_versions(cx: &App) -> (u64, u64) {
 
 impl MainWindow {
     pub fn new(start: Tab, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // A window reopened after an appearance change made while it was gone applies it here.
+        // Unchanged values do nothing.
+        if cx.has_global::<ThemeStore>() {
+            let appearance = TlSettings::settings(cx).appearance.clone();
+            apply_metrics(&appearance, cx);
+        }
         let s = metrics(cx).ui_scale;
         let root_focus = cx.focus_handle();
         let built = cx
@@ -633,6 +708,16 @@ impl MainWindow {
             let model = this.toolbar_model(cx);
             this.titlebar.update(cx, |bar, cx| bar.set_model(model, cx));
         }));
+        // Scale, row height, corners and shadow changes from the keys, the menu sliders, the
+        // Settings window or a reset (UI-SHL-130).
+        subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| this.apply_appearance(cx)));
+        subs.push(cx.observe_global::<Strings>(|this: &mut Self, cx| {
+            let version = strings_version(cx);
+            if version != this.strings_version {
+                this.strings_version = version;
+                this.scale_text = scale_text(cx);
+            }
+        }));
         // The layout and the toast top scale with ui_scale (UI-SHL-130).
         subs.push(cx.observe_global::<UiMetrics>(|this: &mut Self, cx| {
             let m = metrics(cx);
@@ -656,6 +741,7 @@ impl MainWindow {
         // Size saving (UI-SHL-002): the last bounds change wins, written 500 ms later.
         subs.push(
             cx.observe_window_bounds(window, |this: &mut Self, window, cx| {
+                this.on_scale_factor(window.scale_factor(), cx);
                 this.bounds = window_bounds_of(window, cx);
                 this.save_task = Some(cx.spawn(
                     async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -699,6 +785,10 @@ impl MainWindow {
             client,
             bounds: window_bounds_of(window, cx),
             save_task: None,
+            applied: metrics_key(cx),
+            scale_factor: window.scale_factor(),
+            scale_text: scale_text(cx),
+            strings_version: strings_version(cx),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
@@ -844,6 +934,8 @@ impl MainWindow {
                         registry.close_children_of_main(keep_detached, cx)
                     });
                 }
+                // A removed window gets no later deactivation, so Ctrl-pause ends here.
+                self.set_paused(false, cx);
                 let state = cx.default_global::<ShellState>();
                 state.main_window = None;
                 state.main_view = None;
@@ -888,6 +980,61 @@ impl MainWindow {
 
     fn on_zoom(&mut self, _: &ZoomWindow, window: &mut Window, cx: &mut Context<Self>) {
         zoom(window, cx);
+    }
+
+    /// Re-applies the metrics when the scale, row height, corners or shadow changed
+    /// (UI-SHL-130 steps 1 to 5). A `TlSettings::preview` reaches it too, so a slider drag
+    /// previews live.
+    fn apply_appearance(&mut self, cx: &mut Context<Self>) {
+        let key = metrics_key(cx);
+        if key == self.applied {
+            return;
+        }
+        self.applied = key;
+        let appearance = TlSettings::settings(cx).appearance.clone();
+        self.keep_first_row(cx, |cx| apply_metrics(&appearance, cx));
+        self.tabstrip
+            .update(cx, |strip, cx| strip.invalidate_layout_cache(cx));
+        let top = toast_top(self.client, metrics(cx).ui_scale);
+        self.toasts.update(cx, |queue, cx| queue.set_top(top, cx));
+        cx.refresh_windows();
+    }
+
+    /// Runs `apply` with the active page's first visible row kept at the top (UI-SHL-130 step
+    /// 5, R-187). Each page with a table adds its arm.
+    fn keep_first_row(&self, cx: &mut Context<Self>, apply: impl FnOnce(&mut Context<Self>)) {
+        let table = match self.active {
+            Tab::Processes => self
+                .page_entity::<ProcessesPage>(Tab::Processes)
+                .map(|page| page.read(cx).table().clone()),
+            _ => None,
+        };
+        let anchor = table
+            .as_ref()
+            .and_then(|table| table.read(cx).first_visible_row());
+        apply(cx);
+        if let (Some(table), Some(anchor)) = (table, anchor) {
+            table.update(cx, |t, cx| t.restore_first_visible_row(anchor, cx));
+        }
+    }
+
+    /// A compositor scale change. GPUI applies the factor itself, so `ui_scale` stays; the
+    /// style version bumps so cached text and paths are rebuilt (UI-SHL-130).
+    fn on_scale_factor(&mut self, factor: f32, cx: &mut Context<Self>) {
+        if factor == self.scale_factor {
+            return;
+        }
+        self.scale_factor = factor;
+        bump_style_version(cx);
+        self.tabstrip
+            .update(cx, |strip, cx| strip.invalidate_layout_cache(cx));
+        cx.refresh_windows();
+    }
+
+    /// Reports a window scale factor change; the test window's factor is fixed.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn scale_factor_changed_for_test(&mut self, factor: f32, cx: &mut Context<Self>) {
+        self.on_scale_factor(factor, cx);
     }
 
     /// The tab switch. `write_last` is false only for the start tab.
