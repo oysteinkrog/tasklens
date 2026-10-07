@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Context, Entity, IntoElement,
-    ParentElement as _, Render, Styled as _, Task, Window, WindowBackgroundAppearance,
+    ParentElement as _, QuitMode, Render, Styled as _, Task, Window, WindowBackgroundAppearance,
     WindowBounds, WindowDecorations, WindowOptions, div, px, size,
 };
 use rustc_hash::FxHashSet;
@@ -32,6 +32,7 @@ use super::stats::{
 use super::synth::SEED;
 use crate::anim::{AnimationDriver, PaintRecord};
 use crate::app::{AppEnv, TasklensUi, UiInit};
+use crate::components::icons::TlAssets;
 use crate::demand::GlobalDemand;
 use crate::hub::GlobalHub;
 use crate::pages::performance::cpu::CpuPage;
@@ -258,6 +259,39 @@ pub fn run(
         }
         cx.update(|cx| cx.quit());
         Ok(report)
+    })
+}
+
+/// tl-app's `--bench` entry (E01-009): runs `scene` in its own GPUI application, built as
+/// [`crate::run`] builds it (the bundled assets, explicit quit) but with no main window, and
+/// returns once the application has quit. tl-app has no gpui-kit dependency (E33-OI-1).
+pub fn run_app(
+    scene: BenchScene,
+    opts: BenchOptions,
+    clocks: BenchClocks,
+    real: Option<Arc<dyn EngineClient>>,
+) -> Result<BenchReport, BenchError> {
+    let outcome: Rc<RefCell<Option<Result<BenchReport, BenchError>>>> = Rc::default();
+    let slot = Rc::clone(&outcome);
+    gpui_kit::application()
+        .with_assets(TlAssets)
+        .with_quit_mode(QuitMode::Explicit)
+        .run(move |cx| {
+            let task = run(cx, scene, opts, clocks, real);
+            cx.spawn(async move |cx: &mut AsyncApp| {
+                let result = task.await;
+                // `run` quits after a finished scene; a failed one leaves that to its caller.
+                if result.is_err() {
+                    cx.update(|cx| cx.quit());
+                }
+                *slot.borrow_mut() = Some(result);
+            })
+            .detach();
+        });
+    outcome.borrow_mut().take().unwrap_or_else(|| {
+        Err(BenchError(
+            "the bench app quit before the scene finished".to_owned(),
+        ))
     })
 }
 

@@ -6,5 +6,5 @@ pub mod scenes;
 pub mod stats;
 pub mod synth;
 
-pub use scenes::{BenchError, BenchOptions, BenchScene, run};
+pub use scenes::{BenchError, BenchOptions, BenchScene, run, run_app};
 pub use stats::BenchClocks;
