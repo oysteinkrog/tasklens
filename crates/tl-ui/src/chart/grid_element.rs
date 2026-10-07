@@ -677,7 +677,7 @@ impl Element for ChartGridElement {
         // moves to another heading, or, with hover, changes the pinned time or the plot cell.
         // None of them rebuilds the geometry.
         let view = self.view.clone();
-        let (map, sf) = (out.map, env.scale_factor);
+        let (map, grid, sf) = (out.map, out.grid, env.scale_factor);
         window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
             if !phase.bubble() {
                 return;
@@ -707,7 +707,8 @@ impl Element for ChartGridElement {
                     // Same cell: move the pin. A new cell is pinned by the next paint.
                     Some((i, h)) if Some(*i) == view.hover_cell => {
                         let x = f32::from(e.position.x - h.bounds.left()) * sf;
-                        let t = Some(hover::pointer_time(&map, map.plot_width, x));
+                        let t = hover::pointer_time(&map, map.plot_width, x);
+                        let t = Some(hover::snap_time(t, grid));
                         if view.hover.pinned_t_ns != t {
                             view.hover.pinned_t_ns = t;
                             notify = true;
@@ -753,6 +754,8 @@ struct PaintOut {
     map: TimeMap,
     /// A hover pin survived this paint.
     pinned: bool,
+    /// The sample grid the hover pin snaps to.
+    grid: hover::SampleGrid,
 }
 
 /// Builds the geometry when its key changed, then paints every cell and the readout of
@@ -786,6 +789,7 @@ fn paint_grid_view(
                 plot_width: 0.0,
             },
             pinned: false,
+            grid: hover::SampleGrid::default(),
         };
     }
     let layout = grid_layout(n, bounds.size.width, view.spec.cell_min_w, view.spec.gap);
@@ -841,6 +845,14 @@ fn paint_grid_view(
     let range_ns = spec.range_ns;
     // An owner state that hides the data builds and paints no paths.
     let has_data = newest_ns > 0 && !blocked;
+    let sample_grid = hover::SampleGrid {
+        anchor_ns: if newest_ns == 0 {
+            right_edge
+        } else {
+            newest_ns
+        },
+        period_ns,
+    };
 
     let mut cache = cache.borrow_mut();
     if has_data {
@@ -1139,7 +1151,8 @@ fn paint_grid_view(
         // A new cell pins the time under the pointer; later moves are the listener's.
         if entered {
             let x = f32::from(window.mouse_position().x - plot.left()) * sf;
-            hover_state.pinned_t_ns = Some(hover::pointer_time(&map, map.plot_width, x));
+            let t = hover::pointer_time(&map, map.plot_width, x);
+            hover_state.pinned_t_ns = Some(hover::snap_time(t, sample_grid));
         }
         let (fill_s, overlay_s) = series.get(i).cloned().unwrap_or_default();
         let has_overlay = spec.cells[i].overlay_series.is_some();
@@ -1208,6 +1221,7 @@ fn paint_grid_view(
         moving,
         map,
         pinned: hover_state.pinned_t_ns.is_some(),
+        grid: sample_grid,
     }
 }
 

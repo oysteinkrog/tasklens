@@ -1,6 +1,8 @@
 //! Hover readout on large charts and minigraph cards (PERF-023, UI-PRF-004, ADR-009 rule 1).
 //!
-//! While the pointer is over the plot, the chart pins the nearest sample time. Each paint finds
+//! While the pointer is over the plot, the chart pins the nearest sample time, snapped to the
+//! sample grid ([`snap_time`]), so a pointer move inside one sample changes nothing and does not
+//! notify. Each paint finds
 //! that sample by one binary search and draws a vertical marker at its x, a dot per series and a
 //! box with the time offset, each series value, avg, peak and the sample count. The marker's x is
 //! recomputed every frame, so it moves left with the data. The box text is formatted and shaped
@@ -117,6 +119,31 @@ pub fn pointer_time(map: &TimeMap, plot_right_physical: f32, x_physical: f32) ->
     let from_right = (plot_right_physical - x_physical).clamp(0.0, map.plot_width.max(0.0));
     let ns = f64::from(from_right) * map.range_ns as f64 / f64::from(map.plot_width.max(1.0));
     map.right_edge_ns.saturating_sub(ns.round() as u64)
+}
+
+/// The sample grid a pointer time snaps to: the newest sample time and the sample period.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SampleGrid {
+    pub anchor_ns: u64,
+    pub period_ns: u64,
+}
+
+/// `t_ns` moved to the nearest point of `grid`, `anchor_ns − k × period_ns` for a whole `k ≥ 0`;
+/// the older one on a tie, as [`nearest_index`]. Times after the anchor snap to it. A zero
+/// period returns `t_ns`.
+pub fn snap_time(t_ns: u64, grid: SampleGrid) -> u64 {
+    let SampleGrid {
+        anchor_ns,
+        period_ns,
+    } = grid;
+    if period_ns == 0 {
+        return t_ns;
+    }
+    if t_ns >= anchor_ns {
+        return anchor_ns;
+    }
+    let k = (anchor_ns - t_ns).saturating_add(period_ns / 2) / period_ns;
+    anchor_ns.saturating_sub(k.saturating_mul(period_ns))
 }
 
 /// Appends the hover time offset `dt_ns` before the newest sample, rounded to whole seconds:

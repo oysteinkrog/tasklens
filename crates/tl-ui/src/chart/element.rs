@@ -159,8 +159,9 @@ impl Element for ChartElement {
     }
 }
 
-/// Pointer moves over the plot pin the time under the pointer; leaving the plot drops the pin.
-/// Any mouse button down drops it too. Both notify only when the pin changed.
+/// Pointer moves over the plot pin the sample time nearest the pointer; leaving the plot drops
+/// the pin. Any mouse button down drops it too. Both notify only when the pin changed, so moves
+/// inside one sample do not notify.
 fn register_hover_events(
     view: &Entity<ChartView>,
     hitbox: Hitbox,
@@ -170,18 +171,15 @@ fn register_hover_events(
     window: &mut Window,
 ) {
     let plot = bounds.inset(px(1.0));
-    let map = out.map;
+    let (map, grid) = (out.map, out.grid);
     let entity = view.clone();
     window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
         if !phase.bubble() {
             return;
         }
         let t = hitbox.is_hovered(window).then(|| {
-            hover::pointer_time(
-                &map,
-                map.plot_width,
-                f32::from(e.position.x - plot.left()) * sf,
-            )
+            let x = f32::from(e.position.x - plot.left()) * sf;
+            hover::snap_time(hover::pointer_time(&map, map.plot_width, x), grid)
         });
         entity.update(cx, |v, cx| {
             if v.hover.pinned_t_ns != t {
@@ -222,6 +220,8 @@ struct PaintOut {
     map: TimeMap,
     /// A hover pin survived this paint.
     pinned: bool,
+    /// The sample grid the hover pin snaps to.
+    grid: hover::SampleGrid,
     #[cfg_attr(
         not(any(test, feature = "test-hooks")),
         allow(dead_code, reason = "read by the bench paint hook only")
@@ -292,6 +292,14 @@ fn paint_view(
         geometry::right_edge_ns(now, newest_ns, period_ns, sliding)
     };
     let range_ns = spec.range_ns;
+    let sample_grid = hover::SampleGrid {
+        anchor_ns: if newest_ns == 0 {
+            right_edge
+        } else {
+            newest_ns
+        },
+        period_ns,
+    };
 
     let has_data = matches!(state, ChartState::Live | ChartState::Stale { .. });
     let mut cache = cache.borrow_mut();
@@ -423,6 +431,7 @@ fn paint_view(
             moving: false,
             map,
             pinned: false,
+            grid: sample_grid,
             newest_ns,
         };
     }
@@ -504,6 +513,7 @@ fn paint_view(
         moving,
         map,
         pinned: hover_state.pinned_t_ns.is_some(),
+        grid: sample_grid,
         newest_ns,
     }
 }

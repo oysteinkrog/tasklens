@@ -2572,6 +2572,8 @@ mod tier_1hz {
 /// tasklens-yrf.16: hover readout. A hitbox only when `spec.hover`, the nearest valid sample,
 /// the offset text, the box flip at the right edge, and no re-shaping while the index holds.
 mod hover {
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::sync::Arc;
 
     use gpui_kit::{
@@ -2585,7 +2587,9 @@ mod hover {
     use tl_model::time::now_boot_ns;
     use tl_ui::anim::AnimationDriver;
     use tl_ui::chart::geometry::TimeMap;
-    use tl_ui::chart::hover::{nearest_index, offset_text, pointer_time, window_stats};
+    use tl_ui::chart::hover::{
+        SampleGrid, nearest_index, offset_text, pointer_time, snap_time, window_stats,
+    };
     use tl_ui::chart::view::ChartView;
     use tl_ui::chart::{ChartSeries, ChartSpec};
     use tl_ui::testing::fake_engine::FakeEngine;
@@ -2741,6 +2745,105 @@ mod hover {
 
         let stats = window_stats(&gap, 1);
         assert_eq!(stats.samples, 1, "valid samples only");
+    }
+
+    #[test]
+    fn hover_snap_time_to_sample_grid() {
+        let grid = SampleGrid {
+            anchor_ns: 60 * S,
+            period_ns: 100 * MS,
+        };
+        assert_eq!(snap_time(60 * S, grid), 60 * S);
+        assert_eq!(snap_time(61 * S, grid), 60 * S, "after the newest sample");
+        assert_eq!(snap_time(60 * S - 40 * MS, grid), 60 * S);
+        assert_eq!(snap_time(60 * S - 60 * MS, grid), 60 * S - 100 * MS);
+        assert_eq!(
+            snap_time(60 * S - 50 * MS, grid),
+            60 * S - 100 * MS,
+            "the older one on a tie"
+        );
+        assert_eq!(snap_time(0, grid), 0);
+        let no_period = SampleGrid {
+            period_ns: 0,
+            ..grid
+        };
+        assert_eq!(snap_time(123, no_period), 123);
+    }
+
+    /// A 6 s chart over [`view_of`]: 100 px per second, 10 px per sample. Returns the chart, the
+    /// newest sample time and a notify counter.
+    fn wide_samples(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<ChartView>,
+        u64,
+        Rc<Cell<u32>>,
+        gpui_kit::Subscription,
+        &mut VisualTestContext,
+    ) {
+        let spec = ChartSpec {
+            range_ns: 6 * S,
+            ..spec(true)
+        };
+        let (chart, vcx) = chart_in_window(cx, spec, false);
+        let newest = now_boot_ns();
+        chart.update(vcx, |v, cx| {
+            v.set_series_for_test(smallvec![Some(view_of(newest))], cx)
+        });
+        draw(vcx);
+        let notifies = Rc::new(Cell::new(0));
+        let sub = vcx.update(|_, cx| {
+            let n = notifies.clone();
+            cx.observe(&chart, move |_, _| n.set(n.get() + 1))
+        });
+        (chart, newest, notifies, sub, vcx)
+    }
+
+    /// The window x of the pinned sample, from the last paint's right edge.
+    fn pinned_x(vcx: &mut VisualTestContext, chart: &Entity<ChartView>) -> f32 {
+        vcx.read_entity(chart, |v, _| {
+            let t = v.hover_state().pinned_t_ns.expect("pinned");
+            let right = v.last_right_edge_ns.get();
+            // Plot from x 1 to 601, 6 s wide.
+            601. - (right - t) as f32 / (6 * S) as f32 * 600.
+        })
+    }
+
+    #[gpui_kit::test]
+    fn hover_pin_is_a_sample_time(cx: &mut TestAppContext) {
+        let (chart, newest, _, _sub, vcx) = wide_samples(cx);
+        for x in [300.3, 412.7, 598.9] {
+            hover(vcx, x, 100.);
+            let t = vcx.read_entity(&chart, |v, _| v.hover_state().pinned_t_ns);
+            let t = t.expect("pinned");
+            assert_eq!((newest - t) % (100 * MS), 0, "x {x}: a sample time");
+        }
+    }
+
+    #[gpui_kit::test]
+    fn hover_move_within_one_sample_does_not_notify(cx: &mut TestAppContext) {
+        let (chart, _, notifies, _sub, vcx) = wide_samples(cx);
+        hover(vcx, 300., 100.);
+        let center = pinned_x(vcx, &chart);
+        let pinned = vcx.read_entity(&chart, |v, _| v.hover_state().pinned_t_ns);
+        notifies.set(0);
+        for dx in [-4., -3., -2., -1., -0.5, 0., 0.5, 1., 2., 3., 4.] {
+            vcx.simulate_mouse_move(point(px(center + dx), px(100.)), None, Modifiers::none());
+        }
+        assert_eq!(notifies.get(), 0, "moves inside one sample");
+        let same = vcx.read_entity(&chart, |v, _| v.hover_state().pinned_t_ns);
+        assert_eq!(same, pinned);
+
+        // One sample to the left: one notify, the pin one period older.
+        vcx.simulate_mouse_move(point(px(center - 10.), px(100.)), None, Modifiers::none());
+        vcx.simulate_mouse_move(point(px(center - 11.), px(100.)), None, Modifiers::none());
+        assert_eq!(
+            notifies.get(),
+            1,
+            "crossing a sample boundary notifies once"
+        );
+        let older = vcx.read_entity(&chart, |v, _| v.hover_state().pinned_t_ns);
+        assert_eq!(older, pinned.map(|t| t - 100 * MS));
     }
 
     #[test]
