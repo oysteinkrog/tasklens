@@ -2068,10 +2068,11 @@ mod filter {
             })
         }
 
-        /// An empty view for the current query.
+        /// An empty view for the current query, as a new table version.
         fn publish_empty(&mut self) {
             let generation = self.generation();
-            let mut s = Snapshot::clone(&snapshot(10, Vec::new(), Vec::new(), Vec::new()));
+            let version = 10 + generation;
+            let mut s = Snapshot::clone(&snapshot(version, Vec::new(), Vec::new(), Vec::new()));
             s.sequence = self.engine.latest().sequence + 1;
             Arc::make_mut(&mut s.table).query_generation = generation;
             self.engine.publish(s);
@@ -2163,7 +2164,34 @@ mod filter {
             page.read(cx).table().read(cx).delegate.empty_text()
         });
         assert_eq!(text.as_deref(), Some("No processes match the filter"));
-        assert!(r.vcx.debug_bounds("TlTreeTable-empty").is_some(), "drawn");
+        let state = r
+            .vcx
+            .debug_bounds("TlTreeTable-empty-state")
+            .expect("the empty state is drawn");
+        let body = r.vcx.debug_bounds("TlTreeTable-body").expect("the body");
+        assert_eq!(
+            state.origin.y - body.origin.y,
+            gpui_kit::px(96.),
+            "96 below the body top"
+        );
+        assert!(
+            r.vcx.debug_bounds("TlTreeTable-empty").is_none(),
+            "not the plain label"
+        );
+        let button = r
+            .vcx
+            .debug_bounds("TlButton-TlEmptyState-clear-filter")
+            .expect("the Clear filter button");
+        // The button dispatches ClearFilter, which the shell turns into an empty filter.
+        r.vcx
+            .simulate_click(button.center(), gpui_kit::Modifiers::none());
+        // Past the shell's 100 ms debounce.
+        r.vcx
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        r.draw();
+        let q = super::sent(&r.engine).pop().expect("a query");
+        assert_eq!(q.filter.as_ref(), "", "Clear filter cleared the filter");
         assert!(
             r.vcx.debug_bounds("TlTreeTable-group-row").is_none(),
             "no group header row"

@@ -56,12 +56,17 @@ fn include_children_setting(cx: &App) -> bool {
 
 impl ProcessesPage {
     /// One `FilterChanged` for this tab: the lowercased text and a new generation, sent now.
+    /// The same text sends nothing; the jump's Show already cleared the filter before the
+    /// shell's own `FilterChanged` for it arrives.
     fn apply_filter(&mut self, text: &str, cx: &mut Context<Self>) {
-        let lower: Arc<str> = Arc::from(text.to_lowercase());
+        let lower = text.to_lowercase();
         let client = Arc::clone(&self.client);
         self.table.update(cx, |t, _| {
             let q = t.delegate.query_mut();
-            q.set_filter(lower);
+            if q.filter().as_ref() == lower {
+                return;
+            }
+            q.set_filter(Arc::from(lower));
             q.bump_and_send(&*client);
         });
     }

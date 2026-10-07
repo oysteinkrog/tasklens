@@ -1328,6 +1328,11 @@ impl TreeTableDelegate for ProcessDelegate {
         (!self.query.filter().is_empty()).then(|| self.no_match.clone())
     }
 
+    /// The no-match text comes with "Clear filter" (UI-PRC-024).
+    fn empty_clear_filter(&self) -> bool {
+        !self.query.filter().is_empty()
+    }
+
     fn cell_tip_delay(&self) -> Duration {
         DELAY_PROCESS_CELL
     }

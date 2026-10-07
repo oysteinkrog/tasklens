@@ -31,6 +31,8 @@ use tl_model::ids::ColumnId;
 use tl_model::table::{SortSpec, SysColumnId, SysSortSpec};
 use tl_model::validity::Validity;
 
+use crate::actions::ClearFilter;
+use crate::components::empty::TlEmptyState;
 use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::tooltip::{DELAY_CONTROL, DELAY_ROW_NAME, HoverTooltip, TlTooltip};
@@ -146,6 +148,12 @@ pub trait TreeTableDelegate: 'static + Sized {
     /// Text for an empty table (UI-PRC-024).
     fn empty_text(&self) -> Option<SharedString>;
 
+    /// True: an empty table shows `empty_text` as a `TlEmptyState` with "Clear filter" 96 px
+    /// below the body top, instead of the centred label (UI-PRC-024).
+    fn empty_clear_filter(&self) -> bool {
+        false
+    }
+
     fn header_lines(&self) -> HeaderLines {
         HeaderLines::Two
     }
@@ -233,6 +241,9 @@ impl TableSort<SysColumnId> for SysSortSpec {
 
 /// Opacity of the metric cells of a `STALE` row (UI-PRC-002).
 pub const STALE_OPACITY: f32 = 0.6;
+
+/// Top of the filtered-empty state below the body top, at 100% scale (UI-PRC-024).
+pub const EMPTY_STATE_TOP: f32 = 96.0;
 
 /// What the table tells its owner page. The page turns these into toasts: "Copied to clipboard"
 /// and "Failed to copy to clipboard" (APP-044).
@@ -2370,7 +2381,21 @@ impl<D: TreeTableDelegate> Render for TlTreeTable<D> {
             .on_mouse_down(MouseButton::Right, cx.listener(Self::body_right_down))
             .child(list)
             .child(scrollbar);
-        if let Some(text) = empty {
+        if let Some(text) = empty.clone()
+            && self.delegate.empty_clear_filter()
+        {
+            body = body.child(
+                div()
+                    .debug_selector(|| "TlTreeTable-empty-state".into())
+                    .absolute()
+                    .top(px(EMPTY_STATE_TOP * m.ui_scale))
+                    .left_0()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(TlEmptyState::new(text).clear_filter(Box::new(ClearFilter))),
+            );
+        } else if let Some(text) = empty {
             let mut label = div();
             *label.text_style() = t_base(&m);
             body = body.child(
