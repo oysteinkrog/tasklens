@@ -1227,7 +1227,7 @@ mod end {
             let before = self.windows();
             let page = self.page.clone();
             self.vcx
-                .update(|window, cx| page.read(cx).focus_table(window, cx));
+                .update(|window, cx| page.update(cx, |p, cx| p.focus_table(window, cx)));
             self.vcx.run_until_parked();
             self.vcx.update(|window, cx| window.draw(cx).clear(cx));
             self.vcx.dispatch_action(action);
