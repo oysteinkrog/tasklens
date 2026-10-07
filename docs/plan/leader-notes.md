@@ -779,3 +779,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - wlf.29 (f6ee161d) closed. Hover snaps to the sample grid, so a move inside one sample gives 0 notifies. The o55 agent takes wlf.32. The xdh.8 test gap_click_reaches_table fails, and its owner has been told.
 - pdu.54 (0e842935, a603aeb0, ac0123a3, 31d796ba, bb4ab664, 2366dbf5, c1987c02) closed, including network auto-scale. wlf.21 closed as not needed. The pdu-52 agent takes pdu.28.
 - pdu.28: the restricted segment is plain text with no tooltip until pdu.44 makes it a Link. The ftl string is added now.
+- hk6.8 (eda07128, 833b52a5) closed. The m1f agent takes bj6.13, then fut.20.
