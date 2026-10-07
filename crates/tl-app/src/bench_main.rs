@@ -39,6 +39,11 @@ pub fn run(args: BenchArgs) -> i32 {
         }
     };
 
+    if let Some(text) = lock_refusal(session_locked()) {
+        eprintln!("bench failed: {text}");
+        return 1;
+    }
+
     let engine = if scene == BenchScene::Bridge {
         match start_engine() {
             Ok(engine) => Some(engine),
@@ -84,6 +89,52 @@ fn parse_scene(name: &str) -> Result<BenchScene, String> {
     BenchScene::from_arg(name).ok_or_else(|| {
         format!("unknown bench scene \"{name}\"; expected perf-cpu, table-2000, bridge or static")
     })
+}
+
+/// Why a run must not start: a locked session gets no frame callbacks from the compositor, so
+/// every frame figure would be 0. `None` when unlocked or unknown.
+fn lock_refusal(locked: Option<bool>) -> Option<&'static str> {
+    (locked == Some(true)).then_some("session is locked; frames will not be delivered")
+}
+
+/// logind's `LockedHint` over this user's graphical sessions (wayland or x11): true when any is
+/// locked. `None` when logind cannot be asked; the run then goes ahead with a warning.
+fn session_locked() -> Option<bool> {
+    use zbus::blocking::{Connection, Proxy};
+    use zbus::zvariant::OwnedObjectPath;
+
+    const LOGIN1: &str = "org.freedesktop.login1";
+    let ask = || -> zbus::Result<bool> {
+        let conn = Connection::system()?;
+        let manager = Proxy::new(
+            &conn,
+            LOGIN1,
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )?;
+        let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> =
+            manager.call("ListSessions", &())?;
+        let uid = rustix::process::getuid().as_raw();
+        let mut locked = false;
+        for (_, session_uid, _, _, path) in sessions {
+            if session_uid != uid {
+                continue;
+            }
+            let session = Proxy::new(&conn, LOGIN1, path, "org.freedesktop.login1.Session")?;
+            let kind: String = session.get_property("Type")?;
+            if (kind == "wayland" || kind == "x11") && session.get_property::<bool>("LockedHint")? {
+                locked = true;
+            }
+        }
+        Ok(locked)
+    };
+    match ask() {
+        Ok(locked) => Some(locked),
+        Err(e) => {
+            warn!(target: "tasklens::perf", "cannot read the session lock state: {e}");
+            None
+        }
+    }
 }
 
 /// The real engine for `bridge`, with the demand the Performance tab's CPU page sends (ADR-008):
@@ -149,6 +200,20 @@ mod tests {
         assert_eq!(code, 2, "no window is opened for an unknown scene");
         assert_eq!(parse_scene("perf-cpu"), Ok(BenchScene::PerfCpu));
         assert_eq!(parse_scene("table-2000"), Ok(BenchScene::Table2000));
+    }
+
+    #[test]
+    fn locked_session_refused() {
+        assert_eq!(
+            lock_refusal(Some(true)),
+            Some("session is locked; frames will not be delivered")
+        );
+        assert_eq!(lock_refusal(Some(false)), None);
+        assert_eq!(
+            lock_refusal(None),
+            None,
+            "unknown state does not block a run"
+        );
     }
 
     #[test]
