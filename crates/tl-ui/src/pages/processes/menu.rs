@@ -20,6 +20,7 @@ use crate::components::menu::TlMenu;
 use crate::i18n::tr;
 use crate::table::actions::{CopyCell, CopyRowsAsTable};
 use crate::table::tree_table::RowKind;
+use crate::windows::actions::SetAffinity;
 
 /// Minimum width of the row and group header menus before the UI scale (R-112).
 pub const ROW_MENU_MIN_W: f32 = 240.0;
@@ -100,6 +101,7 @@ pub fn row_menu(
     menu = menu.separator();
     menu = add_suspend(menu, targets, shape, cx);
     menu = add_set_priority(menu, targets, shape, window, cx);
+    menu = add_set_affinity(menu, shape, cx);
     menu = menu.separator();
     menu = add_copy(menu, targets, cx);
     menu = add_copy_details(menu, cx);
@@ -254,6 +256,15 @@ fn add_set_priority(
     } else {
         menu
     }
+}
+
+/// Item 7: Set Affinity…, on one process, app or unit row (several targets come with E23-005).
+fn add_set_affinity(menu: TlMenu, shape: Shape, cx: &App) -> TlMenu {
+    if !(shape.process || shape.group) {
+        return menu;
+    }
+    let label = tr(cx, "processes-menu-set-affinity");
+    exitable(menu, shape, label, Box::new(SetAffinity), cx)
 }
 
 /// Item 11: Copy, for the column under the pointer. Not built from the keyboard.

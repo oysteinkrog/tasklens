@@ -1027,6 +1027,8 @@ mod end {
     use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
+    use tl_ui::windows::actions::SetAffinity;
+    use tl_ui::windows::affinity::AffinityDialog;
 
     use super::toasts::{actions_sent, emit, open, visible};
 
@@ -1792,6 +1794,7 @@ mod end {
             "-",
             "Suspend Process",
             "Set Priority >",
+            "Set Affinity…",
             "-",
         ];
         out.extend(COPIES);
@@ -1848,6 +1851,7 @@ mod end {
             "-",
             "(Suspend Process: Process exited)",
             "(Set Priority: Process exited)",
+            "(Set Affinity…: Process exited)",
             "-",
         ];
         exited.extend(COPIES);
@@ -1863,6 +1867,7 @@ mod end {
             "End App",
             "-",
             "Set Priority > [Applies to the app's current processes]",
+            "Set Affinity…",
             "-",
         ];
         app.extend(COPIES);
@@ -1978,7 +1983,6 @@ mod end {
             "Thaw",
             "Show Window",
             "Send Signal",
-            "Set Affinity",
             "I/O",
             "Restart",
             "Properties",
@@ -2272,6 +2276,73 @@ mod end {
         assert!(rig.dispatch(OpenFileLocation).is_none());
         assert!(actions_sent(&rig.engine).is_empty());
         assert_eq!(visible(&mut rig.vcx), ["Process image unavailable"]);
+    }
+
+    #[gpui_kit::test]
+    fn set_affinity_item_position_and_states(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let at = |shape: &[String]| shape.iter().position(|e| e.starts_with("Set Affinity"));
+        let one = {
+            let m = build_menu(&mut rig, &[1], ColumnId::Name);
+            shape(&mut rig, &m)
+        };
+        let priority = one
+            .iter()
+            .position(|e| e == "Set Priority >")
+            .expect("item 6");
+        assert_eq!(at(&one), Some(priority + 1), "item 7 follows Set Priority");
+        assert!(
+            entries(&mut rig, &build_menu(&mut rig, &[1], ColumnId::Name))
+                .iter()
+                .find(|e| e.label.as_deref() == Some("Set Affinity…"))
+                .is_some_and(|e| e.hint.is_none()),
+            "no key hint"
+        );
+        let shape_of = |rig: &mut Rig, rows: &[usize]| {
+            let m = build_menu(rig, rows, ColumnId::Name);
+            shape(rig, &m)
+        };
+        assert_eq!(
+            at(&shape_of(&mut rig, &[1, 2])),
+            None,
+            "not built on two rows (P1)"
+        );
+        assert_eq!(at(&shape_of(&mut rig, &[9])), None, "not on a pseudo row");
+        let exited = shape_of(&mut rig, &[4]);
+        assert!(exited.contains(&"(Set Affinity…: Process exited)".to_owned()));
+        let app = shape_of(&mut rig, &[7]);
+        assert!(
+            app.contains(&"Set Affinity…".to_owned()),
+            "same label on an app row"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn set_affinity_action_opens_pwn021_with_captured_targets(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        rig.publish(own(&[300, 301]), &[300, 301], Vec::new());
+        rig.select_pids(&[300]);
+        // The menu opens on row A (PID 300), then the rows re-sort and the selection moves.
+        let _menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        rig.publish(own(&[300, 301]), &[301, 300], Vec::new());
+        rig.select_pids(&[301]);
+        let before = rig.windows();
+        assert!(rig.dispatch(SetAffinity).is_none());
+        let id = rig
+            .windows()
+            .into_iter()
+            .find(|w| !before.contains(w))
+            .expect("the Set Affinity dialog opened");
+        let handle = WindowHandle::<gpui_kit::base::Root>::new(id);
+        let (targets, subtitle) = rig.vcx.update(|_, cx| {
+            let dialog = AffinityDialog::find(handle, cx).expect("an affinity dialog");
+            let d = dialog.read(cx);
+            (d.targets().to_vec(), d.subtitle(cx).to_string())
+        });
+        assert_eq!(targets, [ActionTarget::Process(key(300))], "row A's key");
+        assert!(subtitle.starts_with("proc (PID 300)"), "{subtitle}");
+        assert!(rig.sent().is_empty(), "the dialog sends on OK only");
     }
 
     fn stopped(pid: u32) -> ProcessRecord {

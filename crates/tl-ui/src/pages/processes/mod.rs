@@ -48,7 +48,7 @@ use self::jump::JumpTexts;
 use self::toasts::{ActionToastTexts, refusal_reason, submit, toast_words};
 use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::{Strings, tr};
+use crate::i18n::{Strings, tr, tr_args};
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::{CollapseAll, CopyCell};
 use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _, TreeTableEvent};
@@ -56,6 +56,7 @@ use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::util::clipboard_write;
 use crate::window::main::ShellPage;
 use crate::window::status::StatusChanged;
+use crate::windows::actions::SetAffinity;
 
 /// Key context of the page div. The table inside it has `Table`.
 pub const PAGE_CONTEXT: &str = "ProcessTable";
@@ -448,6 +449,46 @@ impl ProcessesPage {
 
     fn on_copy_all_metrics(&mut self, _: &CopyAllMetrics, _: &mut Window, cx: &mut Context<Self>) {
         self.copy(CopyKind::AllMetrics, cx);
+    }
+
+    /// Set Affinity… (UI-PRC-021): opens the dialog for the one captured row. An app or unit
+    /// row gives its current member processes, at most [`MAX_TARGETS`].
+    fn on_set_affinity(&mut self, _: &SetAffinity, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((rows, _)) = self.prune(|_| None, cx) else {
+            return;
+        };
+        let [t] = &rows[..] else {
+            return;
+        };
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let p = &snapshot.processes;
+        let keys: Vec<ProcessKey> = match (t.kind, &t.node) {
+            (RowKind::Process | RowKind::KernelThread, NodeId::Process(key)) => vec![*key],
+            (RowKind::App | RowKind::Unit, node) => members(p, node)
+                .into_iter()
+                .take(MAX_TARGETS)
+                .map(|i| p.records[i].key)
+                .collect(),
+            _ => Vec::new(),
+        };
+        let Some(first) = keys.first() else {
+            return;
+        };
+        let pid = t.pid.unwrap_or(first.pid);
+        let subtitle = tr_args(
+            cx,
+            "processes-affinity-subtitle",
+            &[
+                ("name", t.name.to_string().into()),
+                ("pid", pid.to_string().into()),
+            ],
+        );
+        let targets = keys.into_iter().map(ActionTarget::Process).collect();
+        if let Err(err) =
+            crate::windows::affinity::open(targets, subtitle, window.window_handle(), cx)
+        {
+            warn!(target: "tasklens::ui", %err, "the Set Affinity dialog did not open");
+        }
     }
 
     /// Go to parent process (PROC-071): selects the live record whose PID is the target's
@@ -1086,6 +1127,7 @@ impl Render for ProcessesPage {
             .on_action(cx.listener(Self::on_copy_cell))
             .on_action(cx.listener(Self::on_copy_details))
             .on_action(cx.listener(Self::on_copy_all_metrics))
+            .on_action(cx.listener(Self::on_set_affinity))
             .on_action(cx.listener(Self::on_go_to_parent))
             .on_action(cx.listener(Self::on_open_file_location))
             .child(
