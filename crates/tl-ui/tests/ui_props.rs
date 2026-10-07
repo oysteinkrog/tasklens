@@ -643,3 +643,476 @@ fn run_size_scales_with_ui_scale(cx: &mut TestAppContext) {
     assert_eq!(opened, size(px(600.), px(310.)));
     assert_eq!(min, size(px(600.), px(310.)));
 }
+
+/// The Process Properties window over the real app globals and main window (E23-A1, UI-PWN-002
+/// to UI-PWN-004, UI-PWN-018). Needs `--features test-hooks` for `AppEnv::test`.
+#[cfg(feature = "test-hooks")]
+mod window {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use gpui_kit::{AnyWindowHandle, WindowHandle};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::demand::DetailDemand;
+    use tl_model::details::{DetailTab, DetailTarget, TargetDetail};
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::window_frame::TlSecondaryWindow;
+    use tl_ui::demand::GlobalDemand;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui::window::registry::{CapClass, GlobalRegistry, WindowKey};
+    use tl_ui::windows::props::{
+        ACCESS_ENV, ACCESS_FDS, ACCESS_MAPS, ACCESS_SECURITY, ACCESS_STRINGS, PropsWindow,
+        open_process_properties, props_words,
+    };
+
+    use super::*;
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey { pid, ..KEY }
+    }
+
+    fn rec(pid: u32, flags: ProcFlags) -> ProcessRecord {
+        let mut r = record(1.0);
+        r.key = key(pid);
+        r.flags = flags;
+        r
+    }
+
+    /// App globals and the main window on Processes.
+    fn setup(cx: &mut TestAppContext) -> (Arc<FakeEngine>, VisualTestContext) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env: AppEnv::test(),
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Processes, cx))
+            .expect("the main window opens");
+        let mut main = VisualTestContext::from_window(handle.into(), cx);
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        (engine, main)
+    }
+
+    /// Publishes `records` (any order) as the process list.
+    fn publish_records(
+        cx: &mut TestAppContext,
+        engine: &FakeEngine,
+        mut records: Vec<ProcessRecord>,
+    ) {
+        records.sort_by_key(|r| r.key);
+        engine.publish_with(|s| {
+            let p = Arc::make_mut(&mut s.processes);
+            p.records = Arc::from(records);
+            p.header.version += 1;
+        });
+        cx.run_until_parked();
+    }
+
+    /// Edits the detail of `pid` and publishes it.
+    fn publish_detail(
+        cx: &mut TestAppContext,
+        engine: &FakeEngine,
+        pid: u32,
+        f: impl FnOnce(&mut TargetDetail),
+    ) {
+        let target = DetailTarget::Process(key(pid));
+        engine.publish_with(|s| {
+            let d = Arc::make_mut(&mut s.details);
+            let mut detail = d
+                .targets
+                .get(&target)
+                .map(|t| TargetDetail::clone(t))
+                .unwrap_or_default();
+            f(&mut detail);
+            d.targets.insert(target, Arc::new(detail));
+            d.header.version += 1;
+        });
+        cx.run_until_parked();
+    }
+
+    fn open(cx: &mut TestAppContext, pid: u32) -> Option<AnyWindowHandle> {
+        cx.update(|cx| open_process_properties(key(pid), cx));
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).get(&WindowKey::Properties(key(pid)))
+        })
+    }
+
+    fn props(cx: &mut TestAppContext, handle: AnyWindowHandle) -> Entity<PropsWindow> {
+        cx.update(|cx| PropsWindow::find(handle, cx))
+            .expect("props window")
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn props_count(cx: &mut TestAppContext) -> usize {
+        cx.update(|cx| {
+            let registry = cx.global::<GlobalRegistry>().0.clone();
+            registry.read(cx).count(CapClass::ProcessProps)
+        })
+    }
+
+    fn main_toasts(main: &mut VisualTestContext) -> Vec<String> {
+        main.update(|_, cx| {
+            let view = main_window_view(cx).expect("main window");
+            let texts = view.read(cx).toasts().read(cx).visible_texts();
+            texts.iter().map(|t| t.to_string()).collect()
+        })
+    }
+
+    fn demanded(cx: &mut TestAppContext) -> Vec<DetailDemand> {
+        cx.update(|cx| {
+            let demand = cx.global::<GlobalDemand>().0.clone();
+            demand.read(cx).merged().details.to_vec()
+        })
+    }
+
+    fn title(cx: &mut TestAppContext, handle: AnyWindowHandle) -> String {
+        cx.update(|cx| {
+            let frame =
+                TlSecondaryWindow::<PropsWindow>::find(WindowHandle::new(handle.window_id()), cx)
+                    .expect("frame");
+            frame.read(cx).title().to_string()
+        })
+    }
+
+    fn general_demand(pid: u32, tab: DetailTab) -> DetailDemand {
+        DetailDemand {
+            target: DetailTarget::Process(key(pid)),
+            tab,
+        }
+    }
+
+    #[gpui_kit::test]
+    fn props_open_focuses_existing_window(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, cx| {
+            view.update(cx, |p, cx| p.select_tab(DetailTab::Threads, window, cx))
+        });
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+
+        let again = open(cx, 4321).expect("still open");
+        assert_eq!(again.window_id(), handle.window_id());
+        assert_eq!(props_count(cx), 1);
+        let active = cx.update(|cx| cx.active_window().map(|w| w.window_id()));
+        assert_eq!(
+            active,
+            Some(handle.window_id()),
+            "the existing window became active"
+        );
+        assert_eq!(cx.read(|cx| view.read(cx).active()), DetailTab::Threads);
+    }
+
+    #[gpui_kit::test]
+    fn props_ninth_window_shows_toast(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        let pids: Vec<u32> = (100..109).collect();
+        publish_records(
+            cx,
+            &engine,
+            pids.iter().map(|&p| rec(p, ProcFlags::default())).collect(),
+        );
+        for &pid in &pids[..8] {
+            assert!(open(cx, pid).is_some(), "window {pid} opened");
+        }
+        main.update(|window, _| window.activate_window());
+        main.run_until_parked();
+        assert!(open(cx, pids[8]).is_none());
+        assert_eq!(props_count(cx), 8);
+        assert!(
+            main_toasts(&mut main)
+                .iter()
+                .any(|t| t == "Too many process properties windows are already open"),
+            "{:?}",
+            main_toasts(&mut main)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn props_open_failure_toast(cx: &mut TestAppContext) {
+        let (engine, mut main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(200, ProcFlags::EXITED)]);
+        assert!(open(cx, 4321).is_none(), "missing key");
+        assert!(open(cx, 200).is_none(), "exited record");
+        assert_eq!(props_count(cx), 0);
+        assert!(
+            main_toasts(&mut main)
+                .iter()
+                .any(|t| t.starts_with("Could not open properties.")),
+            "{:?}",
+            main_toasts(&mut main)
+        );
+    }
+
+    #[gpui_kit::test]
+    fn props_demand_registered_and_removed(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        assert!(demanded(cx).contains(&general_demand(4321, DetailTab::General)));
+        assert!(
+            engine
+                .commands()
+                .iter()
+                .any(|c| matches!(c, Command::ComputeHashes(k) if *k == key(4321))),
+            "hashes requested on open"
+        );
+
+        cx.update(|cx| {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        });
+        cx.run_until_parked();
+        assert!(demanded(cx).is_empty(), "{:?}", demanded(cx));
+    }
+
+    #[gpui_kit::test]
+    fn props_tab_switch_updates_demand(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(DetailTab::Maps, window, cx)));
+        vcx.run_until_parked();
+        assert_eq!(demanded(cx), vec![general_demand(4321, DetailTab::Maps)]);
+    }
+
+    #[gpui_kit::test]
+    fn props_alt_number_selects_tab(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+
+        vcx.simulate_keystrokes("alt-2");
+        vcx.run_until_parked();
+        assert_eq!(cx.read(|cx| view.read(cx).active()), DetailTab::Threads);
+        assert_eq!(demanded(cx), vec![general_demand(4321, DetailTab::Threads)]);
+
+        vcx.simulate_keystrokes("alt-7");
+        assert_eq!(cx.read(|cx| view.read(cx).active()), DetailTab::Strings);
+        vcx.simulate_keystrokes("ctrl-tab");
+        assert_eq!(cx.read(|cx| view.read(cx).active()), DetailTab::General);
+        vcx.simulate_keystrokes("ctrl-pageup");
+        assert_eq!(cx.read(|cx| view.read(cx).active()), DetailTab::Strings);
+    }
+
+    #[gpui_kit::test]
+    fn props_refresh_sends_detail_refresh(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        vcx.update(|window, _| window.activate_window());
+        draw(&mut vcx);
+        vcx.simulate_keystrokes("f5");
+        vcx.run_until_parked();
+        assert!(engine.commands().iter().any(|c| matches!(
+            c,
+            Command::DetailRefresh { target, tab: DetailTab::General }
+                if *target == DetailTarget::Process(key(4321))
+        )));
+    }
+
+    #[gpui_kit::test]
+    fn props_ignores_other_targets_detail_change(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(
+            cx,
+            &engine,
+            vec![
+                rec(4321, ProcFlags::default()),
+                rec(555, ProcFlags::default()),
+            ],
+        );
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let general = cx
+            .read(|cx| view.read(cx).tabs().general.clone())
+            .expect("general tab");
+        // A frame is drawn only after something in the window notifies, so the notifications
+        // of the window view and its tab are the renders a snapshot causes.
+        let notified = Rc::new(Cell::new(0u32));
+        let _subs = cx.update(|cx| {
+            let a = notified.clone();
+            let b = notified.clone();
+            [
+                cx.observe(&view, move |_, _| a.set(a.get() + 1)),
+                cx.observe(&general, move |_, _| b.set(b.get() + 1)),
+            ]
+        });
+        let general_payload = |name: &str| {
+            let p = payload(detail(name));
+            move |d: &mut TargetDetail| {
+                d.tabs[DetailTab::General.index()].payload = Some(p);
+                d.tabs[DetailTab::General.index()].validity = Validity::Valid;
+            }
+        };
+
+        publish_detail(cx, &engine, 555, general_payload("other"));
+        assert_eq!(notified.get(), 0, "another key's payload");
+
+        publish_detail(cx, &engine, 4321, general_payload("firefox"));
+        assert!(notified.get() > 0, "this key's payload re-renders");
+        let after = notified.get();
+        publish_detail(cx, &engine, 555, general_payload("other 2"));
+        assert_eq!(notified.get(), after, "another key's payload again");
+        assert!(cx.read(|cx| view.read(cx).render_count()) > 0);
+    }
+
+    #[gpui_kit::test]
+    fn props_tab_counts_format(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        cx.update(|cx| {
+            view.update(cx, |p, cx| {
+                p.set_count(DetailTab::Fds, 1204, cx);
+                p.set_count(DetailTab::Environment, 51, cx);
+                p.set_count(DetailTab::Security, 3, cx);
+            })
+        });
+        cx.read(|cx| {
+            let p = view.read(cx);
+            assert_eq!(
+                p.tab_text(DetailTab::Fds),
+                "File descriptors [1\u{2009}204]"
+            );
+            assert_eq!(p.tab_text(DetailTab::Environment), "Environment [51]");
+            assert_eq!(
+                p.tab_text(DetailTab::Threads),
+                "Threads [97]",
+                "from the record"
+            );
+            assert_eq!(p.tab_text(DetailTab::Security), "Security", "never a count");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn props_tab_no_count_before_load(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        cx.read(|cx| {
+            let p = view.read(cx);
+            assert_eq!(p.tab_text(DetailTab::Maps), "Memory maps");
+            assert_eq!(p.tab_text(DetailTab::Fds), "File descriptors");
+            assert_eq!(p.tab_text(DetailTab::General), "General");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn props_exited_freezes_values(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        publish_detail(cx, &engine, 4321, |d| {
+            d.tabs[DetailTab::General.index()].payload = Some(payload(detail("firefox --x")));
+            d.tabs[DetailTab::General.index()].validity = Validity::Valid;
+        });
+        draw(&mut vcx);
+        let general = cx
+            .read(|cx| view.read(cx).tabs().general.clone())
+            .expect("general tab");
+        let values = |cx: &mut TestAppContext| {
+            cx.read(|cx| {
+                let g = general.read(cx);
+                [FieldId::Affinity, FieldId::Executable, FieldId::Pid]
+                    .map(|id| g.field(id).map(|f| f.value.to_string()).unwrap_or_default())
+            })
+        };
+        let before = values(cx);
+        assert_eq!(title(cx, handle), "Process Properties - firefox - PID 4321");
+
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::EXITED)]);
+        publish_records(cx, &engine, Vec::new());
+        draw(&mut vcx);
+
+        assert!(cx.read(|cx| view.read(cx).exited()));
+        assert_eq!(
+            title(cx, handle),
+            "Process Properties - firefox - PID 4321 (not running)"
+        );
+        assert!(
+            vcx.debug_bounds("PropsExitedBanner").is_some(),
+            "banner drawn"
+        );
+        assert_eq!(
+            cx.read(|cx| view.read(cx).words().exited_banner.to_string()),
+            "This process has exited. Values are frozen at the last update."
+        );
+        assert_eq!(values(cx), before, "values frozen");
+        assert!(demanded(cx).is_empty(), "demand removed");
+        assert_eq!(props_count(cx), 1, "the window stays open");
+    }
+
+    #[gpui_kit::test]
+    fn access_block_texts_per_tab(cx: &mut TestAppContext) {
+        let (engine, _main) = setup(cx);
+        let words = cx.update(props_words);
+        for text in [
+            ACCESS_FDS,
+            ACCESS_MAPS,
+            ACCESS_SECURITY,
+            ACCESS_ENV,
+            ACCESS_STRINGS,
+        ] {
+            assert_eq!(words.access(text).as_ref(), text, "en-US text");
+        }
+
+        publish_records(cx, &engine, vec![rec(4321, ProcFlags::default())]);
+        let handle = open(cx, 4321).expect("opened");
+        let view = props(cx, handle);
+        let mut vcx = VisualTestContext::from_window(handle, cx);
+        publish_detail(cx, &engine, 4321, |d| {
+            d.tabs[DetailTab::Fds.index()].validity = Validity::Restricted;
+        });
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(DetailTab::Fds, window, cx)));
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("PropsAccessBlock").is_some(),
+            "access block drawn"
+        );
+        assert!(vcx.debug_bounds("PropsAccessBlock-text").is_some());
+
+        vcx.update(|window, cx| view.update(cx, |p, cx| p.select_tab(DetailTab::Maps, window, cx)));
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("PropsAccessBlock").is_none(),
+            "Maps is not restricted"
+        );
+    }
+}
