@@ -14,6 +14,8 @@ mod crash;
 mod import_ts;
 #[allow(dead_code, reason = "later E33 beads call the rest")]
 mod logging;
+#[allow(dead_code, reason = "E32-004 calls it")]
+mod lowmem_unit;
 #[allow(dead_code, reason = "E33-006 calls it")]
 mod migrations;
 #[allow(dead_code, reason = "E33-012 sends the renderer notices")]
