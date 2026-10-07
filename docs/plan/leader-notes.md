@@ -683,3 +683,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - hk6.7 follow-up (7c6c543a, 51b406d4): TlEmptyState gains heading, button_label, tone, kit_icon and one_line; the text cap and centring apply only under a heading, so existing callers and the gallery golden are unchanged.
 - hk6.9: ActionTracker gains ToastTexts.owner_toasts (default false: no tracker toasts, still sends, sweeps and emits), ActionTrackerEvent::TargetFinished and results(id), with finished results kept for a bounded time. SysActions owns the system-table toasts (pending toasts at submit, fxhash keys, failure_text, View logs). Process action toasts are unchanged.
 - 69a93ee5 (o55.7) swept hk6.9 ftl lines; nothing lost. The brief now forbids naming en-US.ftl in a pathspec commit.
+- bj6.3 closed (9346c4d1, 7d234d10, 7ddcb69c). Follow-up: TlDialog::cancel_label so shell-confirm-cancel is used. The same agent takes bj6.5.
