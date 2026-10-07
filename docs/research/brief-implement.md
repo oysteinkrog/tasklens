@@ -18,6 +18,11 @@ Do not pick up any other bead.
    `Claude-Session: https://claude.ai/code/session_01Bmy1XwAdJ5bM8C4UG8Lb4g`.
    If `Cargo.lock` changes because of your dependency lines, commit it with your files. On
    `index.lock`, wait and retry; never delete it.
+   A pathspec commit takes each named file whole from disk and ignores what you staged. Before
+   committing, run `git diff -- <files>`. If any named file holds another agent's uncommitted
+   hunks, do not use a pathspec for it: write a patch of only your hunks, stage it with
+   `git apply --cached <patch>`, check that `git diff --cached` shows only your changes, then run
+   `git commit -m "..."` with no pathspec right after that check.
 6. Run the bead's tests, `cargo fmt --check` and `cargo clippy -p <crate> --all-targets -- -D
    warnings`, all through `heavy-build`. Builds queue on one machine-wide lock, so start them in
    the background and wait for the result; always read the output before you report. Completion
