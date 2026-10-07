@@ -1,20 +1,23 @@
 //! The View menu of the menu bar (E21-001, UI-SHL-033, UI-SHL-034, APP-017, APP-018).
 //!
 //! The root lists submenus in a fixed order: "Columns", "Process View", "Window", "Appearance",
-//! "Theme", "Graphs". Each appears once its bead adds it; this one adds "Columns". View >
-//! Columns acts on the table of the active tab (PROC-024 to PROC-026, R-065, R-075). Performance
-//! and Information have no table, so "Columns" is disabled there with the reason as tooltip.
+//! "Theme", "Graphs". Each appears once its bead adds it. View > Columns acts on the table of the
+//! active tab (PROC-024 to PROC-026, R-065, R-075). Performance and Information have no table, so
+//! "Columns" is disabled there with the reason as tooltip. View > Process View (E21-002,
+//! UI-SHL-035) holds the view mode radios, two process display checks and "Collapse all"; the
+//! view mode Actions and their toasts are the Processes page's.
 
 use gpui_kit::{App, Entity, FocusHandle, Window};
 use tl_model::command::Tab;
-use tl_model::settings::ColumnResize;
+use tl_model::settings::{ColumnResize, ProcessesSettings};
+use tl_model::table::TableMode;
 
 use super::main::ShellState;
-use crate::actions::SetSetting;
+use crate::actions::{SetSetting, SetViewMode, ToggleSetting};
 use crate::components::menu::{TlMenu, TlMenuPopup};
 use crate::i18n::tr;
 use crate::settings_global::{SettingKey, SettingValue, TlSettings};
-use crate::table::actions::{OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
+use crate::table::actions::{CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit};
 use crate::table::columns::TableId;
 
 /// Builds the View menu. Item actions go to `return_focus`.
@@ -22,12 +25,18 @@ pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> E
     let table = active_table(cx);
     TlMenu::build(window, cx, return_focus.clone(), move |menu, window, cx| {
         let columns = tr(cx, "shell-menu-view-columns");
-        match table {
+        let menu = match table {
             Some(table) => menu.submenu(columns, window, cx, move |menu, window, cx| {
                 columns_submenu(menu, table, window, cx)
             }),
             None => menu.item_disabled(columns, Some(tr(cx, "shell-menu-view-no-table"))),
-        }
+        };
+        menu.submenu(
+            tr(cx, "shell-menu-view-process-view"),
+            window,
+            cx,
+            process_view_submenu,
+        )
     })
 }
 
@@ -103,4 +112,62 @@ fn resize_behavior_submenu(menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu
         last_column,
         set("last_column"),
     )
+}
+
+/// The settings the Process View items show: `processes.mode`, the two checks.
+fn processes_settings(cx: &App) -> ProcessesSettings {
+    cx.try_global::<TlSettings>()
+        .map_or_else(ProcessesSettings::default, |_| {
+            TlSettings::settings(cx).processes.clone()
+        })
+}
+
+/// The radio marks of "Tree View", "Task Manager Grouping" and "List View": which one is
+/// `processes.mode`.
+pub fn view_mode_marks(cx: &App) -> [bool; 3] {
+    let mode = processes_settings(cx).mode;
+    VIEW_MODES.map(|(_, m)| m == mode)
+}
+
+const VIEW_MODES: [(&str, TableMode); 3] = [
+    ("shell-menu-pv-tree", TableMode::Tree),
+    ("shell-menu-pv-grouped", TableMode::Grouped),
+    ("shell-menu-pv-list", TableMode::Flat),
+];
+
+/// The view mode radios (disabled while History mode is on, which shows a flat list), the
+/// connector lines and highlight checks, and "Collapse all" (Processes tab only). Enabled on
+/// every tab, since its settings apply when the Processes tab shows.
+fn process_view_submenu(mut menu: TlMenu, _: &mut Window, cx: &mut App) -> TlMenu {
+    let p = processes_settings(cx);
+    let (tab, history) = cx
+        .try_global::<ShellState>()
+        .map_or((Tab::Processes, false), |s| (s.active_tab, s.history_mode));
+    let marks = view_mode_marks(cx);
+    for ((key, mode), on) in VIEW_MODES.into_iter().zip(marks) {
+        menu = if history {
+            menu.item_disabled(tr(cx, key), Some(tr(cx, "shell-menu-pv-history-flat")))
+        } else {
+            menu.radio_item(tr(cx, key), on, Box::new(SetViewMode(mode)))
+        };
+    }
+    menu = menu
+        .separator()
+        .check_item(
+            tr(cx, "shell-menu-pv-guides"),
+            p.tree_guide_lines,
+            Box::new(ToggleSetting(SettingKey::ProcessesTreeGuideLines)),
+        )
+        .check_item(
+            tr(cx, "shell-menu-pv-highlight"),
+            p.highlight_new_exited,
+            Box::new(ToggleSetting(SettingKey::ProcessesHighlightNewExited)),
+        )
+        .separator();
+    let collapse = tr(cx, "shell-menu-pv-collapse-all");
+    if tab == Tab::Processes {
+        menu.item(collapse, Box::new(CollapseAll))
+    } else {
+        menu.item_disabled(collapse, None)
+    }
 }

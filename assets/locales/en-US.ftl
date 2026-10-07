@@ -1115,3 +1115,11 @@ shell-confirm-reset-button = Reset
 shell-confirm-cancel = Cancel
 shell-toast-settings-reset = Settings reset to defaults
 shell-toast-settings-reset-failed = Failed to reset settings
+# View > Process View (tasklens-bj6.5, UI-SHL-035).
+shell-menu-pv-tree = Tree View
+shell-menu-pv-grouped = Task Manager Grouping
+shell-menu-pv-list = List View
+shell-menu-pv-guides = Tree Connector Lines
+shell-menu-pv-highlight = Highlight New and Exited Processes
+shell-menu-pv-collapse-all = Collapse all
+shell-menu-pv-history-flat = History shows a flat list
