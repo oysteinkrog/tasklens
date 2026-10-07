@@ -79,9 +79,7 @@ const OPEN_LOGS: &str = "shell-about-open-logs";
 const BACK: &str = "shell-about-back";
 const UNKNOWN: &str = "shell-about-unknown";
 const COPIED: &str = "shell-about-copied";
-const LINK_OPENING: &str = "shell-about-link-opening";
 const LINK_FAILED: &str = "shell-about-link-failed";
-const LOGS_OPENING: &str = "shell-about-logs-opening";
 const LOGS_FAILED: &str = "shell-about-logs-failed";
 
 /// The labels of the copied block, in order.
@@ -231,9 +229,7 @@ struct AboutWords {
     back: SharedString,
     unknown: SharedString,
     copied: SharedString,
-    link_opening: SharedString,
     link_failed: SharedString,
-    logs_opening: SharedString,
     logs_failed: SharedString,
     fields: [SharedString; 9],
 }
@@ -258,9 +254,7 @@ impl AboutWords {
             back: tr(cx, BACK),
             unknown: tr(cx, UNKNOWN),
             copied: tr(cx, COPIED),
-            link_opening: tr(cx, LINK_OPENING),
             link_failed: tr(cx, LINK_FAILED),
-            logs_opening: tr(cx, LOGS_OPENING),
             logs_failed: tr(cx, LOGS_FAILED),
             fields: FIELDS.map(|k| tr(cx, k)),
         }
@@ -409,10 +403,7 @@ impl AboutWindow {
     }
 
     fn on_repository(&mut self, _: &OpenRepository, window: &mut Window, cx: &mut Context<Self>) {
-        let texts = ToastTexts::new(
-            self.words.link_opening.clone(),
-            self.words.link_failed.clone(),
-        );
+        let texts = ToastTexts::new("", self.words.link_failed.clone());
         send_open_uri(REPOSITORY.to_owned(), texts, window, cx);
     }
 
@@ -421,10 +412,7 @@ impl AboutWindow {
             warn!(target: "tasklens::ui", "no AppEnv; the log folder was not opened");
             return;
         };
-        let texts = ToastTexts::new(
-            self.words.logs_opening.clone(),
-            self.words.logs_failed.clone(),
-        );
+        let texts = ToastTexts::new("", self.words.logs_failed.clone());
         send_open_uri(file_uri(&dir), texts, window, cx);
     }
 
@@ -557,7 +545,8 @@ fn nvidia_driver(cx: &App) -> Option<String> {
         .map(|g| g.driver_version.value.to_string())
 }
 
-/// Sends `OpenUri(uri)` through the app's `ActionTracker`, with its toasts in this window.
+/// Sends `OpenUri(uri)` through the app's `ActionTracker`. Only a failure shows a toast, in this
+/// window.
 fn send_open_uri(uri: String, texts: ToastTexts, window: &mut Window, cx: &mut App) {
     let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
         warn!(target: "tasklens::ui", "no action tracker; the link was not opened");

@@ -1077,10 +1077,13 @@ fn about_licenses_back(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn about_open_log_folder(cx: &mut TestAppContext) {
     let engine = setup_about(cx);
-    let (_frame, mut vcx) = open_about(cx, 1);
+    let (frame, mut vcx) = open_about(cx, 1);
     let before = engine.commands().len();
     vcx.dispatch_action(OpenLogFolder);
     vcx.run_until_parked();
+    draw(&mut vcx);
+    let toasts = vcx.read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+    assert!(toasts.is_empty(), "no toast while opening: {toasts:?}");
     let commands = engine.commands();
     let uris: Vec<String> = commands[before..]
         .iter()
