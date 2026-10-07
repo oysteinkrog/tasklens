@@ -780,3 +780,15 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.54 (0e842935, a603aeb0, ac0123a3, 31d796ba, bb4ab664, 2366dbf5, c1987c02) closed, including network auto-scale. wlf.21 closed as not needed. The pdu-52 agent takes pdu.28.
 - pdu.28: the restricted segment is plain text with no tooltip until pdu.44 makes it a Link. The ftl string is added now.
 - hk6.8 (eda07128, 833b52a5) closed. The m1f agent takes bj6.13, then fut.20.
+- Closed:
+  - xdh.8 (8b587231, e03c34b9, 43eb8439) and xdh.7 (65a56fe5, 2b99bd1d).
+  - pdu.28 (561c0ab9, d0e69060, 82540260, 06be34ba).
+  - bj6.13 (7df5e7a5, 9f328e5b). Public IP auto-fetch goes through request_public_ip_fetch.
+  - crw.39 (bfcd0349 to ade810e4). Compact scale is in chart/, fd671f31.
+  - gma.14 follow-ups (63dd6268, 89c15cbf).
+  - gma.8 (075f1a55).
+  - wlf.22 closed as not needed.
+- wlf.30 fails: 4 stuck samples starve CPU, because they share the 4-thread blocking pool. Proposed: a sampling thread per source. This changes ADR-004, so it is the owner's call.
+- Filed pdu.55, the delegate first-draw panic.
+- Next beads: pdu-52 takes pdu.55 then pdu.29, 9o0 takes xdh.1, gma takes gma.21, crw takes crw.40.
+- wlf.32 plan approved: the setting is motion.save_power_on_battery.
