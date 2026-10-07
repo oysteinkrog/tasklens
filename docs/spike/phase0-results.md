@@ -163,3 +163,59 @@ Every adapter gpui can list is now a software one, so the real GPU cannot be pic
   no window. Run 1 had to be stopped by hand. Not fixed here.
 - The Mesa vendor file path is the Arch one (package `mesa`). A system without that file was
   not tested.
+
+## zed#64499 soak (tasklens-wlf.20, 2026-10-07)
+
+Result: PASS. 0 stalls over 250 ms in 600 s across 3 windows, with no input.
+
+### Setup
+
+- Owner desktop: KDE Plasma Wayland (`wayland-0`), RTX 5070 Ti, Vulkan, session unlocked.
+- Release build of `tl-app` with `--features bench`, from the tasklens-wlf.17 commits
+  (`536e7d1f`, `66855ba2`, `16e7fff5`).
+- Command, started from a terminal with no keyboard or mouse input for the whole run:
+  `tasklens --app-id dev.tasklens.benchwlf17 --bench soak --duration 600 --warmup 0 --json
+  /var/tmp/claude/tasklens-wlf.17-soak.json`, with scratch `XDG_*` folders under
+  `/var/tmp/claude/`. PID 434439, 22:00:30 to 22:10:31 local time, exit 0.
+- Other agents were building at the same time. The 1-minute load average was 9.6 at the start
+  and 10.8 at the end. A pass under this load is stronger evidence than a pass on an idle
+  machine.
+- Not checked: whether the windows stayed unobscured. The run was started by an agent, which
+  cannot see the screen. No window was minimized by the run.
+
+### Stalls
+
+| Window | Frames | Stalls |
+|---|---|---|
+| 1, perf-cpu composition | 14364 | 0 |
+| 2, Soak Graph 1 (CPU total) | 4605 | 0 |
+| 3, Soak Graph 2 (Memory) | 16877 | 0 |
+| Total | 35846 | 0 |
+
+The log has no `frame stall` line.
+
+### Report
+
+```json
+{
+  "scene": "soak",
+  "frames": 35846,
+  "frame_cpu_ms": { "p50": 0.0, "p99": 0.0, "max": 0.0 },
+  "missed_frames": 0,
+  "long_missed_frames": 0,
+  "process_cpu_pct": 23.656354874028942,
+  "probe_cpu_pct": null,
+  "rss_mb": 325.308416,
+  "pss_mb": 263.972864,
+  "stalls": 0,
+  "warmup_stalls": 0,
+  "bridge_latency_ms": null,
+  "gpu": null
+}
+```
+
+`frame_cpu_ms` is 0 because the soak runs without the frame probe (it would force frames).
+
+## Unverified items settled in phase 0
+
+- U-9 not needed: the soak passed without the patch.
