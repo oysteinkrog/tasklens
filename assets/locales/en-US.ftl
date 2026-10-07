@@ -489,3 +489,7 @@ processes-toolbar-history-flat = History shows a flat list
 ## Processes table toasts (E22, UI-PRC-011)
 
 processes-toast-process-exited = Process exited
+
+## Include children checkbox (E20-010)
+
+shell-filter-include-children = Include children
