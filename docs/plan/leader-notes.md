@@ -763,3 +763,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - o55.8: the Display unit menu opens through a new opt-in TlKeyValueGrid::on_link_click(row, bounds) and a TlLink variant that passes the click bounds, so the menu sits under the value for mouse and keyboard. Chosen over a new action that would open at the pointer.
 - bj6.12: TlMenu gains a slider_row entry and a keep_open flag on check_item, in components/menu.rs. Existing menus behave the same.
 - wlf.17 soak passed: 600 s, 3 windows, 0 stalls, 35,846 frames, 23.7% CPU, 325 MB RSS, load 10. The zed#64499 patch (wlf.21) is not needed. The pdu-51 agent writes up wlf.20, then takes wlf.27 and wlf.28. wlf.16 waits.
+- jqk.20 (42c07173, d231cd60, 6c2976d6) closed. --start-minimized only counts under TitleBarProbe in tests. The 9o0 agent takes xdh.6.
