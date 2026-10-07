@@ -1127,3 +1127,270 @@ fn about_no_foreign_branding(cx: &mut TestAppContext) {
     draw(&mut vcx);
     check(&mut vcx);
 }
+
+// ---- Reset settings confirmation (E21-005, tasklens-bj6.3) ----
+
+mod reset_settings {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, AppContext as _, Context, Entity, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowHandle, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+    use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind, TlWindowSpec};
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::theme::ThemeStore;
+    use tl_ui::window::confirm::ResetSettings;
+
+    struct Body;
+
+    impl Render for Body {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("parent")
+        }
+    }
+
+    type ParentFrame = TlSecondaryWindow<Body>;
+    type Saves = Rc<RefCell<Vec<(Settings, UiState)>>>;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        saves: Saves,
+        parent: Entity<ParentFrame>,
+        pcx: VisualTestContext,
+    }
+
+    /// Settings with scale 150, the light theme and a 2 s refresh; state with a saved column
+    /// width and window size.
+    fn changed() -> (Settings, UiState) {
+        let mut settings = Settings::default();
+        settings.appearance.ui_scale_pct = 150;
+        settings.theme.active = "Default Light".to_owned();
+        settings.processes.interval_ms = 2000;
+        let mut state = UiState::default();
+        state.window.width = 1234;
+        state.window.height = 777;
+        state
+            .columns
+            .processes
+            .widths
+            .insert("name".to_owned(), 321);
+        (settings, state)
+    }
+
+    /// `TasklensUi::init` with `changed()` and a settings write that works when `write_ok`,
+    /// then a parent window to open the confirmation from.
+    fn rig(cx: &mut TestAppContext, write_ok: bool) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let (settings, state) = changed();
+        let saves: Saves = Rc::default();
+        let sink = saves.clone();
+        let mut env = AppEnv::test();
+        if !write_ok {
+            env.write_settings_now = Arc::new(|_| Err("disk full".to_owned()));
+        }
+        let init = UiInit {
+            settings,
+            state,
+            themes_json: None,
+            persist: Box::new(move |s, st| sink.borrow_mut().push((s.clone(), st.clone()))),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env,
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let spec = TlWindowSpec::new(
+            TlWindowKind::Tool { resizable: true },
+            "parent",
+            size(px(600.), px(400.)),
+        );
+        let handle = cx
+            .update(|cx| ParentFrame::open(cx, spec, |_, cx| cx.new(|_| Body)))
+            .expect("parent opens");
+        let parent = cx
+            .update(|cx| ParentFrame::find(handle, cx))
+            .expect("parent frame");
+        let mut pcx = VisualTestContext::from_window(handle.into(), cx);
+        pcx.update(|window, _| window.activate_window());
+        pcx.run_until_parked();
+        Rig {
+            engine,
+            saves,
+            parent,
+            pcx,
+        }
+    }
+
+    /// Dispatches `ResetSettings` from the parent and returns the confirmation window.
+    fn open_confirm(
+        r: &mut Rig,
+        cx: &mut TestAppContext,
+    ) -> (WindowHandle<Root>, Entity<TlDialogView>, VisualTestContext) {
+        let parent_id = r.pcx.update(|window, _| window.window_handle().window_id());
+        r.pcx.dispatch_action(ResetSettings);
+        r.pcx.run_until_parked();
+        let handle = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find(|w| w.window_id() != parent_id)
+            })
+            .and_then(|w: AnyWindowHandle| w.downcast::<Root>())
+            .expect("confirmation window");
+        let view = cx
+            .update(|cx| TlSecondaryWindow::<TlDialogView>::find(handle, cx))
+            .map(|frame| cx.read(|cx| frame.read(cx).content().clone()))
+            .expect("a TlDialog");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        (handle, view, vcx)
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+        let id = handle.window_id();
+        cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+    }
+
+    fn settings(cx: &mut TestAppContext) -> Settings {
+        cx.update(|cx| TlSettings::settings(cx).clone())
+    }
+
+    fn toasts(r: &mut Rig) -> Vec<String> {
+        let parent = r.parent.clone();
+        r.pcx.read(|cx| {
+            parent
+                .read(cx)
+                .toasts()
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    /// Clicks Reset in the confirmation.
+    fn click_reset(vcx: &mut VisualTestContext) {
+        let at = vcx.debug_bounds("TlDialogAction").expect("Reset drawn");
+        vcx.simulate_click(at.center(), Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn reset_confirm_focuses_cancel(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let before = settings(cx);
+        let (handle, view, mut vcx) = open_confirm(&mut r, cx);
+        let (title, text, destructive) = vcx.read(|cx| {
+            let d = view.read(cx).dialog();
+            (
+                d.window_title().to_string(),
+                d.text().to_string(),
+                d.is_destructive(),
+            )
+        });
+        assert_eq!(title, "tasklens");
+        assert_eq!(
+            text,
+            "Reset all settings to their defaults? Themes and history are kept."
+        );
+        assert!(destructive, "Danger Reset");
+        let focused = vcx.update(|window, cx| view.read(cx).focused_button(window));
+        assert_eq!(focused, Some(DialogButton::Cancel));
+
+        drop(view);
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        assert!(!is_open(cx, handle), "Esc closes it");
+        assert_eq!(settings(cx), before, "no setting changes");
+        assert!(r.saves.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn reset_enter_on_cancel_does_nothing(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let before = settings(cx);
+        let (handle, view, mut vcx) = open_confirm(&mut r, cx);
+        drop(view);
+        super::press_enter(&mut vcx);
+        assert!(!is_open(cx, handle), "Enter on Cancel closes it");
+        assert_eq!(settings(cx), before, "no setting changes");
+        assert!(r.saves.borrow().is_empty());
+        assert!(toasts(&mut r).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn reset_settings_keeps_state(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let (_, state) = changed();
+        let (handle, view, mut vcx) = open_confirm(&mut r, cx);
+        drop(view);
+        click_reset(&mut vcx);
+        assert!(!is_open(cx, handle));
+        let now = settings(cx);
+        assert_eq!(now.appearance.ui_scale_pct, 100);
+        assert_eq!(now, Settings::default());
+        let kept = cx.update(|cx| TlSettings::state(cx).clone());
+        assert_eq!(kept.window.width, state.window.width);
+        assert_eq!(kept.window.height, state.window.height);
+        assert_eq!(kept.columns, state.columns);
+        let saves = r.saves.borrow().clone();
+        let (saved, saved_state) = saves.last().expect("persisted");
+        assert_eq!(*saved, Settings::default());
+        assert_eq!(saved_state.columns, state.columns);
+        assert_eq!(toasts(&mut r), ["Settings reset to defaults"]);
+    }
+
+    #[gpui_kit::test]
+    fn reset_reapplies_theme(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let active = |cx: &mut TestAppContext| {
+            cx.update(|cx| cx.global::<ThemeStore>().active.name.to_string())
+        };
+        assert_eq!(active(cx), "Default Light");
+        let (_, view, mut vcx) = open_confirm(&mut r, cx);
+        drop(view);
+        click_reset(&mut vcx);
+        assert_eq!(active(cx), "Default Dark");
+    }
+
+    #[gpui_kit::test]
+    fn reset_sends_engine_settings(cx: &mut TestAppContext) {
+        let mut r = rig(cx, true);
+        let (_, view, mut vcx) = open_confirm(&mut r, cx);
+        drop(view);
+        click_reset(&mut vcx);
+        let sent = r.engine.settings();
+        assert_eq!(sent.last().map(|s| s.interval_ms), Some(1000));
+    }
+
+    #[gpui_kit::test]
+    fn reset_write_failure_changes_nothing(cx: &mut TestAppContext) {
+        let mut r = rig(cx, false);
+        let before = settings(cx);
+        let (_, view, mut vcx) = open_confirm(&mut r, cx);
+        drop(view);
+        click_reset(&mut vcx);
+        assert_eq!(settings(cx), before);
+        assert!(r.saves.borrow().is_empty());
+        assert_eq!(toasts(&mut r), ["Failed to reset settings"]);
+    }
+}
