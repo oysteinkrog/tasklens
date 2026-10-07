@@ -15,6 +15,7 @@
 //! before that, one timer wakes the table at the fade start.
 //!
 //! The row tooltip (PROC-039) is built only for the hovered row, when the table asks for it.
+//! So are the cell tooltips (UI-PRC-004): each is formatted once per hovered row and snapshot.
 
 use std::cell::RefCell;
 use std::fmt::Write as _;
@@ -41,9 +42,9 @@ use tl_model::time::{TimeNs, now_boot_ns};
 use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::{
-    CellCtx, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState, ProcColumn,
-    RowRef, fill_cell, heat_background, process_column, render_metric_cell, row_tint,
-    tint_deadline,
+    CellCtx, CellTipWords, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState,
+    PowerSensor, ProcColumn, RowRef, TipCtx, cell_tooltip, fill_cell, heat_background,
+    process_column, render_metric_cell, row_tint, tint_deadline,
 };
 use super::header_totals::header_total;
 use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell};
@@ -248,6 +249,15 @@ impl ProcessRowCells {
     }
 }
 
+/// The cell tooltips of the hovered row, each formatted on its first ask (UI-PRC-004).
+#[derive(Default)]
+struct CellTips {
+    /// `(snapshot sequence, table version, row index)` the tooltips were built for.
+    built_for: Option<(u64, u64, usize)>,
+    tips: SmallVec<[(ColumnId, Option<SharedString>); 16]>,
+    scratch: String,
+}
+
 /// A cached Name cell text: `"<name> (N)"` for app, unit, Kernel threads and group header
 /// rows, keyed by the name's pointer and the count so an unchanged row is not formatted again.
 struct NameEntry {
@@ -307,6 +317,8 @@ pub struct ProcessDelegate {
     tip: Rc<RefCell<RowTipState>>,
     /// The one row tooltip view, created on the first frame.
     tip_view: Option<AnyView>,
+    cell_tip_words: CellTipWords,
+    cell_tips: RefCell<CellTips>,
     /// A fixed clock for tests.
     #[cfg(any(test, feature = "test-hooks"))]
     fixed_now: Option<TimeNs>,
@@ -357,6 +369,8 @@ impl ProcessDelegate {
             tip_words: RowTipWords::new(cx),
             tip: Rc::default(),
             tip_view: None,
+            cell_tip_words: CellTipWords::new(cx),
+            cell_tips: RefCell::default(),
             #[cfg(any(test, feature = "test-hooks"))]
             fixed_now: None,
         };
@@ -424,6 +438,8 @@ impl ProcessDelegate {
         self.header_words = HEADER_KEYS.map(|k| Arc::from(tr(cx, k).as_ref()));
         self.tip_words = RowTipWords::new(cx);
         self.tip.borrow_mut().clear();
+        self.cell_tip_words = CellTipWords::new(cx);
+        self.cell_tips.borrow_mut().built_for = None;
         for spec in self.specs.values_mut() {
             let col = process_column(spec.id);
             spec.label = tr(cx, col.label);
@@ -647,6 +663,38 @@ impl ProcessDelegate {
             boot_time_s: system.boot_time_s,
             clk_tck: CLK_TCK,
         }
+    }
+
+    /// The UI-PRC-004 tooltip of cell (`ix`, `col`), from the hovered row's cache.
+    fn cell_tip(
+        &self,
+        ix: usize,
+        row: RowRef,
+        col: ColumnId,
+        ctx: &CellCtx,
+    ) -> Option<SharedString> {
+        let mut cache = self.cell_tips.borrow_mut();
+        let key = (self.snapshot.sequence, self.version, ix);
+        if cache.built_for != Some(key) {
+            cache.built_for = Some(key);
+            cache.tips.clear();
+        }
+        if let Some((_, tip)) = cache.tips.iter().find(|(c, _)| *c == col) {
+            return tip.clone();
+        }
+        let s = &*self.snapshot;
+        let tip_ctx = TipCtx {
+            words: &self.cell_tip_words,
+            extras_p2: &s.processes.extras_p2,
+            zram: s.system.memory.zram,
+            power: PowerSensor::from_validity(s.system.cpu.package_power_w.validity),
+        };
+        let CellTips { tips, scratch, .. } = &mut *cache;
+        scratch.clear();
+        let tip = cell_tooltip(row, process_column(col), ctx, &tip_ctx, scratch)
+            .then(|| SharedString::from(scratch.as_str().to_owned()));
+        tips.push((col, tip.clone()));
+        tip
     }
 
     fn paint_state(&self, exited: bool) -> PaintState {
@@ -954,6 +1002,13 @@ impl TreeTableDelegate for ProcessDelegate {
         );
         if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
             out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
+        }
+        // The column's own text replaces the validity tooltip of a value or an `n/a`.
+        if out.want_tooltip
+            && matches!(out.validity, Validity::Valid | Validity::Unsupported)
+            && let Some(tip) = self.cell_tip(ix, row_ref, col, &ctx)
+        {
+            out.tooltip = Some(tip);
         }
         if exited {
             // UI-PRC-011: all text of an exited row is secondary.

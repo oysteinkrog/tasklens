@@ -15,12 +15,13 @@ use gpui_kit::{
 };
 use rustc_hash::{FxBuildHasher, FxHashMap};
 use tl_model::actions::SchedPolicy;
-use tl_model::ids::{ColumnId, GroupKey, NodeId};
+use tl_model::ids::{ColumnId, GroupKey, NodeId, PseudoKind};
 use tl_model::process::{
-    GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessRecord,
+    GroupKind, GroupRow, GroupRowKind, ProcFlags, ProcState, ProcessExtras, ProcessExtrasP2,
+    ProcessRecord,
 };
 use tl_model::settings::{NetworkUnit, Settings};
-use tl_model::system::CpuSet;
+use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow, UnitRef};
 use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime, NetUnit};
@@ -29,7 +30,8 @@ use tl_model::validity::{ProcessField, Validity};
 use crate::components::icons::{TlIcon, icon};
 use crate::components::motion::{M_SLOW, ease_out_cubic};
 use crate::components::validity::{GlyphContent, glyph_parts};
-use crate::i18n::tr;
+use crate::i18n::{tr, tr_en};
+use crate::pages::performance::details::Template;
 use crate::table::cells::CellOut;
 use crate::table::columns::ColumnAlign;
 use crate::table::tree_table::{RowKind, STALE_OPACITY};
@@ -1073,6 +1075,228 @@ fn group_value<'a>(g: &'a GroupRow, col: ColumnId, ctx: &'a CellCtx) -> Value<'a
         // PROC-018). The other columns have no group value.
         _ => Value::Blank,
     }
+}
+
+// ---- Cell tooltips (UI-PRC-004) ----
+
+/// The Command line tooltip breaks its text into lines of this many characters.
+pub const CMDLINE_TIP_COLUMNS: usize = 80;
+
+const KEY_TIP_APP_MEMORY: &str = "processes-cell-tooltip-app-memory";
+const KEY_TIP_NICE: &str = "processes-cell-tooltip-nice";
+const KEY_TIP_POWER_ESTIMATE: &str = "processes-cell-tooltip-power-estimate";
+const KEY_TIP_POWER_NEEDS_SETUP: &str = "processes-cell-tooltip-power-needs-setup";
+const KEY_TIP_POWER_NO_SENSOR: &str = "processes-cell-tooltip-power-no-sensor";
+const KEY_TIP_ZRAM: &str = "processes-cell-tooltip-zram";
+const KEY_TIP_OOM_SCORE_ADJ: &str = "processes-cell-tooltip-oom-score-adj";
+const KEY_TIP_DISK_OPS: &str = "processes-cell-tooltip-disk-ops";
+const KEY_TIP_IRQ: &str = "processes-cell-tooltip-irq-in-task-time";
+
+/// The cell tooltip texts, translated once per `strings_version`. `Default` is en-US.
+#[derive(Clone, Debug)]
+pub struct CellTipWords {
+    pub app_memory: SharedString,
+    /// "nice {$nice}".
+    pub nice: Template,
+    /// "≈ {$watts} W (estimate)".
+    pub power_estimate: Template,
+    pub power_needs_setup: SharedString,
+    pub power_no_sensor: SharedString,
+    /// "original {$original}, compressed {$compressed}, ratio {$ratio}".
+    pub zram: Template,
+    /// "oom_score_adj {$adj}".
+    pub oom_score_adj: Template,
+    pub disk_ops: SharedString,
+    pub irq_in_task_time: SharedString,
+}
+
+impl Default for CellTipWords {
+    fn default() -> Self {
+        Self {
+            app_memory: tr_en(KEY_TIP_APP_MEMORY, &[]),
+            nice: Template::en(KEY_TIP_NICE, &["nice"]),
+            power_estimate: Template::en(KEY_TIP_POWER_ESTIMATE, &["watts"]),
+            power_needs_setup: tr_en(KEY_TIP_POWER_NEEDS_SETUP, &[]),
+            power_no_sensor: tr_en(KEY_TIP_POWER_NO_SENSOR, &[]),
+            zram: Template::en(KEY_TIP_ZRAM, &["original", "compressed", "ratio"]),
+            oom_score_adj: Template::en(KEY_TIP_OOM_SCORE_ADJ, &["adj"]),
+            disk_ops: tr_en(KEY_TIP_DISK_OPS, &[]),
+            irq_in_task_time: tr_en(KEY_TIP_IRQ, &[]),
+        }
+    }
+}
+
+impl CellTipWords {
+    /// Every text through `tr`.
+    pub fn new(cx: &App) -> Self {
+        Self {
+            app_memory: tr(cx, KEY_TIP_APP_MEMORY),
+            nice: Template::new(cx, KEY_TIP_NICE, &["nice"]),
+            power_estimate: Template::new(cx, KEY_TIP_POWER_ESTIMATE, &["watts"]),
+            power_needs_setup: tr(cx, KEY_TIP_POWER_NEEDS_SETUP),
+            power_no_sensor: tr(cx, KEY_TIP_POWER_NO_SENSOR),
+            zram: Template::new(cx, KEY_TIP_ZRAM, &["original", "compressed", "ratio"]),
+            oom_score_adj: Template::new(cx, KEY_TIP_OOM_SCORE_ADJ, &["adj"]),
+            disk_ops: tr(cx, KEY_TIP_DISK_OPS),
+            irq_in_task_time: tr(cx, KEY_TIP_IRQ),
+        }
+    }
+}
+
+/// Whether the per-process power estimate has a source (PROC-034).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PowerSensor {
+    Readable,
+    /// RAPL exists but `energy_uj` is not readable.
+    NeedsSetup,
+    /// No power source at all.
+    Absent,
+}
+
+impl PowerSensor {
+    /// From the validity of the RAPL package power (`CpuTotals::package_power_w`).
+    pub fn from_validity(v: Validity) -> Self {
+        match v {
+            Validity::Restricted => Self::NeedsSetup,
+            Validity::Unsupported | Validity::Missing => Self::Absent,
+            _ => Self::Readable,
+        }
+    }
+}
+
+/// What [`cell_tooltip`] reads besides [`CellCtx`].
+pub struct TipCtx<'a> {
+    pub words: &'a CellTipWords,
+    /// `ProcessSnapshot.extras_p2`, index aligned with `records`. Empty before the P2 sweep.
+    pub extras_p2: &'a [ProcessExtrasP2],
+    /// `MemoryTotals::zram`, for the Memory compression row.
+    pub zram: Metric<ZramTotals>,
+    pub power: PowerSensor,
+}
+
+/// Writes the tooltip of one cell to `out` and returns true, or returns false for a cell
+/// without one (UI-PRC-004). It formats, so call it only for the hovered cell. The caller keeps
+/// the validity tooltip for cells that are not Valid or Unsupported.
+pub fn cell_tooltip(
+    row: RowRef,
+    col: &ProcColumn,
+    ctx: &CellCtx,
+    tip: &TipCtx,
+    out: &mut String,
+) -> bool {
+    use ColumnId as C;
+
+    let w = tip.words;
+    match row {
+        RowRef::Group(_, RowKind::GroupHeader) => false,
+        RowRef::Group(g, _) => match col.id {
+            C::Cmdline => first_member(g, ctx)
+                .and_then(|(_, r)| r.meta.cmdline.as_ref())
+                .is_some_and(|c| write_cmdline_tip(out, c)),
+            C::Memory => match (&g.kind, &g.node) {
+                (GroupRowKind::App | GroupRowKind::Unit, _) => {
+                    out.push_str(&w.app_memory);
+                    true
+                }
+                (_, NodeId::Pseudo(PseudoKind::MemoryCompression)) => {
+                    write_zram_tip(out, w, tip.zram)
+                }
+                _ => false,
+            },
+            C::Cpu => {
+                let na = g.node == NodeId::Pseudo(PseudoKind::Interrupts)
+                    && g.validity.get(ProcessField::Cpu) == Validity::Unsupported;
+                if na {
+                    out.push_str(&w.irq_in_task_time);
+                }
+                na
+            }
+            _ => false,
+        },
+        RowRef::Record(r, t, _) => {
+            let p2 = t.record.and_then(|i| tip.extras_p2.get(i as usize));
+            match col.id {
+                C::Cmdline => r
+                    .meta
+                    .cmdline
+                    .as_ref()
+                    .is_some_and(|c| write_cmdline_tip(out, c)),
+                // The Priority cell shows a value only once the extras arrived.
+                C::Priority => {
+                    let shown = t.record.and_then(|i| ctx.extras.get(i as usize)).is_some();
+                    if shown {
+                        let _ = w.nice.write(out, &[&r.nice]);
+                    }
+                    shown
+                }
+                C::Power | C::PowerTrend => {
+                    let watts = p2.and_then(|x| {
+                        if col.id == C::Power {
+                            x.power_w
+                        } else {
+                            x.power_trend_w
+                        }
+                    });
+                    match (watts, tip.power) {
+                        (Some(watts), _) => {
+                            let _ = w.power_estimate.write(out, &[&format_args!("{watts:.1}")]);
+                            true
+                        }
+                        (None, PowerSensor::NeedsSetup) => {
+                            out.push_str(&w.power_needs_setup);
+                            true
+                        }
+                        (None, PowerSensor::Absent) => {
+                            out.push_str(&w.power_no_sensor);
+                            true
+                        }
+                        (None, PowerSensor::Readable) => false,
+                    }
+                }
+                C::OomScore => match p2.and_then(|x| x.oom_score_adj) {
+                    Some(adj) => {
+                        let _ = w.oom_score_adj.write(out, &[&adj]);
+                        true
+                    }
+                    None => false,
+                },
+                C::DiskReads | C::DiskWrites | C::DiskReadsDelta | C::DiskWritesDelta => {
+                    out.push_str(&w.disk_ops);
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+}
+
+/// The first [`CMDLINE_CELL_CHARS`] characters of `cmdline`, with a line break after every
+/// [`CMDLINE_TIP_COLUMNS`] characters. False for an empty command line.
+fn write_cmdline_tip(out: &mut String, cmdline: &str) -> bool {
+    for (i, c) in cmdline.chars().take(CMDLINE_CELL_CHARS).enumerate() {
+        if i > 0 && i % CMDLINE_TIP_COLUMNS == 0 {
+            out.push('\n');
+        }
+        out.push(c);
+    }
+    !cmdline.is_empty()
+}
+
+/// "original 1.20 GiB, compressed 400.00 MiB, ratio 3.1" (PROC-012). False when zram holds
+/// nothing or was not read.
+fn write_zram_tip(out: &mut String, w: &CellTipWords, zram: Metric<ZramTotals>) -> bool {
+    let z = zram.value;
+    if !shows_value(zram.validity) || z.compr_data == 0 {
+        return false;
+    }
+    w.zram.write_each(out, |i, out| match i {
+        0 => units::bytes(out, z.orig_data),
+        1 => units::bytes(out, z.compr_data),
+        _ => {
+            let _ = write!(out, "{:.1}", z.orig_data as f64 / z.compr_data as f64);
+        }
+    });
+    true
 }
 
 // ---- Cell painting (E22-004, UI-PRC-004) ----
