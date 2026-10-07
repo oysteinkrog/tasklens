@@ -403,7 +403,7 @@ mod row_builders {
     }
 
     /// This machine's values (UI-SYS-086 to UI-SYS-088 examples).
-    fn inventory() -> InventorySnapshot {
+    pub(super) fn inventory() -> InventorySnapshot {
         let mut inv = InventorySnapshot::default();
         let os = &mut inv.os;
         os.name = s("CachyOS Linux");
@@ -462,7 +462,7 @@ mod row_builders {
         inv
     }
 
-    fn system(uptime_s: u64) -> SystemSnapshot {
+    pub(super) fn system(uptime_s: u64) -> SystemSnapshot {
         let mut sys = SystemSnapshot::default();
         sys.header.observed_end = uptime_s * 1_000_000_000;
         sys.header.validity = Validity::Valid;
@@ -1012,7 +1012,7 @@ mod hardware_builders {
     }
 
     /// This machine's values (UI-SYS-089 to UI-SYS-095 examples).
-    fn inventory() -> InventorySnapshot {
+    pub(super) fn inventory() -> InventorySnapshot {
         let mut inv = InventorySnapshot::default();
         let m = &mut inv.memory;
         m.total_bytes = ok(67_324_510_208);
@@ -1067,7 +1067,7 @@ mod hardware_builders {
         inv
     }
 
-    fn system() -> SystemSnapshot {
+    pub(super) fn system() -> SystemSnapshot {
         let mut sys = SystemSnapshot::default();
         sys.header.validity = Validity::Valid;
         let m = &mut sys.memory;
@@ -1368,6 +1368,7 @@ mod page {
 
     use super::*;
     use gpui_kit::base::Root;
+    use gpui_kit::point;
     use tl_model::client::EngineClient;
     use tl_model::command::Command;
     use tl_model::demand::Demand;
@@ -1378,7 +1379,7 @@ mod page {
     use tl_ui::components::toast::{self, ToastQueue};
     use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
     use tl_ui::hub::SnapshotHub;
-    use tl_ui::pages::information::actions::bind_keys_information;
+    use tl_ui::pages::information::actions::{CopyInformationSection, bind_keys_information};
     use tl_ui::pages::information::{InformationPage, REFRESH_TOAST_AFTER};
     use tl_ui::testing::fake_engine::FakeEngine;
 
@@ -1400,6 +1401,7 @@ mod page {
                 .h(px(self.height))
                 .on_action(move |_: &RefreshCurrentTab, _, _| retries.set(retries.get() + 1))
                 .on_action(move |_: &ClearFilter, _, _| clears.set(clears.get() + 1))
+                .child(gpui_kit::base::TextSelectionLayer)
                 .child(self.page.clone())
         }
     }
@@ -1478,6 +1480,10 @@ mod page {
                 inv.header.validity = validity;
                 inv.os.name = tl_model::table::Total {
                     value: Arc::from("CachyOS Linux"),
+                    validity: Validity::Valid,
+                };
+                inv.os.kernel = tl_model::table::Total {
+                    value: Arc::from("6.17.1"),
                     validity: Validity::Valid,
                 };
                 s.inventory = Arc::new(inv);
@@ -1825,6 +1831,73 @@ mod page {
         assert!(shown(&mut r).iter().all(|s| *s));
         assert!(r.bounds("InformationPage-filter-empty").is_none());
     }
+
+    fn clipboard(r: &mut Rig) -> Option<String> {
+        r.vcx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    fn focus_page(r: &mut Rig) {
+        let focus = r.vcx.read_entity(&r.page, |p, _| p.focus_handle().clone());
+        r.vcx.update(|window, cx| window.focus(&focus, cx));
+        r.draw();
+    }
+
+    #[gpui_kit::test]
+    fn info_copy_ignores_filter(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+        let text: Arc<str> = Arc::from("kernel");
+        r.page.update(&mut r.vcx, |p, cx| p.apply_filter(text, cx));
+        focus_page(&mut r);
+        r.vcx.dispatch_action(CopyInformationSection {
+            section: InfoSectionId::OperatingSystem,
+        });
+        r.vcx.run_until_parked();
+        let copied = clipboard(&mut r).expect("copied");
+        let lines: Vec<&str> = copied.lines().collect();
+        assert_eq!(lines[0], "Operating System");
+        assert_eq!(lines.len(), 10, "the title and all nine rows: {copied}");
+        assert!(copied.contains("OS name: CachyOS Linux"));
+        assert!(copied.contains("Kernel: 6.17.1"));
+        let toasts = r.vcx.update(|_, cx| r.queue.read(cx).visible_texts());
+        assert!(toasts.iter().any(|t| t.as_ref() == "Copied to clipboard"));
+    }
+
+    #[gpui_kit::test]
+    fn info_ctrl_c_selection_else_all(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 1280., 800.);
+        r.publish_inventory(1, Validity::Valid);
+        // Only the two kernel rows stay, so value 0 is the Kernel value "6.17.1".
+        let text: Arc<str> = Arc::from("kernel");
+        r.page.update(&mut r.vcx, |p, cx| p.apply_filter(text, cx));
+        focus_page(&mut r);
+        let value = r.bounds("TlKv-value-0").expect("Kernel value drawn");
+        let (from, to) = (
+            point(value.left() + px(1.), value.center().y),
+            point(value.right() - px(1.), value.center().y),
+        );
+        r.vcx
+            .simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+        r.vcx
+            .simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+        r.vcx
+            .simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+        r.draw();
+        r.vcx.simulate_keystrokes("ctrl-c");
+        r.vcx.run_until_parked();
+        assert_eq!(clipboard(&mut r).as_deref(), Some("6.17.1"));
+
+        // No selection: everything, whatever the filter.
+        r.vcx
+            .update(|window, cx| gpui_kit::base::TextSelection::clear(window, cx));
+        focus_page(&mut r);
+        r.vcx.simulate_keystrokes("ctrl-c");
+        r.vcx.run_until_parked();
+        let all = r.vcx.read_entity(&r.page, |p, _| p.copy_all_text());
+        assert_eq!(clipboard(&mut r), Some(all.clone()));
+        assert!(all.starts_with("Operating System\nOS name: CachyOS Linux"));
+        assert!(all.contains("\n\nNetwork adapters"));
+    }
 }
 
 /// The Information filter rules (tasklens-9o0.25, UI-SYS-084).
@@ -1972,5 +2045,140 @@ mod filter_rules {
                 }
             }
         }
+    }
+}
+
+/// Copy section, copy all and Ctrl+C formats (tasklens-9o0.26, UI-SYS-083, D-007).
+mod copy_text {
+    use super::*;
+    use tl_model::devices::DeviceCatalog;
+    use tl_model::snapshot::{InventorySnapshot, NetworkAdapter, SystemSnapshot};
+    use tl_model::table::Total;
+    use tl_ui::pages::information::copy::{all_text, section_text};
+    use tl_ui::pages::information::sections::{
+        InfoInputs, InfoWords, build_bios, build_disks, build_graphics, build_memory,
+        build_modules, build_motherboard, build_network, build_os, build_processor, build_system,
+    };
+
+    /// Compares `actual` with `tests/golden/<name>`. `TL_UPDATE_GOLDEN=1` rewrites the file.
+    fn golden(name: &str, actual: &str) {
+        let path = format!("{}/tests/golden/{name}", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var("TL_UPDATE_GOLDEN").as_deref() == Ok("1") {
+            std::fs::write(&path, actual).expect("write the golden");
+            return;
+        }
+        let expected = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert_eq!(actual, expected, "{name}");
+    }
+
+    /// The OS to Motherboard fixture with the hardware fixture's sections. The two local-time
+    /// rows are Unsupported, so the golden does not depend on the time zone.
+    fn fixture() -> (InventorySnapshot, SystemSnapshot) {
+        let mut inv = super::row_builders::inventory();
+        let hw = super::hardware_builders::inventory();
+        inv.memory = hw.memory;
+        inv.modules = hw.modules;
+        inv.disks = hw.disks;
+        inv.graphics = hw.graphics;
+        inv.network = hw.network;
+        let unsupported = Total {
+            value: 0,
+            validity: Validity::Unsupported,
+        };
+        inv.os.install_date_s = unsupported;
+        inv.system.boot_time_s = unsupported;
+        let mut sys = super::row_builders::system(183_495);
+        let hw = super::hardware_builders::system();
+        sys.memory = hw.memory;
+        sys.gpus = hw.gpus;
+        (inv, sys)
+    }
+
+    fn sections(
+        inv: &InventorySnapshot,
+        sys: &SystemSnapshot,
+    ) -> [(InfoSectionId, Arc<[InfoRow]>); 10] {
+        let words = InfoWords::default();
+        let devices = DeviceCatalog::default();
+        let inputs = InfoInputs {
+            inv,
+            sys,
+            devices: &devices,
+            words: &words,
+        };
+        InfoSectionId::ALL.map(|id| {
+            let build: fn(&InfoInputs, &mut Vec<InfoRow>) = match id {
+                InfoSectionId::OperatingSystem => build_os,
+                InfoSectionId::Processor => build_processor,
+                InfoSectionId::System => build_system,
+                InfoSectionId::Memory => build_memory,
+                InfoSectionId::MemoryModules => build_modules,
+                InfoSectionId::DiskDrives => build_disks,
+                InfoSectionId::BiosFirmware => build_bios,
+                InfoSectionId::Motherboard => build_motherboard,
+                InfoSectionId::Graphics => build_graphics,
+                InfoSectionId::NetworkAdapters => build_network,
+            };
+            let mut rows = Vec::new();
+            build(&inputs, &mut rows);
+            (id, Arc::from(rows))
+        })
+    }
+
+    #[test]
+    fn info_copy_all_format_golden() {
+        let (inv, sys) = fixture();
+        let mut out = String::new();
+        all_text(&sections(&inv, &sys), &mut out);
+        assert!(!out.ends_with('\n'), "no trailing blank line");
+        golden("info_copy_all.txt", &out);
+    }
+
+    #[test]
+    fn info_copy_section_format() {
+        let (mut inv, sys) = fixture();
+        let mut second = NetworkAdapter::clone(&inv.network[0]);
+        second.connection = Total {
+            value: Arc::from("wlan0 (Wi-Fi)"),
+            validity: Validity::Valid,
+        };
+        second.ip_addresses = vec![Arc::from("10.0.0.5/24")].into();
+        inv.network = vec![NetworkAdapter::clone(&inv.network[0]), second].into();
+        let rows = &sections(&inv, &sys)[InfoSectionId::NetworkAdapters as usize].1;
+        let mut out = String::new();
+        section_text(InfoSectionId::NetworkAdapters, rows, &mut out);
+        assert_eq!(
+            out,
+            "Network adapters\n\
+             Connection: enp6s0 (Ethernet)\n\
+             Details: Intel Ethernet Controller I225-V, igc, 2500 Mbps\n\
+             IP address: 192.168.1.10/24, fe80::1c2:3ff:fe4a:5b6c/64\n\
+             MAC address: a8:a1:59:12:34:56\n\
+             \n\
+             Connection: wlan0 (Wi-Fi)\n\
+             Details: Intel Ethernet Controller I225-V, igc, 2500 Mbps\n\
+             IP address: 10.0.0.5/24\n\
+             MAC address: a8:a1:59:12:34:56"
+        );
+    }
+
+    /// D-007 regression: no module serial reaches the copy text. The collector drops the udev
+    /// `SERIAL_NUMBER` (tl-collect `inventory::modules` tests) and `MemoryModule` has no serial
+    /// field; this checks the copy side.
+    #[test]
+    fn info_no_dimm_serial_in_copy() {
+        let (inv, sys) = fixture();
+        let all = sections(&inv, &sys);
+        let mut out = String::new();
+        all_text(&all, &mut out);
+        assert!(!out.contains("ABC123"));
+        let mut modules = String::new();
+        section_text(
+            InfoSectionId::MemoryModules,
+            &all[InfoSectionId::MemoryModules as usize].1,
+            &mut modules,
+        );
+        assert!(modules.starts_with("Memory modules\nModule: Module 1\n"));
+        assert!(!modules.contains("Serial"), "{modules}");
     }
 }
