@@ -543,16 +543,24 @@ fn delegate_sets_cell_tooltip_on_the_hovered_row_only(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn hovered_memory_cell_shows_its_tooltip_at_600ms(cx: &mut TestAppContext) {
-    let (_, mut vcx) = open(cx);
+    let (table, mut vcx) = open(cx);
     vcx.update(|window, _| window.activate_window());
     redraw(&mut vcx);
 
     let name = vcx
         .debug_bounds("TlNameCell")
-        .expect("the app row's Name cell");
-    // Memory follows Name, User, PID and CPU in the default layout (R-006 widths).
-    let x = name.left() + px(248. + 92. + 96. + 63. + 46.);
-    let at = gpui_kit::point(x, name.center().y);
+        .expect("the process row's Name cell");
+    let x = vcx.update(|_, cx| {
+        let layout = table.read(cx).delegate.columns();
+        let pos = layout
+            .visible_columns()
+            .iter()
+            .position(|&c| c == ColumnId::Memory)
+            .expect("Memory is visible by default");
+        layout.offsets()[pos] + layout.width(ColumnId::Memory) / 2.
+    });
+    // `debug_bounds` keeps the last Name cell drawn, the process row's; the app row is above.
+    let at = gpui_kit::point(name.left() + x, name.center().y - name.size.height);
     // The first move sets the hovered row, the second makes its tooltips ready, the third
     // starts the delay.
     for _ in 0..3 {
@@ -573,9 +581,12 @@ fn hovered_memory_cell_shows_its_tooltip_at_600ms(cx: &mut TestAppContext) {
     vcx.executor()
         .advance_clock(DELAY_PROCESS_CELL - DELAY_CONTROL);
     redraw(&mut vcx);
+    let tip = vcx
+        .debug_bounds("TlTooltip")
+        .expect("the Memory cell of the app row shows its tooltip at 600 ms");
     assert!(
-        vcx.debug_bounds("TlTooltip").is_some(),
-        "the Memory cell of the app row shows its tooltip at 600 ms"
+        tip.size.width > px(200.),
+        "the sentence, not the cut value: {tip:?}"
     );
 }
 
