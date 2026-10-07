@@ -8,20 +8,26 @@
 //! snapshot on `SYSTEM`, `INVENTORY`, `DEVICE_DETAILS` and `DEVICES` changes and kept when its
 //! text is unchanged ([`update_card_lines`]). The card text reads no series, so `SERIES` alone
 //! formats nothing. The card words are translated once per strings version ([`card_words`]).
-//! Hotplug animations (E24-010) and edit mode (E24-013) are later beads.
+//!
+//! Hotplug (UI-PRF-012): a new card grows in at its place and a removed card collapses where it
+//! was, over `m_base`. A removed card keeps rendering until then, but it is out of the
+//! selection, the keys and the demand. Each change starts one timer that ends its animations;
+//! nothing runs while no card moves. With animations off the change is at once. Edit mode
+//! (E24-013) is a later bead.
 
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render,
-    ScrollHandle, StatefulInteractiveElement as _, Styled as _, Subscription, Window, canvas, div,
-    px, white,
+    Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity,
+    EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    ParentElement as _, Pixels, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
+    Subscription, WeakEntity, Window, canvas, div, px, white,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -36,7 +42,7 @@ use super::actions::{
     PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
 };
 use super::card::{
-    CARD_CHART_BG, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
+    CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
     card_chart_labels, card_words, update_card_lines,
 };
 use super::{
@@ -44,10 +50,11 @@ use super::{
     selection_after_removal, sidebar_order, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
+use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::Strings;
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::derived::blend_over;
 use crate::theme::palette::accent_color;
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
@@ -72,15 +79,40 @@ const TEXT_MASK: ComponentMask = ComponentMask(
         | ComponentMask::DEVICES.0,
 );
 
-/// One visible card.
+/// A card's hotplug animation (UI-PRF-012).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardAnim {
+    Steady,
+    /// Height 0 to `CARD_H` and opacity 0 to 1.
+    Inserting {
+        started: Instant,
+    },
+    /// Opacity 1 to 0 and height `CARD_H` to 0; the card goes when it ends.
+    Removing {
+        started: Instant,
+    },
+}
+
+/// One card in the list: a visible device, or one that is collapsing out.
 pub struct CardState {
     pub row: DeviceRow,
     pub chart: Entity<ChartView>,
     pub lines: CardLines,
     /// Index among the visible cards of its kind: "Disk 0".
     pub number: u16,
+    pub anim: CardAnim,
+    /// The sync that started `anim`; its timer ends every animation up to it.
+    anim_seq: u64,
+    /// `Removed` was emitted early: the same key came back while this card collapsed.
+    page_released: bool,
     /// The snapshot value the chart's Y scale was built from ([`scale_input`]).
     scale: u64,
+}
+
+impl CardState {
+    pub fn is_removing(&self) -> bool {
+        matches!(self.anim, CardAnim::Removing { .. })
+    }
 }
 
 /// Emitted to the `PerformancePage`.
@@ -337,10 +369,12 @@ fn saved_selection(cx: &App) -> DeviceKey {
 
 /// The device sidebar entity.
 pub struct DeviceSidebar {
-    /// The visible cards, in sidebar order.
+    /// The cards in sidebar order, collapsing ones included.
     pub(crate) cards: Vec<CardState>,
-    /// Position in `cards` by key.
+    /// Position in `cards` by key, for cards that are not collapsing.
     index: FxHashMap<DeviceKey, usize>,
+    /// Bumped by each card list change that animates.
+    anim_seq: u64,
     /// Every present device in sidebar order, hidden ones included.
     pub(crate) rows: Vec<DeviceRow>,
     pub(crate) selected: Option<DeviceKey>,
@@ -401,6 +435,7 @@ impl DeviceSidebar {
         let mut this = Self {
             cards: Vec::new(),
             index: FxHashMap::default(),
+            anim_seq: 0,
             rows: Vec::new(),
             selected: None,
             focus: cx.focus_handle().tab_stop(true),
@@ -423,7 +458,8 @@ impl DeviceSidebar {
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
-        this.sync_cards(&snap, cx);
+        // The first cards are there at once.
+        this.sync_cards(&snap, false, cx);
         this.refresh_lines(&snap);
         this.selected = initial_selection(&this.visible(), Some(&saved_selection(cx)));
         if let Some(ix) = this.selected_index() {
@@ -452,9 +488,14 @@ impl DeviceSidebar {
         cx.notify();
     }
 
-    /// The keys of the visible cards, in sidebar order.
+    /// The keys of the visible cards, in sidebar order. Collapsing cards are not visible.
     pub fn visible_keys(&self) -> impl Iterator<Item = &DeviceKey> {
-        self.cards.iter().map(|c| &c.row.key)
+        self.live().map(|c| &c.row.key)
+    }
+
+    /// The cards that are not collapsing, in sidebar order.
+    fn live(&self) -> impl Iterator<Item = &CardState> {
+        self.cards.iter().filter(|c| !c.is_removing())
     }
 
     /// The text of the card of `key`; page headers reuse its heading.
@@ -466,7 +507,7 @@ impl DeviceSidebar {
         self.index.get(key).map(|&i| &self.cards[i])
     }
 
-    /// The visible cards, in sidebar order.
+    /// Every card in the list, in sidebar order, collapsing ones included.
     pub fn cards(&self) -> &[CardState] {
         &self.cards
     }
@@ -487,7 +528,7 @@ impl DeviceSidebar {
     /// This surface's demand part: CPU total and memory always, and each device class that has
     /// a visible card. `cpu_fast` is the CPU page's.
     pub fn demand_part(&self) -> Demand {
-        let has = |kind| self.cards.iter().any(|c| c.row.kind == kind);
+        let has = |kind| self.live().any(|c| c.row.kind == kind);
         Demand {
             any_surface_visible: true,
             cpu: CpuDemand::Total,
@@ -529,10 +570,17 @@ impl DeviceSidebar {
     }
 
     fn visible(&self) -> Vec<DeviceRow> {
-        self.cards.iter().map(|c| c.row.clone()).collect()
+        self.live().map(|c| c.row.clone()).collect()
     }
 
-    fn new_card(&self, row: &DeviceRow, number: u16, snap: &Snapshot, cx: &mut App) -> CardState {
+    fn new_card(
+        &self,
+        row: &DeviceRow,
+        number: u16,
+        anim: CardAnim,
+        snap: &Snapshot,
+        cx: &mut App,
+    ) -> CardState {
         let scale = scale_input(row, snap, &self.settings);
         let (spec, fmt) = card_spec(row, scale, &self.settings, current(cx));
         let hub = self.hub.clone();
@@ -542,14 +590,25 @@ impl DeviceSidebar {
             chart,
             lines: CardLines::default(),
             number,
+            anim,
+            anim_seq: self.anim_seq,
+            page_released: false,
             scale,
         }
     }
 
     /// Recomputes `rows` and the visible cards: keeps the state of a card whose row is
-    /// unchanged, makes a card for a new row, drops the rest and emits `Removed` for them, and
-    /// sends the demand part. Returns the cards before when the card list changed.
-    fn sync_cards(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> Option<Vec<DeviceRow>> {
+    /// unchanged and makes a card for a new row. A card whose row went collapses in its place
+    /// and is dropped when that ends, and the sidebar emits `Removed` then. With animations off,
+    /// or `animate` false (the first build), new cards are steady and gone ones are dropped at
+    /// once. Sends the demand part. Returns
+    /// the visible cards before when they changed.
+    fn sync_cards(
+        &mut self,
+        snap: &Snapshot,
+        animate: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Vec<DeviceRow>> {
         sidebar_order(&snap.devices, &self.settings.view(), &mut self.rows);
         let visible: Vec<DeviceRow> = visible_rows(&self.rows, &self.settings.view())
             .cloned()
@@ -559,34 +618,136 @@ impl DeviceSidebar {
             return None;
         }
 
-        let mut old = std::mem::take(&mut self.cards);
-        self.index.clear();
+        let animate = animate && animations_on(cx);
+        let now = Instant::now();
+        self.anim_seq += 1;
+        let seq = self.anim_seq;
+        let leaves = |c: &CardState| c.is_removing() || !visible.contains(&c.row);
+        let mut old: Vec<Option<CardState>> = std::mem::take(&mut self.cards)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut cards = Vec::with_capacity(old.len().max(visible.len()));
+        // Old cards before `next` are placed; leaving ones keep their place among the rest.
+        let mut next = 0;
+        let mut animating = false;
         for row in &visible {
             let number = type_number(&visible, &row.key);
-            let card = match old.iter().position(|c| c.row == *row) {
-                Some(i) => {
-                    let mut card = old.swap_remove(i);
+            let found = old.iter().position(|c| {
+                c.as_ref()
+                    .is_some_and(|c| !c.is_removing() && c.row == *row)
+            });
+            let card = match found {
+                Some(p) => {
+                    if p >= next {
+                        for slot in &mut old[next..p] {
+                            if let Some(c) = slot.take_if(|c| leaves(c)) {
+                                cards.push(c);
+                            }
+                        }
+                        next = p + 1;
+                    }
+                    let mut card = old[p].take().expect("found above");
                     card.number = number;
                     card
                 }
-                None => self.new_card(row, number, snap, cx),
+                None if animate => {
+                    animating = true;
+                    self.new_card(row, number, CardAnim::Inserting { started: now }, snap, cx)
+                }
+                None => self.new_card(row, number, CardAnim::Steady, snap, cx),
             };
-            self.index.insert(row.key.clone(), self.cards.len());
-            self.cards.push(card);
+            cards.push(card);
         }
-        for card in old {
-            cx.emit(SidebarEvent::Removed(card.row.key));
+        cards.extend(old.into_iter().flatten());
+
+        // Cards that just left start collapsing, or go at once.
+        let mut kept = Vec::with_capacity(cards.len());
+        for mut card in cards {
+            let gone = !card.is_removing() && !visible.contains(&card.row);
+            if gone && !animate {
+                cx.emit(SidebarEvent::Removed(card.row.key));
+                continue;
+            }
+            if gone {
+                card.anim = CardAnim::Removing { started: now };
+                card.anim_seq = seq;
+                animating = true;
+            }
+            kept.push(card);
+        }
+        self.cards = kept;
+        self.index.clear();
+        for (i, card) in self.cards.iter().enumerate() {
+            if !card.is_removing() {
+                self.index.insert(card.row.key.clone(), i);
+            }
+        }
+        // A key that came back while its old card collapses gets a new page: drop the old one.
+        for card in &mut self.cards {
+            if card.is_removing() && !card.page_released && self.index.contains_key(&card.row.key) {
+                card.page_released = true;
+                cx.emit(SidebarEvent::Removed(card.row.key.clone()));
+            }
+        }
+        if animating {
+            self.end_anims_after(seq, cx);
         }
 
         self.send_demand(cx);
         Some(before)
     }
 
+    /// After `m_base`, makes the cards inserted up to `seq` steady and drops the ones removed up
+    /// to it, emitting `Removed` for each.
+    fn end_anims_after(&self, seq: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(M_BASE).await;
+            let _ = this.update(cx, |this, cx| this.end_anims(seq, cx));
+        })
+        .detach();
+    }
+
+    fn end_anims(&mut self, seq: u64, cx: &mut Context<Self>) {
+        let mut changed = false;
+        let mut kept = Vec::with_capacity(self.cards.len());
+        for mut card in std::mem::take(&mut self.cards) {
+            if card.anim_seq > seq {
+                kept.push(card);
+                continue;
+            }
+            match card.anim {
+                CardAnim::Steady => kept.push(card),
+                CardAnim::Inserting { .. } => {
+                    card.anim = CardAnim::Steady;
+                    changed = true;
+                    kept.push(card);
+                }
+                CardAnim::Removing { .. } => {
+                    changed = true;
+                    if !card.page_released {
+                        cx.emit(SidebarEvent::Removed(card.row.key));
+                    }
+                }
+            }
+        }
+        self.cards = kept;
+        if changed {
+            self.index.clear();
+            for (i, card) in self.cards.iter().enumerate() {
+                if !card.is_removing() {
+                    self.index.insert(card.row.key.clone(), i);
+                }
+            }
+            cx.notify();
+        }
+    }
+
     /// [`Self::sync_cards`], then moves the selection off a card that went: to the next card
     /// below it, else the one above (UI-PRF-012). With no selection, selects the saved device
     /// or the first card. True when the card list changed.
     fn sync_rows(&mut self, snap: &Snapshot, cx: &mut Context<Self>) -> bool {
-        let Some(before) = self.sync_cards(snap, cx) else {
+        let Some(before) = self.sync_cards(snap, true, cx) else {
             return false;
         };
         let next = match self.selected.clone() {
@@ -598,7 +759,7 @@ impl DeviceSidebar {
                     .position(|r| r.key == selected)
                     .and_then(|at| selection_after_removal(&before, at))
                     .filter(|k| self.index.contains_key(k))
-                    .or_else(|| self.cards.first().map(|c| c.row.key.clone()))
+                    .or_else(|| self.live().next().map(|c| c.row.key.clone()))
             }
             None => initial_selection(&self.visible(), Some(&saved_selection(cx))),
         };
@@ -718,14 +879,15 @@ impl DeviceSidebar {
         }
     }
 
+    /// The selected card's index among the visible cards (collapsing ones are skipped).
     fn selected_index(&self) -> Option<usize> {
-        self.selected
-            .as_ref()
-            .and_then(|k| self.index.get(k).copied())
+        let selected = self.selected.as_ref()?;
+        self.live().position(|c| c.row.key == *selected)
     }
 
+    /// Selects the visible card at `ix`; collapsing cards do not count.
     fn select_at(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if let Some(key) = self.cards.get(ix).map(|c| c.row.key.clone()) {
+        if let Some(key) = self.live().nth(ix).map(|c| c.row.key.clone()) {
             self.select(key, cx);
         }
     }
@@ -761,7 +923,7 @@ impl DeviceSidebar {
     }
 
     fn on_last(&mut self, _: &PerfSelectLastDevice, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.cards.len().checked_sub(1) {
+        if let Some(ix) = self.live().count().checked_sub(1) {
             self.select_at(ix, cx);
         }
     }
@@ -794,15 +956,38 @@ impl Render for DeviceSidebar {
         let theme = current(cx);
         let focused = self.focus.is_focused(window);
         let width = self.card_width.get();
-        let cards = self.cards.iter().map(|c| DeviceCard {
-            key: c.row.key.clone(),
-            chart: c.chart.clone(),
-            lines: c.lines.clone(),
-            selected: self.selected.as_ref() == Some(&c.row.key),
-            focused,
-            edit_mode: self.edit_mode,
-            hidden_in_edit: false,
-            width,
+        let card_h = CARD_H * m.ui_scale;
+        let cards = self.cards.iter().map(|c| {
+            let card = DeviceCard {
+                key: c.row.key.clone(),
+                chart: c.chart.clone(),
+                lines: c.lines.clone(),
+                selected: !c.is_removing() && self.selected.as_ref() == Some(&c.row.key),
+                focused,
+                edit_mode: self.edit_mode,
+                hidden_in_edit: false,
+                width,
+            };
+            let showing = match c.anim {
+                CardAnim::Steady => return card.into_any_element(),
+                CardAnim::Inserting { .. } => true,
+                CardAnim::Removing { .. } => false,
+            };
+            // Cards below move with the flex layout as the height changes.
+            div()
+                .flex_none()
+                .w_full()
+                .overflow_hidden()
+                .child(card)
+                .with_animation(
+                    ("perf-card-anim", c.anim_seq as usize),
+                    Animation::new(M_BASE).with_easing(ease_out_cubic),
+                    move |el, t| {
+                        let t = if showing { t } else { 1. - t };
+                        el.h(px(card_h * t)).opacity(t)
+                    },
+                )
+                .into_any_element()
         });
 
         // The cards have a fixed width: measure the sidebar each paint and redraw when it moved.
