@@ -578,3 +578,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - pdu.26 (8625b2d, 12c09d2): toolbar_for now has a Processes arm and the allow is removed; the tests use the real MainWindow. Nothing in src handles ToggleHideSystem or CycleViewMode yet; when a handler lands, the app-level counters in those tests must change.
 - cr0.22 (cfb9e79, 92eadf3): --app-id paths and bus name are validated; '-' maps to '_' in the object path. The window app_id and the autostart file name are on jqk.32.
 - jqk.12 (cc5eb39, 4abb95b): Include children checkbox. No Tab binding exists in the main window, so a new jqk P1 bug binds Tab and Shift+Tab after jqk.13. The accent line gap is in a jqk P3 bead. filter_esc_rule is jqk.13's to update.
+- cr0.22 follow-up (3ea3756): autostart file per app id; Exec passes --app-id.
