@@ -979,6 +979,8 @@ pub struct EngineSettings {
     pub interval_ms: u32,
     /// `units.network`.
     pub network: NetworkUnit,
+    /// `units.network_auto_scale`: the process table sorts network rates at the shown step.
+    pub network_auto_scale: bool,
     pub show_network_wired: bool,
     pub show_network_wireless: bool,
     pub show_network_vpn: bool,
@@ -997,6 +999,7 @@ impl From<&Settings> for EngineSettings {
         Self {
             interval_ms: s.processes.interval_ms,
             network: s.units.network,
+            network_auto_scale: s.units.network_auto_scale,
             show_network_wired: p.show_network_wired,
             show_network_wireless: p.show_network_wireless,
             show_network_vpn: p.show_network_vpn,
