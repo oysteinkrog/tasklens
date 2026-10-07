@@ -586,3 +586,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.25 closed: rendering.gpu = software now also sets both lavapipe ICD paths, __EGL_VENDOR_LIBRARY_FILENAMES (Mesa) and LIBGL_ALWAYS_SOFTWARE; gpui picks llvmpipe Vulkan (5bde23c, 3503156). Follow-up cr0.27: exit when the main window cannot open.
 - m1f.1 closed: watcher loop and real I/O (afdfa01, a59e519). The PSI trigger needs a trailing NUL. Comment on m1f.5: the --watch-memory arm must run before logging::init.
 - Leader 9856fbf: Fatal::key is test-only (clippy dead_code).
+- rsf.26 closed: one line canvas per row for guides and separators (a738bee). Follow-up: regenerate two render_table goldens for pdu.15 dimming.
+- jqk.34 closed: accent line ends at the filter outline (4f7e01d).
+- cr0.26 closed: import callback takes path, Settings and UiState and returns ImportedSettings; tl-app saves nothing (5dce869, b3c1e46, ff1b7f0, 7bd7e68). The UI half is on bj6.45 (comment added).
+- jqk.33 closed without new bindings: gpui_kit Root already binds Tab and Shift+Tab in every window; real-keystroke tests added (082485e, a2513c8). Leader accepts: a Global binding would bypass the kit focus trap.
