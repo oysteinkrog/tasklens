@@ -3,13 +3,17 @@
 //!
 //! Every systemd call goes to the user manager on the session bus through blocking zbus
 //! (ADR-001). These functions block for up to a few seconds, so callers run them on a plain
-//! thread, never on the GPUI main thread.
+//! thread, never on the GPUI main thread. `wrap_persist` (E32-004) runs them on the
+//! "tl-lowmem-unit" thread when `lowmem.enabled` changes.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use tl_model::settings::{Settings, UiState};
 use tracing::{info, warn};
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
@@ -319,5 +323,203 @@ fn ignore_gone(result: zbus::Result<zbus::Message>) -> Result<(), LowmemUnitErro
             Ok(())
         }
         Err(e) => Err(e.into()),
+    }
+}
+
+/// The ADR-011 persist callback. The same type as `settings_store::PersistCallback`, spelled out
+/// here so this module does not need the store.
+pub type PersistFn = Box<dyn Fn(&Settings, &UiState) + Send + Sync>;
+
+const LOG_TARGET: &str = "tasklens::engine";
+const THREAD_NAME: &str = "tl-lowmem-unit";
+
+/// The work `wrap_persist` runs. Tests swap these for counters and fakes.
+pub struct UnitOps {
+    pub install: Box<dyn Fn() -> Result<Installed, LowmemUnitError> + Send + Sync>,
+    pub remove: Box<dyn Fn() -> Result<(), LowmemUnitError> + Send + Sync>,
+    /// True when the unit file exists. Read once, when the callback is built.
+    pub unit_file_exists: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Sends the desktop notification "Could not set up the rescue window".
+    pub notify_failure: Box<dyn Fn() + Send + Sync>,
+}
+
+impl UnitOps {
+    fn real() -> UnitOps {
+        UnitOps {
+            install: Box::new(install_and_enable),
+            remove: Box::new(disable_and_remove),
+            unit_file_exists: Box::new(|| unit_path().is_ok_and(|p| p.exists())),
+            notify_failure: Box::new(|| {
+                crate::notify::send(crate::notify::Fatal::LowmemSetupFailed)
+            }),
+        }
+    }
+}
+
+/// Wraps the persist callback. Keeps the last seen `settings.lowmem.enabled` (starting at
+/// `initial`). When the value changes, it starts one std::thread named "tl-lowmem-unit" that
+/// runs install_and_enable() (false -> true) or disable_and_remove() (true -> false), then
+/// calls `inner` as before. At most one such thread runs at a time; a change that arrives
+/// while one runs is applied after it finishes, using the newest value.
+///
+/// At launch, when `initial` is true and the unit file is missing, the unit is installed again
+/// (R-152 OI-7). When `initial` is false, an existing file is left alone.
+///
+/// On a failure the setting is reverted in every value handed to `inner` until tl-ui sends a
+/// new `lowmem.enabled`, and the desktop notification is sent. tl-app cannot change tl-ui's
+/// copy, so the switch shows the new value until the user changes it or restarts.
+pub fn wrap_persist(inner: PersistFn, initial: bool) -> PersistFn {
+    wrap_persist_with(inner, initial, UnitOps::real())
+}
+
+/// `wrap_persist` with the install, remove, file check and notification given by the caller.
+pub fn wrap_persist_with(inner: PersistFn, initial: bool, ops: UnitOps) -> PersistFn {
+    let applied = initial && (ops.unit_file_exists)();
+    let toggle = Arc::new(Toggle {
+        inner,
+        ops,
+        dispatch: tracing::dispatcher::get_default(|d| d.clone()),
+        shared: Mutex::new(Shared {
+            seen: initial,
+            applied,
+            failed: None,
+            busy: false,
+            oom_score_adjust: None,
+            last: None,
+        }),
+    });
+    if initial && !applied {
+        info!(target: LOG_TARGET, "lowmem.enabled is on and the unit file is missing; installing it again");
+        let mut shared = toggle.lock();
+        toggle.start_worker(&mut shared);
+    }
+    Box::new(move |settings, state| toggle.persist(settings, state))
+}
+
+struct Toggle {
+    inner: PersistFn,
+    ops: UnitOps,
+    /// The worker thread logs through the subscriber of the thread that built the callback.
+    dispatch: tracing::Dispatch,
+    shared: Mutex<Shared>,
+}
+
+struct Shared {
+    /// The newest `lowmem.enabled` from tl-ui.
+    seen: bool,
+    /// True when the unit is installed, as far as this process knows.
+    applied: bool,
+    /// The value whose install or remove failed. Not retried until `seen` changes.
+    failed: Option<bool>,
+    /// True while the worker thread runs.
+    busy: bool,
+    /// The OOMScoreAdjust of an install done by this process, written into every state.
+    oom_score_adjust: Option<i32>,
+    /// The newest values from tl-ui while the worker runs, saved again when it ends.
+    last: Option<(Settings, UiState)>,
+}
+
+impl Toggle {
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn persist(self: &Arc<Self>, settings: &Settings, state: &UiState) {
+        let enabled = settings.lowmem.enabled;
+        let mut shared = self.lock();
+        if enabled != shared.seen {
+            shared.seen = enabled;
+            shared.failed = None;
+            if !shared.busy && enabled != shared.applied {
+                self.start_worker(&mut shared);
+            }
+        }
+        if shared.busy {
+            shared.last = Some((settings.clone(), state.clone()));
+        }
+        // `inner` runs under the lock, so a save from the worker never overtakes a newer one.
+        self.save(&shared, settings, state);
+    }
+
+    /// Calls `inner` with the reverted setting and the accepted OOMScoreAdjust applied.
+    fn save(&self, shared: &Shared, settings: &Settings, state: &UiState) {
+        let mut settings = Cow::Borrowed(settings);
+        if shared.failed == Some(settings.lowmem.enabled)
+            && settings.lowmem.enabled != shared.applied
+        {
+            settings.to_mut().lowmem.enabled = shared.applied;
+        }
+        let mut state = Cow::Borrowed(state);
+        if let Some(oom) = shared.oom_score_adjust
+            && state.lowmem.oom_score_adjust != Some(oom)
+        {
+            state.to_mut().lowmem.oom_score_adjust = Some(oom);
+        }
+        (self.inner)(&settings, &state);
+    }
+
+    fn start_worker(self: &Arc<Self>, shared: &mut Shared) {
+        shared.busy = true;
+        let toggle = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name(THREAD_NAME.to_owned())
+            .spawn(move || {
+                let dispatch = toggle.dispatch.clone();
+                tracing::dispatcher::with_default(&dispatch, || toggle.run_worker());
+            });
+        if let Err(e) = spawned {
+            warn!(target: LOG_TARGET, "could not start the {THREAD_NAME} thread: {e}");
+            shared.busy = false;
+        }
+    }
+
+    /// Applies the newest value until it matches the unit, then ends.
+    fn run_worker(&self) {
+        loop {
+            let target = {
+                let mut shared = self.lock();
+                if shared.seen == shared.applied || shared.failed == Some(shared.seen) {
+                    shared.busy = false;
+                    shared.last = None;
+                    return;
+                }
+                shared.seen
+            };
+            let result = if target {
+                (self.ops.install)().map(Some)
+            } else {
+                (self.ops.remove)().map(|()| None)
+            };
+            let failed = result.is_err();
+            {
+                let mut shared = self.lock();
+                match result {
+                    Ok(Some(installed)) => {
+                        info!(
+                            target: LOG_TARGET,
+                            oom_score_adjust = installed.oom_score_adjust,
+                            "installed and enabled {UNIT_NAME}"
+                        );
+                        shared.applied = true;
+                        shared.oom_score_adjust = Some(installed.oom_score_adjust);
+                    }
+                    Ok(None) => {
+                        info!(target: LOG_TARGET, "disabled and removed {UNIT_NAME}");
+                        shared.applied = false;
+                    }
+                    Err(e) => {
+                        let action = if target { "install" } else { "remove" };
+                        warn!(target: LOG_TARGET, "could not {action} {UNIT_NAME}: {e}");
+                        shared.failed = Some(target);
+                    }
+                }
+                if let Some((settings, state)) = &shared.last {
+                    self.save(&shared, settings, state);
+                }
+            }
+            if failed {
+                (self.ops.notify_failure)();
+            }
+        }
     }
 }

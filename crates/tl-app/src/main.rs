@@ -231,13 +231,14 @@ fn main() -> ExitCode {
         list_adapters: Arc::new(Vec::new),
         run_history: None,
     };
+    let persist = lowmem_unit::wrap_persist(store.persist_callback(), settings.lowmem.enabled);
     let exit = tl_ui::run(UiLaunch {
         client: Arc::new(engine.clone()),
         init: UiInit {
             settings,
             state,
             themes_json,
-            persist: store.persist_callback(),
+            persist,
             persist_themes: store.persist_themes_callback(),
             app_requests,
             startup_toasts,
