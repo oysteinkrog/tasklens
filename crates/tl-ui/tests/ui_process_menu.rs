@@ -1736,7 +1736,10 @@ mod end {
             })
             .collect();
         let at = |pid: u32| {
-            let i = records.iter().position(|r| r.key.pid == pid).unwrap();
+            let i = records
+                .iter()
+                .position(|r| r.key.pid == pid)
+                .expect("a record");
             row(NodeId::Process(key(pid)), Some(i as u32), None)
         };
         let unit = GroupRow {
@@ -1963,7 +1966,7 @@ mod end {
                 .and_then(|e| e.hint.clone())
                 .map(|h| h.to_string())
         };
-        let format = |key: &str| Kbd::format(&Keystroke::parse(key).unwrap());
+        let format = |key: &str| Kbd::format(&Keystroke::parse(key).expect("a keystroke"));
         assert_eq!(hint("End Task"), Some(format("delete")));
         assert_eq!(hint("End Process"), Some(format("shift-delete")));
         assert_eq!(hint("Copy details"), None, "no binding, no hint");
