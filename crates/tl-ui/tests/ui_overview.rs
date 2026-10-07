@@ -588,3 +588,525 @@ mod boxes {
         }
     }
 }
+
+// The GPU, Disk and Network boxes (crw.39).
+
+#[cfg(feature = "test-hooks")]
+mod bottom {
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
+        StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity, NetKind};
+    use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, SeriesSet, Snapshot, SystemSnapshot};
+    use tl_model::system::{DiskTotals, GpuTotals, LinkState, Metric, NetTotals};
+    use tl_model::time::now_boot_ns;
+    use tl_model::units;
+    use tl_model::validity::Validity;
+    use tl_ui::app::{BootSettings, EngineGlobal};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::i18n::init_strings;
+    use tl_ui::pages::performance::DeviceKey;
+    use tl_ui::pages::performance::overview::disk_box::DiskBox;
+    use tl_ui::pages::performance::overview::gpu_box::GpuBox;
+    use tl_ui::pages::performance::overview::net_box::NetBox;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    const GIB: u64 = 1 << 30;
+    const MIB: f64 = 1024. * 1024.;
+    const DISK_AGG: u16 = 50;
+    const NET_AGG: u16 = 51;
+
+    type Devices = Vec<(DeviceKey, DeviceIdx, SharedString)>;
+
+    struct Host {
+        gpu: Entity<GpuBox>,
+        disk: Entity<DiskBox>,
+        net: Entity<NetBox>,
+        /// GPU and Disk box heights.
+        gpu_h: f32,
+        disk_h: f32,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let cached = || StyleRefinement::default().size_full();
+            div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(
+                    div()
+                        .w(px(500.))
+                        .h(px(self.gpu_h))
+                        .child(self.gpu.clone().cached(cached())),
+                )
+                .child(
+                    div()
+                        .w(px(500.))
+                        .h(px(self.disk_h))
+                        .child(self.disk.clone().cached(cached())),
+                )
+                .child(
+                    div()
+                        .w(px(500.))
+                        .h(px(200.))
+                        .child(self.net.clone().cached(cached())),
+                )
+        }
+    }
+
+    fn entry(idx: u16, identity: DeviceIdentity, net_kind: Option<NetKind>) -> DeviceEntry {
+        DeviceEntry {
+            idx: DeviceIdx(idx),
+            identity,
+            generation: 0,
+            display_name: Arc::from("dev"),
+            present: true,
+            parent: None,
+            persistent_key: Arc::from(""),
+            net_kind,
+        }
+    }
+
+    fn gpu_id(n: u8) -> DeviceIdentity {
+        DeviceIdentity::Gpu {
+            uuid: [n; 16],
+            pci_bus_id: Arc::from(format!("0000:0{n}:00.0")),
+        }
+    }
+
+    fn disk_id(minor: u32, name: &str) -> DeviceIdentity {
+        DeviceIdentity::Disk {
+            major: 8,
+            minor,
+            name: Arc::from(name),
+            wwn_or_serial: None,
+        }
+    }
+
+    fn net_id(ifindex: u32, name: &str) -> DeviceIdentity {
+        DeviceIdentity::Net {
+            netns_ino: 1,
+            ifindex,
+            name: Arc::from(name),
+        }
+    }
+
+    /// GPUs at 10..13, disks sda and sdb at 20 and 21, aggregates, eth0 (wired) at 30, docker0
+    /// (virtual) at 31 and lo at 32.
+    fn catalog() -> DeviceCatalog {
+        let mut entries: Vec<_> = (0..3)
+            .map(|n| entry(10 + n, gpu_id(n as u8), None))
+            .collect();
+        entries.push(entry(20, disk_id(0, "sda"), None));
+        entries.push(entry(21, disk_id(16, "sdb"), None));
+        entries.push(entry(
+            DISK_AGG,
+            DeviceIdentity::Aggregate(AggregateKind::Disks),
+            None,
+        ));
+        entries.push(entry(
+            NET_AGG,
+            DeviceIdentity::Aggregate(AggregateKind::Nets),
+            None,
+        ));
+        entries.push(entry(30, net_id(2, "eth0"), Some(NetKind::Wired)));
+        entries.push(entry(31, net_id(3, "docker0"), Some(NetKind::Virtual)));
+        entries.push(entry(32, net_id(1, "lo"), Some(NetKind::Other)));
+        DeviceCatalog {
+            version: 1,
+            entries: Arc::from(entries),
+        }
+    }
+
+    fn devices(kind: &str, idx: &[u16]) -> Devices {
+        idx.iter()
+            .enumerate()
+            .map(|(n, i)| {
+                (
+                    DeviceKey(Arc::from(format!("{kind}{n}"))),
+                    DeviceIdx(*i),
+                    SharedString::from(format!("{kind} {n}")),
+                )
+            })
+            .collect()
+    }
+
+    fn gpu_totals(device: u16) -> GpuTotals {
+        GpuTotals {
+            device: DeviceIdx(device),
+            util_pct: Metric::valid(25.),
+            mem_util_pct: Metric::default(),
+            mem_used: Metric::valid(4 * GIB),
+            mem_total: Metric::valid(16 * GIB),
+            shared_used: Metric::default(),
+            shared_total: Metric::default(),
+            enc_pct: Metric::default(),
+            dec_pct: Metric::default(),
+            temp_c: Metric::with(Validity::Unsupported),
+            power_w: Metric::valid(120.),
+            power_limit_w: Metric::default(),
+            clock_gfx_mhz: Metric::default(),
+            clock_mem_mhz: Metric::default(),
+            fan_pct: Metric::default(),
+            pcie_rx_bps: Metric::default(),
+            pcie_tx_bps: Metric::default(),
+        }
+    }
+
+    fn disk_totals(device: u16, read_bps: f64) -> DiskTotals {
+        DiskTotals {
+            device: DeviceIdx(device),
+            active_pct: Metric::valid(40.),
+            read_bps: Metric::valid(read_bps),
+            write_bps: Metric::valid(0.),
+            response_ms: Metric::default(),
+            read_total: 0,
+            written_total: 0,
+            capacity: 0,
+            temp_c: Metric::default(),
+        }
+    }
+
+    fn net_totals(device: u16, rx_bps: f64, rx_total: u64) -> NetTotals {
+        NetTotals {
+            device: DeviceIdx(device),
+            rx_bps: Metric::valid(rx_bps),
+            tx_bps: Metric::valid(0.),
+            rx_total,
+            tx_total: 0,
+            link_speed_mbps: Metric::default(),
+            state: LinkState::Up,
+        }
+    }
+
+    struct Rig<'a> {
+        engine: Arc<FakeEngine>,
+        host: Entity<Host>,
+        vcx: &'a mut VisualTestContext,
+        version: u64,
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        gpus: Devices,
+        disks: Devices,
+        heights: (f32, f32),
+    ) -> Rig<'_> {
+        let engine = FakeEngine::new();
+        engine.publish_with(|s| s.devices = Arc::new(catalog()));
+        let client: Arc<dyn EngineClient> = engine.clone();
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::theme::metrics::init_metrics(&AppearanceSettings::default(), cx);
+            init_strings(cx, "en-US");
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+        });
+        let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+        let (host, vcx) = cx.add_window_view(move |_, cx| Host {
+            gpu: cx.new(|cx| GpuBox::new(&hub, &gpus, cx)),
+            disk: cx.new(|cx| DiskBox::new(&hub, &disks, cx)),
+            net: cx.new(|cx| NetBox::new(&hub, cx)),
+            gpu_h: heights.0,
+            disk_h: heights.1,
+        });
+        vcx.simulate_scale_factor_change(1.0);
+        vcx.simulate_resize(size(px(500.), px(1600.)));
+        draw(vcx);
+        Rig {
+            engine,
+            host,
+            vcx,
+            version: 0,
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+        }
+    }
+
+    impl Rig<'_> {
+        fn publish(&mut self, f: impl FnOnce(&mut Snapshot)) {
+            self.engine.publish_with(f);
+            self.vcx.run_until_parked();
+        }
+
+        fn system(&mut self, f: impl FnOnce(&mut SystemSnapshot)) {
+            self.publish(|s| {
+                let sys = Arc::make_mut(&mut s.system);
+                sys.header.version += 1;
+                f(sys);
+            });
+        }
+
+        fn boxes(&self) -> (Entity<GpuBox>, Entity<DiskBox>, Entity<NetBox>) {
+            self.vcx.read_entity(&self.host, |h, _| {
+                (h.gpu.clone(), h.disk.clone(), h.net.clone())
+            })
+        }
+
+        fn heights(&mut self, gpu_h: f32, disk_h: f32) {
+            let host = self.host.clone();
+            self.vcx.update(|_, cx| {
+                host.update(cx, |h, cx| {
+                    h.gpu_h = gpu_h;
+                    h.disk_h = disk_h;
+                    cx.notify();
+                })
+            });
+            draw(self.vcx);
+        }
+    }
+
+    fn rate_iec(bps: f64) -> String {
+        let mut s = String::new();
+        units::rate_iec_auto(&mut s, bps);
+        s
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_caps_at_two_with_more(cx: &mut TestAppContext) {
+        let r = open(cx, devices("gpu", &[10, 11, 12]), Vec::new(), (400., 200.));
+        let (gpu, _, _) = r.boxes();
+        let (sections, more, text, shown) = r.vcx.update(|_, cx| {
+            let g = gpu.read(cx);
+            (
+                g.sections().len(),
+                g.more(),
+                g.more_text().to_string(),
+                g.shown(),
+            )
+        });
+        assert_eq!((sections, more), (2, 1));
+        assert_eq!(text, "+1 more");
+        assert_eq!(shown, 2, "400 px fits both sections");
+        let mut copy = String::new();
+        r.vcx.update(|_, cx| gpu.read(cx).copy_text(&mut copy));
+        assert!(copy.ends_with("+1 more\n"), "{copy}");
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_second_section_only_when_both_fit(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10, 11]), Vec::new(), (400., 200.));
+        let (gpu, _, _) = r.boxes();
+        let shown = |r: &mut Rig| r.vcx.update(|_, cx| gpu.read(cx).shown());
+        assert_eq!(shown(&mut r), 2);
+        r.heights(150., 200.);
+        assert_eq!(shown(&mut r), 1, "150 px: one section");
+        r.heights(400., 200.);
+        assert_eq!(shown(&mut r), 2, "back to both");
+    }
+
+    #[gpui_kit::test]
+    fn gpu_box_temp_power_optional(cx: &mut TestAppContext) {
+        let mut r = open(cx, devices("gpu", &[10]), Vec::new(), (300., 200.));
+        r.system(|s| s.gpus = Arc::from([(DeviceIdx(10), gpu_totals(10))]));
+        let (gpu, _, _) = r.boxes();
+        let section = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let g = gpu.read(cx);
+                let s = &g.sections()[0];
+                (
+                    s.value.to_string(),
+                    s.line.to_string(),
+                    s.vram.value.to_string(),
+                    s.vram.fraction,
+                )
+            })
+        };
+        let mut watts = String::new();
+        units::watts(&mut watts, 120.);
+        let (value, line, vram, fraction) = section(&mut r);
+        assert_eq!(value, "25.0%");
+        assert_eq!(line, watts, "temperature Unsupported: power only");
+        assert_eq!(vram, "4.00 GiB / 16.00 GiB");
+        assert_eq!(fraction, Some(0.25));
+
+        r.system(|s| {
+            let mut t = gpu_totals(10);
+            t.temp_c = Metric::valid(62.);
+            s.gpus = Arc::from([(DeviceIdx(10), t)]);
+        });
+        assert_eq!(section(&mut r).1, format!("62 °C · {watts}"));
+    }
+
+    #[gpui_kit::test]
+    fn disk_box_rows_and_rates(cx: &mut TestAppContext) {
+        let mut r = open(cx, Vec::new(), devices("disk", &[20, 21]), (200., 300.));
+        r.system(|s| {
+            s.disks = Arc::from([
+                (DeviceIdx(20), disk_totals(20, MIB)),
+                (DeviceIdx(21), disk_totals(21, MIB)),
+            ]);
+        });
+        let (_, disk, _) = r.boxes();
+        let rows = r.vcx.update(|_, cx| disk.read(cx).rows().to_vec());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].read.as_ref(), rate_iec(MIB));
+        assert_eq!(rows[0].write.as_ref(), rate_iec(0.));
+        assert_eq!(rows[0].busy, Some(0.4));
+        assert_eq!(rows[1].name.as_ref(), "disk 1");
+    }
+
+    #[gpui_kit::test]
+    fn disk_box_rows_fit_height(cx: &mut TestAppContext) {
+        let idx: Vec<u16> = (0..10).map(|i| 200 + i).collect();
+        let mut r = open(cx, Vec::new(), devices("disk", &idx), (200., 600.));
+        let (_, disk, _) = r.boxes();
+        let state = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let d = disk.read(cx);
+                (
+                    d.rows().len(),
+                    d.more(),
+                    d.shown(),
+                    d.shown_more_text().to_string(),
+                )
+            })
+        };
+        assert_eq!(
+            state(&mut r),
+            (8, 2, 8, "+2 more".into()),
+            "600 px: all 8 rows"
+        );
+        // 200 px: 200 - 2·12 padding - 2 border - 24 title - 12 gap = 138 body; minus the 48 px
+        // chart, a 12 px gap and the 18 px header leaves 60 px: 3 rows, one goes to "+n more".
+        r.heights(200., 200.);
+        assert_eq!(state(&mut r), (8, 2, 2, "+8 more".into()));
+    }
+
+    #[gpui_kit::test]
+    fn disk_box_io_chart_on_aggregate(cx: &mut TestAppContext) {
+        let r = open(cx, Vec::new(), devices("disk", &[20]), (200., 300.));
+        let (_, disk, _) = r.boxes();
+        let ids: Vec<SeriesId> = r
+            .vcx
+            .update(|_, cx| disk.read(cx).io_chart().read(cx).series_ids().collect());
+        let id = |metric| SeriesId {
+            device: DeviceIdx(DISK_AGG),
+            metric,
+        };
+        assert_eq!(ids, [id(MetricId::DISK_READ), id(MetricId::DISK_WRITE)]);
+    }
+
+    #[gpui_kit::test]
+    fn net_box_totals_follow_shown_classes(cx: &mut TestAppContext) {
+        let mut r = open(cx, Vec::new(), Vec::new(), (200., 200.));
+        r.system(|s| {
+            s.nets = Arc::from([
+                (DeviceIdx(30), net_totals(30, 1000., GIB)),
+                (DeviceIdx(31), net_totals(31, 5000., 5 * GIB)),
+                (DeviceIdx(32), net_totals(32, 9000., 9 * GIB)),
+            ]);
+        });
+        let (_, _, net) = r.boxes();
+        let texts = r
+            .vcx
+            .update(|_, cx| net.read(cx).texts().map(|t| t.to_string()));
+        assert_eq!(texts[2], "1.00 GiB since boot", "eth0 only");
+        let mut down = String::new();
+        tl_ui::chart::format_value(
+            tl_ui::chart::ValueFormat::RateNetwork,
+            1000.,
+            tl_model::settings::NetworkUnit::default(),
+            &mut down,
+        );
+        assert_eq!(texts[0], down);
+        let ids: Vec<SeriesId> = r
+            .vcx
+            .update(|_, cx| net.read(cx).down_chart().read(cx).series_ids().collect());
+        assert_eq!(
+            ids,
+            [SeriesId {
+                device: DeviceIdx(NET_AGG),
+                metric: MetricId::NET_RX
+            }]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn gpu_disk_net_ignore_cpu_tick(cx: &mut TestAppContext) {
+        let mut r = open(
+            cx,
+            devices("gpu", &[10]),
+            devices("disk", &[20]),
+            (300., 300.),
+        );
+        draw(r.vcx);
+        let (gpu, disk, net) = r.boxes();
+        let counts = |r: &mut Rig| {
+            r.vcx.update(|_, cx| {
+                let (g, d, n) = (gpu.read(cx), disk.read(cx), net.read(cx));
+                let builds = |v: &Entity<tl_ui::chart::ChartView>| v.read(cx).build_count.get();
+                [
+                    g.render_count.get(),
+                    g.notify_count.get(),
+                    builds(&g.sections()[0].chart),
+                    d.render_count.get(),
+                    d.notify_count.get(),
+                    builds(d.io_chart()),
+                    n.render_count.get(),
+                    n.notify_count.get(),
+                    builds(n.down_chart()),
+                    builds(n.up_chart()),
+                ]
+            })
+        };
+        let before = counts(&mut r);
+        r.version += 1;
+        let version = r.version;
+        let newest = now_boot_ns();
+        let view = Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(100),
+                metric: MetricId::CPU_TOTAL,
+            },
+            version,
+            period_ns: 100_000_000,
+            samples: vec![Sample::valid(newest, 10.)].into(),
+        });
+        r.publish(|s| {
+            s.series = Arc::new(SeriesSet {
+                header: ComponentHeader {
+                    version,
+                    ..ComponentHeader::default()
+                },
+                series: Arc::from([view]),
+                slow: Arc::from([]),
+            });
+        });
+        draw(r.vcx);
+        assert_eq!(
+            counts(&mut r),
+            before,
+            "a CPU tick touches none of the three"
+        );
+    }
+}
