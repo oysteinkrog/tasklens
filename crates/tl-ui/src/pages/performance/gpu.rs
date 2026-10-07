@@ -997,7 +997,12 @@ pub struct GpuDetailInputs<'a> {
     pub probe: ProbeState,
 }
 
-/// A value and its validity, from a `Metric` or an inventory field.
+/// A metric of a GPU with no record yet.
+fn missing<T: Copy + Default>() -> Metric<T> {
+    Metric::with(Validity::Missing)
+}
+
+/// The value of a `Metric` or an inventory field when it is shown.
 fn shown_u64(value: u64, validity: Validity) -> Option<u64> {
     matches!(validity, Validity::Valid | Validity::Stale).then_some(value)
 }
@@ -1023,15 +1028,14 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
     let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
     let rows = DetailRows { age_ns };
     let mut changed = false;
-    let none = Metric::with(Validity::Missing);
     let t = inp.totals;
 
-    let pct = |o: &mut String, v: f32| units::percent(o, v);
+    let pct = units::percent;
     let pct_bits = |v: f32| u64::from(v.to_bits());
     changed |= rows.metric(
         model,
         ROW_UTILIZATION,
-        t.map_or(none, |t| t.util_pct),
+        t.map_or(missing(), |t| t.util_pct),
         pct_bits,
         pct,
     );
@@ -1044,7 +1048,7 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
     changed |= rows.pair(
         model,
         ROW_DEDICATED,
-        t.map_or(none, |t| t.mem_used),
+        t.map_or(missing(), |t| t.mem_used),
         dedicated_total,
     );
 
@@ -1064,7 +1068,7 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
         (_, Some(total)) => rows.pair(
             model,
             ROW_SHARED,
-            t.map_or(none, |t| t.shared_used),
+            t.map_or(missing(), |t| t.shared_used),
             Some(total),
         ),
     };
@@ -1078,23 +1082,23 @@ pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -
     changed |= rows.metric(
         model,
         ROW_ENCODE,
-        t.map_or(none, |t| t.enc_pct),
+        t.map_or(missing(), |t| t.enc_pct),
         pct_bits,
         pct,
     );
     changed |= rows.metric(
         model,
         ROW_DECODE,
-        t.map_or(none, |t| t.dec_pct),
+        t.map_or(missing(), |t| t.dec_pct),
         pct_bits,
         pct,
     );
     changed |= rows.metric(
         model,
         ROW_TEMPERATURE,
-        t.map_or(none, |t| t.temp_c),
+        t.map_or(missing(), |t| t.temp_c),
         pct_bits,
-        |o, v| units::celsius(o, v),
+        units::celsius,
     );
 
     changed |= match inp.adapter.map(|a| &a.temperature_source) {

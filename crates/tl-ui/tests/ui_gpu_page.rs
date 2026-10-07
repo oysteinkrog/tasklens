@@ -360,21 +360,34 @@ fn gpu_demand_only_when_active(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn gpu_samples_do_not_rerender_page(cx: &mut TestAppContext) {
-    let r = nvidia(cx);
-    let before = r.vcx.update(|_, cx| r.page.read(cx).render_count.get());
-    for _ in 0..3 {
+fn gpu_samples_rerender_page_only_on_change(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    fn count(r: &mut Rig) -> u32 {
+        let page = r.page.clone();
+        r.vcx.update(|_, cx| page.read(cx).render_count.get())
+    }
+    let publish = |r: &Rig, util: f32| {
         r.engine.publish_with(|s| {
             let sys = Arc::make_mut(&mut s.system);
             sys.header.version += 1;
             let mut t = totals(false);
-            t.util_pct = Metric::valid(50.0);
+            t.util_pct = Metric::valid(util);
             sys.gpus = Arc::from([(GPU, t)].as_slice());
         });
+    };
+    let before = count(&mut r);
+    // The same values: the engine list, Memory shape and Details rows all stay.
+    for _ in 0..3 {
+        publish(&r, 10.9);
         draw(r.vcx);
     }
-    let after = r.vcx.update(|_, cx| r.page.read(cx).render_count.get());
-    assert_eq!(before, after);
+    assert_eq!(count(&mut r), before);
+    // A new utilization changes the Details row once.
+    for _ in 0..3 {
+        publish(&r, 50.0);
+        draw(r.vcx);
+    }
+    assert_eq!(count(&mut r), before + 1);
 }
 
 // Details grid rows 1 to 8 (tasklens-o55.10, UI-PRF-033).
@@ -423,8 +436,9 @@ fn gpu_details_order(cx: &mut TestAppContext) {
             "3.00 GiB / 16.00 GiB",
             "Not supported",
             "Not reported",
-            "0.0%",
-            "0.0%",
+            // `units::percent` writes zero as "0%" (table (d)).
+            "0%",
+            "0%",
             "52 °C",
             "NVML (GPU core)",
         ]
