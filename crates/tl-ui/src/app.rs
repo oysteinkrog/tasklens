@@ -10,7 +10,7 @@
 
 use std::cell::Cell;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -36,6 +36,10 @@ pub type PersistFn = Box<dyn Fn(&Settings, &UiState)>;
 pub type WriteSettingsFn = Arc<dyn Fn(&Settings) -> Result<(), String>>;
 /// Sets or clears the global shortcut. The error is shown to the user.
 pub type SetShortcutFn = Arc<dyn Fn(Option<&str>) -> Result<(), String>>;
+/// Reads a TaskSlinger `UserSettings.ini` and imports it onto the current settings and state.
+/// The error is shown to the user.
+pub type ImportTaskslingerFn =
+    Arc<dyn Fn(&Path, &Settings, &UiState) -> Result<ImportedSettings, String>>;
 /// Handles one `AppRequest` on the main thread.
 pub type AppRequestFn = Box<dyn Fn(AppRequest, &mut App)>;
 
@@ -104,6 +108,14 @@ pub struct ImportSummary {
     pub themes: u32,
 }
 
+/// A TaskSlinger import: the full settings and state with the imported values applied.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImportedSettings {
+    pub settings: Settings,
+    pub state: UiState,
+    pub summary: ImportSummary,
+}
+
 /// Reads and writes the Run dialog history file. tl-app builds it on `write_atomic`.
 pub trait RunHistoryStore {
     fn load(&self) -> Vec<RunHistoryEntry>;
@@ -133,7 +145,9 @@ pub struct AppEnv {
     pub set_autostart: Arc<dyn Fn(bool, bool) -> Result<(), String>>,
     /// `None` outside KDE.
     pub global_shortcut: Option<GlobalShortcutApi>,
-    pub import_taskslinger: Arc<dyn Fn() -> Result<ImportSummary, String>>,
+    /// Writes nothing. The caller must apply the result through `TlSettings::update`, so the UI
+    /// and the settings store stay in sync.
+    pub import_taskslinger: ImportTaskslingerFn,
     /// The wgpu probe runs in tl-app.
     pub list_adapters: Arc<dyn Fn() -> Vec<AdapterInfo>>,
     /// `None` in tests.
@@ -157,7 +171,13 @@ impl AppEnv {
             write_settings_now: Arc::new(|_| Ok(())),
             set_autostart: Arc::new(|_, _| Ok(())),
             global_shortcut: None,
-            import_taskslinger: Arc::new(|| Ok(ImportSummary::default())),
+            import_taskslinger: Arc::new(|_, settings, state| {
+                Ok(ImportedSettings {
+                    settings: settings.clone(),
+                    state: state.clone(),
+                    summary: ImportSummary::default(),
+                })
+            }),
             list_adapters: Arc::new(Vec::new),
             run_history: None,
         }
