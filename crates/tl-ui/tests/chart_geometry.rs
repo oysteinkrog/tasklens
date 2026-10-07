@@ -637,46 +637,48 @@ mod scale {
     }
 
     const BITS: YScale = YScale::AutoRate { iec: false };
+    /// Samples are bytes per second: `n / B` is `n` bits per second.
+    const B: f32 = 8.0;
 
     #[test]
     fn autorate_rises_immediately() {
         let mut s = ScaleState::default();
-        let r = run(BITS, 0.0, 3.2e6, 0, &mut s);
+        let r = run(BITS, 0.0, 3.2e6 / B, 0, &mut s);
         assert_eq!(r.y_min, 0.0);
-        assert_eq!(r.y_max, 5e6);
+        assert_eq!(r.y_max, 5e6 / B);
         assert_eq!(text(&r), Some("5 Mbps"));
 
-        let mut s = rate_state(5e6);
-        let r = run(BITS, 0.0, 7e6, SEC, &mut s);
-        assert_eq!(r.y_max, 1e7);
+        let mut s = rate_state(5e6 / B);
+        let r = run(BITS, 0.0, 7e6 / B, SEC, &mut s);
+        assert_eq!(r.y_max, 1e7 / B);
         assert_eq!(text(&r), Some("10 Mbps"));
     }
 
     #[test]
     fn autorate_falls_after_10s_below_half() {
-        let mut s = rate_state(1e7);
-        assert_eq!(run(BITS, 0.0, 2e6, 0, &mut s).y_max, 1e7);
+        let mut s = rate_state(1e7 / B);
+        assert_eq!(run(BITS, 0.0, 2e6 / B, 0, &mut s).y_max, 1e7 / B);
         assert_eq!(s.below_half_since, Some(0));
-        assert_eq!(run(BITS, 0.0, 2e6, 9 * SEC, &mut s).y_max, 1e7);
+        assert_eq!(run(BITS, 0.0, 2e6 / B, 9 * SEC, &mut s).y_max, 1e7 / B);
         assert_eq!(s.below_half_since, Some(0));
-        let r = run(BITS, 0.0, 2e6, 10 * SEC, &mut s);
-        assert_eq!(r.y_max, 2e6);
+        let r = run(BITS, 0.0, 2e6 / B, 10 * SEC, &mut s);
+        assert_eq!(r.y_max, 2e6 / B);
         assert_eq!(text(&r), Some("2 Mbps"));
         assert_eq!(s.below_half_since, None);
     }
 
     #[test]
     fn autorate_fall_timer_resets_above_half() {
-        let mut s = rate_state(1e7);
-        run(BITS, 0.0, 2e6, 0, &mut s);
+        let mut s = rate_state(1e7 / B);
+        run(BITS, 0.0, 2e6 / B, 0, &mut s);
         assert_eq!(s.below_half_since, Some(0));
-        let r = run(BITS, 0.0, 6e6, 5 * SEC, &mut s);
+        let r = run(BITS, 0.0, 6e6 / B, 5 * SEC, &mut s);
         assert_eq!(s.below_half_since, None);
-        assert_eq!(r.y_max, 1e7);
+        assert_eq!(r.y_max, 1e7 / B);
         // The timer starts again from the next low sample.
-        run(BITS, 0.0, 2e6, 6 * SEC, &mut s);
-        assert_eq!(run(BITS, 0.0, 2e6, 15 * SEC, &mut s).y_max, 1e7);
-        assert_eq!(run(BITS, 0.0, 2e6, 16 * SEC, &mut s).y_max, 2e6);
+        run(BITS, 0.0, 2e6 / B, 6 * SEC, &mut s);
+        assert_eq!(run(BITS, 0.0, 2e6 / B, 15 * SEC, &mut s).y_max, 1e7 / B);
+        assert_eq!(run(BITS, 0.0, 2e6 / B, 16 * SEC, &mut s).y_max, 2e6 / B);
     }
 
     #[test]
@@ -692,7 +694,7 @@ mod scale {
         assert_eq!(r.y_max, 1024.0);
         assert_eq!(text(&r), Some("1 KiB/s"));
         let mut s = ScaleState::default();
-        assert_eq!(run(BITS, 0.0, f32::NAN, 0, &mut s).y_max, 1000.0);
+        assert_eq!(run(BITS, 0.0, f32::NAN, 0, &mut s).y_max, 1000.0 / 8.0);
     }
 
     #[test]
@@ -755,8 +757,9 @@ mod scale {
     #[test]
     fn link_speed_text() {
         let mut s = ScaleState::default();
-        let r = run(YScale::LinkSpeed(1e9), 0.0, 5e8, 0, &mut s);
-        assert_eq!((r.y_min, r.y_max), (0.0, 1e9));
+        // 1 Gbps tops out at 1.25e8 B/s.
+        let r = run(YScale::LinkSpeed(1e9), 0.0, 5e7, 0, &mut s);
+        assert_eq!((r.y_min, r.y_max), (0.0, 1.25e8));
         assert_eq!(text(&r), Some("1 Gbps"));
         let r = run(YScale::LinkSpeed(2.5e9), 0.0, 0.0, 0, &mut s);
         assert_eq!(text(&r), Some("2.5 Gbps"));

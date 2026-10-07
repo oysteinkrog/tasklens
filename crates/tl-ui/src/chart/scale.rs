@@ -19,6 +19,8 @@ pub const FALL_AFTER_NS: u64 = 10_000_000_000;
 /// Lowest `AutoRate` ceiling: 1 KiB/s for IEC rates, 1 Kbps for bit rates.
 const MIN_RATE_IEC: f32 = 1024.0;
 const MIN_RATE_BITS: f32 = 1000.0;
+/// Rate samples are bytes per second; bit scales and link speeds count bits.
+const BITS_PER_BYTE: f32 = 8.0;
 
 /// `StickyTemp` start range in °C.
 const TEMP_START_MIN: f32 = 35.0;
@@ -98,17 +100,25 @@ pub fn compute(
                 (0.0, y_max)
             }
         }
+        // Samples are bytes per second. The bit scale rounds to 1-2-5 steps in bits and keeps
+        // its ceiling in bytes.
         YScale::AutoRate { iec } => {
             let (target, min) = if iec {
                 // Rates above u64::MAX bytes/s do not occur; the cast saturates.
                 let pow2 = ceil_pow2(f64::from(vmax).ceil() as u64) as f32;
                 (pow2, MIN_RATE_IEC)
             } else {
-                (ceil_125(f64::from(vmax)) as f32, MIN_RATE_BITS)
+                let bits = ceil_125(f64::from(vmax * BITS_PER_BYTE)) as f32;
+                (bits / BITS_PER_BYTE, MIN_RATE_BITS / BITS_PER_BYTE)
             };
             let target = target.max(min);
             let ceiling = sticky_fall(state, target, vmax < state.ceiling / 2.0, now_boot_ns);
-            write_rate(out_text, f64::from(ceiling), iec);
+            let shown = if iec {
+                ceiling
+            } else {
+                ceiling * BITS_PER_BYTE
+            };
+            write_rate(out_text, f64::from(shown), iec);
             (0.0, ceiling)
         }
         YScale::LinkSpeed(bps) => {
@@ -119,9 +129,12 @@ pub fn compute(
             };
             match network_unit {
                 NetworkUnit::Bits => write_rate(out_text, f64::from(bps), false),
-                NetworkUnit::Bytes => write_rate(out_text, f64::from(bps) / 8.0, true),
+                NetworkUnit::Bytes => {
+                    write_rate(out_text, f64::from(bps / BITS_PER_BYTE), true);
+                }
             }
-            (0.0, bps)
+            // The link speed counts bits; samples are bytes per second.
+            (0.0, bps / BITS_PER_BYTE)
         }
         YScale::StickyTemp => {
             if !state.initialised {

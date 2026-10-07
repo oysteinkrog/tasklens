@@ -910,6 +910,67 @@ mod sidebar {
         assert_eq!(fmt, ValueFormat::PercentOf { total: 24 << 30 });
     }
 
+    /// A 1 Gbps link at full speed, 1.25e8 B/s, reaches the top of a link speed scale.
+    #[gpui_kit::test]
+    fn net_card_full_link_speed_reaches_top(cx: &mut TestAppContext) {
+        use tl_ui::chart::YScale;
+        let mut settings = Settings::default();
+        settings.performance.network_dynamic_scale = false;
+        let mut r = open(cx, nine(), settings, UiState::default());
+        let _driver = r.vcx.update(|window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            driver
+        });
+        r.engine.publish_with(|s| {
+            let mut sys = system(10);
+            sys.header.version = 77;
+            sys.nets = Arc::from(
+                [(
+                    DeviceIdx(7),
+                    NetTotals {
+                        device: DeviceIdx(7),
+                        rx_bps: Metric::valid(1.25e8),
+                        tx_bps: Metric::valid(0.),
+                        rx_total: 0,
+                        tx_total: 0,
+                        link_speed_mbps: Metric::valid(1000),
+                        state: LinkState::Up,
+                    },
+                )]
+                .as_slice(),
+            );
+            s.system = Arc::new(sys);
+        });
+        draw(r.vcx);
+        let chart = chart_of(&mut r, "net:eth0");
+        let y = r.vcx.read_entity(&chart, |v, _| v.spec.y);
+        assert_eq!(y, YScale::LinkSpeed(1e9));
+        let newest = now_boot_ns();
+        let rx = Arc::new(SeriesView {
+            id: SeriesId {
+                device: DeviceIdx(7),
+                metric: MetricId::NET_RX,
+            },
+            version: 1,
+            period_ns: 1_000_000_000,
+            samples: (0..60u64)
+                .map(|k| Sample::valid(newest - (59 - k) * 1_000_000_000, 1.25e8))
+                .collect::<Vec<_>>()
+                .into(),
+        });
+        chart.update(r.vcx, |v, cx| {
+            v.set_series_for_test([Some(rx), None].into(), cx);
+            v.set_state(ChartState::Live, cx);
+        });
+        draw(r.vcx);
+        let top = r
+            .vcx
+            .read_entity(&chart, |v, _| v.stroke_top_y())
+            .expect("strokes");
+        assert!(top.abs() <= 1.0, "the line sits at {top}, not the plot top");
+    }
+
     #[gpui_kit::test]
     fn marker_catalogue_changes_card_words(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());

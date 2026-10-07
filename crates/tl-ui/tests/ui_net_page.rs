@@ -279,6 +279,21 @@ fn net_link_speed_scale(cx: &mut TestAppContext) {
     assert_eq!(y, YScale::AutoRate { iec: false });
 }
 
+/// A 1 Gbps link at full speed, 1.25e8 B/s, reaches the top of the link speed scale.
+#[gpui_kit::test]
+fn net_full_link_speed_reaches_top(cx: &mut TestAppContext) {
+    let mut settings = Settings::default();
+    settings.performance.network_dynamic_scale = false;
+    let mut r = open(cx, settings, system(1000));
+    let chart = feed(&mut r, 1.25e8, 0., 0);
+    let (y, top) = r
+        .vcx
+        .read_entity(&chart, |v, _| (v.spec.y, v.stroke_top_y()));
+    assert_eq!(y, YScale::LinkSpeed(1e9));
+    let top = top.expect("strokes");
+    assert!(top.abs() <= 1.0, "the line sits at {top}, not the plot top");
+}
+
 #[gpui_kit::test]
 fn net_bytes_unit_switches_scale_and_value(cx: &mut TestAppContext) {
     let mut r = open(cx, with_unit(NetworkUnit::Bytes), system(-1));
