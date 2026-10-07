@@ -2292,8 +2292,9 @@ mod end {
             .position(|e| e == "Set Priority >")
             .expect("item 6");
         assert_eq!(at(&one), Some(priority + 1), "item 7 follows Set Priority");
+        let menu = build_menu(&mut rig, &[1], ColumnId::Name);
         assert!(
-            entries(&mut rig, &build_menu(&mut rig, &[1], ColumnId::Name))
+            entries(&mut rig, &menu)
                 .iter()
                 .find(|e| e.label.as_deref() == Some("Set Affinity…"))
                 .is_some_and(|e| e.hint.is_none()),
