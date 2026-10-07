@@ -863,3 +863,20 @@ information-chassis-33 = IoT Gateway
 information-chassis-34 = Embedded PC
 information-chassis-35 = Mini PC
 information-chassis-36 = Stick PC
+
+# Process Properties window (E23-A1)
+pwn-props-tab-general = General
+pwn-props-tab-threads = Threads
+pwn-props-tab-fds = File descriptors
+pwn-props-tab-maps = Memory maps
+pwn-props-tab-security = Security
+pwn-props-tab-environment = Environment
+pwn-props-tab-strings = Strings
+pwn-props-too-many-windows = Too many process properties windows are already open
+pwn-props-exited-banner = This process has exited. Values are frozen at the last update.
+pwn-props-not-running = The process is not running.
+pwn-props-access-fds = Handles unavailable (insufficient privileges)
+pwn-props-access-maps = Needs administrator access.
+pwn-props-access-security = Security information unavailable (insufficient privileges)
+pwn-props-access-env = Environment unavailable (insufficient privileges)
+pwn-props-access-strings = Strings unavailable: needs administrator rights
