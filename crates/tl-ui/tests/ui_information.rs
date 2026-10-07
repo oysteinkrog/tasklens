@@ -369,3 +369,497 @@ fn copy_text_of_valid_and_missing() {
     assert_eq!(words.restricted.as_ref(), "Restricted");
     let _: SharedString = InfoSectionId::Processor.title();
 }
+
+/// Row builders for OS, Processor, System, BIOS/Firmware and Motherboard (E28-031).
+mod row_builders {
+    use super::*;
+    use tl_model::devices::DeviceCatalog;
+    use tl_model::snapshot::{FirmwareType, InvField, InventorySnapshot, SystemSnapshot};
+    use tl_model::system::Metric;
+    use tl_model::table::Total;
+    use tl_ui::pages::information::sections::{
+        InfoInputs, InfoWords, build_bios, build_motherboard, build_os, build_processor,
+        build_system, find_logo,
+    };
+
+    fn ok<T>(value: T) -> InvField<T> {
+        Total {
+            value,
+            validity: Validity::Valid,
+        }
+    }
+
+    fn s(text: &str) -> InvField<Arc<str>> {
+        ok(Arc::from(text))
+    }
+
+    fn with<T: Default>(validity: Validity) -> InvField<T> {
+        Total {
+            value: T::default(),
+            validity,
+        }
+    }
+
+    /// This machine's values (UI-SYS-086 to UI-SYS-088 examples).
+    fn inventory() -> InventorySnapshot {
+        let mut inv = InventorySnapshot::default();
+        let os = &mut inv.os;
+        os.name = s("CachyOS Linux");
+        os.version = with(Validity::Unsupported);
+        os.build = with(Validity::Unsupported);
+        os.kernel = s("6.17.1-2-cachyos");
+        os.kernel_version = s("#1 SMP PREEMPT_DYNAMIC Mon, 06 Oct 2025 10:00:00 +0000");
+        os.architecture = s("x86_64");
+        os.install_date_s = ok(1_741_976_525);
+        os.package_manager = s("pacman 7.0.0");
+        os.machine_id = s("0123456789abcdef0123456789abcdef");
+
+        let p = &mut inv.processor;
+        p.name = s("AMD Ryzen 9 7950X3D 16-Core Processor");
+        p.vendor = s("AuthenticAMD");
+        p.architecture = s("x86_64");
+        p.family = ok(25);
+        p.model = ok(97);
+        p.stepping = ok(2);
+        p.cores = ok(16);
+        p.logical = ok(32);
+        p.base_mhz = ok(4200);
+        p.max_mhz = ok(5759);
+        p.microcode = s("0xa601209");
+        p.virtualization = s("svm");
+        p.avx512 = ok(true);
+        p.bits = ok(64);
+
+        let sy = &mut inv.system;
+        sy.pretty_hostname = s("Hawk desktop");
+        sy.static_hostname = s("hawk");
+        sy.user_name = s("oystein");
+        sy.domain = None;
+        sy.boot_time_s = ok(1_759_302_760);
+        sy.desktop = s("KDE Plasma 6.4.5");
+        sy.windowing_system = s("Wayland");
+        sy.session_type = s("wayland");
+        sy.virtual_terminal = s("2");
+
+        let f = &mut inv.firmware;
+        f.firmware_type = ok(Some(FirmwareType::Uefi));
+        f.bios_vendor = s("American Megatrends International, LLC.");
+        f.bios_version = s("3001");
+        f.bios_date = s("2025-02-14");
+        f.bios_release = s("5.35");
+        f.secure_boot = ok(true);
+
+        let b = &mut inv.board;
+        b.manufacturer = s("ASUSTeK COMPUTER INC.");
+        b.product = s("ROG STRIX X670E-E GAMING WIFI");
+        b.version = s("Rev 1.xx");
+        b.system_vendor = s("ASUS");
+        b.system_product = s("System Product Name");
+        b.chassis_type = s("3");
+        b.serial = with(Validity::Restricted);
+        inv
+    }
+
+    fn system(uptime_s: u64) -> SystemSnapshot {
+        let mut sys = SystemSnapshot::default();
+        sys.header.observed_end = uptime_s * 1_000_000_000;
+        sys.header.validity = Validity::Valid;
+        sys.cpu.processes = Metric::valid(412);
+        sys.cpu.threads = Metric::valid(5596);
+        sys.cpu.handles = Metric::valid(253_248);
+        sys
+    }
+
+    fn rows(
+        inv: &InventorySnapshot,
+        sys: &SystemSnapshot,
+        build: fn(&InfoInputs, &mut Vec<InfoRow>),
+    ) -> Vec<InfoRow> {
+        let words = InfoWords::default();
+        let devices = DeviceCatalog::default();
+        let inputs = InfoInputs {
+            inv,
+            sys,
+            devices: &devices,
+            words: &words,
+        };
+        let mut out = Vec::new();
+        build(&inputs, &mut out);
+        out
+    }
+
+    /// Label and shown text of each row, in en-US.
+    fn shown(rows: &[InfoRow]) -> Vec<(String, String)> {
+        let words = KvWords::default();
+        rows.iter()
+            .map(|r| {
+                let text = tl_ui::components::kv_grid::shown_text_in(&r.value, &words)
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                (r.label.to_string(), text)
+            })
+            .collect()
+    }
+
+    fn value_of(rows: &[InfoRow], label: &str) -> Option<String> {
+        shown(rows)
+            .into_iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, v)| v)
+    }
+
+    fn local(unix_s: i64) -> String {
+        let z = jiff::Timestamp::from_second(unix_s)
+            .unwrap()
+            .to_zoned(jiff::tz::TimeZone::system());
+        z.strftime("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
+    #[test]
+    fn info_os_rows_golden() {
+        let inv = inventory();
+        let got = shown(&rows(&inv, &system(0), build_os));
+        let expected = [
+            ("OS name", "CachyOS Linux".to_owned()),
+            ("Version", "Rolling".to_owned()),
+            ("Build", "Not reported".to_owned()),
+            ("Kernel", "6.17.1-2-cachyos".to_owned()),
+            (
+                "Kernel version",
+                "#1 SMP PREEMPT_DYNAMIC Mon, 06 Oct 2025 10:00:00 +0000".to_owned(),
+            ),
+            ("Architecture", "x86_64 (64-bit)".to_owned()),
+            ("Install date", local(1_741_976_525)),
+            ("Package manager", "pacman 7.0.0".to_owned()),
+            ("Machine ID", "0123456789abcdef0123456789abcdef".to_owned()),
+        ];
+        let expected: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(l, v)| (l.to_owned(), v))
+            .collect();
+        assert_eq!(got, expected);
+        assert!(
+            rows(&inv, &system(0), build_os).iter().all(|r| !r.live),
+            "no OS row is live"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn info_os_version_rolling_and_build_not_reported(cx: &mut TestAppContext) {
+        cx.update(|cx| setup(cx, 100));
+        let rows = rows(&inventory(), &system(0), build_os);
+        assert_eq!(rows[1].label.as_ref(), "Version");
+        assert_eq!(rows[1].value.text.as_ref(), "Rolling");
+        assert_eq!(rows[1].value.validity, Validity::Valid);
+
+        let (words, theme) = cx.update(|cx| (kv_words(cx), current(cx).clone()));
+        let build = &rows[2];
+        assert_eq!(build.label.as_ref(), "Build");
+        let look = value_look_in(&build.value, &words, &theme).expect("drawn");
+        assert_eq!(look.text.as_ref(), "Not reported");
+        assert_eq!(look.color, theme.text_secondary);
+
+        let mut inv = inventory();
+        inv.os.version = s("2026.10");
+        inv.os.build = s("rolling-20261001");
+        let rows = shown(&super::row_builders::rows(&inv, &system(0), build_os));
+        assert_eq!(rows[1].1, "2026.10");
+        assert_eq!(rows[2].1, "rolling-20261001");
+    }
+
+    #[test]
+    fn info_os_package_manager_hidden_when_missing() {
+        for missing in [with(Validity::Unsupported), with(Validity::Missing), s("")] {
+            let mut inv = inventory();
+            inv.os.package_manager = missing;
+            let rows = rows(&inv, &system(0), build_os);
+            assert_eq!(rows.len(), 8);
+            assert!(value_of(&rows, "Package manager").is_none());
+        }
+    }
+
+    #[test]
+    fn info_cpu_flags_summary_format() {
+        let cases = [
+            ("svm", true, "Virtualization: Yes (AMD-V), AVX-512: Yes"),
+            ("vmx", false, "Virtualization: Yes (VT-x), AVX-512: No"),
+            ("", false, "Virtualization: No, AVX-512: No"),
+        ];
+        for (virt, avx, expected) in cases {
+            let mut inv = inventory();
+            inv.processor.virtualization = s(virt);
+            inv.processor.avx512 = ok(avx);
+            let rows = rows(&inv, &system(0), build_processor);
+            assert_eq!(
+                value_of(&rows, "Flags summary").as_deref(),
+                Some(expected),
+                "{virt}"
+            );
+        }
+
+        let rows = shown(&rows(&inventory(), &system(0), build_processor));
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Name",
+                "Vendor",
+                "Architecture",
+                "Identifier",
+                "Cores",
+                "Logical processors",
+                "Base speed",
+                "Max speed",
+                "Microcode",
+                "Flags summary"
+            ]
+        );
+        assert_eq!(rows[3].1, "Family 25 Model 97 Stepping 2");
+        assert_eq!(rows[6].1, "4200 MHz");
+        assert_eq!(rows[7].1, "5759 MHz");
+
+        let mut inv = inventory();
+        inv.processor.name = with(Validity::Unsupported);
+        let rows = super::row_builders::rows(&inv, &system(0), build_processor);
+        assert_eq!(rows[0].value.text.as_ref(), "Unknown processor");
+        assert_eq!(rows[0].value.validity, Validity::Valid);
+    }
+
+    #[test]
+    fn info_system_computer_name_format() {
+        let inv = inventory();
+        let rows = rows(&inv, &system(0), build_system);
+        assert_eq!(
+            value_of(&rows, "Computer name").as_deref(),
+            Some("Hawk desktop (hawk)")
+        );
+
+        for pretty in [s("hawk"), s(""), with(Validity::Unsupported)] {
+            let mut inv = inventory();
+            inv.system.pretty_hostname = pretty;
+            let rows = super::row_builders::rows(&inv, &system(0), build_system);
+            assert_eq!(value_of(&rows, "Computer name").as_deref(), Some("hawk"));
+        }
+    }
+
+    #[test]
+    fn info_domain_hidden_when_none() {
+        for domain in ["", "(none)"] {
+            let mut inv = inventory();
+            inv.system.domain = Some(Arc::from(domain));
+            let rows = rows(&inv, &system(0), build_system);
+            assert!(value_of(&rows, "Domain").is_none(), "{domain:?}");
+        }
+        let mut inv = inventory();
+        inv.system.domain = Some(Arc::from("lan"));
+        let rows = rows(&inv, &system(0), build_system);
+        assert_eq!(value_of(&rows, "Domain").as_deref(), Some("lan"));
+        assert_eq!(rows[2].label.as_ref(), "Domain", "after User name");
+    }
+
+    #[test]
+    fn info_counts_grouped() {
+        let rows = rows(&inventory(), &system(9495), build_system);
+        assert_eq!(value_of(&rows, "Process count").as_deref(), Some("412"));
+        assert_eq!(
+            value_of(&rows, "Thread count").as_deref(),
+            Some("5\u{2009}596")
+        );
+        let handles = rows
+            .iter()
+            .find(|r| r.label.as_ref() == "Handle count")
+            .expect("handle row");
+        assert_eq!(handles.value.text.as_ref(), "253\u{2009}248");
+        assert_eq!(
+            handles.label_tooltip.as_deref(),
+            Some("Open file descriptors, system-wide")
+        );
+        let live: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.live)
+            .map(|r| r.label.as_ref())
+            .collect();
+        assert_eq!(
+            live,
+            [
+                "System uptime",
+                "Process count",
+                "Thread count",
+                "Handle count"
+            ]
+        );
+
+        let mut sys = system(9495);
+        sys.cpu.threads = Metric {
+            value: 5596,
+            validity: Validity::Stale,
+        };
+        sys.cpu.handles = Metric {
+            value: 0,
+            validity: Validity::WarmingUp,
+        };
+        let rows = super::row_builders::rows(&inventory(), &sys, build_system);
+        assert_eq!(
+            value_of(&rows, "Thread count").as_deref(),
+            Some("5\u{2009}596"),
+            "Stale keeps the last value"
+        );
+        assert_eq!(
+            value_of(&rows, "Handle count").as_deref(),
+            Some("Collecting…")
+        );
+
+        let labels: Vec<String> = shown(&rows).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            [
+                "Computer name",
+                "User name",
+                "System uptime",
+                "Boot time",
+                "Process count",
+                "Thread count",
+                "Handle count",
+                "Desktop",
+                "Windowing system",
+                "Session type",
+                "Virtual terminal"
+            ]
+        );
+        assert_eq!(value_of(&rows, "Boot time"), Some(local(1_759_302_760)));
+    }
+
+    #[test]
+    fn info_system_optional_rows_hidden() {
+        let mut inv = inventory();
+        inv.system.desktop = with(Validity::Unsupported);
+        inv.system.virtual_terminal = s("");
+        let rows = rows(&inv, &system(0), build_system);
+        assert!(value_of(&rows, "Desktop").is_none());
+        assert!(value_of(&rows, "Virtual terminal").is_none());
+    }
+
+    #[test]
+    fn info_uptime_format() {
+        for (secs, expected) in [
+            (2295, "0h 38m 15s"),
+            (95_895, "1 day, 2h 38m 15s"),
+            (181_095, "2 days, 2h 18m 15s"),
+        ] {
+            let rows = rows(&inventory(), &system(secs), build_system);
+            assert_eq!(
+                value_of(&rows, "System uptime").as_deref(),
+                Some(expected),
+                "{secs}"
+            );
+        }
+    }
+
+    #[test]
+    fn info_bios_rows() {
+        let rows = shown(&rows(&inventory(), &system(0), build_bios));
+        let expected = [
+            ("Firmware type", "UEFI"),
+            ("BIOS vendor", "American Megatrends International, LLC."),
+            ("BIOS version", "3001"),
+            ("BIOS date", "2025-02-14"),
+            ("BIOS release", "5.35"),
+            ("Secure Boot", "Enabled"),
+        ];
+        let expected: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(l, v)| (l.to_owned(), v.to_owned()))
+            .collect();
+        assert_eq!(rows, expected);
+
+        let mut inv = inventory();
+        inv.firmware.firmware_type = ok(Some(FirmwareType::LegacyBios));
+        inv.firmware.secure_boot = with(Validity::Unsupported);
+        let rows = super::row_builders::rows(&inv, &system(0), build_bios);
+        assert_eq!(
+            value_of(&rows, "Firmware type").as_deref(),
+            Some("Legacy BIOS")
+        );
+        assert_eq!(
+            value_of(&rows, "Secure Boot").as_deref(),
+            Some("Not reported")
+        );
+    }
+
+    #[test]
+    fn info_board_serial_restricted() {
+        let rows = rows(&inventory(), &system(0), build_motherboard);
+        let serial = rows.last().expect("serial row");
+        assert_eq!(serial.label.as_ref(), "Serial number");
+        assert_eq!(serial.value.validity, Validity::Restricted);
+        assert_eq!(
+            serial.value.tooltip.as_deref(),
+            Some("Needs administrator access.")
+        );
+        assert_eq!(
+            value_of(&rows, "Serial number").as_deref(),
+            Some("Restricted")
+        );
+        let labels: Vec<String> = shown(&rows).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels,
+            [
+                "Manufacturer",
+                "Product",
+                "Version",
+                "System vendor",
+                "System product",
+                "Chassis type",
+                "Serial number"
+            ]
+        );
+
+        let mut inv = inventory();
+        inv.board.serial = s("230912345678");
+        let rows = super::row_builders::rows(&inv, &system(0), build_motherboard);
+        assert!(rows.last().unwrap().value.tooltip.is_none());
+    }
+
+    #[test]
+    fn info_chassis_words() {
+        for (n, word) in [
+            ("3", "Desktop"),
+            ("9", "Laptop"),
+            ("35", "Mini PC"),
+            ("99", "Unknown"),
+        ] {
+            let mut inv = inventory();
+            inv.board.chassis_type = s(n);
+            let rows = rows(&inv, &system(0), build_motherboard);
+            assert_eq!(
+                value_of(&rows, "Chassis type").as_deref(),
+                Some(word),
+                "{n}"
+            );
+        }
+    }
+
+    #[test]
+    fn info_os_logo_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        assert!(find_logo("cachyos", &[root]).is_none(), "not found");
+
+        let pixmap = root.join("pixmaps/cachyos.png");
+        std::fs::create_dir_all(pixmap.parent().unwrap()).unwrap();
+        std::fs::write(&pixmap, b"png").unwrap();
+        assert_eq!(find_logo("cachyos", &[root]), Some(pixmap));
+
+        let svg = root.join("icons/hicolor/scalable/apps/cachyos.svg");
+        std::fs::create_dir_all(svg.parent().unwrap()).unwrap();
+        std::fs::write(&svg, b"<svg/>").unwrap();
+        assert_eq!(
+            find_logo("cachyos", &[root]),
+            Some(svg),
+            "hicolor before pixmaps"
+        );
+
+        assert!(find_logo("../cachyos", &[root]).is_none());
+        assert!(find_logo("", &[root]).is_none());
+    }
+}
