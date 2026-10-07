@@ -145,6 +145,9 @@ pub struct FilterBox {
     processes: ProcessesView,
     /// The drawn width at the last prepaint: the outline plus the checkbox part when shown.
     width: Rc<Cell<Pixels>>,
+    /// The outline's left edge minus the box's left edge at the last prepaint: the checkbox part
+    /// and its gap when shown, else 0. The tab strip ends its accent line there.
+    outline_inset: Rc<Cell<Pixels>>,
     _subs: SmallVec<[Subscription; 4]>,
     #[cfg(any(test, feature = "test-hooks"))]
     outline: gpui_kit::Hsla,
@@ -198,6 +201,7 @@ impl FilterBox {
             labels: Labels::read(cx),
             processes: ProcessesView::read(cx),
             width: Rc::new(Cell::new(px(0.))),
+            outline_inset: Rc::new(Cell::new(px(0.))),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             outline: gpui_kit::Hsla::default(),
@@ -264,6 +268,11 @@ impl FilterBox {
     /// The drawn width at the last layout, checkbox part included, for the tab strip.
     pub fn width(&self) -> Pixels {
         self.width.get()
+    }
+
+    /// The outline's left edge minus the box's left edge at the last layout, for the tab strip.
+    pub fn outline_inset(&self) -> Pixels {
+        self.outline_inset.get()
     }
 
     /// Whether the "Include children" checkbox shows for the current tab, text and mode.
@@ -481,6 +490,7 @@ impl Render for FilterBox {
         });
 
         let width = self.width.clone();
+        let outline_inset = self.outline_inset.clone();
         // Reversed so the outline comes first in element order: the checkbox is the Tab stop
         // after the filter input (UI-SHL-121) while it is drawn to the left.
         div()
@@ -495,6 +505,8 @@ impl Render for FilterBox {
                 let right = bounds.iter().map(|b| b.right()).reduce(Pixels::max);
                 if let (Some(left), Some(right)) = (left, right) {
                     width.set(right - left);
+                    // The outline is the first child.
+                    outline_inset.set(bounds[0].left() - left);
                 }
             })
             .child(

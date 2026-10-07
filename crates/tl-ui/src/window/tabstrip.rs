@@ -22,6 +22,7 @@ use gpui_kit::{
 use smallvec::SmallVec;
 use tl_model::command::Tab;
 
+use super::filter::FilterBox;
 use crate::actions::SelectTab;
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
@@ -50,7 +51,8 @@ struct RuleLayout {
 struct AccentRuleKey {
     /// The active tab's bounds; zero size when the active tab is not shown.
     active: Bounds<Pixels>,
-    /// Where the line ends: the filter slot's left edge, else the strip's right edge.
+    /// Where the line ends: the filter outline's left edge, else the filter slot's left edge,
+    /// else the strip's right edge.
     end_x: Pixels,
     strip: Bounds<Pixels>,
     color: Hsla,
@@ -83,6 +85,9 @@ pub struct TabStrip {
     window_active: bool,
     /// Set by E20-009. `None`: the line runs to the strip's right edge.
     filter_slot: Option<AnyView>,
+    /// The slot's view when it is the shell filter box. The line ends at its outline, right of
+    /// the "Include children" checkbox.
+    filter_box: Option<Entity<FilterBox>>,
     /// Label widths at `t_md` medium weight. Shaped once per language, scale and history mode
     /// change; read by the overflow menu (E20-015).
     label_widths: SmallVec<[(Tab, Pixels); 6]>,
@@ -154,6 +159,7 @@ impl TabStrip {
             history_mode: history_mode(cx),
             window_active: window.is_window_active(),
             filter_slot: None,
+            filter_box: None,
             label_widths: SmallVec::new(),
             rule: None,
             layout: Rc::new(Cell::new(RuleLayout::default())),
@@ -186,6 +192,9 @@ impl TabStrip {
 
     /// Sets the filter box view shown at the right end, or removes it.
     pub fn set_filter_slot(&mut self, slot: Option<AnyView>, cx: &mut Context<Self>) {
+        self.filter_box = slot
+            .clone()
+            .and_then(|slot| slot.downcast::<FilterBox>().ok());
         self.filter_slot = slot;
         cx.notify();
     }
@@ -374,6 +383,7 @@ impl Render for TabStrip {
             .child(AccentRule {
                 strip: cx.entity(),
                 layout: self.layout.clone(),
+                filter_box: self.filter_box.clone(),
                 color,
                 scale: s,
                 width: px(ACCENT_W * s),
@@ -386,6 +396,7 @@ impl Render for TabStrip {
 struct AccentRule {
     strip: Entity<TabStrip>,
     layout: Rc<Cell<RuleLayout>>,
+    filter_box: Option<Entity<FilterBox>>,
     color: Hsla,
     scale: f32,
     width: Pixels,
@@ -442,9 +453,16 @@ impl Element for AccentRule {
         cx: &mut App,
     ) {
         let layout = self.layout.get();
+        // The filter box was prepainted with the row, so its inset is this frame's.
+        let inset = self
+            .filter_box
+            .as_ref()
+            .map_or(px(0.), |f| f.read(cx).outline_inset());
         let key = AccentRuleKey {
             active: layout.active.unwrap_or_default(),
-            end_x: layout.filter.map_or(bounds.right(), |f| f.left()),
+            end_x: layout
+                .filter
+                .map_or(bounds.right(), |f| (f.left() + inset).min(f.right())),
             strip: bounds,
             color: self.color,
             scale_bits: self.scale.to_bits(),
@@ -519,7 +537,7 @@ fn turn(
 ///
 /// Outer edge left to right: up the strip's left edge, along the line's top, a fillet up into
 /// the active tab's left side, over the rounded top, down the right side, a fillet out onto the
-/// line, along the line to `end_x` (with a fillet up into the filter slot's left side when it
+/// line, along the line to `end_x` (with a fillet up into the filter outline's left side when it
 /// is shown). Back along the bottom, the inner edge of the outline is the open bottom.
 fn build_rule(key: &AccentRuleKey, w: Pixels, r: Pixels) -> Option<Path<Pixels>> {
     let strip = key.strip;

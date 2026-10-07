@@ -1139,11 +1139,13 @@ mod tabstrip {
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
     use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::table::TableMode;
     use tl_ui::actions::SelectTab;
     use tl_ui::app::{BootSettings, EngineGlobal};
     use tl_ui::settings_global::TlSettings;
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::theme::current;
+    use tl_ui::window::filter::FilterBox;
     use tl_ui::window::tabstrip::{AccentRuleProbe, TabStrip};
 
     const W: f32 = 1280.;
@@ -1389,6 +1391,52 @@ mod tabstrip {
         assert_eq!(rule.end_x, px(W));
         assert_eq!(rule.path_bounds.right(), px(W));
         assert!(has_vertex(&rule, point(px(W), rule.strip.bottom())));
+    }
+
+    /// With the real filter box in the slot the line ends at its outline, right of the
+    /// "Include children" checkbox when it shows.
+    #[gpui_kit::test]
+    fn accent_rule_ends_at_filter_outline(cx: &mut TestAppContext) {
+        let mut r = rig(cx, 100, all(), Tab::Processes, false);
+        let strip = r.strip.clone();
+        r.cx.update(|window, cx| {
+            let filter = cx.new(|cx| FilterBox::new(Tab::Processes, window, cx));
+            strip.update(cx, |s, cx| s.set_filter_slot(Some(filter.into()), cx));
+        });
+        draw(r.cx);
+        let set_mode = |r: &mut Rig, mode: TableMode| {
+            r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.processes.mode = mode));
+            r.cx.run_until_parked();
+            draw(r.cx);
+        };
+
+        // Checkbox hidden: the outline starts at the slot's left edge, as before.
+        assert!(r.cx.debug_bounds("FilterBox-include-children").is_none());
+        let slot = bounds(r.cx, "TabStripFilter");
+        let outline = bounds(r.cx, "FilterBox-outline");
+        assert_eq!(outline.left(), slot.left());
+        assert_eq!(rule(&mut r).end_x, slot.left());
+
+        // Checkbox shown (Tree): the line ends at the outline, not at the checkbox.
+        set_mode(&mut r, TableMode::Tree);
+        let include = bounds(r.cx, "FilterBox-include-children");
+        let slot = bounds(r.cx, "TabStripFilter");
+        let outline = bounds(r.cx, "FilterBox-outline");
+        assert_eq!(include.left(), slot.left());
+        assert!(outline.left() > include.right());
+        let shown = rule(&mut r);
+        assert_eq!(shown.end_x, outline.left());
+        assert_eq!(shown.path_bounds.right(), outline.left());
+        assert!(has_vertex(
+            &shown,
+            point(outline.left(), shown.strip.bottom())
+        ));
+
+        // Hidden again: back to the slot's left edge.
+        set_mode(&mut r, TableMode::Grouped);
+        assert!(r.cx.debug_bounds("FilterBox-include-children").is_none());
+        let slot = bounds(r.cx, "TabStripFilter");
+        assert_eq!(rule(&mut r).end_x, slot.left());
     }
 
     #[gpui_kit::test]
