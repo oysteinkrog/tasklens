@@ -21,7 +21,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHashSet;
 use tl_model::client::EngineClient;
-use tl_model::settings::{Settings, ThemeSettings, UiState};
+use tl_model::settings::{Settings, UiState};
 use tl_model::time::now_boot_ns;
 
 use super::engine::{BenchEngine, BenchFeed};
@@ -105,8 +105,9 @@ impl std::error::Error for BenchError {}
 /// 60 s graph range, kernel overlays on, smooth graphs except in `static`, CPU page selected
 /// with the sidebar at 252 px.
 pub fn fixture(scene: BenchScene) -> (Settings, UiState) {
+    // The default theme is Default Dark without follow-system, so `init` activates it with no
+    // crossfade.
     let mut settings = Settings::default();
-    settings.theme = ThemeSettings::default();
     settings.appearance.ui_scale_pct = 100;
     settings.motion.smooth_graphs = scene != BenchScene::Static;
     settings.performance.graph_range_s = 60;
@@ -247,7 +248,14 @@ pub fn run(
         }
         let line = serde_json::to_string(&report)
             .map_err(|e| BenchError(format!("cannot serialize the report: {e}")))?;
-        println!("{line}");
+        // The one stdout line of a bench run, read by `cargo xtask bench`.
+        #[allow(
+            clippy::print_stdout,
+            reason = "the bench report line (Cargo.toml lint note)"
+        )]
+        {
+            println!("{line}");
+        }
         cx.update(|cx| cx.quit());
         Ok(report)
     })

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use gpui_kit::{AppContext as _, TestAppContext, VisualTestContext};
+use gpui_kit::{TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::time::now_boot_ns;
 use tl_ui::bench::engine::{BenchEngine, BenchFeed};
