@@ -22,7 +22,11 @@ Do not pick up any other bead.
    committing, run `git diff -- <files>`. If any named file holds another agent's uncommitted
    hunks, do not use a pathspec for it: write a patch of only your hunks, stage it with
    `git apply --cached <patch>`, check that `git diff --cached` shows only your changes, then run
-   `git commit -m "..."` with no pathspec right after that check.
+   `git commit -m "..."` with no pathspec right after that check. The index is shared: never
+   leave anything staged between commits (that includes `git mv` and `git rm`, which stage at
+   once; prefer a plain move and stage it in the same command as the commit). If
+   `git diff --cached` shows anything that is not yours, do not commit without a pathspec; wait
+   and tell the leader.
 6. Run the bead's tests, `cargo fmt --check` and `cargo clippy -p <crate> --all-targets -- -D
    warnings`, all through `heavy-build`. Builds queue on one machine-wide lock, so start them in
    the background and wait for the result; always read the output before you report. Completion
