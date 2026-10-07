@@ -1466,9 +1466,11 @@ mod sidebar {
     fn right_click_keeps_selection(cx: &mut TestAppContext) {
         let mut r = open(cx, nine(), Settings::default(), UiState::default());
         assert_eq!(selected(&mut r).as_deref(), Some("cpu"));
-        let first = r.vcx.debug_bounds("perf-card").expect("first card");
-        // The second card (memory) starts one card and the sp4 gap below.
-        let at = first.center() + gpui_kit::point(px(0.), first.size.height + px(8.));
+        // `debug_bounds` keeps the last card drawn; every card has the same size. The list
+        // starts at sp4 (8 px), and the second card (memory) is one card and a gap lower.
+        let card = r.vcx.debug_bounds("perf-card").expect("a card");
+        let h = card.size.height;
+        let at = gpui_kit::point(card.center().x, px(8.) + h + px(8.) + h / 2.);
         right_click(r.vcx, at);
         draw(r.vcx);
         assert_eq!(
