@@ -506,11 +506,9 @@ fn work(scene: &tl_ui::bench::scenes::SceneWindow, cx: &mut VisualTestContext) -
 /// Diagnostic for tasklens-wlf.27 and wlf.28, not a gate: how much chart work one redraw asks
 /// for in `static` and `perf-cpu`, counted in the test platform (no GPU). Run with
 /// `cargo test -p tl-ui --features bench --test bench_scenes redraw_work -- --ignored --nocapture`.
-#[gpui_kit::test]
-#[ignore = "diagnostic; prints counters"]
-fn redraw_work_per_sample(cx: &mut TestAppContext) {
+fn redraw_work(cx: &mut TestAppContext, scene_kind: BenchScene) {
     cx.executor().allow_parking();
-    for scene_kind in [BenchScene::Static, BenchScene::PerfCpu] {
+    {
         let engine = BenchEngine::start(BenchFeed::Synthetic, SEED, now_boot_ns());
         let scene = cx
             .update(|cx| open_scene(cx, scene_kind, engine.clone()))
@@ -551,4 +549,16 @@ fn redraw_work_per_sample(cx: &mut TestAppContext) {
         );
         engine.stop();
     }
+}
+
+#[gpui_kit::test]
+#[ignore = "diagnostic; prints counters"]
+fn redraw_work_static(cx: &mut TestAppContext) {
+    redraw_work(cx, BenchScene::Static);
+}
+
+#[gpui_kit::test]
+#[ignore = "diagnostic; prints counters"]
+fn redraw_work_perf_cpu(cx: &mut TestAppContext) {
+    redraw_work(cx, BenchScene::PerfCpu);
 }
