@@ -566,3 +566,7 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.2 (9d30119): acquire, load, Store, flush, and crash notify wired into main. tasklens's own startup steps fell from 6.9 to 4.3 ms warm; single_instance takes 1.4 ms warm and 9.2 ms cold. Notes on jqk.20 and jqk.21. MANUAL DESKTOP CHECK: settings are saved when you close the window.
 - pdu.25 (bbb8697, aeb7a86, 757f069): Processes toolbar. TlIcon gains LayoutGrid, Rows2, ListTree and List; gallery goldens regenerated and checked by the agent. pdu.26 registers the toolbar in main.rs.
 - cr0.24 (3fb13e0): check() runs in the dev profile and compiles in 9 min. It found a tl-model ceil_125 subnormal bug; a new yrf bug bead blocks the cr0.24 rerun.
+- cr0.17 (263609a, 9193258): the autostart entry follows [startup] through the save thread; tests use a scratch XDG folder.
+- jqk.11 (57a53a4, ed3cf9d): the filter box is wired into MainWindow; tests run on the real window.
+- m1f.4 (815729a, 96fc890, 76f80a2): the lowmem unit template and install, enable and remove; unit_path returns a Result (accepted). OWNER RUN (U-24): `heavy-build cargo test -p tl-app --test watch_memory -- --ignored real_install_enable_remove --nocapture` installs the unit in your real user session, removes it, and prints the accepted OOMScoreAdjust.
+- cr0.19 (acf9d32, 9193258): rendering_env. GPU selection does not shorten the adapter probe. "software" may still pick a GL adapter for the real GPU; a cr0 bug bead was filed to verify it.
