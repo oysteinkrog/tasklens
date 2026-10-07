@@ -686,3 +686,11 @@ information-copy-section = Copy section
 information-menu-copy-value = Copy value
 information-menu-copy-row = Copy row
 information-menu-copy-section = Copy section
+
+# Menu bar and File menu (E21-A1)
+shell-menubar-file = File
+shell-menubar-view = View
+shell-menubar-settings = Settings
+shell-menubar-help = Help
+shell-menubar-debug = Debug
+shell-menu-file-exit = Exit tasklens
