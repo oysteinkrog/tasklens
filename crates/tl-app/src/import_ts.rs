@@ -64,12 +64,28 @@ pub fn read_ini(path: &Path) -> Result<String, ImportError> {
     decode_ini(&bytes)
 }
 
-/// Refuses bytes above `MAX_INI_BYTES`, then decodes them as UTF-8, replacing invalid sequences.
+/// Refuses bytes above `MAX_INI_BYTES`, then decodes them. A UTF-16 byte order mark (`FF FE` or
+/// `FE FF`) selects UTF-16, because TaskSlinger is a Windows program; anything else is read as
+/// UTF-8. Invalid sequences and a trailing odd byte become U+FFFD.
 pub fn decode_ini(bytes: &[u8]) -> Result<String, ImportError> {
     if bytes.len() > MAX_INI_BYTES {
         return Err(ImportError::TooLarge);
     }
-    Ok(String::from_utf8_lossy(bytes).into_owned())
+    let unit: fn([u8; 2]) -> u16 = match bytes {
+        [0xFF, 0xFE, ..] => u16::from_le_bytes,
+        [0xFE, 0xFF, ..] => u16::from_be_bytes,
+        _ => return Ok(String::from_utf8_lossy(bytes).into_owned()),
+    };
+    let chunks = bytes[2..].chunks_exact(2);
+    let odd = !chunks.remainder().is_empty();
+    let units = chunks.map(|c| unit([c[0], c[1]]));
+    let mut text: String = char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect();
+    if odd {
+        text.push(char::REPLACEMENT_CHARACTER);
+    }
+    Ok(text)
 }
 
 /// Splits INI text into `(section, key, value)` triples in file order. Handles `[Section]`
@@ -544,6 +560,50 @@ mod tests {
         assert!(!r.settings.motion.animations);
         assert_eq!(r.imported, 1);
         assert_eq!(r.skipped.len(), 1);
+    }
+
+    fn utf16(text: &str, le: bool) -> Vec<u8> {
+        let mut bytes = if le {
+            vec![0xFF, 0xFE]
+        } else {
+            vec![0xFE, 0xFF]
+        };
+        for u in text.encode_utf16() {
+            bytes.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
+        }
+        bytes
+    }
+
+    #[test]
+    fn utf16_bom_decoded() {
+        let text = "[Window]\r\nMaximized=true\r\nAnimationsEnabled=false\r\nUIScale=125\r\n";
+        let utf8 = run(&decode_ini(text.as_bytes()).expect("small"));
+        assert_eq!(utf8.imported, 3);
+        for le in [true, false] {
+            let decoded = decode_ini(&utf16(text, le)).expect("small");
+            assert_eq!(decoded, text);
+            assert_eq!(run(&decoded), utf8);
+        }
+    }
+
+    #[test]
+    fn utf16_broken_units_replaced() {
+        // A lone high surrogate, then a key, then an odd trailing byte.
+        let mut bytes = vec![0xFF, 0xFE, 0x00, 0xD8];
+        bytes.extend(utf16("\nCloseToTray=true\n", true).split_off(2));
+        bytes.push(0x41);
+        let text = decode_ini(&bytes).expect("small");
+        assert!(text.starts_with('\u{fffd}'));
+        assert!(text.ends_with('\u{fffd}'));
+        let r = run(&text);
+        assert!(r.settings.tray.close_to_tray);
+        assert_eq!(r.imported, 1);
+
+        // A UTF-16 file above the cap is refused like any other.
+        let big = utf16(&"a".repeat(MAX_INI_BYTES), true);
+        assert!(matches!(decode_ini(&big), Err(ImportError::TooLarge)));
+        // Only a BOM gives an empty text.
+        assert_eq!(decode_ini(&[0xFE, 0xFF]).expect("small"), "");
     }
 
     #[test]
