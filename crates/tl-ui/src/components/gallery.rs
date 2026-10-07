@@ -59,8 +59,10 @@ use super::slider::TlSlider;
 use super::stepper::TlStepper;
 use super::switch::TlSwitch;
 use super::tabs::{NextInWindowTab, PrevInWindowTab, TlTabSpec, TlTabs, tabs_window_context};
+use super::toast::{self, ToastAction, ToastKind};
 use super::tooltip::TlTooltip;
 use super::validity::glyph;
+use super::window_frame::{TlTitleBar, TlWindowPin, pin_look};
 use crate::i18n::{Strings, init_strings};
 use crate::text::ellipsis::middle_ellipsis;
 use crate::text::fonts::{MONO_FAMILY, UI_FAMILY};
@@ -83,9 +85,31 @@ gpui_kit::actions!(
 
 /// One page per component module, plus `text`.
 pub const GALLERY_PAGES: &[&str] = &[
-    "button", "checkbox", "radio", "switch", "slider", "stepper", "input", "select", "tabs",
-    "tooltip", "progress", "skeleton", "kv_grid", "validity", "badge", "empty", "banner", "link",
-    "icons", "text", "dialog", "menu", "shield",
+    "button",
+    "checkbox",
+    "radio",
+    "switch",
+    "slider",
+    "stepper",
+    "input",
+    "select",
+    "tabs",
+    "tooltip",
+    "progress",
+    "skeleton",
+    "kv_grid",
+    "validity",
+    "badge",
+    "empty",
+    "banner",
+    "link",
+    "icons",
+    "text",
+    "toast",
+    "dialog",
+    "window_frame",
+    "menu",
+    "shield",
 ];
 
 /// Window size in logical px.
@@ -589,7 +613,9 @@ fn page_body(page: &str, p: &mut PageCx, window: &mut Window, cx: &mut App) -> V
         "link" => page_link(p),
         "icons" => page_icons(p),
         "text" => page_text(p, window, cx),
+        "toast" => page_toast(p, window, cx),
         "dialog" => page_dialog(p, window, cx),
+        "window_frame" => page_window_frame(p),
         "menu" => page_menu(p),
         "shield" => page_shield(p),
         _ => vec![p.heading(&format!("No page for {page}"))],
@@ -1535,6 +1561,115 @@ fn in_half<R>(half: &Half, cx: &mut App, f: impl FnOnce(&mut App) -> R) -> R {
     scope.swap(cx);
     let out = f(cx);
     scope.swap(cx);
+    out
+}
+
+fn page_toast(p: &mut PageCx, window: &mut Window, cx: &mut App) -> Vec<AnyElement> {
+    let kinds = [
+        (ToastKind::Info, "Process suspended."),
+        (ToastKind::Success, "Process terminated"),
+        (ToastKind::Warning, "Outcome unknown"),
+        (ToastKind::Error, "Could not end task."),
+        (ToastKind::Progress, "Writing core…"),
+    ];
+    let retry = ToastAction {
+        label: "Retry as administrator".into(),
+        action: GalleryNoop.boxed_clone(),
+    };
+    let long = "Could not end task. The process ignored the signal, and tasklens has no rights to \
+                send it again. Open Additional Setup to give tasklens the rights it needs, then \
+                try once more from the context menu.";
+    let samples = [
+        (
+            "With an action",
+            ToastKind::Error,
+            "Could not end task.",
+            1,
+            Some(retry),
+        ),
+        (
+            "Coalesced",
+            ToastKind::Success,
+            "Copied to clipboard",
+            5,
+            None,
+        ),
+        ("Cut at 3 lines", ToastKind::Error, long, 1, None),
+    ];
+    // The Progress card's spinner.
+    p.animated();
+    // The card reads the theme while it is built.
+    let cards = in_half(p.half, cx, |cx| {
+        let mut cards: Vec<(Option<&str>, Div)> = Vec::new();
+        for (n, (kind, text)) in kinds.into_iter().enumerate() {
+            let card = toast::static_card(n as u64, kind, text, 1, None, window, cx);
+            cards.push((None, card));
+        }
+        for (n, (name, kind, text, count, action)) in samples.into_iter().enumerate() {
+            let card = toast::static_card(10 + n as u64, kind, text, count, action, window, cx);
+            cards.push((Some(name), card));
+        }
+        cards
+    });
+    let mut out = Vec::new();
+    for (name, card) in cards {
+        if let Some(name) = name {
+            out.push(p.heading(name));
+        }
+        out.push(
+            div()
+                .w(px(toast::WIDTH))
+                .flex_none()
+                .child(card)
+                .into_any_element(),
+        );
+    }
+    out
+}
+
+fn page_window_frame(p: &mut PageCx) -> Vec<AnyElement> {
+    let samples = [
+        ("Pin off", pin_look(false, true)),
+        ("Pin on", pin_look(true, true)),
+        (
+            "Pin disabled: not supported by this desktop",
+            pin_look(false, false),
+        ),
+    ];
+    let s = p.m.ui_scale;
+    let mut out = Vec::new();
+    for (ix, (name, look)) in samples.into_iter().enumerate() {
+        out.push(p.heading(name));
+        out.push(
+            div()
+                .id(("frame-bar", ix))
+                .w(px(480. * s))
+                .flex_none()
+                .border_1()
+                .border_color(p.t.divider)
+                .child(TlTitleBar::new("tasklens Settings", look).maximizes(true))
+                .into_any_element(),
+        );
+    }
+    out.push(p.heading(
+        "An inactive window draws the same bar; the compositor dims its shadow and border.",
+    ));
+    out.push(p.heading("Server decorations: no title bar, a 24 px pin on the content"));
+    let pins = [
+        pin_look(false, true),
+        pin_look(true, true),
+        pin_look(false, false),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(ix, look)| {
+        div()
+            .id(("frame-server-pin", ix))
+            .flex_none()
+            .child(TlWindowPin::new(px(24. * s), look))
+            .into_any_element()
+    });
+    out.push(p.row("Off, on, disabled", pins));
     out
 }
 
