@@ -1022,6 +1022,7 @@ processes-status-count = { $total } Processes
 processes-status-filtered = { $shown } / { $total } Processes
 processes-status-selected = { $count } processes selected
 processes-status-restricted = { $count } restricted
+processes-status-restricted-tooltip = Some values for other users' processes need administrator rights.
 information-toast-copied = Copied to clipboard
 
 # File menu: Run... (E21-044)
