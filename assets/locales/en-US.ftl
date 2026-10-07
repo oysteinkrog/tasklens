@@ -694,3 +694,6 @@ shell-menubar-settings = Settings
 shell-menubar-help = Help
 shell-menubar-debug = Debug
 shell-menu-file-exit = Exit tasklens
+
+# Tab overflow menu (E20-015)
+shell-tab-more = More tabs
