@@ -3,22 +3,35 @@
 //! `SysQuery` owns one table's query and its generation (ADR-009): the engine sorts, filters and
 //! flattens, and a page shows a view only when `accepts` says its generation is the last one
 //! sent. `SysPageState` turns the page's demand on while its tab is active and asks for a
-//! refresh on the first visit (ADR-008, R-011).
+//! refresh on the first visit (ADR-008, R-011). `sys_body` picks what the body shows: skeleton
+//! rows before the first data of the session, then the rows or an empty or error state
+//! (UI-SYS-004, UI-SYS-005).
 
 use std::sync::Arc;
 
-use gpui_kit::{App, Entity, EntityId};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
+use gpui_kit::{
+    Action, AnyElement, App, Entity, EntityId, FontWeight, IntoElement, ParentElement, Pixels,
+    SharedString, Styled, div, prelude::FluentBuilder as _, px,
+};
 use smallvec::SmallVec;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
 use tl_model::demand::Demand;
-use tl_model::health::SourceId;
+use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::table::{ServiceFilter, SysNodeId, SysSortSpec, SysTable, SysTableQuery};
 use tl_model::validity::Validity;
 use tracing::debug;
 
+use crate::actions::RefreshCurrentTab;
 use crate::app::EngineGlobal;
+use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
+use crate::components::skeleton::{TlSkeletonRows, skeleton_row_count};
 use crate::demand::DemandAggregator;
+use crate::i18n::tr;
+use crate::text::style::{t_base, t_md};
+use crate::theme::{UiMetrics, current, metrics};
 
 /// Query owner for one system table. Generations start at 1 and only grow.
 pub struct SysQuery {
@@ -204,4 +217,230 @@ pub fn set_table_demand(tab: Tab, on: bool, demand: &Entity<DemandAggregator>, c
             d.remove(source, cx);
         }
     });
+}
+
+/// What the body of a system table shows (UI-SYS-004, UI-SYS-005).
+#[derive(Clone, Debug, PartialEq)]
+pub enum SysBody {
+    /// The first data of the session has not arrived.
+    Skeleton,
+    /// The table body.
+    Rows,
+    /// No rows and a filter is active.
+    NoMatches,
+    /// No rows, no filter, the source is fine.
+    NoEntries,
+    /// The source failed before the first data. One line of its error.
+    FailedFirst { error: SharedString },
+    /// Services only: both systemd managers are unavailable.
+    ManagerMissing,
+}
+
+pub struct SysBodyInput<'a> {
+    pub tab: Tab,
+    pub first_data_seen: bool,
+    pub rows_len: usize,
+    /// The text filter is not empty, or (Services) the strip is not at its defaults.
+    pub filter_active: bool,
+    /// The page's source. Services passes the worse of its two.
+    pub source: Option<&'a SourceHealth>,
+    /// Services only.
+    pub managers_unavailable: bool,
+}
+
+/// The body for `input`; the first matching rule wins. A source that fails after the first data
+/// keeps `Rows`: the status chip shows the health item instead.
+pub fn sys_body(input: &SysBodyInput) -> SysBody {
+    if !input.first_data_seen
+        && let Some(source) = input.source.filter(|s| s.state == SourceState::Failed)
+    {
+        let error = source.last_error.as_deref().unwrap_or_default();
+        let line = error.lines().next().unwrap_or_default();
+        return SysBody::FailedFirst {
+            error: SharedString::from(line.to_owned()),
+        };
+    }
+    if !input.first_data_seen {
+        return SysBody::Skeleton;
+    }
+    let services = input.tab == Tab::Services;
+    if services && input.managers_unavailable {
+        return SysBody::ManagerMissing;
+    }
+    if input.rows_len == 0 && input.filter_active {
+        return SysBody::NoMatches;
+    }
+    // Services always has its two group rows while a manager answers.
+    if input.rows_len == 0 && !services {
+        return SysBody::NoEntries;
+    }
+    SysBody::Rows
+}
+
+/// Skeleton rows for a viewport `viewport_h` high: as many as fit, at most 12.
+pub fn skeleton_rows(viewport_h: Pixels, row_h: Pixels) -> usize {
+    if row_h <= px(0.) {
+        return 0;
+    }
+    skeleton_row_count((viewport_h / row_h).floor() as usize)
+}
+
+/// The skeleton drawn in place of the table body, never inside the `uniform_list`. `columns`
+/// are the shown column widths.
+pub fn render_skeleton(columns: &[Pixels], viewport_h: Pixels, metrics: &UiMetrics) -> AnyElement {
+    let rows = skeleton_rows(viewport_h, metrics.row_height);
+    TlSkeletonRows::new(rows, columns.iter().copied()).into_any_element()
+}
+
+/// What the empty-state button does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SysEmptyButton {
+    /// The page's clear action: `ServicesClearAllFilters`, or `ClearFilter`.
+    Clear,
+    /// `RefreshCurrentTab`.
+    Retry,
+}
+
+/// The texts and icon of one empty state, from the UI-SYS-005 table.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SysEmptyContent {
+    pub icon: IconName,
+    /// The icon is drawn in `status.warning` (the failed states).
+    pub warning: bool,
+    pub heading: SharedString,
+    pub text: Option<SharedString>,
+    pub button: Option<(SharedString, SysEmptyButton)>,
+}
+
+/// The empty state for `body` on `tab`. `None` for `Rows`, `Skeleton`, and bodies a tab never
+/// shows (Services `NoEntries`, `ManagerMissing` outside Services).
+pub fn sys_empty_content(body: &SysBody, tab: Tab, cx: &App) -> Option<SysEmptyContent> {
+    let t = |key: &str| tr(cx, key);
+    let content = |icon, heading, text: Option<SharedString>, button| SysEmptyContent {
+        icon,
+        warning: false,
+        heading,
+        text,
+        button,
+    };
+    let retry = || Some((t("sys-sys005-retry"), SysEmptyButton::Retry));
+    Some(match (body, tab) {
+        (SysBody::ManagerMissing, Tab::Services) => content(
+            IconName::Server,
+            t("sys-sys005-systemd-not-found"),
+            Some(t("sys-sys005-tasklens-lists-services-from-systemd")),
+            retry(),
+        ),
+        (SysBody::NoMatches, Tab::Services) => content(
+            IconName::FunnelX,
+            t("sys-sys005-no-matches"),
+            Some(t("sys-sys005-no-services-match-the-current")),
+            Some((t("sys-sys005-clear-filters"), SysEmptyButton::Clear)),
+        ),
+        (SysBody::NoMatches, Tab::Startup | Tab::Connections) => {
+            let text = if tab == Tab::Startup {
+                "sys-sys005-no-startup-entries-match-the"
+            } else {
+                "sys-sys005-no-connections-match-the-filter"
+            };
+            content(
+                IconName::FunnelX,
+                t("sys-sys005-no-matches"),
+                Some(t(text)),
+                Some((t("sys-sys005-clear-filter"), SysEmptyButton::Clear)),
+            )
+        }
+        (SysBody::NoEntries, Tab::Startup) => content(
+            IconName::AppWindow,
+            t("sys-sys005-no-startup-entries"),
+            Some(t("sys-sys005-nothing-starts-automatically-when-you")),
+            None,
+        ),
+        (SysBody::NoEntries, Tab::Connections) => content(
+            IconName::Network,
+            t("sys-sys005-no-connections"),
+            None,
+            None,
+        ),
+        (SysBody::FailedFirst { error }, Tab::Services | Tab::Startup | Tab::Connections) => {
+            let heading = match tab {
+                Tab::Services => "sys-sys005-could-not-load-services",
+                Tab::Startup => "sys-sys005-could-not-load-startup-entries",
+                _ => "sys-sys005-could-not-load-connections",
+            };
+            SysEmptyContent {
+                warning: true,
+                ..content(
+                    IconName::CircleAlert,
+                    t(heading),
+                    Some(error.clone()),
+                    retry(),
+                )
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Max width of the empty-state text before the UI scale.
+const EMPTY_TEXT_MAX_W: f32 = 420.;
+
+/// The centred empty or error state for `body` (UI-FND-029 look with a heading). `clear_action`
+/// is the page's clear action; Retry dispatches `RefreshCurrentTab`. An empty element for a
+/// body with no empty state.
+pub fn render_empty(
+    body: &SysBody,
+    tab: Tab,
+    clear_action: Box<dyn Action>,
+    cx: &App,
+) -> AnyElement {
+    let Some(c) = sys_empty_content(body, tab, cx) else {
+        return div().into_any_element();
+    };
+    let m = *metrics(cx);
+    let theme = current(cx);
+    let fg = theme.text_secondary;
+    let icon_color = if c.warning { theme.status.warning } else { fg };
+
+    let mut heading = div().debug_selector(|| "SysEmpty-heading".into());
+    *heading.text_style() = t_md(&m);
+    let heading = heading
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme.text_primary)
+        .child(c.heading);
+    let text = c.text.map(|line| {
+        let mut el = div().debug_selector(|| "SysEmpty-text".into());
+        *el.text_style() = t_base(&m);
+        // The error is one line; an over-long one ends in an ellipsis.
+        el.max_w(px(EMPTY_TEXT_MAX_W * m.ui_scale))
+            .text_color(fg)
+            .text_center()
+            .when(c.warning, |el| el.truncate())
+            .child(line)
+    });
+    let button = c.button.map(|(label, what)| {
+        let action = match what {
+            SysEmptyButton::Clear => clear_action,
+            SysEmptyButton::Retry => Box::new(RefreshCurrentTab),
+        };
+        TlButton::new("SysEmpty-button", TlButtonKind::Secondary)
+            .size(TlButtonSize::Sm)
+            .label(label)
+            .action(action)
+    });
+
+    div()
+        .debug_selector(|| "SysEmpty".into())
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(m.sp[4])
+        .p(m.sp[8])
+        .child(Icon::new(c.icon).size(m.icon.lg).text_color(icon_color))
+        .child(heading)
+        .children(text)
+        .children(button)
+        .into_any_element()
 }

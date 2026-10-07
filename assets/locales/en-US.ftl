@@ -392,6 +392,23 @@ sys-sys003-masked = Masked
 sys-sys003-not-in-this-desktop = Not in this desktop
 sys-sys003-missing-program = Missing program
 
+# System table empty and error states (UI-SYS-005, tasklens-hk6.7)
+sys-sys005-systemd-not-found = systemd not found
+sys-sys005-tasklens-lists-services-from-systemd = tasklens lists services from systemd. Neither the system manager nor the user manager answered.
+sys-sys005-retry = Retry
+sys-sys005-no-matches = No matches
+sys-sys005-no-services-match-the-current = No services match the current filters.
+sys-sys005-clear-filters = Clear filters
+sys-sys005-no-startup-entries-match-the = No startup entries match the filter.
+sys-sys005-no-connections-match-the-filter = No connections match the filter.
+sys-sys005-clear-filter = Clear filter
+sys-sys005-no-startup-entries = No startup entries
+sys-sys005-nothing-starts-automatically-when-you = Nothing starts automatically when you log in.
+sys-sys005-no-connections = No connections
+sys-sys005-could-not-load-services = Could not load services
+sys-sys005-could-not-load-startup-entries = Could not load startup entries
+sys-sys005-could-not-load-connections = Could not load connections
+
 # TlKeyValueGrid empty filter text
 fnd-kv-no-match = No properties match the current filter.
 

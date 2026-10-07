@@ -454,3 +454,344 @@ mod query_and_demand {
         assert!(rows.note_data(Validity::WarmingUp, 3), "rows count as data");
     }
 }
+
+/// Body states: skeleton, rows, empty and error states (tasklens-hk6.7).
+#[cfg(feature = "test-hooks")]
+mod body_states {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::{
+        AppContext as _, Context, FocusHandle, InteractiveElement as _, IntoElement, Modifiers,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window, div,
+        px,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::Tab;
+    use tl_model::health::{SourceHealth, SourceId, SourceState};
+    use tl_model::table::{SysNodeId, SysRow};
+    use tl_model::validity::Validity;
+    use tl_ui::actions::{ClearFilter, RefreshCurrentTab};
+    use tl_ui::pages::sys_table::{
+        SysBody, SysBodyInput, SysEmptyButton, SysPageState, render_empty, skeleton_rows, sys_body,
+        sys_empty_content,
+    };
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn input(tab: Tab, first: bool, rows: usize) -> SysBodyInput<'static> {
+        SysBodyInput {
+            tab,
+            first_data_seen: first,
+            rows_len: rows,
+            filter_active: false,
+            source: None,
+            managers_unavailable: false,
+        }
+    }
+
+    fn failed(error: &str) -> SourceHealth {
+        SourceHealth {
+            state: SourceState::Failed,
+            last_error: Some(Arc::from(error)),
+            ..SourceHealth::default()
+        }
+    }
+
+    #[test]
+    fn sys_body_rules_order() {
+        let ok = SourceHealth {
+            state: SourceState::Running,
+            ..SourceHealth::default()
+        };
+        let bad = failed("bus timeout\nsecond line");
+
+        // 1. Failed before the first data, one line of the error.
+        let i = SysBodyInput {
+            source: Some(&bad),
+            ..input(Tab::Startup, false, 0)
+        };
+        assert_eq!(
+            sys_body(&i),
+            SysBody::FailedFirst {
+                error: "bus timeout".into()
+            }
+        );
+        // 2. No data yet with a healthy source.
+        let i = SysBodyInput {
+            source: Some(&ok),
+            ..input(Tab::Startup, false, 0)
+        };
+        assert_eq!(sys_body(&i), SysBody::Skeleton);
+        // 3. Services with both managers gone, ahead of the filter rules.
+        let i = SysBodyInput {
+            managers_unavailable: true,
+            filter_active: true,
+            ..input(Tab::Services, true, 0)
+        };
+        assert_eq!(sys_body(&i), SysBody::ManagerMissing);
+        let i = SysBodyInput {
+            managers_unavailable: true,
+            ..input(Tab::Startup, true, 0)
+        };
+        assert_eq!(sys_body(&i), SysBody::NoEntries, "Startup has no managers");
+        // 4. No rows under a filter.
+        let i = SysBodyInput {
+            filter_active: true,
+            ..input(Tab::Connections, true, 0)
+        };
+        assert_eq!(sys_body(&i), SysBody::NoMatches);
+        // 5. No rows, no filter; Services keeps its rows.
+        assert_eq!(sys_body(&input(Tab::Startup, true, 0)), SysBody::NoEntries);
+        assert_eq!(sys_body(&input(Tab::Services, true, 0)), SysBody::Rows);
+        // 6. Rows, and a source that fails after the first data keeps them.
+        assert_eq!(sys_body(&input(Tab::Connections, true, 5)), SysBody::Rows);
+        let i = SysBodyInput {
+            source: Some(&bad),
+            ..input(Tab::Connections, true, 5)
+        };
+        assert_eq!(sys_body(&i), SysBody::Rows);
+        let i = SysBodyInput {
+            source: Some(&bad),
+            ..input(Tab::Startup, true, 0)
+        };
+        assert_eq!(
+            sys_body(&i),
+            SysBody::NoEntries,
+            "no error state after data"
+        );
+    }
+
+    fn row(n: u32) -> SysRow {
+        SysRow {
+            node: SysNodeId::Conn(u64::from(n)),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(n),
+        }
+    }
+
+    #[test]
+    fn skeleton_shows_once_per_session() {
+        let engine = FakeEngine::new();
+        let mut page = SysPageState::new(Tab::Startup, &[SourceId::Startup]);
+        let body = |engine: &FakeEngine, page: &mut SysPageState| {
+            let snap = engine.latest();
+            let (validity, rows) = (snap.startup.header.validity, snap.startup.rows.len());
+            page.note_data(validity, rows);
+            sys_body(&input(Tab::Startup, page.first_data_seen, rows))
+        };
+
+        // An empty WarmingUp component.
+        assert_eq!(body(&engine, &mut page), SysBody::Skeleton);
+        engine.publish_with(|s| {
+            let st = Arc::make_mut(&mut s.startup);
+            st.header.validity = Validity::Valid;
+            st.rows = vec![row(0), row(1)].into();
+        });
+        assert_eq!(body(&engine, &mut page), SysBody::Rows);
+        // Empty and WarmingUp again (an engine restart). `first_data_seen` never resets, so
+        // leaving and entering the tab cannot bring the skeleton back either.
+        engine.publish_with(|s| {
+            let st = Arc::make_mut(&mut s.startup);
+            st.header.validity = Validity::WarmingUp;
+            st.rows = Vec::new().into();
+        });
+        assert_eq!(body(&engine, &mut page), SysBody::NoEntries);
+    }
+
+    #[test]
+    fn skeleton_row_count_capped_at_12() {
+        assert_eq!(skeleton_rows(px(1000.), px(28.)), 12);
+        assert_eq!(skeleton_rows(px(100.), px(28.)), 3);
+        assert_eq!(skeleton_rows(px(27.), px(28.)), 0);
+        assert_eq!(skeleton_rows(px(100.), px(0.)), 0);
+    }
+
+    type Row = (
+        SysBody,
+        Tab,
+        &'static str,
+        Option<&'static str>,
+        Option<(&'static str, SysEmptyButton)>,
+    );
+
+    #[gpui_kit::test]
+    fn empty_state_strings_per_tab(cx: &mut TestAppContext) {
+        use SysEmptyButton::{Clear, Retry};
+        let error = || SysBody::FailedFirst {
+            error: "bus timeout".into(),
+        };
+        let table: [Row; 9] = [
+            (
+                SysBody::ManagerMissing,
+                Tab::Services,
+                "systemd not found",
+                Some(
+                    "tasklens lists services from systemd. Neither the system manager nor the \
+                     user manager answered.",
+                ),
+                Some(("Retry", Retry)),
+            ),
+            (
+                SysBody::NoMatches,
+                Tab::Services,
+                "No matches",
+                Some("No services match the current filters."),
+                Some(("Clear filters", Clear)),
+            ),
+            (
+                SysBody::NoMatches,
+                Tab::Startup,
+                "No matches",
+                Some("No startup entries match the filter."),
+                Some(("Clear filter", Clear)),
+            ),
+            (
+                SysBody::NoMatches,
+                Tab::Connections,
+                "No matches",
+                Some("No connections match the filter."),
+                Some(("Clear filter", Clear)),
+            ),
+            (
+                SysBody::NoEntries,
+                Tab::Startup,
+                "No startup entries",
+                Some("Nothing starts automatically when you log in."),
+                None,
+            ),
+            (
+                SysBody::NoEntries,
+                Tab::Connections,
+                "No connections",
+                None,
+                None,
+            ),
+            (
+                error(),
+                Tab::Services,
+                "Could not load services",
+                Some("bus timeout"),
+                Some(("Retry", Retry)),
+            ),
+            (
+                error(),
+                Tab::Startup,
+                "Could not load startup entries",
+                Some("bus timeout"),
+                Some(("Retry", Retry)),
+            ),
+            (
+                error(),
+                Tab::Connections,
+                "Could not load connections",
+                Some("bus timeout"),
+                Some(("Retry", Retry)),
+            ),
+        ];
+        cx.update(|cx| {
+            super::setup(cx);
+            for (body, tab, heading, text, button) in table {
+                let c = sys_empty_content(&body, tab, cx).expect("an empty state");
+                assert_eq!(&*c.heading, heading, "{body:?} {tab:?}");
+                assert_eq!(c.text.as_deref(), text, "{body:?} {tab:?}");
+                let got = c.button.as_ref().map(|(l, b)| (&**l, *b));
+                assert_eq!(got, button, "{body:?} {tab:?}");
+                assert_eq!(c.warning, matches!(body, SysBody::FailedFirst { .. }));
+            }
+            assert!(sys_empty_content(&SysBody::Rows, Tab::Startup, cx).is_none());
+            assert!(sys_empty_content(&SysBody::Skeleton, Tab::Startup, cx).is_none());
+            assert!(sys_empty_content(&SysBody::NoEntries, Tab::Services, cx).is_none());
+        });
+    }
+
+    /// One `render_empty` under a focused root that counts the two actions.
+    struct Host {
+        body: SysBody,
+        tab: Tab,
+        clears: Rc<Cell<usize>>,
+        refreshes: Rc<Cell<usize>>,
+        focus: FocusHandle,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let (clears, refreshes) = (self.clears.clone(), self.refreshes.clone());
+            div()
+                .id("root")
+                .track_focus(&self.focus)
+                .size(px(600.))
+                .on_action(move |_: &ClearFilter, _, _| clears.set(clears.get() + 1))
+                .on_action(move |_: &RefreshCurrentTab, _, _| refreshes.set(refreshes.get() + 1))
+                .child(render_empty(
+                    &self.body,
+                    self.tab,
+                    Box::new(ClearFilter),
+                    cx,
+                ))
+        }
+    }
+
+    /// Clicks the empty-state button of `body` on `tab`; returns (ClearFilter, RefreshCurrentTab)
+    /// counts.
+    fn click(cx: &mut TestAppContext, body: SysBody, tab: Tab) -> (usize, usize) {
+        cx.update(super::setup);
+        let clears = Rc::new(Cell::new(0));
+        let refreshes = Rc::new(Cell::new(0));
+        let (_, vcx): (_, &mut VisualTestContext) = cx.add_window_view({
+            let (clears, refreshes) = (clears.clone(), refreshes.clone());
+            move |window, cx| {
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                Host {
+                    body,
+                    tab,
+                    clears,
+                    refreshes,
+                    focus,
+                }
+            }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            vcx.debug_bounds("SysEmpty-heading").is_some(),
+            "heading drawn"
+        );
+        let button = vcx
+            .debug_bounds("TlButton-SysEmpty-button")
+            .expect("button drawn");
+        vcx.simulate_click(button.center(), Modifiers::none());
+        vcx.run_until_parked();
+        (clears.get(), refreshes.get())
+    }
+
+    #[gpui_kit::test]
+    fn startup_no_matches_button_clears_filter(cx: &mut TestAppContext) {
+        let first = input(Tab::Startup, true, 0);
+        let body = sys_body(&SysBodyInput {
+            filter_active: true,
+            ..first
+        });
+        assert_eq!(body, SysBody::NoMatches);
+        assert_eq!(click(cx, body, Tab::Startup), (1, 0));
+    }
+
+    #[gpui_kit::test]
+    fn services_systemd_missing_state(cx: &mut TestAppContext) {
+        let body = sys_body(&SysBodyInput {
+            managers_unavailable: true,
+            ..input(Tab::Services, true, 0)
+        });
+        assert_eq!(body, SysBody::ManagerMissing);
+        let heading = cx.update(|cx| {
+            super::setup(cx);
+            sys_empty_content(&body, Tab::Services, cx)
+                .expect("an empty state")
+                .heading
+        });
+        assert_eq!(&*heading, "systemd not found");
+        assert_eq!(click(cx, body, Tab::Services), (0, 1), "Retry refreshes");
+    }
+}
