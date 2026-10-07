@@ -26,7 +26,7 @@ use crate::theme::{current, metrics};
 /// The button label unless the owner sets another.
 const CLEAR_FILTER_LABEL: &str = "Clear filter";
 
-/// Max width of the text line before the UI scale (UI-SYS-005).
+/// Max width of the text line under a heading, before the UI scale (UI-SYS-005).
 const TEXT_MAX_W: f32 = 420.;
 
 /// The icon colour.
@@ -144,13 +144,17 @@ impl RenderOnce for TlEmptyState {
                 .text_color(heading_fg)
                 .child(h)
         });
+        // Under a heading the text is capped at 420 px and centred (UI-SYS-005). Without one it
+        // is laid out as before, so the older callers keep their exact pixels.
+        let capped = heading.is_some();
         let text = (!self.text.is_empty()).then(|| {
             let mut el = div().debug_selector(|| "TlEmptyState-text".into());
             *el.text_style() = t_base(&m);
-            el.max_w(px(TEXT_MAX_W * m.ui_scale))
-                .text_center()
-                .when(self.one_line, |el| el.truncate())
-                .child(self.text)
+            el.when(capped, |el| {
+                el.max_w(px(TEXT_MAX_W * m.ui_scale)).text_center()
+            })
+            .when(self.one_line, |el| el.truncate())
+            .child(self.text)
         });
         let second_line = self.second_line.map(|line| {
             let mut el = div().debug_selector(|| "TlEmptyState-second-line".into());
