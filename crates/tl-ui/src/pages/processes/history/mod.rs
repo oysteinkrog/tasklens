@@ -16,6 +16,7 @@
 //! hands it each installed view, the global filter text and the settings it follows, and copies
 //! its selection into `HistoryUiState::selected` in selection order.
 
+pub mod scrubber;
 pub mod table;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
 use crate::theme::{bump_style_version, current, metrics};
 use crate::window::main::{FilterChanged, GlobalShellEvents};
 
+use self::scrubber::{HistoryScrubber, ScrubberCache};
 use self::table::HistoryTableDelegate;
 
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -122,6 +124,8 @@ pub struct HistoryWords {
     /// "{$hours} h {$min} min".
     pub duration_hour: Template,
     pub loading: SharedString,
+    /// The strip's right-edge time label.
+    pub now: SharedString,
 }
 
 const KEY_COLLECTING: &str = "history-header-collecting";
@@ -134,6 +138,7 @@ const KEY_DURATION: &str = "history-duration";
 const KEY_DURATION_SEC: &str = "history-duration-sec";
 const KEY_DURATION_HOUR: &str = "history-duration-hour";
 const KEY_LOADING: &str = "history-loading";
+const KEY_NOW: &str = "history-scrubber-now";
 
 impl Default for HistoryWords {
     fn default() -> Self {
@@ -148,6 +153,7 @@ impl Default for HistoryWords {
             duration_sec: Template::en(KEY_DURATION_SEC, &["sec"]),
             duration_hour: Template::en(KEY_DURATION_HOUR, &["hours", "min"]),
             loading: tr_en(KEY_LOADING, &[]),
+            now: tr_en(KEY_NOW, &[]),
         }
     }
 }
@@ -166,6 +172,7 @@ impl HistoryWords {
             duration_sec: Template::new(cx, KEY_DURATION_SEC, &["sec"]),
             duration_hour: Template::new(cx, KEY_DURATION_HOUR, &["hours", "min"]),
             loading: tr(cx, KEY_LOADING),
+            now: tr(cx, KEY_NOW),
         }
     }
 }
@@ -413,6 +420,8 @@ pub struct HistoryPage {
     table: Entity<TlTreeTable<HistoryTableDelegate>>,
     /// `TlSettings` versions of [`SECTIONS`] last applied.
     section_versions: [u64; 3],
+    /// The strip's built geometry and shaped labels, filled by `HistoryScrubber` in paint.
+    scrubber: ScrubberCache,
     /// Created in `new`, never in render.
     _subs: SmallVec<[Subscription; 5]>,
     #[cfg(any(test, feature = "test-hooks"))]
@@ -492,6 +501,7 @@ impl HistoryPage {
             retry_timer: None,
             table,
             section_versions,
+            scrubber: ScrubberCache::default(),
             _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: std::cell::Cell::new(0),
@@ -513,6 +523,12 @@ impl HistoryPage {
 
     pub fn table(&self) -> &Entity<TlTreeTable<HistoryTableDelegate>> {
         &self.table
+    }
+
+    /// The strip's cache, for its build counter and painted gap bands.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn scrubber(&self) -> &ScrubberCache {
+        &self.scrubber
     }
 
     /// Sets the global filter text (PROC-046). The table matches it, lowercased, against name,
@@ -849,12 +865,14 @@ impl Render for HistoryPage {
             .flex()
             .items_center()
             .justify_center();
-        if self.loading() {
-            strip = strip
+        strip = if self.loading() {
+            strip
                 .text_size(m.text.base)
                 .text_color(theme.text_secondary)
-                .child(self.words.loading.clone());
-        }
+                .child(self.words.loading.clone())
+        } else {
+            strip.child(HistoryScrubber::new(cx.entity()))
+        };
         let minimap = div()
             .flex_none()
             .h(px(MINIMAP_H * scale))
