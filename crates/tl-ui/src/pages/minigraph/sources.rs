@@ -2,8 +2,11 @@
 //! sources and their `state.toml` strings, process columns, slot geometry, the default layout
 //! and the mapping to and from `[[minigraphs]]` entries.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
+use gpui_kit::private::schemars::{JsonSchema, Schema, SchemaGenerator};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tl_model::ids::ProcessKey;
 use tl_model::settings::MinigraphState;
 use tl_model::time::BootId;
@@ -13,10 +16,12 @@ use crate::pages::performance::DeviceKey;
 use crate::settings_global::SettingKey;
 
 /// A card's identity, assigned at load and stable while the app runs. Never stored.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
+#[schemars(crate = "gpui_kit::private::schemars")]
 pub struct MinigraphId(pub u32);
 
-/// What a card draws.
+/// What a card draws. In action JSON it is its `state.toml` string ("cpu", "gpu:<key>",
+/// "process:...", ...), so `ProcessKey` needs no JSON schema (ADR-001).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MinigraphSource {
     Cpu,
@@ -37,8 +42,11 @@ pub enum MinigraphSource {
     App(Arc<str>),
 }
 
-/// The process column a process, name or app card draws (PERF-085).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// The process column a process, name or app card draws (PERF-085). Its JSON form is
+/// [`GraphColumn::as_str`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[schemars(crate = "gpui_kit::private::schemars")]
 pub enum GraphColumn {
     Cpu,
     Memory,
@@ -153,6 +161,31 @@ impl MinigraphSource {
             Self::GpuTemp(_) => Some(SettingKey::GraphsMinigraphGpuTemperature),
             Self::Process { .. } | Self::Name(_) | Self::App(_) => None,
         }
+    }
+}
+
+impl Serialize for MinigraphSource {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_state_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for MinigraphSource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = Cow::<str>::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            serde::de::Error::custom(format_args!("unknown minigraph source {text:?}"))
+        })
+    }
+}
+
+impl JsonSchema for MinigraphSource {
+    fn schema_name() -> Cow<'static, str> {
+        Cow::Borrowed("MinigraphSource")
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        String::json_schema(generator)
     }
 }
 

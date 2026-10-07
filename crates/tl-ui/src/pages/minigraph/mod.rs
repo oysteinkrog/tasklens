@@ -8,10 +8,14 @@ pub mod panel;
 pub mod sources;
 
 use gpui_kit::SharedString;
+use gpui_kit::private::schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
 /// A card's graph colour (R-263, R-083): the accent colour or one of the 17 APP-039 names. One
-/// type for E26 and the E21-032 Graph Color submenu.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+/// type for E26 and the E21-032 Graph Color submenu. Its JSON form is [`GraphColor::as_str`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[schemars(crate = "gpui_kit::private::schemars")]
 pub enum GraphColor {
     Accent,
     Coral,
