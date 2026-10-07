@@ -29,7 +29,9 @@ use std::time::Duration;
 use gpui_kit::accesskit::Role;
 use gpui_kit::base::{Transition, transition};
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Enter, Escape, Input, InputEvent, InputState, MoveDown};
+use gpui_kit::component::input::{
+    Enter, Escape, Input, InputEvent, InputState, MoveDown, Position,
+};
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, Focusable as _, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString,
@@ -263,11 +265,12 @@ impl FilterBox {
         cx.emit(ReturnFocus);
     }
 
-    /// Type-to-filter (E20-A2): focuses the input and inserts `ch` at the caret. The insert emits
-    /// `Change`, so the debounce runs as for typing.
+    /// Type-to-filter (E20-A2): focuses the input, moves the caret to the end of the text and
+    /// inserts `ch` there. The insert emits `Change`, so the debounce runs as for typing.
     pub fn begin_typing(&mut self, ch: char, window: &mut Window, cx: &mut Context<Self>) {
         self.input.update(cx, |s, cx| {
-            s.focus(window, cx);
+            // Also focuses. The column is clamped to the line length: the end of the text.
+            s.set_cursor_position(Position::new(0, u32::MAX), window, cx);
             s.insert(ch.to_string(), window, cx);
         });
     }

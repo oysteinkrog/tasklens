@@ -49,8 +49,12 @@ fn bound(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn keymap_matches_table_b(cx: &mut TestAppContext) {
+    // The kit bindings first, as at startup, so the focused run sees the kit `Input` keys (U-45).
+    cx.update(gpui_kit::init);
     bound(cx);
     let g = &["Global"];
+    // The filter focused: its container sets "ShellFilter" outside the kit "Input".
+    let focused = &["Root", "Global", "ShellFilter", "Input"];
     let mut rows: Vec<(String, Box<dyn Action>)> = Vec::new();
     for i in 0..6 {
         rows.push((format!("ctrl-{}", i + 1), Box::new(SelectTab(i))));
@@ -88,6 +92,13 @@ fn keymap_matches_table_b(cx: &mut TestAppContext) {
         for (keys, action) in &rows {
             assert_resolves(cx, keys, g, action.as_ref());
         }
+        // `ctrl-f` is the kit's `Search` there and `escape` is `FilterEscape` (E20-002).
+        for (keys, action) in rows.iter().filter(|(k, _)| k != "ctrl-f" && k != "escape") {
+            assert_resolves(cx, keys, focused, action.as_ref());
+        }
+        assert_resolves(cx, "ctrl-q", focused, &Quit);
+        assert_resolves(cx, "ctrl-n", focused, &OpenRunDialog);
+        assert_resolves(cx, "ctrl-w", focused, &CloseWindow);
     });
 }
 

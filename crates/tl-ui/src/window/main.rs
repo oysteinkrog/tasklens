@@ -27,10 +27,10 @@ use gpui_kit::base::Root;
 use gpui_kit::component::{TitleBar, v_flex};
 use gpui_kit::{
     AnyView, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EntityId, EventEmitter,
-    FocusHandle, Global, InteractiveElement, IntoElement, ModifiersChangedEvent, ParentElement,
-    Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task, WeakEntity, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle, WindowOptions, div,
-    point, px, size,
+    FocusHandle, Global, InteractiveElement, IntoElement, KeyDownEvent, ModifiersChangedEvent,
+    ParentElement, Pixels, Render, SharedString, StyleRefinement, Styled, Subscription, Task,
+    WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowHandle,
+    WindowOptions, div, point, px, size,
 };
 use smallvec::SmallVec;
 use tl_model::command::Tab;
@@ -49,13 +49,14 @@ use super::titlebar::{TitleBarView, bar_height_of, is_client, minimize_main, zoo
 use super::toolbar::{DefaultToolbar, ToolbarContent, ToolbarModel};
 use crate::actions::{
     CancelWindowPick, ClearFilter, CloseWindow, CycleViewMode, EscapeChain, FocusFilter,
-    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab, ScaleDown,
-    ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow, ToggleHideSystem,
-    ToggleMainWindow, ZoomWindow,
+    GLOBAL_CONTEXT, MinimizeWindow, NextTab, PrevTab, Quit, RefreshCurrentTab,
+    SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
+    ToggleHideSystem, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::AnimationDriver;
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
-use crate::components::menu::context_menu_layer;
+use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
+use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
 use crate::demand::GlobalDemand;
 use crate::focus::{EscOutcome, EscState, esc_outcome, focus_initial};
@@ -65,11 +66,24 @@ use crate::pages::performance::details::Template;
 use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
+use crate::table::actions::TABLE_CONTEXT;
 use crate::theme::store::apply_metrics;
 use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
 
 pub use super::tabstrip::TAB_STRIP_H;
 pub use super::titlebar::TITLEBAR_H;
+
+/// Key contexts that keep a typed key from going to the filter even below a "Table": the kit
+/// and tl-ui names of inputs, the filter itself, menus and dialogs (E20-A2).
+const NO_TYPE_TO_FILTER: [&str; 7] = [
+    "Input",
+    "TlInput",
+    SHELL_FILTER_CONTEXT,
+    "PopupMenu",
+    MENU_CONTEXT,
+    "Dialog",
+    DIALOG_CONTEXT,
+];
 
 /// The window's smallest size in logical px (ADR-010).
 pub const MIN_W: f32 = 800.0;
@@ -85,6 +99,13 @@ const TOAST_GAP: f32 = 8.0;
 /// 100 %.
 fn toast_top(client: bool, s: f32) -> Pixels {
     bar_height_of(client, s) + px((TAB_STRIP_H + TOAST_GAP) * s)
+}
+
+/// The one char of `text`, or `None` when it has none or more than one.
+fn single_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let ch = chars.next()?;
+    chars.next().is_none().then_some(ch)
 }
 
 /// The UI scale toast's key. Fixed, so repeated presses replace one toast (UI-SHL-130).
@@ -969,6 +990,43 @@ impl MainWindow {
         self.filter.update(cx, |f, cx| f.clear(window, cx));
     }
 
+    /// Type-to-filter (E20-A2, UI-SHL-124, PROC-044): a printable key that no binding and no
+    /// focused element used, typed while a table has focus, moves focus to the filter box and
+    /// goes in there. Space is left to the table (D-008). The cheap checks come first; only a
+    /// printable key reads the context stack.
+    fn route_type_to_filter(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !shown_on(self.active) {
+            return;
+        }
+        let ks = &ev.keystroke;
+        let m = ks.modifiers;
+        if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+        let Some(ch) = ks.key_char.as_deref().and_then(single_char) else {
+            return;
+        };
+        if ch.is_control() || ch == ' ' {
+            return;
+        }
+        let stack = window.context_stack();
+        let table = stack.iter().any(|c| c.contains(TABLE_CONTEXT));
+        let blocked = stack
+            .iter()
+            .any(|c| NO_TYPE_TO_FILTER.iter().any(|name| c.contains(name)));
+        if !table || blocked {
+            return;
+        }
+        self.filter
+            .update(cx, |f, cx| f.begin_typing(ch, window, cx));
+        cx.stop_propagation();
+    }
+
     /// The Esc chain (UI-SHL-122). The kit has already closed any open menu, popover or
     /// in-window dialog: those are deeper in the focus path.
     fn on_escape_chain(&mut self, _: &EscapeChain, window: &mut Window, cx: &mut Context<Self>) {
@@ -1390,6 +1448,8 @@ impl Render for MainWindow {
             .on_action(cx.listener(Self::on_focus_filter))
             .on_action(cx.listener(Self::on_clear_filter))
             .on_action(cx.listener(Self::on_escape_chain))
+            // Bubble phase: sees only keys that no binding and no focused element used.
+            .on_key_down(cx.listener(Self::route_type_to_filter))
             .child(
                 AnyView::from(self.titlebar.clone()).cached(
                     StyleRefinement::default()

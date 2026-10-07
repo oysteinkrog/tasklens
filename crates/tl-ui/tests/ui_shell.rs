@@ -3888,6 +3888,259 @@ mod main_window {
         }
     }
 
+    /// Type-to-filter from a focused table (E20-A2, UI-SHL-124).
+    mod type_to_filter {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui_kit::{
+            AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+            IntoElement, Render, Styled, TestAppContext, VisualTestContext, Window, div, point, px,
+        };
+        use tl_model::command::Tab;
+        use tl_ui::actions::{RefreshCurrentTab, SelectTab};
+        use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
+        use tl_ui::window::filter::{FILTER_DEBOUNCE, FilterBox};
+        use tl_ui::window::main::{
+            FilterChanged, GlobalShellEvents, MainWindow, PageSlot, ShellPage, set_test_page,
+        };
+        use tl_ui::window::status::StatusChanged;
+
+        use super::{Opts, act, draw, main, open, setup};
+
+        /// A page whose focus element sits in the "Table" key context, as `TreeTable` does.
+        struct TablePage {
+            focus: FocusHandle,
+        }
+
+        impl Render for TablePage {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .id("table-page")
+                    .key_context("Table")
+                    .track_focus(&self.focus)
+                    .size_full()
+            }
+        }
+
+        impl EventEmitter<StatusChanged> for TablePage {}
+
+        impl ShellPage for TablePage {
+            fn primary_focus(&self) -> FocusHandle {
+                self.focus.clone()
+            }
+        }
+
+        fn table_page(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+            let page = cx.new(|cx| TablePage {
+                focus: cx.focus_handle().tab_stop(true),
+            });
+            PageSlot::new(page, cx)
+        }
+
+        type Events = Rc<RefCell<Vec<(Tab, String)>>>;
+
+        struct Rig {
+            vcx: VisualTestContext,
+            events: Events,
+        }
+
+        /// The main window on `start` with table pages on Processes and Performance, recording
+        /// `FilterChanged`, with the table focused.
+        fn table_rig(cx: &mut TestAppContext, start: Tab) -> Rig {
+            setup(cx, &Opts::default());
+            cx.update(|cx| {
+                set_test_page(cx, Tab::Processes, table_page);
+                set_test_page(cx, Tab::Performance, table_page);
+            });
+            let mut vcx = open(cx);
+            let events: Events = Rc::default();
+            let seen = events.clone();
+            vcx.update(|_, cx| {
+                let bus = cx.global::<GlobalShellEvents>().0.clone();
+                cx.subscribe(&bus, move |_, e: &FilterChanged, _| {
+                    seen.borrow_mut().push((e.tab, e.text.to_string()));
+                })
+                .detach();
+            });
+            if start != Tab::Processes {
+                act(&mut vcx, SelectTab(start as usize));
+            }
+            let mut r = Rig { vcx, events };
+            r.focus_table();
+            r
+        }
+
+        impl Rig {
+            fn filter(&mut self) -> Entity<FilterBox> {
+                let main = main(&mut self.vcx);
+                self.vcx.read_entity(&main, |m, _| m.filter_box().clone())
+            }
+
+            fn input_text(&mut self) -> String {
+                let f = self.filter();
+                self.vcx
+                    .update(|_, cx| f.read(cx).input().read(cx).text().to_string())
+            }
+
+            fn cursor(&mut self) -> std::ops::Range<usize> {
+                let f = self.filter();
+                self.vcx
+                    .update(|_, cx| f.read(cx).input().read(cx).selected_range())
+            }
+
+            fn table_focus(&mut self) -> FocusHandle {
+                let main = main(&mut self.vcx);
+                let tab = self.vcx.read_entity(&main, |m, _| m.active_tab());
+                let page = self
+                    .vcx
+                    .read_entity(&main, |m, _| m.page_entity::<TablePage>(tab))
+                    .expect("table page built");
+                self.vcx.read_entity(&page, |p, _| p.focus.clone())
+            }
+
+            fn focus_table(&mut self) {
+                let focus = self.table_focus();
+                self.vcx.update(|window, cx| window.focus(&focus, cx));
+                draw(&mut self.vcx);
+            }
+
+            fn table_focused(&mut self) -> bool {
+                let focus = self.table_focus();
+                self.vcx.update(|window, _| focus.is_focused(window))
+            }
+
+            fn filter_focused(&mut self) -> bool {
+                let f = self.filter();
+                self.vcx
+                    .update(|window, cx| f.read(cx).is_focused(window, cx))
+            }
+
+            fn key(&mut self, keys: &str) {
+                self.vcx.simulate_keystrokes(keys);
+                draw(&mut self.vcx);
+            }
+
+            fn wait(&mut self, ms: u64) {
+                self.vcx.executor().advance_clock(Duration::from_millis(ms));
+                self.vcx.run_until_parked();
+            }
+
+            fn events(&self) -> Vec<(Tab, String)> {
+                self.events.borrow().clone()
+            }
+
+            /// The key context names of the focused element, outermost first.
+            fn context_names(&mut self) -> Vec<String> {
+                self.vcx.update(|window, _| {
+                    window
+                        .context_stack()
+                        .iter()
+                        .flat_map(|c| {
+                            ["Root", "Global", "ShellFilter", "Input", "Table"]
+                                .into_iter()
+                                .filter(|n| c.contains(n))
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        })
+                        .collect()
+                })
+            }
+        }
+
+        #[gpui_kit::test]
+        fn printable_key_routes_to_filter(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Processes);
+            assert!(r.table_focused());
+            r.key("f");
+            assert_eq!(r.input_text(), "f");
+            assert!(r.filter_focused());
+            assert!(r.events().is_empty(), "nothing before the quiet time");
+            r.wait(FILTER_DEBOUNCE.as_millis() as u64);
+            assert_eq!(r.events(), [(Tab::Processes, "f".to_owned())]);
+            r.wait(500);
+            assert_eq!(r.events().len(), 1, "exactly one");
+
+            // U-45: the filter's container sets "ShellFilter" outside the kit "Input".
+            let names = r.context_names();
+            let at = |n: &str| names.iter().position(|x| x == n);
+            assert!(at("Global") < at("ShellFilter"), "{names:?}");
+            assert!(at("ShellFilter") < at("Input"), "{names:?}");
+
+            // The text is "ab" with the caret at its start; the key goes at the end.
+            r.key("backspace");
+            r.vcx.simulate_input("ab");
+            r.key("home");
+            assert_eq!(r.cursor(), 0..0);
+            r.focus_table();
+            r.key("c");
+            assert_eq!(r.input_text(), "abc");
+            assert_eq!(r.cursor(), 3..3, "caret at the end");
+            assert!(r.filter_focused());
+        }
+
+        #[gpui_kit::test]
+        fn shift_letter_routes(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Processes);
+            r.key("shift-f");
+            assert_eq!(r.input_text(), "F");
+            assert!(r.filter_focused());
+        }
+
+        #[gpui_kit::test]
+        fn space_not_routed(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Processes);
+            r.key("space");
+            assert_eq!(r.input_text(), "");
+            assert!(r.table_focused());
+            r.wait(200);
+            assert!(r.events().is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn ctrl_letter_not_routed(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Processes);
+            r.key("a b");
+            r.wait(200);
+            r.focus_table();
+            r.key("ctrl-f");
+            assert!(r.filter_focused(), "FocusFilter ran");
+            assert_eq!(r.input_text(), "ab", "no 'f' typed");
+            assert_eq!(r.cursor(), 0..2, "FocusFilter selects all");
+        }
+
+        #[gpui_kit::test]
+        fn no_routing_on_performance(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Performance);
+            assert!(r.table_focused());
+            r.key("a");
+            assert!(r.table_focused());
+            assert_eq!(r.input_text(), "");
+            r.wait(200);
+            assert!(r.events().is_empty());
+        }
+
+        #[gpui_kit::test]
+        fn no_routing_while_menu_open(cx: &mut TestAppContext) {
+            let mut r = table_rig(cx, Tab::Processes);
+            let focus = r.table_focus();
+            r.vcx.update(|window, cx| {
+                let menu = TlMenu::build(window, cx, focus, |m, _, _| {
+                    m.item("Refresh", Box::new(RefreshCurrentTab))
+                });
+                open_context_menu_at(point(px(20.), px(80.)), window, cx, menu);
+            });
+            draw(&mut r.vcx);
+            r.key("a");
+            assert!(r.vcx.update(|window, cx| context_menu_open(window, cx)));
+            assert!(!r.filter_focused());
+            assert_eq!(r.input_text(), "");
+            r.wait(200);
+            assert!(r.events().is_empty());
+        }
+    }
+
     /// Hide system processes and the view-mode handlers (E20-017).
     mod process_view {
         use std::sync::Arc;
