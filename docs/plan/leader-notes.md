@@ -592,3 +592,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.33 closed without new bindings: gpui_kit Root already binds Tab and Shift+Tab in every window; real-keystroke tests added (082485e, a2513c8). Leader accepts: a Global binding would bypass the kit focus trap.
 - rsf.27 closed: two render_table goldens regenerated; every changed pixel is in the exited gnome-shell Name cell (842fe30).
 - cr0.24 closed: makepkg -f with check() passes at fe4b28a; 3287 tests passed, 0 failed, 105 ignored (3fb13e0, c8b6540). Package not installed.
+- jqk.15 closed: Ctrl+Plus/Minus/0 UI scale with toast; metrics re-apply keeps the Processes first visible row; compositor scale bumps style_version; removing the window ends Ctrl-pause (136035b, 18e7f6d). Accepted extras: apply_metrics once at window open; persisted counter in ui_shell Opts. Every later page with a table must add its arm to keep_first_row in window/main.rs.
