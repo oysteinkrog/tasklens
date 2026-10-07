@@ -768,3 +768,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - Owner, 2026-10-07: pixel-paced scrolling to be prototyped behind a flag that defaults off, then compared side by side at 144 Hz (wlf.31, after wlf.28). An opt-in Top processes box (crw.45, after crw.42). "Save power on battery" on by default (wlf.32).
 - crw.37 (0f91d6b0, 6f3b2556, f433fe38, 13afc23b) closed. Fixed sizes scale with ui_scale. A fraction of 1 or more fills the full meter width. The crw agent takes crw.38, and the m1f agent takes crw.39 after bj6.12.
 - gma.14 (80184733, 4f321973, 01310b0d) closed. Accepted gaps: no clipboard-failure trigger, the grid look, Unit stays plain until gma.17. Tab order and click-moves-cursor get a follow-up. The gma agent takes gma.8.
+- pdu.27 (a920e5c4, 370d01ba, 1c1a5d17) closed. Ctrl alone pauses, and the page keeps its snapshot while paused. The pdu-52 agent takes pdu.54.
