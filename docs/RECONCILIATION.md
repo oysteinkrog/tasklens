@@ -2200,6 +2200,7 @@ Key contexts: Global, Table (every table), ProcessTable, ServiceTable, StartupTa
 | F9, Ctrl+T | Performance | Toggle device sidebar |
 | F1..F8 | Performance | Select visible device 1 to 8 |
 | Up / Down | Performance sidebar focused | Move selection |
+| Alt+Up / Alt+Down | Performance | Move device up / down (`PerfMoveFocusedDevice`) |
 | Left / Right, Shift+Left / Shift+Right | History scrubber | Step 1 s / 1 min (P3) |
 | Up / Down, Enter, Shift+Enter | RunDialog | History pick, Run, Run as administrator |
 | Esc | Picker | Cancel window picking |
@@ -2226,6 +2227,11 @@ Key contexts: Global, Table (every table), ProcessTable, ServiceTable, StartupTa
 | Delete / Ctrl+E, Shift+Delete / Ctrl+X, Enter, Ctrl+C, Ctrl+Shift+C | HandleSearch > Table | End Task, End Process, Go to process, copy paths, copy rows as TSV (UI-PWN-031) |
 | Ctrl+A, Ctrl+C, Home / End, click, Shift+click, Ctrl+click | JournalList | Select all shown lines, copy selected lines, top / bottom (End re-sticks), select (UI-SYS-036, UI-SYS-037) |
 | Esc, Ctrl+W, printable character | LowMemory | Clear filter then close; close; start filtering (UI-PWN-032) |
+| Ctrl+W, Esc | PropsWindow | Close the Properties window (Shortcuts heading "Dialogs and windows") |
+| Shift+F10, Menu | PropsWindow > KvGrid | Open the field menu (UI-PWN-007) |
+| Shift+Space | AffinityDialog | Toggle the CPU group (UI-PWN-021) |
+| Enter | AffinityDialog | Apply affinity (OK) (UI-PWN-021) |
+| Esc | ColumnPicker | Close the Column Picker (UI-PRC-007) |
 
 Removed from APP-031: Enter as toggle expand; "Force end" naming.
 

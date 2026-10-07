@@ -60,10 +60,12 @@ pub enum Heading {
     PropertiesWindows,
     /// RunDialog, Picker, ColumnPicker, HandleSearch, JournalList, LowMemory.
     Dialogs,
+    /// Closing and confirming keys of the Properties window, Affinity dialog and Column Picker.
+    DialogsAndWindows,
 }
 
 impl Heading {
-    pub const ALL: [Heading; 11] = [
+    pub const ALL: [Heading; 12] = [
         Self::Global,
         Self::Tables,
         Self::Processes,
@@ -75,6 +77,7 @@ impl Heading {
         Self::Performance,
         Self::PropertiesWindows,
         Self::Dialogs,
+        Self::DialogsAndWindows,
     ];
 
     fn key(self) -> &'static str {
@@ -90,6 +93,7 @@ impl Heading {
             Self::Performance => "shortcuts-heading-performance",
             Self::PropertiesWindows => "shortcuts-heading-properties-windows",
             Self::Dialogs => "shortcuts-heading-dialogs",
+            Self::DialogsAndWindows => "shortcuts-heading-dialogs-and-windows",
         }
     }
 }
@@ -413,6 +417,12 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         Heading::Performance,
         "shortcuts-perf-move-selection",
     ),
+    doc(
+        &["tasklens::PerfMoveFocusedDevice"],
+        "Performance",
+        Heading::Performance,
+        "shortcuts-perf-move-device",
+    ),
     // Properties windows
     doc(
         &["tasklens::PropsSelectTab"],
@@ -532,6 +542,37 @@ pub const SHORTCUT_DOCS: &[ShortcutDoc] = &[
         "LowMemory",
         Heading::Dialogs,
         "shortcuts-low-memory",
+    ),
+    // Dialogs and windows
+    doc(
+        &["tasklens::PropsCloseWindow", "tasklens::PropsEscape"],
+        "PropsWindow",
+        Heading::DialogsAndWindows,
+        "shortcuts-props-close",
+    ),
+    doc(
+        &["tasklens::PropsFieldMenu"],
+        "PropsWindow > KvGrid",
+        Heading::DialogsAndWindows,
+        "shortcuts-props-field-menu",
+    ),
+    doc(
+        &["tasklens::AffinityToggleGroup"],
+        "AffinityDialog",
+        Heading::DialogsAndWindows,
+        "shortcuts-affinity-toggle-group",
+    ),
+    doc(
+        &["tasklens::AffinityApply"],
+        "AffinityDialog",
+        Heading::DialogsAndWindows,
+        "shortcuts-affinity-apply",
+    ),
+    doc(
+        &["tasklens::ColumnPickerEscape"],
+        "ColumnPicker",
+        Heading::DialogsAndWindows,
+        "shortcuts-column-picker-close",
     ),
 ];
 
@@ -695,7 +736,7 @@ fn strings_version(cx: &App) -> u64 {
 struct ShortcutsWords {
     placeholder: SharedString,
     or: SharedString,
-    headings: [SharedString; 11],
+    headings: [SharedString; 12],
 }
 
 impl ShortcutsWords {

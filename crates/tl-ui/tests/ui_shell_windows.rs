@@ -788,15 +788,7 @@ fn shortcuts_esc_and_ctrl_w_close(cx: &mut TestAppContext) {
 
 /// Bindings in the listed contexts that canonical table (b) has no row for. They have no row
 /// until table (b) gets one.
-const NOT_IN_TABLE_B: &[(&str, &str)] = &[
-    ("Performance", "tasklens::PerfMoveFocusedDevice"),
-    ("PropsWindow", "tasklens::PropsCloseWindow"),
-    ("PropsWindow", "tasklens::PropsEscape"),
-    ("PropsWindow > KvGrid", "tasklens::PropsFieldMenu"),
-    ("AffinityDialog", "tasklens::AffinityToggleGroup"),
-    ("AffinityDialog", "tasklens::AffinityApply"),
-    ("ColumnPicker", "tasklens::ColumnPickerEscape"),
-];
+const NOT_IN_TABLE_B: &[(&str, &str)] = &[];
 
 #[gpui_kit::test]
 fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
@@ -831,5 +823,39 @@ fn shortcuts_cover_all_bindings(cx: &mut TestAppContext) {
             checked += 1;
         }
         assert!(checked > 60, "{checked} bindings checked");
+    });
+}
+
+#[gpui_kit::test]
+fn shortcuts_dialogs_and_windows_rows(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| {
+        let rows = build_rows(cx, false);
+        let keys = |text: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.description.as_ref() == text)
+                .unwrap_or_else(|| panic!("{text} row"));
+            (row.heading, row.key_text.to_string())
+        };
+        assert_eq!(
+            keys("Move device up / down"),
+            (Heading::Performance, "Alt+Up or Alt+Down".into())
+        );
+        for (text, key_text) in [
+            ("Close the Properties window", "Ctrl+W or Esc"),
+            ("Open the field menu", "Shift+F10 or Menu"),
+            ("Toggle the CPU group", "Shift+Space"),
+            ("Apply affinity (OK)", "Enter"),
+            ("Close the Column Picker", "Esc"),
+        ] {
+            assert_eq!(
+                keys(text),
+                (Heading::DialogsAndWindows, key_text.into()),
+                "{text}"
+            );
+        }
+        let last = rows.last().expect("rows");
+        assert_eq!(last.heading, Heading::DialogsAndWindows, "the last heading");
     });
 }
