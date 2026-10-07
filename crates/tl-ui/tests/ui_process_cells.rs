@@ -2699,24 +2699,36 @@ mod highlight {
             });
         }
 
+        /// Counts the table's notifies from now on.
+        fn notifies(rig: &mut Rig) -> Rc<Cell<u32>> {
+            let n = Rc::new(Cell::new(0));
+            let (table, count) = (rig.table.clone(), n.clone());
+            rig.vcx.update(|_, cx| {
+                cx.observe(&table, move |_, _| count.set(count.get() + 1))
+                    .detach()
+            });
+            n
+        }
+
+        fn advance(rig: &mut Rig, ms: u64) {
+            rig.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(ms));
+            rig.vcx.run_until_parked();
+        }
+
         #[gpui_kit::test]
         fn fade_start_wakes_the_table(cx: &mut TestAppContext) {
             let mut rig = open(cx, snapshot(T, 0), |d| d.set_fixed_now(Some(T + 500 * MS)));
             assert_eq!(requested(&mut rig), 0);
-            // The timer is due at the fade start, 1200 ms later.
-            let table = rig.table.clone();
-            rig.vcx.update(|_, cx| {
-                table.update(cx, |t, _| t.delegate.set_fixed_now(Some(T + 1710 * MS)))
-            });
-            rig.vcx
-                .executor()
-                .advance_clock(std::time::Duration::from_millis(1199));
-            redraw(&mut rig.vcx);
-            assert_eq!(requested(&mut rig), 0);
-            rig.vcx
-                .executor()
-                .advance_clock(std::time::Duration::from_millis(2));
-            redraw(&mut rig.vcx);
+            // One timer, due at the fade start 1200 ms later, notifies the table.
+            let woke = notifies(&mut rig);
+            advance(&mut rig, 1199);
+            assert_eq!(woke.get(), 0);
+            advance(&mut rig, 2);
+            assert_eq!(woke.get(), 1);
+            // That frame finds the row fading and asks for animation frames.
+            set_now(&mut rig, T + 1710 * MS);
             assert!(requested(&mut rig) >= 1);
             assert!(armed(&mut rig));
         }
@@ -2738,12 +2750,14 @@ mod highlight {
             let before = requested(&mut rig);
             frame(&mut rig);
             assert_eq!(requested(&mut rig), before);
+            let woke = notifies(&mut rig);
+            advance(&mut rig, 149);
+            assert_eq!(woke.get(), 0);
+            advance(&mut rig, 2);
+            assert_eq!(woke.get(), 1);
             rig.vcx.update(|_, cx| {
                 table.update(cx, |t, _| t.delegate.set_fixed_now(Some(T + 2000 * MS)))
             });
-            rig.vcx
-                .executor()
-                .advance_clock(std::time::Duration::from_millis(151));
             redraw(&mut rig.vcx);
             rig.vcx.update(|_, cx| {
                 let theme = current(cx).clone();
