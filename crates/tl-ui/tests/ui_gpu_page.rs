@@ -327,6 +327,11 @@ fn gpu_memory_legend_without_shared(cx: &mut TestAppContext) {
             .collect();
         assert_eq!(legend, [("Dedicated", LegendStyle::Solid)]);
         assert_eq!(
+            v.value_text().map(|t| t.as_ref()),
+            Some("3.00 GiB / 16.00 GiB"),
+            "owner value text"
+        );
+        assert_eq!(
             v.labels.heading.as_ref().map(|h| h.as_ref()),
             Some("Memory")
         );
@@ -500,4 +505,42 @@ fn gpu_vendor_from_kernel_module() {
     ] {
         assert_eq!(GpuVendor::from_kernel_module(module), vendor, "{module}");
     }
+}
+
+#[gpui_kit::test]
+fn gpu_memory_value_text_painted(cx: &mut TestAppContext) {
+    use smallvec::smallvec;
+    use tl_model::ids::SeriesId;
+    use tl_model::series::{Sample, SeriesView};
+    use tl_model::time::now_boot_ns;
+
+    let r = nvidia(cx);
+    let memory = r.vcx.update(|_, cx| r.page.read(cx).memory().clone());
+    let now = now_boot_ns();
+    let view = Arc::new(SeriesView {
+        id: SeriesId {
+            device: GPU,
+            metric: MetricId::GPU_MEM,
+        },
+        version: 1,
+        period_ns: 1_000_000_000,
+        samples: vec![Sample::valid(now, (3 * GIB) as f32)].into(),
+    });
+    r.vcx.update(|_, cx| {
+        memory.update(cx, |v, cx| v.set_series_for_test(smallvec![Some(view)], cx))
+    });
+    draw(r.vcx);
+    r.vcx.update(|_, cx| {
+        assert_eq!(
+            memory.read(cx).painted_value_text(),
+            Some("3.00 GiB / 16.00 GiB")
+        );
+    });
+    // Without the owner text the chart formats series 0 alone.
+    r.vcx
+        .update(|_, cx| memory.update(cx, |v, cx| v.set_value_text(None, cx)));
+    draw(r.vcx);
+    r.vcx.update(|_, cx| {
+        assert_eq!(memory.read(cx).painted_value_text(), Some("3.00 GiB"));
+    });
 }

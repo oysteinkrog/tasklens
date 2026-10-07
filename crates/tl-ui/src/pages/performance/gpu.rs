@@ -477,6 +477,8 @@ pub struct GpuPage {
     placeholder: Option<Entity<ChartView>>,
     memory: Entity<ChartView>,
     memory_shape: MemoryShape,
+    /// Reused buffer for the Memory value text.
+    memory_text: String,
     temperature: Entity<ChartView>,
     /// E25-023.
     #[allow(dead_code, reason = "E25-023 creates it")]
@@ -567,6 +569,7 @@ impl GpuPage {
             placeholder: None,
             memory,
             memory_shape,
+            memory_text: String::new(),
             temperature,
             power: None,
             clocks: None,
@@ -692,6 +695,7 @@ impl GpuPage {
                 self.memory_shape = shape;
                 self.rebuild_memory(labels_changed, cx);
             }
+            self.sync_memory_text(totals, cx);
         }
         if mask.contains(ComponentMask::HEALTH) || vendor_changed {
             let probe = probe_state(self.vendor, snap);
@@ -748,6 +752,26 @@ impl GpuPage {
         }
         // Restarting keeps the per-engine cells, each reading `!`. Missing shows the placeholder.
         self.engines.update(cx, |v, cx| v.set_state(state, cx));
+    }
+
+    /// The Memory value as "2.80 GiB / 15.92 GiB" when used and total are known. The chart gets a
+    /// new text only when the formatted text differs.
+    fn sync_memory_text(&mut self, totals: Option<&GpuTotals>, cx: &mut Context<Self>) {
+        let total = self.memory_shape.total;
+        let used = totals.and_then(|t| shown_u64(t.mem_used.value, t.mem_used.validity));
+        let Some(used) = used.filter(|_| total > 0) else {
+            self.memory.update(cx, |v, cx| v.set_value_text(None, cx));
+            return;
+        };
+        self.memory_text.clear();
+        units::bytes_of(&mut self.memory_text, used, total);
+        let text = &self.memory_text;
+        if self.memory.read(cx).value_text().map(|t| t.as_ref()) == Some(text.as_str()) {
+            return;
+        }
+        let text = SharedString::from(text.clone());
+        self.memory
+            .update(cx, |v, cx| v.set_value_text(Some(text), cx));
     }
 
     fn rebuild_grid(&mut self, cx: &mut Context<Self>) {

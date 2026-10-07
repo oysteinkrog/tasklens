@@ -261,6 +261,7 @@ fn paint_view(
         series,
         text,
         last_value_text,
+        value_text,
         hover: hover_state,
         ..
     } = view;
@@ -389,6 +390,7 @@ fn paint_view(
         spec,
         state: &state,
         value,
+        value_text: value_text.as_deref(),
         axis_text: (has_data && !axis_text.is_empty()).then_some(axis_text.as_str()),
         metrics: &env.metrics,
         theme: &env.theme,

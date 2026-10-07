@@ -5,7 +5,7 @@ use std::cmp::Ordering;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::{Context, Entity, IntoElement, Render, Subscription, Window};
+use gpui_kit::{Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
 use smallvec::SmallVec;
 use tl_model::ids::SeriesId;
 use tl_model::series::SeriesView;
@@ -46,6 +46,9 @@ pub struct ChartView {
     /// The value label shows the sum of every series' newest value (network download plus
     /// upload), not series 0 alone. `set_value_sum`.
     value_sum: bool,
+    /// Owner-formatted value text shown in place of the formatted value while the value is
+    /// Valid or Stale, such as "2.80 GiB / 15.92 GiB". `set_value_text`.
+    pub(crate) value_text: Option<SharedString>,
     /// Reused formatter buffer.
     #[allow(dead_code, reason = "read from E19-009 and E19-010 on")]
     pub(crate) last_value_text: String,
@@ -97,6 +100,7 @@ impl ChartView {
             series: SmallVec::new(),
             tier_fallback: false,
             value_sum: false,
+            value_text: None,
             last_value_text: String::new(),
             hover: hover::HoverState::default(),
             #[cfg(any(test, feature = "test-hooks"))]
@@ -234,6 +238,26 @@ impl ChartView {
             self.value_sum = on;
             cx.notify();
         }
+    }
+
+    /// Shows `text` as the value while the value is Valid or Stale; `None` goes back to the
+    /// formatted value. The owner calls it only when the shown numbers change, never per frame.
+    pub fn set_value_text(&mut self, text: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.value_text != text {
+            self.value_text = text;
+            cx.notify();
+        }
+    }
+
+    /// The value label's text as last painted.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn painted_value_text(&self) -> Option<&str> {
+        self.text.value_text()
+    }
+
+    /// The owner value text from `set_value_text`.
+    pub fn value_text(&self) -> Option<&SharedString> {
+        self.value_text.as_ref()
     }
 
     /// The cached stroke paths' smallest vertex y, chart-local physical px (0 is the plot top).

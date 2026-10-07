@@ -173,6 +173,12 @@ pub struct LabelCache {
 }
 
 impl LabelCache {
+    /// The value label's text as last shaped.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn value_text(&self) -> Option<&str> {
+        self.value.text()
+    }
+
     fn shaped(&mut self, shaped: bool) {
         #[cfg(any(test, feature = "test-hooks"))]
         if shaped {
@@ -228,11 +234,21 @@ pub struct LabelPaint<'a> {
     pub state: &'a ChartState,
     /// Newest value of series 0 and its validity; `None` when the chart has no series.
     pub value: Option<(f32, Validity)>,
+    /// Owner text shown in place of the formatted value while it is Valid or Stale.
+    pub value_text: Option<&'a str>,
     /// Axis max text from `scale::compute`, `None` when the scale has none.
     pub axis_text: Option<&'a str>,
     pub metrics: &'a UiMetrics,
     pub theme: &'a TlTheme,
     pub network_unit: NetworkUnit,
+}
+
+/// The owner's value text when set, else `v` formatted.
+fn write_value(p: &LabelPaint, v: f32, out: &mut String) {
+    match p.value_text {
+        Some(text) => out.push_str(text),
+        None => format_value(p.labels.value_fmt, v, p.network_unit, out),
+    }
 }
 
 /// Paints the heading, value, legend, axis max and range label (UI-PRF-001 step 6). Lines are
@@ -317,11 +333,11 @@ pub fn paint(
             scratch.clear();
             let color = match validity {
                 Validity::Valid => {
-                    format_value(p.labels.value_fmt, v, p.network_unit, scratch);
+                    write_value(p, v, scratch);
                     p.theme.text_primary
                 }
                 Validity::Stale => {
-                    format_value(p.labels.value_fmt, v, p.network_unit, scratch);
+                    write_value(p, v, scratch);
                     p.theme.text_secondary
                 }
                 Validity::WarmingUp => {
