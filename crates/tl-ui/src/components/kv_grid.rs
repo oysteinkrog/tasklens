@@ -7,12 +7,14 @@
 //!   `columns`), column gap `sp7` unless the owner sets `column_gap`, row gap 0, pair height
 //!   2 × row height.
 //! - Inline (Information, Properties General): one row per pair, the label column at a fixed
-//!   width, the value after it. The owner writes the ":" into the label.
+//!   width, the value after it. The owner writes the ":" into the label. A value with `\n` in it
+//!   (a resolution, IP addresses) draws one line per part, each `row_height` high and cut on its
+//!   own; the label sits on the first line. Copies join the lines with ", " (UI-SYS-083).
 //!
 //! A section with a title gets a band: `header` fill, row height high, a 3 px `accent` bar at the
 //! left edge, the title in `t_md` 500, and a copy button ("Copy section") at the right end. A
-//! block with a heading ("Module 1") indents its rows by `block_indent`; blocks are `block_gap`
-//! apart.
+//! block with a heading ("Module 1"), or with `indent` set, indents its rows by `block_indent`;
+//! blocks are `block_gap` apart. `label_inset` moves every row right of the band's left edge.
 //!
 //! Value words per validity (PERF-013), every non-valid word in `text_secondary`. The words are
 //! the `fnd-kv-*` keys in `en-US.ftl`, translated once per strings version ([`kv_words`]):
@@ -42,7 +44,7 @@
 //! The grid caches nothing. Owners keep the formatted strings and re-format only changed values.
 //! Values are never logged.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -57,6 +59,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, fill, point,
     prelude::FluentBuilder as _, px, size,
 };
+use rustc_hash::FxHashMap;
 use tl_model::validity::Validity;
 
 use super::button::{TlButton, TlButtonKind, TlButtonSize};
@@ -106,6 +109,12 @@ const MENU_MIN_WIDTH: f32 = 180.;
 const MENU_MAX_WIDTH: f32 = 360.;
 /// Indent of each copied `Label: value` line (PERF-011).
 const COPY_INDENT: &str = "    ";
+/// Most multi-line values whose split lines a grid keeps. The cache is emptied when full.
+const LINE_CACHE_MAX: usize = 64;
+/// Element id names of the lines of a multi-line value.
+const LINE_IDS: [&str; 8] = [
+    "text", "text1", "text2", "text3", "text4", "text5", "text6", "text7",
+];
 
 type CopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 type SectionHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -293,6 +302,14 @@ pub struct TlKvRow {
 pub struct TlKvBlock {
     pub heading: Option<SharedString>,
     pub rows: Vec<TlKvRow>,
+    /// Indents the rows by `block_indent`. `None` indents a block that has a heading.
+    pub indent: Option<bool>,
+}
+
+impl TlKvBlock {
+    fn indented(&self) -> bool {
+        self.indent.unwrap_or(self.heading.is_some())
+    }
 }
 
 /// One card. A title draws the section band.
@@ -359,12 +376,26 @@ pub fn value_look_in(value: &TlValue, words: &KvWords, theme: &TlTheme) -> Optio
     })
 }
 
+/// The copy form of a shown value: the lines of a multi-line value joined with ", ".
+pub fn value_copy_form(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\n') {
+        text.split('\n').collect::<Vec<_>>().join(", ").into()
+    } else {
+        text.into()
+    }
+}
+
 /// "Label: value" for a row. A trailing ":" in the label is not doubled.
 pub fn row_copy_text(row: &TlKvRow, words: &KvWords) -> Option<String> {
     let value = shown_text_in(&row.value, words)?;
-    let label = row.label.trim_end();
+    Some(row_text(&row.label, &value))
+}
+
+/// "Label: value" from a label and a shown value.
+fn row_text(label: &str, value: &str) -> String {
+    let label = label.trim_end();
     let label = label.strip_suffix(':').unwrap_or(label);
-    Some(format!("{label}: {value}"))
+    format!("{label}: {}", value_copy_form(value))
 }
 
 /// The section as plain text: the title, then each heading and `    Label: value` line
@@ -454,7 +485,11 @@ struct GridState {
     /// Bumps on each flash, so a new flash restarts its animation.
     flash_count: u64,
     flash_timer: Option<Task<()>>,
+    /// The lines of each multi-line value, so a frame does not split them again.
+    lines: LineCache,
 }
+
+type LineCache = Rc<RefCell<FxHashMap<SharedString, Rc<[SharedString]>>>>;
 
 impl GridState {
     fn new(cx: &mut Context<Self>) -> Self {
@@ -465,6 +500,7 @@ impl GridState {
             hovered: None,
             flash_count: 0,
             flash_timer: None,
+            lines: LineCache::default(),
         }
     }
 
@@ -506,6 +542,37 @@ struct Frame {
     reduced_motion: bool,
     row_height: Pixels,
     words: Rc<KvWords>,
+    lines: LineCache,
+}
+
+impl Frame {
+    /// The lines of `text`, or `None` when it has one line.
+    fn lines_of(&self, text: &SharedString) -> Option<Rc<[SharedString]>> {
+        if !text.contains('\n') {
+            return None;
+        }
+        let mut cache = self.lines.borrow_mut();
+        if let Some(lines) = cache.get(text) {
+            return Some(lines.clone());
+        }
+        if cache.len() >= LINE_CACHE_MAX {
+            cache.clear();
+        }
+        let lines: Rc<[SharedString]> = text
+            .split('\n')
+            .map(|line| SharedString::from(line.to_owned()))
+            .collect();
+        cache.insert(text.clone(), lines.clone());
+        Some(lines)
+    }
+}
+
+/// The element id of line `i` of the value `id`.
+fn line_id(id: &ElementId, i: usize) -> ElementId {
+    match LINE_IDS.get(i) {
+        Some(name) => (id.clone(), *name).into(),
+        None => (id.clone(), format!("text{i}")).into(),
+    }
 }
 
 /// The key/value grid. Build it with [`TlKeyValueGrid::new`] and [`TlKeyValueGrid::sections`].
@@ -518,6 +585,7 @@ pub struct TlKeyValueGrid {
     label_width: Option<Pixels>,
     block_indent: Option<Pixels>,
     block_gap: Option<Pixels>,
+    label_inset: Option<Pixels>,
     columns: usize,
     column_gap: Option<Pixels>,
     copy_on_click: bool,
@@ -537,6 +605,7 @@ impl TlKeyValueGrid {
             label_width: None,
             block_indent: None,
             block_gap: None,
+            label_inset: None,
             columns: COLUMNS,
             column_gap: None,
             copy_on_click: false,
@@ -576,6 +645,12 @@ impl TlKeyValueGrid {
         self
     }
 
+    /// Space between the band's left edge and every row, already scaled. Default 0.
+    pub fn label_inset(mut self, inset: Pixels) -> Self {
+        self.label_inset = Some(inset);
+        self
+    }
+
     /// Stacked columns, at least 1. Default 3.
     pub fn columns(mut self, columns: usize) -> Self {
         self.columns = columns.max(1);
@@ -603,8 +678,8 @@ impl TlKeyValueGrid {
         self
     }
 
-    /// Called with the section index when its band's copy button is clicked. Without it the
-    /// button copies [`section_copy_text`] and calls `on_copied`.
+    /// Called with the section index when its band's copy button or a row menu's "Copy section"
+    /// is clicked. Without it both copy [`section_copy_text`] and call `on_copied`.
     pub fn on_copy_section(
         mut self,
         handler: impl Fn(usize, &mut Window, &mut App) + 'static,
@@ -677,7 +752,8 @@ impl TlKeyValueGrid {
             .into_any_element()
     }
 
-    /// The value element of row `n` in section `si`, or `None` when the row is Missing.
+    /// The value element of row `n` in section `si` and its line count, or `None` when the row
+    /// is Missing. Only an inline row (`multiline`) draws a value with `\n` as several lines.
     #[allow(clippy::too_many_arguments)]
     fn value(
         &self,
@@ -685,10 +761,11 @@ impl TlKeyValueGrid {
         si: usize,
         row: &TlKvRow,
         available: Option<Pixels>,
+        multiline: bool,
         f: &Frame,
         window: &mut Window,
         cx: &mut App,
-    ) -> Option<AnyElement> {
+    ) -> Option<(AnyElement, usize)> {
         let look = value_look_in(&row.value, &f.words, &f.theme)?;
         let m = &f.m;
         let id = self.child_id("value", n);
@@ -704,31 +781,60 @@ impl TlKeyValueGrid {
             .text_color(look.color);
 
         let mut full_text = None;
+        let mut full_lines = None;
+        let mut line_count = 1;
         if look.link {
             let action = row.value.link.as_ref()?.boxed_clone();
             cell = cell.child(
                 TlLink::new((id.clone(), "link"), look.text.clone(), action).text_size(m.text.base),
             );
         } else {
-            debug_assert_clean(&look.text);
-            let mut shown = look.text.clone();
-            if let Some(available) = available {
-                let (width, cut) = measure(&look.text, row.value.path, available, m, window, cx);
-                if width > available {
-                    full_text = Some(look.text.clone());
-                    if let Some(cut) = cut {
-                        shown = cut;
+            if let Some(lines) = multiline.then(|| f.lines_of(&look.text)).flatten() {
+                line_count = lines.len();
+                let mut cut = false;
+                let mut column = div().flex().flex_col().min_w_0().max_w_full();
+                for (i, line) in lines.iter().enumerate() {
+                    debug_assert_clean(line);
+                    if let Some(available) = available.filter(|_| !cut) {
+                        cut = measure(line, false, available, m, window, cx).0 > available;
+                    }
+                    let mut text = div().min_w_0();
+                    *text.text_style() = numeric_style(m, m.text.base);
+                    column = column.child(
+                        div().flex().items_center().h(f.row_height).min_w_0().child(
+                            text.truncate().child(
+                                SelectableText::new(line_id(&id, i), line.clone())
+                                    .text_style(numeric_style(m, m.text.base)),
+                            ),
+                        ),
+                    );
+                }
+                if cut {
+                    full_lines = Some(lines);
+                }
+                cell = cell.child(column);
+            } else {
+                debug_assert_clean(&look.text);
+                let mut shown = look.text.clone();
+                if let Some(available) = available {
+                    let (width, cut) =
+                        measure(&look.text, row.value.path, available, m, window, cx);
+                    if width > available {
+                        full_text = Some(look.text.clone());
+                        if let Some(cut) = cut {
+                            shown = cut;
+                        }
                     }
                 }
+                let mut text = div().min_w_0();
+                *text.text_style() = numeric_style(m, m.text.base);
+                cell = cell.child(
+                    text.truncate().child(
+                        SelectableText::new((id.clone(), "text"), shown)
+                            .text_style(numeric_style(m, m.text.base)),
+                    ),
+                );
             }
-            let mut text = div().min_w_0();
-            *text.text_style() = numeric_style(m, m.text.base);
-            cell = cell.child(
-                text.truncate().child(
-                    SelectableText::new((id.clone(), "text"), shown)
-                        .text_style(numeric_style(m, m.text.base)),
-                ),
-            );
             if self.copy_on_click {
                 let on_copied = self.on_copied.clone();
                 let state = f.state.clone();
@@ -738,7 +844,8 @@ impl TlKeyValueGrid {
                     if TextSelection::has_selection(window, cx) {
                         return;
                     }
-                    copy_and_report(text.clone(), on_copied.as_ref(), window, cx);
+                    let copy = value_copy_form(&text).into_owned().into();
+                    copy_and_report(copy, on_copied.as_ref(), window, cx);
                     state.update(cx, |s, cx| s.start_flash(n, cx));
                 });
             }
@@ -754,10 +861,13 @@ impl TlKeyValueGrid {
             }
         }
 
-        let tooltip = match (full_text, row.value.tooltip.clone()) {
-            (Some(full), Some(tip)) => Some(TlTooltip::lines(vec![full, tip])),
-            (Some(text), None) | (None, Some(text)) => Some(TlTooltip::text(text)),
-            (None, None) => None,
+        let tooltip = match (full_lines, full_text, row.value.tooltip.clone()) {
+            (Some(lines), _, tip) => {
+                Some(TlTooltip::lines(lines.iter().cloned().chain(tip).collect()))
+            }
+            (None, Some(full), Some(tip)) => Some(TlTooltip::lines(vec![full, tip])),
+            (None, Some(text), None) | (None, None, Some(text)) => Some(TlTooltip::text(text)),
+            (None, None, None) => None,
         };
         let cell = match tooltip {
             Some(tip) => {
@@ -768,38 +878,53 @@ impl TlKeyValueGrid {
         };
 
         let on_copied = self.on_copied.clone();
+        let on_copy_section = self.on_copy_section.clone();
         let sections = self.sections.clone();
         let value_text = look.text;
-        let row_text: SharedString = row_copy_text(row, &f.words).unwrap_or_default().into();
+        let label = row.label.clone();
         let words = f.words.clone();
         let menu_min = px(MENU_MIN_WIDTH * m.ui_scale);
         let menu_max = px(MENU_MAX_WIDTH * m.ui_scale);
-        Some(
-            cell.context_menu(move |menu: PopupMenu, _, _| {
-                let item = |label: &SharedString, text: Rc<dyn Fn() -> SharedString>| {
-                    let on_copied = on_copied.clone();
-                    PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
-                        copy_and_report(text(), on_copied.as_ref(), window, cx)
-                    })
-                };
-                let value_text = value_text.clone();
-                let row_text = row_text.clone();
+        let menu = cell.context_menu(move |menu: PopupMenu, _, _| {
+            let item = |label: &SharedString, text: Rc<dyn Fn() -> SharedString>| {
+                let on_copied = on_copied.clone();
+                PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
+                    copy_and_report(text(), on_copied.as_ref(), window, cx)
+                })
+            };
+            let value = value_text.clone();
+            let row_value = value_text.clone();
+            let label = label.clone();
+            let section = {
+                let on_copy_section = on_copy_section.clone();
+                let on_copied = on_copied.clone();
                 let sections = sections.clone();
                 let words = words.clone();
-                menu.min_w(menu_min)
-                    .max_w(menu_max)
-                    .item(item(&words.copy_value, Rc::new(move || value_text.clone())))
-                    .item(item(&words.copy_row, Rc::new(move || row_text.clone())))
-                    .item(item(
-                        &words.copy_section,
-                        Rc::new({
-                            let words = words.clone();
-                            move || section_copy_text(&sections[si], &words).into()
-                        }),
-                    ))
-            })
-            .into_any_element(),
-        )
+                PopupMenuItem::new(words.copy_section.clone()).on_click(move |_, window, cx| {
+                    match &on_copy_section {
+                        Some(handler) => handler(si, window, cx),
+                        None => copy_and_report(
+                            section_copy_text(&sections[si], &words).into(),
+                            on_copied.as_ref(),
+                            window,
+                            cx,
+                        ),
+                    }
+                })
+            };
+            menu.min_w(menu_min)
+                .max_w(menu_max)
+                .item(item(
+                    &words.copy_value,
+                    Rc::new(move || value_copy_form(&value).into_owned().into()),
+                ))
+                .item(item(
+                    &words.copy_row,
+                    Rc::new(move || row_text(&label, &row_value).into()),
+                ))
+                .item(section)
+        });
+        Some((menu.into_any_element(), line_count))
     }
 
     /// The `accent` flash over row `n` while it is flashing.
@@ -839,20 +964,32 @@ impl TlKeyValueGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let value = self.value(n, si, row, available, f, window, cx)?;
+        let (value, lines) = self.value(n, si, row, available, true, f, window, cx)?;
         let mut label = div().flex_none().w(label_width).min_w_0();
         *label.text_style() = t_base(&f.m);
         let label = label
             .truncate()
             .text_color(f.theme.text_secondary)
             .child(row.label.clone());
+        // A multi-line value keeps its label on the first line.
+        let label = if lines > 1 {
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .h(f.row_height)
+                .child(label)
+        } else {
+            label
+        };
         Some(
             div()
                 .debug_selector(move || format!("TlKv-row-{n}"))
                 .relative()
                 .flex()
-                .items_center()
-                .h(f.row_height)
+                .when(lines > 1, |d| d.items_start())
+                .when(lines == 1, |d| d.items_center())
+                .h(f.row_height * lines as f32)
                 .child(label)
                 .child(div().flex().flex_1().min_w_0().child(value))
                 .children(self.flash(n, f))
@@ -872,7 +1009,7 @@ impl TlKeyValueGrid {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        let value = self.value(n, si, row, available, f, window, cx)?;
+        let (value, _) = self.value(n, si, row, available, false, f, window, cx)?;
         let mut label = div().min_w_0();
         *label.text_style() = t_sm(&f.m);
         let label = label
@@ -1009,7 +1146,7 @@ impl RenderOnce for TlKeyValueGrid {
         let state = window.use_keyed_state((self.id.clone(), "kv-state"), cx, |_, cx| {
             GridState::new(cx)
         });
-        let (focus, width_cell, flash, hovered, flash_count) = {
+        let (focus, width_cell, flash, hovered, flash_count, lines) = {
             let s = state.read(cx);
             (
                 s.focus.clone(),
@@ -1017,6 +1154,7 @@ impl RenderOnce for TlKeyValueGrid {
                 s.flash,
                 s.hovered,
                 s.flash_count,
+                s.lines.clone(),
             )
         };
         let width = Some(width_cell.get()).filter(|w| *w > px(0.));
@@ -1030,16 +1168,19 @@ impl RenderOnce for TlKeyValueGrid {
             reduced_motion: cx.reduce_motion(),
             row_height: self.row_height.unwrap_or(px(ROW_HEIGHT * m.ui_scale)),
             words,
+            lines,
         };
         let indent = self.block_indent.unwrap_or(m.sp[6]);
         let block_gap = self.block_gap.unwrap_or(m.sp[4]);
+        let inset = self.label_inset.unwrap_or(px(0.));
+        let width = width.map(|w| (w - inset).max(px(0.)));
 
         let mut n = 0;
         let mut sections = Vec::with_capacity(self.sections.len());
         for (si, section) in self.sections.iter().enumerate() {
             let mut blocks = v_flex();
             for (bi, block) in section.blocks.iter().enumerate() {
-                let indented = block.heading.is_some();
+                let indented = block.indented();
                 let rows_width = width.map(|w| if indented { w - indent } else { w });
                 let rows = self.rows(si, block, n, rows_width, &f, window, cx);
                 n += block.rows.len();
@@ -1060,9 +1201,12 @@ impl RenderOnce for TlKeyValueGrid {
             let band = section.title.as_ref().map(|t| self.band(si, t, &f));
             let has_band = band.is_some();
             sections.push(
-                v_flex()
-                    .children(band)
-                    .child(div().when(has_band, |d| d.mt(m.sp[4])).child(blocks)),
+                v_flex().children(band).child(
+                    div()
+                        .when(has_band, |d| d.mt(m.sp[4]))
+                        .when(inset > px(0.), |d| d.pl(inset))
+                        .child(blocks),
+                ),
             );
         }
 
@@ -1202,6 +1346,7 @@ mod tests {
         TlKvSection {
             title: None,
             blocks: vec![TlKvBlock {
+                indent: None,
                 heading: None,
                 rows,
             }],
@@ -1412,6 +1557,118 @@ mod tests {
         assert!(bounds(cx, "TlKv-flash-0").is_none(), "the flash ends");
     }
 
+    /// Opens the context menu on value `n` and picks item `index` (Copy value, row, section).
+    fn pick_menu_item(cx: &mut VisualTestContext, n: usize, index: usize) {
+        let value = bounds(cx, &format!("TlKv-value-{n}")).expect("value drawn");
+        cx.simulate_mouse_down(value.center(), MouseButton::Right, Modifiers::none());
+        cx.simulate_mouse_up(value.center(), MouseButton::Right, Modifiers::none());
+        draw(cx);
+        // The first "down" selects the first item.
+        let keys = ["down enter", "down down enter", "down down down enter"][index];
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+    }
+
+    #[gpui_kit::test]
+    fn multiline_value_rows(cx: &mut TestAppContext) {
+        let sections = [section(vec![
+            row("Resolution:", TlValue::new("2560 × 1440\n1920 × 1080")),
+            row("PID:", TlValue::new("1234")),
+        ])];
+        let (cx, copied, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline).sections(&sections)
+        });
+        let two = bounds(cx, "TlKv-row-0").expect("row drawn");
+        let one = bounds(cx, "TlKv-row-1").expect("row drawn");
+        assert_eq!(two.size.height, px(56.), "two lines are 2 × row height");
+        assert_eq!(one.size.height, px(28.), "one line is unchanged");
+        assert_eq!(one.origin.y, two.bottom());
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        assert_eq!(
+            value.origin.y, two.origin.y,
+            "the value starts on the first line"
+        );
+        assert_eq!(value.size.height, px(56.));
+
+        pick_menu_item(cx, 0, 0);
+        assert_eq!(clipboard(cx).as_deref(), Some("2560 × 1440, 1920 × 1080"));
+        pick_menu_item(cx, 0, 1);
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("Resolution: 2560 × 1440, 1920 × 1080")
+        );
+        assert_eq!(copied.borrow().len(), 2);
+    }
+
+    #[gpui_kit::test]
+    fn indent_flag_and_label_inset(cx: &mut TestAppContext) {
+        let block = |indent| TlKvBlock {
+            heading: None,
+            rows: vec![row("Slot:", TlValue::new("A1"))],
+            indent,
+        };
+        let sections = [TlKvSection {
+            title: None,
+            blocks: vec![block(None), block(Some(true)), block(Some(false))],
+        }];
+        let (cx, _, _) = host(cx, move || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .block_indent(px(12.))
+                .label_inset(px(8.))
+                .sections(&sections)
+        });
+        let x = |cx: &mut VisualTestContext, n: usize| {
+            bounds(cx, &format!("TlKv-row-{n}"))
+                .expect("row drawn")
+                .origin
+                .x
+        };
+        assert_eq!(
+            x(cx, 0),
+            px(8.),
+            "no heading, no flag: not indented, inset 8"
+        );
+        assert_eq!(x(cx, 1), px(20.), "indent flag on a block without heading");
+        assert_eq!(x(cx, 2), px(8.));
+        assert!(
+            TlKvBlock {
+                heading: Some("Module 1".into()),
+                ..block(None)
+            }
+            .indented()
+        );
+        assert!(
+            !TlKvBlock {
+                heading: Some("Module 1".into()),
+                ..block(Some(false))
+            }
+            .indented()
+        );
+    }
+
+    #[gpui_kit::test]
+    fn menu_copy_section_calls_owner(cx: &mut TestAppContext) {
+        let picked = Rc::new(Cell::new(None));
+        let (cx, copied, _) = host(cx, {
+            let picked = picked.clone();
+            move || {
+                let picked = picked.clone();
+                pid_grid().on_copy_section(move |si, _, _| picked.set(Some(si)))
+            }
+        });
+        pick_menu_item(cx, 0, 2);
+        assert_eq!(picked.get(), Some(0), "the owner's handler runs");
+        assert!(copied.borrow().is_empty(), "the grid copies nothing itself");
+    }
+
+    #[gpui_kit::test]
+    fn menu_copy_section_default_copies_text(cx: &mut TestAppContext) {
+        let (cx, copied, _) = host(cx, pid_grid);
+        pick_menu_item(cx, 0, 2);
+        assert_eq!(clipboard(cx).as_deref(), Some("    PID: 1234"));
+        assert_eq!(copied.borrow().len(), 1);
+    }
+
     #[gpui_kit::test]
     fn context_menu_copy_row(cx: &mut TestAppContext) {
         let (cx, copied, _) = host(cx, pid_grid);
@@ -1511,10 +1768,12 @@ mod tests {
             title: Some("Memory".into()),
             blocks: vec![
                 TlKvBlock {
+                    indent: None,
                     heading: None,
                     rows: vec![row("Total:", TlValue::new("32 GiB"))],
                 },
                 TlKvBlock {
+                    indent: None,
                     heading: Some("Module 1".into()),
                     rows: vec![
                         row("Speed:", TlValue::new("4800 MT/s")),

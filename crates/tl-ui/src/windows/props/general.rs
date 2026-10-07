@@ -1105,6 +1105,7 @@ impl GeneralTab {
             self.sections[i] = Rc::from(vec![TlKvSection {
                 title: None,
                 blocks: vec![TlKvBlock {
+                    indent: None,
                     heading: None,
                     rows,
                 }],

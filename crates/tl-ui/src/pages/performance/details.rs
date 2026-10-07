@@ -622,6 +622,7 @@ pub fn render_details(model: &KeyValueModel, m: &UiMetrics, cx: &App) -> TlKeyVa
     let section = TlKvSection {
         title: None,
         blocks: vec![TlKvBlock {
+            indent: None,
             heading: None,
             rows: model.to_kv_rows().collect(),
         }],

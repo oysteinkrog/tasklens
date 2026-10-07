@@ -189,6 +189,7 @@ fn grid_section(rows: &[InfoRow]) -> TlKvSection {
         if current != Some(row.block) {
             current = Some(row.block);
             blocks.push(TlKvBlock {
+                indent: None,
                 heading: None,
                 rows: Vec::new(),
             });

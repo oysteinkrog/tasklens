@@ -999,6 +999,7 @@ fn page_kv_grid(p: &mut PageCx) -> Vec<AnyElement> {
     let stacked = [TlKvSection {
         title: Some("Memory".into()),
         blocks: vec![TlKvBlock {
+            indent: None,
             heading: None,
             rows: vec![
                 row("In use", TlValue::new("3.2 GiB")),
@@ -1035,6 +1036,7 @@ fn page_kv_grid(p: &mut PageCx) -> Vec<AnyElement> {
         title: Some("General".into()),
         blocks: vec![
             TlKvBlock {
+                indent: None,
                 heading: None,
                 rows: vec![
                     row("Name:", TlValue::new("firefox")),
@@ -1050,6 +1052,7 @@ fn page_kv_grid(p: &mut PageCx) -> Vec<AnyElement> {
                 ],
             },
             TlKvBlock {
+                indent: None,
                 heading: Some("Module 1".into()),
                 rows: vec![row("Size:", TlValue::new("1.4 MiB"))],
             },

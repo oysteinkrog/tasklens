@@ -610,6 +610,7 @@ mod display {
             let section = TlKvSection {
                 title: Some("Memory".into()),
                 blocks: vec![TlKvBlock {
+                    indent: None,
                     heading: None,
                     rows: vec![row("In use", "4.2 GiB"), row("Available", "11.6 GiB")],
                 }],
@@ -721,6 +722,7 @@ perf-cpu-time-unknown = <unknown>
             let section = TlKvSection {
                 title: None,
                 blocks: vec![TlKvBlock {
+                    indent: None,
                     heading: None,
                     rows,
                 }],
@@ -778,6 +780,7 @@ perf-cpu-time-unknown = <unknown>
             let section = TlKvSection {
                 title: Some("Memory".into()),
                 blocks: vec![TlKvBlock {
+                    indent: None,
                     heading: None,
                     rows: vec![TlKvRow {
                         label: "Total:".into(),
