@@ -29,6 +29,10 @@ serde_json    = { workspace = true }   # themes.json and run-history.json (R-245
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
+# tests/live_processes.rs: the real engine wired to the UI (tasklens-pdu.52)
+gpui-kit   = { workspace = true, features = ["test-support"] }
+tl-ui      = { workspace = true, features = ["test-hooks"] }
+tl-collect = { workspace = true }
 
 [features]
 bench = ["tl-ui/bench"]   # ADR-002; release builds do not enable it

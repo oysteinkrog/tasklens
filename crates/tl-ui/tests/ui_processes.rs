@@ -682,6 +682,7 @@ mod delegate {
         let vcx = cx.add_empty_window();
         let d = new_delegate(vcx, snapshot(1, rows, groups, records));
         let table = vcx.update(|window, cx| cx.new(|cx| TlTreeTable::new(d, window, cx)));
+        vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.set_active(true, cx)));
 
         // A scroll that shows 40 rows reports 120 ids: 100 processes, 20 other rows.
         let mut ids: Vec<ProcRowId> = (0..100).map(|p| ProcRowId::Process(key(p))).collect();
@@ -696,6 +697,18 @@ mod delegate {
         let keys = vcx.update(|_, cx| agg.read(cx).merged().detail_keys);
         assert_eq!(keys.len(), 512);
         assert_eq!(keys[511], key(511));
+
+        // The part turns the sweep on for the shown columns (tasklens-pdu.52).
+        let merged = vcx.update(|_, cx| agg.read(cx).merged());
+        assert!(merged.process_table);
+        assert!(merged.process_columns.contains(ColumnId::Name));
+
+        // Leaving the tab withdraws the part; a scroll while inactive sends nothing.
+        vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.set_active(false, cx)));
+        vcx.update(|_, cx| table.update(cx, |t, cx| t.delegate.on_visible_range(&ids, cx)));
+        let merged = vcx.update(|_, cx| agg.read(cx).merged());
+        assert!(!merged.process_table);
+        assert!(merged.detail_keys.is_empty());
     }
 
     fn gpu(n: u16, pci: &str, name: &str, present: bool) -> DeviceEntry {

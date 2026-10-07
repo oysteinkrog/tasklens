@@ -695,4 +695,8 @@ impl ShellPage for ProcessesPage {
     fn primary_focus(&self) -> FocusHandle {
         self.focus.clone()
     }
+
+    fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| t.delegate.set_active(active, cx));
+    }
 }

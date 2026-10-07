@@ -30,7 +30,7 @@ use gpui_kit::{
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
-use tl_model::demand::Demand;
+use tl_model::demand::{ColumnSet, Demand};
 use tl_model::devices::{DeviceIdentity, DeviceKind};
 use tl_model::health::SourceId;
 use tl_model::ids::{ColumnId, GroupKey, NodeId, ProcessKey, PseudoKind};
@@ -306,6 +306,10 @@ pub struct ProcessDelegate {
     /// The window the table is in, for the demand part (hidden detection, ADR-008) and the
     /// "Process exited" toast.
     window: Option<AnyWindowHandle>,
+    /// The Processes tab is the shown tab. Only then is the demand part sent (ADR-008).
+    active: bool,
+    /// The process keys of the last visible range, at most `DEMAND_MAX_IDS`.
+    visible_keys: Arc<[ProcessKey]>,
     /// The clock the row tints of this frame read, set in `before_rows`.
     tint_now: TimeNs,
     /// `motion.animations` and not reduced motion, set in `before_rows`.
@@ -364,6 +368,8 @@ impl ProcessDelegate {
             settings: settings.clone(),
             theme: current(cx).clone(),
             window: None,
+            active: false,
+            visible_keys: Arc::from([]),
             tint_now: now_boot_ns(),
             tint_animations: settings.motion.animations && !cx.reduce_motion(),
             tint_wake: None,
@@ -414,6 +420,49 @@ impl ProcessDelegate {
     /// main window is hidden.
     pub fn set_window(&mut self, window: Option<AnyWindowHandle>) {
         self.window = window;
+    }
+
+    /// Called by the page on tab activation. Active sends the demand part, which turns on the
+    /// process sweep and the 1 Hz CPU and memory totals; inactive withdraws it.
+    pub fn set_active(&mut self, active: bool, cx: &mut Context<TlTreeTable<Self>>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        if active {
+            self.send_demand(cx);
+        } else if let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) {
+            let source = cx.entity_id();
+            agg.update(cx, |a, cx| a.remove(source, cx));
+        }
+    }
+
+    /// This surface's demand part: the process table with its shown columns, and the visible
+    /// process keys for the detail reads.
+    pub fn demand_part(&self) -> Demand {
+        let mut columns = ColumnSet::EMPTY;
+        for col in self.layout.visible_columns().iter() {
+            columns.insert(*col);
+        }
+        Demand {
+            any_surface_visible: true,
+            process_table: true,
+            process_columns: columns,
+            detail_keys: Arc::clone(&self.visible_keys),
+            ..Demand::default()
+        }
+    }
+
+    /// Sends the demand part while the tab is active.
+    fn send_demand(&self, cx: &mut Context<TlTreeTable<Self>>) {
+        if !self.active {
+            return;
+        }
+        let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let (source, window, part) = (cx.entity_id(), self.window, self.demand_part());
+        agg.update(cx, |a, cx| a.set(source, window, part, cx));
     }
 
     /// Follows a settings change: units, heat, mode. Cell texts that depend on units change
@@ -1107,13 +1156,11 @@ impl TreeTableDelegate for ProcessDelegate {
             let state = layout.to_state();
             TlSettings::update(cx, |d| d.state.columns.processes = state);
         }
+        self.send_demand(cx);
     }
 
     fn on_visible_range(&mut self, ids: &[ProcRowId], cx: &mut Context<TlTreeTable<Self>>) {
-        let Some(agg) = cx.try_global::<GlobalDemand>().map(|g| g.0.clone()) else {
-            return;
-        };
-        let keys: Arc<[ProcessKey]> = ids
+        self.visible_keys = ids
             .iter()
             .filter_map(|id| match id {
                 ProcRowId::Process(key) => Some(*key),
@@ -1121,13 +1168,7 @@ impl TreeTableDelegate for ProcessDelegate {
             })
             .take(DEMAND_MAX_IDS)
             .collect();
-        let part = Demand {
-            detail_keys: keys,
-            ..Demand::default()
-        };
-        let source = cx.entity_id();
-        let window = self.window;
-        agg.update(cx, |a, cx| a.set(source, window, part, cx));
+        self.send_demand(cx);
     }
 
     /// Enter, Alt+Enter or Ctrl+I (D-008). A group header toggles. An exited row is not
