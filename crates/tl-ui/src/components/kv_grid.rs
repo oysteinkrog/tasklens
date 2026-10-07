@@ -47,7 +47,8 @@
 //! Owner hooks, all opt-in: [`TlKeyValueGrid::copy_texts`] copies a longer form than the shown
 //! value (a full hash), [`TlKeyValueGrid::on_context_menu`] replaces the built-in menu with the
 //! owner's, [`TlKeyValueGrid::cursor`] draws a keyboard cursor ring around one row, and
-//! [`TlKeyValueGrid::on_link_click`] hands a link click to the owner with the link's bounds.
+//! [`TlKeyValueGrid::on_link_click`] hands a link click to the owner with the link's bounds, and
+//! [`TlKeyValueGrid::on_value_mouse_down`] tells the owner which row a left press is on.
 //!
 //! The grid caches nothing. Owners keep the formatted strings and re-format only changed values.
 //! Values are never logged.
@@ -128,6 +129,7 @@ type CopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 type SectionHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 type MenuHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 type LinkHandler = Rc<dyn Fn(usize, Bounds<Pixels>, &mut Window, &mut App)>;
+type RowHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// Binds Ctrl+C inside the grid, so a text selection is copied before the page's Copy binding
 /// runs. Call once at startup.
@@ -606,6 +608,8 @@ pub struct TlKeyValueGrid {
     copy_texts: Rc<[(usize, SharedString)]>,
     on_context_menu: Option<MenuHandler>,
     on_link_click: Option<LinkHandler>,
+    on_value_mouse_down: Option<RowHandler>,
+    link_tab_stop: bool,
     cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
@@ -632,6 +636,8 @@ impl TlKeyValueGrid {
             copy_texts: Rc::from(Vec::new()),
             on_context_menu: None,
             on_link_click: None,
+            on_value_mouse_down: None,
+            link_tab_stop: true,
             cursor: None,
             filtered_empty: false,
             loading: false,
@@ -753,6 +759,23 @@ impl TlKeyValueGrid {
         self
     }
 
+    /// Called with the flat row index on a left press on a value, before any click copy, so the
+    /// owner can move its cursor there. The press goes on as usual.
+    pub fn on_value_mouse_down(
+        mut self,
+        handler: impl Fn(usize, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_value_mouse_down = Some(Rc::new(handler));
+        self
+    }
+
+    /// Whether Tab stops on link values. Default `true`. Off for an owner whose rows are one
+    /// focus stop with a keyboard cursor.
+    pub fn link_tab_stop(mut self, tab_stop: bool) -> Self {
+        self.link_tab_stop = tab_stop;
+        self
+    }
+
     /// Draws the keyboard cursor ring around flat row `row`: 1 px `accent`, inset 1 px, radius
     /// `r_sm`. The owner moves it; the grid has no key handling of its own.
     pub fn cursor(mut self, row: Option<usize>) -> Self {
@@ -862,8 +885,9 @@ impl TlKeyValueGrid {
         let mut line_count = 1;
         if look.link {
             let action = row.value.link.as_ref()?.boxed_clone();
-            let mut link =
-                TlLink::new((id.clone(), "link"), look.text.clone(), action).text_size(m.text.base);
+            let mut link = TlLink::new((id.clone(), "link"), look.text.clone(), action)
+                .text_size(m.text.base)
+                .tab_stop(self.link_tab_stop);
             if let Some(handler) = self.on_link_click.clone() {
                 link = link.on_click_bounds(Rc::new(move |bounds, window, cx| {
                     handler(n, bounds, window, cx)
@@ -951,7 +975,7 @@ impl TlKeyValueGrid {
             (None, Some(text), None) | (None, None, Some(text)) => Some(TlTooltip::text(text)),
             (None, None, None) => None,
         };
-        let cell = match tooltip {
+        let mut cell = match tooltip {
             Some(tip) => {
                 let state = HoverTooltip::state((id, "tooltip"), window, cx);
                 HoverTooltip::attach(&state, cell, DELAY_CONTROL, tip.build(), window, cx)
@@ -959,6 +983,11 @@ impl TlKeyValueGrid {
             None => cell,
         };
 
+        if let Some(handler) = self.on_value_mouse_down.clone() {
+            cell = cell.on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                handler(n, window, cx);
+            });
+        }
         if let Some(handler) = self.on_context_menu.clone() {
             let cell = cell.on_mouse_down(MouseButton::Right, move |ev, window, cx| {
                 cx.stop_propagation();
@@ -2053,5 +2082,31 @@ mod tests {
         let row = bounds(cx, "TlKv-row-1").expect("row drawn");
         assert_eq!(ring.origin.y, row.origin.y + px(1.));
         assert_eq!(ring.size.height, row.size.height - px(2.));
+    }
+
+    #[gpui_kit::test]
+    fn value_mouse_down_reports_the_row(cx: &mut TestAppContext) {
+        let pressed: Rc<RefCell<Vec<usize>>> = Rc::default();
+        let (cx, copied, _) = host(cx, {
+            let pressed = pressed.clone();
+            move || {
+                let pressed = pressed.clone();
+                TlKeyValueGrid::new("grid", KvLayout::Inline)
+                    .sections(&[section(vec![
+                        row("PID:", TlValue::new("1")),
+                        row("PPID:", TlValue::new("2")),
+                    ])])
+                    .copy_on_click(true)
+                    .on_value_mouse_down(move |n, _, _| pressed.borrow_mut().push(n))
+            }
+        });
+        let value = bounds(cx, "TlKv-value-1").expect("value drawn");
+        cx.simulate_click(value.center(), Modifiers::none());
+        assert_eq!(pressed.borrow().as_slice(), &[1]);
+        assert_eq!(
+            copied.borrow().as_slice(),
+            &[SharedString::from("2")],
+            "still copies"
+        );
     }
 }

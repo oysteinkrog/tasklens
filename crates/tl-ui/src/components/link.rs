@@ -41,6 +41,7 @@ pub struct TlLink {
     text_size: Option<Pixels>,
     disabled_reason: Option<SharedString>,
     on_click: Option<LinkClick>,
+    tab_stop: bool,
 }
 
 impl TlLink {
@@ -56,6 +57,7 @@ impl TlLink {
             text_size: None,
             disabled_reason: None,
             on_click: None,
+            tab_stop: true,
         }
     }
 
@@ -63,6 +65,13 @@ impl TlLink {
     /// action.
     pub fn on_click_bounds(mut self, handler: LinkClick) -> Self {
         self.on_click = Some(handler);
+        self
+    }
+
+    /// Whether Tab stops on the link. Default `true`. An owner whose region is one focus stop
+    /// with its own keys (the Properties field grid) turns it off; a click still focuses it.
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 
@@ -117,7 +126,7 @@ impl RenderOnce for TlLink {
             .use_keyed_state(self.id.clone(), cx, |_, cx| cx.focus_handle())
             .read(cx)
             .clone()
-            .tab_stop(true);
+            .tab_stop(self.tab_stop);
 
         let size = self.text_size.unwrap_or(m.text.base);
         // The label style first: `truncate` adds to the same text style.
