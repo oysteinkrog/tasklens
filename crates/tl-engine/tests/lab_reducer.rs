@@ -3066,6 +3066,12 @@ fn drm_vram_valid_with_nvidia_and_amd() {
             devices: vec![gpu_static(&amd, false)],
         })),
         sweep_without_pss(now_boot_ns(), &[1, 2, 3]),
+        gpu_sample(&[(&nvidia, 10.0)]),
+        gpu_sample(&[(&amd, 10.0)]),
+    ])
+    .expect("no invariant violation");
+    // The GPU columns come from the published catalog, so the rows go in a later run.
+    rig.run(vec![
         gpu_rows_msg(&nvidia, Some(vec![nv_row(1, 1000), nv_row(2, 2000)]), None),
         gpu_rows_msg(&amd, None, Some(&[(2, 300), (3, 400)])),
     ])
