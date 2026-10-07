@@ -619,3 +619,11 @@ shortcuts-props-field-menu = Open the field menu
 shortcuts-affinity-toggle-group = Toggle the CPU group
 shortcuts-affinity-apply = Apply affinity (OK)
 shortcuts-column-picker-close = Close the Column Picker
+
+# History table (E30-019)
+history-col-image-path = Image path
+history-tip-values-at = Values at the selected time
+history-tip-averages = Averages over the selected range (peak in cell tooltips)
+history-cell-peak = peak { $value }
+history-not-running = Process not running
+history-previous-boot = (previous boot)
