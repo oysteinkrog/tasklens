@@ -1,3 +1,3 @@
-Name	PID	CPU	Memory	Handles	Version
-firefox	4321	3.3%	812.00 MiB	412	n/a
-firefox	4400	3.3%	812.00 MiB	restricted	n/a
+Name	User	PID	CPU	Memory	Disk	Network	GPU	Description
+firefox	me	4321	3.3%	812.00 MiB	0 MiB/s	0 Mbps	0%
+firefox	me	4400	3.3%	Restricted	0 MiB/s	0 Mbps	0%
