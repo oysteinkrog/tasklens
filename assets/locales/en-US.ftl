@@ -518,3 +518,15 @@ processes-cell-tooltip-irq-in-task-time = Interrupt time is included in task tim
 
 # UI scale keys (E20-013)
 shell-toast-ui-scale = UI scale changed to { $pct }%
+
+# History mode page (E30-016)
+history-header-collecting = Collecting first history snapshot...
+history-header-live = History - Drag scrubber below to view timeline
+history-header-snapshot = History Snapshot: { $count } processes - { $min } min { $sec } sec ago
+history-header-snapshot-sec = History Snapshot: { $count } processes - { $sec } sec ago
+history-header-snapshot-hour = History Snapshot: { $count } processes - { $hours } h { $min } min ago
+history-header-range = History Range: { $from } - { $to } ({ $duration }), averages
+history-duration = { $min } min { $sec } sec
+history-duration-sec = { $sec } sec
+history-duration-hour = { $hours } h { $min } min
+history-loading = Loading history…
