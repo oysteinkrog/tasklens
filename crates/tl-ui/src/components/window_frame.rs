@@ -26,11 +26,13 @@ use gpui_kit::{
     Action, AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, ClickEvent, Context, Entity,
     FocusHandle, FontWeight, Global, Hsla, InteractiveElement, IntoElement, KeyBinding,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Render,
-    SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription, TextLayout,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
-    WindowHandle, WindowId, WindowKind, WindowOptions, div, prelude::FluentBuilder as _, px, rgb,
-    size,
+    RenderOnce, SharedString, StatefulInteractiveElement, Styled, StyledText, Subscription,
+    TextLayout, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowDecorations, WindowHandle, WindowId, WindowKind, WindowOptions, div,
+    prelude::FluentBuilder as _, px, rgb, size,
 };
+use std::rc::Rc;
+
 use rustc_hash::FxHashMap;
 use tl_model::settings::Decorations;
 use tl_model::validity::Validity;
@@ -335,8 +337,6 @@ pub struct TlSecondaryWindow<V> {
     server: bool,
     /// Holds the `TlWindow` key context when no content element has focus.
     focus: FocusHandle,
-    /// The left button went down on the title bar; the next move starts a window move.
-    drag_armed: bool,
     /// The drawn title, for the ellipsis check.
     title_layout: TextLayout,
     /// `title_layout` belongs to a rendered title bar.
@@ -407,7 +407,6 @@ impl<V: Render> TlSecondaryWindow<V> {
             title: spec.title,
             server,
             focus,
-            drag_armed: false,
             title_layout: TextLayout::default(),
             title_rendered: false,
             _hub,
@@ -505,17 +504,42 @@ impl<V: 'static> TlSecondaryWindow<V> {
     fn on_close(&mut self, _: &CloseSecondaryWindow, window: &mut Window, _: &mut Context<Self>) {
         window.remove_window();
     }
+}
 
-    /// The pin: a `TlButton::Toggle` look, `side` square.
-    fn pin(
-        &self,
-        side: Pixels,
-        theme: &TlTheme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+type PinHandler = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// The window pin: a `TlButton::Toggle` look, `side` square. Stateless: the look comes in as a
+/// [`PinLook`], and a click calls `on_pin`. Without `on_pin` a click does nothing, as in the
+/// component gallery.
+#[derive(IntoElement)]
+pub struct TlWindowPin {
+    side: Pixels,
+    look: PinLook,
+    on_pin: Option<PinHandler>,
+}
+
+impl TlWindowPin {
+    /// `side` is already scaled: 34 × ui_scale in the title bar, 24 × ui_scale under server
+    /// decorations.
+    pub fn new(side: Pixels, look: PinLook) -> Self {
+        Self {
+            side,
+            look,
+            on_pin: None,
+        }
+    }
+
+    pub fn on_pin(mut self, f: Rc<dyn Fn(&mut Window, &mut App)>) -> Self {
+        self.on_pin = Some(f);
+        self
+    }
+}
+
+impl RenderOnce for TlWindowPin {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = current(cx).clone();
         let m = *metrics(cx);
-        let look = pin_look(self.pinned, pin_supported(cx));
+        let look = self.look;
         let id = "TlWindowPin";
         let focus: FocusHandle = window
             .use_keyed_state(id, cx, |_, cx| cx.focus_handle())
@@ -533,6 +557,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
         };
         let hover = theme.tab_hover;
         let pressed = theme.header;
+        let on_pin = self.on_pin;
         let mut button = BaseButton::new(id)
             .disabled(!look.enabled)
             .track_focus(&focus)
@@ -542,7 +567,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
             .flex()
             .items_center()
             .justify_center()
-            .size(side)
+            .size(self.side)
             .rounded(m.radius_small)
             .bg(bg)
             .text_color(fg)
@@ -561,10 +586,12 @@ impl<V: 'static> TlSecondaryWindow<V> {
                         window.prevent_default();
                         cx.stop_propagation();
                     })
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    .on_click(move |_: &ClickEvent, window, cx| {
                         cx.stop_propagation();
-                        this.toggle_pin(window, cx);
-                    }))
+                        if let Some(f) = &on_pin {
+                            f(window, cx);
+                        }
+                    })
             })
             .child(icon(TlIcon::Pin, m.icon.md, fg));
         let tip = TlTooltip::text(look.tooltip);
@@ -588,27 +615,63 @@ impl<V: 'static> TlSecondaryWindow<V> {
             cx,
         );
         if show_ring {
-            TlFocusRing::ring(button, m.radius_small, theme).into_any_element()
+            TlFocusRing::ring(button, m.radius_small, &theme).into_any_element()
         } else {
             button.into_any_element()
         }
     }
+}
 
-    fn title_bar(
-        &mut self,
-        theme: &TlTheme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+/// The 34 px title bar of a secondary window: the icon, the title, the pin and the caption
+/// buttons. Stateless: the title, the pin look and whether a double-click maximizes come in as
+/// values, the caption buttons follow `Window::window_controls`, and a pin click calls `on_pin`.
+/// The left-button drag that starts a window move is kept in keyed state.
+#[derive(IntoElement)]
+pub struct TlTitleBar {
+    title: StyledText,
+    look: PinLook,
+    maximizes: bool,
+    on_pin: Option<PinHandler>,
+}
+
+impl TlTitleBar {
+    pub fn new(title: impl Into<SharedString>, look: PinLook) -> Self {
+        Self {
+            title: StyledText::new(title.into()),
+            look,
+            maximizes: false,
+            on_pin: None,
+        }
+    }
+
+    /// A title double-click maximizes the window.
+    pub fn maximizes(mut self, maximizes: bool) -> Self {
+        self.maximizes = maximizes;
+        self
+    }
+
+    pub fn on_pin(mut self, f: Rc<dyn Fn(&mut Window, &mut App)>) -> Self {
+        self.on_pin = Some(f);
+        self
+    }
+
+    /// The title's text layout, filled when the bar is laid out.
+    pub fn text_layout(&self) -> TextLayout {
+        self.title.layout().clone()
+    }
+}
+
+impl RenderOnce for TlTitleBar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = current(cx).clone();
         let m = *metrics(cx);
         let s = m.ui_scale;
         let bar_h = px(TITLE_BAR * s);
         let controls = window.window_controls();
-        let maximizes = self.kind.maximizes();
+        let maximizes = self.maximizes;
+        // The left button went down on the title bar; the next move starts a window move.
+        let drag_armed = window.use_keyed_state("TlWindowTitleBar-drag", cx, |_, _| false);
 
-        let text = StyledText::new(self.title.clone());
-        self.title_layout = text.layout().clone();
-        self.title_rendered = true;
         // The label style replaces the whole text refinement, so set it before the text
         // properties below.
         let mut title = div();
@@ -621,7 +684,7 @@ impl<V: 'static> TlSecondaryWindow<V> {
             .whitespace_nowrap()
             .text_ellipsis()
             .text_color(theme.text_primary)
-            .child(text);
+            .child(self.title);
 
         let caption = |id: &'static str, name: IconName, hover: Hsla, hover_fg: Hsla| {
             div()
@@ -641,8 +704,17 @@ impl<V: 'static> TlSecondaryWindow<V> {
                 })
                 .child(Icon::new(name).size(m.icon.sm))
         };
-        let pin = self.pin(bar_h, theme, window, cx);
-        let close = self.close_button(bar_h, theme, window, cx);
+        let mut pin = TlWindowPin::new(bar_h, self.look);
+        if let Some(f) = self.on_pin {
+            pin = pin.on_pin(f);
+        }
+        let close = close_button(bar_h, &theme, window, cx);
+        let (down, up, out, moved) = (
+            drag_armed.clone(),
+            drag_armed.clone(),
+            drag_armed.clone(),
+            drag_armed,
+        );
 
         div()
             .id("TlWindowTitleBar")
@@ -657,23 +729,21 @@ impl<V: 'static> TlSecondaryWindow<V> {
             .bg(theme.titlebar)
             .border_b_1()
             .border_color(theme.divider)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseDownEvent, _, _| this.drag_armed = true),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.drag_armed = false),
-            )
-            .on_mouse_down_out(
-                cx.listener(|this, _: &MouseDownEvent, _, _| this.drag_armed = false),
-            )
-            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, window, _| {
-                if this.drag_armed {
-                    this.drag_armed = false;
+            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _, cx| {
+                down.update(cx, |armed, _| *armed = true);
+            })
+            .on_mouse_up(MouseButton::Left, move |_: &MouseUpEvent, _, cx| {
+                up.update(cx, |armed, _| *armed = false);
+            })
+            .on_mouse_down_out(move |_: &MouseDownEvent, _, cx| {
+                out.update(cx, |armed, _| *armed = false)
+            })
+            .on_mouse_move(move |_: &MouseMoveEvent, window, cx| {
+                if *moved.read(cx) {
+                    moved.update(cx, |armed, _| *armed = false);
                     window.start_window_move();
                 }
-            }))
+            })
             .on_mouse_down(MouseButton::Right, |ev: &MouseDownEvent, window, _| {
                 window.show_window_menu(ev.position)
             })
@@ -727,58 +797,51 @@ impl<V: 'static> TlSecondaryWindow<V> {
                     })
                     .child(close),
             )
-            .into_any_element()
     }
+}
 
-    /// The close caption button: a tab stop, activated by a click, Enter or Space. Its focus ring
-    /// is drawn inset, because it sits in the window's top-right corner, where an outside ring
-    /// would be cut off.
-    fn close_button(
-        &self,
-        side: Pixels,
-        theme: &TlTheme,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let m = *metrics(cx);
-        let id = "close";
-        let focus: FocusHandle = window
-            .use_keyed_state(id, cx, |_, cx| cx.focus_handle())
-            .read(cx)
-            .clone();
-        let show_ring = TlFocusRing::show(focus.is_focused(window), window);
-        let hover = theme.status.danger;
-        let white: Hsla = rgb(0xFFFFFF).into();
-        BaseButton::new(id)
-            .track_focus(&focus)
-            .debug_selector(|| "TlWindowCaption-close".into())
-            .relative()
-            .flex_none()
-            .w(side)
-            .h_full()
-            .text_color(theme.text_primary)
-            .accessibility_label("Close")
-            .hover(move |st| st.bg(hover).text_color(white))
-            .on_mouse_down(MouseButton::Left, |_, window, cx| {
-                window.prevent_default();
-                cx.stop_propagation();
-            })
-            .on_click(|_, window, cx| {
-                cx.stop_propagation();
-                window.remove_window();
-            })
-            .child(Icon::new(IconName::WindowClose).size(m.icon.sm))
-            .when(show_ring, |b| {
-                b.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .border_2()
-                        .border_color(theme.accent),
-                )
-            })
-            .into_any_element()
-    }
+/// The close caption button: a tab stop, activated by a click, Enter or Space. Its focus ring
+/// is drawn inset, because it sits in the window's top-right corner, where an outside ring
+/// would be cut off.
+fn close_button(side: Pixels, theme: &TlTheme, window: &mut Window, cx: &mut App) -> AnyElement {
+    let m = *metrics(cx);
+    let id = "close";
+    let focus: FocusHandle = window
+        .use_keyed_state(id, cx, |_, cx| cx.focus_handle())
+        .read(cx)
+        .clone();
+    let show_ring = TlFocusRing::show(focus.is_focused(window), window);
+    let hover = theme.status.danger;
+    let white: Hsla = rgb(0xFFFFFF).into();
+    BaseButton::new(id)
+        .track_focus(&focus)
+        .debug_selector(|| "TlWindowCaption-close".into())
+        .relative()
+        .flex_none()
+        .w(side)
+        .h_full()
+        .text_color(theme.text_primary)
+        .accessibility_label("Close")
+        .hover(move |st| st.bg(hover).text_color(white))
+        .on_mouse_down(MouseButton::Left, |_, window, cx| {
+            window.prevent_default();
+            cx.stop_propagation();
+        })
+        .on_click(|_, window, cx| {
+            cx.stop_propagation();
+            window.remove_window();
+        })
+        .child(Icon::new(IconName::WindowClose).size(m.icon.sm))
+        .when(show_ring, |b| {
+            b.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .border_2()
+                    .border_color(theme.accent),
+            )
+        })
+        .into_any_element()
 }
 
 /// The container of the pin and the close button: a tab group after the content. The group
@@ -795,10 +858,22 @@ impl<V: Render> Render for TlSecondaryWindow<V> {
         let theme = current(cx).clone();
         let m = *metrics(cx);
         let blocked = has_modal_child(window.window_handle(), cx);
-        let title_bar = (!self.server).then(|| self.title_bar(&theme, window, cx));
+        let look = self.pin_look(cx);
+        let this = cx.weak_entity();
+        let on_pin: PinHandler = Rc::new(move |window, cx| {
+            let _ = this.update(cx, |this, cx| this.toggle_pin(window, cx));
+        });
+        let title_bar = (!self.server).then(|| {
+            let bar = TlTitleBar::new(self.title.clone(), look)
+                .maximizes(self.kind.maximizes())
+                .on_pin(on_pin.clone());
+            self.title_layout = bar.text_layout();
+            self.title_rendered = true;
+            bar
+        });
         let server_pin = self
             .server
-            .then(|| self.pin(px(SERVER_PIN * m.ui_scale), &theme, window, cx));
+            .then(|| TlWindowPin::new(px(SERVER_PIN * m.ui_scale), look).on_pin(on_pin));
 
         div()
             .id("TlWindow")
