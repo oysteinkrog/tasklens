@@ -676,3 +676,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - o55.9: vendor from GraphicsAdapter.kernel_module (nvidia, amdgpu or radeon, i915 or xe), not the UUID; ChartGridView::set_state approved in chart/grid_element.rs; engines listed unless Unsupported. o55.10 is done partially from GpuTotals and GraphicsAdapter; the four missing model fields moved to new bead o55.36 (P2).
 - jqk.22 closed (21af077d): FPS overlay, nothing runs while off, never requests a frame. Frame CPU time was always 0, so new bead jqk.36 adds tl_model::time::thread_cpu_ns. The same agent takes jqk.36, then o55.7.
 - bj6.4 closed (082e49d7). The same agent takes bj6.3.
+- pdu.22 closed. The same agent takes wlf.9 (P0 bench scenes).
