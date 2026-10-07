@@ -8,6 +8,7 @@ pub mod cpu;
 pub mod cpu_details;
 pub mod cpu_grid;
 pub mod details;
+pub mod gpu;
 pub mod memory;
 pub mod menu;
 pub mod page;
