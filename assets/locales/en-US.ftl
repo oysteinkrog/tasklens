@@ -880,3 +880,7 @@ pwn-props-access-maps = Needs administrator access.
 pwn-props-access-security = Security information unavailable (insufficient privileges)
 pwn-props-access-env = Environment unavailable (insufficient privileges)
 pwn-props-access-strings = Strings unavailable: needs administrator rights
+# tasklens-pdu.20: the action names in the End confirmations (UI-PRC-014).
+processes-confirm-action-end = End
+processes-confirm-action-end-task = End task
+processes-confirm-action-end-process = End process
