@@ -513,7 +513,6 @@ pub enum SysActionsEvent {
 
 /// One request in flight.
 struct Tracked {
-    tag: ActionKindTag,
     targets: SmallVec<[ActionTarget; 1]>,
     texts: ActionTexts,
     queue: WeakEntity<ToastQueue>,
@@ -624,7 +623,6 @@ impl SysActions {
         }
 
         let tracked = Tracked {
-            tag,
             done: SmallVec::from_elem(false, targets.len().max(1)),
             targets,
             texts,
