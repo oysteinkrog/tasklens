@@ -761,3 +761,6 @@ information-toast-copied = Copied to clipboard
 
 # File menu: Run... (E21-044)
 shell-menu-file-run = Run...
+
+# History timeline scrubber (E30-021)
+history-scrubber-now = now
