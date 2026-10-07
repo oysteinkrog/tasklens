@@ -685,3 +685,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - 69a93ee5 (o55.7) swept hk6.9 ftl lines; nothing lost. The brief now forbids naming en-US.ftl in a pathspec commit.
 - bj6.3 closed (9346c4d1, 7d234d10, 7ddcb69c). Follow-up: TlDialog::cancel_label so shell-confirm-cancel is used. The same agent takes bj6.5.
 - o55.9: ChartView::set_value_text override for "used / total" text, set only when the numbers change; made after gma lands value_sum in chart/view.rs. Agents sometimes miss leader messages sent while they are busy, so resend the answer when a report says it is still waiting.
+- wlf.9 closed (a2c8b7e8, 98215f1e, 18bfb112): bench scenes with honest measurement; latency counts samples that were newest at a paint; probe_cpu_pct null in phase 0; table-2000 errors until wlf.10. The same agent takes wlf.11, then wlf.10, with a first real run under the build lock.
