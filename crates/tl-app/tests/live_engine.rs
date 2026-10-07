@@ -1,10 +1,12 @@
-//! The real engine on a fixture root, wired to the UI as `main.rs` does (tasklens-pdu.52).
+//! The real engine on a fixture root, wired to the UI as `main.rs` does (tasklens-pdu.52,
+//! tasklens-hk6.6).
 //!
-//! Every UI test uses `FakeEngine`, so nothing checked that the Processes tab asks the real
-//! engine for the process sweep. This test starts `Engine::start` on a copy of the
+//! Every UI test uses `FakeEngine`, so nothing checked that a page asks the real engine for its
+//! data. The Processes test starts `Engine::start` on a copy of the
 //! `owner-desktop` fixture with `process-edge` laid over it (as the engine lab tests use), runs
 //! `TasklensUi::init` with the engine as the client, opens the main window on the Processes tab
-//! and waits for a filled process table with CPU and Memory totals.
+//! and waits for a filled process table with CPU and Memory totals. The Startup test activates
+//! the Startup page state and waits for the view built for its query.
 //!
 //! GPUI's test scheduler fails a test when another thread wakes one of its tasks, so the UI gets
 //! the engine through `Pumped`, whose wake channel the test thread feeds.
@@ -23,14 +25,19 @@ use tl_model::actions::ActionEvent;
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, CommandError, Tab};
 use tl_model::demand::Demand;
+use tl_model::health::SourceId;
 use tl_model::journal::{JournalHandle, JournalQuery};
 use tl_model::settings::EngineSettings;
 use tl_model::settings::{Settings, UiState};
 use tl_model::snapshot::Snapshot;
+use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec, SysTable};
 use tl_model::validity::Validity;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
+use tl_ui::demand::GlobalDemand;
+use tl_ui::hub::GlobalHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::processes::ProcessesPage;
+use tl_ui::pages::sys_table::{SysPageState, SysQuery};
 use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
 use tl_ui::window::main::{main_window_view, open_main_window_on};
 
@@ -199,17 +206,18 @@ fn step(vcx: &mut VisualTestContext, cpu: &mut CpuTicks, pumped: &Pumped) {
     std::thread::sleep(Duration::from_millis(20));
 }
 
-#[gpui_kit::test]
-fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
-    // On disk under target, not in the tmpfs `/tmp`.
+/// A copy of `owner-desktop` with `process-edge` over it, in a tempdir on disk under target
+/// (not in the tmpfs `/tmp`). Returns the tempdir and the root inside it.
+fn fixture_root() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("tempdir");
     let root = dir.path().join("root");
     overlay(&fixtures().join("owner-desktop"), &root);
     overlay(&fixtures().join("process-edge"), &root);
-    let mut cpu_ticks = CpuTicks::new(&root);
-    let engine = start_engine(dir.path(), &root);
-    let pumped = Arc::new(Pumped::new(engine.clone()));
-    let client: Arc<dyn EngineClient> = pumped.clone();
+    (dir, root)
+}
+
+/// `TasklensUi::init` with `client`, as `main.rs` runs it.
+fn init_ui(cx: &mut TestAppContext, client: Arc<dyn EngineClient>) {
     let (_tx, rx) = async_channel::bounded(4);
     let init = UiInit {
         settings: Settings::default(),
@@ -226,6 +234,15 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
         init_strings(cx, "en-US");
         cx.set_reduce_motion(true);
     });
+}
+
+#[gpui_kit::test]
+fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
+    let (dir, root) = fixture_root();
+    let mut cpu_ticks = CpuTicks::new(&root);
+    let engine = start_engine(dir.path(), &root);
+    let pumped = Arc::new(Pumped::new(engine.clone()));
+    init_ui(cx, pumped.clone());
     let handle = cx
         .update(|cx| open_main_window_on(Tab::Processes, cx))
         .expect("the main window opens");
@@ -270,13 +287,13 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
         last = read(&mut vcx);
     }
     let demand_on = vcx.update(|_, cx| {
-        cx.global::<tl_ui::demand::GlobalDemand>()
+        cx.global::<GlobalDemand>()
             .0
             .read(cx)
             .merged()
             .process_table
     });
-    let hidden = vcx.update(|_, cx| cx.global::<tl_ui::hub::GlobalHub>().0.read(cx).is_hidden());
+    let hidden = vcx.update(|_, cx| cx.global::<GlobalHub>().0.read(cx).is_hidden());
     let engine_records = engine.latest().processes.records.len();
     let report = engine.shutdown(Duration::from_millis(1500));
 
@@ -291,5 +308,65 @@ fn processes_tab_fills_from_real_engine(cx: &mut TestAppContext) {
     assert!(rows > 0, "the table shows process rows");
     assert_eq!(cpu, Validity::Valid, "CPU total filled");
     assert_eq!(memory, Validity::Valid, "Memory total filled");
+    assert!(report.drained, "engine drained on shutdown");
+}
+
+/// The Startup page state against the real engine: activation turns the startup demand on and
+/// sends the query, and the engine answers with a view for that generation. The scan reads the
+/// host's XDG autostart folders, so the rows may be empty; the view's generation and validity
+/// are what is checked.
+#[gpui_kit::test]
+fn startup_view_arrives_from_real_engine(cx: &mut TestAppContext) {
+    let (dir, root) = fixture_root();
+    let engine = start_engine(dir.path(), &root);
+    let pumped = Arc::new(Pumped::new(engine.clone()));
+    let client: Arc<dyn EngineClient> = pumped.clone();
+    init_ui(cx, Arc::clone(&client));
+    let demand = cx.update(|cx| cx.global::<GlobalDemand>().0.clone());
+    let mut page = SysPageState::new(Tab::Startup, &[SourceId::Startup]);
+    let sort = SysSortSpec {
+        column: SysColumnId::Startup(StartupColumn::Name),
+        ascending: true,
+    };
+    let mut query = SysQuery::new(SysTable::Startup, sort, None);
+    cx.update(|cx| page.on_activated(&mut query, &demand, cx));
+    assert!(query.last_sent() > 0, "the first visit sends the query");
+
+    let read = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let snap = cx.global::<GlobalHub>().0.read(cx).current().clone();
+            (
+                snap.startup.query_generation,
+                snap.startup.header.validity,
+                snap.startup.rows.len(),
+            )
+        })
+    };
+    let begin = Instant::now();
+    let mut last = read(cx);
+    while begin.elapsed() < DEADLINE {
+        let (generation, validity, _) = last;
+        if query.accepts(generation) && validity == Validity::Valid {
+            break;
+        }
+        pumped.pump();
+        cx.executor().advance_clock(STEP);
+        cx.run_until_parked();
+        query.on_snapshot(&*client);
+        std::thread::sleep(Duration::from_millis(20));
+        last = read(cx);
+    }
+    let demand_on = cx.update(|cx| demand.read(cx).merged());
+    let report = engine.shutdown(Duration::from_millis(1500));
+
+    let (generation, validity, rows) = last;
+    eprintln!(
+        "generation {generation} (sent {}), validity {validity:?}, rows {rows}",
+        query.last_sent()
+    );
+    assert!(demand_on.any_surface_visible && demand_on.startup);
+    assert!(query.accepts(generation), "the view is for the query sent");
+    assert_eq!(validity, Validity::Valid, "the startup scan ran");
+    assert!(page.note_data(validity, rows), "first data seen");
     assert!(report.drained, "engine drained on shutdown");
 }

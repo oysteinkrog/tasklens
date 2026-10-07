@@ -73,6 +73,11 @@ impl DemandAggregator {
         self.main_window = Some(window);
     }
 
+    /// The main window, for parts of main-window pages that have no window handle of their own.
+    pub fn main_window(&self) -> Option<AnyWindowHandle> {
+        self.main_window
+    }
+
     /// Drops this surface's part (on surface drop or hide) and schedules a flush.
     pub fn remove(&mut self, source: EntityId, cx: &mut Context<Self>) {
         if self.parts.remove(&source).is_some() {

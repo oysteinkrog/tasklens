@@ -265,3 +265,192 @@ mod words {
         });
     }
 }
+
+/// `SysQuery` and `SysPageState` (tasklens-hk6.6).
+#[cfg(feature = "test-hooks")]
+mod query_and_demand {
+    use std::sync::Arc;
+
+    use gpui_kit::{AppContext as _, Entity, TestAppContext};
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::demand::Demand;
+    use tl_model::health::SourceId;
+    use tl_model::table::{StartupColumn, SysColumnId, SysSortSpec, SysTable, SysTableQuery};
+    use tl_model::validity::Validity;
+    use tl_ui::app::EngineGlobal;
+    use tl_ui::demand::{DEMAND_COALESCE, DemandAggregator};
+    use tl_ui::hub::SnapshotHub;
+    use tl_ui::pages::sys_table::{SysPageState, SysQuery};
+    use tl_ui::testing::fake_engine::FakeEngine;
+
+    fn query() -> SysQuery {
+        let sort = SysSortSpec {
+            column: SysColumnId::Startup(StartupColumn::Name),
+            ascending: true,
+        };
+        SysQuery::new(SysTable::Startup, sort, None)
+    }
+
+    fn sent(engine: &FakeEngine) -> Vec<SysTableQuery> {
+        engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SetSysTableQuery(q) => Some(q),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn refreshes(engine: &FakeEngine) -> Vec<SourceId> {
+        engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::RefreshNow(id) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `EngineGlobal` and an aggregator over a new `FakeEngine`.
+    fn rig(cx: &mut TestAppContext) -> (Arc<FakeEngine>, Entity<DemandAggregator>) {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let agg = cx.update(|cx| {
+            cx.set_global(EngineGlobal(Arc::clone(&client)));
+            let hub = cx.new(|cx| SnapshotHub::new(Arc::clone(&client), cx));
+            cx.new(|cx| DemandAggregator::new(client, &hub, cx))
+        });
+        (engine, agg)
+    }
+
+    /// Lets the aggregator's coalesced flush run and returns the last demand sent.
+    fn flushed(cx: &mut TestAppContext, engine: &FakeEngine) -> Demand {
+        cx.executor().advance_clock(DEMAND_COALESCE);
+        cx.run_until_parked();
+        engine.demands().last().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn sys_query_sent_on_filter_changed() {
+        let engine = FakeEngine::new();
+        let mut q = query();
+        for _ in 0..3 {
+            q.resend(&*engine);
+        }
+        assert_eq!(q.last_sent(), 3);
+
+        q.set_filter("SSH", &*engine);
+
+        let all = sent(&engine);
+        assert_eq!(all.len(), 4);
+        let last = all.last().expect("one more query");
+        assert_eq!(&*last.filter, "ssh");
+        assert_eq!(last.generation, 4);
+        assert_eq!(q.last_sent(), 4);
+        assert_eq!(q.query(), last);
+    }
+
+    #[test]
+    fn sys_query_ignores_stale_generation() {
+        let engine = FakeEngine::new();
+        let mut q = query();
+        assert!(q.accepts(0), "nothing sent yet");
+        for _ in 0..4 {
+            q.resend(&*engine);
+        }
+        assert!(!q.accepts(3));
+        assert!(!q.accepts(5));
+        assert!(q.accepts(4));
+    }
+
+    #[test]
+    fn sys_query_resends_after_busy() {
+        let engine = FakeEngine::new();
+        let mut q = query();
+        q.resend(&*engine);
+        assert_eq!(sent(&engine).len(), 1);
+
+        engine.set_busy(true);
+        q.set_filter("x", &*engine);
+        engine.set_busy(false);
+        assert_eq!(sent(&engine).len(), 1, "busy records nothing");
+        assert_eq!(q.last_sent(), 2, "a busy generation still counts");
+        assert!(!q.accepts(1), "the older view is refused");
+
+        q.on_snapshot(&*engine);
+        q.on_snapshot(&*engine);
+        let all = sent(&engine);
+        assert_eq!(all.len(), 2, "exactly one resend");
+        assert_eq!(all[1].generation, 3);
+        assert_eq!(&*all[1].filter, "x");
+        assert!(q.accepts(3));
+    }
+
+    #[gpui_kit::test]
+    fn sys_page_sets_demand_only_while_visible(cx: &mut TestAppContext) {
+        let (engine, agg) = rig(cx);
+        let mut startup = SysPageState::new(Tab::Startup, &[SourceId::Startup]);
+        let mut conns = SysPageState::new(Tab::Connections, &[SourceId::Connections]);
+        let (mut q1, mut q2) = (query(), query());
+
+        cx.update(|cx| startup.on_activated(&mut q1, &agg, cx));
+        let d = flushed(cx, &engine);
+        assert!(d.any_surface_visible && d.startup);
+        assert!(!d.services && !d.connections);
+        assert!(startup.visible);
+
+        cx.update(|cx| startup.on_deactivated(&agg, cx));
+        let d = flushed(cx, &engine);
+        assert!(!d.startup && !d.any_surface_visible);
+        assert!(!startup.visible);
+
+        cx.update(|cx| conns.on_activated(&mut q2, &agg, cx));
+        let d = flushed(cx, &engine);
+        assert!(d.any_surface_visible && d.connections);
+        assert!(!d.startup && !d.services);
+    }
+
+    #[gpui_kit::test]
+    fn sys_page_refresh_now_first_visit_only(cx: &mut TestAppContext) {
+        let (engine, agg) = rig(cx);
+        let mut page = SysPageState::new(
+            Tab::Services,
+            &[SourceId::SystemdSystem, SourceId::SystemdUser],
+        );
+        let mut q = query();
+
+        cx.update(|cx| page.on_activated(&mut q, &agg, cx));
+        assert_eq!(
+            refreshes(&engine),
+            [SourceId::SystemdSystem, SourceId::SystemdUser]
+        );
+        assert_eq!(sent(&engine).len(), 1, "one query on the first visit");
+        assert!(page.first_visit_done);
+        assert!(flushed(cx, &engine).services);
+
+        cx.update(|cx| page.on_deactivated(&agg, cx));
+        cx.update(|cx| page.on_activated(&mut q, &agg, cx));
+        assert_eq!(
+            refreshes(&engine).len(),
+            2,
+            "no RefreshNow on the second visit"
+        );
+        assert_eq!(sent(&engine).len(), 1);
+        assert!(flushed(cx, &engine).services, "demand set again");
+    }
+
+    #[test]
+    fn sys_page_first_data_seen_sticks() {
+        let mut page = SysPageState::new(Tab::Startup, &[SourceId::Startup]);
+        assert!(!page.note_data(Validity::WarmingUp, 0));
+        assert!(page.note_data(Validity::Valid, 0));
+        assert!(!page.note_data(Validity::WarmingUp, 0));
+        assert!(page.first_data_seen);
+
+        let mut rows = SysPageState::new(Tab::Startup, &[SourceId::Startup]);
+        assert!(rows.note_data(Validity::WarmingUp, 3), "rows count as data");
+    }
+}
