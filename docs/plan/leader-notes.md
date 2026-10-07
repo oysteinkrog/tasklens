@@ -760,3 +760,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
   - The moving scenes run at 24 to 31 fps.
   - All of these are far above the UI-PRF-053 gates. Filed as P0 wlf.27 (static idle CPU) and wlf.28 (frame cost and pacing), both for the pdu-51 agent after the soak.
 - crw.36 (314825d8, 2559ac5a) closed. Stacked content_h is 1284, with an 8 px gap. The crw agent starts crw.37. The m1f agent takes bj6.12 while it waits for crw.39.
+- o55.8: the Display unit menu opens through a new opt-in TlKeyValueGrid::on_link_click(row, bounds) and a TlLink variant that passes the click bounds, so the menu sits under the value for mouse and keyboard. Chosen over a new action that would open at the pointer.
