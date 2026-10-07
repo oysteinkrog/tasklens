@@ -10,6 +10,7 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 
 use crate::actions::{CgroupRef, SchedPolicy};
 use crate::ids::{GroupKey, NodeId, ProcessKey};
@@ -133,8 +134,18 @@ pub struct ProcessRecord {
     pub net_tx_bps: f32,
     pub gpu_util_pct: f32,
     pub gpu_mem_bytes: u64,
+    /// The effective UID from the status `Uid:` line, `None` when it equals `uid` (PROC-028).
+    pub euid: Option<u32>,
+    /// At least one attributed socket is held by 2 or more processes (PROC-032).
+    pub net_shared: bool,
+    /// Cancelled write bytes per second from `/proc/<pid>/io` (PROC-031). Its validity is the
+    /// `IoWrite` validity.
+    pub cancelled_write_bps: f32,
     pub validity: FieldValidity,
 }
+
+/// Per-GPU values of one process. Inline up to 4 GPUs, so a record clone does not allocate.
+pub type GpuVram = SmallVec<[u64; 4]>;
 
 /// Group classification of a process (PROC-004). Exactly these four classes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -308,7 +319,7 @@ pub struct AppCgroupSample {
 
 /// P2 per-process column values, filled only for `Demand.detail_keys` (ADR-008 visible-rows
 /// rule) by E05-035. The reducer (E09-030) fills `power_w` and `power_trend_w` for every row
-/// (R-163 items 2 and 9). `None` means the value was not read.
+/// (R-163 items 2 and 9), and `gpu_vram_bytes` too. `None` means the value was not read.
 ///
 /// Privacy: `security_label` and `cwd` are user data. Never log them above debug level (ADR-015).
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -351,6 +362,10 @@ pub struct ProcessExtrasP2 {
     pub package: Option<Arc<PackageInfo>>,
     /// PROC-027 Package status column.
     pub package_status: Option<PackageStatus>,
+    /// Dedicated GPU memory per GPU, in the order of the `gpu_0` to `gpu_15` columns (PROC-033),
+    /// from the per-process GPU samples. Empty for a process with no GPU memory; shorter than
+    /// the GPU count when the last GPUs hold none of it.
+    pub gpu_vram_bytes: GpuVram,
 }
 
 /// Owning package of an executable (R-163 item 1, PROC-027), from the E05-034 index.
@@ -494,6 +509,9 @@ mod tests {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: FieldValidity::default(),
         };
         let b = a.clone();

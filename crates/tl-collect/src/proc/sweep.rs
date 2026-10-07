@@ -162,6 +162,8 @@ pub struct SweptProc {
     pub disk_read_bps: f32,
     /// Written bytes per second without the cancelled bytes (Disk write rate column).
     pub disk_write_raw_bps: f32,
+    /// Cancelled write bytes per second (PROC-031).
+    pub cancelled_write_bps: f32,
     pub page_faults_delta: u64,
     pub validity: FieldValidity,
 }
@@ -514,6 +516,7 @@ fn sweep_one(ctx: &SweepCtx, dir: PidDir<'_>, core: &mut SweepIo<'_>) -> Option<
         io_write_bps: 0.0,
         disk_read_bps: 0.0,
         disk_write_raw_bps: 0.0,
+        cancelled_write_bps: 0.0,
         page_faults_delta: 0,
         validity,
     };
@@ -589,6 +592,7 @@ fn apply_rates(ctx: &SweepCtx, old: &Prev, cur: &Prev, dt_s: f64, p: &mut SweptP
         p.io_write_bps = (d_write.saturating_sub(d_cancel) as f64 / dt_s) as f32;
         p.disk_read_bps = p.io_read_bps;
         p.disk_write_raw_bps = (d_write as f64 / dt_s) as f32;
+        p.cancelled_write_bps = (d_cancel as f64 / dt_s) as f32;
     }
 }
 
@@ -1217,6 +1221,9 @@ impl Build<'_, '_> {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: Some(status.uid[1]).filter(|&euid| euid != ruid),
+            net_shared: false,
+            cancelled_write_bps: p.cancelled_write_bps,
             validity: p.validity,
         });
 

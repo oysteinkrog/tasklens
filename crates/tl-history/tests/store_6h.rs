@@ -187,6 +187,9 @@ fn new_record(id: u32, rng: &mut Rng) -> ProcessRecord {
         net_tx_bps: 0.0,
         gpu_util_pct: 0.0,
         gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.0,
         validity: FieldValidity::all(Validity::Valid),
     };
     let v = Vals {

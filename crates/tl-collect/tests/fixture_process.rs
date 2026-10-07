@@ -473,6 +473,9 @@ fn rollup_apply_and_coverage() {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: FieldValidity::default(),
         })
         .collect();
@@ -2150,6 +2153,64 @@ fn sweep_app_member_grouped() {
         model.validity.get(ProcessField::IoRead),
         Validity::WarmingUp
     );
+}
+
+sweep_clock!(euid_clock);
+
+#[test]
+fn sweep_record_euid_only_when_it_differs() {
+    let (tmp, root) = merged_root();
+    // 4201 gets the setuid status of 4204 (Uid: 1000 0 0 0); 4209 keeps an equal euid.
+    fs::copy(
+        fixture_dir("process-edge").join("proc/4204/status"),
+        tmp.path().join("proc/4201/status"),
+    )
+    .expect("copy status");
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(euid_clock::now);
+    let out = sweep_n(&mut s, euid_clock::set, 1);
+
+    let setuid = &out.records[index_of(&out, 4201)];
+    assert_eq!(setuid.uid, 1000);
+    assert_eq!(setuid.euid, Some(0));
+    assert_eq!(out.records[index_of(&out, 4209)].euid, None);
+}
+
+sweep_clock!(cancelled_clock);
+
+#[test]
+fn sweep_record_cancelled_write_rate() {
+    let (tmp, root) = merged_root();
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut s = sampler(root, cache.path()).with_clock(cancelled_clock::now);
+    let protect = ProtectInputs::default();
+    let mut out = SweepOutput::default();
+
+    cancelled_clock::set(SEC, SEC);
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+    let first = &out.records[index_of(&out, 4201)];
+    assert_eq!(first.cancelled_write_bps, 0.0);
+    assert_eq!(
+        first.validity.get(ProcessField::IoWrite),
+        Validity::WarmingUp
+    );
+
+    // 2 MiB more written and 1 MiB more cancelled over 2 s.
+    let io = String::from_utf8(fixture_bytes("process-edge", "proc/4201/io"))
+        .expect("io UTF-8")
+        .replace("write_bytes: 6627328", "write_bytes: 8724480")
+        .replace(
+            "cancelled_write_bytes: 1048576",
+            "cancelled_write_bytes: 2097152",
+        );
+    fs::write(tmp.path().join("proc/4201/io"), io).expect("write io");
+    cancelled_clock::set(3 * SEC, 3 * SEC);
+    s.sweep(&sweep_ctx(false), &no_inputs(&protect), &mut out);
+
+    let r = &out.records[index_of(&out, 4201)];
+    assert_eq!(r.validity.get(ProcessField::IoWrite), Validity::Valid);
+    assert_eq!(r.cancelled_write_bps, 524_288.0);
+    assert_eq!(r.io_write_bps, 524_288.0);
 }
 
 sweep_clock!(kernel_thread_clock);

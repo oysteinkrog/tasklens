@@ -1281,6 +1281,9 @@ impl Reducer {
         }
         self.mark(ComponentMask::SERIES);
         if let Some(processes) = &s.processes {
+            let columns = table::gpu_columns(&self.components.system, &self.components.devices);
+            self.processes
+                .set_gpu_slots(columns.into_iter().map(|(uuid, _)| uuid));
             self.processes
                 .apply_gpu_processes(processes, &self.apply_state.gpu_caps);
             self.republish_processes(settings);

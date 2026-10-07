@@ -17,12 +17,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use rustc_hash::{FxHashMap, FxHashSet};
+use smallvec::SmallVec;
 use tl_collect::net::NetRate;
 use tl_model::gpu_proto::{GpuProcessSample, Reading};
 use tl_model::history::RecordSink;
 use tl_model::ids::ProcessKey;
 use tl_model::process::{
-    AppCgroupSample, Coverage, LowMemoryInfo, ProcFlags, ProcessExtras, ProcessExtrasP2,
+    AppCgroupSample, Coverage, GpuVram, LowMemoryInfo, ProcFlags, ProcessExtras, ProcessExtrasP2,
     ProcessRecord, linger_ms,
 };
 use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
@@ -51,10 +52,12 @@ struct Live {
 }
 
 /// Per-process GPU values of the last `apply_gpu_processes`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct GpuValue {
     util_pct: f32,
     mem_bytes: u64,
+    /// Per GPU column, see `ProcessExtrasP2::gpu_vram_bytes`.
+    vram: GpuVram,
     validity: Validity,
 }
 
@@ -93,6 +96,8 @@ pub struct ProcessState {
     gpu_default: Option<Validity>,
     /// True when the last GPU sample had process rows.
     gpu_process: bool,
+    /// GPU UUIDs in the order of the `gpu_0` to `gpu_15` columns, from `set_gpu_slots`.
+    gpu_slots: SmallVec<[[u8; 16]; 4]>,
     /// PSS values of the detail keys.
     pss: FxHashMap<ProcessKey, PssValue>,
     /// Attributed TCP rates of the last `ConnectionsUpdate`; `None` before the first one.
@@ -130,6 +135,7 @@ impl ProcessState {
             gpu_by_dev: FxHashMap::default(),
             gpu_default: None,
             gpu_process: false,
+            gpu_slots: SmallVec::new(),
             pss: FxHashMap::default(),
             net: None,
             system_threads: 0,
@@ -251,9 +257,9 @@ impl ProcessState {
     fn overlay(&mut self, record: &mut ProcessRecord) {
         let key = record.key;
         if let Some(g) = self.gpu.get(&key) {
-            set_gpu(record, g.util_pct, g.mem_bytes, g.validity);
+            set_gpu(record, g);
         } else if let Some(v) = self.gpu_default {
-            set_gpu(record, 0.0, 0, v);
+            set_gpu(record, &GpuValue::none(v));
         }
         if let Some(net) = &self.net {
             set_net(record, net.get(&key));
@@ -273,9 +279,19 @@ impl ProcessState {
         }
     }
 
+    /// Sets the GPU UUIDs in column order (`gpu_0` first). The next `apply_gpu_processes` puts
+    /// each device's memory at its UUID's position in the published
+    /// `ProcessExtrasP2::gpu_vram_bytes`; a device not in the list counts only in
+    /// `gpu_mem_bytes`.
+    pub fn set_gpu_slots(&mut self, uuids: impl IntoIterator<Item = [u8; 16]>) {
+        self.gpu_slots.clear();
+        self.gpu_slots.extend(uuids);
+    }
+
     /// pid → key through `live`; sums over devices per pid; sets gpu_util_pct = max over devices
-    /// of max(sm, enc, dec), gpu_mem_bytes = Σ mem_used; validity Valid, or Unsupported when the
-    /// device has `supports_process_util == false`. Returns the number of keys matched.
+    /// of max(sm, enc, dec), gpu_mem_bytes = Σ mem_used and the memory per GPU column;
+    /// validity Valid, or Unsupported when the device has `supports_process_util == false`.
+    /// Returns the number of keys matched.
     ///
     /// Live keys without a sample get 0 with validity `Valid` when some device has
     /// `supports_process_util`, else `Unsupported` (PROC-033). A device missing from
@@ -312,23 +328,27 @@ impl ProcessState {
                 .entry(key)
                 .or_insert(0.0);
             *on_dev = on_dev.max(util);
-            let entry = self.gpu.entry(key).or_insert(GpuValue {
-                util_pct: 0.0,
-                mem_bytes: 0,
-                validity: Validity::Unsupported,
-            });
+            let entry = self
+                .gpu
+                .entry(key)
+                .or_insert_with(|| GpuValue::none(Validity::Unsupported));
             entry.util_pct = entry.util_pct.max(util);
             entry.mem_bytes = entry.mem_bytes.saturating_add(mem);
+            if let Some(slot) = self.gpu_slots.iter().position(|u| *u == s.uuid) {
+                if entry.vram.len() <= slot {
+                    entry.vram.resize(slot + 1, 0);
+                }
+                entry.vram[slot] = entry.vram[slot].saturating_add(mem);
+            }
             if supported {
                 entry.validity = Validity::Valid;
             }
         }
 
+        let none = GpuValue::none(default);
         for live in self.live.values_mut() {
-            match self.gpu.get(&live.record.key) {
-                Some(g) => set_gpu(&mut live.record, g.util_pct, g.mem_bytes, g.validity),
-                None => set_gpu(&mut live.record, 0.0, 0, default),
-            }
+            let g = self.gpu.get(&live.record.key).unwrap_or(&none);
+            set_gpu(&mut live.record, g);
         }
         self.gpu_default = Some(default);
         self.gpu_process = !samples.is_empty();
@@ -505,7 +525,13 @@ impl ProcessState {
         };
         let extras_p2: Arc<[ProcessExtrasP2]> = records
             .iter()
-            .map(|r| self.extras_p2.get(&r.key).cloned().unwrap_or_default())
+            .map(|r| {
+                let mut p2 = self.extras_p2.get(&r.key).cloned().unwrap_or_default();
+                if let Some(g) = self.gpu.get(&r.key) {
+                    p2.gpu_vram_bytes.clone_from(&g.vram);
+                }
+                p2
+            })
             .collect();
 
         Some(Arc::new(ProcessSnapshot {
@@ -561,22 +587,35 @@ impl ProcessState {
     }
 }
 
-fn set_gpu(record: &mut ProcessRecord, util_pct: f32, mem_bytes: u64, validity: Validity) {
-    record.gpu_util_pct = util_pct;
-    record.gpu_mem_bytes = mem_bytes;
+impl GpuValue {
+    /// No GPU use, with `validity`.
+    fn none(validity: Validity) -> Self {
+        Self {
+            util_pct: 0.0,
+            mem_bytes: 0,
+            vram: GpuVram::new(),
+            validity,
+        }
+    }
+}
+
+fn set_gpu(record: &mut ProcessRecord, g: &GpuValue) {
+    record.gpu_util_pct = g.util_pct;
+    record.gpu_mem_bytes = g.mem_bytes;
     set_fields(
         &mut record.validity,
         &[ProcessField::GpuUtil, ProcessField::GpuMem],
-        validity,
+        g.validity,
     );
 }
 
 fn set_net(record: &mut ProcessRecord, rate: Option<&NetRate>) {
-    let (rx, tx, validity) = rate.map_or((0.0, 0.0, Validity::Valid), |r| {
-        (r.rx_bps, r.tx_bps, r.validity)
+    let (rx, tx, shared, validity) = rate.map_or((0.0, 0.0, false, Validity::Valid), |r| {
+        (r.rx_bps, r.tx_bps, r.shared, r.validity)
     });
     record.net_rx_bps = rx;
     record.net_tx_bps = tx;
+    record.net_shared = shared;
     set_fields(
         &mut record.validity,
         &[ProcessField::NetRx, ProcessField::NetTx],
@@ -659,6 +698,9 @@ mod tests {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: sweep_validity(),
         }
     }
@@ -1026,6 +1068,74 @@ mod tests {
         assert_eq!(r.gpu_util_pct, 60.0);
         assert_eq!(r.gpu_mem_bytes, 3 * GIB);
         assert_eq!(r.validity.get(ProcessField::GpuUtil), Validity::Valid);
+    }
+
+    #[test]
+    fn gpu_vram_per_column() {
+        const DEV_C: [u8; 16] = [3; 16];
+        let (a, b) = (key(100, 10), key(200, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        // DEV_B is column 0 and DEV_A column 1; DEV_C has no column.
+        state.set_gpu_slots([DEV_B, DEV_A]);
+        let samples = [
+            gpu(DEV_A, 100, 30, GIB),
+            gpu(DEV_C, 100, 10, 4 * GIB),
+            gpu(DEV_B, 200, 60, 2 * GIB),
+        ];
+        state.apply_gpu_processes(&samples, &caps(true));
+
+        assert_eq!(live_record(&state, a).gpu_mem_bytes, 5 * GIB);
+        let (va, vb) = published_vram(&mut state, a, b);
+        assert_eq!(va.as_slice(), [0, GIB]);
+        assert!(!va.spilled());
+        assert_eq!(vb.as_slice(), [2 * GIB]);
+
+        // The next sweep keeps the values; a key gone from the GPU sample is cleared.
+        apply(&mut state, &[a, b], 2_000 * MS);
+        assert_eq!(published_vram(&mut state, a, b).0.as_slice(), [0, GIB]);
+        state.apply_gpu_processes(&samples[..2], &caps(true));
+        assert!(published_vram(&mut state, a, b).1.is_empty());
+    }
+
+    /// `gpu_vram_bytes` of keys `a` and `b` in the next published snapshot.
+    fn published_vram(
+        state: &mut ProcessState,
+        a: ProcessKey,
+        b: ProcessKey,
+    ) -> (GpuVram, GpuVram) {
+        let snap = state.publish(Coverage::default(), (0, MS)).expect("dirty");
+        let of = |k: ProcessKey| {
+            let i = snap
+                .records
+                .iter()
+                .position(|r| r.key == k)
+                .expect("published");
+            snap.extras_p2[i].gpu_vram_bytes.clone()
+        };
+        (of(a), of(b))
+    }
+
+    #[test]
+    fn net_shared_from_attribution() {
+        let (a, b) = (key(100, 10), key(200, 20));
+        let mut state = ProcessState::new();
+        apply(&mut state, &[a, b], 1_000 * MS);
+        let rate = |shared| NetRate {
+            rx_bps: 10.0,
+            tx_bps: 20.0,
+            shared,
+            validity: Validity::Valid,
+        };
+        state.apply_net_rates([(a, rate(true)), (b, rate(false))].into_iter().collect());
+        assert!(live_record(&state, a).net_shared);
+        assert!(!live_record(&state, b).net_shared);
+
+        // The next sweep sends false; the reducer keeps the last attribution.
+        apply(&mut state, &[a, b], 2_000 * MS);
+        assert!(live_record(&state, a).net_shared);
+        state.apply_net_rates(FxHashMap::default());
+        assert!(!live_record(&state, a).net_shared);
     }
 
     #[test]

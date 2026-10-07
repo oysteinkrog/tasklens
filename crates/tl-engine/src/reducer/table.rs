@@ -1983,6 +1983,30 @@ fn pci_order(bus_id: &str) -> Option<(u32, u8, u8, u8)> {
     Some((domain, bus, device, u8::from_str_radix(function, 16).ok()?))
 }
 
+/// The present GPUs in the order of the `gpu_0` to `gpu_15` columns: by PCI bus id, with
+/// unparsable ids last by text. Each entry is the GPU's UUID and its totals.
+pub fn gpu_columns<'a>(
+    system: &'a SystemSnapshot,
+    devices: &'a DeviceCatalog,
+) -> SmallVec<[([u8; 16], &'a GpuTotals); 4]> {
+    let mut gpus: SmallVec<[(&str, [u8; 16], &GpuTotals); 4]> = system
+        .gpus
+        .iter()
+        .filter_map(
+            |(idx, g)| match &present(devices, *idx, DeviceKind::Gpu)?.identity {
+                DeviceIdentity::Gpu { uuid, pci_bus_id } => Some((&**pci_bus_id, *uuid, g)),
+                _ => None,
+            },
+        )
+        .collect();
+    gpus.sort_by(|a, b| {
+        let (ka, kb) = (pci_order(a.0), pci_order(b.0));
+        // Unparsable bus ids sort last, by text.
+        (ka.is_none(), ka, a.0).cmp(&(kb.is_none(), kb, b.0))
+    });
+    gpus.into_iter().map(|(_, uuid, g)| (uuid, g)).collect()
+}
+
 /// The two-line header numbers (PROC-038) from the latest system snapshot and sweep.
 ///
 /// Every total carries its own validity. A device that does not provide a metric is skipped;
@@ -2055,21 +2079,7 @@ pub fn totals(
         (net_bps, link_mbps.map(|mbps| mbps * BYTES_PER_MBIT))
     };
 
-    let mut gpus: SmallVec<[(&str, &GpuTotals); 4]> = system
-        .gpus
-        .iter()
-        .filter_map(
-            |(idx, g)| match &present(devices, *idx, DeviceKind::Gpu)?.identity {
-                DeviceIdentity::Gpu { pci_bus_id, .. } => Some((&**pci_bus_id, g)),
-                _ => None,
-            },
-        )
-        .collect();
-    gpus.sort_by(|a, b| {
-        let (ka, kb) = (pci_order(a.0), pci_order(b.0));
-        // Unparsable bus ids sort last, by text.
-        (ka.is_none(), ka, a.0).cmp(&(kb.is_none(), kb, b.0))
-    });
+    let gpus = gpu_columns(system, devices);
     let utils: SmallVec<[Metric<f32>; 4]> = gpus.iter().map(|(_, g)| g.util_pct).collect();
     let gpu_pct = max_total(&utils, Validity::Unsupported);
     let mut gpu_adapter_pct = [state(Validity::Unsupported); 16];
@@ -2170,6 +2180,9 @@ mod tests {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: FieldValidity::all(Validity::Valid),
         }
     }

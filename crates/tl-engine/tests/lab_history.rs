@@ -86,6 +86,9 @@ fn sweep(n: u32) -> Arc<[ProcessRecord]> {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: FieldValidity::all(Validity::Valid),
         })
         .collect()
@@ -803,6 +806,9 @@ mod engine {
             net_tx_bps: 0.0,
             gpu_util_pct: 0.0,
             gpu_mem_bytes: 0,
+            euid: None,
+            net_shared: false,
+            cancelled_write_bps: 0.0,
             validity: FieldValidity::all(Validity::Valid),
         }
     }

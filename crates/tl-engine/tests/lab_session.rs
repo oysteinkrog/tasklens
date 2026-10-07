@@ -652,6 +652,9 @@ fn sweep_record(pid: u32) -> ProcessRecord {
         net_tx_bps: 0.0,
         gpu_util_pct: 0.0,
         gpu_mem_bytes: 0,
+        euid: None,
+        net_shared: false,
+        cancelled_write_bps: 0.0,
         validity: FieldValidity::all(Validity::Valid),
     }
 }
