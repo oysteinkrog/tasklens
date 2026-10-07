@@ -656,3 +656,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - fut.11: may edit components/toast.rs (pub(crate) static card shared with ToastQueue) and window_frame.rs (title bar and pin pulled out into a stateless element, no behavior change), so the gallery has all five pages.
 - m1f.2 closed (2856a37d): no success toast, ActionTracker::push skips an empty text (outside the file list, accepted). m1f.20 closed (017f1f5d). The same agent takes bj6.10.
 - 9o0.23 closed (060859bc, 06a370da, 4c10ea99): label_lines by row index on the grid, like label_tooltips, so TlKvRow literals stay unchanged. The same agent takes 8fx.24, then 8fx.39.
+- pdu.51 closed (9aa00583, 1b837169): the subtree check refuses IS_SELF or PID 1. The test data had to be in PID order (Forest::index_of binary-searches). The same agent takes bj6.17.
