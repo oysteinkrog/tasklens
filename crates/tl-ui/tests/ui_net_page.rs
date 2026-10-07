@@ -19,6 +19,7 @@ use tl_model::snapshot::SystemSnapshot;
 use tl_model::system::{LinkState, Metric, NetTotals};
 use tl_model::time::now_boot_ns;
 use tl_model::validity::Validity;
+use tl_ui::anim::AnimationDriver;
 use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::chart::{ChartState, ChartView, ValueFormat, YScale, format_value};
 use tl_ui::components::kv_grid;
@@ -38,11 +39,15 @@ const PERIOD: u64 = 1_000_000_000;
 const MBPS: f32 = 125_000.;
 const MIB: f32 = 1_048_576.;
 
-struct Host(Entity<NetPage>);
+/// The page in a window with an animation driver: a live chart asks it for frames.
+struct Host {
+    page: Entity<NetPage>,
+    _driver: Entity<AnimationDriver>,
+}
 
 impl Render for Host {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1000.)).h(px(2000.)).child(self.0.clone())
+        div().w(px(1000.)).h(px(2000.)).child(self.page.clone())
     }
 }
 
@@ -156,7 +161,14 @@ fn open(cx: &mut TestAppContext, settings: Settings, sys: SystemSnapshot) -> Rig
     let (h, d) = (hub.clone(), demand.clone());
     let page = cx.new(|cx| NetPage::new(key, row, h, d, cx));
     let host = page.clone();
-    let (_, vcx) = cx.add_window_view(move |_, _| Host(host));
+    let (_, vcx) = cx.add_window_view(move |window, cx| {
+        let driver = cx.new(AnimationDriver::new);
+        AnimationDriver::register(&driver, window, cx);
+        Host {
+            page: host,
+            _driver: driver,
+        }
+    });
     vcx.simulate_scale_factor_change(1.0);
     draw(vcx);
     Rig { page, demand, vcx }
