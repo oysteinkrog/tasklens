@@ -63,3 +63,6 @@ otherwise.
 
 Final message, short: bead ID, commit SHAs, files, test and clippy results, anything unsure or not
 done.
+
+
+Never stop a process by name or pattern (`pkill -f`, `killall`). Stop only processes you started, by the PID you recorded when you started them. Other agents' builds can have the same command line.

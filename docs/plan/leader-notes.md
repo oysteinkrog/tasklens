@@ -629,3 +629,4 @@ The PC reboots to move the root disk. Agents were told to commit only green work
 In progress at the stop: fut.11, jqk.2, 9o0.22 (then 9o0.34, 9o0.23), bj6.10, 8fx.24 (then 8fx.39), pdu.20, m1f.2 (then m1f.20), m1f.6, gma.15 (then gma.41, gma.40), bj6.17.
 Queued next: m1f.21 (after m1f.6), jqk.35, jqk.32, gma.39.
 After the reboot: read each in-progress bead's latest comment, check `git status` against it, then resume each bead with a fresh agent (the old agents do not survive). Run the full tl-ui clippy with and without test-hooks once the tree is quiet.
+- Reboot note: gma.15 committed abd5beb and 14be5fe without compiling them, so HEAD may not build until its tests run; check first after the reboot. gma.15 also killed pdu.20's and bj6.17's queued heavy-build jobs with a pattern pkill; both rerun after the reboot. The brief now forbids killing by pattern.
