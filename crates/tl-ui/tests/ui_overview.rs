@@ -126,6 +126,7 @@ mod drawn {
     #[gpui_kit::test]
     fn meter_none_draws_track_only(cx: &mut TestAppContext) {
         let (host, vcx) = open(cx, Part::Meter(None));
+        vcx.run_until_parked();
         take_meter_quads();
         draw(vcx);
         let quads = take_meter_quads();
@@ -140,6 +141,9 @@ mod drawn {
                 cx.notify();
             })
         });
+        // Any frame the notify brought is drawn first; the count is for one frame.
+        vcx.run_until_parked();
+        take_meter_quads();
         draw(vcx);
         let quads = take_meter_quads();
         assert_eq!(quads.len(), 2, "track and fill: {quads:?}");
