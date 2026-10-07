@@ -574,3 +574,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.14 (eb5cbb1): finish() flushes the store, then shuts the engine down within 1500 ms; U-2 was answered from source (Application::run returns after quit). MANUAL DESKTOP CHECK: close the window, time the exit (<= 2 s), and check that `pgrep tl-gpu-probe` finds nothing.
 - pdu.15 (8369ce1, 09caa37, eca9adf): new and exited tint with a 300 ms fade, no row rebuilds, frames requested only while fading; TreeTableDelegate gains row_tint and before_rows (accepted); heat cells no longer double-tint.
 - yrf.22 (bfb80ef): ceil_125 returns 5e-308 for x <= 5e-308. ceil_125(1e-300) gives 2e-300, still >= x (fine).
+- Process note: tl-app main.rs pathspec commits took other agents' unbuilt edits twice (9193258 had cr0.19's; 92eadf3 had cr0.15's). From now on only one agent at a time edits tl-app main.rs; the leader holds main.rs beads until it is free.
