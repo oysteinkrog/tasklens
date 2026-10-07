@@ -143,7 +143,9 @@ const fn bool_row(ts: &'static str, field: fn(&mut Target) -> &mut bool) -> Row 
 /// `Graphics.*`, column, sort and graph layouts) are skipped until the owner supplies a sample
 /// file (D-018).
 const ROWS: &[Row] = &[
-    bool_row("ThemeSyncWithWindows", |t| &mut t.settings.theme.follow_system),
+    bool_row("ThemeSyncWithWindows", |t| {
+        &mut t.settings.theme.follow_system
+    }),
     Row {
         ts: "UIScale",
         clamp_key: "appearance.ui_scale_pct",
@@ -229,12 +231,18 @@ const ROWS: &[Row] = &[
     },
     bool_row("HistoryPersistToDisk", |t| &mut t.settings.history.persist),
     bool_row("CloseWithEsc", |t| &mut t.settings.window.close_with_esc),
-    bool_row("Window.AlwaysOnTop", |t| &mut t.settings.window.always_on_top),
+    bool_row("Window.AlwaysOnTop", |t| {
+        &mut t.settings.window.always_on_top
+    }),
     bool_row("CloseToTray", |t| &mut t.settings.tray.close_to_tray),
     bool_row("MinimizeToTray", |t| &mut t.settings.tray.minimize_to_tray),
     bool_row("AlwaysShowTrayIcon", |t| &mut t.settings.tray.always_show),
-    bool_row("StartWithWindows", |t| &mut t.settings.startup.start_at_login),
-    bool_row("StartMinimized", |t| &mut t.settings.startup.start_minimized),
+    bool_row("StartWithWindows", |t| {
+        &mut t.settings.startup.start_at_login
+    }),
+    bool_row("StartMinimized", |t| {
+        &mut t.settings.startup.start_minimized
+    }),
     bool_row("Connections.AutoFetchPublicIP", |t| {
         &mut t.settings.network.auto_fetch_public_ip
     }),
@@ -244,7 +252,9 @@ const ROWS: &[Row] = &[
     bool_row("AlwaysLaunchElevated", |t| {
         &mut t.settings.privilege.unlock_at_launch
     }),
-    bool_row("UacLessElevation", |t| &mut t.settings.privilege.passwordless),
+    bool_row("UacLessElevation", |t| {
+        &mut t.settings.privilege.passwordless
+    }),
     bool_row("ShowFps", |t| &mut t.settings.debug.show_fps),
     Row {
         ts: "Window.Width",
@@ -311,7 +321,12 @@ fn parse_int(value: &str) -> Option<i64> {
 
 /// Sets an integer field when `value` fits its type and both clamps leave it alone. An
 /// out-of-range value is skipped, not clamped (D-018), so the old value is put back.
-fn apply_int<T>(target: &mut Target, field: fn(&mut Target) -> &mut T, row: &Row, value: &str) -> bool
+fn apply_int<T>(
+    target: &mut Target,
+    field: fn(&mut Target) -> &mut T,
+    row: &Row,
+    value: &str,
+) -> bool
 where
     T: Copy + TryFrom<i64>,
 {
@@ -461,10 +476,7 @@ mod tests {
 
         let mut base = Settings::default();
         base.processes.interval_ms = 2000;
-        let r = import(
-            "RefreshIntervalMs=1000\n",
-            (&base, &UiState::default()),
-        );
+        let r = import("RefreshIntervalMs=1000\n", (&base, &UiState::default()));
         assert_eq!(r.settings.processes.interval_ms, 1000);
     }
 
@@ -472,16 +484,15 @@ mod tests {
     fn int_key_out_of_range_skipped() {
         let mut base = Settings::default();
         base.processes.interval_ms = 2000;
-        let r = import(
-            "RefreshIntervalMs=50\n",
-            (&base, &UiState::default()),
-        );
+        let r = import("RefreshIntervalMs=50\n", (&base, &UiState::default()));
         assert_eq!(r.settings.processes.interval_ms, 2000);
         assert_eq!(r.imported, 0);
         assert_eq!(r.skipped, vec!["RefreshIntervalMs"]);
 
         // Off the 5 % step, past the type, negative, not decimal.
-        let r = run("UIScale=103\nDropShadowIntensityPct=300\nRowHeightPct=-90\nSmoothScrollAmount=0x10\n");
+        let r = run(
+            "UIScale=103\nDropShadowIntensityPct=300\nRowHeightPct=-90\nSmoothScrollAmount=0x10\n",
+        );
         assert_eq!(r.settings, Settings::default());
         assert_eq!(r.imported, 0);
         assert_eq!(r.skipped.len(), 4);
@@ -537,7 +548,9 @@ mod tests {
 
     #[test]
     fn binary_garbage_imports_nothing() {
-        let garbage: Vec<u8> = (0..4096u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        let garbage: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
         let r = run(&decode_ini(&garbage).expect("small"));
         assert_eq!(r.imported, 0);
     }
