@@ -1408,3 +1408,227 @@ mod reset_settings {
         assert_eq!(toasts(&mut r), ["Failed to reset settings"]);
     }
 }
+
+// ---- Crash Report window (tasklens-bj6.8, UI-SHL-093) ----
+
+mod crash_report {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::SystemTime;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AnyWindowHandle, Context, Entity, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowHandle, WindowVisibility, div,
+    };
+    use tl_model::actions::ActionKind;
+    use tl_model::client::EngineClient;
+    use tl_model::command::Command;
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, CrashReport, TasklensUi, UiInit};
+    use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::crash_report::{
+        CopyCrashReport, CrashReportWindow, OpenCrashLogFolder, show_pending,
+    };
+    use tl_ui::window::registry::{GlobalRegistry, WindowKey};
+
+    struct Main;
+
+    impl Render for Main {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("main")
+        }
+    }
+
+    type Frame = TlSecondaryWindow<CrashReportWindow>;
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        /// How many times `mark_crash_seen` ran.
+        seen: Arc<AtomicU32>,
+        main: VisualTestContext,
+    }
+
+    /// `TasklensUi::init` with a pending report "panic at x", a counting `mark_crash_seen`, a
+    /// logs directory, and a main window.
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let (_tx, rx) = async_channel::bounded(4);
+        let seen = Arc::new(AtomicU32::new(0));
+        let count = seen.clone();
+        let mut env = AppEnv::test();
+        env.pending_crash = Some(CrashReport {
+            path: "/home/u/.local/state/tasklens/crash/crash-1.txt".into(),
+            text: "panic at x".into(),
+            at: SystemTime::UNIX_EPOCH,
+        });
+        env.mark_crash_seen = Arc::new(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+        });
+        env.logs_dir = "/home/u/.local/state/tasklens/logs".into();
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env,
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            cx.set_reduce_motion(true);
+        });
+        cx.run_until_parked();
+        let main: AnyWindowHandle = cx.add_window(|_, _| Main).into();
+        let main = VisualTestContext::from_window(main, cx);
+        Rig { engine, seen, main }
+    }
+
+    fn crash_window(cx: &mut TestAppContext) -> Option<WindowHandle<Root>> {
+        cx.update(|cx| {
+            cx.global::<GlobalRegistry>()
+                .0
+                .read(cx)
+                .get(&WindowKey::CrashReport)
+        })
+        .and_then(|h| h.downcast::<Root>())
+    }
+
+    fn show(rig: &mut Rig) {
+        rig.main.update(show_pending);
+        rig.main.run_until_parked();
+    }
+
+    /// Shows the report and returns its frame and window context.
+    fn opened(rig: &mut Rig, cx: &mut TestAppContext) -> (Entity<Frame>, VisualTestContext) {
+        show(rig);
+        let handle = crash_window(cx).expect("crash report window registered");
+        let frame = cx
+            .update(|cx| Frame::find(handle, cx))
+            .expect("crash report frame");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        (frame, vcx)
+    }
+
+    fn is_open(cx: &mut TestAppContext, handle: WindowHandle<Root>) -> bool {
+        let id = handle.window_id();
+        cx.update(|cx| cx.windows().iter().any(|w| w.window_id() == id))
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_shown_once(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let before = cx.update(|cx| cx.windows().len());
+        let (frame, vcx) = opened(&mut rig, cx);
+        assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
+        assert_eq!(rig.seen.load(Ordering::Relaxed), 1, "marked seen once");
+        let (title, kind, text) = vcx.read(|cx| {
+            let f = frame.read(cx);
+            (
+                f.title().to_string(),
+                f.kind(),
+                f.content().read(cx).report_text().to_owned(),
+            )
+        });
+        assert_eq!(title, "tasklens Crash Report");
+        assert_eq!(kind, TlWindowKind::Tool { resizable: false });
+        assert_eq!(text, "panic at x");
+
+        show(&mut rig);
+        assert_eq!(
+            cx.update(|cx| cx.windows().len()),
+            before + 1,
+            "no second window"
+        );
+        assert_eq!(rig.seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_deferred_while_hidden(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        rig.main
+            .simulate_visibility_change(WindowVisibility::Hidden);
+        rig.main.run_until_parked();
+        show(&mut rig);
+        assert!(crash_window(cx).is_none(), "no window while hidden");
+        assert_eq!(
+            rig.seen.load(Ordering::Relaxed),
+            0,
+            "the report stays pending"
+        );
+
+        // Shown again from the tray: the report opens then.
+        rig.main
+            .simulate_visibility_change(WindowVisibility::Visible);
+        rig.main.run_until_parked();
+        assert!(
+            crash_window(cx).is_some(),
+            "opens once the main window shows"
+        );
+        assert_eq!(rig.seen.load(Ordering::Relaxed), 1);
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_copy(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (frame, mut vcx) = opened(&mut rig, cx);
+        vcx.dispatch_action(CopyCrashReport);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let clip = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        assert_eq!(clip.as_deref(), Some("panic at x"));
+        let toasts = vcx.read(|cx| frame.read(cx).toasts().read(cx).visible_texts());
+        assert_eq!(toasts, ["Copied to clipboard"]);
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_open_logs(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (_, mut vcx) = opened(&mut rig, cx);
+        let before = rig.engine.commands().len();
+        vcx.dispatch_action(OpenCrashLogFolder);
+        vcx.run_until_parked();
+        let uris: Vec<String> = rig.engine.commands()[before..]
+            .iter()
+            .filter_map(|c| match c {
+                Command::Action(req) => match &req.kind {
+                    ActionKind::OpenUri(uri) => {
+                        assert!(req.targets.is_empty());
+                        Some(uri.to_string())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(uris.len(), 1, "{uris:?}");
+        assert!(uris[0].ends_with("/tasklens/logs"), "{}", uris[0]);
+    }
+
+    #[gpui_kit::test]
+    fn crash_report_enter_closes(cx: &mut TestAppContext) {
+        let mut rig = rig(cx);
+        let (_, mut vcx) = opened(&mut rig, cx);
+        let handle = crash_window(cx).expect("open");
+        // One Enter as the platform sends it: the focused Close button clicks on key up.
+        let keystroke = Keystroke::parse("enter").expect("keystroke");
+        vcx.simulate_event(KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        if is_open(cx, handle) {
+            vcx.simulate_event(KeyUpEvent { keystroke });
+        }
+        vcx.run_until_parked();
+        assert!(!is_open(cx, handle), "Enter on Close closes the window");
+    }
+}

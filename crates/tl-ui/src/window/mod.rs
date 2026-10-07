@@ -3,6 +3,7 @@
 pub mod about;
 pub mod collector_health;
 pub mod confirm;
+pub mod crash_report;
 pub mod filter;
 pub mod main;
 pub mod menubar;

@@ -75,17 +75,23 @@ impl Global for CrashShown {}
 /// Shows the pending crash report once, if there is one. `window` is the main window: while it
 /// is not visible this waits and runs again when it is shown.
 pub fn show_pending(window: &mut Window, cx: &mut App) {
-    if cx.try_global::<CrashShown>().is_some_and(|c| c.shown || c.wait.is_some()) {
+    if cx
+        .try_global::<CrashShown>()
+        .is_some_and(|c| c.shown || c.wait.is_some())
+    {
         return;
     }
-    if !cx.try_global::<AppEnv>().is_some_and(|e| e.pending_crash.is_some()) {
+    if !cx
+        .try_global::<AppEnv>()
+        .is_some_and(|e| e.pending_crash.is_some())
+    {
         return;
     }
     if window.is_visible() {
         open_pending(cx);
         return;
     }
-    let wait = window.observe_window_visibility(cx, |visibility, _, cx| {
+    let wait = window.observe_window_visibility(|visibility, _, cx| {
         if visibility.is_visible() {
             cx.defer(|cx| {
                 cx.default_global::<CrashShown>().wait = None;
@@ -125,7 +131,9 @@ fn open_pending(cx: &mut App) {
     };
     match cx.try_global::<GlobalRegistry>().map(|r| r.0.clone()) {
         Some(registry) => {
-            registry.update(cx, |r, cx| r.open_or_focus(WindowKey::CrashReport, cx, open));
+            registry.update(cx, |r, cx| {
+                r.open_or_focus(WindowKey::CrashReport, cx, open)
+            });
         }
         None => {
             if let Err(e) = open(cx) {
@@ -169,7 +177,12 @@ impl CrashReportWindow {
         }
     }
 
-    fn on_open_logs(&mut self, _: &OpenCrashLogFolder, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_open_logs(
+        &mut self,
+        _: &OpenCrashLogFolder,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(dir) = cx.try_global::<AppEnv>().map(|e| e.logs_dir.clone()) else {
             warn!(target: "tasklens::ui", "no AppEnv; the log folder was not opened");
             return;
@@ -183,13 +196,9 @@ impl Render for CrashReportWindow {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = current(cx).clone();
         let m = *metrics(cx);
-        let mut line_1 = div()
-            .text_color(theme.text_primary)
-            .child(tr(cx, LINE_1));
+        let mut line_1 = div().text_color(theme.text_primary).child(tr(cx, LINE_1));
         *line_1.text_style() = t_base(&m);
-        let mut line_2 = div()
-            .text_color(theme.text_secondary)
-            .child(tr(cx, LINE_2));
+        let mut line_2 = div().text_color(theme.text_secondary).child(tr(cx, LINE_2));
         *line_2.text_style() = t_sm(&m);
         let label = |key: &str| -> SharedString { tr(cx, key) };
         let footer = div()
@@ -228,13 +237,11 @@ impl Render for CrashReportWindow {
                     .flex()
                     .flex_row()
                     .gap(m.sp[4])
-                    .child(
-                        div().flex_none().child(icon(
-                            TlIcon::TriangleAlert,
-                            px(ICON * m.ui_scale),
-                            theme.status.warning,
-                        )),
-                    )
+                    .child(div().flex_none().child(icon(
+                        TlIcon::TriangleAlert,
+                        px(ICON * m.ui_scale),
+                        theme.status.warning,
+                    )))
                     .child(
                         div()
                             .flex()

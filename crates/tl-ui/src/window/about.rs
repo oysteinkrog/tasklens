@@ -547,7 +547,7 @@ fn nvidia_driver(cx: &App) -> Option<String> {
 
 /// Sends `OpenUri(uri)` through the app's `ActionTracker`. Only a failure shows a toast, in this
 /// window.
-fn send_open_uri(uri: String, texts: ToastTexts, window: &mut Window, cx: &mut App) {
+pub(crate) fn send_open_uri(uri: String, texts: ToastTexts, window: &mut Window, cx: &mut App) {
     let Some(tracker) = cx.try_global::<GlobalActionTracker>().map(|t| t.0.clone()) else {
         warn!(target: "tasklens::ui", "no action tracker; the link was not opened");
         return;
