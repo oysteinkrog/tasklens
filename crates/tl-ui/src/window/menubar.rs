@@ -32,7 +32,7 @@ use gpui_kit::{
 };
 
 use super::titlebar::{MenuBarFactory, MenuRowHeight, bar_height};
-use super::{menus_file, menus_view};
+use super::{menus_file, menus_settings, menus_view};
 use crate::actions::{MenuId, OpenMenu};
 use crate::components::menu::TlMenuPopup;
 use crate::i18n::{Strings, tr, tr_en};
@@ -80,15 +80,15 @@ fn label_key(id: MenuId) -> &'static str {
 }
 
 /// Whether `id` has a button. True exactly when [`build_menu`] builds a menu with items for it
-/// (the "no dead items" rule): in P1 File and View. Called on every frame, so an arm reads only
-/// settings or state, never builds anything.
+/// (the "no dead items" rule): in P1 File, View and Settings. Called on every frame, so an arm
+/// reads only settings or state, never builds anything.
 pub fn has_menu(id: MenuId, cx: &App) -> bool {
     let _ = cx;
     match id {
         // View always has "Columns", disabled on a tab without a table.
-        MenuId::File | MenuId::View => true,
-        // Settings: E21-004. Help: E21-014. Debug: E21-038.
-        MenuId::Settings | MenuId::Help | MenuId::Debug => false,
+        MenuId::File | MenuId::View | MenuId::Settings => true,
+        // Help: E21-014. Debug: E21-038.
+        MenuId::Help | MenuId::Debug => false,
     }
 }
 
@@ -103,7 +103,8 @@ fn build_menu(
     match id {
         MenuId::File => Some(menus_file::build(window, cx, return_focus)),
         MenuId::View => Some(menus_view::build(window, cx, return_focus)),
-        MenuId::Settings | MenuId::Help | MenuId::Debug => None,
+        MenuId::Settings => Some(menus_settings::build(window, cx, return_focus)),
+        MenuId::Help | MenuId::Debug => None,
     }
 }
 

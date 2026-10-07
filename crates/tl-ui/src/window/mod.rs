@@ -7,6 +7,7 @@ pub mod filter;
 pub mod main;
 pub mod menubar;
 pub mod menus_file;
+pub mod menus_settings;
 pub mod menus_view;
 pub mod registry;
 pub mod share_theme;

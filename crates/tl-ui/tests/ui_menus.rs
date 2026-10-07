@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui_kit::AsKeystroke as _;
 use gpui_kit::base::test_support::{ElementSnapshot, snapshots};
@@ -15,26 +16,32 @@ use gpui_kit::{
     ParentElement, Pixels, Point, Render, Role, Styled, TestAppContext, VisualTestContext, Window,
     div, px, size,
 };
+use tl_model::client::EngineClient;
 use tl_model::command::Tab;
-use tl_model::settings::{AppearanceSettings, ColumnResize, Settings, ThemeSettings, UiState};
+use tl_model::settings::{
+    AppearanceSettings, ColumnResize, NetworkUnit, Settings, StartTab, ThemeSettings, UiState,
+};
 use tl_model::table::TableMode;
 use tl_ui::actions::{
     MenuId, OpenRunDialog, Quit, SetViewMode, bind_keys_global, register_global_handlers,
 };
-use tl_ui::app::BootSettings;
+use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::settings_global::TlSettings;
 use tl_ui::table::actions::{
     CollapseAll, OpenColumnPicker, ResetColumns, ResizeColumnsToFit, TABLE_CONTEXT, bind_keys_table,
 };
 use tl_ui::table::columns::TableId;
+use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
+use tl_ui::window::confirm::ResetSettings;
 use tl_ui::window::main::ShellState;
 use tl_ui::window::menubar::{self, MenuBar, menu_bar_for};
-use tl_ui::window::menus_view;
 use tl_ui::window::titlebar::{TitleBarProbe, TitleBarView};
+use tl_ui::window::{menus_settings, menus_view};
 
 const FILE_BUTTON: &str = "TlMenuBarButton-shell-menubar-file";
 const VIEW_BUTTON: &str = "TlMenuBarButton-shell-menubar-view";
+const SETTINGS_BUTTON: &str = "TlMenuBarButton-shell-menubar-settings";
 
 /// A main window stand-in: the title bar with the real menu bar, and a focusable table below.
 struct Host {
@@ -73,6 +80,8 @@ struct Rig<'a> {
     tables: Rc<RefCell<Vec<(&'static str, TableId)>>>,
     collapses: Rc<Cell<u32>>,
     modes: Rc<RefCell<Vec<TableMode>>>,
+    engine: Arc<FakeEngine>,
+    resets: Rc<Cell<u32>>,
 }
 
 fn rig(cx: &mut TestAppContext) -> Rig<'_> {
@@ -85,6 +94,10 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
     let collapses = Rc::new(Cell::new(0));
     let modes = Rc::new(RefCell::new(Vec::new()));
     let mode_log = modes.clone();
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let resets = Rc::new(Cell::new(0));
+    let reset_count = resets.clone();
     cx.update(|cx| {
         gpui_kit::init(cx);
         tl_ui::theme::store::init(
@@ -120,6 +133,8 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         });
         TlSettings::init(cx);
         register_global_handlers(cx);
+        cx.set_global(EngineGlobal(client));
+        cx.on_action(move |_: &ResetSettings, _| reset_count.set(reset_count.get() + 1));
         cx.set_reduce_motion(true);
     });
     let host_collapses = collapses.clone();
@@ -144,6 +159,8 @@ fn rig(cx: &mut TestAppContext) -> Rig<'_> {
         tables,
         collapses,
         modes,
+        engine,
+        resets,
     }
 }
 
@@ -243,15 +260,18 @@ fn hint_for(r: &mut Rig<'_>, action: &dyn gpui_kit::Action) -> Option<String> {
 #[gpui_kit::test]
 fn file_menu_p2_items(cx: &mut TestAppContext) {
     let mut r = rig(cx);
-    // File and View, each followed by a separator one physical pixel wide, and nothing for the
-    // absent menus.
+    // File, View and Settings, each followed by a separator one physical pixel wide, and nothing
+    // for the absent menus.
     let bar_w = bounds(r.cx, "TlMenuBar").size.width;
     let file = bounds(r.cx, FILE_BUTTON);
     let view = bounds(r.cx, VIEW_BUTTON);
+    let settings = bounds(r.cx, SETTINGS_BUTTON);
     let scale = r.cx.update(|window, _| window.scale_factor());
-    assert_eq!(bar_w, file.size.width + view.size.width + px(2. / scale));
+    assert_eq!(
+        bar_w,
+        file.size.width + view.size.width + settings.size.width + px(3. / scale)
+    );
     for absent in [
-        "TlMenuBarButton-shell-menubar-settings",
         "TlMenuBarButton-shell-menubar-help",
         "TlMenuBarButton-shell-menubar-debug",
     ] {
@@ -350,9 +370,9 @@ fn menubar_left_right_wrap(cx: &mut TestAppContext) {
     // In View, Left at the top level opens File.
     keys(r.cx, "left");
     assert_eq!(open_menu(r.cx), Some(MenuId::File));
-    // In File, Left wraps to View, the last present menu.
+    // In File, Left wraps to Settings, the last present menu.
     keys(r.cx, "left");
-    assert_eq!(open_menu(r.cx), Some(MenuId::View));
+    assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
     assert!(popup_bounds(r.cx).is_some());
 }
 
@@ -715,4 +735,149 @@ fn process_view_checks_toggle_keys(cx: &mut TestAppContext) {
     keys(r.cx, "alt-v down right down down down down enter");
     assert!(processes(r.cx).highlight_new_exited);
     assert!(processes(r.cx).tree_guide_lines);
+}
+
+// Settings menu (E21-004).
+
+/// Every drawn entry of the open menus as "item:<label>", "header:<label>" or "separator", top
+/// to bottom.
+fn shapes(cx: &mut VisualTestContext) -> Vec<String> {
+    entries(cx)
+        .iter()
+        .map(|e| match (e.role(), e.label()) {
+            (Some(Role::MenuItem), Some(l)) => format!("item:{l}"),
+            (_, Some(l)) => format!("header:{l}"),
+            (_, None) => "separator".to_owned(),
+        })
+        .collect()
+}
+
+const SETTINGS_ROOT: [&str; 14] = [
+    "header:Monitoring",
+    "item:Refresh",
+    "item:Network transfer unit",
+    "item:Auto-scale network transfer rates",
+    "header:Motion & interaction",
+    "item:Animations",
+    "item:Smooth Graphs",
+    "item:Smooth Scroll",
+    "item:Close with Esc",
+    "header:Window & startup",
+    "item:Default tab",
+    "header:Language",
+    "item:Language:",
+    "separator",
+];
+
+/// The labels of an open Settings submenu: every drawn item label not in the root.
+fn settings_sub(cx: &mut VisualTestContext) -> Vec<String> {
+    shapes(cx)
+        .into_iter()
+        .filter(|s| !SETTINGS_ROOT.contains(&s.as_str()) && s != "item:Reset Settings to Defaults")
+        .filter_map(|s| s.strip_prefix("item:").map(str::to_owned))
+        .collect()
+}
+
+fn settings(cx: &mut VisualTestContext) -> Settings {
+    cx.update(|_, cx| TlSettings::settings(cx).clone())
+}
+
+#[gpui_kit::test]
+fn settings_menu_p1_rows(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s");
+    assert_eq!(open_menu(r.cx), Some(MenuId::Settings));
+    let mut expected: Vec<String> = SETTINGS_ROOT.iter().map(|s| s.to_string()).collect();
+    expected.push("item:Reset Settings to Defaults".to_owned());
+    assert_eq!(shapes(r.cx), expected);
+    // The first enabled item is highlighted; headers are not selectable.
+    let first = entries(r.cx)
+        .into_iter()
+        .find(|e| e.selected() == Some(true))
+        .and_then(|e| e.label().map(str::to_owned));
+    assert_eq!(first.as_deref(), Some("Refresh"));
+}
+
+#[gpui_kit::test]
+fn settings_menu_refresh_labels(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s right");
+    assert_eq!(
+        settings_sub(r.cx),
+        ["0.25s", "0.5s", "1.0s", "2.0s", "5.0s", "10.0s"]
+    );
+    // interval_ms = 1000: the mark is on "1.0s". A value off the list marks nothing.
+    let marks = |cx: &mut VisualTestContext| cx.update(|_, cx| menus_settings::refresh_marks(cx));
+    assert_eq!(marks(r.cx), [false, false, true, false, false, false]);
+    r.cx.update(|_, cx| TlSettings::update(cx, |d| d.settings.processes.interval_ms = 1500));
+    assert_eq!(marks(r.cx), [false; 6]);
+}
+
+#[gpui_kit::test]
+fn settings_menu_refresh_radio(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s right down down down enter");
+    assert_eq!(settings(r.cx).processes.interval_ms, 2000);
+    assert_eq!(
+        r.engine.settings().last().map(|s| s.interval_ms),
+        Some(2000)
+    );
+}
+
+#[gpui_kit::test]
+fn settings_menu_network_and_checks(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    assert_eq!(settings(r.cx).units.network, NetworkUnit::Bits);
+    // Network transfer unit > Bytes per second.
+    keys(r.cx, "alt-s down right");
+    assert_eq!(settings_sub(r.cx), ["Bits per second", "Bytes per second"]);
+    keys(r.cx, "down enter");
+    assert_eq!(settings(r.cx).units.network, NetworkUnit::Bytes);
+    // Animations: Refresh, Network, Auto-scale, Animations.
+    assert!(settings(r.cx).motion.animations);
+    keys(r.cx, "alt-s down down down enter");
+    assert!(!settings(r.cx).motion.animations);
+}
+
+#[gpui_kit::test]
+fn default_tab_lists_built_tabs(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    r.cx.update(|_, cx| {
+        cx.global_mut::<ShellState>().built_tabs =
+            [Tab::Processes, Tab::Performance].into_iter().collect();
+    });
+    // Default tab is the eighth item.
+    keys(r.cx, "alt-s down down down down down down down right");
+    assert_eq!(
+        settings_sub(r.cx),
+        ["Processes", "Performance", "Last used"]
+    );
+    keys(r.cx, "up enter");
+    assert_eq!(settings(r.cx).general.start_tab, StartTab::LastUsed);
+}
+
+#[gpui_kit::test]
+fn language_submenu_p1(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s up up right");
+    assert_eq!(
+        settings_sub(r.cx),
+        ["System default", "English (United States)"]
+    );
+    let current = settings(r.cx).general.language;
+    let marks = r.cx.update(|_, cx| menus_settings::language_marks(cx));
+    assert_eq!(
+        marks,
+        [current == "system", current == "en-US"],
+        "the mark is on {current}"
+    );
+    assert_eq!(marks.iter().filter(|m| **m).count(), 1);
+}
+
+#[gpui_kit::test]
+fn reset_item_dispatches(cx: &mut TestAppContext) {
+    let r = rig(cx);
+    keys(r.cx, "alt-s up enter");
+    assert_eq!(r.resets.get(), 1);
+    assert_eq!(open_menu(r.cx), None);
 }
