@@ -1322,15 +1322,17 @@ mod name_cell {
     use gpui_kit::assets::IconName;
     use gpui_kit::{
         Bounds, Context, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
-        TestAppContext, VisualTestContext, Window, div, px,
+        TestAppContext, VisualTestContext, Window, div, point, px, size,
     };
+    use proptest::prelude::*;
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
     use tl_ui::i18n::init_strings;
+    use tl_ui::pages::processes::delegate::sibling_pass;
     use tl_ui::pages::processes::name_cell::{
         NameCellData, NameIcon, NameWords, StateGlyph, icon_slot, name_cell, name_flags,
         render_group_header, render_name_cell, row_icon,
     };
-    use tl_ui::table::cells::{CellCtx, IconSourceCache, name_look};
+    use tl_ui::table::cells::{CellCtx, IconSourceCache, guide_quads, name_look};
     use tl_ui::table::tree_table::{IconSlot, RowFlags, RowKind, STALE_OPACITY};
     use tl_ui::theme::{current, metrics};
 
@@ -1353,6 +1355,8 @@ mod name_cell {
 
     enum Cell {
         Name(fn() -> NameCellData),
+        /// A Name cell with connector lines on and these tree flags.
+        Tree(fn() -> NameCellData, RowFlags),
         Group(&'static str, bool),
     }
 
@@ -1375,6 +1379,18 @@ mod name_cell {
                 Cell::Name(make) => render_name_cell(
                     make(),
                     7,
+                    None,
+                    &ctx,
+                    &words(),
+                    false,
+                    &mut self.icons,
+                    window,
+                    cx,
+                ),
+                Cell::Tree(make, flags) => render_name_cell(
+                    make(),
+                    7,
+                    Some(*flags),
                     &ctx,
                     &words(),
                     false,
@@ -1564,6 +1580,205 @@ mod name_cell {
         let cell = bounds(vcx, "TlGroupHeaderCell");
         let label = bounds(vcx, "TlGroupHeaderCell-label");
         assert_eq!(label.left() - cell.left(), px(30.));
+    }
+
+    // ---- Tree connector lines (bead pdu.14, PROC-017, UI-PRC-003) ----
+
+    const ROW_H: f32 = 28.;
+
+    fn quads(depth: u8, flags: RowFlags) -> Vec<Bounds<Pixels>> {
+        guide_quads(depth, flags, point(px(0.), px(0.)), px(ROW_H), 1.0, 1.0).into_vec()
+    }
+
+    fn vline(x: f32, top: f32, h: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(top)), size(px(1.), px(h)))
+    }
+
+    fn hline(x: f32, w: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(x), px(ROW_H / 2.)), size(px(w), px(1.)))
+    }
+
+    #[gpui_kit::test]
+    fn connector_lines_only_when_enabled(cx: &mut TestAppContext) {
+        let open_row = RowFlags {
+            bits: 0,
+            ancestor_continues: 0b1,
+        };
+        let vcx = open(cx, Cell::Name(|| data(RowKind::Process, 2, None)));
+        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
+        let vcx = open(cx, Cell::Tree(|| data(RowKind::Process, 2, None), open_row));
+        let guides = bounds(vcx, "TlNameCell-guides");
+        assert_eq!(guides, bounds(vcx, "TlNameCell"));
+        // A depth-0 row with no continuing line draws nothing, so it gets no canvas.
+        let vcx = open(
+            cx,
+            Cell::Tree(|| data(RowKind::Process, 0, None), RowFlags::default()),
+        );
+        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
+    }
+
+    #[test]
+    fn connector_quads_for_depth_and_siblings() {
+        // Depth 2, not the last sibling, the level-0 line continues. R-190: guides at
+        // 20 + 20k + 14, the depth-2 chevron at 20 + 40 + 6.
+        let open_row = RowFlags {
+            bits: 0,
+            ancestor_continues: 0b1,
+        };
+        assert_eq!(
+            quads(2, open_row),
+            [
+                vline(34., 0., ROW_H),
+                vline(54., 0., ROW_H),
+                hline(54., 12.)
+            ]
+        );
+
+        // The last sibling: its own line stops at the row centre (1 px past it, so the corner
+        // closes).
+        let last = RowFlags {
+            bits: RowFlags::LAST_SIBLING,
+            ancestor_continues: 0,
+        };
+        assert_eq!(
+            quads(2, last),
+            [vline(54., 0., ROW_H / 2. + 1.), hline(54., 12.)]
+        );
+
+        // At most depth + 1 quads, and never a line at the row's own elbow level from the bits.
+        let all = RowFlags {
+            bits: 0,
+            ancestor_continues: u64::MAX,
+        };
+        assert_eq!(quads(4, all).len(), 3 + 2);
+
+        // Group header rows are depth 0 with no bits: nothing.
+        assert!(quads(0, RowFlags::default()).is_empty());
+
+        // Under a group header the level-0 line hangs from the header chevron centre, x 16.
+        let in_group = RowFlags {
+            bits: RowFlags::IN_GROUP | RowFlags::LAST_SIBLING,
+            ancestor_continues: 0,
+        };
+        assert_eq!(
+            quads(1, in_group),
+            [vline(16., 0., ROW_H / 2. + 1.), hline(16., 30.)]
+        );
+        let deeper = RowFlags {
+            bits: RowFlags::IN_GROUP,
+            ancestor_continues: 0b1,
+        };
+        assert_eq!(
+            quads(2, deeper),
+            [
+                vline(16., 0., ROW_H),
+                vline(54., 0., ROW_H),
+                hline(54., 12.)
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn connector_group_header_draws_none(cx: &mut TestAppContext) {
+        let vcx = open(cx, Cell::Group("Apps (11)", true));
+        assert!(vcx.debug_bounds("TlNameCell-guides").is_none());
+    }
+
+    #[test]
+    fn connector_quads_snap_to_physical_pixels() {
+        // At device scale 1.5 a line is 1 physical px wide and every edge sits on the grid.
+        let flags = RowFlags {
+            bits: 0,
+            ancestor_continues: 0b1,
+        };
+        let q = guide_quads(2, flags, point(px(0.3), px(0.)), px(ROW_H), 1.0, 1.5);
+        for b in &q {
+            for v in [b.origin.x, b.origin.y] {
+                let phys = f32::from(v) * 1.5;
+                assert!((phys - phys.round()).abs() < 1e-3, "{b:?}");
+            }
+        }
+        assert!((f32::from(q[0].size.width) * 1.5 - 1.).abs() < 1e-3);
+    }
+
+    /// The naive O(n²) reading of the sibling flags.
+    fn naive(depths: &[u8]) -> Vec<(bool, u64)> {
+        let last = |i: usize| {
+            let d = depths[i];
+            !depths[i + 1..]
+                .iter()
+                .take_while(|&&x| x >= d)
+                .any(|&x| x == d)
+        };
+        (0..depths.len())
+            .map(|i| {
+                let d = depths[i];
+                let mut bits = 0u64;
+                for k in 0..usize::from(d.saturating_sub(1)).min(64) {
+                    // The ancestor at depth k + 1: the nearest earlier row at that depth.
+                    let a = (0..i).rev().find(|&j| usize::from(depths[j]) == k + 1);
+                    if a.is_some_and(|a| !last(a)) {
+                        bits |= 1 << k;
+                    }
+                }
+                (last(i), bits)
+            })
+            .collect()
+    }
+
+    fn pass(depths: &[u8]) -> Vec<(bool, u64)> {
+        let mut out = Vec::new();
+        sibling_pass(depths.iter().copied(), &mut out);
+        out
+    }
+
+    #[test]
+    fn sibling_pass_flags() {
+        // A(d0), B(d1), C(d2), D(d1): D follows B, so B is not last and the level-0 line runs
+        // on through C. C and D are last.
+        let f = pass(&[0, 1, 2, 1]);
+        assert_eq!(f, [(true, 0), (false, 0), (true, 0b1), (true, 0)]);
+        assert_eq!(f, naive(&[0, 1, 2, 1]));
+        // A shallower row ends the run: the second root is not B's sibling.
+        assert_eq!(
+            pass(&[0, 1, 0, 1]),
+            [(false, 0), (true, 0), (true, 0), (true, 0)]
+        );
+        // Depths past 64 keep the 64 bits they have room for.
+        let deep: Vec<u8> = (0..=70).chain([70, 1]).collect();
+        assert_eq!(pass(&deep), naive(&deep));
+        // The scratch vector is refilled, not appended to.
+        let mut out = vec![(false, 7); 9];
+        sibling_pass([0u8, 0].into_iter(), &mut out);
+        assert_eq!(out, [(false, 0), (true, 0)]);
+    }
+
+    /// A random forest of up to 1,000 rows in display order: each depth is at most one more than
+    /// the previous row's.
+    fn forest() -> impl Strategy<Value = Vec<u8>> {
+        proptest::collection::vec((any::<bool>(), 0u8..8), 1..1000).prop_map(|steps| {
+            let mut depths = Vec::with_capacity(steps.len());
+            let mut d = 0u8;
+            for (i, (down, up)) in steps.into_iter().enumerate() {
+                d = if i == 0 {
+                    0
+                } else if down {
+                    d.saturating_add(1).min(80)
+                } else {
+                    d.saturating_sub(up)
+                };
+                depths.push(d);
+            }
+            depths
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn sibling_pass_matches_naive(depths in forest()) {
+            prop_assert_eq!(pass(&depths), naive(&depths));
+        }
     }
 }
 

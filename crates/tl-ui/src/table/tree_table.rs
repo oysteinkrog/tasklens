@@ -2366,7 +2366,9 @@ pub enum RowKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct RowFlags {
     pub bits: u16,
-    /// Bit k: the ancestor at depth k has a later sibling, so its guide line continues.
+    /// Bit k: the guide line at level k continues through this row. That line hangs from the
+    /// ancestor at depth k to its children, so the bit is set when the ancestor at depth k + 1
+    /// has a later sibling. Only bits below `depth - 1` are set.
     pub ancestor_continues: u64,
 }
 
@@ -2378,12 +2380,16 @@ impl RowFlags {
     pub const SUSPENDED: u16 = 16;
     pub const FROZEN: u16 = 32;
     pub const LAST_SIBLING: u16 = 64;
+    /// The row sits under a group header: the level-0 guide line hangs from the header's
+    /// chevron centre, x 16 (UI-PRC-003).
+    pub const IN_GROUP: u16 = 128;
 
     pub fn has(self, f: u16) -> bool {
         self.bits & f != 0
     }
 
-    /// True when the ancestor at `depth` has a later sibling. False past depth 63.
+    /// True when the guide line at level `depth` continues through this row. False past
+    /// depth 63.
     pub fn ancestor_continues_at(self, depth: u8) -> bool {
         depth < 64 && (self.ancestor_continues >> depth) & 1 != 0
     }

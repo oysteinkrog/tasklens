@@ -7,6 +7,11 @@
 //! count and the `binary` fallback for a missing icon file are `table/cells.rs`
 //! ([`paint_name_cell`], [`paint_group_header_cell`]). The chevron's hit area, its tooltip and
 //! the toggle that keeps the selection belong to `TlTreeTable`.
+//!
+//! Tree connector lines (PROC-017, `processes.tree_guide_lines`) are quads that
+//! `paint_name_cell` paints from the row's depth and its `LAST_SIBLING`, `IN_GROUP` and
+//! `ancestor_continues` flags ([`crate::table::cells::guide_quads`]). The delegate computes the
+//! flags once per table version ([`super::delegate::sibling_pass`]).
 
 use std::ops::Range;
 
@@ -132,10 +137,13 @@ pub fn name_flags(d: &NameCellData) -> RowFlags {
 
 /// One Name cell outside a table, with the element id `("name", node_key)` (UI-PRC-023 rule 3).
 /// `node_key` is the row's `NodeId` hash. Inside `TlTreeTable` the table paints the cell itself.
+/// `tree` is `Some` when connector lines are on: the row's `LAST_SIBLING` and `IN_GROUP` bits
+/// and its `ancestor_continues` from the owner's sibling pass.
 #[allow(clippy::too_many_arguments)]
 pub fn render_name_cell(
     d: NameCellData,
     node_key: u64,
+    tree: Option<RowFlags>,
     ctx: &CellCtx,
     words: &NameWords,
     tips: bool,
@@ -143,14 +151,18 @@ pub fn render_name_cell(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let flags = name_flags(&d);
+    let mut flags = name_flags(&d);
+    if let Some(t) = tree {
+        flags.bits |= t.bits & (RowFlags::LAST_SIBLING | RowFlags::IN_GROUP);
+        flags.ancestor_continues = t.ancestor_continues;
+    }
     let (depth, expandable) = (d.depth, d.expandable);
     paint_name_cell(
         name_cell(d, words),
         depth,
         expandable,
         flags,
-        false,
+        tree.is_some(),
         ctx,
         tips.then_some(node_key),
         icons,

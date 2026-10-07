@@ -255,8 +255,10 @@ pub struct ProcessDelegate {
     /// The id of each row, by index.
     ids: Vec<ProcRowId>,
     units: UnitIds,
-    /// Per row: last sibling, ancestor-continues bits (E22-006).
+    /// Per row: last sibling, ancestor-continues bits (E22-006, [`sibling_pass`]).
     sibling: Vec<(bool, u64)>,
+    /// The view is grouped: every depth-0 row is a group header (`RowFlags::IN_GROUP`).
+    grouped: bool,
     layout: ColumnLayout,
     /// Every column this build can offer, `gpu_0` to `gpu_15` included.
     specs: FxHashMap<ColumnId, ColumnSpec>,
@@ -302,6 +304,7 @@ impl ProcessDelegate {
             ids: Vec::new(),
             units: UnitIds::default(),
             sibling: Vec::new(),
+            grouped: false,
             layout: ColumnLayout::defaults(TableId::Processes, &[], &[], &[]),
             specs,
             offered: Vec::new(),
@@ -433,23 +436,10 @@ impl ProcessDelegate {
             self.row_index.insert(id, ix as u32);
         }
 
-        self.sibling.clear();
-        self.sibling.resize(rows.len(), (true, 0));
-        // Walking backwards, `seen[d]` is true when a later row at depth d follows with no
-        // shallower row in between: the open ancestor at depth d has a later sibling.
-        let mut seen = [false; 256];
-        for (ix, row) in rows.iter().enumerate().rev() {
-            let d = usize::from(row.depth);
-            let mut bits = 0u64;
-            for (k, &on) in seen.iter().enumerate().take(d.min(64)) {
-                if on {
-                    bits |= 1 << k;
-                }
-            }
-            self.sibling[ix] = (!seen[d], bits);
-            seen[d] = true;
-            seen[d + 1..].iter_mut().for_each(|s| *s = false);
-        }
+        sibling_pass(rows.iter().map(|r| r.depth), &mut self.sibling);
+        self.grouped = rows
+            .first()
+            .is_some_and(|r| matches!(r.node, NodeId::Group(_)));
 
         for (ix, row) in rows.iter().enumerate() {
             let (name, count) = match (row.group, self.kind_of(row)) {
@@ -639,6 +629,39 @@ impl ProcessDelegate {
     }
 }
 
+/// The tree bits of every row from the rows' depths in display order, in one reverse pass
+/// (E22-006, PROC-017). `out[ix]` is `(last_sibling, ancestor_continues)`: the row is the last
+/// sibling when no later row at its depth comes before a shallower row, and bit k is set when
+/// the ancestor at depth k + 1 is not the last sibling, so the guide line at level k continues
+/// through the row (k < depth - 1, k < 64). O(rows), run once per table version.
+pub fn sibling_pass(
+    depths: impl DoubleEndedIterator<Item = u8> + ExactSizeIterator,
+    out: &mut Vec<(bool, u64)>,
+) {
+    out.clear();
+    out.resize(depths.len(), (true, 0));
+    // Walking backwards, bit d of `seen` is set when a later row at depth d follows with no
+    // shallower row in between: the open ancestor at depth d has a later sibling.
+    let mut seen = [0u64; 4];
+    for (ix, d) in depths.enumerate().rev() {
+        let d = usize::from(d);
+        let (w, b) = (d / 64, d % 64);
+        let last = (seen[w] >> b) & 1 == 0;
+        // Bit k of `continues` is bit k + 1 of `seen`.
+        let continues = (seen[0] >> 1) | (seen[1] << 63);
+        let bits = match d {
+            0 | 1 => 0,
+            2..=64 => continues & ((1u64 << (d - 1)) - 1),
+            _ => continues,
+        };
+        out[ix] = (last, bits);
+        // This row is now the latest at depth d, and the deeper rows after it are not its
+        // siblings' subtrees any more.
+        seen[w] = (seen[w] | (1 << b)) & (u64::MAX >> (63 - b));
+        seen[w + 1..].iter_mut().for_each(|x| *x = 0);
+    }
+}
+
 fn restricted(v: &FieldValidity) -> bool {
     v.0.contains(&Validity::Restricted)
 }
@@ -761,6 +784,9 @@ impl TreeTableDelegate for ProcessDelegate {
         if last {
             bits |= RowFlags::LAST_SIBLING;
         }
+        if self.grouped && row.depth > 0 {
+            bits |= RowFlags::IN_GROUP;
+        }
         RowFlags {
             bits,
             ancestor_continues: ancestors,
@@ -769,6 +795,10 @@ impl TreeTableDelegate for ProcessDelegate {
 
     fn table_version(&self) -> u64 {
         self.version
+    }
+
+    fn guide_lines(&self) -> bool {
+        self.settings.processes.tree_guide_lines
     }
 
     fn columns(&self) -> &ColumnLayout {

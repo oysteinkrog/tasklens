@@ -456,11 +456,12 @@ fn guide_x(k: u8, ui_scale: f32) -> f32 {
 /// cell whose top-left corner is `origin`. Lines are one physical pixel wide and snapped to the
 /// physical pixel grid (`device_scale` = `window.scale_factor()`).
 ///
-/// For each ancestor level k below `depth` whose bit is set in `ancestor_continues`, a line over
+/// For each level k below `depth - 1` whose bit is set in `ancestor_continues`, a line over
 /// the full row height at the chevron centre of level k. For the row's own level, at the chevron
 /// centre of the parent level: a line from the row top to the centre (to the bottom unless
 /// `LAST_SIBLING`) and a line from there to the chevron's left edge. Depth-0 rows have no parent
-/// level and draw no elbow.
+/// level and draw no elbow. With `IN_GROUP` the level-0 line runs through the group header's
+/// chevron centre, x 16, instead.
 pub fn guide_quads(
     depth: u8,
     flags: RowFlags,
@@ -471,10 +472,19 @@ pub fn guide_quads(
 ) -> SmallVec<[Bounds<Pixels>; 8]> {
     let line = px(1.0 / device_scale);
     let snap = |v: f32| px((v * device_scale).round() / device_scale);
-    let x_at = |k: u8| snap(f32::from(origin.x) + guide_x(k, ui_scale));
+    let in_group = flags.has(RowFlags::IN_GROUP);
+    let x_at = |k: u8| {
+        let x = if in_group && k == 0 {
+            (GROUP_CHEVRON_X + CHEVRON / 2.0) * ui_scale
+        } else {
+            guide_x(k, ui_scale)
+        };
+        snap(f32::from(origin.x) + x)
+    };
     let top = origin.y;
     let mut quads = SmallVec::new();
-    for k in 0..depth {
+    // The parent level is the row's own elbow, drawn below.
+    for k in 0..depth.saturating_sub(1) {
         if flags.ancestor_continues_at(k) {
             quads.push(Bounds::new(point(x_at(k), top), size(line, row_h)));
         }
