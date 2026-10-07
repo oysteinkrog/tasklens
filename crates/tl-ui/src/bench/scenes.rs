@@ -353,6 +353,9 @@ async fn measure(
     let bridge = scene == BenchScene::Bridge;
     let driver = cx.update(|cx| window.view.read(cx).driver.clone());
 
+    // Stalls during the warm-up are reported apart from the measured ones, never dropped.
+    let stalls_start = cx.update(|cx| driver.read(cx).stats.stalls);
+
     // The probe arms `on_next_frame` every frame, so `static` runs without it.
     let probe = Rc::new(RefCell::new(FrameProbe::new(clocks, PROBE_CAPACITY)));
     if scene != BenchScene::Static {
@@ -433,6 +436,14 @@ async fn measure(
 
     let probe = probe.borrow();
     let intervals = probe.intervals_ns();
+    // A moving scene with no frame callback at all (a locked screen, an occluded window or the
+    // zed#64499 stall) must not pass as a report.
+    if scene != BenchScene::Static && intervals.is_empty() {
+        return Err(BenchError(format!(
+            "{}: 0 frames drawn; possible frame-callback stall",
+            scene.as_str()
+        )));
+    }
     let (missed, long_missed) = count_missed(intervals);
     let (rss_mb, pss_mb) = read_rss_pss_mb();
     let bridge_latency_ms = paint_log
@@ -449,6 +460,7 @@ async fn measure(
         rss_mb,
         pss_mb,
         stalls: u32::try_from(stalls.saturating_sub(stalls_at)).unwrap_or(u32::MAX),
+        warmup_stalls: u32::try_from(stalls_at.saturating_sub(stalls_start)).unwrap_or(u32::MAX),
         bridge_latency_ms,
         gpu: None,
     })
