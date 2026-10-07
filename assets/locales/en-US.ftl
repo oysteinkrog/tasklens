@@ -884,3 +884,11 @@ pwn-props-access-strings = Strings unavailable: needs administrator rights
 processes-confirm-action-end = End
 processes-confirm-action-end-task = End task
 processes-confirm-action-end-process = End process
+# Low-memory rescue window list (UI-PWN-033, E32-A2).
+lowmem-row-memory = Memory { $pct }%
+lowmem-button-end-task = End Task
+lowmem-tooltip-end-task = Ends immediately, unsaved work is lost
+lowmem-tooltip-needs-admin = Needs administrator rights
+lowmem-a11y-end-task = End Task: { $name }
+lowmem-toast-ended = Task ended
+lowmem-toast-end-failed = End Task Failed.
