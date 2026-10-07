@@ -1,5 +1,5 @@
-//! Tests for the low-memory watcher logic and meminfo reader (E32-001), and the
-//! `tasklens-lowmem.service` unit (E32-002).
+//! Tests for the low-memory watcher logic and meminfo reader (E32-001), the
+//! `tasklens-lowmem.service` unit (E32-002) and the watcher loop (E32-A1).
 
 #[allow(dead_code, reason = "the tests use only part of the module")]
 #[path = "../src/watch_memory.rs"]
@@ -16,8 +16,8 @@ mod paths;
 
 use proptest::prelude::*;
 use watch_memory::{
-    MemInfo, MemInfoReader, PSI_TRIGGER, WatchDecision, WatchEvent, WatchState,
-    mem_available_critical, parse_meminfo,
+    MEMAVAIL_CHECK, MemInfo, MemInfoReader, PSI_TRIGGER, WaitResult, WatchDecision, WatchEvent,
+    WatchIo, WatchState, mem_available_critical, parse_meminfo, run_loop,
 };
 
 /// The start of a real `/proc/meminfo` (Linux 7.2, 64 GiB machine).
@@ -292,4 +292,233 @@ fn real_install_enable_remove() {
     lowmem_unit::disable_and_remove().expect("first disable_and_remove");
     lowmem_unit::disable_and_remove().expect("second disable_and_remove");
     assert!(!lowmem_unit::unit_path().unwrap().exists());
+}
+
+// E32-A1: the watcher loop. The loop tests use a fake `WatchIo` with a fake clock; nothing here
+// spawns a process or touches /proc/pressure.
+
+/// A scripted `WatchIo`. `wait` returns `fallback` on every call and moves the fake clock by the
+/// timeout it was given.
+struct FakeIo {
+    clock: std::time::Instant,
+    fallback: WaitResult,
+    /// None makes `read_meminfo` fail.
+    meminfo: Option<MemInfo>,
+    /// How many `rescue_alive` calls return true after a spawn (None = the child never exits).
+    child_lives: Option<u32>,
+    child_left: Option<u32>,
+    child_running: bool,
+    /// The first this many spawns fail.
+    spawn_failures: u32,
+    display: bool,
+    timeouts: Vec<std::time::Duration>,
+    meminfo_reads: u32,
+    spawn_attempts: u32,
+}
+
+impl FakeIo {
+    fn new(fallback: WaitResult) -> Self {
+        Self {
+            clock: std::time::Instant::now(),
+            fallback,
+            meminfo: Some(MemInfo {
+                total_kib: 1_000_000,
+                available_kib: 500_000,
+            }),
+            child_lives: None,
+            child_left: None,
+            child_running: false,
+            spawn_failures: 0,
+            display: true,
+            timeouts: Vec::new(),
+            meminfo_reads: 0,
+            spawn_attempts: 0,
+        }
+    }
+}
+
+impl WatchIo for FakeIo {
+    fn wait(&mut self, timeout: std::time::Duration) -> WaitResult {
+        self.timeouts.push(timeout);
+        self.clock += match self.fallback {
+            WaitResult::Timeout => timeout,
+            _ => std::time::Duration::from_millis(100),
+        };
+        self.fallback
+    }
+
+    fn read_meminfo(&mut self) -> std::io::Result<MemInfo> {
+        self.meminfo_reads += 1;
+        self.meminfo
+            .ok_or_else(|| std::io::Error::other("fake read error"))
+    }
+
+    fn spawn_rescue(&mut self) -> std::io::Result<()> {
+        self.spawn_attempts += 1;
+        if self.spawn_attempts <= self.spawn_failures {
+            return Err(std::io::Error::other("fake spawn error"));
+        }
+        self.child_running = true;
+        self.child_left = self.child_lives;
+        Ok(())
+    }
+
+    fn rescue_alive(&mut self) -> bool {
+        if !self.child_running {
+            return false;
+        }
+        match &mut self.child_left {
+            None => true,
+            Some(0) => {
+                self.child_running = false;
+                false
+            }
+            Some(n) => {
+                *n -= 1;
+                true
+            }
+        }
+    }
+
+    fn now(&mut self) -> std::time::Instant {
+        self.clock
+    }
+
+    fn has_display(&mut self) -> bool {
+        self.display
+    }
+}
+
+/// Collects formatted log lines for one test.
+#[derive(Clone, Default)]
+struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Runs `f` with a subscriber that writes to a buffer, and returns the log lines.
+fn with_logs(f: impl FnOnce()) -> Vec<String> {
+    let buf = LogBuf::default();
+    let writer = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+    text.lines().map(str::to_owned).collect()
+}
+
+#[test]
+fn loop_starts_one_rescue() {
+    // PSI fires on every turn and the child stays alive: one rescue only.
+    let mut io = FakeIo::new(WaitResult::PsiFired);
+    assert_eq!(run_loop(&mut io, Some(10)), 1);
+    assert_eq!(io.spawn_attempts, 1);
+    assert_eq!(io.timeouts.len(), 10);
+    assert!(io.timeouts.iter().all(|&t| t <= MEMAVAIL_CHECK));
+}
+
+#[test]
+fn loop_restarts_after_child_exit() {
+    let mut io = FakeIo::new(WaitResult::PsiFired);
+    io.child_lives = Some(1);
+    // Turn 1 spawns, turn 2 sees the child alive, turn 3 sees it gone and spawns again.
+    assert_eq!(run_loop(&mut io, Some(3)), 2);
+    assert_eq!(io.spawn_attempts, 2);
+}
+
+#[test]
+fn loop_memavailable_path() {
+    let mut io = FakeIo::new(WaitResult::Timeout);
+    io.meminfo = Some(MemInfo {
+        total_kib: 1_000_000,
+        available_kib: 20_000,
+    });
+    // One turn waits one full MEMAVAIL_CHECK, then checks.
+    assert_eq!(run_loop(&mut io, Some(1)), 1);
+    assert_eq!(io.timeouts, [MEMAVAIL_CHECK]);
+    assert_eq!(io.meminfo_reads, 1);
+}
+
+#[test]
+fn loop_survives_meminfo_error() {
+    let mut io = FakeIo::new(WaitResult::Timeout);
+    io.meminfo = None;
+    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(5)), 0));
+    assert_eq!(io.meminfo_reads, 5);
+    assert_eq!(io.spawn_attempts, 0);
+    let warns: Vec<_> = logs
+        .iter()
+        .filter(|l| l.contains("WARN") && l.contains("/proc/meminfo"))
+        .collect();
+    assert_eq!(warns.len(), 5, "{logs:?}");
+}
+
+#[test]
+fn loop_retries_after_spawn_failure() {
+    let mut io = FakeIo::new(WaitResult::PsiFired);
+    io.spawn_failures = 1;
+    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(3)), 1));
+    // The failed first spawn left the state at "not running", so turn 2 tried again.
+    assert_eq!(io.spawn_attempts, 2);
+    assert!(logs.iter().any(|l| l.contains("WARN")), "{logs:?}");
+}
+
+#[test]
+fn no_spawn_without_display() {
+    let mut io = FakeIo::new(WaitResult::PsiFired);
+    io.display = false;
+    let logs = with_logs(|| assert_eq!(run_loop(&mut io, Some(3)), 0));
+    assert_eq!(io.spawn_attempts, 0);
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("WARN") && l.contains("WAYLAND_DISPLAY")),
+        "{logs:?}"
+    );
+}
+
+/// Needs the `--watch-memory` arm in main.rs (E32 m1f.5); without it this starts the full app.
+#[test]
+#[ignore = "starts the real binary; needs the --watch-memory arm in main.rs"]
+fn real_rss_under_4mib() {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tasklens"))
+        .arg("--watch-memory")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let pid = child.id();
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status"));
+    let threads = std::fs::read_dir(format!("/proc/{pid}/task")).map(Iterator::count);
+    // Kill only the child this test started, before any assert can fail.
+    let _ = child.kill();
+    let _ = child.wait();
+    let status = status.unwrap();
+    let rss_kib: u64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .and_then(|v| v.trim().strip_suffix("kB"))
+        .and_then(|v| v.trim().parse().ok())
+        .expect("VmRSS in /proc/<pid>/status");
+    assert!(rss_kib < 4096, "VmRSS {rss_kib} kB");
+    // One thread: no GPUI, no engine, no log writer thread.
+    assert_eq!(threads.unwrap(), 1);
+}
+
+/// U-51 (R-151): an unprivileged PSI trigger is accepted on the owner machine (kernel 7.2).
+#[test]
+#[ignore = "owner machine only, run as a normal user"]
+fn psi_trigger_accepted_unprivileged() {
+    let fd = watch_memory::open_psi_trigger().expect("PSI trigger write");
+    drop(fd);
 }
