@@ -1215,6 +1215,7 @@ shell-confirm-cancel = Cancel
 shell-toast-settings-reset = Settings reset to defaults
 shell-toast-settings-reset-failed = Failed to reset settings
 # View > Process View (tasklens-bj6.5, UI-SHL-035).
+shell-toast-pid-not-found = Process { $pid } not found
 shell-menu-pv-tree = Tree View
 shell-menu-pv-grouped = Task Manager Grouping
 shell-menu-pv-list = List View

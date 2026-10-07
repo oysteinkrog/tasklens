@@ -54,7 +54,7 @@ use crate::actions::{
     ToggleHideSystem, ToggleMainWindow, ZoomWindow,
 };
 use crate::anim::{AnimationDriver, FrameStats};
-use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
+use crate::app::{BootSettings, OpenHooks, StartOptions, ToastKindTag, UiExit, request_exit};
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
 use crate::components::toast::{ToastAction, ToastKey, ToastKind, ToastQueue};
@@ -66,6 +66,7 @@ use crate::pages::information::InformationPage;
 use crate::pages::performance::details::Template;
 use crate::pages::performance::{PerformancePage, SummaryToggled};
 use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::jump::JumpTexts;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::TABLE_CONTEXT;
@@ -653,16 +654,41 @@ fn tray_available(cx: &App) -> bool {
     false
 }
 
-/// The main window's `WindowOptions` (UI-SHL-002, ADR-010, APP-048).
-pub fn main_window_options(cx: &App) -> WindowOptions {
-    let settings = TlSettings::settings(cx);
-    let tray = &settings.tray;
+/// `--start-minimized` with a tray to hide in: the main window opens hidden (APP-048).
+fn start_hidden(cx: &App) -> bool {
+    let tray = &TlSettings::settings(cx).tray;
     let start_minimized = cx
         .try_global::<StartOptions>()
         .is_some_and(|s| s.start_minimized);
-    let start_hidden = start_minimized
+    start_minimized
         && (tray.close_to_tray || tray.minimize_to_tray || tray.always_show)
-        && tray_available(cx);
+        && tray_available(cx)
+}
+
+/// The once-per-process step 11 items that already ran (E20-018): a reopened window skips them.
+#[derive(Default)]
+struct StartupItemsDone {
+    toasts: bool,
+    select_pid: bool,
+    start_minimized: bool,
+}
+
+impl Global for StartupItemsDone {}
+
+/// How long `--select-pid` waits for the process to appear (E20-018).
+pub const SELECT_PID_WAIT: Duration = Duration::from_secs(3);
+
+/// A `--select-pid` waiting for its process: the hub subscription and the 3 s timeout.
+struct PendingPid {
+    pid: u32,
+    _sub: Subscription,
+    _timeout: Task<()>,
+}
+
+/// The main window's `WindowOptions` (UI-SHL-002, ADR-010, APP-048).
+pub fn main_window_options(cx: &App) -> WindowOptions {
+    let settings = TlSettings::settings(cx);
+    let start_hidden = start_hidden(cx);
     let mut options = WindowOptions {
         window_decorations: Some(match settings.appearance.decorations {
             Decorations::Client => WindowDecorations::Client,
@@ -818,8 +844,16 @@ pub struct MainWindow {
     health_ticking: bool,
     _health_tick: Option<Task<()>>,
     _subs: SmallVec<[Subscription; 8]>,
+    /// `--select-pid` waiting for its process (E20-018).
+    pending_pid: Option<PendingPid>,
     #[cfg(any(test, feature = "test-hooks"))]
     first_frames: u32,
+    /// `select_by_pid` calls made by `run_select_pid`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    select_pid_jumps: u32,
+    /// `minimize_window` calls made for `--start-minimized`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    start_minimizes: u32,
 }
 
 /// The `TlSettings` versions the toolbar model depends on.
@@ -979,8 +1013,13 @@ impl MainWindow {
             health_ticking: false,
             _health_tick: None,
             _subs: subs,
+            pending_pid: None,
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
+            #[cfg(any(test, feature = "test-hooks"))]
+            select_pid_jumps: 0,
+            #[cfg(any(test, feature = "test-hooks"))]
+            start_minimizes: 0,
         };
         this.sync_fps(cx);
         this.switch_to(start, false, window, cx);
@@ -1124,6 +1163,89 @@ impl MainWindow {
     #[cfg(any(test, feature = "test-hooks"))]
     pub fn first_frames(&self) -> u32 {
         self.first_frames
+    }
+
+    /// `select_by_pid` calls made by `run_select_pid`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn select_pid_jumps(&self) -> u32 {
+        self.select_pid_jumps
+    }
+
+    /// `minimize_window` calls made for `--start-minimized`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn start_minimizes(&self) -> u32 {
+        self.start_minimizes
+    }
+
+    /// Selects the Processes tab and jumps to `pid` as soon as a live record with that pid
+    /// exists (PROC-071). After [`SELECT_PID_WAIT`] without one: the Info toast "Process <pid>
+    /// not found", and the pid is dropped. A new call replaces a waiting one. Used at startup
+    /// and by E20-019.
+    pub fn run_select_pid(&mut self, pid: u32, window: &mut Window, cx: &mut Context<Self>) {
+        if factory_for(Tab::Processes, cx).is_none() {
+            return;
+        }
+        self.pending_pid = None;
+        self.select_tab(Tab::Processes, window, cx);
+        if self.try_select_pid(pid, window, cx) {
+            return;
+        }
+        let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) else {
+            return;
+        };
+        let sub = cx.subscribe_in(
+            &hub,
+            window,
+            move |this: &mut Self, _, ev: &SnapshotChanged, window, cx| {
+                if ev.mask.contains(ComponentMask::PROCESSES)
+                    && this.pending_pid.as_ref().is_some_and(|p| p.pid == pid)
+                    && this.try_select_pid(pid, window, cx)
+                {
+                    this.pending_pid = None;
+                }
+            },
+        );
+        let timeout = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(SELECT_PID_WAIT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.pending_pid.as_ref().is_some_and(|p| p.pid == pid) {
+                    this.pending_pid = None;
+                    let text = tr_args(
+                        cx,
+                        "shell-toast-pid-not-found",
+                        &[("pid", FluentValue::from(pid))],
+                    );
+                    this.toasts
+                        .update(cx, |q, cx| q.push(ToastKind::Info, text, None, None, cx));
+                }
+            });
+        });
+        self.pending_pid = Some(PendingPid {
+            pid,
+            _sub: sub,
+            _timeout: timeout,
+        });
+    }
+
+    /// Jumps to `pid` when the hub's current snapshot has a non-exited record with it.
+    fn try_select_pid(&mut self, pid: u32, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let live = cx.try_global::<GlobalHub>().is_some_and(|hub| {
+            hub.0.read(cx).current().processes.records.iter().any(|r| {
+                r.key.pid == pid && !r.flags.contains(tl_model::process::ProcFlags::EXITED)
+            })
+        });
+        let page = self.page_entity::<ProcessesPage>(Tab::Processes);
+        let (true, Some(page)) = (live, page) else {
+            return false;
+        };
+        page.update(cx, |p, cx| {
+            p.select_by_pid(pid, JumpTexts::default(), window, cx)
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            self.select_pid_jumps += 1;
+        }
+        true
     }
 
     /// Ctrl-pause (E20-012, UI-SHL-123): paused while Ctrl is held and the window is active. A
@@ -1450,7 +1572,6 @@ impl MainWindow {
 
     /// UI-SHL-110 step 11. Runs once per window, after its first frame.
     fn after_first_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let _ = window;
         #[cfg(any(test, feature = "test-hooks"))]
         {
             self.first_frames += 1;
@@ -1468,10 +1589,39 @@ impl MainWindow {
                 None => warn!(target: "tasklens::perf", "first_frame_ms unavailable"),
             }
         }
-        // step 11: queued toasts (E20-018)
-        // step 11: crash report (E20-018)
-        // step 11: --select-pid (E20-018)
-        // step 11: --start-minimized without tray (E20-018)
+        let done = cx.default_global::<StartupItemsDone>();
+        let first_toasts = !mem::replace(&mut done.toasts, true);
+        let first_select = !mem::replace(&mut done.select_pid, true);
+        let first_minimize = !mem::replace(&mut done.start_minimized, true);
+        // step 11: queued toasts (E20-018), once per process, in order
+        if first_toasts && cx.has_global::<BootSettings>() {
+            let queued = mem::take(&mut cx.global_mut::<BootSettings>().startup_toasts);
+            for (tag, text) in queued {
+                let kind = match tag {
+                    ToastKindTag::Info => ToastKind::Info,
+                    ToastKindTag::Success => ToastKind::Success,
+                    ToastKindTag::Warning => ToastKind::Warning,
+                    ToastKindTag::Error => ToastKind::Error,
+                };
+                self.toasts
+                    .update(cx, |q, cx| q.push(kind, text, None, None, cx));
+            }
+        }
+        // step 11: crash report (E20-018), on every main window's first frame
+        super::crash_report::show_pending(window, cx);
+        // step 11: --select-pid (E20-018), once per process
+        let options = cx.try_global::<StartOptions>().cloned().unwrap_or_default();
+        if first_select && let Some(pid) = options.select_pid {
+            self.run_select_pid(pid, window, cx);
+        }
+        // step 11: --start-minimized without tray (E20-018), once per process
+        if first_minimize && options.start_minimized && !start_hidden(cx) {
+            window.minimize_window();
+            #[cfg(any(test, feature = "test-hooks"))]
+            {
+                self.start_minimizes += 1;
+            }
+        }
         // step 11: helper unlock at launch (E20-026)
         // step 11: public IP auto-fetch (E20-024)
     }
