@@ -457,13 +457,8 @@ fn affinity_demand_registered_and_removed(cx: &mut TestAppContext) {
 fn affinity_hybrid_core_icons(cx: &mut TestAppContext) {
     let mut rig = open_on(cx, hybrid_topology(), Some((set(0..6), set(0..6))));
     rig.draw();
-    for mark in ['P', 'E'] {
-        assert!(
-            rig.vcx
-                .debug_bounds(&format!("AffinityGroupIcon-{mark}"))
-                .is_some(),
-            "{mark} group icon"
-        );
+    for selector in ["AffinityGroupIcon-P", "AffinityGroupIcon-E"] {
+        assert!(rig.vcx.debug_bounds(selector).is_some(), "{selector}");
     }
 }
 
