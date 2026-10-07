@@ -28,8 +28,9 @@ use gpui_kit::component::{ResizableState, h_flex, h_resizable, resizable_panel};
 use gpui_kit::private::schemars::JsonSchema;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyView, App, AppContext as _, AsyncApp, Context, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, StyleRefinement, Styled as _, Subscription, WeakEntity, Window, div, px,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _,
+    Subscription, WeakEntity, Window, div, px,
 };
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
@@ -39,9 +40,12 @@ use tl_model::ids::DeviceIdx;
 use tl_model::settings::DeviceVisibility;
 
 use self::actions::{
-    PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfToggleSidebar, PerfToggleSummaryMode,
+    PERFORMANCE_CONTEXT, PerfJumpToType, PerfSelectDevice, PerfSetGraphRange, PerfToggleSidebar,
+    PerfToggleSummaryMode,
 };
+use self::menu::{PageMenuCtx, page_menu};
 use self::page::DevicePage;
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, M_FAST, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::SnapshotHub;
@@ -651,6 +655,35 @@ impl PerformancePage {
         self.split_width = Pixels::ZERO;
     }
 
+    /// `PerfSetGraphRange`: the sidebar, the pages and the summary tiles follow the setting.
+    fn on_set_graph_range(
+        &mut self,
+        a: &PerfSetGraphRange,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        set_graph_range(a.secs, cx);
+    }
+
+    /// The page menu of the shown page at `at` (UI-PRF-015). Its items run on the page.
+    fn open_page_menu(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.selected_view() else {
+            return;
+        };
+        let focus = page_focus(&view, cx).unwrap_or_else(|| self.focus.clone());
+        let summary_on = self.summary.is_some();
+        let menu = TlMenu::build(window, cx, focus, move |menu, window, cx| {
+            let ctx = page_menu_ctx(summary_on, cx);
+            let mut slot = Some(menu);
+            update_page(&view, cx, |p, cx| {
+                let menu = slot.take().expect("one page");
+                slot = Some(page_menu(menu, p, &ctx, window, cx));
+            });
+            slot.expect("the menu")
+        });
+        open_context_menu_at(at, window, cx, menu);
+    }
+
     /// `PerfJumpToType`: selects the first visible card of `kind`.
     fn on_jump_to_type(&mut self, a: &PerfJumpToType, _: &mut Window, cx: &mut Context<Self>) {
         let key = self
@@ -693,6 +726,40 @@ impl PerformancePage {
 
 /// Runs `f` on the device page behind `view`. Each page type `page::build_page` creates has a
 /// line here (chain edit with its `build_page` arm, E25-010).
+/// Writes `performance.graph_range_s` (PERF-016). 300 and 600 wait for E24-019.
+pub fn set_graph_range(secs: u16, cx: &mut App) {
+    if !matches!(secs, 30 | 60) {
+        return;
+    }
+    TlSettings::update(cx, |d| d.settings.performance.graph_range_s = secs);
+}
+
+/// The page menu's state from the settings.
+pub fn page_menu_ctx(summary_on: bool, cx: &App) -> PageMenuCtx<'static> {
+    PageMenuCtx {
+        range_s: TlSettings::settings(cx).performance.graph_range_s,
+        summary_on,
+        ranges_long_enabled: false,
+        view_types: None,
+        tray_available: None,
+    }
+}
+
+/// The page's own focus handle; its actions are handled on the page's root.
+fn page_focus(view: &AnyView, cx: &App) -> Option<FocusHandle> {
+    fn of<T: Focusable>(view: &AnyView, cx: &App) -> Option<FocusHandle> {
+        view.clone()
+            .downcast::<T>()
+            .ok()
+            .map(|e| e.read(cx).focus_handle(cx))
+    }
+    of::<cpu::CpuPage>(view, cx)
+        .or_else(|| of::<memory::MemoryPage>(view, cx))
+        .or_else(|| of::<disk::DiskPage>(view, cx))
+        .or_else(|| of::<net::NetPage>(view, cx))
+        .or_else(|| of::<gpu::GpuPage>(view, cx))
+}
+
 fn update_page(view: &AnyView, cx: &mut App, f: impl FnOnce(&mut dyn DevicePage, &mut App)) {
     let view = match view.clone().downcast::<cpu::CpuPage>() {
         Ok(e) => return e.update(cx, |p, cx| f(p, cx)),
@@ -799,6 +866,14 @@ impl Render for PerformancePage {
         let page = div()
             .debug_selector(|| PAGE_PANEL_ID.into())
             .size_full()
+            // Right-click anywhere on the device page: the page menu (UI-PRF-015).
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.open_page_menu(ev.position, window, cx);
+                }),
+            )
             .children(
                 self.selected_view()
                     .map(|v| v.cached(StyleRefinement::default().size_full())),
@@ -856,6 +931,7 @@ impl Render for PerformancePage {
             .on_action(cx.listener(Self::on_jump_to_type))
             .on_action(cx.listener(Self::on_select_device))
             .on_action(cx.listener(Self::on_toggle_summary))
+            .on_action(cx.listener(Self::on_set_graph_range))
             .size_full()
             .children(animated)
             .child(split);

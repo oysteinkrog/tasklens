@@ -23,17 +23,18 @@ use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 
 use super::actions::{
-    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfSetPageVisible, PerfShowMiniWindow,
-    PerfToggleSummaryMode,
+    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfSetGraphRange, PerfShowMiniWindow, PerfToggleSummaryMode,
 };
+use super::menu::page_menu_common;
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
+use super::{page_menu_ctx, set_graph_range};
 use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
-use crate::components::menu::open_context_menu_at;
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
-use crate::settings_global::animations_on;
+use crate::settings_global::{TlSettings, animations_on};
 use crate::theme::{current, metrics};
 
 /// Debug selector of the tile grid and the prefix of each tile's (`perf-summary-tile-<i>`).
@@ -131,16 +132,22 @@ pub struct SummaryView {
     /// The tiles fade in on entry unless animations are off.
     fade: bool,
     demand: Entity<DemandAggregator>,
-    /// The tiles follow its visible cards; the tile menu is its card menu.
+    /// The tiles follow its visible cards.
     sidebar: Entity<DeviceSidebar>,
     id: EntityId,
     window: Option<AnyWindowHandle>,
-    _sidebar_sub: Subscription,
+    /// `performance.graph_range_s` the tile charts show, in ns.
+    range_ns: u64,
+    _subs: [Subscription; 2],
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
 impl EventEmitter<SummaryEvent> for SummaryView {}
+
+fn graph_range_ns(cx: &App) -> u64 {
+    u64::from(TlSettings::settings(cx).performance.graph_range_s) * 1_000_000_000
+}
 
 /// One tile per visible (not collapsing) sidebar card, in sidebar order.
 fn build_tiles(sidebar: &Entity<DeviceSidebar>, cx: &mut App) -> Vec<Tile> {
@@ -199,8 +206,11 @@ impl SummaryView {
     ) -> Self {
         let selected_on_entry = sidebar.read(cx).selected().cloned();
         let tiles = build_tiles(sidebar, cx);
-        // A page hidden from the tile menu leaves the grid.
-        let sidebar_sub = cx.observe(sidebar, |this, _, cx| this.sync_tiles(cx));
+        // A page hidden while the mode is on leaves the grid; a new range reaches the tiles.
+        let subs = [
+            cx.observe(sidebar, |this, _, cx| this.sync_tiles(cx)),
+            cx.observe_global::<TlSettings>(Self::sync_range),
+        ];
 
         let id = cx.entity_id();
         let release_demand = demand.clone();
@@ -219,7 +229,8 @@ impl SummaryView {
             sidebar: sidebar.clone(),
             id,
             window: None,
-            _sidebar_sub: sidebar_sub,
+            range_ns: graph_range_ns(cx),
+            _subs: subs,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
@@ -290,16 +301,30 @@ impl SummaryView {
         self.resize(size, cx);
     }
 
-    /// The tile menu runs the card menu's items on the sidebar.
-    fn on_set_page_visible(
+    /// A new graph range: each tile chart takes it and builds its geometry once.
+    fn sync_range(&mut self, cx: &mut Context<Self>) {
+        let range_ns = graph_range_ns(cx);
+        if range_ns == self.range_ns {
+            return;
+        }
+        self.range_ns = range_ns;
+        for tile in &self.tiles {
+            tile.chart.update(cx, |v, cx| {
+                let mut spec = v.spec.clone();
+                spec.range_ns = range_ns;
+                v.set_spec(spec, cx);
+            });
+        }
+    }
+
+    /// The tile menu's Time range items run here: no `PerformancePage` is drawn above this view.
+    fn on_set_graph_range(
         &mut self,
-        a: &PerfSetPageVisible,
-        window: &mut Window,
+        a: &PerfSetGraphRange,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar.update(cx, |s, cx| {
-            s.set_page_visible(&a.key, a.visible, window, cx)
-        });
+        set_graph_range(a.secs, cx);
     }
 }
 
@@ -451,17 +476,19 @@ impl Render for SummaryView {
                         .cached(StyleRefinement::default().size_full()),
                 )
                 .children(marker)
-                .on_mouse_down(MouseButton::Right, {
-                    let key = tile.key.clone();
-                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                // The page menu's common items (UI-PRF-016). No device page is drawn here, so
+                // its own items would reach no handler.
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
-                        let focus = this.focus.clone();
-                        let menu = this
-                            .sidebar
-                            .update(cx, |s, cx| s.card_menu_for(&key, focus, window, cx));
+                        let menu = TlMenu::build(window, cx, this.focus.clone(), |menu, w, cx| {
+                            let ctx = page_menu_ctx(true, cx);
+                            page_menu_common(menu, &ctx, w, cx)
+                        });
                         open_context_menu_at(ev.position, window, cx, menu);
-                    })
-                })
+                    }),
+                )
                 .on_click(
                     cx.listener(move |_, ev: &gpui_kit::ClickEvent, window, cx| {
                         if ev.click_count() == 2 {
@@ -513,7 +540,7 @@ impl Render for SummaryView {
             .key_context(PERFORMANCE_SUMMARY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle))
-            .on_action(cx.listener(Self::on_set_page_visible))
+            .on_action(cx.listener(Self::on_set_graph_range))
             // A binding whose action has no handler falls through to the next binding for the
             // same keys, so the swallowed tab keys need this empty handler.
             .on_action(|_: &NoOp, _, _| {})

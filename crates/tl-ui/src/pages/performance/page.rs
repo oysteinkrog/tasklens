@@ -386,7 +386,7 @@ impl DevicePageFrame<'_> {
             .map_text(label_style(m, m.text.md, FontWeight::MEDIUM))
             .child(details_heading);
 
-        // E24-012: `.context_menu` with the page menu (UI-PRF-015) goes on this column.
+        // The page menu (UI-PRF-015) opens from the page panel of `PerformancePage`.
         v_flex()
             .min_w(px(PAGE_MIN_W * s))
             .p(px(PAGE_PAD * s))
