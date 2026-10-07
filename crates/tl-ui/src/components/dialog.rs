@@ -165,6 +165,8 @@ pub struct TlDialog {
     extra: Option<ExtraBuilder>,
     checkbox: Option<(SharedString, bool)>,
     title: SharedString,
+    /// False for a notice with only the action button (see [`TlDialog::without_cancel`]).
+    cancel: bool,
 }
 
 impl TlDialog {
@@ -181,6 +183,7 @@ impl TlDialog {
             extra: None,
             checkbox: None,
             title: DEFAULT_TITLE.into(),
+            cancel: true,
         }
     }
 
@@ -228,6 +231,21 @@ impl TlDialog {
     pub fn checkbox(mut self, label: impl Into<SharedString>, initial: bool) -> Self {
         self.checkbox = Some((label.into(), initial));
         self
+    }
+
+    /// Drops the Cancel button, for a notice whose one button closes it (the action tracker's
+    /// Details list, R-197). Esc, Ctrl+W and the close button still end it as Cancelled.
+    pub fn without_cancel(mut self) -> Self {
+        self.cancel = false;
+        self
+    }
+
+    pub fn has_cancel(&self) -> bool {
+        self.cancel
+    }
+
+    pub fn text(&self) -> &SharedString {
+        &self.text
     }
 
     pub fn is_destructive(&self) -> bool {
@@ -411,7 +429,7 @@ impl TlDialog {
                     .flex_row()
                     .justify_end()
                     .gap(m.sp[4])
-                    .child(cancel)
+                    .when(self.cancel, |footer| footer.child(cancel))
                     .children(second)
                     .child(action),
             )
