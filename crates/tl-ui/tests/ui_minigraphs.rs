@@ -173,7 +173,10 @@ fn add_minigraph_from_json(cx: &mut TestAppContext) {
 mod card {
     use std::sync::Arc;
 
-    use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, StyleRefinement,
+        Styled as _, TestAppContext, VisualTestContext, Window, div, px,
+    };
     use tl_model::client::EngineClient;
     use tl_model::devices::{AggregateKind, DeviceCatalog, DeviceEntry, DeviceIdentity};
     use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
@@ -317,12 +320,28 @@ mod card {
             order: Vec<DeviceKey>,
         ) -> (Entity<MinigraphCard>, VisualTestContext) {
             let hub = self.hub.clone();
-            let (card, vcx) = cx.add_window_view(move |_, cx| {
-                MinigraphCard::new(mini(source), &catalog(), &order, &hub, cx)
+            let (host, vcx) = cx.add_window_view(move |_, cx| Host {
+                card: cx.new(|cx| MinigraphCard::new(mini(source), &catalog(), &order, &hub, cx)),
             });
             let mut vcx = vcx.clone();
+            let card = vcx.read_entity(&host, |h, _| h.card.clone());
             draw(&mut vcx);
             (card, vcx)
+        }
+    }
+
+    /// Embeds the card cached, as the panel does: the window's root re-renders on every draw.
+    struct Host {
+        card: Entity<MinigraphCard>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size(px(400.)).child(
+                self.card
+                    .clone()
+                    .cached(StyleRefinement::default().w(px(180.)).h(px(90.))),
+            )
         }
     }
 
