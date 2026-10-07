@@ -14,9 +14,10 @@ use std::sync::Arc;
 
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, EntityId,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    Render, SharedString, StyleRefinement, Styled as _, Subscription, Window, canvas, div, px,
+    Animation, AnimationExt as _, AnyElement, AnyWindowHandle, App, AppContext as _, AsyncApp,
+    Bounds, Context, Entity, EntityId, FocusHandle, Focusable, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement as _, Pixels, Render, SharedString, StyleRefinement, Styled as _,
+    Subscription, WeakEntity, Window, canvas, div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
@@ -39,19 +40,20 @@ use super::page::{DevicePage, DevicePageFrame, GRAPH_H_OVERALL, header_text, pag
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{
     ChartBg, ChartLabels, ChartSeries, ChartSpec, ChartState, ChartView, GridStyle, LegendStyle,
-    ValueAlign, ValueFormat, YScale,
+    ValueAlign, ValueFormat, YScale, grid_height, grid_layout,
 };
 use crate::components::button::{TlButton, TlButtonKind, TlButtonSize};
 use crate::components::icons::TlIcon;
 use crate::components::menu::{TlMenu, open_context_menu_at};
+use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
-use crate::settings_global::{Section, TlSettings};
+use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::{TlTheme, UiMetrics, current, metrics};
 
-/// The overlaid and stacked modes. E24-018 sets it to true.
-pub const CPU_EXTRA_MODES_ENABLED: bool = false;
+/// The overlaid and stacked modes are in the mode menu (E24-018).
+pub const CPU_EXTRA_MODES_ENABLED: bool = true;
 
 /// Element id of the mode button.
 pub const MODE_BUTTON_ID: &str = "perf-cpu-mode";
@@ -59,6 +61,16 @@ pub const MODE_BUTTON_ID: &str = "perf-cpu-mode";
 pub const KERNEL_BUTTON_ID: &str = "perf-cpu-kernel";
 /// Debug selector of the box around the Overall chart.
 pub const OVERALL_ID: &str = "perf-cpu-overall";
+/// Debug selector of the box around the overlaid chart.
+pub const OVERLAID_ID: &str = "perf-cpu-overlaid";
+/// Debug selector of the box around the stacked chart.
+pub const STACKED_ID: &str = "perf-cpu-stacked";
+
+/// Lowest line alpha in the overlaid mode (PERF-029).
+const OVERLAID_MIN_ALPHA: f32 = 0.08;
+/// Band alphas in the stacked mode, alternating. No document gives a per-band colour step, so
+/// every band is `cpu_fill` and the alpha alternates (plan open item 7).
+const STACKED_ALPHAS: [f32; 2] = [0.85, 0.70];
 
 const KEY_OVERALL: &str = "perf-cpu-mode-overall";
 const KEY_PER_CORE: &str = "perf-cpu-mode-per-core";
@@ -203,6 +215,26 @@ fn mode_menu(
     menu
 }
 
+/// The chart settings the overlaid and stacked specs read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageSettingsView {
+    pub range_ns: u64,
+    pub smooth: bool,
+    pub rounded: bool,
+}
+
+/// Debug selectors of the two areas during a cross-fade.
+pub const FADE_OLD_ID: &str = "perf-cpu-fade-old";
+pub const FADE_NEW_ID: &str = "perf-cpu-fade-new";
+
+/// A mode change cross-fading over `m_base` (UI-PRF-023).
+#[derive(Clone, Copy, Debug)]
+struct ModeFade {
+    from: CpuGraphMode,
+    /// Bumped on each change, so a new change restarts the animation.
+    generation: u32,
+}
+
 /// The settings the page draws from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct PageSettings {
@@ -214,6 +246,14 @@ struct PageSettings {
 }
 
 impl PageSettings {
+    fn view(&self) -> PageSettingsView {
+        PageSettingsView {
+            range_ns: self.range_ns,
+            smooth: self.smooth,
+            rounded: self.rounded,
+        }
+    }
+
     fn read(cx: &App) -> Self {
         let s = TlSettings::settings(cx);
         Self {
@@ -292,6 +332,94 @@ fn overall_labels(kernel: bool, words: &Words) -> ChartLabels {
     }
 }
 
+/// The logical CPUs that have a catalog entry, ascending by id.
+fn present(logical: &[DeviceIdx]) -> impl Iterator<Item = DeviceIdx> + '_ {
+    logical.iter().copied().filter(|d| d.0 != u16::MAX)
+}
+
+/// The overlaid chart: one line per logical CPU at `max(1/n, 0.08)` alpha, no fill, 0..100.
+pub fn overlaid_spec(logical: &[DeviceIdx], s: &PageSettingsView, theme: &TlTheme) -> ChartSpec {
+    let n = present(logical).count().max(1);
+    let line = theme.graph.cpu_line;
+    let line = Hsla {
+        a: (1.0 / n as f32).max(OVERLAID_MIN_ALPHA),
+        ..line
+    };
+    ChartSpec {
+        series: present(logical)
+            .map(|device| ChartSeries {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::CPU_TOTAL,
+                },
+                fill: None,
+                line,
+                ..ChartSeries::default()
+            })
+            .collect(),
+        y: YScale::Fixed {
+            min: 0.0,
+            max: 100.0,
+        },
+        ..base_spec(s)
+    }
+}
+
+/// The stacked chart: one filled band per logical CPU, 0..100 × n.
+pub fn stacked_spec(logical: &[DeviceIdx], s: &PageSettingsView, theme: &TlTheme) -> ChartSpec {
+    let n = present(logical).count().max(1);
+    let fill = theme.graph.cpu_fill;
+    ChartSpec {
+        series: present(logical)
+            .enumerate()
+            .map(|(k, device)| ChartSeries {
+                id: SeriesId {
+                    device,
+                    metric: MetricId::CPU_TOTAL,
+                },
+                fill: Some(Hsla {
+                    a: STACKED_ALPHAS[k % 2],
+                    ..fill
+                }),
+                line: theme.graph.cpu_line,
+                ..ChartSeries::default()
+            })
+            .collect(),
+        y: YScale::Stacked(u16::try_from(n).unwrap_or(u16::MAX)),
+        stack: true,
+        ..base_spec(s)
+    }
+}
+
+/// The range, smoothing and grid every CPU chart shares.
+fn base_spec(s: &PageSettingsView) -> ChartSpec {
+    ChartSpec {
+        range_ns: s.range_ns,
+        grid: GridStyle {
+            lines: true,
+            baseline: false,
+            outline: true,
+            rounded: s.rounded,
+        },
+        smooth: s.smooth,
+        background: ChartBg::Window,
+        ..ChartSpec::default()
+    }
+}
+
+/// The overlaid and stacked labels: the Utilization heading, no legend; the stacked chart
+/// shows its axis max ("1600%").
+fn all_cores_labels(stacked: bool, words: &Words) -> ChartLabels {
+    ChartLabels {
+        heading: Some(words.utilization.clone()),
+        value_fmt: ValueFormat::Percent,
+        value_align: ValueAlign::Right,
+        range_word: words.utilization.clone(),
+        legend: SmallVec::new(),
+        show_axis_max: stacked,
+    }
+}
+
 /// `DeviceIdx` per logical CPU id from the catalog. An id the catalog skips gets
 /// `DeviceIdx(u16::MAX)`, which matches no series.
 fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
@@ -329,12 +457,15 @@ pub struct CpuPage {
     row: DeviceRow,
     overall: Entity<ChartView>,
     grid: CpuGrid,
-    /// E24-018.
-    #[allow(dead_code, reason = "E24-018 creates it on first use")]
+    /// Created the first time the overlaid mode is shown.
     overlaid: Option<Entity<ChartView>>,
-    /// E24-018.
-    #[allow(dead_code, reason = "E24-018 creates it on first use")]
+    /// Created the first time the stacked mode is shown.
     stacked: Option<Entity<ChartView>>,
+    /// The mode change cross-fading now, if any.
+    fade: Option<ModeFade>,
+    fade_generation: u32,
+    /// The graph area width of the last paint, for the per-core grid height during a fade.
+    area_width: Rc<Cell<Pixels>>,
     /// E24-021.
     #[allow(dead_code, reason = "E24-021 creates it")]
     secondary: Option<Entity<ChartView>>,
@@ -424,6 +555,9 @@ impl CpuPage {
             grid,
             overlaid: None,
             stacked: None,
+            fade: None,
+            fade_generation: 0,
+            area_width: Rc::new(Cell::new(px(0.))),
             secondary: None,
             details: cpu_details_model(),
             mode: settings.mode,
@@ -457,7 +591,130 @@ impl CpuPage {
         };
         cpu_temp_sensors(&snap.devices, &mut this.temp_sensors);
         this.apply_snapshot(&snap, ComponentMask::ALL, cx);
+        this.ensure_mode_chart(cx);
         this
+    }
+
+    pub fn overlaid(&self) -> Option<&Entity<ChartView>> {
+        self.overlaid.as_ref()
+    }
+
+    pub fn stacked(&self) -> Option<&Entity<ChartView>> {
+        self.stacked.as_ref()
+    }
+
+    /// The mode the graph area is fading from, while a mode change cross-fades.
+    pub fn fading_from(&self) -> Option<CpuGraphMode> {
+        self.fade.map(|f| f.from)
+    }
+
+    /// The kernel toggle does nothing in the all-cores modes (UI-PRF-023).
+    pub fn kernel_enabled(&self) -> bool {
+        !matches!(
+            self.mode,
+            CpuGraphMode::AllCoresOverlaid | CpuGraphMode::AllCoresStacked
+        )
+    }
+
+    /// Creates the overlaid or stacked chart the first time its mode is shown.
+    fn ensure_mode_chart(&mut self, cx: &mut Context<Self>) {
+        let theme = current(cx).clone();
+        let s = self.settings.view();
+        match self.mode {
+            CpuGraphMode::AllCoresOverlaid if self.overlaid.is_none() => {
+                let (spec, labels) = (
+                    overlaid_spec(&self.logical, &s, &theme),
+                    all_cores_labels(false, &self.words),
+                );
+                let hub = self.hub.clone();
+                self.overlaid = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+            }
+            CpuGraphMode::AllCoresStacked if self.stacked.is_none() => {
+                let (spec, labels) = (
+                    stacked_spec(&self.logical, &s, &theme),
+                    all_cores_labels(true, &self.words),
+                );
+                let hub = self.hub.clone();
+                self.stacked = Some(cx.new(|cx| ChartView::new(spec, labels, &hub, cx)));
+            }
+            _ => {}
+        }
+    }
+
+    /// New specs for the overlaid and stacked charts that exist (hotplug, settings, theme).
+    fn rebuild_mode_specs(&self, cx: &mut App) {
+        let theme = current(cx).clone();
+        let s = self.settings.view();
+        if let Some(v) = &self.overlaid {
+            let spec = overlaid_spec(&self.logical, &s, &theme);
+            v.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
+        if let Some(v) = &self.stacked {
+            let spec = stacked_spec(&self.logical, &s, &theme);
+            v.update(cx, |v, cx| v.set_spec(spec, cx));
+        }
+    }
+
+    /// Starts the cross-fade from `from` to the current mode, or nothing when animations are
+    /// off. A timer ends it after `m_base`, so no frame is drawn for it afterwards.
+    fn start_fade(&mut self, from: CpuGraphMode, cx: &mut Context<Self>) {
+        self.fade_generation = self.fade_generation.wrapping_add(1);
+        if !animations_on(cx) {
+            self.fade = None;
+            return;
+        }
+        let generation = self.fade_generation;
+        self.fade = Some(ModeFade { from, generation });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(M_BASE).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.fade_generation == generation {
+                    this.fade = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The graph area height of `mode`: 300 for the single charts, the grid's height for the
+    /// width of the last paint in per-core mode.
+    fn area_height(&self, mode: CpuGraphMode, scale: f32, cx: &App) -> Pixels {
+        match mode {
+            CpuGraphMode::PerCore => {
+                let spec = &self.grid.view.read(cx).spec;
+                let w = self.area_width.get();
+                let w = if w > px(0.) { w } else { px(1.0e6) };
+                let layout = grid_layout(spec.cells.len(), w, spec.cell_min_w, spec.gap);
+                grid_height(&layout, spec.cell_h, spec.gap)
+            }
+            _ => px(GRAPH_H_OVERALL * scale),
+        }
+    }
+
+    /// The graph area of `mode`.
+    fn mode_element(&self, mode: CpuGraphMode, window: &mut Window, cx: &mut App) -> AnyElement {
+        let scale = metrics(cx).ui_scale;
+        let chart = |id: &'static str, view: Option<&Entity<ChartView>>| {
+            view.map(|v| Self::chart_element(id, v, scale))
+        };
+        let el = match mode {
+            CpuGraphMode::PerCore => return self.grid.element(window, cx),
+            CpuGraphMode::Overall => None,
+            CpuGraphMode::AllCoresOverlaid => chart(OVERLAID_ID, self.overlaid.as_ref()),
+            CpuGraphMode::AllCoresStacked => chart(STACKED_ID, self.stacked.as_ref()),
+        };
+        el.unwrap_or_else(|| self.overall_element(scale))
+    }
+
+    /// `view` in a full-width box of `GRAPH_H_OVERALL`.
+    fn chart_element(id: &'static str, view: &Entity<ChartView>, scale: f32) -> AnyElement {
+        div()
+            .debug_selector(move || id.into())
+            .w_full()
+            .h(px(GRAPH_H_OVERALL * scale))
+            .child(view.clone().cached(StyleRefinement::default().size_full()))
+            .into_any_element()
     }
 
     pub fn mode(&self) -> CpuGraphMode {
@@ -530,6 +787,7 @@ impl CpuPage {
             self.topology = Arc::clone(&snap.system.cpu_topology);
             self.grid
                 .set_topology(Arc::clone(&self.topology), &self.logical, cx);
+            self.rebuild_mode_specs(cx);
         }
         if system || new_cells {
             self.sync_clocks(&snap.system.cpu.per_cpu_mhz, new_cells, cx);
@@ -590,8 +848,13 @@ impl CpuPage {
         let theme = current(cx).clone();
         let spec = overall_spec(self.row.idx, &new, &theme);
         self.overall.update(cx, |v, cx| v.set_spec(spec, cx));
+        if new.view() != old.view() {
+            self.rebuild_mode_specs(cx);
+        }
         if new.mode != old.mode {
             self.mode = new.mode;
+            self.ensure_mode_chart(cx);
+            self.start_fade(old.mode, cx);
             self.send_demand(cx);
         }
         cx.notify();
@@ -621,6 +884,7 @@ impl CpuPage {
         self.sync_clocks(&clocks, true, cx);
         let spec = overall_spec(self.row.idx, &s, &theme);
         self.overall.update(cx, |v, cx| v.set_spec(spec, cx));
+        self.rebuild_mode_specs(cx);
         cx.notify();
     }
 
@@ -732,6 +996,7 @@ impl DevicePage for CpuPage {
             TlButton::new(KERNEL_BUTTON_ID, TlButtonKind::Segment { on: self.kernel })
                 .label(w.kernel_toggle(self.kernel).clone())
                 .tooltip(w.tip_kernel.clone())
+                .disabled(!self.kernel_enabled())
                 .focus_handle(self.kernel_button_focus.clone())
                 .on_click(move |_, window, cx| {
                     page_focus.dispatch_action(&PerfToggleCpuKernel, window, cx);
@@ -753,11 +1018,54 @@ impl DevicePage for CpuPage {
                 .child(self.grid.element(window, cx))
                 .into_any_element();
         }
-        match self.mode {
-            CpuGraphMode::PerCore => self.grid.element(window, cx),
-            // The overlaid and stacked modes show the Overall chart until E24-018.
-            _ => self.overall_element(m.ui_scale),
-        }
+        let measure = {
+            let cell = Rc::clone(&self.area_width);
+            canvas(move |b, _, _| cell.set(b.size.width), |_, _, _, _| {})
+                .absolute()
+                .inset_0()
+        };
+        let Some(ModeFade { from, generation }) = self.fade else {
+            return div()
+                .relative()
+                .w_full()
+                .child(self.mode_element(self.mode, window, cx))
+                .child(measure)
+                .into_any_element();
+        };
+        // Cross-fade: both areas in one box whose height moves from the old to the new one.
+        let (h0, h1) = (
+            self.area_height(from, m.ui_scale, cx),
+            self.area_height(self.mode, m.ui_scale, cx),
+        );
+        let anim = || Animation::new(M_BASE).with_easing(ease_out_cubic);
+        let id = |part: &'static str| (part, generation as usize);
+        let old = div()
+            .debug_selector(|| FADE_OLD_ID.into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .child(self.mode_element(from, window, cx))
+            .with_animation(id("perf-cpu-fade-old"), anim(), |el, t| el.opacity(1. - t));
+        let new = div()
+            .debug_selector(|| FADE_NEW_ID.into())
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .child(self.mode_element(self.mode, window, cx))
+            .with_animation(id("perf-cpu-fade-new"), anim(), |el, t| el.opacity(t));
+        div()
+            .relative()
+            .w_full()
+            .overflow_hidden()
+            .child(old)
+            .child(new)
+            .child(measure)
+            .with_animation(id("perf-cpu-fade-h"), anim(), move |el, t| {
+                el.h(h0 + (h1 - h0) * t)
+            })
+            .into_any_element()
     }
 
     fn details(&self) -> &KeyValueModel {
