@@ -13,8 +13,9 @@
 //! while scrubbed or with a range set, where no tick runs.
 //!
 //! The table (E30-019) is a child `TlTreeTable` over [`table::HistoryTableDelegate`]. The page
-//! hands it each installed view, the global filter text and the settings it follows, and copies
-//! its selection into `HistoryUiState::selected` in selection order.
+//! hands it each installed view, the global filter text (the filter box's text when the page is
+//! made, then each `FilterChanged`) and the settings it follows, and copies its selection into
+//! `HistoryUiState::selected` in selection order.
 
 pub mod scrubber;
 pub mod table;
@@ -41,7 +42,7 @@ use crate::pages::performance::details::Template;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::tree_table::{TlTreeTable, TreeTableDelegate as _};
 use crate::theme::{bump_style_version, current, metrics};
-use crate::window::main::{FilterChanged, GlobalShellEvents};
+use crate::window::main::{FilterChanged, GlobalShellEvents, main_window_view};
 
 use self::scrubber::{HistoryScrubber, ScrubberCache};
 use self::table::HistoryTableDelegate;
@@ -479,6 +480,20 @@ impl HistoryPage {
                 }
             }));
         }
+        // A filter typed before History mode started sent its FilterChanged before this page
+        // listened, so take the box's text once. Deferred: the main window may be mid-update.
+        cx.defer_in(window, |this, _, cx| {
+            let text = main_window_view(cx).map(|main| {
+                main.read(cx)
+                    .filter_box()
+                    .read(cx)
+                    .text(Tab::Processes)
+                    .clone()
+            });
+            if let Some(text) = text.filter(|t| !t.is_empty()) {
+                this.set_filter(&text, cx);
+            }
+        });
         let section_versions = cx
             .try_global::<TlSettings>()
             .map_or([0; 3], |tl| SECTIONS.map(|s| tl.version(s)));

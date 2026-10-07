@@ -1,7 +1,8 @@
 //! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19), and the
 //! query controller with one Frame query in flight (tasklens-8fx.20), and the History table
 //! (tasklens-8fx.22), and queries on strip window, metric and selection changes
-//! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24).
+//! (tasklens-8fx.38), and the timeline strip's cached geometry and gap bands (tasklens-8fx.24), and
+//! the filter text typed before the page existed (tasklens-8fx.39).
 //! Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
@@ -961,4 +962,84 @@ fn scrubber_draws_gap_band(cx: &mut TestAppContext) {
     // The second band starts 200 s after the first: 200 / 60 band widths to the right.
     let dx = f32::from(bands[1].start - bands[0].start);
     assert!((dx / w0 - 200.0 / 60.0).abs() < 0.05, "{dx} {w0}");
+}
+
+/// A filter typed on Processes before History mode starts applies to the new page's table, and
+/// clearing it shows every row (tasklens-8fx.39). Nothing builds `HistoryPage` in the shell yet,
+/// so making the page stands for turning History mode on.
+#[gpui_kit::test]
+fn filter_typed_before_history_mode_applies(cx: &mut TestAppContext) {
+    use tl_model::command::Tab;
+    use tl_ui::app::StartOptions;
+    use tl_ui::components::toast;
+    use tl_ui::demand::{DemandAggregator, GlobalDemand};
+    use tl_ui::window::filter::FILTER_DEBOUNCE;
+    use tl_ui::window::main::{self as shell, main_window_view, open_main_window};
+
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        let appearance = AppearanceSettings::default();
+        tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+        tl_ui::theme::metrics::init_metrics(&appearance, cx);
+        tl_ui::i18n::init_strings(cx, "en-US");
+        tl_ui::table::actions::bind_keys_table(cx);
+        cx.set_global(BootSettings {
+            settings: Settings::default(),
+            state: UiState::default(),
+            persist: None,
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+        cx.set_global(EngineGlobal(client.clone()));
+        let hub = cx.new(|cx| SnapshotHub::new(client.clone(), cx));
+        let demand = cx.new(|cx| DemandAggregator::new(client, &hub, cx));
+        cx.set_global(GlobalHub(hub));
+        cx.set_global(GlobalDemand(demand));
+        toast::init(cx);
+        tl_ui::actions::bind_keys_global(cx);
+        cx.set_global(StartOptions::default());
+        shell::init(cx);
+    });
+    let handle = cx.update(open_main_window).expect("the main window opens");
+    let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+    let vcx = &mut vcx;
+    vcx.update(|window, _| window.activate_window());
+    vcx.run_until_parked();
+
+    let filter = vcx.update(|_, cx| {
+        let main = main_window_view(cx).expect("main window open");
+        main.read(cx).filter_box().clone()
+    });
+    assert_eq!(vcx.read_entity(&filter, |f, _| f.tab()), Tab::Processes);
+    vcx.update(|window, cx| {
+        let input = filter.read(cx).input().clone();
+        input.update(cx, |s, cx| s.focus(window, cx));
+    });
+    vcx.simulate_input("fire");
+    vcx.executor().advance_clock(FILTER_DEBOUNCE * 2);
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read_entity(&filter, |f, _| f.text(Tab::Processes).to_string()),
+        "fire"
+    );
+
+    let page = vcx.update(|window, cx| cx.new(|cx| HistoryPage::new(window, cx)));
+    vcx.run_until_parked();
+    let rows = vec![prow(2, "firefox", 1.0), prow(3, "bash", 2.0)];
+    publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
+    let shown = |vcx: &mut VisualTestContext| {
+        with_table(&page, vcx, |t| {
+            let d = &t.delegate;
+            (0..d.row_count())
+                .map(|ix| d.row_id(ix).pid)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(shown(vcx), [2], "the earlier filter applies");
+
+    vcx.update(|window, cx| filter.update(cx, |f, cx| f.clear(window, cx)));
+    vcx.run_until_parked();
+    assert_eq!(shown(vcx), [3, 2], "clearing shows every row");
 }
