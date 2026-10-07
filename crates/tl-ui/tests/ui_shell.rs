@@ -3222,6 +3222,80 @@ mod main_window {
         assert!(!vcx.read_entity(&driver, |d, _| d.is_armed()));
     }
 
+    fn set_show_fps(vcx: &mut VisualTestContext, on: bool) {
+        vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.debug.show_fps = on));
+        vcx.run_until_parked();
+        draw(vcx);
+    }
+
+    /// `(overlay shown, overlay drawn, driver sampling)`.
+    fn fps_state(vcx: &mut VisualTestContext) -> (bool, bool, bool) {
+        let main = main(vcx);
+        let driver = vcx.update(|window, cx| AnimationDriver::global(window, cx));
+        let shown = vcx.update(|_, cx| main.read(cx).fps_overlay().read(cx).is_shown());
+        let drawn = vcx.debug_bounds("FpsOverlay").is_some();
+        let sampling = vcx.read_entity(&driver, |d, _| d.stats.sampling);
+        (shown, drawn, sampling)
+    }
+
+    #[gpui_kit::test]
+    fn fps_overlay_hidden_by_default(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        assert_eq!(fps_state(&mut vcx), (false, false, false));
+    }
+
+    #[test]
+    fn fps_text_format() {
+        let mut cpu: Vec<u64> = [500_000; 36].into_iter().chain([700_000; 36]).collect();
+        // Out of order: the percentiles sort the slice.
+        cpu.reverse();
+        assert_eq!(
+            shell::fps_text(72, Duration::from_millis(500), &mut cpu, 0),
+            "144 fps · frame p50 0.50 ms · p99 0.70 ms · stalls 0"
+        );
+    }
+
+    #[test]
+    fn fps_text_idle() {
+        assert_eq!(
+            shell::fps_text(0, Duration::from_millis(500), &mut [], 2),
+            "idle · stalls 2"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn fps_overlay_requests_no_frames(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        set_show_fps(&mut vcx, true);
+        assert_eq!(fps_state(&mut vcx), (true, true, true));
+        let driver = vcx.update(|window, cx| AnimationDriver::global(window, cx));
+        let requested = vcx.read_entity(&driver, |d, _| d.stats.requested);
+        for _ in 0..4 {
+            wait(&mut vcx, 500);
+            draw(&mut vcx);
+        }
+        assert_eq!(
+            vcx.read_entity(&driver, |d, _| d.stats.requested),
+            requested,
+            "the overlay requested a frame"
+        );
+        let main = main(&mut vcx);
+        let text = vcx.update(|_, cx| main.read(cx).fps_overlay().read(cx).text().to_string());
+        assert_eq!(text, "idle · stalls 0");
+    }
+
+    #[gpui_kit::test]
+    fn fps_overlay_stops_when_off(cx: &mut TestAppContext) {
+        let mut vcx = rig(cx, Opts::default());
+        set_show_fps(&mut vcx, true);
+        assert_eq!(fps_state(&mut vcx), (true, true, true));
+        set_show_fps(&mut vcx, false);
+        assert_eq!(fps_state(&mut vcx), (false, false, false));
+        // No timer is left: time passing changes nothing.
+        wait(&mut vcx, 2000);
+        assert_eq!(fps_state(&mut vcx), (false, false, false));
+    }
+
     struct Blank;
 
     impl Render for Blank {

@@ -20,7 +20,7 @@
 //! handlers here (E20-017, UI-SHL-012, UI-SHL-013, UI-SHL-035, PROC-015, PROC-016).
 
 use std::mem;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fluent_bundle::FluentValue;
 use gpui_kit::base::Root;
@@ -53,7 +53,7 @@ use crate::actions::{
     SHELL_FILTER_CONTEXT, ScaleDown, ScaleReset, ScaleUp, SelectTab, SetViewMode, ShowMainWindow,
     ToggleHideSystem, ToggleMainWindow, ZoomWindow,
 };
-use crate::anim::AnimationDriver;
+use crate::anim::{AnimationDriver, FrameStats};
 use crate::app::{OpenHooks, StartOptions, UiExit, request_exit};
 use crate::components::dialog::CONTEXT as DIALOG_CONTEXT;
 use crate::components::menu::{KEY_CONTEXT as MENU_CONTEXT, context_menu_layer};
@@ -68,6 +68,7 @@ use crate::pages::processes::ProcessesPage;
 use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::TABLE_CONTEXT;
+use crate::text::style::numeric_style;
 use crate::theme::store::apply_metrics;
 use crate::theme::{ThemeStore, UiMetrics, bump_style_version, current, metrics};
 
@@ -769,6 +770,10 @@ pub struct MainWindow {
     toasts: Entity<ToastQueue>,
     /// Kept here so the driver lives as long as the window (anim.rs "Storage").
     _anim: Entity<AnimationDriver>,
+    /// The `debug.show_fps` overlay (E20-020). Rendered only while shown.
+    fps: Entity<FpsOverlay>,
+    /// The `debug` section version the overlay was last shown or hidden for.
+    debug_version: u64,
     /// Index = `Tab::ALL` position. Created on first visit, kept.
     pages: [Option<PageSlot>; 6],
     active: Tab,
@@ -836,7 +841,18 @@ impl MainWindow {
             demand.update(cx, |demand, _| demand.set_main_window(handle));
         }
 
+        let fps = cx.new(FpsOverlay::new);
+
         let mut subs = SmallVec::new();
+        // `debug.show_fps` shows or hides the FPS overlay (E20-020).
+        subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
+            let version = TlSettings::get(cx).version(Section::Debug);
+            if version != this.debug_version {
+                this.debug_version = version;
+                this.sync_fps(cx);
+                cx.notify();
+            }
+        }));
         subs.push(cx.observe_global::<TlSettings>(|this: &mut Self, cx| {
             let versions = settings_versions(cx);
             if versions == this.settings_versions {
@@ -929,6 +945,8 @@ impl MainWindow {
             status,
             toasts,
             _anim: anim,
+            fps,
+            debug_version: TlSettings::get(cx).version(Section::Debug),
             pages: Default::default(),
             active: start,
             picking: false,
@@ -949,11 +967,25 @@ impl MainWindow {
             #[cfg(any(test, feature = "test-hooks"))]
             first_frames: 0,
         };
+        this.sync_fps(cx);
         this.switch_to(start, false, window, cx);
         cx.on_next_frame(window, |this, window, cx| {
             this.after_first_frame(window, cx)
         });
         this
+    }
+
+    /// The FPS overlay, shown while `debug.show_fps` is on.
+    pub fn fps_overlay(&self) -> &Entity<FpsOverlay> {
+        &self.fps
+    }
+
+    /// Starts or stops the FPS overlay to match `debug.show_fps`.
+    fn sync_fps(&mut self, cx: &mut Context<Self>) {
+        let show = TlSettings::settings(cx).debug.show_fps;
+        let driver = self._anim.clone();
+        self.fps
+            .update(cx, |fps, cx| fps.set_shown(show, &driver, cx));
     }
 
     /// Selects `tab`. Nothing happens for the active tab or a tab that is not built.
@@ -1430,6 +1462,166 @@ impl MainWindow {
     }
 }
 
+// ---- FPS overlay (E20-020, UI-SHL-140) ----
+
+/// How often the FPS overlay reads the frame statistics.
+pub const FPS_TICK: Duration = Duration::from_millis(500);
+/// Overlay offset from the page area's top right corner, × ui_scale.
+const FPS_INSET: f32 = 8.;
+/// Overlay padding, × ui_scale.
+const FPS_PAD_Y: f32 = 4.;
+const FPS_PAD_X: f32 = 8.;
+
+/// The developer FPS overlay. While shown it turns on the driver's sampling and reads the
+/// statistics every 500 ms; it never requests frames, so it does not change what it measures.
+/// Hidden, it has no timer and the driver does not sample.
+pub struct FpsOverlay {
+    text: SharedString,
+    /// `stats.frames` at the last tick.
+    last_frames: u64,
+    last_tick: Option<Instant>,
+    driver: Option<WeakEntity<AnimationDriver>>,
+    /// The CPU times of one tick, reused so a tick allocates only the text.
+    cpu_ns: Vec<u64>,
+    _tick: Option<Task<()>>,
+}
+
+impl FpsOverlay {
+    pub fn new(_cx: &mut Context<Self>) -> Self {
+        Self {
+            text: SharedString::default(),
+            last_frames: 0,
+            last_tick: None,
+            driver: None,
+            cpu_ns: Vec::new(),
+            _tick: None,
+        }
+    }
+
+    pub fn is_shown(&self) -> bool {
+        self._tick.is_some()
+    }
+
+    pub fn text(&self) -> &SharedString {
+        &self.text
+    }
+
+    /// Shows the overlay for `driver`'s window, or hides it and drops the timer.
+    pub fn set_shown(
+        &mut self,
+        shown: bool,
+        driver: &Entity<AnimationDriver>,
+        cx: &mut Context<Self>,
+    ) {
+        if shown == self.is_shown() {
+            return;
+        }
+        if !shown {
+            self._tick = None;
+            self.driver = None;
+            driver.update(cx, |d, _| {
+                d.stats.sampling = false;
+                d.stats.samples.clear();
+            });
+            cx.notify();
+            return;
+        }
+        let (frames, stalls) = driver.update(cx, |d, _| {
+            d.stats.sampling = true;
+            d.stats.samples.clear();
+            (d.stats.frames, d.stats.stalls)
+        });
+        self.last_frames = frames;
+        self.last_tick = Some(cx.background_executor().now());
+        self.driver = Some(driver.downgrade());
+        self.text = fps_text(0, FPS_TICK, &mut [], stalls).into();
+        self._tick = Some(
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                loop {
+                    cx.background_executor().timer(FPS_TICK).await;
+                    if this.update(cx, |this, cx| this.on_timer(cx)).is_err() {
+                        break;
+                    }
+                }
+            }),
+        );
+        cx.notify();
+    }
+
+    fn on_timer(&mut self, cx: &mut Context<Self>) {
+        let Some(driver) = self.driver.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        let now = cx.background_executor().now();
+        let elapsed = self
+            .last_tick
+            .map_or(FPS_TICK, |last| now.saturating_duration_since(last));
+        self.last_tick = Some(now);
+        // Out of the driver for the tick, so the tick can notify this view; nothing else runs
+        // in between.
+        let mut stats = driver.update(cx, |d, _| mem::take(&mut d.stats));
+        self.tick(&mut stats, elapsed, cx);
+        driver.update(cx, |d, _| d.stats = stats);
+    }
+
+    /// Builds the text from the frames and samples since the last tick, then clears the
+    /// samples.
+    fn tick(&mut self, stats: &mut FrameStats, elapsed: Duration, cx: &mut Context<Self>) {
+        let frames = stats.frames.saturating_sub(self.last_frames);
+        self.last_frames = stats.frames;
+        self.cpu_ns.clear();
+        self.cpu_ns
+            .extend(stats.samples.iter().map(|s| s.thread_cpu_ns));
+        stats.samples.clear();
+        self.text = fps_text(frames, elapsed, &mut self.cpu_ns, stats.stalls).into();
+        cx.notify();
+    }
+}
+
+/// `144 fps · frame p50 0.50 ms · p99 0.70 ms · stalls 0`, or `idle · stalls 2` without
+/// frames. p50 and p99 are nearest-rank percentiles of `cpu_ns`, which is sorted in place.
+pub fn fps_text(frames: u64, elapsed: Duration, cpu_ns: &mut [u64], stalls: u64) -> String {
+    if frames == 0 {
+        return format!("idle · stalls {stalls}");
+    }
+    let secs = elapsed.as_secs_f64();
+    let fps = if secs > 0. {
+        (frames as f64 / secs).round() as u64
+    } else {
+        0
+    };
+    cpu_ns.sort_unstable();
+    let ms = |q: f64| -> f64 {
+        if cpu_ns.is_empty() {
+            return 0.;
+        }
+        let rank = ((q * cpu_ns.len() as f64).ceil() as usize).clamp(1, cpu_ns.len());
+        cpu_ns[rank - 1] as f64 / 1e6
+    };
+    format!(
+        "{fps} fps · frame p50 {:.2} ms · p99 {:.2} ms · stalls {stalls}",
+        ms(0.5),
+        ms(0.99)
+    )
+}
+
+impl Render for FpsOverlay {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let m = *metrics(cx);
+        let theme = current(cx);
+        let mut el = div();
+        *el.text_style() = numeric_style(&m, m.text.xs);
+        el.debug_selector(|| "FpsOverlay".into())
+            .bg(theme.menu_bg.opacity(0.9))
+            .rounded(m.radius_small)
+            .py(px(FPS_PAD_Y * m.ui_scale))
+            .px(px(FPS_PAD_X * m.ui_scale))
+            .whitespace_nowrap()
+            .text_color(theme.text_primary)
+            .child(self.text.clone())
+    }
+}
+
 impl Render for MainWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(hub) = cx.try_global::<GlobalHub>().map(|h| h.0.clone()) {
@@ -1512,7 +1704,15 @@ impl Render for MainWindow {
                             .bottom_0()
                             .max_w(chip_w)
                             .child(chip),
-                    ),
+                    )
+                    // Above the page; not a Tab stop.
+                    .children(self.fps.read(cx).is_shown().then(|| {
+                        div()
+                            .absolute()
+                            .top(px(FPS_INSET * s))
+                            .right(px(FPS_INSET * s))
+                            .child(self.fps.clone())
+                    })),
             )
             // Last: an open context menu covers the window (E16-A3).
             .children(menu)
