@@ -26,8 +26,9 @@ use gpui_kit::component::v_flex;
 use gpui_kit::{
     Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Entity,
     EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Pixels, Render, ScrollHandle, StatefulInteractiveElement as _, Styled as _,
-    Subscription, WeakEntity, Window, canvas, div, px, white,
+    MouseButton, MouseDownEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, canvas, div,
+    px, white,
 };
 use rustc_hash::FxHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -38,22 +39,26 @@ use tl_model::snapshot::Snapshot;
 use tl_model::validity::Validity;
 
 use super::actions::{
-    PERFORMANCE_CONTEXT, PerfSelectDevice, PerfSelectFirstDevice, PerfSelectLastDevice,
-    PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
+    PERFORMANCE_CONTEXT, PerfOpenCardMenu, PerfSelectDevice, PerfSelectFirstDevice,
+    PerfSelectLastDevice, PerfSelectNextDevice, PerfSelectPrevDevice, PerfSelectVisibleDevice,
+    PerfSetPageVisible,
 };
 use super::card::{
     CARD_CHART_BG, CARD_H, CardLines, CardTextInput, CardWords, DeviceCard, card_chart_grid,
     card_chart_labels, card_words, update_card_lines,
 };
+use super::menu::card_menu;
 use super::{
-    DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, initial_selection,
+    DeviceKey, DeviceKind, DeviceRow, PerformanceSettingsView, initial_selection, is_visible,
     selection_after_removal, sidebar_order, type_number, visible_rows,
 };
 use crate::chart::{ChartSeries, ChartSpec, ChartView, ValueFormat, YScale};
+use crate::components::menu::{TlMenu, open_context_menu_at};
 use crate::components::motion::{M_BASE, ease_out_cubic};
+use crate::components::toast::{FIXED_KEY_BASE, ToastKey, ToastKind, ToastQueue};
 use crate::demand::DemandAggregator;
 use crate::hub::{ComponentMask, SnapshotChanged, SnapshotHub};
-use crate::i18n::Strings;
+use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings, animations_on};
 use crate::theme::derived::blend_over;
 use crate::theme::palette::accent_color;
@@ -70,6 +75,9 @@ const BATTERY_COLOR: &str = "mint";
 
 /// Element id of the scrolling card list.
 pub const LIST_ID: &str = "perf-sidebar-list";
+
+/// The "At least one performance page must stay visible" toast, one at a time (R-232).
+pub const LAST_PAGE_TOAST: ToastKey = ToastKey(FIXED_KEY_BASE | 0x0401);
 
 /// The snapshot components the card text reads.
 const TEXT_MASK: ComponentMask = ComponentMask(
@@ -879,6 +887,116 @@ impl DeviceSidebar {
         }
     }
 
+    /// Whether `key`'s page shows when no override is set: its type's setting (PERF-002).
+    fn type_default(&self, row: &DeviceRow) -> bool {
+        let none = HashMap::new();
+        let view = PerformanceSettingsView {
+            overrides: &none,
+            ..self.settings.view()
+        };
+        is_visible(row, &view)
+    }
+
+    /// `PerfSetPageVisible` (PERF-002). Hiding the only visible page is refused with an Info
+    /// toast in `window`. Hiding writes the `hide` override. Showing writes `show` when the type
+    /// is off by default and removes the override when it is on. Hiding the selected page
+    /// selects the next card ([`Self::sync_rows`]).
+    pub fn set_page_visible(
+        &mut self,
+        key: &DeviceKey,
+        visible: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.rows.iter().find(|r| r.key == *key).cloned() else {
+            return;
+        };
+        if !visible && self.index.contains_key(key) && self.live().count() <= 1 {
+            let text = tr(cx, "perf-toast-last-page");
+            if let Some(queue) = ToastQueue::of_window(window, cx) {
+                queue.update(cx, |q, cx| {
+                    q.push(ToastKind::Info, text, Some(LAST_PAGE_TOAST), None, cx)
+                });
+            }
+            return;
+        }
+        let value = match (visible, self.type_default(&row)) {
+            (false, _) => Some(DeviceVisibility::Hide),
+            (true, false) => Some(DeviceVisibility::Show),
+            (true, true) => None,
+        };
+        let name = key.0.to_string();
+        TlSettings::update(cx, |d| {
+            let overrides = &mut d.settings.performance.device_overrides;
+            match value {
+                Some(v) => {
+                    overrides.insert(name, v);
+                }
+                None => {
+                    overrides.remove(&name);
+                }
+            }
+        });
+    }
+
+    /// The card menu of `key` at `at`. Its items run on the sidebar.
+    pub fn open_card_menu(
+        &self,
+        key: &DeviceKey,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let menu = self.card_menu_for(key, self.focus.clone(), window, cx);
+        open_context_menu_at(at, window, cx, menu);
+    }
+
+    /// The card menu of `key`, its actions dispatched at `action_context`.
+    pub fn card_menu_for(
+        &self,
+        key: &DeviceKey,
+        action_context: FocusHandle,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<crate::components::menu::TlMenuPopup> {
+        let (key, count) = (key.clone(), self.live().count());
+        let hidden = !self.index.contains_key(&key);
+        let edit_mode = self.edit_mode;
+        TlMenu::build(window, cx, action_context, move |menu, _, cx| {
+            card_menu(menu, &key, count, hidden, edit_mode, None, cx)
+        })
+    }
+
+    fn on_set_page_visible(
+        &mut self,
+        a: &PerfSetPageVisible,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_page_visible(&a.key, a.visible, window, cx);
+    }
+
+    /// Shift+F10 and Menu: the selected card's menu at its left edge plus `sp4`, below it.
+    fn on_open_card_menu(
+        &mut self,
+        _: &PerfOpenCardMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self.selected.clone() else {
+            return;
+        };
+        let Some(bounds) = self
+            .index
+            .get(&key)
+            .and_then(|&i| self.scroll.bounds_for_item(i))
+        else {
+            return;
+        };
+        let at = Point::new(bounds.left() + metrics(cx).sp[4], bounds.bottom());
+        self.open_card_menu(&key, at, window, cx);
+    }
+
     /// The selected card's index among the visible cards (collapsing ones are skipped).
     fn selected_index(&self) -> Option<usize> {
         let selected = self.selected.as_ref()?;
@@ -959,6 +1077,12 @@ impl Render for DeviceSidebar {
         let width = self.card_width.get();
         let card_h = CARD_H * m.ui_scale;
         let cards = self.cards.iter().map(|c| {
+            let menu_key = c.row.key.clone();
+            // Right-click opens the card menu and leaves the selection alone (UI-PRF-014).
+            let on_right = cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.open_card_menu(&menu_key, ev.position, window, cx);
+            });
             let card = DeviceCard {
                 key: c.row.key.clone(),
                 chart: c.chart.clone(),
@@ -969,6 +1093,10 @@ impl Render for DeviceSidebar {
                 hidden_in_edit: false,
                 width,
             };
+            let card = div()
+                .flex_none()
+                .on_mouse_down(MouseButton::Right, on_right)
+                .child(card);
             let showing = match c.anim {
                 CardAnim::Steady => return card.into_any_element(),
                 CardAnim::Inserting { .. } => true,
@@ -1018,6 +1146,8 @@ impl Render for DeviceSidebar {
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_first))
             .on_action(cx.listener(Self::on_last))
+            .on_action(cx.listener(Self::on_set_page_visible))
+            .on_action(cx.listener(Self::on_open_card_menu))
             .relative()
             .size_full()
             .bg(theme.window_bg)

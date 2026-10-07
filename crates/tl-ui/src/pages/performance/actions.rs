@@ -48,6 +48,8 @@ gpui_kit::actions!(
         PerfOpenNetworkSettings,
         /// Bound to keys that Summary mode swallows (PERF-010). Has no handler.
         NoOp,
+        /// Opens the card menu of the selected sidebar card (Shift+F10, Menu; UI-PRF-014).
+        PerfOpenCardMenu,
     ]
 );
 
@@ -297,6 +299,8 @@ pub fn bind_keys_performance(cx: &mut App) {
         KeyBinding::new("ctrl-c", PerfCopyDeviceInfo, perf),
         KeyBinding::new("alt-up", PerfMoveFocusedDevice { delta: -1 }, perf),
         KeyBinding::new("alt-down", PerfMoveFocusedDevice { delta: 1 }, perf),
+        KeyBinding::new("shift-f10", PerfOpenCardMenu, perf),
+        KeyBinding::new("menu", PerfOpenCardMenu, perf),
         KeyBinding::new("escape", PerfToggleSummaryMode, summary),
         KeyBinding::new("ctrl-m", PerfToggleSummaryMode, summary),
         KeyBinding::new("ctrl-tab", NoOp, summary),

@@ -14,19 +14,22 @@ use std::cell::Cell;
 
 use gpui_kit::{
     Animation, AnimationExt as _, AnyWindowHandle, App, AppContext as _, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
-    Pixels, Render, SharedString, Size, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, Window, canvas, div, px,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement as _, Pixels, Render, SharedString, Size,
+    StatefulInteractiveElement as _, StyleRefinement, Styled as _, Subscription, Window, canvas,
+    div, px,
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::{CpuDemand, Demand};
 
 use super::actions::{
-    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfShowMiniWindow, PerfToggleSummaryMode,
+    NoOp, PERFORMANCE_SUMMARY_CONTEXT, PerfSetPageVisible, PerfShowMiniWindow,
+    PerfToggleSummaryMode,
 };
 use super::sidebar::DeviceSidebar;
 use super::{DeviceKey, DeviceKind};
 use crate::chart::{ChartBg, ChartLabels, ChartView, LegendStyle, ValueAlign, ValueFormat};
+use crate::components::menu::open_context_menu_at;
 use crate::components::motion::{M_BASE, ease_out_cubic};
 use crate::demand::DemandAggregator;
 use crate::i18n::tr;
@@ -128,13 +131,62 @@ pub struct SummaryView {
     /// The tiles fade in on entry unless animations are off.
     fade: bool,
     demand: Entity<DemandAggregator>,
+    /// The tiles follow its visible cards; the tile menu is its card menu.
+    sidebar: Entity<DeviceSidebar>,
     id: EntityId,
     window: Option<AnyWindowHandle>,
+    _sidebar_sub: Subscription,
     #[cfg(any(test, feature = "test-hooks"))]
     pub render_count: Cell<u32>,
 }
 
 impl EventEmitter<SummaryEvent> for SummaryView {}
+
+/// One tile per visible (not collapsing) sidebar card, in sidebar order.
+fn build_tiles(sidebar: &Entity<DeviceSidebar>, cx: &mut App) -> Vec<Tile> {
+    let words = Words::new(cx);
+    let s = sidebar.read(cx);
+    let hub = s.hub.clone();
+    let cards: Vec<_> = s
+        .cards()
+        .iter()
+        .filter(|c| !c.is_removing())
+        .map(|c| {
+            (
+                c.row.key.clone(),
+                c.row.kind,
+                c.lines.clone(),
+                c.chart.clone(),
+            )
+        })
+        .collect();
+    cards
+        .into_iter()
+        .map(|(key, kind, lines, card_chart)| {
+            let card = card_chart.read(cx);
+            let mut spec = card.spec.clone();
+            spec.background = ChartBg::Window;
+            let value_fmt = card.labels.value_fmt;
+            let range_word = words.range_word(kind, value_fmt);
+            let legend = words.legend(kind, spec.series.len());
+            let text = TileText {
+                heading: lines.heading,
+                line1: lines.line1,
+                value_fmt,
+                range_word,
+                legend,
+            };
+            let labels = tile_labels(&text, (false, false));
+            let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
+            Tile {
+                key,
+                kind,
+                chart,
+                text,
+            }
+        })
+        .collect()
+}
 
 impl SummaryView {
     /// One tile per visible sidebar card, in sidebar order, laid out for `size` (the window
@@ -145,48 +197,10 @@ impl SummaryView {
         size: Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let words = Words::new(cx);
-        let s = sidebar.read(cx);
-        let selected_on_entry = s.selected().cloned();
-        let hub = s.hub.clone();
-        let cards: Vec<_> = s
-            .cards()
-            .iter()
-            .map(|c| {
-                (
-                    c.row.key.clone(),
-                    c.row.kind,
-                    c.lines.clone(),
-                    c.chart.clone(),
-                )
-            })
-            .collect();
-        let tiles = cards
-            .into_iter()
-            .map(|(key, kind, lines, card_chart)| {
-                let card = card_chart.read(cx);
-                let mut spec = card.spec.clone();
-                spec.background = ChartBg::Window;
-                let value_fmt = card.labels.value_fmt;
-                let range_word = words.range_word(kind, value_fmt);
-                let legend = words.legend(kind, spec.series.len());
-                let text = TileText {
-                    heading: lines.heading,
-                    line1: lines.line1,
-                    value_fmt,
-                    range_word,
-                    legend,
-                };
-                let labels = tile_labels(&text, (false, false));
-                let chart = cx.new(|cx| ChartView::new(spec, labels, &hub, cx));
-                Tile {
-                    key,
-                    kind,
-                    chart,
-                    text,
-                }
-            })
-            .collect::<Vec<_>>();
+        let selected_on_entry = sidebar.read(cx).selected().cloned();
+        let tiles = build_tiles(sidebar, cx);
+        // A page hidden from the tile menu leaves the grid.
+        let sidebar_sub = cx.observe(sidebar, |this, _, cx| this.sync_tiles(cx));
 
         let id = cx.entity_id();
         let release_demand = demand.clone();
@@ -202,8 +216,10 @@ impl SummaryView {
             label_class: (false, false),
             fade: animations_on(cx),
             demand,
+            sidebar: sidebar.clone(),
             id,
             window: None,
+            _sidebar_sub: sidebar_sub,
             #[cfg(any(test, feature = "test-hooks"))]
             render_count: Cell::new(0),
         };
@@ -257,6 +273,33 @@ impl SummaryView {
 
     fn on_toggle(&mut self, _: &PerfToggleSummaryMode, _: &mut Window, cx: &mut Context<Self>) {
         cx.emit(SummaryEvent::Exit { select: None });
+    }
+
+    /// Rebuilds the tiles when the sidebar's visible cards changed.
+    fn sync_tiles(&mut self, cx: &mut Context<Self>) {
+        let same = {
+            let s = self.sidebar.read(cx);
+            s.visible_keys().eq(self.tiles.iter().map(|t| &t.key))
+        };
+        if same {
+            return;
+        }
+        self.tiles = build_tiles(&self.sidebar, cx);
+        let size = std::mem::take(&mut self.size);
+        self.label_class = (false, false);
+        self.resize(size, cx);
+    }
+
+    /// The tile menu runs the card menu's items on the sidebar.
+    fn on_set_page_visible(
+        &mut self,
+        a: &PerfSetPageVisible,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar.update(cx, |s, cx| {
+            s.set_page_visible(&a.key, a.visible, window, cx)
+        });
     }
 }
 
@@ -408,7 +451,17 @@ impl Render for SummaryView {
                         .cached(StyleRefinement::default().size_full()),
                 )
                 .children(marker)
-                // E24-012 (crw.13): right-click opens this device's page menu.
+                .on_mouse_down(MouseButton::Right, {
+                    let key = tile.key.clone();
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        let focus = this.focus.clone();
+                        let menu = this
+                            .sidebar
+                            .update(cx, |s, cx| s.card_menu_for(&key, focus, window, cx));
+                        open_context_menu_at(ev.position, window, cx, menu);
+                    })
+                })
                 .on_click(
                     cx.listener(move |_, ev: &gpui_kit::ClickEvent, window, cx| {
                         if ev.click_count() == 2 {
@@ -460,6 +513,7 @@ impl Render for SummaryView {
             .key_context(PERFORMANCE_SUMMARY_CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_toggle))
+            .on_action(cx.listener(Self::on_set_page_visible))
             // A binding whose action has no handler falls through to the next binding for the
             // same keys, so the swallowed tab keys need this empty handler.
             .on_action(|_: &NoOp, _, _| {})
