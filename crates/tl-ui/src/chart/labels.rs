@@ -42,9 +42,9 @@ const MIN_PLOT_H: f32 = 100.0;
 const MIN_BOX_W: f32 = 160.0;
 
 pub(crate) static WARMING: &str = "…";
-static UNSUPPORTED: &str = "n/a";
+pub(crate) static UNSUPPORTED: &str = "n/a";
 pub(crate) static MISSING: &str = "-";
-static FAILED: &str = "!";
+pub(crate) static FAILED: &str = "!";
 
 /// One label and what it was shaped from.
 #[derive(Debug)]

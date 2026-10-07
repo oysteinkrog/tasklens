@@ -20,14 +20,15 @@ use gpui_kit::{
 };
 use smallvec::{SmallVec, smallvec};
 use tl_model::demand::Demand;
-use tl_model::devices::DeviceIdentity;
 use tl_model::health::{SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId, SeriesId};
-use tl_model::snapshot::Snapshot;
-use tl_model::system::GpuTotals;
+use tl_model::snapshot::{GraphicsAdapter, Snapshot};
+use tl_model::system::{GpuTotals, Metric};
+use tl_model::time::now_boot_ns;
+use tl_model::units;
 use tl_model::validity::Validity;
 
-use super::details::KeyValueModel;
+use super::details::{Fallback, KeyValueModel};
 use super::page::{DevicePage, DevicePageFrame, GRAPH_H_STACKED, header_text, page_words};
 use super::{DeviceKey, DeviceKind, DeviceRow};
 use crate::chart::{
@@ -82,14 +83,34 @@ pub enum GpuVendor {
 }
 
 impl GpuVendor {
-    /// The catalog carries no vendor yet. A GPU with a UUID comes from NVML, so it is NVIDIA;
-    /// every other GPU is `Unknown` until the device record names the vendor.
-    pub fn from_identity(identity: &DeviceIdentity) -> Self {
-        match identity {
-            DeviceIdentity::Gpu { uuid, .. } if *uuid != [0; 16] => Self::Nvidia,
+    /// The vendor from the adapter's kernel module: `nvidia`, `amdgpu` or `radeon`, `i915` or
+    /// `xe`. Anything else is `Unknown`.
+    pub fn from_kernel_module(module: &str) -> Self {
+        match module.trim() {
+            "nvidia" => Self::Nvidia,
+            "amdgpu" | "radeon" => Self::Amd,
+            "i915" | "xe" => Self::Intel,
             _ => Self::Unknown,
         }
     }
+
+    /// The vendor of `device` from the inventory's graphics adapters; `Unknown` while the
+    /// inventory has no adapter for it or no kernel module.
+    pub fn of(snap: &Snapshot, device: DeviceIdx) -> Self {
+        adapter(snap, device)
+            .filter(|a| matches!(a.kernel_module.validity, Validity::Valid | Validity::Stale))
+            .map_or(Self::Unknown, |a| {
+                Self::from_kernel_module(&a.kernel_module.value)
+            })
+    }
+}
+
+/// The inventory's graphics adapter of `device`.
+pub fn adapter(snap: &Snapshot, device: DeviceIdx) -> Option<&GraphicsAdapter> {
+    snap.inventory
+        .graphics
+        .iter()
+        .find(|a| a.device == Some(device))
 }
 
 /// The state of the NVIDIA probe as the page shows it (PERF-062).
@@ -497,14 +518,7 @@ impl GpuPage {
         let theme = current(cx).clone();
         let settings = PageSettings::read(cx);
         let snap = Arc::clone(hub.read(cx).current());
-        let vendor = snap
-            .devices
-            .entries
-            .iter()
-            .find(|e| e.idx == row.idx)
-            .map_or(GpuVendor::Unknown, |e| {
-                GpuVendor::from_identity(&e.identity)
-            });
+        let vendor = GpuVendor::of(&snap, row.idx);
         let totals = gpu_totals(&snap, row.idx);
         let mut words = Words::default();
         words.refresh(cx);
@@ -556,7 +570,7 @@ impl GpuPage {
             temperature,
             power: None,
             clocks: None,
-            details: KeyValueModel::default(),
+            details: gpu_details_model(),
             probe: ProbeState::Ok,
             focus: cx.focus_handle(),
             hub,
@@ -617,11 +631,13 @@ impl GpuPage {
         self.words.probe_tooltip(self.probe)
     }
 
-    /// This page's demand part while it is active: the GPU component.
+    /// This page's demand part while it is active: the GPU component, and the inventory for the
+    /// adapter's vendor and static rows.
     pub fn demand_part(&self) -> Demand {
         Demand {
             any_surface_visible: true,
             gpus: true,
+            inventory: true,
             ..Demand::default()
         }
     }
@@ -649,6 +665,18 @@ impl GpuPage {
     fn apply_snapshot(&mut self, snap: &Snapshot, mask: ComponentMask, cx: &mut Context<Self>) {
         let mut changed = false;
         let devices = mask.contains(ComponentMask::DEVICES);
+        let inventory = mask.contains(ComponentMask::INVENTORY);
+        // A new vendor can change the engine names and whether probe states apply.
+        let mut vendor_changed = false;
+        if inventory || devices {
+            let vendor = GpuVendor::of(snap, self.row.idx);
+            if vendor != self.vendor {
+                self.vendor = vendor;
+                vendor_changed = true;
+                self.rebuild_grid(cx);
+                changed = true;
+            }
+        }
 
         if mask.contains(ComponentMask::SYSTEM) {
             let totals = gpu_totals(snap, self.row.idx);
@@ -665,7 +693,7 @@ impl GpuPage {
                 self.rebuild_memory(labels_changed, cx);
             }
         }
-        if mask.contains(ComponentMask::HEALTH) {
+        if mask.contains(ComponentMask::HEALTH) || vendor_changed {
             let probe = probe_state(self.vendor, snap);
             if probe != self.probe {
                 self.probe = probe;
@@ -673,7 +701,20 @@ impl GpuPage {
                 changed = true;
             }
         }
-        if (devices || mask.contains(ComponentMask::INVENTORY))
+        if mask.intersects(ComponentMask::SYSTEM | ComponentMask::INVENTORY | ComponentMask::HEALTH)
+            || vendor_changed
+        {
+            let inputs = GpuDetailInputs {
+                now_boot_ns: now_boot_ns(),
+                observed_end_ns: snap.system.header.observed_end,
+                totals: gpu_totals(snap, self.row.idx),
+                adapter: adapter(snap, self.row.idx),
+                vendor: self.vendor,
+                probe: self.probe,
+            };
+            changed |= update_gpu_details_p1(&mut self.details, &inputs);
+        }
+        if (devices || inventory)
             && let Some(entry) = snap.devices.entries.iter().find(|e| e.idx == self.row.idx)
         {
             let header = header_text(page_words(cx), DeviceKind::Gpu, 0, entry, snap);
@@ -705,6 +746,8 @@ impl GpuPage {
             let state = state.clone();
             view.update(cx, |v, cx| v.set_state(state, cx));
         }
+        // Restarting keeps the per-engine cells, each reading `!`. Missing shows the placeholder.
+        self.engines.update(cx, |v, cx| v.set_state(state, cx));
     }
 
     fn rebuild_grid(&mut self, cx: &mut Context<Self>) {
@@ -882,6 +925,247 @@ impl GpuPage {
             cx,
         )
         .into_any_element()
+    }
+}
+
+// ---- Details grid (UI-PRF-033) ----
+
+pub const ROW_UTILIZATION: &str = "perf-gpu-row-utilization";
+pub const ROW_DEDICATED: &str = "perf-gpu-row-dedicated";
+pub const ROW_SHARED: &str = "perf-gpu-row-shared";
+pub const ROW_RESERVED: &str = "perf-gpu-row-reserved";
+pub const ROW_ENCODE: &str = "perf-gpu-row-encode";
+pub const ROW_DECODE: &str = "perf-gpu-row-decode";
+/// Row 5's label when the hardware shares one engine (tasklens-o55.36 sets it).
+pub const ROW_ENCODE_DECODE: &str = "perf-gpu-row-encode-decode";
+pub const ROW_TEMPERATURE: &str = "perf-gpu-row-temperature";
+pub const ROW_TEMP_SOURCE: &str = "perf-gpu-row-temp-source";
+
+/// The 28 Details rows in grid order (UI-PRF-033). Rows 9 to 28 are P2 (E25-024).
+pub const GPU_DETAIL_ROWS: [&str; 28] = [
+    ROW_UTILIZATION,
+    ROW_DEDICATED,
+    ROW_SHARED,
+    ROW_RESERVED,
+    ROW_ENCODE,
+    ROW_DECODE,
+    ROW_TEMPERATURE,
+    ROW_TEMP_SOURCE,
+    "perf-gpu-row-fan",
+    "perf-gpu-row-slowdown",
+    "perf-gpu-row-shutdown",
+    "perf-gpu-row-mem-temp",
+    "perf-gpu-row-clock",
+    "perf-gpu-row-mem-clock",
+    "perf-gpu-row-video-clock",
+    "perf-gpu-row-power",
+    "perf-gpu-row-pcie",
+    "perf-gpu-row-pcie-max",
+    "perf-gpu-row-pcie-throughput",
+    "perf-gpu-row-driver",
+    "perf-gpu-row-module",
+    "perf-gpu-row-cuda",
+    "perf-gpu-row-vulkan",
+    "perf-gpu-row-opengl",
+    "perf-gpu-row-location",
+    "perf-gpu-row-vbios",
+    "perf-gpu-row-uuid",
+    "perf-gpu-row-arch",
+];
+
+/// The rows 1 to 8 fill.
+const P1_ROWS: usize = 8;
+
+/// The GPU Details model: all 28 rows in order, rows 9 to 28 hidden until E25-024.
+pub fn gpu_details_model() -> KeyValueModel {
+    let mut model = KeyValueModel::new(&GPU_DETAIL_ROWS);
+    for label in &GPU_DETAIL_ROWS[P1_ROWS..] {
+        model.hide(label);
+    }
+    model
+}
+
+/// What rows 1 to 8 are read from.
+#[derive(Clone, Copy)]
+pub struct GpuDetailInputs<'a> {
+    pub now_boot_ns: u64,
+    /// `observed_end` of the system component, for the Stale age.
+    pub observed_end_ns: u64,
+    pub totals: Option<&'a GpuTotals>,
+    pub adapter: Option<&'a GraphicsAdapter>,
+    pub vendor: GpuVendor,
+    pub probe: ProbeState,
+}
+
+/// A value and its validity, from a `Metric` or an inventory field.
+fn shown_u64(value: u64, validity: Validity) -> Option<u64> {
+    matches!(validity, Validity::Valid | Validity::Stale).then_some(value)
+}
+
+/// Fills rows 1 to 8 (UI-PRF-033) from the GPU record and the inventory adapter. Rows the model
+/// has no field for yet (hardware reserved memory, NVENC sessions, a shared encode/decode
+/// engine, AMD per-sensor temperatures) read "Not reported" until tasklens-o55.36. In a probe
+/// state every row reads "Unavailable" (restarting) or "Not supported" (missing). True when the
+/// grid needs a redraw.
+pub fn update_gpu_details_p1(model: &mut KeyValueModel, inp: &GpuDetailInputs) -> bool {
+    let probe_word = match inp.probe {
+        ProbeState::Ok => None,
+        ProbeState::Restarting => Some(Fallback::Unavailable),
+        ProbeState::Missing => Some(Fallback::NotSupported),
+    };
+    if let Some(f) = probe_word {
+        let mut changed = false;
+        for label in &GPU_DETAIL_ROWS[..P1_ROWS] {
+            changed |= model.set_fallback(label, Validity::Unsupported, f, None);
+        }
+        return changed;
+    }
+    let age_ns = inp.now_boot_ns.saturating_sub(inp.observed_end_ns);
+    let rows = DetailRows { age_ns };
+    let mut changed = false;
+    let none = Metric::with(Validity::Missing);
+    let t = inp.totals;
+
+    let pct = |o: &mut String, v: f32| units::percent(o, v);
+    let pct_bits = |v: f32| u64::from(v.to_bits());
+    changed |= rows.metric(
+        model,
+        ROW_UTILIZATION,
+        t.map_or(none, |t| t.util_pct),
+        pct_bits,
+        pct,
+    );
+
+    // Dedicated: used of the adapter's size, else of the NVML total.
+    let dedicated_total = inp
+        .adapter
+        .and_then(|a| shown_u64(a.dedicated_bytes.value, a.dedicated_bytes.validity))
+        .or_else(|| t.and_then(|t| shown_u64(t.mem_total.value, t.mem_total.validity)));
+    changed |= rows.pair(
+        model,
+        ROW_DEDICATED,
+        t.map_or(none, |t| t.mem_used),
+        dedicated_total,
+    );
+
+    let shared_total = inp
+        .adapter
+        .and_then(|a| shown_u64(a.shared_bytes.value, a.shared_bytes.validity))
+        .or_else(|| t.and_then(|t| shown_u64(t.shared_total.value, t.shared_total.validity)))
+        .filter(|&n| n > 0);
+    changed |= match (inp.vendor, shared_total) {
+        // NVIDIA has no shared memory pool.
+        (GpuVendor::Nvidia, _) | (_, None) => model.set_fallback(
+            ROW_SHARED,
+            Validity::Unsupported,
+            Fallback::NotSupported,
+            None,
+        ),
+        (_, Some(total)) => rows.pair(
+            model,
+            ROW_SHARED,
+            t.map_or(none, |t| t.shared_used),
+            Some(total),
+        ),
+    };
+
+    changed |= model.set_fallback(
+        ROW_RESERVED,
+        Validity::Unsupported,
+        Fallback::NotReported,
+        None,
+    );
+    changed |= rows.metric(
+        model,
+        ROW_ENCODE,
+        t.map_or(none, |t| t.enc_pct),
+        pct_bits,
+        pct,
+    );
+    changed |= rows.metric(
+        model,
+        ROW_DECODE,
+        t.map_or(none, |t| t.dec_pct),
+        pct_bits,
+        pct,
+    );
+    changed |= rows.metric(
+        model,
+        ROW_TEMPERATURE,
+        t.map_or(none, |t| t.temp_c),
+        pct_bits,
+        |o, v| units::celsius(o, v),
+    );
+
+    changed |= match inp.adapter.map(|a| &a.temperature_source) {
+        Some(src)
+            if matches!(src.validity, Validity::Valid | Validity::Stale)
+                && !src.value.trim().is_empty() =>
+        {
+            model.set_text(ROW_TEMP_SOURCE, src.value.trim())
+        }
+        _ => model.set_fallback(
+            ROW_TEMP_SOURCE,
+            Validity::Unsupported,
+            Fallback::NotReported,
+            None,
+        ),
+    };
+    changed
+}
+
+/// The shared parts of a row update.
+struct DetailRows {
+    age_ns: u64,
+}
+
+impl DetailRows {
+    /// One row from a metric: Valid formats on a bits change, Stale keeps the value and marks
+    /// it, the rest show a fallback word.
+    fn metric<T: Copy + Default>(
+        &self,
+        model: &mut KeyValueModel,
+        label: &'static str,
+        m: Metric<T>,
+        bits: impl Fn(T) -> u64,
+        write: impl FnOnce(&mut String, T),
+    ) -> bool {
+        match m.validity {
+            Validity::Valid => model.set_valid(label, bits(m.value), |o| write(o, m.value)),
+            Validity::Stale => {
+                model.set_valid(label, bits(m.value), |o| write(o, m.value))
+                    | model.set_stale(label, self.age_ns)
+            }
+            v => fallback(model, label, v),
+        }
+    }
+
+    /// "2.80 GiB / 15.92 GiB" from `used` and `total`; "Not reported" without a total.
+    fn pair(
+        &self,
+        model: &mut KeyValueModel,
+        label: &'static str,
+        used: Metric<u64>,
+        total: Option<u64>,
+    ) -> bool {
+        let Some(total) = total else {
+            return model.set_fallback(label, Validity::Unsupported, Fallback::NotReported, None);
+        };
+        // Both halves in the bits, so either change formats again.
+        let bits = |u: u64| u.wrapping_mul(31).wrapping_add(total);
+        self.metric(model, label, used, bits, |o, u| {
+            units::bytes_of(o, u, total)
+        })
+    }
+}
+
+fn fallback(model: &mut KeyValueModel, label: &'static str, v: Validity) -> bool {
+    match v {
+        Validity::Unsupported => model.set_fallback(label, v, Fallback::NotSupported, None),
+        Validity::Missing => {
+            model.set_fallback(label, Validity::Unsupported, Fallback::Unavailable, None)
+        }
+        _ => model.set_fallback(label, v, Fallback::Unavailable, None),
     }
 }
 

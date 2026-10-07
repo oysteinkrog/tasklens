@@ -14,6 +14,7 @@ use tl_model::devices::{DeviceCatalog, DeviceEntry, DeviceIdentity};
 use tl_model::health::{SourceHealth, SourceId, SourceState};
 use tl_model::ids::{DeviceIdx, MetricId};
 use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+use tl_model::snapshot::{GraphicsAdapter, InvField};
 use tl_model::system::{GpuTotals, Metric};
 use tl_model::validity::Validity;
 use tl_ui::app::{BootSettings, EngineGlobal};
@@ -56,7 +57,7 @@ fn totals(shared: bool) -> GpuTotals {
         mem_util_pct: Metric::valid(4.0),
         mem_used: Metric::valid(3 * GIB),
         mem_total: Metric::valid(16 * GIB),
-        shared_used: Metric::default(),
+        shared_used: Metric::valid(0),
         shared_total,
         enc_pct: Metric::valid(0.0),
         dec_pct: Metric::valid(0.0),
@@ -78,8 +79,9 @@ struct Rig<'a> {
     vcx: &'a mut VisualTestContext,
 }
 
-/// A GPU page for `GPU` in a 1000 px wide window. A non-zero `uuid` makes it an NVIDIA GPU.
-fn open(cx: &mut TestAppContext, uuid: [u8; 16], shared: bool) -> Rig<'_> {
+/// A GPU page for `GPU` in a 1000 px wide window. The inventory adapter has kernel module
+/// `module` and temperature source `temp_source`.
+fn open<'a>(cx: &'a mut TestAppContext, module: &str, temp_source: &str, shared: bool) -> Rig<'a> {
     let engine = FakeEngine::new();
     engine.publish_with(|s| {
         s.devices = Arc::new(DeviceCatalog {
@@ -87,7 +89,7 @@ fn open(cx: &mut TestAppContext, uuid: [u8; 16], shared: bool) -> Rig<'_> {
             entries: Arc::from(vec![DeviceEntry {
                 idx: GPU,
                 identity: DeviceIdentity::Gpu {
-                    uuid,
+                    uuid: [1; 16],
                     pci_bus_id: Arc::from("0000:01:00.0"),
                 },
                 generation: 0,
@@ -101,6 +103,27 @@ fn open(cx: &mut TestAppContext, uuid: [u8; 16], shared: bool) -> Rig<'_> {
         let sys = Arc::make_mut(&mut s.system);
         sys.header.version += 1;
         sys.gpus = Arc::from([(GPU, totals(shared))].as_slice());
+        let inv = Arc::make_mut(&mut s.inventory);
+        inv.header.version += 1;
+        inv.graphics = Arc::from(
+            [GraphicsAdapter {
+                device: Some(GPU),
+                kernel_module: InvField {
+                    value: Arc::from(module),
+                    validity: Validity::Valid,
+                },
+                temperature_source: InvField {
+                    value: Arc::from(temp_source),
+                    validity: Validity::Valid,
+                },
+                dedicated_bytes: InvField {
+                    value: 16 * GIB,
+                    validity: Validity::Valid,
+                },
+                ..GraphicsAdapter::default()
+            }]
+            .as_slice(),
+        );
     });
     let client: Arc<dyn EngineClient> = engine.clone();
     cx.update(|cx| {
@@ -148,7 +171,7 @@ fn open(cx: &mut TestAppContext, uuid: [u8; 16], shared: bool) -> Rig<'_> {
 }
 
 fn nvidia(cx: &mut TestAppContext) -> Rig<'_> {
-    open(cx, [1; 16], false)
+    open(cx, "nvidia", "NVML (GPU core)", false)
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -221,6 +244,16 @@ fn gpu_probe_restart_glyphs(cx: &mut TestAppContext) {
             assert_eq!(v.state, ChartState::Failed("GPU monitor restarting".into()));
             assert_eq!(v.value_now().map(|(_, s)| s), Some(Validity::Failed), "`!`");
         }
+        // The grid keeps one cell per engine, each reading `!`.
+        let grid = p.engines().read(cx);
+        assert_eq!(
+            grid.state,
+            ChartState::Failed("GPU monitor restarting".into())
+        );
+        assert_eq!(grid.spec.cells.len(), 3);
+        for i in 0..3 {
+            assert_eq!(grid.value_text(i), Some("!"), "cell {i}");
+        }
     });
     // Back to running: the charts drop the owner state.
     set_gpu_health(&mut r, SourceState::Running, None);
@@ -265,11 +298,11 @@ fn gpu_probe_missing_placeholder_cell(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn gpu_probe_states_only_on_nvidia(cx: &mut TestAppContext) {
-    let mut r = open(cx, [0; 16], true);
+    let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
     set_gpu_health(&mut r, SourceState::Failed, None);
     r.vcx.update(|_, cx| {
         let p = r.page.read(cx);
-        assert_eq!(p.vendor(), GpuVendor::Unknown);
+        assert_eq!(p.vendor(), GpuVendor::Amd);
         assert_eq!(p.probe(), ProbeState::Ok);
         let state = &p.memory().read(cx).state;
         assert!(
@@ -302,7 +335,7 @@ fn gpu_memory_legend_without_shared(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn gpu_memory_shared_series_when_reported(cx: &mut TestAppContext) {
-    let r = open(cx, [0; 16], true);
+    let r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
     r.vcx.update(|_, cx| {
         let v = r.page.read(cx).memory().read(cx);
         assert_eq!(v.spec.series.len(), 2);
@@ -342,4 +375,115 @@ fn gpu_samples_do_not_rerender_page(cx: &mut TestAppContext) {
     }
     let after = r.vcx.update(|_, cx| r.page.read(cx).render_count.get());
     assert_eq!(before, after);
+}
+
+// Details grid rows 1 to 8 (tasklens-o55.10, UI-PRF-033).
+
+fn detail_rows(r: &mut Rig) -> Vec<(String, String, Option<String>)> {
+    let page = r.page.clone();
+    r.vcx.update(|_, cx| {
+        let p = page.read(cx);
+        p.details().refresh_labels(cx);
+        p.details()
+            .to_kv_rows()
+            .map(|row| {
+                (
+                    row.label.to_string(),
+                    row.value.text.to_string(),
+                    row.value.tooltip.as_ref().map(|t| t.to_string()),
+                )
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn gpu_details_order(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    let rows = detail_rows(&mut r);
+    let labels: Vec<&str> = rows.iter().map(|(l, _, _)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        [
+            "Utilization",
+            "Dedicated memory",
+            "Shared memory",
+            "Hardware reserved memory",
+            "Video encode",
+            "Video decode",
+            "Temperature",
+            "Temperature source",
+        ]
+    );
+    let values: Vec<&str> = rows.iter().map(|(_, v, _)| v.as_str()).collect();
+    assert_eq!(
+        values,
+        [
+            "10.9%",
+            "3.00 GiB / 16.00 GiB",
+            "Not supported",
+            "Not reported",
+            "0.0%",
+            "0.0%",
+            "52 °C",
+            "NVML (GPU core)",
+        ]
+    );
+    assert_eq!(rows[2].2.as_deref(), Some("Not available on this device"));
+    // All 28 rows exist in the model, rows 9 to 28 hidden.
+    r.vcx.update(|_, cx| {
+        let d = r.page.read(cx).details();
+        assert_eq!(d.rows.len(), 28);
+        assert!(d.rows[8..].iter().all(|row| row.hidden));
+    });
+}
+
+#[gpui_kit::test]
+fn gpu_temperature_source_amd(cx: &mut TestAppContext) {
+    let mut r = open(cx, "amdgpu", "hwmon amdgpu: junction", true);
+    let rows = detail_rows(&mut r);
+    let source = rows.iter().find(|(l, _, _)| l == "Temperature source");
+    assert_eq!(
+        source.map(|(_, v, _)| v.as_str()),
+        Some("hwmon amdgpu: junction")
+    );
+    let shared = rows.iter().find(|(l, _, _)| l == "Shared memory");
+    assert_eq!(
+        shared.map(|(_, v, _)| v.as_str()),
+        Some("0 B / 8.00 GiB"),
+        "AMD reports a shared pool"
+    );
+}
+
+#[gpui_kit::test]
+fn gpu_details_probe_states(cx: &mut TestAppContext) {
+    let mut r = nvidia(cx);
+    set_gpu_health(&mut r, SourceState::Failed, None);
+    let rows = detail_rows(&mut r);
+    assert!(rows.iter().all(|(_, v, _)| v == "Unavailable"), "{rows:?}");
+    set_gpu_health(
+        &mut r,
+        SourceState::Unsupported,
+        Some("GPU probe not installed"),
+    );
+    let rows = detail_rows(&mut r);
+    assert!(
+        rows.iter().all(|(_, v, _)| v == "Not supported"),
+        "{rows:?}"
+    );
+}
+
+#[test]
+fn gpu_vendor_from_kernel_module() {
+    for (module, vendor) in [
+        ("nvidia", GpuVendor::Nvidia),
+        ("amdgpu", GpuVendor::Amd),
+        ("radeon", GpuVendor::Amd),
+        ("i915", GpuVendor::Intel),
+        ("xe", GpuVendor::Intel),
+        ("nouveau", GpuVendor::Unknown),
+        ("", GpuVendor::Unknown),
+    ] {
+        assert_eq!(GpuVendor::from_kernel_module(module), vendor, "{module}");
+    }
 }

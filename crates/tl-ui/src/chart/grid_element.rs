@@ -15,6 +15,10 @@
 //! elements, so the view records the hovered cell (`hovered_cell`, `hovered_tooltip`) and
 //! notifies when it changes. The owning page shows the cell's tooltip text from there.
 //!
+//! Owner state: `set_state` with Failed, Restricted or Unsupported draws every cell like a single
+//! chart in that state (UI-PRF-001): no paths, a dotted baseline across the plot, and `!` or
+//! `n/a` as the value (Restricted shows `!` too, as the grid has no lock icon). The GPU page uses it while the probe restarts (PERF-062).
+//!
 //! Hover readout (UI-PRF-023): with `spec.hover`, prepaint also inserts one hitbox per cell plot
 //! while the pointer is inside, offline cells excepted, so at most 2n hitboxes exist. The hovered
 //! cell gets the `hover.rs` marker, dots and value box, with its fill series as series 0 and its
@@ -49,8 +53,8 @@ use super::hover::{self, HoverPaint, HoverState};
 use super::labels::{self, CachedLine, LabelCache, LineStyle};
 use super::view::{ChangedRuns, find_tiered};
 use super::{
-    ChartCache, ChartLabels, ChartSeries, ChartSpec, DEFAULT_RANGE_NS, GeometryScalars, GridStyle,
-    LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
+    ChartCache, ChartLabels, ChartSeries, ChartSpec, ChartState, DEFAULT_RANGE_NS, GeometryScalars,
+    GridStyle, LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
 };
 use crate::anim::AnimationDriver;
 use crate::hub::{SnapshotChanged, SnapshotHub};
@@ -188,6 +192,9 @@ fn cell_offset(layout: &GridLayout, i: usize, cell_h: Pixels, gap: Pixels) -> (f
 
 pub struct ChartGridView {
     pub spec: ChartGridSpec,
+    /// Owner-set validity for every cell, as `ChartView::state`. Failed, Restricted and
+    /// Unsupported win over the data; the rest is derived per cell.
+    pub state: ChartState,
     hub: Entity<SnapshotHub>,
     _hub_sub: Subscription,
     /// All cells in one cache: `fills[0]`, `strokes[0]` (total), `strokes[1]` (overlay).
@@ -257,6 +264,7 @@ impl ChartGridView {
         let _hub_sub = cx.subscribe(hub, Self::on_snapshot);
         let mut this = Self {
             spec,
+            state: ChartState::Live,
             hub: hub.clone(),
             _hub_sub,
             cache: Rc::default(),
@@ -360,6 +368,29 @@ impl ChartGridView {
             self.resolve(hub.read(cx).current());
             cx.notify();
         }
+    }
+
+    /// Owner-supplied validity for every cell (Failed, Restricted, Unsupported). Notifies when
+    /// it changed.
+    pub fn set_state(&mut self, state: ChartState, cx: &mut Context<Self>) {
+        if self.state != state {
+            self.state = state;
+            cx.notify();
+        }
+    }
+
+    /// True when the owner state hides the data: Failed, Restricted or Unsupported.
+    fn blocked(&self) -> bool {
+        matches!(
+            self.state,
+            ChartState::Failed(_) | ChartState::Restricted | ChartState::Unsupported
+        )
+    }
+
+    /// Cell `i`'s value text as last painted.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn value_text(&self, i: usize) -> Option<&str> {
+        self.values.get(i)?.text()
     }
 
     /// The cell whose heading the pointer is over.
@@ -714,7 +745,7 @@ fn paint_grid_view(
     let sf = env.scale_factor;
     let now = env.now;
     let n = view.spec.cells.len();
-    let plot_cell = plot_cell.filter(|_| view.spec.hover);
+    let plot_cell = plot_cell.filter(|_| view.spec.hover && !view.blocked());
     // A cell change drops the pin and the formatted lines; the new cell is pinned below.
     let entered = plot_cell != view.hover_cell;
     if entered {
@@ -735,6 +766,8 @@ fn paint_grid_view(
         };
     }
     let layout = grid_layout(n, bounds.size.width, view.spec.cell_min_w, view.spec.gap);
+    let blocked = view.blocked();
+    let failed = matches!(view.state, ChartState::Failed(_) | ChartState::Restricted);
     let ChartGridView {
         spec,
         cache,
@@ -783,7 +816,8 @@ fn paint_grid_view(
         geometry::right_edge_ns(now, newest_ns, period_ns, sliding)
     };
     let range_ns = spec.range_ns;
-    let has_data = newest_ns > 0;
+    // An owner state that hides the data builds and paints no paths.
+    let has_data = newest_ns > 0 && !blocked;
 
     let mut cache = cache.borrow_mut();
     if has_data {
@@ -887,6 +921,12 @@ fn paint_grid_view(
             outline_color: spec.line,
             radius: px(0.),
         };
+        if blocked {
+            // As a single chart: outline and a dotted baseline across the plot, no grid.
+            grid::paint_gaps(window, &gp, &[0.0..pw as f32]);
+            grid::paint_outline(window, &gp);
+            continue;
+        }
         grid::paint_grid(window, &gp);
         while has_data && gap_at < gaps.len() && gaps[gap_at].0 <= i {
             let (cell_i, span) = &gaps[gap_at];
@@ -981,9 +1021,26 @@ fn paint_grid_view(
             continue;
         }
 
-        let (v, validity) = cell_value(series.get(i).and_then(|(a, _)| a.as_deref()), now);
+        let (v, validity) = if blocked {
+            let validity = if failed {
+                Validity::Failed
+            } else {
+                Validity::Unsupported
+            };
+            (0.0, validity)
+        } else {
+            cell_value(series.get(i).and_then(|(a, _)| a.as_deref()), now)
+        };
         value_text.clear();
         let color = match validity {
+            Validity::Failed => {
+                value_text.push_str(labels::FAILED);
+                theme.status.warning
+            }
+            Validity::Unsupported => {
+                value_text.push_str(labels::UNSUPPORTED);
+                theme.text_secondary
+            }
             Validity::Valid | Validity::Stale => {
                 labels::format_value(spec.value_fmt, v, env.network_unit, value_text);
                 if validity == Validity::Valid {
