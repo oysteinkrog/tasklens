@@ -469,9 +469,15 @@ fn cpu_no_marks_on_homogeneous() {
 
     // Only Performance cores is not hybrid either.
     let mut topo = hybrid_topology();
-    for core in &mut topo.cores {
-        core.kind = CoreKind::Performance;
-    }
+    topo.cores = topo
+        .cores
+        .iter()
+        .cloned()
+        .map(|mut c| {
+            c.kind = CoreKind::Performance;
+            c
+        })
+        .collect();
     cell_specs(
         &GridWords::default(),
         &topo,

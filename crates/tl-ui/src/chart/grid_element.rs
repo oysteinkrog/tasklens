@@ -31,7 +31,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui_kit::assets::{IconName, IconNamed as _};
+use gpui_kit::assets::IconName;
 use gpui_kit::{
     App, AvailableSpace, BorderStyle, Bounds, ContentMask, Context, Edges, Element, ElementId,
     Entity, FillOptions, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla,
