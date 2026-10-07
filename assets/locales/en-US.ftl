@@ -288,6 +288,15 @@ perf-disk-row-rotation = Rotation rate
 perf-disk-row-temperature = Temperature
 perf-summary-title-suffix = {" "}· Graph Summary
 perf-summary-range-percentage = Percentage
+
+# Performance Overview page
+perf-overview-core = C{$n}
+perf-overview-mem-used = Used
+perf-overview-mem-available = Available
+perf-overview-mem-cached = Cached
+perf-overview-mem-swap = Swap
+perf-overview-mem-no-swap = No swap
+
 perf-menu-select-pages = Select Pages
 perf-menu-hide-page = Hide This Page
 perf-menu-show-page = Show This Page
