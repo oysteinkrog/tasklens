@@ -580,3 +580,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - jqk.12 (cc5eb39, 4abb95b): Include children checkbox. No Tab binding exists in the main window, so a new jqk P1 bug binds Tab and Shift+Tab after jqk.13. The accent line gap is in a jqk P3 bead. filter_esc_rule is jqk.13's to update.
 - cr0.22 follow-up (3ea3756): autostart file per app id; Exec passes --app-id.
 - cr0.15 (92eadf3, 42d7317): renderer failure notice and a single relaunch after device loss (with a marker; the session bus is closed before relaunch). The RendererFailed path relies on jqk.10's open hook calling request_exit(RendererFailed).
+- jqk.13 (18de48b, a6ae01e, 14090d2): Esc chain on MainWindow; filter_esc_rule updated. CancelWindowPick has no handler until E20-027.
