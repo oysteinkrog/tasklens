@@ -23,6 +23,7 @@ use tl_ui::hub::SnapshotHub;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::cpu::CpuPage;
 use tl_ui::pages::performance::disk::DiskPage;
+use tl_ui::pages::performance::gpu::GpuPage;
 use tl_ui::pages::performance::memory::MemoryPage;
 use tl_ui::pages::performance::net::NetPage;
 use tl_ui::pages::performance::page::{DevicePage, PlaceholderPage, build_page};
@@ -190,6 +191,7 @@ fn header_of(view: &AnyView, cx: &App) -> (SharedString, SharedString) {
         .or_else(|| read::<MemoryPage>(view, cx))
         .or_else(|| read::<DiskPage>(view, cx))
         .or_else(|| read::<NetPage>(view, cx))
+        .or_else(|| read::<GpuPage>(view, cx))
         .or_else(|| read::<PlaceholderPage>(view, cx))
         .expect("a known page type")
 }
@@ -234,6 +236,7 @@ fn build_page_all_p1_kinds(cx: &mut TestAppContext) {
         (DISKS[3], "Disk 3"),
         ("net:enp38s0", "enp38s0"),
         ("net:tailscale0", "tailscale0"),
+        (GPU, "Graphics adapter"),
     ];
     for (k, word) in expect {
         let view = view_of(&mut r, k);
@@ -246,8 +249,7 @@ fn build_page_all_p1_kinds(cx: &mut TestAppContext) {
     assert!(net.downcast::<NetPage>().is_ok());
     let disk = view_of(&mut r, DISKS[0]);
     assert!(disk.downcast::<DiskPage>().is_ok());
-    // E25-009 (o55.9) adds the GPU arm.
-    assert!(view_of(&mut r, GPU).downcast::<PlaceholderPage>().is_ok());
+    assert!(view_of(&mut r, GPU).downcast::<GpuPage>().is_ok());
 }
 
 #[gpui_kit::test]
@@ -286,6 +288,7 @@ fn pages_demand_reaches_engine(cx: &mut TestAppContext) {
         ("memory", (|d: &Demand| d.memory) as fn(&Demand) -> bool),
         (DISKS[1], |d: &Demand| d.disks),
         ("net:enp38s0", |d: &Demand| d.nets),
+        (GPU, |d: &Demand| d.gpus),
     ] {
         select(&mut r, k);
         let d = last_demand(&r);
