@@ -732,3 +732,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - pdu.24: TlTreeDelegate gets a defaulted empty_clear_filter() so the no-match state draws TlEmptyState with Clear filter at top 96. Chosen over a page overlay, which would re-render the page.
 - crw.13 (64428080, 786505d2, 8443afd1, b6033ff5) closed. The trailing separator is dropped before P3. The crw agent takes crw.14, and summary tile right-click moves to the page menu, as UI-PRF-016 says.
 - gma.32 (19f48947, d861ad05) closed. Gaps: Browse has no file-type filter (gpui), the history popup is a deferred panel, and the result comes from ActionTracker Finished. The gma agent takes gma.14.
+- crw.14: the summary tile menu shows only the common items (Copy, Graph Summary View, Time range). Page items need the page to be rendered, and summary mode does not render it.
