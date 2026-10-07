@@ -854,10 +854,11 @@ mod mounted {
     use gpui_kit::{Modifiers, TestAppContext, VisualTestContext, point, px, size};
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
-    use tl_model::ids::ProcessKey;
+    use tl_model::ids::{NodeId, ProcessKey};
     use tl_model::process::{GroupKind, ProcFlags, ProcState, ProcessMeta, ProcessRecord};
     use tl_model::settings::{Settings, StartTab, UiState};
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
+    use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::app::{AppEnv, StartOptions, TasklensUi, UiInit};
@@ -915,7 +916,7 @@ mod mounted {
         }
     }
 
-    /// `TasklensUi::init` on `start_tab` with 80 processes, then the main window at 1280 × 800.
+    /// `TasklensUi::init` on `start_tab` with 80 processes (in a flat table view on Processes), then the main window at 1280 × 800.
     fn open(cx: &mut TestAppContext, start_tab: StartTab) -> VisualTestContext {
         let engine = FakeEngine::new();
         let client: Arc<dyn EngineClient> = engine.clone();
@@ -938,6 +939,21 @@ mod mounted {
             cx.set_reduce_motion(true);
         });
         let records: Vec<ProcessRecord> = (100..180).map(record).collect();
+        // A flat view of every record for the first table query.
+        let rows: Vec<TableRow> = records
+            .iter()
+            .zip(0u32..)
+            .map(|(r, i)| TableRow {
+                node: NodeId::Process(r.key),
+                depth: 0,
+                expanded: false,
+                has_children: false,
+                record: Some(i),
+                group: None,
+                descendants: 0,
+                subtree: None,
+            })
+            .collect();
         engine.publish_with(|s| {
             s.processes = Arc::new(ProcessSnapshot {
                 header: ComponentHeader {
@@ -954,6 +970,24 @@ mod mounted {
         let mut vcx = VisualTestContext::from_window(handle.into(), cx);
         vcx.simulate_scale_factor_change(1.0);
         vcx.simulate_resize(size(px(1280.), px(800.)));
+        draw(&mut vcx);
+        // The view comes after the page's first query, as from the engine. Without a page
+        // there is no query to answer.
+        if start_tab != StartTab::Processes {
+            return vcx;
+        }
+        engine.publish_with(|s| {
+            s.table = Arc::new(ProcessTableView {
+                header: ComponentHeader {
+                    version: 1,
+                    validity: Validity::Valid,
+                    ..ComponentHeader::default()
+                },
+                query_generation: 1,
+                rows: rows.into(),
+                ..ProcessTableView::default()
+            });
+        });
         draw(&mut vcx);
         vcx
     }
