@@ -1640,8 +1640,8 @@ mod summary {
 
     use gpui_kit::{
         AppContext as _, Context, Entity, FocusHandle, Focusable as _, IntoElement, Modifiers,
-        MouseButton, MouseDownEvent, MouseUpEvent, Render, SharedString, TestAppContext,
-        VisualTestContext, Window, div, px, size,
+        MouseButton, MouseDownEvent, MouseUpEvent, Render, TestAppContext, VisualTestContext,
+        Window, div, px, size,
     };
     use tl_model::client::EngineClient;
     use tl_model::command::Tab;
@@ -1653,6 +1653,7 @@ mod summary {
     use tl_model::snapshot::SeriesSet;
     use tl_ui::app::{BootSettings, EngineGlobal, StartOptions};
     use tl_ui::components::kv_grid;
+    use tl_ui::components::menu::{MenuEntryKind, TlMenuPopup, open_context_menu};
     use tl_ui::components::motion::{M_BASE, M_FAST};
     use tl_ui::demand::{DemandAggregator, GlobalDemand};
     use tl_ui::hub::{GlobalHub, SnapshotHub};
@@ -2190,12 +2191,186 @@ mod summary {
         assert_eq!(after.2, before.2, "the memory chart built no geometry");
     }
 
-    /// Right-click on a tile opens that device's card menu; its Hide This Page item takes the
-    /// tile out of the grid.
+    fn right_click(cx: &mut VisualTestContext, at: gpui_kit::Point<gpui_kit::Pixels>) {
+        cx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        cx.run_until_parked();
+    }
+
+    /// One built menu entry: kind, label, tooltip, checked, submenu.
+    type Entry = (
+        MenuEntryKind,
+        String,
+        Option<String>,
+        bool,
+        Option<Entity<TlMenuPopup>>,
+    );
+
+    fn entries_of(r: &mut Rig, menu: &Entity<TlMenuPopup>) -> Vec<Entry> {
+        r.vcx.update(|window, cx| {
+            menu.read(cx)
+                .entries_for_test(window)
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.kind,
+                        e.label.map(|l| l.to_string()).unwrap_or_default(),
+                        e.tooltip.map(|t| t.to_string()),
+                        e.checked,
+                        e.submenu,
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The open context menu's entries.
+    fn open_menu(r: &mut Rig) -> Vec<Entry> {
+        let menu = r
+            .vcx
+            .update(|window, cx| open_context_menu(window, cx))
+            .expect("a context menu is open");
+        entries_of(r, &menu)
+    }
+
+    fn labels(list: &[Entry]) -> Vec<(MenuEntryKind, &str)> {
+        list.iter().map(|e| (e.0, e.1.as_str())).collect()
+    }
+
+    /// The Time range submenu of `list`.
+    fn ranges(r: &mut Rig, list: &[Entry]) -> Vec<Entry> {
+        let sub = list
+            .iter()
+            .find(|e| e.1 == "Time range")
+            .and_then(|e| e.4.clone())
+            .expect("a Time range submenu");
+        entries_of(r, &sub)
+    }
+
+    fn page_panel(r: &mut Rig) -> gpui_kit::Point<gpui_kit::Pixels> {
+        r.vcx
+            .debug_bounds(tl_ui::pages::performance::PAGE_PANEL_ID)
+            .expect("the page panel")
+            .center()
+    }
+
     #[gpui_kit::test]
-    fn summary_tile_right_click_card_menu(cx: &mut TestAppContext) {
-        use tl_ui::components::menu::{close_context_menu, open_context_menu};
-        use tl_ui::pages::performance::actions::PerfSetPageVisible;
+    fn page_menu_common_order(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let list = open_menu(&mut r);
+        assert_eq!(
+            labels(&list),
+            [
+                (MenuEntryKind::Item, "Copy"),
+                (MenuEntryKind::Item, "Graph Summary View"),
+                (MenuEntryKind::Submenu, "Time range"),
+                (MenuEntryKind::Separator, ""),
+                (MenuEntryKind::Submenu, "Graph"),
+                (MenuEntryKind::Item, "Kernel times"),
+            ]
+        );
+        assert!(!list[1].3, "summary mode is off");
+        let ranges = ranges(&mut r, &list);
+        let checked: Vec<&str> = ranges
+            .iter()
+            .filter(|e| e.3)
+            .map(|e| e.1.as_str())
+            .collect();
+        assert_eq!(checked, ["1 minute"], "range 60 s");
+        assert_eq!(
+            selected(&mut r).as_deref(),
+            Some("cpu"),
+            "selection unchanged"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn page_menu_long_ranges_disabled_before_p2(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let list = open_menu(&mut r);
+        let ranges = ranges(&mut r, &list);
+        let later = Some("Available in a later version".to_owned());
+        let shape: Vec<(MenuEntryKind, &str, Option<String>)> = ranges
+            .iter()
+            .map(|e| (e.0, e.1.as_str(), e.2.clone()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (MenuEntryKind::Item, "30 seconds", None),
+                (MenuEntryKind::Item, "1 minute", None),
+                (MenuEntryKind::Disabled, "5 minutes", later.clone()),
+                (MenuEntryKind::Disabled, "10 minutes", later),
+            ]
+        );
+    }
+
+    /// `TlMenu` drops a trailing separator, so a page without its own items ends after the
+    /// common items with no separator at all (never two).
+    #[gpui_kit::test]
+    fn page_menu_single_separator_without_page_items(cx: &mut TestAppContext) {
+        let mut r = open(cx, 1600., 1000., true);
+        select(&mut r, "disk:sda");
+        let at = page_panel(&mut r);
+        right_click(r.vcx, at);
+        let list = open_menu(&mut r);
+        assert_eq!(
+            labels(&list),
+            [
+                (MenuEntryKind::Item, "Copy"),
+                (MenuEntryKind::Item, "Graph Summary View"),
+                (MenuEntryKind::Submenu, "Time range"),
+            ]
+        );
+    }
+
+    #[gpui_kit::test]
+    fn set_graph_range_updates_every_chart(cx: &mut TestAppContext) {
+        use tl_ui::pages::performance::actions::PerfSetGraphRange;
+
+        let mut r = open(cx, 1600., 1000., true);
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
+        draw(r.vcx);
+        let page = r.page.clone();
+        let (range_s, card_ranges) = r.vcx.update(|_, cx| {
+            let sidebar = page.read(cx).sidebar().clone();
+            let ranges: Vec<u64> = sidebar
+                .read(cx)
+                .cards()
+                .iter()
+                .map(|c| c.chart.read(cx).spec.range_ns)
+                .collect();
+            (TlSettings::settings(cx).performance.graph_range_s, ranges)
+        });
+        assert_eq!(range_s, 30);
+        assert_eq!(card_ranges.len(), 9);
+        assert!(
+            card_ranges.iter().all(|&ns| ns == 30_000_000_000),
+            "{card_ranges:?}"
+        );
+    }
+
+    /// Right-click on a tile opens the page menu's common items (UI-PRF-016); its Time range
+    /// items reach the tiles.
+    #[gpui_kit::test]
+    fn summary_tile_right_click_page_menu(cx: &mut TestAppContext) {
+        use tl_ui::components::menu::close_context_menu;
+        use tl_ui::pages::performance::actions::PerfSetGraphRange;
 
         let mut r = open(cx, 1600., 1000., true);
         let view = enter(&mut r);
@@ -2203,54 +2378,39 @@ mod summary {
             .vcx
             .debug_bounds("perf-summary-tile-1")
             .expect("memory tile");
-        let at = tile.center();
-        r.vcx.simulate_event(MouseDownEvent {
-            button: MouseButton::Right,
-            position: at,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-            first_mouse: false,
-        });
-        r.vcx.simulate_event(MouseUpEvent {
-            button: MouseButton::Right,
-            position: at,
-            modifiers: Modifiers::none(),
-            click_count: 1,
-        });
+        right_click(r.vcx, tile.center());
         draw(r.vcx);
         assert!(
             summary(&mut r).is_some(),
             "right-click does not leave summary mode"
         );
-        let hide = SharedString::from("Hide This Page");
-        let action = r.vcx.update(|window, cx| {
-            let menu = open_context_menu(window, cx)?;
-            menu.read(cx)
-                .entries_for_test(window)
-                .into_iter()
-                .find(|e| e.label.as_ref() == Some(&hide))
-                .and_then(|e| e.action)
-        });
-        let action = action.expect("the card menu is open");
-        let want = PerfSetPageVisible {
-            key: key("memory"),
-            visible: false,
-        };
-        assert!(action.partial_eq(&want));
+        let list = open_menu(&mut r);
+        assert_eq!(
+            labels(&list),
+            [
+                (MenuEntryKind::Item, "Copy"),
+                (MenuEntryKind::Item, "Graph Summary View"),
+                (MenuEntryKind::Submenu, "Time range"),
+            ]
+        );
+        assert!(list[1].3, "checked in summary mode");
 
-        // The item runs on the summary view, which hands it to the sidebar.
+        // The items run on the summary view.
         let focus = r.vcx.update(|_, cx| view.read(cx).focus_handle(cx));
         r.vcx.update(|window, cx| {
             close_context_menu(window, cx);
             focus.focus(window, cx);
         });
-        r.vcx.dispatch_action(want);
+        r.vcx.dispatch_action(PerfSetGraphRange { secs: 30 });
         draw(r.vcx);
-        let tiles: Vec<String> = r.vcx.read_entity(&view, |v, _| {
-            v.tiles.iter().map(|t| t.key.0.to_string()).collect()
+        let ranges: Vec<u64> = r.vcx.update(|_, cx| {
+            view.read(cx)
+                .tiles
+                .iter()
+                .map(|t| t.chart.read(cx).spec.range_ns)
+                .collect()
         });
-        assert_eq!(tiles.len(), 8);
-        assert!(!tiles.contains(&"memory".to_owned()));
+        assert!(ranges.iter().all(|&ns| ns == 30_000_000_000), "{ranges:?}");
         assert!(summary(&mut r).is_some());
     }
 
