@@ -1731,6 +1731,7 @@ mod end {
                         )
                     }
                     MenuEntryKind::Submenu => format!("{label} >{tip}"),
+                    MenuEntryKind::Slider => format!("{label} ~"),
                     MenuEntryKind::Separator => "-".to_owned(),
                     MenuEntryKind::Header => format!("# {label}"),
                 }

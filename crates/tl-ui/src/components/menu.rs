@@ -18,11 +18,16 @@
 //! Enter and Space run an item, and Esc on the top menu closes it. Hovering a row for 150 ms opens
 //! its submenu or closes another one; a click on a submenu row opens it at once.
 //!
+//! A slider row ([`TlMenu::slider_row`]) takes Left, Right, Home and End while highlighted: they
+//! step the slider or jump to its ends, and each press commits like a release. A check item
+//! marked [`TlMenu::keep_open`] runs its action and flips its mark without closing the menu.
+//!
 //! Context menus opened from code (Shift+F10, the Menu key, a right-click the table handles
 //! itself) go through [`open_context_menu_at`]. The window draws the open menu where it renders
 //! [`context_menu_layer`]. The layer also covers the window, so a click outside the menu closes
 //! it and reaches nothing below.
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::base::POPUP_PRIORITY;
@@ -30,6 +35,7 @@ use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::actions::{
     Cancel, Confirm, SelectDown, SelectFirst, SelectLast, SelectLeft, SelectRight, SelectUp,
 };
+use gpui_kit::base::slider::SliderState;
 use gpui_kit::component::kbd::Kbd;
 use gpui_kit::{
     Action, Anchor, Animation, AnimationExt as _, AnyElement, App, AppContext as _, AsKeystroke,
@@ -43,6 +49,7 @@ use gpui_kit::{
 
 use super::icons::{TlIcon, icon};
 use super::motion::{M_FAST, ease_out_cubic};
+use super::slider::{KeyMove, MENU_ROW_HEIGHT, TlSlider, key_move};
 use super::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::i18n::tr;
 use crate::text::fonts::UI_FAMILY;
@@ -102,6 +109,8 @@ enum Entry {
         action: Box<dyn Action>,
         mark: Mark,
         tooltip: Option<SharedString>,
+        /// Running it leaves the menu open ([`TlMenu::keep_open`]).
+        keep_open: bool,
     },
     Disabled {
         label: SharedString,
@@ -119,16 +128,30 @@ enum Entry {
         menu: Entity<TlMenuPopup>,
         tooltip: Option<SharedString>,
     },
+    Slider {
+        label: SharedString,
+        state: Entity<SliderState>,
+        /// Min, max and step.
+        range: (f32, f32, f32),
+        /// Formats the current value for the text right of the track.
+        value_text: ValueText,
+    },
     Separator,
     Header(SharedString),
 }
+
+/// Formats a slider value, for example `120` as "120%".
+type ValueText = Rc<dyn Fn(f32) -> SharedString>;
 
 impl Entry {
     /// The arrow keys, Home, End, type-ahead and the mouse can highlight it.
     fn selectable(&self) -> bool {
         matches!(
             self,
-            Entry::Item { .. } | Entry::Painted { .. } | Entry::Submenu { .. }
+            Entry::Item { .. }
+                | Entry::Painted { .. }
+                | Entry::Submenu { .. }
+                | Entry::Slider { .. }
         )
     }
 
@@ -143,6 +166,7 @@ impl Entry {
             | Entry::Disabled { label, .. }
             | Entry::Painted { label, .. }
             | Entry::Submenu { label, .. }
+            | Entry::Slider { label, .. }
             | Entry::Header(label) => Some(label),
             Entry::Separator => None,
         }
@@ -223,6 +247,7 @@ impl TlMenu {
             action,
             mark: Mark::None,
             tooltip: None,
+            keep_open: false,
         });
         self
     }
@@ -268,6 +293,44 @@ impl TlMenu {
             action,
             mark,
             tooltip: None,
+            keep_open: false,
+        });
+        self
+    }
+
+    /// The check item added last stays open when run: the action is dispatched, the mark flips
+    /// and the menu stays, so the user can change several settings in a row. On other rows this
+    /// does nothing.
+    pub fn keep_open(mut self) -> Self {
+        if let Some(Entry::Item {
+            mark: Mark::Check(_),
+            keep_open,
+            ..
+        }) = self.entries.last_mut()
+        {
+            *keep_open = true;
+        }
+        self
+    }
+
+    /// A row with a label, a slider and the value text (UI-SHL-037), 28 high at 100% scale.
+    /// `state` belongs to the owner, which listens to its `TlSliderEvent`s, so the same entity
+    /// serves every open of the menu. `range` is min, max and step. While the row is
+    /// highlighted Left and Right step the slider and Home and End jump to the ends; each press
+    /// emits `Commit`. The menu stays open while the slider is dragged and after the release.
+    pub fn slider_row(
+        mut self,
+        label: impl Into<SharedString>,
+        state: &Entity<SliderState>,
+        range: (f32, f32, f32),
+        value_text: impl Fn(f32) -> SharedString + 'static,
+    ) -> Self {
+        self.has_mark_column = true;
+        self.entries.push(Entry::Slider {
+            label: label.into(),
+            state: state.clone(),
+            range,
+            value_text: Rc::new(value_text),
         });
         self
     }
@@ -358,6 +421,10 @@ pub struct MenuEntryInfo {
     pub hint: Option<SharedString>,
     pub action: Option<Box<dyn Action>>,
     pub submenu: Option<Entity<TlMenuPopup>>,
+    /// The slider of a slider row.
+    pub slider: Option<Entity<SliderState>>,
+    /// A check item that leaves the menu open when run.
+    pub keep_open: bool,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -366,6 +433,7 @@ pub enum MenuEntryKind {
     Item,
     Disabled,
     Submenu,
+    Slider,
     Separator,
     Header,
 }
@@ -417,6 +485,17 @@ impl TlMenuPopup {
         self.entries
             .iter()
             .map(|e| {
+                let slider = match e {
+                    Entry::Slider { state, .. } => Some(state.clone()),
+                    _ => None,
+                };
+                let keep_open = matches!(
+                    e,
+                    Entry::Item {
+                        keep_open: true,
+                        ..
+                    }
+                );
                 let (kind, tooltip, checked, action, submenu) = match e {
                     Entry::Item {
                         action,
@@ -447,6 +526,7 @@ impl TlMenuPopup {
                         None,
                         Some(menu.clone()),
                     ),
+                    Entry::Slider { .. } => (MenuEntryKind::Slider, None, false, None, None),
                     Entry::Separator => (MenuEntryKind::Separator, None, false, None, None),
                     Entry::Header(_) => (MenuEntryKind::Header, None, false, None, None),
                 };
@@ -461,6 +541,8 @@ impl TlMenuPopup {
                     hint,
                     action,
                     submenu,
+                    slider,
+                    keep_open,
                 }
             })
             .collect()
@@ -620,17 +702,46 @@ impl TlMenuPopup {
     }
 
     /// Runs the item at `ix`: focus goes to the action context, the action is dispatched there
-    /// and the whole menu closes.
+    /// and the whole menu closes. A [`TlMenu::keep_open`] item flips its mark instead of
+    /// closing, and the keys come back to this menu.
     fn run(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let action = match self.entries.get(ix) {
+        let (action, keep_open) = match self.entries.get_mut(ix) {
+            Some(Entry::Item {
+                action,
+                keep_open: true,
+                mark,
+                ..
+            }) => {
+                if let Mark::Check(checked) = mark {
+                    *checked = !*checked;
+                }
+                (action.boxed_clone(), true)
+            }
             Some(Entry::Item { action, .. } | Entry::Painted { action, .. }) => {
-                action.boxed_clone()
+                (action.boxed_clone(), false)
             }
             _ => return,
         };
         self.action_context.focus(window, cx);
+        // The dispatch target is taken from the focus now; the action runs later.
         window.dispatch_action(action, cx);
-        self.dismiss(window, cx);
+        if keep_open {
+            self.focus.focus(window, cx);
+            cx.notify();
+        } else {
+            self.dismiss(window, cx);
+        }
+    }
+
+    /// A key on a highlighted slider row moves the slider. Returns false on other rows.
+    fn slider_key(&mut self, mv: KeyMove, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(Entry::Slider { state, .. }) = self.highlight.and_then(|ix| self.entries.get(ix))
+        else {
+            return false;
+        };
+        key_move(&state.clone(), mv, window, cx);
+        cx.notify();
+        true
     }
 
     /// Closes this menu and every menu above it. The top menu emits [`DismissEvent`] and gives
@@ -740,24 +851,37 @@ impl TlMenuPopup {
         self.step(true, window, cx);
     }
 
+    /// On a slider row Home sets the slider to its minimum instead.
     fn select_first(&mut self, _: &SelectFirst, window: &mut Window, cx: &mut Context<Self>) {
-        self.jump(false, window, cx);
+        if !self.slider_key(KeyMove::Min, window, cx) {
+            self.jump(false, window, cx);
+        }
     }
 
+    /// On a slider row End sets the slider to its maximum instead.
     fn select_last(&mut self, _: &SelectLast, window: &mut Window, cx: &mut Context<Self>) {
-        self.jump(true, window, cx);
+        if !self.slider_key(KeyMove::Max, window, cx) {
+            self.jump(true, window, cx);
+        }
     }
 
     /// In a top menu Left goes on to the owner, so a menu bar can move to the previous menu.
+    /// On a slider row it steps the slider down instead.
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slider_key(KeyMove::Steps(-1.0), window, cx) {
+            return;
+        }
         if !self.back_to_parent(window, cx) {
             cx.propagate();
         }
     }
 
     /// Right on a row that is not a submenu goes on to the owner, so a menu bar can move to
-    /// the next menu.
+    /// the next menu. On a slider row it steps the slider up instead.
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slider_key(KeyMove::Steps(1.0), window, cx) {
+            return;
+        }
         let opened = self
             .highlight
             .is_some_and(|ix| self.open_submenu(ix, true, window, cx));
@@ -873,6 +997,7 @@ impl TlMenuPopup {
                 action,
                 mark,
                 tooltip,
+                ..
             } => {
                 let hint =
                     shortcut_hint(action.as_ref(), &self.action_context, window).map(|hint| {
@@ -952,6 +1077,27 @@ impl TlMenuPopup {
                         cx.listener(move |this, _, window, cx| this.on_row_click(ix, window, cx)),
                     )
                     .when(open, |d| d.child(self.render_submenu(menu, m, window, cx)))
+                    .into_any_element()
+            }
+            Entry::Slider {
+                label,
+                state,
+                range: (min, max, step),
+                value_text,
+            } => {
+                let value = value_text(state.read(cx).value().end());
+                row(None)
+                    .aria_label(SharedString::from(format!("{label} {value}")))
+                    .h(s(MENU_ROW_HEIGHT))
+                    .px(m.sp[4])
+                    .children(mark_column(Mark::None))
+                    .child(
+                        TlSlider::new(state)
+                            .in_menu(true)
+                            .label(label.clone())
+                            .range(*min, *max, *step)
+                            .value_text(value),
+                    )
                     .into_any_element()
             }
             Entry::Separator => div()
@@ -1394,6 +1540,7 @@ mod tests {
     use tl_model::settings::{AppearanceSettings, ThemeSettings};
 
     use super::*;
+    use crate::components::slider::TlSliderEvent;
 
     gpui_kit::actions!(tl_menu_test, [RunA, RunB, RunC, RunX, RunY]);
 
@@ -1953,6 +2100,148 @@ mod tests {
         assert!(close(header, MENU_HEADER_H * 1.1), "{header:?}");
         let width = menus(cx)[0].size.width;
         assert!(f32::from(width) >= MENU_MIN_W * 1.1 - 0.01, "{width:?}");
+    }
+
+    type Commits = Rc<RefCell<Vec<f32>>>;
+
+    /// A slider state at 50 in 0..=100 step 5, and the values it commits.
+    fn slider(cx: &mut VisualTestContext) -> (Entity<SliderState>, Commits, Subscription) {
+        let commits = Commits::default();
+        let out = commits.clone();
+        let (state, sub) = cx.update(|_, cx| {
+            let state = cx.new(|_| {
+                SliderState::new()
+                    .min(0.)
+                    .max(100.)
+                    .step(5.)
+                    .default_value(50.)
+            });
+            let sub = cx.subscribe(&state, move |_, e: &TlSliderEvent, _| {
+                if let TlSliderEvent::Commit(v) = e {
+                    out.borrow_mut().push(*v);
+                }
+            });
+            (state, sub)
+        });
+        (state, commits, sub)
+    }
+
+    fn slider_value(state: &Entity<SliderState>, cx: &mut VisualTestContext) -> f32 {
+        state.read_with(cx, |s, _| s.value().end())
+    }
+
+    #[gpui_kit::test]
+    fn slider_row_takes_left_right_home_end(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (state, commits, _sub) = slider(cx);
+        let row_state = state.clone();
+        let menu = open(&view, cx, point(px(100.), px(100.)), move |menu, _, _| {
+            menu.item("A", Box::new(RunA))
+                .slider_row("Size", &row_state, (0., 100., 5.), |v| {
+                    format!("{v}%").into()
+                })
+        });
+
+        keys(cx, "down down");
+        assert_eq!(highlighted(cx), vec![(false, 1)], "the slider row");
+        keys(cx, "right");
+        assert_eq!(slider_value(&state, cx), 55.);
+        keys(cx, "left left");
+        assert_eq!(slider_value(&state, cx), 45.);
+        keys(cx, "home");
+        assert_eq!(slider_value(&state, cx), 0.);
+        keys(cx, "home");
+        keys(cx, "end");
+        assert_eq!(slider_value(&state, cx), 100.);
+        keys(cx, "end");
+        assert_eq!(
+            *commits.borrow(),
+            [55., 50., 45., 0., 100.],
+            "one commit per press that moved the value"
+        );
+        assert!(cx.update(|window, cx| context_menu_open(window, cx)));
+        assert_eq!(highlighted(cx), vec![(false, 1)], "the highlight stays");
+        let label = row(cx, false, 1).label().map(str::to_owned);
+        assert_eq!(label.as_deref(), Some("Size 100%"), "label and value");
+
+        keys(cx, "up");
+        assert_eq!(highlighted(cx), vec![(false, 0)], "Up still moves");
+        keys(cx, "home end");
+        assert_eq!(highlighted(cx), vec![(false, 1)], "End jumps from an item");
+        assert_eq!(commits.borrow().len(), 5, "Home and End on A only jump");
+        let info = cx.update(|window, cx| menu.read(cx).entries_for_test(window));
+        assert_eq!(info[1].kind, MenuEntryKind::Slider);
+        assert_eq!(info[1].slider.as_ref(), Some(&state));
+    }
+
+    #[gpui_kit::test]
+    fn slider_row_is_28_high(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let (state, _, _sub) = slider(cx);
+        open(&view, cx, point(px(100.), px(100.)), move |menu, _, _| {
+            menu.item("A", Box::new(RunA))
+                .slider_row("Size", &state, (0., 100., 5.), |v| format!("{v}%").into())
+        });
+        assert_eq!(row(cx, false, 0).bounds().size.height, px(MENU_ITEM_H));
+        assert_eq!(row(cx, false, 1).bounds().size.height, px(MENU_ROW_HEIGHT));
+    }
+
+    #[gpui_kit::test]
+    fn keep_open_check_item_runs_and_stays(cx: &mut TestAppContext) {
+        let (view, cx) = host(cx);
+        let menu = open(&view, cx, point(px(100.), px(100.)), |menu, _, _| {
+            menu.check_item("C", false, Box::new(RunC))
+                .keep_open()
+                .check_item("A", false, Box::new(RunA))
+        });
+        let checked = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                menu.read(cx)
+                    .entries_for_test(window)
+                    .iter()
+                    .map(|e| (e.checked, e.keep_open))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(checked(cx), [(false, true), (false, false)]);
+
+        keys(cx, "down enter");
+        assert_eq!(*view.read_with(cx, |h, _| h.ran.clone()).borrow(), ["C"]);
+        assert!(
+            cx.update(|window, cx| context_menu_open(window, cx)),
+            "Enter keeps it open"
+        );
+        assert_eq!(
+            checked(cx),
+            [(true, true), (false, false)],
+            "the mark flips"
+        );
+        let focused = cx.update(|window, cx| menu.focus_handle(cx).is_focused(window));
+        assert!(focused, "the keys stay on the menu");
+        assert_eq!(highlighted(cx), vec![(false, 0)], "the highlight stays");
+
+        let c = row(cx, false, 0).bounds().center();
+        cx.simulate_click(c, Modifiers::none());
+        draw(cx);
+        assert_eq!(
+            *view.read_with(cx, |h, _| h.ran.clone()).borrow(),
+            ["C", "C"]
+        );
+        assert!(
+            cx.update(|window, cx| context_menu_open(window, cx)),
+            "a click keeps it open"
+        );
+        assert_eq!(checked(cx), [(false, true), (false, false)]);
+
+        keys(cx, "end enter");
+        assert_eq!(
+            *view.read_with(cx, |h, _| h.ran.clone()).borrow(),
+            ["C", "C", "A"]
+        );
+        assert!(
+            !cx.update(|window, cx| context_menu_open(window, cx)),
+            "a plain check item still closes the menu"
+        );
     }
 
     #[gpui_kit::test]

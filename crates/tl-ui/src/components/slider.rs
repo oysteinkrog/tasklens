@@ -62,7 +62,7 @@ const LENGTH_MENU: f32 = 120.0;
 const LENGTH_PAGE: f32 = 200.0;
 const THUMB: f32 = 12.0;
 const THUMB_ACTIVE: f32 = 14.0;
-const MENU_ROW_HEIGHT: f32 = 28.0;
+pub const MENU_ROW_HEIGHT: f32 = 28.0;
 const MENU_LABEL_MIN_WIDTH: f32 = 140.0;
 const VALUE_MIN_WIDTH: f32 = 40.0;
 
@@ -123,7 +123,7 @@ fn rebuild(s: &mut SliderState, min: f32, max: f32, step: f32, value: f32) {
 
 /// A keyboard move.
 #[derive(Clone, Copy, Debug)]
-enum KeyMove {
+pub(crate) enum KeyMove {
     Steps(f32),
     Min,
     Max,
@@ -148,7 +148,12 @@ fn key_target(value: f32, min: f32, max: f32, step: f32, mv: KeyMove) -> f32 {
 
 /// Applies a keyboard move and emits `Commit` when the value changed. A press at a limit emits
 /// nothing.
-fn key_move(state: &Entity<SliderState>, mv: KeyMove, window: &mut Window, cx: &mut App) {
+pub(crate) fn key_move(
+    state: &Entity<SliderState>,
+    mv: KeyMove,
+    window: &mut Window,
+    cx: &mut App,
+) {
     state.update(cx, |s, cx| {
         let value = s.value().end();
         let next = key_target(value, s.min_value(), s.max_value(), s.step_value(), mv);
