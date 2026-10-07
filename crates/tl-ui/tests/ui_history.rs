@@ -1,23 +1,33 @@
 //! History mode page: header text and render on the HISTORY bit only (tasklens-8fx.19), and the
-//! query controller with one Frame query in flight (tasklens-8fx.20). Run with
-//! `--features test-hooks`.
+//! query controller with one Frame query in flight (tasklens-8fx.20), and the History table
+//! (tasklens-8fx.22). Run with `--features test-hooks`.
 #![cfg(feature = "test-hooks")]
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use gpui_kit::assets::IconName;
 use gpui_kit::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use tl_model::client::EngineClient;
 use tl_model::command::{Command, HistoryWhat};
 use tl_model::details::DetailsSnapshot;
-use tl_model::history::{HistoryRange, HistoryStoreState, HistoryView};
-use tl_model::settings::{AppearanceSettings, ThemeSettings};
+use tl_model::history::{
+    HistoryPeaks, HistoryProcessRow, HistoryRange, HistoryStoreState, HistoryTotals, HistoryView,
+};
+use tl_model::ids::{ColumnId, ProcessKey};
+use tl_model::settings::{AppearanceSettings, Settings, SortState, ThemeSettings, UiState};
 use tl_model::snapshot::ComponentHeader;
-use tl_model::time::TimeNs;
+use tl_model::time::{BootId, TimeNs};
+use tl_model::validity::Validity;
+use tl_ui::app::{BootSettings, EngineGlobal};
 use tl_ui::hub::{GlobalHub, SnapshotHub};
+use tl_ui::pages::processes::history::table::HistoryTableDelegate;
 use tl_ui::pages::processes::history::{
     HistoryPage, HistoryUiState, HistoryWords, default_view_range, header_text,
 };
+use tl_ui::settings_global::TlSettings;
+use tl_ui::table::cells::CellOut;
+use tl_ui::table::tree_table::{TlTreeTable, TreeTableDelegate};
 use tl_ui::testing::fake_engine::FakeEngine;
 
 const S: TimeNs = 1_000_000_000;
@@ -371,4 +381,358 @@ fn unanswered_query_resent_after_timeout(cx: &mut TestAppContext) {
         vcx.read_entity(&page, |p, _| p.query_in_flight()),
         Some(sent[2].0)
     );
+}
+
+const METRICS: [ColumnId; 5] = [
+    ColumnId::Cpu,
+    ColumnId::Memory,
+    ColumnId::Disk,
+    ColumnId::Network,
+    ColumnId::Gpu,
+];
+
+fn key(pid: u32) -> ProcessKey {
+    ProcessKey {
+        start_ticks: u64::from(pid) * 10,
+        boot_id: BootId(1),
+        pid,
+    }
+}
+
+/// A present row with `cpu` percent and `pid` MiB of memory.
+fn prow(pid: u32, name: &str, cpu: f32) -> HistoryProcessRow {
+    HistoryProcessRow {
+        key: key(pid),
+        name: Arc::from(name),
+        comm: Arc::from(name),
+        user: Arc::from("alice"),
+        exe: Some(Arc::from(format!("/usr/bin/{name}").as_str())),
+        app_id: None,
+        system: false,
+        present: true,
+        previous_boot: false,
+        cpu_pct: cpu,
+        mem_anon_bytes: u64::from(pid) << 20,
+        disk_bps: 0.0,
+        net_bps: 0.0,
+        gpu_pct: 0.0,
+        peak: None,
+    }
+}
+
+/// Publishes a view at a scrub second with `rows`.
+fn publish_rows(
+    engine: &FakeEngine,
+    vcx: &mut VisualTestContext,
+    range: HistoryRange,
+    rows: Vec<HistoryProcessRow>,
+) {
+    engine.publish_with(|s| {
+        let version = s.history.header.version + 1;
+        s.history = Arc::new(HistoryView {
+            header: ComponentHeader {
+                version,
+                ..ComponentHeader::default()
+            },
+            store_state: HistoryStoreState::Ready,
+            range,
+            totals: Some(HistoryTotals {
+                cpu_pct: 12.5,
+                mem_used_bytes: 4 << 30,
+                mem_total_bytes: 16 << 30,
+            }),
+            rows: rows.into(),
+            ..view(700 * S)
+        });
+    });
+    vcx.run_until_parked();
+}
+
+/// Runs `f` on the page's table.
+fn with_table<R>(
+    page: &Entity<HistoryPage>,
+    vcx: &mut VisualTestContext,
+    f: impl FnOnce(&TlTreeTable<HistoryTableDelegate>) -> R,
+) -> R {
+    vcx.read_entity(page, |p, cx| f(p.table().read(cx)))
+}
+
+/// Value, text, validity and tooltip of cell (`ix`, `col`), as on the hovered row.
+fn cell(d: &HistoryTableDelegate, ix: usize, col: ColumnId) -> (String, Validity, Option<String>) {
+    let mut out = CellOut {
+        want_text: true,
+        want_tooltip: true,
+        ..CellOut::default()
+    };
+    d.cell(ix, col, &mut out);
+    let text = out.arc.as_deref().map_or(out.text.clone(), str::to_owned);
+    (text, out.validity, out.tooltip.map(|t| t.to_string()))
+}
+
+/// Installs `TlSettings` from `settings`, with an empty state.
+fn init_settings(cx: &mut TestAppContext, engine: &Arc<FakeEngine>, settings: Settings) {
+    let client: Arc<dyn EngineClient> = engine.clone();
+    cx.update(|cx| {
+        cx.set_global(EngineGlobal(client));
+        cx.set_global(BootSettings {
+            settings,
+            state: UiState::default(),
+            persist: None,
+            startup_toasts: Vec::new(),
+        });
+        TlSettings::init(cx);
+    });
+}
+
+#[gpui_kit::test]
+fn history_table_default_sort_cpu_desc(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    // CPU 0.0 to 19.0 in a scrambled order.
+    let rows = (0..20u32)
+        .map(|i| prow(100 + i, &format!("p{i}"), ((i * 7) % 20) as f32))
+        .collect();
+    publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
+    with_table(&page, vcx, |t| {
+        let d = &t.delegate;
+        assert_eq!(d.row_count(), 20);
+        let cpu: Vec<f32> = (0..20).map(|ix| d.row(ix).cpu_pct).collect();
+        let want: Vec<f32> = (0..20).rev().map(|v| v as f32).collect();
+        assert_eq!(cpu, want);
+        assert_eq!(d.sort().column, ColumnId::Cpu);
+        assert!(!d.sort().ascending);
+        let labels: Vec<String> = d
+            .columns()
+            .visible_columns()
+            .iter()
+            .map(|c| d.column_spec(*c).label.to_string())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Name",
+                "PID",
+                "User",
+                "Image path",
+                "CPU",
+                "Memory",
+                "Disk",
+                "Network",
+                "GPU"
+            ]
+        );
+        let widths: Vec<f32> = d
+            .columns()
+            .visible_columns()
+            .iter()
+            .map(|c| f32::from(d.columns().width(*c)))
+            .collect();
+        assert_eq!(
+            widths,
+            [248.0, 96.0, 92.0, 200.0, 63.0, 92.0, 82.0, 92.0, 72.0]
+        );
+
+        // The live table's formats, and the header totals at the scrub time.
+        assert_eq!(cell(d, 0, ColumnId::Cpu).0, "19.0%");
+        assert_eq!(cell(d, 0, ColumnId::Pid).0, d.row(0).key.pid.to_string());
+        assert_eq!(cell(d, 0, ColumnId::ImagePath).0, "/usr/bin/p17");
+        let total = |col| {
+            let mut out = CellOut {
+                want_text: true,
+                ..CellOut::default()
+            };
+            let shown = d.header_total(col, &mut out);
+            (shown, out.text, out.validity)
+        };
+        assert_eq!(
+            total(ColumnId::Cpu),
+            (true, "12.5%".into(), Validity::Valid)
+        );
+        assert_eq!(
+            total(ColumnId::Memory),
+            (true, "25.0%".into(), Validity::Valid)
+        );
+        assert_eq!(total(ColumnId::Disk).2, Validity::Missing);
+        assert!(!total(ColumnId::Name).0);
+        assert_eq!(
+            d.column_spec(ColumnId::Name).tooltip.as_deref(),
+            Some("Values at the selected time")
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn history_missing_identity_row_marked(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let mut gone = prow(7, "gone", 99.0);
+    gone.present = false;
+    let rows = vec![
+        gone,
+        prow(1, "a", 1.0),
+        prow(2, "b", 2.0),
+        prow(3, "c", 3.0),
+    ];
+    publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
+
+    // Selecting it reaches the page state in selection order.
+    let table = vcx.read_entity(&page, |p, _| p.table().clone());
+    table.update(vcx, |t, cx| {
+        t.selection.click(key(2));
+        t.selection.ctrl_click(key(7));
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    assert_eq!(
+        vcx.read_entity(&page, |p, _| p.state().selected.clone()),
+        vec![key(2), key(7)]
+    );
+
+    with_table(&page, vcx, |t| {
+        let d = &t.delegate;
+        let last = d.row_count() - 1;
+        assert_eq!(d.row_id(last), key(7));
+        for col in METRICS {
+            let (text, validity, tip) = cell(d, last, col);
+            assert_eq!(validity, Validity::Missing, "{col:?}");
+            assert!(text.is_empty());
+            assert_eq!(tip.as_deref(), Some("No longer present"));
+        }
+        let name = d.name_cell(last);
+        assert_eq!(name.primary.as_ref(), "gone");
+        assert_eq!(name.secondary.as_deref(), Some("Process not running"));
+        assert!(name.glyphs.is_empty());
+        assert!(d.name_cell(0).secondary.is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn previous_boot_marked(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let mut old = prow(5, "old", 0.0);
+    old.present = false;
+    old.previous_boot = true;
+    publish_rows(
+        &engine,
+        vcx,
+        HistoryRange::At(600 * S),
+        vec![prow(1, "a", 1.0), old],
+    );
+    with_table(&page, vcx, |t| {
+        let d = &t.delegate;
+        let ix = d.row_index(key(5)).expect("row shown");
+        let name = d.name_cell(ix);
+        assert_eq!(name.secondary.as_deref(), Some("(previous boot)"));
+        assert_eq!(name.glyphs.len(), 1);
+        assert_eq!(name.glyphs[0].0, IconName::RotateCcwClock);
+    });
+}
+
+#[gpui_kit::test]
+fn range_peak_tooltip(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let mut busy = prow(3, "busy", 10.0);
+    busy.peak = Some(HistoryPeaks {
+        cpu_pct: 42.1,
+        mem_anon_bytes: 3 << 20,
+        disk_bps: 0.0,
+        net_bps: 0.0,
+        gpu_pct: 0.0,
+    });
+    let range = HistoryRange::Span {
+        from: 100 * S,
+        to: 200 * S,
+    };
+    publish_rows(&engine, vcx, range, vec![busy]);
+    with_table(&page, vcx, |t| {
+        let d = &t.delegate;
+        let (text, _, tip) = cell(d, 0, ColumnId::Cpu);
+        assert_eq!(text, "10.0%");
+        assert_eq!(tip.as_deref(), Some("peak 42.1%"));
+        assert_eq!(
+            cell(d, 0, ColumnId::Memory).2.as_deref(),
+            Some("peak 3.00 MiB")
+        );
+        assert_eq!(
+            d.column_spec(ColumnId::Name).tooltip.as_deref(),
+            Some("Averages over the selected range (peak in cell tooltips)")
+        );
+        // Off the hovered row no tooltip is formatted.
+        let mut out = CellOut::default();
+        d.cell(0, ColumnId::Cpu, &mut out);
+        assert!(out.tooltip.is_none());
+    });
+}
+
+#[gpui_kit::test]
+fn hide_system_filters_history(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    let mut settings = Settings::default();
+    settings.processes.hide_system = true;
+    init_settings(cx, &engine, settings);
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let mut sys = prow(1, "systemd", 5.0);
+    sys.system = true;
+    let rows = vec![sys, prow(2, "firefox", 1.0), prow(3, "bash", 2.0)];
+    publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
+    let shown = |vcx: &mut VisualTestContext| {
+        with_table(&page, vcx, |t| {
+            let d = &t.delegate;
+            (0..d.row_count())
+                .map(|ix| d.row_id(ix).pid)
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(shown(vcx), [3, 2]);
+
+    vcx.update(|_, cx| TlSettings::update(cx, |d| d.settings.processes.hide_system = false));
+    vcx.run_until_parked();
+    assert_eq!(shown(vcx), [1, 3, 2]);
+
+    // The filter matches name, comm, user and executable path without case.
+    page.update(vcx, |p, cx| p.set_filter("FIRE", cx));
+    vcx.run_until_parked();
+    assert_eq!(shown(vcx), [2]);
+    page.update(vcx, |p, cx| p.set_filter("/usr/bin/ba", cx));
+    vcx.run_until_parked();
+    assert_eq!(shown(vcx), [3]);
+    page.update(vcx, |p, cx| p.set_filter("", cx));
+    vcx.run_until_parked();
+    assert_eq!(shown(vcx), [1, 3, 2]);
+}
+
+#[gpui_kit::test]
+fn history_sort_persisted(cx: &mut TestAppContext) {
+    let engine = init(cx);
+    init_settings(cx, &engine, Settings::default());
+    let (page, vcx) = cx.add_window_view(HistoryPage::new);
+    vcx.run_until_parked();
+    let rows = vec![prow(3, "c", 1.0), prow(1, "a", 3.0), prow(2, "b", 2.0)];
+    publish_rows(&engine, vcx, HistoryRange::At(600 * S), rows);
+    let table = vcx.read_entity(&page, |p, _| p.table().clone());
+    // Memory is numeric: the first click sorts descending, the second ascending.
+    for _ in 0..2 {
+        table.update(vcx, |t, cx| t.sort_by_column(ColumnId::Memory, cx));
+    }
+    vcx.run_until_parked();
+    let saved = vcx.update(|_, cx| TlSettings::state(cx).sort.history.clone());
+    assert_eq!(
+        saved,
+        SortState {
+            column: "memory".into(),
+            ascending: true,
+        }
+    );
+    with_table(&page, vcx, |t| {
+        let d = &t.delegate;
+        let pids: Vec<u32> = (0..d.row_count()).map(|ix| d.row_id(ix).pid).collect();
+        assert_eq!(pids, [1, 2, 3]);
+    });
 }
