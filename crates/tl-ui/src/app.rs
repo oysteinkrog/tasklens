@@ -483,7 +483,11 @@ fn start(cx: &mut App, launch: UiLaunch, exit: Rc<Cell<Option<UiExit>>>) {
     cx.set_global(ExitCell(exit));
     cx.set_global(OpenHooks::default());
     // E32-013: low-memory init
-    TasklensUi::init(cx, client, init);
+    if open == OpenMode::LowMemory {
+        crate::windows::low_memory::init_low_memory(cx, client, init);
+    } else {
+        TasklensUi::init(cx, client, init);
+    }
     open_first(cx, open);
     perf_step("window_open");
 }

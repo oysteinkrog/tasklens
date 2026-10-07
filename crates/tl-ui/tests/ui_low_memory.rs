@@ -18,11 +18,12 @@ use tl_model::command::{Command, KWinCommand};
 use tl_model::ids::GroupKey;
 use tl_model::process::{LowMemGroup, LowMemoryInfo};
 use tl_model::settings::{Settings, UiState};
-use tl_ui::app::{AppEnv, OpenHooks, UiExit, UiExitSlot, UiInit};
+use tl_ui::app::{AppEnv, OpenHooks, UiExit, UiExitSlot, UiInit, start_for_test};
 use tl_ui::components::window_frame::TlSecondaryWindow;
 use tl_ui::testing::fake_engine::FakeEngine;
 use tl_ui::theme::current;
 use tl_ui::windows::low_memory::{LowMemoryWindow, init_low_memory};
+use tl_ui::{OpenMode, StartOptions, UiLaunch};
 
 const SECOND: u64 = 1_000_000_000;
 
@@ -621,4 +622,79 @@ fn lowmem_title_follows_language(cx: &mut TestAppContext) {
     let before = tl_ui::i18n::tr_calls();
     draw(&mut vcx);
     assert_eq!(tl_ui::i18n::tr_calls(), before);
+}
+
+/// A test context whose text system records every added face.
+fn recording_cx() -> (TestAppContext, Arc<RecordingText>) {
+    let text = Arc::new(RecordingText {
+        inner: gpui_kit::platform::current_platform(true).text_system(),
+        added: Mutex::new(Vec::new()),
+    });
+    let cx = TestAppContext::build_with_text_system(TestDispatcher::new(0), None, text.clone());
+    (cx, text)
+}
+
+/// The `run` closure body (`start`) for `open` against a new `FakeEngine`.
+fn start_run(cx: &mut TestAppContext, open: OpenMode) -> Option<UiExit> {
+    let client: Arc<dyn EngineClient> = FakeEngine::new();
+    let launch = UiLaunch {
+        client,
+        init: ui_init(),
+        open,
+        start: StartOptions::default(),
+    };
+    let exit = cx.update(|cx| start_for_test(cx, launch));
+    cx.run_until_parked();
+    exit.take()
+}
+
+fn added_faces(text: &RecordingText) -> Vec<Vec<u8>> {
+    text.added
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// A plain test like `lowmem_minimal_init_hook_and_faces`: the full init must not run.
+#[test]
+fn run_low_memory_uses_minimal_init() {
+    let (mut cx, text) = recording_cx();
+    assert_eq!(start_run(&mut cx, OpenMode::LowMemory), None);
+
+    // `open_first` took the low-memory hook; the full init would have set `main`.
+    cx.update(|cx| {
+        let hooks = cx.global::<OpenHooks>();
+        assert!(hooks.main.is_none());
+        assert!(hooks.low_memory.is_none());
+    });
+    assert!(!added_faces(&text).iter().any(|f| f.as_slice() == MEDIUM));
+
+    let windows = cx.update(|cx| cx.windows());
+    assert_eq!(windows.len(), 1);
+    let handle = windows[0].downcast::<Root>().expect("root window");
+    let frame = cx
+        .update(|cx| TlSecondaryWindow::<LowMemoryWindow>::find(handle, cx))
+        .expect("rescue window frame");
+    assert_eq!(
+        cx.read(|cx| frame.read(cx).title().to_string()),
+        "tasklens - Low memory"
+    );
+}
+
+#[test]
+fn run_main_uses_full_init() {
+    let (mut cx, text) = recording_cx();
+    assert_eq!(start_run(&mut cx, OpenMode::Main), None);
+    cx.update(|cx| assert!(cx.global::<OpenHooks>().low_memory.is_none()));
+    assert!(added_faces(&text).iter().any(|f| f.as_slice() == MEDIUM));
+}
+
+#[test]
+fn low_memory_loads_two_faces() {
+    let (mut cx, text) = recording_cx();
+    start_run(&mut cx, OpenMode::LowMemory);
+    let added = added_faces(&text);
+    assert_eq!(added.len(), 2);
+    assert!(added.iter().any(|f| f.as_slice() == REGULAR));
+    assert!(added.iter().any(|f| f.as_slice() == SEMIBOLD));
 }
