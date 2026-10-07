@@ -1385,14 +1385,6 @@ mod page {
         }
     }
 
-    const KINDS: [BoxKind; 5] = [
-        BoxKind::Cpu,
-        BoxKind::Memory,
-        BoxKind::Gpu,
-        BoxKind::Disk,
-        BoxKind::Net,
-    ];
-
     impl Rig<'_> {
         fn set_active(&mut self, active: bool) {
             let page = self.page.clone();
