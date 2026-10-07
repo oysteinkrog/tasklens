@@ -2226,10 +2226,11 @@ mod end {
             }
         );
         assert!(sent[0].targets.is_empty(), "no targets");
+        let id = sent[0].id;
+        emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Started);
         assert_eq!(visible(&mut rig.vcx), ["Opening file location"]);
 
         // Success keeps the Info toast; a failure shows the reason alone.
-        let id = sent[0].id;
         emit(&rig.engine, &mut rig.vcx, id, None, ActionState::Succeeded);
         assert_eq!(visible(&mut rig.vcx), ["Opening file location"]);
         assert!(rig.dispatch(OpenFileLocation).is_none());
