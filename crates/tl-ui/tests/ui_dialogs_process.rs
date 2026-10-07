@@ -107,11 +107,7 @@ fn hybrid_topology() -> CpuTopology {
     }
 }
 
-fn publish_topology(cx: &mut TestAppContext, engine: &FakeEngine, offline: &[u16]) {
-    publish_topology_as(cx, engine, topology(offline));
-}
-
-fn publish_topology_as(cx: &mut TestAppContext, engine: &FakeEngine, topo: CpuTopology) {
+fn publish_topology(cx: &mut TestAppContext, engine: &FakeEngine, topo: CpuTopology) {
     let topo = Arc::new(topo);
     engine.publish_with(|s| {
         let system = Arc::make_mut(&mut s.system);
@@ -231,7 +227,7 @@ fn open(cx: &mut TestAppContext, offline: &[u16], mask: Option<(CpuSet, CpuSet)>
 
 fn open_on(cx: &mut TestAppContext, topo: CpuTopology, mask: Option<(CpuSet, CpuSet)>) -> Rig {
     let engine = setup(cx);
-    publish_topology_as(cx, &engine, topo);
+    publish_topology(cx, &engine, topo);
     let parent = cx.add_window(|window, cx| {
         let host = cx.new(|_| Host);
         Root::new(host, window, cx)
