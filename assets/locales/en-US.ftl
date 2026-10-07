@@ -72,6 +72,23 @@ pwn-threads-affinity-all = All
 pwn-threads-restricted = Needs administrator access.
 pwn-threads-copied = Copied to clipboard
 
+pwn-run-prompt = Type the name of a program, folder, document, or Internet resource.
+pwn-run-open = Open:
+pwn-run-history-button = Show command history
+pwn-run-as-admin = Run as administrator
+pwn-run-wayland-note = GUI programs may not start as root on Wayland
+pwn-run-browse = Browse…
+pwn-run-clear-history = Clear command history
+pwn-run-ok = OK
+pwn-run-cancel = Cancel
+pwn-run-ran-as-admin = Ran as administrator
+pwn-run-toast-empty = Please enter a command
+pwn-run-toast-invalid = Command contains invalid text.
+pwn-run-toast-launched = Command launched
+pwn-run-toast-failed = Failed to run command
+pwn-run-toast-auth-cancelled = Authentication cancelled
+pwn-run-toast-history-cleared = Command history cleared
+
 ## Performance (E24)
 
 perf-fallback-collecting = Collecting…

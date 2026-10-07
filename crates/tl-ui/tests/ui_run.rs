@@ -51,3 +51,304 @@ fn history_roundtrip_through_store() {
     assert_eq!(run_history::clear(Some(&store)), Ok(()));
     assert!(run_history::load(Some(&store)).is_empty());
 }
+
+/// The Run window (tasklens-gma.32, UI-PWN-028, UI-PWN-029). Run with `--features test-hooks`.
+#[cfg(feature = "test-hooks")]
+mod window {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{Entity, TestAppContext, VisualTestContext, WindowHandle};
+    use tl_model::actions::{
+        ActionError, ActionEvent, ActionKind, ActionRequest, ActionState, LaunchWhat,
+    };
+    use tl_model::client::EngineClient;
+    use tl_model::command::{Command, Tab};
+    use tl_model::settings::{Settings, UiState};
+    use tl_ui::app::{AppEnv, RunHistoryEntry, RunHistoryStore, TasklensUi, UiInit};
+    use tl_ui::components::toast::ToastQueue;
+    use tl_ui::testing::fake_engine::FakeEngine;
+    use tl_ui::window::main::{main_window_view, open_main_window_on};
+    use tl_ui::windows::run::{POPUP_ID, ROW_H, RunWindow, VISIBLE_ROWS, open_run_window};
+
+    /// A history file shared with the test.
+    #[derive(Clone, Default)]
+    struct Shared(Rc<RefCell<Vec<RunHistoryEntry>>>);
+
+    impl RunHistoryStore for Shared {
+        fn load(&self) -> Vec<RunHistoryEntry> {
+            self.0.borrow().clone()
+        }
+
+        fn save(&self, entries: &[RunHistoryEntry]) -> Result<(), String> {
+            *self.0.borrow_mut() = entries.to_vec();
+            Ok(())
+        }
+    }
+
+    fn entry(command: &str) -> RunHistoryEntry {
+        RunHistoryEntry {
+            command: command.into(),
+            executed_at: "2026-10-06T10:00:00+02:00".into(),
+            elevated: false,
+        }
+    }
+
+    struct Rig {
+        engine: Arc<FakeEngine>,
+        store: Shared,
+        main: VisualTestContext,
+        run: VisualTestContext,
+        view: Entity<RunWindow>,
+    }
+
+    /// App globals with `history` in the store, the main window, and the Run window.
+    fn setup(cx: &mut TestAppContext, history: &[&str]) -> Rig {
+        let engine = FakeEngine::new();
+        let client: Arc<dyn EngineClient> = engine.clone();
+        let store = Shared::default();
+        *store.0.borrow_mut() = history.iter().map(|c| entry(c)).collect();
+        let mut env = AppEnv::test();
+        env.run_history = Some(Box::new(store.clone()));
+        let (_tx, rx) = async_channel::bounded(4);
+        let init = UiInit {
+            settings: Settings::default(),
+            state: UiState::default(),
+            themes_json: None,
+            persist: Box::new(|_, _| {}),
+            persist_themes: Box::new(|_| {}),
+            app_requests: rx,
+            startup_toasts: Vec::new(),
+            env,
+        };
+        cx.update(|cx| {
+            TasklensUi::init(cx, client, init);
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_reduce_motion(true);
+        });
+        let handle = cx
+            .update(|cx| open_main_window_on(Tab::Processes, cx))
+            .expect("the main window opens");
+        let main = VisualTestContext::from_window(handle.into(), cx);
+        cx.run_until_parked();
+
+        cx.update(open_run_window);
+        cx.run_until_parked();
+        let (handle, view) = find_run(cx).expect("the Run window opens");
+        let mut run = VisualTestContext::from_window(handle.into(), cx);
+        run.update(|window, _| window.activate_window());
+        run.run_until_parked();
+        Rig {
+            engine,
+            store,
+            main,
+            run,
+            view,
+        }
+    }
+
+    fn find_run(cx: &mut TestAppContext) -> Option<(WindowHandle<Root>, Entity<RunWindow>)> {
+        cx.update(|cx| {
+            cx.windows().into_iter().find_map(|w| {
+                let h = w.downcast::<Root>()?;
+                RunWindow::find(h, cx).map(|v| (h, v))
+            })
+        })
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+    }
+
+    fn launches(engine: &FakeEngine) -> Vec<ActionRequest> {
+        engine
+            .commands()
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::Action(req) if matches!(req.kind, ActionKind::Launch(_)) => Some(req),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn run_toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+        vcx.update(|window, cx| {
+            ToastQueue::of_window(window, cx)
+                .expect("toast queue")
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    fn main_toasts(vcx: &mut VisualTestContext) -> Vec<String> {
+        vcx.update(|_, cx| {
+            main_window_view(cx)
+                .expect("main window")
+                .read(cx)
+                .toasts()
+                .read(cx)
+                .visible_texts()
+                .iter()
+                .map(|t| t.to_string())
+                .collect()
+        })
+    }
+
+    fn set_text(rig: &mut Rig, text: &str) {
+        let input = rig.run.read(|cx| rig.view.read(cx).input().clone());
+        let text = text.to_owned();
+        rig.run
+            .update(|window, cx| input.update(cx, |s, cx| s.set_value(text, window, cx)));
+        rig.run.run_until_parked();
+    }
+
+    fn text(rig: &mut Rig) -> String {
+        rig.run
+            .read(|cx| rig.view.read(cx).input().read(cx).text().to_string())
+    }
+
+    #[gpui_kit::test]
+    fn run_empty_command_toast(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &[]);
+        set_text(&mut rig, "   ");
+        rig.run.simulate_keystrokes("enter");
+        assert_eq!(run_toasts(&mut rig.run), ["Please enter a command"]);
+        assert!(launches(&rig.engine).is_empty());
+        assert!(find_run(cx).is_some(), "the window stays open");
+    }
+
+    #[gpui_kit::test]
+    fn run_invalid_text_toast(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &[]);
+        set_text(&mut rig, "kate\u{7}");
+        rig.run.simulate_keystrokes("enter");
+        assert_eq!(run_toasts(&mut rig.run), ["Command contains invalid text."]);
+        assert!(launches(&rig.engine).is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn run_shift_enter_elevated(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &[]);
+        set_text(&mut rig, "kate");
+        rig.run.simulate_keystrokes("shift-enter");
+        let sent = launches(&rig.engine);
+        assert_eq!(sent.len(), 1);
+        let ActionKind::Launch(spec) = &sent[0].kind else {
+            unreachable!()
+        };
+        assert!(spec.as_admin);
+        assert!(matches!(&spec.what, LaunchWhat::Command(c) if &**c == "kate"));
+        assert!(rig.run.read(|cx| rig.view.read(cx).is_pending()));
+        // The checkbox was not changed by Shift+Enter.
+        assert!(!rig.run.read(|cx| rig.view.read(cx).elevated()));
+
+        // Authentication cancelled: an Info toast, the window stays, nothing is recorded.
+        rig.engine.emit(ActionEvent {
+            id: sent[0].id,
+            target: None,
+            state: ActionState::Failed(ActionError::AuthCancelled),
+        });
+        cx.run_until_parked();
+        assert_eq!(run_toasts(&mut rig.run), ["Authentication cancelled"]);
+        assert!(!rig.run.read(|cx| rig.view.read(cx).is_pending()));
+        assert!(rig.store.0.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn run_success_closes_and_toasts_in_main(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &["top"]);
+        set_text(&mut rig, "kate ~/notes.txt");
+        rig.run.simulate_keystrokes("enter");
+        let sent = launches(&rig.engine);
+        assert_eq!(sent.len(), 1);
+        let ActionKind::Launch(spec) = &sent[0].kind else {
+            unreachable!()
+        };
+        assert!(!spec.as_admin);
+        rig.engine.emit(ActionEvent {
+            id: sent[0].id,
+            target: None,
+            state: ActionState::Succeeded,
+        });
+        cx.run_until_parked();
+        assert!(find_run(cx).is_none(), "the Run window closed");
+        assert_eq!(main_toasts(&mut rig.main), ["Command launched"]);
+        let saved: Vec<_> = rig
+            .store
+            .0
+            .borrow()
+            .iter()
+            .map(|e| e.command.clone())
+            .collect();
+        assert_eq!(saved, ["kate ~/notes.txt", "top"]);
+    }
+
+    #[gpui_kit::test]
+    fn run_clear_history_toast_and_disabled(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &["top", "htop"]);
+        assert!(rig.run.read(|cx| rig.view.read(cx).can_clear()));
+        let view = rig.view.clone();
+        rig.run
+            .update(|window, cx| view.update(cx, |v, cx| v.clear_history(window, cx)));
+        rig.run.run_until_parked();
+        assert_eq!(run_toasts(&mut rig.run), ["Command history cleared"]);
+        assert!(rig.store.0.borrow().is_empty());
+        assert!(!rig.run.read(|cx| rig.view.read(cx).can_clear()));
+        // A second clear does nothing.
+        rig.run
+            .update(|window, cx| view.update(cx, |v, cx| v.clear_history(window, cx)));
+        rig.run.run_until_parked();
+        assert_eq!(run_toasts(&mut rig.run), ["Command history cleared"]);
+        // Down finds no history to show.
+        rig.run.simulate_keystrokes("down");
+        assert!(!rig.run.read(|cx| rig.view.read(cx).popup_open()));
+    }
+
+    #[gpui_kit::test]
+    fn run_combo_up_down_fills_input(cx: &mut TestAppContext) {
+        let mut rig = setup(cx, &["top", "htop", "ls"]);
+        // The newest command is in the input when the window opens.
+        assert_eq!(text(&mut rig), "top");
+        set_text(&mut rig, "");
+        rig.run.simulate_keystrokes("down");
+        assert!(rig.run.read(|cx| rig.view.read(cx).popup_open()));
+        assert_eq!(text(&mut rig), "top");
+        rig.run.simulate_keystrokes("down");
+        assert_eq!(text(&mut rig), "htop");
+        rig.run.simulate_keystrokes("down");
+        rig.run.simulate_keystrokes("down");
+        assert_eq!(text(&mut rig), "ls", "Down stops at the last row");
+        rig.run.simulate_keystrokes("up");
+        assert_eq!(text(&mut rig), "htop");
+        assert_eq!(rig.run.read(|cx| rig.view.read(cx).highlight()), Some(1));
+        // Esc closes the popup first, then the window.
+        rig.run.simulate_keystrokes("escape");
+        assert!(!rig.run.read(|cx| rig.view.read(cx).popup_open()));
+        assert!(find_run(cx).is_some());
+    }
+
+    #[gpui_kit::test]
+    fn run_combo_five_rows_visible(cx: &mut TestAppContext) {
+        let commands: Vec<String> = (0..8).map(|i| format!("cmd{i}")).collect();
+        let refs: Vec<&str> = commands.iter().map(String::as_str).collect();
+        let mut rig = setup(cx, &refs);
+        set_text(&mut rig, "");
+        rig.run.simulate_keystrokes("down");
+        assert_eq!(rig.run.read(|cx| rig.view.read(cx).popup_rows().len()), 8);
+        draw(&mut rig.run);
+        let popup = rig.run.debug_bounds(POPUP_ID).expect("popup drawn");
+        let s = rig.run.update(|_, cx| tl_ui::theme::metrics(cx).ui_scale);
+        let want = ROW_H * s * VISIBLE_ROWS as f32;
+        assert!(
+            (f32::from(popup.size.height) - want).abs() < 0.5,
+            "popup height {:?}, want {want}",
+            popup.size.height
+        );
+    }
+}

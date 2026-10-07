@@ -7,6 +7,7 @@ pub mod connection_properties;
 pub mod frame;
 pub mod low_memory;
 pub mod props;
+pub mod run;
 pub mod run_history;
 pub mod service_properties;
 pub mod startup_properties;
