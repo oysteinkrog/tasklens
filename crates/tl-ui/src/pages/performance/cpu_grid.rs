@@ -29,10 +29,11 @@ use tl_model::system::{CoreKind, CpuTopology};
 use tl_model::validity::Validity;
 
 use crate::chart::grid_element::{
-    ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
+    CellMark, ChartGridSpec, ChartGridView, GridCellSpec, grid_height, grid_layout,
 };
 use crate::chart::labels::LABEL_ROW;
 use crate::chart::{LegendStyle, ValueFormat, YScale};
+use crate::components::icons::AppIcon;
 use crate::components::tooltip::{DELAY_CONTROL, HoverTooltip, TlTooltip};
 use crate::hub::SnapshotHub;
 use crate::i18n::{Strings, tr, tr_en};
@@ -533,9 +534,9 @@ fn build_cells(
             Some(core.kind)
         };
         let mark = match (star, hybrid.then(kind).flatten()) {
-            (Some(_), _) => Some(IconName::Star),
-            (None, Some(CoreKind::Performance)) => Some(IconName::Zap),
-            (None, Some(CoreKind::Efficiency)) => Some(IconName::Leaf),
+            (Some(_), _) => Some(CellMark::Kit(IconName::Star)),
+            (None, Some(CoreKind::Performance)) => Some(CellMark::App(AppIcon::CpuPCore)),
+            (None, Some(CoreKind::Efficiency)) => Some(CellMark::App(AppIcon::CpuECore)),
             _ => None,
         };
         scratch.clear();
@@ -596,7 +597,7 @@ fn cell(
     kernel: bool,
     heading: SharedString,
     tooltip: Option<SharedString>,
-    mark: Option<IconName>,
+    mark: Option<CellMark>,
 ) -> GridCellSpec {
     let online = u16::try_from(id).is_ok_and(|id| topology.online.contains(id));
     GridCellSpec {

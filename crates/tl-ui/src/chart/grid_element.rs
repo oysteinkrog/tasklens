@@ -57,6 +57,7 @@ use super::{
     GridStyle, LegendStyle, PathSet, ValueAlign, ValueFormat, YScale, scale,
 };
 use crate::anim::AnimationDriver;
+use crate::components::icons::AppIcon;
 use crate::hub::{SnapshotChanged, SnapshotHub};
 use crate::i18n::{Strings, tr};
 use crate::settings_global::TlSettings;
@@ -83,6 +84,23 @@ const CELL_GRID: GridStyle = GridStyle {
 pub type CellSeries = (Option<Arc<SeriesView>>, Option<Arc<SeriesView>>);
 
 /// One cell of the grid.
+/// A core mark: a kit icon (the preferred-core star) or one of tasklens's own (the P-core and
+/// E-core chips, as the affinity dialog shows them).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellMark {
+    Kit(IconName),
+    App(AppIcon),
+}
+
+impl CellMark {
+    pub fn path(self) -> SharedString {
+        match self {
+            Self::Kit(icon) => icon.path(),
+            Self::App(icon) => SharedString::new_static(icon.path_str()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct GridCellSpec {
     pub heading: SharedString,
@@ -91,8 +109,8 @@ pub struct GridCellSpec {
     /// No plot; the `chart-grid-offline` text in the middle and a `divider` outline. Owners set it for a cell whose
     /// series is Missing (CPU offline).
     pub offline: bool,
-    /// P2 core marks.
-    pub mark: Option<IconName>,
+    /// The core mark after the heading (PERF-031).
+    pub mark: Option<CellMark>,
     /// P2.
     pub tooltip: Option<SharedString>,
 }
@@ -249,7 +267,7 @@ pub struct ChartGridView {
     pub value_shapes: std::cell::Cell<u32>,
     /// Core marks the last paint drew, (cell, icon, left edge).
     #[cfg(any(test, feature = "test-hooks"))]
-    pub last_marks: RefCell<Vec<(usize, IconName, Pixels)>>,
+    pub last_marks: RefCell<Vec<(usize, CellMark, Pixels)>>,
     #[cfg(any(test, feature = "test-hooks"))]
     pub offline_shapes: std::cell::Cell<u32>,
     /// Reads of the offline text from the strings.

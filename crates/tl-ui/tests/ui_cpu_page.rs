@@ -12,6 +12,8 @@ use tl_model::system::{
     CoreInfo, CoreKind, CpuSet, CpuTopology, Metric, SensorKind, SensorReading,
 };
 use tl_model::validity::Validity;
+use tl_ui::chart::grid_element::CellMark;
+use tl_ui::components::icons::AppIcon;
 use tl_ui::i18n::init_strings;
 use tl_ui::pages::performance::cpu_details::{
     CpuLiveInputs, CpuSensor, ROW_L1, ROW_L2, ROW_L3, ROW_LOAD_AVERAGE, ROW_SPEED, ROW_TEMPERATURE,
@@ -450,7 +452,11 @@ fn cpu_core_mark_icons() {
         &mut cells,
     );
     for (i, cell) in cells.iter().enumerate() {
-        let want = if i < 8 { IconName::Zap } else { IconName::Leaf };
+        let want = CellMark::App(if i < 8 {
+            AppIcon::CpuPCore
+        } else {
+            AppIcon::CpuECore
+        });
         assert_eq!(cell.mark, Some(want), "CPU {i}");
     }
 }
@@ -503,7 +509,7 @@ fn cpu_preferred_core_star_and_tooltip() {
         &mut cells,
     );
     let starred: Vec<usize> = (0..16)
-        .filter(|&i| cells[i].mark == Some(IconName::Star))
+        .filter(|&i| cells[i].mark == Some(CellMark::Kit(IconName::Star)))
         .collect();
     assert_eq!(starred, [0, 1]);
     assert_eq!(
