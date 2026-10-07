@@ -806,6 +806,41 @@ fn kind_icon(kind: ToastKind, theme: &TlTheme, size: Pixels) -> AnyElement {
     icon(name, size, color).into_any_element()
 }
 
+/// A toast card with no queue behind it, for the component gallery: drawn by the same
+/// [`toast_card`] as a queued toast, as a toast that takes no input and has no tooltip. `n` keeps
+/// the element ids of cards on one page apart. The card fills its parent; the queue puts it in a
+/// [`WIDTH`] column.
+pub(crate) fn static_card(
+    n: u64,
+    kind: ToastKind,
+    text: impl Into<SharedString>,
+    count: u32,
+    action: Option<ToastAction>,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::Div {
+    let m = *metrics(cx);
+    let theme = current(cx).clone();
+    let text = text.into();
+    let full = if count >= 2 {
+        format!("{text}{}", count_suffix(count)).into()
+    } else {
+        text.clone()
+    };
+    let view = ToastView {
+        slot: Slot::Anon(n),
+        shown: 0,
+        kind,
+        text,
+        full,
+        count,
+        action,
+        focus: None,
+        focused: false,
+    };
+    toast_card(&view, None, &m, &theme, window, cx)
+}
+
 /// One toast: the card with its icon, the text with the optional action button under it, and
 /// the close button. `queue` is `None` for a toast that is fading out: it is drawn the same but
 /// takes no input, has no tooltip and uses element ids of its own.
