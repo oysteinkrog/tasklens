@@ -727,7 +727,7 @@ mod panel {
             ToastKind::Warning,
             "No space for more minigraphs".to_owned(),
         );
-        assert_eq!(r.toasts(), [want.clone()]);
+        assert_eq!(r.toasts(), std::slice::from_ref(&want));
 
         // View > Graphs > GPU temp on a full grid toasts the same.
         r.set(SettingKey::GraphsMinigraphGpuTemperature, true);
