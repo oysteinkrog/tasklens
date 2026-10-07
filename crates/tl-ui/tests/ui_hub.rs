@@ -465,6 +465,48 @@ fn app_request_reaches_handler(cx: &mut TestAppContext) {
     assert_eq!(*seen.borrow(), vec![AppRequest::SelectPid(42)]);
 }
 
+/// m1f.21: tl-app reverts `lowmem.enabled` after a failed unit install. The switch and the
+/// store both show it off, and the request never reaches the replaceable handler.
+#[gpui_kit::test]
+fn set_low_memory_enabled_reverts_switch_and_store(cx: &mut TestAppContext) {
+    let engine = FakeEngine::new();
+    let client: Arc<dyn EngineClient> = engine.clone();
+    let mut settings = Settings::default();
+    settings.lowmem.enabled = true;
+    let (mut init, tx) = ui_init(settings);
+    let saved = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&saved);
+    init.persist = Box::new(move |settings, _| {
+        sink.lock().expect("lock").push(settings.lowmem.enabled);
+    });
+    cx.update(|cx| TasklensUi::init(cx, client, init));
+    cx.run_until_parked();
+    let handled = Rc::new(Cell::new(0));
+    let count = Rc::clone(&handled);
+    cx.update(|cx| {
+        cx.set_global(AppRequestHandler(Box::new(move |_, _| {
+            count.set(count.get() + 1);
+        })));
+    });
+    tx.try_send(AppRequest::SetLowMemoryEnabled(false))
+        .expect("channel has room");
+    cx.run_until_parked();
+    cx.update(|cx| {
+        assert!(
+            !tl_ui::settings_global::TlSettings::settings(cx)
+                .lowmem
+                .enabled
+        );
+    });
+    assert_eq!(*saved.lock().expect("lock"), vec![false]);
+    assert_eq!(handled.get(), 0);
+    // The same value again changes nothing and persists nothing.
+    tx.try_send(AppRequest::SetLowMemoryEnabled(false))
+        .expect("channel has room");
+    cx.run_until_parked();
+    assert_eq!(*saved.lock().expect("lock"), vec![false]);
+}
+
 #[gpui_kit::test]
 fn init_wires_hub_to_engine(cx: &mut TestAppContext) {
     let (engine, _tx) = run_init(cx, Settings::default());

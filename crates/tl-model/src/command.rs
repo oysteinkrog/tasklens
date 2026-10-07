@@ -56,13 +56,18 @@ impl Tab {
     }
 }
 
-/// Requests from tl-app's single-instance handler to the UI (ADR-010).
+/// Requests from tl-app to the UI: the single-instance handler (ADR-010) and the lowmem unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppRequest {
-    Activate { token: Option<Arc<str>> },
+    Activate {
+        token: Option<Arc<str>>,
+    },
     SelectTab(Tab),
     SelectPid(u32),
     Quit,
+    /// tl-app could not install or remove the lowmem unit and puts `lowmem.enabled` back to
+    /// this value, so the switch and the store agree (m1f.21).
+    SetLowMemoryEnabled(bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -23,7 +23,7 @@ const INTERFACE: &str = "org.freedesktop.Application";
 /// Bound on every forwarding call and on the name request.
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
 /// Requests queued for the UI. A fifth is dropped while the UI is busy.
-const QUEUE: usize = 4;
+pub const QUEUE: usize = 4;
 /// Longer activation tokens are ignored.
 const MAX_TOKEN_BYTES: usize = 256;
 const TOKEN_KEY: &str = "activation-token";
@@ -34,6 +34,8 @@ pub enum Outcome {
     Primary {
         conn: Connection,
         requests: async_channel::Receiver<AppRequest>,
+        /// Sends into `requests`, for tl-app's own requests (the lowmem unit, m1f.21).
+        sender: async_channel::Sender<AppRequest>,
     },
     /// Another copy runs and got the arguments. The caller exits 0.
     Forwarded,
@@ -115,14 +117,17 @@ pub fn acquire_on(
     let path = object_path(name);
     // Serve before taking the name, so a second copy never finds the name without the object.
     let (tx, requests) = async_channel::bounded(QUEUE);
+    let sender = tx.clone();
     if let Err(e) = conn.object_server().at(path.as_str(), AppIface { tx }) {
         warn!("Could not serve {INTERFACE}; running without single instance: {e}");
         return Outcome::NoBus;
     }
     match conn.request_name_with_flags(name, RequestNameFlags::DoNotQueue.into()) {
-        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => {
-            Outcome::Primary { conn, requests }
-        }
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Outcome::Primary {
+            conn,
+            requests,
+            sender,
+        },
         Ok(RequestNameReply::Exists | RequestNameReply::InQueue) | Err(zbus::Error::NameTaken) => {
             let _ = conn.object_server().remove::<AppIface, _>(path.as_str());
             forward_to(&conn, name, &path, forward, activation_token);

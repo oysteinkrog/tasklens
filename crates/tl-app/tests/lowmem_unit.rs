@@ -194,12 +194,15 @@ use tl_model::settings::{Settings, UiState};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-/// Counts calls to the fake install, remove and notification, and records what `inner` got.
+/// Counts calls to the fake install, remove and notification, and records what `inner` got
+/// and what was sent back to tl-ui.
 #[derive(Default)]
 struct Fake {
     installs: AtomicUsize,
     removes: AtomicUsize,
     notifications: AtomicUsize,
+    /// The values sent to tl-ui as `AppRequest::SetLowMemoryEnabled`.
+    reverts: Mutex<Vec<bool>>,
     saved: Mutex<Vec<(Settings, UiState)>>,
     /// While true, the fake install waits.
     hold: Mutex<bool>,
@@ -246,7 +249,13 @@ fn wrap(
     install: fn() -> Result<Installed, LowmemUnitError>,
 ) -> (Arc<Fake>, PersistFn) {
     let fake = Arc::new(Fake::default());
-    let (f1, f2, f3, f4) = (fake.clone(), fake.clone(), fake.clone(), fake.clone());
+    let (f1, f2, f3, f4, f5) = (
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+        fake.clone(),
+    );
     let ops = UnitOps {
         install: Box::new(move || {
             let mut hold = f1.hold.lock().expect("lock");
@@ -263,6 +272,9 @@ fn wrap(
         unit_file_exists: Box::new(move || file_exists),
         notify_failure: Box::new(move || {
             f3.notifications.fetch_add(1, Ordering::SeqCst);
+        }),
+        revert_ui: Box::new(move |enabled| {
+            f5.reverts.lock().expect("lock").push(enabled);
         }),
     };
     let inner: PersistFn = Box::new(move |settings, state| {
@@ -408,6 +420,50 @@ fn failure_reverts_setting_and_notifies() {
     persist(&with_lowmem(false), &UiState::default());
     persist(&with_lowmem(true), &UiState::default());
     fake.wait_for(|f| f.installs() == 2);
+}
+
+/// m1f.21: a failed install asks tl-ui to flip the switch back. tl-ui then persists the
+/// reverted value, which starts no second install.
+#[test]
+fn failed_install_reverts_ui_without_second_install() {
+    let (fake, persist) = wrap(false, false, install_fails);
+    persist(&with_lowmem(true), &UiState::default());
+    fake.wait_for(|f| !f.reverts.lock().expect("lock").is_empty());
+    assert_eq!(*fake.reverts.lock().expect("lock"), vec![false]);
+    // What tl-ui does on SetLowMemoryEnabled(false): a persisting write of the reverted value.
+    persist(&with_lowmem(false), &UiState::default());
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!fake.last_saved().0.lowmem.enabled);
+    assert_eq!(fake.installs(), 1);
+    assert_eq!(fake.removes(), 0);
+    assert_eq!(*fake.reverts.lock().expect("lock"), vec![false]);
+}
+
+/// A failed remove asks tl-ui to show the switch on again.
+#[test]
+fn failed_remove_reverts_ui_to_on() {
+    let fake = Arc::new(Fake::default());
+    let f1 = fake.clone();
+    let f2 = fake.clone();
+    let ops = UnitOps {
+        install: Box::new(installed_ok),
+        remove: Box::new(move || {
+            f1.removes.fetch_add(1, Ordering::SeqCst);
+            Err(LowmemUnitError::Bus("fake failure".into()))
+        }),
+        unit_file_exists: Box::new(|| true),
+        notify_failure: Box::new(|| {}),
+        revert_ui: Box::new(move |enabled| {
+            f2.reverts.lock().expect("lock").push(enabled);
+        }),
+    };
+    let persist = lowmem_unit::wrap_persist_with(Box::new(|_, _| {}), true, ops);
+    persist(&with_lowmem(false), &UiState::default());
+    fake.wait_for(|f| !f.reverts.lock().expect("lock").is_empty());
+    assert_eq!(*fake.reverts.lock().expect("lock"), vec![true]);
+    persist(&with_lowmem(true), &UiState::default());
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(fake.removes(), 1);
 }
 
 #[test]

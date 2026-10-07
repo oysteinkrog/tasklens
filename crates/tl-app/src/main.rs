@@ -167,7 +167,11 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             Outcome::NoBus => (None, None),
-            Outcome::Primary { conn, requests } => (Some(conn), Some(requests)),
+            Outcome::Primary {
+                conn,
+                requests,
+                sender,
+            } => (Some(conn), Some((sender, requests))),
         };
     tl_ui::app::perf_step("single_instance");
 
@@ -209,8 +213,9 @@ fn main() -> ExitCode {
     tl_ui::app::perf_step("engine_start");
 
     // Steps 8 to 10: tl-ui runs the GPUI application and opens the first window.
-    // Without a bus nothing sends requests; the closed channel ends tl-ui's request loop.
-    let app_requests = app_requests.unwrap_or_else(|| async_channel::bounded(1).1);
+    // Without a bus only tl-app itself sends requests (the lowmem unit).
+    let (request_tx, app_requests) =
+        app_requests.unwrap_or_else(|| async_channel::bounded(single_instance::QUEUE));
     let write_store = store.clone();
     let env = AppEnv {
         debug,
@@ -231,7 +236,11 @@ fn main() -> ExitCode {
         list_adapters: Arc::new(Vec::new),
         run_history: None,
     };
-    let persist = lowmem_unit::wrap_persist(store.persist_callback(), settings.lowmem.enabled);
+    let persist = lowmem_unit::wrap_persist(
+        store.persist_callback(),
+        settings.lowmem.enabled,
+        request_tx,
+    );
     let exit = tl_ui::run(UiLaunch {
         client: Arc::new(engine.clone()),
         init: UiInit {

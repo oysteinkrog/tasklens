@@ -122,7 +122,7 @@ fn app_id_runs_its_own_instance() {
 #[ignore = "needs dbus-daemon"]
 fn interface_methods() {
     let bus = PrivateBus::start();
-    let Outcome::Primary { conn, requests } =
+    let Outcome::Primary { conn, requests, .. } =
         acquire_on(Ok(bus.connect()), TEST_NAME, &no_forward(), None)
     else {
         panic!("the first copy did not get the name");

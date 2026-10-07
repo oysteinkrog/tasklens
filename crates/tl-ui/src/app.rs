@@ -209,6 +209,20 @@ pub struct AppRequestHandler(pub AppRequestFn);
 
 impl Global for AppRequestHandler {}
 
+/// Applies `SetLowMemoryEnabled` itself, so the handler E20 installs never has to. Every other
+/// request goes to the `AppRequestHandler` Global.
+fn handle_app_request(req: AppRequest, cx: &mut App) {
+    match req {
+        // tl-app could not install or remove the lowmem unit (m1f.21). The persist call this
+        // write makes carries the value the unit already has, so it starts no second attempt.
+        AppRequest::SetLowMemoryEnabled(enabled) => {
+            info!(target: "tasklens::ui", enabled, "lowmem.enabled reverted by tl-app");
+            settings_global::TlSettings::update(cx, |d| d.settings.lowmem.enabled = enabled);
+        }
+        req => cx.update_global::<AppRequestHandler, _>(|h, cx| (h.0)(req, cx)),
+    }
+}
+
 /// The engine client, for code that has no hub at hand.
 pub struct EngineGlobal(pub Arc<dyn EngineClient>);
 
@@ -307,7 +321,7 @@ impl TasklensUi {
         })));
         cx.spawn(async move |cx: &mut AsyncApp| {
             while let Ok(req) = app_requests.recv().await {
-                cx.update_global::<AppRequestHandler, _>(|h, cx| (h.0)(req, cx));
+                cx.update(|cx| handle_app_request(req, cx));
             }
         })
         .detach();

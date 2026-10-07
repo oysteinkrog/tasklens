@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use tl_model::command::AppRequest;
 use tl_model::settings::{Settings, UiState};
 use tracing::{info, warn};
 use zbus::blocking::Connection;
@@ -341,16 +342,23 @@ pub struct UnitOps {
     pub unit_file_exists: Box<dyn Fn() -> bool + Send + Sync>,
     /// Sends the desktop notification "Could not set up the rescue window".
     pub notify_failure: Box<dyn Fn() + Send + Sync>,
+    /// Tells tl-ui to show `lowmem.enabled` as the given value again after a failure.
+    pub revert_ui: Box<dyn Fn(bool) + Send + Sync>,
 }
 
 impl UnitOps {
-    fn real() -> UnitOps {
+    fn real(requests: async_channel::Sender<AppRequest>) -> UnitOps {
         UnitOps {
             install: Box::new(install_and_enable),
             remove: Box::new(disable_and_remove),
             unit_file_exists: Box::new(|| unit_path().is_ok_and(|p| p.exists())),
             notify_failure: Box::new(|| {
                 crate::notify::send(crate::notify::Fatal::LowmemSetupFailed)
+            }),
+            revert_ui: Box::new(move |enabled| {
+                if let Err(e) = requests.try_send(AppRequest::SetLowMemoryEnabled(enabled)) {
+                    warn!(target: LOG_TARGET, "could not ask the UI to revert lowmem.enabled: {e}");
+                }
             }),
         }
     }
@@ -366,10 +374,15 @@ impl UnitOps {
 /// (R-152 OI-7). When `initial` is false, an existing file is left alone.
 ///
 /// On a failure the setting is reverted in every value handed to `inner` until tl-ui sends a
-/// new `lowmem.enabled`, and the desktop notification is sent. tl-app cannot change tl-ui's
-/// copy, so the switch shows the new value until the user changes it or restarts.
-pub fn wrap_persist(inner: PersistFn, initial: bool) -> PersistFn {
-    wrap_persist_with(inner, initial, UnitOps::real())
+/// new `lowmem.enabled`, the desktop notification is sent, and `AppRequest::SetLowMemoryEnabled`
+/// on `requests` asks tl-ui to flip its switch back (m1f.21). The persist call that follows
+/// carries the value the unit already has, so it starts no second install or remove.
+pub fn wrap_persist(
+    inner: PersistFn,
+    initial: bool,
+    requests: async_channel::Sender<AppRequest>,
+) -> PersistFn {
+    wrap_persist_with(inner, initial, UnitOps::real(requests))
 }
 
 /// `wrap_persist` with the install, remove, file check and notification given by the caller.
@@ -490,7 +503,7 @@ impl Toggle {
             } else {
                 (self.ops.remove)().map(|()| None)
             };
-            let failed = result.is_err();
+            let mut revert_to = None;
             {
                 let mut shared = self.lock();
                 match result {
@@ -511,14 +524,16 @@ impl Toggle {
                         let action = if target { "install" } else { "remove" };
                         warn!(target: LOG_TARGET, "could not {action} {UNIT_NAME}: {e}");
                         shared.failed = Some(target);
+                        revert_to = Some(shared.applied);
                     }
                 }
                 if let Some((settings, state)) = &shared.last {
                     self.save(&shared, settings, state);
                 }
             }
-            if failed {
+            if let Some(enabled) = revert_to {
                 (self.ops.notify_failure)();
+                (self.ops.revert_ui)(enabled);
             }
         }
     }
