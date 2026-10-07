@@ -8,15 +8,13 @@
 //! only when the compressed segment's physical edges move. Hitboxes exist only while the pointer
 //! is inside the bar, one per segment.
 
-use std::fmt::Write as _;
-
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    App, AppContext as _, BorderStyle, Bounds, ContentMask, Context, Corners, Element, ElementId,
-    Entity, FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
-    IntoElement, LayoutId, MouseMoveEvent, ParentElement as _, Path, PathBuilder, Pixels, Point,
-    Render, SharedString, Style, Styled as _, Subscription, Window, div, fill, outline, point, px,
-    relative, size,
+    App, BorderStyle, Bounds, ContentMask, Context, Corners, Element, ElementId, Entity,
+    FontWeight, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId,
+    InteractiveElement as _, IntoElement, LayoutId, MouseMoveEvent, ParentElement as _, Path,
+    PathBuilder, Pixels, Point, Render, SharedString, Style, Styled as _, Subscription, Window,
+    div, fill, outline, point, px, relative, size,
 };
 use smallvec::SmallVec;
 use tl_model::system::MemoryTotals;
