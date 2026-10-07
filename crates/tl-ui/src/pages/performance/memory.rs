@@ -315,6 +315,7 @@ pub struct MemoryPage {
     /// `UiMetrics.style_version` the chart colours were built for.
     style_version: u64,
     words: Words,
+    #[allow(dead_code, reason = "E25-003 reads the Details inputs through it")]
     hub: Entity<SnapshotHub>,
     demand: Entity<DemandAggregator>,
     id: EntityId,
@@ -378,7 +379,7 @@ impl MemoryPage {
             .detach();
 
         let header = (page_words(cx).memory.clone(), SharedString::default());
-        let mut this = Self {
+        let this = Self {
             key,
             row,
             physical,
