@@ -174,6 +174,22 @@ pub trait TreeTableDelegate: 'static + Sized {
     fn double_click_expands(&self) -> bool {
         false
     }
+
+    /// The NEW or EXITED tint drawn over the zebra of row `ix`, or `None`. The default is the
+    /// theme's tint for the `NEW` and `EXITED` row flags.
+    fn row_tint(&self, ix: usize, theme: &TlTheme) -> Option<Hsla> {
+        flag_tint(self.row_flags(ix), theme)
+    }
+
+    /// Called once per frame before the body rows of `range` are built. The process table
+    /// reads the clock for its tint fades here and asks for the next frame while one runs.
+    fn before_rows(
+        &mut self,
+        _range: Range<usize>,
+        _window: &mut Window,
+        _cx: &mut Context<TlTreeTable<Self>>,
+    ) {
+    }
 }
 
 /// The column and direction of a sort state, for the header's sort arrow.
@@ -581,7 +597,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         } else {
             theme.row_alt
         };
-        match row_tint(self.delegate.row_flags(ix), theme) {
+        match self.delegate.row_tint(ix, theme) {
             Some(tint) => zebra.blend(tint),
             None => zebra,
         }
@@ -605,6 +621,7 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         #[cfg(any(test, feature = "test-hooks"))]
         self.rows_built_last_frame.set(range.len() as u32);
         self.record_frame(range.clone(), m.row_height);
+        self.delegate.before_rows(range.clone(), window, cx);
 
         let layout = self.columns();
         let frame = FrameCtx {
@@ -704,7 +721,6 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
         // Cell backgrounds show only under the zebra; hover and selection cover them.
         let plain = !selected && !hovered;
         let flags = self.delegate.row_flags(ix);
-        let tint = row_tint(flags, theme);
         let stale = flags.has(RowFlags::STALE);
         let tips = hovered && self.hover_tips_ready;
         let row_key = FxBuildHasher.hash_one(id);
@@ -765,8 +781,9 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             if let Some(color) = cell_text_color(&self.out, &ctx) {
                 cell = cell.text_color(color);
             }
+            // The row fill under the cell already holds the tint, so heat lies over it.
             if plain && let Some(bg) = cell_background(&self.out, &ctx) {
-                cell = cell.bg(tint.map_or(bg, |t| bg.blend(t)));
+                cell = cell.bg(bg);
             }
             if stale {
                 cell = cell.opacity(metric_cell_opacity(flags));
@@ -2160,8 +2177,8 @@ pub fn metric_cell_opacity(flags: RowFlags) -> f32 {
     }
 }
 
-/// The NEW or EXITED tint of a row, if any (UI-PRC-002).
-fn row_tint(flags: RowFlags, theme: &TlTheme) -> Option<Hsla> {
+/// The theme's NEW or EXITED tint for a row's flags, if any (UI-PRC-002).
+pub fn flag_tint(flags: RowFlags, theme: &TlTheme) -> Option<Hsla> {
     if flags.has(RowFlags::NEW) {
         Some(theme.derived.new_row_tint)
     } else if flags.has(RowFlags::EXITED) {

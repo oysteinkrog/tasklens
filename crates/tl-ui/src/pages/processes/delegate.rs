@@ -9,12 +9,20 @@
 //! `row_index`, the sibling pass and the Name cell texts are rebuilt only when the view changes,
 //! so a frame allocates nothing and translates nothing once the caches are warm. Words come from
 //! `tr` at construction and on a locale change only.
+//!
+//! NEW and EXITED tints (PROC-043, UI-PRC-011) are computed per row from the frame's clock and
+//! never rebuild the row tables. Animation frames are requested only while a visible tint fades;
+//! before that, one timer wakes the table at the fade start.
 
 use std::fmt::Write as _;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
-use gpui_kit::{AnyView, AnyWindowHandle, App, Context, Div, Pixels, SharedString, Window, px};
+use gpui_kit::{
+    AnyView, AnyWindowHandle, App, AsyncApp, Context, Div, Hsla, Pixels, SharedString, Task,
+    WeakEntity, Window, px,
+};
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use tl_model::demand::Demand;
@@ -30,13 +38,16 @@ use tl_model::validity::{FieldValidity, Validity};
 
 use super::cells::{
     CellCtx, CellWords, DEFAULT_VISIBLE, GroupMembers, PROCESS_COLUMNS, PaintState, ProcColumn,
-    RowRef, fill_cell, heat_background, process_column, render_metric_cell,
+    RowRef, fill_cell, heat_background, process_column, render_metric_cell, row_tint,
+    tint_deadline,
 };
 use super::header_totals::header_total;
 use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell};
 use super::table::{GroupHeader, ProcessQuery};
+use crate::anim::AnimationDriver;
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
+use crate::components::toast::{ToastKind, ToastQueue};
 use crate::components::validity::{GlyphCtx, tooltip_text};
 use crate::demand::GlobalDemand;
 use crate::i18n::tr;
@@ -276,8 +287,19 @@ pub struct ProcessDelegate {
     tips: ValidityTips,
     settings: Settings,
     theme: Arc<TlTheme>,
-    /// The window the table is in, for the demand part (hidden detection, ADR-008).
+    /// The window the table is in, for the demand part (hidden detection, ADR-008) and the
+    /// "Process exited" toast.
     window: Option<AnyWindowHandle>,
+    /// The clock the row tints of this frame read, set in `before_rows`.
+    tint_now: TimeNs,
+    /// `motion.animations` and not reduced motion, set in `before_rows`.
+    tint_animations: bool,
+    /// The timer that wakes the table when a visible tint starts to fade (or ends, without
+    /// animations), with its deadline. The deadline is 0 once the timer fired.
+    tint_wake: Option<(TimeNs, Task<()>)>,
+    /// A fixed clock for tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    fixed_now: Option<TimeNs>,
 }
 
 impl ProcessDelegate {
@@ -319,6 +341,11 @@ impl ProcessDelegate {
             settings: settings.clone(),
             theme: current(cx).clone(),
             window: None,
+            tint_now: now_boot_ns(),
+            tint_animations: settings.motion.animations && !cx.reduce_motion(),
+            tint_wake: None,
+            #[cfg(any(test, feature = "test-hooks"))]
+            fixed_now: None,
         };
         this.sync_devices(&snapshot, Some(&state.columns.processes));
         this.layout.rebuild(metrics(cx).ui_scale);
@@ -618,6 +645,74 @@ impl ProcessDelegate {
         }
     }
 
+    /// The flags of row `ix`'s process record and when they first appeared. `None` for a row
+    /// without a record. Without extras the time is unknown and reads as long ago.
+    fn record_flags(&self, ix: usize) -> Option<(ProcFlags, TimeNs)> {
+        let i = self.row(ix).record? as usize;
+        let p = &self.snapshot.processes;
+        let r = p.records.get(i)?;
+        Some((r.flags, p.extras.get(i).map_or(0, |x| x.flag_since_ns)))
+    }
+
+    fn exited(&self, ix: usize) -> bool {
+        self.record_flags(ix)
+            .is_some_and(|(flags, _)| flags.contains(ProcFlags::EXITED))
+    }
+
+    fn clock(&self) -> TimeNs {
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(now) = self.fixed_now {
+            return now;
+        }
+        now_boot_ns()
+    }
+
+    /// Fixes the clock the row tints read; `None` goes back to `CLOCK_BOOTTIME`.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn set_fixed_now(&mut self, now: Option<TimeNs>) {
+        self.fixed_now = now;
+    }
+
+    /// Wakes the table at `at` unless an earlier wake is pending.
+    fn schedule_tint_wake(&mut self, at: TimeNs, cx: &mut Context<TlTreeTable<Self>>) {
+        if self
+            .tint_wake
+            .as_ref()
+            .is_some_and(|(due, _)| *due != 0 && *due <= at)
+        {
+            return;
+        }
+        let wait = Duration::from_nanos(at.saturating_sub(self.tint_now));
+        let task = cx.spawn(
+            async move |this: WeakEntity<TlTreeTable<Self>>, cx: &mut AsyncApp| {
+                cx.background_executor().timer(wait).await;
+                let _ = this.update(cx, |t, cx| {
+                    if let Some(wake) = &mut t.delegate.tint_wake {
+                        wake.0 = 0;
+                    }
+                    cx.notify();
+                });
+            },
+        );
+        self.tint_wake = Some((at, task));
+    }
+
+    /// The Warning toast "Process exited" for Enter on an exited row (UI-PRC-011).
+    fn toast_exited(&self, cx: &mut App) {
+        let Some(window) = self.window else {
+            return;
+        };
+        let text = tr(cx, "processes-toast-process-exited");
+        // The table's action handler holds the window; push once it is released.
+        cx.defer(move |cx| {
+            let _ = window.update(cx, |_, window, cx| {
+                if let Some(queue) = ToastQueue::of_window(window, cx) {
+                    queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
+                }
+            });
+        });
+    }
+
     fn toggle(&mut self, id: ProcRowId, cx: &mut App) {
         let Some(&ix) = self.row_index.get(&id) else {
             return;
@@ -842,6 +937,10 @@ impl TreeTableDelegate for ProcessDelegate {
         if out.want_tooltip && matches!(out.validity, Validity::Stale | Validity::Failed) {
             out.tooltip = live_tip(out.validity, &self.snapshot, now_boot_ns());
         }
+        if exited {
+            // UI-PRC-011: all text of an exited row is secondary.
+            out.text_color = Some(self.theme.text_secondary);
+        }
     }
 
     fn name_cell(&self, ix: usize) -> NameCell {
@@ -957,7 +1056,8 @@ impl TreeTableDelegate for ProcessDelegate {
         agg.update(cx, |a, cx| a.set(source, window, part, cx));
     }
 
-    /// Enter, Alt+Enter or Ctrl+I (D-008). A group header toggles. Any other row lets
+    /// Enter, Alt+Enter or Ctrl+I (D-008). A group header toggles. An exited row is not
+    /// actionable and shows the "Process exited" toast (UI-PRC-011). Any other row lets
     /// `OpenProperties` go on to the page, whose handler opens Properties for the focus row.
     fn on_activate(&mut self, id: ProcRowId, cx: &mut Context<TlTreeTable<Self>>) {
         let Some(ix) = self.row_index(id) else {
@@ -965,8 +1065,63 @@ impl TreeTableDelegate for ProcessDelegate {
         };
         if self.row_kind(ix) == RowKind::GroupHeader {
             self.toggle(id, cx);
+        } else if self.exited(ix) {
+            self.toast_exited(cx);
         } else {
             cx.propagate();
+        }
+    }
+
+    /// The NEW or EXITED tint at this frame's clock (PROC-043). `highlight_new_exited = false`
+    /// draws none; the row still lingers.
+    fn row_tint(&self, ix: usize, theme: &TlTheme) -> Option<Hsla> {
+        let (flags, since) = self.record_flags(ix)?;
+        let p = &self.settings.processes;
+        row_tint(
+            flags,
+            since,
+            self.tint_now,
+            p.interval_ms,
+            self.tint_animations,
+            p.highlight_new_exited,
+        )
+        .map(|(kind, alpha)| kind.color(alpha, theme))
+    }
+
+    /// Reads the clock for this frame's tints. Requests the next animation frame while a
+    /// visible tint fades; otherwise sets a timer for the next fade start. Allocates nothing
+    /// unless it sets a new timer.
+    fn before_rows(
+        &mut self,
+        range: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<TlTreeTable<Self>>,
+    ) {
+        let now = self.clock();
+        self.tint_now = now;
+        self.tint_animations = self.settings.motion.animations && !cx.reduce_motion();
+        let p = &self.settings.processes;
+        if !p.highlight_new_exited {
+            return;
+        }
+        let mut next: Option<TimeNs> = None;
+        for ix in range {
+            if let Some((flags, since)) = self.record_flags(ix)
+                && let Some(at) =
+                    tint_deadline(flags, since, now, p.interval_ms, self.tint_animations, true)
+            {
+                next = Some(next.map_or(at, |n| n.min(at)));
+            }
+        }
+        match next {
+            Some(at) if at <= now => {
+                if let Some(driver) = AnimationDriver::try_global(window, cx) {
+                    let id = cx.entity_id();
+                    driver.update(cx, |d, cx| d.request(id, window, cx));
+                }
+            }
+            Some(at) => self.schedule_tint_wake(at, cx),
+            None => {}
         }
     }
 

@@ -2229,3 +2229,555 @@ mod header_totals {
         );
     }
 }
+
+/// NEW and EXITED row highlight (PROC-043, UI-PRC-011): the tint timeline, the linger clamp,
+/// exited row dimming, frame requests and Enter on an exited row. The table checks that fix the
+/// clock or read toasts need `--features test-hooks`.
+mod highlight {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use gpui_kit::base::Root;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement,
+        Render, Styled, TestAppContext, VisualTestContext, Window, div, px,
+    };
+    use tl_model::actions::SchedPolicy;
+    use tl_model::ids::{ColumnId, NodeId, ProcessKey};
+    use tl_model::process::{
+        GroupKind, ProcFlags, ProcState, ProcessExtras, ProcessMeta, ProcessRecord,
+    };
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_model::snapshot::{ComponentHeader, ProcessSnapshot, Snapshot};
+    use tl_model::system::CpuSet;
+    use tl_model::table::{ProcessTableView, TableRow};
+    use tl_model::time::{BootId, TimeNs, now_boot_ns};
+    use tl_model::validity::{FieldValidity, Validity};
+    use tl_ui::anim::AnimationDriver;
+    use tl_ui::components::motion::ease_out_cubic;
+    use tl_ui::pages::processes::cells::{
+        TINT_ALPHA, TintKind, linger_ns, row_tint, tint_deadline,
+    };
+    use tl_ui::pages::processes::delegate::ProcessDelegate;
+    use tl_ui::table::actions::OpenProperties;
+    use tl_ui::table::cells::{CellCtx, CellOut, name_look};
+    use tl_ui::table::tree_table::{RowFlags, STALE_OPACITY, TlTreeTable, TreeTableDelegate};
+    use tl_ui::theme::{current, metrics};
+
+    const MS: TimeNs = 1_000_000;
+
+    #[test]
+    fn highlight_alpha_timeline() {
+        let since = 10_000 * MS;
+        let at = |flags: ProcFlags, age_ms: u64, animations: bool| {
+            row_tint(flags, since, since + age_ms * MS, 1000, animations, true)
+        };
+        let new = |age_ms, animations| at(ProcFlags::NEW, age_ms, animations);
+
+        // 0.35 until L - 300 ms (L = 2000 ms at interval 1000 ms).
+        for age in [0, 500, 1000, 1700] {
+            assert_eq!(
+                new(age, true),
+                Some((TintKind::New, TINT_ALPHA)),
+                "{age} ms"
+            );
+        }
+        // Halfway through the fade: 0.35 × (1 - ease_out_cubic(150 / 300)).
+        let (kind, alpha) = new(1850, true).expect("fading");
+        assert_eq!(kind, TintKind::New);
+        assert!((alpha - TINT_ALPHA * (1.0 - ease_out_cubic(0.5))).abs() < 1e-6);
+        assert!(alpha > 0.0 && alpha < TINT_ALPHA);
+        // The fade only goes down, and the tint is gone at L.
+        let mut last = TINT_ALPHA;
+        for age in (1700..2000).step_by(10) {
+            let (_, a) = new(age, true).expect("inside L");
+            assert!(a <= last, "{age} ms");
+            last = a;
+        }
+        assert_eq!(new(2000, true), None);
+        assert_eq!(new(2500, true), None);
+
+        // Reduced motion: 0.35 to the end, then off at L.
+        assert_eq!(new(1850, false), Some((TintKind::New, TINT_ALPHA)));
+        assert_eq!(new(1999, false), Some((TintKind::New, TINT_ALPHA)));
+        assert_eq!(new(2000, false), None);
+
+        // EXITED is the danger tint on the same timeline; no flag or highlight off is none.
+        assert_eq!(
+            at(ProcFlags::EXITED, 500, true),
+            Some((TintKind::Exited, TINT_ALPHA))
+        );
+        assert_eq!(at(ProcFlags::empty(), 500, true), None);
+        assert_eq!(
+            row_tint(ProcFlags::NEW, since, since + 500 * MS, 1000, true, false),
+            None
+        );
+
+        // When the tint next changes: the fade start, every frame while fading, L without
+        // animations, never once it is over.
+        let next = |age_ms: u64, animations| {
+            tint_deadline(
+                ProcFlags::NEW,
+                since,
+                since + age_ms * MS,
+                1000,
+                animations,
+                true,
+            )
+        };
+        assert_eq!(next(500, true), Some(since + 1700 * MS));
+        assert_eq!(next(1850, true), Some(since + 1850 * MS));
+        assert_eq!(next(500, false), Some(since + 2000 * MS));
+        assert_eq!(next(2000, true), None);
+    }
+
+    #[test]
+    fn linger_clamped_1_to_3_s() {
+        assert_eq!(linger_ns(250), 1000 * MS);
+        assert_eq!(linger_ns(500), 1000 * MS);
+        assert_eq!(linger_ns(750), 1500 * MS);
+        assert_eq!(linger_ns(1000), 2000 * MS);
+        assert_eq!(linger_ns(5000), 3000 * MS);
+        assert_eq!(linger_ns(u32::MAX), 3000 * MS);
+    }
+
+    fn key(pid: u32) -> ProcessKey {
+        ProcessKey {
+            start_ticks: u64::from(pid),
+            boot_id: BootId(0),
+            pid,
+        }
+    }
+
+    fn record(pid: u32, flags: ProcFlags) -> ProcessRecord {
+        let a = |s: &str| Arc::<str>::from(s);
+        ProcessRecord {
+            key: key(pid),
+            ppid: 1,
+            uid: 1000,
+            meta: Arc::new(ProcessMeta {
+                comm: a("bash"),
+                name: a("bash"),
+                exe: None,
+                cmdline: None,
+                user: a("oystein"),
+                cgroup: None,
+                app_id: None,
+                icon: None,
+                description: None,
+                desktop_path: None,
+                search_lower: a("bash"),
+            }),
+            group: GroupKind::System.key(),
+            state: ProcState::Sleeping,
+            flags,
+            nice: 0,
+            threads: 1,
+            cpu_pct: 0.0,
+            rss_anon_bytes: 0,
+            rss_bytes: 0,
+            pss_bytes: 0,
+            uss_bytes: 0,
+            swap_bytes: 0,
+            io_read_bps: 0.0,
+            io_write_bps: 0.0,
+            net_rx_bps: 0.0,
+            net_tx_bps: 0.0,
+            gpu_util_pct: 0.0,
+            gpu_mem_bytes: 0,
+            validity: FieldValidity::all(Validity::Valid),
+        }
+    }
+
+    fn extras(flag_since_ns: TimeNs) -> ProcessExtras {
+        ProcessExtras {
+            cpu_kernel_pct: 0.0,
+            cpu_user_pct: 0.0,
+            cpu_relative_pct: 0.0,
+            utime_ticks: 0,
+            stime_ticks: 0,
+            start_boot_ns: 0,
+            rss_peak_bytes: 0,
+            rss_shared_bytes: 0,
+            commit_bytes: 0,
+            vsize_bytes: 0,
+            vsize_peak_bytes: 0,
+            page_faults: 0,
+            page_faults_delta: 0,
+            major_faults: 0,
+            policy: SchedPolicy::Other,
+            rt_prio: 0,
+            affinity: CpuSet::empty(),
+            handles: None,
+            exe_name: Arc::from("bash"),
+            exe_path: Arc::from("/usr/bin/bash"),
+            exe_deleted: false,
+            unit: None,
+            state_letter: b'S',
+            frozen: false,
+            disk_read_bps: 0.0,
+            disk_write_raw_bps: 0.0,
+            flag_since_ns,
+        }
+    }
+
+    /// Row 0: pid 10, NEW since `new_since`. Row 1: pid 20, EXITED since `exited_since`.
+    /// Row 2: pid 30, no flag. A flat list.
+    fn snapshot(new_since: TimeNs, exited_since: TimeNs) -> Arc<Snapshot> {
+        let flags = [ProcFlags::NEW, ProcFlags::EXITED, ProcFlags::empty()];
+        let since = [new_since, exited_since, 0];
+        let row = |i: u32| TableRow {
+            node: NodeId::Process(key(10 * (i + 1))),
+            depth: 0,
+            expanded: false,
+            has_children: false,
+            record: Some(i),
+            group: None,
+            descendants: 0,
+            subtree: None,
+        };
+        let mut s = Snapshot::empty(BootId(0), 0);
+        s.table = Arc::new(ProcessTableView {
+            header: ComponentHeader {
+                version: 1,
+                validity: Validity::Valid,
+                ..ComponentHeader::default()
+            },
+            rows: (0..3).map(row).collect(),
+            ..ProcessTableView::default()
+        });
+        s.processes = Arc::new(ProcessSnapshot {
+            records: (0..3)
+                .map(|i| record(10 * (i as u32 + 1), flags[i]))
+                .collect(),
+            extras: since.iter().map(|&t| extras(t)).collect(),
+            ..ProcessSnapshot::default()
+        });
+        Arc::new(s)
+    }
+
+    struct Host {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+        opened: Rc<Cell<u32>>,
+        _driver: Entity<AnimationDriver>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let opened = self.opened.clone();
+            div()
+                .w(px(800.))
+                .h(px(400.))
+                .flex()
+                .flex_col()
+                .on_action(move |_: &OpenProperties, _, _| opened.set(opened.get() + 1))
+                .child(self.table.clone())
+        }
+    }
+
+    struct Rig {
+        table: Entity<TlTreeTable<ProcessDelegate>>,
+        driver: Entity<AnimationDriver>,
+        opened: Rc<Cell<u32>>,
+        #[cfg_attr(not(feature = "test-hooks"), allow(dead_code))]
+        toasts: Entity<tl_ui::components::toast::ToastQueue>,
+        vcx: VisualTestContext,
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// A table over [`snapshot`] in a window with an `AnimationDriver` and a toast queue.
+    /// `prepare` runs on the delegate before the table's first frame.
+    fn open(
+        cx: &mut TestAppContext,
+        snap: Arc<Snapshot>,
+        prepare: impl FnOnce(&mut ProcessDelegate) + 'static,
+    ) -> Rig {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            tl_ui::components::toast::init(cx);
+            tl_ui::table::actions::bind_keys_table(cx);
+            tl_ui::theme::store::init(
+                cx,
+                &ThemeSettings::default(),
+                &AppearanceSettings::default(),
+                Vec::new(),
+            );
+            tl_ui::i18n::init_strings(cx, "en-US");
+        });
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let opened = Rc::new(Cell::new(0));
+        let (out, hits) = (slot.clone(), opened.clone());
+        let window = cx.add_window(move |window, cx| {
+            let driver = cx.new(AnimationDriver::new);
+            AnimationDriver::register(&driver, window, cx);
+            let mut d =
+                ProcessDelegate::new(snap, &Settings::default(), &UiState::default(), window, cx);
+            d.set_window(Some(window.window_handle()));
+            prepare(&mut d);
+            let table = cx.new(|cx| TlTreeTable::new(d, window, cx));
+            *out.borrow_mut() = Some((table.clone(), driver.clone()));
+            let host = cx.new(|_| Host {
+                table,
+                opened: hits,
+                _driver: driver,
+            });
+            Root::new(host, window, cx)
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        let toasts = vcx.update(|window, cx| {
+            cx.new(|cx| tl_ui::components::toast::ToastQueue::new(window, cx, px(40.)))
+        });
+        redraw(&mut vcx);
+        let (table, driver) = slot.borrow_mut().take().expect("table created");
+        vcx.update(|window, cx| table.read(cx).focus_handle().clone().focus(window, cx));
+        redraw(&mut vcx);
+        Rig {
+            table,
+            driver,
+            opened,
+            toasts,
+            vcx,
+        }
+    }
+
+    fn requested(rig: &mut Rig) -> u64 {
+        let driver = rig.driver.clone();
+        rig.vcx.read_entity(&driver, |d, _| d.stats.requested)
+    }
+
+    #[gpui_kit::test]
+    fn exited_row_text_and_icon_dimmed(cx: &mut TestAppContext) {
+        let now = now_boot_ns();
+        let mut rig = open(cx, snapshot(now, now), |_| {});
+        let table = rig.table.clone();
+        rig.vcx.update(|_, cx| {
+            let theme = current(cx).clone();
+            let m = *metrics(cx);
+            let t = table.read(cx);
+            let text_color = |ix| {
+                let mut out = CellOut::default();
+                t.delegate.cell(ix, ColumnId::Pid, &mut out);
+                out.text_color
+            };
+            // Metric cells: secondary text on the exited row only.
+            assert_eq!(text_color(1), Some(theme.text_secondary));
+            assert_eq!(text_color(0), None);
+            assert_eq!(text_color(2), None);
+            // Name cell: secondary text and the icon at 60 %.
+            let ctx = CellCtx {
+                m: &m,
+                theme: &theme,
+                selected: false,
+                width: px(200.),
+            };
+            let flags = t.delegate.row_flags(1);
+            assert!(flags.has(RowFlags::EXITED));
+            assert_eq!(name_look(flags, &ctx), (theme.text_secondary, 0.6));
+            assert_eq!(STALE_OPACITY, 0.6);
+            assert_eq!(
+                name_look(t.delegate.row_flags(0), &ctx),
+                (theme.text_primary, 1.0)
+            );
+            assert!(t.delegate.name_cell(1).primary.as_ref() == "bash");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn driver_idle_when_no_fade_active(cx: &mut TestAppContext) {
+        // NEW 500 ms ago: its fade starts in 1200 ms. EXITED long gone: no tint.
+        let now = now_boot_ns();
+        let mut rig = open(cx, snapshot(now - 500 * MS, now - 10_000 * MS), |_| {});
+        let table = rig.table.clone();
+        rig.vcx
+            .update(|_, cx| table.update(cx, |_, cx| cx.notify()));
+        redraw(&mut rig.vcx);
+        assert_eq!(requested(&mut rig), 0);
+        let driver = rig.driver.clone();
+        assert!(!rig.vcx.read_entity(&driver, |d, _| d.is_armed()));
+        // The NEW row is tinted at full alpha; the others show the plain zebra.
+        rig.vcx.update(|_, cx| {
+            let theme = current(cx).clone();
+            let t = table.read(cx);
+            assert_eq!(
+                t.delegate.row_tint(0, &theme),
+                Some(TintKind::New.color(TINT_ALPHA, &theme))
+            );
+            assert_eq!(t.delegate.row_tint(1, &theme), None);
+            assert_eq!(t.row_background(2, &theme), theme.list_bg);
+        });
+    }
+
+    #[gpui_kit::test]
+    fn highlight_off_draws_no_tint(cx: &mut TestAppContext) {
+        let now = now_boot_ns();
+        let mut rig = open(cx, snapshot(now, now), |d| {
+            let mut s = Settings::default();
+            s.processes.highlight_new_exited = false;
+            d.set_settings(&s);
+        });
+        let table = rig.table.clone();
+        rig.vcx.update(|_, cx| {
+            let theme = current(cx).clone();
+            let t = table.read(cx);
+            assert_eq!(t.delegate.row_tint(0, &theme), None);
+            assert_eq!(t.delegate.row_tint(1, &theme), None);
+            assert_eq!(t.row_background(0, &theme), theme.list_bg);
+            assert_eq!(t.row_background(1, &theme), theme.row_alt);
+            // The exited row still lingers.
+            assert!(t.delegate.row_flags(1).has(RowFlags::EXITED));
+        });
+        assert_eq!(requested(&mut rig), 0);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    mod hooks {
+        use super::*;
+
+        const T: TimeNs = 100_000 * MS;
+
+        fn set_now(rig: &mut Rig, now: TimeNs) {
+            let table = rig.table.clone();
+            rig.vcx.update(|_, cx| {
+                table.update(cx, |t, cx| {
+                    t.delegate.set_fixed_now(Some(now));
+                    cx.notify();
+                })
+            });
+            redraw(&mut rig.vcx);
+        }
+
+        fn frame(rig: &mut Rig) {
+            rig.vcx.update(|window, cx| window.simulate_next_frame(cx));
+            redraw(&mut rig.vcx);
+        }
+
+        fn armed(rig: &mut Rig) -> bool {
+            let driver = rig.driver.clone();
+            rig.vcx.read_entity(&driver, |d, _| d.is_armed())
+        }
+
+        #[gpui_kit::test]
+        fn driver_requests_only_while_fading(cx: &mut TestAppContext) {
+            // NEW since T, EXITED gone; the clock starts 500 ms after the flag.
+            let mut rig = open(cx, snapshot(T, 0), |d| d.set_fixed_now(Some(T + 500 * MS)));
+            assert_eq!(requested(&mut rig), 0);
+            assert!(!armed(&mut rig));
+
+            // 1850 ms: inside the fade, so every frame asks for the next.
+            set_now(&mut rig, T + 1850 * MS);
+            assert!(armed(&mut rig));
+            let fading = requested(&mut rig);
+            assert!(fading >= 1);
+            let table = rig.table.clone();
+            rig.vcx.update(|_, cx| {
+                let theme = current(cx).clone();
+                let want = TINT_ALPHA * (1.0 - ease_out_cubic(0.5));
+                let tint = table.read(cx).delegate.row_tint(0, &theme).expect("fading");
+                assert!((tint.a - want).abs() < 1e-6);
+            });
+            frame(&mut rig);
+            assert!(requested(&mut rig) > fading);
+
+            // Past L: the next frame draws no tint and asks for nothing more.
+            rig.vcx.update(|_, cx| {
+                table.update(cx, |t, _| t.delegate.set_fixed_now(Some(T + 2100 * MS)))
+            });
+            frame(&mut rig);
+            let done = requested(&mut rig);
+            assert!(!armed(&mut rig));
+            frame(&mut rig);
+            assert_eq!(requested(&mut rig), done);
+            rig.vcx.update(|_, cx| {
+                let theme = current(cx).clone();
+                assert_eq!(table.read(cx).delegate.row_tint(0, &theme), None);
+            });
+        }
+
+        #[gpui_kit::test]
+        fn fade_start_wakes_the_table(cx: &mut TestAppContext) {
+            let mut rig = open(cx, snapshot(T, 0), |d| d.set_fixed_now(Some(T + 500 * MS)));
+            assert_eq!(requested(&mut rig), 0);
+            // The timer is due at the fade start, 1200 ms later.
+            let table = rig.table.clone();
+            rig.vcx.update(|_, cx| {
+                table.update(cx, |t, _| t.delegate.set_fixed_now(Some(T + 1710 * MS)))
+            });
+            rig.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(1199));
+            redraw(&mut rig.vcx);
+            assert_eq!(requested(&mut rig), 0);
+            rig.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(2));
+            redraw(&mut rig.vcx);
+            assert!(requested(&mut rig) >= 1);
+            assert!(armed(&mut rig));
+        }
+
+        #[gpui_kit::test]
+        fn reduced_motion_holds_then_switches_off(cx: &mut TestAppContext) {
+            let mut rig = open(cx, snapshot(T, 0), |d| d.set_fixed_now(Some(T + 1850 * MS)));
+            rig.vcx.update(|_, cx| cx.set_reduce_motion(true));
+            set_now(&mut rig, T + 1850 * MS);
+            let table = rig.table.clone();
+            rig.vcx.update(|_, cx| {
+                let theme = current(cx).clone();
+                assert_eq!(
+                    table.read(cx).delegate.row_tint(0, &theme),
+                    Some(TintKind::New.color(TINT_ALPHA, &theme))
+                );
+            });
+            // No fade frames; one timer at L instead.
+            let before = requested(&mut rig);
+            frame(&mut rig);
+            assert_eq!(requested(&mut rig), before);
+            rig.vcx.update(|_, cx| {
+                table.update(cx, |t, _| t.delegate.set_fixed_now(Some(T + 2000 * MS)))
+            });
+            rig.vcx
+                .executor()
+                .advance_clock(std::time::Duration::from_millis(151));
+            redraw(&mut rig.vcx);
+            rig.vcx.update(|_, cx| {
+                let theme = current(cx).clone();
+                let t = table.read(cx);
+                assert_eq!(t.delegate.row_tint(0, &theme), None);
+                assert_eq!(t.row_background(0, &theme), theme.list_bg);
+            });
+        }
+
+        #[gpui_kit::test]
+        fn exited_row_enter_toasts_process_exited(cx: &mut TestAppContext) {
+            let mut rig = open(cx, snapshot(T, T), |d| d.set_fixed_now(Some(T)));
+            let table = rig.table.clone();
+            let select = |rig: &mut Rig, pid| {
+                let id = tl_ui::pages::processes::delegate::ProcRowId::Process(key(pid));
+                rig.vcx
+                    .update(|_, cx| table.update(cx, |t, _| t.selection.click(id)));
+            };
+
+            select(&mut rig, 20);
+            rig.vcx.simulate_keystrokes("enter");
+            redraw(&mut rig.vcx);
+            let toasts = rig.toasts.clone();
+            assert_eq!(
+                rig.vcx.read_entity(&toasts, |q, _| q.visible_texts()),
+                vec!["Process exited"]
+            );
+            assert_eq!(rig.opened.get(), 0);
+
+            // A live row still opens Properties.
+            select(&mut rig, 10);
+            rig.vcx.simulate_keystrokes("enter");
+            redraw(&mut rig.vcx);
+            assert_eq!(rig.opened.get(), 1);
+        }
+    }
+}

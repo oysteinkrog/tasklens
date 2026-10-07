@@ -22,10 +22,12 @@ use tl_model::process::{
 use tl_model::settings::{NetworkUnit, Settings};
 use tl_model::system::CpuSet;
 use tl_model::table::{ProcessTableView, TableRow, UnitRef};
+use tl_model::time::TimeNs;
 use tl_model::units::{self, LocalDateTime, NetUnit};
 use tl_model::validity::{ProcessField, Validity};
 
 use crate::components::icons::{TlIcon, icon};
+use crate::components::motion::{M_SLOW, ease_out_cubic};
 use crate::components::validity::{GlyphContent, glyph_parts};
 use crate::i18n::tr;
 use crate::table::cells::CellOut;
@@ -1307,4 +1309,102 @@ pub fn render_metric_cell(
         run(text.len() - colors.split, colors.tail),
     ];
     cell.child(StyledText::new(text).with_runs(runs))
+}
+
+// ---- NEW and EXITED highlight (PROC-043, UI-PRC-011) ----
+
+/// Alpha of the NEW and EXITED row tints until the fade starts.
+pub const TINT_ALPHA: f32 = 0.35;
+
+/// Length of the fade at the end of the linger time (`m_slow`, 300 ms), in ns.
+pub const TINT_FADE_NS: TimeNs = M_SLOW.as_nanos() as TimeNs;
+
+/// Which highlight a row shows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TintKind {
+    /// `status.success`.
+    New,
+    /// `status.danger`.
+    Exited,
+}
+
+impl TintKind {
+    /// The tint colour at `alpha`.
+    pub fn color(self, alpha: f32, theme: &TlTheme) -> Hsla {
+        let base = match self {
+            TintKind::New => theme.status.success,
+            TintKind::Exited => theme.status.danger,
+        };
+        Hsla { a: alpha, ..base }
+    }
+}
+
+/// The linger time `L = clamp(2 × interval_ms, 1000, 3000)` ms, in ns (PROC-043).
+pub fn linger_ns(interval_ms: u32) -> TimeNs {
+    TimeNs::from(interval_ms.saturating_mul(2).clamp(1000, 3000)) * 1_000_000
+}
+
+/// The NEW or EXITED tint of a row and its alpha (PROC-043, UI-PRC-011). `flag_since_ns` is
+/// the engine time the flag first appeared, `now_ns` the same clock now. The tint holds
+/// [`TINT_ALPHA`] for the linger time and fades to 0 with `ease_out_cubic` over its last
+/// 300 ms. With `animations` false (`motion.animations` off or reduced motion) it holds
+/// [`TINT_ALPHA`] and switches off at L. `None` past L, without a flag, or when `enabled`
+/// (`processes.highlight_new_exited`) is false.
+pub fn row_tint(
+    flags: ProcFlags,
+    flag_since_ns: TimeNs,
+    now_ns: TimeNs,
+    interval_ms: u32,
+    animations: bool,
+    enabled: bool,
+) -> Option<(TintKind, f32)> {
+    let kind = tint_kind(flags, enabled)?;
+    let left = linger_left(flag_since_ns, now_ns, interval_ms)?;
+    if !animations || left >= TINT_FADE_NS {
+        return Some((kind, TINT_ALPHA));
+    }
+    let t = 1.0 - left as f32 / TINT_FADE_NS as f32;
+    Some((kind, TINT_ALPHA * (1.0 - ease_out_cubic(t))))
+}
+
+/// When the tint of a row next changes with no new snapshot: `Some(now_ns)` while it fades
+/// (it changes every frame), the fade start before that, the end of the linger time when
+/// `animations` is false, and `None` for a row with no tint. Same arguments as [`row_tint`].
+pub fn tint_deadline(
+    flags: ProcFlags,
+    flag_since_ns: TimeNs,
+    now_ns: TimeNs,
+    interval_ms: u32,
+    animations: bool,
+    enabled: bool,
+) -> Option<TimeNs> {
+    tint_kind(flags, enabled)?;
+    let left = linger_left(flag_since_ns, now_ns, interval_ms)?;
+    Some(if !animations {
+        now_ns + left
+    } else if left > TINT_FADE_NS {
+        now_ns + left - TINT_FADE_NS
+    } else {
+        now_ns
+    })
+}
+
+fn tint_kind(flags: ProcFlags, enabled: bool) -> Option<TintKind> {
+    if !enabled {
+        None
+    } else if flags.contains(ProcFlags::NEW) {
+        Some(TintKind::New)
+    } else if flags.contains(ProcFlags::EXITED) {
+        Some(TintKind::Exited)
+    } else {
+        None
+    }
+}
+
+/// Time left of the linger time at `now_ns`, `None` once it is over.
+fn linger_left(flag_since_ns: TimeNs, now_ns: TimeNs, interval_ms: u32) -> Option<TimeNs> {
+    let age = now_ns.saturating_sub(flag_since_ns);
+    linger_ns(interval_ms)
+        .checked_sub(age)
+        .filter(|&left| left > 0)
 }

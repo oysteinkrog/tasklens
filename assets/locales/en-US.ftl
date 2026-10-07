@@ -485,3 +485,7 @@ processes-toolbar-mode-grouped = Task Manager Grouping
 processes-toolbar-mode-flat = List View
 processes-toolbar-cycle-mode = Toggle view mode (current: {$mode})
 processes-toolbar-history-flat = History shows a flat list
+
+## Processes table toasts (E22, UI-PRC-011)
+
+processes-toast-process-exited = Process exited
