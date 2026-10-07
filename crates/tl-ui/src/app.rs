@@ -323,6 +323,7 @@ impl TasklensUi {
         toast::init(cx);
 
         // ActionTracker
+        crate::action_tracker::install(hub.read(cx).client().clone(), cx);
 
         // open hooks
         crate::window::main::init(cx);
