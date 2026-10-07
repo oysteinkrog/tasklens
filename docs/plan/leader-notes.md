@@ -720,3 +720,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - j185i closed (d57fde9a): a timing flake, no loop bug; tests wait for lines plus quiet, spacing moved to a synthetic-clock test; 200 of 200 under CPU load.
 - xdh.5: AC 5 restated after crw.34: the card never notifies on equal value bits; a snapshot with no change to its series causes 0 renders; a same-value sample re-renders only through the chart.
 - bj6.8 closed (3c7f5a5e, 4c9849ad): Crash Report waits for the main window to become visible; about.rs send_open_uri is pub(crate). ad375964 (pdu.23) swept the bj6.8 ftl strings. shortcuts_cover_all_bindings fails for the Information bindings from 9o0.24; the 9o0 agent is adding SHORTCUT_DOCS entries.
+- bj6.26: GPU engine list for Settings comes from a new pub gpu::device_engines(snap, device), so Settings and the GPU page share one key list; the page has 19 keys (the bead said 21).
