@@ -289,8 +289,12 @@ pub struct PerformancePage {
     /// `state.performance.nav_width`, clamped to 180..=400.
     nav_width: u16,
     /// The split's panel sizes. Made new each time the sidebar comes back, so a drag on the
-    /// handle while the sidebar was hidden leaves nothing behind.
+    /// handle while the sidebar was hidden leaves nothing behind, and each time the split's
+    /// width changes: the kit scales every panel with the container, and the sidebar keeps
+    /// `nav_width` instead (UI-PRF-010).
     split: Entity<ResizableState>,
+    /// The split width `split` was measured at; zero for a new state.
+    split_width: Pixels,
     /// The tab is the active tab (`set_active`).
     active: bool,
     hub: Entity<SnapshotHub>,
@@ -326,6 +330,7 @@ impl PerformancePage {
             anim_generation: 0,
             nav_width: nav_width.clamp(NAV_MIN_W, NAV_MAX_W),
             split: cx.new(|_| ResizableState::default()),
+            split_width: Pixels::ZERO,
             active: true,
             hub,
             demand,
@@ -458,8 +463,20 @@ impl PerformancePage {
 
     /// `PerfToggleSidebar` (F9, Ctrl+T): hides or shows the sidebar. The width animates over
     /// `m_base` unless animations are off. Not persisted (R-090).
-    fn on_toggle_sidebar(&mut self, _: &PerfToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_sidebar(
+        &mut self,
+        _: &PerfToggleSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar_visible = !self.sidebar_visible;
+        // Focus leaves the list before it goes, so F9 still reaches this page, and comes back
+        // to it with the list.
+        if !self.sidebar_visible && self.sidebar_focus.contains_focused(window, cx) {
+            self.focus.focus(window, cx);
+        } else if self.sidebar_visible && self.focus.is_focused(window) {
+            self.sidebar_focus.focus(window, cx);
+        }
         self.anim_generation = self.anim_generation.wrapping_add(1);
         if !animations_on(cx) {
             self.finish_toggle(cx);
@@ -486,9 +503,14 @@ impl PerformancePage {
     fn finish_toggle(&mut self, cx: &mut Context<Self>) {
         self.anim = None;
         if self.sidebar_visible {
-            self.split = cx.new(|_| ResizableState::default());
+            self.new_split(cx);
         }
         cx.notify();
+    }
+
+    fn new_split(&mut self, cx: &mut App) {
+        self.split = cx.new(|_| ResizableState::default());
+        self.split_width = Pixels::ZERO;
     }
 
     /// `PerfJumpToType`: selects the first visible card of `kind`.
@@ -583,6 +605,14 @@ impl Render for PerformancePage {
         self.render_count.set(self.render_count.get() + 1);
         let s = metrics(cx).ui_scale;
         let nav = px(f32::from(self.nav_width) * s);
+        let width = self.split.read(cx).container_size();
+        if width != self.split_width {
+            if self.split_width == Pixels::ZERO {
+                self.split_width = width;
+            } else {
+                self.new_split(cx);
+            }
+        }
 
         let sidebar = div()
             .debug_selector(|| SIDEBAR_PANEL_ID.into())
