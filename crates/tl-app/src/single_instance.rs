@@ -1,7 +1,7 @@
 //! Single instance through `org.freedesktop.Application` on the session bus (ADR-010, APP-011).
 //!
-//! The first copy owns `BUS_NAME` and passes requests to the GPUI main thread as `AppRequest`
-//! values. A second copy forwards its arguments to the first and exits 0. Any session client
+//! The first copy owns `BUS_NAME`, or the `--app-id` value (APP-052, D-016), and passes
+//! requests to the GPUI main thread as `AppRequest` values. A second copy forwards its arguments to the first and exits 0. Any session client
 //! can call these methods, so every parameter is validated before anything is sent. Logs name
 //! the method only, never `platform_data` or tokens.
 
@@ -17,7 +17,8 @@ use zbus::fdo::{self, RequestNameFlags, RequestNameReply};
 use zbus::zvariant::{OwnedValue, Value};
 
 pub const BUS_NAME: &str = "io.github.oysteinkrog.Tasklens";
-pub const OBJECT_PATH: &str = "/io/github/oysteinkrog/Tasklens";
+/// Longest `--app-id`: the D-Bus limit for a bus name.
+pub const MAX_APP_ID_BYTES: usize = 255;
 const INTERFACE: &str = "org.freedesktop.Application";
 /// Bound on every forwarding call and on the name request.
 const CALL_TIMEOUT: Duration = Duration::from_secs(2);
@@ -46,12 +47,52 @@ pub struct Forward {
     pub select_pid: Option<u32>,
 }
 
-/// Takes `BUS_NAME` on the session bus, or forwards to the copy that owns it.
-pub fn acquire(forward: &Forward, activation_token: Option<String>) -> Outcome {
-    acquire_named(BUS_NAME, forward, activation_token)
+/// True when `id` is a valid `--app-id`: a D-Bus well-known name of at least two elements,
+/// matching `^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_-]*)+$`, at most `MAX_APP_ID_BYTES`
+/// bytes. Such an id is also a single path component, never `.`, `..` or empty.
+pub fn valid_app_id(id: &str) -> bool {
+    if id.len() > MAX_APP_ID_BYTES {
+        return false;
+    }
+    let mut elements = id.split('.');
+    let first_ok = elements
+        .next()
+        .is_some_and(|first| element_ok(first, false));
+    let mut rest = elements.peekable();
+    first_ok && rest.peek().is_some() && rest.all(|element| element_ok(element, true))
 }
 
-/// `acquire` with another bus name, for tests.
+/// One element: an ASCII letter, then letters, digits, `_`, and `-` when `dash` is true.
+fn element_ok(element: &str, dash: bool) -> bool {
+    let mut bytes = element.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_alphabetic())
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_' || (dash && b == b'-'))
+}
+
+/// The object path for bus name `name`: a leading `/`, then `name` with `.` replaced by `/`.
+/// `-` is not allowed in an object path, so it becomes `_`, as GLib's `GApplication` does.
+pub fn object_path(name: &str) -> String {
+    let mut path = String::with_capacity(name.len() + 1);
+    path.push('/');
+    path.extend(name.chars().map(|c| match c {
+        '.' => '/',
+        '-' => '_',
+        c => c,
+    }));
+    path
+}
+
+/// Takes the bus name on the session bus, or forwards to the copy that owns it. The name is
+/// `app_id` when given (validated by the caller with `valid_app_id`), else `BUS_NAME`.
+pub fn acquire(
+    app_id: Option<&str>,
+    forward: &Forward,
+    activation_token: Option<String>,
+) -> Outcome {
+    acquire_named(app_id.unwrap_or(BUS_NAME), forward, activation_token)
+}
+
+/// `acquire` with a given bus name.
 pub fn acquire_named(name: &str, forward: &Forward, activation_token: Option<String>) -> Outcome {
     let conn = Builder::session().and_then(|b| b.method_timeout(CALL_TIMEOUT).build());
     acquire_on(conn, name, forward, activation_token)
@@ -71,9 +112,10 @@ pub fn acquire_on(
             return Outcome::NoBus;
         }
     };
+    let path = object_path(name);
     // Serve before taking the name, so a second copy never finds the name without the object.
     let (tx, requests) = async_channel::bounded(QUEUE);
-    if let Err(e) = conn.object_server().at(OBJECT_PATH, AppIface { tx }) {
+    if let Err(e) = conn.object_server().at(path.as_str(), AppIface { tx }) {
         warn!("Could not serve {INTERFACE}; running without single instance: {e}");
         return Outcome::NoBus;
     }
@@ -82,8 +124,8 @@ pub fn acquire_on(
             Outcome::Primary { conn, requests }
         }
         Ok(RequestNameReply::Exists | RequestNameReply::InQueue) | Err(zbus::Error::NameTaken) => {
-            let _ = conn.object_server().remove::<AppIface, _>(OBJECT_PATH);
-            forward_to(&conn, name, forward, activation_token);
+            let _ = conn.object_server().remove::<AppIface, _>(path.as_str());
+            forward_to(&conn, name, &path, forward, activation_token);
             Outcome::Forwarded
         }
         Err(e) => {
@@ -95,17 +137,18 @@ pub fn acquire_on(
 
 /// Calls `Activate`, then one `ActivateAction` per forwarded argument. Failures are logged
 /// and the copy still exits 0.
-fn forward_to(conn: &Connection, name: &str, forward: &Forward, token: Option<String>) {
+fn forward_to(conn: &Connection, name: &str, path: &str, forward: &Forward, token: Option<String>) {
     let mut platform_data: HashMap<&str, Value<'_>> = HashMap::new();
     if let Some(token) = token.as_deref() {
         platform_data.insert(TOKEN_KEY, Value::from(token));
     }
-    call(conn, name, "Activate", &(&platform_data,));
+    call(conn, name, path, "Activate", &(&platform_data,));
     if let Some(tab) = forward.tab {
         let parameter = vec![Value::from(tab.as_str())];
         call(
             conn,
             name,
+            path,
             "ActivateAction",
             &("tab", parameter, &platform_data),
         );
@@ -115,6 +158,7 @@ fn forward_to(conn: &Connection, name: &str, forward: &Forward, token: Option<St
         call(
             conn,
             name,
+            path,
             "ActivateAction",
             &("select-pid", parameter, &platform_data),
         );
@@ -122,11 +166,11 @@ fn forward_to(conn: &Connection, name: &str, forward: &Forward, token: Option<St
 }
 
 /// Calls `method` on the running copy. The connection's method timeout bounds the wait.
-fn call<B>(conn: &Connection, name: &str, method: &str, body: &B)
+fn call<B>(conn: &Connection, name: &str, path: &str, method: &str, body: &B)
 where
     B: serde::Serialize + zbus::zvariant::DynamicType,
 {
-    if let Err(e) = conn.call_method(Some(name), OBJECT_PATH, Some(INTERFACE), method, body) {
+    if let Err(e) = conn.call_method(Some(name), path, Some(INTERFACE), method, body) {
         warn!("Forwarding {method} to the running copy failed: {e}");
     }
 }
@@ -236,6 +280,65 @@ mod tests {
 
     fn val(v: impl Into<Value<'static>>) -> OwnedValue {
         v.into().try_into().expect("owned value")
+    }
+
+    #[test]
+    fn app_id_valid() {
+        let longest = format!("a.{}", "b".repeat(MAX_APP_ID_BYTES - 2));
+        for id in [
+            BUS_NAME,
+            "io.github.oysteinkrog.TasklensDev",
+            "io.example.Dev",
+            "a.b",
+            "org.kde.kwin-test",
+            "A_1.B2_x",
+            longest.as_str(),
+        ] {
+            assert!(valid_app_id(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn app_id_invalid() {
+        let too_long = format!("a.{}", "b".repeat(MAX_APP_ID_BYTES - 1));
+        for id in [
+            "",
+            "bad id",
+            "tasklens",
+            ".",
+            "..",
+            "a..b",
+            ".a.b",
+            "a.b.",
+            "a/b.c",
+            "../x.y",
+            "io.example/../Dev",
+            "1a.b",
+            "a.1b",
+            "a-b.c",
+            "a.-b",
+            "a.b c",
+            "a.b\0",
+            "a.b\n",
+            "a.\u{e9}",
+            too_long.as_str(),
+        ] {
+            assert!(!valid_app_id(id), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn object_path_from_id() {
+        assert_eq!(object_path("io.example.Dev"), "/io/example/Dev");
+        assert_eq!(object_path(BUS_NAME), "/io/github/oysteinkrog/Tasklens");
+        assert_eq!(object_path("org.kde.kwin-test"), "/org/kde/kwin_test");
+        for id in ["io.example.Dev", "org.kde.kwin-test", "A_1.B2_x"] {
+            let path = object_path(id);
+            assert!(
+                zbus::zvariant::ObjectPath::try_from(path.as_str()).is_ok(),
+                "{path}"
+            );
+        }
     }
 
     #[test]

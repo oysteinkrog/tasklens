@@ -144,3 +144,65 @@ fn all_file_names() {
         assert_eq!(path.file_name().unwrap(), name, "{}", path.display());
     }
 }
+
+#[test]
+fn app_id_dirs() {
+    let vars = [
+        ("HOME", "/home/u"),
+        ("XDG_CONFIG_HOME", "/c"),
+        ("XDG_STATE_HOME", "/s"),
+        ("XDG_CACHE_HOME", "/k"),
+        ("XDG_RUNTIME_DIR", "/r"),
+    ];
+    let get = |name: &str| {
+        vars.iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| OsString::from(v))
+    };
+    let p = Paths::from_vars_for(Some("io.example.Dev"), get).unwrap();
+    assert_eq!(p.config_dir, Path::new("/c/io.example.Dev"));
+    assert_eq!(p.state_dir, Path::new("/s/io.example.Dev"));
+    assert_eq!(p.cache_dir, Path::new("/k/io.example.Dev"));
+    assert_eq!(
+        p.runtime_dir.as_deref(),
+        Some(Path::new("/r/io.example.Dev"))
+    );
+    assert_eq!(p.history_dir(), Path::new("/s/io.example.Dev/history"));
+    assert_eq!(p.logs_dir(), Path::new("/s/io.example.Dev/logs"));
+    assert_eq!(p.crash_dir(), Path::new("/s/io.example.Dev/crash"));
+    assert_eq!(
+        p.run_history_file(),
+        Path::new("/s/io.example.Dev/run-history.json")
+    );
+    assert_eq!(
+        p.icon_cache_file(),
+        Path::new("/k/io.example.Dev/icons.toml")
+    );
+    assert_eq!(
+        p.settings_file(),
+        Path::new("/c/io.example.Dev/settings.toml")
+    );
+
+    // Without --app-id the component is `tasklens`.
+    let p = Paths::from_vars_for(None, get).unwrap();
+    assert_eq!(p.config_dir, Path::new("/c/tasklens"));
+    assert_eq!(p.runtime_dir.as_deref(), Some(Path::new("/r/tasklens")));
+    assert_eq!(p, Paths::from_vars(get).unwrap());
+}
+
+#[test]
+fn runtime_dir_unset_or_relative() {
+    let p = resolve(&[("HOME", "/home/u")]).unwrap();
+    assert_eq!(p.runtime_dir, None);
+    let p = resolve(&[("HOME", "/home/u"), ("XDG_RUNTIME_DIR", "run/user")]).unwrap();
+    assert_eq!(p.runtime_dir, None);
+}
+
+#[test]
+fn app_id_cannot_leave_the_roots() {
+    let get = |name: &str| (name == "HOME").then(|| OsString::from("/home/u"));
+    for bad in ["", ".", "..", "a/b", "../x", "/abs"] {
+        let err = Paths::from_vars_for(Some(bad), get).unwrap_err();
+        assert_eq!(err.to_string(), format!("Invalid --app-id: {bad}"));
+    }
+}

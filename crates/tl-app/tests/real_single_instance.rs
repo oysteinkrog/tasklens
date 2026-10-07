@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use single_instance::{Forward, OBJECT_PATH, Outcome, acquire_on};
+use single_instance::{Forward, Outcome, acquire_on, object_path};
 use tl_model::command::{AppRequest, Tab};
 use zbus::blocking::Connection;
 use zbus::blocking::connection::Builder;
@@ -90,6 +90,32 @@ fn no_bus_returns_nobus() {
         acquire_on(conn, TEST_NAME, &no_forward(), None),
         Outcome::NoBus
     ));
+}
+
+/// `--app-id`: a copy with another id takes its own name instead of forwarding (APP-052).
+#[test]
+#[ignore = "needs dbus-daemon"]
+fn app_id_runs_its_own_instance() {
+    let bus = PrivateBus::start();
+    let Outcome::Primary {
+        conn: installed, ..
+    } = acquire_on(Ok(bus.connect()), TEST_NAME, &no_forward(), None)
+    else {
+        panic!("the installed copy did not get the name");
+    };
+    let dev = "io.github.oysteinkrog.TasklensTestDev";
+    let Outcome::Primary { conn: dev_conn, .. } =
+        acquire_on(Ok(bus.connect()), dev, &no_forward(), None)
+    else {
+        panic!("the --app-id copy forwarded instead of starting its own instance");
+    };
+    // A second copy with the same id forwards to the first.
+    assert!(matches!(
+        acquire_on(Ok(bus.connect()), dev, &no_forward(), None),
+        Outcome::Forwarded
+    ));
+    drop(dev_conn);
+    drop(installed);
 }
 
 #[test]
@@ -195,7 +221,7 @@ fn interface_methods() {
 
 /// Lets `interface_methods` call one closure with bodies of different types.
 mod erased_body {
-    use super::{INTERFACE, OBJECT_PATH, TEST_NAME};
+    use super::{INTERFACE, TEST_NAME, object_path};
     use zbus::blocking::Connection;
 
     pub trait Body {
@@ -207,7 +233,13 @@ mod erased_body {
         B: serde::Serialize + zbus::zvariant::DynamicType,
     {
         fn call(&self, conn: &Connection, method: &str) -> zbus::Result<zbus::message::Message> {
-            conn.call_method(Some(TEST_NAME), OBJECT_PATH, Some(INTERFACE), method, self)
+            conn.call_method(
+                Some(TEST_NAME),
+                object_path(TEST_NAME).as_str(),
+                Some(INTERFACE),
+                method,
+                self,
+            )
         }
     }
 }

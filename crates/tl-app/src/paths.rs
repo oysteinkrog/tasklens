@@ -10,10 +10,12 @@ pub const FILE_MODE: u32 = 0o600;
 /// Mode for every directory tasklens creates.
 pub const DIR_MODE: u32 = 0o700;
 
-const APP_DIR: &str = "tasklens";
+/// The directory component under each XDG root when `--app-id` is not given.
+pub const APP_DIR: &str = "tasklens";
 const AUTOSTART_NAME: &str = "io.github.oysteinkrog.Tasklens.desktop";
 
-/// The resolved roots for every tasklens file.
+/// The resolved roots for every tasklens file. With `--app-id <id>`, `<id>` replaces `tasklens`
+/// in all four roots (D-016).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paths {
     /// `$XDG_CONFIG_HOME/tasklens`
@@ -22,6 +24,8 @@ pub struct Paths {
     pub state_dir: PathBuf,
     /// `$XDG_CACHE_HOME/tasklens`
     pub cache_dir: PathBuf,
+    /// `$XDG_RUNTIME_DIR/tasklens`, `None` when `XDG_RUNTIME_DIR` is unset or relative.
+    pub runtime_dir: Option<PathBuf>,
     pub home: PathBuf,
     /// The resolved `$XDG_CONFIG_HOME` root, used for the autostart entry.
     config_root: PathBuf,
@@ -35,6 +39,25 @@ impl Paths {
 
     /// Resolves the paths from `get`, which returns the value of an environment variable.
     pub fn from_vars(get: impl Fn(&str) -> Option<OsString>) -> anyhow::Result<Paths> {
+        Self::from_vars_for(None, get)
+    }
+
+    /// `from_env` with the `--app-id` value, which the caller has validated.
+    pub fn from_env_for(app_id: Option<&str>) -> anyhow::Result<Paths> {
+        Self::from_vars_for(app_id, |name| std::env::var_os(name))
+    }
+
+    /// `from_vars` with the `--app-id` value. `app_id` must be one path component, so every
+    /// directory stays under its XDG root.
+    pub fn from_vars_for(
+        app_id: Option<&str>,
+        get: impl Fn(&str) -> Option<OsString>,
+    ) -> anyhow::Result<Paths> {
+        let app_dir = app_id.unwrap_or(APP_DIR);
+        anyhow::ensure!(
+            !app_dir.is_empty() && app_dir != "." && app_dir != ".." && !app_dir.contains('/'),
+            "Invalid --app-id: {app_dir}"
+        );
         let home = absolute(get("HOME"))
             .ok_or_else(|| anyhow::anyhow!("HOME is not set to an absolute path"))?;
         let root =
@@ -43,9 +66,10 @@ impl Paths {
         let state_root = root("XDG_STATE_HOME", ".local/state");
         let cache_root = root("XDG_CACHE_HOME", ".cache");
         Ok(Paths {
-            config_dir: config_root.join(APP_DIR),
-            state_dir: state_root.join(APP_DIR),
-            cache_dir: cache_root.join(APP_DIR),
+            config_dir: config_root.join(app_dir),
+            state_dir: state_root.join(app_dir),
+            cache_dir: cache_root.join(app_dir),
+            runtime_dir: absolute(get("XDG_RUNTIME_DIR")).map(|root| root.join(app_dir)),
             home,
             config_root,
         })
