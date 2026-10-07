@@ -876,6 +876,50 @@ fn table_totals_follow_system_and_sweep() {
     assert_eq!(table.query_generation, 3);
 }
 
+/// tasklens-9o0.36: Threads comes from the CPU worker's loadavg count. Without a sweep it still
+/// reaches the system snapshot; with a sweep the header shows the same count, not the sweep's sum.
+/// `table_totals_follow_system_and_sweep` covers the sweep fallback when the CPU count is not
+/// readable.
+#[test]
+fn threads_from_loadavg_with_and_without_sweep() {
+    let with_threads = |t_ns, threads| {
+        let mut msg = cpu_msg(t_ns, 50.0, t_ns == SEC);
+        if let EngineMsg::Source(SourceUpdate::Cpu(s)) = &mut msg {
+            s.totals.threads = threads;
+        }
+        msg
+    };
+    let mut rig = Rig::new();
+    rig.run(vec![with_threads(SEC, Metric::valid(6667))])
+        .expect("no invariant violation");
+    assert_eq!(rig.latest().system.cpu.threads, Metric::valid(6667));
+
+    let mut sweep = sweep_msg(2 * SEC);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        s.system_threads = 42;
+    }
+    rig.run(vec![with_threads(2 * SEC, Metric::valid(6668)), sweep])
+        .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.system.cpu.threads, Metric::valid(6668));
+    assert_eq!(snap.table.totals.threads.value, 6668);
+    assert_eq!(snap.table.totals.threads.validity, Validity::Valid);
+
+    // An unreadable loadavg stays Missing in the snapshot; the header falls back to the sweep.
+    let mut sweep = sweep_msg(3 * SEC);
+    if let EngineMsg::Source(SourceUpdate::Processes(s)) = &mut sweep {
+        s.system_threads = 42;
+    }
+    rig.run(vec![
+        with_threads(3 * SEC, Metric::with(Validity::Missing)),
+        sweep,
+    ])
+    .expect("no invariant violation");
+    let snap = rig.latest();
+    assert_eq!(snap.system.cpu.threads.validity, Validity::Missing);
+    assert_eq!(snap.table.totals.threads.value, 42);
+}
+
 #[test]
 fn refresh_now_is_forwarded() {
     let mut rig = Rig::new();

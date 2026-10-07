@@ -444,8 +444,12 @@ impl CpuSource {
             package_power_w: metric(last.power.package_w),
             core_power_w: metric(last.power.core_w),
             processes: metric(last.live.process_count),
-            // The reducer fills Threads from `ProcessSweep.system_threads` (PERF-033).
-            threads: Metric::with(Validity::WarmingUp),
+            // Every kernel scheduling entity, from the "running/total" field of /proc/loadavg
+            // (PERF-033). WarmingUp before the first slow tick, Missing when loadavg is unreadable.
+            threads: Metric {
+                value: last.live.load.value.total,
+                validity: last.live.load.validity,
+            },
             handles: metric(last.live.open_files),
             load_avg: Metric {
                 value: [

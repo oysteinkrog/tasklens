@@ -2118,9 +2118,19 @@ pub fn totals(
         gpu_pct,
         gpu_adapter_pct,
         vram_pct,
-        threads: Total {
-            value: u64::from(sweep.system_threads),
-            validity: Validity::Valid,
+        // One source per mode: the CPU worker's /proc/loadavg count whenever it is readable, so
+        // the header matches Performance and Information. The sweep's sum is the fallback for
+        // Low Memory mode, which runs no CPU worker, and before the first CPU slow tick.
+        threads: if readable(system.cpu.threads.validity) {
+            Total {
+                value: u64::from(system.cpu.threads.value),
+                validity: system.cpu.threads.validity,
+            }
+        } else {
+            Total {
+                value: u64::from(sweep.system_threads),
+                validity: Validity::Valid,
+            }
         },
         handles: sweep
             .file_nr

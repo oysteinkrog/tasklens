@@ -471,8 +471,8 @@ fn cpu_live_stats_owner_desktop() {
     assert_eq!(s.totals.handles, Metric::valid(26143));
     // loadavg "31.35 27.73 27.82 19/6667 3047020".
     assert_eq!(s.totals.load_avg, Metric::valid([31.35, 27.73, 27.82]));
-    // The reducer fills Threads.
-    assert_eq!(s.totals.threads.validity, Validity::WarmingUp);
+    // Threads is the loadavg total (tasklens-9o0.36).
+    assert_eq!(s.totals.threads, Metric::valid(6667));
 }
 
 #[test]
@@ -481,6 +481,8 @@ fn cpu_missing_loadavg_is_missing() {
     fs::remove_file(dir.join("proc/loadavg")).expect("remove loadavg");
     let (_, s) = cpu_sample(cpu_source(&dir), SEC);
     assert_eq!(s.totals.load_avg.validity, Validity::Missing);
+    // Missing, never a zero count.
+    assert_eq!(s.totals.threads.validity, Validity::Missing);
     assert_eq!(s.totals.processes, Metric::valid(50));
     assert_eq!(s.totals.handles, Metric::valid(26143));
 }
