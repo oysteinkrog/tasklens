@@ -562,3 +562,4 @@ OI-E01 to OI-E32 become R-139 to R-170 (R = 138 + n). OI-U01 to OI-U65 become R-
 - cr0.3 (4842348): PKGBUILD with options !strip !lto (makepkg LTO broke ring). The package has the five files; tasklens --version works. check() under release fat LTO thrashed, so a cr0 bead moves it to the dev profile. namcap is not installed (OWNER: optional install of namcap for the package lint).
 - m1f.15 (ad1b317): --low-memory init dispatch in start(); the rescue run loads only Regular and SemiBold.
 - pdu.13 (10a1107, 074bf0d): the Processes page is built on first visit and kept; an inactive page is not drawn.
+- pdu.14 (8cc741a): guide_lines() turned on; sibling_pass off-by-one fixed per PROC-017; RowFlags::IN_GROUP puts the group line at x 16. The extra wrapper div plus canvas per row is merged with the separators canvas in a new rsf bead. pdu.1: the tl warning came from a draft and is not in HEAD.
