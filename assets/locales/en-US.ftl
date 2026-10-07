@@ -493,3 +493,16 @@ processes-toast-process-exited = Process exited
 ## Include children checkbox (E20-010)
 
 shell-filter-include-children = Include children
+
+## Process row tooltip (PROC-039)
+
+processes-tooltip-path = path:
+processes-tooltip-restricted = restricted
+processes-tooltip-user = user:
+processes-tooltip-uid = uid
+processes-tooltip-unit = Unit:
+processes-tooltip-cgroup = cgroup:
+processes-tooltip-desktop-file = Desktop file:
+processes-tooltip-some-values-need-administrator-access = Some values need administrator access.
+processes-tooltip-cpu-time-spent-in-hardware = CPU time spent in hardware and software interrupts
+processes-tooltip-memory-held-by-zram-compressed = Memory held by zram compressed swap devices

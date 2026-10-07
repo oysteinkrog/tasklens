@@ -13,15 +13,19 @@
 //! NEW and EXITED tints (PROC-043, UI-PRC-011) are computed per row from the frame's clock and
 //! never rebuild the row tables. Animation frames are requested only while a visible tint fades;
 //! before that, one timer wakes the table at the fade start.
+//!
+//! The row tooltip (PROC-039) is built only for the hovered row, when the table asks for it.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui_kit::{
-    AnyView, AnyWindowHandle, App, AsyncApp, Context, Div, Hsla, Pixels, SharedString, Task,
-    WeakEntity, Window, px,
+    AnyView, AnyWindowHandle, App, AppContext as _, AsyncApp, Context, Div, Hsla, Pixels,
+    SharedString, Task, WeakEntity, Window, px,
 };
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
@@ -44,6 +48,7 @@ use super::cells::{
 use super::header_totals::header_total;
 use super::name_cell::{NameCellData, NameIcon, NameWords, StateGlyph, name_cell};
 use super::table::{GroupHeader, ProcessQuery};
+use super::tooltip::{RowTipState, RowTipWords, RowTooltip};
 use crate::anim::AnimationDriver;
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
@@ -297,6 +302,11 @@ pub struct ProcessDelegate {
     /// The timer that wakes the table when a visible tint starts to fade (or ends, without
     /// animations), with its deadline. The deadline is 0 once the timer fired.
     tint_wake: Option<(TimeNs, Task<()>)>,
+    tip_words: RowTipWords,
+    /// The hovered row's tooltip lines, shared with `tip_view`.
+    tip: Rc<RefCell<RowTipState>>,
+    /// The one row tooltip view, created on the first frame.
+    tip_view: Option<AnyView>,
     /// A fixed clock for tests.
     #[cfg(any(test, feature = "test-hooks"))]
     fixed_now: Option<TimeNs>,
@@ -344,6 +354,9 @@ impl ProcessDelegate {
             tint_now: now_boot_ns(),
             tint_animations: settings.motion.animations && !cx.reduce_motion(),
             tint_wake: None,
+            tip_words: RowTipWords::new(cx),
+            tip: Rc::default(),
+            tip_view: None,
             #[cfg(any(test, feature = "test-hooks"))]
             fixed_now: None,
         };
@@ -409,6 +422,8 @@ impl ProcessDelegate {
         self.cell_words = CellWords::new(cx);
         self.name_words = NameWords::new(cx);
         self.header_words = HEADER_KEYS.map(|k| Arc::from(tr(cx, k).as_ref()));
+        self.tip_words = RowTipWords::new(cx);
+        self.tip.borrow_mut().clear();
         for spec in self.specs.values_mut() {
             let col = process_column(spec.id);
             spec.label = tr(cx, col.label);
@@ -601,6 +616,18 @@ impl ProcessDelegate {
                 _ => RowKind::GroupHeader,
             },
         }
+    }
+
+    /// The record or group row behind row `ix`. `None` for a group header.
+    fn row_ref(&self, ix: usize) -> Option<RowRef<'_>> {
+        let row = self.row(ix);
+        let kind = self.kind_of(row);
+        if let Some(g) = self.group(row) {
+            return Some(RowRef::Group(g, kind));
+        }
+        row.record
+            .and_then(|i| self.snapshot.processes.records.get(i as usize))
+            .map(|r| RowRef::Record(r, row, kind))
     }
 
     fn cell_ctx(&self) -> CellCtx<'_> {
@@ -907,17 +934,8 @@ impl TreeTableDelegate for ProcessDelegate {
     }
 
     fn cell(&self, ix: usize, col: ColumnId, out: &mut CellOut) {
-        let row = self.row(ix);
-        let kind = self.kind_of(row);
         let ctx = self.cell_ctx();
-        let row_ref = if let Some(g) = self.group(row) {
-            RowRef::Group(g, kind)
-        } else if let Some(r) = row
-            .record
-            .and_then(|i| self.snapshot.processes.records.get(i as usize))
-        {
-            RowRef::Record(r, row, kind)
-        } else {
+        let Some(row_ref) = self.row_ref(ix) else {
             // A group header: every metric cell is blank.
             out.bits = 0;
             out.validity = Validity::Valid;
@@ -1097,6 +1115,10 @@ impl TreeTableDelegate for ProcessDelegate {
         window: &mut Window,
         cx: &mut Context<TlTreeTable<Self>>,
     ) {
+        if self.tip_view.is_none() {
+            let tip = Rc::clone(&self.tip);
+            self.tip_view = Some(cx.new(|_| RowTooltip::new(tip)).into());
+        }
         let now = self.clock();
         self.tint_now = now;
         self.tint_animations = self.settings.motion.animations && !cx.reduce_motion();
@@ -1125,8 +1147,16 @@ impl TreeTableDelegate for ProcessDelegate {
         }
     }
 
-    fn row_tooltip(&self, _: usize) -> Option<AnyView> {
-        None
+    /// The table calls this for the hovered row only, once its tooltips are ready. The lines
+    /// are built on the first call for a row and snapshot. Group headers have no tooltip.
+    fn row_tooltip(&self, ix: usize) -> Option<AnyView> {
+        let view = self.tip_view.as_ref()?;
+        let row = self.row_ref(ix)?;
+        let key = (self.snapshot.sequence, self.version, ix);
+        self.tip
+            .borrow_mut()
+            .update(key, row, &self.snapshot, &self.tip_words)
+            .then(|| view.clone())
     }
 
     fn empty_text(&self) -> Option<SharedString> {

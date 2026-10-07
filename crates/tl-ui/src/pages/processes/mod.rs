@@ -13,6 +13,7 @@ pub mod header_totals;
 pub mod name_cell;
 pub mod table;
 pub mod toolbar;
+pub mod tooltip;
 
 use std::sync::Arc;
 
