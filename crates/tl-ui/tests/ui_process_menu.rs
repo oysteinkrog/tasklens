@@ -984,11 +984,14 @@ mod toasts {
 mod end {
     use std::sync::Arc;
 
+    use gpui_kit::component::kbd::Kbd;
     use gpui_kit::{Action, Entity, TestAppContext, VisualTestContext, WindowHandle, WindowId};
+    use gpui_kit::{KeyBinding, Keystroke, point, px};
     use tl_model::actions::SchedPolicy;
     use tl_model::actions::{ActionKind, ActionState, ActionTarget, Signal};
     use tl_model::command::Tab;
     use tl_model::ids::ColumnId;
+    use tl_model::ids::PseudoKind;
     use tl_model::ids::{GroupKey, NodeId, ProcessKey};
     use tl_model::process::ProcessExtras;
     use tl_model::process::{
@@ -997,10 +1000,14 @@ mod end {
     use tl_model::settings::Settings;
     use tl_model::snapshot::{ComponentHeader, ProcessSnapshot};
     use tl_model::system::CpuSet;
+    use tl_model::table::{Manager, UnitRef};
     use tl_model::table::{ProcessTableView, TableRow};
     use tl_model::time::BootId;
     use tl_model::validity::{FieldValidity, Validity};
     use tl_ui::components::dialog::{DialogButton, TlDialogView};
+    use tl_ui::components::menu::{
+        MenuEntryInfo, MenuEntryKind, TlMenu, TlMenuPopup, open_context_menu_at,
+    };
     use tl_ui::components::window_frame::TlSecondaryWindow;
     use tl_ui::i18n::tr_en;
     use tl_ui::pages::processes::actions::{
@@ -1014,7 +1021,7 @@ mod end {
     use tl_ui::pages::processes::delegate::ProcRowId;
     use tl_ui::pages::processes::{ProcessesPage, SuspendLabel, suspend_or_resume};
     use tl_ui::table::actions::{CopyCell, CopyRowsAsTable};
-    use tl_ui::table::tree_table::RowKind;
+    use tl_ui::table::tree_table::{RowKind, TreeTableDelegate as _};
     use tl_ui::testing::fake_engine::FakeEngine;
     use tl_ui::window::main::main_window_view;
 
@@ -1182,6 +1189,18 @@ mod end {
                     .enumerate()
                     .map(|(g, group)| row(group.node.clone(), None, Some(g as u32))),
             );
+            self.publish_rows(records, Vec::new(), rows, groups);
+        }
+
+        /// Publishes `records` with their `extras` (empty, or one per record) and exactly
+        /// `rows`.
+        fn publish_rows(
+            &mut self,
+            records: Vec<ProcessRecord>,
+            extras: Vec<ProcessExtras>,
+            rows: Vec<TableRow>,
+            groups: Vec<GroupRow>,
+        ) {
             self.version += 1;
             let version = self.version;
             let generation = self.vcx.update(|_, cx| {
@@ -1207,6 +1226,7 @@ mod end {
                 });
                 s.processes = Arc::new(ProcessSnapshot {
                     records: records.into(),
+                    extras: extras.into(),
                     ..ProcessSnapshot::default()
                 });
             });
@@ -1597,26 +1617,394 @@ mod end {
         let mut rig = Rig::new(cx);
         rig.publish(own(&[300, 301, 302]), &[300, 301, 302], Vec::new());
         rig.select_pids(&[300]);
-        let page = rig.page.clone();
-        rig.vcx.update(|_, cx| {
-            page.update(cx, |p, cx| {
-                let targets = p.capture_targets(None, cx);
-                p.set_menu_targets(targets);
-            })
-        });
+        // The menu opens on row X (PID 300, row 0) and captures it.
+        let menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        assert_eq!(shape(&mut rig, &menu)[0], "End Task");
         // The rows move and the selection changes before the item runs.
         rig.publish(own(&[300, 301, 302]), &[302, 301, 300], Vec::new());
         rig.select_pids(&[302]);
-        assert!(rig.dispatch(EndProcess).is_none());
+        assert!(rig.dispatch(EndTask).is_none());
         assert_eq!(
             rig.sent(),
-            [(ActionKind::Signal(Signal::Kill), vec![300])],
+            [(ActionKind::Signal(Signal::Term), vec![300])],
             "the captured target X"
         );
 
         // The capture is used once; the next action reads the selection.
-        assert!(rig.dispatch(EndProcess).is_none());
-        assert_eq!(rig.sent()[1], (ActionKind::Signal(Signal::Kill), vec![302]));
+        assert!(rig.dispatch(EndTask).is_none());
+        assert_eq!(rig.sent()[1], (ActionKind::Signal(Signal::Term), vec![302]));
+    }
+
+    /// Builds the menu the table opens for the rows at `rows`, right-clicked in `col`, the
+    /// way `TlTreeTable::open_menu` builds it.
+    fn build_menu(rig: &mut Rig, rows: &[usize], col: ColumnId) -> Entity<TlMenuPopup> {
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.update(|window, cx| {
+            let focus = table.read(cx).focus_handle().clone();
+            let ids: Vec<ProcRowId> = rows
+                .iter()
+                .map(|&ix| table.read(cx).delegate.row_id(ix))
+                .collect();
+            TlMenu::build(window, cx, focus, |menu, window, cx| {
+                table.update(cx, |t, cx| {
+                    t.delegate.context_menu(&ids, col, menu, window, cx)
+                })
+            })
+        })
+    }
+
+    fn entries(rig: &mut Rig, menu: &Entity<TlMenuPopup>) -> Vec<MenuEntryInfo> {
+        rig.vcx
+            .update(|window, cx| menu.read(cx).entries_for_test(window))
+    }
+
+    /// Each entry as text: an item by its label ("* " first when checked), a disabled item as
+    /// "(label: tooltip)", a submenu as "label >", a tooltip as " [tooltip]" after the label, a
+    /// separator as "-" and a header as "# label".
+    fn shape(rig: &mut Rig, menu: &Entity<TlMenuPopup>) -> Vec<String> {
+        entries(rig, menu)
+            .into_iter()
+            .map(|e| {
+                let label = e.label.as_deref().unwrap_or_default();
+                let tip = e
+                    .tooltip
+                    .as_deref()
+                    .map(|t| format!(" [{t}]"))
+                    .unwrap_or_default();
+                match e.kind {
+                    MenuEntryKind::Item if e.checked => format!("* {label}{tip}"),
+                    MenuEntryKind::Item => format!("{label}{tip}"),
+                    MenuEntryKind::Disabled => {
+                        format!(
+                            "({label}: {})",
+                            e.tooltip.as_deref().unwrap_or("NO TOOLTIP")
+                        )
+                    }
+                    MenuEntryKind::Submenu => format!("{label} >{tip}"),
+                    MenuEntryKind::Separator => "-".to_owned(),
+                    MenuEntryKind::Header => format!("# {label}"),
+                }
+            })
+            .collect()
+    }
+
+    /// The shapes of every submenu of `menu`, one after the other.
+    fn submenu_shapes(rig: &mut Rig, menu: &Entity<TlMenuPopup>) -> Vec<String> {
+        let subs: Vec<_> = entries(rig, menu)
+            .into_iter()
+            .filter_map(|e| e.submenu)
+            .collect();
+        subs.iter().flat_map(|s| shape(rig, s)).collect()
+    }
+
+    fn unit_ref() -> UnitRef {
+        UnitRef {
+            manager: Manager::System,
+            name: Arc::from("foo.service"),
+        }
+    }
+
+    fn header_row(node: NodeId) -> TableRow {
+        TableRow {
+            expanded: true,
+            has_children: true,
+            ..row(node, None, None)
+        }
+    }
+
+    /// Every row kind, by index: 0 an expanded group header, 1 to 3 own processes, 4 an exited
+    /// process, 5 a kernel thread, 6 a process whose executable was deleted, 7 an app row, 8 a
+    /// unit row, 9 a pseudo row, 10 PID 1 (parent PID 0, protected).
+    fn publish_kinds(rig: &mut Rig) {
+        let mut records = own(&[300, 301, 302]);
+        records.push(record(4300, 1, "gone", ProcFlags::EXITED));
+        records.push(record(3, 2, "kworker/0:1", ProcFlags::KERNEL_THREAD));
+        records.push(record(500, 1, "updated", ProcFlags::empty()));
+        records.push(ProcessRecord {
+            group: app_key(),
+            ..record(200, 1, "firefox", ProcFlags::empty())
+        });
+        records.push(record(600, 1, "food", ProcFlags::empty()));
+        records.push(record(1, 0, "systemd", ProcFlags::PROTECTED));
+        let extras = records
+            .iter()
+            .map(|r| ProcessExtras {
+                exe_deleted: r.key.pid == 500,
+                unit: (r.key.pid == 600).then(unit_ref),
+                ..firefox_extras()
+            })
+            .collect();
+        let at = |pid: u32| {
+            let i = records.iter().position(|r| r.key.pid == pid).unwrap();
+            row(NodeId::Process(key(pid)), Some(i as u32), None)
+        };
+        let unit = GroupRow {
+            node: NodeId::Unit(unit_ref()),
+            kind: GroupRowKind::Unit,
+            name: Arc::from("foo.service"),
+            ..app_group(1)
+        };
+        let rows = vec![
+            header_row(NodeId::Group(GroupKind::Background.key())),
+            at(300),
+            at(301),
+            at(302),
+            at(4300),
+            at(3),
+            at(500),
+            row(NodeId::Group(app_key()), None, Some(0)),
+            row(NodeId::Unit(unit_ref()), None, Some(1)),
+            row(NodeId::Pseudo(PseudoKind::Interrupts), None, None),
+            at(1),
+        ];
+        rig.publish_rows(records, extras, rows, vec![app_group(1), unit]);
+    }
+
+    const COPIES: [&str; 4] = [
+        "Copy",
+        "Copy details",
+        "Copy all metrics",
+        "Copy rows as table",
+    ];
+
+    /// The menu of one process row, with item 21 as `open_file` and item 24 as `parent`.
+    fn process_shape(open_file: &str, parent: Option<&str>) -> Vec<String> {
+        let mut out = vec![
+            "End Task",
+            "End Process [Ends the process immediately (SIGKILL)]",
+            "End Process Tree",
+            "-",
+            "Suspend Process",
+            "Set Priority >",
+            "-",
+        ];
+        out.extend(COPIES);
+        out.extend(["-", open_file]);
+        if let Some(parent) = parent {
+            out.extend(["-", parent]);
+        }
+        out.into_iter().map(String::from).collect()
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_items_per_row_kind(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let menu = |rig: &mut Rig, rows: &[usize]| {
+            let m = build_menu(rig, rows, ColumnId::Cpu);
+            shape(rig, &m)
+        };
+        let process = process_shape("Open file location", Some("Go to parent process"));
+        assert_eq!(menu(&mut rig, &[1]), process, "one running own process");
+        assert_eq!(
+            menu(&mut rig, &[5]),
+            process,
+            "a kernel thread as a process"
+        );
+        assert_eq!(
+            menu(&mut rig, &[6]),
+            process_shape(
+                "(Open file location: Executable deleted)",
+                Some("Go to parent process")
+            )
+        );
+        assert_eq!(
+            menu(&mut rig, &[10]),
+            process_shape("Open file location", None),
+            "parent PID 0: no Go to parent; protected keeps the labels"
+        );
+
+        let mut multi = vec![
+            "End Selected Tasks",
+            "End Selected Processes [Ends the process immediately (SIGKILL)]",
+            "-",
+            "Suspend Selected Tasks",
+            "Set Priority >",
+            "-",
+        ];
+        multi.extend(COPIES);
+        assert_eq!(menu(&mut rig, &[1, 2, 3]), multi, "3 selected rows");
+
+        let mut exited = vec![
+            "(End Task: Process exited)",
+            "(End Process: Process exited)",
+            "(End Process Tree: Process exited)",
+            "-",
+            "(Suspend Process: Process exited)",
+            "(Set Priority: Process exited)",
+            "-",
+        ];
+        exited.extend(COPIES);
+        exited.extend([
+            "-",
+            "(Open file location: Process exited)",
+            "-",
+            "(Go to parent process: Process exited)",
+        ]);
+        assert_eq!(menu(&mut rig, &[4]), exited, "an exited row");
+
+        let mut app = vec![
+            "End App",
+            "-",
+            "Set Priority > [Applies to the app's current processes]",
+            "-",
+        ];
+        app.extend(COPIES);
+        assert_eq!(menu(&mut rig, &[7]), app, "an app row");
+        assert_eq!(menu(&mut rig, &[8]), app, "a unit row");
+
+        assert_eq!(
+            menu(&mut rig, &[9]),
+            ["Copy", "Copy details", "Copy all metrics"],
+            "a pseudo row"
+        );
+        assert_eq!(
+            menu(&mut rig, &[0]),
+            ["Collapse"],
+            "an expanded group header"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_hides_unshipped_phases(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        publish_kinds(&mut rig);
+        let unshipped = [
+            "Kill App",
+            "Freeze",
+            "Thaw",
+            "Show Window",
+            "Send Signal",
+            "Set Affinity",
+            "I/O",
+            "Restart",
+            "Properties",
+            "File properties",
+            "VirusTotal",
+            "dump",
+            "Minigraph",
+            "Graph",
+            "tray",
+            "Go to service",
+            "Custom",
+            "Realtime",
+            "Idle",
+        ];
+        for rows in [&[1][..], &[1, 2], &[4], &[5], &[7], &[8], &[9]] {
+            let menu = build_menu(&mut rig, rows, ColumnId::Name);
+            let mut labels = shape(&mut rig, &menu);
+            assert!(labels.len() <= 30, "at most 30 items");
+            labels.extend(submenu_shapes(&mut rig, &menu));
+            for label in &labels {
+                for word in unshipped {
+                    assert!(!label.contains(word), "{label:?} on rows {rows:?}");
+                }
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn priority_check_only_when_all_share(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let nice = |pid, nice| ProcessRecord {
+            nice,
+            ..record(pid, 1, "proc", ProcFlags::empty())
+        };
+        let mut records = vec![nice(300, 0), nice(301, 5), nice(302, 5), nice(303, 3)];
+        records.push(ProcessRecord {
+            group: app_key(),
+            ..nice(200, 0)
+        });
+        rig.publish(records, &[300, 301, 302, 303], vec![app_group(1)]);
+        let priority = |rig: &mut Rig, rows: &[usize]| {
+            let menu = build_menu(rig, rows, ColumnId::Name);
+            submenu_shapes(rig, &menu)
+        };
+        let classes = |checked: Option<&str>| -> Vec<String> {
+            let note = "# With autogroup on, nice only orders processes within the same session.";
+            let mut out = vec![note.to_owned()];
+            for class in ["High", "Above normal", "Normal", "Below normal", "Low"] {
+                out.push(if Some(class) == checked {
+                    format!("* {class}")
+                } else {
+                    class.to_owned()
+                });
+            }
+            out
+        };
+        assert_eq!(priority(&mut rig, &[0, 1]), classes(None), "nice 0 and 5");
+        assert_eq!(priority(&mut rig, &[1, 2]), classes(Some("Below normal")));
+        assert_eq!(priority(&mut rig, &[0]), classes(Some("Normal")));
+        assert_eq!(
+            priority(&mut rig, &[3]),
+            classes(None),
+            "nice 3 is no class"
+        );
+        assert_eq!(priority(&mut rig, &[4]), classes(None), "an app row");
+    }
+
+    #[gpui_kit::test]
+    fn row_menu_key_hints_from_process_table_context(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        // The ProcessTable bindings come with pdu.29; bound here the same way.
+        rig.vcx.update(|_, cx| {
+            cx.bind_keys([
+                KeyBinding::new("delete", EndTask, Some("ProcessTable")),
+                KeyBinding::new("shift-delete", EndProcess, Some("ProcessTable")),
+            ])
+        });
+        rig.publish(own(&[300]), &[300], Vec::new());
+        let menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        let all = entries(&mut rig, &menu);
+        let hint = |label: &str| {
+            all.iter()
+                .find(|e| e.label.as_deref().is_some_and(|l| l.starts_with(label)))
+                .and_then(|e| e.hint.clone())
+                .map(|h| h.to_string())
+        };
+        let format = |key: &str| Kbd::format(&Keystroke::parse(key).unwrap());
+        assert_eq!(hint("End Task"), Some(format("delete")));
+        assert_eq!(hint("End Process"), Some(format("shift-delete")));
+        assert_eq!(hint("Copy details"), None, "no binding, no hint");
+    }
+
+    #[gpui_kit::test]
+    fn group_header_menu_toggles_its_header_not_the_focus_row(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let header = NodeId::Group(GroupKind::Background.key());
+        let rows = vec![
+            header_row(header.clone()),
+            row(NodeId::Process(key(300)), Some(0), None),
+            row(NodeId::Process(key(301)), Some(1), None),
+        ];
+        rig.publish_rows(own(&[300, 301]), Vec::new(), rows, Vec::new());
+        rig.select_pids(&[301]);
+        let table = rig.vcx.update(|_, cx| rig.page.read(cx).table().clone());
+        let expanded = |rig: &mut Rig| {
+            rig.vcx
+                .update(|_, cx| table.read(cx).delegate.query().is_expanded(&header))
+        };
+        let before = expanded(&mut rig);
+
+        let menu = build_menu(&mut rig, &[0], ColumnId::Name);
+        assert_eq!(shape(&mut rig, &menu), ["Collapse"]);
+        rig.vcx
+            .update(|window, cx| open_context_menu_at(point(px(20.), px(20.)), window, cx, menu));
+        rig.vcx.run_until_parked();
+        rig.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        rig.vcx.simulate_keystrokes("down enter");
+        rig.vcx.run_until_parked();
+
+        assert_eq!(expanded(&mut rig), !before, "the header toggled");
+        let (selected, focus) = rig.vcx.update(|_, cx| {
+            let t = table.read(cx);
+            (t.selection.ids().collect::<Vec<_>>(), t.selection.focus())
+        });
+        let row_301 = ProcRowId::Process(key(301));
+        assert_eq!(selected, [row_301], "the selection is unchanged");
+        assert_eq!(focus, Some(row_301), "the focus row is unchanged");
+        assert!(rig.sent().is_empty(), "no action request");
     }
 
     fn stopped(pid: u32) -> ProcessRecord {

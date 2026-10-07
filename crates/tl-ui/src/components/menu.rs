@@ -346,6 +346,30 @@ fn set_depth(menu: &Entity<TlMenuPopup>, depth: usize, cx: &mut App) {
     }
 }
 
+/// What a test reads of one built entry ([`TlMenuPopup::entries_for_test`]).
+#[cfg(any(test, feature = "test-hooks"))]
+pub struct MenuEntryInfo {
+    pub kind: MenuEntryKind,
+    pub label: Option<SharedString>,
+    pub tooltip: Option<SharedString>,
+    /// A check or radio mark is drawn.
+    pub checked: bool,
+    /// The shortcut hint drawn at the right.
+    pub hint: Option<SharedString>,
+    pub action: Option<Box<dyn Action>>,
+    pub submenu: Option<Entity<TlMenuPopup>>,
+}
+
+#[cfg(any(test, feature = "test-hooks"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuEntryKind {
+    Item,
+    Disabled,
+    Submenu,
+    Separator,
+    Header,
+}
+
 /// One open menu or submenu. Emits [`DismissEvent`] from the top menu when it closes.
 pub struct TlMenuPopup {
     focus: FocusHandle,
@@ -385,6 +409,61 @@ impl TlMenuPopup {
     /// Highlights the first enabled item, as a menu opened from the keyboard shows it.
     pub fn highlight_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.jump(false, window, cx);
+    }
+
+    /// Every entry as built, top to bottom, with the shortcut hint the menu draws (tests).
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn entries_for_test(&self, window: &Window) -> Vec<MenuEntryInfo> {
+        self.entries
+            .iter()
+            .map(|e| {
+                let (kind, tooltip, checked, action, submenu) = match e {
+                    Entry::Item {
+                        action,
+                        mark,
+                        tooltip,
+                        ..
+                    } => (
+                        MenuEntryKind::Item,
+                        tooltip.clone(),
+                        matches!(mark, Mark::Check(true) | Mark::Radio(true)),
+                        Some(action.boxed_clone()),
+                        None,
+                    ),
+                    Entry::Disabled { tooltip, .. } => {
+                        (MenuEntryKind::Disabled, tooltip.clone(), false, None, None)
+                    }
+                    Entry::Painted { action, .. } => (
+                        MenuEntryKind::Item,
+                        None,
+                        false,
+                        Some(action.boxed_clone()),
+                        None,
+                    ),
+                    Entry::Submenu { menu, tooltip, .. } => (
+                        MenuEntryKind::Submenu,
+                        tooltip.clone(),
+                        false,
+                        None,
+                        Some(menu.clone()),
+                    ),
+                    Entry::Separator => (MenuEntryKind::Separator, None, false, None, None),
+                    Entry::Header(_) => (MenuEntryKind::Header, None, false, None, None),
+                };
+                let hint = action
+                    .as_deref()
+                    .and_then(|a| shortcut_hint(a, &self.action_context, window));
+                MenuEntryInfo {
+                    kind,
+                    label: e.label().cloned(),
+                    tooltip,
+                    checked,
+                    hint,
+                    action,
+                    submenu,
+                }
+            })
+            .collect()
     }
 
     fn submenus(&self) -> Vec<Entity<TlMenuPopup>> {
