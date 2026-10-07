@@ -1465,17 +1465,18 @@ mod end {
     #[gpui_kit::test]
     fn end_tree_refuses_subtree_with_self_or_pid1(cx: &mut TestAppContext) {
         let mut rig = Rig::new(cx);
-        // tasklens (4242) runs under a shell (410) in a terminal (400).
+        // tasklens (4242) runs under a shell (410) in a terminal (400). Records are in PID
+        // order, as in a snapshot.
         let records = vec![
             record(400, 1, "konsole", ProcFlags::empty()),
             record(410, 400, "fish", ProcFlags::empty()),
+            record(420, 400, "vim", ProcFlags::empty()),
             record(
                 4242,
                 410,
                 "tasklens",
                 ProcFlags::IS_SELF | ProcFlags::PROTECTED,
             ),
-            record(420, 400, "vim", ProcFlags::empty()),
         ];
         rig.publish(records, &[400, 420], Vec::new());
         rig.select_pids(&[400]);
@@ -1485,8 +1486,8 @@ mod end {
 
         // PID 1 under the selected process, as in a container's PID namespace view.
         let records = vec![
-            record(500, 0, "conmon", ProcFlags::empty()),
             record(1, 500, "systemd", ProcFlags::PROTECTED),
+            record(500, 0, "conmon", ProcFlags::empty()),
             record(510, 1, "sshd", ProcFlags::empty()),
         ];
         rig.publish(records, &[500], Vec::new());
@@ -1506,14 +1507,14 @@ mod end {
         let records = vec![
             record(400, 1, "konsole", ProcFlags::empty()),
             record(410, 400, "fish", ProcFlags::empty()),
+            record(420, 400, "vim", ProcFlags::empty()),
+            record(421, 420, "rust-analyzer", ProcFlags::empty()),
             record(
                 4242,
                 410,
                 "tasklens",
                 ProcFlags::IS_SELF | ProcFlags::PROTECTED,
             ),
-            record(420, 400, "vim", ProcFlags::empty()),
-            record(421, 420, "rust-analyzer", ProcFlags::empty()),
         ];
         rig.publish(records, &[400, 420], Vec::new());
         rig.select_pids(&[420]);
