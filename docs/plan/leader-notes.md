@@ -733,3 +733,4 @@ Do not take desktop screenshots to show Oystein the app; he sees his own screen.
 - crw.13 (64428080, 786505d2, 8443afd1, b6033ff5) closed. The trailing separator is dropped before P3. The crw agent takes crw.14, and summary tile right-click moves to the page menu, as UI-PRF-016 says.
 - gma.32 (19f48947, d861ad05) closed. Gaps: Browse has no file-type filter (gpui), the history popup is a deferred panel, and the result comes from ActionTracker Finished. The gma agent takes gma.14.
 - crw.14: the summary tile menu shows only the common items (Copy, Graph Summary View, Time range). Page items need the page to be rendered, and summary mode does not render it.
+- bj6.20 (242ac452, 8e8bb580) closed. TlDialog is 420 px wide, not 460. open_or_focus is deferred. The fetch is a closure passed by the caller. The m1f agent takes bj6.11.
