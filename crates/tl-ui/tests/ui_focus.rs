@@ -54,3 +54,238 @@ fn esc_outcome_order() {
     assert_eq!(esc_outcome(all), EscOutcome::CancelPick);
     assert_eq!(esc_outcome(EscState::default()), EscOutcome::Nothing);
 }
+
+/// The main window's Esc chain (E20-011, UI-SHL-122). Run with `--features test-hooks`.
+#[cfg(feature = "test-hooks")]
+mod esc_chain {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    use gpui_kit::{
+        AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+        IntoElement, ParentElement as _, Render, Styled, TestAppContext, VisualTestContext, Window,
+        div, point, px,
+    };
+    use tl_model::command::Tab;
+    use tl_model::settings::{AppearanceSettings, Settings, ThemeSettings, UiState};
+    use tl_ui::actions::{CancelWindowPick, EscapeChain, RefreshCurrentTab};
+    use tl_ui::app::{BootSettings, UiExit, UiExitSlot};
+    use tl_ui::components::menu::{TlMenu, context_menu_open, open_context_menu_at};
+    use tl_ui::components::toast;
+    use tl_ui::settings_global::TlSettings;
+    use tl_ui::window::main::{
+        self as shell, FilterChanged, GlobalShellEvents, MainWindow, PageSlot, ShellPage,
+        main_window_view, open_main_window, set_test_page,
+    };
+    use tl_ui::window::status::StatusChanged;
+
+    struct FakePage {
+        focus: FocusHandle,
+    }
+
+    impl EventEmitter<StatusChanged> for FakePage {}
+
+    impl Render for FakePage {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("fake-page")
+                .track_focus(&self.focus)
+                .size_full()
+                .child("")
+        }
+    }
+
+    impl ShellPage for FakePage {
+        fn primary_focus(&self) -> FocusHandle {
+            self.focus.clone()
+        }
+    }
+
+    fn fake(_: &mut Window, cx: &mut Context<MainWindow>) -> PageSlot {
+        let page = cx.new(|cx| FakePage {
+            focus: cx.focus_handle().tab_stop(true),
+        });
+        PageSlot::new(page, cx)
+    }
+
+    type Events = Rc<RefCell<Vec<String>>>;
+
+    struct Rig {
+        vcx: VisualTestContext,
+        events: Events,
+    }
+
+    /// The main window on a fake Processes page, recording `FilterChanged` texts.
+    fn rig(cx: &mut TestAppContext) -> Rig {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let appearance = AppearanceSettings::default();
+            tl_ui::theme::store::init(cx, &ThemeSettings::default(), &appearance, Vec::new());
+            tl_ui::i18n::init_strings(cx, "en-US");
+            cx.set_global(BootSettings {
+                settings: Settings::default(),
+                state: UiState::default(),
+                persist: None,
+                startup_toasts: Vec::new(),
+            });
+            TlSettings::init(cx);
+            toast::init(cx);
+            tl_ui::actions::bind_keys_global(cx);
+            set_test_page(cx, Tab::Processes, fake);
+            shell::init(cx);
+        });
+        let handle = cx.update(open_main_window).expect("the main window opens");
+        let mut vcx = VisualTestContext::from_window(handle.into(), cx);
+        vcx.update(|window, _| window.activate_window());
+        vcx.run_until_parked();
+        let events: Events = Rc::default();
+        let seen = events.clone();
+        vcx.update(|_, cx| {
+            let bus = cx.global::<GlobalShellEvents>().0.clone();
+            cx.subscribe(&bus, move |_, e: &FilterChanged, _| {
+                seen.borrow_mut().push(e.text.to_string());
+            })
+            .detach();
+        });
+        let mut r = Rig { vcx, events };
+        r.draw();
+        r
+    }
+
+    impl Rig {
+        fn draw(&mut self) {
+            self.vcx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+
+        fn main(&mut self) -> Entity<MainWindow> {
+            self.vcx
+                .update(|_, cx| main_window_view(cx).expect("main window open"))
+        }
+
+        fn page_focus(&mut self) -> FocusHandle {
+            let main = self.main();
+            let page = self
+                .vcx
+                .read_entity(&main, |m, _| m.page_entity::<FakePage>(Tab::Processes))
+                .expect("page built");
+            self.vcx.read_entity(&page, |p, _| p.focus.clone())
+        }
+
+        fn page_focused(&mut self) -> bool {
+            let focus = self.page_focus();
+            self.vcx.update(|window, _| focus.is_focused(window))
+        }
+
+        fn filter_text(&mut self) -> String {
+            let main = self.main();
+            self.vcx.update(|_, cx| {
+                let filter = main.read(cx).filter_box().clone();
+                filter.read(cx).text(Tab::Processes).to_string()
+            })
+        }
+
+        /// Types `text` into the filter, lets the debounce fire, focuses the page and forgets the
+        /// events.
+        fn type_then_focus_page(&mut self, text: &str) {
+            let main = self.main();
+            self.vcx.update(|window, cx| {
+                let input = main.read(cx).filter_box().read(cx).input().clone();
+                input.update(cx, |s, cx| s.focus(window, cx));
+            });
+            self.draw();
+            self.vcx.simulate_input(text);
+            self.vcx
+                .executor()
+                .advance_clock(Duration::from_millis(200));
+            self.vcx.run_until_parked();
+            let focus = self.page_focus();
+            self.vcx.update(|window, cx| window.focus(&focus, cx));
+            self.draw();
+            self.events.borrow_mut().clear();
+        }
+
+        fn esc(&mut self) {
+            self.vcx.simulate_keystrokes("escape");
+            self.vcx.run_until_parked();
+            self.draw();
+        }
+
+        fn exit(&mut self) -> Option<UiExit> {
+            self.vcx
+                .update(|_, cx| cx.try_global::<UiExitSlot>().and_then(|s| s.0.clone()))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn esc_chain_order(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.type_then_focus_page("fire");
+        assert_eq!(r.filter_text(), "fire");
+        assert!(r.page_focused());
+
+        // Filter text, focus on the table: Esc clears at once and the table keeps focus.
+        r.esc();
+        assert_eq!(r.filter_text(), "");
+        assert_eq!(
+            *r.events.borrow(),
+            [String::new()],
+            "FilterChanged \"\" at once"
+        );
+        assert!(r.page_focused());
+
+        // Empty filter, "Close with Esc" off: nothing happens.
+        r.events.borrow_mut().clear();
+        r.esc();
+        assert!(r.events.borrow().is_empty());
+        assert!(r.page_focused());
+        assert_eq!(r.exit(), None);
+
+        // "Close with Esc" on, default close settings: the window closes and the app quits.
+        r.vcx
+            .update(|_, cx| TlSettings::update(cx, |d| d.settings.window.close_with_esc = true));
+        r.esc();
+        assert_eq!(r.exit(), Some(UiExit::Quit));
+    }
+
+    #[gpui_kit::test]
+    fn esc_menu_first(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        r.type_then_focus_page("fire");
+        let focus = r.page_focus();
+        r.vcx.update(|window, cx| {
+            let menu = TlMenu::build(window, cx, focus, |m, _, _| {
+                m.item("Refresh", Box::new(RefreshCurrentTab))
+            });
+            open_context_menu_at(point(px(20.), px(80.)), window, cx, menu);
+        });
+        r.draw();
+        assert!(r.vcx.update(|window, cx| context_menu_open(window, cx)));
+
+        r.esc();
+        assert!(
+            !r.vcx.update(|window, cx| context_menu_open(window, cx)),
+            "menu closed"
+        );
+        assert_eq!(r.filter_text(), "fire", "the filter text stays");
+        assert!(r.events.borrow().is_empty());
+    }
+
+    #[gpui_kit::test]
+    fn esc_cancels_pick(cx: &mut TestAppContext) {
+        let mut r = rig(cx);
+        let cancels = Rc::new(Cell::new(0u32));
+        let seen = cancels.clone();
+        r.vcx.update(|_, cx| {
+            cx.on_action(move |_: &CancelWindowPick, _| seen.set(seen.get() + 1));
+        });
+        let main = r.main();
+        r.vcx
+            .update(|_, cx| main.update(cx, |m, _| m.set_picking_for_test(true)));
+
+        r.vcx.dispatch_action(EscapeChain);
+        r.vcx.run_until_parked();
+        assert_eq!(cancels.get(), 1, "CancelWindowPick dispatched");
+        assert_eq!(r.exit(), None);
+    }
+}
