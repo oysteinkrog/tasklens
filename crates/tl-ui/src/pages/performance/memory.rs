@@ -397,7 +397,7 @@ pub fn compression(m: &MemoryTotals) -> (u64, u64) {
 /// A huge page size in whole units: "2 MiB", "1 GiB".
 fn page_size(out: &mut String, n: u64) {
     const GIB: u64 = 1 << 30;
-    if n >= GIB && n % GIB == 0 {
+    if n >= GIB && n.is_multiple_of(GIB) {
         let _ = write!(out, "{} GiB", n / GIB);
     } else {
         units::mib_whole(out, n);
