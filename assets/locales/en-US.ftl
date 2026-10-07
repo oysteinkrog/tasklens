@@ -1210,3 +1210,8 @@ shell-settings-page-startup-window = Startup and window
 shell-settings-page-privileges = Privileges
 shell-settings-page-advanced = Advanced
 shell-settings-restart-note = Takes effect after restart
+# Settings window, General and Units pages (tasklens-bj6.22, UI-SHL-061, UI-SHL-064).
+shell-settings-group-startup = Startup
+shell-settings-group-language = Language
+shell-settings-language = Language
+shell-settings-language-desc = Numbers and dates keep the same format in every language.

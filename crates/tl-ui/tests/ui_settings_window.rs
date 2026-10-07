@@ -12,13 +12,15 @@ use gpui_kit::{
     TestAppContext, VisualTestContext, Window, WindowHandle, div, px, size,
 };
 use tl_model::client::EngineClient;
-use tl_model::settings::{Settings, UiState};
+use tl_model::command::Tab;
+use tl_model::settings::{NetworkUnit, Settings, StartTab, UiState};
 use tl_ui::actions::OpenSettings;
 use tl_ui::app::{AppEnv, TasklensUi, UiInit};
 use tl_ui::components::slider::TlSliderEvent;
 use tl_ui::components::window_frame::{TlSecondaryWindow, TlWindowKind};
 use tl_ui::settings_global::{SettingKey, TlSettings};
 use tl_ui::testing::fake_engine::FakeEngine;
+use tl_ui::window::main::ShellState;
 use tl_ui::window::registry::{GlobalRegistry, WindowKey};
 use tl_ui::window::settings::{
     PageBuilder, PageId, SIDEBAR_W, SettingsWindow, TestPages, all_pages,
@@ -158,16 +160,18 @@ fn page_builder_records_keys(cx: &mut TestAppContext) {
     setup(cx);
     let (pages, before) =
         cx.update(|cx| (all_pages(cx), TlSettings::settings(cx).motion.animations));
-    assert_eq!(pages.len(), 1);
+    // The test page comes after the real ones.
+    let test_page = pages.last().expect("pages");
+    assert_eq!(test_page.id(), PageId::Motion);
     assert_eq!(
-        pages[0].keys(),
+        test_page.keys(),
         [
             SettingKey::MotionAnimations,
             SettingKey::MotionSmoothScrollAmount
         ]
     );
     // Toggling the switch writes through TlSettings.
-    cx.update(|cx| pages[0].set_bool(SettingKey::MotionAnimations, !before, cx));
+    cx.update(|cx| test_page.set_bool(SettingKey::MotionAnimations, !before, cx));
     assert_eq!(
         cx.update(|cx| TlSettings::settings(cx).motion.animations),
         !before
@@ -229,4 +233,101 @@ fn settings_window_ignores_unrelated_snapshots(cx: &mut TestAppContext) {
     engine.publish_with(|s| Arc::make_mut(&mut s.devices).version += 1);
     cx.run_until_parked();
     assert!(notifies.get() > 0, "DEVICES re-renders");
+}
+
+/// The real page with `id`.
+fn page(cx: &mut TestAppContext, id: PageId) -> PageBuilder {
+    cx.update(all_pages)
+        .into_iter()
+        .find(|p| p.id() == id)
+        .expect("page listed")
+}
+
+#[gpui_kit::test]
+fn general_default_tab_options(cx: &mut TestAppContext) {
+    setup(cx);
+    cx.update(|cx| cx.default_global::<ShellState>().built_tabs = Tab::ALL.into_iter().collect());
+    let general = page(cx, PageId::General);
+    let labels: Vec<String> = general
+        .dropdown_labels(SettingKey::GeneralStartTab)
+        .iter()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            "Processes",
+            "Performance",
+            "Services",
+            "Startup Apps",
+            "Connections",
+            "Information",
+            "Last used"
+        ]
+    );
+    cx.update(|cx| general.pick(SettingKey::GeneralStartTab, "Last used", cx));
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).general.start_tab),
+        StartTab::LastUsed
+    );
+    let stored = cx.update(|cx| serde_json::to_value(&TlSettings::settings(cx).general));
+    assert_eq!(stored.expect("serialize")["start_tab"], "last_used");
+}
+
+#[gpui_kit::test]
+fn general_language_options_and_desc(cx: &mut TestAppContext) {
+    setup(cx);
+    let general = page(cx, PageId::General);
+    let labels = general.dropdown_labels(SettingKey::GeneralLanguage);
+    assert_eq!(labels, ["System default", "English (United States)"]);
+    assert_eq!(
+        general
+            .description_of(SettingKey::GeneralLanguage)
+            .as_deref(),
+        Some("Numbers and dates keep the same format in every language.")
+    );
+    cx.update(|cx| general.pick(SettingKey::GeneralLanguage, "English (United States)", cx));
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).general.language.clone()),
+        "en-US"
+    );
+}
+
+#[gpui_kit::test]
+fn units_network_dropdown_sends_engine_settings(cx: &mut TestAppContext) {
+    let (engine, _) = setup(cx);
+    let units = page(cx, PageId::Units);
+    assert_eq!(
+        units.dropdown_labels(SettingKey::UnitsNetwork),
+        ["Bits per second", "Bytes per second"]
+    );
+    cx.update(|cx| units.pick(SettingKey::UnitsNetwork, "Bytes per second", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|cx| TlSettings::settings(cx).units.network),
+        NetworkUnit::Bytes
+    );
+    assert_eq!(
+        engine.settings().last().map(|s| s.network),
+        Some(NetworkUnit::Bytes),
+        "the engine gets the bytes unit"
+    );
+}
+
+#[gpui_kit::test]
+fn general_units_keys(cx: &mut TestAppContext) {
+    setup(cx);
+    let keys: Vec<SettingKey> = [PageId::General, PageId::Units]
+        .into_iter()
+        .flat_map(|id| page(cx, id).keys().to_vec())
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            SettingKey::GeneralStartTab,
+            SettingKey::GeneralLanguage,
+            SettingKey::UnitsNetwork,
+            SettingKey::UnitsNetworkAutoScale
+        ]
+    );
 }

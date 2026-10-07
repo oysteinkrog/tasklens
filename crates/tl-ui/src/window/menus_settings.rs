@@ -30,7 +30,8 @@ const REFRESH_KEYS: [&str; 6] = [
 
 /// The locales shipped in this build after "System default": `general.language` value and the
 /// label key with the locale's own name. English only this round (R-132).
-const SHIPPED_LANGUAGES: [(&str, &str); 1] = [("en-US", "shell-menu-settings-language-en-us")];
+pub(crate) const SHIPPED_LANGUAGES: [(&str, &str); 1] =
+    [("en-US", "shell-menu-settings-language-en-us")];
 
 /// Builds the Settings menu. Item actions go to `return_focus`.
 pub fn build(window: &mut Window, cx: &mut App, return_focus: &FocusHandle) -> Entity<TlMenuPopup> {

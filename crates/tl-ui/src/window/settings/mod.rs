@@ -15,6 +15,9 @@
 //! (`ComponentMask::DEVICES`, for the Performance page lists), never on other snapshots. Slider
 //! states are created in `SettingsWindow::new`, never in render.
 
+mod general;
+mod units;
+
 use std::ops::RangeInclusive;
 use std::rc::Rc;
 
@@ -158,13 +161,14 @@ impl PageId {
 /// Every page in page order, each from its page module's `page(cx)`. A page bead adds one
 /// `mod` line above and one call here.
 pub fn all_pages(cx: &mut App) -> Vec<PageBuilder> {
-    #[allow(unused_mut, reason = "the page beads push their pages here")]
-    let mut pages: Vec<PageBuilder> = Vec::new();
+    // Page order: General, Appearance, Motion, Units, Processes, Performance, Graphs,
+    // Services, Startup and window, Privileges, Advanced.
+    #[allow(unused_mut, reason = "test-hooks appends the test pages")]
+    let mut pages: Vec<PageBuilder> = vec![general::page(cx), units::page(cx)];
     #[cfg(any(test, feature = "test-hooks"))]
     if let Some(test) = cx.try_global::<TestPages>().map(|t| t.0) {
         pages.extend(test(cx));
     }
-    let _ = cx;
     pages
 }
 
@@ -197,6 +201,8 @@ impl SliderStates {
 
 type CustomRender = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 type BoolSetter = Rc<dyn Fn(bool, &mut App)>;
+/// A dropdown setter taking the index of the picked option.
+type PickSetter = Rc<dyn Fn(usize, &mut App)>;
 
 /// Builds one page: groups of items, each control bound to one setting. `keys` records every
 /// key a control binds, in order.
@@ -210,6 +216,12 @@ pub struct PageBuilder {
     /// The switch and checkbox setters, the same closures the kit calls.
     #[cfg(any(test, feature = "test-hooks"))]
     bool_setters: Vec<(SettingKey, BoolSetter)>,
+    /// The dropdown option labels and setters, the same closure the kit calls.
+    #[cfg(any(test, feature = "test-hooks"))]
+    dropdowns: Vec<(SettingKey, Vec<SharedString>, PickSetter)>,
+    /// The description each item shows.
+    #[cfg(any(test, feature = "test-hooks"))]
+    descriptions: Vec<(SettingKey, SharedString)>,
 }
 
 impl PageBuilder {
@@ -222,6 +234,10 @@ impl PageBuilder {
             restart_next: None,
             #[cfg(any(test, feature = "test-hooks"))]
             bool_setters: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            dropdowns: Vec::new(),
+            #[cfg(any(test, feature = "test-hooks"))]
+            descriptions: Vec::new(),
         }
     }
 
@@ -244,6 +260,20 @@ impl PageBuilder {
     /// when it changes.
     pub fn restart_note(&mut self, cx: &App) -> &mut Self {
         self.restart_next = Some(tr(cx, RESTART_NOTE));
+        self
+    }
+
+    /// Sets the description of the last item.
+    pub fn description(&mut self, text: impl Into<SharedString>) -> &mut Self {
+        let text = text.into();
+        #[cfg(any(test, feature = "test-hooks"))]
+        if let Some(key) = self.keys.last() {
+            self.descriptions.push((*key, text.clone()));
+        }
+        if let Some(item) = self.groups.last_mut().and_then(|(_, items)| items.pop()) {
+            let item = item.description(text);
+            self.push_item_raw(item);
+        }
         self
     }
 
@@ -302,6 +332,21 @@ impl PageBuilder {
             .collect();
         let read_values = values.clone();
         let toast = restart.clone();
+        let pick: PickSetter = Rc::new(move |i, cx| {
+            let Some(value) = values.get(i) else {
+                return;
+            };
+            TlSettings::set(cx, key, value.clone());
+            if let Some(note) = &toast {
+                restart_toast(note.clone(), cx);
+            }
+        });
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.dropdowns.push((
+            key,
+            options.iter().map(|(label, _)| label.clone()).collect(),
+            pick.clone(),
+        ));
         let field = SettingField::dropdown(
             kit_options,
             move |cx| {
@@ -313,12 +358,8 @@ impl PageBuilder {
                     .unwrap_or_default()
             },
             move |picked: SharedString, cx| {
-                let Some(value) = picked.parse::<usize>().ok().and_then(|i| values.get(i)) else {
-                    return;
-                };
-                TlSettings::set(cx, key, value.clone());
-                if let Some(note) = &toast {
-                    restart_toast(note.clone(), cx);
+                if let Ok(i) = picked.parse::<usize>() {
+                    pick(i, cx);
                 }
             },
         );
@@ -453,6 +494,36 @@ impl PageBuilder {
         }
     }
 
+    /// The option labels of the dropdown of `key`, in order. Empty when there is none.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn dropdown_labels(&self, key: SettingKey) -> Vec<SharedString> {
+        self.dropdowns
+            .iter()
+            .find(|(k, _, _)| *k == key)
+            .map(|(_, labels, _)| labels.clone())
+            .unwrap_or_default()
+    }
+
+    /// Picks the option labelled `label` in the dropdown of `key`, as a click on it would.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn pick(&self, key: SettingKey, label: &str, cx: &mut App) {
+        if let Some((_, labels, setter)) = self.dropdowns.iter().find(|(k, _, _)| *k == key)
+            && let Some(i) = labels.iter().position(|l| l.as_ref() == label)
+        {
+            setter(i, cx);
+        }
+    }
+
+    /// The description the item of `key` shows, if any.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub fn description_of(&self, key: SettingKey) -> Option<SharedString> {
+        self.descriptions
+            .iter()
+            .rev()
+            .find(|(k, _)| *k == key)
+            .map(|(_, text)| text.clone())
+    }
+
     /// Writes a Bool key and pushes the restart toast when the item needs one.
     fn bool_setter(&mut self, key: SettingKey, restart: Option<SharedString>) -> BoolSetter {
         let setter: BoolSetter = Rc::new(move |on, cx| {
@@ -481,11 +552,10 @@ impl PageBuilder {
     ) -> &mut Self {
         self.keys.push(key);
         let mut item = SettingItem::new(label, field);
-        if let Some(description) = description {
-            item = item.description(description);
-        }
-        if let Some(note) = restart {
-            item = item.description(note);
+        if let Some(text) = restart.or(description) {
+            #[cfg(any(test, feature = "test-hooks"))]
+            self.descriptions.push((key, text.clone()));
+            item = item.description(text);
         }
         self.push_item(group, item);
         self
