@@ -21,19 +21,31 @@ use std::sync::Arc;
 
 use gpui_kit::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StyleRefinement, Styled as _, Subscription,
-    UniformListScrollHandle, Window, div,
+    IntoElement, ParentElement as _, Render, SharedString, StyleRefinement, Styled as _,
+    Subscription, UniformListScrollHandle, Window, div,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
 use tl_model::client::EngineClient;
+use tl_model::ids::{ColumnId, NodeId, ProcessKey};
+use tl_model::process::{ProcFlags, ProcessRecord};
 use tl_model::settings::{Settings, UiState};
+use tl_model::snapshot::{ProcessSnapshot, Snapshot};
+use tracing::warn;
 
+use self::actions::{
+    CapturedTarget, CapturedTargets, EndProcess, EndProcessTree, EndTask, MAX_TARGETS,
+};
+use self::confirm::{ConfirmKind, ConfirmResult, confirm};
 use self::delegate::ProcessDelegate;
+use self::toasts::{refusal_reason, submit, toast_words};
+use crate::components::toast::ToastKind;
 use crate::hub::{ComponentMask, GlobalHub, SnapshotChanged};
-use crate::i18n::Strings;
+use crate::i18n::{Strings, tr};
 use crate::settings_global::{Section, TlSettings};
 use crate::table::actions::CollapseAll;
-use crate::table::tree_table::TlTreeTable;
+use crate::table::tree_table::{RowKind, TlTreeTable, TreeTableDelegate as _};
 use crate::theme::{UiMetrics, bump_style_version, current, metrics};
 use crate::window::main::ShellPage;
 use crate::window::status::StatusChanged;
@@ -70,6 +82,10 @@ pub struct ProcessesPage {
     section_versions: [u64; 4],
     style_version: u64,
     strings_version: u64,
+    /// The targets the row menu captured when it opened (E22-A2). An End handler takes them,
+    /// else it captures the selection itself.
+    menu_targets: Option<CapturedTargets>,
+    end_words: EndWords,
 }
 
 impl EventEmitter<StatusChanged> for ProcessesPage {}
@@ -122,6 +138,8 @@ impl ProcessesPage {
             section_versions,
             style_version: cx.try_global::<UiMetrics>().map_or(0, |m| m.style_version),
             strings_version: cx.try_global::<Strings>().map_or(0, |s| s.strings_version),
+            menu_targets: None,
+            end_words: EndWords::new(cx),
         }
     }
 
@@ -209,6 +227,7 @@ impl ProcessesPage {
             return;
         }
         self.strings_version = version;
+        self.end_words = EndWords::new(cx);
         self.table.update(cx, |t, cx| {
             t.delegate.refresh_strings(cx);
             t.on_new_version(cx);
@@ -224,6 +243,432 @@ impl ProcessesPage {
             q.bump_and_send(client);
         });
     }
+
+    /// The selection set in view order, group headers excluded, at most [`MAX_TARGETS`] items
+    /// (`truncated` set beyond that), read from the shown (or paused) snapshot (PROC-001).
+    pub fn capture_targets(&self, clicked_col: Option<ColumnId>, cx: &App) -> CapturedTargets {
+        let table = self.table.read(cx);
+        let d = &table.delegate;
+        let mut rows: Vec<usize> = table
+            .selection
+            .ids()
+            .filter_map(|id| d.row_index(id))
+            .collect();
+        rows.sort_unstable();
+        let snapshot = d.snapshot();
+        let targets = rows
+            .into_iter()
+            .filter_map(|ix| capture_row(snapshot, ix, d.row_kind(ix)));
+        CapturedTargets::new(targets, clicked_col)
+    }
+
+    /// Called by the row menu when it opens, so its items act on the rows it was opened for
+    /// even when the rows move before the click (E22-A2).
+    pub fn set_menu_targets(&mut self, targets: CapturedTargets) {
+        self.menu_targets = Some(targets);
+    }
+
+    fn take_targets(&mut self, cx: &App) -> CapturedTargets {
+        self.menu_targets
+            .take()
+            .unwrap_or_else(|| self.capture_targets(None, cx))
+    }
+
+    fn on_end_task(&mut self, _: &EndTask, window: &mut Window, cx: &mut Context<Self>) {
+        self.end(End::Task, window, cx);
+    }
+
+    fn on_end_process(&mut self, _: &EndProcess, window: &mut Window, cx: &mut Context<Self>) {
+        self.end(End::Process, window, cx);
+    }
+
+    fn on_end_process_tree(
+        &mut self,
+        _: &EndProcessTree,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end(End::Tree, window, cx);
+    }
+
+    /// End Task, End Process and End Process Tree (UI-PRC-013 items 1 to 3): drops pseudo and
+    /// exited targets, refuses tasklens, PID 1 and kernel threads with a toast, asks for
+    /// confirmation where UI-PRC-014 says so (R-198, D-009) and sends one request by key.
+    fn end(&mut self, end: End, window: &mut Window, cx: &mut Context<Self>) {
+        let captured = self.take_targets(cx);
+        let clicked_col = captured.clicked_col;
+        let mut rows: Vec<CapturedTarget> = captured
+            .items
+            .into_iter()
+            .filter(|t| t.kind != RowKind::Pseudo)
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let words = toast_words(cx);
+        rows.retain(|t| !t.flags.contains(ProcFlags::EXITED));
+        if rows.is_empty() {
+            warning_toast(words.exited.clone(), cx);
+            return;
+        }
+        let mut refused: SmallVec<[SharedString; 3]> = SmallVec::new();
+        rows.retain(|t| {
+            let Some(reason) = refusal_reason(t) else {
+                return true;
+            };
+            if let Some(text) = words.refusal_text(reason, t)
+                && !refused.contains(&text)
+            {
+                refused.push(text);
+            }
+            false
+        });
+        for text in refused {
+            warning_toast(text, cx);
+        }
+        if rows.is_empty() {
+            return;
+        }
+
+        let snapshot = Arc::clone(self.table.read(cx).delegate.snapshot());
+        let Some(plan) = EndPlan::new(end, rows, &snapshot.processes, &self.end_words) else {
+            return;
+        };
+        let kind = end.kind();
+        let used = CapturedTargets::new(plan.rows, clicked_col);
+        let Some(texts) = words.texts_for(&kind, &used) else {
+            return;
+        };
+        let req = ActionRequest {
+            // The tracker gives id 0 its next ActionId.
+            id: ActionId(0),
+            kind,
+            targets: plan.keys.into_iter().map(ActionTarget::Process).collect(),
+            privileged: false,
+        };
+        let Some(ask) = plan.confirm else {
+            submit(self, req, texts, cx);
+            return;
+        };
+        let page = cx.entity().downgrade();
+        let parent = window.window_handle();
+        // The dialog opens modal to this window, which is being updated now.
+        cx.defer(move |cx| {
+            confirm(ask, parent, cx, move |result, cx| {
+                if result != ConfirmResult::Confirmed {
+                    return;
+                }
+                if page.update(cx, |p, cx| submit(p, req, texts, cx)).is_err() {
+                    warn!(target: "tasklens::ui", "the Processes page closed before the End request");
+                }
+            });
+        });
+    }
+}
+
+/// The confirmation action names, translated once per strings version (R-132).
+struct EndWords {
+    /// "End", for the protected confirmation.
+    end: SharedString,
+    end_task: SharedString,
+    end_process: SharedString,
+}
+
+impl EndWords {
+    fn new(cx: &App) -> Self {
+        Self {
+            end: tr(cx, "processes-confirm-action-end"),
+            end_task: tr(cx, "processes-confirm-action-end-task"),
+            end_process: tr(cx, "processes-confirm-action-end-process"),
+        }
+    }
+}
+
+/// Which End command runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum End {
+    /// SIGTERM.
+    Task,
+    /// SIGKILL.
+    Process,
+    /// SIGSTOP, then SIGKILL, on a process and its descendants (ADR-006).
+    Tree,
+}
+
+impl End {
+    fn kind(self) -> ActionKind {
+        match self {
+            End::Task => ActionKind::Signal(Signal::Term),
+            End::Process => ActionKind::Signal(Signal::Kill),
+            End::Tree => ActionKind::KillTree,
+        }
+    }
+}
+
+/// What one End command sends and whether it asks first.
+struct EndPlan {
+    /// The rows that gave keys, in view order.
+    rows: Vec<CapturedTarget>,
+    /// Without duplicates, at most [`MAX_TARGETS`].
+    keys: Vec<ProcessKey>,
+    /// `None`: send at once (D-009).
+    confirm: Option<ConfirmKind>,
+}
+
+impl EndPlan {
+    /// `None` when no row gives a key: End Process skips app and unit rows until Kill App
+    /// (E22-035), End Process Tree takes the first process row.
+    fn new(
+        end: End,
+        rows: Vec<CapturedTarget>,
+        p: &ProcessSnapshot,
+        words: &EndWords,
+    ) -> Option<Self> {
+        let forest = Forest::new(&p.records);
+        // (key, index into `used`).
+        let mut keys: Vec<(ProcessKey, usize)> = Vec::new();
+        let mut used: Vec<CapturedTarget> = Vec::new();
+        // End Process Tree: the subtree's records, root first.
+        let mut subtree: Vec<usize> = Vec::new();
+        for t in rows {
+            let n = used.len();
+            match (end, t.kind, &t.node) {
+                (End::Tree, RowKind::Process, NodeId::Process(key)) => {
+                    match forest.index_of(*key) {
+                        Some(root) => {
+                            subtree = forest.subtree(root);
+                            keys.extend(subtree.iter().map(|&i| (p.records[i].key, n)));
+                        }
+                        None => keys.push((*key, n)),
+                    }
+                    used.push(t);
+                    break;
+                }
+                (End::Task | End::Process, RowKind::Process, NodeId::Process(key)) => {
+                    keys.push((*key, n));
+                    used.push(t);
+                }
+                (End::Task, RowKind::App | RowKind::Unit, node) => {
+                    let primaries = primaries(p, node);
+                    if primaries.is_empty() {
+                        continue;
+                    }
+                    keys.extend(
+                        primaries
+                            .into_iter()
+                            .map(|i| (p.records[forest.unwrap_bwrap(i)].key, n)),
+                    );
+                    used.push(t);
+                }
+                _ => {}
+            }
+        }
+        let mut seen = FxHashSet::default();
+        keys.retain(|(key, _)| seen.insert(*key));
+        keys.truncate(MAX_TARGETS);
+        if keys.is_empty() {
+            return None;
+        }
+
+        let count = keys.len() as u32;
+        let protected = used
+            .iter()
+            .find(|t| t.flags.contains(ProcFlags::PROTECTED))
+            .map(|t| t.name.clone())
+            .or_else(|| {
+                subtree
+                    .iter()
+                    .map(|&i| &p.records[i])
+                    .find(|r| r.flags.contains(ProcFlags::PROTECTED))
+                    .map(|r| SharedString::from(&r.meta.name))
+            });
+        let confirm = if let Some(name) = protected {
+            Some(ConfirmKind::Protected {
+                action: words.end.clone(),
+                name,
+                tree_count: (end == End::Tree).then_some(count),
+            })
+        } else if end == End::Tree {
+            Some(ConfirmKind::EndTree { count })
+        } else if used.len() >= 2 {
+            Some(ConfirmKind::EndMany {
+                count,
+                kill: end == End::Process,
+            })
+        } else {
+            keys.iter()
+                .find(|(_, n)| used[*n].flags.contains(ProcFlags::OTHER_USER))
+                .map(|(key, n)| {
+                    let t = &used[*n];
+                    ConfirmKind::OtherUser {
+                        action: if end == End::Task {
+                            words.end_task.clone()
+                        } else {
+                            words.end_process.clone()
+                        },
+                        name: t.name.clone(),
+                        pid: t.pid.unwrap_or(key.pid),
+                        user: t.user.clone(),
+                        destructive: true,
+                    }
+                })
+        };
+        Some(Self {
+            rows: used,
+            keys: keys.into_iter().map(|(key, _)| key).collect(),
+            confirm,
+        })
+    }
+}
+
+/// Flags an app or unit row takes from its primary processes.
+const GROUP_FLAGS: ProcFlags = ProcFlags::PROTECTED
+    .union(ProcFlags::OTHER_USER)
+    .union(ProcFlags::IS_SELF);
+
+/// The target of row `ix`. `None` for a group header.
+fn capture_row(s: &Snapshot, ix: usize, kind: RowKind) -> Option<CapturedTarget> {
+    if kind == RowKind::GroupHeader {
+        return None;
+    }
+    let row = s.table.rows.get(ix)?;
+    let p = &s.processes;
+    if let Some(r) = row.record.and_then(|i| p.records.get(i as usize)) {
+        return Some(CapturedTarget {
+            node: row.node.clone(),
+            kind,
+            name: SharedString::from(&r.meta.name),
+            pid: Some(r.key.pid),
+            uid: r.uid,
+            user: SharedString::from(&r.meta.user),
+            flags: r.flags,
+            member_count: 1,
+        });
+    }
+    let group = row.group.and_then(|g| s.table.groups.get(g as usize));
+    let primaries = primaries(p, &row.node);
+    let first = primaries.first().map(|&i| &p.records[i]);
+    let mut flags = primaries.iter().fold(ProcFlags::empty(), |f, &i| {
+        f | (p.records[i].flags & GROUP_FLAGS)
+    });
+    if matches!(kind, RowKind::App | RowKind::Unit) && first.is_none() {
+        flags |= ProcFlags::EXITED;
+    }
+    let user = group
+        .and_then(|g| g.user.as_ref())
+        .or(first.map(|r| &r.meta.user))
+        .map_or_else(SharedString::default, SharedString::from);
+    Some(CapturedTarget {
+        node: row.node.clone(),
+        kind,
+        name: group.map_or_else(SharedString::default, |g| SharedString::from(&g.name)),
+        pid: None,
+        uid: first.map_or(0, |r| r.uid),
+        user,
+        flags,
+        member_count: group.map_or(0, |g| g.members),
+    })
+}
+
+/// The live member records of an app or unit row whose parent is not a member, lowest PID
+/// first. Empty for every other node.
+fn primaries(p: &ProcessSnapshot, node: &NodeId) -> Vec<usize> {
+    let live = |i: usize| !p.records[i].flags.contains(ProcFlags::EXITED);
+    let members: Vec<usize> = match node {
+        NodeId::Group(key) => (0..p.records.len())
+            .filter(|&i| p.records[i].group == *key && live(i))
+            .collect(),
+        NodeId::Unit(unit) => (0..p.records.len())
+            .filter(|&i| p.extras.get(i).and_then(|x| x.unit.as_ref()) == Some(unit) && live(i))
+            .collect(),
+        _ => return Vec::new(),
+    };
+    let pids: FxHashSet<u32> = members.iter().map(|&i| p.records[i].key.pid).collect();
+    let mut out: Vec<usize> = members
+        .into_iter()
+        .filter(|&i| !pids.contains(&p.records[i].ppid))
+        .collect();
+    out.sort_unstable_by_key(|&i| p.records[i].key.pid);
+    out
+}
+
+/// The parent links of the live records of one snapshot, built once per action (R-192).
+struct Forest<'a> {
+    records: &'a [ProcessRecord],
+    /// Record indexes of each PID's live children, lowest PID first.
+    children: FxHashMap<u32, SmallVec<[usize; 4]>>,
+}
+
+impl<'a> Forest<'a> {
+    fn new(records: &'a [ProcessRecord]) -> Self {
+        let mut children: FxHashMap<u32, SmallVec<[usize; 4]>> = FxHashMap::default();
+        for (i, r) in records.iter().enumerate() {
+            if !r.flags.contains(ProcFlags::EXITED) && r.ppid != r.key.pid {
+                children.entry(r.ppid).or_default().push(i);
+            }
+        }
+        for c in children.values_mut() {
+            c.sort_unstable_by_key(|&i| records[i].key.pid);
+        }
+        Self { records, children }
+    }
+
+    fn index_of(&self, key: ProcessKey) -> Option<usize> {
+        self.records.binary_search_by(|r| r.key.cmp(&key)).ok()
+    }
+
+    /// `root` and its descendants, breadth first, at most [`MAX_TARGETS`] record indexes.
+    fn subtree(&self, root: usize) -> Vec<usize> {
+        let mut out = vec![root];
+        let mut seen = FxHashSet::default();
+        seen.insert(self.records[root].key.pid);
+        let mut next = 0;
+        while next < out.len() && out.len() < MAX_TARGETS {
+            let pid = self.records[out[next]].key.pid;
+            next += 1;
+            for &child in self.children.get(&pid).into_iter().flatten() {
+                if out.len() == MAX_TARGETS {
+                    break;
+                }
+                if seen.insert(self.records[child].key.pid) {
+                    out.push(child);
+                }
+            }
+        }
+        out
+    }
+
+    /// A bwrap record's first non-bwrap descendant in the breadth-first walk (PROC-010,
+    /// R-192); any other record, or a bwrap without one, is itself.
+    fn unwrap_bwrap(&self, i: usize) -> usize {
+        if !is_bwrap(&self.records[i]) {
+            return i;
+        }
+        self.subtree(i)
+            .into_iter()
+            .skip(1)
+            .find(|&j| !is_bwrap(&self.records[j]))
+            .unwrap_or(i)
+    }
+}
+
+/// The exe basename is `bwrap`; `comm` when the exe link was not readable.
+fn is_bwrap(r: &ProcessRecord) -> bool {
+    let name = match &r.meta.exe {
+        Some(exe) => exe.rsplit('/').next().unwrap_or(exe),
+        None => &r.meta.comm,
+    };
+    name == "bwrap"
+}
+
+/// A Warning toast on the main window.
+fn warning_toast(text: SharedString, cx: &mut App) {
+    let Some(main) = crate::window::main::main_window_view(cx) else {
+        warn!(target: "tasklens::ui", "no main window for the End toast");
+        return;
+    };
+    let queue = main.read(cx).toasts().clone();
+    queue.update(cx, |q, cx| q.push(ToastKind::Warning, text, None, None, cx));
 }
 
 impl Render for ProcessesPage {
@@ -235,6 +680,9 @@ impl Render for ProcessesPage {
             .flex()
             .flex_col()
             .on_action(cx.listener(Self::on_collapse_all))
+            .on_action(cx.listener(Self::on_end_task))
+            .on_action(cx.listener(Self::on_end_process))
+            .on_action(cx.listener(Self::on_end_process_tree))
             .child(
                 self.table
                     .clone()
