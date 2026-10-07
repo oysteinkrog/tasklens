@@ -1091,6 +1091,10 @@ const KEY_TIP_ZRAM: &str = "processes-cell-tooltip-zram";
 const KEY_TIP_OOM_SCORE_ADJ: &str = "processes-cell-tooltip-oom-score-adj";
 const KEY_TIP_DISK_OPS: &str = "processes-cell-tooltip-disk-ops";
 const KEY_TIP_IRQ: &str = "processes-cell-tooltip-irq-in-task-time";
+const KEY_TIP_EUID: &str = "processes-cell-tooltip-euid";
+const KEY_TIP_NET_SHARED: &str = "processes-cell-tooltip-net-shared";
+const KEY_TIP_CANCELLED: &str = "processes-cell-tooltip-cancelled-writes";
+const KEY_TIP_GPU_VRAM: &str = "processes-cell-tooltip-gpu-vram";
 
 /// The cell tooltip texts, translated once per `strings_version`. `Default` is en-US.
 #[derive(Clone, Debug)]
@@ -1108,6 +1112,13 @@ pub struct CellTipWords {
     pub oom_score_adj: Template,
     pub disk_ops: SharedString,
     pub irq_in_task_time: SharedString,
+    /// "euid {$euid}".
+    pub euid: Template,
+    pub net_shared: SharedString,
+    /// "cancelled: {$size}".
+    pub cancelled: Template,
+    /// "VRAM on GPU {$n}: {$size}".
+    pub gpu_vram: Template,
 }
 
 impl Default for CellTipWords {
@@ -1122,6 +1133,10 @@ impl Default for CellTipWords {
             oom_score_adj: Template::en(KEY_TIP_OOM_SCORE_ADJ, &["adj"]),
             disk_ops: tr_en(KEY_TIP_DISK_OPS, &[]),
             irq_in_task_time: tr_en(KEY_TIP_IRQ, &[]),
+            euid: Template::en(KEY_TIP_EUID, &["euid"]),
+            net_shared: tr_en(KEY_TIP_NET_SHARED, &[]),
+            cancelled: Template::en(KEY_TIP_CANCELLED, &["size"]),
+            gpu_vram: Template::en(KEY_TIP_GPU_VRAM, &["n", "size"]),
         }
     }
 }
@@ -1139,6 +1154,10 @@ impl CellTipWords {
             oom_score_adj: Template::new(cx, KEY_TIP_OOM_SCORE_ADJ, &["adj"]),
             disk_ops: tr(cx, KEY_TIP_DISK_OPS),
             irq_in_task_time: tr(cx, KEY_TIP_IRQ),
+            euid: Template::new(cx, KEY_TIP_EUID, &["euid"]),
+            net_shared: tr(cx, KEY_TIP_NET_SHARED),
+            cancelled: Template::new(cx, KEY_TIP_CANCELLED, &["size"]),
+            gpu_vram: Template::new(cx, KEY_TIP_GPU_VRAM, &["n", "size"]),
         }
     }
 }
@@ -1264,10 +1283,54 @@ pub fn cell_tooltip(
                     out.push_str(&w.disk_ops);
                     true
                 }
-                _ => false,
+                // PROC-028: only when the effective UID differs from the real one.
+                C::User => match r.euid {
+                    Some(euid) if euid != r.uid => {
+                        let _ = w.euid.write(out, &[&euid]);
+                        true
+                    }
+                    _ => false,
+                },
+                C::Network if r.net_shared => {
+                    out.push_str(&w.net_shared);
+                    true
+                }
+                // PROC-031: IEC two decimals from 1 KiB; less is not worth a tooltip.
+                C::DiskWriteRate => {
+                    let bytes = f64::from(r.cancelled_write_bps).round() as u64;
+                    if bytes < 1024 {
+                        return false;
+                    }
+                    w.cancelled
+                        .write_each(out, |_, out| units::bytes(out, bytes));
+                    true
+                }
+                // PROC-033: `gpu_vram_bytes` is in GPU N column order.
+                id => match gpu_slot(id).and_then(|n| {
+                    let bytes = *p2?.gpu_vram_bytes.get(n)?;
+                    (bytes > 0).then_some((n, bytes))
+                }) {
+                    Some((n, bytes)) => {
+                        w.gpu_vram.write_each(out, |i, out| {
+                            if i == 0 {
+                                let _ = write!(out, "{n}");
+                            } else {
+                                units::bytes(out, bytes);
+                            }
+                        });
+                        true
+                    }
+                    None => false,
+                },
             }
         }
     }
+}
+
+/// The adapter slot of a `gpu_0` to `gpu_15` column.
+fn gpu_slot(id: ColumnId) -> Option<usize> {
+    let n = (id as usize).checked_sub(ColumnId::Gpu0 as usize)?;
+    (id as usize <= ColumnId::Gpu15 as usize).then_some(n)
 }
 
 /// The first [`CMDLINE_CELL_CHARS`] characters of `cmdline`, with a line break after every

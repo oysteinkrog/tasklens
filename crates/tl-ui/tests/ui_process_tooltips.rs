@@ -343,6 +343,66 @@ fn cell_tooltips_texts() {
 }
 
 #[test]
+fn user_tooltip_shows_a_different_euid() {
+    let mut r = record();
+    r.euid = Some(0);
+    assert_eq!(
+        Fixture::new(r).tip(ColumnId::User).as_deref(),
+        Some("euid 0")
+    );
+    let mut r = record();
+    r.euid = Some(r.uid);
+    assert_eq!(
+        Fixture::new(r).tip(ColumnId::User),
+        None,
+        "equal to the real UID"
+    );
+    assert_eq!(Fixture::new(record()).tip(ColumnId::User), None, "not set");
+}
+
+#[test]
+fn network_tooltip_says_shared() {
+    let mut r = record();
+    r.net_shared = true;
+    let f = Fixture::new(r);
+    assert_eq!(f.tip(ColumnId::Network).as_deref(), Some("shared"));
+    assert_eq!(f.tip(ColumnId::NetSendRate), None, "the Network cell only");
+    assert_eq!(Fixture::new(record()).tip(ColumnId::Network), None);
+}
+
+#[test]
+fn disk_write_tooltip_shows_cancelled_bytes() {
+    let mut r = record();
+    r.cancelled_write_bps = 1_258_291.0;
+    assert_eq!(
+        Fixture::new(r).tip(ColumnId::DiskWriteRate).as_deref(),
+        Some("cancelled: 1.20 MiB")
+    );
+    let mut r = record();
+    r.cancelled_write_bps = 1023.0;
+    assert_eq!(
+        Fixture::new(r).tip(ColumnId::DiskWriteRate),
+        None,
+        "nothing below 1 KiB"
+    );
+    assert_eq!(Fixture::new(record()).tip(ColumnId::DiskWriteRate), None);
+}
+
+#[test]
+fn gpu_n_tooltip_shows_that_gpus_vram() {
+    let mut f = Fixture::new(record());
+    f.extras_p2[0].gpu_vram_bytes = [0, 1_310_000_000].into_iter().collect();
+    assert_eq!(
+        f.tip(ColumnId::Gpu1).as_deref(),
+        Some("VRAM on GPU 1: 1.22 GiB")
+    );
+    assert_eq!(f.tip(ColumnId::Gpu0), None, "no VRAM on GPU 0");
+    assert_eq!(f.tip(ColumnId::Gpu2), None, "past the list");
+    assert_eq!(f.tip(ColumnId::Gpu), None, "the GPU column has none");
+    assert_eq!(Fixture::new(record()).tip(ColumnId::Gpu0), None, "not set");
+}
+
+#[test]
 fn cmdline_tooltip_wraps_at_80() {
     let mut r = record();
     let line: String = ('a'..='z').cycle().take(200).collect();
