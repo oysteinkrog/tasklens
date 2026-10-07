@@ -1,0 +1,12 @@
+[Unit]
+Description=tasklens low-memory watcher
+
+[Service]
+Type=simple
+ExecStart=@EXEC@ --watch-memory
+OOMScoreAdjust=@OOM_SCORE_ADJUST@
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
