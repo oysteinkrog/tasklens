@@ -1897,8 +1897,9 @@ mod end {
         let mut expected = process_shape("Open file location", Some("Go to parent process"));
         expected.retain(|e| e != "Copy");
         assert_eq!(shape(&mut rig, &menu), expected);
+        let keyboard = build_menu_from(&mut rig, &[1], None);
         assert_eq!(
-            shape(&mut rig, &build_menu_from(&mut rig, &[1], None)),
+            shape(&mut rig, &keyboard),
             expected,
             "None from the keyboard"
         );
@@ -1953,7 +1954,9 @@ mod end {
             .and_then(|e| e.action)
             .expect("a Copy item");
         assert!(copy.partial_eq(&CopyCell { col: ColumnId::Cpu }));
-        rig.vcx.dispatch_action(copy);
+        // Type-ahead "c" highlights Copy, the first item starting with C; Enter runs it in
+        // the table's context.
+        rig.vcx.simulate_keystrokes("c enter");
         rig.vcx.run_until_parked();
         assert_eq!(clipboard(&mut rig), "1.5%", "the CPU cell of row 301");
         let selected = rig
