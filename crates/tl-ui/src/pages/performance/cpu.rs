@@ -422,7 +422,7 @@ fn all_cores_labels(stacked: bool, words: &Words) -> ChartLabels {
 
 /// `DeviceIdx` per logical CPU id from the catalog. An id the catalog skips gets
 /// `DeviceIdx(u16::MAX)`, which matches no series.
-fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
+pub(crate) fn logical_devices(catalog: &DeviceCatalog, out: &mut Vec<DeviceIdx>) {
     out.clear();
     for e in catalog.entries.iter() {
         if let DeviceIdentity::CpuLogical { id } = e.identity {

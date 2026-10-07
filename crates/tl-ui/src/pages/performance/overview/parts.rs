@@ -6,19 +6,20 @@
 //! charts or cards (ADR-009). [`CoreBars`] re-formats and re-shapes a percent label only when its
 //! 1% bucket changes (U-47).
 
-#[cfg(any(test, feature = "test-hooks"))]
-use std::cell::Cell;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gpui_kit::{
-    AnyElement, App, Bounds, Corners, Div, Element, ElementId, FontWeight, GlobalElementId, Hsla,
-    InspectorElementId, InteractiveElement as _, IntoElement, LayoutId, ParentElement as _, Pixels,
-    SharedString, Style, Styled as _, Window, div, fill, point, px, relative, size,
+    AnyElement, App, Bounds, Corners, Div, Element, ElementId, EntityId, FontWeight,
+    GlobalElementId, Hsla, InspectorElementId, InteractiveElement as _, IntoElement, LayoutId,
+    ParentElement as _, Pixels, Position, SharedString, Style, Styled as _, Window, canvas, div,
+    fill, point, px, relative, size,
 };
+use tl_model::settings::Settings;
 
 use crate::chart::labels::{self, CachedLine, LABEL_ROW, LineStyle, WARMING};
 use crate::components::progress::bucket;
+use crate::settings_global::{Section, TlSettings};
 use crate::text::style::{numeric_style, t_md, t_sm};
 use crate::theme::{TlTheme, UiMetrics, current};
 
@@ -226,6 +227,16 @@ impl CoreBarsModel {
             changed = true;
         }
         changed
+    }
+
+    /// "C0\t12%" per CPU, one per line.
+    pub fn copy_text(&self, out: &mut String) {
+        for (name, pct) in self.names.iter().zip(&self.pct_text) {
+            out.push_str(name);
+            out.push('\t');
+            out.push_str(pct);
+            out.push('\n');
+        }
     }
 }
 
@@ -448,4 +459,212 @@ pub fn box_frame(
                 .child(value_el),
         )
         .child(div().flex_1().min_h_0().w_full().child(body))
+}
+
+/// Box widths from here up put the chart and its side part next to each other; narrower boxes
+/// stack them. Logical px before `ui_scale`.
+pub const SPLIT_W: f32 = 560.;
+
+/// The chart's share of a wide box's body.
+const CHART_SHARE: f32 = 0.55;
+
+/// The plot must be at least this tall for the scale label, logical px before `ui_scale`.
+const SCALE_MIN_PLOT_H: f32 = 32.;
+
+/// A canvas over its parent (which must be `relative`) that keeps the parent's width in `width`
+/// and notifies `view` after the frame when the width crosses `threshold` the other way from
+/// `wide`, the side the last render used. Resizes inside one side never notify.
+pub fn width_probe(
+    width: Rc<Cell<Pixels>>,
+    wide: bool,
+    threshold: Pixels,
+    view: EntityId,
+) -> impl IntoElement {
+    canvas(
+        move |bounds, _, cx| {
+            width.set(bounds.size.width);
+            if (bounds.size.width >= threshold) != wide {
+                cx.defer(move |cx| cx.notify(view));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
+}
+
+/// Whether a box `width` wide (0 before the first paint) puts its chart beside its side part.
+pub fn is_wide(width: Pixels, scale: f32) -> bool {
+    width == px(0.) || width >= px(SPLIT_W * scale)
+}
+
+/// The body of a box: `chart` on the left (55%) and `side` on the right, or `chart` above
+/// `side` when not `wide`.
+pub fn split_body(chart: AnyElement, side: AnyElement, wide: bool, m: &UiMetrics) -> Div {
+    if wide {
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .gap(m.sp[5])
+            .child(
+                div()
+                    .flex_none()
+                    .w(relative(CHART_SHARE))
+                    .h_full()
+                    .child(chart),
+            )
+            .child(div().flex_1().min_w_0().h_full().child(side))
+    } else {
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .gap(m.sp[5])
+            .child(div().flex_1().min_h_0().w_full().child(chart))
+            .child(div().flex_1().min_h_0().w_full().child(side))
+    }
+}
+
+/// The settings a box chart is built from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ChartSettings {
+    pub kernel: bool,
+    pub range_ns: u64,
+    pub smooth: bool,
+    pub rounded: bool,
+}
+
+impl ChartSettings {
+    pub fn read(cx: &App) -> Self {
+        Self::from(TlSettings::settings(cx))
+    }
+}
+
+impl From<&Settings> for ChartSettings {
+    fn from(s: &Settings) -> Self {
+        Self {
+            kernel: s.performance.cpu_kernel,
+            range_ns: u64::from(s.performance.graph_range_s) * 1_000_000_000,
+            smooth: s.motion.smooth_graphs,
+            rounded: s.appearance.rounded_corners,
+        }
+    }
+}
+
+/// The versions of the sections [`ChartSettings`] reads.
+pub fn chart_section_versions(cx: &App) -> [u64; 3] {
+    let tl = TlSettings::get(cx);
+    [
+        tl.version(Section::Performance),
+        tl.version(Section::Motion),
+        tl.version(Section::Appearance),
+    ]
+}
+
+/// The scale label's shaped line.
+#[derive(Default, Debug)]
+pub struct ScaleLabelCache {
+    line: CachedLine,
+    /// Times the line was shaped.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub shape_count: Cell<u32>,
+    /// The last paint drew the label.
+    #[cfg(any(test, feature = "test-hooks"))]
+    pub shown: Cell<bool>,
+}
+
+/// A chart's ceiling ("100%", "64.0 GiB") as one `t_xs` line in the plot's top-left corner, laid
+/// over its parent (which must be `relative`). Shown when the parent is at least 32 px tall. The
+/// line is re-shaped only when `text` changes.
+pub struct ScaleLabel {
+    pub text: SharedString,
+    pub cache: Rc<RefCell<ScaleLabelCache>>,
+}
+
+impl IntoElement for ScaleLabel {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for ScaleLabel {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let mut style = Style {
+            position: Position::Absolute,
+            size: size(relative(1.).into(), relative(1.).into()),
+            ..Style::default()
+        };
+        style.inset.top = px(0.).into();
+        style.inset.left = px(0.).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut Window,
+        _: &mut App,
+    ) {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let m = *cx.global::<UiMetrics>();
+        let s = m.ui_scale;
+        let shown = bounds.size.height >= px(SCALE_MIN_PLOT_H * s);
+        let mut cache = self.cache.borrow_mut();
+        #[cfg(any(test, feature = "test-hooks"))]
+        cache.shown.set(shown);
+        if !shown {
+            return;
+        }
+        let style = LineStyle {
+            size: m.text.xs,
+            weight: FontWeight::NORMAL,
+            color: current(cx).text_secondary,
+            tnum: true,
+        };
+        let shaped = cache.line.sync(window, &self.text, style);
+        #[cfg(any(test, feature = "test-hooks"))]
+        cache
+            .shape_count
+            .set(cache.shape_count.get() + u32::from(shaped));
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        let _ = shaped;
+        let origin = point(bounds.left() + m.sp[2], bounds.top() + m.sp[1]);
+        labels::paint_line(window, cx, &cache.line, origin, px(LABEL_ROW * s));
+    }
 }
