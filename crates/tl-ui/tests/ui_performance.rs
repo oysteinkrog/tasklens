@@ -2374,10 +2374,7 @@ mod summary {
 
         let mut r = open(cx, 1600., 1000., true);
         let view = enter(&mut r);
-        let tile = r
-            .vcx
-            .debug_bounds("perf-summary-tile-0")
-            .expect("CPU tile");
+        let tile = r.vcx.debug_bounds("perf-summary-tile-0").expect("CPU tile");
         right_click(r.vcx, tile.center());
         draw(r.vcx);
         assert!(
