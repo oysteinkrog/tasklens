@@ -20,7 +20,7 @@ use tl_model::system::{CpuSet, Metric, ZramTotals};
 use tl_model::table::{ProcessTableView, TableRow};
 use tl_model::time::BootId;
 use tl_model::validity::{FieldValidity, ProcessField, Validity};
-use tl_ui::components::tooltip::DELAY_CONTROL;
+use tl_ui::components::tooltip::{DELAY_CONTROL, DELAY_PROCESS_CELL};
 use tl_ui::pages::processes::cells::{
     CellCtx, CellTipWords, CellWords, GroupMembers, PowerSensor, RowRef, TipCtx, cell_tooltip,
     process_column,
@@ -539,7 +539,7 @@ fn delegate_sets_cell_tooltip_on_the_hovered_row_only(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn hovered_memory_cell_shows_its_tooltip(cx: &mut TestAppContext) {
+fn hovered_memory_cell_shows_its_tooltip_at_600ms(cx: &mut TestAppContext) {
     let (_, mut vcx) = open(cx);
     vcx.update(|window, _| window.activate_window());
     redraw(&mut vcx);
@@ -560,10 +560,27 @@ fn hovered_memory_cell_shows_its_tooltip(cx: &mut TestAppContext) {
         vcx.debug_bounds("TlTooltip").is_none(),
         "not before the delay"
     );
+    assert_eq!(DELAY_PROCESS_CELL, std::time::Duration::from_millis(600));
     vcx.executor().advance_clock(DELAY_CONTROL);
     redraw(&mut vcx);
     assert!(
-        vcx.debug_bounds("TlTooltip").is_some(),
-        "the Memory cell of the app row has a tooltip"
+        vcx.debug_bounds("TlTooltip").is_none(),
+        "not at 500 ms, the delay of other tables"
     );
+    vcx.executor()
+        .advance_clock(DELAY_PROCESS_CELL - DELAY_CONTROL);
+    redraw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("TlTooltip").is_some(),
+        "the Memory cell of the app row shows its tooltip at 600 ms"
+    );
+}
+
+#[gpui_kit::test]
+fn delegate_cell_tip_delay_is_600ms(cx: &mut TestAppContext) {
+    let (table, mut vcx) = open(cx);
+    vcx.update(|_, cx| {
+        let d = &table.read(cx).delegate;
+        assert_eq!(d.cell_tip_delay(), std::time::Duration::from_millis(600));
+    });
 }

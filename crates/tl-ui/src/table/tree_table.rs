@@ -164,6 +164,19 @@ pub trait TreeTableDelegate: 'static + Sized {
             .find(|c| c.pinned_first())
     }
 
+    /// Hover delay of the explicit cell tooltips (`CellOut::tooltip`). The process table uses
+    /// 600 ms (UI-PRC-004).
+    fn cell_tip_delay(&self) -> Duration {
+        DELAY_CONTROL
+    }
+
+    /// The tooltip content for the explicit tooltip `tip` of a `col` cell. The default wraps at
+    /// 360 px.
+    fn cell_tip_content(&self, col: Self::Column, tip: SharedString) -> TlTooltip {
+        let _ = col;
+        TlTooltip::text(tip)
+    }
+
     /// `processes.tree_guide_lines` (PROC-017).
     fn guide_lines(&self) -> bool {
         false
@@ -1033,7 +1046,18 @@ impl<D: TreeTableDelegate> TlTreeTable<D> {
             }
             _ => None,
         };
-        if let Some(tip) = self.out.tooltip.clone().or(path_cut) {
+        if let Some(tip) = self.out.tooltip.clone() {
+            let state = HoverTooltip::state(key, window, cx);
+            return HoverTooltip::attach(
+                &state,
+                cell,
+                self.delegate.cell_tip_delay(),
+                self.delegate.cell_tip_content(col, tip).build(),
+                window,
+                cx,
+            );
+        }
+        if let Some(tip) = path_cut {
             let state = HoverTooltip::state(key, window, cx);
             return HoverTooltip::attach(
                 &state,

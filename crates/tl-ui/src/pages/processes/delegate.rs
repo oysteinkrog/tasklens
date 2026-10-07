@@ -54,6 +54,7 @@ use crate::anim::AnimationDriver;
 use crate::app::EngineGlobal;
 use crate::components::menu::TlMenu;
 use crate::components::toast::{ToastKind, ToastQueue};
+use crate::components::tooltip::{DELAY_PROCESS_CELL, TlTooltip};
 use crate::components::validity::{GlyphCtx, tooltip_text};
 use crate::demand::GlobalDemand;
 use crate::i18n::tr;
@@ -1216,6 +1217,19 @@ impl TreeTableDelegate for ProcessDelegate {
 
     fn empty_text(&self) -> Option<SharedString> {
         None
+    }
+
+    fn cell_tip_delay(&self) -> Duration {
+        DELAY_PROCESS_CELL
+    }
+
+    /// The command line keeps its 80-column line breaks (UI-PRC-004).
+    fn cell_tip_content(&self, col: ColumnId, tip: SharedString) -> TlTooltip {
+        if col == ColumnId::Cmdline {
+            TlTooltip::preformatted(tip)
+        } else {
+            TlTooltip::text(tip)
+        }
     }
 
     fn header_lines(&self) -> HeaderLines {

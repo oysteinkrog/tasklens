@@ -40,6 +40,8 @@ use crate::theme::{current, metrics};
 pub const DELAY_CONTROL: Duration = Duration::from_millis(500);
 /// Hover delay for table Name cells (PROC-039).
 pub const DELAY_ROW_NAME: Duration = Duration::from_millis(600);
+/// Hover delay for process table cells other than Name (UI-PRC-004).
+pub const DELAY_PROCESS_CELL: Duration = Duration::from_millis(600);
 
 /// Max width of [`TlTooltip::text`], × ui_scale.
 const TEXT_MAX_WIDTH: f32 = 360.;
@@ -62,6 +64,7 @@ pub fn with_kind_prefix(kind: &str, text: &str) -> SharedString {
 enum Body {
     Text(SharedString),
     Lines(Vec<SharedString>),
+    Preformatted(SharedString),
 }
 
 /// Tooltip content. Build it with [`TlTooltip::text`] or [`TlTooltip::lines`], then hand
@@ -91,6 +94,15 @@ impl TlTooltip {
         }
     }
 
+    /// Text with its own line breaks, such as the command line cell tooltip (UI-PRC-004). Lines
+    /// break only at `\n`, never at a width.
+    pub fn preformatted(text: impl Into<SharedString>) -> Self {
+        Self {
+            body: Body::Preformatted(text.into()),
+            action: None,
+        }
+    }
+
     /// Appends a right-aligned line with the key binding of `action`, looked up from `focus` when
     /// given, else from any context. No line when the action has no binding.
     pub fn action(mut self, action: &dyn Action, focus: Option<&FocusHandle>) -> Self {
@@ -108,17 +120,19 @@ impl TlTooltip {
         move |_, cx| self.clone().view(cx)
     }
 
-    fn max_width(&self) -> f32 {
+    /// `None` for preformatted text, which never wraps.
+    fn max_width(&self) -> Option<f32> {
         match self.body {
-            Body::Text(_) => TEXT_MAX_WIDTH,
-            Body::Lines(_) => LINES_MAX_WIDTH,
+            Body::Text(_) => Some(TEXT_MAX_WIDTH),
+            Body::Lines(_) => Some(LINES_MAX_WIDTH),
+            Body::Preformatted(_) => None,
         }
     }
 
     /// The text to lay out: the lines joined by newlines, cut to [`MAX_LINES`].
     fn body_text(&self) -> SharedString {
         match &self.body {
-            Body::Text(text) => text.clone(),
+            Body::Text(text) | Body::Preformatted(text) => text.clone(),
             Body::Lines(lines) => cut_lines(lines).join("\n").into(),
         }
     }
@@ -165,16 +179,18 @@ impl Render for TlTooltip {
 
         let mut text = div().debug_selector(|| "TlTooltip-text".into());
         *text.text_style() = t_sm(&m);
+        let max_width = self.max_width();
         let text = text
             .text_color(theme.text_primary)
             .line_clamp(MAX_LINES)
             .text_ellipsis()
+            .when(max_width.is_none(), |text| text.whitespace_nowrap())
             .child(self.body_text());
 
         let mut panel = BaseTooltip::new("tl-tooltip")
             .flex()
             .flex_col()
-            .max_w(px(self.max_width() * m.ui_scale))
+            .when_some(max_width, |panel, w| panel.max_w(px(w * m.ui_scale)))
             .py(m.sp[2])
             .px(m.sp[4])
             .bg(theme.menu_bg)
@@ -666,6 +682,21 @@ mod tests {
         // GPUI snaps the line height to device pixels, so count rows with a rounding margin.
         let rows = (f32::from(text.size.height) / lh).round();
         assert_eq!(rows, 12., "12 rows show: {:?}", text.size);
+    }
+
+    #[test]
+    fn preformatted_keeps_its_line_breaks() {
+        let mut cx = cosmic_cx();
+        let line = "/usr/lib/firefox/firefox --new-window --profile /home/user/.mozilla/x";
+        let line = &format!("{line}{}", "y".repeat(80 - line.len()));
+        let (tip, text) = hover(&mut cx, TlTooltip::preformatted(format!("{line}\n{line}")));
+        assert!(
+            tip.size.width > px(360.),
+            "no wrap at 360: {:?}",
+            tip.size.width
+        );
+        let rows = (f32::from(text.size.height) / line_height(&mut cx)).round();
+        assert_eq!(rows, 2., "one row per line: {:?}", text.size);
     }
 
     #[gpui_kit::test]
