@@ -53,6 +53,7 @@ use crate::demand::GlobalDemand;
 use crate::focus::focus_initial;
 use crate::hub::GlobalHub;
 use crate::pages::processes::ProcessesPage;
+use crate::pages::processes::toolbar::ProcessesToolbar;
 use crate::settings_global::{Section, TlSettings};
 use crate::theme::{UiMetrics, current, metrics};
 
@@ -186,11 +187,10 @@ fn page_factory(tab: Tab) -> Option<PageFactory> {
 }
 
 /// Toolbar registration: one arm per page epic with page buttons (E22 for Processes).
-// The match stays so page epics can add their arms; the lint goes with the first arm.
-#[allow(clippy::match_single_binding)]
 fn toolbar_for(tab: Tab) -> Box<dyn ToolbarContent> {
     match tab {
         // toolbar registrations (chain edits)
+        Tab::Processes => Box::new(ProcessesToolbar),
         _ => Box::new(DefaultToolbar),
     }
 }
