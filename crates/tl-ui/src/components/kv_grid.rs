@@ -44,6 +44,10 @@
 //! text selection copies the selection; without one the key goes on to the page's Copy action.
 //! For that the app calls [`init`] once, which binds Ctrl+C inside the grid.
 //!
+//! Owner hooks, all opt-in: [`TlKeyValueGrid::copy_texts`] copies a longer form than the shown
+//! value (a full hash), [`TlKeyValueGrid::on_context_menu`] replaces the built-in menu with the
+//! owner's, and [`TlKeyValueGrid::cursor`] draws a keyboard cursor ring around one row.
+//!
 //! The grid caches nothing. Owners keep the formatted strings and re-format only changed values.
 //! Values are never logged.
 
@@ -58,7 +62,7 @@ use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     Action, Animation, AnimationExt as _, AnyElement, App, BorrowAppContext as _, ClipboardItem,
     Context, ElementId, FocusHandle, FontWeight, Global, Hsla, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    KeyBinding, MouseButton, ParentElement, Pixels, Point, RenderOnce, SharedString,
     StatefulInteractiveElement as _, Styled, Task, Window, canvas, div, fill, point,
     prelude::FluentBuilder as _, px, size,
 };
@@ -121,6 +125,7 @@ const LINE_IDS: [&str; 8] = [
 
 type CopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
 type SectionHandler = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+type MenuHandler = Rc<dyn Fn(usize, Point<Pixels>, &mut Window, &mut App)>;
 
 /// Binds Ctrl+C inside the grid, so a text selection is copied before the page's Copy binding
 /// runs. Call once at startup.
@@ -596,6 +601,9 @@ pub struct TlKeyValueGrid {
     on_copy_section: Option<SectionHandler>,
     label_tooltips: Rc<[(usize, SharedString)]>,
     label_lines: Rc<[(usize, u8)]>,
+    copy_texts: Rc<[(usize, SharedString)]>,
+    on_context_menu: Option<MenuHandler>,
+    cursor: Option<usize>,
     filtered_empty: bool,
     loading: bool,
 }
@@ -618,6 +626,9 @@ impl TlKeyValueGrid {
             on_copy_section: None,
             label_tooltips: Rc::from(Vec::new()),
             label_lines: Rc::from(Vec::new()),
+            copy_texts: Rc::from(Vec::new()),
+            on_context_menu: None,
+            cursor: None,
             filtered_empty: false,
             loading: false,
         }
@@ -709,6 +720,31 @@ impl TlKeyValueGrid {
         self
     }
 
+    /// The text a copy takes instead of the shown value, by flat row index as in
+    /// [`TlKeyValueGrid::label_tooltips`]: a click with `copy_on_click`, "Copy value" and "Copy
+    /// row" use it. For a value shown in a short form, such as a hash cut to 16 digits.
+    pub fn copy_texts(mut self, texts: Rc<[(usize, SharedString)]>) -> Self {
+        self.copy_texts = texts;
+        self
+    }
+
+    /// A right-click on a value calls `handler` with the flat row index and the pointer position
+    /// instead of opening the built-in menu, so the owner can open its own.
+    pub fn on_context_menu(
+        mut self,
+        handler: impl Fn(usize, Point<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_context_menu = Some(Rc::new(handler));
+        self
+    }
+
+    /// Draws the keyboard cursor ring around flat row `row`: 1 px `accent`, inset 1 px, radius
+    /// `r_sm`. The owner moves it; the grid has no key handling of its own.
+    pub fn cursor(mut self, row: Option<usize>) -> Self {
+        self.cursor = row;
+        self
+    }
+
     /// Draws [`KvWords::no_match`] instead of the rows.
     pub fn filtered_empty(mut self, empty: bool) -> Self {
         self.filtered_empty = empty;
@@ -788,6 +824,11 @@ impl TlKeyValueGrid {
         cx: &mut App,
     ) -> Option<(AnyElement, usize)> {
         let look = value_look_in(&row.value, &f.words, &f.theme)?;
+        let copy_text = self
+            .copy_texts
+            .iter()
+            .find(|(i, _)| *i == n)
+            .map(|(_, text)| text.clone());
         let m = &f.m;
         let id = self.child_id("value", n);
         let mut cell = div()
@@ -859,7 +900,7 @@ impl TlKeyValueGrid {
             if self.copy_on_click {
                 let on_copied = self.on_copied.clone();
                 let state = f.state.clone();
-                let text = look.text.clone();
+                let text = copy_text.clone().unwrap_or_else(|| look.text.clone());
                 cell = cell.on_click(move |_, window, cx| {
                     // A drag that selected text is not a copy click.
                     if TextSelection::has_selection(window, cx) {
@@ -898,10 +939,17 @@ impl TlKeyValueGrid {
             None => cell,
         };
 
+        if let Some(handler) = self.on_context_menu.clone() {
+            let cell = cell.on_mouse_down(MouseButton::Right, move |ev, window, cx| {
+                cx.stop_propagation();
+                handler(n, ev.position, window, cx);
+            });
+            return Some((cell.into_any_element(), line_count));
+        }
         let on_copied = self.on_copied.clone();
         let on_copy_section = self.on_copy_section.clone();
         let sections = self.sections.clone();
-        let value_text = look.text;
+        let value_text = copy_text.unwrap_or(look.text);
         let label = row.label.clone();
         let words = f.words.clone();
         let menu_min = px(MENU_MIN_WIDTH * m.ui_scale);
@@ -969,6 +1017,27 @@ impl TlKeyValueGrid {
                     Animation::new(M_FAST).with_easing(ease_out_cubic),
                     move |el, t| el.bg(color.alpha(FLASH_ALPHA * (1. - t))),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The keyboard cursor ring around row `n` while the owner's cursor is on it.
+    fn cursor_ring(&self, n: usize, f: &Frame) -> Option<AnyElement> {
+        if self.cursor != Some(n) {
+            return None;
+        }
+        let inset = px(1.);
+        Some(
+            div()
+                .debug_selector(move || format!("TlKv-cursor-{n}"))
+                .absolute()
+                .top(inset)
+                .bottom(inset)
+                .left(inset)
+                .right(inset)
+                .border_1()
+                .border_color(f.theme.accent)
+                .rounded(f.m.radius_small)
                 .into_any_element(),
         )
     }
@@ -1052,6 +1121,7 @@ impl TlKeyValueGrid {
                 .child(label)
                 .child(div().flex().flex_1().min_w_0().child(value))
                 .children(self.flash(n, f))
+                .children(self.cursor_ring(n, f))
                 .into_any_element(),
         )
     }
@@ -1090,6 +1160,7 @@ impl TlKeyValueGrid {
                 .child(label)
                 .child(value)
                 .children(self.flash(n, f))
+                .children(self.cursor_ring(n, f))
                 .into_any_element(),
         )
     }
@@ -1875,5 +1946,63 @@ mod tests {
         assert_eq!(height(cx, 0), px(56.), "a two-line label makes 2 × row_h");
         assert_eq!(height(cx, 1), px(84.), "the value's three lines win");
         assert_eq!(height(cx, 2), px(28.), "other rows stay one line");
+    }
+
+    fn hash_grid() -> TlKeyValueGrid {
+        TlKeyValueGrid::new("grid", KvLayout::Inline)
+            .sections(&[section(vec![row(
+                "SHA-256:",
+                TlValue::new("0123456789abcdef…"),
+            )])])
+            .copy_texts(Rc::from([(0, SharedString::from("0123456789abcdef0011"))]))
+    }
+
+    #[gpui_kit::test]
+    fn copy_texts_replace_the_shown_value(cx: &mut TestAppContext) {
+        let (cx, copied, _) = host(cx, || hash_grid().copy_on_click(true));
+        let value = bounds(cx, "TlKv-value-0").expect("value drawn");
+        cx.simulate_click(value.center(), Modifiers::none());
+        assert_eq!(clipboard(cx).as_deref(), Some("0123456789abcdef0011"));
+        assert_eq!(
+            copied.borrow().as_slice(),
+            &[SharedString::from("0123456789abcdef0011")]
+        );
+        pick_menu_item(cx, 0, 1);
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("SHA-256: 0123456789abcdef0011")
+        );
+    }
+
+    #[gpui_kit::test]
+    fn on_context_menu_replaces_the_menu(cx: &mut TestAppContext) {
+        let opened: Rc<RefCell<Vec<usize>>> = Rc::default();
+        let (cx, copied, _) = host(cx, {
+            let opened = opened.clone();
+            move || {
+                let opened = opened.clone();
+                pid_grid().on_context_menu(move |n, _, _, _| opened.borrow_mut().push(n))
+            }
+        });
+        pick_menu_item(cx, 0, 0);
+        assert_eq!(opened.borrow().as_slice(), &[0]);
+        assert!(copied.borrow().is_empty(), "no built-in menu item ran");
+    }
+
+    #[gpui_kit::test]
+    fn cursor_ring_on_one_row(cx: &mut TestAppContext) {
+        let (cx, _, _) = host(cx, || {
+            TlKeyValueGrid::new("grid", KvLayout::Inline)
+                .sections(&[section(vec![
+                    row("PID:", TlValue::new("1")),
+                    row("PPID:", TlValue::new("2")),
+                ])])
+                .cursor(Some(1))
+        });
+        assert!(bounds(cx, "TlKv-cursor-0").is_none());
+        let ring = bounds(cx, "TlKv-cursor-1").expect("ring drawn");
+        let row = bounds(cx, "TlKv-row-1").expect("row drawn");
+        assert_eq!(ring.origin.y, row.origin.y + px(1.));
+        assert_eq!(ring.size.height, row.size.height - px(2.));
     }
 }
