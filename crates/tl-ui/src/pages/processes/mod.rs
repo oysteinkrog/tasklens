@@ -26,7 +26,7 @@ use gpui_kit::{
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, Signal};
+use tl_model::actions::{ActionId, ActionKind, ActionRequest, ActionTarget, RejectReason, Signal};
 use tl_model::client::EngineClient;
 use tl_model::ids::{ColumnId, NodeId, ProcessKey};
 use tl_model::process::{ProcFlags, ProcessRecord};
@@ -292,8 +292,9 @@ impl ProcessesPage {
     }
 
     /// End Task, End Process and End Process Tree (UI-PRC-013 items 1 to 3): drops pseudo and
-    /// exited targets, refuses tasklens, PID 1 and kernel threads with a toast, asks for
-    /// confirmation where UI-PRC-014 says so (R-198, D-009) and sends one request by key.
+    /// exited targets, refuses tasklens, PID 1 and kernel threads with a toast (End Process Tree
+    /// also a subtree that holds tasklens or PID 1), asks for confirmation where UI-PRC-014
+    /// says so (R-198, D-009) and sends one request by key.
     fn end(&mut self, end: End, window: &mut Window, cx: &mut Context<Self>) {
         let captured = self.take_targets(cx);
         let clicked_col = captured.clicked_col;
@@ -334,6 +335,12 @@ impl ProcessesPage {
         let Some(plan) = EndPlan::new(end, rows, &snapshot.processes, &self.end_words) else {
             return;
         };
+        if let Some(t) = &plan.refused {
+            if let Some(text) = words.refusal_text(RejectReason::Protected, t) {
+                warning_toast(text, cx);
+            }
+            return;
+        }
         let kind = end.kind();
         let used = CapturedTargets::new(plan.rows, clicked_col);
         let Some(texts) = words.texts_for(&kind, &used) else {
@@ -413,6 +420,9 @@ struct EndPlan {
     keys: Vec<ProcessKey>,
     /// `None`: send at once (D-009).
     confirm: Option<ConfirmKind>,
+    /// End Process Tree: the first record of the subtree that is tasklens itself or PID 1.
+    /// The page then shows its refusal toast and sends nothing.
+    refused: Option<CapturedTarget>,
 }
 
 impl EndPlan {
@@ -470,6 +480,21 @@ impl EndPlan {
             return None;
         }
 
+        let refused = subtree
+            .iter()
+            .map(|&i| &p.records[i])
+            .find(|r| r.flags.contains(ProcFlags::IS_SELF) || r.key.pid == 1)
+            .map(|r| CapturedTarget {
+                node: NodeId::Process(r.key),
+                kind: RowKind::Process,
+                name: SharedString::from(&r.meta.name),
+                pid: Some(r.key.pid),
+                uid: r.uid,
+                user: SharedString::from(&r.meta.user),
+                flags: r.flags,
+                member_count: 1,
+            });
+
         let count = keys.len() as u32;
         let protected = used
             .iter()
@@ -517,6 +542,7 @@ impl EndPlan {
             rows: used,
             keys: keys.into_iter().map(|(key, _)| key).collect(),
             confirm,
+            refused,
         })
     }
 }
@@ -697,6 +723,7 @@ impl ShellPage for ProcessesPage {
     }
 
     fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
-        self.table.update(cx, |t, cx| t.delegate.set_active(active, cx));
+        self.table
+            .update(cx, |t, cx| t.delegate.set_active(active, cx));
     }
 }
